@@ -451,9 +451,9 @@ if(TARGET Aver.Render.Sr)
   target_link_libraries(Sandbox PRIVATE Aver.Render.Sr)
 endif()
 
-# Frame interpolation (docs/rendering/FRAME_INTERPOLATION.md): Sandbox constructs the concrete
-# ProceduralFrameGenerator and installs it on the device, as it does the AverSR upscaler.
-target_link_libraries(Sandbox PRIVATE Aver.Render.FrameGen)
+# Frame interpolation (docs/rendering/NEURAFI.md): Sandbox constructs the concrete
+# NeuraFI and installs it on the device, as it does the AverSR upscaler.
+target_link_libraries(Sandbox PRIVATE Aver.Render.NeuraFI)
 
 # Particles (modules/particles): brings AVER_MODULE_PARTICLES=1 through its link interface, which is
 # what lets SandboxApp.cpp guard the feature and --particle-test with `#if AVER_MODULE_PARTICLES`,

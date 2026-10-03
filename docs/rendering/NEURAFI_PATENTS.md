@@ -2,7 +2,7 @@
 
 **Not legal advice.** This is an engineering sweep run 2026-10-03 by research agents with web access: they
 searched by assignee and by technique, read independent claims, and mapped each claim element to the
-design in [FRAME_INTERPOLATION.md](FRAME_INTERPOLATION.md) (elements E1–E15, listed below). A second agent
+design in [NEURAFI.md](NEURAFI.md) (elements E1–E15, listed below). A second agent
 re-read each HIGH/MEDIUM finding and tried to show the first mapping was too lenient. It states element
 mappings and risk, never infringement or clearance. A freedom-to-operate opinion from a patent attorney
 is still required before shipping.
@@ -88,7 +88,7 @@ network, fixed vsync cadence):
   synthesis" (priority 2010-11-11, nominal expiry ~2033-12). Claim 1: reduce the resolution of a 3D-warped
   image until holes fall below a threshold, expand it, fill the warped image's holes from the expanded
   image. A push-pull pyramid fill met every element. **Design change: full-resolution fill, no mip chain**
-  (FRAME_INTERPOLATION.md §3.4). Prior art for counsel: Gortler et al. 1996 (push-pull), Grossman & Dally
+  (NEURAFI.md §3.4). Prior art for counsel: Gortler et al. 1996 (push-pull), Grossman & Dally
   1998, Marroquim et al. 2007. Threshold wording was read from partly garbled OCR.
 - **Granted — Intel US 12,057,090 B2** "Frame pacing…": delaying CPU work to align with GPU availability.
   **Design change: the measured CPU frame-start delay (E12) is dropped.**
@@ -130,7 +130,7 @@ USPTO.gov sign-in since 2026-06-18. Claim text below was read from the filed cla
 | **US 2021/0067735 A1** (prio 2019-09-03) | Any processor/system/medium that generates higher-frame-rate video from lower using one or more neural networks; or trains networks to | **Abandoned** (US). Live members: DE 112020003165 (pending), CN 114303160 (pending). GB withdrawn, PCT ceased. | **TOFlow**, Xue et al., arXiv 1711.09078 (2017-11-24), not NVIDIA-affiliated: "generates a high frame rate video" with a trained network. Super SloMo (2017-11-30) matches fully but two authors are inventors here (outside the 1-year grace period). Cycle-consistency dependents: Liu et al. AAAI-19 (abstract only). |
 | **US 2024/0098216 A1** "Video frame blending" (prio 2022-09-20) | A neural network blends frames into an in-between frame | Pending. DE 102023125188, CN 117750070. No PCT. | Super SloMo (CNN visibility maps blending two warps), RIFE (2020-11-12), IFRNet (2022-05-29), BMBC (2020). **Reads on the held-back milestone 2.** |
 | **US 2025/0106355 A1** "Adaptive video frame blending" (prio 2022-09-20) | In-between frames generated based at least in part on pixel depth | Pending. DE 102023125185, CN 117880561. | **Yang et al. 2011** (bidirectional scene reprojection, the basis of this design): every element. Briedis et al. 2021 (Disney, neural interpolation of rendered content with engine depth). DAIN 2019. Mark, McMillan & Bishop 1997 (not read in full). |
-| **US 2026/0245168 A1** (filed 2026-04-09), continuation of **US 12,632,916 B2** (granted 2026-05-19, expiry ~2043) | In response to API calls to output a frame: store it and interpolated frames in a first buffer, provide them to a swap-chain buffer, present. Dependents: copying, API interception, choosing the count from frame rate vs goal rate | Continuation pending; parent granted. CN 117853306, DE 102023126457. | Not yet collected. Leads: Oculus ASW and Valve motion smoothing (2016–19), ReShade / Special K present hooks. **Design change:** generated frame composited straight into the back buffer, no store-then-copy, no interception (FRAME_INTERPOLATION.md §5). |
+| **US 2026/0245168 A1** (filed 2026-04-09), continuation of **US 12,632,916 B2** (granted 2026-05-19, expiry ~2043) | In response to API calls to output a frame: store it and interpolated frames in a first buffer, provide them to a swap-chain buffer, present. Dependents: copying, API interception, choosing the count from frame rate vs goal rate | Continuation pending; parent granted. CN 117853306, DE 102023126457. | Not yet collected. Leads: Oculus ASW and Valve motion smoothing (2016–19), ReShade / Special K present hooks. **Design change:** generated frame composited straight into the back buffer, no store-then-copy, no interception (NEURAFI.md §5). |
 
 Related, not in the four: NVIDIA **US 12,568,184 B2** (granted 2026-03-03; LOW against the revised design)
 and its pending sibling US 2022/0038653; NVIDIA US 12,574,521 B1 and **12,524,850 B1** (granted 2026,
@@ -220,7 +220,7 @@ Candidate designs, ranked: **N1, a learned trajectory prior** (network outputs o
 acceleration that bends the gather path; never touches the blend), then N3 (single-image residual
 restoration), N4 (learned constants, no network at runtime), N2 (learned reliability feeding the blend
 weight, closest to 17/949,153's allowed claim, dropped). The binding design rules R1–R10 are in
-FRAME_INTERPOLATION.md §3.5.
+NEURAFI.md §3.5.
 
 **Milestone 1 flags from this review:**
 - The **two search starts per frame** with the more confident result kept could be read against NVIDIA

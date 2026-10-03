@@ -1,11 +1,16 @@
-# Aver Radiance Cache — design (draft for review)
+# NeuRaC — Neural Radiance Cache (Aver) — design
 
-**Status:** stage 1 is **implemented, pending verification** (2026-10-03). The code is written and
-reviewed against the Aver source but has not been built, run or measured by the author of the code;
-the owner builds and verifies. Stage 2 and 3 are still design only. Where the implementation departs
-from the design below, section 5.10 lists the deviation and the reason; the older text in 5.1-5.9 is
-kept as the design of record and carries a pointer where it no longer matches. Every millisecond and
-cell count in this document is an estimate unless it says *measured*; nothing here has been run.
+NeuRaC is the engine's world-space radiance cache for ReSTIR's second bounce (`--restir-visibility
+cached`; code `NeuRaC.hpp/.cpp`, `NeuRaCLayout.hpp`, `voxi_neurac*.hlsl*`). Stage 1 is procedural (SH
+cells); the neural part arrives in stage 2.
+
+**Status:** stage 1 is **built, committed (`6057ff50`) and run** (2026-10-03). *Measured* on NewSponza:
+the cache fills (cascade 0: ~18.8k valid cells, n_eff ~14 after 150 frames), the resolve costs
+0.02–0.03 ms and the whole mode ~0.23 ms over HalfResolution; it supplies about half of the term it
+replaces, the HalfResolution fallback the rest. Stage 2 and 3 are still design only. Where the
+implementation departs from the design below, section 5.10 lists the deviation and the reason; the
+older text in 5.1-5.9 is kept as the design of record and carries a pointer where it no longer matches.
+Every millisecond and cell count below is an estimate unless it says *measured*.
 Written 2026-10-03 from three rounds of read-only scouting (algorithm, hardware, prior art, and the
 Aver source).
 
@@ -255,7 +260,7 @@ has been built, run or measured at the time of writing.
 2. **Wire encoding: mode 2 plus bit 128, not a new mode value (5.8, D3).** The shader decodes the mode
    as `(uint)gAmbientParams.w & 3u` (and `givis::packAmbientW` masks the same way), so a 4 would
    silently become 0 (NoRay), the over-bright pre-fix look. The CPU keeps `RestirVisibility::Cached = 4`
-   in `Settings` and in the renderer, and packs mode 2 (`HalfResolution`) plus the new `radianceCache`
+   in `Settings` and in the renderer, and packs mode 2 (`HalfResolution`) plus the new `neurac`
    bit, value 128 (`packAmbientW`'s ninth argument, default false). The existing
    `halfBound`/`tracedPx`/`rec.valid` logic then makes the tracing decisions exactly as for
    `HalfResolution`, and the half-resolution history pair is still allocated (`giVisHistWanted` accepts
@@ -264,7 +269,7 @@ has been built, run or measured at the time of writing.
 3. **Four lazily compiled twin pipelines, not runtime gating (5.8 "off means off").** Adding scatter and
    lookup code to `voxi_restir.hlsli` unconditionally would change the text of every variant that
    includes it, including single-pass `PSRayDriven`, which is documented at the AMD register limit. All
-   new HLSL therefore sits under `#if AVER_RADIANCE_CACHE` (default 0, with a hard `#error` against
+   new HLSL therefore sits under `#if AVER_NEURAC` (default 0, with a hard `#error` against
    `AVER_RD_SINGLE_PASS`), and the define is set only on four staged compute twins built on first use:
    `CSRdGi`, `CSRdGi` + checkerboard, `CSRdGiTrace`, `CSRdGiTrace` + checkerboard. Each frame the
    renderer picks a twin only when bit 128 is set and the twin exists. With the cache off, the existing
@@ -282,7 +287,7 @@ has been built, run or measured at the time of writing.
    octahedral mean normal is 4, which leaves 4 for the rest: a **24-bit tag** (3 x 8 bits of
    `(worldCell >> 6) & 255` per axis), 4-bit `n_eff` and 4-bit age. The accumulator is 12 signed
    fixed-point SH sums plus 3 summed-normal sums per cell (scales `2^15` and `2^16`; the headroom is a
-   `static_assert` in `RadianceCacheLayout.hpp`), with the per-cell counts in their own contiguous
+   `static_assert` in `NeuRaCLayout.hpp`), with the per-cell counts in their own contiguous
    region so the resolve can early-out by streaming 3 MB instead of touching 786k sparse cache lines.
    The tag aliases every 256 x 64 cells (about 4 km at the finest cascade) and is bounded by age expiry;
    a 48-byte cell is the fallback if it ever matters.
@@ -312,7 +317,7 @@ has been built, run or measured at the time of writing.
     `RENDER.RESTIRVISIBILITY` project key (4). No quality-ladder rung returns it: it is opt-in until
     measured. The design's "cascade size and cell-size keys" are deferred; the occupied-cell counter of
     stage 0 is deferred too (a readback needs fence-synchronised `readBuffer`).
-11. **Timing and debug.** GPU stats: `"Voxi radiance cache resolve"` and `"Voxi radiance cache clear"`.
+11. **Timing and debug.** GPU stats: `"Voxi NeuRaC resolve"` and `"Voxi NeuRaC clear"`.
     Scatter and lookup cost lives inside the existing RD lighting spans, so cache versus plain is an
     A/B of mode 2 against mode 4 on those. The F2 path view (`voxi.giVisPathView`) paints f2Path 4 magenta,
     brightness = cache confidence (not in the split `CSRdGi`, which has no twin).

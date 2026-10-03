@@ -32,10 +32,10 @@
 // an early exit would leave the barrier short a thread.
 //
 // FP32 ONLY. No min16float, no -enable-16bit-types: v1 is the portable baseline (design doc
-// docs/rendering/RADIANCE_CACHE.md section 7); packed fp16 comes behind a device caps query.
+// docs/rendering/NEURAC.md section 7); packed fp16 comes behind a device caps query.
 //
 // ---------------------------------------------------------------------------------------------
-// KERNEL STRUCTURE -- A DELIBERATE CHOICE, DO NOT "OPTIMISE" IT (docs/rendering/RADIANCE_CACHE.md
+// KERNEL STRUCTURE -- A DELIBERATE CHOICE, DO NOT "OPTIMISE" IT (docs/rendering/NEURAC.md
 // section 9). The kernel STREAMS WEIGHTS LAYER BY LAYER THROUGH GROUPSHARED MEMORY: the thread
 // group cooperatively loads ONE layer's weights into groupshared, syncs, every thread computes
 // that layer for ITS OWN record with its activations held in a thread-local array, and only then

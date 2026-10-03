@@ -205,7 +205,7 @@ private:
 };
 
 // ---------------------------------------------------------------- weight file
-// A tiny binary format, little-endian, so frame-generation weights can ship later:
+// A tiny binary format, little-endian, so frame-interperation weights can ship later:
 //   u32 magic   'AVNN' (bytes 41 56 4E 4E, i.e. 0x4E4E5641 as a little-endian u32)
 //   u32 version 1
 //   u32 inputs, outputs, hiddenWidth, hiddenLayers, hidden (Activation), output (Activation),

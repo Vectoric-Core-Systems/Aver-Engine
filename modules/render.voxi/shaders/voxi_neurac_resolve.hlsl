@@ -1,25 +1,25 @@
-// voxi_radiance_cache_resolve.hlsl -- the radiance cache's once-per-frame RESOLVE (and its rare clear).
-// See RadianceCache.hpp / docs/rendering/RADIANCE_CACHE.md.
+// voxi_neurac_resolve.hlsl -- the radiance cache's once-per-frame RESOLVE (and its rare clear).
+// See NeuRaC.hpp / docs/rendering/NEURAC.md.
 //
-// WHAT IT DOES: the trace twins scatter fixed-point SH sums into gRcAccum (voxi_radiance_cache_io.hlsli);
+// WHAT IT DOES: the trace twins scatter fixed-point SH sums into gRcAccum (voxi_neurac_io.hlsli);
 // this pass, one thread per cell, turns those sums into the running mean the lookup reads in gRcCells,
 // then zeroes the sums for the next frame. The ONLY thing it shares with the scatter is the layout in
-// voxi_radiance_cache.hlsli, which is pure maths and declares no resources, so it can be included here
+// voxi_neurac.hlsli, which is pure maths and declares no resources, so it can be included here
 // BEFORE this file's own declarations (the Voxi table's t22/u20/u21 do not exist in this pipeline; this
 // pass has its own layout: t0 info, u0 accumulator, u1 cells).
 //
-// ACCUMULATOR LAYOUT (RadianceCacheLayout.hpp): counts region [0, cells), then 15 ints per cell at
+// ACCUMULATOR LAYOUT (NeuRaCLayout.hpp): counts region [0, cells), then 15 ints per cell at
 // cells + cell*15 + k (k 0..11 SH [c0.rgb, cY.rgb, cZ.rgb, cX.rgb], 12..14 summed normal).
 //
 // WHY THE COUNTS ARE READ FIRST: ~90% of cells are empty on any frame. Reading one int per cell is a
 // contiguous 3 MB stream; touching the cell and payload lines of an empty cell would not be.
-#include "voxi_radiance_cache.hlsli"
+#include "voxi_neurac.hlsli"
 
 StructuredBuffer<RcInfo>      gRcInfo  : register(t0);
 RWStructuredBuffer<int>       gRcAccum : register(u0);
 RWStructuredBuffer<RcCell>    gRcCells : register(u1);
 
-// This file's own copies of the geometry numbers (RadianceCacheLayout.hpp is the source; RCR_ prefix so
+// This file's own copies of the geometry numbers (NeuRaCLayout.hpp is the source; RCR_ prefix so
 // they cannot collide with whatever the shared header #defines).
 #define RCR_RES      64u
 #define RCR_PER_CASC 262144u     // 64^3

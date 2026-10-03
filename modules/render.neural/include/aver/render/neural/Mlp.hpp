@@ -1,7 +1,7 @@
 // Mlp -- Aver.Render.Neural's GPU network: a small fully connected MLP that infers and trains
 // entirely on the device, in portable fp32 HLSL (see shaders/aver_neural_mlp.hlsl and README.md).
 //
-// WHAT IT IS FOR. The radiance cache (docs/rendering/RADIANCE_CACHE.md) and, later, frame
+// WHAT IT IS FOR. The radiance cache (docs/rendering/NEURAC.md) and, later, frame
 // interpolation need tiny networks that run INSIDE the frame: records produced by one compute pass,
 // answers consumed by the next, training steps interleaved with rendering, and no CPU round trip.
 // So the interface is "structured buffers in, structured buffers out, recorded into the caller's

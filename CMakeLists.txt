@@ -362,9 +362,9 @@ endif()
 if(AVER_MODULE_SR)
   add_subdirectory(modules/render.sr)     # optional: AverSR upscaler implementations
 endif()
-# Frame interpolation (docs/rendering/FRAME_INTERPOLATION.md). Unconditional for the same reason as PCG
+# Frame interpolation (docs/rendering/NEURAFI.md). Unconditional for the same reason as PCG
 # below: it needs only the generic RHI, and the device keeps it switched off until a host enables it.
-add_subdirectory(modules/render.framegen)
+add_subdirectory(modules/render.neurafi)
 # PCG's GPU half. Needs only the RHI, so it is unconditional like the UI: there is no combination of
 # switches in which the RHI exists and a compute shader that writes a 3D texture does not.
 add_subdirectory(modules/render.pcg)

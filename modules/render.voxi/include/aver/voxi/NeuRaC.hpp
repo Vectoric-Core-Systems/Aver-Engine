@@ -1,9 +1,9 @@
-// RadianceCache -- the GPU half of the Voxi radiance cache, stage 1 (docs/rendering/RADIANCE_CACHE.md).
+// NeuRaC -- the GPU half of the Voxi radiance cache, stage 1 (docs/rendering/NEURAC.md).
 //
 // WHAT THIS CLASS OWNS: the accumulator and cell buffers, a small ring of per-frame RcInfo upload
 // buffers, and the compute pipeline that RESOLVES the accumulator into the cells once per frame. It does
 // NOT own the scatter or the lookup: those are HLSL inside Voxi's own ray-driven compute passes
-// (voxi_radiance_cache_io.hlsli, compiled only into the AVER_RADIANCE_CACHE twin pipelines), reading and
+// (voxi_neurac_io.hlsli, compiled only into the AVER_NEURAC twin pipelines), reading and
 // writing the buffers through Voxi's binding table 0 (t22 info, u20 accumulator, u21 cells). VoxiRenderer
 // therefore calls beginFrame() BEFORE any pass binds table 0, rebinds those three slots to what
 // beginFrame() returns, and calls recordResolve() after the scatter dispatch has finished.
@@ -23,14 +23,14 @@
 
 #include "aver/core/Types.hpp"
 #include "aver/rhi/RHIResources.hpp"
-#include "aver/voxi/RadianceCacheLayout.hpp"
+#include "aver/voxi/NeuRaCLayout.hpp"
 
 namespace aver::voxi {
 
-class RadianceCache {
+class NeuRaC {
 public:
     // Per-frame tunables the renderer passes down (no Settings keys yet: cascade geometry is a
-    // compile-time constant in RadianceCacheLayout.hpp, and these three are not worth a manifest key
+    // compile-time constant in NeuRaCLayout.hpp, and these three are not worth a manifest key
     // until someone measures a reason to move them).
     struct Params {
         u32 sampleCap      = 64;       // samples per cell per frame that may contribute (<= kMaxCap)
@@ -43,20 +43,20 @@ public:
     // when `generation` does.
     struct Bindings {
         rhi::BufferHandle info = 0, accum = 0, cells = 0;
-        u32 infoStride  = radiancecache::kInfoStride;
+        u32 infoStride  = neurac::kInfoStride;
         u32 infoCount   = 1;
-        u32 accumInts   = radiancecache::kAccumInts;
-        u32 cellCount   = radiancecache::kCells;
-        u32 cellStride  = radiancecache::kCellStride;
+        u32 accumInts   = neurac::kAccumInts;
+        u32 cellCount   = neurac::kCells;
+        u32 cellStride  = neurac::kCellStride;
         u32 generation  = 0;   // bumps when the accum/cells handles change (create), never otherwise
     };
 
-    RadianceCache() = default;
-    ~RadianceCache();
-    RadianceCache(const RadianceCache&)            = delete;
-    RadianceCache& operator=(const RadianceCache&) = delete;
+    NeuRaC() = default;
+    ~NeuRaC();
+    NeuRaC(const NeuRaC&)            = delete;
+    NeuRaC& operator=(const NeuRaC&) = delete;
 
-    // Creates the buffers (~75 MB), compiles voxi_radiance_cache_resolve.hlsl (entry CSRcResolve, SM 6.2),
+    // Creates the buffers (~75 MB), compiles voxi_neurac_resolve.hlsl (entry CSRcResolve, SM 6.2),
     // builds the compute pipeline and the resolve binding sets. False = logged and left off, nothing
     // half-built is kept. Cheap to call when already valid (returns true).
     bool create(rhi::IResourceFactory& res);
@@ -75,7 +75,7 @@ public:
     Bindings beginFrame(rhi::IRenderContext& ctx, const f32 camPosCm[3], u32 frameIndex, const Params& p);
 
     // After the scatter dispatch AND a uavBarrierBuffer(accumBuffer()): binds the resolve set for this
-    // frame's ring slot and dispatches one thread per cell, inside ScopedGpuStat "Voxi radiance cache
+    // frame's ring slot and dispatches one thread per cell, inside ScopedGpuStat "Voxi NeuRaC
     // resolve". Does NOT issue the cells barrier after it; the caller does.
     void recordResolve(rhi::IRenderContext& ctx);
 
@@ -87,7 +87,7 @@ public:
     rhi::BufferHandle cellsBuffer() const { return cells_; }
 
 private:
-    static constexpr u32 kRing = radiancecache::kInfoRing;
+    static constexpr u32 kRing = neurac::kInfoRing;
 
     rhi::IResourceFactory* res_ = nullptr;
     bool valid_        = false;
@@ -125,7 +125,7 @@ private:
     static constexpr u32 kStatsReadDelay = 4;
     void logWarmupStats();
     rhi::BufferHandle   statsReadback_ = 0;
-    radiancecache::RcInfo statsInfo_{};   // the RcInfo current when the copy was recorded
+    neurac::RcInfo statsInfo_{};   // the RcInfo current when the copy was recorded
     u32 framesLive_     = 0;
     u32 statsCopyFrame_ = 0;
     u32 statsState_     = 0;              // 0 not yet, 1 copy recorded, 2 reported

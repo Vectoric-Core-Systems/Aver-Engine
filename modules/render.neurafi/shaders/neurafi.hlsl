@@ -1,4 +1,4 @@
-// framegen.hlsl -- procedural frame interpolation, milestone 1 (docs/rendering/FRAME_INTERPOLATION.md §3).
+// neurafi.hlsl -- procedural frame interpolation, milestone 1 (docs/rendering/NEURAFI.md Â§3).
 //
 // One frame half-way between the previous real frame (P = N-1) and the one just rendered (N), at scene
 // resolution, in HDR. Three passes, all compute, all full resolution:
@@ -29,31 +29,34 @@ cbuffer FgConstants : register(b1)
     uint2 gSize;     // scene width, height
     uint  gLast;     // CSFgFill: 1 on the final pass (writes alpha 1)
     uint  gTraj;     // CSFgGather: 1 = follow the acceleration image (t6), 0 = straight lines
-#if defined(FG_TRAJ)
     uint  gMode;     // CSFgAccel: 0 = analytic acceleration, 1 = the network's (u5)
     uint  gFrame;    // CSFgTrainRecords: varies the sampled pixels frame to frame
     uint  gSamples;  // CSFgTrainRecords: records to write at most
-    uint  gPad2;
-#endif
+    uint  gBlock;    // the acceleration image holds one texel per gBlock x gBlock scene pixels
 };
 
-uint2 quarterSize() { return (gSize + 1u) / 2u; }
+// The acceleration image's size. gBlock grows with the scene (2, 4, 8...) so the network's record
+// count stays bounded: MEASURED at 3532x1987 with a fixed 2x2 block, 1.75M records cost 3.5 ms.
+uint2 accelSize() { return (gSize + gBlock - 1u) / gBlock; }
 
 SamplerState gLinear : register(s0);
 
 // The passes reuse registers, so each is compiled with only its own section: FG_GATHER, FG_FILL or
-// FG_TRAJ (ProceduralFrameGenerator.cpp passes the define with the entry point).
+// FG_TRAJ (NeuraFI.cpp passes the define with the entry point).
 //
-// TRAJECTORY (FRAME_INTERPOLATION.md §3.5). The gather can follow a QUADRATIC path instead of a straight
+// TRAJECTORY (NEURAFI.md Â§3.5). The gather can follow a QUADRATIC path instead of a straight
 // line. Through three positions of a surface (frames N-2, N-1, N), the in-between point is
 //     q = p - 0.5 v - 0.125 a,   a = v - v'
 // where v is its motion into N (frame N's own vector at p) and v' its motion into N-1 (frame N-1's
 // vector, fetched BACKWARD at p - v with a depth check; a = 0 where that check fails -- never inferred
-// from neighbours). `a` is one per pixel of a quarter-resolution acceleration image, either computed
-// that way (analytic) or predicted by a small network from the same real-frame motion (neural); the
-// network never outputs colour, a weight, a mask or a confidence, and nothing it outputs reaches the
-// blend except through where the candidates are gathered. One trajectory per pixel: there is never a
-// linear and a quadratic candidate to choose between.
+// from neighbours). `a` is one per texel of a low-resolution acceleration image (one texel per gBlock x gBlock pixels): the analytic
+// v - v', plus (neural) a small network's CORRECTION to it, predicted from the same real-frame motion.
+// Predicting the correction rather than the whole acceleration means that where the analytic answer
+// is already exact (steady acceleration) the network only has to learn "add nothing" -- measured: a
+// network predicting the whole of `a` could not match an analytic error of 0.003-0.018 px on slow wide
+// pans. The network never outputs colour, a weight, a mask or a confidence -- only motion -- and
+// nothing it outputs reaches the blend except through where the candidates are gathered. One
+// trajectory per pixel: there is never a linear and a quadratic candidate to choose between.
 
 // ---------------------------------------------------------------- shared
 
@@ -81,7 +84,7 @@ Texture2D<float>  gZN   : register(t2);
 Texture2D<float4> gColP : register(t3);
 Texture2D<float2> gVelP : register(t4);
 Texture2D<float>  gZP   : register(t5);
-Texture2D<float2> gAccel : register(t6);   // quarter resolution, on frame N's grid; read when gTraj != 0
+Texture2D<float2> gAccel : register(t6);   // one texel per gBlock x gBlock pixels, on frame N's grid; read when gTraj != 0
 RWTexture2D<float4> gOut : register(u0);
 
 static const int   kSearchSteps   = 4;
@@ -94,7 +97,7 @@ float2 velP(float2 p) { return gVelP.Load(texel(p)); }
 float2 accel(float2 p)
 {
     if (gTraj == 0u) return 0.0;
-    const int2 q = clamp(int2(floor(p * 0.5)), int2(0, 0), int2(quarterSize()) - 1);
+    const int2 q = clamp(int2(floor(p / float(gBlock))), int2(0, 0), int2(accelSize()) - 1);
     return gAccel.Load(int3(q, 0));
 }
 
@@ -235,8 +238,8 @@ void CSFgFill(uint3 id : SV_DispatchThreadID)
 
 // ---------------------------------------------------------------- trajectory
 // Four passes on one binding layout:
-//   CSFgFeatures      quarter res: the network's input record for each pixel of the acceleration image
-//   CSFgAccel         quarter res: the acceleration image, analytic or from the network's output
+//   CSFgFeatures      per accel texel: the network's input record for each pixel of the acceleration image
+//   CSFgAccel         per accel texel: the acceleration image, analytic or from the network's output
 //   CSFgClearCount    one thread: zeroes the training record count
 //   CSFgTrainRecords  gSamples threads: self-supervised training records (below)
 //
@@ -247,12 +250,12 @@ void CSFgFill(uint3 id : SV_DispatchThreadID)
 //   [5]    log2(s) / 8
 //   [6-13] v / s at the 4 neighbours 2 pixels away (+x, -x, +y, -y)
 // with s = max(|v|, |v'|, 0.5) pixels: scale-free, so a network trained on two-frame spans applies to
-// one-frame spans. The output is a / s (2 floats).
+// one-frame spans. The output is the correction to the analytic acceleration, (a - (v - v')) / s.
 //
 // SELF-SUPERVISED TRAINING from three ordinary real frames: interpolate the TWO-frame span N-2 -> N and
 // take frame N-1 as the answer. For a pixel p of N: v = (N-2 -> N) = v_N(p) + v_{N-1}(p - v_N(p)),
 // v' = (N-4 -> N-2) at the surface's N-2 position, and the truth is where it was in N-1, p - v_N(p):
-//     p - 0.5 v - 0.125 a = p - v_N   =>   a = 8 v_N - 4 v
+//     p - 0.5 v - 0.125 a = p - v_N   =>   a = 8 v_N - 4 v,   target = (a - (v - v')) / s
 // Purely geometric (engine motion vectors): no colour reaches the loss, so the network learns motion,
 // never shading. A record is written only where every backward fetch passes its depth check.
 #if defined(FG_TRAJ)
@@ -266,10 +269,10 @@ Texture2D<float>  gTZ2    : register(t5);
 Texture2D<float2> gTVel3  : register(t6);   // N-3 (training only)
 Texture2D<float>  gTZ3    : register(t7);
 RWStructuredBuffer<float> gRecords    : register(u0);   // inference records
-RWTexture2D<float2>       gAccelOut   : register(u1);   // quarter-resolution acceleration image
+RWTexture2D<float2>       gAccelOut   : register(u1);   // the acceleration image
 RWStructuredBuffer<float> gTrainRec   : register(u2);
 RWStructuredBuffer<float> gTrainTgt   : register(u3);
-RWStructuredBuffer<uint>  gTrainCount : register(u4);
+RWStructuredBuffer<uint>  gTrainCount : register(u4);   // [0] records written, [1] outliers rejected
 RWStructuredBuffer<float> gNetOut     : register(u5);   // the network's outputs for gRecords
 
 #define FG_RECORD 14u
@@ -302,15 +305,15 @@ void writeRecord(RWStructuredBuffer<float> buf, uint base, float2 v, float2 vPre
 
 static const float2 kNbOffset[4] = { float2(2, 0), float2(-2, 0), float2(0, 2), float2(0, -2) };
 
-// The centre, in scene pixels, of quarter-resolution pixel q.
-float2 quarterCentre(uint2 q) { return float2(q * 2u) + 1.0; }
+// The centre, in scene pixels, of acceleration-image texel q.
+float2 blockCentre(uint2 q) { return float2(q * gBlock) + 0.5 * float(gBlock); }
 
 [numthreads(FG_GROUP, FG_GROUP, 1)]
 void CSFgFeatures(uint3 id : SV_DispatchThreadID)
 {
-    const uint2 qs = quarterSize();
+    const uint2 qs = accelSize();
     if (any(id.xy >= qs)) return;
-    const float2 p = quarterCentre(id.xy);
+    const float2 p = blockCentre(id.xy);
     float2 v, vPrev; bool valid;
     inferMotion(p, v, vPrev, valid);
     float2 nb[4];
@@ -321,16 +324,17 @@ void CSFgFeatures(uint3 id : SV_DispatchThreadID)
 [numthreads(FG_GROUP, FG_GROUP, 1)]
 void CSFgAccel(uint3 id : SV_DispatchThreadID)
 {
-    const uint2 qs = quarterSize();
+    const uint2 qs = accelSize();
     if (any(id.xy >= qs)) return;
-    const float2 p = quarterCentre(id.xy);
+    const float2 p = blockCentre(id.xy);
     float2 v, vPrev; bool valid;
     inferMotion(p, v, vPrev, valid);
     float2 a = 0.0;   // where the backward fetch failed: straight line, never inferred from neighbours
     if (valid) {
         const float s = scaleOf(v, vPrev);
         const uint o = (id.y * qs.x + id.x) * FG_OUTPUT;
-        a = gMode == 1u ? float2(gNetOut[o], gNetOut[o + 1]) * s : v - vPrev;
+        a = v - vPrev;
+        if (gMode == 1u) a += float2(gNetOut[o], gNetOut[o + 1]) * s;   // the network's correction
         // A bound on what one frame can bend a path by: a wild prediction must not throw the search
         // across the screen.
         const float len = length(a);
@@ -340,7 +344,9 @@ void CSFgAccel(uint3 id : SV_DispatchThreadID)
 }
 
 [numthreads(1, 1, 1)]
-void CSFgClearCount(uint3 id : SV_DispatchThreadID) { gTrainCount[0] = 0u; }
+void CSFgClearCount(uint3 id : SV_DispatchThreadID) { gTrainCount[0] = 0u; gTrainCount[1] = 0u; }
+
+static const float kMaxCorrection = 0.5;   // CSFgTrainRecords: |correction| / s above this is a seam
 
 uint hashU(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
 
@@ -377,12 +383,18 @@ void CSFgTrainRecords(uint3 id : SV_DispatchThreadID)
         const float2 a = tvel(gTVelN, pn);
         nb[k] = a + tvel(gTVel1, pn - a);
     }
+    const float s = scaleOf(span, spanPrev);
+    const float2 target = ((8.0 * vN - 4.0 * span) - (span - spanPrev)) / s;
+    // OUTLIERS ARE NOT MOTION. A correction above half the span's own motion is not something a camera
+    // or an object does between two frames; it is a motion-vector seam (an edge whose neighbours belong
+    // to different surfaces) that slipped past the depth checks. MEASURED: kept, a handful of them
+    // dragged the squared-error fit until the network did worse than predicting nothing at all.
+    // Counted in gTrainCount[1] so the rejection rate is visible.
+    if (!(length(target) <= kMaxCorrection)) { InterlockedAdd(gTrainCount[1], 1u); return; }
     uint slot;
     InterlockedAdd(gTrainCount[0], 1u, slot);
     if (slot >= gSamples) return;
-    const float s = scaleOf(span, spanPrev);
     writeRecord(gTrainRec, slot * FG_RECORD, span, spanPrev, true, s, nb);
-    const float2 target = (8.0 * vN - 4.0 * span) / s;
     gTrainTgt[slot * FG_OUTPUT + 0] = target.x;
     gTrainTgt[slot * FG_OUTPUT + 1] = target.y;
 }

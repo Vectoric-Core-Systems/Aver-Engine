@@ -82,25 +82,25 @@ constexpr bool tracedPixel(u32 x, u32 y, u32 frame) {
 //          reuse outright (temporal only); 1..8 pin the count. FOUR bits, because 15 needs a
 //          sentinel distinct from every real count; 0..8 fits comfortably inside one nibble.
 // bits 18-22 `maxHistory` -- see below.
-// bit 128  `radianceCache` -- the radiance cache (RadianceCache.hpp) is live this frame: traced
+// bit 128  `neurac` -- the radiance cache (NeuRaC.hpp) is live this frame: traced
 //          half-res pixels scatter their second-bounce sample into it and the untraced ones read it
 //          (f2Path 4). It is a SEPARATE bit rather than a fifth `mode` value because the shader
 //          decodes `mode` as `& 3u`: RestirVisibility::Cached = 4 would silently decode as 0
 //          (NoRay). The CPU packs Cached as mode 2 (HalfResolution) plus this bit, so the existing
 //          halfBound/tracedPx/rec.valid logic makes the tracing decisions unchanged. Only the
-//          AVER_RADIANCE_CACHE twin pipelines read it; every other variant ignores the bit.
+//          AVER_NEURAC twin pipelines read it; every other variant ignores the bit.
 //          Bit 7 (128) was free: bits 0-6, 12-15 and 18-22 are taken above, and like every field in
 //          this float it stays under 2^24 so the word is exactly representable.
 // Nine arguments, not a bitmask the caller assembles by hand: every call site (VoxiRenderer.cpp's
 // beginShadowHistory, both the unconditional write before the shadow-history early return and the
 // recomputed write inside the giSurf block, 2.11) states its inputs by name, so a reordered
 // bit in this function is the only place that has to change, not every caller. The ninth,
-// `radianceCache`, defaults to false so every older caller and test compiles unchanged.
+// `neurac`, defaults to false so every older caller and test compiles unchanged.
 constexpr u32 packAmbientW(u32 mode, bool histBound, bool histValid, bool blendedCone,
                             bool blendedReplay, bool pathView, u32 spatialSamples, u32 maxHistory,
-                            bool radianceCache = false) {
+                            bool neurac = false) {
     u32 w = mode & 3u;
-    if (radianceCache)  w |= 128u;
+    if (neurac)  w |= 128u;
     if (histBound)     w |= 4u;
     if (histValid)      w |= 8u;
     if (blendedCone)    w |= 16u;

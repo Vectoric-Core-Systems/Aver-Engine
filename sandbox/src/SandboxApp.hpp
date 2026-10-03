@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // SandboxApp: the Aver editor executable. Viewport, gizmos, panels, Content Browser,
 // and the frame loop that drives the runtime modules.
 
@@ -272,8 +272,8 @@ static_assert(static_cast<aver::u32>(aver::sr::Quality::Performance) == aver::vo
 #endif  // AVER_MODULE_VOXI
 #endif  // AVER_MODULE_SR
 
-// Frame interpolation: Sandbox is the composition root for the IFrameGenerator, as for AverSR.
-#include "aver/framegen/ProceduralFrameGenerator.hpp"
+// Frame interpolation: Sandbox is the composition root for the IFrameInterpolator, as for AverSR.
+#include "aver/neurafi/NeuraFI.hpp"
 
 // Guarded on AVER_MODULE_PHYSICS alone, not FRAMEWORK: SCENE=OFF can force FRAMEWORK off while
 // PHYSICS stays on, breaking the guarded call sites below (which check PHYSICS alone) with no
@@ -1501,8 +1501,8 @@ public:
     void setAverSrCycleAuto(int framesIn);   // --aversr-cycle [N]
 #endif
     void setResizeCycle(int n);              // --resize-cycle [N]
-    void setFrameGenCli(int on) { frameGenCli_ = on; }   // --frame-gen 0|1|2 (2: capture the generated image)
-    void setFrameGenTrajectory(int t, bool train) { frameGenTrajectoryCli_ = t; frameGenTrainCli_ = train; }
+    void setFrameInterpCli(int on) { frameInterpCli_ = on; }   // --frame-interp 0|1|2 (2: capture the generated image)
+    void setFrameInterpTrajectory(int t, bool train) { frameInterpTrajectoryCli_ = t; frameInterpTrainCli_ = train; }
     void setGpuTiming(bool on);                                // --gpu-timing
     void setLumaSweep(bool on, int stride);
     void setFireflyMetric(bool on, f32 mult);
@@ -3930,23 +3930,23 @@ private:
     // --edge-aa occupies the upscaler slot; logging that every frame would flood the log.
     bool edgeAaAverSrWarnLogged_ = false;
 
-    // ---- frame generation (docs/rendering/FRAME_INTERPOLATION.md) ----
-    // Who decides, highest first: --frame-gen (frameGenCli_, -1 = not given); during Play, the
-    // project's RENDER.FRAMEGEN; while editing, the Editor Preference below (off by default). The
+    // ---- frame interpolation (docs/rendering/NEURAFI.md) ----
+    // Who decides, highest first: --frame-interp (frameInterpCli_, -1 = not given); during Play, the
+    // project's RENDER.FRAMEINTERP; while editing, the Editor Preference below (off by default). The
     // generator is built on first use and installed on the device for the session.
-    int  frameGenCli_ = -1;
-    bool frameGenWhileEditing_ = false;   // Editor Preferences, display.frameGenWhileEditing
-    // The gather's path and in-engine training of the learned one (FRAME_INTERPOLATION.md §3.5): Editor
-    // Preferences display.frameGenTrajectory / display.frameGenTrain, for editing and Play alike (a
+    int  frameInterpCli_ = -1;
+    bool frameInterpWhileEditing_ = false;   // Editor Preferences, display.frameInterpWhileEditing
+    // The gather's path and in-engine training of the learned one (NEURAFI.md §3.5): Editor
+    // Preferences display.frameInterpTrajectory / display.frameInterpTrain, for editing and Play alike (a
     // per-machine quality choice, like AverSR's Display setting). The CLI flags outrank them.
-    int  frameGenTrajectory_ = 0;         // framegen::Trajectory (0 straight, 1 quadratic, 2 learned)
-    bool frameGenTrain_ = false;
-    int  frameGenTrajectoryCli_ = -1;     // --frame-gen-trajectory; -1 = not given
-    bool frameGenTrainCli_ = false;       // --frame-gen-train
-    std::unique_ptr<aver::framegen::ProceduralFrameGenerator> frameGenerator_;
-    // Decides and pushes this frame's frame-generation state; returns whether it is wanted (the
+    int  frameInterpTrajectory_ = 2;         // neurafi::Trajectory (0 straight, 1 quadratic, 2 learned)
+    bool frameInterpTrain_ = false;
+    int  frameInterpTrajectoryCli_ = -1;     // --frame-interp-trajectory; -1 = not given
+    bool frameInterpTrainCli_ = false;       // --frame-interp-train
+    std::unique_ptr<aver::neurafi::NeuraFI> frameInterpolator_;
+    // Decides and pushes this frame's frame-interperation state; returns whether it is wanted (the
     // G-buffer must then be on).
-    bool updateFrameGeneration(aver::rhi::IDevice* dev);
+    bool updateFrameInterpolation(aver::rhi::IDevice* dev);
 #endif
     int  rdAblate_=0;                // --rd-ablate: AVER_RD_ABLATE for PSRayDriven, 0 = normal
     f32  rtDenoiseMotionTaper_=0.0f; // --rt-denoise-motion: 0 = no taper, the shipped default

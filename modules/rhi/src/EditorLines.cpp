@@ -386,7 +386,7 @@ void EditorLines::replay(IRenderContext& ctx, u32 targetW, u32 targetH, const f3
 
     // Cleared on every path out of this function, including every early return below, so a frame
     // that never reaches this call (suppressed, device lost) doesn't carry stale draws forward. Not
-    // after a frame's first of two replays (frame generation), which leaves the queue for the second.
+    // after a frame's first of two replays (frame interpolation), which leaves the queue for the second.
     struct ClearOnExit {
         std::vector<Draw>* q;
         std::vector<WireDraw>* w;

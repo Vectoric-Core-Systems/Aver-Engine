@@ -1,4 +1,4 @@
-﻿// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 #pragma once
@@ -281,7 +281,7 @@ struct Settings {
     // exact visibility on 1-in-4 pixels/frame, reconstructing the rest from a depth/normal-aware
     // neighbourhood (falls back to tracing when invalid, so worst case = Full's cost); Full traces
     // every pixel every frame (today's behaviour). Cached (4, radiance cache stage 1,
-    // docs/rendering/RADIANCE_CACHE.md) traces exactly the pixels HalfResolution traces, but those
+    // docs/rendering/NEURAC.md) traces exactly the pixels HalfResolution traces, but those
     // pixels also TRAIN a camera-centred world-space SH cache with their F2 ray, and the untraced
     // pixels READ that cache instead of the sky-ratio reconstruction. It is a STAGED ray-driven,
     // D3D12-only feature (rtRenderMode 1 with rayDrivenStages >= 1): single-pass ray-driven, the

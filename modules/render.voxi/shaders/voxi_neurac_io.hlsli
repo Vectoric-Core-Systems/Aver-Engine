@@ -1,6 +1,6 @@
-// voxi_radiance_cache_io.hlsli -- the radiance cache's resource-bound half: the sample SCATTER (training)
-// and the cell LOOKUP (read). Included ONLY by voxi_restir.hlsli, under `#if AVER_RADIANCE_CACHE`, AFTER
-// voxi_radiance_cache.hlsli and the three declarations it reads:
+// voxi_neurac_io.hlsli -- the radiance cache's resource-bound half: the sample SCATTER (training)
+// and the cell LOOKUP (read). Included ONLY by voxi_restir.hlsli, under `#if AVER_NEURAC`, AFTER
+// voxi_neurac.hlsli and the three declarations it reads:
 //   StructuredBuffer<RcInfo>     gRcInfo  : t22   (cascade origins, cell sizes, sample cap)
 //   RWStructuredBuffer<int>      gRcAccum : u20   (fixed-point accumulator, layout in the pure file)
 //   RWStructuredBuffer<RcCell>   gRcCells : u21   (resolved cells, read with plain UAV loads)
@@ -8,13 +8,13 @@
 // group stays barrier-free (UAV-only buffers need no state transition).
 //
 // WORLD UNITS: the cascades' cell sizes are in the engine's world unit (the cbuffer's gCamPos/hit
-// positions), the same unit RadianceCache::beginFrame snaps the camera in.
+// positions), the same unit NeuRaC::beginFrame snaps the camera in.
 
 // The lookup's last overall confidence (1 - the fraction left for the fallback), for the F2 path debug
 // view. `static` hand-off like gGiPoisonPdfHit/gGiCbSkip; per invocation, never a resource.
 static float gRcLastConf = 0.0;
 
-// gAmbientParams.w bit 128 (givis::packAmbientW's radianceCache argument): the CPU sets it only on a frame
+// gAmbientParams.w bit 128 (givis::packAmbientW's neurac argument): the CPU sets it only on a frame
 // the cache twin pipelines run with the cache live. A twin with it clear behaves as plain HalfResolution.
 bool rcCacheOn() { return ((uint)gAmbientParams.w & 128u) != 0u; }
 

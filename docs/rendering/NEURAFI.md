@@ -1,4 +1,9 @@
-# Aver Frame Interpolation — design (draft for review)
+# NeuraFI — Neural Frame Interpolation (Aver) — design
+
+NeuraFI is the engine's frame interpolation: the procedural gather (milestone 1) plus the learned
+trajectory path (§3.5). Code: `modules/render.neurafi` (`NeuraFI.hpp/.cpp`, `neurafi.hlsl`), on the RHI's
+`IFrameInterpolator` seam. Settings and flags describe the feature: "Frame interpolation",
+`--frame-interp`, `RENDER.FRAMEINTERP`.
 
 **Status:** stage 0 (object motion vectors, `4ee7e3ec`) and **milestone 1 (procedural, D3D12)** are built.
 Milestone 1 measured on NewSponza at 1766×994 scene resolution (RX 7800 XT, `--gpu-timing`): generation
@@ -6,7 +11,7 @@ Milestone 1 measured on NewSponza at 1766×994 scene resolution (RX 7800 XT, `--
 Not yet measured: quality against true midpoint frames, cadence stability, the editor viewport path under
 interaction. Vulkan: not started. The neural trajectory prior (§3.5) is built and opt-in. Every
 millisecond figure is an estimate unless it says *measured*. Revised 2026-10-03 after the
-patent sweep ([FRAME_INTERPOLATION_PATENTS.md](FRAME_INTERPOLATION_PATENTS.md)) to the **patent-aware
+patent sweep ([NEURAFI_PATENTS.md](NEURAFI_PATENTS.md)) to the **patent-aware
 design (option b)**: written in-house, no FSR3 code.
 
 **One-line summary:** generate one frame between every two real frames by *gathering* each output pixel
@@ -15,7 +20,7 @@ each candidate with one continuous confidence from real-frame consistency, and l
 only the blend weight. It runs on the HDR scene image **before** the AverSR upscale and before tone mapping;
 UI is drawn on top afterwards; frames are presented on a fixed vsync cadence.
 
-Companion design: [RADIANCE_CACHE.md](RADIANCE_CACHE.md) — both share the `Aver.Render.Neural` module.
+Companion design: [NEURAC.md](NEURAC.md) — both share the `Aver.Render.Neural` module.
 
 ---
 
@@ -30,7 +35,7 @@ Companion design: [RADIANCE_CACHE.md](RADIANCE_CACHE.md) — both share the `Ave
 | 5 | **HDR, before tone mapping, before the AverSR upscale.** AverSR is spatial and keeps no history, so a generated frame can be upscaled like a real one. |
 | 6 | **Training runs in-engine.** It needs convolution backward passes in `Aver.Render.Neural`; **check with the owner before starting that work.** |
 | 7 | **Motion vectors for moving objects** first — **done** (§4, `4ee7e3ec`). |
-| 8 | **Editor while editing** is an **Editor Preferences** setting ("Frame generation in viewport while editing", off by default). Play / PIE and the runtime follow the project's render settings. |
+| 8 | **Editor while editing** is an **Editor Preferences** setting ("Frame interpolation in viewport while editing", off by default). Play / PIE and the runtime follow the project's render settings. |
 | 9 | **Hardware agnostic, written in-house (option b).** FSR3 is a *reference only*: no FSR3 code is vendored or derived. Plain compute shaders on any D3D12 GPU; no vendor SDK, driver extension or matrix hardware. |
 | 10 | **Patent-aware design**: the four changes in §2.3 remove claim elements found by the sweep. Counsel confirms before shipping. |
 
@@ -62,7 +67,7 @@ Companion design: [RADIANCE_CACHE.md](RADIANCE_CACHE.md) — both share the `Ave
   weights or kernels, never the image directly; none is real-time.
 - **Bidirectional scene reprojection** (Yang, Tse, Sander, Lawrence, Nehab, Hoppe, Wilkins, SIGGRAPH Asia
   2011): builds an in-between frame from two rendered frames by a per-pixel *gather* — fixed-point
-  iteration through each frame's own motion and depth. Prior art to the frame-generation filings and the
+  iteration through each frame's own motion and depth. Prior art to the frame-interperation filings and the
   basis of this design.
 
 ### 2.3 The patent-driven changes
@@ -162,34 +167,45 @@ full 1440p, roughly a quarter at 0.5 scale.
 
 ### 3.5 Milestone 2 — the network: a learned trajectory prior (built 2026-10-03, opt-in)
 
-**Built** (`--frame-gen-trajectory linear|quadratic|neural`, `--frame-gen-train`; default linear). The
-quadratic path is `q = p − 0.5·v − 0.125·a` with `a = v − v′` (v′ fetched backward at `p − v` with a depth
-check, else a = 0); `quadratic` uses that analytic `a`, `neural` predicts it with a 14→32×2→2 MLP on
-`Aver.Render.Neural`. Training is self-supervised from ordinary real frames: interpolate the two-frame
-span N−2→N and take N−1 as the answer (`a = 8·v_N − 4·v_span`), purely geometric. Weights are saved every
-500 steps to `framegen_trajectory.avnn` beside editor.ini (lifetime step count and the gate's scores in
-`.avnn.steps`) and loaded at start.
+**Built** (`--frame-interp-trajectory linear|quadratic|neural`, `--frame-interp-train`; default
+**neural** since the engine ships trained weights). The quadratic path is `q = p − 0.5·v − 0.125·a` with
+`a = v − v′` (v′ fetched backward at `p − v` with a depth check, else a = 0). `quadratic` uses that
+analytic `a`; `neural` (**NeuraFI**) adds a 14→32×2→2 MLP's **correction** to it. Predicting the
+correction, not the whole `a`, matters: a whole-`a` network could not match the analytic answer's
+0.003–0.018 px on slow wide pans. The correction layer starts at zero, so a fresh network *is* the
+quadratic and only learns improvements on it.
 
-**Learning-rate schedule:** `5e-4 / (1 + lifetime steps / 1000)`, floored at `2e-5`, over the network's
-whole life, so a new session continues at the decayed rate. **The gate:** every 100 steps the batch just
-trained on is scored on the CPU twin; scores are smoothed (EMA 0.2) and, after 3 checks, Neural uses the
-network only while its smoothed error beats the quadratic's — otherwise the quadratic stands in. Learned
-is therefore never worse than Quadratic on the measured data.
+**Training** is self-supervised from ordinary real frames: interpolate the two-frame span N−2→N and take
+N−1 as the answer (`target = (8·v_N − 4·v_span − (v_span − v′_span)) / s`), purely geometric; corrections
+above half the span's motion are rejected as motion-vector seams (none seen so far). Weights save every
+500 steps to `neurafi_v2.avnn` in the user data folder (lifetime steps and the gate's scores in
+`.avnn.steps`); the user's file wins over the copy shipped in `bin/data`. Learning rate
+`5e-4 / (1 + lifetime steps / 1000)`, floored at `2e-5`, over the network's whole life.
 
-**Measured** (NewSponza, 1766×994, wobbling camera; mean in-between position error on two-frame spans):
-- Constant rate 1e-3: network 0.05–0.09 px, drifting up; with decay but no gate, one check reached
-  0.180 px (worse than the quadratic).
-- Decay + gate, continuing from 3,003 lifetime steps: smoothed network **0.031 → 0.023 px** over 3,000
-  steps, steadily down; quadratic 0.108; straight line 0.22.
-- Costs: generation 0.25 → 0.76 ms with the network's inference (quarter resolution); training 0.53 ms
-  while on.
+**The live gate.** Whenever Learned is chosen — trained or not — the same three-frame check records are
+built from the user's own frames and the network is scored on the CPU twin every 100 frames (0.01 ms).
+Smoothed scores (EMA 0.2; 3 checks to judge) decide: in only at 90% of the quadratic's error, out as soon as
+it is worse. *Why live:* weights trained on fast jitter scored 0.262 px on slow wide pans the quadratic got
+to 0.010 — a verdict from someone else's motion does not transfer, so every user's own motion decides.
 
-Not yet measured: the image-level gain on one-frame spans, other scenes, moving objects.
+**The acceleration image** is sized to at most ~262k texels (one per 2×2, 4×4 or 8×8 pixels): *measured*,
+a fixed 2×2 at 3532×1987 put 1.75M records through the network for 3.98 ms; adaptive, 0.92 ms.
 
-**Settings:** Editor Preferences → "Frame generation path" (Straight lines / Quadratic / Learned) and
-"Train the learned path while frame generation runs", with a live status line (steps, learning rate,
-smoothed errors). They apply while editing and in Play; `--frame-gen-trajectory` / `--frame-gen-train`
-outrank them.
+**Measured** (Sponza day and night, wobbling cameras; mean in-between position error on two-frame spans):
+- The network trained across 6°/40, 3°/20, 20°/120 and 12°/70 wobbles reached 10k lifetime steps; on a
+  wobble it had never seen (12°/70) its first check scored 0.020 px against the quadratic's 0.034, and
+  the session ended at smoothed 0.008 vs 0.021.
+- Earlier, whole-`a` network: 0.031 → 0.023 px vs quadratic 0.108 on its own training motion, but 26×
+  worse than the quadratic on unseen slow pans before retraining.
+- Costs at 1766×994: interpolation 0.92–1.40 ms with network inference; training +0.52 ms while on; the
+  live check 0.01 ms.
+
+Not yet measured: the image-level gain on one-frame spans, scenes with moving objects (NeonDistrict hits a
+GPU fault on load that predates this work; it is being chased separately).
+
+**Settings:** Editor Preferences → "Frame interpolation path" (Straight lines / Quadratic / Learned
+(NeuraFI)) and "Train NeuraFI while frame interpolation runs", with a live status line (steps, learning
+rate, smoothed errors). They apply while editing and in Play; the CLI flags outrank them.
 
 *The design below is what was built; it is kept as the record of why.*
 
@@ -265,12 +281,12 @@ budget), translucent layers (by design no motion/depth — the trust mask covers
   holds scene-resolution HDR inputs, not finished output frames. *Caveat:* the continuation US
   2026/0245168 was **broadened** on 2026-06-16 (interception and "outside the swap chain buffer" struck),
   so this mitigation is weaker than it looks; prior art is the main route (patents doc §6.1).
-- **Fixed cadence, no measured timing:** with frame generation on, the generated frame and the real frame
+- **Fixed cadence, no measured timing:** with frame interpolation on, the generated frame and the real frame
   are queued as **consecutive vsync presents** (interval 1), generated first. The display's refresh is
   the clock. There is no frame-time estimator, no GPU or UI timing in the schedule, no pacer thread
   deciding when to present.
 - **Frame cap** at half the refresh rate (the real-frame rate the cadence needs).
-- **Variable refresh / tearing / uncapped:** frame generation is **off** in these modes rather than
+- **Variable refresh / tearing / uncapped:** frame interpolation is **off** in these modes rather than
   adapting to them.
 - **Below 30 fps base:** warning in the stats overlay (decision 3); the cadence stays the same (the real
   frame simply holds for more vblanks).
@@ -304,7 +320,7 @@ budget), translucent layers (by design no motion/depth — the trust mask covers
 
 ## 7. Patents
 
-Full sweep, element mappings and design-arounds: [FRAME_INTERPOLATION_PATENTS.md](FRAME_INTERPOLATION_PATENTS.md)
+Full sweep, element mappings and design-arounds: [NEURAFI_PATENTS.md](NEURAFI_PATENTS.md)
 (engineering mapping, **not legal advice**; a freedom-to-operate opinion is still required). This design
 applies the changes in §2.3. Round 2 (2026-10-03) re-checked the round-1 HIGH items against this design
 (all now LOW) and found the Georgia Tech fill and Intel pacing patents. Round 3 charted prior art against
@@ -320,7 +336,7 @@ open counsel points (the two-start search, AMD US 2026/0094228) are noted, with 
 |---|---|---|
 | 0 | Object motion vectors, sky motion — **done** (`4ee7e3ec`) | — |
 | 0b | G-buffer reason for frame interpolation; scene-cut signal | — |
-| 1 | **Built (D3D12):** history in the generator, present-pass split (two submissions per frame — D3D12 lets a command list write only the current back buffer), 3 swapchain images decoupled from frames in flight, fixed vsync cadence, HUD/editor-lines/ImGui drawn on both images, Editor Preference, `RENDER.FRAMEGEN`, `--frame-gen 0\|1\|2`, scene cuts (resize, G-buffer reset, camera jump > 2.5 m or 30°). Not built: the waitable swapchain object, the <30 fps warning | — |
+| 1 | **Built (D3D12):** history in the generator, present-pass split (two submissions per frame — D3D12 lets a command list write only the current back buffer), 3 swapchain images decoupled from frames in flight, fixed vsync cadence, HUD/editor-lines/ImGui drawn on both images, Editor Preference, `RENDER.FRAMEINTERP`, `--frame-interp 0\|1\|2`, scene cuts (resize, G-buffer reset, camera jump > 2.5 m or 30°). Not built: the waitable swapchain object, the <30 fps warning | — |
 | 2 | **Built:** G1 gather (2 search starts per frame), G2 confidence, G3 blend, G4 two full-resolution fill passes; eye adaptation held on the generated image, bloom and local exposure recomputed on it | — |
 | 3 | **Built, opt-in (owner go-ahead 2026-10-03):** trajectory-prior MLP (§3.5, rules R1–R10) with in-engine self-supervised training, lifetime learning-rate decay and an evidence gate; analytic quadratic as its fallback; Editor Preferences. Open: image-level measurement, a project key for the packaged runtime (CLI only there) | Yes |
 | 4 | Translucent motion, reflection motion, skinned previous pose, 3× generation | Partly |
@@ -358,6 +374,6 @@ open counsel points (the two-start search, AMD US 2026/0094228) are noted, with 
 - AMD FidelityFX SDK v1.1.4 — reference only.
 - Briedis et al. 2021/2023; Ha, Ahn, Yoon 2025; RIFE, IFRNet, FILM, EMA-VFI — ideas only.
 - Microsoft DXGI docs: flip model, waitable swapchain.
-- Patents: see [FRAME_INTERPOLATION_PATENTS.md](FRAME_INTERPOLATION_PATENTS.md).
+- Patents: see [NEURAFI_PATENTS.md](NEURAFI_PATENTS.md).
 - Aver source: `voxi.hlsl`, `VoxiRenderer.cpp/.hpp`, `voxi_rt.hlsli` (stage 0); `D3D12Device.cpp:51,
   3882-3888, 3949, 5039-5491, 5842-5974`; `UiRenderer.cpp:170-237`; `EditorLines.cpp:392`.

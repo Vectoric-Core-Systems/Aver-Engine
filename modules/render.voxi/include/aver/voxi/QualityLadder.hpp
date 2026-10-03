@@ -121,7 +121,7 @@ constexpr u32 giUpdateInterval(Quality q) {
 //   history traces as Full, so the worst frame costs no more than Full's. Neither rung is timed; the
 //   plan's section 5 by-hand verification settles both before shipping.
 //
-// NO RUNG RETURNS 4 (Cached, the radiance cache -- docs/rendering/RADIANCE_CACHE.md): it is opt-in
+// NO RUNG RETURNS 4 (Cached, the radiance cache -- docs/rendering/NEURAC.md): it is opt-in
 // only, set by hand (project setting, console, --restir-visibility cached) until it has been measured
 // against HalfResolution and Full on the owner's GPU.
 //

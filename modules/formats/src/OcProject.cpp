@@ -143,8 +143,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.frameBudgetMs = static_cast<f32>(parseF64(t[1]));
         } else if (equalsCI(key, "RENDER.AVERSR")) {
             if (t.size() > 1) out.averSr = parseI32(t[1], -1);
-        } else if (equalsCI(key, "RENDER.FRAMEGEN")) {
-            if (t.size() > 1) out.frameGen = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.FRAMEINTERP")) {
+            if (t.size() > 1) out.frameInterp = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.BACKEND")) {
             // Stored verbatim and lowercased; validated where it is USED, not here. A manifest naming
             // a backend this build has no support for is not a broken manifest -- the same file is
@@ -322,7 +322,7 @@ bool isOwnedKey(std::string_view line) {
         // grows a duplicate on every save -- and because the owned block splices in at the first
         // owned key while the author's line stays below it, last-write-wins parsing makes the STALE
         // line win. Changing the renderer appeared to work and reverted on reload.
-        "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS", "RENDER.AVERSR", "RENDER.FRAMEGEN",
+        "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS", "RENDER.AVERSR", "RENDER.FRAMEINTERP",
         "RENDER.MSAA", "RENDER.MESHSHADERS", "RENDER.GIUPDATEINTERVAL", "RENDER.GIVOLUME",
         "RENDER.EXPOSURE", "RENDER.BLOOM", "RENDER.AUTOEXPOSURE", "RENDER.TONEMAP",
         "WINDOW.TITLE", "WINDOW.SIZE", "WINDOW.RESIZABLE", "WINDOW.FULLSCREEN",
@@ -394,7 +394,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     if (!d.backend.empty()) appendKey(owned, "RENDER.BACKEND", d.backend);
     appendKey(owned, "RENDER.FRAMEBUDGETMS", d.frameBudgetMs);
     appendKey(owned, "RENDER.AVERSR", d.averSr);
-    appendKey(owned, "RENDER.FRAMEGEN", d.frameGen);
+    appendKey(owned, "RENDER.FRAMEINTERP", d.frameInterp);
     appendKey(owned, "RENDER.MSAA", d.msaa);
     appendKey(owned, "RENDER.MESHSHADERS", d.meshShaders);
     appendKey(owned, "RENDER.GIUPDATEINTERVAL", d.giUpdateInterval);

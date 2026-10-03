@@ -120,7 +120,7 @@ private:
 
     // Same three-deep ring, and the same reason, as ParticleRenderer's: writeBuffer is immediate and
     // unsynchronised, so reusing one buffer while the GPU may still be reading last frame's draw
-    // from it is a race rather than a saving. Five, not three: with frame generation on, overlayPass
+    // from it is a race rather than a saving. Five, not three: with frame interpolation on, overlayPass
     // runs twice per frame (generated image, then real), so four rotations can be in flight.
     static constexpr u32 kFramesInFlight = 5;
     rhi::BufferHandle vb_[kFramesInFlight] = {};

@@ -1,23 +1,23 @@
-// voxi_radiance_cache.hlsli -- the radiance cache's PURE maths: constants, the RcInfo/RcCell layouts,
+// voxi_neurac.hlsli -- the radiance cache's PURE maths: constants, the RcInfo/RcCell layouts,
 // the cell addressing and tag, the L1 spherical-harmonics (SH) basis and its cosine convolution, and
 // the normal / SH packing. It declares NO resource and reads NO cbuffer field, so the resolve shader
-// (voxi_radiance_cache_resolve.hlsl, own t0/u0/u1) can include it exactly as the Voxi scene shaders do.
-// The resource-bound half (scatter + lookup, over t22/u20/u21) is voxi_radiance_cache_io.hlsli.
+// (voxi_neurac_resolve.hlsl, own t0/u0/u1) can include it exactly as the Voxi scene shaders do.
+// The resource-bound half (scatter + lookup, over t22/u20/u21) is voxi_neurac_io.hlsli.
 //
-// WHO INCLUDES IT: voxi_restir.hlsli, under `#if AVER_RADIANCE_CACHE` only (the four lazily compiled
+// WHO INCLUDES IT: voxi_restir.hlsli, under `#if AVER_NEURAC` only (the four lazily compiled
 // staged-compute twin pipelines), and the resolve shader. Every other variant never sees this text.
 //
-// THE CONSTANTS BELOW ARE MIRRORED BY RadianceCacheLayout.hpp (the single source); RadianceCacheTest
+// THE CONSTANTS BELOW ARE MIRRORED BY NeuRaCLayout.hpp (the single source); NeuRaCTest
 // greps these literals against the header, so change both together.
 //
 // WHAT THE CACHE IS: three camera-centred 64^3 cascades (cell size 25 / 100 / 400 world units), each cell
 // holding the first-order SH of INCIDENT radiance at that point, trained live from the second-bounce
-// rays ReSTIR GI already traces (design: docs/rendering/RADIANCE_CACHE.md). Training accumulates in
+// rays ReSTIR GI already traces (design: docs/rendering/NEURAC.md). Training accumulates in
 // integer fixed point (an InterlockedAdd per term, order-independent), the resolve folds the
 // per-frame mean into the stored cell, and the lookup reads the stored cells.
 
-#ifndef AVER_RADIANCE_CACHE_PURE_HLSLI
-#define AVER_RADIANCE_CACHE_PURE_HLSLI
+#ifndef AVER_NEURAC_PURE_HLSLI
+#define AVER_NEURAC_PURE_HLSLI
 
 #define AVER_RC_CASCADES        3
 #define AVER_RC_RES             64
@@ -25,7 +25,7 @@
 #define AVER_RC_CELLS           786432      // 3 * 64^3
 
 // Fixed-point scales of the accumulator (signed ints, because D3D12 has only u32/s32 atomic add):
-// SH terms * 2^15, summed normals * 2^16. Headroom (static_assert in RadianceCacheLayout.hpp): the worst
+// SH terms * 2^15, summed normals * 2^16. Headroom (static_assert in NeuRaCLayout.hpp): the worst
 // sample |c_i| <= LMAX * 0.488603 * PI / MIN_COS = 491; times the 64-sample cap = 31.4k; times 2^15 =
 // 1.03e9 < 2^31.
 #define AVER_RC_SH_SCALE        32768.0
@@ -133,4 +133,4 @@ void rcUnpackSh(uint4 a, uint2 b, out float3 c[4]) {
     c[2] = float3(v[6], v[7], v[8]);   c[3] = float3(v[9], v[10], v[11]);
 }
 
-#endif  // AVER_RADIANCE_CACHE_PURE_HLSLI
+#endif  // AVER_NEURAC_PURE_HLSLI

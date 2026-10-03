@@ -5,7 +5,7 @@
 #include "aver/formats/OcProject.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/pcg/PcgVolume.hpp"
-#include "aver/framegen/ProceduralFrameGenerator.hpp"
+#include "aver/neurafi/NeuraFI.hpp"
 
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/VoxiRenderer.hpp"
@@ -167,10 +167,11 @@ struct GameConfig {
     // default (U2). UNMEASURED: this host's own frame cost at a reduced internal resolution has not
     // been run.
     int averSrArg = -1;   // -1 = unstated/auto, else the ladder's own numbering 0..3
-    // --frame-gen 0|1: frame interpolation over the project's RENDER.FRAMEGEN. -1 = not given.
-    int frameGenArg = -1;
-    // --frame-gen-trajectory linear|quadratic|neural (framegen::Trajectory's numbering; 0 = linear).
-    int frameGenTrajectory = 0;
+    // --frame-interp 0|1: frame interpolation over the project's RENDER.FRAMEINTERP. -1 = not given.
+    int frameInterpArg = -1;
+    // --frame-interp-trajectory linear|quadratic|neural (neurafi::Trajectory's numbering). Default neural:
+    // the shipped weights, used only where they were measured to beat the quadratic.
+    int frameInterpTrajectory = 2;
 };
 
 // Parses the arguments a game executable accepts. Unknown arguments are ignored rather than fatal:
@@ -489,9 +490,9 @@ private:
     // Null is the ordinary, legal "this build has no SR module linked" case, not an error state.
     AverSrInstaller averSrInstaller_ = nullptr;
 
-    // Frame interpolation (docs/rendering/FRAME_INTERPOLATION.md). Built on first use; detached from
+    // Frame interpolation (docs/rendering/NEURAFI.md). Built on first use; detached from
     // the device in onShutdown before it resets, like averSrUpscaler_.
-    std::unique_ptr<framegen::ProceduralFrameGenerator> frameGenerator_;
+    std::unique_ptr<neurafi::NeuraFI> frameInterpolator_;
 
 #if AVER_MODULE_VOXI
     // BY VALUE, and registered NON-OWNING with addRenderFeature. The device holds a bare pointer to

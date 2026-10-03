@@ -6,7 +6,7 @@ spec for the shader and what the tests check.
 
 It is an RHI-only static module like `Aver.Render.Denoise`: it links `Aver.Core` and `Aver.RHI`,
 owns its shader (deployed beside the executable by `aver_deploy_shaders`), records into a caller's
-`IRenderContext`, and never sees Voxi types. Design: `docs/rendering/RADIANCE_CACHE.md`, section 6.
+`IRenderContext`, and never sees Voxi types. Design: `docs/rendering/NEURAC.md`, section 6.
 
 ## Why it exists
 
@@ -70,7 +70,7 @@ its own record with its activations in a thread-local array, then the next layer
 over the same memory. Records never exchange intermediates through shared memory, and the weights
 are never held in registers across layers.
 
-This is a deliberate choice, recorded in the shader and in `docs/rendering/RADIANCE_CACHE.md` section
+This is a deliberate choice, recorded in the shader and in `docs/rendering/NEURAC.md` section
 9. The patents US 11,631,210 and 11,935,179 describe a fully fused kernel: weights loaded once into
 the register file, intermediates exchanged through shared memory, layer by layer. Layer-streaming is
 the shape this module uses to stay clear of that. Whether it is far enough is counsel's call (this is

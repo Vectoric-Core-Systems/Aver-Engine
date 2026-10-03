@@ -176,7 +176,7 @@ public:
 
     ID3D12DescriptorHeap* render(ID3D12GraphicsCommandList* cmdList) override {
         if (!active_) return nullptr;
-        // Once per ImGui frame: with frame generation the device renders the same UI onto two images,
+        // Once per ImGui frame: with frame interpolation the device renders the same UI onto two images,
         // and the second call only re-records the draw data the first one built.
         if (renderedFrame_ != ImGui::GetFrameCount()) {
             ImGui::Render();

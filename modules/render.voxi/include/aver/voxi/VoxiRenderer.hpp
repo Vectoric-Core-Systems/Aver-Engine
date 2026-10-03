@@ -8,7 +8,7 @@
 #include "aver/voxi/Voxi.hpp"
 #include "aver/voxi/GiDispatchBounds.hpp"   // W3: VoxelBox/GiDispatchConstants -- see the .cpp for how
 #include "aver/render/denoise/Denoiser.hpp"
-#include "aver/voxi/RadianceCache.hpp"      // rc_ -- the radiance cache's buffers and resolve pass
+#include "aver/voxi/NeuRaC.hpp"      // rc_ -- the radiance cache's buffers and resolve pass
 
 #include <unordered_map>
 #include "aver/formats/GiCache.hpp"
@@ -1039,10 +1039,10 @@ private:
     rhi::PipelineHandle rdGiSplitCsPso_   = 0;
     rhi::PipelineHandle rdGiSplitCbCsPso_ = 0;
     // RADIANCE CACHE twins (stage 1): CSRdGi / CSRdGiTrace and their checkerboard variants compiled
-    // again with AVER_RADIANCE_CACHE=1, the ONLY compiles that contain the cache's scatter and
+    // again with AVER_NEURAC=1, the ONLY compiles that contain the cache's scatter and
     // lookup code -- every other variant (single-pass PSRayDriven, raster PSMainVoxi, the split-read
     // CSRdGi) keeps byte-identical preprocessed text, which is what "off means off" and the AMD
-    // register limit both need. Built LAZILY (createRadianceCacheTwins) the first time Cached mode
+    // register limit both need. Built LAZILY (createNeuRaCTwins) the first time Cached mode
     // is wanted on a staged D3D12 pipeline, never otherwise. Chosen per frame by testing bit 128 of
     // cb_.ambientParams[3] AND the handle being non-zero; a twin with the bit clear is plain
     // HalfResolution. The split-read CSRdGi (AVER_GI_SPLIT=1) needs no twin: it never traces.
@@ -1652,8 +1652,8 @@ private:
         //                         the cone gather instead of ReSTIR
         //   bit 32    (& 32u)     backend replays translucent draws blended THIS frame (D3D12 only)
         //   bit 64    (& 64u)     setGiVisPathView's debug view
-        //   bit 128   (& 128u)    radiance cache live this frame (radianceCacheLive_); read only by
-        //                         the AVER_RADIANCE_CACHE twin pipelines
+        //   bit 128   (& 128u)    radiance cache live this frame (neuracLive_); read only by
+        //                         the AVER_NEURAC twin pipelines
         //   bits 12-15 (>>12 & 15u) Settings::giRestirSpatialSamples (15 = auto)
         //   bits 18-22 (>>18 & 31u) Settings::giRestirMaxHistory (reuse.maxHistory)
         // Single writer: beginShadowHistory (published twice -- unconditionally near the top with
@@ -2324,12 +2324,12 @@ private:
     u32 giRestirVisibility_ = 2;
     // RADIANCE CACHE state (stage 1). rc_ owns the accumulator/cells/info-ring buffers, the resolve
     // pipeline and its sets; it is created on the first frame Cached is wanted and destroyed when it
-    // stops being (updateRadianceCache). radianceCacheLive_ is what this frame's packAmbientW packs
+    // stops being (updateNeuRaC). neuracLive_ is what this frame's packAmbientW packs
     // as bit 128: Cached requested && giRestirWanted() && staged ray-driven on D3D12 && rc_.valid()
     // && the twin pipelines exist. Recomputed every frame, before beginShadowHistory reads it.
-    RadianceCache rc_;
-    bool radianceCacheLive_ = false;
-    // The RadianceCache::Bindings::generation last written into table 0's t22/u20/u21; a different
+    NeuRaC rc_;
+    bool neuracLive_ = false;
+    // The NeuRaC::Bindings::generation last written into table 0's t22/u20/u21; a different
     // value from beginFrame means the buffers changed and bindings_ must be rewritten (before the
     // first bind of the frame -- Vulkan ringed sets forbid writing a bound set).
     u32 rcBoundGeneration_ = 0;
@@ -2345,16 +2345,16 @@ private:
     // rc_.create() failed (it logged why): do not retry every frame. Cleared when Cached stops being
     // the wanted mode, so switching away and back gets a fresh attempt.
     bool rcCreateFailed_ = false;
-    // createRadianceCacheTwins ran since the last createScenePipelines (which clears it): a failed
+    // createNeuRaCTwins ran since the last createScenePipelines (which clears it): a failed
     // build is not retried every frame, but a pipeline rebuild retries against fresh bytecode.
     bool rcTwinsTried_ = false;
-    // Build/teardown/per-frame hooks (VoxiRenderer.cpp). updateRadianceCache runs in prePass between
-    // buildLocalLights and beginShadowHistory; createRadianceCacheTwins builds the four
-    // AVER_RADIANCE_CACHE=1 compute pipelines; teardownRadianceCache rebinds t22/u20/u21 away from
+    // Build/teardown/per-frame hooks (VoxiRenderer.cpp). updateNeuRaC runs in prePass between
+    // buildLocalLights and beginShadowHistory; createNeuRaCTwins builds the four
+    // AVER_NEURAC=1 compute pipelines; teardownNeuRaC rebinds t22/u20/u21 away from
     // the buffers and then destroys them.
-    void updateRadianceCache(rhi::IRenderContext& ctx);
-    bool createRadianceCacheTwins();
-    void teardownRadianceCache();
+    void updateNeuRaC(rhi::IRenderContext& ctx);
+    bool createNeuRaCTwins();
+    void teardownNeuRaC();
     // Settings::giRestirSpatialSamples, cached the same defensive way: Voxi.cpp clamps it to [0,15]
     // and std::min repeats the ceiling here so this can't disagree with packAmbientW's `& 15u` mask.
     // 15 (AUTO) matches the struct default, so pre-setSettings frames leave the motion discount's
@@ -2471,8 +2471,8 @@ private:
 
     // RADIANCE CACHE (stage 1): whether Cached mode (giRestirVisibility_ == 4) is the requested
     // mode AND ReSTIR GI is running. Whether the cache is actually LIVE this frame is the narrower
-    // radianceCacheLive_ (also needs staged ray-driven on D3D12, a created cache and built twins).
-    bool radianceCacheWanted() const { return giRestirWanted() && giRestirVisibility_ == 4u; }
+    // neuracLive_ (also needs staged ray-driven on D3D12, a created cache and built twins).
+    bool neuracWanted() const { return giRestirWanted() && giRestirVisibility_ == 4u; }
 
     // LOCAL LIGHTS (LAMPS): whether rdLocalHist_ is worth allocating -- ray tracing on, localLights
     // on, and D3D12 (the only backend buildLocalLights fills a list on). Every ray-traced scene mode

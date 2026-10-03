@@ -1,4 +1,4 @@
-#include "aver/voxi/RadianceCache.hpp"
+#include "aver/voxi/NeuRaC.hpp"
 
 #include "aver/core/Log.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
@@ -9,11 +9,11 @@
 
 namespace aver::voxi {
 
-namespace rc = radiancecache;
+namespace rc = neurac;
 
 namespace {
 
-constexpr const char* kShaderName = "voxi_radiance_cache_resolve.hlsl";
+constexpr const char* kShaderName = "voxi_neurac_resolve.hlsl";
 constexpr const char* kEntry      = "CSRcResolve";
 
 constexpr f64 kMiB = 1024.0 * 1024.0;
@@ -21,7 +21,7 @@ constexpr f64 kMiB = 1024.0 * 1024.0;
 // RcInfo for one frame. cas[c].cellSizeCm travels as float bits in the HLSL int4's .w, which the shader
 // reads back with asfloat(); the struct already stores it as a float, so the bytes are what the shader
 // expects with no conversion here.
-rc::RcInfo makeInfo(const f32 camPosCm[3], u32 frameIndex, u32 flags, const RadianceCache::Params& p) {
+rc::RcInfo makeInfo(const f32 camPosCm[3], u32 frameIndex, u32 flags, const NeuRaC::Params& p) {
     rc::RcInfo info{};
     info.flags         = flags;
     info.frameIndex    = frameIndex;
@@ -38,15 +38,15 @@ rc::RcInfo makeInfo(const f32 camPosCm[3], u32 frameIndex, u32 flags, const Radi
 
 }  // namespace
 
-RadianceCache::~RadianceCache() { destroy(); }
+NeuRaC::~NeuRaC() { destroy(); }
 
-bool RadianceCache::create(rhi::IResourceFactory& res) {
+bool NeuRaC::create(rhi::IResourceFactory& res) {
     if (valid_) return true;
     destroy();   // a failed earlier attempt may have left pieces
     res_ = &res;
 
     auto fail = [&](const char* why) {
-        AVER_WARN("[Voxi] radiance cache: {}; the cached GI visibility mode falls back to half resolution", why);
+        AVER_WARN("[Voxi] NeuRaC: {}; the cached GI visibility mode falls back to half resolution", why);
         destroy();
         return false;
     };
@@ -58,10 +58,10 @@ bool RadianceCache::create(rhi::IResourceFactory& res) {
         bd.kind = rhi::BufferKind::Default;
         bd.allowUnorderedAccess = true;
         bd.bytes = rc::kAccumBytes;
-        bd.debugName = "Voxi radiance cache accumulator";
+        bd.debugName = "Voxi NeuRaC accumulator";
         accum_ = res.createBuffer(bd);
         bd.bytes = rc::kCellsBytes;
-        bd.debugName = "Voxi radiance cache cells";
+        bd.debugName = "Voxi NeuRaC cells";
         cells_ = res.createBuffer(bd);
         if (!accum_ || !cells_) return fail("the accumulator/cell buffers could not be created");
     }
@@ -71,7 +71,7 @@ bool RadianceCache::create(rhi::IResourceFactory& res) {
         rhi::BufferDesc bd;
         bd.bytes = rc::kInfoStride;
         bd.kind  = rhi::BufferKind::Upload;
-        bd.debugName = i < kRing ? "Voxi radiance cache info" : "Voxi radiance cache clear info";
+        bd.debugName = i < kRing ? "Voxi NeuRaC info" : "Voxi NeuRaC clear info";
         const rhi::BufferHandle b = res.createBuffer(bd);
         if (!b) return fail("an info buffer could not be created");
         if (i < kRing) info_[i] = b; else clearInfo_ = b;
@@ -84,11 +84,11 @@ bool RadianceCache::create(rhi::IResourceFactory& res) {
     }
 
     // The resolve shader. Asking for SM 6.2 selects DXC rather than FXC (the same ask the denoiser's
-    // pipelines make), which the f16tof32/f32tof16 packing in voxi_radiance_cache.hlsli is written for.
+    // pipelines make), which the f16tof32/f32tof16 packing in voxi_neurac.hlsli is written for.
     // It #includes that pure-maths header, so the two files must be deployed together (the shader
     // directory is deployed whole).
     const std::string& source = rhi::shaderFile(kShaderName);
-    if (source.empty()) return fail("voxi_radiance_cache_resolve.hlsl is not deployed beside the executable");
+    if (source.empty()) return fail("voxi_neurac_resolve.hlsl is not deployed beside the executable");
     rhi::ShaderDesc sd{};
     sd.source = source.c_str();
     sd.entry  = kEntry;
@@ -129,7 +129,7 @@ bool RadianceCache::create(rhi::IResourceFactory& res) {
     valid_ = true;
     clearPending_ = true;   // Vulkan does not guarantee zeroed memory and D3D12's zero-fill is not relied on
     ++generation_;
-    AVER_INFO("[Voxi] radiance cache: {} cascade(s) of {}^3 cells at {}/{}/{} cm; accumulator {:.1f} MiB + "
+    AVER_INFO("[Voxi] NeuRaC: {} cascade(s) of {}^3 cells at {}/{}/{} cm; accumulator {:.1f} MiB + "
               "cells {:.1f} MiB = {:.1f} MiB VRAM", rc::kCascades, rc::kRes,
               rc::kCellSizeCm[0], rc::kCellSizeCm[1], rc::kCellSizeCm[2],
               static_cast<f64>(rc::kAccumBytes) / kMiB, static_cast<f64>(rc::kCellsBytes) / kMiB,
@@ -137,7 +137,7 @@ bool RadianceCache::create(rhi::IResourceFactory& res) {
     return true;
 }
 
-void RadianceCache::destroy() {
+void NeuRaC::destroy() {
     if (res_) {
         for (rhi::BindingSetHandle& s : sets_) { if (s) res_->destroyBindingSet(s); s = 0; }
         if (clearSet_) res_->destroyBindingSet(clearSet_);
@@ -161,7 +161,7 @@ void RadianceCache::destroy() {
     // changed" to a renderer that last bound the old generation.
 }
 
-RadianceCache::Bindings RadianceCache::beginFrame(rhi::IRenderContext& ctx, const f32 camPosCm[3],
+NeuRaC::Bindings NeuRaC::beginFrame(rhi::IRenderContext& ctx, const f32 camPosCm[3],
                                                   u32 frameIndex, const Params& p) {
     Bindings out;
     out.generation = generation_;
@@ -176,7 +176,7 @@ RadianceCache::Bindings RadianceCache::beginFrame(rhi::IRenderContext& ctx, cons
         clearPending_ = false;
         // Zeroes the whole accumulator and every cell. Recorded here, outside the scene pass, so the
         // dispatch is ordinary compute; the barriers make the zeros visible to the trace twins.
-        rhi::ScopedGpuStat stat(ctx, "Voxi radiance cache clear");
+        rhi::ScopedGpuStat stat(ctx, "Voxi NeuRaC clear");
         ctx.setPipeline(pipeline_);
         ctx.setBindingSet(clearSet_);
         ctx.dispatch(rc::kResolveGroups, 1, 1);
@@ -190,7 +190,7 @@ RadianceCache::Bindings RadianceCache::beginFrame(rhi::IRenderContext& ctx, cons
         rhi::BufferDesc bd;
         bd.bytes = rc::kCellsBytes;
         bd.kind  = rhi::BufferKind::Readback;
-        bd.debugName = "Voxi radiance cache warm-up readback";
+        bd.debugName = "Voxi NeuRaC warm-up readback";
         statsReadback_ = res_->createBuffer(bd);
         if (statsReadback_) {
             ctx.copyBuffer(statsReadback_, cells_, rc::kCellsBytes, 0, 0);
@@ -213,10 +213,10 @@ RadianceCache::Bindings RadianceCache::beginFrame(rhi::IRenderContext& ctx, cons
     return out;
 }
 
-void RadianceCache::logWarmupStats() {
+void NeuRaC::logWarmupStats() {
     std::vector<rc::RcCell> cells(rc::kCells);
     if (!res_->readBuffer(statsReadback_, cells.data(), rc::kCellsBytes, 0)) {
-        AVER_WARN("[Voxi] radiance cache warm-up report: the readback could not be read");
+        AVER_WARN("[Voxi] NeuRaC warm-up report: the readback could not be read");
         return;
     }
     for (u32 c = 0; c < rc::kCascades; ++c) {
@@ -244,7 +244,7 @@ void RadianceCache::logWarmupStats() {
             ambientSum += 0.282095 * (0.2126 * r + 0.7152 * g + 0.0722 * b);
         }
         const f64 v = valid ? static_cast<f64>(valid) : 1.0;
-        AVER_INFO("[Voxi] radiance cache warm-up (frame {}), cascade {} ({} cm): {} cells hold samples, {} valid "
+        AVER_INFO("[Voxi] NeuRaC warm-up (frame {}), cascade {} ({} cm): {} cells hold samples, {} valid "
                   "under the current window ({:.2f}% of {}); valid cells: mean n_eff {:.1f}, mean age {:.1f}, "
                   "mean planarity {:.2f}, mean ambient luminance {:.4f}",
                   statsCopyFrame_, c, rc::kCellSizeCm[c], occupied, valid,
@@ -253,9 +253,9 @@ void RadianceCache::logWarmupStats() {
     }
 }
 
-void RadianceCache::recordResolve(rhi::IRenderContext& ctx) {
+void NeuRaC::recordResolve(rhi::IRenderContext& ctx) {
     if (!valid_) return;
-    rhi::ScopedGpuStat stat(ctx, "Voxi radiance cache resolve");
+    rhi::ScopedGpuStat stat(ctx, "Voxi NeuRaC resolve");
     ctx.setPipeline(pipeline_);
     ctx.setBindingSet(sets_[slot_]);
     ctx.dispatch(rc::kResolveGroups, 1, 1);

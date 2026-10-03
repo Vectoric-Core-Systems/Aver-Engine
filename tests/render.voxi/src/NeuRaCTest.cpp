@@ -1,5 +1,5 @@
-// RadianceCacheTest -- the radiance cache's CPU-checkable half (aver/voxi/RadianceCacheLayout.hpp).
-// See docs/rendering/RADIANCE_CACHE.md.
+// NeuRaCTest -- the radiance cache's CPU-checkable half (aver/voxi/NeuRaCLayout.hpp).
+// See docs/rendering/NEURAC.md.
 //
 // NO GPU, NO RHI, same shape as GiVisibilityTest in this directory: the header under test depends on
 // nothing but aver/core/Types.hpp, so this links Aver.Core alone and reaches it with an include path.
@@ -9,10 +9,10 @@
 // world cells, origin snapping, the fp16 SH and normal packing, and the SH cosine convolution against a
 // Monte Carlo estimate built with the scatter's own weighting. It also reads the HLSL files and checks
 // that the AVER_RC_* #define literals equal the header's constants. It does NOT compile the HLSL or run
-// the resolve: whether voxi_radiance_cache_resolve.hlsl builds and blends correctly is the engine's to
+// the resolve: whether voxi_neurac_resolve.hlsl builds and blends correctly is the engine's to
 // show, not this file's.
 #include "aver/core/Log.hpp"
-#include "aver/voxi/RadianceCacheLayout.hpp"
+#include "aver/voxi/NeuRaCLayout.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -26,7 +26,7 @@
 #include <vector>
 
 using namespace aver;
-namespace rc = aver::voxi::radiancecache;
+namespace rc = aver::voxi::neurac;
 
 namespace {
 
@@ -45,7 +45,7 @@ std::string readFile(const std::string& path) {
     if (!f) {
         // An unreadable file must FAIL every assertion against it, not skip: an empty string would make
         // every "does not contain" style check pass vacuously.
-        AVER_ERROR("[RadianceCache] could not read {} -- every source assertion against it is a failure, "
+        AVER_ERROR("[NeuRaC] could not read {} -- every source assertion against it is a failure, "
                    "not a skip.", path);
         return {};
     }
@@ -330,9 +330,9 @@ int main() {
     AVER_INFO("=== HLSL literals match the header ===");
     {
         const std::string root   = std::string(AVER_REPO_ROOT) + "/modules/render.voxi/";
-        const std::string pure   = readFile(root + "shaders/voxi_radiance_cache.hlsli");
-        const std::string resolve = readFile(root + "shaders/voxi_radiance_cache_resolve.hlsl");
-        const std::string cpp    = readFile(root + "src/RadianceCache.cpp");
+        const std::string pure   = readFile(root + "shaders/voxi_neurac.hlsli");
+        const std::string resolve = readFile(root + "shaders/voxi_neurac_resolve.hlsl");
+        const std::string cpp    = readFile(root + "src/NeuRaC.cpp");
 
         struct Lit { const char* name; f64 value; };
         const Lit lits[] = {
@@ -344,7 +344,7 @@ int main() {
         for (const Lit& l : lits) {
             const f64 v = defineValue(pure, l.name);
             check(!std::isnan(v) && approx(v, l.value, 1e-9),
-                  std::string("voxi_radiance_cache.hlsli #defines ") + l.name + " equal to RadianceCacheLayout.hpp's value");
+                  std::string("voxi_neurac.hlsli #defines ") + l.name + " equal to NeuRaCLayout.hpp's value");
         }
 
         const Lit resolveLits[] = {
@@ -354,7 +354,7 @@ int main() {
         for (const Lit& l : resolveLits) {
             const f64 v = defineValue(resolve, l.name);
             check(!std::isnan(v) && approx(v, l.value, 1e-9),
-                  std::string("voxi_radiance_cache_resolve.hlsl #defines ") + l.name + " equal to the header's value");
+                  std::string("voxi_neurac_resolve.hlsl #defines ") + l.name + " equal to the header's value");
         }
         check(resolve.find("[numthreads(64, 1, 1)]") != std::string::npos && rc::kResolveGroupSize == 64,
               "the resolve kernel is [numthreads(64, 1, 1)], matching the 12,288-group dispatch");
@@ -362,10 +362,10 @@ int main() {
               "the resolve entry point the C++ asks for exists in the shader");
         check(resolve.find("register(t0)") != std::string::npos && resolve.find("register(u0)") != std::string::npos &&
               resolve.find("register(u1)") != std::string::npos,
-              "the resolve declares t0/u0/u1, the registers RadianceCache's layout has");
-        check(resolve.find("#include \"voxi_radiance_cache.hlsli\"") != std::string::npos,
+              "the resolve declares t0/u0/u1, the registers NeuRaC's layout has");
+        check(resolve.find("#include \"voxi_neurac.hlsli\"") != std::string::npos,
               "the resolve includes the pure-maths header, not the resource-bound one");
-        check(cpp.find("voxi_radiance_cache_resolve.hlsl") != std::string::npos, "RadianceCache.cpp loads that shader file");
+        check(cpp.find("voxi_neurac_resolve.hlsl") != std::string::npos, "NeuRaC.cpp loads that shader file");
     }
 
     if (g_failures == 0) {

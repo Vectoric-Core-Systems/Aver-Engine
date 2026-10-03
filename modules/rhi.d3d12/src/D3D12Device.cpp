@@ -49,7 +49,7 @@ static constexpr u64 kShaderCacheBudgetBytes = 256ull * 1024ull * 1024ull;
 namespace {
 
 constexpr u32 kFrameCount = 2;
-// Swapchain images, decoupled from kFrameCount (frames in flight): with frame generation a frame
+// Swapchain images, decoupled from kFrameCount (frames in flight): with frame interpolation a frame
 // presents two images, generated then real, and a third keeps the next frame from waiting on the one
 // still on screen. frameIndex_ is the frame-in-flight slot; bbIndex_ the image being drawn.
 constexpr u32 kBackBufferCount = 3;
@@ -922,19 +922,19 @@ public:
     // AverSR Off bit-identical to a build without the module (docs/AVERSR.md's invariant).
     void setUpscaler(IUpscaler* u) override { upscaler_ = u; }
     IUpscaler* upscaler() const override { return upscaler_; }
-    void setFrameGenerator(IFrameGenerator* g) override {
-        if (g != frameGen_ && frameGen_) frameGen_->reset();
-        frameGen_ = g;
-        frameGenCut_ = true;
+    void setFrameInterpolator(IFrameInterpolator* g) override {
+        if (g != frameInterp_ && frameInterp_) frameInterp_->reset();
+        frameInterp_ = g;
+        frameInterpCut_ = true;
     }
-    void setFrameGeneration(bool on) override {
-        if (on != frameGenOn_) frameGenCut_ = true;
-        frameGenOn_ = on;
+    void setFrameInterpolation(bool on) override {
+        if (on != frameInterpOn_) frameInterpCut_ = true;
+        frameInterpOn_ = on;
     }
-    bool frameGeneration() const override { return frameGenOn_; }
-    bool frameGenerated() const override { return frameGenerated_; }
-    void setFrameGenCaptureGenerated(bool on) override { fgCaptureGenerated_ = on; }
-    void noteSceneCut() override { frameGenCut_ = true; }
+    bool frameInterpolation() const override { return frameInterpOn_; }
+    bool frameInterpolated() const override { return frameInterpolated_; }
+    void setFrameInterpCaptureGenerated(bool on) override { fgCaptureGenerated_ = on; }
+    void noteSceneCut() override { frameInterpCut_ = true; }
     void notifyRenderTargetsChanged();
     // Creates or resizes the factory texture the scene renders into for the viewport.
     bool ensureViewportTexture();
@@ -1315,7 +1315,7 @@ private:
     bool gbufHistoryInvalid_ = true;
 
     ComPtr<ID3D12CommandAllocator> allocators_[kFrameCount];
-    // Frame generation's second recording of a frame (the real image, after the generated one was
+    // Frame interpolation's second recording of a frame (the real image, after the generated one was
     // submitted and presented -- see submitGeneratedImage). Same slot rule as allocators_: the frame's
     // fence retires both.
     ComPtr<ID3D12CommandAllocator> allocatorsGen_[kFrameCount];
@@ -1331,20 +1331,20 @@ private:
     u32 bbIndex_ = 0;      // swapchain image this frame draws first (see kBackBufferCount)
     u32 rtvSize_ = 0;
 
-    // ---- frame generation (IDevice::setFrameGenerator; docs/rendering/FRAME_INTERPOLATION.md) ----
-    IFrameGenerator* frameGen_ = nullptr;   // non-owning, host-installed
-    bool frameGenOn_ = false;               // requested
-    bool frameGenerated_ = false;           // this frame presented a generated image ahead of the real one
-    bool frameGenCut_ = true;               // the next frame must not be interpolated across
-    u32  frameGenOffReason_ = 0;            // last reason logged, so each is said once per change
+    // ---- frame interpolation (IDevice::setFrameInterpolator; docs/rendering/NEURAFI.md) ----
+    IFrameInterpolator* frameInterp_ = nullptr;   // non-owning, host-installed
+    bool frameInterpOn_ = false;               // requested
+    bool frameInterpolated_ = false;           // this frame presented a generated image ahead of the real one
+    bool frameInterpCut_ = true;               // the next frame must not be interpolated across
+    u32  frameInterpOffReason_ = 0;            // last reason logged, so each is said once per change
     TextureHandle fgInputTex_ = 0;          // frame N's scene colour, copied (the scene target has no handle)
     u32 fgInputW_ = 0, fgInputH_ = 0;
     f32 fgPrevCamPos_[3] = {};
     f32 fgPrevCamFwd_[3] = {};
     bool fgCamPrimed_ = false;
-    // Why frame generation cannot run this frame (0 = it can); logs once per change of reason.
-    u32 frameGenBlocker();
-    bool frameGenCameraJumped();
+    // Why frame interpolation cannot run this frame (0 = it can); logs once per change of reason.
+    u32 frameInterpBlocker();
+    bool frameInterpCameraJumped();
     // The post chain, overlays and UI for ONE presented image. `generated` skips everything that must
     // advance once per real frame (eye adaptation, its readback, the frame clock); `firstOfFrame` /
     // `lastOfFrame` tell the overlay drawers whether this is the first or last image of the frame.
@@ -3183,7 +3183,7 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
 
     for (u32 i = 0; i < kFrameCount; ++i) {
         if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocators_[i])), "CreateCommandAllocator")) return false;
-        if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocatorsGen_[i])), "CreateCommandAllocator (frame generation)")) return false;
+        if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocatorsGen_[i])), "CreateCommandAllocator (frame interpolation)")) return false;
     }
     if (!hrOk(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators_[0].Get(), nullptr, IID_PPV_ARGS(&cmdList_)), "CreateCommandList")) return false;
     // Same reasoning as the queue's name just above: this is the ONE command list every draw and
@@ -3928,7 +3928,7 @@ void D3D12Device::beginFrame() {
     applyPendingRenderScale();
     reconcileClearValue();
     // The frame slot rotates by itself; the swapchain image is whatever DXGI hands out next (one or two
-    // images per frame, depending on frame generation -- see kBackBufferCount).
+    // images per frame, depending on frame interpolation -- see kBackBufferCount).
     frameIndex_ = (frameIndex_ + 1) % kFrameCount;
     bbIndex_ = swapChain_->GetCurrentBackBufferIndex();
     const u64 want = fenceValues_[frameIndex_];
@@ -5894,19 +5894,19 @@ void D3D12Device::endFrame() {
         for (IRenderFeature* f : features_) f->transparentPass(*rhiContext_);
     }
 
-    // ---- frame generation (docs/rendering/FRAME_INTERPOLATION.md) ----
+    // ---- frame interpolation (docs/rendering/NEURAFI.md) ----
     // With it on and possible this frame, the image half-way between the previous real frame and this
     // one is generated from the HDR scene target and presented FIRST, on its own swapchain image,
     // through the same post chain, overlays and UI; the real frame follows on the next image. Each is
     // composited straight into its own back buffer -- no finished image is queued or copied into the
     // swapchain afterwards. The generated one is submitted and presented mid-frame
     // (submitGeneratedImage), the real one by present(): consecutive vblanks.
-    frameGenerated_ = false;
+    frameInterpolated_ = false;
     TextureHandle generatedImage = 0;
-    if (frameGenOn_ && frameGen_) {
-        const bool jumped = frameGenCameraJumped();   // every frame, so the previous camera stays current
-        if (frameGenBlocker() == 0) {
-            // sampleCount_ == 1 here (frameGenBlocker), so the scene target IS msaaColor_, in RENDER_TARGET.
+    if (frameInterpOn_ && frameInterp_) {
+        const bool jumped = frameInterpCameraJumped();   // every frame, so the previous camera stays current
+        if (frameInterpBlocker() == 0) {
+            // sampleCount_ == 1 here (frameInterpBlocker), so the scene target IS msaaColor_, in RENDER_TARGET.
             ID3D12Resource* scene = msaaColor_.Get();
             if (fgInputTex_ && (fgInputW_ != sceneWidth_ || fgInputH_ != sceneHeight_)) {
                 rhiFactory_->destroyTexture(fgInputTex_);
@@ -5919,7 +5919,7 @@ void D3D12Device::endFrame() {
                 td.format = Format::RGBA16F;
                 td.bind = ResourceBind::ShaderResource;
                 td.initialState = ResourceState::ShaderResource;
-                td.debugName = "Frame generation input (scene colour)";
+                td.debugName = "Frame interpolation input (scene colour)";
                 fgInputTex_ = rhiFactory_->createTexture(td);
                 fgInputW_ = sceneWidth_;
                 fgInputH_ = sceneHeight_;
@@ -5938,21 +5938,21 @@ void D3D12Device::endFrame() {
                 };
                 cmdList_->ResourceBarrier(2, post);
 
-                FrameGenInput in{};
+                FrameInterpInput in{};
                 in.color = fgInputTex_;
                 in.velocity = gBufferVelocityTexture();
                 in.viewZ = gBufferViewZTexture();
                 in.width = sceneWidth_;
                 in.height = sceneHeight_;
-                in.sceneCut = frameGenCut_ || jumped || gbufHistoryInvalid_;
-                generatedImage = frameGen_->generate(*rhiContext_, in);
-                frameGenCut_ = false;
+                in.sceneCut = frameInterpCut_ || jumped || gbufHistoryInvalid_;
+                generatedImage = frameInterp_->generate(*rhiContext_, in);
+                frameInterpCut_ = false;
                 // The generator bound its own pipelines and sets through the generic context.
                 boundRootSig_ = nullptr; boundPso_ = nullptr; boundHeap_ = nullptr;
                 fovValid_ = false; dbValid_ = false;
             }
         } else {
-            frameGenCut_ = true;   // a paused frame breaks the sequence
+            frameInterpCut_ = true;   // a paused frame breaks the sequence
         }
     }
 
@@ -5983,7 +5983,7 @@ void D3D12Device::endFrame() {
         if (!submitGeneratedImage()) return;
         toScene(fgInputTex_);   // the real frame back into the scene target
         presentPass((bbIndex_ + 1) % kBackBufferCount, false, false, true);
-        frameGenerated_ = true;
+        frameInterpolated_ = true;
     } else {
         presentPass(bbIndex_, false, true, true);
     }
@@ -6034,8 +6034,8 @@ bool D3D12Device::submitGeneratedImage() {
     return true;
 }
 
-// Why frame generation cannot run this frame; 0 when it can. Each change of reason is logged once.
-u32 D3D12Device::frameGenBlocker() {
+// Why frame interpolation cannot run this frame; 0 when it can. Each change of reason is logged once.
+u32 D3D12Device::frameInterpBlocker() {
     u32 why = 0;
     const char* text = nullptr;
     if (!rhiContext_ || !rhiFactory_) {
@@ -6049,10 +6049,10 @@ u32 D3D12Device::frameGenBlocker() {
     } else if (wireframeFrame_ || frameSuppressed_) {
         why = 5;   // per-frame view states (wireframe, a whole-frame feature): not worth a log line
     }
-    if (why != frameGenOffReason_) {
-        if (text) AVER_INFO("[RHI.D3D12] frame generation paused: {}", text);
-        else if (why == 0) AVER_INFO("[RHI.D3D12] frame generation running");
-        frameGenOffReason_ = why;
+    if (why != frameInterpOffReason_) {
+        if (text) AVER_INFO("[RHI.D3D12] frame interpolation paused: {}", text);
+        else if (why == 0) AVER_INFO("[RHI.D3D12] frame interpolation running");
+        frameInterpOffReason_ = why;
     }
     return why;
 }
@@ -6060,7 +6060,7 @@ u32 D3D12Device::frameGenBlocker() {
 // A camera jump the generator must not interpolate across: a teleport, a cut to another camera, a snap
 // turn. Position from frameCB_.camPos (world units); facing from the screen centre unprojected through
 // invViewProjRel (row-major, row-vector) at the near and far planes. Updates the previous camera.
-bool D3D12Device::frameGenCameraJumped() {
+bool D3D12Device::frameInterpCameraJumped() {
     constexpr f32 kJumpDistance = 250.0f;   // world units (cm) in one frame: 150 m/s at 60 fps
     constexpr f32 kJumpCos = 0.866f;        // 30 degrees of turn in one frame
     const f32* m = frameCB_.invViewProjRel;
@@ -6089,7 +6089,7 @@ bool D3D12Device::frameGenCameraJumped() {
 }
 
 // One presented image: post chain, editor lines and overlay features, the UI, then PRESENT (or the
-// capture copy on the frame's last image). Run once per frame, or twice with frame generation.
+// capture copy on the frame's last image). Run once per frame, or twice with frame interpolation.
 void D3D12Device::presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool lastOfFrame) {
     ID3D12Resource* bb = renderTargets_[bbIdx].Get();
     beginGpuSpan(generated ? "post chain (generated)" : "post chain");
@@ -6188,7 +6188,7 @@ void D3D12Device::presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool
         endGpuSpan();   // "editor UI"
     }
     // Captures (screenshots, --frames) take the real image -- or, with the diagnostic
-    // setFrameGenCaptureGenerated on, the generated one.
+    // setFrameInterpCaptureGenerated on, the generated one.
     if (captureReq_ && captureBuf_ && (fgCaptureGenerated_ ? generated : lastOfFrame)) {
         captureRecorded_ = true;
         auto toCopy = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -6216,7 +6216,7 @@ void D3D12Device::present() {
         noteDeviceRemoved("--device-lost-at (SIMULATED, the hardware is fine)", DXGI_ERROR_DEVICE_HUNG);
         return;
     }
-    // With frame generation the generated image was already presented by endFrame
+    // With frame interpolation the generated image was already presented by endFrame
     // (submitGeneratedImage); this shows the real one on the next vblank.
     const HRESULT pr = swapChain_->Present(tearingSupported_ ? interval : 1u, flags);
     // PRESENT IS WHERE A REMOVAL USUALLY SURFACES FIRST, so it is the most likely place to learn
@@ -6243,7 +6243,7 @@ void D3D12Device::present() {
     fenceValues_[frameIndex_] = nextFence_;
 
     // Only when this frame actually recorded the copy: a capture waiting for a generated image
-    // (setFrameGenCaptureGenerated) stays pending through a frame that had none.
+    // (setFrameInterpCaptureGenerated) stays pending through a frame that had none.
     if (captureReq_ && captureBuf_ && captureRecorded_) {
         captureRecorded_ = false;
         waitForGpu();
@@ -6283,7 +6283,7 @@ void D3D12Device::resize(u32 w, u32 h) {
     // already released, matching createDepthBuffer/createMsaaColor's own contract.
     if (gbufferEnabled_) { gbufVelocity_.Reset(); gbufViewZ_.Reset(); gbufNormalRough_.Reset(); }
     const UINT scFlags = tearingSupported_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
-    frameGenCut_ = true;   // never interpolate across a resize
+    frameInterpCut_ = true;   // never interpolate across a resize
     if (!hrOk(swapChain_->ResizeBuffers(kBackBufferCount, w, h, kBackbufferFormat, scFlags), "ResizeBuffers")) {
         createRenderTargetViews();
         createDepthBuffer();
@@ -6498,7 +6498,7 @@ bool D3D12Device::uiInit(void* hwnd) {
     desc.device = device_.Get();
     desc.commandQueue = queue_.Get();
     // TWICE the frames in flight: ImGui's DX12 backend advances its vertex/index buffer ring once per
-    // render, and with frame generation a frame renders the UI twice (generated image, then real).
+    // render, and with frame interpolation a frame renders the UI twice (generated image, then real).
     desc.frameCount = kFrameCount * 2;
     desc.rtvFormat = kBackbufferFormat;
     if (!uiBackend_->init(hwnd, desc)) return false;

@@ -1,4 +1,4 @@
-﻿// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Aver RHI â€” the single render-hardware abstraction every GPU consumer targets. Backends
@@ -509,20 +509,20 @@ public:
     virtual void setUpscaler(IUpscaler* u) { (void)u; }
     virtual IUpscaler* upscaler() const { return nullptr; }
 
-    // ---- frame generation (docs/rendering/FRAME_INTERPOLATION.md) ----
-    // The generator is installed like the upscaler (non-owning, host-composed). setFrameGeneration
+    // ---- frame interpolation (docs/rendering/NEURAFI.md) ----
+    // The generator is installed like the upscaler (non-owning, host-composed). setFrameInterpolation
     // turns it on; the device then presents a generated frame before every real one whenever it can:
     // vsync on (the display's refresh is the only clock -- no measured timing schedules anything),
     // the G-buffer written (single-sample scene), and a valid previous frame. Off otherwise, silently
     // per frame and logged once per reason. Defaulted no-ops: a backend without it compiles unchanged.
-    virtual void setFrameGenerator(IFrameGenerator* g) { (void)g; }
-    virtual void setFrameGeneration(bool on) { (void)on; }
-    virtual bool frameGeneration() const { return false; }
+    virtual void setFrameInterpolator(IFrameInterpolator* g) { (void)g; }
+    virtual void setFrameInterpolation(bool on) { (void)on; }
+    virtual bool frameInterpolation() const { return false; }
     // Diagnostics: captures (screenshots, --frames) take the GENERATED image instead of the real one,
     // so the generator's output can be inspected. Off by default -- captures are real frames.
-    virtual void setFrameGenCaptureGenerated(bool on) { (void)on; }
+    virtual void setFrameInterpCaptureGenerated(bool on) { (void)on; }
     // True when the LAST endFrame presented a generated frame ahead of the real one.
-    virtual bool frameGenerated() const { return false; }
+    virtual bool frameInterpolated() const { return false; }
     // A discontinuity the next frame must not be interpolated across: level load, respawn, teleport,
     // pawn-to-camera. Resizes and render-scale changes are noted by the device itself.
     virtual void noteSceneCut() {}

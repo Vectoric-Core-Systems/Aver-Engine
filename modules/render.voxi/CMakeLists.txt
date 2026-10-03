@@ -24,7 +24,7 @@ set_target_properties(Aver.Render.Voxi PROPERTIES
 # RHI: giving the DLL above that dependency would put render-hardware types on the P/Invoke boundary.
 add_library(Aver.Render.Voxi.Renderer STATIC
   src/VoxiRenderer.cpp
-  src/RadianceCache.cpp
+  src/NeuRaC.cpp
   src/VoxiGiShaders.cpp)
 
 target_include_directories(Aver.Render.Voxi.Renderer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

@@ -44,18 +44,18 @@
 #define AVER_GI_SPLIT 0
 #endif
 
-// Radiance cache (RestirVisibility::Cached; docs/rendering/RADIANCE_CACHE.md): the scatter (training) and
+// Radiance cache (RestirVisibility::Cached; docs/rendering/NEURAC.md): the scatter (training) and
 // lookup (read) code below, and the three resources it uses (t22/u20/u21), exist ONLY in the four
 // lazily compiled staged-compute twin pipelines that define this to 1 (CSRdGi, CSRdGiTrace and their
 // checkerboard variants). Every other compile -- PSMainVoxi, the single-pass PSRayDriven, every plain CS
 // stage -- sees 0 and the preprocessed text is exactly what it was before the cache existed, so the
 // single-pass megakernel (at the AMD register limit, voxi_rt.hlsli rtGiShadowBits) and every cached DXIL
 // are untouched. Own macro rather than an ambient `#ifdef`, same convention as AVER_GI_CHECKERBOARD.
-#ifndef AVER_RADIANCE_CACHE
-#define AVER_RADIANCE_CACHE 0
+#ifndef AVER_NEURAC
+#define AVER_NEURAC 0
 #endif
-#if AVER_RADIANCE_CACHE && AVER_RD_SINGLE_PASS
-#error AVER_RADIANCE_CACHE is staged-compute only: the single-pass PSRayDriven is at the register limit
+#if AVER_NEURAC && AVER_RD_SINGLE_PASS
+#error AVER_NEURAC is staged-compute only: the single-pass PSRayDriven is at the register limit
 #endif
 
 // ================= ReSTIR GI (Settings::giMode == 1) =================
@@ -148,17 +148,17 @@ RWStructuredBuffer<RdGiCand> gRdGiCand : register(u17);
 // PSMainVoxi/PSRayDriven's non-split call sites and must not change.
 static uint gGiCandIdx = 0;
 
-#if AVER_RADIANCE_CACHE
-// ---- RADIANCE CACHE RESOURCES (twin pipelines only; see AVER_RADIANCE_CACHE above) ----
+#if AVER_NEURAC
+// ---- RADIANCE CACHE RESOURCES (twin pipelines only; see AVER_NEURAC above) ----
 // Order matters: the pure maths (structs RcInfo/RcCell, constants), then the three declarations, then
 // the io half that reads them. t22 is a CPU-written Upload ring slot (fixed GENERIC_READ); the
 // accumulator and the cells are UAV-only buffers, so the barrier-free staged lighting group needs no
 // state transition for them (cells are read through the UAV with plain loads rather than an SRV).
-#include "voxi_radiance_cache.hlsli"
+#include "voxi_neurac.hlsli"
 StructuredBuffer<RcInfo>   gRcInfo  : register(t22);
 RWStructuredBuffer<int>    gRcAccum : register(u20);
 RWStructuredBuffer<RcCell> gRcCells : register(u21);
-#include "voxi_radiance_cache_io.hlsli"
+#include "voxi_neurac_io.hlsli"
 #endif
 
 // A receiving surface: this pixel's (giRestirIndirect) or a reprojected previous-frame one
@@ -769,7 +769,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
             const float4 cone = traceCone(hitPos, s.N, AVER_VOX_INJECT_APERTURE);
             indY = min(cone.rgb, AVER_VOX_MAXRAD);
         } else indY = averSkyIrradiance(s.N) * gAmbient.r;
-#if AVER_RADIANCE_CACHE
+#if AVER_NEURAC
     } else if (f2Path == 4u) {
         // ---- CACHED: READ THE RADIANCE CACHE IN PLACE OF THE SECOND-BOUNCE RAY ----
         // Reached only by an untraced half-res pixel with a valid reconstruction while the cache is live
@@ -826,7 +826,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         // U1's half-res history (2.10 E) needs this path's own luminance, separately from the sky it
         // was compared against -- only reachable at f2Path == 3u, the one path that actually traced.
         // averShadowLum: this file's standing luminance reduction (Rec.709, voxi_rt.hlsli:1654).
-#if AVER_RADIANCE_CACHE
+#if AVER_NEURAC
         // Train the cache with this ray: one Monte Carlo sample of INCIDENT radiance at hitPos, in dir2,
         // cosine-sampled (pdf cos/PI, cos = c2). indY is final here (the clamp below it only guards the
         // reservoir). Every traced pixel trains, whichever visibility mode's branch got it here.
@@ -928,7 +928,7 @@ GiPathDecode giDecodePaths(float3 wpos, float3 N, float2 pixel, uint frameIdx) {
     uint f2Path = 3u, f3Path = 3u;
     if (visMode == 1u)                       { f2Path = 1u; f3Path = 1u; }
     if (halfBound && !tracedPx && rec.valid) { f2Path = 2u; f3Path = 2u; }   // no valid reconstruction: trace, as Full
-#if AVER_RADIANCE_CACHE
+#if AVER_NEURAC
     // Cached: the same untraced-with-a-valid-reconstruction pixels that take path 2 read the cache
     // instead (path 4); f3Path stays 2. rcCacheOn() is gAmbientParams.w bit 128, which the CPU packs
     // with wire mode 2 (HalfResolution), so halfBound/tracedPx/rec.valid are the HalfResolution decisions.
@@ -1671,7 +1671,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     if (gGiRestirParams.w <= 0.5 && ((uint)gAmbientParams.w & 64u) != 0u) {
         if (f2Path == 0u) return float3(1.0, 1.0, 0.0);                 // YELLOW: no ray (mode 0 or legacy bit 4)
         if (f2Path == 1u) return float3(0.0, 1.0, 0.0);                 // GREEN: reconstructed (voxel cone)
-#if AVER_RADIANCE_CACHE
+#if AVER_NEURAC
         // MAGENTA: radiance-cache read, brightness = the lookup's confidence (gRcLastConf). Only the twin
         // compiles can paint it; the AVER_GI_SPLIT CSRdGi has no twin and paints these pixels BLUE.
         if (f2Path == 4u) return float3(1.0, 0.0, 1.0) * (0.25 + 0.75 * gRcLastConf);

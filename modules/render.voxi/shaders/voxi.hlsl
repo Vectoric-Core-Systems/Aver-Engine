@@ -144,7 +144,7 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //          turns reuse off and resolves each pixel from its fresh candidate.
     //   bit 128 radiance cache live this frame (RestirVisibility::Cached). The CPU packs Cached as wire
     //          mode 2 (HalfResolution) PLUS this bit, because bits 0-1 cannot hold a value of 4. Only the
-    //          four AVER_RADIANCE_CACHE twin compiles (staged CSRdGi/CSRdGiTrace, voxi_restir.hlsli) read it:
+    //          four AVER_NEURAC twin compiles (staged CSRdGi/CSRdGiTrace, voxi_restir.hlsli) read it:
     //          giDecodePaths then sends untraced half-res pixels to f2Path 4 (cache read) and the traced
     //          pixels scatter into the cache. Every other compile ignores it, i.e. behaves as HalfResolution.
     float4   gAmbientParams;
@@ -1718,7 +1718,7 @@ float2 averGBufferVelocityMoved(float3 wpos, float3 wposPrev) {
 // Camera-only motion: the surface is taken to have stayed where it is (wposPrev == wpos). PSMainVoxi
 // (raster) uses this and ONLY this: RASTER REMAINS STATIC-ONLY, a moving mesh drawn by the raster path
 // still gets camera-only motion. The per-draw root constants have no room for a previous world matrix
-// (docs/rendering/FRAME_INTERPOLATION.md section 4). The ray-driven path, the default, reads
+// (docs/rendering/NEURAFI.md section 4). The ray-driven path, the default, reads
 // RtInstance::prevObjectToWorld instead (PSRayDriven via averGBufferVelocityMoved), and the sky has
 // averGBufferVelocitySky below.
 float2 averGBufferVelocity(float3 wpos) {

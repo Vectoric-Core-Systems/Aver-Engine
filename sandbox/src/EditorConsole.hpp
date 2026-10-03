@@ -576,7 +576,7 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     // a failed prerequisite would read "no ray" while no ReSTIR runs at all), so raw and effective
     // always agree here, unlike voxi.refractionMode's, and reading raw skips the extra resolve() call.
     t.push_back({"voxi.giRestirVisibility", VarType::U32, false,
-        "0 no ray (pre-fix, over-bright), 1 reconstructed (no ray), 2 half resolution, 3 full, 4 cached (radiance cache; staged D3D12 only, else acts as half). Only "
+        "0 no ray (pre-fix, over-bright), 1 reconstructed (no ray), 2 half resolution, 3 full, 4 cached (NeuRaC; staged D3D12 only, else acts as half). Only "
         "applies when voxi.giMode resolves to 1. voxi.legacyRestirHitSky / "
         "voxi.legacyRestirReuseVisibility, when on, force 'no ray' for their own ray regardless of "
         "this.",

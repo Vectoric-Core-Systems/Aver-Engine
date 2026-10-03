@@ -301,7 +301,7 @@ int main() {
         dl.addRect(0, 0, 10, 10, 0xFFFFFFFF);
         r->submit(dl);
 
-        // Five deep: two frames in flight, two overlay passes each with frame generation on, one spare.
+        // Five deep: two frames in flight, two overlay passes each with frame interpolation on, one spare.
         u32 seen[6] = {};
         for (int i = 0; i < 6; ++i) {
             MockContext ctx;

@@ -1,9 +1,9 @@
-// RadianceCacheLayout -- every constant, struct layout and bit-packing rule of the Voxi radiance cache
-// (docs/rendering/RADIANCE_CACHE.md), in ONE header-only place.
+// NeuRaCLayout -- every constant, struct layout and bit-packing rule of the Voxi radiance cache
+// (docs/rendering/NEURAC.md), in ONE header-only place.
 //
 // WHY A HEADER OF ITS OWN, AND WHY IT DEPENDS ON NOTHING BUT Types.hpp: three parties must agree
-// byte for byte -- RadianceCache.cpp (buffer sizes, the RcInfo it writes), voxi_radiance_cache*.hlsli /
-// voxi_radiance_cache_resolve.hlsl (the cell layout they read and write), and RadianceCacheTest (which
+// byte for byte -- NeuRaC.cpp (buffer sizes, the RcInfo it writes), voxi_neurac*.hlsli /
+// voxi_neurac_resolve.hlsl (the cell layout they read and write), and NeuRaCTest (which
 // runs the arithmetic on the CPU with no GPU, linking Aver.Core alone, exactly like GiVisibilityTest).
 // HLSL cannot include a C++ header, so the HLSL mirrors the AVER_RC_* numbers as #defines and the test
 // greps those literals against the constants here; a number that drifts on either side fails a test
@@ -23,7 +23,7 @@
 #include <cmath>
 #include <cstring>
 
-namespace aver::voxi::radiancecache {
+namespace aver::voxi::neurac {
 
 // ---------------------------------------------------------------- geometry
 inline constexpr u32 kCascades         = 3;
@@ -249,4 +249,4 @@ inline void unpackNormal(u32 w, f32 dir[3], f32& len) {
     dir[0] = x / l; dir[1] = y / l; dir[2] = z / l;
 }
 
-}  // namespace aver::voxi::radiancecache
+}  // namespace aver::voxi::neurac

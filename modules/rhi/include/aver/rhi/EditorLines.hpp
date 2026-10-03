@@ -92,7 +92,7 @@ public:
     //     every line then draws on top.
     // Pipelines are (re)built lazily when targetFormat or depthSamples change.
     //
-    // A frame with frame generation on presents TWO images and replays the same queue onto both:
+    // A frame with frame interpolation on presents TWO images and replays the same queue onto both:
     // `firstOfFrame` false on the second replay skips the retire tick (which counts FRAMES -- ticking
     // twice would recycle a buffer the GPU may still be reading), and `lastOfFrame` false on the first
     // keeps the queue for the second. The defaults are the one-replay frame.

@@ -1111,7 +1111,7 @@ public:
 };
 
 // ---------------------------------------------------------------------------------------------
-// Frame generation (docs/rendering/FRAME_INTERPOLATION.md): one frame generated BETWEEN every two real
+// Frame interpolation (docs/rendering/NEURAFI.md): one frame generated BETWEEN every two real
 // frames. The device owns presentation (two back buffers per real frame, generated first); the
 // generator owns the image. Declared like IUpscaler -- the device holds a non-owning pointer the host
 // installs, so Aver.RHI never links an implementation.
@@ -1119,7 +1119,7 @@ public:
 // One real frame handed to the generator. All three are scene-resolution and describe the frame JUST
 // rendered (frame N). Motion follows IDevice::gBufferVelocityTexture's convention exactly: texels per
 // frame, destination minus source, so (x,y) - v is where the surface at (x,y) was in frame N-1.
-struct FrameGenInput {
+struct FrameInterpInput {
     TextureHandle color    = 0;   // HDR scene colour, in ShaderResource
     TextureHandle velocity = 0;   // RG16F texel motion, in RenderTarget (the G-buffer's resting state)
     TextureHandle viewZ    = 0;   // R32F linear view depth, in RenderTarget
@@ -1129,9 +1129,9 @@ struct FrameGenInput {
     bool sceneCut = false;
 };
 
-class IFrameGenerator {
+class IFrameInterpolator {
 public:
-    virtual ~IFrameGenerator() = default;
+    virtual ~IFrameInterpolator() = default;
     virtual const char* name() const = 0;
 
     // Records the generation of the frame half-way between the PREVIOUS real frame and `in`, then
@@ -1140,7 +1140,7 @@ public:
     // no valid previous frame (the first frame, after a cut or a size change) -- the caller then
     // presents the real frame alone. Leaves the velocity/viewZ textures in RenderTarget. Binds its own
     // pipelines and sets; the caller restores whatever it needs afterwards.
-    virtual TextureHandle generate(IRenderContext& ctx, const FrameGenInput& in) = 0;
+    virtual TextureHandle generate(IRenderContext& ctx, const FrameInterpInput& in) = 0;
 
     // Forgets the previous frame (the next generate() returns 0).
     virtual void reset() = 0;

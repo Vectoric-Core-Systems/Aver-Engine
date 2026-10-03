@@ -105,9 +105,11 @@ void SandboxApp::loadEditorPreferences() {
 
     if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
         prefsDevice_->setVSync(prefBool("display.vsync", prefsDevice_->vsync()));
-    frameGenWhileEditing_ = prefBool("display.frameGenWhileEditing", false);
-    frameGenTrajectory_ = prefInt("display.frameGenTrajectory", 0);
-    frameGenTrain_ = prefBool("display.frameGenTrain", false);
+    frameInterpWhileEditing_ = prefBool("display.frameInterpWhileEditing", false);
+    // Default Learned: the engine ships trained weights, and the gate falls back to the quadratic
+    // wherever the network was not measured to beat it.
+    frameInterpTrajectory_ = prefInt("display.frameInterpTrajectory", 2);
+    frameInterpTrain_ = prefBool("display.frameInterpTrain", false);
     // A stored render scale applies behind a crash cookie: applying one below 1 can lose the GPU
     // device -- a persisted setting that kills the device at startup is a trap with no way out
     // from inside the editor; one evening was lost after the AverSR combo persisted a 0.67 that
@@ -336,39 +338,39 @@ void SandboxApp::buildEditorPrefs() {
         ImGui::SameLine();
         ImGui::TextDisabled(vs ? "(capped to the refresh rate)" : "(uncapped, may tear)");
 
-        // Frame generation while editing (docs/rendering/FRAME_INTERPOLATION.md, decision 8). Play
-        // follows the project's Frame generation setting instead; --frame-gen outranks both.
-        ImGui::Checkbox("Frame generation in viewport while editing", &frameGenWhileEditing_);
+        // Frame interpolation while editing (docs/rendering/NEURAFI.md, decision 8). Play
+        // follows the project's Frame interpolation setting instead; --frame-interp outranks both.
+        ImGui::Checkbox("Frame interpolation in viewport while editing", &frameInterpWhileEditing_);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Shows a generated frame between every two rendered ones: twice the frames\n"
                               "on screen for the same rendering work, at about half a frame of extra delay.\n"
                               "Needs V-Sync on and 1x anti-aliasing. Play uses the project's setting instead.");
-        if (frameGenWhileEditing_ && prefsDevice_) {
+        if (frameInterpWhileEditing_ && prefsDevice_) {
             ImGui::SameLine();
             ImGui::TextDisabled(!prefsDevice_->vsync()       ? "(paused: needs V-Sync)"
                                 : prefsDevice_->sampleCount() > 1 ? "(paused: needs 1x anti-aliasing)"
-                                : prefsDevice_->frameGenerated() ? "(running)"
+                                : prefsDevice_->frameInterpolated() ? "(running)"
                                                                  : "(starting)");
         }
 
-        // The path the in-between frame's pixels are gathered along (FRAME_INTERPOLATION.md §3.5).
-        static const char* kPaths[] = {"Straight lines", "Quadratic (procedural)", "Learned (neural)"};
-        int path = frameGenTrajectory_ < 0 ? 0 : (frameGenTrajectory_ > 2 ? 2 : frameGenTrajectory_);
-        if (ImGui::Combo("Frame generation path", &path, kPaths, 3)) frameGenTrajectory_ = path;
+        // The path the in-between frame's pixels are gathered along (NEURAFI.md §3.5).
+        static const char* kPaths[] = {"Straight lines", "Quadratic (procedural)", "Learned (NeuraFI)"};
+        int path = frameInterpTrajectory_ < 0 ? 0 : (frameInterpTrajectory_ > 2 ? 2 : frameInterpTrajectory_);
+        if (ImGui::Combo("Frame interpolation path", &path, kPaths, 3)) frameInterpTrajectory_ = path;
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("How a pixel is followed between two rendered frames. Straight lines: constant\n"
                               "motion. Quadratic: bends with the last two frames' motion (exact for steady\n"
                               "acceleration). Learned: a small network predicts the bend; it uses the\n"
                               "quadratic until it has trained. Applies while editing and in Play.");
-        ImGui::Checkbox("Train the learned path while frame generation runs", &frameGenTrain_);
+        ImGui::Checkbox("Train NeuraFI while frame interpolation runs", &frameInterpTrain_);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Learns from the frames you are already rendering: about 0.5 ms a frame while on.\n"
                               "Progress is saved every 500 steps beside the editor's settings and kept\n"
                               "between sessions; learning slows down as it accumulates, so leave it on as\n"
                               "long as you like.");
-        if (frameGenerator_ && (frameGenTrain_ || frameGenTrajectoryCli_ == 2 || frameGenTrajectory_ == 2)) {
-            const framegen::ProceduralFrameGenerator::TrainingStatus st = frameGenerator_->trainingStatus();
-            ImGui::TextDisabled("Learned path: %llu steps (learning rate %.1e), %s",
+        if (frameInterpolator_ && (frameInterpTrain_ || frameInterpTrajectoryCli_ == 2 || frameInterpTrajectory_ == 2)) {
+            const neurafi::NeuraFI::TrainingStatus st = frameInterpolator_->trainingStatus();
+            ImGui::TextDisabled("NeuraFI: %llu steps (learning rate %.1e), %s",
                                 static_cast<unsigned long long>(st.lifetimeSteps), st.learningRate,
                                 st.networkInUse ? "in use"
                                 : st.evaluated && !st.networkBeatsQuadratic ? "quadratic stands in (it is still better)"
@@ -1302,19 +1304,19 @@ void SandboxApp::buildRenderingSettings(int page) {
         }
 #endif
 
-        // RENDER.FRAMEGEN: frame generation during Play and in the packaged game. Edited on project_
+        // RENDER.FRAMEINTERP: frame interpolation during Play and in the packaged game. Edited on project_
         // directly (like AVERSR it is device-level, outside the Voxi settings this page mostly mirrors);
-        // editing uses the Editor Preference instead, and --frame-gen outranks both.
+        // editing uses the Editor Preference instead, and --frame-interp outranks both.
         {
-            bool fg = project_.frameGen == 1;
-            if (ImGui::Checkbox("Frame generation (Play and packaged game)", &fg)) {
-                project_.frameGen = fg ? 1 : 0;
+            bool fg = project_.frameInterp == 1;
+            if (ImGui::Checkbox("Frame interpolation (Play and packaged game)", &fg)) {
+                project_.frameInterp = fg ? 1 : 0;
                 projectDirty_ = true;
             }
-            uiReg_.track("project.frameGen");
+            uiReg_.track("project.frameInterp");
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Generates a frame between every two rendered ones (procedural frame "
-                                  "interpolation). Round-trips as RENDER.FRAMEGEN. Needs V-Sync and 1x "
+                                  "interpolation). Round-trips as RENDER.FRAMEINTERP. Needs V-Sync and 1x "
                                   "anti-aliasing; the viewport while editing has its own Editor Preference.");
         }
 
@@ -1756,7 +1758,7 @@ void SandboxApp::buildRenderingSettings(int page) {
         ImGui::BeginDisabled(visGreyed);
         int vis = static_cast<int>(er.giRestirVisibility.requested);
         if (ImGui::Combo("ReSTIR visibility rays", &vis,
-            "No ray (pre-fix, over-bright)\0Reconstructed (no ray)\0Half resolution\0Full\0Cached (radiance cache)\0")) {
+            "No ray (pre-fix, over-bright)\0Reconstructed (no ray)\0Half resolution\0Full\0Cached (NeuRaC)\0")) {
             s.giRestirVisibility = static_cast<u32>(vis); changed = true;
         }
         ImGui::EndDisabled();
@@ -1766,7 +1768,7 @@ void SandboxApp::buildRenderingSettings(int page) {
                               "reflection rays this estimator already traces (cost UNMEASURED):\n"
                               "  Full           up to 2 (F2 is the expensive one)\n"
                               "  Cached         the Half ray budget, but those rays also train a\n"
-                              "                 world-space radiance cache that the untraced pixels\n"
+                              "                 world-space radiance cache (NeuRaC) that the untraced pixels\n"
                               "                 read (staged ray-driven on D3D12 only; elsewhere\n"
                               "                 it runs as Half; UNVERIFIED)\n"
                               "  Half           up to 0.5 at rest, plus Full on pixels with no\n"
@@ -2411,9 +2413,9 @@ void SandboxApp::saveEditorPreferences() {
     if (maxFrames_ == 0) {
         if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
             setPrefBool("display.vsync", prefsDevice_->vsync());
-        setPrefBool("display.frameGenWhileEditing", frameGenWhileEditing_);
-        setPrefInt("display.frameGenTrajectory", frameGenTrajectory_);
-        setPrefBool("display.frameGenTrain", frameGenTrain_);
+        setPrefBool("display.frameInterpWhileEditing", frameInterpWhileEditing_);
+        setPrefInt("display.frameInterpTrajectory", frameInterpTrajectory_);
+        setPrefBool("display.frameInterpTrain", frameInterpTrain_);
         // The three AverSR keys below are skipped outright, not written a neutral value, when the
         // command line drove this session's render scale or AverSR level: an interactive `--aversr
         // quality` run has maxFrames_ == 0 too (it is not a --frames capture), so the outer guard

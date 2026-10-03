@@ -492,15 +492,15 @@ GameConfig parseArgs(int argc, char** argv) {
             else if (v && equalsAsciiCI(v, "performance")) { c.averSrArg = 3;  ++i; }
             else if (v && equalsAsciiCI(v, "auto"))        { c.averSrArg = -1; ++i; }
         }
-        // --frame-gen 0|1: frame interpolation on/off over the project's RENDER.FRAMEGEN.
-        else if (std::strcmp(a, "--frame-gen") == 0) {
+        // --frame-interp 0|1: frame interpolation on/off over the project's RENDER.FRAMEINTERP.
+        else if (std::strcmp(a, "--frame-interp") == 0) {
             const char* v = valueAfter(argc, argv, i, nullptr);
-            if (v) { c.frameGenArg = std::atoi(v) != 0 ? 1 : 0; ++i; }
+            if (v) { c.frameInterpArg = std::atoi(v) != 0 ? 1 : 0; ++i; }
         }
-        else if (std::strcmp(a, "--frame-gen-trajectory") == 0) {
+        else if (std::strcmp(a, "--frame-interp-trajectory") == 0) {
             const char* v = valueAfter(argc, argv, i, nullptr);
             if (v) {
-                c.frameGenTrajectory = equalsAsciiCI(v, "quadratic") ? 1 : equalsAsciiCI(v, "neural") ? 2 : 0;
+                c.frameInterpTrajectory = equalsAsciiCI(v, "quadratic") ? 1 : equalsAsciiCI(v, "neural") ? 2 : 0;
                 ++i;
             }
         }
@@ -1906,25 +1906,27 @@ void GameApp::pushFrame(Engine& e) {
         // onUpdate pattern (:3865-3882 there): the G-buffer switch reads resolve()'s
         // denoiserGBufferWanted (see RenderSettingsResolver.hpp), and the MSAA push is the one-shot
         // consumeMsaaDirty() flag.
-        // Frame interpolation: --frame-gen over RENDER.FRAMEGEN. It reads motion and depth from the
+        // Frame interpolation: --frame-interp over RENDER.FRAMEINTERP. It reads motion and depth from the
         // G-buffer, so wanting it turns that on too; the device pauses it (and says why once) when
         // vsync or 1x anti-aliasing is missing.
-        bool wantFrameGen = cfg_.frameGenArg >= 0 ? cfg_.frameGenArg == 1 : project_.frameGen == 1;
-        if (wantFrameGen && !frameGenerator_) {
+        bool wantFrameInterp = cfg_.frameInterpArg >= 0 ? cfg_.frameInterpArg == 1 : project_.frameInterp == 1;
+        if (wantFrameInterp && !frameInterpolator_) {
             if (dev->resources()) {
-                auto fg = std::make_unique<framegen::ProceduralFrameGenerator>(*dev);
-                // The trajectory: --frame-gen-trajectory; Neural reads trained weights from the same
-                // per-machine file the editor trains into (it keeps the analytic path until it has some).
-                fg->setTrajectory(static_cast<framegen::Trajectory>(cfg_.frameGenTrajectory));
-                fg->setWeightsPath(userDataDir() + "\\framegen_trajectory.avnn");
-                frameGenerator_ = std::move(fg);
-                dev->setFrameGenerator(frameGenerator_.get());
+                auto fg = std::make_unique<neurafi::NeuraFI>(*dev);
+                // The trajectory: --frame-interp-trajectory; Neural reads the per-machine file the editor
+                // trains into, else the weights shipped in bin/data.
+                fg->setTrajectory(static_cast<neurafi::Trajectory>(cfg_.frameInterpTrajectory));
+                fg->setWeightsPath(userDataDir() + "\\" + neurafi::NeuraFI::kWeightsFileName);
+                fg->setShippedWeightsPath(executableDir() + "\\data\\" +
+                                          neurafi::NeuraFI::kWeightsFileName);
+                frameInterpolator_ = std::move(fg);
+                dev->setFrameInterpolator(frameInterpolator_.get());
             } else {
-                wantFrameGen = false;
+                wantFrameInterp = false;
             }
         }
-        dev->setFrameGeneration(wantFrameGen);
-        dev->setGBufferEnabled(voxi::resolve(vx.settings(), vx.deviceInfo()).denoiserGBufferWanted || wantFrameGen);
+        dev->setFrameInterpolation(wantFrameInterp);
+        dev->setGBufferEnabled(voxi::resolve(vx.settings(), vx.deviceInfo()).denoiserGBufferWanted || wantFrameInterp);
         if (vx.consumeMsaaDirty()) dev->setSampleCount(static_cast<u32>(vx.settings().msaa));
 
         // The volume the editor would be showing, pushed every frame exactly as the editor does
@@ -2593,8 +2595,8 @@ void GameApp::onShutdown(Engine& e) {
     if (dev) dev->setUpscaler(nullptr);
     averSrUpscaler_.reset();
     // The frame generator: same detach-then-destroy order, same reason.
-    if (dev) { dev->setFrameGeneration(false); dev->setFrameGenerator(nullptr); }
-    frameGenerator_.reset();
+    if (dev) { dev->setFrameInterpolation(false); dev->setFrameInterpolator(nullptr); }
+    frameInterpolator_.reset();
     if (dev && pcgAttached_) { dev->removeRenderFeature(&pcgVolume_); pcgAttached_ = false; }
     pcgVolume_.shutdown();
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE

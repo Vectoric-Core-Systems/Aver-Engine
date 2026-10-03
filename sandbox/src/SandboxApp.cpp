@@ -2593,9 +2593,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #else
     const bool wantGbufForDenoiser = false;
 #endif
-    // Frame generation reads motion and depth from the G-buffer -- the fourth reason it exists.
-    const bool wantGbufForFrameGen = updateFrameGeneration(e.device());
-    e.device()->setGBufferEnabled(gbufferOverride_ || wantGbufForDenoiser || wantGbufForFrameGen ||
+    // Frame interpolation reads motion and depth from the G-buffer -- the fourth reason it exists.
+    const bool wantGbufForFrameInterp = updateFrameInterpolation(e.device());
+    e.device()->setGBufferEnabled(gbufferOverride_ || wantGbufForDenoiser || wantGbufForFrameInterp ||
                                   gbufferDebugView_ != GBufferDebugFeature::Mode::Off);
     gbufferDebugFeature_.setDevice(e.device());
     // vpX_/vpY_/vpW_/vpH_: this frame's 3D-viewport rect (buildViewportOverlay), a frame stale at
@@ -2962,9 +2962,9 @@ editor::shutdownAnimEditors();
     edgeAaUpscaler_.reset();
 #endif
     // Same order as the upscaler, same reason: the device's raw pointer first, then the object.
-    e.device()->setFrameGeneration(false);
-    e.device()->setFrameGenerator(nullptr);
-    frameGenerator_.reset();
+    e.device()->setFrameInterpolation(false);
+    e.device()->setFrameInterpolator(nullptr);
+    frameInterpolator_.reset();
     if (gameUi_) {
         e.device()->removeRenderFeature(gameUi_);
         delete gameUi_;
@@ -3048,38 +3048,42 @@ editor::shutdownAnimEditors();
 
 void SandboxApp::setVSyncOff(bool off) { vsyncOffRequested_ = off; }
 
-// Frame generation's on/off for this frame (docs/rendering/FRAME_INTERPOLATION.md, decision 8):
-// --frame-gen wins; otherwise Play follows the project's RENDER.FRAMEGEN and editing follows the
+// Frame interpolation's on/off for this frame (docs/rendering/NEURAFI.md, decision 8):
+// --frame-interp wins; otherwise Play follows the project's RENDER.FRAMEINTERP and editing follows the
 // Editor Preference. The device still declines frame by frame when it cannot run (vsync off, MSAA,
 // no G-buffer yet) and says why once.
-bool SandboxApp::updateFrameGeneration(rhi::IDevice* dev) {
+bool SandboxApp::updateFrameInterpolation(rhi::IDevice* dev) {
     if (!dev) return false;
 #if AVER_MODULE_FRAMEWORK
     const bool playing = anyPlayActive();
 #else
     const bool playing = false;
 #endif
-    bool want = frameGenCli_ >= 0 ? frameGenCli_ >= 1
-              : playing           ? project_.frameGen == 1
-                                  : frameGenWhileEditing_;
-    dev->setFrameGenCaptureGenerated(frameGenCli_ == 2);
-    if (want && !frameGenerator_) {
+    bool want = frameInterpCli_ >= 0 ? frameInterpCli_ >= 1
+              : playing           ? project_.frameInterp == 1
+                                  : frameInterpWhileEditing_;
+    dev->setFrameInterpCaptureGenerated(frameInterpCli_ == 2);
+    if (want && !frameInterpolator_) {
         if (dev->resources()) {
-            frameGenerator_ = std::make_unique<framegen::ProceduralFrameGenerator>(*dev);
-            // Trained trajectory weights live beside editor.ini: per machine, shared by every project.
+            frameInterpolator_ = std::make_unique<neurafi::NeuraFI>(*dev);
+            // Trained trajectory weights: the user's own beside editor.ini (per machine, shared by every
+            // project), else the ones shipped in bin/data.
             const std::string dir = aver::userDataDir();
-            if (!dir.empty()) frameGenerator_->setWeightsPath(dir + "\\framegen_trajectory.avnn");
-            dev->setFrameGenerator(frameGenerator_.get());
+            if (!dir.empty())
+                frameInterpolator_->setWeightsPath(dir + "\\" + neurafi::NeuraFI::kWeightsFileName);
+            frameInterpolator_->setShippedWeightsPath(aver::executableDir() + "\\data\\" +
+                                                   neurafi::NeuraFI::kWeightsFileName);
+            dev->setFrameInterpolator(frameInterpolator_.get());
         } else {
             want = false;
         }
     }
-    if (frameGenerator_) {
-        const int traj = frameGenTrajectoryCli_ >= 0 ? frameGenTrajectoryCli_ : frameGenTrajectory_;
-        frameGenerator_->setTrajectory(static_cast<framegen::Trajectory>(traj < 0 ? 0 : (traj > 2 ? 2 : traj)));
-        frameGenerator_->setTraining(frameGenTrainCli_ || frameGenTrain_);
+    if (frameInterpolator_) {
+        const int traj = frameInterpTrajectoryCli_ >= 0 ? frameInterpTrajectoryCli_ : frameInterpTrajectory_;
+        frameInterpolator_->setTrajectory(static_cast<neurafi::Trajectory>(traj < 0 ? 0 : (traj > 2 ? 2 : traj)));
+        frameInterpolator_->setTraining(frameInterpTrainCli_ || frameInterpTrain_);
     }
-    dev->setFrameGeneration(want);
+    dev->setFrameInterpolation(want);
     return want;
 }
 

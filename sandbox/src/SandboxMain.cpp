@@ -86,10 +86,10 @@ Application* createApplication(int argc, char** argv) {
     // --resize-cycle N: resize the real window every N frames of a bounded run. Verification-only; it
     // reproduces a real crash -- see SandboxApp::resizeCheck() for which one and why nothing else could.
     int resizeCycleArg = 0;
-    int frameGenArg = -1;   // --frame-gen 0|1|2; -1 = not given (project / Editor Preference decide)
+    int frameInterpArg = -1;   // --frame-interp 0|1|2; -1 = not given (project / Editor Preference decide)
     bool vsyncOn = false;   // --vsync
-    int frameGenTrajectory = -1;  // --frame-gen-trajectory: 0 linear, 1 quadratic, 2 neural; -1 = not given
-    bool frameGenTrain = false;   // --frame-gen-train
+    int frameInterpTrajectory = -1;  // --frame-interp-trajectory: 0 linear, 1 quadratic, 2 neural; -1 = not given
+    bool frameInterpTrain = false;   // --frame-interp-train
     int pieCamArg = 0;
     int inputStuckArg = 0;
     int inputSourceArg = 0;
@@ -831,19 +831,19 @@ Application* createApplication(int argc, char** argv) {
         // as a string, parsed below, so a build with the module compiled out still recognises the flag
         // and explains why it did nothing rather than erroring as unknown.
         else if (!std::strcmp(argv[i],"--aversr") && i+1<argc) aversrArg=argv[++i];
-        // --frame-gen 0|1|2: frame interpolation off / on for the whole session, over the project's
-        // RENDER.FRAMEGEN and the Editor Preference (docs/rendering/FRAME_INTERPOLATION.md). 2 = on,
+        // --frame-interp 0|1|2: frame interpolation off / on for the whole session, over the project's
+        // RENDER.FRAMEINTERP and the Editor Preference (docs/rendering/NEURAFI.md). 2 = on,
         // and captures (--shot, --frames) take the GENERATED image, for inspecting the generator.
         // Needs vsync and 1x anti-aliasing; the device logs why when it cannot run.
-        else if (!std::strcmp(argv[i],"--frame-gen") && i+1<argc) { const int v=std::atoi(argv[++i]); frameGenArg = v < 0 ? 0 : (v > 2 ? 2 : v); }
-        // --frame-gen-trajectory linear|quadratic|neural: the path the gather follows (FRAME_INTERPOLATION.md
-        // §3.5). --frame-gen-train: train the trajectory network in-engine while frame generation runs,
-        // saving to framegen_trajectory.avnn beside editor.ini.
-        else if (!std::strcmp(argv[i],"--frame-gen-trajectory") && i+1<argc) {
+        else if (!std::strcmp(argv[i],"--frame-interp") && i+1<argc) { const int v=std::atoi(argv[++i]); frameInterpArg = v < 0 ? 0 : (v > 2 ? 2 : v); }
+        // --frame-interp-trajectory linear|quadratic|neural: the path the gather follows (NEURAFI.md
+        // §3.5). --frame-interp-train: train the trajectory network in-engine while frame interpolation runs,
+        // saving to neurafi_v2.avnn beside editor.ini.
+        else if (!std::strcmp(argv[i],"--frame-interp-trajectory") && i+1<argc) {
             const char* t = argv[++i];
-            frameGenTrajectory = !std::strcmp(t,"quadratic") ? 1 : !std::strcmp(t,"neural") ? 2 : 0;
+            frameInterpTrajectory = !std::strcmp(t,"quadratic") ? 1 : !std::strcmp(t,"neural") ? 2 : 0;
         }
-        else if (!std::strcmp(argv[i],"--frame-gen-train")) frameGenTrain=true;
+        else if (!std::strcmp(argv[i],"--frame-interp-train")) frameInterpTrain=true;
         // --depth-prepass: same-frame depth-only pass ahead of the opaque colour walk, so an occluded
         // fragment skips PSMainVoxi's shadow lookup/cone trace/fog entirely (setDepthPrepassOverride).
         // Unset reproduces pre-existing behaviour exactly.
@@ -1463,8 +1463,8 @@ Application* createApplication(int argc, char** argv) {
 #if AVER_MODULE_SR
     if (aversrCycle > 0) app->setAverSrCycleAuto(aversrCycle);
     if (resizeCycleArg > 0) app->setResizeCycle(resizeCycleArg);
-    if (frameGenArg >= 0) app->setFrameGenCli(frameGenArg);
-    app->setFrameGenTrajectory(frameGenTrajectory, frameGenTrain);
+    if (frameInterpArg >= 0) app->setFrameInterpCli(frameInterpArg);
+    app->setFrameInterpTrajectory(frameInterpTrajectory, frameInterpTrain);
     if (gpuTimingArg) app->setGpuTiming(true);
     if (pieCamArg > 0) app->setPieCameraTest(pieCamArg);
     if (inputStuckArg > 0) app->setInputStuckTest(inputStuckArg);
