@@ -505,6 +505,61 @@ int main() {
     check(std::strcmp(disableReasonText(DisableReason::RequiresRestirGi), "Unavailable.") != 0,
           "disableReasonText(RequiresRestirGi) is its own sentence, not the generic fallback");
 
+    // Radiance cache stage 1: RestirVisibility::Cached = 4 is a legal value (passes through), 5 and up
+    // clamp to Full (3) rather than to Cached, and its only prerequisite beyond ReSTIR GI itself is a
+    // SOFT one -- staged ray-driven primary visibility on D3D12 -- that warns and never greys.
+    {
+        Settings s{};
+        s.globalIllumination = Quality::Medium;
+        s.rayTracing = Quality::Medium;
+        s.giMode = 1;
+        s.giRestirVisibility = 4;
+        s.rtRenderMode = 1;
+        s.rayDrivenStages = 2;
+        const Resolution r = resolve(s, fullDevice());
+        check(r.giRestirVisibility.requested == 4 && r.giRestirVisibility.effective == 4,
+              "giRestirVisibility 4 (Cached) passes through resolve() unclamped, requested == effective");
+        check(r.giRestirVisibility.reason == DisableReason::None,
+              "Cached has no reason with ReSTIR GI on, staged ray-driven primary visibility and a D3D12 device");
+    }
+    {
+        Settings s{};
+        s.globalIllumination = Quality::Medium;
+        s.rayTracing = Quality::Medium;
+        s.giMode = 1;
+        s.giRestirVisibility = 4;
+        s.rtRenderMode = 1;
+        s.rayDrivenStages = 0;   // single-pass ray-driven: the cache code is not compiled there
+        Resolution r = resolve(s, fullDevice());
+        check(r.giRestirVisibility.reason == DisableReason::RequiresStagedRayDriven,
+              "Cached with rayDrivenStages 0 reads RequiresStagedRayDriven");
+        check(r.giRestirVisibility.effective == r.giRestirVisibility.requested,
+              "...and effective still equals requested (the field's standing rule)");
+        check(!greysControl(r.giRestirVisibility.reason),
+              "RequiresStagedRayDriven is SOFT: it warns, it does not grey the combo");
+        s.rayDrivenStages = 2;
+        s.rtRenderMode = 0;      // raster primary
+        check(resolve(s, fullDevice()).giRestirVisibility.reason == DisableReason::RequiresStagedRayDriven,
+              "Cached with raster primary visibility (rtRenderMode 0) reads RequiresStagedRayDriven");
+        s.rtRenderMode = 1;
+        DeviceInfo notD3d12 = fullDevice();
+        notD3d12.denoiserSupported = false;   // the D3D12 test (DeviceInfo::denoiserSupported)
+        check(resolve(s, notD3d12).giRestirVisibility.reason == DisableReason::RequiresStagedRayDriven,
+              "Cached on a non-D3D12 device reads RequiresStagedRayDriven");
+        s.giRestirVisibility = 2;
+        s.rayDrivenStages = 0;
+        check(resolve(s, fullDevice()).giRestirVisibility.reason == DisableReason::None,
+              "the soft reason is Cached-only: Half resolution with the same staged setting has no reason");
+    }
+    {
+        Settings s{};
+        s.giRestirVisibility = 5;
+        check(resolve(s, fullDevice()).giRestirVisibility.requested == 3,
+              "resolve() clamps giRestirVisibility 5 (one past Cached) to 3 (Full), not to Cached");
+    }
+    check(std::strcmp(disableReasonText(DisableReason::RequiresStagedRayDriven), "Unavailable.") != 0,
+          "disableReasonText(RequiresStagedRayDriven) is its own sentence, not the generic fallback");
+
     // giRestirMaxHistory's own Project Settings control sits directly under giRestirVisibility's and
     // borrows its exact reason chain (RenderSettingsResolver.hpp's resolve()) rather than computing a
     // fresh one -- these three cases mirror the three immediately above, field-for-field, proving the
@@ -612,6 +667,14 @@ int main() {
         Renderer::get().setSettings(s);
         check(Renderer::get().settings().giRestirVisibility == 3,
               "giRestirVisibility 9 (garbage) clamps to 3 (Full), never to 0 (NoRay)");
+        s.giRestirVisibility = 4;
+        Renderer::get().setSettings(s);
+        check(Renderer::get().settings().giRestirVisibility == 4,
+              "giRestirVisibility 4 (Cached, the radiance cache) is legal and survives setSettings");
+        s.giRestirVisibility = 5;
+        Renderer::get().setSettings(s);
+        check(Renderer::get().settings().giRestirVisibility == 3,
+              "giRestirVisibility 5 (one past Cached) clamps to 3 (Full), not to Cached");
     }
 
     std::printf("[INFO ] === U2: ladder::averSrLevel / overallAverSrLevel / autoAverSrLevel ===\n");

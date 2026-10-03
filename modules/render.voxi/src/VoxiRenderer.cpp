@@ -179,8 +179,12 @@ void giSamplers(rhi::PipelineLayout& l) {
 // (rdLocalHist_, u19's read twin) -- shaders skip both unless gCameraMedium.z's light count is
 // nonzero this frame; t20/t21 instanced foliage (setFoliage): the part table (gRtFoliageParts, an
 // RtInstance per prototype part) and the TLAS static prefix's own instance descs (gRtFoliageDescs), a
-// one-element placeholder each while there is no foliage.
-constexpr u32 kVoxiSrvCount = kGiSrvCount + 13;
+// one-element placeholder each while there is no foliage; t22 radiance-cache cascade info (RcInfo,
+// an Upload-ring StructuredBuffer written by the CPU each frame -- see RadianceCache.hpp), left
+// null-filled unless Cached mode is live. The cache's two big buffers are UAVs (u20/u21), NOT
+// SRVs: a cells SRV would need UAV<->SRV buffer barriers around the barrier-free staged lighting
+// group and would take table 0 to 24 SRVs, exactly kMaxBindingSlots with no headroom.
+constexpr u32 kVoxiSrvCount = kGiSrvCount + 14;
 
 // Extra UAV slots, same widening reasoning as kVoxiSrvCount above (kind/reason per slot in
 // giTableKinds() below): u4/u5 sky-occlusion history + hit distance; u6 ReSTIR GI reservoir buffer
@@ -192,10 +196,13 @@ constexpr u32 kVoxiSrvCount = kGiSrvCount + 13;
 // an SRV since the shade passes also read it); u17/u18 sub-stage split candidate buffers (gRdGiCand,
 // 48 B/element, and gRdShadowTiles, one uint/8x8 tile -- see rdGiCandBuf_/rdShadowTileBuf_ in
 // VoxiRenderer.hpp for why neither is gated on the setting that consumes it); u19 local-light
-// history write side (t19's twin). u11 onward are ALWAYS declared, staged or not, and bound to a
+// history write side (t19's twin); u20/u21 radiance-cache accumulator (RWStructuredBuffer<int>,
+// fixed-point SH sums) and resolved cells (RWStructuredBuffer<RcCell>, 32 B), both read AND
+// written through the UAV alone (no SRV twin), left null-filled unless Cached mode is live.
+// u11 onward are ALWAYS declared, staged or not, and bound to a
 // placeholder when the real resource is absent -- Tier 1 hardware needs a valid descriptor of the
 // declared kind in every reserved slot, the same reason u1's voxelAccumPlaceholder_ exists.
-constexpr u32 kVoxiUavCount = kGiUavCount + 16;
+constexpr u32 kVoxiUavCount = kGiUavCount + 18;
 
 // What KIND of resource each of table 0's slots holds, read by both giLayout() (every pipeline) and
 // createVoxelVolume()'s BindingSetDesc (the set those pipelines bind) -- Vulkan refuses a set whose
@@ -244,7 +251,7 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // ReSTIR GI and the denoiser are both running.
     srv[15] = rhi::SlotKind::Texture2D;             // t15 denoised ReSTIR GI radiance (read)
     // t16/u10: half-res ReSTIR VISIBILITY history pair (giVisHist_) -- bound only while
-    // giVisHistWanted() (giRestirVisibility == HalfResolution); same GetDimensions() test as t14/t15.
+    // giVisHistWanted() (giRestirVisibility == HalfResolution or Cached); same GetDimensions() test as t14/t15.
     srv[16] = rhi::SlotKind::Texture2D;             // t16 ReSTIR visibility half-res history (read)
     // t17/u16: air sky-visibility volume -- see kVoxiSrvCount's comment above. Texture3D SRV like
     // t0, sampled trilinear over the same voxel space, at its own fixed 32^3 resolution.
@@ -256,6 +263,9 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // t20/t21: instanced foliage -- see kVoxiSrvCount above. StructuredBuffers like t3-t5/t9.
     srv[20] = rhi::SlotKind::StructuredBuffer;      // t20 foliage part table (gRtFoliageParts)
     srv[21] = rhi::SlotKind::StructuredBuffer;      // t21 foliage instance descs (gRtFoliageDescs)
+    // t22: radiance-cache cascade info (gRcInfo, RcInfo, 80 B x 1). Only the AVER_RADIANCE_CACHE
+    // twin pipelines declare it in HLSL; a null-filled StructuredBuffer otherwise, like t3-t5.
+    srv[22] = rhi::SlotKind::StructuredBuffer;      // t22 radiance-cache cascade info (gRcInfo)
     uav[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
     uav[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     uav[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
@@ -293,7 +303,12 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     uav[17] = rhi::SlotKind::StructuredBuffer;      // u17 GI-trace candidate buffer (gRdGiCand)
     uav[18] = rhi::SlotKind::StructuredBuffer;      // u18 shadow-probe tile verdicts (gRdShadowTiles)
     uav[19] = rhi::SlotKind::Texture2D;             // u19 local-light history (write)
-    static_assert(kVoxiSrvCount == 22 && kVoxiUavCount == 20 && kGiSrvCount == 9 && kGiUavCount == 4,
+    // u20/u21: radiance cache accumulator + resolved cells -- see kVoxiUavCount above. Both
+    // StructuredBuffer, no SRV twin (UAV-only buffers need no state transitions at all, the same
+    // reason rdGiCandBuf_/rdVisBuf_ are UAV-only).
+    uav[20] = rhi::SlotKind::StructuredBuffer;      // u20 radiance-cache accumulator (gRcAccum)
+    uav[21] = rhi::SlotKind::StructuredBuffer;      // u21 radiance-cache cells (gRcCells)
+    static_assert(kVoxiSrvCount == 23 && kVoxiUavCount == 22 && kGiSrvCount == 9 && kGiUavCount == 4,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -558,6 +573,9 @@ void VoxiRenderer::shutdown() {
                                         rdShadowProbeCsPso_, rdShadowTiledCsPso_,
                                         rdGiTraceCsPso_, rdGiTraceCbCsPso_,
                                         rdGiSplitCsPso_, rdGiSplitCbCsPso_,
+                                        // Radiance cache twins (AVER_RADIANCE_CACHE=1), lazily built.
+                                        rdGiCacheCsPso_, rdGiCacheCbCsPso_,
+                                        rdGiTraceCacheCsPso_, rdGiTraceCacheCbCsPso_,
                                         // Sub-stage C (Settings::rayDrivenReflSplit).
                                         rdReflSplitCsPso_, rdReflFilterCsPso_,
                                         // Local lights (lamps): CSRdLocalLights.
@@ -581,6 +599,7 @@ void VoxiRenderer::shutdown() {
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
     rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = 0;
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
+    rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
     rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
     rdLocalLightsCsPso_ = 0;
 
@@ -657,6 +676,16 @@ void VoxiRenderer::shutdown() {
     if (rdShadowTileBuf_) { res_->destroyBuffer(rdShadowTileBuf_); rdShadowTileBuf_ = 0; }
     if (rdGiCandBufPlaceholder_) { res_->destroyBuffer(rdGiCandBufPlaceholder_); rdGiCandBufPlaceholder_ = 0; }
     if (rdShadowTileBufPlaceholder_) { res_->destroyBuffer(rdShadowTileBufPlaceholder_); rdShadowTileBufPlaceholder_ = 0; }
+    // Radiance cache: bindings_ is already destroyed above, so there is no table left to rebind away
+    // from the buffers (teardownRadianceCache's job while the set is alive) -- destroy outright.
+    rc_.destroy();
+    if (rcPlaceholder_) { res_->destroyBuffer(rcPlaceholder_); rcPlaceholder_ = 0; }
+    radianceCacheLive_ = false;
+    rcSlotsBound_ = false;
+    rcBoundGeneration_ = 0;
+    rcUnsupportedLogged_ = false;
+    rcCreateFailed_ = false;
+    rcTwinsTried_ = false;
     rdVisBufElemCapacity_ = 0;
     rdGiCandBufElemCapacity_ = rdShadowTileElemCapacity_ = 0;
     rdStagedW_ = rdStagedH_ = rdStagedRowPitch_ = 0;
@@ -752,8 +781,10 @@ void VoxiRenderer::setSettings(const Settings& s) {
     // Clamped defensively even though Settings::clamp() (Voxi.cpp) already does the same thing --
     // std::min lands a typo on Full(3), the corrected value, never on 0/NoRay, which is what an
     // unclamped out-of-range value would silently decode as through the shader's `& 3u` mask (2.9's
-    // bit table) if a caller ever reached this field some other way.
-    giRestirVisibility_ = std::min(s.giRestirVisibility, 3u);
+    // bit table) if a caller ever reached this field some other way. 4 (Cached) is legal here -- it
+    // never reaches the shader as 4 (beginShadowHistory packs it as mode 2 plus bit 128) -- so only
+    // values ABOVE 4 land on Full, not on Cached.
+    giRestirVisibility_ = s.giRestirVisibility > 4u ? 3u : s.giRestirVisibility;
     // Same defensive clamp repeat, for givis::packAmbientW's `& 15u` mask.
     giRestirSpatialSamples_ = std::min(s.giRestirSpatialSamples, 15u);
     giRestirMaxHistory_     = std::min(s.giRestirMaxHistory, 63u);
@@ -1582,6 +1613,10 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // bindings_ -- t18 is written here, and Vulkan forbids writing a set it has already bound this
     // frame.
     buildLocalLights();
+    // Radiance cache (Cached mode): creates/destroys the cache, records its rare clear-all dispatch
+    // and rebinds t22/u20/u21 -- all BEFORE beginShadowHistory so radianceCacheLive_ is final when
+    // it packs bit 128, and before shadowPass() first binds bindings_ (same Vulkan rule as t18 above).
+    updateRadianceCache(ctx);
     // Gated on rtActive_, not the setting alone: the shader traces against the same acceleration
     // structure the shadow ray uses, and there is none on a frame with no TLAS -- publishing a
     // non-zero count then would have every pixel trace into nothing and read "sky visible
@@ -5321,6 +5356,16 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     if (localHistRead)
         ctx.textureBarrier(localHistRead, rhi::ResourceState::ShaderResource,
                            rhi::ResourceState::NonPixelShaderResource);
+    // RADIANCE CACHE: bit 128 of ambientParams.w is beginShadowHistory's radianceCacheLive_ (it
+    // wrote this frame's cb_ already, in prePass). When set, the GI trace runs the
+    // AVER_RADIANCE_CACHE twin of whichever pipeline it would have used -- the twin scatters traced
+    // pixels' second-bounce samples into the accumulator and reads the cells on untraced ones. Read
+    // back from the cb_ word, not from radianceCacheLive_, for the same reason giDispatch reads cb_
+    // fields: the CPU decision and the shader's can't disagree. A twin that failed to compile (0)
+    // simply leaves that variant on the plain pipeline, i.e. plain HalfResolution. usedCacheTwin
+    // gates the resolve below: nothing scattered, nothing to resolve.
+    const bool rcBit = (static_cast<u32>(cb_.ambientParams[3]) & 128u) != 0u;
+    bool usedCacheTwin = false;
     {
         // Wraps every dispatch below -- see this function's comment on why no barrier or timestamp
         // sits between the four lighting stages (S1/G1 just below are the one exception).
@@ -5417,7 +5462,10 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // both restore the plain pitch immediately after so no later upload sees it.
         if (giSplit) {
             stageBegin("Voxi RD GI trace stage");
-            ctx.setPipeline(giCb ? rdGiTraceCbCsPso_ : rdGiTraceCsPso_);
+            const rhi::PipelineHandle g1Twin =
+                rcBit ? (giCb ? rdGiTraceCacheCbCsPso_ : rdGiTraceCacheCsPso_) : rhi::PipelineHandle(0);
+            if (g1Twin) usedCacheTwin = true;
+            ctx.setPipeline(g1Twin ? g1Twin : (giCb ? rdGiTraceCbCsPso_ : rdGiTraceCsPso_));
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
@@ -5473,8 +5521,15 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
 
         if (giDispatch) {
             stageBegin("Voxi RD GI stage");
-            ctx.setPipeline(giSplit ? (giCb ? rdGiSplitCbCsPso_ : rdGiSplitCsPso_)
-                                     : (giCb ? rdGiCbCsPso_     : rdGiCsPso_));
+            // The split-read CSRdGi never traces (it loads gRdGiCand), so it has no cache twin; the
+            // unsplit CSRdGi traces inline and takes its twin here.
+            const rhi::PipelineHandle giTwin =
+                (!giSplit && rcBit) ? (giCb ? rdGiCacheCbCsPso_ : rdGiCacheCsPso_)
+                                    : rhi::PipelineHandle(0);
+            if (giTwin) usedCacheTwin = true;
+            ctx.setPipeline(giTwin ? giTwin
+                                   : giSplit ? (giCb ? rdGiSplitCbCsPso_ : rdGiSplitCsPso_)
+                                             : (giCb ? rdGiCbCsPso_     : rdGiCsPso_));
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
@@ -5543,6 +5598,18 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     if (localHistRead)
         ctx.textureBarrier(localHistRead, rhi::ResourceState::NonPixelShaderResource,
                            rhi::ResourceState::ShaderResource);
+    // RADIANCE CACHE RESOLVE: after the lighting group closes (every scatter has landed), before
+    // Stage B. The accumulator and cells are UAV-only buffers, so no state transition -- just the
+    // two UAV barriers: scatter -> resolve on the accumulator, and resolve -> the NEXT frame's
+    // lookups on the cells (a different command list, cheap insurance). Reads in frame N therefore
+    // see the cache resolved at the end of frame N-1. Outside the barrier-free group on purpose:
+    // the resolve reads exactly what the group's twins wrote. usedCacheTwin is only ever set inside
+    // a giDispatch branch, so no separate giDispatch re-test is needed here.
+    if (usedCacheTwin && rc_.valid()) {
+        ctx.uavBarrierBuffer(rc_.accumBuffer());
+        rc_.recordResolve(ctx);
+        ctx.uavBarrierBuffer(rc_.cellsBuffer());
+    }
     // Stage B's reads of gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex must see whichever of the four
     // dispatches above wrote them -- all four barriers sit here, unconditionally, rather than only
     // behind each dispatch's own `if`: a barrier against a texture nothing wrote this frame is a
@@ -6350,9 +6417,16 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // histBound/histValid are false here; that block recomputes this component once it knows better.
     // See givis::packAmbientW (GiVisibility.hpp) for the bit table shared byte-for-byte with
     // voxi.hlsl/voxi_restir.hlsli/voxi_gi.hlsli's own decode.
-    const u32 ambW = givis::packAmbientW(giRestirVisibility_, /*histBound=*/false, /*histValid=*/false,
+    //
+    // Cached (4) never reaches the shader as 4: its `& 3u` decode would read it as NoRay. It packs
+    // as wire mode 2 (HalfResolution) -- so halfBound/tracedPx/rec.valid make exactly the tracing
+    // decisions HalfResolution does -- plus bit 128 (radianceCacheLive_, settled by
+    // updateRadianceCache earlier in prePass), which only the AVER_RADIANCE_CACHE twins read.
+    const u32 wireVisMode = giRestirVisibility_ == 4u ? 2u : giRestirVisibility_;
+    const u32 ambW = givis::packAmbientW(wireVisMode, /*histBound=*/false, /*histValid=*/false,
                                          blendedGiCone_, dev_ && dev_->backend() == rhi::Backend::D3D12,
-                                         giVisPathView_, giRestirSpatialSamples_, giRestirMaxHistory_);
+                                         giVisPathView_, giRestirSpatialSamples_, giRestirMaxHistory_,
+                                         /*radianceCache=*/radianceCacheLive_);
     cb_.ambientParams[3] = static_cast<f32>(ambW);
     if (!shadowHistoryActive()) {
         // ---- F3: a skipped frame must not leave the validity flags trusting frozen state ----
@@ -6485,11 +6559,12 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             // was known true. Every other component (mode, blendedGiCone_, D3D12-only replay bit,
             // giVisPathView_, giRestirSpatialSamples_, giRestirMaxHistory_) is unchanged, so this
             // only updates the two bits that couldn't be known until now.
-            const u32 ambW2 = givis::packAmbientW(giRestirVisibility_, /*histBound=*/true,
+            const u32 ambW2 = givis::packAmbientW(wireVisMode, /*histBound=*/true,
                                                   giVisHistValid_, blendedGiCone_,
                                                   dev_ && dev_->backend() == rhi::Backend::D3D12,
                                                   giVisPathView_, giRestirSpatialSamples_,
-                                                  giRestirMaxHistory_);
+                                                  giRestirMaxHistory_,
+                                                  /*radianceCache=*/radianceCacheLive_);
             cb_.ambientParams[3] = static_cast<f32>(ambW2);
         }
     }
@@ -6841,6 +6916,179 @@ rhi::PipelineHandle VoxiRenderer::pickGbuf(rhi::PipelineHandle plain, rhi::Pipel
     if (dev_->sampleCount() > 1) return plain;
 
     return gbuf;
+}
+
+// RADIANCE CACHE (Cached mode, stage 1): the per-frame hook, called from prePass between
+// buildLocalLights() and beginShadowHistory(). Decides whether the cache can run THIS frame, creates
+// or tears it down on the edge, records its rare clear-all dispatch (RadianceCache::beginFrame, outside
+// the scene pass), points table 0's t22/u20/u21 at its buffers, and settles radianceCacheLive_, which
+// beginShadowHistory packs as bit 128 right after. Every bindings_ write happens here, before anything
+// binds the set this frame -- Vulkan's ringed sets forbid writing one that is already bound.
+//
+// WHERE IT CAN RUN: only the staged ray-driven passes on D3D12 (the twin compute pipelines are the
+// only code that scatters/reads, and recording compute inside the scene pass is Vulkan-illegal).
+// Anywhere else Cached silently behaves as HalfResolution -- the wire mode is 2 and bit 128 stays
+// clear -- with a once-only log so the fallback is never mysterious.
+void VoxiRenderer::updateRadianceCache(rhi::IRenderContext& ctx) {
+    radianceCacheLive_ = false;
+    if (!radianceCacheWanted()) {
+        // Off (or never requested): release everything on the edge, then cost nothing. Nothing ran
+        // that could have failed, so the retry/log latches reset too -- a later switch back to Cached
+        // gets a fresh attempt.
+        if (rc_.valid() || rcSlotsBound_) teardownRadianceCache();
+        rcCreateFailed_ = false;
+        rcUnsupportedLogged_ = false;
+        return;
+    }
+    if (!res_ || !dev_) return;
+
+    // Can the staged path run at all? rdStagedWanted()/rayDrivenActive() are the settings-side halves
+    // of rdStagedActive() (which runs later, in scenePass, and may still refuse a frame for a missing
+    // pipeline -- harmless: twins are chosen inside recordStagedRayDriven only, so a refused frame just
+    // never scatters, and its stale cache is read again the next frame it runs).
+    const char* why = nullptr;
+    if (dev_->backend() != rhi::Backend::D3D12)
+        why = "the backend is not D3D12 (the cache runs inside the staged compute passes)";
+    else if (!rdStagedWanted())
+        why = "voxi.rayDrivenStages is 0 (the cache needs the staged ray-driven passes)";
+    else if (!rayDrivenActive())
+        why = "ray-driven primary visibility is not active (voxi.rtRenderMode / ray tracing)";
+    if (why) {
+        if (!rcUnsupportedLogged_) {
+            rcUnsupportedLogged_ = true;
+            AVER_INFO("[Voxi] ReSTIR visibility mode Cached (radiance cache) requested, but {}; "
+                      "behaving as HalfResolution (said once)", why);
+        }
+        if (rc_.valid() || rcSlotsBound_) teardownRadianceCache();
+        return;
+    }
+
+    // Twins first: a cache with nothing to scatter into would cost 75 MB for no effect. Built on the
+    // first frame Cached is wanted (createScenePipelines builds them up front only when Cached was
+    // already the mode at pipeline build).
+    if (!rcTwinsTried_) createRadianceCacheTwins();
+    const bool anyTwin = rdGiCacheCsPso_ || rdGiCacheCbCsPso_ || rdGiTraceCacheCsPso_ ||
+                         rdGiTraceCacheCbCsPso_;
+    if (!anyTwin) return;   // createRadianceCacheTwins already said why, once
+
+    if (!rc_.valid()) {
+        if (rcCreateFailed_) return;
+        if (!rc_.create(*res_)) {
+            // create() logs the specific failure; this latch only stops a retry (and a re-log) every
+            // frame. Cleared when Cached stops being wanted.
+            rcCreateFailed_ = true;
+            return;
+        }
+        // The buffers are zeroed by beginFrame's clear-all dispatch below, not assumed zero (Vulkan
+        // does not guarantee it, D3D12 only happens to). A history reset rides along: GI history from
+        // before the switch never saw the cache.
+        giHistValid_ = false;
+    }
+
+    // The eye: the same camera() read the local-light and rebuild-gate code makes. Centimetres,
+    // matching RadianceCacheLayout's cell sizes.
+    f32 vp[16], eye[3] = {};
+    if (!dev_->camera(vp, nullptr, eye)) return;
+    const RadianceCache::Params params{};   // defaults: cap 64, alphaMin 1/16, age step 16 frames
+    const RadianceCache::Bindings b = rc_.beginFrame(ctx, eye, rtFrameIndex_, params);
+    if (!b.info || !b.accum || !b.cells) return;
+
+    // t22 names this frame's ring slot, so it is rewritten EVERY frame; u20/u21 only when the
+    // buffers changed (generation) or the slots were last on the placeholder/null.
+    res_->setSrvBuffer(bindings_, 22, b.info, b.infoStride, b.infoCount, 0);
+    if (!rcSlotsBound_ || b.generation != rcBoundGeneration_) {
+        res_->setUavBuffer(bindings_, 20, b.accum, 4, b.accumInts, 0);
+        res_->setUavBuffer(bindings_, 21, b.cells, b.cellStride, b.cellCount, 0);
+        rcBoundGeneration_ = b.generation;
+        rcSlotsBound_ = true;
+        AVER_INFO("[Voxi] radiance cache live: {} accumulator ints, {} cells of {} B", b.accumInts,
+                  b.cellCount, b.cellStride);
+    }
+    radianceCacheLive_ = true;
+}
+
+// Builds the four AVER_RADIANCE_CACHE=1 compute twins: CSRdGi and CSRdGiTrace, each plain and
+// checkerboard -- the only variants whose HLSL contains the cache's scatter and lookup (the HLSL
+// guards all of it behind `#if AVER_RADIANCE_CACHE`, default 0, and #errors under
+// AVER_RD_SINGLE_PASS). Everything else -- single-pass PSRayDriven (at the AMD register limit),
+// raster PSMainVoxi, the split-read CSRdGi that never traces -- compiles from byte-identical text
+// with or without this feature, which is what "off means off" needs.
+//
+// Same layout (giLayout(kRtTextureCapacity), so the staged root signature dedupes), same material
+// defines, csDefs and SM 6.6 as the plain pipelines in createScenePipelines; the define is the only
+// difference. Compile failures leave that handle 0 and that variant on its plain pipeline.
+// Idempotent: returns true at once if every twin already exists. Sets rcTwinsTried_ so a failure is
+// not retried every frame; createScenePipelines clears it on every rebuild (a shader hot-reload or
+// resize rebuilds, and must retry against the new bytecode).
+bool VoxiRenderer::createRadianceCacheTwins() {
+    rcTwinsTried_ = true;
+    if (rdGiCacheCsPso_ && rdGiCacheCbCsPso_ && rdGiTraceCacheCsPso_ && rdGiTraceCacheCbCsPso_)
+        return true;
+    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 66 && caps_.dxcAvailable;
+    if (!res_ || !rtOk || !rtTexTable_) {
+        AVER_WARN("[Voxi] radiance cache twins not built: needs ray tracing, shader model 6.6 and the "
+                  "bindless texture table (said once per pipeline build)");
+        return false;
+    }
+    ShaderScope compile(*res_);
+    const rhi::PipelineLayout giTex = giLayout(kRtTextureCapacity);
+    // Byte-for-byte what createScenePipelines builds for the plain staged compute variants, so the
+    // twins differ from them in the one define alone.
+    const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
+                                                          layeredBsdf_);
+    const std::string bindlessDefs = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
+                                     std::to_string(kRtTextureCapacity);
+    const std::string csDefs = bindlessDefs + (rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_))
+                                                          : std::string());
+    const auto build = [&](const char* entry, const char* extra, rhi::PipelineHandle& out) {
+        if (out) return;   // an earlier call already built this one
+        const std::string defs = matDefs + ";" + csDefs + ";AVER_RADIANCE_CACHE=1" + extra;
+        const rhi::ShaderHandle cs = compile(entry, rhi::ShaderStage::Compute, 66, defs.c_str());
+        if (!cs) return;
+        rhi::ComputePipelineDesc p;
+        p.cs = cs;
+        p.layout = giTex;
+        out = res_->createComputePipeline(p);
+    };
+    build("CSRdGi",      "",                        rdGiCacheCsPso_);
+    build("CSRdGi",      ";AVER_GI_CHECKERBOARD=1", rdGiCacheCbCsPso_);
+    build("CSRdGiTrace", "",                        rdGiTraceCacheCsPso_);
+    build("CSRdGiTrace", ";AVER_GI_CHECKERBOARD=1", rdGiTraceCacheCbCsPso_);
+    const u32 built = (rdGiCacheCsPso_ ? 1u : 0u) + (rdGiCacheCbCsPso_ ? 1u : 0u) +
+                      (rdGiTraceCacheCsPso_ ? 1u : 0u) + (rdGiTraceCacheCbCsPso_ ? 1u : 0u);
+    if (built == 4u)
+        AVER_INFO("[Voxi] radiance cache twin pipelines ready (CSRdGi/CSRdGiTrace x plain/checkerboard)");
+    else
+        AVER_WARN("[Voxi] radiance cache twin pipelines: {} of 4 compiled; a variant without its twin "
+                  "runs as plain HalfResolution", built);
+    return built == 4u;
+}
+
+// Releases the cache: rebinds t22/u20/u21 away from its buffers FIRST, then destroys them. A bound
+// descriptor that outlives its buffer faults the GPU (the same rule as every other resource here),
+// and a UAV slot cannot be cleared once set -- setUav/setUavBuffer refuse handle 0 -- so u20/u21 go to
+// a tiny placeholder, created lazily right here (never at init, never if Cached was never requested).
+// t22 is an SRV, which clearSrv() does reset to null. Idempotent.
+void VoxiRenderer::teardownRadianceCache() {
+    radianceCacheLive_ = false;
+    if (res_ && bindings_ && rcSlotsBound_) {
+        res_->clearSrv(bindings_, 22);
+        if (!rcPlaceholder_) {
+            rhi::BufferDesc pd;
+            pd.bytes = 64;   // 16 ints / 2 cells: the smallest both slots' strides can describe
+            pd.kind  = rhi::BufferKind::Default;
+            pd.allowUnorderedAccess = true;
+            pd.debugName = "Voxi radiance cache placeholder";
+            rcPlaceholder_ = res_->createBuffer(pd);
+        }
+        if (rcPlaceholder_) {
+            res_->setUavBuffer(bindings_, 20, rcPlaceholder_, 4, 16, 0);
+            res_->setUavBuffer(bindings_, 21, rcPlaceholder_, 32, 2, 0);
+        }
+    }
+    rc_.destroy();
+    rcSlotsBound_ = false;
+    rcBoundGeneration_ = 0;
 }
 
 // Staged ray-driven passes (extended by milestone 2/3's rdGiCsPso_/rdSkyOccCsPso_/rdReflCsPso_
@@ -7542,6 +7790,11 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          rdShadowProbeCsPso_, rdShadowTiledCsPso_,
                                          rdGiTraceCsPso_, rdGiTraceCbCsPso_,
                                          rdGiSplitCsPso_, rdGiSplitCbCsPso_,
+                                         // Radiance cache twins: a hot-reload must not leave them
+                                         // pointing at the old shader bytecode. Rebuilt below only
+                                         // while Cached mode is wanted; otherwise lazily on demand.
+                                         rdGiCacheCsPso_, rdGiCacheCbCsPso_,
+                                         rdGiTraceCacheCsPso_, rdGiTraceCacheCbCsPso_,
                                          rdReflSplitCsPso_, rdReflFilterCsPso_,
                                          rdLocalLightsCsPso_};
     for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
@@ -7557,6 +7810,8 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
     rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = 0;
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
+    rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
+    rcTwinsTried_ = false;
     rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
     rdLocalLightsCsPso_ = 0;
 
@@ -8037,6 +8292,11 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                       "will stay flat");
         else
             AVER_INFO("[Voxi] textured blended (glass) variant ready");
+
+        // Radiance cache twins, only when Cached mode is already the requested mode -- otherwise
+        // they stay unbuilt (off means off: no extra compile, no extra pipeline) and
+        // updateRadianceCache builds them lazily the first frame Cached is wanted.
+        if (giRestirVisibility_ == 4u) createRadianceCacheTwins();
     }
 
     // PSRayDriven's own G-buffer twin: RayDrivenGBufferOut adds SV_DEPTH to sceneGbuf's four targets,

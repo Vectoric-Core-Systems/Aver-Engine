@@ -576,14 +576,14 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     // a failed prerequisite would read "no ray" while no ReSTIR runs at all), so raw and effective
     // always agree here, unlike voxi.refractionMode's, and reading raw skips the extra resolve() call.
     t.push_back({"voxi.giRestirVisibility", VarType::U32, false,
-        "0 no ray (pre-fix, over-bright), 1 reconstructed (no ray), 2 half resolution, 3 full. Only "
+        "0 no ray (pre-fix, over-bright), 1 reconstructed (no ray), 2 half resolution, 3 full, 4 cached (radiance cache; staged D3D12 only, else acts as half). Only "
         "applies when voxi.giMode resolves to 1. voxi.legacyRestirHitSky / "
         "voxi.legacyRestirReuseVisibility, when on, force 'no ray' for their own ray regardless of "
         "this.",
         []{ return vU32(Renderer::get().settings().giRestirVisibility); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRestirVisibility = n; }); },
         [](const VarValue& v, std::string& err) -> bool {
-            if (v.as.u > 3) { err = "giRestirVisibility must be 0 (no ray), 1 (reconstructed), 2 (half resolution) or 3 (full) -- values above 3 are clamped to 3 by the engine, but this refuses them up front so the message names your own mistake, not the substitute"; return false; }
+            if (v.as.u > 4) { err = "giRestirVisibility must be 0 (no ray), 1 (reconstructed), 2 (half resolution), 3 (full) or 4 (cached) -- values above 4 are clamped to 3 by the engine, but this refuses them up front so the message names your own mistake, not the substitute"; return false; }
             return true;
         }});
     // The two dials the fade bisection left standing -- everything else it tried was removed by its

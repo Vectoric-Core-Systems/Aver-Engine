@@ -1694,7 +1694,7 @@ void SandboxApp::buildRenderingSettings(int page) {
         ImGui::BeginDisabled(visGreyed);
         int vis = static_cast<int>(er.giRestirVisibility.requested);
         if (ImGui::Combo("ReSTIR visibility rays", &vis,
-            "No ray (pre-fix, over-bright)\0Reconstructed (no ray)\0Half resolution\0Full\0")) {
+            "No ray (pre-fix, over-bright)\0Reconstructed (no ray)\0Half resolution\0Full\0Cached (radiance cache)\0")) {
             s.giRestirVisibility = static_cast<u32>(vis); changed = true;
         }
         ImGui::EndDisabled();
@@ -1703,6 +1703,10 @@ void SandboxApp::buildRenderingSettings(int page) {
             ImGui::SetTooltip("Extra rays per shaded fragment beyond the candidate/sun/sky/\n"
                               "reflection rays this estimator already traces (cost UNMEASURED):\n"
                               "  Full           up to 2 (F2 is the expensive one)\n"
+                              "  Cached         the Half ray budget, but those rays also train a\n"
+                              "                 world-space radiance cache that the untraced pixels\n"
+                              "                 read (staged ray-driven on D3D12 only; elsewhere\n"
+                              "                 it runs as Half; UNVERIFIED)\n"
                               "  Half           up to 0.5 at rest, plus Full on pixels with no\n"
                               "                 valid reconstruction this frame\n"
                               "  Reconstructed  0 rays -- one voxel-cone march instead\n"
@@ -1718,6 +1722,11 @@ void SandboxApp::buildRenderingSettings(int page) {
         if (visGreyed) {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]",
+                               disableReasonText(er.giRestirVisibility.reason));
+        } else if (er.giRestirVisibility.reason == DisableReason::RequiresStagedRayDriven) {
+            // SOFT reason (greysControl is false for it): the choice stays live and runs as Half
+            // resolution, so this is amber, not the red a greyed control's reason gets above.
+            ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1), "[%s]",
                                disableReasonText(er.giRestirVisibility.reason));
         } else if (vis == 0) {
             // Amber, not red: a legal, live choice (unlike the giMode reason above, an unfixable

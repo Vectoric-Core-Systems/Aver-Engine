@@ -95,6 +95,19 @@ target_include_directories(GiVisibilityTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/
 target_compile_definitions(GiVisibilityTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(GiVisibilityTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# RadianceCacheTest -- the radiance cache's CPU-checkable half (aver/voxi/RadianceCacheLayout.hpp): the
+# fixed-point headroom, tag/cell addressing (negative cells included), origin snapping, the fp16 SH and
+# normal packing, the SH cosine convolution against a Monte Carlo estimate with the scatter's own
+# weighting, and the AVER_RC_* #define literals in voxi_radiance_cache.hlsli against the header's
+# constants. Same shape as GiVisibilityTest above: the header depends on nothing but
+# aver/core/Types.hpp, so this links Aver.Core alone; AVER_REPO_ROOT because the last section reads the
+# HLSL files themselves.
+add_executable(RadianceCacheTest src/RadianceCacheTest.cpp)
+target_link_libraries(RadianceCacheTest PRIVATE Aver.Core)
+target_include_directories(RadianceCacheTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include)
+target_compile_definitions(RadianceCacheTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(RadianceCacheTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # RenderSettingsResolverTest -- the quality ladder (QualityLadder.hpp), the prerequisite resolver that
 # decides what greys and why (RenderSettingsResolver.hpp), and the UE-style Overall Quality scalability
 # preset (Scalability.hpp).

@@ -123,7 +123,7 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //
     // w carries GI-VISIBILITY (U1) and BLENDED-HISTORY (W6/M5) bits, decoded the same inline way, written
     // only by VoxiRenderer::beginShadowHistory (aver::voxi::givis::packAmbientW):
-    //   bits 0-1 RestirVisibility mode (Settings::giRestirVisibility, 0..3: No ray/Reconstructed/
+    //   bits 0-1 RestirVisibility mode (Settings::giRestirVisibility, 0..3 on the wire: No ray/Reconstructed/
     //          HalfRes/Full). Decoded once in giRestirIndirect into f2Path/f3Path; other readers use those.
     //   bit 4  half-res visibility pair (gGiVisHist/gGiVisHistOut, t16/u10) bound this frame; mode 2 with
     //          this clear means the pair failed to allocate (2.11) and behaves as Full, not a
@@ -142,6 +142,11 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //          See Settings::giRestirSpatialSamples (Voxi.hpp).
     //   bits 18-22 Settings::giRestirMaxHistory (0..31): the M cap on a reused reservoir; 0 (default)
     //          turns reuse off and resolves each pixel from its fresh candidate.
+    //   bit 128 radiance cache live this frame (RestirVisibility::Cached). The CPU packs Cached as wire
+    //          mode 2 (HalfResolution) PLUS this bit, because bits 0-1 cannot hold a value of 4. Only the
+    //          four AVER_RADIANCE_CACHE twin compiles (staged CSRdGi/CSRdGiTrace, voxi_restir.hlsli) read it:
+    //          giDecodePaths then sends untraced half-res pixels to f2Path 4 (cache read) and the traced
+    //          pixels scatter into the cache. Every other compile ignores it, i.e. behaves as HalfResolution.
     float4   gAmbientParams;
     // x = VIEW-DEBUG MODE (VoxiRenderer::ViewDebug): 0 normal, 1 Unlit, 2 RayHitInstance, 3 RayHitMaterial,
     // 4 RayHitDistance, 5 Triangles -- PSRayDriven's debug visualisations only (search "vmode");

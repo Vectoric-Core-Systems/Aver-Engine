@@ -110,7 +110,7 @@ struct ProjectDesc {
     // F3 reuse) -- see voxi::Settings::giRestirVisibility, which owns the explanation. -1 is one of the
     // TEN tier-derived GI/RT/PT knobs ProjectRenderApply.hpp's N6 rule covers: absent follows whatever
     // the GI tier's own ladder rung says, not whatever value happened to already be live.
-    int restirVisibility   = -1; // RENDER.RESTIRVISIBILITY  0=no ray 1=reconstructed 2=half 3=full
+    int restirVisibility   = -1; // RENDER.RESTIRVISIBILITY  0=no ray 1=reconstructed 2=half 3=full 4=cached
     // RENDER.RESTIRHISTORY: the ReSTIR GI reuse params' maxHistory -- how much weight a
     // previous-frame reservoir may carry into the ReSTIR GI combine; see
     // voxi::Settings::giRestirMaxHistory, which owns the full explanation and the Sponza numbers

@@ -55,6 +55,9 @@ enum class DisableReason : u8 {
     RequiresRayDrivenPrimary,     // milestone 1: rayDrivenStages only applies once rtRenderMode
                                    // itself resolves to primary rays -- Resolution::rayDrivenStages'
                                    // own gate
+    RequiresStagedRayDriven,      // SOFT: giRestirVisibility = Cached (4) only runs in the STAGED
+                                   // ray-driven path on D3D12 (rtRenderMode 1, rayDrivenStages >= 1);
+                                   // anywhere else it behaves as Half resolution. Warns; does not grey.
     Count
 };
 
@@ -139,17 +142,22 @@ inline const char* disableReasonText(DisableReason r) {
             return "Only applies when Indirect diffuse is ReSTIR.";
         case DisableReason::RequiresRayDrivenPrimary:
             return "Only applies when Primary visibility is Primary rays.";
+        case DisableReason::RequiresStagedRayDriven:
+            return "Cached needs staged ray-driven primary visibility on D3D12; until then it runs as Half resolution.";
         default:
             return "Unavailable.";
     }
 }
 
 // Whether a reason should GREY the control (hide the choice entirely) rather than merely warn beside
-// it. Exactly one reason is soft today: MSAA above 1x is a condition the same page's own MSAA radios
-// can undo in one click, so the denoiser checkbox stays clickable and reachable with a warning line
-// next to it, per the prerequisite table's own "soft reasons only warn inline" rule.
+// it. Two reasons are soft today: MSAA above 1x is a condition the same page's own MSAA radios can
+// undo in one click, so the denoiser checkbox stays clickable and reachable with a warning line next
+// to it, per the prerequisite table's own "soft reasons only warn inline" rule; and the radiance
+// cache's staged-ray-driven requirement (RequiresStagedRayDriven), where the choice is still legal
+// and merely falls back to Half resolution, so greying it would hide a working fallback.
 inline bool greysControl(DisableReason r) {
-    return r != DisableReason::None && r != DisableReason::RequiresMsaaOne;
+    return r != DisableReason::None && r != DisableReason::RequiresMsaaOne &&
+           r != DisableReason::RequiresStagedRayDriven;
 }
 
 // One field's resolved state: what was asked for, what is actually in effect, and why they differ
@@ -231,10 +239,20 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
     // reason when giMode has one (the RT/GI prerequisite that also blocks giMode blocks this); otherwise
     // RequiresRestirGi when the project simply has not turned ReSTIR on (s.giMode == 0), which is not a
     // prerequisite failure but is still a reason this control should read as inert.
-    r.giRestirVisibility.requested = s.giRestirVisibility > 3u ? 3u : s.giRestirVisibility;
+    // 4 (Cached, the radiance cache) is legal and passes through; values above it clamp to 3 (Full),
+    // the same typo-lands-on-the-safe-rung rule as Voxi.cpp's own clamp.
+    r.giRestirVisibility.requested = s.giRestirVisibility > 4u ? 3u : s.giRestirVisibility;
     r.giRestirVisibility.reason = (r.giMode.reason != DisableReason::None)
                                        ? r.giMode.reason
                                        : (s.giMode == 0 ? DisableReason::RequiresRestirGi : DisableReason::None);
+    // SOFT reason for Cached: the cache code is compiled only into the staged ray-driven compute
+    // passes, which exist on D3D12 alone (DeviceInfo::denoiserSupported is that backend test, see its
+    // comment in Voxi.hpp -- borrowed here rather than adding a second field the two host call sites
+    // would each have to fill). Anywhere else the request still stands and the renderer runs it as
+    // Half resolution, so this only warns (greysControl) and `effective` stays == requested below.
+    if (r.giRestirVisibility.reason == DisableReason::None && r.giRestirVisibility.requested == 4u &&
+        !(s.rtRenderMode == 1u && s.rayDrivenStages >= 1u && d.denoiserSupported))
+        r.giRestirVisibility.reason = DisableReason::RequiresStagedRayDriven;
     // effective == requested ALWAYS -- deliberately unlike giMode/rtRenderMode/denoiser above. Clamping to 0 on a
     // failed prerequisite would read "No ray (over-bright)" while no ReSTIR runs at all; inertness is carried by
     // `reason` alone. Do not "fix" this to match the file's general rule (the comment at :169).
@@ -384,7 +402,7 @@ inline u32 manifestContradictions(const Settings& effective, const DeviceInfo& d
 // reason refuse() has already told the log about, rather than saying the same device limitation twice
 // from two different call sites (Renderer::refusalLogged(f) is the skip check; see its own comment,
 // Voxi.hpp). Returns false for a reason nothing already logs (RequiresRayTracingEnabled,
-// RequiresGlobalIllumination, NothingToDenoise, RequiresDenoiserBackend, RequiresMsaaOne, RequiresRestirGi, and the
+// RequiresGlobalIllumination, NothingToDenoise, RequiresDenoiserBackend, RequiresMsaaOne, RequiresRestirGi, RequiresStagedRayDriven, and the
 // synthetic ptSubControls reuse of RequiresPathTracingHardware never reaches here because callers only
 // feed this the four hardware reasons and NotImplemented) -- those get reported fresh by the caller
 // instead.

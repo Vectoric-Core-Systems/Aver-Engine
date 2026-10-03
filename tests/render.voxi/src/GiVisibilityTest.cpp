@@ -212,7 +212,7 @@ int main() {
     }
 
     // ---- 2. packAmbientW: round-trips every (mode, bound, valid, cone, replay, pathView,
-    //         spatialSamples, maxHistory) ----
+    //         spatialSamples, maxHistory, radianceCache) ----
     // spatialSamples and maxHistory are each swept through their FULL bit range (0..15, 0..31), which
     // is exactly what Settings' own clamps (Voxi.cpp) restrict callers to, so there is no
     // "past the clamp" value left to add on top.
@@ -224,23 +224,48 @@ int main() {
                     for (int bc = 0; bc < 2; ++bc)
                         for (int br = 0; br < 2; ++br)
                             for (int pv = 0; pv < 2; ++pv)
-                                for (u32 spatialSamples = 0; spatialSamples <= 15u; ++spatialSamples)
-                                    for (u32 maxHistory = 0; maxHistory <= 31u; ++maxHistory) {
-                                        const bool histBound = hb != 0, histValid = hv != 0, cone = bc != 0,
-                                                   replay = br != 0, path = pv != 0;
-                                        const u32 w = packAmbientW(mode, histBound, histValid, cone, replay,
-                                                                    path, spatialSamples, maxHistory);
-                                        ++checked;
-                                        const u32 want = (mode & 3u) | (histBound ? 4u : 0u) | (histValid ? 8u : 0u) |
-                                                         (cone ? 16u : 0u) | (replay ? 32u : 0u) | (path ? 64u : 0u) |
-                                                         ((spatialSamples & 15u) << 12) | ((maxHistory & 31u) << 18);
-                                        if (w != want) ++failures;
-                                    }
-        check(checked == 4 * 2 * 2 * 2 * 2 * 2 * 16 * 32 && failures == 0,
+                                for (int rc = 0; rc < 2; ++rc)
+                                    for (u32 spatialSamples = 0; spatialSamples <= 15u; ++spatialSamples)
+                                        for (u32 maxHistory = 0; maxHistory <= 31u; ++maxHistory) {
+                                            const bool histBound = hb != 0, histValid = hv != 0, cone = bc != 0,
+                                                       replay = br != 0, path = pv != 0, cache = rc != 0;
+                                            const u32 w = packAmbientW(mode, histBound, histValid, cone, replay,
+                                                                        path, spatialSamples, maxHistory, cache);
+                                            ++checked;
+                                            const u32 want = (mode & 3u) | (histBound ? 4u : 0u) | (histValid ? 8u : 0u) |
+                                                             (cone ? 16u : 0u) | (replay ? 32u : 0u) | (path ? 64u : 0u) |
+                                                             (cache ? 128u : 0u) |
+                                                             ((spatialSamples & 15u) << 12) | ((maxHistory & 31u) << 18);
+                                            if (w != want) ++failures;
+                                        }
+        check(checked == 4 * 2 * 2 * 2 * 2 * 2 * 2 * 16 * 32 && failures == 0,
               "packAmbientW round-trips every (mode 0..3, histBound, histValid, blendedCone, "
-              "blendedReplay, pathView, spatialSamples 0..15, maxHistory 0..31) combination against "
-              "2.9/W6's own bit table exactly -- " + std::to_string(failures) + " of " +
-              std::to_string(checked) + " combinations disagreed");
+              "blendedReplay, pathView, radianceCache (bit 128), spatialSamples 0..15, maxHistory "
+              "0..31) combination against 2.9/W6's own bit table exactly -- " + std::to_string(failures) +
+              " of " + std::to_string(checked) + " combinations disagreed");
+
+        // The radiance cache's bit (128) is its own bit: the wire mode stays a 2-bit field (the shader
+        // decodes `& 3u`), so a CPU-side RestirVisibility::Cached = 4 must be packed as mode 2 plus
+        // bit 128 -- passing 4 straight through would mask to 0 (NoRay), the over-bright pre-fix look.
+        // Omitting the ninth argument leaves the bit clear, so every pre-cache caller is unchanged.
+        const u32 withoutCache = packAmbientW(2u, true, true, false, false, false, 4u, 4u);
+        const u32 withCache    = packAmbientW(2u, true, true, false, false, false, 4u, 4u, true);
+        check((withCache ^ withoutCache) == 128u,
+              "radianceCache = true sets exactly bit 128 and changes nothing else in packAmbientW's word");
+        check(packAmbientW(2u, true, true, false, false, false, 4u, 4u, false) == withoutCache,
+              "the ninth argument defaults to false: an explicit false equals the call that omits it");
+        check((packAmbientW(4u, false, false, false, false, false, 0u, 0u) & 3u) == 0u,
+              "a raw mode 4 masks to 0 (NoRay) on the wire -- which is why Cached travels as mode 2 + bit 128");
+        int cacheTooWide = 0;
+        for (u32 maxHistory = 0; maxHistory <= 31u; ++maxHistory) {
+            const u32 w = packAmbientW(3u, true, true, true, true, true, 15u, maxHistory, true);
+            if (w >= (1u << 24) || static_cast<u32>(static_cast<f32>(w)) != w || (w & 128u) == 0u)
+                ++cacheTooWide;
+        }
+        check(cacheTooWide == 0,
+              "with bit 128 set, every packed value (maxHistory 0..31, all other bits set) stays under "
+              "2^24 and survives the f32 round trip gAmbientParams.w puts it through -- " +
+              std::to_string(cacheTooWide) + " of 32 did not");
 
         // Bits 12-15 must not disturb bits 0-6: fixing every OTHER argument and sweeping
         // spatialSamples alone must leave the low seven bits (mode | histBound | histValid |
@@ -531,12 +556,13 @@ int main() {
 
     // ---- 12. SOURCE ASSERTION: VoxiRenderer.cpp's binding-count static_assert (consumed from L4) ----
     {
-        check(has(rendererCppText(), "kVoxiSrvCount == 20 && kVoxiUavCount == 20"),
-              "VoxiRenderer.cpp asserts the widened binding counts (20 SRV slots, 20 UAV slots) this "
+        check(has(rendererCppText(), "kVoxiSrvCount == 23 && kVoxiUavCount == 22"),
+              "VoxiRenderer.cpp asserts the widened binding counts (23 SRV slots, 22 UAV slots) this "
               "lane's t16/u10 registers depend on (u11-u15 are the staged ray-driven buffers, t17/u16 "
               "are the occlusion-aware fog design's air sky-visibility volume, u17/u18 are the "
               "sub-stage splits' own GI-trace candidate and shadow-probe tile buffers, t18/t19/u19 are "
-              "the local-light list and its visibility history)");
+              "the local-light list and its visibility history, t22/u20/u21 are the radiance cache's "
+              "cascade info, accumulator and cells)");
     }
 
     if (g_failures == 0) {

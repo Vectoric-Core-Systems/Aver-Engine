@@ -1231,7 +1231,7 @@ Application* createApplication(int argc, char** argv) {
     app->setPtOverride(pt);
     app->setGiUpdateInterval(giUpdateInterval);
     app->setGiMode(giModeArg);
-    // --restir-visibility none|reconstructed|half|full: parsed here, same shape as --aversr/
+    // --restir-visibility none|reconstructed|half|full|cached: parsed here, same shape as --aversr/
     // --gbuffer-debug, so an unrecognised name gets a clear error rather than silently mapping to 0
     // (No ray).
     if (!restirVisibilityArg.empty()) {
@@ -1241,8 +1241,9 @@ Application* createApplication(int argc, char** argv) {
         else if (m == "reconstructed") app->setRestirVisibility(1);
         else if (m == "half")          app->setRestirVisibility(2);
         else if (m == "full")          app->setRestirVisibility(3);
+        else if (m == "cached")        app->setRestirVisibility(4);
         else AVER_ERROR("[Sandbox] --restir-visibility '{}' not recognised "
-                        "(none|reconstructed|half|full)", restirVisibilityArg);
+                        "(none|reconstructed|half|full|cached)", restirVisibilityArg);
     }
     app->setDenoiser(denoiserArg);
     app->setRtForceOff(noRt);

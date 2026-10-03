@@ -8,6 +8,7 @@
 #include "aver/voxi/Voxi.hpp"
 #include "aver/voxi/GiDispatchBounds.hpp"   // W3: VoxelBox/GiDispatchConstants -- see the .cpp for how
 #include "aver/render/denoise/Denoiser.hpp"
+#include "aver/voxi/RadianceCache.hpp"      // rc_ -- the radiance cache's buffers and resolve pass
 
 #include <unordered_map>
 #include "aver/formats/GiCache.hpp"
@@ -1037,7 +1038,19 @@ private:
     rhi::PipelineHandle rdGiTraceCbCsPso_ = 0;
     rhi::PipelineHandle rdGiSplitCsPso_   = 0;
     rhi::PipelineHandle rdGiSplitCbCsPso_ = 0;
-    // C: rdReflSplitCsPso_ (R1, CSRdRefl + AVER_RD_REFL_SPLIT=1) traces the ray and writes gRdReflTex
+    // RADIANCE CACHE twins (stage 1): CSRdGi / CSRdGiTrace and their checkerboard variants compiled
+    // again with AVER_RADIANCE_CACHE=1, the ONLY compiles that contain the cache's scatter and
+    // lookup code -- every other variant (single-pass PSRayDriven, raster PSMainVoxi, the split-read
+    // CSRdGi) keeps byte-identical preprocessed text, which is what "off means off" and the AMD
+    // register limit both need. Built LAZILY (createRadianceCacheTwins) the first time Cached mode
+    // is wanted on a staged D3D12 pipeline, never otherwise. Chosen per frame by testing bit 128 of
+    // cb_.ambientParams[3] AND the handle being non-zero; a twin with the bit clear is plain
+    // HalfResolution. The split-read CSRdGi (AVER_GI_SPLIT=1) needs no twin: it never traces.
+    rhi::PipelineHandle rdGiCacheCsPso_        = 0;
+    rhi::PipelineHandle rdGiCacheCbCsPso_      = 0;
+    rhi::PipelineHandle rdGiTraceCacheCsPso_   = 0;
+    rhi::PipelineHandle rdGiTraceCacheCbCsPso_ = 0;
+    // C: rdReflSplitCsPso_(R1, CSRdRefl + AVER_RD_REFL_SPLIT=1) traces the ray and writes gRdReflTex
     // a PENDING marker in place of composing wherever a history is bound to gather against (see
     // gRdReflTex's header comment, voxi.hlsl, for the fourth alpha this adds). rdReflFilterCsPso_
     // (R2, CSRdReflFilter) reruns rtReflectionSpatial against R1's own gRtReflHistOut write this same
@@ -1632,13 +1645,15 @@ private:
         // every lighting-contrast fix live; see that method's bit table). w = U1/2.9's own bitmask,
         // packed/decoded by givis::packAmbientW (same numeric-cast idiom as z, not a
         // bit-reinterpretation):
-        //   bits 0-1  (& 3u)      Settings::giRestirVisibility (0 NoRay, 1 Reconstructed, 2 HalfRes, 3 Full)
+        //   bits 0-1  (& 3u)      Settings::giRestirVisibility (0 NoRay, 1 Reconstructed, 2 HalfRes, 3 Full; Cached (4) packs as 2 + bit 128)
         //   bit 4     (& 4u)      half-res ReSTIR visibility pair (t16/u10, giVisHist_) bound this frame
         //   bit 8     (& 8u)      t16 holds a real previous frame
         //   bit 16    (& 16u)     W6/M5 setBlendedGiCone: blended fragment's indirect diffuse uses
         //                         the cone gather instead of ReSTIR
         //   bit 32    (& 32u)     backend replays translucent draws blended THIS frame (D3D12 only)
         //   bit 64    (& 64u)     setGiVisPathView's debug view
+        //   bit 128   (& 128u)    radiance cache live this frame (radianceCacheLive_); read only by
+        //                         the AVER_RADIANCE_CACHE twin pipelines
         //   bits 12-15 (>>12 & 15u) Settings::giRestirSpatialSamples (15 = auto)
         //   bits 18-22 (>>18 & 31u) Settings::giRestirMaxHistory (reuse.maxHistory)
         // Single writer: beginShadowHistory (published twice -- unconditionally near the top with
@@ -2303,8 +2318,43 @@ private:
     bool rdLocalLightsRunLogged_ = false;
     // Settings::giRestirVisibility, cached at setSettings. 2 (HalfResolution) matches the struct
     // default (Voxi.hpp, Quality::Medium's ladder rung), so a renderer rendering before its first
-    // setSettings call behaves as Medium rather than NoRay (0).
+    // setSettings call behaves as Medium rather than NoRay (0). 0..3 are the shader's own `& 3u`
+    // modes; 4 (Cached) exists only on the CPU and is packed as wire mode 2 plus bit 128 (see
+    // givis::packAmbientW), so the shader never sees a value above 3.
     u32 giRestirVisibility_ = 2;
+    // RADIANCE CACHE state (stage 1). rc_ owns the accumulator/cells/info-ring buffers, the resolve
+    // pipeline and its sets; it is created on the first frame Cached is wanted and destroyed when it
+    // stops being (updateRadianceCache). radianceCacheLive_ is what this frame's packAmbientW packs
+    // as bit 128: Cached requested && giRestirWanted() && staged ray-driven on D3D12 && rc_.valid()
+    // && the twin pipelines exist. Recomputed every frame, before beginShadowHistory reads it.
+    RadianceCache rc_;
+    bool radianceCacheLive_ = false;
+    // The RadianceCache::Bindings::generation last written into table 0's t22/u20/u21; a different
+    // value from beginFrame means the buffers changed and bindings_ must be rewritten (before the
+    // first bind of the frame -- Vulkan ringed sets forbid writing a bound set).
+    u32 rcBoundGeneration_ = 0;
+    // True while t22/u20/u21 hold real cache buffers. false = null-filled (never activated) or on
+    // the placeholder (torn down).
+    bool rcSlotsBound_ = false;
+    // 64 B UAV-capable stand-in rebound to u20/u21 at teardown (a UAV slot cannot be cleared once
+    // set -- setUav/setUavBuffer refuse handle 0), so no descriptor outlives the buffer it names.
+    // Created lazily at teardown only, never if Cached was never requested.
+    rhi::BufferHandle rcPlaceholder_ = 0;
+    // Once-only logs: "Cached unsupported here, acting as HalfResolution" and the twin-build result.
+    bool rcUnsupportedLogged_ = false;
+    // rc_.create() failed (it logged why): do not retry every frame. Cleared when Cached stops being
+    // the wanted mode, so switching away and back gets a fresh attempt.
+    bool rcCreateFailed_ = false;
+    // createRadianceCacheTwins ran since the last createScenePipelines (which clears it): a failed
+    // build is not retried every frame, but a pipeline rebuild retries against fresh bytecode.
+    bool rcTwinsTried_ = false;
+    // Build/teardown/per-frame hooks (VoxiRenderer.cpp). updateRadianceCache runs in prePass between
+    // buildLocalLights and beginShadowHistory; createRadianceCacheTwins builds the four
+    // AVER_RADIANCE_CACHE=1 compute pipelines; teardownRadianceCache rebinds t22/u20/u21 away from
+    // the buffers and then destroys them.
+    void updateRadianceCache(rhi::IRenderContext& ctx);
+    bool createRadianceCacheTwins();
+    void teardownRadianceCache();
     // Settings::giRestirSpatialSamples, cached the same defensive way: Voxi.cpp clamps it to [0,15]
     // and std::min repeats the ceiling here so this can't disagree with packAmbientW's `& 15u` mask.
     // 15 (AUTO) matches the struct default, so pre-setSettings frames leave the motion discount's
@@ -2410,10 +2460,19 @@ private:
 
     // U1/2.11: whether the half-resolution ReSTIR VISIBILITY history pair (t16/u10, giVisHist_) is
     // wanted -- a STRICT SUBSET of giRestirWanted(), further gated on giRestirVisibility ==
-    // HalfResolution (2); Full (3), Reconstructed (1) and NoRay (0) never touch this pair, so allocating it for them
-    // would be VRAM for a mode that isn't running. Gates giVisHist_'s allocation in
-    // ensureShadowHistory the same way giRestirWanted() gates the surface-history pair's.
-    bool giVisHistWanted() const { return giRestirWanted() && giRestirVisibility_ == 2u; }
+    // HalfResolution (2) or Cached (4, which packs as wire mode 2 and so traces exactly the same
+    // half-res pixels and reads the same pair); Full (3), Reconstructed (1) and NoRay (0) never touch
+    // this pair, so allocating it for them would be VRAM for a mode that isn't running. Gates
+    // giVisHist_'s allocation in ensureShadowHistory the same way giRestirWanted() gates the
+    // surface-history pair's.
+    bool giVisHistWanted() const {
+        return giRestirWanted() && (giRestirVisibility_ == 2u || giRestirVisibility_ == 4u);
+    }
+
+    // RADIANCE CACHE (stage 1): whether Cached mode (giRestirVisibility_ == 4) is the requested
+    // mode AND ReSTIR GI is running. Whether the cache is actually LIVE this frame is the narrower
+    // radianceCacheLive_ (also needs staged ray-driven on D3D12, a created cache and built twins).
+    bool radianceCacheWanted() const { return giRestirWanted() && giRestirVisibility_ == 4u; }
 
     // LOCAL LIGHTS (LAMPS): whether rdLocalHist_ is worth allocating -- ray tracing on, localLights
     // on, and D3D12 (the only backend buildLocalLights fills a list on). Every ray-traced scene mode

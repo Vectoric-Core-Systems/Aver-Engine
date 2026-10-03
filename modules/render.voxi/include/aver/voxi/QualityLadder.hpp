@@ -121,6 +121,10 @@ constexpr u32 giUpdateInterval(Quality q) {
 //   history traces as Full, so the worst frame costs no more than Full's. Neither rung is timed; the
 //   plan's section 5 by-hand verification settles both before shipping.
 //
+// NO RUNG RETURNS 4 (Cached, the radiance cache -- docs/rendering/RADIANCE_CACHE.md): it is opt-in
+// only, set by hand (project setting, console, --restir-visibility cached) until it has been measured
+// against HalfResolution and Full on the owner's GPU.
+//
 // OFF RETURNS 3 (Full), INERT: with GI Off, ReSTIR never runs (RequiresRestirGi, RenderSettingsResolver
 // .hpp), so this value is unread; Full is the safe no-op answer, same convention as giCones(Off) = 6.
 constexpr u32 giRestirVisibility(Quality q) {
@@ -411,7 +415,8 @@ static_assert(Settings{}.giCones          == ladder::giCones(Quality::Medium),
 static_assert(Settings{}.giUpdateInterval == ladder::giUpdateInterval(Quality::Medium),
               "giUpdateInterval's struct default no longer matches GI Medium's ladder rung");
 static_assert(Settings{}.giRestirVisibility == ladder::giRestirVisibility(Quality::Medium),
-              "giRestirVisibility's struct default no longer matches GI Medium's ladder rung");
+              "giRestirVisibility's struct default no longer matches GI Medium's ladder rung "
+              "(and no rung may return 4, Cached: it is opt-in only)");
 
 static_assert(Settings{}.rtShadowRays       == ladder::rtShadowRays(Quality::Medium),
               "rtShadowRays' struct default no longer matches RT Medium's ladder rung");

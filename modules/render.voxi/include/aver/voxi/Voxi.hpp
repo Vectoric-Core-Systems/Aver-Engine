@@ -280,7 +280,15 @@ struct Settings {
     // voxel-cone march the diffuse gather already pays for (no extra ray); HalfResolution traces
     // exact visibility on 1-in-4 pixels/frame, reconstructing the rest from a depth/normal-aware
     // neighbourhood (falls back to tracing when invalid, so worst case = Full's cost); Full traces
-    // every pixel every frame (today's behaviour).
+    // every pixel every frame (today's behaviour). Cached (4, radiance cache stage 1,
+    // docs/rendering/RADIANCE_CACHE.md) traces exactly the pixels HalfResolution traces, but those
+    // pixels also TRAIN a camera-centred world-space SH cache with their F2 ray, and the untraced
+    // pixels READ that cache instead of the sky-ratio reconstruction. It is a STAGED ray-driven,
+    // D3D12-only feature (rtRenderMode 1 with rayDrivenStages >= 1): single-pass ray-driven, the
+    // raster path and Vulkan never compile the cache code, so there Cached behaves exactly as
+    // HalfResolution (a soft DisableReason::RequiresStagedRayDriven says so in the UI). On the GPU
+    // the wire mode stays 2 plus bit 128 of gAmbientParams.w (GiVisibility.hpp) -- the shader's
+    // 2-bit mode field cannot hold a 4.
     // See ladder::giRestirVisibility (QualityLadder.hpp) for per-rung reasoning.
     // Derived from globalIllumination on a tier change like giCones/voxelResolution/giUpdateInterval;
     // default 2 (HalfResolution) since the default tier is Medium (see rtShadowRays above).
@@ -290,7 +298,7 @@ struct Settings {
     // Stored exactly as requested, resolved at read time (like giMode); Resolution::
     // giRestirVisibility.effective deliberately EQUALS requested always -- see that field's comment
     // for why the usual resolve-to-clamped rule would be wrong here.
-    enum class RestirVisibility : u32 { NoRay = 0, Reconstructed = 1, HalfResolution = 2, Full = 3 };
+    enum class RestirVisibility : u32 { NoRay = 0, Reconstructed = 1, HalfResolution = 2, Full = 3, Cached = 4 };
     u32 giRestirVisibility = 2;   // must equal ladder::giRestirVisibility(Quality::Medium)
 
     // ---- BISECTING THE SAME FADE FROM THE OTHER SIDE: SPLIT REUSE APART, THEN TIGHTEN IT ----

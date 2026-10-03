@@ -201,11 +201,13 @@ void Renderer::setSettings(const Settings& s) {
     // Same reasoning as rtRenderMode directly above: 1 is the only mode besides the cone gather, so
     // a garbage value clamps to the DEFAULT (0, cones) rather than silently landing on ReSTIR GI.
     n.giMode             = n.giMode > 1u ? 0u : n.giMode;
-    // U1: 3 (Full) is the top of RestirVisibility, so a typo lands on the CORRECTED transport -- never
+    // U1: 3 (Full) is the corrected-transport rung of RestirVisibility, so a typo lands on it -- never
     // on 0 (NoRay), which would silently reintroduce the over-brightness cb4b48df's contrast fix exists
     // to remove. Unlike giMode/rtRenderMode just above, whose typos clamp to "nothing changed" (0), a
-    // typo here clamps to the tier's own safest answer instead.
-    n.giRestirVisibility = n.giRestirVisibility > 3u ? 3u : n.giRestirVisibility;
+    // typo here clamps to the tier's own safest answer instead. 4 (Cached, the radiance cache) is a
+    // legal value and passes through; only values ABOVE it clamp, and they clamp to Full (3), not to
+    // Cached, so a typo never lands on the experimental cache.
+    n.giRestirVisibility = n.giRestirVisibility > 4u ? 3u : n.giRestirVisibility;
     // Settings::giRestirSpatialSamples's own comment has the bisection this splits reuse for. 15
     // (AUTO) through 0 (temporal only) are all legitimate choices with nothing to typo-guard against,
     // so a plain std::clamp is enough. 15 because givis::packAmbientW packs this into exactly four
