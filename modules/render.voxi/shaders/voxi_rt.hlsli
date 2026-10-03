@@ -701,7 +701,7 @@ float rtSkyOcclusion(float3 wpos, float3 N, float2 pixel, uint rays) {
 bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 velocityPx) {
     hist = 0.0;
     velocityPx = 0.0;
-    float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
+    float4 clip = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
     const float dzdx = ddx(clip.w);
     const float dzdy = ddy(clip.w);
     if (clip.w <= 1e-4) return false;
@@ -729,7 +729,7 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
 bool rtReprojectTexel(float3 wpos, float2 pixel, out int2 texel, out float2 velocityPx) {
     texel = int2(0, 0);
     velocityPx = 0.0;
-    float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
+    float4 clip = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
     const float dzdx = ddx(clip.w);
     const float dzdy = ddy(clip.w);
     if (clip.w <= 1e-4) return false;
@@ -753,7 +753,7 @@ bool rtReprojectTexel(float3 wpos, float2 pixel, out int2 texel, out float2 velo
 bool rtReprojectAo(float3 wpos, float2 pixel, out float hist, out float2 velocityPx) {
     hist = 0.0;
     velocityPx = 0.0;
-    float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
+    float4 clip = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
     const float dzdx = ddx(clip.w);
     const float dzdy = ddy(clip.w);
     if (clip.w <= 1e-4) return false;
@@ -782,7 +782,7 @@ float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDe
     float texW, texH;
     gAoHist.GetDimensions(texW, texH);
 
-    const float4 pclip  = mul(float4(wpos, 1.0), gPrevViewProj);
+    const float4 pclip  = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
     const float  pdepth = pclip.w;
     const float  dpdx   = ddx(pdepth);
     const float  dpdy   = ddy(pdepth);
@@ -910,7 +910,7 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
     gRtShadowHist.GetDimensions(texW, texH);
 
     // Gather around where this pixel was last frame (last frame's depth texture).
-    const float4 pclip  = mul(float4(wpos, 1.0), gPrevViewProj);
+    const float4 pclip  = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
     const float  pdepth = pclip.w;
     const float  dpdx   = ddx(pdepth);
     const float  dpdy   = ddy(pdepth);
@@ -985,6 +985,11 @@ float3 averShadowTint(float3 v, float lum) {
     return (lum > 1e-4) ? (v / lum) : float3(1.0, 1.0, 1.0);
 }
 
+// An occluder arrived or left (often a moving object): the fresh answer differs from history by more
+// than penumbra noise can. Follow it instead of trailing it for ~10 frames.
+static const float kAverShadowChangeHistory = 0.35;
+bool rtShadowChanged(float fresh, float hist) { return abs(fresh - hist) > 0.75; }
+
 // Primary sun-shadow with temporal accumulation and optional tiling (ray amortisation).
 float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
                           bool haveFresh, float3 freshIn) {
@@ -1009,7 +1014,7 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
         float2 velocityPx = 0.0;
         if (gRtHistParams.y > 0.75 && rtReprojectHistory(wpos, pixel, histV, velocityPx)) {
             const float t      = saturate(length(velocityPx) / 32.0);
-            const float weight = lerp(0.9, 0.5, t);
+            const float weight = rtShadowChanged(fresh, histV) ? kAverShadowChangeHistory : lerp(0.9, 0.5, t);
             vis = lerp(fresh, histV, weight);
         }
         if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
@@ -1039,7 +1044,7 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
             // Adaptive blend: high weight for near-still reprojection, lower as velocity increases.
             const float budget = max(6.0 - 1.5 * (float)tileBits, 1.0);
             const float t = saturate(length(velocityPx) / budget);
-            const float weight = lerp(0.9, 0.1, t);
+            const float weight = rtShadowChanged(vis, hist) ? kAverShadowChangeHistory : lerp(0.9, 0.1, t);
             vis = lerp(vis, hist, weight);
         }
     } else {
