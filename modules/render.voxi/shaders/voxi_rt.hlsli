@@ -382,6 +382,16 @@ uint rtGiShadowBits() { return 1u; }
 uint rtGiShadowBits() { return (uint)gGiShadowParams.w; }
 #endif
 
+// True when the instance moved since last frame (animated object, viewmodel). Foliage never moves.
+bool rtInstanceMoved(uint ref) {
+    const RtInstance i = rtLoadInstance(ref);
+    return any(i.objectToWorld[0] != i.prevObjectToWorld[0]) || any(i.objectToWorld[1] != i.prevObjectToWorld[1]) ||
+           any(i.objectToWorld[2] != i.prevObjectToWorld[2]) || any(i.objectToWorld[3] != i.prevObjectToWorld[3]);
+}
+
+// Set by rtShadowEx when a blocking hit was on a moving instance; callers reset it before tracing.
+static bool gAverShadowHitMover = false;
+
 // Sun-shadow rays: 0..1 visibility over disc. Penumbra from pixel footprint (dpx/dpy), not just disc.
 // Bias scales with distance. Secondary rays can request fewer samples than primary.
 // frameJitter added to rotation (gate-deterministic per-pixel). Bit 32 enables ACCEPT_FIRST_HIT.
@@ -431,6 +441,7 @@ float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, flo
                 }
             }
             if (qf.CommittedStatus() != COMMITTED_TRIANGLE_HIT) vis += float3(1.0, 1.0, 1.0);
+            else if (rtInstanceMoved(rtPackCommitted(qf))) gAverShadowHitMover = true;
             continue;
         }
 #endif
@@ -510,7 +521,10 @@ float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, flo
         }
 
         // Opaque hit anywhere blocks everything.
-        if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) through = float3(0, 0, 0);
+        if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) {
+            through = float3(0, 0, 0);
+            if (rtInstanceMoved(rtPackCommitted(q))) gAverShadowHitMover = true;
+        }
 
         vis += through;
     }
@@ -696,12 +710,17 @@ float rtSkyOcclusion(float3 wpos, float3 N, float2 pixel, uint rays) {
     return rtAmbientTraced(wpos, N, pixel, rays).open;
 }
 
+// Sun-shadow history .x is visibility, +2 when a moving occluder shaped it (rtShadowTemporalEx).
+float rtShadowHistVis(float stored) { return stored > 1.5 ? stored - 2.0 : stored; }
+// Set by rtReprojectHistory: the history it returned was shaped by a moving occluder.
+static bool gAverShadowHistMover = false;
+
 // Reprojects wpos through last frame's camera to sample shadow history. False when unusable
 // (off-screen, behind near plane, or disocclusion).
 bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 velocityPx) {
     hist = 0.0;
     velocityPx = 0.0;
-    float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
+    float4 clip = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
     const float dzdx = ddx(clip.w);
     const float dzdy = ddy(clip.w);
     if (clip.w <= 1e-4) return false;
@@ -720,7 +739,8 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
     const float tol = max(clip.w, stored.y) * 0.03 + 1.0 + (abs(dzdx) + abs(dzdy)) * 2.0;
     if (abs(clip.w - stored.y) > tol) return false;
 
-    hist = stored.x;
+    gAverShadowHistMover = stored.x > 1.5;
+    hist = rtShadowHistVis(stored.x);
     velocityPx = px - pixel;
     return true;
 }
@@ -729,7 +749,7 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
 bool rtReprojectTexel(float3 wpos, float2 pixel, out int2 texel, out float2 velocityPx) {
     texel = int2(0, 0);
     velocityPx = 0.0;
-    float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
+    float4 clip = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
     const float dzdx = ddx(clip.w);
     const float dzdy = ddy(clip.w);
     if (clip.w <= 1e-4) return false;
@@ -753,7 +773,7 @@ bool rtReprojectTexel(float3 wpos, float2 pixel, out int2 texel, out float2 velo
 bool rtReprojectAo(float3 wpos, float2 pixel, out float hist, out float2 velocityPx) {
     hist = 0.0;
     velocityPx = 0.0;
-    float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
+    float4 clip = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
     const float dzdx = ddx(clip.w);
     const float dzdy = ddy(clip.w);
     if (clip.w <= 1e-4) return false;
@@ -782,7 +802,7 @@ float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDe
     float texW, texH;
     gAoHist.GetDimensions(texW, texH);
 
-    const float4 pclip  = mul(float4(wpos, 1.0), gPrevViewProj);
+    const float4 pclip  = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
     const float  pdepth = pclip.w;
     const float  dpdx   = ddx(pdepth);
     const float  dpdy   = ddy(pdepth);
@@ -910,7 +930,7 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
     gRtShadowHist.GetDimensions(texW, texH);
 
     // Gather around where this pixel was last frame (last frame's depth texture).
-    const float4 pclip  = mul(float4(wpos, 1.0), gPrevViewProj);
+    const float4 pclip  = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
     const float  pdepth = pclip.w;
     const float  dpdx   = ddx(pdepth);
     const float  dpdy   = ddy(pdepth);
@@ -945,7 +965,8 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
             if (ox == 0 && oy == 0) continue;
             const int2 t = base + int2(ox, oy);
             if (any(t < 0) || t.x >= (int)texW || t.y >= (int)texH) continue;
-            const float2 st = gRtShadowHist.Load(int3(t, 0));
+            float2 st = gRtShadowHist.Load(int3(t, 0));
+            st.x = rtShadowHistVis(st.x);
             const float predicted = planeDepth + dzdx * (float)ox + dzdy * (float)oy;
             const float tol = max(abs(predicted), 1.0) * 0.02 + 1.0;
             if (abs(st.y - predicted) > tol) continue;
@@ -985,6 +1006,13 @@ float3 averShadowTint(float3 v, float lum) {
     return (lum > 1e-4) ? (v / lum) : float3(1.0, 1.0, 1.0);
 }
 
+// History weight while a moving occluder shapes the shadow (static shadows keep 0.9).
+static const float kAverMoverShadowHistory = 0.35;
+// The mover flag stays while the occluder still hits, or while the shadow it left is still changing.
+bool rtMoverShadowKeep(bool moverNow, bool histMover, float vis, float hist) {
+    return moverNow || (histMover && abs(vis - hist) > 0.02);
+}
+
 // Primary sun-shadow with temporal accumulation and optional tiling (ray amortisation).
 float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
                           bool haveFresh, float3 freshIn) {
@@ -999,20 +1027,27 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
     if (tileBits == 0u) {
         // Non-tiled: every pixel traces every frame, accumulate vs history.
         const float frameJitter = (float)((uint)gRtHistParams.z) * 2.39996323;
+        gAverShadowHitMover = false;
         float3 fresh3 = freshIn;
         if (!haveFresh) fresh3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
         const float  fresh   = averShadowLum(fresh3);
         const float3 tint    = averShadowTint(fresh3, fresh);
 
+        const bool moverNow = gAverShadowHitMover;
         float vis = fresh;
         float histV = 0.0;
         float2 velocityPx = 0.0;
-        if (gRtHistParams.y > 0.75 && rtReprojectHistory(wpos, pixel, histV, velocityPx)) {
+        gAverShadowHistMover = false;
+        const bool haveHist = gRtHistParams.y > 0.75 && rtReprojectHistory(wpos, pixel, histV, velocityPx);
+        const bool histMover = haveHist && gAverShadowHistMover;
+        if (haveHist) {
+            // A moving occluder casts this shadow now, or cast the one in history: follow it, don't trail it.
             const float t      = saturate(length(velocityPx) / 32.0);
-            const float weight = lerp(0.9, 0.5, t);
+            const float weight = (moverNow || histMover) ? kAverMoverShadowHistory : lerp(0.9, 0.5, t);
             vis = lerp(fresh, histV, weight);
         }
-        if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
+        const bool keep = rtMoverShadowKeep(moverNow, histMover, vis, histV);
+        if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis + (keep ? 2.0 : 0.0), curDepth);
         return saturate(rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint);
     }
 
@@ -1025,28 +1060,35 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
 
     float hist = 0.0;
     float2 velocityPx = 0.0;
+    gAverShadowHistMover = false;
     const bool haveHist = gRtHistParams.y > 0.75 && rtReprojectHistory(wpos, pixel, hist, velocityPx);
+    const bool histMover = haveHist && gAverShadowHistMover;
 
     float vis;
     float3 tint = float3(1.0, 1.0, 1.0);
-    if (myTurn || !haveHist) {
+    bool moverNow = false;
+    // A shadow a moving occluder shaped traces every frame, not on its tile turn.
+    if (myTurn || !haveHist || histMover) {
         const float frameJitter = (float)frameIdx * 2.39996323;
+        gAverShadowHitMover = false;
         float3 vis3 = freshIn;
         if (!haveFresh) vis3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
+        moverNow = gAverShadowHitMover;
         vis  = averShadowLum(vis3);
         tint = averShadowTint(vis3, vis);
         if (haveHist) {
             // Adaptive blend: high weight for near-still reprojection, lower as velocity increases.
             const float budget = max(6.0 - 1.5 * (float)tileBits, 1.0);
             const float t = saturate(length(velocityPx) / budget);
-            const float weight = lerp(0.9, 0.1, t);
+            const float weight = (moverNow || histMover) ? kAverMoverShadowHistory : lerp(0.9, 0.1, t);
             vis = lerp(vis, hist, weight);
         }
     } else {
         vis = hist;
     }
 
-    if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
+    const bool keep = rtMoverShadowKeep(moverNow, histMover, vis, hist);
+    if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis + (keep ? 2.0 : 0.0), curDepth);
     return saturate(rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint);
 }
 

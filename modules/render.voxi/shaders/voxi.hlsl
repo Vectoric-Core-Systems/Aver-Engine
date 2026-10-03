@@ -191,6 +191,11 @@ static bool gAverHistoryWrite = true;
 // Added to ray origin in rtShadowEx only (temporal wrapper operates at real surface). Reset after each call.
 static float3 gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
 
+// ---- OBJECT MOTION: this pixel's surface point, last frame's position minus this frame's ----
+// History reprojection projects wpos + this through last frame's camera, so an animated object (or the
+// viewmodel) keeps its own history. Rigid instance motion only; 0 for static geometry and in raster.
+static float3 gAverReprojDelta = float3(0.0, 0.0, 0.0);
+
 // Is this fragment a translucent (glass/water) draw, replayed blended?
 bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) != 0u || gTransmission > 0.0; }
 
@@ -580,6 +585,7 @@ struct RdSurface {
     RtMaterial mat;
     float      hitT;
     float3     wpos;
+    float3     reprojDelta;   // last frame's world position minus this frame's (gAverReprojDelta)
 };
 
 // Rebuilds a PSRayDriven-shaped surface from CSRdVisibility's record instead of a live RayQuery.
@@ -621,6 +627,11 @@ RdSurface rdSurfaceFromRecord(uint4 rec, float3 dir) {
     const float3 ng = cross(p1 - p0, p2 - p0);
     o.Ng = dot(ng, ng) > 1e-12 ? normalize(ng) : o.N;
     if (dot(o.Ng, dir) > 0.0) o.Ng = -o.Ng;
+    // Every caller reconstructs only its own pixel, so this pass's history reprojection follows it.
+    const float3 objPos = gRtVerts[o.i0].pos * o.w.x + gRtVerts[o.i1].pos * o.w.y + gRtVerts[o.i2].pos * o.w.z;
+    o.reprojDelta = mul(float4(objPos, 1.0), o.inst.prevObjectToWorld).xyz -
+                    mul(float4(objPos, 1.0), o.inst.objectToWorld).xyz;
+    gAverReprojDelta = o.reprojDelta;
     return o;
 }
 
@@ -817,7 +828,7 @@ float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
 bool rtReprojectReflection(float3 wpos, float2 pixel, out float3 hist, out float2 velocityPx) {
     hist = 0.0;
     velocityPx = 0.0;
-    float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
+    float4 clip = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
     if (clip.w <= 1e-4) return false;
     float3 ndc = clip.xyz / clip.w;
     if (ndc.z < 0.0 || ndc.z > 1.0) return false;
@@ -852,7 +863,7 @@ float3 rtReflectionSpatial(float3 centre, float3 wpos, float3 N, float2 pixel, f
 
     // Gather around where this pixel was last frame, same arithmetic as rtReprojectHistory.
     float2 centrePx = pixel;
-    const float4 pclip = mul(float4(wpos, 1.0), gPrevViewProj);
+    const float4 pclip = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
     if (pclip.w > 1e-4) {
         const float3 pndc = pclip.xyz / pclip.w;
         if (pndc.z >= 0.0 && pndc.z <= 1.0)
@@ -1690,6 +1701,11 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     float3 wpos = gCamPos.xyz + dir * hitT;
     const uint rdInstanceIndex = rtPackCommitted(q);
     const uint rdPrimIndex     = q.CommittedPrimitiveIndex();
+    {
+        const float3 objPos = gRtVerts[i0].pos * w.x + gRtVerts[i1].pos * w.y + gRtVerts[i2].pos * w.z;
+        gAverReprojDelta = mul(float4(objPos, 1.0), inst.prevObjectToWorld).xyz -
+                           mul(float4(objPos, 1.0), inst.objectToWorld).xyz;
+    }
 #endif
     float3 L    = normalize(gLightDir.xyz);
 
@@ -2210,6 +2226,7 @@ void CSRdShadowProbe(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, ui
             const uint kProbe = (pixel.x + 3u * pixel.y + (uint)gRtHistParams.z) % rays;
             // From same side CSRdShadow will trace from (subsurface handling).
             gAverShadowOriginPush = averSubsurfaceShadowPush(s.mat.flags, s.mat.subsurfaceRadius, s.N, L);
+            gAverShadowHitMover = false;
             const float3 fresh = rtShadowEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy, 1u, jitter,
                                             kProbe);
             gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
@@ -2217,6 +2234,8 @@ void CSRdShadowProbe(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, ui
             if (all(fresh == 0.0))      bit = 1u;   // fully blocked
             else if (all(fresh == 1.0)) bit = 2u;   // fully lit
             else                        bit = 4u;   // penumbra or tinted hit
+            // A moving occluder: the tile never counts as uniform, so its pixels trace (and flag history).
+            if (gAverShadowHitMover) bit |= 8u;
 #endif
         }
     }
