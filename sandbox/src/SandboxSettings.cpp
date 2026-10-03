@@ -110,6 +110,7 @@ void SandboxApp::loadEditorPreferences() {
     // wherever the network was not measured to beat it.
     frameInterpTrajectory_ = prefInt("display.frameInterpTrajectory", 2);
     frameInterpTrain_ = prefBool("display.frameInterpTrain", false);
+    fpsCountsInterpolated_ = prefBool("display.fpsCountsInterpolated", true);
     // A stored render scale applies behind a crash cookie: applying one below 1 can lose the GPU
     // device -- a persisted setting that kills the device at startup is a trap with no way out
     // from inside the editor; one evening was lost after the AverSR combo persisted a 0.67 that
@@ -2416,6 +2417,7 @@ void SandboxApp::saveEditorPreferences() {
         setPrefBool("display.frameInterpWhileEditing", frameInterpWhileEditing_);
         setPrefInt("display.frameInterpTrajectory", frameInterpTrajectory_);
         setPrefBool("display.frameInterpTrain", frameInterpTrain_);
+        setPrefBool("display.fpsCountsInterpolated", fpsCountsInterpolated_);
         // The three AverSR keys below are skipped outright, not written a neutral value, when the
         // command line drove this session's render scale or AverSR level: an interactive `--aversr
         // quality` run has maxFrames_ == 0 too (it is not a --frames capture), so the outer guard

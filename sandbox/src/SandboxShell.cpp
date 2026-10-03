@@ -2738,14 +2738,44 @@ void SandboxApp::buildUI(Engine& e) {
                 project_.valid() ? project_.name.c_str() : "No project",
                 rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_*100.f);
     ImGui::SameLine(0.0f, 0.0f);
-    ImGui::Text("%.0f FPS (%.2f ms)", smoothMs > 1e-3 ? 1000.0 / smoothMs : 0.0, smoothMs);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Smoothed over about half a second.\n"
-                          "This frame: %.0f FPS (%.2f ms)\n"
-                          "Worst of the last %u frames: %.1f ms\n"
-                          "Window > GPU Profiler has the CPU and GPU breakdown.",
-                          dt > 1e-6f ? 1.f / dt : 0.f, dt * 1000.f, playProf_.windowFrames(),
-                          playProf_.worstFrameMs());
+    // The frame rate, clickable: with frame interpolation running, each real frame puts two images on
+    // screen, so it can count real frames only or real + interpolated ones (fpsCountsInterpolated_,
+    // chosen in the box the click opens). Everything measured here is per REAL frame.
+    {
+        const bool interpolating = e.device()->frameInterpolated();
+        const f64 realFps = smoothMs > 1e-3 ? 1000.0 / smoothMs : 0.0;
+        char fpsLabel[96];
+        // Kept short: the right-hand button cluster starts where it starts, and a longer face ran
+        // under it ("real + interpolated" hid the actor count). The tooltip says the rest.
+        if (interpolating && fpsCountsInterpolated_)
+            std::snprintf(fpsLabel, sizeof fpsLabel, "%.0f FPS (%.0f real)###fps", realFps * 2.0, realFps);
+        else if (interpolating)
+            std::snprintf(fpsLabel, sizeof fpsLabel, "%.0f FPS real###fps", realFps);
+        else
+            std::snprintf(fpsLabel, sizeof fpsLabel, "%.0f FPS (%.2f ms)###fps", realFps, smoothMs);
+        const char* shown = fpsLabel;   // what ImGui draws: the text before "###"
+        const ImVec2 size = ImGui::CalcTextSize(shown, std::strstr(shown, "###"));
+        if (ImGui::Selectable(fpsLabel, false, ImGuiSelectableFlags_None, size)) ImGui::OpenPopup("##fpsMode");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s"
+                              "Smoothed over about half a second.\n"
+                              "This real frame: %.0f FPS (%.2f ms)\n"
+                              "Worst of the last %u frames: %.1f ms\n"
+                              "Window > GPU Profiler has the CPU and GPU breakdown.\n"
+                              "Click to choose whether interpolated frames are counted.",
+                              interpolating ? "Frame interpolation is on: one interpolated image is shown\n"
+                                              "between every two rendered (real) frames.\n" : "",
+                              dt > 1e-6f ? 1.f / dt : 0.f, dt * 1000.f, playProf_.windowFrames(),
+                              playProf_.worstFrameMs());
+        if (ImGui::BeginPopup("##fpsMode")) {
+            ImGui::TextDisabled("Frame rate shows");
+            if (ImGui::RadioButton("Real frames only", !fpsCountsInterpolated_)) fpsCountsInterpolated_ = false;
+            if (ImGui::RadioButton("Real + interpolated frames", fpsCountsInterpolated_)) fpsCountsInterpolated_ = true;
+            if (!interpolating)
+                ImGui::TextDisabled("Frame interpolation is not running, so both read the same.");
+            ImGui::EndPopup();
+        }
+    }
     ImGui::SameLine(0.0f, 0.0f);
     ImGui::Text("  |  %zu actors  |  %s", objects_.size(), selectionLabel().c_str());
 

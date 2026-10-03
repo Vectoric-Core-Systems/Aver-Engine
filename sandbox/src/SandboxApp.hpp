@@ -3943,6 +3943,9 @@ private:
     bool frameInterpTrain_ = false;
     int  frameInterpTrajectoryCli_ = -1;     // --frame-interp-trajectory; -1 = not given
     bool frameInterpTrainCli_ = false;       // --frame-interp-train
+    // The status bar's frame rate counts interpolated frames too (real + interpolated) or real frames
+    // only; chosen by clicking it. display.fpsCountsInterpolated.
+    bool fpsCountsInterpolated_ = true;
     std::unique_ptr<aver::neurafi::NeuraFI> frameInterpolator_;
     // Decides and pushes this frame's frame-interperation state; returns whether it is wanted (the
     // G-buffer must then be on).
