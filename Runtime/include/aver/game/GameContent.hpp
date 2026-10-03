@@ -377,15 +377,10 @@ private:
     bool collisionSlotCollides(const std::string& slotName);
 
     // Splits `md` into one compacted MeshHandle + material token per submesh, when it names more than
-    // one -- a no-op otherwise. Ported from SandboxApp::buildMeshParts (sandbox/src/SandboxAssets.cpp):
-    // same compaction (each part gets its OWN remapped vertex/index arrays, not a view into `verts`,
-    // because IDevice::createMesh copies what it is given and a part sharing the parent's whole buffer
-    // would upload it once per part), same slot-name-to-material-token rule (a submesh's materialSlot
-    // names a string in md.materialSlots, resolved through aver_scene_material the same way
-    // meshSlot0Material_ already is above), same "one surviving part is not a split" fallback. Called
-    // unconditionally from loadProjectMeshes, not gated on AVER_MODULE_LANDSCAPE the way the editor's
-    // call site is -- see MeshPart's own comment for why that guard does not belong here.
-    void buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md,
+    // one -- a no-op otherwise. Each part is an index buffer sharing `whole`'s vertices; a submesh's
+    // materialSlot names a string in md.materialSlots, resolved through aver_scene_material. One
+    // surviving part is not a split. Called unconditionally from loadProjectMeshes.
+    void buildMeshParts(rhi::IDevice& device, u64 id, rhi::MeshHandle whole, const fmt::OcMeshData& md,
                          const std::vector<rhi::MeshVertex>& verts, const std::string& rel);
 #endif
 

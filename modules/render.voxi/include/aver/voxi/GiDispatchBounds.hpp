@@ -44,11 +44,11 @@ struct VoxelBox {
 inline constexpr u32 kGiDispatchConstantDwords = 8;
 
 // Byte-for-byte mirror of voxi.hlsl's `cbuffer MipCB : register(b3) { uint gSrcMip; uint3 gBoxLo;
-// uint3 gBoxHi; uint _boxPad; };`. HLSL cbuffer packing puts gSrcMip at byte 0 (4 B) and gBoxLo
+// uint3 gBoxHi; uint gSlabZ; };`. HLSL cbuffer packing puts gSrcMip at byte 0 (4 B) and gBoxLo
 // immediately after it at byte 4 -- a uint3 needs 12 B and HLSL only pushes a field to the NEXT
 // 16-byte slot when it would otherwise straddle one, and 4..15 does not cross the 16 B boundary at 16,
 // so gBoxLo fits in what is left of gSrcMip's own slot. gBoxHi then starts a fresh 16-byte slot at
-// byte 16, and _boxPad fills its last 4 B. No slot is left partially empty, so this struct needs no
+// byte 16, and gSlabZ fills its last 4 B. No slot is left partially empty, so this struct needs no
 // compiler-inserted padding of its own to reach the same 32 B layout: every member here is 4-byte
 // aligned and the total is already a multiple of 4. static_assert below pins that rather than trusting
 // the paragraph. gSrcMip is CSMip's source-level index; CSClear/CSResolve never read it and leave it
@@ -57,7 +57,7 @@ struct GiDispatchConstants {
     u32 srcMip = 0;
     u32 boxLo[3] = {0, 0, 0};
     u32 boxHi[3] = {0, 0, 0};
-    u32 pad = 0;
+    u32 slabZ = 0;   // CSClear/CSResolve: first z layer of the injection slab
 };
 static_assert(sizeof(GiDispatchConstants) == kGiDispatchConstantDwords * sizeof(u32));
 

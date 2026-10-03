@@ -531,8 +531,7 @@ void SandboxApp::setConsoleSets(std::vector<std::pair<std::string, std::string>>
 // false (DEFAULT, "upload") is today's behaviour, untouched by this flag's absence.
 void SandboxApp::setMeshHeapDefault(bool on) { meshHeapDefault_ = on; }
 
-// --lod-share-vertices 0|1 (W11): read inside loadProjectMeshes' LOD-ladder loop. false (DEFAULT)
-// is today's behaviour -- every LOD level gets its own independent vertex buffer.
+// --lod-share-vertices 0|1: read inside loadProjectMeshes' LOD-ladder loop. Default on.
 void SandboxApp::setLodShareVertices(bool on) { lodShareVertices_ = on; }
 
 // --cam-translate SPEED: flies the camera forward along camForward() by SPEED world-cm/frame,

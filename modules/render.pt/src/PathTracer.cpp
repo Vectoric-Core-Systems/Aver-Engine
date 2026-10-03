@@ -457,6 +457,9 @@ bool PathTracer::prepare() {
     // so this is a deduplication within one snapshot, never a cache across snapshots.
     std::unordered_map<rhi::MeshHandle, u32> rowOf;
     rowOf.reserve(surfaces_.size());
+    // Vertex buffer -> its first vertex in the table: meshes sharing one buffer (LOD levels, split
+    // parts) index the same rows, so it is copied once.
+    std::unordered_map<rhi::BufferHandle, u32> vertsOf;
     for (usize i = 0; i < surfaces_.size(); ++i) {
         const rhi::MeshHandle mesh = surfaces_[i].mesh;
         auto found = rowOf.find(mesh);
@@ -469,11 +472,17 @@ bool PathTracer::prepare() {
             }
             MeshRow row;
             row.mesh        = mesh;
-            row.firstVertex = totalVerts_;
             row.firstIndex  = totalIndices_;
             row.vertexCount = vc;
             row.indexCount  = ic;
-            totalVerts_   += vc;
+            if (const auto shared = vertsOf.find(vb); shared != vertsOf.end()) {
+                row.firstVertex = shared->second;
+                row.copiesVertices = false;
+            } else {
+                row.firstVertex = totalVerts_;
+                vertsOf.emplace(vb, totalVerts_);
+                totalVerts_ += vc;
+            }
             totalIndices_ += ic;
             found = rowOf.emplace(mesh, static_cast<u32>(meshRows_.size())).first;
             meshRows_.push_back(row);
@@ -647,8 +656,9 @@ bool PathTracer::buildScenes(rhi::IRenderContext& ctx) {
             rhi::BufferHandle vb = 0, ib = 0;
             u32 vc = 0, ic = 0;
             if (!dev_->meshGeometry(row.mesh, &vb, &ib, &vc, &ic)) { ctx.popMarker(); return false; }
-            ctx.copyBuffer(verts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
-                           static_cast<u64>(row.firstVertex) * sizeof(rhi::MeshVertex), 0);
+            if (row.copiesVertices)
+                ctx.copyBuffer(verts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
+                               static_cast<u64>(row.firstVertex) * sizeof(rhi::MeshVertex), 0);
             ctx.copyBuffer(indices_, ib, static_cast<u64>(ic) * sizeof(u32),
                            static_cast<u64>(row.firstIndex) * sizeof(u32), 0);
         }
@@ -656,6 +666,18 @@ bool PathTracer::buildScenes(rhi::IRenderContext& ctx) {
         ctx.bufferBarrier(indices_, rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
     }
 
+    if (!buildTlases(ctx)) { ctx.popMarker(); return false; }
+    ctx.popMarker();
+
+    built_ = true;
+    AVER_INFO("[PT] {} surfaces, {} scenes, {} vertices and {} indices in the flat table",
+              surfaces_.size(), scenes_.size(), totalVerts_, totalIndices_);
+    return true;
+}
+
+// Voxi's shared BLASes can move (compaction, rebuild); the TLASes hold their addresses.
+bool PathTracer::buildTlases(rhi::IRenderContext& ctx) {
+    tlasBlasGeneration_ = res_->blasGeneration();
     for (const Scene& s : scenes_) {
         std::vector<rhi::TlasInstance> inst;
         inst.reserve(s.surfaces.size());
@@ -673,14 +695,9 @@ bool PathTracer::buildScenes(rhi::IRenderContext& ctx) {
             i.instanceId = id & rhi::kMaxTlasInstanceId;
             inst.push_back(i);
         }
-        if (inst.empty()) { ctx.popMarker(); return false; }
+        if (inst.empty()) return false;
         ctx.buildTlas(s.tlas, inst.data(), static_cast<u32>(inst.size()));
     }
-    ctx.popMarker();
-
-    built_ = true;
-    AVER_INFO("[PT] {} surfaces, {} scenes, {} vertices and {} indices in the flat table",
-              surfaces_.size(), scenes_.size(), totalVerts_, totalIndices_);
     return true;
 }
 
@@ -767,6 +784,7 @@ void PathTracer::destroyTarget(PtTarget& t) {
 void PathTracer::accumulate(rhi::IRenderContext& ctx, const PtTarget& t, const PtCamera& cam,
                             const PtDispatch& d) {
     if (!pipeline_ || !built_ || !t.valid()) return;
+    if (res_->blasGeneration() != tlasBlasGeneration_ && !buildTlases(ctx)) return;
 
     FrameCB cb{};
     for (u32 i = 0; i < 3; ++i) {

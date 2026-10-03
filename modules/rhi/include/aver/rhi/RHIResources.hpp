@@ -620,6 +620,9 @@ public:
     // its instance buffers and static prefix too -- or 0 for a dead handle or a backend that does not
     // say. For memory reports, not for sizing anything.
     virtual u64 blasMemoryBytes(BlasHandle h) const { (void)h; return 0; }
+    // Advances whenever a backend moves built BLASes (compaction). A TLAS holds BLAS addresses, so its
+    // owner must rebuild it on a frame this has changed since its last build.
+    virtual u64 blasGeneration() const { return 0; }
     virtual u64 tlasMemoryBytes(TlasHandle h) const { (void)h; return 0; }
 
     // Destruction is DEFERRED BY CONTRACT: the resource retires once the GPU is past every frame

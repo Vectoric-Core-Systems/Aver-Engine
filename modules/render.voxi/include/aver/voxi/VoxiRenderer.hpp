@@ -2337,6 +2337,9 @@ private:
     // && the twin pipelines exist. Recomputed every frame, before beginShadowHistory reads it.
     NeuRaC rc_;
     bool neuracLive_ = false;
+    u64 tlasBlasGeneration_ = 0;   // IResourceFactory::blasGeneration at the last full TLAS build
+    u64 tlasBuiltBlasGeneration_ = 0;   // ... at the last tlas_ build or refit
+    std::vector<u32> voxDrawZ_;   // voxelizePass: each draw's voxel z range, pairs [lo, hi)
     u32 neuracView_ = 0;   // setNeuRaCView: mode in bits 0-2, grid bit 3 (packed into gAmbientParams.w << 8)
     // The NeuRaC::Bindings::generation last written into table 0's t22/u20/u21; a different
     // value from beginFrame means the buffers changed and bindings_ must be rewritten (before the

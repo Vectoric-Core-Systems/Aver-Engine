@@ -2027,10 +2027,16 @@ struct RetiredRange {
     u64 fence = 0;
 };
 
-// A bottom-level acceleration structure for one mesh, with its build scratch.
-// Scratch is released only through the deferred-destroy queue.
+// A bottom-level acceleration structure. `as` may be a shared arena buffer once compacted, so the
+// structure is at as + asOffset, asBytes long. Only an updatable BLAS keeps its own scratch; the rest
+// build from the factory's shared scratch (docs/rendering/VRAM.md).
 struct RhiBlas {
     ComPtr<ID3D12Resource> as, scratch;
+    u64 asOffset = 0, asBytes = 0;
+    u64 maxBytes = 0, scratchBytes = 0;   // prebuild sizes: an uncompacted structure, a build's scratch
+    bool compacted = false;
+    bool pinned = false;   // its address is baked into a TLAS static prefix: never moved
+    D3D12_GPU_VIRTUAL_ADDRESS va() const { return as ? as->GetGPUVirtualAddress() + asOffset : 0; }
     MeshHandle mesh = 0;
     bool built = false;
     // Set at creation by createBlasUpdatable: built with ALLOW_UPDATE and a scratch sized for an
@@ -2083,6 +2089,7 @@ struct RhiTlas {
     // The distinct BLASes the prefix names, checked before every build: a handful for millions of
     // instances, so the check is not O(prefix).
     std::vector<BlasHandle> staticBlases;
+    std::vector<D3D12_GPU_VIRTUAL_ADDRESS> staticBlasVa;   // as baked; a moved BLAS breaks the prefix
     // The prefix length the last build/refit actually used (0 when it had none or dropped a broken one):
     // an update is only legal over the same descs its build had.
     u32 builtStatic = 0;
@@ -2357,6 +2364,29 @@ private:
     std::vector<RhiBindlessTable> bindlessTables_;
     std::vector<RhiBlas>       blases_;
     std::vector<RhiTlas>       tlases_;
+
+    // ---- BLAS memory (docs/rendering/VRAM.md) ----
+    // Shared build scratch for non-updatable BLAS: carved linearly, a UAV barrier before reuse.
+    ComPtr<ID3D12Resource> sharedScratch_;
+    u64 sharedScratchCap_ = 0, sharedScratchOff_ = 0, sharedScratchSerial_ = ~0ull;
+    D3D12_GPU_VIRTUAL_ADDRESS buildScratch(ID3D12GraphicsCommandList* cl, u64 bytes);
+    // Compaction: a build writes its compacted size to postbuild_[slot]; the next frame copies the sizes
+    // to postbuildRb_; once that copy has retired, processCompaction copies each BLAS into the arena.
+    static constexpr u32 kCompactSlots = 16384;
+    struct CompactEntry { BlasHandle h; u32 slot; ID3D12Resource* src; };
+    ComPtr<ID3D12Resource> postbuild_, postbuildRb_;
+    std::vector<CompactEntry> compactBuilt_;      // built this frame, sizes not copied yet
+    std::vector<CompactEntry> compactInFlight_;   // sizes copied, waiting for compactFence_
+    u64 compactFence_ = 0;
+    u32 compactNextSlot_ = 0;
+    ComPtr<ID3D12Resource> arena_;
+    u64 arenaOff_ = 0;
+    u64 blasGeneration_ = 0;
+    bool requestCompaction(BlasHandle h, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC& out);
+public:
+    void processCompaction(ID3D12GraphicsCommandList4* cl);   // the device calls it at the top of each frame
+    u64 blasGeneration() const override { return blasGeneration_; }
+private:
     std::vector<RootSigEntry>  rootSigs_;
     std::vector<RetiredObject> retired_;
     std::vector<RetiredRange>  pendingRanges_;   // returned, still behind the fence (shader-visible heap)
@@ -4219,6 +4249,8 @@ void D3D12Device::beginFrame() {
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
     recording_ = true;
+    // Before any feature builds a TLAS this frame: compacted BLASes move here (blasGeneration).
+    if (rhiFactory_ && cmdList4_) rhiFactory_->processCompaction(cmdList4_.Get());
     boundRootSig_ = nullptr;
     boundPso_ = pso_.Get();   // Reset's second argument IS the command list's initial bound PSO
     // Reset() does not carry descriptor heaps forward either -- a freshly reset command list has
@@ -8185,7 +8217,8 @@ D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blasInputs(const GpuMesh& m
     in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
     in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-    if (allowUpdate) in.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+    in.Flags |= allowUpdate ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE
+                            : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
     in.NumDescs = 1;
     in.pGeometryDescs = &geo;
     return in;
@@ -8216,7 +8249,8 @@ bool blasMultiInputs(const std::vector<GpuMesh>& meshes, const std::vector<BlasG
     in = {};
     in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
     in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE |
+               D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
     in.NumDescs = static_cast<UINT>(geos.size());
     in.pGeometryDescs = geos.data();
     return true;
@@ -8292,13 +8326,14 @@ BlasHandle D3D12ResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpdat
     RhiBlas b;
     b.mesh = mesh;
     b.allowUpdate = allowUpdate;
+    b.maxBytes = info.ResultDataMaxSizeInBytes;
+    b.asBytes = b.maxBytes;
     b.as = makeAsBuffer(dev_->device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-    // An updatable structure's scratch must cover whichever of a build or an update asks for more --
-    // it is reused for both, and D3D12 sizes the two independently.
-    const u64 scratchBytes = allowUpdate ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
-                                          : info.ScratchDataSizeInBytes;
-    b.scratch = makeAsBuffer(dev_->device_.Get(), scratchBytes, D3D12_RESOURCE_STATE_COMMON);
-    if (!b.as || !b.scratch) { AVER_ERROR("[RHI.D3D12] createBlas allocation failed"); return 0; }
+    // Updatable: its own scratch, covering a build or an update. Otherwise the shared build scratch.
+    b.scratchBytes = allowUpdate ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
+                                 : info.ScratchDataSizeInBytes;
+    if (allowUpdate) b.scratch = makeAsBuffer(dev_->device_.Get(), b.scratchBytes, D3D12_RESOURCE_STATE_COMMON);
+    if (!b.as || (allowUpdate && !b.scratch)) { AVER_ERROR("[RHI.D3D12] createBlas allocation failed"); return 0; }
     blases_.push_back(std::move(b));
     return static_cast<BlasHandle>(blases_.size());
 }
@@ -8320,9 +8355,11 @@ BlasHandle D3D12ResourceFactory::createBlasMulti(const BlasGeometry* geometries,
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
     dev_->device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
     b.mesh = geometries[0].mesh;
+    b.maxBytes = info.ResultDataMaxSizeInBytes;
+    b.asBytes = b.maxBytes;
+    b.scratchBytes = info.ScratchDataSizeInBytes;
     b.as = makeAsBuffer(dev_->device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-    b.scratch = makeAsBuffer(dev_->device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_COMMON);
-    if (!b.as || !b.scratch) { AVER_ERROR("[RHI.D3D12] createBlasMulti allocation failed"); return 0; }
+    if (!b.as) { AVER_ERROR("[RHI.D3D12] createBlasMulti allocation failed"); return 0; }
     blases_.push_back(std::move(b));
     return static_cast<BlasHandle>(blases_.size());
 }
@@ -8399,6 +8436,8 @@ bool D3D12ResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInstan
     }
     std::sort(distinct.begin(), distinct.end());
     distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+    // Their addresses are about to be baked into a persistent buffer: never move them (compaction).
+    for (const BlasHandle bh : distinct) blases_[bh - 1].pinned = true;
 
     // The structure and scratch for prefix + the TLAS's own per-frame maximum, from the prebuild query
     // with the flags it is built with (see createTlasImpl).
@@ -8432,7 +8471,7 @@ bool D3D12ResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInstan
             [&](u8* dst) {
                 auto* out = reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(dst);
                 for (u32 i = 0; i < count; ++i)
-                    out[i] = toInstanceDesc(instances[i], blases_[instances[i].blas - 1].as->GetGPUVirtualAddress());
+                    out[i] = toInstanceDesc(instances[i], blases_[instances[i].blas - 1].va());
             });
         if (!filled) {
             AVER_ERROR("[RHI.D3D12] setTlasStaticInstances: the {:.1f} MiB instance buffer could not be created "
@@ -8457,6 +8496,8 @@ bool D3D12ResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInstan
     t->staticDescs = descs;
     t->staticCount = count;
     t->staticDescsState = D3D12_RESOURCE_STATE_COMMON;
+    t->staticBlasVa.clear();
+    for (const BlasHandle bh : distinct) t->staticBlasVa.push_back(blases_[bh - 1].va());
     t->staticBlases = std::move(distinct);
     t->staticBrokenLogged = false;
     t->built = false;
@@ -8480,7 +8521,7 @@ BufferHandle D3D12ResourceFactory::tlasStaticInstanceBuffer(TlasHandle h) const 
 u64 D3D12ResourceFactory::blasMemoryBytes(BlasHandle h) const {
     if (h == 0 || h > blases_.size()) return 0;
     const RhiBlas& b = blases_[h - 1];
-    return (b.as ? b.as->GetDesc().Width : 0) + (b.scratch ? b.scratch->GetDesc().Width : 0);
+    return (b.as ? b.asBytes : 0) + (b.scratch ? b.scratch->GetDesc().Width : 0);
 }
 
 u64 D3D12ResourceFactory::tlasMemoryBytes(TlasHandle h) const {
@@ -8532,10 +8573,126 @@ void D3D12ResourceFactory::destroyBlas(BlasHandle h) {
     retire(b.scratch);
     b.as.Reset();
     b.scratch.Reset();
+    b.asOffset = b.asBytes = 0;
+    b.compacted = false;
     b.mesh = 0;
     b.built = false;
     b.geometries.clear();
     collect();
+}
+
+// ---- BLAS memory: shared build scratch and compaction (docs/rendering/VRAM.md) ----
+
+D3D12_GPU_VIRTUAL_ADDRESS D3D12ResourceFactory::buildScratch(ID3D12GraphicsCommandList* cl, u64 bytes) {
+    constexpr u64 kAlign = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT;
+    constexpr u64 kMinCap = 64ull << 20;
+    bytes = (bytes + kAlign - 1) & ~(kAlign - 1);
+    if (bytes > sharedScratchCap_) {
+        retire(sharedScratch_);
+        sharedScratchCap_ = std::max(bytes, std::max(kMinCap, sharedScratchCap_ * 2));
+        sharedScratch_ = makeAsBuffer(dev_->device_.Get(), sharedScratchCap_, D3D12_RESOURCE_STATE_COMMON);
+        if (!sharedScratch_) { sharedScratchCap_ = 0; return 0; }
+        sharedScratchOff_ = 0;
+        sharedScratchSerial_ = dev_->frameSerial_;
+    } else if (sharedScratchSerial_ != dev_->frameSerial_ || sharedScratchOff_ + bytes > sharedScratchCap_) {
+        // Reusing a range an earlier build may still be using: wait for it.
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        b.UAV.pResource = sharedScratch_.Get();
+        cl->ResourceBarrier(1, &b);
+        sharedScratchOff_ = 0;
+        sharedScratchSerial_ = dev_->frameSerial_;
+    }
+    const D3D12_GPU_VIRTUAL_ADDRESS va = sharedScratch_->GetGPUVirtualAddress() + sharedScratchOff_;
+    sharedScratchOff_ += bytes;
+    return va;
+}
+
+bool D3D12ResourceFactory::requestCompaction(BlasHandle h,
+                                             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC& out) {
+    RhiBlas* b = blas(h);
+    if (!b || b->allowUpdate || b->pinned || compactNextSlot_ >= kCompactSlots) return false;
+    if (!postbuild_) {
+        postbuild_ = makeAsBuffer(dev_->device_.Get(), kCompactSlots * 8ull, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        auto rh = heapProps(D3D12_HEAP_TYPE_READBACK);
+        auto rd = bufferDesc(kCompactSlots * 8ull);
+        dev_->device_->CreateCommittedResource(&rh, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST,
+                                               nullptr, IID_PPV_ARGS(&postbuildRb_));
+    }
+    if (!postbuild_ || !postbuildRb_) return false;
+    const u32 slot = compactNextSlot_++;
+    out.DestBuffer = postbuild_->GetGPUVirtualAddress() + slot * 8ull;
+    out.InfoType = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE;
+    compactBuilt_.push_back({h, slot, b->as.Get()});
+    return true;
+}
+
+// Top of each frame, before any TLAS is built. Finishes a batch whose sizes have reached the CPU (copy
+// into the arena, retire the original, advance blasGeneration_ so TLAS owners rebuild), then starts the
+// next batch by copying the latest compacted sizes back.
+void D3D12ResourceFactory::processCompaction(ID3D12GraphicsCommandList4* cl) {
+    if (!cl || !dev_->fence_) return;
+    constexpr u64 kAlign = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT;
+    constexpr u64 kArenaBytes = 64ull << 20;
+    if (!compactInFlight_.empty() && dev_->fence_->GetCompletedValue() >= compactFence_) {
+        void* mapped = nullptr;
+        D3D12_RANGE rr{0, kCompactSlots * 8ull};
+        if (SUCCEEDED(postbuildRb_->Map(0, &rr, &mapped)) && mapped) {
+            const u64* sizes = static_cast<const u64*>(mapped);
+            u64 before = 0, after = 0;
+            u32 moved = 0;
+            for (const CompactEntry& e : compactInFlight_) {
+                RhiBlas* b = blas(e.h);
+                if (!b || !b->built || b->compacted || b->pinned || b->as.Get() != e.src) continue;
+                const u64 size = (sizes[e.slot] + kAlign - 1) & ~(kAlign - 1);
+                if (size == 0 || size >= b->asBytes) continue;
+                if (!arena_ || arenaOff_ + size > arena_->GetDesc().Width) {
+                    arena_ = makeAsBuffer(dev_->device_.Get(), std::max(kArenaBytes, size),
+                                          D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+                    arenaOff_ = 0;
+                    if (!arena_) break;
+                }
+                cl->CopyRaytracingAccelerationStructure(arena_->GetGPUVirtualAddress() + arenaOff_, b->va(),
+                    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
+                before += b->asBytes;
+                after += size;
+                retire(b->as);
+                b->as = arena_;
+                b->asOffset = arenaOff_;
+                b->asBytes = size;
+                b->compacted = true;
+                arenaOff_ += size;
+                ++moved;
+            }
+            D3D12_RANGE none{0, 0};
+            postbuildRb_->Unmap(0, &none);
+            if (moved) {
+                D3D12_RESOURCE_BARRIER bar{};
+                bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                bar.UAV.pResource = nullptr;   // every UAV: the arena chunks the copies wrote
+                cl->ResourceBarrier(1, &bar);
+                ++blasGeneration_;
+                AVER_INFO("[RHI.D3D12] compacted {} BLAS: {:.1f} -> {:.1f} MiB", moved,
+                          static_cast<f64>(before) / (1024.0 * 1024.0), static_cast<f64>(after) / (1024.0 * 1024.0));
+            }
+        }
+        compactInFlight_.clear();
+    }
+    if (compactInFlight_.empty() && !compactBuilt_.empty()) {
+        D3D12_RESOURCE_BARRIER pre[2]{};
+        pre[0].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        pre[0].UAV.pResource = postbuild_.Get();
+        pre[1] = transition(postbuild_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        cl->ResourceBarrier(2, pre);
+        cl->CopyBufferRegion(postbuildRb_.Get(), 0, postbuild_.Get(), 0, compactNextSlot_ * 8ull);
+        D3D12_RESOURCE_BARRIER post = transition(postbuild_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl->ResourceBarrier(1, &post);
+        compactInFlight_.swap(compactBuilt_);
+        compactBuilt_.clear();
+        compactNextSlot_ = 0;
+        compactFence_ = retireFence();
+    }
 }
 
 MeshHandle D3D12ResourceFactory::blasMesh(BlasHandle h) const {
@@ -9622,6 +9779,21 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
     if (!b) { AVER_ERROR("[RHI.D3D12] buildBlas with an invalid handle"); return; }
     if (!dev_->cmdList4_ || !dev_->device5_) { AVER_ERROR("[RHI.D3D12] buildBlas without ray-tracing support"); return; }
     if (b->mesh == 0 || b->mesh > dev_->meshes_.size()) return;
+    // A compacted structure is too small to build into: back to a full-size buffer of its own. Its
+    // address changes, so TLAS owners must rebuild (blasGeneration).
+    if (b->compacted) {
+        res_->retire(b->as);
+        b->as = makeAsBuffer(dev_->device_.Get(), b->maxBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+        b->asOffset = 0;
+        b->asBytes = b->maxBytes;
+        b->compacted = false;
+        ++res_->blasGeneration_;
+        if (!b->as) { AVER_ERROR("[RHI.D3D12] buildBlas: re-allocating compacted BLAS {} failed", h); return; }
+    }
+    const D3D12_GPU_VIRTUAL_ADDRESS scratch = b->scratch ? b->scratch->GetGPUVirtualAddress()
+                                                         : res_->buildScratch(dev_->cmdList_.Get(), b->scratchBytes);
+    if (!scratch) { AVER_ERROR("[RHI.D3D12] buildBlas: no build scratch for BLAS {}", h); return; }
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC pb{};
     if (!b->geometries.empty()) {
         // createBlasMulti: every geometry at once, into the allocation its prebuild query sized.
         std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geos;
@@ -9630,9 +9802,10 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
             AVER_ERROR("[RHI.D3D12] buildBlas: multi-geometry BLAS {} names a mesh that is gone", h);
             return;
         }
-        bd.ScratchAccelerationStructureData = b->scratch->GetGPUVirtualAddress();
-        bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
-        dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+        bd.ScratchAccelerationStructureData = scratch;
+        bd.DestAccelerationStructureData = b->va();
+        const bool compact = res_->requestCompaction(h, pb);
+        dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, compact ? 1 : 0, compact ? &pb : nullptr);
         D3D12_RESOURCE_BARRIER bar{};
         bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         bar.UAV.pResource = b->as.Get();
@@ -9645,9 +9818,10 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
     D3D12_RAYTRACING_GEOMETRY_DESC geo{};
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
     bd.Inputs = blasInputs(m, geo, b->allowUpdate);
-    bd.ScratchAccelerationStructureData = b->scratch->GetGPUVirtualAddress();
-    bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
-    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    bd.ScratchAccelerationStructureData = scratch;
+    bd.DestAccelerationStructureData = b->va();
+    const bool compact = res_->requestCompaction(h, pb);
+    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, compact ? 1 : 0, compact ? &pb : nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     bar.UAV.pResource = b->as.Get();
@@ -9689,7 +9863,7 @@ bool D3D12RenderContext::refitBlas(BlasHandle h) {
             const u64 scratchBytes = b->allowUpdate
                 ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
                 : info.ScratchDataSizeInBytes;
-            if (info.ResultDataMaxSizeInBytes > b->as->GetDesc().Width || scratchBytes > b->scratch->GetDesc().Width) {
+            if (info.ResultDataMaxSizeInBytes > b->maxBytes || (b->scratch && scratchBytes > b->scratch->GetDesc().Width)) {
                 AVER_ERROR("[RHI.D3D12] refitBlas: mesh {} moved from {}v/{}i to {}v/{}i, past what its BLAS "
                            "was allocated for at creation -- rebuilding it in place would write past that "
                            "allocation, so this refit is refused; the caller must destroy and recreate the BLAS",
@@ -9706,9 +9880,9 @@ bool D3D12RenderContext::refitBlas(BlasHandle h) {
     bd.Inputs = blasInputs(m, geo, /*allowUpdate=*/true);
     bd.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
     bd.ScratchAccelerationStructureData = b->scratch->GetGPUVirtualAddress();
-    bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
+    bd.DestAccelerationStructureData = b->va();
     // In place: DXR allows Source == Dest for an update, and that is what "refit" means here.
-    bd.SourceAccelerationStructureData = b->as->GetGPUVirtualAddress();
+    bd.SourceAccelerationStructureData = b->va();
     dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -9744,7 +9918,7 @@ u32 D3D12RenderContext::packTlasInstances(RhiTlas& t, const TlasInstance* instan
                        caller, i, instances[i].instanceId);
             continue;
         }
-        const D3D12_RAYTRACING_INSTANCE_DESC id = toInstanceDesc(instances[i], b->as->GetGPUVirtualAddress());
+        const D3D12_RAYTRACING_INSTANCE_DESC id = toInstanceDesc(instances[i], b->va());
         dst[written++] = id;
         // The mask as the GPU keeps it (InstanceMask is 8 bits), so bits it never sees can't defeat a refit.
         outSlots.push_back({id.AccelerationStructure, id.Flags, instances[i].mask & 0xFFu});
@@ -9784,12 +9958,14 @@ void D3D12RenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, 
 // one away at any time and the prefix holds raw GPU addresses -- O(distinct BLASes), not O(prefix).
 u32 D3D12RenderContext::usableStaticPrefix(RhiTlas& t) {
     if (t.staticCount == 0 || !res_->bufferResource(t.staticDescs)) return 0;
-    for (BlasHandle b : t.staticBlases) {
-        if (res_->blas(b)) continue;
+    for (usize i = 0; i < t.staticBlases.size(); ++i) {
+        const BlasHandle b = t.staticBlases[i];
+        const RhiBlas* rb = res_->blas(b);
+        if (rb && rb->va() == t.staticBlasVa[i]) continue;
         if (!t.staticBrokenLogged) {
-            AVER_ERROR("[RHI.D3D12] TLAS static prefix names BLAS {}, destroyed since it was set -- its {} "
+            AVER_ERROR("[RHI.D3D12] TLAS static prefix names BLAS {}, {} since it was set -- its {} "
                        "instance(s) are left out of every build until the prefix is replaced or removed",
-                       b, t.staticCount);
+                       b, rb ? "moved" : "destroyed", t.staticCount);
             t.staticBrokenLogged = true;
         }
         return 0;

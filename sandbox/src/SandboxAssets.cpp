@@ -150,7 +150,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
                 // 0 back means the device refused (an unsupported backend, or `h`'s vertices are
                 // compute-written, e.g. a skin target -- see createMeshSharingVertices' own
                 // comment for the full list) and the caller MUST fall back, exactly as if the flag
-                // were off. Off by default, so this is a no-op call on the common path.
+                // were off.
                 rhi::MeshHandle lh = app.lodShareVertices_
                     ? e.device()->createMeshSharingVertices(h, lod.indices.data(), (u32)lod.indices.size())
                     : 0;
