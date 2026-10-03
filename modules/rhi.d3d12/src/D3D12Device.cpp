@@ -1328,6 +1328,14 @@ private:
     u64 fenceValues_[kFrameCount] = {0, 0};
     u64 nextFence_ = 0;
     u32 frameIndex_ = 0;   // frame-in-flight slot: allocators, fences, per-frame upload rings
+    // Advanced ONLY by beginFrame, after its fence wait: "a new frame's recording has begun". The
+    // upload ring keys its epoch on this. It used to key on nextFence_, which waitForGpu() also
+    // advances -- and a wait INSIDE a frame (ensureViewportTexture's waitIdle, mid post chain) then
+    // looked like a new frame: the ring reset its cursor over constants already recorded and, with
+    // growth pending, released the buffer the open command list still pointed at. MEASURED on
+    // NeonDistrict (heavy enough to grow the ring): "resource deleted prior to closing the command
+    // list", then a page fault on the freed allocation and a TDR on every load.
+    u64 frameSerial_ = 0;
     u32 bbIndex_ = 0;      // swapchain image this frame draws first (see kBackBufferCount)
     u32 rtvSize_ = 0;
 
@@ -2349,7 +2357,8 @@ private:
     // The epoch an overflow was last reported in, so the message is once per frame rather than once
     // per failed allocation.
     u64 ringOverflowEpoch_ = ~0ull;
-    // The ring resets itself when the device's monotonic fence counter moves on.
+    // The ring resets itself when a new frame begins (D3D12Device::frameSerial_ -- NOT the fence
+    // counter, which a mid-frame waitForGpu also advances; see frameSerial_'s comment).
     u64 ringEpoch_ = ~0ull;
 
     // Sticky per-draw state (setDrawBinding), copied from the caller's block.
@@ -3937,6 +3946,7 @@ void D3D12Device::beginFrame() {
     // for a device that would never run it, paying waitFence's full one-second timeout each time.
     // Returning here makes the loss cost one frame instead of every frame.
     if (want != 0 && !waitFence(want)) return;
+    ++frameSerial_;   // after the wait: this slot's previous frame has retired (see frameSerial_)
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
     boundRootSig_ = nullptr;
@@ -8967,9 +8977,10 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderContext::ringAlloc(const void* data, u32 by
     if (!data || bytes == 0) return 0;
     const u32 f = dev_->frameIndex_ < kFrameCount ? dev_->frameIndex_ : 0;
 
-    // New epoch: reset the cursor, and take the growth the previous frames asked for.
-    if (ringEpoch_ != dev_->nextFence_) {
-        ringEpoch_ = dev_->nextFence_;
+    // New epoch -- a new FRAME, as beginFrame counts them (frameSerial_; never a mid-frame GPU wait):
+    // reset the cursor, and take the growth the previous frames asked for.
+    if (ringEpoch_ != dev_->frameSerial_) {
+        ringEpoch_ = dev_->frameSerial_;
         ringUsed_[f] = 0;
         if (ringWanted_ > ringBytes_[f]) {
             // This buffer is only safe to drop now because kFrameCount frames have retired since it
