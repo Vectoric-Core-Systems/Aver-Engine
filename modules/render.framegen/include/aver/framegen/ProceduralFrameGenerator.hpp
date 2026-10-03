@@ -11,8 +11,8 @@
 // with the acceleration predicted by a small network (Neural: Aver.Render.Neural's Mlp). The network
 // only ever outputs an acceleration -- never colour, a weight, a mask or a confidence -- and is trained
 // in-engine, self-supervised, on purely geometric targets taken from ordinary real frames (training
-// keeps two more frames of motion history). Until it has trained weights (loaded from the weights file,
-// or after kWarmSteps steps) Neural uses the analytic acceleration.
+// keeps two more frames of motion history). Neural uses the analytic acceleration until the network has
+// weights (loaded, or kWarmSteps steps) AND its measured error beats the analytic one (the gate, below).
 //
 // Backend-agnostic: only the generic RHI. NOT THREAD-SAFE; generate() records into the context the
 // device is recording the frame with.
@@ -50,8 +50,41 @@ public:
 
     // Steps of Adam this session; the network is used once this reaches kWarmSteps (or weights loaded).
     static constexpr u32 kWarmSteps = 1500;
-    static constexpr u32 kSaveEverySteps = 500;   // and evaluateBatch's cadence
+    static constexpr u32 kSaveEverySteps = 500;
+    static constexpr u32 kEvalEverySteps = 100;   // evaluateBatch's cadence
     static constexpr u32 kTrainSamples = 2000;   // records per step; within Mlp::safeBatchLimit() (2047)
+
+    // THE GATE. One batch's score is noisy (measured: the network ranged 0.045-0.180 px against a steady
+    // 0.11 for the quadratic), so both errors are smoothed (EMA, kEvalSmoothing) and the network is
+    // used only while ITS smoothed error is below the quadratic's, after kEvalsToJudge checks. The
+    // verdict is saved beside the weights, so a session that does not train still knows it. Learned
+    // is therefore never worse than Quadratic on the measured data.
+    static constexpr f32 kEvalSmoothing = 0.2f;
+    static constexpr u32 kEvalsToJudge = 3;
+
+    // THE LEARNING-RATE SCHEDULE. Constant-rate Adam kept chasing each new batch: the measured error
+    // rose from 0.047 to 0.090 px over 2,000 more steps at 1e-3. Inverse decay over the network's
+    // LIFETIME step count (saved beside the weights, so a new session continues where the last
+    // stopped instead of restarting hot): lr = kLearningRate / (1 + steps / kDecaySteps), floored.
+    static constexpr f32 kLearningRate = 5e-4f;
+    static constexpr f32 kDecaySteps = 1000.0f;
+    static constexpr f32 kLearningRateFloor = 2e-5f;
+    static f32 learningRateAt(u64 lifetimeSteps) {
+        const f32 lr = kLearningRate / (1.0f + static_cast<f32>(lifetimeSteps) / kDecaySteps);
+        return lr > kLearningRateFloor ? lr : kLearningRateFloor;
+    }
+
+    // What the editor shows while it trains.
+    struct TrainingStatus {
+        u64 lifetimeSteps = 0;   // including the steps behind the loaded weights
+        u32 sessionSteps = 0;
+        f32 learningRate = 0.0f;
+        bool networkInUse = false;
+        bool networkBeatsQuadratic = false;   // the gate's verdict
+        bool evaluated = false;  // the three errors below are the smoothed evaluateBatch scores
+        f32 errLinear = 0.0f, errAnalytic = 0.0f, errNetwork = 0.0f;   // px
+    };
+    TrainingStatus trainingStatus() const;
 
 private:
     bool ensurePipelines();
@@ -59,7 +92,7 @@ private:
     bool ensureTargets(u32 w, u32 h);   // true = usable; recreating forgets the previous frame
     void releaseTargets();
     void bindInputs(const rhi::FrameGenInput& in);
-    bool networkReady() const { return weightsLoaded_ || trainSteps_ >= kWarmSteps; }
+    bool networkReady() const { return (weightsLoaded_ || trainSteps_ >= kWarmSteps) && beatsQuadratic_; }
 
     rhi::IDevice& dev_;
     rhi::IResourceFactory& res_;
@@ -89,9 +122,14 @@ private:
     bool training_ = false;
     std::string weightsPath_;
     bool weightsLoaded_ = false;
-    u32 trainSteps_ = 0;
+    u32 trainSteps_ = 0;                // this session
+    u64 priorSteps_ = 0;                // behind the loaded weights (weightsPath_ + ".steps")
+    f32 errEma_[3] = {};                // evaluateBatch, smoothed: straight, analytic, network (px)
+    u32 evals_ = 0;
+    bool beatsQuadratic_ = false;       // the gate (see kEvalSmoothing)
     u32 frame_ = 0;
-    u32 saveAtFrame_ = 0;               // collect + save the readback recorded kSaveEverySteps ago
+    u32 collectAtFrame_ = 0;            // collect (evaluate, maybe save) the readback recorded then
+    bool saveOnCollect_ = false;
     bool loggedNetworkLive_ = false;
     // THE EVIDENCE: with each weight save, the batch just trained on is read back too and scored on the
     // CPU (MlpReference, the network's twin) against the two procedural paths -- see evaluateBatch.

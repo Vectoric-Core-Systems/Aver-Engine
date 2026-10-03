@@ -106,6 +106,8 @@ void SandboxApp::loadEditorPreferences() {
     if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
         prefsDevice_->setVSync(prefBool("display.vsync", prefsDevice_->vsync()));
     frameGenWhileEditing_ = prefBool("display.frameGenWhileEditing", false);
+    frameGenTrajectory_ = prefInt("display.frameGenTrajectory", 0);
+    frameGenTrain_ = prefBool("display.frameGenTrain", false);
     // A stored render scale applies behind a crash cookie: applying one below 1 can lose the GPU
     // device -- a persisted setting that kills the device at startup is a trap with no way out
     // from inside the editor; one evening was lost after the AverSR combo persisted a 0.67 that
@@ -347,6 +349,34 @@ void SandboxApp::buildEditorPrefs() {
                                 : prefsDevice_->sampleCount() > 1 ? "(paused: needs 1x anti-aliasing)"
                                 : prefsDevice_->frameGenerated() ? "(running)"
                                                                  : "(starting)");
+        }
+
+        // The path the in-between frame's pixels are gathered along (FRAME_INTERPOLATION.md §3.5).
+        static const char* kPaths[] = {"Straight lines", "Quadratic (procedural)", "Learned (neural)"};
+        int path = frameGenTrajectory_ < 0 ? 0 : (frameGenTrajectory_ > 2 ? 2 : frameGenTrajectory_);
+        if (ImGui::Combo("Frame generation path", &path, kPaths, 3)) frameGenTrajectory_ = path;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("How a pixel is followed between two rendered frames. Straight lines: constant\n"
+                              "motion. Quadratic: bends with the last two frames' motion (exact for steady\n"
+                              "acceleration). Learned: a small network predicts the bend; it uses the\n"
+                              "quadratic until it has trained. Applies while editing and in Play.");
+        ImGui::Checkbox("Train the learned path while frame generation runs", &frameGenTrain_);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Learns from the frames you are already rendering: about 0.5 ms a frame while on.\n"
+                              "Progress is saved every 500 steps beside the editor's settings and kept\n"
+                              "between sessions; learning slows down as it accumulates, so leave it on as\n"
+                              "long as you like.");
+        if (frameGenerator_ && (frameGenTrain_ || frameGenTrajectoryCli_ == 2 || frameGenTrajectory_ == 2)) {
+            const framegen::ProceduralFrameGenerator::TrainingStatus st = frameGenerator_->trainingStatus();
+            ImGui::TextDisabled("Learned path: %llu steps (learning rate %.1e), %s",
+                                static_cast<unsigned long long>(st.lifetimeSteps), st.learningRate,
+                                st.networkInUse ? "in use"
+                                : st.evaluated && !st.networkBeatsQuadratic ? "quadratic stands in (it is still better)"
+                                                                            : "quadratic stands in until trained");
+            if (st.evaluated)
+                ImGui::TextDisabled("Measured in-between position error (smoothed): straight %.3f px, "
+                                    "quadratic %.3f px, learned %.3f px", st.errLinear, st.errAnalytic,
+                                    st.errNetwork);
         }
 
 #if AVER_MODULE_SR
@@ -2382,6 +2412,8 @@ void SandboxApp::saveEditorPreferences() {
         if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
             setPrefBool("display.vsync", prefsDevice_->vsync());
         setPrefBool("display.frameGenWhileEditing", frameGenWhileEditing_);
+        setPrefInt("display.frameGenTrajectory", frameGenTrajectory_);
+        setPrefBool("display.frameGenTrain", frameGenTrain_);
         // The three AverSR keys below are skipped outright, not written a neutral value, when the
         // command line drove this session's render scale or AverSR level: an interactive `--aversr
         // quality` run has maxFrames_ == 0 too (it is not a --frames capture), so the outer guard

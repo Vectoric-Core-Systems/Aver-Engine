@@ -167,14 +167,29 @@ quadratic path is `q = p − 0.5·v − 0.125·a` with `a = v − v′` (v′ fe
 check, else a = 0); `quadratic` uses that analytic `a`, `neural` predicts it with a 14→32×2→2 MLP on
 `Aver.Render.Neural`. Training is self-supervised from ordinary real frames: interpolate the two-frame
 span N−2→N and take N−1 as the answer (`a = 8·v_N − 4·v_span`), purely geometric. Weights are saved every
-500 steps to `framegen_trajectory.avnn` beside editor.ini and loaded at start; Neural uses the analytic
-`a` until it has weights or 1,500 steps.
+500 steps to `framegen_trajectory.avnn` beside editor.ini (lifetime step count and the gate's scores in
+`.avnn.steps`) and loaded at start.
 
-**Measured** (NewSponza, 1766×994, wobbling camera; mean in-between position error on two-frame spans,
-scored on the CPU twin every 500 steps): straight line 0.22 px, analytic 0.11 px, network **0.05–0.09 px**.
-Costs: generation 0.25 → 0.76 ms with the network's inference (quarter resolution); training 0.53 ms
-while on. The network's error drifted up from 0.047 to 0.090 over 2,000 continued steps: tune the learning
-rate or decay it. Not yet measured: the image-level gain on one-frame spans, scenes with moving objects.
+**Learning-rate schedule:** `5e-4 / (1 + lifetime steps / 1000)`, floored at `2e-5`, over the network's
+whole life, so a new session continues at the decayed rate. **The gate:** every 100 steps the batch just
+trained on is scored on the CPU twin; scores are smoothed (EMA 0.2) and, after 3 checks, Neural uses the
+network only while its smoothed error beats the quadratic's — otherwise the quadratic stands in. Learned
+is therefore never worse than Quadratic on the measured data.
+
+**Measured** (NewSponza, 1766×994, wobbling camera; mean in-between position error on two-frame spans):
+- Constant rate 1e-3: network 0.05–0.09 px, drifting up; with decay but no gate, one check reached
+  0.180 px (worse than the quadratic).
+- Decay + gate, continuing from 3,003 lifetime steps: smoothed network **0.031 → 0.023 px** over 3,000
+  steps, steadily down; quadratic 0.108; straight line 0.22.
+- Costs: generation 0.25 → 0.76 ms with the network's inference (quarter resolution); training 0.53 ms
+  while on.
+
+Not yet measured: the image-level gain on one-frame spans, other scenes, moving objects.
+
+**Settings:** Editor Preferences → "Frame generation path" (Straight lines / Quadratic / Learned) and
+"Train the learned path while frame generation runs", with a live status line (steps, learning rate,
+smoothed errors). They apply while editing and in Play; `--frame-gen-trajectory` / `--frame-gen-train`
+outrank them.
 
 *The design below is what was built; it is kept as the record of why.*
 
@@ -307,7 +322,7 @@ open counsel points (the two-start search, AMD US 2026/0094228) are noted, with 
 | 0b | G-buffer reason for frame interpolation; scene-cut signal | — |
 | 1 | **Built (D3D12):** history in the generator, present-pass split (two submissions per frame — D3D12 lets a command list write only the current back buffer), 3 swapchain images decoupled from frames in flight, fixed vsync cadence, HUD/editor-lines/ImGui drawn on both images, Editor Preference, `RENDER.FRAMEGEN`, `--frame-gen 0\|1\|2`, scene cuts (resize, G-buffer reset, camera jump > 2.5 m or 30°). Not built: the waitable swapchain object, the <30 fps warning | — |
 | 2 | **Built:** G1 gather (2 search starts per frame), G2 confidence, G3 blend, G4 two full-resolution fill passes; eye adaptation held on the generated image, bloom and local exposure recomputed on it | — |
-| 3 | **Built, opt-in (owner go-ahead 2026-10-03):** trajectory-prior MLP (§3.5, rules R1–R10) with in-engine self-supervised training; analytic quadratic as its fallback. Open: learning-rate decay, image-level measurement, a project/editor setting (CLI only today) | Yes |
+| 3 | **Built, opt-in (owner go-ahead 2026-10-03):** trajectory-prior MLP (§3.5, rules R1–R10) with in-engine self-supervised training, lifetime learning-rate decay and an evidence gate; analytic quadratic as its fallback; Editor Preferences. Open: image-level measurement, a project key for the packaged runtime (CLI only there) | Yes |
 | 4 | Translucent motion, reflection motion, skinned previous pose, 3× generation | Partly |
 
 ---

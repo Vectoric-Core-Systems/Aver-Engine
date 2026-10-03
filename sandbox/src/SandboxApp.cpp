@@ -3075,8 +3075,9 @@ bool SandboxApp::updateFrameGeneration(rhi::IDevice* dev) {
         }
     }
     if (frameGenerator_) {
-        frameGenerator_->setTrajectory(static_cast<framegen::Trajectory>(frameGenTrajectory_));
-        frameGenerator_->setTraining(frameGenTrain_);
+        const int traj = frameGenTrajectoryCli_ >= 0 ? frameGenTrajectoryCli_ : frameGenTrajectory_;
+        frameGenerator_->setTrajectory(static_cast<framegen::Trajectory>(traj < 0 ? 0 : (traj > 2 ? 2 : traj)));
+        frameGenerator_->setTraining(frameGenTrainCli_ || frameGenTrain_);
     }
     dev->setFrameGeneration(want);
     return want;

@@ -86,6 +86,11 @@ public:
     // (MlpReference.hpp safeBatchLimit). recordTrain warns once above it.
     [[nodiscard]] u32 safeBatchLimit() const { return neural::safeBatchLimit(opt_); }
 
+    // A learning-rate SCHEDULE: the step size the next recordTrain uses (it travels in that call's
+    // constants, so a change costs nothing). False, unchanged, unless finite and > 0. The rest of the
+    // optimiser is fixed at create.
+    bool setLearningRate(f32 lr);
+
     // ---- inference -------------------------------------------------------------------------
     // records: a StructuredBuffer<float> of maxCount * inputs floats.
     // outputs: an RW structured float buffer (created with allowUnorderedAccess) of

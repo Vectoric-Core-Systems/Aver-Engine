@@ -88,7 +88,7 @@ Application* createApplication(int argc, char** argv) {
     int resizeCycleArg = 0;
     int frameGenArg = -1;   // --frame-gen 0|1|2; -1 = not given (project / Editor Preference decide)
     bool vsyncOn = false;   // --vsync
-    int frameGenTrajectory = 0;   // --frame-gen-trajectory: 0 linear, 1 quadratic, 2 neural
+    int frameGenTrajectory = -1;  // --frame-gen-trajectory: 0 linear, 1 quadratic, 2 neural; -1 = not given
     bool frameGenTrain = false;   // --frame-gen-train
     int pieCamArg = 0;
     int inputStuckArg = 0;

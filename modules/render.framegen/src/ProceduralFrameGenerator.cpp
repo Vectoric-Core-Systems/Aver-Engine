@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <span>
 #include <string>
 #include <vector>
@@ -150,12 +151,26 @@ bool ProceduralFrameGenerator::ensureTrajectory() {
         std::error_code ec;
         if (!weightsPath_.empty() && std::filesystem::exists(weightsPath_, ec)) {
             weightsLoaded_ = mlp_.loadWeights(weightsPath_);
-            AVER_INFO("[FrameGen] trajectory network weights {} from {}",
-                      weightsLoaded_ ? "loaded" : "NOT loaded (shape mismatch?)", weightsPath_);
+            // The lifetime step count the learning-rate schedule continues from (absent: 0).
+            // Sidecar: "steps [quadratic-error network-error]" -- the smoothed scores the gate last
+            // judged by. Without them the network waits to be judged again (the quadratic stands in).
+            if (weightsLoaded_) {
+                std::ifstream steps(weightsPath_ + ".steps");
+                if (!(steps >> priorSteps_)) priorSteps_ = 0;
+                f32 quad = 0.0f, net = 0.0f;
+                if (steps >> quad >> net) {
+                    errEma_[1] = quad;
+                    errEma_[2] = net;
+                    evals_ = kEvalsToJudge;
+                    beatsQuadratic_ = net < quad;
+                }
+            }
+            AVER_INFO("[FrameGen] trajectory network weights {} from {} ({} steps behind them)",
+                      weightsLoaded_ ? "loaded" : "NOT loaded (shape mismatch?)", weightsPath_, priorSteps_);
         }
         AVER_INFO("[FrameGen] trajectory network {}->{}x{}->{} ready; {}", kRecordFloats, 32, 2, kOutputFloats,
-                  weightsLoaded_ ? "using the loaded weights"
-                                 : "the analytic acceleration stands in until it has trained");
+                  beatsQuadratic_ ? "the loaded weights beat the quadratic and are used"
+                                  : "the analytic acceleration stands in until it has been trained and judged");
     }
     return true;
 }
@@ -326,9 +341,40 @@ void ProceduralFrameGenerator::evaluateBatch() {
         errNet += err(out[0], out[1]);
     }
     const f64 n = static_cast<f64>(count);
-    AVER_INFO("[FrameGen] trajectory error at step {} over {} two-frame spans (mean in-between position "
-              "error, px): straight line {:.3f}, analytic {:.3f}, network {:.3f}",
-              trainSteps_, count, errLinear / n, errAnalytic / n, errNet / n);
+    const f32 now[3] = {static_cast<f32>(errLinear / n), static_cast<f32>(errAnalytic / n),
+                        static_cast<f32>(errNet / n)};
+    for (u32 i = 0; i < 3; ++i)
+        errEma_[i] = evals_ == 0 ? now[i] : errEma_[i] + kEvalSmoothing * (now[i] - errEma_[i]);
+    ++evals_;
+    // The gate: judged only once the smoothed scores rest on a few checks.
+    if (evals_ >= kEvalsToJudge) {
+        const bool beats = errEma_[2] < errEma_[1];
+        if (beats != beatsQuadratic_)
+            AVER_INFO("[FrameGen] learned path {} (smoothed: network {:.3f} px, quadratic {:.3f} px)",
+                      beats ? "now in use" : "set aside, the quadratic is better", errEma_[2], errEma_[1]);
+        beatsQuadratic_ = beats;
+    }
+    // Logged at the save cadence only (every 5th check), so a long session's log stays readable.
+    if (saveOnCollect_)
+        AVER_INFO("[FrameGen] trajectory error at step {} ({} lifetime, learning rate {:.2e}), mean in-between "
+                  "position error px -- this batch: straight {:.3f}, analytic {:.3f}, network {:.3f}; smoothed: "
+                  "analytic {:.3f}, network {:.3f}",
+                  trainSteps_, priorSteps_ + trainSteps_, learningRateAt(priorSteps_ + trainSteps_), now[0],
+                  now[1], now[2], errEma_[1], errEma_[2]);
+}
+
+ProceduralFrameGenerator::TrainingStatus ProceduralFrameGenerator::trainingStatus() const {
+    TrainingStatus s;
+    s.lifetimeSteps = priorSteps_ + trainSteps_;
+    s.sessionSteps = trainSteps_;
+    s.learningRate = learningRateAt(s.lifetimeSteps);
+    s.networkInUse = trajectory_ == Trajectory::Neural && mlp_.valid() && networkReady();
+    s.networkBeatsQuadratic = beatsQuadratic_;
+    s.evaluated = evals_ > 0;
+    s.errLinear = errEma_[0];
+    s.errAnalytic = errEma_[1];
+    s.errNetwork = errEma_[2];
+    return s;
 }
 
 // Frame N's inputs keep their handles from frame to frame (the device's own textures), so the sets are
@@ -354,15 +400,23 @@ rhi::TextureHandle ProceduralFrameGenerator::generate(rhi::IRenderContext& ctx, 
     bindInputs(in);
     ++frame_;
 
-    // A readback recorded kSaveEverySteps steps ago has certainly finished (frames in flight are 2).
-    if (saveAtFrame_ && frame_ >= saveAtFrame_) {
-        saveAtFrame_ = 0;
+    // A readback recorded four frames ago has certainly finished (frames in flight are 2).
+    if (collectAtFrame_ && frame_ >= collectAtFrame_) {
+        collectAtFrame_ = 0;
         if (mlp_.collectWeights()) {
             evaluateBatch();
-            if (!weightsPath_.empty()) {
-                const bool ok = mlp_.saveWeights(weightsPath_);
-                AVER_INFO("[FrameGen] trajectory network: {} steps trained, weights {} {}", trainSteps_,
-                          ok ? "saved to" : "could NOT be saved to", weightsPath_);
+            if (saveOnCollect_ && !weightsPath_.empty()) {
+                bool ok = mlp_.saveWeights(weightsPath_);
+                if (ok) {
+                    std::ofstream steps(weightsPath_ + ".steps", std::ios::trunc);
+                    steps << (priorSteps_ + trainSteps_);
+                    if (evals_ >= kEvalsToJudge) steps << ' ' << errEma_[1] << ' ' << errEma_[2];
+                    steps << '\n';
+                    ok = static_cast<bool>(steps);
+                }
+                AVER_INFO("[FrameGen] trajectory network: {} steps trained ({} lifetime), weights {} {}",
+                          trainSteps_, priorSteps_ + trainSteps_, ok ? "saved to" : "could NOT be saved to",
+                          weightsPath_);
             }
         }
     }
@@ -460,11 +514,13 @@ rhi::TextureHandle ProceduralFrameGenerator::generate(rhi::IRenderContext& ctx, 
         render::neural::IoStates io;
         io.input = RS::UnorderedAccess;
         io.output = RS::UnorderedAccess;
+        mlp_.setLearningRate(learningRateAt(priorSteps_ + trainSteps_));
         if (mlp_.recordTrain(ctx, trainRec_, trainTgt_, trainCount_, kTrainSamples, io)) {
             ++trainSteps_;
             if (trainSteps_ == kWarmSteps && !weightsLoaded_)
-                AVER_INFO("[FrameGen] trajectory network warmed up ({} steps); Neural now uses it", trainSteps_);
-            if (trainSteps_ % kSaveEverySteps == 0 && mlp_.recordReadback(ctx)) {
+                AVER_INFO("[FrameGen] trajectory network warmed up ({} steps); used while it beats the quadratic",
+                          trainSteps_);
+            if (trainSteps_ % kEvalEverySteps == 0 && collectAtFrame_ == 0 && mlp_.recordReadback(ctx)) {
                 // The batch just trained on, for evaluateBatch (copied while it is still current).
                 const rhi::BufferHandle src[] = {trainRec_, trainTgt_, trainCount_};
                 for (rhi::BufferHandle b : src) ctx.bufferBarrier(b, RS::UnorderedAccess, RS::CopySource);
@@ -472,7 +528,8 @@ rhi::TextureHandle ProceduralFrameGenerator::generate(rhi::IRenderContext& ctx, 
                 ctx.copyBuffer(evalTgt_, trainTgt_, static_cast<u64>(kTrainSamples) * kOutputFloats * 4);
                 ctx.copyBuffer(evalCount_, trainCount_, 4);
                 for (rhi::BufferHandle b : src) ctx.bufferBarrier(b, RS::CopySource, RS::UnorderedAccess);
-                saveAtFrame_ = frame_ + 4;
+                collectAtFrame_ = frame_ + 4;
+                saveOnCollect_ = trainSteps_ % kSaveEverySteps == 0;
             }
         }
     }

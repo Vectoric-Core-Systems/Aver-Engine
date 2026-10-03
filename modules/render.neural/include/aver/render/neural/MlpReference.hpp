@@ -138,6 +138,12 @@ public:
 
     const MlpDesc& desc() const { return desc_; }
     const OptimiserDesc& optimiser() const { return opt_; }
+    // Mlp::setLearningRate's twin: the next step's learning rate; false, unchanged, unless finite and > 0.
+    bool setLearningRate(f32 lr) {
+        if (!(lr > 0.0f) || !(lr < 3.4e38f)) return false;
+        opt_.learningRate = lr;
+        return true;
+    }
     const MlpLayout& layout() const { return layout_; }
     u32 weightCount() const { return layout_.total; }
 

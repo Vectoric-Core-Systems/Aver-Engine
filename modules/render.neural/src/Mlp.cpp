@@ -443,6 +443,12 @@ bool Mlp::recordTrain(rhi::IRenderContext& ctx, rhi::BufferHandle records, rhi::
 
 // ---------------------------------------------------------------- weights
 
+bool Mlp::setLearningRate(f32 lr) {
+    if (!(lr > 0.0f) || !(lr < 3.4e38f)) return false;   // the same test as MlpReference's twin
+    opt_.learningRate = lr;
+    return true;
+}
+
 bool Mlp::uploadWeights(std::span<const f32> w) {
     if (!valid() || w.size() != layout_.total) return false;
     cpuMaster_.assign(w.begin(), w.end());
