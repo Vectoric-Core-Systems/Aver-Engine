@@ -461,6 +461,8 @@ add_subdirectory(modules/render.pt)
 # The denoiser (AMD FidelityFX Denoiser, MIT, plus this engine's host code). Unconditional and
 # RHI-only for the same reason the three above are; whether it runs is decided at runtime.
 add_subdirectory(modules/render.denoise)
+# Small neural networks that run inside the frame (MLP inference + training). Unconditional and RHI-only, like the denoiser.
+add_subdirectory(modules/render.neural)
 # The audio seam. Added down HERE rather than beside the mixer because it links the WAV reader,
 # which is a target inside modules/formats and so does not exist until that has been added.
 add_subdirectory(modules/audio.abi)
@@ -541,6 +543,8 @@ if(AVER_BUILD_TESTS)
   # The renderer's half, and unconditional for the same reason: it talks to the generic RHI, which
   # always exists, and the test supplies its own recording device rather than needing a backend.
   add_subdirectory(tests/render.ui)
+  # The neural module's CPU reference: the maths its shaders must reproduce, checked without a GPU.
+  add_subdirectory(tests/render.neural)
   # The actor preview, for the same reason and by the same means.
   add_subdirectory(tests/render.actorpreview)
   # The layered BSDF's coat lobe. Unconditional, like the PBR material system it belongs to, and
