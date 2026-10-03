@@ -155,6 +155,32 @@ China and Germany for anything distributed there.
 - *Watch:* set Patent Center / Espacenet alerts on 19/643,218, 17/949,153 and 17/949,156. Continuations
   let claims be redrafted toward a later product.
 
+**AMD US 2025/0299287 (application 18/615,997, "Time-adjusted interpolated frame display"), read
+2026-10-03 from Global Dossier** (the office action's XML; doc list via the GD API):
+
+- Timeline:
+  - 2025-11-28: non-final rejection.
+  - 2026-02-12: amendment.
+  - **2026-05-12: notice of allowance.**
+  - 2026-08-11: RCE, filed with a new IDS that includes a Japanese counterpart's notice of allowance
+    dated 2026-04-14.
+  - **2026-09-16: non-final rejection of all 20 claims under §103.** The reply is due 2026-12-16
+    (extendable to 2027-03-16).
+- Claim 1 as pending is still broad:
+  - generate an interpolated frame from a first and a second rendered frame;
+  - determine its display timing from rendering metrics carrying timing information of those two frames;
+  - provide it to the display on that timing.
+- The examiner's art, useful as prior art for counsel:
+  - Lobete US 2021/0400170: an interpolator timed against the display refresh and rendering metrics.
+  - Schluessler US 2022/0122566: measured timing schedules later frames.
+  - Campbell US 2016/0042488: measured GPU render time spaces presents evenly; pre-2022.
+  - Masuda US 2012/0147013, Saulters US 2014/0092109, Ungureanu US 2014/0168229, Swedberg
+    US 2007/0057952.
+- *Reading (not legal advice):* the application was one step from issuing, so it is close to grant.
+  AMD may yet win claims by narrowing them, and a Japanese counterpart has been allowed. Measured
+  pacing in general is old art (Campbell 2016), but this exact combination may still issue. NeuraFI
+  keeps the fixed clock (NEURAFI.md §5) until counsel says otherwise.
+
 ### 6.2 The present chain: granted parent claims and pre-2022 prior art (2026-10-03)
 
 **US 12,632,916 B2 claim 1 (verbatim, Google Patents):** "A method, comprising: intercepting one or more
