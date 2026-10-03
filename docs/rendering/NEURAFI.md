@@ -197,8 +197,19 @@ a fixed 2×2 at 3532×1987 put 1.75M records through the network for 3.98 ms; ad
   the session ended at smoothed 0.008 vs 0.021.
 - Earlier, whole-`a` network: 0.031 → 0.023 px vs quadratic 0.108 on its own training motion, but 26×
   worse than the quadratic on unseen slow pans before retraining.
+- Two more unseen motions before shipping: big slow sweeps (25°/150), first check network 0.009 vs
+  quadratic 0.018, ending 0.005 vs 0.006 (the quadratic is near-exact there); quick swings (8°/30), first
+  check 0.217 vs 0.238, ending 0.050 vs 0.226 — about 4.5× better.
 - Costs at 1766×994: interpolation 0.92–1.40 ms with network inference; training +0.52 ms while on; the
   live check 0.01 ms.
+
+**Shipped weights.** The engine ships the network trained above (15,018 lifetime steps over seven
+wobbles on Sponza day and night) as `modules/render.neurafi/data/neurafi_v2.avnn`, deployed to
+`bin/data` and listed in both packaging allowlists (`data/**`). Its sidecar holds only the step count:
+no verdict ships, so every user's live gate judges it on their own motion first. *Measured* as a fresh
+user (no user file): loaded from `bin/data`, quadratic stood in, judged after three checks, switched in
+at network 0.057 px vs quadratic 0.232. NeonDistrict (moving objects) is not in the training yet: it hits
+a GPU fault on load that predates this work.
 
 Not yet measured: the image-level gain on one-frame spans, scenes with moving objects (NeonDistrict hits a
 GPU fault on load that predates this work; it is being chased separately).

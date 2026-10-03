@@ -190,7 +190,7 @@ bool NeuraFI::ensureTrajectory() {
         }
         AVER_INFO("[NeuraFI] network {}->{}x{}->{} ready; {}", kRecordFloats, 32, 2, kOutputFloats,
                   beatsQuadratic_ ? "the loaded weights beat the quadratic and are used"
-                                  : "the analytic acceleration stands in until it has been trained and judged");
+                                  : "the analytic acceleration stands in until the live gate has judged it on this motion");
     }
     return true;
 }

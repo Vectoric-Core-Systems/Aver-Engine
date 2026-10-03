@@ -98,6 +98,12 @@ nethost.dll
 # which is exactly the assertion this entry wants.
 shaders/**
 
+# TRAINED NETWORKS the engine ships with (modules/render.neurafi/CMakeLists.txt deploys them to bin/data).
+# NeuraFI's frame-interpolation weights live here: without this line a package would load nothing and
+# every user would start from the procedural quadratic until they trained their own. A pattern matching
+# nothing is an error, which is the assertion wanted -- a build that lost its weights must not ship.
+data/**
+
 # Fonts the editor loads by name from executableDir(). Roboto, Apache-2.0 -- the notice is required.
 Roboto-Regular.ttf
 Roboto-Medium.ttf
