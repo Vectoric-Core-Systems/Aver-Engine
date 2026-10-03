@@ -148,7 +148,7 @@ void SandboxApp::loadEditorPreferences() {
     // Play toolbar: clamp out-of-range enums to compiled-in defaults.
     {
         const i32 storedMode = prefInt("play.mode", static_cast<i32>(playMode_));
-        playMode_ = (storedMode >= 0 && storedMode <= static_cast<i32>(PlayMode::Standalone))
+        playMode_ = (storedMode >= 0 && storedMode <= static_cast<i32>(PlayMode::NewWindow))
                   ? static_cast<PlayMode>(storedMode) : PlayMode::SelectedViewport;
         const i32 storedSpawn = prefInt("play.spawnAt", static_cast<i32>(playSpawnAt_));
         playSpawnAt_ = (storedSpawn >= 0 && storedSpawn <= static_cast<i32>(PlaySpawnAt::CameraLocation))
@@ -179,10 +179,10 @@ void SandboxApp::buildPlayPrefsSection() {
     if (scrollPrefsToPlay_) { ImGui::SetScrollHereY(0.0f); scrollPrefsToPlay_ = false; }
     if (!ImGui::CollapsingHeader("Play", ImGuiTreeNodeFlags_DefaultOpen)) return;
 
-    static const char* kModeNames[] = {"Selected Viewport", "Simulate", "Standalone Game"};
+    static const char* kModeNames[] = {"Selected Viewport", "Simulate", "Standalone Game", "New Window"};
     const int modeIdx = static_cast<int>(playMode_);
     if (ImGui::BeginCombo("Default mode", kModeNames[modeIdx])) {
-        for (int i = 0; i < 3; ++i)
+        for (int i = 0; i < 4; ++i)
             if (ImGui::Selectable(kModeNames[i], modeIdx == i)) playMode_ = static_cast<PlayMode>(i);
         ImGui::EndCombo();
     }

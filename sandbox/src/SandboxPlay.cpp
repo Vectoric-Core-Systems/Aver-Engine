@@ -515,6 +515,7 @@ void SandboxApp::stopPlay() {
     // would be gone. startPlay's restart already made the average Play-only up to this point.
     const bool gpuDumpPending = gpuTiming_ && maxFrames_ != 0 && !gpuTimingDone_;
     if (!gpuDumpPending) resetPlayProfile(false);
+    closePlayWindow();
     // Cleared unconditionally, before anything else: a stale ejected/frame-step flag must never
     // survive into the next Play press, however this session ends.
     playEjected_ = false;
@@ -871,12 +872,73 @@ Vec3 SandboxApp::camForward() const {
 
 // Gives the mouse to the game or hands it back. ShowCursor is a counter, so each call is paired.
 void SandboxApp::setMouseCaptured(bool on) {
-    mouse_.set(on, window_, "Sandbox", " (Shift+F1 to release)");
+    mouse_.set(on, captureWindow(), "Sandbox", " (Shift+F1 to release)");
 }
 
 // Measures one frame of captured mouse movement, then re-centres for the next.
 void SandboxApp::pollCapturedMouse() {
-    mouse_.poll(window_);
+    mouse_.poll(captureWindow());
+}
+
+// The scene renders in the top-left of the present image at the play window's size (clamped to the
+// editor window, which the present images are sized from); the device mirrors that rect.
+void SandboxApp::openPlayWindow(Engine& e) {
+    rhi::IDevice* dev = e.device();
+    if (!dev || !window_ || playWindow_) return;
+    const f32 dpi = window_->dpiScale() > 0.0f ? window_->dpiScale() : 1.0f;
+    WindowDesc d;
+    d.title = "Aver Engine - Play (Esc to stop)";
+    d.width  = static_cast<u32>(std::fmax(320.0f, vpW_) / dpi);   // logical; create() applies the DPI
+    d.height = static_cast<u32>(std::fmax(180.0f, vpH_) / dpi);
+    d.quitOnDestroy = false;
+    auto w = std::make_unique<Window>();
+    if (!w->create(d)) {
+        AVER_WARN("[Sandbox] Play in New Window: the window could not be created; playing in the viewport");
+        return;
+    }
+    const u32 pw = std::min(w->width(), window_->width());
+    const u32 ph = std::min(w->height(), window_->height());
+    if (!dev->setMirrorWindow(w->nativeHandle(), pw, ph)) {
+        AVER_WARN("[Sandbox] Play in New Window needs the D3D12 renderer; playing in the viewport instead");
+        w->destroy();
+        return;
+    }
+    w->setEventCallback(&sandboxWindowEvent, &input_);
+    mouse_.set(false, window_, "Sandbox", "");   // re-captured against the new window next frame
+    playWindow_ = std::move(w);
+    playWindowDevice_ = dev;
+    playWindowW_ = pw;
+    playWindowH_ = ph;
+    AVER_INFO("[Sandbox] Play in New Window: {}x{}", pw, ph);
+}
+
+void SandboxApp::closePlayWindow() {
+    if (!playWindow_) return;
+    mouse_.set(false, playWindow_.get(), "Sandbox", "");
+    if (playWindowDevice_) playWindowDevice_->setMirrorWindow(nullptr, 0, 0);
+    playWindow_->destroy();
+    playWindow_.reset();
+    playWindowDevice_ = nullptr;
+    if (window_) window_->focus();
+}
+
+void SandboxApp::updatePlayWindow(Engine& e) {
+    if (!playWindow_) return;
+    if (playWindow_->shouldClose()) { stopPlay(); return; }
+    if (!anyPlayActive()) { closePlayWindow(); return; }
+    if (!playWindow_->inModalResize() && e.device() && window_) {
+        const u32 pw = std::min(playWindow_->width(), window_->width());
+        const u32 ph = std::min(playWindow_->height(), window_->height());
+        if (pw > 0 && ph > 0 && (pw != playWindowW_ || ph != playWindowH_) &&
+            e.device()->setMirrorWindow(playWindow_->nativeHandle(), pw, ph)) {
+            playWindowW_ = pw;
+            playWindowH_ = ph;
+        }
+    }
+    vpX_ = 0.0f;
+    vpY_ = 0.0f;
+    vpW_ = static_cast<f32>(playWindowW_);
+    vpH_ = static_cast<f32>(playWindowH_);
 }
 
 // True while a game is playing, in a build with or without the framework.
@@ -896,10 +958,15 @@ void SandboxApp::launchPlay(Engine& e, PlayMode m) {
     if (anyPlayActive()) return;
     playMode_ = m;
     AVER_INFO("[Sandbox] Play: {}", m == PlayMode::SelectedViewport ? "Selected Viewport" :
-                                     m == PlayMode::Simulate ? "Simulate" : "Standalone");
+                                     m == PlayMode::Simulate ? "Simulate" :
+                                     m == PlayMode::NewWindow ? "New Window" : "Standalone");
     switch (m) {
     case PlayMode::SelectedViewport:
         startPlay();
+        break;
+    case PlayMode::NewWindow:
+        startPlay();
+        if (anyPlayActive()) openPlayWindow(e);
         break;
     case PlayMode::Simulate:
         startPlay();

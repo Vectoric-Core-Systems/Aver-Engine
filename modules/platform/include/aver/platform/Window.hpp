@@ -36,6 +36,8 @@ struct WindowDesc {
     // rows and mean nothing was comparable across machines. Interactive runs get fullscreen; capture
     // runs keep the exact window the oracle was recorded through.
     bool fullscreen = false;
+    // False for a secondary window (Play in New Window): destroying it must not end the app.
+    bool quitOnDestroy = true;
 };
 
 // Minimal OS window (Win32 backend). create() returns false rather than aborting.
@@ -84,6 +86,9 @@ public:
     f32 dpiScale() const { return dpiScale_; }
     void* nativeHandle() const { return nativeHandle_; } // HWND on Windows
     bool valid() const { return nativeHandle_ != nullptr; }
+    bool quitOnDestroy() const { return quitOnDestroy_; }
+    // True while this window has the keyboard focus (is the foreground window).
+    bool isForeground() const;
 
     void setEventCallback(EventCallback cb, void* user) { callback_ = cb; callbackUser_ = user; }
 
@@ -195,6 +200,7 @@ private:
     u32 height_ = 0;
     f32 dpiScale_ = 1.0f;
     bool shouldClose_ = false;
+    bool quitOnDestroy_ = true;
     EventCallback callback_ = nullptr;
     void* callbackUser_ = nullptr;
     MessageHook messageHook_ = nullptr;

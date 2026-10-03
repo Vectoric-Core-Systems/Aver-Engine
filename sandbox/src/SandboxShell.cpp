@@ -1665,6 +1665,8 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
         if (ImGui::IsItemHovered()) {
             if (playMode_ == PlayMode::Standalone) {
                 ImGui::SetTooltip("Standalone Game: a separate Aver Engine Runtime on the saved level");
+            } else if (playMode_ == PlayMode::NewWindow) {
+                ImGui::SetTooltip("Play in a new window (Esc there returns to the editor)");
             } else {
                 const editor::CommandId modeCmd = playMode_ == PlayMode::Simulate
                                                  ? editor::CommandId::PlaySimulate : editor::CommandId::PlayStart;
@@ -1684,6 +1686,12 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
                                 playMode_ == PlayMode::SelectedViewport))
                 launchPlay(e, PlayMode::SelectedViewport);
             uiReg_.track("toolbar.play.options.viewport");
+            if (ImGui::MenuItem(ICON_PLAY " New Window", nullptr, playMode_ == PlayMode::NewWindow))
+                launchPlay(e, PlayMode::NewWindow);
+            uiReg_.track("toolbar.play.options.newWindow");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Plays in a window of its own, without the editor around it.\n"
+                                  "Esc in that window (or closing it) returns to the editor.");
             if (ImGui::MenuItem(ICON_EJECT " Simulate",
                                 editor::chordToString(keybinds_.chordFor(editor::CommandId::PlaySimulate)).c_str(),
                                 playMode_ == PlayMode::Simulate))
@@ -2254,13 +2262,20 @@ void SandboxApp::buildUI(Engine& e) {
         const f32 w = avail.x > 8.0f ? avail.x : 8.0f;
         const f32 h = avail.y > 8.0f ? avail.y : 8.0f;
 
-        vpX_ = at.x; vpY_ = at.y; vpW_ = w; vpH_ = h;
+        // Play in New Window owns the scene rect (updatePlayWindow); the tab only says where the game went.
+        if (!playWindow_) vpX_ = at.x, vpY_ = at.y, vpW_ = w, vpH_ = h;
         drawGraphPrintOverlay(at, ImVec2(at.x + w, at.y + h));
         levelFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
         levelHovered_ = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
                                                ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
 
-        if (levelVisible_ && e.device()) {
+        if (playWindow_) {
+            if (e.device()) e.device()->setViewportToTexture(true);
+            const char* note = "Playing in a separate window. Press Esc there, or Stop, to return.";
+            const ImVec2 ts = ImGui::CalcTextSize(note);
+            ImGui::SetCursorScreenPos(ImVec2(at.x + std::fmax(0.0f, (w - ts.x) * 0.5f), at.y + h * 0.5f - ts.y));
+            ImGui::TextDisabled("%s", note);
+        } else if (levelVisible_ && e.device()) {
             e.device()->setViewportToTexture(true);
             if (const u64 tex = e.device()->viewportTextureId()) {
                 // The texture is the whole backbuffer; the scene is this sub-rect of it.

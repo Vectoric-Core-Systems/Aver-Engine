@@ -865,6 +865,7 @@ public:
     void setViewportToTexture(bool on) override { viewportToTex_ = on; }
     bool viewportToTexture() const override { return viewportToTex_; }
     u64  viewportTextureId() override;
+    bool setMirrorWindow(void* windowHandle, u32 width, u32 height) override;
 
     void setViewportRect(u32 x, u32 y, u32 w, u32 h) override {
         if (w == 0 || h == 0 || x >= width_ || y >= height_) { vpX_ = vpY_ = vpW_ = vpH_ = 0; return; }
@@ -1122,6 +1123,19 @@ private:
     ComPtr<ID3D12Resource> renderTargets_[kBackBufferCount];
     ComPtr<ID3D12Resource> swapBuffers_[kSwapBufferCount];
 
+    // ---- MIRROR WINDOW (IDevice::setMirrorWindow) ----
+    // presentPass copies the viewport rect of each present image into mirrorImages_[same index]; the
+    // present thread presents it to mirrorSwap_ beside the main swapchain. Changed only with the
+    // present queue drained.
+    ComPtr<IDXGISwapChain3> mirrorSwap_;
+    ComPtr<ID3D12Resource> mirrorSwapBuffers_[kSwapBufferCount];
+    ComPtr<ID3D12Resource> mirrorImages_[kBackBufferCount];
+    HWND mirrorHwnd_ = nullptr;
+    u32 mirrorW_ = 0, mirrorH_ = 0;
+    std::atomic<bool> mirrorFailLogged_{false};
+    void releaseMirror();
+    void copyToMirror(u32 bbIdx);
+
     // ---- PRESENT THREAD (FSR3-style) ----
     // Present can block waiting for previous image to display. Render thread queues requests to a dedicated thread
     // which waits (GPU-side) for the image, copies it into the swapchain on its own queue, and presents.
@@ -1130,6 +1144,7 @@ private:
         u64 ready;        // readyFence_ value the render queue signals once the image is drawn
         u64 serial;       // doneFence_ value this thread signals once the image has been copied
         UINT sync, flags;
+        bool mirror = false;   // also present mirrorImages_[image] to the mirror window
     };
     static constexpr u32 kPresentAllocs = 4;
     static constexpr usize kPresentQueueMax = 4;   // requests waiting; the render thread waits beyond
@@ -2403,6 +2418,79 @@ u64 D3D12Device::viewportTextureId() {
     return uiTextureId(viewportTex_);
 }
 
+void D3D12Device::releaseMirror() {
+    for (auto& i : mirrorImages_) i.Reset();
+    for (auto& b : mirrorSwapBuffers_) b.Reset();
+    mirrorSwap_.Reset();
+    mirrorHwnd_ = nullptr;
+    mirrorW_ = mirrorH_ = 0;
+}
+
+bool D3D12Device::setMirrorWindow(void* windowHandle, u32 w, u32 h) {
+    if (!hasSwapchain_ || deviceLost_ || !presentQueue_) return false;
+    HWND hwnd = static_cast<HWND>(windowHandle);
+    if (hwnd && hwnd == mirrorHwnd_ && w == mirrorW_ && h == mirrorH_) return true;
+    // The present thread reads the mirror; nothing may be queued or in flight while it changes.
+    waitForGpu();
+    drainPresents();
+    pendingReal_ = false;
+    const bool resizeOnly = hwnd && hwnd == mirrorHwnd_ && mirrorSwap_;
+    for (auto& i : mirrorImages_) i.Reset();
+    for (auto& b : mirrorSwapBuffers_) b.Reset();
+    if (!hwnd || w == 0 || h == 0) { releaseMirror(); return true; }
+
+    const UINT scFlags = tearingSupported_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
+    if (resizeOnly) {
+        if (!hrOk(mirrorSwap_->ResizeBuffers(kSwapBufferCount, w, h, kBackbufferFormat, scFlags), "ResizeBuffers (mirror)")) {
+            releaseMirror();
+            return false;
+        }
+    } else {
+        releaseMirror();
+        DXGI_SWAP_CHAIN_DESC1 sd{};
+        sd.Width = w; sd.Height = h;
+        sd.Format = kBackbufferFormat;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.BufferCount = kSwapBufferCount;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        sd.Scaling = DXGI_SCALING_STRETCH;
+        sd.SampleDesc.Count = 1;
+        sd.Flags = scFlags;
+        ComPtr<IDXGISwapChain1> sc1;
+        if (!hrOk(factory_->CreateSwapChainForHwnd(presentQueue_.Get(), hwnd, &sd, nullptr, nullptr, &sc1),
+                  "CreateSwapChainForHwnd (mirror)"))
+            return false;
+        factory_->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+        if (!hrOk(sc1.As(&mirrorSwap_), "As IDXGISwapChain3 (mirror)")) { releaseMirror(); return false; }
+        mirrorHwnd_ = hwnd;
+    }
+    for (u32 i = 0; i < kSwapBufferCount; ++i)
+        if (!hrOk(mirrorSwap_->GetBuffer(i, IID_PPV_ARGS(&mirrorSwapBuffers_[i])), "mirror GetBuffer")) {
+            releaseMirror();
+            return false;
+        }
+    D3D12_RESOURCE_DESC td{};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = w; td.Height = h;
+    td.DepthOrArraySize = 1;
+    td.MipLevels = 1;
+    td.Format = kBackbufferFormat;
+    td.SampleDesc.Count = 1;
+    auto heap = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    for (u32 i = 0; i < kBackBufferCount; ++i) {
+        if (!hrOk(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COMMON,
+                                                   nullptr, IID_PPV_ARGS(&mirrorImages_[i])), "mirror image")) {
+            releaseMirror();
+            return false;
+        }
+        setDebugName(mirrorImages_[i].Get(), "Aver mirror image");
+    }
+    mirrorW_ = w; mirrorH_ = h;
+    mirrorFailLogged_ = false;
+    AVER_INFO("[RHI.D3D12] mirror window {}x{}", w, h);
+    return true;
+}
+
 // Notifies features of render-target changes (scene size, sample count, format).
 void D3D12Device::notifyRenderTargetsChanged() {
     if (sampleCount_ == notifiedSamples_ &&
@@ -2842,12 +2930,35 @@ void D3D12Device::presentThreadMain() {
             transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
         };
         presentList_->ResourceBarrier(2, post);
+        const bool mirror = r.mirror && mirrorSwap_ && mirrorImages_[r.image];
+        if (mirror) {
+            ID3D12Resource* mdst = mirrorSwapBuffers_[mirrorSwap_->GetCurrentBackBufferIndex()].Get();
+            ID3D12Resource* msrc = mirrorImages_[r.image].Get();
+            D3D12_RESOURCE_BARRIER mpre[2] = {
+                transition(mdst, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST),
+                transition(msrc, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE),
+            };
+            presentList_->ResourceBarrier(2, mpre);
+            presentList_->CopyResource(mdst, msrc);
+            D3D12_RESOURCE_BARRIER mpost[2] = {
+                transition(mdst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT),
+                transition(msrc, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
+            };
+            presentList_->ResourceBarrier(2, mpost);
+        }
         presentList_->Close();
         ID3D12CommandList* lists[] = {presentList_.Get()};
         presentQueue_->ExecuteCommandLists(1, lists);
 
         const i64 t0 = qpcNow();
         const HRESULT hr = swapChain_->Present(r.sync, r.flags);
+        // The mirror never waits for vblank and never fails the main present.
+        if (mirror) {
+            const HRESULT mhr = mirrorSwap_->Present(0, tearingSupported_ ? DXGI_PRESENT_ALLOW_TEARING : 0u);
+            if (FAILED(mhr) && !mirrorFailLogged_.exchange(true)) {
+                AVER_WARN("[RHI.D3D12] mirror window Present failed 0x{:08X}", static_cast<u32>(mhr));
+            }
+        }
         presentBlockedUs_ += static_cast<u64>(qpcMs(t0, qpcNow()) * 1000.0);
         ++presentCount_;
         presentQueue_->Signal(doneFence_.Get(), r.serial);
@@ -2868,7 +2979,7 @@ bool D3D12Device::queuePresent(u32 image, UINT sync, UINT flags) {
         return false;
     }
     ++readySerial_;
-    PresentRequest r{image, readySerial_, ++requestSerial_, sync, flags};
+    PresentRequest r{image, readySerial_, ++requestSerial_, sync, flags, mirrorSwap_ != nullptr};
     imageLastUse_[image] = r.serial;
     HRESULT err = S_OK;
     const i64 t0 = qpcNow();
@@ -5228,6 +5339,44 @@ bool D3D12Device::frameInterpCameraJumped() {
     return jumped;
 }
 
+// Copies the viewport rect of present image `bbIdx` (or of the viewport texture, where the editor
+// composites it) into mirrorImages_[bbIdx], at the mirror's origin.
+void D3D12Device::copyToMirror(u32 bbIdx) {
+    ID3D12Resource* dst = mirrorSwap_ ? mirrorImages_[bbIdx].Get() : nullptr;
+    if (!dst) return;
+    const RhiTexture* vt = (viewportToTex_ && viewportTex_ && rhiFactory_) ? rhiFactory_->texture(viewportTex_) : nullptr;
+    const bool fromTexture = vt && vt->res;
+    ID3D12Resource* src = fromTexture ? vt->res.Get() : renderTargets_[bbIdx].Get();
+    const D3D12_RESOURCE_STATES srcState = fromTexture ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+                                                       : D3D12_RESOURCE_STATE_RENDER_TARGET;
+    // vpX_.. are scene pixels; the image is in present pixels.
+    const f32 sx = sceneWidth_  ? static_cast<f32>(width_)  / static_cast<f32>(sceneWidth_)  : 1.0f;
+    const f32 sy = sceneHeight_ ? static_cast<f32>(height_) / static_cast<f32>(sceneHeight_) : 1.0f;
+    u32 x = vpW_ ? static_cast<u32>(static_cast<f32>(vpX_) * sx + 0.5f) : 0u;
+    u32 y = vpW_ ? static_cast<u32>(static_cast<f32>(vpY_) * sy + 0.5f) : 0u;
+    u32 w = vpW_ ? static_cast<u32>(static_cast<f32>(vpW_) * sx + 0.5f) : width_;
+    u32 h = vpW_ ? static_cast<u32>(static_cast<f32>(vpH_) * sy + 0.5f) : height_;
+    if (x >= width_ || y >= height_) return;
+    w = std::min({w, mirrorW_, width_ - x});
+    h = std::min({h, mirrorH_, height_ - y});
+    if (w == 0 || h == 0) return;
+
+    D3D12_RESOURCE_BARRIER pre[2] = {
+        transition(src, srcState, D3D12_RESOURCE_STATE_COPY_SOURCE),
+        transition(dst, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST),
+    };
+    cmdList_->ResourceBarrier(2, pre);
+    D3D12_TEXTURE_COPY_LOCATION s{}; s.pResource = src; s.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION d{}; d.pResource = dst; d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    const D3D12_BOX box{x, y, 0, x + w, y + h, 1};
+    cmdList_->CopyTextureRegion(&d, 0, 0, 0, &s, &box);
+    D3D12_RESOURCE_BARRIER post[2] = {
+        transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE, srcState),
+        transition(dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON),
+    };
+    cmdList_->ResourceBarrier(2, post);
+}
+
 // One presented image: post chain, editor lines and overlay features, UI, then PRESENT.
 void D3D12Device::presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool lastOfFrame) {
     ID3D12Resource* bb = renderTargets_[bbIdx].Get();
@@ -5297,6 +5446,7 @@ void D3D12Device::presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool
 
     // UI backend draw, before capture.
     endGpuSpan();   // "overlay"
+    copyToMirror(bbIdx);   // the game view without the editor UI
     if (uiActive_ && uiBackend_) {
         beginGpuSpan("editor UI");
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();

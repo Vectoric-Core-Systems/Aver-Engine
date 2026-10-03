@@ -1603,6 +1603,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             applyDpi(dpi);
         }
     }
+    updatePlayWindow(e);
     // Engine's default pawn is an exception: it must not stand down (leaving it out broke PIE feel).
     // One arbitration computed once instead of eleven spellings.
 #if AVER_WITH_IMGUI
@@ -1626,6 +1627,11 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         ic.pointerInViewport = levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
         ic.drawerOpen        = drawer_ != Drawer::None;
         ic.landscapeMode     = mode_ == EditorMode::Landscape;
+        // ImGui sees only the editor window: the play window's keys and mouse are the game's.
+        if (playWindowFocused()) {
+            ic.textInput = ic.uiWantsKeyboard = ic.uiWantsMouse = false;
+            ic.pointerInViewport = true;
+        }
         // --wheel-speed-test overrides stand in for right-drag state (headless has no real cursor).
 #if AVER_MODULE_FRAMEWORK
         if (wheelTestForceFly_) {
@@ -1644,7 +1650,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     if (own_.keyboardToTool || own_.mouseToTool) {
         const ImGuiIO& io = ImGui::GetIO();
-        const bool overUI = !levelHovered_ || !inViewport(io.MousePos.x, io.MousePos.y);
+        const bool inPlayWindow = playWindowFocused();
+        const bool overUI = !inPlayWindow && (!levelHovered_ || !inViewport(io.MousePos.x, io.MousePos.y));
+        // The play window's keys arrive through input_ only (ImGui sees the editor window).
+        auto flyKey = [&](ImGuiKey k, i32 vk) { return ImGui::IsKeyDown(k) || (inPlayWindow && input_.keyHeld(vk)); };
         if (inputProbe_ && (ImGui::GetFrameCount() % 30) == 0)
             AVER_INFO("[input-probe] mouse=({},{}) wantCaptureMouse={} hovered={} inViewport={} "
                       "focused={} -> overUI={} | flying={} cam=({:.0f},{:.0f},{:.0f}) yaw={:.2f}",
@@ -1694,18 +1703,18 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // defaultPawnPlay_ is scene-guarded. Without the module, camera flies on right button alone.
         // EJECTED DROPS THE EXCEPTION: spectator pawn stops flying without RMB, block below moves camPos_ instead.
 #if AVER_MODULE_SCENE
-        if ((flying_ || (defaultPawnPlay_ && !playEjected())) && !io.WantCaptureKeyboard) {
+        if ((flying_ || (defaultPawnPlay_ && !playEjected())) && (!io.WantCaptureKeyboard || inPlayWindow)) {
 #else
-        if (flying_ && !io.WantCaptureKeyboard) {
+        if (flying_ && (!io.WantCaptureKeyboard || inPlayWindow)) {
 #endif
             const f32 sp = flySpeed_ * t.dt;
             Vec3 step{0, 0, 0};
-            if (ImGui::IsKeyDown(ImGuiKey_W)) step += fwd * sp;
-            if (ImGui::IsKeyDown(ImGuiKey_S)) step -= fwd * sp;
-            if (ImGui::IsKeyDown(ImGuiKey_D)) step += right * sp;
-            if (ImGui::IsKeyDown(ImGuiKey_A)) step -= right * sp;
-            if (ImGui::IsKeyDown(ImGuiKey_E)) step += up * sp;
-            if (ImGui::IsKeyDown(ImGuiKey_Q)) step -= up * sp;
+            if (flyKey(ImGuiKey_W, 'W')) step += fwd * sp;
+            if (flyKey(ImGuiKey_S, 'S')) step -= fwd * sp;
+            if (flyKey(ImGuiKey_D, 'D')) step += right * sp;
+            if (flyKey(ImGuiKey_A, 'A')) step -= right * sp;
+            if (flyKey(ImGuiKey_E, 'E')) step += up * sp;
+            if (flyKey(ImGuiKey_Q, 'Q')) step -= up * sp;
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
             // Move the PAWN (not camera) while default pawn is possessed and not ejected (drivePlayCamera rewrites view every frame).
             if (defaultPawnPlay_ && !playEjected() && walkCapsule_) {
@@ -1795,6 +1804,19 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                 eatRecaptureClick_ = true;
             }
         }
+        // The play window's chords come through input_ (Win32 virtual keys): Esc stops, Shift+F1
+        // releases the mouse, a click takes it back.
+        if (playWindowFocused()) {
+            if (input_.keyPressed(0x1B /*VK_ESCAPE*/)) { stopPlay(); }
+            else if (playSessionActive() && !playEjected()) {
+                if (input_.keyHeld(0x10 /*VK_SHIFT*/) && input_.keyPressed(0x70 /*VK_F1*/))
+                    releasedByUser_ = !releasedByUser_;
+                else if (releasedByUser_ && input_.mousePressed(0)) {
+                    releasedByUser_ = false;
+                    eatRecaptureClick_ = true;
+                }
+            }
+        }
         const bool wantCapture = playSessionActive() && !releasedByUser_ && !playEjected();
         // Alt+P/Alt+S start Play (same anyPlayActive() precondition the toolbar Play button uses).
         if (!ImGui::GetIO().WantTextInput && !anyPlayActive() &&
@@ -1869,6 +1891,14 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         else { px -= ox; py -= oy; }
         for (int b = 0; b < 3; ++b)
             if (ImGui::IsMouseDown(static_cast<ImGuiMouseButton>(b))) buttons |= (1u << b);
+        // In the play window the HUD is laid out at its origin, and only input_ sees its pointer.
+        if (playWindowFocused() && !hudPreviewActive()) {
+            px = static_cast<f32>(input_.mouseX());
+            py = static_cast<f32>(input_.mouseY());
+            buttons = 0;
+            for (int b = 0; b < 3; ++b)
+                if (input_.mouseHeld(b)) buttons |= (1u << b);
+        }
 #else
         (void)ox; (void)oy;
 #endif
@@ -2237,6 +2267,7 @@ int SandboxApp::exitCode() const  {
 }
 
 void SandboxApp::onShutdown(Engine& e)  {
+    closePlayWindow();   // its swapchain must go before the device does
 #if AVER_MODULE_MCP
     mcp_.stop();
 #endif

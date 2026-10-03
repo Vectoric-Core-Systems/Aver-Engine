@@ -3832,6 +3832,7 @@ private:
         SelectedViewport = 0,   // play in the Level viewport, possessing the player (Alt+P)
         Simulate         = 1,   // the game runs, the player is not possessed, the editor keeps the camera (Alt+S)
         Standalone       = 2,   // a separate AverEngineRuntime.exe on the saved level (launchInRuntime)
+        NewWindow        = 3,   // the viewport session, shown in a window of its own; Esc returns
     };
     enum class PlaySpawnAt : u8 { PlayerStart = 0, CameraLocation = 1 };
     PlayMode    playMode_ = PlayMode::SelectedViewport;    // Last launched; main button repeats it.
@@ -3850,6 +3851,16 @@ private:
     // Play From Here: viewport pawn starts at surface, facing camera yaw.
     void playFromHere(const Vec3& surface);
     std::optional<Vec3> playFromHere_;
+    // Play in New Window: the device mirrors the game view into playWindow_ (IDevice::setMirrorWindow),
+    // whose input feeds input_. The scene renders at the window's size; see docs/editor/PLAY_IN_NEW_WINDOW.md.
+    std::unique_ptr<Window> playWindow_;
+    rhi::IDevice* playWindowDevice_ = nullptr;
+    u32 playWindowW_ = 0, playWindowH_ = 0;
+    void openPlayWindow(Engine& e);
+    void closePlayWindow();
+    void updatePlayWindow(Engine& e);   // per frame, before the scene rect is used
+    bool playWindowFocused() const { return playWindow_ && playWindow_->isForeground(); }
+    Window* captureWindow() const { return playWindow_ ? playWindow_.get() : window_; }
     // Toggle eject (F8). No-op outside framework session.
     void togglePlayEject();
     // Teleport pawn to camera (Shift+F while ejected).

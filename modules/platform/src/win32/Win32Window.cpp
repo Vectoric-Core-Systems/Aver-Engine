@@ -216,7 +216,7 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         case WM_DESTROY:
-            PostQuitMessage(0);
+            if (self->quitOnDestroy()) PostQuitMessage(0);
             return 0;
         // A file forwarded from another instance's launch (see the single-instance block above and
         // SandboxApp.cpp's createApplication for the sender). dwData==1 is the only message kind
@@ -272,6 +272,10 @@ void Window::focus() {
     HWND hwnd = static_cast<HWND>(nativeHandle_);
     if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
     SetForegroundWindow(hwnd);
+}
+
+bool Window::isForeground() const {
+    return nativeHandle_ && GetForegroundWindow() == static_cast<HWND>(nativeHandle_);
 }
 
 // Opts this window into (or back out of) WM_DROPFILES. DragAcceptFiles is the whole mechanism --
@@ -413,6 +417,7 @@ bool Window::create(const WindowDesc& desc) {
     }
 
     nativeHandle_ = hwnd;
+    quitOnDestroy_ = desc.quitOnDestroy;
     width_ = desc.width;
     height_ = desc.height;
     dpiScale_ = queryDpiScale(hwnd);

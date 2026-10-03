@@ -379,6 +379,13 @@ public:
     // The UI identifier for that texture, or 0 when the mode is off or unsupported.
     virtual u64 viewportTextureId() { return 0; }
 
+    // Play in New Window: every presented image's viewport rect (after post and overlays, before the
+    // editor UI) is also presented to a second window, `width` x `height`. A null handle removes it.
+    // Calling again with the same handle resizes. False when unsupported or on failure.
+    virtual bool setMirrorWindow(void* windowHandle, u32 width, u32 height) {
+        (void)windowHandle; (void)width; (void)height; return false;
+    }
+
     // True once this device has been REMOVED and can no longer execute anything. One-way and sticky:
     // nothing here recovers a lost device. Defaults to false so a backend that can't lose its device
     // is unaffected.
