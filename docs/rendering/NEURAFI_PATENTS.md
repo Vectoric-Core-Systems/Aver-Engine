@@ -180,6 +180,22 @@ China and Germany for anything distributed there.
   AMD may yet win claims by narrowing them, and a Japanese counterpart has been allowed. Measured
   pacing in general is old art (Campbell 2016), but this exact combination may still issue. NeuraFI
   keeps the fixed clock (NEURAFI.md §5) until counsel says otherwise.
+- *Practising the prior art, checked 2026-10-03 (Google Patents legal status; counsel to confirm):*
+  - Live, so not usable as a source:
+    - Lobete → Samsung US 11,665,305 B2.
+    - Campbell → AMD US 9,679,345 B2 (8th-year fee paid 2024-11-25).
+    - Schluessler → Intel US 12,057,090 B2.
+  - Lapsed for unpaid fees, free to practise, but neither times a generated frame between two rendered
+    frames:
+    - Swedberg → Microsoft US 7,450,130: compositor scheduling against vsync from measured times.
+    - Masuda → Panasonic US 8,711,152: UI keyframe animation that skips an in-between screen if it
+      cannot finish before the next keyframe.
+  - No single lapsed or unpatented reference found so far practises measured midpoint pacing of
+    interpolated frames. The unpatented line that matches NeuraFI is the fixed-cadence one:
+    - game frame-rate up-conversion at 30→60 locked to vsync (Andreev, LucasArts, SIGGRAPH 2010 talk);
+    - Didyk et al. 2010;
+    - TV motion-compensated frame-rate conversion.
+    Each is to be read and confirmed before it is relied on.
 
 ### 6.2 The present chain: granted parent claims and pre-2022 prior art (2026-10-03)
 
