@@ -176,7 +176,12 @@ public:
 
     ID3D12DescriptorHeap* render(ID3D12GraphicsCommandList* cmdList) override {
         if (!active_) return nullptr;
-        ImGui::Render();
+        // Once per ImGui frame: with frame generation the device renders the same UI onto two images,
+        // and the second call only re-records the draw data the first one built.
+        if (renderedFrame_ != ImGui::GetFrameCount()) {
+            ImGui::Render();
+            renderedFrame_ = ImGui::GetFrameCount();
+        }
         ID3D12DescriptorHeap* heaps[] = {srvHeap_.Get()};
         cmdList->SetDescriptorHeaps(1, heaps);
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList);
@@ -204,6 +209,7 @@ private:
     ComPtr<ID3D12DescriptorHeap> srvHeap_;
     UiSrvPool pool_;
     bool active_ = false;
+    int renderedFrame_ = -1;   // ImGui::GetFrameCount() of the last ImGui::Render()
 };
 
 } // namespace aver::rhi::d3d12

@@ -1972,6 +1972,13 @@ void SandboxApp::buildUI(Engine& e) {
         if (prefsDevice_->vsyncCanDisable()) { prefsDevice_->setVSync(false); AVER_INFO("[Sandbox] vsync OFF (--no-vsync)"); }
         else AVER_WARN("[Sandbox] --no-vsync ignored: this display path cannot tear");
     }
+    // --vsync: forces it ON for the session, whatever the stored preference (a capture of frame
+    // generation needs it). Applied after --no-vsync, so it wins when both are given.
+    if (vsyncOnRequested_) {
+        vsyncOnRequested_ = false;
+        prefsDevice_->setVSync(true);
+        AVER_INFO("[Sandbox] vsync ON (--vsync)");
+    }
 #if AVER_WITH_IMGUI
     if (!e.device()->uiActive()) return;
     ++frameNo_;   // the Content Browser's directory-cache freshness clock

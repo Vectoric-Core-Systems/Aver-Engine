@@ -1110,6 +1110,42 @@ public:
     virtual void execute(IRenderContext& ctx, const UpscalerInput& in, TextureHandle outTarget) = 0;
 };
 
+// ---------------------------------------------------------------------------------------------
+// Frame generation (docs/rendering/FRAME_INTERPOLATION.md): one frame generated BETWEEN every two real
+// frames. The device owns presentation (two back buffers per real frame, generated first); the
+// generator owns the image. Declared like IUpscaler -- the device holds a non-owning pointer the host
+// installs, so Aver.RHI never links an implementation.
+
+// One real frame handed to the generator. All three are scene-resolution and describe the frame JUST
+// rendered (frame N). Motion follows IDevice::gBufferVelocityTexture's convention exactly: texels per
+// frame, destination minus source, so (x,y) - v is where the surface at (x,y) was in frame N-1.
+struct FrameGenInput {
+    TextureHandle color    = 0;   // HDR scene colour, in ShaderResource
+    TextureHandle velocity = 0;   // RG16F texel motion, in RenderTarget (the G-buffer's resting state)
+    TextureHandle viewZ    = 0;   // R32F linear view depth, in RenderTarget
+    u32  width = 0, height = 0;
+    // A discontinuity between N-1 and N (level load, teleport, camera jump, resize): nothing may be
+    // interpolated across it. The generator still stores N as history.
+    bool sceneCut = false;
+};
+
+class IFrameGenerator {
+public:
+    virtual ~IFrameGenerator() = default;
+    virtual const char* name() const = 0;
+
+    // Records the generation of the frame half-way between the PREVIOUS real frame and `in`, then
+    // records storing `in` as the new previous frame. Returns the generated scene-resolution HDR image
+    // (in ShaderResource, owned by the generator, valid until the next generate()), or 0 when there is
+    // no valid previous frame (the first frame, after a cut or a size change) -- the caller then
+    // presents the real frame alone. Leaves the velocity/viewZ textures in RenderTarget. Binds its own
+    // pipelines and sets; the caller restores whatever it needs afterwards.
+    virtual TextureHandle generate(IRenderContext& ctx, const FrameGenInput& in) = 0;
+
+    // Forgets the previous frame (the next generate() returns 0).
+    virtual void reset() = 0;
+};
+
 // The shared HLSL prelude: cbuffer layouts, vertex structures and helpers.
 const char* sharedShaderPrelude();
 

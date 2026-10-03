@@ -163,6 +163,9 @@ if(AVER_BUILD_GAME)
   # stb_image_write, for GameApp.cpp's --screenshot (captureScreenshotIfDue). Matching
   # sandbox/CMakeLists.txt's own `target_include_directories(Sandbox PRIVATE .../third_party/stb)`.
   target_include_directories(Aver.Runtime.Game PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
+  # Frame interpolation (docs/rendering/FRAME_INTERPOLATION.md): GameApp builds and installs the
+  # generator when the project's RENDER.FRAMEGEN (or --frame-gen) asks for it.
+  target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Render.FrameGen)
   # Save/load of a whole world. A composition root is the only thing that may link BOTH this and
   # Aver.Framework -- Aver.Save deliberately takes function pointers instead of the framework.
   if(TARGET Aver.Save)

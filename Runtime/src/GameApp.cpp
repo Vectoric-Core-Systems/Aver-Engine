@@ -1,6 +1,7 @@
 #include "aver/game/GameApp.hpp"
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
+#include "aver/framegen/ProceduralFrameGenerator.hpp"
 
 #include <filesystem>
 
@@ -491,6 +492,11 @@ GameConfig parseArgs(int argc, char** argv) {
             else if (v && equalsAsciiCI(v, "balanced"))    { c.averSrArg = 2;  ++i; }
             else if (v && equalsAsciiCI(v, "performance")) { c.averSrArg = 3;  ++i; }
             else if (v && equalsAsciiCI(v, "auto"))        { c.averSrArg = -1; ++i; }
+        }
+        // --frame-gen 0|1: frame interpolation on/off over the project's RENDER.FRAMEGEN.
+        else if (std::strcmp(a, "--frame-gen") == 0) {
+            const char* v = valueAfter(argc, argv, i, nullptr);
+            if (v) { c.frameGenArg = std::atoi(v) != 0 ? 1 : 0; ++i; }
         }
         // A bare .ocproject path is the project, so double-clicking or dropping it on the exe works. A
         // packaged game launched with no arguments at all finds its manifest in its own directory
@@ -1894,7 +1900,20 @@ void GameApp::pushFrame(Engine& e) {
         // onUpdate pattern (:3865-3882 there): the G-buffer switch reads resolve()'s
         // denoiserGBufferWanted (see RenderSettingsResolver.hpp), and the MSAA push is the one-shot
         // consumeMsaaDirty() flag.
-        dev->setGBufferEnabled(voxi::resolve(vx.settings(), vx.deviceInfo()).denoiserGBufferWanted);
+        // Frame interpolation: --frame-gen over RENDER.FRAMEGEN. It reads motion and depth from the
+        // G-buffer, so wanting it turns that on too; the device pauses it (and says why once) when
+        // vsync or 1x anti-aliasing is missing.
+        bool wantFrameGen = cfg_.frameGenArg >= 0 ? cfg_.frameGenArg == 1 : project_.frameGen == 1;
+        if (wantFrameGen && !frameGenerator_) {
+            if (rhi::IResourceFactory* res = dev->resources()) {
+                frameGenerator_ = std::make_unique<framegen::ProceduralFrameGenerator>(*res);
+                dev->setFrameGenerator(frameGenerator_.get());
+            } else {
+                wantFrameGen = false;
+            }
+        }
+        dev->setFrameGeneration(wantFrameGen);
+        dev->setGBufferEnabled(voxi::resolve(vx.settings(), vx.deviceInfo()).denoiserGBufferWanted || wantFrameGen);
         if (vx.consumeMsaaDirty()) dev->setSampleCount(static_cast<u32>(vx.settings().msaa));
 
         // The volume the editor would be showing, pushed every frame exactly as the editor does
@@ -2562,6 +2581,9 @@ void GameApp::onShutdown(Engine& e) {
     // applyAverSrQuality guard for the identical crash class (search: "--aversr-cycle").
     if (dev) dev->setUpscaler(nullptr);
     averSrUpscaler_.reset();
+    // The frame generator: same detach-then-destroy order, same reason.
+    if (dev) { dev->setFrameGeneration(false); dev->setFrameGenerator(nullptr); }
+    frameGenerator_.reset();
     if (dev && pcgAttached_) { dev->removeRenderFeature(&pcgVolume_); pcgAttached_ = false; }
     pcgVolume_.shutdown();
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE

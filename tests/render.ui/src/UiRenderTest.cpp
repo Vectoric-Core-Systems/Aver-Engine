@@ -201,7 +201,7 @@ int main() {
               "COLOR0 is four bytes at byte 16");
         check(p.layout.srvCount == 1 && p.layout.samplerCount == 1, "one texture slot and one sampler");
 
-        check(f.buffers.size() == 6, "six buffers: three vertex and three index");
+        check(f.buffers.size() == 10, "ten buffers: five vertex and five index");
         for (const BufferRecord& b : f.buffers)
             if (b.kind != rhi::BufferKind::Upload) { check(false, "every UI buffer is CPU-writable"); break; }
         check(f.buffers[0].kind == rhi::BufferKind::Upload, "every UI buffer is CPU-writable");
@@ -301,18 +301,24 @@ int main() {
         dl.addRect(0, 0, 10, 10, 0xFFFFFFFF);
         r->submit(dl);
 
-        u32 seen[4] = {};
-        for (int i = 0; i < 4; ++i) {
+        // Five deep: two frames in flight, two overlay passes each with frame generation on, one spare.
+        u32 seen[6] = {};
+        for (int i = 0; i < 6; ++i) {
             MockContext ctx;
             r->overlayPass(ctx, 1280, 720);
             const std::vector<Call> vb = ctx.ofKind(Call::Kind::VertexBuffer);
             seen[i] = vb.empty() ? 0u : vb[0].a;
             check(!vb.empty() && vb[0].b == 20, "the stride bound is the 20-byte UiVertex");
         }
-        check(seen[0] && seen[1] && seen[2], "three frames, three buffers");
-        check(seen[0] != seen[1] && seen[1] != seen[2] && seen[0] != seen[2],
-              "consecutive frames write DIFFERENT buffers -- the CPU never overwrites one in flight");
-        check(seen[3] == seen[0], "and the fourth frame comes back round to the first");
+        bool allSet = true, allDistinct = true;
+        for (int i = 0; i < 5; ++i) {
+            allSet = allSet && seen[i] != 0;
+            for (int j = i + 1; j < 5; ++j) allDistinct = allDistinct && seen[i] != seen[j];
+        }
+        check(allSet, "five passes, five buffers");
+        check(allDistinct,
+              "consecutive passes write DIFFERENT buffers -- the CPU never overwrites one in flight");
+        check(seen[5] == seen[0], "and the sixth pass comes back round to the first");
     }
 
     AVER_INFO("=== the bytes that reach the GPU are the bytes in the list ===");

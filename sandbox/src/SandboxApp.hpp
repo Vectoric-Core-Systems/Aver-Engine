@@ -272,6 +272,9 @@ static_assert(static_cast<aver::u32>(aver::sr::Quality::Performance) == aver::vo
 #endif  // AVER_MODULE_VOXI
 #endif  // AVER_MODULE_SR
 
+// Frame interpolation: Sandbox is the composition root for the IFrameGenerator, as for AverSR.
+#include "aver/framegen/ProceduralFrameGenerator.hpp"
+
 // Guarded on AVER_MODULE_PHYSICS alone, not FRAMEWORK: SCENE=OFF can force FRAMEWORK off while
 // PHYSICS stays on, breaking the guarded call sites below (which check PHYSICS alone) with no
 // missing-symbol error to point at it.
@@ -1402,6 +1405,7 @@ public:
 
     void onShutdown(Engine& e) override;
     void setVSyncOff(bool off);               // --no-vsync
+    void setVSyncOn(bool on) { vsyncOnRequested_ = on; }   // --vsync
     void setLodSelect(bool on, f32 thresholdPx);
     void setLodClusterStats(bool on);
     void setLodPerCluster(bool on, f32 thresholdPx);
@@ -1497,6 +1501,7 @@ public:
     void setAverSrCycleAuto(int framesIn);   // --aversr-cycle [N]
 #endif
     void setResizeCycle(int n);              // --resize-cycle [N]
+    void setFrameGenCli(int on) { frameGenCli_ = on; }   // --frame-gen 0|1|2 (2: capture the generated image)
     void setGpuTiming(bool on);                                // --gpu-timing
     void setLumaSweep(bool on, int stride);
     void setFireflyMetric(bool on, f32 mult);
@@ -3389,6 +3394,7 @@ private:
     bool levelCameraRestored_ = false;
     editor::AssetEditorHost assetEditors_;
     bool vsyncOffRequested_ = false;        // --no-vsync, pending a device to apply it to
+    bool vsyncOnRequested_ = false;         // --vsync, the same, the other way
     bool wantMeshReload_ = false;
     // Outliner display names. Not scene::World::name(), which holds the asset path.
     std::unordered_map<u32, std::string> entityLabels_;
@@ -3922,6 +3928,17 @@ private:
     // Said once per session, not once per frame: updateAverSrAuto forces Auto to Off every frame
     // --edge-aa occupies the upscaler slot; logging that every frame would flood the log.
     bool edgeAaAverSrWarnLogged_ = false;
+
+    // ---- frame generation (docs/rendering/FRAME_INTERPOLATION.md) ----
+    // Who decides, highest first: --frame-gen (frameGenCli_, -1 = not given); during Play, the
+    // project's RENDER.FRAMEGEN; while editing, the Editor Preference below (off by default). The
+    // generator is built on first use and installed on the device for the session.
+    int  frameGenCli_ = -1;
+    bool frameGenWhileEditing_ = false;   // Editor Preferences, display.frameGenWhileEditing
+    std::unique_ptr<aver::framegen::ProceduralFrameGenerator> frameGenerator_;
+    // Decides and pushes this frame's frame-generation state; returns whether it is wanted (the
+    // G-buffer must then be on).
+    bool updateFrameGeneration(aver::rhi::IDevice* dev);
 #endif
     int  rdAblate_=0;                // --rd-ablate: AVER_RD_ABLATE for PSRayDriven, 0 = normal
     f32  rtDenoiseMotionTaper_=0.0f; // --rt-denoise-motion: 0 = no taper, the shipped default

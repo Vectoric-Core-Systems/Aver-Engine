@@ -45,8 +45,10 @@ private:
     rhi::ShaderHandle   vs_ = 0, ps_ = 0;
     rhi::TextureHandle  white_ = 0;         // 1x1 opaque
 
-    // Rotated per overlayPass, three deep against a backend keeping two frames in flight.
-    static constexpr u32 kFramesInFlight = 3;
+    // Rotated per overlayPass. Five deep: a backend keeps two frames in flight, and with frame
+    // generation on each frame runs overlayPass twice (the generated image, then the real one), so
+    // four rotations can still be in flight; one spare as before.
+    static constexpr u32 kFramesInFlight = 5;
     rhi::BufferHandle vb_[kFramesInFlight] = {};
     rhi::BufferHandle ib_[kFramesInFlight] = {};
     u32 frame_ = 0;

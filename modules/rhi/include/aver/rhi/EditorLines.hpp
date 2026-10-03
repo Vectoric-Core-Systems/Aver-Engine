@@ -91,8 +91,14 @@ public:
     //     `depthSamples` its sample count (> 1 reads it as Texture2DMS). 0 = no depth available:
     //     every line then draws on top.
     // Pipelines are (re)built lazily when targetFormat or depthSamples change.
+    //
+    // A frame with frame generation on presents TWO images and replays the same queue onto both:
+    // `firstOfFrame` false on the second replay skips the retire tick (which counts FRAMES -- ticking
+    // twice would recycle a buffer the GPU may still be reading), and `lastOfFrame` false on the first
+    // keeps the queue for the second. The defaults are the one-replay frame.
     void replay(IRenderContext& ctx, u32 targetW, u32 targetH, const f32 sceneRect[4],
-                TextureHandle sceneDepth, u32 depthSamples, Format targetFormat);
+                TextureHandle sceneDepth, u32 depthSamples, Format targetFormat,
+                bool firstOfFrame = true, bool lastOfFrame = true);
     // Drops the queue without drawing: a frame that never reached the overlay stage (suppressed,
     // device lost) must not carry its lines into the next one.
     void discardQueue() { queue_.clear(); wireQueue_.clear(); }

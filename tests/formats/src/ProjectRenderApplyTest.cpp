@@ -821,6 +821,20 @@ static void testRestirVisibilityAndAverSrRoundTrip() {
           "RENDER.RESTIRVISIBILITY appears exactly once after a rewrite, not duplicated");
     check(countOccurrences(second, "RENDER.AVERSR") == 1,
           "RENDER.AVERSR appears exactly once after a rewrite, not duplicated");
+
+    // RENDER.FRAMEGEN: the same device-level shape as AVERSR -- written when set, once, and absent
+    // (no line) when left at -1, so a project that never touched it is byte-identical.
+    fmt::ProjectDesc fg;
+    fg.name = "RoundTrip";
+    fg.frameGen = 1;
+    const std::string fgFirst = fmt::writeOcproject(fg, "");
+    check(fgFirst.find("RENDER.FRAMEGEN 1") != std::string::npos, "RENDER.FRAMEGEN 1 is written");
+    fmt::ProjectDesc fgBack;
+    check(fmt::parseOcproject(fgFirst, fgBack, &err), "the FRAMEGEN manifest parses back: " + err);
+    check(fgBack.frameGen == 1, "FRAMEGEN round-trips through parse");
+    check(countOccurrences(fmt::writeOcproject(fgBack, fgFirst), "RENDER.FRAMEGEN") == 1,
+          "RENDER.FRAMEGEN appears exactly once after a rewrite, not duplicated");
+    check(first.find("RENDER.FRAMEGEN") == std::string::npos, "an unset FRAMEGEN writes no line");
 }
 
 // ---- RENDER.RESTIRHISTORY (Settings::giRestirMaxHistory) -- deliberately NOT tier-derived ---------

@@ -155,7 +155,86 @@ China and Germany for anything distributed there.
 - *Watch:* set Patent Center / Espacenet alerts on 19/643,218, 17/949,153 and 17/949,156. Continuations
   let claims be redrafted toward a later product.
 
+### 6.2 The present chain: granted parent claims and pre-2022 prior art (2026-10-03)
+
+**US 12,632,916 B2 claim 1 (verbatim, Google Patents):** "A method, comprising: intercepting one or more
+application programming interface (API) calls from a host application indicative of a request to output
+an application-generated frame using a swap chain buffer; storing the application-generated frame, to be
+rendered by a first process, in a buffer outside of a swap chain buffer; initiating a second process
+that, at least partially in parallel with the first process as the first process is rendering the
+application-generated frame, generates one or more interpolated frames based at least on the
+application-generated frame and stored in the buffer outside of the swap chain buffer; identifying a goal
+frame rate; and providing the application-generated frame and the one or more interpolated frames to the
+swap chain buffer from the buffer outside of the swap chain buffer to output the application-generated
+frame and the one or more interpolated frames in accordance with the goal frame rate." Claims 8/14 are the
+system/processor forms. Dependents: a pacer process (4, 9, 10, 19), the next frame in parallel (5, 15), a
+machine-learning model (6, 18), the count from the rate gap (7, 11), a goal rate from display
+characteristics (12). Examiner-cited: NVIDIA US 2014/0092109 A1 ("GPU driver-generated interpolated
+frames", 2012), not yet read.
+
+**Against milestone 1 as designed:** no interception (the engine is the application); no finished frame
+stored outside the swap chain (each frame is composited straight into its back buffer); no second process
+generating in parallel (the gather runs in the same command list, after the scene); no goal frame rate
+(fixed 2×, one generated frame per real frame, the refresh is the clock). The broadened continuation
+(§6.1) drops interception, parallelism and the goal rate, which is why the prior art below matters there.
+
+| Reference | Public | Discloses | Licence |
+|---|---|---|---|
+| Andreev, *Real-time frame rate up-conversion for video games*, SIGGRAPH 2010 Talks (LucasArts, *The Force Unleashed 2*), DOI 10.1145/1837026.1837047 | 2010-07 | Interpolated frame built as a new front buffer and flipped mid-frame, triple buffered; generated in parallel with the next frame. | ACM copyright: cite only |
+| Mark, McMillan, Bishop, *Post-Rendering 3D Warping*, I3D 97 | 1997-04 | Low-rate reference frames depth-warped into higher-rate displayed frames | ACM: cite |
+| Didyk et al., Eurographics 2010; Yang et al. 2011; Bowles et al. 2012 | 2010–12 | Synthesised in-between frames for high-refresh display | Publisher: cite |
+| Oculus Asynchronous Timewarp (2016-03-25), ASW (2016-11-10), ASW 2.0 (2019-04-04) | 2016–19 | App submits frames through an API; runtime buffers, synthesises (extrapolation) and presents; ASW engages when the app misses rate | Proprietary: cite |
+| Valve SteamVR Motion Smoothing (beta 2018-10-17) | 2018 | App at half rate; "synthesize 2 frames or even 3 frames for every 1 frame delivered" (count from the rate gap) | Proprietary; OpenVR headers BSD-3 |
+| Windows Mixed Reality motion reprojection (2018-04-01; Auto mode 2019) | 2018–19 | Half-rate rendering with synthesised frames; switches on the achieved rate | Proprietary: cite |
+| Meta Application SpaceWarp (2021-11-04) | 2021 | App submits colour, motion and depth at half rate; the OS synthesises every other frame | Runtime proprietary |
+| ReShade (Present-hooking proxy, releases from ~2015) / OBS game-capture hook (2014) | 2014–15 | Intercepting Present and the back buffer (no frame insertion) | BSD-3 / GPL-2.0 |
+
+No pre-2022 tool was found that combines a third-party Present hook with frame insertion.
+
+**Permissively licensed interpolation / reprojection code public before 2022-09-20** (reusable under its
+licence; prior-art status depends only on the date): DAIN (MIT, 2019-03-22, depth-aware), RIFE (MIT,
+2020-11-12), rife-ncnn-vulkan (MIT, 2020-11-24), IFRNet (MIT, 2022-03-17), Super-SloMo reimplementation
+(MIT, 2018-12-25), FLAVR (Apache-2.0, 2020-12-24), ABME (MIT, 2021-08-24), ST-MFNet (MIT, 2022-02-09), AMD
+FSR2 (MIT, 2022-06-22, depth + motion reprojection for upscaling), Microsoft MiniEngine (MIT, camera
+reprojection 2015, temporal effects 2017). Not permissive (cite only): softmax-splatting (academic use
+only), MVTools (GPL), Blender EEVEE (GPL), Special K (GPL-3.0).
+
+### 6.3 The neural milestone: claims read and candidate designs (2026-10-03)
+
+Claims read from the USPTO PDFs (page images): 12,524,850; 12,574,521; 12,229,970; 2026/0094228;
+2026/0030797; 2025/0225705. From Google Patents pages: 10,776,688; 12,288,281; US 2024/0029196; GB 2620919
+**A** (the granted **B** claims are still unread).
+
+| Document | Status | Claim 1 (plain words) |
+|---|---|---|
+| NVIDIA US 12,524,850 B1 | Granted 2026-01-13 | Filter pixels to locate an edge, convert the filtered images to luma, then down-sample; dependents: a network uses the result for blending information |
+| NVIDIA US 12,574,521 B1 | Granted 2026-03-10 | Find pixels with no motion vector; estimate their motion from nearby pixels with motion vectors, the same depth and the same object |
+| NVIDIA US 12,229,970 B2 | Granted 2025-02-18 | Two reference frames' vectors conflict at one intermediate pixel; use the one more similar to a global motion vector |
+| AMD US 2026/0094228 A1 | Pending, unexamined | A rendering pipeline in which at least one stage is a trained network transforming the previous stage's data (very broad as published) |
+| Arm US 2026/0030797 A1 | Pending | Reduced-resolution interpolated optical flow AND motion-vector data; nearest-in-depth vector per output pixel (scatter); gather colour |
+| Intel US 2025/0225705 A1 | Pending | Forward motion plus generated optical flow "representing non-geometric changes" plus motion to the timepoint. **No precision element in any claim** |
+| NVIDIA US 10,776,688 B2 | Granted | A flow-interpolation network predicts occlusion data and generates the intermediate frame |
+| Disney/ILM US 12,288,281 B2 | Granted | A network on features of key frames AND of the target frame, producing pixel mappings |
+
+Candidate designs, ranked: **N1, a learned trajectory prior** (network outputs only a per-pixel
+acceleration that bends the gather path; never touches the blend), then N3 (single-image residual
+restoration), N4 (learned constants, no network at runtime), N2 (learned reliability feeding the blend
+weight, closest to 17/949,153's allowed claim, dropped). The binding design rules R1–R10 are in
+FRAME_INTERPOLATION.md §3.5.
+
+**Milestone 1 flags from this review:**
+- The **two search starts per frame** with the more confident result kept could be read against NVIDIA
+  US 2022/0038653 ("generate a third frame based on one of a plurality of possible motions", pending since
+  2020). Counsel to decide; a single-start search is the fallback (thin fast objects suffer).
+- **AMD US 2026/0094228** as published reads on any trained network stage — the neural radiance cache
+  stage 2 included. Pre-2024 prior art: DLSS 2.0 (2020), Chaitanya et al. 2017, Xiao et al. 2020,
+  ExtraNet 2021.
+
 ## 7. Gaps — still to search or read
+
+- GB 2620919 **B** (granted) claims; 2022/0038653's current claims and status.
+
+- NVIDIA US 2014/0092109 A1 (examiner-cited on the parent): not read.
 
 - USPTO file wrappers for every application above (abandonment of 2021/0067735 and any revival or
   continuation; whether 2024/0098216 and 2025/0106355 have a first rejection).

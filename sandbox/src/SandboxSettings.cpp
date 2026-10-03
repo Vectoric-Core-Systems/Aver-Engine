@@ -105,6 +105,7 @@ void SandboxApp::loadEditorPreferences() {
 
     if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
         prefsDevice_->setVSync(prefBool("display.vsync", prefsDevice_->vsync()));
+    frameGenWhileEditing_ = prefBool("display.frameGenWhileEditing", false);
     // A stored render scale applies behind a crash cookie: applying one below 1 can lose the GPU
     // device -- a persisted setting that kills the device at startup is a trap with no way out
     // from inside the editor; one evening was lost after the AverSR combo persisted a 0.67 that
@@ -332,6 +333,21 @@ void SandboxApp::buildEditorPrefs() {
                               "Needs DXGI tearing support (DXGI 1.5+).");
         ImGui::SameLine();
         ImGui::TextDisabled(vs ? "(capped to the refresh rate)" : "(uncapped, may tear)");
+
+        // Frame generation while editing (docs/rendering/FRAME_INTERPOLATION.md, decision 8). Play
+        // follows the project's Frame generation setting instead; --frame-gen outranks both.
+        ImGui::Checkbox("Frame generation in viewport while editing", &frameGenWhileEditing_);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Shows a generated frame between every two rendered ones: twice the frames\n"
+                              "on screen for the same rendering work, at about half a frame of extra delay.\n"
+                              "Needs V-Sync on and 1x anti-aliasing. Play uses the project's setting instead.");
+        if (frameGenWhileEditing_ && prefsDevice_) {
+            ImGui::SameLine();
+            ImGui::TextDisabled(!prefsDevice_->vsync()       ? "(paused: needs V-Sync)"
+                                : prefsDevice_->sampleCount() > 1 ? "(paused: needs 1x anti-aliasing)"
+                                : prefsDevice_->frameGenerated() ? "(running)"
+                                                                 : "(starting)");
+        }
 
 #if AVER_MODULE_SR
         // Every Overall rung has an AverSR default (QualityLadder.hpp's ladder::averSrLevel), so
@@ -1255,6 +1271,22 @@ void SandboxApp::buildRenderingSettings(int page) {
                                   "default. \"Follow Overall preset\" (-1) pins nothing.");
         }
 #endif
+
+        // RENDER.FRAMEGEN: frame generation during Play and in the packaged game. Edited on project_
+        // directly (like AVERSR it is device-level, outside the Voxi settings this page mostly mirrors);
+        // editing uses the Editor Preference instead, and --frame-gen outranks both.
+        {
+            bool fg = project_.frameGen == 1;
+            if (ImGui::Checkbox("Frame generation (Play and packaged game)", &fg)) {
+                project_.frameGen = fg ? 1 : 0;
+                projectDirty_ = true;
+            }
+            uiReg_.track("project.frameGen");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Generates a frame between every two rendered ones (procedural frame "
+                                  "interpolation). Round-trips as RENDER.FRAMEGEN. Needs V-Sync and 1x "
+                                  "anti-aliasing; the viewport while editing has its own Editor Preference.");
+        }
 
         // The three groups an Overall preset moves together, each its own Off..Epic row: where a
         // Custom project actually lives. "(modified)" flags a group at the right tier with a
@@ -2349,6 +2381,7 @@ void SandboxApp::saveEditorPreferences() {
     if (maxFrames_ == 0) {
         if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
             setPrefBool("display.vsync", prefsDevice_->vsync());
+        setPrefBool("display.frameGenWhileEditing", frameGenWhileEditing_);
         // The three AverSR keys below are skipped outright, not written a neutral value, when the
         // command line drove this session's render scale or AverSR level: an interactive `--aversr
         // quality` run has maxFrames_ == 0 too (it is not a --frames capture), so the outer guard

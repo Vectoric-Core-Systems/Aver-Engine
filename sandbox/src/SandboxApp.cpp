@@ -2592,7 +2592,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #else
     const bool wantGbufForDenoiser = false;
 #endif
-    e.device()->setGBufferEnabled(gbufferOverride_ || wantGbufForDenoiser ||
+    // Frame generation reads motion and depth from the G-buffer -- the fourth reason it exists.
+    const bool wantGbufForFrameGen = updateFrameGeneration(e.device());
+    e.device()->setGBufferEnabled(gbufferOverride_ || wantGbufForDenoiser || wantGbufForFrameGen ||
                                   gbufferDebugView_ != GBufferDebugFeature::Mode::Off);
     gbufferDebugFeature_.setDevice(e.device());
     // vpX_/vpY_/vpW_/vpH_: this frame's 3D-viewport rect (buildViewportOverlay), a frame stale at
@@ -2958,6 +2960,10 @@ editor::shutdownAnimEditors();
     averSrUpscaler_.reset();
     edgeAaUpscaler_.reset();
 #endif
+    // Same order as the upscaler, same reason: the device's raw pointer first, then the object.
+    e.device()->setFrameGeneration(false);
+    e.device()->setFrameGenerator(nullptr);
+    frameGenerator_.reset();
     if (gameUi_) {
         e.device()->removeRenderFeature(gameUi_);
         delete gameUi_;
@@ -3040,5 +3046,33 @@ editor::shutdownAnimEditors();
 }
 
 void SandboxApp::setVSyncOff(bool off) { vsyncOffRequested_ = off; }
+
+// Frame generation's on/off for this frame (docs/rendering/FRAME_INTERPOLATION.md, decision 8):
+// --frame-gen wins; otherwise Play follows the project's RENDER.FRAMEGEN and editing follows the
+// Editor Preference. The device still declines frame by frame when it cannot run (vsync off, MSAA,
+// no G-buffer yet) and says why once.
+bool SandboxApp::updateFrameGeneration(rhi::IDevice* dev) {
+    if (!dev) return false;
+#if AVER_MODULE_FRAMEWORK
+    const bool playing = anyPlayActive();
+#else
+    const bool playing = false;
+#endif
+    bool want = frameGenCli_ >= 0 ? frameGenCli_ >= 1
+              : playing           ? project_.frameGen == 1
+                                  : frameGenWhileEditing_;
+    dev->setFrameGenCaptureGenerated(frameGenCli_ == 2);
+    if (want && !frameGenerator_) {
+        rhi::IResourceFactory* res = dev->resources();
+        if (res) {
+            frameGenerator_ = std::make_unique<framegen::ProceduralFrameGenerator>(*res);
+            dev->setFrameGenerator(frameGenerator_.get());
+        } else {
+            want = false;
+        }
+    }
+    dev->setFrameGeneration(want);
+    return want;
+}
 
 } // namespace aver

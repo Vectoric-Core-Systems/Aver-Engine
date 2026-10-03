@@ -380,16 +380,19 @@ bool EditorLines::buildPipelines(u32 depthSamples, Format targetFormat) {
 }
 
 void EditorLines::replay(IRenderContext& ctx, u32 targetW, u32 targetH, const f32 sceneRect[4],
-                          TextureHandle sceneDepth, u32 depthSamples, Format targetFormat) {
-    retireTick();
+                          TextureHandle sceneDepth, u32 depthSamples, Format targetFormat,
+                          bool firstOfFrame, bool lastOfFrame) {
+    if (firstOfFrame) retireTick();
 
     // Cleared on every path out of this function, including every early return below, so a frame
-    // that never reaches this call (suppressed, device lost) doesn't carry stale draws forward.
+    // that never reaches this call (suppressed, device lost) doesn't carry stale draws forward. Not
+    // after a frame's first of two replays (frame generation), which leaves the queue for the second.
     struct ClearOnExit {
         std::vector<Draw>* q;
         std::vector<WireDraw>* w;
-        ~ClearOnExit() { q->clear(); w->clear(); }
-    } clearer{&queue_, &wireQueue_};
+        bool on;
+        ~ClearOnExit() { if (on) { q->clear(); w->clear(); } }
+    } clearer{&queue_, &wireQueue_, lastOfFrame};
 
     if ((queue_.empty() && wireQueue_.empty()) || !res_) return;
 

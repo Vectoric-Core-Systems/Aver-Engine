@@ -86,6 +86,8 @@ Application* createApplication(int argc, char** argv) {
     // --resize-cycle N: resize the real window every N frames of a bounded run. Verification-only; it
     // reproduces a real crash -- see SandboxApp::resizeCheck() for which one and why nothing else could.
     int resizeCycleArg = 0;
+    int frameGenArg = -1;   // --frame-gen 0|1|2; -1 = not given (project / Editor Preference decide)
+    bool vsyncOn = false;   // --vsync
     int pieCamArg = 0;
     int inputStuckArg = 0;
     int inputSourceArg = 0;
@@ -827,6 +829,11 @@ Application* createApplication(int argc, char** argv) {
         // as a string, parsed below, so a build with the module compiled out still recognises the flag
         // and explains why it did nothing rather than erroring as unknown.
         else if (!std::strcmp(argv[i],"--aversr") && i+1<argc) aversrArg=argv[++i];
+        // --frame-gen 0|1|2: frame interpolation off / on for the whole session, over the project's
+        // RENDER.FRAMEGEN and the Editor Preference (docs/rendering/FRAME_INTERPOLATION.md). 2 = on,
+        // and captures (--shot, --frames) take the GENERATED image, for inspecting the generator.
+        // Needs vsync and 1x anti-aliasing; the device logs why when it cannot run.
+        else if (!std::strcmp(argv[i],"--frame-gen") && i+1<argc) { const int v=std::atoi(argv[++i]); frameGenArg = v < 0 ? 0 : (v > 2 ? 2 : v); }
         // --depth-prepass: same-frame depth-only pass ahead of the opaque colour walk, so an occluded
         // fragment skips PSMainVoxi's shadow lookup/cone trace/fog entirely (setDepthPrepassOverride).
         // Unset reproduces pre-existing behaviour exactly.
@@ -934,6 +941,7 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--exposure") && i+1<argc) { exposure=static_cast<f32>(std::atof(argv[++i])); exposureSet=true; }
         else if (!std::strcmp(argv[i],"--auto-exposure")) autoExposure=true;
         else if (!std::strcmp(argv[i],"--no-vsync")) vsyncOff=true;
+        else if (!std::strcmp(argv[i],"--vsync")) vsyncOn=true;
         // --lod-select [px]: virtualized-geometry per-instance LOD level selection
         // (aver::trifactor::ClusterAdapt). Optional pixel error budget, default 1.0px.
         else if (!std::strcmp(argv[i],"--lod-select")) {
@@ -1112,6 +1120,7 @@ Application* createApplication(int argc, char** argv) {
     if (skyPhysical) app->setSkyPhysical(skyElevation);
     if (skyAuthored) app->setSkyAuthored();
     app->setVSyncOff(vsyncOff);
+    app->setVSyncOn(vsyncOn);
     app->setLodSelect(lodSelect, lodErrorPx);
     app->setLodClusterStats(lodClusterStats);
     app->setLodPerCluster(lodPerCluster, lodErrorPx);
@@ -1444,6 +1453,7 @@ Application* createApplication(int argc, char** argv) {
 #if AVER_MODULE_SR
     if (aversrCycle > 0) app->setAverSrCycleAuto(aversrCycle);
     if (resizeCycleArg > 0) app->setResizeCycle(resizeCycleArg);
+    if (frameGenArg >= 0) app->setFrameGenCli(frameGenArg);
     if (gpuTimingArg) app->setGpuTiming(true);
     if (pieCamArg > 0) app->setPieCameraTest(pieCamArg);
     if (inputStuckArg > 0) app->setInputStuckTest(inputStuckArg);

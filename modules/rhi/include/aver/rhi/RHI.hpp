@@ -509,6 +509,24 @@ public:
     virtual void setUpscaler(IUpscaler* u) { (void)u; }
     virtual IUpscaler* upscaler() const { return nullptr; }
 
+    // ---- frame generation (docs/rendering/FRAME_INTERPOLATION.md) ----
+    // The generator is installed like the upscaler (non-owning, host-composed). setFrameGeneration
+    // turns it on; the device then presents a generated frame before every real one whenever it can:
+    // vsync on (the display's refresh is the only clock -- no measured timing schedules anything),
+    // the G-buffer written (single-sample scene), and a valid previous frame. Off otherwise, silently
+    // per frame and logged once per reason. Defaulted no-ops: a backend without it compiles unchanged.
+    virtual void setFrameGenerator(IFrameGenerator* g) { (void)g; }
+    virtual void setFrameGeneration(bool on) { (void)on; }
+    virtual bool frameGeneration() const { return false; }
+    // Diagnostics: captures (screenshots, --frames) take the GENERATED image instead of the real one,
+    // so the generator's output can be inspected. Off by default -- captures are real frames.
+    virtual void setFrameGenCaptureGenerated(bool on) { (void)on; }
+    // True when the LAST endFrame presented a generated frame ahead of the real one.
+    virtual bool frameGenerated() const { return false; }
+    // A discontinuity the next frame must not be interpolated across: level load, respawn, teleport,
+    // pawn-to-camera. Resizes and render-scale changes are noted by the device itself.
+    virtual void noteSceneCut() {}
+
     // The SCENE colour target's format, which a backend running a post chain does not present
     // directly. Pipelines drawing into the scene must match it.
     virtual Format backbufferFormat() const { return Format::Unknown; }

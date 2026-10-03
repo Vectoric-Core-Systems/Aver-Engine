@@ -1,7 +1,11 @@
 # Aver Frame Interpolation — design (draft for review)
 
-**Status:** design. Stage 0 (object motion vectors) is built and committed (`4ee7e3ec`); everything else is
-unbuilt. Every millisecond figure is an estimate unless it says *measured*. Revised 2026-10-03 after the
+**Status:** stage 0 (object motion vectors, `4ee7e3ec`) and **milestone 1 (procedural, D3D12)** are built.
+Milestone 1 measured on NewSponza at 1766×994 scene resolution (RX 7800 XT, `--gpu-timing`): generation
+**0.25 ms**, plus **0.48 ms** for the generated image's own post chain. No debug-layer errors of its own.
+Not yet measured: quality against true midpoint frames, cadence stability, the editor viewport path under
+interaction. Vulkan: not started. The neural milestone is a design (§3.5), not built. Every millisecond
+figure is an estimate unless it says *measured*. Revised 2026-10-03 after the
 patent sweep ([FRAME_INTERPOLATION_PATENTS.md](FRAME_INTERPOLATION_PATENTS.md)) to the **patent-aware
 design (option b)**: written in-house, no FSR3 code.
 
@@ -156,21 +160,48 @@ frame simply has low confidence, and the blend follows continuously.
 Milestone 1 is shippable on its own and is the baseline the network must beat. Estimate ~0.4–0.8 ms at
 full 1440p, roughly a quarter at 0.5 scale.
 
-### 3.5 Milestone 2 — the network (weight only)
+### 3.5 Milestone 2 — the network: a learned trajectory prior (design, 2026-10-03; HELD BACK)
 
-- **Job:** one output channel per pixel: the blend weight between the two gathered candidates (optionally
-  a small search-start offset). **No colour output of any kind.**
-- **Inputs (~16 channels, all from the two real frames):** the two gathered colours and their difference,
-  each real frame's own depth at its candidate, the two confidences, the trust mask, motion magnitude,
-  convergence residuals.
-- **Shape:** a 3-level U-Net at 1/4 resolution, 12/16/24 channels (~2.5–4 GMAC at full 1440p, less at 0.5
-  scale), weights upsampled with a joint-bilateral filter. fp32 first; fp16 behind the native-16-bit cap.
-  *(Intel US 2025/0225705, mixed-precision interpolation network, is MEDIUM: re-read before enabling fp16.)*
-- **Runs on:** `Aver.Render.Neural`, which gains conv forward kernels.
-- **Training (in-engine, check with the owner first):** ground truth from the engine rendering a scripted
-  sequence at double rate with a fixed timestep (half steps are targets). Needs frame determinism first.
-  Losses: L1 on tone-mapped colour, Laplacian-pyramid edge term, temporal flicker term. ~20–50k crops from
-  10–20 camera paths over the showcase levels, one held out.
+**Redesigned after the claim review** (patents doc §6.3). The earlier "network outputs the blend weight"
+plan reads closely on NVIDIA 17/949,153's allowed claim ("use one or more neural networks to blend two or
+more intermediate video frames"), so the network no longer touches blending at all. It improves only
+**where** each candidate is gathered.
+
+- **Job (N1):** per pixel of each real frame, a 2-D **acceleration** a(p), so the G1 search follows a
+  quadratic path (`q = p − 0.5·MV + 0.125·a`) instead of a straight line. Curved motion (turning cars,
+  orbiting cameras, falling objects) is the largest error linear gathering leaves. Prior art: Xu et al.,
+  *Quadratic Video Interpolation*, NeurIPS 2019; Liu et al. 2020; Chi et al. 2020.
+- **Inputs:** real frames only — frame N's colour, depth and motion, and frame N−1's motion fetched by
+  **backward lookup** at `p − MV_N(p)` with a depth check.
+- **Shape:** a small conv net at 1/4 resolution, upsampled; fp32 (precision is not a claim element
+  anywhere — R10). Runs on `Aver.Render.Neural` with conv forward kernels added.
+- **Training (in-engine, check with the owner first):** supervised **only on geometric targets** — the true
+  half-step positions from engine motion vectors at 2× rate. No colour or perceptual loss reaches the
+  network. Needs frame determinism first.
+
+**Design rules (binding for anyone implementing it; from the review, for counsel to confirm):**
+
+| | Rule | Keeps clear of |
+|---|---|---|
+| R1 | No network output enters G2/G3 or any value that sets or scales a blend weight ("reliability", "confidence", "visibility", a gate) | NVIDIA 17/949,153 |
+| R2 | No network outputs colour, a residual, a mask, a kernel or a visibility map; no learned multiplicative term | Arm GB 2620919 / US 2024/0029196; Super SloMo US 10,776,688 |
+| R3 | Never forward-project N−1's motion into N; fetch it backward with a depth check. Where the check fails, acceleration is **0** (linear), never inferred from neighbours. Nothing anywhere estimates motion for a vector-less pixel from same-depth neighbours | NVIDIA US 12,574,521; 17/949,156 |
+| R4 | Geometric supervision only; the network never learns shading or lighting motion | Intel US 2025/0225705 |
+| R5 | One trajectory per pixel: never a linear and a quadratic candidate with a choice between them | NVIDIA US 2022/0038653 |
+| R6 | No input describes the in-between time (no midpoint camera, depth, G-buffer or partial render) | Disney US 12,288,281; 17/949,156 |
+| R7 | No optical flow anywhere; no global-motion similarity as a tie-break; no nearest-depth scatter | NVIDIA US 12,229,970; Arm US 2026/0030797; Intel '705 |
+| R8 | (only if a restoration pass is ever added) its sole inputs are the generated image and its procedural confidence | 17/949,156 |
+| R9 | Network inputs are down-sampled by plain strided/box filtering of linear RGB — no edge filter followed by luma conversion | NVIDIA US 12,524,850 |
+| R10 | fp16 vs fp32 is not an element of any published Intel claim; precision is an engineering choice | (correction) |
+
+Alternatives considered and ranked lower: N2 (learned motion-vector reliability feeding G2 — closest to
+the blending claim, dropped), N3 (single-image residual restoration pass — clean if it never gains a mask,
+but the weakest quality gain), N4 (learned constants with no network at runtime — cleanest against network
+claims but not neural, and a learned table setting the blend weight raises an equivalence question).
+
+**Open for counsel:** AMD US 2026/0094228 as published reads on *any* trained network stage in a rendering
+pipeline (this one, and the neural radiance cache alike); prior art before 2024-09 is plentiful (DLSS 2.0,
+Chaitanya 2017, Xiao 2020, ExtraNet 2021).
 
 ---
 
@@ -256,9 +287,9 @@ the broad NVIDIA applications and checked their status and family (no Singapore,
 |---|---|---|
 | 0 | Object motion vectors, sky motion — **done** (`4ee7e3ec`) | — |
 | 0b | G-buffer reason for frame interpolation; scene-cut signal | — |
-| 1 | History ring, present-pass split, waitable swapchain, fixed vsync cadence; runtime first, then the editor viewport; HUD/editor-lines/ImGui redraw | — |
-| 2 | Milestone 1: G1 gather, G2 confidence, G3 heuristic blend, G4 full-resolution fill; exposure and bloom blending | — |
-| 3 | **HELD BACK (owner, 2026-10-03).** `Aver.Render.Neural` conv forward kernels; weight-only U-Net; in-engine training | Yes |
+| 1 | **Built (D3D12):** history in the generator, present-pass split (two submissions per frame — D3D12 lets a command list write only the current back buffer), 3 swapchain images decoupled from frames in flight, fixed vsync cadence, HUD/editor-lines/ImGui drawn on both images, Editor Preference, `RENDER.FRAMEGEN`, `--frame-gen 0\|1\|2`, scene cuts (resize, G-buffer reset, camera jump > 2.5 m or 30°). Not built: the waitable swapchain object, the <30 fps warning | — |
+| 2 | **Built:** G1 gather (2 search starts per frame), G2 confidence, G3 blend, G4 two full-resolution fill passes; eye adaptation held on the generated image, bloom and local exposure recomputed on it | — |
+| 3 | **HELD BACK (owner, 2026-10-03).** `Aver.Render.Neural` conv forward kernels; trajectory-prior net (§3.5, rules R1–R10); in-engine training | Yes |
 | 4 | Translucent motion, reflection motion, skinned previous pose, 3× generation | Partly |
 
 ---

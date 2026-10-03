@@ -49,6 +49,10 @@ static constexpr u64 kShaderCacheBudgetBytes = 256ull * 1024ull * 1024ull;
 namespace {
 
 constexpr u32 kFrameCount = 2;
+// Swapchain images, decoupled from kFrameCount (frames in flight): with frame generation a frame
+// presents two images, generated then real, and a third keeps the next frame from waiting on the one
+// still on screen. frameIndex_ is the frame-in-flight slot; bbIndex_ the image being drawn.
+constexpr u32 kBackBufferCount = 3;
 constexpr u32 kDefaultSampleCount = 4;
 constexpr DXGI_FORMAT kBackbufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
@@ -918,6 +922,19 @@ public:
     // AverSR Off bit-identical to a build without the module (docs/AVERSR.md's invariant).
     void setUpscaler(IUpscaler* u) override { upscaler_ = u; }
     IUpscaler* upscaler() const override { return upscaler_; }
+    void setFrameGenerator(IFrameGenerator* g) override {
+        if (g != frameGen_ && frameGen_) frameGen_->reset();
+        frameGen_ = g;
+        frameGenCut_ = true;
+    }
+    void setFrameGeneration(bool on) override {
+        if (on != frameGenOn_) frameGenCut_ = true;
+        frameGenOn_ = on;
+    }
+    bool frameGeneration() const override { return frameGenOn_; }
+    bool frameGenerated() const override { return frameGenerated_; }
+    void setFrameGenCaptureGenerated(bool on) override { fgCaptureGenerated_ = on; }
+    void noteSceneCut() override { frameGenCut_ = true; }
     void notifyRenderTargetsChanged();
     // Creates or resizes the factory texture the scene renders into for the viewport.
     bool ensureViewportTexture();
@@ -1219,7 +1236,8 @@ private:
     bool createPostPipelines();          // root signature, PSOs and the constant ring: once, at init
     bool createPostTargets();            // resolve target, bloom pyramid and descriptors: per resize
     void releasePostTargets();
-    void runPostChain(ID3D12Resource* backbuffer);
+    // `bbIdx` names `backbuffer`'s RTV (renderTargets_[bbIdx]).
+    void runPostChain(ID3D12Resource* backbuffer, u32 bbIdx);
     // Suballocate one pass's constants from this frame's post ring.
     D3D12_GPU_VIRTUAL_ADDRESS postConstants(const void* data, u32 bytes);
     D3D12_GPU_DESCRIPTOR_HANDLE postTriple(u32 triple) const;
@@ -1235,7 +1253,7 @@ private:
     ComPtr<ID3D12DescriptorHeap> rtvHeap_;
     ComPtr<ID3D12DescriptorHeap> dsvHeap_;
     ComPtr<ID3D12DescriptorHeap> msaaRtvHeap_;
-    ComPtr<ID3D12Resource> renderTargets_[kFrameCount];
+    ComPtr<ID3D12Resource> renderTargets_[kBackBufferCount];
     ComPtr<ID3D12Resource> msaaColor_;
     ComPtr<ID3D12Resource> depthBuffer_;
     // Generic-RHI wrapper around depthBuffer_ -- see sceneDepthTexture()'s comment. STABLE across a
@@ -1297,15 +1315,43 @@ private:
     bool gbufHistoryInvalid_ = true;
 
     ComPtr<ID3D12CommandAllocator> allocators_[kFrameCount];
+    // Frame generation's second recording of a frame (the real image, after the generated one was
+    // submitted and presented -- see submitGeneratedImage). Same slot rule as allocators_: the frame's
+    // fence retires both.
+    ComPtr<ID3D12CommandAllocator> allocatorsGen_[kFrameCount];
+    bool submitGeneratedImage();
     ComPtr<ID3D12GraphicsCommandList> cmdList_;
     ComPtr<ID3D12Fence> fence_;
     HANDLE fenceEvent_ = nullptr;
-    // Wait-before-reuse frame sync: the fence value that retires each backbuffer's last frame,
+    // Wait-before-reuse frame sync: the fence value that retires each frame slot's last frame,
     // and the monotonic counter it is drawn from.
     u64 fenceValues_[kFrameCount] = {0, 0};
     u64 nextFence_ = 0;
-    u32 frameIndex_ = 0;
+    u32 frameIndex_ = 0;   // frame-in-flight slot: allocators, fences, per-frame upload rings
+    u32 bbIndex_ = 0;      // swapchain image this frame draws first (see kBackBufferCount)
     u32 rtvSize_ = 0;
+
+    // ---- frame generation (IDevice::setFrameGenerator; docs/rendering/FRAME_INTERPOLATION.md) ----
+    IFrameGenerator* frameGen_ = nullptr;   // non-owning, host-installed
+    bool frameGenOn_ = false;               // requested
+    bool frameGenerated_ = false;           // this frame presented a generated image ahead of the real one
+    bool frameGenCut_ = true;               // the next frame must not be interpolated across
+    u32  frameGenOffReason_ = 0;            // last reason logged, so each is said once per change
+    TextureHandle fgInputTex_ = 0;          // frame N's scene colour, copied (the scene target has no handle)
+    u32 fgInputW_ = 0, fgInputH_ = 0;
+    f32 fgPrevCamPos_[3] = {};
+    f32 fgPrevCamFwd_[3] = {};
+    bool fgCamPrimed_ = false;
+    // Why frame generation cannot run this frame (0 = it can); logs once per change of reason.
+    u32 frameGenBlocker();
+    bool frameGenCameraJumped();
+    // The post chain, overlays and UI for ONE presented image. `generated` skips everything that must
+    // advance once per real frame (eye adaptation, its readback, the frame clock); `firstOfFrame` /
+    // `lastOfFrame` tell the overlay drawers whether this is the first or last image of the frame.
+    void presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool lastOfFrame);
+    bool fgGeneratedPost_ = false;          // runPostChain is drawing the generated image
+    bool fgCaptureGenerated_ = false;       // diagnostics: captures take the generated image
+    bool captureRecorded_ = false;          // this frame recorded the capture copy (present() reads it)
 
     // Per-pass GPU timing: a whole-frame CPU delta can't say which pass is expensive (five wrong
     // theories -- shadow cascades, scene walk, chunk streaming, volumetric clouds, build config --
@@ -3093,7 +3139,7 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
     sd.Width = width_; sd.Height = height_;
     sd.Format = kBackbufferFormat;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.BufferCount = kFrameCount;
+    sd.BufferCount = kBackBufferCount;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     sd.SampleDesc.Count = 1;
     if (tearingSupported_) sd.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
@@ -3103,10 +3149,11 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
     if (!hrOk(factory_->CreateSwapChainForHwnd(queue_.Get(), hwnd, &sd, nullptr, nullptr, &sc1), "CreateSwapChainForHwnd")) return false;
     factory_->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
     if (!hrOk(sc1.As(&swapChain_), "As IDXGISwapChain3")) return false;
-    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
+    bbIndex_ = swapChain_->GetCurrentBackBufferIndex();
+    frameIndex_ = 0;
 
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
-    hd.NumDescriptors = kFrameCount;
+    hd.NumDescriptors = kBackBufferCount;
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     if (!hrOk(device_->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&rtvHeap_)), "RTV heap")) return false;
     rtvSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
@@ -3136,6 +3183,7 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
 
     for (u32 i = 0; i < kFrameCount; ++i) {
         if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocators_[i])), "CreateCommandAllocator")) return false;
+        if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocatorsGen_[i])), "CreateCommandAllocator (frame generation)")) return false;
     }
     if (!hrOk(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators_[0].Get(), nullptr, IID_PPV_ARGS(&cmdList_)), "CreateCommandList")) return false;
     // Same reasoning as the queue's name just above: this is the ONE command list every draw and
@@ -3159,14 +3207,14 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
 
     fenceValues_[0] = fenceValues_[1] = 0; nextFence_ = 0;
     hasSwapchain_ = true;
-    AVER_INFO("[RHI.D3D12] swapchain {}x{} + depth (D32) ({} buffers, FLIP_DISCARD)", width_, height_, kFrameCount);
+    AVER_INFO("[RHI.D3D12] swapchain {}x{} + depth (D32) ({} buffers, FLIP_DISCARD)", width_, height_, kBackBufferCount);
     return true;
 }
 
 // Creates one render target view per swapchain backbuffer.
 void D3D12Device::createRenderTargetViews() {
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
-    for (u32 i = 0; i < kFrameCount; ++i) {
+    for (u32 i = 0; i < kBackBufferCount; ++i) {
         swapChain_->GetBuffer(i, IID_PPV_ARGS(&renderTargets_[i]));
         device_->CreateRenderTargetView(renderTargets_[i].Get(), nullptr, rtv);
         rtv.ptr += rtvSize_;
@@ -3879,7 +3927,10 @@ void D3D12Device::beginFrame() {
     // See setRenderScale's comment for the full account.
     applyPendingRenderScale();
     reconcileClearValue();
-    frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
+    // The frame slot rotates by itself; the swapchain image is whatever DXGI hands out next (one or two
+    // images per frame, depending on frame generation -- see kBackBufferCount).
+    frameIndex_ = (frameIndex_ + 1) % kFrameCount;
+    bbIndex_ = swapChain_->GetCurrentBackBufferIndex();
     const u64 want = fenceValues_[frameIndex_];
     // THE RESULT IS ACTED ON -- discarding it was the whole bug. waitFence detected a removed device
     // and returned false, but nobody looked, so every frame kept resetting an allocator and recording
@@ -5036,8 +5087,10 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12Device::postConstants(const void* data, u32 bytes
 
 // Scene -> backbuffer. Records the whole chain and leaves the backbuffer in RENDER_TARGET.
 // A stage that would be a no-op is skipped rather than run with a zero weight.
-void D3D12Device::runPostChain(ID3D12Resource* bb) {
-    {
+void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx) {
+    // The frame clock advances once per REAL frame: a generated image is not a frame of the simulation,
+    // and counting it would halve every rate eye adaptation derives from frameSeconds_.
+    if (!fgGeneratedPost_) {
         LARGE_INTEGER now{}, freq{};
         QueryPerformanceCounter(&now);
         QueryPerformanceFrequency(&freq);
@@ -5232,7 +5285,11 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
     // fillCommon's gPostRegion comment), so auto-exposure stops averaging the black dead zone
     // outside the viewport panel that CSHistogram's uv mapping now confines sampling to. Full
     // scene extent, unchanged, when undocked (vpW_/vpH_ == 0).
-    if (autoExp) {
+    //
+    // NOT on a generated image: adaptation steps once per real frame, so the generated image (drawn
+    // first) is exposed with the value adapted up to the previous real frame -- the right exposure for a
+    // moment between the two -- and the real frame then meters and adapts as it always did.
+    if (autoExp && !fgGeneratedPost_) {
         const u32 regionW = vpW_ ? vpW_ : sceneWidth_;
         const u32 regionH = vpH_ ? vpH_ : sceneHeight_;
         const u32 hw = regionW / kHistogramDownscale > 1 ? regionW / kHistogramDownscale : 1;
@@ -5315,7 +5372,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         // Detours expBuf_ through COPY_SOURCE and back to the PIXEL_SHADER_RESOURCE state the
         // composite below (and the restore block further down) already expect either way, so the
         // transitions this block makes stay balanced on both paths.
-        const bool readExp = autoExp && expReadback_[frameIndex_ < kFrameCount ? frameIndex_ : 0];
+        const bool readExp = autoExp && !fgGeneratedPost_ && expReadback_[frameIndex_ < kFrameCount ? frameIndex_ : 0];
         if (readExp) {
             const u32 f = frameIndex_ < kFrameCount ? frameIndex_ : 0;
             auto expToCopy = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -5461,7 +5518,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         auto toRt = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
         cmdList_->ResourceBarrier(1, &toRt);
         D3D12_CPU_DESCRIPTOR_HANDLE bbRtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
-        bbRtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
+        bbRtv.ptr += static_cast<SIZE_T>(bbIdx) * rtvSize_;
 
         const RhiTexture* vt = (viewportToTex_ && ensureViewportTexture() && rhiFactory_)
                              ? rhiFactory_->texture(viewportTex_) : nullptr;
@@ -5517,7 +5574,6 @@ void D3D12Device::endFrame() {
     beginGpuSpan("sky+post+ui");
     fovValid_ = false;   // the post chain sets pipelines on the command list directly
     dbValid_ = false;    // same reason, same moment -- see dbValid_'s member comment
-    ID3D12Resource* bb = renderTargets_[frameIndex_].Get();
 
     // Same scene-space rect (and fallback to the scene target, not the present one) as beginFrame --
     // shared by the transparent pass and the sky draw just below, both of which land on the SAME
@@ -5838,8 +5894,208 @@ void D3D12Device::endFrame() {
         for (IRenderFeature* f : features_) f->transparentPass(*rhiContext_);
     }
 
-    beginGpuSpan("post chain");
-    runPostChain(bb);
+    // ---- frame generation (docs/rendering/FRAME_INTERPOLATION.md) ----
+    // With it on and possible this frame, the image half-way between the previous real frame and this
+    // one is generated from the HDR scene target and presented FIRST, on its own swapchain image,
+    // through the same post chain, overlays and UI; the real frame follows on the next image. Each is
+    // composited straight into its own back buffer -- no finished image is queued or copied into the
+    // swapchain afterwards. The generated one is submitted and presented mid-frame
+    // (submitGeneratedImage), the real one by present(): consecutive vblanks.
+    frameGenerated_ = false;
+    TextureHandle generatedImage = 0;
+    if (frameGenOn_ && frameGen_) {
+        const bool jumped = frameGenCameraJumped();   // every frame, so the previous camera stays current
+        if (frameGenBlocker() == 0) {
+            // sampleCount_ == 1 here (frameGenBlocker), so the scene target IS msaaColor_, in RENDER_TARGET.
+            ID3D12Resource* scene = msaaColor_.Get();
+            if (fgInputTex_ && (fgInputW_ != sceneWidth_ || fgInputH_ != sceneHeight_)) {
+                rhiFactory_->destroyTexture(fgInputTex_);
+                fgInputTex_ = 0;
+            }
+            if (!fgInputTex_) {
+                TextureDesc td{};
+                td.width = sceneWidth_;
+                td.height = sceneHeight_;
+                td.format = Format::RGBA16F;
+                td.bind = ResourceBind::ShaderResource;
+                td.initialState = ResourceState::ShaderResource;
+                td.debugName = "Frame generation input (scene colour)";
+                fgInputTex_ = rhiFactory_->createTexture(td);
+                fgInputW_ = sceneWidth_;
+                fgInputH_ = sceneHeight_;
+            }
+            RhiTexture* it = fgInputTex_ ? rhiFactory_->texture(fgInputTex_) : nullptr;
+            if (it && it->res && scene) {
+                D3D12_RESOURCE_BARRIER pre[2] = {
+                    transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                    transition(it->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST),
+                };
+                cmdList_->ResourceBarrier(2, pre);
+                cmdList_->CopyResource(it->res.Get(), scene);
+                D3D12_RESOURCE_BARRIER post[2] = {
+                    transition(scene, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+                    transition(it->res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                };
+                cmdList_->ResourceBarrier(2, post);
+
+                FrameGenInput in{};
+                in.color = fgInputTex_;
+                in.velocity = gBufferVelocityTexture();
+                in.viewZ = gBufferViewZTexture();
+                in.width = sceneWidth_;
+                in.height = sceneHeight_;
+                in.sceneCut = frameGenCut_ || jumped || gbufHistoryInvalid_;
+                generatedImage = frameGen_->generate(*rhiContext_, in);
+                frameGenCut_ = false;
+                // The generator bound its own pipelines and sets through the generic context.
+                boundRootSig_ = nullptr; boundPso_ = nullptr; boundHeap_ = nullptr;
+                fovValid_ = false; dbValid_ = false;
+            }
+        } else {
+            frameGenCut_ = true;   // a paused frame breaks the sequence
+        }
+    }
+
+    // Puts `src` (a factory texture resting in PIXEL_SHADER_RESOURCE) into the scene target the post
+    // chain reads. The post chain is wired to that one target, so the generated image travels through
+    // it rather than through a second set of post-chain descriptors.
+    auto toScene = [&](TextureHandle src) {
+        RhiTexture* st = rhiFactory_->texture(src);
+        ID3D12Resource* scene = msaaColor_.Get();
+        D3D12_RESOURCE_BARRIER pre[2] = {
+            transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST),
+            transition(st->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE),
+        };
+        cmdList_->ResourceBarrier(2, pre);
+        cmdList_->CopyResource(scene, st->res.Get());
+        D3D12_RESOURCE_BARRIER post[2] = {
+            transition(scene, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET),
+            transition(st->res.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+        };
+        cmdList_->ResourceBarrier(2, post);
+    };
+    RhiTexture* genT = generatedImage ? rhiFactory_->texture(generatedImage) : nullptr;
+    if (genT && genT->res) {
+        toScene(generatedImage);
+        presentPass(bbIndex_, true, true, false);
+        // D3D12 lets a command list write only the swapchain's CURRENT back buffer, so the generated
+        // image is submitted and presented here and the real one is recorded on a fresh list.
+        if (!submitGeneratedImage()) return;
+        toScene(fgInputTex_);   // the real frame back into the scene target
+        presentPass((bbIndex_ + 1) % kBackBufferCount, false, false, true);
+        frameGenerated_ = true;
+    } else {
+        presentPass(bbIndex_, false, true, true);
+    }
+
+    // Last thing before Close: the frame-end stamp, then resolve every stamp issued this frame into
+    // this slice's own region of the readback buffer. ResolveQueryData is a GPU copy -- it does not
+    // wait, and nothing reads the destination until beginFrame has fenced on it two frames later.
+    endGpuSpan();   // "sky+post+ui"
+    tsSliceEnd_[frameIndex_] = gpuStamp();
+    if (tsEnabled_ && tsCount_ > 0)
+        cmdList_->ResolveQueryData(tsHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                                   frameIndex_ * kMaxGpuStamps, tsCount_, tsReadback_.Get(),
+                                   static_cast<u64>(frameIndex_) * kMaxGpuStamps * sizeof(u64));
+
+    // NOTHING IS SUBMITTED ONCE THE DEVICE IS GONE, and the reason is not politeness: beginFrame
+    // returns before resetting the command list when the device is lost, so the list here is
+    // whatever was left from the last good frame -- already closed. Closing it again and submitting
+    // it would be two API misuses stacked on top of a failure that has already been reported.
+    if (deviceLost_) return;
+    cmdList_->Close();
+    ID3D12CommandList* lists[] = {cmdList_.Get()};
+    queue_->ExecuteCommandLists(1, lists);
+    if (infoQueue_) drainDebugMessages();
+}
+
+// Closes and submits everything recorded so far (the scene, the generator, the generated image's post
+// chain, overlays and UI), presents the generated image -- fixed interval 1: the display's refresh is
+// the whole schedule, nothing measured decides when it is shown -- and reopens the command list on the
+// slot's second allocator for the real image. False when the device was lost (nothing more is recorded).
+// Every cache of bound GPU state is dropped: a reset list has nothing bound.
+bool D3D12Device::submitGeneratedImage() {
+    if (deviceLost_) return false;
+    cmdList_->Close();
+    ID3D12CommandList* lists[] = {cmdList_.Get()};
+    queue_->ExecuteCommandLists(1, lists);
+    const HRESULT gr = swapChain_->Present(1u, 0u);
+    if (FAILED(gr)) {
+        if (gr == DXGI_ERROR_DEVICE_REMOVED || gr == DXGI_ERROR_DEVICE_RESET) {
+            noteDeviceRemoved("Present (generated frame)", gr);
+            return false;
+        }
+        AVER_ERROR("[RHI.D3D12] Present (generated frame) failed 0x{:08X}", (u32)gr);
+    }
+    allocatorsGen_[frameIndex_]->Reset();
+    cmdList_->Reset(allocatorsGen_[frameIndex_].Get(), nullptr);
+    boundRootSig_ = nullptr; boundPso_ = nullptr; boundHeap_ = nullptr;
+    fovValid_ = false; dbValid_ = false;
+    return true;
+}
+
+// Why frame generation cannot run this frame; 0 when it can. Each change of reason is logged once.
+u32 D3D12Device::frameGenBlocker() {
+    u32 why = 0;
+    const char* text = nullptr;
+    if (!rhiContext_ || !rhiFactory_) {
+        why = 1; text = "the device has no generic RHI context";
+    } else if (!vsync_) {
+        why = 2; text = "vsync is off (generated frames are shown on the display's refresh, so it needs vsync)";
+    } else if (sampleCount_ > 1) {
+        why = 3; text = "MSAA is on; it needs the G-buffer, which is written only at 1x anti-aliasing";
+    } else if (!gbufferEnabled_ || !gbufVelocity_ || !gbufViewZ_) {
+        why = 4; text = "the G-buffer (motion and depth) is not enabled";
+    } else if (wireframeFrame_ || frameSuppressed_) {
+        why = 5;   // per-frame view states (wireframe, a whole-frame feature): not worth a log line
+    }
+    if (why != frameGenOffReason_) {
+        if (text) AVER_INFO("[RHI.D3D12] frame generation paused: {}", text);
+        else if (why == 0) AVER_INFO("[RHI.D3D12] frame generation running");
+        frameGenOffReason_ = why;
+    }
+    return why;
+}
+
+// A camera jump the generator must not interpolate across: a teleport, a cut to another camera, a snap
+// turn. Position from frameCB_.camPos (world units); facing from the screen centre unprojected through
+// invViewProjRel (row-major, row-vector) at the near and far planes. Updates the previous camera.
+bool D3D12Device::frameGenCameraJumped() {
+    constexpr f32 kJumpDistance = 250.0f;   // world units (cm) in one frame: 150 m/s at 60 fps
+    constexpr f32 kJumpCos = 0.866f;        // 30 degrees of turn in one frame
+    const f32* m = frameCB_.invViewProjRel;
+    auto unproject = [&](f32 z, f32 out[3]) {
+        const f32 w = m[11] * z + m[15];
+        const f32 iw = std::fabs(w) > 1e-20f ? 1.0f / w : 0.0f;
+        for (int k = 0; k < 3; ++k) out[k] = (m[8 + k] * z + m[12 + k]) * iw;
+    };
+    f32 a[3], b[3];
+    unproject(0.0f, a);
+    unproject(1.0f, b);
+    f32 fwd[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    const f32 len = std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]);
+    if (!(len > 1e-12f)) return false;   // no camera yet
+    for (f32& c : fwd) c /= len;
+    const f32* p = frameCB_.camPos;
+    bool jumped = false;
+    if (fgCamPrimed_) {
+        const f32 dx = p[0] - fgPrevCamPos_[0], dy = p[1] - fgPrevCamPos_[1], dz = p[2] - fgPrevCamPos_[2];
+        const f32 turn = fwd[0] * fgPrevCamFwd_[0] + fwd[1] * fgPrevCamFwd_[1] + fwd[2] * fgPrevCamFwd_[2];
+        jumped = dx * dx + dy * dy + dz * dz > kJumpDistance * kJumpDistance || turn < kJumpCos;
+    }
+    for (int k = 0; k < 3; ++k) { fgPrevCamPos_[k] = p[k]; fgPrevCamFwd_[k] = fwd[k]; }
+    fgCamPrimed_ = true;
+    return jumped;
+}
+
+// One presented image: post chain, editor lines and overlay features, the UI, then PRESENT (or the
+// capture copy on the frame's last image). Run once per frame, or twice with frame generation.
+void D3D12Device::presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool lastOfFrame) {
+    ID3D12Resource* bb = renderTargets_[bbIdx].Get();
+    beginGpuSpan(generated ? "post chain (generated)" : "post chain");
+    fgGeneratedPost_ = generated;
+    runPostChain(bb, bbIdx);
+    fgGeneratedPost_ = false;
     endGpuSpan();   // "post chain"
 
     // ---- editor lines + overlay features, on the tonemapped backbuffer ----
@@ -5847,9 +6103,14 @@ void D3D12Device::endFrame() {
     // EditorLines.hpp), then every overlayPass: both draw into the target this block binds, and both
     // want the scene depth readable, so it flips to ShaderResource once for the whole stage.
     beginGpuSpan("overlay");
+    // The 3D view's rect in scene pixels -- the same rect endFrame's scene passes used.
+    const f32 rx = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
+    const f32 ry = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
+    const f32 rw = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(sceneWidth_);
+    const f32 rh = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(sceneHeight_);
     if (rhiContext_) {
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
-        rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
+        rtv.ptr += static_cast<SIZE_T>(bbIdx) * rtvSize_;
 
         const RhiTexture* ovt = (viewportToTex_ && viewportTex_ && rhiFactory_)
                               ? rhiFactory_->texture(viewportTex_) : nullptr;
@@ -5887,7 +6148,7 @@ void D3D12Device::endFrame() {
         // its comment), not this stage's actual target -- the real backbuffer and the viewport texture
         // are both created at kBackbufferFormat (createSwapchainResources, ensureViewportTexture).
         editorLines_.replay(*rhiContext_, width_, height_, displayRect, sceneDepth, sampleCount_,
-                            fromDxgiFormat(kBackbufferFormat));
+                            fromDxgiFormat(kBackbufferFormat), firstOfFrame, lastOfFrame);
         // replay() set pipeline/root signature/heap through the generic context, bypassing
         // bindGraphicsRoot/setPipeline's own caches -- invalidated the way the blended replay does, so
         // the overlay features below and the UI don't skip a rebind believing stale state is current.
@@ -5908,7 +6169,7 @@ void D3D12Device::endFrame() {
     } else {
         // Never reached the replay this frame (no generic context) -- the queue must not carry
         // editor-chrome draws into the next one (see EditorLines::discardQueue).
-        editorLines_.discardQueue();
+        if (lastOfFrame) editorLines_.discardQueue();
     }
 
     // The installed UI backend's own draw, after every overlay feature and before capture. uiActive_
@@ -5921,12 +6182,15 @@ void D3D12Device::endFrame() {
         // the 8.2ms parent is mostly a docked ImGui at 2750x1639 and a game build never pays it.
         beginGpuSpan("editor UI");
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
-        rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
+        rtv.ptr += static_cast<SIZE_T>(bbIdx) * rtvSize_;
         cmdList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         boundHeap_ = uiBackend_->render(cmdList_.Get());
         endGpuSpan();   // "editor UI"
     }
-    if (captureReq_ && captureBuf_) {
+    // Captures (screenshots, --frames) take the real image -- or, with the diagnostic
+    // setFrameGenCaptureGenerated on, the generated one.
+    if (captureReq_ && captureBuf_ && (fgCaptureGenerated_ ? generated : lastOfFrame)) {
+        captureRecorded_ = true;
         auto toCopy = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
         cmdList_->ResourceBarrier(1, &toCopy);
         D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = bb; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
@@ -5938,25 +6202,6 @@ void D3D12Device::endFrame() {
         auto toPresent = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
         cmdList_->ResourceBarrier(1, &toPresent);
     }
-    // Last thing before Close: the frame-end stamp, then resolve every stamp issued this frame into
-    // this slice's own region of the readback buffer. ResolveQueryData is a GPU copy -- it does not
-    // wait, and nothing reads the destination until beginFrame has fenced on it two frames later.
-    endGpuSpan();   // "sky+post+ui"
-    tsSliceEnd_[frameIndex_] = gpuStamp();
-    if (tsEnabled_ && tsCount_ > 0)
-        cmdList_->ResolveQueryData(tsHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
-                                   frameIndex_ * kMaxGpuStamps, tsCount_, tsReadback_.Get(),
-                                   static_cast<u64>(frameIndex_) * kMaxGpuStamps * sizeof(u64));
-
-    // NOTHING IS SUBMITTED ONCE THE DEVICE IS GONE, and the reason is not politeness: beginFrame
-    // returns before resetting the command list when the device is lost, so the list here is
-    // whatever was left from the last good frame -- already closed. Closing it again and submitting
-    // it would be two API misuses stacked on top of a failure that has already been reported.
-    if (deviceLost_) return;
-    cmdList_->Close();
-    ID3D12CommandList* lists[] = {cmdList_.Get()};
-    queue_->ExecuteCommandLists(1, lists);
-    if (infoQueue_) drainDebugMessages();
 }
 
 // Presents the frame, signals its fence, and services a pending capture.
@@ -5971,6 +6216,8 @@ void D3D12Device::present() {
         noteDeviceRemoved("--device-lost-at (SIMULATED, the hardware is fine)", DXGI_ERROR_DEVICE_HUNG);
         return;
     }
+    // With frame generation the generated image was already presented by endFrame
+    // (submitGeneratedImage); this shows the real one on the next vblank.
     const HRESULT pr = swapChain_->Present(tearingSupported_ ? interval : 1u, flags);
     // PRESENT IS WHERE A REMOVAL USUALLY SURFACES FIRST, so it is the most likely place to learn
     // about one. It used to log and carry on, which is how a single lost device turned into a
@@ -5995,7 +6242,10 @@ void D3D12Device::present() {
     ++nextFence_;
     fenceValues_[frameIndex_] = nextFence_;
 
-    if (captureReq_ && captureBuf_) {
+    // Only when this frame actually recorded the copy: a capture waiting for a generated image
+    // (setFrameGenCaptureGenerated) stays pending through a frame that had none.
+    if (captureReq_ && captureBuf_ && captureRecorded_) {
+        captureRecorded_ = false;
         waitForGpu();
         void* mapped = nullptr;
         if (SUCCEEDED(captureBuf_->Map(0, nullptr, &mapped))) {
@@ -6033,7 +6283,8 @@ void D3D12Device::resize(u32 w, u32 h) {
     // already released, matching createDepthBuffer/createMsaaColor's own contract.
     if (gbufferEnabled_) { gbufVelocity_.Reset(); gbufViewZ_.Reset(); gbufNormalRough_.Reset(); }
     const UINT scFlags = tearingSupported_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
-    if (!hrOk(swapChain_->ResizeBuffers(kFrameCount, w, h, kBackbufferFormat, scFlags), "ResizeBuffers")) {
+    frameGenCut_ = true;   // never interpolate across a resize
+    if (!hrOk(swapChain_->ResizeBuffers(kBackBufferCount, w, h, kBackbufferFormat, scFlags), "ResizeBuffers")) {
         createRenderTargetViews();
         createDepthBuffer();
         createMsaaColor();
@@ -6246,7 +6497,9 @@ bool D3D12Device::uiInit(void* hwnd) {
     d3d12::UiBackendInitDesc desc;
     desc.device = device_.Get();
     desc.commandQueue = queue_.Get();
-    desc.frameCount = kFrameCount;
+    // TWICE the frames in flight: ImGui's DX12 backend advances its vertex/index buffer ring once per
+    // render, and with frame generation a frame renders the UI twice (generated image, then real).
+    desc.frameCount = kFrameCount * 2;
     desc.rtvFormat = kBackbufferFormat;
     if (!uiBackend_->init(hwnd, desc)) return false;
 

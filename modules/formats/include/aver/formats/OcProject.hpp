@@ -158,6 +158,12 @@ struct ProjectDesc {
     // and CLI --aversr both outrank this when they are stated.
     int averSr = -1; // RENDER.AVERSR  -1 follow preset, 0 off, 1 quality, 2 balanced, 3 performance
 
+    // RENDER.FRAMEGEN: frame interpolation (docs/rendering/FRAME_INTERPOLATION.md) for Play / PIE and the
+    // packaged runtime. Like AVERSR, a device-level option the hosts read directly (render.voxi has no
+    // business knowing about it). -1 / absent = off; CLI --frame-gen outranks it. The editor's
+    // while-editing switch is an Editor Preference, not this key.
+    int frameGen = -1; // RENDER.FRAMEGEN  0 off, 1 on (needs vsync and 1x anti-aliasing)
+
     // ---- FOUR THINGS THE UI COULD SET AND THE FILE COULD NOT HOLD ------------------------------
     //
     // Each of these was a live control in Project Settings that applied immediately and then
