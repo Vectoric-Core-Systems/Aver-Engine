@@ -211,7 +211,7 @@ GiVisRecon giVisReconstruct(float3 wpos, float3 N, float2 pixel, uint frameIdx) 
     if (((uint)gAmbientParams.w & 8u) == 0u || gGiRestirParams.y < 0.5) return rec;
 
     // Reprojection: same recipe as giRestirIndirect (gPrevViewProj + gSceneViewport).
-    const float4 prevClip = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
+    const float4 prevClip = mul(float4(wpos, 1.0), gPrevViewProj);
     if (prevClip.w <= 1e-4) return rec;
     const float3 prevNdc = prevClip.xyz / prevClip.w;
     const float2 prevPx = gSceneViewport.xy +
@@ -746,7 +746,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // screenSpaceMotion: reprojection position (xy) and depth delta (z); from gPrevViewProj.
         float3 screenSpaceMotion = float3(0, 0, 0);
         {
-            const float4 prevClip = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
+            const float4 prevClip = mul(float4(wpos, 1.0), gPrevViewProj);
             if (prevClip.w > 1e-4) {
                 const float3 prevNdc = prevClip.xyz / prevClip.w;
                 const float2 prevPx = gSceneViewport.xy +
@@ -884,7 +884,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     float  denoisedWsum = 0.0;
     // W6/M5: gAverHistoryWrite gates the surface-history lookups.
     if (gAverHistoryWrite && denoisedReproject && gw > 0u && gh > 0u) {
-        const float4 dnPrevClip = mul(float4(wpos + gAverReprojDelta, 1.0), gPrevViewProj);
+        const float4 dnPrevClip = mul(float4(wpos, 1.0), gPrevViewProj);
         if (dnPrevClip.w > 1e-4) {
             const float3 dnPrevNdc = dnPrevClip.xyz / dnPrevClip.w;
             const float2 dnPrevPx = gSceneViewport.xy +
