@@ -47,6 +47,11 @@ std::string ownerProjectOf(const std::string& mapPath) {
 
 // Parse command line and build the editor. Flags run in separate loops due to MSVC C1061 nesting limit.
 Application* createApplication(int argc, char** argv) {
+#ifdef NDEBUG
+    AVER_INFO("[Sandbox] {} (Release build)", argc > 0 ? argv[0] : "Sandbox.exe");
+#else
+    AVER_WARN("[Sandbox] {} (DEBUG build: frame rates are not representative)", argc > 0 ? argv[0] : "Sandbox.exe");
+#endif
     u16 mcpPort=0;
     // mcpRequested: --mcp given. mcpPortExplicit: given WITH a numeric port.
     bool mcpRequested = false, mcpPortExplicit = false;

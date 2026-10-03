@@ -2549,6 +2549,14 @@ void SandboxApp::buildUI(Engine& e) {
         }
     }
 
+#ifndef NDEBUG
+    // A Debug editor runs several times slower; say so where the frame rate is read.
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1.0f), "  |  DEBUG BUILD");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("This editor was compiled in Debug: frame rates are not representative.\n"
+                          "Build and run the Release configuration (build-release) to measure.");
+#endif
     ImGui::SameLine(0.0f, 0.0f);
     ImGui::Text("  |  %zu actors  |  %s", objects_.size(), selectionLabel().c_str());
 
