@@ -17,6 +17,7 @@
       "name": "msvc-ninja-release",
       "inherits": "msvc-ninja",
       "displayName": "MSVC x64 Release (Ninja)",
+      "binaryDir": "${sourceDir}/build-release",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
     }
   ],
