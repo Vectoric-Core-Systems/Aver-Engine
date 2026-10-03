@@ -61,7 +61,7 @@ Companion design: [RADIANCE_CACHE.md](RADIANCE_CACHE.md) — both share the `Ave
   iteration through each frame's own motion and depth. Prior art to the frame-generation filings and the
   basis of this design.
 
-### 2.3 The four patent-driven changes
+### 2.3 The patent-driven changes
 
 | Old design | Problem (see the patents doc) | New design |
 |---|---|---|
@@ -69,10 +69,16 @@ Companion design: [RADIANCE_CACHE.md](RADIANCE_CACHE.md) — both share the `Ave
 | Two disocclusion masks (occlusion / dis-occlusion), interpolated depth, snap to one frame | AMD US 2025/0069319 (pending), NVIDIA US 12,568,184 (granted) | **One continuous confidence per candidate** (§3.3) from real-frame consistency only. No mask pair, no midpoint depth, never snapping by mask. |
 | Network outputs blend weight **and** a colour fill | Arm GB 2620919 (granted UK), US 2024/0029196 (pending) | **Network outputs only the blend weight** (§3.5). Uncovered pixels are filled procedurally in colour space (§3.4). |
 | Pacer times the generated frame from measured frame times | AMD US 2025/0299287 (pending) | **Fixed back-to-back vsync presents** (§5): no frame-time estimator in the schedule; generation off on variable-refresh / uncapped output. |
+| Push-pull pyramid fill for holes *(round 2)* | Georgia Tech US 9,094,660 (granted, ~2033): reduce resolution until holes fall below a threshold, expand, fill from the expanded image | **Full-resolution fill** (§3.4): no mip chain of any kind, hole-aware or not. |
+| CPU frame-start delay from measured GPU time *(round 2)* | Intel US 12,057,090 (granted): delay CPU work to align with GPU availability | **Dropped.** Latency reduction is the waitable swapchain's one-frame limit only (§5). |
+| Store generated frames, then copy into the swap chain *(round 3)* | NVIDIA US 12,632,916 (granted 2026-05-19) and its continuation US 2026/0245168 (pending): in response to present calls, store real + interpolated frames in a first buffer, copy them to a swap-chain buffer, present | **The generated frame is composited straight into the back buffer** (§5); no intermediate frame queue, no API interception (the engine is the application). Counsel to confirm. |
 
-Two very broad NVIDIA applications (US 2022/0038653, 2022/0398751) have no clean design-around on their
-literal text; they are tracked, with prior art on file. The hole fill (§3.4) works in colour space, not by
-propagating motion, which keeps distance from the second one.
+Very broad NVIDIA applications have no clean design-around on their literal text; they are tracked, with
+prior art on file (patents doc §6–7). US 2022/0038653 and 2022/0398751 (round 1); US 2024/0098216
+(neural blending; **the held-back milestone 2**) and US 2025/0106355 (in-between frames "based at least in
+part on depth", which reads on milestone 1 too; Yang 2011 is the prior art). US 2021/0067735 (any neural
+network generating higher-frame-rate video) is reported **abandoned**. The hole fill works in colour space,
+not by propagating motion, which keeps distance from 2022/0398751.
 
 ---
 
@@ -86,7 +92,7 @@ real frame N rendered (HDR scene colour, depth, motion vectors, trust mask)
 G1  gather     per output pixel: fixed-point search into N and into N-1         procedural
 G2  confidence one continuous score per candidate from real-frame consistency    procedural
 G3  blend      weight per pixel (heuristic in milestone 1, network in 2)         procedural / neural
-G4  fill       push-pull colour pyramid for pixels with no valid candidate       procedural
+G4  fill       full-resolution colour fill for pixels with no valid candidate   procedural
       |
       v
 generated HDR frame  ->  AverSR upscale  ->  composite (exposure, bloom, ACES, gamma)
@@ -138,9 +144,14 @@ frame simply has low confidence, and the blend follows continuously.
 ### 3.4 G3/G4 — blend and fill
 
 - **Milestone 1 blend:** `out = (c_N·w_N + c_{N−1}·w_{N−1}) / (w_N + w_{N−1})`, weights from §3.3.
-- **Fill:** pixels where both confidences are near zero (true holes) are filled by a push-pull colour
-  pyramid of the blended frame (Gortler et al. 1996): build a pyramid of valid colour, then pull back
-  down. Colour space only; motion is never propagated into holes.
+- **Fill:** pixels where both confidences are near zero (true holes) take the **un-warped colour of
+  frame N at the same pixel**, then 2–3 full-resolution passes of a 3×3 normalised convolution over the
+  valid neighbours soften the seam. Everything runs at full scene resolution: **no pyramid, no mip chain,
+  no reduce-then-expand step** (Georgia Tech US 9,094,660 claims exactly that structure; push-pull,
+  Gortler et al. 1996, is its prior art, an argument for counsel only). Colour space only; motion is never
+  propagated into holes. Holes are rare (both real frames failed), so a plain fill is enough. The fill
+  must **not pick source pixels by depth similarity to the hole** ("same object" by a depth threshold):
+  that is the amended claim of NVIDIA US 2025/0106355 (2026-07-16).
 
 Milestone 1 is shippable on its own and is the baseline the network must beat. Estimate ~0.4–0.8 ms at
 full 1440p, roughly a quarter at 0.5 scale.
@@ -185,6 +196,12 @@ budget), translucent layers (by design no motion/depth — the trust mask covers
   with the buffer count decoupled from `kFrameCount = 2` (`D3D12Device.cpp:3882-3888`).
 - **Present pass split:** `endFrame` becomes "render the scene" + "present pass" (upscale, composite,
   overlays, UI, Present), so the present pass runs for the generated frame and then the real one.
+- **No frame queue in front of the swap chain:** each present pass composites its frame (generated or
+  real) **directly into the acquired back buffer** and presents it. Neither frame is stored as a finished
+  image and later copied into a swap-chain buffer, and no present call is intercepted. The history ring
+  holds scene-resolution HDR inputs, not finished output frames. *Caveat:* the continuation US
+  2026/0245168 was **broadened** on 2026-06-16 (interception and "outside the swap chain buffer" struck),
+  so this mitigation is weaker than it looks; prior art is the main route (patents doc §6.1).
 - **Fixed cadence, no measured timing:** with frame generation on, the generated frame and the real frame
   are queued as **consecutive vsync presents** (interval 1), generated first. The display's refresh is
   the clock. There is no frame-time estimator, no GPU or UI timing in the schedule, no pacer thread
@@ -194,9 +211,9 @@ budget), translucent layers (by design no motion/depth — the trust mask covers
   adapting to them.
 - **Below 30 fps base:** warning in the stats overlay (decision 3); the cadence stays the same (the real
   frame simply holds for more vblanks).
-- **Latency reduction is separate:** the waitable object with latency 1. A CPU frame-start delay from
-  measured GPU time is **on hold** until Intel US 12,057,090 ("Frame pacing…", delaying CPU work to align
-  with GPU availability) has been read — the follow-up sweep covers it.
+- **Latency reduction is separate:** the waitable object with latency 1, and nothing else. A CPU
+  frame-start delay from measured GPU time is **dropped**: Intel US 12,057,090 (granted) claims delaying
+  CPU work to align with GPU availability.
 - **Factor:** shaders take `t` as an input; v1 ships 2× only.
 
 ---
@@ -226,9 +243,10 @@ budget), translucent layers (by design no motion/depth — the trust mask covers
 
 Full sweep, element mappings and design-arounds: [FRAME_INTERPOLATION_PATENTS.md](FRAME_INTERPOLATION_PATENTS.md)
 (engineering mapping, **not legal advice**; a freedom-to-operate opinion is still required). This design
-applies the four changes in §2.3. A follow-up sweep (2026-10-03) re-checks the HIGH items verbatim against
-this revised design and covers the gaps (NVIDIA DLSS frame-generation filings, Intel US 12,057,090, AMD
-latency filings, and whether the gather and push-pull replacements are themselves claimed).
+applies the changes in §2.3. Round 2 (2026-10-03) re-checked the round-1 HIGH items against this design
+(all now LOW) and found the Georgia Tech fill and Intel pacing patents. Round 3 charted prior art against
+the broad NVIDIA applications and checked their status and family (no Singapore, EP, KR or JP members).
+**Milestone 2 (the network) is held back** by the owner until counsel has looked at US 2024/0098216.
 
 ---
 
@@ -239,8 +257,8 @@ latency filings, and whether the gather and push-pull replacements are themselve
 | 0 | Object motion vectors, sky motion — **done** (`4ee7e3ec`) | — |
 | 0b | G-buffer reason for frame interpolation; scene-cut signal | — |
 | 1 | History ring, present-pass split, waitable swapchain, fixed vsync cadence; runtime first, then the editor viewport; HUD/editor-lines/ImGui redraw | — |
-| 2 | Milestone 1: G1 gather, G2 confidence, G3 heuristic blend, G4 push-pull fill; exposure and bloom blending | — |
-| 3 | `Aver.Render.Neural` conv forward kernels; weight-only U-Net; in-engine training (**check with the owner first**) | Yes |
+| 2 | Milestone 1: G1 gather, G2 confidence, G3 heuristic blend, G4 full-resolution fill; exposure and bloom blending | — |
+| 3 | **HELD BACK (owner, 2026-10-03).** `Aver.Render.Neural` conv forward kernels; weight-only U-Net; in-engine training | Yes |
 | 4 | Translucent motion, reflection motion, skinned previous pose, 3× generation | Partly |
 
 ---
@@ -271,7 +289,8 @@ latency filings, and whether the gather and push-pull replacements are themselve
 
 - Yang, Tse, Sander, Lawrence, Nehab, Hoppe, Wilkins, *Image-based Bidirectional Scene Reprojection*,
   SIGGRAPH Asia 2011.
-- Gortler, Grzeszczuk, Szeliski, Cohen, *The Lumigraph*, SIGGRAPH 1996 (push-pull).
+- Gortler, Grzeszczuk, Szeliski, Cohen, *The Lumigraph*, SIGGRAPH 1996 (push-pull; cited as prior art
+  against US 9,094,660, not used).
 - AMD FidelityFX SDK v1.1.4 — reference only.
 - Briedis et al. 2021/2023; Ha, Ahn, Yoon 2025; RIFE, IFRNet, FILM, EMA-VFI — ideas only.
 - Microsoft DXGI docs: flip model, waitable swapchain.
