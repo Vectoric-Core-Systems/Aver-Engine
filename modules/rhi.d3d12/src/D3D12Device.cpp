@@ -1382,6 +1382,14 @@ private:
     HANDLE fgTimer_ = nullptr;              // high-resolution waitable timer for the sleep
     void frameInterpWaitForTick();
     void queryDisplayRefresh();
+    // With vsync: refreshes each image is held for, so the images go out at fgClockHz_ (rounded to a
+    // whole number of refreshes; 1 at the refresh rate). Generated and real alternate on that fixed
+    // beat -- a generated image always sits exactly halfway between two real ones.
+    UINT frameInterpVsyncInterval() const {
+        if (!(fgClockHz_ > 0.0f) || !(fgDisplayHz_ > 0.0f)) return 1u;
+        const f32 n = std::round(fgDisplayHz_ / fgClockHz_);
+        return n < 1.0f ? 1u : (n > 4.0f ? 4u : static_cast<UINT>(n));
+    }
 
     // Per-pass GPU timing: a whole-frame CPU delta can't say which pass is expensive (five wrong
     // theories -- shadow cascades, scene walk, chunk streaming, volumetric clouds, build config --
@@ -6058,7 +6066,8 @@ bool D3D12Device::submitGeneratedImage() {
     queue_->ExecuteCommandLists(1, lists);
     const bool tearing = !vsync_ && tearingSupported_;
     if (tearing) frameInterpWaitForTick();   // after the submit, so the GPU is never kept waiting
-    const HRESULT gr = tearing ? swapChain_->Present(0u, DXGI_PRESENT_ALLOW_TEARING) : swapChain_->Present(1u, 0u);
+    const HRESULT gr = tearing ? swapChain_->Present(0u, DXGI_PRESENT_ALLOW_TEARING)
+                               : swapChain_->Present(frameInterpVsyncInterval(), 0u);
     if (FAILED(gr)) {
         if (gr == DXGI_ERROR_DEVICE_REMOVED || gr == DXGI_ERROR_DEVICE_RESET) {
             noteDeviceRemoved("Present (generated frame)", gr);
@@ -6310,7 +6319,10 @@ void D3D12Device::present() {
     // next generated image).
     if (tearing && frameInterpolated_) frameInterpWaitForTick();
     else fgNextTick_ = 0;
-    const HRESULT pr = swapChain_->Present(tearingSupported_ ? interval : 1u, flags);
+    // With vsync and an interpolated frame, the real image is held as long as the generated one was.
+    const UINT sync = (vsync_ && frameInterpolated_) ? frameInterpVsyncInterval()
+                                                     : (tearingSupported_ ? interval : 1u);
+    const HRESULT pr = swapChain_->Present(sync, flags);
     // PRESENT IS WHERE A REMOVAL USUALLY SURFACES FIRST, so it is the most likely place to learn
     // about one. It used to log and carry on, which is how a single lost device turned into a
     // screenful of identical errors and then a hard fault somewhere else entirely.

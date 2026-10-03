@@ -317,6 +317,14 @@ budget), translucent layers (by design no motion/depth — the trust mask covers
   the clock. There is no frame-time estimator, no GPU or UI timing in the schedule, no pacer thread
   deciding when to present.
 - **Frame cap** at half the refresh rate (the real-frame rate the cadence needs).
+- **The fixed target (2026-10-03).** One setting, "Frames shown per second" (`IDevice::setFrameInterpClock`,
+  default the refresh rate). Real frames run at half the target, each followed by a generated frame
+  halfway. With vsync, every present (generated and real) uses sync interval round(refresh / target),
+  1-4, so on 60 Hz a target of 30 holds each image for 2 refreshes: 15 real, 30 shown, evenly spaced.
+  Without vsync the fixed clock runs at the target. This follows the fixed-cadence prior art
+  (NEURAFI_PATENTS.md §6.1): the rate is the user's constant. Why: the owner found NeonDistrict (15 real
+  fps) felt no smoother with interpolation. A back-to-back interval-1 pair at that rate shows the
+  generated frame for 1 refresh and the real one for 3 (reasoned from the cadence, not measured).
 - **Without vsync (tearing), since 2026-10-03:** frame interpolation runs, on a **fixed present clock**
   (`D3D12Device::frameInterpWaitForTick`). Each image, generated then real, is presented with
   `ALLOW_TEARING` on the next tick of a clock running at a **constant** rate: the display's refresh rate

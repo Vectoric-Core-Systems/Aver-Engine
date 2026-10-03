@@ -520,8 +520,9 @@ public:
     virtual void setFrameInterpolator(IFrameInterpolator* g) { (void)g; }
     virtual void setFrameInterpolation(bool on) { (void)on; }
     virtual bool frameInterpolation() const { return false; }
-    // Vsync off only: images presented per second (generated + real) -- each is presented on the next
-    // tick of a clock at this rate. 0 = the display's refresh rate (displayRefreshRate()).
+    // Images shown per second (generated + real; real frames run at half): the fixed target. Vsync off,
+    // each image is presented on the next tick of a clock at this rate; vsync on, each is held for
+    // refresh / rate refreshes (rounded, 1-4). 0 = the display's refresh rate (displayRefreshRate()).
     virtual void setFrameInterpClock(f32 imagesPerSecond) { (void)imagesPerSecond; }
     // The refresh rate of the display the swapchain is on, Hz; 0 when unknown or headless.
     virtual f32 displayRefreshRate() const { return 0.0f; }

@@ -354,30 +354,23 @@ void SandboxApp::buildEditorPrefs() {
                                                                  : "(starting)");
         }
 
-        // Without V-Sync the generated and real images go out on a fixed clock (NEURAFI.md §5): a
-        // constant rate, never one measured from the frames.
+        // THE FIXED TARGET (NEURAFI.md §5): frames shown per second; real frames run at half, each
+        // followed by a generated one exactly halfway. A constant, never measured from the frames.
         {
             const f32 refresh = prefsDevice_ ? prefsDevice_->displayRefreshRate() : 0.0f;
-            bool atRefresh = frameInterpClockHz_ <= 0.0f;
-            ImGui::BeginDisabled(vs);
-            if (ImGui::Checkbox("Without V-Sync, present at the display's refresh rate", &atRefresh))
-                frameInterpClockHz_ = atRefresh ? 0.0f : (refresh > 0.0f ? refresh * 2.0f : 240.0f);
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("With V-Sync off, frame interpolation shows its frames on a steady clock\n"
-                                  "(generated, real, generated, real...), one per tick. On: the clock runs at\n"
-                                  "the display's refresh rate%s. Off: at the rate you set below, which can be\n"
-                                  "above the refresh rate (frames then tear). The clock is a fixed rate, never\n"
-                                  "taken from how long frames took. Only used while V-Sync is off.",
-                                  refresh > 0.0f ? "" : " (not known for this display: frames go out at once)");
-            if (!atRefresh) {
-                f32 hz = frameInterpClockHz_;
-                if (ImGui::SliderFloat("Frames per second shown (generated + real)", &hz, 30.0f, 500.0f, "%.0f"))
-                    frameInterpClockHz_ = hz < 30.0f ? 30.0f : hz;
-            } else if (refresh > 0.0f) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(%.0f Hz)", refresh);
-            }
-            ImGui::EndDisabled();
+            const f32 shownDefault = refresh > 0.0f ? refresh : 60.0f;
+            f32 shown = frameInterpClockHz_ > 0.0f ? frameInterpClockHz_ : shownDefault;
+            if (ImGui::SliderFloat("Frames shown per second", &shown, 20.0f, vs ? shownDefault : 500.0f,
+                                   "%.0f"))
+                frameInterpClockHz_ = (refresh > 0.0f && std::fabs(shown - refresh) < 0.5f) ? 0.0f : shown;
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%.0f real)", shown * 0.5f);
+            if (ImGui::IsItemHovered() || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Frame interpolation doubles the frame rate: real frames run at half this\n"
+                                  "rate and a generated frame is shown exactly halfway between each two.\n"
+                                  "Set it to twice what the scene can render, e.g. 30 for a 15 fps scene.\n"
+                                  "With V-Sync on it snaps to whole refreshes of the display (%.0f Hz).",
+                                  shownDefault);
         }
 
         // The path the in-between frame's pixels are gathered along (NEURAFI.md §3.5).
