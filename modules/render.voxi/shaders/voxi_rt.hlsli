@@ -42,7 +42,12 @@ RaytracingAccelerationStructure gScene : register(t2);
 // thing "bindless" means here, and none of these are that.
 struct RtVertex   { float3 pos; float3 nrm; float2 uv; };
 struct RtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo;
-                    float metallic; float roughness; uint materialIndex; };
+                    float metallic; float roughness; uint materialIndex;
+                    float4x4 prevObjectToWorld; };
+// prevObjectToWorld: the instance's objectToWorld AS DRAWN IN THE PREVIOUS FRAME, same engine row-vector
+// convention. Equal to objectToWorld for anything that did not move (static props, foliage, the first
+// frame of a new instance). Feeds the ray-driven G-buffer velocity (PSRayDriven, voxi.hlsl). MUST MATCH
+// VoxiRenderer::RtInstance::prevObjectToWorld (VoxiRenderer.hpp), the struct's trailing field.
 StructuredBuffer<RtVertex>   gRtVerts     : register(t3);
 StructuredBuffer<uint>       gRtIndices   : register(t4);
 StructuredBuffer<RtInstance> gRtInstances : register(t5);
@@ -50,7 +55,7 @@ StructuredBuffer<RtInstance> gRtInstances : register(t5);
 // ---- INSTANCED FOLIAGE: TLAS instances that are not draws (VoxiRenderer::setFoliage) ----
 // A foliage instance sits in the TLAS's STATIC PREFIX (slots [0, count), packed once) and has no
 // gRtInstances row: its InstanceID is AVER_RT_FOLIAGE_ID_BIT | the first row of its prototype's parts in
-// gRtFoliageParts (an RtInstance per part, objectToWorld unused), and its transform is read back from
+// gRtFoliageParts (an RtInstance per part, objectToWorld/prevObjectToWorld unused), and its transform is read back from
 // the prefix's own instance descs, gRtFoliageDescs, at its CommittedInstanceIndex(). A draw's InstanceID
 // is its gRtInstances row, always below the bit (kMaxDraws, VoxiRenderer.cpp). MUST MATCH
 // kRtFoliageIdBit (VoxiRenderer.cpp).
@@ -99,12 +104,16 @@ RtInstance rtLoadInstance(uint ref) {
     RtInstance inst = gRtFoliageParts[(d.tail.x & (AVER_RT_FOLIAGE_ID_BIT - 1u)) +
                                       ((ref >> AVER_RT_REF_GEOM_SHIFT) & 15u)];
     inst.objectToWorld = transpose(float4x4(d.row0, d.row1, d.row2, float4(0.0, 0.0, 0.0, 1.0)));
+    // Foliage instances are static (they live in the TLAS's packed-once static prefix), so last frame's
+    // transform is this one: the part row's prevObjectToWorld is as unused as its objectToWorld, and
+    // leaving it would hand a hit garbage/zero motion.
+    inst.prevObjectToWorld = inst.objectToWorld;
     return inst;
 }
 
 // ---- per-material data for a ray hit, keyed by RtInstance::materialIndex ----
 // materialIndex repurposes `pad`, a u32 nothing read (grep confirmed zero refs) -- zero extra bytes,
-// RtInstance stays 96 bytes (VoxiRenderer.hpp static_assert unchanged).
+// RtInstance was 96 bytes then (the trailing prevObjectToWorld made it 160, VoxiRenderer.hpp static_assert).
 // RtMaterial mirrors pbr::MaterialConstants (MaterialGpu.hpp) field-for-field, same order as
 // `cbuffer AverMaterial` (PbrShaders.cpp) -- a mismatched order reads a neighbour's bytes with no
 // compile error. Unread fields stay declared in order for the same reason: no partial

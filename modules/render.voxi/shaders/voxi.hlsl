@@ -1671,18 +1671,11 @@ float4 averPackNormalRoughness(float3 N, float roughness) {
     return float4(p * 0.5 + 0.5, saturate(roughness), 0.0);
 }
 
-// Screen-space motion for the velocity channel: `wpos` reprojected through THIS frame's camera minus
-// the SAME wpos through LAST frame's, in the SCENE VIEWPORT RECT (same landmine as rtReprojectHistory:
-// plain ndc*0.5+0.5 is wrong once the editor docks the 3D view in a sub-rect).
-//
-// STATIC-GEOMETRY ONLY, A DELIBERATE GAP: using `wpos` in both projections is correct only if the
-// surface didn't move. A moving instance needs its OWN previous-frame transform (previous `gWorld` for
-// raster, previous `RtInstance.objectToWorld` for ray-driven), and NEITHER EXISTS YET -- so a moving
-// object gets ZERO motion, SILENTLY. Fix: thread a previous-transform through RtInstance (or the
-// per-draw cbuffer) and reproject through it instead of `wpos` twice.
-float2 averGBufferVelocity(float3 wpos) {
-    const float4 curClip  = mul(float4(wpos, 1.0), gViewProj);
-    const float4 prevClip = mul(float4(wpos, 1.0), gPrevViewProj);
+// Screen-space motion for the velocity channel, in the SCENE VIEWPORT RECT (same landmine as
+// rtReprojectHistory: plain ndc*0.5+0.5 is wrong once the editor docks the 3D view in a sub-rect).
+// This is the ONE mapping every velocity helper below shares: a clip position from THIS frame's camera
+// (gViewProj) and one from LAST frame's (gPrevViewProj) in, destination-minus-source pixels out.
+float2 averClipToVelocity(float4 curClip, float4 prevClip) {
     // Either transform can put this point behind its own near plane -- prevClip routinely does (first
     // frame, or anything that just entered the frustum). Zero is "no motion known", same fallback as
     // rtReprojectHistory's velocityPx -- the least wrong answer when the maths is undefined, rather than
@@ -1707,6 +1700,34 @@ float2 averGBufferVelocity(float3 wpos) {
     // DESTINATION (curPx) minus SOURCE (prevPx) -- the contract UpscalerNeeds::MotionVectors
     // (RHIResources.hpp) documents.
     return curPx - prevPx;
+}
+
+// Motion of a surface point that sat at `wposPrev` last frame and sits at `wpos` now: `wpos` through
+// THIS frame's camera minus `wposPrev` through LAST frame's. Camera motion AND object motion both land
+// in the result, so a moving instance gets its true velocity instead of the camera-only one.
+float2 averGBufferVelocityMoved(float3 wpos, float3 wposPrev) {
+    return averClipToVelocity(mul(float4(wpos, 1.0), gViewProj),
+                              mul(float4(wposPrev, 1.0), gPrevViewProj));
+}
+
+// Camera-only motion: the surface is taken to have stayed where it is (wposPrev == wpos). PSMainVoxi
+// (raster) uses this and ONLY this: RASTER REMAINS STATIC-ONLY, a moving mesh drawn by the raster path
+// still gets camera-only motion. The per-draw root constants have no room for a previous world matrix
+// (docs/rendering/FRAME_INTERPOLATION.md section 4). The ray-driven path, the default, reads
+// RtInstance::prevObjectToWorld instead (PSRayDriven via averGBufferVelocityMoved), and the sky has
+// averGBufferVelocitySky below.
+float2 averGBufferVelocity(float3 wpos) {
+    return averGBufferVelocityMoved(wpos, wpos);
+}
+
+// A sky pixel: ROTATION-ONLY reprojection of the view direction, a point at infinity. w = 0 in
+// float4(dir, 0.0) drops the translation rows of both view-projections, which is exactly right for the
+// sky -- moving the camera does not shift the stars, turning it does. Same mapping and the same
+// behind-the-near-plane zero fallback as every other velocity, so a sky pixel carries the camera's
+// rotation instead of the old hard zero.
+float2 averGBufferVelocitySky(float3 dir) {
+    return averClipToVelocity(mul(float4(dir, 0.0), gViewProj),
+                              mul(float4(dir, 0.0), gPrevViewProj));
 }
 
 // One expansion point for PSMainVoxi's several `return` statements, so the three extra channels stay
@@ -2532,7 +2553,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         }
         o.depth = 1.0;
 #if AVER_GBUFFER
-        o.velocity        = float2(0.0, 0.0);
+        // Sky velocity is the camera's rotation-only reprojection of `dir` (averGBufferVelocitySky), no
+        // longer a hard zero; viewZ stays the 1e7 far sentinel, which is what a consumer masking sky uses.
+        o.velocity        = averGBufferVelocitySky(dir);
         o.viewZ            = 1.0e7;
         o.normalRoughness  = averPackNormalRoughness(-dir, 1.0);
 #endif
@@ -2583,12 +2606,13 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         }
         o.depth = 1.0;
 #if AVER_GBUFFER
-        // No real surface for a miss, so no true velocity or normal. Velocity 0 (matches
-        // averGBufferVelocity's near-plane fallback); viewZ 1e7 (sentinel past real geometry, matching
-        // this ray's TMax); normal -dir so renormalising gives a unit vector, not a NaN from
-        // normalize(0,0,0). NOT A SKY MASK SUBSTITUTE: a consumer excluding sky pixels should use
-        // viewZ's far-plane sentinel, not this normal.
-        o.velocity        = float2(0.0, 0.0);
+        // No real surface for a miss, so no true normal. Velocity is the sky's rotation-only
+        // reprojection of `dir` (averGBufferVelocitySky; zero only via its near-plane fallback); viewZ
+        // 1e7 (sentinel past real geometry, matching this ray's TMax); normal -dir so renormalising
+        // gives a unit vector, not a NaN from normalize(0,0,0). NOT A SKY MASK SUBSTITUTE: a consumer
+        // excluding sky pixels should use viewZ's far-plane sentinel, not this normal and not a zero
+        // velocity (sky velocity is no longer zero).
+        o.velocity        = averGBufferVelocitySky(dir);
         o.viewZ            = 1.0e7;
         o.normalRoughness  = averPackNormalRoughness(-dir, 1.0);
 #endif
@@ -3315,10 +3339,18 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         o.col.rgb = viewDebugColor(vmode, rdInstanceIndex, inst.materialIndex, rdPrimIndex, hitT, N, dir);
 #if AVER_GBUFFER
     // clip.w IS the view-space linear depth viewZ wants, reused from o.depth's divide above rather
-    // than a second mul. Velocity uses the SAME static-geometry function as PSMainVoxi (see
-    // averGBufferVelocity for what it doesn't yet handle); normal is this pass's ray-hit N, not an
-    // interpolated vertex normal -- what this feature's task asked for.
-    o.velocity        = averGBufferVelocity(wpos);
+    // than a second mul. Velocity carries OBJECT motion: the hit's object-space point is mapped through
+    // this frame's and last frame's objectToWorld, and the DELTA is applied to wpos, so the current
+    // projection is exactly today's wpos and an instance with prevObjectToWorld == objectToWorld (static,
+    // foliage, first frame) gets a delta of exactly 0 and today's camera-only result bit for bit.
+    // RIGID MOTION ONLY: skinned/soft-body deformation is not in prev (gRtVerts holds the CURRENT pose),
+    // raster stays static-only (see averGBufferVelocity), and translucent layers write no velocity by
+    // design (VoxiRenderer.cpp). Normal is this pass's ray-hit N, not an interpolated vertex normal --
+    // what this feature's task asked for.
+    const float3 objPos  = gRtVerts[i0].pos * w.x + gRtVerts[i1].pos * w.y + gRtVerts[i2].pos * w.z;
+    const float3 curObjW = mul(float4(objPos, 1.0), inst.objectToWorld).xyz;
+    const float3 prvObjW = mul(float4(objPos, 1.0), inst.prevObjectToWorld).xyz;
+    o.velocity        = averGBufferVelocityMoved(wpos, wpos + (prvObjW - curObjW));
     o.viewZ            = clip.w;
     o.normalRoughness  = averPackNormalRoughness(N, s.rough);
 #endif

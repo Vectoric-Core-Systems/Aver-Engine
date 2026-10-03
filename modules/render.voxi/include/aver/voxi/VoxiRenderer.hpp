@@ -676,18 +676,23 @@ private:
     //     tlas_ is refit from) and rtInstanceData_ (what a ray hit reads), re-uploads the instance table,
     //     and the caller refits tlas_ (refitOrRebuildTlas, same periodic full rebuild as ever).
     // The world matrix feeds exactly those two places (TlasInstance::world, RtInstance::objectToWorld)
-    // plus the previous-transform tracker, which is compiled out (kTrackPrevTransforms) -- and the lane
-    // is compiled out with it, rather than half-supported. Instance bounds, material rows, geometry
-    // slices and the instance mask/flags are not functions of the world, and the key still gates them.
+    // plus RtInstance::prevObjectToWorld, which the patch fills from the instance's old objectToWorld as
+    // it overwrites it (and which rtPrevPending_ settles back to equal on a later frame, so a mover that
+    // stops stops reporting motion). Instance bounds, material rows, geometry slices and the instance
+    // mask/flags are not functions of the world, and the key still gates them.
     // Needs the gate and Settings::rtRefitAccel both on (rtMoverPatchActive); with either off the key
     // hashes every world as before, which is the old behaviour bit for bit.
     //
     // A recorded mover is matched to the CURRENT list by IDENTITY (rtDrawHash without the world), not by
     // draw index: the key is a commutative sum, so a reshuffled draw list (occlusion culling) still
     // matches it, and an index would then name the wrong draw. Two movers with equal identity share
-    // mesh, material set and flags, so ties break by draw order. Not covered: an authored draw's
-    // per-draw colour/metallic/roughness are not in its identity, so a per-draw tint on a mover (only
-    // the show-culled debug view does that today) keeps its last full-build value until the next one.
+    // mesh, material set and flags, so which of them takes which instance is free: patchRtMovers() breaks
+    // the tie by NEAREST translation to the instance's current world (not draw order, which occlusion
+    // culling reshuffles -- two identical cars would swap transforms and each report the other's motion).
+    // The choice never changes the structure's content, only which instance carries which world.
+    // Not covered: an authored draw's per-draw colour/metallic/roughness are not in its identity, so a
+    // per-draw tint on a mover (only the show-culled debug view does that today) keeps its last
+    // full-build value until the next one.
     bool rtMoverPatchActive() const;
     static constexpr u32 kRtNoInstance = 0xFFFFFFFFu;
     struct RtMover {
@@ -841,12 +846,22 @@ private:
         // mismatch shifts every field after it and corrupts every ray hit with no compile error.
         // Only the byte-count static_assert below guards against it.
         u32 materialIndex = 0;
+        // The instance's objectToWorld AS DRAWN IN THE PREVIOUS FRAME (engine row-vector, same
+        // convention as objectToWorld): what the shader pushes an object-space hit through to find
+        // where the same surface point was last frame, i.e. the motion vector of a MOVING object.
+        // Equal to objectToWorld for anything that did not move -- static props, a new instance, a
+        // mover that has stopped (rtPrevPending_ settles it) -- so a zero-motion instance needs no
+        // special case on the GPU. Filled by buildAccelerationStructures' carry-forward (a full build)
+        // and patchRtMovers (a mover patch); foliage parts and the placeholder carry their own
+        // objectToWorld here, foliage being static. Appended AFTER materialIndex so every earlier
+        // field keeps its offset; the HLSL mirror (voxi_rt.hlsli) appends the same float4x4.
+        f32 prevObjectToWorld[16];
     };
-    // 64+4+4+12+4+4+4 = 96 bytes, matching the HLSL side under natural alignment; the stride handed
+    // 64+4+4+12+4+4+4+64 = 160 bytes, matching the HLSL side under natural alignment; the stride handed
     // to setSrvBuffer must agree too. Three places must agree and the assert only guards two (this
     // struct and the HLSL mirror) -- a wrong stride fails silently: every instance past the first
     // reads its neighbour's bytes, showing up as reflections/hits with the wrong surface's colour.
-    static_assert(sizeof(RtInstance) == 96, "RtInstance is the HLSL RtInstance ABI");
+    static_assert(sizeof(RtInstance) == 160, "RtInstance is the HLSL RtInstance ABI");
 
     rhi::BufferHandle rtVerts_ = 0, rtIndices_ = 0;
     u32  rtVertCapacity_ = 0, rtIndexCapacity_ = 0, rtInstanceCapacity_ = 0;
@@ -1209,80 +1224,83 @@ private:
     // for the rest of the frame, the blended replay included. `pass` names it in the once-only log.
     bool publishLocalLights(bool live, const char* pass);
 
-    // ---- previous-frame per-instance transforms: tracked here; NOT YET reachable by any shader ----
+    // ---- previous-frame per-instance transforms: RtInstance::prevObjectToWorld's bookkeeping ----
     //
-    // averGBufferVelocity() (VoxiShaders.hpp) reprojects one world position through this frame's
-    // camera and last frame's -- correct only for a surface that did not move. Fixing that for a
-    // MOVING instance needs that instance's own previous object-to-world; this is the bookkeeping
-    // half of that fix, rebuilt every buildAccelerationStructures() call.
+    // averGBufferVelocity() (voxi.hlsl) reprojects one world position through this frame's
+    // camera and last frame's -- correct only for a surface that did not move. A MOVING instance
+    // needs its own previous object-to-world, which the ray-driven shader reads from
+    // RtInstance::prevObjectToWorld. It has two writers, both fed from what the TLAS actually drew
+    // (not from this frame's entities: the draw list the structure reads is one frame stale by design,
+    // so motion must be the difference between successive TLAS transforms to match the image):
+    //   - patchRtMovers() copies a mover's current objectToWorld into prevObjectToWorld just before it
+    //     writes the new world (the mover patch lane above);
+    //   - a FULL build carries last frame's drawn transforms forward by group + nearest match, below.
+    // rtPrevPending_ then makes sure a prev that differs from its current does not outlive the frame it
+    // describes.
     //
-    // KEY: neither existing identity fits -- giDrawsKey() folds the whole draw list into one hash
-    // (useless per-instance), and the RT instanceId is a POSITION in this frame's replay, not a
-    // stable identity (insert/drop an earlier draw and every instanceId after it renames a different
-    // instance, unrelated to that slot). Mesh handle alone collides on instanced foliage/repeated
-    // props. So: group by (mesh, drawBinding) -- this RHI isn't bindless (see RtInstance's own
-    // comment), so drawBinding is shared per MATERIAL, which is what a scene submits many of -- and
-    // within a group, disambiguate by an ORDINAL (the Nth draw with that pair, in submission order).
+    // GROUP KEY: the RT instanceId is a POSITION in this frame's replay, not a stable identity (insert
+    // or drop an earlier draw and every id after it renames a different instance), and giDrawsKey()
+    // folds the whole list into one hash. Mesh handle alone collides on instanced props. So an
+    // instance's group is (mesh, drawBinding) -- this RHI isn't bindless, so drawBinding is shared per
+    // MATERIAL -- and within a group instances are told apart by WHERE they were, not by an ordinal:
+    // an ordinal shifts for the whole group the moment one instance spawns or despawns, which is
+    // exactly the failure the old ordinal tracker had.
     //
-    // POPULATION GATE: an ordinal is trusted against last build's map only when the group's total
-    // population this build matches last build's -- otherwise every ordinal in the group may have
-    // silently shifted (submission order isn't tracked for stability across a set change), so a
-    // population change drops trust for the WHOLE group for one build (it resynchronises the next
-    // build the population holds steady). A brand-new instance and a merely SKIPPED one (kMaxDraws
-    // cap, brief absence) are indistinguishable here and get the same fallback: the instance's own
-    // current transform reported back as "previous", i.e. zero velocity, never a stale or
-    // interpolated guess.
-    //
-    // WHERE THIS STOPS: rtInstancePrevWorld_ is computed and measured but never bound to a
-    // descriptor. Reaching a shader needs either widening RtInstance -- a 96-byte struct whose HLSL
-    // mirror must change in lockstep (see RtInstance's own "THREE PLACES HAVE TO AGREE" comment) --
-    // or widening table 0's declared slot count (VoxiGiShaders.hpp's kGiSrvCount/giTableKinds), a
-    // coordinated RtInstance ABI change owned by the agent doing this feature's shader half, editing
-    // concurrently -- RtInstance is unchanged at 96 bytes there today. Widening the struct from this
-    // file alone, with no guarantee a matching HLSL edit lands in the same build, would corrupt the
-    // stride every ray-driven pixel and reflection ray reads TODAY. So dynamic objects get no true
-    // motion vectors yet, from either pipeline; wiring this in is gated on that ABI change landing.
-    //
-    // OFF UNTIL SOMETHING READS IT (kTrackPrevTransforms = false): every map operation below runs
-    // once per draw per frame for an output that is, today, discarded (the only read of
-    // rtInstancePrevWorld_ is `.size()` in the one-time memory log, confirmed by a repo-wide grep).
-    // Kept as a constant rather than deleted: the population gate, ordinal scheme and two-map swap
-    // are correct and would have to be rediscovered; flipping this to true is step one of finishing
-    // the job, and the compiler removes the cost while it's false.
-    //
-    // UNMEASURED VALUE: on PTTest (20 entities, GPU-bound, CPU scene walk 0.0 ms) this buys nothing;
-    // it is a per-draw cost that scales with draw count, not with this scene.
-    static constexpr bool kTrackPrevTransforms = false;
-
     // Groups by (mesh, drawBinding). FNV-1a, matching giDrawsKey()/buildGeometryTable's own mixing
     // constants so a reader who already knows those two recognises the recipe.
-    u64 prevTransformGroupKey(rhi::MeshHandle mesh, rhi::BindingSetHandle matSet) const;
+    u64 rtInstanceGroupKey(rhi::MeshHandle mesh, rhi::BindingSetHandle matSet) const;
 
-    // This build's per-group population (mesh+drawBinding -> instance count) and the SAME map from
-    // the previous successful build -- compared in buildAccelerationStructures to decide whether a
-    // group's ordinals are trustworthy. Swapped (never merged) at the end of a build that exits
-    // normally, so a group this build's draw list doesn't name is simply absent and mismatches "last
-    // build" the moment it reappears.
-    std::unordered_map<u64, u32> prevGroupCountThisBuild_;
-    std::unordered_map<u64, u32> prevGroupCountLastBuild_;
-    // This build's running per-group ordinal counter, cleared at the START of every build -- still
-    // climbing while a build is in progress, not the final population the two maps above hold;
-    // conflating the two would misread every instance but the group's last as a population change.
-    std::unordered_map<u64, u32> prevGroupOrdinal_;
-    // (mesh, drawBinding, ordinal) -> the world transform that instance carried last build, and this
-    // build's own answer being assembled to replace it. Swapped whole at the end of a build, never
-    // merged, for the same reason the population maps are swapped: a key this build doesn't name is
-    // dropped rather than surviving for an unrelated later instance to inherit.
-    std::unordered_map<u64, std::array<f32, 16>> prevTransformByKey_;
-    std::unordered_map<u64, std::array<f32, 16>> nextTransformByKey_;
-    // This build's answer in rtInstanceData_'s own index order: element i is the previous-frame
-    // transform for rtInstanceData_[i] (both grow in lockstep), or that instance's CURRENT transform
-    // when no trustworthy previous one was found -- zero velocity, not a disguised lookup failure.
-    // Ready for a future RtInstance::prevObjectToWorld field once the ABI change above lands.
-    std::vector<std::array<f32, 16>> rtInstancePrevWorld_;
-    // The memory-cost report is said once, sized from the real instance count of whatever scene is
-    // actually loaded rather than a number that would drift if kMaxDraws or streaming changed.
-    bool prevTransformMemoryLogged_ = false;
+    // Parallel to rtInstanceData_ (one entry per row, filled in the same loop that pushes the row): the
+    // group key of the draw that produced it. Foliage parts are not in rtInstanceData_ and not here.
+    // Cleared with the other per-build vectors; sized differently from rtInstanceData_ (an empty vector
+    // after a shutdown) it tells the next build there is nothing trustworthy to carry forward.
+    std::vector<u64> rtInstanceGroupKey_;
+
+    // Rows of rtInstanceData_ whose prevObjectToWorld != objectToWorld as of the latest upload. The
+    // instance table is only re-uploaded when something changes, so a mover that stops would otherwise
+    // leave its last motion in the table for the GPU to report forever: the start of the next gate-hit
+    // frame settles these rows (prev = current) and re-uploads once if it did. See the gate branch in
+    // buildAccelerationStructures.
+    std::vector<u32> rtPrevPending_;
+
+    // A full build's carry-forward lookup over LAST frame's rows (built from rtInstanceData_ before it
+    // is cleared). Member containers, cleared and refilled each build so a steady 42-51k-draw scene
+    // reuses their capacity. Exact matches go through a hash of (group, the 16 floats' raw bits), so
+    // the common case -- the instance is exactly where it was -- is O(1) average; a used entry is
+    // unlinked from its exact chain so a chain only ever holds unmatched rows.
+    static constexpr u32 kRtCarryNone = 0xFFFFFFFFu;
+    // Engine units are centimetres. A nearest match farther than this is a different object that
+    // happens to share a mesh and material, not the same one moved: handing it that object's motion
+    // would smear the pixel across the map, and WRONG motion is worse than none (the fallback, zero).
+    // 20 m is generous for anything that moves in one frame, including a fast vehicle at low fps.
+    static constexpr f32 kRtMaxCarryCm = 2000.0f;
+    // Nearest-translation matching is a linear scan over a group's unmatched rows, so it only runs when
+    // there are at most this many: a group of thousands of identical props is O(n^2) otherwise, and a
+    // prop in such a group that did not match EXACTLY is far more likely new than moved.
+    static constexpr u32 kRtCarryMaxScan = 64;
+    struct RtCarryEntry {
+        f32 world[16];                       // last frame's drawn objectToWorld
+        u32 nextInGroup = kRtCarryNone;      // chain through the entries of one group
+        u32 nextExact = kRtCarryNone;        // chain through entries with the same (group, world) hash bucket
+        u32 group = 0;                       // index into rtCarryGroups_
+        bool used = false;
+    };
+    struct RtCarryGroup {
+        u64 key = 0;
+        u32 head = kRtCarryNone;             // first entry of the group
+        u32 unused = 0;                      // entries not yet matched by an instance of this build
+        u32 nextInBucket = kRtCarryNone;     // chain through the groups of one bucket
+    };
+    std::vector<RtCarryEntry> rtCarryEntries_;
+    std::vector<RtCarryGroup> rtCarryGroups_;
+    std::vector<u32> rtCarryGroupBuckets_;   // power-of-two, bucket -> first group
+    std::vector<u32> rtCarryExactBuckets_;   // power-of-two, bucket -> first entry
+    // Fills the lookup above from rtInstanceData_/rtInstanceGroupKey_. Leaves it empty when there is
+    // nothing to carry (first build, after a reset, or the two vectors out of step).
+    void buildRtCarryLookup();
+    // Writes `outPrev` for an instance of `groupKey` drawn at `world` this build: the exact last-frame
+    // match, else the nearest unmatched one in range, else `world` itself. Marks the entry it took.
+    void carryPrevTransform(u64 groupKey, const f32* world, f32* outPrev);
 
     // One replayed draw: its transform, its legacy colour parameters and its captured material.
     struct Draw {

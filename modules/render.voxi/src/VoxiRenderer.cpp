@@ -701,13 +701,10 @@ void VoxiRenderer::shutdown() {
     lightFlaggedDraws_ = lightFlaggedDrawsPrev_ = 0;
     rebuiltThisFrame_.clear();
     lastBlasRebuilds_ = 0xFFFFFFFFu;
-    prevGroupCountThisBuild_.clear();
-    prevGroupCountLastBuild_.clear();
-    prevGroupOrdinal_.clear();
-    prevTransformByKey_.clear();
-    nextTransformByKey_.clear();
-    rtInstancePrevWorld_.clear();
-    prevTransformMemoryLogged_ = false;
+    // The next full build has no last frame to carry transforms from (and rtInstanceData_ itself is not
+    // reset here): an empty key vector no longer matches it, so every instance starts with prev = current.
+    rtInstanceGroupKey_.clear();
+    rtPrevPending_.clear();
     frameTimeMs_.clear();
     frameTimeLastNs_ = 0;
     frameTimeSeen_ = 0;
@@ -1121,7 +1118,7 @@ f32 maxAxisScale(const Mat4& m) {
     return std::max(sx, std::max(sy, sz));
 }
 
-// FNV-1a over an arbitrary byte range, same offset basis and prime giCacheKey()/prevTransformGroupKey
+// FNV-1a over an arbitrary byte range, same offset basis and prime giCacheKey()/rtInstanceGroupKey
 // already use in this file -- one mixing recipe, not a second one learned separately.
 void fnvMix(u64& h, const void* p, usize n) {
     const u8* b = static_cast<const u8*>(p);
@@ -1864,10 +1861,44 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // non-empty -- the dynamic BLASes/tlas_/their rtVerts_ slices, refreshed in place by
     // refitDynamicAccelStructures() rather than left alone.
     if (settings_.rtSkipUnchangedTlas && rtAccelSnapshotUnchanged()) {
+        // SETTLING (rtPrevPending_, VoxiRenderer.hpp): rows whose previous transform still differs from
+        // their current one describe LAST frame's motion. If the object moves again this frame the patch
+        // below writes a fresh prev; if it does not, prev must become equal to current NOW, or the GPU
+        // keeps reporting that old motion for as long as the table goes un-uploaded. Done before the
+        // patch so the patch only ever has to think about this frame's movers.
+        //
+        // Harmless if the patch is then Refused: the full build that follows carries forward from each
+        // row's objectToWorld (what was drawn), never from its prevObjectToWorld, so a row settled here
+        // loses nothing -- the full build recomputes every prev from scratch, and rebuilds
+        // rtPrevPending_ with it. The settled CPU rows are simply never uploaded.
+        bool settled = false;
+        for (const u32 row : rtPrevPending_) {
+            if (row >= rtInstanceData_.size()) continue;
+            RtInstance& r = rtInstanceData_[row];
+            std::memcpy(r.prevObjectToWorld, r.objectToWorld, sizeof(r.prevObjectToWorld));
+            settled = true;
+        }
         // THE MOVER PATCH LANE (VoxiRenderer.hpp). Nothing recorded means nothing to patch: lane off,
         // or the last full build had no movable draw with an instance.
         const MoverPatch patch = rtMovers_.empty() ? MoverPatch::Unchanged : patchRtMovers();
         if (patch != MoverPatch::Refused) {
+            // A patch re-uploaded the table itself (settled rows included -- they were written first).
+            // Without one, a settle alone must still reach the GPU, but it is a prev-only change: the
+            // transforms in tlas_ did not move, so no refit. If the upload fails the indices stay
+            // pending and the next frame settles and retries.
+            bool settleUploadFailed = false;
+            if (settled && patch != MoverPatch::Patched) settleUploadFailed = !uploadRtInstanceTable();
+            if (!settleUploadFailed) {
+                // Only a mover can differ on a gate-hit frame (every other row was settled above, and
+                // a non-movable draw's move would have closed the gate), so scan the movers, not the table.
+                rtPrevPending_.clear();
+                for (const RtMover& m : rtMovers_) {
+                    if (m.inst == kRtNoInstance || m.inst >= rtInstanceData_.size()) continue;
+                    const RtInstance& r = rtInstanceData_[m.inst];
+                    if (std::memcmp(r.prevObjectToWorld, r.objectToWorld, sizeof(r.objectToWorld)) != 0)
+                        rtPrevPending_.push_back(m.inst);
+                }
+            }
             if (patch == MoverPatch::Patched) {
                 // tlas_ must follow the transforms just written into tlasInstScratch_ -- refit in place,
                 // on the same one-in-kTlasRefitsPerRebuild schedule as every other refit. A dynamic
@@ -1917,11 +1948,17 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     tlasInstScratch_.clear();
     matConstantsScratch_.clear();
     tlasInstScratch_.reserve(drawsPrev_.size());
+    // CARRY-FORWARD (RtInstance::prevObjectToWorld): rtInstanceData_ still holds LAST frame's drawn
+    // transforms -- mover patches included -- until the clear just below, so the lookup the loop
+    // matches against is built from it first. Nothing to carry after a reset: every instance this
+    // build creates then gets prev = current.
+    buildRtCarryLookup();
     rtInstanceData_.clear();
     rtInstanceMesh_.clear();
     rtInstanceMatKey_.clear();
+    rtInstanceGroupKey_.clear();
+    rtPrevPending_.clear();
     rebuiltThisFrame_.clear();
-    rtInstancePrevWorld_.clear();
     // Repopulated below as each dynamic mesh's BLAS survives the loop -- see rtDynamicMeshes_'s
     // declaration for why this, not rebuiltThisFrame_, is what refitDynamicAccelStructures() reads.
     rtDynamicMeshes_.clear();
@@ -1939,32 +1976,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // lastAccelBuildCpuMs().
     const auto accelBuildCpuStart = std::chrono::steady_clock::now();
 
-    // ---- previous-transform tracking, pass 1: THIS build's population per (mesh, drawBinding) ----
-    // See prevTransformGroupKey() for the whole scheme. Counted over the full drawsPrev_ list, not
-    // just draws with a usable BLAS, so a transient BLAS cache miss (a brand-new mesh's first frame)
-    // never looks like a population change -- "has geometry to trace yet" and "did the submitted set
-    // change" are independent.
-    if constexpr (kTrackPrevTransforms) {
-        prevGroupCountThisBuild_.clear();
-        prevGroupOrdinal_.clear();
-        nextTransformByKey_.clear();
-        for (const Draw& d : drawsPrev_)
-            ++prevGroupCountThisBuild_[prevTransformGroupKey(d.mesh, d.matSet)];
-    }
-
     for (const Draw& d : drawsPrev_) {
-        // ---- previous-transform tracking, pass 2: this draw's ordinal within its group ----
-        // Incremented for every draw, survivor or not, so ordinal numbering matches what pass 1
-        // counted over. Only the STORE below (after the BLAS check) is conditional on survival, so
-        // rtInstancePrevWorld_ lines up index-for-index with rtInstanceData_.
-        u64 prevGroupKey = 0, prevInstKey = 0;
-        if constexpr (kTrackPrevTransforms) {
-            prevGroupKey = prevTransformGroupKey(d.mesh, d.matSet);
-            const u32 prevOrdinal = prevGroupOrdinal_[prevGroupKey]++;
-            prevInstKey = prevGroupKey ^ static_cast<u64>(prevOrdinal);
-        }
-        prevInstKey *= 1099511628211ull;
-
         // ---- mover patch lane: this movable draw's record, completed below if it gets an instance ----
         // Taken before the BLAS check so a mover that never becomes an instance still counts in the
         // sorted list -- patchRtMovers() compares it, element for element, against every movable draw
@@ -2075,6 +2087,11 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         // this loop and rtInstanceMatKey_ have run and
         // the full material set is known, since the final index depends on the whole set's sorted order.
         ri.materialIndex = 0;
+        // The transform this instance was drawn with last frame, carried forward from the lookup built
+        // before the clears above -- or its own current world when there is no trustworthy match (a new
+        // instance, or nothing to carry), i.e. zero motion. Never left uninitialised.
+        const u64 groupKey = rtInstanceGroupKey(d.mesh, d.matSet);
+        carryPrevTransform(groupKey, d.world, ri.prevObjectToWorld);
 
         // ---- resolving THIS draw's material key and, the first time it is seen, its bytes ----
         // d.mat: the real per-material bytes, captured at submit time -- see rtMaterialKey().
@@ -2103,38 +2120,13 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         // The index rtInstanceData_.push_back below is about to give this draw -- the same one
         // tlasInstScratch_.push_back(i) gave it above, and the one a mover patch writes the world to.
         if (moverSlot != kRtNoInstance) rtMovers_[moverSlot].inst = static_cast<u32>(rtInstanceData_.size());
+        // A row whose carried prev differs from its current is one the GPU would keep reporting as
+        // moving until something re-uploads the table -- rtPrevPending_ settles it on the next gate hit.
+        if (std::memcmp(ri.prevObjectToWorld, ri.objectToWorld, sizeof(ri.objectToWorld)) != 0)
+            rtPrevPending_.push_back(static_cast<u32>(rtInstanceData_.size()));
         rtInstanceData_.push_back(ri);
         rtInstanceMesh_.push_back(d.mesh);
-
-        // ---- previous-transform tracking, pass 2 continued: look up, or admit there is none ----
-        // Trusted only when this group's population matches last build's -- a change drops the
-        // WHOLE group rather than risk an ordinal pointing at a different instance's old transform.
-        // "Brand new key" and "population changed" both fall to the else branch: this instance's
-        // current transform reported back as "previous" (the honest zero-velocity answer).
-        if constexpr (kTrackPrevTransforms) {
-            const auto lastCountIt = prevGroupCountLastBuild_.find(prevGroupKey);
-            const bool trustGroup = lastCountIt != prevGroupCountLastBuild_.end() &&
-                                    lastCountIt->second == prevGroupCountThisBuild_[prevGroupKey];
-            std::array<f32, 16> prevWorld;
-            const auto foundIt = trustGroup ? prevTransformByKey_.find(prevInstKey)
-                                             : prevTransformByKey_.end();
-            if (foundIt != prevTransformByKey_.end()) {
-                prevWorld = foundIt->second;
-            } else {
-                std::memcpy(prevWorld.data(), d.world, sizeof(prevWorld));
-            }
-            rtInstancePrevWorld_.push_back(prevWorld);
-        }
-
-        // This build's own transform becomes "last build's answer" next time this key is seen --
-        // staged into nextTransformByKey_, swapped into prevTransformByKey_ whole once the loop
-        // finishes (never written in place), so a dropped instance can't leave a stale transform
-        // under a key some later instance could reuse.
-        if constexpr (kTrackPrevTransforms) {
-            std::array<f32, 16> curWorld;
-            std::memcpy(curWorld.data(), d.world, sizeof(curWorld));
-            nextTransformByKey_[prevInstKey] = curWorld;
-        }
+        rtInstanceGroupKey_.push_back(groupKey);
     }
 
     // Finishes the mover patch lane's record. A list whose movers all lack an instance has nothing for
@@ -2152,31 +2144,6 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // reaches this line, so lastAccelBuildCpuMs_ just keeps its previous value on that path.
     lastAccelBuildCpuMs_ = std::chrono::duration<f64, std::milli>(
         std::chrono::steady_clock::now() - accelBuildCpuStart).count();
-
-    // Commits this build's previous-transform bookkeeping unconditionally, so a build where nothing
-    // survived clears both maps to empty rather than leaving a stale generation.
-    if constexpr (kTrackPrevTransforms) {
-        prevGroupCountLastBuild_ = std::move(prevGroupCountThisBuild_);
-        prevTransformByKey_ = std::move(nextTransformByKey_);
-    }
-
-    // Memory-cost report, said once, sized from the real instance count this build reached rather
-    // than a number that drifts with kMaxDraws or scene content.
-    if (!prevTransformMemoryLogged_ && !rtInstancePrevWorld_.empty()) {
-        prevTransformMemoryLogged_ = true;
-        const usize n = rtInstancePrevWorld_.size();
-        const usize payloadBytes = n * (sizeof(u64) + sizeof(std::array<f32, 16>));   // 8 + 64 = 72 B
-        AVER_INFO("[Voxi] previous-instance-transform tracker: {} instances, {} bytes/instance payload "
-                  "(8-byte key + 16-float transform) = {} KB of flat payload this build. The four "
-                  "unordered_maps that produce it (two population-count maps, two transform maps) add "
-                  "their own per-node overhead on top of that, typically on the order of the payload "
-                  "itself for a map this small -- so figure roughly {}-{} KB in real bytes, briefly "
-                  "doubled while both this build's and the superseded generation are both live around "
-                  "the swap above, then back to one generation. Against the ~54 MB the three new "
-                  "render targets themselves cost at scene resolution, and the ~144 MB the RT "
-                  "histories already spend, this is noise.",
-                  n, payloadBytes / n, payloadBytes / 1024, payloadBytes / 1024, (payloadBytes * 2) / 1024);
-    }
 
     // gpuStat's destructor closes the marker here (see ScopedGpuStat for the two-hand-popped-exits
     // bug this replaces). rtAccelKey_/rtAccelSnapValid_ are deliberately left untouched on this
@@ -2410,15 +2377,10 @@ void VoxiRenderer::hashDrawMaterialInto(u64& h, const Draw& d, DrawMaterialMemo&
 // through it) and the refit path (the patch hands the structure to refitOrRebuildTlas, whose in-place
 // update is what makes a per-frame transform change cheap); with either off, every world stays in the
 // key -- the behaviour before the lane existed, which voxi.rtRefitAccel / voxi.rtSkipUnchangedTlas
-// false therefore still reproduce for an A/B. Compiled out with the previous-transform tracker
-// (kTrackPrevTransforms): its ordinals are keyed off the whole draw list each build, which a patch
-// does not walk, so the two cannot be mixed.
+// false therefore still reproduce for an A/B. (With the lane off every moving draw closes the gate, so
+// every frame is a full build and RtInstance::prevObjectToWorld comes from its carry-forward alone.)
 bool VoxiRenderer::rtMoverPatchActive() const {
-    if constexpr (kTrackPrevTransforms) {
-        return false;
-    } else {
-        return settings_.rtRefitAccel && settings_.rtSkipUnchangedTlas;
-    }
+    return settings_.rtRefitAccel && settings_.rtSkipUnchangedTlas;
 }
 
 // One draw's term of rtAccelDrawsKey(): mesh, the world transform, the two flags i.mask/i.flags are
@@ -2538,8 +2500,9 @@ void VoxiRenderer::takeRtAccelSnapshot() {
 // Pairing by identity rather than draw index is what keeps this correct when the list is reshuffled
 // without changing the key (occlusion culling reorders drawsPrev_ every frame; the key is a
 // commutative sum for that reason): draws of equal identity are indistinguishable but for their world,
-// so any one-to-one assignment among them yields the same structure, and ties break by draw order so a
-// stable list keeps every mover in the instance it had (a refit sees small steps, not swaps).
+// so any one-to-one assignment among them yields the same structure, and ties break by NEAREST
+// translation (see the re-pairing below) so a mover stays in the instance it had whatever order the
+// list arrives in (a refit sees small steps, not swaps, and prevObjectToWorld stays that mover's own).
 //
 // Only a mover whose world really differs from the one already in tlasInstScratch_ is written, and a
 // frame where none does is MoverPatch::Unchanged -- a paused Play session costs what the editor does.
@@ -2568,6 +2531,60 @@ VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers() {
             return refuse("a recorded instance index is out of range");
     }
 
+    // TIE-BREAK BY NEAREST: within a run of EQUAL id the sort above ordered both lists by draw index, so
+    // k-th current draw to k-th instance is draw order -- which occlusion culling reshuffles every
+    // frame, and two identical cars would then swap transforms, each reporting the other's (huge)
+    // motion. Re-pair the run greedily by nearest translation between each current draw's world and the
+    // instance's current world (tlasInstScratch_, i.e. where it was drawn last frame). Equal identity
+    // means the same mesh, material and flags, so this never changes the acceleration structure's
+    // CONTENT -- only which of the interchangeable instances carries which world, so a car keeps being
+    // itself and its refit step stays small. Runs are almost always size 1: that is the fast path, one
+    // compare. A run past kMaxPairRun keeps draw order (the pairing is cubic, and that many identical
+    // movers are a crowd, not two cars).
+    constexpr usize kMaxPairRun = 64;
+    for (usize a = 0; a < rtMovers_.size();) {
+        usize b = a + 1;
+        while (b < rtMovers_.size() && rtMovers_[b].id == rtMovers_[a].id) ++b;
+        const usize m = b - a;
+        if (m > 1 && m <= kMaxPairRun) {
+            u32 draws[kMaxPairRun];     // the run's current draw indices, as they came out of the sort
+            bool drawTaken[kMaxPairRun] = {};
+            u32 chosen[kMaxPairRun];    // chosen[j] = which of draws[] instance a+j takes
+            bool instDone[kMaxPairRun] = {};
+            for (usize j = 0; j < m; ++j) { draws[j] = rtMoversNow_[a + j].draw; chosen[j] = kRtNoInstance; }
+            // An instance with no BLAS has no world to compare; it takes whatever is left, below.
+            for (usize j = 0; j < m; ++j) instDone[j] = rtMovers_[a + j].inst == kRtNoInstance;
+            for (;;) {
+                f32 bestD2 = 0.0f;
+                usize bi = m, bd = m;
+                for (usize j = 0; j < m; ++j) {
+                    if (instDone[j]) continue;
+                    const f32* iw = tlasInstScratch_[rtMovers_[a + j].inst].world;
+                    for (usize q = 0; q < m; ++q) {
+                        if (drawTaken[q]) continue;
+                        const f32* dw = drawsPrev_[draws[q]].world;
+                        const f32 dx = dw[12] - iw[12], dy = dw[13] - iw[13], dz = dw[14] - iw[14];
+                        const f32 d2 = dx * dx + dy * dy + dz * dz;
+                        if (bi == m || d2 < bestD2) { bestD2 = d2; bi = j; bd = q; }
+                    }
+                }
+                if (bi == m) break;
+                chosen[bi] = static_cast<u32>(bd);
+                instDone[bi] = true;
+                drawTaken[bd] = true;
+            }
+            usize freeDraw = 0;
+            for (usize j = 0; j < m; ++j) {
+                if (chosen[j] != kRtNoInstance) continue;
+                while (drawTaken[freeDraw]) ++freeDraw;
+                drawTaken[freeDraw] = true;
+                chosen[j] = static_cast<u32>(freeDraw);
+            }
+            for (usize j = 0; j < m; ++j) rtMoversNow_[a + j].draw = draws[chosen[j]];
+        }
+        a = b;
+    }
+
     bool changed = false;
     for (usize k = 0; k < rtMovers_.size(); ++k) {
         const u32 inst = rtMovers_[k].inst;
@@ -2576,8 +2593,13 @@ VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers() {
         rhi::TlasInstance& ti = tlasInstScratch_[inst];
         if (std::memcmp(ti.world, world, sizeof(ti.world)) == 0) continue;
         changed = true;
+        RtInstance& ri = rtInstanceData_[inst];
+        // FIRST the world this instance was drawn with until now becomes its previous transform --
+        // the motion vector the shader reports is the step from that to the new one -- THEN the new
+        // world goes into both places, as before. Overwriting first would lose it.
+        std::memcpy(ri.prevObjectToWorld, ri.objectToWorld, sizeof(ri.prevObjectToWorld));
         std::memcpy(ti.world, world, sizeof(ti.world));
-        std::memcpy(rtInstanceData_[inst].objectToWorld, world, sizeof(rtInstanceData_[inst].objectToWorld));
+        std::memcpy(ri.objectToWorld, world, sizeof(ri.objectToWorld));
     }
     if (!changed) return MoverPatch::Unchanged;
     if (!uploadRtInstanceTable()) return refuse("the instance table could not be uploaded");
@@ -2672,14 +2694,133 @@ void VoxiRenderer::refitDynamicAccelStructures(rhi::IRenderContext& ctx) {
     refreshDynamicVertexSlices(ctx);
 }
 
-// Groups a previous-transform key by (mesh, drawBinding) -- see VoxiRenderer.hpp's declaration
-// comment for why this pair, not mesh alone, and for the disambiguating ordinal. Same FNV-1a
-// offset/prime as giDrawsKey()/buildGeometryTable's hash.
-u64 VoxiRenderer::prevTransformGroupKey(rhi::MeshHandle mesh, rhi::BindingSetHandle matSet) const {
+// Groups an instance by (mesh, drawBinding) for the previous-transform carry-forward -- see
+// VoxiRenderer.hpp's declaration comment for why this pair, not mesh alone. Same FNV-1a offset/prime as
+// giDrawsKey()/buildGeometryTable's hash.
+u64 VoxiRenderer::rtInstanceGroupKey(rhi::MeshHandle mesh, rhi::BindingSetHandle matSet) const {
     u64 key = 1469598103934665603ull;
     key ^= static_cast<u64>(mesh);   key *= 1099511628211ull;
     key ^= static_cast<u64>(matSet); key *= 1099511628211ull;
     return key;
+}
+
+// Bucket for a 64-bit key in a power-of-two table: the murmur finaliser first, because the FNV group
+// keys and the word-lane exact hashes are not guaranteed uniform in their low bits.
+static inline usize rtCarryBucket(u64 k, usize mask) {
+    k ^= k >> 33; k *= 0xff51afd7ed558ccdull;
+    k ^= k >> 33; k *= 0xc4ceb9fe1a85ec53ull;
+    k ^= k >> 33;
+    return static_cast<usize>(k) & mask;
+}
+
+// Hash of an instance's identity for the exact-match index: its group and the 16 floats' raw bits (a
+// -0.0 or a NaN payload is a different transform here, exactly as the gate's key treats it).
+static inline u64 rtCarryExactHash(u64 groupKey, const f32* world) {
+    u64 h = groupKey;
+    hashBytesInto(h, world, sizeof(f32) * 16);
+    return h;
+}
+
+// Builds the carry-forward lookup from LAST frame's rows (rtInstanceData_ / rtInstanceGroupKey_), before
+// buildAccelerationStructures clears them. Reuses the member containers: clear() / assign() keep their
+// capacity, so a steady scene's ~42-51k rows allocate nothing after the first build. Left empty when
+// there is nothing trustworthy to carry -- the first build, a reset (rtInstanceGroupKey_ is cleared
+// there, so the sizes disagree), or the two vectors out of step.
+void VoxiRenderer::buildRtCarryLookup() {
+    rtCarryEntries_.clear();
+    rtCarryGroups_.clear();
+    const usize n = rtInstanceData_.size();
+    if (n == 0 || rtInstanceGroupKey_.size() != n) {
+        rtCarryGroupBuckets_.clear();
+        rtCarryExactBuckets_.clear();
+        return;
+    }
+    usize cap = 16;
+    while (cap < n * 2) cap <<= 1;   // load factor <= 0.5; groups <= entries, so both tables fit
+    const usize mask = cap - 1;
+    rtCarryGroupBuckets_.assign(cap, kRtCarryNone);
+    rtCarryExactBuckets_.assign(cap, kRtCarryNone);
+    rtCarryEntries_.reserve(n);
+    for (usize i = 0; i < n; ++i) {
+        const u64 key = rtInstanceGroupKey_[i];
+        // Find (or open) this row's group.
+        const usize gb = rtCarryBucket(key, mask);
+        u32 g = rtCarryGroupBuckets_[gb];
+        while (g != kRtCarryNone && rtCarryGroups_[g].key != key) g = rtCarryGroups_[g].nextInBucket;
+        if (g == kRtCarryNone) {
+            g = static_cast<u32>(rtCarryGroups_.size());
+            RtCarryGroup ng;
+            ng.key = key;
+            ng.nextInBucket = rtCarryGroupBuckets_[gb];
+            rtCarryGroups_.push_back(ng);
+            rtCarryGroupBuckets_[gb] = g;
+        }
+        RtCarryEntry e;
+        std::memcpy(e.world, rtInstanceData_[i].objectToWorld, sizeof(e.world));
+        e.group = g;
+        e.nextInGroup = rtCarryGroups_[g].head;
+        const usize eb = rtCarryBucket(rtCarryExactHash(key, e.world), mask);
+        e.nextExact = rtCarryExactBuckets_[eb];
+        const u32 idx = static_cast<u32>(rtCarryEntries_.size());
+        rtCarryEntries_.push_back(e);
+        rtCarryGroups_[g].head = idx;
+        ++rtCarryGroups_[g].unused;
+        rtCarryExactBuckets_[eb] = idx;
+    }
+}
+
+// One instance's previous transform, from the lookup buildRtCarryLookup() made over last frame's rows:
+//   a) EXACT: an unmatched row of the same group with a bit-identical world -- the instance did not move,
+//      prev == current (zero motion). O(1) average through the exact index; the row is unlinked from
+//      its chain so later duplicates (identical props at identical spots) pair off one for one.
+//   b) NEAREST: otherwise the closest unmatched row of the group by translation (the last row of a
+//      row-vector matrix, elements 12..14 -- see xformPoint), but only when the group has at most
+//      kRtCarryMaxScan unmatched rows (the scan is linear) and the closest is within kRtMaxCarryCm.
+//   c) otherwise the instance's own world: new, or no trustworthy match. Zero motion, never a guess.
+// A row is matched at most once, so two identical cars cannot both claim the same old transform.
+void VoxiRenderer::carryPrevTransform(u64 groupKey, const f32* world, f32* outPrev) {
+    std::memcpy(outPrev, world, sizeof(f32) * 16);   // (c), overwritten by a match below
+    if (rtCarryEntries_.empty()) return;
+    const usize mask = rtCarryGroupBuckets_.size() - 1;
+    u32 g = rtCarryGroupBuckets_[rtCarryBucket(groupKey, mask)];
+    while (g != kRtCarryNone && rtCarryGroups_[g].key != groupKey) g = rtCarryGroups_[g].nextInBucket;
+    if (g == kRtCarryNone || rtCarryGroups_[g].unused == 0) return;
+    RtCarryGroup& grp = rtCarryGroups_[g];
+
+    // (a) exact
+    const usize eb = rtCarryBucket(rtCarryExactHash(groupKey, world), mask);
+    u32* link = &rtCarryExactBuckets_[eb];
+    while (*link != kRtCarryNone) {
+        RtCarryEntry& e = rtCarryEntries_[*link];
+        if (e.group == g && std::memcmp(e.world, world, sizeof(e.world)) == 0) {
+            e.used = true;
+            --grp.unused;
+            *link = e.nextExact;   // unlink: a chain only ever holds unmatched rows
+            return;                // outPrev already == world
+        }
+        link = &e.nextExact;
+    }
+
+    // (b) nearest translation among the group's unmatched rows
+    if (grp.unused > kRtCarryMaxScan) return;
+    u32 best = kRtCarryNone;
+    f32 bestD2 = kRtMaxCarryCm * kRtMaxCarryCm;
+    for (u32 i = grp.head; i != kRtCarryNone; i = rtCarryEntries_[i].nextInGroup) {
+        const RtCarryEntry& e = rtCarryEntries_[i];
+        if (e.used) continue;
+        const f32 dx = e.world[12] - world[12], dy = e.world[13] - world[13], dz = e.world[14] - world[14];
+        const f32 d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 <= bestD2) { bestD2 = d2; best = i; }
+    }
+    if (best == kRtCarryNone) return;
+    RtCarryEntry& e = rtCarryEntries_[best];
+    e.used = true;
+    --grp.unused;
+    // Unlink from its exact chain too, so a later exact probe cannot hand the same row out again.
+    u32* el = &rtCarryExactBuckets_[rtCarryBucket(rtCarryExactHash(groupKey, e.world), mask)];
+    while (*el != kRtCarryNone && *el != best) el = &rtCarryEntries_[*el].nextExact;
+    if (*el == best) *el = e.nextExact;
+    std::memcpy(outPrev, e.world, sizeof(f32) * 16);
 }
 
 // Builds one orthographic light frustum per cascade, fitted to a slice of the camera's view, and
@@ -4063,6 +4204,9 @@ void VoxiRenderer::setFoliage(std::vector<FoliagePrototype> prototypes, std::vec
     for (usize i = 0; i < foliageParts_.size(); ++i) {
         RtInstance& r = foliagePartData_[i];
         for (u32 k = 0; k < 16; ++k) r.objectToWorld[k] = (k % 5 == 0) ? 1.0f : 0.0f;
+        // Foliage is static: its previous transform is its current one (and, like objectToWorld, the
+        // shader takes the instance's own transforms, not this record's).
+        std::memcpy(r.prevObjectToWorld, r.objectToWorld, sizeof(r.prevObjectToWorld));
         r.albedo[0] = foliageParts_[i].color[0];
         r.albedo[1] = foliageParts_[i].color[1];
         r.albedo[2] = foliageParts_[i].color[2];
