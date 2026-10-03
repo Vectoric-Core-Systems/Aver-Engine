@@ -54,16 +54,7 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         if (equalsCI(key, "OCPROJECT")) {
             sawHeader = true;
             if (t.size() > 1) out.version = parseI32(t[1], 1);
-            // REFUSED, RATHER THAN READ AS VERSION 1. This number was parsed, round-tripped and
-            // never once compared to anything, so a future OCPROJECT 2 -- whatever it came to mean --
-            // would be read by THIS build as if every key still meant what it means today, and then
-            // written back out having quietly dropped whatever it did not understand. `.ocmat` and
-            // the AVR1 container both refuse an unsupported version; these text formats were the
-            // odd ones out, and a version field nobody checks is a field that cannot be used.
-            //
-            // A CEILING, NOT AN EQUALITY: a project written by an OLDER engine is the migration
-            // system's business (modules/upgrade), and it opens those on purpose. Only the future is
-            // unreadable.
+            // Reject future versions; older versions are handled by migration system.
             if (out.version > kOcProjectVersion) {
                 if (err) *err = "this project is OCPROJECT version " + std::to_string(out.version) +
                                 ", and this engine understands up to " +
@@ -146,9 +137,7 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         } else if (equalsCI(key, "RENDER.FRAMEINTERP")) {
             if (t.size() > 1) out.frameInterp = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.BACKEND")) {
-            // Stored verbatim and lowercased; validated where it is USED, not here. A manifest naming
-            // a backend this build has no support for is not a broken manifest -- the same file is
-            // meant to open on a machine that does.
+            // Stored verbatim and lowercased; validated where it is USED, not here.
             if (t.size() > 1) { out.backend = t[1]; for (char& ch : out.backend) ch = static_cast<char>(::tolower(ch)); }
         } else if (equalsCI(key, "RENDER.MSAA")) {
             if (t.size() > 1) out.msaa = parseI32(t[1], -1);
@@ -157,19 +146,14 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         } else if (equalsCI(key, "RENDER.GIUPDATEINTERVAL")) {
             if (t.size() > 1) out.giUpdateInterval = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.GIVOLUME")) {
-            // ALL FOUR OR NONE, for PHYSICS.GRAVITY's reason immediately below: a half-stated volume
-            // would keep defaults the author believed they had replaced.
+            // All four or none: partial vector silently keeps defaults the author thought they replaced.
             if (t.size() > 4) {
                 for (int i = 0; i < 3; ++i) out.giCenter[i] = static_cast<f32>(parseF64(t[1 + i]));
                 out.giExtent = static_cast<f32>(parseF64(t[4]));
                 out.hasGiVolume = true;
             }
         } else if (equalsCI(key, "RENDER.EXPOSURE")) {
-            // -1.0 ON A MALFORMED VALUE, not parseF64's own 0.0 default, and the difference is not
-            // cosmetic for this pair: zero is a legal authored exposure and a legal authored bloom,
-            // so falling back to 0 would turn "RENDER.BLOOM banana" into a black-and-bloomless frame
-            // the author never asked for. Unreadable and absent mean the same thing here -- leave
-            // rhi::PostSettings' compiled default alone -- which is what -1 says.
+            // Use -1.0 on malformed values, not 0.0, because zero is a legal authored value.
             if (t.size() > 1) out.postExposure = static_cast<f32>(parseF64(t[1], -1.0));
         } else if (equalsCI(key, "RENDER.BLOOM")) {
             if (t.size() > 1) out.postBloom = static_cast<f32>(parseF64(t[1], -1.0));
@@ -180,7 +164,7 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         } else if (equalsCI(key, "WINDOW.TITLE")) {
             out.windowTitle = std::string(restOfLine(line, key));
         } else if (equalsCI(key, "WINDOW.SIZE")) {
-            // BOTH OR NEITHER: half a resolution is not a resolution.
+            // Both or neither: half a resolution is not a resolution.
             if (t.size() > 2) {
                 out.windowWidth  = parseI32(t[1], -1);
                 out.windowHeight = parseI32(t[2], -1);
@@ -220,8 +204,7 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         } else if (equalsCI(key, "PHYSICS.TEMPALLOCMB")) {
             if (t.size() > 1) out.physTempAllocatorMb = parseI32(t[1], -1);
         } else if (equalsCI(key, "PHYSICS.GRAVITY")) {
-            // All three or none: a partial vector is worse than no vector, because two of the axes
-            // would silently keep a default the author thought they had replaced.
+            // All three or none: partial vector silently keeps defaults the author thought they replaced.
             if (t.size() > 3) {
                 out.gravity[0] = static_cast<f32>(parseF64(t[1]));
                 out.gravity[1] = static_cast<f32>(parseF64(t[2]));
@@ -233,8 +216,7 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         } else if (equalsCI(key, "AUDIO.MASTER")) {
             if (t.size() > 1) { out.masterVolume = static_cast<f32>(parseF64(t[1])); out.hasAudioMix = true; }
         } else if (equalsCI(key, "AUDIO.BUS")) {
-            // Four on one line, in audio_abi.h's own bus order. One key rather than four keeps the
-            // mix readable as a mix, and makes a partial write impossible.
+            // Four values on one line, in audio_abi.h's bus order, to keep mix readable.
             if (t.size() > 4) {
                 for (int i = 0; i < 4; ++i) out.busVolume[i] = static_cast<f32>(parseF64(t[static_cast<usize>(i) + 1]));
                 out.hasAudioMix = true;
@@ -317,11 +299,6 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.REFRACTIONMODE", "RENDER.REFRACTIONSTRENGTH",
         "RENDER.REFRACTIONEDGEFADE", "RENDER.LODSELECT", "RENDER.LODTHRESHOLD",
         "RENDER.OCCLUSIONCULL", "RENDER.DEPTHPREPASS",
-        // IN EMIT ORDER, and these two were missing. A key appended to `owned` above but absent
-        // here is copied through as the author's "unowned text" AND re-emitted, so the manifest
-        // grows a duplicate on every save -- and because the owned block splices in at the first
-        // owned key while the author's line stays below it, last-write-wins parsing makes the STALE
-        // line win. Changing the renderer appeared to work and reverted on reload.
         "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS", "RENDER.AVERSR", "RENDER.FRAMEINTERP",
         "RENDER.MSAA", "RENDER.MESHSHADERS", "RENDER.GIUPDATEINTERVAL", "RENDER.GIVOLUME",
         "RENDER.EXPOSURE", "RENDER.BLOOM", "RENDER.AUTOEXPOSURE", "RENDER.TONEMAP",
@@ -350,20 +327,14 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
         if (!d.engineMinVersion.empty()) { owned += ' '; owned += d.engineMinVersion; }
         owned += '\n';
     }
-    // What last opened it, as against ENGINE's "what it needs at least". Written whenever it is
-    // known, so a project stamped once carries its provenance forward through every later save.
+    // Records what last opened it, as against ENGINE's minimum requirement.
     if (!d.createdWith.empty())      { owned += "CREATEDWITH "; owned += d.createdWith; owned += '\n'; }
     if (!d.contentRoot.empty())      { owned += "CONTENT ";  owned += d.contentRoot; owned += '\n'; }
     if (!d.startMap.empty())         { owned += "STARTMAP "; owned += d.startMap;    owned += '\n'; }
     if (!d.author.empty())           { owned += "AUTHOR ";   owned += d.author;      owned += '\n'; }
-    // EMITTED BECAUSE IT IS AN OWNED KEY. isOwnedKey lists DRONE.GRAPH, so the writer strips whatever
-    // line the file had; without this it would strip and never replace, and saving a project would
-    // quietly delete its drone. Empty writes nothing -- a project with no drone graph has no line.
+    // Owned key: stripped if present, replaced with this if not empty.
     if (!d.droneGraph.empty())       { owned += "DRONE.GRAPH "; owned += d.droneGraph; owned += '\n'; }
-    // EMITTED BECAUSE IT IS AN OWNED KEY, for DRONE.GRAPH's exact reason immediately above: isOwnedKey
-    // lists INPUT.SCHEME, so leaving this out would strip whatever line the file had without ever
-    // replacing it -- silently deleting a project's input scheme reference on every save. Empty
-    // writes nothing -- a project with no default scheme has no line.
+    // Owned key: stripped if present, replaced with this if not empty.
     if (!d.inputScheme.empty())      { owned += "INPUT.SCHEME "; owned += d.inputScheme; owned += '\n'; }
     appendKey(owned, "RENDER.GI",          d.giQuality);
     appendKey(owned, "RENDER.RAYTRACING",  d.rayTracing);
@@ -398,9 +369,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.MSAA", d.msaa);
     appendKey(owned, "RENDER.MESHSHADERS", d.meshShaders);
     appendKey(owned, "RENDER.GIUPDATEINTERVAL", d.giUpdateInterval);
-    // Same presence-flag shape as PHYSICS.GRAVITY below, and written with snprintf for the same
-    // reason: %g gives the shortest round-tripping spelling, so a value the author typed comes back
-    // looking like what they typed.
+    // Has presence flag because downward gravity needs to be represented distinctly from unset.
     if (d.hasGiVolume) {
         char b[200];
         std::snprintf(b, sizeof b, "RENDER.GIVOLUME %g %g %g %g\n",
@@ -409,17 +378,13 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
         owned += b;
     }
 
-    // THE POST CHAIN. appendKey's f32 overload is exactly the right rule for these two: it skips a
-    // NEGATIVE value, which is the sentinel, and emits a zero, which is an author saying "no bloom".
-    // Had the sentinel been 0 instead, this line could not have told the two apart and a project
-    // would have been unable to state the one bloom value anybody deliberately sets.
+    // Post chain: f32 overload skips negative (unset) and emits zero (explicit "no bloom").
     appendKey(owned, "RENDER.EXPOSURE", d.postExposure);
     appendKey(owned, "RENDER.BLOOM", d.postBloom);
     appendKey(owned, "RENDER.AUTOEXPOSURE", d.postAutoExposure);
     appendKey(owned, "RENDER.TONEMAP", d.postTonemap);
 
-    // WINDOW.* -- how a shipped game presents itself. TITLE is prose, so it is written directly
-    // rather than through appendKey, which is numeric.
+    // WINDOW.* -- how a shipped game presents itself.
     if (!d.windowTitle.empty()) owned += "WINDOW.TITLE " + d.windowTitle + "\n";
     if (d.windowWidth > 0 && d.windowHeight > 0) {
         char b[96];
@@ -447,8 +412,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "PHYSICS.MAXCONTACTS", d.physMaxContacts);
     appendKey(owned, "PHYSICS.TEMPALLOCMB", d.physTempAllocatorMb);
 
-    // WRITTEN ON THEIR PRESENCE FLAG, not on a sentinel -- appendKey's "negative means unstated"
-    // rule cannot express a downward gravity or a muted bus. See OcProjectDesc for both reasons.
+    // Has presence flag because negative values are legal.
     if (d.hasGravity) {
         char b[160];
         std::snprintf(b, sizeof b, "PHYSICS.GRAVITY %g %g %g\n",
@@ -503,19 +467,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     }
     if (!placed) out += owned;
 
-    // THE HEADER IS NOT OPTIONAL, and this branch used to omit it whenever `existing` carried no
-    // OCPROJECT line of its own. Only the empty-existing branch above wrote one, so any caller
-    // passing a non-empty preamble got back a manifest with every key and no header -- which
-    // loadOcproject then refuses with "not an .ocproject: no OCPROJECT header line".
-    //
-    // That is not hypothetical. It broke NEW PROJECT ENTIRELY: ProjectScaffold::manifestText passes
-    // three comment lines as `existing`, so every project the editor scaffolded was written with no
-    // header and failed to load a moment later, from the very function that had just written it.
-    // The guard then deleted the half-made folder, so the user saw a creation that simply refused.
-    //
-    // Prepended rather than fixed at the call site because the contract belongs here: this function
-    // returns a manifest, and a manifest has a header. Any other caller passing a preamble -- a
-    // template, an importer, a migration -- had the same bug waiting.
+    // Ensure the output always has an OCPROJECT header.
     if (!sawHeader)
         out.insert(0, "OCPROJECT " + std::to_string(d.version > 0 ? d.version : 1) + "\n");
     return out;

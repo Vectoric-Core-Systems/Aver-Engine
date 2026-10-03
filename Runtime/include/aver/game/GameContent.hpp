@@ -7,8 +7,7 @@
 
 #if AVER_MODULE_PBR
 #  include "aver/pbr/Material.hpp"
-// resolveMaterialTexture below returns MaterialSystem::ResolvedTexture by value, so the full type
-// is needed here rather than a forward declaration.
+// Needed for resolveMaterialTexture return type.
 #  include "aver/pbr/MaterialSystem.hpp"
 #endif
 
@@ -20,43 +19,21 @@
 #include <utility>
 #include <vector>
 
-// Forward-declared rather than included: only buildMeshParts' PRIVATE signature (GameContent.cpp)
-// needs the full aver/formats/OcMesh.hpp, and this header is included widely enough that a leaf
-// forward declaration is worth it over a header nothing else here reads.
+// Forward-declared to avoid widespread header inclusion.
 namespace aver::fmt { struct OcMeshData; }
 
 namespace aver::game {
 
 // Every asset under the project's content root, keyed by ObjectId.
-//
-// DELIBERATELY UNGUARDED, and this is the one design decision in the lift worth arguing for. In
-// SandboxApp this map and the walk that fills it sit inside `#if AVER_MODULE_PBR`
-// (SandboxApp.cpp:1132-1347), which means a tree built PBR=OFF, SCENE=ON resolves no asset by id at
-// all and hands the animation system no resolver -- an accident of where the code happened to be
-// written, not a decision. Copying it verbatim would copy the accident: MOVING CODE DOES NOT CHANGE
-// WHICH #if IT IS WRITTEN UNDER. So the guard is re-decided here, per symbol.
-//
-// Nothing about this class needs either module. It is an unordered_map of u64 to std::string, and
-// fnv1a64 lives in Aver.Core.
-//
-// Not a god object: the resolvers take `void* user` pointing at a GameContent, never at the app, so
-// nothing downstream acquires a handle on the whole game to look up a file.
 class GameContent {
 public:
-    // Adopts a project and indexes it. Safe to call again when the project changes; NOT per frame --
-    // it walks the whole content tree.
+    // Adopts a project and indexes it. Safe to call again when the project changes; NOT per frame.
     void adopt(const fmt::ProjectDesc& project);
 
     // The native absolute path for an ObjectId, or empty.
     std::string pathFor(u64 id) const;
 
-    // Every indexed asset's absolute path whose extension case-insensitively matches `ext` (pass it
-    // WITH the dot, e.g. ".ocgraph"), sorted for a deterministic order run to run. Built by filtering
-    // the SAME contentIndex_ that adopt() fills with a hardened, error_code-based recursive walk --
-    // added for visual-scripting phase 2's graph discovery (GameApp::discoverProjectGraphs), but
-    // deliberately generic rather than named pathsToGraphs: the walk this reuses already exists and
-    // asking it for a second, easier-to-get-wrong directory scan would be the exact "moved code
-    // doesn't change which #if it's under" mistake this class's own header comment warns against.
+    // Paths of assets with matching extension (with dot, e.g. ".ocgraph"), sorted for determinism.
     std::vector<std::string> pathsWithExtension(std::string_view ext) const;
 
     usize size() const { return contentIndex_.size(); }
@@ -64,12 +41,10 @@ public:
 
     // Every indexed asset, ObjectId -> absolute path, for a picker that lists assets by type.
     const std::unordered_map<u64, std::string>& index() const { return contentIndex_; }
-    // Points one ObjectId at a file, for a caller that makes an asset reachable with no project open
-    // (the editor's --skin-scene-test). adopt() replaces the whole index.
+    // Points one ObjectId at a file, for a caller that makes an asset reachable with no project open.
     void indexAsset(u64 id, std::string absolutePath) { contentIndex_[id] = std::move(absolutePath); }
 
-    // Resolver for aver::anim::AnimSystem, which takes a plain function pointer: asset discovery is
-    // the host's business, not the sampler's. `user` is a GameContent*.
+    // Resolver for aver::anim::AnimSystem. `user` is a GameContent*.
     static std::string resolveAnimAsset(u64 id, void* user);
 
 #if AVER_MODULE_PBR
@@ -77,8 +52,6 @@ public:
     void setTextureFactory(rhi::IResourceFactory* f) { textureFactory_ = f; }
 
     // Uploads the texture a material reference names. 0 keeps the slot's fallback.
-    //
-    // A plain function pointer with a void* because that is what MaterialSystem's resolver takes.
     // `user` is a GameContent*.
     static pbr::MaterialSystem::ResolvedTexture resolveMaterialTexture(const pbr::TextureRef& ref, pbr::TextureSlot slot,
                                                      void* user);
@@ -89,56 +62,11 @@ public:
     // The material a surface token names, loading it on first use. 0 when the project has none.
     pbr::MaterialHandle materialForSurface(const std::string& name);
 
-    // NO loadProjectMaterials(), deliberately. The runtime carried a copy of the editor's, nothing
-    // ever called it, and it was removed: a level resolves each surface it references through
-    // materialForSurface(), lazily and Binaries-first, so eagerly loading every project material would
-    // only cost load time and memory. If an eager preload is ever wanted, wire one deliberately --
-    // scanning Binaries\Materials as well as Content\Materials -- rather than reviving a stale copy.
-    //
-    // `clearGraphRegistry` false leaves the process-wide pbr::materialGraphs() alone, for a host that
-    // registers graphs there itself (the editor's material graph editor does).
+    // Deliberately no loadProjectMaterials: materials load lazily per-surface instead.
+    // `clearGraphRegistry` false leaves the process-wide pbr::materialGraphs() alone.
     void releaseProjectMaterials(bool clearGraphRegistry = true);
 
-    // ---- level-scoped material residency ----
-    //
-    // A PARTIAL releaseProjectMaterials(): destroys every currently-loaded material whose NAME is
-    // not in `keep`, instead of every material this GameContent has ever loaded. This is what makes
-    // an editor that keeps every level's materials resident (SandboxApp's applyProject, historically)
-    // able to hold only the OPEN level's instead -- a project with several heavy imported levels in
-    // one Content folder (the motivating case: Sponza and Jungle Ruins together, 17.2 GB resident
-    // against a 13.1 GB budget because every material in the PROJECT loaded, not just the one level
-    // on screen) otherwise never lets go of a level's textures once another one opens.
-    //
-    // `keep` is every surface NAME the caller has already decided must survive. SandboxApp calls
-    // this from unloadLevel() (every way OUT of a level, including "New Level", passes through
-    // there) with `keep` = whatever an open editor tab or the current selection has pinned resident
-    // (SandboxApp::pinMaterialResident) -- ordinarily empty, so an ordinary level change releases
-    // everything. It does NOT need to gather the NEXT level's surfaces itself: GameLevel::load()
-    // (shared with the runtime) already resolves every surface a level actually draws through
-    // materialForSurface()/bindSurfaceMaterial() as it places entities, so whatever the level about
-    // to open needs is reloaded, fresh, the moment it opens. This function has no idea what a "tab"
-    // or a "selection" is; a caller that needs one protected from release must put its name in
-    // `keep` itself.
-    //
-    // pbr::MaterialLibrary::destroy() is called for the handle behind every name NOT kept (the same
-    // ownership releaseProjectMaterials() already documents: MaterialLibrary owns it, this map only
-    // named it), and the name is forgotten from materialAssets_. THE TEXTURE(S) THAT MATERIAL
-    // SAMPLED ARE NOT FREED HERE -- that is pbr::MaterialSystem's job, on its very next update() call
-    // (see MaterialSystem::update()'s eviction loop and its textureRefs_ for why a texture two
-    // materials share must outlive whichever of them is released first; this function has no view of
-    // the GPU residency that system owns, only of which pbr::MaterialHandle exists).
-    //
-    // ALSO FORGETS ANY surfaceMaterials_ TOKEN LEFT NAMING A HANDLE THIS CALL JUST DESTROYED, so
-    // authoredFor() goes back to reporting "unbound" for it instead of a handle
-    // pbr::MaterialLibrary::valid() will now refuse -- GameRender's resolveDrawLook already falls
-    // back safely for a dead handle (a one-shot warning, then the surface's built-in look or the
-    // flat-gray fallback), but leaving the stale entry behind is exactly what makes that warning fire
-    // on every later draw of a surface this call meant to retire quietly. Safe to call even for a
-    // name the NEXT level still needs: materialForSurface() plus bindSurfaceMaterial() (the same
-    // pair every existing caller of this class already uses) rebinds it, fresh, before it is ever
-    // drawn again.
-    //
-    // Returns how many materials were actually destroyed.
+    // Level-scoped material release: destroys materials NOT in `keep` set.
     usize releaseMaterialsExcept(const std::unordered_set<std::string>& keep);
 #endif
 
@@ -151,58 +79,29 @@ public:
 #endif
 
 #if AVER_MODULE_SCENE
-    /// The material token this mesh's own materialSlots[0] names, or 0 when it names none.
-    ///
-    /// THE EDITOR'S RULE, HELD HERE TOO, and it has to be: a fallback the editor honours and the
-    /// packaged game does not is this repo's most-repeated defect shape, and the divergence gate in
-    /// scripts/verify-game.ps1 exists because of it. An entity whose CMeshRenderer.material is 0 is
-    /// not saying "draw me flat", it is saying nothing -- and the mesh it points at already declares
-    /// a material. A non-zero material stays an override, exactly as before.
+    // The material token this mesh's own materialSlots[0] names, or 0 when it names none.
     i32 meshDefaultMaterial(u64 meshId) const;
-    // The NAME a loaded mesh's materialSlots[0] carries, or empty -- for the editor's previews,
-    // which resolve it through materialForSurface.
+    // The NAME a loaded mesh's materialSlots[0] carries, or empty -- for the editor's previews.
     const std::string& meshSlot0Name(u64 meshId) const;
 #endif
 
-    // MESH LOOKUP, OUTSIDE THE SCENE BLOCK THE REST OF THIS SECTION IS IN. The name sceneMeshes_ is
-    // historical: the table is the CONTENT INDEX's mesh id -> handle map, keyed by
-    // fnv1a64(relative path), and nothing about a lookup in it needs an entity world. Two editor
-    // callers prove it -- the foliage loader (guarded on AVER_MODULE_LANDSCAPE) asks whether a
-    // species' mesh is loaded before accepting it, and Add > Primitive asks the same question about
-    // a built-in -- and `scene-off` and `all-off` both failed on those two lines, which is how this
-    // was found at all.
-    //
-    // WITH NO SCENE THE TABLE IS SIMPLY EMPTY, because what FILLS it (loadProjectMeshes, the .ocmesh
-    // upload path) stays behind the guard. meshFor then returns 0 for everything, which is exactly
-    // the answer both call sites already handle and already have a sentence for -- "not loaded --
-    // skipping", "no built-in mesh registered". A degraded lookup, not a compile error.
+    // Mesh lookup from content index (not gated on AVER_MODULE_SCENE).
     rhi::MeshHandle meshFor(u64 id) const;
 
 #if AVER_MODULE_SCENE
     // Uploads the built-in primitives a .ocworld may name. Call once, before any project meshes.
     void registerBuiltins(rhi::IDevice& device);
 
-    // One material-slot's worth of a mesh split for naming more than one. Ported from
-    // SandboxApp::MeshPart (sandbox/src/SandboxApp.hpp) -- same two fields, same "0 means the slot
-    // named nothing, ask the entity instead" convention buildMeshParts() (GameContent.cpp) and
-    // GameRender.cpp's planEntityDraws() both read. Unlike the editor's copy, not gated behind
-    // AVER_MODULE_LANDSCAPE: this class has no landscape dependency to inherit, and nothing about a
-    // material-slot split is landscape-specific.
+    // One material-slot's worth of a mesh split.
     struct MeshPart {
         rhi::MeshHandle mesh = 0;
         i32             material = 0;
     };
 
     // Uploads every .ocmesh under the project's content root.
-    //
-    // Takes an IDevice and not an Engine: a content cache with a handle on the whole engine is how
-    // the SandboxApp god object started.
     void loadProjectMeshes(rhi::IDevice& device);
 
-    // What loadProjectMeshes or registerBuiltins just uploaded, handed to a host that builds more
-    // from the same data -- the editor's pick triangles, triangle counts and LOD ladder -- without
-    // reading the file again. Called once per mesh, after its split parts are built. `data` is null
-    // for a built-in, which has no .ocmesh.
+    // Callback after each mesh is uploaded, before split parts are built. `data` is null for built-ins.
     struct LoadedMesh {
         u64 id;
         const std::string& relativePath;
@@ -214,9 +113,7 @@ public:
     using MeshLoadedFn = void (*)(const LoadedMesh& mesh, void* user);
     void setMeshLoadedHook(MeshLoadedFn fn, void* user) { meshLoaded_ = fn; meshLoadedUser_ = user; }
 
-    // Whether loadProjectMeshes uploads one coarser LOD per mesh as its depth-pass stand-in
-    // (depthProxyMap). On by default; off for a host that uploads the whole LOD ladder itself and
-    // answers the depth passes from that.
+    // Whether loadProjectMeshes uploads a coarser LOD per mesh as its depth-pass stand-in.
     void setBuildDepthProxies(bool on) { buildDepthProxies_ = on; }
 
     // A mesh uploaded elsewhere, registered under `id` (the editor's --skin-scene-test).
@@ -225,31 +122,16 @@ public:
     // The ids loadProjectMeshes loaded, in load order.
     const std::vector<u64>& projectMeshIds() const { return projectMeshIds_; }
 
-    // The per-material split for a mesh with more than one submesh, or nullptr for a mesh that was
-    // never split -- either it names one material slot (the common case), or every submesh past the
-    // first was refused (buildMeshParts' "ONE SURVIVING PART IS NOT A SPLIT" rule, GameContent.cpp).
-    // GameRender.cpp's draw walk is the sole reader: it plans one draw per part instead of one draw
-    // for the whole mesh whenever this returns non-null.
+    // The per-material split for a mesh with more than one submesh, or nullptr if never split.
+    // GameRender.cpp's draw walk reads this to plan one draw per part instead of one draw per mesh.
     const std::vector<MeshPart>* partsFor(u64 id) const;
 
-    // The split above RE-CUT OVER A POSED COPY: one IDevice::createPosedPartMesh per part,
-    // index-for-index with partsFor(id) (same materials; mesh 0 where the base part is 0). Built once
-    // per posed handle on first ask, and cached. nullptr -- cached too -- when the mesh has no split,
-    // carries no skin streams, the posed copy was not cut from THIS upload of `baseMesh` (its index
-    // buffer differs, e.g. across an editor mesh reload), or the device refuses (D3D11). A null answer
-    // means "keep the single whole-mesh draw", which is exactly the behaviour before this existed.
-    //
-    // WHY: a skinned entity draws its POSED copy, a different handle from the one partsFor's split was
-    // cut from, so it used to draw as ONE mesh under the entity's own material -- a character whose
-    // hair cards are their own material slot never drew them with the hair material.
+    // Posed parts split re-cut over a posed copy, index-for-index with partsFor(id).
+    // Cached on first ask, nullptr when the mesh has no split or has no skin streams.
     const std::vector<MeshPart>* posedPartsFor(rhi::IDevice& device, u64 id,
                                                rhi::MeshHandle baseMesh, rhi::MeshHandle posedMesh);
 
-    // Forgets every project mesh, destroying its split parts and its depth proxy. The base handle is
-    // destroyed too unless `destroyBaseHandles` is false, which only forgets it: the editor's mesh
-    // reload passes false, because caches keyed by MeshHandle (its depth proxies and LOD ladders among
-    // them) are not cleared with the meshes, and a destroyed handle's number can be reused. Built-ins
-    // survive. The packaged game never reloads, so it never calls this.
+    // Forgets every project mesh. If `destroyBaseHandles` is false, only forgets the handles.
     void releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHandles = true);
 
     usize meshCount() const { return sceneMeshes_.size(); }
@@ -258,33 +140,9 @@ public:
     // Bounds as loaded from the .ocmesh, or nullptr. Used by the draw walk to cull.
     const std::pair<Vec3, Vec3>* boundsFor(u64 id) const;
 
-    // A collision-only triangle mesh for `id`, lazily built from its .ocmesh and cached on first ask
-    // (see GameContent.cpp for exactly how). `positions` is LOCAL space, 3 f32 per vertex; `indices`
-    // is 3 per triangle into `positions`, compacted down to only the vertices these triangles actually
-    // reference.
-    //
-    // WHAT'S IN IT, in order: (1) every LOD-0 triangle whose material slot is not alpha-masked or
-    // translucent (leaves, glass -- see collisionSlotCollides) -- a mesh with no submesh table at all,
-    // or a slot whose material cannot be resolved, keeps its triangles, the conservative default every
-    // other cache miss in this class already uses; (2) simplified with meshoptimizer to roughly a 2 cm
-    // world error, subject to a triangle ceiling, UNLESS Trifactor's own coarsest-LOD-within-2cm pick
-    // (the old behaviour) is available and came out with fewer triangles, in which case that is kept
-    // instead -- see collisionMeshFor's own comment for the exact rule. `lod`/`errorCm` describe
-    // whichever of the two produced the answer: `lod` is the stored Trifactor level (0 as LOD 0's own
-    // convention already meant) when the Trifactor pick won, or 0 for the meshoptimizer path; `errorCm`
-    // is that path's own geometric error, in centimetres, either way.
-    //
-    // DISK-CACHED under <project>/Saved/DerivedDataCache/Collision -- see collisionCacheHits() -- so a
-    // second load of the same mesh (same path, size and last-write time) skips the filter/simplify
-    // work entirely, not just the .ocmesh read. Cache misses and rebuilds fall back to reading the
-    // source .ocmesh exactly as before this existed.
-    //
-    // nullptr for a mesh with no .ocmesh at all -- a built-in (registerBuiltins never indexes one), an
-    // unknown id, one whose file failed to load, or one whose EVERY material slot is alpha-masked or
-    // translucent (logged once, here, not once per placement). EITHER answer is cached, so a bad id is
-    // stat'd/read at most once no matter how many placements name it. A caller getting nullptr keeps
-    // colliding that mesh as the fitted box (world::addStaticBoxBody) -- this function never falls
-    // back to a box itself, because it has no box to fall back to; the caller does.
+    // Collision-only triangle mesh for `id`, lazily built and cached. `positions` is LOCAL space.
+    // Simplifies to roughly 2 cm error unless Trifactor's coarsest-LOD pick has fewer triangles.
+    // Disk-cached under <project>/Saved/DerivedDataCache/Collision. nullptr for no .ocmesh.
     struct CollisionMesh {
         std::vector<f32> positions;
         std::vector<u32> indices;
@@ -293,19 +151,13 @@ public:
     };
     const CollisionMesh* collisionMeshFor(u64 id);
 
-    // How many times collisionMeshFor was answered from the disk cache rather than by re-reading and
-    // re-simplifying the source .ocmesh -- for GameLevel.cpp's own collision summary line to report
-    // alongside world::LevelInstance::uniqueMeshShapeCount (see that field's own comment,
-    // LevelInstance.hpp). Counts a HIT ONLY: a miss is indistinguishable here from "never asked",
-    // which the mesh-load summary already reports through its own loaded/failed counts.
+    // How many times collisionMeshFor was answered from the disk cache.
     u32 collisionCacheHits() const { return collisionCacheHits_; }
 
     // Depth proxy map for LOD-based shadow/voxel optimization.
     const std::unordered_map<rhi::MeshHandle, rhi::MeshHandle>& depthProxyMap() const { return depthProxyMap_; }
 
-    // Resolver for aver::render::SkinnedScene. Deliberately the SAME table the draw pass reads: a
-    // skin target built from a different upload than the one on screen would be a rig skinning
-    // geometry nobody can see.
+    // Resolver for aver::render::SkinnedScene. Deliberately the SAME table the draw pass reads.
     static rhi::MeshHandle resolveSceneMesh(u64 id, void* user);
 
     // The named surfaces gameplay can ask for, by interned material token.
@@ -314,17 +166,8 @@ public:
 #endif
 
 #if AVER_MODULE_PARTICLES
-    // Loads every .ocparticle under the project's content root into particles::particleEffects(),
-    // keyed by fnv1a64(relative path) -- the SAME id space contentIndex_ already uses for every other
-    // project asset (adopt()'s own "FROZEN" comment), so a CParticleEmitter::effect a level or a
-    // script names resolves the identical way a CMeshRenderer::mesh or CAnimator::clip does. Recursive
-    // over the whole content root, matching loadProjectMeshes rather than the Materials-folder
-    // convention .ocmat follows: DECIDED 3 gave .ocparticle no such folder rule.
-    //
-    // particles::particleEffects() is the SAME process-global table SandboxApp.cpp's
-    // loadProjectParticleEffects() fills and --particle-test's hardcoded content calls set() on
-    // directly -- there is no GameContent-owned cache to keep in sync, matching resolveAnimAsset's
-    // relationship to aver::anim::animSystem() one block up.
+    // Loads every .ocparticle under the project's content root into particles::particleEffects().
+    // Keyed by fnv1a64(relative path), the SAME id space contentIndex_ uses for all project assets.
     void loadProjectParticleEffects();
 #endif
 
@@ -340,46 +183,27 @@ private:
     std::unordered_map<u64, std::string>           meshSlot0Name_;
     std::vector<u64>                               projectMeshIds_;
     std::unordered_map<i32, SurfaceLook>           surfaceLooks_;
-    // Depth proxy map: LOD meshes used instead of full detail in depth passes
+    // Depth proxy map: LOD meshes used instead of full detail in depth passes.
     std::unordered_map<rhi::MeshHandle, rhi::MeshHandle> depthProxyMap_;
-    // mesh id -> its per-material split, for a mesh whose .ocmesh names more than one. See MeshPart.
+    // mesh id -> its per-material split. See MeshPart.
     std::unordered_map<u64, std::vector<MeshPart>> meshParts_;
-    // mesh id -> per part, index-for-index with meshParts_[id]: that part's slice of md.indices
-    // UNREMAPPED, i.e. in the base mesh's vertex numbering, which a skin target shares verbatim.
-    // Kept only for a mesh with skin streams (md.hasSkin()), the only kind SkinnedScene poses. The
-    // parts themselves are compacted and renumbered, so their own indices cannot be reused over a
-    // posed buffer -- this is the one piece of information the split used to throw away.
+    // mesh id -> per part: indices UNREMAPPED in base mesh's vertex numbering (shared by skin targets).
     std::unordered_map<u64, std::vector<std::vector<u32>>> meshPartBaseIndices_;
-    // posed MeshHandle -> its posed parts. `parts` empty = refused, cached so it is not retried every
-    // frame. Keyed by handle: RHI handles are never recycled (IDevice::destroyMesh's contract).
+    // posed MeshHandle -> its posed parts. Empty = refused, cached. Keyed by handle (never recycled).
     struct PosedParts { u64 meshId = 0; std::vector<MeshPart> parts; };
     std::unordered_map<rhi::MeshHandle, PosedParts> posedParts_;
-    // collisionMeshFor's cache: mesh id -> its collision mesh, or a present key holding a null
-    // pointer for "asked for and there is none" (missing file, load failure, or a built-in) -- see
-    // that function's own comment for why a negative result is cached too. Cleared alongside
-    // meshBounds_/meshSlot0Material_ in releaseProjectMeshes: it is keyed by the same mesh ids and a
-    // reload can put a different .ocmesh behind one of them.
+    // collisionMeshFor's cache: mesh id -> collision mesh, or null pointer cached for "none".
     std::unordered_map<u64, std::unique_ptr<CollisionMesh>> collisionMeshCache_;
-    // collisionCacheHits(): incremented once per collisionMeshFor call the DISK cache (not this
-    // in-memory table) answered.
+    // Incremented once per collisionMeshFor call answered from disk cache.
     u32 collisionCacheHits_ = 0;
     MeshLoadedFn meshLoaded_ = nullptr;
     void* meshLoadedUser_ = nullptr;
     bool buildDepthProxies_ = true;
 
-    // True when a material-slot NAME should collide: false only for one that resolves (through
-    // materialForSurface, the same lookup an authored surface always goes through) to an authored
-    // .ocmat whose alphaMode is Mask or Blend -- leaves and glass, which a Banyan tree's leaf cards or
-    // a window pane author as cut-out or translucent precisely so a player is not blocked by them.
-    // True for an empty name, one with no PBR module to resolve it, or one that resolves to nothing:
-    // "cannot be resolved" keeps the triangles, the same conservative default collisionMeshFor already
-    // uses for a mesh it cannot otherwise make sense of.
+    // Whether a material-slot NAME should collide: false only for Mask or Blend alphaMode.
     bool collisionSlotCollides(const std::string& slotName);
 
-    // Splits `md` into one compacted MeshHandle + material token per submesh, when it names more than
-    // one -- a no-op otherwise. Each part is an index buffer sharing `whole`'s vertices; a submesh's
-    // materialSlot names a string in md.materialSlots, resolved through aver_scene_material. One
-    // surviving part is not a split. Called unconditionally from loadProjectMeshes.
+    // Splits `md` into one compacted MeshHandle + material per submesh, or a no-op if only one.
     void buildMeshParts(rhi::IDevice& device, u64 id, rhi::MeshHandle whole, const fmt::OcMeshData& md,
                          const std::vector<rhi::MeshVertex>& verts, const std::string& rel);
 #endif
@@ -388,11 +212,8 @@ private:
     rhi::IResourceFactory* textureFactory_ = nullptr;
     std::unordered_map<std::string, pbr::MaterialHandle> materialAssets_;
 
-    // Turns an .ocmat's GRAPHREF path into the id materialForSurface() stores in
-    // MaterialDesc::graphId. Ported from SandboxApp::resolveMaterialGraph
-    // (sandbox/src/SandboxAssets.cpp): same content-relative resolution, same cache-by-compiled-path
-    // through pbr::materialGraphs().idOf(), same compile-on-miss through fmt::loadOcgraph() +
-    // pbr::materialGraphs().add(), same 0 (stock shading) fallback on any failure.
+    // Turns an .ocmat's GRAPHREF path into the id materialForSurface() stores.
+    // Ported from SandboxApp::resolveMaterialGraph, same cache-by-compiled-path through pbr::materialGraphs().
     u32 resolveMaterialGraph(const std::string& graphRef) const;
 #endif
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE

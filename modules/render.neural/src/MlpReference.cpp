@@ -5,8 +5,7 @@
 #include <cstring>
 #include <fstream>
 
-// KEEP IN STEP WITH shaders/aver_neural_mlp.hlsl. Every function here has an HLSL twin; the
-// comments name it. See MlpReference.hpp for what "the same maths" does and does not promise.
+// Keep in step with shaders/aver_neural_mlp.hlsl (each function has an HLSL twin named in comments).
 
 namespace aver::render::neural {
 
@@ -17,9 +16,7 @@ bool fail(std::string* why, const char* msg) {
     return false;
 }
 
-// Forward pass over the flat weight array; `acts` holds layout.actTotal floats and receives every
-// layer's post-activation output. HLSL twin: forwardLayer() in the CSInfer / CSTrainGrad bodies.
-// z starts at the bias and accumulates w * a in ascending i, the order the GPU loop uses.
+// Forward pass; acts holds all layer post-activation outputs (HLSL twin: forwardLayer).
 void forwardImpl(const MlpDesc& d, const MlpLayout& L, const f32* w, const f32* in, f32* acts) {
     for (u32 i = 0; i < d.inputs; ++i) acts[i] = in[i];
     for (u32 l = 0; l < L.layers; ++l) {
@@ -59,7 +56,6 @@ bool validate(const OptimiserDesc& o, std::string* why) {
     if (!(o.gradFixedScale > 0.0f)) return fail(why, "gradFixedScale must be > 0");
     if (!(o.gradClamp > 0.0f)) return fail(why, "gradClamp must be > 0");
     if (static_cast<u32>(o.loss) > 1u) return fail(why, "unknown loss");
-    // One record's quantised gradient must itself fit an int32 with room to sum.
     if (!(o.gradClamp * o.gradFixedScale <= 1.0e9f)) return fail(why, "gradClamp * gradFixedScale must be <= 1e9");
     return true;
 }
@@ -227,8 +223,7 @@ f32 MlpReference::accumulateRecord(std::span<const f32> in, std::span<const f32>
     std::vector<f32> grad(layout_.total);
     const f32 loss = backward(in, target, grad);
     for (u32 k = 0; k < layout_.total; ++k) {
-        // u32 arithmetic: defined wraparound, the same bits InterlockedAdd leaves behind.
-        acc_[k] = static_cast<i32>(static_cast<u32>(acc_[k]) + static_cast<u32>(quantise(grad[k], opt_)));
+            acc_[k] = static_cast<i32>(static_cast<u32>(acc_[k]) + static_cast<u32>(quantise(grad[k], opt_)));
     }
     return loss;
 }

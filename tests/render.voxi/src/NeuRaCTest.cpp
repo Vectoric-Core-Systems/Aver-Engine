@@ -1,16 +1,4 @@
-// NeuRaCTest -- the radiance cache's CPU-checkable half (aver/voxi/NeuRaCLayout.hpp).
-// See docs/rendering/NEURAC.md.
-//
-// NO GPU, NO RHI, same shape as GiVisibilityTest in this directory: the header under test depends on
-// nothing but aver/core/Types.hpp, so this links Aver.Core alone and reaches it with an include path.
-//
-// WHAT THIS CAN AND CANNOT CATCH. It checks the ARITHMETIC both sides share -- the fixed-point headroom
-// (a wrapped InterlockedAdd is a wrong colour, not a crash), tag and cell addressing including negative
-// world cells, origin snapping, the fp16 SH and normal packing, and the SH cosine convolution against a
-// Monte Carlo estimate built with the scatter's own weighting. It also reads the HLSL files and checks
-// that the AVER_RC_* #define literals equal the header's constants. It does NOT compile the HLSL or run
-// the resolve: whether voxi_neurac_resolve.hlsl builds and blends correctly is the engine's to
-// show, not this file's.
+// Tests NeuRaCLayout.hpp (see docs/rendering/NEURAC.md).
 #include "aver/core/Log.hpp"
 #include "aver/voxi/NeuRaCLayout.hpp"
 
@@ -43,8 +31,7 @@ void check(bool cond, const std::string& what) {
 std::string readFile(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
-        // An unreadable file must FAIL every assertion against it, not skip: an empty string would make
-        // every "does not contain" style check pass vacuously.
+        // Unreadable file must FAIL assertions, not skip (empty string would pass vacuously).
         AVER_ERROR("[NeuRaC] could not read {} -- every source assertion against it is a failure, "
                    "not a skip.", path);
         return {};
@@ -105,8 +92,7 @@ int main() {
     // ---- 2. fixed-point headroom ------------------------------------------------------------------
     AVER_INFO("=== fixed-point headroom ===");
     {
-        // The worst sample the scatter can produce, summed cap times in int64 (so the test itself cannot
-        // wrap), must stay under half of int32 max.
+        // Worst sample summed in int64 (test cannot wrap) must stay under half of int32 max.
         const f64 worst = rc::kLMax * 0.488603 * rc::kPi / rc::kMinCos;
         std::int64_t sum = 0;
         for (u32 i = 0; i < rc::kMaxCap; ++i) sum += static_cast<std::int64_t>(std::llround(worst * rc::kShScale));
@@ -125,7 +111,7 @@ int main() {
         check(rc::tagPack(63, 63, 63) == 0u, "the first 64-cell block shares one tag");
         check(rc::tagPack(64, 0, 0) == 1u && rc::tagPack(0, 64, 0) == (1u << 8) && rc::tagPack(0, 0, 64) == (1u << 16),
               "one block along an axis moves that axis' byte by one");
-        // Negative cells: arithmetic shift puts -1 in block -1 (0xFF), which is distinct from block 0.
+        // Negative cells: floor(cell/64) fits in one byte via arithmetic shift, distinct from block 0.
         check(rc::tagPack(-1, 0, 0) == 0xFFu && rc::tagPack(-64, 0, 0) == 0xFFu && rc::tagPack(-65, 0, 0) == 0xFEu,
               "negative world cells tag by floor(cell/64): -1..-64 -> 0xFF, -65 -> 0xFE");
         check(rc::tagPack(-1, 0, 0) != rc::tagPack(0, 0, 0), "cell -1 and cell 0 do not alias");
@@ -138,8 +124,7 @@ int main() {
         check(rc::cellIndex(0, -1, 0, 0) == 63u && rc::cellIndex(2, -1, -1, -1) == rc::kCells - 1,
               "negative cells wrap into the window with &63");
 
-        // A window anchored at a NEGATIVE origin: every one of its 64^3 cells must land on a distinct texel,
-        // and exactly two tag values per axis at most (the toroidal property the resolve relies on).
+        // 64^3 window anchored at negative origin: each cell maps to distinct texel with correct world recovery.
         const i32 ox = -37, oy = -90, oz = 17;
         std::vector<std::uint8_t> seen(rc::kCellsPerCascade, 0);
         u32 collisions = 0;
@@ -147,7 +132,7 @@ int main() {
         for (i32 z = 0; z < 64; ++z) for (i32 y = 0; y < 64; ++y) for (i32 x = 0; x < 64; ++x) {
             const u32 idx = rc::cellIndex(1, ox + x, oy + y, oz + z) - rc::kCellsPerCascade;
             if (seen[idx]++) ++collisions;
-            // The resolve's derivation: world = origin + ((texel - origin) & 63) must return the world cell.
+            // world = origin + ((texel - origin) & 63) recovers the world cell.
             const i32 tx = idx & 63, ty = (idx >> 6) & 63, tz = idx >> 12;
             const i32 wx = ox + ((tx - ox) & 63), wy = oy + ((ty - oy) & 63), wz = oz + ((tz - oz) & 63);
             if (wx != ox + x || wy != oy + y || wz != oz + z) tagsOk = false;
@@ -181,8 +166,7 @@ int main() {
         const u32 tag = rc::tagPack(-3, 130, 700);
         const u32 m = rc::metaPack(tag, 9, 4);
         check(rc::metaTag(m) == tag && rc::metaNEff(m) == 9 && rc::metaAge(m) == 4, "meta round-trips tag, n_eff, age");
-        // 99 is 0b1100011: only its low 4 bits (3) may land in each 4-bit field, and the 32-bit tag
-        // only its low 24 -- so every field reads back masked and nothing spills into a neighbour.
+        // Oversized field values mask to their width without spilling into neighbours.
         const u32 big = rc::metaPack(0xFFFFFFFFu, 99, 99);
         check(rc::metaTag(big) == 0xFFFFFFu && rc::metaNEff(big) == 3u && rc::metaAge(big) == 3u &&
                   big == 0x33FFFFFFu,
@@ -210,7 +194,7 @@ int main() {
         }
         check(worstCos > 0.99998f, "octahedral directions round-trip within ~0.4 degrees (worst cos " + std::to_string(worstCos) + ")");
         check(worstLen < 1.0f / 1023.0f, "the length field is within one 10-bit step (worst error " + std::to_string(worstLen) + ")");
-        // Axis-aligned normals are the common case: they must land exactly on the axis.
+        // Axis-aligned normals survive the pack exactly.
         f32 up[3] = {0.0f, 1.0f, 0.0f}, dir[3], len;
         rc::unpackNormal(rc::packNormal(up), dir, len);
         check(approx(dir[1], 1.0, 1e-3) && approx(len, 1.0, 1e-3), "+Y at full length survives the pack");
@@ -247,7 +231,7 @@ int main() {
             }
         }
         check(worstRel < 1.0f / 1024.0f, "12 SH floats round-trip within fp16's 2^-11 relative step (worst " + std::to_string(worstRel) + ")");
-        // Layout: k = 0 lives in the low half of word 0, k = 1 in its high half.
+        // k = 0 in low half of word 0, k = 1 in high half.
         f32 sh[rc::kShFloats] = {1.0f, 2.0f};
         u32 w[6];
         rc::packSh(sh, w);
@@ -257,8 +241,7 @@ int main() {
     // ---- 7. SH convolution and the scatter's estimator --------------------------------------------
     AVER_INFO("=== SH irradiance and the scatter estimator ===");
     {
-        // Analytic: constant L over the hemisphere around N -> c0 = Y0 * 2 PI L, cN = 0.488603 * PI L, and
-        // the cosine convolution gives back exactly L (the contract's own check).
+        // Constant L over hemisphere: c0 = Y0 * 2π L, cN = 0.488603 * π L; cosine convolution returns L.
         const f32 L = 3.0f;
         const f32 n[3] = {0.0f, 1.0f, 0.0f};
         f32 c[4][3] = {};
@@ -277,8 +260,7 @@ int main() {
         rc::shIrradianceOverPi(neg, n, e);
         check(e[0] == 0.0f, "negative irradiance clamps to zero");
 
-        // Monte Carlo with the scatter's own weighting: cosine-sampled directions (Malley), L clamped, weight
-        // PI / max(cos, MIN_COS), fixed-point rounded, summed in int64, divided by n * scale.
+        // Monte Carlo: cosine-sampled directions (Malley), L clamped, weight π / max(cos, MIN_COS), fixed-point sum.
         const f32 normals[3][3] = {{0.0f, 1.0f, 0.0f}, {0.6f, 0.0f, 0.8f}, {-0.267261f, 0.534522f, -0.801784f}};
         for (const auto& N : normals) {
             // Tangent frame.
@@ -314,8 +296,7 @@ int main() {
                 for (int ch = 0; ch < 3; ++ch) mean[j][ch] = static_cast<f32>(static_cast<f64>(acc[j][ch]) / (nSamples * rc::kShScale));
             f32 out[3];
             rc::shIrradianceOverPi(mean, N, out);
-            // The cos floor under-weights the 1% of samples below 0.1 (documented bias): a few percent low,
-            // never high.
+            // cos floor under-weights <0.1 angles: few-percent bias, never high.
             check(out[0] > 0.94f * Lsample && out[0] < 1.01f * Lsample,
                   "Monte Carlo of constant L reproduces L within the floor's few-percent bias (got " + std::to_string(out[0]) + ")");
             const f64 nx = static_cast<f64>(nacc[0]) / (nSamples * rc::kNScale);

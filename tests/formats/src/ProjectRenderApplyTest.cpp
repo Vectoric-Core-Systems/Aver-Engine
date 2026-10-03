@@ -1,22 +1,5 @@
-// ProjectRenderApply.hpp: the shared, header-only .ocproject -> voxi::Settings apply and the
-// Settings -> .ocproject capture rule, both pure functions of Settings/DeviceInfo/ProjectDesc values
-// (see that header's own top comment for why). Covers every RENDER.* key reaching its Settings field,
-// the N6 fix (an absent derived knob resets to its tier's ladder value rather than a stale live one),
-// the R2 regression the two-phase apply exists to avoid (proven THROUGH the live voxi::Renderer
-// singleton, not just the pure helpers), the capture rule's four cases, N5 (a no-RT device's own
-// clamp must not be mistaken for a user's edit), manifestContradictions, N9 (hasRenderSettings
-// seeing GIMODE/DENOISER), and RESTIRHISTORY (giRestirMaxHistory: deliberately NOT one of the
-// tier-derived knobs above -- absent leaves Settings alone rather than following a ladder, and capture
-// is unconditional like giMode/denoiser rather than captureKnob's four-branch rule). Compiled by the
-// build; NEVER run from this workflow.
-//
-// AND THE COMMAND-LINE HALF (N7), added when the editor's twenty `*Override_` members collapsed into
-// RenderCliOverrides and applyCliOverrides: every flag reaching the Settings field it names, all three
-// "flag not given" sentinels (-1, 0, -1.0f) staying distinct, --no-gi/--no-rt behaving as the Phase A
-// tier changes they are, and -- the one that made the collapse safe to attempt --
-// testN7CliPhaseOrderThroughTheSingleton, which FAILS if Phase A and Phase B are ever merged into a
-// single setSettings call. Rewriting precedence logic that has already regressed four times needs a
-// net under it, and that test is the net.
+// ProjectRenderApply: manifest apply/capture, N6/R2/N7/N5/N9 fixes, and CLI override precedence.
+// Compiled by build, never run from workflow.
 #include "aver/voxi/ProjectRenderApply.hpp"
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -28,7 +11,7 @@ using namespace aver;
 
 static int g_failures = 0;
 
-// Logs one assertion and counts the failures -- same idiom as tests/formats/src/OcInputTest.cpp.
+// Same idiom as tests/formats/src/OcInputTest.cpp.
 static void check(bool cond, const std::string& what) {
     if (cond) {
         AVER_INFO("   PASS  {}", what);
@@ -40,10 +23,7 @@ static void check(bool cond, const std::string& what) {
 
 static bool near(f32 a, f32 b, f32 eps = 1e-4f) { return std::fabs(a - b) <= eps; }
 
-// A device with every gate this header's fields can ask about satisfied: compute shaders, RT
-// hardware, mesh shaders, every MSAA count, denoiser. Most tests below do not care WHICH device gates a
-// field -- they exercise the manifest-apply and capture arithmetic, not the prerequisite table
-// (RenderSettingsResolverTest.cpp, Lane 1, owns that) -- so one fully-capable device covers them.
+// Fully capable device: compute, RT hardware, mesh shaders, all MSAA counts, denoiser.
 static voxi::DeviceInfo fullyCapableDevice() {
     voxi::DeviceInfo d;
     d.msaaMask = 1u | 2u | 4u | 8u;
@@ -59,8 +39,7 @@ static voxi::DeviceInfo fullyCapableDevice() {
     return d;
 }
 
-// N5's own device: compute shaders only -- GI runs, but ray tracing and mesh shaders are both
-// unsupported, the same shape a teammate's machine without an RT card actually has.
+// Compute shaders only: no RT or mesh shaders, as some actual hardware.
 static voxi::DeviceInfo noRtDevice() {
     voxi::DeviceInfo d;
     d.msaaMask = 1u | 2u | 4u | 8u;
@@ -74,8 +53,7 @@ static voxi::DeviceInfo noRtDevice() {
     return d;
 }
 
-// Field-by-field equality, rather than memcmp -- Settings carries padding bytes memcmp would trip
-// over for no reason this test cares about, and this reads as a list of what "unchanged" means.
+// Field-by-field equality (memcmp would trip on padding). Defines "unchanged".
 static bool settingsEqual(const voxi::Settings& a, const voxi::Settings& b) {
     return a.msaa == b.msaa &&
            a.globalIllumination == b.globalIllumination &&
@@ -110,17 +88,8 @@ static bool settingsEqual(const voxi::Settings& a, const voxi::Settings& b) {
            a.ptBounces == b.ptBounces;
 }
 
-// Every RENDER.* key that maps to a voxi::Settings field, set to a distinct non-default value, reaches
-// it through applyManifestTiers/applyManifestKnobs.
-//
-// THE 4 TIER KEYS: GI, RAYTRACING, PATHTRACING, LAYEREDBSDF.
-//
-// THE 17 KNOB KEYS -- not 19: SandboxApp.cpp's applyProjectVoxiSettings (the function this header's
-// applyManifestKnobs is copied from) carries exactly 17 Settings-backed knobs in its second
-// setSettings call. RENDER.LODSELECT/LODTHRESHOLD/OCCLUSIONCULL/DEPTHPREPASS are real ProjectDesc
-// keys but apply to editor-side flags OUTSIDE voxi::Settings entirely (SandboxApp.cpp's
-// applyProjectRenderSettings applies them directly, never through voxi::Renderer) -- this header does
-// not touch them, so they are not counted here.
+// 4 tier keys (GI, RAYTRACING, PATHTRACING, LAYEREDBSDF) and 17 knob keys reach their Settings fields.
+// LODSELECT/LODTHRESHOLD/OCCLUSIONCULL/DEPTHPREPASS are ProjectDesc keys but not handled here.
 static void testEveryKeyReachesSettings() {
     AVER_INFO("=== every RENDER.* key that maps to a Settings field reaches it ===");
 
@@ -158,9 +127,7 @@ static void testEveryKeyReachesSettings() {
         p.meshShaders        = 1;
         p.giUpdateInterval   = 7;
 
-        // Tiers left absent -- s stays Medium/Medium/Off, Settings{}'s own defaults -- so every
-        // knob's landing value below is unambiguously the manifest's explicit ask, not a ladder
-        // fallback (all 17 keys here are STATED, so the N6 else-branches never fire).
+        // All 17 keys stated, so N6 else-branches never fire: every landing value is the manifest's ask.
         voxi::Settings s{};
         voxi::applyManifestTiers(p, s);
         voxi::applyManifestKnobs(p, s);
@@ -185,17 +152,15 @@ static void testEveryKeyReachesSettings() {
     }
 }
 
-// N6: a derived knob the manifest does not state resets to its NEW tier's ladder value, not whatever
-// was already live -- even when the tier itself did not change in this same apply.
+// N6: absent derived knob resets to its NEW tier's ladder value, not stale live.
 static void testN6AbsentDerivedKnobResetsToLadder() {
     AVER_INFO("=== N6: an absent derived knob resets to its tier's ladder value ===");
     voxi::Settings s{};
     s.globalIllumination = voxi::Quality::Epic;
-    s.giCones = 7;   // stale -- a previous project's pin that happens to still be live
+    s.giCones = 7;   // stale pin
 
     fmt::ProjectDesc p;
-    p.giQuality = static_cast<int>(voxi::Quality::Epic);   // restates the SAME tier -- no tier change
-    // p.giCones intentionally left at its default (-1, absent)
+    p.giQuality = static_cast<int>(voxi::Quality::Epic);   // same tier, no change
 
     voxi::applyManifestTiers(p, s);
     check(s.giCones == 7, "restating the same tier alone does not touch the stale knob");
@@ -204,18 +169,15 @@ static void testN6AbsentDerivedKnobResetsToLadder() {
           "an absent GICONES resets to ladder::giCones(Epic) = 13, not the stale 7");
 }
 
-// N6, extended to the tenth derived knob: an absent RENDER.RESTIRVISIBILITY resets to the tier's ladder
-// value, not whatever giRestirVisibility happened to already be live at -- the identical rule
-// testN6AbsentDerivedKnobResetsToLadder (above) proves for giCones, now proved for the newest knob.
+// N6 extended to giRestirVisibility: absent RESTIRVISIBILITY also resets to ladder value.
 static void testN6RestirVisibilityFollowsTier() {
     AVER_INFO("=== N6: an absent RESTIRVISIBILITY resets to its tier's ladder value ===");
     voxi::Settings s{};
     s.globalIllumination = voxi::Quality::Low;
-    s.giRestirVisibility = 3;   // stale -- e.g. a previous Epic project's value, still live
+    s.giRestirVisibility = 3;   // stale pin
 
     fmt::ProjectDesc p;
-    p.giQuality = static_cast<int>(voxi::Quality::Low);   // restates the SAME tier -- no tier change
-    // p.restirVisibility intentionally left at its default (-1, absent)
+    p.giQuality = static_cast<int>(voxi::Quality::Low);   // same tier
 
     voxi::applyManifestTiers(p, s);
     check(s.giRestirVisibility == 3, "restating the same tier alone does not touch the stale knob");
@@ -224,12 +186,7 @@ static void testN6RestirVisibilityFollowsTier() {
           "an absent RESTIRVISIBILITY resets to ladder::giRestirVisibility(Low), not the stale 3");
 }
 
-// R2, extended to the tenth derived knob: live GI Medium (giRestirVisibility defaults to Medium's own
-// ladder rung); a manifest states GI Epic plus RESTIRVISIBILITY at the SAME number Medium already had.
-// Two-phase must keep the manifest's explicit ask; a merged single call would silently re-derive Epic's
-// ladder value over it -- the identical race testR2RegressionThroughTheSingleton (above) proves for
-// giCones, now proved for giRestirVisibility so L1's new field and L2's new capture/apply logic are
-// both exercised together through the live singleton, not just the pure helpers.
+// R2 extended: two-phase apply avoids the regression where single setSettings re-derives the knob.
 static void testR2RestirVisibilityRaceThroughTheSingleton() {
     AVER_INFO("=== R2: giRestirVisibility race, two-phase through voxi::Renderer avoids it too ===");
     voxi::Renderer& vx = voxi::Renderer::get();
@@ -245,8 +202,8 @@ static void testR2RestirVisibilityRaceThroughTheSingleton() {
           "singleton seeded at GI Medium, giRestirVisibility at Medium's own ladder rung");
 
     fmt::ProjectDesc p;
-    p.giQuality        = static_cast<int>(voxi::Quality::Epic);   // RENDER.GI 4
-    p.restirVisibility = static_cast<int>(mediumRestirVis);        // RENDER.RESTIRVISIBILITY, explicit
+    p.giQuality        = static_cast<int>(voxi::Quality::Epic);
+    p.restirVisibility = static_cast<int>(mediumRestirVis);
 
     voxi::Settings s = vx.settings();
     voxi::applyManifestTwoPhase(p, s, [&]() {
@@ -257,10 +214,7 @@ static void testR2RestirVisibilityRaceThroughTheSingleton() {
           "two-phase apply: the explicit RESTIRVISIBILITY survives even though Epic's ladder rung differs");
     check(vx.settings().giRestirVisibility == mediumRestirVis, "...and the singleton itself agrees");
 
-    // A MERGED SINGLE CALL WOULD HAVE GIVEN Epic's ladder value -- proven, not merely asserted: reset
-    // the singleton to the same pre-edit live state, then apply both phases into ONE local Settings
-    // before ever calling setSettings, and commit once. Only meaningful when the two rungs actually
-    // differ -- U1's picks (Medium=HalfResolution=2, Epic=Full=3) guarantee that today.
+    // Single merged call would have re-derived Epic's value: proven by applying both phases in one buffer.
     check(mediumRestirVis != epicRestirVis,
           "sanity: Medium and Epic's own RESTIRVISIBILITY ladder rungs must differ for this race to be live");
     vx.setSettings(live);
@@ -275,9 +229,7 @@ static void testR2RestirVisibilityRaceThroughTheSingleton() {
           "-- the exact regression two-phase (above) avoids");
 }
 
-// An empty manifest is a genuine no-op against Settings{} -- the sanity check ProjectRenderApply.hpp's
-// own comment makes: Settings{}'s defaults already equal ladder(Medium)/ladder(Off) per group (Lane
-// 1's static_asserts, QualityLadder.hpp), so N6's unconditional reset lands on the same values.
+// Empty manifest leaves Settings{} unchanged: Settings{}'s defaults already match ladder(Medium)/ladder(Off).
 static void testEmptyManifestLeavesSettingsUnchanged() {
     AVER_INFO("=== ProjectDesc{{}} (empty manifest) leaves Settings{{}} completely unchanged ===");
     fmt::ProjectDesc empty;
@@ -290,26 +242,21 @@ static void testEmptyManifestLeavesSettingsUnchanged() {
     check(settingsEqual(s, before), "applying an empty manifest to Settings{} changes nothing");
 }
 
-// R2, THROUGH THE LIVE SINGLETON: live GI Medium (giCones 6, Medium's own ladder rung); a manifest
-// states GI Epic plus GICONES 6 -- the SAME number Medium already had. Two-phase gives 6, exactly what
-// the manifest asked for; a merged single call would have silently re-derived Epic's 13 over it,
-// because 6-arriving-unchanged-from-live is indistinguishable from 6-never-asked-for to setSettings'
-// own change-gated derivation. See ProjectRenderApply.hpp's own applyManifestTwoPhase comment for the
-// full mechanism.
+// R2 through singleton: two-phase apply avoids merging live tier state before applying manifest knobs.
 static void testR2RegressionThroughTheSingleton() {
     AVER_INFO("=== R2: two-phase through voxi::Renderer avoids the merged-call regression ===");
     voxi::Renderer& vx = voxi::Renderer::get();
     vx.setDeviceInfo(fullyCapableDevice());
 
     voxi::Settings live{};
-    live.globalIllumination = voxi::Quality::Medium;   // giCones defaults to 6, Medium's own rung
+    live.globalIllumination = voxi::Quality::Medium;
     vx.setSettings(live);
     check(vx.settings().globalIllumination == voxi::Quality::Medium && vx.settings().giCones == 6,
           "singleton seeded at GI Medium, giCones 6");
 
     fmt::ProjectDesc p;
-    p.giQuality = static_cast<int>(voxi::Quality::Epic);   // RENDER.GI 4
-    p.giCones   = 6;                                        // RENDER.GICONES 6, explicit
+    p.giQuality = static_cast<int>(voxi::Quality::Epic);
+    p.giCones   = 6;
 
     voxi::Settings s = vx.settings();
     voxi::applyManifestTwoPhase(p, s, [&]() {
@@ -319,13 +266,11 @@ static void testR2RegressionThroughTheSingleton() {
     check(s.giCones == 6, "two-phase apply: GICONES 6 survives even though Epic's ladder rung is 13");
     check(vx.settings().giCones == 6, "...and the singleton itself agrees");
 
-    // A MERGED SINGLE CALL WOULD HAVE GIVEN 13 -- proven, not merely asserted in a comment: reset the
-    // singleton to the same pre-edit live state, then apply both phases into ONE local Settings before
-    // ever calling setSettings, and commit once.
+    // Single merged call would have re-derived 13: reset, apply both phases to one buffer, commit once.
     vx.setSettings(live);
     voxi::Settings merged = vx.settings();
     voxi::applyManifestTiers(p, merged);
-    voxi::applyManifestKnobs(p, merged);   // giCones already forced to 6 here too (p.giCones is stated)
+    voxi::applyManifestKnobs(p, merged);
     check(merged.giCones == 6, "before the single commit, the merged buffer also holds the explicit 6");
     vx.setSettings(merged);
     check(vx.settings().giCones == 13,
@@ -335,11 +280,7 @@ static void testR2RegressionThroughTheSingleton() {
 
 // ---- applyCliOverrides: the command-line half (N7) ----
 
-// A log sink that only counts, which is all these tests need from it: the sentences themselves are
-// the HOST's (ProjectRenderApply.hpp hands back a CliOverrideNote and SandboxProject.cpp words it),
-// but WHETHER a note was produced is the shared header's own decision and is exactly the thing the
-// N7 race corrupts -- a knob that "looks unchanged" to take() logs nothing and applies nothing, so a
-// note count is a direct read of whether the override was seen at all.
+// Counts override notes. The HOST words the sentences; this test checks WHETHER they were produced.
 struct NoteCounter {
     u32 total = 0;
     u32 takes = 0;
@@ -356,21 +297,9 @@ struct NoteCounter {
     }
 };
 
-// EVERY RenderCliOverrides FIELD REACHES THE Settings FIELD IT NAMES. The collapse that created this
-// struct turned twenty separately-read `*Override_` members into twenty struct fields assigned at one
-// call site, and a single mistyped line there (cli.rtShadowDenoise = ptBouncesOverride_) would be
-// invisible: both are ints, both have the same sentinel, and the result is a flag that quietly drives
-// the wrong knob. This is the wiring check for that.
-//
-// PURE, no singleton: applyCliTiers/applyCliKnobs mutate a Settings& and nothing else, so with no
-// setSettings in between there is no derivation to confuse the reading -- each assertion is "the flag
-// wrote this field", full stop.
-//
-// --restir-visibility AND --rt-render-mode ARE ASKED FOR AT 0 ON PURPOSE. Both carry the
-// -1-means-absent sentinel precisely so that 0 stays an expressible ask, and a collapse that "tidied"
-// them onto the 0-means-absent convention the other four flags use would leave both unusable at
-// their most interesting value -- `--rt-render-mode 0` is the flag that exists so a ray-driven build
-// can be compared against the rasteriser at all.
+// Every RenderCliOverrides field reaches the Settings field it names (wiring check after collapse).
+// applyCliTiers/applyCliKnobs mutate Settings& only, no singleton derivation: "the flag wrote this field".
+// Note: --restir-visibility and --rt-render-mode use -1-sentinel so 0 stays expressible (0 = "No ray", "rasteriser").
 static void testCliEveryFlagReachesItsField() {
     AVER_INFO("=== CLI: every RenderCliOverrides field reaches the Settings field it names ===");
 
@@ -418,24 +347,14 @@ static void testCliEveryFlagReachesItsField() {
     check(s.giRestirVisibility == 0,  "--restir-visibility 0 reaches Settings::giRestirVisibility (0 is an ask)");
     check(s.denoiser,                 "--denoiser reaches Settings::denoiser");
 
-    // The tiers are Phase A's ONLY business and layeredBsdf is deliberately not one of them (it is a
-    // knob to setSettings' derivation, which is what decides the split). Three notes from Phase A and
-    // fifteen from Phase B accounts for every field set above, with nothing double-applied.
+    // 3 notes from Phase A (tier takes), 15 from Phase B (knob takes + giIntensity special case).
     check(notes.total == 18 && notes.takes == 17 && notes.giIntensities == 1 && notes.forceOffs == 0,
           "one note per flag that won: 3 tier takes, 14 knob takes, 1 --gi-intensity, 0 force-offs");
 }
 
-// ABSENT IS ABSENT, AND THE THREE SENTINELS ARE NOT INTERCHANGEABLE. A default-constructed
-// RenderCliOverrides means "no render flag was typed" and must leave a fully non-default Settings
-// byte-identical -- and both phases must SAY so by returning false, because that bool is what gates
-// vx.setSettings() at the call site. A phase that returned true on an empty command line would push
-// a redundant commit through the renderer on every project open.
-//
-// THE FOUR 0-MEANS-ABSENT FLAGS ARE THE POINT of the second half: msaa, rtShadowRays,
-// rtPixelsPerRayTile and giUpdateInterval default to 0, and 0 is NOT a request -- "zero samples",
-// "zero rays", "a zero-pixel tile", "revoxelise every zero frames". take() only treats a NEGATIVE as
-// absent, so if applyCliKnobs' `> 0` guards were ever dropped in favour of "take() handles it", each
-// of these four would write a 0 nobody asked for into a running renderer.
+// Absent flags (default RenderCliOverrides) leave Settings untouched, both phases return false.
+// Four flags use 0-means-absent: msaa, rtShadowRays, rtPixelsPerRayTile, giUpdateInterval default to 0.
+// take() treats NEGATIVE as absent, so applyCliKnobs' `> 0` guards must not be dropped.
 static void testCliAbsentOverridesLeaveSettingsAlone() {
     AVER_INFO("=== CLI: a default RenderCliOverrides leaves Settings untouched (all three sentinels) ===");
 
@@ -460,12 +379,10 @@ static void testCliAbsentOverridesLeaveSettingsAlone() {
     check(!voxi::applyCliKnobs(none, s, notes), "Phase B reports no change, so the caller skips its commit");
     check(notes.total == 0, "an empty command line prints nothing");
     check(settingsEqual(s, before), "an empty command line leaves every Settings field exactly as it was");
-    // settingsEqual predates giRestirVisibility and does not compare it (see its own comment for what
-    // "unchanged" means there), so --restir-visibility's absent case is asserted by name.
+    // settingsEqual doesn't compare giRestirVisibility.
     check(s.giRestirVisibility == 4, "...giRestirVisibility included, which settingsEqual does not cover");
 
-    // The four 0-sentinel flags, stated at their own absent value against a Settings that is nowhere
-    // near 0 -- msaa X8, 7 rays, a 3-pixel tile, a 5-frame interval. Each must survive.
+    // Four 0-sentinel flags against non-zero Settings: each must survive being stated at 0.
     voxi::RenderCliOverrides zeros;
     zeros.msaa               = 0;
     zeros.rtShadowRays       = 0;
@@ -478,11 +395,7 @@ static void testCliAbsentOverridesLeaveSettingsAlone() {
     check(notes.total == 0, "...and nothing claimed to have outranked anything");
 }
 
-// --no-gi/--no-rt ARE BOOLEANS, NOT -1-SENTINEL INTEGERS, which is exactly why they were left behind
-// when the flag-outranks-manifest rule was "closed" for integers -- the third instance of that defect
-// in SandboxProject.cpp's own record. They belong to Phase A because forcing a tier Off IS a tier
-// change, and a tier change has to be committed before any knob flag is compared against what follows
-// from it.
+// --no-gi/--no-rt are boolean Phase A tier changes, not integer sentinels. Inert when already Off.
 static void testCliForceOffIsAPhaseATierChange() {
     AVER_INFO("=== CLI: --no-gi/--no-rt are Phase A tier changes, and are inert when already Off ===");
 
@@ -500,28 +413,14 @@ static void testCliForceOffIsAPhaseATierChange() {
     check(notes.forceOffs == 2 && notes.takes == 0,
           "both force-offs said so out loud, and neither was mistaken for an integer take");
 
-    // ALREADY OFF IS NOT A CHANGE: `s` is untouched, so the caller must not be told to commit. Run
-    // straight on, with `s` still at Off from above.
+    // Already Off: not a change, caller must not be told to commit.
     NoteCounter again;
     check(!voxi::applyCliTiers(cli, s, again), "--no-gi/--no-rt against an already-Off tier is inert");
     check(again.total == 0, "...and prints nothing, rather than claiming to have won");
 }
 
-// N7, THROUGH THE LIVE SINGLETON: the command-line twin of testR2RegressionThroughTheSingleton above,
-// and THE REASON COLLAPSING THIS APPLY WAS SAFE TO ATTEMPT AT ALL. Live RT Epic, rtShadowRays 8 (Epic's
-// own ladder rung); the command line says `--rt 1 --rt-rays 8` -- explicitly asking for the SAME ray
-// count Epic already had.
-//
-// THIS TEST FAILS IF THE TWO PHASES ARE EVER MERGED. take()'s "ignore an override already equal to the
-// live value" rule reads --rt-rays 8 against the OLD tier's live 8, so in a merged call it looks like
-// a no-op, is never marked overridden, and rides into the single setSettings() still at 8 -- at which
-// point setSettings sees rayTracing change Epic -> Low with rtShadowRays "untouched" and rederives it
-// to Low's rung of 1, silently discarding the 8 a human typed. The second half below proves that,
-// rather than asserting it in a comment: it runs the merged version and watches the 8 turn into a 1.
-//
-// PTTest carried the real instance (RENDER.RAYTRACING 4, RENDER.RTSHADOWRAYS 4 opened with
-// `--rt 1 --rt-rays 4`); the numbers here are Epic's 8 because ladder::rtShadowRays makes Low and
-// Medium both 1, so Epic is the rung that keeps this race visible if the ladder is retuned.
+// N7: two-phase CLI apply keeps explicit override even when it matches the old tier's value.
+// Single merged call would re-derive the new tier's value, discarding the explicit ask.
 static void testN7CliPhaseOrderThroughTheSingleton() {
     AVER_INFO("=== N7: the two-phase CLI apply keeps --rt-rays 8 against --rt 1 ===");
     voxi::Renderer& vx = voxi::Renderer::get();
@@ -529,15 +428,15 @@ static void testN7CliPhaseOrderThroughTheSingleton() {
 
     voxi::Settings seed{};
     seed.rayTracing   = voxi::Quality::Epic;
-    seed.rtShadowRays = 8;                     // Epic's own ladder rung, stated rather than derived
+    seed.rtShadowRays = 8;
     vx.setSettings(seed);
     const voxi::Settings live = vx.settings();
     check(live.rayTracing == voxi::Quality::Epic && live.rtShadowRays == 8,
           "singleton seeded at RT Epic, rtShadowRays 8");
 
     voxi::RenderCliOverrides cli;
-    cli.rayTracing   = static_cast<int>(voxi::Quality::Low);   // --rt 1
-    cli.rtShadowRays = 8;                                       // --rt-rays 8, explicit
+    cli.rayTracing   = static_cast<int>(voxi::Quality::Low);
+    cli.rtShadowRays = 8;
 
     NoteCounter notes;
     voxi::Settings s = vx.settings();
@@ -552,9 +451,7 @@ static void testN7CliPhaseOrderThroughTheSingleton() {
     check(notes.total == 2,
           "both flags were SEEN: Phase B compared --rt-rays against Low's derived 1, not Epic's 8");
 
-    // A MERGED SINGLE COMMIT WOULD HAVE GIVEN 1 -- proven, not merely asserted: reset the singleton to
-    // the same pre-flag live state, run both phases into ONE buffer without committing in between,
-    // and commit once.
+    // Single merged call would re-derive Low's value: proven by applying both phases to one buffer.
     vx.setSettings(live);
     NoteCounter mergedNotes;
     voxi::Settings merged = vx.settings();
@@ -572,24 +469,25 @@ static void testN7CliPhaseOrderThroughTheSingleton() {
 
 // ---- captureVoxiSettings ----
 
+// Tier change with unedited knob: follows new tier's ladder (-1).
 static void testCaptureTierChangeUneditedKnobFollows() {
     AVER_INFO("=== capture: a tier change with the knob left unedited follows the new tier (-1) ===");
     const voxi::DeviceInfo d = fullyCapableDevice();
 
     voxi::Settings live{};
     live.globalIllumination = voxi::Quality::Low;
-    live.giCones = voxi::ladder::giCones(voxi::Quality::Low);   // 3, following Low's own rung
+    live.giCones = voxi::ladder::giCones(voxi::Quality::Low);
 
     voxi::Settings requested = live;
-    requested.globalIllumination = voxi::Quality::Epic;   // GI 2 -> 4
-    // giCones left completely unedited here -- still Low's 3, not Epic's 13
+    requested.globalIllumination = voxi::Quality::Epic;
 
     fmt::ProjectDesc p;
-    p.giCones = 7;   // an existing pin -- must be cleared back to -1 by this rule
+    p.giCones = 7;
     voxi::captureVoxiSettings(p, requested, live, d, /*overallFollowMask=*/0);
     check(p.giCones == -1, "a tier change with the knob unedited clears the pin back to -1");
 }
 
+// Overall-follow bit forces -1 regardless of knob values.
 static void testCaptureOverallMaskWins() {
     AVER_INFO("=== capture: an Overall-follow bit forces -1 regardless of the knob values ===");
     const voxi::DeviceInfo d = fullyCapableDevice();
@@ -599,7 +497,7 @@ static void testCaptureOverallMaskWins() {
     live.rtShadowRays = 1;
 
     voxi::Settings requested = live;
-    requested.rtShadowRays = 4;   // looks like an explicit edit...
+    requested.rtShadowRays = 4;
 
     fmt::ProjectDesc p;
     p.rtShadowRays = 1;
@@ -610,6 +508,7 @@ static void testCaptureOverallMaskWins() {
           "just wrote this knob itself, so the manifest goes back to following the tier");
 }
 
+// Unedited knob at unchanged tier: manifest stays exactly as it was.
 static void testCaptureUneditedKnobLeavesManifestAlone() {
     AVER_INFO("=== capture: an unedited knob at an unchanged tier leaves the manifest exactly as it was ===");
     const voxi::DeviceInfo d = fullyCapableDevice();
@@ -617,7 +516,7 @@ static void testCaptureUneditedKnobLeavesManifestAlone() {
     voxi::Settings live{};
     live.globalIllumination = voxi::Quality::Medium;
     live.giCones = 6;
-    const voxi::Settings requested = live;   // nothing changed at all
+    const voxi::Settings requested = live;
 
     {
         fmt::ProjectDesc p;
@@ -633,6 +532,7 @@ static void testCaptureUneditedKnobLeavesManifestAlone() {
     }
 }
 
+// Explicit edit at unchanged tier: captured verbatim.
 static void testCaptureExplicitEditIsPinned() {
     AVER_INFO("=== capture: an explicit edit at an unchanged tier is captured verbatim ===");
     const voxi::DeviceInfo d = fullyCapableDevice();
@@ -641,7 +541,7 @@ static void testCaptureExplicitEditIsPinned() {
     live.globalIllumination = voxi::Quality::Medium;
     live.giCones = 6;
     voxi::Settings requested = live;
-    requested.giCones = 9;   // tier unchanged, knob edited
+    requested.giCones = 9;
 
     fmt::ProjectDesc p;
     p.giCones = -1;
@@ -649,10 +549,7 @@ static void testCaptureExplicitEditIsPinned() {
     check(p.giCones == 9, "an edited giCones 9 is captured as 9");
 }
 
-// captureKnob's three live branches, exercised through captureVoxiSettings for RESTIRVISIBILITY
-// specifically -- the giCones tests above already prove captureKnob's own logic; these prove L2's new
-// call site (the fourth GI-group captureKnob, added beside voxelResolution/giCones/giUpdateInterval)
-// actually wires giRestirVisibility/project.restirVisibility into it correctly.
+// giRestirVisibility: tier change unedited knob follows new tier (-1).
 static void testCaptureRestirVisibilityTierChangeUneditedKnobFollows() {
     AVER_INFO("=== capture: a GI tier change with RESTIRVISIBILITY unedited follows the new tier (-1) ===");
     const voxi::DeviceInfo d = fullyCapableDevice();
@@ -662,15 +559,15 @@ static void testCaptureRestirVisibilityTierChangeUneditedKnobFollows() {
     live.giRestirVisibility = voxi::ladder::giRestirVisibility(voxi::Quality::Low);
 
     voxi::Settings requested = live;
-    requested.globalIllumination = voxi::Quality::Epic;   // GI Low -> Epic
-    // giRestirVisibility left completely unedited here -- still Low's ladder value, not Epic's
+    requested.globalIllumination = voxi::Quality::Epic;
 
     fmt::ProjectDesc p;
-    p.restirVisibility = 1;   // an existing pin -- must be cleared back to -1 by this rule
+    p.restirVisibility = 1;
     voxi::captureVoxiSettings(p, requested, live, d, /*overallFollowMask=*/0);
     check(p.restirVisibility == -1, "a GI tier change with RESTIRVISIBILITY unedited clears the pin to -1");
 }
 
+// giRestirVisibility: Overall-follow bit forces -1 regardless of value.
 static void testCaptureRestirVisibilityOverallMaskWins() {
     AVER_INFO("=== capture: an Overall-follow bit forces RESTIRVISIBILITY back to -1 regardless of value ===");
     const voxi::DeviceInfo d = fullyCapableDevice();
@@ -680,7 +577,7 @@ static void testCaptureRestirVisibilityOverallMaskWins() {
     live.giRestirVisibility = 2;
 
     voxi::Settings requested = live;
-    requested.giRestirVisibility = 3;   // looks like an explicit edit...
+    requested.giRestirVisibility = 3;
 
     fmt::ProjectDesc p;
     p.restirVisibility = 2;
@@ -691,6 +588,7 @@ static void testCaptureRestirVisibilityOverallMaskWins() {
           "giCones");
 }
 
+// giRestirVisibility: explicit edit at unchanged tier captured verbatim.
 static void testCaptureRestirVisibilityExplicitEditIsPinned() {
     AVER_INFO("=== capture: an explicit RESTIRVISIBILITY edit at an unchanged tier is captured verbatim ===");
     const voxi::DeviceInfo d = fullyCapableDevice();
@@ -699,7 +597,7 @@ static void testCaptureRestirVisibilityExplicitEditIsPinned() {
     live.globalIllumination = voxi::Quality::Medium;
     live.giRestirVisibility = 2;
     voxi::Settings requested = live;
-    requested.giRestirVisibility = 0;   // tier unchanged, knob edited (picked "No ray")
+    requested.giRestirVisibility = 0;
 
     fmt::ProjectDesc p;
     p.restirVisibility = -1;
@@ -707,25 +605,22 @@ static void testCaptureRestirVisibilityExplicitEditIsPinned() {
     check(p.restirVisibility == 0, "an edited giRestirVisibility 0 is captured as 0, not dropped as falsy");
 }
 
-// N5: on a device that cannot run RT or mesh shaders at all, requested == live for those fields
-// (setSettings already clamped both to Off/false, every apply) must not be read as "the user
-// reaffirmed this value" -- an unrelated edit on this machine must not overwrite a teammate's pin for
-// hardware this machine simply does not have.
+// N5: no-RT device's own clamp must not overwrite a teammate's RT/mesh-shader pin.
 static void testN5NoRtDeviceLeavesManifestAlone() {
     AVER_INFO("=== N5: a no-RT device's own clamp does not overwrite a teammate's RT/mesh-shader pin ===");
     const voxi::DeviceInfo d = noRtDevice();
 
     voxi::Settings live{};
-    live.rayTracing   = voxi::Quality::Off;   // already clamped by this device
-    live.rtShadowRays = 4;                     // range-clamped only, not device-clamped
-    live.meshShaders  = false;                 // already clamped by this device
+    live.rayTracing   = voxi::Quality::Off;   // already clamped
+    live.rtShadowRays = 4;                     // range-clamped only
+    live.meshShaders  = false;                 // already clamped
 
-    const voxi::Settings requested = live;   // an unrelated edit -- nothing about RT/mesh changed
+    const voxi::Settings requested = live;
 
     fmt::ProjectDesc p;
-    p.rayTracing   = 4;   // RENDER.RAYTRACING 4 -- a teammate's pin for hardware this machine lacks
-    p.rtShadowRays = 4;   // RENDER.RTSHADOWRAYS 4
-    p.meshShaders  = 1;   // RENDER.MESHSHADERS 1
+    p.rayTracing   = 4;
+    p.rtShadowRays = 4;
+    p.meshShaders  = 1;
 
     voxi::captureVoxiSettings(p, requested, live, d, 0);
     check(p.rayTracing == 4, "RAYTRACING stays 4 -- this device's Off clamp is not read as a user choice");
@@ -733,13 +628,12 @@ static void testN5NoRtDeviceLeavesManifestAlone() {
     check(p.meshShaders == 1, "MESHSHADERS stays 1 for the same reason as RAYTRACING");
 }
 
-// manifestContradictions: RT tier Off makes a GIMODE/RTRENDERMODE pin into a reportable contradiction;
-// an unset ask (-1) is simply not checked.
+// manifestContradictions: RT Off turns GIMODE/RTRENDERMODE pins into reports; unset asks (-1) unchecked.
 static void testManifestContradictions() {
     AVER_INFO("=== manifestContradictions: RT Off turns GIMODE/RTRENDERMODE pins into reports ===");
-    const voxi::DeviceInfo d = fullyCapableDevice();   // HAS RT hardware...
+    const voxi::DeviceInfo d = fullyCapableDevice();
     voxi::Settings s{};
-    s.rayTracing = voxi::Quality::Off;                  // ...but this project's RT tier is Off
+    s.rayTracing = voxi::Quality::Off;
     s.globalIllumination = voxi::Quality::Medium;
 
     voxi::ManifestAsks asks;
@@ -749,13 +643,12 @@ static void testManifestContradictions() {
     u32 n = voxi::manifestContradictions(s, d, asks, reports);
     check(n == 2, "GIMODE 1 and RTRENDERMODE 1 both contradict RT Off -- two reports");
 
-    asks.giMode = -1;   // unset
+    asks.giMode = -1;
     n = voxi::manifestContradictions(s, d, asks, reports);
     check(n == 1, "with GIMODE unset, only the RTRENDERMODE contradiction remains");
 }
 
-// N9: hasRenderSettings used to be blind to a manifest stating only GIMODE or only DENOISER -- both
-// loaders' whole apply block was gated on this one predicate, so either key alone was silently ignored.
+// N9: hasRenderSettings sees GIMODE and DENOISER alone (was blind to both).
 static void testHasRenderSettingsSeesGiModeAndDenoiser() {
     AVER_INFO("=== N9: hasRenderSettings sees a manifest stating only GIMODE or DENOISER ===");
     fmt::ProjectDesc p;
@@ -769,27 +662,20 @@ static void testHasRenderSettingsSeesGiModeAndDenoiser() {
     check(p2.hasRenderSettings(), "DENOISER alone is also enough");
 }
 
-// hasRenderSettings, extended to this wave's two new keys, both stated at 0 deliberately -- the same
-// "not just >= 0 as a truthy check" edge N9's own GIMODE/DENOISER case would have missed had either of
-// them meant "Off" at zero: RESTIRVISIBILITY 0 is "No ray" and AVERSR 0 is "Off", both legitimate
-// stated values the `>= 0` tests in hasRenderSettings() must still catch.
+// hasRenderSettings: RESTIRVISIBILITY and AVERSR at 0 are legitimate (not just >= 0 truthy check).
 static void testHasRenderSettingsSeesRestirVisibilityAndAverSr() {
     AVER_INFO("=== hasRenderSettings sees a manifest stating only RESTIRVISIBILITY or only AVERSR, even at 0 ===");
     fmt::ProjectDesc p;
-    p.restirVisibility = 0;   // "No ray", not "absent"
+    p.restirVisibility = 0;
     check(p.hasRenderSettings(), "RESTIRVISIBILITY 0 alone is enough to trip hasRenderSettings");
 
     fmt::ProjectDesc p2;
-    p2.averSr = 0;   // "Off", not "absent"
+    p2.averSr = 0;
     check(p2.hasRenderSettings(), "AVERSR 0 alone is also enough");
 }
 
-// Round-trip: RENDER.RESTIRVISIBILITY and RENDER.AVERSR both write, parse back, and -- rewritten
-// against a manifest that already states them -- do not duplicate. isOwnedKey's own comment
-// (OcProject.cpp) names exactly this failure mode: a key appended to kOwned's list but missing from
-// isOwnedKey's array is copied through as unowned text AND re-emitted by appendKey, so the manifest
-// grows a duplicate line on every save and the STALE (first, copied-through) line wins on the next
-// parse -- a change that appears to work and silently reverts on reload.
+// Round-trip: RESTIRVISIBILITY and AVERSR write, parse, and rewrite without duplication.
+// isOwnedKey check prevents keys appended to kOwned but missing from isOwnedKey's array (copy-through + re-emit = duplicate).
 static void testRestirVisibilityAndAverSrRoundTrip() {
     AVER_INFO("=== round-trip: RENDER.RESTIRVISIBILITY and RENDER.AVERSR write, parse and rewrite cleanly ===");
     fmt::ProjectDesc p;
@@ -807,10 +693,7 @@ static void testRestirVisibilityAndAverSrRoundTrip() {
     check(reparsed.restirVisibility == 2, "RESTIRVISIBILITY round-trips through parse");
     check(reparsed.averSr == 1, "AVERSR round-trips through parse");
 
-    // Rewriting against the manifest that already states them (not against a fresh ProjectDesc{}) is
-    // the actual isOwnedKey path -- writeOcproject's "copy every unowned line through, splice owned
-    // keys in once" logic only has something to walk over and possibly duplicate when `existing`
-    // already contains the lines in question.
+    // Rewrite against existing manifest: the isOwnedKey path that could duplicate keys.
     const std::string second = fmt::writeOcproject(reparsed, first);
     auto countOccurrences = [](const std::string& haystack, const std::string& needle) {
         int n = 0;
@@ -822,8 +705,7 @@ static void testRestirVisibilityAndAverSrRoundTrip() {
     check(countOccurrences(second, "RENDER.AVERSR") == 1,
           "RENDER.AVERSR appears exactly once after a rewrite, not duplicated");
 
-    // RENDER.FRAMEINTERP: the same device-level shape as AVERSR -- written when set, once, and absent
-    // (no line) when left at -1, so a project that never touched it is byte-identical.
+    // FRAMEINTERP: same device-level shape as AVERSR.
     fmt::ProjectDesc fg;
     fg.name = "RoundTrip";
     fg.frameInterp = 1;
@@ -837,28 +719,18 @@ static void testRestirVisibilityAndAverSrRoundTrip() {
     check(first.find("RENDER.FRAMEINTERP") == std::string::npos, "an unset FRAMEINTERP writes no line");
 }
 
-// ---- RENDER.RESTIRHISTORY (Settings::giRestirMaxHistory) -- deliberately NOT tier-derived ---------
-//
-// Four properties, mirroring the RESTIRVISIBILITY cases above but adapted to a PLAIN knob's shape
-// (giMode/denoiser's own shape, not restirVisibility's captureKnob/N6 one): an absent key leaves
-// Settings alone rather than following a ladder rung, every legal value applies, capture is
-// unconditional, and the manifest round-trips cleanly (written once, no duplicate on rewrite, no line
-// when absent).
+// ---- RENDER.RESTIRHISTORY: NOT tier-derived, unlike RESTIRVISIBILITY ----
+// Absent leaves Settings alone (not ladder). Every legal value applies. Capture unconditional. Writes once, no duplicate.
 
-// The mirror image of testN6RestirVisibilityFollowsTier (above): where an absent RESTIRVISIBILITY
-// resets to the tier's ladder value even across a tier CHANGE, an absent RESTIRHISTORY must leave
-// whatever was already live in Settings untouched -- proven with a real GI tier change in the same
-// apply specifically because that is the one case a tier-derived knob would react to and this field,
-// having no ladder rung at all (Voxi.hpp's own comment on giRestirMaxHistory), must not.
+// Absent RESTIRHISTORY leaves Settings::giRestirMaxHistory alone even across a tier change.
 static void testRestirHistoryAbsentLeavesSettingsAlone() {
     AVER_INFO("=== RESTIRHISTORY is NOT tier-derived: absent leaves Settings::giRestirMaxHistory alone ===");
     voxi::Settings s{};
     s.globalIllumination = voxi::Quality::Low;
-    s.giRestirMaxHistory = 5;   // stale -- e.g. a previous project's console-set value, still live
+    s.giRestirMaxHistory = 5;
 
     fmt::ProjectDesc p;
-    p.giQuality = static_cast<int>(voxi::Quality::Epic);   // a real GI tier CHANGE, Low -> Epic
-    // p.restirHistory intentionally left at its default (-1, absent)
+    p.giQuality = static_cast<int>(voxi::Quality::Epic);
 
     voxi::applyManifestTiers(p, s);
     voxi::applyManifestKnobs(p, s);
@@ -866,9 +738,7 @@ static void testRestirHistoryAbsentLeavesSettingsAlone() {
           "an absent RESTIRHISTORY leaves giRestirMaxHistory at 5 even though the GI tier just changed");
 }
 
-// Every value the Project Settings slider offers (0..8) reaches Settings::giRestirMaxHistory verbatim.
-// The engine's own range is [0,31] (Voxi.cpp's setSettings clamp) but the UI never offers above 8 --
-// see SandboxSettings.cpp's own comment on why -- so 0..8 is what this test covers.
+// Every legal value (0..8, the UI slider range) applies verbatim.
 static void testRestirHistoryEveryLegalValueApplies() {
     AVER_INFO("=== every legal RENDER.RESTIRHISTORY value (0..8) applies to Settings::giRestirMaxHistory ===");
     for (int v = 0; v <= 8; ++v) {
@@ -882,24 +752,18 @@ static void testRestirHistoryEveryLegalValueApplies() {
     }
 }
 
-// capture: RESTIRHISTORY writes the requested value UNCONDITIONALLY, the same "EVERYTHING ELSE" rule
-// giMode/denoiser already use (captureVoxiSettings' own comment) -- never captureKnob's four-branch
-// tier-aware rule restirVisibility uses. Proven by re-running the exact three conditions that change
-// captureKnob's answer for giCones/restirVisibility (a GI tier change with the knob unedited, an
-// Overall-follow bit, and nothing edited at all) and showing none of them stop RESTIRHISTORY from
-// landing at the requested value.
+// Capture: RESTIRHISTORY unconditional, not tier-aware like RESTIRVISIBILITY.
 static void testCaptureRestirHistoryIsUnconditional() {
     AVER_INFO("=== capture: RESTIRHISTORY writes the requested value unconditionally, unlike RESTIRVISIBILITY ===");
     const voxi::DeviceInfo d = fullyCapableDevice();
 
     {
-        // A GI tier change, knob itself unedited -- captureKnob would clear a tier-derived pin to -1
-        // here (testCaptureRestirVisibilityTierChangeUneditedKnobFollows, above).
+        // GI tier change, knob unedited: tier-derived would reset to -1.
         voxi::Settings live{};
         live.globalIllumination = voxi::Quality::Low;
         live.giRestirMaxHistory = 3;
         voxi::Settings requested = live;
-        requested.globalIllumination = voxi::Quality::Epic;   // GI Low -> Epic; history left unedited
+        requested.globalIllumination = voxi::Quality::Epic;
 
         fmt::ProjectDesc p;
         p.restirHistory = -1;
@@ -908,8 +772,7 @@ static void testCaptureRestirHistoryIsUnconditional() {
               "a GI tier change with RESTIRHISTORY unedited still writes 3, not -1 the way a tier-derived knob would");
     }
     {
-        // An Overall-follow bit on the GI group -- captureKnob forces -1 regardless of value here
-        // (testCaptureRestirVisibilityOverallMaskWins, above).
+        // Overall-follow bit on GI group: tier-derived would force -1.
         voxi::Settings live{};
         live.globalIllumination = voxi::Quality::Medium;
         live.giRestirMaxHistory = 1;
@@ -924,23 +787,20 @@ static void testCaptureRestirHistoryIsUnconditional() {
               "the GI group's Overall-follow bit is ignored -- RESTIRHISTORY still captures the requested 4");
     }
     {
-        // Nothing edited at all -- captureKnob leaves an existing pin exactly as it was
-        // (testCaptureUneditedKnobLeavesManifestAlone, above, proves this for giCones).
+        // Nothing edited: unconditional still writes the (unchanged) requested value.
         voxi::Settings live{};
         live.giRestirMaxHistory = 0;
         const voxi::Settings requested = live;
 
         fmt::ProjectDesc p;
-        p.restirHistory = 6;   // an existing pin from a stale hand-edit
+        p.restirHistory = 6;
         voxi::captureVoxiSettings(p, requested, live, d, 0);
         check(p.restirHistory == 0,
               "nothing edited: RESTIRHISTORY still writes the (unchanged) requested 0 over the stale pin 6");
     }
 }
 
-// Round-trip: RENDER.RESTIRHISTORY writes, parses back, does not duplicate on a rewrite against a
-// manifest that already states it (isOwnedKey's own failure mode -- see testRestirVisibilityAndAverSrRoundTrip's
-// comment above for the exact mechanism this guards against), and writes no line at all when absent.
+// Round-trip: RESTIRHISTORY writes, parses, rewrites without duplication.
 static void testRestirHistoryRoundTrip() {
     AVER_INFO("=== round-trip: RENDER.RESTIRHISTORY writes, parses and rewrites cleanly ===");
     fmt::ProjectDesc p;

@@ -10,8 +10,7 @@
 namespace aver::rhi {
 namespace {
 
-// corner.x: 0 at endpoint a, 1 at endpoint b. corner.y: -1/+1 side. Matches EditorLineVertex's own
-// comment and VSEditorLine's read of i.corner.
+// corner.x: 0 at endpoint a, 1 at endpoint b; corner.y: ±1 side (matches VSEditorLine).
 constexpr f32 kCorner[4][2] = {{0.0f, -1.0f}, {0.0f, 1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}};
 
 // A display colour as RGBA8Unorm, R in the low byte (0xAABBGGRR), opaque.
@@ -23,12 +22,11 @@ u32 packDisplay(f32 r, f32 g, f32 b) {
     return q(r) | (q(g) << 8) | (q(b) << 16) | (255u << 24);
 }
 
-// Unreal's wireframe colours (UStaticMeshComponent::GetWireframeColor), display sRGB: static meshes
-// cyan, movable ones magenta.
+// Unreal's wireframe colors: cyan (static), magenta (movable).
 constexpr f32 kWireStatic[3]  = {0.0f, 1.0f, 1.0f};
 constexpr f32 kWireMovable[3] = {1.0f, 0.0f, 1.0f};
 
-// The CPU twin of the prelude's srgbToLin, for a colour written to a target that encodes sRGB itself.
+// CPU-side sRGB to linear conversion (matches prelude's srgbToLin).
 f32 srgbToLinear(f32 c) {
     return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
 }
@@ -81,9 +79,7 @@ bool EditorLines::init(IResourceFactory& res) {
         AVER_WARN("[EditorLines] the wireframe view's shaders failed to compile -- Wireframe will show "
                   "only the editor's own lines");
 
-    // One binding set per frame in flight, per depth-sample flavour, so a rewritten descriptor
-    // (setSrv in replay()) never reaches a draw from an earlier frame still executing -- the same
-    // reasoning ViewportIconRenderer documents for its own per-icon sets.
+    // One binding set per frame in flight per depth-sample flavor; prevents descriptor race with earlier frames.
     for (u32 i = 0; i < kFramesInFlight; ++i) {
         BindingSetDesc bsd;
         bsd.srvCount = 1;
@@ -299,8 +295,7 @@ bool EditorLines::buildPipelines(u32 depthSamples, Format targetFormat) {
     psoMs_ = 0;
     wirePso_ = 0;
 
-    // The wireframe view: the engine's own MeshVertex (the default vertex layout), edges only, no
-    // depth and no blending. Its failure is logged and leaves the lines untouched.
+    // Wireframe view: MeshVertex layout, edges only, no depth or blending.
     if (wireVs_ && wirePs_) {
         GraphicsPipelineDesc wd;
         wd.vs = wireVs_;
@@ -314,7 +309,7 @@ bool EditorLines::buildPipelines(u32 depthSamples, Format targetFormat) {
         wd.renderTargetCount = 1;
         wd.renderTargets[0] = targetFormat;
         wd.sampleCount = 1;
-        wd.layout.constantDwords[kObjectConstantRegister] = kObjectConstantDwords;   // see below
+        wd.layout.constantDwords[kObjectConstantRegister] = kObjectConstantDwords;
         wirePso_ = res_->createGraphicsPipeline(wd);
         if (!wirePso_)
             AVER_WARN("[EditorLines] the wireframe view's pipeline failed to build (target format {})",
@@ -324,8 +319,7 @@ bool EditorLines::buildPipelines(u32 depthSamples, Format targetFormat) {
     GraphicsPipelineDesc gd;
     gd.vs = vs_;
 
-    // Positions split xy + z (no three-component float Format), in editor_lines.hlsl's ELIn order,
-    // which is also the Vulkan attribute-location order.
+    // Positions: xy + z split (no RG32B32Float format); layout order matches editor_lines.hlsl's ELIn.
     gd.vertexLayout.stride = sizeof(EditorLineVertex);
     gd.vertexLayout.attribCount = 6;
     gd.vertexLayout.attribs[0] = {VertexSemantic::Position, 0, Format::RG32Float,
@@ -353,12 +347,9 @@ bool EditorLines::buildPipelines(u32 depthSamples, Format targetFormat) {
     gd.renderTargets[0] = targetFormat;
     gd.sampleCount = 1;   // the overlay target itself is never multisampled; depthSamples is the SRV's
     gd.layout.srvCount = 1;
-    // b1 as root constants, DECLARED: an undeclared slot is a root CBV on D3D12, and replay()'s
-    // setConstants was refused on every draw ("slot 1 declares constantDwords 0") -- ActorPreview
-    // declares its object block the same way.
+    // b1 declared as root constants (undeclared slot becomes root CBV on D3D12).
     gd.layout.constantDwords[kObjectConstantRegister] = kObjectConstantDwords;
-    // Declared, not reflected: Vulkan types every binding in the layout, and the two pixel shaders
-    // read t0 as different kinds (PipelineLayout's own comment on why reflection is not enough).
+    // Declared, not reflected: Vulkan requires explicit binding declaration; pixel shaders read t0 as different kinds.
     gd.layout.slotKindsDeclared = true;
 
     gd.ps = ps_;
@@ -384,9 +375,8 @@ void EditorLines::replay(IRenderContext& ctx, u32 targetW, u32 targetH, const f3
                           bool firstOfFrame, bool lastOfFrame) {
     if (firstOfFrame) retireTick();
 
-    // Cleared on every path out of this function, including every early return below, so a frame
-    // that never reaches this call (suppressed, device lost) doesn't carry stale draws forward. Not
-    // after a frame's first of two replays (frame interpolation), which leaves the queue for the second.
+    // Cleared on every path out, including early returns, so device-lost frames don't carry stale draws.
+    // Not after frame interpolation's first replay, which leaves the queue for the second.
     struct ClearOnExit {
         std::vector<Draw>* q;
         std::vector<WireDraw>* w;
@@ -441,9 +431,7 @@ void EditorLines::replay(IRenderContext& ctx, u32 targetW, u32 targetH, const f3
     const PipelineHandle pso = useMs ? psoMs_ : pso_;
     if (queue_.empty() || !pso) { ctx.popMarker(); return; }
 
-    // Advance to the next frame-in-flight slot BEFORE writing its descriptor, so this replay's
-    // setSrv can't race a draw from an earlier frame still reading the previous contents of the
-    // slot it is about to reuse (three replays back, by construction).
+    // Advance frame-in-flight slot before writing descriptor to prevent race with earlier frames.
     frame_ = (frame_ + 1) % kFramesInFlight;
     const BindingSetHandle set = useMs ? depthSetMs_[frame_] : depthSet_[frame_];
     if (!set) { ctx.popMarker(); return; }
@@ -462,9 +450,7 @@ void EditorLines::replay(IRenderContext& ctx, u32 targetW, u32 targetH, const f3
         const Mesh& m = meshes_[d.mesh];
         if (!m.alive || !m.vb || !m.ib) continue;
 
-        // PerObject (shared_prelude.hlsl), 32 dwords: gWorld[0..15], gBaseColor[16..19],
-        // gMaterial[20..23], gShadingModel/gReflectance/gF90/_objPad[24..27] (unused here, left
-        // zero), gEmissive[28..31].
+        // PerObject (shared_prelude.hlsl): gWorld[0..15], gBaseColor/gWidth/gDepthTest/gViewportSize/gIsTargetSrgb/gViewportMin/gTargetSize[16..27], gEmissive[28..31].
         f32 consts[kObjectConstantDwords] = {};
         std::memcpy(consts, d.world, sizeof(f32) * 16);
         consts[16] = d.width;

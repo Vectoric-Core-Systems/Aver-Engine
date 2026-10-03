@@ -2,13 +2,10 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
-// The concrete Dear ImGui implementation of aver::rhi::d3d12::IUiBackend. Every ImGui/ImGui_Impl*
-// symbol Aver.RHI.D3D12 (D3D12Device.cpp) used to reference directly now lives only here, moved
-// verbatim rather than rewritten -- see UiBackend.hpp for why the split exists and what stayed
-// behind (the generic descriptor-heap plumbing that has nothing to do with ImGui).
+// Dear ImGui implementation of aver::rhi::d3d12::IUiBackend (moved from D3D12Device.cpp).
 #include "aver/rhi/d3d12/ImGuiUiBackend.hpp"
 #include "aver/core/Log.hpp"
-#include "aver/platform/FileSystem.hpp"   // userDataDir, for where the layout ini lives
+#include "aver/platform/FileSystem.hpp"
 
 #include <string>
 
@@ -16,8 +13,7 @@
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_dx12.h"
-// Not exposed by imgui_impl_win32.h's own declarations; D3D12Device.cpp forward-declared it the same
-// way to reach it from its own raw Win32 message thunk, before this module existed.
+// Forward-declared from imgui_impl_win32.h (not in its public API).
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 using Microsoft::WRL::ComPtr;
@@ -25,26 +21,8 @@ using Microsoft::WRL::ComPtr;
 namespace aver::rhi::d3d12 {
 namespace {
 
-// Slots in the UI's own descriptor pool. ImGui 1.92 keeps several atlas textures alive at once, and
-// D3D12ResourceFactory::uiDescriptor (via IUiBackend::allocTextureSrv) shares this SAME pool -- see
-// IUiBackend::allocTextureSrv's own comment for why that sharing is a hard requirement, not a
-// preference. Moved verbatim from D3D12Device.cpp's former g_uiSrv/kUiSrvCount/uiSrvAlloc/uiSrvFree,
-// now a plain member instead of a file-static global: this module only ever has one instance anyway
-// (Sandbox constructs exactly one), but a member is one fewer global for no cost.
+// Slots in the UI descriptor pool. ImGui 1.92 keeps several atlas textures alive at once.
 struct UiSrvPool {
-    // 16 UNTIL IT WAS MEASURED AGAINST WHAT ACTUALLY WANTS A SLOT, and 16 was far too few. The
-    // permanent residents alone -- three icon sheets, the splash logo, the compile-status icon, the
-    // scene viewport, the shared asset-editor preview, and the thumbnail cache's own preview target
-    // -- account for about eight before ImGui's atlases are subtracted. That left roughly half a
-    // dozen for Content Browser thumbnails, while ThumbnailCache advertises a cap of 64: the coded
-    // cap was an order of magnitude above the real ceiling, so browsing a folder of meshes silently
-    // stopped generating previews after the first few tiles and fell back to the type glyph.
-    //
-    // 512 IS STILL SMALL. A shader-visible CBV/SRV/UAV heap can hold a million descriptors; this one
-    // is 512 * 32 bytes, about 16 KB of GPU memory. The number is not a budget, it is a headroom
-    // choice -- the real budget is ThumbnailCache's own VRAM cap, which is what should decide how
-    // many thumbnails live at once. Sizing this so the descriptor heap is never the binding
-    // constraint puts that decision back where it is actually reasoned about.
     static constexpr u32 kCount = 512;
     u64 cpuBase = 0, gpuBase = 0;
     u32 stride = 0;
@@ -69,8 +47,7 @@ struct UiSrvPool {
     }
 };
 
-// ImGui_ImplDX12_InitInfo's own alloc/free callback shape (imgui_impl_dx12.h) -- routed through
-// InitInfo::UserData rather than a second global, so this module needs none at all.
+// ImGui_ImplDX12_InitInfo's alloc/free callback shape (routed through UserData).
 void SrvAllocThunk(ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DESCRIPTOR_HANDLE* outCpu, D3D12_GPU_DESCRIPTOR_HANDLE* outGpu) {
     auto* pool = static_cast<UiSrvPool*>(info->UserData);
     u64 cpu = 0, gpu = 0;
@@ -87,8 +64,7 @@ void SrvFreeThunk(ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DESCRIPTOR_HANDLE cpu
 // See UiBackend.hpp for the contract every method here implements.
 class ImGuiD3D12Backend final : public IUiBackend {
 public:
-    // Safety net for a caller that skips the explicit device->uiShutdown()/shutdown() dance -- costs
-    // nothing when shutdown() already ran, since it is idempotent on active_.
+    // Safety net for a caller that skips the explicit device->uiShutdown()/shutdown() dance.
     ~ImGuiD3D12Backend() override { shutdown(); }
 
     bool init(void* hwnd, const UiBackendInitDesc& desc) override {
@@ -112,21 +88,7 @@ public:
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-        // THE LAYOUT PERSISTS NOW, AND IT DELIBERATELY DID NOT BEFORE. `io.IniFilename = nullptr`
-        // meant every window size, dock arrangement, table column width and collapsing-header state
-        // was thrown away on exit, and a one-shot DockBuilder pass rebuilt the default each launch --
-        // so resizing the Outliner and restarting put it straight back. That was a real decision
-        // rather than an oversight (docs/EDITOR.md argued it), and it was the wrong one: it is paid
-        // on every single start, by everyone, forever.
-        //
-        // BESIDE editor.ini, not beside the executable, and for the same reason editor.ini lives
-        // there: this is per-machine, per-user, disposable state, and writing it next to a binary
-        // that may sit in Program Files fails on exactly the installs that matter. Held in a static
-        // because ImGui stores the POINTER and reads it at shutdown -- a local would dangle.
-        //
-        // THE ESCAPE HATCH ALREADY EXISTS: View > Reset Layout clears dockBuilt_ and rebuilds the
-        // default, which is what makes turning this on safe. A layout that ends up unusable is one
-        // menu item from being fixed rather than a reason to reinstall.
+        // Layout persists in editor-layout.ini in user data directory. View > Reset Layout rebuilds default.
         static std::string s_iniPath;
         if (s_iniPath.empty()) {
             const std::string dir = aver::userDataDir();
@@ -176,8 +138,7 @@ public:
 
     ID3D12DescriptorHeap* render(ID3D12GraphicsCommandList* cmdList) override {
         if (!active_) return nullptr;
-        // Once per ImGui frame: with frame interpolation the device renders the same UI onto two images,
-        // and the second call only re-records the draw data the first one built.
+        // Called once per ImGui frame (second UI render in frame interpolation reuses draw data).
         if (renderedFrame_ != ImGui::GetFrameCount()) {
             ImGui::Render();
             renderedFrame_ = ImGui::GetFrameCount();
@@ -209,7 +170,7 @@ private:
     ComPtr<ID3D12DescriptorHeap> srvHeap_;
     UiSrvPool pool_;
     bool active_ = false;
-    int renderedFrame_ = -1;   // ImGui::GetFrameCount() of the last ImGui::Render()
+    int renderedFrame_ = -1;   // Last ImGui::GetFrameCount() from ImGui::Render()
 };
 
 } // namespace aver::rhi::d3d12

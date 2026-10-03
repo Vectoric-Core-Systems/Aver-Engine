@@ -1,22 +1,5 @@
-// GiVisibilityTest -- U1's shared bit definitions and reconstruction arithmetic
-// (aver/voxi/GiVisibility.hpp): the giRestirVisibility mode/half-res-pair packing gAmbientParams.w
-// carries (packAmbientW), the tracedPixel phase schedule the half-resolution history's write and
-// reconstruction share, and the depth/normal reconstruction weight giVisReconstruct sums per tap
-// (reconstructWeight). See optimisation-wave2-plan.md sections 2.9/2.10/2.12 and GiVisibility.hpp's
-// own top comment for the full design this checks.
-//
-// NO GPU, NO RHI, same shape as GiDispatchBoundsTest/CameraFactorTest in this same directory: the
-// header under test depends on nothing but aver/core/Types.hpp by design, so this links Aver.Core
-// alone and reaches it with an include path.
-//
-// WHAT WOULD HAVE CAUGHT THE BUG THIS SUITE'S OWN VERIFICATION PASS ACTUALLY FOUND: the DXC harness
-// (17-case matrix, material base 17), not this file -- this file's job is the ARITHMETIC (packing,
-// weighting, the ratio/EMA estimators the reconstruction is built from) and that the shader's SOURCE
-// TEXT still carries the exact strings the C2-7 contract specifies, not whether voxi_restir.hlsli
-// actually compiles. A struct-typed ternary (HLSL has no conditional operator over non-numeric types)
-// slipped past an earlier pass of this lane's edits and was only caught by the DXC harness; this
-// suite could not have caught it either, which is exactly why the harness step is separate and
-// mandatory, not a replacement for it.
+// GiVisibilityTest: U1's shared bit definitions, reconstruction arithmetic, and phase schedule.
+// See aver/voxi/GiVisibility.hpp and optimisation-wave2-plan.md sections 2.9/2.10/2.12.
 #include "aver/core/Log.hpp"
 #include "aver/voxi/GiVisibility.hpp"
 
@@ -43,13 +26,11 @@ void check(bool cond, const std::string& what) {
     AVER_ERROR("  FAIL  {}", what);
 }
 
-// ---------------------------------------------------------------- shader/CPU source text helpers
+// ---- shader/CPU source text helpers ----
 std::string readFile(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
-        // AN UNREADABLE FILE MUST FAIL EVERY ASSERTION AGAINST IT, NOT SKIP -- an empty string would
-        // make every substring search below pass vacuously, same reasoning as GiDispatchBoundsTest's
-        // own hlslText().
+        // Unreadable file must fail all assertions, not skip (empty string would pass vacuously).
         AVER_ERROR("[GiVisibility] could not read {} -- every source assertion against it would pass "
                    "vacuously against an empty string, so this is a failure, not a skip.", path);
         return {};
@@ -89,8 +70,7 @@ bool has(const std::string& text, const std::string& needle) {
     return !needle.empty() && text.find(needle) != std::string::npos;
 }
 
-// Non-overlapping occurrence count -- the same walk-and-advance idiom used wherever this codebase's
-// own tests count repeated substrings.
+// Non-overlapping occurrence count via walk-and-advance.
 int countOccurrences(const std::string& text, const std::string& needle) {
     if (needle.empty()) return 0;
     int n = 0;
@@ -99,10 +79,8 @@ int countOccurrences(const std::string& text, const std::string& needle) {
     return n;
 }
 
-// Is `needle` found with "if (gAverHistoryWrite" somewhere in the `window` characters right before
-// it? Used to confirm PSRayDriven's two deliberately-ungated writes (voxi.hlsl's own sky-miss
-// surface-history sentinel and AO hit-distance write) are NOT behind that gate -- a positive control
-// on the negative claim, not merely "the total gate count is right".
+// Is `needle` found with "if (gAverHistoryWrite" within `window` chars before it?
+// Positive control: confirms intentionally-ungated writes are not gated.
 bool precededByHistoryWriteGate(const std::string& text, const std::string& needle, size_t window = 200) {
     size_t pos = text.find(needle);
     if (pos == std::string::npos) return false;
@@ -110,9 +88,7 @@ bool precededByHistoryWriteGate(const std::string& text, const std::string& need
     return text.substr(start, pos - start).find("if (gAverHistoryWrite") != std::string::npos;
 }
 
-// Parses the numeric literal following "#define NAME " in `text` -- used to check GiVisibility.hpp's
-// five UNMEASURED tunables against voxi_restir.hlsli's own #define literals without hand-copying
-// either side's value into this file a third time.
+// Parse numeric literal following "#define NAME " in text. Checks GiVisibility.hpp tunables against voxi_restir.hlsli.
 double defineValue(const std::string& text, const std::string& name) {
     const std::string key = "#define " + name + " ";
     size_t pos = text.find(key);
@@ -125,11 +101,8 @@ double defineValue(const std::string& text, const std::string& name) {
     return std::atof(text.substr(pos, end - pos).c_str());
 }
 
-// The declared fields of one `cbuffer <marker>` block, one entry per non-comment, non-blank line,
-// with any trailing "// ..." comment stripped -- so two mirrors of the same cbuffer can be compared
-// on FIELD TEXT alone regardless of how their comments differ (2.9: "Update the comments, text only,
-// in all three mirrors"; checklist item 14: "only comments changed"). Assumes the block's closing
-// "};" sits alone on its own line, which is how voxi.hlsl and voxi_gi.hlsli both write VoxiFrame's.
+// Declared fields of one cbuffer block, one per non-comment/non-blank line, comments stripped.
+// Allows mirrors of the same cbuffer to compare on field text alone regardless of comment differences.
 std::vector<std::string> cbufferFieldLines(const std::string& text, const std::string& marker) {
     std::vector<std::string> out;
     size_t i = text.find("cbuffer " + marker);
@@ -173,9 +146,7 @@ int main() {
         check(tracedOnceFailures == 0, "every pixel of a 2x2 block traces on exactly one of frames "
                                         "0..3 (" + std::to_string(tracedOnceFailures) + " failure(s))");
 
-        // every 2x2 block has exactly one writer per frame -- checked at several block origins so
-        // only the low bit of each coordinate is shown to matter (a 2-periodic tiling), not merely
-        // the block already probed above.
+        // Every 2x2 block has exactly one writer per frame at several block origins (2-periodic tiling).
         const u32 origins[][2] = {{0, 0}, {2, 0}, {0, 2}, {4, 6}, {100, 200}, {8192, 4097}};
         int oneWriterFailures = 0, oneWriterChecks = 0;
         for (const auto& o : origins) {
@@ -192,16 +163,12 @@ int main() {
               "pixel per frame, over " + std::to_string(oneWriterChecks) + " (origin, frame) checks "
               "at several block origins (" + std::to_string(oneWriterFailures) + " failed)");
 
-        // The writer at frame f-1 matches HLSL kGiVisPhase[(frameIdx - 1u) & 3u] for frameIdx 0
-        // (unsigned wrap) -- giVisReconstruct's own step 4b (2.10 D), the exact arithmetic that
-        // decides which full-resolution pixel wrote the half-res texel a frameIdx-0 reconstruction
-        // reads.
+        // Frame f-1's writer matches voxi_restir.hlsli's kGiVisPhase[(frameIdx - 1u) & 3u] at frameIdx 0 (giVisReconstruct step 4b).
         const u32 frameIdx = 0u;
         const u32 prevFrame = (frameIdx - 1u) & 3u;   // HLSL's own unsigned wrap: 0u - 1u == 0xFFFFFFFFu
         check(prevFrame == 3u, "(frameIdx - 1u) & 3u wraps to 3 at frameIdx == 0, matching HLSL's own "
                                 "unsigned uint arithmetic (no signed UB, no accidental huge index)");
-        // kGiVisPhase[3] == uint2(0, 1) (voxi_restir.hlsli's own literal -- checked again below by
-        // source assertion), so pixel (0,1) must be the block's traced pixel at "frame 3".
+        // kGiVisPhase[3] == uint2(0, 1) (voxi_restir.hlsli), so pixel (0,1) is the traced pixel at frame 3.
         check(tracedPixel(0, 1, prevFrame), "tracedPixel(0, 1, (0u - 1u) & 3u) is true, matching "
                                              "voxi_restir.hlsli's kGiVisPhase[3] == uint2(0, 1)");
         int wrongWriterAtPrevFrame = 0;
@@ -211,11 +178,8 @@ int main() {
                                             "frame (0u - 1u) & 3u");
     }
 
-    // ---- 2. packAmbientW: round-trips every (mode, bound, valid, cone, replay, pathView,
-    //         spatialSamples, maxHistory, radianceCache) ----
-    // spatialSamples and maxHistory are each swept through their FULL bit range (0..15, 0..31), which
-    // is exactly what Settings' own clamps (Voxi.cpp) restrict callers to, so there is no
-    // "past the clamp" value left to add on top.
+    // ---- 2. packAmbientW: round-trips every (mode, bound, valid, cone, replay, pathView, spatialSamples, maxHistory, radianceCache) ----
+    // spatialSamples and maxHistory swept through their FULL bit range (0..15, 0..31) per Settings' clamps in Voxi.cpp.
     {
         int checked = 0, failures = 0;
         for (u32 mode = 0; mode <= 3u; ++mode)
@@ -244,10 +208,7 @@ int main() {
               "0..31) combination against 2.9/W6's own bit table exactly -- " + std::to_string(failures) +
               " of " + std::to_string(checked) + " combinations disagreed");
 
-        // The radiance cache's bit (128) is its own bit: the wire mode stays a 2-bit field (the shader
-        // decodes `& 3u`), so a CPU-side RestirVisibility::Cached = 4 must be packed as mode 2 plus
-        // bit 128 -- passing 4 straight through would mask to 0 (NoRay), the over-bright pre-fix look.
-        // Omitting the ninth argument leaves the bit clear, so every pre-cache caller is unchanged.
+        // Radiance cache's bit (128) is separate: wire mode stays 2-bit, so CPU-side RestirVisibility::Cached = 4 packs as mode 2 + bit 128.
         const u32 withoutCache = packAmbientW(2u, true, true, false, false, false, 4u, 4u);
         const u32 withCache    = packAmbientW(2u, true, true, false, false, false, 4u, 4u, true);
         check((withCache ^ withoutCache) == 128u,
@@ -267,9 +228,7 @@ int main() {
               "2^24 and survives the f32 round trip gAmbientParams.w puts it through -- " +
               std::to_string(cacheTooWide) + " of 32 did not");
 
-        // Bits 12-15 must not disturb bits 0-6: fixing every OTHER argument and sweeping
-        // spatialSamples alone must leave the low seven bits (mode | histBound | histValid |
-        // blendedCone | blendedReplay | pathView) exactly as spatialSamples=0 produced them.
+        // Bits 12-15 must not disturb bits 0-6: sweeping spatialSamples alone must leave the low seven bits exactly as spatialSamples=0 produced them.
         const u32 base = packAmbientW(3u, true, true, true, true, true, 0u, 0u) & 0x7Fu;
         int lowBitsChecked = 0, lowBitsFailures = 0;
         for (u32 spatialSamples = 0; spatialSamples <= 15u; ++spatialSamples) {
@@ -281,9 +240,7 @@ int main() {
               "sweeping spatialSamples 0..15 alone never changes bits 0-6 of packAmbientW's result -- " +
               std::to_string(lowBitsFailures) + " of " + std::to_string(lowBitsChecked) + " disagreed");
 
-        // Bits 18-22 must not disturb bits 0-17, and must stay under 2^24 so the float this packing
-        // travels in (gAmbientParams.w) can hold it EXACTLY -- the trap that silently corrupted a
-        // debug dial parked at bit 24 during the camera-motion fade investigation.
+        // Bits 18-22 must not disturb bits 0-17 and must stay under 2^24 for exact f32 representation in gAmbientParams.w.
         const u32 base2 = packAmbientW(3u, true, true, true, true, true, 15u, 0u) & 0x3FFFFu;
         int histChecked = 0, histFailures = 0, tooWide = 0;
         for (u32 maxHistory = 0; maxHistory <= 31u; ++maxHistory) {
@@ -291,7 +248,7 @@ int main() {
             ++histChecked;
             if ((w & 0x3FFFFu) != base2) ++histFailures;
             if (w >= (1u << 24)) ++tooWide;
-            // The float round trip the renderer actually performs, exactly: pack -> f32 -> decode.
+            // Pack -> f32 -> decode, as renderer performs.
             if (static_cast<u32>(static_cast<f32>(w)) != w) ++tooWide;
         }
         check(histChecked == 32 && histFailures == 0 && tooWide == 0,
@@ -334,14 +291,8 @@ int main() {
     }
 
     // ---- 4. THE RATIO ESTIMATOR: sum(w*g)/sum(w*b) vs. the average of per-tap ratios ----
-    //
-    // giVisReconstruct computes rho2 = sum(w*g)/sum(w*b) (2.10 D.6), a RATIO OF EXPECTATIONS, not an
-    // average of per-tap ratios -- the two estimators are only interchangeable when the sampling
-    // weight and the per-tap brightness scale are uncorrelated, which a real half-res neighbourhood
-    // has no reason to guarantee. This synthetic field makes them disagree on purpose: two equally
-    // likely "kinds" of tap, one BRIGHT-AND-MOSTLY-OCCLUDED (b=10, true visibility V=0.1), one
-    // DIM-AND-MOSTLY-OPEN (b=1, V=0.9), with g := V*b exactly (no added noise, so g/b == V on every
-    // single tap and the "true expectation ratio" this section computes has a closed form).
+    // giVisReconstruct computes rho2 = sum(w*g)/sum(w*b) (2.10 D.6), a RATIO OF EXPECTATIONS.
+    // Two estimators are interchangeable only when sampling weight and per-tap brightness scale are uncorrelated.
     {
         constexpr int N = 4096;
         constexpr double bBright = 10.0, vBright = 0.1;
@@ -349,22 +300,18 @@ int main() {
 
         double sumWG = 0.0, sumWB = 0.0, sumRatio = 0.0;
         for (int i = 0; i < N; ++i) {
-            const bool bright = (i % 2) == 0;   // exact 50/50 split: a deterministic field, not a
-                                                 // Monte-Carlo draw, so there is no run-to-run flake
+            const bool bright = (i % 2) == 0;   // Deterministic 50/50 split: no run-to-run flake.
             const double b = bright ? bBright : bDim;
             const double v = bright ? vBright : vDim;
             const double g = v * b;
-            const double w = 1.0;               // uniform sampling weight: the divergence below comes
-                                                  // entirely from b's own correlation with v, exactly
-                                                  // the "brightness, not sample count, does the
-                                                  // weighting" property rho2's formula relies on
+            const double w = 1.0;   // Uniform weight: divergence comes entirely from b's correlation with v.
             sumWG += w * g;
             sumWB += w * b;
             sumRatio += g / b;   // == v exactly
         }
-        // The population values both estimators are being checked against, in closed form:
+        // Population values in closed form:
         //   E[w*g] / E[w*b] == (0.5*vBright*bBright + 0.5*vDim*bDim) / (0.5*bBright + 0.5*bDim)
-        //   E[g/b]          == 0.5*vBright + 0.5*vDim   (the naive, unweighted-by-brightness average)
+        //   E[g/b]          == 0.5*vBright + 0.5*vDim   (naive unweighted average)
         const double trueRatio = (0.5 * vBright * bBright + 0.5 * vDim * bDim) / (0.5 * bBright + 0.5 * bDim);
         const double naiveRatio = 0.5 * vBright + 0.5 * vDim;
 
@@ -386,17 +333,10 @@ int main() {
     }
 
     // ---- 5. THE HALF-RES HISTORY'S EMA (2.10 E): converges toward a steady fresh value ----
-    //
-    // The write is `lerp(fresh, history, h)` (HLSL lerp(a,b,t) = a + t*(b-a) = a*(1-t) + b*t), i.e.
-    // history_n = fresh*(1 - h) + history_{n-1}*h -- a standard exponential moving average with the
-    // OLD value weighted by h = kHistWeight at rest. Geometric convergence means the error after n
-    // steps toward a constant fresh value is exactly kHistWeight^n times the initial error.
+    // history_n = fresh*(1 - h) + history_{n-1}*h, a standard exponential moving average with old value weighted by h = kHistWeight.
     {
-        const double target = 5.0;   // an arbitrary steady "fresh" value every step
-        double hist = 0.0;           // the honest "nothing traced yet" prior (2.10 E's own r=1.0/g=b=0.0
-                                      // defaults are different per-channel constants; 0.0 here since
-                                      // only the CONVERGENCE RATE is under test, not any one channel's
-                                      // specific starting value)
+        const double target = 5.0;   // Arbitrary steady "fresh" value each step.
+        double hist = 0.0;   // Start at 0.0 (only convergence rate under test, not any one channel's initial value).
         for (int step = 0; step < 64; ++step)
             hist = target * (1.0 - kHistWeight) + hist * kHistWeight;
         check(std::fabs(hist - target) / target < 0.01,
@@ -425,8 +365,7 @@ int main() {
         }
     }
 
-    // ---- 7. halfDim: rounds an odd full-resolution edge UP, matching ensureShadowHistory's own
-    //         "(w+1)/2 x (h+1)/2" sizing (2.11) ----
+    // ---- 7. halfDim: rounds odd full-resolution edge UP, matching ensureShadowHistory (2.11) ----
     {
         check(halfDim(0) == 0, "halfDim(0) == 0");
         check(halfDim(1) == 1, "halfDim(1) == 1 -- a single leftover row/column still needs a texel");
@@ -458,9 +397,7 @@ int main() {
                      "uint2(0, 1) };"),
               "kGiVisPhase's literal matches givis::tracedPixel's own mirrored table exactly");
 
-        // reuse.numSamples = 0u must come AFTER the motion-discount lerp (checklist item 9), never
-        // before -- otherwise the discount's own numSamples write would silently undo Reconstructed's
-        // forced temporal-only mode.
+        // reuse.numSamples = 0u must come AFTER the motion-discount lerp, not before.
         const std::string lerpLine = "reuse.samplingRadius = lerp(32.0, 8.0, motionT);";
         const size_t lerpPos = t.find(lerpLine);
         const size_t zeroPos = t.find("reuse.numSamples = 0u");
@@ -468,11 +405,7 @@ int main() {
               "`reuse.numSamples = 0u` appears textually AFTER the motion-discount lerp, never "
               "before it");
 
-        // Exactly 4 gAverHistoryWrite WRITE gates (store, surface history, denoiser input, the new
-        // visibility write) plus the denoised readback's TWO gates: the reprojected read b6a64126 added
-        // (gAverHistoryWrite && denoisedReproject ...) and the decode it falls back to
-        // (gAverHistoryWrite && gw > 0u) -- both keep a blended fragment from reading the opaque
-        // surface's denoised answer.
+        // Exactly 4 gAverHistoryWrite write gates plus 2 denoised readback gates.
         const int totalGates = countOccurrences(t, "if (gAverHistoryWrite");
         const int readbackGates = countOccurrences(t, "if (gAverHistoryWrite && gw > 0u");
         const int reprojectGates = countOccurrences(t, "if (gAverHistoryWrite && denoisedReproject");
@@ -483,8 +416,7 @@ int main() {
               std::to_string(readbackGates) + " decode + " + std::to_string(reprojectGates) +
               " reprojected-read gate(s)");
 
-        // The reservoir is the engine's own (voxi_reservoir.hlsli): no vendored resampling header may
-        // come back in through this file.
+        // Reservoir is in-house (voxi_reservoir.hlsli): no vendored resampling header may be included.
         check(has(t, "#include \"voxi_reservoir.hlsli\""), "voxi_restir.hlsli includes the in-house reservoir module");
         check(!has(t, "Rtxdi/") && !has(t, "RTXDI_") && !has(t, "RAB_"),
               "voxi_restir.hlsli names no RTXDI header, function or RAB_ callback");
@@ -498,8 +430,7 @@ int main() {
         check(has(t, "averShadowLum"), "F2's traced-path luminance still uses this file's own "
                                         "averShadowLum reduction, not a second formula");
 
-        // No unconditional denoised-occlusion readback gate here any more: df4122cc ("Ray-driven stops
-        // reading a denoised occlusion it did not produce") put denoisedAoUsable in front of it.
+        // No unconditional denoised-occlusion readback gate here (df4122cc added denoisedAoUsable guard).
         const int totalGates = countOccurrences(t, "if (gAverHistoryWrite");
         const int readbackGates = countOccurrences(t, "if (gAverHistoryWrite && dnW > 0u");
         check(totalGates == 4 && readbackGates == 0,
@@ -508,8 +439,7 @@ int main() {
               std::to_string(totalGates) + " total, " + std::to_string(readbackGates) + " readback");
     }
 
-    // ---- 10. SOURCE ASSERTIONS: voxi.hlsl's gate count, the static flag, and PSRayDriven's two
-    //          deliberately UNgated writes ----
+    // ---- 10. SOURCE ASSERTIONS: voxi.hlsl's gate count, static flag, and PSRayDriven's ungated writes ----
     {
         const std::string& t = voxiText();
         check(has(t, "static bool gAverHistoryWrite = true;"), "the static flag exists with its "
@@ -526,9 +456,7 @@ int main() {
                                 "rtReflectionTemporal branches), no denoiser-style readback of its own -- "
                                 "got " + std::to_string(totalGates));
 
-        // PSRayDriven's own sky-miss surface-history sentinel and AO hit-distance writes are NOT
-        // gated on gAverHistoryWrite at all (checklist item 12) -- checked positively (the lines still
-        // exist) and negatively (nothing that looks like the gate sits immediately before either).
+        // PSRayDriven's sky-miss surface-history sentinel and AO hit-distance writes are NOT gated (checklist items 12).
         const std::string skyMissSentinel = "gGiSurfNrmHistOut[uint2(i.pos.xy)] = float2(0.0, asfloat(0u));";
         check(has(t, skyMissSentinel), "PSRayDriven's sky-miss surface-history sentinel write exists");
         check(!precededByHistoryWriteGate(t, skyMissSentinel),
@@ -541,9 +469,8 @@ int main() {
               "unrelated)");
     }
 
-    // ---- 11. cbuffer VoxiFrame: voxi.hlsl and voxi_gi.hlsli declare the IDENTICAL field list ----
-    //          (aver-voxi-cbuffer-three-mirrors) -- comments are allowed, indeed expected, to differ
-    //          (2.9: "Update the comments, text only, in all three mirrors"); the FIELDS must not.
+    // ---- 11. cbuffer VoxiFrame: voxi.hlsl and voxi_gi.hlsli declare IDENTICAL field list ----
+    // Comments may differ (2.9: "Update the comments, text only, in all three mirrors"); fields must not.
     {
         const std::vector<std::string> a = cbufferFieldLines(voxiText(), "VoxiFrame");
         const std::vector<std::string> b = cbufferFieldLines(giPreludeText(), "VoxiFrame");

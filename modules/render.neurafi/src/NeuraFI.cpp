@@ -17,7 +17,7 @@ namespace {
 constexpr const char* kShaderName = "neurafi.hlsl";
 constexpr u32 kGroup = 8;           // neurafi.hlsl's FG_GROUP
 constexpr u32 kConstantSlot = 1;    // b1: FgConstants
-constexpr u32 kConstantDwords = 12; // FgConstants, the same for every pass
+constexpr u32 kConstantDwords = 12; // FgConstants
 constexpr u32 kRecordFloats = 14;   // neurafi.hlsl's FG_RECORD
 constexpr u32 kOutputFloats = 2;    // FG_OUTPUT
 
@@ -28,8 +28,8 @@ struct FgConstants {
     u32 mode;
     u32 frame;
     u32 samples;
-    u32 block;      // acceleration-image block size (pixels per texel, each axis)
-    u32 viz;        // Visualisation
+    u32 block;      // acceleration-image block size (pixels per texel)
+    u32 viz;        // visualisation mode
     f32 vizScale;   // px of bend at full heat
     u32 pad[2];
 };
@@ -37,7 +37,7 @@ static_assert(sizeof(FgConstants) == kConstantDwords * 4, "FgConstants mirrors n
 
 using RS = rhi::ResourceState;
 
-// The trajectory network: the record and output sizes are neurafi.hlsl's; two hidden layers of 32.
+// Network: 2 hidden layers of 32 (record and output sizes from neurafi.hlsl).
 render::neural::MlpDesc networkDesc() {
     render::neural::MlpDesc d;
     d.inputs = kRecordFloats;
@@ -86,7 +86,7 @@ bool NeuraFI::ensurePipelines() {
         pd.cs = cs;
         pd.layout.srvCount = srvs;
         pd.layout.uavCount = uavs;
-        pd.layout.slotKindsDeclared = true;   // every slot is a Texture2D (the default kind)
+        pd.layout.slotKindsDeclared = true;   // all Texture2D
         pd.layout.constantDwords[kConstantSlot] = kConstantDwords;
         if (sampler) {
             pd.layout.samplers[0] = rhi::SamplerDesc{rhi::Filter::Linear, rhi::AddressMode::Clamp};
@@ -103,9 +103,7 @@ bool NeuraFI::ensurePipelines() {
     return true;
 }
 
-// The four trajectory passes share one layout: t0-t7 motion and depth of frames N..N-3, u0 inference
-// records, u1 the acceleration image, u2-u4 training records/targets/count, u5 the network's outputs,
-// u6 the network's share of the acceleration (the NetworkShare visualisation).
+// Layout: t0-t7 motion/depth N..N-3, u0 records, u1 accel, u2-u4 training, u5 outputs, u6 network share.
 bool NeuraFI::ensureTrajectory() {
     if (featuresPso_ && accelPso_ && clearCountPso_ && trainRecordsPso_ && mlp_.valid()) return true;
     if (trajectoryFailed_) return false;
@@ -152,8 +150,7 @@ bool NeuraFI::ensureTrajectory() {
     if (!mlp_.valid()) {
         render::neural::OptimiserDesc opt;
         if (!mlp_.create(dev_, networkDesc(), opt)) return fail("the trajectory network could not be created");
-        // The user's own trained weights win; otherwise the ones shipped with the engine. Training only
-        // ever writes the user's file.
+        // User weights take precedence; otherwise use shipped weights. Training only writes user file.
         std::error_code ec;
         std::string from;
         if (!weightsPath_.empty() && std::filesystem::exists(weightsPath_, ec)) from = weightsPath_;
@@ -161,9 +158,7 @@ bool NeuraFI::ensureTrajectory() {
             from = shippedWeightsPath_;
         if (!from.empty()) {
             weightsLoaded_ = mlp_.loadWeights(from);
-            // The lifetime step count the learning-rate schedule continues from (absent: 0).
-            // Sidecar: "steps [quadratic-error network-error]" -- the smoothed scores the gate last
-            // judged by. Without them the network waits to be judged again (the quadratic stands in).
+            // Load step count and prior error scores from sidecar file (if present).
             if (weightsLoaded_) {
                 std::ifstream steps(from + ".steps");
                 if (!(steps >> priorSteps_)) priorSteps_ = 0;
@@ -182,11 +177,7 @@ bool NeuraFI::ensureTrajectory() {
                       weightsPath_, shippedWeightsPath_);
         }
         if (!weightsLoaded_) {
-            // A FRESH network starts as exactly the analytic path: its output layer (the correction) is
-            // zeroed, so it can only learn improvements on the quadratic. MEASURED without this: the
-            // random He-init correction started at 0.47 px against the quadratic's 0.087 and was still
-            // worse (0.13) 2,500 steps later. The hidden layers keep their init, so gradients reach them
-            // as soon as the output layer moves.
+            // Fresh network: output layer zeroed so it can only improve on the quadratic.
             const render::neural::MlpLayout lay = render::neural::MlpLayout::make(networkDesc());
             std::vector<f32> w(mlp_.cpuWeights(false).begin(), mlp_.cpuWeights(false).end());
             const u32 last = lay.layers - 1;
@@ -201,7 +192,7 @@ bool NeuraFI::ensureTrajectory() {
 }
 
 void NeuraFI::releaseTargets() {
-    // The network caches binding sets on our buffers: drop them before the buffers go.
+    // Network caches bindings on our buffers; drop bindings before destroying buffers.
     mlp_.invalidateBindings();
     for (rhi::BindingSetHandle* s : {&gatherSet_, &fillSetA_, &fillSetB_, &trajSet_}) {
         if (*s) res_.destroyBindingSet(*s);
@@ -226,8 +217,7 @@ void NeuraFI::releaseTargets() {
 bool NeuraFI::ensureTargets(u32 w, u32 h) {
     if (w == w_ && h == h_ && out_) return true;
     releaseTargets();
-    // The acceleration image's block: the smallest power of two keeping it within kMaxAccelTexels, so
-    // the network's per-frame cost stays roughly flat at any scene size (2x2 up to ~1080p).
+    // Acceleration block: smallest power-of-two keeping it under kMaxAccelTexels.
     u32 block = 2;
     while (static_cast<u64>((w + block - 1) / block) * ((h + block - 1) / block) > kMaxAccelTexels) block *= 2;
     const u32 qw = (w + block - 1) / block, qh = (h + block - 1) / block;
@@ -348,13 +338,9 @@ bool NeuraFI::ensureTargets(u32 w, u32 h) {
     return true;
 }
 
-// Scores one read-back training batch three ways, as the error in the predicted in-between POSITION
-// (0.125 |a - a_true| pixels, the quadratic's own term): a straight line (a = 0), the analytic
-// acceleration (v - v', exact for constant acceleration), and the network (the CPU twin running the
-// EMA weights inference uses). The batch was trained on once, so the network's figure is slightly
-// flattering; the comparison is still the one that says whether it earns its cost.
+// Scores training batch three ways: straight line, analytic acceleration, network; compared as corrections.
 void NeuraFI::evaluateBatch() {
-    u32 counts[2] = {};   // records written (before the cap), outliers rejected
+    u32 counts[2] = {};   // records written, outliers rejected
     if (!res_.readBuffer(evalCount_, counts, 8, 0)) return;
     const u32 rejected = counts[1];
     u32 count = counts[0] > kTrainSamples ? kTrainSamples : counts[0];
@@ -372,9 +358,7 @@ void NeuraFI::evaluateBatch() {
         const f64 s = std::exp2(static_cast<f64>(r[5]) * 8.0);   // record [5] is log2(s)/8
         f32 out[kOutputFloats];
         net.forward(std::span<const f32>(r, kRecordFloats), std::span<f32>(out, kOutputFloats));
-        // Everything is compared as a CORRECTION to the analytic acceleration, which is what the target
-        // is: the analytic path predicts 0, a straight line predicts minus the analytic acceleration
-        // (a = 0 overall), and the network predicts its output.
+        // Compared as corrections to the analytic path.
         auto err = [&](f64 cx, f64 cy) { return 0.125 * s * std::sqrt((cx - t[0]) * (cx - t[0]) + (cy - t[1]) * (cy - t[1])); };
         errLinear += err(-(static_cast<f64>(r[0]) - r[2]), -(static_cast<f64>(r[1]) - r[3]));
         errAnalytic += err(0.0, 0.0);
@@ -386,9 +370,7 @@ void NeuraFI::evaluateBatch() {
     for (u32 i = 0; i < 3; ++i)
         errEma_[i] = evals_ == 0 ? now[i] : errEma_[i] + kEvalSmoothing * (now[i] - errEma_[i]);
     ++evals_;
-    // The gate: judged only once the smoothed scores rest on a few checks.
-    // Hysteresis: in only at kGateEnter of the quadratic's error, out as soon as it is worse -- without
-    // it the path flapped every few checks while the two scores were within noise of each other.
+    // Gate with hysteresis: enters at kGateEnter * quadratic, exits when network is worse.
     if (evals_ >= kEvalsToJudge) {
         const bool beats = beatsQuadratic_ ? errEma_[2] <= errEma_[1] : errEma_[2] < kGateEnter * errEma_[1];
         if (beats != beatsQuadratic_)
@@ -396,9 +378,7 @@ void NeuraFI::evaluateBatch() {
                       beats ? "now in use" : "set aside, the quadratic is better", errEma_[2], errEma_[1]);
         beatsQuadratic_ = beats;
     }
-    // Logged at the save cadence (every 5th check), so a long session's log stays readable -- and the
-    // session's FIRST check, taken after only kEvalEverySteps steps of adapting to this session's motion:
-    // with loaded weights that is the nearest thing to a held-out test of how they generalise.
+    // Logged at save cadence (every 5th check) and after first evaluation.
     ++sessionEvals_;
     if (saveOnCollect_ || sessionEvals_ == 1 || (!training_ && sessionEvals_ % 5 == 0))
         AVER_INFO("[NeuraFI] check at step {} ({} lifetime, learning rate {:.2e}), mean in-between "
@@ -422,8 +402,7 @@ NeuraFI::TrainingStatus NeuraFI::trainingStatus() const {
     return s;
 }
 
-// Frame N's inputs keep their handles from frame to frame (the device's own textures), so the sets are
-// rewritten only when one changes -- a resize, after which the device has idled the GPU.
+// Input textures kept across frames; bindings rewritten only on resize.
 void NeuraFI::bindInputs(const rhi::FrameInterpInput& in) {
     if (in.color != boundColor_) { res_.setSrv(gatherSet_, 0, in.color); boundColor_ = in.color; }
     if (in.velocity != boundVel_) {
@@ -445,7 +424,7 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
     bindInputs(in);
     ++frame_;
 
-    // A readback recorded four frames ago has certainly finished (frames in flight are 2).
+    // Readback 4 frames ago is finished (frames in flight = 2).
     if (collectAtFrame_ && frame_ >= collectAtFrame_) {
         collectAtFrame_ = 0;
         if (!collectReadsWeights_ || mlp_.collectWeights()) {
@@ -470,11 +449,7 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
     if (cut) histDepth_ = 0;
     const bool trajOk = (trajectory_ != Trajectory::Linear || training_) && ensureTrajectory();
     const bool bend = trajOk && trajectory_ != Trajectory::Linear && !cut;
-    // THE LIVE GATE: whenever Learned is chosen, the three-frame check records are built from THIS
-    // user's own frames and the network is scored on them, trained or not. MEASURED why: weights
-    // trained on fast jitter scored 0.262 px on slow wide pans the quadratic got to 0.010 -- a verdict
-    // from someone else's motion does not transfer. Training, when on, is one more step on the same
-    // records.
+    // Network is scored on three-frame check records built from this session's frames.
     const bool keepHistory = trajOk && (training_ || trajectory_ == Trajectory::Neural);
     const bool records = keepHistory && histDepth_ >= 3;
     const bool train = records && training_;
@@ -486,7 +461,7 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
     FgConstants k{{in.width, in.height}, 0, bend ? 1u : 0u, neural ? 1u : 0u, frame_, kTrainSamples, block_,
                   viz, vizScale_, {0, 0}};
 
-    // Frame N becomes compute-readable (a pixel-shader read state does not cover compute).
+    // Frame N becomes compute-readable.
     ctx.textureBarrier(in.color, RS::ShaderResource, RS::NonPixelShaderResource);
     ctx.textureBarrier(in.velocity, RS::RenderTarget, RS::NonPixelShaderResource);
     ctx.textureBarrier(in.viewZ, RS::RenderTarget, RS::NonPixelShaderResource);
@@ -555,7 +530,7 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
         result = out_;
     }
 
-    // ---- the check records from frames N..N-3 (the shader says how): scored always, trained on if on ----
+    // Check records from frames N..N-3: scored always, trained if on.
     if (records) {
         rhi::ScopedGpuStat stat(ctx, train ? "Frame interpolation training" : "Frame interpolation check");
         ctx.setPipeline(clearCountPso_);
@@ -582,8 +557,7 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
                               "quadratic", trainSteps_);
             }
         }
-        // Every kEvalEverySteps frames of records: copy this batch out for evaluateBatch. While training,
-        // the weights moved on the GPU and are read back too; otherwise the CPU copies are current.
+        // Every kEvalEverySteps frames: copy records to readback buffer for evaluation.
         ++checkFrames_;
         if (checkFrames_ % kEvalEverySteps == 0 && collectAtFrame_ == 0 && (!training_ || mlp_.recordReadback(ctx))) {
             const rhi::BufferHandle src[] = {trainRec_, trainTgt_, trainCount_};
@@ -600,12 +574,12 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
     if (bend || records)
         for (rhi::BufferHandle b : bufs) ctx.bufferBarrier(b, RS::UnorderedAccess, RS::Common);
 
-    // ---- frame N becomes the previous frame; for the check records, the motion history shifts down ----
+    // Frame N becomes the previous frame; motion history shifts down.
     ctx.textureBarrier(in.color, RS::NonPixelShaderResource, RS::CopySource);
     ctx.textureBarrier(in.velocity, RS::NonPixelShaderResource, RS::CopySource);
     ctx.textureBarrier(in.viewZ, RS::NonPixelShaderResource, RS::CopySource);
     if (keepHistory) {
-        // N-2 -> N-3, then N-1 -> N-2 (oldest first, so nothing is overwritten before it is copied).
+        // N-2 -> N-3, then N-1 -> N-2 (oldest first).
         const rhi::TextureHandle shift[][2] = {
             {histVel3_, histVel2_}, {histZ3_, histZ2_}, {histVel2_, histVel_}, {histZ2_, histZ_}};
         for (const auto& s : shift) {
@@ -617,7 +591,7 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
         }
         histDepth_ = histDepth_ < 3 ? histDepth_ + 1 : 3;
     } else {
-        histDepth_ = 1;   // only N-1 is current once this frame is stored
+        histDepth_ = 1;   // only N-1 valid after this frame is stored
     }
     ctx.textureBarrier(histColor_, RS::NonPixelShaderResource, RS::CopyDest);
     ctx.textureBarrier(histVel_, RS::NonPixelShaderResource, RS::CopyDest);

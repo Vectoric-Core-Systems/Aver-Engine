@@ -1,30 +1,17 @@
-// voxi_neurac_io.hlsli -- the radiance cache's resource-bound half: the sample SCATTER (training)
-// and the cell LOOKUP (read). Included ONLY by voxi_restir.hlsli, under `#if AVER_NEURAC`, AFTER
-// voxi_neurac.hlsli and the three declarations it reads:
-//   StructuredBuffer<RcInfo>     gRcInfo  : t22   (cascade origins, cell sizes, sample cap)
-//   RWStructuredBuffer<int>      gRcAccum : u20   (fixed-point accumulator, layout in the pure file)
-//   RWStructuredBuffer<RcCell>   gRcCells : u21   (resolved cells, read with plain UAV loads)
-// and after the cbuffer field gAmbientParams. Cells are a UAV rather than an SRV so the staged lighting
-// group stays barrier-free (UAV-only buffers need no state transition).
-//
-// WORLD UNITS: the cascades' cell sizes are in the engine's world unit (the cbuffer's gCamPos/hit
-// positions), the same unit NeuRaC::beginFrame snaps the camera in.
+// Radiance cache I/O: SCATTER (training) and LOOKUP (read).
+// Included after voxi_neurac.hlsli and RcInfo/RcAccum/RcCells declarations.
+// Resources: gRcInfo (t22), gRcAccum (u20), gRcCells (u21).
+// WORLD UNITS: cascade cell sizes match cbuffer's gCamPos and engine world unit.
 
-// The lookup's last overall confidence (1 - the fraction left for the fallback), for the F2 path debug
-// view. `static` hand-off like gGiPoisonPdfHit/gGiCbSkip; per invocation, never a resource.
+// Lookup's last confidence (1 - fallback fraction) for debug view.
 static float gRcLastConf = 0.0;
 
-// gAmbientParams.w bit 128 (givis::packAmbientW's neurac argument): the CPU sets it only on a frame
-// the cache twin pipelines run with the cache live. A twin with it clear behaves as plain HalfResolution.
+// Cache enabled: gAmbientParams.w bit 128 set by CPU when cache pipelines run live.
 bool rcCacheOn() { return ((uint)gAmbientParams.w & 128u) != 0u; }
 
-// ---- SCATTER: one second-bounce ray = one Monte Carlo sample of INCIDENT radiance at hitPos ----
-// `indY` is that ray's result (sky on a miss, the voxel volume on a hit, 0 outside it -- F2's own
-// semantics, so the cache inherits them). The ray was cosine-sampled about N, so its pdf is cos/PI with
-// cos = cosDir2 and the unbiased projection weight is PI / cos; the floor at AVER_RC_MIN_COS under-weights
-// the 1% grazing samples (P(cos < c) = c^2) instead of letting 1/cos blow the fixed-point headroom.
-// Only the FINEST cascade containing hitPos trains. The count atomic comes first and is what enforces the
-// per-cell cap: an over-cap sample costs one atomic, not sixteen.
+// ---- SCATTER: one second-bounce ray = one Monte Carlo sample of incident radiance ----
+// Scatter a Monte Carlo sample. Only the finest cascade trains.
+// Count atomic enforces per-cell cap (one atomic, not sixteen).
 void rcScatter(float3 hitPos, float3 N, float3 dir2, float3 indY, float cosDir2) {
     const float3 L = min(max(indY, 0.0), AVER_RC_LMAX);
     if (!all(isfinite(L)) || !all(isfinite(dir2)) || !all(isfinite(N))) return;
@@ -60,13 +47,8 @@ void rcScatter(float3 hitPos, float3 N, float3 dir2, float3 indY, float cosDir2)
 }
 
 // ---- LOOKUP: cosine-convolved irradiance / PI at p for normal N, blended across cascades ----
-// Per cascade (finest first): look half a cell out along N (the same idea as F2's shell-straddle fix),
-// find the 8 surrounding cell centres, skip the cascade if any corner is within AVER_RC_MARGIN_CELLS of
-// its window edge, and weight each VALID corner by trilinear * normal agreement * planarity *
-// observation count * freshness. The cascade's value is the weight-normalised SH blend, its confidence
-// the (<= 1) weight sum; a cascade contributes confidence * edge-fade of what is still `remaining`, so a
-// cold or edge-adjacent fine cascade hands the rest to the next coarser one. What nothing covered is
-// returned in `remaining` for the caller to fill with its own fallback (the F2 sky-ratio formula).
+// Blend across cascades (finest first), weighting by trilinear * normal agreement * planarity.
+// Returns confidence and unfilled light fraction in `remaining` for fallback fill.
 float3 rcLookup(float3 p, float3 N, out float remaining) {
     remaining = 1.0;
     float3 outV = 0.0;
@@ -81,7 +63,7 @@ float3 rcLookup(float3 p, float3 N, out float remaining) {
         const float3 fl   = floor(g);
         const float3 f    = g - fl;
         const int3   b    = (int3)fl;                                         // window-relative base corner
-        // Both corners (b and b + 1) must sit at least MARGIN cells inside the window.
+        // Both corners (b and b + 1) must sit inside margin.
         if (any(b < AVER_RC_MARGIN_CELLS) || any(b > AVER_RC_RES - 2 - AVER_RC_MARGIN_CELLS)) continue;
         const float dEdge  = min(min(q.x, min(q.y, q.z)), min(AVER_RC_RES - q.x, min(AVER_RC_RES - q.y, AVER_RC_RES - q.z)));
         const float aEdge  = saturate((dEdge - (float)AVER_RC_MARGIN_CELLS) / (float)AVER_RC_CROSSFADE_CELLS);
@@ -120,21 +102,15 @@ float3 rcLookup(float3 p, float3 N, out float remaining) {
 }
 
 // ---- VISUALISATION (gAmbientParams.w bits 8-10 mode, bit 11 cell grid; givis::packAmbientW) ----
-// The editor's NeuRaC visualiser. giRestirIndirect returns this colour in place of indirect diffuse
-// (after the denoiser-input write, like the path view, so it never enters history) and Stage B shows it
-// as the pixel's final colour. Looked up at the PRIMARY surface: the cache is a world-space structure
-// trained at second-bounce hits, and this shows what it holds where the camera can see.
-//   1 cached light   -- rcLookup's irradiance/PI alone (no fallback): black where nothing is cached
-//   2 coverage       -- the lookup's confidence: red (fallback does it all) -> green (cache does it all)
-//   3 cascade        -- the finest cascade holding the point: cyan 25, yellow 100, orange 400 units
-//   4 cell state     -- that cell: green = observations (n_eff), red = age; dark violet = empty or stale
+// NeuRaC visualiser: modes 1-4 show cached light / coverage / cascade / cell state.
+// Looked up at the primary surface (world-space, trained at second-bounce hits).
 uint rcViewMode() { return ((uint)gAmbientParams.w >> 8) & 7u; }
 bool rcViewGrid() { return ((uint)gAmbientParams.w & 2048u) != 0u; }
 
 float3 rcDebugColour(float3 p, float3 N) {
     const uint   mode = rcViewMode();
     const RcInfo info = gRcInfo[0];
-    // The finest cascade whose window holds p (offset half a cell along N, as the lookup does).
+    // Find the finest cascade whose window holds p.
     int    cas  = -1;
     float  size = 1.0;
     float3 qc   = 0.0;   // p in that cascade's cell units
@@ -166,8 +142,7 @@ float3 rcDebugColour(float3 p, float3 N) {
         col = live ? float3((float)age / (float)AVER_RC_AGE_MAX, (float)neff / (float)AVER_RC_NEFF_MAX, 0.1)
                    : float3(0.2, 0.0, 0.3);
     }
-    // Cell edges: darken within 4% of a cell boundary on the two axes the surface runs along (the
-    // axis closest to N would darken a whole face).
+    // Cell edges: darken within 4% of a boundary on the two axes the surface runs along.
     if (rcViewGrid() && cas >= 0) {
         const float3 f  = frac(qc);
         const float3 d  = min(f, 1.0 - f);

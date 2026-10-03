@@ -30,83 +30,48 @@ constexpr u32 kPtAccumStride = 16;
 
 // A deliberate arithmetic fault in the estimator, shipped so the furnace can be shown FAILING.
 // See the PT_DEFECT_* block in the shader for what each one is and what it must read.
-//
-// DielectricNoPdfCancel is the third one, and it targets ptScatterDielectric rather than ptScatter:
-// applying the Fresnel term a SECOND time as a multiplicative weight, on top of already having used
-// it as the reflect/refract branch PROBABILITY -- the discrete-choice equivalent of NoCosine
-// forgetting that the pdf it divides by is the same cosine it just sampled with.
 enum class PtDefect : u32 { None = 0, TimesPi = 1, NoCosine = 2, DielectricNoPdfCancel = 3 };
 
 // One surface the tracer can hit: a mesh, where it is, and what it reflects.
-// "This slot holds no texture." NOT ZERO -- zero is a real, reachable bindless index, so a
-// zero-initialised field would silently mean "sample slot 0" (whatever material happened to land
-// there first) instead of "sample nothing". Same value and same reasoning as pbr::kUnboundTexture,
-// restated rather than included: this module links Aver.RHI and Aver.Core only, deliberately, and
-// naming a pbr:: symbol here is precisely the dependency the resolver callback exists to avoid.
+// "This slot holds no texture." NOT ZERO -- zero is a real, reachable bindless index. Same value
+// and reasoning as pbr::kUnboundTexture, restated to avoid that dependency.
 inline constexpr u32 kUnboundTexture = 0xFFFFFFFFu;
 
 struct PtSurface {
     rhi::MeshHandle mesh = 0;
     // ENGINE convention: row-major / row-vector, cm, +Z up. Handed to TlasInstance untouched.
     f32 world[16] = {1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1};
-    // THE FACTOR, NOT THE FINISHED COLOUR, whenever baseColorTex is bound -- the sampled texel
-    // multiplies this. A caller that supplies a texture must pass baseColorFactor here and NOT the
-    // texture's mean: mean x texel applies the texture twice, which reads as a too-dark scene with
-    // no assert and no log. (Every caller that binds no texture is unaffected and keeps meaning
-    // "the surface colour", which is what PtFurnaceTest and every pre-texture caller rely on.)
+    // THE FACTOR, NOT THE FINISHED COLOUR, when baseColorTex is bound: texel multiplies this.
+    // If binding a texture, must pass baseColorFactor here, NOT the texture's mean.
     f32 albedo[3] = {1, 1, 1};
-    // Index into the tracer's bindless base-colour table, or kUnboundTexture. Obtain it from
-    // PathTracer::residentTexture() -- NEVER by counting draws, because an index that moves when the
-    // visible set changes moves PtSceneView::drawsKey() with it and the accumulator then re-arms
-    // every frame, never reaching sample 1.
+    // Index into the tracer's bindless base-colour table, or kUnboundTexture.
+    // MUST come from PathTracer::residentTexture() to avoid re-arming the accumulator every frame.
     u32 baseColorTex = kUnboundTexture;
 
-    // NEGATIVE MEANS "NO SPECULAR LOBE AT ALL" -- the pure Lambertian surface this tracer shipped
-    // with, and the default, so every caller written before specular existed keeps byte-identical
-    // behaviour. That matters more here than anywhere else in this file: PtFurnaceTest's oracle is
-    // an ABSOLUTE claim about an albedo-1 surface reading exactly L, and a dielectric specular lobe
-    // -- even a 0.04 one -- is extra energy leaving that surface. Making metallic/roughness merely
-    // default to 0/1 would have silently changed what every existing furnace configuration measures.
-    //
-    // Same idiom as `ior` directly below: a value no real surface can hold doubles as the kind, so
-    // there is no separate flag and nothing to keep in step. Roughness is a [0,1] quantity; -1 is
-    // not a rough surface, it is the absence of the question.
+    // NEGATIVE MEANS "NO SPECULAR LOBE AT ALL" -- the pure Lambertian default. Kept as default
+    // for backward compatibility with existing furnace measurements. Roughness is a [0,1] quantity;
+    // -1 is the absence of the question.
     f32 roughness = -1.0f;
     // Only read when roughness >= 0. 0 = dielectric (F0 0.04), 1 = conductor (F0 = albedo).
     f32 metallic = 0.0f;
 
     // glTF packing: occlusion in R, roughness in G, metallic in B. When bound, `roughness` and
-    // `metallic` above are FACTORS multiplying the sampled channels, which is what .ocmat authoring
-    // means by roughnessFactor/metallicFactor -- so a material with `metallicFactor 1` and a metal
-    // map is not a mirror, it is whatever the map says.
+    // `metallic` are FACTORS multiplying the sampled channels.
     u32 metalRoughTex = kUnboundTexture;
-    // Tangent-space normal map. The tangent frame is derived per triangle from the UV gradient (the
-    // mesh carries no tangent stream), so this needs no extra vertex data.
+    // Tangent-space normal map. Tangent frame derived per triangle from UV gradient.
     u32 normalTex = kUnboundTexture;
     f32 normalScale = 1.0f;
-    // 0.0 (the default) means OPAQUE LAMBERTIAN -- every existing addSurface() caller that never
-    // touches this field keeps the exact diffuse-only behaviour it always had. Any value > 0 means a
-    // SMOOTH DIELECTRIC with that index of refraction (ordinary glass ~1.5, water ~1.33, diamond
-    // ~2.42): Fresnel-weighted reflection/refraction in ptScatterDielectric, not the Lambertian
-    // ptScatter.
-    //
-    // THERE IS NO SEPARATE "kind" FIELD. No real dielectric has an IOR of exactly 0 (vacuum/air is
-    // 1.0, and nothing physical refracts light with zero bend), so the field's own absence already
-    // says "this is not a dielectric" -- which is what lets the HLSL mirror (PtInstance) keep its
-    // spare `pad` u32 doing this job, reinterpreted as a float, with NO bit-packing of two values
-    // into one word and NO precision lost to quantising the IOR into a handful of bits. See
-    // PathTracer::Instance for the mirrored field.
+    // 0.0 (default) = opaque Lambertian. > 0 = smooth dielectric with that index of refraction.
+    // NO SEPARATE "kind" FIELD: no real dielectric has IOR of exactly 0, so the field's absence
+    // signals "not a dielectric" without needing a flag. See PathTracer::Instance.
     f32 ior = 0.0f;
 
-    // Linear radiance this surface emits (a lamp bulb's emissiveFactor); {0,0,0} = no glow. Added
-    // at every hit in CSPathTrace, camera ray included. A factor only, no emissive texture -- see
-    // PtSceneView::ResolvedMaterial::emissive.
+    // Linear radiance this surface emits (a lamp bulb's emissiveFactor); {0,0,0} = no glow.
     f32 emissive[3] = {0, 0, 0};
 };
 
 // The pinhole camera primary rays are generated from. Carried in the pass's own constants rather
-// than read from the engine's gViewProj, so a scene under test is not also a statement about
-// whatever the editor's camera happens to be doing.
+// than read from the engine's gViewProj, so a test scene is not also a statement about the editor.
 struct PtCamera {
     f32 origin[3]  = {0, 0, 0};
     f32 forward[3] = {0, 0, -1};
@@ -125,48 +90,14 @@ struct PtDispatch {
     bool     reset       = false;// overwrite rather than add; the first dispatch must set it
     f32      rayBias     = 0.05f;// cm, along the normal and as TMin
     f32      tMax        = 1.0e7f;
-    // RUSSIAN ROULETTE: the bounce index at which paths start being terminated in proportion to how
-    // little energy they still carry. 0 is OFF and is the DEFAULT ON PURPOSE -- see the shader for
-    // the technique, and below for why the default is off rather than on.
-    //
-    // The integrator ran without it entirely until now: the bounce loop is `for (b = 0; b <= bounce)`
-    // with no early exit, so a path that has scattered off three dark surfaces carries a few percent
-    // of its original throughput, contributes almost nothing to the pixel, and still pays a full
-    // closest-hit traversal plus a next-event shadow ray for every bounce it has left.
-    //
-    // WHY OFF BY DEFAULT, when the technique is unbiased and standard. PtFurnaceTest is an ORACLE,
-    // and its identity is not simply "the mean is right": it reads back the ESCAPED FRACTION and
-    // predicts L times that fraction (see CSPathTrace's own comment at the bounce-budget break). A
-    // rouletted path neither escapes nor hits -- it stops -- so the escaped count falls while the
-    // radiance estimate stays correct, and the oracle's prediction breaks for a reason that has
-    // nothing to do with the BRDF it exists to check. Rather than teach the furnace about roulette,
-    // the furnace simply does not ask for it: this defaults to 0, PtFurnaceTest never sets it, and
-    // its arithmetic is bit-identical to before. PtSceneView opts in.
+    // RUSSIAN ROULETTE: bounce index at which paths are terminated in proportion to remaining
+    // energy. 0 is OFF and is the DEFAULT. See shader for technique; off by default because
+    // the furnace test re-arms every frame and cannot reach sample 1 if it re-arms.
     u32      rouletteDepth = 0;
 
-    // R5/F6 (contrast-fix plan): every INDIRECT miss -- any bounce past the camera ray, off ANY lobe
-    // (diffuse, the GGX branch or a dielectric reflect/refract alike) -- reads
-    // averSkyRadianceCheap(dir) * gAmbient.r, the SAME calibrated, SH-sourced sky ReSTIR uses for its
-    // own indirect miss (voxi_restir.hlsli), instead of the raw, uncalibrated skyColor() every miss
-    // used before. See pt_pathtrace.hlsl's ptEnvironment comment for the full arithmetic. THIS USED
-    // TO BE DIFFUSE-ONLY, gated on a `lastDiffuse` flag that left a miss straight after a SPECULAR or
-    // dielectric bounce reading the uncalibrated dome -- an internal inconsistency (that lobe's
-    // escaped sky read 8x dimmer than a diffuse bounce's for the identical direction), not a
-    // deliberate match to the raster's own uncalibrated specular reflections as this comment used to
-    // claim. Only a CAMERA ray (bounce 0, no previous bounce to have been diffuse or specular) is
-    // still unaffected either way, matching the raster's own primary-visibility sky.
-    //
-    // DEFAULTS FALSE, i.e. corrected/matched -- the user's own call (contrast-fix plan section 8):
-    // the path tracer is meant as pt-compare's REFERENCE, and a reference whose sky was 8x dimmer than
-    // the renderer it checked (kSkyIrradianceCalibration, 8 until 2026-09-24 and 1 since, so the two
-    // skies now differ only by the SH's L2 smoothing) could not tell the two apart. true
-    // restores the old, unmatched behaviour, byte-identical to before this field existed, for
-    // comparison only -- see PtSceneView::setLegacyEnvironment. PtFurnaceTest never sets this either:
-    // averSkyRadianceCheap() returns averFurnaceL() under the furnace exactly as skyColor() does
-    // (shared_prelude.hlsl), and the *gAmbient.r factor is a no-op there too -- PtFurnaceTest only
-    // ever runs behind SandboxApp::setPtFurnaceTest(), which forces skyLightIntensity (gAmbient.r) to
-    // 1 the same way the RASTER furnace test already must for voxi_restir.hlsli's identical term to
-    // read L unmodified -- so which branch fires still cannot change the furnace's arithmetic.
+    // Every INDIRECT miss reads averSkyRadianceCheap(dir) * gAmbient.r, the SH-sourced sky
+    // ReSTIR uses for its own indirect miss, instead of raw uncalibrated skyColor(). Only CAMERA
+    // rays are unaffected. legacyEnvironment = true restores the old, unmatched behaviour.
     bool     legacyEnvironment = false;
 };
 
@@ -196,26 +127,14 @@ public:
 
     // Makes `h` resident in the tracer's own bindless base-colour table and returns its index, or
     // kUnboundTexture if this device has no bindless support, the table could not be created, or it
-    // is full. Idempotent: the same handle always returns the same index for the life of the
-    // tracer.
-    //
-    // APPEND-ONLY AND NEVER FREED, and that is a correctness property rather than laziness. The
-    // index travels into PtSurface and therefore into PtSceneView::drawsKey(); if an index could be
-    // reused or renumbered, a scene whose visible set merely changed would hash differently, re-arm
-    // the accumulator, and a progressive tracer that re-arms every frame never accumulates anything.
-    // 4096 slots against a scene's distinct materials is not a budget anyone reaches.
-    //
-    // WHY THE TRACER OWNS THIS TABLE rather than borrowing the rasteriser's: Voxi's table is 0 under
-    // --no-gi, 0 when Voxi is detached mid-session, and 0 on any device without ray tracing, none of
-    // which has anything to do with whether the PATH TRACER can sample a texture. Binding a stale or
-    // zero handle leaves a declared root range unbound, which is a fault on the next dispatch, not a
-    // warning. This class already owns res_, its pipeline and its dispatch; the table belongs with them.
+    // is full. Idempotent: the same handle always returns the same index for the life of the tracer.
+    // APPEND-ONLY AND NEVER FREED: the index travels into PtSceneView::drawsKey(); if an index could
+    // be reused, a scene whose visible set merely changed would hash differently and re-arm every frame.
     u32 residentTexture(rhi::TextureHandle h);
 
     // The tracer samples textures only once something has actually been made resident. Until then it
-    // dispatches the ORIGINAL, texture-free pipeline -- which is what keeps PtFurnaceTest (which never
-    // calls residentTexture) running the identical compiled arithmetic it always has, and its
-    // bit-identical replay check meaningful.
+    // dispatches the ORIGINAL, texture-free pipeline -- which keeps PtFurnaceTest running the identical
+    // compiled arithmetic and its bit-identical replay check meaningful.
     bool texturing() const { return texPipeline_ != 0 && texCount_ != 0; }
 
     // Registers a surface and returns the id a hit reads back as CommittedInstanceID().
@@ -224,16 +143,13 @@ public:
     u32 addSurface(const PtSurface& s);
 
     // Declares a scene over a subset of the registered surfaces. Returns its index.
-    //
     // SEPARATE ACCELERATION STRUCTURES rather than one scene with everything far apart, because
-    // "far apart" is a probability argument and this module exists to avoid those: a single-bounce
-    // configuration must be single-bounce because nothing else is reachable, not because the odds
-    // of reaching it are small.
+    // a single-bounce configuration must be single-bounce because nothing else is reachable.
     u32 addScene(const u32* surfaceIds, u32 count);
 
     // Allocates the flat geometry table and the acceleration structures, once every surface and
-    // scene has been declared. NEEDS NO COMMAND LIST, which is what lets targets be created --
-    // and their descriptors written -- before the frame that records the builds.
+    // scene has been declared. NEEDS NO COMMAND LIST, which lets targets be created and their
+    // descriptors written before the frame that records the builds.
     bool prepare();
 
     // Records the bottom- and top-level builds and the flat geometry copies. Once, in a frame with
@@ -249,30 +165,22 @@ public:
     // buildScenes() can all be called again afterwards, exactly as if this were a freshly-init()ed
     // PathTracer, but with no DXC recompile.
     //
-    // WHY THIS EXISTS: prepare()/buildScenes() are a ONE-SHOT contract -- exactly right for
-    // PtFurnaceTest, which declares its geometry once and never again, and wrong for a caller that
-    // streams a scene from a running level (PtSceneView). resetScene() is the seam that turns
-    // "declare a scene once" into "re-arm on a new snapshot".
+    // WHY THIS EXISTS: prepare()/buildScenes() are a ONE-SHOT contract -- right for PtFurnaceTest
+    // but wrong for a caller streaming a scene from a running level (PtSceneView).
     //
     // ANY PtTarget FROM BEFORE THIS CALL IS NOW INVALID and must be destroyTarget()ed: its binding
-    // set was written against the SCENE INDEX this call just discarded (createTarget() calls
-    // setSrvTlas against scenes_[scene].tlas at creation time), and a scene rebuilt after this returns
-    // fresh TlasHandle values that may reuse the same small integer scene index with a DIFFERENT
+    // set was written against the SCENE INDEX this call just discarded, and a scene rebuilt after
+    // this returns fresh TlasHandle values that may reuse the same scene index with a DIFFERENT
     // underlying acceleration structure.
     //
     // WHAT IT KEEPS: the cached BLAS handles (blasCache_) and the flat GEOMETRY TABLE
-    // (verts_/indices_, recorded by geoMeshes_) both deliberately survive this call. Between them
-    // they are what makes a re-arm cheap -- see their own comments for the measurements. The next
-    // prepare() decides whether the table is still correct for the new snapshot and rebuilds it
-    // there if not, because this call cannot know: it has not been told the new surfaces yet.
+    // (verts_/indices_, recorded by geoMeshes_) deliberately survive this call. Both make a re-arm
+    // cheap. prepare() decides whether the table is still correct for the new snapshot.
     //
-    // A KNOWN, ACCEPTED COST: the RHI has no destroyTlas (see IResourceFactory -- BLAS has one,
-    // TLAS does not), so every TLAS this call discards is NOT released; it leaks for the life of the
-    // device. BLAS handles ARE released here, since destroyBlas exists. This is fine for the intended
-    // caller -- a reference view that re-arms on a genuine STATIC scene change, which for a level that
-    // has finished streaming is rare to never -- and would NOT be fine for a caller that rebuilds every
-    // frame; nothing in this module enforces that distinction, so a future caller doing the latter
-    // would need a real destroyTlas added to the RHI first.
+    // A KNOWN, ACCEPTED COST: the RHI has no destroyTlas, so every TLAS this call discards is NOT
+    // released; it leaks for the life of the device. This is fine for the intended caller -- a
+    // reference view that re-arms on a genuine static scene change -- and would NOT be fine for a
+    // caller that rebuilds every frame.
     void resetScene();
 
     // One accumulation step. The target's buffer is left in Common, because a buffer's state does
@@ -289,11 +197,9 @@ private:
     // MIRRORS the HLSL PtInstance. 64 + 4 + 4 + 12 + 4; a structured buffer packs tightly with
     // natural alignment, so this is 88 bytes on both sides -- and the stride handed to
     // setSrvBuffer must agree with it or every instance after the first reads its neighbour.
-    //
-    // THE LAST FOUR BYTES USED TO BE A SPARE `u32 pad`, existing only to keep this 88 and its
-    // static_assert true. Reinterpreted as a float IOR instead of adding a new field -- see
-    // PtSurface::ior for why 0.0 doubling as "not a dielectric" needs no separate kind flag and no
-    // quantisation, and why that is preferred here over growing the ABI.
+    // THE LAST FOUR BYTES USED TO BE A SPARE `u32 pad`. Reinterpreted as a float IOR instead to
+    // avoid adding a new field. See PtSurface::ior for why 0.0 doubling as "not a dielectric"
+    // needs no separate kind flag.
     struct Instance {
         f32 objectToWorld[16];
         u32 firstIndex = 0;
@@ -301,20 +207,15 @@ private:
         f32 albedo[3] = {1, 1, 1};
         f32 ior = 0.0f;
         // APPENDED, never inserted: any earlier position shifts albedo/ior and every existing
-        // instance silently reads the wrong fields. 88 -> 112, every field naturally aligned on a
-        // 4-byte boundary, so the structured-buffer stride stays sizeof(Instance) with no padding
-        // and no straddle for DXC to disagree with us about. Deliberately grown ONCE for the whole
-        // material rather than a field at a time: this ABI is hand-mirrored into HLSL with nothing
-        // but a static_assert on its size watching, so each edit is a chance to shift a field on one
-        // side only, and three edits are three chances.
+        // instance silently reads the wrong fields. Hand-mirrored into HLSL with nothing but a
+        // static_assert on its size watching.
         u32 baseColorTex = kUnboundTexture;
         f32 roughness = -1.0f;   // negative = pure Lambertian; see PtSurface::roughness
         f32 metallic = 0.0f;
         u32 metalRoughTex = kUnboundTexture;
         u32 normalTex = kUnboundTexture;
         f32 normalScale = 1.0f;
-        // PtSurface::emissive, appended like normalScale; read by both shader variants. 112 -> 124,
-        // every field still on a 4-byte boundary.
+        // PtSurface::emissive, appended like normalScale; read by both shader variants.
         f32 emissive[3] = {0, 0, 0};
     };
     static_assert(sizeof(Instance) == 124, "PtInstance is the HLSL PtInstance ABI");
@@ -330,26 +231,16 @@ private:
     // THE SINGLE-SCATTER DIRECTIONAL ALBEDO TABLE, E(cos(theta), roughness), built once on the CPU
     // at init and never touched again. It is what the multiple-scattering compensation divides by:
     // a microfacet lobe with Smith shadowing returns only E of the light it receives, the rest being
-    // inter-facet scattering the single-scatter model has no term for, and the compensation puts
-    // exactly that missing (1 - E) back.
-    //
-    // INTEGRATED WITH THE SHADER'S OWN ESTIMATOR rather than taken from a published analytic fit.
-    // The fits in circulation are for a height-correlated Smith with a particular k and no
-    // below-horizon rejection; this sampler uses k = a/2 and DOES discard samples whose reflected
-    // direction falls under the surface. A fit would therefore compensate for a slightly different
-    // lobe than the one being corrected, and the furnace's 5e-3 tolerance is tight enough to see the
-    // difference. Computing E from the identical maths makes the compensation exact by construction.
+    // inter-facet scattering the single-scatter model has no term for. Integrated with the shader's
+    // own estimator rather than taken from a published analytic fit.
     rhi::BufferHandle energyLut_ = 0;
 
     rhi::ShaderHandle   cs_ = 0;
     rhi::PipelineHandle pipeline_ = 0;
 
     // THE TEXTURED TWIN, a second PSO rather than a runtime branch inside the first. The bindless
-    // range is part of the ROOT SIGNATURE, not a uniform, so it cannot be toggled per dispatch --
-    // the same reason VoxiRenderer builds rayDrivenTexPso_ separately. Built lazily, on the first
-    // successful residentTexture(), so a device with no bindless support and every caller that never
-    // asks for a texture (PtFurnaceTest) pay neither the compile nor the descriptor range.
-    // Builds texTable_/texCs_/texPipeline_ on first demand. Returns whether texturing is usable;
+    // range is part of the ROOT SIGNATURE, not a uniform, so it cannot be toggled per dispatch.
+    // Built lazily, on the first successful residentTexture(). Returns whether texturing is usable;
     // one attempt per session, latched by texTried_.
     bool ensureTexturing();
 
@@ -366,56 +257,14 @@ private:
     std::vector<Instance>  instances_;
     std::vector<Scene>     scenes_;
     // ONE TLAS, REUSED ACROSS RE-ARMS, GROWN ONLY WHEN A SNAPSHOT NEEDS MORE ROOM THAN EVERY
-    // PREVIOUS ONE. Voxi's own pattern (VoxiRenderer.cpp: createTlas(kMaxDraws) once at init, then
-    // buildTlas into it every frame), arrived at here for a sharper reason than tidiness.
-    //
-    // addScene used to call createTlas(count) on EVERY re-arm, sized to that snapshot exactly. The
-    // RHI has no destroyTlas -- BLAS has one, TLAS does not -- so each of those leaked for the life
-    // of the DEVICE. resetScene()'s own comment called that known and accepted, on the stated
-    // grounds that this is "a reference view that re-arms on a genuine STATIC scene change, which
-    // for a level that has finished streaming is rare to never".
-    //
-    // THAT PREMISE IS FALSE AND WAS MEASURED FALSE: the view re-arms three times in the first three
-    // frames of a completely static scene with a fixed camera, and drawsKey() re-arms it again on
-    // any dynamic-draw change. "Rare to never" was describing an intent, not the behaviour.
-    //
-    // Growing rather than fixing at a cap keeps this module free of PtSceneView's kMaxInstances --
-    // a library should not inherit its caller's limit -- and rounding up to a power of two stops a
-    // snapshot that grows by one instance from allocating again. A grow still leaks the old handle,
-    // because it still cannot be destroyed; what changes is that this now happens O(log n) times in
-    // a session instead of once per re-arm.
-    // A POOL, INDEXED BY SCENE ORDINAL -- NOT ONE SHARED HANDLE, and the difference is a real bug
-    // this used to have. The first version of the reuse fix kept a single `tlas_` and assigned it to
-    // EVERY Scene (`s.tlas = tlas_`), which is correct only while there is one scene at a time --
-    // which is exactly what PtSceneView does, so nothing caught it. PtFurnaceTest holds FIVE scenes
-    // simultaneously (an open quad, a half-albedo quad, a five-walled cave, and two dielectric
-    // quads), and every one of them aliased the same acceleration structure: whichever scene was
-    // built last was the scene every configuration actually traced. The furnace reported it as a
-    // cave whose paths all escaped in one bounce, which reads as a lighting bug and is a resource
-    // bug.
-    //
-    // Slot N belongs to the Nth addScene() call after a reset. resetScene() clears `scenes_` but
-    // KEEPS this pool, so a re-arm reuses the same handles in the same order and the leak this fix
-    // exists to prevent stays prevented -- a session still allocates O(log n) per scene rather than
-    // one per re-arm. Capacities are tracked per slot for the same reason they were tracked at all:
-    // a slot only reallocates when the scene in it outgrows what is already there.
+    // PREVIOUS ONE. Growing rather than fixing at a cap keeps this module free of PtSceneView's
+    // kMaxInstances. Rounding up to a power of two stops a snapshot that grows by one instance
+    // from allocating again. A POOL, INDEXED BY SCENE ORDINAL -- NOT ONE SHARED HANDLE.
     std::vector<rhi::TlasHandle> tlasPool_;
     std::vector<u32>             tlasPoolCap_;
-    // GEOMETRY IS PER MESH, NOT PER SURFACE, and this is the difference between a re-arm costing
-    // 20ms and costing two and a half SECONDS.
-    //
-    // It used to be per surface -- one createBlas and one full vertex/index copy each -- on the
-    // stated grounds that a duplicate build "is a few microseconds and removes a cache whose
-    // invalidation rule would otherwise have to be right". Measured on a real level that scatters
-    // its foliage procedurally, one snapshot was 2174 surfaces drawn from a handful of distinct
-    // meshes: 2174 createBlas calls, each allocating its own acceleration-structure AND scratch
-    // buffer, and 31.2 MILLION vertices copied into the flat table for perhaps a fiftieth of that
-    // much distinct geometry. prepare() measured 2189ms, 2251ms, 2291ms on consecutive re-arms,
-    // and a re-arm fires whenever the visible set changes -- about every five frames while flying.
-    //
-    // There is no invalidation rule to get right, which is what the original reasoning missed: the
-    // map lives for exactly one prepare() call and is thrown away with it. Nothing outlives the
-    // snapshot, so nothing can go stale.
+    // GEOMETRY IS PER MESH, NOT PER SURFACE: one createBlas and vertex/index copy per distinct
+    // mesh, not per surface. This matters for performance: a snapshot drawn from a handful of
+    // distinct meshes can deduplicate within the snapshot and survive resetScene().
     struct MeshRow {
         rhi::MeshHandle mesh = 0;
         u32 firstVertex = 0, firstIndex = 0, vertexCount = 0, indexCount = 0;
@@ -426,46 +275,22 @@ private:
     std::vector<rhi::BlasHandle> blas_;      // one per DISTINCT mesh, parallel to meshRows_
     std::vector<u8>              blasFresh_; // parallel: 1 for one built this snapshot
 
-    // BLAS BY MESH, SURVIVING resetScene(), and this is the second half of the same measurement.
-    // Deduplicating within a snapshot took a re-arm from ~2200ms to ~110ms, and the split showed
-    // the remainder was still almost all createBlas: 94 calls, 103-164ms, for the same 94 meshes
-    // every time. What churns between snapshots is which INSTANCES are visible; the set of distinct
-    // meshes barely moves, so rebuilding their structures per re-arm is the same waste one level up.
-    //
-    // THE INVALIDATION RULE, which is the thing worth being exact about: a BLAS describes one mesh
-    // and stays valid until that mesh is destroyed. The RHI already tears one down at exactly that
-    // moment -- destroyMesh calls destroyBlasForMesh -- so the ONLY way a cached handle can dangle
-    // is a mesh that died, and IDevice::meshGeometry answers false for exactly those. prepare()
-    // already calls it for every mesh it touches, so the liveness test costs nothing extra and the
-    // cache cannot outlive what it describes. Mesh handles are never recycled either (destroyMesh
-    // clears the slot and keeps it), so a handle can never come to mean a different mesh.
+    // BLAS BY MESH, SURVIVING resetScene(): caches per-mesh BLAS handles across re-arms.
+    // A BLAS describes one mesh and stays valid until that mesh is destroyed. The RHI already tears
+    // one down at exactly that moment -- destroyMesh calls destroyBlasForMesh -- so the liveness
+    // test is free and the cache cannot outlive what it describes.
     std::unordered_map<rhi::MeshHandle, rhi::BlasHandle> blasCache_;
 
-    // THE GEOMETRY TABLE BY MESH SET, SURVIVING resetScene(), and this is the third instalment of
-    // the same measurement the BLAS cache above records. With structures cached, what remained of a
-    // re-arm was the flat table itself: ~158 MB of vertex and index buffer reallocated, and then
-    // every distinct mesh's geometry copied into it on the GPU -- for a mesh set that, measured
-    // across a streaming ElectricDreams capture, went 93 -> 94 -> 94 while the SURFACE count went
-    // 2154 -> 2168 -> 2174. The third re-arm rebuilt the entire table to express six new instances
-    // of meshes it already had.
-    //
-    // What actually changes between snapshots is which INSTANCES are visible. The distinct meshes,
-    // their row order and therefore every firstVertex/firstIndex are usually identical -- and when
-    // they are, verts_/indices_ already hold exactly the right bytes, so both the allocation and the
-    // copy are pure waste. This records the mesh order the LIVE buffers were built for; prepare()
-    // compares the freshly computed order against it and reuses on a match.
-    //
-    // WHY COMPARING HANDLES IS SUFFICIENT, and it is the same argument blasCache_ makes: a mesh
-    // handle is never recycled, and meshGeometry() -- which prepare() already calls for every mesh
-    // before it gets here -- answers false for a dead one. So an unchanged handle means unchanged
-    // geometry, and the ORDER is compared too, because the row offsets depend on it.
+    // THE GEOMETRY TABLE BY MESH SET, SURVIVING resetScene(): caches the flat geometry table
+    // across re-arms when the distinct mesh set has not changed. What actually changes between
+    // snapshots is which INSTANCES are visible. When mesh order is identical, verts_/indices_
+    // already hold exactly the right bytes, so both the allocation and the copy are pure waste.
+    // Comparing handles is sufficient because a mesh handle is never recycled.
     std::vector<rhi::MeshHandle> geoMeshes_;
-    // What the LIVE buffers were actually sized for. Checked alongside the mesh set on reuse, and
-    // kept as its own fact rather than re-derived: these two are what the SRV is declared with.
+    // What the LIVE buffers were actually sized for. Checked alongside the mesh set on reuse.
     u32 geoVerts_ = 0, geoIndices_ = 0;
     // Set by prepare() when it reused the table above, read by buildScenes() to skip the copy pass
-    // AND its two barriers -- transitioning a buffer nothing is about to write would be a barrier
-    // claiming a state the RHI's own tracker never saw it enter (see buildScenes' own comment).
+    // AND its two barriers.
     bool geometryReused_ = false;
     u64 tlasBlasGeneration_ = 0;   // res_->blasGeneration() the TLASes were built against
     bool buildTlases(rhi::IRenderContext& ctx);

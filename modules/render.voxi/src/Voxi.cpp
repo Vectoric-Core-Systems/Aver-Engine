@@ -4,12 +4,7 @@
 #include "aver/voxi/Voxi.hpp"
 #include "aver/voxi/voxi_abi.h"
 #include "aver/core/Log.hpp"
-// QualityLadder.hpp: every *ForQuality body below is now a one-line forward into aver::voxi::ladder --
-// see that header for the switch statements and the reasoning that used to live in this file.
-// RenderSettingsResolver.hpp: the new resolve() step inside setSettings, and Renderer::status's own
-// forward to featureStatus. Including both here means every build of this shared library runs
-// QualityLadder.hpp's tier-derivation static_asserts, not merely whatever happens to include it
-// directly.
+// QualityLadder.hpp: tier derivation logic. RenderSettingsResolver.hpp: resolve() step in setSettings.
 #include "aver/voxi/QualityLadder.hpp"
 #include "aver/voxi/RenderSettingsResolver.hpp"
 
@@ -39,10 +34,7 @@ void Renderer::setSettings(const Settings& s) {
         const u32 bit = 1u << static_cast<u32>(f);
         if (refusalLogged_ & bit) return;
         refusalLogged_ |= bit;
-        // THE DEVICE IS NOT ALWAYS AT FAULT, and saying it is sends the reader to the wrong place.
-        // Unsupported means this GPU cannot; NotImplemented means the engine does not, on any GPU.
-        // The old wording blamed hardware for both, so a NotImplemented feature read as "your card is
-        // too old" -- someone could reasonably go shopping over a line of missing code.
+        // Device unsupported vs engine NotImplemented: must distinguish in message to avoid misdirection.
         AVER_INFO(status(f) == Status::NotImplemented
                       ? "[Voxi] {} was requested but this engine does not implement it yet ({}); it stays off"
                       : "[Voxi] {} was requested but this device cannot run it ({}); it stays off",
@@ -61,22 +53,7 @@ void Renderer::setSettings(const Settings& s) {
     if (status(Feature::RayTracing) != Status::Ready) {
         if (n.rayTracing != Quality::Off) refuse(Feature::RayTracing);
         n.rayTracing = Quality::Off;
-        // giMode==1 (ReSTIR GI) needs the same RayQuery hardware the shadow/reflection rays
-        // do -- it traces its own candidate ray through the identical acceleration structure and
-        // flat geometry table. THIS USED TO FORCE n.giMode TO 0 HERE, as a CONSEQUENCE of the
-        // RayTracing refusal just logged above, the same way rayTracing itself is clamped.
-        //
-        // NOT ANY MORE: giMode is now stored EXACTLY AS REQUESTED, unclamped, and resolved at READ
-        // time instead (RenderSettingsResolver.hpp's resolve(), called near the bottom of this
-        // function). That is safe because nothing downstream ever reads this raw field to decide
-        // whether ReSTIR GI actually runs -- VoxiRenderer::giRestirWanted() is the only reader of
-        // giMode_ (VoxiRenderer.hpp), and the shader itself branches on gGiRestirParams.x, a
-        // per-frame constant that is reset to 0 every frame and set to 1 only inside the block
-        // already gated on giRestirWanted()'s own ReSTIR history textures (VoxiRenderer.cpp) -- so a
-        // value this device cannot honour is never seen by a shader regardless of what setSettings
-        // does to the field it came from. Keeping the request lets the UI and the console show a
-        // combo the way it was left (see resolve()'s FieldResolution: requested vs effective) instead
-        // of silently discarding a choice the moment ray tracing goes off and on again.
+        // giMode stored unclamped, resolved at read time by RenderSettingsResolver.hpp (safe for shader flow).
     }
     if (status(Feature::PathTracing) != Status::Ready) {
         if (n.pathTracing != Quality::Off) refuse(Feature::PathTracing);
@@ -87,62 +64,33 @@ void Renderer::setSettings(const Settings& s) {
         n.meshShaders = false;
     }
 
-    // Clamped exactly like the four above it, and for the same reason -- a setting that a device or a
-    // half-built feature cannot honour must not keep a value that says otherwise. While
-    // status(LayeredBsdf) is NotImplemented this pins the field to Off, so nothing downstream has to
-    // ask whether the value it is reading is real, and a project manifest carrying a stale rung is
-    // reported once by refuse() rather than acted on.
+    // Unsupported features clamp to Off; downstream code needn't check validity.
     if (status(Feature::LayeredBsdf) != Status::Ready) {
         if (n.layeredBsdf != Quality::Off) refuse(Feature::LayeredBsdf);
         n.layeredBsdf = Quality::Off;
     }
 
-    // Quality tiers used to leave voxelResolution completely alone -- selecting Epic cost nothing
-    // extra because nothing read the tier to size the grid. When the caller changes the GI tier and
-    // leaves voxelResolution exactly as it already was -- the common case: the editor's Quality
-    // combo touched alone, or a project manifest that states giQuality but not voxelResolution (see
-    // applyProjectRenderSettings in SandboxApp.cpp) -- derive the grid edge from the new tier. An
-    // explicit voxelResolution request arriving in the SAME call (the incoming value differs from
-    // what is currently active) always wins over the derived one, so the editor's "Voxel grid"
-    // combo and a manifest's explicit voxelResolution keep overriding it exactly as before.
+    // Derive voxel resolution from tier if tier changed but voxelResolution was not explicitly set in this call.
     if (n.globalIllumination != settings_.globalIllumination && n.voxelResolution == settings_.voxelResolution)
         n.voxelResolution = voxelResolutionForQuality(n.globalIllumination);
 
-    // The same derivation for HOW OFTEN the volume is rebuilt, by exactly the same rule and for the
-    // same reason: the tier sized the grid but said nothing about the revoxelisation rate, so every
-    // tier paid the full always-fresh cost. Revoxelising measured at 108 ms of a 229 ms frame -- 47%,
-    // the single largest item in it -- and dropping to one rebuild in four took the frame from 121.1
-    // to 104.5 ms on the Electric Dreams scene.
-    //
-    // EPIC STAYS AT 1, which is the point. Epic means "do not compromise", so its indirect light
-    // remains bit-identical to the always-fresh behaviour every tier used to have; only the cheaper
-    // tiers buy speed with latency. The trade is temporal, not spatial -- indirect light lags scene
-    // changes by up to N-1 frames and a static scene converges to exactly the same image.
+    // Derive revoxelisation interval from tier (same rule).
     if (n.globalIllumination != settings_.globalIllumination && n.giUpdateInterval == settings_.giUpdateInterval)
         n.giUpdateInterval = giUpdateIntervalForQuality(n.globalIllumination);
 
-    // And the CONE COUNT, by the same rule -- the one that was missing, and the one that carries
-    // most of the cost. See Settings::giCones.
+    // Derive cone count from tier (same rule).
     if (n.globalIllumination != settings_.globalIllumination && n.giCones == settings_.giCones)
         n.giCones = giConesForQuality(n.globalIllumination);
 
-    // U1: how much of F2/F3's cost this tier pays for, derived exactly as giCones is above -- same
-    // "changed tier AND untouched field" rule, same reason. See Settings::giRestirVisibility.
+    // Derive ReSTIR visibility setting from ray-tracing tier (same rule).
     if (n.globalIllumination != settings_.globalIllumination && n.giRestirVisibility == settings_.giRestirVisibility)
         n.giRestirVisibility = giRestirVisibilityForQuality(n.globalIllumination);
 
-    // REFRACTION FOLLOWS THE RAY-TRACING TIER, by the same by-value rule as every derived knob here:
-    // only when the tier MOVED and the caller did not set the mode itself in the same call. A caller
-    // asking for the value the field already holds is indistinguishable from one who never asked --
-    // that is the trap SandboxApp's two-call setSettings pattern exists to step around, and it
-    // applies to this exactly as it does to rtShadowRays.
+    // Refraction mode derives from ray-tracing tier, only if tier moved and field was not explicitly set.
     if (n.rayTracing != settings_.rayTracing && n.refractionMode == settings_.refractionMode)
         n.refractionMode = refractionForQuality(n.rayTracing);
 
-    // The RT sun-shadow knobs follow their own tier the same way, and for a sharper reason: with RT
-    // on by default there is no longer any configuration in which these are inert, so a tier change
-    // that left them alone would advertise Medium while running whatever the last tier paid for.
-    // Same "only if the caller did not set it explicitly in this call" rule as GI above.
+    // RT sun-shadow knobs derive from ray-tracing tier.
     if (n.rayTracing != settings_.rayTracing && n.rtShadowRays == settings_.rtShadowRays)
         n.rtShadowRays = rtShadowRaysForQuality(n.rayTracing);
     if (n.rayTracing != settings_.rayTracing && n.rtPixelsPerRayTile == settings_.rtPixelsPerRayTile)
@@ -151,104 +99,51 @@ void Renderer::setSettings(const Settings& s) {
         n.rtShadowDenoise = rtShadowDenoiseForQuality(n.rayTracing);
     if (n.rayTracing != settings_.rayTracing && n.rtRenderMode == settings_.rtRenderMode)
         n.rtRenderMode = rtRenderModeForQuality(n.rayTracing);
-    // KEYED ON rayTracing, not globalIllumination, even though it is the AMBIENT term it corrects:
-    // what it costs is a ray, and what makes it possible at all is the acceleration structure. A
-    // project raising GI quality on hardware with ray tracing off must not start paying for rays.
+    // giSkyOcclusionRays keyed on rayTracing (needs ray acceleration structure), not globalIllumination.
     if (n.rayTracing != settings_.rayTracing && n.giSkyOcclusionRays == settings_.giSkyOcclusionRays)
         n.giSkyOcclusionRays = giSkyOcclusionRaysForQuality(n.rayTracing);
     if (n.rayTracing != settings_.rayTracing && n.giSkyOcclusionTile == settings_.giSkyOcclusionTile)
         n.giSkyOcclusionTile = giSkyOcclusionTileForQuality(n.rayTracing);
-    // KEYED ON pathTracing, not rayTracing. A bounce budget is a path-tracing quantity; deriving
-    // it from the ray-tracing tier is what let the two run out of step.
+    // ptBounces keyed on pathTracing, not rayTracing.
     if (n.pathTracing != settings_.pathTracing && n.ptBounces == settings_.ptBounces)
         n.ptBounces = ptBouncesForQuality(n.pathTracing);
 
     n.voxelResolution = std::clamp(n.voxelResolution, 32u, 512u);
-    // At least the axial cone, or the gather returns nothing and GI silently switches itself off.
-    // 16 is a ceiling on a per-pixel loop, for the same reason the bounce count has one.
+    // At least the axial cone, or the gather returns nothing.
     n.giCones         = std::clamp(n.giCones, 1u, 16u);
-    // 1 is "a fresh direction per pixel" and is the no-op; 16 is well past where a tile stops being a
-    // local neighbourhood and starts being a visible block. Clamped rather than rejected for the same
-    // reason every other dial here is: a project asking for something silly gets the nearest sane
-    // renderer, not a refusal to start.
+    // 1 is per-pixel (no-op); 16 is well past usable range.
     n.giSkyOcclusionTile = std::clamp(n.giSkyOcclusionTile, 1u, 16u);
     n.giIntensity     = std::clamp(n.giIntensity, 0.0f, 8.0f);
     n.giMaxDistance   = std::clamp(n.giMaxDistance, 1.0f, 100000.0f);
-    // The GI radiance ceiling (AVER_VOX_MAXRAD's live half -- see the field's own comment). Lower
-    // bound is deliberately > 0: the shader macro (voxi.hlsl/voxi_gi.hlsli) falls back to the
-    // engine default 16.0 only when gViewParams.y arrives as exactly 0 (an UNSET FrameConstants
-    // block, e.g. giFrameConstants() read before VoxiRenderer::init() has run at all), and letting a
-    // real `set voxi.giRadianceCeiling 0` through here would collide with that sentinel and silently
-    // do nothing instead of the near-zero ceiling the user actually asked for. Upper bound is
-    // generous headroom, not a measured ceiling of its own.
+    // Lower bound must be > 0 (sentinel; shader falls back to 16.0 when exactly 0).
     n.giRadianceCeiling = std::clamp(n.giRadianceCeiling, 0.1f, 256.0f);
-    // Mirrors VoxiRenderer::kMaxShadowRays / kMaxPixelsPerRayTile, restated rather than shared: this
-    // library is core-only and must not depend on the RHI-backed renderer that owns those constants.
-    // The renderer's own setters are the authority on the exact contract (kMaxPixelsPerRayTile also
-    // rounds to a power of two); this is just enough to keep a wild request off the wire to it.
     n.rtShadowRays       = std::clamp(n.rtShadowRays, 1u, 32u);
-    // 3 is a (2*3+1)^2 = 49-tap neighbourhood, which is already past the point where a wider
-    // kernel buys anything a second iteration would not buy more cheaply. Kept low deliberately:
-    // this runs per FRAGMENT inside the shading shader, so the tap count multiplies by overdraw.
+    // 3 is (2*3+1)^2 = 49-tap; kept low (runs per fragment, tap count multiplies by overdraw).
     n.rtShadowDenoise    = std::clamp(n.rtShadowDenoise, 0u, 3u);
-    // 1 is the only mode that exists besides raster; anything else is a manifest typo, and
-    // clamping to 1 rather than 0 would turn a typo into a silent renderer swap.
+    // Clamp to 1 if invalid; rtRenderMode=1 is ray-traced (0 is raster).
     n.rtRenderMode       = n.rtRenderMode > 1u ? 0u : n.rtRenderMode;
-    // 0..2 are the only modes (single pass, staged, staged + half-rate GI); a typo clamps to the
-    // default 2 -- all three draw the same scene, so unlike rtRenderMode above a typo cannot swap
-    // renderers, and 2 is what a project without the key already gets.
+    // Valid modes: 0 (single pass), 1 (staged), 2 (staged + half-rate GI); clamp to default 2.
     n.rayDrivenStages    = n.rayDrivenStages > 2u ? 2u : n.rayDrivenStages;
-    // Same reasoning as rtRenderMode directly above: 1 is the only mode besides the cone gather, so
-    // a garbage value clamps to the DEFAULT (0, cones) rather than silently landing on ReSTIR GI.
+    // Valid modes: 0 (cone gather), 1 (ReSTIR GI); clamp to default 0.
     n.giMode             = n.giMode > 1u ? 0u : n.giMode;
-    // U1: 3 (Full) is the corrected-transport rung of RestirVisibility, so a typo lands on it -- never
-    // on 0 (NoRay), which would silently reintroduce the over-brightness cb4b48df's contrast fix exists
-    // to remove. Unlike giMode/rtRenderMode just above, whose typos clamp to "nothing changed" (0), a
-    // typo here clamps to the tier's own safest answer instead. 4 (Cached, the radiance cache) is a
-    // legal value and passes through; only values ABOVE it clamp, and they clamp to Full (3), not to
-    // Cached, so a typo never lands on the experimental cache.
+    // Valid values: 0-4; typo clamps to 3 (Full), not 0 (would reintroduce over-brightness).
     n.giRestirVisibility = n.giRestirVisibility > 4u ? 3u : n.giRestirVisibility;
-    // Settings::giRestirSpatialSamples's own comment has the bisection this splits reuse for. 15
-    // (AUTO) through 0 (temporal only) are all legitimate choices with nothing to typo-guard against,
-    // so a plain std::clamp is enough. 15 because givis::packAmbientW packs this into exactly four
-    // bits (bits 12-15).
+    // 15 (AUTO) through 0 (temporal only) valid; packs to 4 bits.
     n.giRestirSpatialSamples = std::clamp(n.giRestirSpatialSamples, 0u, 15u);
-    // giRestirMaxHistory: the per-neighbour M cap (reuse.maxHistory). 31 is what the five packed
-    // bits (gAmbientParams.w bits 18-22) hold.
+    // Per-neighbour M cap; 31 is the 5-bit packed limit.
     n.giRestirMaxHistory     = std::clamp(n.giRestirMaxHistory, 0u, 31u);
-    // 8 is arbitrary but finite: an unbounded bounce count in a shader loop is a hang, and the
-    // useful range for a real-time path tracer is nowhere near it.
     n.ptBounces          = std::clamp(n.ptBounces, 1u, 8u);
     n.rtPixelsPerRayTile = std::clamp(n.rtPixelsPerRayTile, 1u, 16u);
-    // Mirrors VoxiRenderer::kMaxGiUpdateInterval for the same reason as rtPixelsPerRayTile above.
     n.giUpdateInterval   = std::clamp(n.giUpdateInterval, 1u, 8u);
-    // The denoiser's dials. A zero history length would divide by zero inside FidelityFX's
-    // accumulation; 255 is a defensive ceiling (a history that long no longer follows anything).
-    // The clip weight must stay positive: zero would clip the history to a point.
+    // Zero history length would divide by zero in FidelityFX; 255 is defensive ceiling.
     n.denoiserMaxSamples        = std::clamp(n.denoiserMaxSamples, 1u, 255u);
     n.denoiserHistoryClipWeight = std::clamp(n.denoiserHistoryClipWeight, 0.01f, 4.0f);
     n.denoiserSunMovingSamples  = std::clamp(n.denoiserSunMovingSamples, 1u, 255u);
 
-    // A GARBAGE VALUE, NOT A HARDWARE ONE: mirrors n.rtRenderMode's own range clamp a few lines above
-    // rather than replacing it -- 2 is the top of the enum RayTraced names, so anything past it is a
-    // manifest typo and clamps down to ScreenSpace (1), never to 0 (Off would silently turn refraction
-    // off outright over a typo, which is a bigger behaviour change than a typo earns). The HARDWARE
-    // question -- can this device actually run RayTraced refraction right now -- is a separate concern
-    // and belongs to resolve() below, not to this range check.
+    // Clamp typos to ScreenSpace (1), not Off (0), to avoid silent behaviour change.
     n.refractionMode = n.refractionMode > 2u ? 1u : n.refractionMode;
 
-    // THE PREREQUISITE PASS: everything above this line clamps a field against its OWN valid range or
-    // against whether its FEATURE is supported at all (globalIllumination/rayTracing/pathTracing/
-    // meshShaders, at the top of this function). What those clamps do not answer is the finer-grained
-    // question RenderSettingsResolver.hpp exists for: given a tier that IS legal, is this specific
-    // NON-default value inside it legal right now -- ReSTIR GI needs RT hardware AND the RT tier on
-    // AND the GI tier on; ray-driven primary visibility and ray-traced refraction each need RT
-    // hardware AND the RT tier on. giMode is stored as requested regardless (see the comment where its
-    // old forced-Off clamp used to be, above) and resolved fresh by every reader instead -- but
-    // rtRenderMode and refractionMode are still clamped here, in settings_ itself, so a raw reader
-    // (the A2 self-contradiction check, SandboxApp.cpp, among others) sees the same honest value the
-    // UI and the console do, without every one of them having to call resolve() itself just to avoid
-    // being lied to by the stored field.
+    // Resolve feature interactions (see RenderSettingsResolver.hpp).
     const Resolution r = resolve(n, device_);
     n.rtRenderMode   = r.rtRenderMode.effective;
     n.refractionMode = r.refractionMode.effective;
@@ -257,10 +152,7 @@ void Renderer::setSettings(const Settings& s) {
     settings_ = n;
 }
 
-// Returns whether a feature is usable on this device. The switch statement and its per-feature
-// reasoning now live in RenderSettingsResolver.hpp's featureStatus -- lifted there rather than kept
-// here so the same device-capability answer is reachable without a live Renderer instance (a manifest
-// apply resolving a project's request before it is committed, or a unit test's hand-built device).
+// Returns whether a feature is usable on this device. See RenderSettingsResolver.hpp.
 Status Renderer::status(Feature f) const { return featureStatus(f, device_); }
 
 // Returns a readable reason for a feature's status.
@@ -292,25 +184,19 @@ const char* Renderer::featureName(Feature f) {
     }
 }
 
-// EVERY *ForQuality BODY BELOW IS NOW A ONE-LINE FORWARD into aver::voxi::ladder
-// (QualityLadder.hpp) -- the switch statements and the reasoning that used to sit directly above
-// each of them (one measured table, one retuning history, one torn-pair postmortem, apiece) have
-// moved there instead, so an edit to a rung's value and the comment justifying it can no longer
-// drift apart the way ladder::rtPixelsPerRayTile's own history records happening here once. These
-// stay in this file, as one-liners, only because Renderer::*ForQuality is this shared library's
-// exported, P/Invoke-adjacent API surface, and QualityLadder.hpp is not.
-u32 Renderer::refractionForQuality(Quality q) { return ladder::refraction(q); }         // reasoning: QualityLadder.hpp, ladder::refraction
-u32 Renderer::giConesForQuality(Quality q) { return ladder::giCones(q); }               // reasoning: QualityLadder.hpp, ladder::giCones
-u32 Renderer::giRestirVisibilityForQuality(Quality q) { return ladder::giRestirVisibility(q); } // reasoning: QualityLadder.hpp, ladder::giRestirVisibility
-u32 Renderer::voxelResolutionForQuality(Quality q) { return ladder::voxelResolution(q); } // reasoning: QualityLadder.hpp, ladder::voxelResolution
-u32 Renderer::giUpdateIntervalForQuality(Quality q) { return ladder::giUpdateInterval(q); } // reasoning: QualityLadder.hpp, ladder::giUpdateInterval
-u32 Renderer::giSkyOcclusionRaysForQuality(Quality q) { return ladder::giSkyOcclusionRays(q); } // reasoning: QualityLadder.hpp, ladder::giSkyOcclusionRays
-u32 Renderer::giSkyOcclusionTileForQuality(Quality q) { return ladder::giSkyOcclusionTile(q); } // reasoning: QualityLadder.hpp, ladder::giSkyOcclusionTile
-u32 Renderer::rtShadowRaysForQuality(Quality q) { return ladder::rtShadowRays(q); }     // reasoning: QualityLadder.hpp, ladder::rtShadowRays
-u32 Renderer::rtRenderModeForQuality(Quality q) { return ladder::rtRenderMode(q); }     // reasoning: QualityLadder.hpp, ladder::rtRenderMode
-u32 Renderer::ptBouncesForQuality(Quality q) { return ladder::ptBounces(q); }           // reasoning: QualityLadder.hpp, ladder::ptBounces
-u32 Renderer::rtShadowDenoiseForQuality(Quality q) { return ladder::rtShadowDenoise(q); } // reasoning: QualityLadder.hpp, ladder::rtShadowDenoise
-u32 Renderer::rtPixelsPerRayTileForQuality(Quality q) { return ladder::rtPixelsPerRayTile(q); } // reasoning: QualityLadder.hpp, ladder::rtPixelsPerRayTile
+// One-liners forwarding to QualityLadder.hpp (ladder:: functions contain reasoning).
+u32 Renderer::refractionForQuality(Quality q) { return ladder::refraction(q); }
+u32 Renderer::giConesForQuality(Quality q) { return ladder::giCones(q); }
+u32 Renderer::giRestirVisibilityForQuality(Quality q) { return ladder::giRestirVisibility(q); }
+u32 Renderer::voxelResolutionForQuality(Quality q) { return ladder::voxelResolution(q); }
+u32 Renderer::giUpdateIntervalForQuality(Quality q) { return ladder::giUpdateInterval(q); }
+u32 Renderer::giSkyOcclusionRaysForQuality(Quality q) { return ladder::giSkyOcclusionRays(q); }
+u32 Renderer::giSkyOcclusionTileForQuality(Quality q) { return ladder::giSkyOcclusionTile(q); }
+u32 Renderer::rtShadowRaysForQuality(Quality q) { return ladder::rtShadowRays(q); }
+u32 Renderer::rtRenderModeForQuality(Quality q) { return ladder::rtRenderMode(q); }
+u32 Renderer::ptBouncesForQuality(Quality q) { return ladder::ptBounces(q); }
+u32 Renderer::rtShadowDenoiseForQuality(Quality q) { return ladder::rtShadowDenoise(q); }
+u32 Renderer::rtPixelsPerRayTileForQuality(Quality q) { return ladder::rtPixelsPerRayTile(q); }
 
 // Returns a quality level's display name.
 const char* Renderer::qualityName(Quality q) {
@@ -331,8 +217,7 @@ bool Renderer::consumeMsaaDirty() {
     return d;
 }
 
-// Same one-shot shape as consumeMsaaDirty() above, one per reset* console command -- see the header's
-// own comment on requestGiHistoryReset() and its siblings.
+// Same one-shot shape as consumeMsaaDirty() above (see header for console command details).
 bool Renderer::consumeGiHistoryResetRequest() {
     const bool d = giHistoryResetRequested_;
     giHistoryResetRequested_ = false;

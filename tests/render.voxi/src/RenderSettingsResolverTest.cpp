@@ -1,18 +1,5 @@
-// RenderSettingsResolverTest -- the quality ladder (QualityLadder.hpp), the prerequisite resolver
-// (RenderSettingsResolver.hpp) and the Overall Quality scalability preset (Scalability.hpp), all three
-// new in this change, plus a handful of regressions through the live Renderer singleton for the one
-// behaviour (F-d: giMode/denoiser stored as requested, resolved at read time) that only the singleton's
-// own setSettings() can actually exercise.
-//
-// Links Aver.Render.Voxi and Aver.Core, unlike this directory's CameraFactorTest (which deliberately
-// links only Aver.Core because the header it tests never calls an exported Renderer function): this
-// file calls Renderer::get(), Renderer::setDeviceInfo() and the exported Renderer::*ForQuality statics,
-// all of which live in the Aver.Render.Voxi shared library, not merely in a header.
-//
-// check() follows tests/editor/src/PtRenderConflictTest.cpp's own idiom exactly (plain std::printf,
-// no AVER_ macros) -- consistent with this file testing three more header-only, dependency-free
-// decision points in the same "pure function, no ImGui, no globals" shape PtRenderConflict.hpp set the
-// precedent for.
+// RenderSettingsResolverTest: test QualityLadder, RenderSettingsResolver, and Scalability.
+// Calls exported Renderer functions from Aver.Render.Voxi.
 #include "aver/voxi/QualityLadder.hpp"
 #include "aver/voxi/RenderSettingsResolver.hpp"
 #include "aver/voxi/Scalability.hpp"
@@ -21,9 +8,6 @@
 #include <cstdio>
 #include <cstring>
 
-// Both directives are needed: u32/f32 live in aver itself (aver/core/Types.hpp), while Quality,
-// Settings, Feature, Renderer, DisableReason and ladder:: live one level down in aver::voxi -- exactly
-// the pattern CameraFactorTest.cpp already uses in this same directory for the same reason.
 using namespace aver;
 using namespace aver::voxi;
 
@@ -53,7 +37,7 @@ const char* tierName(Quality q) {
     }
 }
 
-// One row of section 4's ladder tables, checked against ladder::fn directly.
+// Check one ladder row against fn(Quality).
 void checkLadder(const char* name, u32 (*fn)(Quality), u32 offV, u32 lowV, u32 medV, u32 highV, u32 epicV) {
     char buf[160];
     std::snprintf(buf, sizeof(buf), "ladder::%s(Off) == %u", name, offV);
@@ -68,8 +52,7 @@ void checkLadder(const char* name, u32 (*fn)(Quality), u32 offV, u32 lowV, u32 m
     check(fn(Quality::Epic) == epicV, buf);
 }
 
-// Every Renderer::XForQuality body is now a one-line forward to ladder::X -- proves the forward
-// actually forwards, at every tier, rather than trusting the one-liner by inspection alone.
+// Verify Renderer::XForQuality forwards ladder::X at every tier.
 void checkForwards(const char* name, u32 (*legacy)(Quality), u32 (*ladderFn)(Quality)) {
     for (u32 t = 0; t <= 4; ++t) {
         const Quality q = static_cast<Quality>(t);
@@ -80,8 +63,7 @@ void checkForwards(const char* name, u32 (*legacy)(Quality), u32 (*ladderFn)(Qua
     }
 }
 
-// A device that can run every Voxi feature this resolver gates: compute, DXR 1.1 + SM 6.5 + DXC (so
-// Ray Tracing AND Path Tracing are both Ready), mesh-shader Tier 1, and denoiser support.
+// Device capable of all Voxi features: compute, RT hardware, mesh shaders, denoiser.
 DeviceInfo fullDevice() {
     DeviceInfo d;
     d.msaaMask = 1u | 2u | 4u | 8u;
@@ -97,9 +79,7 @@ DeviceInfo fullDevice() {
     return d;
 }
 
-// The same device with ray-tracing hardware removed -- since Path Tracing's own gate (Renderer::status,
-// mirrored by featureStatus) shares the RT hardware set, this also makes Path Tracing Unsupported;
-// GlobalIllumination and MeshShaders are untouched and stay Ready.
+// fullDevice without RT hardware (Path Tracing also unsupported then).
 DeviceInfo noRtHardwareDevice() {
     DeviceInfo d = fullDevice();
     d.rayTracingTier = 0;
@@ -121,10 +101,7 @@ int main() {
     checkLadder("giSkyOcclusionRays",ladder::giSkyOcclusionRays, 0,  0,   1,   1,   1);
     checkLadder("giSkyOcclusionTile",ladder::giSkyOcclusionTile, 1,  1,   1,   1,   1);
     checkLadder("ptBounces",         ladder::ptBounces,          1,  2,   2,   3,   4);
-    // U1: {Off 3, Low 1, Medium 2, High 3, Epic 3} -- see ladder::giRestirVisibility's own comment for
-    // why High/Epic are your decision (Full) and Low/Medium are mine, UNMEASURED.
     checkLadder("giRestirVisibility",ladder::giRestirVisibility, 3,  1,   2,   3,   3);
-    // U2: {Off 0, Low 3, Medium 2, High 1, Epic 1} -- kAverSr* mirror sr::Quality's own numbering.
     checkLadder("averSrLevel",       ladder::averSrLevel, ladder::kAverSrOff, ladder::kAverSrPerformance,
                 ladder::kAverSrBalanced, ladder::kAverSrQuality, ladder::kAverSrQuality);
 
@@ -197,12 +174,7 @@ int main() {
         check(rtDiffers(Quality::High, Quality::Epic),   "RT High and Epic differ (rtShadowRays 4 -> 8)");
     }
     {
-        // PT is the one group where Low and Medium are DELIBERATELY equal on the ladder's only knob --
-        // section 4's own "Neighbouring tiers differ" list says so ("the accumulator grows at each
-        // step; High and Epic add a bounce"), and the accumulator resolution that actually
-        // differentiates Low from Medium is PtSceneView's, not a ladder:: function (see
-        // QualityLadder.hpp's own top comment for why it is deliberately not here). Asserting
-        // Low != Medium here would be asserting something section 4 does not claim.
+        // PT Low and Medium deliberately share the same bounce count by design.
         check(ladder::ptBounces(Quality::Low) == ladder::ptBounces(Quality::Medium),
               "PT Low and Medium share the same bounce count by design (2, 2) -- the accumulator, not ptBounces, differs there");
         check(ladder::ptBounces(Quality::Medium) != ladder::ptBounces(Quality::High),
@@ -238,9 +210,6 @@ int main() {
         nonDecreasing("giRestirVisibility",ladder::giRestirVisibility);
         nonIncreasing("giUpdateInterval",  ladder::giUpdateInterval);
         nonIncreasing("rtShadowDenoise",   ladder::rtShadowDenoise);
-        // Exception 1 (section 4): rtRenderMode at Low changes the METHOD (raster), not the amount --
-        // it is not cost-monotone across cameras (D3's own evidence is PARTIAL, not a speed claim), so
-        // this file deliberately does not assert monotonicity for it at all.
     }
 
     std::printf("[INFO ] === giMode = 1 (ReSTIR GI) prerequisites ===\n");
@@ -344,9 +313,7 @@ int main() {
         check(r.refractionMode.effective == 2, "refractionMode 2 with RT tier High on capable hardware resolves to 2 (RayTraced)");
     }
     {
-        // Through the full pipeline: setSettings' own range clamp catches the garbage value BEFORE
-        // resolve() ever runs (resolve() itself trusts an already range-clamped request, per its own
-        // top comment) -- so this is a regression test for the pipeline order, not for resolve() alone.
+        // setSettings' own range clamp catches the garbage value before resolve() ever runs.
         Renderer::get().setDeviceInfo(fullDevice());
         Settings s = Renderer::get().settings();
         s.refractionMode = 7;
@@ -505,9 +472,7 @@ int main() {
     check(std::strcmp(disableReasonText(DisableReason::RequiresRestirGi), "Unavailable.") != 0,
           "disableReasonText(RequiresRestirGi) is its own sentence, not the generic fallback");
 
-    // Radiance cache stage 1: RestirVisibility::Cached = 4 is a legal value (passes through), 5 and up
-    // clamp to Full (3) rather than to Cached, and its only prerequisite beyond ReSTIR GI itself is a
-    // SOFT one -- staged ray-driven primary visibility on D3D12 -- that warns and never greys.
+    // RestirVisibility::Cached = 4 is a legal value; 5+ clamp to Full (3).
     {
         Settings s{};
         s.globalIllumination = Quality::Medium;
@@ -560,15 +525,7 @@ int main() {
     check(std::strcmp(disableReasonText(DisableReason::RequiresStagedRayDriven), "Unavailable.") != 0,
           "disableReasonText(RequiresStagedRayDriven) is its own sentence, not the generic fallback");
 
-    // giRestirMaxHistory's own Project Settings control sits directly under giRestirVisibility's and
-    // borrows its exact reason chain (RenderSettingsResolver.hpp's resolve()) rather than computing a
-    // fresh one -- these three cases mirror the three immediately above, field-for-field, proving the
-    // borrowed chain actually reaches this field. NOT mirrored: the fourth case above (an out-of-range
-    // request clamped to 3) and the whole "follows Overall Quality / groupFollowsLadder / Renderer
-    // tier-change derivation" block below -- both are specific to giRestirVisibility being one of the
-    // TEN TIER-DERIVED knobs (ProjectRenderApply.hpp's N6 rule); giRestirMaxHistory is deliberately NOT
-    // one of them (Voxi.hpp's own comment on the field), so it has no ladder rung to derive from or
-    // clamp against here, only the [0,31] range-clamp Voxi.cpp's setSettings already applied upstream.
+    // giRestirMaxHistory borrows giRestirVisibility's reason chain; these three cases mirror it above.
     std::printf("[INFO ] === giRestirMaxHistory prerequisites, through resolve() ===\n");
     {
         Settings s{};
@@ -690,9 +647,6 @@ int main() {
               "overallAverSrLevel(Custom) casts to Quality::Off's level (0) -- never called this way in practice, still defined");
     }
     {
-        // GI Epic, RT Low, NEITHER following its own ladder rung (both left at Settings{}'s Medium
-        // knobs) -- overallFromSettings must read Custom for this pair, which is the precondition
-        // autoAverSrLevel's Custom branch needs.
         Settings s{};
         s.globalIllumination = Quality::Epic;
         s.rayTracing = Quality::Low;
@@ -718,17 +672,14 @@ int main() {
 
     std::printf("[INFO ] === U2: resolveAverSrLevel precedence -- CLI > user > manifest > auto ===\n");
     {
-        // A correct oracle, written independently of resolveAverSrLevel's own body, against the stated
-        // precedence -- checked against the real function rather than against itself.
+        // A correct oracle, written independently of resolveAverSrLevel's own body.
         auto oracleCorrect = [](int cli, int user, int manifest, u32 autoL) -> AverSrDecision {
             if (cli >= 0)      return AverSrDecision{static_cast<u32>(cli),      AverSrSource::Cli};
             if (user >= 0)     return AverSrDecision{static_cast<u32>(user),     AverSrSource::User};
             if (manifest >= 0) return AverSrDecision{static_cast<u32>(manifest), AverSrSource::Manifest};
             return AverSrDecision{autoL, AverSrSource::Auto};
         };
-        // THE NEGATIVE CONTROL: user ranked ABOVE cli, the wrong order -- exists to prove this sweep can
-        // actually fail. It only diverges from the correct oracle in the cases where BOTH cli and user
-        // are present at once (the only cases the two orderings disagree on a winner).
+        // Negative control: user above CLI, the wrong order.
         auto oracleWrongOrder = [](int cli, int user, int manifest, u32 autoL) -> AverSrDecision {
             if (user >= 0)     return AverSrDecision{static_cast<u32>(user),     AverSrSource::User};
             if (cli >= 0)      return AverSrDecision{static_cast<u32>(cli),      AverSrSource::Cli};
@@ -741,8 +692,7 @@ int main() {
         bool allAgree = true;
         bool wrongOracleEverDisagreed = false;
         int combos = 0;
-        // 3 presence bits (cli/user/manifest) x 2 value variants per present source = 16 cases --
-        // covering both "who wins" (presence) and "which value wins" for whichever source does.
+        // 3 presence bits (cli/user/manifest) x 2 value variants per present source = 16 cases
         for (int hasCli = 0; hasCli < 2; ++hasCli) {
             for (int hasUser = 0; hasUser < 2; ++hasUser) {
                 for (int hasManifest = 0; hasManifest < 2; ++hasManifest) {

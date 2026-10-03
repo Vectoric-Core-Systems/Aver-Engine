@@ -1,15 +1,5 @@
-// NeuralMlpTest -- Aver.Render.Neural's CPU reference, with no GPU and no device.
+// NeuralMlpTest: CPU reference with finite-difference gradient check, training, and file I/O.
 //
-// The GPU network (Mlp, shaders/aver_neural_mlp.hlsl) cannot run in this suite, so the maths it is
-// written to reproduce lives in MlpReference and the properties are checked there:
-//   * the backward pass against finite differences, for every activation and both losses;
-//   * a toy function (sin of a 2-D input) being learned, under both losses, with the EMA following;
-//   * Adam's bias-corrected first step;
-//   * deterministic init, the He bound, and the weight file's round trip and rejections;
-//   * the fixed-point gradient quantisation, and that accumulation order does not change the result
-//     -- the property that makes the GPU's grouped atomics deterministic.
-// Output follows the suite's convention (see UiRenderTest): "  FAIL  ..." per failed assertion and
-// "=== N FAILED ===" at the end; exit code = failure count != 0.
 #include "aver/render/neural/MlpReference.hpp"
 #include "aver/core/Log.hpp"
 
@@ -39,8 +29,7 @@ static void check(bool cond, const std::string& what) {
 
 namespace {
 
-// A tiny deterministic generator for test data (xorshift32): the tests must not depend on the
-// standard library's distributions, whose output differs between implementations.
+// Deterministic RNG (xorshift32): tests must not depend on stdlib distributions.
 struct Rng {
     u32 s;
     explicit Rng(u32 seed) : s(seed ? seed : 1u) {}
@@ -126,9 +115,8 @@ void testActivations() {
 
 // ---------------------------------------------------------------- finite-difference gradient check
 
-// Compares MlpReference::backward with central differences of the loss, for one configuration.
-// For RelativeL2 the numeric loss holds the denominator at its value at the unperturbed point --
-// that is what "stopgrad" means, and it is what backward() differentiates.
+// Compares backward with central differences of the loss, for one configuration.
+// For RelativeL2 the numeric loss holds the denominator at its unperturbed value (stopgrad semantics).
 void gradientCheck(Activation hidden, Activation output, Loss loss) {
     MlpDesc d;
     d.inputs = 3; d.outputs = 2; d.hiddenWidth = 8; d.hiddenLayers = 2;
@@ -136,15 +124,11 @@ void gradientCheck(Activation hidden, Activation output, Loss loss) {
     OptimiserDesc o; o.loss = loss;
     MlpReference ref(d, o);
 
-    // Shrink the He init and add biases, so the net sits away from saturation and kinks and every
-    // weight (biases included) has a nonzero gradient to check.
+    // Scale He init and add biases so weights sit away from saturation.
     Rng rng(0x1234u + static_cast<u32>(hidden) * 17u + static_cast<u32>(output));
     std::vector<f32> w = ref.weights();
     for (f32& x : w) x = 0.5f * x + rng.range(-0.2f, 0.2f);
-    // A ReLU hidden layer can come out mostly dead for an unlucky draw (measured: hidden relu + output
-    // sigmoid at this seed left fewer than a quarter of the gradients nonzero, with 0 outliers among
-    // them), which says nothing about backward(). Lift the hidden biases so the units sit on the
-    // active side of the kink; the check is about the maths, not about initialisation luck.
+    // Lift ReLU hidden biases so units sit on the active side of the kink.
     if (hidden == Activation::ReLU) {
         const MlpLayout lay = MlpLayout::make(d);
         for (u32 l = 0; l + 1 < lay.layers; ++l)   // hidden layers only; the output layer is not ReLU
@@ -186,8 +170,7 @@ void gradientCheck(Activation hidden, Activation output, Loss loss) {
         if (std::fabs(grad[k] - numeric) > tol) ++outliers;
         if (grad[k] != 0.0f) ++nonzero;
     }
-    // A ReLU kink within eps of a pre-activation makes the numeric slope wrong for that one weight;
-    // a real backward-pass bug breaks nearly all of them. So a small outlier budget, not zero.
+    // A ReLU kink within eps of a pre-activation can make the numeric slope wrong for one weight.
     const u32 budget = ref.weightCount() * 3 / 100;
     check(outliers <= budget && nonzero > ref.weightCount() / 4,
           std::string("backward matches finite differences: hidden ") + actName(hidden) + ", output " +
@@ -286,9 +269,7 @@ void testAdamFirstStep() {
     const std::vector<f32> w0 = ref.weights();
     ref.adamStep(64);
 
-    // Bias-corrected Adam's first update is mhat / (sqrt(vhat) + eps) = g / (|g| + eps): a full
-    // learning-rate step against the gradient's sign, whatever the gradient's size. (Weights with a
-    // tiny accumulator are skipped: eps is then no longer negligible against |g|.)
+    // Bias-corrected Adam's first update: mhat/(sqrt(vhat)+eps) = sign(g), scaled by learning rate.
     u32 checked = 0, wrong = 0;
     for (u32 k = 0; k < ref.weightCount(); ++k) {
         if (std::abs(acc[k]) < 4000) continue;
@@ -466,8 +447,7 @@ void testFixedPoint() {
     check(a.accumulator() == b.accumulator(), "forward and reversed record order give identical accumulators");
     check(a.accumulator() == c.accumulator(), "a shuffled record order gives the identical accumulator");
 
-    // The GPU's structure: sum within groups of 64 records, then add the group totals. Integer
-    // addition makes that grouping exact.
+    // GPU structure: sum within groups of 64 records, then add the group totals.
     std::vector<u32> total(base.weightCount(), 0u);
     for (u32 g0 = 0; g0 < n; g0 += 64) {
         MlpReference group = base;

@@ -1,35 +1,19 @@
-// Editor: menu bar/toolbar (buildUI), modal prompts, output log/console, drawer/notifications, reference/profiler/nav panels.
-// Split out of SandboxApp.cpp (29,952 lines) on 2026-09-16, method bodies moved verbatim; class declared in SandboxApp.hpp.
+// Editor UI: menu bar/toolbar, prompts, log/console, drawer/notifications, reference/profiler/nav panels.
 
 #include "SandboxApp.hpp"
 #include "aver/core/CpuTiming.hpp"
 
 namespace aver {
-// Restarts what the profiler measures when Play starts and stops (called from startPlay/stopPlay in
-// SandboxPlay.cpp). Outside the ImGui guard below because those two build in every configuration.
-// The device's since-boot GPU average restarts: a pass that only exists in Play is otherwise
-// divided by every edit frame before it (see IDevice::resetGpuTiming), and a device with nothing
-// accumulated treats the call as a no-op. stopPlay skips its restart while a --gpu-timing dump is
-// still pending, so that dump keeps the Play frames. The CPU phase table restarts only when Play
-// starts, so the session that just ended stays readable after Stop.
+// Restarts profiler stats when Play starts/stops (called from startPlay/stopPlay in SandboxPlay.cpp).
 void SandboxApp::resetPlayProfile(bool playStarting) {
     if (prefsDevice_) prefsDevice_->resetGpuTiming();
     if (playStarting) playProf_.resetPhases();
 }
 
-// GUARDED ON THE EDITOR UI, NOT ON NAVIGATION. Both panels below were written inside this file's
-// AVER_MODULE_SYNAPSE block and neither has anything to do with a navigation grid -- one is a view
-// over GpuTimingReport, the other scans text files for references to an asset. They sat there
-// because that is where the cursor was, and it cost nothing only because Aver.Synapse has no
-// option() of its own. Their declarations moved to AVER_WITH_IMGUI in SandboxApp.hpp; these follow,
-// because a declaration compiled out while its definition is not is a C2039 on a member of a class
-// that no longer has one -- which is exactly how `no-ui` and `d3d12-off` broke.
+// Guarded on AVER_WITH_IMGUI (declarations in SandboxApp.hpp).
 #if AVER_WITH_IMGUI
-// ---- References panel: which files name the asset you asked about ----
-// On-demand scan (previously only reachable from delete/rename confirms -- too late to ask "what
-// uses this?"). A snapshot over text formats only, not an index: misses references built at
-// runtime in C# or held as a hashed id with no path on disk. Reports "found N", not "there are
-// exactly N" (repeated in the panel's own text below).
+// ---- References panel ----
+// Finds files that name the asset. On-demand scan; text formats only (misses runtime references).
 void SandboxApp::buildReferencesPanel() {
     if (!showReferences_) return;
     ImGui::SetNextWindowSize(ImVec2(520.0f * dpi_, 320.0f * dpi_), ImGuiCond_FirstUseEver);
@@ -54,7 +38,7 @@ void SandboxApp::buildReferencesPanel() {
         ImGui::Text("%zu file(s) name it:", refPanelResults_.size());
         ImGui::Separator();
         for (const std::string& rel : refPanelResults_) {
-            // Double-click opens it -- makes this a navigation surface, not just a list of strings.
+            // Double-click opens the file.
             if (ImGui::Selectable(rel.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick) &&
                 ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 const std::string abs = project_.contentDir() + "\\" + rel;
@@ -65,7 +49,6 @@ void SandboxApp::buildReferencesPanel() {
     }
 
     ImGui::Separator();
-    // See cbFindReferencesTo for what this scan can/cannot see (restated in the UI text below).
     ImGui::TextDisabled("Scanned .ocworld/.ocmap/.ocmat/.ocgraph/.ocproject for this path.");
     ImGui::TextDisabled("Cannot see: a path built in C# at runtime, or a reference stored only as");
     ImGui::TextDisabled("a hashed id. This is \"found N\", not \"there are exactly N\".");
@@ -73,10 +56,7 @@ void SandboxApp::buildReferencesPanel() {
 }
 
 // ---- Neural Visualiser (Window > Neural Visualiser) ----
-// One window for the two neural techs' visualisations. NeuraFI: an overlay drawn by neurafiViz_ from
-// the image neurafi.hlsl's gather writes, plus the device's "interpolated frames only" view. NeuRaC: Voxi
-// paints the cache in place of the lit image (rcDebugColour, voxi_neurac_io.hlsli). The choices are
-// members applied every frame by onUpdate, so closing the window leaves a view up until set to Off.
+// NeuraFI: frame interpolation overlay. NeuRaC: radiance cache (painted via rcDebugColour).
 void SandboxApp::buildNeuralVisualiserPanel(Engine& e) {
     if (!showNeuralViz_) return;
     ImGui::SetNextWindowSize(ImVec2(470.0f * dpi_, 430.0f * dpi_), ImGuiCond_FirstUseEver);
@@ -168,16 +148,7 @@ void SandboxApp::buildNeuralVisualiserPanel(Engine& e) {
 }
 
 // ---- Profiler panel (Window > GPU Profiler) ----
-// Four things, top to bottom: the smoothed frame time and the worst recent frame (PlayProfile, fed
-// from the status bar every UI frame); the CPU phases only Play adds to onUpdate (PlayProfile, fed by
-// begin()/end() brackets in onUpdate, folded only while a Play session runs); the scene walk's CPU
-// tree and Voxi's last acceleration-structure loop; and the per-pass GPU table, a view over
-// GpuTimingReport that the device has always produced and only the console used to read. GPU nodes
-// carry INCLUSIVE ms + parent index; exclusive time (own cost minus children's) is derived here
-// rather than stored, so the ABI keeps one number per node.
-//
-// The GPU table is an average since the last reset (Play start, Play stop, the Reset button), not
-// since boot: boot-long averaging hid every Play-only pass behind the edit frames before it.
+// Frame time, CPU phases (Play), scene walk, Voxi accel-struct loop, and per-pass GPU table.
 void SandboxApp::buildProfilerPanel(Engine& e) {
     if (!showProfiler_) return;
     ImGui::SetNextWindowSize(ImVec2(560.0f * dpi_, 540.0f * dpi_), ImGuiCond_FirstUseEver);
@@ -235,7 +206,6 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(editor::kPlayPhaseLabel[i]);
                     ImGui::TableSetColumnIndex(1);
-                    // Same thresholds as the GPU table's exclusive column below.
                     if (frac > 0.20)      ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%.2f", ms);
                     else if (frac > 0.08) ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.40f, 1.0f), "%.2f", ms);
                     else                  ImGui::Text("%.2f", ms);
@@ -264,8 +234,6 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
         } else if (w.nodes.empty() || w.framesAccumulated == 0) {
             ImGui::TextDisabled("No scene-walk window has completed yet.");
         } else {
-            // collectCpuTiming's ms and calls are the WINDOW's totals (framesAccumulated walks), so
-            // dividing gives one walk's worth.
             const f64 perWalk = 1.0 / static_cast<f64>(w.framesAccumulated);
             const usize walkIdx = static_cast<usize>(CpuSpan::SceneWalk);
             const usize overheadIdx = static_cast<usize>(CpuSpan::TimingOverhead);
@@ -275,7 +243,7 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
                 ImGui::TableSetupColumn("calls / walk", ImGuiTableColumnFlags_WidthFixed, 90.0f * dpi_);
                 ImGui::TableHeadersRow();
                 for (usize i = 0; i < w.nodes.size(); ++i) {
-                    if (i == overheadIdx) continue;   // a footnote below, not a row: see CpuTimingFormat.hpp
+                    if (i == overheadIdx) continue;   // footnote below: see CpuTimingFormat.hpp
                     const CpuTimingNode& n = w.nodes[i];
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
@@ -318,7 +286,6 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
         return;
     }
 
-    // Exclusive = inclusive minus the inclusive time of the direct children.
     std::vector<f64> childSum(r.nodes.size(), 0.0);
     for (usize i = 0; i < r.nodes.size(); ++i) {
         const u32 p = r.nodes[i].parent;
@@ -337,7 +304,6 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
     ImGui::TextDisabled("(marked passes only)");
     ImGui::Separator();
 
-    // ScrollY needs a height: whatever the sections above left, but never a sliver.
     if (ImGui::BeginTable("##passes", 4,
                           ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg |
                           ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollY,
@@ -349,9 +315,6 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
 
-        // Single pass, parent-before-child order (already the report's order); depth is computed
-        // from the parent chain rather than a recursive walk, so a forward-pointing parent index
-        // can't break it.
         for (usize i = 0; i < r.nodes.size(); ++i) {
             const rhi::GpuTimingNode& n = r.nodes[i];
             int depth = 0;
@@ -367,7 +330,6 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
             ImGui::Unindent(depth * 14.0f * dpi_);
             ImGui::TableSetColumnIndex(1); ImGui::Text("%.2f", n.ms);
             ImGui::TableSetColumnIndex(2);
-            // Exclusive-time column is colour-coded -- it's the one that shows where the work is.
             const f64 frac = total > 0.0 ? (excl / total) : 0.0;
             if (frac > 0.20)      ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%.2f", excl);
             else if (frac > 0.08) ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.40f, 1.0f), "%.2f", excl);
@@ -381,17 +343,7 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
 #endif  // AVER_WITH_IMGUI -- the two panels above
 
 #if AVER_MODULE_SYNAPSE
-// Bakes, writes the .ocnav beside the level, rebuilds the overlay. Returns false with a reason
-// (not thrown away): every failure needs author action -- empty level, stray entity, no physics.
-//
-// Guarded on AVER_MODULE_SYNAPSE (grid math only, via editor::bakeNavigation/synapse::BakeStats)
-// AND AVER_MODULE_SCENE (needs scene::World::instance() to sample) -- with no world to sample the
-// whole function could only ever report "failed", so the guard covers the function, not just that
-// call. The four toasts (notifyOutcome, behind AVER_WITH_IMGUI, pushing onto editor::notifications()
-// which only the overlay drains) are a separate guard on the CALLER only, same pattern as the
-// screenshot writer in SandboxRender.cpp and --import's deferred handshake (see notifyOutcome's own
-// comment): every branch logs first, so a no-UI build still answers, it just has nowhere to show
-// the toast. Build menu's "Bake Navigation" item carries the same SYNAPSE+SCENE pairing.
+// Bakes navmesh, writes the .ocnav, rebuilds overlay. Guarded on AVER_MODULE_SYNAPSE and AVER_MODULE_SCENE.
 #if AVER_MODULE_SCENE
 bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
     editor::NavBakeSettings s;
@@ -442,25 +394,12 @@ bool SandboxApp::bakeNavigationNow(Engine& e, std::string* why) {
 
 #endif
 
-// ---- Revision control: the editor-facing half ----
-// RevisionControl.hpp (carries a headless unit test for what git's bytes mean) and .cpp (every
-// process spawn) own that; this file owns ImGui, logging, and WHEN to ask -- nothing below parses
-// git output or spawns a process on the frame thread.
-//
-// Enforced a layer down: only read-only git subcommands run (isReadOnlyGitSubcommand()'s list,
-// RevisionControl.hpp) -- no commit/checkout/restore/reset/clean/stash/revert/push/pull. So no
-// Discard/Revert/Sync button here: a work-losing action needs its own confirmation modal (pattern
-// to copy: drawLaunchRuntimePrompt below -- names the stakes, offers the safe path first, stays
-// open on failure) and its own entry point in RevisionControl.cpp, not a widened read-only list
-// (see the list's own comment).
+// ---- Revision control: editor UI and timing ----
+// Logic in RevisionControl.cpp; this file owns ImGui and worker scheduling. Read-only git commands only.
 #if AVER_WITH_IMGUI
 namespace {
 
-// Which paths the diff viewer can show a text diff for.
-// Lives here, not RevisionControl.hpp: that header only knows git's output, not the editor's asset
-// format table (keeping it that way is why RevisionControlTest can claim to link only Aver.Core).
-// Everything else (.ocmesh/.ocbeam/.ocbt/.ocaudio/... = AVR1 binary) diffs as a wall of escaped
-// bytes, so the panel says so in words instead of showing an empty pane.
+// Text-diffable asset formats.
 bool isDiffableAsset(std::string_view path) {
     const usize dot = path.rfind('.');
     if (dot == std::string_view::npos) return false;
@@ -469,8 +408,7 @@ bool isDiffableAsset(std::string_view path) {
     return ext == ".ocworld" || ext == ".ocmat" || ext == ".ocgraph" || ext == ".cs";
 }
 
-// Flattens separators+case so an editor path ("C:\Users\...\Content") compares equal to git's
-// ("C:/Users/.../Content"); either may differ in case from the other without naming a different file.
+// Normalize separators and case for path comparison (editor vs git).
 std::string flattenedPath(std::string_view s) {
     std::string out(s);
     for (char& c : out) {
@@ -481,11 +419,10 @@ std::string flattenedPath(std::string_view s) {
     return out;
 }
 
-// Per-file history depth. 50: more than a docked panel needs to scroll; `git log` cost grows with
-// the repo's age, not its size.
+// Per-file history depth.
 constexpr int kRcLogCount = 50;
 
-// How loudly a status should speak for a FOLDER that contains it. Only the ordering matters.
+// Folder status rank (for summarizing child statuses).
 int folderRank(editor::FileStatus s) {
     switch (s) {
         case editor::FileStatus::Conflicted: return 3;
@@ -495,15 +432,7 @@ int folderRank(editor::FileStatus s) {
     }
 }
 
-// Status-bar face: icon + branch (or stand-in) + change count once an answer is current. Mirrors
-// Unreal's status bar shape.
-//
-// Split out of drawRevisionControlStatusWidget so the status bar can measure this text's width
-// before drawing (ImGui::SameLine needs the run's total width up front); called twice/frame
-// (measure + draw), cheap string ops over already-latched data, not the git process itself.
-//
-// `busy` overrides the label rather than racing it: once rcStatusJob_ is set, `summary` is only
-// the last latched answer, no longer trustworthy as current, so shows "Refreshing..." instead.
+// Status bar: icon + branch + change count. Cheap operation over latched data (called twice/frame).
 std::string rcStatusFace(bool busy, const editor::StatusBarSummary& summary) {
     std::string face = ICON_TREE " ";
     face += busy ? "Refreshing..." : summary.label;
@@ -513,10 +442,8 @@ std::string rcStatusFace(bool busy, const editor::StatusBarSummary& summary) {
 
 } // namespace
 
-// Reaps whatever a worker finished, and decides whether to ask again. Once a frame, from buildUI.
+// Reaps workers and refreshes state. Once a frame, from buildUI.
 void SandboxApp::revisionControlTick() {
-    // Project changed under the latch: stale state here would badge the new project's files with
-    // the old project's changes -- wrong direction, since a mark means "differs from committed".
     if (rcProjectDir_ != project_.dir) {
         rcProjectDir_ = project_.dir;
         rcRoot_.clear();
@@ -533,10 +460,7 @@ void SandboxApp::revisionControlTick() {
         rcDiff_.clear();
         rcLogWhy_.clear();
         rcDiffWhy_.clear();
-        // Jobs are DROPPED, not cancelled: a detached worker can't be recalled, but its shared_ptr
-        // keeps the result alive until it exits. Releasing the handle here stops the old project's
-        // answer being latched for the new one by the reaps below, since the worker itself has no
-        // idea the project closed.
+        // Jobs are dropped (detached workers cannot be cancelled).
         rcStatusJob_.reset();
         rcFileJob_.reset();
     }
@@ -544,8 +468,6 @@ void SandboxApp::revisionControlTick() {
     if (rcStatusJob_ && rcStatusJob_->done.load(std::memory_order_acquire)) {
         const std::shared_ptr<RcStatusQuery> job = rcStatusJob_;
         rcStatusJob_.reset();
-        // Stale by a project switch that happened while it ran. Dropped without a word: the user
-        // did nothing wrong and there is nothing to report.
         if (job->dir == project_.dir) {
             rcGitPresent_ = job->gitPresent;
             rcRoot_ = job->root;
@@ -555,10 +477,6 @@ void SandboxApp::revisionControlTick() {
             rcAnswered_ = true;
             rcRefreshedAt_ = ImGui::GetTime();
 
-            // Badge table, built once per answer rather than per card per frame. ONE status per
-            // path: worktree wins (it's what's on disk), staged is the fallback for a path with only
-            // a staged difference, and a conflict outranks both -- FileEntry::conflicted() is the
-            // state where being told the wrong thing costs an edit.
             rcMarks_.clear();
             rcMarks_.reserve(rcStatus_.files.size());
             for (const editor::FileEntry& f : rcStatus_.files) {
@@ -601,9 +519,6 @@ void SandboxApp::revisionControlTick() {
 
     constexpr f64 kRcAutoRefreshSec = 4.0;
     const f64 now = ImGui::GetTime();
-    // MEASURED FROM THE LAST LATCH, not from the last start: on a repository where status takes
-    // longer than the interval, starting from the launch time would queue a new refresh the moment
-    // the previous one landed and leave a git running permanently.
     if (rcRefreshedAt_ < 0.0 || now - rcRefreshedAt_ >= kRcAutoRefreshSec) revisionControlRefresh(false);
 }
 
@@ -615,28 +530,17 @@ void SandboxApp::revisionControlRefresh(bool force) {
 
     auto job = std::make_shared<RcStatusQuery>();
     job->dir = project_.dir;
-    // THE ROOT IS RESOLVED ONCE AND THEN REUSED. rev-parse is a second process for an answer that
-    // cannot change while a project stays open, so only the first refresh for a project pays for
-    // it -- and Refresh re-resolves, because that is the button someone presses after `git init`.
     const std::string knownRoot = (force || rcProjectDir_ != job->dir) ? std::string() : rcRoot_;
     rcProjectDir_ = job->dir;
     rcStatusJob_ = job;
 
-    // Captures the job and one string BY VALUE, never `this` or a reference into SandboxApp -- that
-    // is what makes detaching safe: nothing this thread touches can be destroyed out from under it.
-    // Must not log: AVER_* reaches logSink, which writes SandboxApp's own logLines_, the exact
-    // reach-back the capture rule forbids. The one AVER_* reachable below (runGit's refusal in
-    // RevisionControl.cpp) only fires for a non-read-only subcommand, a programming error
-    // unreachable from here; everything else comes back via `why`. Adding an AVER_* to this lambda
-    // would quietly break that rule.
+    // Capture job by value; detached worker cannot be cancelled.
     std::thread([job, knownRoot] {
         job->gitPresent = editor::gitAvailable();
         if (!job->gitPresent) {
             job->why = "git was not found -- is it installed and on PATH?";
         } else {
             job->root = knownRoot.empty() ? editor::gitRepositoryRoot(job->dir, &job->why) : knownRoot;
-            // An EMPTY root with an empty `why` is the ordinary "this project is not under revision
-            // control" answer, which is not a failure and must not be shown as one.
             if (!job->root.empty()) job->status = editor::gitStatus(job->root, false, &job->why);
         }
         job->done.store(true, std::memory_order_release);
@@ -652,16 +556,11 @@ void SandboxApp::revisionControlSelect(const std::string& repoRelativePath) {
     rcDiffWhy_.clear();
     rcSelectedDiffable_ = isDiffableAsset(repoRelativePath);
     if (rcRoot_.empty() || repoRelativePath.empty()) return;
-    // A second click while the first query runs: the old job is released rather than waited on, and
-    // its answer is discarded on reap because the path no longer matches.
     auto job = std::make_shared<RcFileQuery>();
     job->root = rcRoot_;
     job->path = repoRelativePath;
     job->wantDiff = rcSelectedDiffable_;
     const editor::DiffSide side = rcDiffSide_;
-    // NO HISTORY TO ASK FOR before the first commit -- git exits non-zero with "does not have any
-    // commits yet", which RevisionControl.cpp would hand back as an error string. RepoStatus says
-    // so outright, so the panel checks instead of reporting a defect that is a normal new repo.
     const bool haveCommits = !rcStatus_.initialCommit;
     rcFileJob_ = job;
 
@@ -669,7 +568,6 @@ void SandboxApp::revisionControlSelect(const std::string& repoRelativePath) {
         if (haveCommits) job->log = editor::gitLog(job->root, kRcLogCount, job->path, &job->logWhy);
         if (!job->wantDiff) { job->done.store(true, std::memory_order_release); return; }
         std::string text = editor::gitDiff(job->root, job->path, side, &job->diffWhy);
-        // Split here, on the worker, for the reason RcFileQuery::diff's own comment gives.
         usize start = 0;
         while (start <= text.size()) {
             usize nl = text.find('\n', start);
@@ -686,20 +584,14 @@ void SandboxApp::revisionControlSelect(const std::string& repoRelativePath) {
     }).detach();
 }
 
-// An editor path as git would name it. Empty means "git has nothing to say about this", which
-// covers both "outside the repository" and "no repository known yet".
+// Editor path as git would name it; empty if not in repository.
 std::string SandboxApp::rcKeyFor(const std::string& absolute) const {
     if (rcRootKey_.empty() || absolute.size() <= rcRootKey_.size()) return {};
     const std::string flat = flattenedPath(absolute);
     if (flat.size() <= rcRootKey_.size()) return {};
     if (flat.compare(0, rcRootKey_.size(), rcRootKey_) != 0) return {};
-    // The separator check matters: without it, a sibling dir whose name merely starts with the
-    // root's ("MyGame" vs "MyGameOld") would be read as living inside it, and every file under
-    // the second would be marked with the first's statuses.
     if (flat[rcRootKey_.size()] != '/') return {};
 
-    // The ORIGINAL case is kept: git records the case the filesystem gave it, and rcMarks_ holds
-    // git's spelling. Only the comparison above is case-insensitive.
     std::string key = absolute.substr(rcRootKey_.size() + 1);
     for (char& c : key) if (c == '\\') c = '/';
     return key;
@@ -720,12 +612,7 @@ bool SandboxApp::rcMarkFor(const std::string& absolute, bool isDir, editor::File
         return true;
     }
 
-    // A folder's mark is a SUMMARY (the panel has the detail): "Modified" is the honest reading of
-    // one corner dot over an added-plus-deleted folder, not a claim about one specific child.
-    // Untracked only when nothing tracked changed, so a new asset folder reads as new, not edited --
-    // git already collapses such a folder to one record ending in '/' (the default
-    // --untracked-files=normal, which gitStatus asks for deliberately), inside this same prefix
-    // range, so no special case is needed.
+    // Folder mark is a summary of child statuses; conflicts rank highest, then untracked.
     const std::string prefix = key + "/";
     int best = 0;
     for (auto it = std::lower_bound(rcMarks_.begin(), rcMarks_.end(), prefix, byPath);
@@ -741,10 +628,7 @@ bool SandboxApp::rcMarkFor(const std::string& absolute, bool isDir, editor::File
     return true;
 }
 
-// One table for every view (gallery, list, panel), so a status can't be amber in one and green in
-// another for the same file. Colour is never the only carrier: every badge has a statusName()
-// tooltip, and the panel prints git's own two letters beside each row -- so a reader who can't
-// separate the amber from the green still gets the answer in words.
+// Color for status badge (colour is never the only carrier; tooltips and text provided too).
 ImU32 SandboxApp::rcStatusColour(editor::FileStatus s) {
     switch (s) {
         case editor::FileStatus::Modified:   return IM_COL32(230, 170,  60, 255);
@@ -790,9 +674,6 @@ void SandboxApp::buildRevisionControlPanel() {
                           "A slow or missing git costs the editor nothing.");
     ImGui::Separator();
 
-    // THE THREE "nothing to show" STATES ARE THREE DIFFERENT SENTENCES. Collapsing them into one
-    // empty list is how a panel tells somebody their work is untracked when git simply is not
-    // installed.
     if (!rcAnswered_) {
         ImGui::TextWrapped("Waiting for the first answer from git.");
         ImGui::End();
@@ -833,8 +714,6 @@ void SandboxApp::buildRevisionControlPanel() {
     }
     if (rcStatus_.hasUpstream) {
         ImGui::SameLine();
-        // Both counts are positive (RepoStatus stores git's `-3` as 3); words carry the direction so
-        // nothing renders "-3 behind". Level-with-upstream gets its own line, not "0 ahead, 0 behind".
         if (rcStatus_.ahead == 0 && rcStatus_.behind == 0)
             ImGui::TextDisabled("= %s", rcStatus_.upstream.c_str());
         else
@@ -850,7 +729,6 @@ void SandboxApp::buildRevisionControlPanel() {
                            ICON_WARNING " This working tree has unresolved conflicts.");
     ImGui::Separator();
 
-    // ---- the changed files ----
     const f32 listH = ImGui::GetContentRegionAvail().y * 0.42f;
     if (rcStatus_.clean()) {
         ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "Nothing changed. The working tree is clean.");
@@ -867,9 +745,7 @@ void SandboxApp::buildRevisionControlPanel() {
         for (const editor::FileEntry& f : rcStatus_.files) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            // GIT'S OWN TWO LETTERS, VERBATIM, and this is the column that earns FileEntry keeping
-            // them: FileStatus::Conflicted cannot tell "both modified" (UU) from "deleted by us"
-            // (DU), and those are different sentences to put in front of somebody.
+            // Git's two-letter status codes (necessary for conflicts: "both modified" vs "deleted by us").
             const char xy[3] = {f.x, f.y, '\0'};
             ImGui::TextUnformatted(xy);
 
@@ -887,8 +763,7 @@ void SandboxApp::buildRevisionControlPanel() {
                                   ImGuiSelectableFlags_SpanAllColumns))
                 revisionControlSelect(f.path);
             ImGui::PopID();
-            // WHERE IT CAME FROM, for a rename or a copy. This is the field porcelain v1 cannot
-            // give safely and the whole reason RevisionControl.hpp asks for v2 with -z.
+            // Original path for renames/copies (v2 format).
             if (!f.oldPath.empty()) {
                 ImGui::SameLine();
                 ImGui::TextDisabled(f.copied ? "(copied from %s, %d%%)" : "(was %s, %d%%)",
@@ -915,8 +790,7 @@ void SandboxApp::buildRevisionControlPanel() {
             } else if (!rcLogWhy_.empty()) {
                 ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", rcLogWhy_.c_str());
             } else if (rcLog_.empty()) {
-                // A FILE GIT HAS NEVER SEEN, which is the ordinary answer for anything untracked --
-                // not a failure, and not the same thing as a log that could not be read.
+                // Ordinary answer for untracked files (not a failure).
                 ImGui::TextDisabled("No commits touch this path yet.");
             } else if (ImGui::BeginTable("##rcLog", 3,
                                          ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
@@ -931,9 +805,6 @@ void SandboxApp::buildRevisionControlPanel() {
                     ImGui::TableSetColumnIndex(0);
                     ImGui::TextUnformatted(c.shortOid.c_str());
                     ImGui::TableSetColumnIndex(1);
-                    // Printed as git wrote it, clipped to the day: %aI is strict ISO-8601, whose
-                    // first ten chars are the calendar date in any timezone -- reparsing it to
-                    // reformat would be a second place to get the format wrong.
                     ImGui::Text("%.10s", c.date.c_str());
                     ImGui::TableSetColumnIndex(2);
                     ImGui::TextUnformatted(c.subject.c_str());
@@ -948,19 +819,13 @@ void SandboxApp::buildRevisionControlPanel() {
 
         if (ImGui::BeginTabItem("Diff")) {
             if (!rcSelectedDiffable_) {
-                // SAID IN WORDS RATHER THAN SHOWN AS AN EMPTY PANE. An empty diff view and "this
-                // file has no text to diff" look identical and mean opposite things.
                 ImGui::TextWrapped("No diff for this file. The viewer covers the text formats "
                                    "(.ocworld, .ocmat, .ocgraph, .cs); everything else a project "
                                    "holds is a binary container or an image, and a unified diff of "
                                    "those bytes would say nothing.");
                 ImGui::TextDisabled("Its status and its history above still apply.");
             } else {
-                // Both sides are offered: a path can have two different diffs at once (staged as
-                // added, then edited again), and showing only one would hide half of what changed.
-                // Both RadioButton calls are made, then combined -- `if (a() || b())` would
-                // short-circuit the second on a click, and an uncalled ImGui widget isn't drawn, so
-                // the Staged button would vanish on the frame Worktree was picked.
+                // Both sides offered (staged and worktree can differ); make both calls to avoid short-circuit.
                 int side = rcDiffSide_ == editor::DiffSide::Worktree ? 0 : 1;
                 bool sideChanged = ImGui::RadioButton("Worktree", &side, 0);
                 ImGui::SameLine();
@@ -979,23 +844,15 @@ void SandboxApp::buildRevisionControlPanel() {
                 } else if (rcDiff_.empty()) {
                     ImGui::TextDisabled("Nothing differs on this side.");
                 } else {
-                    // BeginChild's return isn't a gate for EndChild -- it says whether the contents
-                    // are worth submitting, not whether the child opened (same rule as the Begin/End
-                    // above, which is why that one calls End on the failing branch too). Called as an
-                    // unconditional pair so an `else if` chain can't grow a path that skips EndChild.
                     ImGui::BeginChild("##rcDiffText", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders,
                                       ImGuiWindowFlags_HorizontalScrollbar);
-                    // CLIPPED, not drawn whole: a diff is as long as the change is, and a
-                    // thousand-line one would otherwise cost a thousand AddText calls a frame for
-                    // the thirty lines on screen.
+                    // Clipped: avoid AddText calls for off-screen lines.
                     ImGuiListClipper clip;
                     clip.Begin(static_cast<int>(rcDiff_.size()));
                     while (clip.Step()) {
                         for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
                             const std::string& line = rcDiff_[static_cast<usize>(i)];
-                            // The first character is what unified diff means by the line, with one
-                            // trap: "+++"/"---" are the FILE HEADERS, not an added and a removed
-                            // line, and colouring them as such paints the header green and red.
+                            // First char is the diff line type; +++ and --- are headers, not add/remove.
                             ImVec4 col(0.86f, 0.87f, 0.89f, 1.0f);
                             if (line.starts_with("+++") || line.starts_with("---"))
                                 col = ImVec4(0.62f, 0.64f, 0.68f, 1.0f);
@@ -1021,34 +878,21 @@ void SandboxApp::buildRevisionControlPanel() {
     ImGui::End();
 }
 
-// ---- the status bar's right-hand widgets --------------------------------------------------
-//
-// One helper, not two hand-rolled buttons (see SandboxApp.hpp): an icon-and-word control tinted by
-// state, shared by revision control and MCP so their padding/tooltip conventions can't drift apart.
-// `face` is built by the caller (it knows its own icon/words); `tint` colours only the text, like
-// drawerButton's fill; `id` names the ImGui id and uiReg_ entry stably even as `face` changes.
+// ---- Status bar widgets ----
+// Icon-and-word control, shared by revision control and MCP.
 bool SandboxApp::statusBarWidget(const char* id, const char* face, const ImVec4& tint,
                                  const char* tooltip) {
     ImGui::PushID(id);
     ImGui::PushStyleColor(ImGuiCol_Text, tint);
-    // SmallButton, matching drawerButton above: the row's five controls share one height only
-    // because every one of them goes through the same call.
     const bool clicked = ImGui::SmallButton(face);
     ImGui::PopStyleColor();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
     ImGui::PopID();
-    // TRACKED BY `id`, which does not move, rather than by `face`, which does -- a name MCP has
-    // learned to click by must not walk away the first time the state it names changes.
     uiReg_.track(id);
     return clicked;
 }
 
-// The palette for the status-bar widget alone (RepoMood's states are decided in
-// RevisionControl.hpp and handed here, not re-derived from the files). Colours are copied verbatim
-// from rcStatusColour rather than shared, since one status must not read as two colours in two
-// views: Conflicted is the panel's merge pink, Dirty reuses its detached-HEAD amber (both mean
-// "needs a look, nothing on fire"). Detached itself is StatusBarSummary's own bool, not a RepoMood,
-// since a detached tree can be clean or dirty and folding it in would force a choice.
+// Status-bar widget color palette (RepoMood states defined in RevisionControl.hpp).
 ImVec4 SandboxApp::rcMoodColour(editor::RepoMood m) {
     switch (m) {
         case editor::RepoMood::Clean:
@@ -1063,14 +907,10 @@ ImVec4 SandboxApp::rcMoodColour(editor::RepoMood m) {
         case editor::RepoMood::NotARepo:
             break;
     }
-    // Nothing to report isn't an alarm: a project outside a repository, or one not yet asked about,
-    // is ordinary, and painting it red/amber would waste that signal on a non-problem -- exactly
-    // the case summariseForStatusBar's own comment calls out.
     return ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
 }
 
-// Window > Revision Control's icon-and-word twin in the status bar. Reads the same latched answer
-// via editor::summariseForStatusBar, so the two surfaces can never disagree about repository state.
+// Status-bar twin of Window > Revision Control (same latched answer via summariseForStatusBar).
 void SandboxApp::drawRevisionControlStatusWidget() {
     const bool busy = rcStatusJob_ != nullptr;
     const editor::StatusBarSummary summary = editor::summariseForStatusBar(
@@ -1112,8 +952,6 @@ void SandboxApp::drawRevisionControlStatusWidget() {
             ImGui::SetTooltip("A refresh is already asking git for the answer.");
 
         ImGui::Separator();
-        // Same lines the tooltip carries, greyed and always visible: a click already committed to
-        // reading this.
         ImGui::BeginDisabled(true);
         ImGui::TextUnformatted(summary.detail.empty() ? "(nothing to report)" : summary.detail.c_str());
         ImGui::EndDisabled();
@@ -1122,7 +960,7 @@ void SandboxApp::drawRevisionControlStatusWidget() {
 }
 #endif  // AVER_WITH_IMGUI -- the whole revision-control UI half
 
-// True when the HUD preview may draw: a tab published a rect and no session is playing.
+// Whether HUD preview may draw (tab has rect and no session playing).
 bool SandboxApp::hudPreviewActive() const {
 #if AVER_MODULE_SCRIPTING && AVER_MODULE_FRAMEWORK
     return hudPreviewIndex_ >= 0 && hudRectW_ > 1.0f &&
@@ -1134,7 +972,7 @@ bool SandboxApp::hudPreviewActive() const {
 #endif
 }
 
-// Published by the HUD tab each frame it draws; cleared when it does not.
+// Called by the HUD tab each frame; cleared when not drawn.
 void SandboxApp::setHudPreview(int index, f32 x, f32 y, f32 w, f32 h) {
     hudPreviewIndex_ = index; hudRectX_ = x; hudRectY_ = y; hudRectW_ = w; hudRectH_ = h;
 }
@@ -1154,22 +992,7 @@ bool SandboxApp::dropButton(const char* label) {
 
 #endif
 
-// Records an upgrade outcome as a notification. Kept as a setter (not a bare assignment) so none
-// of the three call sites forgets to restart the timer; the name stays only because fourteen sites
-// use it -- it's misnamed (sites include "Saved", "Created") but folding it into the shared
-// notification queue was the right fix, not a second parallel channel.
-//
-// Used to be a status-bar string with a 12s timer, whose severity came from matching the prefix
-// `rfind("Upgrade failed", 0) == 0`. Only one call site matched it, so "Could not save <name>",
-// "Could not write <file>", "Wrote <file> but could not load it back.", "Could not synthesise a
-// landscape at that size." and "Open a project first." all rendered green -- a failure shown as
-// success is worse than no message, since it gets believed.
-//
-// Has an #else (unlike the navmesh bake above) because every caller here already logs the same
-// outcome before the toast, so guarding the toast is free; folding this into the queue removed the
-// old status bar, so a bare guard would go silent with no fallback. The function itself stays
-// unguarded since its callers (saveLevel, Add Water, landscape create) run even with
-// -DAVER_ENABLE_UI=OFF; only the destination changes.
+// Records upgrade outcome as a notification.
 void SandboxApp::setUpgradeStatus(std::string msg,
                       editor::NotifySeverity sev) {
 #if AVER_WITH_IMGUI
@@ -1180,43 +1003,29 @@ void SandboxApp::setUpgradeStatus(std::string msg,
 #endif
 }
 
-// May the window close? Called from inside WM_CLOSE, on the message thread -- so it decides and
-// returns, and the prompt it arms is drawn by the ordinary frame loop that keeps running because
-// this said no.
- bool SandboxApp::onCloseGuardThunk(void* user) {
+// May the window close? Called from WM_CLOSE on the message thread.
+bool SandboxApp::onCloseGuardThunk(void* user) {
     return static_cast<SandboxApp*>(user)->onCloseGuard();
 }
 
 bool SandboxApp::onCloseGuard() {
 #if AVER_WITH_IMGUI
-    // ALREADY ASKING is not a reason to ask again: a second X click while the prompt is up must
-    // not stack a second prompt, and must still not close.
     if (exitPrompt_) return false;
     if (assetEditors_.anyDirty() || levelHasUnsavedEdits()) { exitPrompt_ = true; return false; }
 #endif
     return true;
 }
 
-// Does the LEVEL differ from its file? True when it differs from disk -- NOT "has anything ever
-// been edited" (the old canUndo() answer, which saving never clears, so the close prompt cried
-// wolf on every exit regardless of how recently the level was written; the only way to silence it
-// was to undo every edit of the session). Also not the undo stack's SIZE: pushEdit erases from
-// the front once kUndoDepth is reached, so the same depth can mean two different documents.
-// A per-edit serial is stable under that trimming.
+// Does the level differ from its file (uses per-edit serial, not undo stack depth)?
 bool SandboxApp::levelHasUnsavedEdits() const { return currentEditMark() != savedEditMark_; }
 
-// Called wherever the document and the file agree: after a successful save, and after a load or
-// a New Level, both of which start from a file nothing has edited yet.
+// Mark document as saved (after save, load, or new).
 void SandboxApp::markLevelSaved() { savedEditMark_ = currentEditMark(); }
 
-// Forces the dirty state on, for content that came from somewhere other than levelPath_.
-// ~0 is a serial pushEdit can never produce, so no edit can accidentally match it.
+// Force dirty state on (for content from outside levelPath_).
 void SandboxApp::markLevelUnsaved() { savedEditMark_ = ~0ull; }
 
-// Exit, unless something is unsaved -- ASK first. Exit used to call requestExit() straight
-// through; AssetEditorHost::anyDirty() existed for this but had no callers, so an unsaved material
-// was silently discarded. The bigger hole: the level itself was never registered as an
-// AssetEditor, so an hour of building and File > Exit warned about nothing.
+// Exit, unless something is unsaved (ask first).
 void SandboxApp::requestExitChecked(Engine& e) {
 #if AVER_WITH_IMGUI
     if (assetEditors_.anyDirty() || levelHasUnsavedEdits()) { exitPrompt_ = true; return; }
@@ -1224,12 +1033,7 @@ void SandboxApp::requestExitChecked(Engine& e) {
     e.requestExit();
 }
 
-// File > Save All, Ctrl+Shift+S. The level goes through saveLevelInteractive() (same Save Level
-// As fallback and outcome reporting, so the two stay in agreement) and every dirty asset tab goes
-// through AssetEditorHost::saveAllDirty, previously only reachable from the quit prompt's "Save
-// all and exit" -- it carries on past a failure so nine tabs that CAN be saved still get written
-// when a tenth can't. A failure surfaces as a notification (Save All has no modal to write into,
-// unlike the quit prompt); a success is quiet.
+// File > Save All, Ctrl+Shift+S (save level and all dirty asset tabs).
 void SandboxApp::saveAll() {
 #if AVER_WITH_IMGUI
     saveLevelInteractive();
@@ -1273,7 +1077,6 @@ void SandboxApp::drawAboutPrompt(Engine& e) {
     }
     ImGui::BeginGroup();
     if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
-    // kEngineName/kEngineVersion are string_views, not char* -- print by length.
     ImGui::Text("%.*s", static_cast<int>(kEngineName.size()), kEngineName.data());
     if (fontMedium_) ImGui::PopFont();
     ImGui::TextDisabled("Version %.*s", static_cast<int>(kEngineVersion.size()), kEngineVersion.data());
@@ -1303,10 +1106,7 @@ void SandboxApp::drawAboutPrompt(Engine& e) {
 #endif
 }
 
-// Names a new file for the current level and saves it there. A name, not a file dialog: the
-// platform layer has openFileDialog but no save counterpart, and a level belongs in the project's
-// Content\Maps anyway, like the Content Browser's own create items; saveLevel already accepts an
-// arbitrary path. Guarded inside the braces for drawAboutPrompt's reason above.
+// Names a new file for the level and saves it there (prompted, not file dialog).
 void SandboxApp::drawSaveLevelAsPrompt() {
 #if AVER_WITH_IMGUI
     if (!wantSaveLevelAs_) return;
@@ -1355,12 +1155,7 @@ void SandboxApp::drawSaveLevelAsPrompt() {
     if ((go || (submit && valid)) && valid) {
         std::filesystem::create_directories(maps, ec);
 #if AVER_MODULE_SCENE
-        // A COPY IS A NEW LEVEL, SO IT GETS ITS OWN NAME AND ID. saveLevel starts from levelHeader_
-        // (or legacyMapHeader_) and writes levelName_, so the old order -- save first, rename after
-        // -- put the SOURCE's NAME and its explicit ID into the copy. The name is set BEFORE the save,
-        // and the stored ID zeroed so the writer recomputes it from the new NAME (ID = FNV-1a-64(NAME)).
-        // Saving onto a level of the same name keeps its ID untouched. A failed save puts both back:
-        // the open level is still the old one.
+        // Copy gets a new ID; zero it so the writer recomputes from the new name.
         const bool renamed = stem != levelName_;
         const std::string prevName = levelName_;
         const u64 prevId = levelHeader_.contentId, prevLegacyId = legacyMapHeader_.contentId;
@@ -1371,9 +1166,7 @@ void SandboxApp::drawSaveLevelAsPrompt() {
         }
         if (saveLevel(target.string())) {
 #if AVER_MODULE_PHYSICS
-            // THE LANES TRAVEL WITH THE LEVEL. The copy's cars read their roads from <name>.oclanes beside
-            // it, and a Save As that left that file behind would send every one of them to the parking
-            // brake. levelPath_ is still the SOURCE here; an unsaved level has no lanes to bring.
+            // Lanes file travels with the level (copy reads from <name>.oclanes).
             if (!levelPath_.empty()) {
                 const std::filesystem::path from = game::GameLevel::laneSidecarPath(levelPath_);
                 const std::filesystem::path to = game::GameLevel::laneSidecarPath(target.string());
@@ -1399,9 +1192,6 @@ void SandboxApp::drawSaveLevelAsPrompt() {
             saveLevelAsError_ = "Could not write " + target.filename().string() + ".";
         }
 #else
-        // levelPath_/levelName_/saveLevel() only exist under AVER_MODULE_SCENE, and wantSaveLevelAs_
-        // is only raised from the SCENE-guarded menu item, so this popup can't actually be open
-        // without it. Close it rather than pretend a save happened.
         wantSaveLevelAs_ = false;
         ImGui::CloseCurrentPopup();
 #endif
@@ -1428,10 +1218,7 @@ void SandboxApp::drawExitPrompt(Engine& e) {
 
     std::vector<std::string> dirty = assetEditors_.dirtyTitles();
 #if AVER_MODULE_SCENE
-    // The LEVEL first: most likely to represent an afternoon's work, and this prompt used not to
-    // mention it. levelName_/levelPath_ (and so levelDirty) are declared only under
-    // AVER_MODULE_SCENE, since there's no level to name without a world -- every place levelDirty
-    // is read below is one of these two.
+    // List the level first (most likely to be significant work).
     const bool levelDirty = levelHasUnsavedEdits();
     if (levelDirty)
         dirty.insert(dirty.begin(),
@@ -1456,9 +1243,6 @@ void SandboxApp::drawExitPrompt(Engine& e) {
     if (ImGui::Button("Save all and exit", ImVec2(150.0f * dpi_, 0.0f))) {
         std::string why;
         usize failed = assetEditors_.saveAllDirty(&why);
-        // The level too, and only when it already HAS a path: a never-saved level has no name to
-        // write to, and inventing one here would put a file somewhere the user did not choose.
-        // The line above the buttons says so, and Cancel -> Save Level As is the way out.
 #if AVER_MODULE_SCENE
         if (levelDirty && !levelPath_.empty() && !saveLevel(levelPath_)) {
             ++failed;
@@ -1470,8 +1254,7 @@ void SandboxApp::drawExitPrompt(Engine& e) {
             exitPrompt_ = false;
             e.requestExit();
         } else {
-            // STAY OPEN on a failed save. Exiting anyway would discard exactly the work the
-            // user just asked to keep.
+            // Stay open on failure (user asked to keep the work).
             exitPromptError_ = why;
             AVER_ERROR("[Editor] {} editor(s) could not be saved; the exit was cancelled: {}",
                        failed, why);
@@ -1496,16 +1279,13 @@ void SandboxApp::drawExitPrompt(Engine& e) {
 #endif
 }
 
-// Opens the picker, rebuilding its list. Shared by the menu item and --open-level-picker (same
-// reason as --tools-menu, --project-settings-page): the only way a bounded --frames run can
-// screenshot a menu-driven panel without a human clicking anything.
+// Open level picker, rebuilding its list (shared by menu item and --open-level-picker).
 void SandboxApp::openLevelPickerNow() {
     openLevelList_ = editor::listLevels(project_.contentDir());
     openLevelSelected_ = -1;
     openLevelError_.clear();
 #if AVER_MODULE_SCENE
-    // Pre-select what is already open, so the list appears showing where you are. levelPath_ is
-    // declared only under AVER_MODULE_SCENE (there is no open level to point at without a world).
+    // Pre-select the currently open level so list shows where you are.
     for (int i = 0; i < static_cast<int>(openLevelList_.size()); ++i) {
         std::error_code lec;
         if (!levelPath_.empty() &&
@@ -1517,21 +1297,11 @@ void SandboxApp::openLevelPickerNow() {
     openLevelPicker_ = true;
 }
 
-// File > Open Level's picker. A list of the project's own levels, not an OS file dialog (same
-// two reasons as Save Level As): no save-dialog counterpart worth threading through, and a level
-// belongs to a project anyway -- the whole filesystem would mostly offer levels with unresolvable
-// assets. listLevels walks the content root; see LevelList.hpp for what it skips and why.
-// Built when the modal opens, not per frame: a content root can be a few thousand entries, and
-// re-walking it every frame to draw a list that can't have changed is wasted work.
+// File > Open Level picker (project-local list, not OS file dialog).
 void SandboxApp::drawOpenLevelPrompt(Engine& e) {
     (void)e;   // required by the caller's uniform signature (buildPanels/menu dispatch); unused here
 #if AVER_WITH_IMGUI && AVER_MODULE_SCENE
-    // ARMED BY --open-level-picker, consumed once. Done here rather than at startup because the
-    // list needs project_ to be applied, which happens after the flags are read.
     if (armOpenLevelPicker_) { armOpenLevelPicker_ = false; openLevelPickerNow(); }
-    // --open-level <name>: matched against both the content-relative path and the bare stem, so
-    // either "Maps/Scratch.ocworld" or "Scratch" finds it. Through requestOpenLevel like every
-    // other caller, so a name that matches nothing REPORTS that instead of emptying the world.
     if (!openLevelByName_.empty()) {
         const std::string want = openLevelByName_;
         openLevelByName_.clear();
@@ -1561,8 +1331,7 @@ void SandboxApp::drawOpenLevelPrompt(Engine& e) {
         ImGui::BeginChild("##levels", ImVec2(0.0f, 240.0f * dpi_), true);
         for (int i = 0; i < static_cast<int>(openLevelList_.size()); ++i) {
             const editor::LevelEntry& l = openLevelList_[static_cast<usize>(i)];
-            // The one already open is marked rather than hidden: re-opening it is a legitimate
-            // way to discard edits and go back to what is on disk.
+            // Current level is marked, not hidden (re-opening discards edits).
             const bool current = !levelPath_.empty() &&
                 std::filesystem::path(l.absPath) == std::filesystem::path(levelPath_);
             ImGui::PushID(i);
@@ -1848,10 +1617,7 @@ void SandboxApp::drawUpgradePrompt() {
 }
 
 #if AVER_WITH_IMGUI
-// The centred Play group of the main toolbar, laid out like Unreal 5's. Idle: Play (repeats
-// playMode_) and its options dropdown. During a session: Pause/Resume, Frame Skip (while paused),
-// Eject/Possess (real sessions only) and Stop. The width is summed from this frame's labels, so the
-// group stays centred as it changes shape.
+// Play toolbar: Pause/Resume/Eject/Stop, or Idle/Play dropdown.
 void SandboxApp::drawPlayToolbar(Engine& e) {
     const ImGuiViewport* mv = ImGui::GetMainViewport();
     const f32 wsizeX = mv->WorkSize.x;
@@ -1862,11 +1628,9 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
 
     const int32_t ps = aver_fw_play_state();
     const bool paused = ps == AVER_FW_PLAY_PAUSED;
-    // A drone/spectator stand-in is not a play session -- begin_play never ran for either -- so
-    // aver_fw_play_state reports EDITOR throughout. anyPlayActive() folds them in, or Stop would
-    // vanish while one flew and leave no way to stop it from the toolbar.
+    // anyPlayActive() includes stand-ins (drones/spectators have no begin_play).
     const bool anyPlay = anyPlayActive();
-    // Pause, Frame Skip and Eject need framework state a stand-in does not have.
+    // Pause/Skip/Eject need active framework session.
     const bool session = playSessionActive();
     const bool ejected = playEjected();
 
@@ -1877,7 +1641,7 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
     constexpr const char* kFrameSkipLabel = ICON_SKIP_NEXT " Frame Skip";
     const char* ejectLabel = ejected ? ICON_GAMEPAD " Possess" : ICON_EJECT " Eject";
     constexpr const char* kStopLabel = ICON_STOP " Stop";
-    // dropButton(" ") draws a single space plus its 16dpi arrow gutter; it returns only the click.
+    // dropButton returns only the click.
     const f32 dropW = btnW(" ") + 16.0f * dpi_;
 
     f32 grpW = 0.0f;
@@ -1899,7 +1663,6 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
         if (ImGui::Button(playLabel.c_str())) launchPlay(e, playMode_);
         uiReg_.track("toolbar.play");
         if (ImGui::IsItemHovered()) {
-            // Standalone has no chord of its own: Alt+P and Alt+S each start a specific mode.
             if (playMode_ == PlayMode::Standalone) {
                 ImGui::SetTooltip("Standalone Game: a separate Aver Engine Runtime on the saved level");
             } else {
@@ -1916,7 +1679,6 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play options");
         if (ImGui::BeginPopup("playOptions")) {
             ImGui::TextDisabled("MODES");
-            // Picking a mode makes it the button's AND starts it, as Unreal's dropdown does.
             if (ImGui::MenuItem(ICON_PLAY " Selected Viewport",
                                 editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayStart)).c_str(),
                                 playMode_ == PlayMode::SelectedViewport))
@@ -1933,7 +1695,6 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
                                   editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayEject)).c_str());
             const bool haveLevel = !levelPath_.empty();
             const bool haveRuntime = !editor::runtimeExecutablePath().empty();
-            // Same conditions File > Launch in Aver Engine Runtime disables on.
             const bool standaloneOk = project_.valid() && haveLevel && haveRuntime;
             if (ImGui::MenuItem(ICON_GAMEPAD " Standalone Game", nullptr,
                                 playMode_ == PlayMode::Standalone, standaloneOk))
@@ -1947,7 +1708,7 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
 
             ImGui::Separator();
             ImGui::TextDisabled("SPAWN PLAYER AT");
-            // Radio buttons rather than menu items, so the popup stays open while it is set up.
+            // Radio buttons keep the popup open while setting up.
             if (ImGui::RadioButton("Current Camera Location", playSpawnAt_ == PlaySpawnAt::CameraLocation))
                 playSpawnAt_ = PlaySpawnAt::CameraLocation;
             uiReg_.track("toolbar.play.options.spawnCamera");
@@ -1994,7 +1755,6 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
             if (ImGui::Button(kFrameSkipLabel)) requestPlayFrameStep();
             uiReg_.track("toolbar.play.frameSkip");
             if (ImGui::IsItemHovered()) {
-                // Unbound by default, so the chord is named only once someone binds one.
                 const editor::Chord& skipChord = keybinds_.chordFor(editor::CommandId::PlayFrameSkip);
                 if (skipChord.isBound())
                     ImGui::SetTooltip("Advance one gameplay tick, then pause again (%s)",
@@ -2009,9 +1769,6 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
         if (ImGui::IsItemHovered()) {
             const std::string ejectChord =
                 editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayEject));
-            // Ejected, the tooltip also names the chord that makes possessing useful after flying
-            // away: without it the view snaps back to wherever the pawn was left. Only when it HAS a
-            // chord, like Frame Skip's above -- a cleared one would read "none first brings...".
             const editor::Chord& pawnChord = keybinds_.chordFor(editor::CommandId::PlayPawnToCamera);
             if (ejected && pawnChord.isBound())
                 ImGui::SetTooltip("Possess the player again (%s)\n"
@@ -2051,8 +1808,6 @@ void SandboxApp::buildUI(Engine& e) {
 #endif
     prefsDevice_ = e.device();
 #if AVER_WITH_IMGUI
-    // Editor preferences are read/written by the preferences PANEL; a UI-less editor never opens
-    // one, so the defaults compiled into the members stand.
     if (!prefsLoaded_) { prefsLoaded_ = true; loadEditorPreferences(); }
 #endif
 #if AVER_MODULE_SCENE
@@ -2067,8 +1822,7 @@ void SandboxApp::buildUI(Engine& e) {
         if (prefsDevice_->vsyncCanDisable()) { prefsDevice_->setVSync(false); AVER_INFO("[Sandbox] vsync OFF (--no-vsync)"); }
         else AVER_WARN("[Sandbox] --no-vsync ignored: this display path cannot tear");
     }
-    // --vsync: forces it ON for the session, whatever the stored preference (a capture of frame
-    // generation needs it). Applied after --no-vsync, so it wins when both are given.
+    // --vsync: forces it ON, overriding stored preference.
     if (vsyncOnRequested_) {
         vsyncOnRequested_ = false;
         prefsDevice_->setVSync(true);
@@ -2088,14 +1842,10 @@ void SandboxApp::buildUI(Engine& e) {
         return;
     }
 
-    // BEFORE ANYTHING DRAWS, so the Content Browser's badges and the panel read the same latch on
-    // the same frame rather than one of them trailing the other by one. It reaps finished workers
-    // and may start one; it never waits on git, and never spawns a process itself.
+    // Before anything draws; reaps finished workers and may start one.
     revisionControlTick();
 
-    // Drawer shortcuts (Ctrl+Space: Content Browser, `: Console, Escape: close) share one
-    // !WantTextInput guard, so ` can't open the console while a text field has focus, and the
-    // console's own input line then swallows further ` presses the same way Ctrl+Space always did.
+    // Drawer shortcuts (Ctrl+Space: Content Browser, `: Console, Escape: close).
     {
         const ImGuiIO& io = ImGui::GetIO();
         if (!io.WantTextInput && !io.WantCaptureKeyboard) {
@@ -2107,7 +1857,7 @@ void SandboxApp::buildUI(Engine& e) {
         }
     }
 
-    // ---------------- menu bar ----------------
+    // ---- menu bar ----
     if (ImGui::BeginMainMenuBar()) {
         if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
         ImGui::TextColored(ImVec4(0.95f,0.42f,0.13f,1),"AE");
@@ -2117,22 +1867,16 @@ void SandboxApp::buildUI(Engine& e) {
 #if AVER_MODULE_SCENE
             const bool haveProject = project_.valid();
             ImGui::BeginDisabled(!haveProject);
-            // ASKS FIRST NOW. This called unloadLevel() straight through, which clears the undo
-            // stack and every entity with no prompt -- so one wrong click on a level somebody had
-            // been building for an hour threw all of it away, silently, with Cancel nowhere.
+            // Asks first; prevents silently discarding unsaved edits.
             if (ImGui::MenuItem("New Level")) {
                 if (levelHasUnsavedEdits()) pendingNewLevel_ = true;
                 else                        startNewLevel(e);
             }
             uiReg_.track("file.newLevel");
-            // Opens a picker now. Used to call loadStartMap() (the project's ONE start map), so a
-            // project with three levels had two unreachable, and a start map with missing assets
-            // just reloaded the same empty world, looking like the menu item was broken.
+            // Opens a picker; shows all levels, not just the start level.
             if (ImGui::MenuItem("Open Level...")) openLevelPickerNow();
             uiReg_.track("file.openLevel");
-            // RELOAD, which is what the old "Open Level" actually did. Keeping it as its own item
-            // rather than deleting the behaviour: reopening the start map to throw away edits is
-            // a real thing to want, it just is not what "Open Level" means.
+            // Reload: reopens the start level to discard edits.
             ImGui::BeginDisabled(project_.startMap.empty());
             if (ImGui::MenuItem("Reload Start Level")) {
                 const std::string start = project_.contentDir() + "\\" + project_.startMap;
@@ -2146,9 +1890,7 @@ void SandboxApp::buildUI(Engine& e) {
             if (ImGui::MenuItem("Save All", editor::chordToString(keybinds_.chordFor(editor::CommandId::SaveAll)).c_str()))
                 saveAll();
             uiReg_.track("file.saveAll");
-            // Save Level As: the toolbar's Save tooltip has always said "File > New Level, then
-            // Save Level As" while the menu had no such item. saveLevel already takes an arbitrary
-            // path; only a way to name one was missing.
+            // Save Level As: saveLevel takes an arbitrary path; this provides the UI.
             if (ImGui::MenuItem("Save Level As...")) {
                 saveLevelAsName_[0] = '\0';
                 const std::string stem = levelPath_.empty()
@@ -2167,9 +1909,7 @@ void SandboxApp::buildUI(Engine& e) {
             ImGui::MenuItem("New Level"); ImGui::MenuItem("Open Level..."); ImGui::MenuItem("Save Level");
 #endif
 #if AVER_MODULE_LANDSCAPE
-            // Independent of the Save Level item above: a sculpt changes the resident section
-            // (landscape_.data()) in memory only (handleSculpt) -- the SAME split saveLevel/Save
-            // Level already has between "the editor's state" and "what is actually on disk".
+            // Sculpt changes the resident section in memory; save separately.
             {
                 const bool canSave = landscape_.loaded() && !landscape_.path().empty();
                 ImGui::BeginDisabled(!canSave);
@@ -2187,9 +1927,7 @@ void SandboxApp::buildUI(Engine& e) {
                 requestViewportScreenshot();
             uiReg_.track("file.takeScreenshot");
 #if AVER_MODULE_SCENE
-            // Starts a SEPARATE process (AverEngineRuntime.exe) on this level -- the disk-only
-            // inputs a packaged game gets, unlike Play, which runs in-process against whatever is
-            // in memory. See RuntimeLaunch.hpp for what gets launched and why it runs detached.
+            // Starts AverEngineRuntime.exe on this level (separate process).
             {
                 const bool haveProj = project_.valid();
                 const bool haveLevel = !levelPath_.empty();
@@ -2208,10 +1946,7 @@ void SandboxApp::buildUI(Engine& e) {
             }
 #endif
             ImGui::Separator();
-            // Packaging. Disabled with a SPECIFIC reason rather than a generic one: "greyed
-            // out" with no explanation is the single most common way an editor wastes somebody's
-            // afternoon. The item is a shell over scripts/stage-game.ps1 and adds nothing of its
-            // own -- a packaging path that exists only behind a button cannot run in CI.
+            // Packaging disabled only with specific reason.
             {
                 const bool haveProj = project_.valid();
                 const bool haveScripts = haveProj &&
@@ -2236,9 +1971,7 @@ void SandboxApp::buildUI(Engine& e) {
             if (ImGui::MenuItem("Redo", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditRedo)).c_str(), false, canRedo())) redo();
             uiReg_.track("edit.redo");
             ImGui::Separator();
-            // Shortcut hints are read from the SAME registry the keypress dispatch in
-            // handleManip() reads from, so a rebind can never leave the menu and the keyboard
-            // disagreeing about what a chord does.
+            // Shortcut hints from the same registry as handleManip(), so menu and keyboard agree.
             if (ImGui::MenuItem("Copy", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditCopy)).c_str(), false, anySelected())) copySelection();
             uiReg_.track("edit.copy");
             if (ImGui::MenuItem("Paste", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditPaste)).c_str(), false, !clipboard_.entities.empty() || clipboard_.hasObject)) pasteClipboard();
@@ -2257,9 +1990,7 @@ void SandboxApp::buildUI(Engine& e) {
                     const bool open_window = ImGui::BeginMenu("Window");
         uiReg_.track("menu.window");
         if (open_window){
-            // Both of these used to discard their return value against panels that had no
-            // p_open, so the items consumed a click and could never do anything: docking let
-            // you close the tab, and nothing could reopen it.
+            // MenuItem now captures return value so panels can be reopened.
             ImGui::MenuItem("World Outliner", nullptr, &showOutliner_);
             uiReg_.track("window.worldOutliner");
             ImGui::MenuItem("Details", nullptr, &showDetails_);
@@ -2267,11 +1998,7 @@ void SandboxApp::buildUI(Engine& e) {
             if (ImGui::MenuItem("Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
             uiReg_.track("window.contentBrowser");
             if (ImGui::MenuItem("Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
-            // track() names the LAST item submitted, so it must sit immediately after its own
-            // widget. A trailing track("window.outputLog") used to sit after World Settings,
-            // registering that rect under this name -- since this is a live automation target
-            // (setWidgetResolver -> centreOf), anything clicking "window.outputLog" toggled World
-            // Settings instead. The real item was left under the tell-tale name "window.outputLogDup".
+            // track() names the LAST item; keep it immediately after the widget.
             uiReg_.track("window.outputLog");
             if (ImGui::MenuItem("Console", "`", drawer_ == Drawer::Console)) toggleDrawer(Drawer::Console);
             uiReg_.track("window.console");
@@ -2286,14 +2013,11 @@ void SandboxApp::buildUI(Engine& e) {
                 if (ImGui::MenuItem("Chunk Streaming", nullptr, streamOn)) setChunkStreamingEnabled(!streamOn);
                 ImGui::EndDisabled();
                 uiReg_.track("window.chunkStreaming");
-                // The per-pass GPU tree, which existed for a long time and could only be read
-                // as scrolling console text from the `frametime` command.
                 ImGui::MenuItem("GPU Profiler", nullptr, &showProfiler_);
                 uiReg_.track("window.gpuProfiler");
                 ImGui::MenuItem("Neural Visualiser", nullptr, &showNeuralViz_);
                 uiReg_.track("window.neuralVisualiser");
-                // Which files name an asset. Reachable from here as well as from the Content
-                // Browser's own context menu, so it can be left open while working.
+                // Which files name an asset; reachable from Content Browser context menu too.
                 ImGui::MenuItem("References", nullptr, &showReferences_);
                 uiReg_.track("window.references");
                 if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -2318,9 +2042,7 @@ void SandboxApp::buildUI(Engine& e) {
             }
             ImGui::Separator();
 #endif
-            // OUTSIDE the AVER_MODULE_SCENE block above, unlike the GPU Profiler and References
-            // items: what git says about the project's files has nothing to do with whether this
-            // build has an ECS compiled in.
+            // Outside AVER_MODULE_SCENE; git info is independent of ECS.
             ImGui::MenuItem("Revision Control", nullptr, &showRevisionControl_);
             uiReg_.track("window.revisionControl");
             if (ImGui::IsItemHovered())
@@ -2336,13 +2058,7 @@ void SandboxApp::buildUI(Engine& e) {
                 ImGui::SetTooltip(gameUi_ ? "A hand-written Aver.UI draw list, until there is a widget tree to produce one."
                                           : "The UI render feature is unavailable on this backend.");
             ImGui::Separator();
-            // Reset Layout is scoped to whichever tab is in front, routed through the focused
-            // editor rather than hardcoded to the Actor editor: it used to call
-            // resetActorEditorLayout() unconditionally for ANY open asset tab, so resetting a
-            // Sound or Graph tab silently reset the Actor editor instead -- assetTabActive said
-            // only "some asset tab is open", never which one.
-            // AssetEditorHost::resetFocusedLayout() tracks which tab's window was actually focused
-            // and calls that editor's own resetLayout().
+            // Reset Layout applies to the focused tab.
             const bool assetTabActive = !levelVisible_ && assetEditors_.anyOpen();
             if (ImGui::MenuItem(assetTabActive ? "Reset Tab Layout" : "Reset Layout")) {
                 if (assetTabActive) assetEditors_.resetFocusedLayout();
@@ -2356,10 +2072,7 @@ void SandboxApp::buildUI(Engine& e) {
         }
         tools_.drawMenu(project_);
         if (ImGui::BeginMenu("Build")){
-            // Build Geometry is GONE, not disabled: no CSG/brush system exists or is planned, so
-            // it was an Unreal-shaped label with nothing behind it. Build Lighting stays disabled
-            // and explained -- a lightmap baker IS planned (docs/rendering/RENDERING.md), so that
-            // one is "not yet", not "not a thing here".
+            // Build Geometry is gone; no CSG/brush system exists. Build Lighting planned.
             ImGui::BeginDisabled(true);
             ImGui::MenuItem("Build Lighting");
             ImGui::EndDisabled();
@@ -2369,10 +2082,7 @@ void SandboxApp::buildUI(Engine& e) {
 #if AVER_MODULE_SYNAPSE
             ImGui::Separator();
 #if AVER_MODULE_SCENE
-            // PAIRED WITH bakeNavigationNow'S OWN GUARD. AVER_MODULE_SYNAPSE alone is the grid
-            // math, not a world to sample, so without AVER_MODULE_SCENE this item would call a
-            // bake that always fails -- offering an action that can only ever report "failed" is
-            // worse than not offering it, so the item is gone rather than disabled.
+            // Needs both SYNAPSE (grid math) and SCENE (a world to sample).
             if (ImGui::MenuItem("Bake Navigation")) bakeNavigationNow(e);
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip("Samples the live physics scene into a walkable grid and "
@@ -2380,13 +2090,10 @@ void SandboxApp::buildUI(Engine& e) {
                                   "Colours in the overlay are REGIONS: two patches of floor "
                                   "in different colours have no path between them.");
 #endif
-            // SHOWN EVEN WITHOUT SCENE, unlike the item above: this only visualises nav_, which a
-            // level can carry as an already-baked .ocnav loaded from disk, so a scene-less build
-            // can still open a level someone else baked navigation for and look at it.
+            // Show Navigation works even without SCENE (reads a baked .ocnav).
             ImGui::MenuItem("Show Navigation", nullptr, &showNav_);
 #if AVER_MODULE_PHYSICS
-            // A toggle either way forgets what the overlay last drew: it skips unchanged frames
-            // (rebuildColliderOverlay), and anything could have changed while it was off.
+            // Toggling forgets the overlay; rebuildColliderOverlay skips unchanged frames.
             if (ImGui::MenuItem("Show Colliders", nullptr, &showColliders_))
                 colliderOverlayBuilt_ = false;
             uiReg_.track("view.showColliders");
@@ -2403,21 +2110,9 @@ void SandboxApp::buildUI(Engine& e) {
         }
         uiReg_.track("menu.build");
         if (ImGui::BeginMenu("Select")){
-            // Select All works now: it used to be disabled with a tooltip that outlived its own
-            // truth -- "The editor selects one object at a time. Multi-selection is not built
-            // yet." -- still saying so after multi-selection shipped, talking someone out of
-            // trying the feature that exists. Greyed only when the Outliner has no rows (the one
-            // case it would do nothing). Walks outlinerOrder_ (the Outliner's drawn/filtered order),
-            // not World's entity list -- that's what "all" means on screen, and it's exactly what
-            // multiRange walks, so shift-click agrees with this by construction. outlinerOrder_ and
-            // selectAllInOutliner() only exist under AVER_MODULE_SCENE, so the item is dropped
-            // (not disabled) without it; Select None survives since it only clears
-            // sel_/selEntity_, which need no world.
+            // Select All now works; disabled only when nothing to select.
 #if AVER_MODULE_SCENE
             ImGui::BeginDisabled(outlinerOrder_.empty());
-            // The hint comes from the registry, like every Edit-menu row. It was a hardcoded
-            // "Ctrl+A" string with no command behind it, so the menu named a key that was never
-            // dispatched -- the precise drift the Edit menu's comment says this pattern prevents.
             if (ImGui::MenuItem("Select All",
                                 editor::chordToString(
                                     keybinds_.chordFor(editor::CommandId::EditSelectAll)).c_str()))
@@ -2427,18 +2122,13 @@ void SandboxApp::buildUI(Engine& e) {
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && outlinerOrder_.empty())
                 ImGui::SetTooltip("Nothing is listed in the World Outliner to select.");
 #endif
-            // BOTH, like every other deselect in this file. Clearing sel_ alone left selEntity_
-            // live; it happens to read correctly today only because every consumer tests sel_
-            // first, which is one refactor away from resurrecting a dead selection.
+            // Clears both sel_ and selEntity_ to avoid stale data.
             if(ImGui::MenuItem("Select None")) { sel_=-1; selEntity_=kInvalidId; }
             uiReg_.track("select.none");
             ImGui::EndMenu();
         }
         uiReg_.track("menu.select");
         if (ImGui::BeginMenu("Help")){
-            // Discarded its return value and had no dialog behind it. Every string it needs was
-            // already one line away -- the version is printed in Project Settings, the backend
-            // and adapter in the status bar.
             if (ImGui::MenuItem("About Aver Engine")) showAbout_ = true;
             uiReg_.track("help.about");
             ImGui::EndMenu();
@@ -2452,20 +2142,16 @@ void SandboxApp::buildUI(Engine& e) {
     const ImVec2 wpos = mv->WorkPos, wsize = mv->WorkSize; // already excludes the menu bar
     const f32 toolbarH = 42.0f*dpi_, statusH = 26.0f*dpi_;
 
-    // ---------------- main toolbar ----------------
+    // ---- main toolbar ----
     ImGui::SetNextWindowPos(wpos);
     ImGui::SetNextWindowSize(ImVec2(wsize.x, toolbarH));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::Begin("##maintoolbar", nullptr, kChromeFlags);
     ImGui::SetCursorPosY((toolbarH - ImGui::GetFrameHeight()) * 0.5f);
-    // levelPath_ and saveLevel() are declared only under AVER_MODULE_SCENE (there is no level to
-    // path or save without a world), matching the File-menu Save Level item's own guard above --
-    // this toolbar button was the same feature, unguarded.
+    // levelPath_ and saveLevel() are under AVER_MODULE_SCENE only.
 #if AVER_MODULE_SCENE
-    // NOT DISABLED WHEN THE LEVEL HAS NO PATH ANY MORE. A level that has never been written is
-    // exactly when a person most wants this button, and greying it out to explain that in a
-    // tooltip is a worse answer than opening Save As, which is what it does now.
+    // Opens Save As if level has no path; otherwise saves.
     if (ImGui::Button(ICON_SAVE " Save")) saveLevelInteractive();
     uiReg_.track("toolbar.save");
     if (ImGui::IsItemHovered())
@@ -2510,7 +2196,7 @@ void SandboxApp::buildUI(Engine& e) {
     ImGui::End();
     ImGui::PopStyleVar(2);
 
-    // ---------------- dockspace host ----------------
+    // ---- dockspace host ----
     ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + toolbarH));
     ImGui::SetNextWindowSize(ImVec2(wsize.x, wsize.y - toolbarH - statusH));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
@@ -2523,28 +2209,17 @@ void SandboxApp::buildUI(Engine& e) {
     const ImVec2 dockSize(wsize.x, wsize.y - toolbarH - statusH);
     ImGui::DockSpace(dockId, ImVec2(0,0), ImGuiDockNodeFlags_PassthruCentralNode);
 
-    // Defer to a restored layout: since io.IniFilename points at a real file (see the UI
-    // backend), ImGui rebuilds the dock tree from it before the first frame. Rebuilding over a
-    // node with children (a layout that came from the ini) would mean the file is written
-    // faithfully every exit and ignored every launch -- worse than not saving, since it would
-    // look like it worked. Reset Layout still forces a rebuild by clearing dockBuilt_, and that
-    // path deliberately ignores the check below -- the one case where overwriting a restored
-    // layout is exactly what was asked for.
+    // Defer to restored layout from ini file; reset only on explicit Reset Layout.
     const ImGuiDockNode* restored = ImGui::DockBuilderGetNode(dockId);
     const bool adoptRestored = !dockBuilt_ && !dockResetRequested_ &&
                                restored && restored->IsSplitNode();
     if (adoptRestored) {
         dockBuilt_ = true;
-        // SAID ONCE, because "the layout persisted" and "the layout was silently rebuilt from
-        // the default" look identical on a first launch, when the default IS what you'd see
-        // either way. Without this line a regression here is invisible until someone notices,
-        // months later, that their panels moved back.
+        // Logged once to detect regressions (default == restored on first launch).
         AVER_INFO("[Editor] dock layout restored from editor-layout.ini");
     }
 
     if (!dockBuilt_ && dockSize.x > 1.0f && dockSize.y > 1.0f) {
-        // Reset Layout clears dockBuilt_ and sets this, overriding the adopt above (see the
-        // comment there).
         dockResetRequested_ = false;
         dockBuilt_ = true;
         ImGui::DockBuilderRemoveNode(dockId);
@@ -2553,11 +2228,7 @@ void SandboxApp::buildUI(Engine& e) {
         ImGuiID centre = dockId, right = 0, rightTop = 0, rightBottom = 0, left = 0;
         ImGui::DockBuilderSplitNode(centre, ImGuiDir_Right, 0.22f, &right,  &centre);
         ImGui::DockBuilderSplitNode(right,  ImGuiDir_Down,  0.60f, &rightBottom, &rightTop);
-        // The Mode panel goes LEFT (Unreal's side, opposite the selection panels): right answers
-        // "what is this object", left "what am I doing" -- brush settings under Details would mix
-        // terrain tools into the selected-entity panel. `centre` splits AFTER the right-hand
-        // splits so split order keeps it the central (passthrough) node; otherwise the scene
-        // stops rendering.
+        // Mode panel left (opposite details); left "what am I doing", right "what is this object".
         ImGui::DockBuilderSplitNode(centre, ImGuiDir_Left, 0.20f, &left, &centre);
         ImGui::DockBuilderDockWindow("World Outliner",  rightTop);
         ImGui::DockBuilderDockWindow("Details",         rightBottom);
@@ -2568,7 +2239,7 @@ void SandboxApp::buildUI(Engine& e) {
     if (const ImGuiDockNode* cn = ImGui::DockBuilderGetCentralNode(dockId)) centralDock_ = cn->ID;
     ImGui::End(); // ##dockhost
 
-    // ---------------- the level, as a tab drawing the scene texture ----------------
+    // ---- the level, as a tab drawing the scene texture ----
     {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         if (focusLevelAt_ > 0 && ImGui::GetFrameCount() == focusLevelAt_) {
@@ -2599,16 +2270,7 @@ void SandboxApp::buildUI(Engine& e) {
                     const ImVec2 uv0(at.x / bw, at.y / bh);
                     const ImVec2 uv1((at.x + w) / bw, (at.y + h) / bh);
                     ImGui::Image(static_cast<ImTextureID>(tex), ImVec2(w, h), uv0, uv1);
-                    // Drop target for content-browser assets; actual placement lives in
-                    // spawnFromAssetDrop, guarded on its own, so this call site stays compilable
-                    // with the module off either way.
-                    //
-                    // ONE payload per drag: ImGui's SetDragDropPayload (cond 0 = ImGuiCond_Always)
-                    // overwrites the type each call (imgui.cpp SetDragDropPayload). The browser
-                    // used to set kAssetDragDropType then kCbMoveDragDropType on the same drag, so
-                    // only the move payload delivered, and this asset-only target silently ignored
-                    // every drop. It now sends its whole selection under kCbMoveDragDropType;
-                    // kAssetDragDropType is still accepted from a single-asset source.
+                    // Drop target for content-browser assets.
                     if (ImGui::BeginDragDropTarget()) {
                         const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kCbMoveDragDropType);
                         if (!payload) payload = ImGui::AcceptDragDropPayload(kAssetDragDropType);
@@ -2618,13 +2280,7 @@ void SandboxApp::buildUI(Engine& e) {
                                 payload->DataSize > 0 ? static_cast<usize>(payload->DataSize - 1) : usize(0));
                             const ImVec2 mp = ImGui::GetMousePos();
 #if AVER_MODULE_SCENE
-                            // ONE path per line: a multi-selection drag sends every selected
-                            // entry, a single drag sends one path with no newline. Folders and
-                            // non-placeable files are skipped HERE, since the payload is the
-                            // browser's unfiltered selection. All land at the SAME point (the
-                            // cursor), not fanned out, so a stack dropped together piles up
-                            // rather than scattering to positions nobody chose -- moving them
-                            // apart is a drag each, and guessing a layout isn't undoable in one.
+                            // Multiple paths separated by newlines; drop all at cursor.
                             const std::vector<std::string> dragged = editor::splitDropPayload(droppedPath);
                             usize placed = 0;
                             for (const std::string& one : dragged) {
@@ -2653,15 +2309,7 @@ void SandboxApp::buildUI(Engine& e) {
         ImGui::PopStyleVar();
     }
 
-    // NO MODE PANEL IN SELECT MODE, and the dock node collapses with it so the viewport gets the
-    // width back: Select's whole tool set is already in the viewport toolbar, so a panel repeating
-    // them bought nothing and cost 20% of the viewport permanently. The panel exists for modes
-    // with genuinely more settings than a toolbar row can hold -- Landscape's brush, Foliage's palette.
-    // A PANEL NOT BUILT THIS FRAME HOLDS NO FOCUS. buildOutlinerPanel/buildDetailsPanel are the only
-    // writers of these two, and neither runs for a closed panel or while an asset tab has the central
-    // area -- so the last value used to stick, and a panel closed with focus kept "focused" for the rest
-    // of the session, opening every focus-gated shortcut (Frame Selected, the edit verbs, Pawn to
-    // Camera) over an asset tab. Their readers run in onUpdate, before this, so they see last frame's.
+    // No mode panel in Select (redundant with viewport toolbar).
     outlinerFocused_ = false;
     detailsFocused_  = false;
     if (levelVisible_ || !assetEditors_.anyOpen()) {
@@ -2670,8 +2318,7 @@ void SandboxApp::buildUI(Engine& e) {
     }
     if (levelVisible_) buildViewportOverlay();
     drawDrawer(e);
-    // AFTER drawDrawer, deliberately: it publishes drawerPixelH_, so the stack dodges the
-    // drawer using this frame's height rather than last frame's.
+    // drawNotifications after drawDrawer (needs drawerPixelH_ from this frame).
     drawNotifications();
     buildEditorPrefs();
     buildProjectSettings();
@@ -2686,16 +2333,11 @@ void SandboxApp::buildUI(Engine& e) {
 #endif
 #endif
 #if AVER_MODULE_SCENE
-    // Cleared after it fires, exactly like openAsset_ below: a selection the user then changes
-    // must not be yanked back every frame.
+    // Cleared after it fires (prevent repeated firing each frame).
     if (!selectEntity_.empty() && frameNo_ > 5) {
         const std::string want = selectEntity_;
         selectEntity_.clear();
-        // Outliner pseudo-entries first: Sun, Sky and Post Process are rows in the same list and
-        // open Details, but aren't entities, so a world-enumerating flag could never reach them --
-        // this flag exists (see setSelectEntity's own comment) to make the Details panel
-        // capturable. The level's WATER controls live under Sky + Atmosphere, which is what made
-        // the gap obvious.
+        // Pseudo-entries (Sun, Sky, Post Process) aren't entities but appear in Outliner/Details.
         {
             struct Pseudo { int sel; const char* shown; };
             static const Pseudo kPseudo[] = {
@@ -2710,10 +2352,7 @@ void SandboxApp::buildUI(Engine& e) {
         }
         scene::World& sw = scene::World::instance();
         scene::Entity found = kInvalidId;
-        // Enumerated the way the Outliner enumerates (count()/at()), matched against the same
-        // string it displays -- entityLabels_/levelEntities_ matched nothing, since those are
-        // editor bookkeeping an entity may not be in; the world is the authority here. If this
-        // stops finding what the Outliner shows, THIS is the copy that's wrong.
+        // Enumerate like Outliner does (count/at), match against world authority.
         const u32 n = sw.count();
         for (u32 i = 0; i < n && found == kInvalidId; ++i) {
             const scene::Entity ent = sw.at(i);
@@ -2737,28 +2376,23 @@ void SandboxApp::buildUI(Engine& e) {
     if (!openAsset_.empty() && frameNo_ > 5) {
         std::string want = openAsset_;
         openAsset_.clear();
-        // A relative path is the project's ("Content/..." as the Content Browser shows it), not the
-        // working directory's, which is wherever the editor happened to be launched from.
+        // Relative path is project-relative ("Content/..."), not editor launch directory.
         if (project_.valid() && !std::filesystem::path(want).is_absolute()) {
             const std::filesystem::path inProject = std::filesystem::path(project_.dir) / want;
             std::error_code ec;
             if (std::filesystem::exists(inProject, ec)) want = inProject.string();
         }
-        lastOpenAssetPath_ = want; // --graph-select (below) needs this after openAsset_ is cleared
+        lastOpenAssetPath_ = want;
         if (assetEditors_.open(want)) AVER_INFO("[Editor] --open-asset opened {}", want);
         else AVER_ERROR("[Editor] --open-asset: no registered editor accepts {}", want);
     }
-    // --graph-select <nodeId>: one frame after the block above could have opened something, so the
-    // editor this looks for is guaranteed to exist by the time this runs. See
-    // setGraphSelectNode's own comment for why this exists at all.
+    // --graph-select: run one frame after --open-asset so editor exists by then.
     if (!graphSelectNode_.empty() && frameNo_ > 6) {
         const std::string nodeId = graphSelectNode_;
         graphSelectNode_.clear();
         if (auto* ed = assetEditors_.find(lastOpenAssetPath_)) {
             if (auto* ge = dynamic_cast<editor::GraphEditor*>(ed)) {
-                // The message follows the RESULT, not the call. It used to say "selected node"
-                // unconditionally, which is how a capture run against a node id that does not
-                // exist reported success and proved nothing.
+                // Report result, not call (captures against non-existent nodes were marked successful).
                 if (ge->selectNode(nodeId))
                     AVER_INFO("[Editor] --graph-select selected '{}'", nodeId);
                 else
@@ -2771,8 +2405,7 @@ void SandboxApp::buildUI(Engine& e) {
             AVER_ERROR("[Editor] --graph-select: no open editor for '{}'", lastOpenAssetPath_);
         }
     }
-    // --graph-tab <name>: same one-frame-after-open timing as --graph-select above, and the
-    // same dynamic_cast, because the same thing is true -- only a graph editor has inner tabs.
+    // --graph-tab: run one frame after --open-asset (like --graph-select); graph editors only.
     if (!graphTab_.empty() && frameNo_ > 6) {
         const std::string tab = graphTab_;
         graphTab_.clear();
@@ -2798,30 +2431,18 @@ void SandboxApp::buildUI(Engine& e) {
     drawExitPrompt(e);
     drawPendingOpenPrompt(e);
     drawLaunchRuntimePrompt(e);
-    // After the modals, so a request made this frame is guarded by the prompt this frame rather
-    // than loaded out from under it. applyPendingOpen only exists under AVER_MODULE_SCENE (it
-    // loads into a scene::World), and every request it acts on comes from requestOpenLevel, itself
-    // SCENE-only, so nothing is pending to apply without it.
 #if AVER_MODULE_SCENE
     applyPendingOpen(e);
 #endif
 
-    // ---------------- status bar ----------------
+    // ---- status bar ----
     ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH));
     ImGui::SetNextWindowSize(ImVec2(wsize.x, statusH));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::Begin("##statusbar", nullptr, kChromeFlags);
     const f32 dt = e.time().dt;
-    // Once a frame, here because this is the one place every UI frame passes. It smooths the FPS
-    // below and feeds the profiler panel's frame header and Play CPU table (phases count only while
-    // Play runs). The raw frame was unreadable in Play, where it flickers between neighbours.
-    // A frame is folded as a Play sample only if the work it measures ran. A framework session ticks
-    // gameplay only while PLAYING, so a paused one (Gameplay, Vehicles and the graph ticks never open)
-    // is skipped, keeping the table readable after Pause; Frame Skip still folds, its bracket ran.
-    // The frame the Play button was pressed in is skipped too: startPlay wiped the accumulators after
-    // onUpdate had run, and an all-zero sample would seed every average at 0. The drone and spectator
-    // (Walk) stand-ins never run the gameplay tick, so for them any phase having run is the test.
+    // Smooth FPS for profiler/Play CPU table; fold Play frame only if measured.
 #if AVER_MODULE_FRAMEWORK
     const bool foldPlayFrame = anyPlayActive() &&
         (playSessionActive() ? playProf_.ranThisFrame(editor::PlayPhase::Gameplay)
@@ -2836,22 +2457,19 @@ void SandboxApp::buildUI(Engine& e) {
                 project_.valid() ? project_.name.c_str() : "No project",
                 rhi::backendName(e.device()->backend()), e.device()->adapterName(), dpi_*100.f);
     ImGui::SameLine(0.0f, 0.0f);
-    // The frame rate, clickable: with frame interpolation running, each real frame puts two images on
-    // screen, so it can count real frames only or real + interpolated ones (fpsCountsInterpolated_,
-    // chosen in the box the click opens). Everything measured here is per REAL frame.
+    // Frame rate (clickable): with interpolation, shows real or real+interpolated. Real FPS only.
     {
         const bool interpolating = e.device()->frameInterpolated();
         const f64 realFps = smoothMs > 1e-3 ? 1000.0 / smoothMs : 0.0;
         char fpsLabel[96];
-        // Kept short: the right-hand button cluster starts where it starts, and a longer face ran
-        // under it ("real + interpolated" hid the actor count). The tooltip says the rest.
+        // Short label; tooltip shows full text.
         if (interpolating && fpsCountsInterpolated_)
             std::snprintf(fpsLabel, sizeof fpsLabel, "%.0f FPS (%.0f real)###fps", realFps * 2.0, realFps);
         else if (interpolating)
             std::snprintf(fpsLabel, sizeof fpsLabel, "%.0f FPS real###fps", realFps);
         else
             std::snprintf(fpsLabel, sizeof fpsLabel, "%.0f FPS (%.2f ms)###fps", realFps, smoothMs);
-        const char* shown = fpsLabel;   // what ImGui draws: the text before "###"
+        const char* shown = fpsLabel;
         const ImVec2 size = ImGui::CalcTextSize(shown, std::strstr(shown, "###"));
         if (ImGui::Selectable(fpsLabel, false, ImGuiSelectableFlags_None, size)) ImGui::OpenPopup("##fpsMode");
         if (ImGui::IsItemHovered())
@@ -2874,11 +2492,8 @@ void SandboxApp::buildUI(Engine& e) {
             ImGui::EndPopup();
         }
     }
-    // VRAM AGAINST THE BUDGET. Over budget, Windows moves part of the GPU's working set into system
-    // memory, and whatever lands there is read across PCIe: MEASURED in NeonDistrict, the denoiser went
-    // from 0.63 to 3.40 ms when frame interpolation's buffers pushed the scene ~150 MB further over.
-    // That reads as a mystery slowdown unless something says so -- hence this. Polled twice a second
-    // (videoMemory() asks the driver), grey under 90% of the budget, amber above, red over.
+    // VRAM against budget: over = GPU paging to RAM via PCIe.
+    // Polled 2x/sec: grey <90%, amber >90%, red >100%.
     {
         vramPollS_ -= dt;
         if (vramPollS_ <= 0.0f) {
@@ -2902,7 +2517,7 @@ void SandboxApp::buildUI(Engine& e) {
                              : frac > 0.9 ? ImVec4(0.95f, 0.72f, 0.25f, 1.0f)
                                           : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
             ImGui::SameLine(0.0f, 0.0f);
-            // Short on purpose: the right-hand button cluster starts close by, and red already says "over".
+            // Short label; right-hand buttons are nearby.
             ImGui::TextColored(col, over ? "  |  VRAM! %.1f/%.1f GB" : "  |  VRAM %.1f/%.1f GB", usedGb, budgetGb);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s"
@@ -2922,9 +2537,7 @@ void SandboxApp::buildUI(Engine& e) {
     ImGui::SameLine(0.0f, 0.0f);
     ImGui::Text("  |  %zu actors  |  %s", objects_.size(), selectionLabel().c_str());
 
-    // The upgrade outcome, for a while: twelve seconds is long enough to read after clicking a
-    // button and short enough not to become permanent furniture. A FAILURE draws in the error
-    // colour -- "Upgrade failed: ..." sliding past in frame-rate grey reads as it having worked.
+    // Upgrade outcome: 12s is readable but not permanent. Failure in error color.
     auto drawerButton = [&](const char* label, Drawer d, const char* tip) {
         const bool on = drawer_ == d;
         if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
@@ -2932,14 +2545,7 @@ void SandboxApp::buildUI(Engine& e) {
         if (on) ImGui::PopStyleColor();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
     };
-    // The right-hand cluster's start, MEASURED not guessed: a literal here was wrong twice (250,
-    // then 340 "widened for the third button"), and any constant breaks again once a control joins
-    // the row or DPI scale grows a face past it. So this sums what ImGui actually spends per
-    // button: CalcTextSize of the face, FramePadding.x*2, ItemSpacing.x -- the same style fields
-    // ImGui itself uses to lay the row out. The revision-control face is computed once here via
-    // rcStatusFace (the widget below calls it again; computing it twice costs nothing); the MCP
-    // face can't be measured from this file, so it uses its documented ceiling ("MCP" + a
-    // five-digit port) instead.
+    // Cluster width not hardcoded; sum actual button widths per ImGui's layout.
     const bool rcBusy = rcStatusJob_ != nullptr;
     const editor::StatusBarSummary rcSummary = editor::summariseForStatusBar(
         project_.valid(), rcAnswered_, rcGitPresent_, rcRoot_, rcStatus_, rcWhy_);
@@ -2955,23 +2561,14 @@ void SandboxApp::buildUI(Engine& e) {
 #if AVER_MODULE_MCP
     clusterW += barStyle.ItemSpacing.x + faceWidth(ICON_LINK " MCP :65535");
 #endif
-    // Small right margin so the last button isn't flush with the edge; fmax against the cursor's
-    // own position -- the same guard the old constant already leaned on -- means a window too
-    // narrow for the cluster runs off the right edge rather than backing up over text already
-    // drawn -- overflow is recoverable by widening the window, two overlapping text runs are not
-    // readable at all. A five-widget row makes a narrow window more likely to reach this, not
-    // less.
+    // Small margin: cluster runs off edge rather than overlap text.
     ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - clusterW - 8.0f*dpi_));
     drawerButton("Content Browser", Drawer::Content, "Show the Content Browser  (Ctrl+Space)");
     ImGui::SameLine();
     drawerButton("Output Log", Drawer::Log, "Show the Output Log");
     ImGui::SameLine();
     drawerButton("Console", Drawer::Console, "Show the Console  (`)");
-    // Revision Control sits at the far right (Unreal's own spot for it); MCP -- Aver-specific, no
-    // Unreal equivalent -- sits one slot further in rather than displacing it. That means MCP is
-    // DRAWN FIRST: SameLine lays the row left to right, so the last call is the rightmost control
-    // -- drawing them the other way round once put MCP on the end, under a comment still claiming
-    // Revision Control was there.
+    // RC at far right; MCP drawn first (SameLine lays left to right).
 #if AVER_MODULE_MCP
     ImGui::SameLine();
     drawMcpStatusWidget();
@@ -2986,22 +2583,14 @@ void SandboxApp::buildUI(Engine& e) {
 }
 
 #if AVER_WITH_IMGUI
-// The on-screen graph print feed, over the viewport's bottom-left corner. Visual scripting had no
-// debugging surface: a Print node wrote one line into the engine log among render/asset/physics
-// lines (findable only by filtering the Output Log for "[Graph]"), easily scrolled away before it
-// was seen. Not a second log -- the Output Log still holds every line permanently; this is a
-// transient, oldest-first feed of the last few, answering "what just happened" without becoming
-// something to scroll.
+// On-screen graph print feed (transient overlay, bottom-left).
 void SandboxApp::drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
     const f64 now = ImGui::GetTime();
-    std::vector<std::pair<std::string, f32>> visible;   // text, alpha
+    std::vector<std::pair<std::string, f32>> visible;
     {
         std::lock_guard<std::mutex> lk(logMutex_);
         for (auto& gp : graphPrints_) {
-            // Stamped on first SIGHT, not when logged: logSink runs under the core log mutex on
-            // whichever thread logged (contracted to be quick), and ImGui::GetTime is this
-            // thread's clock anyway, so a line logged while minimised gets its full few seconds
-            // once the editor is back, rather than expiring unseen.
+            // Stamped on first sight (not when logged) so minimized window doesn't expire before viewing.
             if (gp.at < 0.0) gp.at = now;
             const f64 age = now - gp.at;
             if (age > kGraphPrintHoldSec) continue;
@@ -3013,8 +2602,7 @@ void SandboxApp::drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
                                               : gp.text,
                                  a);
         }
-        // Dropped here rather than in the sink, so the sink stays a push and a pop: an expired
-        // line is only expired once something has had a chance to look at it.
+        // Reap in loop, not sink: line stays visible until viewed once.
         while (!graphPrints_.empty() && graphPrints_.front().at >= 0.0 &&
                now - graphPrints_.front().at > kGraphPrintHoldSec)
             graphPrints_.pop_front();
@@ -3027,8 +2615,7 @@ void SandboxApp::drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
     f32 y = vpMax.y - pad - lineH * static_cast<f32>(visible.size());
     for (const auto& [text, alpha] : visible) {
         const ImVec2 sz = ImGui::CalcTextSize(text.c_str());
-        // A backing plate, because the 3D viewport behind this is arbitrary: white text on a
-        // snow bank or a sunlit wall is unreadable, and this exists to be read at a glance.
+        // Backing plate: white text on 3D background is unreadable.
         dl->AddRectFilled(ImVec2(vpMin.x + pad - 4.0f * dpi_, y - 1.0f * dpi_),
                           ImVec2(vpMin.x + pad + sz.x + 4.0f * dpi_, y + lineH - 1.0f * dpi_),
                           IM_COL32(0, 0, 0, static_cast<int>(150.0f * alpha)), 3.0f * dpi_);
@@ -3038,17 +2625,8 @@ void SandboxApp::drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
     }
 }
 
-// Draws the Output Log: clear / level filter / auto-scroll over the captured log, under logMutex_.
-// ONE severity palette, shared by the Output Log and the Console: four flat colours weren't worth
-// factoring out, but six levels with two carrying a row background made the two copies' agreement
-// load-bearing -- disagreeing means the same line reads as a different severity per drawer.
-// THE PALETTE:
-//   Warn      bright orange, NOT kAverOrange (the product accent) -- a warning that looks like a
-//             selected control is worse than a yellow one.
-//   Error     red.
-//   Critical  DARK red on a dark red row: hard to scroll past unnoticed.
-//   Fatal     BLACK on red -- black alone would be invisible on this panel's dark background; the
-//             filled row is what makes it readable.
+// Output Log: clear / level filter / auto-scroll, under logMutex_.
+// Shared severity palette (Output Log and Console): prevents drift.
  void SandboxApp::logLineStyle(LogLevel l, ImVec4& text, ImVec4& row, bool& filled) {
     filled = false;
     row    = ImVec4(0, 0, 0, 0);
@@ -3070,9 +2648,7 @@ void SandboxApp::drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
     }
 }
 
-// Draws one line in its severity's style, painting the row behind it first for the two levels that
-// have one. The rect draws at the cursor before the text so it sits underneath, spanning the
-// content region so a short Fatal message still reads as a full banner, not a small red smear.
+// Draws one line in its severity's style, with row background for Fatal/Critical.
  void SandboxApp::drawLogLine(LogLevel level, const char* text) {
     ImVec4 fg, bg;
     bool filled = false;
@@ -3092,8 +2668,7 @@ void SandboxApp::drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
 void SandboxApp::drawOutputLog() {
     if (ImGui::SmallButton("Clear")) { std::lock_guard<std::mutex> lk(logMutex_); logLines_.clear(); }
     ImGui::SameLine();
-    // Same reasoning as the console's own Copy button: this text is not selectable either, and
-    // the log is the FIRST thing anyone is asked for when something goes wrong.
+    // Text is not selectable; log is frequently needed.
     if (ImGui::SmallButton("Copy")) {
         std::string all;
         {
@@ -3105,9 +2680,7 @@ void SandboxApp::drawOutputLog() {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy the whole log to the clipboard");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(110.0f * dpi_);
-    // APPENDED AFTER "Warn+", never inserted before it. This index is persisted verbatim as
-    // outputLog.levelFilter in editor.ini, so inserting an entry earlier would silently change
-    // what every existing user's stored filter means.
+    // Appended only; order is persisted in editor.ini.
     ImGui::Combo("##loglevel", &logLevelFilter_, "All\0Info+\0Warn+\0Error+\0Critical+\0");
     ImGui::SameLine();
     ImGui::Checkbox("Auto-scroll", &logAutoScroll_);
@@ -3120,14 +2693,7 @@ void SandboxApp::drawOutputLog() {
                           : logLevelFilter_ == 3 ? (int)LogLevel::Error
                           : logLevelFilter_ == 2 ? (int)LogLevel::Warn
                           : logLevelFilter_ == 1 ? (int)LogLevel::Info : (int)LogLevel::Trace;
-        // ONLY THE ROWS ON SCREEN ARE SUBMITTED. Up to kMaxLogLines (4000) lines used to be styled
-        // and drawn every frame, filter or no filter, all under logMutex_ -- which every logging
-        // thread queues on. The filter is applied first, to a list of indices (a level compare per
-        // line, nothing to cache or invalidate), and ImGuiListClipper draws just the visible slice
-        // of that list, so the lock is now held for a few dozen rows, not four thousand.
-        // The clipper needs ONE row height, so a line holding a newline (a multi-line shader error,
-        // say) sends the whole list down the old draw-everything path instead: it is exact for any
-        // height, and only costs what it always did while such a line is still in the buffer.
+        // Only visible rows submitted (ImGuiListClipper); multiline lines fall back to all rows.
         std::vector<u32> shown;
         shown.reserve(logLines_.size());
         bool multiLine = false;
@@ -3140,8 +2706,7 @@ void SandboxApp::drawOutputLog() {
         if (multiLine) {
             for (const u32 i : shown) drawLogLine(logLines_[i].level, logLines_[i].text.c_str());
         } else {
-            // The FLOOR of the line height with spacing: what ItemSize advances a text row by (it
-            // truncates the cursor to whole pixels), so clipper and rows agree at any DPI scale.
+            // Floor of line height with spacing (for DPI scale agreement).
             ImGuiListClipper clipper;
             clipper.Begin(static_cast<int>(shown.size()),
                           std::floor(ImGui::GetTextLineHeightWithSpacing()));
@@ -3157,22 +2722,13 @@ void SandboxApp::drawOutputLog() {
     ImGui::EndChild();
 }
 
-// Truncates to at most `maxLen` bytes, appending "..." when it had to cut -- used for the ONE-LINE
-// rows in the suggestion popup and the variable browser, both of which show the FULL text in a
-// hover tooltip anyway (see editor::varTooltipText), so nothing here is ever the only copy.
+// Truncates to maxLen, appending "..." -- full text shown in tooltip.
  std::string SandboxApp::elide(const std::string& s, std::size_t maxLen) {
     if (s.size() <= maxLen) return s;
     return s.substr(0, maxLen > 3 ? maxLen - 3 : 0) + "...";
 }
 
-// Live suggestions for `consoleInput_` (WHAT TO BUILD item 2, "discoverability while typing").
-// Reads the buffer as it stood at frame START, i.e. after the input widget's own edits last
-// frame and thus what will be drawn in the box this frame too -- the normal ImGui
-// filter-as-you-type ordering.
-// The word being completed is the LAST whitespace run; a trailing space means it's already
-// finished, nothing partial to suggest. Matches SUBSTRING, not prefix (commandMatchesQuery/
-// varMatchesQuery), so "cone" finds voxi.giCones mid-name and "firefly" can match on DESCRIPTION
-// alone.
+// Live suggestions for consoleInput_: substring match on command/variable names.
 std::vector<SandboxApp::ConsoleSuggestion> SandboxApp::computeConsoleSuggestions() const {
     std::vector<ConsoleSuggestion> out;
     const std::string_view sv(consoleInput_);
@@ -3195,18 +2751,9 @@ std::vector<SandboxApp::ConsoleSuggestion> SandboxApp::computeConsoleSuggestions
             if (out.size() >= 6) break;
         }
     }
-    // Variable names fill the rest of the list (or all of it, past the first word) -- covers
-    // `get <partial>`, `set <partial>`, and simply typing a name with no command at all, which is
-    // the common case for someone who does not yet think of this as a command language.
+    // Variable names fill the rest of the list.
     if (out.size() < 8) {
-        // ---- Shortest match first, not table order ----
-        // Observed: typing "voxi.gi" listed six specialisations (giCones, giSkyOcclusionRays,
-        // giSkyOcclusionTile, giIntensity, giMaxDistance, giUpdateInterval) and pushed voxi.giMode
-        // -- the one most people typing that prefix actually want, since it chooses the GI
-        // estimator -- off the end, reading as if the variable didn't exist.
-        // Shortest-first needs no relevance scoring: within a shared prefix, the shortest name IS
-        // the most general one (giMode over giSkyOcclusionRays, post.tonemap over
-        // post.tonemapWhitePoint). Ties break on name for a stable, table-independent order.
+        // Shortest match first (most general name wins; ties break on name).
         std::vector<const editor::ConsoleVar*> hits;
         for (const editor::ConsoleVar& v : editor::allVars())
             if (editor::varMatchesQuery(v, partial)) hits.push_back(&v);
@@ -3225,20 +2772,14 @@ std::vector<SandboxApp::ConsoleSuggestion> SandboxApp::computeConsoleSuggestions
     return out;
 }
 
-// Overwrites consoleInput_ wholesale and arms the same consoleFocusPending_ latch
-// toggleDrawer(Console) uses, so seeding a line (e.g. a Browse Variables click) both fills the
-// box and returns the caret to it, whichever drawer tab is showing (see drawConsole's comment on
-// ImGuiTabItemFlags_SetSelected for why the latch also steers the tab bar).
+// Seeds input and arms focus latch (toggleDrawer behavior).
 void SandboxApp::seedConsoleInput(const std::string& line) {
     std::strncpy(consoleInput_, line.c_str(), sizeof(consoleInput_) - 1);
     consoleInput_[sizeof(consoleInput_) - 1] = '\0';
     consoleFocusPending_ = true;
 }
 
-// Replaces only the LAST whitespace-delimited word of consoleInput_ with `insertText` + a
-// trailing space -- the suggestion popup's accept action. Unlike seedConsoleInput, it completes
-// the word being TYPED without discarding what precedes it (`set voxi.msaa 4 post.t` -> picking
-// "post.tonemap" keeps "set voxi.msaa 4 ").
+// Completes last word, keeping prefix.
 void SandboxApp::acceptConsoleSuggestion(const std::string& insertText) {
     const std::string cur(consoleInput_);
     const std::size_t lastSpace = cur.find_last_of(" \t");
@@ -3246,13 +2787,7 @@ void SandboxApp::acceptConsoleSuggestion(const std::string& insertText) {
     seedConsoleInput(prefix + insertText + " ");
 }
 
-// Draws one transcript line, split into whitespace runs so a token matching a known variable name
-// gets its OWN hover tooltip (WHAT TO BUILD item 1, "hovering a name anywhere it appears"); a run
-// that matches nothing is still one plain TextUnformatted call, same as before this existed. A
-// line with no dot skips per-token work entirely (every var name is dotted; EditorConsole.hpp's
-// convention), and even then only a dotted token ever reaches findVar. Wrapped in Begin/EndGroup
-// so the caller's IsItemHovered() after the call -- the existing right-click-to-copy-this-line
-// feature -- still means "hovering anywhere on this line", not just the last token.
+// Splits on dots to enable per-token hovers (var names are dotted).
 void SandboxApp::drawConsoleTranscriptLine(LogLevel level, const std::string& text) {
     ImGui::BeginGroup();
     if (text.find('.') == std::string::npos) {
@@ -3296,17 +2831,13 @@ void SandboxApp::drawConsoleTranscriptLine(LogLevel level, const std::string& te
             }
         }
         emit(text.substr(lastEnd));
-        if (!any) ImGui::TextUnformatted("");   // an all-punctuation line; never seen in practice
+        if (!any) ImGui::TextUnformatted("");
         ImGui::PopStyleColor();
     }
     ImGui::EndGroup();
 }
 
-// One row of the Browse Variables tab: name, value, read-only/[live]/[reload] tags, trimmed
-// description (WHAT TO BUILD item 3), plus the full varTooltipText on hover (item 1's "listing"
-// surface). Clicking seeds a
-// ready-to-run `get`/`set` line into the console input, so browsing gets someone to using without
-// retyping the name.
+// Draws variable row: name, value, tags, trimmed description.
 void SandboxApp::drawConsoleVarRow(const editor::ConsoleVar& v) {
     ImGui::PushID(v.name.c_str());
     std::string row = v.name + "  =  " + editor::formatValue(v.read());
@@ -3320,15 +2851,11 @@ void SandboxApp::drawConsoleVarRow(const editor::ConsoleVar& v) {
     ImGui::PopID();
 }
 
-// The REPL: transcript, live suggestions, and the input line. Was the whole of drawConsole()
-// before the console rework split it from drawConsoleBrowserTab() below; unchanged in shape.
+// REPL: transcript, suggestions, input line.
 void SandboxApp::drawConsoleTranscriptTab(Engine& e) {
     if (ImGui::SmallButton("Clear")) consoleLines_.clear();
     ImGui::SameLine();
-    // Copy, because the text can't be selected: drawLogLine's coloured ImGui text offers no drag-
-    // selection, so getting output back out (the whole point of a console) was impossible. A
-    // read-only InputTextMultiline would be selectable but lose the severity colours; a button
-    // keeps both -- `frametime`'s tree is exactly what needs handing to someone else.
+    // Copy, since text can't be selected (colored text loses drag-selection).
     if (ImGui::SmallButton("Copy")) {
         std::string all;
         for (const LogLine& ln : consoleLines_) { all += ln.text; all += char(10); }
@@ -3342,26 +2869,19 @@ void SandboxApp::drawConsoleTranscriptTab(Engine& e) {
     ImGui::Checkbox("Auto-scroll", &consoleAutoScroll_);
     ImGui::Separator();
 
-    // An empty transcript teaches nothing -- WHAT TO BUILD item 4's other half ("an empty console
-    // worth reading"). Re-seeded any time it goes empty, Clear included: `help` below covers the
-    // full grammar, this is only the orientation someone needs before they have typed a first
-    // thing here.
+    // Welcome lines: orientation for first-time users.
     if (consoleLines_.empty())
         for (const std::string& line : editor::consoleWelcomeLines())
             consoleLines_.push_back({LogLevel::Info, line});
 
-    // --drawer console:<seed> (verification-only; see drawerStartSub_'s own comment): pre-fills
-    // the input box ONCE so a screenshot script can capture the live suggestion popup without a
-    // mouse to type with. Consumed before computeConsoleSuggestions() below so the very first
-    // frame already shows suggestions for it, not just the seeded text with an empty popup.
+    // Pre-fills input for screenshot capture (--drawer console:<seed>).
     if (!drawerStartSub_.empty()) {
         std::strncpy(consoleInput_, drawerStartSub_.c_str(), sizeof(consoleInput_) - 1);
         consoleInput_[sizeof(consoleInput_) - 1] = '\0';
         drawerStartSub_.clear();
     }
 
-    // Live suggestions (WHAT TO BUILD item 2) are computed from THIS frame's starting buffer, so
-    // how tall the panel needs to be is known before laying out the transcript above it.
+    // Compute suggestions before layout to know height.
     const std::vector<ConsoleSuggestion> suggestions = computeConsoleSuggestions();
     const f32 inputLineH = ImGui::GetFrameHeightWithSpacing();
     const f32 suggestRowH = ImGui::GetTextLineHeightWithSpacing();
@@ -3373,8 +2893,7 @@ void SandboxApp::drawConsoleTranscriptTab(Engine& e) {
     {
         for (const LogLine& ln : consoleLines_) {
             drawConsoleTranscriptLine(ln.level, ln.text);
-            // ONE line, for when the whole buffer is not what is wanted. Right-click is where a
-            // person looks for this, and it costs nothing when unused.
+            // Right-click to copy single line.
             if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
                 ImGui::SetClipboardText(ln.text.c_str());
         }
@@ -3405,14 +2924,11 @@ void SandboxApp::drawConsoleTranscriptTab(Engine& e) {
         consoleHistory_.emplace_back(consoleInput_);
         consoleHistoryPos_ = -1;
         consoleInput_[0] = '\0';
-        ImGui::SetKeyboardFocusHere(-1);   // keep focus in the input box after Enter
+        ImGui::SetKeyboardFocusHere(-1);
     }
 }
 
-// The Browse Variables tab: a filter box over EVERY entry in editor::allVars(), grouped by prefix
-// (editor::varGroupKey) -- WHAT TO BUILD item 3 in full. `get`/`set`/`vars` still work exactly as
-// they always did (see EditorConsole.hpp's own handleVarsList comment); this is a second way to
-// reach the same table for someone who does not yet know a name to type.
+// Variable browser: filtered by name/description, grouped by prefix.
 void SandboxApp::drawConsoleBrowserTab() {
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputTextWithHint("##consolebrowsefilter", "Filter by name or description (e.g. \"gi\", \"exposure\", \"read-only\")...",
@@ -3437,20 +2953,13 @@ void SandboxApp::drawConsoleBrowserTab() {
     if (shown == 0) ImGui::TextDisabled("No variable's name or description matches '%s'.", consoleBrowseFilter_);
     ImGui::EndChild();
 
-    // The two omissions EditorConsole.hpp's own header comment names (occlusion culling,
-    // virtualized-geometry LOD selection) stay visible here too, not just in `help` -- someone
-    // browsing rather than reading the transcript should not have to find that gap by its absence.
+    // Two variable groups omitted from browsing; see EditorConsole.hpp.
     ImGui::TextDisabled("%zu of %zu variables shown. Click a row to copy a ready-to-run line to the console input.", shown, total);
 }
 
-// The bottom Console drawer: a tab bar over the REPL transcript and the Browse Variables listing.
-// Transcript is FORCED to the front (ImGuiTabItemFlags_SetSelected) exactly on the frame
-// consoleFocusPending_ is set -- by toggleDrawer(Console) opening fresh (backtick, the Window
-// menu, or the toolbar button), or by drawConsoleVarRow/acceptConsoleSuggestion -- so either path
-// lands the caret in the input box on the tab that actually has one.
+// Console drawer tabs: Transcript (forced front on focus) and Browse Variables.
 void SandboxApp::drawConsole(Engine& e) {
-    // Hands this frame's device to EditorConsole.hpp's post.* variable table, which cannot reach
-    // Engine& itself (ConsoleVar::read takes no arguments -- see its own file comment for why).
+    // Device passed to post.* variables (ConsoleVar::read takes no args).
     editor::setConsoleDevice(e.device());
 
     if (ImGui::BeginTabBar("##consoleTabs")) {
@@ -3468,10 +2977,7 @@ void SandboxApp::drawConsole(Engine& e) {
     }
 }
 
-// Splits on whitespace, echoes into consoleLines_, looks the first token up in
-// editor::consoleCatalog() case-insensitively, and dispatches. UNKNOWN COMMAND is the one error
-// the console itself synthesizes. No quoting support (an argument with a space can't be
-// expressed) -- a known limit, unneeded by frametime or get/set/vars.
+// Parses and dispatches commands; no quoting support.
 void SandboxApp::runConsoleLine(Engine& e, const std::string& line) {
     consoleLines_.push_back({LogLevel::Info, "> " + line});
     if (consoleLines_.size() > kMaxConsoleLines) consoleLines_.pop_front();
@@ -3500,24 +3006,21 @@ void SandboxApp::runConsoleLine(Engine& e, const std::string& line) {
     cmd->handler(*this, e, args, print);
 }
 
-// ImGui InputText callback: Up/Down walks consoleHistory_, Tab completes a command name against
-// editor::consoleCatalog(). Same pattern imgui_demo.cpp's own Console example uses.
+// ImGui InputText callback: Up/Down walks history, Tab completes command name.
  int SandboxApp::consoleInputCallback(ImGuiInputTextCallbackData* data) {
     SandboxApp* self = static_cast<SandboxApp*>(data->UserData);
     if (data->EventFlag == ImGuiInputTextFlags_CallbackHistory) {
-        // consoleHistory_ is most-recent-LAST, so `last` is the newest entry and index 0 is the
-        // oldest. Up walks toward older entries (decreasing index), Down toward newer ones
-        // (increasing index) and back out to the blank line once it walks past the newest.
+        // consoleHistory_ is most-recent-last; Up/Down walk older/newer.
         if (self->consoleHistory_.empty()) return 0;
         const int last = static_cast<int>(self->consoleHistory_.size()) - 1;
         int pos = self->consoleHistoryPos_;
         if (data->EventKey == ImGuiKey_UpArrow) {
-            if (pos < 0) pos = last;        // first Up press: jump to the newest entry
+            if (pos < 0) pos = last;
             else if (pos > 0) --pos;
         } else if (data->EventKey == ImGuiKey_DownArrow) {
-            if (pos < 0) return 0;          // already at the blank line; nothing newer to recall
+            if (pos < 0) return 0;
             ++pos;
-            if (pos > last) {               // walked past the newest: back to the blank line
+            if (pos > last) {
                 self->consoleHistoryPos_ = -1;
                 data->DeleteChars(0, data->BufTextLen);
                 return 0;
@@ -3529,12 +3032,12 @@ void SandboxApp::runConsoleLine(Engine& e, const std::string& line) {
         data->DeleteChars(0, data->BufTextLen);
         data->InsertChars(0, self->consoleHistory_[static_cast<size_t>(pos)].c_str());
     } else if (data->EventFlag == ImGuiInputTextFlags_CallbackCompletion) {
-        // Complete the FIRST token only (a command name); args are never completed in v1.
+        // v1 completes command names only, not args.
         const char* bufStart = data->Buf;
         const char* wordEnd = data->Buf + data->CursorPos;
         const char* wordStart = wordEnd;
         while (wordStart > bufStart && !std::isspace(static_cast<unsigned char>(wordStart[-1]))) --wordStart;
-        if (wordStart != bufStart) return 0;   // only completes the command name, not an argument
+        if (wordStart != bufStart) return 0;
         const std::string_view prefix(wordStart, static_cast<size_t>(wordEnd - wordStart));
         std::vector<const editor::ConsoleCommandDesc*> matches;
         for (const editor::ConsoleCommandDesc& c : editor::consoleCatalog())
@@ -3556,7 +3059,7 @@ void SandboxApp::runConsoleLine(Engine& e, const std::string& line) {
     return 0;
 }
 
-// Draws the bottom drawer, sliding the Content Browser or the Output Log up over the viewport.
+// Draws the bottom drawer, sliding Content Browser or Output Log up over viewport.
 void SandboxApp::drawDrawer(Engine& e) {
     const f32 dt = std::fmin(e.time().dt, 0.05f);
     const f32 target = drawer_ == Drawer::None ? 0.0f : 1.0f;
@@ -3569,8 +3072,7 @@ void SandboxApp::drawDrawer(Engine& e) {
     const f32 statusH = 26.0f * dpi_;
     const f32 fullH = (wsize.y - statusH) * drawerFrac_;
     const f32 h = fullH * drawerAnim_;
-    // PUBLISHED FOR THE VIEWPORT HINT, which is anchored to the viewport's own bottom edge and
-    // would otherwise draw straight through an open drawer -- see drawerPixelH_'s declaration.
+    // Published for viewport hint (prevents drawing through drawer).
     drawerPixelH_ = h;
 
     ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH - h));
@@ -3580,7 +3082,7 @@ void SandboxApp::drawDrawer(Engine& e) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(0.0f, 0.0f));
     ImGui::Begin("##drawer", nullptr, kDrawerFlags);
 
-    // The top edge is a resize grip, claimed before anything else is submitted.
+    // Top edge is a resize grip, claimed before anything else is submitted.
     const f32 gripH = 5.0f * dpi_;
     ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
     ImGui::InvisibleButton("##drawergrip", ImVec2(std::fmax(wsize.x, 1.0f), gripH));
@@ -3619,15 +3121,11 @@ void SandboxApp::drawDrawer(Engine& e) {
 void SandboxApp::toggleDrawer(Drawer d) {
     drawer_ = (drawer_ == d) ? Drawer::None : d;
     if (drawer_ != Drawer::None) drawerRaise_ = true;
-    // Arms the input line's SetKeyboardFocusHere() for the NEXT drawConsole call. Gated on this
-    // flag rather than ImGui::IsWindowAppearing(), since the ##drawer window doesn't newly "appear"
-    // switching FROM Content/Log TO Console -- the flag targets "just chose Console specifically".
+    // Arms console focus latch (window doesn't 'appear' when switching tabs).
     if (drawer_ == Drawer::Console) consoleFocusPending_ = true;
 }
 
-// Maps a notification's severity onto the palette the Output Log/Console already share --
-// reused, not re-chosen, since two copies of these colours drifting apart (an error that's one
-// red in the log, another in a toast) is itself the bug logLineStyle exists to avoid.
+// Reuses Output Log/Console palette (avoid drift).
  ImVec4 SandboxApp::notifyColour(editor::NotifySeverity s) {
     switch (s) {
         case editor::NotifySeverity::Success:  return ImVec4(0.55f, 0.85f, 0.55f, 1.0f);
@@ -3638,11 +3136,9 @@ void SandboxApp::toggleDrawer(Drawer d) {
     }
 }
 
-// Draws the notification stack, bottom-right, newest nearest the corner and growing upward.
+// Draws the notification stack, bottom-right, newest nearest the corner.
 void SandboxApp::drawNotifications() {
-    // NOTHING DURING A CAPTURE RUN. --frames drives the render gates and the screenshot tooling,
-    // which compare exact pixel values; a toast in shot changes what was measured. Every
-    // autosave sibling guards on the same condition for the same class of reason.
+    // --frames (measurement mode): skip toasts.
     if (maxFrames_ != 0 && !notifyTestLift_) return;
 
     editor::NotificationQueue& q = editor::notifications();
@@ -3651,18 +3147,13 @@ void SandboxApp::drawNotifications() {
     q.tick(ImGui::GetTime(), shown, hidden);
     if (shown.empty() && hidden == 0) return;
 
-    // Own windows, not the Level's draw list: drawGraphPrintOverlay writes into the Level
-    // window's list before ImGui::Image appends the viewport texture, so it gets painted then
-    // covered -- a separate Begin() dodges submission order. GetForegroundDrawList() would sit on
-    // top too, but has no hit-testing, and these carry real buttons.
+    // Own windows (separate Begin) for correct z-order and hit-testing.
     const ImGuiViewport* mv = ImGui::GetMainViewport();
     const f32 pad     = 8.0f * dpi_;
     const f32 statusH = 26.0f * dpi_;
     const f32 width   = 340.0f * dpi_;
     const f32 anchorX = mv->WorkPos.x + mv->WorkSize.x - pad;
-    // Above the status bar AND above the drawer. drawerPixelH_ is this frame's value because
-    // this runs after drawDrawer -- ##vphint reads the same member one call earlier and is
-    // therefore a frame stale while the drawer slides.
+    // Above status bar and drawer; drawerPixelH_ is current frame.
     f32 y = mv->WorkPos.y + mv->WorkSize.y - statusH - drawerPixelH_ - pad;
 
     const ImGuiWindowFlags base =
@@ -3671,9 +3162,7 @@ void SandboxApp::drawNotifications() {
         ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNavFocus;
 
-    // NEWEST FIRST, so the toast being read is placed exactly: with a bottom-right pivot its
-    // position needs no knowledge of its own height. Only the older ones above it need the
-    // newer heights, which are remembered from last frame.
+    // Newest first (bottom-right pivot): older ones need stored heights.
     static std::unordered_map<u64, f32> heights;
     for (usize i = shown.size(); i-- > 0;) {
         const editor::Notification& n = shown[i];
@@ -3681,10 +3170,7 @@ void SandboxApp::drawNotifications() {
 
         ImGui::SetNextWindowPos(ImVec2(anchorX, y), ImGuiCond_Always, ImVec2(1.0f, 1.0f));
         ImGui::SetNextWindowSize(ImVec2(width, 0.0f), ImGuiCond_Always);
-        // OPAQUE, not mostly-opaque: the viewport bars sit at 0.62 (translucency reads as depth
-        // there), but these land on the Details panel, and 0.92 measured "Transform", "Rotation"
-        // and "Base Color" legible straight through an error message -- a notification competing
-        // with the text beneath it is one you misread.
+        // Opaque (legibility over Details panel).
         ImGui::SetNextWindowBgAlpha(1.0f);
 
         char id[32];
@@ -3703,10 +3189,7 @@ void SandboxApp::drawNotifications() {
                 ImGui::PopTextWrapPos();
             }
             if (n.hasProgress) {
-                // Negative progress is the indeterminate sentinel (ImGui animates the bar for it,
-                // the "working, no idea how long" case a bake's first step is in). Empty overlay
-                // in both cases: ImGui's default "60%" text is taller than this bar height and
-                // clips through it, and is redundant anyway since the title already says "in 4s".
+                // Negative progress = indeterminate; no text overlay.
                 ImGui::ProgressBar(n.progress, ImVec2(-FLT_MIN, 6.0f * dpi_), "");
                 if (!n.progressNote.empty()) ImGui::TextDisabled("%s", n.progressNote.c_str());
             }
@@ -3733,15 +3216,13 @@ void SandboxApp::drawNotifications() {
         ImGui::End();
     }
 
-    // ACTED ON HERE, not inside the button, so an action that closes or re-orders the stack
-    // cannot do it while the stack is mid-iteration.
+    // Drain activations after iteration (prevent concurrent modification).
     u64 actId = 0;
     editor::NotifyAction act = editor::NotifyAction::None;
     while (q.drainActivation(actId, act)) {
         switch (act) {
             case editor::NotifyAction::ShowOutputLog:
-                // OPENED, not toggled: the user asked to see the log, and toggleDrawer would
-                // close it if the Output Log already happened to be the open drawer.
+                // Open (not toggle) to avoid closing if already open.
                 drawer_ = Drawer::Log;
                 drawerRaise_ = true;
                 break;
@@ -3751,8 +3232,7 @@ void SandboxApp::drawNotifications() {
             default: break;
         }
     }
-    // Forget heights for notifications that are gone, so the map cannot grow for the life of the
-    // session on an editor that raises thousands of them.
+    // Forget heights for notifications that are gone (prevent unbounded growth).
     if (heights.size() > editor::NotificationQueue::kMaxLive * 4) heights.clear();
 }
 

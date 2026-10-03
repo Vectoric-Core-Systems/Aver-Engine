@@ -1,26 +1,5 @@
 // neurafi.hlsl -- procedural frame interpolation, milestone 1 (docs/rendering/NEURAFI.md Â§3).
-//
-// One frame half-way between the previous real frame (P = N-1) and the one just rendered (N), at scene
-// resolution, in HDR. Three passes, all compute, all full resolution:
-//
-//   CSFgGather  G1 gather + G2 confidence + G3 blend. Per output pixel x, a fixed-point SEARCH into each
-//               real frame along that frame's OWN motion (Yang et al. 2011, bidirectional scene
-//               reprojection): no motion field is built for the in-between time and nothing is
-//               scattered. Each frame's candidate gets ONE continuous confidence from real-frame
-//               consistency; the two are blended by those confidences. A pixel neither frame can vouch
-//               for is a HOLE: it is written with frame N's own colour at x and confidence 0.
-//   CSFgFill    G4, run twice: holes take the confidence-weighted average of their 3x3 neighbours,
-//               seeded by that frame-N colour. Full resolution -- no pyramid, no mip chain, no
-//               reduce-then-expand (Georgia Tech US 9,094,660 claims that structure), and neighbours
-//               are weighted by CONFIDENCE ONLY, never chosen by depth similarity to the hole (the
-//               amended claim of NVIDIA US 2025/0106355). Colour space only; motion is never propagated.
-//
-// Coordinates: continuous pixel positions with texel CENTRES at .5 (pixel q's centre is q + 0.5).
-// Motion follows IDevice::gBufferVelocityTexture: texels per frame, destination minus source, so the
-// surface at x in frame F was at x - v_F(x) in frame F-1. Over two frames the velocity is assumed
-// constant: P's own motion (from N-2 to N-1) stands in for its motion on to N.
-//
-// Alpha of every intermediate image carries the blend confidence; the last fill pass writes 1.
+// Three compute passes, full resolution: gather candidates, fill holes, compute motion for training.
 
 #define FG_GROUP 8
 
@@ -38,28 +17,17 @@ cbuffer FgConstants : register(b1)
     uint  gPad0, gPad1;
 };
 
-// The acceleration image's size. gBlock grows with the scene (2, 4, 8...) so the network's record
-// count stays bounded: MEASURED at 3532x1987 with a fixed 2x2 block, 1.75M records cost 3.5 ms.
+// The acceleration image's size. gBlock grows with the scene (2, 4, 8...) so the network's record count stays bounded.
 uint2 accelSize() { return (gSize + gBlock - 1u) / gBlock; }
 
 SamplerState gLinear : register(s0);
 
-// The passes reuse registers, so each is compiled with only its own section: FG_GATHER, FG_FILL or
-// FG_TRAJ (NeuraFI.cpp passes the define with the entry point).
+// Each pass compiled with only its own section: FG_GATHER, FG_FILL or FG_TRAJ.
 //
-// TRAJECTORY (NEURAFI.md Â§3.5). The gather can follow a QUADRATIC path instead of a straight
-// line. Through three positions of a surface (frames N-2, N-1, N), the in-between point is
-//     q = p - 0.5 v - 0.125 a,   a = v - v'
-// where v is its motion into N (frame N's own vector at p) and v' its motion into N-1 (frame N-1's
-// vector, fetched BACKWARD at p - v with a depth check; a = 0 where that check fails -- never inferred
-// from neighbours). `a` is one per texel of a low-resolution acceleration image (one texel per gBlock x gBlock pixels): the analytic
-// v - v', plus (neural) a small network's CORRECTION to it, predicted from the same real-frame motion.
-// Predicting the correction rather than the whole acceleration means that where the analytic answer
-// is already exact (steady acceleration) the network only has to learn "add nothing" -- measured: a
-// network predicting the whole of `a` could not match an analytic error of 0.003-0.018 px on slow wide
-// pans. The network never outputs colour, a weight, a mask or a confidence -- only motion -- and
-// nothing it outputs reaches the blend except through where the candidates are gathered. One
-// trajectory per pixel: there is never a linear and a quadratic candidate to choose between.
+// TRAJECTORY (NEURAFI.md Â§3.5). The gather follows a QUADRATIC path: q = p - 0.5 v - 0.125 a,
+// where v is motion into N and v' its motion into N-1 (fetched backward with a depth check; a = 0 if check fails).
+// `a` is analytic v - v' plus (neural) a small network's CORRECTION, one per gBlock x gBlock pixels.
+// One trajectory per pixel: never a choice between linear and quadratic.
 
 // ---------------------------------------------------------------- shared
 
@@ -69,9 +37,7 @@ static const float kDepthFalloff  = 0.08;   // ...and the extra difference over 
 bool inside(float2 p) { return all(p >= 0.0) && all(p < float2(gSize)); }
 int3 texel(float2 p)  { return int3(clamp(int2(floor(p)), int2(0, 0), int2(gSize) - 1), 0); }
 
-// Relative depth agreement between a surface at depth zA and what the other real frame stored where
-// that surface should be: 1 inside the tolerance, fading to 0. Real depths only -- never a depth
-// interpolated to the in-between time.
+// Relative depth agreement between a surface at depth zA and what the other real frame stored where that surface should be: 1 inside the tolerance, fading to 0.
 float depthAgree(float zA, float zB)
 {
     const float rel = abs(zA - zB) / max(min(zA, zB), 1e-3);
@@ -87,14 +53,14 @@ Texture2D<float>  gZN   : register(t2);
 Texture2D<float4> gColP : register(t3);
 Texture2D<float2> gVelP : register(t4);
 Texture2D<float>  gZP   : register(t5);
-Texture2D<float2> gAccel : register(t6);   // one texel per gBlock x gBlock pixels, on frame N's grid; read when gTraj != 0
-Texture2D<float2> gAccelNet : register(t7);   // the network's share of gAccel (same grid); read by visualisation 4
+Texture2D<float2> gAccel : register(t6);   // one texel per gBlock x gBlock pixels, on frame N's grid
+Texture2D<float2> gAccelNet : register(t7);   // the network's share of gAccel
 RWTexture2D<float4> gOut : register(u0);
-RWTexture2D<float4> gVizOut : register(u1);   // display-ready visualisation colour (NeuraFI::Visualisation)
+RWTexture2D<float4> gVizOut : register(u1);   // display-ready visualisation colour
 
 static const int   kSearchSteps   = 4;
 static const float kHoleWeight    = 0.08;   // below this summed confidence the pixel is a hole
-static const float kResidualScale = 2.0;    // exp(-k r^2), r in pixels: half a pixel keeps ~0.6
+static const float kResidualScale = 2.0;    // exp(-k r^2), r in pixels
 
 float2 velN(float2 p) { return gVelN.Load(texel(p)); }
 float2 velP(float2 p) { return gVelP.Load(texel(p)); }
@@ -106,8 +72,7 @@ float2 accel(float2 p)
     return gAccel.Load(int3(q, 0));
 }
 
-// The velocity of largest magnitude in the 3x3 around x: a second search start, so a thin fast object
-// whose own pixels are not under x at the in-between time can still be found.
+// The velocity of largest magnitude in the 3x3 around x: a second search start for fast-moving thin objects.
 float2 dominantVel(Texture2D<float2> vel, float2 x)
 {
     float2 best = 0.0;
@@ -123,7 +88,7 @@ float2 dominantVel(Texture2D<float2> vel, float2 x)
 
 struct Candidate { float3 color; float conf; };
 
-// From N: solve p - 0.5 v_N(p) - 0.125 a(p) = x.  Checked against P: the surface was at p - v_N(p) in P.
+// From N: solve p - 0.5 v_N(p) - 0.125 a(p) = x. Checked against P: the surface was at p - v_N(p) in P.
 Candidate fromN(float2 x, float2 start)
 {
     float2 p = start;
@@ -142,9 +107,7 @@ Candidate fromN(float2 x, float2 start)
     return c;
 }
 
-// From P: solve r + 0.5 v_P(r) + 0.375 a = x, a fetched at the surface's place in N (r + v_P(r): the
-// acceleration lives on N's grid). With a = 0 that is constant velocity.  Checked against N: the
-// surface should be at r + v_P(r) + a in N.
+// From P: solve r + 0.5 v_P(r) + 0.375 a = x, where a is fetched on N's grid. Checked against N.
 Candidate fromP(float2 x, float2 start)
 {
     float2 q = start;
@@ -168,11 +131,9 @@ Candidate fromP(float2 x, float2 start)
 
 float luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
-// ---- VISUALISATION (NeuraFI::Visualisation; drawn over the viewport by the editor) ----
-// Display-ready colours: the editor blends this image over the finished frame, after the tonemap, so
-// nothing here goes through exposure. Written by the gather because the gather is the only pass that
-// knows each pixel's two candidates. Purely an output: nothing reads it back.
-static const float3 kVizHole = float3(1.0, 0.0, 1.0);   // magenta: neither real frame could vouch for it
+// ---- VISUALISATION ----
+// Display-ready colours: blended over the finished frame after tonemap by the editor.
+static const float3 kVizHole = float3(1.0, 0.0, 1.0);   // magenta
 
 // Blue (0) -> cyan -> green -> yellow -> red (1).
 float3 vizHeat(float t)
@@ -187,10 +148,7 @@ float2 accelNet(float2 p)
     return gAccelNet.Load(int3(q, 0));
 }
 
-// 1 sources: orange from the newer frame (N), blue from the older (N-1), dimmer where less sure.
-// 2 confidence: the blend's confidence as heat. 3 path bend: how far the quadratic/learned path moves
-// the in-between point off the straight line (0.125 |a| px). 4 network share: how much of that bend the
-// network added (0.125 |correction| px; zero while the quadratic stands in).
+// Visualisation modes: 1=source blend (orange/blue), 2=confidence, 3=path bend (quadratic+learned), 4=network share.
 float4 vizColour(float2 x, float wN, float wP, float conf, bool hole)
 {
     if (gViz == 1u) {
@@ -212,20 +170,17 @@ void CSFgGather(uint3 id : SV_DispatchThreadID)
     if (any(id.xy >= gSize)) return;
     const float2 x = float2(id.xy) + 0.5;
 
-    // Two starts per frame; each frame keeps its more confident search result. This picks among the
-    // search results within ONE real frame -- it never selects among motion vectors landing at an
-    // in-between location (there are none: nothing is splatted).
+    // Two starts per frame; keep the more confident result within each frame.
     Candidate n0 = fromN(x, x);
     Candidate n1 = fromN(x, x + 0.5 * dominantVel(gVelN, x));
     Candidate n  = n0;
-    if (n1.conf > n0.conf) n = n1;   // (HLSL's ?: does not take structs)
+    if (n1.conf > n0.conf) n = n1;
     Candidate p0 = fromP(x, x);
     Candidate p1 = fromP(x, x - 0.5 * dominantVel(gVelP, x));
     Candidate p  = p0;
     if (p1.conf > p0.conf) p = p1;
 
-    // Colour agreement, low weight: a disagreement is as often a lighting change as an error, so it
-    // only scales the TOTAL confidence (how sure the pixel is), never the split between the frames.
+    // Colour agreement scales total confidence only, never the frame split: lighting changes are common.
     const float ln = luma(n.color), lp = luma(p.color);
     const float colourAgree = lerp(1.0, saturate(1.0 - abs(ln - lp) / (max(ln, lp) + 0.05)), 0.25);
 
@@ -262,7 +217,7 @@ void CSFgFill(uint3 id : SV_DispatchThreadID)
         gFillDst[id.xy] = float4(c.rgb, gLast != 0 ? 1.0 : c.a);
         return;
     }
-    // Normalised convolution over the 3x3: each neighbour weighted by its confidence alone.
+    // Normalised convolution over the 3x3: each neighbour weighted by its confidence.
     float3 acc = c.rgb * kSeedWeight;
     float  wsum = kSeedWeight;
     float  aMax = 0.0;
@@ -275,35 +230,30 @@ void CSFgFill(uint3 id : SV_DispatchThreadID)
         wsum += nb.a;
         aMax  = max(aMax, nb.a);
     }
-    // A filled pixel passes half its best neighbour's confidence on, so a second pass reaches one
-    // pixel further into a wider hole.
+    // A filled pixel passes half its best neighbour's confidence on, so a second pass reaches one pixel further.
     gFillDst[id.xy] = float4(acc / wsum, gLast != 0 ? 1.0 : 0.5 * aMax);
 }
 
 #endif  // FG_FILL
 
 // ---------------------------------------------------------------- trajectory
-// Four passes on one binding layout:
-//   CSFgFeatures      per accel texel: the network's input record for each pixel of the acceleration image
-//   CSFgAccel         per accel texel: the acceleration image, analytic or from the network's output
-//   CSFgClearCount    one thread: zeroes the training record count
-//   CSFgTrainRecords  gSamples threads: self-supervised training records (below)
+// Four passes: CSFgFeatures (per accel texel: network input), CSFgAccel (acceleration image),
+// CSFgClearCount (zero training record count), CSFgTrainRecords (self-supervised training).
 //
-// THE RECORD (14 floats), identical in meaning for inference and training so one network serves both:
+// THE RECORD (14 floats): layout identical for inference and training so one network serves both:
 //   [0,1]  v / s       motion over the span ending at the pixel's frame
 //   [2,3]  v' / s      the same surface's motion over the span before (backward fetch)
 //   [4]    1 if the backward fetch passed its depth check, else 0 (and v' = v)
 //   [5]    log2(s) / 8
 //   [6-13] v / s at the 4 neighbours 2 pixels away (+x, -x, +y, -y)
-// with s = max(|v|, |v'|, 0.5) pixels: scale-free, so a network trained on two-frame spans applies to
-// one-frame spans. The output is the correction to the analytic acceleration, (a - (v - v')) / s.
+// with s = max(|v|, |v'|, 0.5) pixels: scale-free, so a network trained on two-frame spans applies to one-frame.
+// The output is the correction to the analytic acceleration, (a - (v - v')) / s.
 //
-// SELF-SUPERVISED TRAINING from three ordinary real frames: interpolate the TWO-frame span N-2 -> N and
-// take frame N-1 as the answer. For a pixel p of N: v = (N-2 -> N) = v_N(p) + v_{N-1}(p - v_N(p)),
-// v' = (N-4 -> N-2) at the surface's N-2 position, and the truth is where it was in N-1, p - v_N(p):
-//     p - 0.5 v - 0.125 a = p - v_N   =>   a = 8 v_N - 4 v,   target = (a - (v - v')) / s
-// Purely geometric (engine motion vectors): no colour reaches the loss, so the network learns motion,
-// never shading. A record is written only where every backward fetch passes its depth check.
+// SELF-SUPERVISED TRAINING from three ordinary real frames: interpolate the span N-2 -> N using frame N-1 as ground truth.
+// For a pixel p of N: v = (N-2 -> N), v' = (N-4 -> N-2) at the surface's N-2 position, target = a / s where a = 8 v_N - 4 v.
+// Purely geometric (engine motion vectors): no colour reaches the loss, so the network learns motion only.
+// Records written only where every backward fetch passes its depth check.
+
 #if defined(FG_TRAJ)
 
 Texture2D<float2> gTVelN  : register(t0);   // frame N (the one just rendered)
@@ -328,7 +278,7 @@ RWTexture2D<float2>       gAccelNetOut : register(u6);  // the network's share o
 float2 tvel(Texture2D<float2> t, float2 p) { return t.Load(texel(p)); }
 float  tz(Texture2D<float> t, float2 p)    { return t.Load(texel(p)); }
 
-// Inference: frame N's motion at p, and N-1's for the same surface fetched backward with a depth check.
+// Frame N's motion at p, and N-1's for the same surface fetched backward with a depth check.
 void inferMotion(float2 p, out float2 v, out float2 vPrev, out bool valid)
 {
     v = tvel(gTVelN, p);
@@ -386,8 +336,7 @@ void CSFgAccel(uint3 id : SV_DispatchThreadID)
             corr = float2(gNetOut[o], gNetOut[o + 1]) * s;   // the network's correction
             a += corr;
         }
-        // A bound on what one frame can bend a path by: a wild prediction must not throw the search
-        // across the screen.
+        // A bound on what one frame can bend a path by: a wild prediction must not throw the search across the screen.
         const float len = length(a);
         if (!(len <= 2.0 * s)) a = len > 0.0 && len == len ? a * (2.0 * s / len) : 0.0;
     }
@@ -398,12 +347,11 @@ void CSFgAccel(uint3 id : SV_DispatchThreadID)
 [numthreads(1, 1, 1)]
 void CSFgClearCount(uint3 id : SV_DispatchThreadID) { gTrainCount[0] = 0u; gTrainCount[1] = 0u; }
 
-static const float kMaxCorrection = 0.5;   // CSFgTrainRecords: |correction| / s above this is a seam
+static const float kMaxCorrection = 0.5;   // |correction| / s above this is a motion-vector seam
 
 uint hashU(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
 
-// One surface followed back three frames; false where any step leaves the screen or fails its depth
-// check. Gives frame N's own motion, the two-frame span N-2 -> N, and the span N-4 -> N-2 before it.
+// One surface followed back three frames; false where any step leaves the screen or fails its depth check.
 bool twoFrameSpans(float2 p, out float2 vN, out float2 span, out float2 spanPrev)
 {
     vN = tvel(gTVelN, p);
@@ -437,11 +385,7 @@ void CSFgTrainRecords(uint3 id : SV_DispatchThreadID)
     }
     const float s = scaleOf(span, spanPrev);
     const float2 target = ((8.0 * vN - 4.0 * span) - (span - spanPrev)) / s;
-    // OUTLIERS ARE NOT MOTION. A correction above half the span's own motion is not something a camera
-    // or an object does between two frames; it is a motion-vector seam (an edge whose neighbours belong
-    // to different surfaces) that slipped past the depth checks. MEASURED: kept, a handful of them
-    // dragged the squared-error fit until the network did worse than predicting nothing at all.
-    // Counted in gTrainCount[1] so the rejection rate is visible.
+    // Corrections above half the span's motion are motion-vector seams, not camera/object motion, and are rejected.
     if (!(length(target) <= kMaxCorrection)) { InterlockedAdd(gTrainCount[1], 1u); return; }
     uint slot;
     InterlockedAdd(gTrainCount[0], 1u, slot);

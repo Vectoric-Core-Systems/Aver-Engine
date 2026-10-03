@@ -11,12 +11,8 @@
 #include <limits>
 #include <system_error>
 
-// UNCONDITIONAL, deliberately. AssetType/assetTypeFromPath live in modules/assets -- a leaf with no
-// module switch at all, always linked through Aver.Formats -- and they have TWO callers here under
-// DIFFERENT guards: loadProjectMeshes(), which is scene-guarded, and loadProjectParticleEffects(),
-// which is particles-guarded. Scoping the include to either guard leaves the other branch without
-// the type. (A PBR-guarded loadProjectMaterials() was a third caller until it was removed as dead
-// code; that removal changes nothing here, because the two remaining guards still differ.)
+// Always included: AssetType/assetTypeFromPath are used by both loadProjectMeshes (scene-guarded)
+// and loadProjectParticleEffects (particles-guarded); scoping to either guard breaks the other.
 #include "aver/assets/AssetId.hpp"
 
 #if AVER_MODULE_PBR
@@ -34,9 +30,7 @@
 #  if AVER_MODULE_TRIFACTOR
 #    include "aver/trifactor/ClusterAdapt.hpp"
 #  endif
-// collisionMeshFor's simplification step. Angle-bracket, no directory prefix: the vendored target's
-// own CMakeLists.txt (third_party/meshoptimizer) exposes its include dir that way, and
-// modules/trifactor/src/ClusterBuilder.cpp already includes it identically.
+// Vendored meshoptimizer include, exposed by third_party/meshoptimizer CMakeLists.txt.
 #  include <meshoptimizer.h>
 #endif
 
@@ -60,30 +54,20 @@ void GameContent::adopt(const fmt::ProjectDesc& project) {
         return;
     }
 
-    // The error_code overload of increment, so an unreadable subdirectory ends the walk instead of
-    // throwing out of it.
+    // Use error_code overload to stop on unreadable subdirectory, not throw.
     for (std::filesystem::recursive_directory_iterator it(content, ec), end; it != end; it.increment(ec)) {
         if (ec) break;
         if (!it->is_regular_file(ec)) continue;
         std::string rel = std::filesystem::relative(it->path(), content, ec).string();
         if (ec || rel.empty()) continue;
-        // FROZEN: the id hashes the forward-slash spelling, matching C# Assets.ObjectIdOf. This is
-        // the property that makes packaging nearly free -- stage-game.ps1 copies Content/ under a
-        // new root and every id in every .ocworld and .ocmat is unchanged, because the ids were
-        // never a function of where the project lives.
+        // IDs hash forward-slash spelling, matching C# Assets.ObjectIdOf, so packaging is nearly free.
         for (char& c : rel) if (c == '\\') c = '/';
         contentIndex_[fnv1a64(std::string_view(rel))] = it->path().string();
     }
     AVER_INFO("[Content] indexed {} asset(s) under {}", contentIndex_.size(), content);
 
 #if AVER_MODULE_SCENE
-    // The anim system does its own file discovery through this and caches by id, so a re-index has
-    // to drop what it cached or a moved asset keeps resolving to its old path. Safe because adopt()
-    // is a project-adoption call and never a per-frame one.
-    //
-    // Guarded on SCENE rather than PBR, which is where SandboxApp has it: the animation system has
-    // nothing to do with physically based rendering, and the original guard is the cross-
-    // contamination this lift exists to stop copying forward.
+    // Animation system caches by id; re-index must clear its cache.
     anim::animSystem().clear();
     anim::animSystem().setResolver(&GameContent::resolveAnimAsset, this);
 #endif
@@ -98,9 +82,7 @@ std::vector<std::string> GameContent::pathsWithExtension(std::string_view ext) c
     std::vector<std::string> out;
     for (const auto& [id, path] : contentIndex_) {
         if (path.size() < ext.size()) continue;
-        // Case-insensitive suffix compare, ASCII only -- matches isOcproject's own reasoning in
-        // GameApp.cpp (a project's asset extensions are all plain ASCII, and Windows paths are
-        // case-insensitive on disk but not in a plain string compare).
+        // Case-insensitive suffix compare (Windows paths are case-insensitive but string compare is not).
         bool match = true;
         for (usize i = 0; i < ext.size(); ++i) {
             char a = path[path.size() - ext.size() + i];
@@ -111,10 +93,7 @@ std::vector<std::string> GameContent::pathsWithExtension(std::string_view ext) c
         }
         if (match) out.push_back(path);
     }
-    // contentIndex_ is an unordered_map: iteration order is not the walk order, and is not even
-    // stable between two runs of the SAME binary over the SAME content. A caller that assigns
-    // anything by position (GameApp's synthetic entity ids, notably) would otherwise get a
-    // reproducibility gap that looks like a bug in whatever the ids are used for.
+    // Sort for reproducible order (unordered_map iteration is not stable).
     std::sort(out.begin(), out.end());
     return out;
 }
@@ -128,26 +107,13 @@ std::string GameContent::resolveAnimAsset(u64 id, void* user) {
 
 namespace {
 
-// Appends an axis-aligned box of INDEPENDENT per-axis half-extents (hx,hy,hz), yawed by yawDeg around
-// Z and placed at (cx,cy,cz). GameMath.hpp's appendBox is fixed to a symmetric cube (one h for all
-// three axes, no rotation) because that is all a placed-in-a-level box ever needed; the drone's arms
-// are long and thin and pointed at the four diagonals, and its body/skids/struts are axis-aligned
-// boxes of yet other aspect ratios, so one generalised generator replaces four bespoke ones. The face
-// table below is copied verbatim from appendBox -- same corners, same winding, same per-face normals
-// -- with the per-axis extents and the yaw rotation as the only additions. yawDeg=0 makes this an
-// axis-aligned anisotropic box; hx=hy=hz with yawDeg=0 reproduces appendBox exactly (true by
-// construction, same face table and corner order -- not separately asserted here).
-//
-// A SECOND COPY of sandbox/src/SandboxApp.cpp's own appendBoxYaw (read, not shared -- that file
-// belongs to another agent), the same trade GameMath.hpp already makes for appendBox/appendSphere:
-// one generator, needed by both the editor and the runtime, copied instead of promoted to a shared
-// header because that header is outside this change's file ownership.
+// Axis-aligned box with independent per-axis half-extents, yawed around Z, placed at (cx,cy,cz).
+// Face table and winding copied from appendBox.
 void appendBoxYaw(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
                    f32 cx, f32 cy, f32 cz, f32 hx, f32 hy, f32 hz, f32 yawDeg) {
     const f32 rad = yawDeg * kDegToRad;
     const f32 cs = std::cos(rad), sn = std::sin(rad);
-    // Rotates a LOCAL (lx,ly,lz) around Z. A pure rotation has determinant +1, so it changes nothing
-    // about winding or handedness -- every face below stays CCW-outward exactly as appendBox left it.
+    // Rotation around Z preserves winding; every face stays CCW-outward.
     auto rotZ = [cs, sn](f32 lx, f32 ly, f32 lz, f32& ox, f32& oy, f32& oz) {
         ox = lx * cs - ly * sn; oy = lx * sn + ly * cs; oz = lz;
     };
@@ -170,12 +136,8 @@ void appendBoxYaw(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
     }
 }
 
-// Appends a capped cylinder standing along +Z, centred at (cx,cy,cz) -- the drone's motor pods and
-// rotor discs. Flat-shaded per face like appendBox/appendBoxYaw, not smooth-shaded like appendSphere:
-// at the segment counts a rotor pod uses (8-10) a smoothed normal would look indistinguishable from a
-// faceted one, so this reuses the "duplicate vertices, exact face normal" convention every other
-// hand-built primitive already follows rather than adding a second shading convention. A second copy
-// of SandboxApp.cpp's own appendCylinderZ, for the same file-ownership reason as appendBoxYaw above.
+// Capped cylinder standing along +Z, centred at (cx,cy,cz), flat-shaded per face like appendBox.
+// A second copy of SandboxApp.cpp's own appendCylinderZ for file-ownership reasons.
 void appendCylinderZ(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
                       f32 cx, f32 cy, f32 cz, f32 radius, f32 halfHeight, u32 segments) {
     for (u32 s = 0; s < segments; ++s) {
@@ -183,9 +145,7 @@ void appendCylinderZ(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
         const f32 a1 = kTwoPi * static_cast<f32>(s + 1) / static_cast<f32>(segments);
         const f32 x0 = std::cos(a0), y0 = std::sin(a0);
         const f32 x1 = std::cos(a1), y1 = std::sin(a1);
-        // Side quad: both edges get the SAME flat normal -- the averaged (renormalised) radial
-        // direction of the two -- the same "one normal per face" rule appendBox uses, just computed
-        // rather than hand-written because the direction depends on which segment this is.
+        // Side quad: one flat normal per face, computed as the average radial direction.
         f32 nx = x0 + x1, ny = y0 + y1;
         const f32 nl = std::sqrt(nx * nx + ny * ny);
         if (nl > 1e-6f) { nx /= nl; ny /= nl; }
@@ -196,9 +156,7 @@ void appendCylinderZ(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
         v.push_back({cx + x0 * radius, cy + y0 * radius, cz + halfHeight, nx, ny, 0, 0, 1});
         idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2);
         idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
-        // Top (+Z) and bottom (-Z) caps, each a single fan triangle for this segment's wedge -- cheap
-        // at these segment counts (an 8-10 sided cap still reads as round) and it keeps the caps flat-
-        // shaded too, instead of introducing yet another normal convention for just two faces.
+        // Top and bottom caps as fan triangles per segment; flat-shaded.
         const u32 ct = static_cast<u32>(v.size());
         v.push_back({cx, cy, cz + halfHeight, 0, 0, 1, 0.5f, 0.5f});
         v.push_back({cx + x0 * radius, cy + y0 * radius, cz + halfHeight, 0, 0, 1, x0*0.5f+0.5f, y0*0.5f+0.5f});
@@ -212,33 +170,18 @@ void appendCylinderZ(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
     }
 }
 
-// Appends a placeholder quadcopter, built from appendBoxYaw/appendCylinderZ, for the "the drone [has]
-// a box, the drone should be like UE's default drone" complaint against the old drone spawn (a bare
-// unit cube -- see SandboxApp.cpp's setDroneEnabled). 420 triangles: a central body, four arms out to
-// the corners each ending in a motor-pod hub and a rotor disc, and a pair of landing skids on struts.
-//
-// NORMALISED THE SAME WAY THE UNIT CUBE AND UNIT SPHERE ARE: nothing in this mesh goes past 1.0 from
-// the origin, so a PLACEG scale on "Meshes/drone.ocmesh" means the same half-extent-in-centimetres
-// thing it means on the cube. UNLIKE the isotropic cube and sphere, though, this shape is NOT the same
-// size along every axis -- it is a flat quadcopter, not a cube -- so "1.0" is reached only at the four
-// rotor-tip diagonals (kArmROuter + kDiscRadius = 0.80 + 0.20 = 1.00 exactly); the straight per-axis
-// reach is smaller (about 0.7657 along X or Y alone, since a disc centred on a 45-degree line does not
-// project its full radius onto either axis), and the vertical reach is smaller again (about 0.16 up,
-// 0.22 down). Recorded precisely at the registration site (search "droneId" in registerBuiltins,
-// below) rather than assumed to be the cube/sphere's -1..1 box.
-//
-// MATCHED, vertex-for-vertex convention (winding, normal style, units), by SandboxApp.cpp's own
-// appendDrone. See appendBoxYaw's header comment, above, for why this is a copy and not a shared call.
+// Placeholder quadcopter: body, four arms with motor pods and rotors, landing skids with struts.
+// Normalised like the unit cube/sphere: nothing goes past 1.0 from origin. Per-axis reach varies.
+// Matched vertex-for-vertex with SandboxApp.cpp's appendDrone.
 void appendDrone(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx) {
-    // Central body: a squarish box, flatter than it is wide -- real quadcopter chassis proportions.
+    // Central body: squarish box.
     constexpr f32 kBodyHX = 0.26f, kBodyHY = 0.26f, kBodyHZ = 0.15f;
     appendBoxYaw(v, idx, 0, 0, 0, kBodyHX, kBodyHY, kBodyHZ, 0.0f);
 
-    // Four arms, out to the corners (45/135/225/315 degrees), each ending in a motor pod and a rotor
-    // disc -- see this function's own header comment for why kArmROuter + kDiscRadius is exactly 1.0.
+    // Four arms out to corners, ending in motor pods and rotor discs.
     constexpr f32 kArmAngleDeg[4] = {45.0f, 135.0f, 225.0f, 315.0f};
-    constexpr f32 kArmRInner = 0.34f;  // just inside the body's own corner (0.26*sqrt2 = 0.368) -- no seam
-    constexpr f32 kArmROuter = 0.80f;  // hub distance from the drone's centre
+    constexpr f32 kArmRInner = 0.34f;
+    constexpr f32 kArmROuter = 0.80f;
     constexpr f32 kArmHalfLen = (kArmROuter - kArmRInner) * 0.5f;
     constexpr f32 kArmCenterR = (kArmROuter + kArmRInner) * 0.5f;
     constexpr f32 kArmHalfWidth = 0.045f, kArmHalfThick = 0.032f;
@@ -251,21 +194,17 @@ void appendDrone(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx) {
 
         const f32 hubX = kArmROuter * std::cos(rad), hubY = kArmROuter * std::sin(rad);
         appendCylinderZ(v, idx, hubX, hubY, kHubCenterZ, kHubRadius, kHubHalfHeight, 8);
-        // The rotor disc stands in for the swept area of a spinning prop that a static placeholder
-        // mesh cannot animate -- a flat approximation, stated here rather than left for someone to
-        // wonder why a "propeller" never turns.
+        // Rotor disc stands in for the swept area of a spinning prop; flat approximation.
         appendCylinderZ(v, idx, hubX, hubY, kDiscCenterZ, kDiscRadius, kDiscHalfHeight, 10);
     }
 
-    // A pair of landing skids plus the four short struts that stand them off the body's underside.
+    // Landing skids and struts.
     constexpr f32 kSkidHalfLen = 0.30f, kSkidHalfWidth = 0.02f, kSkidHalfThick = 0.018f;
     constexpr f32 kSkidY = 0.20f, kSkidZ = -0.20f;
     appendBoxYaw(v, idx, 0.0f,  kSkidY, kSkidZ, kSkidHalfLen, kSkidHalfWidth, kSkidHalfThick, 0.0f);
     appendBoxYaw(v, idx, 0.0f, -kSkidY, kSkidZ, kSkidHalfLen, kSkidHalfWidth, kSkidHalfThick, 0.0f);
 
     constexpr f32 kStrutHalfX = 0.02f, kStrutHalfY = 0.02f, kStrutHalfZ = 0.016f;
-    // Midpoint between the body's underside (-kBodyHZ = -0.15) and the skid's top (kSkidZ +
-    // kSkidHalfThick = -0.182).
     constexpr f32 kStrutX = 0.16f, kStrutZ = -0.166f;
     for (f32 sx : {-kStrutX, kStrutX})
         for (f32 sy : {-kSkidY, kSkidY})
@@ -275,18 +214,8 @@ void appendDrone(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx) {
 } // namespace
 
 void GameContent::registerBuiltins(rhi::IDevice& device) {
-    // FROZEN: the unit cube stays half-extent 1. A .ocworld PLACEG scale is a half-extent in
-    // centimetres applied to this mesh, so changing it silently resizes every placed box in every
-    // level ever authored. The same constant is frozen in SandboxApp.cpp with the same note.
-    // BOUNDS ARE RECORDED FOR THE BUILT-INS, which SandboxApp does not do. Both are generated at
-    // radius/half-extent 1, so the box is exactly known and costs nothing to write down.
-    //
-    // This is not tidiness. A CMeshRenderer whose bounds were never filled in presents a DEGENERATE
-    // box, and the draw walk deliberately draws a degenerate box rather than culling it -- an entity
-    // whose bounds are unknown must not vanish. The consequence in the editor is that every entity
-    // using a built-in primitive is exempt from frustum culling entirely, including ones directly
-    // behind the camera. Measured here: a five-placement level reported "5 drawn, 0 culled" from
-    // every camera angle until these two lines existed.
+    // Unit cube half-extent stays 1 (frozen): PLACEG scale is half-extent in cm on this mesh.
+    // Bounds recorded here; SandboxApp does not. Degenerate bounds cause frustum cull exemption.
     const std::pair<Vec3, Vec3> unitBounds{Vec3{-1.0f, -1.0f, -1.0f}, Vec3{1.0f, 1.0f, 1.0f}};
     const auto add = [&](const std::string& path, const std::vector<rhi::MeshVertex>& v,
                          const std::vector<u32>& i, const std::pair<Vec3, Vec3>& bounds) {
@@ -307,72 +236,31 @@ void GameContent::registerBuiltins(rhi::IDevice& device) {
         add("Meshes/cube.ocmesh", v, i, unitBounds);
     }
     {
-        // Third built-in: the quadcopter appendDrone (above) builds, for the graph-driven drone actor
-        // (SandboxApp.cpp's setDroneEnabled) that used to spawn as a bare unit cube.
+        // Quadcopter for the graph-driven drone actor (replaces bare unit cube).
         std::vector<rhi::MeshVertex> v; std::vector<u32> i;
         appendDrone(v, i);
-        // NOT unitBounds: appendDrone is not isotropic (see its own comment for the exact per-axis
-        // reach), so recording the cube/sphere's -1..1 box here would be roughly six times too tall
-        // and would silently defeat the frustum cull the comment over this function already exists to
-        // fix -- for a different reason (loose rather than missing) than the one that comment
-        // describes. Padded a few thousandths beyond the generator's own exact numbers (X/Y tip reach
-        // 0.765685..., top 0.154, skid bottom -0.218) rather than trimmed to them -- a bound must
-        // never be tighter than the geometry it describes.
+        // Not isotropic: exact per-axis reach differs. Bounds padded beyond exact numbers.
         add("Meshes/drone.ocmesh", v, i, {Vec3{-0.78f, -0.78f, -0.22f}, Vec3{0.78f, 0.78f, 0.16f}});
     }
 
-    // The named surfaces gameplay can ask for, with the editor's exact values.
-    //
-    // THIS TABLE MUST STAY IN STEP WITH sandbox/src/SandboxApp.cpp's OWN look()/surfaceLooks_ BLOCK
-    // (search "The named surfaces gameplay can ask for" there), and there is nothing that enforces
-    // that beyond this comment and the one over there. A VERIFIED PARITY BUG lived here until this
-    // edit: the editor's table names TEN surfaces, this one named only SEVEN -- M_Foliage, M_Bark
-    // and M_Rock were missing entirely. A level authored in the editor using one of those three,
-    // with no backing .ocmat, rendered its intended colour in the editor and fell through to the
-    // flat 0.80/0.80/0.85 gray fallback (see GameRender.cpp's drawWorld) the moment the packaged
-    // game ran the SAME level -- with nothing in the log to say why, until GameRender.cpp's
-    // one-shot "no authored .ocmat and no built-in look" warning was added alongside this fix.
-    // Whoever adds an eleventh name to the editor's table and forgets this one reproduces exactly
-    // that bug, silently, again.
+    // Named surfaces gameplay can ask for. Must stay in step with SandboxApp.cpp's look()/surfaceLooks_.
     auto look = [this](const char* name, f32 r, f32 g, f32 b, f32 metal, f32 rough) {
         surfaceLooks_[aver_scene_material(0, name)] = SurfaceLook{{r, g, b}, metal, rough};
     };
     look("M_Floor",  0.22f, 0.23f, 0.26f, 0.02f, 0.85f);
     look("M_Wall",   0.48f, 0.50f, 0.55f, 0.03f, 0.72f);
-    // A GENERIC SURFACE IN THE ENGINE'S OWN DEFAULT PALETTE, alongside M_Floor/M_Wall/M_Metal above
-    // -- not an entry that exists because one project asked for it. Every name in this table is a
-    // common architectural surface the engine is willing to give a sensible look to when a level
-    // names it and no .ocmat defines it.
-    //
-    // It was added after a scene naming it fell through to the flat {0.80,0.80,0.85} fallback and
-    // rendered as undifferentiated near-white -- which got reported as a lighting bug when it was
-    // content resolving to nothing, identically in BOTH render paths. That is the failure mode this
-    // whole table exists to prevent, and concrete was simply a hole in it.
-    //
-    // KEEP THIS TABLE AND GameContent.cpp/SandboxApp.cpp IN STEP -- they have diverged before.
+    // Generic surfaces in the engine's default palette.
     look("M_Concrete", 0.55f, 0.54f, 0.51f, 0.00f, 0.88f);
     look("M_Trim",   0.30f, 0.33f, 0.38f, 0.35f, 0.45f);
     look("M_Crate",  0.62f, 0.44f, 0.22f, 0.02f, 0.78f);
     look("M_Target", 0.86f, 0.20f, 0.16f, 0.05f, 0.40f);
     look("M_Metal",  0.55f, 0.57f, 0.60f, 0.85f, 0.28f);
     look("M_Accent", 0.95f, 0.66f, 0.15f, 0.30f, 0.35f);
-    // Copied verbatim from sandbox/src/SandboxApp.cpp's table. Ordinary outdoor vocabulary, not tied to any one demo project;
-    // see that file's own comment on why a former "M_Foliage" scatter default was removed and
-    // these three names were kept anyway.
+    // Outdoor vocabulary.
     look("M_Foliage", 0.16f, 0.42f, 0.14f, 0.00f, 0.85f);
     look("M_Bark",    0.35f, 0.24f, 0.15f, 0.00f, 0.85f);
     look("M_Rock",    0.42f, 0.40f, 0.37f, 0.05f, 0.80f);
-    // M_Glass: the editor's values (SandboxApp.cpp's table).
-    //
-    // NOT TRANSLUCENT: SurfaceLook (GameContent.hpp) has no alphaMode field
-    // at all -- it is a colour and a metal/rough pair, nothing else. GameRender.cpp's
-    // drawWorld only ever sets device.setDrawBlended(true) for an AUTHORED .ocmat whose alphaMode
-    // reads AlphaMode::Blend (pbr::MaterialLibrary::desc()); a built-in look, this one included, can
-    // never trigger the blended path. A level using "M_Glass" with no backing .ocmat therefore
-    // renders an OPAQUE near-white cube, not glass -- an improvement over the flat gray default (and
-    // over the one-shot "no built-in look" warning this would otherwise trip), but still opaque.
-    // Actual translucency needs an authored M_Glass.ocmat with BLEND set; this entry is a fallback
-    // for the case where one was never authored, not a substitute for authoring one.
+    // M_Glass: opaque fallback (SurfaceLook has no alphaMode; actual translucency needs authored .ocmat).
     look("M_Glass", 0.92f, 0.94f, 0.95f, 0.00f, 0.05f);
 
     AVER_INFO("[Mesh] {} built-in primitive(s), {} named surface(s)", sceneMeshes_.size(), surfaceLooks_.size());
@@ -399,9 +287,7 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
         std::string why;
         if (!fmt::loadOcMesh(full, md, &why)) { AVER_WARN("[Mesh] {}", why); ++failed; continue; }
 
-        // Position, normal and uv ONLY. rhi::MeshVertex is 32 bytes and has nowhere to put joints
-        // or weights, so a skinned asset arrives here as static geometry -- correct, because the
-        // skinning path uploads its own target mesh and resolves through resolveSceneMesh.
+        // Position, normal, uv only. rhi::MeshVertex has nowhere to put joints/weights.
         std::vector<rhi::MeshVertex> verts(md.vertexCount());
         for (u32 i = 0; i < md.vertexCount(); ++i) {
             rhi::MeshVertex& v = verts[i];
@@ -416,43 +302,17 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
         const u64 id = fnv1a64(std::string_view(rel));
         sceneMeshes_[id] = h;
         meshBounds_[id] = {md.boundsMin, md.boundsMax};
-        // THE MESH'S OWN MATERIAL. .ocmesh has always carried a materialSlots table and nothing here
-        // read it, so an entity that named no material drew flat grey even though the mesh said what
-        // it was. See GameContent.hpp's meshDefaultMaterial for why 0 means "ask the mesh".
+        // Mesh's own material slot; see GameContent.hpp::meshDefaultMaterial.
         if (!md.materialSlots.empty() && !md.materialSlots[0].empty()) {
             meshSlot0Material_[id] = aver_scene_material(0, md.materialSlots[0].c_str());
             meshSlot0Name_[id] = md.materialSlots[0];
         }
-        // THE PER-SUBMESH SPLIT. .ocmesh has always carried a submeshes table alongside
-        // materialSlots, and until now nothing here read it either: a mesh naming several materials
-        // (bark and leaves, say) drew as one mesh in slot 0's material end to end. See MeshPart's own
-        // comment (GameContent.hpp) and buildMeshParts' (below) for the shape this mirrors.
+        // Per-submesh split; see MeshPart and buildMeshParts.
         buildMeshParts(device, id, h, md, verts, rel);
         projectMeshIds_.push_back(id);
         if (meshLoaded_) meshLoaded_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshLoadedUser_);
 
-        // THE COARSE STAND-IN THE SHADOW, GI-SHADOW AND VOXELISE PASSES DRAW INSTEAD OF THIS MESH.
-        // Those passes are depth-only -- they resolve a silhouette, never a surface -- so detail a
-        // coarser level drops is detail they were never going to show. Same rule, same threshold and
-        // same reasoning as the editor's ladder (sandbox/src/SandboxApp.cpp's kShadowErrorCm block):
-        // chosen on Trifactor's measured world error in centimetres, not on a triangle ratio, because
-        // how coarse a level is says nothing about how wrong it looks. 20cm is about one shadow-map
-        // texel, below which the silhouette cannot change the shadow.
-        //
-        // WHERE THIS DELIBERATELY DIVERGES FROM THE EDITOR: the editor uploads the WHOLE ladder and
-        // keys the map on every level's handle, because with --lod-select its lit pass submits
-        // whichever level it chose and each of those handles has to resolve. The game has no runtime
-        // LOD selection at all -- GameRender.cpp's draw walk only ever submits meshFor(mr->mesh)
-        // itself (this handle, `h`, LOD 0 and nothing else) or, for a mesh buildMeshParts split below,
-        // one of ITS handles -- neither route ever looks up a coarser level -- so uploading the rest
-        // of the ladder would be VRAM that nothing can ever look up. The pick needs no upload to
-        // compute (levelWorldErrorCm reads the OcMeshData), so it is computed first and exactly ONE
-        // extra level is uploaded. The day the game learns to select, this becomes the editor's loop
-        // again.
-        //
-        // A SPLIT MESH'S PARTS HAVE NO PROXY: this map is keyed on `h`, the whole mesh's handle, and
-        // buildMeshParts' parts are separate handles it never mentions, so the depth passes draw
-        // each part at full detail.
+        // Coarse LOD for shadow/GI/voxelise passes (depth-only). 20cm target error (one shadow texel).
 #if AVER_MODULE_TRIFACTOR
         if (buildDepthProxies_ && md.lodCount() > 1) {
             constexpr f32 kShadowErrorCm = 20.0f;
@@ -460,12 +320,11 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
             for (u32 lvl = 1; lvl < md.lodCount(); ++lvl)
                 if (trifactor::levelWorldErrorCm(md, lvl) <= kShadowErrorCm) pick = lvl;
 
-            // A pick that is not actually cheaper than LOD 0 buys an upload and saves nothing.
+            // Only upload if it's actually cheaper than LOD 0.
             const u32 tris0 = trifactor::levelTriangleCount(md, 0);
             if (pick > 0 && trifactor::levelTriangleCount(md, pick) < tris0) {
                 const fmt::OcMeshLod& lod = md.coarserLods[pick - 1];
-                // Shares LOD 0's vertex buffer (coarser levels index the same VTXS block); a refusal
-                // falls back to a copy.
+                // Try to share LOD 0's vertex buffer; fall back to a copy if refused.
                 rhi::MeshHandle ph = device.createMeshSharingVertices(h, lod.indices.data(),
                                                                      (u32)lod.indices.size());
                 if (!ph) ph = device.createMesh(verts.data(), (u32)verts.size(),
@@ -492,27 +351,18 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
                   failed ? (", " + std::to_string(failed) + " failed") : "");
 }
 
-// Splits a mesh that names more than one material into one MeshHandle per slot. Ported from
-// SandboxApp::buildMeshParts (sandbox/src/SandboxAssets.cpp) -- see that function's own comment for
-// why splitting at load time, rather than drawing per-submesh RANGES, is what makes this tractable at
-// all (the ray path's BLAS carries one materialIndex per instance, so a range draw would still shade
-// flat in the renderer that is actually on screen).
-//
-// Each part is an index buffer over the whole mesh's vertex buffer (createMeshSharingVertices), so a
-// split mesh holds its vertices once; parts take the whole mesh's bounds.
+// Splits a mesh with multiple materials into one MeshHandle per slot.
+// Each part shares the whole mesh's vertex buffer. Parts take the whole mesh's bounds.
 void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, rhi::MeshHandle whole, const fmt::OcMeshData& md,
                                   const std::vector<rhi::MeshVertex>& verts, const std::string& rel) {
-    if (md.submeshes.size() <= 1) return;   // the common case: nothing to split
+    if (md.submeshes.size() <= 1) return;   // common case: nothing to split
 
     std::vector<MeshPart> parts;
     parts.reserve(md.submeshes.size());
     std::unordered_map<u32, u32> remap;
     std::vector<rhi::MeshVertex> pv;
     std::vector<u32> pi;
-    // THE UNREMAPPED SLICES, kept for a SKINNED mesh only. Each part below is compacted and
-    // renumbered, which is right for a static mesh and useless over a posed buffer: a skin target
-    // keeps the BASE mesh's vertex numbering (it shares the base index buffer verbatim), so only a
-    // slice of md.indices in that numbering can be re-cut over the pose. See posedPartsFor.
+    // Unremapped slices for skinned meshes only (skin targets share base index buffer verbatim).
     const bool keepBaseIndices = md.hasSkin();
     std::vector<std::vector<u32>> baseIndices;
 
@@ -531,8 +381,7 @@ void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, rhi::MeshHandle w
         }
 
         MeshPart part;
-        // Index-only: the part shares the whole mesh's vertex buffer. A refusal falls back to a
-        // compacted copy of just the vertices this submesh uses.
+        // Index-only: shares whole mesh's vertex buffer. Falls back to compacted copy if refused.
         part.mesh = device.createMeshSharingVertices(whole, md.indices.data() + sm.indexStart, sm.indexCount);
         if (!part.mesh) {
             remap.clear(); pv.clear(); pi.clear();
@@ -549,22 +398,18 @@ void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, rhi::MeshHandle w
             AVER_WARN("[Mesh] the device refused submesh '{}' of '{}'", sm.name, rel);
             continue;
         }
-        // THE SLOT NAMES THE MATERIAL, which is the whole point of the format's slot table -- and
-        // the cook writes those names as the .ocmat stems it produced, so a name resolves through
-        // exactly the path an authored material does (GameContent::materialForSurface).
+        // Slot names the material, resolving through the same path as an authored material.
         if (sm.materialSlot < md.materialSlots.size()) {
             const std::string& slot = md.materialSlots[sm.materialSlot];
             if (!slot.empty()) part.material = aver_scene_material(0, slot.c_str());
         }
         parts.push_back(part);
-        // IN LOCKSTEP with `parts`: pushed only for a part that survived every check above, so
-        // baseIndices[i] is always the slice parts[i] was cut from.
+        // baseIndices[i] is the slice parts[i] was cut from (lockstep).
         if (keepBaseIndices)
             baseIndices.emplace_back(md.indices.data() + sm.indexStart, md.indices.data() + end);
     }
 
-    // ONE SURVIVING PART IS NOT A SPLIT. Falling through to the ordinary single-mesh path costs a
-    // draw call less and keeps the entity's own material override meaningful.
+    // One surviving part is not a split; falling through costs one less draw call.
     if (parts.size() <= 1) {
         for (const MeshPart& p : parts) if (p.mesh) device.destroyMesh(p.mesh);
         return;
@@ -585,13 +430,11 @@ const std::vector<GameContent::MeshPart>* GameContent::posedPartsFor(rhi::IDevic
     if (!posedMesh || !baseMesh || posedMesh == baseMesh) return nullptr;
     if (const auto it = posedParts_.find(posedMesh); it != posedParts_.end())
         return (it->second.meshId == id && !it->second.parts.empty()) ? &it->second.parts : nullptr;
-    PosedParts& entry = posedParts_[posedMesh];   // recorded now, so a refusal is not retried per frame
+    PosedParts& entry = posedParts_[posedMesh];   // cache the refusal so it is not retried per frame
     entry.meshId = id;
     const auto pit = meshParts_.find(id);
     const auto bit = meshPartBaseIndices_.find(id);
-    // Every refusal below WARNS, once per posed handle (the entry above caches it): each one leaves
-    // a multi-material character drawing whole under one material, and a log that says nothing
-    // makes that look like the cut-out bug this path exists to fix.
+    // Refusal (cached per posed handle): multi-material character draws whole under one material.
     if (pit == meshParts_.end() || bit == meshPartBaseIndices_.end() ||
         bit->second.size() != pit->second.size()) {
         if (pit != meshParts_.end())   // no parts at all is a single-material mesh: nothing to say
@@ -599,10 +442,8 @@ const std::vector<GameContent::MeshPart>* GameContent::posedPartsFor(rhi::IDevic
                       "slices were not kept; it draws as one mesh", id, posedMesh);
         return nullptr;
     }
-    // PROOF THE POSED COPY IS NUMBERED LIKE THIS UPLOAD, not an assumption: a skin target shares its
-    // source's index buffer verbatim (createSkinTargetMesh), so equal index buffers and equal vertex
-    // counts mean it was cut from `baseMesh` itself. After an editor mesh reload they differ, and the
-    // entity keeps its single whole-mesh draw rather than drawing indices against the wrong vertices.
+    // Skin target shares source's index buffer verbatim, so equal index buffers and vertex counts
+    // mean it was cut from baseMesh. After mesh reload they differ; entity keeps single draw.
     rhi::BufferHandle baseIb = 0, posedIb = 0;
     u32 baseVc = 0, posedVc = 0;
     if (!device.meshGeometry(baseMesh, nullptr, &baseIb, &baseVc, nullptr) ||
@@ -621,8 +462,7 @@ const std::vector<GameContent::MeshPart>* GameContent::posedPartsFor(rhi::IDevic
         const std::vector<u32>& idx = bit->second[i];
         if (pit->second[i].mesh && !idx.empty()) {
             pp.mesh = device.createPosedPartMesh(posedMesh, idx.data(), static_cast<u32>(idx.size()));
-            // ALL OR NOTHING: a half-split character would silently lose the geometry of every part
-            // that failed, where the whole-mesh fallback at least draws all of it.
+            // All or nothing: half-split character silently loses failed parts; whole-mesh fallback draws all.
             if (!pp.mesh) {
                 for (const MeshPart& q : out) if (q.mesh) device.destroyMesh(q.mesh);
                 AVER_WARN("[Mesh] posed split refused for mesh {} (posed handle {}); it draws as one mesh",
@@ -643,22 +483,21 @@ void GameContent::registerMesh(u64 id, rhi::MeshHandle handle, const std::pair<V
 }
 
 void GameContent::releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHandles) {
-    // POSED PARTS FIRST: each holds a vertex share on a skin target (which would otherwise refuse its
-    // own destruction while they live), and each was cut from a meshPartBaseIndices_ entry about to go.
+    // Posed parts hold a vertex share on a skin target (which would refuse its own destruction).
     for (auto& kv : posedParts_)
         for (const MeshPart& p : kv.second.parts)
             if (p.mesh) device.destroyMesh(p.mesh);
     posedParts_.clear();
     for (const u64 id : projectMeshIds_) {
         meshPartBaseIndices_.erase(id);
-        // The split parts are this class's own uploads, and nothing keys anything else on them.
+        // Split parts are this class's uploads; nothing else keys on them.
         if (const auto pit = meshParts_.find(id); pit != meshParts_.end()) {
             for (const MeshPart& p : pit->second)
                 if (p.mesh) device.destroyMesh(p.mesh);
             meshParts_.erase(pit);
         }
         if (const auto sit = sceneMeshes_.find(id); sit != sceneMeshes_.end()) {
-            // The depth proxy is keyed on the base handle, so it goes before that handle does.
+            // Depth proxy is keyed on the base handle.
             if (const auto dit = depthProxyMap_.find(sit->second); dit != depthProxyMap_.end()) {
                 if (dit->second) device.destroyMesh(dit->second);
                 depthProxyMap_.erase(dit);
@@ -683,11 +522,7 @@ namespace {
 
 // ---- collisionMeshFor's building blocks ------------------------------------------------------------
 
-// Compacts `srcIndexCount` indices (3 per triangle, into a `srcVertexCount`-vertex array at
-// `srcPositions`) down to only the vertices they actually reference, dropping any triangle that is
-// out of range or degenerate (no area, nothing to collide with) -- the same remap this function
-// replaces used to do inline, now shared by every candidate collisionMeshFor builds. False (leaving
-// `outPositions`/`outIndices` whatever they already held) when nothing survived.
+// Compacts indices down to only the vertices they reference, dropping degenerate triangles.
 bool compactTriangles(const f32* srcPositions, u32 srcVertexCount,
                       const u32* srcIndices, usize srcIndexCount,
                       std::vector<f32>& outPositions, std::vector<u32>& outIndices) {
@@ -713,9 +548,7 @@ bool compactTriangles(const f32* srcPositions, u32 srcVertexCount,
     return outIndices.size() >= 3;
 }
 
-// A vertex position's exact bit pattern, for welding by position rather than by original vertex
-// index. Two vertices this compares equal are the SAME point even if a UV seam or a hard-normal edge
-// gave them separate slots in the source mesh -- collision cares about neither.
+// Vertex position's exact bit pattern for welding by position, not vertex index.
 struct WeldKey {
     u32 xb, yb, zb;
     bool operator==(const WeldKey& o) const { return xb == o.xb && yb == o.yb && zb == o.zb; }
@@ -730,11 +563,8 @@ struct WeldKeyHash {
     }
 };
 
-// Welds `positions`/`indices` (already compacted -- see compactTriangles) by EXACT position.
-// meshopt_simplify treats a topological border (an edge with only one triangle) as something to
-// preserve rather than collapse, and every duplicate a UV seam or a hard-normal split leaves behind is
-// one more edge it reads as a border that is not actually one -- welding first is what lets the
-// simplifier see the mesh's real, mostly-closed topology instead of a surface of tiny false seams.
+// Welds positions/indices (already compacted) by exact position.
+// meshopt_simplify preserves topological borders; welding first lets it see the real topology.
 void weldByPosition(const std::vector<f32>& positions, const std::vector<u32>& indices,
                     std::vector<f32>& outPositions, std::vector<u32>& outIndices) {
     const usize vertexCount = positions.size() / 3;
@@ -742,8 +572,7 @@ void weldByPosition(const std::vector<f32>& positions, const std::vector<u32>& i
     weld.reserve(vertexCount);
     std::vector<u32> remap(vertexCount);
     for (usize v = 0; v < vertexCount; ++v) {
-        // +0.0f, not the stored bits, when a coordinate is exactly zero: IEEE 754 gives +0 and -0
-        // different bit patterns for a value this comparison must treat as one.
+        // Normalise ±0 to +0 (different IEEE 754 bit patterns).
         f32 x = positions[v * 3 + 0], y = positions[v * 3 + 1], z = positions[v * 3 + 2];
         if (x == 0.0f) x = 0.0f;
         if (y == 0.0f) y = 0.0f;
@@ -760,35 +589,25 @@ void weldByPosition(const std::vector<f32>& positions, const std::vector<u32>& i
     for (usize k = 0; k < indices.size(); ++k) outIndices[k] = remap[indices[k]];
 }
 
-// Simplifies welded `positions`/`indices` toward a ~2 cm world error, never past a triangle ceiling --
-// growing the error past 2 cm, and logging that it did, only for the mesh that cannot reach the
-// ceiling within it. Returned indices still number into `positions` (meshopt's own contract, so the
-// caller compacts again to drop what stopped being referenced).
+// Simplifies welded positions/indices toward ~2 cm world error, capped at 65536 triangles.
 std::vector<u32> simplifyCollisionMesh(const std::vector<f32>& positions, const std::vector<u32>& indices,
                                        const std::string& meshPathForLog, f32& outErrorCm) {
-    // ERRORABSOLUTE, not meshopt_simplifyScale's relative-to-extent conversion: this option (present
-    // in the vendored meshoptimizer -- third_party/meshoptimizer/src/meshoptimizer.h) takes and
-    // returns the error in the SAME units as `positions`, which are already this engine's own
-    // centimetres, so "2 cm" needs no extent-dependent conversion at all.
+    // ERRORABSOLUTE: error in the SAME units as positions (centimetres).
     constexpr f32 kTargetErrorCm = 2.0f;
     constexpr usize kTriangleCeiling = 65536;
-    // LOCKBORDER: a mesh's own genuine open edges, and the ones material-slot filtering just cut,
-    // both read as topological borders to the simplifier -- collision fidelity at either matters more
-    // than a few extra triangles there.
+    // LOCKBORDER: preserve genuine open edges and ones from material-slot filtering.
     constexpr unsigned kOptions =
         static_cast<unsigned>(meshopt_SimplifyLockBorder) | static_cast<unsigned>(meshopt_SimplifyErrorAbsolute);
 
     const usize targetIndexCount = std::min(indices.size(), kTriangleCeiling * 3);
-    std::vector<u32> dest(indices.size());   // worst case per meshopt_simplify's own contract
+    std::vector<u32> dest(indices.size());
     f32 resultError = 0.0f;
     usize resultCount = meshopt_simplify(dest.data(), indices.data(), indices.size(), positions.data(),
                                          positions.size() / 3, 3 * sizeof(f32), targetIndexCount,
                                          kTargetErrorCm, kOptions, &resultError);
 
     if (resultCount / 3 > kTriangleCeiling) {
-        // 2 cm was not enough to reach the ceiling without exceeding it. The ceiling is the HARD
-        // limit here (BVH and runtime cost both scale with it), so the error is allowed to grow as
-        // far as it has to -- topology permitting -- rather than the other way around.
+        // 2 cm not enough; ceiling is the hard limit. Error is allowed to grow.
         resultCount = meshopt_simplify(dest.data(), indices.data(), indices.size(), positions.data(),
                                        positions.size() / 3, 3 * sizeof(f32), targetIndexCount,
                                        std::numeric_limits<f32>::max(), kOptions, &resultError);
@@ -803,25 +622,16 @@ std::vector<u32> simplifyCollisionMesh(const std::vector<f32>& positions, const 
 }
 
 // ---- the disk cache: <project>/Saved/DerivedDataCache/Collision/<hash>.occol -------------------------
-// DERIVED DATA, not authored, matching aver::fmt::GiCache's own DerivedDataCache/GI contract: the
-// whole directory can be deleted at any time for the cost of one rebuild per mesh. A small hand-rolled
-// record rather than an AVR1 container -- there is exactly one caller and one record shape, so a
-// chunk table would buy nothing here.
-//
-// BUMP kCollisionCacheVersion whenever collisionMeshFor's FILTER RULE, SIMPLIFICATION TARGET or this
-// FILE'S OWN LAYOUT changes. The key below is the source mesh's (path, size, last-write time) alone,
-// which says nothing about what THIS BUILD would compute from it -- without the version, a rule change
-// would keep serving a previous rule's output forever for a mesh file that never itself changed.
-constexpr u32 kCollisionCacheMagic   = 0x4C4F4341u;   // arbitrary marker; not a real AVR1 fourCC
+// Derived data (not authored). Whole directory can be deleted for cost of one rebuild per mesh.
+// Bump kCollisionCacheVersion when filter rule, simplification target or layout changes.
+constexpr u32 kCollisionCacheMagic   = 0x4C4F4341u;
 constexpr u32 kCollisionCacheVersion = 1;
 
 std::string collisionCacheDir(const std::string& projectDir) {
     return projectDir.empty() ? std::string() : projectDir + "\\Saved\\DerivedDataCache\\Collision";
 }
 
-// "<hash>.occol", named the same way aver::fmt::giCacheFileName names its own entries: an FNV-1a hash
-// of everything the key covers, so two different keys (a different mesh, or the same mesh re-saved
-// with a different size or timestamp) practically never collide on one file.
+// "<hash>.occol", FNV-1a hash of the key (mesh path, size, mtime, version).
 std::string collisionCachePathFor(const std::string& projectDir, const std::string& meshPath,
                                   u64 fileSize, i64 mtimeTicks) {
     const std::string dir = collisionCacheDir(projectDir);
@@ -834,11 +644,7 @@ std::string collisionCachePathFor(const std::string& projectDir, const std::stri
     return dir + "\\" + name;
 }
 
-// Reads and VALIDATES a cache entry against the source mesh's CURRENT path/size/mtime -- not merely
-// against what its filename implies, in case of a hash collision or a hand-edited file. Any failure
-// (missing file, short read, a mismatched field) returns false and leaves `out` however far the read
-// got; the caller's only response to false is "build it from the .ocmesh instead", so nothing here
-// needs to be recoverable.
+// Reads and validates cache entry against source mesh's current path/size/mtime.
 bool readCollisionCacheFile(const std::string& cachePath, const std::string& meshPath, u64 fileSize,
                             i64 mtimeTicks, GameContent::CollisionMesh& out) {
     std::ifstream in(cachePath, std::ios::binary);
@@ -861,9 +667,7 @@ bool readCollisionCacheFile(const std::string& cachePath, const std::string& mes
 
     u32 vertexCount = 0, indexCount = 0;
     if (!get(&vertexCount, sizeof(vertexCount)) || !get(&indexCount, sizeof(indexCount))) return false;
-    // A CORRUPT COUNT IS NOT A HUGE ALLOCATION. Well above anything a real collision mesh needs --
-    // NewSponza's coarsest level, the heaviest this cache has measured, is ~182k triangles -- so a
-    // torn or hand-edited file fails the read instead of asking for gigabytes.
+    // Sanity check: a corrupt count is not a huge allocation.
     constexpr u32 kMaxReasonableVertices = 64u * 1024u * 1024u;
     if (vertexCount == 0 || vertexCount > kMaxReasonableVertices ||
         indexCount < 3 || indexCount > kMaxReasonableVertices * 3u) return false;
@@ -876,11 +680,7 @@ bool readCollisionCacheFile(const std::string& cachePath, const std::string& mes
     return true;
 }
 
-// Writes a cache entry ATOMICALLY: the whole record goes to "<cachePath>.tmp" first, and only a
-// successful rename publishes it at `cachePath` -- so a reader never sees a partially-written file,
-// and a writer that crashes or is killed mid-write leaves the OLD entry (or none) in place rather than
-// a corrupt one. `why` is set on any failure; the caller's only response is to log it and move on,
-// since the triangles it was about to cache are already built and usable this run either way.
+// Writes cache entry atomically: record goes to "<cachePath>.tmp" first; successful rename publishes it.
 bool writeCollisionCacheFile(const std::string& cachePath, const std::string& meshPath, u64 fileSize,
                              i64 mtimeTicks, const GameContent::CollisionMesh& mesh, std::string* why) {
     std::error_code ec;
@@ -917,42 +717,32 @@ bool writeCollisionCacheFile(const std::string& cachePath, const std::string& me
 } // namespace
 
 #if AVER_MODULE_PBR
-// True when a material-slot NAME should collide -- see GameContent.hpp's own comment on this method.
+// Material slot collision filter.
 bool GameContent::collisionSlotCollides(const std::string& slotName) {
     if (slotName.empty()) return true;
     const pbr::MaterialHandle mh = materialForSurface(slotName);
-    if (!mh) return true;   // no authored .ocmat for this slot: cannot resolve, keep the triangles
+    if (!mh) return true;   // no authored .ocmat: cannot resolve
     const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(mh);
     if (!d) return true;
     return d->alphaMode != pbr::AlphaMode::Mask && d->alphaMode != pbr::AlphaMode::Blend;
 }
 #else
-// NO PBR MODULE, NO MATERIAL TO RESOLVE: every slot collides, the same "cannot be resolved" default
-// this method documents for the PBR build too.
+// Every slot collides (no PBR module).
 bool GameContent::collisionSlotCollides(const std::string&) { return true; }
 #endif
 
-// Concave architecture needs its triangles: NewSponza's per-material merged meshes (walls, arches,
-// ...) each span the whole building, so world::addStaticBoxBody's one box per mesh fills the
-// courtyard and buries anyone standing in it. This is the lazily-built source those triangles come
-// from -- see GameContent.hpp's own comment on the shape of the answer and what null means, and on
-// the filter/simplify/cache pipeline this function now runs to build it.
+// Filters and simplifies collision geometry from meshes with multiple per-material submeshes.
 const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
     if (const auto it = collisionMeshCache_.find(id); it != collisionMeshCache_.end())
         return it->second.get();
 
-    // INSERTED NOW, EVEN ON FAILURE: every `return nullptr` below leaves this null entry behind, so
-    // the next ask for the same id is a hash lookup, not a re-read of a file that was never going to
-    // parse (or a re-stat of a path that was never going to exist, e.g. every built-in id).
+    // Cache null entries so failed lookups are O(1) on retry.
     std::unique_ptr<CollisionMesh>& slot = collisionMeshCache_[id];
 
     const std::string path = pathFor(id);
-    if (path.empty()) return nullptr;   // a built-in (never indexed) or an id nothing recognises
+    if (path.empty()) return nullptr;   // built-in or unrecognized id
 
-    // ---- the disk cache, tried from the source file's STAT ALONE -- a hit reads no .ocmesh at all ---
-    // ONE error_code FOR BOTH STAT CALLS, deliberately: last_write_time is skipped once file_size has
-    // already failed (nothing to stat), and either failure leaves `statEc` truthy afterward, which is
-    // all `canCache` below needs to know.
+    // Disk cache: check source file size and mtime.
     std::error_code statEc;
     const u64 srcSize = static_cast<u64>(std::filesystem::file_size(path, statEc));
     const i64 srcMtime = statEc ? 0 : static_cast<i64>(
@@ -979,20 +769,18 @@ const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
     const u32 vertexCount = md.vertexCount();
     if (vertexCount == 0 || md.indices.size() < 3) return nullptr;
 
-    // ---- 1. drop cut-out/translucent material slots, from LOD 0's own submesh ranges ---------------
-    // OcMeshSubmesh's indexStart/indexCount/materialSlot exist for LOD 0 only (OcMesh.hpp), so this is
-    // the ONE place in the ladder that can tell a leaf card's triangles from a trunk's at all.
+    // Drop cut-out/translucent material slots from LOD 0 submeshes.
     bool anyDropped = false;
     std::vector<u32> keptIndices;
     if (md.submeshes.empty()) {
-        keptIndices = md.indices;   // no submesh table: nothing to tell slots apart by, keep all
+        keptIndices = md.indices;   // no submesh table: keep all
     } else {
         keptIndices.reserve(md.indices.size());
         u32 droppedSlots = 0;
         for (const fmt::OcMeshSubmesh& sm : md.submeshes) {
             if (sm.indexCount == 0) continue;
             const usize end = usize(sm.indexStart) + sm.indexCount;
-            if (end > md.indices.size()) continue;   // malformed range; nothing safe to take from it
+            if (end > md.indices.size()) continue;   // malformed range
             const std::string slotName =
                 sm.materialSlot < md.materialSlots.size() ? md.materialSlots[sm.materialSlot] : std::string();
             if (!collisionSlotCollides(slotName)) { anyDropped = true; ++droppedSlots; continue; }
@@ -1005,22 +793,20 @@ const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
                       "excluded from collision", path, droppedSlots, md.submeshes.size());
     }
     if (keptIndices.empty()) {
-        // LOGGED ONCE, HERE -- not once per placement: collisionMeshFor is only ever reached once per
-        // mesh id (the cache above answers every further ask), which is what makes this safe to log
-        // unconditionally rather than needing a seen-once guard of its own.
+        // Logged once per mesh id (cache prevents reruns).
         AVER_WARN("[Collision] {}: every material slot is alpha-masked or translucent; no collision "
                   "geometry", path);
         return nullptr;
     }
 
-    // ---- 2. compact the filtered set: only the vertices it references, no out-of-range/degenerate --
+    // Compact: keep only referenced vertices, remove degenerate triangles.
     std::vector<f32> filteredPositions;
     std::vector<u32> filteredIndices;
     if (!compactTriangles(md.positions.data(), vertexCount, keptIndices.data(), keptIndices.size(),
                           filteredPositions, filteredIndices))
-        return nullptr;   // every kept triangle was degenerate or out of range
+        return nullptr;   // all kept triangles degenerate or out of range
 
-    // ---- 3. weld by position, then meshoptimizer down toward ~2 cm ----------------------------------
+    // Weld by position, simplify with meshoptimizer toward ~2 cm.
     std::vector<f32> weldedPositions;
     std::vector<u32> weldedIndices;
     weldByPosition(filteredPositions, filteredIndices, weldedPositions, weldedIndices);
@@ -1035,10 +821,7 @@ const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
                                             simplified.data(), simplified.size(),
                                             meshoptPositions, meshoptIndices);
 
-    // ---- 4. Trifactor's own coarsest-LOD-within-2cm pick, ONLY when nothing was filtered ------------
-    // A coarser LOD's own indices carry no submesh table to filter step 1's exclusion through -- using
-    // one after triangles were actually dropped could silently bring the excluded geometry back.
-    // Identical to this function's pre-existing behaviour when nothing was filtered.
+    // Trifactor coarsest LOD only when nothing was filtered (no submesh table to filter through).
     u32 trifactorLod = 0;
     f32 trifactorErrorCm = 0.0f;
     std::vector<f32> trifactorPositions;
@@ -1058,9 +841,7 @@ const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
     }
 #endif
 
-    // ---- 5. ONE CLEAR RULE: fewer triangles wins. A tie, or a meshoptimizer candidate this mesh
-    // could not produce at all, keeps the Trifactor pick -- it cost nothing further once computed
-    // (no simplification math, and it is what this function already did before this change) ----------
+    // Fewer triangles wins; a tie keeps Trifactor (no further cost).
     auto mesh = std::make_unique<CollisionMesh>();
     const bool useTrifactor =
         haveTrifactor && (!meshoptOk || trifactorIndices.size() <= meshoptIndices.size());
@@ -1077,10 +858,7 @@ const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
         mesh->lod = 0;
         mesh->errorCm = meshoptErrorCm;
     } else {
-        // Neither simplifier left anything: meshoptimizer collapsed the whole filtered mesh away (a
-        // sliver too small for even a 2 cm budget to preserve) and there was no Trifactor pick to
-        // fall back on. The filtered set itself, before simplification, is the last honest answer --
-        // every triangle this mesh's collision was ever going to keep.
+        // Fallback: neither simplifier produced output; use filtered set before simplification.
         mesh->positions = std::move(filteredPositions);
         mesh->indices = std::move(filteredIndices);
         mesh->lod = 0;
@@ -1145,20 +923,9 @@ pbr::MaterialSystem::ResolvedTexture GameContent::resolveMaterialTexture(const p
         return {};
     }
 
-    // THE SLOT DECIDES THE COLOUR SPACE, NEVER THE FILENAME. A normal map read as sRGB is a subtly
-    // wrong lighting response that looks like a shading bug rather than a decode bug.
+    // Slot decides colour space: normal maps sRGB-decoded give subtle shading bugs.
     assets::TextureUsage usage = assets::TextureUsage::Data;
-    // THE LAYER-1 SLOTS BELONG HERE TOO, and their absence was a decode bug rather than an omission
-    // of principle. MaterialSystem::colourClass classifies Layer1BaseColor as 'c' (sRGB) and
-    // Layer1Normal as 'n', and its own comment says "KEEP THIS IN STEP WITH THOSE TWO SWITCHES" --
-    // this being one of them. It drifted: everything not named fell through to Data, so a
-    // slope-blended material's SECOND base-colour layer was uploaded LINEAR when its pixels are sRGB.
-    //
-    // WHAT THAT LOOKS LIKE is why it went unnoticed: decoding sRGB texels as linear does not corrupt
-    // them, it LIFTS the midtones and flattens the contrast -- the layer reads pale and washed out
-    // beside the layer 0 it blends against, which reads as a lighting or blending problem rather than
-    // as a colour-space one. Layer1Normal had the matching fault the other way: routed to Data it lost
-    // the normal-map-aware mip generation that NormalMap selects.
+    // Layer1 slots must be here too: Layer1BaseColor is sRGB, Layer1Normal is NormalMap.
     switch (slot) {
         case pbr::TextureSlot::BaseColor:
         case pbr::TextureSlot::Layer1BaseColor:
@@ -1178,37 +945,27 @@ pbr::MaterialSystem::ResolvedTexture GameContent::resolveMaterialTexture(const p
     }
     AVER_INFO("[Material] {} -> {}x{}, {} mips ({} KB) for slot '{}'", path, info.width, info.height,
               info.mips, info.bytes / 1024, pbr::MaterialLibrary::textureSlotName(slot));
-    // The mean travels with the handle -- see MaterialSystem::ResolvedTexture for why anything
-    // that cannot sample a texture needs it.
+    // Mean in handle: needed for sampling fallbacks.
     pbr::MaterialSystem::ResolvedTexture out;
     out.handle = h;
     for (int c = 0; c < 3; ++c) out.averageLinear[c] = info.averageLinear[c];
-    // Feeds MaterialSystem's level-change eviction log ("MiB freed") only -- see
-    // ResolvedTexture::bytes's own comment.
+    // Bytes: used for level-change eviction log.
     out.bytes = info.bytes;
     return out;
 }
 
-// Turns an .ocmat's GRAPHREF path into the gMaterialGraphId its constants carry. 0 for a material
-// with no GRAPHREF, and 0 for one whose graph will not load or compile. Ported from
-// SandboxApp::resolveMaterialGraph (sandbox/src/SandboxAssets.cpp).
-//
-// A broken graph does not take the material down with it: returning 0 falls back to the stock
-// .ocmat factors/maps instead of vanishing the object entirely. Logged either way.
+// .ocmat GRAPHREF path to gMaterialGraphId. Returns 0 for materials with no graph or load failure.
+// Broken graph does not disable the material: falls back to stock factors/maps.
 u32 GameContent::resolveMaterialGraph(const std::string& graphRef) const {
     if (graphRef.empty()) return 0;
     const std::string content = project_.contentDir();
     if (content.empty()) return 0;
 
-    // CONTENT-RELATIVE, the same convention COMP mesh= uses in .ocgraph and TEX uses in
-    // materialForSurface's candidate paths: a path with the content directory on the front resolves
-    // to nothing, silently, which is a mistake worth not repeating here.
+    // Content-relative path (matches COMP mesh= and TEX conventions).
     std::string path = content + "\\" + graphRef;
     for (char& c : path) if (c == '/') c = '\\';
 
-    // ALREADY COMPILED? Two materials naming one graph is ordinary -- a stone and a wet stone
-    // sharing a pattern -- and asking the registry first means the graph is read and compiled once,
-    // and both materials get the same id rather than two arms doing the same arithmetic.
+    // Compile once: multiple materials can share a graph.
     if (const u32 known = pbr::materialGraphs().idOf(path)) return known;
 
     fmt::OcGraphData g;
@@ -1229,9 +986,7 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
     pbr::MaterialHandle h = 0;
     const std::string content = project_.contentDir();
     if (!content.empty()) {
-        // ORDER MATTERS: a BUILT .ocmat under Binaries wins over a hand-authored one under Content,
-        // because the built one is what avermatc produced from the C# source and is therefore the
-        // one the ids in the level refer to.
+        // Built .ocmat (Binaries) wins over hand-authored (Content).
         const std::string candidates[3] = {
             project_.binariesDir() + "\\Materials\\" + name + ".ocmat",
             content + "\\Materials\\" + name + ".ocmat",
@@ -1243,8 +998,7 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
             pbr::MaterialDesc d;
             fmt::OcMatExtras extras;
             std::string err;
-            // A parse failure BREAKS rather than falling through to the next candidate: a corrupt
-            // built material must not be silently replaced by a stale hand-authored one.
+            // Parse failure breaks: corrupt built material must not fall through to stale hand-authored.
             if (!fmt::loadOcmat(path, d, &extras, &err)) { AVER_WARN("[Material] {}", err); break; }
             d.graphId = resolveMaterialGraph(extras.graphRef);
             h = pbr::MaterialLibrary::get().create(d);
@@ -1253,28 +1007,23 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
             break;
         }
     }
-    // Caches 0 as a negative result and never retries. Deliberate: a project with fifty unauthored
-    // surfaces would otherwise stat three paths per surface per level load.
+    // Cache 0 (no retries) to avoid stat calls for missing surfaces.
     materialAssets_.emplace(name, h);
     return h;
 }
 
 void GameContent::releaseProjectMaterials(bool clearGraphRegistry) {
-    // Destroyed, not just forgotten: MaterialLibrary owns the material, this map only names it.
+    // Destroy materials (library owns them, map only names).
     for (const auto& kv : materialAssets_) if (kv.second) pbr::MaterialLibrary::get().destroy(kv.second);
     materialAssets_.clear();
-    // resolveMaterialGraph() caches into this process-wide registry by compiled path (its own
-    // idOf()), so a project close has to forget the graphs too -- otherwise a differently-authored
-    // project reusing the same content-relative GRAPHREF path would inherit stale ids (or a reload
-    // of the SAME project would just leak entries forever, since idOf() never expires them itself).
+    // Material graphs cached process-wide by path; clear to prevent id collisions on project reload.
     if (clearGraphRegistry) pbr::materialGraphs().clear();
 #if AVER_MODULE_SCENE
     surfaceMaterials_.clear();
 #endif
 }
 
-// See this method's own header comment for the full contract; this is releaseProjectMaterials()
-// narrowed to "every name but these".
+// Release all materials except those in keep set.
 usize GameContent::releaseMaterialsExcept(const std::unordered_set<std::string>& keep) {
     usize released = 0;
     for (auto it = materialAssets_.begin(); it != materialAssets_.end();) {
@@ -1283,9 +1032,7 @@ usize GameContent::releaseMaterialsExcept(const std::unordered_set<std::string>&
         it = materialAssets_.erase(it);
     }
 #if AVER_MODULE_SCENE
-    // Self-healing cleanup, not required for correctness (authoredFor()'s reader already treats a
-    // dead handle as unbound) -- see this method's own header comment for why a stale entry is worth
-    // dropping anyway rather than leaving it to warn on the next draw.
+    // Clean dead handles from surface map.
     if (released) {
         for (auto it = surfaceMaterials_.begin(); it != surfaceMaterials_.end();) {
             if (it->second && !pbr::MaterialLibrary::get().valid(it->second)) it = surfaceMaterials_.erase(it);
@@ -1320,7 +1067,7 @@ pbr::MaterialHandle GameContent::authoredFor(i32 token) const {
 
 #if AVER_MODULE_PARTICLES
 void GameContent::loadProjectParticleEffects() {
-    // The table is process-global: without this a reload keeps effects whose files are gone.
+    // Clear process-global table on reload.
     particles::particleEffects().clear();
     const std::string dir = project_.contentDir();
     if (dir.empty()) return;
@@ -1346,9 +1093,7 @@ void GameContent::loadProjectParticleEffects() {
             continue;
         }
 
-        // The SAME id a CParticleEmitter::effect placed by a level or set by a script names --
-        // see this method's own header comment on why that is fnv1a64(relative path) and not
-        // something GameContent invents.
+        // Effect id is fnv1a64(relative path), matches CParticleEmitter::effect.
         particles::particleEffects().set(fnv1a64(std::string_view(rel)), fx);
         ++loaded;
     }
@@ -1358,8 +1103,7 @@ void GameContent::loadProjectParticleEffects() {
 }
 #endif // AVER_MODULE_PARTICLES
 
-// OUTSIDE EVERY GUARD, matching the declaration -- see GameContent.hpp for why a lookup in
-// the content index's mesh table is not scene state, and what an empty table means.
+// Mesh lookup in content index; empty table means no scene state.
 rhi::MeshHandle GameContent::meshFor(u64 id) const {
     const auto it = sceneMeshes_.find(id);
     return it == sceneMeshes_.end() ? 0 : it->second;

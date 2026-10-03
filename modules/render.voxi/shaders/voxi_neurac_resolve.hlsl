@@ -1,26 +1,12 @@
-// voxi_neurac_resolve.hlsl -- the radiance cache's once-per-frame RESOLVE (and its rare clear).
-// See NeuRaC.hpp / docs/rendering/NEURAC.md.
-//
-// WHAT IT DOES: the trace twins scatter fixed-point SH sums into gRcAccum (voxi_neurac_io.hlsli);
-// this pass, one thread per cell, turns those sums into the running mean the lookup reads in gRcCells,
-// then zeroes the sums for the next frame. The ONLY thing it shares with the scatter is the layout in
-// voxi_neurac.hlsli, which is pure maths and declares no resources, so it can be included here
-// BEFORE this file's own declarations (the Voxi table's t22/u20/u21 do not exist in this pipeline; this
-// pass has its own layout: t0 info, u0 accumulator, u1 cells).
-//
-// ACCUMULATOR LAYOUT (NeuRaCLayout.hpp): counts region [0, cells), then 15 ints per cell at
-// cells + cell*15 + k (k 0..11 SH [c0.rgb, cY.rgb, cZ.rgb, cX.rgb], 12..14 summed normal).
-//
-// WHY THE COUNTS ARE READ FIRST: ~90% of cells are empty on any frame. Reading one int per cell is a
-// contiguous 3 MB stream; touching the cell and payload lines of an empty cell would not be.
+// Resolve: SH sums to running mean, zero accumulator for next frame.
+// ACCUMULATOR: counts [0, cells), then 15 ints per cell.
 #include "voxi_neurac.hlsli"
 
 StructuredBuffer<RcInfo>      gRcInfo  : register(t0);
 RWStructuredBuffer<int>       gRcAccum : register(u0);
 RWStructuredBuffer<RcCell>    gRcCells : register(u1);
 
-// This file's own copies of the geometry numbers (NeuRaCLayout.hpp is the source; RCR_ prefix so
-// they cannot collide with whatever the shared header #defines).
+// RCR_ prefix prevents collision with shared header #defines.
 #define RCR_RES      64u
 #define RCR_PER_CASC 262144u     // 64^3
 #define RCR_CELLS    786432u     // 3 * 64^3
@@ -40,7 +26,7 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
     const RcInfo info = gRcInfo[0];
     const uint payloadBase = RCR_CELLS + cell * RCR_PAYLOAD;
 
-    // CLEAR_ALL: first frame / requestReset(). Zero the cell, its count and its payload and stop.
+    // CLEAR_ALL flag: zero cell and return.
     if ((info.hdr0.x & RCR_FLAG_CLEAR_ALL) != 0u)
     {
         RcCell zero;
@@ -52,19 +38,17 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
         return;
     }
 
-    // Contributing samples: the scatter counts every attempt but only the first `cap` add payload.
+    // Limit samples by cap.
     const uint cap = min(info.hdr0.w, (uint)AVER_RC_MAX_CAP);
     const uint n   = min((uint)gRcAccum[cell], cap);
 
-    // Aging runs on a fixed cadence so the per-frame cost of an idle cell is the single count read.
+    // Aging: fixed cadence per frame.
     const uint ageStep   = info.hdr0.z;
     const bool agingFrame = ageStep != 0u && (info.hdr0.y % ageStep) == 0u;
 
     if (n == 0u && !agingFrame) return;
 
-    // Which world cell this texel stands for NOW: the window slides one cell per camera step, and a texel
-    // is world & 63 per axis, so the world cell is the window's origin plus the texel's offset from it.
-    // int & on a negative value is two's complement, which is exactly the modulo wanted.
+    // World cell: window origin + (texel - origin) & 63.
     const uint cascade = cell / RCR_PER_CASC;
     const uint local   = cell - cascade * RCR_PER_CASC;
     const int3 texel   = int3(local & 63u, (local >> 6) & 63u, local >> 12);
@@ -80,8 +64,7 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
 
     if (n == 0u)
     {
-        // Aging frame, no samples. An empty cell has nothing to age; an occupied one (even one carrying
-        // a stale tag from before the window slid) gets one step older and is emptied at the limit.
+        // Aging frame with no samples: occupied cells age and empty at limit.
         if (nEff == 0u) return;
         const uint nextAge = age + 1u;
         if (nextAge >= (uint)AVER_RC_AGE_MAX)
@@ -98,7 +81,7 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
         return;
     }
 
-    // Sample mean: the sums are fixed point (x scale) over n contributing samples.
+    // Sample mean: fixed point (scale AVER_RC_SH_SCALE) over n samples.
     const float shInv = 1.0 / ((float)n * (float)AVER_RC_SH_SCALE);
     float3 mean[4];
     [unroll] for (uint j = 0; j < 4; ++j)
@@ -117,8 +100,7 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
     uint newNEff = 1u;
     if (valid)
     {
-        // alpha = max(1/(n_eff+1), alphaMin): a fresh cell converges at 1/k (the exact running mean),
-        // a mature one keeps a floor so a lighting change still shows. Per frame, not per sample.
+        // Blend rate: 1/(n_eff+1) with minimum for lighting changes (per frame).
         const float alpha = max(1.0 / ((float)nEff + 1.0), info.hdr1.x);
         float3 old[4];
         rcUnpackSh(stored.a, stored.b.xy, old);
@@ -128,8 +110,7 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
         nMean = lerp(oldDir * oldLen, nMean, alpha);
         newNEff = min(nEff + 1u, (uint)AVER_RC_NEFF_MAX);
     }
-    // An invalid cell (empty, or a previous occupant's tag from before the window slid) is replaced
-    // outright: blending a different world cell's light into this one would be a leak.
+    // Invalid cell (stale tag): replace to avoid light leak.
 
     uint w6[6];
     rcPackSh(sh, w6);
@@ -138,7 +119,7 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
     outCell.b = uint4(w6[4], w6[5], rcPackNormal(nMean), rcrMeta(expectedTag, newNEff, 0u));
     gRcCells[cell] = outCell;
 
-    // Re-arm the accumulator for the next frame's scatter: count and all 15 payload ints.
+    // Reset accumulator for next frame's scatter.
     gRcAccum[cell] = 0;
     [unroll] for (uint k = 0; k < RCR_PAYLOAD; ++k) gRcAccum[payloadBase + k] = 0;
 }

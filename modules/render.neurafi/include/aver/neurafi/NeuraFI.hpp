@@ -1,21 +1,5 @@
 // NeuraFI -- frame interpolation (docs/rendering/NEURAFI.md): the
 // rhi::IFrameInterpolator the hosts install on the device.
-//
-// WHAT IT OWNS: the previous real frame (colour, motion, view depth -- copied after every generate()),
-// the generated image and a scratch image for the fill, and compute pipelines built from
-// shaders/neurafi.hlsl. Everything is scene resolution and recreated on a size change, which also
-// forgets the previous frame.
-//
-// THE TRAJECTORY (Â§3.5). The gather follows either straight lines (Linear: milestone 1, the default),
-// a quadratic path through three frames with an analytic acceleration (Quadratic), or the same path
-// with the acceleration predicted by a small network (Neural: Aver.Render.Neural's Mlp). The network
-// only ever outputs an acceleration -- never colour, a weight, a mask or a confidence -- and is trained
-// in-engine, self-supervised, on purely geometric targets taken from ordinary real frames (training
-// keeps two more frames of motion history). Neural uses the analytic acceleration until the network has
-// weights (loaded, or kWarmSteps steps) AND its measured error beats the analytic one (the gate, below).
-//
-// Backend-agnostic: only the generic RHI. NOT THREAD-SAFE; generate() records into the context the
-// device is recording the frame with.
 #pragma once
 
 #include "aver/core/Types.hpp"
@@ -29,8 +13,7 @@ namespace aver::neurafi {
 
 enum class Trajectory : u32 { Linear = 0, Quadratic = 1, Neural = 2 };
 
-// What visualisation() shows (neurafi.hlsl's vizColour has the colour legend). Values are the shader's
-// gViz.
+// Visualisation modes shown by visualisation() (see neurafi.hlsl's vizColour for legend).
 enum class Visualisation : u32 {
     None = 0,
     Sources = 1,       // which real frame each pixel came from (orange N, blue N-1), holes magenta
@@ -54,11 +37,8 @@ public:
     void setTrajectory(Trajectory t) { trajectory_ = t; }
     Trajectory trajectory() const { return trajectory_; }
 
-    // THE VISUALISATION: a scene-resolution image of display-ready colours (alpha 1), written by the
-    // gather while `v` is not None, for the host to draw over its viewport. `bendFullScalePx` is the
-    // path bend (PathBend, NetworkShare) shown at full heat. visualisation() is 0 until one was made.
-    // vizCount() advances with every generate() that wrote it, so a host can tell a fresh image from
-    // one left over from before frame interpolation paused. Rests in ShaderResource (pixel-readable).
+    // Scene-resolution visualisation image for the host to draw over its viewport.
+    // bendFullScalePx: full-heat scale for path bend. Rests in ShaderResource.
     void setVisualisation(Visualisation v, f32 bendFullScalePx) {
         viz_ = v;
         vizScale_ = bendFullScalePx > 1e-3f ? bendFullScalePx : 1e-3f;
@@ -70,9 +50,7 @@ public:
     // Where the user's trained weights are loaded from at first use and saved to while training
     // ("" = never). Takes precedence over the shipped weights.
     void setWeightsPath(std::string path) { weightsPath_ = std::move(path); }
-    // The weights trained by the engine's makers and shipped with it (bin/data), read-only: loaded when
-    // the user has none of their own. Its ".steps" sidecar carries the gate's verdict, so a user who
-    // never trains still gets the network wherever it was measured to beat the quadratic.
+    // Shipped pre-trained weights (bin/data), read-only. Its ".steps" sidecar carries the gate's verdict.
     void setShippedWeightsPath(std::string path) { shippedWeightsPath_ = std::move(path); }
     // The file name both live under. "_v2": the network predicts a CORRECTION to the analytic
     // acceleration since v2; a v1 file (the whole acceleration) has the same shape and must not load.
@@ -84,19 +62,13 @@ public:
     static constexpr u32 kEvalEverySteps = 100;   // evaluateBatch's cadence
     static constexpr u32 kTrainSamples = 2000;   // records per step; within Mlp::safeBatchLimit() (2047)
 
-    // THE GATE. One batch's score is noisy (measured: the network ranged 0.045-0.180 px against a steady
-    // 0.11 for the quadratic), so both errors are smoothed (EMA, kEvalSmoothing) and the network is
-    // used only while ITS smoothed error is below the quadratic's, after kEvalsToJudge checks. The
-    // verdict is saved beside the weights, so a session that does not train still knows it. Learned
-    // is therefore never worse than Quadratic on the measured data.
+    // Gate: both errors are smoothed (EMA, kEvalSmoothing) and the network is used only while its error
+    // is below the quadratic's, after kEvalsToJudge checks. Verdict is saved beside the weights.
     static constexpr f32 kEvalSmoothing = 0.2f;
     static constexpr u32 kEvalsToJudge = 3;
     static constexpr f32 kGateEnter = 0.9f;   // must be 10% better than the quadratic to switch in
 
-    // THE LEARNING-RATE SCHEDULE. Constant-rate Adam kept chasing each new batch: the measured error
-    // rose from 0.047 to 0.090 px over 2,000 more steps at 1e-3. Inverse decay over the network's
-    // LIFETIME step count (saved beside the weights, so a new session continues where the last
-    // stopped instead of restarting hot): lr = kLearningRate / (1 + steps / kDecaySteps), floored.
+    // Learning-rate schedule: inverse decay over the network's lifetime step count.
     static constexpr f32 kLearningRate = 5e-4f;
     static constexpr f32 kDecaySteps = 1000.0f;
     static constexpr f32 kLearningRateFloor = 2e-5f;
@@ -141,10 +113,9 @@ private:
     rhi::TextureHandle histVel2_ = 0, histZ2_ = 0, histVel3_ = 0, histZ3_ = 0;
     // The generated image and the fill's ping-pong partner. Rest in ShaderResource.
     rhi::TextureHandle out_ = 0, tmp_ = 0;
-    // The acceleration image, one texel per block_ x block_ pixels, and the network's share of it (written
-    // only for the NetworkShare visualisation). Both rest in NonPixelShaderResource.
+    // The acceleration image and the network's share of it. Both rest in NonPixelShaderResource.
     rhi::TextureHandle accel_ = 0, accelNet_ = 0;
-    // The visualisation (see setVisualisation). Rests in ShaderResource.
+    // The visualisation. Rests in ShaderResource.
     rhi::TextureHandle vizTex_ = 0;
     Visualisation viz_ = Visualisation::None;
     f32 vizScale_ = 0.5f;
@@ -175,8 +146,7 @@ private:
     bool collectReadsWeights_ = false;  // training: the GPU weights were read back too
     u32 checkFrames_ = 0;               // frames that built check records
     bool loggedNetworkLive_ = false;
-    // THE EVIDENCE: with each weight save, the batch just trained on is read back too and scored on the
-    // CPU (MlpReference, the network's twin) against the two procedural paths -- see evaluateBatch.
+    // The batch just trained on is read back and scored on the CPU (MlpReference) against the two procedural paths.
     rhi::BufferHandle evalRec_ = 0, evalTgt_ = 0, evalCount_ = 0;   // Readback
     void evaluateBatch();
 
