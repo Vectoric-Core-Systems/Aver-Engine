@@ -110,7 +110,6 @@ void SandboxApp::loadEditorPreferences() {
     // wherever the network was not measured to beat it.
     frameInterpTrajectory_ = prefInt("display.frameInterpTrajectory", 2);
     frameInterpTrain_ = prefBool("display.frameInterpTrain", false);
-    frameInterpClockHz_ = prefFloat("display.frameInterpClock", 0.0f);
     fpsCountsInterpolated_ = prefBool("display.fpsCountsInterpolated", true);
     // A stored render scale applies behind a crash cookie: applying one below 1 can lose the GPU
     // device -- a persisted setting that kills the device at startup is a trap with no way out
@@ -352,25 +351,6 @@ void SandboxApp::buildEditorPrefs() {
             ImGui::TextDisabled(prefsDevice_->sampleCount() > 1 ? "(paused: needs 1x anti-aliasing)"
                                 : prefsDevice_->frameInterpolated() ? "(running)"
                                                                  : "(starting)");
-        }
-
-        // THE FIXED TARGET (NEURAFI.md §5): frames shown per second; real frames run at half, each
-        // followed by a generated one exactly halfway. A constant, never measured from the frames.
-        {
-            const f32 refresh = prefsDevice_ ? prefsDevice_->displayRefreshRate() : 0.0f;
-            const f32 shownDefault = refresh > 0.0f ? refresh : 60.0f;
-            f32 shown = frameInterpClockHz_ > 0.0f ? frameInterpClockHz_ : shownDefault;
-            if (ImGui::SliderFloat("Frames shown per second", &shown, 20.0f, vs ? shownDefault : 500.0f,
-                                   "%.0f"))
-                frameInterpClockHz_ = (refresh > 0.0f && std::fabs(shown - refresh) < 0.5f) ? 0.0f : shown;
-            ImGui::SameLine();
-            ImGui::TextDisabled("(%.0f real)", shown * 0.5f);
-            if (ImGui::IsItemHovered() || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Frame interpolation doubles the frame rate: real frames run at half this\n"
-                                  "rate and a generated frame is shown exactly halfway between each two.\n"
-                                  "Set it to twice what the scene can render, e.g. 30 for a 15 fps scene.\n"
-                                  "With V-Sync on it snaps to whole refreshes of the display (%.0f Hz).",
-                                  shownDefault);
         }
 
         // The path the in-between frame's pixels are gathered along (NEURAFI.md §3.5).
@@ -2436,7 +2416,6 @@ void SandboxApp::saveEditorPreferences() {
         setPrefBool("display.frameInterpWhileEditing", frameInterpWhileEditing_);
         setPrefInt("display.frameInterpTrajectory", frameInterpTrajectory_);
         setPrefBool("display.frameInterpTrain", frameInterpTrain_);
-        setPrefFloat("display.frameInterpClock", frameInterpClockHz_);
         setPrefBool("display.fpsCountsInterpolated", fpsCountsInterpolated_);
         // The three AverSR keys below are skipped outright, not written a neutral value, when the
         // command line drove this session's render scale or AverSR level: an interactive `--aversr

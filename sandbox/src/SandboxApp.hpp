@@ -1615,14 +1615,12 @@ public:
     void setResizeCycle(int n);              // --resize-cycle [N]
     void setFrameInterpCli(int on) { frameInterpCli_ = on; }   // --frame-interp 0|1|2 (2: capture the generated image)
     void setFrameInterpTrajectory(int t, bool train) { frameInterpTrajectoryCli_ = t; frameInterpTrainCli_ = train; }
-    // --neurafi-view, --neurafi-generated-only, --neurac-view, --neurac-grid (negative = not given) and
-    // --frame-interp-clock (negative = not given; outranks the Editor Preference).
-    void setNeuralVisualiserCli(int neurafiView, bool generatedOnly, int neuracView, bool neuracGrid, f32 clockHz) {
+    // --neurafi-view, --neurafi-generated-only, --neurac-view, --neurac-grid (negative = not given).
+    void setNeuralVisualiserCli(int neurafiView, bool generatedOnly, int neuracView, bool neuracGrid) {
         if (neurafiView >= 0) neurafiVizMode_ = neurafiView;
         if (generatedOnly) neurafiShowGeneratedOnly_ = true;
         if (neuracView >= 0) neuracViewMode_ = neuracView;
         if (neuracGrid) neuracViewGrid_ = true;
-        frameInterpClockCli_ = clockHz;
     }
     void setGpuTiming(bool on);                                // --gpu-timing
     void setLumaSweep(bool on, int stride);
@@ -4078,10 +4076,6 @@ private:
     // per-machine quality choice, like AverSR's Display setting). The CLI flags outrank them.
     int  frameInterpTrajectory_ = 2;         // neurafi::Trajectory (0 straight, 1 quadratic, 2 learned)
     bool frameInterpTrain_ = false;
-    // Preferences display.frameInterpClock: with V-Sync off, images per second (generated + real) on the
-    // device's fixed present clock; 0 = the display's refresh rate (IDevice::setFrameInterpClock).
-    f32  frameInterpClockHz_ = 0.0f;
-    f32  frameInterpClockCli_ = -1.0f;       // --frame-interp-clock; negative = not given
     int  frameInterpTrajectoryCli_ = -1;     // --frame-interp-trajectory; -1 = not given
     bool frameInterpTrainCli_ = false;       // --frame-interp-train
     // The status bar's frame rate counts interpolated frames too (real + interpolated) or real frames

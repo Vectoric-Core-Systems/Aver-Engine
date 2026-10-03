@@ -5559,6 +5559,12 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             if (gx && gy) ctx.dispatch(gx, gy, 1);
             stageEnd(rdGiTex_);
         }
+        // FRAME MIDPOINT (IDevice::frameMidpoint): with frame interpolation the previous frame's real
+        // image is presented once the GPU gets here -- after the GI stage, the largest single piece of
+        // the frame, which puts it near the middle (Sponza at 0.5: about 7 of 15 ms). The stages after
+        // it are independent of the GI stage's output until the barriers below, so splitting the
+        // submission here changes nothing they see.
+        if (dev_) dev_->frameMidpoint();
 
         // CSRdSkyOcc: CPU mirror of PSRayDriven's own sky-occlusion condition -- covers the cases
         // where rdAo would otherwise still read its initial 1.0 and rdAoGathered stays false (ReSTIR

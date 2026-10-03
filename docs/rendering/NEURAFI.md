@@ -330,14 +330,24 @@ budget), translucent layers (by design no motion/depth — the trust mask covers
   vsync off: Sponza 60 + 60 (67 real without interpolation), NeonDistrict 44.5 + 44.5 (59 without; it is
   at the VRAM limit). In a composed window the display still shows at most its refresh rate.
   Debug layer: 0 errors.
-- **The fixed target (2026-10-03).** One setting, "Frames shown per second" (`IDevice::setFrameInterpClock`,
-  default the refresh rate). Real frames run at half the target, each followed by a generated frame
-  halfway. With vsync, every present (generated and real) uses sync interval round(refresh / target),
-  1-4, so on 60 Hz a target of 30 holds each image for 2 refreshes: 15 real, 30 shown, evenly spaced.
-  Without vsync the fixed clock runs at the target. This follows the fixed-cadence prior art
-  (NEURAFI_PATENTS.md §6.1): the rate is the user's constant. Why: the owner found NeonDistrict (15 real
-  fps) felt no smoother with interpolation. A back-to-back interval-1 pair at that rate shows the
-  generated frame for 1 refresh and the real one for 3 (reasoned from the cadence, not measured).
+- **The midpoint present: doubling at any frame rate, nothing timed (2026-10-03; replaced the fixed
+  target and clock the same day).**
+  - Each frame's generated image is queued when that frame's work ends.
+  - Its real image is held back. At a fixed point in the next frame's command stream, `IDevice::frameMidpoint()`
+    (Voxi calls it after the ray-driven GI stage), the work so far is submitted and the real image is
+    queued behind it. The present thread can only show that image once the GPU has done that work.
+  - So real and generated images alternate at the GPU's own pace, with the generated frame roughly halfway.
+    No clock, target, frame time or present statistic decides anything. The schedule is the order of the
+    work in the queue, and the real image costs half a frame of latency. The owner's "one frame back" idea.
+  - Frames that never call the midpoint (no staged ray-driven pass) fall back to the old order: the real
+    image goes just before the next generated one.
+  - *Measured* (0.5, vsync off, Release):
+    - Sponza: 67 real FPS off; on, 57 real and **2.00 images per frame** (114 shown).
+    - NeonDistrict: 52 off; on, 43 real and 2.00 per frame (86 shown).
+  - Debug layer: 0 errors, once the midpoint restored the scene's render targets, viewport and topology
+    after reopening the list (without that: #615 twice a frame).
+  - Patent note: the display time comes from where the present sits in the GPU work, not from metrics of
+    rendered frames (AMD US 2025/0299287 claims timing derived from rendering metrics). Counsel to confirm.
 - **Without vsync (tearing), since 2026-10-03:** frame interpolation runs, on a **fixed present clock**
   (`D3D12Device::frameInterpWaitForTick`). Each image, generated then real, is presented with
   `ALLOW_TEARING` on the next tick of a clock running at a **constant** rate: the display's refresh rate

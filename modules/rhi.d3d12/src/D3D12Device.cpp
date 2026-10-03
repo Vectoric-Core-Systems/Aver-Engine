@@ -946,10 +946,11 @@ public:
     bool frameInterpolated() const override { return frameInterpolated_; }
     void setFrameInterpCaptureGenerated(bool on) override { fgCaptureGenerated_ = on; }
     void setFrameInterpShowGeneratedOnly(bool on) override { fgShowGeneratedOnly_ = on; }
-    void setFrameInterpClock(f32 imagesPerSecond) override {
-        fgClockHz_ = imagesPerSecond > 0.0f ? imagesPerSecond : 0.0f;
-    }
     f32 displayRefreshRate() const override { return fgDisplayHz_; }
+    void frameMidpoint() override;
+    // How every image is presented: vsync on, interval 1; off, torn where the display path allows it.
+    UINT presentSync() const { return vsync_ ? 1u : (tearingSupported_ ? 0u : 1u); }
+    UINT presentFlags() const { return (!vsync_ && tearingSupported_) ? DXGI_PRESENT_ALLOW_TEARING : 0u; }
     void noteSceneCut() override { frameInterpCut_ = true; }
     void notifyRenderTargetsChanged();
     // Creates or resizes the factory texture the scene renders into for the viewport.
@@ -1287,7 +1288,6 @@ private:
         u64 ready;        // readyFence_ value the render queue signals once the image is drawn
         u64 serial;       // doneFence_ value this thread signals once the image has been copied
         UINT sync, flags;
-        f64 clockHz;      // > 0: present on the fixed clock's next tick (vsync off, interpolating)
     };
     static constexpr u32 kPresentAllocs = 4;
     static constexpr usize kPresentQueueMax = 4;   // requests waiting; the render thread waits beyond
@@ -1308,12 +1308,12 @@ private:
     bool presentStop_ = false;
     HRESULT presentError_ = S_OK;
     std::atomic<u64> presentBlockedUs_{0};         // time the present thread spent inside Present
+    std::atomic<u64> presentCount_{0};             // Presents the present thread made (the report resets it)
     bool startPresentThread();
     void stopPresentThread();
     void drainPresents();                          // waits until every queued image has been presented
     void presentThreadMain();
-    bool queuePresent(u32 image, UINT sync, UINT flags, f64 clockHz);
-    void interpPresentMode(UINT& sync, UINT& flags, f64& clockHz) const;
+    bool queuePresent(u32 image, UINT sync, UINT flags);
     u32 realImage_ = 0;                            // the present image this frame's real image is drawn into
     void waitImageFree(u32 image);                 // GPU-side: the render queue waits for the copy
     bool createPresentImages();
@@ -1424,36 +1424,35 @@ private:
     bool fgCaptureGenerated_ = false;       // diagnostics: captures take the generated image
     bool fgShowGeneratedOnly_ = false;      // visualisation: the real image's slot shows the generated one too
     bool captureRecorded_ = false;          // this frame recorded the capture copy (present() reads it)
-    // ---- without vsync: the FIXED present clock (NEURAFI.md §5) ----
-    // Each image (generated, then real) is presented on the next tick of a clock running at a CONSTANT
-    // rate: fgClockHz_ (the host's setting) or, at 0, the display's refresh rate. Nothing measured --
-    // no frame time, GPU time or present statistic -- sets the rate or a tick (AMD US 2025/0299287 claims
-    // display timing derived from rendering metrics). It is an ordinary frame-rate cap: sleep to the tick,
-    // present; a present that comes later than a whole tick restarts the clock from now.
-    f32 fgClockHz_ = 0.0f;
     f32 fgDisplayHz_ = 0.0f;                // queried at swapchain creation and on every resize
-    i64 fgNextTick_ = 0;                    // QueryPerformanceCounter units; 0 = the clock is not running
-    HANDLE fgTimer_ = nullptr;              // high-resolution waitable timer for the sleep
-    void frameInterpWaitForTick(f64 hz);   // present thread only (fgNextTick_, fgTimer_ are its own)
     void queryDisplayRefresh();
-    // CPU WAIT ACCOUNTING (with --gpu-timing): where a frame's CPU time goes blocked -- the start-of-frame
-    // fence wait, the generated image's Present, the real image's Present. Logged every kWaitReport frames.
+    // ---- THE MIDPOINT PRESENT (IDevice::frameMidpoint; NEURAFI.md §5) ----
+    // An interpolated frame's real image is not queued at the end of its own frame: it waits here and is
+    // queued at the NEXT frame's midpoint, behind the GPU work recorded before it, so the present thread
+    // can only show it once the GPU is halfway through that frame. The generated image goes at the end of
+    // each frame. Real and generated therefore alternate at the GPU's own pace -- exactly double the real
+    // rate -- with no clock and nothing measured.
+    bool pendingReal_ = false;
+    u32 pendingRealImage_ = 0;
+    UINT pendingRealSync_ = 1, pendingRealFlags_ = 0;
+    bool recording_ = false;                // cmdList_ is open between beginFrame and endFrame's submit
+    ComPtr<ID3D12CommandAllocator> allocatorsMid_[kFrameCount];   // the list reopened after a midpoint
+    // The scene pass's bindings as beginFrame made them, restored after the midpoint reopens the list.
+    D3D12_CPU_DESCRIPTOR_HANDLE sceneRtvs_[4] = {};
+    u32 sceneRtvCount_ = 1;
+    D3D12_CPU_DESCRIPTOR_HANDLE sceneDsv_ = {};
+    D3D12_VIEWPORT sceneVp_ = {};
+    D3D12_RECT sceneSc_ = {};
+    // CPU WAIT ACCOUNTING (with --gpu-timing): where a frame's CPU time goes blocked. Logged every
+    // kWaitReport frames.
     static constexpr u32 kWaitReport = 300;
-    f64 waitFenceMs_ = 0.0, waitGenPresentMs_ = 0.0, waitPresentMs_ = 0.0, waitTickMs_ = 0.0;
+    f64 waitFenceMs_ = 0.0, waitPresentMs_ = 0.0;
     u32 waitFrames_ = 0;
     static f64 qpcMs(i64 a, i64 b) {
         LARGE_INTEGER f; QueryPerformanceFrequency(&f);
         return static_cast<f64>(b - a) * 1000.0 / static_cast<f64>(f.QuadPart);
     }
     static i64 qpcNow() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
-    // With vsync: refreshes each image is held for, so the images go out at fgClockHz_ (rounded to a
-    // whole number of refreshes; 1 at the refresh rate). Generated and real alternate on that fixed
-    // beat -- a generated image always sits exactly halfway between two real ones.
-    UINT frameInterpVsyncInterval() const {
-        if (!(fgClockHz_ > 0.0f) || !(fgDisplayHz_ > 0.0f)) return 1u;
-        const f32 n = std::round(fgDisplayHz_ / fgClockHz_);
-        return n < 1.0f ? 1u : (n > 4.0f ? 4u : static_cast<UINT>(n));
-    }
 
     // Per-pass GPU timing: a whole-frame CPU delta can't say which pass is expensive (five wrong
     // theories -- shadow cascades, scene walk, chunk streaming, volumetric clouds, build config --
@@ -2683,7 +2682,6 @@ D3D12Device::~D3D12Device() {
     stopPresentThread();
     drainPresents();
     if (presentEvent_) CloseHandle(presentEvent_);
-    if (fgTimer_) CloseHandle(fgTimer_);
     if (infoQueue_) {
         drainDebugMessages();
         AVER_INFO("[RHI.D3D12] debug layer totals: {} corruption, {} error, {} warning",
@@ -3302,6 +3300,7 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
     for (u32 i = 0; i < kFrameCount; ++i) {
         if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocators_[i])), "CreateCommandAllocator")) return false;
         if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocatorsGen_[i])), "CreateCommandAllocator (frame interpolation)")) return false;
+        if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocatorsMid_[i])), "CreateCommandAllocator (frame midpoint)")) return false;
     }
     if (!hrOk(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocators_[0].Get(), nullptr, IID_PPV_ARGS(&cmdList_)), "CreateCommandList")) return false;
     // Same reasoning as the queue's name just above: this is the ONE command list every draw and
@@ -3448,11 +3447,10 @@ void D3D12Device::presentThreadMain() {
         ID3D12CommandList* lists[] = {presentList_.Get()};
         presentQueue_->ExecuteCommandLists(1, lists);
 
-        if (r.clockHz > 1.0) frameInterpWaitForTick(r.clockHz);
-        else fgNextTick_ = 0;
         const i64 t0 = qpcNow();
         const HRESULT hr = swapChain_->Present(r.sync, r.flags);
         presentBlockedUs_ += static_cast<u64>(qpcMs(t0, qpcNow()) * 1000.0);
+        ++presentCount_;
         presentQueue_->Signal(doneFence_.Get(), r.serial);
         presentAllocUse_[slot] = r.serial;
         {
@@ -3467,13 +3465,13 @@ void D3D12Device::presentThreadMain() {
 // Called right after the command list that drew `image` was submitted to the render queue. Never calls
 // Present itself; blocks only while kPresentQueueMax requests are already waiting (the display cannot
 // keep up -- the back-pressure that bounds latency). False once a Present has failed with a lost device.
-bool D3D12Device::queuePresent(u32 image, UINT sync, UINT flags, f64 clockHz) {
+bool D3D12Device::queuePresent(u32 image, UINT sync, UINT flags) {
     if (FAILED(queue_->Signal(readyFence_.Get(), readySerial_ + 1))) {
         noteDeviceRemoved("the present-image fence signal", DXGI_ERROR_DEVICE_REMOVED);
         return false;
     }
     ++readySerial_;
-    PresentRequest r{image, readySerial_, ++requestSerial_, sync, flags, clockHz};
+    PresentRequest r{image, readySerial_, ++requestSerial_, sync, flags};
     imageLastUse_[image] = r.serial;
     HRESULT err = S_OK;
     const i64 t0 = qpcNow();
@@ -4220,6 +4218,7 @@ void D3D12Device::beginFrame() {
     ++frameSerial_;   // after the wait: this slot's previous frame has retired (see frameSerial_)
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
+    recording_ = true;
     boundRootSig_ = nullptr;
     boundPso_ = pso_.Get();   // Reset's second argument IS the command list's initial bound PSO
     // Reset() does not carry descriptor heaps forward either -- a freshly reset command list has
@@ -4312,7 +4311,11 @@ void D3D12Device::beginFrame() {
             gbufNormalRoughRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
         };
         cmdList_->OMSetRenderTargets(4, rtvs, FALSE, &dsv);
+        for (u32 i = 0; i < 4; ++i) sceneRtvs_[i] = rtvs[i];
+        sceneRtvCount_ = 4;
     } else {
+        sceneRtvs_[0] = rtv;
+        sceneRtvCount_ = 1;
         // EXACTLY the call this line made before the G-buffer existed: 1 render target, the DSV.
         // "Feature disabled" (gbufferEnabled_ == false -- every build today) and "feature enabled
         // but MSAA makes it unbindable" both reproduce this identical bind, which is the guarantee
@@ -4352,6 +4355,9 @@ void D3D12Device::beginFrame() {
     D3D12_RECT sc{static_cast<LONG>(rx), static_cast<LONG>(ry), static_cast<LONG>(rx + rw), static_cast<LONG>(ry + rh)};
     cmdList_->RSSetViewports(1, &vp);
     cmdList_->RSSetScissorRects(1, &sc);
+    sceneDsv_ = dsv;
+    sceneVp_ = vp;
+    sceneSc_ = sc;
 
     bindGraphicsRoot(rootSig_.Get());
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -6290,36 +6296,29 @@ void D3D12Device::endFrame() {
     // it would be two API misuses stacked on top of a failure that has already been reported.
     if (deviceLost_) return;
     cmdList_->Close();
+    recording_ = false;
     ID3D12CommandList* lists[] = {cmdList_.Get()};
     waitImageFree(realImage_);
     queue_->ExecuteCommandLists(1, lists);
     if (infoQueue_) drainDebugMessages();
 }
 
-// How an interpolated frame's images are presented. With vsync: each held for frameInterpVsyncInterval
-// refreshes. Without: torn, on the fixed clock's next tick at the target rate (fgClockHz_, else the
-// display's refresh rate). Nothing measured decides when either is shown (NEURAFI.md §5).
-void D3D12Device::interpPresentMode(UINT& sync, UINT& flags, f64& clockHz) const {
-    const bool tearing = !vsync_ && tearingSupported_;
-    sync = vsync_ ? frameInterpVsyncInterval() : 0u;
-    flags = tearing ? DXGI_PRESENT_ALLOW_TEARING : 0u;
-    clockHz = tearing ? (fgClockHz_ > 0.0f ? fgClockHz_ : fgDisplayHz_) : 0.0;
-}
-
 // Closes and submits everything recorded so far (the scene, the generator, the generated image's post
 // chain, overlays and UI), hands the generated image to the present thread, and reopens the command
-// list on the slot's second allocator for the real image. False when the device was lost (nothing more
-// is recorded). Every cache of bound GPU state is dropped: a reset list has nothing bound.
+// list on the slot's second allocator for the real image. A previous real image no midpoint picked up
+// goes first, so the order on screen stays real, generated, real. False when the device was lost
+// (nothing more is recorded). Every cache of bound GPU state is dropped: a reset list has nothing bound.
 bool D3D12Device::submitGeneratedImage() {
     if (deviceLost_) return false;
     cmdList_->Close();
     ID3D12CommandList* lists[] = {cmdList_.Get()};
     waitImageFree(bbIndex_);
     queue_->ExecuteCommandLists(1, lists);
-    UINT sync = 1, flags = 0;
-    f64 clockHz = 0.0;
-    interpPresentMode(sync, flags, clockHz);
-    if (!queuePresent(bbIndex_, sync, flags, clockHz)) return false;
+    if (pendingReal_) {
+        pendingReal_ = false;
+        if (!queuePresent(pendingRealImage_, pendingRealSync_, pendingRealFlags_)) return false;
+    }
+    if (!queuePresent(bbIndex_, presentSync(), presentFlags())) return false;
     allocatorsGen_[frameIndex_]->Reset();
     cmdList_->Reset(allocatorsGen_[frameIndex_].Get(), nullptr);
     boundRootSig_ = nullptr; boundPso_ = nullptr; boundHeap_ = nullptr;
@@ -6327,38 +6326,27 @@ bool D3D12Device::submitGeneratedImage() {
     return true;
 }
 
-// Without vsync: sleeps until the fixed clock's next tick, then advances it by one period. The rate is
-// a constant (fgClockHz_, else the display's refresh rate) -- see fgClockHz_'s comment for why nothing
-// measured may set it. Late by up to one period: no sleep, the tick still advances by one period (the
-// clock catches up). Later than that: no sleep, the clock restarts from now.
-void D3D12Device::frameInterpWaitForTick(f64 hz) {
-    if (!(hz > 1.0)) { fgNextTick_ = 0; return; }   // no rate known: present at once
-    LARGE_INTEGER freq, now;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&now);
-    const i64 period = static_cast<i64>(static_cast<f64>(freq.QuadPart) / hz);
-    if (fgNextTick_ == 0 || now.QuadPart > fgNextTick_ + period) {
-        fgNextTick_ = now.QuadPart + period;
-        return;
-    }
-    if (now.QuadPart < fgNextTick_) {
-        // The waitable timer to ~1 ms before the tick (its own resolution), then a short spin.
-        const i64 spin = freq.QuadPart / 1000;
-        if (fgNextTick_ - now.QuadPart > spin) {
-            if (!fgTimer_) {
-                fgTimer_ = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-                                                  TIMER_ALL_ACCESS);
-                if (!fgTimer_) fgTimer_ = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
-            }
-            const i64 sleepTicks = fgNextTick_ - now.QuadPart - spin;
-            LARGE_INTEGER due;
-            due.QuadPart = -static_cast<LONGLONG>(static_cast<f64>(sleepTicks) * 1.0e7 / static_cast<f64>(freq.QuadPart));
-            if (fgTimer_ && SetWaitableTimer(fgTimer_, &due, 0, nullptr, nullptr, FALSE))
-                WaitForSingleObject(fgTimer_, 1000);
-        }
-        do { YieldProcessor(); QueryPerformanceCounter(&now); } while (now.QuadPart < fgNextTick_);
-    }
-    fgNextTick_ += period;
+// IDevice::frameMidpoint: submits the work recorded so far, queues the previous frame's held-back real
+// image behind it (the present thread can only show it once the GPU has done this work), and reopens the
+// list. Nothing pending (no interpolation last frame), not inside a frame, or the device gone: no-op.
+void D3D12Device::frameMidpoint() {
+    if (!pendingReal_ || !recording_ || deviceLost_) return;
+    cmdList_->Close();
+    ID3D12CommandList* lists[] = {cmdList_.Get()};
+    queue_->ExecuteCommandLists(1, lists);
+    pendingReal_ = false;
+    queuePresent(pendingRealImage_, pendingRealSync_, pendingRealFlags_);
+    allocatorsMid_[frameIndex_]->Reset();
+    cmdList_->Reset(allocatorsMid_[frameIndex_].Get(), nullptr);
+    boundRootSig_ = nullptr; boundPso_ = nullptr; boundHeap_ = nullptr;
+    fovValid_ = false; dbValid_ = false;
+    // A reset list has nothing bound. The rest of the scene pass expects the scene's targets, viewport
+    // and topology exactly as beginFrame bound them (MEASURED without this: debug layer #615 twice a
+    // frame, Stage B drawing with no depth target bound).
+    cmdList_->OMSetRenderTargets(sceneRtvCount_, sceneRtvs_, FALSE, &sceneDsv_);
+    cmdList_->RSSetViewports(1, &sceneVp_);
+    cmdList_->RSSetScissorRects(1, &sceneSc_);
+    cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 }
 
 // The refresh rate of the display holding the swapchain, from the display mode (not from anything
@@ -6548,30 +6536,35 @@ void D3D12Device::presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool
 // Presents the frame, signals its fence, and services a pending capture.
 void D3D12Device::present() {
     if (!hasSwapchain_ || deviceLost_) return;
-    const bool tearing = !vsync_ && tearingSupported_;
-    const UINT interval = vsync_ ? 1u : 0u;
-    const UINT flags = tearing ? DXGI_PRESENT_ALLOW_TEARING : 0u;
     // Staged loss, counted in PRESENTED frames so it is reproducible run to run. Checked before the
     // real Present so the frame it fires on behaves exactly like one the device died during.
     if (const u32 loseAt = simulatedDeviceLoss(); loseAt != 0 && ++presentedFrames_ >= loseAt) {
         noteDeviceRemoved("--device-lost-at (SIMULATED, the hardware is fine)", DXGI_ERROR_DEVICE_HUNG);
         return;
     }
-    // The real image goes to the present thread (the generated one went from submitGeneratedImage). With
-    // frame interpolation it is shown the way the generated one was (interpPresentMode); otherwise as
-    // ever. A Present that fails -- where a removal usually surfaces first -- comes back from the
-    // present thread on the next queuePresent, which reports it.
-    UINT sync = tearingSupported_ ? interval : 1u;
-    UINT pflags = flags;
-    f64 clockHz = 0.0;
-    if (frameInterpolated_) interpPresentMode(sync, pflags, clockHz);
-    if (!queuePresent(realImage_, sync, pflags, clockHz)) return;
+    // The real image. With frame interpolation it is held back for the next frame's midpoint
+    // (pendingReal_); otherwise it goes to the present thread now -- after any real image a midpoint
+    // never picked up, so nothing is shown out of order. A Present that fails -- where a removal
+    // usually surfaces first -- comes back from the present thread on the next queuePresent.
+    if (pendingReal_) {
+        pendingReal_ = false;
+        if (!queuePresent(pendingRealImage_, pendingRealSync_, pendingRealFlags_)) return;
+    }
+    if (frameInterpolated_) {
+        pendingReal_ = true;
+        pendingRealImage_ = realImage_;
+        pendingRealSync_ = presentSync();
+        pendingRealFlags_ = presentFlags();
+    } else if (!queuePresent(realImage_, presentSync(), presentFlags())) {
+        return;
+    }
     if (tsEnabled_ && ++waitFrames_ >= kWaitReport) {
         AVER_INFO("[RHI.D3D12] per frame (avg of {}): render thread blocked at the start-of-frame fence "
-                  "{:.2f} ms and on a full present queue {:.2f} ms; the present thread spent {:.2f} ms in Present",
-                  waitFrames_, waitFenceMs_ / waitFrames_, waitPresentMs_ / waitFrames_,
-                  static_cast<f64>(presentBlockedUs_.exchange(0)) / 1000.0 / waitFrames_);
-        waitFenceMs_ = waitTickMs_ = waitGenPresentMs_ = waitPresentMs_ = 0.0;
+                  "{:.2f} ms and on a full present queue {:.2f} ms; the present thread spent {:.2f} ms in Present "
+                  "and presented {:.2f} images", waitFrames_, waitFenceMs_ / waitFrames_, waitPresentMs_ / waitFrames_,
+                  static_cast<f64>(presentBlockedUs_.exchange(0)) / 1000.0 / waitFrames_,
+                  static_cast<f64>(presentCount_.exchange(0)) / waitFrames_);
+        waitFenceMs_ = waitPresentMs_ = 0.0;
         waitFrames_ = 0;
     }
 
@@ -6622,6 +6615,7 @@ void D3D12Device::resize(u32 w, u32 h) {
     // Every queued image presented and copied before the images and the swapchain's buffers go: the
     // present thread then sits idle on its condition variable until the next request.
     drainPresents();
+    pendingReal_ = false;   // a held-back real image is not shown across a resize (its image is going)
     for (auto& rt : renderTargets_) rt.Reset();
     for (auto& sb : swapBuffers_) sb.Reset();
     depthBuffer_.Reset();

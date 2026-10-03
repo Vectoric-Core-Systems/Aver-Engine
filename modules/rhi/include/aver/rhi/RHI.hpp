@@ -514,16 +514,18 @@ public:
     // turns it on; the device then presents a generated frame before every real one whenever it can:
     // the G-buffer written (single-sample scene) and a valid previous frame. Off otherwise, silently
     // per frame and logged once per reason. Defaulted no-ops: a backend without it compiles unchanged.
-    // THE CLOCK IS NEVER MEASURED (NEURAFI.md §5): with vsync the two images are consecutive vsync
-    // presents; without it they are presented on a fixed clock whose rate is a constant --
-    // setFrameInterpClock's, or the display's refresh rate.
+    // NOTHING IS TIMED (NEURAFI.md §5): the GPU's own progress is the clock. The generated image is shown
+    // when its frame's work finishes; the real image one frame later, when the GPU reaches frameMidpoint()
+    // in the NEXT frame's work -- so real and generated alternate at whatever rate the scene renders,
+    // doubling it, without anything measuring a frame time.
     virtual void setFrameInterpolator(IFrameInterpolator* g) { (void)g; }
     virtual void setFrameInterpolation(bool on) { (void)on; }
     virtual bool frameInterpolation() const { return false; }
-    // Images shown per second (generated + real; real frames run at half): the fixed target. Vsync off,
-    // each image is presented on the next tick of a clock at this rate; vsync on, each is held for
-    // refresh / rate refreshes (rounded, 1-4). 0 = the display's refresh rate (displayRefreshRate()).
-    virtual void setFrameInterpClock(f32 imagesPerSecond) { (void)imagesPerSecond; }
+    // Called by the renderer at a fixed point roughly halfway through its frame's GPU work (Voxi: after
+    // the ray-driven GI stage). With frame interpolation the previous frame's real image is presented
+    // there, queue-ordered behind the work before it. A frame that never calls it presents that image
+    // just ahead of its own generated one. No-op otherwise.
+    virtual void frameMidpoint() {}
     // The refresh rate of the display the swapchain is on, Hz; 0 when unknown or headless.
     virtual f32 displayRefreshRate() const { return 0.0f; }
     // Diagnostics: captures (screenshots, --frames) take the GENERATED image instead of the real one,

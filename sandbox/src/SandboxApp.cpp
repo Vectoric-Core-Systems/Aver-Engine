@@ -3117,7 +3117,6 @@ bool SandboxApp::updateFrameInterpolation(rhi::IDevice* dev) {
     neurafiViz_.setSource(frameInterpolator_ && neurafiVizMode_ > 0 ? frameInterpolator_.get() : nullptr,
                           neurafiVizOpacity_);
     dev->setFrameInterpShowGeneratedOnly(neurafiShowGeneratedOnly_);
-    dev->setFrameInterpClock(frameInterpClockCli_ >= 0.0f ? frameInterpClockCli_ : frameInterpClockHz_);
     dev->setFrameInterpolation(want);
     return want;
 }
