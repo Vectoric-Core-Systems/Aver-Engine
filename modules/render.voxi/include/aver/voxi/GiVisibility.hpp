@@ -91,6 +91,9 @@ constexpr bool tracedPixel(u32 x, u32 y, u32 frame) {
 //          AVER_NEURAC twin pipelines read it; every other variant ignores the bit.
 //          Bit 7 (128) was free: bits 0-6, 12-15 and 18-22 are taken above, and like every field in
 //          this float it stays under 2^24 so the word is exactly representable.
+// bits 8-11 `neuracView` -- the NeuRaC visualiser (voxi_neurac_io.hlsli's rcDebugColour): bits 8-10 the
+//          mode (0 off, 1 cached light, 2 coverage, 3 cascade, 4 cell state), bit 11 the cell grid. Only
+//          meaningful beside `neurac`; the caller passes 0 otherwise.
 // Nine arguments, not a bitmask the caller assembles by hand: every call site (VoxiRenderer.cpp's
 // beginShadowHistory, both the unconditional write before the shadow-history early return and the
 // recomputed write inside the giSurf block, 2.11) states its inputs by name, so a reordered
@@ -98,9 +101,10 @@ constexpr bool tracedPixel(u32 x, u32 y, u32 frame) {
 // `neurac`, defaults to false so every older caller and test compiles unchanged.
 constexpr u32 packAmbientW(u32 mode, bool histBound, bool histValid, bool blendedCone,
                             bool blendedReplay, bool pathView, u32 spatialSamples, u32 maxHistory,
-                            bool neurac = false) {
+                            bool neurac = false, u32 neuracView = 0u) {
     u32 w = mode & 3u;
     if (neurac)  w |= 128u;
+    w |= (neuracView & 15u) << 8;
     if (histBound)     w |= 4u;
     if (histValid)      w |= 8u;
     if (blendedCone)    w |= 16u;

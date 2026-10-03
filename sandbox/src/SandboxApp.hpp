@@ -1265,6 +1265,118 @@ static inline const char* gbufferDebugShaderSource() {
     return s.c_str();
 }
 
+// NEURAFI VISUALISATION OVERLAY (Window > Neural Visualiser).
+// NeuraFI writes its visualisation image in the gather (neurafi.hlsl's vizColour, display-ready
+// colours); this draws it over the 3D viewport in overlayPass -- after the tonemap, on BOTH presented
+// images of an interpolated frame -- alpha-blended at the chosen opacity (shaders/neural_visualiser.hlsl).
+// Drawn only when NeuraFI wrote a fresh image this frame (vizCount moved since onUpdate's baseline), so a
+// paused interpolation never leaves a frozen picture on screen. Same lifetime rules as
+// GBufferDebugFeature: registered at init, unregistered and shut down explicitly at onShutdown.
+class NeuraFiVizFeature final : public rhi::IRenderFeature {
+public:
+    const char* name() const override { return "NeuraFiViz"; }
+    ~NeuraFiVizFeature() override { releaseGpu(); }
+
+    void setDevice(rhi::IDevice* dev) { device_ = dev; }
+    // Called once per frame from onUpdate, before the frame renders: the source (null = off), its
+    // vizCount() now (so overlayPass draws only an image written after this), and the opacity.
+    void setSource(const aver::neurafi::NeuraFI* src, f32 opacity) {
+        src_ = src;
+        baseline_ = src ? src->vizCount() : 0;
+        opacity_ = opacity;
+    }
+    void setViewportRect(u32 x, u32 y, u32 w, u32 h) { vpX_ = x; vpY_ = y; vpW_ = w; vpH_ = h; }
+
+    void overlayPass(rhi::IRenderContext& ctx, u32 width, u32 height) override {
+        if (!src_ || !device_ || vpW_ == 0 || vpH_ == 0 || src_->vizCount() == baseline_) return;
+        const rhi::TextureHandle tex = src_->visualisation();
+        if (!tex || !ensurePipeline()) return;
+        if (tex != boundTex_) { res_->setSrv(binding_, 0, tex); boundTex_ = tex; }
+        const f32 cb[4] = {opacity_, 0.0f, 0.0f, 0.0f};
+        ctx.setViewport(vpX_, vpY_, vpW_, vpH_);
+        ctx.setScissor(vpX_, vpY_, vpW_, vpH_);
+        ctx.setPipeline(pipeline_);
+        ctx.setBindingSet(binding_);
+        ctx.setConstantBuffer(kConstantRegister, cb, sizeof(cb));
+        ctx.drawFullscreen();
+        ctx.setViewport(0, 0, width, height);
+        ctx.setScissor(0, 0, width, height);
+    }
+
+    void shutdown() { releaseGpu(); }
+
+private:
+    bool ensurePipeline() {
+        if (pipeline_) return true;
+        if (failed_ || !device_) return false;
+        rhi::IResourceFactory* res = device_->resources();
+        if (!res) return false;
+        res_ = res;
+        const std::string& src = rhi::shaderFile("neural_visualiser.hlsl");
+        if (src.empty()) {
+            AVER_ERROR("[NeuralViz] neural_visualiser.hlsl is not deployed beside the executable");
+            failed_ = true;
+            return false;
+        }
+        rhi::ShaderDesc vsd; vsd.source = src.c_str(); vsd.entry = "VSNeuralViz";
+        vsd.stage = rhi::ShaderStage::Vertex; vsd.minShaderModel = 51;
+        rhi::ShaderDesc psd; psd.source = src.c_str(); psd.entry = "PSNeuralViz";
+        psd.stage = rhi::ShaderStage::Pixel; psd.minShaderModel = 51;
+        const rhi::ShaderHandle vs = res->createShader(vsd);
+        const rhi::ShaderHandle ps = res->createShader(psd);
+        if (vs && ps) {
+            rhi::GraphicsPipelineDesc pd;
+            pd.vs = vs; pd.ps = ps;
+            pd.layout.srvCount = 1;
+            pd.layout.samplers[0] = rhi::SamplerDesc{rhi::Filter::Linear, rhi::AddressMode::Clamp};
+            pd.layout.samplerCount = 1;
+            pd.cull = rhi::CullMode::None;
+            pd.depthClip = false;
+            pd.renderTargetCount = 1;
+            pd.renderTargets[0] = rhi::Format::RGBA8Unorm;   // the tonemapped composite (see GBufferDebugFeature)
+            pd.sampleCount = 1;
+            pd.blend = rhi::BlendMode::AlphaBlend;
+            pipeline_ = res->createGraphicsPipeline(pd);
+        }
+        if (vs) res->destroyShader(vs);
+        if (ps) res->destroyShader(ps);
+        if (pipeline_) {
+            rhi::BindingSetDesc bd;
+            bd.srvCount = 1;
+            bd.srvKinds[0] = rhi::SlotKind::Texture2D;
+            binding_ = res->createBindingSet(bd);
+        }
+        if (!pipeline_ || !binding_) {
+            AVER_ERROR("[NeuralViz] pipeline unavailable");
+            releaseGpu();
+            failed_ = true;
+            return false;
+        }
+        return true;
+    }
+
+    void releaseGpu() {
+        if (res_) {
+            if (pipeline_) res_->destroyPipeline(pipeline_);
+            if (binding_)  res_->destroyBindingSet(binding_);
+        }
+        pipeline_ = 0; binding_ = 0; boundTex_ = 0;
+    }
+
+    static constexpr u32 kConstantRegister = 1;   // own b1, no shared prelude (as GBufferDebugFeature)
+
+    rhi::IDevice*          device_ = nullptr;
+    rhi::IResourceFactory* res_ = nullptr;
+    const aver::neurafi::NeuraFI* src_ = nullptr;
+    u64 baseline_ = 0;
+    f32 opacity_ = 1.0f;
+    u32 vpX_ = 0, vpY_ = 0, vpW_ = 0, vpH_ = 0;
+    rhi::PipelineHandle   pipeline_ = 0;
+    rhi::BindingSetHandle binding_ = 0;
+    rhi::TextureHandle    boundTex_ = 0;
+    bool failed_ = false;
+};
+
 // The editor application: owns the scene, the panels, and the frame loop.
 class SandboxApp final : public Application {
 public:
@@ -1503,6 +1615,15 @@ public:
     void setResizeCycle(int n);              // --resize-cycle [N]
     void setFrameInterpCli(int on) { frameInterpCli_ = on; }   // --frame-interp 0|1|2 (2: capture the generated image)
     void setFrameInterpTrajectory(int t, bool train) { frameInterpTrajectoryCli_ = t; frameInterpTrainCli_ = train; }
+    // --neurafi-view, --neurafi-generated-only, --neurac-view, --neurac-grid (negative = not given) and
+    // --frame-interp-clock (negative = not given; outranks the Editor Preference).
+    void setNeuralVisualiserCli(int neurafiView, bool generatedOnly, int neuracView, bool neuracGrid, f32 clockHz) {
+        if (neurafiView >= 0) neurafiVizMode_ = neurafiView;
+        if (generatedOnly) neurafiShowGeneratedOnly_ = true;
+        if (neuracView >= 0) neuracViewMode_ = neuracView;
+        if (neuracGrid) neuracViewGrid_ = true;
+        frameInterpClockCli_ = clockHz;
+    }
     void setGpuTiming(bool on);                                // --gpu-timing
     void setLumaSweep(bool on, int stride);
     void setFireflyMetric(bool on, f32 mult);
@@ -1545,6 +1666,8 @@ public:
     void buildReferencesPanel();
 
     void buildProfilerPanel(Engine& e);
+    // Window > Neural Visualiser: NeuraFI's and NeuRaC's visualisations (SandboxShell.cpp).
+    void buildNeuralVisualiserPanel(Engine& e);
 #endif
     // Restarts what the profiler panel measures: the device's since-boot GPU average always, and the
     // CPU phase table too when Play is starting (Stop leaves the last session's phases readable).
@@ -3653,6 +3776,17 @@ private:
     // that the device has always produced and only the console used to read, above which sit
     // playProf_'s frame time and Play CPU phases.
     bool showProfiler_=false;
+    // Window > Neural Visualiser. The choices live here (not in the prefs) and are applied every frame
+    // by onUpdate: neurafiViz_'s source/opacity, NeuraFI::setVisualisation, the device's
+    // generated-only view, and VoxiRenderer::setNeuRaCView. Closing the window does not turn them off --
+    // its "Off" entries do -- so a view can stay up while the window is docked away.
+    bool showNeuralViz_ = false;
+    int  neurafiVizMode_ = 0;          // neurafi::Visualisation
+    f32  neurafiVizOpacity_ = 0.85f;
+    f32  neurafiVizScalePx_ = 0.5f;    // path bend at full heat
+    bool neurafiShowGeneratedOnly_ = false;
+    int  neuracViewMode_ = 0;          // VoxiRenderer::setNeuRaCView's mode
+    bool neuracViewGrid_ = false;
     // The References panel. refPanelScanned_ distinguishes "opened but never asked" from "asked and
     // found nothing" -- two states an empty list cannot tell apart, and the second is the useful one.
     bool showReferences_ = false;
@@ -3736,6 +3870,8 @@ private:
     // voxiRenderer_ below.
     GBufferDebugFeature gbufferDebugFeature_;
     bool gbufferDebugAttached_ = false;
+    // Window > Neural Visualiser's NeuraFI overlay. Registered beside gbufferDebugFeature_, for the run.
+    NeuraFiVizFeature neurafiViz_;
     // --occlusion-cull: hierarchical-Z two-pass box culling (modules/occlusion). OFF (default) never
     // calls occluder_ or reorders the entity walk -- see renderSceneEntities for the in-place
     // two-pass reorder (reuses the draw logic depthPrepassOverride_'s walk doesn't replicate).
@@ -3942,6 +4078,10 @@ private:
     // per-machine quality choice, like AverSR's Display setting). The CLI flags outrank them.
     int  frameInterpTrajectory_ = 2;         // neurafi::Trajectory (0 straight, 1 quadratic, 2 learned)
     bool frameInterpTrain_ = false;
+    // Preferences display.frameInterpClock: with V-Sync off, images per second (generated + real) on the
+    // device's fixed present clock; 0 = the display's refresh rate (IDevice::setFrameInterpClock).
+    f32  frameInterpClockHz_ = 0.0f;
+    f32  frameInterpClockCli_ = -1.0f;       // --frame-interp-clock; negative = not given
     int  frameInterpTrajectoryCli_ = -1;     // --frame-interp-trajectory; -1 = not given
     bool frameInterpTrainCli_ = false;       // --frame-interp-train
     // The status bar's frame rate counts interpolated frames too (real + interpolated) or real frames

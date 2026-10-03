@@ -72,6 +72,101 @@ void SandboxApp::buildReferencesPanel() {
     ImGui::End();
 }
 
+// ---- Neural Visualiser (Window > Neural Visualiser) ----
+// One window for the two neural techs' visualisations. NeuraFI: an overlay drawn by neurafiViz_ from
+// the image neurafi.hlsl's gather writes, plus the device's "interpolated frames only" view. NeuRaC: Voxi
+// paints the cache in place of the lit image (rcDebugColour, voxi_neurac_io.hlsli). The choices are
+// members applied every frame by onUpdate, so closing the window leaves a view up until set to Off.
+void SandboxApp::buildNeuralVisualiserPanel(Engine& e) {
+    if (!showNeuralViz_) return;
+    ImGui::SetNextWindowSize(ImVec2(470.0f * dpi_, 430.0f * dpi_), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Neural Visualiser", &showNeuralViz_)) { ImGui::End(); return; }
+    rhi::IDevice* dev = e.device();
+
+    // ---- NeuraFI ----
+    ImGui::SeparatorText("NeuraFI (frame interpolation)");
+    const bool fiOn = dev && dev->frameInterpolation();
+    if (!fiOn) {
+        ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1.0f),
+                           "Frame interpolation is off. Turn it on in Editor Preferences > Display\n"
+                           "(\"Frame interpolation in viewport while editing\"); Play follows the project.");
+    } else if (!dev->frameInterpolated()) {
+        ImGui::TextDisabled("Frame interpolation is paused this frame (see the log for why).");
+    }
+    static const char* kFiViews[] = {"Off", "Sources (which real frame)", "Confidence",
+                                     "Path bend (curved vs straight)", "Network share of the bend"};
+    int fv = neurafiVizMode_ < 0 ? 0 : (neurafiVizMode_ > 4 ? 4 : neurafiVizMode_);
+    if (ImGui::Combo("View##neurafi", &fv, kFiViews, 5)) neurafiVizMode_ = fv;
+    uiReg_.track("neuralViz.neurafiView");
+    switch (fv) {
+        case 1: ImGui::TextDisabled("Orange: from the newer real frame. Blue: from the older one.\n"
+                                    "Dim: low confidence. Magenta: a hole neither frame could fill\n"
+                                    "(filled from its neighbours)."); break;
+        case 2: ImGui::TextDisabled("How sure the blend is: blue (unsure) to red (sure). Magenta: a hole."); break;
+        case 3: ImGui::TextDisabled("How far the curved path moves the in-between point off a straight\n"
+                                    "line, blue (none) to red (full scale). Needs Quadratic or Learned."); break;
+        case 4: ImGui::TextDisabled("How much of that bend the network added, blue (none) to red (full\n"
+                                    "scale). All blue while the quadratic stands in."); break;
+        default: break;
+    }
+    ImGui::BeginDisabled(fv == 0);
+    ImGui::SliderFloat("Opacity##neurafi", &neurafiVizOpacity_, 0.05f, 1.0f, "%.2f");
+    uiReg_.track("neuralViz.neurafiOpacity");
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(fv != 3 && fv != 4);
+    ImGui::SliderFloat("Full scale (px)##neurafi", &neurafiVizScalePx_, 0.05f, 4.0f, "%.2f px",
+                       ImGuiSliderFlags_Logarithmic);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("The bend, in pixels at the in-between frame, shown at full red.");
+    ImGui::EndDisabled();
+    ImGui::Checkbox("Show interpolated frames only", &neurafiShowGeneratedOnly_);
+    uiReg_.track("neuralViz.generatedOnly");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Both images of every frame show the GENERATED one, so its errors can be\n"
+                          "seen on their own (the real frames are hidden).");
+    if (frameInterpolator_) {
+        const neurafi::NeuraFI::TrainingStatus st = frameInterpolator_->trainingStatus();
+        ImGui::TextDisabled("Path: %s", st.networkInUse ? "learned (network in use)"
+                                        : frameInterpolator_->trajectory() == neurafi::Trajectory::Linear
+                                            ? "straight lines" : "quadratic");
+        if (st.evaluated)
+            ImGui::TextDisabled("Error (smoothed): straight %.3f px, quadratic %.3f px, learned %.3f px",
+                                st.errLinear, st.errAnalytic, st.errNetwork);
+    }
+
+    // ---- NeuRaC ----
+    ImGui::SeparatorText("NeuRaC (radiance cache)");
+#if AVER_MODULE_VOXI
+    if (!voxiRenderer_.neuracLive()) {
+        ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1.0f),
+                           "The cache is not running. It needs ray-driven GI (staged, D3D12) with\n"
+                           "Project Settings > Rendering > ReSTIR visibility rays: Cached (NeuRaC).");
+    }
+    static const char* kRcViews[] = {"Off", "Cached light", "Coverage", "Cascade", "Cell state"};
+    int rv = neuracViewMode_ < 0 ? 0 : (neuracViewMode_ > 4 ? 4 : neuracViewMode_);
+    if (ImGui::Combo("View##neurac", &rv, kRcViews, 5)) neuracViewMode_ = rv;
+    uiReg_.track("neuralViz.neuracView");
+    switch (rv) {
+        case 1: ImGui::TextDisabled("The light the cache holds at each visible surface, on its own.\n"
+                                    "Black: nothing cached there yet."); break;
+        case 2: ImGui::TextDisabled("Green: the cache supplies the light. Red: the fallback does."); break;
+        case 3: ImGui::TextDisabled("Finest cascade holding the point: cyan 25 cm cells, yellow 100 cm,\n"
+                                    "orange 400 cm. Dark red: outside all three."); break;
+        case 4: ImGui::TextDisabled("Green: how many frames the cell has averaged. Red: how long since it\n"
+                                    "was last updated. Violet: empty or stale."); break;
+        default: break;
+    }
+    ImGui::BeginDisabled(rv == 0);
+    ImGui::Checkbox("Cell grid", &neuracViewGrid_);
+    uiReg_.track("neuralViz.neuracGrid");
+    ImGui::EndDisabled();
+    ImGui::TextDisabled("Replaces the lit image while on (not an overlay).");
+#else
+    ImGui::TextDisabled("This build has no Voxi renderer.");
+#endif
+    ImGui::End();
+}
+
 // ---- Profiler panel (Window > GPU Profiler) ----
 // Four things, top to bottom: the smoothed frame time and the worst recent frame (PlayProfile, fed
 // from the status bar every UI frame); the CPU phases only Play adds to onUpdate (PlayProfile, fed by
@@ -2195,6 +2290,8 @@ void SandboxApp::buildUI(Engine& e) {
                 // as scrolling console text from the `frametime` command.
                 ImGui::MenuItem("GPU Profiler", nullptr, &showProfiler_);
                 uiReg_.track("window.gpuProfiler");
+                ImGui::MenuItem("Neural Visualiser", nullptr, &showNeuralViz_);
+                uiReg_.track("window.neuralVisualiser");
                 // Which files name an asset. Reachable from here as well as from the Content
                 // Browser's own context menu, so it can be left open while working.
                 ImGui::MenuItem("References", nullptr, &showReferences_);
@@ -2580,6 +2677,7 @@ void SandboxApp::buildUI(Engine& e) {
     buildProjectSettings();
     buildWorldSettings();
     buildProfilerPanel(e);
+    buildNeuralVisualiserPanel(e);
     buildReferencesPanel();
     buildRevisionControlPanel();
 #if AVER_MODULE_SCENE

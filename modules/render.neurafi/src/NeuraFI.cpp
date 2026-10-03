@@ -17,7 +17,7 @@ namespace {
 constexpr const char* kShaderName = "neurafi.hlsl";
 constexpr u32 kGroup = 8;           // neurafi.hlsl's FG_GROUP
 constexpr u32 kConstantSlot = 1;    // b1: FgConstants
-constexpr u32 kConstantDwords = 8;  // FgConstants, the same for every pass
+constexpr u32 kConstantDwords = 12; // FgConstants, the same for every pass
 constexpr u32 kRecordFloats = 14;   // neurafi.hlsl's FG_RECORD
 constexpr u32 kOutputFloats = 2;    // FG_OUTPUT
 
@@ -29,6 +29,9 @@ struct FgConstants {
     u32 frame;
     u32 samples;
     u32 block;      // acceleration-image block size (pixels per texel, each axis)
+    u32 viz;        // Visualisation
+    f32 vizScale;   // px of bend at full heat
+    u32 pad[2];
 };
 static_assert(sizeof(FgConstants) == kConstantDwords * 4, "FgConstants mirrors neurafi.hlsl's cbuffer");
 
@@ -70,7 +73,7 @@ bool NeuraFI::ensurePipelines() {
     const std::string& source = rhi::shaderFile(kShaderName);
     if (source.empty()) return fail("neurafi.hlsl is not deployed beside the executable");
 
-    auto build = [&](const char* entry, const char* define, u32 srvs, bool sampler) -> rhi::PipelineHandle {
+    auto build = [&](const char* entry, const char* define, u32 srvs, u32 uavs, bool sampler) -> rhi::PipelineHandle {
         rhi::ShaderDesc sd{};
         sd.source = source.c_str();
         sd.entry = entry;
@@ -82,7 +85,7 @@ bool NeuraFI::ensurePipelines() {
         rhi::ComputePipelineDesc pd{};
         pd.cs = cs;
         pd.layout.srvCount = srvs;
-        pd.layout.uavCount = 1;
+        pd.layout.uavCount = uavs;
         pd.layout.slotKindsDeclared = true;   // every slot is a Texture2D (the default kind)
         pd.layout.constantDwords[kConstantSlot] = kConstantDwords;
         if (sampler) {
@@ -93,15 +96,16 @@ bool NeuraFI::ensurePipelines() {
         res_.destroyShader(cs);
         return p;
     };
-    gatherPso_ = build("CSFgGather", "FG_GATHER=1", 7, true);
-    fillPso_   = build("CSFgFill", "FG_FILL=1", 1, false);
+    gatherPso_ = build("CSFgGather", "FG_GATHER=1", 8, 2, true);
+    fillPso_   = build("CSFgFill", "FG_FILL=1", 1, 1, false);
     if (!gatherPso_ || !fillPso_) return fail("the frame interpolation shaders would not compile");
     AVER_INFO("[NeuraFI] procedural interpolation ready (gather + 2 full-resolution fill passes)");
     return true;
 }
 
 // The four trajectory passes share one layout: t0-t7 motion and depth of frames N..N-3, u0 inference
-// records, u1 the acceleration image, u2-u4 training records/targets/count, u5 the network's outputs.
+// records, u1 the acceleration image, u2-u4 training records/targets/count, u5 the network's outputs,
+// u6 the network's share of the acceleration (the NetworkShare visualisation).
 bool NeuraFI::ensureTrajectory() {
     if (featuresPso_ && accelPso_ && clearCountPso_ && trainRecordsPso_ && mlp_.valid()) return true;
     if (trajectoryFailed_) return false;
@@ -124,7 +128,7 @@ bool NeuraFI::ensureTrajectory() {
         rhi::ComputePipelineDesc pd{};
         pd.cs = cs;
         pd.layout.srvCount = 8;
-        pd.layout.uavCount = 6;
+        pd.layout.uavCount = 7;
         pd.layout.slotKindsDeclared = true;
         pd.layout.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
         pd.layout.uavKinds[1] = rhi::SlotKind::Texture2D;
@@ -132,6 +136,7 @@ bool NeuraFI::ensureTrajectory() {
         pd.layout.uavKinds[3] = rhi::SlotKind::StructuredBuffer;
         pd.layout.uavKinds[4] = rhi::SlotKind::StructuredBuffer;
         pd.layout.uavKinds[5] = rhi::SlotKind::StructuredBuffer;
+        pd.layout.uavKinds[6] = rhi::SlotKind::Texture2D;
         pd.layout.constantDwords[kConstantSlot] = kConstantDwords;
         const rhi::PipelineHandle p = res_.createComputePipeline(pd);
         res_.destroyShader(cs);
@@ -203,7 +208,7 @@ void NeuraFI::releaseTargets() {
         *s = 0;
     }
     for (rhi::TextureHandle* t : {&histColor_, &histVel_, &histZ_, &histVel2_, &histZ2_, &histVel3_, &histZ3_,
-                                  &out_, &tmp_, &accel_}) {
+                                  &out_, &tmp_, &accel_, &accelNet_, &vizTex_}) {
         if (*t) res_.destroyTexture(*t);
         *t = 0;
     }
@@ -248,6 +253,8 @@ bool NeuraFI::ensureTargets(u32 w, u32 h) {
     out_       = make(w, h, rhi::Format::RGBA16F, true, RS::ShaderResource, "FrameInterp generated frame");
     tmp_       = make(w, h, rhi::Format::RGBA16F, true, RS::ShaderResource, "FrameInterp fill scratch");
     accel_     = make(qw, qh, rhi::Format::RG16F, true, RS::NonPixelShaderResource, "FrameInterp acceleration");
+    accelNet_  = make(qw, qh, rhi::Format::RG16F, true, RS::NonPixelShaderResource, "FrameInterp network share");
+    vizTex_    = make(w, h, rhi::Format::RGBA16F, true, RS::ShaderResource, "NeuraFI visualisation");
     auto buffer = [&](u64 bytes, const char* name) {
         rhi::BufferDesc bd;
         bd.bytes = bytes;
@@ -273,7 +280,7 @@ bool NeuraFI::ensureTargets(u32 w, u32 h) {
     evalTgt_   = readback(static_cast<u64>(kTrainSamples) * kOutputFloats * 4, "FrameInterp evaluation targets");
     evalCount_ = readback(16, "FrameInterp evaluation count");
     if (!histColor_ || !histVel_ || !histZ_ || !histVel2_ || !histZ2_ || !histVel3_ || !histZ3_ || !out_ ||
-        !tmp_ || !accel_ || !records_ || !netOut_ || !trainRec_ || !trainTgt_ || !trainCount_ || !evalRec_ ||
+        !tmp_ || !accel_ || !accelNet_ || !vizTex_ || !records_|| !netOut_ || !trainRec_ || !trainTgt_ || !trainCount_ || !evalRec_ ||
         !evalTgt_ || !evalCount_) {
         AVER_WARN("[NeuraFI] could not create the {}x{} targets", w, h);
         releaseTargets();
@@ -281,8 +288,8 @@ bool NeuraFI::ensureTargets(u32 w, u32 h) {
     }
 
     rhi::BindingSetDesc gd;
-    gd.srvCount = 7;
-    gd.uavCount = 1;
+    gd.srvCount = 8;
+    gd.uavCount = 2;
     gatherSet_ = res_.createBindingSet(gd);
     rhi::BindingSetDesc fd;
     fd.srvCount = 1;
@@ -291,13 +298,14 @@ bool NeuraFI::ensureTargets(u32 w, u32 h) {
     fillSetB_ = res_.createBindingSet(fd);
     rhi::BindingSetDesc td;
     td.srvCount = 8;
-    td.uavCount = 6;
+    td.uavCount = 7;
     td.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
     td.uavKinds[1] = rhi::SlotKind::Texture2D;
     td.uavKinds[2] = rhi::SlotKind::StructuredBuffer;
     td.uavKinds[3] = rhi::SlotKind::StructuredBuffer;
     td.uavKinds[4] = rhi::SlotKind::StructuredBuffer;
     td.uavKinds[5] = rhi::SlotKind::StructuredBuffer;
+    td.uavKinds[6] = rhi::SlotKind::Texture2D;
     trajSet_ = res_.createBindingSet(td);
     if (!gatherSet_ || !fillSetA_ || !fillSetB_ || !trajSet_) {
         AVER_WARN("[NeuraFI] could not create the binding sets");
@@ -308,7 +316,9 @@ bool NeuraFI::ensureTargets(u32 w, u32 h) {
     res_.setSrv(gatherSet_, 4, histVel_);
     res_.setSrv(gatherSet_, 5, histZ_);
     res_.setSrv(gatherSet_, 6, accel_);
+    res_.setSrv(gatherSet_, 7, accelNet_);
     res_.setUav(gatherSet_, 0, out_, 0);
+    res_.setUav(gatherSet_, 1, vizTex_, 0);
     res_.setSrv(fillSetA_, 0, out_);
     res_.setUav(fillSetA_, 0, tmp_, 0);
     res_.setSrv(fillSetB_, 0, tmp_);
@@ -325,14 +335,15 @@ bool NeuraFI::ensureTargets(u32 w, u32 h) {
     res_.setUavBuffer(trajSet_, 3, trainTgt_, 4, kTrainSamples * kOutputFloats, 0);
     res_.setUavBuffer(trajSet_, 4, trainCount_, 4, 4, 0);
     res_.setUavBuffer(trajSet_, 5, netOut_, 4, static_cast<u32>(qCount * kOutputFloats), 0);
+    res_.setUav(trajSet_, 6, accelNet_, 0);
 
     w_ = w;
     h_ = h;
     qw_ = qw;
     qh_ = qh;
     block_ = block;
-    const f64 mib = (static_cast<f64>(w) * h * (8 + 4 + 4 + 8 + 8 + 2 * (4 + 4)) +
-                     static_cast<f64>(qCount) * (4 + 4 * (kRecordFloats + kOutputFloats))) / (1024.0 * 1024.0);
+    const f64 mib = (static_cast<f64>(w) * h * (8 + 4 + 4 + 8 + 8 + 8 + 2 * (4 + 4)) +
+                     static_cast<f64>(qCount) * (4 + 4 + 4 * (kRecordFloats + kOutputFloats))) / (1024.0 * 1024.0);
     AVER_INFO("[NeuraFI] targets {}x{} ({:.1f} MiB)", w, h, mib);
     return true;
 }
@@ -471,7 +482,9 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
 
     const u32 gx = (in.width + kGroup - 1) / kGroup, gy = (in.height + kGroup - 1) / kGroup;
     const u32 qgx = (qw_ + kGroup - 1) / kGroup, qgy = (qh_ + kGroup - 1) / kGroup;
-    FgConstants k{{in.width, in.height}, 0, bend ? 1u : 0u, neural ? 1u : 0u, frame_, kTrainSamples, block_};
+    const u32 viz = static_cast<u32>(viz_);
+    FgConstants k{{in.width, in.height}, 0, bend ? 1u : 0u, neural ? 1u : 0u, frame_, kTrainSamples, block_,
+                  viz, vizScale_, {0, 0}};
 
     // Frame N becomes compute-readable (a pixel-shader read state does not cover compute).
     ctx.textureBarrier(in.color, RS::ShaderResource, RS::NonPixelShaderResource);
@@ -503,18 +516,23 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
                 }
             }
             ctx.textureBarrier(accel_, RS::NonPixelShaderResource, RS::UnorderedAccess);
+            ctx.textureBarrier(accelNet_, RS::NonPixelShaderResource, RS::UnorderedAccess);
             ctx.setPipeline(accelPso_);
             ctx.setBindingSet(trajSet_);
             ctx.setConstants(kConstantSlot, &k, kConstantDwords);
             ctx.dispatch(qgx, qgy, 1);
             ctx.textureBarrier(accel_, RS::UnorderedAccess, RS::NonPixelShaderResource);
+            ctx.textureBarrier(accelNet_, RS::UnorderedAccess, RS::NonPixelShaderResource);
         }
 
         ctx.textureBarrier(out_, RS::ShaderResource, RS::UnorderedAccess);
+        ctx.textureBarrier(vizTex_, RS::ShaderResource, RS::UnorderedAccess);
         ctx.setPipeline(gatherPso_);
         ctx.setBindingSet(gatherSet_);
         ctx.setConstants(kConstantSlot, &k, kConstantDwords);
         ctx.dispatch(gx, gy, 1);
+        ctx.textureBarrier(vizTex_, RS::UnorderedAccess, RS::ShaderResource);
+        if (viz != 0) ++vizCount_;
 
         // Fill, twice: out_ -> tmp_ -> out_.
         ctx.textureBarrier(out_, RS::UnorderedAccess, RS::NonPixelShaderResource);

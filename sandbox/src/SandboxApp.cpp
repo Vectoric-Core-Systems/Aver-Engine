@@ -448,6 +448,8 @@ void SandboxApp::onInit(Engine& e)  {
     // onUpdate (gbufferOverride_).
     e.device()->addRenderFeature(&gbufferDebugFeature_);
     gbufferDebugAttached_ = true;
+    // Same idiom: draws nothing until Window > Neural Visualiser picks a NeuraFI view.
+    e.device()->addRenderFeature(&neurafiViz_);
 
     // Registration order is precedence: the first factory that accepts a path wins.
     assetEditors_.registerFactory(&editor::makeMeshEditor);
@@ -2725,6 +2727,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // only on an actual change, so reasserting both every frame is free when untouched.
         voxiRenderer_.setGiVisPathView(editor::consoleGiVisPathViewSlot());
         voxiRenderer_.setBlendedGiCone(editor::consoleBlendedGiConeSlot());
+        // Window > Neural Visualiser's NeuRaC view (paints only while the cache is live).
+        voxiRenderer_.setNeuRaCView(static_cast<u32>(neuracViewMode_ < 0 ? 0 : neuracViewMode_), neuracViewGrid_);
         // --no-gi-cone: see setGiConeTraceOff's own comment. Applied every frame, same as
         // setDebugView beside it, so it takes effect the instant the flag is set rather than only at attach time.
         voxiRenderer_.setConeTraceEnabled(!giConeTraceOff_);
@@ -2935,6 +2939,9 @@ editor::shutdownAnimEditors();
     // with 0 debug-layer errors -- a clean frame followed by a CPU access violation at teardown.
     e.device()->removeRenderFeature(&gbufferDebugFeature_);
     gbufferDebugFeature_.shutdown();
+    e.device()->removeRenderFeature(&neurafiViz_);
+    neurafiViz_.setSource(nullptr, 0.0f);
+    neurafiViz_.shutdown();
 #if AVER_MODULE_PHYSICS
 #if AVER_MODULE_SCENE
     // Closing the window mid-Play never reaches stopPlay: the cars' bodies and constraints come down
@@ -3068,8 +3075,8 @@ void SandboxApp::setVSyncOff(bool off) { vsyncOffRequested_ = off; }
 
 // Frame interpolation's on/off for this frame (docs/rendering/NEURAFI.md, decision 8):
 // --frame-interp wins; otherwise Play follows the project's RENDER.FRAMEINTERP and editing follows the
-// Editor Preference. The device still declines frame by frame when it cannot run (vsync off, MSAA,
-// no G-buffer yet) and says why once.
+// Editor Preference. The device still declines frame by frame when it cannot run (MSAA, no G-buffer
+// yet) and says why once. Also applies the Neural Visualiser's NeuraFI choices and the vsync-off clock.
 bool SandboxApp::updateFrameInterpolation(rhi::IDevice* dev) {
     if (!dev) return false;
 #if AVER_MODULE_FRAMEWORK
@@ -3100,7 +3107,17 @@ bool SandboxApp::updateFrameInterpolation(rhi::IDevice* dev) {
         const int traj = frameInterpTrajectoryCli_ >= 0 ? frameInterpTrajectoryCli_ : frameInterpTrajectory_;
         frameInterpolator_->setTrajectory(static_cast<neurafi::Trajectory>(traj < 0 ? 0 : (traj > 2 ? 2 : traj)));
         frameInterpolator_->setTraining(frameInterpTrainCli_ || frameInterpTrain_);
+        // Window > Neural Visualiser (buildNeuralVisualiserPanel).
+        const int vm = neurafiVizMode_ < 0 ? 0 : (neurafiVizMode_ > 4 ? 4 : neurafiVizMode_);
+        frameInterpolator_->setVisualisation(static_cast<neurafi::Visualisation>(vm), neurafiVizScalePx_);
     }
+    neurafiViz_.setDevice(dev);
+    neurafiViz_.setViewportRect(static_cast<u32>(vpX_), static_cast<u32>(vpY_),
+                                static_cast<u32>(vpW_), static_cast<u32>(vpH_));
+    neurafiViz_.setSource(frameInterpolator_ && neurafiVizMode_ > 0 ? frameInterpolator_.get() : nullptr,
+                          neurafiVizOpacity_);
+    dev->setFrameInterpShowGeneratedOnly(neurafiShowGeneratedOnly_);
+    dev->setFrameInterpClock(frameInterpClockCli_ >= 0.0f ? frameInterpClockCli_ : frameInterpClockHz_);
     dev->setFrameInterpolation(want);
     return want;
 }

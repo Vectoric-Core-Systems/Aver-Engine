@@ -5419,7 +5419,11 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // giSplit: giDispatch plus the setting plus whichever plain/checkerboard trace+split pair
         // this frame's giCb needs -- the checkerboard trace pass is useless without the checkerboard
         // split pass and vice versa, so both are required together.
-        const bool giSplit = giDispatch && settings_.rayDrivenGiSplit &&
+        // The NeuRaC visualiser needs the cache in the pass that writes the final diffuse (its colour
+        // replaces it there), and only the UNSPLIT CSRdGi has a cache twin -- so while a view is up the
+        // split stands down and CSRdGi traces its own candidate.
+        const bool neuracViewing = rcBit && (neuracView_ & 7u) != 0u;
+        const bool giSplit = giDispatch && settings_.rayDrivenGiSplit && !neuracViewing &&
                               (giCb ? (rdGiTraceCbCsPso_ && rdGiSplitCbCsPso_)
                                     : (rdGiTraceCsPso_ && rdGiSplitCsPso_));
         // One-shot logs, same shape as the half-rate GI pair above.
@@ -5437,7 +5441,8 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             rdGiSplitRunLogged_ = true;
             AVER_INFO("[Voxi] GI candidate-trace split running: CSRdGiTrace traces the fresh ReSTIR GI "
                       "candidate, CSRdGi resamples/shades from the stored result");
-        } else if (giDispatch && settings_.rayDrivenGiSplit && !giSplit && !rdGiSplitFallbackLogged_) {
+        } else if (giDispatch && settings_.rayDrivenGiSplit && !giSplit && !neuracViewing &&
+                   !rdGiSplitFallbackLogged_) {
             rdGiSplitFallbackLogged_ = true;
             AVER_WARN("[Voxi] voxi.rayDrivenGiSplit requested the GI candidate-trace split, but the {} "
                       "GI-trace/split pipeline pair did not compile; behaving as the unsplit CSRdGi "
@@ -6426,7 +6431,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     const u32 ambW = givis::packAmbientW(wireVisMode, /*histBound=*/false, /*histValid=*/false,
                                          blendedGiCone_, dev_ && dev_->backend() == rhi::Backend::D3D12,
                                          giVisPathView_, giRestirSpatialSamples_, giRestirMaxHistory_,
-                                         /*neurac=*/neuracLive_);
+                                         /*neurac=*/neuracLive_, neuracLive_ ? neuracView_ : 0u);
     cb_.ambientParams[3] = static_cast<f32>(ambW);
     if (!shadowHistoryActive()) {
         // ---- F3: a skipped frame must not leave the validity flags trusting frozen state ----
@@ -6564,7 +6569,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
                                                   dev_ && dev_->backend() == rhi::Backend::D3D12,
                                                   giVisPathView_, giRestirSpatialSamples_,
                                                   giRestirMaxHistory_,
-                                                  /*neurac=*/neuracLive_);
+                                                  /*neurac=*/neuracLive_, neuracLive_ ? neuracView_ : 0u);
             cb_.ambientParams[3] = static_cast<f32>(ambW2);
         }
     }

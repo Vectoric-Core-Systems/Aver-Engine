@@ -34,6 +34,10 @@
 #include <utility>
 #include <vector>
 
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION   // Windows 10 1803+; older SDK headers lack the name
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
 // Seam a UI toolkit's D3D12 backend plugs into; no ImGui symbol lives in this file -- see
 // UiBackend.hpp; Dear ImGui itself is in modules/rhi.d3d12.imgui.
 #include "aver/rhi/d3d12/UiBackend.hpp"
@@ -934,6 +938,11 @@ public:
     bool frameInterpolation() const override { return frameInterpOn_; }
     bool frameInterpolated() const override { return frameInterpolated_; }
     void setFrameInterpCaptureGenerated(bool on) override { fgCaptureGenerated_ = on; }
+    void setFrameInterpShowGeneratedOnly(bool on) override { fgShowGeneratedOnly_ = on; }
+    void setFrameInterpClock(f32 imagesPerSecond) override {
+        fgClockHz_ = imagesPerSecond > 0.0f ? imagesPerSecond : 0.0f;
+    }
+    f32 displayRefreshRate() const override { return fgDisplayHz_; }
     void noteSceneCut() override { frameInterpCut_ = true; }
     void notifyRenderTargetsChanged();
     // Creates or resizes the factory texture the scene renders into for the viewport.
@@ -1359,7 +1368,20 @@ private:
     void presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool lastOfFrame);
     bool fgGeneratedPost_ = false;          // runPostChain is drawing the generated image
     bool fgCaptureGenerated_ = false;       // diagnostics: captures take the generated image
+    bool fgShowGeneratedOnly_ = false;      // visualisation: the real image's slot shows the generated one too
     bool captureRecorded_ = false;          // this frame recorded the capture copy (present() reads it)
+    // ---- without vsync: the FIXED present clock (NEURAFI.md §5) ----
+    // Each image (generated, then real) is presented on the next tick of a clock running at a CONSTANT
+    // rate: fgClockHz_ (the host's setting) or, at 0, the display's refresh rate. Nothing measured --
+    // no frame time, GPU time or present statistic -- sets the rate or a tick (AMD US 2025/0299287 claims
+    // display timing derived from rendering metrics). It is an ordinary frame-rate cap: sleep to the tick,
+    // present; a present that comes later than a whole tick restarts the clock from now.
+    f32 fgClockHz_ = 0.0f;
+    f32 fgDisplayHz_ = 0.0f;                // queried at swapchain creation and on every resize
+    i64 fgNextTick_ = 0;                    // QueryPerformanceCounter units; 0 = the clock is not running
+    HANDLE fgTimer_ = nullptr;              // high-resolution waitable timer for the sleep
+    void frameInterpWaitForTick();
+    void queryDisplayRefresh();
 
     // Per-pass GPU timing: a whole-frame CPU delta can't say which pass is expensive (five wrong
     // theories -- shadow cascades, scene walk, chunk streaming, volumetric clouds, build config --
@@ -2585,6 +2607,7 @@ void D3D12Device::drainDebugMessages() {
 // Waits for the GPU, reports the debug-layer totals, and tears the device down.
 D3D12Device::~D3D12Device() {
     waitForGpu();
+    if (fgTimer_) CloseHandle(fgTimer_);
     if (infoQueue_) {
         drainDebugMessages();
         AVER_INFO("[RHI.D3D12] debug layer totals: {} corruption, {} error, {} warning",
@@ -3160,6 +3183,7 @@ bool D3D12Device::createSwapchainResources(const SwapchainDesc& d) {
     if (!hrOk(sc1.As(&swapChain_), "As IDXGISwapChain3")) return false;
     bbIndex_ = swapChain_->GetCurrentBackBufferIndex();
     frameIndex_ = 0;
+    queryDisplayRefresh();
 
     D3D12_DESCRIPTOR_HEAP_DESC hd{};
     hd.NumDescriptors = kBackBufferCount;
@@ -5991,7 +6015,9 @@ void D3D12Device::endFrame() {
         // D3D12 lets a command list write only the swapchain's CURRENT back buffer, so the generated
         // image is submitted and presented here and the real one is recorded on a fresh list.
         if (!submitGeneratedImage()) return;
-        toScene(fgInputTex_);   // the real frame back into the scene target
+        // The real frame back into the scene target -- or, with the "interpolated frames only"
+        // visualisation, the generated one again.
+        toScene(fgShowGeneratedOnly_ ? generatedImage : fgInputTex_);
         presentPass((bbIndex_ + 1) % kBackBufferCount, false, false, true);
         frameInterpolated_ = true;
     } else {
@@ -6020,16 +6046,19 @@ void D3D12Device::endFrame() {
 }
 
 // Closes and submits everything recorded so far (the scene, the generator, the generated image's post
-// chain, overlays and UI), presents the generated image -- fixed interval 1: the display's refresh is
-// the whole schedule, nothing measured decides when it is shown -- and reopens the command list on the
-// slot's second allocator for the real image. False when the device was lost (nothing more is recorded).
-// Every cache of bound GPU state is dropped: a reset list has nothing bound.
+// chain, overlays and UI), presents the generated image, and reopens the command list on the slot's
+// second allocator for the real image. With vsync: interval 1, the display's refresh is the whole
+// schedule. Without: on the next tick of the fixed clock (frameInterpWaitForTick), torn. Nothing
+// measured decides when it is shown either way. False when the device was lost (nothing more is
+// recorded). Every cache of bound GPU state is dropped: a reset list has nothing bound.
 bool D3D12Device::submitGeneratedImage() {
     if (deviceLost_) return false;
     cmdList_->Close();
     ID3D12CommandList* lists[] = {cmdList_.Get()};
     queue_->ExecuteCommandLists(1, lists);
-    const HRESULT gr = swapChain_->Present(1u, 0u);
+    const bool tearing = !vsync_ && tearingSupported_;
+    if (tearing) frameInterpWaitForTick();   // after the submit, so the GPU is never kept waiting
+    const HRESULT gr = tearing ? swapChain_->Present(0u, DXGI_PRESENT_ALLOW_TEARING) : swapChain_->Present(1u, 0u);
     if (FAILED(gr)) {
         if (gr == DXGI_ERROR_DEVICE_REMOVED || gr == DXGI_ERROR_DEVICE_RESET) {
             noteDeviceRemoved("Present (generated frame)", gr);
@@ -6044,14 +6073,63 @@ bool D3D12Device::submitGeneratedImage() {
     return true;
 }
 
+// Without vsync: sleeps until the fixed clock's next tick, then advances it by one period. The rate is
+// a constant (fgClockHz_, else the display's refresh rate) -- see fgClockHz_'s comment for why nothing
+// measured may set it. Late by up to one period: no sleep, the tick still advances by one period (the
+// clock catches up). Later than that: no sleep, the clock restarts from now.
+void D3D12Device::frameInterpWaitForTick() {
+    const f64 hz = fgClockHz_ > 0.0f ? fgClockHz_ : fgDisplayHz_;
+    if (!(hz > 1.0)) { fgNextTick_ = 0; return; }   // no rate known: present at once
+    LARGE_INTEGER freq, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    const i64 period = static_cast<i64>(static_cast<f64>(freq.QuadPart) / hz);
+    if (fgNextTick_ == 0 || now.QuadPart > fgNextTick_ + period) {
+        fgNextTick_ = now.QuadPart + period;
+        return;
+    }
+    if (now.QuadPart < fgNextTick_) {
+        // The waitable timer to ~1 ms before the tick (its own resolution), then a short spin.
+        const i64 spin = freq.QuadPart / 1000;
+        if (fgNextTick_ - now.QuadPart > spin) {
+            if (!fgTimer_) {
+                fgTimer_ = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                  TIMER_ALL_ACCESS);
+                if (!fgTimer_) fgTimer_ = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+            }
+            const i64 sleepTicks = fgNextTick_ - now.QuadPart - spin;
+            LARGE_INTEGER due;
+            due.QuadPart = -static_cast<LONGLONG>(static_cast<f64>(sleepTicks) * 1.0e7 / static_cast<f64>(freq.QuadPart));
+            if (fgTimer_ && SetWaitableTimer(fgTimer_, &due, 0, nullptr, nullptr, FALSE))
+                WaitForSingleObject(fgTimer_, 1000);
+        }
+        do { YieldProcessor(); QueryPerformanceCounter(&now); } while (now.QuadPart < fgNextTick_);
+    }
+    fgNextTick_ += period;
+}
+
+// The refresh rate of the display holding the swapchain, from the display mode (not from anything
+// rendered). 0 when it cannot be read.
+void D3D12Device::queryDisplayRefresh() {
+    fgDisplayHz_ = 0.0f;
+    if (!swapChain_) return;
+    ComPtr<IDXGIOutput> out;
+    if (FAILED(swapChain_->GetContainingOutput(&out)) || !out) return;
+    DXGI_OUTPUT_DESC od{};
+    if (FAILED(out->GetDesc(&od))) return;
+    DEVMODEW dm{};
+    dm.dmSize = sizeof(dm);
+    if (EnumDisplaySettingsW(od.DeviceName, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
+        fgDisplayHz_ = static_cast<f32>(dm.dmDisplayFrequency);
+}
+
 // Why frame interpolation cannot run this frame; 0 when it can. Each change of reason is logged once.
 u32 D3D12Device::frameInterpBlocker() {
     u32 why = 0;
     const char* text = nullptr;
+    // (Reason 2, "vsync is off", is gone: without vsync the images go out on the fixed clock.)
     if (!rhiContext_ || !rhiFactory_) {
         why = 1; text = "the device has no generic RHI context";
-    } else if (!vsync_) {
-        why = 2; text = "vsync is off (generated frames are shown on the display's refresh, so it needs vsync)";
     } else if (sampleCount_ > 1) {
         why = 3; text = "MSAA is on; it needs the G-buffer, which is written only at 1x anti-aliasing";
     } else if (!gbufferEnabled_ || !gbufVelocity_ || !gbufViewZ_) {
@@ -6227,7 +6305,11 @@ void D3D12Device::present() {
         return;
     }
     // With frame interpolation the generated image was already presented by endFrame
-    // (submitGeneratedImage); this shows the real one on the next vblank.
+    // (submitGeneratedImage); this shows the real one on the next vblank -- or, without vsync, on the
+    // fixed clock's next tick. A frame that was not interpolated stops the clock (it restarts from the
+    // next generated image).
+    if (tearing && frameInterpolated_) frameInterpWaitForTick();
+    else fgNextTick_ = 0;
     const HRESULT pr = swapChain_->Present(tearingSupported_ ? interval : 1u, flags);
     // PRESENT IS WHERE A REMOVAL USUALLY SURFACES FIRST, so it is the most likely place to learn
     // about one. It used to log and carry on, which is how a single lost device turned into a
@@ -6294,6 +6376,7 @@ void D3D12Device::resize(u32 w, u32 h) {
     if (gbufferEnabled_) { gbufVelocity_.Reset(); gbufViewZ_.Reset(); gbufNormalRough_.Reset(); }
     const UINT scFlags = tearingSupported_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
     frameInterpCut_ = true;   // never interpolate across a resize
+    queryDisplayRefresh();    // the window may have moved to another display
     if (!hrOk(swapChain_->ResizeBuffers(kBackBufferCount, w, h, kBackbufferFormat, scFlags), "ResizeBuffers")) {
         createRenderTargetViews();
         createDepthBuffer();

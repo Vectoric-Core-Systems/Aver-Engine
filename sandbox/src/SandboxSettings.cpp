@@ -110,6 +110,7 @@ void SandboxApp::loadEditorPreferences() {
     // wherever the network was not measured to beat it.
     frameInterpTrajectory_ = prefInt("display.frameInterpTrajectory", 2);
     frameInterpTrain_ = prefBool("display.frameInterpTrain", false);
+    frameInterpClockHz_ = prefFloat("display.frameInterpClock", 0.0f);
     fpsCountsInterpolated_ = prefBool("display.fpsCountsInterpolated", true);
     // A stored render scale applies behind a crash cookie: applying one below 1 can lose the GPU
     // device -- a persisted setting that kills the device at startup is a trap with no way out
@@ -345,13 +346,38 @@ void SandboxApp::buildEditorPrefs() {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Shows a generated frame between every two rendered ones: twice the frames\n"
                               "on screen for the same rendering work, at about half a frame of extra delay.\n"
-                              "Needs V-Sync on and 1x anti-aliasing. Play uses the project's setting instead.");
+                              "Needs 1x anti-aliasing. Play uses the project's setting instead.");
         if (frameInterpWhileEditing_ && prefsDevice_) {
             ImGui::SameLine();
-            ImGui::TextDisabled(!prefsDevice_->vsync()       ? "(paused: needs V-Sync)"
-                                : prefsDevice_->sampleCount() > 1 ? "(paused: needs 1x anti-aliasing)"
+            ImGui::TextDisabled(prefsDevice_->sampleCount() > 1 ? "(paused: needs 1x anti-aliasing)"
                                 : prefsDevice_->frameInterpolated() ? "(running)"
                                                                  : "(starting)");
+        }
+
+        // Without V-Sync the generated and real images go out on a fixed clock (NEURAFI.md §5): a
+        // constant rate, never one measured from the frames.
+        {
+            const f32 refresh = prefsDevice_ ? prefsDevice_->displayRefreshRate() : 0.0f;
+            bool atRefresh = frameInterpClockHz_ <= 0.0f;
+            ImGui::BeginDisabled(vs);
+            if (ImGui::Checkbox("Without V-Sync, present at the display's refresh rate", &atRefresh))
+                frameInterpClockHz_ = atRefresh ? 0.0f : (refresh > 0.0f ? refresh * 2.0f : 240.0f);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("With V-Sync off, frame interpolation shows its frames on a steady clock\n"
+                                  "(generated, real, generated, real...), one per tick. On: the clock runs at\n"
+                                  "the display's refresh rate%s. Off: at the rate you set below, which can be\n"
+                                  "above the refresh rate (frames then tear). The clock is a fixed rate, never\n"
+                                  "taken from how long frames took. Only used while V-Sync is off.",
+                                  refresh > 0.0f ? "" : " (not known for this display: frames go out at once)");
+            if (!atRefresh) {
+                f32 hz = frameInterpClockHz_;
+                if (ImGui::SliderFloat("Frames per second shown (generated + real)", &hz, 30.0f, 500.0f, "%.0f"))
+                    frameInterpClockHz_ = hz < 30.0f ? 30.0f : hz;
+            } else if (refresh > 0.0f) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(%.0f Hz)", refresh);
+            }
+            ImGui::EndDisabled();
         }
 
         // The path the in-between frame's pixels are gathered along (NEURAFI.md §3.5).
@@ -2417,6 +2443,7 @@ void SandboxApp::saveEditorPreferences() {
         setPrefBool("display.frameInterpWhileEditing", frameInterpWhileEditing_);
         setPrefInt("display.frameInterpTrajectory", frameInterpTrajectory_);
         setPrefBool("display.frameInterpTrain", frameInterpTrain_);
+        setPrefFloat("display.frameInterpClock", frameInterpClockHz_);
         setPrefBool("display.fpsCountsInterpolated", fpsCountsInterpolated_);
         // The three AverSR keys below are skipped outright, not written a neutral value, when the
         // command line drove this session's render scale or AverSR level: an interactive `--aversr

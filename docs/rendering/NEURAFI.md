@@ -77,7 +77,7 @@ Companion design: [NEURAC.md](NEURAC.md) — both share the `Aver.Render.Neural`
 | Splat frame N's motion to the midpoint, pick one per pixel by depth | AMD US 2025/0191120 (pending) | **Gather** (§3.2): each output pixel searches each real frame along that frame's own motion. No midpoint motion field is built; nothing is weighted or selected per output location. |
 | Two disocclusion masks (occlusion / dis-occlusion), interpolated depth, snap to one frame | AMD US 2025/0069319 (pending), NVIDIA US 12,568,184 (granted) | **One continuous confidence per candidate** (§3.3) from real-frame consistency only. No mask pair, no midpoint depth, never snapping by mask. |
 | Network outputs blend weight **and** a colour fill | Arm GB 2620919 (granted UK), US 2024/0029196 (pending) | **Network outputs only the blend weight** (§3.5). Uncovered pixels are filled procedurally in colour space (§3.4). |
-| Pacer times the generated frame from measured frame times | AMD US 2025/0299287 (pending) | **Fixed back-to-back vsync presents** (§5): no frame-time estimator in the schedule; generation off on variable-refresh / uncapped output. |
+| Pacer times the generated frame from measured frame times | AMD US 2025/0299287 (pending) | **Fixed back-to-back vsync presents** (§5): no frame-time estimator in the schedule. Without vsync (since 2026-10-03), a **fixed-rate clock** (refresh rate or a user constant), never a measured period. |
 | Push-pull pyramid fill for holes *(round 2)* | Georgia Tech US 9,094,660 (granted, ~2033): reduce resolution until holes fall below a threshold, expand, fill from the expanded image | **Full-resolution fill** (§3.4): no mip chain of any kind, hole-aware or not. |
 | CPU frame-start delay from measured GPU time *(round 2)* | Intel US 12,057,090 (granted): delay CPU work to align with GPU availability | **Dropped.** Latency reduction is the waitable swapchain's one-frame limit only (§5). |
 | Store generated frames, then copy into the swap chain *(round 3)* | NVIDIA US 12,632,916 (granted 2026-05-19) and its continuation US 2026/0245168 (pending): in response to present calls, store real + interpolated frames in a first buffer, copy them to a swap-chain buffer, present | **The generated frame is composited straight into the back buffer** (§5); no intermediate frame queue, no API interception (the engine is the application). Counsel to confirm. |
@@ -317,8 +317,20 @@ budget), translucent layers (by design no motion/depth — the trust mask covers
   the clock. There is no frame-time estimator, no GPU or UI timing in the schedule, no pacer thread
   deciding when to present.
 - **Frame cap** at half the refresh rate (the real-frame rate the cadence needs).
-- **Variable refresh / tearing / uncapped:** frame interpolation is **off** in these modes rather than
-  adapting to them.
+- **Without vsync (tearing), since 2026-10-03:** frame interpolation runs, on a **fixed present clock**
+  (`D3D12Device::frameInterpWaitForTick`). Each image, generated then real, is presented with
+  `ALLOW_TEARING` on the next tick of a clock running at a **constant** rate: the display's refresh rate
+  (read from the display mode, `EnumDisplaySettingsW`), or the rate the user sets (Editor Preferences,
+  `--frame-interp-clock`). That is an ordinary frame-rate cap. No frame time, GPU time or present statistic
+  sets the rate or a tick. The render thread sleeps to the tick *after* submitting the GPU work, so the
+  GPU is never held. A present later than one whole tick restarts the clock from "now". **This is the
+  one place the schedule reads the clock at all; counsel should confirm that a fixed-rate limiter which
+  re-anchors on a missed tick is not "display timing determined from rendering metrics"** (AMD US
+  2025/0299287 claim 1; claim 15 covers metrics of the interpolated frame). Rejected alternative:
+  timing each present from the measured frame period (FSR3-style pacing), which is the claimed method.
+  It also delays no CPU work to align with GPU availability (Intel US 12,057,090): the sleep aligns to
+  the fixed clock, never to a fence.
+- **Variable refresh:** still not adapted to. The fixed clock simply runs; the display shows what arrives.
 - **Below 30 fps base:** warning in the stats overlay (decision 3); the cadence stays the same (the real
   frame simply holds for more vblanks).
 - **Latency reduction is separate:** the waitable object with latency 1, and nothing else. A CPU
@@ -346,6 +358,22 @@ budget), translucent layers (by design no motion/depth — the trust mask covers
   respawn/teleport, pawn-to-camera, resize, render-scale and MSAA changes; an automatic camera-jump
   detector (position delta, view angle, FOV); a content check (mean gather confidence too low). On a cut,
   present the real frame only. `IUpscaler::reset()` is called from the same path.
+- **Neural Visualiser (Window > Neural Visualiser, 2026-10-03).** NeuraFI's gather also writes a
+  display-ready visualisation image (`neurafi.hlsl` `vizColour`) while one is chosen. The editor draws it
+  over the viewport after the tonemap, alpha-blended (`NeuraFiVizFeature`, `sandbox/shaders/neural_visualiser.hlsl`),
+  on both presented images. Views:
+  - **Sources**: orange = newer frame, blue = older, grey = both agree, magenta = hole.
+  - **Confidence**: heat map; magenta = hole.
+  - **Path bend**: `0.125·|a|` px, the curved path's offset from the straight line.
+  - **Network share**: `0.125·|correction|` px; zero while the quadratic stands in.
+
+  The full scale (px) and the opacity are adjustable. "Show interpolated frames only" makes the device
+  put the generated image in both slots (`IDevice::setFrameInterpShowGeneratedOnly`). The visualisation
+  is output only: nothing reads it back, and it has no effect on the generated frame.
+
+  CLI flags for bounded runs: `--neurafi-view 0-4`, `--neurafi-generated-only`.
+  *Measured* (NewSponza, 300 frames, vsync off): the overlay draws at 59 FPS shown / 29 real on the 60 Hz
+  clock.
 
 ---
 

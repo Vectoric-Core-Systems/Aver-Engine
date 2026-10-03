@@ -1658,6 +1658,13 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         if (giPoisonDenoisedCeilHit) return float3(0.0, 1.0, 0.0);
     }
 
+#if AVER_NEURAC
+    // ---- NeuRaC VISUALISER (gAmbientParams.w bits 8-11; voxi_neurac_io.hlsli's rcDebugColour) ----
+    // Same place and the same reason as the path view below: after the denoiser-input write, so the
+    // debug colour never enters history. Stage B shows it unshaded (PSRayDriven, AVER_RD_SPLIT).
+    if (rcCacheOn() && rcViewMode() != 0u) return rcDebugColour(wpos, N);
+#endif
+
     // ---- U1's PATH DEBUG VIEW (voxi.giVisPathView, gAmbientParams.w bit 64; 2.10 I) ----
     // Separate from the poison view above, gated `gGiRestirParams.w <= 0.5` so the two never fight
     // over the same return (poison view returns first when both are on -- deliberate: it answers

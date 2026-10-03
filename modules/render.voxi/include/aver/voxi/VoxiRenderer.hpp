@@ -68,6 +68,14 @@ public:
     // `set voxi.giVisPathView true`.
     void setGiVisPathView(bool on);
 
+    // The NeuRaC visualiser (gAmbientParams.w bits 8-11; legend at voxi_neurac_io.hlsli's
+    // rcDebugColour): 0 off, 1 cached light, 2 coverage, 3 cascade, 4 cell state; `grid` adds the cell
+    // edges. Paints only while the cache is live (neuracLive()): staged ray-driven GI with ReSTIR
+    // visibility Cached. Reasserted every frame by the editor.
+    void setNeuRaCView(u32 mode, bool grid) { neuracView_ = (mode & 7u) | (grid ? 8u : 0u); }
+    // The radiance cache trained and read this frame.
+    bool neuracLive() const { return neuracLive_; }
+
     // W6/M5 pricing switch (PSMainVoxi's gAverHistoryWrite gate, voxi.hlsl; optimisation-wave-2 plan
     // section 4): OFF (default) shades a blended fragment's indirect diffuse through ReSTIR GI like an
     // opaque one, paying its full share of the ReSTIR/shadow/reflection/AO history work; ON drops it
@@ -2329,6 +2337,7 @@ private:
     // && the twin pipelines exist. Recomputed every frame, before beginShadowHistory reads it.
     NeuRaC rc_;
     bool neuracLive_ = false;
+    u32 neuracView_ = 0;   // setNeuRaCView: mode in bits 0-2, grid bit 3 (packed into gAmbientParams.w << 8)
     // The NeuRaC::Bindings::generation last written into table 0's t22/u20/u21; a different
     // value from beginFrame means the buffers changed and bindings_ must be rewritten (before the
     // first bind of the frame -- Vulkan ringed sets forbid writing a bound set).

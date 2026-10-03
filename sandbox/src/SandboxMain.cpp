@@ -91,6 +91,11 @@ Application* createApplication(int argc, char** argv) {
     f32 camWanderAmp = 0.0f, camWanderSpeed = 1.0f;   // --cam-wander AMP SPEED
     int frameInterpTrajectory = -1;  // --frame-interp-trajectory: 0 linear, 1 quadratic, 2 neural; -1 = not given
     bool frameInterpTrain = false;   // --frame-interp-train
+    int neurafiVizArg = -1;          // --neurafi-view 0-4; -1 = not given
+    bool neurafiGeneratedOnly = false;  // --neurafi-generated-only
+    int neuracViewArg = -1;          // --neurac-view 0-4; -1 = not given
+    bool neuracGrid = false;         // --neurac-grid
+    f32 frameInterpClockArg = -1.0f; // --frame-interp-clock HZ; -1 = not given
     int pieCamArg = 0;
     int inputStuckArg = 0;
     int inputSourceArg = 0;
@@ -839,7 +844,8 @@ Application* createApplication(int argc, char** argv) {
         // --frame-interp 0|1|2: frame interpolation off / on for the whole session, over the project's
         // RENDER.FRAMEINTERP and the Editor Preference (docs/rendering/NEURAFI.md). 2 = on,
         // and captures (--shot, --frames) take the GENERATED image, for inspecting the generator.
-        // Needs vsync and 1x anti-aliasing; the device logs why when it cannot run.
+        // Needs 1x anti-aliasing; the device logs why when it cannot run. With --no-vsync the images
+        // go out on the fixed clock (--frame-interp-clock HZ, default the display's refresh rate).
         else if (!std::strcmp(argv[i],"--frame-interp") && i+1<argc) { const int v=std::atoi(argv[++i]); frameInterpArg = v < 0 ? 0 : (v > 2 ? 2 : v); }
         // --frame-interp-trajectory linear|quadratic|neural: the path the gather follows (NEURAFI.md
         // §3.5). --frame-interp-train: train the trajectory network in-engine while frame interpolation runs,
@@ -849,6 +855,14 @@ Application* createApplication(int argc, char** argv) {
             frameInterpTrajectory = !std::strcmp(t,"quadratic") ? 1 : !std::strcmp(t,"neural") ? 2 : 0;
         }
         else if (!std::strcmp(argv[i],"--frame-interp-train")) frameInterpTrain=true;
+        else if (!std::strcmp(argv[i],"--frame-interp-clock") && i+1<argc) frameInterpClockArg = static_cast<f32>(std::atof(argv[++i]));
+        // The Neural Visualiser's views (Window > Neural Visualiser), for bounded runs: --neurafi-view
+        // 0 off, 1 sources, 2 confidence, 3 path bend, 4 network share; --neurafi-generated-only;
+        // --neurac-view 0 off, 1 cached light, 2 coverage, 3 cascade, 4 cell state; --neurac-grid.
+        else if (!std::strcmp(argv[i],"--neurafi-view") && i+1<argc) neurafiVizArg = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i],"--neurafi-generated-only")) neurafiGeneratedOnly = true;
+        else if (!std::strcmp(argv[i],"--neurac-view") && i+1<argc) neuracViewArg = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i],"--neurac-grid")) neuracGrid = true;
         // --depth-prepass: same-frame depth-only pass ahead of the opaque colour walk, so an occluded
         // fragment skips PSMainVoxi's shadow lookup/cone trace/fog entirely (setDepthPrepassOverride).
         // Unset reproduces pre-existing behaviour exactly.
@@ -1471,6 +1485,7 @@ Application* createApplication(int argc, char** argv) {
     if (resizeCycleArg > 0) app->setResizeCycle(resizeCycleArg);
     if (frameInterpArg >= 0) app->setFrameInterpCli(frameInterpArg);
     app->setFrameInterpTrajectory(frameInterpTrajectory, frameInterpTrain);
+    app->setNeuralVisualiserCli(neurafiVizArg, neurafiGeneratedOnly, neuracViewArg, neuracGrid, frameInterpClockArg);
     if (gpuTimingArg) app->setGpuTiming(true);
     if (pieCamArg > 0) app->setPieCameraTest(pieCamArg);
     if (inputStuckArg > 0) app->setInputStuckTest(inputStuckArg);

@@ -1908,7 +1908,7 @@ void GameApp::pushFrame(Engine& e) {
         // consumeMsaaDirty() flag.
         // Frame interpolation: --frame-interp over RENDER.FRAMEINTERP. It reads motion and depth from the
         // G-buffer, so wanting it turns that on too; the device pauses it (and says why once) when
-        // vsync or 1x anti-aliasing is missing.
+        // 1x anti-aliasing is missing. Without vsync it presents on the display's refresh clock.
         bool wantFrameInterp = cfg_.frameInterpArg >= 0 ? cfg_.frameInterpArg == 1 : project_.frameInterp == 1;
         if (wantFrameInterp && !frameInterpolator_) {
             if (dev->resources()) {

@@ -118,3 +118,64 @@ float3 rcLookup(float3 p, float3 N, out float remaining) {
     gRcLastConf = 1.0 - remaining;
     return outV;
 }
+
+// ---- VISUALISATION (gAmbientParams.w bits 8-10 mode, bit 11 cell grid; givis::packAmbientW) ----
+// The editor's NeuRaC visualiser. giRestirIndirect returns this colour in place of indirect diffuse
+// (after the denoiser-input write, like the path view, so it never enters history) and Stage B shows it
+// as the pixel's final colour. Looked up at the PRIMARY surface: the cache is a world-space structure
+// trained at second-bounce hits, and this shows what it holds where the camera can see.
+//   1 cached light   -- rcLookup's irradiance/PI alone (no fallback): black where nothing is cached
+//   2 coverage       -- the lookup's confidence: red (fallback does it all) -> green (cache does it all)
+//   3 cascade        -- the finest cascade holding the point: cyan 25, yellow 100, orange 400 units
+//   4 cell state     -- that cell: green = observations (n_eff), red = age; dark violet = empty or stale
+uint rcViewMode() { return ((uint)gAmbientParams.w >> 8) & 7u; }
+bool rcViewGrid() { return ((uint)gAmbientParams.w & 2048u) != 0u; }
+
+float3 rcDebugColour(float3 p, float3 N) {
+    const uint   mode = rcViewMode();
+    const RcInfo info = gRcInfo[0];
+    // The finest cascade whose window holds p (offset half a cell along N, as the lookup does).
+    int    cas  = -1;
+    float  size = 1.0;
+    float3 qc   = 0.0;   // p in that cascade's cell units
+    [loop] for (uint c = 0; c < (uint)AVER_RC_CASCADES; ++c) {
+        const float  s = asfloat(info.cas[c].w);
+        const float3 q = (p + N * (0.5 * s)) / s;
+        const float3 rel = q - (float3)info.cas[c].xyz;
+        if (all(rel >= (float)AVER_RC_MARGIN_CELLS) && all(rel < (float)(AVER_RC_RES - AVER_RC_MARGIN_CELLS))) {
+            cas = (int)c; size = s; qc = q;
+            break;
+        }
+    }
+    float3 col = float3(0.25, 0.0, 0.0);   // outside every window
+    if (mode == 1u || mode == 2u) {
+        float rem;
+        const float3 v = rcLookup(p, N, rem);
+        col = mode == 1u ? v : lerp(float3(1.0, 0.08, 0.05), float3(0.1, 1.0, 0.2), 1.0 - rem);
+    } else if (mode == 3u) {
+        if (cas == 0) col = float3(0.1, 0.9, 1.0);
+        else if (cas == 1) col = float3(1.0, 0.9, 0.1);
+        else if (cas == 2) col = float3(1.0, 0.45, 0.05);
+    } else if (mode == 4u && cas >= 0) {
+        const int3   wc   = (int3)floor(qc);
+        const RcCell cell = gRcCells[rcCellIndex((uint)cas, wc)];
+        const uint   meta = cell.b.w;
+        const uint   neff = (meta >> 24) & 15u;
+        const uint   age  = meta >> 28;
+        const bool   live = neff != 0u && (meta & 0xFFFFFFu) == rcTagPack(wc) && age < (uint)AVER_RC_AGE_MAX;
+        col = live ? float3((float)age / (float)AVER_RC_AGE_MAX, (float)neff / (float)AVER_RC_NEFF_MAX, 0.1)
+                   : float3(0.2, 0.0, 0.3);
+    }
+    // Cell edges: darken within 4% of a cell boundary on the two axes the surface runs along (the
+    // axis closest to N would darken a whole face).
+    if (rcViewGrid() && cas >= 0) {
+        const float3 f  = frac(qc);
+        const float3 d  = min(f, 1.0 - f);
+        const float3 an = abs(N);
+        const float  ex = an.x >= an.y && an.x >= an.z ? 1.0 : d.x;
+        const float  ey = an.y > an.x && an.y >= an.z ? 1.0 : d.y;
+        const float  ez = an.z > an.x && an.z > an.y ? 1.0 : d.z;
+        if (min(ex, min(ey, ez)) < 0.04) col *= 0.2;
+    }
+    return col;
+}

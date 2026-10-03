@@ -147,6 +147,9 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     //          four AVER_NEURAC twin compiles (staged CSRdGi/CSRdGiTrace, voxi_restir.hlsli) read it:
     //          giDecodePaths then sends untraced half-res pixels to f2Path 4 (cache read) and the traced
     //          pixels scatter into the cache. Every other compile ignores it, i.e. behaves as HalfResolution.
+    //   bit POSITIONS 8-10 (values 256-1024) the NeuRaC visualiser's mode, 0 = off; position 11 (2048) its
+    //          cell grid. Set only beside bit 128. The twin's giRestirIndirect returns rcDebugColour
+    //          (voxi_neurac_io.hlsli) and Stage B shows it unshaded.
     float4   gAmbientParams;
     // x = VIEW-DEBUG MODE (VoxiRenderer::ViewDebug): 0 normal, 1 Unlit, 2 RayHitInstance, 3 RayHitMaterial,
     // 4 RayHitDistance, 5 Triangles -- PSRayDriven's debug visualisations only (search "vmode");
@@ -3342,6 +3345,13 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         o.col.rgb = aoView.xxx;
     else if (vmode >= 2u)
         o.col.rgb = viewDebugColor(vmode, rdInstanceIndex, inst.materialIndex, rdPrimIndex, hitT, N, dir);
+#if AVER_RD_SPLIT
+    // NeuRaC visualiser (gAmbientParams.w bits 8-10, only ever set beside the live-cache bit 128): the
+    // cache twin's CSRdGi wrote rcDebugColour into gRdGiTex in place of indirect diffuse; shown as is.
+    if (((uint)gAmbientParams.w & 128u) != 0u && (((uint)gAmbientParams.w >> 8) & 7u) != 0u &&
+        gVoxelParams.w > 0.5 && gGiRestirParams.x > 0.5)
+        o.col.rgb = gRdGiTex[uint2(i.pos.xy)].rgb;
+#endif
 #if AVER_GBUFFER
     // clip.w IS the view-space linear depth viewZ wants, reused from o.depth's divide above rather
     // than a second mul. Velocity carries OBJECT motion: the hit's object-space point is mapped through

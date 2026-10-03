@@ -321,6 +321,25 @@ has been built, run or measured at the time of writing.
     Scatter and lookup cost lives inside the existing RD lighting spans, so cache versus plain is an
     A/B of mode 2 against mode 4 on those. The F2 path view (`voxi.giVisPathView`) paints f2Path 4 magenta,
     brightness = cache confidence (not in the split `CSRdGi`, which has no twin).
+12. **Neural Visualiser (Window > Neural Visualiser, 2026-10-03).** Shows the cache at the visible
+    surfaces in place of the lit image (`rcDebugColour`, `voxi_neurac_io.hlsli`). The twin
+    `giRestirIndirect` returns the colour after the denoiser-input write (so it never enters history),
+    and Stage B shows it unshaded. Views:
+    - **Cached light**: `rcLookup` alone; black = nothing cached.
+    - **Coverage**: red = fallback, green = cache.
+    - **Cascade**: cyan 25, yellow 100, orange 400 cm cells.
+    - **Cell state**: green = n_eff, red = age, violet = empty or stale.
+
+    An optional **cell grid** darkens cell edges along the surface. The mode travels in `gAmbientParams.w`
+    bit positions 8-11 (`givis::packAmbientW`'s `neuracView`), set only beside the live-cache bit.
+
+    While a view is up the GI split stands down for the frame, because only the unsplit `CSRdGi` has a
+    cache twin. CLI flags: `--neurac-view 0-4`, `--neurac-grid`.
+
+    *Seen* on NewSponza (200 frames, Cached): the cascades are correct (cyan near, yellow beyond, grid
+    aligned). Coverage after 200 frames is green on floors and red on most vertical surfaces (curtains,
+    pillars, walls), so the cache mostly serves upward-facing surfaces so far. Worth a look against the
+    warm-up stats (cascade 0 holds 7% of cells valid at frame 150).
 
 **What is unverified (all of it):** that the twins compile and fit in registers on the RX 7800 XT
 (a `--dred` or crash check is needed, since `CSRdGiTrace` is a monolith with ray queries), the atomic

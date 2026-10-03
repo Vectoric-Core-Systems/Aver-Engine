@@ -33,6 +33,9 @@ cbuffer FgConstants : register(b1)
     uint  gFrame;    // CSFgTrainRecords: varies the sampled pixels frame to frame
     uint  gSamples;  // CSFgTrainRecords: records to write at most
     uint  gBlock;    // the acceleration image holds one texel per gBlock x gBlock scene pixels
+    uint  gViz;      // CSFgGather: the visualisation written to gVizOut (NeuraFI::Visualisation; 0 = none)
+    float gVizScale; // CSFgGather: pixels of path bend shown at full heat (visualisations 3 and 4)
+    uint  gPad0, gPad1;
 };
 
 // The acceleration image's size. gBlock grows with the scene (2, 4, 8...) so the network's record
@@ -85,7 +88,9 @@ Texture2D<float4> gColP : register(t3);
 Texture2D<float2> gVelP : register(t4);
 Texture2D<float>  gZP   : register(t5);
 Texture2D<float2> gAccel : register(t6);   // one texel per gBlock x gBlock pixels, on frame N's grid; read when gTraj != 0
+Texture2D<float2> gAccelNet : register(t7);   // the network's share of gAccel (same grid); read by visualisation 4
 RWTexture2D<float4> gOut : register(u0);
+RWTexture2D<float4> gVizOut : register(u1);   // display-ready visualisation colour (NeuraFI::Visualisation)
 
 static const int   kSearchSteps   = 4;
 static const float kHoleWeight    = 0.08;   // below this summed confidence the pixel is a hole
@@ -163,6 +168,44 @@ Candidate fromP(float2 x, float2 start)
 
 float luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
+// ---- VISUALISATION (NeuraFI::Visualisation; drawn over the viewport by the editor) ----
+// Display-ready colours: the editor blends this image over the finished frame, after the tonemap, so
+// nothing here goes through exposure. Written by the gather because the gather is the only pass that
+// knows each pixel's two candidates. Purely an output: nothing reads it back.
+static const float3 kVizHole = float3(1.0, 0.0, 1.0);   // magenta: neither real frame could vouch for it
+
+// Blue (0) -> cyan -> green -> yellow -> red (1).
+float3 vizHeat(float t)
+{
+    t = saturate(t);
+    return saturate(float3(1.5 - abs(4.0 * t - 3.0), 1.5 - abs(4.0 * t - 2.0), 1.5 - abs(4.0 * t - 1.0)));
+}
+
+float2 accelNet(float2 p)
+{
+    const int2 q = clamp(int2(floor(p / float(gBlock))), int2(0, 0), int2(accelSize()) - 1);
+    return gAccelNet.Load(int3(q, 0));
+}
+
+// 1 sources: orange from the newer frame (N), blue from the older (N-1), dimmer where less sure.
+// 2 confidence: the blend's confidence as heat. 3 path bend: how far the quadratic/learned path moves
+// the in-between point off the straight line (0.125 |a| px). 4 network share: how much of that bend the
+// network added (0.125 |correction| px; zero while the quadratic stands in).
+float4 vizColour(float2 x, float wN, float wP, float conf, bool hole)
+{
+    if (gViz == 1u) {
+        if (hole) return float4(kVizHole, 1.0);
+        const float share = wP / max(wN + wP, 1e-6);
+        const float3 c = lerp(float3(1.0, 0.55, 0.12), float3(0.15, 0.55, 1.0), share);
+        return float4(c * (0.35 + 0.65 * saturate((wN + wP) * 0.5)), 1.0);
+    }
+    if (gViz == 2u) return float4(hole ? kVizHole : vizHeat(conf), 1.0);
+    const float scale = max(gVizScale, 1e-3);
+    if (gViz == 3u) return float4(vizHeat(0.125 * length(accel(x)) / scale), 1.0);
+    if (gViz == 4u) return float4(vizHeat(gMode == 1u ? 0.125 * length(accelNet(x)) / scale : 0.0), 1.0);
+    return float4(0.0, 0.0, 0.0, 0.0);
+}
+
 [numthreads(FG_GROUP, FG_GROUP, 1)]
 void CSFgGather(uint3 id : SV_DispatchThreadID)
 {
@@ -187,13 +230,16 @@ void CSFgGather(uint3 id : SV_DispatchThreadID)
     const float colourAgree = lerp(1.0, saturate(1.0 - abs(ln - lp) / (max(ln, lp) + 0.05)), 0.25);
 
     const float w = n.conf + p.conf;
-    if (w < kHoleWeight) {
+    const bool hole = w < kHoleWeight;
+    const float conf = hole ? 0.0 : saturate(w * 0.5 * colourAgree);
+    if (gViz != 0u) gVizOut[id.xy] = vizColour(x, n.conf, p.conf, conf, hole);
+    if (hole) {
         // Hole: frame N's own colour at x seeds the fill; confidence 0 marks it for CSFgFill.
         gOut[id.xy] = float4(gColN.Load(int3(id.xy, 0)).rgb, 0.0);
         return;
     }
     const float3 blended = (n.color * n.conf + p.color * p.conf) / w;
-    gOut[id.xy] = float4(blended, saturate(w * 0.5 * colourAgree));
+    gOut[id.xy] = float4(blended, conf);
 }
 
 #endif  // FG_GATHER
@@ -274,6 +320,7 @@ RWStructuredBuffer<float> gTrainRec   : register(u2);
 RWStructuredBuffer<float> gTrainTgt   : register(u3);
 RWStructuredBuffer<uint>  gTrainCount : register(u4);   // [0] records written, [1] outliers rejected
 RWStructuredBuffer<float> gNetOut     : register(u5);   // the network's outputs for gRecords
+RWTexture2D<float2>       gAccelNetOut : register(u6);  // the network's share of gAccelOut (visualisation only)
 
 #define FG_RECORD 14u
 #define FG_OUTPUT 2u
@@ -330,17 +377,22 @@ void CSFgAccel(uint3 id : SV_DispatchThreadID)
     float2 v, vPrev; bool valid;
     inferMotion(p, v, vPrev, valid);
     float2 a = 0.0;   // where the backward fetch failed: straight line, never inferred from neighbours
+    float2 corr = 0.0;
     if (valid) {
         const float s = scaleOf(v, vPrev);
         const uint o = (id.y * qs.x + id.x) * FG_OUTPUT;
         a = v - vPrev;
-        if (gMode == 1u) a += float2(gNetOut[o], gNetOut[o + 1]) * s;   // the network's correction
+        if (gMode == 1u) {
+            corr = float2(gNetOut[o], gNetOut[o + 1]) * s;   // the network's correction
+            a += corr;
+        }
         // A bound on what one frame can bend a path by: a wild prediction must not throw the search
         // across the screen.
         const float len = length(a);
         if (!(len <= 2.0 * s)) a = len > 0.0 && len == len ? a * (2.0 * s / len) : 0.0;
     }
     gAccelOut[id.xy] = a;
+    if (gViz == 4u) gAccelNetOut[id.xy] = all(corr == corr) ? corr : float2(0.0, 0.0);
 }
 
 [numthreads(1, 1, 1)]

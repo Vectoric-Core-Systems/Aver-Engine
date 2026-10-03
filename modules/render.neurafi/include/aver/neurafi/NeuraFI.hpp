@@ -29,6 +29,16 @@ namespace aver::neurafi {
 
 enum class Trajectory : u32 { Linear = 0, Quadratic = 1, Neural = 2 };
 
+// What visualisation() shows (neurafi.hlsl's vizColour has the colour legend). Values are the shader's
+// gViz.
+enum class Visualisation : u32 {
+    None = 0,
+    Sources = 1,       // which real frame each pixel came from (orange N, blue N-1), holes magenta
+    Confidence = 2,    // the blend's confidence as heat, holes magenta
+    PathBend = 3,      // how far the curved path moves the in-between point off the straight line
+    NetworkShare = 4,  // how much of that bend the network added
+};
+
 class NeuraFI final : public rhi::IFrameInterpolator {
 public:
     // `dev` must have resources() (the hosts check) and outlive this.
@@ -43,6 +53,18 @@ public:
 
     void setTrajectory(Trajectory t) { trajectory_ = t; }
     Trajectory trajectory() const { return trajectory_; }
+
+    // THE VISUALISATION: a scene-resolution image of display-ready colours (alpha 1), written by the
+    // gather while `v` is not None, for the host to draw over its viewport. `bendFullScalePx` is the
+    // path bend (PathBend, NetworkShare) shown at full heat. visualisation() is 0 until one was made.
+    // vizCount() advances with every generate() that wrote it, so a host can tell a fresh image from
+    // one left over from before frame interpolation paused. Rests in ShaderResource (pixel-readable).
+    void setVisualisation(Visualisation v, f32 bendFullScalePx) {
+        viz_ = v;
+        vizScale_ = bendFullScalePx > 1e-3f ? bendFullScalePx : 1e-3f;
+    }
+    rhi::TextureHandle visualisation() const { return vizTex_; }
+    u64 vizCount() const { return vizCount_; }
     // In-engine training of the trajectory network, every frame frame interpolation runs.
     void setTraining(bool on) { training_ = on; }
     // Where the user's trained weights are loaded from at first use and saved to while training
@@ -119,11 +141,18 @@ private:
     rhi::TextureHandle histVel2_ = 0, histZ2_ = 0, histVel3_ = 0, histZ3_ = 0;
     // The generated image and the fill's ping-pong partner. Rest in ShaderResource.
     rhi::TextureHandle out_ = 0, tmp_ = 0;
-    // The acceleration image, one texel per block_ x block_ pixels. Rests in NonPixelShaderResource.
-    rhi::TextureHandle accel_ = 0;
+    // The acceleration image, one texel per block_ x block_ pixels, and the network's share of it (written
+    // only for the NetworkShare visualisation). Both rest in NonPixelShaderResource.
+    rhi::TextureHandle accel_ = 0, accelNet_ = 0;
+    // The visualisation (see setVisualisation). Rests in ShaderResource.
+    rhi::TextureHandle vizTex_ = 0;
+    Visualisation viz_ = Visualisation::None;
+    f32 vizScale_ = 0.5f;
+    u64 vizCount_ = 0;
     // Network I/O, all UAV structured float buffers (count: uint). Common between frames.
     rhi::BufferHandle records_ = 0, netOut_ = 0, trainRec_ = 0, trainTgt_ = 0, trainCount_ = 0;
-    // gather: t0-t2 frame N, t3-t5 the previous frame, t6 acceleration, u0 out_.
+    // gather: t0-t2 frame N, t3-t5 the previous frame, t6 acceleration, t7 its network share, u0 out_,
+    // u1 the visualisation.
     // fillA: out_ -> tmp_; fillB: tmp_ -> out_.  traj: see neurafi.hlsl's trajectory section.
     rhi::BindingSetHandle gatherSet_ = 0, fillSetA_ = 0, fillSetB_ = 0, trajSet_ = 0;
     rhi::TextureHandle boundColor_ = 0, boundVel_ = 0, boundZ_ = 0;   // what gatherSet_/trajSet_ hold
