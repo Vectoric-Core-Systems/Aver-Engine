@@ -1382,6 +1382,16 @@ private:
     HANDLE fgTimer_ = nullptr;              // high-resolution waitable timer for the sleep
     void frameInterpWaitForTick();
     void queryDisplayRefresh();
+    // CPU WAIT ACCOUNTING (with --gpu-timing): where a frame's CPU time goes blocked -- the start-of-frame
+    // fence wait, the generated image's Present, the real image's Present. Logged every kWaitReport frames.
+    static constexpr u32 kWaitReport = 300;
+    f64 waitFenceMs_ = 0.0, waitGenPresentMs_ = 0.0, waitPresentMs_ = 0.0, waitTickMs_ = 0.0;
+    u32 waitFrames_ = 0;
+    static f64 qpcMs(i64 a, i64 b) {
+        LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+        return static_cast<f64>(b - a) * 1000.0 / static_cast<f64>(f.QuadPart);
+    }
+    static i64 qpcNow() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
     // With vsync: refreshes each image is held for, so the images go out at fgClockHz_ (rounded to a
     // whole number of refreshes; 1 at the refresh rate). Generated and real alternate on that fixed
     // beat -- a generated image always sits exactly halfway between two real ones.
@@ -3977,7 +3987,9 @@ void D3D12Device::beginFrame() {
     // and returned false, but nobody looked, so every frame kept resetting an allocator and recording
     // for a device that would never run it, paying waitFence's full one-second timeout each time.
     // Returning here makes the loss cost one frame instead of every frame.
+    const i64 tWait0 = qpcNow();
     if (want != 0 && !waitFence(want)) return;
+    waitFenceMs_ += qpcMs(tWait0, qpcNow());
     ++frameSerial_;   // after the wait: this slot's previous frame has retired (see frameSerial_)
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
@@ -6065,9 +6077,13 @@ bool D3D12Device::submitGeneratedImage() {
     ID3D12CommandList* lists[] = {cmdList_.Get()};
     queue_->ExecuteCommandLists(1, lists);
     const bool tearing = !vsync_ && tearingSupported_;
+    const i64 tTick0 = qpcNow();
     if (tearing) frameInterpWaitForTick();   // after the submit, so the GPU is never kept waiting
+    const i64 tGen0 = qpcNow();
+    waitTickMs_ += qpcMs(tTick0, tGen0);
     const HRESULT gr = tearing ? swapChain_->Present(0u, DXGI_PRESENT_ALLOW_TEARING)
                                : swapChain_->Present(frameInterpVsyncInterval(), 0u);
+    waitGenPresentMs_ += qpcMs(tGen0, qpcNow());
     if (FAILED(gr)) {
         if (gr == DXGI_ERROR_DEVICE_REMOVED || gr == DXGI_ERROR_DEVICE_RESET) {
             noteDeviceRemoved("Present (generated frame)", gr);
@@ -6317,12 +6333,24 @@ void D3D12Device::present() {
     // (submitGeneratedImage); this shows the real one on the next vblank -- or, without vsync, on the
     // fixed clock's next tick. A frame that was not interpolated stops the clock (it restarts from the
     // next generated image).
+    const i64 tTick0 = qpcNow();
     if (tearing && frameInterpolated_) frameInterpWaitForTick();
     else fgNextTick_ = 0;
     // With vsync and an interpolated frame, the real image is held as long as the generated one was.
     const UINT sync = (vsync_ && frameInterpolated_) ? frameInterpVsyncInterval()
                                                      : (tearingSupported_ ? interval : 1u);
+    const i64 tPres0 = qpcNow();
+    waitTickMs_ += qpcMs(tTick0, tPres0);
     const HRESULT pr = swapChain_->Present(sync, flags);
+    waitPresentMs_ += qpcMs(tPres0, qpcNow());
+    if (tsEnabled_ && ++waitFrames_ >= kWaitReport) {
+        AVER_INFO("[RHI.D3D12] CPU blocked per frame (avg of {}): start-of-frame fence {:.2f} ms, fixed-clock "
+                  "sleep {:.2f} ms, generated Present {:.2f} ms, real Present {:.2f} ms", waitFrames_,
+                  waitFenceMs_ / waitFrames_, waitTickMs_ / waitFrames_, waitGenPresentMs_ / waitFrames_,
+                  waitPresentMs_ / waitFrames_);
+        waitFenceMs_ = waitTickMs_ = waitGenPresentMs_ = waitPresentMs_ = 0.0;
+        waitFrames_ = 0;
+    }
     // PRESENT IS WHERE A REMOVAL USUALLY SURFACES FIRST, so it is the most likely place to learn
     // about one. It used to log and carry on, which is how a single lost device turned into a
     // screenful of identical errors and then a hard fault somewhere else entirely.
