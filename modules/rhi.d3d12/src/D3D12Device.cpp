@@ -1653,7 +1653,8 @@ struct RetiredRange {
 // A bottom-level acceleration structure for one mesh, with its build scratch.
 // Scratch is released only through the deferred-destroy queue.
 struct RhiBlas {
-    ComPtr<ID3D12Resource> as, scratch;
+    ComPtr<ID3D12Resource> as, scratch;   // non-updatable: scratch only while a build is in flight
+    u64 scratchBytes = 0;
     MeshHandle mesh = 0;
     bool built = false;
     bool allowUpdate = false;   // Built with ALLOW_UPDATE; may be refitted in place.
@@ -6948,10 +6949,11 @@ BlasHandle D3D12ResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpdat
     b.as = makeAsBuffer(dev_->device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
     // An updatable structure's scratch must cover whichever of a build or an update asks for more --
     // it is reused for both, and D3D12 sizes the two independently.
-    const u64 scratchBytes = allowUpdate ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
-                                          : info.ScratchDataSizeInBytes;
-    b.scratch = makeAsBuffer(dev_->device_.Get(), scratchBytes, D3D12_RESOURCE_STATE_COMMON);
-    if (!b.as || !b.scratch) { AVER_ERROR("[RHI.D3D12] createBlas allocation failed"); return 0; }
+    b.scratchBytes = allowUpdate ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
+                                 : info.ScratchDataSizeInBytes;
+    // A static BLAS gets its scratch in buildBlas and gives it back after (docs/rendering/VRAM.md).
+    if (allowUpdate) b.scratch = makeAsBuffer(dev_->device_.Get(), b.scratchBytes, D3D12_RESOURCE_STATE_COMMON);
+    if (!b.as || (allowUpdate && !b.scratch)) { AVER_ERROR("[RHI.D3D12] createBlas allocation failed"); return 0; }
     blases_.push_back(std::move(b));
     return static_cast<BlasHandle>(blases_.size());
 }
@@ -6973,8 +6975,8 @@ BlasHandle D3D12ResourceFactory::createBlasMulti(const BlasGeometry* geometries,
     dev_->device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
     b.mesh = geometries[0].mesh;
     b.as = makeAsBuffer(dev_->device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-    b.scratch = makeAsBuffer(dev_->device_.Get(), info.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_COMMON);
-    if (!b.as || !b.scratch) { AVER_ERROR("[RHI.D3D12] createBlasMulti allocation failed"); return 0; }
+    b.scratchBytes = info.ScratchDataSizeInBytes;
+    if (!b.as) { AVER_ERROR("[RHI.D3D12] createBlasMulti allocation failed"); return 0; }
     blases_.push_back(std::move(b));
     return static_cast<BlasHandle>(blases_.size());
 }
@@ -8117,6 +8119,15 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
     if (!b) { AVER_ERROR("[RHI.D3D12] buildBlas with an invalid handle"); return; }
     if (!dev_->cmdList4_ || !dev_->device5_) { AVER_ERROR("[RHI.D3D12] buildBlas without ray-tracing support"); return; }
     if (b->mesh == 0 || b->mesh > dev_->meshes_.size()) return;
+    if (!b->scratch) {
+        b->scratch = makeAsBuffer(dev_->device_.Get(), b->scratchBytes, D3D12_RESOURCE_STATE_COMMON);
+        if (!b->scratch) { AVER_ERROR("[RHI.D3D12] buildBlas: no build scratch for BLAS {}", h); return; }
+    }
+    // A static BLAS's scratch is retired behind this frame's fence once the build is recorded.
+    struct ReleaseScratch {
+        D3D12ResourceFactory* res; RhiBlas* b;
+        ~ReleaseScratch() { if (!b->allowUpdate && b->scratch) { res->retire(b->scratch); b->scratch.Reset(); } }
+    } releaseScratch{res_, b};
     if (!b->geometries.empty()) {
         // createBlasMulti: every geometry at once, into the allocation its prebuild query sized.
         std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geos;
@@ -8175,7 +8186,7 @@ bool D3D12RenderContext::refitBlas(BlasHandle h) {
             const u64 scratchBytes = b->allowUpdate
                 ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
                 : info.ScratchDataSizeInBytes;
-            if (info.ResultDataMaxSizeInBytes > b->as->GetDesc().Width || scratchBytes > b->scratch->GetDesc().Width) {
+            if (info.ResultDataMaxSizeInBytes > b->as->GetDesc().Width || scratchBytes > b->scratchBytes) {
                 AVER_ERROR("[RHI.D3D12] refitBlas: mesh {} moved from {}v/{}i to {}v/{}i, past what its BLAS "
                            "was allocated for at creation -- rebuilding it in place would write past that "
                            "allocation, so this refit is refused; the caller must destroy and recreate the BLAS",
