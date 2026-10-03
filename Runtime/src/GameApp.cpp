@@ -1,7 +1,6 @@
 #include "aver/game/GameApp.hpp"
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
-#include "aver/framegen/ProceduralFrameGenerator.hpp"
 
 #include <filesystem>
 
@@ -497,6 +496,13 @@ GameConfig parseArgs(int argc, char** argv) {
         else if (std::strcmp(a, "--frame-gen") == 0) {
             const char* v = valueAfter(argc, argv, i, nullptr);
             if (v) { c.frameGenArg = std::atoi(v) != 0 ? 1 : 0; ++i; }
+        }
+        else if (std::strcmp(a, "--frame-gen-trajectory") == 0) {
+            const char* v = valueAfter(argc, argv, i, nullptr);
+            if (v) {
+                c.frameGenTrajectory = equalsAsciiCI(v, "quadratic") ? 1 : equalsAsciiCI(v, "neural") ? 2 : 0;
+                ++i;
+            }
         }
         // A bare .ocproject path is the project, so double-clicking or dropping it on the exe works. A
         // packaged game launched with no arguments at all finds its manifest in its own directory
@@ -1905,8 +1911,13 @@ void GameApp::pushFrame(Engine& e) {
         // vsync or 1x anti-aliasing is missing.
         bool wantFrameGen = cfg_.frameGenArg >= 0 ? cfg_.frameGenArg == 1 : project_.frameGen == 1;
         if (wantFrameGen && !frameGenerator_) {
-            if (rhi::IResourceFactory* res = dev->resources()) {
-                frameGenerator_ = std::make_unique<framegen::ProceduralFrameGenerator>(*res);
+            if (dev->resources()) {
+                auto fg = std::make_unique<framegen::ProceduralFrameGenerator>(*dev);
+                // The trajectory: --frame-gen-trajectory; Neural reads trained weights from the same
+                // per-machine file the editor trains into (it keeps the analytic path until it has some).
+                fg->setTrajectory(static_cast<framegen::Trajectory>(cfg_.frameGenTrajectory));
+                fg->setWeightsPath(userDataDir() + "\\framegen_trajectory.avnn");
+                frameGenerator_ = std::move(fg);
                 dev->setFrameGenerator(frameGenerator_.get());
             } else {
                 wantFrameGen = false;

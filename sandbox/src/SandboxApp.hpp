@@ -1502,6 +1502,7 @@ public:
 #endif
     void setResizeCycle(int n);              // --resize-cycle [N]
     void setFrameGenCli(int on) { frameGenCli_ = on; }   // --frame-gen 0|1|2 (2: capture the generated image)
+    void setFrameGenTrajectory(int t, bool train) { frameGenTrajectory_ = t; frameGenTrain_ = train; }
     void setGpuTiming(bool on);                                // --gpu-timing
     void setLumaSweep(bool on, int stride);
     void setFireflyMetric(bool on, f32 mult);
@@ -3935,6 +3936,8 @@ private:
     // generator is built on first use and installed on the device for the session.
     int  frameGenCli_ = -1;
     bool frameGenWhileEditing_ = false;   // Editor Preferences, display.frameGenWhileEditing
+    int  frameGenTrajectory_ = 0;         // framegen::Trajectory: --frame-gen-trajectory (0 linear)
+    bool frameGenTrain_ = false;          // --frame-gen-train: train the trajectory network in-engine
     std::unique_ptr<aver::framegen::ProceduralFrameGenerator> frameGenerator_;
     // Decides and pushes this frame's frame-generation state; returns whether it is wanted (the
     // G-buffer must then be on).

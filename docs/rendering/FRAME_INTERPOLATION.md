@@ -4,8 +4,8 @@
 Milestone 1 measured on NewSponza at 1766×994 scene resolution (RX 7800 XT, `--gpu-timing`): generation
 **0.25 ms**, plus **0.48 ms** for the generated image's own post chain. No debug-layer errors of its own.
 Not yet measured: quality against true midpoint frames, cadence stability, the editor viewport path under
-interaction. Vulkan: not started. The neural milestone is a design (§3.5), not built. Every millisecond
-figure is an estimate unless it says *measured*. Revised 2026-10-03 after the
+interaction. Vulkan: not started. The neural trajectory prior (§3.5) is built and opt-in. Every
+millisecond figure is an estimate unless it says *measured*. Revised 2026-10-03 after the
 patent sweep ([FRAME_INTERPOLATION_PATENTS.md](FRAME_INTERPOLATION_PATENTS.md)) to the **patent-aware
 design (option b)**: written in-house, no FSR3 code.
 
@@ -160,7 +160,23 @@ frame simply has low confidence, and the blend follows continuously.
 Milestone 1 is shippable on its own and is the baseline the network must beat. Estimate ~0.4–0.8 ms at
 full 1440p, roughly a quarter at 0.5 scale.
 
-### 3.5 Milestone 2 — the network: a learned trajectory prior (design, 2026-10-03; HELD BACK)
+### 3.5 Milestone 2 — the network: a learned trajectory prior (built 2026-10-03, opt-in)
+
+**Built** (`--frame-gen-trajectory linear|quadratic|neural`, `--frame-gen-train`; default linear). The
+quadratic path is `q = p − 0.5·v − 0.125·a` with `a = v − v′` (v′ fetched backward at `p − v` with a depth
+check, else a = 0); `quadratic` uses that analytic `a`, `neural` predicts it with a 14→32×2→2 MLP on
+`Aver.Render.Neural`. Training is self-supervised from ordinary real frames: interpolate the two-frame
+span N−2→N and take N−1 as the answer (`a = 8·v_N − 4·v_span`), purely geometric. Weights are saved every
+500 steps to `framegen_trajectory.avnn` beside editor.ini and loaded at start; Neural uses the analytic
+`a` until it has weights or 1,500 steps.
+
+**Measured** (NewSponza, 1766×994, wobbling camera; mean in-between position error on two-frame spans,
+scored on the CPU twin every 500 steps): straight line 0.22 px, analytic 0.11 px, network **0.05–0.09 px**.
+Costs: generation 0.25 → 0.76 ms with the network's inference (quarter resolution); training 0.53 ms
+while on. The network's error drifted up from 0.047 to 0.090 over 2,000 continued steps: tune the learning
+rate or decay it. Not yet measured: the image-level gain on one-frame spans, scenes with moving objects.
+
+*The design below is what was built; it is kept as the record of why.*
 
 **Redesigned after the claim review** (patents doc §6.3). The earlier "network outputs the blend weight"
 plan reads closely on NVIDIA 17/949,153's allowed claim ("use one or more neural networks to blend two or
@@ -169,7 +185,8 @@ more intermediate video frames"), so the network no longer touches blending at a
 
 - **Job (N1):** per pixel of each real frame, a 2-D **acceleration** a(p), so the G1 search follows a
   quadratic path (`q = p − 0.5·MV + 0.125·a`) instead of a straight line. Curved motion (turning cars,
-  orbiting cameras, falling objects) is the largest error linear gathering leaves. Prior art: Xu et al.,
+  orbiting cameras, falling objects) is the largest error linear gathering leaves. (Sign convention as
+  built: `q = p − 0.5·MV − 0.125·a`, `a = v − v′`.) Prior art: Xu et al.,
   *Quadratic Video Interpolation*, NeurIPS 2019; Liu et al. 2020; Chi et al. 2020.
 - **Inputs:** real frames only — frame N's colour, depth and motion, and frame N−1's motion fetched by
   **backward lookup** at `p − MV_N(p)` with a depth check.
@@ -277,7 +294,8 @@ Full sweep, element mappings and design-arounds: [FRAME_INTERPOLATION_PATENTS.md
 applies the changes in §2.3. Round 2 (2026-10-03) re-checked the round-1 HIGH items against this design
 (all now LOW) and found the Georgia Tech fill and Intel pacing patents. Round 3 charted prior art against
 the broad NVIDIA applications and checked their status and family (no Singapore, EP, KR or JP members).
-**Milestone 2 (the network) is held back** by the owner until counsel has looked at US 2024/0098216.
+The network was redesigned to stay off blending entirely (§3.5) and built on the owner's go-ahead; the
+open counsel points (the two-start search, AMD US 2026/0094228) are noted, with no change needed now.
 
 ---
 
@@ -289,7 +307,7 @@ the broad NVIDIA applications and checked their status and family (no Singapore,
 | 0b | G-buffer reason for frame interpolation; scene-cut signal | — |
 | 1 | **Built (D3D12):** history in the generator, present-pass split (two submissions per frame — D3D12 lets a command list write only the current back buffer), 3 swapchain images decoupled from frames in flight, fixed vsync cadence, HUD/editor-lines/ImGui drawn on both images, Editor Preference, `RENDER.FRAMEGEN`, `--frame-gen 0\|1\|2`, scene cuts (resize, G-buffer reset, camera jump > 2.5 m or 30°). Not built: the waitable swapchain object, the <30 fps warning | — |
 | 2 | **Built:** G1 gather (2 search starts per frame), G2 confidence, G3 blend, G4 two full-resolution fill passes; eye adaptation held on the generated image, bloom and local exposure recomputed on it | — |
-| 3 | **HELD BACK (owner, 2026-10-03).** `Aver.Render.Neural` conv forward kernels; trajectory-prior net (§3.5, rules R1–R10); in-engine training | Yes |
+| 3 | **Built, opt-in (owner go-ahead 2026-10-03):** trajectory-prior MLP (§3.5, rules R1–R10) with in-engine self-supervised training; analytic quadratic as its fallback. Open: learning-rate decay, image-level measurement, a project/editor setting (CLI only today) | Yes |
 | 4 | Translucent motion, reflection motion, skinned previous pose, 3× generation | Partly |
 
 ---

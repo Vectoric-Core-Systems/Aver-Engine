@@ -5,6 +5,7 @@
 #include "aver/formats/OcProject.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/pcg/PcgVolume.hpp"
+#include "aver/framegen/ProceduralFrameGenerator.hpp"
 
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/VoxiRenderer.hpp"
@@ -168,6 +169,8 @@ struct GameConfig {
     int averSrArg = -1;   // -1 = unstated/auto, else the ladder's own numbering 0..3
     // --frame-gen 0|1: frame interpolation over the project's RENDER.FRAMEGEN. -1 = not given.
     int frameGenArg = -1;
+    // --frame-gen-trajectory linear|quadratic|neural (framegen::Trajectory's numbering; 0 = linear).
+    int frameGenTrajectory = 0;
 };
 
 // Parses the arguments a game executable accepts. Unknown arguments are ignored rather than fatal:
@@ -488,7 +491,7 @@ private:
 
     // Frame interpolation (docs/rendering/FRAME_INTERPOLATION.md). Built on first use; detached from
     // the device in onShutdown before it resets, like averSrUpscaler_.
-    std::unique_ptr<rhi::IFrameGenerator> frameGenerator_;
+    std::unique_ptr<framegen::ProceduralFrameGenerator> frameGenerator_;
 
 #if AVER_MODULE_VOXI
     // BY VALUE, and registered NON-OWNING with addRenderFeature. The device holds a bare pointer to

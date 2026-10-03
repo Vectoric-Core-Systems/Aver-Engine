@@ -230,6 +230,22 @@ FRAME_INTERPOLATION.md §3.5.
   stage 2 included. Pre-2024 prior art: DLSS 2.0 (2020), Chaitanya et al. 2017, Xiao et al. 2020,
   ExtraNet 2021.
 
+**AMD US 2026/0094228 A1 in full (read from the publication; file history from Global Dossier,
+2026-10-03).** "Neural Network Based Graphics Rendering", Appl. 18/901,288, filed 2024-09-30, inventor
+Kunal Tyagi, published 2026-04-02. The disclosure is **cloud gaming**: a server ray traces, denoises and
+encodes with a trained network; a client decodes, denoises and upscales with one and interpolates or
+extrapolates frames with another, fed local and predicted user input to hide lag. Independent claims 1
+(method), 10 (system), 20 (medium) need only: a multi-stage rendering pipeline receives scene data; at
+least one stage is a trained network transforming the previous stage's data; the frame is rendered at
+least partly from that output. Dependents: denoise/encode/decode/upscale (2, 11); training on
+original/transformed frame pairs (3, 12); a network generating extra frames by interpolation or
+extrapolation (4, 9, 13, 18); the server/client split with lag adjustment from local input (5–8, 14–17);
+predicted user input to the frame network (9, 19). **Status: non-final rejection 2026-08-12**; reply due
+2026-11-12 (2027-02-12 with extensions). The §122(e) window closed 2026-10-02. No SG member found.
+**Decision (owner, 2026-10-03): no design change now** — the independent claims as filed are anticipated
+by the prior art above and already rejected; the likely survivors (cloud split, predicted/local user
+input) are features Aver does not use. Watch AMD's reply.
+
 ## 7. Gaps — still to search or read
 
 - GB 2620919 **B** (granted) claims; 2022/0038653's current claims and status.

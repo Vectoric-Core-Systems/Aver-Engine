@@ -9,6 +9,7 @@ aver_add_module(Aver.Render.FrameGen
   DEPS
     Aver.Core
     Aver.RHI
+    Aver.Render.Neural   # the trajectory network (FRAME_INTERPOLATION.md §3.5)
 )
 
 # HLSL beside the executable -- see cmake/AvModule.cmake.

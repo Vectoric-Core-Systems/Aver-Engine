@@ -10,6 +10,7 @@
 #include "TextureEditor.hpp"   // makeTextureEditor; SandboxApp.hpp does not pull this one in
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
+#include "aver/platform/FileSystem.hpp"   // userDataDir: where the trajectory network's weights live
 
 namespace aver {
 SandboxApp::SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::string shot, Tool initialTool)
@@ -3063,13 +3064,19 @@ bool SandboxApp::updateFrameGeneration(rhi::IDevice* dev) {
                                   : frameGenWhileEditing_;
     dev->setFrameGenCaptureGenerated(frameGenCli_ == 2);
     if (want && !frameGenerator_) {
-        rhi::IResourceFactory* res = dev->resources();
-        if (res) {
-            frameGenerator_ = std::make_unique<framegen::ProceduralFrameGenerator>(*res);
+        if (dev->resources()) {
+            frameGenerator_ = std::make_unique<framegen::ProceduralFrameGenerator>(*dev);
+            // Trained trajectory weights live beside editor.ini: per machine, shared by every project.
+            const std::string dir = aver::userDataDir();
+            if (!dir.empty()) frameGenerator_->setWeightsPath(dir + "\\framegen_trajectory.avnn");
             dev->setFrameGenerator(frameGenerator_.get());
         } else {
             want = false;
         }
+    }
+    if (frameGenerator_) {
+        frameGenerator_->setTrajectory(static_cast<framegen::Trajectory>(frameGenTrajectory_));
+        frameGenerator_->setTraining(frameGenTrain_);
     }
     dev->setFrameGeneration(want);
     return want;
