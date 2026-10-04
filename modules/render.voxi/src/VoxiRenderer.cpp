@@ -412,7 +412,7 @@ void VoxiRenderer::shutdown() {
                                         rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                         rdGiCacheCsPso_, rdGiCacheCbCsPso_,
                                         rdGiTraceCacheCsPso_, rdGiTraceCacheCbCsPso_,
-                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_, rdPtRefCsPso_,
+                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_, rdGiPtRcCbCsPso_, rdGiTracePtRcCbCsPso_, rdPtRefCsPso_, rdReflPtRcCsPso_, rdReflSplitPtRcCsPso_,
                                         rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                         rdReflSplitCsPso_, rdReflFilterCsPso_,
                                         rdLocalLightsCsPso_,
@@ -434,7 +434,7 @@ void VoxiRenderer::shutdown() {
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
     rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
-    rdGiPtRcCsPso_ = rdGiTracePtRcCsPso_ = rdPtRefCsPso_ = 0;
+    rdGiPtRcCsPso_ = rdGiTracePtRcCsPso_ = rdGiPtRcCbCsPso_ = rdGiTracePtRcCbCsPso_ = rdPtRefCsPso_ = rdReflPtRcCsPso_ = rdReflSplitPtRcCsPso_ = 0;
     rdReflPtCsPso_ = rdReflSplitPtCsPso_ = 0;
     rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
     rdLocalLightsCsPso_ = 0;
@@ -4245,8 +4245,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // ReSTIR GI is chosen AND cone trace is gated on.
         const bool giDispatch = !ptRef && cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f;
         // Half-rate ReSTIR GI: gated on rayDrivenStages==2, checkerboard variant compiled, denoiser live.
-        // Not under Path Tracing: every pixel traces its path every frame (half the paths is twice the grain).
-        const bool giCb = giDispatch && settings_.rayDrivenStages == 2u && !pt && rdGiCbCsPso_ != 0 &&
+        const bool giCb = giDispatch && settings_.rayDrivenStages == 2u && rdGiCbCsPso_ != 0 &&
                           denoiseGiRanThisFrame_;
         giCbWrittenThisFrame_ = giCb;
         giCbParityWritten_    = denoiseFrame_ & 1u;
@@ -4254,7 +4253,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             rdGiCbRunLogged_ = true;
             AVER_INFO("[Voxi] half-rate ReSTIR GI running: CSRdGi traces one checkerboard half each "
                       "frame, the denoiser reconstructs the rest");
-        } else if (settings_.rayDrivenStages == 2u && !giCb && !pt && !rdGiCbFallbackLogged_) {
+        } else if (settings_.rayDrivenStages == 2u && !giCb && !rdGiCbFallbackLogged_) {
             rdGiCbFallbackLogged_ = true;
             const char* why =
                 !giDispatch ? "ReSTIR GI is not the diffuse estimator this frame"
@@ -4311,9 +4310,10 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // carries. Copied here rather than shared.
         if (giSplit) {
             stageBegin("Voxi RD GI trace stage");
-            const bool g1PtRc = pt && !giCb && rcBit && rdGiTracePtRcCsPso_ != 0;
+            const rhi::PipelineHandle g1Rc = giCb ? rdGiTracePtRcCbCsPso_ : rdGiTracePtRcCsPso_;
+            const bool g1PtRc = pt && rcBit && g1Rc != 0;
             const rhi::PipelineHandle g1Pt =
-                g1PtRc ? rdGiTracePtRcCsPso_
+                g1PtRc ? g1Rc
                        : pt ? (giCb ? rdGiTracePtCbCsPso_ : rdGiTracePtCsPso_) : rhi::PipelineHandle(0);
             const rhi::PipelineHandle g1Twin =
                 (!g1Pt && rcBit) ? (giCb ? rdGiTraceCacheCbCsPso_ : rdGiTraceCacheCsPso_) : rhi::PipelineHandle(0);
@@ -4365,10 +4365,11 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
 
         if (giDispatch) {
             stageBegin("Voxi RD GI stage");
-            const bool giPtRc = !giSplit && pt && !giCb && rcBit && rdGiPtRcCsPso_ != 0;
+            const rhi::PipelineHandle giRc = giCb ? rdGiPtRcCbCsPso_ : rdGiPtRcCsPso_;
+            const bool giPtRc = !giSplit && pt && rcBit && giRc != 0;
             if (giPtRc) usedCacheTwin = true;
             const rhi::PipelineHandle giPt =
-                giPtRc ? rdGiPtRcCsPso_
+                giPtRc ? giRc
                        : (!giSplit && pt) ? (giCb ? rdGiPtCbCsPso_ : rdGiPtCsPso_) : rhi::PipelineHandle(0);
             const rhi::PipelineHandle giTwin =
                 giPt ? giPt
@@ -4424,8 +4425,11 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // CSRdRefl: CPU mirror of PSRayDriven's reflection-block condition's reflections-enabled half.
         if (!ptRef && cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f) {
             stageBegin("Voxi RD reflection stage");
+            // Over the radiance cache when it is live: a reflected surface it covers needs no more rays.
+            const rhi::PipelineHandle reflPtRc =
+                (pt && rcBit) ? (reflSplit ? rdReflSplitPtRcCsPso_ : rdReflPtRcCsPso_) : rhi::PipelineHandle(0);
             const rhi::PipelineHandle reflPt =
-                pt ? (reflSplit ? rdReflSplitPtCsPso_ : rdReflPtCsPso_) : rhi::PipelineHandle(0);
+                reflPtRc ? reflPtRc : pt ? (reflSplit ? rdReflSplitPtCsPso_ : rdReflPtCsPso_) : rhi::PipelineHandle(0);
             ctx.setPipeline(reflPt ? reflPt : reflSplit ? rdReflSplitCsPso_ : rdReflCsPso_);
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
@@ -5607,10 +5611,14 @@ bool VoxiRenderer::createPathTraceTwins() {
     build("CSRdGiTrace", ";AVER_GI_CHECKERBOARD=1", rdGiTracePtCbCsPso_);
     build("CSRdRefl",    "",                        rdReflPtCsPso_);
     build("CSRdRefl",    ";AVER_RD_REFL_SPLIT=1",   rdReflSplitPtCsPso_);
-    // Over the radiance cache. Plain only: Path Tracing never runs the half-rate checkerboard.
+    // Over the radiance cache, plain and half-rate checkerboard.
     build("CSRdGi",      ";AVER_NEURAC=1",          rdGiPtRcCsPso_);
     build("CSRdGiTrace", ";AVER_NEURAC=1",          rdGiTracePtRcCsPso_);
+    build("CSRdGi",      ";AVER_NEURAC=1;AVER_GI_CHECKERBOARD=1", rdGiPtRcCbCsPso_);
+    build("CSRdGiTrace", ";AVER_NEURAC=1;AVER_GI_CHECKERBOARD=1", rdGiTracePtRcCbCsPso_);
     build("CSRdPtRef",   "",                        rdPtRefCsPso_);
+    build("CSRdRefl",    ";AVER_NEURAC=1",                         rdReflPtRcCsPso_);
+    build("CSRdRefl",    ";AVER_NEURAC=1;AVER_RD_REFL_SPLIT=1",   rdReflSplitPtRcCsPso_);
     if (!rdPtRefCsPso_)
         AVER_WARN("[Voxi] the reference path tracing pass did not compile; Reference mode runs as ReSTIR");
     if (!rdGiPtRcCsPso_ || !rdGiTracePtRcCsPso_)
@@ -6200,7 +6208,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                          rdGiCacheCsPso_, rdGiCacheCbCsPso_,
                                          rdGiTraceCacheCsPso_, rdGiTraceCacheCbCsPso_,
-                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_, rdPtRefCsPso_,
+                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_, rdGiPtRcCbCsPso_, rdGiTracePtRcCbCsPso_, rdPtRefCsPso_, rdReflPtRcCsPso_, rdReflSplitPtRcCsPso_,
                                         rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                          rdReflSplitCsPso_, rdReflFilterCsPso_,
                                          rdLocalLightsCsPso_};
@@ -6219,7 +6227,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
     rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
-    rdGiPtRcCsPso_ = rdGiTracePtRcCsPso_ = rdPtRefCsPso_ = 0;
+    rdGiPtRcCsPso_ = rdGiTracePtRcCsPso_ = rdGiPtRcCbCsPso_ = rdGiTracePtRcCbCsPso_ = rdPtRefCsPso_ = rdReflPtRcCsPso_ = rdReflSplitPtRcCsPso_ = 0;
     rdReflPtCsPso_ = rdReflSplitPtCsPso_ = 0;
     rcTwinsTried_ = false;
     ptTwinsTried_ = false;

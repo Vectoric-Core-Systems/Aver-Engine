@@ -94,12 +94,15 @@ Sample rtDiscSample(u32 k, f32 ang0) {
     return Sample{std::cos(a) * rad, std::sin(a) * rad};
 }
 
+// Mirrors voxi.hlsl's averGoldenTurns: n golden-angle turns mod 2 pi, integer fixed point.
+f32 averGoldenTurns(u32 n) { return static_cast<f32>((n * 0x9E3779B9u) >> 8) * (6.2831853f / 16777216.0f); }
+
 // Mirrors F1's rtHemiDiscSample EXACTLY -- see the source assertion at the bottom for the literal
 // HLSL body this arithmetic has to keep matching.
 Sample rtHemiDiscSample(u32 k, u32 n, u32 frameIdx, f32 pixelX, f32 pixelY, f32 streamSalt) {
     const u32 idx = frameIdx * std::max(n, 1u) + k;
     const f32 u   = fracf(radicalInverse2(idx + 1u) + rtHash(pixelX + streamSalt, pixelY + 17.0f + streamSalt));
-    const f32 a   = rtHash(pixelX, pixelY) * 6.2831853f + static_cast<f32>(idx) * 2.39996323f + streamSalt;
+    const f32 a   = rtHash(pixelX, pixelY) * 6.2831853f + averGoldenTurns(idx) + streamSalt;
     const f32 r   = std::sqrt(u);
     return Sample{std::cos(a) * r, std::sin(a) * r};
 }
@@ -290,7 +293,7 @@ int main() {
               "...its idx line matches this file's C++ mirror, verbatim");
         check(hlslHas("const float u   = frac(rtRadicalInverse2(idx + 1u) + rtHash(pixelKey + float2(streamSalt, 17.0 + streamSalt)));"),
               "...its u line matches this file's C++ mirror, verbatim");
-        check(hlslHas("const float a   = rtHash(pixelKey) * 6.2831853 + (float)idx * 2.39996323 + streamSalt;"),
+        check(hlslHas("const float a   = rtHash(pixelKey) * 6.2831853 + averGoldenTurns(idx) + streamSalt;"),
               "...its a line matches this file's C++ mirror, verbatim");
         check(hlslHas("return float2(cos(a), sin(a)) * sqrt(u);"),
               "...and its return line matches this file's C++ mirror, verbatim");

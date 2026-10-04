@@ -8,6 +8,9 @@
 
 namespace aver {
 #if AVER_WITH_IMGUI
+// Default render scale: half resolution, upscaled (new projects state AverSR Performance too).
+constexpr f32 kDefaultRenderScale = 0.5f;
+
 // Reads every editor preference into the members that back the widgets.
 void SandboxApp::loadEditorPreferences() {
     using namespace editor;
@@ -103,11 +106,13 @@ void SandboxApp::loadEditorPreferences() {
             } else if (pending && !renderScaleCookieArmed_) {
                 // !renderScaleCookieArmed_: a cookie THIS process armed isn't evidence the previous
                 // launch crashed (see updateAverSrAuto's prefsLoaded_ gate for the frame-1 ordering bug).
+                // Falls back to the default 0.5, not native: a device loss is rarely the scale's fault,
+                // and native resolution is 4x the work (it took NeonDistrict from 57 fps to 3).
+                const f32 fallback = stored == kDefaultRenderScale ? 1.0f : kDefaultRenderScale;
                 AVER_CRITICAL("[Sandbox] the last launch did not survive a stored render scale of "
-                              "{:.2f} -- resetting display.renderScale to 1. Set it again if that "
-                              "was not the cause; the scale itself is the thing that needs fixing.",
-                              stored);
-                setPrefFloat("display.renderScale", 1.0f);
+                              "{:.2f} -- resetting display.renderScale to {:.2f}. Set it again if that "
+                              "was not the cause.", stored, fallback);
+                setPrefFloat("display.renderScale", fallback);
                 setPrefBool("display.renderScalePending", false);
                 flushEditorPrefs();
             } else {
@@ -1548,13 +1553,13 @@ void SandboxApp::buildRenderingSettings(int page) {
         uiReg_.track("project.gi.restirHistory");
         // Tooltip asked before the greyed-reason label (IsItemHovered reads LAST submitted item).
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("0 (default): each frame's indirect light stands on its own -- no\n"
-                              "bright flash when the camera stops. Higher values let a pixel\n"
-                              "lean on previous frames, which is exactly what caused that flash:\n"
-                              "1 measured about 8%% too bright for roughly 25 frames after the\n"
-                              "camera stopped, 8 about +104%% (Sponza, viewport mean luminance,\n"
-                              "674ed667). The denoiser below already smooths this, so 0 measured\n"
-                              "no noisier than 1 either at rest or in motion.\n\n"
+            ImGui::SetTooltip("How many earlier samples a pixel's ReSTIR reservoir may lean on.\n"
+                              "8 (default): temporal reuse, 37%% less noise in the raw indirect light\n"
+                              "and within 3%% of no reuse in brightness, no flash when the camera\n"
+                              "stops (NeonDistrict Day, viewport mean). 0 turns reuse off: one\n"
+                              "fresh sample per pixel per frame.\n\n"
+                              "(The old +8%%/+104%% overshoot came from two bugs in the reuse pass,\n"
+                              "fixed, not from the history itself.)\n\n"
                               "Round-trips as RENDER.RESTIRHISTORY.");
         if (histGreyed) {
             ImGui::SameLine();

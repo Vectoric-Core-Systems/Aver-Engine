@@ -196,6 +196,9 @@ static float3 gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
 // History reprojection projects wpos + this through last frame's camera, so an animated object (or the
 // viewmodel) keeps its own history. Rigid instance motion only; 0 for static geometry and in raster.
 static float3 gAverReprojDelta = float3(0.0, 0.0, 0.0);
+// n turns of the golden angle, mod 2 pi, in integer fixed point: `n * 2.39996323` in float drifts once
+// the frame count is large.
+float averGoldenTurns(uint n) { return (float)((n * 0x9E3779B9u) >> 8) * (6.2831853 / 16777216.0); }
 
 // Is this fragment a translucent (glass/water) draw, replayed blended?
 bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) != 0u || gTransmission > 0.0; }
@@ -463,7 +466,7 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
 
             // The sun's golden-angle jitter (rtShadowTemporalEx's untiled branch), stepped per TURN so the
             // disc sample advances one golden angle each time this pixel traces.
-            const float frameJitter = (float)turn * 2.39996323;
+            const float frameJitter = averGoldenTurns(turn);
             const float v = rdLocalShadow(wpos, N, gRdLocalLights[pick], pixelC, frameJitter);
 
             // Exponential accumulation: 0.95 history at rest (~20 turns), rising only to 0.2 fresh by 32
@@ -813,7 +816,7 @@ float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel
         sun.direction  = L;
         sun.radiance   = averSunRadiance();
         sun.visibility = rtShadow(h.pos, s.N, L, pixel, float3(0, 0, 0), float3(0, 0, 0), 1u,
-                                  (float)(sampleFrame + k) * 2.39996323);
+                                  averGoldenTurns(sampleFrame + k));
         AverIndirect ind;
         ind.ambient      = averSkyIrradiance(s.N);
         ind.ambientScale = gAmbient.r;
@@ -2120,7 +2123,7 @@ void CSRdShadowProbe(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, ui
             const float3 L = normalize(gLightDir.xyz);
             // Same jitter rtShadowTemporal's non-tiled branch passes to agree with CSRdShadow's fresh trace.
             const float jitter = (gRtHistParams.x < 0.5) ? 0.0
-                                : (float)((uint)gRtHistParams.z) * 2.39996323;
+                                : averGoldenTurns((uint)gRtHistParams.z);
             // Which sample the probe traces: rotated by pixel/frame to cover all radii in every tile.
             // Rotating keeps row/column neighbours on different samples.
             const uint rays   = (uint)max(gRtParams.y, 1.0);
@@ -2299,7 +2302,7 @@ void CSRdGiTrace(uint3 tid : SV_DispatchThreadID) {
     bool   nonFinite   = false;
     float  f2LumTraced = 0.0, f2LumSky = 0.0;
     bool   f2Observed  = false;
-    const bool ok = giTraceInitialCandidate(s.wpos, s.N, float2(pixel) + 0.5, frameIdx * 2.39996323,
+    const bool ok = giTraceInitialCandidate(s.wpos, s.N, float2(pixel) + 0.5, averGoldenTurns(frameIdx),
                                             pos, nrm, rad, nonFinite, gd.f2Path, gd.rho2,
                                             f2LumTraced, f2LumSky, f2Observed);
 

@@ -127,18 +127,14 @@ float3 ptLamp(AverSurface s, float3 pos, float2 pixel, inout uint rng) {
 #if AVER_RD_LAMPS
     const uint n = min(rdLocalLightCount(), 32u);
     if (n == 0u) return float3(0.0, 0.0, 0.0);
-    float wsum = 0.0;
-    [loop] for (uint i = 0u; i < n; ++i) wsum += averShadowLum(rdLocalIrradiance(gRdLocalLights[i], pos, s.N));
-    if (!(wsum > 0.0)) return float3(0.0, 0.0, 0.0);
-
-    const float target = ptRand(rng) * wsum;
-    float acc = 0.0, wPick = 0.0;
+    // One pass of weighted reservoir sampling: lamp j is kept with probability w_j / (sum so far).
+    float wsum = 0.0, wPick = 0.0;
     uint  pick = 0u;
     [loop] for (uint j = 0u; j < n; ++j) {
         const float wj = averShadowLum(rdLocalIrradiance(gRdLocalLights[j], pos, s.N));
-        acc += wj;
-        if (wj > 0.0) { pick = j; wPick = wj; }
-        if (target < acc && wj > 0.0) break;
+        if (!(wj > 0.0)) continue;
+        wsum += wj;
+        if (ptRand(rng) * wsum < wj) { pick = j; wPick = wj; }
     }
     if (!(wPick > 0.0)) return float3(0.0, 0.0, 0.0);
 
@@ -174,8 +170,10 @@ float3 ptDirect(PtVertex v, float2 pixel, inout uint rng) {
     AverLight sun;
     sun.direction  = L;
     sun.radiance   = averSunRadiance();
-    sun.visibility = dot(v.s.N, L) > 0.0 ? rtShadowOpaque(v.pos, v.s.N, L, pixel, ptRand(rng) * 6.2831853)
-                                         : float3(0.0, 0.0, 0.0);
+    // No shadow ray where the sun can add nothing: facing away, or set (a night scene).
+    const float jitter = ptRand(rng) * 6.2831853;
+    sun.visibility = (dot(v.s.N, L) > 0.0 && averShadowLum(sun.radiance) > 1e-6)
+                   ? rtShadowOpaque(v.pos, v.s.N, L, pixel, jitter) : float3(0.0, 0.0, 0.0);
     AverSurface s = v.s;
     ptAim(s, L);
     return averShadeDirect(float3(0.0, 0.0, 0.0), s, sun) + ptLamp(v.s, v.pos, pixel, rng);
@@ -226,7 +224,12 @@ bool   rcCacheOn();
 float3 rcLookup(float3 p, float3 N, out float remaining);
 #endif
 // How much of a vertex's light the cache must cover before a path ends there (1 - its fallback share).
-#define AVER_PT_RC_CONFIDENCE 0.75
+#define AVER_PT_RC_CONFIDENCE 0.5
+// The cache holds diffuse light only, so a path may end in it only where the diffuse bounce dominates:
+// rough, or more diffuse than specular. A glossy or metal vertex keeps tracing (its reflections live there).
+bool ptCacheable(AverSurface s) {
+    return s.rough >= 0.5 || averShadowLum(s.kdAlbedo) >= 2.0 * averShadowLum(s.F0);
+}
 
 // The first segment of a continued path: its direction, the radiance that came back along it (before
 // the BSDF weight), and whether the diffuse lobe chose it, which makes it a cosine-distributed sample
@@ -279,10 +282,10 @@ float3 ptContinueEx(PtVertex v, float2 pixel, inout uint rng, uint depth, out Pt
             break;
         }
         // A translucent vertex reflects its direct light by its coverage (the composite's diffuse share).
-        float3 here = nv.s.emissive + ptDirect(nv, pixel, rng) * nv.cover;
+        float3 here = (nv.s.emissive + ptDirect(nv, pixel, rng)) * nv.cover;
         bool cached = false;
 #if AVER_NEURAC
-        if (rcCacheOn()) {
+        if (rcCacheOn() && ptCacheable(nv.s)) {
             float rem;
             const float3 e = rcLookup(nv.pos, nv.s.N, rem);
             if (1.0 - rem >= AVER_PT_RC_CONFIDENCE) {
@@ -316,7 +319,17 @@ float3 ptRadiance(float3 origin, float3 dir, float tmin, float cone, float2 pixe
     PtVertex v;
     if (!ptTrace(origin, dir, tmin, cone, v)) return skyFallback;
     uint rng = ptSeed(pixel, stream);
-    return v.s.emissive + ptDirect(v, pixel, rng) + ptContinue(v, pixel, rng, ptBounceCount() - 1u);
+    const float3 here = v.s.emissive + ptDirect(v, pixel, rng);
+#if AVER_NEURAC
+    // The cache already holds the light arriving here (other paths trained it): its diffuse bounce
+    // replaces the continuation's rays.
+    if (rcCacheOn() && ptCacheable(v.s)) {
+        float rem;
+        const float3 e = rcLookup(v.pos, v.s.N, rem);
+        if (1.0 - rem >= AVER_PT_RC_CONFIDENCE) return here + v.cover * v.s.kdAlbedo * e / (1.0 - rem);
+    }
+#endif
+    return here + ptContinue(v, pixel, rng, ptBounceCount() - 1u);
 }
 
 // REFERENCE MODE (Settings::ptMode 1): one independent path from the primary surface, every lobe, fresh

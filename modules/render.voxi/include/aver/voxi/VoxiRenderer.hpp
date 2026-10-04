@@ -494,7 +494,11 @@ private:
     // Path Tracing over the radiance cache (AVER_PT_PATHS + AVER_NEURAC): paths train the cache and end in it.
     rhi::PipelineHandle rdGiPtRcCsPso_      = 0;
     rhi::PipelineHandle rdGiTracePtRcCsPso_ = 0;
+    rhi::PipelineHandle rdGiPtRcCbCsPso_      = 0;   // the same, half-rate checkerboard
+    rhi::PipelineHandle rdGiTracePtRcCbCsPso_ = 0;
     rhi::PipelineHandle rdPtRefCsPso_       = 0;   // CSRdPtRef: Reference mode's per-pixel path
+    rhi::PipelineHandle rdReflPtRcCsPso_      = 0; // CSRdRefl paths over the radiance cache
+    rhi::PipelineHandle rdReflSplitPtRcCsPso_ = 0;
     rhi::PipelineHandle rdReflPtCsPso_      = 0;
     rhi::PipelineHandle rdReflSplitPtCsPso_ = 0;
     rhi::PipelineHandle rdReflSplitCsPso_  = 0;
@@ -1151,8 +1155,8 @@ private:
     bool createNeuRaCTwins();
     void teardownNeuRaC();
     // Settings::giRestirSpatialSamples, cached defensively.
-    u32 giRestirSpatialSamples_ = 15;
-    u32 giRestirMaxHistory_ = 1;
+    u32 giRestirSpatialSamples_ = 0;
+    u32 giRestirMaxHistory_ = 8;
     // voxi.blendedGiCone's live backing store.
     bool blendedGiCone_ = false;
     // voxi.giVisPathView's live backing store.

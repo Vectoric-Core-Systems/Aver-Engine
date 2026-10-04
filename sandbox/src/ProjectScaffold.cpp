@@ -150,12 +150,13 @@ std::string templatesRoot() {
 void applyNewProjectRenderDefaults(fmt::ProjectDesc& d) {
     d.giQuality          = 4;      // Epic (0=Off 1=Low 2=Medium 3=High 4=Epic)
     d.rayTracing         = 4;
-    d.pathTracing        = 0;
+    d.pathTracing        = 0;      // Global Illumination > Method: Ray traced (ReSTIR GI)
+    d.ptMode             = 0;
     d.giMode             = 1;      // ReSTIR GI
     d.giIntensity        = 1.0f;
     d.giMaxDistance      = 4000.0f;
     d.restirVisibility   = 4;      // cached (NeuRaC)
-    d.restirHistory      = 0;
+    d.restirHistory      = 8;      // ReSTIR temporal reuse on (0 turns reuse off)
     d.denoiser           = 1;
     d.rdStages           = 2;      // staged + half-rate GI
     d.fogOcclusion       = 1;
@@ -167,7 +168,7 @@ void applyNewProjectRenderDefaults(fmt::ProjectDesc& d) {
     d.occlusionCull      = 1;
     d.depthPrepass       = 0;
     d.backend            = "d3d12";
-    d.averSr             = 2;      // Balanced
+    d.averSr             = 3;      // Performance: render scale 0.5
     d.frameInterp        = 1;
     d.taa                = 0;
     d.msaa               = 1;

@@ -84,12 +84,11 @@ static Rigid route(f32 t) {
     t = t < 0.0f ? 0.0f : (t > kRouteSeconds ? kRouteSeconds : t);
     const int k = t >= 1.0f ? 1 : 0;
     const f32 a = t - static_cast<f32>(k);
-    const Quat q0 = Quat::fromAxisAngle(Vec3{0, 0, 1}, radians(kKeyDeg[k]));
-    const Quat q1 = Quat::fromAxisAngle(Vec3{0, 0, 1}, radians(kKeyDeg[k + 1]));
+    // Rotation keys are slerped (AnimSampler): between two turns about Z that is a turn by the
+    // linearly interpolated angle (the keys are under 180 degrees apart, the shortest arc).
     Rigid r;
     r.p = lerp(kKeyPos[k], kKeyPos[k + 1], a);
-    r.r = Quat{q0.x + (q1.x - q0.x) * a, q0.y + (q1.y - q0.y) * a,
-               q0.z + (q1.z - q0.z) * a, q0.w + (q1.w - q0.w) * a}.normalized();
+    r.r = Quat::fromAxisAngle(Vec3{0, 0, 1}, radians(kKeyDeg[k] + (kKeyDeg[k + 1] - kKeyDeg[k]) * a));
     return r;
 }
 

@@ -130,12 +130,20 @@ float giTargetPdf(float3 samplePosition, float3 sampleRadiance, GiSurface surfac
     return pdf;
 }
 
-// Jacobian [1/4, 4]: decide acceptance for reprojection.
-bool giAcceptJacobian(inout float jacobian) {
+// Jacobian [1/4, 4]: decide acceptance for reprojection. The value itself is kept: it re-expresses the
+// neighbour's contribution weight in this receiver's solid angle (forcing it to 1 was a bias, bright in
+// corners and at contacts, and the reason reuse used to overshoot).
+bool giAcceptJacobian(float jacobian) {
     if (isnan(jacobian) || isinf(jacobian) || jacobian <= 0.0) return false;
-    if (jacobian < 0.25 || jacobian > 4.0) return false;
-    jacobian = 1.0;
-    return true;
+    return jacobian >= 0.25 && jacobian <= 4.0;
+}
+
+// Target of sample y at another domain's surface `at`, in THIS receiver's measure: y shifted to `at`
+// keeps its point, so p_at(y) * |J here->at|. Zero where that shift would be rejected.
+float giShiftedTargetPdf(GiReservoir y, GiSurface here, GiSurface at) {
+    const float j = giReconnectionJacobian(at.worldPos, here.worldPos, y.position, y.normal);
+    if (!giAcceptJacobian(j)) return 0.0;
+    return giTargetPdf(y.position, y.radiance, at) * j;
 }
 
 // Depth/normal similarity: normals within `normalThreshold` (cosine) and depth within `depthThreshold` fraction.
@@ -362,28 +370,47 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
 
     // The hit's emission is the seed; averShadeDirect adds the direct sun term.
     float3 radiance = averShadeDirect(s.emissive, s, sun);
+    // One lamp, picked by its light here, with its own shadow ray: lamps bounce light too (their glow
+    // at a hit is zeroed above in favour of this).
+    uint rng = ptSeed(pixel, 0x2c1bu);
+    radiance += ptLamp(s, hitPos, pixel, rng);
 
 #if AVER_PT_PATHS
-    // PATH TRACING: the candidate is a whole path. The lamps light this vertex too, and the path
-    // continues through its BSDF for Settings::ptBounces - 1 more vertices (voxi_pt.hlsli) in place of
-    // the cached/approximate second bounce below. ReSTIR resamples the path's radiance as before.
+    // PATH TRACING: the candidate is a whole path. The path continues through its BSDF for
+    // Settings::ptBounces - 1 more vertices (voxi_pt.hlsli) in place of the cached/approximate second
+    // bounce below. ReSTIR resamples the path's radiance as before.
     {
-        uint rng = ptSeed(pixel, 0x2c1bu);
         PtVertex v;
         v.pos   = hitPos;
         v.s     = s;
         v.cover = 1.0;   // the candidate ray sees the opaque lane only
-        radiance += ptLamp(s, hitPos, pixel, rng);
-        PtFirst first;
-        const float3 li = ptContinueEx(v, pixel, rng, ptBounceCount() - 1u, first);
-        radiance += li;
+        float3 li = float3(0.0, 0.0, 0.0);
+        bool   traced = true;
 #if AVER_NEURAC
-        // TRAINING: a diffuse first segment is a cosine sample of the light arriving here, which is what a
-        // cache cell holds. One pixel in four per frame, rotating, keeps the atomics off the hot cells.
+        // THE CACHE DOES THE REPEATED WORK: one pixel in four per frame (rotating) traces the whole path
+        // and trains the cache with its first diffuse segment, a cosine sample of the light arriving
+        // here, which is what a cell holds. The other three read the cell instead of tracing, wherever
+        // it is confident; its diffuse bounce stands in for the continuation.
         const uint2 tp = uint2(pixel);
-        if (rcCacheOn() && first.diffuse && (((tp.x ^ tp.y) + (uint)gRtHistParams.z) & 3u) == 0u)
-            rcScatter(hitPos, s.N, first.dir, first.li, saturate(dot(s.N, first.dir)));
+        const bool trainer = (((tp.x ^ tp.y) + (uint)gRtHistParams.z) & 3u) == 0u;
+        if (rcCacheOn() && !trainer && ptCacheable(s)) {
+            float rem;
+            const float3 e = rcLookup(hitPos, s.N, rem);
+            if (1.0 - rem >= AVER_PT_RC_CONFIDENCE) {
+                li = s.kdAlbedo * e / (1.0 - rem);
+                traced = false;
+            }
+        }
 #endif
+        if (traced) {
+            PtFirst first;
+            li = ptContinueEx(v, pixel, rng, ptBounceCount() - 1u, first);
+#if AVER_NEURAC
+            if (rcCacheOn() && trainer && first.diffuse)
+                rcScatter(hitPos, s.N, first.dir, first.li, saturate(dot(s.N, first.dir)));
+#endif
+        }
+        radiance += li;
         f2Observed  = true;
         f2LumTraced = averShadowLum(li);
         f2LumSky    = averShadowLum(averSkyIrradiance(s.N) * gAmbient.r);
@@ -548,7 +575,27 @@ struct GiReuseParams {
     float samplingRadius;    // spatial tap radius, pixels
     float depthThreshold;    // relative linear-depth tolerance for a similar surface
     float normalThreshold;   // minimum normal cosine for a similar surface
+    bool  domainVisibility;  // trace each spatial neighbour's view of the winner for the normalisation
 };
+
+// Is `to` visible from a surface at `from` (normal `n`)? One any-hit ray, opaque geometry.
+bool giSegmentVisible(float3 from, float3 n, float3 to) {
+    const float3 d = to - from;
+    const float  dist2 = dot(d, d);
+    if (dist2 <= 1e-8) return true;
+    const float dist = sqrt(dist2);
+    const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(from - gCamPos.xyz) * 5e-4);
+    RayDesc r;
+    r.Origin    = from + n * bias;
+    r.Direction = d / dist;
+    r.TMin      = bias;
+    r.TMax      = max(dist - 2.0 * bias, bias);
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | gAverRtSecondaryRayFlags,
+                     AVER_RT_MASK_OPAQUE_ALL, r);
+    averRtProceedSolid(q);
+    return q.CommittedStatus() != COMMITTED_TRIANGLE_HIT;
+}
 
 GiReservoir giSpatioTemporalReuse(float2 pixel, GiSurface surface, float3 screenSpaceMotion,
                                   uint prevSlice, GiReservoir fresh, inout GiRng rng, GiReuseParams rp) {
@@ -603,14 +650,17 @@ GiReservoir giSpatioTemporalReuse(float2 pixel, GiSurface surface, float3 screen
             }
 
             GiReservoir nb = giLoadReservoir(uint2(px), prevSlice);
-            if (!giIsValidReservoir(nb) || nb.age >= rp.maxAge) continue;
+            if (!giIsValidReservoir(nb)) continue;
             nb.M = min(nb.M, rp.maxHistory);
-            float jacobian = giReconnectionJacobian(surface.worldPos, ns.worldPos, nb.position, nb.normal);
-            if (!giAcceptJacobian(jacobian)) continue;
-
+            // The domain counts in the normalisation whatever happens to its own sample (dropping it
+            // when its sample fails would shrink the denominator and brighten the result).
             tapPx[k] = px;
             tapM[k]  = nb.M;
             mTotal  += nb.M;
+            if (nb.age >= rp.maxAge) continue;
+            const float jacobian = giReconnectionJacobian(surface.worldPos, ns.worldPos, nb.position, nb.normal);
+            if (!giAcceptJacobian(jacobian)) continue;
+
             const float w = giTargetPdf(nb.position, nb.radiance, surface) * nb.W * jacobian * (float)nb.M;
             if (giStreamAccept(weightSum, w, giRandom(rng))) {
                 selected     = nb;
@@ -622,13 +672,23 @@ GiReservoir giSpatioTemporalReuse(float2 pixel, GiSurface surface, float3 screen
 
     if (selStream == 0u) return giEmptyReservoir();
 
-    // Normalise: every stream's target for the winner, at that stream's own surface.
+    // Normalise: every domain's target for the winner, shifted into this receiver's measure (Jacobian
+    // included), zero where the winner could not have come from that domain. This pixel's own domain
+    // counts when it traced a candidate (a half-rate skipped pixel traced none).
     const float pHere = giTargetPdf(selected.position, selected.radiance, surface);
     float pSum = giIsValidReservoir(fresh) ? (float)fresh.M * pHere : 0.0;
     float pSel = selStream == 1u ? pHere : 0.0;
     [unroll] for (uint j = 0u; j < kStreams; ++j) {
         if (tapM[j] == 0u) continue;
-        const float p = giTargetPdf(selected.position, selected.radiance, giLoadPrevSurface(tapPx[j]));
+        const GiSurface sj = giLoadPrevSurface(tapPx[j]);
+        float p = giShiftedTargetPdf(selected, surface, sj);
+        // A spatial neighbour that cannot see the winner could never have produced it: without this the
+        // normalisation counts it anyway and the result darkens (measured -11% with two taps). The
+        // temporal domain is this surface a frame ago and shares its visibility; the winner's own
+        // domain saw it by construction.
+        if (rp.domainVisibility && j > 0u && selStream != 2u + j && p > 0.0 &&
+            !giSegmentVisible(sj.worldPos, sj.normal, selected.position))
+            p = 0.0;
         pSum += (float)tapM[j] * p;
         if (selStream == 2u + j) pSel = p;
     }
@@ -641,7 +701,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
                         out float ao) {
     ao = 1.0;
     const uint2 pixelPos = uint2(pixel);
-    const float frameJitter = (float)frameIdx * 2.39996323;
+    const float frameJitter = averGoldenTurns(frameIdx);
 
     // Reset poison-view flag before anything below can set it.
     gGiPoisonPdfHit = false;
@@ -742,6 +802,8 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
             reuse.numSamples = min(spatialSamples, GI_RESTIR_MAX_SPATIAL);
         // Reconstructed forces temporal-only (U1, 2.10 C).
         if (f3Path == 1u) reuse.numSamples = 0u;
+        // Pixels that trace visibility (F3) also trace their spatial neighbours' view of the winner.
+        reuse.domainVisibility = f3Path == 3u;
 
         result = giSpatioTemporalReuse(pixel, surface, screenSpaceMotion, 1u - writeSlice, initial, rng, reuse);
     }
@@ -753,8 +815,9 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     const bool nonFiniteRad     = any(isnan(result.radiance)) || any(isinf(result.radiance));
     const bool giPoisonStoreHit = nonFiniteWeight || nonFiniteRad;
     if (corpseWeight || giPoisonStoreHit) result = giEmptyReservoir();
-    // W6/M5: gAverHistoryWrite gates the reservoir store (blended fragments don't write here).
-    if (gAverHistoryWrite) giStoreReservoir(result, pixelPos, writeSlice);
+    // The reservoir is stored below, after F3's visibility ray: a reused sample found blocked from here
+    // must not keep spreading through next frame's reuse.
+    bool reusedBlocked = false;
 
     // Store surface for next frame's reprojection (giLoadPrevSurface).
     const uint packedN = giOctEncode(N);
@@ -796,6 +859,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
             averRtProceedSolid(qv);
             if (qv.CommittedStatus() == COMMITTED_TRIANGLE_HIT) visF3 = 0.0;
             f3Observed = true;
+            reusedBlocked = visF3 == 0.0;
         } else if (f3Path == 2u && reused) {
             // Half non-traced pixel: use reconstructed visibility.
             visF3 = rec.v3;
@@ -824,6 +888,12 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         giPoisonEstCeilHit = !giPoisonEstHit && any(estNonNeg > AVER_VOX_MAXRAD);
         outDiffuse = giPoisonEstHit ? float3(0.0, 0.0, 0.0)
                                      : min(estNonNeg, AVER_VOX_MAXRAD);
+    }
+    // W6/M5: gAverHistoryWrite gates the reservoir store (blended fragments don't write here).
+    if (gAverHistoryWrite) {
+        GiReservoir stored = result;
+        if (reusedBlocked) stored = giEmptyReservoir();
+        giStoreReservoir(stored, pixelPos, writeSlice);
     }
 
     // Write raw estimate to denoiser; read back last frame's denoised value.

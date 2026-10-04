@@ -128,12 +128,16 @@ struct Settings {
     u32 giRestirVisibility = 2;   // must equal ladder::giRestirVisibility(Quality::Medium)
 
     // ---- ReSTIR GI spatial reuse control: pin the tap count or disable spatial reuse ----
-    // 15 = AUTO (today's motion-discount). 0 disables spatial reuse. 1..8 pin the tap count regardless of motion.
-    u32 giRestirSpatialSamples = 15;
+    // 15 = AUTO (2 taps at rest, fewer in motion). 0 disables spatial reuse. 1..8 pin the tap count.
+    // DEFAULT 0: measured on NeonDistrict Day (denoiser off) spatial reuse still reads +9.7% bright and
+    // no less noisy, where temporal-only reuse is +1.1% and 37% less noisy.
+    u32 giRestirSpatialSamples = 0;
 
-    // ---- ReSTIR GI history weighting: cap on the M a neighbour reservoir carries into the combine ----
-    // DEFAULT 0 IS THE CAMERA-MOTION FADE FIX: 1 (old default) overshoots +8%, decaying over ~25 frames.
-    u32 giRestirMaxHistory = 0;
+    // ---- ReSTIR GI history weighting: cap on the M a reused reservoir carries into the combine ----
+    // 0 turns reuse off entirely (one fresh sample a pixel). DEFAULT 8 since the reuse pass keeps its
+    // Jacobian and counts every neighbour domain in its normalisation: the old +8% overshoot at 1 and
+    // the darkening that replaced it were those two bugs, not the history.
+    u32 giRestirMaxHistory = 8;
 
     // ---- THE DENOISER OVER THE SKY OCCLUSION AND THE ReSTIR GI RADIANCE ----
     // AMD FidelityFX Denoiser (MIT) through Aver.Render.Denoise -- see modules/render.denoise.

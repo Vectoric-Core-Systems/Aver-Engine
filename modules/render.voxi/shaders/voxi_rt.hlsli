@@ -518,7 +518,7 @@ float2 rtDiscSample(uint k, float ang0) {
 float2 rtHemiDiscSample(uint k, uint n, uint frameIdx, float2 pixelKey, float streamSalt) {
     const uint  idx = frameIdx * max(n, 1u) + k;
     const float u   = frac(rtRadicalInverse2(idx + 1u) + rtHash(pixelKey + float2(streamSalt, 17.0 + streamSalt)));
-    const float a   = rtHash(pixelKey) * 6.2831853 + (float)idx * 2.39996323 + streamSalt;
+    const float a   = rtHash(pixelKey) * 6.2831853 + averGoldenTurns(idx) + streamSalt;
     return float2(cos(a), sin(a)) * sqrt(u);
 }
 
@@ -801,7 +801,7 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
     const float aoTileEdge = max(gAmbientParams.y, AVER_AO_COHERENCE_TILE);
     const float2 aoTile = floor(pixel / aoTileEdge);
     // Different direction every frame via golden angle, else accumulation does nothing.
-    const float ang0 = rtHash(aoTile) * 6.2831853 + gRtHistParams.z * 2.39996323;
+    const float ang0 = rtHash(aoTile) * 6.2831853 + averGoldenTurns((uint)gRtHistParams.z);
     float3 T, B;
     const float3 up = abs(N.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
     T = normalize(cross(up, N));
@@ -1158,7 +1158,7 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
 
     if (tileBits == 0u) {
         // Non-tiled: every pixel traces every frame, accumulate vs history.
-        const float frameJitter = (float)((uint)gRtHistParams.z) * 2.39996323;
+        const float frameJitter = averGoldenTurns((uint)gRtHistParams.z);
         float3 fresh3 = freshIn;
         if (!haveFresh) fresh3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
         const float  fresh   = averShadowLum(fresh3);
@@ -1190,7 +1190,7 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
     float vis;
     float3 tint = float3(1.0, 1.0, 1.0);
     if (myTurn || !haveHist) {
-        const float frameJitter = (float)frameIdx * 2.39996323;
+        const float frameJitter = averGoldenTurns(frameIdx);
         float3 vis3 = freshIn;
         if (!haveFresh) vis3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
         vis  = averShadowLum(vis3);
@@ -1280,7 +1280,7 @@ float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2
         return skyColor(dir);
 #endif
     }
-    const float frameJitter = (float)frameIdx * 2.39996323;
+    const float frameJitter = averGoldenTurns(frameIdx);
     hit = true;
 
     // The reflected surface, built and lit like every other ray hit: its own maps through the shared
