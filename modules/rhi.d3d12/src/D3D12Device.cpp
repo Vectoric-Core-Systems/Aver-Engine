@@ -1401,6 +1401,9 @@ private:
     // Last logged outcome of scene-claim race.
     const IRenderFeature* lastSuppressWinner_ = nullptr;
     u32                   lastSuppressClaimants_ = 0;
+    // The winner asked to record its scene at endFrame (wantsLateScenePass): set in beginFrame,
+    // consumed by endFrame's first lines.
+    IRenderFeature* lateSceneWinner_ = nullptr;
     // The authored atmosphere.
     SkyAtmosphere sky_{};
     bool wireframe_ = false;
@@ -3761,8 +3764,12 @@ void D3D12Device::beginFrame() {
     }
     lastSuppressWinner_    = winner;
     lastSuppressClaimants_ = claimants;
+    lateSceneWinner_ = nullptr;
     if (winner) {
-        if (rhiContext_) winner->scenePass(*rhiContext_);
+        // A late scene is recorded at the top of endFrame, after this frame's draws have been
+        // submitted, so moving objects are drawn where they are this frame (not last frame).
+        if (winner->wantsLateScenePass()) lateSceneWinner_ = winner;
+        else if (rhiContext_) winner->scenePass(*rhiContext_);
         cmdList_->SetPipelineState(pso_.Get());
         sceneSuppressed_ = true;
         if (winner->suppressesWholeFrame()) frameSuppressed_ = true;
@@ -4993,6 +5000,25 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
 // Closes the frame: post chain, overlay, UI, capture, then submit.
 void D3D12Device::endFrame() {
     if (!hasSwapchain_) return;
+    // LATE SCENE (wantsLateScenePass): the scene's targets, viewport and root are rebound, since draw
+    // submission may have changed them, and the winner records inside the still-open "scene draw" span.
+    if (IRenderFeature* late = lateSceneWinner_) {
+        lateSceneWinner_ = nullptr;
+        if (recording_ && rhiContext_) {
+            cmdList_->OMSetRenderTargets(sceneRtvCount_, sceneRtvs_, FALSE, &sceneDsv_);
+            cmdList_->RSSetViewports(1, &sceneVp_);
+            cmdList_->RSSetScissorRects(1, &sceneSc_);
+            boundRootSig_ = nullptr;
+            boundPso_ = nullptr;
+            fovValid_ = false;
+            dbValid_ = false;
+            bindGraphicsRoot(rootSig_.Get());
+            cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            late->scenePass(*rhiContext_);
+            cmdList_->SetPipelineState(pso_.Get());
+            boundPso_ = pso_.Get();
+        }
+    }
     // Closes scene draw, opens one covering post chain, composite, editor viewport, overlay, ImGui.
     endGpuSpan();
     beginGpuSpan("sky+post+ui");
@@ -8476,6 +8502,13 @@ void D3D12RenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, 
     bd.Inputs = in;
     bd.ScratchAccelerationStructureData = t->scratch->GetGPUVirtualAddress();
     bd.DestAccelerationStructureData = t->as->GetGPUVirtualAddress();
+    {
+        // Earlier ray queries this frame may still be reading the TLAS; order them before the rewrite.
+        D3D12_RESOURCE_BARRIER pre{};
+        pre.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        pre.UAV.pResource = t->as.Get();
+        dev_->cmdList_->ResourceBarrier(1, &pre);
+    }
     dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -8558,6 +8591,13 @@ bool D3D12RenderContext::refitTlas(TlasHandle h, const TlasInstance* instances, 
     bd.Inputs = in;
     bd.ScratchAccelerationStructureData = t->scratch->GetGPUVirtualAddress();
     bd.DestAccelerationStructureData = t->as->GetGPUVirtualAddress();
+    {
+        // Earlier ray queries this frame may still be reading the TLAS; order them before the rewrite.
+        D3D12_RESOURCE_BARRIER pre{};
+        pre.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        pre.UAV.pResource = t->as.Get();
+        dev_->cmdList_->ResourceBarrier(1, &pre);
+    }
     if (eligible) {
         bd.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
         // In place: DXR allows Source == Dest for an update, and that is what "refit" means here.

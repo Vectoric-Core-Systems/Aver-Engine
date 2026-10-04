@@ -134,6 +134,8 @@ public:
     bool suppressesScene() const override;
     bool suppressesWholeFrame() const override;
     void scenePass(rhi::IRenderContext& ctx) override;
+    // Ray-driven frames record at endFrame so moving objects use this frame's transforms.
+    bool wantsLateScenePass() const override;
 
     void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
                                 u32 width, u32 height) override;
@@ -312,7 +314,6 @@ private:
         Unchanged,   // every mover where TLAS has it: nothing to write
         Patched,     // at least one transform rewritten, table re-uploaded
     };
-    MoverPatch patchRtMovers();
 
     // Per-build scratch: hoisted to avoid frame reallocation. .clear()'d at buildAccelerationStructures top.
     std::vector<rhi::TlasInstance> tlasInstScratch_;
@@ -394,7 +395,7 @@ private:
 
     // Instance table: RING on upload heap. Rewritten every frame while GPU reads previous copy.
     // One buffer per frame in flight; 3 matches PcgVolume's readback window.
-    static constexpr u32 kRtInstanceRing = 3;
+    static constexpr u32 kRtInstanceRing = 8;   // two uploads a frame (prePass + late movers) x frames in flight
 
     // Distinct textures ray can sample. Fixed, not grown (baked into root signature). 4096 limit: 6% of 65536-descriptor heap.
     static constexpr u32 kRtTextureCapacity = 4096;
@@ -641,6 +642,11 @@ private:
     u64 rtDrawHash(const Draw& d, DrawMaterialMemo& memo, bool moverLane) const;
 
     std::vector<Draw> draws_, drawsPrev_;
+    // Pairs movers against list (drawsPrev_ in prePass; this frame's draws_ in the late scene pass)
+    // and writes their transforms. late skips the key-pass check (the late pass builds its own movers).
+    MoverPatch patchRtMovers(const std::vector<Draw>& list, bool late);
+    // Late scene pass: brings movers to THIS frame's transforms before anything traces (D3D12).
+    void latePatchMovers(rhi::IRenderContext& ctx);
     // Two facts about the list recorded as each draw appends and swapped by beginScene().
     std::vector<u32> translucentDraws_, translucentDrawsPrev_;
     u32 lightFlaggedDraws_ = 0, lightFlaggedDrawsPrev_ = 0;

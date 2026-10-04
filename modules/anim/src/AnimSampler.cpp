@@ -58,6 +58,28 @@ void readChannel(const fmt::OcTrack& t, usize k, u32 offset, u32 count, int slot
     }
 }
 
+// Spherical interpolation between two rotation keys (glTF's LINEAR for rotations), along the
+// shorter arc: q and -q are the same rotation, so a key pair stored in opposite hemispheres would
+// otherwise swing the long way round. Constant angular speed between keys, unlike a lerp of the
+// components, which speeds up and slows down across each key interval. Nearly equal keys fall back
+// to a normalised lerp, where slerp's sin(theta) divide loses precision.
+void slerpQuat(const f32 a[4], const f32 b[4], f32 s, f32 out[4]) {
+    f32 bb[4] = {b[0], b[1], b[2], b[3]};
+    f32 d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    if (d < 0.0f) { d = -d; for (f32& v : bb) v = -v; }
+    f32 wa = 1.0f - s, wb = s;
+    if (d < 0.9995f) {
+        const f32 theta = std::acos(std::min(d, 1.0f));
+        const f32 sinT  = std::sin(theta);
+        wa = std::sin((1.0f - s) * theta) / sinT;
+        wb = std::sin(s * theta) / sinT;
+    }
+    f32 len2 = 0.0f;
+    for (int i = 0; i < 4; ++i) { out[i] = a[i] * wa + bb[i] * wb; len2 += out[i] * out[i]; }
+    const f32 inv = len2 > 0.0f ? 1.0f / std::sqrt(len2) : 1.0f;
+    for (int i = 0; i < 4; ++i) out[i] *= inv;
+}
+
 // glTF's cubic Hermite: p(s) = h00*v0 + h10*dt*b0 + h01*v1 + h11*dt*a1, with b0 the out-tangent of
 // the first key and a1 the in-tangent of the second.
 f32 hermite(f32 v0, f32 b0, f32 v1, f32 a1, f32 s, f32 dt) {
@@ -86,6 +108,10 @@ bool sampleChannel(const fmt::OcTrack& t, u8 channel, f32 seconds, f32* out, u32
         f32 a[4] = {}, b[4] = {};
         readChannel(t, k, offset, count, 1, a);
         readChannel(t, next, offset, count, 1, b);
+        if (channel == fmt::kOcChannelRotation) {
+            slerpQuat(a, b, alpha, out);
+            return true;
+        }
         for (u32 i = 0; i < count; ++i) out[i] = a[i] + (b[i] - a[i]) * alpha;
         return true;
     }

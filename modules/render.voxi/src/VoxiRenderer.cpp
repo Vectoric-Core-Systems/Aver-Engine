@@ -1396,7 +1396,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
             settled = true;
         }
         // Mover patch lane: rtMovers_ collects current movers; empty means lane off or no movable draws.
-        const MoverPatch patch = rtMovers_.empty() ? MoverPatch::Unchanged : patchRtMovers();
+        const MoverPatch patch = rtMovers_.empty() ? MoverPatch::Unchanged : patchRtMovers(drawsPrev_, false);
         if (patch != MoverPatch::Refused) {
             bool settleUploadFailed = false;
             if (settled && patch != MoverPatch::Patched) settleUploadFailed = !uploadRtInstanceTable();
@@ -1807,7 +1807,7 @@ void VoxiRenderer::takeRtAccelSnapshot() {
 // Verifies before writing: movers must pair off identity-for-identity. Refusal leaves both unchanged.
 // Pairing by identity: reshuffled but unchanged list still matches. TIE-BREAK BY NEAREST: movers stay in instances.
 // Only changed instances written; unchanged movers returns MoverPatch::Unchanged.
-VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers() {
+VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers(const std::vector<Draw>& list, bool late) {
     const auto refuse = [this](const char* why) {
         if (!(rtAccelGateWhyMask_ & (1u << 3))) {
             rtAccelGateWhyMask_ |= (1u << 3);
@@ -1815,7 +1815,7 @@ VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers() {
         }
         return MoverPatch::Refused;
     };
-    if (!rtAccelListKeyValid_) return refuse("no key pass this frame");
+    if (!late && !rtAccelListKeyValid_) return refuse("no key pass this frame");
     if (rtMoversNow_.size() != rtMovers_.size()) return refuse("the movable draw count changed");
     const usize instances = tlasInstScratch_.size();
     if (rtInstanceData_.size() != instances) return refuse("the instance tables are out of step");
@@ -1850,7 +1850,7 @@ VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers() {
                     const f32* iw = tlasInstScratch_[rtMovers_[a + j].inst].world;
                     for (usize q = 0; q < m; ++q) {
                         if (drawTaken[q]) continue;
-                        const f32* dw = drawsPrev_[draws[q]].world;
+                        const f32* dw = list[draws[q]].world;
                         const f32 dx = dw[12] - iw[12], dy = dw[13] - iw[13], dz = dw[14] - iw[14];
                         const f32 d2 = dx * dx + dy * dy + dz * dz;
                         if (bi == m || d2 < bestD2) { bestD2 = d2; bi = j; bd = q; }
@@ -1877,7 +1877,7 @@ VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers() {
     for (usize k = 0; k < rtMovers_.size(); ++k) {
         const u32 inst = rtMovers_[k].inst;
         if (inst == kRtNoInstance) continue;
-        const f32* world = drawsPrev_[rtMoversNow_[k].draw].world;
+        const f32* world = list[rtMoversNow_[k].draw].world;
         rhi::TlasInstance& ti = tlasInstScratch_[inst];
         if (std::memcmp(ti.world, world, sizeof(ti.world)) == 0) continue;
         changed = true;
@@ -1890,6 +1890,40 @@ VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers() {
     if (!changed) return MoverPatch::Unchanged;
     if (!uploadRtInstanceTable()) return refuse("the instance table could not be uploaded");
     return MoverPatch::Patched;
+}
+
+// Ray-driven frames record at endFrame (D3D12), so latePatchMovers sees this frame's draw list.
+bool VoxiRenderer::wantsLateScenePass() const {
+    return rayDrivenActive() && !debugViewActive() && rtMoverPatchActive();
+}
+
+// The TLAS and instance table are built in prePass from LAST frame's draws (this frame's are submitted
+// after it). A moving object would then be traced one frame behind the camera, by a distance that
+// changes with every frame time: jitter against everything that is current. Called from the late
+// scene pass, this re-pairs the movers against this frame's draws_ and refits before any ray is traced.
+void VoxiRenderer::latePatchMovers(rhi::IRenderContext& ctx) {
+    if (!rtActive_ || !rtMoverPatchActive() || rtMovers_.empty() || draws_.empty()) return;
+    DrawMaterialMemo memo{};
+    rtMoversNow_.clear();
+    u32 drawIndex = 0;
+    for (const Draw& d : draws_) {
+        if (d.movable) rtMoversNow_.push_back({rtDrawHash(d, memo, true), drawIndex, kRtNoInstance});
+        ++drawIndex;
+    }
+    if (patchRtMovers(draws_, true) != MoverPatch::Patched) return;
+    rtPrevPending_.clear();
+    for (const RtMover& m : rtMovers_) {
+        if (m.inst == kRtNoInstance || m.inst >= rtInstanceData_.size()) continue;
+        const RtInstance& r = rtInstanceData_[m.inst];
+        if (std::memcmp(r.prevObjectToWorld, r.objectToWorld, sizeof(r.objectToWorld)) != 0)
+            rtPrevPending_.push_back(m.inst);
+    }
+    if (!rtDynamicMeshes_.empty()) {
+        refitDynamicAccelStructures(ctx);
+    } else {
+        rhi::ScopedGpuStat gpuStat(ctx, "Voxi acceleration structures (movers)");
+        refitOrRebuildTlas(ctx);
+    }
 }
 
 // Widening-interval "N rebuilt / M refit-only / M skipped / M mover-patched" report.
@@ -3918,6 +3952,8 @@ bool VoxiRenderer::suppressesWholeFrame() const { return debugViewActive(); }
 // Draws the scene pass replacement (debug view or ray-driven); debug wins if both are active.
 void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
     ptRanThisFrame_ = false;
+    // Recorded late (wantsLateScenePass) this frame's draws exist; bring the movers up to date first.
+    if (!draws_.empty() && !debugViewActive() && rayDrivenActive()) latePatchMovers(ctx);
     if (pathTracingWanted() && !debugViewActive()) {
         const char* why = nullptr;
         const bool staged = rayDrivenActive() && rdStagedActive(&why);

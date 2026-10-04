@@ -683,6 +683,11 @@ public:
     // Draws the replacement scene.
     virtual void scenePass(IRenderContext& ctx) { (void)ctx; }
 
+    // True when the replacement scene should be recorded at the END of draw submission (start of
+    // endFrame) rather than in beginFrame, so it sees this frame's draws instead of last frame's.
+    // A backend that does not support it calls scenePass at beginFrame as before.
+    virtual bool wantsLateScenePass() const { return false; }
+
     // Draws depth-tested, blended geometry into the scene after opaque drawMesh and sky.
     virtual void transparentPass(IRenderContext& ctx) { (void)ctx; }
 
