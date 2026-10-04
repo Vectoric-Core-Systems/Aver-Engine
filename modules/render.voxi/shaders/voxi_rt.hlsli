@@ -108,8 +108,8 @@ float4 averRtSampleSlot(RtMaterial mat, uint slot, float2 uv, float2 gx, float2 
 #endif
 }
 
-// Material-graph adapter: generated body rewritten to call averRtSampleSlotGraph.
-// Material via static (generator doesn't know this backend exists).
+// Material-graph adapter: the generated ray twin (MaterialGraphHlsl.cpp) samples through this, and is
+// declared ahead of it there. The hit's material and footprint travel in statics the caller sets.
 static RtMaterial gAverGraphMat;
 static float2     gAverGraphGx;
 static float2     gAverGraphGy;
@@ -366,6 +366,16 @@ AverSurface rtHitSurface(RtHit h, float3 V, float3 L, float2 gx, float2 gy, uint
     v.V        = V;
     v.uv       = uv;
     v.backFace = false;   // h.N already faces the ray
+#if defined(AVER_RT_BINDLESS) && defined(AVER_MATERIAL_GRAPH)
+    // THE MATERIAL'S GRAPH, as raster runs it: it edits the same AverAuthored before the composition.
+    if (m.graphId != 0u) {
+        gAverGraphMat       = m;
+        gAverGraphGx        = gx;
+        gAverGraphGy        = gy;
+        gAverGraphObjectPos = h.inst.objectToWorld[3].xyz;
+        a = averApplyMaterialGraphRt(m.graphId, a, v, uv);
+    }
+#endif
 
     float3 N = h.N;
 #if defined(AVER_RT_BINDLESS) && AVER_RT_NORMAL_MAPPING
@@ -421,9 +431,33 @@ bool averRtCandidateOpaque(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q
     }
 
     // Mip 0; unbound slot returns opaque white. Slot 0 is BaseColor.
-    const float alpha = averRtSampleSlot(mat, 0, uv, float2(0, 0), float2(0, 0),
-                                         float4(1, 1, 1, 1)).a * mat.baseColorFactor.a;
-    return alpha >= mat.alphaCutoff;
+    const float4 baseMap = averRtSampleSlot(mat, 0, uv, float2(0, 0), float2(0, 0), float4(1, 1, 1, 1));
+#ifdef AVER_MATERIAL_GRAPH
+    // A graph may drive opacity or the cutoff; the cut-out must be the one raster clip()s.
+    if (mat.graphId != 0u) {
+        AverMaps map;
+        map.baseColor  = baseMap;
+        map.metalRough = float2(1.0, 1.0);
+        map.normalTS   = float3(0.0, 0.0, 1.0);
+        map.occlusion  = 1.0;
+        map.emissive   = float3(1.0, 1.0, 1.0);
+        AverAuthored a = averAuthoredFrom(mat, map);
+        const float3 p0 = gRtVerts[i0].pos, p1 = gRtVerts[i1].pos, p2 = gRtVerts[i2].pos;
+        AverVertex v;
+        v.wpos     = q.WorldRayOrigin() + q.WorldRayDirection() * q.CandidateTriangleRayT();
+        v.N        = normalize(mul(float4(cross(p1 - p0, p2 - p0), 0.0), inst.objectToWorld).xyz);
+        v.V        = -q.WorldRayDirection();
+        v.uv       = uv;
+        v.backFace = false;
+        gAverGraphMat       = mat;
+        gAverGraphGx        = float2(0.0, 0.0);
+        gAverGraphGy        = float2(0.0, 0.0);
+        gAverGraphObjectPos = inst.objectToWorld[3].xyz;
+        a = averApplyMaterialGraphRt(mat.graphId, a, v, uv);
+        return a.opacity >= a.alphaCutoff;
+    }
+#endif
+    return baseMap.a * mat.baseColorFactor.a >= mat.alphaCutoff;
 #endif
 }
 

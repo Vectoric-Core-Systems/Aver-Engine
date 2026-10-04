@@ -812,19 +812,17 @@ MaterialGraphBody compileMaterialGraph(const fmt::OcGraphData& g) {
     return r;
 }
 
-// The switch itself, emitted once and shared. Split out of averEvalMaterial so a caller that cannot
-// use averStockAuthored can still run a graph.
-//
-// WHY THAT MATTERS: the ray-driven path has no material cbuffer and no bound texture slots -- it
-// reads gRtMaterials[materialIndex] and samples through averRtSampleSlot -- so it hand-builds its
-// surface and could never call averEvalMaterial. That is the entire reason "no material GRAPH runs
-// on any ray path" was true, on the renderer that is the DEFAULT path. Handing the switch its
-// AverAuthored as a parameter, rather than fetching one itself, is what lets both callers share it.
+// The switch itself, emitted once per entry point. `key` is what selects the arm: the raster draw's
+// gMaterialGraphId (b2), or the ray hit's own material row's graphId (a parameter -- on a ray pass b2
+// holds whatever was last bound, never the hit's material). The body is the graph's one compile,
+// with its raster-only tokens substituted for the ray twin rather than emitted twice from the graph,
+// so the two copies cannot drift.
 static void emitSwitch(std::string& s, const std::vector<MaterialGraphEntry>& entries,
-                       const char* sampleFn) {
-    // A UNIFORM SWITCH, not a chain of ifs: gMaterialGraphId is a constant across the whole draw,
-    // so every lane takes the same arm and the cost is the arm's own, not the sum of all of them.
-    s += "    switch (gMaterialGraphId) {\n";
+                       const char* key, bool rayTwin) {
+    // A UNIFORM SWITCH on raster (constant across the draw); per lane on a ray pass.
+    s += "    switch (";
+    s += key;
+    s += ") {\n";
     for (const MaterialGraphEntry& e : entries) {
         if (e.id == 0) continue;   // 0 is "no graph"; an entry claiming it would shadow the default
         s += "    // ";
@@ -832,19 +830,18 @@ static void emitSwitch(std::string& s, const std::vector<MaterialGraphEntry>& en
         s += "\n    case ";
         s += std::to_string(e.id);
         s += ": {\n";
-        // The body verbatim, except for which sampler its SampleTexture nodes reach. Substituted
-        // textually rather than emitted twice from the graph, so the two copies cannot drift: there
-        // is one compile of each graph and one body string, differing only in this token.
-        if (std::string(sampleFn) == "averSampleSlot") {
-            s += e.hlsl;
-        } else {
-            std::string body = e.hlsl;
-            const std::string from = "averSampleSlot(";
-            const std::string to   = std::string(sampleFn) + "(";
-            for (usize p = body.find(from); p != std::string::npos; p = body.find(from, p + to.size()))
-                body.replace(p, from.size(), to);
-            s += body;
+        std::string body = e.hlsl;
+        if (rayTwin) {
+            // The ray hit samples through the bindless table (voxi_rt.hlsli's adapter), and its object
+            // position is the hit instance's, not the raster draw's gWorld.
+            const auto subst = [&body](const std::string& from, const std::string& to) {
+                for (usize p = body.find(from); p != std::string::npos; p = body.find(from, p + to.size()))
+                    body.replace(p, from.size(), to);
+            };
+            subst("averSampleSlot(", "averRtSampleSlotGraph(");
+            subst("gWorld[3].xyz", "gAverGraphObjectPos");
         }
+        s += body;
         s += "        break;\n    }\n";
     }
     s += "    default: break;   // no graph: exactly the stock material\n";
@@ -855,35 +852,27 @@ std::string materialGraphHlsl(const std::vector<MaterialGraphEntry>& entries) {
     std::string s;
     s += "// ---- generated from .ocgraph material graphs; do not edit ----\n";
 
-    // ---- the raster entry point, unchanged in behaviour ----
+    // ---- the raster entry point ----
     s += "AverSurface averEvalMaterial(AverVertex v, AverLight l) {\n";
     s += "    float2 uv = averSurfaceUV(v);\n";
     s += "    AverAuthored a = averStockAuthored(uv, v.N);\n";
-    emitSwitch(s, entries, "averSampleSlot");
+    emitSwitch(s, entries, "gMaterialGraphId", false);
     s += "    return averBuildSurface(v, l, a, uv);\n";
     s += "}\n";
 
-    // ---- the ray-driven twin ----
-    //
-    // TAKES AN AverAuthored RATHER THAN BUILDING ONE, because its caller has already assembled the
-    // stock values from the hit's own RtMaterial and bindless samples -- there is no cbuffer for
-    // averStockAuthored to read. It returns the mutated struct and does NOT build a surface: the ray
-    // path has its own hand-written surface assembly, matched line by line against averBuildSurface,
-    // and replacing that is a separate argument from making graphs run at all.
-    //
-    // averRtSampleSlotGraph is voxi.hlsl's own adapter -- see its definition there for why the
-    // material travels in a static rather than a parameter (the generated body cannot be given extra
-    // arguments without teaching the emitter about a type this module cannot see).
-    //
-    // GUARDED, because AVER_RT_BINDLESS is what declares that adapter. Without it this function
-    // would not compile, and every raster-only consumer of this text includes it.
+    // ---- the ray twin: every ray hit runs the same graph (voxi_rt.hlsli's rtHitSurface) ----
+    // It edits the AverAuthored the hit's stock material produced and returns it; the shared
+    // averComposeSurface turns it into the surface, as on raster. The sampler adapter and the object
+    // position live in voxi_rt.hlsli, which comes AFTER this text in the translation unit, so the
+    // adapter is declared here (a prototype) and the position travels in a static the caller sets.
     s += "#ifdef AVER_RT_BINDLESS\n";
-    s += "AverAuthored averApplyMaterialGraphRt(AverAuthored a, AverVertex v, float2 uv) {\n";
-    emitSwitch(s, entries, "averRtSampleSlotGraph");
+    s += "float4 averRtSampleSlotGraph(uint slot, float2 uv);\n";
+    s += "static float3 gAverGraphObjectPos;\n";
+    s += "AverAuthored averApplyMaterialGraphRt(uint graphId, AverAuthored a, AverVertex v, float2 uv) {\n";
+    emitSwitch(s, entries, "graphId", true);
     s += "    return a;\n";
     s += "}\n";
     s += "#endif\n";
     return s;
 }
-
 } // namespace aver::pbr

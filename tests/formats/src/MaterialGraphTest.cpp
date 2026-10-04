@@ -1129,6 +1129,13 @@ static void testDispatchShape() {
         check(s.find("M_Flat") != std::string::npos, "named in a comment, so a shader dump says where it came from");
         check(s.find("gMaterialGraphId") != std::string::npos,
               "switched on the per-draw constant the material block already carries");
+        // The ray twin: every ray hit runs the graph too (voxi_rt.hlsli's rtHitSurface).
+        const usize twin = s.find("averApplyMaterialGraphRt(uint graphId");
+        check(twin != std::string::npos, "the ray twin takes the hit's own graph id as a parameter");
+        check(twin != std::string::npos && s.find("switch (graphId)", twin) != std::string::npos,
+              "...and switches on it, not on b2 (which holds whatever a ray pass last bound)");
+        check(s.find("float4 averRtSampleSlotGraph(uint slot, float2 uv);") != std::string::npos,
+              "the ray sampler adapter is declared ahead of the twin (it is defined later, in voxi_rt.hlsli)");
     }
 }
 
