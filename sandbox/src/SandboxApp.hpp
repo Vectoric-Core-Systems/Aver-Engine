@@ -1418,6 +1418,7 @@ public:
     void setPtFurnaceTest();        // --pt-furnace
     void setPtSceneView();   // --pt-scene
     void setPtQualityRamp(int everyFrames);
+    void setGiMethodCycle(int everyFrames) { giMethodCycleEvery_ = everyFrames; giMethodCycleCountdown_ = everyFrames; }
     void setPtSceneToggleOnAuto(int framesIn);
     void setPtSceneToggleOffAuto(int framesIn);
     void setSunSetAt(int framesIn, f32 elevDeg, f32 azimDeg);
@@ -3550,6 +3551,8 @@ private:
     // --pt-scene-toggle-on/--pt-scene-toggle-off [N]: VERIFICATION ONLY. Simulates flipping the Path Tracing Quality combo N frames into a bounded run.
     int ptQualityRampEvery_ = 0;
     int ptQualityRampCountdown_ = 0;
+    int giMethodCycleEvery_ = 0;       // --gi-method-cycle N
+    int giMethodCycleCountdown_ = 0;
     int ptSceneToggleOnAutoFrames_ = 0;
     int ptSceneToggleOffAutoFrames_ = 0;
     // --sun-set-at N ELEV AZIM: VERIFICATION ONLY. Simulates dragging the Directional Light panel's sliders, N frames into a --frames run.

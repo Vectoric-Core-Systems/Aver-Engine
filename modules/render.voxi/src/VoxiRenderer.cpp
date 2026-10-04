@@ -1226,7 +1226,10 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                                      : 0.0f;
     beginShadowHistory(ctx);
     shadowPass(ctx);
-    if (giEnabled()) {
+    if (giEnabled() && giBuild_.active) {
+        // A STAGED REBUILD in progress (giBuildStep): one more slice this frame, gate untouched.
+        giBuildStep(ctx);
+    } else if (giEnabled()) {
         // Amortised revoxelisation: skip voxelize/filter on off frames, cone trace samples last-built volume.
         if (giUpdateInterval_ <= 1 || ((rtFrameIndex_ - 1) % giUpdateInterval_) == 0) {
             // GI rebuild gate: if nothing moved, volume texture already holds the answer.
@@ -1247,16 +1250,29 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                     if (converging) --giConvergeTicks_;
                     else            giConvergeTicks_ = kGiConvergeTicks;
                     takeGiSnapshot();
-                    // GI-only map must exist before injection reads it.
-                    giShadowPass(ctx);
-                    // Cache read: between "gate says rebuild" and rebuild itself.
-                    if (giForceRebuild_ || !giCacheRestore(ctx)) {
-                        voxelizePass(ctx);
-                        filterMips(ctx);
-                        if (!gateUnchanged)
-                            giCacheSettleCloudOnly_ =
-                                (giCacheSettlePending_ ? giCacheSettleCloudOnly_ : true) && giRebuildCloudOnly_;
-                        giCacheSettlePending_ = true;
+                    // A rebuild bigger than one frame's slice is STAGED over several frames (giBuildStep):
+                    // in one submission NeonDistrict's GI shadow map + voxelisation is ~1.4 s of GPU work,
+                    // which with the frame around it crosses Windows' 2 s timeout (device lost on load).
+                    const bool staged =
+                        giBuildTriangles(0, drawsPrev_.size(), kGiBuildTrisPerFrame) > kGiBuildTrisPerFrame;
+                    if (staged) {
+                        giBuild_ = GiBuild{};
+                        giBuild_.active = true;
+                        giBuild_.tryCache = !giForceRebuild_;
+                        giBuild_.settleCloudOnly = !gateUnchanged;
+                        giBuildStep(ctx);
+                    } else {
+                        // GI-only map must exist before injection reads it.
+                        giShadowPass(ctx, 0, drawsPrev_.size(), true, true);
+                        // Cache read: between "gate says rebuild" and rebuild itself.
+                        if (giForceRebuild_ || !giCacheRestore(ctx)) {
+                            voxelizePass(ctx, 0, drawsPrev_.size(), true, true);
+                            filterMips(ctx);
+                            if (!gateUnchanged)
+                                giCacheSettleCloudOnly_ =
+                                    (giCacheSettlePending_ ? giCacheSettleCloudOnly_ : true) && giRebuildCloudOnly_;
+                            giCacheSettlePending_ = true;
+                        }
                     }
                 }
             }
@@ -3664,8 +3680,10 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
 }
 
 // Renders the GI-only shadow map: one box over the GI volume, for light injection alone.
-void VoxiRenderer::giShadowPass(rhi::IRenderContext& ctx) {
+void VoxiRenderer::giShadowPass(rhi::IRenderContext& ctx, usize begin, usize end, bool first, bool last) {
+    (void)last;
     const bool useInstancing = giShadowInstancedPso_ != 0;
+    end = std::min(end, drawsPrev_.size());
     if ((!giShadowPso_ && !giShadowInstancedPso_) || drawsPrev_.empty()) {
         cb_.giShadowParams[1] = 0.0f;   // unusable: giShadowFactor falls back to fully lit
         return;
@@ -3677,7 +3695,7 @@ void VoxiRenderer::giShadowPass(rhi::IRenderContext& ctx) {
     ctx.setPipeline(useInstancing ? giShadowInstancedPso_ : giShadowPso_);
     ctx.setBindingSet(bindings_);        // Tier 1: bind every declared table, read or not
     ctx.setRenderTargets(nullptr, 0, giShadowTex_);
-    ctx.clearDepth(giShadowTex_, 1.0f);
+    if (first) ctx.clearDepth(giShadowTex_, 1.0f);
     ctx.setViewport(0, 0, kGiShadowSize, kGiShadowSize);
     ctx.setScissor(0, 0, kGiShadowSize, kGiShadowSize);
     // Depth-only, no pixel shader: material content is never read, so one binding satisfies Tier 1
@@ -3691,7 +3709,8 @@ void VoxiRenderer::giShadowPass(rhi::IRenderContext& ctx) {
     u32 submitted = 0;
     if (useInstancing) {
         for (ShadowInstanceGroup& g : giShadowInstanceGroups_) g.worlds.clear();
-        for (const Draw& d : drawsPrev_) {
+        for (usize di = begin; di < end; ++di) {
+            const Draw& d = drawsPrev_[di];
             // Translucent draws excluded (depth-only pass) -- see shadowPass's note on the same skip.
             // Movable ones too: this map lights the bake, and a shadow baked from something that
             // keeps moving would stay where it was when the volume was last built.
@@ -3711,7 +3730,8 @@ void VoxiRenderer::giShadowPass(rhi::IRenderContext& ctx) {
             ctx.drawMeshInstanced(g.mesh, g.worlds.data(), static_cast<u32>(g.worlds.size() / 16));
         }
     } else {
-        for (const Draw& d : drawsPrev_) {
+        for (usize di = begin; di < end; ++di) {
+            const Draw& d = drawsPrev_[di];
             // Translucent and movable draws excluded, as in the instanced loop above.
             if (d.translucent || d.movable) continue;
             if (d.boundsRadius >= 0.0f && dist(Vec3{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]},
@@ -3736,9 +3756,74 @@ void VoxiRenderer::giShadowPass(rhi::IRenderContext& ctx) {
     ctx.textureBarrier(giShadowTex_, rhi::ResourceState::DepthWrite, rhi::ResourceState::ShaderResource);
 }
 
+u64 VoxiRenderer::giBuildTriangles(usize begin, usize end, u64 stopAt) const {
+    u64 tris = 0;
+    end = std::min(end, drawsPrev_.size());
+    for (usize i = begin; i < end && tris <= stopAt; ++i) {
+        const Draw& d = drawsPrev_[i];
+        if (d.translucent || d.movable || !dev_ || dev_->meshVertexBuffer(d.mesh)) continue;
+        u32 indices = 0;
+        if (dev_->meshGeometry(d.depthMesh, nullptr, nullptr, nullptr, &indices)) tris += indices / 3u;
+    }
+    return tris;
+}
+
+usize VoxiRenderer::giBuildSliceEnd(usize begin) const {
+    const usize n = drawsPrev_.size();
+    u64 tris = 0;
+    usize i = begin;
+    while (i < n) {
+        tris += giBuildTriangles(i, i + 1, ~0ull);
+        ++i;
+        if (tris >= kGiBuildTrisPerFrame) break;
+    }
+    return i;
+}
+
+// One slice of a staged GI rebuild (see GiBuild): the GI shadow map first, then the injection, then
+// the resolve and mips on the last slice. Restarts when the volume changes under it.
+void VoxiRenderer::giBuildStep(rhi::IRenderContext& ctx) {
+    GiBuild& b = giBuild_;
+    const usize n = drawsPrev_.size();
+    if (!voxelAccumTex_ || (b.res && b.res != voxelResBuilt_)) {
+        b = GiBuild{};
+        giConvergeTicks_ = std::max(giConvergeTicks_, 1u);   // the gate rebuilds on the next tick
+        return;
+    }
+    b.res = voxelResBuilt_;
+    ++b.frames;
+    b.cursor = std::min(b.cursor, n);
+    const usize end = giBuildSliceEnd(b.cursor);
+    const bool first = b.cursor == 0, last = end >= n;
+    if (b.phase == 0) {
+        giShadowPass(ctx, b.cursor, end, first, last);
+        b.cursor = end;
+        if (last) {
+            b.phase = 1;
+            b.cursor = 0;
+            if (b.tryCache && giCacheRestore(ctx)) b = GiBuild{};   // a cached volume replaces the injection
+        }
+        return;
+    }
+    voxelizePass(ctx, b.cursor, end, first, last);
+    b.cursor = end;
+    if (!last) return;
+    filterMips(ctx);
+    if (b.settleCloudOnly)
+        giCacheSettleCloudOnly_ = (giCacheSettlePending_ ? giCacheSettleCloudOnly_ : true) && giRebuildCloudOnly_;
+    giCacheSettlePending_ = true;
+    if (!giBuildLogged_) {
+        giBuildLogged_ = true;
+        AVER_INFO("[Voxi] GI rebuild staged over {} frame(s) ({} draws, at most {} triangles a frame) so no "
+                  "single GPU submission runs long (said once)", b.frames, n, kGiBuildTrisPerFrame);
+    }
+    b = GiBuild{};
+}
+
 // Clears the accumulator, rasterises the scene into it with direct lighting applied, then resolves
 // it into mip 0 of the radiance volume.
-void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
+void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx, usize begin, usize end, bool first, bool last) {
+    end = std::min(end, drawsPrev_.size());
     if (!voxelAccumTex_) {
         static bool sNoAccumWarned = false;
         if (!sNoAccumWarned) {
@@ -3752,9 +3837,12 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     rhi::ScopedGpuStat gpuStat(ctx, "Voxi voxelise");
 
     // ---- W3 pre-pass: which part of the grid THIS rebuild's injection can possibly touch ----
-    VoxelBox drawsBox{};
-    bool anyUnbounded = false;
-    {
+    // Over every draw, on the rebuild's first slice; later slices of a staged rebuild reuse it.
+    VoxelBox drawsBox = giBuildDrawsBox_;
+    bool anyUnbounded = giBuildAnyUnbounded_;
+    if (first) {
+        drawsBox = VoxelBox{};
+        anyUnbounded = false;
         const f32 origin[3] = {center_[0] - extent_, center_[1] - extent_, center_[2] - extent_};
         for (const Draw& d : drawsPrev_) {
             if (d.translucent) continue;
@@ -3785,6 +3873,8 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
             drawsBox = unionBox(drawsBox, voxelBoxFromWorldAabb(wmin, wmax, origin, extent_ * 2.0f,
                                                                 res, 2u));
         }
+        giBuildDrawsBox_ = drawsBox;
+        giBuildAnyUnbounded_ = anyUnbounded;
     }
 
     // ---- W3 box selection: bounded, or full, and why ----
@@ -3797,13 +3887,14 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     else if (anyUnbounded)        { full = true;  giBoxReason = "full: unbounded draw"; }
     else if (boxMovedOrResized)   { full = true;  giBoxReason = "full: volume moved or resized"; }
     else                           { full = false; giBoxReason = "bounded"; }
-    const VoxelBox box0 = full ? fullVoxelBox(res)
-                                : alignOutward(unionBox(drawsBox, giBoxPrevDraws_), 4u, res);
-    giDispatchBox0_ = box0;   // filterMips derives each mip level's own box from this
+    if (first)
+        giDispatchBox0_ = full ? fullVoxelBox(res)   // filterMips derives each mip level's box from this
+                               : alignOutward(unionBox(drawsBox, giBoxPrevDraws_), 4u, res);
+    const VoxelBox box0 = giDispatchBox0_;
 
-    ctx.setPipeline(clearPso_);
-    ctx.setBindingSet(clearBindings_);
-    {
+    if (first) {
+        ctx.setPipeline(clearPso_);
+        ctx.setBindingSet(clearBindings_);
         const GiDispatchConstants k = dispatchConstants(box0, 0);
         ctx.setConstants(3, &k, kGiDispatchConstantDwords);
         u32 g[3];
@@ -3835,7 +3926,8 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     // what's resident, so this cull is most of the pass. The test is giVoxelisedDraw's.
     u32 voxelSubmitted = 0, voxelCulled = 0, voxelSkinned = 0, voxelMovable = 0;
 
-    for (const Draw& d : drawsPrev_) {
+    for (usize di = begin; di < end; ++di) {
+        const Draw& d = drawsPrev_[di];
         // Translucent draws excluded (depth-only pass) -- see shadowPass's note on the same skip.
         if (d.translucent) continue;
         // A COMPUTE-SKINNED MESH IS EXCLUDED, DELIBERATELY -- a trade, not a fix. giDrawsKey hashes
@@ -3871,6 +3963,9 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
         if (useMs) ctx.dispatchMeshFor(d.depthMesh);
         else       ctx.drawMesh(d.depthMesh);
     }
+
+    // A staged rebuild's earlier slices end here: the accumulator keeps its sums for the next one.
+    if (!last) return;
 
     if ((voxelCullLogs_ & (voxelCullLogs_ + 1)) == 0) {
         const u32 considered = voxelSubmitted + voxelCulled;

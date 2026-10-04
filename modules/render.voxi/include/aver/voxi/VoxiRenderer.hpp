@@ -175,10 +175,37 @@ private:
     bool createScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth);
     rhi::PipelineHandle pickGbuf(rhi::PipelineHandle plain, rhi::PipelineHandle gbuf) const;
     void shadowPass(rhi::IRenderContext& ctx);
-    void giShadowPass(rhi::IRenderContext& ctx);
+    // Both take the slice [begin, end) of drawsPrev_: `first` clears, `last` finishes (a staged
+    // rebuild calls them once per frame per slice, giBuildStep).
+    void giShadowPass(rhi::IRenderContext& ctx, usize begin, usize end, bool first, bool last);
     void buildAccelerationStructures(rhi::IRenderContext& ctx);
-    void voxelizePass(rhi::IRenderContext& ctx);
+    void voxelizePass(rhi::IRenderContext& ctx, usize begin, usize end, bool first, bool last);
     void filterMips(rhi::IRenderContext& ctx);
+    // ---- STAGED GI REBUILD: a rebuild too big for one frame's GPU submission, a slice per frame ----
+    // Phase 0 draws the GI shadow map, phase 1 injects into the accumulator, and the last slice
+    // resolves and filters. The volume being replaced stays in use until then.
+    // 16M: on NeonDistrict 1.5M triangles cost ~3 ms of GI shadow, so a slice is ~30 ms shadow or
+    // ~100 ms injection, and a full rebuild takes about 25 frames.
+    static constexpr u64 kGiBuildTrisPerFrame = 16000000;
+    struct GiBuild {
+        bool  active = false;
+        u32   phase = 0;            // 0 GI shadow map, 1 voxel injection
+        usize cursor = 0;           // next draw in drawsPrev_
+        u32   res = 0;              // voxelResBuilt_ it started at
+        u32   frames = 0;
+        bool  tryCache = true;      // a restored cached volume replaces phase 1
+        bool  settleCloudOnly = false;
+    };
+    GiBuild giBuild_;
+    void giBuildStep(rhi::IRenderContext& ctx);
+    // Triangles the GI passes draw for drawsPrev_[begin, end), stopping once past `stopAt`.
+    u64 giBuildTriangles(usize begin, usize end, u64 stopAt) const;
+    // End of the slice from `begin` that fits kGiBuildTrisPerFrame (at least one draw).
+    usize giBuildSliceEnd(usize begin) const;
+    // W3's box for the build in progress: computed by the first injection slice, used by the last.
+    VoxelBox giBuildDrawsBox_{};
+    bool giBuildAnyUnbounded_ = false;
+    bool giBuildLogged_ = false;
     bool ensureAirVis();
     void dispatchAirVis(rhi::IRenderContext& ctx, u32 zLo, u32 zHi);
     void recordStagedRayDriven(rhi::IRenderContext& ctx);
@@ -836,7 +863,8 @@ private:
     // longer still while paging slowed the frame rate; a later rebuild waits one tick for the recreate.
     static constexpr u32 kGiAccumulatorQuietTicks = 60;
     // Per-frame BLAS build budget (structure bytes; scratch is of the same order). See buildAccelerationStructures.
-    static constexpr u64 kBlasBuildBytesPerFrame = 512ull << 20;
+    // 128 MB: NeonDistrict's first frame at 512 MB was ~0.7 s of builds in one submission.
+    static constexpr u64 kBlasBuildBytesPerFrame = 128ull << 20;
     bool blasBuildsDeferred_ = false;   // some draw's first BLAS build waits for the next frame
     bool blasDeferLogged_ = false;
 

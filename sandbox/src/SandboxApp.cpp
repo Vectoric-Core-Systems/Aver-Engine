@@ -1560,6 +1560,25 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                       static_cast<u32>(ramped.pathTracing));
         }
     }
+    // --gi-method-cycle: verification-only, steps the GI page's Method combo every N frames
+    // (cones -> ReSTIR GI -> ReSTIR PT -> reference PT), exactly as a click would; nothing is saved.
+    if (giMethodCycleEvery_ > 0 && --giMethodCycleCountdown_ <= 0) {
+        giMethodCycleCountdown_ = giMethodCycleEvery_;
+        voxi::Settings m = voxi::Renderer::get().settings();
+        const bool ptOn = m.pathTracing != voxi::Quality::Off;
+        const int cur  = ptOn ? (m.ptMode == 1u ? 3 : 2) : (m.giMode != 0 ? 1 : 0);
+        const int next = (cur + 1) % 4;
+        m.giMode = next == 0 ? 0u : 1u;
+        if (next < 2) {
+            m.pathTracing = voxi::Quality::Off;
+        } else {
+            m.ptMode = static_cast<u32>(next - 2);
+            if (!ptOn) { m.pathTracing = voxi::Quality::High; m.ptBounces = voxi::ladder::ptBounces(m.pathTracing); }
+        }
+        voxi::Renderer::get().setSettings(m);
+        static const char* kNames[] = {"Voxel cones", "ReSTIR GI", "ReSTIR path tracing", "reference path tracing"};
+        AVER_INFO("[Sandbox] --gi-method-cycle: Method -> {}", kNames[next]);
+    }
     // Rung reconciled on same cadence as registration (idempotent setQuality call every frame).
     if (ptSceneView_) {
         const voxi::Quality q = voxi::Renderer::get().settings().pathTracing;
