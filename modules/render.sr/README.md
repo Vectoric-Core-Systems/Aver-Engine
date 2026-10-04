@@ -76,6 +76,10 @@ TAAU (temporal anti-aliasing with upscale) followed by FSR 1's RCAS. The editor'
   output pixels) for the blend, weighted by how close the nearest sample landed; history fetched
   with a 9-tap Catmull-Rom at `uv - motion`, clipped, blended at up to 10% (25% under motion).
   Generated (frame-interpolation) images are resolved but never written to history.
+- **Still camera only.** While the camera moves (its unjittered view-projection changed since the
+  last frame, `UpscalerInput::cameraMoving`) the device stops jittering and the resolve hands the
+  frame to FSR 1; history restarts when the camera stops. No smear while moving, and a cut needs no
+  reset signal.
 - **Needs the G-buffer** (velocity + view Z, so MSAA 1): the editor enables it while TAA is on.
   Without it, or on a backend whose caller cannot let it retarget (Vulkan), it falls back to FSR 1.
 - **Measured** on NeonDistrict_Day at 0.5 scale: edges anti-aliased (no stair-steps on the sign
@@ -85,7 +89,5 @@ TAAU (temporal anti-aliasing with upscale) followed by FSR 1's RCAS. The editor'
 ## What's NOT here yet
 
 - **TAA in the packaged runtime** (it still uses FSR 1), and **jitter on Vulkan**.
-- **A camera-cut signal.** Nothing calls `IUpscaler::reset()` on a teleport or level load; the
-  variance clip absorbs a cut within a few frames.
 - Frame interpolation and the denoiser read the jitter-carrying velocity unmodified (up to half a
   scene pixel of extra apparent motion).

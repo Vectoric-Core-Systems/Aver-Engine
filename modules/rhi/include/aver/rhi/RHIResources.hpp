@@ -738,6 +738,9 @@ struct UpscalerInput {
     // This image is a frame-interpolation in-between, not a rendered frame: a temporal upscaler
     // must not accumulate it.
     bool generated = false;
+    // The camera moved since the last rendered frame. A temporal upscaler resolves without history
+    // then (no smear), and the device stops jittering until the camera is still again.
+    bool cameraMoving = false;
     // Whether execute() may bind its own intermediate targets (and must leave outTarget bound at
     // the end). False on Vulkan, whose caller holds a rendering scope open across execute().
     bool canRetarget = true;

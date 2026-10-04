@@ -911,6 +911,13 @@ public:
     // unjittered previous matrix therefore carries +jitter, which the resolve subtracts.
     void jitterForUpload(PerFrameCB& cb) {
         cb.jitter[0] = cb.jitter[1] = cb.jitter[2] = cb.jitter[3] = 0.0f;
+        // Camera motion: compared on the unjittered matrix, once per uploaded frame. No jitter while
+        // moving -- the temporal upscaler resolves without history then (UpscalerInput::cameraMoving).
+        taaCameraMoving_ = taaLastViewProjValid_ &&
+                           std::memcmp(taaLastViewProj_, frameCB_.viewProj, sizeof(taaLastViewProj_)) != 0;
+        std::memcpy(taaLastViewProj_, frameCB_.viewProj, sizeof(taaLastViewProj_));
+        taaLastViewProjValid_ = true;
+        if (taaCameraMoving_) return;
         if (!upscaler_ || !any(upscaler_->needs(), UpscalerNeeds::Jitter)) return;
         auto halton = [](u32 i, u32 b) { f32 f = 1.0f, r = 0.0f; for (; i; i /= b) { f /= b; r += f * (i % b); } return r; };
         const u32 i = (taaJitterIndex_++ % 8u) + 1u;
@@ -928,6 +935,9 @@ public:
     }
     u32 taaJitterIndex_ = 0;
     f32 taaJitterThisFrame_[2] = {0.0f, 0.0f};   // what this frame's upload carried, for the upscaler
+    f32 taaLastViewProj_[16] = {};
+    bool taaLastViewProjValid_ = false;
+    bool taaCameraMoving_ = false;
     bool camera(f32 viewProj[16], f32 invViewProjRel[16], f32 cameraPos[3]) const override {
         if (viewProj)       std::memcpy(viewProj, frameCB_.viewProj, sizeof(frameCB_.viewProj));
         if (invViewProjRel) std::memcpy(invViewProjRel, frameCB_.invViewProjRel, sizeof(frameCB_.invViewProjRel));
@@ -4897,6 +4907,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
             in.jitterX = taaJitterThisFrame_[0];
             in.jitterY = taaJitterThisFrame_[1];
             in.generated = generated;
+            in.cameraMoving = taaCameraMoving_;
             // A temporal upscaler reads this frame's G-buffer velocity and view Z; they rest as
             // render targets, so they are made readable around execute() and put back.
             const bool gbufForSr = any(upscaler_->needs(), UpscalerNeeds::MotionVectors) &&
