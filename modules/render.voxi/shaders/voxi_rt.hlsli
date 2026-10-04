@@ -1,6 +1,11 @@
 // voxi_rt.hlsli -- RT lighting estimators; scene/material resources, RayQuery helpers, sampling
 // primitives, and estimators. Compiled into voxi.hlsl under AVER_RT guard.
 
+// The single-pass ray-driven shader (AVER_RD_SINGLE_PASS=1) works at its register limit; see its users.
+#ifndef AVER_RD_SINGLE_PASS
+#define AVER_RD_SINGLE_PASS 0
+#endif
+
 // DXR 1.1 inline ray tracing.
 RaytracingAccelerationStructure gScene : register(t2);
 
@@ -50,7 +55,6 @@ RtInstance rtLoadInstance(uint ref) {
 }
 
 // ---- Per-material data, keyed by RtInstance::materialIndex ----
-// RtMaterial mirrors pbr::MaterialConstants (MaterialGpu.hpp) field-for-field.
 #ifdef AVER_RT_BINDLESS
 // Ray path's texture array, space1.
 #ifndef AVER_RT_TEX_CAPACITY
@@ -66,41 +70,9 @@ Texture2D gRtTextures[AVER_RT_TEX_CAPACITY] : register(t0, space1);
 
 #endif
 
-struct RtMaterial {
-    float4 baseColorFactor;   // rgb LINEAR
-    float3 emissiveFactor;
-    float  metallicFactor;
-    float  roughnessFactor;
-    float  normalScale;
-    float  occlusionStrength;
-    float  alphaCutoff;
-    uint   flags;
-    float  reflectance;
-    float  f90;
-    float  uvTilesPerCm;
-    float  slopeBlendLo;
-    float  slopeBlendHi;
-    float  layer1UvScale;
-    uint   graphId;
-    float  ior;
-    float  transmission;
-    float  subsurfaceWeight;
-    float  subsurfaceRadius;
-    float  coatWeight;
-    float  coatRoughness;
-    float  coatF0;
-    float  _coatPad;
-
-    // Texture indices: BaseColor, MetalRough, Normal, Occlusion, Emissive, Layer1BaseColor,
-    // Layer1MetalRough, Layer1Normal. 0xFFFFFFFF = unbound.
-    uint   texIndex[8];
-
-    float3 attenuationColor;
-    float  attenuationDistance;
-
-    float  lightIntensity;   // Lamp brightness at 1m; >0 sets AVER_MAT_LIGHT.
-    float3 subsurfaceColor;
-};
+// The material table's row IS the material (material_prelude.hlsl's AverMaterialData, mirroring
+// pbr::MaterialConstants): one type, so raster and every ray hit compose a surface from the same value.
+typedef AverMaterialData RtMaterial;
 
 #ifdef AVER_RT_BINDLESS
 // Measurement ablation switches (0=default; every non-zero value renders deliberately wrong).
@@ -259,6 +231,157 @@ float3 averRtPerturbNormal(RtMaterial mat, RtInstance inst, float3 N, float3 nTS
 // Material buffer slot t9.
 StructuredBuffer<RtMaterial> gRtMaterials : register(t9);
 
+// ================= ONE SURFACE FOR EVERY RAY HIT =================
+// Where a ray landed, as the surface its material describes. The primary ray (PSRayDriven / Stage B),
+// ReSTIR GI candidates, reflections and Path Tracing vertices all build it here: the material's maps
+// through the bindless table, then material_prelude.hlsl's averAuthoredFrom/averComposeSurface -- the
+// composition raster runs too. What differs per caller is only the UV footprint and how many maps.
+struct RtHit {
+    RtInstance inst;
+    RtMaterial mat;
+    uint   i0, i1, i2;
+    float3 w;        // barycentrics
+    float3 pos;      // world position
+    float3 N;        // interpolated normal, world space, facing back along the ray
+    float2 meshUV;
+    float  t;        // ray distance
+};
+
+RtHit rtHitFrom(uint ref, uint prim, float2 bary, float3 origin, float3 dir, float t) {
+    RtHit h;
+    h.inst = rtLoadInstance(ref);
+    h.mat  = gRtMaterials[h.inst.materialIndex];
+    const uint tri = h.inst.firstIndex + prim * 3;
+    h.i0 = h.inst.firstVertex + gRtIndices[tri + 0];
+    h.i1 = h.inst.firstVertex + gRtIndices[tri + 1];
+    h.i2 = h.inst.firstVertex + gRtIndices[tri + 2];
+    h.w  = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
+    const float3 nObj = normalize(gRtVerts[h.i0].nrm * h.w.x + gRtVerts[h.i1].nrm * h.w.y + gRtVerts[h.i2].nrm * h.w.z);
+    h.N = normalize(mul(float4(nObj, 0.0), h.inst.objectToWorld).xyz);
+    if (dot(h.N, dir) > 0.0) h.N = -h.N;
+    h.pos    = origin + dir * t;
+    h.meshUV = gRtVerts[h.i0].uv * h.w.x + gRtVerts[h.i1].uv * h.w.y + gRtVerts[h.i2].uv * h.w.z;
+    h.t      = t;
+    return h;
+}
+
+RtHit rtHitCommitted(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q, float3 origin, float3 dir) {
+    return rtHitFrom(rtPackCommitted(q), q.CommittedPrimitiveIndex(), q.CommittedTriangleBarycentrics(),
+                     origin, dir, q.CommittedRayT());
+}
+
+// The per-draw half of a hit, as the composition takes it. The tint is LINEARISED like raster's
+// averDrawTerms: RtInstance carries the draw's colour as authored (sRGB).
+AverDrawTerms rtDrawTerms(RtInstance inst) {
+    AverDrawTerms d;
+    d.tint      = srgbToLin(inst.albedo);
+    d.alpha     = 1.0;
+    d.metallic  = inst.metallic;
+    d.roughness = inst.roughness;
+    d.emissive  = float3(0.0, 0.0, 0.0);
+    d.model     = AVER_MODEL_STANDARD;
+    return d;
+}
+
+// How many of the material's maps a hit samples. FULL: all eight. LITE: base colour and metal/rough
+// (plus emissive outside the single pass) -- the single-pass shader's secondary hits, at its register limit.
+#define AVER_RT_HIT_FULL 0u
+#define AVER_RT_HIT_LITE 1u
+
+#ifndef AVER_RT_NORMAL_MAPPING
+#define AVER_RT_NORMAL_MAPPING 0
+#endif
+
+// UV footprint for SampleGrad from world-space footprint vectors at the hit: ray differentials for
+// the primary, a cone for everything secondary (rtHitConeGrad).
+void rtHitGrad(RtHit h, float3 dx, float3 dy, out float2 gx, out float2 gy) {
+#ifdef AVER_RT_BINDLESS
+    averRtUvGrad(h.mat, h.inst, h.N,
+                 gRtVerts[h.i0].pos, gRtVerts[h.i1].pos, gRtVerts[h.i2].pos,
+                 gRtVerts[h.i0].uv,  gRtVerts[h.i1].uv,  gRtVerts[h.i2].uv,
+                 dx, dy, gx, gy);
+#else
+    gx = float2(0.0, 0.0);
+    gy = float2(0.0, 0.0);
+#endif
+}
+
+// A cone of half-angle tangent `tanCone` from the ray origin, as a footprint at the hit.
+void rtHitConeGrad(RtHit h, float tanCone, out float2 gx, out float2 gy) {
+    const float  rad = max(tanCone, 1e-3) * h.t;
+    const float3 up  = abs(h.N.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+    const float3 T   = normalize(cross(up, h.N));
+    const float3 B   = cross(h.N, T);
+    rtHitGrad(h, T * rad, B * rad, gx, gy);
+}
+
+// THE HIT'S SURFACE. V points back along the ray; L is the light the half vector is first aimed at.
+AverSurface rtHitSurface(RtHit h, float3 V, float3 L, float2 gx, float2 gy, uint detail) {
+    const RtMaterial m = h.mat;
+    AverMaps map;
+    map.baseColor  = float4(1.0, 1.0, 1.0, 1.0);
+    map.metalRough = float2(1.0, 1.0);
+    map.normalTS   = float3(0.0, 0.0, 1.0);
+    map.occlusion  = 1.0;
+    map.emissive   = float3(1.0, 1.0, 1.0);
+    float2 uv = h.meshUV;
+#ifdef AVER_RT_BINDLESS
+    uv = averRtSurfaceUV(m, h.inst, h.pos, h.N, h.meshUV);
+    map.baseColor = averRtSampleSlot(m, 0, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0));
+    const float4 mr = averRtSampleSlot(m, 1, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0));
+    map.metalRough = float2(mr.g, mr.b);   // glTF: roughness G, metallic B
+#if !AVER_RD_SINGLE_PASS
+    map.emissive = averRtSampleSlot(m, 4, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0)).rgb;
+#endif
+    if (detail == AVER_RT_HIT_FULL) {
+#if AVER_RD_SINGLE_PASS
+        map.emissive  = averRtSampleSlot(m, 4, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0)).rgb;
+#endif
+        const float3 n = averRtSampleSlot(m, 2, uv, gx, gy, float4(0.5, 0.5, 1.0, 1.0)).xyz * 2.0 - 1.0;
+        map.normalTS  = float3(n.xy * m.normalScale, n.z);
+        map.occlusion = averRtSampleSlot(m, 3, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0)).r;
+        // The second layer by slope (material_prelude.hlsl's averLayerWeight), as raster blends it.
+        const float lw = averLayerWeight(m, h.N);
+        if (lw > 0.001) {
+            const float  s1  = m.layer1UvScale;
+            const float2 uv1 = uv * s1;
+            if (m.flags & AVER_MAT_L1_BASECOLOR)
+                map.baseColor = lerp(map.baseColor, averRtSampleSlot(m, 5, uv1, gx * s1, gy * s1, map.baseColor), lw);
+            if (m.flags & AVER_MAT_L1_METALROUGH) {
+                const float4 mr1 = averRtSampleSlot(m, 6, uv1, gx * s1, gy * s1, float4(1.0, mr.g, mr.b, 1.0));
+                map.metalRough = lerp(map.metalRough, float2(mr1.g, mr1.b), lw);
+            }
+            if (m.flags & AVER_MAT_L1_NORMAL) {
+                const float3 n1 = averRtSampleSlot(m, 7, uv1, gx * s1, gy * s1, float4(0.5, 0.5, 1.0, 1.0)).xyz * 2.0 - 1.0;
+                map.normalTS = normalize(lerp(map.normalTS, float3(n1.xy * m.normalScale, n1.z), lw));
+            }
+        }
+    }
+#endif
+    AverAuthored a = averAuthoredFrom(m, map);
+
+    AverVertex v;
+    v.wpos     = h.pos;
+    v.N        = h.N;
+    v.V        = V;
+    v.uv       = uv;
+    v.backFace = false;   // h.N already faces the ray
+
+    float3 N = h.N;
+#if defined(AVER_RT_BINDLESS) && AVER_RT_NORMAL_MAPPING
+    if (detail == AVER_RT_HIT_FULL && (m.flags & (AVER_MAT_NORMAL_MAP | AVER_MAT_L1_NORMAL))) {
+        N = averRtPerturbNormal(m, h.inst, h.N, a.normalTS,
+                                gRtVerts[h.i0].pos, gRtVerts[h.i1].pos, gRtVerts[h.i2].pos,
+                                gRtVerts[h.i0].uv,  gRtVerts[h.i1].uv,  gRtVerts[h.i2].uv);
+        if (dot(N, V) < 0.0) N = normalize(N - V * dot(N, V) * 1.01);   // keep it facing the viewer
+    }
+#endif
+    AverLight l;
+    l.direction  = L;
+    l.radiance   = float3(0.0, 0.0, 0.0);
+    l.visibility = float3(1.0, 1.0, 1.0);
+    return averComposeSurface(v, l, a, m, rtDrawTerms(h.inst), N);
+}
 // ---- ALPHA-TESTED GEOMETRY ----
 // Opaque by default; BLENDED instances un-opaqued. Alpha-masked geometry (foliage, grates) is
 // FORCE_NON_OPAQUE: each candidate pays index/vertex fetches, texture sample.
@@ -373,9 +496,6 @@ float2 rtHemiDiscSample(uint k, uint n, uint frameIdx, float2 pixelKey, float st
 }
 
 // Decoder for gGiShadowParams.w bitfield (rtGiShadowBits usage in staging passes).
-#ifndef AVER_RD_SINGLE_PASS
-#define AVER_RD_SINGLE_PASS 0
-#endif
 #if AVER_RD_SINGLE_PASS
 uint rtGiShadowBits() { return 1u; }
 #else
@@ -1134,63 +1254,34 @@ float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2
 #endif
     }
     const float frameJitter = (float)frameIdx * 2.39996323;
-
-    RtInstance inst = rtLoadInstance(rtPackCommitted(q));
-    uint tri = inst.firstIndex + q.CommittedPrimitiveIndex() * 3;
-    uint i0 = inst.firstVertex + gRtIndices[tri + 0];
-    uint i1 = inst.firstVertex + gRtIndices[tri + 1];
-    uint i2 = inst.firstVertex + gRtIndices[tri + 2];
-
-    float2 bary = q.CommittedTriangleBarycentrics();
-    float3 w = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
-    float3 nObj = normalize(gRtVerts[i0].nrm * w.x + gRtVerts[i1].nrm * w.y + gRtVerts[i2].nrm * w.z);
-    float3 nWS = normalize(mul(float4(nObj, 0.0), inst.objectToWorld).xyz);
-    if (dot(nWS, dir) > 0.0) nWS = -nWS;
-
-    float3 hitPos = wpos + dir * q.CommittedRayT();
-    // One opaque shadow ray from the PIXEL (seeded per-pixel, no footprint).
-    float3 shadow;
-    if ((rtGiShadowBits() & 1u) != 0u) {
-        shadow = rtShadowOpaque(hitPos, nWS, L, pixel, frameJitter);
-    } else {
-        shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0), 1u, frameJitter);
-    }
-
-    // Lambertian exitant: /PI cancels sky's PI, keeps sun's (Burley convention).
-    float3 direct = averSunRadiance() * saturate(dot(nWS, L)) * shadow / PI;
-    float3 ambient = averSkyIrradiance(nWS) * gAmbient.r;
     hit = true;
 
-    float3 reflAlbedo = inst.albedo;
-    float3 emission = 0.0;
-#ifdef AVER_RT_BINDLESS
-    {
-        const RtMaterial rmat = gRtMaterials[inst.materialIndex];
-        const float2 meshUV = gRtVerts[i0].uv * w.x + gRtVerts[i1].uv * w.y + gRtVerts[i2].uv * w.z;
-        const float2 ruv    = averRtSurfaceUV(rmat, inst, hitPos, nWS, meshUV);
-
-        // Cone footprint: tanCone*CommittedRayT gives mip selection for rougher reflections.
-        const float  rad = max(tanCone, 1e-3) * q.CommittedRayT();
-        const float3 rup = abs(nWS.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
-        const float3 rt  = normalize(cross(rup, nWS));
-        const float3 rb  = cross(nWS, rt);
-        float2 rgx, rgy;
-        averRtUvGrad(rmat, inst, nWS,
-                     gRtVerts[i0].pos, gRtVerts[i1].pos, gRtVerts[i2].pos,
-                     gRtVerts[i0].uv,  gRtVerts[i1].uv,  gRtVerts[i2].uv,
-                     rt * rad, rb * rad, rgx, rgy);
-        reflAlbedo *= averRtSampleSlot(rmat, 0, ruv, rgx, rgy, float4(1, 1, 1, 1)).rgb
-                    * rmat.baseColorFactor.rgb;
-
-#if !AVER_RD_SINGLE_PASS
-        emission = rmat.emissiveFactor
-                 * averRtSampleSlot(rmat, 4, ruv, rgx, rgy, float4(1, 1, 1, 1)).rgb;
-#else
-        emission = rmat.emissiveFactor;
+    // The reflected surface, built and lit like every other ray hit: its own maps through the shared
+    // composition, the sun through the full BRDF (one shadow ray from this pixel), one lamp, and the
+    // sky for its diffuse ambient.
+    const RtHit h = rtHitCommitted(q, wpos, dir);
+    float2 rgx, rgy;
+    rtHitConeGrad(h, tanCone, rgx, rgy);
+    AverSurface s = rtHitSurface(h, -dir, L, rgx, rgy, AVER_RD_SINGLE_PASS ? AVER_RT_HIT_LITE : AVER_RT_HIT_FULL);
+#if AVER_RD_LAMPS
+    // A listed lamp's glow is already its sphere light's specular on the surface this ray left.
+    if ((h.mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalCarriesEmitters()) s.emissive = float3(0.0, 0.0, 0.0);
 #endif
+
+    AverLight sun;
+    sun.direction = L;
+    sun.radiance  = averSunRadiance();
+    if ((rtGiShadowBits() & 1u) != 0u) {
+        sun.visibility = rtShadowOpaque(h.pos, s.N, L, pixel, frameJitter);
+    } else {
+        sun.visibility = rtShadow(h.pos, s.N, L, pixel, float3(0,0,0), float3(0,0,0), 1u, frameJitter);
     }
-#else
-    emission = gRtMaterials[inst.materialIndex].emissiveFactor;
+    float3 radiance = averShadeDirect(s.emissive, s, sun);
+#if AVER_RD_LAMPS && !AVER_RD_SINGLE_PASS
+    if (rdLocalLightCount() > 0u) {
+        uint rng = ptSeed(pixel, 0x7a31u);
+        radiance += ptLamp(s, h.pos, pixel, rng);
+    }
 #endif
-    return reflAlbedo * (direct + ambient) + emission;
+    return radiance + s.kdAlbedo * averSkyIrradiance(s.N) * gAmbient.r;
 }

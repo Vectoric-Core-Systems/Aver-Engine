@@ -1,17 +1,17 @@
-// ---- PATH TRACING: multi-bounce paths inside the staged ray-driven frame ----
-// Settings::pathTracing above Off. ReSTIR GI's candidate and the reflection ray each continue as a
-// full path: every vertex is shaded from its own textures and lit by the sun and the lamps (one
-// next-event ray each), the path continues through the surface's BSDF (GGX VNDF or cosine diffuse,
-// chosen per vertex) and ends on a sky miss, at Settings::ptBounces, or by Russian roulette.
-// ReSTIR then resamples these paths across pixels and frames, and the denoiser runs on the result.
+// ---- PATH VERTICES: light sampling and path continuation for every ray hit ----
+// Included from voxi_rt.hlsli after everything it calls. The helpers here (random numbers, one lamp by
+// next-event estimation, BSDF sampling) serve any ray path that wants them; reflections light their hit
+// with ptLamp in every mode.
 //
-// Compiled only into the AVER_PT_PATHS twins (VoxiRenderer::createPathTraceTwins), so no other
-// compile pays its registers. Included from voxi_rt.hlsli, after everything it calls.
+// Path Tracing (Settings::pathTracing above Off) uses the rest: ReSTIR GI's candidate and the
+// reflection ray continue as full paths. Every vertex is the material's own surface (rtHitSurface),
+// lit by the sun and one lamp; the path continues through the BSDF and ends on a sky miss, at
+// Settings::ptBounces, or by Russian roulette. Those call sites exist only in the AVER_PT_PATHS twins
+// (VoxiRenderer::createPathTraceTwins), so no other compile pays for them.
 #ifndef AVER_PT_PATHS
 #define AVER_PT_PATHS 0
 #endif
 
-#if AVER_PT_PATHS
 // gPtBounceParams.x: path vertices after the primary hit (Settings::ptBounces, [1,8]).
 uint ptBounceCount() { return (uint)clamp(gPtBounceParams.x, 1.0, 8.0); }
 
@@ -43,14 +43,14 @@ void ptAim(inout AverSurface s, float3 L) {
     s.F = fresnelSchlick(saturate(dot(s.H, s.V)), s.F0, s.f90);
 }
 
-// One path vertex: where a ray landed, shaded from that surface's own maps.
+// One path vertex: where a ray landed, as its material's surface.
 struct PtVertex {
     float3      pos;
     AverSurface s;
 };
 
-// Traces origin->dir against opaque geometry and builds the hit's surface. `cone` is the ray's
-// footprint growth per cm (texture mip selection). False on a miss.
+// Traces origin->dir against opaque geometry and builds the hit's surface through rtHitSurface.
+// `cone` is the ray's footprint growth per cm (texture mip selection). False on a miss.
 bool ptTrace(float3 origin, float3 dir, float tmin, float cone, out PtVertex v) {
     v = (PtVertex)0;
     RayDesc r;
@@ -63,71 +63,22 @@ bool ptTrace(float3 origin, float3 dir, float tmin, float cone, out PtVertex v) 
     averRtProceedSolid(q);
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return false;
 
-    const RtInstance inst = rtLoadInstance(rtPackCommitted(q));
-    const uint tri = inst.firstIndex + q.CommittedPrimitiveIndex() * 3;
-    const uint i0 = inst.firstVertex + gRtIndices[tri + 0];
-    const uint i1 = inst.firstVertex + gRtIndices[tri + 1];
-    const uint i2 = inst.firstVertex + gRtIndices[tri + 2];
-    const float2 bary = q.CommittedTriangleBarycentrics();
-    const float3 w = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
-    const float3 nObj = normalize(gRtVerts[i0].nrm * w.x + gRtVerts[i1].nrm * w.y + gRtVerts[i2].nrm * w.z);
-    float3 N = normalize(mul(float4(nObj, 0.0), inst.objectToWorld).xyz);
-    if (dot(N, dir) > 0.0) N = -N;
-
-    v.pos = origin + dir * q.CommittedRayT();
-    const RtMaterial mat = gRtMaterials[inst.materialIndex];
-
-    float4 mapBase = float4(1, 1, 1, 1);
-    float4 mapMR   = float4(1, 1, 1, 1);
-    float4 mapEmis = float4(1, 1, 1, 1);
-#ifdef AVER_RT_BINDLESS
-    {
-        const float2 meshUV = gRtVerts[i0].uv * w.x + gRtVerts[i1].uv * w.y + gRtVerts[i2].uv * w.z;
-        const float2 uv     = averRtSurfaceUV(mat, inst, v.pos, N, meshUV);
-        const float  rad    = max(cone, 1e-3) * q.CommittedRayT();
-        float3 T, B;
-        ptBasis(N, T, B);
-        float2 gx, gy;
-        averRtUvGrad(mat, inst, N,
-                     gRtVerts[i0].pos, gRtVerts[i1].pos, gRtVerts[i2].pos,
-                     gRtVerts[i0].uv,  gRtVerts[i1].uv,  gRtVerts[i2].uv,
-                     T * rad, B * rad, gx, gy);
-        mapBase = averRtSampleSlot(mat, 0, uv, gx, gy, float4(1, 1, 1, 1));
-        mapMR   = averRtSampleSlot(mat, 1, uv, gx, gy, float4(1, 1, 1, 1));
-        mapEmis = averRtSampleSlot(mat, 4, uv, gx, gy, float4(1, 1, 1, 1));
-    }
+    const RtHit h = rtHitCommitted(q, origin, dir);
+    float2 gx, gy;
+    rtHitConeGrad(h, cone, gx, gy);
+    v.pos = h.pos;
+    v.s   = rtHitSurface(h, -dir, normalize(gLightDir.xyz), gx, gy, AVER_RT_HIT_FULL);
+#if AVER_RD_LAMPS
+    // A listed lamp is reached by next-event estimation (ptLamp); its glow would count twice.
+    if ((h.mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalCarriesEmitters()) v.s.emissive = float3(0.0, 0.0, 0.0);
 #endif
-    AverSurface s = (AverSurface)0;
-    s.N           = N;
-    s.V           = -dir;
-    s.albedo      = inst.albedo * mat.baseColorFactor.rgb * mapBase.rgb;
-    s.metallic    = saturate(inst.metallic * mat.metallicFactor * mapMR.b);
-    s.rough       = clamp(inst.roughness * mat.roughnessFactor * mapMR.g, 0.045, 1.0);
-    s.ndv         = saturate(dot(s.N, s.V));
-    s.f90         = mat.f90;
-    s.reflectance = mat.reflectance;
-    s.sssColor    = float3(1.0, 1.0, 1.0);
-#ifdef AVER_LAYERED_BSDF
-    s.coatWeight = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatWeight)    : 0.0;
-    s.coatRough  = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatRoughness) : 0.0;
-    s.coatF0     = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatF0)        : 0.0;
-#endif
-    s.F0        = lerp(mat.reflectance.xxx, s.albedo, s.metallic);
-    s.kdAlbedo  = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(mat.transmission));
-    s.model     = AVER_MODEL_STANDARD;
-    s.alpha     = 1.0;
-    s.occlusion = 1.0;
-    s.emissive  = mat.emissiveFactor * mapEmis.rgb;
-    // A lamp in the light list is reached by next-event estimation (ptLamp); its glow would count twice.
-    if ((mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalCarriesEmitters()) s.emissive = float3(0.0, 0.0, 0.0);
-    ptAim(s, normalize(gLightDir.xyz));
-    v.s = s;
     return true;
 }
 
 // One lamp, picked in proportion to its unshadowed irradiance here, with one shadow ray, divided by its
-// pick probability. The lamp is shaded through the same GGX as the sun (rdLocalLightAt's sphere widening).
+// pick probability. Shaded through the same GGX as the sun, with rdLocalLightAt's sphere widening.
 float3 ptLamp(AverSurface s, float3 pos, float2 pixel, inout uint rng) {
+#if AVER_RD_LAMPS
     const uint n = min(rdLocalLightCount(), 32u);
     if (n == 0u) return float3(0.0, 0.0, 0.0);
     float wsum = 0.0;
@@ -162,6 +113,9 @@ float3 ptLamp(AverSurface s, float3 pos, float2 pixel, inout uint rng) {
     sL.rough = clamp(s.rough + r * 0.5 * invD, s.rough, 1.0);
     ptAim(sL, l.direction);
     return averShadeDirect(float3(0.0, 0.0, 0.0), sL, l) * (wsum / wPick);
+#else
+    return float3(0.0, 0.0, 0.0);
+#endif
 }
 
 // Direct light at a vertex: the sun (one shadow ray) and one lamp.
@@ -172,7 +126,9 @@ float3 ptDirect(PtVertex v, float2 pixel, inout uint rng) {
     sun.radiance   = averSunRadiance();
     sun.visibility = dot(v.s.N, L) > 0.0 ? rtShadowOpaque(v.pos, v.s.N, L, pixel, ptRand(rng) * 6.2831853)
                                          : float3(0.0, 0.0, 0.0);
-    return averShadeDirect(float3(0.0, 0.0, 0.0), v.s, sun) + ptLamp(v.s, v.pos, pixel, rng);
+    AverSurface s = v.s;
+    ptAim(s, L);
+    return averShadeDirect(float3(0.0, 0.0, 0.0), s, sun) + ptLamp(v.s, v.pos, pixel, rng);
 }
 
 // Smith G1 for GGX, alpha = rough^2.
@@ -233,8 +189,8 @@ float3 ptContinue(PtVertex v, float2 pixel, inout uint rng, uint depth) {
     return sum;
 }
 
-// Outgoing radiance toward the ray from the first surface it hits: what a reflection sees.
-// `skyFallback` is the caller's own sky lookup for a miss.
+// Outgoing radiance toward the ray from the first surface it hits, path traced: what a reflection
+// sees in Path Tracing. `skyFallback` is the caller's own sky lookup for a miss.
 float3 ptRadiance(float3 origin, float3 dir, float tmin, float cone, float2 pixel, uint stream,
                   float3 skyFallback) {
     PtVertex v;
@@ -242,4 +198,3 @@ float3 ptRadiance(float3 origin, float3 dir, float tmin, float cone, float2 pixe
     uint rng = ptSeed(pixel, stream);
     return v.s.emissive + ptDirect(v, pixel, rng) + ptContinue(v, pixel, rng, ptBounceCount() - 1u);
 }
-#endif

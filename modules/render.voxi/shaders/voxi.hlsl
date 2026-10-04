@@ -1746,112 +1746,21 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #endif
 #endif
 
-    // Lambertian direct term with /PI normalization.
-    // ---- the bounce loop ----
-    // Path tracing: extra rays on first-hit loop, cosine-weighted with screen-pinned dither.
-    AverSurface s = (AverSurface)0;
-    s.N        = N;
-    s.V        = -dir;
-    s.H        = normalize(s.V + L);
-    // Multiply per-draw value by material factor (raster model in PbrShaders.cpp).
-    // Authored draws have neutralised per-draw, unauthored have fallback factors of 1.0.
-#ifdef AVER_RT_BINDLESS
-    // Stock material at ray hit: six of eight maps, slope-blended second layer, same as raster.
-    // No normal mapping (slots 2/7 sampled but discarded, AVER_RT_NORMAL_MAPPING is 0).
-    // UV scaled for world-aligned material.
-    const float2 uvS = averRtSurfaceUV(mat, inst, wpos, N, hitUV);
-    // Footprint in UV space from ray differentials.
+    // THE HIT'S SURFACE, built like every ray hit's (voxi_rt.hlsli's rtHitSurface): all eight maps and
+    // the slope-blended second layer through the shared composition, with the footprint from the ray
+    // differentials above.
+    RtHit hit;
+    hit.inst   = inst;
+    hit.mat    = mat;
+    hit.i0 = i0; hit.i1 = i1; hit.i2 = i2;
+    hit.w      = w;
+    hit.pos    = wpos;
+    hit.N      = N;
+    hit.meshUV = hitUV;
+    hit.t      = hitT;
     float2 uvGx, uvGy;
-    averRtUvGrad(mat, inst, N,
-                 gRtVerts[i0].pos, gRtVerts[i1].pos, gRtVerts[i2].pos,
-                 gRtVerts[i0].uv,  gRtVerts[i1].uv,  gRtVerts[i2].uv,
-                 rdRayDx, rdRayDy, uvGx, uvGy);
-
-    float4 mapBase  = averRtSampleSlot(mat, 0, uvS, uvGx, uvGy, float4(1, 1, 1, 1));
-    float4 mapMR    = averRtSampleSlot(mat, 1, uvS, uvGx, uvGy, float4(1, 1, 1, 1));
-    float3 mapNrm   = averRtSampleSlot(mat, 2, uvS, uvGx, uvGy, float4(0.5, 0.5, 1, 1)).xyz * 2.0 - 1.0;
-    float  mapOcc   = averRtSampleSlot(mat, 3, uvS, uvGx, uvGy, float4(1, 1, 1, 1)).r;
-    // White (not black): unbound map must be identity for multiplication.
-    float3 mapEmis  = averRtSampleSlot(mat, 4, uvS, uvGx, uvGy, float4(1, 1, 1, 1)).rgb;
-    // glTF: occlusion in R, roughness in G, metallic in B.
-    float2 metalRough = float2(mapMR.g, mapMR.b);
-    float3 normalTS   = float3(mapNrm.xy * mat.normalScale, mapNrm.z);
-
-    // Second layer blended by slope off geometric normal (normal map would flicker per bump).
-    if (mat.flags & AVER_MAT_SLOPE_BLEND) {
-        const float flat01 = saturate(abs(N.z));
-        const float lw = 1.0 - smoothstep(mat.slopeBlendLo, mat.slopeBlendHi, flat01);
-        if (lw > 0.001) {
-            const float2 uv1 = uvS * mat.layer1UvScale;
-            if (mat.texIndex[5] != AVER_TEX_UNBOUND)
-                mapBase = lerp(mapBase, averRtSampleSlot(mat, 5, uv1, uvGx * mat.layer1UvScale, uvGy * mat.layer1UvScale, mapBase), lw);
-            if (mat.texIndex[6] != AVER_TEX_UNBOUND) {
-                const float4 mr1 = averRtSampleSlot(mat, 6, uv1, uvGx * mat.layer1UvScale, uvGy * mat.layer1UvScale, mapMR);
-                metalRough = lerp(metalRough, float2(mr1.g, mr1.b), lw);
-            }
-            if (mat.texIndex[7] != AVER_TEX_UNBOUND) {
-                const float3 n1 = averRtSampleSlot(mat, 7, uv1, uvGx * mat.layer1UvScale, uvGy * mat.layer1UvScale, float4(0.5, 0.5, 1, 1)).xyz * 2.0 - 1.0;
-                normalTS = normalize(lerp(normalTS, float3(n1.xy * mat.normalScale, n1.z), lw));
-            }
-        }
-    }
-
-    // Normal mapping disabled (AVER_RT_NORMAL_MAPPING 0): on terrain causes worse results than no textures.
-#define AVER_RT_NORMAL_MAPPING 0
-#if AVER_RT_NORMAL_MAPPING
-    if (mat.texIndex[2] != AVER_TEX_UNBOUND || mat.texIndex[7] != AVER_TEX_UNBOUND) {
-        s.N = averRtPerturbNormal(mat, inst, N, normalTS,
-                                  gRtVerts[i0].pos, gRtVerts[i1].pos, gRtVerts[i2].pos,
-                                  gRtVerts[i0].uv,  gRtVerts[i1].uv,  gRtVerts[i2].uv);
-        // Perturbed normal must face the ray to avoid false shadows.
-        if (dot(s.N, dir) > 0.0) s.N = -s.N;
-    }
-#endif
-
-    s.albedo    = inst.albedo * mat.baseColorFactor.rgb * mapBase.rgb;
-    s.emissive  = mat.emissiveFactor * mapEmis;
-    // Through occlusionStrength as raster path does.
-    s.occlusion = lerp(1.0, mapOcc, mat.occlusionStrength);
-#else
-    s.albedo   = inst.albedo * mat.baseColorFactor.rgb;
-    // Factor alone: no texture table on this compile.
-    s.emissive = mat.emissiveFactor;
-#endif
-#ifdef AVER_RT_BINDLESS
-    // Sampled pair glTF-unpacked, multiplied onto factors like raster.
-    s.metallic = saturate(inst.metallic  * mat.metallicFactor  * metalRough.y);
-    s.rough    = clamp(inst.roughness * mat.roughnessFactor * metalRough.x, 0.045, 1.0);
-#else
-    s.metallic = saturate(inst.metallic * mat.metallicFactor);
-    s.rough    = clamp(inst.roughness * mat.roughnessFactor, 0.045, 1.0);
-#endif
-    s.ndv      = saturate(dot(s.N, s.V));
-    s.f90      = mat.f90;
-    s.reflectance = mat.reflectance;
-    // Hand-set: primary ray from eye always has a front-facing first hit, no refraction.
-    s.backFace  = false;
-    s.sssWeight = (mat.flags & AVER_MAT_SUBSURFACE) ? saturate(mat.subsurfaceWeight) : 0.0;
-    s.sssRadius = (mat.flags & AVER_MAT_SUBSURFACE) ? saturate(mat.subsurfaceRadius) : 0.0;
-    s.sssColor  = max(mat.subsurfaceColor, 0.0);
-#ifdef AVER_LAYERED_BSDF
-    // Coat must be explicitly set to 0 (the OFF state).
-    s.coatWeight = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatWeight)    : 0.0;
-    s.coatRough  = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatRoughness) : 0.0;
-    s.coatF0     = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatF0)        : 0.0;
-#endif
-    // Same shape as raster, mat.reflectance standing in for gMatReflectance.
-    s.F0       = lerp(mat.reflectance.xxx, s.albedo, s.metallic);
-    s.F        = fresnelSchlick(saturate(dot(s.H, s.V)), s.F0, s.f90);
-    // (1 - transmission): light through substrate can't scatter back, or material invents energy.
-    // Kept identical on both paths for correctness.
-    s.kdAlbedo = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(mat.transmission));
-    s.model    = AVER_MODEL_STANDARD;
-    s.alpha    = 1.0;
-#ifndef AVER_RT_BINDLESS
-    // Default when no texture sampled above.
-    s.occlusion = 1.0;
-#endif
-
+    rtHitGrad(hit, rdRayDx, rdRayDy, uvGx, uvGy);
+    AverSurface s = rtHitSurface(hit, -dir, L, uvGx, uvGy, AVER_RT_HIT_FULL);
     AverLight sun;
     sun.direction  = L;
     sun.radiance   = averSunRadiance();

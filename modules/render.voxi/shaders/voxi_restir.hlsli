@@ -331,84 +331,19 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         return true;
     }
 
-    RtInstance inst = rtLoadInstance(rtPackCommitted(q));
-    uint tri = inst.firstIndex + q.CommittedPrimitiveIndex() * 3;
-    uint i0 = inst.firstVertex + gRtIndices[tri + 0];
-    uint i1 = inst.firstVertex + gRtIndices[tri + 1];
-    uint i2 = inst.firstVertex + gRtIndices[tri + 2];
-    float2 bary = q.CommittedTriangleBarycentrics();
-    float3 w = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
-    float3 nObj = normalize(gRtVerts[i0].nrm * w.x + gRtVerts[i1].nrm * w.y + gRtVerts[i2].nrm * w.z);
-    float3 hitN = normalize(mul(float4(nObj, 0.0), inst.objectToWorld).xyz);
-    if (dot(hitN, dir) > 0.0) hitN = -hitN;
-
-    const float3 hitPos = wpos + dir * q.CommittedRayT();
-    const RtMaterial mat = gRtMaterials[inst.materialIndex];
+    // The hit's own surface, built like every ray hit's (voxi_rt.hlsli's rtHitSurface): its maps through
+    // the shared composition, a cone footprint for the mips. Lite in the single pass (register limit).
+    const RtHit h = rtHitCommitted(q, wpos, dir);
+    const float3 hitPos = h.pos;
     const float3 L = normalize(gLightDir.xyz);
-
-    // Read the hit's own maps (glTF factor MULTIPLIES its map).
-    AverSurface s = (AverSurface)0;
-    s.N           = hitN;
-    s.V           = -dir;
-    // Guard against antiparallel ray to sun (0/0 risk).
-    {
-        const float3 VL  = s.V + L;
-        const float  vl2 = dot(VL, VL);
-        s.H = vl2 > 1e-12 ? VL * rsqrt(vl2) : s.N;
-    }
-    float4 hitMapBase = float4(1, 1, 1, 1);
-    float4 hitMapMR   = float4(1, 1, 1, 1);
-    float4 hitMapEmis = float4(1, 1, 1, 1);
-#ifdef AVER_RT_BINDLESS
-    {
-        const float2 meshUV = gRtVerts[i0].uv * w.x + gRtVerts[i1].uv * w.y + gRtVerts[i2].uv * w.z;
-        const float2 huv    = averRtSurfaceUV(mat, inst, hitPos, hitN, meshUV);
-        const float  rad = AVER_GI_HIT_TEX_CONE * q.CommittedRayT();
-        const float3 hup = abs(hitN.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
-        const float3 ht  = normalize(cross(hup, hitN));
-        const float3 hb  = cross(hitN, ht);
-        float2 hgx, hgy;
-        averRtUvGrad(mat, inst, hitN,
-                     gRtVerts[i0].pos, gRtVerts[i1].pos, gRtVerts[i2].pos,
-                     gRtVerts[i0].uv,  gRtVerts[i1].uv,  gRtVerts[i2].uv,
-                     ht * rad, hb * rad, hgx, hgy);
-        hitMapBase = averRtSampleSlot(mat, 0, huv, hgx, hgy, float4(1, 1, 1, 1));
-        hitMapMR   = averRtSampleSlot(mat, 1, huv, hgx, hgy, float4(1, 1, 1, 1));
-#if !AVER_RD_SINGLE_PASS
-        hitMapEmis = averRtSampleSlot(mat, 4, huv, hgx, hgy, float4(1, 1, 1, 1));
-#endif
-    }
-#endif
-    // glTF metal-rough channels: G roughness, B metalness.
-    s.albedo      = inst.albedo * mat.baseColorFactor.rgb * hitMapBase.rgb;
-    s.metallic    = saturate(inst.metallic * mat.metallicFactor * hitMapMR.b);
-    s.rough       = clamp(inst.roughness * mat.roughnessFactor * hitMapMR.g, 0.045, 1.0);
-    s.ndv         = saturate(dot(s.N, s.V));
-    s.f90         = mat.f90;
-    s.reflectance = mat.reflectance;
-    s.backFace    = false;
-    s.sssWeight   = 0.0;
-    s.sssRadius   = 0.0;
-    s.sssColor    = float3(1.0, 1.0, 1.0);
-#ifdef AVER_LAYERED_BSDF
-    // Read coat from the hit's material (not hardcoded off).
-    s.coatWeight = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatWeight)    : 0.0;
-    s.coatRough  = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatRoughness) : 0.0;
-    s.coatF0     = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatF0)        : 0.0;
-#endif
-    s.F0        = lerp(mat.reflectance.xxx, s.albedo, s.metallic);
-    s.F         = fresnelSchlick(saturate(dot(s.H, s.V)), s.F0, s.f90);
-    s.kdAlbedo  = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(mat.transmission));
-    s.model     = AVER_MODEL_STANDARD;
-    s.alpha     = 1.0;
-    s.emissive  = mat.emissiveFactor * hitMapEmis.rgb;
+    float2 hgx, hgy;
+    rtHitConeGrad(h, AVER_GI_HIT_TEX_CONE, hgx, hgy);
+    AverSurface s = rtHitSurface(h, -dir, L, hgx, hgy, AVER_RD_SINGLE_PASS ? AVER_RT_HIT_LITE : AVER_RT_HIT_FULL);
 #if AVER_RD_LAMPS
     // Lamp glow already lit by direct term (rdLocalLightsShade); don't double-count.
-    if ((mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalCarriesEmitters())
+    if ((h.mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalCarriesEmitters())
         s.emissive = float3(0.0, 0.0, 0.0);
 #endif
-    s.occlusion = 1.0;
-
     AverLight sun;
     sun.direction = L;
     sun.radiance  = averSunRadiance();

@@ -783,9 +783,13 @@ static void testPack() {
         check(!voxi.empty(),    "voxi.hlsl is readable");
 
         const std::string cb = blockAfter(prelude, "cbuffer AverMaterial");
-        const std::string rt = blockAfter(voxi,    "struct RtMaterial");
+        // The ray path's RtMaterial is a typedef of material_prelude.hlsl's AverMaterialData (one
+        // material struct for every path), so that struct is the second mirror.
+        const std::string rt = blockAfter(prelude, "struct AverMaterialData");
+        check(voxi.find("typedef AverMaterialData RtMaterial") != std::string::npos,
+              "voxi_rt.hlsli's RtMaterial is the prelude's AverMaterialData");
         check(!cb.empty(), "...and declares `cbuffer AverMaterial`");
-        check(!rt.empty(), "...and declares `struct RtMaterial`");
+        check(!rt.empty(), "...and declares `struct AverMaterialData`");
 
         // Every field of the table must be DECLARED in each mirror that claims to carry it. A field
         // added to the C++ struct and forgotten in a shader shifts everything after it.

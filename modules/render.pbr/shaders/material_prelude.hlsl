@@ -471,55 +471,166 @@ struct AverAuthored {
     float  coatF0;
 };
 
-// What the stock material path authors: the five maps, blended by slope, times the b2 factors.
-AverAuthored averStockAuthored(float2 uv, float3 geoN) {
-    AverMaps map = averSampleMaps(uv);
-    map = averBlendLayers(map, uv, geoN);
+// ================= ONE MATERIAL, EVERY PATH =================
+// A material is the same value whichever path shades it. AverMaterialData is pbr::MaterialConstants
+// (MaterialGpu.hpp) field for field: raster reads it out of the b2 cbuffer (averMaterialData), a ray
+// hit reads the identical struct out of the material table (voxi_rt.hlsli's gRtMaterials, whose
+// RtMaterial is this type). Everything below that turns it into a surface takes it as a PARAMETER,
+// so raster and every ray path run one composition, and a material graph edits the same
+// AverAuthored in both.
+struct AverMaterialData {
+    float4 baseColorFactor;   // rgb LINEAR
+    float3 emissiveFactor;
+    float  metallicFactor;
+    float  roughnessFactor;
+    float  normalScale;
+    float  occlusionStrength;
+    float  alphaCutoff;
+    uint   flags;
+    float  reflectance;
+    float  f90;
+    float  uvTilesPerCm;
+    float  slopeBlendLo;
+    float  slopeBlendHi;
+    float  layer1UvScale;
+    uint   graphId;
+    float  ior;
+    float  transmission;
+    float  subsurfaceWeight;
+    float  subsurfaceRadius;
+    float  coatWeight;
+    float  coatRoughness;
+    float  coatF0;
+    float  _coatPad;
+    // BaseColor, MetalRough, Normal, Occlusion, Emissive, L1 BaseColor, L1 MetalRough, L1 Normal;
+    // 0xFFFFFFFF unbound. Read by the ray path's bindless table; raster binds the maps per draw.
+    uint   texIndex[8];
+    float3 attenuationColor;
+    float  attenuationDistance;
+    float  lightIntensity;
+    float3 subsurfaceColor;
+};
 
-    float4 base = gBaseColorFactor * map.baseColor;
+// The b2 cbuffer as one AverMaterialData.
+AverMaterialData averMaterialData() {
+    AverMaterialData m;
+    m.baseColorFactor = gBaseColorFactor;
+    m.emissiveFactor = gEmissiveFactor;
+    m.metallicFactor = gMetallicFactor;
+    m.roughnessFactor = gRoughnessFactor;
+    m.normalScale = gNormalScale;
+    m.occlusionStrength = gOcclusionStrength;
+    m.alphaCutoff = gAlphaCutoff;
+    m.flags = gMaterialFlags;
+    m.reflectance = gMatReflectance;
+    m.f90 = gMatF90;
+    m.uvTilesPerCm = gUvTilesPerCm;
+    m.slopeBlendLo = gSlopeBlendLo;
+    m.slopeBlendHi = gSlopeBlendHi;
+    m.layer1UvScale = gL1UvScale;
+    m.graphId = gMaterialGraphId;
+    m.ior = gIor;
+    m.transmission = gTransmission;
+    m.subsurfaceWeight = gSubsurfaceWeight;
+    m.subsurfaceRadius = gSubsurfaceRadius;
+    m.coatWeight = gCoatWeight;
+    m.coatRoughness = gCoatRoughness;
+    m.coatF0 = gCoatF0;
+    m._coatPad = 0.0;
+    m.texIndex[0] = gTexIndex0.x; m.texIndex[1] = gTexIndex0.y;
+    m.texIndex[2] = gTexIndex0.z; m.texIndex[3] = gTexIndex0.w;
+    m.texIndex[4] = gTexIndex1.x; m.texIndex[5] = gTexIndex1.y;
+    m.texIndex[6] = gTexIndex1.z; m.texIndex[7] = gTexIndex1.w;
+    m.attenuationColor = gAttenuationColor;
+    m.attenuationDistance = gAttenuationDistance;
+    m.lightIntensity = gLightIntensity;
+    m.subsurfaceColor = gSubsurfaceColor;
+    return m;
+}
 
+// What the renderer applies per DRAW on top of the material: the entity's tint (LINEAR), its
+// metal/rough scales, added glow and shading model. Raster has them in the per-draw cbuffer
+// (averDrawTerms); a ray hit has them in its RtInstance (voxi_rt.hlsli's rtDrawTerms).
+struct AverDrawTerms {
+    float3 tint;
+    float  alpha;
+    float  metallic;
+    float  roughness;
+    float3 emissive;
+    uint   model;
+};
+
+AverDrawTerms averDrawTerms() {
+    AverDrawTerms d;
+    d.tint      = srgbToLin(gBaseColor.rgb);
+    d.alpha     = gBaseColor.a;
+    d.metallic  = gMaterial.x;
+    d.roughness = gMaterial.y;
+    d.emissive  = gEmissive.rgb;
+    d.model     = gShadingModel;
+    return d;
+}
+
+// How much of the second layer a point takes: 0 flat ... 1 steep, by the GEOMETRIC normal's slope
+// (a normal-mapped one would make the layer flicker with every bump). 0 without AVER_MAT_SLOPE_BLEND.
+float averLayerWeight(AverMaterialData m, float3 geoN) {
+    if (!(m.flags & AVER_MAT_SLOPE_BLEND)) return 0.0;
+    return 1.0 - smoothstep(m.slopeBlendLo, m.slopeBlendHi, saturate(abs(geoN.z)));
+}
+
+// The material's factors times its (already sampled and layer-blended) maps.
+AverAuthored averAuthoredFrom(AverMaterialData m, AverMaps map) {
+    const float4 base = m.baseColorFactor * map.baseColor;
     AverAuthored a;
     a.baseColor   = base.rgb;
     a.opacity     = base.a;
-    a.metallic    = gMetallicFactor * map.metalRough.y;
-    a.roughness   = gRoughnessFactor * map.metalRough.x;
+    a.metallic    = m.metallicFactor * map.metalRough.y;
+    a.roughness   = m.roughnessFactor * map.metalRough.x;
     a.normalTS    = map.normalTS;
-    a.emissive    = gEmissiveFactor * map.emissive;
+    a.emissive    = m.emissiveFactor * map.emissive;
     a.occlusion   = map.occlusion;
-    a.alphaCutoff = gAlphaCutoff;
+    a.alphaCutoff = m.alphaCutoff;
     // GATED HERE ONCE: nothing below re-tests the flag, so a graph pin written after the stock path
     // runs is not vetoed by it.
-    a.subsurfaceWeight = (gMaterialFlags & AVER_MAT_SUBSURFACE) ? saturate(gSubsurfaceWeight) : 0.0;
-    a.subsurfaceRadius = (gMaterialFlags & AVER_MAT_SUBSURFACE) ? saturate(gSubsurfaceRadius) : 0.0;
-    a.subsurfaceColor  = gSubsurfaceColor;
-    a.ior              = gIor;
-    a.transmission     = gTransmission;
-    a.attenuationColor    = gAttenuationColor;
-    a.attenuationDistance = gAttenuationDistance;
-    // Gated here once, like subsurface above, and for the same reason: a graph driving the pin
-    // writes after this and must not then be vetoed by the flag.
-    a.coatWeight       = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatWeight)    : 0.0;
-    a.coatRoughness    = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatRoughness) : 0.0;
-    a.coatF0           = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatF0)        : 0.0;
+    a.subsurfaceWeight = (m.flags & AVER_MAT_SUBSURFACE) ? saturate(m.subsurfaceWeight) : 0.0;
+    a.subsurfaceRadius = (m.flags & AVER_MAT_SUBSURFACE) ? saturate(m.subsurfaceRadius) : 0.0;
+    a.subsurfaceColor  = m.subsurfaceColor;
+    a.ior              = m.ior;
+    a.transmission     = m.transmission;
+    a.attenuationColor    = m.attenuationColor;
+    a.attenuationDistance = m.attenuationDistance;
+    a.coatWeight       = (m.flags & AVER_MAT_COAT) ? saturate(m.coatWeight)    : 0.0;
+    a.coatRoughness    = (m.flags & AVER_MAT_COAT) ? saturate(m.coatRoughness) : 0.0;
+    a.coatF0           = (m.flags & AVER_MAT_COAT) ? saturate(m.coatF0)        : 0.0;
     return a;
 }
 
+// What the stock material path authors on raster: the five maps, blended by slope, times the b2 factors.
+AverAuthored averStockAuthored(float2 uv, float3 geoN) {
+    AverMaps map = averSampleMaps(uv);
+    map = averBlendLayers(map, uv, geoN);
+    return averAuthoredFrom(averMaterialData(), map);
+}
 
-AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 uv) {
+// THE SURFACE, from authored values, the material and the draw's terms, at shading normal N (already
+// perturbed by whichever path has the tangent frame). The one place every renderer derives F0, the
+// energy split, coverage and the rest. No clip(): raster's averBuildSurface does that (compute can't).
+AverSurface averComposeSurface(AverVertex v, AverLight l, AverAuthored a, AverMaterialData m,
+                               AverDrawTerms d, float3 N) {
     AverSurface s;
-    s.N = averPerturbNormal(v.N, v.wpos, uv, a.normalTS);
+    s.N = N;
     s.V = v.V;
     s.H = normalize(v.V + l.direction);
-    s.metallic = saturate(gMaterial.x * a.metallic);
-    s.rough = clamp(gMaterial.y * a.roughness, 0.045, 1.0);
-    s.alpha = gBaseColor.a * a.opacity;
-    s.model = gShadingModel;
-    s.emissive = gEmissive.rgb + a.emissive;
-    s.occlusion = lerp(1.0, a.occlusion, gOcclusionStrength);
-    s.f90 = gMatF90;
-    s.reflectance = gMatReflectance;
-    s.display = gShadingModel == AVER_MODEL_UNLIT;
-    s.albedo = srgbToLin(gBaseColor.rgb) * a.baseColor;
+    s.metallic = saturate(d.metallic * a.metallic);
+    s.rough = clamp(d.roughness * a.roughness, 0.045, 1.0);
+    s.alpha = d.alpha * a.opacity;
+    s.model = d.model;
+    s.emissive = d.emissive + a.emissive;
+    s.occlusion = lerp(1.0, a.occlusion, m.occlusionStrength);
+    s.f90 = m.f90;
+    s.reflectance = m.reflectance;
+    s.display = d.model == AVER_MODEL_UNLIT;
+    s.albedo = d.tint * a.baseColor;
     // s.albedo, not gBaseColor alone -- that was two bugs, both rendering as WHITE: draw loops
     // neutralise gBaseColor to 1,1,1 for a material carrying colour in a texture (SandboxApp's
     // authored branch, GameRender.cpp), dropping a.baseColor drops the whole colour, and skipping
@@ -528,9 +639,8 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     // Plus s.emissive, since Unlit (the only user of displayColor -- setUnlit; SandboxRender.cpp
     // clears it first on overlay/chrome) removes lighting, not a lamp's own glow.
     s.displayColor = float4(s.albedo + s.emissive, s.alpha);
-    if (gMaterialFlags & AVER_MAT_ALPHA_MASK) clip(s.alpha - a.alphaCutoff);
     s.ndv = saturate(dot(s.N, v.V));
-    s.F0 = lerp(gMatReflectance.xxx, s.albedo, s.metallic);
+    s.F0 = lerp(m.reflectance.xxx, s.albedo, s.metallic);
     s.F = fresnelSchlick(saturate(dot(s.H, v.V)), s.F0, s.f90);
     // TRANSMISSION REMOVES LIGHT FROM THE DIFFUSE LOBE (it did not, before this line): light that
     // passed THROUGH the substrate is the same photons as light scattered back out, so a material
@@ -580,7 +690,7 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     // (gBaseColor.a * a.opacity, optionally clip()'d), provably bit-identical -- Material.cpp reported
     // Feature::AlphaBlend as Status::NotImplemented until this change, so nothing shipped a material
     // expecting a renderer to act on the bit.
-    if (gMaterialFlags & AVER_MAT_ALPHA_BLEND) {
+    if (m.flags & AVER_MAT_ALPHA_BLEND) {
         // TRANSMISSION SETS THE FLOOR FIRST; FRESNEL LIFTS IT SECOND. gTransmission > 0 is a fact
         // about the substrate regardless of camera position, so it must apply before anything
         // view-dependent -- a floor the view term then lifts away from. Reversed, a transmissive
@@ -617,6 +727,15 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
         s.alpha = lerp(baseAlpha, 1.0, saturate(fresnelLum));
     }
 
+    return s;
+}
+
+// Raster: the draw's own shading normal (screen-space tangent frame), the composition above with b2
+// and the per-draw cbuffer, then the alpha mask's clip.
+AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 uv) {
+    const AverSurface s = averComposeSurface(v, l, a, averMaterialData(), averDrawTerms(),
+                                             averPerturbNormal(v.N, v.wpos, uv, a.normalTS));
+    if (gMaterialFlags & AVER_MAT_ALPHA_MASK) clip(s.alpha - a.alphaCutoff);
     return s;
 }
 

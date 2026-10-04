@@ -3102,14 +3102,13 @@ u64 VoxiRenderer::rtMaterialKey(rhi::BindingSetHandle matSet, const void* author
                 mc.texIndex[t] = residentTexture((*tex)[t]);
         }
     } else {
-        // Built from color/metal/rough layered onto fallback.
+        // The fallback material, as raster binds for this draw. The draw's colour, metallic and roughness
+        // reach the shader as its PER-DRAW terms (RtInstance -> rtDrawTerms), applied once like raster's
+        // gBaseColor/gMaterial; folding them into the factors too squared them on every ray hit. Only
+        // the alpha stays here: the shadow walk reads coverage from the material.
+        (void)metallic; (void)roughness;
         mc = materials_.fallbackConstants();
-        mc.baseColorFactor[0] = color[0];
-        mc.baseColorFactor[1] = color[1];
-        mc.baseColorFactor[2] = color[2];
         mc.baseColorFactor[3] = color[3];
-        mc.metallicFactor  = metallic;
-        mc.roughnessFactor = roughness;
     }
     matConstantsScratch_.emplace(matKey, mc);
     return matKey;
