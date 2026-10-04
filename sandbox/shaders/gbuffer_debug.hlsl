@@ -15,7 +15,7 @@ SamplerState gGBufferDebugSamp : register(s0);
 
 struct GBufferDebugVSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 
-// The identical fullscreen-triangle-from-SV_VertexID trick AverSrFxaaVS/AverSrSpatialVS already use
+// The identical fullscreen-triangle-from-SV_VertexID trick AverSrSpatialVS/AverSrFsrVS already use
 // (modules/render.sr) -- three vertices, no vertex buffer, one triangle that overshoots the [-1,1]
 // clip-space square (cheaper than two triangles: one draw call, no shared diagonal for the
 // rasteriser to seam).

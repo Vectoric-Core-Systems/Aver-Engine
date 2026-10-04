@@ -76,6 +76,8 @@ void SandboxApp::loadEditorPreferences() {
     frameInterpTrajectory_ = prefInt("display.frameInterpTrajectory", 2);
     frameInterpTrain_ = prefBool("display.frameInterpTrain", false);
     fpsCountsInterpolated_ = prefBool("display.fpsCountsInterpolated", true);
+    edgeAaEnabled_ = edgeAaEnabled_ || prefBool("display.edgeAa", false);   // --edge-aa also turns it on
+    fsrSharpness_  = prefFloat("display.fsrSharpness", fsrSharpness_);
     // Stored render scale behind crash cookie: detects device loss at startup via renderScalePending.
     // Migration: AverSrChoice from display.aversr/renderScale if display.aversrChoice not yet written.
 #if AVER_MODULE_SR
@@ -355,9 +357,9 @@ void SandboxApp::buildEditorPrefs() {
             ImGui::EndCombo();
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Aver Super Resolution: renders the scene smaller and resamples it\n"
-                              "back up with a bicubic Catmull-Rom filter. Off is bit-identical to\n"
-                              "no AverSR at all. See docs/AVERSR.md.\n"
+            ImGui::SetTooltip("Aver Super Resolution: renders the scene smaller and upscales it\n"
+                              "back with AMD FSR 1 (edge-adaptive EASU + RCAS sharpening). Off is\n"
+                              "bit-identical to no AverSR at all. See docs/AVERSR.md.\n"
                               "\n"
                               "Auto follows the Overall preset's own AverSR default and moves with\n"
                               "it; the named levels and Manual scale pin one choice regardless of\n"
@@ -383,7 +385,21 @@ void SandboxApp::buildEditorPrefs() {
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Renders the 3D scene at a fraction of the window's resolution, then\n"
-                              "upscales it back for display. The editor UI stays crisp either way.");
+                              "upscales it back for display with FSR 1. The editor UI stays crisp either way.");
+#if AVER_MODULE_SR
+        ImGui::Checkbox("Edge anti-aliasing", &edgeAaEnabled_);
+        uiReg_.track("prefs.display.edgeAa");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("FXAA-class edge smoothing on the rendered scene, before the upscale.\n"
+                              "Works at any render scale, including native.");
+        float sharpen = 2.0f - fsrSharpness_;   // shown as strength: 2 = sharpest, 0 = off-ish
+        if (ImGui::SliderFloat("Sharpening", &sharpen, 0.0f, 2.0f, "%.2f"))
+            fsrSharpness_ = 2.0f - sharpen;
+        uiReg_.track("prefs.display.fsrSharpness");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("FSR 1 RCAS sharpening after the upscale (AMD's default is 1.80 here).\n"
+                              "Only applies while the scene is upscaled or edge AA is on.");
+#endif
     }
     if (ImGui::CollapsingHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Checkbox("Show grid", &showGrid_);
@@ -1146,7 +1162,7 @@ void SandboxApp::buildRenderingSettings(int page) {
             std::string sourceText = averSrSource_ == voxi::AverSrSource::Auto
                 ? (std::string("Auto from ") + rungName)
                 : (averSrSource_ == voxi::AverSrSource::ForcedOff
-                       ? (edgeAaEnabled_ ? "--edge-aa" : "forced Off after a failed launch")
+                       ? "forced Off after a failed launch"
                        : averSrSourceText(averSrSource_));
             ImGui::Text("Upscaling: AverSR %s (%s)", aver::sr::qualityName(averSrQuality_),
                         sourceText.c_str());
@@ -2170,6 +2186,8 @@ void SandboxApp::saveEditorPreferences() {
             // enum's four values fit a float exactly.
             setPrefFloat("display.aversr", static_cast<f32>(static_cast<int>(averSrQuality_)));
         }
+        setPrefBool ("display.edgeAa",       edgeAaEnabled_);
+        setPrefFloat("display.fsrSharpness", fsrSharpness_);
 #endif  // AVER_MODULE_SR
     }
 

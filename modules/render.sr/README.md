@@ -19,6 +19,16 @@ renderer, no other module, links `Aver.Render.Sr` to know it exists. A renderer 
   backend-specific code of its own. It reads only the scene colour target (`needs()` answers
   `UpscalerNeeds::None`); depth, motion vectors, jitter and history are accepted by the seam but
   ignored here.
+- `include/aver/sr/AverSrFsr.hpp` / `src/AverSrFsr.cpp` / `shaders/sr_fsr1.hlsl` — `FsrUpscaler`:
+  **AMD FSR 1** (`third_party/fidelityfx-fsr`, MIT) — EASU edge-adaptive upscale then RCAS
+  sharpening, with optional FXAA-class edge AA on the source first. Three fullscreen passes; FSR
+  expects display-range input and this runs before the tonemap, so the chain squashes HDR with
+  `c / (1 + max(c))` and undoes it after RCAS. The editor uses it for every AverSR level, for a
+  manual render scale below 1 (which used to be a plain bilinear stretch), and for edge AA at native
+  scale; the packaged runtime uses it for its AverSR levels. Falls back to `SpatialUpscaler` if its
+  pipelines will not build, and on a backend whose caller cannot let it bind its own targets
+  (`UpscalerInput::canRetarget`, false on Vulkan today). Measured on NeonDistrict_Day at 0.5 scale:
+  85% of native edge sharpness versus 64% for the bilinear stretch.
 - `include/aver/sr/AverSrQuality.hpp` — `sr::Quality` (`Off`/`Quality`/`Balanced`/`Performance`),
   `renderScaleFor()` and `qualityName()` for the render-scale table in docs/AVERSR.md "Quality
   levels", plus a case-insensitive `parseQuality()` for a CLI flag or a UI combo. Header-only,
@@ -49,9 +59,6 @@ Built as its own module (`AVER_MODULE_SR=ON`, the default); `sandbox` links it (
 
 ## What's NOT here yet
 
-- **AMD FSR.** `third_party/fidelityfx-fsr` is vendored (MIT), but nothing here wraps it in an
-  `IUpscaler` yet — that is the next implementation this module gains, alongside `SpatialUpscaler`,
-  without `IUpscaler` itself changing.
 - **A temporal (`aver::sr`-native) upscaler.** Needs render-scale, sub-pixel jitter, per-pixel
   screen-space motion vectors, depth, exposure and a camera-cut reset signal as whole-frame data —
   none of which exists yet outside Voxi's ray-traced-shadow-only reprojection. See

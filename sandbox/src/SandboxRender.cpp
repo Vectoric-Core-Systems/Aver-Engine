@@ -2376,13 +2376,8 @@ void SandboxApp::ensureAverSrUpscaler(rhi::IDevice* dev) {
     if (!dev) return;
     if (!averSrUpscaler_) {
         if (rhi::IResourceFactory* res = dev->resources())
-            averSrUpscaler_ = std::make_unique<aver::sr::SpatialUpscaler>(*res);
+            averSrUpscaler_ = std::make_unique<aver::sr::FsrUpscaler>(*res);
     }
-    // HANDED TO THE DEVICE, the step that was missing: constructed and correct, but nothing ever
-    // called execute() because IDevice had no slot for it. It does now.
-    // NULL WHEN Off is the whole of how the bit-identical invariant is kept: the backend branches
-    // on upscaler() != nullptr. Non-owning on the device's side -- told nullptr before this object
-    // goes away (clearAverSrUpscaler).
     applyUpscalerSlot(dev);
 }
 
@@ -2393,30 +2388,25 @@ void SandboxApp::clearAverSrUpscaler(rhi::IDevice* dev) {
 
 void SandboxApp::setEdgeAaOverride(bool on) { edgeAaEnabled_ = on; }
 
-// Picks whichever of --edge-aa / --aversr binds to the device's ONE upscaler slot -- only one can
-// run at a time (edgeAaEnabled_'s own comment). Every call site that used to hand the device an
-// upscaler directly now goes through this, so the two can't race to overwrite each other.
+// The device's one upscaler slot: FSR whenever the scene is rendered below native (an AverSR level
+// OR a manual render scale, which used to fall back to a plain bilinear stretch) or edge AA is
+// asked for; nothing otherwise, which keeps native-resolution frames bit-identical. Called every
+// frame from onUpdate (outside beginFrame/endFrame), so a manual scale change takes effect at once.
+// DETACH BEFORE DESTROY: the device holds a raw pointer, so it is told nullptr first.
 void SandboxApp::applyUpscalerSlot(rhi::IDevice* dev) {
     if (!dev) return;
-    if (edgeAaEnabled_ && edgeAaUpscaler_) { dev->setUpscaler(edgeAaUpscaler_.get()); return; }
-    dev->setUpscaler(averSrQuality_ == aver::sr::Quality::Off ? nullptr : averSrUpscaler_.get());
-}
-
-// Builds FxaaResolve (once) against dev's resource factory, then hands it to the device via
-// applyUpscalerSlot() -- same idempotent shape as ensureAverSrUpscaler, different algorithm on the
-// same rhi::IUpscaler seam. Never called when edge-AA is off.
-void SandboxApp::ensureEdgeAaUpscaler(rhi::IDevice* dev) {
-    if (!dev) return;
-    if (!edgeAaUpscaler_) {
+    const bool want = averSrQuality_ != aver::sr::Quality::Off || dev->renderScale() < 0.999f || edgeAaEnabled_;
+    if (want && !averSrUpscaler_) {
         if (rhi::IResourceFactory* res = dev->resources())
-            edgeAaUpscaler_ = std::make_unique<aver::sr::FxaaResolve>(*res);
+            averSrUpscaler_ = std::make_unique<aver::sr::FsrUpscaler>(*res);
     }
-    applyUpscalerSlot(dev);
-    if (edgeAaUpscaler_)
-        AVER_INFO("[AverSR] '{}' handed to the device (--edge-aa)", edgeAaUpscaler_->name());
-    else
-        AVER_WARN("[AverSR] --edge-aa requested but FxaaResolve could not be constructed "
-                  "(no resource factory)");
+    rhi::IUpscaler* slot = want ? averSrUpscaler_.get() : nullptr;
+    if (averSrUpscaler_) {
+        averSrUpscaler_->setEdgeAa(edgeAaEnabled_);
+        averSrUpscaler_->setSharpness(fsrSharpness_);
+    }
+    if (dev->upscaler() != slot) dev->setUpscaler(slot);
+    if (!want && averSrUpscaler_) averSrUpscaler_.reset();
 }
 
 // Logs the [AverSR] brand-tag line: current render scale, and whether an upscaler was
@@ -2426,7 +2416,7 @@ void SandboxApp::logAverSrActive(rhi::IDevice* dev) {
     if (!dev) return;
     AVER_INFO("[AverSR] {}: render scale {:.2f}{}", aver::sr::qualityName(averSrQuality_),
               dev->renderScale(),
-              averSrUpscaler_ ? "" : " (SpatialUpscaler not constructed -- no resource factory)");
+              averSrUpscaler_ ? "" : " (FsrUpscaler not constructed -- no resource factory)");
     if (averSrUpscaler_ && averSrQuality_ != aver::sr::Quality::Off)
         AVER_INFO("[AverSR] {} handed to the device; the backend reports when it upscales",
                   averSrUpscaler_->name());
@@ -2451,11 +2441,10 @@ void SandboxApp::applyAverSrQuality(rhi::IDevice* dev, aver::sr::Quality q) {
         // SIGSEGV at process exit, fixed inline there). clearAverSrUpscaler() already guards this
         // ("detaches before destruction, so the device can never hold a dangling upscaler") but was
         // never called from here -- the only UI-reachable case, left open until now.
-        // applyUpscalerSlot(), not setUpscaler(nullptr): the slot falls back to
-        // edge-AA if that's on, so clearing outright would silently disable --edge-aa too.
-        applyUpscalerSlot(dev);
-        averSrUpscaler_.reset();
+        // Scale first, then the slot: it keeps FSR (and so edge AA) when that is still wanted and
+        // otherwise detaches before dropping it.
         dev->setRenderScale(1.0f);
+        applyUpscalerSlot(dev);
         return;
     }
     dev->setRenderScale(aver::sr::renderScaleFor(q));
@@ -2472,9 +2461,7 @@ void SandboxApp::applyAverSrQuality(rhi::IDevice* dev, aver::sr::Quality q) {
 #if AVER_MODULE_VOXI
 // Human text for the "(source)" half of every AverSR surface (startup log, the Display combo's
 // "Auto (<level> from <source>)" preview, Project Settings line) -- one place so the three can't
-// drift apart. ForcedOff doesn't say WHY
-// (--edge-aa conflict and a tripped crash cookie both read as ForcedOff here); callers needing that
-// check edgeAaEnabled_/averSrCookieTripped_ before falling back to this text.
+// drift apart. ForcedOff means a tripped crash cookie (averSrCookieTripped_).
 const char* SandboxApp::averSrSourceText(voxi::AverSrSource source) const {
     switch (source) {
         case voxi::AverSrSource::Auto:      return "Auto";
@@ -2530,17 +2517,6 @@ void SandboxApp::updateAverSrAuto(Engine& e) {
         voxi::AverSrDecision decision =
             voxi::resolveAverSrLevel(cliLevel, userLevel, averSrProjectDefault_, autoLevel);
 
-        // --edge-aa and AverSR share one upscaler slot; applyUpscalerSlot lets edge-AA win, but
-        // only over an AUTO resolution -- an explicit CLI/user/manifest pin is a deliberate ask
-        // this flag should not silently swallow.
-        if (edgeAaEnabled_ && decision.source == voxi::AverSrSource::Auto) {
-            decision = voxi::AverSrDecision{0u, voxi::AverSrSource::ForcedOff};
-            if (!edgeAaAverSrWarnLogged_) {
-                AVER_WARN("[AverSR] --edge-aa occupies the upscaler slot; AverSR Auto is off for "
-                          "this session");
-                edgeAaAverSrWarnLogged_ = true;
-            }
-        }
         // A level that just took the device down is never silently re-attempted: loadEditorPreferences'
         // own cookie check already forced Off and latched it for a level that didn't survive launch;
         // stays forced for the session, same as that load-time latch (cleared only by a fresh process).

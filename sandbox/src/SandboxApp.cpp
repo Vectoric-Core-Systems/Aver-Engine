@@ -374,8 +374,7 @@ void SandboxApp::onInit(Engine& e)  {
         ensureAverSrUpscaler(e.device());
         logAverSrActive(e.device());
     }
-    // Edge-AA shares AverSR's upscaler slot.
-    if (edgeAaEnabled_) ensureEdgeAaUpscaler(e.device());
+    applyUpscalerSlot(e.device());   // a manual scale or edge AA wants FSR too
 #endif
     // Depth-only pass before opaque walk. See entity loop for two-walk mechanism.
     if (depthPrepassOverride_) {
@@ -2181,6 +2180,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #if AVER_MODULE_SR
         // AverSR level resolved fresh each frame from precedence chain.
         updateAverSrAuto(e);
+        applyUpscalerSlot(e.device());
 #endif
         const Vec3 sd = Vec3{sky_.sunDirection[0], sky_.sunDirection[1],
                              sky_.sunDirection[2]}.getSafeNormal();
@@ -2368,7 +2368,6 @@ editor::shutdownAnimEditors();
     // Detach from device first, then destroy: raw pointers must be cleared before unique_ptrs reset.
     e.device()->setUpscaler(nullptr);
     averSrUpscaler_.reset();
-    edgeAaUpscaler_.reset();
 #endif
     // Same order: clear device pointer before destroying the object.
     e.device()->setFrameInterpolation(false);

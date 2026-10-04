@@ -1308,7 +1308,13 @@ public:
     // (nothing here ever assigns upscaler_ on its own); every branch that matters gates on this
     // pointer rather than a quality enum or build flag, so "no upscaler set" and "no AverSR module
     // in this build" are the same code path -- see D3D12Device::setUpscaler for the same invariant.
-    void setUpscaler(IUpscaler* u) override { upscaler_ = u; }
+    // Mirrors D3D12Device: AverSR's targets are built with the post targets, so attaching or
+    // detaching an upscaler rebuilds them at the next frame start.
+    void setUpscaler(IUpscaler* u) override {
+        if ((u != nullptr) != (upscaler_ != nullptr) && hasSwapchain_) upscalerTargetsDirty_ = true;
+        upscaler_ = u;
+    }
+    bool upscalerTargetsDirty_ = false;
     IUpscaler* upscaler() const override { return upscaler_; }
     Format backbufferFormat() const override { return fromVkFormat(kVkSceneColorFormat); }
     Format depthFormat() const override { return fromVkFormat(kVkDepthFormat); }

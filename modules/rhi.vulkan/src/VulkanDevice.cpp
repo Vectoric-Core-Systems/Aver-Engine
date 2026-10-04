@@ -1696,11 +1696,13 @@ void VulkanDevice::setRenderScale(f32 scale) {
 // (VulkanCommon.hpp) and setRenderScale's own comment above for the full account. Mirrors
 // D3D12Device::applyPendingRenderScale() exactly, field for field.
 void VulkanDevice::applyPendingRenderScale() {
-    if (!pendingRenderScaleValid_) return;
-    pendingRenderScaleValid_ = false;
-    if (pendingRenderScale_ == renderScale_) return;
-    renderScale_ = pendingRenderScale_;
-    rebuildSceneTargets();
+    bool rebuild = upscalerTargetsDirty_;   // an upscaler attached/detached (setUpscaler)
+    upscalerTargetsDirty_ = false;
+    if (pendingRenderScaleValid_) {
+        pendingRenderScaleValid_ = false;
+        if (pendingRenderScale_ != renderScale_) { renderScale_ = pendingRenderScale_; rebuild = true; }
+    }
+    if (rebuild) rebuildSceneTargets();
 }
 
 // Tears down and rebuilds every target sized off sceneWidth_/sceneHeight_ after renderScale_ moves
@@ -3824,6 +3826,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
             in.color = sceneColorTex_;
             in.srcWidth = sceneWidth_;   in.srcHeight = sceneHeight_;
             in.dstWidth = width_;        in.dstHeight = height_;
+            in.canRetarget = false;   // the scope above stays open across execute()
             upscaler_->execute(*rhiContext_, in, presentHdrTex_);
 
             popRenderScope(cmd, srScope);

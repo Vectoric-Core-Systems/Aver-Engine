@@ -15,7 +15,7 @@
 aver_add_module(Aver.Render.Sr
   SOURCES
     src/AverSrSpatial.cpp
-    src/AverSrFxaa.cpp
+    src/AverSrFsr.cpp
   DEPS
     Aver.Core
     Aver.RHI
@@ -25,3 +25,7 @@ aver_add_module(Aver.Render.Sr
 
 # HLSL beside the executable -- see cmake/AvModule.cmake.
 aver_deploy_shaders(Aver.Render.Sr "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+# FSR 1's headers, which sr_fsr1.hlsl includes as "FidelityFX/<name>.h" (the denoiser's live there too).
+file(COPY "${CMAKE_SOURCE_DIR}/third_party/fidelityfx-fsr/ffx_a.h"
+          "${CMAKE_SOURCE_DIR}/third_party/fidelityfx-fsr/ffx_fsr1.h"
+     DESTINATION "${CMAKE_BINARY_DIR}/bin/shaders/FidelityFX")

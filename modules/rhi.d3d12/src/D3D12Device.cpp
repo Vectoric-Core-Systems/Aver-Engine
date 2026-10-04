@@ -817,7 +817,12 @@ public:
     void addRenderFeature(IRenderFeature* f) override;
     void removeRenderFeature(IRenderFeature* f) override;
     // Non-owning. Null keeps single-pass composite path.
-    void setUpscaler(IUpscaler* u) override { upscaler_ = u; }
+    // AverSR's targets exist only while an upscaler is set and are built with the post targets, so
+    // attaching or detaching one rebuilds them at the next frame start, like a render-scale change.
+    void setUpscaler(IUpscaler* u) override {
+        if ((u != nullptr) != (upscaler_ != nullptr) && hasSwapchain_) upscalerTargetsDirty_ = true;
+        upscaler_ = u;
+    }
     IUpscaler* upscaler() const override { return upscaler_; }
     void setFrameInterpolator(IFrameInterpolator* g) override {
         if (g != frameInterp_ && frameInterp_) frameInterp_->reset();
@@ -1481,12 +1486,15 @@ private:
         return pendingRenderScaleValid_ ? pendingRenderScale_ : renderScale_;
     }
     void applyPendingRenderScale() {
-        if (!pendingRenderScaleValid_) return;
-        pendingRenderScaleValid_ = false;
-        if (pendingRenderScale_ == renderScale_) return;
-        renderScale_ = pendingRenderScale_;
-        rebuildSceneTargets();
+        bool rebuild = upscalerTargetsDirty_;
+        upscalerTargetsDirty_ = false;
+        if (pendingRenderScaleValid_) {
+            pendingRenderScaleValid_ = false;
+            if (pendingRenderScale_ != renderScale_) { renderScale_ = pendingRenderScale_; rebuild = true; }
+        }
+        if (rebuild) rebuildSceneTargets();
     }
+    bool upscalerTargetsDirty_ = false;
     f32  pendingRenderScale_ = 1.0f;
     bool pendingRenderScaleValid_ = false;
     f32 renderScale() const override { return pendingOrCurrentRenderScale(); }

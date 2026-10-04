@@ -47,7 +47,7 @@ bool tanAndAxis(const Vec3& dir, const Vec3& forward, f32& tanOut, Vec3& axisOut
 // colour target, BEFORE that chain, exactly where Voxi's own debug view writes), so the reference
 // view is visually comparable rather than differently graded.
 //
-// SELF-CONTAINED, same reasoning AverSrFxaa.cpp gives for its own presentation shader: it declares
+// SELF-CONTAINED, same reasoning AverSrSpatial.cpp gives for its own presentation shader: it declares
 // its own tiny constant buffer and does NOT include rhi::sharedShaderPrelude() -- the vertex side
 // borrows the prelude's VSky entry point (a plain SV_VertexID fullscreen triangle, the same one
 // VoxiRenderer's own debug view compiles against), compiled as a SEPARATE shader object, so nothing
@@ -819,7 +819,7 @@ void PtSceneView::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi
     // (VoxiRenderer.cpp's createScenePipelines, "shares the prelude's fullscreen triangle"), read out
     // of the shared prelude rather than duplicated here.
     // SM 5.1, the SAME minimum VoxiRenderer's own VSky compile uses (VoxiRenderer.cpp's kBaseSm) and
-    // AverSrFxaa's presentation shaders use (AverSrFxaa.cpp) -- a fullscreen triangle and a
+    // AverSR's upscale shaders use (AverSrSpatial.cpp) -- a fullscreen triangle and a
     // StructuredBuffer read need nothing from SM6, and asking for less than the integrator itself
     // needs is what keeps this pass working on the same hardware floor as everything else it stands
     // beside, even though the integrator compute shader beside it is pinned to SM 6.5 for RayQuery.

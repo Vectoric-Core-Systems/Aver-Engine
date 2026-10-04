@@ -726,6 +726,9 @@ struct UpscalerInput {
     TextureHandle motionVectors = 0;
     f32 jitterX = 0.0f, jitterY = 0.0f;
     TextureHandle history       = 0;
+    // Whether execute() may bind its own intermediate targets (and must leave outTarget bound at
+    // the end). False on Vulkan, whose caller holds a rendering scope open across execute().
+    bool canRetarget = true;
 };
 
 // Upscaler interface. See docs/AVERSR.md.

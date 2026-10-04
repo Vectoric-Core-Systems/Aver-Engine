@@ -466,7 +466,7 @@ private:
     // Root CBV register for the presentation pixel shader's own tiny constant block (accumulator
     // width/height). This pipeline never includes rhi::sharedShaderPrelude() on the PIXEL side (only
     // the vertex shader borrows its VSky entry point), so b1 here is unrelated to what b1 means to a
-    // pipeline that does -- same reasoning AverSrFxaa.cpp's kFxaaConstantRegister gives.
+    // pipeline that does -- same reasoning AverSrSpatial.cpp's kUpscaleConstantRegister gives.
     static constexpr u32 kPresentConstantRegister = 1;
 };
 

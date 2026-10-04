@@ -219,8 +219,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // Spatial upscaler composition root.
 #if AVER_MODULE_SR
 #include "aver/sr/AverSrQuality.hpp"
-#include "aver/sr/AverSrSpatial.hpp"
-#include "aver/sr/AverSrFxaa.hpp"
+#include "aver/sr/AverSrFsr.hpp"
 // AverSR level constants must match Voxi ladder numbering.
 #if AVER_MODULE_VOXI
 static_assert(static_cast<aver::u32>(aver::sr::Quality::Off)         == aver::voxi::ladder::kAverSrOff,
@@ -1556,8 +1555,6 @@ public:
     void setEdgeAaOverride(bool on);   // --edge-aa
 
     void applyUpscalerSlot(rhi::IDevice* dev);
-
-    void ensureEdgeAaUpscaler(rhi::IDevice* dev);
 
     void logAverSrActive(rhi::IDevice* dev);
 
@@ -3305,13 +3302,12 @@ private:
 #endif
     // Project's own AverSR default combo's live edit state. Unconditionally reset to -1 on project open (not inherit from previous project).
     int  averSrProjectDefault_ = -1;
-    // Constructed lazily on the first non-Off quality; never rebuilt, only dropped to null on Off.
-    std::unique_ptr<aver::sr::SpatialUpscaler> averSrUpscaler_;
-    // --edge-aa: constructs a real aver::sr::FxaaResolve. SHARES ONE rhi::IDevice UPSCALER SLOT with AverSR.
+    // FSR 1 (EASU + RCAS). Built whenever the scene is scaled (any AverSR level or a manual render
+    // scale) or edge AA is on; dropped, after the device lets go of it, when none is (applyUpscalerSlot).
+    std::unique_ptr<aver::sr::FsrUpscaler> averSrUpscaler_;
+    // Edge AA (FXAA-class) in FSR's first pass: --edge-aa or Display > Edge anti-aliasing.
     bool edgeAaEnabled_ = false;
-    std::unique_ptr<aver::sr::FxaaResolve> edgeAaUpscaler_;
-    // Said once per session, not once per frame: updateAverSrAuto forces Auto to Off every frame --edge-aa occupies the upscaler slot.
-    bool edgeAaAverSrWarnLogged_ = false;
+    f32  fsrSharpness_ = 0.2f;   // RCAS stops (0 = sharpest); Display > Sharpening
 
     // ---- frame interpolation (docs/rendering/NEURAFI.md) ----
     // Who decides, highest first: --frame-interp, project RENDER.FRAMEINTERP, Editor Preference (off by default).
