@@ -208,6 +208,8 @@ struct World {
     // steps because a character that leaves a moving ground keeps its horizontal part until it lands.
     // Gone with the world; erased with its character, and by a teleport.
     std::unordered_map<int32_t, JPH::Vec3> characterCarry;
+    // aver_phys_character_set_gravity_factor; absent means 1. Erased with its character.
+    std::unordered_map<int32_t, float> characterGravity;
     int32_t nextHandle = 1;
 
     std::unordered_map<JPH::BodyID, int32_t> byId;   // reverse of `bodies`

@@ -360,6 +360,38 @@ static void testEntityToCharacter() {
     check(aver_phys_character_of_entity(42) == 0, "with no world at all the answer is still 0");
 }
 
+// The flying default pawn: gravity factor 0 hovers where it is put, still collides (a wall stops it),
+// and 1 gives gravity back.
+static void testGravityFactor() {
+    aver_phys_init();
+    aver_phys_add_static_box(0, 0, -50.0f, 4000.0f, 4000.0f, 50.0f);       // floor, top at z = 0
+    aver_phys_add_static_box(300.0f, 0, 500.0f, 50.0f, 4000.0f, 1000.0f); // wall, face at x = 250
+    const int32_t ch = aver_phys_character_create(35.0f, 90.0f, 0.0f, 0.0f, 500.0f);
+    float f = -1.0f;
+    check(aver_phys_character_gravity_factor(ch, &f) == 1 && f == 1.0f, "the default factor is 1");
+    check(aver_phys_character_set_gravity_factor(ch, -1.0f) == 0, "a negative factor is refused");
+    check(aver_phys_character_set_gravity_factor(ch, 0.0f) == 1, "0 is accepted");
+    aver_phys_character_set_stair_stepping(ch, 0.0f, 0.0f);
+    for (int i = 0; i < 120; ++i) { aver_phys_character_set_velocity(ch, 0, 0, 0); aver_phys_step(kDt); }
+    float p[3] = {0, 0, 0};
+    aver_phys_character_position(ch, p);
+    check(near(p[2], 500.0f, 0.5f), "with factor 0 it hovers (z " + f2s(p[2]) + ", wants 500)");
+
+    const f32 moved = walkForward(ch, 600.0f, 120);   // 12 m of travel asked for
+    aver_phys_character_position(ch, p);
+    check(moved > 150.0f && p[0] <= 250.0f - 35.0f + 1.0f,
+          "flying into the wall it stops at its face (x " + f2s(p[0]) + ", face 250, radius 35)");
+    check(near(p[2], 500.0f, 1.0f), "and still holds its height (z " + f2s(p[2]) + ")");
+
+    aver_phys_character_set_gravity_factor(ch, 1.0f);
+    for (int i = 0; i < 120; ++i) aver_phys_step(kDt);
+    aver_phys_character_position(ch, p);
+    check(p[2] < 100.0f, "factor 1 brings gravity back: it falls (z " + f2s(p[2]) + ")");
+    aver_phys_character_destroy(ch);
+    check(aver_phys_character_gravity_factor(ch, &f) == 0, "a destroyed character has no factor");
+    aver_phys_shutdown();
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     AVER_INFO("==================================================");
@@ -372,6 +404,7 @@ int main() {
     testDeadHandles();
     testRidesAMovingDeck();
     testEntityToCharacter();
+    testGravityFactor();
 
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);

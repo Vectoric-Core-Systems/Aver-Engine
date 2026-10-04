@@ -52,6 +52,13 @@ AVER_PHYS_API int32_t aver_phys_character_set_stair_stepping(int32_t ch, float s
 AVER_PHYS_API int32_t aver_phys_character_stair_stepping(int32_t ch, float* outStepUpCm,
                                                           float* outStepDownCm);
 
+// ---- Gravity factor ----------------------------------------------------------------------------------
+// How much of the world's gravity aver_phys_step applies to this character: 1 (the default) walks and
+// falls, 0 flies -- a free-flying collider that still sweeps and slides against the world, with its
+// vertical velocity entirely the driver's. Negative or non-finite is refused.
+AVER_PHYS_API int32_t aver_phys_character_set_gravity_factor(int32_t ch, float factor);
+AVER_PHYS_API int32_t aver_phys_character_gravity_factor(int32_t ch, float* outFactor);
+
 // ---- Ground state -------------------------------------------------------------------------------
 // aver_phys_character_grounded (physics_abi.h) collapses Jolt's four-way answer to a single boolean.
 // This is the four-way answer itself, IN JOLT'S OWN DECLARED ORDER (see CharacterBase::EGroundState) so

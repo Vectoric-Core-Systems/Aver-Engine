@@ -169,6 +169,14 @@ public readonly struct CharacterBody : IEquatable<CharacterBody>
     }
     public bool SetMaxStrength(float maxStrengthKgCmS2) => Native.aver_phys_character_set_max_strength(Handle, maxStrengthKgCmS2) != 0;
 
+    /// <summary>How much of the world's gravity this character feels: 1 walks and falls, 0 flies (still
+    /// sweeping and sliding against the world). Negative is refused.</summary>
+    public float GravityFactor
+    {
+        get { var v = new float[1]; return Native.aver_phys_character_gravity_factor(Handle, v) != 0 ? v[0] : 1f; }
+    }
+    public bool SetGravityFactor(float factor) => Native.aver_phys_character_set_gravity_factor(Handle, factor) != 0;
+
     public bool Equals(CharacterBody other) => Handle == other.Handle;
     public override bool Equals(object? obj) => obj is CharacterBody c && Equals(c);
     public override int GetHashCode() => Handle;

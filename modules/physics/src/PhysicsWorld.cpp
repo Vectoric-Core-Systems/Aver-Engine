@@ -358,6 +358,9 @@ int32_t aver_phys_step(float dt) {
         // steps is still its own, relative to what it stands on. Doing it here rather than in each
         // driver is also what keeps it right when one frame runs several fixed steps.
         for (auto& [h, ch] : g_world->characters) {
+            const auto gIt = g_world->characterGravity.find(h);
+            const JPH::Vec3 gravity = g_world->system.GetGravity() *
+                                      (gIt != g_world->characterGravity.end() ? gIt->second : 1.0f);
             const JPH::Vec3 up = ch->GetUp();
             JPH::Vec3 v = ch->GetLinearVelocity();
             const float vUp = v.Dot(up);
@@ -381,7 +384,7 @@ int32_t aver_phys_step(float dt) {
                 v += up * carryUp;
                 carry -= up * carryUp;
                 // Fall normally.
-                v += g_world->system.GetGravity() * g_world->fixedStep;
+                v += gravity * g_world->fixedStep;
             }
             ch->SetLinearVelocity(v + carry);
 
@@ -392,7 +395,7 @@ int32_t aver_phys_step(float dt) {
             JPH::CharacterVirtual::ExtendedUpdateSettings us;
             applyCharacterStairSettings(h, us);
             ch->ExtendedUpdate(g_world->fixedStep,
-                               g_world->system.GetGravity(),
+                               gravity,
                                us,
                                g_world->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
                                g_world->system.GetDefaultLayerFilter(Layers::MOVING),
@@ -638,6 +641,7 @@ int32_t aver_phys_character_destroy(int32_t ch) {
     if (!g_world || !g_world->characters.count(ch)) return 0;
     g_world->characters.erase(ch);
     g_world->characterCarry.erase(ch);
+    g_world->characterGravity.erase(ch);
     return 1;
 }
 

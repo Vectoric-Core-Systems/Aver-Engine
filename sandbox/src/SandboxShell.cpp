@@ -1726,8 +1726,11 @@ void SandboxApp::drawPlayToolbar(Engine& e) {
 
             ImGui::Separator();
             ImGui::TextDisabled("WITH NO GAMEMODE");
-            if (ImGui::RadioButton("Fly (spectator)", !defaultPawnWalk_)) defaultPawnWalk_ = false;
+            if (ImGui::RadioButton("Fly (drone, collides)", !defaultPawnWalk_)) defaultPawnWalk_ = false;
             uiReg_.track("toolbar.play.options.pawnFly");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Like Unreal's DefaultPawn: flies with no gravity inside a %.0f cm collision "
+                                  "capsule that stops at walls and slides along them. WASD, Q/E down/up.", 35.0f);
             if (ImGui::RadioButton("Walk (gravity, stairs, Space jumps)", defaultPawnWalk_)) defaultPawnWalk_ = true;
             uiReg_.track("toolbar.play.options.pawnWalk");
             if (ImGui::IsItemHovered())

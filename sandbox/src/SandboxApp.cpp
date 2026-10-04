@@ -1702,23 +1702,37 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
         // defaultPawnPlay_ is scene-guarded. Without the module, camera flies on right button alone.
         // EJECTED DROPS THE EXCEPTION: spectator pawn stops flying without RMB, block below moves camPos_ instead.
+        bool flyPawnDriven = false;
 #if AVER_MODULE_SCENE
         if ((flying_ || (defaultPawnPlay_ && !playEjected())) && (!io.WantCaptureKeyboard || inPlayWindow)) {
 #else
         if (flying_ && (!io.WantCaptureKeyboard || inPlayWindow)) {
 #endif
             const f32 sp = flySpeed_ * t.dt;
+            // The possessed default pawn also takes the game's own input (AVER_FW_KEY_A.. is A-Z in
+            // order), like the walking one, so --play-test and a game's input mapping can fly it.
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
+            const bool pawnInput = defaultPawnPlay_ && !playEjected();
+            auto moveKey = [&](ImGuiKey k, i32 vk) {
+                return flyKey(k, vk) || (pawnInput && aver_fw_input_key(vk - 'A') != 0);
+            };
+#else
+            auto moveKey = flyKey;
+#endif
             Vec3 step{0, 0, 0};
-            if (flyKey(ImGuiKey_W, 'W')) step += fwd * sp;
-            if (flyKey(ImGuiKey_S, 'S')) step -= fwd * sp;
-            if (flyKey(ImGuiKey_D, 'D')) step += right * sp;
-            if (flyKey(ImGuiKey_A, 'A')) step -= right * sp;
-            if (flyKey(ImGuiKey_E, 'E')) step += up * sp;
-            if (flyKey(ImGuiKey_Q, 'Q')) step -= up * sp;
+            if (moveKey(ImGuiKey_W, 'W')) step += fwd * sp;
+            if (moveKey(ImGuiKey_S, 'S')) step -= fwd * sp;
+            if (moveKey(ImGuiKey_D, 'D')) step += right * sp;
+            if (moveKey(ImGuiKey_A, 'A')) step -= right * sp;
+            if (moveKey(ImGuiKey_E, 'E')) step += up * sp;
+            if (moveKey(ImGuiKey_Q, 'Q')) step -= up * sp;
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
             // Move the PAWN (not camera) while default pawn is possessed and not ejected (drivePlayCamera rewrites view every frame).
             if (defaultPawnPlay_ && !playEjected() && walkCapsule_) {
                 driveDefaultPawnWalk(fwd, right);    // the walking default pawn (Play options > Walk)
+            } else if (defaultPawnPlay_ && !playEjected() && flyCapsule_) {
+                driveDefaultPawnFly(t.dt > 0.0f ? step * (1.0f / t.dt) : Vec3{0, 0, 0});   // collides
+                flyPawnDriven = true;
             } else if (defaultPawnPlay_ && !playEjected()) {
                 const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
                 if (pn) {
@@ -1746,6 +1760,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                 camPos_ += up    * static_cast<f32>(input_.mouseDY()) * 0.02f;
             }
         }
+        // Nothing drove the flying pawn (ejected, or the keyboard is the UI's): stop it, since with no
+        // gravity its last velocity would carry it on forever.
+        if (flyCapsule_ && !flyPawnDriven) driveDefaultPawnFly(Vec3{0, 0, 0});
         // Ctrl+S saves the level (the File menu's label for this shortcut wires nothing).
         // Not gated on levelFocused_ (saving isn't a viewport gesture) but gated on WantTextInput.
         if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::LevelSave, io))

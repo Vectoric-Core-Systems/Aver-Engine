@@ -1600,6 +1600,8 @@ public:
     void setPlayWalk() { defaultPawnWalk_ = true; }          // --play-walk: the no-GameMode default pawn walks
     void startDefaultPawnWalk(bool fromCamera);                // SandboxPlay.cpp: the capsule for a walking default pawn
     void driveDefaultPawnWalk(const Vec3& fwd, const Vec3& right);   // per frame, from the fly block
+    void startDefaultPawnFly();                                // SandboxPlay.cpp: the flying default pawn's collider
+    void driveDefaultPawnFly(const Vec3& velocity);            // per frame; zero when nothing drives it
     void setProjectPath(std::string p);          // <path>.ocproject
     void setStartMode(std::string m);
     void setOpenMap(std::string p);
@@ -3837,9 +3839,10 @@ private:
     enum class PlaySpawnAt : u8 { PlayerStart = 0, CameraLocation = 1 };
     PlayMode    playMode_ = PlayMode::SelectedViewport;    // Last launched; main button repeats it.
     PlaySpawnAt playSpawnAt_ = PlaySpawnAt::PlayerStart;
-    // Default pawn walks (capsule: gravity, stairs, jumps, runs) without GameMode. Off = flying spectator.
+    // Default pawn walks (capsule: gravity, stairs, jumps, runs) without GameMode. Off = flying drone.
     bool        defaultPawnWalk_ = false;
     int32_t     walkCapsule_ = 0;
+    int32_t     flyCapsule_ = 0;   // the flying default pawn's zero-gravity collider (0 = no-clip fallback)
     bool        playGameGetsMouse_ = true;   // Capture mouse when viewport session starts.
     std::string playStandaloneArgs_;         // Extra command line for Standalone Game.
     // Ejected (F8): editor has camera/input/tools; session keeps running. Possess (F8) to snap back.

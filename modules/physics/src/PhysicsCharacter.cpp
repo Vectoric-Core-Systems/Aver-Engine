@@ -104,6 +104,21 @@ int32_t aver_phys_character_stair_stepping(int32_t ch, float* outStepUpCm, float
     return 1;
 }
 
+// ---- Gravity factor ----------------------------------------------------------------------------
+
+int32_t aver_phys_character_set_gravity_factor(int32_t ch, float factor) {
+    if (!findCharacter(ch) || !std::isfinite(factor) || factor < 0.0f) return 0;
+    g_world->characterGravity[ch] = factor;
+    return 1;
+}
+
+int32_t aver_phys_character_gravity_factor(int32_t ch, float* outFactor) {
+    if (!findCharacter(ch) || !outFactor) return 0;
+    const auto it = g_world->characterGravity.find(ch);
+    *outFactor = it != g_world->characterGravity.end() ? it->second : 1.0f;
+    return 1;
+}
+
 // ---- Ground state ------------------------------------------------------------------------------
 
 int32_t aver_phys_character_ground_state(int32_t ch) {

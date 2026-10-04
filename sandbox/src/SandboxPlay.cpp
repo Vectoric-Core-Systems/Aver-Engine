@@ -23,6 +23,9 @@ namespace {
 // also needs the eye height to stand a FLYING pawn's camera above the picked point.
 constexpr f32 kWalkHeight = 180.0f, kWalkRadius = 34.0f, kWalkEye = 160.0f, kWalkSpeed = 450.0f,
               kWalkRunSpeed = 900.0f, kWalkJump = 465.0f;
+// The flying default pawn's collider, centred on the camera: Unreal's DefaultPawn sphere is 35 cm, and a
+// capsule needs some cylinder (height > 2 x radius).
+constexpr f32 kFlyRadius = 35.0f, kFlyHeight = 90.0f;
 // Play From Here stands the pawn's feet this far above the picked surface, so a capsule or a pawn's own
 // ground snap never starts embedded in the triangle the ray hit.
 constexpr f32 kPlayFromHereLiftCm = 5.0f;
@@ -354,9 +357,11 @@ void SandboxApp::startPlay() {
                 atCamera = true;
             }
             if (defaultPawnWalk_) startDefaultPawnWalk(atCamera);
+            else                  startDefaultPawnFly();
             AVER_INFO("[Sandbox] Play: no GameMode declared -- possessing the engine's "
                       "AverDefaultPawn ({}, hold RMB to look). Declare an [AverGameMode] class to take over.",
-                      walkCapsule_ ? "WASD to walk, Space jumps, Shift runs" : "WASD/QE to fly");
+                      walkCapsule_ ? "WASD to walk, Space jumps, Shift runs"
+                                   : flyCapsule_ ? "WASD/QE to fly, collides" : "WASD/QE to fly");
             // Mouse capture matches the toolbar option from the first frame, not just after a
             // viewport click -- the same convention the GameMode path below follows.
             releasedByUser_ = !playGameGetsMouse_;
@@ -484,6 +489,50 @@ void SandboxApp::driveDefaultPawnWalk(const Vec3& fwd, const Vec3& right) {
 #endif
 }
 
+// THE FLYING DEFAULT PAWN's collider, like Unreal's DefaultPawn: a zero-gravity character capsule centred
+// on the camera, so flying stops at walls and slides along them instead of passing through. No stair
+// stepping or floor snap (both would pull a flyer down). If physics will not create it, Play still
+// flies, without collision, exactly as before.
+void SandboxApp::startDefaultPawnFly() {
+#if AVER_MODULE_PHYSICS && AVER_MODULE_SCENE
+    const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+    if (!pn) return;
+    const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
+    scene::World& pw = scene::World::instance();
+    if (!pw.valid(pe)) return;
+    const Vec3 at = pw.localTransform(pe).position;
+    flyCapsule_ = aver_phys_character_create(kFlyRadius, kFlyHeight, at.x, at.y, at.z);
+    if (!flyCapsule_ || !aver_phys_character_set_gravity_factor(flyCapsule_, 0.0f)) {
+        if (flyCapsule_) aver_phys_character_destroy(flyCapsule_);
+        flyCapsule_ = 0;
+        AVER_WARN("[Sandbox] Play: the physics world would not create the flying pawn's collider; it flies without collision");
+        return;
+    }
+    aver_phys_character_set_stair_stepping(flyCapsule_, 0.0f, 0.0f);
+    AVER_INFO("[Sandbox] Play: the default pawn FLIES with collision (capsule {:.0f} x {:.0f} cm) from ({:.0f}, {:.0f}, {:.0f})",
+              kFlyRadius, kFlyHeight, at.x, at.y, at.z);
+#endif
+}
+
+// One frame of flying: the velocity the fly keys asked for (zero when nothing drives it, so a
+// gravity-free capsule never drifts on), then the pawn follows the capsule, facing the view.
+void SandboxApp::driveDefaultPawnFly(const Vec3& velocity) {
+#if AVER_MODULE_PHYSICS && AVER_MODULE_SCENE
+    if (!flyCapsule_) return;
+    aver_phys_character_set_velocity(flyCapsule_, velocity.x, velocity.y, velocity.z);
+    const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+    if (!pn) return;
+    const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
+    scene::World& pw = scene::World::instance();
+    if (!pw.valid(pe)) return;
+    float p[3];
+    if (aver_phys_character_position(flyCapsule_, p) != 0) pw.setLocalPosition(pe, Vec3{p[0], p[1], p[2]});
+    pw.setLocalRotation(pe, Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw_) * Quat::fromAxisAngle(Vec3{0, 1, 0}, -pitch_));
+#else
+    (void)velocity;
+#endif
+}
+
 // True when Play is standing in a drone because the project declares no GameMode. Not a real
 // play session -- aver_fw_begin_play never ran -- so aver_fw_play_state() knows nothing about it
 // and every place that gates on "are we playing" has to ask this too.
@@ -544,6 +593,10 @@ void SandboxApp::stopPlay() {
     if (walkCapsule_) {
         aver_phys_character_destroy(walkCapsule_);
         walkCapsule_ = 0;
+    }
+    if (flyCapsule_) {
+        aver_phys_character_destroy(flyCapsule_);
+        flyCapsule_ = 0;
     }
 #endif
     // Restored whether or not the default pawn was what ended, so a view this editor changed can
@@ -1047,6 +1100,13 @@ void SandboxApp::teleportPawnToCamera() {
     Vec3 feet = camPos_;
     const char* what = "the flying default pawn, at the camera itself";
     if (defaultPawnPlay_ && !walkCapsule_) {
+#if AVER_MODULE_PHYSICS
+        if (flyCapsule_) {
+            what = "the flying default pawn and its collider, at the camera itself";
+            aver_phys_character_set_position(flyCapsule_, camPos_.x, camPos_.y, camPos_.z);
+            aver_phys_character_set_velocity(flyCapsule_, 0.0f, 0.0f, 0.0f);
+        }
+#endif
         placeDefaultPawnAtCamera(camPos_, yaw_, pitch_);
     } else if (defaultPawnPlay_) {
         what = "the walking default pawn and its capsule";

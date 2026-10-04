@@ -205,6 +205,8 @@ internal static class Native
     [DllImport(Lib)] internal static extern int aver_phys_character_mass(int ch, float[] outMassKg);
     [DllImport(Lib)] internal static extern int aver_phys_character_set_max_strength(int ch, float maxStrengthKgCmS2);
     [DllImport(Lib)] internal static extern int aver_phys_character_max_strength(int ch, float[] outMaxStrengthKgCmS2);
+    [DllImport(Lib)] internal static extern int aver_phys_character_set_gravity_factor(int ch, float factor);
+    [DllImport(Lib)] internal static extern int aver_phys_character_gravity_factor(int ch, float[] outFactor);
     [DllImport(Lib)] internal static extern int aver_phys_character_shape(int ch, float[] outRadius, float[] outHeight);
     [DllImport(Lib)] internal static extern int aver_phys_character_of_entity(int entity);
 
