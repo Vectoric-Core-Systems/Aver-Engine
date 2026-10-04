@@ -138,7 +138,7 @@ constexpr u32 kVoxiSrvCount = kGiSrvCount + 14;
 
 // Wider than kGiUavCount (same reasoning as kVoxiSrvCount).
 // Includes history, ray-driven, and radiance-cache outputs. u11+ always declared, bound to placeholders when absent.
-constexpr u32 kVoxiUavCount = kGiUavCount + 18;
+constexpr u32 kVoxiUavCount = kGiUavCount + 19;
 
 // Declares slot kinds for all table 0 bindings (Vulkan requires type consistency).
 void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
@@ -187,7 +187,8 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     uav[19] = rhi::SlotKind::Texture2D;             // u19 local-light history (write)
     uav[20] = rhi::SlotKind::StructuredBuffer;      // u20 radiance-cache accumulator
     uav[21] = rhi::SlotKind::StructuredBuffer;      // u21 radiance-cache cells
-    static_assert(kVoxiSrvCount == 23 && kVoxiUavCount == 22 && kGiSrvCount == 9 && kGiUavCount == 4,
+    uav[22] = rhi::SlotKind::StructuredBuffer;      // u22 Path Tracing progressive accumulation
+    static_assert(kVoxiSrvCount == 23 && kVoxiUavCount == 23 && kGiSrvCount == 9 && kGiUavCount == 4,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -491,6 +492,10 @@ void VoxiRenderer::shutdown() {
     if (rdShadowTileBuf_) { res_->destroyBuffer(rdShadowTileBuf_); rdShadowTileBuf_ = 0; }
     if (rdGiCandBufPlaceholder_) { res_->destroyBuffer(rdGiCandBufPlaceholder_); rdGiCandBufPlaceholder_ = 0; }
     if (rdShadowTileBufPlaceholder_) { res_->destroyBuffer(rdShadowTileBufPlaceholder_); rdShadowTileBufPlaceholder_ = 0; }
+    if (ptAccumBuf_)         { res_->destroyBuffer(ptAccumBuf_);         ptAccumBuf_ = 0; }
+    if (ptAccumPlaceholder_) { res_->destroyBuffer(ptAccumPlaceholder_); ptAccumPlaceholder_ = 0; }
+    ptAccumElemCapacity_ = 0;
+    ptAccumValid_ = false;
     // Radiance cache: bindings_ already destroyed, so destroy buffers outright.
     rc_.destroy();
     if (rcPlaceholder_) { res_->destroyBuffer(rcPlaceholder_); rcPlaceholder_ = 0; }
@@ -578,6 +583,7 @@ void VoxiRenderer::setSettings(const Settings& in) {
     const u32 wasVis = giRestirVisibility_;
     const bool wasRdStagedResourcesWanted = rdStagedResourcesWanted();
     const bool wasAirVisWanted = airVisWanted();
+    const bool wasPtWanted = pathTracingWanted();
     settings_ = s;
     setShadowRays(s.rtShadowRays);
     setPixelsPerRayTile(s.rtPixelsPerRayTile);
@@ -631,6 +637,9 @@ void VoxiRenderer::setSettings(const Settings& in) {
         if (!ensureRdStagedResources(rtHistWantW_, rtHistWantH_))
             AVER_ERROR("[Voxi] staged ray-driven resources could not follow a settings change at {}x{}",
                        rtHistWantW_, rtHistWantH_);
+
+    // Path Tracing's accumulation buffer follows the mode.
+    if (pathTracingWanted() != wasPtWanted) ensurePtAccum();
 
     // Air visibility volume: fixed resolution, no size guard.
     if (airVisWanted() != wasAirVisWanted)
@@ -4720,7 +4729,7 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
             rdStagedW_ = rdStagedH_ = rdStagedRowPitch_ = 0;
             AVER_INFO("[Voxi] staged ray-driven resources released");
         }
-        return true;
+        return ensurePtAccum();
     }
 
     // Row pitch is exactly the render target's width. Every resource already matches -- nothing to do.
@@ -4734,7 +4743,7 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
         rdReflTex_ && !perPixelBufferNeedsRealloc(rdVisBufElemCapacity_, elemCount) &&
         !perPixelBufferNeedsRealloc(rdGiCandBufElemCapacity_, elemCount) &&
         !perPixelBufferNeedsRealloc(rdShadowTileElemCapacity_, tileElemCount))
-        return true;
+        return ensurePtAccum();
 
     // Texture resizes recreate the texture outright (unlike buffers, which can grow).
     if (rdSunVisTex_ && (rdStagedW_ != width || rdStagedH_ != height)) {
@@ -4872,6 +4881,38 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
     rdStagedW_ = width;
     rdStagedH_ = height;
     rdStagedRowPitch_ = pitch;
+    return ensurePtAccum();
+}
+
+// Path Tracing's accumulation buffer (u22): one float4 per staged pixel while Path Tracing is wanted,
+// released otherwise. Called wherever the staged resources are sized, and on a Path Tracing edge.
+bool VoxiRenderer::ensurePtAccum() {
+    if (!res_ || !bindings_) return false;
+    const bool want = pathTracingWanted() && rdStagedResourcesWanted() && rdStagedRowPitch_ && rdStagedH_;
+    const u32 elems = want ? rdStagedRowPitch_ * rdStagedH_ : 0u;
+    if (ptAccumBuf_ && (!want || ptAccumElemCapacity_ < elems)) {
+        // Rebind before destroy (aver-view-outlives-its-buffer).
+        if (ptAccumPlaceholder_) res_->setUavBuffer(bindings_, 22, ptAccumPlaceholder_, kPtAccumElemBytes, 1, 0);
+        res_->destroyBuffer(ptAccumBuf_);
+        ptAccumBuf_ = 0;
+        ptAccumElemCapacity_ = 0;
+    }
+    ptAccumValid_ = ptAccumValid_ && ptAccumBuf_ != 0;
+    if (!want || ptAccumBuf_) return true;
+    rhi::BufferDesc d;
+    d.bytes = static_cast<u64>(elems) * kPtAccumElemBytes;
+    d.kind  = rhi::BufferKind::Default;
+    d.allowUnorderedAccess = true;
+    d.debugName = "Voxi Path Tracing accumulation";
+    ptAccumBuf_ = res_->createBuffer(d);
+    if (!ptAccumBuf_) {
+        AVER_WARN("[Voxi] Path Tracing accumulation buffer ({} pixels) could not be created; the image "
+                  "will not accumulate", elems);
+        return false;
+    }
+    ptAccumElemCapacity_ = elems;
+    ptAccumValid_ = false;
+    res_->setUavBuffer(bindings_, 22, ptAccumBuf_, kPtAccumElemBytes, elems, 0);
     return true;
 }
 
@@ -5133,6 +5174,41 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     cb_.rtHistParams[3] = static_cast<f32>(tileBits);
     // Spatial filter radius; blend amount pinned at 0 (loop runs but result discarded via constant).
     cb_.ptBounceParams[0] = static_cast<f32>(pathTracingWanted() ? ptBounces_ : 1u);
+    // PROGRESSIVE ACCUMULATION (Stage B, u22): y = 0 off, 1 restart, 2 keep averaging; z = frame cap.
+    // Restarts whenever something that lights the whole image changes: the camera, the sun, the
+    // viewport, the lamp set or a setting. A moving object only restarts its own pixels (shader).
+    cb_.ptBounceParams[1] = 0.0f;
+    cb_.ptBounceParams[2] = static_cast<f32>(kPtAccumMaxFrames);
+    if (pathTracingWanted() && ptAccumBuf_ && dev_) {
+        f32 key[kPtAccumKeyFloats] = {};
+        f32 eyeK[3] = {};
+        const bool haveCam = dev_->camera(key, nullptr, eyeK);
+        const rhi::SkyAtmosphere skyK = dev_->skyAtmosphere();
+        for (int a = 0; a < 3; ++a) {
+            key[16 + a] = eyeK[a];
+            key[19 + a] = skyK.sunDirection[a];
+            key[22 + a] = skyK.sunColor[a];
+        }
+        for (int a = 0; a < 4; ++a) key[25 + a] = curSceneViewport_[a];
+        std::memcpy(&key[29], &rdLocalLightHash_, sizeof(rdLocalLightHash_));
+        // The settings that change the lit image, field by field (a whole-struct compare would see padding).
+        const f32 lit[] = {
+            static_cast<f32>(settings_.pathTracing), static_cast<f32>(settings_.ptBounces),
+            static_cast<f32>(settings_.globalIllumination), static_cast<f32>(settings_.rayTracing),
+            settings_.giIntensity, settings_.giMaxDistance, static_cast<f32>(settings_.rtShadowRays),
+            static_cast<f32>(settings_.giMode), static_cast<f32>(settings_.giRestirMaxHistory),
+            static_cast<f32>(settings_.giRestirSpatialSamples), static_cast<f32>(settings_.refractionMode),
+            settings_.refractionStrength, settings_.fogOcclusion ? 1.0f : 0.0f,
+            settings_.denoiser ? 1.0f : 0.0f, static_cast<f32>(settings_.msaa)};
+        static_assert(31 + sizeof(lit) / sizeof(f32) <= kPtAccumKeyFloats, "kPtAccumKeyFloats holds the key");
+        std::memcpy(&key[31], lit, sizeof(lit));
+        const bool same = haveCam && ptAccumValid_ && std::memcmp(key, ptAccumKey_, sizeof(key)) == 0;
+        cb_.ptBounceParams[1] = same ? 2.0f : 1.0f;
+        std::memcpy(ptAccumKey_, key, sizeof(key));
+        ptAccumValid_ = haveCam;
+    } else {
+        ptAccumValid_ = false;
+    }
     cb_.rtDenoiseParams[0] = static_cast<f32>(rtShadowDenoise_);
     cb_.rtDenoiseParams[1] = rtShadowDenoise_ > 0 ? 1.0f : 0.0f;
     // Motion taper: off by default (temporal accumulation already removes variance).
@@ -5589,6 +5665,17 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     rdLocalLightsBound_ = rdLocalLightsPlaceholder_;
     res_->setSrv(bindings_, 19, rdLocalHistPlaceholder_);
     res_->setUav(bindings_, 19, rdLocalHistPlaceholder_, 0);
+    // Path Tracing's accumulation (u22): a one-element stand-in until ensurePtAccum sizes the real one.
+    if (!ptAccumPlaceholder_) {
+        rhi::BufferDesc pd;
+        pd.bytes = kPtAccumElemBytes;
+        pd.kind  = rhi::BufferKind::Default;
+        pd.allowUnorderedAccess = true;
+        pd.debugName = "Voxi Path Tracing accumulation placeholder";
+        ptAccumPlaceholder_ = res_->createBuffer(pd);
+        if (!ptAccumPlaceholder_) { AVER_ERROR("[Voxi] Path Tracing accumulation placeholder could not be created"); return false; }
+    }
+    res_->setUavBuffer(bindings_, 22, ptAccumPlaceholder_, kPtAccumElemBytes, 1, 0);
     // Instanced foliage: t20/t21 placeholders; refreshFoliageBindings() swaps in real pair.
     if (!foliagePartPlaceholder_) {
         rhi::BufferDesc pd;

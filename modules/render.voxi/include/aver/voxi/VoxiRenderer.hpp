@@ -1082,6 +1082,17 @@ private:
     bool rcCreateFailed_ = false;
     // createNeuRaCTwins ran since the last createScenePipelines.
     bool rcTwinsTried_ = false;
+    // Path Tracing's progressive accumulation (u22, Stage B): per pixel, the running mean in rgb and
+    // (half-float depth in m << 16 | frame count) in w. Sized by ensurePtAccum; restarted by key change.
+    static constexpr u32 kPtAccumElemBytes = 16;
+    static constexpr u32 kPtAccumMaxFrames = 1024;   // past this the mean becomes a 1/1024 moving average
+    static constexpr u32 kPtAccumKeyFloats = 48;
+    rhi::BufferHandle ptAccumBuf_ = 0;
+    rhi::BufferHandle ptAccumPlaceholder_ = 0;
+    u32  ptAccumElemCapacity_ = 0;
+    bool ptAccumValid_ = false;
+    f32  ptAccumKey_[kPtAccumKeyFloats] = {};
+    bool ensurePtAccum();
     // createPathTraceTwins ran since the last createScenePipelines; the mode ran this frame; said-once logs.
     bool ptTwinsTried_ = false;
     bool ptRanThisFrame_ = false;

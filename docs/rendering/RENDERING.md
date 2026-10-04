@@ -341,6 +341,7 @@ One accepted, pre-existing gap this makes more visible rather than introduces: t
 - **What it switches on:** ray-driven primary visibility, at least staged pass 1, GI at least Low, ReSTIR GI, the `Full` visibility mode (every pixel traces its candidate), the denoiser, and a denoiser history of at least 128 frames so a still camera keeps converging. `VoxiRenderer::setSettings` applies these.
 - **Where it runs:** only in the `AVER_PT_PATHS` twins of `CSRdGi`/`CSRdGiTrace` (plain and checkerboard) and `CSRdRefl` (plain and split). These are built lazily by `createPathTraceTwins`, so every other compile is unchanged.
 - **Requirements:** D3D12 and ray tracing. Elsewhere it logs once and renders without path tracing.
+- **Progressive accumulation:** Stage B keeps a running mean of every pixel in a structured buffer (`u22`, `VoxiRenderer::ensurePtAccum`). It is capped at 1,024 frames, then becomes a 1/1024 moving average. The whole image restarts when the camera, sun, viewport, lamp set or a lighting setting changes. A single pixel restarts on its own when the object under it moves or its depth changes, so moving traffic doesn't reset the rest of the frame.
 - **Tiers:** set only the bounce count (`ladder::ptBounces`).
 
 ---

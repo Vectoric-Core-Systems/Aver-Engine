@@ -209,6 +209,10 @@ bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) !=
 // Settings::rayDrivenStages (0/1/2) splits PSRayDriven: CSRdVisibility traces, CSRdShadow resolves shadow.
 // 0 (default) disables the split (AVER_RD_SPLIT=0 is unchanged). Milestone 2 adds CSRdGi checkerboard.
 RWStructuredBuffer<uint4> gRdVisBuf    : register(u11);
+// Path Tracing's progressive accumulation, one float4 per pixel at the same row pitch: rgb = running mean,
+// w = asfloat(half(view depth in m) << 16 | frame count). Read and written by Stage B only, while
+// gPtBounceParams.y > 0.5 (VoxiRenderer::ensurePtAccum sizes it; a one-element placeholder otherwise).
+RWStructuredBuffer<float4> gPtAccum    : register(u22);
 // This frame's resolved sun visibility: rgb=tinted transmittance, alpha=linear view depth (proof of surface).
 RWTexture2D<float4>       gRdSunVisTex : register(u12);
 
@@ -2038,6 +2042,26 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     if (((uint)gAmbientParams.w & 128u) != 0u && (((uint)gAmbientParams.w >> 8) & 7u) != 0u &&
         gVoxelParams.w > 0.5 && gGiRestirParams.x > 0.5)
         o.col.rgb = gRdGiTex[uint2(i.pos.xy)].rgb;
+    // PATH TRACING: progressive accumulation. While the CPU key holds (gPtBounceParams.y == 2) each
+    // pixel keeps a running mean of its frames, capped at gPtBounceParams.z frames (a moving average
+    // after that). A pixel restarts on its own when the surface under it moves or its depth changes.
+    if (gPtBounceParams.y > 0.5 && vmode == 0u) {
+        const uint   accIdx = rdPixel.y * rdPitch + rdPixel.x;
+        const float  depthM = clip.w * 0.01;
+        const float4 prev   = gPtAccum[accIdx];
+        const uint   packed = asuint(prev.w);
+        const float  n      = (float)(packed & 0xFFFFu);
+        const float  prevZ  = f16tof32(packed >> 16);
+        const bool   moved  = dot(gAverReprojDelta, gAverReprojDelta) > 1e-4;
+        const bool   keep   = gPtBounceParams.y > 1.5 && !moved && n > 0.0 && all(isfinite(prev.rgb)) &&
+                              abs(prevZ - depthM) <= depthM * 0.01 + 0.01;
+        const float  nn     = keep ? min(n + 1.0, gPtBounceParams.z) : 1.0;
+        const float3 acc    = keep ? lerp(prev.rgb, o.col.rgb, 1.0 / nn) : o.col.rgb;
+        if (all(isfinite(acc))) {
+            gPtAccum[accIdx] = float4(acc, asfloat((f32tof16(depthM) << 16) | (uint)nn));
+            o.col.rgb = acc;
+        }
+    }
 #endif
 #if AVER_GBUFFER
     // clip.w is view-space linear depth (reused from o.depth divide).
