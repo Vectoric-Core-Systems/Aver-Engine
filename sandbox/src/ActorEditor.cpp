@@ -242,6 +242,7 @@ public:
     // BtEditor's own title()s.
     std::string title() const override { return actorTabTitle(title_, dirty_); }
     bool dirty() const override { return dirty_; }
+    bool usesSharedPreview() const override { return true; }
 
     // Restores this tab's column widths. Every open actor tab shares ONE column-width pair
     // (g_leftColW/g_rightColW below), so this simply forwards to the existing free function rather
@@ -864,7 +865,7 @@ void ActorEditor::rebuildLive(Engine& e) {
 // Rebuilds the preview's draw list from the live snapshot or the parsed source.
 void ActorEditor::buildDrawList(Engine& e) {
     if (!g_preview || !e.device()) return;
-    g_meshes.setContentRoot(*e.device(), g_contentRoot);
+    setSharedMeshRoot(*e.device(), g_contentRoot);
 
     if (live_) {
         if (liveGeneration_ != g_scriptGeneration) liveStale_ = true;
@@ -1675,10 +1676,10 @@ void ActorEditor::draw(Engine& e) {
 render::preview::ActorPreview* sharedPreview(Engine& e) {
     if (!g_previewTried && e.device()) {
         g_previewTried = true;
+        g_device = e.device();
         g_preview = render::preview::ActorPreview::create(*e.device(), 1024);
         if (g_preview) {
-            // Registered non-owning; shutdownActorEditors removes it before deleting.
-            g_device = e.device();
+            // Registered non-owning; releaseActorEditorGpu removes it before deleting.
             g_device->addRenderFeature(g_preview);
 #if AVER_MODULE_PBR
             // APPLIED AT CREATION, from whatever was remembered. Without this the preview's own
@@ -1695,6 +1696,20 @@ render::preview::ActorPreview* sharedPreview(Engine& e) {
 }
 
 render::preview::PreviewMeshCache& sharedPreviewMeshes() { return g_meshes; }
+
+render::preview::ActorPreview* sharedPreviewIfCreated() { return g_preview; }
+
+rhi::IDevice* sharedEditorDevice() { return g_device; }
+
+// Changing the root destroys every cached mesh, so nothing may still draw or hold one.
+void setSharedMeshRoot(rhi::IDevice& device, const std::string& root) {
+    if (root == g_meshes.contentRoot()) return;
+    if (g_meshes.loaded() != 0) {
+        if (g_preview) g_preview->setDrawList({});
+        ++g_scriptGeneration;   // live actor views hold cached handles; this makes them rebuild
+    }
+    g_meshes.setContentRoot(device, root);
+}
 
 #if AVER_MODULE_PBR
 void setPreviewTextureResolver(pbr::MaterialSystem::TextureResolver fn, void* user) {
@@ -1764,13 +1779,19 @@ void notifyActorEditorsScriptsReloaded() {
     AVER_INFO("[ActorEditor] scripts reloaded; live views are generation {}", g_scriptGeneration);
 }
 
-// Releases the shared preview and its meshes. Called before the device goes.
-void shutdownActorEditors() {
+// Frees the shared preview (targets, material textures, pipelines) and every cached preview mesh.
+void releaseActorEditorGpu() {
     if (g_device && g_preview) g_device->removeRenderFeature(g_preview);
-    g_device = nullptr;
-    delete g_preview;
+    delete g_preview;   // waits for the GPU, so the meshes below are no longer in flight
     g_preview = nullptr;
     g_previewTried = false;
+    if (g_device) g_meshes.clear(*g_device);
+}
+
+// Releases everything, once, before the device goes.
+void shutdownActorEditors() {
+    releaseActorEditorGpu();
+    g_device = nullptr;
 }
 
 // Creates an actor editor for a C# actor file, else nullptr.

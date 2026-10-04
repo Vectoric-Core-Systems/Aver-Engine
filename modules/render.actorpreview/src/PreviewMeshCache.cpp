@@ -123,9 +123,10 @@ void PreviewMeshCache::setContentRoot(rhi::IDevice& device, std::string root) {
     root_ = std::move(root);
 }
 
-// Forgets every cached mesh, radius and miss.
+// Destroys every cached mesh and forgets its radius and every miss. Handles the cache returned die here.
 void PreviewMeshCache::clear(rhi::IDevice& device) {
-    (void)device;   // meshes live for the device's lifetime; there is no destroyMesh
+    for (const auto& kv : meshes_)
+        if (kv.second) device.destroyMesh(kv.second);
     meshes_.clear();
     radii_.clear();
     missing_.clear();

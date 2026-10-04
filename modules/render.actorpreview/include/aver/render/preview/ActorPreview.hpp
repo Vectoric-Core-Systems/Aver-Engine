@@ -14,6 +14,7 @@
 #include "aver/pbr/MaterialSystem.hpp"
 #endif
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -97,6 +98,13 @@ public:
     const char* name() const override { return "Aver.Render.ActorPreview"; }
 
     void setDrawList(std::vector<PreviewDraw> draws) { draws_ = std::move(draws); }
+    // Drops every draw naming `mesh` (when non-zero) or `materialHandle` (when non-zero), for a caller
+    // about to destroy either.
+    void dropDrawsUsing(rhi::MeshHandle mesh, u32 materialHandle = 0) {
+        draws_.erase(std::remove_if(draws_.begin(), draws_.end(), [&](const PreviewDraw& d) {
+            return (mesh != 0 && d.mesh == mesh) || (materialHandle != 0 && d.materialHandle == materialHandle);
+        }), draws_.end());
+    }
     void setCamera(const PreviewCamera& c) { camera_ = c; }
     PreviewCamera& camera() { return camera_; }
     // Points the camera at the whole draw list.

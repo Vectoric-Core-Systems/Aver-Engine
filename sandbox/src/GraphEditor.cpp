@@ -3794,7 +3794,7 @@ void GraphEditor::buildComponentPreview(Engine& e) {
     }
 
     render::preview::PreviewMeshCache& meshes = sharedPreviewMeshes();
-    meshes.setContentRoot(*e.device(), actorEditorContentRoot());
+    setSharedMeshRoot(*e.device(), actorEditorContentRoot());
 
     std::vector<render::preview::PreviewDraw> draws;
     draws.reserve(graph_.components.size());
@@ -3884,5 +3884,6 @@ std::unique_ptr<AssetEditor> makeGraphEditor(const std::string& path) {
     if (g_graphNodeHits)  ed->setNodeHitSource(g_graphNodeHits);
     return ed;
 }
+
 
 } // namespace aver::editor

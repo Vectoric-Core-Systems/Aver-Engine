@@ -17,7 +17,7 @@
 #include "aver/pbr/MaterialSystem.hpp"
 #endif
 
-namespace aver { class Engine; namespace render::preview { class ActorPreview; class PreviewMeshCache; } }
+namespace aver { class Engine; namespace rhi { class IDevice; } namespace render::preview { class ActorPreview; class PreviewMeshCache; } }
 
 namespace aver::editor {
 
@@ -44,6 +44,18 @@ inline std::string actorTabTitle(const std::string& baseTitle, bool /*dirty*/) {
 render::preview::ActorPreview* sharedPreview(Engine& e);
 // The mesh registry that preview shares, for the same reason.
 render::preview::PreviewMeshCache& sharedPreviewMeshes();
+// Points the shared mesh cache at a content root. A change destroys every cached mesh, so it also
+// empties the preview's draw list and forces live actor views to rebuild.
+void setSharedMeshRoot(rhi::IDevice& device, const std::string& root);
+// The shared preview if one exists right now; never creates it.
+render::preview::ActorPreview* sharedPreviewIfCreated();
+// The device the shared preview state lives on, or null before the first sharedPreview() call and
+// after shutdownActorEditors(). A destructor that frees GPU objects checks this first.
+rhi::IDevice* sharedEditorDevice();
+// Frees the shared preview, its render targets and material textures, and every cached preview mesh.
+// Repeatable: sharedPreview() and the cache recreate lazily on next use. Callers must guarantee no
+// open tab is drawing into the preview (AssetEditorHost does, when the last such tab has closed).
+void releaseActorEditorGpu();
 
 #if AVER_MODULE_PBR
 // THE TEXTURE RESOLVER EVERY ASSET PREVIEW'S MATERIALS GO THROUGH, installed once by the composition
@@ -108,7 +120,8 @@ void setActorEditorLiveByDefault(bool on);
 // Restores the tab's columns to their defaults and persists that.
 void resetActorEditorLayout();
 
-// Releases the shared preview and its meshes. Called before the device goes.
+// releaseActorEditorGpu() for app exit, after which sharedEditorDevice() is null. Called before the
+// device goes.
 void shutdownActorEditors();
 
 } // namespace aver::editor

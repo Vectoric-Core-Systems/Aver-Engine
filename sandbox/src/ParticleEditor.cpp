@@ -553,8 +553,8 @@ void ParticleEditor::drawParams() {
 }
 
 // Draws the live preview into the SAME shared ActorPreview surface Mesh/Actor/Anim/Graph tabs use
-// (sharedPreview(), ActorEditor.hpp) -- one texture, one orbit camera, already torn down by
-// shutdownActorEditors(). See ParticleEditor.hpp's own comment on tickPreview() for the simulation
+// (sharedPreview(), ActorEditor.hpp) -- one texture, one orbit camera, freed with the other
+// tabs' state once the last preview tab closes (releaseActorEditorGpu()). See ParticleEditor.hpp's own comment on tickPreview() for the simulation
 // half; this is the drawing half.
 //
 // VISUAL-ONLY. This was NOT verified against the runtime's actual look -- there is no automated way
@@ -749,11 +749,12 @@ std::unique_ptr<AssetEditor> makeParticleEditor(const std::string& path) {
 //
 // This tab registers NO new rhi::IRenderFeature of its own. Its live preview draws through the SAME
 // shared ActorPreview feature Mesh/Actor/Anim/Graph tabs already use (sharedPreview(),
-// ActorEditor.hpp) -- already released by shutdownActorEditors() -- and its cube geometry through
-// the SAME shared PreviewMeshCache (sharedPreviewMeshes()), likewise already released there. There
-// is therefore nothing device-owned left for this function to release, and no static/global state of
-// this tab's own that outlives a single draw() call either (preview_ and friends are per-instance
-// members, destroyed with their ParticleEditor when its tab closes, well before device teardown).
+// ActorEditor.hpp) and its cube geometry through the SAME shared PreviewMeshCache
+// (sharedPreviewMeshes()); both are freed by releaseActorEditorGpu() (when the last preview tab
+// closes, and at exit via shutdownActorEditors()). There is therefore nothing device-owned left for
+// this function to release, and no static/global state of this tab's own that outlives a single
+// draw() call either (preview_ and friends are per-instance members, destroyed with their
+// ParticleEditor when its tab closes, well before device teardown).
 //
 // WIRED INTO THE SHUTDOWN SITE ANYWAY, beside shutdownActorEditors()/shutdownAnimEditors(), for two
 // reasons. First, the brief for this tab is explicit that a render feature must be unregistered

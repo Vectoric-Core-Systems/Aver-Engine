@@ -7,6 +7,7 @@
 #include "aver/formats/OcMesh.hpp"
 #if AVER_WITH_IMGUI
 #include "ActorEditor.hpp"                                  // sharedPreview
+#include "AnimEditor.hpp"                                   // releaseAnimEditorGpu
 #include "EditorWidgets.hpp"                                 // SplitPane
 #include "PreviewChrome.hpp"                                 // drawPreviewToolbar/Stats/Axes
 #include "aver/render/preview/ActorPreview.hpp"
@@ -122,9 +123,21 @@ void AssetEditorHost::resetFocusedLayout() {
     if (AssetEditor* ed = find(focusedPath_)) ed->resetLayout();
 }
 
+// Frees the shared preview, mesh cache and skinning meshes once no open tab draws into them; the
+// next tab that needs them recreates them lazily.
+void AssetEditorHost::releaseSharedGpuIfIdle() {
+#if AVER_WITH_IMGUI
+    for (const auto& ed : editors_)
+        if (ed->usesSharedPreview()) return;
+    releaseActorEditorGpu();
+    releaseAnimEditorGpu();
+#endif
+}
+
 // Draws every open editor window and destroys the ones the user closed. True if any remain.
 bool AssetEditorHost::draw(Engine& e, unsigned dockInto, float dpi) {
 #if AVER_WITH_IMGUI
+    if (releasePending_) { releasePending_ = false; releaseSharedGpuIfIdle(); }
     if (editors_.empty()) return false;
     closing_.clear();
 
@@ -165,6 +178,7 @@ bool AssetEditorHost::draw(Engine& e, unsigned dockInto, float dpi) {
             continue;
         }
         editors_.erase(editors_.begin() + static_cast<isize>(closing_[k]));
+        releasePending_ = true;
     }
 
     drawClosePrompt(dpi);
@@ -205,6 +219,7 @@ void AssetEditorHost::drawClosePrompt(float dpi) {
         for (usize i = 0; i < editors_.size(); ++i) {
             if (editors_[i]->path() != closeAskPath_) continue;
             editors_.erase(editors_.begin() + static_cast<isize>(i));
+            releasePending_ = true;
             break;
         }
         closeAskPath_.clear();
@@ -280,6 +295,21 @@ public:
         if (!fmt::loadOcMesh(path_, mesh_, &error_)) loaded_ = false;
         else                                        loaded_ = true;
     }
+
+#if AVER_WITH_IMGUI
+    // Destroys the preview upload. sharedEditorDevice() is null once the app is shutting down, when
+    // the device reclaims it anyway.
+    ~MeshEditor() override {
+        if (!gpuMesh_) return;
+        rhi::IDevice* dev = editor::sharedEditorDevice();
+        if (!dev) return;
+        if (render::preview::ActorPreview* preview = editor::sharedPreviewIfCreated())
+            preview->dropDrawsUsing(gpuMesh_);
+        dev->destroyMesh(gpuMesh_);
+    }
+#endif
+
+    bool usesSharedPreview() const override { return true; }
 
     const std::string& path() const override { return path_; }
 

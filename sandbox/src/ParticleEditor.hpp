@@ -61,6 +61,7 @@ public:
     const std::string& path() const override { return path_; }
     std::string title() const override;
     bool dirty() const override { return dirty_; }
+    bool usesSharedPreview() const override { return true; }
     void draw(Engine& e) override;
     bool save(std::string* why) override;
     void onFileChanged() override;
@@ -185,7 +186,8 @@ std::unique_ptr<AssetEditor> makeParticleEditor(const std::string& path);
 
 // Releases whatever this editor registered with the render device, before the device goes. Called
 // from the single shutdown site in SandboxApp::onShutdown, beside shutdownActorEditors()/
-// shutdownAnimEditors() -- see the .cpp for why this is a deliberate no-op today, kept for the same
+// shutdownAnimEditors() -- see the .cpp for why this is a deliberate no-op today (the shared preview
+// and mesh cache it draws through are released by the other two), kept for the same
 // reason those two exist at all: AnimEditor.cpp:1263-1276 documents what skipping this looks like
 // (a clean exit that access-violates AFTER the last frame rendered correctly) for the shape this tab
 // would take on the day it stops being one.

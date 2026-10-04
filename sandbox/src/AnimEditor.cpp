@@ -52,6 +52,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <unordered_map>
 
 namespace aver::editor {
 namespace {
@@ -189,11 +190,30 @@ public:
     }
 
     void shutdown() {
-        if (gpu_.valid()) pass_.destroyMesh(gpu_);
-        gpu_ = {};
+        releaseMeshes();
         pass_.shutdown();
         ready_ = false;
+        dev_ = nullptr;
+        meshPath_.clear();
+        boneCount_ = 0;
+    }
+
+    // Frees the skinning buffers and both meshes. The draw mesh goes first: it shares the source's
+    // index buffer, so the device refuses the source while it lives. A caller still drawing drawMesh()
+    // must drop that draw first.
+    void releaseMeshes() {
+        if (gpu_.valid()) pass_.destroyMesh(gpu_);
+        gpu_ = {};
+        if (dev_) {
+            if (drawMesh_) dev_->destroyMesh(drawMesh_);
+            if (source_)   dev_->destroyMesh(source_);
+        }
         drawMesh_ = 0;
+        source_ = 0;
+        vertexCount_ = 0;
+        triangleCount_ = 0;
+        meshPath_.clear();
+        slot0Material_.clear();
     }
 
     bool ready() const { return ready_; }
@@ -213,11 +233,10 @@ public:
         if (!ready_) return false;
         if (meshPath == meshPath_ && gpu_.valid() && boneCount == boneCount_) return true;
 
-        if (gpu_.valid()) pass_.destroyMesh(gpu_);
-        gpu_ = {};
-        drawMesh_ = 0;
-        vertexCount_ = 0;
-        triangleCount_ = 0;
+        // The preview may still list the old draw mesh; drop it before it dies.
+        if (drawMesh_)
+            if (render::preview::ActorPreview* p = sharedPreviewIfCreated()) p->dropDrawsUsing(drawMesh_);
+        releaseMeshes();
         meshPath_ = meshPath;
         boneCount_ = boneCount;
         // Cleared here, not only on success: a partial rebind failure (no skin streams, a truncated
@@ -259,16 +278,15 @@ public:
             verts0[i].u  = md.uvs[i * 2 + 0];
             verts0[i].v  = md.uvs[i * 2 + 1];
         }
-        const rhi::MeshHandle source = dev.createMesh(verts0.data(), static_cast<u32>(vcount),
-                                                       md.indices.data(),
-                                                       static_cast<u32>(md.indices.size()));
-        if (!source) return false;
+        source_ = dev.createMesh(verts0.data(), static_cast<u32>(vcount),
+                                 md.indices.data(), static_cast<u32>(md.indices.size()));
+        if (!source_) return false;
         rhi::BufferHandle verts = 0;
         // Draw handle whose vertex buffer IS the skin target: the preview rasterises posed vertices
         // directly, no second copy.
-        drawMesh_ = dev.createSkinTargetMesh(source, &verts);
-        if (!drawMesh_ || !verts) { drawMesh_ = 0; return false; }
-        if (!pass_.createMesh(md, boneCount, gpu_, verts)) { drawMesh_ = 0; return false; }
+        drawMesh_ = dev.createSkinTargetMesh(source_, &verts);
+        if (!drawMesh_ || !verts) { releaseMeshes(); return false; }
+        if (!pass_.createMesh(md, boneCount, gpu_, verts)) { releaseMeshes(); return false; }
 
         // Bounds radius for frameAll, from the rest mesh -- posed mesh doesn't move enough to matter,
         // and per-frame GPU readback isn't available anyway.
@@ -304,6 +322,7 @@ private:
     render::SkinningPass    pass_;
     render::SkinnedMeshGpu  gpu_;
     rhi::MeshHandle         drawMesh_ = 0;
+    rhi::MeshHandle         source_ = 0;   // drawMesh_'s rest mesh; shares indices, so freed after it
     std::string             meshPath_;
     u32                     boneCount_ = 0;
     u32                     vertexCount_ = 0, triangleCount_ = 0;
@@ -315,6 +334,7 @@ private:
 
 AnimSkinFeature g_skin;
 bool g_skinTried = false;
+u32 g_animTabs = 0;   // open AnimEditor tabs; the last to close frees the skinned mesh
 
 // Created and registered once, before the shared preview (ordering reason in AnimSkinFeature's
 // comment). Shared rather than per-tab, matching sharedPreview(): two anim tabs already share one
@@ -374,6 +394,31 @@ std::vector<BoneColor> computeAnimEditorBonePalette(const fmt::OcSkeleton& skele
 }
 
 #if AVER_MODULE_PBR
+// Materials this editor created itself (as opposed to found already in the library), with how many
+// open anim tabs hold each. The last holder to let go destroys the material.
+std::unordered_map<pbr::MaterialHandle, u32> g_ownedMaterials;
+
+pbr::MaterialHandle createOwnedMaterial(const pbr::MaterialDesc& desc) {
+    const pbr::MaterialHandle h = pbr::MaterialLibrary::get().create(desc);
+    if (h) g_ownedMaterials[h] = 0;
+    return h;
+}
+
+// Takes a share of `h`; a no-op for a material this editor did not create.
+void holdOwnedMaterial(pbr::MaterialHandle h) {
+    const auto it = g_ownedMaterials.find(h);
+    if (it != g_ownedMaterials.end()) ++it->second;
+}
+
+// Drops a share of `h`, destroying it when the last goes. Skipped once the editor is shutting down.
+void releaseOwnedMaterial(pbr::MaterialHandle h) {
+    const auto it = g_ownedMaterials.find(h);
+    if (it == g_ownedMaterials.end()) return;
+    if (it->second > 0 && --it->second > 0) return;
+    g_ownedMaterials.erase(it);
+    if (sharedEditorDevice()) pbr::MaterialLibrary::get().destroy(h);
+}
+
 // Everything resolvePreviewMaterial hands buildPreview: the graph id PreviewDraw::materialGraphId
 // wants, the real pbr::MaterialHandle PreviewDraw::materialHandle wants (else the preview shades
 // white), and a status sentence -- always set -- logged once (buildPreview's materialTried_ latch
@@ -463,7 +508,7 @@ PreviewMaterialResolution resolvePreviewMaterial(const std::string& binariesDir,
 
     if (extras.graphRef.empty()) {
         // Ordinary material -- not one of the four failures (see top comment).
-        if (!r.handle) r.handle = pbr::MaterialLibrary::get().create(desc);
+        if (!r.handle) r.handle = createOwnedMaterial(desc);
         if (!r.handle) {
             r.failed = true;
             r.status = "material '" + name + "' parsed but MaterialLibrary is full";
@@ -505,7 +550,7 @@ PreviewMaterialResolution resolvePreviewMaterial(const std::string& binariesDir,
     // `default: break` arm) but factors/textures still reach the mesh through `handle` -- same rule as
     // GameContent::materialForSurface.
     desc.graphId = graphId;
-    if (!r.handle) r.handle = pbr::MaterialLibrary::get().create(desc);
+    if (!r.handle) r.handle = createOwnedMaterial(desc);
     r.graphId = graphId;
     r.failed = graphBroken || !r.handle;
     if (!r.handle) {
@@ -524,7 +569,26 @@ public:
     AnimEditor(std::string path, fmt::OcAnimation clip, fmt::OcSkeleton skel, bool isClip,
                 std::string skelPath = {})
         : path_(std::move(path)), skelPath_(std::move(skelPath)), clip_(std::move(clip)),
-          skel_(std::move(skel)), isClip_(isClip) {}
+          skel_(std::move(skel)), isClip_(isClip) { ++g_animTabs; }
+
+    // Frees what this tab put on the GPU: its material share and, for the last anim tab, the skinned
+    // mesh. Drops the preview's draws of both first. Skipped while the app is shutting down
+    // (shutdownAnimEditors has already freed it, and sharedEditorDevice() is null).
+    ~AnimEditor() override {
+        const bool lastTab = --g_animTabs == 0;
+        if (!sharedEditorDevice()) return;
+        render::preview::ActorPreview* preview = sharedPreviewIfCreated();
+#if AVER_MODULE_PBR
+        if (preview && materialHandle_) preview->dropDrawsUsing(0, materialHandle_);
+        releaseOwnedMaterial(materialHandle_);
+#endif
+        if (lastTab) {
+            if (preview && g_skin.drawMesh()) preview->dropDrawsUsing(g_skin.drawMesh());
+            g_skin.releaseMeshes();
+        }
+    }
+
+    bool usesSharedPreview() const override { return true; }
 
     const std::string& path() const override { return path_; }
     std::string title() const override { return std::filesystem::path(path_).filename().string(); }
@@ -999,7 +1063,7 @@ void AnimEditor::buildPreview(Engine& e) {
     }
 
     render::preview::PreviewMeshCache& meshes = sharedPreviewMeshes();
-    meshes.setContentRoot(*e.device(), g_contentRoot);
+    setSharedMeshRoot(*e.device(), g_contentRoot);
     f32 radius = 1.0f;
     const rhi::MeshHandle cube = meshes.resolve(*e.device(), "Meshes/cube.ocmesh", &radius);
     if (!cube) return;
@@ -1054,6 +1118,8 @@ void AnimEditor::buildPreview(Engine& e) {
             const std::string binariesDir =
                 std::filesystem::path(g_contentRoot).parent_path().string() + "\\Binaries";
             const PreviewMaterialResolution res = resolvePreviewMaterial(binariesDir, g_contentRoot, slot0);
+            holdOwnedMaterial(res.handle);   // before releasing the old one: it may be the same handle
+            releaseOwnedMaterial(materialHandle_);
             materialGraphId_ = res.graphId;
             materialHandle_ = res.handle;
             materialStatus_ = res.status;
@@ -2766,12 +2832,14 @@ void setAnimEditorContentRoot(std::string root) { g_contentRoot = std::move(root
 // Missing this crashed on exit (access violation after the last frame, screen correct but process
 // dead): addRenderFeature holds the feature non-owning, same as ActorEditor's shared preview, so
 // something must remove it -- sharedPreview always did; this feature simply hadn't.
-void shutdownAnimEditors() {
+void releaseAnimEditorGpu() {
     if (g_skinDevice) g_skinDevice->removeRenderFeature(&g_skin);
     g_skinDevice = nullptr;
     g_skin.shutdown();
     g_skinTried = false;
 }
+
+void shutdownAnimEditors() { releaseAnimEditorGpu(); }
 
 std::unique_ptr<AssetEditor> makeAnimEditor(const std::string& path) {
     const std::string ext = std::filesystem::path(path).extension().string();

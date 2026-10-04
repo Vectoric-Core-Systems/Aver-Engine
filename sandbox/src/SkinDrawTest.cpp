@@ -134,8 +134,8 @@ bool SkinDrawTest::init(rhi::IDevice& dev) {
 void SkinDrawTest::shutdown() {
     pass_.destroyMesh(gpu_);
     pass_.shutdown();
-    // The meshes are not released: the RHI has no destroyMesh, which is a known and recorded gap.
-    // Three meshes for the life of a test run is not what makes that worth fixing.
+    // The meshes are not released although IDevice::destroyMesh exists now: this is a short test
+    // run, and a skin target must be destroyed before its source.
     rest_ = skinned_ = ground_ = 0;
     vertices_ = 0;
     step_ = 0;

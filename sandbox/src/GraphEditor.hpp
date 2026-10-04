@@ -59,6 +59,7 @@ public:
     const std::string& path() const override { return path_; }
     std::string title() const override;
     bool dirty() const override { return dirty_; }
+    bool usesSharedPreview() const override { return true; }
     void draw(Engine& e) override;
     bool save(std::string* why) override;
     void onFileChanged() override;

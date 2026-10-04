@@ -30,6 +30,10 @@ public:
     // Draws the editor's contents into a window the host has already begun.
     virtual void draw(Engine& e) = 0;
 
+    // True when this tab draws into the shared ActorPreview (sharedPreview()). The host frees the
+    // shared GPU state once no open tab says so.
+    virtual bool usesSharedPreview() const { return false; }
+
     // Restores this tab's own panel layout to its defaults (column widths and the like). Default is
     // a no-op, for editors with nothing to reset. "Reset Tab Layout" (SandboxApp.cpp's Window menu)
     // routes through AssetEditorHost::resetFocusedLayout(), which calls this on whichever editor is
@@ -108,7 +112,12 @@ private:
     // applied to closeAskPath_ itself.
     void drawClosePrompt(float dpi);
 
+    // Frees the shared preview GPU state if no open editor uses it. Run a frame after the last user
+    // closed (releasePending_), so the closed tab's image is no longer in flight.
+    void releaseSharedGpuIfIdle();
+
     std::vector<AssetEditorFactory> factories_;
+    bool releasePending_ = false;
     std::vector<std::unique_ptr<AssetEditor>> editors_;
     std::string focusRequest_;          // path to bring forward on the next draw
     std::vector<usize> closing_;        // deferred: an editor must not be destroyed mid-draw

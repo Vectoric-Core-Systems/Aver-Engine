@@ -18,7 +18,7 @@ void appendPreviewUnitBox(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx
 // Resolves designer-file mesh paths to mesh handles, keyed by canonical path.
 class PreviewMeshCache {
 public:
-    // Sets the content root every mesh path is relative to. Clears the cache when it changes.
+    // Sets the content root every mesh path is relative to. Clears (destroys) the cache when it changes.
     void setContentRoot(rhi::IDevice& device, std::string root);
     const std::string& contentRoot() const { return root_; }
 
@@ -59,7 +59,9 @@ public:
     // Every path that failed to resolve, canonical form, in first-asked order.
     const std::vector<std::string>& missing() const { return missing_; }
 
-    // Forgets every cached mesh, radius and miss.
+    // Destroys every cached mesh and forgets its radius and every miss. A caller must not draw a
+    // handle this returned before the clear.
+    // TODO: capsule()/generated() keys only ever accumulate (one per size) until clear().
     void clear(rhi::IDevice& device);
     usize loaded() const { return loaded_; }
 
