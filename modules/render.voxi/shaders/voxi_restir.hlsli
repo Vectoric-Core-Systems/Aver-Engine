@@ -605,6 +605,7 @@ GiReservoir giSpatioTemporalReuse(float2 pixel, GiSurface surface, float3 screen
     [unroll] for (uint z = 0u; z < kStreams; ++z) { tapPx[z] = int2(0, 0); tapM[z] = 0u; }
 
     GiReservoir selected = giEmptyReservoir();
+    GiReservoir counted  = giEmptyReservoir();   // any domain that counts, for a zero-weight result
     uint  selStream = 0u;        // 0 none, 1 fresh, 2 + slot for a reused tap
     float weightSum = 0.0;
     uint  mTotal    = 0u;
@@ -650,14 +651,16 @@ GiReservoir giSpatioTemporalReuse(float2 pixel, GiSurface surface, float3 screen
             }
 
             GiReservoir nb = giLoadReservoir(uint2(px), prevSlice);
-            if (!giIsValidReservoir(nb)) continue;
+            // An aged-out sample leaves its domain absent, as an empty one (counting it while offering
+            // nothing darkened temporal reuse 13%: the samples that live longest are the bright ones).
+            if (!giIsValidReservoir(nb) || nb.age >= rp.maxAge) continue;
             nb.M = min(nb.M, rp.maxHistory);
-            // The domain counts in the normalisation whatever happens to its own sample (dropping it
-            // when its sample fails would shrink the denominator and brighten the result).
+            // From here the domain counts in the normalisation whatever its own sample does: a shift
+            // this receiver rejects is outside that domain's support, not an absence.
             tapPx[k] = px;
             tapM[k]  = nb.M;
             mTotal  += nb.M;
-            if (nb.age >= rp.maxAge) continue;
+            counted  = nb;
             const float jacobian = giReconnectionJacobian(surface.worldPos, ns.worldPos, nb.position, nb.normal);
             if (!giAcceptJacobian(jacobian)) continue;
 
@@ -670,7 +673,15 @@ GiReservoir giSpatioTemporalReuse(float2 pixel, GiSurface surface, float3 screen
         }
     }
 
-    if (selStream == 0u) return giEmptyReservoir();
+    // Domains counted but none offered a sample (all zero-weight or rejected): the result is present
+    // with W = 0, not empty -- an empty one would drop out of next frame's normalisation (see the store).
+    if (selStream == 0u) {
+        if (mTotal == 0u) return giEmptyReservoir();
+        counted.W   = 0.0;
+        counted.M   = mTotal;
+        counted.age = counted.age + 1u;
+        return counted;
+    }
 
     // Normalise: every domain's target for the winner, shifted into this receiver's measure (Jacobian
     // included), zero where the winner could not have come from that domain. This pixel's own domain
@@ -800,8 +811,11 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // Override the motion discount via spatialSamples (see Settings::giRestirSpatialSamples).
         if (spatialSamples != 15u)
             reuse.numSamples = min(spatialSamples, GI_RESTIR_MAX_SPATIAL);
-        // Reconstructed forces temporal-only (U1, 2.10 C).
-        if (f3Path == 1u) reuse.numSamples = 0u;
+        // Spatial reuse only where this pixel traces the F3 visibility ray: a pixel that cannot check a
+        // neighbour's sample from here (reconstructed, half-rate untraced, checkerboard-skipped, no-ray)
+        // would store it unchecked, and the next frame's normalisation would count a domain that never
+        // saw it -- light leaks and brightens. Those pixels keep temporal reuse (their own surface).
+        if (f3Path != 3u) reuse.numSamples = 0u;
         // Pixels that trace visibility (F3) also trace their spatial neighbours' view of the winner.
         reuse.domainVisibility = f3Path == 3u;
 
@@ -814,7 +828,9 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     const bool nonFiniteWeight  = isnan(result.W) || isinf(result.W);
     const bool nonFiniteRad     = any(isnan(result.radiance)) || any(isinf(result.radiance));
     const bool giPoisonStoreHit = nonFiniteWeight || nonFiniteRad;
-    if (corpseWeight || giPoisonStoreHit) result = giEmptyReservoir();
+    // Non-finite is emptied; a zero weight stays present at W = 0 (the reuse pass's normalisation needs it).
+    if (giPoisonStoreHit) result = giEmptyReservoir();
+    else if (corpseWeight) result.W = 0.0;
     // The reservoir is stored below, after F3's visibility ray: a reused sample found blocked from here
     // must not keep spreading through next frame's reuse.
     bool reusedBlocked = false;
@@ -845,7 +861,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // Skips the ray when not needed (fresh or degenerate sample); one ray per reuse.
         float visF3 = 1.0; bool f3Observed = false;
         const bool reused = !(freshValid && all(result.position == freshPos)) && dist2 > 1e-8;
-        if (((uint)gAmbientParams.z & 8u) == 0u && f3Path == 3u &&
+        if (((uint)gAmbientParams.z & 8u) == 0u && f3Path == 3u && result.W > 0.0 &&
             !(freshValid && all(result.position == freshPos)) && dist2 > 1e-8) {
             const float dist = sqrt(dist2);
             const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
@@ -890,9 +906,12 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
                                      : min(estNonNeg, AVER_VOX_MAXRAD);
     }
     // W6/M5: gAverHistoryWrite gates the reservoir store (blended fragments don't write here).
+    // A reused sample found blocked is stored with W = 0, not emptied: its weight already counted that
+    // outcome as zero, so the domain must stay in next frame's normalisation (emptying it dropped the
+    // domain and over-weighted the rest: spatial reuse read +60% GI). W = 0 also keeps it from spreading.
     if (gAverHistoryWrite) {
         GiReservoir stored = result;
-        if (reusedBlocked) stored = giEmptyReservoir();
+        if (reusedBlocked) stored.W = 0.0;
         giStoreReservoir(stored, pixelPos, writeSlice);
     }
 
@@ -947,11 +966,14 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         }
     }
     if (gAverHistoryWrite && gw > 0u && gh > 0u) {
-        // Disoccluded: this frame's own estimate, not the old texel (another surface's light).
+        // Disoccluded: this frame's own estimate, not the old texel (another surface's light). A pixel
+        // that wrote no estimate this frame (half-rate skipped) has none: it takes the denoiser's own
+        // reconstruction at this pixel instead (outDiffuse there is zero or temporal-only).
+        const float3 own = giDenoiseInWrite ? outDiffuse : gDenoisedGi.Load(int3(pixelPos, 0)).rgb;
         float3 denoised;
         if (!denoisedReproject)        denoised = gDenoisedGi.Load(int3(pixelPos, 0)).rgb;   // legacy
-        else if (denoisedWsum > 1e-3)  denoised = lerp(outDiffuse, denoisedSum / denoisedWsum, saturate(denoisedWsum * 2.0));
-        else                           denoised = outDiffuse;
+        else if (denoisedWsum > 1e-3)  denoised = lerp(own, denoisedSum / denoisedWsum, saturate(denoisedWsum * 2.0));
+        else                           denoised = own;
         // Guard denoiser output: it is not trusted to be finite/bounded.
         giPoisonDenoisedHit = any(isnan(denoised)) || any(isinf(denoised));
         // Below zero: pull toward grey by the minimum amount that brings every channel >= 0.

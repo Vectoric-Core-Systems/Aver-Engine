@@ -129,8 +129,8 @@ struct Settings {
 
     // ---- ReSTIR GI spatial reuse control: pin the tap count or disable spatial reuse ----
     // 15 = AUTO (2 taps at rest, fewer in motion). 0 disables spatial reuse. 1..8 pin the tap count.
-    // DEFAULT 0: measured on NeonDistrict Day (denoiser off) spatial reuse still reads +9.7% bright and
-    // no less noisy, where temporal-only reuse is +1.1% and 37% less noisy.
+    // DEFAULT 0 until checked with the denoiser on. GI-only, linear, NeonDistrict Day, denoiser off: two taps read
+    // 1.60x the no-reuse GI before the blocked-sample and age fixes, 0.93x after (temporal-only 0.92x).
     u32 giRestirSpatialSamples = 0;
 
     // ---- ReSTIR GI history weighting: cap on the M a reused reservoir carries into the combine ----
