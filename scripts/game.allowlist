@@ -1,0 +1,145 @@
+# What a PACKAGED GAME contains, one path per line, `?AVER_MODULE_X` to make a line conditional.
+#
+# Read by scripts/stage-game.ps1. Sibling of payload.allowlist, and the differences between the two
+# files are the whole point: that one stages the ENGINE for a developer, this one stages a GAME for
+# a player. Anything a player cannot use is absent here, and its absence is deliberate rather than
+# an oversight, so each omission is written down below.
+#
+# THE RULE THIS FILE EXISTS TO ENFORCE is that a package contains what it needs and nothing else. An
+# allowlist rather than a denylist for the obvious reason: a new build artefact appearing in bin/
+# must not silently start shipping to players.
+#
+# Conditions are checked BOTH WAYS by the staging script. An option that is ON must match at least
+# one file, and an option that is OFF must match none -- the second half is what catches a
+# reconfigured Ninja tree still holding the previous configure's DLL.
+
+[bin]
+# The game runtime. NOT Sandbox.exe: that is the editor, and it is the single most important thing
+# this file leaves out. "Aver Engine Runtime" in Task Manager (Runtime/host/AverEngineRuntime.rc).
+AverEngineRuntime.exe
+
+# The crash reporter, and its absence here was a real hole rather than a judgement call.
+#
+# Runtime/host/RuntimeMain.cpp calls crash::install() as the FIRST statement of main(), exactly as the
+# editor does. On a crash it writes the whole folder -- minidump, CrashContext.runtime-xml with a
+# symbolicated stack, and the log ring -- and then spawns AverCrashReporter.exe to show it. That exe
+# was never staged, so a shipped game did all of that work and then launched a file that was not
+# there: the player saw the process vanish with no window, no message, and no idea a report existed
+# on their disk.
+#
+# It links nothing from the engine (see tools/AverCrashReporter.cpp) and is built unconditionally, so
+# there is no module condition to attach and nothing for it to drag in.
+AverCrashReporter.exe
+
+# Engine modules. Same set as the engine payload minus the editor-only ones.
+Aver.UI.Abi.dll
+Aver.Render.PBR.dll   ?AVER_MODULE_PBR
+Aver.Render.Voxi.dll  ?AVER_MODULE_VOXI
+Aver.Scene.dll        ?AVER_MODULE_SCENE
+Aver.Framework.dll    ?AVER_MODULE_FRAMEWORK
+Aver.Physics.dll      ?AVER_MODULE_PHYSICS
+
+# The audio seam. THIS LINE WAS A "DELIBERATELY ABSENT" NOTE, and the note went stale: it said the DLL
+# had zero callers, no DllImport named it and it sat in no import table. All three stopped being true
+# -- Runtime/CMakeLists.txt links Aver.Audio.Abi into the runtime, GameApp.cpp calls aver_audio_init(),
+# and scripting/csharp/Aver.Framework/Audio.cs P/Invokes it -- while the exclusion stayed, so a package
+# built from a tree with the seam would name a DLL in its import table that staging refused to copy.
+# Unconditional, like payload.allowlist's entry: the top-level CMakeLists adds modules/audio.abi in
+# every edition.
+Aver.Audio.Abi.dll
+
+# The settings seam, missing for the one reason this file's safety net cannot cover.
+#
+# NOTHING NATIVE LINKS IT. Search the CMakeLists files for Aver.Settings and the only consumers are
+# the module itself (modules/settings/CMakeLists.txt:7, SHARED, output into bin) and tests/settings,
+# which a package never contains -- so the name appears in no staged binary's import directory. The
+# only caller is MANAGED: scripting/csharp/Aver.Framework/Native.cs:243 declares
+# `Lib = "Aver.Settings"` and :248-276 import fourteen aver_settings_* entry points through it. A
+# DllImport is a string the CLR resolves at first call, not a PE import-table entry, so refusal 8b
+# -- the import-closure walk that is the only thing standing between this file and a package that
+# names a DLL it did not copy -- is structurally blind to it. stage-game.ps1:592 says as much in its
+# own log line, "managed assemblies have none". That is why this entry argues rather than just
+# naming a file: the next managed-only dependency goes missing exactly the same way, and the check
+# that caught Aver.Audio.Abi above cannot be the one that catches it.
+#
+# WHAT A PLAYER WOULD HAVE SEEN, and why nobody would have looked here. Runtime/src/GameApp.cpp:1314
+# builds a settings path unconditionally -- userDataDir() plus the project name plus Settings.ini --
+# and hands it to configureInput at :1317, so HostBridge.cs:440 calls Settings.Open on EVERY launch
+# of a scripted game. That is the first P/Invoke into the absent DLL. The DllNotFoundException is
+# swallowed by ConfigureInput's own catch (HostBridge.cs:461-464), which returns -1, and
+# GameApp.cpp:1328 reports that as "input scheme '<path>' failed to load". So every rebindable
+# action dies at startup and the message blames the .ocinput file, which is present and correct.
+# The editor takes the same route at Play (sandbox/src/SandboxPlay.cpp:168-169), which is why
+# payload.allowlist grew this entry in the same change.
+#
+# UNCONDITIONAL, and it cannot be otherwise. The top-level CMakeLists.txt:242 adds modules/settings
+# beside core and platform with no switch over it -- "a game with no scene still has settings" --
+# so there is no AVER_MODULE_SETTINGS in CMakeCache.txt to gate on, and stage-game.ps1:320 refuses
+# outright any condition the cache does not mention. Gating it on AVER_MODULE_SCRIPTING, the option
+# that actually decides whether the managed caller ships, would be worse than useless: the DLL is
+# built in every edition regardless, so a scripting-off tree would trip the OFF half of the
+# both-ways check and refuse a package that was fine.
+Aver.Settings.dll
+
+# Runtime redistributables. HLSL is compiled on the fly, so the shader compiler ships; dxil.dll is
+# the signing library without which drivers reject the compiled shaders.
+dxcompiler.dll
+dxil.dll
+nethost.dll
+
+# THE HLSL ITSELF -- the other half of dxcompiler.dll above, which this file shipped without.
+#
+# FOUND BY THE DIVERGENCE GATE, on its first real run, and it is worth recording how because the
+# symptom points somewhere else entirely. A staged game reported:
+#
+#     [ERROR] [RHI.D3D12] VSMain (vs_6_0): error: missing entry point definition
+#     [TRACE] [RHI]       backend D3D12 unavailable, trying next
+#     [WARN ]             device created (backend=Null)
+#
+# ...then refused every mesh and loaded 16 entities where the editor loaded 20. That reads like a
+# shader bug, or a driver problem, or a broken level. It is a packaging bug: the engine's shaders
+# are not compiled into the executable -- rhi::shaderFile() reads them from <executableDir>\shaders
+# at pipeline-build time -- so this package shipped the HLSL COMPILER and no HLSL, and a missing
+# shader file is deliberately non-fatal (shaderFile() logs, caches an empty string, returns it).
+#
+# payload.allowlist grew this same entry for the same reason, with a comment saying the payload "had
+# been shipping none of them". THIS file was deleted before that migration finished and restored
+# after it, so it arrived carrying the identical hole.
+#
+# Recursive, and deliberately not a list of names: every module that calls aver_deploy_shaders copies
+# into one flat directory, so naming files individually would silently drop the next module's shader
+# the day it is added.
+shaders/**
+
+# TRAINED NETWORKS the engine ships with (modules/render.neurafi/CMakeLists.txt deploys them to bin/data).
+# NeuraFI's frame-interpolation weights live here: without this line a package would load nothing and
+# every user would start from the procedural quadratic until they trained their own. A pattern matching
+# nothing is an error, which is the assertion wanted -- a build that lost its weights must not ship.
+data/**
+
+# DELIBERATELY ABSENT from [bin]:
+#   Roboto-*.ttf        -- loaded only by SandboxApp's ImGui font setup. A game has no ImGui.
+#   splash.png, logo.png, compile-status.png, file-icons.png, folder-icons.png, asset-icons.png
+#                       -- editor chrome. The compile-status sprite sheet is for a button that
+#                          only exists in the editor.
+#   Tools/**            -- avermatc, averdesign, Microsoft.CodeAnalysis*.dll and 26 localisation
+#                          satellites, about 10 MB. A shipped game has no reason to carry a C#
+#                          compiler. payload.allowlist gates these on ?AVER_MODULE_PBR, so a game
+#                          payload that reused that file would ship all of it for nothing.
+
+[scripting]
+# The managed bridge and the contract assemblies a project's scripts were compiled against. The
+# script DLLs themselves are the PROJECT's and are staged from the project, not from here.
+Scripting/**   ?AVER_MODULE_SCRIPTING
+
+[crt]
+# The Visual C++ runtime, resolved and staged by the script rather than copied from the build tree,
+# because it is not in the build tree. Listed here so the file is a complete inventory of what a
+# package contains, and so an audit does not have to read PowerShell to find out.
+#
+# These ship with Visual Studio and NOT with Windows -- only the UCRT (api-ms-win-crt-*) is part of
+# the OS. 36 of 69 native binaries in a Release tree import them. A package without them does not
+# start on a clean machine.
+msvcp140.dll
+vcruntime140.dll
+vcruntime140_1.dll

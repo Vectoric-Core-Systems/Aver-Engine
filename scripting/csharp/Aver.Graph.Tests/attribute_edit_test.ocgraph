@@ -1,0 +1,22 @@
+OCGRAPH 1
+NAME AttributeEditTest
+DESCRIPTION Gap B fixture: the C++ editor adds class= to 'sp' below; this exact saved file is then parsed and compiled by the C# runtime, unedited
+
+NODE tick OnTick 0 0
+NODE cx ConstFloat 200 0
+NODE cy ConstFloat 200 100
+NODE cz ConstFloat 200 200
+NODE sp Spawn 400 100 debugLabel=spawn_test_marker
+
+PIN cx value out float 1
+PIN cy value out float 2
+PIN cz value out float 3
+
+LINK tick.exec sp.exec
+LINK cx.value sp.x
+LINK cy.value sp.y
+LINK cz.value sp.z
+
+ENTRY tick OnTick
+
+OUT sp entity

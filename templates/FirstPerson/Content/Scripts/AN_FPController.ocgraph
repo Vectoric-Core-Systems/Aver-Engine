@@ -1,0 +1,25 @@
+OCGRAPH 1
+DOMAIN gameplay
+# THE PLAYER CONTROLLER, and it is deliberately empty.
+#
+# WHY IT HAS TO EXIST AT ALL. aver_fw_begin_play possesses a pawn only when it has BOTH a controller
+# and a pawn ("if (ctrl && pawn)"), and the engine's built-in `PlayerController` class is ABSTRACT --
+# aver_fw_spawn refuses an abstract class outright. So a GameMode that named a pawn and no controller
+# spawned the pawn, never possessed it, and left GameApp's camera following nothing: that camera
+# follows aver_fw_controlled_pawn() and returns early when there is none, which is why the whole
+# project rendered from a default camera no matter what `view=firstperson` said.
+#
+# A graph can supply the missing concrete class with no C# at all, because ABSTRACT is deliberately
+# NOT inherited (FrameworkAbi.cpp's kInheritableKindFlags leaves it out, while the CONTROLLER bit is
+# in): a class parented to PlayerController is spawnable AND still carries the flag possession checks
+# for. This is the same thing a Blueprint subclass of APlayerController is, and it needs no more
+# content than this to do its job.
+#
+# NOTHING ELSE BELONGS HERE YET. Input is polled by the character itself (MoveAxis/MouseDelta/InputKey
+# read the device directly, not through a controller), so there is no input routing for this file to
+# own. Give it an OnTick and some VARs when you want per-player state that should outlive the pawn --
+# a score that survives respawning is the usual first reason.
+NAME FPController
+DESCRIPTION The player controller. Empty on purpose -- it exists so the GameMode has something concrete to possess with.
+
+CLASS AN_FPController PlayerController

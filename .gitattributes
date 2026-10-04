@@ -1,0 +1,20 @@
+# Line endings for files whose BYTES are compared, not just their text.
+#
+# WHY THIS FILE EXISTS. This machine has core.autocrlf=true set globally. That is fine for source --
+# the compiler does not care -- but this repository has fixtures that are checked with a BYTE
+# comparison, because that is the only way to catch two implementations of a format drifting apart
+# (see OcGraph.hpp's own account of the C++ and C# readers silently disagreeing about what a graph
+# returns). autocrlf rewrites those fixtures on checkout, so the bytes on disk stop matching the
+# bytes in the object database and the comparison fails for a reason that has nothing to do with the
+# code.
+#
+# It showed up as a phantom: a fresh `git worktree add` got CRLF copies (632 bytes) while the
+# original checkout still held the LF blob (605 bytes), so OcGraphTest and GraphEditorLoadSaveTest
+# failed in the worktree and passed in the main tree, on identical source. Half an hour of an
+# adversarial reviewer's time went into proving that was an artifact rather than a regression.
+#
+# Pinning the format fixtures to LF makes the byte comparison mean what it says everywhere.
+*.ocgraph  text eol=lf
+*.ocmat    text eol=lf
+*.ocmap    text eol=lf
+*.ocproject text eol=lf

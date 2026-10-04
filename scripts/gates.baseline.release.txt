@@ -1,0 +1,211 @@
+﻿# The oracle's expected raw 8-bit probe codes for the RELEASE build, one line per
+# (configuration | gate | r,g,b). Read by scripts/gates.ps1 -Release.
+#
+# WHY THIS FILE EXISTS SEPARATELY FROM gates.baseline.txt: optimisation settings change
+# floating-point codegen -- contraction, vectorisation, reassociation -- so a Release probe code may
+# legitimately differ from the Debug one by a code or two. A shared baseline would have to either
+# tolerate that (and stop being bit-exact) or forbid it (and fail for a reason that is not a bug).
+#
+# RE-RECORDED 2026-08-02 by ./scripts/record-gates.ps1 -Only Both, and VERIFIED: 162 gates across
+# nine configurations (18 x 9, up from 17 x 9), 0 values moved, 9 added, none dropped, and the
+# immediate read-back sweep reported ALL GATES PASS. AMD Radeon RX 7800 XT (driver 32.0.23027.2005),
+# /O2 /Ob2 /DNDEBUG, /fp:precise (no /fp:fast anywhere in the build -- see docs/STATUS.md 4i).
+#
+# ZERO MOVED IS THE INTERESTING NUMBER. In the same run the Debug baseline moved 15, because THAT
+# file was the stale one this time: it was last written at 79f6f04, before the reflection energy
+# correction, while this file was re-recorded after it at 2d4e1a1. The tear had simply changed
+# direction since the note below was written. Recording one half is what creates the state; both
+# files belong in the same commit, every time.
+#
+# THE 9 ADDED are rt-penumbra x nine configurations -- the gate added by ae47a2f, never recorded,
+# and therefore scoring NO-BASELINE (a failure) in both trees since it was written.
+#
+# It is true again, and measured rather than assumed -- re-checked by diffing the two files' data
+# rows on 2026-08-02, 0 differing lines: all 162 gates are BIT-IDENTICAL to the Debug
+# baseline recorded the same day. That is a result, not a shortcut: nothing in this renderer's shading happens on the
+# CPU. The probe reads an 8-bit backbuffer written by HLSL the GPU compiles itself, and the host code
+# in front of it only assembles matrices and constants. Host optimisation had nothing to move.
+#
+# One gate (no-rt/gi-debug) missed twice inside the sweep and then measured correct 8 times out of 8
+# in isolation and correct again through the runner: that is docs/STATUS.md 4d item 22, the
+# unexplained plausible-wrong-pixel flake, and it is NOT a Release difference.
+baseline | centre | 57,24,18
+baseline | ms | 57,24,18
+baseline | rt | 44,31,27
+baseline | ms-rt | 43,31,27
+baseline | gi | 54,18,14
+baseline | ms-gi | 54,18,14
+baseline | ms-rt-gi | 60,34,29
+baseline | gi-debug | 55,20,13
+baseline | ms-gi-debug | 55,20,13
+baseline | layered-off | 57,24,18
+baseline | layered-coat | 59,28,23
+baseline | shadow | 16,24,34
+baseline | shadow-rt | 27,40,56
+baseline | shadow-ms-rt | 28,42,59
+baseline | shadow-gi | 12,15,20
+baseline | penumbra | 47,49,54
+baseline | penumbra-rt | 82,88,97
+baseline | sunlit | 87,84,82
+baseline | sunlit-gi | 86,81,75
+baseline | rt-penumbra | 127,125,125
+no-rt | centre | 57,24,18
+no-rt | ms | 57,24,18
+no-rt | rt | 57,24,18
+no-rt | ms-rt | 57,24,18
+no-rt | gi | 54,18,14
+no-rt | ms-gi | 54,18,14
+no-rt | ms-rt-gi | 54,18,14
+no-rt | gi-debug | 55,20,13
+no-rt | ms-gi-debug | 55,20,13
+no-rt | layered-off | 57,24,18
+no-rt | layered-coat | 59,28,23
+no-rt | shadow | 16,24,34
+no-rt | shadow-rt | 16,24,34
+no-rt | shadow-ms-rt | 16,24,34
+no-rt | shadow-gi | 12,15,20
+no-rt | penumbra | 47,49,54
+no-rt | penumbra-rt | 47,49,54
+no-rt | sunlit | 87,84,82
+no-rt | sunlit-gi | 86,81,75
+no-rt | rt-penumbra | 85,83,81
+no-ms | centre | 57,24,18
+no-ms | ms | 57,24,18
+no-ms | rt | 43,31,26
+no-ms | ms-rt | 43,31,27
+no-ms | gi | 54,18,14
+no-ms | ms-gi | 54,18,14
+no-ms | ms-rt-gi | 60,34,29
+no-ms | gi-debug | 55,20,13
+no-ms | ms-gi-debug | 55,20,13
+no-ms | layered-off | 57,24,18
+no-ms | layered-coat | 59,28,23
+no-ms | shadow | 16,24,34
+no-ms | shadow-rt | 27,41,57
+no-ms | shadow-ms-rt | 28,42,59
+no-ms | shadow-gi | 12,15,20
+no-ms | penumbra | 47,49,54
+no-ms | penumbra-rt | 82,88,97
+no-ms | sunlit | 87,84,82
+no-ms | sunlit-gi | 86,81,75
+no-ms | rt-penumbra | 127,125,125
+sm60 | centre | 57,24,18
+sm60 | ms | 57,24,18
+sm60 | rt | 57,24,18
+sm60 | ms-rt | 57,24,18
+sm60 | gi | 54,18,14
+sm60 | ms-gi | 54,18,14
+sm60 | ms-rt-gi | 54,18,14
+sm60 | gi-debug | 55,20,13
+sm60 | ms-gi-debug | 55,20,13
+sm60 | layered-off | 57,24,18
+sm60 | layered-coat | 59,28,23
+sm60 | shadow | 16,24,34
+sm60 | shadow-rt | 16,24,34
+sm60 | shadow-ms-rt | 16,24,34
+sm60 | shadow-gi | 12,15,20
+sm60 | penumbra | 47,49,54
+sm60 | penumbra-rt | 47,49,54
+sm60 | sunlit | 87,84,82
+sm60 | sunlit-gi | 86,81,75
+sm60 | rt-penumbra | 85,83,81
+tier1-no-typed-uav | centre | 57,24,18
+tier1-no-typed-uav | ms | 57,24,18
+tier1-no-typed-uav | rt | 61,43,36
+tier1-no-typed-uav | ms-rt | 61,43,36
+tier1-no-typed-uav | gi | 54,18,14
+tier1-no-typed-uav | ms-gi | 54,18,14
+tier1-no-typed-uav | ms-rt-gi | 61,43,36
+tier1-no-typed-uav | gi-debug | 55,20,13
+tier1-no-typed-uav | ms-gi-debug | 55,20,13
+tier1-no-typed-uav | layered-off | 57,24,18
+tier1-no-typed-uav | layered-coat | 59,28,23
+tier1-no-typed-uav | shadow | 16,24,34
+tier1-no-typed-uav | shadow-rt | 165,160,155
+tier1-no-typed-uav | shadow-ms-rt | 165,160,155
+tier1-no-typed-uav | shadow-gi | 12,15,20
+tier1-no-typed-uav | penumbra | 47,49,54
+tier1-no-typed-uav | penumbra-rt | 165,160,154
+tier1-no-typed-uav | sunlit | 87,84,82
+tier1-no-typed-uav | sunlit-gi | 86,81,75
+tier1-no-typed-uav | rt-penumbra | 165,160,154
+no-cons-raster | centre | 57,24,18
+no-cons-raster | ms | 57,24,18
+no-cons-raster | rt | 43,31,27
+no-cons-raster | ms-rt | 43,31,27
+no-cons-raster | gi | 53,18,14
+no-cons-raster | ms-gi | 53,18,14
+no-cons-raster | ms-rt-gi | 59,34,29
+no-cons-raster | gi-debug | 55,20,13
+no-cons-raster | ms-gi-debug | 55,20,13
+no-cons-raster | layered-off | 57,24,18
+no-cons-raster | layered-coat | 59,28,23
+no-cons-raster | shadow | 16,24,34
+no-cons-raster | shadow-rt | 27,41,57
+no-cons-raster | shadow-ms-rt | 28,42,59
+no-cons-raster | shadow-gi | 12,15,20
+no-cons-raster | penumbra | 47,49,54
+no-cons-raster | penumbra-rt | 82,88,97
+no-cons-raster | sunlit | 87,84,82
+no-cons-raster | sunlit-gi | 86,81,75
+no-cons-raster | rt-penumbra | 127,125,125
+all-off | centre | 57,24,18
+all-off | ms | 57,24,18
+all-off | rt | 57,24,18
+all-off | ms-rt | 57,24,18
+all-off | gi | 53,18,14
+all-off | ms-gi | 53,18,14
+all-off | ms-rt-gi | 53,18,14
+all-off | gi-debug | 55,20,13
+all-off | ms-gi-debug | 55,20,13
+all-off | layered-off | 57,24,18
+all-off | layered-coat | 59,28,23
+all-off | shadow | 16,24,34
+all-off | shadow-rt | 16,24,34
+all-off | shadow-ms-rt | 16,24,34
+all-off | shadow-gi | 12,15,20
+all-off | penumbra | 47,49,54
+all-off | penumbra-rt | 47,49,54
+all-off | sunlit | 87,84,82
+all-off | sunlit-gi | 86,81,75
+all-off | rt-penumbra | 85,83,81
+no-dxc | centre | 57,24,18
+no-dxc | ms | 57,24,18
+no-dxc | rt | 57,24,18
+no-dxc | ms-rt | 57,24,18
+no-dxc | gi | 54,18,14
+no-dxc | ms-gi | 54,18,14
+no-dxc | ms-rt-gi | 54,18,14
+no-dxc | gi-debug | 55,20,13
+no-dxc | ms-gi-debug | 55,20,13
+no-dxc | layered-off | 57,24,18
+no-dxc | layered-coat | 59,28,23
+no-dxc | shadow | 16,24,34
+no-dxc | shadow-rt | 16,24,34
+no-dxc | shadow-ms-rt | 16,24,34
+no-dxc | shadow-gi | 12,15,20
+no-dxc | penumbra | 47,49,54
+no-dxc | penumbra-rt | 47,49,54
+no-dxc | sunlit | 87,84,82
+no-dxc | sunlit-gi | 86,81,75
+no-dxc | rt-penumbra | 85,83,81
+warp | centre | 57,24,18
+warp | ms | 57,24,18
+warp | rt | 43,31,27
+warp | ms-rt | 43,31,27
+warp | gi | 53,18,14
+warp | ms-gi | 53,18,14
+warp | ms-rt-gi | 59,34,29
+warp | gi-debug | 55,20,13
+warp | ms-gi-debug | 55,20,13
+warp | layered-off | 57,24,18
+warp | layered-coat | 59,28,23
+warp | shadow | 16,24,34
+warp | shadow-rt | 33,45,61
+warp | shadow-ms-rt | 33,45,61
+warp | shadow-gi | 12,15,20
+warp | penumbra | 47,49,54
+warp | penumbra-rt | 84,89,98
+warp | sunlit | 87,84,82
+warp | sunlit-gi | 86,81,75
+warp | rt-penumbra | 128,126,126

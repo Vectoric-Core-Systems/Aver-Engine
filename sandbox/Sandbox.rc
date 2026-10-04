@@ -1,0 +1,52 @@
+// Application icon (id 1). Path is relative to this .rc file.
+1 ICON "../branding/icon.ico"
+
+// VERSIONINFO -- what the executable calls ITSELF.
+//
+// There was none, so every field the shell reads was empty and Windows had nothing to name the
+// program but its filename. That is why the Open-with picker offered "Sandbox.exe" rather than
+// "Aver Engine": the ProgID's description names the FILE TYPE, and the friendly name of the
+// APPLICATION comes from here. It is also what Task Manager, the Details tab of file properties and
+// any installer inventory show, so the absence was visible in several places at once and only
+// noticed when a file association made it matter.
+//
+// The numeric version is duplicated from the top-level project(AverEngine VERSION 0.1.0) rather than
+// generated, because a .rc is not configured through CMake in this tree. If the two disagree the
+// build is not wrong, only the About box -- but they should be changed together.
+#define AVER_VER_MAJOR 0
+#define AVER_VER_MINOR 1
+#define AVER_VER_PATCH 0
+
+1 VERSIONINFO
+FILEVERSION    AVER_VER_MAJOR, AVER_VER_MINOR, AVER_VER_PATCH, 0
+PRODUCTVERSION AVER_VER_MAJOR, AVER_VER_MINOR, AVER_VER_PATCH, 0
+FILEFLAGSMASK  0x3fL
+#ifdef _DEBUG
+FILEFLAGS      0x1L                     // VS_FF_DEBUG
+#else
+FILEFLAGS      0x0L
+#endif
+FILEOS         0x40004L                 // VOS_NT_WINDOWS32
+FILETYPE       0x1L                     // VFT_APP
+FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 040904b0 = US English, Unicode. The Translation value below MUST agree with this name or
+        // the block is ignored wholesale and every field reads back empty again.
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "Aver Engine"
+            VALUE "FileDescription",  "Aver Engine"
+            VALUE "FileVersion",      "0.1.0.0"
+            VALUE "InternalName",     "Sandbox"
+            VALUE "OriginalFilename", "Sandbox.exe"
+            VALUE "ProductName",      "Aver Engine"
+            VALUE "ProductVersion",   "0.1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

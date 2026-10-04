@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The storage binding: the maths types (Vec3/Quat/Rot), the dense scene ids and field resolver,
+       asset identity (fnv1a64), and the P/Invoke surface for the Aver.Scene C ABI. It is a leaf —
+       it references nothing and is referenced BY Aver.Framework and by the editor's id generator.
+
+       This csproj is authored as part of the actor-authoring LOCK because Aver.Framework hard-depends
+       on it; before the lock the folder carried only loose .cs with no project. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Scene</AssemblyName>
+    <RootNamespace>Aver.Scene</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- The .xml ships for IntelliSense, but CS1591 nagging over Vec3.X / operator + / Equals is
+         noise: the maths primitives are self-evident and a comment restating "the X component" is
+         exactly the kind the house style forbids. Suppressed here, not silenced globally. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Aver.Graph's GraphCompiler emits IL that calls straight through to Native's P/Invoke
+         externs (aver_scene_get_f32/set_f32) for getfield/setfield, rather than duplicating a
+         second, differently-configured DllImport+resolver pair of its own. That needs compile-time
+         access to an internal type from a different assembly. -->
+    <InternalsVisibleTo Include="Aver.Graph" />
+  </ItemGroup>
+
+</Project>

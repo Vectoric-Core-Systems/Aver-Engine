@@ -1,0 +1,241 @@
+﻿# The oracle's expected raw 8-bit probe codes, one line per (configuration | gate | r,g,b).
+#
+# Read by scripts/gates.ps1, which is the only thing that should ever write it (-Record). Compare the
+# RAW CODES and never the floats: a one-code move hides completely inside %.2f, which is why the
+# probe line prints both.
+#
+# A value here moving is either an announced, understood, oracle-moving change or a regression. There
+# is no third case. Whichever it is belongs in the commit message and in docs/STATUS.md.
+#
+# RE-RECORDED 2026-08-02 by ./scripts/record-gates.ps1 -Only Both, and VERIFIED: 162 gates across
+# nine configurations (18 gates x 9, up from 17 x 9), 15 values moved, 9 added, none dropped, and the
+# immediate read-back sweep reported ALL GATES PASS.
+#
+# WHY 15 MOVED, when the tree had not changed since the last Release recording: this file was stale.
+# It was last written at 79f6f04, BEFORE the reflection energy correction; gates.baseline.release.txt
+# was re-recorded after it at 2d4e1a1 and this one was not carried along. The pair had been torn ever
+# since, disagreeing on the 15 RT-affected rows across the five RT-capable configurations. Recording
+# only one half is what creates that state, which is why -Only Both is the default and why both files
+# belong in the same commit. Release moved 0 values in this same run, which is the confirmation:
+# Release was already right, Debug was the stale half.
+#
+# THE 9 ADDED are rt-penumbra x nine configurations -- the gate added by ae47a2f, which had never
+# been recorded and so had been scoring NO-BASELINE (counted as a failure) since it was written.
+#
+# Verifying straight after recording is the step that makes this trustworthy rather than merely
+# written down: numbers measured minutes earlier that then fail to reproduce would be non-determinism,
+# not a regression, and this is the one moment that distinction can be established.
+#
+# Measured on an AMD Radeon RX 7800 XT, driver 32.0.23027.2005. See docs/STATUS.md 4h for what each
+# configuration is and why its numbers differ, and 4v for the probe repair below.
+#
+# THE RELEASE BASELINE IS STILL STALE -- only the Debug tree was recorded. Run
+# `./scripts/record-gates.ps1 -Only Release` to close it.
+#
+# WHY THE PROBES MOVED, since the header above says a moved value is either announced or a regression.
+# Both applied, and they had to be separated before either could be believed:
+#
+#   * The PROBES had gone wrong, and that is not a value change. `0fe81e2` made the level a docked
+#     tab and the scene composite into a texture; the viewport went 2750x1711 -> 2750x1639. A
+#     relative probe survives a change of SIZE but not of ASPECT, because the projection moves with
+#     it -- so shadow/sunlit/penumbra slid onto plain floor and five gates defined to differ all
+#     returned 94,102,129. Re-picking them by intent lands `shadow` on 23,40,86 against a recorded
+#     22,40,86: the geometry never moved, the probes did.
+#   * The CENTRE probe was on the placeholder cube's corner edge, where the 7x7 varies by 83 codes
+#     and one pixel decides which face is sampled. gates.ps1 has carried a note saying it must be
+#     re-picked rather than re-recorded; this is that being done. `gi-debug` read 156,55,36 from the
+#     edge and reads 103,39,30 from the face interior, against a recorded 101,38,31.
+#   * What genuinely moved, once the probes were honest, is the GI value on the sun-blind face:
+#     75,25,21 -> 92,28,22. That face is lit only by indirect light, and `1b4db02` (the shadowed
+#     world ends in a ramp instead of a cliff) and `a743ab0` (dominant-axis projection in the
+#     object's frame) are both announced GI changes. Brighter and warmer is what a ramp instead of a
+#     cliff looks like on a surface whose entire budget is bounce.
+#
+# THE NEW PROBES WERE CHECKED FOR REPEATABILITY BEFORE ANY OF THIS WAS WRITTEN DOWN: five consecutive
+# runs each of centre / gi / penumbra / sunlit / shadow returned bit-identical codes, 25 runs with zero
+# variation. That matters here more than usual, because whole-frame screenshots of this renderer are
+# NOT reproducible (~2400 differing bytes run to run). The oracle survives that only because these
+# probes sit in flat neighbourhoods -- which is now a stated selection criterion rather than a lucky
+# property. That prediction held: the re-record wrote exactly the values those 25 runs produced, and
+# the verification sweep reproduced them again immediately. What changed was this file, not what the
+# renderer does.
+baseline | centre | 57,24,18
+baseline | ms | 57,24,18
+baseline | rt | 45,32,28
+baseline | ms-rt | 50,36,31
+baseline | gi | 54,18,14
+baseline | ms-gi | 54,18,14
+baseline | ms-rt-gi | 60,34,29
+baseline | gi-debug | 55,20,13
+baseline | ms-gi-debug | 55,20,13
+baseline | layered-off | 57,24,18
+baseline | layered-coat | 59,28,23
+baseline | shadow | 16,24,34
+baseline | shadow-rt | 26,39,55
+baseline | shadow-ms-rt | 27,40,56
+baseline | shadow-gi | 12,15,20
+baseline | penumbra | 47,49,54
+baseline | penumbra-rt | 82,87,97
+baseline | sunlit | 87,84,82
+baseline | sunlit-gi | 86,81,75
+baseline | rt-penumbra | 127,125,124
+no-rt | centre | 57,24,18
+no-rt | ms | 57,24,18
+no-rt | rt | 57,24,18
+no-rt | ms-rt | 57,24,18
+no-rt | gi | 54,18,14
+no-rt | ms-gi | 54,18,14
+no-rt | ms-rt-gi | 54,18,14
+no-rt | gi-debug | 55,20,13
+no-rt | ms-gi-debug | 55,20,13
+no-rt | layered-off | 57,24,18
+no-rt | layered-coat | 59,28,23
+no-rt | shadow | 16,24,34
+no-rt | shadow-rt | 16,24,34
+no-rt | shadow-ms-rt | 16,24,34
+no-rt | shadow-gi | 12,15,20
+no-rt | penumbra | 47,49,54
+no-rt | penumbra-rt | 47,49,54
+no-rt | sunlit | 87,84,82
+no-rt | sunlit-gi | 86,81,75
+no-rt | rt-penumbra | 85,83,81
+no-ms | centre | 57,24,18
+no-ms | ms | 57,24,18
+no-ms | rt | 42,31,26
+no-ms | ms-rt | 36,26,23
+no-ms | gi | 54,18,14
+no-ms | ms-gi | 54,18,14
+no-ms | ms-rt-gi | 66,39,32
+no-ms | gi-debug | 55,20,13
+no-ms | ms-gi-debug | 55,20,13
+no-ms | layered-off | 57,24,18
+no-ms | layered-coat | 59,28,23
+no-ms | shadow | 16,24,34
+no-ms | shadow-rt | 26,38,54
+no-ms | shadow-ms-rt | 26,39,55
+no-ms | shadow-gi | 12,15,20
+no-ms | penumbra | 47,49,54
+no-ms | penumbra-rt | 82,88,97
+no-ms | sunlit | 87,84,82
+no-ms | sunlit-gi | 86,81,75
+no-ms | rt-penumbra | 127,125,124
+sm60 | centre | 57,24,18
+sm60 | ms | 57,24,18
+sm60 | rt | 57,24,18
+sm60 | ms-rt | 57,24,18
+sm60 | gi | 54,18,14
+sm60 | ms-gi | 54,18,14
+sm60 | ms-rt-gi | 54,18,14
+sm60 | gi-debug | 55,20,13
+sm60 | ms-gi-debug | 55,20,13
+sm60 | layered-off | 57,24,18
+sm60 | layered-coat | 59,28,23
+sm60 | shadow | 16,24,34
+sm60 | shadow-rt | 16,24,34
+sm60 | shadow-ms-rt | 16,24,34
+sm60 | shadow-gi | 12,15,20
+sm60 | penumbra | 47,49,54
+sm60 | penumbra-rt | 47,49,54
+sm60 | sunlit | 87,84,82
+sm60 | sunlit-gi | 86,81,75
+sm60 | rt-penumbra | 85,83,81
+tier1-no-typed-uav | centre | 57,24,18
+tier1-no-typed-uav | ms | 57,24,18
+tier1-no-typed-uav | rt | 61,43,36
+tier1-no-typed-uav | ms-rt | 61,43,36
+tier1-no-typed-uav | gi | 54,18,14
+tier1-no-typed-uav | ms-gi | 54,18,14
+tier1-no-typed-uav | ms-rt-gi | 61,43,36
+tier1-no-typed-uav | gi-debug | 55,20,13
+tier1-no-typed-uav | ms-gi-debug | 55,20,13
+tier1-no-typed-uav | layered-off | 57,24,18
+tier1-no-typed-uav | layered-coat | 59,28,23
+tier1-no-typed-uav | shadow | 16,24,34
+tier1-no-typed-uav | shadow-rt | 165,160,155
+tier1-no-typed-uav | shadow-ms-rt | 165,160,155
+tier1-no-typed-uav | shadow-gi | 12,15,20
+tier1-no-typed-uav | penumbra | 47,49,54
+tier1-no-typed-uav | penumbra-rt | 165,160,154
+tier1-no-typed-uav | sunlit | 87,84,82
+tier1-no-typed-uav | sunlit-gi | 86,81,75
+tier1-no-typed-uav | rt-penumbra | 165,160,154
+no-cons-raster | centre | 57,24,18
+no-cons-raster | ms | 57,24,18
+no-cons-raster | rt | 34,25,22
+no-cons-raster | ms-rt | 43,31,27
+no-cons-raster | gi | 53,18,14
+no-cons-raster | ms-gi | 53,18,14
+no-cons-raster | ms-rt-gi | 62,37,31
+no-cons-raster | gi-debug | 55,20,13
+no-cons-raster | ms-gi-debug | 55,20,13
+no-cons-raster | layered-off | 57,24,18
+no-cons-raster | layered-coat | 59,28,23
+no-cons-raster | shadow | 16,24,34
+no-cons-raster | shadow-rt | 28,41,57
+no-cons-raster | shadow-ms-rt | 28,42,59
+no-cons-raster | shadow-gi | 12,15,20
+no-cons-raster | penumbra | 47,49,54
+no-cons-raster | penumbra-rt | 82,87,97
+no-cons-raster | sunlit | 87,84,82
+no-cons-raster | sunlit-gi | 86,81,75
+no-cons-raster | rt-penumbra | 126,124,123
+all-off | centre | 57,24,18
+all-off | ms | 57,24,18
+all-off | rt | 57,24,18
+all-off | ms-rt | 57,24,18
+all-off | gi | 53,18,14
+all-off | ms-gi | 53,18,14
+all-off | ms-rt-gi | 53,18,14
+all-off | gi-debug | 55,20,13
+all-off | ms-gi-debug | 55,20,13
+all-off | layered-off | 57,24,18
+all-off | layered-coat | 59,28,23
+all-off | shadow | 16,24,34
+all-off | shadow-rt | 16,24,34
+all-off | shadow-ms-rt | 16,24,34
+all-off | shadow-gi | 12,15,20
+all-off | penumbra | 47,49,54
+all-off | penumbra-rt | 47,49,54
+all-off | sunlit | 87,84,82
+all-off | sunlit-gi | 86,81,75
+all-off | rt-penumbra | 85,83,81
+no-dxc | centre | 57,24,18
+no-dxc | ms | 57,24,18
+no-dxc | rt | 57,24,18
+no-dxc | ms-rt | 57,24,18
+no-dxc | gi | 54,18,14
+no-dxc | ms-gi | 54,18,14
+no-dxc | ms-rt-gi | 54,18,14
+no-dxc | gi-debug | 55,20,13
+no-dxc | ms-gi-debug | 55,20,13
+no-dxc | layered-off | 57,24,18
+no-dxc | layered-coat | 59,28,23
+no-dxc | shadow | 16,24,34
+no-dxc | shadow-rt | 16,24,34
+no-dxc | shadow-ms-rt | 16,24,34
+no-dxc | shadow-gi | 12,15,20
+no-dxc | penumbra | 47,49,54
+no-dxc | penumbra-rt | 47,49,54
+no-dxc | sunlit | 87,84,82
+no-dxc | sunlit-gi | 86,81,75
+no-dxc | rt-penumbra | 85,83,81
+warp | centre | 57,24,18
+warp | ms | 57,24,18
+warp | rt | 43,31,27
+warp | ms-rt | 43,31,27
+warp | gi | 53,18,14
+warp | ms-gi | 53,18,14
+warp | ms-rt-gi | 59,34,29
+warp | gi-debug | 55,20,13
+warp | ms-gi-debug | 55,20,13
+warp | layered-off | 57,24,18
+warp | layered-coat | 59,28,23
+warp | shadow | 16,24,34
+warp | shadow-rt | 33,45,61
+warp | shadow-ms-rt | 33,45,61
+warp | shadow-gi | 12,15,20
+warp | penumbra | 47,49,54
+warp | penumbra-rt | 84,89,98
+warp | sunlit | 87,84,82
+warp | sunlit-gi | 86,81,75
+warp | rt-penumbra | 128,126,126

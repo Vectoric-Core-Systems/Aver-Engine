@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The applicator half of the PCG API: F# produces placements, this spawns them.
+
+       WHY IT IS A SEPARATE ASSEMBLY FROM Aver.Pcg. The F# library is pure and references nothing of
+       the engine, which is what lets it be tested with no host, no device and no CLR bootstrap. The
+       moment it referenced Aver.Framework it could only run inside a live engine, and "same seed,
+       same output" would stop being checkable on its own. So the dependency runs one way only:
+       this project knows about Aver.Pcg, and Aver.Pcg knows about nothing.
+
+       WHY IT IS NOT PART OF Aver.Framework. Folding it in would put FSharp.Core into the dependency
+       chain of every C# script in every project, including the ones that never touch PCG. It is a
+       few hundred KB and an extra assembly to load for people who did not ask for it.
+
+       BUILDING THIS PROJECT BUILDS BOTH: MSBuild picks the compiler from each referenced project's
+       extension, so `dotnet build` on this .csproj compiles the .fsproj too. That is the same
+       mechanism the editor's Compile .NET button relies on, and the reason F# needed no new compile
+       path anywhere in the engine. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Pcg.Apply</AssemblyName>
+    <RootNamespace>Aver.Pcg.Apply</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Same reason as the F# project: a library does not copy package assets to its output by
+         default, so without this FSharp.Core.dll never reaches the folder the host loads from and
+         the failure appears at the first call into F#, not at load. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" />
+    <ProjectReference Include="..\..\fsharp\Aver.Pcg\Aver.Pcg.fsproj" />
+  </ItemGroup>
+
+</Project>

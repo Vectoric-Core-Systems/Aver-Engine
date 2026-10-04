@@ -1,0 +1,180 @@
+// The editor control channel's wire protocol. Exit code = failure count. No socket, no window.
+#include "aver/core/ErrorCodes.hpp"
+#include "aver/core/Log.hpp"
+#include "aver/mcp/McpBridge.hpp"
+
+#include <string>
+
+using namespace aver;
+using namespace aver::mcp;
+
+static int g_checks = 0, g_failures = 0;
+
+// Records one assertion and logs it.
+static void check(bool cond, const std::string& what) {
+    ++g_checks;
+    if (cond) { AVER_INFO("  ok    {}", what); return; }
+    AVER_ERROR("   FAIL  {}", what);
+    ++g_failures;
+}
+
+// Runs the parser, bridge and ABI-registry checks. Returns the failure count.
+int main() {
+    AVER_INFO("=== commands that should parse ===");
+    {
+        Command c;
+        std::string why;
+
+        check(parseCommand(R"({"id":7,"cmd":"ping"})", c, &why), "ping parses (" + why + ")");
+        check(c.id == 7, "and its id is echoed back, so a client can match reply to request");
+        check(c.events.empty(), "ping queues no input");
+
+        check(parseCommand(R"({"cmd":"move","x":120,"y":340})", c, &why), "move parses");
+        check(c.events.size() == 1 && c.events[0].kind == InputEvent::Kind::MouseMove,
+              "as one MouseMove");
+        check(c.events[0].x == 120 && c.events[0].y == 340, "with the coordinates intact");
+
+        check(parseCommand(R"({"cmd":"click","x":50,"y":60})", c, &why), "click parses");
+        check(c.events.size() == 3, "into three events: move, down, up (got " +
+                                   std::to_string(c.events.size()) + ")");
+        check(c.events[0].kind == InputEvent::Kind::MouseMove &&
+              c.events[1].kind == InputEvent::Kind::MouseDown &&
+              c.events[2].kind == InputEvent::Kind::MouseUp, "in that order");
+        check(c.events[1].button == 0, "left by default");
+
+        check(parseCommand(R"({"cmd":"click","x":1,"y":2,"button":"right"})", c, &why), "a right click");
+        check(c.events[1].button == 1, "carries button 1");
+        check(parseCommand(R"({"cmd":"click","x":1,"y":2,"button":"middle"})", c, &why), "a middle click");
+        check(c.events[1].button == 2, "carries button 2");
+
+        check(parseCommand(R"({"cmd":"key","key":"F"})", c, &why), "a letter key parses");
+        check(c.events.size() == 2 && c.events[0].key == 'F', "as down+up on the right code");
+        check(parseCommand(R"({"cmd":"key","key":"f1"})", c, &why), "a named key parses");
+        check(c.events[0].key == 0x70, "F1 is 0x70, not the letter F");
+        check(parseCommand(R"({"cmd":"key","key":"ESCAPE"})", c, &why), "names are case-insensitive");
+        check(c.events[0].key == 0x1B, "escape is 0x1B");
+
+        check(parseCommand(R"({"cmd":"text","text":"hello"})", c, &why), "text parses");
+        check(c.events.size() == 1 && c.events[0].text == "hello", "carrying the string");
+
+        check(parseCommand(R"({"cmd":"shot","path":"C:/tmp/a.png"})", c, &why), "shot parses");
+        check(c.arg == "C:/tmp/a.png", "carrying the path (" + c.arg + ")");
+
+        check(parseCommand(R"({"cmd":"shot","path":"C:\\tmp\\a.png"})", c, &why), "an escaped path parses");
+        check(c.arg == "C:\\tmp\\a.png", "with one level of escaping undone (" + c.arg + ")");
+
+        check(parseCommand("{ \"cmd\" : \"move\" , \"y\" : 9 , \"x\" : 8 }", c, &why),
+              "spacing and key order do not matter");
+        check(c.events[0].x == 8 && c.events[0].y == 9, "and the values are still right");
+
+        check(parseCommand(R"({"cmd":"move","x":-40,"y":-5})", c, &why), "negative coordinates parse");
+        check(c.events[0].x == -40 && c.events[0].y == -5, "and stay negative");
+    }
+
+    AVER_INFO("=== commands that should be REFUSED, not ignored ===");
+    {
+        Command c;
+        std::string why;
+        // One refusal fixture: the line to parse and what it is.
+        struct Case { const char* line; const char* what; };
+        const Case cases[] = {
+            {R"({"cmd":"clik","x":1,"y":2})",   "a misspelled command"},
+            {R"({"x":1,"y":2})",                 "a command with no cmd field"},
+            {R"({"cmd":"click","x":1})",         "a click missing y"},
+            {R"({"cmd":"move"})",                "a move with no coordinates"},
+            {R"({"cmd":"key"})",                 "a key with no key"},
+            {R"({"cmd":"key","key":"nonsense"})","an unknown key name"},
+            {R"({"cmd":"text"})",                "text with no text"},
+            {R"({"cmd":"shot"})",                "shot with no path"},
+            {"",                                  "an empty line"},
+            {"not json at all",                   "something that is not JSON"},
+        };
+        for (const Case& k : cases) {
+            why.clear();
+            const bool refused = !parseCommand(k.line, c, &why);
+            check(refused, std::string(k.what) + " is refused (" + why + ")");
+        }
+    }
+
+    AVER_INFO("=== the bridge is inert until asked ===");
+    {
+        McpBridge bridge;
+        check(!bridge.listening(), "a fresh bridge is not listening");
+        check(bridge.port() == 0, "and has no port");
+        u32 applied = 99;
+        applied = bridge.pump([](const Command&) {});
+        check(applied == 0, "pumping an unstarted bridge is a no-op");
+        bridge.stop();
+        check(!bridge.listening(), "stop() on an unstarted bridge is harmless");
+    }
+
+
+    AVER_INFO("=== the ABI registry: one surface, many module seams ===");
+    {
+        Command c;
+        std::string why;
+
+        check(parseCommand(R"({"id":11,"cmd":"abi","module":"framework","fn":"spawn","args":[1,2.5,-3]})",
+                           c, &why), "an abi call parses (" + why + ")");
+        check(c.abi.module == "framework", "the module is carried");
+        check(c.abi.fn == "spawn", "and the entry point, WITHOUT its module prefix");
+        check(c.abi.args.size() == 3, "three numeric args (got " + std::to_string(c.abi.args.size()) + ")");
+        check(c.abi.args[1] > 2.4 && c.abi.args[1] < 2.6, "a fractional arg survives (" +
+                                                          std::to_string(c.abi.args[1]) + ")");
+        check(c.abi.args[2] < -2.9, "and a negative one stays negative");
+
+        check(parseCommand(R"({"cmd":"abi","module":"scene","fn":"find","text":"Player"})", c, &why),
+              "a string argument parses");
+        check(c.abi.text == "Player", "and is carried");
+        check(c.abi.args.empty(), "args may be absent entirely");
+
+        why.clear();
+        check(!parseCommand(R"({"cmd":"abi","fn":"spawn"})", c, &why),
+              "an abi call with no module is refused (" + why + ")");
+        why.clear();
+        check(!parseCommand(R"({"cmd":"abi","module":"framework"})", c, &why),
+              "and one with no fn (" + why + ")");
+
+        McpBridge bridge;
+        check(bridge.modules().empty(), "a fresh bridge exposes NO ABI at all");
+
+        std::string sawModule, sawFn;
+        int frameworkCalls = 0, physicsCalls = 0;
+        bridge.registerAbi("framework", [&](const AbiCall& a, std::string& r, std::string& w) {
+            ++frameworkCalls; sawModule = a.module; sawFn = a.fn;
+            if (a.fn != "spawn") { w = "aver_fw_" + a.fn + " is not an entry point"; return false; }
+            r = "entity 42";
+            return true;
+        });
+        bridge.registerAbi("physics", [&](const AbiCall&, std::string& r, std::string&) {
+            ++physicsCalls; r = "ok"; return true;
+        });
+
+        const std::vector<std::string> mods = bridge.modules();
+        check(mods.size() == 2, "two ABIs registered");
+        check(mods[0] == "framework" && mods[1] == "physics", "and reported sorted, so a client can list them");
+
+        std::string result, err;
+        AbiCall call; call.module = "framework"; call.fn = "spawn";
+        check(bridge.callAbi(call, result, err), "a framework call is routed (" + err + ")");
+        check(frameworkCalls == 1 && physicsCalls == 0,
+              "to the FRAMEWORK dispatcher and no other -- that is the whole point");
+        check(sawModule == "framework" && sawFn == "spawn", "which saw the module and entry point");
+        check(result == "entity 42", "and its result comes back to the caller");
+
+        err.clear();
+        call.fn = "explode";
+        check(!bridge.callAbi(call, result, err), "an unknown entry point is refused by the MODULE");
+        check(err.find("aver_fw_explode") != std::string::npos,
+              "in the module's own words (" + err + ")");
+
+        err.clear();
+        AbiCall missing; missing.module = "voxi"; missing.fn = "setQuality";
+        check(!bridge.callAbi(missing, result, err), "a call to an unregistered module is refused");
+        check(err.find("voxi") != std::string::npos && err.find("not built") != std::string::npos,
+              "naming the module and the likely cause (" + err + ")");
+    }
+
+    AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
+}

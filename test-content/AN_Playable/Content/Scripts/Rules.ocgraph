@@ -1,0 +1,45 @@
+OCGRAPH 1
+DOMAIN gameplay
+# THE GAME MODE, as a graph. This is what starts the play session.
+#
+# Before 6d7ff99 this file could declare `CLASS AN_Rules GameMode` and the very next log line would
+# still read "no GameMode class declared -- play session not started": class FLAGS were not inherited
+# down the registry chain, so a graph parented to GameMode never actually carried the GameMode bit
+# and nothing that looks for one could find it. Kind bits flow at seal time now, so declaring this
+# genuinely begins play -- and with it everything gated on AVER_FW_PLAY_PLAYING, physics stepping
+# included.
+#
+# WHAT IT STILL CANNOT DO, stated because a reader will look for it: a graph GameMode cannot name a
+# default pawn or controller. The CLASS record understands `mesh=` and `material=` and nothing else,
+# so there is no equivalent of [AverGameMode(DefaultPawnClass=..., PlayerControllerClass=...)]. The
+# player in this project is PLACED by the map rather than spawned-and-possessed by the mode, which is
+# a real difference from the framework's normal Controller-mediated flow, not a stylistic one.
+NAME Rules
+DESCRIPTION The game mode, as a graph. Starts the play session and keeps a round clock in a VAR.
+
+CLASS AN_Rules GameMode
+
+PARAM deltaTime float
+
+# The round clock the graph owns. Nothing outside it accumulates this -- which is the point: before
+# VAR existed, a graph wanting elapsed time needed a C# host to sum deltaTime and hand it back as a
+# PARAM every tick, and that host was most of a file that existed for no other reason.
+VAR elapsed float 0
+
+NODE dt Param param=deltaTime
+
+ENTRY tick OnTick
+NODE tick OnTick
+
+NODE prev GetVar var=elapsed
+NODE sum Add
+LINK prev.value sum.a
+LINK dt.value sum.b
+
+NODE store SetVar var=elapsed
+LINK tick.exec store.exec
+LINK sum.result store.value
+
+# Read back through its own node after the write, for the reason Target.ocgraph's own comment gives.
+NODE report GetVar var=elapsed
+OUT report value

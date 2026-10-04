@@ -1,0 +1,2506 @@
+// Verification harnesses: the maybe*Test / run*Test / *Check drivers and the CLI knobs that set them.
+
+#include "SandboxApp.hpp"
+
+namespace aver {
+// --lod-select [px]: virtualized-geometry LOD selection; thresholdPx is pixel budget for screenSpaceErrorPx.
+void SandboxApp::setLodSelect(bool on, f32 thresholdPx) {
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+    lodSelectEnabled_ = on;
+    lodErrorThresholdPx_ = thresholdPx;
+#else
+    (void)on; (void)thresholdPx;
+#endif
+}
+
+// --lod-cluster-stats: separate gate to measure cluster selection.
+void SandboxApp::setLodClusterStats(bool on) {
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+    lodClusterStatsEnabled_ = on;
+#else
+    (void)on;
+#endif
+}
+
+// --lod-per-cluster [px]: per-cluster selection; overrides per-level when both given.
+void SandboxApp::setLodPerCluster(bool on, f32 thresholdPx) {
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+    lodPerClusterEnabled_ = on;
+    if (on) lodErrorThresholdPx_ = thresholdPx;   // shares the one pixel-budget knob with --lod-select
+#else
+    (void)on; (void)thresholdPx;
+#endif
+}
+
+// --lod-mesh-shader [px]: GPU per-cluster selection via amplification shader; falls back to per-instance.
+void SandboxApp::setLodMeshShader(bool on, f32 thresholdPx) {
+#if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
+    lodMeshShaderRequest_ = on ? 1 : 0;
+    lodMeshShaderEnabled_ = on;
+    if (on) lodErrorThresholdPx_ = thresholdPx;   // shares the one pixel-budget knob with the others
+#else
+    (void)on; (void)thresholdPx;
+#endif
+}
+
+void SandboxApp::setUiDemo(bool on) { showUiDemo_ = on; }
+
+void SandboxApp::setOpenAsset(std::string p) { openAsset_ = std::move(p); }
+
+// --select <substring>: select entity by name; makes the Details panel capturable in bounded runs.
+void SandboxApp::setSelectEntity(std::string p) { selectEntity_ = std::move(p); }
+
+// --water <heightCm>. Stored whether or not the module is compiled in, so a build without it can
+// say so rather than ignoring the flag in silence.
+void SandboxApp::setWater(bool on, f32 heightCm) { waterEnabled_ = on; waterHeightCm_ = heightCm; }
+
+// --open-legacy: open an older-series project WITHOUT upgrading it. Never migrates, so it cannot
+// damage the project -- safe for a benchmark that must measure content exactly as it is on disk.
+void SandboxApp::setOpenLegacy(bool on) { openLegacy_ = on; }
+
+// --graph-select <nodeId>: select node for capture; work happens in onGui().
+void SandboxApp::setGraphSelectNode(std::string id) { graphSelectNode_ = std::move(id); }
+
+// --graph-tab viewport: bring Viewport tab to front.
+void SandboxApp::setGraphTab(std::string tab) { graphTab_ = std::move(tab); }
+
+void SandboxApp::setInputProbe(bool on) { inputProbe_ = on; }
+
+void SandboxApp::setAutoCompile(bool on) { autoCompile_ = on; autoCompileFromCli_ = on; }
+
+void SandboxApp::setFocusLevelAt(int frame) { focusLevelAt_ = frame; }
+
+// --chunk-stream [N]: frames before setChunkStreamingEnabled fires.
+void SandboxApp::setChunkStreamAuto(int framesIn) { chunkStreamAutoFrames_ = framesIn; }
+
+#if AVER_MODULE_SCENE
+void SandboxApp::setDroneGraph(std::string relPath) { droneGraphRel_ = std::move(relPath); }
+
+#endif
+
+#if AVER_MODULE_SCENE
+#else
+void SandboxApp::setDroneGraph(std::string) {}
+
+#endif
+
+// --landscape <path>: explicit .ocland override for capture testing.
+void SandboxApp::setLandscapePath(std::string path) { landscapeCliOverride_ = std::move(path); }
+
+#if AVER_MODULE_SCENE
+void SandboxApp::setFogMatchToStreamRadius(bool on, f32 targetOpacity) {
+    matchFogToStreamRadius_ = on;
+    if (targetOpacity > 0.0f) fogMatchTargetOpacity_ = std::clamp(targetOpacity, 0.05f, 0.99f);
+}
+
+#endif
+
+#if AVER_MODULE_SCENE
+#else
+void SandboxApp::setFogMatchToStreamRadius(bool, f32) {}
+
+#endif
+
+// --drone [N]: frames before setDroneEnabled fires.
+void SandboxApp::setDroneAuto(int framesIn) { droneAutoFrames_ = framesIn; }
+
+// --undo-test [N]: frames before runUndoTest fires and exits.
+void SandboxApp::setUndoTestAuto(int framesIn) { undoTestAutoFrames_ = framesIn; }
+
+// --keybind-test write|read [N]: test keybinding persistence.
+void SandboxApp::setKeybindTestAuto(std::string mode, int framesIn) {
+    keybindTestMode_ = std::move(mode); keybindTestAutoFrames_ = framesIn;
+}
+
+void SandboxApp::setShowEditorPrefs(bool on) { if (on) showEditorPrefs_ = true; }
+
+// --scroll-prefs-to-keybinds: scroll preferences panel to keybinds.
+void SandboxApp::setScrollPrefsToKeybinds(bool on) { scrollPrefsToKeybinds_ = on; }
+
+void SandboxApp::setHudTest(int idx) { hudTest_ = idx; }
+
+void SandboxApp::setSaveProject(bool on) { saveProject_ = on; }
+
+void SandboxApp::setSaveLevelTo(std::string p) { saveLevelTo_ = std::move(p); }
+
+void SandboxApp::setRayProbe(f32 x, f32 y) { rayProbe_ = true; rayProbeX_ = x; rayProbeY_ = y; }
+
+// Queues one Content Browser import to run on startup. --import <src> <destDir>.
+void SandboxApp::setImportOnce(std::string src, std::string dst) { importSrc_ = std::move(src); importDst_ = std::move(dst); }
+
+bool* SandboxApp::autoCompileFlag() { return &autoCompile_; }
+
+// Turns clouds on, optionally at the given coverage. --clouds [coverage].
+void SandboxApp::setClouds(f32 coverage) {
+    sky_.cloudsEnabled = true;
+    if (coverage >= 0.0f) sky_.cloudCoverage = coverage;
+}
+
+// Selects the physical sky and optionally moves the sun's elevation. --sky-physical [elevation].
+void SandboxApp::setSkyPhysical(f32 elevationDeg) {
+    skyModelOverride_ = 1;
+    if (elevationDeg > -90.0f) sunElevationOverride_ = elevationDeg;
+}
+
+void SandboxApp::setSkyAuthored() { skyModelOverride_ = 0; }
+
+// Sets exposure, bloom intensity and auto-exposure. --exposure / --bloom / --auto-exposure.
+void SandboxApp::setPost(f32 exposure, bool exposureSet, f32 bloomIntensity, bool bloomSet, bool autoExposure) {
+    post_.exposure = exposure;
+    post_.bloomIntensity = bloomIntensity;
+    if (autoExposure) post_.autoExposure = true;
+    postExposureFromCli_ = exposureSet;
+    postBloomFromCli_    = bloomSet;
+    postAutoExpFromCli_  = autoExposure;
+}
+
+// --tonemap N / --max-radiance F: POST settings (not renderer ones).
+void SandboxApp::setTonemap(int mode)      { if (mode >= 0) post_.tonemap = static_cast<u32>(mode); }
+
+void SandboxApp::setMaxRadiance(f32 ceil)  { if (ceil >= 0.0f) post_.maxRadiance = ceil; }
+
+// Disables auto-exposure for a capture run unless the run asked for it.
+void SandboxApp::applyCaptureExposureRule(bool explicitlyRequested) {
+    if (maxFrames_ != 0 && !explicitlyRequested) post_.autoExposure = false;
+}
+
+void SandboxApp::setFocusVoxi(bool b) { focusVoxi_ = b ? 4 : 0; }
+
+// --project-settings-page N: jump to settings sub-page N.
+void SandboxApp::setProjectSettingsPage(int page) { focusVoxi_ = 4; settingsPage_ = page; }
+
+// Opens a drawer on startup, optionally in a Content subfolder. --drawer.
+void SandboxApp::setDrawerOpen(int which, std::string sub) {
+    if (!which) return;
+    drawer_ = drawerShown_ = which == 2 ? Drawer::Log : which == 3 ? Drawer::Console : Drawer::Content;
+    drawerAnim_ = 1.0f;
+    drawerStartSub_ = std::move(sub);
+}
+
+void SandboxApp::setFocusScript(bool b) { tools_.armNewScript(b); }
+
+void SandboxApp::setFocusTools(bool b) { tools_.armToolsMenu(b); }
+
+void SandboxApp::setOpenLevelPicker(bool b) { armOpenLevelPicker_ = b; }
+
+// --no-editor-chrome: suppress viewport chrome (grid, gizmo, outline).
+void SandboxApp::setNoEditorChrome(bool b) { noEditorChrome_ = b; }
+
+// --scene-census: walk the scene and report entity counts.
+#if AVER_MODULE_SCENE
+void SandboxApp::setSceneCensus(bool b) { sceneCensus_ = b; }
+#else
+void SandboxApp::setSceneCensus(bool) {}
+#endif
+
+void SandboxApp::setOpenLevelByName(std::string n) { openLevelByName_ = std::move(n); }
+
+void SandboxApp::setFocusCompileMenu(bool b) { tools_.armCompileMenu(b); }
+
+#if AVER_MODULE_MCP
+void SandboxApp::setMcpPort(u16 p) { mcpPort_ = p; }
+
+#endif
+
+void SandboxApp::setSkinTest() { skinTest_ = true; }
+
+void SandboxApp::setSkinDrawTest() { skinDrawTest_ = true; }
+
+void SandboxApp::setParticleTest() { particleTest_ = true; }
+
+// --no-particle-gi: A/B toggle for particle GI seam; distinct from --no-gi and --no-gi-cone.
+void SandboxApp::setNoParticleGi() { noParticleGi_ = true; }
+
+// --particle-stress <N> <M>: stress-test particle emitters.
+void SandboxApp::setParticleStress(int emitters, int maxParticles) {
+    particleStressEmitters_ = emitters;
+    particleStressMaxParticles_ = maxParticles;
+}
+
+void SandboxApp::setParticleStressSecondEmitter() { particleStressSecondEmitter_ = true; }
+
+void SandboxApp::setReflTest() { reflTest_ = true; }
+
+void SandboxApp::setFurnaceTest() { furnaceTest_ = true; }
+
+void SandboxApp::setFurnaceSun() { furnaceTest_ = true; furnaceSun_ = true; }
+
+// --furnace-grid: implies --furnace-test; furnace is a sky property.
+void SandboxApp::setFurnaceGrid() { furnaceTest_ = true; furnaceGrid_ = true; }
+
+// --furnace-tilt DEG: implies the grid, since it is the grid it rotates.
+void SandboxApp::setFurnaceTilt(f32 d) { furnaceTest_ = true; furnaceGrid_ = true; furnaceTilt_ = d; }
+
+// --sun-angle DEG: sun's angular diameter; sets ray-traced penumbra width.
+void SandboxApp::setSunAngle(f32 deg) { sunAngle_ = deg; }
+
+// --pt-furnace: measure furnace through path tracer.
+void SandboxApp::setPtFurnaceTest() { furnaceTest_ = true; ptFurnaceTest_ = true; }
+
+// --pt-scene: enable path tracer scene view.
+void SandboxApp::setPtSceneView() { ptSceneViewWantEnabled_ = true; ptSceneViewFromCli_ = true; }
+
+// --pt-quality-ramp [N]: ramp quality during frames for testing.
+void SandboxApp::setPtQualityRamp(int everyFrames) {
+    ptQualityRampEvery_ = everyFrames;
+    ptQualityRampCountdown_ = everyFrames;
+}
+
+void SandboxApp::setPtSceneToggleOnAuto(int framesIn)  { ptSceneToggleOnAutoFrames_  = framesIn; }
+
+void SandboxApp::setPtSceneToggleOffAuto(int framesIn) { ptSceneToggleOffAutoFrames_ = framesIn; }
+
+// --sun-set-at N ELEV AZIM / --gi-history-reset-at N: see sunSetAtFrames_'s own comment.
+void SandboxApp::setSunSetAt(int framesIn, f32 elevDeg, f32 azimDeg) {
+    sunSetAtFrames_ = framesIn; sunSetElevDeg_ = elevDeg; sunSetAzimDeg_ = azimDeg;
+}
+
+void SandboxApp::setSunSweep(int framesIn, f32 degPerFrame, int turns) {
+    sunSweepFrames_ = framesIn; sunSweepDeg_ = degPerFrame; sunSweepTurnsLeft_ = turns;
+}
+
+void SandboxApp::setGiHistoryResetAt(int framesIn) { giHistoryResetAtFrames_ = framesIn; }
+
+#if AVER_MODULE_SR
+void SandboxApp::setAverSrCycleAuto(int framesIn) { averSrCycleFrames_ = framesIn; }
+
+#endif
+
+void SandboxApp::setResizeCycle(int n) { resizeCycle_ = n < 0 ? 0 : (u64)n; }
+
+void SandboxApp::setGpuTiming(bool on) { gpuTiming_ = on; }
+
+// --luma-sweep [STRIDE]: measure pixel luminance (readback only, doesn't change rendering).
+void SandboxApp::setLumaSweep(bool on, int stride) { lumaSweep_ = on; lumaSweepStride_ = stride > 0 ? stride : 1; }
+
+// --firefly-metric [MULT]: measure outlier pixels (shares --luma-sweep readback).
+void SandboxApp::setFireflyMetric(bool on, f32 mult) { fireflyMetric_ = on; fireflyMult_ = mult > 0.0f ? mult : 8.0f; }
+
+// Guarded because members are AVER_MODULE_FRAMEWORK-only; setters need no-op stubs for compilation.
+#if AVER_MODULE_FRAMEWORK
+void SandboxApp::setPieCameraTest(int n) { pieCamFrames_ = n; }
+#else
+void SandboxApp::setPieCameraTest(int) {}
+#endif
+
+#if AVER_MODULE_FRAMEWORK
+void SandboxApp::setInputStuckTest(int n) { inputStuckFrames_ = n; }
+#else
+void SandboxApp::setInputStuckTest(int) {}
+#endif
+
+#if AVER_MODULE_FRAMEWORK
+void SandboxApp::setInputSourceTest(int n) { inputSrcFrames_ = n; }
+#else
+void SandboxApp::setInputSourceTest(int) {}
+#endif
+
+#if AVER_MODULE_FRAMEWORK
+void SandboxApp::setWheelSpeedTest(int n) { wheelTestFrames_ = n; }
+#else
+void SandboxApp::setWheelSpeedTest(int) {}
+#endif
+
+// Guarded because members are AVER_WITH_IMGUI-only.
+#if AVER_WITH_IMGUI
+void SandboxApp::setMultiSelectTest(int n) { multiSelTestFrames_ = n; }
+#else
+void SandboxApp::setMultiSelectTest(int) {}
+#endif
+
+#if AVER_WITH_IMGUI
+void SandboxApp::setCbMoveTest(const std::string& dir) { cbMoveTestDir_ = dir; cbMoveTestFrames_ = 10; }
+#else
+void SandboxApp::setCbMoveTest(const std::string&) {}
+#endif
+
+#if AVER_WITH_IMGUI
+void SandboxApp::setSaveDirtyTest(int n) { saveDirtyTestFrames_ = n; }
+#else
+void SandboxApp::setSaveDirtyTest(int) {}
+#endif
+
+#if AVER_WITH_IMGUI
+void SandboxApp::setPrefsWriteTest(int n) { prefsWriteTestFrames_ = n; }
+#else
+void SandboxApp::setPrefsWriteTest(int) {}
+#endif
+
+// --notify-test N: lift capture suppression to show toast.
+#if AVER_WITH_IMGUI
+void SandboxApp::setNotifyTest(int n) { notifyTestFrames_ = n; notifyTestLift_ = true; }
+#else
+void SandboxApp::setNotifyTest(int) {}
+#endif
+
+// --autosave-test <sec>: test autosave with shortened interval; needs AVER_MODULE_SCENE && AVER_WITH_IMGUI.
+#if AVER_WITH_IMGUI && AVER_MODULE_SCENE
+void SandboxApp::setAutosaveTest(f32 sec) {
+    autosaveIntervalSec_ = sec;
+    notifyTestLift_ = true;
+    autosaveTestArm_ = true;
+    autosaveTestLift_ = true;
+}
+#else
+void SandboxApp::setAutosaveTest(f32) {}
+#endif
+
+// --find-refs <path>: print what references an asset.
+#if AVER_WITH_IMGUI
+void SandboxApp::setFindRefs(const std::string& p) { findRefsPath_ = p; findRefsFrames_ = 8; }
+#else
+void SandboxApp::setFindRefs(const std::string&) {}
+#endif
+
+#if AVER_WITH_IMGUI
+void SandboxApp::setRenameRepointTest(int frames) { renameRepointFrames_ = frames > 0 ? frames : 8; }
+#else
+void SandboxApp::setRenameRepointTest(int) {}
+#endif
+
+#if AVER_WITH_IMGUI
+void SandboxApp::setProjectSwitchTest(int frames) { projectSwitchFrames_ = frames > 0 ? frames : 8; }
+#else
+void SandboxApp::setProjectSwitchTest(int) {}
+#endif
+
+#if AVER_WITH_IMGUI
+void SandboxApp::setValidateGraph(const std::string& p) { validateGraphPath_ = p; validateGraphFrames_ = 8; }
+#else
+void SandboxApp::setValidateGraph(const std::string&) {}
+#endif
+
+#if AVER_WITH_IMGUI
+void SandboxApp::setGraphPrintTest(int frames) { graphPrintTestFrames_ = frames > 0 ? frames : 8; }
+#else
+void SandboxApp::setGraphPrintTest(int) {}
+#endif
+
+#if AVER_WITH_IMGUI
+void SandboxApp::setAssetAssignTest(int frames) { assetAssignTestFrames_ = frames > 0 ? frames : 8; }
+#else
+void SandboxApp::setAssetAssignTest(int) {}
+#endif
+
+#if AVER_WITH_IMGUI
+void SandboxApp::setGraphHitsTest(const std::string& p) { graphHitsTestPath_ = p; graphHitsTestFrames_ = 8; }
+#else
+void SandboxApp::setGraphHitsTest(const std::string&) {}
+#endif
+
+#if AVER_WITH_IMGUI
+void SandboxApp::setClearShaderCache(const std::string& dir) {
+    clearShaderCacheDir_ = dir; clearShaderCacheFrames_ = 4;
+}
+#else
+void SandboxApp::setClearShaderCache(const std::string&) {}
+#endif
+
+// Same reason as pieCamFrames_ et al. above: recapFrames_/vmFrames_ are `#if AVER_MODULE_FRAMEWORK`
+// (maybeRecaptureTest/maybeViewmodelTest are Play-in-Editor-only).
+#if AVER_MODULE_FRAMEWORK
+void SandboxApp::setRecaptureTest(int n)   { recapFrames_ = n; }
+#else
+void SandboxApp::setRecaptureTest(int)     {}
+#endif
+
+#if AVER_MODULE_FRAMEWORK
+void SandboxApp::setViewmodelTest(int n)   { vmFrames_ = n; }
+#else
+void SandboxApp::setViewmodelTest(int)     {}
+#endif
+
+void SandboxApp::setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }
+
+// --shader-source <dir>: watch a shader source tree and reload without restarting.
+void SandboxApp::setShaderSourceDir(std::string d) { shaderSourceDir_ = std::move(d); }
+
+#if AVER_MODULE_SYNAPSE
+void SandboxApp::setBakeNavOnStart(f32 cellCm) { navBakeOnStart_ = true; navBakeCell_ = cellCm; }
+
+#endif
+
+// --cam X Y Z PITCH YAW: place viewport camera (cm, degrees).
+// --cam-wobble DEG PERIOD: swing yaw sinusoidally; returns to zero at whole periods (frame-counter driven).
+void SandboxApp::setCamWobble(f32 degrees, i32 periodFrames) {
+    camWobbleDeg_ = degrees;
+    camWobblePeriod_ = periodFrames > 0 ? periodFrames : 0;
+}
+
+// --cam-wobble-stop N: frame where wobble stops.
+void SandboxApp::setCamWobbleStop(i32 frame) { camWobbleStopFrame_ = frame > 0 ? frame : 0; }
+
+// --set NAME VALUE, repeatable: apply console variables on first frame with device.
+void SandboxApp::setConsoleSets(std::vector<std::pair<std::string, std::string>> sets) {
+    consoleSets_ = std::move(sets);
+}
+
+// --mesh-heap default|upload: select mesh heap mode.
+void SandboxApp::setMeshHeapDefault(bool on) { meshHeapDefault_ = on; }
+
+// --lod-share-vertices 0|1 (W11): read inside loadProjectMeshes' LOD-ladder loop. false (DEFAULT)
+// is today's behaviour -- every LOD level gets its own independent vertex buffer.
+void SandboxApp::setLodShareVertices(bool on) { lodShareVertices_ = on; }
+
+// --cam-translate SPEED: fly camera forward (world-cm/frame); frame-counter driven, repeatable.
+void SandboxApp::setCamTranslate(f32 speedCmPerFrame) { camTranslateSpeed_ = speedCmPerFrame; }
+
+// --cam-wander AMP SPEED: smooth non-repeating drift (for trajectory training); stopped by --cam-wobble-stop.
+void SandboxApp::setCamWander(f32 amp, f32 speed) {
+    camWanderAmp_ = amp > 0.0f ? amp : 0.0f;
+    camWanderSpeed_ = speed > 0.0f ? speed : 1.0f;
+}
+
+void SandboxApp::setCamera(Vec3 pos, f32 pitchDeg, f32 yawDeg) {
+    camOverride_ = true;
+    camPosOverride_ = pos;
+    pitchOverride_ = pitchDeg * 0.01745329252f;
+    yawOverride_   = yawDeg   * 0.01745329252f;
+}
+
+void SandboxApp::setScriptsDir(std::string d) { scriptsDir_ = std::move(d); }
+
+void SandboxApp::setSpawnTest(std::string cls) { spawnTestClass_ = std::move(cls); }
+
+// --unlit: set unlit view mode.
+void SandboxApp::setUnlitMode(bool on) { unlit_ = on; if (on) viewModeFromCli_ = true; }
+
+// --view-mode: set viewport view mode (lit|unlit|wireframe|rayhit-*|triangles|undenoised).
+void SandboxApp::setViewMode(const std::string& mode) {
+    std::string m = mode;
+    for (char& c : m) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (m == "undenoised") {
+        undenoised_ = true;
+        AVER_INFO("[Sandbox] --view-mode undenoised");
+        return;
+    }
+    if (m == "lit" || m == "unlit" || m == "wireframe") {
+        unlit_ = (m == "unlit");
+        wireframe_ = (m == "wireframe");
+#if AVER_MODULE_VOXI
+        debugView_ = voxi::VoxiRenderer::ViewDebug::None;
+#endif
+    } else if (m == "rayhit-instance" || m == "rayhit-material" || m == "rayhit-distance" || m == "triangles" ||
+               m == "ambient-occlusion") {
+#if AVER_MODULE_VOXI
+        if (m == "rayhit-instance")      debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitInstance;
+        else if (m == "rayhit-material") debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitMaterial;
+        else if (m == "rayhit-distance") debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitDistance;
+        else if (m == "ambient-occlusion") debugView_ = voxi::VoxiRenderer::ViewDebug::AmbientOcclusion;
+        else                             debugView_ = voxi::VoxiRenderer::ViewDebug::Triangles;
+        wireframe_ = false;
+        gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
+#else
+        AVER_WARN("[Sandbox] --view-mode {} was given but this build has no Voxi module "
+                  "(-DAVER_MODULE_VOXI=ON to include it); there is no ray-driven path to show it through", m);
+        return;
+#endif
+    } else {
+        AVER_ERROR("[Sandbox] --view-mode '{}' not recognised (lit|unlit|wireframe|rayhit-instance|"
+                   "rayhit-material|rayhit-distance|triangles|undenoised)", mode);
+        return;
+    }
+    viewModeFromCli_ = true;
+    AVER_INFO("[Sandbox] --view-mode {}", m);
+}
+
+void SandboxApp::setPlayTest() { playTest_ = true; }
+
+void SandboxApp::setProjectPath(std::string p) { projectPath_ = std::move(p); }
+
+// --mode <name>: set editor mode; applied on first frame with level.
+void SandboxApp::setStartMode(std::string m) { startMode_ = std::move(m); }
+
+// <path>.ocmap given on the command line: opened INSTEAD of the project's start map.
+void SandboxApp::setOpenMap(std::string p) { openMapPath_ = std::move(p); }
+
+void SandboxApp::armBrowser(bool on) { browserActive_ = on; }
+
+// Whether launch command line was shell-shaped; decides single-instance primary registration.
+void SandboxApp::setSingleInstanceEligible(bool b) { singleInstanceEligible_ = b; }
+
+#if AVER_MODULE_FRAMEWORK
+// Spawns one instance of the --spawn-test class, then destroys it a few frames later.
+void SandboxApp::maybeSpawnTestActor() {
+    if (spawnTestClass_.empty()) return;
+
+    if (!spawnTestDone_) {
+        spawnTestDone_ = true;
+        const int32_t c = aver_fw_class_find(spawnTestClass_.c_str());
+        if (c == 0) {
+            AVER_WARN("[spawn-test] no class named '{}' is declared - is the script assembly loaded? "
+                      "(pass --scripts <dir> pointing at the built actor assembly)", spawnTestClass_);
+            return;
+        }
+        spawnTestEntity_ = aver_fw_spawn(c, "spawn-test-instance", nullptr, nullptr, nullptr);
+        if (spawnTestEntity_ == 0)
+            AVER_WARN("[spawn-test] class '{}' failed to spawn", spawnTestClass_);
+        else
+            AVER_INFO("[spawn-test] spawned '{}' as entity {} - watch for its OnBeginPlay/OnTick lines",
+                      spawnTestClass_, spawnTestEntity_);
+        return;
+    }
+
+    if (spawnTestEntity_ != 0 && ++spawnTestFrames_ == 3) {
+        AVER_INFO("[spawn-test] destroying entity {} - watch for its OnEndPlay line", spawnTestEntity_);
+        aver_fw_destroy(spawnTestEntity_);
+        spawnTestEntity_ = 0;
+    }
+}
+
+namespace {
+
+// ---- SYNTHETIC INPUT FOR PLAY SELF-TESTS ----
+// Input injected into input_ (where publisher reads), not ImGui queue.
+// Drivers run after publishInput; HELD state persists, EDGE is cleared before publish sees it.
+#if AVER_WITH_IMGUI
+// Guarded: only called when UI context exists (--recapture-test/--input-stuck-test).
+void injectMouseButton(InputState& in, i32 button, bool pressed) {
+    Event e;
+    e.type    = EventType::MouseButton;
+    e.button  = button;
+    e.pressed = pressed;
+    // Position restated from accumulator to avoid moving cursor to 0,0 on next real WM_MOUSEMOVE.
+    e.mouseX  = in.mouseX();
+    e.mouseY  = in.mouseY();
+    in.onEvent(e);
+}
+#endif
+
+// Inject by raw Win32 virtual key (InputState key); maps to AVER_FW_KEY_* via frameworkKeyFromVk.
+void injectKey(InputState& in, i32 vk, bool pressed) {
+    Event e;
+    e.type    = EventType::Key;
+    e.key     = vk;
+    e.pressed = pressed;
+    in.onEvent(e);
+}
+
+} // namespace
+
+// --pie-camera-test [N]: verify PIE camera holds still with no input; tests round-trip with pawn.
+void SandboxApp::maybePieCameraTest() {
+    if (pieCamFrames_ <= 0) return;
+// Needs AVER_WITH_IMGUI to drive camera via ImGuiIO.
+#if AVER_MODULE_FRAMEWORK && AVER_WITH_IMGUI
+    ++pieCamFrame_;
+    if (pieCamFrame_ == 10) { startPlay(); return; }   // let startup settle, as --play-test does
+    if (pieCamFrame_ < 11) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+
+    // ---- phase 1: idle. Nothing touches anything; the view must not move. ----
+    if (pieCamFrame_ == 11) {
+        pieCamRef_ = camPos_; pieCamRefYaw_ = yaw_; pieCamRefPitch_ = pitch_;
+        return;
+    }
+    if (pieCamFrame_ < 40) {
+        pieCamMaxPos_   = std::fmax(pieCamMaxPos_,   (camPos_ - pieCamRef_).size());
+        pieCamMaxYaw_   = std::fmax(pieCamMaxYaw_,   std::fabs(yaw_   - pieCamRefYaw_));
+        pieCamMaxPitch_ = std::fmax(pieCamMaxPitch_, std::fabs(pitch_ - pieCamRefPitch_));
+        return;
+    }
+
+    // ---- phase 2: one look, then settle. ----
+    if (pieCamFrame_ == 40) { pieCamPendingLook_ = true; return; }
+    if (pieCamFrame_ == 41) return;                    // the look lands in the fly block here
+    if (pieCamFrame_ == 42) {
+        // Check if look survived the round-trip into the pawn and back.
+        pieCamKeptYaw_   = std::fabs(yaw_   - pieCamWantYaw_)   < 1e-3f;
+        pieCamKeptPitch_ = std::fabs(pitch_ - pieCamWantPitch_) < 1e-3f;
+        pieCamRef_ = camPos_;
+        return;
+    }
+
+    // ---- phase 3: hold W, check camera travels ----
+    // Send to both readers: editor fly block reads ImGui::IsKeyDown, gameplay reads AVER_FW_KEY_W from input_.
+    if (pieCamFrame_ >= 50 && pieCamFrame_ < 90) {
+        io.AddKeyEvent(ImGuiKey_W, true);
+        injectKey(input_, 'W', true);          // VK_W is the ASCII code; see InputKeys.hpp
+        if (pieCamFrame_ == 50) pieCamMoveFrom_ = camPos_;
+        return;
+    }
+    if (pieCamFrame_ == 90) {
+        io.AddKeyEvent(ImGuiKey_W, false);
+        injectKey(input_, 'W', false);
+        pieCamMoved_    = (camPos_ - pieCamMoveFrom_).size();
+        // Measure forward component only; gravity or stray impulse could register distance elsewhere.
+        const Vec3 d = (camPos_ - pieCamMoveFrom_).getSafeNormal();
+        pieCamMoveDot_  = dot(d, camForward());
+        return;
+    }
+    // ---- phase 4: released, must coast to stop ----
+    if (pieCamFrame_ == 92) { pieCamAfterMove_ = camPos_; return; }
+    if (pieCamFrame_ > 92)
+        pieCamCoast_ = std::fmax(pieCamCoast_, (camPos_ - pieCamAfterMove_).size());
+
+    if (pieCamFrame_ >= 92 + pieCamFrames_) {
+        const bool idleOk  = pieCamMaxPos_ < 0.5f && pieCamMaxYaw_ < 1e-3f && pieCamMaxPitch_ < 1e-3f;
+        const bool lookOk  = pieCamKeptYaw_ && pieCamKeptPitch_;
+        const bool moveOk  = pieCamMoved_ > 1.0f && pieCamMoveDot_ > 0.9f;
+        const bool stopOk  = pieCamCoast_ < 0.5f;
+        AVER_INFO("[pie-camera] idle  : max drift pos {:.4f} cm, yaw {:.6f}, pitch {:.6f} -- {}",
+                  pieCamMaxPos_, pieCamMaxYaw_, pieCamMaxPitch_, idleOk ? "STEADY" : "DRIFTING");
+        AVER_INFO("[pie-camera] look  : +0.5 yaw / +0.3 pitch -> yaw {}, pitch {} -- {}",
+                  pieCamKeptYaw_ ? "kept" : "REVERTED", pieCamKeptPitch_ ? "kept" : "REVERTED",
+                  lookOk ? "the view answers the mouse" : "THE VIEW IGNORES THE MOUSE");
+        AVER_INFO("[pie-camera] move  : W held 40 frames -> travelled {:.1f} cm, {:.3f} along the "
+                  "view -- {}", pieCamMoved_, pieCamMoveDot_,
+                  moveOk ? "the view answers W" : "THE VIEW IGNORES W");
+        AVER_INFO("[pie-camera] release: drift after W let go {:.4f} cm -- {}", pieCamCoast_,
+                  stopOk ? "stops" : "STILL MOVING (the key is stuck or nothing clears it)");
+        AVER_INFO("[pie-camera] RESULT: {}",
+                  (idleOk && lookOk && moveOk && stopOk) ? "PASS" : "FAIL");
+        stopPlay();
+        pieCamFrames_ = 0;
+    }
+#endif
+}
+
+// --input-source-test N: verify InputState sees real OS events and ImGui sees them too.
+// Posts REAL WINDOW MESSAGES (not ImGui queue) since the test checks whether the real path is wired.
+void SandboxApp::maybeInputSourceTest() {
+    if (inputSrcFrames_ <= 0) return;
+#if defined(_WIN32) && AVER_WITH_IMGUI
+    ++inputSrcFrame_;
+    HWND hwnd = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
+    if (!hwnd) { if (inputSrcFrame_ > 4) { AVER_INFO("[input-source] RESULT: SKIPPED (no window)"); inputSrcFrames_ = 0; } return; }
+
+    const int   kVk = 0x57;              // VK_W
+    const int   half = inputSrcFrames_;  // frames spent held, then the same again released
+
+    if (inputSrcFrame_ == 5)        { ::PostMessageW(hwnd, WM_KEYDOWN, (WPARAM)kVk, 0); return; }
+    if (inputSrcFrame_ == 6 + half) { ::PostMessageW(hwnd, WM_KEYUP,   (WPARAM)kVk, 0); return; }
+    if (inputSrcFrame_ < 7) return;
+
+    // Wait for PostMessageW queue delivery and ImGui NewFrame before sampling.
+    const bool inState = input_.keyHeld(kVk);
+    const bool inImGui = ImGui::IsKeyDown(ImGuiKey_W);
+    const bool wantDown = inputSrcFrame_ < 6 + half;
+    if (inputSrcFrame_ >= 7 && inputSrcFrame_ != 6 + half + 1) {
+        if (inState) inputSrcStateSaw_ = true;
+        if (inImGui) inputSrcImguiSaw_ = true;
+        if (inState != inImGui) ++inputSrcDisagree_;
+        if (!wantDown && inputSrcFrame_ > 6 + half + 2 && (inState || inImGui)) ++inputSrcStuck_;
+    }
+
+    if (inputSrcFrame_ >= 6 + half * 2) {
+        const bool stateOk = inputSrcStateSaw_;
+        const bool imguiOk = inputSrcImguiSaw_;
+        const bool agreeOk = inputSrcDisagree_ == 0;
+        const bool clearOk = inputSrcStuck_ == 0;
+        AVER_INFO("[input-source] InputState saw the OS key: {} -- {}", inputSrcStateSaw_ ? "yes" : "NO",
+                  stateOk ? "setEventCallback is wired and receiving" : "THE EDITOR NEVER GOT THE EVENT");
+        AVER_INFO("[input-source] ImGui still saw it too : {} -- {}", inputSrcImguiSaw_ ? "yes" : "NO",
+                  imguiOk ? "the two do not compete" : "IMGUI STOPPED SEEING INPUT");
+        AVER_INFO("[input-source] frames they disagreed  : {} -- {}", inputSrcDisagree_,
+                  agreeOk ? "one stream, two readers" : "THE TWO VIEWS OF THE KEYBOARD HAVE DIVERGED");
+        AVER_INFO("[input-source] held after WM_KEYUP    : {} -- {}", inputSrcStuck_,
+                  clearOk ? "released" : "STILL HELD");
+        AVER_INFO("[input-source] RESULT: {}",
+                  (stateOk && imguiOk && agreeOk && clearOk) ? "PASS" : "FAIL");
+        inputSrcFrames_ = 0;
+    }
+#endif
+}
+
+// --wheel-speed-test: verify wheel input changes fly speed. Posts REAL WINDOW MESSAGES.
+void SandboxApp::maybeWheelSpeedTest() {
+    if (wheelTestFrames_ <= 0) return;
+#if defined(_WIN32) && AVER_WITH_IMGUI
+    ++wheelTestFrame_;
+    HWND hwnd = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
+    if (!hwnd) {
+        if (wheelTestFrame_ > 4) { AVER_INFO("[wheel-test] RESULT: SKIPPED (no window)"); wheelTestFrames_ = 0; }
+        return;
+    }
+    // Sample both sources every frame.
+    wheelTestSawImGui_ = wheelTestSawImGui_ || ImGui::GetIO().MouseWheel != 0.0f;
+    wheelTestSawInput_ = wheelTestSawInput_ || input_.wheel() != 0.0f;
+    // Check if change happens when wheel arrives.
+    if (input_.wheel() != 0.0f) {
+        wheelTestOwnAtWheel_ = own_.keyboardToTool || own_.mouseToTool;
+        wheelTestFlyAtWheel_ = flying_;
+    }
+
+    if (wheelTestFrame_ == 5) {
+        wheelTestSpeedBefore_ = flySpeed_;
+        // Force fly mode; test the wheel READ, not the gesture that opens it.
+        wheelTestForceFly_ = true;
+        return;
+    }
+    // Post wheel-up message (one notch speed-up).
+    if (wheelTestFrame_ == 6) {
+        ::PostMessageW(hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA), 0);
+        return;
+    }
+    // Wait for PostMessageW queue delivery.
+    if (wheelTestFrame_ < 9) return;
+
+    wheelTestForceFly_ = false;
+    const f32 after = flySpeed_;
+    const f32 want = wheelTestSpeedBefore_ * 1.25f;
+    const bool moved = std::fabs(after - wheelTestSpeedBefore_) > 0.01f;
+    const bool right = std::fabs(after - want) < std::fmax(1.0f, want * 0.02f);
+    AVER_INFO("[wheel-test] speed {:.1f} -> {:.1f} cm/s (one notch up, want {:.1f})",
+              wheelTestSpeedBefore_, after, want);
+    AVER_INFO("[wheel-test] sources during onUpdate: io.MouseWheel seen={} input_.wheel() seen={}",
+              wheelTestSawImGui_ ? "yes" : "NO (always zero -- this is the bug)",
+              wheelTestSawInput_ ? "yes" : "NO");
+    AVER_INFO("[wheel-test] gates on the wheel frame: inputOwnedByTool={} flying={}",
+              wheelTestOwnAtWheel_ ? "yes" : "NO", wheelTestFlyAtWheel_ ? "yes" : "NO");
+    AVER_INFO("[wheel-test] RESULT: {}", (moved && right) ? "PASS"
+                                       : moved ? "FAIL (speed moved, but not by one notch)"
+                                               : "FAIL (speed did not change at all)");
+    wheelTestFrames_ = 0;
+#else
+    AVER_INFO("[wheel-test] RESULT: SKIPPED (needs Win32 + ImGui)");
+    wheelTestFrames_ = 0;
+#endif
+}
+
+// --viewmodel-test N: verify gun stays still in view space relative to camera.
+// Invariant: rigidly parented to eye, so view-space position is constant; any drift means mismatched transforms.
+void SandboxApp::maybeViewmodelTest() {
+    if (vmFrames_ <= 0) return;
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE && AVER_WITH_IMGUI
+    ++vmFrame_;
+    if (vmFrame_ == 10) { startPlay(); return; }
+    if (vmFrame_ < 20) return;
+
+    scene::World& w = scene::World::instance();
+    const int32_t viewId = aver_fw_view_entity();
+    const scene::Entity ve = static_cast<scene::Entity>(static_cast<uint32_t>(viewId));
+    if (!w.valid(ve)) return;
+
+    // Gun is the view entity's mesh-bearing child; walk rather than cache.
+    scene::Entity gun = scene::kInvalidEntity;
+    vmKids_ = 0;
+    const u32 vmN = w.count();
+    for (u32 k = 0; k < vmN; ++k) {
+        const scene::Entity c = w.at(k);
+        if (!w.valid(c) || w.parent(c) != ve) continue;
+        if (w.component<scene::CMeshRenderer>(c, scene::kComponentMeshRenderer)) { if (!w.valid(gun)) gun = c; ++vmKids_; }
+    }
+    if (!w.valid(gun)) { if (vmFrame_ == 25) AVER_INFO("[viewmodel] no viewmodel found under the view entity"); return; }
+
+    const Mat4& gm = w.worldMatrix(gun);
+    const Vec3 gunPos{gm.m[3][0], gm.m[3][1], gm.m[3][2]};
+
+    // Use camForward() from yaw_/pitch_, not view entity's axes (else gun compares against itself).
+    const Vec3 fwd = camForward();
+    const Vec3 wup{0, 0, 1};
+    const Vec3 rgt = Vec3{fwd.y * wup.z - fwd.z * wup.y, fwd.z * wup.x - fwd.x * wup.z,
+                          fwd.x * wup.y - fwd.y * wup.x}.getSafeNormal();
+    const Vec3 up2{rgt.y * fwd.z - rgt.z * fwd.y, rgt.z * fwd.x - rgt.x * fwd.z,
+                   rgt.x * fwd.y - rgt.y * fwd.x};
+    const Vec3 rel = gunPos - camPos_;
+    const Vec3 vs{rel.x * rgt.x + rel.y * rgt.y + rel.z * rgt.z,
+                  rel.x * up2.x + rel.y * up2.y + rel.z * up2.z,
+                  rel.x * fwd.x + rel.y * fwd.y + rel.z * fwd.z};
+
+    // ---- phase 1: dead still ----
+    // Baseline reference; prevent measuring from zero-initialized vmRef_.
+    if (vmFrame_ <= 25) { vmRef_ = vs; return; }
+    if (vmFrame_ < 25 + vmFrames_) {
+        vmStill_ = std::fmax(vmStill_, (vs - vmRef_).size());
+        return;
+    }
+    // ---- phase 2: turning, one steady look per frame ----
+    if (vmFrame_ <= 25 + vmFrames_) { vmRef_ = vs; return; }
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMousePosEvent(vpX_ + vpW_ * 0.5f + (f32)(vmFrame_ % 20) * 2.0f, vpY_ + vpH_ * 0.5f);
+    vmMoving_ = std::fmax(vmMoving_, (vs - vmRef_).size());
+
+    if (vmFrame_ >= 25 + vmFrames_ * 2) {
+        const bool stillOk  = vmStill_  < 0.05f;
+        const bool moveOk   = vmMoving_ < 0.05f;
+        AVER_INFO("[viewmodel] offset from the eye: ({:.3f}, {:.3f}, {:.3f}) cm right/up/forward",
+                  vmRef_.x, vmRef_.y, vmRef_.z);
+        AVER_INFO("[viewmodel] still  : drifts {:.4f} cm in view space -- {}", vmStill_,
+                  stillOk ? "rigid" : "IT MOVES WITH NOBODY TOUCHING ANYTHING");
+        AVER_INFO("[viewmodel] turning: drifts {:.4f} cm in view space -- {}", vmMoving_,
+                  moveOk ? "rigid" : "IT SWIMS AGAINST THE CAMERA WHILE TURNING");
+        AVER_INFO("[viewmodel] RESULT: {}", (stillOk && moveOk) ? "PASS" : "FAIL");
+        stopPlay();
+        vmFrames_ = 0;
+    }
+#endif
+}
+
+// --recapture-test N: verify recapture click doesn't also fire weapon.
+// Unlike --input-stuck-test: this releases then clicks back.
+void SandboxApp::maybeRecaptureTest() {
+    if (recapFrames_ <= 0) return;
+#if AVER_MODULE_FRAMEWORK && AVER_WITH_IMGUI
+    ++recapFrame_;
+    if (recapFrame_ == 10) { startPlay(); return; }
+    if (recapFrame_ < 15) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    // Park pointer in viewport middle; recapture gates on inViewport().
+    io.AddMousePosEvent(vpX_ + vpW_ * 0.5f, vpY_ + vpH_ * 0.5f);
+
+    // Release to editor, then click back and hold (mimic the real gesture).
+    if (recapFrame_ == 15) { releasedByUser_ = true; return; }
+    if (recapFrame_ < 20) return;
+
+    // Inject to both readers (ImGui and input_); one real click reaches both.
+    io.AddMouseButtonEvent(0, true);
+    injectMouseButton(input_, 0, true);
+    // Count leak only after recapture succeeds (releasedByUser_ clears).
+    if (!releasedByUser_) recapNotRecaptured_ = 1;
+    if (recapNotRecaptured_ && aver_fw_input_key(AVER_FW_KEY_MOUSE_LEFT)) ++recapLeaked_;
+
+    if (recapFrame_ >= 21 + recapFrames_) {
+        const bool tookBack = recapNotRecaptured_ != 0;
+        const bool clean    = recapLeaked_ == 0;
+        // NOT-RECAPTURED IS A FINDING, NOT A FAILURE: the recapture branch requires
+        // !WantCaptureMouse, and ImGui ALWAYS wants the mouse over the 3D dock window (measured
+        // here), so it can't be taken today -- its own bug, and the reason the weapon-fire defect
+        // can't currently happen. The leak assertion stays meaningful for whoever fixes recapture.
+        AVER_INFO("[recapture] the click took the mouse back : {} -- {}",
+                  tookBack ? "yes" : "no",
+                  tookBack ? "the gesture works"
+                           : "UNREACHABLE: the branch needs !WantCaptureMouse and the viewport is "
+                             "an ImGui window, so it always wants the mouse");
+        AVER_INFO("[recapture] frames it also reached the gun: {} of {} -- {}",
+                  recapLeaked_, recapFrames_,
+                  clean ? "no shot leaked" : "THE RECAPTURE CLICK IS FIRING THE WEAPON");
+        AVER_INFO("[recapture] RESULT: {}",
+                  !clean ? "FAIL" : (tookBack ? "PASS" : "PASS (recapture unreachable -- see above)"));
+        io.AddMouseButtonEvent(0, false);
+        injectMouseButton(input_, 0, false);   // both readers let go, for the reason both were told
+        stopPlay();
+        recapFrames_ = 0;
+    }
+#endif
+}
+
+// --input-stuck-test N: verify releasing mouse doesn't leave keys stuck forever.
+// Tests the input path that fires on publishInput; injects to input_, not ImGui.
+// Guarded on AVER_WITH_IMGUI because own_ resolution needs UI context.
+void SandboxApp::maybeInputStuckTest() {
+    if (inputStuckFrames_ <= 0) return;
+#if AVER_MODULE_FRAMEWORK && AVER_WITH_IMGUI
+    ++inputStuckFrame_;
+    if (inputStuckFrame_ == 10) { startPlay(); return; }
+    if (inputStuckFrame_ < 11) return;
+
+    // ---- phase 1: hold the button and verify it reaches gameplay ----
+    if (inputStuckFrame_ < 30) {
+        injectMouseButton(input_, 0, true);
+        if (inputStuckFrame_ > 12 && aver_fw_input_key(AVER_FW_KEY_MOUSE_LEFT)) inputStuckSawDown_ = true;
+        return;
+    }
+
+    // ---- phase 2: release mouse to editor, but keep button physically down ----
+    if (inputStuckFrame_ == 30) { injectMouseButton(input_, 0, true); releasedByUser_ = true; return; }
+
+    // ---- phase 3: gameplay must see nothing held ----
+    injectMouseButton(input_, 0, true);   // physically down; must not reach game
+    for (int k = 0; k < AVER_FW_KEY_COUNT; ++k) {
+        if (aver_fw_input_key(k)) { ++inputStuckLatched_; if (inputStuckFirstKey_ < 0) inputStuckFirstKey_ = k; }
+    }
+
+    if (inputStuckFrame_ >= 30 + inputStuckFrames_) {
+        const bool downOk  = inputStuckSawDown_;
+        const bool clearOk = inputStuckLatched_ == 0;
+        AVER_INFO("[input-stuck] press  : MOUSE_LEFT held -> gameplay {} -- {}",
+                  downOk ? "saw it" : "NEVER SAW IT",
+                  downOk ? "the button reaches the game" : "THE TEST PROVED NOTHING (no input arrived)");
+        AVER_INFO("[input-stuck] release: {} key-frames still held across {} frames after the "
+                  "release chord, first offender key {} -- {}",
+                  inputStuckLatched_, inputStuckFrames_, inputStuckFirstKey_,
+                  clearOk ? "nothing latched" : "A KEY IS STUCK (pushInput returned without publishing)");
+        AVER_INFO("[input-stuck] RESULT: {}", (downOk && clearOk) ? "PASS" : "FAIL");
+        injectMouseButton(input_, 0, false);
+        releasedByUser_ = false;
+        stopPlay();
+        inputStuckFrames_ = 0;
+    }
+#endif
+}
+
+// Run --play-test: begin play, drive synthetic input 150 frames, stop.
+void SandboxApp::maybePlayTest() {
+    if (!playTest_) return;
+    if (!playTestBegun_) {
+        // No GameMode is a case worth testing; test the engine default pawn fallback too.
+        if (aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE) == 0) {
+            if (++playTestWait_ <= 10) return;
+            playTestBegun_ = true;
+            AVER_INFO("[play-test] no GameMode after 10 frames -- exercising the engine default "
+                      "pawn fallback instead");
+            startPlay();
+            return;
+        }
+        playTestBegun_ = true;
+        AVER_INFO("[play-test] starting - watch for GameMode/Controller/Pawn OnBeginPlay + Pawn OnTick");
+        startPlay();
+        return;
+    }
+    // Countdown runs regardless of input receptivity; don't let spectator fallback run forever.
+    const bool fwPlaying = aver_fw_play_state() == AVER_FW_PLAY_PLAYING;
+    if (fwPlaying) {
+        aver_fw_input_set_key(AVER_FW_KEY_W, 1);
+        if (playTestFrames_ > 60) aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT, 1);
+        if (playTestFrames_ == 100) aver_fw_input_set_key(AVER_FW_KEY_SPACE, 1);
+    }
+    {
+        if (++playTestFrames_ == 150) {
+            const int32_t pawn = fwPlaying ? aver_fw_controlled_pawn(aver_fw_player_controller(0)) : 0;
+            if (pawn) {
+                const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pawn));
+                const Mat4& wm = scene::World::instance().worldMatrix(pe);
+                AVER_INFO("[play-test] character walked to ({:.1f}, {:.1f}, {:.1f}) under synthetic W (spawned at origin)",
+                          wm.m[3][0], wm.m[3][1], wm.m[3][2]);
+            }
+            AVER_INFO("[play-test] stopping - watch for OnEndPlay(reason=Stop) lines");
+            // Use stopPlay(), not aver_fw_end_play() directly; test the button path, not a bypass.
+            stopPlay();
+        }
+    }
+}
+
+#endif
+
+#if AVER_WITH_IMGUI
+// --undo-test [N]: headless proof that Copy/Paste/Duplicate/Delete/Undo/Redo work in scene and objects.
+// Two phases: scene-entity (A) and placeholder-object (B) paths; B runs even without SCENE module.
+// --multiselect-test: test the multi-selection model semantics (model, not clicks).
+// --cbmove-test <dir>: test Content Browser copy/move (file operations, not the drag).
+void SandboxApp::runCbMoveTest(const std::string& root) {
+    int failures = 0;
+    auto check = [&](bool cond, const char* what) {
+        if (cond) AVER_INFO("[cbmove-test] PASS: {}", what);
+        else      { AVER_ERROR("[cbmove-test] FAIL: {}", what); ++failures; }
+    };
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    const fs::path base = fs::path(root) / "cbmove";
+    fs::remove_all(base, ec);
+    const fs::path src = base / "src";
+    const fs::path dst = base / "dst";
+    const fs::path sub = src / "sub";
+    fs::create_directories(sub, ec);
+    fs::create_directories(dst, ec);
+    auto put = [&](const fs::path& p, const char* text) {
+        std::ofstream f(p, std::ios::binary); f << text;
+    };
+    put(src / "a.ocmesh", "A");
+    put(src / "b.ocmat", "B");
+    put(sub / "inner.txt", "I");
+
+    // ---- copy leaves the original ----
+    check(cbCopyEntryTo((src / "a.ocmesh").string(), dst.string()), "copy reports success");
+    check(fs::exists(dst / "a.ocmesh", ec), "the copy landed in the destination");
+    check(fs::exists(src / "a.ocmesh", ec), "and the original is still there");
+
+    // ---- a collision is refused, not overwritten ----
+    check(!cbCopyEntryTo((src / "a.ocmesh").string(), dst.string()),
+          "copying over an existing name is REFUSED");
+    {
+        std::ifstream f(dst / "a.ocmesh", std::ios::binary);
+        std::string got; f >> got;
+        check(got == "A", "and the existing file was not clobbered");
+    }
+
+    // ---- move takes the original with it ----
+    check(cbMoveEntryTo((src / "b.ocmat").string(), dst.string()), "move reports success");
+    check(fs::exists(dst / "b.ocmat", ec), "the moved file is in the destination");
+    check(!fs::exists(src / "b.ocmat", ec), "and is GONE from the source");
+
+    // ---- a folder copies whole ----
+    check(cbCopyEntryTo(sub.string(), dst.string()), "a folder copies");
+    check(fs::exists(dst / "sub" / "inner.txt", ec), "with its contents");
+
+    // ---- the containment primitive the cycle guard rests on ----
+    check(cbIsUnder(sub.string(), src.string()), "a child is under its parent");
+    check(cbIsUnder(src.string(), src.string()), "a folder is under itself");
+    check(!cbIsUnder(src.string(), sub.string()), "a parent is NOT under its child");
+    check(!cbIsUnder(dst.string(), src.string()), "unrelated folders are not related");
+
+    // ---- and the one that stops a double move ----
+    {
+        const std::vector<std::string> in = {src.string(), (sub / "inner.txt").string()};
+        const std::vector<std::string> out = cbPruneNested(in);
+        check(out.size() == 1 && out[0] == src.string(),
+              "dragging a folder AND something inside it moves only the folder");
+    }
+
+    fs::remove_all(base, ec);
+    AVER_INFO("[cbmove-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+}
+
+// --savedirty-test: test "unsaved changes" tracking across save/undo/redo.
+// --prefs-write-test: test that preferences actually reach disk.
+// --notify-test: raise notifications so the stack can be screenshotted (visibility not testable headless).
+void SandboxApp::runNotifyTest() {
+    editor::NotificationQueue& q = editor::notifications();
+    editor::Notification n;
+
+    n = {}; n.severity = editor::NotifySeverity::Info;
+    n.title = "Info"; n.body = "A routine outcome worth mentioning once.";
+    n.ttlSec = 1.0e6; q.push(n);
+
+    n = {}; n.severity = editor::NotifySeverity::Success;
+    n.title = "Imported Rock_01.fbx"; n.body = "3 meshes, 1 skeleton, 2 clips.";
+    n.ttlSec = 1.0e6; q.push(n);
+
+    n = {}; n.severity = editor::NotifySeverity::Warning;
+    n.title = "Already imported"; n.body = "Content/Props/Rock_01.ocmesh exists.";
+    n.ttlSec = 1.0e6; q.push(n);
+
+    // Log this sample to test production path (logSink -> pushFromLog -> queue).
+    AVER_ERROR("[Import] could not read Textures/missing.png");
+
+    n = {}; n.severity = editor::NotifySeverity::Critical;
+    n.title = "Critical - RHI.D3D12"; n.body = "THE GPU DEVICE HAS BEEN LOST";
+    n.sticky = true;
+    n.actions[0] = editor::NotifyAction::ShowOutputLog; n.actionLabels[0] = "Show in Output Log";
+    n.actions[1] = editor::NotifyAction::Dismiss;       n.actionLabels[1] = "Dismiss";
+    q.push(n);
+
+    AVER_INFO("[notify-test] raised {} sample notification(s)", q.size());
+}
+
+void SandboxApp::runPrefsWriteTest() {
+    int failures = 0;
+    auto check = [&](bool cond, const char* what) {
+        if (cond) AVER_INFO("[prefs-write-test] PASS: {}", what);
+        else      { AVER_ERROR("[prefs-write-test] FAIL: {}", what); ++failures; }
+    };
+
+    const std::string path = editor::editorPrefsPath();
+    AVER_INFO("[prefs-write-test] the store says its path is: '{}'", path);
+    check(!path.empty(), "the store has a path at all");
+    if (path.empty()) { AVER_INFO("[prefs-write-test] RESULT: FAIL"); return; }
+
+    std::error_code ec;
+    const bool existed = std::filesystem::exists(path, ec);
+    const auto sizeBefore = existed ? std::filesystem::file_size(path, ec) : 0u;
+    AVER_INFO("[prefs-write-test] before: exists={} size={}", existed ? 1 : 0,
+              static_cast<unsigned long long>(sizeBefore));
+
+    // A key nothing else uses, with a value that cannot already be there.
+    const std::string sentinel = "diagnostic.writeProbe";
+    editor::setPrefString(sentinel, "probe-2026");
+    editor::flushEditorPrefs();
+
+    // Read the FILE back, not the in-memory store -- the store would report success even if the
+    // write never happened.
+    std::string text;
+    const bool read = readFileText(path, text);
+    check(read, "the file can be read back after the flush");
+    check(read && text.find("diagnostic.writeProbe=probe-2026") != std::string::npos,
+          "and the probe value is IN the file on disk");
+
+    const auto sizeAfter = std::filesystem::exists(path, ec)
+                         ? std::filesystem::file_size(path, ec) : 0u;
+    AVER_INFO("[prefs-write-test] after:  size={}", static_cast<unsigned long long>(sizeAfter));
+
+    // Also proves the directory is writable independently of the prefs store, to tell a failure
+    // apart from a permissions problem.
+    const std::string probe = std::filesystem::path(path).parent_path().string() + "/writeprobe.tmp";
+    const bool direct = writeFileTextAtomic(probe, "x");
+    check(direct, "writeFileTextAtomic can write to that directory directly");
+    std::filesystem::remove(probe, ec);
+
+    AVER_INFO("[prefs-write-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+}
+
+void SandboxApp::runProjectSwitchTest() {
+    int failures = 0;
+    auto check = [&](bool cond, const char* what) {
+        if (cond) AVER_INFO("[project-switch-test] PASS: {}", what);
+        else      { AVER_ERROR("[project-switch-test] FAIL: {}", what); ++failures; }
+    };
+
+    const fmt::ProjectDesc saved = project_;
+    const std::string savedBackend = projectBackend_;
+    const f32 savedBudget = frameBudgetMs_;
+    const bool savedForced = frameBudgetForced_;
+    frameBudgetForced_ = false;   // the manifest path, not the --frame-budget override path
+
+    fmt::ProjectDesc a;
+    a.name = "SwitchTestA";
+    a.dir = executableDir();
+    a.backend = "vulkan";
+    a.frameBudgetMs = 8.0f;
+    check(a.valid() && a.hasRenderSettings(), "project A is valid and states render settings");
+    project_ = a;
+    applyProjectRenderSettings();
+    check(projectBackend_ == "vulkan", "opening A puts its backend in the dropdown mirror");
+    check(frameBudgetMs_ == 8.0f, "opening A arms its frame budget");
+
+    fmt::ProjectDesc b;
+    b.name = "SwitchTestB";
+    b.dir = executableDir();
+    check(b.valid() && !b.hasRenderSettings(), "project B is valid and states NO render settings");
+    project_ = b;
+    applyProjectRenderSettings();
+    check(projectBackend_.empty(),
+          "opening B clears the backend mirror instead of inheriting A's vulkan");
+    check(frameBudgetMs_ == b.frameBudgetMs,
+          "opening B resets the frame budget instead of inheriting A's 8ms");
+
+    project_ = saved;
+    projectBackend_ = savedBackend;
+    frameBudgetMs_ = savedBudget;
+    frameBudgetForced_ = savedForced;
+    applyProjectRenderSettings();
+
+    AVER_INFO("[project-switch-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+}
+
+void SandboxApp::runGraphPrintTest() {
+    // Don't log while logMutex_ is held (deadlock with non-recursive mutex).
+    // Read under lock, release, then report; never call check() lambda while locked.
+    int failures = 0;
+    auto check = [&](bool cond, const char* what) {
+        if (cond) AVER_INFO("[graph-print-test] PASS: {}", what);
+        else      { AVER_ERROR("[graph-print-test] FAIL: {}", what); ++failures; }
+    };
+    auto clear = [this] { std::lock_guard<std::mutex> lk(logMutex_); graphPrints_.clear(); };
+
+    // Test PrintString on OnTick; runs every frame during Play (when watched).
+    clear();
+    for (int i = 0; i < 200; ++i) AVER_INFO("[Graph] hello: reached_the_tick");
+    usize rows = 0; u32 count = 0; std::string text;
+    {
+        std::lock_guard<std::mutex> lk(logMutex_);
+        rows = graphPrints_.size();
+        if (!graphPrints_.empty()) { count = graphPrints_.back().count; text = graphPrints_.back().text; }
+    }
+    check(rows == 1, "200 identical prints collapse to ONE row, not 200");
+    check(count == 200, "and the row counts every one of them");
+    check(text == "hello: reached_the_tick", "with the [Graph] prefix stripped and the rest kept verbatim");
+
+    // Alternating prints must not collapse (Branch alternation is the signal).
+    clear();
+    for (int i = 0; i < 3; ++i) {
+        AVER_INFO("[Graph] branch: took_true");
+        AVER_INFO("[Graph] branch: took_false");
+    }
+    { std::lock_guard<std::mutex> lk(logMutex_); rows = graphPrints_.size(); }
+    check(rows == 6, "alternating prints stay separate rows");
+
+    // Non-graph lines must not reach the feed (avoid duplicate logging).
+    clear();
+    AVER_INFO("[Renderer] this is not a graph print");
+    AVER_INFO("[Graph] real: yes");
+    {
+        std::lock_guard<std::mutex> lk(logMutex_);
+        rows = graphPrints_.size();
+        text = graphPrints_.empty() ? std::string() : graphPrints_.back().text;
+    }
+    check(rows == 1, "only the [Graph] line is picked up");
+    check(text == "real: yes", "and it is the right one");
+
+    // Ring cap prevents unbounded growth in long sessions.
+    clear();
+    for (int i = 0; i < static_cast<int>(kMaxGraphPrints) + 20; ++i)
+        AVER_INFO("[Graph] n{}: distinct", i);
+    { std::lock_guard<std::mutex> lk(logMutex_); rows = graphPrints_.size(); }
+    check(rows == kMaxGraphPrints, "the feed is capped, oldest dropped");
+    clear();
+
+    AVER_INFO("[graph-print-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+}
+
+void SandboxApp::runClearShaderCache() {
+    std::filesystem::path dir;
+    if (!clearShaderCacheDir_.empty()) {
+        dir = clearShaderCacheDir_;
+    } else {
+        const std::string udir = userDataDir();
+        if (udir.empty()) {
+            AVER_ERROR("[shader-cache] no user data directory, so there is no cache to clear");
+            return;
+        }
+        dir = std::filesystem::path(udir) / "ShaderCache";
+    }
+    const auto before = rhi::sweepShaderCache(dir, ~0ull);   // a budget nothing can exceed: measure only
+    AVER_INFO("[shader-cache] {} holds {} blob(s), {:.1f} MB", dir.string(), before.filesRemaining,
+              static_cast<f64>(before.bytesRemaining) / (1024.0 * 1024.0));
+    const auto r = rhi::sweepShaderCache(dir, 0);
+    AVER_INFO("[shader-cache] cleared {} blob(s), {:.1f} MB freed", r.filesRemoved,
+              static_cast<f64>(r.bytesRemoved) / (1024.0 * 1024.0));
+    // Reassurance: the cache lives under the user's own data dir, and the sweeper touches only .dxil.
+    AVER_INFO("[shader-cache] only .dxil blobs were touched; the shaders recompile on next launch");
+}
+
+void SandboxApp::runValidateGraph() {
+    // scripts_ is a scripting::ScriptHost, typed `#if AVER_MODULE_SCRIPTING` (SandboxApp.hpp) -- no
+    // member (graphValidateAvailable/graphValidate) exists to call in a scripting-off tree, and the
+    // AVER_WITH_IMGUI this function already sits inside proves nothing about it (module-matrix.ps1's
+    // scripting-off row leaves the UI on, only this module off). The guard covers the whole body
+    // since driving the bridge is this function's only job.
+#if AVER_MODULE_SCRIPTING
+    if (!scripts_.graphValidateAvailable()) {
+        AVER_ERROR("[validate-graph] the staged bridge exports no GraphValidate");
+        return;
+    }
+    const std::string abs = project_.valid() && validateGraphPath_.find(':') == std::string::npos
+        ? (project_.contentDir() + "\\" + validateGraphPath_) : validateGraphPath_;
+    std::string text;
+    if (!readFileText(abs, text)) {
+        AVER_ERROR("[validate-graph] could not read '{}'", abs);
+        return;
+    }
+    std::string err;
+    if (scripts_.graphValidate(text, err))
+        AVER_INFO("[validate-graph] '{}' is VALID", validateGraphPath_);
+    else
+        AVER_INFO("[validate-graph] '{}' is INVALID: {}", validateGraphPath_, err);
+#else
+    AVER_ERROR("[validate-graph] this build has no scripting module; nothing to validate against");
+#endif
+}
+
+void SandboxApp::runRenameRepointTest() {
+    int failures = 0;
+    auto check = [&](bool cond, const char* what) {
+        if (cond) AVER_INFO("[rename-repoint-test] PASS: {}", what);
+        else      { AVER_ERROR("[rename-repoint-test] FAIL: {}", what); ++failures; }
+    };
+    if (!project_.valid()) {
+        AVER_ERROR("[rename-repoint-test] FAIL: needs an open project (pass --project)");
+        AVER_INFO("[rename-repoint-test] RESULT: FAIL");
+        return;
+    }
+
+    std::error_code ec;
+    const std::filesystem::path root = std::filesystem::path(project_.contentDir()) / "RepointTmp";
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::create_directories(root, ec);
+
+    const std::filesystem::path asset   = root / "Cube.ocmesh";
+    const std::filesystem::path referrer= root / "Uses.ocworld";
+    const std::filesystem::path nearMiss= root / "NearMiss.ocworld";
+    const std::filesystem::path unrelated = root / "Other.ocmesh";
+
+    writeFileTextAtomic(asset.string(), "not a real mesh, only its name matters here");
+    writeFileTextAtomic(unrelated.string(), "also not a real mesh");
+    // A real reference, twice, in both separator styles.
+    writeFileTextAtomic(referrer.string(),
+                        "MESH RepointTmp/Cube.ocmesh\nMESH RepointTmp\\Cube.ocmesh\n");
+    // THE NEAR MISS: a longer folder ending in the same segment; anchoring must leave it alone -- its survival is the real test.
+    const std::string nearMissText = "MESH XRepointTmp/Cube.ocmesh\nMESH RepointTmp/Cube.ocmesh2\n";
+    writeFileTextAtomic(nearMiss.string(), nearMissText);
+
+    const std::vector<std::string> found = cbFindReferencesTo(asset.string());
+    check(found.size() == 1, "the scan finds exactly the one real referrer, not the near-miss file");
+
+    cbRenameEntry(asset.string(), "Box.ocmesh", /*repointRefs=*/true);
+    check(std::filesystem::exists(root / "Box.ocmesh", ec), "the asset is renamed on disk");
+
+    std::string after;
+    check(readFileText(referrer.string(), after), "the referrer is readable after the rewrite");
+    check(after.find("RepointTmp/Box.ocmesh") != std::string::npos,
+          "the forward-slash reference was repointed");
+    check(after.find("RepointTmp\\Box.ocmesh") != std::string::npos,
+          "AND the backslash one, keeping its own separator style");
+    check(after.find("Cube.ocmesh") == std::string::npos, "with no stale reference left behind");
+
+    std::string nm;
+    check(readFileText(nearMiss.string(), nm), "the near-miss file is readable");
+    check(nm == nearMissText,
+          "AND IS BYTE-IDENTICAL -- a longer folder and a longer filename were both left alone");
+
+    std::string un;
+    check(readFileText(unrelated.string(), un), "the unrelated asset still exists untouched");
+
+    std::filesystem::remove_all(root, ec);
+    AVER_INFO("[rename-repoint-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+}
+
+void SandboxApp::runFindRefs() {
+    const std::string abs = project_.valid()
+        ? (project_.contentDir() + "\\" + findRefsPath_) : findRefsPath_;
+    const std::vector<std::string> refs = cbFindReferencesTo(abs);
+    AVER_INFO("[find-refs] '{}' is referenced by {} file(s)", findRefsPath_, refs.size());
+    for (const std::string& r : refs) AVER_INFO("[find-refs]   {}", r);
+}
+
+void SandboxApp::runSaveDirtyTest() {
+    int failures = 0;
+    auto check = [&](bool cond, const char* what) {
+        if (cond) AVER_INFO("[savedirty-test] PASS: {}", what);
+        else      { AVER_ERROR("[savedirty-test] FAIL: {}", what); ++failures; }
+    };
+
+    undoStack_.clear();
+    redoStack_.clear();
+    markLevelSaved();
+    check(!levelHasUnsavedEdits(), "a freshly loaded level is not dirty");
+
+    auto edit = [&]() { EditCmd c; c.kind = EditCmd::Kind::Transform; pushEdit(std::move(c)); };
+
+    edit();
+    check(levelHasUnsavedEdits(), "an edit makes it dirty");
+
+    markLevelSaved();
+    check(!levelHasUnsavedEdits(), "SAVING clears it -- the whole point");
+
+    edit();
+    check(levelHasUnsavedEdits(), "editing after a save makes it dirty again");
+
+    undo();
+    check(!levelHasUnsavedEdits(), "undoing back TO the save point is clean again");
+
+    redo();
+    check(levelHasUnsavedEdits(), "redoing away from it is dirty again");
+
+    // Undo PAST the save point is dirty even though the stack is shorter than at save time; depth alone cannot tell this from clean.
+    markLevelSaved();
+    undo();
+    check(levelHasUnsavedEdits(), "undoing PAST the save point is dirty, not clean");
+
+    redo();
+    check(!levelHasUnsavedEdits(), "and redoing back to it is clean");
+
+    // A recovered sidecar is unsaved by construction, whatever the stack says.
+    undoStack_.clear();
+    redoStack_.clear();
+    markLevelUnsaved();
+    check(levelHasUnsavedEdits(), "recovered content reports unsaved even with an empty history");
+
+    // AN EDIT WITH NO UNDO COMMAND MUST STILL BE DIRTY: sun/fog/sky/clouds, Add Component and the
+    // emitter's effect assignment push no EditCmd, so levelHasUnsavedEdits() (driven by the undo
+    // serial alone) missed them, silently losing changes. Driven via markLevelUnsaved -- the panel
+    // needs ImGui state a headless run lacks; this pins the contract those call sites rely on.
+    undoStack_.clear();
+    redoStack_.clear();
+    markLevelSaved();
+    check(!levelHasUnsavedEdits(), "a level with no history and no edits is clean");
+    markLevelUnsaved();
+    check(levelHasUnsavedEdits(),
+          "a non-undoable edit (sun, fog, Add Component, emitter effect) reports unsaved");
+    markLevelSaved();
+    check(!levelHasUnsavedEdits(), "and only SAVING clears it -- there is no command to undo");
+
+    undoStack_.clear();
+    redoStack_.clear();
+    markLevelSaved();
+    AVER_INFO("[savedirty-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+}
+
+void SandboxApp::runMultiSelectTest(Engine& eng) {
+    (void)eng;
+    int failures = 0;
+    auto check = [&](bool cond, const char* what) {
+        if (cond) AVER_INFO("[multiselect-test] PASS: {}", what);
+        else      { AVER_ERROR("[multiselect-test] FAIL: {}", what); ++failures; }
+    };
+#if AVER_MODULE_SCENE
+    scene::World& w = scene::World::instance();
+    scene::Entity a = w.create("msA"), b = w.create("msB"), c = w.create("msC");
+    // A fourth, never added to the set: staleness is about the anchor landing OUTSIDE the selection.
+    scene::Entity d = w.create("msD");
+
+    multiSetSingle(a);
+    check(selEntity_ == a && selectedEntities().size() == 1, "a plain click selects exactly one");
+
+    multiToggle(b);
+    check(selectedEntities().size() == 2 && multiIsSelected(a) && multiIsSelected(b),
+          "ctrl+click adds a second without dropping the first");
+    check(selEntity_ == b, "and the newly added one becomes the anchor");
+
+    multiToggle(b);
+    check(selectedEntities().size() == 1 && !multiIsSelected(b),
+          "ctrl+click again removes it");
+    check(selEntity_ == a, "and the anchor moves to something still selected");
+
+    // Range walk needs drawn order; shift+click takes the whole range.
+    outlinerOrder_ = {a, b, c};
+    multiSetSingle(a);
+    multiRange(c);
+    check(selectedEntities().size() == 3, "shift+click takes the whole range in DRAWN order");
+    check(selEntity_ == a, "and the anchor stays put so a second shift re-ranges from it");
+
+    // Moving anchor within the set must not collapse it (avoid dropping multiple rows).
+    sel_ = kSelScene; selEntity_ = b;
+    check(!multiStale(), "moving the anchor WITHIN the set is not stale");
+    check(selectedEntities().size() == 3, "and the set survives it");
+
+    // Anchor assigned outside the set marks it stale (simulates pick/undo/paste/spawn).
+    sel_ = kSelScene; selEntity_ = d;
+    check(multiStale(), "an anchor assigned OUTSIDE the set marks it stale");
+    check(selectedEntities().size() == 1 && selectedEntities()[0] == d,
+          "and the selection collapses to that one entity rather than staying three");
+    check(!multiIsSelected(a), "the stale set stops reporting membership");
+    multiSyncToAnchor();
+    check(multiSel_.empty(), "the once-a-frame sync then actually drops it");
+
+    // Destroyed entities must not survive in selection.
+    multiSetSingle(a); multiToggle(b);
+    w.destroy(b); w.flush();
+    check(selectedEntities().size() == 1, "a destroyed entity leaves the reported selection");
+
+    // ---- Multi-move undo returns the whole set, not just the anchor ----
+    {
+        scene::Entity m0 = w.create("mvA"), m1 = w.create("mvB"), m2 = w.create("mvC");
+        auto place = [&](scene::Entity e, f32 x) {
+            Transform t; t.position = Vec3{x, 0.0f, 0.0f};
+            w.setLocalTransform(e, t);
+        };
+        place(m0, 0.0f); place(m1, 100.0f); place(m2, 200.0f);
+        outlinerOrder_ = {m0, m1, m2};
+        multiSetSingle(m0); multiToggle(m1); multiToggle(m2);
+        sel_ = kSelScene; selEntity_ = m0;
+
+        check(beginTransformEdit(), "a multi-selection opens a transform gesture");
+        const Vec3 delta{0.0f, 0.0f, 500.0f};
+        Transform at = w.localTransform(m0); at.position += delta; w.setLocalTransform(m0, at);
+        forEachMultiMoved([&](scene::Entity e, const Transform& xf) {
+            Transform t = xf; t.position += delta; w.setLocalTransform(e, t);
+        });
+        endTransformEdit();
+
+        check(std::fabs(w.localTransform(m1).position.z - 500.0f) < 0.01f &&
+              std::fabs(w.localTransform(m2).position.z - 500.0f) < 0.01f,
+              "the non-anchor entities actually moved");
+
+        undo();
+        check(std::fabs(w.localTransform(m0).position.z) < 0.01f,
+              "one undo returns the anchor");
+        check(std::fabs(w.localTransform(m1).position.z) < 0.01f &&
+              std::fabs(w.localTransform(m2).position.z) < 0.01f,
+              "and THE SAME undo returns every other entity in the set");
+
+        redo();
+        check(std::fabs(w.localTransform(m1).position.z - 500.0f) < 0.01f &&
+              std::fabs(w.localTransform(m2).position.z - 500.0f) < 0.01f,
+              "redo takes the whole set forward again, not just the anchor");
+
+        multiClear();
+        sel_ = -1; selEntity_ = scene::kInvalidEntity;
+        undoStack_.clear(); redoStack_.clear();
+        w.destroy(m0); w.destroy(m1); w.destroy(m2); w.flush();
+    }
+
+    // ---- Select All and Ctrl+D copy the whole set ----
+    {
+        scene::Entity s0 = w.create("selA"), s1 = w.create("selB"), s2 = w.create("selC");
+        outlinerOrder_ = {s0, s1, s2};
+        multiClear();
+        sel_ = -1; selEntity_ = scene::kInvalidEntity;
+
+        selectAllInOutliner();
+        check(selectedEntities().size() == 3, "Select All takes every row the outliner listed");
+        check(selEntity_ == s0,
+              "and anchors on the FIRST row, so a following shift-click ranges downward");
+
+        // Duplicate the whole set; count world entities to verify (not just selection).
+        const usize beforeCount = w.count();
+        duplicateSelection();
+        check(w.count() == beforeCount + 3,
+              "Ctrl+D on a set of three creates THREE copies, not one");
+        check(selectedEntities().size() == 3, "and the copies become the selection");
+        check(!multiIsSelected(s0), "leaving the originals deselected, so a drag moves the copies");
+
+        multiClear();
+        sel_ = -1; selEntity_ = scene::kInvalidEntity;
+        undoStack_.clear(); redoStack_.clear();
+        outlinerOrder_.clear();
+    }
+
+    // ---- Copy/Paste take the whole set too, and don't double-copy a subtree ----
+    {
+        scene::Entity c0 = w.create("cpA"), c1 = w.create("cpB"), c2 = w.create("cpC");
+        multiClear();
+        sel_ = -1; selEntity_ = scene::kInvalidEntity;
+        multiSetSingle(c0); multiToggle(c1); multiToggle(c2);
+        sel_ = kSelScene; selEntity_ = c0;
+
+        // Count world entities to catch anchor-only copy.
+        const usize beforeCopy = w.count();
+        copySelection();
+        pasteClipboard();
+        check(w.count() == beforeCopy + 3,
+              "Ctrl+C then Ctrl+V on a set of three creates THREE copies, not one");
+        check(selectedEntities().size() == 3, "and the pastes become the selection");
+        check(w.valid(c0) && w.valid(c1) && w.valid(c2), "with every original left alone");
+
+        multiClear();
+        sel_ = -1; selEntity_ = scene::kInvalidEntity;
+        undoStack_.clear(); redoStack_.clear();
+
+        // Parent+child selected shouldn't double-copy the child as orphan.
+        scene::Entity par = w.create("cpParent");
+        scene::Entity kid = w.create("cpChild", par, Transform{});
+        w.flush();
+        multiClear();
+        multiSetSingle(par); multiToggle(kid);
+        sel_ = kSelScene; selEntity_ = par;
+
+        const usize beforeNest = w.count();
+        copySelection();
+        pasteClipboard();
+        check(w.count() == beforeNest + 2,
+              "a selected parent AND its selected child paste as two entities, not three -- "
+              "the child is not copied a second time as an orphan");
+
+        multiClear();
+        sel_ = -1; selEntity_ = scene::kInvalidEntity;
+        undoStack_.clear(); redoStack_.clear();
+    }
+
+    multiClear();
+    sel_ = -1; selEntity_ = scene::kInvalidEntity;
+    w.destroy(a); w.destroy(c); w.destroy(d); w.flush();
+#endif
+    AVER_INFO("[multiselect-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+}
+
+void SandboxApp::runGraphHitsTest() {
+    // Guard for AVER_MODULE_SCRIPTING.
+#if AVER_MODULE_SCRIPTING
+    int failures = 0;
+    auto check = [&](bool cond, const char* what) {
+        if (cond) AVER_INFO("[graph-hits-test] PASS: {}", what);
+        else      { AVER_ERROR("[graph-hits-test] FAIL: {}", what); ++failures; }
+    };
+
+    if (!scripts_.graphHitsAvailable()) {
+        AVER_ERROR("[graph-hits-test] FAIL: the staged bridge exports no node-hit entry points");
+        AVER_INFO("[graph-hits-test] RESULT: FAIL");
+        return;
+    }
+    check(true, "the bridge exports GraphSetHitRecording and GraphGetHits");
+
+    std::string name;
+    {   // Read graph name from file (key for the managed table).
+        std::string text;
+        if (!readFileText(graphHitsTestPath_, text)) {
+            AVER_ERROR("[graph-hits-test] FAIL: could not read '{}'", graphHitsTestPath_);
+            AVER_INFO("[graph-hits-test] RESULT: FAIL");
+            return;
+        }
+        fmt::OcGraphData g;
+        std::string why;
+        if (fmt::parseOcgraph(text, g, &why)) name = g.name;
+    }
+    check(!name.empty(), "the test graph declares a NAME for the hit table to key on");
+
+    constexpr i32 kEnt = 424242;   // Arbitrary ID; graphLoad keys a map by it.
+    std::vector<std::pair<std::string, f32>> hits;
+
+    // Test with recording disabled first.
+    scripts_.graphSetHitRecording(false);
+    check(scripts_.graphLoad(kEnt, graphHitsTestPath_), "the graph loads onto an entity");
+    scripts_.graphTick(kEnt, 0.016f);
+    scripts_.graphNodeHits(name, 5.0f, hits);
+    check(hits.empty(), "with recording OFF a full tick records nothing");
+
+    scripts_.graphSetHitRecording(true);
+    scripts_.graphTick(kEnt, 0.032f);
+    scripts_.graphNodeHits(name, 5.0f, hits);
+    check(!hits.empty(), "with recording ON the same tick reports nodes that ran");
+    bool aged = true;
+    for (const auto& h : hits) if (h.second < 0.0f || h.second > 5.0f) aged = false;
+    check(aged, "and every reported age is a plausible number of seconds, so the payload parsed");
+
+    // Last entry must survive marshalling.
+    check(hits.size() >= 3,
+          "every node on the chain survives marshalling, including the LAST one");
+    bool named = !hits.empty();
+    for (const auto& h : hits) if (h.first.empty()) named = false;
+    check(named, "and no entry came back with an empty node id, so nothing was cut mid-entry");
+    for (const auto& h : hits) AVER_INFO("[graph-hits-test]   ran: {} ({:.3f}s ago)", h.first, h.second);
+
+    // Different name must report nothing.
+    scripts_.graphNodeHits(name + "_NotThisOne", 5.0f, hits);
+    check(hits.empty(), "asking for a different graph name reports nothing");
+
+    scripts_.graphSetHitRecording(false);
+    scripts_.graphUnload(kEnt);
+    AVER_INFO("[graph-hits-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+#else
+    AVER_ERROR("[graph-hits-test] FAIL: this build has no scripting module; no bridge to hit-test");
+    AVER_INFO("[graph-hits-test] RESULT: FAIL");
+#endif
+}
+
+void SandboxApp::runAssetAssignTest() {
+    int failures = 0;
+    auto check = [&](bool cond, const char* what) {
+        if (cond) AVER_INFO("[asset-assign-test] PASS: {}", what);
+        else      { AVER_ERROR("[asset-assign-test] FAIL: {}", what); ++failures; }
+    };
+#if AVER_MODULE_SCENE
+    scene::World& w = scene::World::instance();
+    const scene::Entity e = w.create("assignTarget");
+    w.addComponent(e, scene::kComponentMeshRenderer);
+    auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+    check(mr != nullptr, "the fixture entity has a mesh renderer");
+    if (mr) {
+        *mr = scene::CMeshRenderer{};
+
+        // Mesh ID is path hash; must reach the field verbatim.
+        const u64 meshId = fnv1a64(std::string_view("Meshes/Pick.ocmesh"));
+        markLevelSaved();
+        check(!levelHasUnsavedEdits(), "the level starts clean");
+        // Clear dirty first to test assignment, not default.
+        mr->dirty = 0;
+        check(assignMeshId(e, meshId), "assignMeshId accepts an entity with a mesh renderer");
+        check(mr->mesh == meshId, "the picked mesh id reaches the field unchanged");
+        check(mr->dirty == 1, "AND THE RENDERER IS TOLD TO RE-UPLOAD -- without this the picture never changes");
+        check(levelHasUnsavedEdits(),
+              "the level is dirty afterwards (these writes have no EditCmd, so this is the only "
+              "thing standing between the edit and silent loss on close)");
+
+        // Material is a name token, not a hash.
+        const i32 token = aver_scene_material(0, "M_PickTest");
+        check(token != 0, "a surface name interns to a non-zero token");
+        check(aver_scene_material(0, "M_PickTest") == token, "and interning is stable");
+        check(fnv1a64(std::string_view("M_PickTest")) != static_cast<u64>(static_cast<u32>(token)),
+              "the token is NOT the name's hash -- which is exactly why the two id spaces cannot "
+              "be used interchangeably");
+        markLevelSaved();
+        check(assignMaterialToken(e, token), "assignMaterialToken accepts the entity");
+        check(mr->material == token, "the TOKEN reaches the field, not a path hash");
+        check(levelHasUnsavedEdits(), "and it marks the level dirty too");
+    }
+
+    // Entity with no mesh renderer must be refused.
+    const scene::Entity bare = w.create("noRenderer");
+    check(!assignMeshId(bare, 1234), "assignMeshId refuses an entity with no mesh renderer");
+    check(!assignMaterialToken(bare, 1), "assignMaterialToken refuses it too");
+
+#if AVER_MODULE_PARTICLES
+    const scene::Entity pem = w.create("emitter");
+    w.addComponent(pem, scene::kComponentParticleEmitter);
+    if (auto* pe = w.component<scene::CParticleEmitter>(pem, scene::kComponentParticleEmitter)) {
+        *pe = scene::CParticleEmitter{};
+        // Extension gate: relative path only.
+        check(!assignParticleEffect(pem, "Meshes/Thing.ocmesh"),
+              "assignParticleEffect refuses anything that is not a .ocparticle");
+        check(pe->effect == 0, "and leaves the field alone when it refuses");
+    }
+    w.destroy(pem);
+#endif
+    w.destroy(e); w.destroy(bare); w.flush();
+#endif
+    AVER_INFO("[asset-assign-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+}
+
+void SandboxApp::runUndoTest(Engine& eng) {
+    int failures = 0;
+    auto check = [&](bool cond, const char* what) {
+        if (cond) AVER_INFO("[undo-test] PASS: {}", what);
+        else      { AVER_ERROR("[undo-test] FAIL: {}", what); ++failures; }
+    };
+
+#if AVER_MODULE_SCENE
+    {
+        scene::World& w = scene::World::instance();
+        // flush() retires a destroy() and makes count()/valid() see it; destroy() only sets
+        // a pending bit until flush() is called. This test flushes after each destroy to
+        // simulate the eventually-consistent state a human would see across real frames.
+        const u32 base = w.count();
+        hideEditorScene_ = true;   // forces spawnCube()'s scene-entity branch
+
+        spawnCube(eng);
+        w.flush();
+        const scene::Entity a1 = selEntity_;
+        check(sel_ == kSelScene && w.valid(a1) && w.count() == base + 1, "spawnCube creates one scene entity");
+
+        // A custom object id, not the fnv1a64(asset name) default.
+        const u64 customId = 0x00A5EA55u;
+        w.setObjectId(a1, customId);
+        check(w.objectId(a1) == customId, "setObjectId sets the custom id the rest of this phase checks for");
+
+        deleteSelection();
+        w.flush();
+        check(!w.valid(a1) && w.count() == base, "deleteSelection removes the scene entity");
+
+        undo();
+        w.flush();
+        const scene::Entity a2 = selEntity_;
+        check(sel_ == kSelScene && w.valid(a2) && w.count() == base + 1, "undo restores the deleted entity");
+        check(w.valid(a2) && w.objectId(a2) == customId, "undo restores the SAME (custom) persisted object id");
+
+        redo();
+        w.flush();
+        check(w.count() == base, "redo re-deletes the restored entity");
+
+        undo();
+        w.flush();
+        const scene::Entity a3 = selEntity_;
+        check(sel_ == kSelScene && w.valid(a3) && w.count() == base + 1, "a second undo restores it again");
+        check(w.valid(a3) && w.objectId(a3) == customId, "the custom object id survives a second undo too");
+
+        copySelection();
+        pasteClipboard();
+        w.flush();
+        const scene::Entity b1 = selEntity_;   // pasteClipboard() selects the pasted copy
+        check(w.valid(b1) && b1 != a3 && w.count() == base + 2, "paste creates a second, distinct entity");
+        check(w.valid(b1) && w.objectId(b1) != customId,
+              "paste's copy does NOT clone a's custom object id (see instantiateEntity's restoreObjectId)");
+
+        duplicateSelection();   // duplicates b1, the current selection
+        w.flush();
+        const scene::Entity c1 = selEntity_;
+        check(w.valid(c1) && c1 != b1 && w.count() == base + 3, "duplicate creates a third, distinct entity");
+        check(w.valid(c1) && w.objectId(c1) != customId, "duplicate's copy also does not clone the custom object id");
+
+        undo(); w.flush(); check(w.count() == base + 2, "unwind 1/3: undoes duplicate's Create");
+        undo(); w.flush(); check(w.count() == base + 1, "unwind 2/3: undoes paste's Create");
+        undo(); w.flush(); check(w.count() == base,     "unwind 3/3: undoes the original spawn's Create");
+    }
+
+    // ---- deleting a PARENT, and getting its children back ------------------------------------
+    // World::destroy retires the whole subtree; a Destroy command captures all entities below the deleted one.
+    {
+        scene::World& w = scene::World::instance();
+        const u32 base = w.count();
+        hideEditorScene_ = true;
+
+        spawnCube(eng); w.flush();
+        const scene::Entity parent = selEntity_;
+        spawnCube(eng); w.flush();
+        const scene::Entity child = selEntity_;
+        spawnCube(eng); w.flush();
+        const scene::Entity grand = selEntity_;
+        check(w.count() == base + 3, "three entities for the hierarchy phase");
+
+        // keepWorld = false: local transform matches parent-relative transform.
+        check(w.setParent(child, parent, false), "the child accepts the parent");
+        check(w.setParent(grand, child, false),  "and the grandchild accepts the child");
+        check(w.parent(child) == parent && w.parent(grand) == child, "the chain is two deep");
+
+        // ---- the gizmo's frame ----------------------------------------------------------
+        // selectedXform/setSelectedXform used to return CLocal while gizmo draws
+        // at the returned position: a child 5000 cm out drew its manipulator 50 m from its mesh.
+        {
+            Transform pxf; pxf.position = Vec3{5000.0f, 0.0f, 0.0f};
+            w.setLocalTransform(parent, pxf);
+            Transform cxf; cxf.position = Vec3{0.0f, 0.0f, 90.0f};
+            w.setLocalTransform(child, cxf);
+
+            sel_ = kSelScene; selEntity_ = child;
+            EditXform gx{};
+            check(selectedXform(gx), "the child's transform reads back");
+            check(std::fabs(gx.pos.x - 5000.0f) < 0.01f && std::fabs(gx.pos.z - 90.0f) < 0.01f,
+                  "and it is WORLD (5000,0,90), not the local (0,0,90) the gizmo would have drawn at");
+
+            // Round trip must be exact.
+            setSelectedXform(gx);
+            const auto* back = w.component<scene::CLocal>(child, scene::kComponentLocal);
+            check(back && std::fabs(back->xf.position.x) < 0.01f
+                       && std::fabs(back->xf.position.z - 90.0f) < 0.01f,
+                  "writing that world transform straight back leaves the LOCAL one unchanged");
+
+            // A real world-space move lands where asked.
+            gx.pos = Vec3{5000.0f, 0.0f, 140.0f};
+            setSelectedXform(gx);
+            EditXform again{};
+            check(selectedXform(again) && std::fabs(again.pos.z - 140.0f) < 0.01f,
+                  "and moving it in world space puts it where the drag asked");
+
+                sel_ = kSelScene; selEntity_ = parent;
+        }
+
+        // ---- undo of a TRANSFORM on a child ---------------------------------------------
+        // endTransformEdit records via selectedXform (WORLD), but applyXformTo writes into CLocal:
+        // on a child undo moved it by its own world coords read as parent-relative offset.
+        {
+            Transform pxf; pxf.position = Vec3{5000.0f, 0.0f, 0.0f};
+            w.setLocalTransform(parent, pxf);
+            Transform cxf; cxf.position = Vec3{0.0f, 0.0f, 90.0f};
+            w.setLocalTransform(child, cxf);
+
+            sel_ = kSelScene; selEntity_ = child;
+            beginTransformEdit();
+            EditXform moved{};
+            selectedXform(moved);
+            moved.pos = Vec3{5000.0f, 0.0f, 250.0f};   // a world-space drag, straight up
+            setSelectedXform(moved);
+            endTransformEdit();
+
+            const auto* afterDrag = w.component<scene::CLocal>(child, scene::kComponentLocal);
+            check(afterDrag && std::fabs(afterDrag->xf.position.z - 250.0f) < 0.01f,
+                  "dragging a child in world space leaves the expected LOCAL z");
+
+            undo();
+            w.flush();
+            const auto* afterUndo = w.component<scene::CLocal>(child, scene::kComponentLocal);
+            check(afterUndo && std::fabs(afterUndo->xf.position.z - 90.0f) < 0.01f
+                            && std::fabs(afterUndo->xf.position.x) < 0.01f,
+                  "and UNDO puts the child back at local (0,0,90) -- not at its world x of 5000");
+
+            redo();
+            w.flush();
+            const auto* afterRedo = w.component<scene::CLocal>(child, scene::kComponentLocal);
+            check(afterRedo && std::fabs(afterRedo->xf.position.z - 250.0f) < 0.01f,
+                  "and redo returns it to the dragged position");
+            undo(); w.flush();
+        }
+
+        // ---- undo of DELETING A CHILD keeps it attached ---------------------------------
+        // Subtree capture restores everything BELOW the deleted entity; a deleted child came back as a root.
+        {
+            sel_ = kSelScene; selEntity_ = child;
+            deleteSelection();
+            w.flush();
+            check(!w.valid(child), "the child is deleted");
+
+            undo();
+            w.flush();
+            const scene::Entity back = selEntity_;
+            check(w.valid(back), "and undo brings it back");
+            check(w.parent(back) == parent,
+                  "STILL PARENTED to the entity it hung from, rather than restored as a root");
+            const auto* bl = w.component<scene::CLocal>(back, scene::kComponentLocal);
+            check(bl && std::fabs(bl->xf.position.z - 90.0f) < 0.01f,
+                  "at its original parent-relative transform");
+        }
+
+        // ---- Duplicate and Paste take the CHILDREN with them ----------------------------
+        // copySelection/duplicateSelection described one entity, so duplicating a
+        // table with a lamp produced a bare table. Delete carried its subtree; these two did not.
+        {
+            // A fresh depth-2 chain, independent of the parent/child/grand fixture above.
+            const u32 dbase = w.count();
+            spawnCube(eng); w.flush(); const scene::Entity dp = selEntity_;
+            spawnCube(eng); w.flush(); const scene::Entity dc = selEntity_;
+            spawnCube(eng); w.flush(); const scene::Entity dg = selEntity_;
+            check(w.setParent(dc, dp, false) && w.setParent(dg, dc, false),
+                  "a fresh parent -> child -> grandchild chain for the copy phase");
+            Transform dcx; dcx.position = Vec3{0.0f, 0.0f, 120.0f};
+            w.setLocalTransform(dc, dcx);
+            check(w.count() == dbase + 3, "three entities before any copying");
+
+            // ---- Duplicate ----
+            sel_ = kSelScene; selEntity_ = dp;
+            duplicateSelection();
+            w.flush();
+            const scene::Entity dupRoot = selEntity_;
+            check(w.valid(dupRoot) && dupRoot != dp, "duplicate made a NEW root entity");
+            check(w.count() == dbase + 6,
+                  "and brought BOTH descendants with it -- three more entities, not one");
+            const scene::Entity dupChild = w.firstChild(dupRoot);
+            check(dupChild != scene::kInvalidEntity, "the copy has a child");
+            check(dupChild != scene::kInvalidEntity && w.firstChild(dupChild) != scene::kInvalidEntity,
+                  "and the child has one too, so the whole depth-2 chain came across");
+            // The copy is its own object, not an alias.
+            const auto* dcl = dupChild != scene::kInvalidEntity
+                ? w.component<scene::CLocal>(dupChild, scene::kComponentLocal) : nullptr;
+            check(dcl && std::fabs(dcl->xf.position.z - 120.0f) < 0.01f,
+                  "the copied child kept its parent-relative transform");
+
+            undo(); w.flush();
+            check(w.count() == dbase + 3 && w.valid(dp) && w.valid(dc) && w.valid(dg),
+                  "undo removes the whole duplicate and leaves the ORIGINAL chain intact");
+
+            redo(); w.flush();
+            check(w.count() == dbase + 6,
+                  "and REDO brings the descendants back, not just the root");
+            undo(); w.flush();
+
+            // ---- Copy / Paste ----
+            sel_ = kSelScene; selEntity_ = dp;
+            copySelection();
+            pasteClipboard();
+            w.flush();
+            const scene::Entity pasteRoot = selEntity_;
+            check(w.valid(pasteRoot) && pasteRoot != dp, "paste made a NEW root entity");
+            check(w.count() == dbase + 6, "and pasted the descendants with it");
+            const scene::Entity pasteChild = w.firstChild(pasteRoot);
+            check(pasteChild != scene::kInvalidEntity &&
+                  w.firstChild(pasteChild) != scene::kInvalidEntity,
+                  "two levels deep, like the thing that was copied");
+
+            undo(); w.flush();
+            check(w.count() == dbase + 3 && w.valid(dp) && w.valid(dc) && w.valid(dg),
+                  "undo of a paste removes the copy and leaves the original chain");
+
+            // Clipboard survives its own paste.
+            pasteClipboard(); w.flush();
+            check(w.count() == dbase + 6, "a SECOND paste from the same clipboard is complete too");
+            undo(); w.flush();
+
+            // Clean up.
+            sel_ = kSelScene; selEntity_ = dp; deleteSelection(); w.flush();
+            check(w.count() == dbase, "the copy phase cleaned up after itself");
+        }
+
+        // ---- a material edit is an undoable COMMAND -------------------------------------
+        // materialPanel wrote straight through a MaterialDesc* and called touch(); EditCmd::Kind
+        // had no Material case, so nothing was ever pushed. Ctrl+Z after darkening a wall undid
+        // whatever came BEFORE it and left the wall dark.
+#if AVER_MODULE_PBR
+        {
+            pbr::MaterialDesc md;
+            md.name = "M_UndoTestProbe";
+            md.roughnessFactor = 0.20f;
+            md.metallicFactor  = 0.00f;
+            const pbr::MaterialHandle mh = pbr::MaterialLibrary::get().create(md);
+            check(mh != 0, "a probe material was created");
+
+            const usize stackBefore = undoStack_.size();
+
+            // What the panel does on release: snapshot before, mutate, push one command.
+            pbr::MaterialDesc* live = pbr::MaterialLibrary::get().mutableDesc(mh);
+            check(live != nullptr, "and its desc is reachable");
+            if (live) {
+                const pbr::MaterialDesc beforeDesc = *live;
+                live->roughnessFactor = 0.90f;
+                live->metallicFactor  = 1.00f;
+                EditCmd mc;
+                mc.kind = EditCmd::Kind::Material;
+                mc.matHandle = mh;
+                mc.matBefore = beforeDesc;
+                mc.matAfter  = *live;
+                pushEdit(std::move(mc));
+                check(undoStack_.size() == stackBefore + 1,
+                      "a material edit puts exactly ONE entry on the undo stack");
+
+                undo();
+                const pbr::MaterialDesc* afterUndo = pbr::MaterialLibrary::get().desc(mh);
+                check(afterUndo && std::fabs(afterUndo->roughnessFactor - 0.20f) < 1e-4f
+                                && std::fabs(afterUndo->metallicFactor) < 1e-4f,
+                      "undo restores BOTH sliders, not just the last one moved");
+                // Name is identity, not an edited value.
+                check(afterUndo && afterUndo->name == "M_UndoTestProbe",
+                      "and does NOT rewrite the material's name");
+
+                // A SENTINEL BEFORE THE REDO.
+                if (pbr::MaterialDesc* poke = pbr::MaterialLibrary::get().mutableDesc(mh))
+                    poke->roughnessFactor = 0.55f;
+                redo();
+                const pbr::MaterialDesc* afterRedo = pbr::MaterialLibrary::get().desc(mh);
+                check(afterRedo && std::fabs(afterRedo->roughnessFactor - 0.90f) < 1e-4f
+                                && std::fabs(afterRedo->metallicFactor - 1.00f) < 1e-4f,
+                      "redo re-applies the edit");
+                check(afterRedo && afterRedo->name == "M_UndoTestProbe",
+                      "with the name still intact");
+
+                undo();   // leave the library as this phase found it
+            }
+            pbr::MaterialLibrary::get().destroy(mh);
+        }
+#endif
+
+        // ---- renaming an entity is an undoable COMMAND ---------------------------------
+        // No F2, context menu, or Details field existed; entityLabels_ was written only at
+        // spawn/paste/duplicate/load, so "Cube 1..40" stayed that way.
+        {
+            const u32 rnbase = w.count();
+            spawnCube(eng); w.flush();
+            const scene::Entity re = selEntity_;
+            const std::string spawned = entityLabels_.count(static_cast<u32>(re))
+                                      ? entityLabels_[static_cast<u32>(re)] : std::string();
+            const usize stackBefore = undoStack_.size();
+
+            renameEntity(re, "Doorway");
+            check(entityLabels_[static_cast<u32>(re)] == "Doorway", "renameEntity sets the label");
+            check(undoStack_.size() == stackBefore + 1, "and puts ONE entry on the undo stack");
+
+            // Rename to the SAME name is not an edit.
+            renameEntity(re, "Doorway");
+            check(undoStack_.size() == stackBefore + 1, "renaming to the same name pushes nothing");
+
+            undo();
+            check((entityLabels_.count(static_cast<u32>(re))
+                   ? entityLabels_[static_cast<u32>(re)] : std::string()) == spawned,
+                  "undo restores the name it had before");
+            redo();
+            check(entityLabels_[static_cast<u32>(re)] == "Doorway", "redo re-applies the rename");
+
+            // Asset name is not touched: CName is the placement's asset path.
+            check(std::string(w.name(re)) == "Meshes/cube.ocmesh",
+                  "and the entity's ASSET name is untouched by any of it");
+
+            undo();                       // put the label back
+            sel_ = kSelScene; selEntity_ = re; deleteSelection(); w.flush();
+            check(w.count() == rnbase, "the rename phase cleaned up after itself");
+        }
+
+        // ---- the Outliner's reparent, as a command --------------------------------------
+        // pushReparent is what a World Outliner drag-and-drop calls.
+        {
+            const u32 rbase = w.count();
+            spawnCube(eng); w.flush(); const scene::Entity ra = selEntity_;
+            spawnCube(eng); w.flush(); const scene::Entity rb = selEntity_;
+            spawnCube(eng); w.flush(); const scene::Entity rc = selEntity_;
+            check(w.count() == rbase + 3, "three fresh roots for the reparent phase");
+
+            Transform axf; axf.position = Vec3{1000.0f, 0.0f, 0.0f};
+            w.setLocalTransform(ra, axf);
+            Transform bxf; bxf.position = Vec3{1000.0f, 0.0f, 300.0f};
+            w.setLocalTransform(rb, bxf);
+
+            // keepWorld: the object must not jump on screen during a drag.
+            const usize stackBefore = undoStack_.size();
+            pushReparent(rb, ra);
+            check(w.parent(rb) == ra, "a drop parents the dragged entity to the row it landed on");
+            check(undoStack_.size() == stackBefore + 1, "and puts exactly one entry on the undo stack");
+            const auto* bl = w.component<scene::CLocal>(rb, scene::kComponentLocal);
+            check(bl && std::fabs(bl->xf.position.x) < 0.01f
+                     && std::fabs(bl->xf.position.z - 300.0f) < 0.01f,
+                  "keepWorld rewrote the local transform so it did not move on screen");
+
+            undo(); w.flush();
+            check(w.parent(rb) == scene::kInvalidEntity, "undo puts it back at the root");
+            const auto* bu = w.component<scene::CLocal>(rb, scene::kComponentLocal);
+            check(bu && std::fabs(bu->xf.position.x - 1000.0f) < 0.01f,
+                  "with the exact local transform it had before the drop, not a recomputed one");
+
+            redo(); w.flush();
+            check(w.parent(rb) == ra, "redo re-parents it");
+
+            // A cycle is refused and pushes nothing.
+            pushReparent(rc, rb);   // rc under rb, so rb's chain is ra -> rb -> rc
+            check(w.parent(rc) == rb, "a grandchild attaches");
+            const usize beforeCycle = undoStack_.size();
+            // The legality test directly (World already refuses via setParent).
+            check(reparentLegality(ra, rc) == ReparentLegality::SelfOrDescendant,
+                  "the Outliner's own legality test calls an ancestor-under-descendant a cycle");
+            check(reparentLegality(ra, ra) == ReparentLegality::SelfOrDescendant,
+                  "and calls self-parenting one too");
+            check(reparentLegality(rb, ra) == ReparentLegality::Ok,
+                  "while an ordinary re-parent onto a non-descendant is allowed");
+            pushReparent(ra, rc);   // ra is rc's ancestor: a cycle
+            check(w.parent(ra) == scene::kInvalidEntity, "reparenting an ancestor under its own descendant is REFUSED");
+            check(undoStack_.size() == beforeCycle, "and pushes no undo entry");
+            pushReparent(ra, ra);
+            check(w.parent(ra) == scene::kInvalidEntity, "so is parenting something to itself");
+            check(undoStack_.size() == beforeCycle, "still no undo entry");
+
+            // Dropping onto the current parent is a no-op.
+            pushReparent(rc, rb);
+            check(undoStack_.size() == beforeCycle, "dropping onto the CURRENT parent adds nothing to the stack");
+
+            // Off-level endpoints are refused: saveLevel only writes a parent for level-owned entities.
+            const scene::Entity stray = w.create("stray", scene::kInvalidEntity, Transform{});
+            w.flush();
+            check(!isLevelOwned(stray), "an entity outside levelEntities_ is not level-owned");
+            const usize beforeStray = undoStack_.size();
+            pushReparent(stray, ra);
+            check(w.parent(stray) == scene::kInvalidEntity, "reparenting an entity the level does not own is REFUSED");
+            pushReparent(rc, stray);
+            check(w.parent(rc) == rb, "and so is parenting a level entity UNDER one it does not own");
+            check(undoStack_.size() == beforeStray, "neither pushed an undo entry");
+            w.destroy(stray); w.flush();
+
+            // The root drop zone.
+            pushReparent(rc, scene::kInvalidEntity);
+            check(w.parent(rc) == scene::kInvalidEntity, "dropping on empty space unparents to the root");
+            undo(); w.flush();
+            check(w.parent(rc) == rb, "and undo re-attaches it");
+
+            // Clean up.
+            sel_ = kSelScene; selEntity_ = ra; deleteSelection(); w.flush();
+            check(w.count() == rbase, "teardown: the reparent phase leaves no entities behind");
+            undoStack_.clear(); redoStack_.clear(); markLevelSaved();
+        }
+
+        sel_ = kSelScene; selEntity_ = parent;
+        deleteSelection();
+        w.flush();
+        check(w.count() == base, "deleting the PARENT removes all three -- World::destroy takes the subtree");
+        check(!w.valid(child) && !w.valid(grand), "the children are gone with it, not orphaned");
+
+        undo();
+        w.flush();
+        check(w.count() == base + 3, "and undo brings all three back, not just the one that was selected");
+
+        // Restored relationship, not just count.
+        const scene::Entity p2 = selEntity_;
+        check(w.valid(p2) && w.parent(p2) == scene::kInvalidEntity, "the restored parent is a root again");
+        u32 kids = 0;
+        scene::Entity firstKid = scene::kInvalidEntity;
+        for (scene::Entity c = w.firstChild(p2); c != scene::kInvalidEntity; c = w.nextSibling(c)) {
+            if (firstKid == scene::kInvalidEntity) firstKid = c;
+            ++kids;
+        }
+        check(kids == 1, "with exactly one child under it again");
+        u32 grandKids = 0;
+        if (firstKid != scene::kInvalidEntity)
+            for (scene::Entity g = w.firstChild(firstKid); g != scene::kInvalidEntity; g = w.nextSibling(g))
+                ++grandKids;
+        check(grandKids == 1, "and the grandchild back under THAT child, two deep as it was");
+
+        redo();
+        w.flush();
+        check(w.count() == base, "redo re-deletes the whole subtree");
+        undo();
+        w.flush();
+        check(w.count() == base + 3, "and a second undo restores all three again");
+
+        // Clean up.
+        sel_ = kSelScene; selEntity_ = selEntity_;
+        deleteSelection();
+        w.flush();
+        check(w.count() == base, "teardown: the phase leaves no entities behind");
+    }
+#else
+    AVER_INFO("[undo-test] AVER_MODULE_SCENE is off; skipping the scene-entity phase");
+#endif
+    {
+        const usize objBase = objects_.size();
+        hideEditorScene_ = false;   // forces spawnCube()'s placeholder-object branch instead
+        sel_ = -1; selEntity_ = kInvalidId;
+
+        spawnCube(eng);
+        check(sel_ >= 0 && (usize)sel_ < objects_.size() && objects_.size() == objBase + 1,
+              "spawnCube (placeholder branch) adds one object");
+
+        deleteSelection();
+        check(objects_.size() == objBase, "deleteSelection removes the placeholder object");
+
+        undo();
+        check(objects_.size() == objBase + 1 && sel_ >= 0 && (usize)sel_ < objects_.size(),
+              "undo restores the deleted placeholder object -- THIS DID NOT EXIST before this change");
+
+        redo();
+        check(objects_.size() == objBase, "redo re-deletes the placeholder object");
+
+        undo();
+        check(objects_.size() == objBase + 1, "a second undo restores the placeholder object again");
+
+        copySelection();
+        pasteClipboard();
+        check(objects_.size() == objBase + 2, "paste creates a second placeholder object");
+
+        duplicateSelection();
+        check(objects_.size() == objBase + 3, "duplicate creates a third placeholder object");
+
+        undo(); check(objects_.size() == objBase + 2, "unwind 1/3: undoes duplicate's CreateObj");
+        undo(); check(objects_.size() == objBase + 1, "unwind 2/3: undoes paste's CreateObj");
+        undo(); check(objects_.size() == objBase,     "unwind 3/3: undoes the original spawn's CreateObj");
+    }
+
+    AVER_INFO("[undo-test] {} failure(s)", failures);
+    std::exit(failures == 0 ? 0 : 1);
+}
+
+// --keybind-test write|read: a TWO-PROCESS test that a rebind survives restart
+// and conflict detection refuses rather than silently stealing a chord.
+//   write: rebinds Edit.Copy to Ctrl+K, attempts Edit.Paste onto Ctrl+Z (Undo's default).
+//   read:  checks Edit.Copy is Ctrl+K and Edit.Paste is Ctrl+V.
+void SandboxApp::runKeybindPersistTest(const std::string& mode) {
+    int failures = 0;
+    auto check = [&](bool cond, const char* what) {
+        if (cond) AVER_INFO("[keybind-test] PASS: {}", what);
+        else      { AVER_ERROR("[keybind-test] FAIL: {}", what); ++failures; }
+    };
+    using editor::CommandId;
+    using editor::Chord;
+
+    if (mode == "write") {
+        check(editor::chordToString(keybinds_.chordFor(CommandId::EditCopy)) == "Ctrl+C",
+              "Edit.Copy starts at its compiled-in default (Ctrl+C)");
+
+        // SelectAll as a real command.
+        check(editor::chordToString(keybinds_.chordFor(CommandId::EditSelectAll)) == "Ctrl+A",
+              "Edit.SelectAll exists as a real command and defaults to Ctrl+A");
+        check(keybinds_.conflictWith(CommandId::EditSelectAll,
+                                      editor::keybindDef(CommandId::EditSelectAll).def,
+                                      editor::keybindDef(CommandId::EditSelectAll).scope) == CommandId::Count,
+              "and Ctrl+A collides with nothing else in the viewport scope");
+
+        const Chord ctrlZ{ImGuiKey_Z, true, false, false};   // Edit.Undo's own default chord
+        const bool blocked = !keybinds_.rebind(CommandId::EditPaste, ctrlZ);
+        check(blocked, "rebinding Edit.Paste to Ctrl+Z is REFUSED (Edit.Undo already holds it)");
+        check(editor::chordToString(keybinds_.chordFor(CommandId::EditPaste)) == "Ctrl+V",
+              "the refused rebind left Edit.Paste's chord unchanged");
+
+        const Chord ctrlK{ImGuiKey_K, true, false, false};   // not any command's default
+        check(keybinds_.conflictWith(CommandId::EditCopy, ctrlK,
+                                      editor::keybindDef(CommandId::EditCopy).scope) == CommandId::Count,
+              "Ctrl+K is free before the rebind");
+        check(keybinds_.rebind(CommandId::EditCopy, ctrlK), "rebinding Edit.Copy to the free chord Ctrl+K succeeds");
+        check(editor::chordToString(keybinds_.chordFor(CommandId::EditCopy)) == "Ctrl+K",
+              "Edit.Copy now reads back as Ctrl+K in THIS process' memory");
+
+        keybinds_.saveToPrefs();
+        editor::flushEditorPrefs();
+        AVER_INFO("[keybind-test] wrote keybind.edit.copy=Ctrl+K to {}", editor::editorPrefsPath());
+    } else if (mode == "read") {
+        // loadEditorPreferences() already ran this frame.
+        check(editor::chordToString(keybinds_.chordFor(CommandId::EditCopy)) == "Ctrl+K",
+              "a FRESH process reads Edit.Copy back as Ctrl+K from editor.ini -- the rebind persisted");
+        check(editor::chordToString(keybinds_.chordFor(CommandId::EditPaste)) == "Ctrl+V",
+              "Edit.Paste is still Ctrl+V in a fresh process -- the REFUSED rebind never reached disk");
+    } else {
+        AVER_ERROR("[keybind-test] unknown mode '{}' (want write|read)", mode);
+        ++failures;
+    }
+
+    AVER_INFO("[keybind-test] {} failure(s)", failures);
+    std::exit(failures == 0 ? 0 : 1);
+}
+
+#endif
+
+#if AVER_MODULE_SYNAPSE
+// --bake-nav: fired at frame 5, not 0, since applyProject's startup builds collision bodies.
+void SandboxApp::navBakeCheck(Engine& e) {
+    if (navLoadPending_) { navLoadPending_ = false; loadNavForLevel(e); }
+    if (!navBakeOnStart_ || navBakeDone_) return;
+    if (e.time().frame < 5) return;
+    navBakeDone_ = true;
+    // bakeNavigationNow samples scene::World::instance(), compiled only under AVER_MODULE_SCENE.
+#if AVER_MODULE_SCENE
+    bakeNavigationNow(e);
+#else
+    AVER_WARN("[Editor] --bake-nav: this build has no scene module, so there is no world to sample");
+#endif
+}
+
+#endif
+
+// --gpu-timing: print per-pass GPU breakdown near the end of a bounded run.
+// Calls handleFrameTime at maxFrames_ - 2 since numbers average over accumulated frames.
+// --ray-probe <sx> <sy>: report what viewportRay returns for one screen point.
+// Prints two checkable numbers: ray origin's distance along view axis
+// and reprojection of a ray point (must return the asked-for pixel).
+void SandboxApp::rayProbeCheck(Engine& e) {
+    if (!rayProbe_ || maxFrames_ == 0 || rayProbeDone_) return;
+    const u64 want = maxFrames_ > 8 ? maxFrames_ - 2 : maxFrames_ - 1;
+    if (e.time().frame < want) return;
+    rayProbeDone_ = true;
+    // viewportRay is guarded by AVER_WITH_IMGUI.
+#if AVER_WITH_IMGUI
+    Vec3 ro{}, rd{};
+    viewportRay(rayProbeX_, rayProbeY_, ro, rd);
+    const Vec3 fwd = camForward();
+    const Vec3 d   = ro - eye_;
+    const f32 along = d.x*fwd.x + d.y*fwd.y + d.z*fwd.z;
+    f32 bx = 0.0f, by = 0.0f;
+    const bool ok = project(ro + rd * 0.5f, bx, by);
+    AVER_INFO("[RayProbe] screen ({:.1f},{:.1f}) viewport ({:.0f},{:.0f} {:.0f}x{:.0f}) "
+              "eye ({:.2f},{:.2f},{:.2f}) origin ({:.2f},{:.2f},{:.2f}) "
+              "aheadOfEye {:.4f} dir ({:.3f},{:.3f},{:.3f}) reproject {} ({:.1f},{:.1f})",
+              rayProbeX_, rayProbeY_, vpX_, vpY_, vpW_, vpH_,
+              eye_.x, eye_.y, eye_.z, ro.x, ro.y, ro.z, along,
+              rd.x, rd.y, rd.z, ok ? "ok" : "BEHIND", bx, by);
+#else
+    AVER_INFO("[RayProbe] this build has no editor viewport (AVER_WITH_IMGUI is off); nothing to probe");
+#endif
+}
+
+void SandboxApp::gpuTimingCheck(Engine& e) {
+    if (!gpuTiming_ || maxFrames_ == 0 || gpuTimingDone_) return;
+    const u64 want = maxFrames_ > 8 ? maxFrames_ - 2 : maxFrames_ - 1;
+    if (e.time().frame < want) return;
+    gpuTimingDone_ = true;
+    editor::handleFrameTime(*this, e, {}, [](LogLevel lvl, std::string msg) {
+        if (lvl == LogLevel::Error) AVER_ERROR("[GPU] {}", msg);
+        else                        AVER_INFO ("[GPU] {}", msg);
+    });
+    // M6: video-memory snapshot near the end of the run.
+    const rhi::VideoMemoryInfo vm = e.device() ? e.device()->videoMemory() : rhi::VideoMemoryInfo{};
+    if (vm.supported) {
+        AVER_INFO("[GPU] video memory: local {} MB used of {} MB budget, non-local {} MB used of {} MB budget",
+                  vm.localUsageBytes / 1048576, vm.localBudgetBytes / 1048576,
+                  vm.nonLocalUsageBytes / 1048576, vm.nonLocalBudgetBytes / 1048576);
+    } else {
+        AVER_INFO("[GPU] video memory: not reported by this backend");
+    }
+}
+
+// --resize-cycle N: resize the real window every N frames during a bounded run.
+// SetWindowPos on the HWND with SWP_NOACTIVATE so a capture run doesn't steal focus.
+void SandboxApp::resizeCheck(Engine& e) {
+    if (resizeCycle_ == 0 || !e.window()) return;
+    const u64 f = e.time().frame;
+    if (f == 0 || (f % resizeCycle_) != 0) return;
+    HWND hwnd = static_cast<HWND>(e.window()->nativeHandle());
+    if (!hwnd) return;
+    RECT r{};
+    if (!GetWindowRect(hwnd, &r)) return;
+    // Alternate between two sizes.
+    const int w = (r.right - r.left), h = (r.bottom - r.top);
+    const bool big = (resizeStep_++ & 1) == 0;
+    const int nw = big ? (w - 137) : (w + 137);   // odd numbers on purpose
+    const int nh = big ? (h -  83) : (h +  83);
+    if (nw < 320 || nh < 240) return;
+    SetWindowPos(hwnd, nullptr, 0, 0, nw, nh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    AVER_INFO("[Sandbox] --resize-cycle: frame {} resized the window to {}x{}", f, nw, nh);
+}
+
+void SandboxApp::captureCheck(Engine& e) {
+    // --luma-sweep and --firefly-metric share the device's capture slot; don't stomp.
+    if (lumaSweep_ || fireflyMetric_) return;
+    const u64 f = e.time().frame;
+    const u64 sf = maxFrames_>8?maxFrames_-3:4;
+    const u32 px_ = probeU_ >= 0.0f ? (u32)(vpX_ + vpW_ * probeU_)
+                  : (probeX_ ? probeX_ : (u32)(vpX_ + vpW_*0.5f));
+    const u32 py_ = probeV_ >= 0.0f ? (u32)(vpY_ + vpH_ * probeV_)
+                  : (probeY_ ? probeY_ : (u32)(vpY_ + vpH_*0.5f));
+    if (f==sf) {
+        e.device()->requestCapture(px_, py_);
+        capX_=px_; capY_=py_; capVpX_=vpX_; capVpY_=vpY_; capVpW_=vpW_; capVpH_=vpH_;
+    }
+    if (f>sf && !capDone_){
+        const bool insideReq = (f32)capX_ >= capVpX_ && (f32)capX_ < capVpX_+capVpW_ &&
+                               (f32)capY_ >= capVpY_ && (f32)capY_ < capVpY_+capVpH_;
+        const bool rectStable = capVpX_==vpX_ && capVpY_==vpY_ && capVpW_==vpW_ && capVpH_==vpH_;
+        const char* tag = !insideReq ? "OUTSIDE-VIEWPORT"
+                        : !rectStable ? "VIEWPORT-MOVED"
+                                      : "in-viewport";
+        f32 px[4]; if (e.device()->getCapture(px)) {
+            AVER_INFO("[Sandbox] probe ({},{}) px ({:.2f},{:.2f},{:.2f}) raw ({},{},{}) viewport ({},{} {}x{}) {}",
+                      capX_, capY_, px[0],px[1],px[2],
+                      (int)(px[0]*255.0f+0.5f), (int)(px[1]*255.0f+0.5f), (int)(px[2]*255.0f+0.5f),
+                      (int)capVpX_, (int)capVpY_, (int)capVpW_, (int)capVpH_, tag);
+            if (!insideReq)
+                AVER_ERROR("[Sandbox] PROBE INVALID: ({},{}) is outside the 3D viewport ({},{} {}x{}) "
+                           "-- the value above is editor chrome, not a shading result",
+                           capX_, capY_, (int)capVpX_, (int)capVpY_, (int)capVpW_, (int)capVpH_);
+            else if (!rectStable)
+                AVER_WARN("[Sandbox] PROBE SUSPECT: the viewport moved to ({},{} {}x{}) after the "
+                          "capture was requested -- re-run before trusting the value above",
+                          (int)vpX_, (int)vpY_, (int)vpW_, (int)vpH_);
+        }
+        if (!shot_.empty()){ std::vector<u8> img; u32 iw=0,ih=0;
+            if (e.device()->getFrameImage(img,iw,ih)&&iw&&ih && stbi_write_png(shot_.c_str(),(int)iw,(int)ih,4,img.data(),(int)iw*4))
+                AVER_INFO("[Sandbox] screenshot: {} ({}x{})", shot_, iw, ih); }
+        capDone_=true;
+    }
+}
+
+// --luma-sweep: test whether GI estimator's output inflates during motion.
+// Logs one [LumaSweep] line per frame with the viewport's mean linear luminance.
+// ONE FRAME OF LAG is inherent to the capture API; request on frame f is ready on frame f+1.
+// SUBSAMPLED 4x4: a mean doesn't need every pixel; full-res decode every frame is expensive.
+// sRGB -> linear BEFORE averaging: radiance is additive in LINEAR light.
+//
+// --firefly-metric: extends the readback to report OUTLIER PIXELS (spatial outliers).
+// Reference is an OUTER RING MINUS INNER CORE: excludes the inner core so a cluster
+// up to that size doesn't inflate its own reference.
+void SandboxApp::lumaSweepCheck(Engine& e) {
+    if ((!lumaSweep_ && !fireflyMetric_) || maxFrames_ == 0) return;
+    // Only issue NEW requests on stride; pending readback is always collected.
+    const bool sampleThisFrame = (e.time().frame % (u64)lumaSweepStride_) == 0;
+    if (lumaSweepPending_) {
+        std::vector<u8> img; u32 iw = 0, ih = 0;
+        if (e.device()->getFrameImage(img, iw, ih) && iw && ih) {
+            const u32 x0 = (u32)std::fmax(0.0f, lumaSweepVpX_);
+            const u32 y0 = (u32)std::fmax(0.0f, lumaSweepVpY_);
+            const u32 x1 = (u32)std::fmin((f32)iw, lumaSweepVpX_ + lumaSweepVpW_);
+            const u32 y1 = (u32)std::fmin((f32)ih, lumaSweepVpY_ + lumaSweepVpH_);
+            auto toLin = [](u8 c) -> f32 {
+                const f32 s = c / 255.0f;
+                return s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f);
+            };
+            // Allocate grid only for firefly metric.
+            // Stride 1 for fireflies (full res), stride 4 for luma sweep (cheap).
+            const u32 step = fireflyMetric_ ? 1u : 4u;
+            const u32 gridW = (fireflyMetric_ && x1 > x0) ? (x1 - 1 - x0) / step + 1 : 0;
+            const u32 gridH = (fireflyMetric_ && y1 > y0) ? (y1 - 1 - y0) / step + 1 : 0;
+            std::vector<f32> grid;
+            if (gridW && gridH) grid.assign((size_t)gridW * gridH, 0.0f);
+
+            f64 sum = 0.0; u64 n = 0;
+            for (u32 y = y0; y + 1 < y1; y += step) {
+                const u8* row = img.data() + static_cast<size_t>(y) * iw * 4;
+                const u32 gy = (y - y0) / step;
+                for (u32 x = x0; x + 1 < x1; x += step) {
+                    const u8* px = row + static_cast<size_t>(x) * 4;
+                    const f32 lin = 0.2126f * toLin(px[0]) + 0.7152f * toLin(px[1]) + 0.0722f * toLin(px[2]);
+                    sum += lin;
+                    ++n;
+                    if (!grid.empty()) grid[(size_t)gy * gridW + (x - x0) / step] = lin;
+                }
+            }
+            const f64 meanLin = n ? sum / (f64)n : -1.0;
+            // lumaSweepYaw_ cached at request time; yaw_ already advanced by THIS tick's camWobble.
+            if (lumaSweep_) {
+                AVER_INFO("[LumaSweep] frame={} meanLinLuma={:.6f} samples={} viewport=({},{} {}x{}) "
+                          "giMode={} camWobbleDeg={:.2f} camWobblePeriod={} yawDeg={:.3f}",
+                          lumaSweepFrame_, meanLin, n, (int)lumaSweepVpX_, (int)lumaSweepVpY_,
+                          (int)lumaSweepVpW_, (int)lumaSweepVpH_, giModeOverride_, camWobbleDeg_,
+                          camWobblePeriod_, lumaSweepYaw_ * 57.29577951f);
+            }
+
+            if (fireflyMetric_ && !grid.empty()) {
+                // Summed-area table for O(1) windowed sums.
+                std::vector<f64> sat((size_t)(gridW + 1) * (gridH + 1), 0.0);
+                for (u32 gy = 0; gy < gridH; ++gy) {
+                    f64 rowSum = 0.0;
+                    for (u32 gx = 0; gx < gridW; ++gx) {
+                        rowSum += grid[(size_t)gy * gridW + gx];
+                        sat[(size_t)(gy + 1) * (gridW + 1) + (gx + 1)] =
+                            rowSum + sat[(size_t)gy * (gridW + 1) + (gx + 1)];
+                    }
+                }
+                auto boxSum = [&](int bx0, int by0, int bx1, int by1) -> f64 {
+                    // Inclusive [bx0,bx1] x [by0,by1].
+                    return sat[(size_t)(by1 + 1) * (gridW + 1) + (bx1 + 1)]
+                         - sat[(size_t)(by0)     * (gridW + 1) + (bx1 + 1)]
+                         - sat[(size_t)(by1 + 1) * (gridW + 1) + (bx0)]
+                         + sat[(size_t)(by0)     * (gridW + 1) + (bx0)];
+                };
+                // Scale ring with stride to keep screen neighbourhood constant.
+                const int Ro = (step == 1u) ? 12 : 3, Ri = (step == 1u) ? 4 : 1;
+                // Absolute floor: in black regions, any nonzero noise would clear an N-times-zero threshold.
+                const f64 kAbsFloor = 0.02;
+                // A firefly is distinguished by INSTABILITY, not just spatial outliers.
+                // Outliers whose luminance changed materially since the previous sampled frame.
+                const bool havePrev = fireflyPrevW_ == gridW && fireflyPrevH_ == gridH &&
+                                      fireflyPrevGrid_.size() == grid.size();
+                u64 outlierCount = 0; f64 outlierMax = 0.0; u64 flickerCount = 0; f64 flickerMax = 0.0;
+                for (u32 gy = 0; gy < gridH; ++gy) {
+                    const int oy0 = std::max(0, (int)gy - Ro), oy1 = std::min((int)gridH - 1, (int)gy + Ro);
+                    const int iy0 = std::max(0, (int)gy - Ri), iy1 = std::min((int)gridH - 1, (int)gy + Ri);
+                    for (u32 gx = 0; gx < gridW; ++gx) {
+                        const f64 lum = grid[(size_t)gy * gridW + gx];
+                        if (lum < kAbsFloor) continue;
+                        const int ox0 = std::max(0, (int)gx - Ro), ox1 = std::min((int)gridW - 1, (int)gx + Ro);
+                        const int ix0 = std::max(0, (int)gx - Ri), ix1 = std::min((int)gridW - 1, (int)gx + Ri);
+                        const f64 outerSum = boxSum(ox0, oy0, ox1, oy1);
+                        const f64 innerSum = boxSum(ix0, iy0, ix1, iy1);
+                        const f64 outerCnt = (f64)(ox1 - ox0 + 1) * (f64)(oy1 - oy0 + 1);
+                        const f64 innerCnt = (f64)(ix1 - ix0 + 1) * (f64)(iy1 - iy0 + 1);
+                        const f64 ringCnt  = outerCnt - innerCnt;
+                        const f64 localRef = ringCnt > 0.0 ? (outerSum - innerSum) / ringCnt
+                                                            : (outerCnt > 0.0 ? outerSum / outerCnt : 0.0);
+                        if (lum > (f64)fireflyMult_ * std::max(localRef, kAbsFloor)) {
+                            ++outlierCount;
+                            outlierMax = std::max(outlierMax, lum);
+                            // Relative to the LARGER of the two for stability.
+                            if (havePrev) {
+                                const f64 was = fireflyPrevGrid_[(size_t)gy * gridW + gx];
+                                const f64 den = std::max(std::max(was, lum), kAbsFloor);
+                                if (std::fabs(lum - was) / den > 0.5) {
+                                    ++flickerCount;
+                                    flickerMax = std::max(flickerMax, lum);
+                                }
+                            }
+                        }
+                    }
+                }
+                // flicker=-1 on first sampled frame (no previous grid).
+                AVER_INFO("[FireflyMetric] frame={} outliers={} flicker={} maxLin={:.4f} "
+                          "flickerMax={:.4f} meanLin={:.6f} mult={:.2f} grid={}x{} giMode={} "
+                          "camWobbleDeg={:.2f} camWobblePeriod={}",
+                          lumaSweepFrame_, outlierCount, havePrev ? (i64)flickerCount : -1,
+                          outlierMax, flickerMax, meanLin, fireflyMult_,
+                          gridW, gridH, giModeOverride_, camWobbleDeg_, camWobblePeriod_);
+                fireflyPrevGrid_ = grid;
+                fireflyPrevW_ = gridW;
+                fireflyPrevH_ = gridH;
+            }
+        } else {
+            AVER_WARN("[LumaSweep] frame={}: getFrameImage() returned nothing -- this backend may "
+                      "not support a full-frame readback", lumaSweepFrame_);
+        }
+        lumaSweepPending_ = false;
+    }
+    if (!sampleThisFrame) return;
+    e.device()->requestCapture((u32)(vpX_ + vpW_ * 0.5f), (u32)(vpY_ + vpH_ * 0.5f));
+    lumaSweepVpX_ = vpX_; lumaSweepVpY_ = vpY_; lumaSweepVpW_ = vpW_; lumaSweepVpH_ = vpH_;
+    lumaSweepFrame_ = e.time().frame;
+    lumaSweepYaw_ = yaw_;   // THIS tick's angle, for THIS tick's image.
+    lumaSweepPending_ = true;
+}
+
+} // namespace aver

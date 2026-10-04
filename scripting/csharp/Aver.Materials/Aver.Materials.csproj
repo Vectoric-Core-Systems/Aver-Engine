@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The material authoring surface: [AverMaterial], the builder, and the .ocmat emitter. A LEAF —
+       it references nothing, because a material is a description of a surface and knows nothing
+       about entities, the world, or a device.
+
+       It is referenced by a project's material sources and by Aver.MaterialCompiler, which runs
+       Configure at build time and writes the result under Binaries. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Materials</AssemblyName>
+    <RootNamespace>Aver.Materials</RootNamespace>
+    <Version>1.0.0</Version>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>

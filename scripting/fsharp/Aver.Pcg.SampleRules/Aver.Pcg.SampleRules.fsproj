@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A worked example of AUTHORED PCG RULES: the F# a project writer produces.
+       Depends on Aver.Pcg and nothing else: no Aver.Scripting, no Aver.Framework, no engine. That
+       is the property worth protecting: rules stay testable with no host, no device and no CLR
+       bootstrap, so "same seed, same world" can be checked on CPU in milliseconds.
+       The C# behaviour in Aver.Scripting.SamplePcg is what makes any of it exist in a level. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Aver.Pcg.SampleRules</AssemblyName>
+    <RootNamespace>Aver.Pcg.SampleRules</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Order is significant in F#: a file may only use what is compiled before it. Sky and Forest
+         are independent, so this order is alphabetical rather than meaningful. -->
+    <Compile Include="Forest.fs" />
+    <Compile Include="Sky.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aver.Pcg\Aver.Pcg.fsproj" />
+  </ItemGroup>
+
+</Project>

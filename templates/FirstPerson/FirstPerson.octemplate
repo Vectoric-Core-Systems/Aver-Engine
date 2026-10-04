@@ -1,0 +1,10 @@
+TEMPLATE 1
+# A playable first-person character, three shootable targets, a game mode and a viewmodel -- five
+# Aver Node graphs, one map, one CC0 mesh, and no C# anywhere. Verify that last claim with
+# `find . -name '*.cs'` in a project made from this and expect nothing back.
+#
+# See Content/README.md for what each file does and what this template deliberately does not do yet.
+# That file is copied into every project scaffolded from here, so its owner finds it too.
+NAME First Person
+DESCRIPTION A playable first-person character with a gun, three scorable targets and a game mode -- no C# anywhere.
+STARTMAP Maps/Default.ocmap

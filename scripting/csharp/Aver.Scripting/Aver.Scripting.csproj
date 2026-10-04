@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Aver Engine C# scripting bindings — the assembly a user's scripts reference.
+       Holds AverBehaviour and Log, plus the P/Invoke bindings for the Voxi and PBR C ABIs. The
+       native DLLs are resolved from the engine's build output at run time; see README.md.
+
+       The VERSION is a contract, not decoration. The host bridge reads it out of a loaded user
+       assembly's reference table and refuses one built against a different major (or against a
+       newer version than the engine provides), so a stale script DLL gets a message naming both
+       versions instead of a MissingMethodException three frames into the game. Bump the major
+       when anything in the scripting surface changes shape. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Scripting</AssemblyName>
+    <RootNamespace>Aver.Scripting</RootNamespace>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>

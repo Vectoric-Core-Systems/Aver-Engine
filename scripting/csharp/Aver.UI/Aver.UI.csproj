@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The game UI binding: layers, colours, rectangles, and the P/Invoke surface for the Aver.UI C
+       ABI. A LEAF, like Aver.Scene — it references nothing, because a HUD is drawn from screen
+       coordinates and knows nothing about entities or the world.
+
+       The native library it calls into is Aver.UI.Abi, a different file name from this assembly, so
+       unlike Aver.Scene and Aver.Framework there is no NativeResolver here and none is needed. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.UI</AssemblyName>
+    <RootNamespace>Aver.UI</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Aver.Scripting.Bridge — the managed end of the engine's in-process CLR host.
+       Loaded by hostfxr from next to the executable; never referenced by user scripts, which
+       reference Aver.Scripting instead. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Scripting.Bridge</AssemblyName>
+    <RootNamespace>Aver.Scripting.Bridge</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+
+    <!-- The managed dispatch thunks are [UnmanagedCallersOnly] statics whose addresses are taken as
+         function pointers (delegate* unmanaged[Cdecl]) to fill the native table — that needs unsafe. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- EnableDynamicLoading is what makes this a hostable component rather than a plain library:
+         it emits the .runtimeconfig.json hostfxr_initialize_for_runtime_config needs, and copies
+         references next to the output so the host directory is self-contained. -->
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+
+    <!-- The engine ships one bridge and cannot know which patch of .NET 10 a user machine has.
+         Without roll-forward the host declines on a machine that has 10.0.x for any other x, which
+         would read as "scripting is broken" rather than as a version pin nobody asked for. -->
+    <RollForward>LatestMinor</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aver.Scripting\Aver.Scripting.csproj" />
+    <!-- Step 11: the bridge now owns the actor lifecycle, so it references the gameplay assembly to
+         declare classes and construct/bind actors. This is deliberate: the managed Aver.Framework.dll it
+         pulls in is what gives AverActor ONE runtime identity shared with user scripts (they resolve
+         their Aver.Framework reference out of this same context). Aver.Scene comes in transitively. The
+         managed copies land in the bridge's own output dir (bin/Scripting), NOT next to the executable,
+         so they never overwrite the native DLLs of the same name — see NativeResolver in each assembly. -->
+    <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" />
+    <!-- Aver.UI, so [AverHud] and the Hud draw calls resolve out of the BRIDGE's context, the same
+         one a user script resolves them from. Without this a HUD assembly would load its own copy of
+         Aver.UI, its attribute would be a different Type object, and discovery would silently match
+         nothing at all. Discovery matches the attribute by NAME for the same reason; see
+         DiscoverHuds, but the draw calls still have to reach one shared native seam. -->
+    <ProjectReference Include="..\Aver.UI\Aver.UI.csproj" />
+    <!-- Aver.Graph: hosts one compiled .ocgraph per driven entity (GraphLoad/GraphTick/GraphUnload
+         below). References Aver.Scene itself, which is already transitive through Aver.Framework
+         above, so this adds no new native surface, just the managed graph runtime. -->
+    <ProjectReference Include="..\Aver.Graph\Aver.Graph.csproj" />
+  </ItemGroup>
+
+</Project>

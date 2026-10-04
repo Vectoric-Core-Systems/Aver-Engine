@@ -1,0 +1,529 @@
+// In-process CoreCLR host: loads hostfxr, binds the managed bridge, drives it.
+#include "aver/scripting/ScriptHost.hpp"
+#include "aver/scripting/scripting_abi.h"
+
+#include "aver/core/Log.hpp"
+
+#include <format>
+#include <string>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
+namespace aver::scripting {
+
+#if defined(_WIN32)
+namespace {
+
+// Declared here instead of included: must match nethost.h / hostfxr.h / coreclr_delegates.h.
+using char_t = wchar_t;
+using hostfxr_handle = void*;
+
+// Mirrors hostfxr.h's hostfxr_initialize_parameters field for field.
+struct hostfxr_initialize_parameters {
+    size_t size;
+    const char_t* host_path;
+    const char_t* dotnet_root;
+};
+
+using get_hostfxr_path_fn = int32_t(__cdecl*)(char_t* buffer, size_t* bufferSize, const void* parameters);
+using hostfxr_initialize_for_runtime_config_fn =
+    int32_t(__cdecl*)(const char_t* runtimeConfigPath, const hostfxr_initialize_parameters* params,
+                      hostfxr_handle* hostContext);
+using hostfxr_get_runtime_delegate_fn = int32_t(__cdecl*)(hostfxr_handle ctx, int32_t type, void** del);
+using hostfxr_close_fn = int32_t(__cdecl*)(hostfxr_handle ctx);
+using load_assembly_and_get_function_pointer_fn =
+    int32_t(__cdecl*)(const char_t* assemblyPath, const char_t* typeName, const char_t* methodName,
+                      const char_t* delegateTypeName, void* reserved, void** del);
+
+// coreclr_delegates.h: hdt_load_assembly_and_get_function_pointer.
+constexpr int32_t kHdtLoadAssemblyAndGetFunctionPointer = 5;
+// coreclr_delegates.h: the sentinel meaning the method carries [UnmanagedCallersOnly].
+const char_t* const kUnmanagedCallersOnly = reinterpret_cast<const char_t*>(-1);
+
+// True for the three return codes hostfxr counts as success.
+constexpr bool hostfxrOk(int32_t rc) { return rc >= 0 && rc <= 2; }
+
+// The bridge's entry points, all [UnmanagedCallersOnly] on the managed side.
+using bootstrap_fn     = int32_t(__cdecl*)(const AverScriptHostApi* api);
+using loadScripts_fn   = int32_t(__cdecl*)(const char* utf8Dir);
+using unloadScripts_fn = int32_t(__cdecl*)(void);
+using update_fn        = void(__cdecl*)(float dt);
+using shutdown_fn      = void(__cdecl*)(void);
+using hud_count_fn     = int32_t(__cdecl*)(void);
+using hud_name_fn      = int32_t(__cdecl*)(int32_t, char*, int32_t);
+using hud_draw_fn      = int32_t(__cdecl*)(int32_t, float);
+using graph_load_fn    = int32_t(__cdecl*)(int32_t entity, const char* utf8Path);
+using graph_tick_fn    = void(__cdecl*)(int32_t entity, float timeSeconds);
+using graph_unload_fn  = void(__cdecl*)(int32_t entity);
+using graph_fire_fn    = int32_t(__cdecl*)(int32_t entity, const char* utf8EventName);
+using graph_validate_fn = int32_t(__cdecl*)(const char* utf8Text, char* outErr, int32_t cap);
+using graph_set_hits_fn = int32_t(__cdecl*)(int32_t on);
+using graph_get_hits_fn = int32_t(__cdecl*)(const char* utf8GraphName, char* out, int32_t cap, float maxAgeSeconds);
+using declare_graph_classes_fn = int32_t(__cdecl*)(const char* utf8ContentDir);
+using tick_graph_class_instances_fn = void(__cdecl*)(float dt);
+using configure_input_fn = int32_t(__cdecl*)(const char* utf8SchemePath, const char* utf8SettingsPath);
+
+// Converts UTF-8 to UTF-16.
+std::wstring widen(const std::string& s) {
+    if (s.empty()) return {};
+    const int n = ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring out(static_cast<size_t>(n), L'\0');
+    ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), out.data(), n);
+    return out;
+}
+
+// True when the path names an existing file rather than a directory.
+bool fileThere(const std::wstring& path) {
+    const DWORD a = ::GetFileAttributesW(path.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// Writes a managed log line into the engine log. Handed to the bridge at bootstrap.
+void __cdecl managedLog(int32_t level, const char* utf8Message) {
+    const char* m = utf8Message ? utf8Message : "";
+    // EVERY level spelled out, and the default kept as Info for genuinely unknown codes only. The
+    // default is a real hazard here rather than a tidy fallback: it does not fail, it DOWNGRADES --
+    // a script calling Log.Critical through an ABI code this switch did not know would have arrived
+    // in the engine log as an ordinary Info line, which is worse than a crash because it looks like
+    // it worked. AVER_FATAL is deliberately last and terminates: managed code asking for Fatal gets
+    // Fatal, including the crash report.
+    switch (level) {
+        case AVER_SCRIPT_LOG_TRACE:    AVER_TRACE("{}", m);    break;
+        case AVER_SCRIPT_LOG_WARN:     AVER_WARN("{}", m);     break;
+        case AVER_SCRIPT_LOG_ERROR:    AVER_ERROR("{}", m);    break;
+        case AVER_SCRIPT_LOG_CRITICAL: AVER_CRITICAL("{}", m); break;
+        case AVER_SCRIPT_LOG_FATAL:    AVER_FATAL("{}", m);           // does not return
+        default:                       AVER_INFO("{}", m);     break;
+    }
+}
+
+} // namespace
+
+// The loaded runtime modules, the host context and the bound bridge entry points.
+struct ScriptHost::Impl {
+    HMODULE nethost = nullptr;
+    HMODULE hostfxr = nullptr;
+    hostfxr_handle ctx = nullptr;
+    hostfxr_close_fn close = nullptr;
+    loadScripts_fn load = nullptr;
+    unloadScripts_fn unload = nullptr;
+    update_fn update = nullptr;
+    shutdown_fn shutdown = nullptr;
+    hud_count_fn hudCount = nullptr;
+    hud_name_fn  hudName  = nullptr;
+    hud_draw_fn  hudDraw  = nullptr;
+    graph_load_fn   graphLoad   = nullptr;
+    graph_tick_fn   graphTick   = nullptr;
+    graph_unload_fn graphUnload = nullptr;
+    graph_fire_fn   graphFire   = nullptr;
+    graph_validate_fn graphValidate = nullptr;
+    graph_set_hits_fn graphSetHits = nullptr;
+    graph_get_hits_fn graphGetHits = nullptr;
+    declare_graph_classes_fn      declareGraphClasses    = nullptr;
+    tick_graph_class_instances_fn tickGraphClassInstances = nullptr;
+    configure_input_fn configureInput = nullptr;
+};
+
+ScriptHost::ScriptHost() = default;
+
+// Shuts the runtime down and releases the implementation.
+ScriptHost::~ScriptHost() {
+    shutdown();
+    delete impl_;
+    impl_ = nullptr;
+}
+
+// Starts the CLR, binds the bridge and loads the script directory. False, with a reason, on decline.
+bool ScriptHost::init(const HostDesc& desc) {
+    if (ready_) return true;
+    if (!impl_) impl_ = new Impl();
+
+    const auto decline = [this](std::string why) {
+        declineReason_ = std::move(why);
+        AVER_WARN("[Scripting] init declined: {}", declineReason_);
+        return false;
+    };
+
+    const std::wstring bridgeDirW = widen(desc.bridgeDir);
+    const std::wstring bridgeDll = bridgeDirW + L"\\Aver.Scripting.Bridge.dll";
+    const std::wstring bridgeCfg = bridgeDirW + L"\\Aver.Scripting.Bridge.runtimeconfig.json";
+
+    if (!fileThere(bridgeDll) || !fileThere(bridgeCfg))
+        return decline("the managed bridge was not staged next to the executable "
+                       "(Aver.Scripting.Bridge.dll / .runtimeconfig.json) — build with the .NET SDK present");
+
+    // Loaded dynamically, and by bare name: a machine with no .NET must still start the editor.
+    impl_->nethost = ::LoadLibraryW(L"nethost.dll");
+    if (!impl_->nethost)
+        return decline("nethost.dll could not be loaded — the .NET runtime is unavailable");
+
+    auto getHostfxrPath =
+        reinterpret_cast<get_hostfxr_path_fn>(reinterpret_cast<void*>(::GetProcAddress(impl_->nethost, "get_hostfxr_path")));
+    if (!getHostfxrPath)
+        return decline("nethost.dll exports no get_hostfxr_path");
+
+    wchar_t fxrPath[MAX_PATH * 2] = {};
+    size_t fxrLen = sizeof(fxrPath) / sizeof(fxrPath[0]);
+    if (getHostfxrPath(fxrPath, &fxrLen, nullptr) != 0)
+        return decline("get_hostfxr_path found no .NET runtime on this machine");
+
+    impl_->hostfxr = ::LoadLibraryW(fxrPath);
+    if (!impl_->hostfxr)
+        return decline("hostfxr could not be loaded");
+
+    auto fxrInit = reinterpret_cast<hostfxr_initialize_for_runtime_config_fn>(
+        reinterpret_cast<void*>(::GetProcAddress(impl_->hostfxr, "hostfxr_initialize_for_runtime_config")));
+    auto fxrDelegate = reinterpret_cast<hostfxr_get_runtime_delegate_fn>(
+        reinterpret_cast<void*>(::GetProcAddress(impl_->hostfxr, "hostfxr_get_runtime_delegate")));
+    impl_->close = reinterpret_cast<hostfxr_close_fn>(
+        reinterpret_cast<void*>(::GetProcAddress(impl_->hostfxr, "hostfxr_close")));
+    if (!fxrInit || !fxrDelegate || !impl_->close)
+        return decline("hostfxr is missing an expected export");
+
+    int32_t rc = fxrInit(bridgeCfg.c_str(), nullptr, &impl_->ctx);
+    if (!hostfxrOk(rc) || !impl_->ctx) {
+        impl_->ctx = nullptr;
+        return decline(std::format("hostfxr_initialize_for_runtime_config failed (0x{:08X}) — the "
+                                   "framework the bridge targets is not installed",
+                                   static_cast<uint32_t>(rc)));
+    }
+
+    void* raw = nullptr;
+    rc = fxrDelegate(impl_->ctx, kHdtLoadAssemblyAndGetFunctionPointer, &raw);
+    if (rc != 0 || !raw)
+        return decline(std::format("hostfxr_get_runtime_delegate failed (0x{:08X})", static_cast<uint32_t>(rc)));
+
+    auto loadFn = reinterpret_cast<load_assembly_and_get_function_pointer_fn>(raw);
+    const wchar_t* kType = L"Aver.Scripting.Bridge.HostBridge, Aver.Scripting.Bridge";
+
+    const auto bind = [&](const wchar_t* method, void** out) {
+        return loadFn(bridgeDll.c_str(), kType, method, kUnmanagedCallersOnly, nullptr, out) == 0 && *out;
+    };
+
+    bootstrap_fn bootstrap = nullptr;
+    if (!bind(L"Bootstrap", reinterpret_cast<void**>(&bootstrap)) ||
+        !bind(L"LoadScripts", reinterpret_cast<void**>(&impl_->load)) ||
+        !bind(L"UnloadScripts", reinterpret_cast<void**>(&impl_->unload)) ||
+        !bind(L"Update", reinterpret_cast<void**>(&impl_->update)) ||
+        !bind(L"Shutdown", reinterpret_cast<void**>(&impl_->shutdown))) {
+        impl_->load = nullptr;
+        impl_->unload = nullptr;
+        impl_->update = nullptr;
+        impl_->shutdown = nullptr;
+        return decline("the staged Aver.Scripting.Bridge.dll does not export the expected entry "
+                       "points — it is from a different engine build");
+    }
+
+    // The HUD three are optional: a missing one costs the preview, not the host.
+    if (!bind(L"HudCount", reinterpret_cast<void**>(&impl_->hudCount)) ||
+        !bind(L"HudName",  reinterpret_cast<void**>(&impl_->hudName))  ||
+        !bind(L"HudDraw",  reinterpret_cast<void**>(&impl_->hudDraw))) {
+        impl_->hudCount = nullptr;
+        impl_->hudName  = nullptr;
+        impl_->hudDraw  = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no HUD entry points; HUD preview is unavailable");
+    }
+
+    // Graph hosting is optional too, same reasoning as the HUD three: a bridge built before
+    // GraphLoad/GraphTick/GraphUnload existed still boots, and graphAvailable() just reports false.
+    if (!bind(L"GraphLoad", reinterpret_cast<void**>(&impl_->graphLoad)) ||
+        !bind(L"GraphTick", reinterpret_cast<void**>(&impl_->graphTick)) ||
+        !bind(L"GraphUnload", reinterpret_cast<void**>(&impl_->graphUnload))) {
+        impl_->graphLoad = nullptr;
+        impl_->graphTick = nullptr;
+        impl_->graphUnload = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no Graph entry points; graph hosting is unavailable");
+    }
+
+    // GraphFire is optional SEPARATELY from the three above, not folded in with them, because it
+    // arrived later: a bridge that predates it hosts and ticks graphs correctly and is only unable
+    // to be fired at. Folding it into the block above would turn a bridge missing one new export
+    // into a bridge with no graph hosting at all.
+    if (!bind(L"GraphFire", reinterpret_cast<void**>(&impl_->graphFire))) {
+        impl_->graphFire = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no GraphFire; animation notifies will not reach graphs");
+    }
+
+    // GraphValidate is optional and SEPARATE again, for GraphFire's reason: a bridge that predates
+    // it hosts, ticks and fires graphs correctly and is only unable to check one. The editor asks
+    // graphValidateAvailable() and says so rather than refusing to save.
+    if (!bind(L"GraphValidate", reinterpret_cast<void**>(&impl_->graphValidate))) {
+        impl_->graphValidate = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no GraphValidate; the graph editor cannot check a "
+                  "graph before saving it");
+    }
+
+    // The node-hit pair, optional together and separate from GraphValidate -- same graceful-degradation
+    // rule every group above follows. A bridge predating them hosts and validates graphs perfectly
+    // well and is only unable to say which nodes are running.
+    if (!bind(L"GraphSetHitRecording", reinterpret_cast<void**>(&impl_->graphSetHits)) ||
+        !bind(L"GraphGetHits", reinterpret_cast<void**>(&impl_->graphGetHits))) {
+        impl_->graphSetHits = nullptr;
+        impl_->graphGetHits = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no node-hit entry points; the graph editor cannot "
+                  "highlight which nodes are executing");
+    }
+
+    // GRAPH-AS-CLASS is optional too, same reasoning: a bridge built before DeclareGraphClasses/
+    // GraphTickBoundInstances existed still boots, and graphClassesAvailable() just reports false.
+    if (!bind(L"DeclareGraphClasses", reinterpret_cast<void**>(&impl_->declareGraphClasses)) ||
+        !bind(L"GraphTickBoundInstances", reinterpret_cast<void**>(&impl_->tickGraphClassInstances))) {
+        impl_->declareGraphClasses = nullptr;
+        impl_->tickGraphClassInstances = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no graph-class entry points; graph-as-class is unavailable");
+    }
+
+    // INPUT SCHEME is optional too, same reasoning: a bridge built before ConfigureInput existed
+    // still boots, and configureInput() reports -2 (see the header) rather than pretending success.
+    if (!bind(L"ConfigureInput", reinterpret_cast<void**>(&impl_->configureInput))) {
+        impl_->configureInput = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no ConfigureInput; rebindable input schemes are unavailable");
+    }
+
+    AverScriptHostApi api{};
+    api.structBytes = static_cast<int32_t>(sizeof(AverScriptHostApi));
+    api.contractVersion = AVER_SCRIPTING_CONTRACT_VERSION;
+    api.log = &managedLog;
+
+    const int32_t brc = bootstrap(&api);
+    if (brc != AVER_SCRIPT_OK) {
+        impl_->load = nullptr;
+        impl_->unload = nullptr;
+        impl_->update = nullptr;
+        impl_->shutdown = nullptr;
+        if (brc == AVER_SCRIPT_ERR_CONTRACT)
+            return decline(std::format("the staged Aver.Scripting.Bridge.dll speaks a different host "
+                                       "contract than this build (host v{}) — rebuild the managed side",
+                                       AVER_SCRIPTING_CONTRACT_VERSION));
+        return decline(std::format("the managed bridge failed to bootstrap (code {})", brc));
+    }
+
+    ready_ = true;
+    declineReason_.clear();
+
+    behaviours_ = desc.scriptsDir.empty() ? 0 : impl_->load(desc.scriptsDir.c_str());
+    if (behaviours_ < 0) behaviours_ = 0;
+
+    AVER_INFO("[Scripting] .NET runtime hosted in-process; {} behaviour(s) live", behaviours_);
+    return true;
+}
+
+// Loads a directory of script assemblies. Returns the live behaviour count, or -1 when not ready.
+i32 ScriptHost::loadScripts(const std::string& dir) {
+    if (!ready_ || !impl_ || !impl_->load) return -1;
+    const int32_t n = impl_->load(dir.c_str());
+    behaviours_ = n < 0 ? 0 : n;
+    return behaviours_;
+}
+
+// Drains OnShutdown and unloads the collectible context. True when it was fully collected.
+bool ScriptHost::unloadScripts() {
+    if (!ready_ || !impl_ || !impl_->unload) return false;
+    const int32_t collected = impl_->unload();
+    behaviours_ = 0;
+    return collected != 0;
+}
+
+// How many [AverHud] classes the bridge found. Zero when unavailable.
+i32 ScriptHost::hudCount() const {
+    return (ready_ && impl_ && impl_->hudCount) ? impl_->hudCount() : 0;
+}
+
+// The HUD's display name, or empty.
+std::string ScriptHost::hudName(i32 index) const {
+    if (!ready_ || !impl_ || !impl_->hudName) return {};
+    char buf[128] = {};
+    const int32_t n = impl_->hudName(index, buf, static_cast<int32_t>(sizeof buf));
+    return n > 0 ? std::string(buf, static_cast<usize>(n)) : std::string();
+}
+
+// Calls the HUD's Draw(dt). True if it ran.
+bool ScriptHost::hudDraw(i32 index, f32 dt) {
+    return (ready_ && impl_ && impl_->hudDraw) && impl_->hudDraw(index, dt) == 1;
+}
+
+// Drives OnUpdate on every live behaviour.
+void ScriptHost::update(f32 dt) {
+    if (!ready_ || !impl_ || !impl_->update) return;
+    impl_->update(dt);
+}
+
+// Whether the staged bridge exports GraphLoad/GraphTick -- see the optional-bind block in init().
+bool ScriptHost::graphAvailable() const {
+    return ready_ && impl_ && impl_->graphLoad && impl_->graphTick;
+}
+
+// Loads and compiles an .ocgraph, binding it to `entity`. False when unavailable or on any failure
+// GraphHost.Load reports (bad path, parse error, compile error, unsupported PARAM shape).
+bool ScriptHost::graphLoad(i32 entity, const std::string& path) {
+    if (!graphAvailable()) return false;
+    return impl_->graphLoad(entity, path.c_str()) != 0;
+}
+
+// Ticks the graph bound to `entity`. A no-op for an entity with none, or when unavailable.
+void ScriptHost::graphTick(i32 entity, f32 timeSeconds) {
+    if (!graphAvailable()) return;
+    impl_->graphTick(entity, timeSeconds);
+}
+
+// Drops the graph bound to `entity`, if any.
+void ScriptHost::graphUnload(i32 entity) {
+    if (!ready_ || !impl_ || !impl_->graphUnload) return;
+    impl_->graphUnload(entity);
+}
+
+// Whether the staged bridge exports GraphFire -- see its own optional-bind block in init().
+bool ScriptHost::graphFireAvailable() const {
+    return ready_ && impl_ && impl_->graphFire;
+}
+
+// Raises `eventName` on the graph bound to `entity`. False when unavailable, when the entity has
+// no graph, or when the graph declares no such event.
+bool ScriptHost::graphFire(i32 entity, const std::string& eventName) {
+    if (!graphFireAvailable() || eventName.empty()) return false;
+    return impl_->graphFire(entity, eventName.c_str()) != 0;
+}
+
+bool ScriptHost::graphValidateAvailable() const {
+    return ready_ && impl_ && impl_->graphValidate;
+}
+
+// Validates .ocgraph TEXT. True when valid, or when validation is unavailable -- see the header for
+// why an absent bridge must not read as an invalid graph.
+bool ScriptHost::graphValidate(const std::string& text, std::string& err) const {
+    err.clear();
+    if (!graphValidateAvailable()) return true;
+    // A FIXED BUFFER, not a two-call size-then-fill: every message this can return is one sentence
+    // written by hand in Graph.Validate/OcGraphParser, and the managed side truncates to fit rather
+    // than failing. 2 KB is roughly four times the longest of them.
+    char buf[2048] = {};
+    const int32_t rc = impl_->graphValidate(text.c_str(), buf, static_cast<int32_t>(sizeof buf));
+    if (rc == 0) return true;
+    err = buf[0] ? buf : "the graph is not valid";
+    // rc < 0 is a bad argument (a null buffer, or text that did not marshal) rather than an invalid
+    // graph. Reported as invalid anyway, because the caller wanted to know whether it is safe to
+    // save and the honest answer is "this could not be checked".
+    return false;
+}
+
+bool ScriptHost::graphHitsAvailable() const {
+    return ready_ && impl_ && impl_->graphSetHits && impl_->graphGetHits;
+}
+
+void ScriptHost::graphSetHitRecording(bool on) const {
+    if (!graphHitsAvailable()) return;
+    impl_->graphSetHits(on ? 1 : 0);
+}
+
+void ScriptHost::graphNodeHits(const std::string& graphName, f32 maxAgeSeconds,
+                               std::vector<std::pair<std::string, f32>>& out) const {
+    out.clear();
+    if (!graphHitsAvailable() || graphName.empty()) return;
+    // A FIXED BUFFER, and the managed side truncates at a separator rather than mid-entry, so a graph
+    // with more recent hits than fit loses whole entries instead of producing a node id nothing on the
+    // canvas matches. 8 KB is a few hundred nodes, well past any graph a person is reading.
+    char buf[8192] = {};
+    const int32_t n = impl_->graphGetHits(graphName.c_str(), buf, static_cast<int32_t>(sizeof buf), maxAgeSeconds);
+    if (n <= 0) return;
+
+    // "nodeId:age;nodeId:age". Parsed here rather than handed over as a string so every caller does
+    // not re-derive the format.
+    std::string_view all(buf, static_cast<usize>(n));
+    usize pos = 0;
+    while (pos < all.size()) {
+        const usize semi = all.find(';', pos);
+        const std::string_view entry = all.substr(pos, semi == std::string_view::npos ? all.size() - pos : semi - pos);
+        const usize colon = entry.rfind(':');
+        if (colon != std::string_view::npos && colon > 0) {
+            f32 age = 0.0f;
+            // A node id can itself contain a colon in principle, so the LAST one separates the age.
+            const std::string ageText(entry.substr(colon + 1));
+            try { age = std::stof(ageText); } catch (...) { age = 0.0f; }
+            out.emplace_back(std::string(entry.substr(0, colon)), age);
+        }
+        if (semi == std::string_view::npos) break;
+        pos = semi + 1;
+    }
+}
+
+// Whether the staged bridge exports the graph-class entry points -- see the optional-bind block in init().
+bool ScriptHost::graphClassesAvailable() const {
+    return ready_ && impl_ && impl_->declareGraphClasses && impl_->tickGraphClassInstances;
+}
+
+// Declares one framework class per CLASS-bearing .ocgraph under `contentDir`. 0 when unavailable or
+// the directory has none.
+i32 ScriptHost::declareGraphClasses(const std::string& contentDir) {
+    if (!graphClassesAvailable()) return 0;
+    return impl_->declareGraphClasses(contentDir.c_str());
+}
+
+// Ticks every live graph-class instance once. A no-op when unavailable.
+void ScriptHost::tickGraphClassInstances(f32 dt) {
+    if (!graphClassesAvailable()) return;
+    impl_->tickGraphClassInstances(dt);
+}
+
+// Opens the settings store and loads (or, for an empty `schemePath`, unloads) the project's input
+// scheme. See the header for the full return convention; -2 means the staged bridge predates this
+// export rather than that anything failed to parse.
+i32 ScriptHost::configureInput(const std::string& schemePath, const std::string& settingsPath) {
+    if (!ready_ || !impl_ || !impl_->configureInput) return -2;
+    return impl_->configureInput(schemePath.c_str(), settingsPath.c_str());
+}
+
+// Drains the behaviours, unloads the context and closes the host context. Safe twice.
+void ScriptHost::shutdown() {
+    if (!impl_) return;
+    if (ready_ && impl_->shutdown) impl_->shutdown();
+    ready_ = false;
+    behaviours_ = 0;
+    impl_->load = nullptr;
+    impl_->unload = nullptr;
+    impl_->update = nullptr;
+    impl_->shutdown = nullptr;
+    if (impl_->ctx && impl_->close) impl_->close(impl_->ctx);
+    impl_->ctx = nullptr;
+    // hostfxr is never freed: CoreCLR stays loaded for the life of the process.
+    if (impl_->nethost) { ::FreeLibrary(impl_->nethost); impl_->nethost = nullptr; }
+}
+
+#else // !_WIN32
+
+// No CLR host off Win32; every entry point declines the way the missing-runtime path does.
+struct ScriptHost::Impl {};
+
+ScriptHost::ScriptHost() = default;
+ScriptHost::~ScriptHost() { delete impl_; }
+
+// Always declines: the CLR host is Win32-only.
+bool ScriptHost::init(const HostDesc&) {
+    declineReason_ = "the CLR host is implemented for Win32 only";
+    AVER_WARN("[Scripting] init declined: {}", declineReason_);
+    return false;
+}
+i32 ScriptHost::loadScripts(const std::string&) { return -1; }
+bool ScriptHost::unloadScripts() { return false; }
+void ScriptHost::update(f32) {}
+void ScriptHost::shutdown() {}
+bool ScriptHost::graphAvailable() const { return false; }
+bool ScriptHost::graphLoad(i32, const std::string&) { return false; }
+void ScriptHost::graphTick(i32, f32) {}
+void ScriptHost::graphUnload(i32) {}
+bool ScriptHost::graphFireAvailable() const { return false; }
+bool ScriptHost::graphFire(i32, const std::string&) { return false; }
+bool ScriptHost::graphValidateAvailable() const { return false; }
+bool ScriptHost::graphValidate(const std::string&, std::string& err) const { err.clear(); return true; }
+bool ScriptHost::graphHitsAvailable() const { return false; }
+void ScriptHost::graphSetHitRecording(bool) const {}
+void ScriptHost::graphNodeHits(const std::string&, f32, std::vector<std::pair<std::string, f32>>& out) const { out.clear(); }
+bool ScriptHost::graphClassesAvailable() const { return false; }
+i32  ScriptHost::declareGraphClasses(const std::string&) { return 0; }
+void ScriptHost::tickGraphClassInstances(f32) {}
+i32  ScriptHost::configureInput(const std::string&, const std::string&) { return 0; }
+
+#endif
+
+} // namespace aver::scripting

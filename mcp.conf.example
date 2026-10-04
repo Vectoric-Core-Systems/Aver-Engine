@@ -1,0 +1,31 @@
+# Aver Engine MCP configuration.
+#
+# Optional. The editor and the MCP tool server both run fine with no mcp.conf at all -- every value
+# below has a built-in default, and this file existing is never required.
+#
+# Copy this file to mcp.conf (untracked -- every checkout, including each git worktree, gets its own,
+# so concurrent checkouts do not collide on the same port) and uncomment what you want to change.
+#
+# Precedence, always: an explicit command-line argument wins over a value set here, and a value set
+# here wins over the built-in default. A missing file, a missing key, or a line that fails to parse
+# falls back to the built-in default for that key alone -- it never stops the editor or the tool
+# server from starting, and it never affects any OTHER key in this file.
+#
+# Format: one `key = value` per line. Lines starting with '#' and blank lines are ignored. No
+# sections, no quoting. If a key is repeated, the first occurrence wins.
+
+# --- In-editor control channel (Aver.Mcp / McpBridge) -------------------------------------------
+# The loopback TCP port Sandbox.exe's --mcp opens. This key ONLY changes which port is used when
+# --mcp is given with NO number after it (e.g. "--mcp", not "--mcp 45555") -- it can never open the
+# channel by itself; --mcp is still required. Built only under -DAVER_MODULE_MCP=ON (off by default).
+# The tool server's aver_editor and aver_level tools read this same key to find the running editor,
+# so one line here keeps both sides on the same port (a `port` argument on a call overrides it).
+# Built-in default: 45123
+#editor_bridge.port = 45123
+
+# --- MCP tool server (tools/mcp/aver_mcp.py) -----------------------------------------------------
+# The port the tool server binds when started with --http (MCP Streamable HTTP). .mcp.json still
+# launches the server over stdio by default -- this key has no effect on that path beyond being
+# read and logged at startup either way. Pass --http yourself to actually serve on this port.
+# Built-in default: 8787
+#tool_server.port = 8787

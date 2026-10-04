@@ -1,0 +1,259 @@
+// DirectoryWatcher, exercised against a real filesystem in a temp directory.
+#include "aver/platform/DirectoryWatcher.hpp"
+#include "aver/core/Log.hpp"
+
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <thread>
+#include <vector>
+
+// This process's id, for a temp directory name two concurrent runs cannot share.
+#ifdef _WIN32
+#  include <process.h>
+#  define AVER_TEST_PID _getpid()
+#else
+#  include <unistd.h>
+#  define AVER_TEST_PID getpid()
+#endif
+
+using namespace aver;
+
+static int g_failures = 0;
+
+// Records one assertion. Counts a failure and logs it when the condition is false.
+static void check(bool cond, const std::string& what) {
+    if (cond) { AVER_INFO("  ok    {}", what); return; }
+    ++g_failures;
+    AVER_ERROR("  FAIL  {}", what);
+}
+
+// How long every wait here runs. Well past the watcher's documented 150 ms settle window.
+static constexpr int kSettleWaitMs = 700;
+
+// Truncates a file and writes text into it.
+static void write(const std::filesystem::path& p, const std::string& text) {
+    std::ofstream os(p, std::ios::binary | std::ios::trunc);
+    os.write(text.data(), static_cast<std::streamsize>(text.size()));
+}
+
+// Polls for a full settle window, appending events. False if the watcher signalled overflow.
+static bool drain(DirectoryWatcher& w, std::vector<FileEvent>& out, int waitMs = kSettleWaitMs) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (w.poll(out)) return false;               // overflow
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return true;
+}
+
+// How many events name this path.
+static int countFor(const std::vector<FileEvent>& evs, const std::string& rel) {
+    int n = 0;
+    for (const FileEvent& e : evs) if (e.path == rel) ++n;
+    return n;
+}
+
+// The first event naming this path, or null.
+static const FileEvent* findFor(const std::vector<FileEvent>& evs, const std::string& rel) {
+    for (const FileEvent& e : evs) if (e.path == rel) return &e;
+    return nullptr;
+}
+
+// Runs every directory watcher check. Returns 1 if any failed.
+int main() {
+    AVER_INFO("=== DirectoryWatcher ===");
+
+    std::error_code ec;
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path(ec) /
+        ("aver-watch-test-" + std::to_string(static_cast<long>(AVER_TEST_PID)));
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::create_directories(root, ec);
+    if (ec) { AVER_ERROR("could not make a temp directory to watch"); return 1; }
+
+    {
+        DirectoryWatcher w;
+        check(!w.start((root / "does-not-exist").string()), "start() on a missing directory returns false");
+        check(!w.watching(), "and it is not watching afterwards");
+        std::vector<FileEvent> evs;
+        check(!w.poll(evs), "poll() on an unstarted watcher does not claim overflow");
+        check(evs.empty(), "and reports nothing");
+    }
+
+    DirectoryWatcher w;
+    check(w.start(root.string(), /*recursive=*/true), "start() on a real directory succeeds");
+    check(w.watching(), "watching() is true after a successful start");
+    check(w.root() == root.string(), "root() is what was asked for");
+
+    {
+        std::vector<FileEvent> evs;
+        write(root / "one.cs", "// hello\n");
+        check(drain(w, evs), "a create does not overflow the watcher");
+        const FileEvent* e = findFor(evs, "one.cs");
+        check(e != nullptr, "a newly written file is reported");
+        if (e) check(e->kind == FileChange::Created || e->kind == FileChange::Modified,
+                     "as Created (or Modified -- the header documents the ambiguity)");
+        check(countFor(evs, "one.cs") == 1, "ONE event for one write, not the burst the OS emitted");
+    }
+
+    {
+        std::vector<FileEvent> evs;
+        write(root / "one.cs", "// hello again, with more text than before\n");
+        check(drain(w, evs), "a rewrite does not overflow the watcher");
+        const FileEvent* e = findFor(evs, "one.cs");
+        check(e != nullptr, "a rewritten file is reported");
+        if (e) check(e->kind == FileChange::Modified, "as Modified, now that the path is known");
+        check(countFor(evs, "one.cs") == 1, "still ONE event, however many records the OS emitted");
+    }
+
+    {
+        std::vector<FileEvent> evs;
+        for (int i = 0; i < 5; ++i) {
+            write(root / "burst.cs", "// write " + std::to_string(i) + "\n");
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        check(drain(w, evs), "a burst does not overflow the watcher");
+        check(countFor(evs, "burst.cs") == 1, "five writes 10 ms apart coalesce into ONE event");
+    }
+
+    {
+        std::vector<FileEvent> evs;
+        std::filesystem::rename(root / "one.cs", root / "renamed.cs", ec);
+        check(!ec, "the rename itself succeeded");
+        check(drain(w, evs), "a rename does not overflow the watcher");
+        const FileEvent* e = findFor(evs, "renamed.cs");
+        check(e != nullptr, "the rename is reported under the NEW name");
+        if (e) {
+            check(e->kind == FileChange::Renamed, "with kind Renamed");
+            check(e->oldPath == "one.cs", "and oldPath is what it used to be called");
+        }
+    }
+
+    {
+        std::vector<FileEvent> evs;
+        std::filesystem::remove(root / "burst.cs", ec);
+        check(!ec, "the remove itself succeeded");
+        check(drain(w, evs), "a delete does not overflow the watcher");
+        const FileEvent* e = findFor(evs, "burst.cs");
+        check(e != nullptr, "the deletion is reported");
+        if (e) check(e->kind == FileChange::Deleted, "with kind Deleted");
+    }
+
+    {
+        std::vector<FileEvent> evs;
+        std::filesystem::create_directories(root / "Scripts", ec);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));   // let the mkdir settle out
+        (void)drain(w, evs, 300);
+        evs.clear();
+        write(root / "Scripts" / "Deep.cs", "// nested\n");
+        check(drain(w, evs), "a nested write does not overflow the watcher");
+        const FileEvent* e = findFor(evs, "Scripts/Deep.cs");
+        check(e != nullptr, "a file in a subdirectory is reported");
+        if (e) check(e->path.find('\\') == std::string::npos,
+                     "and its path uses '/' separators, never the platform's");
+    }
+
+    {
+        std::vector<FileEvent> evs;
+        check(drain(w, evs, 400), "an idle watcher does not overflow");
+        check(evs.empty(), "an idle watcher reports NOTHING at all");
+    }
+
+    // THE EDITING-SESSION SHAPE, and the one this file never tested. Every case above changes
+    // something and drains it IMMEDIATELY, so the watcher is never asked to survive a period of
+    // quiet and then report again -- which is what an editor does: you change a shader, look at it
+    // for ten seconds, change it again.
+    //
+    // WRITTEN TO REPRODUCE A REPORTED DEFECT, AND IT DID NOT. The report was that the watcher
+    // delivers only the first change of a run: a 900-frame --shader-source session with three
+    // appends seven seconds apart logged exactly one event and nothing after. The observation
+    // was real; the cause was not the watcher. 900 frames at --no-vsync is about twelve seconds,
+    // and three appends seven seconds apart span twenty-one -- the last two were made after the
+    // process had already exited.
+    //
+    // The case is kept anyway, because it is the shape nothing else in this file covers: every
+    // other block changes something and drains it IMMEDIATELY, which is not what an editing
+    // session looks like. If the watcher ever does go quiet after a stretch of idle, this says so.
+    {
+        std::vector<FileEvent> evs;
+        write(root / "session.hlsl", "// first edit\n");
+        check(drain(w, evs), "the first edit does not overflow");
+        check(findFor(evs, "session.hlsl") != nullptr, "the FIRST edit is reported");
+
+        // Idle well past the settle window. An editing session is mostly idle, and this is the only
+        // thing separating this case from the ones above.
+        std::vector<FileEvent> idle;
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        check(drain(w, idle, 200), "the idle stretch does not overflow");
+        check(idle.empty(), "and reports nothing, because nothing happened");
+
+        std::vector<FileEvent> second;
+        write(root / "session.hlsl", "// second edit, after three idle seconds\n");
+        check(drain(w, second), "the second edit does not overflow");
+        check(findFor(second, "session.hlsl") != nullptr,
+              "the SECOND edit, after several seconds of quiet, is reported too");
+
+        // A third, because two could be a coincidence and the report was of three appends.
+        std::vector<FileEvent> third;
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        (void)drain(w, third, 200);
+        third.clear();
+        write(root / "session.hlsl", "// third edit\n");
+        check(drain(w, third), "the third edit does not overflow");
+        check(findFor(third, "session.hlsl") != nullptr, "and so is the THIRD");
+    }
+
+    // A WORKER THAT DIES MUST STOP CLAIMING TO WATCH. died()'s own contract says so in as many
+    // words: "WITHOUT THIS A DEAD WATCHER IS INDISTINGUISHABLE FROM A QUIET ONE", and it names the
+    // consequence -- hot reload stops silently for the rest of the session, because
+    // DirectoryWatcher::watching() is what the caller re-arms on.
+    //
+    // The abnormal exits are real I/O failures and no test against a real directory can provoke
+    // one, which is precisely why some of them stayed wrong: nothing could reach them.
+    // AVER_WATCHER_KILL_AFTER makes the worker leave through the same break a failed overlapped
+    // read takes. Same idea as --crash-test and --device-lost-at elsewhere in this engine.
+    {
+        _putenv_s("AVER_WATCHER_KILL_AFTER", "1");
+        // OUTSIDE `root`, not a subdirectory of it. AVER_WATCHER_KILL_AFTER is read from the
+        // environment, so it applies to every watcher in this process -- and `w` above is watching
+        // `root` RECURSIVELY, so a write inside it would give `w` a batch too and kill that watcher
+        // as a side effect of testing this one. Separate trees keep the two independent.
+        DirectoryWatcher dying;
+        const std::filesystem::path dyingRoot =
+            root.parent_path() / ("aver-watch-dying-" + std::to_string(static_cast<long>(AVER_TEST_PID)));
+        std::filesystem::remove_all(dyingRoot, ec);
+        std::filesystem::create_directories(dyingRoot, ec);
+        check(dying.start(dyingRoot.string()), "a second watcher starts on its own directory");
+        check(dying.watching(), "and reports that it is watching");
+
+        std::vector<FileEvent> evs;
+        write(dyingRoot / "trigger.txt", "// provoke one batch, then the worker leaves\n");
+        (void)drain(dying, evs, kSettleWaitMs);
+
+        check(!dying.watching(),
+              "a watcher whose worker died reports watching() == false, so the caller re-arms "
+              "instead of believing a corpse");
+        _putenv_s("AVER_WATCHER_KILL_AFTER", "");
+        check(w.watching(), "and the OTHER watcher, on its own tree, is untouched by that death");
+        dying.stop();
+        std::filesystem::remove_all(dyingRoot, ec);
+    }
+
+    {
+        w.stop();
+        check(!w.watching(), "watching() is false after stop()");
+        std::vector<FileEvent> evs;
+        write(root / "after-stop.cs", "// nobody should see this\n");
+        std::this_thread::sleep_for(std::chrono::milliseconds(kSettleWaitMs));
+        (void)w.poll(evs);
+        check(evs.empty(), "a write after stop() produces nothing -- the worker really is gone");
+    }
+
+    std::filesystem::remove_all(root, ec);
+
+    if (g_failures == 0) AVER_INFO("=== all directory watcher tests passed ===");
+    else                 AVER_ERROR("=== {} directory watcher check(s) FAILED ===", g_failures);
+    return g_failures == 0 ? 0 : 1;
+}

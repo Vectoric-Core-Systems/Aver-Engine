@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Test suite for Aver.Graph: graph parsing and IL compilation.
+       Tests follow the house pattern: a console project that returns a failure count from Main.
+       The test runs a graph through parse -> compile -> invoke and asserts the result matches
+       a hand-written equivalent. No xunit dependencies. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Aver.Graph.Tests</AssemblyName>
+    <RootNamespace>Aver.Graph.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aver.Graph\Aver.Graph.csproj" />
+  </ItemGroup>
+
+</Project>

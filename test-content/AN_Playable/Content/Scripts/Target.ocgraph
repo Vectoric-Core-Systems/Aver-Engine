@@ -1,0 +1,96 @@
+OCGRAPH 1
+DOMAIN gameplay
+# A THING THAT REACTS TO BEING HIT, and remembers how often. Still no C# anywhere in this project.
+#
+# Two capabilities meet here. ENTRY OnHit has existed since 75be56b, but until 6d7ff99 nothing could
+# SEND one from a graph -- GraphHost.Fire was reachable only from C#, so a graph could declare a
+# reaction it had no way of ever receiving. And VAR (a45e32f) is what lets the count survive the
+# tick, stored per GraphHost instance, so two targets placed from this one file keep separate scores
+# rather than sharing one.
+NAME Target
+DESCRIPTION Counts the hits it receives. One file, any number of instances, independent counts.
+
+CLASS AN_Target Character
+
+PARAM entity int
+
+# FLOAT, not int, and the engine told me why: Add takes float pins and there is no integer
+# Add in the palette, so an int VAR wired into one fails at load with
+#   "Link prev.value (Int) to next.a (Float): type mismatch"
+# -- a good error, caught before anything ran rather than counting wrongly at runtime.
+VAR hits float 0
+
+# ---- becoming raycast-visible ----------------------------------------------------------------------
+# CHANGED FROM `Actor` TO `Character`, and that is not cosmetic: a plain Actor gets no physics body
+# from ANYWHERE in this engine when it is spawned as a class instance -- LevelInstance.cpp's own
+# static-box path (the one that stamps a level placement's body with its entity, per the
+# raycast-entity slice) is deliberately skipped for a `class=` placement like this one, and nothing in
+# ClassBuilder (Aver.Framework/ClassBuilder.cs) can add a collider either. `Character` is the one
+# class in this engine whose graph-facing node reaches all the way down to a real Jolt body --
+# AverCharacter.EnsureCapsule (Character.cs), reached through CharacterMove -- and, since this same
+# slice, that capsule is stamped with its OWNING ENTITY the instant it exists
+# (`Phys.aver_phys_set_entity(_capsule, Self.Handle)`, Character.cs:260) with no extra graph work
+# needed here. `CharacterVirtual` is otherwise invisible to a raycast entirely -- Jolt does not add it
+# to the broad phase on its own -- which the physics half of this slice fixed at the ABI level
+# (aver_phys_character_create now gives every character a real, broadphase-visible inner body).
+#
+# ONE CALL, AT OnStart, WITH EVERY MOTION INPUT AT 0. EnsureCapsule is lazy -- first call creates it --
+# so CharacterMove has to run at least once for this target to exist physically at all; it never needs
+# to run again; wiring it into OnTick instead would just re-walk the same zero-motion command every
+# frame for no benefit. This target does not move itself and does not look anywhere -- it only ever
+# reacts to being hit.
+#
+# TWO HONEST CONSEQUENCES OF REUSING CharacterMove FOR THIS, NAMED RATHER THAN HIDDEN. First: nothing
+# in this map gives ANY character a floor to stand on -- AN_Player's own capsule already falls under
+# gravity the same way once it exists -- so this target does too, the moment its own capsule is made;
+# that is a property of this test range having no ground, not something this node introduces. Second:
+# AverCharacter.Drive (which CharacterMove reaches through) unconditionally calls
+# `Fw.aver_fw_set_view_entity` as part of creating its view node -- a single GLOBAL "the camera follows
+# this entity" request (`FrameworkAbi.cpp`'s `viewRequest().entity`), not scoped to whichever character
+# is actually possessed. Firing this ONCE, at load, means the camera can flash onto this target for at
+# most the instant between its own OnStart and the player's own next CharacterMove tick reasserting
+# itself -- CharacterMove has no "just make the capsule, leave the camera alone" mode to call instead,
+# because no such node exists in this catalog. A future node that separates the two would remove this
+# caveat; nothing here pretends the caveat is not real in the meantime.
+ENTRY seed OnStart
+NODE seed OnStart
+NODE ent Param param=entity
+NODE zero ConstFloat value=0.0
+NODE settle CharacterMove
+LINK seed.exec settle.exec
+LINK ent.value settle.entity
+LINK zero.value settle.dt
+LINK zero.value settle.forward
+LINK zero.value settle.right
+LINK zero.value settle.yawDelta
+LINK zero.value settle.pitchDelta
+
+# ---- the reaction --------------------------------------------------------------------------------
+# An ENTRY is not a node type: it names which node begins a chain, and OnHit differs from OnStart and
+# OnTick only in that nobody calls it for you. A host -- or, since 6d7ff99, another graph's FireEvent
+# -- has to fire it by name.
+ENTRY hit OnHit
+NODE hit OnHit
+
+NODE one ConstFloat
+PIN one value out float 1.0
+
+NODE prev GetVar var=hits
+NODE next Add
+LINK prev.value next.a
+LINK one.value next.b
+
+NODE store SetVar var=hits
+LINK hit.exec store.exec
+LINK next.result store.value
+
+# ---- reporting -----------------------------------------------------------------------------------
+# A SEPARATE GetVar, deliberately not the `prev` node above. An OUT record pulls a pure data
+# expression, and pulling `prev` would report the count as it was BEFORE this hit was stored -- an
+# off-by-one that looks like a lost hit. Reading through its own node after the write is the honest
+# shape, and the same trap caught a reviewer building acceptance evidence for this very feature.
+ENTRY tick OnTick
+NODE tick OnTick
+NODE report GetVar var=hits
+
+OUT report value

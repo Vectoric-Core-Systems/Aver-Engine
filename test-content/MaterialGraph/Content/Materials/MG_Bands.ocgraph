@@ -1,0 +1,41 @@
+OCGRAPH 1
+DOMAIN material
+# A material graph, and deliberately one that says something no PARAM block can.
+#
+# frac(worldPosition * 0.02) is a value that CHANGES ACROSS THE SURFACE -- bands every 50 cm in each
+# axis, so a 120 cm cube shows more than two of them. That is the point: a flat colour would prove
+# nothing here, because a flat colour is exactly what `PARAM baseColorFactor` already does, and a
+# picture of one could not tell a working graph from a material that ignored its graph entirely and
+# fell back to its own factors. A gradient can only have come from the graph.
+#
+# ROUGHNESS IS A TYPED LITERAL, not a wire, and that is also on purpose: it exercises the other half
+# of "driven" (see compileMaterialGraph -- a MaterialOutput input counts as driven when it is LINKED
+# or when a value is typed into it, and its palette pins carry no defaults precisely so a non-empty
+# one is unambiguously something a person wrote). Metallic, Normal, Emissive, Occlusion and Opacity
+# are left alone entirely, so they keep what this material's own .ocmat declares -- which is the
+# partial-graph behaviour the whole AverAuthored split exists for.
+NAME MG_Bands
+
+NODE wp WorldPosition -760 -60
+PIN wp xyz out float3
+
+NODE rate ConstFloat3 -760 160
+PIN rate value out float3 0.02,0.02,0.02
+
+NODE scaled Multiply -420 30
+PIN scaled a in float3
+PIN scaled b in float3
+PIN scaled result out float3
+
+NODE bands Frac -140 30
+PIN bands x in float3
+PIN bands result out float3
+
+NODE out MaterialOutput 160 -40
+PIN out BaseColor in float3
+PIN out Roughness in float 0.25
+
+LINK wp.xyz scaled.a
+LINK rate.value scaled.b
+LINK scaled.result bands.x
+LINK bands.result out.BaseColor

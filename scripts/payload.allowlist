@@ -1,0 +1,203 @@
+# Aver Engine -- shipping payload allowlist
+#
+# What a DOWNLOADED engine consists of. Read by scripts/stage-payload.ps1, which copies exactly
+# these paths out of a build tree and refuses to invent any.
+#
+# WHY AN ALLOWLIST AND NOT A DENYLIST: build-release\bin holds 90 files, of which 17 are test
+# executables, 14 are .pdb/.ilk, and 6 are stale leftovers that nothing loads. A denylist means
+# every new test target silently ships until someone notices. `aver_add_module` takes an explicit
+# SOURCES list for the same reason -- if a new file has to be named to be built, a new file should
+# have to be named to be shipped.
+#
+# FORMAT: [section] headers, then one path or glob per line. Blank lines and # comments ignored.
+#   [bin]      relative to <buildTree>\bin      -> staged at <out>\bin
+#   [samples]  same, but only with -WithSamples -> staged at <out>\bin
+#   [engine]   relative to the repo root        -> staged at <out>\<same relative path>
+# Globs may use * and **. A pattern matching nothing is an ERROR, not a warning: it means the
+# build layout moved and the payload silently lost a file.
+#
+# A trailing `?AVER_SOMETHING` makes an entry CONDITIONAL on that CMake option, which is what makes
+# more than one edition publishable from one allowlist. The check runs BOTH ways:
+#   option ON  -> the pattern must match at least one file (as usual)
+#   option OFF -> the pattern must match NOTHING
+# The second half is the useful half. A build tree reconfigured with a module off still contains that
+# module's DLL from the previous configure, and Ninja has no reason to delete it -- so without this
+# assertion a "Minimal" edition would quietly ship the very binaries it claims not to have.
+
+[bin]
+# The editor. Named Sandbox.exe because the CMake target is; the public README calls it
+# AverEngine.exe, and one of the two has to change before release.
+Sandbox.exe
+
+# The Aver Exchange asset compiler (tools/AverAssetC.cpp). Unlike ConvertTool/ActorSweep/the test
+# executables below (deliberately NOT shipped, see the bottom of this file), the launcher's Aver
+# Exchange feature invokes this one out of process on a real user's machine, so it has to be present
+# in every edition -- unconditional, the same as Sandbox.exe itself.
+AverAssetC.exe
+AverCrashReporter.exe
+
+# The C-seam DLLs. Listed individually rather than as Aver.*.dll on purpose: that glob would also
+# sweep the dead root-level Aver.Scripting.dll (see below), and it would hide which DLLs an edition
+# is supposed to have.
+#
+# Audio, UI and Settings are unconditional in the top-level CMakeLists, so they are in every
+# edition. The rest are behind their module option, and an edition built without one must not
+# contain it.
+Aver.Audio.Abi.dll
+Aver.UI.Abi.dll
+
+# SETTINGS IS NOT ONE THE EDITOR LOAD-TIME LINKS -- it is the exception this block used to claim did
+# not exist, and the reason it was absent from this file entirely.
+#
+# Sandbox.exe names Aver.Settings nowhere: no CMakeLists in the tree links it except the module's
+# own and tests/settings, so it is in no import table and no staged binary would have reported it
+# missing. The caller is managed. scripting/csharp/Aver.Framework/Native.cs:243 declares
+# `Lib = "Aver.Settings"` and :248-276 import fourteen aver_settings_* entry points through it, and
+# the editor reaches them at every Play start: sandbox/src/SandboxPlay.cpp:168-169 hands
+# ScriptHost::configureInput a settings path, which is HostBridge.cs:440's Settings.Open. On a
+# downloaded payload without this DLL that call throws DllNotFoundException, ConfigureInput's catch
+# (HostBridge.cs:461-464) returns -1, and the editor reports it as the input scheme failing to load
+# -- so rebindable input is dead and the diagnostic points at a .ocinput file that is perfectly
+# fine. scripts/game.allowlist carries the same entry and the longer version of this argument.
+#
+# Unconditional because CMakeLists.txt:242 adds modules/settings beside core and platform with no
+# switch over it, so there is no option to gate on and nothing for the both-ways check to assert.
+Aver.Settings.dll
+Aver.Render.PBR.dll   ?AVER_MODULE_PBR
+Aver.Render.Voxi.dll  ?AVER_MODULE_VOXI
+Aver.Scene.dll        ?AVER_MODULE_SCENE
+Aver.Framework.dll    ?AVER_MODULE_FRAMEWORK
+Aver.Physics.dll      ?AVER_MODULE_PHYSICS
+
+# Redistributables that are NOT part of Windows and must sit beside the executable.
+#   dxcompiler.dll + dxil.dll  HLSL is compiled at RUNTIME; dxil.dll is the signing library, and
+#                              without it drivers reject the compiled DXIL. From the Windows SDK.
+#   nethost.dll                loaded with LoadLibraryW (not linked) so the editor still starts on
+#                              a machine with no .NET at all.
+dxcompiler.dll
+dxil.dll
+nethost.dll
+
+# THE HLSL ITSELF, which shipped nowhere until this line existed.
+#
+# This is the other half of dxcompiler.dll above, and the payload had one without the other. The
+# engine's shaders are not compiled into the executable: rhi::shaderFile() reads them from
+# <executableDir>\shaders at pipeline-build time (modules/rhi/src/ShaderFiles.cpp), and
+# shared_prelude.hlsl, material_prelude.hlsl, voxi.hlsl, post.hlsl and color.hlsli have all lived
+# there as real files for some time. A staged payload therefore shipped the HLSL COMPILER and no
+# HLSL.
+#
+# WHY NOBODY NOTICED: a missing shader file is deliberately non-fatal. shaderFile() logs, caches an
+# empty string and returns it, so the failure surfaces later as DXC complaining about missing
+# declarations -- a compile error for a file-not-found cause, which reads like a shader bug rather
+# than a packaging one.
+#
+# Recursive, and deliberately not a list of names: every module that calls aver_deploy_shaders
+# copies into this one flat directory, so naming files individually would silently drop the next
+# module's shader the day it is added. A pattern matching nothing is an error here (see the header),
+# which is exactly the assertion this entry wants.
+shaders/**
+
+# TRAINED NETWORKS the engine ships with (modules/render.neurafi/CMakeLists.txt deploys them to bin/data).
+# NeuraFI's frame-interpolation weights live here: without this line a package would load nothing and
+# every user would start from the procedural quadratic until they trained their own. A pattern matching
+# nothing is an error, which is the assertion wanted -- a build that lost its weights must not ship.
+data/**
+
+# Fonts the editor loads by name from executableDir(). Roboto, Apache-2.0 -- the notice is required.
+Roboto-Regular.ttf
+Roboto-Medium.ttf
+# Material Icons, Apache-2.0, merged into the same atlas. Absent, the editor still starts and every
+# icon renders as an empty box -- so a payload missing this is cosmetically broken, not dead.
+MaterialIcons-Regular.ttf
+
+# Artwork sampled from executableDir(). splash.png is shown at NATIVE SIZE by the layered-window
+# splash, and the icon sheets are sliced on fixed tile dimensions, so none of these may be rescaled.
+splash.png
+logo.png
+compile-status.png
+file-icons.png
+folder-icons.png
+asset-icons.png
+
+# The managed bridge and the C# contract assemblies. This subdirectory -- not bin\ -- is the live
+# copy: SandboxApp.cpp sets hd.bridgeDir = executableDir() + "\\Scripting", and ScriptHost.cpp
+# builds the bridge DLL and runtimeconfig paths from it.
+Scripting/**   ?AVER_MODULE_SCRIPTING
+
+# avermatc, the material compiler the editor shells out to for Compile C#. Part of the material
+# system, so it follows PBR rather than scripting.
+Tools/**       ?AVER_MODULE_PBR
+
+[samples]
+# Sample behaviour/actor assemblies. Useful for a first look, dead weight for a real project, so
+# they are opt-in rather than part of the default payload.
+SampleScripts/**
+ActorScripts/**
+
+[engine]
+# ENGINE C# SOURCE -- LOAD-BEARING, NOT OPTIONAL.
+#
+# ProjectScaffold.cpp generates every project's Content\Scripts\Scripts.csproj with relative
+# <ProjectReference> paths to these .csproj files, resolved by walking up from executableDir()
+# looking for scripting/csharp/Aver.X/Aver.X.csproj. When the walk fails,
+# engineProjectReference() returns an EMPTY STRING, so the generated project gets Include="" and
+# MSBuild reports an error naming nothing useful. Drop this directory and every project's
+# `dotnet build` breaks, with a diagnostic that points nowhere.
+#
+# This is also why the staged layout puts bin\ and scripting\ as SIBLINGS: from <install>\bin the
+# walk finds <install>\scripting\csharp at one level up.
+#
+# The fix that would remove this from the payload is engine-side -- emit <Reference> + <HintPath>
+# into bin\Scripting\*.dll instead of <ProjectReference> to source. Until then, it ships.
+scripting/csharp/**
+
+# AND THE F# TREE, for exactly the same reason, which it did not until a tester hit it.
+#
+# ProjectScaffold.cpp writes an F# project into every new project (fsprojText) referencing
+# scripting/fsharp/Aver.Pcg/Aver.Pcg.fsproj, and scaffolds a Sky.fs that opens Aver.Pcg. The C#
+# half of that pair was reasoned about carefully and shipped; the F# half was not, so on a shipped
+# build the reference walk returned empty, the ProjectReference was quietly omitted -- and Sky.fs
+# was still written, still saying `open Aver.Pcg`. Every project created by a Launcher install was
+# born unable to build: FS0039 "The namespace 'Pcg' is not defined", dotnet build exits 1, on a
+# project the author had not yet touched.
+#
+# 124 KB of source. The reason it was missing is that nothing connected "the scaffold emits F#" to
+# "the payload ships C# only" -- the two decisions live in different files and neither mentions the
+# other. They mention each other now.
+scripting/fsharp/**
+
+# New Project templates. STAGED HERE, NOT UNDER [bin], and the distinction is load-bearing:
+# ProjectScaffold.cpp's templatesRoot() walks up from executableDir() the same way
+# engineProjectReference() does for scripting/csharp above, so templates\ must be staged as a SIBLING
+# of bin\, not inside it, for that walk to find <install>\templates from <install>\bin on a shipped
+# install. Staged in the wrong place it would be present on disk and invisible to the editor, which
+# is a worse failure than being absent -- absent at least degrades the way the code says it will
+# (missing, empty and malformed roots all resolve to the same empty list, and New Project falls back
+# to Blank-only without an error).
+templates/**
+
+# NOT SHIPPED, and both halves of that are deliberate:
+#
+#   cmake/AvModule.cmake + modules/   EngineScaffold.cpp engineRoot() requires BOTH markers before
+#                                     it enables the Tools menu's C++ items and lists modules. A
+#                                     binary install cannot rebuild the engine, so the correct
+#                                     state is for that walk to fail and those items to be
+#                                     disabled. Shipping ONE of the two markers is the worst case:
+#                                     still degraded, but now it looks like a bug.
+#
+#   *.pdb / *.ilk                     ~340 MB in Debug. Symbols are a crash-triage tool for the
+#                                     engine developer, not part of the product.
+#
+#   the 17 test executables           UiTest, UiRenderTest, ActorPreviewTest, AudioTest,
+#                                     OcAudioTest, AudioProbe, FormatTest, JsonTest, GltfTest,
+#                                     MeshTest, MaterialTest, ActorScriptTest, SceneTest,
+#                                     FrameworkTest, PhysicsTest, ConvertTool, ActorSweep.
+#
+#   bin\Aver.Scripting.dll            STALE DUPLICATES, superseded by bin\Scripting\. Verified:
+#   bin\Aver.Scripting.xml            root Aver.Scripting.dll is 14,848 bytes dated 2026-07-22
+#   bin\Aver.Scripting.deps.json      while Scripting\Aver.Scripting.dll is 15,360 bytes dated
+#   bin\Aver.Scripting.Bridge.*       2026-07-26. Nothing reads the root copies -- the bridge path
+#                                     is executableDir() + "\Scripting". They are left over from
+#                                     before the managed assemblies moved into a subdirectory, to
+#                                     avoid overwriting the same-named NATIVE DLLs in bin\.

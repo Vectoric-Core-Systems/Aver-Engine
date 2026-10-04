@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- averdesign: the Roslyn half of reading an actor script.
+
+       WHY IT IS A SEPARATE PROCESS. The alternative is hosting Roslyn inside the editor, which means
+       loading a compiler into a process whose job is to draw frames, and which the editor's own
+       collectible load context would then have to keep clear of on every script reload. A console
+       tool is invoked, answers, and exits; nothing about the editor's lifetime touches it.
+
+       WHY IT IS THE FALLBACK AND NOT THE PARSER. The built-in scanner in modules/formats needs no
+       .NET, no NuGet and no process, and it is sufficient by construction for the locked grammar
+       that docs/DESIGNER_REWRITE.md defines. This runs only when the scanner reports Malformed,
+       which is precisely the signal that the text has left that grammar, because somebody hand
+       edited inside a region the header told them not to. Neither is a degraded mode; they cover
+       different files.
+
+       THE ONLY NUGET CONSUMER IN THIS REPO, and deliberately a small one. Microsoft.CodeAnalysis is
+       MIT, so it satisfies the permissive-dependency rule, and the package is VENDORED at
+       third_party/nuget so this restores with no network. It used to say the restore was offline
+       because "the .NET SDK ships it"; that was false. The SDK carries Roslyn as the compiler's own
+       DLLs under Roslyn/bincore and its only restorable .nupkg is FSharp.Core, so the package really
+       did come from nuget.org the first time anyone built this. Checking it in is what made the
+       sentence true. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>averdesign</AssemblyName>
+    <RootNamespace>Aver.Design</RootNamespace>
+    <RollForward>LatestMinor</RollForward>
+    <!-- The tool is invoked once per file that needs it and its answer is cached by the caller, so
+         start-up time matters more than steady-state throughput. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TieredPGO>false</TieredPGO>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- PINNED, not floating. A parser whose version can move underneath the build is a parser whose
+         output can change between two runs of the same source, and the C++ side compares spans byte
+         for byte against text it read itself.
+
+         5.6.0 IS THE NEWEST release/stable ROSLYN. Not 5.9.0, which is what this machine's SDK
+         actually runs (`csc 5.9.0-1.26379.115`): its nuspec is built from release/insiders and it
+         depends on a prerelease Microsoft.CodeAnalysis.Analyzers. A parser that reads a user's
+         gameplay script should not be the first prerelease in the tree.
+
+         WHY IT MOVED OFF 4.13.0 AT ALL. `csc -langversion:?` on the installed SDK ends
+         "... 13.0 14.0 (default)"; Roslyn 4.13 stops at C# 13. That left this tool reading actor
+         scripts with a grammar one language version behind the compiler that builds them, and
+         Program.cs never inspects diagnostics, so a construct it cannot parse produces a recovered
+         tree and a confident answer rather than an error. Roslyn's recovery turns out to be good
+         enough that no fixture tried so far actually diverges, so this is a latent hazard closed,
+         not a bug fixed; the honest reason to do it is that the version should not trail the
+         compiler in the first place. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.6.0" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,118 @@
+OCGRAPH 1
+# Drone flight path -- a wide, continuous orbit over the landscape, with a gentle altitude bob so
+# it doesn't look like it's riding a rail. Every node name states what it computes, so the file
+# reads top to bottom like the formula it implements:
+#
+#   x = center_x + radius * cos(time * orbit_speed)
+#   y = center_y + radius * sin(time * orbit_speed)
+#   z = base_altitude + bob_amplitude * sin(time * bob_speed)
+#
+# orbit_speed and bob_speed are deliberately different (bob_speed is 6x orbit_speed) so the
+# vertical bob never lines up with the horizontal orbit -- see BOB_SPEED below.
+#
+# Compiled and ticked by Aver.Graph's GraphHost (scripting/csharp/Aver.Graph/GraphHost.cs) as
+# Tick(entityId, timeSeconds). GraphHost reads OUT pos_x / pos_y / pos_z, in that order, as
+# (x, y, z) and writes them into the entity's CLocal.position (a Vec3 scene field) via
+# aver_scene_set_vec -- NOT through a setfield node in this graph, because setfield only supports
+# F32-kind fields today and CLocal.position is Vec3-kind (see GraphCompiler.FieldKindF32).
+NAME DroneFlightPath
+DESCRIPTION Circular orbit over the landscape with an out-of-phase altitude bob; ticked with (entity, time) by GraphHost.
+
+PARAM time float
+
+# ---- Tunable constants (all lengths in centimetres -- the engine's native unit) ----
+
+NODE radius ConstFloat
+PIN radius value out float 9000.0
+# ORBIT RADIUS, cm. The sample level scatters content out to roughly 13000cm from the origin;
+# 9000cm keeps the whole circle inside that scattered area with margin to spare, while still
+# being a genuinely wide loop (the point of this drone is to cross a lot of ground continuously,
+# for the chunk-streaming workflow driving off of it).
+
+NODE center_x ConstFloat
+PIN center_x value out float 0.0
+
+NODE center_y ConstFloat
+PIN center_y value out float 0.0
+# Orbit is centred on the world origin.
+
+NODE base_altitude ConstFloat
+PIN base_altitude value out float 1400.0
+# CRUISE ALTITUDE, cm (14 m) -- comfortably above landscape scatter height.
+
+NODE bob_amplitude ConstFloat
+PIN bob_amplitude value out float 180.0
+# ALTITUDE BOB AMPLITUDE, cm (1.8 m) -- visible on approach, not a wild swing.
+
+NODE orbit_speed ConstFloat
+PIN orbit_speed value out float 0.15
+# ORBIT ANGULAR SPEED, rad/s. One full lap every 2*pi/0.15 =~ 42 seconds.
+
+NODE bob_speed ConstFloat
+PIN bob_speed value out float 0.9
+# BOB ANGULAR SPEED, rad/s -- exactly 6x orbit_speed. Six bob cycles per orbit lap means the
+# vertical motion never repeats in the same place twice around the circle, which is what keeps
+# this reading as "flying," not "riding a fixed rail."
+
+# ---- Time input ----
+
+NODE time Param param=time
+# Reads the PARAM "time" argument GraphHost passes to the compiled delegate every tick.
+
+# ---- Horizontal orbit ----
+#   x = center_x + radius * cos(time * orbit_speed)
+#   y = center_y + radius * sin(time * orbit_speed)
+
+NODE orbit_angle Multiply
+LINK time.value orbit_angle.a
+LINK orbit_speed.value orbit_angle.b
+
+NODE orbit_cos Cos
+LINK orbit_angle.result orbit_cos.a
+
+NODE orbit_sin Sin
+LINK orbit_angle.result orbit_sin.a
+
+NODE x_offset Multiply
+LINK radius.value x_offset.a
+LINK orbit_cos.result x_offset.b
+
+NODE y_offset Multiply
+LINK radius.value y_offset.a
+LINK orbit_sin.result y_offset.b
+
+NODE pos_x Add
+LINK center_x.value pos_x.a
+LINK x_offset.result pos_x.b
+
+NODE pos_y Add
+LINK center_y.value pos_y.a
+LINK y_offset.result pos_y.b
+
+# ---- Altitude bob ----
+#   z = base_altitude + bob_amplitude * sin(time * bob_speed)
+
+NODE bob_phase Multiply
+LINK time.value bob_phase.a
+LINK bob_speed.value bob_phase.b
+
+NODE bob_sin Sin
+LINK bob_phase.result bob_sin.a
+
+NODE bob_offset Multiply
+LINK bob_amplitude.value bob_offset.a
+LINK bob_sin.result bob_offset.b
+
+NODE pos_z Add
+LINK base_altitude.value pos_z.a
+LINK bob_offset.result pos_z.b
+
+# ---- Outputs ----
+# GraphHost reads these three, IN THIS ORDER, as (x, y, z). Reordering these lines reorders the
+# axes GraphHost writes to -- see GraphCompiler's "OUTPUTS ARRAY" comment for why file order is
+# the only order that exists once this compiles to IL. pos_x/pos_y/pos_z are Add nodes, whose
+# default output pin is named "result" (see OcGraphParser.AddDefaultPins), not "value".
+
+OUT pos_x result
+OUT pos_y result
+OUT pos_z result

@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The gameplay authoring layer a project's Scripts.csproj references. It sits beside Aver.Scripting
+       (which owns AverBehaviour + Log) and Aver.Scene (which owns the storage binding, the maths types
+       and asset identity). This assembly adds the familiar names — Actor, Pawn, PlayerController,
+       GameMode, GameInstance — each a THIN wrapper over an entity handle plus a class attachment.
+
+       It is a versioned contract assembly, like Aver.Scripting: a user script binds to a specific
+       major, so a doc file is generated and the version is pinned. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Framework</AssemblyName>
+    <RootNamespace>Aver.Framework</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Log lives in Aver.Scripting; Vec3/Quat/Rot, SceneIds and Assets live in Aver.Scene. Both are
+         loaded by the engine already, so a normal reference is correct here (the engine host owns the
+         one runtime identity). User game scripts, by contrast, reference THIS assembly with
+         Private="false" — see Sample.Game.csproj. -->
+    <ProjectReference Include="..\Aver.Scripting\Aver.Scripting.csproj" />
+    <ProjectReference Include="..\Aver.Scene\Aver.Scene.csproj" />
+    <!-- The physics binding. Aver.Framework's own Physics.cs is a shim over it now: the API game
+         scripts already use keeps its exact surface, and the 125-function ABI lives in the assembly
+         named after the native module it binds. -->
+    <ProjectReference Include="..\Aver.Physics\Aver.Physics.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The scripting bridge owns the managed dispatch table and the actor instance list, and drives the
+         actor lifecycle. It reaches this assembly's internals — ClassBuilder's ctor and captured tick
+         wiring, ClassFlags, Fw, ManagedDispatch, Entity's ctor, AverActor.Self and InvokeBuildModels — so
+         the bridge can declare classes and construct/bind actors without duplicating a P/Invoke surface. -->
+    <InternalsVisibleTo Include="Aver.Scripting.Bridge" />
+    <!-- Aver.Graph's GraphCompiler emits IL that calls straight through to this assembly's internals:
+         Fw.aver_fw_input_key for the InputKey node, GraphInterop.RaycastForGraph for the Raycast node,
+         by reflection, mirroring exactly how it already calls Aver.Scene.Native's P/Invoke externs for
+         getfield/setfield (see Aver.Scene.csproj's own InternalsVisibleTo grant, added for the same
+         reason). Compile-time access to an internal type from a different assembly needs this. -->
+    <InternalsVisibleTo Include="Aver.Graph" />
+  </ItemGroup>
+
+</Project>

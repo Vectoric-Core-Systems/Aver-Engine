@@ -1,0 +1,279 @@
+// THE RULE THIS HEADER ENFORCES: per entity, ONE function produces the list of draws the renderer
+// receives, and that list does not depend on any cull verdict. A cull decides only WHO delivers the
+// list -- drawMesh() (which broadcasts it to every IRenderFeature) or a direct voxiRenderer_.submit()
+// -- never WHAT is in it. Culling may skip rasterisation, LOD/cluster selection and outline
+// bookkeeping; it must never change a mesh, a material, or a translucency flag.
+//
+// THE BUG THIS FIXES. Before this header existed, a culled or owner-hidden entity reached Voxi
+// through a second, hand-written route (the since-deleted submitShadowOnly lambda in
+// SandboxApp.cpp) that read a different
+// material (mesh-slot-0's, not each part's own), dropped multi-part splits entirely, and diverged on
+// translucency and on the owner-hidden flag. In PTTest, 110 of 142 placed meshes have more than one
+// submesh, so a false cull -- itself caused by a separate viewport-mapping bug this plan's F7 fixes --
+// routinely reshaded whole entities as their slot-0 material: lamps and door frames turned into rough
+// metal, glass panes went opaque or vanished, emissive bulbs lost their glow. Feeding the ray-traced
+// GI volume and the denoiser's history a flip between "N parts, N materials" and "1 draw, slot 0's
+// material" every time a visibility verdict changed is what produced the white panels this whole
+// investigation started from (see the plan's Link 5 for the denoiser mechanism; UNCONFIRMED which
+// exact step crosses the radiance ceiling, but F1-F4 remove every candidate at once by construction).
+//
+// WHY IT LIVES IN THE LIBRARY, having been written as a sandbox-local header. TWO hosts run this
+// walk -- the editor (sandbox/src/SandboxRender.cpp) and the shipped game
+// (Runtime/src/GameRender.cpp) -- and while this file sat in sandbox/src the second one could not
+// include it, because Aver.Runtime.Game.Core links no sandbox/ header. So it carried a hand-kept
+// COPY instead, and said so in its own comments ("ported, not included"): its own PlannedDraw, its
+// own kMaxPlannedDraws spelled "Matches SandboxApp::kMaxPlannedDraws", its own planEntityDraws, and
+// an authored > look > fallback ladder that re-derived by hand what resolveSurfaceLook decides
+// below. A rule whose entire purpose is to be stated ONCE cannot be stated twice, and the two
+// statements had already drifted: GameRender.cpp's ladder branched on `if (authored)` alone, with
+// no liveness check, so a dead material handle there baked in the bright-white-mirror identity as
+// the surface's FINAL look -- precisely the step-2 fall-through resolveSurfaceLook exists to
+// guarantee (docs/RUNTIME-DEDUP.md records the same gap from the warnDeadMaterialHandle side).
+// Aver.Runtime.Game.Core exposes Runtime/include PUBLICly (cmake/AvModule.cmake:15) and sandbox
+// already links that target, so the editor reaches this header exactly the way it already reaches
+// aver/game/GameContent.hpp, and the copy can go.
+//
+// A PURE HEADER, DELIBERATELY, for sandbox/src/PtRenderConflict.hpp's exact reason (see that file's
+// own top comment, which this one follows line for line): no ImGui types, no SandboxApp state, no
+// pbr::, no rhi::, no AVER_WARN/AVER_INFO, no globals -- plain values in, plain values out, over
+// aver/core/Types.hpp and nothing else. That is what makes every decision below a headless unit test
+// (tests/editor/src/SceneSubmissionTest.cpp, which links Aver.Core alone) in a codebase where almost
+// nothing about either host's rendering walk can otherwise be tested at all. Purity is not a
+// leftover of the old location either: it is the reason the test needs no device, no RHI and no
+// ImGui, so it survives the move deliberately. Every ImGui call, every pbr::MaterialLibrary/
+// pbr::isTranslucent lookup, every AVER_WARN, and every rhi:: handle resolution stays at the call
+// site in SandboxRender.cpp and GameRender.cpp; only the DECISIONS live here.
+//
+// SurfaceInputs exists so this header never has to know what pbr::MaterialDesc or pbr::isTranslucent
+// even are: each host's own resolver (SandboxRender.cpp's resolveSurface, GameRender.cpp's walk)
+// does the two lookups (content_.authoredFor, MaterialLibrary::desc) and hands the three booleans
+// and the looked-up SurfaceLook fields across as plain data.
+#pragma once
+#include "aver/core/Types.hpp"
+
+namespace aver::game {
+
+// What the caller found out about ONE surface token before asking what it should look like.
+struct SurfaceInputs {
+    bool authored = false;      // content_.authoredFor has a handle for this token
+    bool authoredLive = false;  // MaterialLibrary::desc(handle) is non-null; == authored when PBR is
+                                 // compiled out (there is no library to ask, so a handle is trusted
+                                 // at face value, matching the entity loop's own comment, formerly
+                                 // SandboxApp.cpp:5881)
+    bool translucent = false;   // pbr::isTranslucent(*desc) -- live handles only, meaningless otherwise
+    bool haveLook = false;      // content_.lookFor(token) succeeded
+    f32 lookCol[3] = {0.0f, 0.0f, 0.0f};
+    f32 lookMetallic = 0.0f;
+    f32 lookRoughness = 0.0f;
+};
+
+// The resolved appearance for one surface, and how it got there. `blended`/`warnDeadHandle`/
+// `usedFallback` default false and `col`/`metallic`/`roughness` default to the flat fallback look
+// itself, so a default-constructed SurfaceLook is already the correct "nothing matched" answer --
+// resolveSurfaceLook only has to OVERWRITE fields a branch actually changes, the same aggregate-init
+// idiom PtRenderConflict.hpp's PtRtConflict uses for the same reason.
+struct SurfaceLook {
+    f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
+    f32 metallic = 0.0f;
+    f32 roughness = 0.5f;
+    bool blended = false;
+    bool warnDeadHandle = false;
+    bool usedFallback = false;
+};
+
+// THE SINGLE COPY of the rule duplicated three times before this header existed -- the editor's
+// entity loop (formerly SandboxApp.cpp:5897-5903), the off-screen-caster lambda submitShadowOnly
+// (formerly 5584-5591) and drawMeshParts (formerly 8313-8324) all ran this exact if/else chain by
+// hand, and the third copy was missing the liveness check the other two had (a dead handle there
+// baked in the bright-white-mirror identity as the entity's FINAL look, which is one of the worst
+// possible failure appearances -- it reads as confident lighting rather than as missing content).
+// All three are gone: SandboxApp.hpp's resolveSurface declaration carries the same three "formerly"
+// ranges from the other side, and SandboxApp::resolveSurface is the editor's one remaining caller.
+// Order matters and is preserved exactly:
+//   1. live authored material: the multiplicative identity (1,1,1,1)/1/1, so the material's own
+//      texture/factor pair supplies everything; blended is the material's own alphaMode read.
+//   2. authored but the handle no longer resolves: flag it (the caller warns once per name with
+//      warnDeadMaterialHandle), then FALL THROUGH to the same look-up an unauthored surface gets --
+//      a dead handle must not be trusted, but it also must not go unlit.
+//   3. a named built-in SurfaceLook: its colour/metallic/roughness (SurfaceLook has no alphaMode of
+//      its own, so blended stays false here -- the entity loop's own note said the same, formerly
+//      SandboxApp.cpp:5877).
+//   4. neither: the flat fallback {0.80, 0.80, 0.85, 1.0}/0/0.5, flagged so the caller can warn once.
+inline SurfaceLook resolveSurfaceLook(const SurfaceInputs& in) {
+    SurfaceLook look;
+    if (in.authored && in.authoredLive) {
+        look.col[0] = look.col[1] = look.col[2] = look.col[3] = 1.0f;
+        look.metallic = 1.0f;
+        look.roughness = 1.0f;
+        look.blended = in.translucent;
+        return look;
+    }
+    if (in.authored && !in.authoredLive) {
+        look.warnDeadHandle = true;
+        // fall through -- a dead handle is treated exactly like an unauthored surface below.
+    }
+    if (in.haveLook) {
+        look.col[0] = in.lookCol[0];
+        look.col[1] = in.lookCol[1];
+        look.col[2] = in.lookCol[2];
+        look.metallic = in.lookMetallic;
+        look.roughness = in.lookRoughness;
+        return look;
+    }
+    look.usedFallback = true;
+    return look;
+}
+
+// One draw Voxi (or the raster device) will actually receive: which mesh, and which material token.
+struct PlannedDraw {
+    u32 mesh = 0;
+    i32 material = 0;
+};
+
+// Bounds a caller-supplied PlannedDraw buffer -- see planEntityDraws' own "Capacity truncation"
+// test case (SceneSubmissionTest.cpp T1). No content in PTTest or JungleRuins comes close (the
+// plan's own MADR/MHDR parse found 3-7 parts per multi-material tree, the deepest split seen);
+// 64 is a wide margin over that, not a tuned minimum.
+//
+// It sits HERE, next to the struct it bounds, because it too was written down twice: once as
+// SandboxApp::kMaxPlannedDraws and once as a file-static in Runtime/src/GameRender.cpp whose comment
+// could only say "Matches SandboxApp::kMaxPlannedDraws" and hope. A capacity that two hosts must
+// agree on is a decision, and decisions live in this header.
+constexpr u32 kMaxPlannedDraws = 64;
+
+// THE SINGLE COPY of what was the editor's entity loop plus drawMeshParts (formerly
+// SandboxApp.cpp:6360-6365 and 8297-8299): the "a mesh that names several materials draws as
+// several meshes, one per slot" rule, and its "a substituted handle keeps today's single draw and the
+// entity's own material" exception (formerly 6353-6359's own comment -- a LOD level or a posed
+// skin/soft-body copy is DIFFERENT geometry from the one content_.partsFor was split from, so the
+// split does not apply to it). `Part` is a template parameter rather than game::GameContent::MeshPart by name so this header
+// never has to declare or forward-declare that type -- it only ever reads two fields off it, exactly the
+// contract GameContent's own MeshPart already satisfies (rhi::MeshHandle mesh; i32 material;), and
+// rhi::MeshHandle is a plain u32 (RHIResources.hpp), so writing it into PlannedDraw::mesh needs no
+// rhi:: include either.
+//
+// Returns the number of entries written into `out` (capped at outCapacity, never exceeded).
+template <class Part>
+inline u32 planEntityDraws(u32 baseMesh, u32 chosenMesh, const Part* parts, u32 partCount,
+                            i32 entityMaterial, PlannedDraw* out, u32 outCapacity) {
+    if (parts != nullptr && partCount > 0 && chosenMesh == baseMesh) {
+        u32 n = 0;
+        for (u32 i = 0; i < partCount && n < outCapacity; ++i) {
+            const Part& p = parts[i];
+            if (!p.mesh) continue;   // a part whose slot named nothing carries no geometry of its own
+            out[n].mesh = static_cast<u32>(p.mesh);
+            out[n].material = p.material ? p.material : entityMaterial;
+            ++n;
+        }
+        return n;
+    }
+    // No split applies: either this entity has no parts, or chosenMesh is a substitution (LOD/posed
+    // skin/soft-body) that the split was never cut from. One draw, the entity's own material.
+    // A SKINNED entity is no longer normally one of these: drawWorld passes its POSED handle as
+    // `baseMesh` together with that handle's own posed parts (GameContent::posedPartsFor), so the
+    // test above is true for it and it splits like a static mesh. It lands here only when that
+    // posed split was refused, which keeps the old single draw.
+    if (chosenMesh != 0 && outCapacity > 0) {
+        out[0].mesh = chosenMesh;
+        out[0].material = entityMaterial;
+        return 1;
+    }
+    return 0;
+}
+
+// Which of the two delivery routes an entity takes, and whether it is hidden from its own owner.
+struct RouteDecision {
+    bool raster = false;
+    bool hiddenFromOwner = false;
+    bool tint = false;
+};
+
+// hiddenFromOwner is decided ONCE, before either cull, and carried on EVERY route -- the 0d3bcf1 fix
+// ("hidden=owner never reached the renderer that actually draws the image"): under ray-driven primary
+// visibility the TLAS *is* what the camera sees, so an owner-hidden mesh must stay out of it exactly
+// as it stays out of the raster walk, on every path this function can send it down, frustum-culled or
+// not (frustum-culled AND owner-hidden must still give hiddenFromOwner true -- that combination is
+// the regression 0d3bcf1 itself fixed and is pinned by a test here).
+//
+// raster is the ordinary "nothing is hiding or culling this entity" case, PLUS occlusion.showCulled's
+// debug case: showCulled sends an otherwise-culled, non-owner-hidden entity through the raster route
+// too (so it draws instead of being skipped) with tint set, so the caller can multiply its colour by
+// (1, 0.15, 1) instead of drawing it unmodified. showCulled never overrides an owner-hide: a mesh
+// hidden from its own owner (the camera being inside it) is not a "culled" entity in the sense this
+// debug view is for, and must stay invisible regardless.
+inline RouteDecision chooseRoute(bool frustumCulled, bool occlusionCulled, bool ownerHidden,
+                                  bool showCulled) {
+    const bool culled = frustumCulled || occlusionCulled;
+    RouteDecision r;
+    r.hiddenFromOwner = ownerHidden;
+    r.raster = !culled && !ownerHidden;
+    r.tint = false;
+    if (showCulled && culled && !ownerHidden) {
+        r.raster = true;
+        r.tint = true;
+    }
+    return r;
+}
+
+// What actually reaches Voxi (or the raster device) for one planned draw, once its look and its
+// route are both known.
+struct VoxiDelivery {
+    u32 mesh = 0;
+    i32 material = 0;
+    bool translucent = false;
+    bool hiddenFromOwner = false;
+};
+
+// MIRRORS VoxiRenderer::submitDraw EXACTLY -- deliberately not edited by this lane, only cited:
+// submitDraw's `blended` parameter is read straight off IRenderFeature's own contract for a raster
+// draw, and everything downstream of it (submit()'s translucent lane, the TLAS non-opaque flag, the
+// exclusion from the cascade/GI shadow map/voxelisation) is driven by that one bool. deliver()
+// reproduces the SAME translucent value for the direct route, so a culled pane of glass and a
+// visible one agree about being translucent -- which submitShadowOnly's old, independent
+// re-implementation of this test (formerly SandboxApp.cpp:5556-5566, deleted by lane A) did not
+// always do.
+//
+// hiddenFromOwner: the raster route never carries it (a raster draw that reached drawMesh() was never
+// owner-hidden in the first place -- chooseRoute's own raster expression already excludes that case,
+// so `false` here is a statement of fact, not a default silently accepted). The direct route passes
+// route.hiddenFromOwner through unchanged, which is what lets voxiRenderer_.submit's own
+// AVER_RT_MASK_OWNER_HIDDEN lane (defined in voxi.hlsl, and the one opaque query that asks for it
+// rather than for _ALL) keep the mesh out of primary visibility while
+// still letting it cast a shadow and contribute GI, exactly like the raster walk always did.
+//
+// CALLED, NOT MERELY DECLARED, and that is load-bearing rather than incidental: the one caller is
+// game::drawWorld's direct route (Runtime/src/GameRender.cpp), which BOTH hosts run, so there is
+// no second place left for this pair to be written out and drift. It spent a while stated here and
+// hand-written there, which is the two-statements-of-one-rule shape this whole header exists to
+// close.
+inline VoxiDelivery deliver(const PlannedDraw& draw, const SurfaceLook& look,
+                             const RouteDecision& route) {
+    VoxiDelivery d;
+    d.mesh = draw.mesh;
+    d.material = draw.material;
+    d.translucent = look.blended;
+    if (route.raster) {
+        d.hiddenFromOwner = false;
+    } else {
+        d.hiddenFromOwner = route.hiddenFromOwner;
+    }
+    return d;
+}
+
+// F8's gate: should the occlusion test even run this frame. `cullEnabled` is the manifest/CLI
+// RENDER.OCCLUSIONCULL setting (occlusionCullEnabled_ -- never written by this function or by its
+// caller); `haveOccluder` is whether an IOcclusionCuller actually exists; `sceneSuppressed` is
+// e.device()->sceneSuppressed() -- true whenever a render feature (ray-driven Voxi, Path Tracing) has
+// claimed the frame and is painting the scene itself, in which case culling can save almost no work
+// (every culled entity still has to be submitted for primary rays -- see the plan's F8 for the full
+// accounting) so it goes idle; `runUnderSuppression` is the override
+// (consoleOcclusionCullUnderSuppressionSlot, EditorConsole.hpp) that keeps it running anyway, the
+// only way to exercise F1-F4's route parity in ray-driven mode once the idle is in effect. The
+// override can only ever ADD a run, never remove one the manifest already turned off: with
+// cullEnabled false, this returns false no matter what runUnderSuppression says.
+inline bool occlusionTestShouldRun(bool cullEnabled, bool haveOccluder, bool sceneSuppressed,
+                                    bool runUnderSuppression) {
+    return cullEnabled && haveOccluder && (!sceneSuppressed || runUnderSuppression);
+}
+
+} // namespace aver::game

@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Graph runtime: parses .ocgraph text files and compiles them to .NET IL using
+       System.Reflection.Emit. THIS IS NO LONGER THE MINIMAL SLICE THIS COMMENT USED TO DESCRIBE.
+       It said "five or six node types" and "no canvas, no editor panel" for long after both had
+       stopped being true. It now covers roughly 180 gameplay node types (math, vectors, scene,
+       physics, input, audio, animation, save/load, custom events, graph variables and user-defined
+       functions with real recursion), authored on a canvas in sandbox/src/GraphEditor.cpp.
+       docs/VISUAL_SCRIPTING.md is the reference; this file only builds the assembly.
+       (No double hyphens anywhere in here: MSBuild parses this as XML, where a double hyphen
+       inside a comment is MSB4025 and fails the whole build.) -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Graph</AssemblyName>
+    <RootNamespace>Aver.Graph</RootNamespace>
+    <Version>0.1.0</Version>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <FileVersion>0.1.0.0</FileVersion>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The graph compiler needs Scene to call P/Invoke functions through the Native binding. -->
+    <ProjectReference Include="..\Aver.Scene\Aver.Scene.csproj" />
+    <!-- InputKey (Fw.aver_fw_input_key) and Raycast (GraphInterop.RaycastForGraph) both call straight
+         through to internals of this assembly, exactly like Aver.Scene's Native above; see
+         Aver.Framework.csproj's InternalsVisibleTo("Aver.Graph") grant. -->
+    <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,35 @@
+OCGRAPH 1
+# Visual scripting graph, written by the Aver Engine editor.
+NAME CrossImplementationTest
+DESCRIPTION Written by the C++ writer, parsed and executed by the C# runtime
+
+NODE c1 ConstFloat 0 0
+NODE c2 ConstFloat 0 100
+NODE c3 ConstFloat 0 200
+NODE sum Add 200 50
+NODE prod Multiply 400 100
+NODE tick OnTick 0 400
+NODE seq Sequence 200 400
+
+PIN c1 value out float 5
+PIN c2 value out float 7
+PIN c3 value out float 3
+PIN sum a in float
+PIN sum b in float
+PIN sum result out float
+PIN prod a in float
+PIN prod b in float
+PIN prod result out float
+PIN tick exec out exec
+PIN seq exec in exec
+PIN seq then out exec
+
+LINK c1.value sum.a
+LINK c2.value sum.b
+LINK sum.result prod.a
+LINK c3.value prod.b
+LINK tick.exec seq.exec
+
+ENTRY tick OnTick
+
+OUT prod result

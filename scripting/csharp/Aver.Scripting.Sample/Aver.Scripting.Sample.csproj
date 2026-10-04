@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Aver.Scripting.Sample</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aver.Scripting\Aver.Scripting.csproj" />
+  </ItemGroup>
+
+  <!-- Copy the engine's native Voxi DLL next to this sample so P/Invoke resolves it.
+       AverBinDir can be overridden: dotnet run -p:AverBinDir=... -->
+  <PropertyGroup>
+    <AverBinDir Condition="'$(AverBinDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\build\bin</AverBinDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="$(AverBinDir)\Aver.Render.Voxi.dll"
+          Condition="Exists('$(AverBinDir)\Aver.Render.Voxi.dll')"
+          CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
+</Project>

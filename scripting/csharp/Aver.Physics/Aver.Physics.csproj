@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The Jolt binding: every aver_phys_* export across physics_abi.h, physics_joints_abi.h,
+       physics_shapes_abi.h, physics_layers_abi.h, physics_character_abi.h and physics_vehicle_abi.h, plus the
+       game-author-facing API built on top of them (Physics, Body, Joint, Shapes, CharacterBody).
+
+       A LEAF — it references nothing, deliberately: Aver.Physics.csproj mirrors the native
+       module's own name and Aver.Framework references THIS project, not the other way round, so a
+       script-facing Physics.cs in Aver.Framework can forward to it without a circular dependency. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Physics</AssemblyName>
+    <RootNamespace>Aver.Physics</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- The .xml ships for IntelliSense, but CS1591 nagging over every enum member and struct field
+         is noise: the house style already forbids a comment that only restates a name. Suppressed
+         here, not silenced globally. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+</Project>

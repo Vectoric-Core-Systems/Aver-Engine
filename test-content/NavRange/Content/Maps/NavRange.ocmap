@@ -1,0 +1,31 @@
+OCWORLD 1
+# A level built for ONE question: does Bake Navigation produce a grid that agrees with the geometry?
+#
+# Centimetres, +X forward, +Y right, +Z up. Everything here is a plain PLACEG, so everything gets a
+# real static box body -- LevelInstance builds one from the placement's scale. That matters more than
+# it looks: the bake samples PHYSICS, so a placement with no body is a placement the navmesh cannot
+# see, and this map would quietly bake nothing at all.
+NAME NavRange
+SUN dir 0.304027 0.406402 0.861629 color 1 0.98 0.92 lux 100000
+SKY model physical
+
+# THE FLOOR: 2000 x 2000 cm, its top surface exactly at z = 0. cube.ocmesh is a unit cube spanning
+# +/-1, so a scale of S gives a half-extent of S centimetres -- 1000 1000 10 is 2000 x 2000 x 20,
+# centred at z = -10 so the walkable surface lands on zero rather than somewhere that has to be
+# remembered.
+PLACEG Meshes/cube.ocmesh 0 0 -10 0 0 0 1000 1000 10 M_Crate
+
+# THE WALL: solid, full width, no doorway. Deliberately impassable, because the assertion this map
+# exists to support is that the bake reports the two sides as SEPARATE REGIONS -- and a wall with a
+# gap in it would make them one region and prove nothing.
+#
+# It also produces a third region nobody has to author: the wall's own TOP is flat ground 300 cm up,
+# so the bake finds floor there and marks it walkable, and the 300 cm rise from the floor beside it
+# is far over the 40 cm step limit. A navmesh that fails to notice that would let an agent walk up
+# the side of a wall, which is exactly the failure maxStepCm exists to prevent.
+PLACEG Meshes/cube.ocmesh 0 0 150 0 0 0 25 1000 150 M_Crate
+
+# A CRATE, off to one side. Small enough to stand on (its top is 120 cm up, over the step limit) and
+# narrow enough that the cells around it stay connected -- so the expected region count does not
+# depend on it, and it is here to give the overlay something that is neither floor nor wall.
+PLACE Meshes/cube.ocmesh 500 -500 60 0 0 0 60 M_Crate

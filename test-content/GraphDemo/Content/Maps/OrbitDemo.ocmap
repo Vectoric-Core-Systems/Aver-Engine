@@ -1,0 +1,18 @@
+OCWORLD 1
+# Engine test content for GRAPH-AS-CLASS. Two placements naming the SAME class, AN_Orbiter (declared
+# by Content/Scripts/IdleMotion.ocgraph's CLASS record), at two different starting points.
+#
+# WHAT THIS PROVES. AN_Orbiter's own graph seeds a "home" VAR from its own entity's position at
+# OnStart, then orbits that remembered point every OnTick -- see IdleMotion.ocgraph's own header
+# comment. Placing two instances at DIFFERENT positions is therefore, by itself, the proof that two
+# instances of one graph class carry INDEPENDENT VAR state: if they shared one store, both would
+# orbit whichever entity's OnStart ran last, and their positions would coincide (or run in lockstep
+# offset by a fixed vector) rather than genuinely diverging around two separate centres.
+NAME OrbitDemo
+
+# `none` in the asset slot is never read: LevelInstance.cpp skips building a raw mesh/physics entity
+# for any placement whose className is non-empty (see OcWorldPlacement::className's own comment), so
+# the asset column is inert here -- present only because PLACE's grammar is positional and the class
+# keyword rides in the trailing key=value-style token region, not the leading columns.
+PLACE none 0 0 0 0 0 0 1 class AN_Orbiter
+PLACE none 400 0 0 0 0 0 1 class AN_Orbiter

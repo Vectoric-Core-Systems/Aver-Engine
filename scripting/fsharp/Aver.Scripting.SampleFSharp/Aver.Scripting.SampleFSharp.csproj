@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The C# half of the F# round trip: an ordinary AverBehaviour, in an ordinary script assembly,
+       that happens to call into F#. This is the project the host discovers; the .fsproj it references
+       is just a library that travels with it.
+
+       Nothing here is F#-aware. That is the point of the whole exercise: one ProjectReference to an
+       .fsproj is the entire integration, because `dotnet build` already drives fsc the same way it
+       drives csc, and the host loads the resulting IL without knowing or caring which compiler
+       emitted it. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Scripting.SampleFSharp</AssemblyName>
+    <RootNamespace>Aver.Scripting.SampleFSharp</RootNamespace>
+    <!-- Same reason as the .fsproj: a library does not copy package assets by default, and
+         FSharp.Core arrives here transitively as a package rather than as a project. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Private=false for the same reason Aver.Scripting.SampleBehaviour gives: the engine already has
+         Aver.Scripting loaded, and a second copy in the scripts folder would be a second runtime
+         identity for AverBehaviour that the bridge's discovery test would match nothing against. -->
+    <ProjectReference Include="..\..\csharp\Aver.Scripting\Aver.Scripting.csproj" Private="false" />
+    <ProjectReference Include="..\Aver.FSharp.Sample\Aver.FSharp.Sample.fsproj" />
+  </ItemGroup>
+
+</Project>
