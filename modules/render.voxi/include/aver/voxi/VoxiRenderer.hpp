@@ -467,6 +467,7 @@ private:
     // Path Tracing over the radiance cache (AVER_PT_PATHS + AVER_NEURAC): paths train the cache and end in it.
     rhi::PipelineHandle rdGiPtRcCsPso_      = 0;
     rhi::PipelineHandle rdGiTracePtRcCsPso_ = 0;
+    rhi::PipelineHandle rdPtRefCsPso_       = 0;   // CSRdPtRef: Reference mode's per-pixel path
     rhi::PipelineHandle rdReflPtCsPso_      = 0;
     rhi::PipelineHandle rdReflSplitPtCsPso_ = 0;
     rhi::PipelineHandle rdReflSplitCsPso_  = 0;

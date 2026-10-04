@@ -1915,6 +1915,9 @@ private:
 
     // The fence value at which work recorded right now can be considered retired.
     u64  retireFence() const;
+    // Stands in for the recording frame's present fence until present() knows it.
+    static constexpr u64 kPendingFrameFence = ~0ull;
+    void resolvePendingRetires(u64 fence);
     void retire(ComPtr<IUnknown> obj);
     void collect();
 
@@ -5599,6 +5602,8 @@ void D3D12Device::present() {
     }
     ++nextFence_;
     fenceValues_[frameIndex_] = nextFence_;
+    // What this frame retired while it recorded is released once this frame is done.
+    if (rhiFactory_) rhiFactory_->resolvePendingRetires(nextFence_);
 
     // Service a pending capture if this frame recorded the copy.
     if (captureReq_ && captureBuf_ && captureRecorded_) {
@@ -6148,8 +6153,19 @@ bool D3D12ResourceFactory::allocStageRange(u32 count, u32& outFirst) {
 
 // The fence value at which work recorded right now can be considered retired.
 u64 D3D12ResourceFactory::retireFence() const {
+    // Retired while a frame records: that frame's open command list may already use it, and a mid-frame
+    // waitForGpu (the occlusion culler waits every frame) signals the value below before the frame is
+    // submitted. So it waits for the frame's own present fence instead (resolvePendingRetires).
+    if (dev_->recording_) return kPendingFrameFence;
     const u64 completed = dev_->fence_ ? dev_->fence_->GetCompletedValue() : 0;
     return (dev_->nextFence_ > completed ? dev_->nextFence_ : completed) + 1;
+}
+
+// present() signalled `fence` for the frame that recorded these retirements.
+void D3D12ResourceFactory::resolvePendingRetires(u64 fence) {
+    for (RetiredObject& r : retired_)          if (r.fence == kPendingFrameFence) r.fence = fence;
+    for (RetiredRange& r : pendingRanges_)     if (r.fence == kPendingFrameFence) r.fence = fence;
+    for (RetiredRange& r : stagePendingRanges_) if (r.fence == kPendingFrameFence) r.fence = fence;
 }
 
 // Queues an object for release once the GPU has passed the current frame.

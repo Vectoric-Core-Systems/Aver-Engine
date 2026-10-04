@@ -1774,7 +1774,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     rtHitGrad(hit, rdRayDx, rdRayDy, uvGx, uvGy);
     AverSurface s = rtHitSurface(hit, -dir, L, uvGx, uvGy, AVER_RT_HIT_FULL);
 #if AVER_RD_SPLIT
-    // Path Tracing, Reference mode: the pixel is one fresh path (ptReferencePixel below); the staged
+    // Path Tracing, Reference mode: the pixel is one fresh path (CSRdPtRef, read below); the staged
     // lighting it would otherwise read was not traced this frame.
     const bool ptRef = ptReferenceMode();
 #else
@@ -1942,7 +1942,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     const float aoView = ind.occlusion * s.occlusion;   // ViewDebug::AmbientOcclusion (vmode 6)
     radiance = averShadeIndirect(radiance, s, ind);
 #if AVER_RD_SPLIT
-    if (ptRef) radiance = ptReferencePixel(s, wpos, i.pos.xy);
+    if (ptRef) radiance = gRdGiTex[uint2(i.pos.xy)].rgb;   // CSRdPtRef's path for this pixel
 #endif
 
 #if AVER_RD_ABLATE == AVER_RD_ABL_FOG
@@ -2418,6 +2418,33 @@ void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID) {
     // ablated: matches PSRayDriven's fallback (rdAo's initial 1.0).
     gRdAoTex[pixel] = float4(1.0, 0.0, 0.0, 1.0);
 #endif
+}
+
+// ---- STAGE P: CSRdPtRef -- Path Tracing, Reference mode ----------------------------
+//
+// One independent path per pixel from the visibility record's surface (ptReferencePixel), into
+// gRdGiTex, which Reference mode's skipped GI stage leaves free; Stage B shades the pixel with it. Its
+// own pass so the path loop stays out of Stage B's pixel shader (register pressure lost the device on
+// this GPU once already: aver-single-pass-tdr).
+[numthreads(8, 8, 1)]
+void CSRdPtRef(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+    const uint pitch = rdRowPitch();
+    if (pitch == 0u) return;
+    const uint4 rec = gRdVisBuf[pixel.y * pitch + pixel.x];
+    if (rec.x == 0xFFFFFFFFu) {
+        gRdGiTex[pixel] = float4(0.0, 0.0, 0.0, 0.0);   // sky: Stage B paints it without reading this
+        return;
+    }
+    float2 ndc;
+    const float3 dir = rdPrimaryRayDir(pixel, ndc);
+    const RdSurface s = rdSurfaceFromRecord(rec, dir);
+    const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0), 2.0 / max(gSceneViewport.w, 1.0));
+    const float3 rdRayDx = (averViewRayDir(ndc + float2(ndcPixelStep.x, 0.0)) - dir) * s.hitT;
+    const float3 rdRayDy = (averViewRayDir(ndc + float2(0.0, ndcPixelStep.y)) - dir) * s.hitT;
+    const AverSurface hs = rdHitSurface(s, dir, rdRayDx, rdRayDy);
+    gRdGiTex[pixel] = float4(ptReferencePixel(hs, s.wpos, float2(pixel) + 0.5), 1.0);
 }
 
 // ---- STAGE R: CSRdRefl -- reconstruct surface, resolve ray-traced reflection -------

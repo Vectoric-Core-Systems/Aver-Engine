@@ -412,7 +412,7 @@ void VoxiRenderer::shutdown() {
                                         rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                         rdGiCacheCsPso_, rdGiCacheCbCsPso_,
                                         rdGiTraceCacheCsPso_, rdGiTraceCacheCbCsPso_,
-                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_,
+                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_, rdPtRefCsPso_,
                                         rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                         rdReflSplitCsPso_, rdReflFilterCsPso_,
                                         rdLocalLightsCsPso_,
@@ -434,7 +434,7 @@ void VoxiRenderer::shutdown() {
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
     rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
-    rdGiPtRcCsPso_ = rdGiTracePtRcCsPso_ = 0;
+    rdGiPtRcCsPso_ = rdGiTracePtRcCsPso_ = rdPtRefCsPso_ = 0;
     rdReflPtCsPso_ = rdReflSplitPtCsPso_ = 0;
     rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
     rdLocalLightsCsPso_ = 0;
@@ -4099,8 +4099,11 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
 
     // Path Tracing, Reference mode: Stage B traces each pixel's whole path itself, so the GI, sky-occlusion,
     // lamp and reflection stages have nothing to give it (lamps are still published for its next-event pick).
-    const bool ptRef = ptReferenceWanted();
+    if (pathTracingWanted() && !ptTwinsTried_) createPathTraceTwins();
+    const bool ptRef = ptReferenceWanted() && rdPtRefCsPso_ != 0;
     if (ptRef) ptRanThisFrame_ = true;
+    // Without its pass Stage B must not take the reference branch (bit 4 of ptBounceParams.x).
+    else cb_.ptBounceParams[0] = static_cast<f32>(static_cast<u32>(cb_.ptBounceParams[0]) & ~16u);
 
     // Reflection register/filter split: optional sub-stage C.
     const bool reflSplit = !ptRef && (cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f) &&
@@ -4138,7 +4141,6 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     const bool rcBit = (static_cast<u32>(cb_.ambientParams[3]) & 128u) != 0u;
     bool usedCacheTwin = false;
     // PATH TRACING: the AVER_PT_PATHS twins take the GI-candidate and reflection dispatches.
-    if (pathTracingWanted() && !ptTwinsTried_) createPathTraceTwins();
     const bool pt = pathTracingWanted();
     {
         // Wraps every dispatch below -- see this function's comment on why no barrier or timestamp
@@ -4293,6 +4295,17 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             } else {
                 ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
             }
+            if (gx && gy) ctx.dispatch(gx, gy, 1);
+            stageEnd(rdGiTex_);
+        }
+        // Reference path tracing: one path per pixel into gRdGiTex, which Stage B shades the pixel with.
+        if (ptRef) {
+            stageBegin("Voxi RD reference path");
+            ctx.setPipeline(rdPtRefCsPso_);
+            ctx.setBindingSet(bindings_);
+            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+            ctx.setBindlessTable(rtTexTable_);
+            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
             if (gx && gy) ctx.dispatch(gx, gy, 1);
             stageEnd(rdGiTex_);
         }
@@ -5502,6 +5515,9 @@ bool VoxiRenderer::createPathTraceTwins() {
     // Over the radiance cache. Plain only: Path Tracing never runs the half-rate checkerboard.
     build("CSRdGi",      ";AVER_NEURAC=1",          rdGiPtRcCsPso_);
     build("CSRdGiTrace", ";AVER_NEURAC=1",          rdGiTracePtRcCsPso_);
+    build("CSRdPtRef",   "",                        rdPtRefCsPso_);
+    if (!rdPtRefCsPso_)
+        AVER_WARN("[Voxi] the reference path tracing pass did not compile; Reference mode runs as ReSTIR");
     if (!rdGiPtRcCsPso_ || !rdGiTracePtRcCsPso_)
         AVER_WARN("[Voxi] the Path Tracing pipelines over the radiance cache did not compile; paths run "
                   "without it");
@@ -6089,7 +6105,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                          rdGiCacheCsPso_, rdGiCacheCbCsPso_,
                                          rdGiTraceCacheCsPso_, rdGiTraceCacheCbCsPso_,
-                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_,
+                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_, rdPtRefCsPso_,
                                         rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                          rdReflSplitCsPso_, rdReflFilterCsPso_,
                                          rdLocalLightsCsPso_};
@@ -6108,7 +6124,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
     rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
-    rdGiPtRcCsPso_ = rdGiTracePtRcCsPso_ = 0;
+    rdGiPtRcCsPso_ = rdGiTracePtRcCsPso_ = rdPtRefCsPso_ = 0;
     rdReflPtCsPso_ = rdReflSplitPtCsPso_ = 0;
     rcTwinsTried_ = false;
     ptTwinsTried_ = false;
