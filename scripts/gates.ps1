@@ -396,7 +396,10 @@ function Invoke-Gate($exe, [string[]] $gateArgs, [string[]] $extra, [int] $frame
     # array changes nothing, so a default run's argument list is untouched, in order and byte for
     # byte, from what this script built before -Backend existed -- the one requirement this feature
     # is not allowed to break. See the header comment and $Backend's own comment for why.
-    $all = @('--frames', "$frames", '--debug-layer', '--aversr', 'off') + $gateArgs + $extra + $backendArgs
+    # An empty [string[]] parameter arrives as $null, and `+ $null` appends a null element that
+    # Start-Process -ArgumentList refuses (it broke verify-payload.ps1); drop them.
+    $all = @(@('--frames', "$frames", '--debug-layer', '--aversr', 'off') + $gateArgs + $extra + $backendArgs |
+             Where-Object { $null -ne $_ })
 
     # START-PROCESS, NOT `& $exe`, AND THAT IS NOT A STYLE CHOICE. Sandbox.exe is linked
     # /SUBSYSTEM:WINDOWS as of 0.5.0 so the editor never opens a console window, and Windows
