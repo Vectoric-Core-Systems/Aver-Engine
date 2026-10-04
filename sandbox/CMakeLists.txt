@@ -124,6 +124,9 @@ target_link_libraries(Sandbox PRIVATE Aver.UI Aver.Render.UI)
 # UiDrawList directly, so the seam a game's HUD uses is exercised by the editor too. Aver.UI is
 # still named above because the host casts aver_ui_draw_list() back to that type.
 target_link_libraries(Sandbox PRIVATE Aver.UI.Abi)
+# Loaded only by C# (Native.cs DllImport), so nothing links it; without this, building just Sandbox
+# skips it and Play's ConfigureInput throws DllNotFoundException.
+add_dependencies(Sandbox Aver.Settings)
 # Water. Guarded because AVER_MODULE_FLUIDS is a real option and the module matrix builds trees with
 # it off; linking it is also what brings AVER_MODULE_FLUIDS=1 through to SandboxApp.cpp, which is
 # what the #if guards there key on -- the same transitive-define arrangement Scene/PBR/Physics use.

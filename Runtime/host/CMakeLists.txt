@@ -27,6 +27,8 @@
 # someone check. It says the reason itself now, rather than pointing at a target that did not share it.
 add_executable(AverEngineRuntime WIN32 RuntimeMain.cpp AverEngineRuntime.rc)
 target_link_libraries(AverEngineRuntime PRIVATE Aver.Runtime.Game Aver.Runtime Aver.Platform Aver.Core)
+# Loaded only by C# (Native.cs DllImport); build it with the runtime since nothing links it.
+add_dependencies(AverEngineRuntime Aver.Settings)
 
 # AverSR (3.3 C): linked to the EXECUTABLE, never to Aver.Runtime.Game -- Runtime/host/RuntimeMain.cpp is
 # the only translation unit in this tree allowed to name sr::anything (see its own header comment), and
