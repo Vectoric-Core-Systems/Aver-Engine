@@ -4,7 +4,9 @@
 A modular general purpose 3D engine developed by Hydrogen-isotope, design was derived from an earlier proprietary Sandbox Engine as well as Averion Engine, creator of Averion being https://github.com/xKrvZ . 
 
 <img width="3839" height="2074" alt="NeonDistrictDemoSceneTAA" src="https://github.com/user-attachments/assets/4caa0d67-8089-4f7c-9c32-32ced2e1c8cf" />
+
 #OVERVIEW
+
 -------------------------------------------------------------------------------------------------------------
 Aver Engine uses frontier NeuRaC(Neural Radiance Cache), NeuraFI (Neural Frame Interpolation), and ReSTIR PT to get state of the art rendering while maintaining an acceptable realtime framerate on majority of modern hardware (2020 and later), achieving quality of rendering similar to Unreal Engine or Unity HDRP while at comparably higher framerates. The engine also supports Aver Node Visual Scripting where you can use nodes and wires to link a graph together to form a script as well as C# Scripting. Anims and Assets are handled by the engine's importer which supports USD, GLTF, and GLB as of now. Materials are made in Visual Scripting as well as a Material graph where nodes define Physically Based Rendering(PBR) properties to construct realistic and accurate surfaces from Mettalic mirrors, to textured vents and rust on iron bars. 
 
