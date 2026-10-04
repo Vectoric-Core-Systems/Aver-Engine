@@ -48,7 +48,7 @@ float2 iconSceneDepthSize() { uint w, h; gIconSceneDepth.GetDimensions(w, h); re
 
 IconVSOut IconVS(IconVSIn i) {
     IconVSOut o;
-    o.pos = mul(float4(float3(i.posXY, i.posZ), 1.0), gViewProj);
+    o.pos = mul(float4(float3(i.posXY, i.posZ), 1.0), gViewProjNoJitter);
     o.uv = i.uv;
     o.color = i.color;
     return o;

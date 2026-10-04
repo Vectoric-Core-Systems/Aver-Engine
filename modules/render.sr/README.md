@@ -57,9 +57,35 @@ This was the third stale "X is not implemented" claim found in this tree in one 
 
 Built as its own module (`AVER_MODULE_SR=ON`, the default); `sandbox` links it (`sandbox/CMakeLists.txt`) and constructs `SpatialUpscaler` for real when a non-`Off` `--aversr` level or Editor Preferences combo selection is applied. **What is still true:** those PTTest numbers measure *frame time*, not pixels — `SpatialUpscaler::execute()` has still never been proven correct against a live swapchain by a GPU capture (`docs/AVERSR.md` says the same).
 
+## Temporal AA — `TemporalUpscaler` (`AverSrTaa.hpp`, `shaders/sr_taa.hlsl`)
+
+TAAU (temporal anti-aliasing with upscale) followed by FSR 1's RCAS. The editor's default
+(Display > Temporal anti-aliasing; `--taa` / `--no-taa`), at any render scale.
+
+- **Jitter.** `needs()` asks for `Jitter`, so the D3D12 device offsets the camera by an 8-step
+  Halton(2,3) sub-pixel offset — in the UPLOADED frame constants only (`jitterForUpload`). The CPU
+  camera (`camera()`, picking, culling, every renderer's previous-frame matrix) stays unjittered.
+  Raster draws and ray-driven primary rays both read the jittered `gViewProj`/`gInvViewProjRel`.
+  `PerFrameCB::viewProjNoJitter` (`gViewProjNoJitter`) is the unjittered camera for what draws after
+  the resolve: editor lines and viewport icons.
+- **Sign convention.** With the camera offset by `+j` (scene pixels, +y down), scene pixel `n` shows
+  the point at `n + 0.5 - j`, and the G-buffer velocity (written against an unjittered previous
+  matrix) carries `+j`; the resolve subtracts it.
+- **Resolve** (one pass at output size, squashed space): a wide reconstruction (kernel in scene
+  pixels) for the YCoCg variance clip box and for pixels without history, a narrow one (kernel in
+  output pixels) for the blend, weighted by how close the nearest sample landed; history fetched
+  with a 9-tap Catmull-Rom at `uv - motion`, clipped, blended at up to 10% (25% under motion).
+  Generated (frame-interpolation) images are resolved but never written to history.
+- **Needs the G-buffer** (velocity + view Z, so MSAA 1): the editor enables it while TAA is on.
+  Without it, or on a backend whose caller cannot let it retarget (Vulkan), it falls back to FSR 1.
+- **Measured** on NeonDistrict_Day at 0.5 scale: edges anti-aliased (no stair-steps on the sign
+  rim, railings, road markings), road grain reduced under motion, no visible ghost trails three
+  frames after a moving camera stops. Slightly softer fine texture than FSR 1.
+
 ## What's NOT here yet
 
-- **A temporal (`aver::sr`-native) upscaler.** Needs render-scale, sub-pixel jitter, per-pixel
-  screen-space motion vectors, depth, exposure and a camera-cut reset signal as whole-frame data —
-  none of which exists yet outside Voxi's ray-traced-shadow-only reprojection. See
-  `docs/AVERSR.md` "Prerequisites".
+- **TAA in the packaged runtime** (it still uses FSR 1), and **jitter on Vulkan**.
+- **A camera-cut signal.** Nothing calls `IUpscaler::reset()` on a teleport or level load; the
+  variance clip absorbs a cut within a few frames.
+- Frame interpolation and the denoiser read the jitter-carrying velocity unmodified (up to half a
+  scene pixel of extra apparent motion).

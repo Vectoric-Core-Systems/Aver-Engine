@@ -220,6 +220,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #if AVER_MODULE_SR
 #include "aver/sr/AverSrQuality.hpp"
 #include "aver/sr/AverSrFsr.hpp"
+#include "aver/sr/AverSrTaa.hpp"
 // AverSR level constants must match Voxi ladder numbering.
 #if AVER_MODULE_VOXI
 static_assert(static_cast<aver::u32>(aver::sr::Quality::Off)         == aver::voxi::ladder::kAverSrOff,
@@ -1553,6 +1554,7 @@ public:
     void clearAverSrUpscaler(rhi::IDevice* dev);
 
     void setEdgeAaOverride(bool on);   // --edge-aa
+    void setTaaOverride(bool on) { temporalAaEnabled_ = on; taaFromCli_ = true; }   // --taa / --no-taa
 
     void applyUpscalerSlot(rhi::IDevice* dev);
 
@@ -3305,6 +3307,10 @@ private:
     // FSR 1 (EASU + RCAS). Built whenever the scene is scaled (any AverSR level or a manual render
     // scale) or edge AA is on; dropped, after the device lets go of it, when none is (applyUpscalerSlot).
     std::unique_ptr<aver::sr::FsrUpscaler> averSrUpscaler_;
+    // Temporal AA (TAAU + RCAS): when on, it takes the slot instead of FSR, at any render scale.
+    std::unique_ptr<aver::sr::TemporalUpscaler> taaUpscaler_;
+    bool temporalAaEnabled_ = true;   // Display > Temporal anti-aliasing; --no-taa / --taa win over it
+    bool taaFromCli_ = false;
     // Edge AA (FXAA-class) in FSR's first pass: --edge-aa or Display > Edge anti-aliasing.
     bool edgeAaEnabled_ = false;
     f32  fsrSharpness_ = 0.2f;   // RCAS stops (0 = sharpest); Display > Sharpening

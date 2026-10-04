@@ -16,6 +16,7 @@ aver_add_module(Aver.Render.Sr
   SOURCES
     src/AverSrSpatial.cpp
     src/AverSrFsr.cpp
+    src/AverSrTaa.cpp
   DEPS
     Aver.Core
     Aver.RHI

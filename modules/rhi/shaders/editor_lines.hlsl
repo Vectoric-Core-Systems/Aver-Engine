@@ -32,8 +32,8 @@ static const float kEditorLineFeather = 1.0;
 // sideways (and past its end, for a square cap) by half the width in SCREEN pixels. Offsetting xy by
 // px * 2/size * w keeps z/w -- the line's own depth -- untouched.
 ELOut VSEditorLine(ELIn i) {
-    float4 ca = mul(mul(float4(i.axy, i.az, 1.0), gWorld), gViewProj);
-    float4 cb = mul(mul(float4(i.bxy, i.bz, 1.0), gWorld), gViewProj);
+    float4 ca = mul(mul(float4(i.axy, i.az, 1.0), gWorld), gViewProjNoJitter);
+    float4 cb = mul(mul(float4(i.bxy, i.bz, 1.0), gWorld), gViewProjNoJitter);
     ELOut o;
     o.col = i.col.rgb;
     o.side = 0.0;
@@ -84,7 +84,7 @@ float3 editorRelPoint(float2 ndc, float z) {
 // A scene mesh's own vertices (VSIn, the engine's MeshVertex) through a FillMode::Wireframe pipeline:
 // gWorld is its world matrix, gBaseColor.rgb the wire colour, already in the target's encoding.
 float4 VSEditorWire(VSIn i) : SV_POSITION {
-    return mul(mul(float4(i.pos, 1.0), gWorld), gViewProj);
+    return mul(mul(float4(i.pos, 1.0), gWorld), gViewProjNoJitter);
 }
 
 float4 PSEditorWire(float4 pos : SV_POSITION) : SV_TARGET {

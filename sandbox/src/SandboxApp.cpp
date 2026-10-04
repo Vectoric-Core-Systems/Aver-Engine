@@ -2102,8 +2102,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     const bool wantGbufForDenoiser = false;
 #endif
     const bool wantGbufForFrameInterp = updateFrameInterpolation(e.device());
+#if AVER_MODULE_SR
+    const bool wantGbufForTaa = temporalAaEnabled_;   // its resolve reads velocity and view Z
+#else
+    const bool wantGbufForTaa = false;
+#endif
     e.device()->setGBufferEnabled(gbufferOverride_ || wantGbufForDenoiser || wantGbufForFrameInterp ||
-                                  gbufferDebugView_ != GBufferDebugFeature::Mode::Off);
+                                  wantGbufForTaa || gbufferDebugView_ != GBufferDebugFeature::Mode::Off);
     gbufferDebugFeature_.setDevice(e.device());
     // vpX_/vpY_/vpW_/vpH_: this frame's 3D-viewport rect (frame stale at worst on first draw).
     gbufferDebugFeature_.setViewportRect(static_cast<u32>(vpX_), static_cast<u32>(vpY_),
@@ -2368,6 +2373,7 @@ editor::shutdownAnimEditors();
     // Detach from device first, then destroy: raw pointers must be cleared before unique_ptrs reset.
     e.device()->setUpscaler(nullptr);
     averSrUpscaler_.reset();
+    taaUpscaler_.reset();
 #endif
     // Same order: clear device pointer before destroying the object.
     e.device()->setFrameInterpolation(false);

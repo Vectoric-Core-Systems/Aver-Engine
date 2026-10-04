@@ -722,10 +722,13 @@ struct UpscalerInput {
     u32 srcWidth = 0, srcHeight = 0;
     u32 dstWidth = 0, dstHeight = 0;
 
-    TextureHandle depth         = 0;
-    TextureHandle motionVectors = 0;
-    f32 jitterX = 0.0f, jitterY = 0.0f;
+    TextureHandle depth         = 0;   // R32F linear view depth (the G-buffer's), 0 when unavailable
+    TextureHandle motionVectors = 0;   // RG16F scene pixels, destination minus source, carrying +jitter
+    f32 jitterX = 0.0f, jitterY = 0.0f;   // this frame's camera jitter in scene pixels (+y down)
     TextureHandle history       = 0;
+    // This image is a frame-interpolation in-between, not a rendered frame: a temporal upscaler
+    // must not accumulate it.
+    bool generated = false;
     // Whether execute() may bind its own intermediate targets (and must leave outTarget bound at
     // the end). False on Vulkan, whose caller holds a rendering scope open across execute().
     bool canRetarget = true;

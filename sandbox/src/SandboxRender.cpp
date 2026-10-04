@@ -2395,18 +2395,25 @@ void SandboxApp::setEdgeAaOverride(bool on) { edgeAaEnabled_ = on; }
 // DETACH BEFORE DESTROY: the device holds a raw pointer, so it is told nullptr first.
 void SandboxApp::applyUpscalerSlot(rhi::IDevice* dev) {
     if (!dev) return;
-    const bool want = averSrQuality_ != aver::sr::Quality::Off || dev->renderScale() < 0.999f || edgeAaEnabled_;
-    if (want && !averSrUpscaler_) {
-        if (rhi::IResourceFactory* res = dev->resources())
-            averSrUpscaler_ = std::make_unique<aver::sr::FsrUpscaler>(*res);
-    }
-    rhi::IUpscaler* slot = want ? averSrUpscaler_.get() : nullptr;
+    rhi::IResourceFactory* res = dev->resources();
+    // Temporal AA takes the slot whenever it is on, at any scale (it is the AA as well as the upscale).
+    if (temporalAaEnabled_ && !taaUpscaler_ && res) taaUpscaler_ = std::make_unique<aver::sr::TemporalUpscaler>(*res);
+    const bool wantFsr = !temporalAaEnabled_ &&
+        (averSrQuality_ != aver::sr::Quality::Off || dev->renderScale() < 0.999f || edgeAaEnabled_);
+    if (wantFsr && !averSrUpscaler_ && res) averSrUpscaler_ = std::make_unique<aver::sr::FsrUpscaler>(*res);
+    rhi::IUpscaler* slot = temporalAaEnabled_ ? static_cast<rhi::IUpscaler*>(taaUpscaler_.get())
+                         : wantFsr ? averSrUpscaler_.get() : nullptr;
     if (averSrUpscaler_) {
         averSrUpscaler_->setEdgeAa(edgeAaEnabled_);
         averSrUpscaler_->setSharpness(fsrSharpness_);
     }
+    if (taaUpscaler_) {
+        taaUpscaler_->setEdgeAa(edgeAaEnabled_);
+        taaUpscaler_->setSharpness(fsrSharpness_);
+    }
     if (dev->upscaler() != slot) dev->setUpscaler(slot);
-    if (!want && averSrUpscaler_) averSrUpscaler_.reset();
+    if (!wantFsr && averSrUpscaler_) averSrUpscaler_.reset();
+    if (!temporalAaEnabled_ && taaUpscaler_) taaUpscaler_.reset();
 }
 
 // Logs the [AverSR] brand-tag line: current render scale, and whether an upscaler was

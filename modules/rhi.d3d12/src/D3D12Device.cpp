@@ -896,9 +896,34 @@ public:
         gbufCameraPrimed_ = true;
 
         std::memcpy(frameCB_.viewProj, viewProj, sizeof(frameCB_.viewProj));
+        std::memcpy(frameCB_.viewProjNoJitter, viewProj, sizeof(frameCB_.viewProjNoJitter));
         std::memcpy(frameCB_.invViewProjRel, invViewProjRel, sizeof(frameCB_.invViewProjRel));
         frameCB_.camPos[0] = camPos[0]; frameCB_.camPos[1] = camPos[1]; frameCB_.camPos[2] = camPos[2]; frameCB_.camPos[3] = 1;
     }
+    // TEMPORAL AA JITTER, applied to the UPLOADED copy only: frameCB_ (and so camera(), picking,
+    // culling and every renderer's own previous-frame chain) stays unjittered. An 8-step Halton(2,3)
+    // offset within the scene pixel, written into viewProj (clip.xy += j * clip.w) and its inverse,
+    // so raster draws and ray-driven primary rays both sample it. Velocity written against an
+    // unjittered previous matrix therefore carries +jitter, which the resolve subtracts.
+    void jitterForUpload(PerFrameCB& cb) {
+        cb.jitter[0] = cb.jitter[1] = cb.jitter[2] = cb.jitter[3] = 0.0f;
+        if (!upscaler_ || !any(upscaler_->needs(), UpscalerNeeds::Jitter)) return;
+        auto halton = [](u32 i, u32 b) { f32 f = 1.0f, r = 0.0f; for (; i; i /= b) { f /= b; r += f * (i % b); } return r; };
+        const u32 i = (taaJitterIndex_++ % 8u) + 1u;
+        const f32 jx = halton(i, 2) - 0.5f, jy = halton(i, 3) - 0.5f;   // scene pixels
+        const f32 w = static_cast<f32>(vpW_ ? vpW_ : sceneWidth_), h = static_cast<f32>(vpH_ ? vpH_ : sceneHeight_);
+        if (w <= 0.0f || h <= 0.0f) return;
+        const f32 nx = 2.0f * jx / w, ny = -2.0f * jy / h;            // NDC, y up
+        for (u32 r = 0; r < 4; ++r) {                                    // viewProj * T
+            cb.viewProj[r * 4 + 0] += cb.viewProj[r * 4 + 3] * nx;
+            cb.viewProj[r * 4 + 1] += cb.viewProj[r * 4 + 3] * ny;
+        }
+        for (u32 c = 0; c < 4; ++c)                                      // T^-1 * invViewProjRel
+            cb.invViewProjRel[12 + c] -= nx * cb.invViewProjRel[c] + ny * cb.invViewProjRel[4 + c];
+        cb.jitter[0] = jx; cb.jitter[1] = jy;
+    }
+    u32 taaJitterIndex_ = 0;
+    f32 taaJitterThisFrame_[2] = {0.0f, 0.0f};   // what this frame's upload carried, for the upscaler
     bool camera(f32 viewProj[16], f32 invViewProjRel[16], f32 cameraPos[3]) const override {
         if (viewProj)       std::memcpy(viewProj, frameCB_.viewProj, sizeof(frameCB_.viewProj));
         if (invViewProjRel) std::memcpy(invViewProjRel, frameCB_.invViewProjRel, sizeof(frameCB_.invViewProjRel));
@@ -1109,7 +1134,7 @@ private:
     bool createPostTargets();            // resolve target, bloom pyramid and descriptors: per resize
     void releasePostTargets();
     // bbIdx names backbuffer's RTV (renderTargets_[bbIdx]).
-    void runPostChain(ID3D12Resource* backbuffer, u32 bbIdx);
+    void runPostChain(ID3D12Resource* backbuffer, u32 bbIdx, bool generated = false);
     // Suballocate one pass's constants from this frame's post ring.
     D3D12_GPU_VIRTUAL_ADDRESS postConstants(const void* data, u32 bytes);
     D3D12_GPU_DESCRIPTOR_HANDLE postTriple(u32 triple) const;
@@ -3634,7 +3659,12 @@ void D3D12Device::beginFrame() {
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = msaaRtvHeap_->GetCPUDescriptorHandleForHeapStart();
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = dsvHeap_->GetCPUDescriptorHandleForHeapStart();
-    std::memcpy(frameCBPtr_[frameIndex_], &frameCB_, sizeof(PerFrameCB));
+    {
+        PerFrameCB up = frameCB_;
+        jitterForUpload(up);
+        taaJitterThisFrame_[0] = up.jitter[0]; taaJitterThisFrame_[1] = up.jitter[1];
+        std::memcpy(frameCBPtr_[frameIndex_], &up, sizeof(PerFrameCB));
+    }
     for (IRenderFeature* f : features_) f->beginScene();
 
     if (rhiContext_) {
@@ -4547,7 +4577,7 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12Device::postConstants(const void* data, u32 bytes
 }
 
 // Scene -> backbuffer. Records chain, leaves backbuffer in RENDER_TARGET. Skip no-op stages.
-void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx) {
+void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
     // Frame clock advances once per real frame (generated images don't count toward eye adaptation).
     if (!fgGeneratedPost_) {
         LARGE_INTEGER now{}, freq{};
@@ -4850,7 +4880,30 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx) {
             in.color = sceneColorTex_;
             in.srcWidth = sceneWidth_;   in.srcHeight = sceneHeight_;
             in.dstWidth = width_;        in.dstHeight = height_;
+            in.jitterX = taaJitterThisFrame_[0];
+            in.jitterY = taaJitterThisFrame_[1];
+            in.generated = generated;
+            // A temporal upscaler reads this frame's G-buffer velocity and view Z; they rest as
+            // render targets, so they are made readable around execute() and put back.
+            const bool gbufForSr = any(upscaler_->needs(), UpscalerNeeds::MotionVectors) &&
+                                   gbufferEnabled_ && sampleCount_ == 1 && gbufVelocity_ && gbufViewZ_;
+            if (gbufForSr) {
+                D3D12_RESOURCE_BARRIER b[2] = {
+                    transition(gbufVelocity_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                    transition(gbufViewZ_.Get(),    D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                };
+                cmdList_->ResourceBarrier(2, b);
+                in.motionVectors = gBufferVelocityTexture();
+                in.depth         = gBufferViewZTexture();
+            }
             upscaler_->execute(*rhiContext_, in, presentHdrTex_);
+            if (gbufForSr) {
+                D3D12_RESOURCE_BARRIER b[2] = {
+                    transition(gbufVelocity_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+                    transition(gbufViewZ_.Get(),    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+                };
+                cmdList_->ResourceBarrier(2, b);
+            }
 
             auto backToSrv = transition(dstT->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -5390,7 +5443,7 @@ void D3D12Device::presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool
     ID3D12Resource* bb = renderTargets_[bbIdx].Get();
     beginGpuSpan(generated ? "post chain (generated)" : "post chain");
     fgGeneratedPost_ = generated;
-    runPostChain(bb, bbIdx);
+    runPostChain(bb, bbIdx, generated);
     fgGeneratedPost_ = false;
     endGpuSpan();   // "post chain"
 

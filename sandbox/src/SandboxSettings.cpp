@@ -78,6 +78,7 @@ void SandboxApp::loadEditorPreferences() {
     fpsCountsInterpolated_ = prefBool("display.fpsCountsInterpolated", true);
     edgeAaEnabled_ = edgeAaEnabled_ || prefBool("display.edgeAa", false);   // --edge-aa also turns it on
     fsrSharpness_  = prefFloat("display.fsrSharpness", fsrSharpness_);
+    if (!taaFromCli_) temporalAaEnabled_ = prefBool("display.temporalAa", temporalAaEnabled_);
     // Stored render scale behind crash cookie: detects device loss at startup via renderScalePending.
     // Migration: AverSrChoice from display.aversr/renderScale if display.aversrChoice not yet written.
 #if AVER_MODULE_SR
@@ -387,6 +388,12 @@ void SandboxApp::buildEditorPrefs() {
             ImGui::SetTooltip("Renders the 3D scene at a fraction of the window's resolution, then\n"
                               "upscales it back for display with FSR 1. The editor UI stays crisp either way.");
 #if AVER_MODULE_SR
+        ImGui::Checkbox("Temporal anti-aliasing (TAA)", &temporalAaEnabled_);
+        uiReg_.track("prefs.display.temporalAa");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Jitters the camera by a fraction of a pixel each frame and blends the frames,\n"
+                              "reprojected with motion vectors: smooth edges and stable detail, upscaled to\n"
+                              "the window. Needs MSAA 1 (it reads the G-buffer); otherwise FSR 1 is used.");
         ImGui::Checkbox("Edge anti-aliasing", &edgeAaEnabled_);
         uiReg_.track("prefs.display.edgeAa");
         if (ImGui::IsItemHovered())
@@ -2188,6 +2195,7 @@ void SandboxApp::saveEditorPreferences() {
         }
         setPrefBool ("display.edgeAa",       edgeAaEnabled_);
         setPrefFloat("display.fsrSharpness", fsrSharpness_);
+        if (!taaFromCli_) setPrefBool("display.temporalAa", temporalAaEnabled_);
 #endif  // AVER_MODULE_SR
     }
 

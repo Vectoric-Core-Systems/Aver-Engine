@@ -91,13 +91,19 @@ struct PerFrameCB {
     // are live, z and w spare.
     f32 wave[3][4];
     f32 waveParams[4];
+    // TEMPORAL AA. viewProj above carries the frame's sub-pixel jitter while a temporal upscaler is
+    // set (the device applies it at upload; on the CPU, camera() stays unjittered). This is the same
+    // camera WITHOUT it, for what draws after the resolve (editor lines, viewport icons), which must
+    // not shimmer. Equal to viewProj when no jitter is applied.
+    f32 viewProjNoJitter[16];
+    f32 jitter[4];       // xy this frame's jitter in scene pixels (+x right, +y down); zw unused
 };
 
 // A REAL SIZE, not just an alignment. The `% 16 == 0` check both backends carried is necessary and
 // nowhere near sufficient: every legal edit to this struct keeps it a multiple of 16, so the one
 // assertion guarding the layout could not fail for the change most likely to break it. This number
 // moving is the signal that shared_prelude.hlsl's cbuffer has to move with it.
-static_assert(sizeof(PerFrameCB) == 672, "cbuffer PerFrame in shaders/shared_prelude.hlsl mirrors this");
+static_assert(sizeof(PerFrameCB) == 752, "cbuffer PerFrame in shaders/shared_prelude.hlsl mirrors this");
 static_assert(sizeof(PerFrameCB) % 16 == 0, "a constant buffer's rows are float4s");
 
 // Spot checks at the boundaries a reader would look for, in the shape MaterialTest.cpp proved out:
@@ -113,6 +119,7 @@ static_assert(offsetof(PerFrameCB, atmoMie)   == 336, "atmoMie at 336");
 static_assert(offsetof(PerFrameCB, skySh)     == 448, "the SH block sits at 448");
 static_assert(offsetof(PerFrameCB, time)      == 592, "time follows the SH block");
 static_assert(offsetof(PerFrameCB, wave)      == 608, "the wave set follows time");
+static_assert(offsetof(PerFrameCB, viewProjNoJitter) == 672, "the unjittered camera follows the waves");
 
 // Constants for every post pass. Mirrors `cbuffer AverPost : register(b0)` in rhi::postShaderSource().
 struct PostCB {

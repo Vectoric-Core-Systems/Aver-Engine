@@ -49,6 +49,10 @@ cbuffer PerFrame : register(AVER_CB_JOIN(b, AVER_FRAME_CB)) {
     // gWaveParams: x amplitude, y live count. See PerFrameCB::wave for why they live in THIS block.
     float4   gWave[3];
     float4   gWaveParams;
+    // gViewProj without temporal AA's sub-pixel jitter, for what draws after the resolve
+    // (PerFrameCB::viewProjNoJitter). gTaaJitter.xy: the jitter in scene pixels (+y down).
+    float4x4 gViewProjNoJitter;
+    float4   gTaaJitter;
 };
 
 // The unit world-space view ray through one viewport-relative NDC point (y up). gInvViewProjRel

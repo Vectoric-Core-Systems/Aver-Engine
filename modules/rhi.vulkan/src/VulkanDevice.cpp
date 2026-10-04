@@ -2148,6 +2148,7 @@ void VulkanDevice::setViewportRect(u32 x, u32 y, u32 w, u32 h) {
 }
 void VulkanDevice::setCamera(const f32 viewProj[16], const f32 invViewProjRel[16], const f32 camPos[3]) {
     std::memcpy(frameCB_.viewProj, viewProj, sizeof(frameCB_.viewProj));
+    std::memcpy(frameCB_.viewProjNoJitter, viewProj, sizeof(frameCB_.viewProjNoJitter));   // no TAA jitter on Vulkan yet
     std::memcpy(frameCB_.invViewProjRel, invViewProjRel, sizeof(frameCB_.invViewProjRel));
     frameCB_.camPos[0] = camPos[0]; frameCB_.camPos[1] = camPos[1]; frameCB_.camPos[2] = camPos[2]; frameCB_.camPos[3] = 1;
 }
