@@ -793,6 +793,8 @@ SURFACE 2 grass  0.45 0.090 0.35
 GROUND 0.0 0
 KILLZ -5000.0
 SPAWN 0 0 100 0
+GAMEMODE AN_FPRules            # World Settings: GameMode override (class name; omitted = project GAME.MODE, then the engine drone)
+DEFAULTPAWN AverDefaultPawn    # World Settings: pawn spawned instead of the GameMode's own (omitted = the mode's)
 
 # --- .ocmap placements still valid ---
 DEFORM tyre_barrier.ocbeam 12000.0 800.0 0.0 90.0 0.0 0.0 rubber

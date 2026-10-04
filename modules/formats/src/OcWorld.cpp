@@ -182,6 +182,9 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             // by whoever wrote the C# class, and nothing forbids one.
             out.gameMode = std::string(t[1]);
             for (usize i = 2; i < t.size(); ++i) { out.gameMode += ' '; out.gameMode += std::string(t[i]); }
+        } else if (equalsCI(key, "DEFAULTPAWN") && t.size() >= 2) {
+            out.defaultPawn = std::string(t[1]);
+            for (usize i = 2; i < t.size(); ++i) { out.defaultPawn += ' '; out.defaultPawn += std::string(t[i]); }
         } else if (equalsCI(key, "SPAWN")) {
             out.hasSpawn = true;
             out.spawnX = tokF(t, 1); out.spawnY = tokF(t, 2);
@@ -598,6 +601,7 @@ std::string writeOcworld(const OcWorldData& w) {
     // Omitted when empty: no override is the default, and a blank GAMEMODE line would read back as
     // a class named "" rather than as an absence.
     if (!w.gameMode.empty()) s += "GAMEMODE " + w.gameMode + "\n";
+    if (!w.defaultPawn.empty()) s += "DEFAULTPAWN " + w.defaultPawn + "\n";
     if (w.hasSpawn) {
         s += "SPAWN " + num(w.spawnX) + " " + num(w.spawnY) + " " + num(w.spawnZ) + " " + num(w.spawnYaw) + "\n";
     }

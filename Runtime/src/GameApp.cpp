@@ -954,6 +954,8 @@ void GameApp::installLevelHooks(Engine& e) {
         e.setLoadingProgress(fraction);
     };
     hooks.afterInstantiate = [this](const GameLevel::LoadedLevel& loaded) {
+        levelGameMode_    = loaded.world.gameMode;      // World Settings overrides, read at begin play
+        levelDefaultPawn_ = loaded.world.defaultPawn;
 #  if AVER_MODULE_VOXI
         // Load foliage after placements (matches editor)
         if (voxiAttached_) {
@@ -1303,8 +1305,16 @@ void GameApp::beginPlayIfGameModeDeclared() {
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCRIPTING
     if (!scriptsReady_) return;
 
-    // Find concrete GameMode subclass (abstract base is invisible)
-    const i32 modeClass = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE);
+    // The level's World Settings GAMEMODE, else the project's GAME.MODE, else (a shipped game has no
+    // editor drone) the first concrete GameMode declared, as before those keys existed.
+    auto named = [](const std::string& n, i32 flag) -> i32 {
+        const i32 c = n.empty() ? 0 : aver_fw_class_find(n.c_str());
+        return (c && (aver_fw_class_get_flags(c) & flag)) ? c : 0;
+    };
+    i32 modeClass = named(levelGameMode_, AVER_FW_CLASS_GAME_MODE);
+    if (!modeClass) modeClass = named(project_.gameMode, AVER_FW_CLASS_GAME_MODE);
+    if (!modeClass) modeClass = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE);
+    const i32 pawnClass = named(levelDefaultPawn_, AVER_FW_CLASS_PAWN);
     // Latch for the rest of process (onUpdate's graph-class tick needs to distinguish "not begun" from "undeclared")
     gameModeDeclared_ = modeClass != 0;
     if (modeClass == 0) {
@@ -1315,7 +1325,7 @@ void GameApp::beginPlayIfGameModeDeclared() {
     }
     const i32 instanceClass = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_INSTANCE);
     // (PlayMobility already began in onInit, before this call)
-    if (aver_fw_begin_play(instanceClass, modeClass)) {
+    if (aver_fw_begin_play_with_pawn(instanceClass, modeClass, pawnClass)) {
         AVER_INFO("[Game] play session begun automatically (GameMode class {}) -- a shipped game has no "
                   "editor Play button, so booting it IS beginning play", modeClass);
         // Pawn doesn't exist until GameMode spawned and possessed it

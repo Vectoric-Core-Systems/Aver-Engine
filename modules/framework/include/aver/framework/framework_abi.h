@@ -51,8 +51,10 @@ extern "C" {
  *    which nothing did before (see INPUT SCHEME below).
  * 8: HOST CONTROL section (aver_fw_set_quit_requested/aver_fw_quit_requested and
  *    aver_fw_cursor_request/aver_fw_cursor_release/aver_fw_cursor_requested) -- a shipped game had
- *    no way to exit itself or release the mouse cursor (see that section below). */
-#define AVER_FW_ABI_VERSION_MINOR 8
+ *    no way to exit itself or release the mouse cursor (see that section below).
+ * 9: aver_fw_class_count (enumerate declared classes) and aver_fw_begin_play_with_pawn (a level's
+ *    pawn override) -- for World Settings' game mode / default pawn pickers. */
+#define AVER_FW_ABI_VERSION_MINOR 9
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -98,6 +100,8 @@ AVER_FW_ABI int32_t aver_fw_class_declare(const char* name, const char* parentNa
 AVER_FW_ABI int32_t aver_fw_class_find(const char* name);           /* 0 when unknown */
 /* The class's name. */
 AVER_FW_ABI const char* aver_fw_class_name(int32_t c);              /* "" for an invalid handle */
+/* How many classes are declared; handles run 1..count. (minor 9) */
+AVER_FW_ABI int32_t aver_fw_class_count(void);
 /* The class's parent handle. */
 AVER_FW_ABI int32_t aver_fw_class_parent(int32_t c);               /* parent handle, 0 for a root */
 /* Clears the class's components and defaults, keeping its identity and lineage. */
@@ -187,6 +191,10 @@ AVER_FW_ABI int32_t aver_fw_controller_of(int32_t pawn);           /* the contro
  * GameMode's controller and pawn (possessed). 0 if one was already running or the mode was
  * invalid. */
 AVER_FW_ABI int32_t aver_fw_begin_play(int32_t gameInstanceClass, int32_t gameModeClass);
+/* aver_fw_begin_play, spawning `pawnClass` instead of the GameMode's default pawn (0 = the default)
+ * -- a level's pawn override. The GameMode class itself is left unchanged. (minor 9) */
+AVER_FW_ABI int32_t aver_fw_begin_play_with_pawn(int32_t gameInstanceClass, int32_t gameModeClass,
+                                                 int32_t pawnClass);
 /* Ends the running session: OnEndPlay(STOP) and destroy every actor it spawned, back to EDITOR.
  * 0 if nothing was running. */
 AVER_FW_ABI int32_t aver_fw_end_play(void);

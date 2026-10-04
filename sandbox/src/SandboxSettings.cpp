@@ -508,6 +508,39 @@ void SandboxApp::buildEditorPrefs() {
     saveEditorPreferences();
 }
 
+#if AVER_MODULE_FRAMEWORK
+// A combo over declared, non-abstract classes carrying `flag`, writing the chosen class NAME into
+// `value`: first `emptyLabel` (value ""), then `engineLabel` (the engine's own class), then the
+// project's. A stored name that no class answers to stays visible, marked, rather than vanishing.
+bool SandboxApp::classPicker(const char* label, std::string& value, int32_t flag, const char* emptyLabel,
+                             const char* engineClass, const char* engineLabel) {
+    engineDefaultGameMode();   // registers AverDefault* so they can be named before the first Play
+    auto labelOf = [&](const std::string& v) -> std::string {
+        if (v.empty()) return emptyLabel;
+        if (engineClass && v == engineClass) return engineLabel;
+        const int32_t c = aver_fw_class_find(v.c_str());
+        return (c && (aver_fw_class_get_flags(c) & flag)) ? v : v + "  (not declared -- compile .NET?)";
+    };
+    bool changed = false;
+    ImGui::SetNextItemWidth(320.0f * dpi_);
+    if (ImGui::BeginCombo(label, labelOf(value).c_str())) {
+        auto item = [&](const std::string& v, const std::string& text) {
+            if (ImGui::Selectable(text.c_str(), value == v) && value != v) { value = v; changed = true; }
+        };
+        item("", emptyLabel);
+        if (engineClass) item(engineClass, engineLabel);
+        for (int32_t c = 1; c <= aver_fw_class_count(); ++c) {
+            const int32_t f = aver_fw_class_get_flags(c);
+            const std::string n = aver_fw_class_name(c);
+            if ((f & flag) == 0 || (f & AVER_FW_CLASS_ABSTRACT) != 0 || n.rfind("AverDefault", 0) == 0) continue;
+            item(n, n);
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+#endif
+
 // World Settings: per-level edits. Project Settings: per-project. No parallel setting copy.
 void SandboxApp::buildWorldSettings() {
     if (!showWorldSettings_) return;
@@ -541,43 +574,28 @@ void SandboxApp::buildWorldSettings() {
     ImGui::TextDisabled("%s", levelPath_.c_str());
     ImGui::Dummy(ImVec2(0, 6.0f * dpi_));
 
-    // ---- GameMode override ----
+    // ---- GameMode and default pawn overrides ----
     ImGui::TextDisabled("Game Mode");
     ImGui::Separator();
-    {
-        // By name: that's what the file stores and what survives a restart. Framework class handles
-        // from aver_fw_class_declare are process-local, so a number here would mean something else next launch.
-        char buf[128];
-        const std::string& gm = levelHeader_.gameMode;
-        std::snprintf(buf, sizeof buf, "%s", gm.c_str());
-        ImGui::SetNextItemWidth(320.0f * dpi_);
-        if (ImGui::InputText("GameMode Override", buf, sizeof buf)) {
-            levelHeader_.gameMode = buf;
-        }
-        uiReg_.track("worldSettings.gameMode");
-
-        // Says whether the name resolves, rather than leaving a typo to be discovered on Play.
-        // A blank field is not an error -- it means "use the project default".
 #if AVER_MODULE_FRAMEWORK
-        if (levelHeader_.gameMode.empty()) {
-            ImGui::TextDisabled("Empty -- the project's default GameMode applies.");
-        } else {
-            const int32_t c = aver_fw_class_find(levelHeader_.gameMode.c_str());
-            if (c == 0) {
-                ImGui::TextColored(ImVec4(0.95f, 0.6f, 0.2f, 1.0f),
-                                   "No class named '%s' is declared.", levelHeader_.gameMode.c_str());
-                ImGui::TextDisabled("Compile .NET first, or check the spelling.");
-            } else if ((aver_fw_class_get_flags(c) & AVER_FW_CLASS_GAME_MODE) == 0) {
-                ImGui::TextColored(ImVec4(0.95f, 0.6f, 0.2f, 1.0f),
-                                   "'%s' exists but is not a GameMode.", levelHeader_.gameMode.c_str());
-            } else {
-                ImGui::TextDisabled("Resolved.");
-            }
-        }
-#else
-        ImGui::TextDisabled("This build has no framework module, so the name cannot be checked.");
-#endif
+    {
+        // Stored by class NAME (handles are process-local). Empty = inherit: the project's GAME.MODE,
+        // then the engine's own (the flying drone).
+        const std::string projectGm = project_.gameMode.empty() ? "engine default: drone" : project_.gameMode;
+        if (classPicker("GameMode Override", levelHeader_.gameMode, AVER_FW_CLASS_GAME_MODE,
+                        ("Project default (" + projectGm + ")").c_str(), "AverDefaultGameMode",
+                        "Engine default (drone)"))
+            markLevelUnsaved();
+        uiReg_.track("worldSettings.gameMode");
+        if (classPicker("Default Pawn", levelHeader_.defaultPawn, AVER_FW_CLASS_PAWN,
+                        "GameMode's default pawn", "AverDefaultPawn", "Drone (flies, collides)"))
+            markLevelUnsaved();
+        uiReg_.track("worldSettings.defaultPawn");
+        ImGui::TextDisabled("Empty Game Mode and project default: the flying drone. Saved with the level.");
     }
+#else
+    ImGui::TextDisabled("This build has no framework module, so there is no game mode to pick.");
+#endif
     ImGui::Dummy(ImVec2(0, 6.0f * dpi_));
 
     // ---- Player Start ----
@@ -743,6 +761,16 @@ void SandboxApp::buildProjectSettings() {
                     ImGui::SetTooltip("The .ocinput scheme EnhancedInput pushes as this "
                                        "project's default bindings.");
             }
+#if AVER_MODULE_FRAMEWORK
+            // GAME.MODE: the GameMode every level without its own World Settings override uses.
+            if (classPicker("Default Game Mode", project_.gameMode, AVER_FW_CLASS_GAME_MODE,
+                            "Engine default (drone)", nullptr, nullptr))
+                projectDirty_ = true;
+            uiReg_.track("project.gameMode");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Used by every level whose World Settings leave Game Mode empty.\n"
+                                  "Declaring a GameMode class does not make it the default; this does.");
+#endif
             ImGui::PopItemWidth();
 
             // Read-only on purpose: ENGINE is a requirement, not a preference, and changing CONTENT

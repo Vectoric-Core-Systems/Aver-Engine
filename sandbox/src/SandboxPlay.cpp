@@ -303,25 +303,33 @@ void SandboxApp::startPlay() {
     }
 #endif
 
-    const int32_t gm = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE);
-    if (gm == 0) {
-        // scene:: is safe here without a further guard: root CMakeLists forces
-        // AVER_MODULE_FRAMEWORK off when SCENE is off (CMakeLists.txt:169-171), and this whole
-        // function is #if FRAMEWORK.
-        // NO GameMode MEANS A PLAIN FLYING CAMERA, what Unreal hands you.
-        // It used to SPAWN THE DRONE and possess it: the drone only moves if the project named a
-        // graph (nothing could before DRONE.GRAPH), and the camera FOLLOWS a play-started drone as
-        // its pawn, so pressing Play with no GameMode snapped your view onto a stationary
-        // quadcopter and left you unable to move. That was the whole of "the drone is glitched".
-        // A camera has no such failure mode: nothing to spawn, possess, or decline to move. The
-        // drone is still there from Window > Drone, something you asked for.
-        // THE ENGINE'S DEFAULT TAKES OVER through the SAME begin_play every real session uses -- a
-        // GameMode spawns, a controller possesses it, the camera follows because it genuinely is
-        // one. The previous version flew the viewport camera directly with an editor-only flag:
-        // looked the same, was not -- aver_fw_play_state stayed EDITOR and every "are we playing"
-        // gate needed a second case.
-        const int32_t dgm = engineDefaultGameMode();
-        if (dgm && aver_fw_begin_play(0, dgm)) {
+    // WHICH GAMEMODE AND PAWN, as Unreal answers it: the level's World Settings override, else the
+    // project's GAME.MODE, else the engine's own -- the flying drone. Declaring a GameMode class
+    // does not make it the default (PTTest kept the FirstPerson template's AN_FPRules in its scripts,
+    // and every level, NeonDistrict included, got the FPS character). The level's DEFAULTPAWN
+    // replaces the mode's pawn; naming the drone pawn gives the drone controls under any mode.
+    const int32_t engineGm  = engineDefaultGameMode();
+    const int32_t dronePawn = aver_fw_class_find("AverDefaultPawn");
+    auto resolveNamed = [](const std::string& name, int32_t flag, const char* what) -> int32_t {
+        if (name.empty()) return 0;
+        const int32_t c = aver_fw_class_find(name.c_str());
+        if (c && (aver_fw_class_get_flags(c) & flag) != 0) return c;
+        AVER_WARN("[Sandbox] Play: {} '{}' is {}; using the default instead", what, name,
+                  c ? "not that kind of class" : "not declared (compile .NET?)");
+        return 0;
+    };
+    const std::string& gmName = !levelHeader_.gameMode.empty() ? levelHeader_.gameMode : project_.gameMode;
+    int32_t gm = resolveNamed(gmName, AVER_FW_CLASS_GAME_MODE, "GameMode");
+    if (!gm) gm = engineGm;
+    const int32_t pawnOverride = resolveNamed(levelHeader_.defaultPawn, AVER_FW_CLASS_PAWN, "default pawn");
+    const bool    drone = pawnOverride ? pawnOverride == dronePawn : gm == engineGm;
+    const int32_t gi = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_INSTANCE);  // 0 == none, allowed
+    if (drone) {
+        // THE DRONE PAWN (AverDefaultPawn), like Unreal's DefaultPawn: a real session (begin_play, a
+        // controller possesses it), flown or walked by the editor below. Under the engine's own
+        // GameMode, or under a project mode when the level names it as its pawn.
+        // scene:: needs no further guard: FRAMEWORK is forced off without SCENE.
+        if (gm && dronePawn && aver_fw_begin_play_with_pawn(gm == engineGm ? 0 : gi, gm, dronePawn)) {
             defaultPawnPlay_ = true;
             // FIRST PERSON, NO EYE OFFSET, NO BOOM: a flying camera wants to be exactly at its
             // pawn and never see it, i.e. first person with zero eye height.
@@ -355,19 +363,30 @@ void SandboxApp::startPlay() {
             else if (!placePawnAtPlayerStart("the engine's default pawn")) {
                 placeDefaultPawnAtCamera(camPos_, yaw_, pitch_);
                 atCamera = true;
+            } else if (!defaultPawnWalk_) {
+                // A Player Start marks feet; the flying drone IS the camera, so it starts at eye height.
+                const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+                scene::World& pw = scene::World::instance();
+                const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
+                if (pn && pw.valid(pe)) {
+                    const Transform& t = pw.localTransform(pe);
+                    const Vec3 f = t.rotation.rotate(Vec3{1, 0, 0});   // and faces the way it does
+                    if (f.x * f.x + f.y * f.y > 1e-6f) { yaw_ = std::atan2(f.y, f.x); pitch_ = 0.0f; }
+                    placeDefaultPawnAtCamera(t.position + Vec3{0.0f, 0.0f, kWalkEye}, yaw_, pitch_);
+                }
             }
             if (defaultPawnWalk_) startDefaultPawnWalk(atCamera);
             else                  startDefaultPawnFly();
-            AVER_INFO("[Sandbox] Play: no GameMode declared -- possessing the engine's "
-                      "AverDefaultPawn ({}, hold RMB to look). Declare an [AverGameMode] class to take over.",
+            AVER_INFO("[Sandbox] Play: GameMode '{}' with the engine's drone pawn ({}, hold RMB to look). "
+                      "Pick another in World Settings or Project Settings.", aver_fw_class_name(gm),
                       walkCapsule_ ? "WASD to walk, Space jumps, Shift runs"
                                    : flyCapsule_ ? "WASD/QE to fly, collides" : "WASD/QE to fly");
             // Mouse capture matches the toolbar option from the first frame, not just after a
             // viewport click -- the same convention the GameMode path below follows.
             releasedByUser_ = !playGameGetsMouse_;
         } else {
-            AVER_WARN("[Sandbox] Play: no GameMode declared and the engine's default could not "
-                      "start; the viewport camera is unchanged");
+            AVER_WARN("[Sandbox] Play: the drone pawn could not start under GameMode '{}'; the viewport "
+                      "camera is unchanged", aver_fw_class_name(gm));
 #if AVER_MODULE_SCENE
             anim::animSystem().setObjectAnimationLive(false);
 #if AVER_MODULE_PHYSICS
@@ -377,8 +396,7 @@ void SandboxApp::startPlay() {
         }
         return;
     }
-    const int32_t gi = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_INSTANCE);  // 0 == none, allowed
-    if (aver_fw_begin_play(gi, gm)) {
+    if (aver_fw_begin_play_with_pawn(gi, gm, pawnOverride)) {
         AVER_INFO("[Sandbox] Play: begin_play GameMode='{}'{}", aver_fw_class_name(gm),
                   gi ? std::string(" GameInstance='") + aver_fw_class_name(gi) + "'" : std::string());
         // AFTER begin_play, not before: the pawn this moves doesn't exist until the GameMode has

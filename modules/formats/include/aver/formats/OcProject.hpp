@@ -28,6 +28,10 @@ struct ProjectDesc {
     // INPUT.SCHEME: project's default input bindings (.ocinput), relative to content root; may be empty.
     // A project key so the engine does not assume a particular path or layout.
     std::string inputScheme;            // INPUT.SCHEME, relative to the content root; may be empty
+    // GAME.MODE: the project's default GameMode class name, used by every level without its own
+    // GAMEMODE override. Empty: the engine's default (the flying drone pawn). Declaring a GameMode
+    // class does NOT make it the default; this key does.
+    std::string gameMode;
     std::string author;                 // AUTHOR (free text, rest of line)
 
     // RENDER.*, all -1 when the manifest did not state them.

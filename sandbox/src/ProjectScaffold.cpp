@@ -109,6 +109,8 @@ bool parseTemplateManifest(const std::string& manifestPath, const std::string& d
             out.previewPath = (std::filesystem::path(dir) / std::string(t[1])).string();
         } else if (equalsCI(t[0], "STARTMAP") && t.size() >= 2) {
             out.startMap = std::string(t[1]);
+        } else if (equalsCI(t[0], "GAMEMODE") && t.size() >= 2) {
+            out.gameMode = std::string(t[1]);
         }
         if (last) break;
     }
@@ -970,6 +972,7 @@ bool scaffoldProjectFromTemplate(const std::string& location, const std::string&
     desc.createdWith = std::string(kEngineVersion);
     desc.contentRoot = "Content";
     desc.startMap = tmpl.startMap;
+    desc.gameMode = tmpl.gameMode;
 
     const std::string manifest = root + "\\" + name + ".ocproject";
     if (!writeFileText(manifest, fmt::writeOcproject(desc, ""))) {

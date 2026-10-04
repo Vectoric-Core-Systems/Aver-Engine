@@ -8,3 +8,5 @@ TEMPLATE 1
 NAME First Person
 DESCRIPTION A playable first-person character with a gun, three scorable targets and a game mode -- no C# anywhere.
 STARTMAP Maps/Default.ocmap
+# The new project's default GameMode (GAME.MODE): the template's rules, character and gun.
+GAMEMODE AN_FPRules

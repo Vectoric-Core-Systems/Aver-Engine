@@ -1798,6 +1798,9 @@ private:
 
     int32_t engineDefaultGameMode();
     int32_t engineDefaultGm_ = 0;
+    // World/Project Settings: a combo of declared classes with `flag`, by name (SandboxSettings.cpp).
+    bool classPicker(const char* label, std::string& value, int32_t flag, const char* emptyLabel,
+                     const char* engineClass, const char* engineLabel);
     // The view request before the editor overrode it (see startPlay).
     bool    savedView_ = false;
     int32_t savedViewMode_ = AVER_FW_VIEW_THIRD_PERSON;

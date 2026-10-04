@@ -443,6 +443,11 @@ int32_t aver_fw_class_get_flags(int32_t c) {
     return r ? r->flags : 0;
 }
 
+// Declared classes; handle 0 is the reserved slot, so handles run 1..count.
+int32_t aver_fw_class_count(void) {
+    return classes().empty() ? 0 : static_cast<int32_t>(classes().size() - 1);
+}
+
 // Sets the class's tick group and order. Rejects an out-of-range group.
 int32_t aver_fw_class_set_tick(int32_t c, int32_t tickGroup, int32_t tickOrder) {
     ClassRecord* r = rec(c);
@@ -925,6 +930,11 @@ int32_t aver_fw_find_class_with_flags(int32_t flags) {
 // Begins a play session: spawns the optional GameInstance, the GameMode, and its controller and pawn
 // (possessed), then fires OnPostLogin. 0 if one was already running or the GameMode was invalid.
 int32_t aver_fw_begin_play(int32_t gameInstanceClass, int32_t gameModeClass) {
+    return aver_fw_begin_play_with_pawn(gameInstanceClass, gameModeClass, 0);
+}
+
+// As aver_fw_begin_play, with `pawnClass` (when valid) spawned in place of the mode's default pawn.
+int32_t aver_fw_begin_play_with_pawn(int32_t gameInstanceClass, int32_t gameModeClass, int32_t pawnClass) {
     if (playStateRef() != AVER_FW_PLAY_EDITOR) return 0;
     if (!validClass(gameModeClass))            return 0;
 
@@ -946,8 +956,9 @@ int32_t aver_fw_begin_play(int32_t gameInstanceClass, int32_t gameModeClass) {
     ClassRecord* r = rec(gameModeClass);
     const int32_t ctrl = (r && validClass(r->playerController))
                        ? aver_fw_spawn(r->playerController, "PlayerController", nullptr, nullptr, nullptr) : 0;
-    const int32_t pawn = (r && validClass(r->defaultPawn))
-                       ? aver_fw_spawn(r->defaultPawn, "Pawn", nullptr, nullptr, nullptr) : 0;
+    const int32_t pawnToSpawn = validClass(pawnClass) ? pawnClass : (r ? r->defaultPawn : 0);
+    const int32_t pawn = validClass(pawnToSpawn)
+                       ? aver_fw_spawn(pawnToSpawn, "Pawn", nullptr, nullptr, nullptr) : 0;
     playerCtrlRef() = ctrl;
     playPawnRef()   = pawn;
     if (ctrl && pawn) aver_fw_possess(ctrl, pawn);

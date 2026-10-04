@@ -407,6 +407,7 @@ private:
     // True once aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE) has found a GameMode.
     // Defaults to false (gate off, tick forever). A mirror, not a second call, so the two cannot disagree.
     bool gameModeDeclared_ = false;
+    std::string levelGameMode_, levelDefaultPawn_;   // the loaded level's World Settings overrides
 };
 
 } // namespace aver::game

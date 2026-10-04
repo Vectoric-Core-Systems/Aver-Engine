@@ -484,7 +484,11 @@ struct OcWorldData : OcWorldEnv {
     // A LEVEL-SCOPED OVERRIDE, deliberately, matching what a World Settings window is for: one
     // project can hold a menu level, a gameplay level and a test level that need different rules,
     // and putting the choice in the project would force them to share one.
+    // "AverDefaultGameMode" names the engine's own (the flying drone) explicitly.
     std::string gameMode;
+    // DEFAULTPAWN: the pawn class this level spawns instead of the GameMode's own default, by class
+    // name (same reasoning as gameMode). Empty: the GameMode's default pawn.
+    std::string defaultPawn;
     u32 build = 0;
     u32 algo = 3;
 

@@ -45,6 +45,7 @@ struct TemplateInfo {
     std::string description;  // DESCRIPTION -- one line, rest-of-line free text
     std::string previewPath;  // absolute path to the preview image, or empty (picker draws a fallback)
     std::string startMap;     // STARTMAP, defaulted to "Maps/Default.ocmap" when the manifest omits it
+    std::string gameMode;     // GAMEMODE -- written as the new project's GAME.MODE; empty = engine drone
 };
 
 // Every valid template found as an immediate subdirectory of `root`: `<sub>\<sub>.octemplate` must

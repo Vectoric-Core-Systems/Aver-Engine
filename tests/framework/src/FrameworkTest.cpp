@@ -697,6 +697,24 @@ static void testPlayLifecycle() {
     check(aver_fw_game_mode() == 0, "and the session roots are cleared too");
     World::instance().flush();
 
+    // A level's pawn override (minor 9): another pawn class is spawned and possessed instead, and
+    // the GameMode keeps its own default for the next plain begin_play.
+    const int32_t dronePawnC = aver_fw_class_declare("PlayDronePawn", "");
+    aver_fw_class_set_flags(dronePawnC, AVER_FW_CLASS_PAWN);
+    aver_fw_class_seal(dronePawnC);
+    check(aver_fw_class_count() >= dronePawnC && dronePawnC > 0, "class_count covers every declared handle");
+    check(std::string(aver_fw_class_name(aver_fw_class_count())) != "", "the last handle class_count names is a class");
+    check(aver_fw_begin_play_with_pawn(giC, gmC, dronePawnC) == 1, "begin_play_with_pawn starts a session");
+    check(aver_fw_class_of(aver_fw_controlled_pawn(aver_fw_player_controller(0))) == dronePawnC,
+          "the override pawn is spawned and possessed");
+    aver_fw_end_play();
+    World::instance().flush();
+    check(aver_fw_begin_play_with_pawn(giC, gmC, 0) == 1, "pawn class 0 means the GameMode's default");
+    check(aver_fw_class_of(aver_fw_controlled_pawn(aver_fw_player_controller(0))) == pawnC,
+          "and the GameMode's own default pawn is back");
+    aver_fw_end_play();
+    World::instance().flush();
+
     // A session cannot start without a valid GameMode.
     check(aver_fw_begin_play(giC, 0) == 0, "begin_play with an invalid GameMode is refused");
     check(aver_fw_play_state() == AVER_FW_PLAY_EDITOR, "a refused begin_play leaves the state in EDITOR");
