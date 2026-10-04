@@ -35,6 +35,23 @@ void ptBasis(float3 N, out float3 T, out float3 B) {
 // Ray offset off a surface, growing with distance from the camera like every other secondary ray here.
 float ptBias(float3 p) { return max(gRtParams.z, 1e-4) * (1.0 + length(p - gCamPos.xyz) * 5e-4); }
 
+// Distance through the medium a surface bounds, along `viewDir`: to the next surface of any kind
+// (panes are real boundaries). 0 when nothing is found. Read by every translucent composite.
+float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
+    RayDesc r;
+    // Bias same as reflection ray, pushed along view direction (ray heads into the surface).
+    const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
+    r.Origin    = wpos + viewDir * bias;
+    r.Direction = viewDir;
+    r.TMin      = 0.0;
+    r.TMax      = 100000.0;
+
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL | AVER_RT_MASK_TRANSLUCENT, r);
+    averRtProceedSolid(q);
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return 0.0;
+    return q.CommittedRayT() + bias;
+}
 // Re-aims a surface's half vector and Fresnel at one light (they are built for whichever light came first).
 void ptAim(inout AverSurface s, float3 L) {
     const float3 VL = s.V + L;
@@ -51,7 +68,8 @@ struct PtVertex {
 
 // Traces origin->dir against opaque geometry and builds the hit's surface through rtHitSurface.
 // `cone` is the ray's footprint growth per cm (texture mip selection). False on a miss.
-bool ptTrace(float3 origin, float3 dir, float tmin, float cone, out PtVertex v) {
+bool ptTrace(float3 origin, float3 dir, float tmin, float cone, out PtVertex v,
+             uint mask = AVER_RT_MASK_OPAQUE_ALL) {
     v = (PtVertex)0;
     RayDesc r;
     r.Origin    = origin;
@@ -137,7 +155,10 @@ float ptSmithG1(float ndx, float a2) { return 2.0 * ndx / (ndx + sqrt(a2 + (1.0 
 // Samples the next direction from the surface's BSDF. weight = f * cos / pdf for the lobe chosen.
 // Specular: GGX VNDF, whose estimator is F * G1(L). Diffuse: cosine-weighted, whose estimator is kd.
 // The lobe is picked by its share of reflected energy, and its weight divided by that probability.
-bool ptSampleBsdf(AverSurface s, inout uint rng, out float3 dir, out float3 weight) {
+// coverage < 1 (a translucent surface, reached on the branch that reflects with probability
+// coverage): its specular is full strength and its diffuse coverage-weighted, so the specular
+// estimate is divided by the branch probability and the diffuse one not.
+bool ptSampleBsdf(AverSurface s, inout uint rng, out float3 dir, out float3 weight, float coverage = 1.0) {
     dir = s.N;
     weight = float3(0.0, 0.0, 0.0);
     const float specLum = averShadowLum(fresnelSchlick(s.ndv, s.F0, s.f90));
@@ -153,7 +174,8 @@ bool ptSampleBsdf(AverSurface s, inout uint rng, out float3 dir, out float3 weig
         dir = reflect(-s.V, H);
         const float ndl = dot(s.N, dir);
         if (ndl <= 1e-4) return false;
-        weight = fresnelSchlick(saturate(dot(s.V, H)), s.F0, s.f90) * ptSmithG1(ndl, alpha * alpha) / pSpec;
+        weight = fresnelSchlick(saturate(dot(s.V, H)), s.F0, s.f90) * ptSmithG1(ndl, alpha * alpha) /
+                 (pSpec * max(coverage, 1e-3));
     } else {
         const float u1 = ptRand(rng), u2 = ptRand(rng);
         const float r = sqrt(u1), phi = 6.2831853 * u2;
@@ -170,15 +192,31 @@ float3 ptContinue(PtVertex v, float2 pixel, inout uint rng, uint depth) {
     float3 thr = float3(1.0, 1.0, 1.0);
     [loop] for (uint b = 0u; b < depth; ++b) {
         float3 dir, w;
-        if (!ptSampleBsdf(v.s, rng, dir, w)) break;
-        thr *= w;
+        float3 origin;
         const float bias = ptBias(v.pos);
+        const float a    = saturate(v.s.alpha);
+        if (a < 0.999 && ptRand(rng) >= a) {
+            // THROUGH a translucent surface, with probability (1 - coverage): the light the composite
+            // passes, absorbed by the volume over its measured thickness.
+            dir = -v.s.V;
+            w = (v.s.attenuationDistance > 0.0)
+              ? averVolumeTransmittance(v.s.attenuationColor, v.s.attenuationDistance,
+                                        averVolumeThickness(v.pos, v.s.N, dir))
+              : float3(1.0, 1.0, 1.0);
+            origin = v.pos + dir * bias;
+        } else {
+            if (!ptSampleBsdf(v.s, rng, dir, w, a)) break;
+            origin = v.pos + v.s.N * bias;
+        }
+        thr *= w;
         PtVertex nv;
-        if (!ptTrace(v.pos + v.s.N * bias, dir, bias, v.s.rough * v.s.rough + 0.1, nv)) {
+        if (!ptTrace(origin, dir, bias, v.s.rough * v.s.rough + 0.1, nv,
+                     AVER_RT_MASK_OPAQUE_ALL | AVER_RT_MASK_TRANSLUCENT)) {
             sum += thr * averSkyRadianceCheap(dir) * gAmbient.r;
             break;
         }
-        sum += thr * (nv.s.emissive + ptDirect(nv, pixel, rng));
+        // A translucent vertex reflects its direct light by its coverage (the composite's diffuse share).
+        sum += thr * (nv.s.emissive + ptDirect(nv, pixel, rng) * saturate(nv.s.alpha));
         if (b >= 1u) {
             const float p = clamp(max(thr.r, max(thr.g, thr.b)), 0.05, 0.95);
             if (ptRand(rng) > p) break;

@@ -3951,6 +3951,7 @@ bool VoxiRenderer::suppressesWholeFrame() const { return debugViewActive(); }
 // Draws the scene pass replacement (debug view or ray-driven); debug wins if both are active.
 void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
     ptRanThisFrame_ = false;
+    translucentInPath_ = false;
     // Recorded late (wantsLateScenePass) this frame's draws exist; bring the movers up to date first.
     if (!draws_.empty() && !debugViewActive() && rayDrivenActive()) latePatchMovers(ctx);
     if (pathTracingWanted() && !debugViewActive()) {
@@ -4348,6 +4349,12 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
                                                                     // uses, so an A/B across the switch
                                                                     // is a like-for-like GPU-time
                                                                     // comparison of just this draw.
+        // TRANSLUCENCY IN THE PATH (ptBounceParams.w): Stage B composites every translucent surface the
+        // primary ray crosses over the opaque background (voxi.hlsl), and the device then skips their
+        // blended replay (blendedDrawsResolvedInScene). Not with the eye inside a medium: that case keeps
+        // the replay's eye-inside refraction.
+        translucentInPath_ = settings_.translucencyInPath && rtTlasTranslucent_ > 0 && cb_.cameraMedium[0] < 0.5f;
+        cb_.ptBounceParams[3] = translucentInPath_ ? 1.0f : 0.0f;
         ctx.setPipeline(stageBPso);
         ctx.setBindingSet(bindings_);
         ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
@@ -4355,6 +4362,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
         ctx.drawFullscreen();
     }
+    cb_.ptBounceParams[3] = 0.0f;
     // What stays on a frame CSRdGi traced GI at half rate, is bit 17 plus the parity in bit 16.
     cb_.viewParams[3] = giCbWrittenThisFrame_
                       ? static_cast<f32>((1u << 17) | (giCbParityWritten_ << 16))

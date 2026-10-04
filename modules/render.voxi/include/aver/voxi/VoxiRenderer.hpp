@@ -136,6 +136,8 @@ public:
     void scenePass(rhi::IRenderContext& ctx) override;
     // Ray-driven frames record at endFrame so moving objects use this frame's transforms.
     bool wantsLateScenePass() const override;
+    // This frame's translucent draws were composited inside the ray-driven frame; skip their replay.
+    bool blendedDrawsResolvedInScene() const override { return translucentInPath_; }
 
     void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
                                 u32 width, u32 height) override;
@@ -1101,6 +1103,7 @@ private:
     bool ensurePtAccum();
     // createPathTraceTwins ran since the last createScenePipelines; the mode ran this frame; said-once logs.
     bool ptTwinsTried_ = false;
+    bool translucentInPath_ = false;   // Stage B composited translucency this frame (ptBounceParams.w)
     bool ptRanThisFrame_ = false;
     bool ptRunLogged_ = false;
     bool ptFallbackLogged_ = false;

@@ -688,6 +688,10 @@ public:
     // A backend that does not support it calls scenePass at beginFrame as before.
     virtual bool wantsLateScenePass() const { return false; }
 
+    // True when this frame's scenePass already composited the translucent (blended) draws itself, so
+    // the backend must not replay them over the result. Asked after the scene pass.
+    virtual bool blendedDrawsResolvedInScene() const { return false; }
+
     // Draws depth-tested, blended geometry into the scene after opaque drawMesh and sky.
     virtual void transparentPass(IRenderContext& ctx) { (void)ctx; }
 

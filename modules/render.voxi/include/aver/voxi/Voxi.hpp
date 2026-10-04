@@ -201,6 +201,12 @@ struct Settings {
     // ON BY DEFAULT. MEASURED: blended replay 0.39 -> 0.17 ms at the saved camera.
     bool blendedReuseStagedLighting = true;
 
+    // ---- TRANSLUCENCY IN THE PATH (staged ray-driven, D3D12) ----
+    // Glass and every other translucent material is shaded at the primary ray's crossings, front to
+    // back over the lit opaque surface, by the same surface builder and composite as everything else,
+    // instead of a blended raster replay drawn over the finished ray-driven image. Off: the replay.
+    bool translucencyInPath = true;
+
     // ---- the acceleration-structure "unchanged" gate ------------------------------------------
     // MEASURED: costs 0.42 ms every frame rebuilding identically on an unmoved static scene.
     // Hash what buildAccelerationStructures() reads; if nothing moved, leave TLAS/rtInstanceData unchanged.

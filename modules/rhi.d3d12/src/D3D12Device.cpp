@@ -5051,7 +5051,10 @@ void D3D12Device::endFrame() {
 
     // Blended mesh flush: every drawMesh(..., drawBlended_=true) was captured instead of drawn.
     // Must land between sky and transparent pass. Guarded on frameSuppressed_, not sceneSuppressed_.
-    if (!blendedDraws_.empty() && rhiContext_ && !frameSuppressed_) {
+    // A scene feature that composited translucency in its own pass owns those draws this frame.
+    bool blendedInScene = false;
+    if (sceneSuppressed_) for (IRenderFeature* f : features_) blendedInScene = blendedInScene || f->blendedDrawsResolvedInScene();
+    if (!blendedDraws_.empty() && rhiContext_ && !frameSuppressed_ && !blendedInScene) {
         // Backdrop copy only for draws that read it (IRenderFeature::blendedDrawReadsBackdrop).
         // Captures the target AT THAT POINT, not just "before first translucent draw".
         // Size check is load-bearing: mismatch between backdrop and scene target can briefly occur.

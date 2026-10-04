@@ -770,24 +770,76 @@ float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular,
     return float4(specular + diffuse * alpha + dstTerm, alpha);
 }
 
-float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
-    RayDesc r;
-    // Bias same as reflection ray, pushed along view direction (ray heads into the surface).
-    const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
-    r.Origin    = wpos + viewDir * bias;
-    r.Direction = viewDir;
-    r.TMin      = 0.0;
-    r.TMax      = 100000.0;
+// averVolumeThickness lives in voxi_pt.hlsli (every translucent composite uses it).
 
-    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    // Measures to the far side of the medium; panes are real boundaries.
-    q.TraceRayInline(gScene, RAY_FLAG_NONE,
-                     AVER_RT_MASK_OPAQUE_ALL | AVER_RT_MASK_TRANSLUCENT, r);
-    averRtProceedSolid(q);
-    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return 0.0;
-    return q.CommittedRayT() + bias;
+#if AVER_RT && AVER_RD_SPLIT
+// ---- TRANSLUCENCY IN THE PATH (Settings::translucencyInPath; gPtBounceParams.w) ----
+// The primary ray's translucent crossings in front of the opaque surface at `hitT`, front to back.
+// Each is its material's own surface (rtHitSurface), lit like any hit (sun through the transmittance-
+// aware shadow ray, one lamp, sky ambient, a traced reflection) and composited as the blended replay
+// does (averShadeSplit: reflection at full strength, diffuse by coverage). What gets through is
+// (1 - coverage) times the volume's absorption over its measured thickness -- PER CHANNEL, since here
+// the background is known, which the replay's single blend alpha could not express. `background` is
+// the opaque surface Stage B already lit.
+#define AVER_RD_GLASS_LAYERS 4
+float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel) {
+    float3 acc = float3(0.0, 0.0, 0.0);
+    float3 thr = float3(1.0, 1.0, 1.0);
+    const float3 L = normalize(gLightDir.xyz);
+    const uint   frameIdx = (uint)gRtHistParams.z;
+    // One pixel's angular footprint, for the crossings' mips.
+    const float  pixelCone = 2.0 / max(gSceneViewportCur.w, 1.0);
+    float tmin = 0.0;
+    [loop] for (uint k = 0u; k < AVER_RD_GLASS_LAYERS; ++k) {
+        RayDesc r;
+        r.Origin    = gCamPos.xyz;
+        r.Direction = dir;
+        r.TMin      = tmin;
+        r.TMax      = hitT;
+        RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+        q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_TRANSLUCENT, r);
+        averRtProceedSolid(q);
+        if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) break;
+
+        const RtHit h = rtHitCommitted(q, gCamPos.xyz, dir);
+        float2 gx, gy;
+        rtHitConeGrad(h, pixelCone, gx, gy);
+        const AverSurface s = rtHitSurface(h, -dir, L, gx, gy, AVER_RT_HIT_FULL);
+
+        AverLight sun;
+        sun.direction  = L;
+        sun.radiance   = averSunRadiance();
+        sun.visibility = rtShadow(h.pos, s.N, L, pixel, float3(0, 0, 0), float3(0, 0, 0), 1u,
+                                  (float)(frameIdx + k) * 2.39996323);
+        AverIndirect ind;
+        ind.ambient      = averSkyIrradiance(s.N);
+        ind.ambientScale = gAmbient.r;
+        ind.diffuse      = float3(0.0, 0.0, 0.0);
+        ind.occlusion    = 1.0;
+        bool reflHit = false;
+        ind.specular = rtReflection(h.pos, s.N, h.N, reflect(dir, s.N), L, pixel,
+                                    s.rough < AVER_REFL_MIRROR_ROUGH ? 0.0 : s.rough, frameIdx, reflHit);
+        float3 diffuse, specular;
+        averShadeSplit(s, sun, ind, diffuse, specular);
+#if AVER_RD_LAMPS
+        if (rdLocalLightCount() > 0u) {
+            uint rng = ptSeed(pixel, 0x91c5u + k);
+            specular += ptLamp(s, h.pos, pixel, rng);
+        }
+#endif
+        float3 T = float3(1.0, 1.0, 1.0);
+        if (s.attenuationDistance > 0.0)
+            T = averVolumeTransmittance(s.attenuationColor, s.attenuationDistance,
+                                        averVolumeThickness(h.pos, s.N, dir));
+        const float a = saturate(s.alpha);
+        acc += thr * min(specular + diffuse * a, AVER_VOX_MAXRAD);
+        thr *= (1.0 - a) * T;
+        if (max(thr.r, max(thr.g, thr.b)) < 1e-3) break;
+        tmin = h.t + ptBias(h.pos);
+    }
+    return acc + thr * background;
 }
-
+#endif
 // Reprojects wpos through LAST frame's camera to sample reflection history. False when off-screen,
 // behind near plane, untraced (stored.a <= 0), or disocclusion.
 bool rtReprojectReflection(float3 wpos, float2 pixel, out float3 hist, out float2 velocityPx) {
@@ -1890,6 +1942,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     radiance = averApplyFogAirVis(radiance, wpos, false, voxiAirVisibility(wpos));
 #else
     radiance = averApplyFogAirVis(radiance, wpos, true, voxiAirVisibility(wpos));
+#endif
+#if AVER_RD_SPLIT
+    // Glass and every other translucent material, inside the path (rdTranslucentPath).
+    if (gPtBounceParams.w > 0.5 && vmode == 0u) radiance = rdTranslucentPath(dir, hitT, radiance, i.pos.xy);
 #endif
 
     // Depth for deferred sky, transparentPass, particles (otherwise they sort against cleared buffer).
