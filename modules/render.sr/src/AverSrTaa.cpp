@@ -118,7 +118,7 @@ void TemporalUpscaler::execute(rhi::IRenderContext& ctx, const rhi::UpscalerInpu
                        ensureTargets(in.dstWidth, in.dstHeight);
     if (!ready) {
         if (!fallbackLogged_) {
-            AVER_WARN("[AverSR] temporal AA needs the G-buffer (MSAA 1) and a D3D12 device; using FSR 1 instead");
+            AVER_INFO("[AverSR] temporal AA needs the G-buffer (MSAA 1) and a D3D12 device; using FSR 1 instead");
             fallbackLogged_ = true;
         }
         if (in.canRetarget && in.motionVectors && in.depth && !ready) failed_ = true;   // pipelines/targets

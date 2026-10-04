@@ -1669,6 +1669,20 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
         if (flying_) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
+        // Wheel changes fly speed, up = faster (Unreal's direction), 1.25x per notch so a notch feels
+        // the same at any speed. The flying drone pawn takes it without RMB too: in Play the mouse
+        // is the game's, and the drone moves at this same speed.
+        auto wheelFlySpeed = [&] {
+            const f32 wheel = input_.wheel();
+            if (wheel == 0.0f) return;
+            flySpeed_ *= std::pow(1.25f, wheel);
+            flySpeed_ = flySpeed_ < 20.0f ? 20.0f : (flySpeed_ > 40000.0f ? 40000.0f : flySpeed_);
+        };
+#if AVER_MODULE_SCENE
+        if (!flying_ && defaultPawnPlay_ && !playEjected() && !walkCapsule_ && (!overUI || inPlayWindow))
+            wheelFlySpeed();
+#endif
+
         if (flying_) {
             // input_.mouseDX/DY not io.MouseDelta: same phase bug as wheel below.
             // ImGui computes io.MouseDelta in NewFrame, but Engine::frameStep runs onUpdate before uiNewFrame.
@@ -1676,13 +1690,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             yaw_   += static_cast<f32>(input_.mouseDX()) * lookSpeed_;
             pitch_ -= static_cast<f32>(input_.mouseDY()) * lookSpeed_;
             pitch_ = pitch_ < -1.54f ? -1.54f : (pitch_ > 1.54f ? 1.54f : pitch_);
-            // Wheel while flying changes speed, up = faster (Unreal's direction).
-            // Multiplicative (1.25/notch) so a notch feels the same at speed 1 as at 20.
-            const f32 wheel = input_.wheel();
-            if (wheel != 0.0f) {
-                flySpeed_ *= std::pow(1.25f, wheel);
-                flySpeed_ = flySpeed_ < 20.0f ? 20.0f : (flySpeed_ > 40000.0f ? 40000.0f : flySpeed_);
-            }
+            wheelFlySpeed();
         }
 
         const Vec3 fwd = camForward();
