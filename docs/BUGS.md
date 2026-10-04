@@ -126,7 +126,7 @@ reasserted after whatever would otherwise clobber it — and a disagreement betw
 **logged**, not silently resolved in either direction. Silence is the only thing that turns a
 one-line precedence bug into hours of confidently wrong measurement; a single log line would have
 made the original raster-vs-ray-driven comparison self-correcting the first time someone read the
-console. See `SESSION-STATE.md` for which numbers from that investigation are now retracted and what
+console. The 2026-08-28 session notes (kept out of the repository) record which numbers from that investigation were retracted and what
 the corrected ones are.
 
 - **Transmission never left the alpha channel, so glass scattered light it had already let through**

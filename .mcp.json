@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "aver-engine": {
-      "command": "python",
-      "args": ["tools/mcp/aver_mcp.py"],
-      "env": {}
-    }
-  }
-}

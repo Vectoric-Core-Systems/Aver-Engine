@@ -92,3 +92,15 @@ DerivedDataCache/
 # rc.exe's own temporaries, named RCxxxxxx with no extension, left behind under whatever directory
 # it was invoked in (a vendored library's .rc directory collects them). Anchored to nothing because rc.exe chooses the directory, not us.
 RC[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
+
+# --- Development-session material: never needed by anyone building or using the engine ---
+# Internal session hand-off and planning notes, kept on the developer's machine only.
+/SESSION-STATE.md
+/notes-*-plan.md
+# Claude Code's per-repo MCP registration (tools/mcp itself is an engine feature and stays tracked).
+/.mcp.json
+# Local scratch a session leaves at the root: observation dumps, logs, captures.
+/obs.json
+/*.log
+/*.png
+/*.dmp
