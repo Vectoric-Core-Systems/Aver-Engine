@@ -1598,7 +1598,14 @@ void GameApp::pushFrame(Engine& e) {
         }
         dev->setFrameInterpolation(wantFrameInterp);
         dev->setGBufferEnabled(voxi::resolve(vx.settings(), vx.deviceInfo()).denoiserGBufferWanted || wantFrameInterp);
-        if (vx.consumeMsaaDirty()) dev->setSampleCount(static_cast<u32>(vx.settings().msaa));
+        // Ray-driven frames run at 1x whatever MSAA says (voxi::Resolution::sampleCount).
+        {
+            const u32 samples = voxi::resolve(vx.settings(), vx.deviceInfo()).sampleCount;
+            if (vx.consumeMsaaDirty() || samples != msaaPushed_) {
+                dev->setSampleCount(samples);
+                msaaPushed_ = samples;
+            }
+        }
 
         // LEVEL's GI volume, fitted once at load; not camera-following (would re-voxelise every move).
         voxiRenderer_.setVolume(&giCenter_.x, giExtent_);

@@ -374,8 +374,16 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         v.s     = s;
         v.cover = 1.0;   // the candidate ray sees the opaque lane only
         radiance += ptLamp(s, hitPos, pixel, rng);
-        const float3 li = ptContinue(v, pixel, rng, ptBounceCount() - 1u);
+        PtFirst first;
+        const float3 li = ptContinueEx(v, pixel, rng, ptBounceCount() - 1u, first);
         radiance += li;
+#if AVER_NEURAC
+        // TRAINING: a diffuse first segment is a cosine sample of the light arriving here, which is what a
+        // cache cell holds. One pixel in four per frame, rotating, keeps the atomics off the hot cells.
+        const uint2 tp = uint2(pixel);
+        if (rcCacheOn() && first.diffuse && (((tp.x ^ tp.y) + (uint)gRtHistParams.z) & 3u) == 0u)
+            rcScatter(hitPos, s.N, first.dir, first.li, saturate(dot(s.N, first.dir)));
+#endif
         f2Observed  = true;
         f2LumTraced = averShadowLum(li);
         f2LumSky    = averShadowLum(averSkyIrradiance(s.N) * gAmbient.r);

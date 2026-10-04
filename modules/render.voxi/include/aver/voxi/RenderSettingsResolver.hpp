@@ -130,6 +130,7 @@ struct Resolution {
     DisableReason rtSubControls = DisableReason::None;
     DisableReason ptSubControls = DisableReason::None;
     bool denoiserGBufferWanted = false;
+    u32  sampleCount = 1;   // what the device should run at: Settings::msaa, or 1 under ray-driven primary
 };
 
 // Resolve prerequisites: effective = requested && reason == None. refractionMode falls back to ScreenSpace (1), not Off.
@@ -214,13 +215,20 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
     r.refractionMode.effective =
         (s.refractionMode >= 2u && rtGate != DisableReason::None) ? 1u : s.refractionMode;
 
+    // ---- the device's sample count: one sample a pixel whenever a ray finds the first surface ----
+    // A ray-driven frame shades once per pixel whatever MSAA says, and the G-buffer the denoiser, TAA and
+    // frame interpolation read is only written at 1x, so the hosts push 1 (effectiveSampleCount below).
+    const bool rayPrimary = r.rtRenderMode.effective == 1u ||
+                            (s.pathTracing != Quality::Off && rtGate == DisableReason::None);
+    r.sampleCount = rayPrimary ? 1u : static_cast<u32>(s.msaa);
+
     // ---- denoiser: RT hardware, RT tier not Off, denoiserSupported, something to denoise, MSAA 1 (soft) --
     DisableReason denoiseReason = rtGate;
     if (denoiseReason == DisableReason::None && !d.denoiserSupported)
         denoiseReason = DisableReason::RequiresDenoiserBackend;
     if (denoiseReason == DisableReason::None && r.giMode.effective == 0 && s.giSkyOcclusionRays == 0)
         denoiseReason = DisableReason::NothingToDenoise;
-    if (denoiseReason == DisableReason::None && static_cast<u32>(s.msaa) != 1u)
+    if (denoiseReason == DisableReason::None && r.sampleCount != 1u)
         denoiseReason = DisableReason::RequiresMsaaOne;   // SOFT: warns, does not grey
     r.denoiser.requested = s.denoiser ? 1u : 0u;
     r.denoiser.reason    = denoiseReason;

@@ -98,6 +98,29 @@ bool ptTrace(float3 origin, float3 dir, float tmin, float cone, out PtVertex v,
     return true;
 }
 
+#if AVER_RD_LAMPS
+// A lamp as a light at `pos`, unshadowed: its sphere widens the surface's roughness (rdLocalLightAt).
+bool ptLampLight(RdLocalLight ll, AverSurface s, float3 pos, out AverLight l, out AverSurface sL) {
+    sL = s;
+    l.direction  = float3(0.0, 0.0, 1.0);
+    l.radiance   = float3(0.0, 0.0, 0.0);
+    l.visibility = float3(1.0, 1.0, 1.0);
+    const float3 toC   = ll.posRadius.xyz - pos;
+    const float  d2    = dot(toC, toC);
+    const float  range = ll.radianceRange.w;
+    if (d2 >= range * range) return false;
+    const float r    = ll.posRadius.w;
+    const float x2   = d2 / (range * range);
+    const float win  = saturate(1.0 - x2 * x2);
+    const float invD = rsqrt(max(d2, 1e-8));
+    l.direction = toC * invD;
+    l.radiance  = ll.radianceRange.rgb * (1e4 / max(d2, r * r)) * (win * win);
+    sL.rough = clamp(s.rough + r * 0.5 * invD, s.rough, 1.0);
+    ptAim(sL, l.direction);
+    return true;
+}
+#endif
+
 // One lamp, picked in proportion to its unshadowed irradiance here, with one shadow ray, divided by its
 // pick probability. Shaded through the same GGX as the sun, with rdLocalLightAt's sphere widening.
 float3 ptLamp(AverSurface s, float3 pos, float2 pixel, inout uint rng) {
@@ -120,25 +143,29 @@ float3 ptLamp(AverSurface s, float3 pos, float2 pixel, inout uint rng) {
     if (!(wPick > 0.0)) return float3(0.0, 0.0, 0.0);
 
     const RdLocalLight ll = gRdLocalLights[pick];
-    const float3 toC   = ll.posRadius.xyz - pos;
-    const float  d2    = dot(toC, toC);
-    const float  range = ll.radianceRange.w;
-    if (d2 >= range * range) return float3(0.0, 0.0, 0.0);
-    const float r    = ll.posRadius.w;
-    const float x2   = d2 / (range * range);
-    const float win  = saturate(1.0 - x2 * x2);
-    const float invD = rsqrt(max(d2, 1e-8));
     AverLight l;
-    l.direction  = toC * invD;
-    l.radiance   = ll.radianceRange.rgb * (1e4 / max(d2, r * r)) * (win * win);
+    AverSurface sL;
+    if (!ptLampLight(ll, s, pos, l, sL)) return float3(0.0, 0.0, 0.0);
     l.visibility = rdLocalShadow(pos, s.N, ll, pixel, ptRand(rng) * 6.2831853).xxx;
-    AverSurface sL = s;
-    sL.rough = clamp(s.rough + r * 0.5 * invD, s.rough, 1.0);
-    ptAim(sL, l.direction);
     return averShadeDirect(float3(0.0, 0.0, 0.0), sL, l) * (wsum / wPick);
 #else
     return float3(0.0, 0.0, 0.0);
 #endif
+}
+
+// Every listed lamp, unshadowed: the same answer every frame, for a hit nothing averages over time
+// (reflection hits outside Path Tracing). ptLamp is the unbiased, shadowed pick paths use.
+float3 ptLampsAll(AverSurface s, float3 pos) {
+    float3 sum = float3(0.0, 0.0, 0.0);
+#if AVER_RD_LAMPS
+    const uint n = min(rdLocalLightCount(), 32u);
+    [loop] for (uint i = 0u; i < n; ++i) {
+        AverLight l;
+        AverSurface sL;
+        if (ptLampLight(gRdLocalLights[i], s, pos, l, sL)) sum = averShadeDirect(sum, sL, l);
+    }
+#endif
+    return sum;
 }
 
 // Direct light at a vertex: the sun (one shadow ray) and one lamp.
@@ -162,10 +189,12 @@ float ptSmithG1(float ndx, float a2) { return 2.0 * ndx / (ndx + sqrt(a2 + (1.0 
 // The lobe is picked by its share of reflected energy, and its weight divided by that probability.
 // coverage < 1 (a translucent surface, reached on the branch that reflects with probability
 // coverage): its specular is full strength and its diffuse coverage-weighted, so the specular
-// estimate is divided by the branch probability and the diffuse one not.
-bool ptSampleBsdf(AverSurface s, inout uint rng, out float3 dir, out float3 weight, float coverage = 1.0) {
+// estimate is divided by the branch probability and the diffuse one not. `diffuse` says which lobe.
+bool ptSampleBsdf(AverSurface s, inout uint rng, out float3 dir, out float3 weight, float coverage,
+                  out bool diffuse) {
     dir = s.N;
     weight = float3(0.0, 0.0, 0.0);
+    diffuse = false;
     const float specLum = averShadowLum(fresnelSchlick(s.ndv, s.F0, s.f90));
     const float diffLum = averShadowLum(s.kdAlbedo);
     const float pSpec   = diffLum > 0.0 ? clamp(specLum / max(specLum + diffLum, 1e-4), 0.1, 0.9) : 1.0;
@@ -186,18 +215,43 @@ bool ptSampleBsdf(AverSurface s, inout uint rng, out float3 dir, out float3 weig
         const float r = sqrt(u1), phi = 6.2831853 * u2;
         dir = normalize(T * (r * cos(phi)) + B * (r * sin(phi)) + s.N * sqrt(max(1.0 - u1, 0.0)));
         weight = s.kdAlbedo / (1.0 - pSpec);
+        diffuse = true;
     }
     return any(weight > 0.0);
 }
 
+#if AVER_NEURAC
+// The radiance cache (voxi_neurac_io.hlsli, included after this file in the NeuRaC twins).
+bool   rcCacheOn();
+float3 rcLookup(float3 p, float3 N, out float remaining);
+#endif
+// How much of a vertex's light the cache must cover before a path ends there (1 - its fallback share).
+#define AVER_PT_RC_CONFIDENCE 0.75
+
+// The first segment of a continued path: its direction, the radiance that came back along it (before
+// the BSDF weight), and whether the diffuse lobe chose it, which makes it a cosine-distributed sample
+// of incident light: what the radiance cache trains on.
+struct PtFirst {
+    float3 dir;
+    float3 li;
+    bool   diffuse;
+};
+
 // Radiance arriving at v along the rest of its path: up to `depth` more vertices sampled from the
 // BSDF, each adding emission + direct light, a sky miss ending it. Russian roulette from the third.
-float3 ptContinue(PtVertex v, float2 pixel, inout uint rng, uint depth) {
+// In the NeuRaC twins a vertex the cache covers ends the path with the cached diffuse bounce there
+// (NVIDIA's NRC termination): the path is two segments long and the cache carries the rest.
+float3 ptContinueEx(PtVertex v, float2 pixel, inout uint rng, uint depth, out PtFirst first) {
+    first.dir = v.s.N;
+    first.li = float3(0.0, 0.0, 0.0);
+    first.diffuse = false;
     float3 sum = float3(0.0, 0.0, 0.0);
     float3 thr = float3(1.0, 1.0, 1.0);
+    float3 rel = float3(1.0, 1.0, 1.0);   // thr without the first segment's weight (first.li)
     [loop] for (uint b = 0u; b < depth; ++b) {
         float3 dir, w;
         float3 origin;
+        bool diffuse = false;
         const float bias = ptBias(v.pos);
         const float a    = v.cover;
         if (a < 0.999 && ptRand(rng) >= a) {
@@ -210,28 +264,51 @@ float3 ptContinue(PtVertex v, float2 pixel, inout uint rng, uint depth) {
               : float3(1.0, 1.0, 1.0);
             origin = v.pos + dir * bias;
         } else {
-            if (!ptSampleBsdf(v.s, rng, dir, w, a)) break;
+            if (!ptSampleBsdf(v.s, rng, dir, w, a, diffuse)) break;
             origin = v.pos + v.s.N * bias;
         }
         thr *= w;
+        if (b == 0u) { first.dir = dir; first.diffuse = diffuse; }
+        else rel *= w;
         PtVertex nv;
         if (!ptTrace(origin, dir, bias, v.s.rough * v.s.rough + 0.1, nv,
                      AVER_RT_MASK_OPAQUE_ALL | AVER_RT_MASK_TRANSLUCENT)) {
-            sum += thr * averSkyRadianceCheap(dir) * gAmbient.r;
+            const float3 sky = averSkyRadianceCheap(dir) * gAmbient.r;
+            sum += thr * sky;
+            first.li += rel * sky;
             break;
         }
         // A translucent vertex reflects its direct light by its coverage (the composite's diffuse share).
-        sum += thr * (nv.s.emissive + ptDirect(nv, pixel, rng) * nv.cover);
+        float3 here = nv.s.emissive + ptDirect(nv, pixel, rng) * nv.cover;
+        bool cached = false;
+#if AVER_NEURAC
+        if (rcCacheOn()) {
+            float rem;
+            const float3 e = rcLookup(nv.pos, nv.s.N, rem);
+            if (1.0 - rem >= AVER_PT_RC_CONFIDENCE) {
+                here += nv.cover * nv.s.kdAlbedo * e / (1.0 - rem);
+                cached = true;
+            }
+        }
+#endif
+        sum += thr * here;
+        first.li += rel * here;
+        if (cached) break;
         if (b >= 1u) {
             const float p = clamp(max(thr.r, max(thr.g, thr.b)), 0.05, 0.95);
             if (ptRand(rng) > p) break;
             thr /= p;
+            rel /= p;
         }
         v = nv;
     }
     return sum;
 }
 
+float3 ptContinue(PtVertex v, float2 pixel, inout uint rng, uint depth) {
+    PtFirst first;
+    return ptContinueEx(v, pixel, rng, depth, first);
+}
 // Outgoing radiance toward the ray from the first surface it hits, path traced: what a reflection
 // sees in Path Tracing. `skyFallback` is the caller's own sky lookup for a miss.
 float3 ptRadiance(float3 origin, float3 dir, float tmin, float cone, float2 pixel, uint stream,

@@ -776,7 +776,7 @@ float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular,
 // ---- TRANSLUCENCY IN THE PATH (Settings::translucencyInPath; gPtBounceParams.w) ----
 // The primary ray's translucent crossings in front of the opaque surface at `hitT`, front to back.
 // Each is its material's own surface (rtHitSurface), lit like any hit (sun through the transmittance-
-// aware shadow ray, one lamp, sky ambient, a traced reflection) and composited as the blended replay
+// aware shadow ray, the lamps, sky ambient, a traced reflection) and composited as the blended replay
 // does (averShadeSplit: reflection at full strength, diffuse by coverage). What gets through is
 // (1 - coverage) times the volume's absorption over its measured thickness -- PER CHANNEL, since here
 // the background is known, which the replay's single blend alpha could not express. `background` is
@@ -786,7 +786,7 @@ float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel
     float3 acc = float3(0.0, 0.0, 0.0);
     float3 thr = float3(1.0, 1.0, 1.0);
     const float3 L = normalize(gLightDir.xyz);
-    const uint   frameIdx = (uint)gRtHistParams.z;
+    const uint   sampleFrame = ptReferenceMode() ? (uint)gRtHistParams.z : 0u;
     // One pixel's angular footprint, for the crossings' mips.
     const float  pixelCone = 2.0 / max(gSceneViewportCur.w, 1.0);
     float tmin = 0.0;
@@ -806,11 +806,14 @@ float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel
         rtHitConeGrad(h, pixelCone, gx, gy);
         const AverSurface s = rtHitSurface(h, -dir, L, gx, gy, AVER_RT_HIT_FULL);
 
+        // Nothing averages these layers over frames (no history, not denoised), so every ray here is the
+        // same each frame: a fixed shadow and reflection sample per pixel, every lamp unshadowed. Reference
+        // path tracing does average them (its accumulation), so there the samples move.
         AverLight sun;
         sun.direction  = L;
         sun.radiance   = averSunRadiance();
         sun.visibility = rtShadow(h.pos, s.N, L, pixel, float3(0, 0, 0), float3(0, 0, 0), 1u,
-                                  (float)(frameIdx + k) * 2.39996323);
+                                  (float)(sampleFrame + k) * 2.39996323);
         AverIndirect ind;
         ind.ambient      = averSkyIrradiance(s.N);
         ind.ambientScale = gAmbient.r;
@@ -818,14 +821,11 @@ float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel
         ind.occlusion    = 1.0;
         bool reflHit = false;
         ind.specular = rtReflection(h.pos, s.N, h.N, reflect(dir, s.N), L, pixel,
-                                    s.rough < AVER_REFL_MIRROR_ROUGH ? 0.0 : s.rough, frameIdx, reflHit);
+                                    s.rough < AVER_REFL_MIRROR_ROUGH ? 0.0 : s.rough, sampleFrame, reflHit);
         float3 diffuse, specular;
         averShadeSplit(s, sun, ind, diffuse, specular);
 #if AVER_RD_LAMPS
-        if (rdLocalLightCount() > 0u) {
-            uint rng = ptSeed(pixel, 0x91c5u + k);
-            specular += ptLamp(s, h.pos, pixel, rng);
-        }
+        if (rdLocalLightCount() > 0u) rdLocalLightsShadeSplit(s, h.pos, 1.0, diffuse, specular);
 #endif
         float3 T = float3(1.0, 1.0, 1.0);
         if (s.attenuationDistance > 0.0)
@@ -2009,7 +2009,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     const float3 prvObjW = mul(float4(objPos, 1.0), inst.prevObjectToWorld).xyz;
     o.velocity        = averGBufferVelocityMoved(wpos, wpos + (prvObjW - curObjW));
     o.viewZ            = clip.w;
-    o.normalRoughness  = averPackNormalRoughness(s.N, s.rough);
+    // The surface's own normal, not the normal-mapped one: the GI the denoiser filters is gathered over
+    // the geometric hemisphere, and per-texel normal-map detail broke its neighbour weights into speckle.
+    o.normalRoughness  = averPackNormalRoughness(N, s.rough);
 #endif
     return o;
 }

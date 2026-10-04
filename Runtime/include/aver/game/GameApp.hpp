@@ -313,6 +313,7 @@ private:
     // Registered NON-OWNING with addRenderFeature. Must outlive the device.
     voxi::VoxiRenderer voxiRenderer_;
     bool voxiAttached_ = false;
+    u32  msaaPushed_ = 0;   // sample count last given to the device
     // Frame-budget state. Ticked once a frame and seeded from project_.frameBudgetMs.
     voxi::FrameBudgetState frameBudget_;
 #endif

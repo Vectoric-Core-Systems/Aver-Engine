@@ -356,10 +356,20 @@ int main() {
         {
             Settings s4 = s;
             s4.msaa = Msaa::X4;
+            s4.rtRenderMode = 0;   // the rasteriser finds the first surface, so MSAA really applies
             const Resolution r = resolve(s4, fullDevice());
+            check(r.sampleCount == 4, "the device runs the requested 4x under raster primary");
             check(r.denoiser.reason == DisableReason::RequiresMsaaOne, "denoiser.reason is RequiresMsaaOne (soft) at 4x MSAA with a real signal");
             check(r.denoiser.effective == 0, "denoiser.effective is 0 at 4x MSAA -- the denoiser really does skip itself there");
             check(r.denoiserGBufferWanted, "denoiserGBufferWanted stays true under the soft MSAA reason");
+        }
+        {
+            Settings s5 = s;
+            s5.msaa = Msaa::X4;
+            s5.rtRenderMode = 1;
+            const Resolution r = resolve(s5, fullDevice());
+            check(r.sampleCount == 1, "ray-driven primary runs the device at 1x whatever MSAA says");
+            check(r.denoiser.reason == DisableReason::None, "so 4x MSAA no longer stops the denoiser under ray-driven primary");
         }
         {
             const Resolution r = resolve(s, fullDevice());

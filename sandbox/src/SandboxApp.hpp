@@ -3323,6 +3323,7 @@ private:
     // Who decides, highest first: --frame-interp, project RENDER.FRAMEINTERP, Editor Preference (off by default).
     int  frameInterpCli_ = -1;
     bool frameInterpWhileEditing_ = false;   // Editor Preferences, display.frameInterpWhileEditing
+    u32  msaaPushed_ = 0;                    // sample count last given to the device (onUpdate)
     // The gather's path and in-engine training (Editor Preferences display.frameInterpTrajectory / display.frameInterpTrain).
     int  frameInterpTrajectory_ = 2;         // neurafi::Trajectory (0 straight, 1 quadratic, 2 learned)
     bool frameInterpTrain_ = false;

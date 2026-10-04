@@ -2126,9 +2126,15 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     e.device()->setMeshShaders(msOverride_);
 #endif
 #if AVER_MODULE_VOXI
-    // Voxi owns the AA setting; push it when it changes (rebuilds targets+PSOs).
-    if (voxi::Renderer::get().consumeMsaaDirty())
-        e.device()->setSampleCount(static_cast<u32>(voxi::Renderer::get().settings().msaa));
+    // Voxi owns the AA setting; push it when it changes (rebuilds targets+PSOs). Ray-driven frames run
+    // at 1x whatever MSAA says (voxi::Resolution::sampleCount).
+    {
+        const u32 samples = voxi::resolve(vx.settings(), vx.deviceInfo()).sampleCount;
+        if (vx.consumeMsaaDirty() || samples != msaaPushed_) {
+            e.device()->setSampleCount(samples);
+            msaaPushed_ = samples;
+        }
+    }
 
     if (voxiAttached_) {
         // Copy, load-bearing: must never write back to the singleton.

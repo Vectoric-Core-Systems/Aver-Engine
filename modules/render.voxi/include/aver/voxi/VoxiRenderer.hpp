@@ -464,6 +464,9 @@ private:
     rhi::PipelineHandle rdGiPtCbCsPso_      = 0;
     rhi::PipelineHandle rdGiTracePtCsPso_   = 0;
     rhi::PipelineHandle rdGiTracePtCbCsPso_ = 0;
+    // Path Tracing over the radiance cache (AVER_PT_PATHS + AVER_NEURAC): paths train the cache and end in it.
+    rhi::PipelineHandle rdGiPtRcCsPso_      = 0;
+    rhi::PipelineHandle rdGiTracePtRcCsPso_ = 0;
     rhi::PipelineHandle rdReflPtCsPso_      = 0;
     rhi::PipelineHandle rdReflSplitPtCsPso_ = 0;
     rhi::PipelineHandle rdReflSplitCsPso_  = 0;
@@ -1175,7 +1178,11 @@ private:
     }
 
     // RADIANCE CACHE (stage 1): whether Cached mode (giRestirVisibility_ == 4) is the requested mode AND ReSTIR GI is running.
-    bool neuracWanted() const { return giRestirWanted() && giRestirVisibility_ == 4u; }
+    // ReSTIR Path Tracing always runs it: its paths train the cache and end in it.
+    bool neuracWanted() const {
+        return giRestirWanted() &&
+               (giRestirVisibility_ == 4u || (pathTracingWanted() && settings_.ptMode == 0u));
+    }
 
     // LOCAL LIGHTS (LAMPS): whether rdLocalHist_ is worth allocating.
     bool rdLocalHistWanted() const {

@@ -412,7 +412,7 @@ void VoxiRenderer::shutdown() {
                                         rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                         rdGiCacheCsPso_, rdGiCacheCbCsPso_,
                                         rdGiTraceCacheCsPso_, rdGiTraceCacheCbCsPso_,
-                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_,
+                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_,
                                         rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                         rdReflSplitCsPso_, rdReflFilterCsPso_,
                                         rdLocalLightsCsPso_,
@@ -434,6 +434,7 @@ void VoxiRenderer::shutdown() {
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
     rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
+    rdGiPtRcCsPso_ = rdGiTracePtRcCsPso_ = 0;
     rdReflPtCsPso_ = rdReflSplitPtCsPso_ = 0;
     rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
     rdLocalLightsCsPso_ = 0;
@@ -4213,11 +4214,13 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // carries. Copied here rather than shared.
         if (giSplit) {
             stageBegin("Voxi RD GI trace stage");
+            const bool g1PtRc = pt && !giCb && rcBit && rdGiTracePtRcCsPso_ != 0;
             const rhi::PipelineHandle g1Pt =
-                pt ? (giCb ? rdGiTracePtCbCsPso_ : rdGiTracePtCsPso_) : rhi::PipelineHandle(0);
+                g1PtRc ? rdGiTracePtRcCsPso_
+                       : pt ? (giCb ? rdGiTracePtCbCsPso_ : rdGiTracePtCsPso_) : rhi::PipelineHandle(0);
             const rhi::PipelineHandle g1Twin =
                 (!g1Pt && rcBit) ? (giCb ? rdGiTraceCacheCbCsPso_ : rdGiTraceCacheCsPso_) : rhi::PipelineHandle(0);
-            if (g1Twin) usedCacheTwin = true;
+            if (g1Twin || g1PtRc) usedCacheTwin = true;
             if (g1Pt) ptRanThisFrame_ = true;
             ctx.setPipeline(g1Pt ? g1Pt : g1Twin ? g1Twin : (giCb ? rdGiTraceCbCsPso_ : rdGiTraceCsPso_));
             ctx.setBindingSet(bindings_);
@@ -4265,8 +4268,11 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
 
         if (giDispatch) {
             stageBegin("Voxi RD GI stage");
+            const bool giPtRc = !giSplit && pt && !giCb && rcBit && rdGiPtRcCsPso_ != 0;
+            if (giPtRc) usedCacheTwin = true;
             const rhi::PipelineHandle giPt =
-                (!giSplit && pt) ? (giCb ? rdGiPtCbCsPso_ : rdGiPtCsPso_) : rhi::PipelineHandle(0);
+                giPtRc ? rdGiPtRcCsPso_
+                       : (!giSplit && pt) ? (giCb ? rdGiPtCbCsPso_ : rdGiPtCsPso_) : rhi::PipelineHandle(0);
             const rhi::PipelineHandle giTwin =
                 giPt ? giPt
                      : (!giSplit && rcBit) ? (giCb ? rdGiCacheCbCsPso_ : rdGiCacheCsPso_)
@@ -5493,7 +5499,13 @@ bool VoxiRenderer::createPathTraceTwins() {
     build("CSRdGiTrace", ";AVER_GI_CHECKERBOARD=1", rdGiTracePtCbCsPso_);
     build("CSRdRefl",    "",                        rdReflPtCsPso_);
     build("CSRdRefl",    ";AVER_RD_REFL_SPLIT=1",   rdReflSplitPtCsPso_);
-    const bool ok = rdGiPtCsPso_ && rdGiPtCbCsPso_ && rdGiTracePtCsPso_ && rdGiTracePtCbCsPso_ &&
+    // Over the radiance cache. Plain only: Path Tracing never runs the half-rate checkerboard.
+    build("CSRdGi",      ";AVER_NEURAC=1",          rdGiPtRcCsPso_);
+    build("CSRdGiTrace", ";AVER_NEURAC=1",          rdGiTracePtRcCsPso_);
+    if (!rdGiPtRcCsPso_ || !rdGiTracePtRcCsPso_)
+        AVER_WARN("[Voxi] the Path Tracing pipelines over the radiance cache did not compile; paths run "
+                  "without it");
+    const bool ok =rdGiPtCsPso_ && rdGiPtCbCsPso_ && rdGiTracePtCsPso_ && rdGiTracePtCbCsPso_ &&
                     rdReflPtCsPso_ && rdReflSplitPtCsPso_;
     if (ok) AVER_INFO("[Voxi] Path Tracing pipelines ready (ReSTIR GI paths and reflection paths)");
     else    AVER_WARN("[Voxi] some Path Tracing pipelines did not compile; those stages run as ordinary "
@@ -6077,7 +6089,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                          rdGiCacheCsPso_, rdGiCacheCbCsPso_,
                                          rdGiTraceCacheCsPso_, rdGiTraceCacheCbCsPso_,
-                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_,
+                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_,
                                         rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                          rdReflSplitCsPso_, rdReflFilterCsPso_,
                                          rdLocalLightsCsPso_};
@@ -6096,6 +6108,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
     rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
+    rdGiPtRcCsPso_ = rdGiTracePtRcCsPso_ = 0;
     rdReflPtCsPso_ = rdReflSplitPtCsPso_ = 0;
     rcTwinsTried_ = false;
     ptTwinsTried_ = false;

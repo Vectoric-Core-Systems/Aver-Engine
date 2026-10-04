@@ -1284,7 +1284,7 @@ float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2
     hit = true;
 
     // The reflected surface, built and lit like every other ray hit: its own maps through the shared
-    // composition, the sun through the full BRDF (one shadow ray from this pixel), one lamp, and the
+    // composition, the sun through the full BRDF (one shadow ray from this pixel), the lamps, and the
     // sky for its diffuse ambient.
     const RtHit h = rtHitCommitted(q, wpos, dir);
     float2 rgx, rgy;
@@ -1305,10 +1305,8 @@ float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2
     }
     float3 radiance = averShadeDirect(s.emissive, s, sun);
 #if AVER_RD_LAMPS && !AVER_RD_SINGLE_PASS
-    if (rdLocalLightCount() > 0u) {
-        uint rng = ptSeed(pixel, 0x7a31u);
-        radiance += ptLamp(s, h.pos, pixel, rng);
-    }
+    // Every lamp, unshadowed: a random one-lamp pick here sparkled through the reflection history.
+    if (rdLocalLightCount() > 0u) radiance += ptLampsAll(s, h.pos);
 #endif
     return radiance + s.kdAlbedo * averSkyIrradiance(s.N) * gAmbient.r;
 }

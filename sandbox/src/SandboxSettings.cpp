@@ -1314,8 +1314,8 @@ void SandboxApp::buildRenderingSettings(int page) {
         }
         // rtRenderMode.effective: whether ray pass is ACTUALLY ray-driven (not raw request).
         if (er.rtRenderMode.effective == 1)
-            ImGui::TextDisabled("Primary visibility is ray-driven -- the ray pass runs at a single "
-                                "sample regardless of the setting above.");
+            ImGui::TextDisabled("Primary visibility is ray-driven, so the frame runs at 1x (one ray a pixel); "
+                                "this setting applies when the rasteriser draws.");
 
 #if AVER_MODULE_SR
         {
@@ -1333,7 +1333,7 @@ void SandboxApp::buildRenderingSettings(int page) {
                                   "reprojected with motion vectors: smooth edges and stable detail, upscaled to\n"
                                   "the window. Needs MSAA 1 (it reads the G-buffer); otherwise FSR 1 is used.\n\n"
                                   "Round-trips as RENDER.TAA. --taa / --no-taa outrank it.");
-            if (taa && static_cast<u32>(s.msaa) != 1u)
+            if (taa && er.sampleCount != 1u)
                 ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
                                    "   MSAA is %ux -- TAA needs 1x, so FSR 1 is used instead.",
                                    static_cast<u32>(s.msaa));
@@ -1428,9 +1428,6 @@ void SandboxApp::buildRenderingSettings(int page) {
                             s.pathTracing = Quality::High;
                             s.ptBounces   = ladder::ptBounces(Quality::High);
                         }
-                        // Path tracing finds the first surface with a ray (one sample a pixel), and its
-                        // denoiser reads a single-sample G-buffer.
-                        s.msaa = Msaa::Off;
                     }
                     changed = true;
                 }
@@ -1451,8 +1448,7 @@ void SandboxApp::buildRenderingSettings(int page) {
                               "lobe, no reuse and no denoiser, averaged while the view holds still. Converges\n"
                               "to the ground truth; grainy while moving.\n\n"
                               "The path tracing methods turn on what they run on: primary rays, ReSTIR GI and\n"
-                              "the denoiser, and set anti-aliasing to 1x. Picking an Overall Quality preset\n"
-                              "turns path tracing off.");
+                              "the denoiser. Picking an Overall Quality preset turns path tracing off.");
         if (s.giMode != 0 && !ptOn && er.giMode.reason != DisableReason::None)
             ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1),
                                "   ReSTIR is selected and resumes when %s",
@@ -1480,10 +1476,6 @@ void SandboxApp::buildRenderingSettings(int page) {
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Path vertices after the first hit. Path quality re-derives this, so set it\n"
                                   "after picking one. Round-trips as RENDER.PTBOUNCES.");
-            if (static_cast<u32>(s.msaa) != 1u)
-                ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.2f, 1.0f),
-                                   "   Anti-aliasing is %ux: the denoiser cannot run, so the image stays grainy. "
-                                   "Set it to Off.", static_cast<u32>(s.msaa));
         }
         // ReSTIR's own controls below are inert under the reference path tracer.
         ImGui::BeginDisabled(ptOn && s.ptMode == 1u);
@@ -1735,7 +1727,7 @@ void SandboxApp::buildRenderingSettings(int page) {
                                     "filter blanks into a confidently wrong image.\n\n"
                                     "Round-trips as RENDER.DENOISER.");
         // Warning on s.msaa (edited value), not device's live count: shows before Apply.
-        if (den && static_cast<u32>(s.msaa) != 1u)
+        if (den && er.sampleCount != 1u)
             ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.2f, 1.0f),
                                "   Anti-aliasing is %ux -- set it to 1 or the denoiser stays off.",
                                static_cast<u32>(s.msaa));
