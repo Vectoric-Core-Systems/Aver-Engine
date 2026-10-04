@@ -652,63 +652,23 @@ float rdPlaneDepthStep(float3 wpos, float3 Ng, float3 dirN) {
     return mul(float4(Pn, 1.0), gViewProj).w - mul(float4(wpos, 1.0), gViewProj).w;
 }
 
-// MILESTONE 3. The one number CSRdRefl needs from PSRayDriven's material block before deciding whether
-// to trace a reflection ray: the hit's ROUGHNESS. TRANSCRIBED FROM PSRayDriven'S OWN MATERIAL BLOCK
-// (AVER_RT_BINDLESS branch of "THE STOCK MATERIAL AT A RAY HIT", below) -- uvS/averRtUvGrad/the slot-1
-// metal-rough sample/the AVER_MAT_SLOPE_BLEND layer-1 blend/the final clamp copied verbatim, keeping only
-// the statements roughness depends on. NOT a full AverSurface rebuild: mapBase/occlusion/emissive/normal
-// feed PSMainVoxi/PSRayDriven's shading but never `s.rough`, and CSRdRefl never reads them back, so
-// computing them here would be dead work.
-//
-// KEEP IN STEP WITH PSRayDriven's OWN COPY BY HAND (same rule as rdSurfaceFromRecord above, same reason:
-// no shared statement). A future roughness edit not mirrored here silently gives CSRdRefl's gate and
-// rtReflectionTemporal a stale value, while the shade pass's own s.rough (still computed in full; still
-// what the cone/sky fallback below uses) moves on without it.
-//
-// WHY STAGE B CAN'T JUST RE-CHECK `rough <= 0.75` INSTEAD OF READING gRdReflTex's alpha: it has no cheap
-// way to know CSRdRefl's roughness without redoing this reconstruction -- exactly the register-pressure
-// cost splitting reflection out of the shade pass exists to remove (see CSRdRefl's header). Reading
-// gRdReflTex[pixel].a instead asks the stage that already paid for this answer, once.
-float rdSurfaceRoughness(RdSurface s, float3 rdRayDx, float3 rdRayDy) {
-#ifdef AVER_RT_BINDLESS
-    // THE EFFECTIVE UV and its footprint, same two calls PSRayDriven makes (see that block for why
-    // averRtSurfaceUV/averRtUvGrad are the right pair and why the gradient rides the shadow-ray
-    // footprint, not a screen-space derivative -- undefined on a ray hit).
-    const float2 uvS = averRtSurfaceUV(s.mat, s.inst, s.wpos, s.N, s.hitUV);
-    float2 uvGx, uvGy;
-    averRtUvGrad(s.mat, s.inst, s.N,
-                 gRtVerts[s.i0].pos, gRtVerts[s.i1].pos, gRtVerts[s.i2].pos,
-                 gRtVerts[s.i0].uv,  gRtVerts[s.i1].uv,  gRtVerts[s.i2].uv,
-                 rdRayDx, rdRayDy, uvGx, uvGy);
-
-    // glTF packs roughness in G, metallic in B, same unpack as PSRayDriven. Only slot 1 (MetalRough) is
-    // sampled -- slots 0/2/3/4 feed shading channels this function has no use for.
-    const float4 mapMR      = averRtSampleSlot(s.mat, 1, uvS, uvGx, uvGy, float4(1, 1, 1, 1));
-    float2       metalRough = float2(mapMR.g, mapMR.b);
-
-    // SECOND LAYER, blended by SLOPE off the geometric normal -- same predicate/weight as PSRayDriven.
-    // Only texIndex[6] (Layer1MetalRough) is transcribed; sibling texIndex[5]/[7] blend mapBase/normalTS,
-    // neither returned here.
-    if (s.mat.flags & AVER_MAT_SLOPE_BLEND) {
-        const float flat01 = saturate(abs(s.N.z));
-        const float lw = 1.0 - smoothstep(s.mat.slopeBlendLo, s.mat.slopeBlendHi, flat01);
-        if (lw > 0.001) {
-            if (s.mat.texIndex[6] != AVER_TEX_UNBOUND) {
-                const float2 uv1 = uvS * s.mat.layer1UvScale;
-                const float4 mr1 = averRtSampleSlot(s.mat, 6, uv1,
-                                                    uvGx * s.mat.layer1UvScale,
-                                                    uvGy * s.mat.layer1UvScale, mapMR);
-                metalRough = lerp(metalRough, float2(mr1.g, mr1.b), lw);
-            }
-        }
-    }
-
-    return clamp(s.inst.roughness * s.mat.roughnessFactor * metalRough.x, 0.045, 1.0);
-#else
-    return clamp(s.inst.roughness * s.mat.roughnessFactor, 0.045, 1.0);   // averEvalMaterial's own floor
-#endif
+// The full surface at a staged pixel, through the one builder every ray hit uses (voxi_rt.hlsli's
+// rtHitSurface): what CSRdRefl needs before tracing -- the roughness for its gate and the shading
+// (normal-mapped) normal to reflect about -- is exactly what Stage B shades with.
+AverSurface rdHitSurface(RdSurface s, float3 dir, float3 rdRayDx, float3 rdRayDy) {
+    RtHit h;
+    h.inst   = s.inst;
+    h.mat    = s.mat;
+    h.i0 = s.i0; h.i1 = s.i1; h.i2 = s.i2;
+    h.w      = s.w;
+    h.pos    = s.wpos;
+    h.N      = s.N;
+    h.meshUV = s.hitUV;
+    h.t      = s.hitT;
+    float2 gx, gy;
+    rtHitGrad(h, rdRayDx, rdRayDy, gx, gy);
+    return rtHitSurface(h, -dir, normalize(gLightDir.xyz), gx, gy, AVER_RT_HIT_FULL);
 }
-
 // Is a real backdrop bound? Null-filled Texture2D reports zero dimensions.
 bool averBlendBackdropValid(out float2 invSize) {
     uint w = 0, h = 0;
@@ -1783,10 +1743,11 @@ RayDrivenOut PSRayDriven(SkyOut i) {
                                        rdLocalLightsVisibility(wpos, N, i.pos.xy, uint2(i.pos.xy), true));
 #endif
 
-    // Environment through engine's indirect term, not diffuse-only.
-    float3 R = reflect(dir, N);
+    // Environment through engine's indirect term, not diffuse-only. The SHADING normal, as raster
+    // (averShadingNormal): a normal map moves the reflection and the sky it sees.
+    float3 R = reflect(dir, s.N);
     AverIndirect ind;
-    ind.ambient      = averSkyIrradiance(N);
+    ind.ambient      = averSkyIrradiance(s.N);
     ind.ambientScale = gAmbient.r;
 
     // ---- Diffuse indirect: cone trace as PSMainVoxi does ----
@@ -1982,7 +1943,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     const float3 prvObjW = mul(float4(objPos, 1.0), inst.prevObjectToWorld).xyz;
     o.velocity        = averGBufferVelocityMoved(wpos, wpos + (prvObjW - curObjW));
     o.viewZ            = clip.w;
-    o.normalRoughness  = averPackNormalRoughness(N, s.rough);
+    o.normalRoughness  = averPackNormalRoughness(s.N, s.rough);
 #endif
     return o;
 }
@@ -2436,10 +2397,10 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
     const float3 rdRayDy = (dirDy - dir) * s.hitT;
 
     const float3 L = normalize(gLightDir.xyz);
-    // Reflect primary ray about the face-the-ray-flipped surface normal.
-    const float3 R = reflect(dir, s.N);
-    // The one value this stage needs before gating: see rdSurfaceRoughness's header.
-    const float rough = rdSurfaceRoughness(s, rdRayDx, rdRayDy);
+    // The surface Stage B shades: its roughness gates the ray, its shading normal reflects it.
+    const AverSurface hs = rdHitSurface(s, dir, rdRayDx, rdRayDy);
+    const float3 R = reflect(dir, hs.N);
+    const float rough = hs.rough;
     averRtCutoutPolicy(AVER_RD_CUTOUTS_REFL, rough > AVER_RD_REFL_SOLID_CUTOUT_ROUGH);
 
     // History writes live (blended draws never reach ray-driven primary).
@@ -2536,7 +2497,7 @@ void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
     const float rdReflDzdy = rdPlaneDepthStep(s.wpos, s.Ng, dirDy);
 
     // Roughness and depth recomputed, not read. Pending marker is plain -1.0 flag.
-    const float rough    = rdSurfaceRoughness(s, rdRayDx, rdRayDy);
+    const float rough    = rdHitSurface(s, dir, rdRayDx, rdRayDy).rough;
     const float curDepth = mul(float4(s.wpos, 1.0), gViewProj).w;
 
     // Mirror cutoff same as rtReflectionTemporal(Ex): agrees with R1's filter radius.

@@ -288,8 +288,10 @@ AverDrawTerms rtDrawTerms(RtInstance inst) {
 #define AVER_RT_HIT_FULL 0u
 #define AVER_RT_HIT_LITE 1u
 
+// Normal maps on ray hits, as on raster. Every user of the hit's shading normal (direct light, the
+// reflection ray, sky ambient, the G-buffer) takes the same perturbed s.N.
 #ifndef AVER_RT_NORMAL_MAPPING
-#define AVER_RT_NORMAL_MAPPING 0
+#define AVER_RT_NORMAL_MAPPING 1
 #endif
 
 // UV footprint for SampleGrad from world-space footprint vectors at the hit: ray differentials for
