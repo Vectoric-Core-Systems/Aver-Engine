@@ -1925,13 +1925,18 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         f32 px = 0.0f, py = 0.0f;
         u32 buttons = 0;
 #if AVER_WITH_IMGUI
-        const ImGuiIO& uiIo = ImGui::GetIO();
-        px = uiIo.MousePos.x; py = uiIo.MousePos.y;
-        // ImGui reports outside cursor as -FLT_MAX; pushed further negative to hit nothing.
-        if (px < -1.0e6f || py < -1.0e6f) { px = -1.0e6f; py = -1.0e6f; }
-        else { px -= ox; py -= oy; }
-        for (int b = 0; b < 3; ++b)
-            if (ImGui::IsMouseDown(static_cast<ImGuiMouseButton>(b))) buttons |= (1u << b);
+        // No ImGui context when headless (--headless): GetIO() would read through null.
+        if (ImGui::GetCurrentContext()) {
+            const ImGuiIO& uiIo = ImGui::GetIO();
+            px = uiIo.MousePos.x; py = uiIo.MousePos.y;
+            // ImGui reports outside cursor as -FLT_MAX; pushed further negative to hit nothing.
+            if (px < -1.0e6f || py < -1.0e6f) { px = -1.0e6f; py = -1.0e6f; }
+            else { px -= ox; py -= oy; }
+            for (int b = 0; b < 3; ++b)
+                if (ImGui::IsMouseDown(static_cast<ImGuiMouseButton>(b))) buttons |= (1u << b);
+        } else {
+            px = py = -1.0e6f;
+        }
         // In the play window the HUD is laid out at its origin, and only input_ sees its pointer.
         if (playWindowFocused() && !hudPreviewActive()) {
             px = static_cast<f32>(input_.mouseX());
