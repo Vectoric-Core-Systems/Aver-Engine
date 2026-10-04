@@ -1695,8 +1695,14 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             // input_.mouseDX/DY not io.MouseDelta: same phase bug as wheel below.
             // ImGui computes io.MouseDelta in NewFrame, but Engine::frameStep runs onUpdate before uiNewFrame.
             // InputState holds THIS frame's motion (fed by pumpEvents before frameStep).
-            yaw_   += static_cast<f32>(input_.mouseDX()) * lookSpeed_;
-            pitch_ -= static_cast<f32>(input_.mouseDY()) * lookSpeed_;
+            // CAPTURED (Play): the cursor is re-centred every frame, and that warp arrives as a
+            // WM_MOUSEMOVE straight back, so input_'s delta nets to zero -- the view turned, then
+            // snapped back. MouseCapture measures from its anchor instead (last frame's poll).
+            const bool cap = mouse_.captured();
+            const f32 mdx = cap ? mouse_.dx() : static_cast<f32>(input_.mouseDX());
+            const f32 mdy = cap ? mouse_.dy() : static_cast<f32>(input_.mouseDY());
+            yaw_   += mdx * lookSpeed_;
+            pitch_ -= mdy * lookSpeed_;
             pitch_ = pitch_ < -1.54f ? -1.54f : (pitch_ > 1.54f ? 1.54f : pitch_);
             wheelFlySpeed();
         }
