@@ -138,6 +138,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.averSr = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.FRAMEINTERP")) {
             if (t.size() > 1) out.frameInterp = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.TAA")) {
+            if (t.size() > 1) out.taa = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.BACKEND")) {
             // Stored verbatim and lowercased; validated where it is USED, not here.
             if (t.size() > 1) { out.backend = t[1]; for (char& ch : out.backend) ch = static_cast<char>(::tolower(ch)); }
@@ -301,7 +303,7 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.REFRACTIONMODE", "RENDER.REFRACTIONSTRENGTH",
         "RENDER.REFRACTIONEDGEFADE", "RENDER.LODSELECT", "RENDER.LODTHRESHOLD",
         "RENDER.OCCLUSIONCULL", "RENDER.DEPTHPREPASS",
-        "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS", "RENDER.AVERSR", "RENDER.FRAMEINTERP",
+        "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS", "RENDER.AVERSR", "RENDER.FRAMEINTERP", "RENDER.TAA",
         "RENDER.MSAA", "RENDER.MESHSHADERS", "RENDER.GIUPDATEINTERVAL", "RENDER.GIVOLUME",
         "RENDER.EXPOSURE", "RENDER.BLOOM", "RENDER.AUTOEXPOSURE", "RENDER.TONEMAP",
         "WINDOW.TITLE", "WINDOW.SIZE", "WINDOW.RESIZABLE", "WINDOW.FULLSCREEN",
@@ -369,6 +371,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.FRAMEBUDGETMS", d.frameBudgetMs);
     appendKey(owned, "RENDER.AVERSR", d.averSr);
     appendKey(owned, "RENDER.FRAMEINTERP", d.frameInterp);
+    appendKey(owned, "RENDER.TAA", d.taa);
     appendKey(owned, "RENDER.MSAA", d.msaa);
     appendKey(owned, "RENDER.MESHSHADERS", d.meshShaders);
     appendKey(owned, "RENDER.GIUPDATEINTERVAL", d.giUpdateInterval);

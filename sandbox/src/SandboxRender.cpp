@@ -2589,6 +2589,18 @@ void SandboxApp::updateAverSrAuto(Engine& e) {
 // releasing in-flight GPU objects is safe).
 // OPEN GAP: PathTracer leaks every TLAS it builds (no destroyTlas in the RHI) -- one leak per
 // re-arm; small, bounded, pre-existing.
+bool SandboxApp::ptTakesViewport() const {
+#if AVER_MODULE_VOXI
+    if (ptSceneViewUnavailable_ || wireframe_ || gbufferDebugView_ != GBufferDebugFeature::Mode::Off)
+        return false;
+    if (debugView_ != voxi::VoxiRenderer::ViewDebug::None && voxiRenderer_.rayDrivenAvailable())
+        return false;
+    return voxi::Renderer::get().settings().pathTracing != voxi::Quality::Off || ptSceneViewFromCli_;
+#else
+    return false;
+#endif
+}
+
 void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
     if (!dev) return;
 
@@ -2601,7 +2613,9 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
     // this frame until beginFrame() runs buildAccelerationStructures, so suppressesScene() would
     // answer LAST frame's question; this predicts prePass's answer instead (VoxiRenderer.hpp).
 #if AVER_MODULE_VOXI
-    const bool rayDrivenPaints = voxiRenderer_.willSuppressSceneThisFrame();
+    // ptTakesViewport(): onUpdate forces raster primary this frame, so ray-driven will not paint
+    // (its last-frame mode may still read 1 on the frame Path Tracing is switched on).
+    const bool rayDrivenPaints = voxiRenderer_.willSuppressSceneThisFrame() && !ptTakesViewport();
 #else
     // One fewer candidate: voxiRenderer_ is `#if AVER_MODULE_VOXI`-only but this function isn't --
     // the flag and PT view registration must keep working with the module off, so this is a constant.
@@ -2613,15 +2627,8 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
         ptSceneViewSuppressedByRayDriven_ = true;
         if (!ptSceneViewYieldLogged_) {
             ptSceneViewYieldLogged_ = true;
-            if (ptSceneViewFromCli_)
-                AVER_WARN("[PT] --pt-scene was given, but ray-driven primary visibility is "
-                          "painting the scene and wins the election -- the path-traced image "
-                          "would never be shown, so it is not being traced. Add "
-                          "--rt-render-mode 0 to actually see it.");
-            else
-                AVER_INFO("[PT] the path-traced view is not being traced: ray-driven primary "
-                          "visibility is painting the scene, so its image would never be "
-                          "shown. --rt-render-mode 0 hands the frame back to it.");
+            AVER_INFO("[PT] the path-traced view is paused while a ray-hit debug view is "
+                      "drawing; it resumes when the view goes back to Lit.");
         }
         ptSceneViewWantEnabled_ = false;
     } else if (!rayDrivenPaints) {

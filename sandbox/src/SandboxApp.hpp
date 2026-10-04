@@ -1573,6 +1573,8 @@ public:
 #endif  // AVER_MODULE_SR
 
     void syncPtSceneView(rhi::IDevice* dev);
+    // Path Tracing on owns the viewport, unless a view mode needs the raster or ray-driven path.
+    bool ptTakesViewport() const;
 
     void setFrameTimeReport(bool on);                 // --frame-time
     void setRayDrivenAblation(int m);
@@ -3312,7 +3314,7 @@ private:
     std::unique_ptr<aver::sr::FsrUpscaler> averSrUpscaler_;
     // Temporal AA (TAAU + RCAS): when on, it takes the slot instead of FSR, at any render scale.
     std::unique_ptr<aver::sr::TemporalUpscaler> taaUpscaler_;
-    bool temporalAaEnabled_ = true;   // Display > Temporal anti-aliasing; --no-taa / --taa win over it
+    bool temporalAaEnabled_ = true;   // the project's RENDER.TAA (unstated = on); --no-taa / --taa win over it
     bool taaFromCli_ = false;
     // Edge AA (FXAA-class) in FSR's first pass: --edge-aa or Display > Edge anti-aliasing.
     bool edgeAaEnabled_ = false;

@@ -316,6 +316,8 @@ void SandboxApp::applyProjectRenderSettings() {
     // no RENDER.AVERSR key must reset this back to -1, unconditionally, or a project opened right
     // after one that pinned a level would silently inherit that teammate's pin.
     averSrProjectDefault_ = project_.averSr;
+    // Mirrors too: an unstated RENDER.TAA is the engine default (on), not "keep the last project's".
+    if (!taaFromCli_) temporalAaEnabled_ = project_.taa != 0;
 #endif
 
     if (!project_.hasRenderSettings()) return;
@@ -358,13 +360,6 @@ void SandboxApp::applyProjectRenderSettings() {
     // not the rule left every other RENDER.* knob carrying the same bug; this closes the rule.
     // A FLAG IS AN INSTRUCTION FROM A HUMAN STANDING RIGHT THERE; a manifest is a recorded
     // preference. When they disagree the human wins, out loud.
-    //
-    // CAPTURED HERE, BEFORE the override block below can touch either field: the A2 conflict
-    // check further down needs to tell "the manifest alone asks for this" apart from "a flag is
-    // what produced this", and the only honest way to do that is to remember what the manifest
-    // (applyProjectVoxiSettings(), already applied above) resolved to BEFORE any flag gets a say.
-    const u32  manifestRtRenderMode  = vx.settings().rtRenderMode;
-    const bool manifestPathTracingOn = vx.settings().pathTracing != voxi::Quality::Off;
     // ---- THE OVERRIDES THEMSELVES: ONE STRUCT, ONE SHARED TWO-PHASE APPLY (N7) ----
     // Twenty `*Override_` members used to be read one at a time here, inline, across two hand-rolled
     // blocks. They are now voxi::RenderCliOverrides and voxi::applyCliOverrides
@@ -440,54 +435,6 @@ void SandboxApp::applyProjectRenderSettings() {
             vx.setSettings(k);
             k = vx.settings();
         });
-    }
-
-    // A2: A SELF-CONTRADICTORY MANIFEST NEVER SAID SO. RENDER.RTRENDERMODE 1 (ray-driven primary
-    // visibility) and a RENDER.PATHTRACING level that is not Off can both be recorded in the same
-    // .ocproject -- PTTest.ocproject does exactly this. Only one can ever paint the scene: the
-    // beginFrame() election awards it to the first registered feature whose suppressesScene() is
-    // true, and Voxi (ray-driven) always registers before PtSceneView can (see
-    // syncPtSceneView()'s own comment), so ray-driven always wins. Until now nothing said so at
-    // load time -- the Path Tracing page's Quality combo just silently did nothing (see its
-    // ptSceneViewSuppressedByRayDriven_ tag, added alongside this).
-    //
-    // checkPtRtConflict() (PtRenderConflict.hpp) is pure and takes the EFFECTIVE settings, i.e.
-    // vx.settings() AFTER the flag>manifest block immediately above already resolved precedence --
-    // not the raw project_.rtRenderMode/project_.pathTracing manifest fields. A `--rt-render-mode
-    // 0` or `--pt 0` that already fixed the contradiction must never be reported as one; that
-    // would be exactly the silent-then-wrong-message shape this file's own history warns about
-    // (see the block above's "COMMAND LINE OUTRANKS THE MANIFEST" comment).
-    //
-    // decidedByCli is computed from manifestRtRenderMode/manifestPathTracingOn (captured BEFORE
-    // the override block, above) actually CHANGING -- not merely from a flag being present. A
-    // redundant `--rt-render-mode 1` against a manifest that already said 1 must still read as
-    // "the manifest says this", not "the command line decided it": nothing the human typed moved
-    // this outcome away from what the file alone already produced.
-    {
-        const voxi::Settings& fs = vx.settings();
-        const bool rtRenderModeChangedByCli  = fs.rtRenderMode != manifestRtRenderMode;
-        const bool pathTracingOnChangedByCli =
-            (fs.pathTracing != voxi::Quality::Off) != manifestPathTracingOn;
-        const aver::editor::PtRtConflict conflict = aver::editor::checkPtRtConflict(
-            fs.rtRenderMode, fs.pathTracing != voxi::Quality::Off,
-            rtRenderModeChangedByCli, pathTracingOnChangedByCli);
-        if (conflict.conflicts) {
-            if (conflict.decidedByCli)
-                AVER_WARN("[Project] {} asks for both ray-driven primary visibility "
-                          "(RENDER.RTRENDERMODE 1) and Path Tracing (RENDER.PATHTRACING {}); "
-                          "the command line decided ray-driven wins and paints the scene, so "
-                          "Path Tracing's view will not be shown. Pass --rt-render-mode 0 (or "
-                          "--pt 0) to see it instead.",
-                          project_.manifestPath, static_cast<int>(fs.pathTracing));
-            else
-                AVER_WARN("[Project] {} sets RENDER.RTRENDERMODE 1 AND RENDER.PATHTRACING {} -- "
-                          "only one can paint the scene, and ray-driven primary visibility wins "
-                          "the election (it registers before Path Tracing's view ever can), so "
-                          "Path Tracing's view will never be shown. Set RENDER.RTRENDERMODE 0 in "
-                          "the manifest, or switch Ray Tracing > \"Finds the first surface\" to "
-                          "Rasteriser in the Rendering settings, to see it instead.",
-                          project_.manifestPath, static_cast<int>(fs.pathTracing));
-        }
     }
 
     // MANIFEST CONTRADICTIONS (section 2's load-time report rule, RenderSettingsResolver.hpp):

@@ -134,12 +134,14 @@ AUTHOR OpenConstructor Team
 | Identity | 9 | `OCPROJECT` `NAME` `ENGINE` `CREATEDWITH` `CONTENT` `STARTMAP` `AUTHOR` `DRONE.GRAPH` `INPUT.SCHEME` `GAME.MODE` |
 
 **`GAME.MODE <class>`** (Project Settings > Default Game Mode) is the GameMode every level uses unless its World Settings override it (`.ocworld` `GAMEMODE`). Without it the editor plays the engine's own drone pawn: declaring a GameMode class no longer makes it the default. The packaged runtime has no drone, so there a project without `GAME.MODE` still falls back to the first concrete GameMode declared. The FirstPerson template writes `GAME.MODE AN_FPRules`.
-| `RENDER.*` | 38 | `GI` `RAYTRACING` `PATHTRACING` `VOXELRES` `GIINTENSITY` `GIDISTANCE` `RTSHADOWRAYS` `RTPIXELSPERRAY` `RTSHADOWDENOISE` `RTRENDERMODE` `RDSTAGES` `FOGOCCLUSION` `PTBOUNCES` `LAYEREDBSDF` `GICONES` `GIMODE` `DENOISER` `RESTIRVISIBILITY` `RESTIRHISTORY` `REFRACTIONMODE` `REFRACTIONSTRENGTH` `REFRACTIONEDGEFADE` `LODSELECT` `LODTHRESHOLD` `OCCLUSIONCULL` `DEPTHPREPASS` `BACKEND` `FRAMEBUDGETMS` `AVERSR` `FRAMEINTERP` `MSAA` `MESHSHADERS` `GIUPDATEINTERVAL` `GIVOLUME` `EXPOSURE` `BLOOM` `AUTOEXPOSURE` `TONEMAP` |
+| `RENDER.*` | 39 | `GI` `RAYTRACING` `PATHTRACING` `VOXELRES` `GIINTENSITY` `GIDISTANCE` `RTSHADOWRAYS` `RTPIXELSPERRAY` `RTSHADOWDENOISE` `RTRENDERMODE` `RDSTAGES` `FOGOCCLUSION` `PTBOUNCES` `LAYEREDBSDF` `GICONES` `GIMODE` `DENOISER` `RESTIRVISIBILITY` `RESTIRHISTORY` `REFRACTIONMODE` `REFRACTIONSTRENGTH` `REFRACTIONEDGEFADE` `LODSELECT` `LODTHRESHOLD` `OCCLUSIONCULL` `DEPTHPREPASS` `BACKEND` `FRAMEBUDGETMS` `AVERSR` `FRAMEINTERP` `TAA` `MSAA` `MESHSHADERS` `GIUPDATEINTERVAL` `GIVOLUME` `EXPOSURE` `BLOOM` `AUTOEXPOSURE` `TONEMAP` |
 | `WINDOW.*` | 4 | `TITLE` `SIZE` `RESIZABLE` `FULLSCREEN` |
 | `IMPORT.*` | 5 | `SCALE` `CONVERTAXES` `GENNORMALS` `GENMIPS` `MAXTEXTURE` |
 | `STREAM.*` | 6 | `LOADRADIUS` `EVICTRADIUS` `LOADBUDGET` `EVICTBUDGET` `VERTICALRADIUS` `LEADSECONDS` |
 | `PHYSICS.*` | 6 | `MAXBODIES` `MAXBODYPAIRS` `MAXCONTACTS` `TEMPALLOCMB` `GRAVITY` `FIXEDSTEP` |
 | `AUDIO.*` | 2 | `MASTER` `BUS` |
+
+**New projects** (blank or from a template) start from PTTest's render settings with Path Tracing and temporal AA off: GI and ray tracing Epic, ReSTIR GI with cached visibility, the denoiser, staged ray-driven passes, MSAA 1, AverSR Balanced, frame interpolation on, `RENDER.TAA 0` (`applyNewProjectRenderDefaults` in `sandbox/src/ProjectScaffold.cpp`). `RENDER.TAA` is the project's temporal AA switch (Project Settings > Rendering > Anti-Aliasing & Upscaling); absent means on, and `--taa`/`--no-taa` outrank it. Path Tracing above Off takes over the editor viewport, so RT and PT can be compared by switching it.
 
 **The single authoritative enumeration is `isOwnedKey`'s table at `OcProject.cpp:291-312`**, not this
 one — a table in prose is a second copy, and this is the copy nobody will update. Point a reader

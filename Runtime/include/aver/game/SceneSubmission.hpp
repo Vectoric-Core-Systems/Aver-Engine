@@ -70,8 +70,7 @@ struct SurfaceInputs {
 // The resolved appearance for one surface, and how it got there. `blended`/`warnDeadHandle`/
 // `usedFallback` default false and `col`/`metallic`/`roughness` default to the flat fallback look
 // itself, so a default-constructed SurfaceLook is already the correct "nothing matched" answer --
-// resolveSurfaceLook only has to OVERWRITE fields a branch actually changes, the same aggregate-init
-// idiom PtRenderConflict.hpp's PtRtConflict uses for the same reason.
+// resolveSurfaceLook only has to OVERWRITE fields a branch actually changes.
 struct SurfaceLook {
     f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
     f32 metallic = 0.0f;

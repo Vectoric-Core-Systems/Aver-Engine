@@ -1,13 +1,5 @@
-// PtRenderConflictTest -- the two pure decisions behind A1/A2 of the ray-driven/Path-Tracing
-// suppression work: which tag the Path Tracing page's Quality combo shows (PtRenderConflict.hpp's
-// choosePtViewTag), and whether a project's EFFECTIVE render settings self-contradict by asking for
-// both ray-driven primary visibility and Path Tracing at once (checkPtRtConflict).
-//
-// Header-only and dependency-free, for InputOwnershipTest.cpp's exact reason (see that file's own
-// top comment): no ImGui, no SandboxApp, no AVER_WARN, no voxi::Renderer -- PtRenderConflict.hpp
-// takes plain bools/u32 in and returns plain data out, so the two decisions SandboxApp.cpp's
-// buildUI()/applyProjectRenderSettings() make are reachable without a window, a device, or a project
-// file. This is COMPILED, not run, by this lane's own build -- see the task's own verification rule.
+// PtRenderConflictTest -- the Path Tracing page's Quality-combo tag priority (PtRenderConflict.hpp's
+// choosePtViewTag). Header-only and dependency-free: no ImGui, no SandboxApp, no voxi::Renderer.
 #include "PtRenderConflict.hpp"
 
 #include <cstdio>
@@ -61,63 +53,6 @@ int main() {
         // pinning the priority anyway documents the invariant rather than leaving it implicit.
         check(choosePtViewTag(false, true, true) == PtViewTag::SuppressedByRayDriven,
               "suppressed AND active (should not occur): suppressed wins, matching priority order");
-    }
-
-    // ---- A2: checkPtRtConflict on the effective settings ----
-    {
-        // THE ORDINARY CASE: ray-driven mode with Path Tracing off. No manifest ships this pair by
-        // accident often, but it is the shipped DEFAULT (rtRenderMode's own default is 1, pathTracing
-        // defaults to Off) and must never warn.
-        const PtRtConflict c = checkPtRtConflict(1u, false, false, false);
-        check(!c.conflicts, "rtRenderMode 1, Path Tracing Off: no conflict (the shipped default)");
-    }
-    {
-        // Rasteriser mode with Path Tracing on: also fine, this is precisely how a project SEES its
-        // path-traced view (per this file's own SandboxApp.cpp comment: "--rt-render-mode 0 the path
-        // tracer DOES paint").
-        const PtRtConflict c = checkPtRtConflict(0u, true, false, false);
-        check(!c.conflicts, "rtRenderMode 0, Path Tracing on: no conflict (this is how PT is seen)");
-    }
-    {
-        // THE DIAGNOSIS'S OWN CASE: PTTest.ocproject's RENDER.RTRENDERMODE 1 + RENDER.PATHTRACING 4,
-        // with no command line involved at all.
-        const PtRtConflict c = checkPtRtConflict(1u, true, false, false);
-        check(c.conflicts, "rtRenderMode 1 AND Path Tracing on, no CLI: conflicts");
-        check(!c.decidedByCli, "...and it is the manifest alone that says so");
-    }
-    {
-        // A CLI FLAG CHANGED THE OUTCOME: --rt-render-mode moved the effective value away from what
-        // the manifest alone produced, and Path Tracing is (still) on -- the command line is what put
-        // the scene in this state, and the warning should credit it by name.
-        const PtRtConflict c = checkPtRtConflict(1u, true, /*rtRenderModeChangedByCli=*/true, false);
-        check(c.conflicts, "rtRenderMode 1 AND Path Tracing on, CLI moved rtRenderMode: conflicts");
-        check(c.decidedByCli, "...credited to the command line, since it is what produced this value");
-    }
-    {
-        // THE SAME, but via --pt instead of --rt-render-mode: a flag that turned Path Tracing ON over
-        // a manifest that had it Off, against a manifest/default rtRenderMode of 1.
-        const PtRtConflict c = checkPtRtConflict(1u, true, false, /*pathTracingOnChangedByCli=*/true);
-        check(c.conflicts, "rtRenderMode 1 (manifest), Path Tracing turned on by --pt: conflicts");
-        check(c.decidedByCli, "...credited to the command line for the same reason");
-    }
-    {
-        // A REDUNDANT FLAG MUST NOT BE CREDITED. --rt-render-mode 1 given on the command line against
-        // a manifest that ALREADY said 1 changes nothing -- the effective value is identical to what
-        // the manifest alone would have produced, so this must read as "the manifest says this", not
-        // "the command line decided it". This is the case the naive "was a flag given at all" version
-        // of this check would have gotten wrong.
-        const PtRtConflict c = checkPtRtConflict(1u, true, /*rtRenderModeChangedByCli=*/false, false);
-        check(c.conflicts, "rtRenderMode 1 AND Path Tracing on, flag given but redundant: still conflicts");
-        check(!c.decidedByCli, "...but NOT credited to the command line, since nothing actually moved");
-    }
-    {
-        // A FLAG THAT RESOLVES THE CONFLICT LEAVES NOTHING TO WARN ABOUT. This is exercised at the
-        // call site by feeding checkPtRtConflict the EFFECTIVE (post-override) settings in the first
-        // place -- once rtRenderMode's effective value is 0, there is no conflict left to name, CLI
-        // or otherwise, which is exactly what an unconditional pass-the-effective-values call site
-        // (applyProjectRenderSettings) gets for free without an explicit branch.
-        const PtRtConflict c = checkPtRtConflict(0u, true, /*rtRenderModeChangedByCli=*/true, false);
-        check(!c.conflicts, "CLI moved rtRenderMode to 0: no conflict left, regardless of the manifest");
     }
 
     std::printf("[INFO ] === %d assertions, %d failed ===\n", g_checks, g_failures);

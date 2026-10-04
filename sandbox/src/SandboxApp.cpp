@@ -2155,7 +2155,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         const bool needRaster = wireframe_ || gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
         const bool needRayDriven = !needRaster &&
             debugView_ != voxi::VoxiRenderer::ViewDebug::None && voxiRenderer_.rayDrivenAvailable();
-        if (needRaster) vs.rtRenderMode = 0;
+        if (needRaster || ptTakesViewport()) vs.rtRenderMode = 0;
         else if (needRayDriven) vs.rtRenderMode = 1;
         // Reset history when renderer mode changes (compared against last frame's effective mode).
         if (static_cast<i32>(vs.rtRenderMode) != lastEffectiveRtRenderMode_) {

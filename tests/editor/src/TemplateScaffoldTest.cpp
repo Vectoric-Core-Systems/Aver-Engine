@@ -276,6 +276,11 @@ int main() {
                 check(text.find("namespace My Game") == std::string::npos,
                       "never the raw one -- that is the line that would not compile");
             }
+            // New projects start from PTTest's render settings, with Path Tracing and TAA off.
+            check(made.rayTracing == 4 && made.giQuality == 4 && made.giMode == 1,
+                  "a new project states PTTest's GI and ray tracing tiers");
+            check(made.pathTracing == 0, "with Path Tracing off");
+            check(made.taa == 0, "and temporal AA off");
         }
     }
 

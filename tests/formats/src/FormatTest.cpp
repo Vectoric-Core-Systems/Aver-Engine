@@ -220,6 +220,15 @@ static void checkOcproject() {
         check(writeOcproject(b4, w) == w, "and a second write is byte-identical -- isOwnedKey covers them");
     }
     {
+        // RENDER.TAA: 0 is a stated value (off), unlike an absent key (engine default, on).
+        ProjectDesc t;
+        check(parseOcproject("OCPROJECT 1\nNAME T\nRENDER.TAA 0\n", t, &err), "RENDER.TAA parses");
+        check(t.taa == 0 && t.hasRenderSettings(), "TAA off is a stated render setting");
+        const std::string w = writeOcproject(t, "");
+        check(w.find("RENDER.TAA 0") != std::string::npos, "and is written back");
+        check(writeOcproject(t, w) == w, "once -- isOwnedKey covers it");
+    }
+    {
         // ---- THE POST CHAIN, which the file could not hold at all ----------------------------
         //
         // docs/RUNTIME-DEDUP.md records the gap as an owner decision in one line: "A project cannot

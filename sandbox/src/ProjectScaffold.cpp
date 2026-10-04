@@ -144,18 +144,39 @@ std::string templatesRoot() {
     return cached;
 }
 
-// Builds the .ocproject manifest text -- through fmt::writeOcproject, NOT by hand.
-//
-// THIS USED TO CONCATENATE THE KEYS ITSELF, and it was the last place in this file that did: the
-// two siblings below (createFromTemplate, migrateProject) already call the canonical writer. A
-// hand-rolled manifest is a second implementation of a grammar with exactly one reader, and the
-// only thing keeping the two in step was that one person wrote both.
-//
-// writeOcproject owns NAME/ENGINE/CREATEDWITH/CONTENT/STARTMAP/AUTHOR and every RENDER.* key, and
-// copies every line of `existing` it does NOT own through untouched -- which is exactly the
-// mechanism for keeping the explanatory comments, since those are the point of a scaffolded
-// manifest. Unset RENDER.* fields are -1 and omitted, so this still states RAYTRACING and nothing
-// else, as the hand-written version did.
+// The render settings every new project starts with: the PTTest reference project's, minus Path
+// Tracing (it takes over the viewport) and temporal AA. Written explicitly rather than left to engine
+// defaults, so a project's look does not drift across engine versions and every value has a line to edit.
+void applyNewProjectRenderDefaults(fmt::ProjectDesc& d) {
+    d.giQuality          = 4;      // Epic (0=Off 1=Low 2=Medium 3=High 4=Epic)
+    d.rayTracing         = 4;
+    d.pathTracing        = 0;
+    d.giMode             = 1;      // ReSTIR GI
+    d.giIntensity        = 1.0f;
+    d.giMaxDistance      = 4000.0f;
+    d.restirVisibility   = 4;      // cached (NeuRaC)
+    d.restirHistory      = 0;
+    d.denoiser           = 1;
+    d.rdStages           = 2;      // staged + half-rate GI
+    d.fogOcclusion       = 1;
+    d.layeredBsdf        = 0;
+    d.refractionStrength = 1.0f;
+    d.refractionEdgeFade = 0.15f;
+    d.lodSelect          = 0;
+    d.lodThresholdPx     = 1.0f;
+    d.occlusionCull      = 1;
+    d.depthPrepass       = 0;
+    d.backend            = "d3d12";
+    d.averSr             = 2;      // Balanced
+    d.frameInterp        = 1;
+    d.taa                = 0;
+    d.msaa               = 1;
+    d.meshShaders        = 1;
+    d.postAutoExposure   = 1;
+}
+
+// Builds the .ocproject manifest text through fmt::writeOcproject, never by hand: one grammar, one
+// writer. writeOcproject copies every line of `existing` it does not own, which keeps the comments.
 std::string manifestText(const std::string& name) {
     fmt::ProjectDesc d;
     d.name             = name;
@@ -166,12 +187,7 @@ std::string manifestText(const std::string& name) {
     d.createdWith      = kEngineVersion;
     d.contentRoot      = "Content";
     d.startMap         = "Maps/Default.ocmap";
-    // WRITTEN EXPLICITLY, not left to the engine default it currently agrees with. A manifest that
-    // states nothing inherits whatever the default happens to be on the day it is opened, which
-    // makes a project's look a moving target across engine versions and gives its author no line to
-    // edit. 2 is Medium (0=Off 1=Low 2=Medium 3=High 4=Epic). Not free: on ElectricDreams, Medium
-    // measured 18.36 ms against 11.73 ms with ray tracing off.
-    d.rayTracing       = 2;
+    applyNewProjectRenderDefaults(d);
 
     // The lines writeOcproject does not own, and therefore preserves verbatim.
     const std::string comments =
@@ -973,6 +989,7 @@ bool scaffoldProjectFromTemplate(const std::string& location, const std::string&
     desc.contentRoot = "Content";
     desc.startMap = tmpl.startMap;
     desc.gameMode = tmpl.gameMode;
+    applyNewProjectRenderDefaults(desc);
 
     const std::string manifest = root + "\\" + name + ".ocproject";
     if (!writeFileText(manifest, fmt::writeOcproject(desc, ""))) {

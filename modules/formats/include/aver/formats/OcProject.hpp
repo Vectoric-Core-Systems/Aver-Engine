@@ -88,6 +88,10 @@ struct ProjectDesc {
     // -1 / absent = off; CLI --frame-interp outranks it.
     int frameInterp = -1; // RENDER.FRAMEINTERP  0 off, 1 on (needs vsync and 1x anti-aliasing)
 
+    // RENDER.TAA: temporal anti-aliasing (AverSR TAAU). -1 / absent = engine default (on);
+    // CLI --taa / --no-taa outranks it.
+    int taa = -1;         // RENDER.TAA  0 off, 1 on (needs MSAA 1; otherwise FSR 1 is used)
+
     // ---- UI SETTINGS THAT THE FILE COULD NOT HOLD (now fixed) ---------------------------------
     // These were live controls in Project Settings that applied immediately, then vanished on reopen
     // because captureRenderSettingsFromUi never read them and there was no key to write.
@@ -127,7 +131,7 @@ struct ProjectDesc {
                msaa >= 0 || meshShaders >= 0 || giUpdateInterval >= 0 || hasGiVolume ||
                postExposure >= 0.0f || postBloom >= 0.0f ||
                postAutoExposure >= 0 || postTonemap >= 0 ||
-               !backend.empty() || frameBudgetMs > 0.0f || averSr >= 0;
+               !backend.empty() || frameBudgetMs > 0.0f || averSr >= 0 || taa >= 0;
     }
 
     // ---- WINDOW.* -- shipped game window presentation (now persisted) -------------------------
