@@ -31,13 +31,14 @@
 // G-buffer's: PIXELS, destination minus source (voxi.hlsl's GBufferOut header).
 
 // OUR OWN COPY OF FIDELITYFX'S CONFIG (its header is guarded by FFX_DNSR_REFLECTIONS_CONFIG), the
-// vendored values except three: the 8x8 average is a plain mean (luminance weight 0) and neighbours
-// are not weighted by their radiance difference (bias and variance K 0). Both pull a skewed 1-spp
-// diffuse signal toward its dark values: measured on NeonDistrict Day, the denoised GI read 0.66 of
-// the raw estimate's mean with them, 0.79 without (0.84 with Settings::denoiserHistoryClipWeight 4).
+// vendored values except three: the 8x8 average is a plain mean (luminance weight 0), and the
+// radiance-difference weight is 0.2 (vendored 0.6) with no variance term. Both pull a skewed 1-spp
+// diffuse signal toward its dark values (NeonDistrict Day: denoised GI 0.66 of the raw mean as
+// vendored, 0.79 with both off). Fully off, a night path-traced signal (rare bright samples) turned
+// into blotches in motion; 0.2 keeps ~70% of that light (2x the vendored) with the blotches mostly gone.
 #define FFX_DNSR_REFLECTIONS_CONFIG
 #define FFX_DNSR_REFLECTIONS_GAUSSIAN_K 3.0
-#define FFX_DNSR_REFLECTIONS_RADIANCE_WEIGHT_BIAS 0.0
+#define FFX_DNSR_REFLECTIONS_RADIANCE_WEIGHT_BIAS 0.2
 #define FFX_DNSR_REFLECTIONS_RADIANCE_WEIGHT_VARIANCE_K 0.0
 #define FFX_DNSR_REFLECTIONS_AVG_RADIANCE_LUMINANCE_WEIGHT 0.0
 #define FFX_DNSR_REFLECTIONS_PREFILTER_VARIANCE_WEIGHT 4.4
