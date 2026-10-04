@@ -811,8 +811,13 @@ private:
     // Tiny stand-in UAV (4x1x1, R32_UINT) bound to bindings_/clearBindings_/resolveBindings_ slot 1 in place of voxelAccumTex_ while freed.
     // Every binding set naming a resource must be rebound before that resource is destroyed.
     rhi::TextureHandle voxelAccumPlaceholder_ = 0;
-    // How many quiet GI ticks before freeing -- a guess at "long enough that an idle session is done lighting".
-    static constexpr u32 kGiAccumulatorQuietTicks = 240;
+    // Quiet GI ticks before freeing (~1 s). 240 kept 2 GiB alive through a level load's first seconds,
+    // longer still while paging slowed the frame rate; a later rebuild waits one tick for the recreate.
+    static constexpr u32 kGiAccumulatorQuietTicks = 60;
+    // Per-frame BLAS build budget (structure bytes; scratch is of the same order). See buildAccelerationStructures.
+    static constexpr u64 kBlasBuildBytesPerFrame = 512ull << 20;
+    bool blasBuildsDeferred_ = false;   // some draw's first BLAS build waits for the next frame
+    bool blasDeferLogged_ = false;
 
     // ---- the GI derived-data cache ----
     // Resolved volume written beside the project, keyed by the gate's inputs (giCacheKey).

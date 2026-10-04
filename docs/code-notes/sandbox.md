@@ -34,7 +34,7 @@ VoxiRenderer has private debug views (giPoisonView, giVisPathView) and measureme
 
 ### GI measurement results on PTTest
 - giBoundedDispatch: rebuilds only touch ~1.3% of the 512^3 grid instead of 100%. Measured on PTTest NewSponza, ray-driven, 400 moving frames: GPU total 30.64 → 30.25ms. Output verified 99.3% bit-identical, 0.0024 mean absolute difference (residual is GI temporal noise).
-- giFreeAccumulator: frees ~2048 MiB accumulator at Epic's 512^3 after 240 quiet ticks, recreates on demand (one-tick latency cost).
+- giFreeAccumulator: frees ~2048 MiB accumulator at Epic's 512^3 after 60 quiet ticks (was 240), recreates on demand (one-tick latency cost).
 
 ### RT shadow optimizations and measurements
 - rtSecondaryShadowOpaque: secondary (reflection, ReSTIR GI candidate) shadows use fast opaque-only rays instead of full glass-tinting walk. Measured GI trace 3.88 → 3.38 ms, reflection 3.14 → 2.73 ms, image MAD 0.09. Glass/water stops casting shadows for these two secondary rays only; primary shadows untouched. Default ON.

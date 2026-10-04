@@ -500,7 +500,7 @@ backticks are where the knowledge applies. Measurements are as originally record
 
 - `giFreeAccumulator_`: freed because the accumulator is the single largest idle GI allocation (2048 MiB at Epic's 512^3 volume size), promoting a former measurement-only toggle to shipped default
 - `giAccumRecreateBackoff` constants: ~0.5s at 60 Hz for min, ~30s for max, implemented exponential backoff doubling on each consecutive failure (capped)
-- `kGiAccumulatorQuietTicks = 240`: "long enough that an idle session is done lighting, short enough that scrubbing a timeline doesn't recreate every few seconds"; empirically determined tuning
+- `kGiAccumulatorQuietTicks` (240 until 2026-10-04, now 60 so it is gone before a level load's BLAS wave settles): "long enough that an idle session is done lighting, short enough that scrubbing a timeline doesn't recreate every few seconds"; empirically determined tuning
 - `giSnapshotUnchanged avoids ~93% of rebuilds` within a run (cache hit rate within a single level load), but remembers nothing across level loads
 - `giCacheKey_` storage: keyed on whole key not just drawsKey alone -- a camera move changes centre without changing draws, would rebuild from scratch even though same volume cached minutes earlier
 - `giCacheReadbackDelay = 4 frames`: longer than deepest frame-in-flight for GPU command copy

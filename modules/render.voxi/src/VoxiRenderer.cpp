@@ -1314,8 +1314,8 @@ void VoxiRenderer::manageInjectionAccumulator(rhi::IRenderContext& ctx) {
             // in flight right now; both D3D12ResourceFactory::collect() and its Vulkan twin only walk
             // that retired list and Release()/vkDestroyImage the ones whose fence has already passed,
             // and neither runs on a timer -- each is a side effect of some OTHER create*/destroy* call
-            // on the SAME factory. In an otherwise idle scene (which is exactly when W12 fires: 240
-            // quiet GI ticks) nothing may call the factory again for a while, so this retired texture
+            // on the SAME factory. In an otherwise idle scene (which is exactly when W12 fires:
+            // kGiAccumulatorQuietTicks quiet GI ticks) nothing may call the factory again for a while, so this retired texture
             // can sit un-reclaimed past the frames a process-VRAM reading was taken over -- a real gap,
             // not a rounding artefact of the reading. A fix belongs in the backends (not this module):
             // an unconditional collect() once per frame, e.g. beside D3D12Device::beginFrame's existing
@@ -1350,7 +1350,8 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // buildGeometryTable() call, and -- when Settings::rtRefitAccel is on and rtDynamicMeshes_ is
     // non-empty -- the dynamic BLASes/tlas_/their rtVerts_ slices, refreshed in place by
     // refitDynamicAccelStructures() rather than left alone.
-    if (settings_.rtSkipUnchangedTlas && rtAccelSnapshotUnchanged()) {
+    // A build deferred by the per-frame BLAS budget must get its turn, whatever the snapshot says.
+    if (settings_.rtSkipUnchangedTlas && !blasBuildsDeferred_ && rtAccelSnapshotUnchanged()) {
         // SETTLING (rtPrevPending_, VoxiRenderer.hpp): rows whose previous transform still differs from
         // their current one describe LAST frame's motion. If the object moves again this frame the patch
         // below writes a fresh prev; if it does not, prev must become equal to current NOW, or the GPU
@@ -1427,6 +1428,10 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     rtMovers_.clear();
     DrawMaterialMemo moverMemo{};
     u32 firstBuilds = 0;
+    // Each new BLAS takes its own build scratch until the frame's fence passes, so a level's whole
+    // build wave in one frame held ~2.6 GB at once on NeonDistrict. Builds past the budget wait.
+    u64 blasBytesThisFrame = 0;
+    u32 blasDeferred = 0;
 
     // CPU cost of walking drawsPrev_ and filling rtInstanceData_/rtInstanceMesh_/rtInstanceMatKey_.
     const auto accelBuildCpuStart = std::chrono::steady_clock::now();
@@ -1449,10 +1454,15 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
             dynamicBlasRefits_.erase(d.mesh);
         }
         if (it == blas_.end()) {
+            if (blasBytesThisFrame >= kBlasBuildBytesPerFrame) { ++blasDeferred; continue; }
             // createBlas returns 0 for destroyed mesh. Updatable only for compute-written mesh with rtRefitAccel on.
             const bool dynamic = settings_.rtRefitAccel && dev_->meshVertexBuffer(d.mesh) != 0;
             const rhi::BlasHandle nb = dynamic ? res_->createBlasUpdatable(d.mesh) : res_->createBlas(d.mesh);
-            if (nb) { ctx.buildBlas(nb); ++firstBuilds; }
+            if (nb) {
+                ctx.buildBlas(nb);
+                ++firstBuilds;
+                blasBytesThisFrame += res_->blasMemoryBytes(nb);   // scratch is of the same order
+            }
             it = blas_.emplace(d.mesh, nb).first;
             ++blasRevision_;
         } else if (it->second && dev_->meshVertexBuffer(d.mesh)) {
@@ -1578,6 +1588,13 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         AVER_INFO("[Voxi] RayQuery active ({} instances, {} bottom-level structures)",
                   static_cast<u32>(tlasInstScratch_.size()), static_cast<u32>(blas_.size()));
         rtLogged_ = true;
+    }
+    blasBuildsDeferred_ = blasDeferred > 0;
+    if (blasDeferred && !blasDeferLogged_) {
+        AVER_INFO("[Voxi] bottom-level builds spread over frames: {:.0f} MiB this frame, {} draw(s) wait "
+                  "for the next (budget {} MiB/frame)", static_cast<f64>(blasBytesThisFrame) / (1024.0 * 1024.0),
+                  blasDeferred, kBlasBuildBytesPerFrame >> 20);
+        blasDeferLogged_ = true;
     }
     // First-time build is always full. Dynamic mesh refits tracked separately.
     const u32 rebuilds = (static_cast<u32>(rebuiltThisFrame_.size()) << 16) | (firstBuilds & 0xFFFFu);

@@ -308,7 +308,7 @@ inline u32& consoleLightingLegacySlot() { static u32 v = 0; return v; }
 inline bool& consoleGiForceRebuildSlot()    { static bool v = false; return v; }
 // Default TRUE: rebuilds always dispatch bounded (1.3% of grid instead of 100%, measured 30.64->30.25ms on PTTest).
 inline bool& consoleGiBoundedDispatchSlot() { static bool v = true; return v; }
-// Default TRUE: frees accumulator after 240 quiet ticks (~2048 MiB at Epic's 512^3).
+// Default TRUE: frees accumulator after 60 quiet ticks (~2048 MiB at Epic's 512^3).
 inline bool& consoleGiFreeAccumulatorSlot() { static bool v = true; return v; }
 
 // Path-debug view: shows F2's resolved visibility path over indirect diffuse.
@@ -648,7 +648,7 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         }});
     t.push_back({"voxi.giFreeAccumulator", VarType::Bool, false,
         "Frees the GI injection accumulator (roughly 2048 MiB at Epic's 512^3, this renderer's single "
-        "largest idle GI allocation) after 240 consecutive quiet GI ticks -- ticks that needed no "
+        "largest idle GI allocation) after 60 consecutive quiet GI ticks -- ticks that needed no "
         "rebuild -- and recreates it the instant a change needs one again, which then runs one tick "
         "later than it otherwise would while the texture is recreated. Trades that one-tick latency "
         "and a recreation cost against holding the memory for the entire session regardless of how "

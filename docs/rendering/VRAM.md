@@ -26,6 +26,20 @@ per-frame `collect()` frees it when the GPU is done. A rebuild allocates scratch
 (refit) BLASes keep theirs, because every refit needs it. No acceleration structure moves, so TLAS
 contents are unaffected.
 
+## First BLAS builds are spread over frames (2026-10-04)
+
+A level load used to build every BLAS in one frame. All of their scratch was alive at once (about
+2.6 GB on NeonDistrict), on top of the 2 GiB GI injection accumulator. `buildAccelerationStructures`
+now stops first builds after `kBlasBuildBytesPerFrame` (512 MiB of BLAS) in a frame, and the rest
+follow on later frames. The TLAS skip gate is bypassed while builds are deferred
+(`blasBuildsDeferred_`), and the log says `bottom-level builds spread over frames` once. NeonDistrict
+finishes in 6 frames. The GI accumulator is freed after 60 quiet GI ticks (was 240).
+
+NeonDistrict_Day load + Play, render scale 0.5: the peak fell from 16.2 GB to 14.7 GB against a
+14.0-14.2 GB budget. It drops to 13.4 GB once the accumulator is freed. Play brings it back to 14.7
+GB, because movers keep GI rebuilding and the accumulator is recreated. The next lever is the
+accumulator's 16 bytes per voxel (512^3 = 2 GiB).
+
 ## Tried and reverted (2026-10-03, ab97099f, reverted in 456cbbcc)
 
 All three went in together and the build crashed the driver on startup, so none is known-bad

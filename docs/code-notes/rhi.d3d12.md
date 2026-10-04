@@ -269,7 +269,7 @@ Successfully processed 2 of 7 assigned chunks. Total comment reduction achieved:
 
 - `beginFrame` state clearing: blendedDraws_ cleared here (not after endFrame's flush) because both end empty, but clearing only here keeps one place deciding "new frame's captures start empty" (same discipline as drawBinding_ and nextDrawPrepassed_).
 
-- `beginFrame` deferred destroys: collect() reclaimed every frame (not just on next create/destroy); e.g. GI injection accumulator (~2 GiB) Voxi drops after 240 quiet ticks, which may be exactly when nothing else is created (resource would stay resident indefinitely if only collected as side effect).
+- `beginFrame` deferred destroys: collect() reclaimed every frame (not just on next create/destroy); e.g. GI injection accumulator (~2 GiB) Voxi drops after 60 quiet ticks (kGiAccumulatorQuietTicks), which may be exactly when nothing else is created (resource would stay resident indefinitely if only collected as side effect).
 
 - `beginFrame` G-buffer binding MSAA: G-buffer targets always single-sample; MSAA scene target cannot bind them (D3D12 requires every render target in one OMSetRenderTargets to share sample count). Warning once per mismatch (clears when setGBufferEnabled or setSampleCount changes), not every frame (trains reader to stop reading).
 
