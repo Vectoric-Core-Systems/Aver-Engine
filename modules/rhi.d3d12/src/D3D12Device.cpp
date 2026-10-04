@@ -312,7 +312,10 @@ bool hrOk(HRESULT hr, const char* what) {
 }
 
 // A whole-resource transition barrier.
-D3D12_RESOURCE_BARRIER transition(ID3D12Resource* res, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
+D3D12_RESOURCE_BARRIER transitionAt(ID3D12Resource* res, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after,
+                                    int line) {
+    // A NULL barrier removes the device a frame later with no pointer back here; name the line now.
+    if (!res) AVER_ERROR("[RHI.D3D12] transition barrier on a NULL resource at D3D12Device.cpp:{}", line);
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     b.Transition.pResource = res;
@@ -321,6 +324,7 @@ D3D12_RESOURCE_BARRIER transition(ID3D12Resource* res, D3D12_RESOURCE_STATES bef
     b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     return b;
 }
+#define transition(r, b, a) transitionAt((r), (b), (a), __LINE__)
 
 // Single-node heap properties of the given type.
 D3D12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE type) {
@@ -4915,9 +4919,14 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                 cmdList_->ResourceBarrier(2, b);
             }
 
-            auto backToSrv = transition(dstT->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
-                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            cmdList_->ResourceBarrier(1, &backToSrv);
+            // Looked up again: execute() may create textures (an upscaler's history on first use), and
+            // a grown texture table moves, leaving the earlier dstT dangling (a NULL barrier, device lost).
+            dstT = rhiFactory_->texture(presentHdrTex_);
+            if (dstT && dstT->res) {
+                auto backToSrv = transition(dstT->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                cmdList_->ResourceBarrier(1, &backToSrv);
+            }
 
             // Restore post chain's descriptor heap and root signature.
             ID3D12DescriptorHeap* heaps[] = {postSrvHeap_.Get()};
@@ -8691,6 +8700,8 @@ void D3D12RenderContext::textureBarrier(TextureHandle h, ResourceState from, Res
     if (rejectAsState(from, to, "textureBarrier")) return;
     RhiTexture* t = res_->texture(h);
     if (!t || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] textureBarrier with an invalid handle"); return; }
+    if (!t->res) AVER_ERROR("[RHI.D3D12] textureBarrier on destroyed texture {} '{}'", h,
+                            t->desc.debugName ? t->desc.debugName : "");
     trackTextureBarrier(*t, from, to, subresource);
     D3D12_RESOURCE_BARRIER b = transition(t->res.Get(), toResourceStates(from), toResourceStates(to));
     b.Transition.Subresource = (subresource == kAllSubresources) ? D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES : subresource;
