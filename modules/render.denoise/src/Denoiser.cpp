@@ -14,9 +14,12 @@ namespace {
 constexpr u32 kConstantSlot = 1;
 
 // Shader bindings per pass, matching aver_denoise.hlsl's register lists.
-constexpr u32 kSrvCount[3] = {9, 6, 9};
-constexpr u32 kUavCount[3] = {4, 2, 2};
-constexpr const char* kEntry[3] = {"CSDenoiseReproject", "CSDenoisePrefilter", "CSDenoiseResolve"};
+constexpr u32 kSrvCount[4] = {10, 7, 10, 5};
+constexpr u32 kUavCount[4] = {4, 2, 2, 1};
+constexpr const char* kEntry[4] = {"CSDenoiseReproject", "CSDenoisePrefilter", "CSDenoiseResolve",
+                                   "CSDenoiseScale"};
+// The frame-scale texture's SRV slot in each FidelityFX pass (DNSR_SCALE_SLOT).
+constexpr u32 kScaleSrv[3] = {9, 6, 9};
 
 // aver_denoise.hlsl's AverDenoiseCB, byte for byte.
 struct Constants {
@@ -53,7 +56,7 @@ bool Denoiser::create(rhi::IDevice& dev) {
         return false;
     }
     for (u32 pass = 0; pass < kPassCount; ++pass) {
-        for (u32 scalar = 0; scalar < 2; ++scalar) {
+        for (u32 scalar = 0; scalar < (pass == Scale ? 1u : 2u); ++scalar) {
             // AVER_HLSL_2018 is consumed by the shader compiler (D3D12Device.cpp): FidelityFX's
             // headers are written against HLSL 2018 and are vendored unmodified.
             const std::string defines = "AVER_HLSL_2018;AVER_DNSR_PASS=" + std::to_string(pass) +
@@ -89,7 +92,7 @@ bool Denoiser::create(rhi::IDevice& dev) {
             pipelines_[pass * 2 + scalar] = p;
         }
     }
-    AVER_INFO("[Denoise] AMD FidelityFX Denoiser (reflection pipeline, diffuse use): 6 pipelines built");
+    AVER_INFO("[Denoise] AMD FidelityFX Denoiser (reflection pipeline, diffuse use): 7 pipelines built");
     return true;
 }
 
@@ -103,6 +106,7 @@ void Denoiser::releaseTargets() {
         drop(s.variance);
         drop(s.prefiltered);
         drop(s.prefilteredVar);
+        drop(s.scale);
         for (rhi::BindingSetHandle& b : s.sets) { if (b) res_->destroyBindingSet(b); b = 0; }
         s.parity = 0;
         s.historyState[0] = s.historyState[1] = rhi::ResourceState::NonPixelShaderResource;
@@ -171,6 +175,7 @@ bool Denoiser::resize(u32 width, u32 height) {
         t.variance       = make(rhi::Format::R16F, width, height, true, (n + " variance").c_str());
         t.prefiltered    = make(value, width, height, true, (n + " prefiltered").c_str());
         t.prefilteredVar = make(rhi::Format::R16F, width, height, true, (n + " prefiltered variance").c_str());
+        t.scale          = make(rhi::Format::R32Float, 1, 1, true, (n + " scale").c_str());
         for (u32 p = 0; p < kPassCount && ok; ++p) {
             rhi::BindingSetDesc bd{};
             bd.srvCount = kSrvCount[p];
@@ -234,6 +239,10 @@ bool Denoiser::recordSignal(rhi::IRenderContext& ctx, u32 s, rhi::TextureHandle 
     res_->setSrv(rs, 8, t.average);
     res_->setUav(rs, 0, t.history[cur], 0);
     res_->setUav(rs, 1, t.varHistory[cur], 0);
+    for (u32 p = 0; p < Scale; ++p) res_->setSrv(t.sets[p], kScaleSrv[p], t.scale);
+    rhi::BindingSetHandle sc = t.sets[Scale];
+    res_->setSrv(sc, 4, t.average);   // still last frame's: Scale records before Reproject
+    res_->setUav(sc, 0, t.scale, 0);
 
     Constants cb{};
     cb.size[0] = width_;
@@ -259,9 +268,11 @@ bool Denoiser::recordSignal(rhi::IRenderContext& ctx, u32 s, rhi::TextureHandle 
         ctx.setPipeline(pipelines_[pass * 2 + scalar]);
         ctx.setBindingSet(t.sets[pass]);
         ctx.setConstantBuffer(kConstantSlot, &cb, sizeof(cb));
-        ctx.dispatch(gx, gy, 1);
+        if (pass == Scale) ctx.dispatch(1, 1, 1);
+        else               ctx.dispatch(gx, gy, 1);
         for (rhi::TextureHandle o : outs) ctx.textureBarrier(o, kWrite, kRead);
     };
+    if (!scalar) dispatch(Scale, {t.scale});
     dispatch(Reproject, {t.reprojected, t.average, t.variance, t.sampleCount[cur]});
     dispatch(Prefilter, {t.prefiltered, t.prefilteredVar});
     // history[cur] rests in NonPixelShaderResource here: it was last frame's `prev`.

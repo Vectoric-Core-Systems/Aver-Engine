@@ -884,8 +884,14 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     // Seed reprojection from this pixel's own trace, not coneAo (which is constant 1.0 under ReSTIR GI).
     float vis = fresh;
     if (haveHist) {
-        const float t      = saturate(length(velocityPx) / 32.0);
-        const float weight = lerp(0.97, 0.5, t);
+        const float t = saturate(length(velocityPx) / 32.0);
+        float weight  = lerp(0.97, 0.5, t);
+        // A change beyond the trace's noise (std of an n-ray mean <= 0.5/sqrt(n)) is an occluder
+        // arriving or leaving: drop toward 0.75 so it does not trail for 30 frames.
+        if (tracedNow) {
+            const float thr = 0.75 / sqrt((float)max(rays, 1u));
+            weight = lerp(weight, min(weight, 0.75), saturate((abs(fresh - histV) - thr) / thr));
+        }
         vis = lerp(fresh, histV, weight);
     }
 

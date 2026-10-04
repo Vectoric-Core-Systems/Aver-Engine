@@ -943,8 +943,10 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 Ng, float3 R, float3
                 float2 velocityPx = 0.0;
                 if (gRtHistParams.y > 0.75 && rtReprojectReflection(wpos, pixel, hist, velocityPx)) {
                     // Velocity-discounted weight: far-slid sample is same surface but different point.
+                    // A rough lobe barely shows that parallax, so it keeps history at speed.
                     const float t = saturate(length(velocityPx) / 6.0);
-                    col = lerp(hist, fresh, lerp(0.15, 1.0, t));
+                    const float fastFresh = lerp(1.0, 0.35, saturate(lobeRough * 2.0));
+                    col = lerp(hist, fresh, lerp(0.15, fastFresh, t));
                 }
             }
         }

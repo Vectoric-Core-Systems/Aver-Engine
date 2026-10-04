@@ -13,6 +13,62 @@
 
 ---
 
+## 0. Fitting FidelityFX to Voxi's units (2026-10-04)
+
+The vendored headers are tuned for AMD's sample: depth in [0,1] and reflection radiance near 1.
+Voxi feeds centimetre view Z and ReSTIR GI radiance that is often near 0.01. Two of the filter's
+mechanisms were silently off because of that. The headers stay unmodified; `aver_denoise.hlsl`
+adapts its inputs instead.
+
+- **The spatial pass did nothing.** The prefilter's edge-stopping weight is
+  `exp(-|zc - zn| * zc * 4)`. At zc = 1000 cm, any neighbour more than a hair off the centre depth
+  weighs zero. The host callback now hands it `sqrt(10 ln(z + 1))`, for which the same formula
+  becomes `exp(-20 |dz| / z)`: a relative test, e^-1 at 5%.
+- **Variance and firefly rejection assumed brighter input.** Temporal variance divides by
+  `max(lum, 0.5)`, the radiance weight is `exp(-0.6 |dz|)`, and the clip box widens by 0.001. All of
+  these are absolute. A new first pass, `CSDenoiseScale` (colour only, one 16x16 group), reduces last
+  frame's 8x8 averages to a frame scale that brings the mean luminance to 0.25. It eases 20% per
+  frame in log space, is clamped to [0.01, 1e4], and is stored in a 1x1 R32F texture. Radiance is
+  multiplied by the scale on its way in and divided on its way out to history and to the 8x8
+  average, so stored values stay in scene units and a scale change never rescales history.
+- **Half-rate reconstruction blurred silhouettes.** A skipped checkerboard pixel averaged its four
+  traced neighbours blindly. They are now weighted by relative depth (`exp(-32 |dz|/z)`) and
+  normal agreement (`dot^8`), with the plain mean kept as the fallback when no neighbour agrees.
+
+Measured on NeonDistrict_Day at render scale 0.5. The rig was the matched-pose motion rig
+(`--cam-translate 3 --cam-wobble 8 40 --cam-wobble-stop 100`), capturing at frame 103 (3 frames after
+the camera stops) and frame 300 (settled). The denoiser variants were swapped with
+`--shader-source`. Display values, 0-255:
+
+| variant | moving vs settled (MAD) | shadow high-frequency, settled | brightness vs old |
+|---|---|---|---|
+| old | 1.20 | 2.43 | 0 |
+| depth mapping only | 1.00 | 2.35 | +0.30 |
+| **depth + scale to mean 0.25 (shipped)** | **0.93** | **2.28** | **-0.17** |
+| depth + scale to mean 1.0 | 0.86 | 2.17 | -1.93 (8% darker) |
+
+At a mean of 1.0, FidelityFX's firefly weight (`exp(-0.6 |avg - x|)`) starts rejecting real bright
+bounce light. 0.25 keeps most of the gain at under 1% bias.
+
+Voxi-side history fixes landed in the same change:
+
+- **Denoised GI on disocclusion** used last frame's denoised value at this pixel, which is another
+  surface's light. It now uses this frame's ReSTIR estimate, blended in by the valid bilinear
+  weight (`voxi_restir.hlsli`).
+- **Rough reflections at speed** dropped history entirely above 6 px/frame of motion. The fresh
+  weight at speed now falls from 1.0 (near mirror) to 0.35 (roughness 0.5), because a rough lobe
+  barely shows the parallax the discount exists for (`voxi.hlsl`).
+- **Ray-traced AO** kept 97% history whatever happened, so a passing occluder trailed for about 30
+  frames. A change beyond the trace's own noise (0.75 / sqrt(rays)) now eases the weight toward 0.75
+  (`voxi_rt.hlsli`). This is the same idea as `rtShadowChanged` in
+  [MOVING_OBJECTS_HISTORY.md](MOVING_OBJECTS_HISTORY.md).
+
+Still open: the reflection, shadow and AO histories read the nearest texel rather than a bilinear or
+area footprint; `AVER_GBUFFER_HISTORY`'s crease test is compiled out; `denoiserSunMovingSamples`
+below 8 has no visible effect.
+
+---
+
 ## 1. What we have today
 
 | | |

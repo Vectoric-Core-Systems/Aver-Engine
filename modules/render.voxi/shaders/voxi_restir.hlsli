@@ -909,8 +909,11 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         }
     }
     if (gAverHistoryWrite && gw > 0u && gh > 0u) {
-        const float3 denoised = denoisedWsum > 1e-3 ? denoisedSum / denoisedWsum
-                                                    : gDenoisedGi.Load(int3(pixelPos, 0)).rgb;   // disocclusion / legacy
+        // Disoccluded: this frame's own estimate, not the old texel (another surface's light).
+        float3 denoised;
+        if (!denoisedReproject)        denoised = gDenoisedGi.Load(int3(pixelPos, 0)).rgb;   // legacy
+        else if (denoisedWsum > 1e-3)  denoised = lerp(outDiffuse, denoisedSum / denoisedWsum, saturate(denoisedWsum * 2.0));
+        else                           denoised = outDiffuse;
         // Guard denoiser output: it is not trusted to be finite/bounded.
         giPoisonDenoisedHit = any(isnan(denoised)) || any(isinf(denoised));
         // Below zero: pull toward grey by the minimum amount that brings every channel >= 0.

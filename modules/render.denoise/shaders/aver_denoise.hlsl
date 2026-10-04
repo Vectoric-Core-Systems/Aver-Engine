@@ -2,8 +2,9 @@
 // pipeline (third_party/fidelityfx-denoiser, MIT), driven as a DIFFUSE denoiser for two Voxi
 // signals -- the ReSTIR GI radiance and the sky-occlusion hit distance.
 //
-// THREE PASSES, ONE COMPILE EACH (AVER_DNSR_PASS), because the three FidelityFX headers each declare
+// FOUR PASSES, ONE COMPILE EACH (AVER_DNSR_PASS), because the three FidelityFX headers each declare
 // their own groupshared arrays under the same names and cannot share a translation unit:
+//   3 CSDenoiseScale     -- colour only, first: the frame's pre-exposure scale (see dnsrScale).
 //   0 CSDenoiseReproject -- reproject last frame's denoised result, accumulate a per-pixel sample
 //                           count and temporal variance, and reduce the noisy input to an 8x8
 //                           average (the outlier anchor the next two passes clip against).
@@ -34,6 +35,13 @@
 #endif
 #ifndef AVER_DNSR_SCALAR
 #define AVER_DNSR_SCALAR 0
+#endif
+
+// The 1x1 frame-scale texture's SRV slot: one past each pass's own inputs.
+#if AVER_DNSR_PASS == 1
+#define DNSR_SCALE_SLOT t6
+#else
+#define DNSR_SCALE_SLOT t9
 #endif
 
 // FP32 THROUGHOUT. FidelityFX writes its maths in min16float and packs it into groupshared memory
@@ -100,22 +108,49 @@ float3 dnsrLoadNormal(int2 p) { return dnsrDecodeNormal(gDnsrNormal.Load(int3(dn
 // In UV units, previous-to-current: FidelityFX reprojects by history_uv = uv - motion_vector.
 float2 dnsrLoadMotion(int2 p) { return gDnsrMotion.Load(int3(dnsrClampPixel(p), 0)) * gDnsrInvSize; }
 
-min16float3 dnsrLoadInputTexel(int2 p) { return DNSR_LOAD3(gDnsrInput.Load(int3(dnsrClampPixel(p), 0))); }
+// ---- pre-exposure (colour only; docs/rendering/DENOISING.md) ----
+// FidelityFX's constants assume radiance near 1; ReSTIR GI is often near 0.01. Every radiance
+// entering the passes is multiplied by the frame scale and every value leaving for history divided
+// by it, so stored values stay in scene units.
+#if AVER_DNSR_SCALAR || AVER_DNSR_PASS == 3
+float dnsrScale() { return 1.0; }
+#else
+Texture2D<float> gDnsrScale : register(DNSR_SCALE_SLOT);
+float dnsrScale() { return gDnsrScale.Load(int3(0, 0, 0)); }
+#endif
+
+min16float3 dnsrLoadInputTexel(int2 p) { return DNSR_LOAD3(gDnsrInput.Load(int3(dnsrClampPixel(p), 0))) * dnsrScale(); }
 
 // ---- the noisy input, with half-rate reconstruction ----
-// Under half-rate ReSTIR GI (Voxi's rayDrivenStages 2) only the pixels with ((x ^ y ^ parity) & 1)
-// == 0 traced a fresh candidate this frame; the others hold whatever an earlier frame left. A
-// skipped pixel's four edge neighbours are all traced pixels (the pattern is a checkerboard), so it
-// takes their mean -- the plainest reconstruction that never reads a stale value. The spatial and
-// temporal passes that follow do the rest.
+// Under half-rate ReSTIR GI only pixels with ((x ^ y ^ parity) & 1) == 0 traced this frame. A
+// skipped pixel takes its four traced edge neighbours, weighted by depth and normal agreement so a
+// silhouette does not bleed across; with no agreeing neighbour it falls back to the plain mean.
 min16float3 dnsrLoadInput(int2 p) {
     const int2 c = dnsrClampPixel(p);
     if (dnsrHalfRateInput() && (((uint(c.x) ^ uint(c.y) ^ dnsrHalfRateParity()) & 1u) != 0u)) {
-        return (dnsrLoadInputTexel(c + int2(-1, 0)) + dnsrLoadInputTexel(c + int2(1, 0)) +
-                dnsrLoadInputTexel(c + int2(0, -1)) + dnsrLoadInputTexel(c + int2(0, 1))) * 0.25;
+        const int2 offs[4] = {int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1)};
+        const float  zc = dnsrLoadViewZ(c);
+        const float3 nc = dnsrLoadNormal(c);
+        min16float3 sum = 0.0, plain = 0.0;
+        float wsum = 0.0;
+        [unroll] for (int i = 0; i < 4; ++i) {
+            const int2 q = c + offs[i];
+            const min16float3 v = dnsrLoadInputTexel(q);
+            const float w = exp(-abs(dnsrLoadViewZ(q) - zc) / max(zc, 1e-3) * 32.0) *
+                            pow(saturate(dot(dnsrLoadNormal(q), nc)), 8.0);
+            sum += v * w;
+            plain += v;
+            wsum += w;
+        }
+        return wsum > 1e-3 ? sum / wsum : plain * 0.25;
     }
     return dnsrLoadInputTexel(c);
 }
+
+// The prefilter's edge-stopping weight is exp(-|zc - zn| * zc * 4): absolute, sized for depth in
+// [0,1], and zero for any neighbour off a plane at Voxi's centimetre view Z. Feeding it
+// f(z) = sqrt(K ln z) turns that into exp(-2K |dz| / z), a relative test; K = 10 gives e^-1 at 5%.
+float dnsrPrefilterDepth(float viewZ) { return sqrt(10.0 * log(max(viewZ, 1.0) + 1.0)); }
 
 // ---- the roughness-1 contract (see the header) ----
 min16float FFX_DNSR_Reflections_LoadRoughness(int2 p) { return 1.0; }
@@ -166,11 +201,11 @@ float3 FFX_DNSR_Reflections_WorldSpaceToScreenSpacePrevious(float3 world) {
 // into its 8x8 average, which a zero would darken for the frame after every reset.
 min16float3 FFX_DNSR_Reflections_SampleRadianceHistory(float2 uv) {
     if (dnsrHistoryReset()) return dnsrLoadInput(dnsrUvToPixel(uv));
-    return DNSR_LOAD3(gDnsrRadianceHistory.SampleLevel(gDnsrLinear, uv, 0));
+    return DNSR_LOAD3(gDnsrRadianceHistory.SampleLevel(gDnsrLinear, uv, 0)) * dnsrScale();
 }
 min16float3 FFX_DNSR_Reflections_LoadRadianceHistory(int2 p) {
     if (dnsrHistoryReset()) return dnsrLoadInput(p);
-    return DNSR_LOAD3(gDnsrRadianceHistory.Load(int3(dnsrClampPixel(p), 0)));
+    return DNSR_LOAD3(gDnsrRadianceHistory.Load(int3(dnsrClampPixel(p), 0))) * dnsrScale();
 }
 min16float FFX_DNSR_Reflections_SampleVarianceHistory(float2 uv) {
     if (dnsrHistoryReset()) return 1.0;
@@ -195,7 +230,8 @@ min16float3 FFX_DNSR_Reflections_SampleWorldSpaceNormalHistory(float2 uv) {
 }
 
 void FFX_DNSR_Reflections_StoreRadianceReprojected(int2 p, min16float3 v) { gDnsrReprojectedOut[p] = DNSR_STORE(v); }
-void FFX_DNSR_Reflections_StoreAverageRadiance(int2 p, min16float3 v)     { gDnsrAverageOut[p] = DNSR_STORE(v); }
+// Stored in scene units: the exposure pass reads it next frame, after the scale has moved.
+void FFX_DNSR_Reflections_StoreAverageRadiance(int2 p, min16float3 v)     { gDnsrAverageOut[p] = DNSR_STORE(v / dnsrScale()); }
 void FFX_DNSR_Reflections_StoreVariance(int2 p, min16float v)             { gDnsrVarianceOut[p] = v; }
 void FFX_DNSR_Reflections_StoreNumSamples(int2 p, min16float v)           { gDnsrSampleCountOut[p] = v; }
 
@@ -226,9 +262,9 @@ void FFX_DNSR_Reflections_LoadNeighborhood(int2 p, out min16float3 radiance, out
     radiance = dnsrLoadInput(p);
     variance = (min16float)gDnsrVariance.Load(int3(dnsrClampPixel(p), 0));
     normal   = (min16float3)dnsrLoadNormal(p);
-    depth    = dnsrLoadViewZ(p);
+    depth    = dnsrPrefilterDepth(dnsrLoadViewZ(p));
 }
-min16float3 FFX_DNSR_Reflections_SampleAverageRadiance(float2 uv) { return DNSR_LOAD3(gDnsrAverage.SampleLevel(gDnsrLinear, uv, 0)); }
+min16float3 FFX_DNSR_Reflections_SampleAverageRadiance(float2 uv) { return DNSR_LOAD3(gDnsrAverage.SampleLevel(gDnsrLinear, uv, 0)) * dnsrScale(); }
 void FFX_DNSR_Reflections_StorePrefilteredReflections(int2 p, min16float3 radiance, min16float variance) {
     gDnsrPrefilteredOut[p]         = DNSR_STORE(radiance);
     gDnsrPrefilteredVarianceOut[p] = variance;
@@ -243,6 +279,47 @@ void FFX_DNSR_Reflections_StorePrefilteredReflections(int2 p, min16float3 radian
 [numthreads(8, 8, 1)]
 void CSDenoisePrefilter(int2 dtid : SV_DispatchThreadID, int2 gtid : SV_GroupThreadID) {
     FFX_DNSR_Reflections_Prefilter(dtid, gtid, gDnsrSize);
+}
+
+// =================================================================================================
+#elif AVER_DNSR_PASS == 3   // ---- frame scale (colour only; runs first) ----
+
+Texture2D<DNSR_TEX> gDnsrAverageLast : register(t4);   // last frame's 8x8 averages, scene units
+RWTexture2D<float>  gDnsrScaleOut    : register(u0);   // 1x1, read-modify-write
+
+static const uint kDnsrScaleThreads = 256;
+groupshared float gsDnsrLumSum[kDnsrScaleThreads];
+groupshared float gsDnsrCount[kDnsrScaleThreads];
+
+// Scale brings the mean luminance to 0.25, eased in log space so a flash does not snap the filter
+// weights. At 1.0 FidelityFX's firefly weight ate real light (NeonDistrict 8% darker); 0.25 kept
+// most of the noise gain at <1% bias (docs/rendering/DENOISING.md).
+static const float kDnsrScaleTargetLum = 0.25;
+[numthreads(16, 16, 1)]
+void CSDenoiseScale(uint gi : SV_GroupIndex) {
+    const uint2 dim = (gDnsrSize + 7u) / 8u;
+    float sum = 0.0, count = 0.0;
+    for (uint i = gi; i < dim.x * dim.y; i += kDnsrScaleThreads) {
+        const float3 v = DNSR_LOAD3(gDnsrAverageLast.Load(int3(i % dim.x, i / dim.x, 0)));
+        const float l = dot(v, float3(0.299, 0.587, 0.114));
+        if (l >= 0.0 && l < 65504.0) { sum += l; count += 1.0; }   // false for NaN too
+    }
+    gsDnsrLumSum[gi] = sum;
+    gsDnsrCount[gi] = count;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint s = kDnsrScaleThreads / 2; s > 0; s >>= 1) {
+        if (gi < s) { gsDnsrLumSum[gi] += gsDnsrLumSum[gi + s]; gsDnsrCount[gi] += gsDnsrCount[gi + s]; }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (gi != 0) return;
+    const float old = gDnsrScaleOut[uint2(0, 0)];
+    const bool oldOk = old >= 0.01 && old <= 1.0e4;
+    float k = oldOk ? old : 1.0;
+    if (gsDnsrCount[0] > 0.0 && gsDnsrLumSum[0] > 0.0) {
+        const float target = clamp(kDnsrScaleTargetLum * gsDnsrCount[0] / gsDnsrLumSum[0], 0.01, 1.0e4);
+        k = (dnsrHistoryReset() || !oldOk) ? target : exp(lerp(log(old), log(target), 0.2));
+    }
+    gDnsrScaleOut[uint2(0, 0)] = k;
 }
 
 // =================================================================================================
@@ -261,9 +338,9 @@ min16float3 FFX_DNSR_Reflections_LoadRadiance(int2 p)            { return DNSR_L
 min16float3 FFX_DNSR_Reflections_LoadRadianceReprojected(int2 p) { return DNSR_LOAD3(gDnsrReprojected.Load(int3(dnsrClampPixel(p), 0))); }
 min16float  FFX_DNSR_Reflections_LoadVariance(int2 p)            { return (min16float)gDnsrPrefilteredVariance.Load(int3(dnsrClampPixel(p), 0)); }
 min16float  FFX_DNSR_Reflections_LoadNumSamples(int2 p)          { return (min16float)gDnsrSampleCount.Load(int3(dnsrClampPixel(p), 0)); }
-min16float3 FFX_DNSR_Reflections_SampleAverageRadiance(float2 uv) { return DNSR_LOAD3(gDnsrAverage.SampleLevel(gDnsrLinear, uv, 0)); }
+min16float3 FFX_DNSR_Reflections_SampleAverageRadiance(float2 uv) { return DNSR_LOAD3(gDnsrAverage.SampleLevel(gDnsrLinear, uv, 0)) * dnsrScale(); }
 void FFX_DNSR_Reflections_StoreTemporalAccumulation(int2 p, min16float3 radiance, min16float variance) {
-    gDnsrOut[p]         = DNSR_STORE(radiance);
+    gDnsrOut[p]         = DNSR_STORE(radiance / dnsrScale());
     gDnsrVarianceOut[p] = variance;
 }
 

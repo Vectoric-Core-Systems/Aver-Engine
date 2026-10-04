@@ -4,8 +4,8 @@
 // THE FILTER IS AMD's, THE PLUMBING IS OURS. The shader passes are AMD FidelityFX Denoiser's
 // reflection pipeline (third_party/fidelityfx-denoiser, MIT), driven at roughness 1 as a diffuse
 // denoiser -- see shaders/aver_denoise.hlsl for why that pipeline and what the host callbacks
-// pin. This class owns everything around it: the six compute pipelines (three passes, each in a
-// colour and a one-channel variant), the per-signal history textures, the G-buffer history copy,
+// pin. This class owns everything around it: the seven compute pipelines (three passes in a colour
+// and a one-channel variant, plus the colour pre-exposure pass), the per-signal history textures, the G-buffer history copy,
 // and every resource-state transition.
 //
 // RUNTIME-COMPILED HLSL through the engine's own shader compiler, like every other Voxi pass: no
@@ -72,7 +72,7 @@ public:
         f32 historyClipWeight = 0.5f;   // width of the neighbourhood clip applied to the history
     };
 
-    // Compiles the six pipelines. False -- said once at WARN -- when a shader will not compile or a
+    // Compiles the seven pipelines. False -- said once at WARN -- when a shader will not compile or a
     // pipeline will not build; the caller then runs undenoised.
     bool create(rhi::IDevice& dev);
     void destroy();
@@ -97,7 +97,8 @@ public:
     [[nodiscard]] rhi::TextureHandle output(Signal s) const { return output_[static_cast<u32>(s)]; }
 
 private:
-    enum Pass : u32 { Reproject = 0, Prefilter = 1, Resolve = 2, kPassCount = 3 };
+    // Scale (colour only) records first; its number matches the shader's AVER_DNSR_PASS.
+    enum Pass : u32 { Reproject = 0, Prefilter = 1, Resolve = 2, Scale = 3, kPassCount = 4 };
 
     // Everything one signal keeps. Pairs ping-pong by `parity`: [parity] is written this frame,
     // [1 - parity] holds last frame's.
@@ -110,6 +111,7 @@ private:
         rhi::TextureHandle variance       = 0;    // reproject's temporal variance
         rhi::TextureHandle prefiltered    = 0;    // the spatially filtered input
         rhi::TextureHandle prefilteredVar = 0;
+        rhi::TextureHandle scale          = 0;    // 1x1 pre-exposure scale (colour only)
         rhi::BindingSetHandle sets[kPassCount] = {};
         // history[] alone changes resting state: the one written this frame is left pixel-readable
         // for Voxi (ShaderResource); every other target rests in NonPixelShaderResource.
