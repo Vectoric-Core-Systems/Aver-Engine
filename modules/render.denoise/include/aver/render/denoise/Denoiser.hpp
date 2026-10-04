@@ -69,7 +69,7 @@ public:
     // FidelityFX's two dials. Safe to change any frame.
     struct Tuning {
         u32 maxSamples        = 32;     // cap on the accumulated sample count (history length)
-        f32 historyClipWeight = 0.5f;   // width of the neighbourhood clip applied to the history
+        f32 historyClipWeight = 4.0f;   // width of the neighbourhood clip applied to the history
     };
 
     // Compiles the seven pipelines. False -- said once at WARN -- when a shader will not compile or a

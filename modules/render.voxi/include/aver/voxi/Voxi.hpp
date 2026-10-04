@@ -148,7 +148,8 @@ struct Settings {
     // Applied every frame the denoiser records, so a console change takes effect next frame with no teardown.
     u32   denoiserMaxSamples = 32;
     // How tightly the reprojected history is clipped to this frame's neighbourhood statistics before blending.
-    float denoiserHistoryClipWeight = 0.5f;
+    // 4 (was 0.5): the narrow box clipped bright GI samples and read the denoised GI dark.
+    float denoiserHistoryClipWeight = 4.0f;
     // Caps the history length when the sun moves and the one after. Not re-measured with this denoiser.
     u32   denoiserSunMovingSamples = 4;
 

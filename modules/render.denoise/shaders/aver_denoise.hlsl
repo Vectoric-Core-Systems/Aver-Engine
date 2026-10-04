@@ -30,6 +30,27 @@
 // is the noisy signal; the history textures hold the frame before that. Motion vectors are the
 // G-buffer's: PIXELS, destination minus source (voxi.hlsl's GBufferOut header).
 
+// OUR OWN COPY OF FIDELITYFX'S CONFIG (its header is guarded by FFX_DNSR_REFLECTIONS_CONFIG), the
+// vendored values except three: the 8x8 average is a plain mean (luminance weight 0) and neighbours
+// are not weighted by their radiance difference (bias and variance K 0). Both pull a skewed 1-spp
+// diffuse signal toward its dark values: measured on NeonDistrict Day, the denoised GI read 0.66 of
+// the raw estimate's mean with them, 0.79 without (0.84 with Settings::denoiserHistoryClipWeight 4).
+#define FFX_DNSR_REFLECTIONS_CONFIG
+#define FFX_DNSR_REFLECTIONS_GAUSSIAN_K 3.0
+#define FFX_DNSR_REFLECTIONS_RADIANCE_WEIGHT_BIAS 0.0
+#define FFX_DNSR_REFLECTIONS_RADIANCE_WEIGHT_VARIANCE_K 0.0
+#define FFX_DNSR_REFLECTIONS_AVG_RADIANCE_LUMINANCE_WEIGHT 0.0
+#define FFX_DNSR_REFLECTIONS_PREFILTER_VARIANCE_WEIGHT 4.4
+#define FFX_DNSR_REFLECTIONS_REPROJECT_SURFACE_DISCARD_VARIANCE_WEIGHT 1.5
+#define FFX_DNSR_REFLECTIONS_PREFILTER_VARIANCE_BIAS 0.1
+#define FFX_DNSR_REFLECTIONS_PREFILTER_NORMAL_SIGMA 512.0
+#define FFX_DNSR_REFLECTIONS_PREFILTER_DEPTH_SIGMA 4.0
+#define FFX_DNSR_REFLECTIONS_DISOCCLUSION_NORMAL_WEIGHT 1.4
+#define FFX_DNSR_REFLECTIONS_DISOCCLUSION_DEPTH_WEIGHT 1.0
+#define FFX_DNSR_REFLECTIONS_DISOCCLUSION_THRESHOLD 0.9
+#define FFX_DNSR_REFLECTIONS_REPROJECTION_NORMAL_SIMILARITY_THRESHOLD 0.9999
+#define FFX_DNSR_REFLECTIONS_SAMPLES_FOR_ROUGHNESS(r) (1.0 - exp(-r * 100.0))
+
 #ifndef AVER_DNSR_PASS
 #define AVER_DNSR_PASS 0
 #endif

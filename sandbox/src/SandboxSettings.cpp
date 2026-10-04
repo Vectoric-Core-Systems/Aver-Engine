@@ -1770,7 +1770,7 @@ void SandboxApp::buildRenderingSettings(int page) {
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip("Width of the neighbourhood box the history is clipped to.\n"
                                   "Smaller rejects stale history harder (less ghosting, more\n"
-                                  "grain); larger trusts it longer. [0.01,4]; default 0.5.\n"
+                                  "grain); larger trusts it longer. [0.01,4]; default 4 (narrower darkens GI).\n"
                                   "Not captured to the project manifest (see above).");
             int sunSamples = static_cast<int>(s.denoiserSunMovingSamples);
             if (ImGui::SliderInt("History while sun moves (frames)", &sunSamples, 1, 255)) {
