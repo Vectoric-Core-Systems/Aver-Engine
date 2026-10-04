@@ -223,7 +223,7 @@ if ($Compile -and $authoredScripts.Count -gt 0) {
         # left there, so this does not reliably fail -- it can read 0 from something unrelated, fall
         # through to the Test-Path below, find compiled assemblies left over from an EARLIER build,
         # and package those. A staging step that silently ships stale scripts is worse than one that
-        # breaks loudly. gates.ps1, pt-compare.ps1 and run.ps1 were converted when the subsystem
+        # breaks loudly. gates.ps1 and run.ps1 were converted when the subsystem
         # changed; this call site was missed.
         #
         # -Wait waits whatever the subsystem is. The redirect files replace what `2>&1` used to

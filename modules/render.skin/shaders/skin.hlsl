@@ -1,8 +1,8 @@
 // Aver.Render.Skin: the compute skinning dispatch.
 //
 // Moved out of a C++ raw-string literal. It is compiled the same way it always was -- see the call
-// site for which prelude it is composed with -- but it is now a file the shader watcher can see,
-// scripts/check-code-unchanged.py can normalise, and a payload can ship.
+// site for which prelude it is composed with -- but it is now a file the shader watcher can see
+// and a payload can ship.
 
 struct SkinVertex { float3 pos; float3 nrm; float2 uv; };
 struct SkinBind   { uint4  joints; float4 weights; };

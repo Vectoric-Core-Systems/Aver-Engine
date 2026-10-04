@@ -94,9 +94,20 @@ DerivedDataCache/
 RC[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
 
 # --- Development-session material: never needed by anyone building or using the engine ---
-# Internal session hand-off and planning notes, kept on the developer's machine only.
+# Internal session hand-off and planning notes, kept on the developer's machine only. Release notes
+# (notes-<version>.md) are drafts for scripts/publish-release.ps1 -NotesFile; the release page holds them.
 /SESSION-STATE.md
-/notes-*-plan.md
+/notes-*.md
+# Developer measurement and one-off asset tools: nothing builds, tests, packages or runs them.
+/scripts/rt-spread.ps1
+/scripts/pt-compare.ps1
+/scripts/make-icon-sheet.ps1
+/scripts/check-code-unchanged.py
+/tools/make_pbr_textures.py
+# Any other local script dropped at the root.
+/*.ps1
+/*.py
+/*.bat
 # Claude Code's per-repo MCP registration (tools/mcp itself is an engine feature and stays tracked).
 /.mcp.json
 # Local scratch a session leaves at the root: observation dumps, logs, captures.

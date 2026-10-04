@@ -1,8 +1,8 @@
 // Aver.Render.Pcg: the volume-evaluation compute shader.
 //
 // Moved out of a C++ raw-string literal. It is compiled the same way it always was -- see the call
-// site for which prelude it is composed with -- but it is now a file the shader watcher can see,
-// scripts/check-code-unchanged.py can normalise, and a payload can ship.
+// site for which prelude it is composed with -- but it is now a file the shader watcher can see
+// and a payload can ship.
 
 cbuffer PcgVolumeCB : register(b0) {
     uint4  gRes;         // xyz resolution, w layer count

@@ -1,8 +1,8 @@
 // Aver.Render.UI's own HLSL: the editor's 2D draw-list pass.
 //
 // Moved out of a C++ raw-string literal. It is compiled the same way it always was -- see the call
-// site for which prelude it is composed with -- but it is now a file the shader watcher can see,
-// scripts/check-code-unchanged.py can normalise, and a payload can ship.
+// site for which prelude it is composed with -- but it is now a file the shader watcher can see
+// and a payload can ship.
 //
 // SELF-CONTAINED, and deliberately NOT compiled against rhi::sharedShaderPrelude() -- this pass
 // stands where the post chain stands.

@@ -217,7 +217,7 @@ change or at startup:
 device-loss cookie tripped on the previous launch forced this session's level to `Off`). Because
 Auto applies to `--frames` runs the same as an interactive session, a capture or probe script that
 needs native-resolution pixels has to say `--aversr off` explicitly rather than rely on the rung's
-default — `scripts/gates.ps1`, `scripts/pt-compare.ps1` and `scripts/rt-spread.ps1` all do.
+default — `scripts/gates.ps1` does.
 
 ## Prerequisites
 
