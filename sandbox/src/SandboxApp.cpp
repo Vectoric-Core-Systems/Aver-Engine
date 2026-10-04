@@ -1645,7 +1645,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // Leaving fly mode is unconditional (flying_ used to clear only in narrower gate, so focused text fields left camera stuck flying).
 #if AVER_WITH_IMGUI
     // uiActive() first (headless has no ImGui context). Nothing lost skipping it there.
-    if (e.device()->uiActive() && !ImGui::GetIO().MouseDown[1]) flying_ = false;
+    // The drone's right-drag look reads InputState too (captured mouse, play window), so both must release.
+    if (e.device()->uiActive() && !ImGui::GetIO().MouseDown[1] && !input_.mouseHeld(1)) flying_ = false;
 #endif
     if (own_.keyboardToTool || own_.mouseToTool) {
         const ImGuiIO& io = ImGui::GetIO();
@@ -1663,6 +1664,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 
         // Right mouse enters fly mode; leaving is handled unconditionally above (outside this gate).
         if (ImGui::IsMouseClicked(1) && !overUI) flying_ = true;
+        // The drone pawn looks while the right button is held, read from InputState: ImGui sees
+        // neither a captured mouse's clicks over the viewport reliably nor the play window at all.
+#if AVER_MODULE_SCENE
+        if (defaultPawnPlay_ && !playEjected() && input_.mouseHeld(1) &&
+            (!overUI || inPlayWindow || mouse_.captured()))
+            flying_ = true;
+#endif
         // --wheel-speed-test drives this directly (forces state rather than synthesising right-drag).
 #if AVER_MODULE_FRAMEWORK
         if (wheelTestForceFly_) flying_ = true;
@@ -1738,7 +1746,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             if (defaultPawnPlay_ && !playEjected() && walkCapsule_) {
                 driveDefaultPawnWalk(fwd, right);    // the walking default pawn (Play options > Walk)
             } else if (defaultPawnPlay_ && !playEjected() && flyCapsule_) {
-                driveDefaultPawnFly(t.dt > 0.0f ? step * (1.0f / t.dt) : Vec3{0, 0, 0});   // collides
+                driveDefaultPawnFly(t.dt > 0.0f ? step * (1.0f / t.dt) : Vec3{0, 0, 0}, t.dt);   // collides, drifts
                 flyPawnDriven = true;
             } else if (defaultPawnPlay_ && !playEjected()) {
                 const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
@@ -1767,9 +1775,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                 camPos_ += up    * static_cast<f32>(input_.mouseDY()) * 0.02f;
             }
         }
-        // Nothing drove the flying pawn (ejected, or the keyboard is the UI's): stop it, since with no
-        // gravity its last velocity would carry it on forever.
-        if (flyCapsule_ && !flyPawnDriven) driveDefaultPawnFly(Vec3{0, 0, 0});
+        // Nothing drove the flying pawn: it glides to rest (the keyboard is the UI's for a moment), or
+        // stops dead while ejected, where it must stay where Pawn to Camera puts it.
+        if (flyCapsule_ && !flyPawnDriven) driveDefaultPawnFly(Vec3{0, 0, 0}, playEjected() ? 0.0f : t.dt);
         // Ctrl+S saves the level (the File menu's label for this shortcut wires nothing).
         // Not gated on levelFocused_ (saving isn't a viewport gesture) but gated on WantTextInput.
         if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::LevelSave, io))

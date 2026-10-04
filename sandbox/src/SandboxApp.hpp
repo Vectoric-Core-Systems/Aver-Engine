@@ -1600,7 +1600,7 @@ public:
     void startDefaultPawnWalk(bool fromCamera);                // SandboxPlay.cpp: the capsule for a walking default pawn
     void driveDefaultPawnWalk(const Vec3& fwd, const Vec3& right);   // per frame, from the fly block
     void startDefaultPawnFly();                                // SandboxPlay.cpp: the flying default pawn's collider
-    void driveDefaultPawnFly(const Vec3& velocity);            // per frame; zero when nothing drives it
+    void driveDefaultPawnFly(const Vec3& velocity, f32 dt);    // per frame; dt 0 = no drift (hard set)
     void setProjectPath(std::string p);          // <path>.ocproject
     void setStartMode(std::string m);
     void setOpenMap(std::string p);

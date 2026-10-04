@@ -532,12 +532,23 @@ void SandboxApp::startDefaultPawnFly() {
 #endif
 }
 
-// One frame of flying: the velocity the fly keys asked for (zero when nothing drives it, so a
-// gravity-free capsule never drifts on), then the pawn follows the capsule, facing the view.
-void SandboxApp::driveDefaultPawnFly(const Vec3& velocity) {
+// One frame of flying, with a drone's inertia: the capsule eases toward the velocity the keys ask
+// for (~0.25 s to full speed) and glides to rest when they let go (~1 s), starting from the velocity
+// physics left it -- so a wall it hit has already taken the drift out. dt 0 sets it outright.
+// Then the pawn follows the capsule, facing the view.
+void SandboxApp::driveDefaultPawnFly(const Vec3& velocity, f32 dt) {
 #if AVER_MODULE_PHYSICS && AVER_MODULE_SCENE
     if (!flyCapsule_) return;
-    aver_phys_character_set_velocity(flyCapsule_, velocity.x, velocity.y, velocity.z);
+    constexpr f32 kDroneAccel = 9.0f, kDroneDrag = 2.5f;   // 1/s, exponential approach
+    Vec3 v = velocity;
+    float cur[3];
+    if (dt > 0.0f && aver_phys_character_velocity(flyCapsule_, cur) != 0) {
+        const Vec3 now{cur[0], cur[1], cur[2]};
+        const f32 rate = velocity.sizeSquared() > 1.0f ? kDroneAccel : kDroneDrag;
+        v = now + (velocity - now) * (1.0f - std::exp(-rate * dt));
+        if (v.sizeSquared() < 1.0f && velocity.sizeSquared() < 1.0f) v = Vec3{0, 0, 0};   // settle
+    }
+    aver_phys_character_set_velocity(flyCapsule_, v.x, v.y, v.z);
     const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
     if (!pn) return;
     const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
@@ -547,7 +558,7 @@ void SandboxApp::driveDefaultPawnFly(const Vec3& velocity) {
     if (aver_phys_character_position(flyCapsule_, p) != 0) pw.setLocalPosition(pe, Vec3{p[0], p[1], p[2]});
     pw.setLocalRotation(pe, Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw_) * Quat::fromAxisAngle(Vec3{0, 1, 0}, -pitch_));
 #else
-    (void)velocity;
+    (void)velocity; (void)dt;
 #endif
 }
 
