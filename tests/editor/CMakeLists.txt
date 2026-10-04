@@ -498,17 +498,10 @@ add_executable(EditorWidgetsTest
 target_link_libraries(EditorWidgetsTest PRIVATE Aver.Platform Aver.Core)
 set_target_properties(EditorWidgetsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# PtRenderConflictTest -- the Path Tracing page's Quality-combo tag priority (choosePtViewTag in
-# sandbox/src/PtRenderConflict.hpp). Header-only and dependency-free, for InputOwnershipTest's reason.
-add_executable(PtRenderConflictTest src/PtRenderConflictTest.cpp)
-target_include_directories(PtRenderConflictTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
-target_link_libraries(PtRenderConflictTest PRIVATE Aver.Core)
-set_target_properties(PtRenderConflictTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-
 # AverSrChoiceTest -- optimisation-wave-2's U2/3.3 A AverSR "choice" abstraction (sandbox/src/
 # AverSrChoice.hpp): the name<->enum round-trip, the one-time migration off the pre-Auto
 # display.aversr/display.renderScale pair, userLevelFor's -1 sentinel for Auto/Manual, and
-# renderScaleToPersist's Manual-only rule. Same PtRenderConflictTest precedent immediately above
+# renderScaleToPersist's Manual-only rule. Same InputOwnershipTest precedent
 # (header-only and dependency-free): the migration rule takes plain bools/strings/floats in and
 # returns plain data out, so it is reachable without a window, a device, or an editor.ini on disk.
 add_executable(AverSrChoiceTest src/AverSrChoiceTest.cpp)
@@ -522,7 +515,7 @@ set_target_properties(AverSrChoiceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMA
 # look/fallback chain (the single copy of 5584-5591, 5897-5903 and 8313-8324), chooseRoute's
 # raster/direct/showCulled-tint decision, deliver()'s route-independent draw content (mirroring
 # VoxiRenderer::submitDraw at VoxiRenderer.cpp:861-880), and F8's occlusionTestShouldRun gate.
-# Header-only and dependency-free, for PtRenderConflictTest's exact reason above: every function
+# Header-only and dependency-free, for InputOwnershipTest's reason: every function
 # under test takes plain bools/u32/i32/f32 in and returns plain data out, precisely so the rule a
 # cull verdict must never change WHAT an entity delivers (only WHO delivers it) could be pinned
 # without a window, a device, a project file, or a scene -- SandboxApp.cpp keeps every ImGui call,

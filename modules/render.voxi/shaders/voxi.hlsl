@@ -37,6 +37,7 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     float4   gGiShadowParams;
     // Shadow denoiser: x = filter radius (0=off), y = blend weight, z/w unused.
     float4   gRtDenoiseParams;
+    // x = Path Tracing's path vertices after the primary hit (voxi_pt.hlsli); y/z/w unused.
     float4   gPtBounceParams;
     // x = total cones for diffuse gather; y/z/w = refraction mode, strength, edge fade.
     float4   gGiParams;
@@ -264,8 +265,8 @@ RWTexture2D<float4>       gRdAoTex     : register(u14);
 RWTexture2D<float4>       gRdReflTex   : register(u15);
 
 // ---- LOCAL LIGHTS (lamps): the light list, their visibility history, and the two halves that light ----
-// gRdLocalLights: sphere lights (at most 32); gRdLocalHist/gRdLocalOut: ping-ponged with sun shadow history.
-StructuredBuffer<RdLocalLight> gRdLocalLights : register(t18);
+// gRdLocalLights (t18, the light list) is declared in voxi_rt.hlsli; gRdLocalHist/gRdLocalOut are
+// ping-ponged with sun shadow history.
 Texture2D<float4>              gRdLocalHist   : register(t19);
 RWTexture2D<float4>            gRdLocalOut    : register(u19);
 
@@ -1854,8 +1855,6 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // Caustic term, ray-driven twin.
     sun.visibility *= 1.0 + averCausticFocus(wpos);
 
-    const uint bounces = (uint)max(gPtBounceParams.x, 1.0);
-
     float3 radiance = averShadeDirect(0.0, s, sun);
 
     // Local lights: diffuse and specular through sun's BRDF. Inside `radiance`, outside denoiser/AO.
@@ -2009,68 +2008,6 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         ind.diffuse -= ind.ambient * ind.ambientScale * ind.occlusion * s.occlusion * gVoxelParams.y;
     const float aoView = ind.occlusion * s.occlusion;   // ViewDebug::AmbientOcclusion (vmode 6)
     radiance = averShadeIndirect(radiance, s, ind);
-
-    // Bounce carries diffuse response, not raw albedo (metals reflect almost nothing diffusely).
-    float3 throughput = s.kdAlbedo;
-    float3 bp = wpos;
-    float3 bn = N;
-    // Skipped when cone trace answers this (both compute same bounce; running both doubles interiors).
-    const bool rdConeSuppliedDiffuse = gVoxelParams.w > 0.5;
-    [loop] for (uint b = 1; b < bounces && !rdConeSuppliedDiffuse; ++b) {
-        // Cosine-weighted direction from fixed hash (screen-pinned, no history).
-        float u1 = rtHash(i.pos.xy + float2(b * 17.0, 0.0));
-        float u2 = rtHash(i.pos.xy + float2(0.0, b * 23.0));
-        float r   = sqrt(u1);
-        float phi = 2.0 * PI * u2;
-        float3 t  = normalize(abs(bn.z) < 0.999 ? cross(float3(0,0,1), bn) : cross(float3(1,0,0), bn));
-        float3 bt = cross(bn, t);
-        float3 dirB = normalize(t * (r * cos(phi)) + bt * (r * sin(phi)) + bn * sqrt(max(0.0, 1.0 - u1)));
-
-        RayDesc rb;
-        const float bbias = max(gRtParams.z, 1e-4) * (1.0 + length(bp - gCamPos.xyz) * 5e-4);
-        rb.Origin = bp + bn * bbias;
-        rb.Direction = dirB;
-        rb.TMin = bbias;
-        rb.TMax = 1.0e7;
-
-        RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> qb;
-        // Opaque lane only (AVER_RT_MASK_OPAQUE).
-        qb.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, rb);
-        averRtProceedSolid(qb);
-
-        if (qb.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
-            // Escaped: path ends without adding sky (already given by averShadeIndirect).
-            break;
-        }
-
-        RtInstance bi = rtLoadInstance(rtPackCommitted(qb));
-        uint btri = bi.firstIndex + qb.CommittedPrimitiveIndex() * 3;
-        uint b0 = bi.firstVertex + gRtIndices[btri + 0];
-        uint b1 = bi.firstVertex + gRtIndices[btri + 1];
-        uint b2 = bi.firstVertex + gRtIndices[btri + 2];
-        float2 bbary = qb.CommittedTriangleBarycentrics();
-        float3 bw = float3(1.0 - bbary.x - bbary.y, bbary.x, bbary.y);
-        float3 bnObj = normalize(gRtVerts[b0].nrm * bw.x + gRtVerts[b1].nrm * bw.y + gRtVerts[b2].nrm * bw.z);
-        float3 bnWS = normalize(mul(float4(bnObj, 0.0), bi.objectToWorld).xyz);
-        if (dot(bnWS, dirB) > 0.0) bnWS = -bnWS;
-
-        bp = bp + dirB * qb.CommittedRayT();
-        bn = bnWS;
-        // Hit's emission weighted by path so far, not by this hit's albedo.
-        // Factor alone, no map. Not in single-pass compile (register limit).
-#if !AVER_RD_SINGLE_PASS
-        const RtMaterial bmat = gRtMaterials[bi.materialIndex];
-        if (!((bmat.flags & AVER_MAT_LIGHT) != 0u && rdLocalCarriesEmitters()))
-            radiance += throughput * bmat.emissiveFactor;
-#endif
-        // Diffuse response: metal contributes almost nothing.
-        throughput *= (1.0 - saturate(bi.metallic)) * bi.albedo;
-
-        // One shadow ray per bounce (penumbra of doubly-bounced surfaces not resolvable).
-        float bshadow = rtShadow(bp, bn, L, i.pos.xy, float3(0,0,0), float3(0,0,0), 1u, 0.0);
-        float3 bdirect = averSunRadiance() * saturate(dot(bn, L)) * bshadow / PI;
-        radiance += throughput * bdirect;
-    }
 
 #if AVER_RD_ABLATE == AVER_RD_ABL_FOG
     // ablated: no aerial perspective and no fog inscatter march.

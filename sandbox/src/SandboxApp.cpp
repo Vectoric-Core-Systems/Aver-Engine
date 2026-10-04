@@ -1541,24 +1541,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         AVER_INFO("[AverSR] --aversr-cycle: survived the round trip");
     }
 #endif
-#if AVER_MODULE_VOXI
-    // PT view now follows path tracing tier changes from anywhere (console, Overall Quality, voxi.scalability).
-    {
-        const voxi::Quality curPtTier = voxi::Renderer::get().settings().pathTracing;
-        if (curPtTier != ptTierSeen_) {
-            if (curPtTier != voxi::Quality::Off) {
-                ptSceneViewWantEnabled_ = true;
-                // Quality::Low is 1, so the rung is one less (mirrors buildRenderingSettings' re-quality call).
-                if (ptSceneView_) ptSceneView_->setQuality(static_cast<u32>(curPtTier) - 1);
-            } else if (!ptSceneViewFromCli_) {
-                // --pt-scene still wins: console edit or mid-session project open that turns PT Off must not drop a CLI-requested view.
-                ptSceneViewWantEnabled_ = false;
-            }
-            ptTierSeen_ = curPtTier;
-        }
-    }
-#endif
-    // Add/remove render feature (only safe before device_->beginFrame; see syncPtSceneView()).
+    // The Path Tracing tier drives Voxi's path-traced frame (voxi_pt.hlsli); the standalone reference
+    // view below is --pt-scene only. Add/remove render feature (only safe before device_->beginFrame; see syncPtSceneView()).
     syncPtSceneView(e.device());
     // Path tracer's matched-environment legacy switch (contrast-fix F6/F7, root cause R5).
     if (ptSceneView_) ptSceneView_->setLegacyEnvironment(editor::consolePtLegacyEnvSlot());
@@ -2155,7 +2139,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         const bool needRaster = wireframe_ || gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
         const bool needRayDriven = !needRaster &&
             debugView_ != voxi::VoxiRenderer::ViewDebug::None && voxiRenderer_.rayDrivenAvailable();
-        if (needRaster || ptTakesViewport()) vs.rtRenderMode = 0;
+        // Path Tracing forces ray-driven primary (VoxiRenderer::setSettings), so a raster view mode or
+        // the --pt-scene reference view turns it off for the frame.
+        if (needRaster || ptTakesViewport()) { vs.rtRenderMode = 0; vs.pathTracing = voxi::Quality::Off; }
         else if (needRayDriven) vs.rtRenderMode = 1;
         // Reset history when renderer mode changes (compared against last frame's effective mode).
         if (static_cast<i32>(vs.rtRenderMode) != lastEffectiveRtRenderMode_) {

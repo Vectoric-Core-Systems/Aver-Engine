@@ -3,7 +3,7 @@
 // raster/direct/showCulled-tint decision, deliver()'s route-independent draw content, and F8's
 // occlusionTestShouldRun gate.
 //
-// Header-only and dependency-free, for PtRenderConflictTest.cpp's exact reason (see that file's own
+// Header-only and dependency-free, for InputOwnershipTest.cpp's exact reason (see that file's own
 // top comment, and aver/game/SceneSubmission.hpp's): no ImGui, no SandboxApp, no pbr::, no rhi::, no
 // AVER_WARN, no voxi::Renderer -- every function under test takes plain bools/u32/i32/f32 in and
 // returns plain data out, so the rule that a cull verdict must never change WHAT an entity delivers

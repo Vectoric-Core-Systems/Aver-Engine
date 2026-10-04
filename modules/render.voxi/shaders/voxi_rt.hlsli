@@ -570,6 +570,8 @@ float3 rtShadowOpaque(float3 wpos, float3 N, float3 L, float2 pixel, float frame
 // radianceRange = rgb: colour * sphere's 1-metre irradiance; w: range in cm.
 // MIRRORS the C++ RdLocalLight (32 bytes) field for field.
 struct RdLocalLight { float4 posRadius; float4 radianceRange; };
+// The light list (at most 32). Declared here, not in voxi.hlsl, so voxi_pt.hlsli below can read it.
+StructuredBuffer<RdLocalLight> gRdLocalLights : register(t18);
 
 // AVER_RD_SINGLE_PASS_LAMPS (default 1) keeps lamps in single-pass, at register limit. ";AVER_RD_SINGLE_PASS_LAMPS=0" strips them.
 #ifndef AVER_RD_SINGLE_PASS_LAMPS
@@ -1081,6 +1083,8 @@ float3 rtSampleGgxVndf(float3 Ve, float alpha, float2 u) {
     return normalize(float3(alpha * Nh.x, alpha * Nh.y, max(1e-6, Nh.z)));
 }
 
+#include "voxi_pt.hlsli"
+
 // Trace one reflection ray: shaded hit or sky. One ray/pixel/frame; variance paid by history and spatial filter.
 // `hit` true for traced hits (even misses, which sample the lobe like any ray). GGX lobe, sampled by VNDF (alpha=rough^2).
 float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2 pixel, float rough,
@@ -1113,6 +1117,11 @@ float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2
     r.TMin      = bias;
     r.TMax      = 1.0e7;
 
+#if AVER_PT_PATHS
+    // Path Tracing: the reflected surface is shaded as a full path vertex (voxi_pt.hlsli).
+    hit = true;
+    return ptRadiance(r.Origin, dir, r.TMin, max(tanCone, 1e-3), pixel, 0x51f3u, skyColor(dir));
+#endif
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     q.TraceRayInline(gScene, RAY_FLAG_NONE | gAverRtSecondaryRayFlags, AVER_RT_MASK_OPAQUE_ALL, r);
     averRtProceedSolid(q);

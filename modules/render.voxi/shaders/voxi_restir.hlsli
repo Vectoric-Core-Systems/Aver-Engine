@@ -428,6 +428,30 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // The hit's emission is the seed; averShadeDirect adds the direct sun term.
     float3 radiance = averShadeDirect(s.emissive, s, sun);
 
+#if AVER_PT_PATHS
+    // PATH TRACING: the candidate is a whole path. The lamps light this vertex too, and the path
+    // continues through its BSDF for Settings::ptBounces - 1 more vertices (voxi_pt.hlsli) in place of
+    // the cached/approximate second bounce below. ReSTIR resamples the path's radiance as before.
+    {
+        uint rng = ptSeed(pixel, 0x2c1bu);
+        PtVertex v;
+        v.pos = hitPos;
+        v.s   = s;
+        radiance += ptLamp(s, hitPos, pixel, rng);
+        const float3 li = ptContinue(v, pixel, rng, ptBounceCount() - 1u);
+        radiance += li;
+        f2Observed  = true;
+        f2LumTraced = averShadowLum(li);
+        f2LumSky    = averShadowLum(averSkyIrradiance(s.N) * gAmbient.r);
+        samplePos    = hitPos;
+        sampleNormal = s.N;
+        const bool bad     = any(isnan(radiance)) || any(isinf(radiance));
+        nonFiniteCandidate = nonFiniteCandidate || bad;
+        sampleRadiance     = bad ? float3(0.0, 0.0, 0.0) : min(max(radiance, 0.0), AVER_VOX_MAXRAD);
+        return true;
+    }
+#endif
+
     // Diffuse ambient only: no unoccluded environment-specular term.
     // F2 (R2): diffuse now owns its own visibility via cosine ray (not unoccluded sky).
     // gAmbientParams.z bit 4 TRUE keeps legacy unoccluded read; FALSE traces one more cosine ray.

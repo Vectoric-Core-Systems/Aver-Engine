@@ -411,6 +411,8 @@ void VoxiRenderer::shutdown() {
                                         rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                         rdGiCacheCsPso_, rdGiCacheCbCsPso_,
                                         rdGiTraceCacheCsPso_, rdGiTraceCacheCbCsPso_,
+                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_,
+                                        rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                         rdReflSplitCsPso_, rdReflFilterCsPso_,
                                         rdLocalLightsCsPso_,
                                         airVisPso_};
@@ -430,6 +432,8 @@ void VoxiRenderer::shutdown() {
     rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = 0;
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
+    rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
+    rdReflPtCsPso_ = rdReflSplitPtCsPso_ = 0;
     rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
     rdLocalLightsCsPso_ = 0;
 
@@ -496,6 +500,7 @@ void VoxiRenderer::shutdown() {
     rcUnsupportedLogged_ = false;
     rcCreateFailed_ = false;
     rcTwinsTried_ = false;
+    ptTwinsTried_ = false;
     rdVisBufElemCapacity_ = 0;
     rdGiCandBufElemCapacity_ = rdShadowTileElemCapacity_ = 0;
     rdStagedW_ = rdStagedH_ = rdStagedRowPitch_ = 0;
@@ -551,7 +556,19 @@ void VoxiRenderer::shutdown() {
     dev_ = nullptr;
 }
 
-void VoxiRenderer::setSettings(const Settings& s) {
+void VoxiRenderer::setSettings(const Settings& in) {
+    // Path Tracing runs inside the staged ray-driven frame (voxi_pt.hlsli), so it brings what that frame
+    // needs: ray-driven primary, ReSTIR GI with every candidate traced, the denoiser with a long history.
+    Settings s = in;
+    if (in.pathTracing != Quality::Off) {
+        s.rtRenderMode = 1u;
+        if (s.rayDrivenStages == 0u) s.rayDrivenStages = 1u;
+        if (s.globalIllumination == Quality::Off) s.globalIllumination = Quality::Low;
+        s.giMode = 1u;
+        s.giRestirVisibility = 3u;   // Full: every pixel's candidate is a traced path
+        s.denoiser = true;
+        s.denoiserMaxSamples = std::max(s.denoiserMaxSamples, 128u);
+    }
     // Capture edge states BEFORE assignment: resources allocate on OFF->on, deallocate on on->OFF.
     const bool wasWanted = rayTracingWanted();
     const bool wasAoWanted = aoHistoryWanted();
@@ -3891,6 +3908,17 @@ bool VoxiRenderer::suppressesWholeFrame() const { return debugViewActive(); }
 
 // Draws the scene pass replacement (debug view or ray-driven); debug wins if both are active.
 void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
+    ptRanThisFrame_ = false;
+    if (pathTracingWanted() && !debugViewActive()) {
+        const char* why = nullptr;
+        const bool staged = rayDrivenActive() && rdStagedActive(&why);
+        if (!staged && !ptFallbackLogged_) {
+            ptFallbackLogged_ = true;
+            AVER_WARN("[Voxi] Path Tracing needs the staged ray-driven frame (D3D12, ray tracing on), but {}; "
+                      "rendering without it (said once)",
+                      why ? why : "ray-driven primary visibility is not active");
+        }
+    }
     if (!debugViewActive() && rayDrivenActive()) {
         // Staged ray-driven passes checked first, before any single-pass state is touched, so
         // rayDrivenStages == 0 reaches the single-pass code exactly as before this feature existed --
@@ -4036,6 +4064,9 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     // RADIANCE CACHE: bit 128 of ambientParams.w gates the NeuRaC twin.
     const bool rcBit = (static_cast<u32>(cb_.ambientParams[3]) & 128u) != 0u;
     bool usedCacheTwin = false;
+    // PATH TRACING: the AVER_PT_PATHS twins take the GI-candidate and reflection dispatches.
+    if (pathTracingWanted() && !ptTwinsTried_) createPathTraceTwins();
+    const bool pt = pathTracingWanted();
     {
         // Wraps every dispatch below -- see this function's comment on why no barrier or timestamp
         // sits between the four lighting stages (S1/G1 just below are the one exception).
@@ -4109,10 +4140,13 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // carries. Copied here rather than shared.
         if (giSplit) {
             stageBegin("Voxi RD GI trace stage");
+            const rhi::PipelineHandle g1Pt =
+                pt ? (giCb ? rdGiTracePtCbCsPso_ : rdGiTracePtCsPso_) : rhi::PipelineHandle(0);
             const rhi::PipelineHandle g1Twin =
-                rcBit ? (giCb ? rdGiTraceCacheCbCsPso_ : rdGiTraceCacheCsPso_) : rhi::PipelineHandle(0);
+                (!g1Pt && rcBit) ? (giCb ? rdGiTraceCacheCbCsPso_ : rdGiTraceCacheCsPso_) : rhi::PipelineHandle(0);
             if (g1Twin) usedCacheTwin = true;
-            ctx.setPipeline(g1Twin ? g1Twin : (giCb ? rdGiTraceCbCsPso_ : rdGiTraceCsPso_));
+            if (g1Pt) ptRanThisFrame_ = true;
+            ctx.setPipeline(g1Pt ? g1Pt : g1Twin ? g1Twin : (giCb ? rdGiTraceCbCsPso_ : rdGiTraceCsPso_));
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
@@ -4158,10 +4192,14 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
 
         if (giDispatch) {
             stageBegin("Voxi RD GI stage");
+            const rhi::PipelineHandle giPt =
+                (!giSplit && pt) ? (giCb ? rdGiPtCbCsPso_ : rdGiPtCsPso_) : rhi::PipelineHandle(0);
             const rhi::PipelineHandle giTwin =
-                (!giSplit && rcBit) ? (giCb ? rdGiCacheCbCsPso_ : rdGiCacheCsPso_)
-                                    : rhi::PipelineHandle(0);
-            if (giTwin) usedCacheTwin = true;
+                giPt ? giPt
+                     : (!giSplit && rcBit) ? (giCb ? rdGiCacheCbCsPso_ : rdGiCacheCsPso_)
+                                           : rhi::PipelineHandle(0);
+            if (giTwin && !giPt) usedCacheTwin = true;
+            if (giPt) ptRanThisFrame_ = true;
             ctx.setPipeline(giTwin ? giTwin
                                    : giSplit ? (giCb ? rdGiSplitCbCsPso_ : rdGiSplitCsPso_)
                                              : (giCb ? rdGiCbCsPso_     : rdGiCsPso_));
@@ -4199,7 +4237,9 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // CSRdRefl: CPU mirror of PSRayDriven's reflection-block condition's reflections-enabled half.
         if (cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f) {
             stageBegin("Voxi RD reflection stage");
-            ctx.setPipeline(reflSplit ? rdReflSplitCsPso_ : rdReflCsPso_);
+            const rhi::PipelineHandle reflPt =
+                pt ? (reflSplit ? rdReflSplitPtCsPso_ : rdReflPtCsPso_) : rhi::PipelineHandle(0);
+            ctx.setPipeline(reflPt ? reflPt : reflSplit ? rdReflSplitCsPso_ : rdReflCsPso_);
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
@@ -4208,6 +4248,11 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             stageEnd(rdReflTex_);
         }
         if (!perStage) ctx.popMarker();
+    }
+    if (ptRanThisFrame_ && !ptRunLogged_) {
+        ptRunLogged_ = true;
+        AVER_INFO("[Voxi] Path Tracing running: {}-vertex paths for ReSTIR GI and reflections, sun and "
+                  "lamps lit at every vertex", ptBounces_);
     }
     if (giHitShadowMap)
         ctx.textureBarrier(giShadowTex_, rhi::ResourceState::NonPixelShaderResource,
@@ -5263,6 +5308,46 @@ bool VoxiRenderer::createNeuRaCTwins() {
     return built == 4u;
 }
 
+// Build AVER_PT_PATHS=1 compute twins: CSRdGi/CSRdGiTrace (plain/checkerboard) and CSRdRefl (plain/split).
+bool VoxiRenderer::createPathTraceTwins() {
+    ptTwinsTried_ = true;
+    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 66 && caps_.dxcAvailable;
+    if (!res_ || !rtOk || !rtTexTable_) {
+        AVER_WARN("[Voxi] Path Tracing pipelines not built: needs ray tracing, shader model 6.6 and the "
+                  "bindless texture table (said once per pipeline build)");
+        return false;
+    }
+    ShaderScope compile(*res_);
+    const rhi::PipelineLayout giTex = giLayout(kRtTextureCapacity);
+    const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
+                                                          layeredBsdf_);
+    const std::string csDefs = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
+                               std::to_string(kRtTextureCapacity) +
+                               (rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string());
+    const auto build = [&](const char* entry, const char* extra, rhi::PipelineHandle& out) {
+        if (out) return;
+        const std::string defs = matDefs + ";" + csDefs + ";AVER_PT_PATHS=1" + extra;
+        const rhi::ShaderHandle cs = compile(entry, rhi::ShaderStage::Compute, 66, defs.c_str());
+        if (!cs) return;
+        rhi::ComputePipelineDesc p;
+        p.cs = cs;
+        p.layout = giTex;
+        out = res_->createComputePipeline(p);
+    };
+    build("CSRdGi",      "",                        rdGiPtCsPso_);
+    build("CSRdGi",      ";AVER_GI_CHECKERBOARD=1", rdGiPtCbCsPso_);
+    build("CSRdGiTrace", "",                        rdGiTracePtCsPso_);
+    build("CSRdGiTrace", ";AVER_GI_CHECKERBOARD=1", rdGiTracePtCbCsPso_);
+    build("CSRdRefl",    "",                        rdReflPtCsPso_);
+    build("CSRdRefl",    ";AVER_RD_REFL_SPLIT=1",   rdReflSplitPtCsPso_);
+    const bool ok = rdGiPtCsPso_ && rdGiPtCbCsPso_ && rdGiTracePtCsPso_ && rdGiTracePtCbCsPso_ &&
+                    rdReflPtCsPso_ && rdReflSplitPtCsPso_;
+    if (ok) AVER_INFO("[Voxi] Path Tracing pipelines ready (ReSTIR GI paths and reflection paths)");
+    else    AVER_WARN("[Voxi] some Path Tracing pipelines did not compile; those stages run as ordinary "
+                      "ray-driven passes");
+    return ok;
+}
+
 // Release cache: unbind t22/u20/u21, then destroy (bound descriptor outliving its buffer faults GPU).
 void VoxiRenderer::teardownNeuRaC() {
     neuracLive_ = false;
@@ -5828,6 +5913,8 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                          rdGiCacheCsPso_, rdGiCacheCbCsPso_,
                                          rdGiTraceCacheCsPso_, rdGiTraceCacheCbCsPso_,
+                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_,
+                                        rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                          rdReflSplitCsPso_, rdReflFilterCsPso_,
                                          rdLocalLightsCsPso_};
     for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
@@ -5844,7 +5931,10 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = 0;
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
+    rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
+    rdReflPtCsPso_ = rdReflSplitPtCsPso_ = 0;
     rcTwinsTried_ = false;
+    ptTwinsTried_ = false;
     rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
     rdLocalLightsCsPso_ = 0;
 

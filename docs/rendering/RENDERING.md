@@ -288,7 +288,7 @@ A lamp's own emission is left out of ReSTIR GI's candidate hits (and the GI-off 
 
 ## 4b. Path tracer scene view (reference renderer)
 
-**Available as:** the `--pt-scene` command-line flag at startup, OR the editor's own **Project Settings > Rendering > Path Tracing > Quality** control (any value but Off) at any later frame — both requests funnel through the same `SandboxApp::syncPtSceneView` reconciler, so a live editor session can turn this on and off without a relaunch. Opt-in; disabled by default either way.
+**Available as:** the `--pt-scene` command-line flag at startup only. The editor's **Project Settings > Rendering > Path Tracing** control no longer reaches it; it drives the path-traced real-time mode in 4c.
 
 ### 4b.1 What it is
 
@@ -329,6 +329,19 @@ The `PtSceneView::AlbedoResolver` is a `std::function<bool(BindingSetHandle, con
 The editor surfaces convergence for the first time too: `PtSceneView::samplesAccumulated()`/`sceneReady()` are read on that same settings page, next to an `[active]` / `[unavailable on this device]` badge.
 
 One accepted, pre-existing gap this makes more visible rather than introduces: the RHI has no `destroyTlas` at all (`IResourceFactory`), so every TLAS a `PathTracer` builds leaks for the life of the device. Toggling this view on and off in one long editor session leaks one TLAS per genuine re-arm of the static scene — bounded by how often the scene actually changes while the view is on, not by how many times the checkbox is clicked. `PathTracer::shutdown()`'s BLAS leak (a real, separate bug: `destroyBlas` exists and was simply never called there) was fixed alongside this change, since a toggle can now call `shutdown()` many times in one process instead of once at exit.
+
+---
+
+## 4c. Path Tracing (the Path Tracing quality setting)
+
+`Settings::pathTracing` above Off runs the staged ray-driven frame with full light paths (`modules/render.voxi/shaders/voxi_pt.hlsli`):
+
+- **ReSTIR GI's candidate is a whole path.** The first secondary hit is shaded as before (textures, emissive, sun), then also lit by one lamp picked from the light list in proportion to its unshadowed irradiance, with its own shadow ray. The path then continues through that surface's BSDF, either GGX VNDF for specular or cosine for diffuse, with the lobe chosen by its share of reflected energy. It runs for `Settings::ptBounces - 1` more vertices, and Russian roulette applies from the third vertex. Every vertex is shaded from its own textures (base colour, metal/roughness, emissive) and lit by the sun and one lamp; a sky miss ends the path. ReSTIR then resamples these path radiances across pixels and frames as before, and this replaces the cached/approximate second bounce.
+- **Reflections** continue the same way from the reflected surface, in place of its Lambert-only shading.
+- **What it switches on:** ray-driven primary visibility, at least staged pass 1, GI at least Low, ReSTIR GI, the `Full` visibility mode (every pixel traces its candidate), the denoiser, and a denoiser history of at least 128 frames so a still camera keeps converging. `VoxiRenderer::setSettings` applies these.
+- **Where it runs:** only in the `AVER_PT_PATHS` twins of `CSRdGi`/`CSRdGiTrace` (plain and checkerboard) and `CSRdRefl` (plain and split). These are built lazily by `createPathTraceTwins`, so every other compile is unchanged.
+- **Requirements:** D3D12 and ray tracing. Elsewhere it logs once and renders without path tracing.
+- **Tiers:** set only the bounce count (`ladder::ptBounces`).
 
 ---
 

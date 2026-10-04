@@ -464,36 +464,8 @@ void SandboxApp::applyProjectRenderSettings() {
     }
 
     voxiRenderer_.setSettings(vx.settings());
-    // A manifest that names Path Tracing explicitly should actually (de)register PtSceneView at
-    // load: PathTracing needs an explicit register/unregister step (syncPtSceneView(), called
-    // later this frame or on the next onUpdate() for a project opened mid-session via this same
-    // function at line ~4615). Guarded on
-    // project_.pathTracing >= 0 -- i.e. actually PRESENT -- so a project stating nothing never
-    // silently overrides a view --pt-scene or the settings combo already asked for.
-    // A COMMAND-LINE FLAG OUTRANKS THE MANIFEST, AND NEITHER IS ALLOWED TO BE SILENT.
-    // The paragraph above guarded RENDER.PATHTRACING being ABSENT, not PRESENT-and-Off: that
-    // overwrote the want flag with no log line, so `--pt-scene` against such a project silently
-    // rendered raster while claiming otherwise -- wrong in the plausible-looking, expensive way.
-    // Precedence stays the same as everywhere else: an explicit CLI flag wins over stored project
-    // state; the settings combo and toggle-test flags are NOT covered by ptSceneViewFromCli_,
-    // since those are live edits a mid-session project open should still override.
-    if (project_.pathTracing >= 0) {
-        const bool want = (vx.settings().pathTracing != voxi::Quality::Off);
-        if (ptSceneViewFromCli_ && !want) {
-            // ASSERTED, not merely left alone: an earlier version only declined to write the
-            // manifest value, which is not the same -- anything that had set the flag false in
-            // between left the view off while this line claimed the command line had won.
-            ptSceneViewWantEnabled_ = true;
-            AVER_WARN("[Project] RENDER.PATHTRACING in {} asks for Path Tracing Off, but "
-                      "--pt-scene was given -- the command line wins and the path-traced view "
-                      "stays on", project_.manifestPath);
-        } else {
-            if (want != ptSceneViewWantEnabled_)
-                AVER_INFO("[Project] RENDER.PATHTRACING {} the path-traced view",
-                          want ? "enables" : "disables");
-            ptSceneViewWantEnabled_ = want;
-        }
-    }
+    // RENDER.PATHTRACING reaches Voxi through the settings above (its path-traced frame); the standalone
+    // reference view is --pt-scene only.
     AVER_INFO("[Project] applied render settings from {}", project_.manifestPath);
 }
 

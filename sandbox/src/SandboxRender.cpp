@@ -2595,7 +2595,7 @@ bool SandboxApp::ptTakesViewport() const {
         return false;
     if (debugView_ != voxi::VoxiRenderer::ViewDebug::None && voxiRenderer_.rayDrivenAvailable())
         return false;
-    return voxi::Renderer::get().settings().pathTracing != voxi::Quality::Off || ptSceneViewFromCli_;
+    return ptSceneViewFromCli_;
 #else
     return false;
 #endif
@@ -2622,7 +2622,6 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
     const bool rayDrivenPaints = false;
 #endif
     if (rayDrivenPaints && ptSceneViewWantEnabled_) {
-        // A1: feeds the Path Tracing page's Quality-combo tag (PtRenderConflict.hpp's choosePtViewTag).
         // Set every frame this branch fires, so it stays true for as long as suppression does.
         ptSceneViewSuppressedByRayDriven_ = true;
         if (!ptSceneViewYieldLogged_) {
@@ -2633,16 +2632,8 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
         ptSceneViewWantEnabled_ = false;
     } else if (!rayDrivenPaints) {
         ptSceneViewYieldLogged_ = false;   // re-arm the message if the mode changes back
-#if AVER_MODULE_VOXI
-        // N8 fix, part 2: the PT view actually comes back (before, this branch only re-armed the
-        // log/suppression flags, so the want stayed false forever once ray-driven suppressed it).
-        // Restored only if THIS yield caused the loss (checked before clearing the flag below) and
-        // the suppressed request is still live (tier above Off, or --pt-scene asked explicitly).
-        // Guarded on AVER_MODULE_VOXI: must still build with the module off, where Renderer::get() doesn't exist.
-        if (ptSceneViewSuppressedByRayDriven_ &&
-            (voxi::Renderer::get().settings().pathTracing != voxi::Quality::Off || ptSceneViewFromCli_))
-            ptSceneViewWantEnabled_ = true;
-#endif
+        // The view comes back only if THIS yield caused the loss and --pt-scene still asks for it.
+        if (ptSceneViewSuppressedByRayDriven_ && ptSceneViewFromCli_) ptSceneViewWantEnabled_ = true;
         ptSceneViewSuppressedByRayDriven_ = false;   // A1: same re-arm trigger as the log message
     }
 
@@ -2661,12 +2652,7 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
         if (rayDrivenPaints) {
             ptSceneViewSuppressedByRayDriven_ = true;
         } else {
-#if AVER_MODULE_VOXI
-            if (voxi::Renderer::get().settings().pathTracing != voxi::Quality::Off || ptSceneViewFromCli_)
-                ptSceneViewWantEnabled_ = true;
-#else
-            ptSceneViewWantEnabled_ = true;
-#endif
+            if (ptSceneViewFromCli_) ptSceneViewWantEnabled_ = true;
         }
     }
 

@@ -148,7 +148,6 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "ViewportIconRenderer.hpp"
 #include "PhysicsSceneSync.hpp"
 #include "InputOwnership.hpp"
-#include "PtRenderConflict.hpp"
 #include "AverSrChoice.hpp"
 #include "EditorConsole.hpp"
 #include "EditorEntitySnapshot.hpp"
@@ -3540,10 +3539,6 @@ private:
     std::unique_ptr<aver::pt::PtSceneView> ptSceneView_;
     // REQUESTED state (--pt-scene at startup, or the settings-page Quality combo later); ptSceneView_ != nullptr is the ACTUAL one.
     bool ptSceneViewWantEnabled_ = false;
-#if AVER_MODULE_VOXI
-    // N8: the Path Tracing tier onUpdate's reconcile block last saw vx.settings().pathTracing read as.
-    voxi::Quality ptTierSeen_ = voxi::Quality::Off;
-#endif
     // --pt-scene WAS GIVEN ON THE COMMAND LINE. Sticky for the session, separate from the want flag above.
     bool ptSceneViewFromCli_ = false;
     bool ptSceneViewUnavailable_ = false;   // init() refused once this session -- stop re-asking

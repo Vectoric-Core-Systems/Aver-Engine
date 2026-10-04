@@ -95,7 +95,7 @@ The round-trip tests (RESTIRVISIBILITY/AVERSR/FRAMEINTERP/RESTIRHISTORY) exercis
 
 ## tests/render.voxi/src/RenderSettingsResolverTest.cpp
 
-- **Header block (removed)**: File tests three independent quality-ladder decision systems (QualityLadder, RenderSettingsResolver, Scalability) plus regressions through the live Renderer singleton for F-d (giMode/denoiser stored as requested, resolved at read time). Calls Renderer::get(), setDeviceInfo(), and exported *ForQuality statics from Aver.Render.Voxi. Follows tests/editor/PtRenderConflictTest.cpp's idiom: plain std::printf with no AVER_ macros, testing pure functions with no ImGui or globals.
+- **Header block (removed)**: File tests three independent quality-ladder decision systems (QualityLadder, RenderSettingsResolver, Scalability) plus regressions through the live Renderer singleton for F-d (giMode/denoiser stored as requested, resolved at read time). Calls Renderer::get(), setDeviceInfo(), and exported *ForQuality statics from Aver.Render.Voxi. Follows tests/editor/InputOwnershipTest.cpp's idiom: plain std::printf with no AVER_ macros, testing pure functions with no ImGui or globals.
 
 - **Using namespace comment (removed)**: u32/f32 live in aver::core, while Quality, Settings, Feature, Renderer, DisableReason and ladder:: live one level down in aver::voxi—same pattern CameraFactorTest.cpp already uses.
 

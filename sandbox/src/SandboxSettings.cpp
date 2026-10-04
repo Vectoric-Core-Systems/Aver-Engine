@@ -1590,7 +1590,7 @@ void SandboxApp::buildRenderingSettings(int page) {
 
         if (s.pathTracing != Quality::Off)
             ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-                               "Path Tracing is on and draws the viewport; these settings apply when it is Off.");
+                               "Path Tracing is on: primary rays, ReSTIR GI and the denoiser are forced on.");
         // Primary visibility: rasteriser vs ray-driven (shipped default Medium and above).
         ImGui::Spacing();
         ImGui::TextUnformatted("Primary visibility");
@@ -1776,39 +1776,36 @@ void SandboxApp::buildRenderingSettings(int page) {
     }
 
     if (page == kRenderPagePathTracing) {
-        // Path tracing quality: status mirrors PathTracer::init() gates. Tier drives accumulator res.
+        // Path Tracing: Voxi's staged ray-driven frame with multi-bounce ReSTIR paths (voxi_pt.hlsli).
         const Status st = vx.status(Feature::PathTracing);
         ImGui::TextUnformatted(Renderer::featureName(Feature::PathTracing));
         featureStatusBadge(vx, Feature::PathTracing);
-        // ptSceneViewUnavailable_: runtime signal (e.g. DXC compile failure) device caps didn't predict.
-        ImGui::BeginDisabled(st != Status::Ready || ptSceneViewUnavailable_);
+        ImGui::BeginDisabled(st != Status::Ready);
         int q = static_cast<int>(s.pathTracing);
         const char* qs[] = {"Off","Low","Medium","High","Epic"};
         if (ImGui::Combo("Quality", &q, qs, 5)) {
             s.pathTracing = static_cast<Quality>(q);
             changed = true;
-            // UI event -> PtSceneView request; syncPtSceneView() does RHI registration next onUpdate().
-            ptSceneViewWantEnabled_ = (s.pathTracing != Quality::Off);
-            // Quality::Low is 1, so the rung is one less.
-            if (ptSceneView_ && s.pathTracing != Quality::Off)
-                ptSceneView_->setQuality(static_cast<u32>(s.pathTracing) - 1);
         }
+        uiReg_.track("project.pt.quality");
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Turns on Aver.PathTracer's reference view: a still-camera, brute-\n"
-                               "force render of the real scene through modules/render.pt.\n"
-                               "TAKES OVER THE VIEWPORT while on (raster and ray-driven step aside). Sky and sun light\n"
-                               "only -- no CLight (point/spot/area) and no emissive term --\n"
-                               "static geometry only, flat albedo only, no denoiser -- see\n"
-                               "PtSceneView.hpp for the full list of what it deliberately does\n"
-                               "not do.\n\n"
-                               "HAS TIERS NOW: Low..Epic drive the reference view's accumulator\n"
-                               "resolution (480x270 up to 1280x720, see Bounces below for the\n"
-                               "bounce budget each rung buys) -- both this combo and the Overall\n"
-                               "Quality preset on the General page set it, though Overall always\n"
-                               "sets it to Off (a locked decision: a PT tier above Off takes over\n"
-                               "the entire view, too large a side effect for one preset button).\n"
-                               "The console's voxi.pathTracing/voxi.scalability reach it too.");
+            ImGui::SetTooltip("Path-traces the scene inside the real-time renderer. Each pixel's ReSTIR GI\n"
+                              "sample becomes a whole light path (Bounces below): every vertex is shaded\n"
+                              "from its own textures and lit by the sun and the lamps, and reflections\n"
+                              "continue the same way. ReSTIR reuses the paths across pixels and frames and\n"
+                              "the denoiser keeps a long history, so a still camera keeps converging.\n\n"
+                              "Turns on what it runs on: primary rays, ReSTIR GI with every pixel traced,\n"
+                              "and the denoiser. Needs ray tracing on D3D12. The Overall Quality presets\n"
+                              "set it to Off.\n\n"
+                              "Round-trips as RENDER.PATHTRACING.");
         ImGui::EndDisabled();
+        if (s.pathTracing != Quality::Off) {
+            ImGui::SameLine();
+            if (voxiRenderer_.pathTracingRan())
+                ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1), "[running]");
+            else
+                ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[not running, see the Output Log]");
+        }
 
         // Bounces: tier-derived (hand-set value survives until tier changes). Quality above re-derives.
         ImGui::BeginDisabled(s.pathTracing == Quality::Off);
@@ -1820,38 +1817,10 @@ void SandboxApp::buildRenderingSettings(int page) {
         uiReg_.track("project.pt.bounces");
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Light paths after the first hit. Changing Quality above re-derives\n"
-                              "this from the tier, so set it after picking one.");
-
-        // Priority: unavailable, suppressed by ray-driven, or active (choosePtViewTag()).
-        switch (aver::editor::choosePtViewTag(ptSceneViewUnavailable_,
-                                               ptSceneViewSuppressedByRayDriven_,
-                                               ptSceneView_ != nullptr)) {
-        case aver::editor::PtViewTag::Unavailable:
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[unavailable on this device]");
-            break;
-        case aver::editor::PtViewTag::SuppressedByRayDriven:
-            // Same colour as [unavailable]: both mean combo isn't doing anything.
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1),
-                                "[paused: a ray-hit debug view is drawing]");
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("A ray-hit debug view needs ray-driven rendering, so the\n"
-                                  "path-traced view is paused. Switch the viewport back to Lit.");
-            break;
-        case aver::editor::PtViewTag::Active:
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1), "[active]");
-            ImGui::Text("%s, %u sample(s) accumulated",
-                        ptSceneView_->sceneReady() ? "tracing" : "no static geometry captured yet",
-                        ptSceneView_->samplesAccumulated());
-            break;
-        case aver::editor::PtViewTag::None:
-            break;
-        }
+            ImGui::SetTooltip("Path vertices after the first hit, the ReSTIR sample's own included.\n"
+                              "Changing Quality above re-derives this from the tier, so set it after\n"
+                              "picking one.");
     }
-
     if (page == kRenderPageMaterials) {
         // Layered BSDF: changes what every material-shaded draw computes. Reload to take effect.
         const Status lst = vx.status(Feature::LayeredBsdf);

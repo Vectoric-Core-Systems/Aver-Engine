@@ -69,6 +69,8 @@ public:
     void setPaused(bool on) { paused_ = on; }
 
     bool rayDrivenAvailable() const { return rtActive_ && rayDrivenPso_ != 0; }
+    // Path Tracing ran last frame: multi-bounce ReSTIR GI and reflections in the staged frame.
+    bool pathTracingRan() const { return ptRanThisFrame_; }
 
     void setConeTraceEnabled(bool on) { coneTraceEnabled_ = on; }
     bool coneTraceEnabled() const { return coneTraceEnabled_; }
@@ -454,6 +456,13 @@ private:
     rhi::PipelineHandle rdGiCacheCbCsPso_      = 0;
     rhi::PipelineHandle rdGiTraceCacheCsPso_   = 0;
     rhi::PipelineHandle rdGiTraceCacheCbCsPso_ = 0;
+    // Path Tracing twins (AVER_PT_PATHS=1, built lazily): multi-bounce ReSTIR candidates and reflections.
+    rhi::PipelineHandle rdGiPtCsPso_        = 0;
+    rhi::PipelineHandle rdGiPtCbCsPso_      = 0;
+    rhi::PipelineHandle rdGiTracePtCsPso_   = 0;
+    rhi::PipelineHandle rdGiTracePtCbCsPso_ = 0;
+    rhi::PipelineHandle rdReflPtCsPso_      = 0;
+    rhi::PipelineHandle rdReflSplitPtCsPso_ = 0;
     rhi::PipelineHandle rdReflSplitCsPso_  = 0;
     rhi::PipelineHandle rdReflFilterCsPso_ = 0;
     rhi::PipelineHandle rdLocalLightsCsPso_ = 0;
@@ -1073,6 +1082,12 @@ private:
     bool rcCreateFailed_ = false;
     // createNeuRaCTwins ran since the last createScenePipelines.
     bool rcTwinsTried_ = false;
+    // createPathTraceTwins ran since the last createScenePipelines; the mode ran this frame; said-once logs.
+    bool ptTwinsTried_ = false;
+    bool ptRanThisFrame_ = false;
+    bool ptRunLogged_ = false;
+    bool ptFallbackLogged_ = false;
+    bool createPathTraceTwins();
     // Build/teardown/per-frame hooks (VoxiRenderer.cpp).
     void updateNeuRaC(rhi::IRenderContext& ctx);
     bool createNeuRaCTwins();

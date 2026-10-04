@@ -7,7 +7,7 @@
 // user dragged the Render Scale slider to a number no named level produces), neither of which
 // aver::sr::Quality itself has room to express. AverSrChoice is that superset.
 //
-// A PURE FUNCTION HEADER, DELIBERATELY, for PtRenderConflict.hpp's exact reason (see that header's
+// A PURE FUNCTION HEADER, DELIBERATELY, for InputOwnership.hpp's exact reason (see that header's
 // own top comment): no ImGui, no SandboxApp state, no AVER_WARN call, no globals, no Engine& -- plain
 // values in, plain values out. That is what makes the migration rule and the two small derived
 // questions below (userLevelFor, renderScaleToPersist) headless unit tests
@@ -32,7 +32,7 @@ enum class AverSrChoice : u32 { Auto, Off, Quality, Balanced, Performance, Manua
 // parseQuality, aver::sr::parseQuality). Never partial: "qual" does not match "quality".
 inline bool parseAverSrChoice(std::string_view tok, AverSrChoice& out) {
     // No <cctype>/<algorithm> dependency: six short ASCII names, checked by hand the same way
-    // PtRenderConflict.hpp's neighbours in this directory keep their own parsers dependency-light.
+    // InputOwnership.hpp's neighbours in this directory keep their own parsers dependency-light.
     auto ciEquals = [](std::string_view a, std::string_view b) {
         if (a.size() != b.size()) return false;
         for (std::size_t i = 0; i < a.size(); ++i) {

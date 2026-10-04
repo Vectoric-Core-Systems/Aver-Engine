@@ -3,7 +3,7 @@
 // display.aversr/display.renderScale pair, userLevelFor's -1 sentinel for the two choices with no
 // single sr::Quality level of their own, and renderScaleToPersist's Manual-only rule.
 //
-// Header-only and dependency-free, for PtRenderConflictTest.cpp's exact reason (see that file's own
+// Header-only and dependency-free, for InputOwnershipTest.cpp's exact reason (see that file's own
 // top comment): no ImGui, no SandboxApp, no AVER_INFO/AVER_CRITICAL, no editor::prefString --
 // AverSrChoice.hpp takes plain bools/strings/floats in and returns plain data out, so the migration
 // rule SandboxApp.cpp's loadEditorPreferences() applies is reachable without a window, a device, or an

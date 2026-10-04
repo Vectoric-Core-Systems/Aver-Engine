@@ -33,7 +33,7 @@
 // already links that target, so the editor reaches this header exactly the way it already reaches
 // aver/game/GameContent.hpp, and the copy can go.
 //
-// A PURE HEADER, DELIBERATELY, for sandbox/src/PtRenderConflict.hpp's exact reason (see that file's
+// A PURE HEADER, DELIBERATELY, for sandbox/src/InputOwnership.hpp's exact reason (see that file's
 // own top comment, which this one follows line for line): no ImGui types, no SandboxApp state, no
 // pbr::, no rhi::, no AVER_WARN/AVER_INFO, no globals -- plain values in, plain values out, over
 // aver/core/Types.hpp and nothing else. That is what makes every decision below a headless unit test
