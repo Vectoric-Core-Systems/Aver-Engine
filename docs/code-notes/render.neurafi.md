@@ -7,11 +7,11 @@ backticks are where the knowledge applies. Measurements are as originally record
 
 ## modules/render.neurafi/include/aver/neurafi/NeuraFI.hpp
 
-- **Trajectory modes**: Linear (straight lines, milestone 1 default), Quadratic (quadratic path through three frames with analytic acceleration), Neural (same path with acceleration predicted by Mlp network). The network only outputs acceleration, never colour/weight/mask/confidence. Trained in-engine self-supervised on geometric targets from real frames (keeps two more frames of motion history). Neural uses analytic until weights load/warm (kWarmSteps) AND measured error beats analytic (gate).
+- **Trajectory modes**: Linear (straight lines, milestone 1 default), Quadratic (quadratic path through three frames with analytic acceleration), Neural (same path with acceleration predicted by MLP network). The network outputs acceleration only, never colour/weight/mask/confidence. Trained in-engine self-supervised on geometric targets from real frames (keeps two more frames of motion history). Neural uses analytic until weights load/warm (kWarmSteps) AND measured error beats analytic (gate).
 
-- **Learning-rate schedule**: Constant-rate Adam kept chasing each new batch (measured error rose from 0.047 to 0.090 px over 2,000 more steps at 1e-3). Uses inverse decay over network's lifetime step count (saved with weights, allows continuing from last session): lr = kLearningRate / (1 + steps / kDecaySteps), floored at kLearningRateFloor.
+- **Learning-rate schedule**: Inverse decay over network's lifetime step count (saved with weights, allowing continuation from last session): lr = kLearningRate / (1 + steps / kDecaySteps), floored at kLearningRateFloor. Constant-rate Adam was abandoned when measured error rose from 0.047 to 0.090 px over 2,000 steps at 1e-3.
 
-- **Gate mechanism**: One batch score is noisy (measured: network ranged 0.045-0.180 px against steady 0.11 for quadratic). Both errors smoothed with EMA (kEvalSmoothing), network used only while its smoothed error is below quadratic's after kEvalsToJudge checks. Verdict saved beside weights so non-training sessions still know it. Result is never worse than Quadratic on measured data.
+- **Gate mechanism**: One batch score is noisy (measured: network ranged 0.045-0.180 px against steady 0.11 for quadratic). Both errors smoothed with EMA (kEvalSmoothing), network used only while its smoothed error is below quadratic's after kEvalsToJudge checks. Verdict saved beside weights so non-training sessions know it. Result is never worse than Quadratic on measured data.
 
 ## modules/render.neurafi/shaders/neurafi.hlsl
 
@@ -23,7 +23,7 @@ backticks are where the knowledge applies. Measurements are as originally record
 
 - **Acceleration image resolution**: gBlock grows with scene (2, 4, 8...) to keep network record count bounded. Measured on 3532x1987 scene with fixed 2x2 block: 1.75M records cost 3.5 ms.
 
-- **Network vs analytic acceleration**: Network predicts correction to v - v', not the whole acceleration. Measured: network predicting full `a` could not match analytic error of 0.003-0.018 px on slow wide pans; predicting correction lets network learn "add nothing" where analytic is already exact.
+- **Network vs analytic acceleration**: Network predicts correction to v - v', not the whole acceleration. Measured: predicting full `a` could not match analytic error of 0.003-0.018 px on slow wide pans; predicting correction lets network learn "add nothing" where analytic is already exact.
 
 - **Motion-vector seams**: Outliers detected in training as corrections above half the span's own motion. These are edges whose neighbours belong to different surfaces and slipped past depth checks. Measured: a handful of unrejected seams dragged squared-error fit so network did worse than predicting nothing.
 

@@ -4,16 +4,16 @@
 aver_build           build; returns whether it built plus compiler errors, Ninja progress dropped
 aver_run             run a host for N frames with flags; returns the parsed probe, log, screenshot
 aver_inspect_image   crop/scale a screenshot so a region is legible
-aver_tests           run the headless suites THROUGH CTest (scripts/test.ps1); failures and fail lines
+aver_tests           run the headless suites through CTest (scripts/test.ps1); failures and fail lines
 aver_gates           the render-gate oracle, READ-ONLY
 aver_package         stage the engine payload (stage-payload.ps1), optionally verify it
 aver_flags           each host's CLI flags, read from source so the list cannot go stale
-aver_editor          one raw command to a RUNNING editor's control channel (abi calls, ping, modules, ...)
-aver_level           assemble a level in a RUNNING editor: open, place, move, animate, remove, save
+aver_editor          one raw command to a running editor's control channel (abi calls, ping, modules, ...)
+aver_level           assemble a level in a running editor: open, place, move, animate, remove, save
 ```
 
-The first seven start a process, run it and exit. The last two are the odd ones out: they talk to an
-editor somebody already has open. See [Driving a running editor](#driving-a-running-editor).
+The first seven start a process, run it and exit. The last two talk to an editor somebody already has
+open. See [Driving a running editor](#driving-a-running-editor).
 
 ## Two hosts
 
@@ -24,58 +24,44 @@ editor somebody already has open. See [Driving a running editor](#driving-a-runn
 | `editor` (default) | `build/bin/Sandbox.exe` | the editor — every render-override flag, `--probe`/`--probe-rel`, and what `gates.ps1` drives |
 | `runtime` | `build/bin/AverEngineRuntime.exe` | the shipped game host (`Runtime/`) — **no** render-override flags and no probe at all |
 
-They do not parse the same set, and neither one rejects a flag it does not know: `GameApp.cpp`'s
-parse loop says "Anything else is deliberately ignored" in as many words. So `--gi --no-rt
---probe-rel 0.5 0.5` aimed at the runtime runs cleanly, exits 0, prints no probe line and means
-nothing. `aver_run` reports any flag it cannot find in the chosen host's own source for exactly that
-reason — the same silence `binary_provenance` catches one step later, when the flag exists but the
-binary predates it.
+They do not parse the same set, and neither one rejects a flag it does not know. Both hosts ignore
+arguments they do not recognise (see `GameApp.cpp`: "Anything else is deliberately ignored"). `aver_run`
+reports any flag it cannot find in the chosen host's own source for exactly that reason — the same
+silence `binary_provenance` catches one step later, when the flag exists but the binary predates it.
 
-There is no count of the flags written down anywhere here on purpose. This file used to say 128 and
-the module docstring used to say 43; the real number when someone next checked was 183. Ask
-`aver_flags`.
+There is no count of flags written here on purpose. This file used to say 128 and the module docstring
+used to say 43; the real number when someone next checked was 183. Ask `aver_flags`.
 
 ## `aver_tests` goes through CTest, and that is the whole point of it
 
-It used to glob `bin/*Test.exe` and run each one directly, reporting pass or fail from the exit code
-alone. The root `CMakeLists.txt` registers every `*Test` target with a `FAIL_REGULAR_EXPRESSION`
-(`FAIL  ` or `FAILED ===`) precisely because suites in this tree have historically returned 0 however
-they went — there is a commit named *"Two skin tests that exited 0 however they went"*. Running the
-binaries directly skipped that check, so **a suite that printed `FAIL` and exited 0 was reported
-green** by the one test path an agent session could reach. It even collected those `FAIL` lines into
-the result and then never let them change the verdict.
-
-The registration walk covers exactly the set the glob covered — 140 registered tests against 140
-`bin/*Test.exe`, with no name in either that is missing from the other — so nothing was lost by the
-move, and three things were gained: the fail-regex, CTest's `bin/` working directory (several suites
-resolve fixtures relative to the executable; this tool had been running them from the repo root), and
-one command a human or a build server can run too.
+It used to glob `bin/*Test.exe` and run each one directly. The root `CMakeLists.txt` registers every
+`*Test` target with a `FAIL_REGULAR_EXPRESSION` (`FAIL  ` or `FAILED ===`) precisely because suites in
+this tree have historically returned 0 however they went. A suite that printed `FAIL` and exited 0 was
+reported green by the glob path. Running through CTest applies the fail-regex, uses the correct working
+directory (several suites resolve fixtures relative to the executable), and uses one command a human or
+build server can run.
 
 `only` is now a **CTest `-R` name regex and case-sensitive**, where it used to be a case-insensitive
 substring. `import` no longer matches `ImportTest`; write `Import`.
 
 Enable it by trusting `.mcp.json` when the editor asks. Pure Python stdlib — nothing to `pip install`
-or `npm install`, which also means nothing whose licence has to be vetted against this repo's
-permissive-only rule.
+or `npm install`.
 
 ## Why
 
 Every visual defect in this tree was found by building, launching with flags, screenshotting, cropping
-and looking. Nine in one phase (`docs/STATUS.md` §4u), three more in the session that wrote this. That
-loop is entirely mechanical, and being tedious is why it gets skipped — which is how a subsystem ends
-up compiling, linking, passing tests and never having been seen.
+and looking. That loop is entirely mechanical, and being tedious is why it gets skipped — which is how a
+subsystem ends up compiling, linking, passing tests and never having been seen.
 
 ## The batch tools drive the existing CLI and change nothing in the engine
 
-Both hosts already take the flags and the whole gates oracle is built out of `Sandbox.exe`'s, so
-`aver_build`, `aver_run`, `aver_tests`, `aver_gates`, `aver_package` and `aver_flags` need no
-engine-side listener: no socket, no named pipe, no new thread, and no risk to a working editor.
+Both hosts already take the flags and the gates oracle is built out of `Sandbox.exe`'s, so `aver_build`,
+`aver_run`, `aver_tests`, `aver_gates`, `aver_package` and `aver_flags` need no engine-side listener: no
+socket, no named pipe, no new thread, and no risk to a working editor.
 
-That was the deliberate first cut, and those six are still **batch control** — each call is a fresh
-process that runs N frames and exits. Live control needed an engine-side command channel, a real
-feature with threading and lifetime concerns, which arrived separately as
-[`modules/mcp`](../../modules/mcp/README.md) (`McpBridge`). `aver_editor` and `aver_level` are its
-client.
+That was the deliberate first cut. Those six are still **batch control** — each call is a fresh process
+that runs N frames and exits. Live control needed an engine-side command channel, which arrived separately
+as [`modules/mcp`](../../modules/mcp/README.md) (`McpBridge`). `aver_editor` and `aver_level` are its client.
 
 ## Driving a running editor
 
@@ -91,8 +77,8 @@ window, so it is the user's to switch on.
 
 **One connection per call.** The bridge serves one client at a time and takes the next only after the
 current one disconnects, so each call connects, sends one line, reads one line and closes. Two calls at
-once queue behind each other rather than failing. A call that gets no answer says so after `timeout`
-seconds (default 90; the bridge itself gives up on the editor's main thread after 60).
+once queue behind each other. A call that gets no answer says so after `timeout` seconds (default 90; the
+bridge itself gives up on the editor's main thread after 60).
 
 ### `aver_editor`
 

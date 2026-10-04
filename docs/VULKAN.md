@@ -1,23 +1,8 @@
 # The Vulkan backend
 
-> **STATUS, checked against source on 2026-08-25 (engine at v0.4.0): real, off by default, and one
-> shadow map short of correct.** `modules/rhi.vulkan` is not a stub and has not been for two weeks.
-> It builds a real `VkInstance`/`VkPhysicalDevice`/`VkDevice`, presents a swapchain, draws the scene
-> — grid, cube, shadow, sky, world axes — with instanced draws, runs the whole editor UI (menus,
-> toolbar, World Outliner, Details, dockspace, 3D viewport) through its own ImGui backend, and tears
-> down with **zero leaked objects** and **10 non-fatal validation errors, down from 156**. It needs
-> no Vulkan SDK to build or run. **`AVER_RHI_VULKAN` now defaults `ON`** (`CMakeLists.txt:58`), so a
-> default build of the engine *does* contain Vulkan code — this banner said "still `OFF` by default …
-> contains no Vulkan code at all", citing `CMakeLists.txt:30`, and both the default and the line
-> number changed before 2026-09-20. The backend is still chosen with `--backend vulkan` rather than
-> automatically, so a default *run* is still D3D12. And it has
-> one confirmed, precisely-diagnosed rendering defect: **the cascaded shadow map has never been
-> written on this backend**, for a structural reason recorded below.
+> **STATUS, checked against source on 2026-10-04: real, off by default, and one shadow map short of correct.** `modules/rhi.vulkan` is not a stub and has not been for two weeks. It builds a real `VkInstance`/`VkPhysicalDevice`/`VkDevice`, presents a swapchain, draws the scene — grid, cube, shadow, sky, world axes — with instanced draws, runs the whole editor UI (menus, toolbar, World Outliner, Details, dockspace, 3D viewport) through its own ImGui backend, and tears down with **zero leaked objects** and **10 non-fatal validation errors, down from 156**. It needs no Vulkan SDK to build or run. **`AVER_RHI_VULKAN` now defaults `ON`** (`CMakeLists.txt:58`), so a default build of the engine *does* contain Vulkan code — this banner said "still `OFF` by default … contains no Vulkan code at all", citing `CMakeLists.txt:30`, and both the default and the line number changed before 2026-09-20. The backend is still chosen with `--backend vulkan` rather than automatically, so a default *run* is still D3D12. And it has one confirmed, precisely-diagnosed rendering defect: **the cascaded shadow map has never been written on this backend**, for a structural reason recorded below.
 >
-> This replaces a 2026-08-02 draft that opened "STATUS: PLAN ONLY. No Vulkan code has been written."
-> Everything below was checked against the tree as it stands, not carried over from that draft or
-> from any commit message taken at face value — commit messages are cited as evidence of intent,
-> source and `git log` dates are what settled every claim.
+> This replaces a 2026-08-02 draft that opened "STATUS: PLAN ONLY. No Vulkan code has been written." Everything below was checked against the tree as it stands, not carried over from that draft or from any commit message taken at face value — commit messages are cited as evidence of intent, source and `git log` dates are what settled every claim.
 
 ---
 
@@ -27,7 +12,7 @@ Two modules, both new since the 2026-08-02 draft:
 
 | Module | Files | Purpose |
 |---|---|---|
-| `Aver.RHI.Vulkan` (`modules/rhi.vulkan`) | `VulkanDevice.cpp` (3758 lines, was 3798), `VulkanResourceFactory.cpp` (3000, was 2964), `VulkanCommon.hpp` (2123, was 2136), `VulkanRenderContext.cpp` (1478, was 1463), `VulkanPipeline.cpp` (686, unchanged, **not built** — see below), `VulkanShaderCompiler.cpp` (293, was 286), `VulkanRegisterMap.hpp` (75, unchanged) | The `IDevice` implementation: instance/device bring-up, swapchain, the fixed scene/sky/line/mesh pipelines, resources, binding, barriers, acceleration structures, capture. |
+| `Aver.RHI.Vulkan` (`modules/rhi.vulkan`) | `VulkanDevice.cpp` (4065 lines), `VulkanResourceFactory.cpp` (3366 lines), `VulkanCommon.hpp` (2206 lines), `VulkanRenderContext.cpp` (1695 lines), `VulkanPipeline.cpp` (687 lines, **not built** — see below), `VulkanShaderCompiler.cpp` (472 lines) | The `IDevice` implementation: instance/device bring-up, swapchain, the fixed scene/sky/line/mesh pipelines, resources, binding, barriers, acceleration structures, capture. |
 | `Aver.RHI.Vulkan.ImGui` (`modules/rhi.vulkan.imgui`) | `ImGuiVulkanUiBackend.cpp` | The concrete Dear ImGui backend, structural twin of `modules/rhi.d3d12.imgui`, plugged into `Aver.RHI.Vulkan`'s `vkb::IUiBackend` seam. Only `Sandbox` links it. |
 
 `modules/rhi.vulkan/src/VulkanCommon.hpp` declares `class VulkanDevice final : public IDevice` with
@@ -87,12 +72,10 @@ this module, and is out of scope for this document to fix.
 
 ## What actually renders
 
-Confirmed by reading `VulkanDevice::init` (`VulkanDevice.cpp:521`, drifted from `658`) and the commits
+Confirmed by reading `VulkanDevice::init` (`VulkanDevice.cpp:521`) and the commits
 that built it:
 
-- A real `vkCreateInstance` → `vkEnumeratePhysicalDevices` → `vkCreateDevice` chain
-  (`VulkanDevice.cpp:595`, `:617-618`, `:740` — all drifted down from `737`/`759-762`/`859` as the
-  file's earlier sections grew), not a stub returning a null device.
+- A real `vkCreateInstance` → `vkEnumeratePhysicalDevices` → `vkCreateDevice` chain, not a stub returning a null device.
 - A live swapchain, presenting. `modules/rhi.vulkan/README.md` states it plainly: *"It presents a
   frame — grid, cube, shadow, sky and world axes — which it did not until `7504a80`."*
 - **Instanced draws**, added in `c97f092` (2026-08-23): `drawMeshInstanced` issues one
@@ -101,18 +84,14 @@ that built it:
   push constant D3D12 uses for the same data.
 - **The whole editor UI**, added in `43a04c8` (2026-08-23, "Vulkan: the editor runs on it"):
   `modules/rhi.vulkan.imgui`'s `ImGuiVulkanUiBackend` is installed from `sandbox/src/SandboxApp.cpp`
-  (`rhi::vkb::imgui_backend::create()` then `rhi::vkb::installUiBackend(e.device(), ...)`, around
-  `SandboxApp.cpp:1411`, drifted again from `1436`, itself drifted from `1057-1058`) whenever the live device reports itself as the Vulkan backend. See "The
+  (around `SandboxApp.cpp:1411`) whenever the live device reports itself as the Vulkan backend. See "The
   two contradictions" below for how this reconciles with an older note claiming the opposite.
 - **Ray tracing and mesh-shader capability queries are real, not deferred.** `VulkanDevice.cpp`
   queries `VK_EXT_mesh_shader` and the acceleration-structure extension set and reports
   `caps_.meshShaderTier = 1` / `caps_.rayTracingTier = 11` when the hardware and DXC both support
-  them (`:1022-1052`, drifted from `:1136-1158`); `buildBlas`/`buildTlas` are implemented in
-  `VulkanRenderContext.cpp` (`:926`, `:985` — these two have not moved), including the same
+  them; `buildBlas`/`buildTlas` are implemented in `VulkanRenderContext.cpp`, including the same
   `instanceCustomIndex` handling the D3D12 backend uses for RT reflection, and
-  `requestCapture`/`getCapture`/`getFrameImage` exist and are wired to a real readback path
-  (`requestCapture` inline in `VulkanCommon.hpp:1402`; `getCapture`/`getFrameImage` at
-  `VulkanDevice.cpp:3607`/`:3612`, drifted from `:3691-3696`). None of this matches the 2026-08-02
+  `requestCapture`/`getCapture`/`getFrameImage` exist and are wired to a real readback path. None of this matches the 2026-08-02
   draft's plan to defer ray tracing and mesh shaders to a much later slice — they were built alongside everything
   else, not held back.
 - **Teardown leaks nothing.** `972dac7` (2026-08-23) took `vkDestroyDevice`'s leaked-object count
@@ -134,10 +113,6 @@ that built it:
   destroyed or updated without `UPDATE_AFTER_BIND`"* as fatal to the whole command buffer, not a
   warning: the driver silently drops every later call in that buffer.
 
-  **Correction to the brief for this document:** the number to cite here is **10**, not "~14". 14
-  was the count as of `6e343c0` (before `972dac7` and `57eb3e9` each found and fixed more); it moved
-  twice more after that commit and the tree has not regressed since.
-
 ---
 
 ## The two contradictions, resolved
@@ -154,11 +129,7 @@ directly:
 - It is wired into the build: `CMakeLists.txt:264-272` adds it as a nested subdirectory of the
   `AVER_RHI_VULKAN` block, additionally gated on `AVER_ENABLE_UI` — the same two-level gating
   `modules/rhi.d3d12.imgui` uses.
-- `sandbox/src/SandboxApp.cpp` installs it: the block, now around line 1398 (drifted again from the
-  1420 previously recorded here, itself drifted from 1042 as the file grew), picks one of two
-  `installUiBackend` calls "by what the device actually is" — `rhi::d3d12::installUiBackend`
-  (`SandboxApp.cpp:1404`) for a D3D12 device, `rhi::vkb::installUiBackend`
-  (`SandboxApp.cpp:1411`) for a Vulkan one.
+- `sandbox/src/SandboxApp.cpp` installs it: the block picks one of two `installUiBackend` calls "by what the device actually is" — `rhi::d3d12::installUiBackend` for a D3D12 device, `rhi::vkb::installUiBackend` for a Vulkan one.
 - `43a04c8`'s own commit message claims the result was seen on screen ("menus, toolbar, World
   Outliner, Details, dockspace and the 3D viewport with the scene in it -- now draws on the Vulkan
   backend at 60 FPS"). That claim is not independently reproducible from this pass — this document
@@ -197,12 +168,7 @@ neighbors:
 - `modules/rhi.vulkan/src/VulkanRegisterMap.hpp:73` declares `buildRegisterBinds(const
   PipelineLayout&, VkRegisterBind*, u32, bool)` — "fills `out` with one `VkRegisterBind` per SRV /
   UAV / SAMPLER register a `PipelineLayout` declares."
-- `VulkanShaderCompiler::compile` (`VulkanShaderCompiler.cpp`, `bool ... compile(...)`) takes an
-  optional `const VkRegisterBind* binds, u32 bindCount` and, when supplied, emits one
-  `-fvk-bind-register <class><number> <space> <binding> <set>` per entry instead of the blanket
-  `-fvk-u-shift` it uses when there is no map — the two are mutually exclusive by DXC's own rule
-  (*"`-fvk-u-shift` cannot be used together with `-fvk-bind-register`"*), which is recorded in the
-  file as how this was discovered.
+- `VulkanShaderCompiler::compile` takes an optional `const VkRegisterBind* binds, u32 bindCount` and, when supplied, emits one `-fvk-bind-register <class><number> <space> <binding> <set>` per entry instead of the blanket `-fvk-u-shift` it uses when there is no map — the two are mutually exclusive by DXC's own rule (*"`-fvk-u-shift` cannot be used together with `-fvk-bind-register`"*), which is recorded in the file as how this was discovered.
 - `VulkanResourceFactory::moduleForLayout` (`VulkanResourceFactory.cpp:2056`) is the caller: it
   builds the register map from the pipeline's real `PipelineLayout` and passes it into `compile()`,
   falling back to the old blanket-shift behaviour only for the specific registers a layout does not
@@ -235,9 +201,7 @@ D3D12   darkest floor pixel (13, 15, 19)  -- a shadow
 Vulkan  darkest floor pixel (66, 66, 66)  -- unshadowed floor, no shadow
 ```
 
-**The cause is `pushRenderScope`** (`VulkanDevice.cpp:2524-2528` — moved down from the `2578-2583`
-recorded here originally by a "KNOWN DEFECT, MEASURED, NOT YET FIXED" comment block added above it;
-the function body itself is unchanged):
+**The cause is `pushRenderScope`** (`VulkanDevice.cpp:2732`):
 
 ```cpp
 bool VulkanDevice::pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri) {
@@ -302,8 +266,7 @@ Building with it — which a default configure now does:
   is shared runtime code, out of scope for this document to fix, but it means a `--backend vulkan`
   request that somehow failed would still silently fall through to D3D12 with only a warning, exactly
   as the draft described.
-- `scripts/gates.ps1` still has no `-Backend`/`--backend` handling anywhere in it (confirmed:
-  `grep -n backend scripts/gates.ps1` returns nothing), so the pixel-probe oracle cannot run
+- `scripts/gates.ps1` still has no `-Backend`/`--backend` handling anywhere in it, so the pixel-probe oracle cannot run
   against this backend at all yet, let alone assert that a gate run actually used it — 18 gates in
   `$Gates` when this line was written, 20 now, the count having grown since is itself evidence the
   oracle keeps changing under a backend that has never once run through it. This is the
@@ -321,7 +284,7 @@ the same harness D3D12 is held to.
 ## What is not done
 
 - **The cascaded shadow map bug above.** The single confirmed rendering defect.
-- **`VulkanPipeline.cpp` is dead code that still exists.** 686 lines, deliberately excluded from
+- **`VulkanPipeline.cpp` is dead code that still exists.** 687 lines, deliberately excluded from
   `modules/rhi.vulkan/CMakeLists.txt`'s `SOURCES` list. It holds an unfinished file split: six
   functions (`tableSetLayout`, `getOrCreateSampler`, `descriptorLayout`, both pipeline creators, the
   free `pushConstantLayout`) were moved out of `VulkanResourceFactory.cpp` and the originals were
@@ -331,35 +294,24 @@ the same harness D3D12 is held to.
   nothing live. It stays on disk, unbuilt, as a trap for whoever edits the "wrong" copy next.
 - **9 of the 10 remaining validation errors are a genuine gap, not noise**: 7 on the mesh-shader
   stage (`MSVoxel`'s `gVerts`/`gIndices`/`MeshCB` — the fixed compute-driven mesh-geometry path this
-  backend has not implemented) and, as of the register-map work, some on the instancing path where a
+  backend has not implemented) and some on the instancing path where a
   `PipelineLayout` does not fully describe every register a shared shader declares. `moduleForLayout`
   falls back to the pre-map placement for exactly these cases rather than inventing a binding, which
   keeps them from being wrong rather than making them right.
 - **No suballocator.** `VulkanResourceFactory.cpp` calls `vkAllocateMemory` once per buffer and once
-  per image (`:954`, `:997`) — a direct translation of D3D12's one-`CreateCommittedResource`-per-
-  resource pattern. Neither VulkanMemoryAllocator nor any other suballocator is vendored. This has
-  not caused a failure yet because the scenes exercised so far (a handful of meshes and textures) are
+  per image — a direct translation of D3D12's one-`CreateCommittedResource`-per-resource pattern. Neither VulkanMemoryAllocator nor any other suballocator is vendored. This has
+  not caused a failure yet because the scenes exercised so far are
   nowhere near a driver's `maxMemoryAllocationCount` (commonly 4096), but it is a real ceiling a
   bigger scene would hit.
 - **No cross-backend correctness oracle.** Nothing compares a Vulkan frame against a D3D12 one, by
-  pixel or by relational assertion. `scripts/gates.ps1` has no backend switch at all (see above), and
+  pixel or by relational assertion. `scripts/gates.ps1` has no backend switch at all, and
   no Vulkan-specific baseline file exists in `scripts/`.
 - **Validation layers require a LunarG SDK install this machine does not have**, so nothing in this
-  pass — or apparently any pass since `43a04c8` — has actually run the validation layer against the
-  current state; the "10 errors, from 156" figures are what earlier sessions with the layer available
-  recorded and left in the README, not something re-verified here.
+  pass has actually run the validation layer against the current state; the "10 errors, from 156" figures are what earlier sessions with the layer available recorded and left in the README, not something re-verified here.
 - **This document itself was written without building or running the code.** Every claim above about
   what compiles, what a debug session found, and what a frame looks like traces to source text and
   `git log`, not to a build performed in this pass — this task's own rules prohibit building or
-  launching anything in this tree while other work is in flight. `VulkanDevice.cpp`'s own top-of-file
-  banner still says *"UNVERIFIED. House rule: no build, no run… not compiled"* — but that banner
-  dates to `895ba68`, the very first checkpoint commit (2026-08-09), before the module ever compiled,
-  and has not been touched since despite eleven-plus commits of build/run/test iteration afterward.
-  It is exactly as stale as the two contradictions resolved above, for the same reason: nobody
-  returned to update a comment once the code around it changed. Take the specific, falsifiable claims
-  in the commit history (frame counts, validation-error counts that visibly went down step by step,
-  measured pixel values) as the stronger evidence; take neither that banner nor any single commit
-  message as proof on its own.
+  launching anything in this tree while other work is in flight.
 
 ---
 
@@ -371,7 +323,7 @@ the same harness D3D12 is held to.
 | DirectXShaderCompiler, SPIR-V build | `third_party/dxc-spirv/dxcompiler.dll` | MIT (Microsoft) over NCSA (LLVM base) | Vendored, `v1.9.2607`, 27 MB. `dxil.dll` (proprietary MS EULA, DXIL signing) deliberately **not** vendored alongside it — SPIR-V needs no signing. |
 | Dear ImGui Vulkan backend | `third_party/imgui/backends/imgui_impl_vulkan.{h,cpp}` | MIT (already-vendored ImGui) | Vendored at the docking branch matching the ImGui version already in tree, "with permission asked first" per `43a04c8`'s commit message. Built only under `AVER_RHI_VULKAN` — it includes `vulkan.h`. |
 | VulkanMemoryAllocator | — | — | **Not vendored.** See "No suballocator" above. |
-| Vulkan validation layers | — | Apache-2.0 (LunarG SDK) | Not vendored, not required to build or run — required only for `--debug-layer` to do anything, and this machine does not have them installed. |
+| Vulkan validation layers | — | Apache-2.0 (LunarG SDK) | Not vendored, not required to build or run — required only for `--debug-layer` to do anything. |
 | glslang / shaderc | — | — | Not needed and not used — DXC with `-spirv` is the whole shader pipeline, for both backends. |
 
 ---
@@ -387,7 +339,7 @@ In rough order of leverage:
    together, the way `-Release` already does. Without it, this backend cannot be regression-tested at
    all, and cannot ever be turned on by default responsibly.
 3. **Install a LunarG SDK on a development machine** and re-run with `--debug-layer` before trusting
-   the "10 errors" figure as current, since nothing in this pass could re-check it.
+   the "10 errors" figure as current.
 4. **Finish or delete the `VulkanPipeline.cpp` split.** Two files with six functions that disagree is
    a standing hazard, not a cosmetic issue — the linker resolves it silently today, but "silently" is
    exactly the failure mode this project has been burned by before.

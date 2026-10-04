@@ -1,85 +1,42 @@
 # Actor Editor with Live Sync
 
-> **Status: all four pieces are built.** The preview, the designer reader and rewriter, the tab, the
-> translate/rotate/scale gizmo (all three — see below), source-to-view reload, the Live view (§4b),
-> the file watcher (§4c) and the Roslyn backend `averdesign` (§4d) all exist and are in the build.
-> What is NOT built: most of the tab infrastructure fixes in §2 Piece 1 (Ctrl+S, and a cancellable
-> exit-confirm) — the `.cs`-file item in that same list has since been fixed, see below.
-> Sections below marked *(built)* describe what shipped; the rest is still plan.
->
-> **Corrected: this used to say rotate/scale gizmo handles were not built.** `ActorEditor.cpp` now
-> has `ToolRotate`/`ToolScale` (keys 3/4) alongside the original translate tool, with
-> `dragRotateAxis`/`dragScaleAxis` driving them.
+> **Status: all four pieces are built.** The preview, the designer reader and rewriter, the tab, the translate/rotate/scale gizmo, source-to-view reload, the Live view (§4b), the file watcher (§4c) and the Roslyn backend `averdesign` (§4d) all exist and are in the build. Sections below describe what shipped unless they say otherwise.
 
+A tab for a C# actor class: a 3D preview of its authored model tree, a properties panel, and a save path that rewrites the actor's `.Designer.cs`. Two-way — dragging in the preview changes the source; changing the source changes the preview.
 
-A tab for a C# actor class: a 3D preview of its authored model tree, a properties panel, and a save
-path that rewrites the actor's `.Designer.cs`. Two-way — dragging in the preview changes the source;
-changing the source changes the preview.
-
-None of this was built when this document was first written — see the Status callout above for what
-has shipped since. This started as the plan, written before the code for the same reason
-[docs/AUDIO.md](AUDIO.md) was: the expensive decision is where the second 3D view comes from, and it
-is not recoverable once something depends on the wrong answer.
-
-**This was surveyed and then adversarially checked, and the check found ten factual errors in the
-first draft.** Four of them changed a decision. Where a claim below cites a file and line, it was
-read; where a decision reverses the first draft, it says so and why. That record is kept because the
-same mistakes are the ones a reader will otherwise make again.
-
----
+This began as a plan, written before the code for the same reason [docs/AUDIO.md](AUDIO.md) was: the expensive decision is where the second 3D view comes from, and it is not recoverable once something depends on the wrong answer. Where a claim below cites a file, it was read, not assumed.
 
 ## 1. What already exists
 
-**The tab seam is real and nearly unused.** `AssetEditorHost` (`sandbox/src/AssetEditor.hpp`) has a
-five-virtual contract, dedup-by-path, and a first-accepting-factory registry. Its whole footprint is
-four references repo-wide: one factory registered, one draw site, one open site, one member. Docking
-is on globally; **multi-viewport is not enabled anywhere**, so tear-off OS windows are out of scope.
+**The tab seam is real and nearly unused.** `AssetEditorHost` (`sandbox/src/AssetEditor.hpp`) has a five-virtual contract, dedup-by-path, and a first-accepting-factory registry. Its footprint is four references repo-wide: one factory registered, one draw site, one open site, one member. Multi-viewport is not enabled anywhere, so tear-off OS windows are out of scope.
 
-**The rewrite precedent is tested.** `fmt::rewriteMaterialScript`
-(`modules/formats/src/MaterialScript.cpp`) already locates a class by attribute, replaces only its
-`Configure` chain, preserves usings, prose and indentation, and refuses rather than corrupts — with
-24 assertions behind it. The actor case is the same shape at greater difficulty.
+**The rewrite precedent is tested.** `fmt::rewriteMaterialScript` (`modules/formats/src/MaterialScript.cpp`) already locates a class by attribute, replaces only its `Configure` chain, preserves usings, prose and indentation, and refuses rather than corrupts — with 24 assertions behind it. The actor case is the same shape at greater difficulty.
 
-**The authoring contract is implemented, not merely specified.** `ActorBuilder.Place(modelId,
-meshPath, material, pos, rot, scale)` builds a child entity, stamps the ObjectId, attaches
-`CMeshRenderer`, and sets local TRS *before* `SetParent` — which is correct, because `SetParent`
-defaults `keepWorld=false`. `AverActor.BuildModels` is dispatched through the bridge and driven
-native-side in a contracted order, with a real test in `tests/framework`.
+**The authoring contract is implemented.** `ActorBuilder.Place(modelId, meshPath, material, pos, rot, scale)` builds a child entity, stamps the ObjectId, attaches `CMeshRenderer`, and sets local TRS *before* `SetParent` — which is correct, because `SetParent` defaults `keepWorld=false`. `AverActor.BuildModels` is dispatched through the bridge and driven native-side in a contracted order, with a real test in `tests/framework`.
 
-`ClassBuilder`'s entire surface is four methods — `Mesh`, `PointLight`, `Camera`, `Ticks`. That bounds
-what any "class defaults" panel could ever show.
+`ClassBuilder`'s entire surface is four methods — `Mesh`, `PointLight`, `Camera`, `Ticks`. That bounds what any "class defaults" panel could ever show.
 
-**A `DirectoryWatcher` exists, debounced and coalescing, with a Win32 backend — and zero consumers
-and zero tests.** It is a starting point, not a dependency that has been exercised.
-
----
+**A `DirectoryWatcher` exists, debounced and coalescing, with a Win32 backend — and zero consumers and zero tests.** It is a starting point, not a dependency that has been exercised.
 
 ## 1b. What is built, and where
 
 | Piece | Where | Verified by |
 |---|---|---|
-| Reading the generated region, and rewriting coordinates | `modules/formats/{include/aver/formats,src}/ActorScript.*` | `ActorScriptTest`, 92 assertions (was 51; the suite has grown since this table was written) |
+| Reading the generated region, and rewriting coordinates | `modules/formats/{include/aver/formats,src}/ActorScript.*` | `ActorScriptTest`, 92 assertions |
 | Reading what a class declares (`Configure`) | same | same |
-| The preview render feature | `modules/render.actorpreview/` | `ActorPreviewTest`, 98 assertions (was 51) |
+| The preview render feature | `modules/render.actorpreview/` | `ActorPreviewTest`, 98 assertions |
 | The preview's own mesh registry | `modules/render.actorpreview/src/PreviewMeshCache.cpp` | — |
-| The tab, gizmo and reload | `sandbox/src/ActorEditor.{hpp,cpp}` | not covered by a test |
+| The tab, gizmo (select/move/rotate/scale, keys 1–4) and reload | `sandbox/src/ActorEditor.{hpp,cpp}` | not covered by a test |
 | The **Live** view — spawn the class, read what it built | same, plus `aver_fw_spawn_preview` | `FrameworkTest` (the ABI edge); `--open-asset … --actor-live` (the tab) |
 | The Components tree, and the camera/light wireframes | `sandbox/src/ActorEditor.cpp` | not covered by a test; verified by screenshot against `Car.Designer.cs` and `FpsCharacter.cs` |
 | A resizable, non-square preview target | `modules/render.actorpreview/` | `ActorPreviewTest` — drain/create/destroy order, id re-fetch, idempotence, zero-extent refusal |
-| The file watcher, and routing a disk change to a tab | `modules/platform/…/DirectoryWatcher`, `sandbox/src/AssetEditor.cpp` | `WatcherTest`, 47 assertions against a real filesystem (was 33) |
+| The file watcher, and routing a disk change to a tab | `modules/platform/…/DirectoryWatcher`, `sandbox/src/AssetEditor.cpp` | `WatcherTest`, 47 assertions against a real filesystem |
 | The **Roslyn** backend | `scripting/csharp/Aver.Design/` → `bin/Tools/averdesign.exe`; `modules/formats.roslyn/` | `RoslynTest` — agreement with the scanner, and the cases it declines |
 
-**It is general, and that was checked against real projects rather than a fixture.** A sweep over
-SkyForge's scripts opens `Gun.cs` (2 actors), `FpsGameMode.cs` (5 actors, 2 previewable) and
-`Target.cs`, and over the engine's own sample opens `Car.Designer.cs` (5 placements). Files that
-declare nothing previewable are skipped rather than opened empty. Two bugs came straight out of that
-sweep and neither would have shown up in a fixture:
+**It is general, and that was checked against real projects rather than a fixture.** A sweep over SkyForge's scripts opens `Gun.cs` (2 actors), `FpsGameMode.cs` (5 actors, 2 previewable) and `Target.cs`, and over the engine's own sample opens `Car.Designer.cs` (5 placements). Files that declare nothing previewable are skipped rather than opened empty. Two bugs came straight out of that sweep and neither would have shown up in a fixture:
 
-1. Attribute kinds were searched in turn, so a file naming a `[AverGameMode]` above an `[AverClass]`
-   came back named after the wrong one. Attributes are now collected in **file order**.
-2. A file was assumed to declare one actor. Real ones declare several, and each entry now carries
-   only what appears between its own attribute and the next — so two actors in one file cannot
-   borrow each other's mesh. The tab shows a picker.
+1. Attribute kinds were searched in turn, so a file naming a `[AverGameMode]` above an `[AverClass]` came back named after the wrong one. Attributes are now collected in **file order**.
+2. A file was assumed to declare one actor. Real ones declare several, and each entry now carries only what appears between its own attribute and the next — so two actors in one file cannot borrow each other's mesh. The tab shows a picker.
 
 ## 2. The four pieces, in dependency order
 
@@ -94,51 +51,34 @@ sweep and neither would have shown up in a fixture:
 
 The virtuals are trivial; every one is a call site with an ordering decision.
 
-- `draw()`'s return value is **discarded**, so with an editor focused `Delete` still deletes the level
-  selection and `Ctrl+Z` still rewinds the level's undo stack.
-- `tick()` does not exist, and is not optional: ImGui skips `draw()` entirely for a collapsed window
-  **or an inactive dock tab** — which is the common case for a tab-based editor.
-- `anyDirty()` and `save()` have **zero callers**, despite the header claiming the host asks before
-  closing. Today a dirty editor is destroyed after a warning.
+- `draw()`'s return value is **discarded**, so with an editor focused `Delete` still deletes the level selection and `Ctrl+Z` still rewinds the level's undo stack.
+- `tick()` does not exist, and is not optional: ImGui skips `draw()` entirely for a collapsed window **or an inactive dock tab** — which is the common case for a tab-based editor.
+- `anyDirty()` and `save()` have **zero callers**, despite the header claiming the host asks before closing. Today a dirty editor is destroyed after a warning.
 - A rename leaves an editor keyed on a dead path and lets a second open for the same asset.
 
-Three things the first draft missed, all found by the check:
-
-- **There is no `Ctrl+S` handler anywhere in the editor.** `MenuItem("Save Level", "Ctrl+S")` passes a
-  *display string*; it binds nothing. Building the shortcut path — including the level's — is new work.
-- **This has since been fixed — a `.cs` file now reaches the host.** It used to be true that double-clicking one tested `cbIsSourceFile`, opened the IDE, and *returned* before the editor-open call, short-circuiting the actor editor's own file type. `SandboxApp.cpp`'s `cbOpenEntry` now checks `assetEditors_.open(full)` **first** and only falls through to `cbIsSourceFile`/the IDE if that returns false; `ActorEditor.cpp`'s `makeActorEditor` factory accepts a `.cs` path, parses it, and returns non-null exactly when it declares something previewable (§1b's "files that declare nothing previewable are skipped"). A `.cs` file with a recognised actor now opens the actor tab; one with no actor content still falls through to the IDE unchanged.
-- **The exit-confirm is not implementable as stated.** `Window` exposes `shouldClose()` and
-  `requestClose()` and nothing that clears or vetoes it; `WM_CLOSE` calls `requestClose()`
-  unconditionally. "Cancel" needs a cancellable close in the platform layer.
+A `Ctrl+S` shortcut did not exist when this was written — `MenuItem("Save Level", "Ctrl+S")` passes a *display string* and binds nothing — and neither did a way to cancel an exit; both have since been built (`AssetSave`/`LevelSave` in `sandbox/src/EditorKeybinds.cpp`, and `Window::setCloseGuard`). A `.cs` double-click used to open the IDE and return before the editor-open call, short-circuiting the actor editor's own file type. `SandboxApp.cpp`'s `cbOpenEntry` now checks `assetEditors_.open(full)` **first** and only falls through to `cbIsSourceFile`/the IDE if that returns false; `ActorEditor.cpp`'s `makeActorEditor` factory accepts a `.cs` path, parses it, and returns non-null exactly when it declares something previewable. A `.cs` file with a recognised actor now opens the actor tab; one with no actor content still falls through to the IDE.
 
 ### Piece 2 — `averdesign`
 
-Roslyn is **MIT, already in the local NuGet cache, and ships inside the SDK** — so it restores
-offline. That removes the only practical objection.
+Roslyn is **MIT, in the local NuGet cache** (vendored at `third_party/nuget`), pinned at 5.6.0 on the `release/stable` branch. The repo-root `NuGet.config` names that folder as the only source, so the restore needs no network.
 
-But one Roslyn argument in the first draft was wrong and is withdrawn: the generated region is
-delimited by `// <aver-generated region="models" schema="1">` comments, **not** `#region`. Roslyn
-models `#region` as directive trivia with matching and nesting; a line comment is just
-`SingleLineCommentTrivia` — a span and nothing else. For *locating the region*, Roslyn buys
-approximately nothing over a scanner.
+The generated region is delimited by `// <aver-generated region="models" schema="1">` comments, **not** `#region`. Roslyn models `#region` as directive trivia with matching and nesting; a line comment is just `SingleLineCommentTrivia` — a span and nothing else. So for *locating the region*, Roslyn buys approximately nothing over a scanner.
 
 What it does buy, for actors specifically:
 
-- **Named and optional arguments.** `Place(0x…UL, "…", material: "M_Rubber", pos: (120f, 80f, 20f))`
-  — a scanner matching positionally breaks the moment somebody reorders or omits one. (Note the
-  parameter is `modelId`, not `objectId`; a matcher built from the wrong spelling silently misses.)
+- **Named and optional arguments.** `Place(0x…UL, "…", material: "M_Rubber", pos: (120f, 80f, 20f))` — a scanner matching positionally breaks the moment somebody reorders or omits one. (Note the parameter is `modelId`, not `objectId`; a matcher built from the wrong spelling silently misses.)
 - **Tuple literals with nested parens**, which brace-counting gets wrong.
 - **Trivia-preserving replacement**, so a rewrite is a span swap rather than a reconstruction.
 - **Real refusal**: a body it cannot model is a diagnostic, not a mangled file.
 
-Materials did not need this — a flat list of scalars in one fluent chain is honestly hand-scannable,
-and it is tested. Actors are structured, and that is where the hand-rolled approach stops being
-honest.
+Materials did not need this — a flat list of scalars in one fluent chain is honestly hand-scannable, and it is tested. Actors are structured, and that is where the hand-rolled approach stops being honest.
 
-**One inherited-code trap:** `MaterialScript.cpp`'s float formatter walks `%.1g`…`%.9g`, so values
-outside `%g`'s fixed range come back in exponent form (`1e+07f`). `docs/DESIGNER_REWRITE.md` fixes the
-numeric token as `-?[0-9]+(\.[0-9]+)?f` — no exponent. That formatter must be *written*, not reused.
-(It is fine where it is: C# accepts exponent literals, and `.ocmat` is not governed by that grammar.)
+**One inherited-code trap:** `MaterialScript.cpp`'s float formatter walks `%.1g`…`%.9g`, so values outside `%g`'s fixed range come back in exponent form (`1e+07f`). `docs/DESIGNER_REWRITE.md` fixes the numeric token for actors as `-?[0-9]+(\.[0-9]+)?f` — no exponent. That formatter must be *written*, not reused. (It is fine where it is: C# accepts exponent literals, and `.ocmat` is not governed by that grammar.)
+
+Two things pinned by `RoslynTest`:
+
+- **Byte offsets, not character offsets.** Roslyn counts UTF-16 chars; the C++ side slices UTF-8 bytes. They agree only while the file is pure ASCII, and one accented letter in a comment above a placement shifts every subsequent span — so a rewrite lands in the middle of another token. `averdesign` converts every offset through a prefix table before it leaves.
+- **The object id crosses as a string.** It is a full 64 bits and a JSON number is a double, so a numeric round trip would silently round the one field every rewrite is matched by.
 
 ### Piece 3 — the preview viewport
 
@@ -154,254 +94,91 @@ See §4. Shipped as the **Live** toggle described in §4b.
 
 There is exactly one 3D view in the process and it is the backbuffer.
 
-**Option A — a second scissored rect in the main pass. Rejected, and it is worth knowing why it
-*compiles*.** `setCamera` writes only the CPU-side frame struct; that struct is memcpy'd into the
-frame's upload buffer once, at the top of `beginFrame`, and bound as a single root CBV. Called after
-`beginFrame` it is a **no-op for the current frame**. So the naive two-viewport implementation draws
-both rects with the *previous frame's* camera, and presents as a matrix-maths bug.
+**Option A — a second scissored rect in the main pass. Rejected, and it is worth knowing why it *compiles*.** `setCamera` writes only the CPU-side frame struct; that struct is memcpy'd into the frame's upload buffer once, at the top of `beginFrame`, and bound as a single root CBV. Called after `beginFrame` it is a **no-op for the current frame**. So the naive two-viewport implementation draws both rects with the *previous frame's* camera, and presents as a matrix-maths bug. Even fixed: depth is one buffer cleared once full-surface, so overlapping rects occlude each other; bloom is a full-image pyramid with no notion of a rect; and exposure is a single histogram over the whole target reducing to one scalar. That last is decisive — **two viewports cannot have different exposure**, and because adaptation is temporal, opening an actor tab would make the *level viewport* visibly ramp brightness for about a second. That reads as a renderer bug in the level.
 
-Even fixed: depth is one buffer cleared once full-surface, so overlapping rects occlude each other;
-bloom is a full-image pyramid with no notion of a rect; and exposure is a single histogram over the
-whole target reducing to one scalar. That last is decisive — **two viewports cannot have different
-exposure**, and because adaptation is temporal, opening an actor tab would make the *level viewport*
-visibly ramp brightness for about a second. That reads as a renderer bug in the level.
+**Option B — extend the device to N views. Rejected.** Weeks of work in the one subsystem whose regressions this project cannot cheaply adjudicate, because the renderer is not bit-deterministic and the pixel oracle therefore cannot settle a disagreement.
 
-**Option B — extend the device to N views. Rejected.** Weeks of work in the one subsystem whose
-regressions this project cannot cheaply adjudicate, because the renderer is not bit-deterministic and
-the pixel oracle therefore cannot settle a disagreement.
+**Option C — draw on the tonemapped backbuffer in `overlayPass`. Closed.** That hook binds no depth by contract, so even a single cube self-occludes wrongly, and the backbuffer is not a `TextureHandle` a module can pair with its own depth.
 
-**Option C — draw on the tonemapped backbuffer in `overlayPass`. Closed.** That hook binds no depth
-by contract, so even a single cube self-occludes wrongly, and the backbuffer is not a `TextureHandle`
-a module can pair with its own depth.
+**Option D — a dedicated preview `IRenderFeature`. Chosen.** It owns a colour texture and a depth texture, its own PSO at sample count 1, its own shaders, tonemapping in its own pixel shader, handed to ImGui via `uiTextureId`. Structurally this is Voxi's shadow pass with a colour target added. It publishes its camera at `kFeatureFrameConstantRegister` (**b4**), as Voxi does, **not** at **b0** via `setConstantBuffer(0, …)`: slot 0 is reserved for the engine's per-frame block and `setPipeline` re-binds it on *every* pipeline change, so an override would have to be re-issued after each one. It therefore cannot use `averSkyAbove`, which reads the sky fields out of b0; it writes its own sky.
 
-**Option D — a dedicated preview `IRenderFeature`. Chosen.** It owns a colour texture and a depth
-texture, its own PSO at sample count 1, its own shaders, tonemapping in its own pixel shader, handed
-to ImGui via `uiTextureId`. Structurally this is Voxi's shadow pass with a colour target added.
+**What it draws is not entities** — a flat list of `(meshHandle, materialSlot, worldMatrix)` from the parsed model rows. No spawn, no world, no bridge, no play state. Spawning a live instance would need a preview-world isolation the bridge cannot give: its state is process-global statics.
 
-> **Corrected from the first draft.** That draft had the preview publish its camera at **b0** via
-> `setConstantBuffer(0, …)`. That breaks the RHI contract — slot 0 is reserved for the engine's
-> per-frame block, and `setPipeline` re-binds it on *every* pipeline change, so the override would
-> have to be re-issued after each one. The cited precedent does the opposite: Voxi publishes at
-> `kFeatureFrameConstantRegister` (**b4**). The preview must do the same — **and therefore cannot use
-> `averSkyAbove`, which reads the sky fields out of b0.** It writes its own sky. This is a different
-> shader from the one the draft costed.
+**What it costs, and this must be written in the panel and not only here:** the preview does not match the level and will not. Fixed exposure, no bloom, no adaptation, no GI, no cascaded shadows, no MSAA. A second lighting shader to maintain, which drifts when the material model changes. One live preview at a time.
 
-**What it draws is not entities** — a flat list of `(meshHandle, materialSlot, worldMatrix)` from the
-parsed model rows. No spawn, no world, no bridge, no play state. Spawning a live instance would need a
-preview-world isolation the bridge cannot give: its state is process-global statics.
-
-**What it costs, and this must be written in the panel and not only here:** the preview does not match
-the level and will not. Fixed exposure, no bloom, no adaptation, no GI, no cascaded shadows, no MSAA.
-A second lighting shader to maintain, which drifts when the material model changes. One live preview
-at a time.
-
-**What it forecloses:** per-viewport post parity, permanently, short of doing Option B from scratch.
-And it is not reusable as a *scene* view — no picture-in-picture camera actor, no reflection probe.
+**What it forecloses:** per-viewport post parity, permanently, short of doing Option B from scratch. And it is not reusable as a *scene* view — no picture-in-picture camera actor, no reflection probe.
 
 ---
 
 ## 4. The live-sync contract
 
-**Viewport-edit → source.** *(built)* A drag on a gizmo handle moves the placement; Save rewrites
-that row through `fmt::rewriteActorScript`, matched by ObjectId, touching only the three coordinate
-tuples.
+**Viewport-edit → source.** A drag on a gizmo handle moves the placement; Save rewrites that row through `fmt::rewriteActorScript`, matched by ObjectId, touching only the three coordinate tuples.
 
-The gizmo is an **ImGui overlay projected through the preview's own camera**, not geometry in the
-pass. Two reasons: the preview feature must stay drivable with no ImGui at all — that is what lets a
-test be the device — and a handle has to be pickable at a constant *screen* size, which it cannot be
-if it is part of a scene that scales. The axis is latched on mouse-down and held for the whole
-gesture, because deciding per frame lets a drag that began on the handle become an orbit the moment
-the cursor leaves it, which is exactly when a user is dragging fastest.
+The gizmo is an **ImGui overlay projected through the preview's own camera**, not geometry in the pass. Two reasons: the preview feature must stay drivable with no ImGui at all — that is what lets a test be the device — and a handle has to be pickable at a constant *screen* size, which it cannot be if it is part of a scene that scales. The axis is latched on mouse-down and held for the whole gesture, because deciding per frame lets a drag that began on the handle become an orbit the moment the cursor leaves it, which is exactly when a user is dragging fastest.
 
-**Source-edit → viewport.** *(built, and not with a watcher.)* The open tab compares the file's
-last-write time once per frame it is visible and re-reads when it changes. **No rebuild is required**,
-because the preview reads the *parsed source* rather than a spawned actor — that is the direct
-consequence of the Piece 3 decision and it is what makes this cheap.
+**Source-edit → viewport.** The open tab compares the file's last-write time once per frame it is visible and re-reads when it changes. **No rebuild is required**, because the preview reads the *parsed source* rather than a spawned actor — that is the direct consequence of the Piece 3 decision and it is what makes this cheap.
 
-A `DirectoryWatcher` was the planned answer and was rejected on contact. It has **zero consumers and
-zero tests** in this tree, and its `poll()` returns `true` to mean *the OS dropped records, rescan
-yourself* — a case nothing handles. Worse, `dotnet build` runs with its working directory inside
-`Content\Scripts`, so a recursive watch covers that project's own `obj/` and `bin/` and **a build is
-exactly the burst that overflows it**. One `stat` per visible tab is cheaper than a thread, an OS
-handle, a filter list and an overflow path, and it cannot lose an event. If a future need is a
-project-wide watch rather than a per-tab one, the watcher is still the right tool and its first test
-comes with it.
+A `DirectoryWatcher` was planned and rejected on contact. It has **zero consumers and zero tests** in this tree, and its `poll()` returns `true` to mean *the OS dropped records, rescan yourself* — a case nothing handles. Worse, `dotnet build` runs with its working directory inside `Content\Scripts`, so a recursive watch covers that project's own `obj/` and `bin/` and **a build is exactly the burst that overflows it**. One `stat` per visible tab is cheaper than a thread, an OS handle, a filter list and an overflow path, and it cannot lose an event. If a future need is a project-wide watch rather than a per-tab one, the watcher is still the right tool and its first test comes with it.
 
-**When both race**, *(built)* the reload is **refused** while the tab is dirty and says so. Silently
-replacing somebody's in-progress drag with what a background tool wrote is the one behaviour a live
-sync must never have. Saving, or closing without saving, resolves it. A file mid-write that fails to
-parse also leaves the previous good state on screen rather than blanking the tab.
+**When both race**, the reload is **refused** while the tab is dirty and says so. Silently replacing somebody's in-progress drag with what a background tool wrote is the one behaviour a live sync must never have. Saving, or closing without saving, resolves it. A file mid-write that fails to parse also leaves the previous good state on screen rather than blanking the tab.
 
 ---
 
 ## 4a. The layout, and the Components panel
 
-**Three columns, the way UE lays a Blueprint editor out:** Components on the left, the viewport in
-the middle with everything left over, Details on the right. It was two — viewport, then one column
-carrying the class picker, the class defaults, the component tree and the transform editor — so the
-tree had to be kept short to leave the others room, and the viewport was squeezed by a column doing
-three unrelated jobs.
+**Three columns, the way UE lays a Blueprint editor out:** Components on the left, the viewport in the middle with everything left over, Details on the right. Below ~260 pixels of viewport width the left column folds back into the right one and the tab is two columns again. The test is phrased as *"is there still room for a viewport"* rather than as a ratio between the side panels — phrased as a ratio it never reached three columns at 300% DPI at all, because the panels scale with DPI and a ratio between them ignores how much room there actually is. (It was previously two columns — viewport, then one column carrying the class picker, class defaults, component tree and transform editor — so the tree had to be kept short and the viewport was squeezed by a column doing three unrelated jobs.)
 
-Below the width where the viewport would be squeezed under ~260 units the left column folds back
-into the right one and the tab is two columns again. The test is phrased as *"is there still room
-for a viewport"* rather than as a ratio between the side panels — phrased as a ratio it never
-reached three columns at 300% DPI at all, because the panels scale with DPI and a ratio between them
-ignores how much room there actually is.
+**The dividers are draggable.** ImGui has no splitter widget — the docking system has one, but that is for dock *nodes*, and these columns are children inside a single window. The idiom is ImGui's own: an `InvisibleButton` is a hit region with press-and-hold already tracked, so the drag is `IsItemActive` plus a mouse delta. The line is drawn only while hot — a permanent rule between every column is chrome, one that appears under the cursor is an affordance. Widths are clamped against the *current* available width every frame, so shrinking the tab cannot leave a column wider than the tab. They are **shared by every actor tab and persisted** — see below.
 
-**The dividers are draggable.** ImGui has no splitter widget — the docking system has one, but that
-is for dock *nodes*, and these columns are children inside a single window. The idiom is ImGui's own:
-an `InvisibleButton` is a hit region with press-and-hold already tracked, so the drag is
-`IsItemActive` plus a mouse delta. The line is drawn only while hot — a permanent rule between every
-column is chrome, one that appears under the cursor is an affordance. Widths are clamped against the
-*current* available width every frame rather than once when set, so shrinking the tab cannot leave a
-column wider than the tab. They are **shared by every actor tab and persisted** — see below.
+**Column widths persist across sessions**, in `%LOCALAPPDATA%\AverEngine\editor.ini`. The editor had no home for the small things a user adjusts and expects to stay put (ImGui's own ini, `editor-layout.ini`, is the backend's and not an app-owned store). `sandbox/src/EditorPrefs` is that home: `key=value` lines, every read takes a fallback so a missing or corrupt file is a fresh-looking editor rather than a broken one, and nothing about a *project* goes in it. Two details pinned by `EditorPrefsTest`: values are stored in **DPI-independent units**, or a layout set on a 300% display would arrive three times too wide on a 100% one; and parsing uses `from_chars`/`to_chars` rather than `atof`, which is locale-**dependent** — a machine set to a comma locale would write `230.5` and read back `230`, degrading silently on somebody else's machine and nowhere else.
 
-**Column widths persist across sessions**, in `%LOCALAPPDATA%\AverEngine\editor.ini`. The editor had
-nowhere to put UI state: ImGui's own persistence is deliberately off (`io.IniFilename = nullptr`, and
-the dock layout is rebuilt in code every run — the right call for a designed default, but it left no
-home for the small things a user adjusts and expects to stay put). `sandbox/src/EditorPrefs` is that
-home: `key=value` lines, every read takes a fallback so a missing or corrupt file is a fresh-looking
-editor rather than a broken one, and nothing about a *project* goes in it.
+Widths are shared by every actor tab rather than kept per-tab: dragging the split in one and finding a different one in the next is the sort of inconsistency nobody reports and everybody finds irritating. UE remembers a layout per editor *type* for the same reason.
 
-Two details that are easy to get wrong and are pinned by `EditorPrefsTest`: values are stored in
-**DPI-independent units**, or a layout set on a 300% display would arrive three times too wide on a
-100% one; and parsing uses `from_chars`/`to_chars` rather than `atof`, which is locale-**dependent**
-— a machine set to a comma locale would write `230.5` and read back `230`, degrading silently on
-somebody else's machine and nowhere else.
+**Window > Reset Layout is scoped to what is on screen.** It used to rebuild the whole editor dock unconditionally, so reaching for it while an actor tab was open — to straighten that tab's columns, the only layout you can see — threw away the level editor's arrangement too, and that is not undoable. It now resets the layout of the tab in front and says which in its own label ("Reset Tab Layout" vs "Reset Layout").
 
-Widths are shared by every actor tab rather than kept per-tab: dragging the split in one and finding
-a different one in the next is the sort of inconsistency nobody reports and everybody finds
-irritating. UE remembers a layout per editor *type* for the same reason.
+**An actor tab hides the level's panels.** Opening one now fills the editor the way a Blueprint editor does, instead of sitting in a slot with a World Outliner beside it listing a level it has nothing to do with. Not submitting a window leaves its dock node with no tabs, so ImGui folds the node away and the central region takes the width; submitting them again puts them back where they were docked. The gate is *"the Level tab is not the active one"* rather than *"an editor exists"*, because an actor tab torn off into its own window leaves the level on screen and its panels should still be there. `--focus-level-at <N>` brings the Level tab forward at frame N so the whole return path can be exercised. The obvious failure mode — the panels never coming back — is one no screenshot of a single state can catch and no click can be delivered to headlessly; measured, both panels return to their original dock and the actor tab is still open beside the level.
 
-**Window > Reset Layout is scoped to what is on screen.** It used to rebuild the whole editor dock
-unconditionally, so reaching for it while an actor tab was open — to straighten that tab's columns,
-the only layout you can see — threw away the level editor's arrangement too, and that is not
-undoable. It now resets the layout of the tab in front and says which in its own label
-("Reset Tab Layout" vs "Reset Layout").
-
-**An actor tab hides the level's panels.** Opening one now fills the editor the way a Blueprint
-editor does, instead of sitting in a slot with a World Outliner beside it listing a level it has
-nothing to do with. Not submitting a window leaves its dock node with no tabs, so ImGui folds the
-node away and the central region takes the width; submitting them again puts them back where they
-were docked. The gate is *"the Level tab is not the active one"* rather than *"an editor exists"*,
-because an actor tab torn off into its own window leaves the level on screen and its panels should
-still be there.
-
-That has an obvious failure mode — the panels never coming back — which no screenshot of a single
-state can catch and no click can be delivered to headlessly. `--focus-level-at <N>` brings the Level
-tab forward at frame N so the whole return path can be exercised; measured, both panels return to
-their original dock and the actor tab is still open beside the level.
-
-**The viewport fills its column.** The preview target used to be square and fixed at creation, so a
-wide panel letterboxed — most of a wide monitor's viewport spent on nothing. `ActorPreview::resize`
-now matches the target to the panel, and the projection's aspect follows the target (it was
-hard-coded to 1, which against a wide target stretches every actor horizontally and reads as a
-modelling mistake rather than a projection one).
-
-Resizing destroys a texture the UI is sampling, which needs a `waitIdle` — a whole-GPU stall. The
-editor therefore **debounces**: a size must hold still for 250 ms, and must differ by more than 24
-pixels, before a resize is asked for. Without the deadband a layout that oscillates by a pixel
-between frames — a scrollbar appearing and disappearing — would resize forever. That costs one stall
-per resize gesture instead of one per frame.
-
-`ActorPreviewTest` pins the order, because every hazard here is a use-after-free no validation layer
-catches: drain first, create the new pair, destroy the old, **re-fetch the UI texture id** (a new
-texture is a new descriptor; keeping the old id reintroduces the exact bug the drain prevents), and
-do nothing at all when the size is unchanged.
+**The viewport fills its column.** The preview target used to be square and fixed at creation, so a wide panel letterboxed. `ActorPreview::resize` now matches the target to the panel, and the projection's aspect follows the target (it was hard-coded to 1, which against a wide target stretches every actor horizontally and reads as a modelling mistake rather than a projection one). Resizing destroys a texture the UI is sampling, which needs a `waitIdle` — a whole-GPU stall. The editor therefore **debounces**: a size must hold still for 250 ms, and must differ by more than 24 pixels, before a resize is asked for; without the deadband a layout that oscillates by a pixel between frames — a scrollbar appearing and disappearing — would resize forever. That costs one stall per resize gesture instead of one per frame. `ActorPreviewTest` pins the order, because every hazard here is a use-after-free no validation layer catches: drain first, create the new pair, destroy the old, **re-fetch the UI texture id** (a new texture is a new descriptor; keeping the old id reintroduces the exact bug the drain prevents), and do nothing at all when the size is unchanged.
 
 ### The Components panel
 
-UE's Blueprint editor shows an actor as a **tree**, not a list, and this now does the same. An actor
-is a root with a transform and a set of things attached to it, some of which draw and some of which
-do not.
+UE's Blueprint editor shows an actor as a **tree**, not a list. An actor is a root with a transform and a set of things attached to it, some of which draw and some of which do not. The panel used to be a flat list of `b.Place` rows, so a class-level mesh, a character's capsule, a camera and a light — three of the four things an actor can be made of — had **no row at all**; a class whose only component was a camera showed an empty panel over an empty viewport.
 
-What replaced what: the panel used to be a flat list of `b.Place` rows. That meant a class-level
-mesh, a character's capsule, a camera and a light — three of the four things an actor can be made
-of — had **no row at all**. A class whose only component was a camera showed an empty panel over an
-empty viewport.
+The tree is built to one shape from either source, which is what lets Live be a toggle rather than a second editor:
 
-The tree is built to one shape from either source, which is what lets Live be a toggle rather than a
-second editor:
+- **Parsed** — the root, then the class's own declarations (`b.Mesh`, capsule, camera, light), then every `b.Place` row.
+- **Live** — the root, then the spawned subtree, whose world matrices are read off real entities, so nesting that `BuildModels` created survives.
 
-- **Parsed** — the root, then the class's own declarations (`b.Mesh`, capsule, camera, light), then
-  every `b.Place` row.
-- **Live** — the root, then the spawned subtree, whose world matrices are read off real entities, so
-  nesting that `BuildModels` created survives.
+Rows are colour-coded by kind, because in a list of twenty the eye finds "the light" by colour long before it finds it by name. Selecting a row highlights that component in the viewport and, when the row came from a `b.Place`, drives the gizmo and the transform editor — the tree index and the model index are **derived** from one another rather than kept in step by hand.
 
-Rows are colour-coded by kind, because in a list of twenty the eye finds "the light" by colour long
-before it finds it by name. Selecting a row highlights that component in the viewport and, when the
-row came from a `b.Place`, drives the gizmo and the transform editor — the tree index and the model
-index are **derived** from one another rather than kept in step by hand.
+**The gizmo and the wireframes project with BOTH extents.** `projectToScreen` scaled NDC to pixels by one number, which was right only while the target was square; the viewport fills a column of whatever shape the splitters leave it. The projection matrix already carries that aspect, so NDC was correct and it was the pixel mapping that was wrong — scaling both axes by the smaller extent left a handle sitting on its object at the centre of the view and drifting further from it towards the edges, which reads as a mis-calibrated gizmo rather than as a projection bug. Measured on a 1732×1423 viewport: a light's range circles, centred on the actor at the origin, land on the viewport's exact centre; under the old mapping they sat ~155 px left of it.
 
-**The gizmo and the wireframes project with BOTH extents.** `projectToScreen` scaled NDC to pixels by
-one number, which was right only while the target was square. It is not: the viewport fills a column
-of whatever shape the splitters leave it. The projection matrix already carries that aspect, so NDC
-was correct and it was the pixel mapping that was wrong — scaling both axes by the smaller extent
-left a handle sitting on its object at the centre of the view and drifting further from it towards
-the edges, which reads as a mis-calibrated gizmo rather than as a projection bug. Measured on a
-1732×1423 viewport: a light's range circles, which are centred on the actor at the origin, land on
-the viewport's exact centre; under the old mapping they sat ~155 px left of it.
+**Components with no geometry are drawn as wireframes**, projected through the preview's own camera: a camera as a frustum pointing down +X at a fixed 60 cm (a real far plane is tens of metres and would fill the preview with lines that say nothing about where the camera is), and a point light as three orthogonal circles at its range — one circle reads as a disc and hides which plane it is in.
 
-**Components with no geometry are drawn as wireframes**, projected through the preview's own camera:
-a camera as a frustum pointing down +X at a fixed 60 cm (a real far plane is tens of metres and
-would fill the preview with lines that say nothing about where the camera is), and a point light as
-three orthogonal circles at its range — one circle reads as a disc and hides which plane it is in.
+**A stored vector with child indices**, not owned children or pointers: nodes are appended during a walk, and a vector that reallocates invalidates every pointer taken so far. That is the standard way this shape gets written and then quietly broken by the first actor with enough parts.
 
-**A stored vector with child indices**, not owned children or pointers: nodes are appended during a
-walk, and a vector that reallocates invalidates every pointer taken so far. That is the standard way
-this shape gets written and then quietly broken by the first actor with enough parts.
-
-**What it will not show, and should not.** An actor that assembles itself in `OnBeginPlay` — SkyForge's
-`Gun` builds its five boxes in `AttachTo()`, from gameplay — appears as its class-level mesh only.
-That is not a gap: the preview runs the construction and stops (§4b), and UE's Blueprint viewport
-does not run BeginPlay either. Measured against a real designer file, the five-placement `Car`
-renders assembled at its authored ±120/±80 cm offsets with all five rows in the tree.
+**What it will not show, and should not.** An actor that assembles itself in `OnBeginPlay` — SkyForge's `Gun` builds its five boxes in `AttachTo()`, from gameplay — appears as its class-level mesh only. That is not a gap: the preview runs the construction and stops (§4b), and UE's Blueprint viewport does not run BeginPlay either. Measured against a real designer file, the five-placement `Car` renders assembled at its authored ±120/±80 cm offsets with all five rows in the tree.
 
 ## 4b. The Live toggle, as shipped
 
 The tab draws two things, and the toggle picks between them.
 
-**Off (the default) — the PARSED view.** What the source *says*: the class's `Configure` mesh, the
-designer region's placements, a character's capsule. It needs nothing loaded, works on a file that
-has never compiled and in a build with no CLR, and it is what the gizmo drags — the picture and the
-bytes are the same data.
+**Off (the default) — the PARSED view.** What the source *says*: the class's `Configure` mesh, the designer region's placements, a character's capsule. It needs nothing loaded, works on a file that has never compiled and in a build with no CLR, and it is what the gizmo drags — the picture and the bytes are the same data.
 
-**On — the LIVE view.** What the class *builds*. It resolves the class by its registry name
-(`aver_fw_class_find`), spawns it with `aver_fw_spawn_preview`, walks the resulting subtree reading
-`CMeshRenderer.mesh` and `aver_scene_world_matrix` off each child, and destroys it with
-`aver_fw_destroy_preview` — all within the one call. Nothing is left in the world.
+**On — the LIVE view.** What the class *builds*. It resolves the class by its registry name (`aver_fw_class_find`), spawns it with `aver_fw_spawn_preview`, walks the resulting subtree reading `CMeshRenderer.mesh` and `aver_scene_world_matrix` off each child, and destroys it with `aver_fw_destroy_preview` — all within the one call. Nothing is left in the world.
 
-The two disagree exactly when `BuildModels` does something the parser cannot see — a loop, a
-constant, a branch on a field — which is precisely when an author needs to look rather than guess.
-Live is off by default because the parsed view is the robust one: defaulting to the fragile one
-would make the tab look broken in every case where the other had something useful to show.
+The two disagree exactly when `BuildModels` does something the parser cannot see — a loop, a constant, a branch on a field — which is precisely when an author needs to look rather than guess. Live is off by default because the parsed view is the robust one: defaulting to the fragile one would make the tab look broken in every case where the other had something useful to show.
 
-Four properties are load-bearing, and each is measured rather than asserted:
+Four properties are measured rather than asserted:
 
-1. **No `OnBeginPlay`.** `aver_fw_spawn_preview` stops after `build_models`. Opening `Target.cs`
-   with Live on produces no `Physics.AddStaticBox` — the log shows the ground body and nothing else,
-   where a normal spawn would have added one per open. See `docs/ABI.md` for the full argument.
-2. **Nothing leaks into the level.** The spawned entity's `CMeshRenderer` visible bit is cleared
-   before anything can draw it, because `World::flush` retires a destroy on the *next* frame
-   boundary. Measured: `scene-render: 16 spawned CMeshRenderer entities drawn`, identical with and
-   without `--actor-live`.
-3. **`unbind` still fires** on `aver_fw_destroy_preview`, or the editor would leak one managed object
-   per Refresh.
-4. **Mesh ids resolve back to paths.** `CMeshRenderer.mesh` is an `fnv1a64` ObjectId, and
-   `Aver.Scene.ObjectIdOf` hashes the path *as written* rather than canonically — so the reverse
-   table holds every spelling that could have produced an id: the two built-in primitives, every
-   `.ocmesh` under the content root in both bare and `Content/`-prefixed form, and every `.ocmesh`
-   string literal in the file itself. The hash is `aver::fnv1a64`, which `FormatTest` already pins
-   against the C# side by value.
+1. **No `OnBeginPlay`.** `aver_fw_spawn_preview` stops after `build_models`. Opening `Target.cs` with Live on produces no `Physics.AddStaticBox` — the log shows the ground body and nothing else, where a normal spawn would have added one per open. See `docs/ABI.md` for the full argument.
+2. **Nothing leaks into the level.** The spawned entity's `CMeshRenderer` visible bit is cleared before anything can draw it, because `World::flush` retires a destroy on the *next* frame boundary. Measured: `scene-render: 16 spawned CMeshRenderer entities drawn`, identical with and without `--actor-live`.
+3. **`unbind` still fires** on `aver_fw_destroy_preview`, or the editor would leak one managed object per Refresh.
+4. **Mesh ids resolve back to paths.** `CMeshRenderer.mesh` is an `fnv1a64` ObjectId, and `Aver.Scene.ObjectIdOf` hashes the path *as written* rather than canonically — so the reverse table holds every spelling that could have produced an id: the two built-in primitives, every `.ocmesh` under the content root in both bare and `Content/`-prefixed form, and every `.ocmesh` string literal in the file itself. The hash is `aver::fnv1a64`, which `FormatTest` already pins against the C# side by value.
 
-**What Live cannot show.** `AverCharacter` keeps `Height` and `Radius` as plain managed fields —
-no component, no scene field — so a native walk of a spawned character sees nothing. A character
-that built no models therefore falls back to the source's capsule, and the panel says so rather than
-passing it off as measured. The gizmo is disabled in the live view: what is on screen there was
-produced by code, and there is no byte in the file to write a new coordinate back to.
+**What Live cannot show.** `AverCharacter` keeps `Height` and `Radius` as plain managed fields — no component, no scene field — so a native walk of a spawned character sees nothing. A character that built no models therefore falls back to the source's capsule, and the panel says so. The gizmo is disabled in the live view: what is on screen there was produced by code, and there is no byte in the file to write a new coordinate back to.
 
-**Refresh is manual.** A Compile C# replaces the class in the registry; the tab does not currently
-notice, so the button is there and its tooltip says when to press it.
+**Refresh is manual.** A Compile C# replaces the class in the registry; the tab does not currently notice, so the button is there and its tooltip says when to press it.
 
 Measured against SkyForge with `--open-asset <file> --actor-live`:
 
@@ -416,131 +193,52 @@ Measured against SkyForge with `--open-asset <file> --actor-live`:
 
 ## 4c. The file watcher, as shipped
 
-`DirectoryWatcher` is started on the project's **Content** root when a project opens, pumped once a
-frame *before* the tabs draw, and routed to whichever editor owns the changed path.
+`DirectoryWatcher` is started on the project's **Content** root when a project opens, pumped once a frame *before* the tabs draw, and routed to whichever editor owns the changed path.
 
-It does not replace the two polls that were already there; it covers what neither can. The tab's own
-per-frame `stat` only sees the tab being **drawn**, so a background tab lagged until it was clicked.
-The Compile button's half-second directory walk colours one button and would have to cover the whole
-content tree at that rate to be a change signal.
+It does not replace the two polls that were already there; it covers what neither can. The tab's own per-frame `stat` only sees the tab being **drawn**, so a background tab lagged until it was clicked. The Compile button's half-second directory walk colours one button and would have to cover the whole content tree at that rate to be a change signal.
 
-The notification **bypasses** the mtime stamp rather than feeding it: a safe save can leave a
-modification time the tab has already seen, and the stamp then says nothing happened about a file
-whose bytes are entirely different.
+The notification **bypasses** the mtime stamp rather than feeding it: a safe save can leave a modification time the tab has already seen, and the stamp then says nothing happened about a file whose bytes are entirely different.
 
-`WatcherTest` is new and found a real bug on its first run: `start()` opened the directory handle,
-spawned the worker and returned, but the kernel only records changes while a `ReadDirectoryChangesW`
-is outstanding — and that call happens on the worker thread. The first file written after `start()`
-was silently dropped. `start()` now waits for an event the worker sets once its first read is in
-flight.
+`WatcherTest` is new and found a real bug on its first run: `start()` opened the directory handle, spawned the worker and returned, but the kernel only records changes while a `ReadDirectoryChangesW` is outstanding — and that call happens on the worker thread, so the first file written after `start()` was silently dropped. `start()` now waits for an event the worker sets once its first read is in flight.
 
 ### Auto-compile on save
 
-**Tools > Auto-compile on Save**, off by default, or `--auto-compile`. With it on, a `.cs` change
-anywhere under Content rebuilds and reloads the project's scripts, which closes the loop: save in
-Visual Studio, and the Live view updates with nothing pressed.
+**Tools > Auto-compile on Save**, off by default, or `--auto-compile`. With it on, a `.cs` change anywhere under Content rebuilds and reloads the project's scripts, which closes the loop: save in Visual Studio, and the Live view updates with nothing pressed.
 
 Two things it must get right, and both are measured:
 
-- **One build per burst, not one per file.** A second debounce sits on top of the watcher's. The
-  watcher's 150 ms settle coalesces the burst *one* save produces into one event per path; this
-  coalesces events across *many* paths into one build, because a Save All or a branch switch touches
-  several files and sequential `dotnet build` runs each lock the script assembly. Measured: two saves
-  200 ms apart produced `auto-compile: 2 script change(s) settled` — once — and one build.
-- **It must not compile in a loop.** MSBuild regenerates `Scripts.AssemblyInfo.cs`,
-  `Scripts.GlobalUsings.g.cs` and `.NETCoreApp,Version=v10.0.AssemblyAttributes.cs` under `obj/` on
-  **every** build, and those are `.cs` files inside the watched tree. Any path with a `bin` or `obj`
-  segment is therefore ignored — matched on whole segments, so `Scripts/Robots/BinPacker.cs` is
-  safe. Measured: no second trigger in the 30 s after a build.
+- **One build per burst, not one per file.** A second debounce sits on top of the watcher's. The watcher's 150 ms settle coalesces the burst *one* save produces into one event per path; this coalesces events across *many* paths into one build, because a Save All or a branch switch touches several files and sequential `dotnet build` runs each lock the script assembly. Measured: two saves 200 ms apart produced `auto-compile: 2 script change(s) settled` — once — and one build.
+- **It must not compile in a loop.** MSBuild regenerates `Scripts.AssemblyInfo.cs`, `Scripts.GlobalUsings.g.cs` and `.NETCoreApp,Version=v10.0.AssemblyAttributes.cs` under `obj/` on **every** build, and those are `.cs` files inside the watched tree. Any path with a `bin` or `obj` segment is therefore ignored — matched on whole segments, so `Scripts/Robots/BinPacker.cs` is safe. Measured: no second trigger in the 30 s after a build.
 
-It takes the same path as the Reload Scripts button rather than a quieter private one, so the reload
-that bumps the Live views' generation happens here too. A build already running holds the deadline
-rather than being dropped: the last edit is the one being waited on.
+It takes the same path as the Reload Scripts button rather than a quieter private one, so the reload that bumps the Live views' generation happens here too. A build already running holds the deadline rather than being dropped: the last edit is the one being waited on.
 
 ## 4d. The Roslyn backend, as shipped
 
-`averdesign` (`scripting/csharp/Aver.Design/`, staged to `bin/Tools/`) parses a `.cs` with
-`Microsoft.CodeAnalysis.CSharp` and prints what it declares as JSON. It is the repo's **only** NuGet
-consumer; Roslyn is MIT, and the package is **checked in** at `third_party/nuget` with the repo-root
-`NuGet.config` naming that folder as the only source, so the restore needs no network.
+`averdesign` (`scripting/csharp/Aver.Design/`, staged to `bin/Tools/`) parses a `.cs` with `Microsoft.CodeAnalysis.CSharp` and prints what it declares as JSON. It is the repo's **only** NuGet consumer; Roslyn 5.6.0 is vendored at `third_party/nuget` with the repo-root `NuGet.config` naming that folder as the only source. (Roslyn does **not** ship inside the .NET SDK as a restorable package: the SDK carries it as the compiler's own DLLs under `Roslyn/bincore`, and the only `.nupkg` it ships is `FSharp.Core`, under `FSharp/library-packs`. A copy sitting in a machine's NuGet cache only means something fetched it from nuget.org once; a first build on a clean machine would go to the network. Vendoring is what makes the offline restore true.) The repo still has no `Directory.Build.props` or `.sln`.
 
-> **This paragraph used to say the restore was offline because Roslyn "ships inside the .NET SDK".
-> That was false.** The SDK carries Roslyn as the compiler's own DLLs under `Roslyn/bincore`; the
-> only restorable `.nupkg` it ships is `FSharp.Core`, under `FSharp/library-packs`. The package sat
-> in the machine's cache because something had fetched it from nuget.org once, and a first build on a
-> clean machine would have gone to the network for it. Vendoring is what made the sentence true.
+It was pinned at 5.6.0 on `release/stable` rather than 5.9.0 (the SDK's own `csc`), because 5.9.0 is built from `release/insiders` and depends on a prerelease analyzer package. It moved off 4.13.0 because `csc -langversion:?` ends `13.0 14.0 (default)` while Roslyn 4.13 stops at C# 13, and `Program.cs` never inspects diagnostics: a construct the parser does not know recovers silently rather than failing. On measurement that gap changed no output — twelve fixtures, four C# 14 constructs in three positions each, byte-identical JSON from 4.13.0 and 5.6.0 — so this closed a latent hazard rather than fixing a bug.
 
-The pin is **5.6.0**, the newest Roslyn on the `release/stable` branch — not 5.9.0, which is what the
-installed SDK's own `csc` is, because 5.9.0 is built from `release/insiders` and depends on a
-prerelease analyzer package. It moved off 4.13.0 because `csc -langversion:?` ends `13.0 14.0
-(default)` while Roslyn 4.13 stops at C# 13, and `Program.cs` never inspects diagnostics: a construct
-the parser does not know recovers silently rather than failing. **On measurement that gap changed no
-output** — twelve fixtures, four C# 14 constructs in three positions each, byte-identical JSON from
-4.13.0 and 5.6.0 — so this closed a latent hazard rather than fixing a bug.
+**It runs only on `Malformed`.** That status means the text has left the locked grammar rather than that the text is wrong. A file the scanner reads is never re-read by the slower parser, and a file with no region has nothing for either to read.
 
-**It runs only on `Malformed`.** That status means the text has left the locked grammar rather than
-that the text is wrong. A file the scanner reads is never re-read by the slower parser, and a file
-with no region has nothing for either to read.
+**A separate process, not a hosted library.** The alternative is loading a compiler into a process whose job is to draw frames, which the editor's collectible load context would then have to keep clear of on every script reload.
 
-**A separate process, not a hosted library.** The alternative is loading a compiler into a process
-whose job is to draw frames, which the editor's collectible load context would then have to keep
-clear of on every script reload.
+**A separate module, not part of `Aver.Formats`.** The base module reads bytes and depends on nothing, which is what lets a test link it alone and what lets the scanner run on a machine with no .NET. `Aver.Formats.Roslyn` sits above that line; a build without it simply has no escalation.
 
-**A separate module, not part of `Aver.Formats`.** The base module reads bytes and depends on
-nothing, which is what lets a test link it alone and what lets the scanner run on a machine with no
-.NET. `Aver.Formats.Roslyn` sits above that line; a build without it simply has no escalation.
-
-Two things are easy to get wrong here and both are pinned by `RoslynTest`:
-
-- **Byte offsets, not character offsets.** Roslyn counts UTF-16 chars; the C++ side slices UTF-8
-  bytes. They agree only while the file is pure ASCII, and one accented letter in a comment above a
-  placement shifts every subsequent span — so a rewrite lands in the middle of another token.
-  `averdesign` converts every offset through a prefix table before it leaves.
-- **The object id crosses as a string.** It is a full 64 bits and a JSON number is a double, so a
-  numeric round trip would silently round the one field every rewrite is matched by.
-
-Measured end to end: a `Car.Designer.cs` with its named arguments reordered — which the scanner
-declines — opens in the editor with all five placements, logging
-`Rig.Designer.cs left the locked grammar; Roslyn read it: 5 placement(s)`.
+Measured end to end: a `Car.Designer.cs` with its named arguments reordered — which the scanner declines — opens in the editor with all five placements, logging `Rig.Designer.cs left the locked grammar; Roslyn read it: 5 placement(s)`.
 
 ---
 
 ## 5. Open decisions
 
-These block a start; none is answerable from the code alone.
-
-1. **Which mesh-path spelling is canonical.** `Sample.Game/Car.Designer.cs` passes
-   `"Content/Meshes/CarBody.ocmesh"`; the engine's mesh registry is keyed on `fnv1a64` of the
-   **content-relative** path without that prefix (`"Meshes/sphere.ocmesh"`). *Different hash* — so the
-   one conforming sample in the tree places models that resolve to nothing and draw nothing, silently.
-   This is a live latent bug, not merely a spec question.
-2. **What a `.cs` double-click does now**, given it currently opens the IDE and people rely on that.
-   *Answered since:* `cbOpenEntry` tries `assetEditors_.open(full)` before falling back to the IDE, and
-   `ActorEditor`'s factory accepts a `.cs` path that declares a previewable actor — so a `.cs` file
-   with recognised actor content now opens the actor tab, and one without still opens the IDE exactly
-   as before.
-3. **How an editor window becomes a tab.** The dock layout is built once, and `DockBuilderDockWindow`
-   takes a window *name* — but editor windows are named from their path and do not exist at layout
-   time. "Add it to the existing DockBuilder block" is not implementable as written.
-4. **Whether the exit-confirm can cancel at all** (see Piece 1).
-5. **Where `averdesign` is built, staged and versioned.** It would be the repo's *first* NuGet
-   consumer: no project here has a `PackageReference`, and there is no `NuGet.config`,
-   `Directory.Build.props` or `.sln`. `Sample.Game` is in no CMakeLists at all.
-   *Answered since:* built by `modules/scripting/CMakeLists.txt` into `bin/Tools/`, pinned at Roslyn
-   5.6.0, vendored at `third_party/nuget`, and there is now a repo-root `NuGet.config` and
-   `global.json` — still no `Directory.Build.props` or `.sln`.
-6. **Whether `DESIGNER_REWRITE.md` is being amended.** It says of the user half: *"The editor never
-   reads or writes a byte of it."* `Configure` lives there. A class-defaults panel needs to read it —
-   so either the document changes or that panel does not ship.
+1. **Which mesh-path spelling is canonical.** `Sample.Game/Car.Designer.cs` passes `"Content/Meshes/CarBody.ocmesh"`; the engine's mesh registry is keyed on `fnv1a64` of the **content-relative** path without that prefix (`"Meshes/sphere.ocmesh"`). *Different hash* — so the one conforming sample in the tree places models that resolve to nothing and draw nothing, silently. This is a live latent bug.
+2. **How an editor window becomes a tab.** The dock layout is built once, and `DockBuilderDockWindow` takes a window *name* — but editor windows are named from their path and do not exist at layout time.
+3. **Whether the exit-confirm can cancel at all** — *resolved since:* `Window::setCloseGuard` lets `WM_CLOSE` be vetoed (it used to call `requestClose()` unconditionally, with no way to clear or veto it).
+4. **Whether `DESIGNER_REWRITE.md` is being amended.** It says of the user half: *"The editor never reads or writes a byte of it."* But `Configure` lives there. A class-defaults panel needs to read it — so either the document changes or that panel does not ship.
 
 ---
 
 ## 6. What gets tested headlessly
 
-In the style `tests/formats` already uses for the material rewriter: golden output for a known
-`.Designer.cs`; rewrite-own-output byte equality; a neighbouring model row left untouched; refusal
-cases that leave the file unmodified; a tuple literal with nested parens; a named argument out of
-order. The preview feature gets the `tests/render.ui` treatment — a recording context asserting the
-draw list, with no GPU.
+In the style `tests/formats` already uses for the material rewriter: golden output for a known `.Designer.cs`; rewrite-own-output byte equality; a neighbouring model row left untouched; refusal cases that leave the file unmodified; a tuple literal with nested parens; a named argument out of order. The preview feature gets the `tests/render.ui` treatment — a recording context asserting the draw list, with no GPU.
 
-> **This used to say the watcher had never had a test at all. That's no longer true — `WatcherTest` (`tests/platform/src/WatcherTest.cpp`, §1b, §4c) now exists, with 47 assertions against a real filesystem.** What is still true: every one of those assertions calls `drain()`, whose only overflow behaviour is returning `false` when the OS reports one, and every call site asserts `drain(...)` is `true` — "does not overflow" in a create, a rewrite, a burst, a rename, a delete, a nested write, and an idle stretch. Nothing in the file forces a real overflow and checks that the **positive** case — `poll()` actually signalling one, and whatever a caller is meant to do with `true` (§4c: "the kernel dropped records, rescan yourself") — is handled at all. That path remains untested.
+`WatcherTest` (`tests/platform/src/WatcherTest.cpp`, §1b, §4c) has 47 assertions against a real filesystem, but the watcher's overflow path remains untested: every assertion calls `drain()`, whose only overflow behaviour is returning `false` when the OS reports one, and every call site asserts `drain(...)` is `true` — "does not overflow" in a create, a rewrite, a burst, a rename, a delete, a nested write, and an idle stretch. Nothing forces a real overflow and checks that the **positive** case — `poll()` actually signalling one, and whatever a caller is meant to do with `true` (§4c: "the kernel dropped records, rescan yourself") — is handled at all.

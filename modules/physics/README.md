@@ -6,7 +6,7 @@
 
 Rigid-body dynamics + collision behind an AvPhysics facade: bodies, shapes, broadphase, raycasts (aero ride-height probe), contact callbacks.
 
-**Implemented and wired.** Built as `Aver.Physics` (SHARED, so the C# layer P/Invokes one binary and
+Implemented and wired. Built as `Aver.Physics` (SHARED, so the C# layer P/Invokes one binary and
 therefore one world), with the backend linked `PRIVATE` — nothing above this module can include a
 `JPH::` header, so replacing the backend stays a decision about this module rather than about the
 tree.
@@ -37,18 +37,11 @@ Jolt's sources are **vendored** — MIT, 5.6.0, not edited here. The provenance,
 - **Units and axes:** everything crossing this boundary is the ENGINE's contract (centimetres, +X
   forward, +Y right, +Z up, left-handed). See `src/Convert.hpp`; all four conventions differ from
   Jolt's, so the translation is real arithmetic, not a relabelling.
-- **Evidence, corrected — `tests/physics` has grown well past the one file this used to describe.**
-  `PhysicsTest.cpp` alone is now 79 assertions (was 25), and still checks the change of basis by the
-  property that defines it — `convert(rotate(q, v)) == rotate(convert(q), convert(v))` — which cannot
-  hold by accident for a mirrored axis map. It now shares `tests/physics` with eight more suites added
-  since this line was written: `BodyDynamicsTest`, `BuoyancyTest`, `CharacterTest`, `JointTest`,
-  `LayerTest`, `ShapeTest`, `SoftBodyTest` and `FluidDampingCalibrationTest` — 413 assertions across
-  the module as a whole. `CharacterTest` is where character-on-ground behaviour actually lives today
-  (`aver_phys_character_grounded`/`ground_state`, kerb step-up, max slope angle); the specific "drops
-  a character from 3 m, logs ~1 g, lands at exactly z=0" scenario this line used to describe for
-  `--play-test` no longer matches that harness, which now begins Play, holds synthetic `W` for 150
-  frames and logs where the pawn walked to (`SandboxApp.cpp:9094`, `maybePlayTest`, drifted from the
-  `9431` previously recorded here) rather than
-  measuring a drop.
+- **Tests:** `tests/physics` has 413+ assertions across 9 suites. `PhysicsTest.cpp` checks the change
+  of basis by the property that defines it — `convert(rotate(q, v)) == rotate(convert(q), convert(v))` —
+  which cannot hold by accident for a mirrored axis map. `CharacterTest` verifies character-on-ground
+  behaviour (`aver_phys_character_grounded`/`ground_state`, kerb step-up, max slope angle). The
+  `--play-test` harness in `SandboxApp` begins Play, holds synthetic `W` for 150 frames and logs where
+  the pawn walked to, verifying that movement works end-to-end.
 
 See [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the full module DAG.

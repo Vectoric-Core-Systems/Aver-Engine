@@ -13,13 +13,13 @@ backticks are where the knowledge applies. Measurements are as originally record
 
 - `ProjectDesc::droneGraph` and `ProjectDesc::inputScheme`: These are project keys (file path keys), not assumed filenames. This design exists because the engine must not assume a project contains a file with any particular name. Without these keys, the drone would spawn with no graph from the editor or drone window (appearing "glitched" because it sat still), and input bindings could not be authored as data. A project stating no value still gets consistent behaviour (drone sits still, or gameplay code builds the context directly).
 
-- `voxelResolution`: The valid range is [32, 512] clamped by `Voxi.cpp::setSettings`. Epic tier derives 512. The 512³ RGBA16F grid with mip chain is ~1.2 GiB, so 512 is a real performance choice. Previous comment text misleadingly stated "64 / 128 / 256" which named neither the real floor nor ceiling.
+- `voxelResolution`: The valid range is [32, 512] clamped by `Voxi.cpp::setSettings`. Epic tier derives 512. The 512³ RGBA16F grid with mip chain is ~1.2 GiB, so 512 is a real performance choice.
 
 - `rdStages` (ray-driven stages): The field controls the ray-driven primary's internal shape. 0 = single pass (baseline/fallback, one drawFullscreen); 1 = staged visibility → shadow → shade (D3D12 only, falls back to single pass if unavailable); 2 = staged + half-rate GI (milestone 4: checkerboards GI rays, denoiser reconstructs, deliberately changes the image vs. 1's same-image comparison). This field has no ladder rung—an absent key leaves the engine default (2) alone regardless of RT tier changes (unlike `rtRenderMode` which falls back).
 
 - `restirHistory` (ReSTIR GI temporal history): Measured maxHistory weight impacts on Sponza: history 0 = no overshoot at rest or moving; history 1 (+8% vs. settled); history 8 (+104% vs. settled). Not tier-derived—has no ladder rung—so absent here leaves engine default (0) alone regardless of GI tier.
 
-- `backend` (RHI backend selection): This is a preference, not a guarantee. The backend must be compiled in (AVER_RHI_VULKAN defaults OFF in CMake) and must successfully create a device on the target machine; fallback occurs if unavailable. The peek is early in `SandboxApp::main()` before `setBackend` (search for RENDER.BACKEND there). This is read before the editor opens a project—far too early to apply through the per-frame render settings path.
+- `backend` (RHI backend selection): This is a preference, not a guarantee. The backend must be compiled in (AVER_RHI_VULKAN defaults ON in CMake) and must successfully create a device on the target machine; fallback occurs if unavailable. The peek is early in `SandboxApp::main()` before `setBackend` (search for RENDER.BACKEND there). This is read before the editor opens a project—far too early to apply through the per-frame render settings path.
 
 - `frameBudgetMs`: Used to enable quality auto-tuning to hit a target frame time. A renderer that quietly retunes itself cannot be A/B tested meaningfully, so this must be disabled (≤0) for measurements.
 
@@ -33,7 +33,7 @@ backticks are where the knowledge applies. Measurements are as originally record
 
 - `hasRenderSettings()`: Bug N9—`giMode` and `denoiser` were parsed but never applied. These fields already existed in the struct but the check `hasRenderSettings()` did not include them, so `ProjectRenderApply.hpp`'s apply block was gated out entirely if only those two keys were stated, silently ignoring `RENDER.GIMODE` 1 or `RENDER.DENOISER` 1.
 
-- Window settings (windowTitle, windowWidth, windowHeight, windowResizable, windowFullscreen): These were hardcoded (1280×720 from `platform::WindowDesc`) with no flag, key, or UI. A shipped game had no way to set its presentation beyond recompiling. Previously, the gap was supposed to be filled by a side-car game.json that never had a reader or writer.
+- Window settings (windowTitle, windowWidth, windowHeight, windowResizable, windowFullscreen): These were hardcoded (1280×720 from `platform::WindowDesc`) with no flag, key, or UI. A shipped game had no way to set its presentation beyond recompiling.
 
 - Import settings (importScale, importConvertAxes, importGenNormals, importGenMips, importMaxTexture): Keys parse and serialize and are editable in Project Settings, but no importer option struct (GltfImportOptions, ObjImportOptions, UsdImportOptions, TextureLoadOptions, MaterialCookOptions) is constructed from ProjectDesc. `AverAssetC` takes its options from its own command line without opening the owning .ocproject. The design intent—to declare project-wide import defaults—was left incomplete.
 
@@ -52,8 +52,6 @@ backticks are where the knowledge applies. Measurements are as originally record
 - .ocmat and AVR1 container refuse unsupported version; text formats were odd ones out
 - Version field nobody checks is field that cannot be used
 - Ceiling, not equality: older engine projects are migration system's business; only future unreadable
-
-
 
 - **isOwnedKey list ordering**: The kOwned[] array in `isOwnedKey()` must match the order keys are emitted in `writeOcproject()`. A key appended to the owned list but missing from isOwnedKey will be stripped from the input but never replaced, causing it to be deleted on every save. Because owned keys are inserted at the first owned line while author's lines stay below, last-write-wins parsing makes the stale line win, so the change appeared to work but reverted on reload.
 

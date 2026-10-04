@@ -38,7 +38,7 @@ stage 2 on top of it, through a new shared module, `Aver.Render.Neural`.
 
 - Matching NVIDIA NRC's per-pixel network. On the dev GPU (RX 7800 XT, RDNA3) there is no D3D12 route
   to matrix hardware, and the paper's 5×64 network is estimated at 8–18 ms there in plain HLSL.
-- Glossy/specular indirect. Today's second bounce is diffuse-only (`voxi_restir.hlsli:792`,
+- Glossy/specular indirect. Today's second bounce is diffuse-only (`voxi_restir.hlsli:487`,
   `radiance += s.kdAlbedo * indY`); glossy queries are a new capability, planned for stage 3.
 - Cache-guided ReSTIR sampling. Parked: it sits in patent territory (see §9).
 - Vulkan. D3D12 first, Vulkan parity afterwards, as for every other feature.
@@ -157,7 +157,7 @@ Two properties matter here:
   not a default.
 
 **Open decision D1:** the sample does not need the hit's albedo, because it is *incident* radiance at a
-point. Widening `RdGiCand` (`voxi_restir.hlsli:129`, 48 B) to carry albedo and roughness is needed only
+point. Widening `RdGiCand` (`voxi_restir.hlsli:60`, 48 B) to carry albedo and roughness is needed only
 for stage 3's glossy queries. Recommendation: defer the widening until stage 3.
 
 ### 5.5 Resolve (once per frame per cascade)

@@ -4,41 +4,29 @@ Two modules: `Aver.Scene`, a data-oriented entity/component world, and `Aver.Fra
 gameplay layer — GameInstance, GameMode, GameActor, Pawn, PlayerController — expressed *over* that
 world rather than as a class hierarchy inside it.
 
-> **This was a design record that ran ahead of the tree; it now runs well behind it.** The banner
-> here used to say: "Of section 8's fourteen steps, only step 1 is built... There is no entity, no
-> component pool, no transform, no class registry, no `Scene.cs` and no `Framework.cs`." That was
-> true at commit `03b79e1` and has not been true for a long time. Both modules hold real
-> implementations: entities, component pools, field tables and the transform/hierarchy pass are live
-> (`modules/scene/src/World.cpp`, `ComponentPool.cpp`, `Fields.cpp`), the full `scene_abi.h` surface
-> is implemented in `SceneAbi.cpp` and exercised by `SceneTest.exe` (935 lines), and
-> `modules/framework/src/FrameworkAbi.cpp` (1,436 lines) carries a working class registry —
-> `declare`/`find`/`seal`, `spawn`/`destroy`, `possess`/`unpossess`, a hoisted per-class `tick` — with
-> its own `framework_hooks.h` dispatch tables, exercised by `FrameworkTest.exe`.
+> **Status: implemented.** This design is now live. Both modules hold real implementations: entities,
+> component pools, field tables and the transform/hierarchy pass are live (`modules/scene/src/World.cpp`,
+> `ComponentPool.cpp`, `Fields.cpp`), the full `scene_abi.h` surface is implemented in `SceneAbi.cpp`
+> and exercised by `SceneTest.cpp` (1,015 lines), and `modules/framework/src/FrameworkAbi.cpp`
+> (1,619 lines) carries a working class registry — declare/find/seal, spawn/destroy, possess/unpossess,
+> a hoisted per-class tick — with its own dispatch tables.
 >
-> The shape it landed in diverges from what follows below in real ways, not only in degree. There is
-> no `Scene.cs` folded into `Aver.Scripting.dll` as §1.4 describes: the C# side is two separate
-> assemblies, `scripting/csharp/Aver.Scene` and `scripting/csharp/Aver.Framework` (the latter holding
-> `Actor.cs`, `ActorBuilder.cs`, `ClassBuilder.cs`, `GameMode.cs`, `Pawn.cs`, `PlayerController.cs`
-> and more). There is no `include/aver/framework/ClassRegistry.hpp` either — §4.1 below already
-> corrects that one in place. A class is declared from C# through
-> `Aver.Scripting.Bridge/HostBridge.cs`, for both an `[AverClass]` type and a `.ocgraph` `CLASS`
-> record, never through a header this document sketches.
+> The C# side is two separate assemblies, `scripting/csharp/Aver.Scene` and
+> `scripting/csharp/Aver.Framework` (the latter holding `Actor.cs`, `ActorBuilder.cs`, `ClassBuilder.cs`,
+> `GameMode.cs`, `Pawn.cs`, `PlayerController.cs` and more). A class is declared from C# through
+> `Aver.Scripting.Bridge/HostBridge.cs`, for both an `[AverClass]` type and a `.ocgraph` `CLASS` record.
 >
-> What genuinely has not moved: the editor's own viewport still keeps its own
-> `std::vector<MeshObj> objects_` (`sandbox/src/SandboxApp.cpp`) instead of reading
-> `CMeshRenderer`/`CWorld` off the world — there is no `Aver.Scene.Renderer` target and no
-> `SceneRender.cpp` anywhere in the tree, so step 7 below has not happened. Section 8's checklist
-> predates essentially all of this work, and its checkboxes should not be trusted step by step:
-> several unchecked steps are done, several of those in a shape this document never anticipated, and
-> step 7 genuinely is not done. Section 9 is what this design does not know and section 10 is where
-> the design contradicts itself; both remain worth reading as written.
+> The editor's viewport keeps its own `std::vector<MeshObj> objects_` (`sandbox/src/SandboxApp.cpp`)
+> instead of reading `CMeshRenderer`/`CWorld` off the world — there is no rendering integration with
+> Aver.Scene yet.
+>
+> Section 8's original checklist predates most of this work, and its checkboxes should not be trusted
+> step by step: several unchecked steps are done, several in shapes the document did not anticipate.
+> This document now reads more like a record of what got built than a specification of what remains.
 
-`docs/SCRIPTING.md` §5 says the honest version of the *old* state: there is no scene API, and none
-was written on purpose, because an interim object API would have to be replaced wholesale and would
-break every script authored against it. That section is now stale for the same reason this banner
-was — the scene and framework layers described below did get built, just not by folding into
-`Aver.Scripting.dll` the way §5 anticipated. This document reads today more like a record of what got
-built than a specification of what remains to be typed.
+`docs/SCRIPTING.md` §5 discussed the old interim object API. That section is now stale — the scene and
+framework layers described below did get built, just not through the path §5 anticipated. This document
+describes what exists.
 
 ---
 
@@ -83,8 +71,7 @@ with **two separate ABI headers**.
 The archetype half is what a user coming from Unreal actually asked for, and its native shape is a
 transcription of the existing tree rather than a reinterpretation: the CMakeLists is `render.pbr` with
 the names changed, the handle is a raw `u32` with a `k`-constant, `scene_abi.h` is `pbr_abi.h`'s
-`#define` blocks and 1/0 setters, and the C# facade lives in the assembly `Pbr.cs` and `Voxi.cs`
-already live in.
+`#define` blocks and 1/0 setters, and the C# facade lives in the assemblies already in place.
 
 The two-target split is the repair that model needed. On its own it has no framework module, so
 `AVER_SCENE_CLASS_PAWN`, `aver_scene_possess` and `aver_scene_world_begin_play` end up sitting in the
@@ -177,37 +164,34 @@ after it.
 ```
 modules/scene/
   CMakeLists.txt
-  README.md                                  (rewritten: this module has no gameplay vocabulary)
+  README.md                                  (this module has no gameplay vocabulary)
   include/aver/scene/Entity.hpp
   include/aver/scene/ComponentPool.hpp
   include/aver/scene/Fields.hpp
   include/aver/scene/World.hpp
   include/aver/scene/scene_abi.h             <- P/Invoke surface
   src/World.cpp  src/ComponentPool.cpp  src/Fields.cpp  src/Builtins.cpp  src/SceneAbi.cpp
-  src/SceneRender.cpp                        <- the ONLY file that includes aver/rhi/*
 
 modules/framework/
   CMakeLists.txt
   README.md
-  include/aver/framework/ClassRegistry.hpp
   include/aver/framework/Framework.hpp
   include/aver/framework/framework_abi.h     <- P/Invoke surface
   include/aver/framework/framework_hooks.h   <- dispatch tables; NOT a P/Invoke surface
-  src/ClassRegistry.cpp  src/Framework.cpp  src/DefaultClasses.cpp  src/FrameworkAbi.cpp
+  src/Framework.cpp  src/DefaultClasses.cpp  src/FrameworkAbi.cpp
 
-tests/scene/   (new)  src/SceneTest.cpp
-tests/framework/ (new) src/FrameworkTest.cpp
+tests/scene/src/SceneTest.cpp
+tests/framework/src/FrameworkTest.cpp
 
-scripting/csharp/Aver.Scripting/Scene.cs        (namespace Aver.Scene)
-scripting/csharp/Aver.Scripting/Framework.cs    (namespace Aver.Framework)
-scripting/csharp/Aver.Scripting/Generated/SceneIds.g.cs   (emitted by the editor from the live registry)
-scripting/csharp/Aver.Scripting.Bridge/HostBridge.Actors.cs
+scripting/csharp/Aver.Scene/      (assembly)
+scripting/csharp/Aver.Framework/  (assembly, holds Actor.cs, ActorBuilder.cs, ClassBuilder.cs, GameMode.cs, Pawn.cs, PlayerController.cs, etc.)
+scripting/csharp/Aver.Scripting.Bridge/HostBridge.cs
 ```
 
 ### 2.2 Targets and link lines
 
 ```cmake
-  # modules/scene/CMakeLists.txt — render.pbr with the names changed.
+  # modules/scene/CMakeLists.txt
   # SHARED for the reason PBR is: the C# layer P/Invokes this DLL, and keeping the world in one
   # binary means the editor and the bindings address the same entities.
   # aver_add_module() is STATIC-only, so a plain add_library is used here.
@@ -221,21 +205,13 @@ scripting/csharp/Aver.Scripting.Bridge/HostBridge.Actors.cs
   set_target_properties(Aver.Scene PROPERTIES
     FOLDER "modules" RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-  # The GPU half, deliberately a SECOND target, STATIC, linked straight into the executable.
-  # Aver.RHI is the GENERIC interface. NEVER Aver.RHI.D3D12.
-  add_library(Aver.Scene.Renderer STATIC src/SceneRender.cpp)
-  target_include_directories(Aver.Scene.Renderer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  target_compile_features(Aver.Scene.Renderer PUBLIC cxx_std_20)
-  target_link_libraries(Aver.Scene.Renderer PUBLIC Aver.Core Aver.RHI Aver.Scene)
-  set_target_properties(Aver.Scene.Renderer PROPERTIES FOLDER "modules")
-
   # modules/framework/CMakeLists.txt
   # SHARED for the same P/Invoke-identity reason, and it links Aver.Scene because gameplay is
   # ABOVE storage and the arrow must point down. The rule this shape is tested against is the one
   # render.pbr states: no RHI type behind a P/Invoke DLL. The transitive closure here is
   # {Core, Assets, Scene} — there is no RHI anywhere behind this boundary.
   add_library(Aver.Framework SHARED
-    src/ClassRegistry.cpp src/Framework.cpp src/DefaultClasses.cpp src/FrameworkAbi.cpp)
+    src/Framework.cpp src/DefaultClasses.cpp src/FrameworkAbi.cpp)
   target_include_directories(Aver.Framework PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_compile_features(Aver.Framework PUBLIC cxx_std_20)
   target_link_libraries(Aver.Framework PUBLIC Aver.Core Aver.Assets Aver.Scene)
@@ -250,11 +226,9 @@ scripting/csharp/Aver.Scripting.Bridge/HostBridge.Actors.cs
 | Target | Kind | Reason |
 |---|---|---|
 | `Aver.Scene` | **SHARED** | C# P/Invokes it. One binary holding the world means the editor and the bindings address the same entities — the same argument `modules/scripting` already makes about hosting the CLR in-process (`docs/SCRIPTING.md` §6). A static copy per consumer is two worlds that cannot see each other. |
-| `Aver.Scene.Renderer` | **STATIC** | It includes `aver/rhi/*`. Keeping it out of the SHARED target is what keeps RHI off the P/Invoke boundary, which is the rule `render.pbr` states and the only reason the SHARED-links-SHARED shape is defensible at all. Linked straight into the executable. |
 | `Aver.Framework` | **SHARED** | Same P/Invoke-identity reason. Its transitive closure is {Core, Assets, Scene}; no RHI. |
 
-`aver_add_module()` is STATIC-only, so both DLLs use a plain `add_library`, exactly as `render.pbr`
-does.
+Both DLLs use a plain `add_library`, exactly as `render.pbr` does.
 
 ### 2.4 Top level
 
@@ -271,15 +245,10 @@ Two hand-typed lines, in this order. The DAG is maintained by hand here; there i
   if(AVER_MODULE_FRAMEWORK) add_subdirectory(modules/framework) endif()
 ```
 
-The Sandbox links `Aver.Scene`, `Aver.Scene.Renderer` and `Aver.Framework` by hand under
-`if(TARGET ...)`, the way it already names `Aver.Scripting.Host` and the Voxi feature. **The executable
-owns the instances and ticks them**; `Aver.Runtime` is not touched, because a subsystem the app
-configures is not something the composition root should reach into
-(`sandbox/CMakeLists.txt:22-27`).
-
-`modules/platform/CMakeLists.txt` gains two `SOURCES` lines: `src/DirectoryWatcher.cpp` and
-`src/win32/Win32DirectoryWatcher.cpp`. They are already on disk and, because `aver_add_module` never
-globs, they compile into nothing today and the omission produces no diagnostic. This is step 14.
+The Sandbox links `Aver.Scene` and `Aver.Framework` by hand under `if(TARGET ...)`, the way it already
+names `Aver.Scripting.Host` and the Voxi feature. **The executable owns the instances and ticks them**;
+`Aver.Runtime` is not touched, because a subsystem the app configures is not something the composition
+root should reach into (`sandbox/CMakeLists.txt:22-27`).
 
 ### 2.5 The documentation delta this design owes
 
@@ -288,14 +257,8 @@ delta is **`Framework -> Core, Assets, Scene`** at Tier 5, plus a table row stat
 `ARCHITECTURE.md:142` currently allocates gameplay to C# above the ABI seam; that stays true — the
 framework is the *mechanism*, the game classes are C#.
 
-**That delta is applied**, in step 1's commit `03b79e1` alongside the first CMakeLists, where it
-belongs. It went in as three edge-list rows rather than one, because `Scene.Renderer` needed naming
-too and the `Scene` row had to gain the note that it is SHARED with no RHI behind its P/Invoke
-boundary.
-
-`ARCHITECTURE.md` also gained a paragraph the plan did not ask for, recording that the
-SHARED-links-SHARED edge is **verified rather than assumed** — and that the first attempt did not
-have it at all. See §8, step 1.
+**That delta is applied** in the first commit alongside the CMakeLists. `ARCHITECTURE.md` gained a
+paragraph recording that the SHARED-links-SHARED edge is **verified rather than assumed**.
 
 ---
 
@@ -444,7 +407,7 @@ scripts write; `CWorld` is derived data exactly one pass writes.
 struct CLocal     { Transform xf; u32 rev = 1; };      // Core's Transform: cm, +Z up, LH
 struct CWorld     { Mat4 m; u32 composedLocalRev = 0; u32 composedParentRev = 0; u32 rev = 1; };
 struct CHierarchy { Entity parent = 0, firstChild = 0, nextSibling = 0, prevSibling = 0; u32 depth = 0; };
-struct CName      { u64 nameId = 0; u32 offset = 0; u32 len = 0; };   // fnv1a64 + slice into the name blob
+struct CName      { u64 objectId = 0; u32 offset = 0; u32 len = 0; };   // fnv1a64 + slice into the name blob
 struct CTags      { u32 bits = 0; };                   // never interpreted here; see the ownership table
 ```
 
@@ -527,13 +490,11 @@ private:
 
 ### 3.7 Built-in components
 
-Registered by Scene's own init before anything else runs, at fixed dense ids starting from 1: this
-section originally listed eight (`CLocal`, `CWorld`, `CHierarchy`, `CName`, `CTags`, `CMeshRenderer`,
-`CLight`, `CCamera`), and `modules/scene/src/Builtins.cpp` has since appended seven more the same
-way — `CSkeletalMesh`, `CAnimator`, `CParticleEmitter`, `CAttachment`, then (per `docs/CHUNKS.md`
-§5.1's read-only-handle rule) `CSoftBody`, `CRigidBody` and `CJoint` — for **15** in total. Every one
-is registered through the same public API a script-declared component uses, so **nothing about the
-built-ins is privileged**.
+Registered by Scene's own init before anything else runs, at fixed dense ids starting from 1: **15**
+components — `CLocal`, `CWorld`, `CHierarchy`, `CName`, `CTags`, `CMeshRenderer`, `CLight`, `CCamera`,
+`CSkeletalMesh`, `CAnimator`, `CParticleEmitter`, `CAttachment`, `CSoftBody`, `CRigidBody`, `CJoint`.
+Every one is registered through the same public API a script-declared component uses, so **nothing
+about the built-ins is privileged**.
 
 ```cpp
 // `mesh` is an opaque ObjectId and `material` an opaque i32 this module never dereferences.
@@ -566,117 +527,45 @@ Two mechanisms hold the line, and only one of them is documentation:
 Everything Unreal-shaped lives in `Aver.Framework` and **nothing in it is a C++ base class**. There is
 no `AGameActor`, no `APawn`, no virtual inheritance anywhere.
 
-### 4.1 The class registry — `include/aver/framework/ClassRegistry.hpp`
+### 4.1 The class registry — `modules/framework/src/FrameworkAbi.cpp`
 
-```cpp
-#pragma once
-#include "aver/core/Types.hpp"
-#include "aver/scene/Entity.hpp"
-#include "aver/framework/framework_hooks.h"
-#include <string>
-#include <vector>
+The class registry implementation lives in `modules/framework/src/FrameworkAbi.cpp` (1,619 lines) as free
+functions with module-static state: `aver_fw_class_declare`, `aver_fw_class_find`, `aver_fw_class_seal`,
+a plain `struct ClassRecord`, and dispatch tables following `scripting_abi.h`'s idiom.
 
-namespace aver::fw {
+**`declare` is idempotent by name**, and the whole of hot-reload identity: a rebuilt assembly
+redeclares its class, gets back the handle its live entities already store, and only the descriptor
+behind that handle is rewritten. A hash collision against a DIFFERENT name is refused at declare time,
+which turns a silent alias into a load-time error.
 
-using Class = u32;                                  // dense registry index; 0 invalid
-inline constexpr Class kInvalidClass = 0u;
+A **sealed archetype** is the ordered component list of the whole parent chain, plus one contiguous
+blob of default values with a per-component offset. Spawning is then a loop of `memcpy` over that blob
+— no constructor chain, no virtual dispatch, no reflection, no allocation beyond growing the pools.
 
-// A resolved spawn archetype: the ordered component list of the whole parent chain, plus ONE
-// contiguous blob of default values with a per-component offset. Spawning is then a loop of memcpy
-// over that blob — no constructor chain, no virtual dispatch, no reflection, no allocation beyond
-// growing the pools.
-struct SealedArchetype {
-    std::vector<u32>   components;   // scene component type ids, parent-first
-    std::vector<u32>   blobOffset;   // parallel to components
-    std::vector<u8>    blob;
-};
+**Flatten the parent chain** with `seal`: resolve parent names to handles, check for cycles or missing
+parents, and fill NULL vtable slots from the parent's record — this is how "override only OnTick"
+works without inheritance. A name that resolves to nothing produces ONE warning at load naming both
+sides — not a null at the moment someone presses Play.
 
-struct ClassRecord {
-    std::string  name;
-    u64          nameHash   = 0;     // fnv1a64(name); the identity a file and a reload carry
-    Class        parent     = kInvalidClass;
-    i32          flags      = 0;
-    i32          tickGroup  = kTickPrePhysics;
-    i32          tickOrder  = 0;
-    bool         managed    = false; // ticked by the bridge in one batch, not by the loop below
-    bool         orphaned   = false; // its type vanished from a rebuilt assembly; entities kept
-    bool         sealed     = false;
-    Class        defaultPawn       = kInvalidClass;   // GAMEMODE classes only
-    Class        playerController  = kInvalidClass;
-    std::string  defaultPawnName;                     // resolved at seal, so declaration order is free
-    std::string  playerControllerName;
-    SealedArchetype     archetype;
-    AvActorVTable       vt{};        // BY VALUE, so the registrant's lifetime stops mattering
-    std::vector<scene::Entity> instances;             // dense; the tick's inner loop IS this vector
-};
-
-class ClassRegistry {
-public:
-    // IDEMPOTENT BY NAME, and this is the whole of hot-reload identity: a rebuilt assembly
-    // redeclares its class, gets back the handle its live entities already store, and only the
-    // descriptor behind that handle is rewritten. A hash collision against a DIFFERENT name is
-    // refused at declare time, which turns a silent alias into a load-time error.
-    Class declare(std::string_view name, std::string_view parentName);
-    Class find(std::string_view name) const;
-    Class find(u64 nameHash) const;
-
-    bool  reset(Class c);                       // drop components + defaults, keep the handle
-    bool  addComponent(Class c, u32 type);
-    bool  setFlags(Class c, i32 flags);
-    bool  setVTable(Class c, const AvActorVTable& vt);   // copied, never referenced
-    bool  setDefaultF32(Class c, u32 type, i32 field, f32 v);
-    bool  setDefaultI32(Class c, u32 type, i32 field, i32 v);
-    bool  setDefaultI64(Class c, u32 type, i32 field, i64 v);
-    bool  setDefaultVec(Class c, u32 type, i32 field, const f32* v);
-    bool  setDefaultStr(Class c, u32 type, i32 field, std::string_view v);
-    bool  setDefaultPawnByName(Class gameMode, std::string_view pawnClass);
-    bool  setPlayerControllerByName(Class gameMode, std::string_view controllerClass);
-
-    // Flatten the parent chain. 0 on a cycle, a missing parent, or a field-kind clash. A name that
-    // resolves to nothing produces ONE warning at load naming both sides — not a null at the moment
-    // someone presses Play. NULL vtable slots are filled from the parent's record here, which is
-    // how "override only OnTick" works without a byte of storage inheritance.
-    bool  seal(Class c);
-
-    ClassRecord*       at(Class c);
-    const ClassRecord* at(Class c) const;
-    u32                count() const;
-private:
-    std::vector<ClassRecord> classes_;   // index 0 is a permanent dead sentinel
-};
-
-} // namespace aver::fw
-```
-
-> **This registry's *behaviour* shipped, not this header.** There is no
-> `include/aver/framework/ClassRegistry.hpp` in the tree — the real thing is a few hundred lines of
-> free functions and module-static state in `modules/framework/src/FrameworkAbi.cpp`
-> (`aver_fw_class_declare`/`_find`/`_seal`, a plain `struct ClassRecord`, no `ClassRegistry` class),
-> a plainer shape than this section's `class ClassRegistry` sketch. But the *contract* this section
-> describes — declare is idempotent by name, a name resolves its parent rather than a compile-time
-> reference, `seal` flattens the parent chain into a spawn archetype — is exactly what runs, for
-> **two** kinds of declarant: a C# type carrying `[AverClass(...)]` (`docs/SCRIPTING_API.md` §11)
-> and, as of `41d6566`, a `.ocgraph` file declaring itself a class with a top-level `CLASS` record
-> (`docs/VISUAL_SCRIPTING.md` §2, `docs/formats/FORMAT_SPECS.md` §10a). Both go through
-> `Aver.Scripting.Bridge`'s `HostBridge` into the identical `declare`/`set_flags(Managed)`/`seal`
-> sequence; nothing downstream of `seal` can tell which kind of source produced a given class
-> handle.
+Both C# types carrying `[AverClass(...)]` (`docs/SCRIPTING_API.md` §11) and `.ocgraph` files
+declaring a top-level `CLASS` record (`docs/VISUAL_SCRIPTING.md` §2) go through the identical
+`declare`/`set_flags`/`seal` sequence through `Aver.Scripting.Bridge/HostBridge.cs`; nothing downstream
+of `seal` can tell which source produced a given class handle.
 
 ### 4.2 The five framework objects — all the same mechanism, differentiated by a flag
 
-**GameInstance.** Process lifetime, and the only thing that outlives a world. `class Framework` owns
-the registry and the world list; the GameInstance *entity* is spawned once from the single class
-carrying `AVER_FW_CLASS_GAME_INSTANCE` and is refused destruction by Stop and by level travel. The
-registry lives here rather than on a world for a concrete reason: **classes are declared by scripts at
-assembly load, before any world exists**, and must still be there after Stop destroys the play world.
-A second GAME_INSTANCE class is refused with a log line naming both, never silently overridden.
+**GameInstance.** Process lifetime, and the only thing that outlives a world. `Framework` owns the
+registry and the world list; the GameInstance *entity* is spawned once from the single class carrying
+`AVER_FW_CLASS_GAME_INSTANCE` and is refused destruction by Stop and by level travel. The registry lives
+here rather than on a world for a concrete reason: **classes are declared by scripts at assembly load,
+before any world exists**, and must still be there after Stop destroys the play world. A second
+GAME_INSTANCE class is refused with a log line naming both, never silently overridden.
 
-**GameMode.** A class carrying `AVER_FW_CLASS_GAME_MODE` plus two descriptor fields,
-`defaultPawnClass` and `playerControllerClass`, named **by string** in the attribute and resolved to
-handles at seal time — so two game classes never acquire compile-time references to each other. One
-game-mode class per world; on Play the world spawns it as a normal entity (so it has a script instance
-and ticks like anything else) with `tickOrder -1000` in the pre-physics group, so it runs before
-everything it governs.
+**GameMode.** A class carrying `AVER_FW_CLASS_GAME_MODE` plus two descriptor fields, `defaultPawnClass`
+and `playerControllerClass`, named **by string** in the attribute and resolved to handles at seal time —
+so two game classes never acquire compile-time references to each other. One game-mode class per world;
+on Play the world spawns it as a normal entity (so it has a script instance and ticks like anything else)
+with `tickOrder -1000` in the pre-physics group, so it runs before everything it governs.
 
 **GameActor.** Not a type. `aver_fw_class_of(e) != 0` is the complete definition of "this entity runs
 code", and an entity without a class is a plain piece of scene data with a transform. `Actor`,
@@ -787,24 +676,20 @@ allocator becomes silently-wrong queries the moment two subsystems want bit 12.
 `Aver.Scene` states in `scene_abi.h` that it never interprets a tag bit.
 
 ---
-
 ## 5. The C ABI
 
 Three headers. **Two of them are pure P/Invoke surfaces and one of them deliberately is not.** This is
 the contract; it is reproduced here in full because an implementer will follow it literally.
 
-> **The real `scene_abi.h` took the generic path further than §5.1 sketches, and is far shorter for
-> it (161 lines, not the several hundred implied below).** There is no dedicated
-> `aver_scene_get_position`/`set_rotation`/`get_scale`, no `aver_scene_set_world_position`, no batched
-> `aver_scene_get_locals`/`set_locals`/`get_world_matrices`, and no `aver_scene_query_*` or
-> `aver_scene_snapshot`/`restore` family — none of those convenience wrappers were built. What shipped
-> is the fully generic field surface this section's own reasoning argues for and then adds
-> conveniences on top of: `aver_scene_field(qualifiedName)` resolves a dense id once, and
-> `aver_scene_get_f32`/`get_vec`/`get_i32`/`get_i64`/`get_ref`/`get_str` (and their setters) read or
-> write ANY field through it, position and rotation included. `aver_scene_create` takes no name
-> argument. The one dedicated accessor that did ship is named `aver_scene_world_matrix`, not
-> `aver_scene_get_world_matrix`. Read this section for the reasoning, not as a transcript of the
-> header on disk.
+> **The real `scene_abi.h` is much shorter (198 lines) and far more generic than the sketch below.**
+> There is no dedicated `aver_scene_get_position`/`set_rotation`/`get_scale`, no
+> `aver_scene_set_world_position`, no batched `aver_scene_get_locals`/`set_locals`/`get_world_matrices`,
+> and no `aver_scene_query_*` or `aver_scene_snapshot`/`restore` family — none of those convenience wrappers
+> were built. What shipped is the fully generic field surface this section argues for: `aver_scene_field(qualifiedName)`
+> resolves a dense id once, and `aver_scene_get_f32`/`get_vec`/`get_i32`/`get_i64`/`get_ref`/`get_str`
+> (and their setters) read or write ANY field through it. `aver_scene_create` takes no name argument. The
+> one dedicated accessor is `aver_scene_world_matrix`, not `aver_scene_get_world_matrix`. Read this section
+> for the reasoning, not as a transcript of the header on disk.
 
 ### 5.1 `modules/scene/include/aver/scene/scene_abi.h`
 
@@ -1778,13 +1663,12 @@ on the GameInstance.
 private copy of `Aver.Scene` would run every script against an empty world and report nothing at all.
 
 ---
-
 ## 7. Frame lifecycle
 
 ### 7.1 One required reorder, and it cannot be deferred
 
-`handleManip` currently runs as the first statement of `SandboxApp::onRender` (`:569`), after that
-frame's camera matrices were computed in `onUpdate` (`:529-533`). **It moves into `onUpdate`,
+`handleManip` currently runs as the first statement of `SandboxApp::onRender`, after that
+frame's camera matrices were computed in `onUpdate`. **It moves into `onUpdate`,
 immediately before the framework tick.** Then a gizmo drag is simply another writer of a local
 transform, the tick observes it the same frame, and the flush composes once.
 
@@ -1792,8 +1676,7 @@ Left where it is, a drag writes *after* the flush and the drawn matrix trails by
 tick's output is silently overwritten one phase later.
 
 This will move pixels, so the gates re-baseline is announced **before** the migration starts, with a
-delta table and a stated reason — that is the tree's own rule, and the announcement has to precede the
-first line, not follow the red.
+delta table and a stated reason.
 
 ### 7.2 Process start — `SandboxApp::onInit`
 
@@ -1808,8 +1691,8 @@ first line, not follow the red.
    methods: `DeclareClasses`, `ActorBind`, `ActorTickAll`). Immediately after a successful
    `Bootstrap` the **executable** — not the framework, not the script host module — calls
    `aver_fw_install_managed_dispatch(&d)`. `Aver.Framework` links Core/Assets/Scene and must never
-   learn that a CLR exists; the exe owns both ends, which is the same argument
-   `sandbox/CMakeLists.txt:22-27` already makes about Voxi and scripting.
+   learn that a CLR exists; the exe owns both ends, which is the same argument already made
+   in the Sandbox CMakeLists.txt about material and Voxi bindings.
 4. `scripts_.loadScripts(dir)`. Classes are declared and sealed. `AverBehaviour` types keep their
    existing one-instance-per-type meaning untouched, so nothing already written breaks.
 5. The world is created and populated; the editor's `std::vector<MeshObj>` is gone. `sel_` becomes an
@@ -1830,9 +1713,7 @@ first line, not follow the red.
    nothing else wrote it, so "the manipulator wins" is true rather than merely asserted.
 4. `fw_.tick(t.dt)` — the whole scheduler, and deliberately not a general system graph:
    - **a.** `dt` clamped to `kMaxFrameDt` (0.1 s). The clamp lives here and not in `Engine`, because
-     `Engine` has no business deciding what a gameplay frame is, and `Engine.cpp:101` returns before
-     the `frameClock_.restart()` at `:112`, so the first frame after a resize drag carries the whole
-     drag.
+     `Engine` has no business deciding what a gameplay frame is.
    - **b.** drain the deferred-spawn queue: `memcpy` each component's defaults out of the sealed blob,
      apply the transform override, and for a managed class call `managed_.bind(nameHash, e)`. The
      queue is **double-buffered** and swapped before draining — an actor spawning another actor inside
@@ -1850,25 +1731,22 @@ first line, not follow the red.
    semantics.
 6. `aver_scene_flush()` — retire destroys, rebuild the topological order if a parent link moved,
    propagate world matrices in one linear pass. **This is the single point in the frame where world
-   matrices become correct**, and it is after all gameplay writes and before anything reads. Gameplay
-   that needed one mid-tick got it through the on-demand path and did not pay for a second sweep.
-7. Viewport rect, camera matrices from the resolved `CCamera`, light, sky
-   (`SandboxApp.cpp:525-540`).
+   matrices become correct**, and it is after all gameplay writes and before anything reads.
+7. Viewport rect, camera matrices from the resolved `CCamera`, light, sky.
 
 **`onRender`.** `Aver.Scene.Renderer` walks the `CMeshRenderer` pool, joins `CWorld` by entity and
 issues `drawMesh`. Draws are recorded in `onRender`, never `onUpdate`, per the standing rule.
 
 ### 7.4 Stop → Play
 
-The toolbar's dead `ImGui::Button("Play")` at `:1005` finally gets a handler.
+The toolbar's dead `ImGui::Button("Play")` finally gets a handler.
 
 1. `aver_scene_snapshot()` — a `memcpy` per pool. **This must be proven working before Play is
    enabled**, not alongside it: a Stop that restores an incomplete snapshot loses the user's level
-   edits silently, which is a worse outcome than the buttons staying inert.
+   edits silently.
 2. Spawn the world's GAMEMODE class → spawn `playerControllerClass` → find a PlayerStart entity →
    spawn `defaultPawnClass` there → possess → `OnPossessed`.
-3. Every pre-existing attached actor is queued for `beginPlay(PLAY)`, in `tickList_` order so the
-   ordering is the one the tick will use.
+3. Every pre-existing attached actor is queued for `beginPlay(PLAY)`, in `tickList_` order.
 4. Play state PLAYING. Pause suppresses step 4e only.
 
 ### 7.5 Play → Stop
@@ -1883,14 +1761,13 @@ GameMode.
 
 Main thread, triggered by `DirectoryWatcher` → 250 ms debounce → `dotnet build` on the existing worker
 → **exit code 0 only**. `ToolsMenu::reapCompile`'s rule stands unchanged: a failed build must **not**
-unload, or a typo leaves the editor with no scripts at all.
+unload.
 
 1. `aver_fw_reload_begin()` — for every managed actor in reverse tick order: `endPlay(RELOAD)`,
    unbind. No entity is destroyed and no class is cleared. Class records are marked stale but their
    **slots are kept**, so an `aver_class` held by the Details panel resolves to "same class,
    reloading".
-2. `aver_fw_clear_managed_dispatch()` — a NULL store the thunk guards already handle, so a reload that
-   fails halfway leaves a framework that ticks nothing rather than one that crashes.
+2. `aver_fw_clear_managed_dispatch()` — a NULL store the thunk guards already handle.
 3. `scripts_.unloadScripts()` — the existing `DrainAndUnload` untouched, including the `NoInlining`
    that is load-bearing and the bounded two-cycle collect. **False is not a failure.**
 4. `scripts_.loadScripts(binDir)` — every class redeclared. `declare()` is idempotent by name, so each
@@ -1907,9 +1784,7 @@ were never in a file; possession pairs; play state; the Play snapshot; and every
 including per-instance overrides a designer typed into Details.
 
 **What does not:** non-`[Editable]` C# fields, which come back at their initialisers — the same rule
-`AverBehaviour` already has, and the escape hatch is a one-word `[Editable]` the user can apply
-themselves, which is why no serialisation contract for arbitrary managed state is invented here
-(`docs/STATUS.md:822-824` refused to invent one, correctly).
+`AverBehaviour` already has. The escape hatch is a one-word `[Editable]` the user can apply themselves.
 
 A class whose type vanished is **ORPHANED** and its entities **PARKED**, listed by name, restored
 intact when the name comes back.
@@ -1927,8 +1802,7 @@ dangling pool.
 ### 7.8 Native C++ classes do not reload
 
 `aver_fw_class_set_vtable` exists for a future plugin DLL, but with the current build shape changing a
-native actor class means a relink and a restart. Pretending otherwise would be the one dishonest claim
-available here, so it is not made.
+native actor class means a relink and a restart.
 
 ---
 
@@ -1979,8 +1853,7 @@ steps exist *only* to retire a risk before anything can depend on the answer.
   `componentId`/`fieldId` lookup. Register the eight built-ins in `Builtins.cpp` with their tables.
   **Verify:** `SceneTest` enumerates every registered component and field, checks
   `aver_scene_component_size` against `sizeof` for each, and asserts that a table deliberately missing
-  a member fails `verify()` with the component named. A wrong `offsetof` is caught here rather than
-  three layers away.
+  a member fails `verify()` with the component named.
 
 - [ ] **4. Transform, hierarchy, dirty propagation.**
   `CLocal`/`CWorld`/`CHierarchy`, intrusive links, `setParent` with cycle rejection, `order_` rebuilt
@@ -1990,7 +1863,7 @@ steps exist *only* to retire a risk before anything can depend on the answer.
   `Transform::toMatrix()` composed by hand left-to-right, element for element; asserts translation
   lands in the **last row**; asserts `setParent(child, descendant)` returns false and leaves the sort
   intact; asserts that moving a root recomposes exactly its subtree and no other entity's `CWorld.rev`
-  changes; asserts `worldMatrix()` mid-frame equals the value the next flush produces.
+  changes.
 
 - [ ] **5. `scene_abi.h` and `SceneAbi.cpp`.**
   The full header as specified, plus the implementation, the snapshot/restore `memcpy`,
@@ -2003,9 +1876,8 @@ steps exist *only* to retire a risk before anything can depend on the answer.
   `Scene.cs`, the version bump, the `LPUTF8Str`/`PtrToStringUTF8` pair everywhere, and the
   `abi_version` assert at `Bootstrap`. No framework types yet.
   **Verify:** `Aver.Scripting.Sample` creates an entity, sets a position, reads it back, sets a
-  non-ASCII name and reads it back unchanged (this is the test the existing `PtrToStringAnsi` bindings
-  would fail). An assembly built against 1.0.0 still loads, proving `CheckApiVersion`'s minor-bump
-  behaviour.
+  non-ASCII name and reads it back unchanged. An assembly built against 1.0.0 still loads, proving
+  `CheckApiVersion`'s minor-bump behaviour.
 
 - [ ] **7. `Aver.Scene.Renderer`, and migrate the editor's object list.**
   `SceneRender.cpp` walks `CMeshRenderer` joined with `CWorld`. Delete `std::vector<MeshObj>`; `sel_`
@@ -2013,9 +1885,7 @@ steps exist *only* to retire a risk before anything can depend on the answer.
   and `CTags`; the outliner walks `CHierarchy`; `handleManip` moves into `onUpdate`.
   **Announce the gates re-baseline before starting this step.**
   **Verify:** `./scripts/gates.ps1` across all nine device configurations, with the stated reason and a
-  delta table for every gate that moved. Draw order changes from vector order to dense-array order and
-  `handleManip` moves a phase earlier, so movement is expected; what must be argued is which gates held
-  **exactly** and why.
+  delta table for every gate that moved.
 
 - [ ] **8. ClassRegistry: declare, seal, spawn.**
   `ClassRegistry.hpp`/`.cpp` with idempotent-by-name `declare`, hash-collision refusal, parent-chain
@@ -2045,8 +1915,7 @@ steps exist *only* to retire a risk before anything can depend on the answer.
   **Verify:** a stale `Aver.Scripting.Bridge.dll` in `build/bin` declines with one line rather than
   crashing. Installing a dispatch twice returns 0 and logs. Clearing the dispatch mid-frame leaves the
   tick ticking nothing rather than faulting. Verify the `DEPENDS` addition by touching only a `.cs`
-  file and confirming a clean build ships the **new** bridge — this is the exact failure mode the
-  CMake comments say has already shipped once.
+  file and confirming a clean build ships the **new** bridge.
 
 - [ ] **11. C# authoring layer and class declaration at load.**
   `Framework.cs`, the attributes, `ClassBuilder`, the bridge's `DeclareClasses` pass reflecting
@@ -2077,15 +1946,14 @@ steps exist *only* to retire a risk before anything can depend on the answer.
 
 - [ ] **14. DirectoryWatcher wired, and the editor's generic panels.**
   Add `DirectoryWatcher.cpp` and `win32/Win32DirectoryWatcher.cpp` to
-  `modules/platform/CMakeLists.txt` `SOURCES` (they are on disk, untracked, and compile into nothing
-  today with no diagnostic). Debounce 250 ms into the existing `startCompile` path; `poll()` returning
-  true triggers a full rescan. Details panel becomes one generic loop over field tables; the Add menu
-  is `class_count()`/`at()` filtered by ABSTRACT; FAILED and PARKED rows render red with the reason as
-  a tooltip.
+  `modules/platform/CMakeLists.txt` `SOURCES`. Debounce 250 ms into the existing `startCompile` path;
+  `poll()` returning true triggers a full rescan. Details panel becomes one generic loop over field
+  tables; the Add menu is `class_count()`/`at()` filtered by ABSTRACT; FAILED and PARKED rows render
+  red with the reason as a tooltip.
   **Verify:** saving a `.cs` from an external IDE reloads the viewport within a second without
   touching the Tools menu. A newly authored C#-only class appears in **Add ▸** on the next reload with
   no C++ edit. Add an `[Editable] Vec3` to a script, rebuild, and confirm a colour/vector row appears
-  in Details **with no editor code written for it** — the panel must not know what the field is.
+  in Details **with no editor code written for it**.
 
 ---
 
@@ -2095,59 +1963,47 @@ These are the honest limits of the design. None of them is softened, and none ha
 
 1. **Nothing serialises a world yet**, and this design assumes `.ocworld` eventually stores
    `(className, instanceName, overrides)`. There is no `.ocworld` reader, no writer for any `.oc*`
-   format in `modules/formats`, and `.ocmap`'s `PLACE` has no per-placement object id (both branches
-   derive it from the asset name, `OcMap.cpp:95` and `:107`). Everything above works **in memory
-   only** until the tree grows its first format writer, and the `CLASS <objectId> <ClassName>` line
-   this design needs is a format addition that must be specified before the first save button exists.
+   format in `modules/formats`, and `.ocmap`'s `PLACE` has no per-placement object id. Everything above
+   works **in memory only** until the tree grows its first format writer.
 
 2. **The gates oracle is a renderer oracle.** It compares raw 8-bit pixel codes across nine device
    configurations and would notice a scene change only if it moved a pixel. A world tick, possession,
    spawn ordering, PIE snapshot/restore and reattach-after-reload all need their own test target, and
-   the tree has no CTest, no `enable_testing()` and exactly one hand-run test executable to copy from.
-   `tests/scene` and `tests/framework` follow that precedent, which means **nothing runs them unless a
-   human does**.
+   the tree has no CTest and exactly one hand-run test executable to copy from.
 
 3. **Whether SHARED-links-SHARED needs anything beyond the import lib on Windows is asserted, not
    known.** Step 1 exists to answer it before anything depends on the answer, but the staging rules
-   for `build/bin` have never been exercised for a DLL that another DLL depends on, and a load-order
-   surprise would land on the very first configure.
+   for `build/bin` have never been exercised for a DLL that another DLL depends on.
 
 4. **Attach-as-reclass mints derived classes the user did not name** (canonical parent + sorted mixin
    names). They appear in the outliner and the user can be confused by them, and there is no undo
-   system anywhere in the tree, so the first request for Ctrl+Z on a script attach has no mechanism
-   behind it at all.
+   system anywhere in the tree.
 
 5. **The framework sweeps its instance lists with `aver_scene_valid`** rather than taking a destroy
    callback from Scene. That keeps the arrow pointing down and costs a `u32` compare per actor, but
-   `endPlay(DESTROY)` fires **up to one frame after** the entity went away, and any resource an actor
-   holds on the entity's behalf is released one frame late. Whether that is acceptable is untested and
-   cannot be tested until something holds such a resource.
+   `endPlay(DESTROY)` fires **up to one frame after** the entity went away.
 
 6. **Seven generation bits gives 127 reuses of an index before retirement.** Retiring rather than
    wrapping is affordable at 16.7M indices, but a world that churns entities hard enough to retire
    slots in bulk has a bug worth seeing, and there is currently **no plan for what the editor does
    when the retirement counter climbs**.
 
-7. **Sim determinism is documented as a linkage guarantee** (`ARCHITECTURE.md:372`). Native actor
+7. **Sim determinism is documented as a linkage guarantee** (`ARCHITECTURE.md:680`). Native actor
    classes tick through a fixed vtable and are in scope for it; managed actors are JIT-compiled and
-   are not. This design does not extend the guarantee upward and does not pretend to, but the boundary
-   needs writing down before a C# class ends up inside something the Rust validator is expected to
-   reproduce.
+   are not. This design does not extend the guarantee upward and does not pretend to.
 
-8. **`aver_scene_at` and the query wrapper share the hazard `aver_pbr_at` already documents:** indices
-   are dense over live entities and **shift on destroy**, so a loop that destroys while iterating
-   skips entities. The header says so; nothing enforces it, and the `Query` wrapper re-evaluating on
-   every `Count` call makes the mistake easy to write and hard to see.
+8. **`aver_scene_at` and the query wrapper share a hazard:** indices are dense over live entities and
+   **shift on destroy**, so a loop that destroys while iterating skips entities. The header says so;
+   nothing enforces it, and the `Query` wrapper re-evaluating on every `Count` call makes the mistake
+   easy to write and hard to see.
 
 9. **A behaviour disabled by a throw stays disabled for the rest of the session** with the entity
    still sitting in the outliner looking fine. There is no API to list or re-enable disabled actors
-   short of a full reload, and making Play real means the editor now has a mode where one bad tick
-   silently removes an actor from the simulation.
+   short of a full reload.
 
 10. **One world per process** removes a parameter from every ABI call and a lifetime question from
     every handle, and it makes multi-world, world previews and PIE-in-a-separate-world impossible
-    without additive ABI. That is a deliberate option kept open rather than an oversight, but the
-    additive entry points should be sketched before someone asks for a second viewport.
+    without additive ABI.
 
 ---
 
@@ -2157,28 +2013,21 @@ Recorded here rather than silently repaired, because each one is a decision an i
 the first hour and should hit with the trade already visible.
 
 - **`ClassRegistry::setDefault*` takes `(Class, u32 type, i32 field)` but the ABI takes
-  `(aver_class, aver_field)`.** The ABI form is the intended one — the whole point of the dense field
-  id is that it already carries the component. The C++ signature above still carries the redundant
-  `type` parameter; it should lose it, and the ABI is the side that is right.
+  `(aver_class, aver_field)`.** The ABI form is the intended one. The C++ signature should lose the
+  redundant `type` parameter.
 - **`ClassBuilder.Mesh` writes `set_default_str` into `CMeshRenderer`.** `CMeshRenderer.mesh` is a
-  `u64` ObjectId (kind `I64`) and `material` is an `i32`, so those two calls would be **rejected by
-  the ABI's own kind check**. Either the builder resolves a path to an ObjectId before writing (which
-  needs an Assets lookup on the managed side), or `CMeshRenderer` grows string-kind path fields. This
-  is unresolved and it lands in step 11.
-- **`ActorSlot.TickGroup` is never assigned** in `ActorBind` before it is used to index `s_byGroup`,
-  so every managed actor would land in group 0. The class record knows its tick group; the bind path
-  has to read it.
+  `u64` ObjectId and `material` is an `i32`, so those two calls would be **rejected by the ABI's own
+  kind check**. Either the builder resolves a path to an ObjectId before writing, or `CMeshRenderer`
+  grows string-kind path fields.
+- **`ActorSlot.TickGroup` is never assigned** in `ActorBind` before it is used to index `s_byGroup`.
+  The class record knows its tick group; the bind path has to read it.
 - **`CName` is specified as `{ nameId, offset, len }` but the ABI exposes
   `aver_scene_get_object_id` / `set_object_id`.** Persisted identity is described as "CName's
-  ObjectId"; there is no such member. Either `nameId` *is* the ObjectId (in which case the name blob
-  slice is the display name and the field should say so), or `CName` needs a fifth member.
+  ObjectId"; there is no such member. Either `nameId` *is* the ObjectId or `CName` needs a fifth member.
 - **`aver_fw_class_set_vtable` returns `aver_class`** while its C++ counterpart returns `bool`. A
-  setter returning a handle is odd; the C++ form is the sane one and the header should follow it.
+  setter returning a handle is odd; the C++ form is the sane one.
 - **Two debounces exist for one gesture.** `DirectoryWatcher` settles at 150 ms
-  (`modules/platform/README.md`), and hot reload adds a further 250 ms before `startCompile`. That is
-  defensible as two layers — one coalesces OS records, one avoids compiling mid-save-burst — but it is
-  400 ms of latency from a save and nobody has argued that number.
+  (`modules/platform/README.md`), and hot reload adds a further 250 ms before `startCompile`.
 - **`Framework::tick` references `kDead`**, which no header above declares.
 - **`AverActor.Spawn` allocates a `float[3]` per call**, inside the same design that justifies
-  `[ThreadStatic]` scratch buffers elsewhere on GC-pressure grounds. Spawn is rarer than a transform
-  write, so it may be fine; it is simply inconsistent with the stated reasoning.
+  `[ThreadStatic]` scratch buffers elsewhere on GC-pressure grounds.

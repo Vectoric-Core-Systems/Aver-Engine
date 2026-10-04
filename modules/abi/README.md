@@ -17,13 +17,8 @@ The reason is that consolidating would cost the three properties the separate se
 
 A single seam has to link everything it exposes, so it could hold none of them.
 
-**Where to look instead:** [docs/ABI.md](../../docs/ABI.md) documents all the seams in one place —
-seven today, not six (the count has grown since this line was written; docs/ABI.md's own header names
-the current total) — which to use for a given job, every entry point and signature, the type and
-handle rules, the error convention, the three version boundaries, and what must change together when
-you add an entry point.
+**Where to look instead:** [docs/ABI.md](../../docs/ABI.md) documents all the seams in one place,
+which to use for a given job, every entry point and signature, the type and handle rules, the error
+convention, the three version boundaries, and what must change together when you add an entry point.
 
-**Corrected:** `docs/ARCHITECTURE.md` no longer carries the old sketch — every mention of `Aver.ABI`
-in it (its module table, its DAG, and a dedicated "designed here, and then dropped" paragraph) now
-states the drop plainly and points back to this file and to `docs/ABI.md`. It was stale on this point
-once; it has since been fixed and should not be assumed stale again without checking.
+See [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the full module DAG.

@@ -1,9 +1,3 @@
-I have everything I need, including byte-level confirmation. Key findings verified: `fnv1a64("demoworld") = 0x376B85BC4D1A03BA` (matches sample), the Java `ROOT` formula `sha256("demoworld|build1|scene")` matches the sample byte-for-byte, and the sample has **mixed line endings** (`\r\n` on exactly the lines Java emits via `%n`: `ID`, `DEFORM`, `PLACE`; `\n` everywhere else).
-
-Here is the specification.
-
----
-
 # OpenConstructor `.scene` / `.ocmap` Format Specification
 
 Source of truth:

@@ -24,8 +24,6 @@ Bool: true/false, 1/0, on/off.
 ### ConsoleBatch two-phase commit (part00, lines ~178-200)
 Setter closures, not two pre-seeded Settings structs. Tier-phase first, dial-phase second. Snapshot fresh at each phase's commit to avoid stale tier fields. Tier change detected by diffing incoming vs live settings.
 
-
-
 ### ConsoleBatch design: closures for tier/dial separation
 The batch uses setter closures (not pre-seeded structs) to avoid stale tier fields when commits happen in multiple phases. Each phase re-reads the live renderer settings at commit time: tier-phase reads what was live before, dial-phase reads what the tier-phase just derived. This prevents a tier change from overwriting explicitly-set dial values in the same `set` line.
 
@@ -33,8 +31,8 @@ The batch uses setter closures (not pre-seeded structs) to avoid stale tier fiel
 VoxiRenderer has private debug views (giPoisonView, giVisPathView) and measurement toggles (giForceRebuild, giBoundedDispatch, giFreeAccumulator) with no path through voxi::Settings/setSettings. These use a raw-slot pattern: a static bool/u32 owned by this header, written by `set voxi.name` and reasserted every frame from SandboxApp's onUpdate to make the value live.
 
 ### GI measurement results on PTTest
-- giBoundedDispatch: rebuilds only touch ~1.3% of the 512^3 grid instead of 100%. Measured on PTTest NewSponza, ray-driven, 400 moving frames: GPU total 30.64 → 30.25ms. Output verified 99.3% bit-identical, 0.0024 mean absolute difference (residual is GI temporal noise).
-- giFreeAccumulator: frees ~2048 MiB accumulator at Epic's 512^3 after 60 quiet ticks (was 240), recreates on demand (one-tick latency cost).
+- giBoundedDispatch: rebuilds only touch ~1.3% of the 512³ grid instead of 100%. Measured on PTTest NewSponza, ray-driven, 400 moving frames: GPU total 30.64 → 30.25ms. Output verified 99.3% bit-identical, 0.0024 mean absolute difference (residual is GI temporal noise).
+- giFreeAccumulator: frees ~2048 MiB accumulator at Epic's 512³ after 60 quiet ticks (was 240), recreates on demand (one-tick latency cost).
 
 ### RT shadow optimizations and measurements
 - rtSecondaryShadowOpaque: secondary (reflection, ReSTIR GI candidate) shadows use fast opaque-only rays instead of full glass-tinting walk. Measured GI trace 3.88 → 3.38 ms, reflection 3.14 → 2.73 ms, image MAD 0.09. Glass/water stops casting shadows for these two secondary rays only; primary shadows untouched. Default ON.
@@ -213,7 +211,6 @@ Five bits of consoleLightingLegacySlot(), all default OFF (fixed behaviour):
 ### Depth proxy map
 - Empty if no Trifactor module; every lookup answers 0, draws mesh unchanged
 - Guarded where BUILT (with LOD ladder) but declared unguarded (needed by unguarded Voxi resolver call)
-
 
 
 - **MULTI-SELECTION anchor+set design**: anchor is sel_/selEntity_, kept as sole reference point (read by Details, gizmo, outliner, copy, rename, status line); multiSel_ contains the rest plus the anchor itself as invariant. Forgetting the anchor in multiSel_ causes "delete removed all but one" bugs.

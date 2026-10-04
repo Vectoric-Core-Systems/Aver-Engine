@@ -11,7 +11,7 @@ backticks are where the knowledge applies. Measurements are as originally record
 
 - `PtSurface::baseColorTex`: Must be obtained from PathTracer::residentTexture(), never by counting draws. An index that moves when the visible set changes moves PtSceneView::drawsKey() with it and causes the accumulator to re-arm every frame, never reaching sample 1.
 
-- `PtSurface::roughness`: Default of -1 is kept for backward compatibility with existing furnace measurements, which are an ABSOLUTE claim about an albedo-1 surface reading exactly L. A dielectric specular lobe -- even a 0.04 one -- is extra energy leaving that surface and would silently change all existing furnace measurements if the default changed.
+- `PtSurface::roughness`: Default of -1 is kept for backward compatibility with existing furnace measurements, which are an ABSOLUTE claim about an albedo-1 surface reading exactly L. A dielectric specular lobe — even a 0.04 one — is extra energy leaving that surface and would silently change all existing furnace measurements if the default changed.
 
 - `PtSurface::ior`: No real dielectric has IOR of exactly 0 (vacuum/air is 1.0). The field's own absence at 0.0 signals "not a dielectric" without needing a separate flag or quantisation. This design preserves the HLSL mirror (PtInstance) from growing the ABI and losing precision.
 
@@ -29,7 +29,7 @@ backticks are where the knowledge applies. Measurements are as originally record
 
 - `meshRows_/blas_`: GEOMETRY IS PER MESH, NOT PER SURFACE. Deduplicating within a snapshot is critical for performance. Measured on a real level with procedural foliage: one snapshot had 2174 surfaces drawn from a handful of distinct meshes. Per-surface approach required 2174 createBlas calls, each allocating its own acceleration structure AND scratch buffer, with 31.2 MILLION vertices copied into the flat table for perhaps a fiftieth of that much distinct geometry. Per-mesh approach reduced this dramatically.
 
-- `blasCache_`: BLAS BY MESH, SURVIVING resetScene(). A BLAS describes one mesh and stays valid until that mesh is destroyed. The RHI already tears one down at exactly that moment -- destroyMesh calls destroyBlasForMesh -- so the only way a cached handle can dangle is a mesh that died, and IDevice::meshGeometry answers false for exactly those.
+- `blasCache_`: BLAS BY MESH, SURVIVING resetScene(). A BLAS describes one mesh and stays valid until that mesh is destroyed. The RHI already tears one down at exactly that moment — destroyMesh calls destroyBlasForMesh — so the only way a cached handle can dangle is a mesh that died, and IDevice::meshGeometry answers false for exactly those.
 
 - `geoMeshes_/geoVerts_/geoIndices_`: THE GEOMETRY TABLE BY MESH SET, SURVIVING resetScene(). What actually changes between snapshots is which INSTANCES are visible. The distinct meshes and their row order are usually identical. When they are, verts_/indices_ already hold exactly the right bytes, so both the allocation and the copy are pure waste. prepare() compares the freshly computed order against geoMeshes_ and reuses on a match.
 

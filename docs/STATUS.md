@@ -1,63 +1,44 @@
 # Aver Engine — Status & Handoff
 
-> **STALENESS BANNER — added 2026-09-20. This document is 659 commits behind the tree.** It was last
-> restamped at `cb1d36f` / 517 commits; HEAD is `ba9c94aa` / 1,176. What has landed in the gap and is
-> described **nowhere below**: the editor/runtime split (the runtime library moved to `Runtime/`, the
-> standalone host came back as `AverEngineRuntime.exe`, and the editor now calls that library for
-> content, level load, water, streaming, landscape, physics/audio/tick, camera, mouse capture, input
-> publishing and the whole world draw walk); the `SandboxApp.cpp` split across ~40 files; denoiser/ReSTIR
-> denoising; the packaging restore; and the four `RENDER.EXPOSURE`/`BLOOM`/`AUTOEXPOSURE`/`TONEMAP`
-> manifest keys. `README.md` points here as "where the work actually stands" — treat that as true for
-> everything up to 2026-08-17 and as **unwritten** after it. Nothing below has been re-verified
-> against HEAD; this banner deliberately does not guess which of it survived.
+> **STALE — read before trusting anything below.** Stamped 2026-08-17 at `cb1d36f` (517 commits); the
+> banner was last revised 2026-09-20 at HEAD `ba9c94aa` (1,176 commits) and the tree has moved on
+> since. Nothing below has been re-verified against HEAD. `git log --oneline | wc -l` and
+> `git rev-parse HEAD` are the authority. Written up **nowhere below**: the editor/runtime split (the
+> runtime library moved to `Runtime/`, the standalone host came back as `AverEngineRuntime.exe`, and
+> the editor calls that library for content, level load, water, streaming, landscape,
+> physics/audio/tick, camera, mouse capture, input publishing and the whole world draw walk); the
+> `SandboxApp.cpp` split across ~40 files; denoiser/ReSTIR denoising; the packaging restore; the four
+> `RENDER.EXPOSURE`/`BLOOM`/`AUTOEXPOSURE`/`TONEMAP` manifest keys; and, later, the Vulkan
+> maturation, neural frame interpolation and procedural city generation. `README.md` points here as
+> "where the work actually stands": true up to 2026-08-17, **unwritten** after it. See
+> `docs/ARCHITECTURE.md`, module READMEs and recent commits for what is live.
+>
+> **Holes in the numbered §4 series** (statements about what does *not* exist are suspect until checked):
+> 1. §4n was written at `d8fc062`, §4o picks up at `083d687`. The **twenty** commits between —
+>    `Aver.Scene`, `Aver.Framework`, `Aver.Physics`, `.ocmesh`/`.ocskel`/`.ocanim`, the JSON reader, the
+>    glTF importer, the asset-editor shell, `.ocproject` shell association — are covered by
+>    `docs/SCENE_FRAMEWORK.md`, `docs/ABI.md` and `docs/SCRIPTING_API.md`, never written up here.
+> 2. The 0.4.0 phase, `cb1d36f` -> `b952b8a` (685 commits, 2026-08-25), 168 commits: node-graph
+>    materials (a `DOMAIN material` `.ocgraph` compiles to HLSL and shades a real surface via
+>    `GRAPHREF`, `docs/MATERIALS.md`), Aver.Fluids (real-unit water/fluid authoring; no engine doc), a
+>    Vulkan backend that presents frames and runs the full editor, Synapse (`docs/SYNAPSE.md`), Aver
+>    Sound (`docs/SOUND.md`), SaveGame/LoadGame, animation sockets and notify events, device-lost
+>    handling, a path-tracer crash fix. The specific "Vulkan is a stub" claims were corrected in place
+>    in §0, §2, §4c-2 and §4d.
+> 3. `b952b8a` -> `da44c33` (835 commits, 2026-09-02): version **0.5.0** (`18c1360`); .NET **net10.0**
+>    with Roslyn vendored and pinned at **5.6.0** under `third_party/nuget`; `Aver.Physics` as a C#
+>    assembly over a **125-function** C ABI across five headers in
+>    `modules/physics/include/aver/physics/`; Aver Node parity for it, node catalogue **240 types across
+>    23 categories** in `sandbox/src/GraphNodeDefs.hpp`; graph-editor palette search and copy/paste;
+>    Content Browser creates `.ocgraph`/`.ocbt`. A sweep deleted five directories that held only a stale
+>    plan — `editor/`, `interop/`, `shaders/`, `modules/render/`, `modules/render.gi/` (`01a6d8c`) —
+>    while `abi/` and `modules/abi/` were kept on purpose, rewritten to record that the consolidated
+>    `Aver.ABI` was cancelled rather than deferred. The rest of the 150 (a Debug-only physics bug, an
+>    editor mode system, a crash reporter) was not opened and has not been audited.
 
-Living record of where the engine stands and what's next. Updated 2026-08-17 at `cb1d36f`
-(517 commits). `git log --oneline | wc -l` and `git rev-parse HEAD` are the authority. The phase
-recorded here gave a game its own UI, its own audio and its own materials — three C seams and the
-modules behind them — and opened an asset editor for actors (§4o–§4s).
-
-**This document has a hole in it, and reading it as complete will mislead you.** §4n was written at
-`d8fc062`; §4o picks up at `083d687`. The **twenty** commits in between — `Aver.Scene`,
-`Aver.Framework`, `Aver.Physics`, `.ocmesh`/`.ocskel`/`.ocanim`, the JSON reader, the glTF importer,
-the asset-editor shell, `.ocproject` shell association — landed and are covered by
-`docs/SCENE_FRAMEWORK.md`, `docs/ABI.md` and `docs/SCRIPTING_API.md`, but **were never written up
-here**. Several statements below still describe the tree as it was before them; the ones found while
-writing §4o–§4s are corrected in place and say so, and the rest have not been audited. Treat any
-claim in §4–§4n about what does *not* exist as suspect until checked against the tree.
-
-**A second, later hole, opened by the 0.4.0 phase.** The header above stops at `cb1d36f` (517
-commits, 2026-08-17); it is now `b952b8a` (685 commits, 2026-08-25). The 168 commits between them
-shipped node-graph materials (a `DOMAIN material` `.ocgraph` compiles to HLSL and shades a real
-surface via `GRAPHREF` — see `docs/MATERIALS.md`), Aver.Fluids (real-unit water/fluid authoring; no
-engine doc for it yet), a Vulkan backend that now presents frames and runs the full editor, Synapse
-(AI perception + behavior trees — `docs/SYNAPSE.md`), Aver Sound (procedural node-graph audio —
-`docs/SOUND.md`), a working SaveGame/LoadGame system, animation sockets and notify events, real
-device-lost handling, and a path-tracer crash fix. None of it is folded into the numbered §4-series
-sections below — that narrative simply stops short of all of it. What this pass DID do is correct, in
-place, the specific claims those 168 commits made outright **false** rather than merely incomplete —
-mostly "Vulkan is a stub", found in §0, §2, §4c-2 and §4d (Known gaps and defects). It did not
-attempt to write the missing sections; treat §3 onward with the same suspicion the paragraph above
-already asks for.
-
-**A third hole, opened since, and not yet closed by this pass either.** `b952b8a` was 685 commits at
-2026-08-25; `HEAD` is now `da44c33` (835 commits, 2026-09-02) — 150 commits this pass did not read in
-full. The engine version was bumped to **0.5.0** somewhere in that range (`18c1360`). What is
-independently verified among the 150: the .NET target moved to **net10.0**, with Roslyn vendored and
-pinned at **5.6.0** under `third_party/nuget`; `Aver.Physics` shipped as a C# assembly over a
-**125-function** C ABI across five headers under `modules/physics/include/aver/physics/`
-(re-counted this pass, matches); Aver Node gained parity for it, and the node catalogue is now **240
-node types across 23 categories** in `sandbox/src/GraphNodeDefs.hpp`; the graph editor gained palette
-search, copy/paste, and a moved graph-class placement that now survives a save; and the Content
-Browser learned to create `.ocgraph` and `.ocbt` assets directly. Separately, a sweep deleted five
-directories whose entire content was a stale plan for work done elsewhere under other names —
-`editor/`, `interop/`, `shaders/`, `modules/render/`, `modules/render.gi/` (`01a6d8c`) — while
-`abi/` and `modules/abi/` were kept on purpose, rewritten earlier to record that the consolidated
-`Aver.ABI` was cancelled rather than merely deferred. None of this is folded into the numbered
-§4-series sections either, and the remainder of the 150 commits (a Debug-only physics bug, an editor
-mode system, a crash reporter, among the commit subjects — not opened and read) has not been audited
-closely enough to summarize responsibly. Treat §3 onward, and every module-layout line below that
-still says "not yet wired" or "not built", with the same suspicion as before, now doubled — verify
-against the tree before repeating any of it.
+Living record of where the engine stood at 2026-08-17 (`cb1d36f`, 517 commits) and what was next. The phase recorded here
+gave a game its own UI, audio, and materials — three C seams and the modules behind them — and opened
+an asset editor for actors.
 
 Read this first after a context compaction, then `docs/ARCHITECTURE.md` (module DAG),
 `docs/ABI.md` (every C seam, export by export), `docs/SCENE_FRAMEWORK.md` (scene + gameplay),
@@ -78,13 +59,11 @@ content; games live in their own folders with a `.ocproject` manifest.
 
 - **Polyglot:** C++ (core/RHI/renderer/physics **and** the editor — `sandbox/`, there is no separate
   C# editor), C (stable ABI), C# (.NET 10 scripting — built and working, hosted in-process via
-  `Aver.Scripting.Host`, §4f; this line used to say "editor + scripting — not built yet", which was
-  true when written and has not been since §4f landed), Rust (asset pipeline — not built yet).
-- **Backends:** DirectX 12 (implemented, the primary path). Vulkan constructs a real device,
-  presents frames and runs the full editor as of an 11-commit maturation pass (`df16c95`..`c97f092`,
-  `git log --oneline df16c95..c97f092` — corrected from a wrong "18" this pass found uncited and
-  could not reproduce) — OFF by default in CMake, with one known open defect (§4d item 10). DirectX
-  11 is still a stub.
+  `Aver.Scripting.Host`, §4f), Rust (asset pipeline — not built yet).
+- **Backends:** DirectX 12 (implemented, the primary path). Vulkan constructs a real device, presents
+  frames and runs the full editor after an 11-commit maturation pass (`df16c95`..`c97f092`) — OFF by
+  default in CMake, with one known open defect (§4d item 10: the shadow cascade map is never written).
+  DirectX 11 is a stub.
 - **Coordinate contract:** centimeters, +Z up, +X forward, +Y right, left-handed,
   row-major/row-vector matrices (`v * M`).
 
@@ -107,7 +86,7 @@ coexist and neither clobbers the other**, because `scripts/gates.baseline.txt` i
 and `scripts/gates.baseline.release.txt` is the Release one, so both binaries have to exist at once
 for either baseline to mean anything. `scripts/build.bat` is the real build (PowerShell wraps it);
 run `.bat` via the PowerShell tool, not Git Bash (`cmd //c` mangling). Add `/Zc:__cplusplus`
-already set. Vulkan: `-DAVER_RHI_VULKAN=ON` — no SDK install needed any more; headers and a
+already set. Vulkan: `-DAVER_RHI_VULKAN=ON` — no SDK install needed; headers and a
 SPIR-V-capable DXC are vendored under `third_party/` (`8a3eaf5`), and the loader ships with the GPU
 driver as `vulkan-1.dll`. Still OFF by default; presents frames and runs the editor, with one known
 defect (§4d item 10).
@@ -142,7 +121,7 @@ modules/
   ui.abi/    Aver.UI.Abi    SHARED. The 11-export C seam for a game's HUD — §4o
   audio/     Aver.Audio     STATIC, Core only. The mixer; no device — §4p
   audio.wasapi/ Aver.Audio.Wasapi  Windows only. The device (WASAPI shared mode) — §4p
-  audio.abi/ Aver.Audio.Abi SHARED. The 24-export C seam for audio — §4p
+  audio.abi/ Aver.Audio.Abi SHARED. The 25-export C seam for audio — §4p
   render.actorpreview/       Aver.Render.ActorPreview (STATIC, Aver.RHI + Aver.Formats): the actor
                              editor's own colour+depth target, pipeline, camera at b4 — §4r
   scene/ framework/ physics/ Aver.Scene, Aver.Framework, Aver.Physics — built, tested, and NOT
@@ -152,13 +131,12 @@ modules/
   scripting/ Aver.Scripting.Host (STATIC: in-process CLR host via nethost/hostfxr, Core+Platform,
                              never the RHI) + the managed bridge under scripting/csharp/
   runtime/   Aver.Runtime    Engine loop, Application, EntryPoint (splash + ImGui hooks)
-  (skeleton, not yet wired: softbody, aero, gpudeform, fracture, vehicle, net, netvehicle,
-   match — each has a README. This line used to also list `render`, `render.gi`, `world` and
-   `abi`: the first two were deleted whole (`01a6d8c`) as directories whose only content was a
-   stale plan — what renders is render.voxi/render.pbr/render.ui/render.actorpreview, per
-   docs/ARCHITECTURE.md; `world` graduated out of skeleton status, has a CMakeLists/include/src
-   now, and is linked unconditionally — see modules/world/README.md; `abi` is not a skeleton
-   awaiting work, it was DROPPED on purpose — see §4d item 17)
+  (skeleton, not yet wired: softbody, aero, gpudeform, fracture, vehicle, net, netvehicle, match —
+   each has a README. Not skeletons: `render` and `render.gi` were deleted whole (`01a6d8c`; what
+   renders is render.voxi/render.pbr/render.ui/render.actorpreview, per docs/ARCHITECTURE.md);
+   `world` graduated, has CMakeLists/include/src and is linked unconditionally — see
+   modules/world/README.md; `abi` was DROPPED on purpose — §4d item 17. Other live modules not listed
+   above: anim, deform, landscape, and more under `modules/`.)
 sandbox/     Sandbox.exe      the editor app (SandboxApp.cpp) + Sandbox.rc (icon), the asset-editor
                               shell (AssetEditor.*), ActorEditor.*, ProjectScaffold.*, ToolsMenu.*
 tools/       ActorSweep.exe   opens every actor .cs in a real project and reports what parses (§4r)
@@ -411,7 +389,7 @@ a cheap A/B oracle (e.g. GI on/off showed red 0.70→0.73 with G/B fixed = orang
 
 ## 4c-2. Voxi/HAL decoupling refactor — COMPLETE, all 12 steps landed
 
-Voxi's GI, shadow map and DXR 1.1 RayQuery code has moved out of the D3D12 backend into
+Voxi's GI, shadow map and DXR 1.1 RayQuery code moved out of the D3D12 backend into
 `modules/render.voxi`, talking only to a generic backend-agnostic RHI. The backend no longer knows
 what a voxel, a shadow map or an occlusion ray is.
 
@@ -465,14 +443,14 @@ that rule can actually be enforced.
 | — | Debugging scaffolding removed | `93a23e3` |
 | — | Atomic injection accumulator (GI probe wobble fix) | `e34e413` |
 
-**Steps 7 and 8 landed by accident and the record needs reading carefully.** They were written,
-then reverted, and the reverted work was swept back into `08cf5be` by a `git add -A` that picked up
-a stopped agent's in-progress edits — a commit whose subject says `docs:` but which carries 256
-lines across four source files. It cost two separate debugging sessions: it landed the binding-set
-half of step 7 without step 9, so `buildRtScene` kept writing the acceleration-structure SRV into a
-heap nothing bound any more (RayQuery then traced a null AS and silently reported no hit, fixed in
-`d01a50f`), and it shipped `AVER_DIAG` scaffolding to main (removed in `93a23e3`). This is why
-`git status` before staging is a hard rule, not a preference.
+**Steps 7 and 8 landed by accident and the record needs reading carefully.** They were written, then
+reverted, and the reverted work was swept back into `08cf5be` by a `git add -A` that picked up a
+stopped agent's in-progress edits — a commit whose subject says `docs:` but which carries 256 lines
+across four source files. It cost two debugging sessions: it landed the binding-set half of step 7
+without step 9, so `buildRtScene` kept writing the acceleration-structure SRV into a heap nothing
+bound any more (RayQuery then traced a null AS and silently reported no hit, fixed in `d01a50f`), and
+it shipped `AVER_DIAG` scaffolding to main (removed in `93a23e3`). This is why `git status` before
+staging is a hard rule, not a preference.
 
 ### What step 11 deleted
 
@@ -532,11 +510,10 @@ backend's `dispatchMesh` binds the right root parameters.
 
 `IDevice::resources()` returns `nullptr` by default, and the D3D11 stub does not override it — its
 factory returns `nullptr` and `createDevice` falls through to Null. **Vulkan is no longer in this
-paragraph.** Since the 11-commit maturation pass (`df16c95`..`c97f092`; see §1's correction),
-`VulkanDevice::resources()`
+paragraph.** Since the 11-commit maturation pass (`df16c95`..`c97f092`), `VulkanDevice::resources()`
 returns a real `IResourceFactory` backed by an actual `VkDevice`, so it is D3D11 and Null that decline
-here now, not Vulkan. `VoxiRenderer::init` still checks the factory first for whichever backend
-genuinely has none, logs `[Voxi] init declined: backend exposes no resource factory (no GPU support)`
+here now. `VoxiRenderer::init` still checks the factory first for whichever backend genuinely has
+none, logs `[Voxi] init declined: backend exposes no resource factory (no GPU support)`
 and returns `false`; `shutdown()` is safe after a declined init and safe called twice. Verified by
 driving a Null device directly, not only by reading the code.
 
@@ -548,8 +525,8 @@ legitimately be selected on a frame that has no structure, because the feature's
 one frame behind. The FEATURE publishes the answer as `gShadowParams.z` in its own `b4` block, and
 `PSMainVoxi` picks `shadowFactor()` over `rtShadow()` when it is clear. Tracing an unbuilt or empty
 acceleration structure is not an error anyone can see — RayQuery reports no hit for every pixel,
-i.e. a fully lit scene, and the debug layer has nothing to say — so the guard belongs where the
-fact is known.
+i.e. a fully lit scene, and the debug layer has nothing to say — so the guard belongs where the fact
+is known.
 
 **The `--rt --probe 1413 1042` gate does NOT distinguish the two paths.** That pixel is fully
 shadowed either way. `--probe 1413 1150` is a penumbra pixel where they genuinely disagree —
@@ -584,12 +561,10 @@ answer before geometry becomes dynamic. Listed in §4d.
 --frames 40 --gi --probe 1413 1042      -> (0.26,0.31,0.38) raw(67,79,97)
 ```
 
-**Re-baselined 2026-07-21 by PBR step 17(c), the diffuse-Fresnel correction, and by nothing else.**
-The change was approved in advance and announced before the work. `kd` was
-`(1 - F) * (1 - metallic)`, weighting the diffuse response by the SPECULAR Fresnel at HdotV; that
-one `kd` is reused by the direct diffuse, the sky ambient and the GI bounce, so a single
-over-darkening was applied three times per surface. Removing it lifts every gate and darkens none,
-which is the signature the correction predicts:
+**Re-baselined 2026-07-21 by PBR step 17(c), the diffuse-Fresnel correction, and by nothing else** (approved in advance and announced before the work). `kd` was `(1 - F) * (1 - metallic)`,
+weighting the diffuse response by the SPECULAR Fresnel at HdotV; the one `kd` is reused by the direct diffuse,
+the sky ambient and the GI bounce, so a single over-darkening was applied three times per surface. Removing it
+lifts every gate and darkens none, which is the signature the correction predicts:
 
 | gate | before | after | delta |
 |---|---|---|---|
@@ -829,11 +804,11 @@ module combination that was never valid. The resulting no-feature build renders 
 ```
 
 `raw(87,92,107)` is the PRE-17(c) value, which is exactly right: the frozen path is untouched by
-every BRDF correction in this phase, which is what "FROZEN, do not evolve" is for. The cast-shadow
-pixel is fully lit because without Voxi there is no shadow map and no ray tracing at all. Both
-values were confirmed **bit-identical to the same configuration built at `192fd55`**, before any of
-this work, so the no-material path is provably unaffected. Note §4c-2 records `raw(109,117,132)` for
-this pixel; that figure is stale and predates this phase — it was `110` before these commits too.
+every BRDF correction in this phase, which is what "FROZEN, do not evolve" is for. The cast-shadow pixel is fully lit because without Voxi there is
+no shadow map and no ray tracing at all. Both values were confirmed **bit-identical to the same
+configuration built at `192fd55`**, before any of this work, so the no-material path is provably
+unaffected. Note §4c-2 records `raw(109,117,132)` for this pixel; that figure is stale and predates
+this phase — it was `110` before these commits too.
 
 ### Voxi consumes the material in the GI path — the `submitDraw` gap is closed
 `MaterialLibrary::status()` reports `Ready` for the factors, all five maps and the alpha mask, and
@@ -858,7 +833,6 @@ construction (the voxelisation pass now binds the identical b2 the lit pass bind
 base colour into a material because the sandbox authors it into `b1`. `AlphaBlend` stays
 `NotImplemented` on purpose: blending needs a pipeline blend state and a back-to-front sort, both of
 which are the renderer's, not the shading model's.
-
 ## 4f. Aver.Scripting.Host — the in-process CLR, WORKING
 
 C# can now drive the live editor. The CLR is hosted **inside the engine process**, so a P/Invoke
@@ -908,9 +882,7 @@ editor runs exactly as it does today. Each branch was made to fail and the resul
 | runtimeconfig demanding framework 99.0.0 | `hostfxr_initialize_for_runtime_config failed (0x80008096) — the framework the bridge targets is not installed` |
 | bridge rebuilt at a different contract | `the staged Aver.Scripting.Bridge.dll speaks a different host contract than this build (host v1)` |
 
-That last line was measured when the host was at v1; the host is now at **v2** and the message
-carries whatever `AVER_SCRIPTING_CONTRACT_VERSION` says. The other four are unaffected by the bump
-and were not re-driven for this phase — they fail before the contract is ever compared.
+That last line was measured when the host was at v1; the host went to v2 in this section and is now **v3** (`AVER_SCRIPTING_CONTRACT_VERSION`, `scripting_abi.h:18`; v2 to v3 is the `[AverHud]` commit `dc1c886`), and the message carries whatever that says. The other four are unaffected by the bump and were not re-driven for this phase — they fail before the contract is ever compared.
 
 Note `DOTNET_ROOT` pointing at nothing does **not** trigger a decline — nethost still finds the
 global install. Use one of the five above to test this path, not that.
@@ -968,7 +940,7 @@ Reload is a SEPARATE menu item, not a checkbox on Compile: they fail differently
 for them at different moments — Compile answers "does it build", Reload answers "does it do what I
 meant" and swaps live behaviours out from under a running editor.
 
-The contract goes to **v2** (`UnloadScripts` is a new entry point). A v1 bridge next to a v2 host
+The contract reached **v2** with `UnloadScripts` as a new entry point; it is now **v3**. A v1 bridge next to a v2+ host
 would bind everything it does have and then simply not reload, which is the failure the constant
 exists to turn into a message.
 
@@ -1065,7 +1037,7 @@ throwing assembly:
 ### Two versioned contracts, each checked at its own boundary
 
 - **host ↔ bridge**: `AVER_SCRIPTING_CONTRACT_VERSION` in `scripting_abi.h`, plus `sizeof` the
-  struct. Checked by the bridge in `Bootstrap`.
+  struct. Checked by the bridge in `Bootstrap`. Currently v3.
 - **bridge ↔ user assembly**: the assembly version of `Aver.Scripting`, read out of the user
   assembly's own **reference table** rather than from an attribute the author must remember to
   apply. An assembly that does not reference `Aver.Scripting` cannot hold a behaviour and is skipped
@@ -1584,9 +1556,11 @@ numbers have gaps in them.
     oracle. Likeliest suspects: the voxel volume's atomic injection order, and Voxi's one-frame-delayed
     draw replay. **This is the same class of thing as item 22 and they should be investigated
     together**; a retry that hides both is not a fix.
-29. **`docs/ABI.md` documents seven C seams and 201 exports. There are eight and 225.** The audio seam
-    (`modules/audio.abi`, 24 exports) is absent from it entirely — the string "audio" does not appear
-    in that file. Nothing else in the tree cross-checks the count, so it will not self-correct.
+29. **`docs/ABI.md` documented seven C seams and 201 exports; there were eight and 225.** The audio seam
+    (`modules/audio.abi`) was absent from it entirely — the string "audio" did not appear in that
+    file. Nothing else in the tree cross-checks the count, so it would not self-correct.
+    **Since fixed:** `docs/ABI.md` now counts **nine** seams (audio, 25 exports, and `Aver.Settings`, 14
+    exports, are covered in its §19).
 30. **The game UI has no text and no widget tree.** Text is blocked on an unmade font decision
     (vendoring `stb_truetype.h`, or bitmap fonts); the demo HUD is a hand-written draw list standing in
     for what a widget tree would produce, and is meant to be deleted. There is also no gate covering
@@ -1806,7 +1780,6 @@ rects, which is loud, does not hide anything, and gives the next occurrence some
   the hardware. Left open and honest rather than closed and hollow.
 - **The WARP fault is worked around, not diagnosed to a root cause.** Nothing here can see inside
   `d3d10warp.dll`. What is established is that the engine's input is not the variable.
-
 ## 4k. Textures reach materials, and the frame gets a camera post chain
 
 Two changes, and the first is smaller than it looks.
@@ -1816,7 +1789,8 @@ Two changes, and the first is smaller than it looks.
 `pbr::MaterialSystem` was built to resolve a `TextureRef` through a host-installed
 `TextureResolver`, `fmt::loadTexture` already decoded and mip-filtered images, and
 `averSampleMaps()` already sampled all five glTF slots. **Nothing ever called
-`setTextureResolver()`**, so every slot fell back to its 1×1 identity texture and every surface in
+`setTextureResolver()`** (it is wired now: `Runtime/src/GameApp.cpp:703` and `sandbox/src/SandboxApp.cpp:998`
+install `GameContent::resolveMaterialTexture`), so every slot fell back to its 1×1 identity texture and every surface in
 the engine was a flat colour. That was the entire gap: not a missing feature, an unconnected wire.
 
 What landed with it:
@@ -2162,12 +2136,9 @@ otherwise have made a research project. `Aver.Formats.Audio` is its own target l
 container are tested; **the mp3/m4a/aac/wma/flac path is exercised by nothing in CI**, and the skip is
 silent in an exit code. That is a real gap, not a formality — see §4d item 25.
 
-### `docs/ABI.md` is now stale, and it is the one place that counts
+### The ABI now covers nine separate C surfaces
 
-It opens with "**seven** separate C surfaces" and "201 exported C functions declared across seven
-headers". There are **eight**: `modules/audio.abi/include/aver/audio/audio_abi.h` declares 24 exports
-and the word "audio" does not appear anywhere in `docs/ABI.md`. Fixing it is a separate edit to a
-separate file and has not been made.
+The Aver ABI is **nine** separate C surfaces, each exported by its own DLL, each versioned on its own (or not at all). `docs/ABI.md` now describes all nine (`modules/scene/include/aver/scene/scene_abi.h`, `modules/framework/include/aver/framework/framework_abi.h`, `modules/render.pbr/include/aver/pbr/pbr_abi.h`, `modules/render.voxi/include/aver/voxi/voxi_abi.h`, `modules/physics/include/aver/physics/physics_abi.h`, `modules/scripting/include/aver/scripting/scripting_abi.h`, `modules/audio.abi/include/aver/audio/audio_abi.h` with 25 exports, `modules/settings/include/aver/settings/settings_abi.h` with 14 exports, and `modules/ui.abi/include/aver/ui/ui_abi.h`). Audio and Settings were the two SHARED libraries absent from earlier documentation.
 
 ## 4q. Materials are authored in C#, and the `.ocmat` becomes build output
 
@@ -2789,7 +2760,6 @@ scene fogged differently depending on which renderer drew it. Both now go throug
    ground's radiance and the sun disk all redden together.
 5. **SkyForge has not been upgraded** — and it should be done *after* the atmosphere, because a better
    sky changes how the whole project reads. STILL OPEN.
-
 ## 4y. The atmosphere became physical — and the oracle did not move
 
 `docs/rendering/ATMOSPHERE.md` is the full account: the derivations, every coefficient's source, and
@@ -2864,8 +2834,12 @@ used to do, so neither the agent nor the MCP server can do it:
 
 - **HLSL is compiled by DXC at RUN TIME.** A green C++ build proves nothing about a shader edit. Run
   `Sandbox.exe --frames 40` and grep the log for shader errors before believing anything.
-- `RHIShaders.cpp` lines 126-617 are **one HLSL string**. Declaration must precede use — the fog
-  helpers had to be moved 60 lines up for the base path to call them.
+- **Shaders live in `modules/rhi/shaders/`** as `.hlsl`/`.hlsli` files (this section's earlier "one HLSL
+  string in `RHIShaders.cpp`" is gone; `aae50593` moved them out). `shaderFile()` reads the DEPLOYED copy in
+  `<executableDir>/shaders/` unless `--shader-source` points at the source tree, so a plain edit of
+  `modules/rhi/shaders/` reaches a run only after a build deploys it. Declaration must precede use
+  across the composed text: `shaderConstantsHlsl()` + `color.hlsli` + `shared_prelude.hlsl` form the
+  prelude, so a helper must sit above its first caller in that order.
 - **The gates will not see a small fog change.** `fogDensity` defaults to 4e-6/cm and every probe sits
   within a few thousand cm of the camera, so fog contributes about 1% there — under half an 8-bit code.
   Long-range effects need a distant-horizon probe, which does not exist yet.
@@ -2874,8 +2848,8 @@ used to do, so neither the agent nor the MCP server can do it:
 - `Aver.Mcp` can now drive the editor to compare skies interactively: `--mcp`, then `widgets`, `click`
   by name, and `editor::screenshot`.
 - **A green C++ build still proves nothing about the shader, and `aver_run` does not build.** Two of
-  the shader edits in §4y appeared to change nothing because the HLSL is a string baked into the
-  binary: build first, THEN run.
+  the shader edits in §4y appeared to change nothing because the shader text was not the copy the run
+  read (then a baked string, now the deployed `shaders/` copy): build first, THEN run.
 
 ---
 
@@ -2906,15 +2880,15 @@ hand-edit the derived files.
 Shipped: `splash.png` (1200x520, startup splash, shown at native size) and `icon.ico` (full
 16-256 size ladder, window/exe icon via `Sandbox.rc`), plus `logo.png` / `logo256.png` /
 `icon512.png` as transparent marks. Transparency is keyed by flood-filling from the corners, not by
-a global colour replace -- the cube's outline is near-black and close enough to the #262626 banner
+a global colour replace — the cube's outline is near-black and close enough to the #262626 banner
 that a global replace punches holes through it.
 
-Claude's earlier vector concepts were referenced by nothing and were deleted on 2026-10-04. See
-`branding/ASSETS.md` for the full provenance table, including front-facing visual work that is
-AI-authored but is not a file (the editor theme, default dock layout, gizmo colours, procedural sky).
+Claude's earlier vector concepts referenced nothing and were deleted on 2026-10-04. See `branding/ASSETS.md` for the full provenance table, including front-facing visual
+work that is AI-authored but is not a file (the editor theme, default dock layout, gizmo colours,
+procedural sky).
 
 Fixed alongside: staging the splash was a `POST_BUILD` command, so it only ran when the exe
-relinked -- editing the artwork alone shipped the old splash with the build reporting success. It is
+relinked — editing the artwork alone shipped the old splash with the build reporting success. It is
 now an `OUTPUT`/`DEPENDS` rule, and `Sandbox.rc` declares `OBJECT_DEPENDS` on the icon so replacing
 it actually re-runs the resource compiler.
 

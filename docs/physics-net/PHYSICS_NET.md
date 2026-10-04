@@ -1,22 +1,6 @@
-> **STATUS, added 2026-09-02: this is a day-one design that was NOT built as designed.** The repo
-> genuinely was empty when this was written (commit `ab2264a`, 2026-07-19, "Aver Engine foundation" —
-> the very first commit in the tree). Six weeks later, none of the module names below exist as real
-> code: `modules/net`, `modules/softbody`, `modules/aero`, `modules/fracture`, `modules/match` and
-> `modules/netvehicle` are each still a skeleton README only, and none is wired into the top-level
-> `CMakeLists.txt`'s `add_subdirectory(...)` list (verified by reading it). What actually shipped is
-> narrower and under different names: rigid-body dynamics + collision live in `modules/physics` over a
-> vendored Jolt backend in `modules/physics.jolt` (see both READMEs), and Jolt's own **elastic-only**
-> soft body — no plastic deformation, no break/tear, no `.ocbeam` — is exposed through that module's C
-> ABI as `aver_phys_softbody_*` and drawn by `modules/render.softbody`. `modules/softbody/README.md`
-> is explicit that the plastic/break/tear cage solver this document specifies "stays unwired... until
-> vehicle damage is actually wanted," and that reaching for soft body before then means the Jolt path,
-> not this one. The networking design (§6) is in the same state: `oc_sim`/`oc_match` reuse and the
-> `NetPayload`/`NetModule`/`NetCoordinator` triad described below have no in-tree implementation under
-> any name (grepped for `SoftBodySolver`, `CageAsset`, `AeroTable`, `DebrisChunk`, `NetPayload`,
-> `ChannelProfile`, `NetModule`, `NetCoordinator`, `oc_sim`, `oc_match` — zero matches outside this
-> doc). Kept in full below as the design record it always was — the reasoning, the wire formats and
-> the UE-free replacement tables are still the closest thing to a spec if vehicle damage or networking
-> is ever built — but nothing past this notice should be read as a description of the current tree.
+> **STATUS: This is a design document written 2026-09-02 for modules that remain unbuilt.**
+> 
+> Modules `net`, `softbody`, `aero`, `fracture`, `match`, `netvehicle` exist as skeleton READMEs only and are not wired into CMakeLists.txt. The actual implementation is narrower: `modules/physics` (rigid bodies + collision over Jolt) and `modules/render.softbody` (GPU-accelerated deformation). See `modules/softbody/README.md` — the Jolt soft-body path is elastic-only (no plastic deformation, no break/tear); this design document specifies the plastic/break/tear cage solver deferred until vehicle damage is actually needed. The design reasoning, wire formats, and UE-free replacement tables remain the closest specification if the modules are built later.
 
 ---
 

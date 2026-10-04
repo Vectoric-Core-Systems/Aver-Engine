@@ -4,14 +4,6 @@ The mixer. Voices in, one interleaved float buffer out. **It never touches a dev
 
 See [docs/AUDIO.md](../../docs/AUDIO.md) for the plan this implements.
 
-> **This supersedes the skeleton that stood here**, which read: *"[opt] Procedural audio graph
-> (Metasound successor) on miniaudio (MIT): runtime node graph, live params on playing sources."*
-> The node graph is still a reasonable eventual shape and nothing here forecloses it. miniaudio is
-> not used: it is a fine library and permissively licensed, but it is also a dependency this
-> repository does not yet vendor, and a WASAPI backend needs nothing that is not already installed.
-> That is the whole of the reason, and if miniaudio is later vendored it becomes a second backend
-> rather than a rewrite — the mixer is Core-only precisely so a backend is replaceable.
-
 ## Why it is Core-only
 
 `mix()` fills a buffer the caller supplies; a backend hands that buffer to hardware. Same split as

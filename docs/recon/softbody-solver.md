@@ -1,7 +1,3 @@
-I now have a complete, faithful picture of the solver, data structures, threading, and dependencies. Here is the extracted spec.
-
----
-
 # OpenConstructor Soft-Body Vehicle Damage Solver — Implementation-Ready Port Spec
 
 Authoritative sources (all paths absolute):
@@ -12,7 +8,7 @@ Authoritative sources (all paths absolute):
 - `.../Private/OC27FractureLibrary.cpp` (editor-only Voronoi bake — see §12)
 - Clean port reference: `C:/Users/User/Documents/OpenConstructorSupportAssets/OCServer/OCSimCore/{include/oc_sim.h, src/oc_sim.cpp, src/math/Vec3.h}`
 
-> Cross-reference note on the standalone port: `OCSimCore` (`oc_sim.cpp`) is an **explicit P0 stub** — a forward-motion placeholder proving the C#↔C++ interop, not the damage solver (`oc_sim.cpp:1-10, 63-77`). Its only reusable artifact for this port is `oc::Vec3` (`Vec3.h`), a header-only float vector that already "mirrors FVector semantics (cm, Z-up)" (`Vec3.h:1`). The damage solver itself lives **only** in the UE files; there is no clean prior port of it. This spec therefore extracts from the UE source and flags every UE dependency (§14).
+Note: `OCSimCore` (`oc_sim.cpp`) is an **explicit P0 stub** proving C#↔C++ interop, not the damage solver. Its only reusable artifact is `oc::Vec3` (header-only float vector mirroring `FVector` semantics). The damage solver itself lives only in the UE files; this spec extracts from UE source and flags every UE dependency (§14).
 
 ---
 

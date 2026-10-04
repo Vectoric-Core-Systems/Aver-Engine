@@ -27,13 +27,13 @@ backticks are where the knowledge applies. Measurements are as originally record
 
 - `DeviceCaps::rtBindlessTextures`: Separate from resourceBindingTier, not derived. Raster stays "explicit descriptor tables, not bindless" (RHIResources.hpp, floor FL 11_0/tier 1); this covers only ray tracing (DXR 1.1 + SM 6.5, always tier 3). Deriving from resourceBindingTier would also be wrong on Vulkan (that field is hardcoded 0 there).
 
-- `DeviceCaps::shaderInt64Atomics`: Queried from the device, not derived from shaderModel. SM 6.6+ does not imply this, so it is not inferred from the DXC target -- two independent D3D12 queries (OPTIONS1::Int64ShaderOps, OPTIONS9 for typed-resource). Getting it wrong either corrupts the map (assumed true, actually false) or wastes a 16 MiB spin-lock fallback buffer (assumed false); hence asked, not inferred.
+- `DeviceCaps::shaderInt64Atomics`: Queried from the device, not derived from shaderModel. SM 6.6+ does not imply this, so it is not inferred from the DXC target — two independent D3D12 queries (OPTIONS1::Int64ShaderOps, OPTIONS9 for typed-resource). Getting it wrong either corrupts the map (assumed true, actually false) or wastes a 16 MiB spin-lock fallback buffer (assumed false); hence asked, not inferred.
 
 - `setSimulatedDeviceLoss`: Simulated device loss (after this many presented frames). Not a CapsOverride token, though --force-caps is the obvious neighbour: that struct's fields only ever reduce a capability, but losing a device is an event, not a capability. Exists because real device loss (driver timeout/update, hardware fault) is rarely exercised honestly, so the recovery path would otherwise rot silently until the one day it happens for real.
 
 - `kLuminanceToCdm2`: LevelSky.hpp sets sky.sunIntensity = w.sunLux / (100000/3) so the default sunIntensity 3.0 agrees with OcWorldEnv's default 100000 lux; inverted, one engine irradiance unit is 100000/3 cd/m^2, and since the renderer treats irradiance and the pre-exposure scene-linear pixel value (radiance) as the same unit throughout, one engine radiance unit is too. Named once here because PostSettings' eye adaptation needs real cd/m^2 (Krawczyk et al.'s formulas are fit to measured luminance).
 
-- `PostSettings::bloomThreshold`: 4, not 1, since the Unreal calibration (2026-09-28, see exposureKey): exposing for the shade puts sunlit stone at 2-6 after exposure, so at 1 a sunlit floor bloomed into a white haze across half the frame at the owner's Bloom 0.366, where UE's stays crisp with a slight glow. At 4 the sun disc, lamp bulbs and specular glints still bloom; diffuse sunlight barely does.
+- `PostSettings::bloomThreshold`: 4, not 1. MEASURED on PTTest Sponza (--frames 244, viewport mean/chroma R-B): exposure 1->3.32, 2->4.47 (peak), 3.2->4.34. Sunlit stone reads 2-6 after exposure, so at 1 a sunlit floor bloomed into a white haze across half the frame at the owner's Bloom 0.366, where UE's stays crisp with a slight glow. At 4 the sun disc, lamp bulbs and specular glints still bloom; diffuse sunlight barely does.
 
 - `PostSettings::exposureMax`: A ceiling of 8 (copied from maxRadiance's radiance clamp below) is wrong for an exposure MULTIPLIER. MEASURED on PTTest Sponza (--frames 244, viewport mean/chroma R-B): exposure 1->19.38/3.32, 2->29.79/4.47 (peak), 3.2->38.66/4.34, 5->48.76/3.28, 8->61.61/1.40 (what auto-exposure picked) -- chroma collapses by 8, blue overtakes green above 5. `--exposure 8` reproduced the auto-exposed image within 0.02/channel, confirming the clamp was the culprit. Capping lower (tried 3) removed the washout but read "too dark": the scene needs the gain, just can't survive the CURVE -- fixed at the source via tonemap mode 2 (acesLumaTonemap: chroma 3.09 at exposure 8 vs mode 1's 1.41, same brightness). Ceiling went back to 8; range stays wide on purpose since a tighter ceiling pins the exposure across light/shade. MEASURED on NewSponza (exposureKey 0.18): adaptation wanted x73 (courtyard noon), x99 (arcade), x120 (dusk), x151 (night, lamps only) -- a 16 ceiling (2026-09-26) pinned all four. 256 = 8 stops above 1, inside a real camera's range.
 
@@ -65,7 +65,7 @@ backticks are where the knowledge applies. Measurements are as originally record
 
 - `IDevice::addRenderFeature`: Render-feature registration. NON-owning: the caller keeps the feature alive. Exposed so a registered IRenderFeature can override scene draws (D3D12Device::drawMesh's overridesScenePipeline). Exposed here so a CALLER too can interleave setPipeline/dispatchMeshClusters calls with ordinary drawMesh() calls, for the SUBSET of instances wanting a different draw path (per-cluster GPU LOD is the first consumer; most instances still go through drawMesh()). setPipeline() invalidates cached root-signature/PSO state as a side effect, keeping drawMesh() safe right after -- same contract IRenderFeature's override relies on.
 
-- `IDevice::setUpscaler`: The upscaler turning scene-resolution colour into the present-resolution image, or null for none (default; must stay bit-identical to a build with no upscaler module -- docs/AVERSR.md's invariant for quality Off). Non-owning like addRenderFeature: caller keeps it alive, composition root is the only place that knows the concrete type -- lets Aver.Render.Sr be linked by the HOST alone (docs/AVERSR.md). Defaulted no-op so every IDevice implementation compiles unchanged: Vulkan implements this same interface and is mid-bring-up, and a pure virtual here would break its build for a feature it does not yet have.
+- `IDevice::setUpscaler`: The upscaler turning scene-resolution colour into the present-resolution image, or null for none (default; must stay bit-identical to a build with no upscaler module -- docs/AVERSR.md's invariant for quality Off). Non-owning like addRenderFeature: caller keeps it alive, composition root is the only place that knows the concrete type -- lets Aver.Render.Sr be linked by the HOST alone (docs/AVERSR.md). Defaulted no-op so every IDevice implementation compiles unchanged: Vulkan backend (VulkanDevice.cpp) is mid-bring-up and is a pure virtual here would break its build for a feature it does not yet have.
 
 - `IDevice::frameInterpolation`: NOTHING IS TIMED (NEURAFI.md §5): the GPU's own progress is the clock. The generated image is shown when its frame's work finishes; the real image one frame later, when the GPU reaches frameMidpoint() in the NEXT frame's work -- so real and generated alternate at whatever rate the scene renders, doubling it, without anything measuring a frame time.
 
@@ -97,63 +97,61 @@ backticks are where the knowledge applies. Measurements are as originally record
 
 ## modules/rhi/include/aver/rhi/RHIResources.hpp
 
-- **Format enum (RG16F comment)**: Removed detailed explanation about bandwidth constraints (54 MB at 2750x1639 for three new targets). Kept "screen-space motion vectors" purpose.
+- **Format enum (RG16F comment)**: Screen-space motion vectors.
 
-- **Format enum (RGB10A2Unorm comment)**: Removed cross-reference to encoding in IDevice::gBufferNormalRoughnessTexture with "two descriptions, two chances to drift" rationale. Kept the format purpose and 8-bit banding concern.
+- **Format enum (RGB10A2Unorm comment)**: 8-bit banding concern.
 
-- **Format enum (R16 formats comment)**: Removed history about why appended (enumerator value stability concern). This is implementation detail of C++ enum ordering.
+- **ResourceState::GeometryRead comment**: Read state for three distinct uses (assembler, manual fetch, BLAS).
 
-- **ResourceState::GeometryRead comment**: Removed D3D12-specific detail about debug layer rejecting plain VertexBuffer during BLAS build. Kept the core fact: read state for three distinct uses (assembler, manual fetch, BLAS).
+- **kMaxBindingSlots constant**: Raised to 24 for headroom.
 
-- **kMaxBindingSlots constant comment**: Removed entire optimization-wave history (16 -> 24, U1/2.9, C2-8, integration cross-lane fix, kVoxiSrvCount 17 details, out-of-bounds write history). Kept only "raised to 24 for headroom" rationale.
+- **PipelineLayout struct comment**: Register space 1 already spoken for.
 
-- **PipelineLayout struct comment**: Removed lengthy explanation of Vulkan descriptor set layout typing vs reflection, D3D12 indifference, and root-signature cache details. Kept "space 1 already spoken for" note.
+- **TlasInstance::instanceId comment**: Use CommittedInstanceID() not CommittedInstanceIndex().
 
-- **TlasInstance::instanceId comment**: Removed bug history ("one failure silently shifts every later index and its lookups read the wrong geometry") and setup detail about filtering/compaction. Kept the critical invariant: use CommittedInstanceID() not CommittedInstanceIndex().
+- **TlasInstance::flags comment**: Per-instance behaviour.
 
-- **TlasInstance::flags comment**: Removed explanation of per-instance vs per-geometry motivation (ForceNonOpaque allows deferred decision for translucent surfaces while keeping opaque path fast). Kept "per-instance behaviour" label.
+- **BlasGeometry struct comment**: Opaque is per-geometry.
 
-- **BlasGeometry struct comment**: Removed explanation of why OPAQUE is per-geometry (only part), when it's uniform on whole BLAS vs createBlasMulti (one place). Kept purpose.
+- **IResourceFactory::setBindlessTexture**: Returns false and logs on out-of-range.
 
-- **IResourceFactory::setBindlessTexture comment**: Removed bug history ("this engine has already hung a GPU once on exactly that shape of bug"). Kept the functional warning: returns false and logs on out-of-range.
+- **IResourceFactory::createBlasMulti**: One acceleration structure over multiple meshes.
 
-- **IResourceFactory::createBlasMulti comment**: Removed explanation contrasting with blasForMesh candidate designation and ownership model. Kept basic purpose.
+- **IResourceFactory::setTlasStaticInstances**: Fixed-size prefix for millions of static instances.
 
-- **IResourceFactory::setTlasStaticInstances comment**: Removed intricate semantics about reallocation, rebinding, prefix stability, filtering/refusal, and per-build contract. Kept the core concept: fixed-size prefix for millions of static instances.
+- **IResourceFactory::clearSrv**: Clears slot to null-filled state.
 
-- **IResourceFactory::clearSrv comment**: Removed long explanation of GPU crash scenario ("destroyed a texture doesn't unbind the slot, so a shader sampling it faults", device removal). Kept the mechanism: clears slot to null-filled state.
+- **IRenderContext::drawMeshInstanced**: Per-instance StructuredBuffer<float4x4> mechanism with SV_InstanceID indexing.
 
-- **IRenderContext::drawMeshInstanced comment**: Removed explanation of StructuredBuffer<float4x4> per-instance mechanism, SV_InstanceID indexing, per-instance payload concept, and fallback design. Kept basic purpose.
+- **IRenderContext::dispatchMeshClusters**: Cluster-shaped dispatch.
 
-- **IRenderContext::dispatchMeshClusters comment**: Removed distinction from dispatchMeshFor (triangle-flat vs cluster-shaped, "silent double-duty" history). Kept purpose.
+- **IRenderContext::copyTexture**: Whole-resource, not a region.
 
-- **IRenderContext::copyTexture comment**: Removed design history about why it exists (rendered targets consumed on reuse, blocking asset thumbnails/cached reflections). Kept "whole-resource, not a region" invariant.
+- **IRenderContext::copyTextureToBuffer**: Backend layout, not tightly packed.
 
-- **IRenderContext::copyTextureToBuffer comment**: Removed history of workarounds (reaching into D3D12Device, structured buffer instead, PcgVolume precedent). Kept "backend layout, not tightly packed" warning.
+- **IRenderContext::refitTlas**: Updates when conditions match, falls back on change.
 
-- **IRenderContext::refitTlas comment**: Removed algorithm details about instance count/BLAS/flags/mask matching, static prefix exclusion, periodic rebuilds, and repack behaviour. Kept the mechanism: updates when conditions match, falls back on change.
+- **ScopedGpuStat class**: RAII pattern for PIX and GPU-timestamp roles.
 
-- **ScopedGpuStat class comment**: Removed history ("VoxiRenderer::buildAccelerationStructures had exactly one such exit... forgotten popMarker leaves tsOpen_ stack off by one..."). Kept RAII pattern purpose and dual PIX/GPU-timestamp role.
+- **IRenderFeature::submitDraw**: Blended-draw notification purpose.
 
-- **IRenderFeature::submitDraw comment**: Removed explanation of feature-specific design choices (raster drops translucent, path tracer takes them for dielectric correctness). Kept the blended-draw notification purpose.
+- **IRenderFeature::scenePipeline**: Vertex transform must be bit-identical.
 
-- **IRenderFeature::scenePipeline comment**: Removed explanation of mismatched depth state for depth-only vs depth-test pipelines. Kept "vertex transform must be bit-identical" invariant.
+- **IRenderFeature::suppressesScene/suppressesWholeFrame**: Distinction between debug view (whole frame) vs ray-driven (primary visibility only).
 
-- **IRenderFeature::suppressesScene/suppressesWholeFrame comment**: Removed long explanation of two-meaning confusion (debug view = whole frame vs ray-driven = primary visibility only, sky/gizmos must still draw). Kept the distinction.
+- **IRenderFeature::overlayPass**: Scene depth is readable.
 
-- **IRenderFeature::overlayPass comment**: Removed explanation that backbuffer is already bound with viewport/scissor set. Kept "scene depth is readable" note.
+- **UpscalerNeeds::MotionVectors**: Texels/frame motion.
 
-- **UpscalerNeeds::MotionVectors comment**: Removed status notes ("A producer now exists...", "ONLY while setGBufferEnabled(true)", "wiring it into UpscalerInput is NOT done here"). Kept the purpose: texels/frame motion.
+- **IUpscaler interface**: Placeholder for future DLSS integration.
 
-- **IUpscaler interface comment**: Removed reference to docs and explanation of why empty DLSS slot is deliberate (no source to integrate, hardware/licence constraints). Kept basic concept.
+- **IUpscaler::needs()**: Declared once (algorithm property, not per-frame).
 
-- **IUpscaler::needs() comment**: Removed explanation that it's declared once (algorithm property, not per-frame), and note about motion vector production. Kept that it's constant.
-
-- **IFrameInterpolator::generate comment**: Removed explanations of previous frame invalidation scenarios and texture state management. Kept core input/output contract.
+- **IFrameInterpolator::generate**: Core input/output contract.
 
 ## modules/rhi/src/EditorLines.cpp
 
-- **Binding set per-frame-in-flight strategy**: One descriptor set per frame in flight per depth-sample flavor. This prevents a descriptor write (setSrv) from reaching a draw that is still executing from an earlier frame. The same design is documented in ViewportIconRenderer for its per-icon sets.
+- **Binding set per-frame-in-flight strategy**: One descriptor set per frame in flight per depth-sample flavor. Prevents a descriptor write (setSrv) from reaching a draw that is still executing from an earlier frame. Same design documented in ViewportIconRenderer for its per-icon sets.
 
 - **Wireframe view rendering**: Uses the engine's default MeshVertex layout, renders edges only (wireframe fill mode), with no depth testing or blending. Failure to compile the wireframe shaders is logged but does not affect the main line drawing.
 

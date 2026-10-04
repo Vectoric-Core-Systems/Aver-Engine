@@ -1,7 +1,3 @@
-I have everything needed. Here is the extracted spec.
-
----
-
 # GPU Vehicle-Body Deformation Compute Pipeline — Port Spec
 
 Faithful extraction from the authoritative sources. Purpose: re-express the per-frame GPU cage-skin/deform as a compute pass on a new RHI (DX12/DX11/Vulkan), independent of Unreal.

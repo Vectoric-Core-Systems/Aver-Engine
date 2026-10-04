@@ -35,12 +35,9 @@ bottom-left; glTF's UVs are already top-left origin, so they cross unchanged.
 
 Sharing one convention means a model exported to two formats lands in the same place, and means
 there is one piece of arithmetic in this codebase to get wrong instead of three.
-`ObjImport.cpp` points at `GltfImport.cpp`'s `toEngine` (currently line 191, was 173 when this note
-was last checked — these numbers drift, so trust the symbol name over either number) for the basis
-change and at its winding-reversal comment (currently line 315, was 297) rather than restating them.
-**`UsdImport.cpp` does not** — this line used to say it pointed at `GltfImport.cpp` too, but USD's
-own `toEngine` (line 215) is a separate implementation handling both the Y-up and Z-up cases
-described below, which OBJ and glTF never need to.
+`ObjImport.cpp` and `UsdImport.cpp` both reference `GltfImport.cpp`'s basis change and winding-reversal code
+for the shared transformation logic rather than restating it. **`UsdImport.cpp` implements its own `toEngine`**
+handling both the Y-up and Z-up cases that OBJ and glTF never need.
 
 **The USD case is different and is handled separately** — see below.
 
@@ -53,9 +50,7 @@ animation clips. `.glb` and
 `.gltf` are told apart by the GLB magic, not the extension. Buffers may be external files or base64
 data URIs.
 
-The editor exposes it through `SandboxApp.cpp`'s `importGltfToDir` (this used to cite a single line,
-`:4036`; the function is defined around line 911 now and called from two menu/drag-drop sites, so a
-symbol name survives the file's churn better than a line number), writing
+The editor exposes it through `SandboxContentBrowser.cpp`'s `importGltfToDir`, writing
 `Content/Meshes/<base>.ocmesh`.
 
 ### Sockets: an Empty parented to a bone
@@ -392,9 +387,8 @@ engine.
 
 A normal map read as sRGB is a subtly wrong lighting response that looks like a shading bug rather
 than a decode bug, which is why this is decided by slot in both resolvers' matching
-`pbr::TextureSlot` switch (`SandboxApp.cpp`, currently around line 3537, was cited at 1167; and
-`GameContent.cpp`, currently around line 535, was cited at 229 — both numbers have drifted since)
-and not by guessing from the name.
+`pbr::TextureSlot` switch (`SandboxApp.cpp` line 1167 and `GameContent.cpp` line 229, where both
+map base colour and emissive to Colour, normal to NormalMap, and everything else to Data) and not by guessing from the name.
 
 Mipmaps are generated on the CPU, filtering **in linear light** — sRGB taps are decoded with the
 exact piecewise curve, averaged, and re-encoded. Alpha is always averaged linearly.
@@ -462,14 +456,12 @@ Writes `Tree_Pine`, `Tree_Oak` and `Bush_Small` as `.ocmesh`, the same geometry 
 `Meshes/Source/`, the `T_Tree_BC/_MR/_N` PNG set, and optionally a forest level.
 
 **One mesh per tree, not two.** The renderer draws a whole mesh with a single material —
-`RHI.hpp`'s `IRenderContext::drawMesh(mesh, world, baseColor, metallic, roughness)` (currently line
-572, was 348) and nothing in the draw path
+`RHI.hpp`'s `IRenderContext::drawMesh(mesh, world, baseColor, metallic, roughness)` and nothing in the draw path
 iterates submeshes. So bark and leaves cannot be two material slots on one entity. Both surfaces live
 in one texture and the UVs are **banded**: trunks map into the left half, foliage into the right. One
 draw call, correct colours. Splitting into trunk and canopy meshes would also work and would double
 the draw calls — **the RHI does now have instancing** (`IRenderContext::drawMeshInstanced`,
-`modules/rhi/include/aver/rhi/RHIResources.hpp`; this paragraph used to say there was none at all),
-but only the depth-only shadow and GI-shadow passes group draws by mesh and use it
+`modules/rhi/include/aver/rhi/RHIResources.hpp`), but only the depth-only shadow and GI-shadow passes group draws by mesh and use it
 (`VoxiRenderer::shadowPass`/its GI-shadow twin); the coloured forward draw a tree's foliage actually
 shows on screen still issues one `drawMesh` per instance, so splitting one material per tree into two
 would still double what a viewer's frame time pays for.
@@ -484,10 +476,8 @@ with UVs and normals — rather than only against hand-written triangles.
 
 ## Testing
 
-`tests/formats/src/ImportTest.cpp` — 55 assertions over OBJ and USDA (this line said 74 before a
-recount; `grep -c "check("` over the file's 387 lines is the fastest way to re-check this number): the
-basis change in both
-directions, winding reversal, the V flip, hard-edge splitting, n-gon triangulation, negative indices,
+`tests/formats/src/ImportTest.cpp` — 162 assertions over OBJ and USDA, exercising the
+basis change in both directions, winding reversal, the V flip, hard-edge splitting, n-gon triangulation, negative indices,
 `usemtl` slot reuse, `o` splitting, `.mtl` option skipping and PBR extensions, Y-up vs Z-up stages,
 `metersPerUnit` folding, nested `xformOp` inheritance, and every refusal path.
 

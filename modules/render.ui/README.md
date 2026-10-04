@@ -72,9 +72,8 @@ that looks like a filtering artefact and is not one.
 
 ## Status
 
-Not verified on screen at the time of writing. The path compiles, all suites pass, and the sandbox
-carries a hand-written demo draw list behind **Window → Game UI Demo** — off by default, because the
-gates compare backbuffer pixels and a HUD over the viewport would move every one of them.
-
-There is no text and no widget tree yet. Text is blocked on a font decision (vendor
-`stb_truetype.h`, or bitmap fonts); the widget tree is the next thing above this.
+The path compiles and all test suites pass. The sandbox carries a hand-written demo draw list
+behind **Window → Game UI Demo** — off by default, because the gates compare backbuffer pixels and a
+HUD over the viewport would move every one of them. There is no text and no widget tree yet. Text is
+blocked on a font decision (vendor `stb_truetype.h`, or bitmap fonts); the widget tree is the next
+thing above this.

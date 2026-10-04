@@ -145,8 +145,8 @@ and none points up.
 Two things the list says that are worth saying in words — and the first of them has since been
 overtaken. **`Aver.Audio.Abi` is no longer unlinked**: this paragraph said "nothing links it:
 `sandbox/CMakeLists.txt` names no audio target at all, so the editor is silent", and as of 2026-09-20
-that is false twice over. `sandbox/CMakeLists.txt:153-154` links `Aver.Audio.Abi` and `:110-111` links
-`Aver.Formats.Audio`; the Sound editor opens the device at `sandbox/src/SoundEditor.cpp:510`; and
+that is false twice over. `sandbox/CMakeLists.txt:116-119` links `Aver.Formats.Audio` and `:159-161` links
+`Aver.Audio.Abi`; the Sound editor opens the device at `sandbox/src/SoundEditor.cpp:536`; and
 `Runtime/CMakeLists.txt:153-154` links it for the standalone host too. The seam is exercised by two
 hosts and by `scripting/csharp/Aver.Framework/Audio.cs`, not only by its own tests.
 
@@ -252,7 +252,7 @@ be shorter or longer than the plan in the same row's prose.
 | **Aver.RHI** | C++ | Core, Platform | Core | Abstract render hardware interface: device, queues, command lists, PSO, root signature/descriptor model, typed & structured buffers, textures, resource-state/barrier model, `Buffer<float>`/`RWBuffer` semantics, feature-level query. Backend-agnostic. | The "ONE RHI abstraction"; GPU-deform buffer contract (typed R32) |
 | **Aver.RHI.D3D12** | C++ | RHI | `[opt, default ON]` | DirectX 12 backend (primary). DXIL PSOs, D3D12 barriers, UAV↔vertex-buffer aliasing. | Primary backend |
 | **Aver.RHI.D3D11** | C++ | RHI | `[opt, default ON]` | DirectX 11 backend (fallback for older HW). | Secondary backend |
-| **Aver.RHI.Vulkan** | C++ | RHI | `[opt, default ON]` | **No longer a stub — this row said "a 13-line stub that returns `nullptr`" for a long time and that is now false.** `VulkanDevice.cpp` alone is 3,819 lines (`VulkanResourceFactory.cpp` another 3,000, `VulkanRenderContext.cpp` 1,478), Vulkan headers are vendored and included, `IDevice` is implemented, and SPIR-V compiles through a vendored `dxcompiler.dll` (`third_party/dxc-spirv`) selected because the Windows SDK's own copy accepts `-spirv` and then refuses at codegen. Per `modules/rhi.vulkan/README.md` it **presents a frame** — grid, cube, shadow, sky, world axes — and the editor's own ImGui UI draws too, since `modules/rhi.vulkan.imgui` was written to mirror `modules/rhi.d3d12.imgui` (both gated on `AVER_ENABLE_UI`, both linked only by Sandbox). 10 of an original 156 validation-layer errors are left, 9 of them the same known gap (`GraphicsPipelineDesc::instanced` and feature-module mesh geometry are unimplemented on this backend) and the 10th not a real error at all. Nothing leaks at teardown. `AVER_RHI_VULKAN` now defaults **ON** (`CMakeLists.txt:58`, whose help text reads "headers vendored; no SDK required") — so the default build links and exercises it, which is a change from the state this row used to describe ("staying off until it presents a frame", the module's own README, written before it did). The 10 remaining validation errors are therefore in the default build, not behind a flag. `Aver.RHI.D3D11`, unlike Vulkan, genuinely still is a 13-line stub that returns `nullptr` (`modules/rhi.d3d11/src/D3D11Device.cpp`) and is in the DEFAULT build, so the engine still ships one backend — D3D11, not Vulkan any more — that has never executed a GPU command. What a backend must actually implement is tiered — 9 pure virtuals to be a legal device (`resources()` defaults to `nullptr`, so a partial backend is legal and every render feature declines gracefully), 53 to be a complete one. `modules/rhi/src/null/NullDevice.cpp` is the existence proof at 43 lines. | Vulkan (SDK still not required — loader `vulkan-1.dll` ships with the GPU driver; SPIR-V codegen is vendored separately) |
+| **Aver.RHI.Vulkan** | C++ | RHI | `[opt, default ON]` | **No longer a stub — this row said "a 13-line stub that returns `nullptr`" for a long time and that is now false.** `VulkanDevice.cpp` alone is 4,065 lines (`VulkanResourceFactory.cpp` another 3,366, `VulkanRenderContext.cpp` 1,478), Vulkan headers are vendored and included, `IDevice` is implemented, and SPIR-V compiles through a vendored `dxcompiler.dll` (`third_party/dxc-spirv`) selected because the Windows SDK's own copy accepts `-spirv` and then refuses at codegen. Per `modules/rhi.vulkan/README.md` it **presents a frame** — grid, cube, shadow, sky, world axes — and the editor's own ImGui UI draws too, since `modules/rhi.vulkan.imgui` was written to mirror `modules/rhi.d3d12.imgui` (both gated on `AVER_ENABLE_UI`, both linked only by Sandbox). 10 of an original 156 validation-layer errors are left, 9 of them the same known gap (`GraphicsPipelineDesc::instanced` and feature-module mesh geometry are unimplemented on this backend) and the 10th not a real error at all. Nothing leaks at teardown. `AVER_RHI_VULKAN` now defaults **ON** (`CMakeLists.txt:58`, whose help text reads "headers vendored; no SDK required") — so the default build links and exercises it, which is a change from the state this row used to describe ("staying off until it presents a frame", the module's own README, written before it did). The 10 remaining validation errors are therefore in the default build, not behind a flag. `Aver.RHI.D3D11`, unlike Vulkan, genuinely still is a 13-line stub that returns `nullptr` (`modules/rhi.d3d11/src/D3D11Device.cpp`) and is in the DEFAULT build, so the engine still ships one backend — D3D11, not Vulkan any more — that has never executed a GPU command. What a backend must actually implement is tiered — 9 pure virtuals to be a legal device (`resources()` defaults to `nullptr`, so a partial backend is legal and every render feature declines gracefully), 53 to be a complete one. `modules/rhi/src/null/NullDevice.cpp` is the existence proof at 43 lines. | Vulkan (SDK still not required — loader `vulkan-1.dll` ships with the GPU driver; SPIR-V codegen is vendored separately) |
 | **Aver.Assets** | C++ | Core, Platform | Core | One source file, `AssetId.cpp` — content ids over `fnv1a64`. **Not there:** the asset registry, typed handles, ref-counting, async streaming, the binary container (that is `Avr1.hpp` in `Aver.Formats`), and the offline-cache reader P6 assumes. A leaf, and much smaller than this row used to imply. | Asset I/O runtime backbone (partial) |
 | **Aver.Assets.Gpu** | C++ | Core, Formats, RHI | always built | The decode-to-GPU join (`TextureUpload.cpp`), deliberately a second target so `Aver.Assets` stays a leaf: a tool that only needs asset ids drags in neither a decoder nor the RHI. | Asset I/O (upload path) |
 | **Aver.Formats** | C++ | Core, Platform, Assets | always built | Runtime *loaders*: `.ocmesh` (now with the JOINTS/WEIGHTS skin streams its `HasSkin` flag always promised), `.ocskel`/`.ocanim`, `.ocworld`, `.ocmap`, `.ocbeam`, `.ocproject`, glTF import **including skins and animation clips**, JSON, texture decode, and the AVR1 container every binary asset shares. Two sibling targets hang off it (below) for the same reason each: they parse into a type that lives outside this module. | Asset I/O (all carried-over text formats) |
@@ -430,11 +430,9 @@ module table: an option exists where a module is genuinely severable, and nowher
 ```cmake
 option(AVER_RHI_D3D12  "DirectX 12 backend (primary)"       ON)
 option(AVER_RHI_D3D11  "DirectX 11 backend"                 ON)
-option(AVER_RHI_VULKAN "Vulkan backend (needs Vulkan SDK)"  OFF)  # no SDK yet
-# ^ HISTORICAL, as of 2026-09-20. The real line is CMakeLists.txt:58:
-#   option(AVER_RHI_VULKAN "Vulkan backend (headers vendored; no SDK required)" ON)
-# Both halves changed: the default is ON, and the SDK requirement was never real once the
-# headers were vendored and SPIR-V codegen moved to third_party/dxc-spirv.
+option(AVER_RHI_VULKAN "Vulkan backend (headers vendored; no SDK required)" ON)
+# ^ As of 2026-09-20, AVER_RHI_VULKAN defaults ON (changed from OFF), and the SDK requirement
+#   was never real once the headers were vendored and SPIR-V codegen moved to third_party/dxc-spirv.
 option(AVER_BUILD_SANDBOX "Build the sandbox sample app"    ON)
 option(AVER_BUILD_TESTS   "Build test executables"          ON)
 option(AVER_ENABLE_UI     "In-window editor UI (Dear ImGui)" ON)
@@ -613,22 +611,20 @@ Aver Engine/
   cmake/AvModule.cmake           # aver_add_module(): STATIC lib, PUBLIC include dir, PUBLIC deps
   modules/
     # This list said "34 directories, 22 built, 12 README" for a long time; the tree has since
-    # grown well past what §2/§3 individually describe, and the honest count is now 58 directories,
-    # 49 of them carrying a CMakeLists.txt. Rather than let this list go stale line by line the way
+    # grown well past what §2/§3 individually describe, and the honest count is now 60 directories,
+    # 51 of them carrying a CMakeLists.txt. Rather than let this list go stale line by line the way
     # the old one did, treat `modules/*/CMakeLists.txt` itself as the source of truth for BUILT vs
     # README-only — a directory listing is not a claim about what a module does, only that it links.
-    BUILT (49):    core/ platform/ assets/ formats/ formats.roslyn/ formats.particles/ anim/
+    BUILT (51):    core/ platform/ assets/ formats/ formats.roslyn/ formats.particles/ anim/
               anim.scene/ deform/ rhi/ rhi.d3d12/ rhi.d3d12.imgui/ rhi.d3d11/ rhi.vulkan/
               rhi.vulkan.imgui/ scene/ framework/ physics/ physics.jolt/ scripting/ runtime/
               landscape/ mcp/ save/ settings/ upgrade/ synapse/ synapse.scene/
               render.pbr/ render.voxi/ render.ui/ render.actorpreview/ render.pcg/ render.pt/
-              render.skin/ render.softbody/ render.sr/ render.denoise/ fluids/ particles/ occlusion/
-              trifactor/ sound/ ui/ ui.abi/ audio/ audio.wasapi/ audio.abi/ world/
-    # runtime.game/ was in this list and is GONE from the tree: the runtime library moved to the
-    # top-level Runtime/ on 2026-09-16 (Runtime/CMakeLists.txt:1 records the move). render.denoise/
-    # (the FidelityFX-based denoiser, replacing the removed NVIDIA NRD module) is in the list.
-    # The two errors cancelled in the totals, which is why 58/49 stayed right while the list was
-    # wrong; do not trust a count to catch a substitution.
+              render.skin/ render.softbody/ render.sr/ render.denoise/ render.neurafi/
+              render.neural/ fluids/ particles/ occlusion/ trifactor/ sound/ ui/ ui.abi/
+              audio/ audio.wasapi/ audio.abi/ world/
+    # render.neurafi/ and render.neural/ are the NeuraFI/NeuRaC frame interpolation modules added
+    # after this document said "58 directories, 49 built".
     README-only (9): abi/ aero/ fracture/ gpudeform/ match/ net/ netvehicle/ softbody/ vehicle/
     # `render/` and `render.gi/` are not in either list above — see the DELETED note below, and §1/§3.
   sandbox/                       # the editor, Sandbox.exe. C++ + Dear ImGui, links the modules
@@ -693,8 +689,8 @@ Aver Engine/
 This defines a strict-DAG, pay-for-what-you-use module graph — `Core` sinks to nothing
 engine-specific, and the edge list in §2 is transcribed from the build rather than asserted. This
 paragraph once said "thirty-four directories under `modules/`, twenty-two carry a `CMakeLists.txt`
-and twelve carry only a README" — the tree has grown since, and as of this pass it is **58**
-directories, **49** carrying a `CMakeLists.txt` and **9** carrying only a README (§9 names both
+and twelve carry only a README" — the tree has grown since, and as of this pass it is **60**
+directories, **51** carrying a `CMakeLists.txt` and **9** carrying only a README (§9 names both
 sets). Because that count will keep moving as modules are added, treat `modules/*/CMakeLists.txt`
 as the actual source of truth rather than either number here; the two sets are marked apart
 throughout, because an earlier revision of this file did not mark them apart at all and was read as

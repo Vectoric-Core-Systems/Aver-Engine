@@ -1,7 +1,3 @@
-I have everything I need. Note: `PartMesh` and `RMat` do not exist anywhere in the source file — I confirmed this with case-insensitive search. I'll flag that explicitly. Here is the extracted spec.
-
----
-
 # OCCompiler Internal Data Model — Faithful Spec for Native Format Design
 
 Source of truth: `C:/Users/User/Documents/OpenConstructorSupportAssets/OCCompiler/Main.java` (4117 lines). All line citations are to this file.

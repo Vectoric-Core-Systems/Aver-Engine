@@ -1,7 +1,6 @@
 # scripting/
 
-The C# side of Aver Engine. The native half — the CLR host itself — lives in
-`modules/scripting/` and carries the full write-up in its README.
+The C# side of Aver Engine. The native half — the CLR host itself — lives in `modules/scripting/` and carries the full write-up in its README.
 
 | Project | What it is |
 |---|---|
@@ -14,21 +13,14 @@ The C# side of Aver Engine. The native half — the CLR host itself — lives in
 
 Both are real, and the difference is the whole point of the host:
 
-- **In-process** (`build\bin\Sandbox.exe --scripts <dir>`) — the CLR runs inside the editor, so a
-  P/Invoke resolves to the module the editor has **already loaded**. Same settings singleton, real
-  device capabilities.
-- **Out-of-process** (`dotnet run --project scripting/csharp/Aver.Scripting.Sample`) — a separate
-  process loads its *own* copy of `Aver.Render.Voxi.dll` and therefore sees default settings and
-  empty caps. Useful for checking the bindings compile and marshal; useless for driving the editor.
+- **In-process** (`build\bin\Sandbox.exe --scripts <dir>`) — the CLR runs inside the editor, so a P/Invoke resolves to the module the editor has **already loaded**. Same settings singleton, real device capabilities.
+- **Out-of-process** (`dotnet run --project scripting/csharp/Aver.Scripting.Sample`) — a separate process loads its *own* copy of `Aver.Render.Voxi.dll` and therefore sees default settings and empty caps. Useful for checking the bindings compile and marshal; useless for driving the editor.
 
-`Aver.Scripting.Log` works in both: with a host it reaches the engine's log, without one it falls
-back to the console.
+`Aver.Scripting.Log` works in both: with a host it reaches the engine's log, without one it falls back to the console.
 
 ## Building
 
-The engine's CMake builds and stages the bridge automatically when `dotnet` is on `PATH`, and skips
-it — with a status message at configure time — when it is not. The scripting host then declines at
-run time and the editor runs unchanged. To build the managed side by hand:
+The engine's CMake builds and stages the bridge automatically when `dotnet` is on `PATH`, and skips it — with a status message at configure time — when it is not. To build the managed side by hand:
 
 ```
 dotnet build scripting/csharp/Aver.Scripting.Bridge/Aver.Scripting.Bridge.csproj -c Release -o build/bin
@@ -36,13 +28,8 @@ dotnet build scripting/csharp/Aver.Scripting.Bridge/Aver.Scripting.Bridge.csproj
 
 ## Where a project's scripts come from
 
-A project's own C# lives in `<project>\Content\Scripts` and is built by **Tools ▸ Compile Scripts**
-into `<project>\Binaries\Scripts` — the one directory the scripting host is pointed at when a
-project is open. Nothing has to be passed on the command line. **Tools ▸ Reload Scripts** rebuilds
-and swaps the result into the running editor.
+A project's own C# lives in `<project>\Content\Scripts` and is built by **Tools ▸ Compile Scripts** into `<project>\Binaries\Scripts` — the one directory the scripting host is pointed at when a project is open. **Tools ▸ Reload Scripts** rebuilds and swaps the result into the running editor.
 
-`--scripts <dir>` still overrides both, which is how the staged sample stays reachable
-(`--scripts SampleScripts`) and why no oracle gate can be made to load a project's scripts.
+`--scripts <dir>` still overrides both, which is how the staged sample stays reachable (`--scripts SampleScripts`) and why no oracle gate can be made to load a project's scripts.
 
-Hot reload is implemented, and what it does *not* do is carry state: a behaviour's fields start
-again from their initialisers on the far side of a swap. See `modules/scripting/README.md`.
+Hot reload is implemented, and what it does *not* do is carry state: a behaviour's fields start again from their initialisers on the far side of a swap. See `modules/scripting/README.md`.

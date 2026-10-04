@@ -977,16 +977,11 @@ A parse failure leaves the caller's effect at this format's own defaults, never 
 of a file that failed halfway.
 
 ---
-
 ## 11b. `.ocinst` — baked instanced foliage (binary, `AVR1`/`INST`)
 
-`modules/formats/include/aver/formats/OcInstances.hpp`, `src/OcInstances.cpp`. What a level's own
-`FOLIAGE <path>` record (§11) names: a flat, GROUPED table of world transforms, never authored as
-text — it is written by an importer (`AverAssetC`, for a USD `PointInstancer` by default) or a future
-paint tool, at up to `kMaxFoliageInstances` = 8,000,000 rows, which is why it is binary rather than
-following `.ocworld`'s own line-oriented grammar the way every other level-adjacent record in this
-document does. Subtype `'INST'`. Chunks: `IHDR` (required), `ISTR` (the §3.3 string table, for
-prototype asset paths), `IGRP` (required), `IXFM` (`GpuUploadable`).
+`modules/formats/include/aver/formats/OcInstances.hpp`, `src/OcInstances.cpp`. A flat, grouped table of world transforms for instanced foliage — grouped by prototype asset, never authored as text, written by an importer (USD `PointInstancer` by default, via `AverAssetC`) or a future paint tool. Up to `kMaxFoliageInstances` = 8,000,000 rows. Subtype `'INST'`. Chunks: `IHDR` (required), `ISTR` (§3.3 string table for prototype asset paths), `IGRP` (required), `IXFM` (`GpuUploadable`).
+
+Foliage is static, ray-traced only (one TLAS instance per row; not in raster), has no collision, and is not individually selectable — outside the scene/entity/`placements` system entirely. `Runtime/include/aver/game/GameFoliage.hpp`'s `loadLevelFoliage` turns a level's `FOLIAGE` records into `voxi::VoxiRenderer::setFoliage` prototype/instance buffers.
 
 ### 11b.1 `IHDR`
 | Off | Size | Type | Field | Notes |
@@ -997,46 +992,21 @@ prototype asset paths), `IGRP` (required), `IXFM` (`GpuUploadable`).
 ### 11b.2 `IGRP` (`GroupCount` × 16-byte entries)
 | Off | Size | Type | Field | Notes |
 |---|---|---|---|---|
-| 0x00 | 4 | StringRef | `AssetRef` | into `ISTR`; the SAME string a `PLACE` line's own asset column carries, so `objectId = fnv1a64(asset)` (`OcWorld.cpp`) matches a mesh placement of the identical prototype |
-| 0x04 | 4 | u32 | `Flags` | bit0 `CastShadow` (`kOcInstanceFlagCastShadow`); every group this tree writes sets it — foliage casting no shadow at all would be a visible regression against the entities it replaces |
+| 0x00 | 4 | StringRef | `AssetRef` | into `ISTR`; the SAME string a `PLACE` line's asset carries, so `objectId = fnv1a64(asset)` (OcWorld.cpp) matches an identical mesh placement |
+| 0x04 | 4 | u32 | `Flags` | bit0 `CastShadow` (`kOcInstanceFlagCastShadow`); foliage casts shadow unconditionally |
 | 0x08 | 4 | u32 | `First` | index of this group's first row in `IXFM` |
 | 0x0C | 4 | u32 | `Count` | this group's row count; `[First, First+Count)` must lie inside `InstanceCount` |
 
-### 11b.3 `IXFM` (`InstanceCount` × 12 `f32`, one flat array — not an array of per-instance records)
-Row-vector (`v * M`) world transforms, centimetres, engine world space, with the matrix's trailing
-`(0, 0, 0, 1)` column already dropped: `t[r*3 + c] = M[r][c]` for `r` in `0..3`, `c` in `0..2` — the
-SAME convention `game::drawWorld` already passes as `&wm.m[0][0]` and `voxi::TlasInstance::world`
-already holds, just without the four trailing zeros/one neither of those ever reads either. ONE FLAT
-CHUNK rather than a per-instance struct because the whole format exists to be read and written in ONE
-bulk `memcpy` — see the header's own comment for why an 8,000,000-row table (384 MB at this point) must
-never cost a per-instance allocation on either side of the round trip.
+### 11b.3 `IXFM` (`InstanceCount` × 12 `f32`, one flat array)
+Row-vector world transforms (`v * M`), centimetres, engine world space, with the trailing `(0, 0, 0, 1)` column dropped: `t[r*3 + c] = M[r][c]` for `r` in `0..3`, `c` in `0..2`. The SAME convention `game::drawWorld` passes as `&wm.m[0][0]` and `voxi::TlasInstance::world` holds. One flat chunk (not per-instance records) because the whole format reads and writes in ONE bulk `memcpy`: at 8,000,000 rows (384 MB), per-instance allocation is unaffordable.
 
-A reader validates counts (`IGRP`/`IXFM` sizes against `IHDR`'s declared counts), ranges (every
-group's `[First, First+Count)` inside `InstanceCount`, checked by subtraction so a crafted `First`
-near u32's own maximum cannot wrap the comparison — the identical rearrangement §3's own `AVR1` chunk
-bounds checks use, for the identical reason) and that every transform float is finite, refusing a
-truncated or hand-corrupted file rather than handing it to a TLAS build as silent garbage.
-
-**What a `.ocinst` row is NOT**: an entity. Instanced foliage sits outside the whole
-scene/entity/`placements` system this document otherwise describes — no `scene::Entity`, no
-`CMeshRenderer`, no `NAME`/outliner row per instance. It is static, ray-traced only (one TLAS instance
-per row; not drawn in raster mode yet), has no collision and is not individually selectable, exactly as
-§11's own `FOLIAGE` entry states. `Runtime/include/aver/game/GameFoliage.hpp`'s `loadLevelFoliage` is
-what turns a level's `FOLIAGE` records into `voxi::VoxiRenderer::setFoliage`'s prototype/instance
-buffers; this format's own job stops at naming the file and carrying its rows.
+A reader validates counts (groups/transforms against header), ranges (each group's `[First, First+Count)` inside instance count, checked by subtraction to prevent u32 wrap), and that every transform float is finite, refusing truncated or corrupted files.
 
 ---
 
 ## 11c. `.oclanes` — traffic lanes (text)
 
-`modules/formats/include/aver/formats/OcLanes.hpp`, `src/OcLanes.cpp`. A level's **sidecar**:
-`<level>.oclanes` sits beside `<level>.ocworld`, same folder, same stem. It carries the directed lane
-polylines the level's `vehicle <preset>` placements (§11) drive along, and which lanes each one flows
-into; `world::VehicleSystem` reads it. Text, for §1's reason and one more: the writer is expected to be a
-level generator's Python script, which can write a text file with nothing but `print`, and at a couple of
-thousand lanes the file is small enough that a binary container's mmap and bulk upload would buy nothing.
-The file is found by name, so it has to move with the level: Save As in the editor copies it beside the
-new level, and a recovered autosave (`<level>.ocworld.autosave`) reads its level's.
+`modules/formats/include/aver/formats/OcLanes.hpp`, `src/OcLanes.cpp`. A level's sidecar: `<level>.oclanes` sits beside `<level>.ocworld`. Carries directed lane polylines that `vehicle <preset>` placements drive along, read by `world::VehicleSystem`. Text format (writer is a level generator's Python script), small enough that binary would buy nothing.
 
 ```
 OCLANES 1
@@ -1048,42 +1018,21 @@ NEXT 1 2
 
 | Record | Fields | Meaning |
 |---|---|---|
-| `OCLANES 1` | version | must be the first record; the only version is `1` |
-| `LANE` | `<id> <speedLimit> <width> <flags> <n> x y z x y z …` | one lane: `id` any `int`, unique in the file; `speedLimit` cm/s and `width` cm, both `> 0`; `flags` a non-negative `int`; `n >= 2` points, each three coordinates, exactly `3n` numbers |
-| `NEXT` | `<id> <successor> <successor> …` | the lanes `id` flows into; zero or more successors, and at most one `NEXT` per lane |
+| `OCLANES 1` | version | must be first; only version is `1` |
+| `LANE` | `<id> <speedLimit> <width> <flags> <n> x y z x y z …` | one lane: `id` unique in file; `speedLimit` cm/s and `width` cm, both `> 0`; `flags` non-negative `int`; `n >= 2` points, exactly `3n` coordinates |
+| `NEXT` | `<id> <successor> <successor> …` | lanes this one flows into; zero or more, one per lane max |
 
-Engine units throughout, in the `.ocworld`'s own space (cm, +X forward, +Y right, +Z up, left-handed), so a
-lane point and a placement position compare directly.
+Units: engine cm, +X forward, +Y right, +Z up, left-handed, same space as `.ocworld` — lane point and placement position compare directly.
 
-**A lane is directed.** Traffic runs from its first point to its last, and a successor's first point is
-(near) this lane's last point. The file does not enforce that — how near is near is the consumer's
-tolerance to choose — but a generator is expected to write it that way and the vehicle AI relies on it when
-it steps from one lane onto the next. Which side of the road traffic keeps is not a property of the format:
-whatever writes the file offsets each lane from its road's centre line, and the format carries the result.
+**A lane is directed:** traffic runs from first to last point. Successor's first point is (near) this lane's last; the file does not enforce proximity, but a generator writes it that way and vehicle AI relies on it. Which side of the road is not a property of the format — the generator offsets from its road's centre line.
 
-**`flags`** (`kOcLaneHighway`, `kOcLaneBridge`, `kOcLaneRamp`): bit0 highway, bit1 bridge, bit2 ramp.
-Statements about the road for a consumer to weigh; none changes how the lane is followed.
+**`flags`** (`kOcLaneHighway`, `kOcLaneBridge`, `kOcLaneRamp`): bit0, bit1, bit2 respectively. Statements about the road for a consumer to weigh; none changes how the lane is followed.
 
-**`NEXT` may come before or after the lane it names**, and every id it mentions, its own and each
-successor, must be declared by some `LANE` in the file. Resolution waits for the whole file because a
-forward reference is the ordinary case, and a dangling one is refused rather than dropped: a vehicle that
-reaches a lane end and finds a successor id no table holds shows up as one car stopped at one junction,
-a long way from the typo.
+**`NEXT` may come before or after the lane it names.** Every id it mentions must be declared by some `LANE`. Resolution waits for the whole file (forward references are ordinary). A dangling reference is refused, not dropped: a vehicle reaching a lane end with a missing successor shows as one car stopped at one junction.
 
-**Parsing is tolerant of presentation and strict about content.** CRLF, blank lines and `#` comments
-(whole-line or trailing) are fine. Refused, each with a message that names the line: a missing, repeated
-or unknown-version header, a record this reader does not know (unlike `.ocworld`, §11, which skips
-unknown records — a lane file has one writer and a version line to say when that changes), a `LANE`
-whose `n` is below 2 or does not match the numbers present (checked before anything is allocated, so a
-corrupt count is an error and not a reservation), a number that is not entirely a number (`12x` is not
-`12`) or not finite, a non-positive speed limit or width, a repeated lane id, and a `NEXT` that names an
-undeclared lane, lists an undeclared successor or repeats for a lane that already had one. A failed parse
-leaves the caller's data empty, never half-read. A header with no lanes is legal (a level with no
-traffic); a file with no header, a zero-byte one included, is not.
+**Parsing is tolerant of presentation, strict about content:** CRLF, blank lines, `#` comments (whole-line or trailing) are fine. Refused with a line-specific message: missing/repeated/unknown-version header, unknown record, `LANE` with `n < 2` or mismatched point count (checked before allocation), non-numeric/non-finite number, non-positive speed/width, repeated lane id, `NEXT` naming undeclared lane/successor. Failed parse leaves data empty. A header with no lanes is legal; a file with no header is not.
 
-**The writer is exact.** `writeOcLanes` puts each `LANE` line followed by its `NEXT` line (omitted for a
-dead end) and writes every float as the shortest text that reads back as the same `f32`, so
-`parse(write(d))` equals `d` bit for bit and a second write is byte-identical to the first.
+**The writer is exact.** `writeOcLanes` puts each `LANE` line and its `NEXT` line (omitted for dead end), writing every float as the shortest text that reads back as the same `f32`, so `parse(write(d)) == d` bit-for-bit and a second write is byte-identical.
 
 ---
 
@@ -1100,7 +1049,7 @@ dead end) and writes every float as the shortest text that reads back as the sam
 ## 13. Cooked / DDC / packaging
 
 - **Source vs cooked.** Source = text (`.ocmat/.ocprefab/.ocworld` + legacy `.oc*`) and importer-neutral binaries. Cooked = platform-specialized, compressed, GPU-aligned, source stripped. Cooked artifacts live in `.ocpak` (subtype `'PAK '`), a container whose chunks are complete embedded assets (each with its own header) plus a `TOC ` chunk (`GUID → {chunkIndex, offset, size, subtype, dependencies[]}`).
-- **DDC key.** `BLAKE3( sourceContentHash ‖ importerVersion ‖ targetPlatform ‖ cookSettings )`. A hit reuses the cooked blob. This is the offline analogue of UE's import-compile step (recon `arch §4`): `.ocbeam`/`.ocaero` compile once to a `UVehicleCageAsset`-equivalent; the Aver equivalent is a cooked cage chunk keyed the same way.
+- **DDC key.** `BLAKE3( sourceContentHash ‖ importerVersion ‖ targetPlatform ‖ cookSettings )`. A hit reuses the cooked blob. This is the offline analogue of UE's import-compile step: `.ocbeam`/`.ocaero` compile once to a `UVehicleCageAsset`-equivalent; the Aver equivalent is a cooked cage chunk keyed the same way.
 - **`.ocmeta` sidecars.** Each source asset gets a text `.ocmeta` (JSON-ish) holding its `GUID`, import settings, and source-file hash — so GUIDs are stable across moves and re-imports, and the cooker knows when to re-cook.
 - **Platform variants.** Cook targets pick texture codecs (BC7/BC6H desktop vs ASTC mobile vs Basis universal), index width, position quantization, and whether to keep meshlets. Deformable vehicle-body meshes are exempt from position quantization (bit8 `Deformable`).
 - **Streaming.** Mip data (`MIPS`) and per-LOD mesh blocks are individually addressable + individually compressed so higher mips / finer LODs stream on demand; `.ocworld` `CELL`/`STREAM` records drive spatial streaming.
@@ -1113,7 +1062,7 @@ dead end) and writes every float as the shortest text that reads back as the sam
 `.ocbeam`, `.ocaero`, `.ocmap`, `.scene`, `.octrack` load unchanged through the faithful parsers (§4). No conversion, no re-save. They remain the source of truth for cages, aero, and worlds. Cooking them (optional) produces cage/aero/world chunks in `.ocpak` but the text stays canonical.
 
 ### 14.2 Extract the embedded GLB (closes the biggest gap)
-Today geometry/PBR/textures survive only as base64 `.glb` bytes inside `.ocbeam` (recon `assets §0/§9`). The Aver importer:
+Today geometry/PBR/textures survive only as base64 `.glb` bytes inside `.ocbeam`. The Aver importer:
 1. Runs the `.ocbeam` parser; on `GLB{}`, base64-decodes to raw `.glb`.
 2. Applies the recorded `GLBXFORM` (`yup/forward/mirror`) + `SCALE`/bounds-fit exactly as the UE factory did (`(x,-z,y)`, forward rotation, Y-mirror, per-axis AABB fit) so geometry lands in engine cm space with winding fixed.
 3. Emits one **`.ocmesh`** per glTF part (submeshes = parts, names preserved to match `PART`/`FVehicleCagePartMesh`), **`.octex`** per image (PNG/JPEG via stb_image → BC7/BC5), **`.ocmat`** per glTF material (metallic-roughness → §7), and **`.ocskel`**/**`.ocanim`** if the glb has a skin/animations (rig extracted like `GltfRig`, but multi-skin + full-fidelity anim per §8/§9).
@@ -1122,7 +1071,7 @@ Today geometry/PBR/textures survive only as base64 `.glb` bytes inside `.ocbeam`
 After this, the opaque embedded-glb handoff is eliminated; `.ocbeam` can shrink to just the cage (glb optional/legacy).
 
 ### 14.3 UE `.uasset`-derived content
-Recon (`assets §8`) shows the OCCompiler `.uasset` reader extracts only **component lists** (names + FRACTURE/DEFORM kind), not geometry. So mesh geometry is **not** taken from `.uasset`; it comes from the original glTF/OBJ/FBX sources (or the embedded glb, §14.2) via the importer. The `.uasset` component list is used only to author the corresponding `.ocprefab` component set (FRACTURE→fracturable part, DEFORM→skeletal part). No dependence on Epic's package binary at runtime — the fragile `.uasset` parse stays an editor-time import convenience.
+The OCCompiler `.uasset` reader extracts only **component lists** (names + FRACTURE/DEFORM kind), not geometry. Mesh geometry comes from the original glTF/OBJ/FBX sources (or the embedded glb, §14.2) via the importer. The `.uasset` component list authors the corresponding `.ocprefab` component set (FRACTURE→fracturable part, DEFORM→skeletal part). No runtime dependence on Epic's package binary — the `.uasset` parse is an editor-time import convenience.
 
 ### 14.4 Toolchain (polyglot)
 - **Rust asset pipeline** (`aver-cook`) does import + cook + DDC over the C ABI: glTF/OBJ/PNG/JPEG in → `.ocmesh/.octex/.ocmat/.ocskel/.ocanim` out → `.ocpak`. glTF/JSON parse and image decode use permissive crates (or FFI to the C core).
@@ -1209,13 +1158,15 @@ STARTMAP Maps/MyStartLevel.ocmap
 
 ---
 
-### Deliverable file map (paths this design implies under `C:/Users/User/Documents/Aver Engine`)
+### Deliverable file map (design proposal)
 
-> **This map is the original proposal and was never the layout that got built.** `engine/assets/`, `libaver_assets`, `include/ocasset.h` and the Rust `tools/aver-cook/` never existed; the readers live at `modules/formats/` and there is no Rust in the tree. `editor/` did exist as a directory holding one README and no source, and has been deleted — the editor is `sandbox/`. Read the list below as intent from the design, not as a description of the repository.
+This map describes the original design intent; the implementation differs. The design proposed `engine/assets/`, `libaver_assets`, `include/ocasset.h` (header), and Rust `tools/aver-cook/` — none were built. In the actual repository, the readers live in `modules/formats/`, there is no Rust in the tree, and `editor/` (which existed as a directory with one README) has been deleted; the editor is `sandbox/`.
+
+The design intent covered:
 - `docs/formats/` — this spec split per format (container, ocmesh, octex, ocmat, ocskel, ocanim, ocprefab, ocworld, legacy, .octemplate).
-- `engine/assets/` — C++ readers/writers (`libaver_assets`) + C ABI header `include/ocasset.h`.
-- `tools/aver-cook/` — Rust importer/cooker.
-- `editor/` — C# authoring for text formats.
-- `samples/` — round-trip the existing `Ferrari499P.ocbeam/.ocaero` and `demoworld.scene/.ocmap` to prove byte-fidelity load and lossless `.ocworld` upgrade.
+- C++ readers/writers + C ABI header.
+- Rust importer/cooker.
+- C# authoring for text formats.
+- Round-trip samples (Ferrari499P.ocbeam/.ocaero and demoworld.scene/.ocmap) to prove byte-fidelity load and lossless `.ocworld` upgrade.
 
 This design preserves the four legacy formats byte-for-byte, gives the seven missing asset types real versioned formats under one skippable-chunk container, keeps authoring data human-readable while making bulk data GPU-ready and GPU-driven-capable, and provides a concrete import/cook/DDC path that finally lifts geometry/material/texture/skeleton/animation data out of the opaque embedded-glb and into first-class, permissively-licensed native formats.

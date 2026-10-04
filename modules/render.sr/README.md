@@ -39,6 +39,14 @@ already used, and constructing a live `SpatialUpscaler` once a non-`Off` level i
 beyond whatever `--render-scale` itself asked for, no `SpatialUpscaler` construction, nothing under
 the `[AverSR]` log tag — the same code path as a tree with no AverSR in it.
 
+**Backend wiring is done** (this README once claimed otherwise, and the editor's own AverSR tooltip repeated the claim, so the one control that meaningfully reduces frame time on a high-DPI display told anyone who hovered it that it did nothing). `IDevice` has the hook — `RHI.hpp:315-316`, `virtual void setUpscaler(IUpscaler* u)` / `virtual IUpscaler* upscaler() const` (default no-op, so every existing backend is unchanged by construction) — and a backend's composite step reads it: `upscaler_->execute(*rhiContext_, in, presentHdrTex_)` at `modules/rhi.d3d12/src/D3D12Device.cpp:4845` (the composite pass is the one place that owns the scene-resolution colour target as an addressable resource) and `modules/rhi.vulkan/src/VulkanDevice.cpp:3827`. Line numbers drift with unrelated edits; if they no longer match, grep for `setUpscaler`/`upscaler()` in `RHI.hpp` and `upscaler_->execute` in both device files. The D3D12 composite runs the resample in HDR before the tonemap, and VulkanDevice mirrors it. A non-`Off` level produces AverSR's own Catmull-Rom pixels, not a backend bilinear stretch.
+
+*Measured* at 2750x1639 PTTest: the ray-driven primary pass (largest single span) goes 5.0ms at Off to 2.3 / 1.7 / 1.3ms at Quality / Balanced / Performance.
+
+This was the third stale "X is not implemented" claim found in this tree in one day, after a shadow-denoiser comment asserting an inert change that was live at every tier, and a sky function documented as unread that two paths consumed. None was a code bug, and all three hid working behaviour — a feature is not shipped while the thing describing it says it is not.
+
+Built as its own module (`AVER_MODULE_SR=ON`, the default); `sandbox` links it (`sandbox/CMakeLists.txt`) and constructs `SpatialUpscaler` for real when a non-`Off` `--aversr` level or Editor Preferences combo selection is applied. **What is still true:** those PTTest numbers measure *frame time*, not pixels — `SpatialUpscaler::execute()` has still never been proven correct against a live swapchain by a GPU capture (`docs/AVERSR.md` says the same).
+
 ## What's NOT here yet
 
 - **AMD FSR.** `third_party/fidelityfx-fsr` is vendored (MIT), but nothing here wraps it in an
@@ -48,47 +56,3 @@ the `[AverSR]` log tag — the same code path as a tree with no AverSR in it.
   screen-space motion vectors, depth, exposure and a camera-cut reset signal as whole-frame data —
   none of which exists yet outside Voxi's ray-traced-shadow-only reprojection. See
   `docs/AVERSR.md` "Prerequisites".
-- **Backend wiring — DONE, and this section said otherwise for far too long.** The paragraph that
-  stood here declared `IDevice` had no `setUpscaler`/`upscaler()` hook and that nothing called
-  `SpatialUpscaler::execute()`, and it said it had been "checked again this phase". Both halves are
-  false and were false when written down most recently:
-
-      modules/rhi/include/aver/rhi/RHI.hpp:335   virtual void setUpscaler(IUpscaler* u)
-      modules/rhi/include/aver/rhi/RHI.hpp:336   virtual IUpscaler* upscaler() const
-      modules/rhi.d3d12/src/D3D12Device.cpp:4561 upscaler_->execute(*rhiContext_, in, presentHdrTex_);
-
-  (Line numbers drift with unrelated edits to both files — if these no longer match, grep for
-  `setUpscaler`/`upscaler()` in RHI.hpp and `upscaler_->execute` in D3D12Device.cpp/VulkanDevice.cpp
-  rather than trusting the numbers.)
-
-  The D3D12 composite runs the resample in HDR before the tonemap, and VulkanDevice mirrors it. A
-  non-`Off` level produces AverSR's own Catmull-Rom pixels, not a backend bilinear stretch.
-
-  WHY THIS MATTERED RATHER THAN BEING A TYPO. The editor's own AverSR tooltip repeated the same
-  claim, so the one control that meaningfully reduces frame time on a high-DPI display told anyone
-  who hovered it that it did nothing. MEASURED, PTTest at 2750x1639: the ray-driven primary pass --
-  the largest single span in the frame -- goes 5.0ms at Off to 2.3 / 1.7 / 1.3ms at Quality /
-  Balanced / Performance. A feature is not shipped while the thing describing it says it is not.
-
-  This is the third stale "X is not implemented" claim found in this tree in one day, after a
-  shadow-denoiser comment asserting an inert change that was live at every tier, and a sky function
-  documented as unread that two paths consumed. The pattern is worth more attention than any one of
-  them: none was a code bug, and all three hid working behaviour. Closing the ORIGINAL gap needed a
-  `setUpscaler`/`upscaler()` pair on `IDevice` (default no-op, so every existing backend is
-  unchanged by construction) AND a backend's composite step reading it — concretely
-  `modules/rhi.d3d12/src/D3D12Device.cpp`'s composite pass (see its own comment starting "dst is
-  present-space... THIS IS the actual render-scale upscale"), which is the one place that owns the
-  scene-resolution colour target as an addressable resource today. Neither file was touched this
-  phase: both were out of this change's file ownership, not skipped by oversight.
-
-## Verified this phase
-
-Built as its own module (`AVER_MODULE_SR=ON`, the default) alongside the rest of the engine, now
-with `sandbox` linking it (`sandbox/CMakeLists.txt`) and constructing `SpatialUpscaler` for real
-when a non-`Off` `--aversr` level or Editor Preferences combo selection is applied. **This section
-used to say `SpatialUpscaler::execute()` had never been run against a live swapchain "because
-nothing yet calls it" — false by the time "Backend wiring" above was written, since that section
-names the exact call site and a measured frame-time drop from it.** What is still true, and is a
-narrower gap than "nothing calls it": those PTTest numbers measure *frame time*, not pixels —
-`SpatialUpscaler::execute()` has still never been proven correct against a live swapchain by a GPU
-capture (docs/AVERSR.md says the same, at time of writing).

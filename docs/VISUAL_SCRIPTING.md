@@ -403,7 +403,7 @@ The actual output (captured against this repository, trimmed to the relevant lin
 ```
 [INFO ] [Graph] declared class 'AN_Orbiter' (parent 'Actor', ticks) from '...IdleMotion.ocgraph'
 [INFO ] [Graph] 1 graph class(es) declared from '...Content'
-[INFO ] [Level] 2 class instance(s) placed -- an entity exists for each; whether its graph COMPILED
+[Level] 2 class instance(s) placed -- an entity exists for each; whether its graph COMPILED
         is reported per instance above, ...
 [GraphHost] 'IdleMotion' entity 16777217: OnStart -> [5, 0, 6.12E-06]
 [GraphHost] 'IdleMotion' entity 16777217: OnTick  -> [5, 0, 6.12E-06]
@@ -431,15 +431,13 @@ running. It is also new, and smaller than what it resembles. Specifically:
   one entity's graph raise an event *on a different entity's* graph. `Fire()` is something a host
   calls into one specific `GraphHost`; it is not something a node can invoke.
 - **No HUD or 2D drawing from a graph.** Nothing in the palette reaches `Aver.UI` — still true,
-  checked against the catalog rather than remembered: **239 node types across 24 categories**
+  checked against the catalog rather than remembered: **254 node types across 24 categories**
   (re-derived this pass: `grep -cP '^\s*t\.push_back\('` in `sandbox/src/GraphNodeDefs.hpp`, and 24
   distinct category strings, an "Audio" one among them, which this page's own node reference does
-  not yet document at all), none of them a draw call. This bullet's number has now gone stale three
-  times in a row — 36, then 124, then 240 (that last one counted a comment that happened to quote
-  the literal text `t.push_back({...})`, not a real entry) — while the claim itself ("no draw call
-  in the catalog") has held every time. A stale number beside a true statement is what teaches a
-  reader to stop trusting the statement; see [the node reference](AVER_NODE_NODES.md)'s own intro for
-  the same lesson stated at length.
+  not yet document at all), none of them a draw call. This bullet's number has gone stale multiple times,
+  but the claim itself ("no draw call in the catalog") has held every time. A stale number beside a true
+  statement teaches a reader to stop trusting the statement; see [the node reference](AVER_NODE_NODES.md)'s
+  own intro for the same lesson stated at length.
 - **No `String` pin.** `PinType` has exactly four members — `Float`, `Int`, `Bool`, `Exec`. Every
   string a node needs (`field=`, `class=`, `var=`, `name=`, `mesh=`, `material=`) arrives as a
   `NODE`-line attribute, never as data an upstream node computes or a pin carries.

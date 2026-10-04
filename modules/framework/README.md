@@ -7,12 +7,11 @@
 The gameplay vocabulary: game instance, game mode, actors, pawns, player controllers — expressed
 over [`Aver.Scene`](../scene/README.md)'s entities rather than as a class hierarchy.
 
-> **Status: no longer a skeleton.** This used to say only the two version entry points existed. The
-> ABI has since grown to 85 entry points at minor version 5 — class registry and defaults, spawn/
-> destroy (and the preview pair), possession, the play lifecycle, input (keys, actions, raw VK,
-> gamepad), the play view, sky-cloud and fluid-spawn authoring, and save/load providers — see
-> [docs/ABI.md](../../docs/ABI.md) §4 for the current surface. The full design is
-> [docs/SCENE_FRAMEWORK.md](../../docs/SCENE_FRAMEWORK.md).
+Implemented and wired. The ABI has 85 entry points at minor version 5 — class registry and defaults,
+spawn/destroy (and the preview pair), possession, the play lifecycle, input (keys, actions, raw VK,
+gamepad), the play view, sky-cloud and fluid-spawn authoring, and save/load providers. See
+[docs/ABI.md](../../docs/ABI.md) §4 for the current surface. The full design is
+[docs/SCENE_FRAMEWORK.md](../../docs/SCENE_FRAMEWORK.md).
 
 ## The idea
 

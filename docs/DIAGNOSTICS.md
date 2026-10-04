@@ -1,9 +1,5 @@
 # Diagnostics: log severity, exit codes, ABI reasons, and the crash reporter
 
-There was no document about logging in this engine until now. `docs/ARCHITECTURE.md` mentions
-"logging" in a module one-liner and that was the entire written surface, which is how the severity
-ladder drifted into meaning whatever each call site felt like at the time.
-
 ---
 
 ## The severity ladder
@@ -19,20 +15,13 @@ ladder drifted into meaning whatever each call site felt like at the time.
 | `Critical` | `AVER_CRITICAL` | The failure threatens the PROCESS. Wakes the crash reporter. | **dark red**, on a dark red row |
 | `Fatal` | `AVER_FATAL` | Death is imminent. Writes a report and terminates. | **black on red** |
 
-**Where the line is between the top three**, because otherwise "how bad is this" becomes a matter of
-taste and the ladder stops meaning anything within a week:
+**Where the line is**, to keep the ladder meaningful:
 
-- **Error** — a file did not load, a shader did not compile, an argument was rejected. The next frame
-  will be fine.
-- **Critical** — a lost GPU device, an exhausted descriptor heap, an allocation the engine needed and
-  did not get. It is still running and may well survive, but it is now *a candidate to die*.
-- **Fatal** — `AVER_FATAL` does not return. There is deliberately no way to log Fatal and carry on,
-  because a "fatal" that execution continues past is how the worst severity quietly becomes a louder
-  warning.
+- **Error** — a file did not load, a shader did not compile, an argument was rejected. The next frame will be fine.
+- **Critical** — a lost GPU device, an exhausted descriptor heap, an allocation the engine needed and did not get. It is still running and may well survive, but it is now *a candidate to die*.
+- **Fatal** — `AVER_FATAL` does not return. There is deliberately no way to log Fatal and carry on, because a "fatal" that execution continues past is how the worst severity quietly becomes a louder warning.
 
-**Black on red for Fatal** is legible only because of the row behind it. This editor's panel
-background sits at 0.07–0.15 luminance, where black text alone would be invisible — which for the
-highest severity in the ladder is the worst possible outcome. The filled row is what makes it work.
+**Black on red for Fatal** is legible only because of the row behind it. This editor's panel background sits at 0.07–0.15 luminance, where black text alone would be invisible — which for the highest severity in the ladder is the worst possible outcome. The filled row is what makes it work.
 
 ### Adding a level
 
@@ -48,16 +37,11 @@ Six places must move together. A missed one is a silent bug, not a build error:
 **Append, never insert.** Every one of those mirrors is a bare integer, and the editor persists the
 filter index in `editor.ini`. A value added in the middle renumbers all of them with no diagnostic.
 
-**Three of those six are now checked.** `tests/abi/src/AbiEnumTest.cpp` reads `Log.hpp`,
-`scripting_abi.h` and `Log.cs` and compares all three numberings — the C++ enum by the POSITION of
-each name, since it assigns no values. Reorder the ladder in `Log.hpp` alone and that suite goes
-red. It does not yet reach `managedLog()`'s switch or the editor's filter combo; those two remain
-on the honour system.
+**Three of those six are checked by automated test.** `tests/abi/src/AbiEnumTest.cpp` reads `Log.hpp`,
+`scripting_abi.h` and `Log.cs` and compares all three numberings — the C++ enum by the position of
+each name. Reorder the ladder in `Log.hpp` alone and the suite goes red. The other three (`managedLog()`'s switch and the editor's filter combo) remain on the honour system.
 
-**And `tools/mcp/aver_mcp.py`.** It scrapes stdout for the bracketed tag: `errors` matches `[ERROR`,
-`[CRIT` and `[FATAL`, `warns` matches `[WARN`. Tag spellings are load-bearing — renaming one silently
-drops that severity out of every gate summary. (`[FATAL` sat there matching nothing for months before
-the level existed.)
+**And `tools/mcp/aver_mcp.py` scrapes the bracket tags**: `errors` matches `[ERROR`, `[CRIT` and `[FATAL`; `warns` matches `[WARN`. Tag spellings are load-bearing — renaming one silently drops that severity out of every gate summary.
 
 ---
 
@@ -73,25 +57,19 @@ the level existed.)
 | 3 | `Environment` | the *machine* is wrong: no build tree, no compiler, no GPU, a missing SDK |
 | 4 | `Interrupted` | stopped by a signal, a timeout, or a user |
 
-**0–15 is reserved**; above that band a tool may define its own, which is what keeps this from being
-a file every new tool has to edit.
+**0–15 is reserved**; above that band a tool may define its own.
 
 `Environment` is separate from `Usage` on purpose: it is not the caller's fault and re-reading the
 help text will not fix it, and CI wants to report the two differently.
 
 ### A count is not an exit code
 
-This is the rule the table exists to state, and it was broken in three places at once. `gates.ps1`,
-`verify-game.ps1` and `stage-game.ps1` all exited **the number of failures**, and 55 of the 100 test
-suites returned `g_failures` from `main`. Two consequences, both only visible from a script:
+This rule was broken in three places at once. `gates.ps1`, `verify-game.ps1` and `stage-game.ps1` all exited **the number of failures**, and 55 of the 100 test suites returned `g_failures` from `main`. Two consequences:
 
-- Two failures exited `2`, which this table spells *"you invoked me wrong"* — so nothing downstream
-  could tell a renderer regression from a typo in a `-Config` name.
-- A shell truncates an exit code to a byte, so **256 failures exit 0**. The count that says the most
-  is the one that vanishes.
+- Two failures exited `2`, which this table spells *"you invoked me wrong"* — so nothing downstream could tell a renderer regression from a typo in a `-Config` name.
+- A shell truncates an exit code to a byte, so **256 failures exit 0**. The count that says the most is the one that vanishes.
 
-A tool with a count **prints** it and returns `Failed`. Every count in this repo is still printed;
-only the code changed.
+A tool with a count **prints** it and returns `Failed`. Every count in this repo is now printed; only the code changed.
 
 ### Who follows it
 
@@ -324,10 +302,7 @@ The ranges below are allocated so a code names its owner on sight. The retrofit 
 code has actually been issued anywhere yet: `noteCritical` already takes a `u32 code`, and the
 intended approach is to attach codes at the few choke points that cover most ground — `hrOk` in
 `D3D12Device.cpp`, `fail()` in `Avr1.cpp`, `assertFail` — rather than editing every `AVER_ERROR`/
-`AVER_WARN` call site (1,313 of them as of this pass — this line said 1,197 before a recount; re-run
-`grep -roP "AVER_ERROR\(|AVER_WARN\(" -r modules sandbox tools tests | wc -l` rather than trust either
-number, since it moves with every commit). An uncoded line is still coloured by severity; codes are
-additive.
+`AVER_WARN` call site. An uncoded line is still coloured by severity; codes are additive.
 
 | Range | Owner |
 |---|---|

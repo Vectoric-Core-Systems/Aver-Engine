@@ -114,8 +114,9 @@ AverActor                     the root: a thing in the world with a transform an
 ```
 
 The base type you derive is how the **compiler** decides which capability flag the class gets
-(`PAWN`, `CONTROLLER`, `GAME_MODE`, …) and which hooks you may override. `AverPlayerController` is the one
-non-abstract base — many games never subclass it and just name `"PlayerController"` as the controller.
+(`PAWN`, `CONTROLLER`, `GAME_MODE`, …) and which hooks you may override. `AverCharacter` and
+`AverPlayerController` are concrete (not abstract) and may be used directly; all others are abstract
+anchors a project or graph must subclass.
 
 ---
 

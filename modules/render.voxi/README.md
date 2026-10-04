@@ -9,10 +9,10 @@ device capabilities which of them can actually be used:
 | Setting | State |
 |---|---|
 | **Anti-Aliasing (MSAA)** | **Implemented.** Off / 2x / 4x / 8x, applied at runtime — rebuilds the scene targets and every PSO. |
-| **Global Illumination** | **Implemented.** Voxel cone tracing: voxelise+inject -> mip filter -> diffuse gather + AO, cone count tier-derived (Low 3 / Medium 6 / High 9 / Epic 13 — this row said a fixed "6-cone gather" for a long time; Medium kept the old hardcoded 6 as its default, but the other three tiers now spend or save real cost on it). |
+| **Global Illumination** | **Implemented.** Voxel cone tracing: voxelise+inject -> mip filter -> diffuse gather + AO, cone count tier-derived (Low 3 / Medium 6 / High 9 / Epic 13). |
 | **Ray Tracing** | **Implemented.** DXR 1.1 inline `RayQuery` sun shadows (exact, hard-edged). Needs DXR 1.1 + SM 6.5. |
 | **Mesh shaders** | **Implemented.** Replaces the input assembler, and removes the geometry shader from voxelisation. Needs mesh-shader tier 1 + SM 6.5. The DEVICE owns the toggle; Voxi only reports and stores it. |
-| **Path Tracing** | **Implemented — this row said "Declared... not built yet" for a long time, and `Voxi.cpp`'s own `status()` comment now names that as the mistake.** `modules/render.pt` (`PtSceneView`) is a real, built path tracer over DXR 1.1 inline `RayQuery`; `Feature::PathTracing` used to hardcode `Status::NotImplemented` here even after `PtSceneView` existed, which left the settings page permanently greyed out and clamped `Settings::pathTracing` to Off on every device regardless of hardware. It now mirrors the tracer's own capability gate (`RaytracingTier>=11`, SM 6.5, DXC, compute shaders) and reports `Ready` when they hold. |
+| **Path Tracing** | **Implemented.** `modules/render.pt` (`PtSceneView`) is a real, built path tracer over DXR 1.1 inline `RayQuery`. Feature::PathTracing now reports Ready when hardware supports it (RaytracingTier >= 1.1, SM 6.5, DXC, compute shaders). |
 
 **MSAA, GI and the shadow map ask for shader model 5.1**, so they compile under FXC and work on a
 machine with no `dxcompiler.dll` at all — measured bit-identical to the SM 6.6 hardware path at every
@@ -89,10 +89,9 @@ CLR hosted in-process — the ABI is already shaped for it, that host just doesn
 3. **Mip filter (compute).** `CSMip` box-filters each level into the next. Mip N is the cone
    footprint at distance N, which is what lets one sample stand in for a whole cone step.
 4. **Cone trace (INSIDE the lit pixel shader).** A tier-derived number of cones over the hemisphere —
-   3 at Low, 6 at Medium (one along the normal, five in a ring — this was every tier's fixed count
-   before the GI quality ladder existed), 9 at High, 13 at Epic — march the volume, widening with
-   distance and reading a coarser mip each step, composited front-to-back. The alpha that accumulates
-   doubles as ambient occlusion.
+   3 at Low, 6 at Medium, 9 at High, 13 at Epic — march the volume, widening with distance and
+   reading a coarser mip each step, composited front-to-back. The alpha that accumulates doubles
+   as ambient occlusion.
 
 Step 4 is a whole pixel shader (`PSMainVoxi`), not an extra pass: sun visibility and indirect
 radiance are *arguments* to the shared `shadeSurface`, and a term inside the shading is not
@@ -185,26 +184,11 @@ no shader binding tables, no `DispatchRays`, so it drops into the existing raste
 - A second pixel-shader variant is compiled at `ps_6_5` with `-D AVER_RT=1`; the default variant
   asks only for **SM 5.1**, so a device without DXR — or without a DXIL compiler at all — still gets
   a working renderer and falls back to the shadow map.
-- **The sun-shadow ray no longer uses `ACCEPT_FIRST_HIT_AND_END_SEARCH` by default — this line said
-  it did, and that stopped being true once transmissive shadows landed.** `modules/render.voxi/
-  shaders/voxi.hlsl`'s shadow ray now runs `RAY_FLAG_NONE` and its own traversal loop, multiplying a
-  running transmittance through every translucent surface it crosses so a pane of glass attenuates a
-  shadow instead of stopping it outright — deliberately dropping the early-out a closest-hit-free
-  visibility query gave it. The flag is still there, but only under a measurement-only ablation
-  (`AVER_RD_ABL_SHADOW_FIRSTHIT`) that restores the old opaque-only, stop-at-first-hit behaviour to
-  price what was given up; it must never be wired to a real quality tier. **The `--rt-rays`
-  per-ray-cost table below predates this change and was measured against the cheaper,
-  `ACCEPT_FIRST_HIT`-enabled ray — the real per-ray cost today is higher and has not been
-  re-measured.**
-- **The FEATURE decides whether a ray may be traced**, publishing it as `gShadowParams.z`. Tracing
-  an unbuilt or empty structure is not an error anyone can see: RayQuery reports no hit for every
-  pixel, i.e. a fully lit scene, with nothing for the debug layer to say. The guard belongs where
-  the fact is known, not in a pipeline choice a backend would have to keep in step.
-
-Engine matrices are row-vector (`v*M`); DXR instance transforms are 3x4 column-vector, so the
-upper 3x3 is transposed on the way in — **by the backend**, from the engine-convention matrix Voxi
-hands over untouched. Getting that wrong leaves the raster image perfectly correct and puts every
-ray somewhere else, which only a cast-shadow probe can see.
+- Sun-shadow rays use `RAY_FLAG_NONE` and a traversal loop. The default behaviour is stop-at-first
+  opaque surface. Engine matrices are row-vector (`v*M`); DXR instance transforms are 3x4
+  column-vector, so the upper 3x3 is transposed on the way in — **by the backend**, from the
+  engine-convention matrix Voxi hands over untouched. Getting that wrong leaves the raster image
+  perfectly correct and puts every ray somewhere else, which only a cast-shadow probe can see.
 
 Also note: `IResourceFactory` has `createBlas`/`createTlas` but no matching destroy, so
 acceleration structures are released only when the factory is. Harmless while meshes are static;

@@ -9,10 +9,7 @@ reproduce is a rumour.
 
 A six-lens sweep across rendering, physics/fluids, audio/animation, formats/save, graph/scripting and
 the editor, each finding then given to a reproducer and to a separate pass told to refute it. Three
-candidates were killed on that second pass — two as already-documented behaviour (`docs/ABI.md:1067`
-states the character inner-body contact gap is deliberate; `docs/AVER_NODE_NODES.md:662` already
-describes the SphereCast emitter gap) and one as failing the bar: a real observation about code that
-produces no wrong output.
+candidates were killed on that second pass — two as already-documented behaviour (the character inner-body contact gap is deliberate, and the SphereCast emitter gap is documented) and one as failing the bar: a real observation about code that produces no wrong output.
 
 ## Fixed
 

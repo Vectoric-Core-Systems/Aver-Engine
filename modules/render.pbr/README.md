@@ -42,22 +42,18 @@ one-for-one (`baseColorFactor`, `metallicFactor`, `roughnessFactor`, `emissiveFa
 that lands later is therefore a rename-free mapping rather than a translation table nobody can
 audit.
 
-## Honest status reporting
+## Feature status
 
-`aver_pbr_status` / `aver_pbr_status_text` report `Ready` / `NotImplemented` / `Unsupported` per
-feature, exactly as Voxi does. **This used to say everything reports `NotImplemented`; that stopped
-being true.** All eight declared features (`Factors`, `BaseColorMap`, `MetalRoughMap`, `NormalMap`,
-`OcclusionMap`, `EmissiveMap`, `AlphaMask`, `AlphaBlend` — `Material.hpp`'s `Feature` enum) now report
-`Ready` (`MaterialLibrary::status`, `modules/render.pbr/src/Material.cpp:191-234`): the b2 constant
-block and the five maps are consumed by `averEvalMaterial()`, and alpha blending is a real
-back-to-front blended pass (`IDevice::setDrawBlended` / `endFrame`'s per-frame sort). The `Ready`
-verdict on `AlphaBlend` is deliberately narrow, and the source comment is explicit about the line: it
-covers alpha **compositing** only — a blended surface is never voxelised, never in the ray-tracing
-TLAS and never in the shadow map (the same exclusion drawMesh's opaque path already applies to any
-translucent mesh), and `MaterialDesc`'s newer `ior`/`transmission` fields are carried into the alpha
-computation but there is still no refraction: a window will show an unbent, translucent copy of what
-is behind it, not a bent one. Reporting `Ready` beyond what is true would be precisely the lie the enum
-exists to prevent, and that is exactly why this status is qualified rather than blanket.
+All eight declared features report `Ready`: `Factors`, `BaseColorMap`, `MetalRoughMap`, `NormalMap`,
+`OcclusionMap`, `EmissiveMap`, `AlphaMask`, `AlphaBlend` (in `Material.hpp`'s `Feature` enum). The
+b2 constant block and the five maps are consumed by `averEvalMaterial()`, and alpha blending is a
+real back-to-front blended pass (`IDevice::setDrawBlended` / `endFrame`'s per-frame sort).
+
+**Status on AlphaBlend is deliberately qualified:** it covers alpha **compositing** only — a blended
+surface is never voxelised, never in the ray-tracing TLAS and never in the shadow map (the same
+exclusion drawMesh's opaque path already applies to any translucent mesh). `MaterialDesc`'s newer
+`ior`/`transmission` fields are carried into the alpha computation, but there is still no refraction:
+a window will show an unbent, translucent copy of what is behind it, not a bent one.
 
 ## C# scripting
 
@@ -68,7 +64,7 @@ The stable surface is `include/aver/pbr/pbr_abi.h` (`aver_pbr_*`), bound by
 var m = Pbr.Create("carbon body");
 m.RoughnessFactor = 0.45f;
 m.SetTexturePath(PbrTextureSlot.BaseColor, "content/textures/carbon_bc.octex");
-Console.WriteLine(Pbr.StatusTextOf(PbrFeature.BaseColorMap));   // "Ready" -- this used to say "not implemented yet"; it now renders
+Console.WriteLine(Pbr.StatusTextOf(PbrFeature.BaseColorMap));   // "Ready"
 ```
 
 One deviation from the `voxi_abi.h` idiom, deliberate: a texture's opaque asset id crosses as

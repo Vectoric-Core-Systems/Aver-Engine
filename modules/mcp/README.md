@@ -25,11 +25,10 @@ configurable — making the address an option would be offering remote control a
 It **posts real Win32 messages** to the window: `WM_MOUSEMOVE`, `WM_LBUTTONDOWN`/`UP`, `WM_KEYDOWN`/`UP`.
 
 The editor's input already arrives that way — `ImGui_ImplWin32_WndProcHandler`, see
-`modules/rhi.d3d12.imgui/src/ImGuiUiBackend.cpp:154` (moved out of `D3D12Device.cpp` when ImGui hosting
-was split into its own module) — so a synthetic click travels the *identical* path as a human one, through the
-same handler, in the same order, with no second code path to keep in step. The alternative was calling
-ImGui's `io.Add*Event` directly, which would fight the Win32 backend's own `NewFrame` and would exercise
-a path no user ever takes.
+`modules/rhi.d3d12.imgui/src/ImGuiUiBackend.cpp` — so a synthetic click travels the *identical* path
+as a human one, through the same handler, in the same order, with no second code path to keep in step.
+The alternative was calling ImGui's `io.Add*Event` directly, which would fight the Win32 backend's own
+`NewFrame` and would exercise a path no user ever takes.
 
 It also means this module knows nothing about ImGui, the RHI, or the editor. It holds a socket and a
 queue. That is exactly why it can be optional.
@@ -63,8 +62,7 @@ from the socket thread rather than queued, since there is nothing for the main t
 
 **Strings are real JSON strings.** A `text` (or `path`, `key`, `module`, `fn`) may hold `\n`, `\r`, `\t`,
 `\"`, `\\`, `\/` and `\uXXXX` (surrogate pairs included), and comes out the other side as the characters
-they name. Until 2026-09-29 only `\"` and `\\` were undone and every other escape arrived as its bare
-letter, so a multi-line `text` reached an ABI as one run-together line. A key is found at its **first
+they name. JSON escapes were fully supported from 2026-09-29 onwards. A key is found at its **first
 occurrence** in the line, so a client puts free-form content (`text`) last, after the keys the reader
 looks up by name; a `"` inside a string is always escaped, so it cannot spell a key.
 
@@ -72,8 +70,7 @@ looks up by name; a `"` inside a string is always escaped, so it cannot spell a 
 `result` and `error` are JSON-escaped strings, so an ABI that answers with a JSON document (the `level`
 ABI does) is a string inside the reply, and a client parses twice. An `abi` request is waited on until
 the main thread has run it, or 60 s: a request that times out **still runs** later, so it is worth
-asking again whether it took effect rather than sending it twice. (The wait was 5 s, which a call that
-does real work on the main thread — a batch `place` builds collision — could outlast.)
+asking again whether it took effect rather than sending it twice.
 
 **The wait is taken in 100 ms slices**, so it can end early for the two reasons that are not an answer.
 If the client **hangs up** while a call is pending, the connection is dropped at once and the next client
@@ -100,15 +97,10 @@ it:
 {"cmd":"abi","module":"graph","fn":"attach","args":[7]}          -> ScriptHost::graphLoad, via the entity id
 ```
 
-**Corrected:** the modules actually registered by `SandboxApp::registerMcpAbis()` today are `editor`,
-`physics`, `world`, `graph` and `level` — not `framework` or `scene` as an earlier version of this
-example showed, and neither of those two names is registered by anything in the tree. `physics` itself
-exposes only `bodyCount` and `ready`; there is no `raycast` entry point over this channel. Ask
-`{"cmd":"modules"}` (see below) rather than trusting a list in a doc, since the set is exactly the
-registry and drifts as modules are added.
-
-`fn` is the entry point **without** its module prefix — `spawn`, not `aver_fw_spawn` — because the
-prefix is already implied by `module`, and making a client repeat it is inviting the two to disagree.
+The modules registered by `SandboxApp::registerMcpAbis()` are `editor`, `physics`, `world`, `graph`
+and `level`. `fn` is the entry point **without** its module prefix — `spawn`, not `aver_fw_spawn` —
+because the prefix is already implied by `module`, and making a client repeat it is inviting the two
+to disagree.
 
 ### It is a registry, not a switch, and that is what keeps this module Core-only
 
@@ -131,19 +123,15 @@ unknown `fn` comes back in the module's words.
 Dispatchers are called **outside** the queue lock — a dispatcher runs module code of unknown duration,
 and holding the mutex across it would stall the socket thread for as long as the engine took to answer.
 
-## Wiring — no longer "still to do"
+## Wiring
 
-**The sandbox does pump it.** Both of this section's former gaps are closed. `SandboxApp` takes a
-`--mcp [port]` flag, calls `mcp_.start(port)`, and pumps one event per frame from `onUpdate` whenever
-`mcp_.listening()` (`SandboxApp.cpp:2831`, drifted from `3108`) — the click-forcing path this module exists for actually
-runs today, not just in `tests/mcp`. `registerMcpAbis()` registers `editor`, `physics`, `world`,
-`graph` and `level` (see the corrected protocol section above); `framework` and `scene` are not among
-them, so a client should not assume every module in the engine has an ABI seam exposed here yet — only
-the five above do.
+`SandboxApp` takes a `--mcp [port]` flag, calls `mcp_.start(port)`, and pumps one event per frame from
+`onUpdate` whenever `mcp_.listening()` — the click-forcing path this module exists for actually runs today.
+`registerMcpAbis()` registers `editor`, `physics`, `world`, `graph` and `level`; `framework` and `scene`
+are not among them, so a client should not assume every module in the engine has an ABI seam exposed here.
 
-`{"cmd":"modules"}` also exists now: `McpBridge::modules()` (`McpBridge.cpp:292`) is reachable over the
-wire (`McpBridge.cpp:133, :409`), so a client can ask what this build's registry currently holds instead
-of trusting a list in this file.
+`{"cmd":"modules"}` exists: `McpBridge::modules()` is reachable over the wire, so a client can ask what
+this build's registry currently holds instead of trusting a list in this file.
 
 ## The `level` ABI
 
@@ -190,8 +178,7 @@ mesh: one whose file is under the project's Content directory but was imported a
 meshes loaded is picked up (the reload a Content Browser drop does); anything else is refused by name
 before any entity is made. An `anim` clip is checked **the way the runtime will resolve it**: through the
 content index (id = `fnv1a64` of the clip's spelling) and `AnimSystem::clip()`, which must hand back an
-**object** clip (`kOcAnimObject`); anything else is refused. (It used to check the file on disk, so a clip
-the index had never seen was accepted and then never played.) A clip written after the project opened is
+**object** clip (`kOcAnimObject`); anything else is refused. A clip written after the project opened is
 not in the index, since nothing rescans short of reopening the project, so that one file is indexed on
 the spot, and only when the clip is spelled exactly as the file is named under Content, case included,
 because the runtime finds a clip by that exact path. A clip *re-imported over an existing one* is served

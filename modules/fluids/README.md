@@ -1,18 +1,10 @@
 # Aver.Fluids  (`modules/fluids`)
 
-**Corrected:** this header named `modules/water` — the module's name before `b887a78` ("Water and
-render.fluid become one module called Fluids") merged it with `render.fluid` and renamed the
-directory. This file describes only the water half (`GerstnerWave`/`WaterRenderer`/`Underwater`) that
-`modules/water` used to be; `FluidVolume.hpp`/`.cpp` and `FluidScene.hpp`/`.cpp` — the solver-driven
-half that motivated the rename, per that commit's own message ("FluidVolume builds a closed shell of
-arbitrary compliance and pressure and hands it to a solver. That is a fluid, not specifically water") —
-also live in this directory now and are not documented below.
-
 - **Language:** C++
 - **Depends on:** Core, RHI
 - **Option:** `AVER_MODULE_FLUIDS` (ON)
 
-Water in three parts, of which this module is two.
+Water in three parts. This module implements two; the solver-driven buoyancy is in `modules/physics`. The module was `modules/water` until `b887a78` ("Water and render.fluid become one module called Fluids") merged it with `render.fluid`. The tables and sections below describe only the water half (`GerstnerWave`/`WaterRenderer`/`Underwater`); the solver-driven half that motivated the rename also lives here and is not documented below: `FluidVolume.hpp`/`.cpp` and `FluidScene.hpp`/`.cpp` ("FluidVolume builds a closed shell of arbitrary compliance and pressure and hands it to a solver. That is a fluid, not specifically water", per that commit's message).
 
 | Part | Where | Why there |
 | --- | --- | --- |
@@ -44,38 +36,14 @@ both copies by hand and keeping them in step; nothing in the build checks that t
 
 ## What this slice does not do
 
-Recorded here rather than left to be discovered:
+- **Levels can author water.** `WATER` (name, level height, `bounds`/`infinite`, an optional `simulate` flag) and `WAVE` (cross-referenced to a `WATER` by name, empty name meaning the first declared one) are real `.ocworld` records (`modules/formats/src/OcWorld.cpp`'s `WATER` parse, `OcWorld.hpp`'s `OcWaterPlacement`/`OcGerstnerWave`; `9afd98b`), modelled on `OcPcgVolume` rather than the `LANDSCAPE` precedent, since a `WATER` record has no external asset and nothing about it needs positioning the way a landscape tile does. (This bullet once said the water level and wave set were supplied only by the host at registration; that is no longer true.)
 
-- **No longer true — a level can author its own water.** This used to say the water level and wave
-  set were supplied only by the host at registration. `9afd98b` closed it: `WATER` (name, level height,
-  `bounds`/`infinite`, an optional `simulate` flag) and `WAVE` (cross-referenced to a `WATER` by name,
-  empty name meaning the first declared one) are real `.ocworld` records now
-  (`modules/formats/src/OcWorld.cpp`'s `WATER` parse, `OcWorld.hpp`'s `OcWaterPlacement`/`OcGerstnerWave`),
-  modelled on `OcPcgVolume` rather than the `LANDSCAPE` precedent this bullet originally pointed at —
-  a `WATER` record has no external asset, so nothing about it needs positioning the way a landscape
-  tile does.
-- **No soft shoreline.** The surface is depth-*tested* but does not sample scene depth, so it meets
-  sloped terrain in a hard line rather than a fade. **Corrected:** scene depth is no longer D3D12-only
-  — `VulkanDevice::sceneDepthTexture()` (`VulkanDevice.cpp:848`, drifted from `906`) now mirrors the D3D12 implementation
-  structurally, so both backends can supply it. D3D11 still returns `IDevice`'s own default of 0
-  (no override in `modules/rhi.d3d11`). The blend is still deferred, but the reason has narrowed to
-  "not built yet" rather than "blocked on a D3D12-only capability".
-- **Vulkan claim corrected.** This used to say the post chain the surface would composite through was
-  refused on Vulkan, so no claim was made about the final image there. `VulkanDevice::runPostChain`
-  is called unconditionally every frame (`VulkanDevice.cpp`, present since the backend's first
-  checkpoint commit `895ba68`), and `modules/rhi.vulkan/README.md`'s own "What is left" section lists
-  the post chain's bindings as verified, not among its remaining gaps — so nothing refuses it. This
-  module's own code still has no Vulkan-specific path or gate (`WaterRenderer.cpp` declines only when
-  the backend exposes no resource factory at all, a generic check), so the water surface should
-  composite through the same way on both backends; that has simply not been independently checked
-  here.
-- **The fog defaults are placeholders.** They are unvalidated guesses at centimetre scale, and the
-  existing fog was measured only at kilometre scale — a genuinely different regime.
-- **Invisible to every other render feature.** `WaterRenderer::transparentPass` issues its own
-  `ctx.drawIndexed` directly and never goes through `IDevice::drawMesh`, so the surface never enters
-  the shadow cascades, the ray-tracing TLAS, or GI voxelisation. Its lighting is entirely
-  self-contained for the same reason — it was never wired into the scene's light in the first place.
-- **No simulation.** There is no wave field being stepped or evolved anywhere. The surface is
-  analytic: a static 129x129 grid whose vertices never change, recentred under the camera each frame
-  by moving a world-space origin uniform, with the Gerstner displacement applied entirely in the
-  vertex shader.
+- **No soft shoreline.** The surface is depth-*tested* but does not sample scene depth, so it meets sloped terrain in a hard line rather than a fade. Scene depth is now available on all backends (`VulkanDevice::sceneDepthTexture()` mirrors the D3D12 implementation structurally, both backends support it; D3D11 still returns `IDevice`'s own default of 0, no override in `modules/rhi.d3d11`). The blend is still deferred, but the reason has narrowed to "not built yet".
+
+- **Vulkan: the post chain is not a blocker, but water there is unchecked.** The post chain the surface composites through was once believed refused on Vulkan; `VulkanDevice::runPostChain` is called unconditionally every frame (present since the backend's first checkpoint commit `895ba68`), and `modules/rhi.vulkan/README.md`'s "What is left" lists the post chain's bindings as verified. This module has no Vulkan-specific path or gate (`WaterRenderer.cpp` declines only when the backend exposes no resource factory at all, a generic check, `"[Water] init declined: backend exposes no resource factory"`), so the surface should composite the same way on both backends; that has not been independently checked.
+
+- **The fog defaults are placeholders.** They are unvalidated guesses at centimetre scale, and the existing fog was measured only at kilometre scale — a genuinely different regime.
+
+- **Invisible to every other render feature.** `WaterRenderer::transparentPass` issues its own `ctx.drawIndexed` directly and never goes through `IDevice::drawMesh`, so the surface never enters the shadow cascades, the ray-tracing TLAS, or GI voxelisation. Its lighting is entirely self-contained for the same reason — it was never wired into the scene's light in the first place.
+
+- **No simulation.** There is no wave field being stepped or evolved anywhere. The surface is analytic: a static 129x129 grid whose vertices never change, recentred under the camera each frame by moving a world-space origin uniform, with the Gerstner displacement applied entirely in the vertex shader.
