@@ -12,8 +12,10 @@
 #define AVER_PT_PATHS 0
 #endif
 
-// gPtBounceParams.x: path vertices after the primary hit (Settings::ptBounces, [1,8]).
-uint ptBounceCount() { return (uint)clamp(gPtBounceParams.x, 1.0, 8.0); }
+// gPtBounceParams.x: path vertices after the primary hit (Settings::ptBounces, [1,8]) in the low four
+// bits; bit 4 is Reference mode (Settings::ptMode 1).
+uint ptBounceCount() { return clamp((uint)gPtBounceParams.x & 15u, 1u, 8u); }
+bool ptReferenceMode() { return ((uint)gPtBounceParams.x & 16u) != 0u; }
 
 // PCG hash (Jarzynski & Olano 2020): per pixel, per frame, per stream.
 uint ptPcg(uint v) {
@@ -60,10 +62,12 @@ void ptAim(inout AverSurface s, float3 L) {
     s.F = fresnelSchlick(saturate(dot(s.H, s.V)), s.F0, s.f90);
 }
 
-// One path vertex: where a ray landed, as its material's surface.
+// One path vertex: where a ray landed, as its material's surface. `cover` is how much of the light it
+// stops: its alpha for a blended material, 1 for everything else (a masked cut-out that was hit is solid).
 struct PtVertex {
     float3      pos;
     AverSurface s;
+    float       cover;
 };
 
 // Traces origin->dir against opaque geometry and builds the hit's surface through rtHitSurface.
@@ -77,15 +81,16 @@ bool ptTrace(float3 origin, float3 dir, float tmin, float cone, out PtVertex v,
     r.TMin      = tmin;
     r.TMax      = 1.0e7;
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(gScene, RAY_FLAG_NONE | gAverRtSecondaryRayFlags, AVER_RT_MASK_OPAQUE_ALL, r);
+    q.TraceRayInline(gScene, RAY_FLAG_NONE | gAverRtSecondaryRayFlags, mask, r);
     averRtProceedSolid(q);
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return false;
 
     const RtHit h = rtHitCommitted(q, origin, dir);
     float2 gx, gy;
     rtHitConeGrad(h, cone, gx, gy);
-    v.pos = h.pos;
-    v.s   = rtHitSurface(h, -dir, normalize(gLightDir.xyz), gx, gy, AVER_RT_HIT_FULL);
+    v.pos   = h.pos;
+    v.s     = rtHitSurface(h, -dir, normalize(gLightDir.xyz), gx, gy, AVER_RT_HIT_FULL);
+    v.cover = (h.mat.flags & AVER_MAT_ALPHA_MASK) != 0u ? 1.0 : saturate(v.s.alpha);
 #if AVER_RD_LAMPS
     // A listed lamp is reached by next-event estimation (ptLamp); its glow would count twice.
     if ((h.mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalCarriesEmitters()) v.s.emissive = float3(0.0, 0.0, 0.0);
@@ -194,7 +199,7 @@ float3 ptContinue(PtVertex v, float2 pixel, inout uint rng, uint depth) {
         float3 dir, w;
         float3 origin;
         const float bias = ptBias(v.pos);
-        const float a    = saturate(v.s.alpha);
+        const float a    = v.cover;
         if (a < 0.999 && ptRand(rng) >= a) {
             // THROUGH a translucent surface, with probability (1 - coverage): the light the composite
             // passes, absorbed by the volume over its measured thickness.
@@ -216,7 +221,7 @@ float3 ptContinue(PtVertex v, float2 pixel, inout uint rng, uint depth) {
             break;
         }
         // A translucent vertex reflects its direct light by its coverage (the composite's diffuse share).
-        sum += thr * (nv.s.emissive + ptDirect(nv, pixel, rng) * saturate(nv.s.alpha));
+        sum += thr * (nv.s.emissive + ptDirect(nv, pixel, rng) * nv.cover);
         if (b >= 1u) {
             const float p = clamp(max(thr.r, max(thr.g, thr.b)), 0.05, 0.95);
             if (ptRand(rng) > p) break;
@@ -235,4 +240,16 @@ float3 ptRadiance(float3 origin, float3 dir, float tmin, float cone, float2 pixe
     if (!ptTrace(origin, dir, tmin, cone, v)) return skyFallback;
     uint rng = ptSeed(pixel, stream);
     return v.s.emissive + ptDirect(v, pixel, rng) + ptContinue(v, pixel, rng, ptBounceCount() - 1u);
+}
+
+// REFERENCE MODE (Settings::ptMode 1): one independent path from the primary surface, every lobe, fresh
+// shadow rays, no reuse across pixels or frames. Stage B averages it while the view holds still.
+float3 ptReferencePixel(AverSurface s, float3 wpos, float2 pixel) {
+    uint rng = ptSeed(pixel, 0x7e1fu);
+    PtVertex v;
+    v.pos   = wpos;
+    v.s     = s;
+    v.cover = 1.0;   // the primary ray sees the opaque lane; glass is composited over it afterwards
+    const float3 l = s.emissive + ptDirect(v, pixel, rng) + ptContinue(v, pixel, rng, ptBounceCount());
+    return all(isfinite(l)) ? min(l, 64.0 * AVER_VOX_MAXRAD) : float3(0.0, 0.0, 0.0);
 }

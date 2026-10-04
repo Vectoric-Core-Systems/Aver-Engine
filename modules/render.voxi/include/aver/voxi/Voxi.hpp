@@ -223,6 +223,12 @@ struct Settings {
     // Path tracing = multi-bounce solve. Separate settings because separately useful, priced, and supported.
     // 1 = NO extra bounces (one hit = ray tracing). Above 1 is path tracing.
     u32 ptBounces = 1;
+    // How a path-traced frame is estimated (only while pathTracing is above Off):
+    //   0 ReSTIR: each pixel's ReSTIR GI sample is a whole path, reused across pixels and frames and
+    //     denoised. Clean in motion, slightly biased.
+    //   1 Reference: one independent path per pixel per frame, no reuse and no denoiser, averaged while
+    //     the view holds still. Converges to the ground truth; grainy while moving.
+    u32 ptMode = 0;
 
     // ---- occlusion-aware fog: the air sky-visibility volume -----------------------------------
     // Fog adds in-scattered SKY light along the camera-to-surface path with no regard for what's between.

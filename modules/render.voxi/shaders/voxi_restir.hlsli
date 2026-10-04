@@ -370,8 +370,9 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     {
         uint rng = ptSeed(pixel, 0x2c1bu);
         PtVertex v;
-        v.pos = hitPos;
-        v.s   = s;
+        v.pos   = hitPos;
+        v.s     = s;
+        v.cover = 1.0;   // the candidate ray sees the opaque lane only
         radiance += ptLamp(s, hitPos, pixel, rng);
         const float3 li = ptContinue(v, pixel, rng, ptBounceCount() - 1u);
         radiance += li;

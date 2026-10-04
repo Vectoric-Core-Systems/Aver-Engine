@@ -288,7 +288,7 @@ A lamp's own emission is left out of ReSTIR GI's candidate hits (and the GI-off 
 
 ## 4b. Path tracer scene view (reference renderer)
 
-**Available as:** the `--pt-scene` command-line flag at startup only. The editor's **Project Settings > Rendering > Path Tracing** control no longer reaches it; it drives the path-traced real-time mode in 4c.
+**Available as:** the `--pt-scene` command-line flag at startup only. The editor's path tracing methods (**Project Settings > Rendering > Global Illumination > Method**) don't reach it; they drive the real-time modes in 4c.
 
 ### 4b.1 What it is
 
@@ -332,16 +332,19 @@ One accepted, pre-existing gap this makes more visible rather than introduces: t
 
 ---
 
-## 4c. Path Tracing (the Path Tracing quality setting)
+## 4c. Path Tracing (Global Illumination > Method)
 
 `Settings::pathTracing` above Off runs the staged ray-driven frame with full light paths (`modules/render.voxi/shaders/voxi_pt.hlsli`):
 
 - **ReSTIR GI's candidate is a whole path.** The first secondary hit is shaded as before (textures, emissive, sun), then also lit by one lamp picked from the light list in proportion to its unshadowed irradiance, with its own shadow ray. The path then continues through that surface's BSDF, either GGX VNDF for specular or cosine for diffuse, with the lobe chosen by its share of reflected energy. It runs for `Settings::ptBounces - 1` more vertices, and Russian roulette applies from the third vertex. Every vertex is shaded from its own textures (base colour, metal/roughness, emissive) and lit by the sun and one lamp; a sky miss ends the path. ReSTIR then resamples these path radiances across pixels and frames as before, and this replaces the cached/approximate second bounce.
 - **Reflections** continue the same way from the reflected surface, in place of its Lambert-only shading.
-- **What it switches on:** ray-driven primary visibility, at least staged pass 1, GI at least Low, ReSTIR GI, the `Full` visibility mode (every pixel traces its candidate), the denoiser, and a denoiser history of at least 128 frames so a still camera keeps converging. `VoxiRenderer::setSettings` applies these.
+- **Where it is chosen:** the Global Illumination page's **Method** combo: Voxel cones, Ray traced (ReSTIR GI), ReSTIR path tracing (`ptMode` 0) or Path tracing (reference) (`ptMode` 1). The path tracing methods set `pathTracing` (its tier is **Path quality**), `giMode` 1 and MSAA 1x. Round-trips as `RENDER.GIMODE`, `RENDER.PATHTRACING` and `RENDER.PTMODE`. There is no separate Path Tracing page or Overview row any more.
+- **What it switches on:** ray-driven primary visibility, at least staged pass 1, GI at least Low, ReSTIR GI, the denoiser and a denoiser history of at least 128 frames. `VoxiRenderer::setSettings` applies these and forces the same set for both modes, so switching between them reallocates nothing. It leaves the ReSTIR visibility mode alone: forcing `Full` flipped the history and radiance-cache resources on every toggle. Any resource edge in `setSettings` waits for the GPU (`waitIdle`) before freeing anything.
+- **ReSTIR path tracing** traces every pixel every frame (no half-rate checkerboard).
+- **Reference path tracing:** Stage B traces one independent path per pixel (`ptReferencePixel`: emission, sun and one lamp with fresh shadow rays, then `ptBounces` BSDF-sampled vertices). The GI, sky-occlusion, lamp and reflection stages and the denoiser's GI pass are skipped. The accumulation below averages it up to 16,384 frames, so a still view converges to the ground truth.
 - **Where it runs:** only in the `AVER_PT_PATHS` twins of `CSRdGi`/`CSRdGiTrace` (plain and checkerboard) and `CSRdRefl` (plain and split). These are built lazily by `createPathTraceTwins`, so every other compile is unchanged.
 - **Requirements:** D3D12 and ray tracing. Elsewhere it logs once and renders without path tracing.
-- **Progressive accumulation:** Stage B keeps a running mean of every pixel in a structured buffer (`u22`, `VoxiRenderer::ensurePtAccum`). It is capped at 1,024 frames, then becomes a 1/1024 moving average. The whole image restarts when the camera, sun, viewport, lamp set or a lighting setting changes. A single pixel restarts on its own when the object under it moves or its depth changes, so moving traffic doesn't reset the rest of the frame.
+- **Progressive accumulation:** Stage B keeps a running mean of every pixel in a structured buffer (`u22`, `VoxiRenderer::ensurePtAccum`). It is capped at 1,024 frames, then becomes a 1/1024 moving average. The whole image restarts when the camera, sun, viewport or a lighting setting changes. A lamp change (moving traffic, a flicker) only shortens the average to 8 frames for that frame. A single pixel restarts on its own when the object under it moves or its depth changes, so moving traffic doesn't reset the rest of the frame.
 - **Tiers:** set only the bounce count (`ladder::ptBounces`).
 
 ---

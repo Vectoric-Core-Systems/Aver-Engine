@@ -226,9 +226,11 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
     r.denoiser.reason    = denoiseReason;
     r.denoiser.effective = (s.denoiser && denoiseReason == DisableReason::None) ? 1u : 0u;
 
-    // Allocate ~54 MB G-buffer when: denoiser requested AND (no reason, or only soft MSAA reason).
+    // Allocate ~54 MB G-buffer when: denoiser requested (Path Tracing turns it on in VoxiRenderer::setSettings)
+    // AND (no reason, or only soft MSAA reason).
     r.denoiserGBufferWanted =
-        s.denoiser && (denoiseReason == DisableReason::None || denoiseReason == DisableReason::RequiresMsaaOne);
+        (s.denoiser || s.pathTracing != Quality::Off) &&
+        (denoiseReason == DisableReason::None || denoiseReason == DisableReason::RequiresMsaaOne);
 
     // ---- the RT/PT page rows below their Quality combos ----
     r.rtSubControls = rtGate;

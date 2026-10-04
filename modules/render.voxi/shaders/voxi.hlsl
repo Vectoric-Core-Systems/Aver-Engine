@@ -1773,6 +1773,13 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     float2 uvGx, uvGy;
     rtHitGrad(hit, rdRayDx, rdRayDy, uvGx, uvGy);
     AverSurface s = rtHitSurface(hit, -dir, L, uvGx, uvGy, AVER_RT_HIT_FULL);
+#if AVER_RD_SPLIT
+    // Path Tracing, Reference mode: the pixel is one fresh path (ptReferencePixel below); the staged
+    // lighting it would otherwise read was not traced this frame.
+    const bool ptRef = ptReferenceMode();
+#else
+    const bool ptRef = false;
+#endif
     AverLight sun;
     sun.direction  = L;
     sun.radiance   = averSunRadiance();
@@ -1786,7 +1793,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // Unlit (vmode 1) drops it with the rest of lighting.
 #if AVER_RD_SPLIT && !AVER_RD_SINGLE_PASS
     // Stage B: visibility already resolved by CSRdLocalLights.
-    if (rdLocalLightCount() > 0u)
+    if (rdLocalLightCount() > 0u && !ptRef)
         radiance += rdLocalLightsShade(s, wpos, rdLocalVisFiltered(uint2(i.pos.xy)));
 #elif !AVER_RD_SPLIT && AVER_RD_LAMPS
     // Single pass resolves on its own hit.
@@ -1812,7 +1819,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // ablated: no cone gather
 #else
     // GI mode switch: gGiRestirParams.x says whether ReSTIR is wanted.
-    if (gVoxelParams.w > 0.5) {
+    if (gVoxelParams.w > 0.5 && !ptRef) {
         if (gGiRestirParams.x > 0.5) {
 #if AVER_RD_SPLIT
             // Stage B: read CSRdGi's already-resolved estimate.
@@ -1837,13 +1844,13 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #if AVER_RD_SPLIT
     // Stage B: read CSRdRefl's already-resolved reflection.
     // Gate lacks roughness term: rdRefl.a encodes CSRdRefl's own gate decision.
-    const float4 rdRefl = (gShadowParams.z > 0.5 && gRtParams.w > 0.5)
+    const float4 rdRefl = (gShadowParams.z > 0.5 && gRtParams.w > 0.5 && !ptRef)
                          ? gRdReflTex[uint2(i.pos.xy)] : float4(0.0, 0.0, 0.0, 0.0);
     if (rdRefl.a > 0.5) {
         // CSRdRefl's PRE-clamp ceiling test in alpha (2.0 = over ceiling).
         giPoisonSpecCeilHit = rdRefl.a > 1.5;
         ind.specular = rdRefl.rgb;
-    } else if (gVoxelParams.w > 0.5) {
+    } else if (gVoxelParams.w > 0.5 && !ptRef) {
         // Voxel-cone fallback (rough > 0.75 or RT unavailable).
         float  specAperture = clamp(s.rough * 0.5 + 0.02, 0.02, 0.4);
 #if AVER_RD_ABLATE == AVER_RD_ABL_SPECCONE
@@ -1934,6 +1941,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         ind.diffuse -= ind.ambient * ind.ambientScale * ind.occlusion * s.occlusion * gVoxelParams.y;
     const float aoView = ind.occlusion * s.occlusion;   // ViewDebug::AmbientOcclusion (vmode 6)
     radiance = averShadeIndirect(radiance, s, ind);
+#if AVER_RD_SPLIT
+    if (ptRef) radiance = ptReferencePixel(s, wpos, i.pos.xy);
+#endif
 
 #if AVER_RD_ABLATE == AVER_RD_ABL_FOG
     // ablated: no aerial perspective and no fog inscatter march.

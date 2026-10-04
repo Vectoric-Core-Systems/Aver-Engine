@@ -1094,12 +1094,18 @@ private:
     // (half-float depth in m << 16 | frame count) in w. Sized by ensurePtAccum; restarted by key change.
     static constexpr u32 kPtAccumElemBytes = 16;
     static constexpr u32 kPtAccumMaxFrames = 1024;   // past this the mean becomes a 1/1024 moving average
+    static constexpr u32 kPtAccumRefFrames = 16384;  // Reference mode's cap (the count is 16 bits)
+    static constexpr u32 kPtAccumLampFrames = 8;     // a frame whose lamps changed keeps an 8-frame average
     static constexpr u32 kPtAccumKeyFloats = 48;
     rhi::BufferHandle ptAccumBuf_ = 0;
     rhi::BufferHandle ptAccumPlaceholder_ = 0;
     u32  ptAccumElemCapacity_ = 0;
     bool ptAccumValid_ = false;
     f32  ptAccumKey_[kPtAccumKeyFloats] = {};
+    u64  ptAccumLampHash_ = 0;
+    // Path Tracing in Reference mode this frame: the staged GI, sky-occlusion, lamp and reflection
+    // passes are skipped and Stage B traces one path per pixel.
+    bool ptReferenceWanted() const { return pathTracingWanted() && settings_.ptMode == 1u; }
     bool ensurePtAccum();
     // createPathTraceTwins ran since the last createScenePipelines; the mode ran this frame; said-once logs.
     bool ptTwinsTried_ = false;

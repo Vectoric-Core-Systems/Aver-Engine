@@ -655,7 +655,8 @@ void SandboxApp::buildWorldSettings() {
 }
 
 namespace {
-// Project Settings > Rendering pages. 1-4 keep their old numbers (--project-settings-page).
+// Project Settings > Rendering pages. 1-4 keep their old numbers (--project-settings-page); 4 was the
+// Path Tracing page and now opens Global Illumination, where the lighting method is chosen.
 constexpr int kRenderPageOverview     = 1;
 constexpr int kRenderPageGi           = 2;
 constexpr int kRenderPageRayTracing   = 3;
@@ -668,7 +669,7 @@ constexpr int kRenderPagePerformance  = 14;
 constexpr int kRenderPageDebug        = 15;
 constexpr int kRenderPageOrder[] = {
     kRenderPageOverview, kRenderPageAntiAliasing, kRenderPageGi, kRenderPageRayTracing,
-    kRenderPagePathTracing, kRenderPageDenoising, kRenderPageMaterials, kRenderPagePost,
+    kRenderPageDenoising, kRenderPageMaterials, kRenderPagePost,
     kRenderPagePerformance, kRenderPageDebug};
 
 const char* renderPageTitle(int page) {
@@ -677,7 +678,6 @@ const char* renderPageTitle(int page) {
         case kRenderPageAntiAliasing: return "Anti-Aliasing & Upscaling";
         case kRenderPageGi:           return "Global Illumination";
         case kRenderPageRayTracing:   return "Ray Tracing";
-        case kRenderPagePathTracing:  return "Path Tracing";
         case kRenderPageDenoising:    return "Denoising";
         case kRenderPageMaterials:    return "Materials";
         case kRenderPagePost:         return "Post Processing";
@@ -691,6 +691,7 @@ const char* renderPageTitle(int page) {
 void SandboxApp::buildProjectSettings() {
     if (focusVoxi_ > 0) { showProjectSettings_ = true; --focusVoxi_; } // --project-settings
     if (!showProjectSettings_) return;
+    if (settingsPage_ == kRenderPagePathTracing) settingsPage_ = kRenderPageGi;
 
     const ImGuiViewport* mv = ImGui::GetMainViewport();
     ImGui::SetNextWindowSize(ImVec2(880.0f*dpi_, 560.0f*dpi_), ImGuiCond_FirstUseEver);
@@ -1210,18 +1211,17 @@ void SandboxApp::buildRenderingSettings(int page) {
             // Rungs turn Path Tracing OFF: any tier above Off silently drops to Off.
             if (s.pathTracing != Quality::Off)
                 ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-                                   "Picking a preset turns Path Tracing off (currently %s).",
-                                   Renderer::qualityName(s.pathTracing));
+                                   "Picking a preset turns path tracing off (the method is %s now).",
+                                   s.ptMode == 1u ? "reference path tracing" : "ReSTIR path tracing");
         }
 
-        // Three groups: each Off..Epic row (where Custom lives). "(modified)" = hand-edited knob.
+        // Two groups: each Off..Epic row (where Custom lives). "(modified)" = hand-edited knob. Path tracing
+        // is a Global Illumination method (its page), not a group of its own.
         {
             static const ScalabilityGroup kGroups[] = {ScalabilityGroup::GlobalIllumination,
-                                                       ScalabilityGroup::RayTracing,
-                                                       ScalabilityGroup::PathTracing};
-            static const Feature kGroupFeature[] = {Feature::GlobalIllumination, Feature::RayTracing,
-                                                    Feature::PathTracing};
-            static const char* kGroupLabel[] = {"Global Illumination", "Ray Tracing", "Path Tracing"};
+                                                       ScalabilityGroup::RayTracing};
+            static const Feature kGroupFeature[] = {Feature::GlobalIllumination, Feature::RayTracing};
+            static const char* kGroupLabel[] = {"Global Illumination", "Ray Tracing"};
             static const char* kTierNames[] = {"Off", "Low", "Medium", "High", "Epic"};
             // Per-group setter; mirrors applyOverall (Scalability.hpp).
             const auto setGroupTier = [](Settings& set, ScalabilityGroup g, Quality t) {
@@ -1243,14 +1243,10 @@ void SandboxApp::buildRenderingSettings(int page) {
                         set.giSkyOcclusionRays = ladder::giSkyOcclusionRays(t);
                         set.giSkyOcclusionTile = ladder::giSkyOcclusionTile(t);
                         break;
-                    case ScalabilityGroup::PathTracing:
-                        set.pathTracing = t;
-                        set.ptBounces   = ladder::ptBounces(t);
-                        break;
                     default: break;
                 }
             };
-            for (int gi = 0; gi < 3; ++gi) {
+            for (int gi = 0; gi < 2; ++gi) {
                 const ScalabilityGroup group = kGroups[gi];
                 ImGui::PushID(gi);
                 ImGui::TextUnformatted(kGroupLabel[gi]);
@@ -1412,29 +1408,85 @@ void SandboxApp::buildRenderingSettings(int page) {
         const char* qs[] = {"Off","Low","Medium","High","Epic"};
         if (ImGui::Combo("Quality", &q, qs, 5)) { s.globalIllumination = static_cast<Quality>(q); changed = true; }
 
-        // ---- Which diffuse GI estimator ----
-        // giMode round-trips as RENDER.GIMODE; absent from older manifest it stays -1 (engine default).
-        int giAlgo = static_cast<int>(er.giMode.effective);
-        if (ImGui::Combo("Indirect diffuse", &giAlgo, "Voxel cones\0ReSTIR (experimental)\0")) {
-            s.giMode = static_cast<u32>(giAlgo); changed = true;
+        // ---- Lighting method: how indirect light is found ----
+        // Round-trips through RENDER.GIMODE, RENDER.PATHTRACING and RENDER.PTMODE.
+        const bool ptOn = s.pathTracing != Quality::Off;
+        const bool ptReady = vx.status(Feature::PathTracing) == Status::Ready;
+        static const char* kMethods[] = {"Voxel cones", "Ray traced (ReSTIR GI)", "ReSTIR path tracing",
+                                         "Path tracing (reference)"};
+        const int method = ptOn ? (s.ptMode == 1u ? 3 : 2) : (s.giMode != 0 ? 1 : 0);
+        if (ImGui::BeginCombo("Method", kMethods[method])) {
+            for (int i = 0; i < 4; ++i) {
+                ImGui::BeginDisabled(i >= 2 && !ptReady);
+                if (ImGui::Selectable(kMethods[i], method == i) && method != i) {
+                    s.giMode = i == 0 ? 0u : 1u;
+                    if (i < 2) {
+                        s.pathTracing = Quality::Off;
+                    } else {
+                        s.ptMode = static_cast<u32>(i - 2);
+                        if (!ptOn) {
+                            s.pathTracing = Quality::High;
+                            s.ptBounces   = ladder::ptBounces(Quality::High);
+                        }
+                        // Path tracing finds the first surface with a ray (one sample a pixel), and its
+                        // denoiser reads a single-sample G-buffer.
+                        s.msaa = Msaa::Off;
+                    }
+                    changed = true;
+                }
+                ImGui::EndDisabled();
+            }
+            ImGui::EndCombo();
         }
+        uiReg_.track("project.gi.method");
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Voxel cones is what this engine has always shipped: a clipmap\n"
-                              "marched with cones. It is the default and is unchanged. The\n"
-                              "Voxel grid and Diffuse cones settings below apply ONLY to it.\n\n"
-                              "ReSTIR resamples ray-traced indirect samples over time AND\n"
-                              "across neighbouring pixels (the engine's own implementation).\n"
-                              "It has no voxel volume, so the boundary artefacts the clipmap\n"
-                              "produces -- surfaces near the edge reading as unoccluded, worst\n"
-                              "while the camera moves -- cannot occur.\n\n"
-                              "EXPERIMENTAL: spatio-temporal resampling. Grainier than the\n"
-                              "cone gather unless Denoiser below is on -- which is what the\n"
-                              "denoiser pass is for, and it needs MSAA 1 to run at all.");
-        // ReSTIR is requested but not effective.
-        if (s.giMode != 0 && er.giMode.reason != DisableReason::None)
+            ImGui::SetTooltip("Voxel cones: a clipmap of the scene marched with cones. No ray tracing needed;\n"
+                              "soft and stable, leaks light near thin walls and the volume's edge.\n\n"
+                              "Ray traced (ReSTIR GI): one traced bounce per pixel, resampled across\n"
+                              "neighbours and frames, then denoised. The real-time default.\n\n"
+                              "ReSTIR path tracing: the same, but each pixel's sample is a whole light\n"
+                              "path (Bounces below) shaded from every vertex's own material, and\n"
+                              "reflections continue the same way. Clean in motion.\n\n"
+                              "Path tracing (reference): one independent path per pixel per frame, every\n"
+                              "lobe, no reuse and no denoiser, averaged while the view holds still. Converges\n"
+                              "to the ground truth; grainy while moving.\n\n"
+                              "The path tracing methods turn on what they run on: primary rays, ReSTIR GI and\n"
+                              "the denoiser, and set anti-aliasing to 1x. Picking an Overall Quality preset\n"
+                              "turns path tracing off.");
+        if (s.giMode != 0 && !ptOn && er.giMode.reason != DisableReason::None)
             ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1),
                                "   ReSTIR is selected and resumes when %s",
                                disableReasonText(er.giMode.reason));
+        if (ptOn) {
+            int pq = static_cast<int>(s.pathTracing) - 1;
+            const char* pqs[] = {"Low", "Medium", "High", "Epic"};
+            if (ImGui::Combo("Path quality", &pq, pqs, 4)) {
+                s.pathTracing = static_cast<Quality>(pq + 1);
+                s.ptBounces   = ladder::ptBounces(s.pathTracing);
+                changed = true;
+            }
+            uiReg_.track("project.pt.quality");
+            ImGui::SameLine();
+            if (voxiRenderer_.pathTracingRan())
+                ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1), "[running]");
+            else
+                ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[not running, see the Output Log]");
+            int bounces = static_cast<int>(s.ptBounces);
+            if (ImGui::SliderInt("Bounces", &bounces, 1, 8)) {
+                s.ptBounces = static_cast<u32>(bounces);
+                changed = true;
+            }
+            uiReg_.track("project.pt.bounces");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Path vertices after the first hit. Path quality re-derives this, so set it\n"
+                                  "after picking one. Round-trips as RENDER.PTBOUNCES.");
+            if (static_cast<u32>(s.msaa) != 1u)
+                ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.2f, 1.0f),
+                                   "   Anti-aliasing is %ux: the denoiser cannot run, so the image stays grainy. "
+                                   "Set it to Off.", static_cast<u32>(s.msaa));
+        }
+        // ReSTIR's own controls below are inert under the reference path tracer.
+        ImGui::BeginDisabled(ptOn && s.ptMode == 1u);
 
         // ReSTIR visibility rays: shows er.giRestirVisibility.REQUESTED (not effective).
         const bool visGreyed = greysControl(er.giRestirVisibility.reason);
@@ -1516,6 +1568,7 @@ void SandboxApp::buildRenderingSettings(int page) {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.giRestirMaxHistory.reason));
         }
+        ImGui::EndDisabled();   // ReSTIR controls (reference path tracing)
 
         ImGui::Spacing();
         ImGui::TextUnformatted("Voxel volume");
@@ -1775,52 +1828,6 @@ void SandboxApp::buildRenderingSettings(int page) {
         ImGui::EndDisabled();
     }
 
-    if (page == kRenderPagePathTracing) {
-        // Path Tracing: Voxi's staged ray-driven frame with multi-bounce ReSTIR paths (voxi_pt.hlsli).
-        const Status st = vx.status(Feature::PathTracing);
-        ImGui::TextUnformatted(Renderer::featureName(Feature::PathTracing));
-        featureStatusBadge(vx, Feature::PathTracing);
-        ImGui::BeginDisabled(st != Status::Ready);
-        int q = static_cast<int>(s.pathTracing);
-        const char* qs[] = {"Off","Low","Medium","High","Epic"};
-        if (ImGui::Combo("Quality", &q, qs, 5)) {
-            s.pathTracing = static_cast<Quality>(q);
-            changed = true;
-        }
-        uiReg_.track("project.pt.quality");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Path-traces the scene inside the real-time renderer. Each pixel's ReSTIR GI\n"
-                              "sample becomes a whole light path (Bounces below): every vertex is shaded\n"
-                              "from its own textures and lit by the sun and the lamps, and reflections\n"
-                              "continue the same way. ReSTIR reuses the paths across pixels and frames and\n"
-                              "the denoiser keeps a long history, so a still camera keeps converging.\n\n"
-                              "Turns on what it runs on: primary rays, ReSTIR GI with every pixel traced,\n"
-                              "and the denoiser. Needs ray tracing on D3D12. The Overall Quality presets\n"
-                              "set it to Off.\n\n"
-                              "Round-trips as RENDER.PATHTRACING.");
-        ImGui::EndDisabled();
-        if (s.pathTracing != Quality::Off) {
-            ImGui::SameLine();
-            if (voxiRenderer_.pathTracingRan())
-                ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1), "[running]");
-            else
-                ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[not running, see the Output Log]");
-        }
-
-        // Bounces: tier-derived (hand-set value survives until tier changes). Quality above re-derives.
-        ImGui::BeginDisabled(s.pathTracing == Quality::Off);
-        int bounces = static_cast<int>(s.ptBounces);
-        if (ImGui::SliderInt("Bounces", &bounces, 1, 8)) {
-            s.ptBounces = static_cast<u32>(bounces);
-            changed = true;
-        }
-        uiReg_.track("project.pt.bounces");
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Path vertices after the first hit, the ReSTIR sample's own included.\n"
-                              "Changing Quality above re-derives this from the tier, so set it after\n"
-                              "picking one.");
-    }
     if (page == kRenderPageMaterials) {
         // Layered BSDF: changes what every material-shaded draw computes. Reload to take effect.
         const Status lst = vx.status(Feature::LayeredBsdf);

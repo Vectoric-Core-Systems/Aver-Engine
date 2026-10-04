@@ -111,6 +111,7 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
 
     if (project.giMode   >= 0) s.giMode   = static_cast<u32>(project.giMode);
     if (project.denoiser  >= 0) s.denoiser = project.denoiser != 0;
+    if (project.ptMode    >= 0) s.ptMode   = static_cast<u32>(project.ptMode);
 
     // RENDER.RESTIRHISTORY rides the same plain-knob shape as giMode/denoiser just above, NOT the
     // tier-derived one below: giRestirMaxHistory has no ladder rung to fall back to (Voxi.hpp's own
@@ -544,7 +545,8 @@ inline void captureVoxiSettings(fmt::ProjectDesc& project, const Settings& reque
     project.layeredBsdf        = static_cast<int>(requested.layeredBsdf);
     project.giMode             = static_cast<int>(requested.giMode);
     project.denoiser           = requested.denoiser ? 1 : 0;
-    project.restirHistory      = static_cast<int>(requested.giRestirMaxHistory);
+    project.ptMode             = static_cast<int>(requested.ptMode);
+    project.restirHistory     = static_cast<int>(requested.giRestirMaxHistory);
     // RENDER.RDSTAGES: unconditional capture, same "EVERYTHING ELSE" rule as RESTIRHISTORY directly
     // above (giMode/denoiser's shape), never captureKnob's four-branch tier-aware rule -- there is no
     // ladder rung for a tier change to race against.

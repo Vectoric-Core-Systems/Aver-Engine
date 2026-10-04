@@ -133,6 +133,7 @@ void Renderer::setSettings(const Settings& s) {
     // Per-neighbour M cap; 31 is the 5-bit packed limit.
     n.giRestirMaxHistory     = std::clamp(n.giRestirMaxHistory, 0u, 31u);
     n.ptBounces          = std::clamp(n.ptBounces, 1u, 8u);
+    n.ptMode             = n.ptMode > 1u ? 0u : n.ptMode;
     n.rtPixelsPerRayTile = std::clamp(n.rtPixelsPerRayTile, 1u, 16u);
     n.giUpdateInterval   = std::clamp(n.giUpdateInterval, 1u, 8u);
     // Zero history length would divide by zero in FidelityFX; 255 is defensive ceiling.

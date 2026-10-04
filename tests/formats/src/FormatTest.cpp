@@ -412,6 +412,7 @@ static void checkOcproject() {
     rs.rtShadowDenoise = 0;
     rs.rtRenderMode = 0;
     rs.ptBounces = 1;
+    rs.ptMode = 1;
     // THESE TWO ARE THE REASON THE LOOP BELOW MISSED A LIVE BUG. Both are skipped by appendKey
     // unless set -- backend is guarded on !empty(), frameBudgetMs defaults to -1.0f and the f32
     // overload returns early on a negative -- so a fixture that leaves them at their defaults
@@ -444,7 +445,7 @@ static void checkOcproject() {
                              "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
                              "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY",
                              "RENDER.RTSHADOWDENOISE", "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES",
-                             "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS",
+                             "RENDER.PTMODE", "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS",
                              "RENDER.EXPOSURE", "RENDER.BLOOM", "RENDER.AUTOEXPOSURE",
                              "RENDER.TONEMAP"}) {
         check(countKey(thrice, key) == 1,
@@ -453,7 +454,7 @@ static void checkOcproject() {
 
     ProjectDesc rb;
     check(parseOcproject(thrice, rb, &err), "the thrice-written manifest still parses");
-    check(rb.rtRenderMode == 0 && rb.ptBounces == 1,
+    check(rb.rtRenderMode == 0 && rb.ptBounces == 1 && rb.ptMode == 1,
           "and the ray-driven keys read back the values they were written with");
     check(rb.rtShadowDenoise == 0 && rb.rtShadowRays == 1,
           "alongside the RT keys that predate them");

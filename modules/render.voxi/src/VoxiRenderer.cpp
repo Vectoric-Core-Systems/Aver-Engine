@@ -563,17 +563,20 @@ void VoxiRenderer::shutdown() {
 
 void VoxiRenderer::setSettings(const Settings& in) {
     // Path Tracing runs inside the staged ray-driven frame (voxi_pt.hlsli), so it brings what that frame
-    // needs: ray-driven primary, ReSTIR GI with every candidate traced, the denoiser with a long history.
+    // needs: ray-driven primary, ReSTIR GI and the denoiser with a long history. Both modes force the
+    // same set, so switching between ReSTIR and Reference reallocates nothing; ReSTIR's visibility mode
+    // is left as the project set it (forcing it flipped the history and radiance-cache resources).
     Settings s = in;
     if (in.pathTracing != Quality::Off) {
         s.rtRenderMode = 1u;
         if (s.rayDrivenStages == 0u) s.rayDrivenStages = 1u;
         if (s.globalIllumination == Quality::Off) s.globalIllumination = Quality::Low;
         s.giMode = 1u;
-        s.giRestirVisibility = 3u;   // Full: every pixel's candidate is a traced path
         s.denoiser = true;
         s.denoiserMaxSamples = std::max(s.denoiserMaxSamples, 128u);
     }
+    const bool wasPtRef = ptReferenceWanted();
+    const Quality wasPt = settings_.pathTracing;
     // Capture edge states BEFORE assignment: resources allocate on OFF->on, deallocate on on->OFF.
     const bool wasWanted = rayTracingWanted();
     const bool wasAoWanted = aoHistoryWanted();
@@ -607,6 +610,25 @@ void VoxiRenderer::setSettings(const Settings& in) {
                   "(said once)");
     }
     setGiUpdateInterval(s.giUpdateInterval);
+
+    // A resource edge below frees what an in-flight frame may still read through a descriptor; the
+    // GPU is drained first. Only on a mode change, never per frame.
+    const bool resourceEdge =
+        rayTracingWanted() != wasWanted || aoHistoryWanted() != wasAoWanted ||
+        giRestirWanted() != wasGiRestirWanted || giVisHistWanted() != wasVisWanted ||
+        rdLocalHistWanted() != wasLocalHistWanted ||
+        rdStagedResourcesWanted() != wasRdStagedResourcesWanted ||
+        pathTracingWanted() != wasPtWanted || airVisWanted() != wasAirVisWanted;
+    if (resourceEdge && res_) res_->waitIdle();
+
+    // A change of path-tracing method leaves every history describing the other estimator.
+    if (ptReferenceWanted() != wasPtRef || (wasPt == Quality::Off) != (s.pathTracing == Quality::Off)) {
+        giHistValid_ = false;
+        giVisHistValid_ = false;
+        rtHistValid_ = false;
+        ptAccumValid_ = false;
+        denoiser_.forceHistoryReset();
+    }
 
     // A genuine visibility-mode change resets GI reservoir history, denoiser history and the half-res
     // visibility history together -- all three carry a stale answer once visMode changes (2.8's
@@ -4074,8 +4096,13 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         ctx.popMarker();
     };
 
+    // Path Tracing, Reference mode: Stage B traces each pixel's whole path itself, so the GI, sky-occlusion,
+    // lamp and reflection stages have nothing to give it (lamps are still published for its next-event pick).
+    const bool ptRef = ptReferenceWanted();
+    if (ptRef) ptRanThisFrame_ = true;
+
     // Reflection register/filter split: optional sub-stage C.
-    const bool reflSplit = (cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f) &&
+    const bool reflSplit = !ptRef && (cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f) &&
                             settings_.rayDrivenReflSplit && rdReflSplitCsPso_ != 0 && rdReflFilterCsPso_ != 0;
     if (reflSplit && !rdReflSplitRunLogged_) {
         rdReflSplitRunLogged_ = true;
@@ -4118,9 +4145,10 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         if (!perStage) ctx.pushMarker("Voxi RD lighting stages");
 
         // ReSTIR GI is chosen AND cone trace is gated on.
-        const bool giDispatch = cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f;
+        const bool giDispatch = !ptRef && cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f;
         // Half-rate ReSTIR GI: gated on rayDrivenStages==2, checkerboard variant compiled, denoiser live.
-        const bool giCb = giDispatch && settings_.rayDrivenStages == 2u && rdGiCbCsPso_ != 0 &&
+        // Not under Path Tracing: every pixel traces its path every frame (half the paths is twice the grain).
+        const bool giCb = giDispatch && settings_.rayDrivenStages == 2u && !pt && rdGiCbCsPso_ != 0 &&
                           denoiseGiRanThisFrame_;
         giCbWrittenThisFrame_ = giCb;
         giCbParityWritten_    = denoiseFrame_ & 1u;
@@ -4128,7 +4156,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             rdGiCbRunLogged_ = true;
             AVER_INFO("[Voxi] half-rate ReSTIR GI running: CSRdGi traces one checkerboard half each "
                       "frame, the denoiser reconstructs the rest");
-        } else if (settings_.rayDrivenStages == 2u && !giCb && !rdGiCbFallbackLogged_) {
+        } else if (settings_.rayDrivenStages == 2u && !giCb && !pt && !rdGiCbFallbackLogged_) {
             rdGiCbFallbackLogged_ = true;
             const char* why =
                 !giDispatch ? "ReSTIR GI is not the diffuse estimator this frame"
@@ -4222,7 +4250,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         stageEnd(rdSunVisTex_);
 
         // Local lights stage: only runs if there are lamps.
-        if (localLights) {
+        if (localLights && !ptRef) {
             stageBegin("Voxi RD local lights");
             ctx.setPipeline(rdLocalLightsCsPso_);
             ctx.setBindingSet(bindings_);
@@ -4267,7 +4295,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         if (dev_) dev_->frameMidpoint();
 
         // CSRdSkyOcc: CPU mirror of PSRayDriven's own sky-occlusion condition.
-        if (cb_.ambientParams[0] > 0.5f &&
+        if (!ptRef && cb_.ambientParams[0] > 0.5f &&
             (cb_.giRestirParams[0] > 0.5f || cb_.voxelParams[3] <= 0.5f)) {
             stageBegin("Voxi RD sky occlusion stage");
             ctx.setPipeline(rdSkyOccCsPso_);
@@ -4280,7 +4308,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         }
 
         // CSRdRefl: CPU mirror of PSRayDriven's reflection-block condition's reflections-enabled half.
-        if (cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f) {
+        if (!ptRef && cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f) {
             stageBegin("Voxi RD reflection stage");
             const rhi::PipelineHandle reflPt =
                 pt ? (reflSplit ? rdReflSplitPtCsPso_ : rdReflPtCsPso_) : rhi::PipelineHandle(0);
@@ -5080,7 +5108,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         denoiseWarnedMsaa_ = true;
     }
     // Skip AO signal when nothing reads it (under ray-driven primary visibility).
-    const bool denoiseGiSignal = giRadiance_ && giRestirWanted();
+    const bool denoiseGiSignal = giRadiance_ && giRestirWanted() && !ptReferenceWanted();
     const bool denoiseAoSignal = rtAoHitDist_ != 0 &&
                                  (!rayDrivenActive() || (lightingLegacyBits_ & 32u) != 0u);
     if (denoiser_.valid() && gbufWritten && (denoiseAoSignal || denoiseGiSignal)) {
@@ -5216,12 +5244,15 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     for (u32 v = rtPixelsPerRayTile_; v > 1; v >>= 1) ++tileBits;
     cb_.rtHistParams[3] = static_cast<f32>(tileBits);
     // Spatial filter radius; blend amount pinned at 0 (loop runs but result discarded via constant).
-    cb_.ptBounceParams[0] = static_cast<f32>(pathTracingWanted() ? ptBounces_ : 1u);
+    // x: bounces in the low four bits, bit 4 = Reference mode (voxi_pt.hlsli ptReferenceMode).
+    cb_.ptBounceParams[0] = static_cast<f32>((pathTracingWanted() ? std::clamp(ptBounces_, 1u, 8u) : 1u) |
+                                             (ptReferenceWanted() ? 16u : 0u));
     // PROGRESSIVE ACCUMULATION (Stage B, u22): y = 0 off, 1 restart, 2 keep averaging; z = frame cap.
     // Restarts whenever something that lights the whole image changes: the camera, the sun, the
-    // viewport, the lamp set or a setting. A moving object only restarts its own pixels (shader).
+    // viewport or a setting. A moving object only restarts its own pixels (shader). A lamp change
+    // (moving traffic, a flicker) only shortens the average to kPtAccumLampFrames for that frame.
     cb_.ptBounceParams[1] = 0.0f;
-    cb_.ptBounceParams[2] = static_cast<f32>(kPtAccumMaxFrames);
+    cb_.ptBounceParams[2] = static_cast<f32>(ptReferenceWanted() ? kPtAccumRefFrames : kPtAccumMaxFrames);
     if (pathTracingWanted() && ptAccumBuf_ && dev_) {
         f32 key[kPtAccumKeyFloats] = {};
         f32 eyeK[3] = {};
@@ -5233,10 +5264,10 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             key[22 + a] = skyK.sunColor[a];
         }
         for (int a = 0; a < 4; ++a) key[25 + a] = curSceneViewport_[a];
-        std::memcpy(&key[29], &rdLocalLightHash_, sizeof(rdLocalLightHash_));
         // The settings that change the lit image, field by field (a whole-struct compare would see padding).
         const f32 lit[] = {
             static_cast<f32>(settings_.pathTracing), static_cast<f32>(settings_.ptBounces),
+            static_cast<f32>(settings_.ptMode),
             static_cast<f32>(settings_.globalIllumination), static_cast<f32>(settings_.rayTracing),
             settings_.giIntensity, settings_.giMaxDistance, static_cast<f32>(settings_.rtShadowRays),
             static_cast<f32>(settings_.giMode), static_cast<f32>(settings_.giRestirMaxHistory),
@@ -5247,7 +5278,10 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         std::memcpy(&key[31], lit, sizeof(lit));
         const bool same = haveCam && ptAccumValid_ && std::memcmp(key, ptAccumKey_, sizeof(key)) == 0;
         cb_.ptBounceParams[1] = same ? 2.0f : 1.0f;
+        if (same && rdLocalLightHash_ != ptAccumLampHash_)
+            cb_.ptBounceParams[2] = static_cast<f32>(kPtAccumLampFrames);
         std::memcpy(ptAccumKey_, key, sizeof(key));
+        ptAccumLampHash_ = rdLocalLightHash_;
         ptAccumValid_ = haveCam;
     } else {
         ptAccumValid_ = false;

@@ -85,7 +85,8 @@ static bool settingsEqual(const voxi::Settings& a, const voxi::Settings& b) {
            a.rtRenderMode == b.rtRenderMode &&
            a.rayDrivenStages == b.rayDrivenStages &&
            a.fogOcclusion == b.fogOcclusion &&
-           a.ptBounces == b.ptBounces;
+           a.ptBounces == b.ptBounces &&
+           a.ptMode == b.ptMode;
 }
 
 // 4 tier keys (GI, RAYTRACING, PATHTRACING, LAYEREDBSDF) and 17 knob keys reach their Settings fields.
@@ -126,6 +127,7 @@ static void testEveryKeyReachesSettings() {
         p.msaa               = 8;
         p.meshShaders        = 1;
         p.giUpdateInterval   = 7;
+        p.ptMode             = 1;
 
         // All 17 keys stated, so N6 else-branches never fire: every landing value is the manifest's ask.
         voxi::Settings s{};
@@ -149,6 +151,7 @@ static void testEveryKeyReachesSettings() {
         check(s.msaa == voxi::Msaa::X8, "RENDER.MSAA -> Settings::msaa");
         check(s.meshShaders == true, "RENDER.MESHSHADERS -> Settings::meshShaders");
         check(s.giUpdateInterval == 7, "RENDER.GIUPDATEINTERVAL -> Settings::giUpdateInterval");
+        check(s.ptMode == 1, "RENDER.PTMODE -> Settings::ptMode");
     }
 }
 

@@ -53,6 +53,7 @@ struct ProjectDesc {
     // RENDER.FOGOCCLUSION: fog in-scatter scaled by sky visibility, so enclosed air stops glowing.
     int fogOcclusion       = -1; // RENDER.FOGOCCLUSION     0/1 (engine default 1)
     int ptBounces          = -1; // RENDER.PTBOUNCES        PATH tracing: bounces after the first hit, [1,8]
+    int ptMode             = -1; // RENDER.PTMODE           0 = ReSTIR path tracing, 1 = reference (converging)
     int layeredBsdf        = -1; // RENDER.LAYEREDBSDF      0=Off 1=Low 2=Medium 3=High 4=Epic
     int giCones            = -1; // RENDER.GICONES          diffuse gather cones, [1,16]
     // RENDER.GIMODE: 0 = voxel cone gather (default), 1 = ReSTIR GI. -1 keeps engine default.
@@ -122,7 +123,7 @@ struct ProjectDesc {
         return giQuality >= 0 || rayTracing >= 0 || pathTracing >= 0 ||
                voxelResolution > 0 || giIntensity >= 0.0f || giMaxDistance >= 0.0f ||
                rtShadowRays >= 0 || rtPixelsPerRayTile >= 0 || rtShadowDenoise >= 0 ||
-               rtRenderMode >= 0 || ptBounces >= 0 || layeredBsdf >= 0 ||
+               rtRenderMode >= 0 || ptBounces >= 0 || ptMode >= 0 || layeredBsdf >= 0 ||
                giCones >= 0 || giMode >= 0 || denoiser >= 0 || restirVisibility >= 0 ||
                restirHistory >= 0 || rdStages >= 0 || fogOcclusion >= 0 ||
                refractionMode >= 0 || refractionStrength >= 0.0f ||
