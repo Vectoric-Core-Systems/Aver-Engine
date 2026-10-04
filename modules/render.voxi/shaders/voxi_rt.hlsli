@@ -172,16 +172,7 @@ void averRtUvGrad(RtMaterial mat, RtInstance inst, float3 N,
 // Texture coordinate at ray hit: mesh UV or world-aligned planar projection.
 float2 averRtSurfaceUV(RtMaterial mat, RtInstance inst, float3 wpos, float3 N, float2 meshUV) {
     if (!(mat.flags & AVER_MAT_WORLD_UV)) return meshUV;
-    const float3 ax = normalize(inst.objectToWorld[0].xyz);
-    const float3 ay = normalize(inst.objectToWorld[1].xyz);
-    const float3 az = normalize(inst.objectToWorld[2].xyz);
-    const float3 d  = wpos - inst.objectToWorld[3].xyz;
-    const float3 op = float3(dot(d, ax), dot(d, ay), dot(d, az));
-    const float3 on = float3(dot(N, ax), dot(N, ay), dot(N, az));
-    const float3 a  = abs(on);
-    const float2 pp = (a.z >= a.x && a.z >= a.y) ? op.xy
-                    : ((a.x >= a.y) ? op.yz : op.xz);
-    return pp * mat.uvTilesPerCm;
+    return averWorldUV(inst.objectToWorld, wpos, N, mat.uvTilesPerCm);   // the prelude's one projection
 }
 
 // Tangent frame from triangle positions/UVs (ddx/ddy invalid at ray hit; RtVertex has no tangent).

@@ -250,21 +250,30 @@ struct AverMaps {
     float3 emissive;
 };
 
+// World-aligned UV (AVER_MAT_WORLD_UV): a planar projection in the object's frame, onto the plane the
+// normal faces most. THE ONE COPY: raster (averSurfaceUV, the draw's gWorld) and every ray hit
+// (voxi_rt.hlsli's averRtSurfaceUV, the hit instance's objectToWorld) call it with their own frame.
+float2 averWorldUV(float4x4 objectToWorld, float3 wpos, float3 N, float tilesPerCm) {
+    const float3 ax = normalize(objectToWorld[0].xyz);
+    const float3 ay = normalize(objectToWorld[1].xyz);
+    const float3 az = normalize(objectToWorld[2].xyz);
+    const float3 d  = wpos - objectToWorld[3].xyz;
+    const float3 op = float3(dot(d, ax), dot(d, ay), dot(d, az));   // position in the object's frame
+    const float3 a  = abs(float3(dot(N, ax), dot(N, ay), dot(N, az)));
+    const float2 p  = (a.z >= a.x && a.z >= a.y) ? op.xy : ((a.x >= a.y) ? op.yz : op.xz);
+    return p * tilesPerCm;
+}
+
+// How much of a material's second layer a point takes: 0 flat ... 1 steep, by the GEOMETRIC normal's
+// slope (a normal-mapped one would make the layer flicker with every bump). 0 without AVER_MAT_SLOPE_BLEND.
+float averSlopeLayerWeight(uint flags, float lo, float hi, float3 geoN) {
+    if (!(flags & AVER_MAT_SLOPE_BLEND)) return 0.0;
+    return 1.0 - smoothstep(lo, hi, saturate(abs(geoN.z)));
+}
+
 // The texture coordinate this surface is sampled at: the mesh's own, or a planar projection.
 float2 averSurfaceUV(AverVertex v) {
-    if (gMaterialFlags & AVER_MAT_WORLD_UV) {
-        float3 ax = normalize(gWorld[0].xyz);
-        float3 ay = normalize(gWorld[1].xyz);
-        float3 az = normalize(gWorld[2].xyz);
-        float3 d  = v.wpos - gWorld[3].xyz;
-        float3 op = float3(dot(d, ax), dot(d, ay), dot(d, az));      // position in the object's frame
-        float3 on = float3(dot(v.N, ax), dot(v.N, ay), dot(v.N, az)); // normal likewise
-
-        float3 a = abs(on);
-        float2 p = (a.z >= a.x && a.z >= a.y) ? op.xy
-                 : ((a.x >= a.y) ? op.yz : op.xz);
-        return p * gUvTilesPerCm;
-    }
+    if (gMaterialFlags & AVER_MAT_WORLD_UV) return averWorldUV(gWorld, v.wpos, v.N, gUvTilesPerCm);
     return v.uv;
 }
 
@@ -325,12 +334,8 @@ float3 averPerturbNormal(float3 N, float3 wpos, float2 uv, float3 nTS) {
 // it would make the layer choice flicker with every bump in the detail.
 AverMaps averBlendLayers(AverMaps m, float2 uv, float3 geoN) {
 #ifdef AVER_MATERIAL_SRV
-    if (!(gMaterialFlags & AVER_MAT_SLOPE_BLEND)) return m;
-
-    // World normal Z: 1 on flat ground, 0 on a vertical face. smoothstep(lo, hi, .) is 0 at the
-    // steep end, so `w` is how much of LAYER 1 to take.
-    float flat01 = saturate(abs(geoN.z));
-    float w = 1.0 - smoothstep(gSlopeBlendLo, gSlopeBlendHi, flat01);
+    // How much of LAYER 1 to take, by slope: the one weight every path uses.
+    const float w = averSlopeLayerWeight(gMaterialFlags, gSlopeBlendLo, gSlopeBlendHi, geoN);
     if (w <= 0.001) return m;
 
     float2 uv1 = uv * gL1UvScale;
@@ -574,8 +579,7 @@ AverDrawTerms averDrawTerms() {
 // How much of the second layer a point takes: 0 flat ... 1 steep, by the GEOMETRIC normal's slope
 // (a normal-mapped one would make the layer flicker with every bump). 0 without AVER_MAT_SLOPE_BLEND.
 float averLayerWeight(AverMaterialData m, float3 geoN) {
-    if (!(m.flags & AVER_MAT_SLOPE_BLEND)) return 0.0;
-    return 1.0 - smoothstep(m.slopeBlendLo, m.slopeBlendHi, saturate(abs(geoN.z)));
+    return averSlopeLayerWeight(m.flags, m.slopeBlendLo, m.slopeBlendHi, geoN);
 }
 
 // The material's factors times its (already sampled and layer-blended) maps.
