@@ -522,7 +522,7 @@ $notices = [System.Text.StringBuilder]::new()
 [void]$notices.AppendLine('')
 [void]$notices.AppendLine('This game includes the following third-party components. Aver Engine is licensed')
 [void]$notices.AppendLine('under the GNU Lesser General Public License, version 2.1 (LGPL-2.1-only); its source is')
-[void]$notices.AppendLine('at https://github.com/Vectoric-Core-Systems/Aver-Source.')
+[void]$notices.AppendLine('at https://github.com/Vectoric-Core-Systems/Aver-Engine.')
 [void]$notices.AppendLine('')
 $components = @(
     # The engine, unconditionally: every game ships its binaries, and the LGPL obliges its text to
