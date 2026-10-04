@@ -63,23 +63,12 @@ It is drawn at 4× and downsampled like the sheet, and it is likewise regenerate
 The badge hues are new on purpose — amber, teal and green against the human sheet's purple (C#) and
 blue (C++) — so an asset type is distinguishable from a source file at a glance in a mixed folder.
 
-## AI-generated — `ai-generated/`
+## Removed: the AI-generated vector concepts (2026-10-04)
 
-Written by Claude before the human artwork existed. **None is referenced by the build or by any
-code path**, so nothing here ships. Kept rather than deleted because they are the only vector
-sources — the master is raster-only, so the shipped marks above have no SVG equivalent.
-
-| File | Notes |
-|------|-------|
-| `ai-generated/logo.svg` | Superseded by the master. |
-| `ai-generated/wordmark.svg` | Superseded by the master. |
-| `ai-generated/ae-mark-isocube.svg` | The concept the master's mark descends from. |
-| `ai-generated/ae-mark-ligature.svg` | Rejected concept. |
-| `ai-generated/ae-mark-monogram.svg` | Rejected concept. |
-| `ai-generated/ae-mark-velocity.svg` | Rejected concept. |
-
-**If a vector version of the real mark is ever needed, it has to be authored from the master — do
-not promote one of these back into the shipped set.**
+Claude's SVG concepts (`logo.svg`, `wordmark.svg` and four `ae-mark-*.svg`) were written before the
+human artwork existed and were referenced by nothing. They were deleted at the owner's request; git
+history still holds them. The master is raster-only, so **a vector version of the real mark, if
+ever needed, has to be authored from the master.**
 
 ## Other AI-authored visual work, for completeness
 

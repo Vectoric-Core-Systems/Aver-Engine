@@ -166,7 +166,7 @@ tests/       formats/ scene/ framework/ physics/ ui/ render.ui/ audio/ render.ac
 third_party/ imgui/ (docking, MIT) stb/ (stb_image + stb_image_write, PD) fonts/ (Roboto)
              Jolt is vendored too, but at modules/physics.jolt/ — it is the physics BACKEND
 branding/    master-lockup.png (HUMAN, source of truth) -> splash.png, icon.ico, logo*.png
-             ai-generated/ (Claude's superseded vector concepts, shipped nowhere), ASSETS.md
+             ASSETS.md (provenance)
 docs/        ARCHITECTURE, formats/, rendering/, physics-net/, recon/, PROJECTS, EDITOR, this file
 ```
 Content lives OUTSIDE the engine: example project at
@@ -2909,8 +2909,7 @@ Shipped: `splash.png` (1200x520, startup splash, shown at native size) and `icon
 a global colour replace -- the cube's outline is near-black and close enough to the #262626 banner
 that a global replace punches holes through it.
 
-Claude's earlier vector concepts now live in `branding/ai-generated/` and are referenced by nothing.
-They are kept only because the master is raster-only, so they are the sole vector sources. See
+Claude's earlier vector concepts were referenced by nothing and were deleted on 2026-10-04. See
 `branding/ASSETS.md` for the full provenance table, including front-facing visual work that is
 AI-authored but is not a file (the editor theme, default dock layout, gizmo colours, procedural sky).
 
