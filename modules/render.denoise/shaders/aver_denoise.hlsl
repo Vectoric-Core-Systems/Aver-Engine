@@ -397,7 +397,7 @@ static const float kNrdDepthSigma = 16.0;   // relative view-Z difference that h
 // Measured 2026-10-05, NeonDistrict Night (NEURAA_NRD.md section 4): coarse-leaning beat fine-leaning on
 // brightness, spots and grain, still and moving.
 static const float kNrdLogit[4]   = {-2.0, -1.0, 0.0, 0.0};   // this pixel, 1/2, 1/4, 1/8
-static const uint  kNrdFramesMoving = 4u, kNrdFramesStill = 16u;
+static const uint  kNrdFramesMoving = 12u, kNrdFramesStill = 16u;
 
 bool nrdSpatial() { return (gDnsrFlags & 8u) != 0u; }
 bool nrdNetwork() { return (gDnsrFlags & 32u) != 0u; }
@@ -495,10 +495,26 @@ groupshared float3 gsNrdS[10 * 10];
 #define NRD_IN 16
 #define NRD_H 16
 static const float kNrdDeltaMax = 6.0;
-groupshared float gsNrdA[64][11];   // per-pixel terms for the reductions
+groupshared float gsNrdA[64][11];   // per-pixel terms, reduced in place
 groupshared float gsNrdS1[11];      // pass one totals: count, L0..L3, log(hz), conf1..3, contact, push
-groupshared float gsNrdS2[9];       // pass two totals: var, tail4, tail16, var(log hz), zmin, zmax, normal
-groupshared float4 gsNrdDelta;
+groupshared float gsNrdF[NRD_IN];   // the standardised features
+groupshared float gsNrdH1[NRD_H], gsNrdH2[NRD_H];
+groupshared float gsNrdOut[4];
+
+// Tree reduction of gsNrdA's first `nq` columns into row 0 (sums; columns minCol/maxCol take min/max).
+void nrdReduce(uint gi, uint nq, uint minCol, uint maxCol) {
+    [unroll] for (uint stride = 32u; stride > 0u; stride >>= 1) {
+        GroupMemoryBarrierWithGroupSync();
+        if (gi < stride) {
+            [unroll] for (uint q = 0; q < 11u; ++q) {
+                if (q >= nq) break;
+                const float o = gsNrdA[gi + stride][q];
+                gsNrdA[gi][q] = q == minCol ? min(gsNrdA[gi][q], o) : q == maxCol ? max(gsNrdA[gi][q], o) : gsNrdA[gi][q] + o;
+            }
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+}
 
 float4 nrdTileDelta(uint gi, NrdPixel px) {
     const float m = px.surf ? 1.0 : 0.0;
@@ -508,16 +524,13 @@ float4 nrdTileDelta(uint gi, NrdPixel px) {
     gsNrdA[gi][5] = lhz * m;
     gsNrdA[gi][6] = px.conf[0] * m; gsNrdA[gi][7] = px.conf[1] * m; gsNrdA[gi][8] = px.conf[2] * m;
     gsNrdA[gi][9] = px.contact * m; gsNrdA[gi][10] = px.push * m;
-    GroupMemoryBarrierWithGroupSync();
-    if (gi == 0u) {
-        [unroll] for (uint q = 0; q < 11u; ++q) gsNrdS1[q] = 0.0;
-        for (uint t = 0; t < 64u; ++t) [unroll] for (uint q2 = 0; q2 < 11u; ++q2) gsNrdS1[q2] += gsNrdA[t][q2];
-    }
+    nrdReduce(gi, 11u, 99u, 99u);
+    if (gi < 11u) gsNrdS1[gi] = gsNrdA[0][gi];
     GroupMemoryBarrierWithGroupSync();
     const float cnt = max(gsNrdS1[0], 1.0);
     const float m0 = gsNrdS1[1] / cnt, mh = gsNrdS1[5] / cnt;
     const float L0 = px.lum[0];
-    // Pass two: what needs the tile means first.
+    // Pass two: what needs the tile means first. Columns: var, tail4, tail16, var(log hz), zmin, zmax, normal.
     gsNrdA[gi][0] = (L0 - m0) * (L0 - m0) * m;
     gsNrdA[gi][1] = (L0 > 4.0 * m0) ? L0 * m : 0.0;
     gsNrdA[gi][2] = (L0 > 16.0 * m0) ? L0 * m : 0.0;
@@ -525,58 +538,51 @@ float4 nrdTileDelta(uint gi, NrdPixel px) {
     gsNrdA[gi][4] = px.surf ? px.z : 1.0e30;
     gsNrdA[gi][5] = px.surf ? px.z : 0.0;
     gsNrdA[gi][6] = px.n.x * m; gsNrdA[gi][7] = px.n.y * m; gsNrdA[gi][8] = px.n.z * m;
-    GroupMemoryBarrierWithGroupSync();
-    if (gi == 0u) {
-        [unroll] for (uint q = 0; q < 9u; ++q) gsNrdS2[q] = 0.0;
-        gsNrdS2[4] = 1.0e30;
-        for (uint t = 0; t < 64u; ++t) {
-            [unroll] for (uint q2 = 0; q2 < 4u; ++q2) gsNrdS2[q2] += gsNrdA[t][q2];
-            gsNrdS2[4] = min(gsNrdS2[4], gsNrdA[t][4]);
-            gsNrdS2[5] = max(gsNrdS2[5], gsNrdA[t][5]);
-            [unroll] for (uint q3 = 6; q3 < 9u; ++q3) gsNrdS2[q3] += gsNrdA[t][q3];
-        }
+    nrdReduce(gi, 9u, 4u, 5u);
+    if (gi < NRD_IN) {
         const float tot = gsNrdS1[1] + 1.0e-12;
         const float mean1 = gsNrdS1[2] / cnt, mean2 = gsNrdS1[3] / cnt, mean3 = gsNrdS1[4] / cnt;
         const float eps = 1.0e-4 * (m0 + mean3) + 1.0e-12;
-        float f[NRD_IN];
-        f[0] = log((mean1 + eps) / (m0 + eps));
-        f[1] = log((mean2 + eps) / (m0 + eps));
-        f[2] = log((mean3 + eps) / (m0 + eps));
-        f[3] = log(gsNrdS2[0] / cnt / (m0 * m0 + eps * eps) + 1.0e-4);
-        f[4] = gsNrdS2[1] / tot;
-        f[5] = gsNrdS2[2] / tot;
-        f[6] = mh;
-        f[7] = sqrt(gsNrdS2[3] / cnt);
-        const float zlo = gsNrdS2[4], zhi = gsNrdS2[5];
-        f[8] = (zlo < 1.0e29 && zhi > 0.0) ? log(max(zhi, 1.0e-3) / max(zlo, 1.0e-3)) : 0.0;
-        f[9] = 1.0 - length(float3(gsNrdS2[6], gsNrdS2[7], gsNrdS2[8]) / cnt);
-        f[10] = gsNrdS1[0] / 64.0;
-        f[11] = gsNrdS1[6] / cnt; f[12] = gsNrdS1[7] / cnt; f[13] = gsNrdS1[8] / cnt;
-        f[14] = gsNrdS1[9] / cnt; f[15] = gsNrdS1[10] / cnt;
-        [unroll] for (uint n = 0; n < NRD_IN; ++n) f[n] = (f[n] - gNrdNet[n]) / gNrdNet[NRD_IN + n];
-        float h1[NRD_H], h2[NRD_H];
-        const uint w1 = 2 * NRD_IN, b1 = w1 + NRD_H * NRD_IN, w2 = b1 + NRD_H, b2 = w2 + NRD_H * NRD_H;
-        const uint w3 = b2 + NRD_H, b3 = w3 + 4 * NRD_H;
-        for (uint a = 0; a < NRD_H; ++a) {
-            float v = gNrdNet[b1 + a];
-            for (uint n2 = 0; n2 < NRD_IN; ++n2) v += gNrdNet[w1 + a * NRD_IN + n2] * f[n2];
-            h1[a] = max(v, 0.0);
+        const float zlo = gsNrdA[0][4], zhi = gsNrdA[0][5];
+        float f;
+        switch (gi) {
+        case 0u:  f = log((mean1 + eps) / (m0 + eps)); break;
+        case 1u:  f = log((mean2 + eps) / (m0 + eps)); break;
+        case 2u:  f = log((mean3 + eps) / (m0 + eps)); break;
+        case 3u:  f = log(gsNrdA[0][0] / cnt / (m0 * m0 + eps * eps) + 1.0e-4); break;
+        case 4u:  f = gsNrdA[0][1] / tot; break;
+        case 5u:  f = gsNrdA[0][2] / tot; break;
+        case 6u:  f = mh; break;
+        case 7u:  f = sqrt(gsNrdA[0][3] / cnt); break;
+        case 8u:  f = (zlo < 1.0e29 && zhi > 0.0) ? log(max(zhi, 1.0e-3) / max(zlo, 1.0e-3)) : 0.0; break;
+        case 9u:  f = 1.0 - length(float3(gsNrdA[0][6], gsNrdA[0][7], gsNrdA[0][8]) / cnt); break;
+        case 10u: f = gsNrdS1[0] / 64.0; break;
+        default:  f = gsNrdS1[gi - 5u] / cnt; break;   // 11..15: conf1..3, contact, push
         }
-        for (uint a2 = 0; a2 < NRD_H; ++a2) {
-            float v = gNrdNet[b2 + a2];
-            for (uint n3 = 0; n3 < NRD_H; ++n3) v += gNrdNet[w2 + a2 * NRD_H + n3] * h1[n3];
-            h2[a2] = max(v, 0.0);
-        }
-        float4 outD = 0.0;
-        [unroll] for (uint o = 0; o < 4u; ++o) {
-            float v = gNrdNet[b3 + o];
-            for (uint n4 = 0; n4 < NRD_H; ++n4) v += gNrdNet[w3 + o * NRD_H + n4] * h2[n4];
-            outD[o] = kNrdDeltaMax * tanh(v);
-        }
-        gsNrdDelta = gsNrdS1[0] < 1.0 ? 0.0 : outD;   // no surface in this tile: nothing to correct
+        gsNrdF[gi] = (f - gNrdNet[gi]) / gNrdNet[NRD_IN + gi];
     }
     GroupMemoryBarrierWithGroupSync();
-    return gsNrdDelta;
+    const uint w1 = 2 * NRD_IN, b1 = w1 + NRD_H * NRD_IN, w2 = b1 + NRD_H, b2 = w2 + NRD_H * NRD_H;
+    const uint w3 = b2 + NRD_H, b3 = w3 + 4 * NRD_H;
+    if (gi < NRD_H) {
+        float v = gNrdNet[b1 + gi];
+        [unroll] for (uint n = 0; n < NRD_IN; ++n) v += gNrdNet[w1 + gi * NRD_IN + n] * gsNrdF[n];
+        gsNrdH1[gi] = max(v, 0.0);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (gi < NRD_H) {
+        float v = gNrdNet[b2 + gi];
+        [unroll] for (uint n = 0; n < NRD_H; ++n) v += gNrdNet[w2 + gi * NRD_H + n] * gsNrdH1[n];
+        gsNrdH2[gi] = max(v, 0.0);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (gi < 4u) {
+        float v = gNrdNet[b3 + gi];
+        [unroll] for (uint n = 0; n < NRD_H; ++n) v += gNrdNet[w3 + gi * NRD_H + n] * gsNrdH2[n];
+        gsNrdOut[gi] = gsNrdS1[0] < 1.0 ? 0.0 : kNrdDeltaMax * tanh(v);   // no surface: nothing to correct
+    }
+    GroupMemoryBarrierWithGroupSync();
+    return float4(gsNrdOut[0], gsNrdOut[1], gsNrdOut[2], gsNrdOut[3]);
 }
 
 void nrdResolve(int2 dtid, int2 gtid) {
@@ -603,6 +609,17 @@ void nrdResolve(int2 dtid, int2 gtid) {
             const float3 v = gsNrdS[int(c) + y * 10 + x];
             lo = min(lo, v); hi = max(hi, v);
         }
+    // The box also spans the 1/8 level's 3x3: a blob inside S's 3x3 would otherwise hold history to itself.
+    {
+        uint lw, lh;
+        gNrdLevel3.GetDimensions(lw, lh);
+        const int2 q = dtid >> 3;
+        [unroll] for (int wy = -1; wy <= 1; ++wy)
+            [unroll] for (int wx = -1; wx <= 1; ++wx) {
+                const float4 t = gNrdLevel3.Load(int3(clamp(q + int2(wx, wy), int2(0, 0), int2(lw, lh) - 1), 0));
+                if (t.w > 0.0) { lo = min(lo, t.rgb * dnsrScale()); hi = max(hi, t.rgb * dnsrScale()); }
+            }
+    }
     const float3 hist = clamp(DNSR_LOAD3(gDnsrReprojected.Load(int3(dtid, 0))), lo, hi);
     const float  n = gDnsrSampleCount.Load(int3(dtid, 0));
     const bool   moving = dot(gDnsrMotion.Load(int3(dtid, 0)), gDnsrMotion.Load(int3(dtid, 0))) > 0.0025;

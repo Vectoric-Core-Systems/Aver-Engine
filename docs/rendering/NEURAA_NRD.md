@@ -280,9 +280,10 @@ and prefilter see no difference, and switching per tile or toggling the setting 
    non-negative and sum to 1, so S keeps the local energy: a firefly is spread over its neighbourhood
    instead of being deleted, which is what keeps brightness right.
 4. **Short stabiliser (hand-written, no network).** `out = lerp(S, clamp(H), a)`: `H` is reproject's
-   history at this pixel, clamped to the 3x3 min/max of S (Karis 2014, not a mean +- sigma box);
-   `a = 1 - 1/min(n, N)` with `n` reproject's sample count and `N` = 4 frames while the camera or the
-   surface moves, 16 at rest. History only steadies the residual flicker; it never decides brightness.
+   history at this pixel, clamped to the min/max of S's 3x3 and the 1/8 level's 3x3 texels (Karis 2014,
+   not a mean +- sigma box); `a = 1 - 1/min(n, N)` with `n` reproject's sample count and `N` = 12 frames
+   while the camera or the surface moves, 16 at rest. The 1/8 level's texels widen the box because a
+   coarse-level blob covers all of S's 3x3, and a box of S alone held history up to the blob. History only steadies the residual flicker; it never decides brightness.
    `varHistory` is updated with FidelityFX's formula so its prefilter keeps the same input.
 5. **Fallback.** With no weights for a signal, the whole pass runs FidelityFX's own resolve. With
    weights, a tile whose gate confidence is low runs FidelityFX's resolve for that 8x8 group: the same
@@ -310,8 +311,32 @@ against the reference path tracer (`voxi.ptMode 1`) at a still camera; spots and
 - **Not solved: blotches in motion.** At a still camera NRD is visibly cleaner. Moving, it trades fine
   speckle for soft coloured blotches: the coarse levels leave low-frequency noise and history cannot
   average it, because the sample count keeps resetting (a 4, 8 or 16-frame cap measured the same).
-  That is what the per-tile network has to decide (where to lean coarse), and the developer flag stays
-  off by default until it does.
+  The network did not fix it; the widened history clamp did (below).
+
+### Network v1 (2026-10-05)
+
+Trained on 20 NeonDistrict Day/Night poses, judged on 6 held-out Night poses at another wander speed
+(`tools/nrd/nrd_train.py`): relative L2 against the converged input 1.10 fixed, **0.77 network**, 0.71
+oracle; energy 1.003. Loading `bin/data/nrd_v1.bin` turns NRD's resolve on under Neural Denoise.
+
+Night, still, total image against the reference path tracer: FidelityFX 0.943, NRD fixed 0.973, NRD
+network 0.981 (the input reaches ~0.985). Moving (`--cam-wander 1.5 2.3`, frame 400), GI only, blotch =
+band-pass energy between 9 and 33-pixel boxes over the GI mean (`blotch.py`):
+
+| resolve | GI mean | blotch | blob pixels | spots | Denoise GPU |
+|---|---|---|---|---|---|
+| FidelityFX | 0.00114 | 0.269 | 0.96% | 2.62 | 1.22 ms |
+| NRD network, 3x3-of-S clamp, N 4 | 0.00170 | 0.327 | 1.38% | 1.94 | 2.90 ms |
+| NRD network, widened clamp, N 12 | 0.00172 | **0.260** | 1.04% | 1.80 | **1.49 ms** |
+
+- The owner saw more bright blotches moving with the first network build: coarse-level blobs held by
+  the 3x3-of-S clamp. A longer history alone did nothing (0.320); the widened box is the fix.
+- The first build ran the reductions and the network on one thread per tile (2.90 ms). It is now an LDS
+  tree reduction and one hidden unit per thread (1.49 ms, +0.27 ms over FidelityFX). Staging the
+  weights in LDS with wave reductions measured the same; computing each candidate once was slower
+  (more LDS).
+- The rest of that frame is ~45 ms GPU at 3532x1987 x 0.5 with or without NRD (lighting stages 20 ms,
+  voxelise 9 ms under the moving camera).
 
 ### Hit distance
 
@@ -354,9 +379,9 @@ Pre-trained offline; weights ship in `bin/data` like NeuraFI's, the same for eve
 Scenes: NeonDistrict Day and Night, NewSponza and NewSponza_Night, captured on scripted camera paths in
 a visible window; camera paths are split between training and evaluation.
 
-### Cost (estimate, render scale 0.5, RX 7800 XT, per RGB signal)
+### Cost (render scale 0.5, RX 7800 XT, per RGB signal)
 
-Pyramid + tile records ~0.1 ms, inference ~0.05 ms, resolve ~0.15 ms: ~0.3 ms, against a budget of
+Measured +0.27 ms over FidelityFX's resolve for the GI signal (network v1, above), against a budget of
 **+1 ms** over FidelityFX's resolve for everything NRD runs. Within that budget the cheapest setting
 that meets the quality bar wins: two pyramid levels before three; 8x8 tiles before 4x4.
 
