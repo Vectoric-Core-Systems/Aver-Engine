@@ -15,7 +15,7 @@ A contribution will be governed by the rules in this document
 
 3. Once a contribution is given, you are giving an irrevocable, worldwide , royalty-free , fully paid up license to use it worldwide in this repository under the GNU Lesser General Public License
 
-4. Make sure any code that you use that is not original from you is attributed (by either linking the original repo or file it was from, name it as ATTRIBUTION_<name of file in the original repo>relicensable under the GNU Lesser General Public License (so code under GNU Affero General Public License or GNU General Public License in this case will not be accepted)
+4. Make sure any code that you use that is not original from you is attributed (by either linking the original repo or file it was from, name it as 'ATTRIBUTION_<name_of_file_in_the_original_repo>'relicensable under the GNU Lesser General Public License (so code under GNU Affero General Public License or GNU General Public License in this case will not be accepted)
 
 5. Contributiors must have a valid license of Aver under the GNU Lesser General Public License or another license if not given from this original source of the engine (Please state where, we have to verify and prevent violations of the license)
 
