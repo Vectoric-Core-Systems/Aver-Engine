@@ -363,16 +363,10 @@ void MaterialSystem::update() {
     const auto t0 = std::chrono::steady_clock::now();
     MaterialLibrary& lib = MaterialLibrary::get();
 
-    // W10 / DO-NOT-DO #21: tableScratch_/indexOfScratch_ are the SECOND, PERSISTENT container of the
-    // alternating pair -- built fresh into here every call, then swapped with gpuIndexOf_/gpuTable_
-    // below, never compared against or filled into the SAME object twice in a row. See the header's
-    // comment on tableScratch_/indexOfScratch_ for the bug a single reused container produces.
-    tableScratch_.clear();
     const u32 n = lib.count();
-    tableScratch_.reserve(n + 1u);
-    tableScratch_.push_back(fallbackConstants_);   // row 0, always -- see gpuMaterialTable()'s own comment
-    indexOfScratch_.clear();
-    indexOfScratch_.reserve(n);
+    // False means the live table already holds exactly what a rebuild would produce, so the rebuild
+    // and swap below are skipped and the previous generation stays in place.
+    bool tableChanged = gpuTable_.size() != n + 1u || gpuIndexOf_.size() != n;
 
     // M2(b): a burst of Entry builds may have gone quiet between the previous update() call and this
     // one -- a project's materials finished streaming in, or a run of first-draw builds stopped. This
@@ -396,13 +390,14 @@ void MaterialSystem::update() {
     inUpdate_ = true;
     for (u32 i = 0; i < n; ++i) {
         const MaterialHandle h = lib.at(i);
-        if (!h) continue;
+        if (!h) { tableChanged = true; continue; }
         const bool dirty = lib.consumeDirty(h);
         auto it = entries_.find(h);
         if (it == entries_.end()) {
             entryFor(h);                     // freshly built, already current
-            it = entries_.find(h);
+            tableChanged = true;
         } else if (dirty) {
+            tableChanged = true;
             const MaterialDesc* d = lib.desc(h);
             if (d) {
                 it->second.constants = packMaterial(*d);
@@ -412,10 +407,30 @@ void MaterialSystem::update() {
                 if (it->second.set) writeSlots(*d, it->second.set, true);
             }
         }
-        indexOfScratch_.emplace(h, static_cast<u32>(tableScratch_.size()));
-        tableScratch_.push_back(it->second.constants);
+        if (!tableChanged) {
+            const auto row = gpuIndexOf_.find(h);
+            if (row == gpuIndexOf_.end() || row->second != i + 1u) tableChanged = true;
+        }
     }
     inUpdate_ = false;
+
+    // W10 / DO-NOT-DO #21: tableScratch_/indexOfScratch_ are the SECOND, PERSISTENT container of the
+    // alternating pair -- built fresh into here, then swapped with gpuIndexOf_/gpuTable_ below, never
+    // compared against or filled into the SAME object twice in a row. See the header's comment on
+    // tableScratch_/indexOfScratch_ for the bug a single reused container produces.
+    if (tableChanged) {
+        tableScratch_.clear();
+        tableScratch_.reserve(n + 1u);
+        tableScratch_.push_back(fallbackConstants_);   // row 0, always -- see gpuMaterialTable()'s own comment
+        indexOfScratch_.clear();
+        indexOfScratch_.reserve(n);
+        for (u32 i = 0; i < n; ++i) {
+            const MaterialHandle h = lib.at(i);
+            if (!h) continue;
+            indexOfScratch_.emplace(h, static_cast<u32>(tableScratch_.size()));
+            tableScratch_.push_back(entries_.find(h)->second.constants);
+        }
+    }
 
     // Destruction is deferred by RHI contract, so retiring mid-frame is safe.
     //
@@ -460,9 +475,11 @@ void MaterialSystem::update() {
     // container compared against itself is always equal to itself, gpuRevision_ would stop
     // advancing, and every material created after the first update() call would never reach
     // gpuIndexOf_/gpuTable_ at all (DO-NOT-DO #21).
-    if (indexOfScratch_ != gpuIndexOf_) ++gpuRevision_;
-    gpuIndexOf_.swap(indexOfScratch_);
-    gpuTable_.swap(tableScratch_);
+    if (tableChanged) {
+        if (indexOfScratch_ != gpuIndexOf_) ++gpuRevision_;
+        gpuIndexOf_.swap(indexOfScratch_);
+        gpuTable_.swap(tableScratch_);
+    }
 
     buildsPendingAtLastUpdateEnd_ = buildsPending_;
 

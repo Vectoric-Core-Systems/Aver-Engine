@@ -243,6 +243,13 @@ private:
     // True from airVisTex_ creation until CSAirVis has written it once (avoids garbage at t17).
     bool airVisDirty_ = false;
     u32 airVisSlab_ = 0;
+    // Bumped whenever the radiance volume's contents or placement may have changed.
+    u64 voxelGen_ = 0;
+    // Generation the current slab cycle runs against, and the slabs it still has to rewrite.
+    u64 airVisGen_ = 0;
+    u32 airVisLeft_ = 0;
+    // Volume origin/scale and resolution CSAirVis last ran with.
+    f32 airVisInputs_[5] = {};
     // Rising edge marks volume dirty (geometry may have changed while unrefreshed).
     bool airVisWasActive_ = false;
     // t0 volume, t1 shadow, t2 TLAS, u0 volume mip 0, u1 accumulator.
@@ -314,11 +321,14 @@ private:
     // Draw-list half as last computed; reused until next build.
     mutable u64  rtAccelListKey_ = 0;
     mutable bool rtAccelListKeyValid_ = false;
-    // Mesh filter for rtAccelMustForceRebuild(): direct-mapped, zeroed per call. 16384 slots hold ~3000 meshes.
+    // Mesh filter for rtAccelMustForceRebuild(): direct-mapped, a slot is live only for the call that stamped it.
+    // 16384 slots hold ~3000 meshes.
     static constexpr u32 kRtAccelMeshCheckSlots = 16384;
     static_assert((kRtAccelMeshCheckSlots & (kRtAccelMeshCheckSlots - 1)) == 0,
                   "kRtAccelMeshCheckSlots must be a power of two for the '& (kRtAccelMeshCheckSlots - 1)' mask");
-    mutable std::vector<rhi::MeshHandle> rtAccelMeshChecked_;
+    struct MeshCheckSlot { rhi::MeshHandle mesh = 0; u32 stamp = 0; };
+    mutable std::vector<MeshCheckSlot> rtAccelMeshChecked_;
+    mutable u32 rtAccelMeshStamp_ = 0;
     bool rtAccelSnapValid_ = false;
     u64  rtAccelSkipped_ = 0, rtAccelRebuilt_ = 0, rtAccelRefitOnly_ = 0, rtAccelMoverPatched_ = 0;
     mutable u32 rtAccelGateWhyMask_ = 0;
@@ -675,12 +685,27 @@ private:
                   "kDrawMaterialMemoSlots must be a power of two for the '& (kDrawMaterialMemoSlots - 1)' mask");
     using DrawMaterialMemo = std::array<DrawMaterialMemoSlot, kDrawMaterialMemoSlots>;
 
-    // One draw's material identity folded into running hash h.
-    // skipEmissive: hash the constants with emissiveFactor zeroed (mover lane only).
-    void hashDrawMaterialInto(u64& h, const Draw& d, DrawMaterialMemo& memo, bool skipEmissive = false) const;
+    // Lane states of a drawsPrev_ entry's world and material byte hashes: pure functions of the draw, so
+    // rtAccelDrawsKey and the GI keys share them for one list. Valid for the entry's token only.
+    struct DrawLanes {
+        static constexpr u8 kWorld = 1, kMat = 2;
+        u64 world[4];
+        u64 mat[4];
+        u64 token = 0;
+        u8  have = 0;
+    };
+    mutable std::vector<DrawLanes> drawLanes_;
+    u64 drawLanesToken_ = 1;
+    DrawLanes* drawLanes(usize i) const;
+    void hashWorldInto(u64& h, const Draw& d, DrawLanes* lanes) const;
+
+    // One draw's material identity folded into running hash h; `lanes` (optional) caches its byte hash.
+    // skipEmissive: hash the constants with emissiveFactor zeroed (mover lane only; never cached).
+    void hashDrawMaterialInto(u64& h, const Draw& d, DrawMaterialMemo& memo, bool skipEmissive = false,
+                              DrawLanes* lanes = nullptr) const;
 
     // One draw's rtAccelDrawsKey() term; with moverLane a movable draw's term omits world matrix.
-    u64 rtDrawHash(const Draw& d, DrawMaterialMemo& memo, bool moverLane) const;
+    u64 rtDrawHash(const Draw& d, DrawMaterialMemo& memo, bool moverLane, DrawLanes* lanes = nullptr) const;
 
     std::vector<Draw> draws_, drawsPrev_;
     // Pairs movers against list (drawsPrev_ in prePass; this frame's draws_ in the late scene pass)

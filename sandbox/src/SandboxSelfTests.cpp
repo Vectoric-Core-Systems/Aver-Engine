@@ -2288,6 +2288,8 @@ void SandboxApp::rayProbeCheck(Engine& e) {
 
 void SandboxApp::gpuTimingCheck(Engine& e) {
     if (!gpuTiming_ || maxFrames_ == 0 || gpuTimingDone_) return;
+    // Averages the second half of the run only, so load-time builds do not dilute steady state.
+    if (maxFrames_ > 64 && e.time().frame == maxFrames_ / 2 && e.device()) e.device()->resetGpuTiming();
     const u64 want = maxFrames_ > 8 ? maxFrames_ - 2 : maxFrames_ - 1;
     if (e.time().frame < want) return;
     gpuTimingDone_ = true;

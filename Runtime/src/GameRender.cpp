@@ -51,6 +51,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <unordered_set>
 #include <vector>
 
@@ -170,6 +171,20 @@ struct DrawLookMemoSlot {
     DrawLook look;
 };
 
+// One entity's world box, valid while its handle (index + generation, never reused), world-matrix
+// revision and local box bits all match. Unlike the tables above it persists across calls.
+struct WorldBoxEntry {
+    scene::Entity ent = scene::kInvalidEntity;
+    u32 rev = 0;
+    f32 lo[3] = {};
+    f32 hi[3] = {};
+    Vec3 wlo{};
+    Vec3 whi{};
+};
+
+// Entities past this index are walked uncached.
+constexpr u32 kMaxWorldBoxEntries = 1u << 22;
+
 // The tables drawWorld reuses from one call to the next, so a walk starts with a bumped counter
 // instead of a zeroed table (the mesh table alone is several hundred KB; zeroing it twice a frame,
 // depth prepass then colour, for a change that saves work per ENTITY would eat part of the win).
@@ -177,6 +192,7 @@ struct DrawLookMemoSlot {
 struct WalkCacheStore {
     std::vector<MeshLookupCacheSlot> meshSlots;
     std::vector<DrawLookMemoSlot> looks;
+    std::vector<WorldBoxEntry> worldBoxes;   // indexed by entity index
     u32 generation = 0;
     // Held for the duration of one drawWorld() call. See WalkCacheLease.
     std::atomic<bool> busy{false};
@@ -288,6 +304,18 @@ public:
             at = (at + 1) & (kDrawLookMemoSlots - 1);
         }
         return nullptr;
+    }
+    // The entity's world-box entry, or null when uncached (no lease, cache off, index too high).
+    WorldBoxEntry* worldBox(scene::Entity e) {
+        if (!store_ || !meshCache_) return nullptr;
+        const u32 idx = scene::entityIndex(e);
+        if (idx >= kMaxWorldBoxEntries) return nullptr;
+        std::vector<WorldBoxEntry>& v = store_->worldBoxes;
+        if (idx >= v.size()) {
+            const usize grown = v.size() + v.size() / 2 + 1024;
+            v.resize(grown > idx + 1 ? grown : idx + 1);
+        }
+        return &v[idx];
     }
     // Stamped only once the look exists, so a slot is never live while holding a half-built answer.
     void commitLook(DrawLookMemoSlot& slot, i32 material, const DrawLook& look) {
@@ -732,12 +760,31 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             const Vec3 lo{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
             const Vec3 hi{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
             if (hi.x > lo.x && hi.y > lo.y && hi.z > lo.z) {
-                for (u32 c = 0; c < 8; ++c) {
-                    const Vec3 p{(c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z};
-                    const Vec3 t = xformPoint(wm, p);
-                    wlo.x = std::fmin(wlo.x, t.x); whi.x = std::fmax(whi.x, t.x);
-                    wlo.y = std::fmin(wlo.y, t.y); whi.y = std::fmax(whi.y, t.y);
-                    wlo.z = std::fmin(wlo.z, t.z); whi.z = std::fmax(whi.z, t.z);
+                // Reuse the last build while neither the world matrix (revision) nor the local box
+                // bits have changed.
+                const u32 rev = w.worldRevision(ent);
+                WorldBoxEntry* const box = cacheLease.worldBox(ent);
+                if (box && box->ent == ent && box->rev == rev &&
+                    std::memcmp(box->lo, mr->aabbMin, sizeof box->lo) == 0 &&
+                    std::memcmp(box->hi, mr->aabbMax, sizeof box->hi) == 0) {
+                    wlo = box->wlo;
+                    whi = box->whi;
+                } else {
+                    for (u32 c = 0; c < 8; ++c) {
+                        const Vec3 p{(c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y, (c & 4) ? hi.z : lo.z};
+                        const Vec3 t = xformPoint(wm, p);
+                        wlo.x = std::fmin(wlo.x, t.x); whi.x = std::fmax(whi.x, t.x);
+                        wlo.y = std::fmin(wlo.y, t.y); whi.y = std::fmax(whi.y, t.y);
+                        wlo.z = std::fmin(wlo.z, t.z); whi.z = std::fmax(whi.z, t.z);
+                    }
+                    if (box) {
+                        box->ent = ent;
+                        box->rev = rev;
+                        std::memcpy(box->lo, mr->aabbMin, sizeof box->lo);
+                        std::memcpy(box->hi, mr->aabbMax, sizeof box->hi);
+                        box->wlo = wlo;
+                        box->whi = whi;
+                    }
                 }
                 haveWorldBox = true;
                 bool outside = false;

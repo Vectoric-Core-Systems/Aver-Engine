@@ -18,6 +18,7 @@ namespace aver::render::preview {
 namespace {
 
 constexpr f32 kPi = 3.14159265358979f;
+constexpr f32 kBackdropFloor[4] = {0.10f, 0.10f, 0.11f, 1.0f};
 f32 rad(f32 deg) { return deg * kPi / 180.0f; }
 f32 clampf(f32 v, f32 lo, f32 hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -229,6 +230,7 @@ bool ActorPreview::createTargets(u32 width, u32 height) {
     cd.bind = rhi::ResourceBind::RenderTarget | rhi::ResourceBind::ShaderResource;
     cd.initialState = rhi::ResourceState::ShaderResource;
     cd.hasClearValue = true;
+    std::memcpy(cd.clearColor, kBackdropFloor, sizeof cd.clearColor);
     cd.debugName = "ActorPreview.Color";
     color_ = res_->createTexture(cd);
 
@@ -610,7 +612,6 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     // THE COLOUR TARGET MUST BE CLEARED, or whatever the meshes do not cover keeps earlier frames'
     // pixels. The backdrop pass paints over this; the clear is its fallback, the gradient's floor
     // colour in display values.
-    const f32 kBackdropFloor[4] = {0.10f, 0.10f, 0.11f, 1.0f};
     ctx.clearColor(color_, kBackdropFloor);
 
     if (backdropPipeline_) {

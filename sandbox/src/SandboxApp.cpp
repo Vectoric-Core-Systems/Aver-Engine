@@ -9,6 +9,15 @@
 #include "aver/platform/FileSystem.hpp"   // userDataDir: where the trajectory network's weights live
 
 namespace aver {
+// Rows ImGui draws `t` as: one per newline, plus a last partial row when it has text.
+static u32 logTextRows(std::string_view t) {
+    u32 n = static_cast<u32>(std::count(t.begin(), t.end(), '\n'));
+    const usize nl = t.find_last_of('\n');
+    const std::string_view tail = nl == std::string_view::npos ? t : t.substr(nl + 1);
+    if (tail.find_first_not_of('\r') != std::string_view::npos) ++n;
+    return n ? n : 1u;
+}
+
 SandboxApp::SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::string shot, Tool initialTool)
     : maxFrames_(maxFrames), headless_(headless), beamPath_(std::move(beamPath)), shot_(std::move(shot)), initialTool_(initialTool) {
     setLogSink(&SandboxApp::logSink, this);
@@ -44,8 +53,13 @@ SandboxApp::SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::
  void SandboxApp::logSink(void* ctx, LogLevel level, std::string_view msg) {
     auto* self = static_cast<SandboxApp*>(ctx);
     std::lock_guard<std::mutex> lock(self->logMutex_);
-    self->logLines_.push_back({level, std::string(msg)});
-    if (self->logLines_.size() > kMaxLogLines) self->logLines_.pop_front();
+    const u32 rows = logTextRows(msg);
+    self->logLines_.push_back({level, std::string(msg), rows});
+    if (rows > 1) ++self->logMultiRowCount_;
+    if (self->logLines_.size() > kMaxLogLines) {
+        if (self->logLines_.front().rows > 1) --self->logMultiRowCount_;
+        self->logLines_.pop_front();
+    }
 
     // Forwards Info+ lines to loading screen (main thread only; Jolt job pool may log too).
     // MUST NOT LOG: core log mutex is held and non-recursive.

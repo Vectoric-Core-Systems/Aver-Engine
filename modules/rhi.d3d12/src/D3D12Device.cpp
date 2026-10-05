@@ -5145,6 +5145,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
             // Restore post chain's descriptor heap and root signature.
             ID3D12DescriptorHeap* heaps[] = {postSrvHeap_.Get()};
             cmdList_->SetDescriptorHeaps(1, heaps);
+            boundHeap_ = postSrvHeap_.Get();
             cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
             dbValid_ = false;
             srUpscaled = true;

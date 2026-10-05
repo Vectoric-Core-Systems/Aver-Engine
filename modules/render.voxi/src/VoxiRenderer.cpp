@@ -450,6 +450,7 @@ void VoxiRenderer::shutdown() {
     if (airVisPlaceholder_) res_->destroyTexture(airVisPlaceholder_);
     airVisTex_ = airVisPlaceholder_ = 0;
     airVisDirty_ = false;
+    ++voxelGen_;
     if (voxelTex_)  res_->destroyTexture(voxelTex_);
     if (shadowTex_) res_->destroyTexture(shadowTex_);
     if (giShadowTex_) res_->destroyTexture(giShadowTex_);
@@ -930,11 +931,13 @@ inline u64 hashLaneStep(u64 lane, u64 word) {
     return lane;
 }
 
-// Hash bytes word-at-a-time with four independent lanes.
-void hashBytesInto(u64& h, const void* p, usize bytes) {
+// Lane state of hashBytesInto: a function of the bytes alone.
+void hashBytesLanes(u64 (&lane)[4], const void* p, usize bytes) {
     const u8* b = static_cast<const u8*>(p);
-    u64 lane[4] = {0x243F6A8885A308D3ull ^ static_cast<u64>(bytes), 0x13198A2E03707344ull,
-                   0xA4093822299F31D0ull, 0x082EFA98EC4E6C89ull};
+    lane[0] = 0x243F6A8885A308D3ull ^ static_cast<u64>(bytes);
+    lane[1] = 0x13198A2E03707344ull;
+    lane[2] = 0xA4093822299F31D0ull;
+    lane[3] = 0x082EFA98EC4E6C89ull;
     for (; bytes >= 32; b += 32, bytes -= 32) {
         u64 w[4];
         std::memcpy(w, b, sizeof(w));
@@ -953,7 +956,18 @@ void hashBytesInto(u64& h, const void* p, usize bytes) {
         std::memcpy(&w, b, static_cast<usize>(bytes));
         lane[3] = hashLaneStep(lane[3], w);
     }
+}
+
+// Folds a lane state into the running hash.
+inline void hashFoldLanes(u64& h, const u64 (&lane)[4]) {
     for (const u64 l : lane) { h ^= l; h *= 1099511628211ull; }
+}
+
+// Hash bytes word-at-a-time with four independent lanes.
+void hashBytesInto(u64& h, const void* p, usize bytes) {
+    u64 lane[4];
+    hashBytesLanes(lane, p, bytes);
+    hashFoldLanes(h, lane);
 }
 
 // Material key for non-authored draws (built-in SurfaceLook or fallback).
@@ -996,6 +1010,7 @@ constexpr u64 mixMeshId(u64 x) {
 // Clears submit()'s per-mesh cache; bounds staleness to at most one frame.
 void VoxiRenderer::beginScene() {
     drawsPrev_.swap(draws_);
+    ++drawLanesToken_;
     draws_.clear();
     translucentDrawsPrev_.swap(translucentDraws_);
     translucentDraws_.clear();
@@ -1315,23 +1330,36 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
             }
         }
     }
-    // Air sky-visibility refresh: every frame round-robin, decoupled from GI rebuild gate.
+    // Air sky-visibility refresh: round-robin slabs, decoupled from GI rebuild gate. Idle once a full
+    // cycle has run against an unchanged volume (CSAirVis reads only the volume, its origin and resolution).
     const bool airVisActive = airVisTex_ && airVisPso_ && voxelTex_ && cb_.voxelParams[3] > 0.5f;
     if (airVisActive && !airVisWasActive_) airVisDirty_ = true;
     airVisWasActive_ = airVisActive;
     if (airVisActive) {
-        ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource,
-                           rhi::ResourceState::NonPixelShaderResource);
-        if (airVisDirty_) {
-            dispatchAirVis(ctx, 0, kAirVisResolution);
-        } else {
-            constexpr u32 kSlabs = kAirVisResolution / kAirVisSlabLayers;
-            const u32 zLo = (airVisSlab_ % kSlabs) * kAirVisSlabLayers;
-            dispatchAirVis(ctx, zLo, zLo + kAirVisSlabLayers);
-            airVisSlab_ = (airVisSlab_ + 1) % kSlabs;
+        constexpr u32 kSlabs = kAirVisResolution / kAirVisSlabLayers;
+        const f32 inputs[5] = {cb_.voxelOrigin[0], cb_.voxelOrigin[1], cb_.voxelOrigin[2], cb_.voxelOrigin[3],
+                               cb_.voxelParams[0]};
+        if (voxelGen_ != airVisGen_ || std::memcmp(inputs, airVisInputs_, sizeof(inputs)) != 0) {
+            airVisGen_ = voxelGen_;
+            std::memcpy(airVisInputs_, inputs, sizeof(inputs));
+            airVisLeft_ = kSlabs;
         }
-        ctx.textureBarrier(voxelTex_, rhi::ResourceState::NonPixelShaderResource,
-                           rhi::ResourceState::ShaderResource);
+        const bool full = airVisDirty_;
+        if (full || airVisLeft_ > 0) {
+            ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource,
+                               rhi::ResourceState::NonPixelShaderResource);
+            if (full) {
+                dispatchAirVis(ctx, 0, kAirVisResolution);
+                airVisLeft_ = 0;
+            } else {
+                const u32 zLo = (airVisSlab_ % kSlabs) * kAirVisSlabLayers;
+                dispatchAirVis(ctx, zLo, zLo + kAirVisSlabLayers);
+                --airVisLeft_;
+            }
+            ctx.textureBarrier(voxelTex_, rhi::ResourceState::NonPixelShaderResource,
+                               rhi::ResourceState::ShaderResource);
+        }
+        if (!full) airVisSlab_ = (airVisSlab_ + 1) % kSlabs;
     }
     endShadowHistory();
 
@@ -1728,12 +1756,20 @@ void VoxiRenderer::updateRtParamsPerFrame() {
 // Cheap check: unordered_map lookup and at most one virtual call per distinct mesh.
 // rtAccelMeshChecked_ is a lossy direct-mapped filter; collision re-checks, never skips unchecked mesh.
 bool VoxiRenderer::rtAccelMustForceRebuild() const {
-    rtAccelMeshChecked_.assign(kRtAccelMeshCheckSlots, 0);
+    // A slot counts as 0 unless stamped this call, so the table is never cleared per call.
+    if (rtAccelMeshChecked_.size() != kRtAccelMeshCheckSlots)
+        rtAccelMeshChecked_.assign(kRtAccelMeshCheckSlots, {});
+    if (++rtAccelMeshStamp_ == 0) {
+        rtAccelMeshChecked_.assign(kRtAccelMeshCheckSlots, {});
+        rtAccelMeshStamp_ = 1;
+    }
     for (const Draw& d : drawsPrev_) {
-        rhi::MeshHandle& checked =
+        MeshCheckSlot& slot =
             rtAccelMeshChecked_[static_cast<u32>(mixMeshId(d.mesh) & (kRtAccelMeshCheckSlots - 1))];
+        const rhi::MeshHandle checked = slot.stamp == rtAccelMeshStamp_ ? slot.mesh : 0;
         if (checked == d.mesh) continue;
-        checked = d.mesh;
+        slot.mesh = d.mesh;
+        slot.stamp = rtAccelMeshStamp_;
         // Compute-skinned mesh: BLAS needs refresh every call; freezing silently shows stale pose.
         // Only forces loop when rtRefitAccel is off; when on, refit-only pass keeps current.
         if (!settings_.rtRefitAccel && dev_ && dev_->meshVertexBuffer(d.mesh)) return true;
@@ -1744,11 +1780,30 @@ bool VoxiRenderer::rtAccelMustForceRebuild() const {
     return false;
 }
 
+// Lane cache entry for drawsPrev_[i]; an entry left from an earlier list is reset on first touch.
+VoxiRenderer::DrawLanes* VoxiRenderer::drawLanes(usize i) const {
+    if (drawLanes_.size() < drawsPrev_.size()) drawLanes_.resize(drawsPrev_.size());
+    DrawLanes& e = drawLanes_[i];
+    if (e.token != drawLanesToken_) { e.token = drawLanesToken_; e.have = 0; }
+    return &e;
+}
+
+// d.world's bytes folded into `h`, reusing the draw's cached lanes when given.
+void VoxiRenderer::hashWorldInto(u64& h, const Draw& d, DrawLanes* lanes) const {
+    if (!lanes) { hashBytesInto(h, d.world, sizeof(d.world)); return; }
+    if (!(lanes->have & DrawLanes::kWorld)) {
+        hashBytesLanes(lanes->world, d.world, sizeof(d.world));
+        lanes->have |= DrawLanes::kWorld;
+    }
+    hashFoldLanes(h, lanes->world);
+}
+
 // One draw's material identity into hash `h`, for rtAccelDrawsKey() and GI keys.
 // 176-byte constant block hashed word-at-a-time; two MaterialSystem lookups per binding set, not per draw.
 // d.matSet alone is not enough: in-place material edits bypass revision bumps; hash d.mat + texture set instead.
 // skipEmissive hashes the block with emissiveFactor zeroed (mover lane: an emissive-only change keeps identity).
-void VoxiRenderer::hashDrawMaterialInto(u64& h, const Draw& d, DrawMaterialMemo& memo, bool skipEmissive) const {
+void VoxiRenderer::hashDrawMaterialInto(u64& h, const Draw& d, DrawMaterialMemo& memo, bool skipEmissive,
+                                        DrawLanes* lanes) const {
     DrawMaterialMemoSlot& slot = memo[d.matSet & (kDrawMaterialMemoSlots - 1)];
     if (slot.state == 0 || slot.set != d.matSet) {
         slot.set = d.matSet;
@@ -1774,6 +1829,12 @@ void VoxiRenderer::hashDrawMaterialInto(u64& h, const Draw& d, DrawMaterialMemo&
             std::memcpy(bytes, d.mat, sizeof(bytes));
             std::memset(bytes + offsetof(pbr::MaterialConstants, emissiveFactor), 0, sizeof(f32) * 3);
             hashBytesInto(h, bytes, sizeof(bytes));
+        } else if (lanes) {
+            if (!(lanes->have & DrawLanes::kMat)) {
+                hashBytesLanes(lanes->mat, d.mat, sizeof(d.mat));
+                lanes->have |= DrawLanes::kMat;
+            }
+            hashFoldLanes(h, lanes->mat);
         } else {
             hashBytesInto(h, d.mat, sizeof(d.mat));
         }
@@ -1802,18 +1863,18 @@ bool VoxiRenderer::rtMoverPatchActive() const {
 
 // One draw's term of rtAccelDrawsKey(): mesh, world, translucent/hiddenFromOwner flags, material.
 // moverLane: drops movable draw's world, hashes movable bit instead (keeps changed movers in gate).
-u64 VoxiRenderer::rtDrawHash(const Draw& d, DrawMaterialMemo& memo, bool moverLane) const {
+u64 VoxiRenderer::rtDrawHash(const Draw& d, DrawMaterialMemo& memo, bool moverLane, DrawLanes* lanes) const {
     const bool mover = moverLane && d.movable;
     u64 h = 1469598103934665603ull;
     h ^= static_cast<u64>(d.mesh); h *= 1099511628211ull;
     // 16 world floats as raw bits, eight bytes at a time.
-    if (!mover) hashBytesInto(h, d.world, sizeof(d.world));
+    if (!mover) hashWorldInto(h, d, lanes);
     // Two flags hashed as bools.
     h ^= (d.translucent ? 1ull : 0ull) | (d.hiddenFromOwner ? 2ull : 0ull) | (mover ? 4ull : 0ull);
     h *= 1099511628211ull;
 
     // A mover's emissive stays out of its identity: patchRtMovers() re-keys the material row instead.
-    hashDrawMaterialInto(h, d, memo, mover);
+    hashDrawMaterialInto(h, d, memo, mover, lanes);
 
     // Finalize: decorrelate low bits before addition.
     h ^= h >> 33; h *= 0xff51afd7ed558ccdull;
@@ -1835,7 +1896,7 @@ u64 VoxiRenderer::rtAccelDrawsKey(bool reuseListKey) const {
         rtMoversNow_.clear();
         u32 drawIndex = 0;
         for (const Draw& d : drawsPrev_) {
-            const u64 h = rtDrawHash(d, matMemo, moverLane);
+            const u64 h = rtDrawHash(d, matMemo, moverLane, drawLanes(drawIndex));
             // Also collects current movers for patchRtMovers() (avoids rescanning whole list).
             if (moverLane && d.movable) rtMoversNow_.push_back({h, drawIndex, kRtNoInstance});
             key += h;
@@ -2226,16 +2287,18 @@ u64 VoxiRenderer::giDrawsKey() const {
     u64 key = 0;
     u64 counted = 0;
     DrawMaterialMemo matMemo{};
-    for (const Draw& d : drawsPrev_) {
+    for (usize di = 0; di < drawsPrev_.size(); ++di) {
+        const Draw& d = drawsPrev_[di];
         // Skip translucent, movable, skinned, out-of-volume (see giVoxelisedDraw).
         if (!giVoxelisedDraw(d)) continue;
+        DrawLanes* lanes = drawLanes(di);
         u64 h = 1469598103934665603ull;
         // depthMesh, not mesh: voxelizePass draws depthMesh.
         h ^= static_cast<u64>(d.depthMesh);
         h *= 1099511628211ull;
-        hashBytesInto(h, d.world, sizeof(d.world));
+        hashWorldInto(h, d, lanes);
         // Material lands in baked radiance (PSVoxel reads it).
-        hashDrawMaterialInto(h, d, matMemo);
+        hashDrawMaterialInto(h, d, matMemo, false, lanes);
         // Finalise before adding (splitmix64's avalanche).
         h ^= h >> 33; h *= 0xff51afd7ed558ccdull;
         h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ull;
@@ -2258,17 +2321,19 @@ void VoxiRenderer::giDrawsSubKeys(u64& count, u64& mesh, u64& world, u64& mat) c
         h ^= h >> 33; return h;
     };
     DrawMaterialMemo matMemo{};
-    for (const Draw& d : drawsPrev_) {
+    for (usize di = 0; di < drawsPrev_.size(); ++di) {
+        const Draw& d = drawsPrev_[di];
         if (!giVoxelisedDraw(d)) continue;
+        DrawLanes* lanes = drawLanes(di);
         ++count;
         mesh += mix(1469598103934665603ull ^ static_cast<u64>(d.depthMesh));
         u64 w = 1469598103934665603ull;
-        hashBytesInto(w, d.world, sizeof(d.world));
+        hashWorldInto(w, d, lanes);
         // Mesh folded into world axis too: without it, swapped transforms read unchanged.
         w ^= static_cast<u64>(d.depthMesh); w *= 1099511628211ull;
         world += mix(w);
         u64 m = 1469598103934665603ull;
-        hashDrawMaterialInto(m, d, matMemo);
+        hashDrawMaterialInto(m, d, matMemo, false, lanes);
         m ^= static_cast<u64>(d.depthMesh); m *= 1099511628211ull;
         mat += mix(m);
     }
@@ -2542,6 +2607,7 @@ bool VoxiRenderer::giCacheRestore(rhi::IRenderContext& ctx) {
         }
     }
 
+    ++voxelGen_;
     ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::CopyDest);
     for (u32 m = 0; m < voxelMips_; ++m)
         ctx.copyBufferToTexture(voxelTex_, m, giCacheUpload_, giCacheMipOffsets_[m]);
@@ -4042,6 +4108,7 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx, usize begin, usize end
     ++voxelCullLogs_;
 
     // Reduce the atomic sums into the filterable RGBA16F volume.
+    ++voxelGen_;
     ctx.uavBarrierTexture(voxelAccumTex_);
     ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
     ctx.setPipeline(resolvePso_);
@@ -4069,6 +4136,7 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx, usize begin, usize end
 // a shader resource.
 void VoxiRenderer::filterMips(rhi::IRenderContext& ctx) {
     rhi::ScopedGpuStat gpuStat(ctx, "Voxi mip filter");
+    ++voxelGen_;
     ctx.uavBarrierTexture(voxelTex_);
     ctx.setPipeline(mipPso_);
     const u32 res = voxelResBuilt_;
@@ -6146,6 +6214,7 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     d.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::UnorderedAccess;
     d.initialState = rhi::ResourceState::ShaderResource;
     d.debugName    = "Voxi radiance volume";
+    ++voxelGen_;
     voxelTex_ = res_->createTexture(d);
     if (!voxelTex_) { AVER_ERROR("[Voxi] radiance volume {}^3 could not be created", resolution); return false; }
 

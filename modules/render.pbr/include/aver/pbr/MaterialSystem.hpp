@@ -334,8 +334,9 @@ private:
     //
     // After update()'s swap these two hold the PREVIOUS generation (whatever gpuIndexOf_/gpuTable_
     // held before the call) rather than being destroyed -- swap(), not assign, is the whole point:
-    // it hands the old backing storage to next frame's build instead of freeing and reallocating it
-    // every update(). Cleared at the START of the next update() (not left to be read), and cleared by
+    // it hands the old backing storage to the next build instead of freeing and reallocating it.
+    // An update() that finds the table unchanged neither builds nor swaps, so the live pair stays
+    // put. Cleared at the START of the next build (not left to be read), and cleared by
     // shutdown() alongside gpuIndexOf_/gpuTable_ for the same "0 rows is the honest answer once this
     // system owns no device" reasoning as that comment already gives.
     std::unordered_map<MaterialHandle, u32> indexOfScratch_;

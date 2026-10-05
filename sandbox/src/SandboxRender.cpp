@@ -107,6 +107,11 @@ void SandboxApp::onRender(Engine& e)  {
             projectLoading_.reset();
         }
     }
+    // Restarts the GPU average once, when no load screen is up, so it covers steady state only.
+    if (!gpuTimingStartupReset_ && !projectLoading_) {
+        gpuTimingStartupReset_ = true;
+        e.device()->resetGpuTiming();
+    }
 
     applyStartMode();
     e.device()->setWireframe(wireframe_);
@@ -1457,10 +1462,14 @@ void SandboxApp::onRender(Engine& e)  {
                 // motivated this had 8,765 authored-hidden colliders, and warning about each (one
                 // flushed line apiece, on the first frame) buried every real fault in the log.
                 //
-                // Decided on the first sighting only, behind the same once-per-entity set as before, so
-                // the per-frame cost for a hidden entity is what it was: one set lookup. An entity that
-                // has a record is counted, not warned about, and reported in one line after the walk.
-                if (self.undrawnInvisible_.insert(static_cast<u64>(ent)).second) {
+                // Decided on the first sighting only, behind a once-per-entity slot table, so the
+                // per-frame cost for a hidden entity is one array read. An entity that has a record
+                // is counted, not warned about, and reported in one line after the walk.
+                const u32 slot = aver::scene::entityIndex(ent);
+                const u8  gen  = static_cast<u8>(aver::scene::entityGen(ent));
+                if (slot >= self.undrawnInvisibleGen_.size()) self.undrawnInvisibleGen_.resize(slot + 1u, 0);
+                if (self.undrawnInvisibleGen_[slot] != gen) {
+                    self.undrawnInvisibleGen_[slot] = gen;
                     if (self.entityLabels_.find(static_cast<u32>(ent)) != self.entityLabels_.end()) {
                         if (c.authoredHiddenNew < 3) c.authoredHiddenIds[c.authoredHiddenNew] = static_cast<u64>(ent);
                         ++c.authoredHiddenNew;

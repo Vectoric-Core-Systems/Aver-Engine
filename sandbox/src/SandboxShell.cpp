@@ -2443,6 +2443,7 @@ void SandboxApp::buildUI(Engine& e) {
         }
     }
     pumpContentWatch();
+    cbApplyWatchEvents();
     assetEditors_.draw(e, centralDock_, dpi_);
     tools_.drawModals(project_, dpi_);
     nrd2Session_.drawWindow(dpi_);
@@ -2697,7 +2698,7 @@ void SandboxApp::drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
 }
 
 void SandboxApp::drawOutputLog() {
-    if (ImGui::SmallButton("Clear")) { std::lock_guard<std::mutex> lk(logMutex_); logLines_.clear(); }
+    if (ImGui::SmallButton("Clear")) { std::lock_guard<std::mutex> lk(logMutex_); logLines_.clear(); logMultiRowCount_ = 0; }
     ImGui::SameLine();
     // Text is not selectable; log is frequently needed.
     if (ImGui::SmallButton("Copy")) {
@@ -2724,18 +2725,32 @@ void SandboxApp::drawOutputLog() {
                           : logLevelFilter_ == 3 ? (int)LogLevel::Error
                           : logLevelFilter_ == 2 ? (int)LogLevel::Warn
                           : logLevelFilter_ == 1 ? (int)LogLevel::Info : (int)LogLevel::Trace;
-        // Only visible rows submitted (ImGuiListClipper); multiline lines fall back to all rows.
+        // Only visible rows submitted: ImGuiListClipper, or spacers over summed row heights once
+        // any multi-row line exists.
         std::vector<u32> shown;
         shown.reserve(logLines_.size());
-        bool multiLine = false;
-        for (usize i = 0; i < logLines_.size(); ++i) {
-            const LogLine& ln = logLines_[i];
-            if ((int)ln.level < minLevel) continue;
-            shown.push_back(static_cast<u32>(i));
-            if (!multiLine && ln.text.find('\n') != std::string::npos) multiLine = true;
-        }
-        if (multiLine) {
-            for (const u32 i : shown) drawLogLine(logLines_[i].level, logLines_[i].text.c_str());
+        for (usize i = 0; i < logLines_.size(); ++i)
+            if ((int)logLines_[i].level >= minLevel) shown.push_back(static_cast<u32>(i));
+        if (logMultiRowCount_ != 0) {
+            const f32 lineH = ImGui::GetTextLineHeight();
+            const f32 spacing = ImGui::GetStyle().ItemSpacing.y;
+            // top[k] = y of row k below the first row, each height floored as ImGui snaps its cursor.
+            std::vector<f32> top(shown.size() + 1, 0.0f);
+            for (usize k = 0; k < shown.size(); ++k)
+                top[k + 1] = top[k] + std::floor(static_cast<f32>(logLines_[shown[k]].rows) * lineH + spacing);
+            const ImDrawList* dl = ImGui::GetWindowDrawList();
+            const f32 y0 = ImGui::GetCursorScreenPos().y;
+            const f32 visTop = dl->GetClipRectMin().y - y0;
+            const f32 visBot = dl->GetClipRectMax().y - y0;
+            const usize n = shown.size();
+            const usize first = static_cast<usize>(
+                std::max<std::ptrdiff_t>(0, std::upper_bound(top.begin(), top.end(), visTop) - top.begin() - 1));
+            const usize last = std::max(first, static_cast<usize>(
+                std::lower_bound(top.begin(), top.begin() + static_cast<std::ptrdiff_t>(n), visBot) - top.begin()));
+            if (first > 0) ImGui::Dummy(ImVec2(0.0f, top[first] - spacing));
+            for (usize k = first; k < last; ++k)
+                drawLogLine(logLines_[shown[k]].level, logLines_[shown[k]].text.c_str());
+            if (last < n) ImGui::Dummy(ImVec2(0.0f, top[n] - top[last] - spacing));
         } else {
             // Floor of line height with spacing (for DPI scale agreement).
             ImGuiListClipper clipper;

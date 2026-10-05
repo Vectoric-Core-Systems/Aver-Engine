@@ -1504,11 +1504,58 @@ editor::GraphAssetFamily SandboxApp::graphAssetFamilyFor(const std::string& path
     return family;
 }
 
-// Returns a directory's sorted listing, cached for 20 frames.
+// Lower-case, '/'-separated, no trailing slash: the form listing keys and watcher paths are compared in.
+static std::string cbPathKey(std::string s) {
+    for (char& ch : s) ch = ch == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    while (s.size() > 1 && s.back() == '/') s.pop_back();
+    return s;
+}
+
+bool SandboxApp::cbDirWatched(const std::string& dir) const {
+    if (!contentWatch_.watching()) return false;
+    const std::string r = cbPathKey(contentWatch_.root());
+    const std::string d = cbPathKey(dir);
+    return d == r || (d.size() > r.size() && d.compare(0, r.size(), r) == 0 && d[r.size()] == '/');
+}
+
+// Drops the listings a changed path can alter: its own and any below it (a folder), its parent's
+// entries, and its grandparent's (a subfolder's module flag reads the CMakeLists.txt inside it).
+void SandboxApp::cbApplyWatchEvents() {
+    if (watchEvents_.empty() || dirCache_.empty() || !contentWatch_.watching()) return;
+    const std::string root = cbPathKey(contentWatch_.root());
+    auto parentOf = [](const std::string& p) {
+        const usize slash = p.find_last_of('/');
+        return slash == std::string::npos ? std::string() : p.substr(0, slash);
+    };
+    std::vector<std::string> subtrees, exact;   // a listing is stale if it is in `subtrees` or below one, or is in `exact`
+    for (const FileEvent& ev : watchEvents_) {
+        for (const std::string* rel : {&ev.path, &ev.oldPath}) {
+            if (rel->empty()) continue;
+            const std::string p = root + '/' + cbPathKey(*rel);
+            subtrees.push_back(p);
+            exact.push_back(parentOf(p));
+            exact.push_back(parentOf(exact.back()));
+        }
+    }
+    for (auto it = dirCache_.begin(); it != dirCache_.end();) {
+        const std::string key = cbPathKey(it->first);
+        bool stale = std::find(exact.begin(), exact.end(), key) != exact.end();
+        for (usize i = 0; !stale && i < subtrees.size(); ++i) {
+            const std::string& p = subtrees[i];
+            stale = key == p || (key.size() > p.size() && key.compare(0, p.size(), p) == 0 && key[p.size()] == '/');
+        }
+        it = stale ? dirCache_.erase(it) : std::next(it);
+    }
+}
+
+// Returns a directory's sorted listing. A watched folder refreshes on watcher events (and every
+// kWatchedRefreshFrames as a net for events the watcher drops); others every 20 frames.
 const DirListing& SandboxApp::dirListing(const std::string& dir) {
+    constexpr int kWatchedRefreshFrames = 600;
     DirListing& c = dirCache_[dir];
-    if (frameNo_ - c.stamp < 20) return c;
+    if (frameNo_ - c.stamp < (c.watched ? kWatchedRefreshFrames : 20)) return c;
     c.stamp = frameNo_;
+    c.watched = cbDirWatched(dir);
     c.entries.clear(); c.dirCount = 0;
     std::error_code ec;
     try {
@@ -1538,7 +1585,7 @@ const DirListing& SandboxApp::dirListing(const std::string& dir) {
                 }
                 // A material graph is not a generic graph -- see GraphAssetPresentation.hpp for
                 // why Gameplay/Material/Unknown must not collapse into one bucket. Read HERE,
-                // once per 20-frame listing refresh, not per frame: see graphAssetFamilyFor().
+                // once per listing refresh, not per frame: see graphAssetFamilyFor().
                 if (lext == ".ocgraph") ent.graphFamily = graphAssetFamilyFor(ent.full);
             }
             c.entries.push_back(std::move(ent));
@@ -2116,7 +2163,7 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
 // are safe here: it's a std::unordered_map with node-allocated values, so inserting folders during
 // this walk rehashes the map but doesn't move the DirListing objects -- pointers into their entry
 // vectors stay valid (a folder already listed this frame returns from cache untouched, per
-// dirListing's 20-frame stamp). Files only: a matching folder would be a row that navigates rather
+// dirListing's freshness stamp). Files only: a matching folder would be a row that navigates rather
 // than opens, mixed with rows that open -- two different meanings for one gesture.
 void SandboxApp::cbGatherDeepMatches(const std::string& dir, std::vector<const DirEntry*>& out, int depth) {
     // A depth cap rather than a visited set: the content tree is a tree, and the one thing that

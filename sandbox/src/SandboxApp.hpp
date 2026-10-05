@@ -923,8 +923,8 @@ static inline void applyEditorColors() {
 }
 #endif
 
-// One captured log line for the Output Log panel.
-struct LogLine { LogLevel level; std::string text; };
+// One captured log line for the Output Log panel. `rows` is how many text rows it draws as (Output Log only).
+struct LogLine { LogLevel level; std::string text; u32 rows = 1; };
 
 // How many graph prints the on-screen feed keeps. Small on purpose: it is a feed, not a log --
 // the Output Log already holds every one of these, without a fade.
@@ -948,7 +948,7 @@ struct DirEntry {
 };
 
 // A Content Browser directory listing, refreshed on a frame stamp. Folders sort first and are counted.
-struct DirListing { int stamp = -1000; std::vector<DirEntry> entries; usize dirCount = 0; };
+struct DirListing { int stamp = -1000; std::vector<DirEntry> entries; usize dirCount = 0; bool watched = false; };
 
 // Placed mesh animation (anim/animspeed/animtime/animonce from PLACE record).
 struct EntityAnim {
@@ -2682,6 +2682,10 @@ private:
     editor::GraphAssetFamily graphAssetFamilyFor(const std::string& path);
 
     const DirListing& dirListing(const std::string& dir);
+    // True when the content watcher covers `dir`, so its listing refreshes on watcher events.
+    bool cbDirWatched(const std::string& dir) const;
+    // Drops the cached listings the watcher's events this frame touched.
+    void cbApplyWatchEvents();
 
     void drawFolderTree(const std::string& dir);
 
@@ -2952,6 +2956,7 @@ private:
     u64 resizeCycle_ = 0;
     bool gpuTiming_ = false;
     bool gpuTimingDone_ = false;
+    bool gpuTimingStartupReset_ = false;   // GPU average restarted once load work is done.
     u32 resizeStep_ = 0;
     bool lumaSweep_ = false;
     int  lumaSweepStride_ = 1;
@@ -3485,7 +3490,7 @@ private:
     // Tiles are packed into one int so a cached DirListing entry stays one field.
     static constexpr int kAssetTileBase   = 100;
     std::unordered_map<std::string, std::pair<std::filesystem::file_time_type, int>> fileIconCache_;
-    // A .ocgraph's DOMAIN record, read once and kept against the file's mtime (same cache shape as fileIconCache_, rebuilt every 20 frames).
+    // A .ocgraph's DOMAIN record, read once and kept against the file's mtime (same cache shape as fileIconCache_, rebuilt with the listing).
     std::unordered_map<std::string, std::pair<std::filesystem::file_time_type, editor::GraphAssetFamily>>
         graphDomainCache_;
     std::unordered_map<std::string, DirListing> dirCache_;
@@ -3945,6 +3950,7 @@ private:
     static constexpr size_t kMaxLogLines = 4000;
     std::mutex          logMutex_;
     std::deque<LogLine> logLines_;
+    usize               logMultiRowCount_ = 0;   // Lines in logLines_ with rows > 1.
     struct GraphPrint { std::string text; f64 at; u32 count; };
     std::deque<GraphPrint> graphPrints_;
     bool                logAutoScroll_ = true;
@@ -4038,7 +4044,8 @@ private:
     // Mesh id -> project-relative path. Handles/bounds/parts are in content_.
     std::unordered_map<u64, std::string>     meshPathById_;
     // Entities missing mesh or with invisible bit. Per-entity or per-id fault. Never cleared on reload.
-    std::unordered_set<u64> undrawnInvisible_;
+    // Invisible: last generation reported per entity slot (0 = none); generations only rise per slot.
+    std::vector<u8> undrawnInvisibleGen_;
     std::unordered_set<u64> undrawnMissingMesh_;
     // Triangle count per mesh id (same key as content_). Enables budget reporting instead of guessing.
     std::unordered_map<u64, u32> meshTris_;
