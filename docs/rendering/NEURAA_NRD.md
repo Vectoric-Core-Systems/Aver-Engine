@@ -494,6 +494,16 @@ legal advice). The design follows them unless counsel says otherwise:
    force to 2043) claims a history-validation network fed, per pixel, the current colour, depth,
    auxiliary buffers, the reprojected history colour and the time between frames. NRD's network gets
    tile aggregates only and outputs spatial parameters; history is handled by hand-written code.
+   **Amended for NRD2 (2026-10-06):** NRD2's convolutional encoder reads half-resolution features, so
+   each input texel is a 2x2 block, not a tile aggregate. They are luminance only (log2 of the 2x2
+   mean relative to the block's 1/8 pyramid texel, and its 2x2 contrast), plus depth, normal,
+   roughness, albedo luminance, hit distance and validity. There are no colours, no history and no
+   frame time, and NRD2 keeps no history at all. Its outputs stay per 8x8 tile (rule 6), and it is
+   trained in parameter space (rule 4). **Counsel should confirm** that 2x2 log-luminance is outside
+   "current colour per pixel", and that NRD2's oracle is not the claimed corrected model of UC US
+   10,192,146. The oracle fits free per-tile variables through the fixed resolve against a converged
+   mean. It is not a model, the network never sees that error, and `--nrd2-oracle grid` is a
+   derivative-free fallback.
 11. **Un-jitter before the denoiser** (Arm US 18/497,608, granted 2026-09-29).
 12. **Watch:** AMD's pending US 2026/0094228 (any trained network in a pipeline stage; every claim
    rejected as of 2026-08-12) and NVIDIA's US 2025/0299305 and US 2026/0073486.

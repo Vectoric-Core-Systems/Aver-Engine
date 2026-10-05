@@ -247,8 +247,47 @@ and an Editor Preferences line (weights source, steps, held-out ratio, gate, in 
 CLI: `--nrd2-train STEPS [DATASETDIR...]` (steps this session; no dirs = the default dataset folder),
 bounded with `--frames N`. Training needs the device, not NRD2 as the active denoiser.
 
-Not yet: training on the captured scenes and judging the weights on the image rig (M9), shipped weights,
-NRD2 in-frame on Vulkan (the trainer itself is portable compute).
+Not yet: NRD2 in-frame on Vulkan (the trainer itself is portable compute).
+
+## Network v1 (M9, 2026-10-06)
+
+Trained in-engine (`--nrd2-train 30000`) on 128 captured poses: NeonDistrict Day and Night, NewSponza and
+NewSponza_Night, 24 training and 8 held-out per scene. It stopped early at 26,000 steps (8 validations
+without improvement), with the best checkpoint at 24,000. That run took about 2 minutes on the RX 7800 XT.
+
+Held-out parameter error, as a ratio to the default parameters, was 0.671 overall:
+
+| Scene | Ratio |
+|---|---|
+| NeonDistrict Day | 0.675 |
+| NeonDistrict Night | 0.676 |
+| NewSponza | 0.650 |
+| NewSponza Night | 0.690 |
+
+The ratio was already 0.78 at step 500. The weights ship as `modules/render.denoise/data/nrd2_v1.avnn`
+plus its `.steps`, and the live gate is open.
+
+**Image rig** (D3D12, render scale 0.5, no TAA, tonemap and auto-exposure off, NeuRAA off, 400 frames):
+
+- Speckles are per mille.
+- Energy and error are against the reference path tracer (`voxi.ptMode 1`) on the still frame.
+- "Blob" is the error after a 9 px box filter.
+
+| | FidelityFX | NRD2 defaults | NRD2 network |
+|---|---|---|---|
+| NeonDistrict Night, speckles moving / still | 0.49 / 0.11 | 0.23 / 0.17 | 0.21 / 0.14 |
+| NeonDistrict Night, energy, pixel / blob error | 0.983, 0.044 / 0.027 | 0.990, 0.077 / 0.059 | 0.990, 0.068 / 0.052 |
+| NewSponza, energy, pixel / blob error | 1.007, 0.034 / 0.024 | 1.036, 0.110 / 0.060 | 1.018, 0.073 / 0.037 |
+| GPU denoise (moving), Night / Sponza | 2.01 / 1.83 ms | 0.35 / 0.31 ms | 0.82 / 0.73 ms |
+
+The network's 0.82 ms on Night breaks down as features 0.12, network 0.32 and resolve 0.38. NewSponza's
+speckle counts are about 0.01-0.02 in every mode.
+
+The network beats NRD2's fixed defaults everywhere: Sponza blob error drops 38% and its energy bias halves.
+In motion it beats FidelityFX on speckle, energy and cost. At rest FidelityFX is still closer to the
+reference, because its history accumulates. That is the price of being single-frame, which is also why
+NRD2 cannot smear. The next levers are more poses per scene, more scenes, and a second network input
+level (1/4).
 
 ## The network
 
