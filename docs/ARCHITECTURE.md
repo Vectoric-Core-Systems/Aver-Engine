@@ -582,12 +582,9 @@ of independent features, each driving `Aver.RHI` directly with no render graph b
   out. Vendored is still vendored: those sources are not edited, and `scripts/stage-payload.ps1`
   concatenates the `LICENSE` there into `THIRD-PARTY-NOTICES.txt`.
 
-  **The licence constraint is intact: there is no exception.** NVIDIA NRD, once a named
-  exception to the permissive-licence rule (commit `d91ce76e`), was removed together with MathLib and
-  ShaderMake, which existed only for it; the denoiser is now AMD FidelityFX Denoiser (MIT) in
+  **The licence constraint has no exception.** The denoiser is AMD FidelityFX Denoiser (MIT) in
   `third_party/fidelityfx-denoiser`, driven by `modules/render.denoise`. No GPL, no Unreal, no
-  proprietary tech: every vendored tree is MIT/BSD/zlib/Apache-2.0/public-domain. See
-  `docs/NVIDIA-SDK-COMPLIANCE.md`.
+  proprietary tech: every vendored tree is MIT/BSD/zlib/Apache-2.0/public-domain.
 
   Where a capability was needed and no dependency was taken, the tree still wrote its own (the audio
   mixer, the WAV reader, the glTF import) or used what the OS already ships (Media Foundation for

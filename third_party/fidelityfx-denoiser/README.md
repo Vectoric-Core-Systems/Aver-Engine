@@ -30,11 +30,8 @@ prefilter, temporal resolve — driven at roughness 1 as a diffuse denoiser, ove
 signals: the sky-occlusion hit distance and the ReSTIR GI radiance. The shadow denoiser
 (`ffx_denoiser_shadows_*.h`) is still unused. See `modules/render.denoise/README.md` for the host side.
 
-It was chosen over NVIDIA NRD (investigated 2026-08-27, `docs/rendering/DENOISING.md`) because NRD
-ships under the NVIDIA RTX SDKs License, whose grant is to distribute it "as incorporated in object
-code format into a software application" and "without the right to sublicense". Aver is an engine
-redistributed to licensees, not an application, so that licence could not flow through. This is MIT,
-from the same vendor as `third_party/fidelityfx-fsr`, and `docs/ASSET_IMPORT.md` accepts MIT.
+It is MIT, from the same vendor as `third_party/fidelityfx-fsr`, and `docs/ASSET_IMPORT.md` accepts
+MIT. How it is fitted to Voxi is in `docs/rendering/DENOISING.md`.
 
 The host-implemented accessors these headers call but never define are all satisfied now: the Voxi
 G-buffer supplies depth, octahedral normal + roughness and screen-space motion vectors, the previous

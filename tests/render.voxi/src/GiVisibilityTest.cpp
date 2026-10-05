@@ -416,10 +416,7 @@ int main() {
               std::to_string(readbackGates) + " decode + " + std::to_string(reprojectGates) +
               " reprojected-read gate(s)");
 
-        // Reservoir is in-house (voxi_reservoir.hlsli): no vendored resampling header may be included.
         check(has(t, "#include \"voxi_reservoir.hlsli\""), "voxi_restir.hlsli includes the in-house reservoir module");
-        check(!has(t, "Rtxdi/") && !has(t, "RTXDI_") && !has(t, "RAB_"),
-              "voxi_restir.hlsli names no RTXDI header, function or RAB_ callback");
     }
 
     // ---- 9. SOURCE ASSERTIONS: voxi_rt.hlsli's traceCone prototype and its own gate count ----

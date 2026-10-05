@@ -64,13 +64,6 @@ real quality setting -- do not wire this to the editor or a project manifest.")
 target_compile_definitions(Aver.Render.Voxi.Renderer PRIVATE
     AVER_VOXI_SHADOW_CASCADE_LIMIT=${AVER_VOXI_SHADOW_CASCADE_LIMIT})
 
-# NVIDIA RTXDI and RTXGI (SHaRC) are no longer vendored: ReSTIR GI is the engine's own
-# (voxi_reservoir.hlsli / voxi_restir.hlsli). Older configures copied their headers into
-# bin/shaders/Rtxdi and bin/shaders/Sharc, and a build tree keeps them until something deletes them --
-# where the staging scripts would still find and ship NVIDIA source text. Removed here so an existing
-# build directory is cleaned on its next configure.
-file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/bin/shaders/Rtxdi" "${CMAKE_BINARY_DIR}/bin/shaders/Sharc")
-
 # HLSL beside the executable. Deployed through a stamp with the .hlsl files as DEPENDS, NOT a
 # POST_BUILD command: POST_BUILD runs on a RELINK, and a shader-only edit relinks nothing, so
 # the old text stayed deployed and silently kept being compiled. Mirrors modules/rhi/CMakeLists.txt --

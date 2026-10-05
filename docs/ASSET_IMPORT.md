@@ -420,9 +420,7 @@ The importers accept anything in a supported format. The constraint is **licensi
 **This repository accepts permissively-licensed content only** — MIT, BSD, Apache-2.0, zlib, CC0,
 CC-BY with attribution.
 
-> **There is no exception.** NVIDIA's NRD was once vendored under the NVIDIA RTX SDKs License as a named
-> exception; it has been removed and replaced by AMD FidelityFX Denoiser (MIT). No proprietary SDK
-> remains in the tree.
+> **There is no exception.** No proprietary SDK is in the tree.
 
 That rules out:
 

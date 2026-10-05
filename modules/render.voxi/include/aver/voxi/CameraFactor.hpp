@@ -12,7 +12,7 @@
 // WHY THIS EXISTS. IDevice::camera() and every per-frame consumer in this renderer (curViewProj_,
 // prevViewProj_) only ever carry the TWO matrices already multiplied together -- view * proj, row-
 // major, row-vector (RHI.hpp: "row-major, row-vector viewProj = view*proj"). Consumers that
-// reconstruct view-space positions (formerly NVIDIA NRD, now any denoiser or reprojection pass)
+// reconstruct view-space positions (a denoiser or reprojection pass)
 // want the two SEPARATELY -- they decompose viewToClip to recover the projection frustum and the
 // scene's handedness, and rebuild every pixel's view-space position from viewToClip alone before
 // rotating by worldToView. Handing them identity for worldToView and the combined viewProj for

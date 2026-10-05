@@ -5,8 +5,7 @@ indirect radiance and the sky-occlusion hit distance.
 
 The filter is AMD FidelityFX Denoiser, vendored at `third_party/fidelityfx-denoiser` under the MIT
 licence. This module is the host around it: the compute pipelines, the history textures, the
-G-buffer history copy and every resource-state transition. It replaced NVIDIA NRD, whose licence
-does not allow the engine to be redistributed with it.
+G-buffer history copy and every resource-state transition.
 
 ## How it works
 
