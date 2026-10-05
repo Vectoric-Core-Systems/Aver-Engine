@@ -38,7 +38,8 @@ Predicting parameters rather than pixels also:
   layers <= 6, AVNN weight files, in-engine Adam) needs no new layer types for this.
 - **follows NeuraFI's rule:** the network predicts a correction to an analytic baseline, the baseline is
   what runs until weights exist, and a gate keeps the network out where it measures worse.
-- **is a different shape from the patent-dense prior art** (section 7).
+- **clears most of the patent-dense prior art**, which needs image or per-pixel-kernel outputs. Four
+  findings still constrain the design, one of them reaching the shipped TAA clamp (section 7).
 
 ---
 
@@ -103,9 +104,10 @@ is two steps:
    reference is the same camera pose accumulated over 64 jittered frames at the same render scale.
 2. **Regression.** Train the MLP to map the tile's features to its oracle parameters.
 
-Loss: relative L2 against the reference, plus a temporal-stability term (frame-to-frame change not
-present in the reference) and a ghosting term (energy left behind a moving object's previous
-position). Captures come from scripted camera paths (`--cam-wobble`, `--cam-translate`) on NeonDistrict
+The oracle search scores candidates by relative L2 against the reference, plus a temporal-stability
+term (frame-to-frame change not present in the reference) and a ghosting term (energy left behind a
+moving object's previous position). Those image-space scores are used only inside the search and the
+gate; nothing back-propagates them (section 7). Captures come from scripted camera paths (`--cam-wobble`, `--cam-translate`) on NeonDistrict
 Day and Night, NewSponza and the test levels, all run in a visible window.
 
 Weights ship in `bin/data` as an AVNN file, as NeuraFI's do. An optional on-device refinement can use
@@ -137,7 +139,7 @@ an argument, is passed per pixel:
 
 ### Features per tile (~20 floats)
 
-Sample count; temporal and spatial variance; luminance relative to the 8x8 mean; **tail heaviness**
+Sample count (never an input to the prefilter-spread output, section 7); temporal and spatial variance; luminance relative to the 8x8 mean; **tail heaviness**
 (the fraction of the tile's energy carried by samples above 4x and 16x the mean, the quantity that
 separated "fireflies" from "real night light" in the 10-05 measurements); motion length; disocclusion
 fraction; normal and depth gradients; roughness; the signal (GI or sky occlusion) and the GI method
@@ -151,12 +153,13 @@ fraction; normal and depth gradients; roughness; the signal (GI or sky occlusion
 
 ### Training
 
-The same oracle-then-regress scheme as NeuRAA, with three loss terms chosen from what went wrong this
-week:
+The same oracle-then-regress scheme as NeuRAA. The oracle search scores candidate parameters by three
+terms chosen from what went wrong this week, and the network is then regressed onto the winning
+parameters only (no image-space loss is back-propagated, section 7):
 
 - **Error:** relative L2 against the reference.
-- **Energy:** the tile's mean against the reference's mean. This is the term that stops the network from
-  learning to darken, which is what every global setting did (0.49-0.84 of the true GI).
+- **Energy:** the tile's mean against the reference's mean. This is the term that stops the chosen
+  parameters from darkening, which is what every global setting did (0.49-0.84 of the true GI).
 - **Blotching:** temporal flicker and the spot metric from the 10-05 rig (`--cam-wobble 30 16`).
 
 ### Cost (estimate)
@@ -192,14 +195,35 @@ Every comparison runs in a visible window on fixed camera paths, with the linear
 
 ## 7. Patents and licences
 
-Neural anti-aliasing / upscaling and neural denoising are patent-dense areas (vendor super-resolution
-and frame-generation families, and kernel-predicting denoiser families among them). This design is
-deliberately a different shape: a tiny network predicting a few bounded parameters of a hand-written
-filter per tile, not an image-to-image network and not per-pixel filter kernels. Published prior art
-for that shape exists (Kalantari et al. 2015 predicted per-pixel filter parameters with an MLP for
-Monte Carlo denoising). As with NeuRaC and NeuraFI (`NEURAFI_PATENTS.md`), **counsel should review
-before either ships**; this section is a flag, not legal advice. Nothing is vendored: the network code
-is `Aver.Render.Neural`, the filters are the in-house TAAU and the MIT FidelityFX Denoiser.
+A sweep was run on 2026-10-05: [NEURAA_NRD_PATENTS.md](NEURAA_NRD_PATENTS.md) (engineering mapping,
+not legal advice). Predicting bounded per-tile parameters rather than pixels or per-pixel kernels does
+clear most of the neural denoising and upscaling families (they need image or kernel outputs). It does
+**not** clear four, and the design changes accordingly unless counsel says otherwise:
+
+1. **The baseline clamp.** NVIDIA US 10,116,916 claims TAA history adjusted by a per-colour-channel
+   mean ± sigma axis-aligned box, which is the shipped TAAU's clip and arguably FidelityFX's resolve
+   clip, with or without a network. NeuRAA's resolve (and, ideally, the shipped TAA now) replaces the
+   box with a **scalar luminance-distance down-weighting** of history, or a neighbourhood **min/max**
+   clip; NeuRAA's "clip width" becomes that test's falloff width.
+2. **NeuRAA without a neural network in the upscaling path.** NVIDIA US 12,033,301 claims generating
+   higher-resolution video *using one or more neural networks* from upsampled frames blended with
+   prior output, its dependents name a predicted blending factor and kernel factors, and its training
+   claims reach the oracle regression. NeuRAA keeps the tile-parameter architecture, oracle search,
+   bounds, fallback and gate, but fits the per-tile parameters with a **non-neural regressor**
+   (quantised-feature lookup table, piecewise/polynomial fit or small tree ensemble) trained directly on
+   the oracle data. Whether a network may be used at native resolution only is counsel's question.
+3. **NRD trains in parameter space only.** The University of California's US 10,832,091 (Kalantari et al.)
+   claims back-propagating an image error between filtered output and ground truth. NRD regresses onto
+   oracle parameters; image-space error is used only to score the search and in the gate.
+4. **NRD keeps sample count away from spatial filter size.** NVIDIA US 11,113,792 claim 15 covers a
+   spatial filter sized from the temporal history count.
+
+Also open: AMD's pending US 2026/0094228 claims any trained network inside a render pipeline stage,
+which would concern NeuraFI and NeuRaC as well; and Arm's pending UK GB 2635953 claims denoising that
+preserves jitter before a TAA upsample (the shipped order), avoided by un-jittering before the denoiser.
+**Counsel should review before either feature ships.** Nothing is vendored: the code is
+`Aver.Render.Neural` and the in-house filters, plus the MIT FidelityFX Denoiser (whose licence grants no
+third-party patent rights).
 
 ---
 
