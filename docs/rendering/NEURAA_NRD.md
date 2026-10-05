@@ -8,7 +8,7 @@ it says *measured*.
 
 **One-line summary:** a small network predicts the *parameters* of a filter we already have; it never
 paints pixels. For NeuRAA that is how each edge pixel, found from primary visibility, blends with its
-neighbours, used while the camera moves. For NRD it is how a spatial pyramid of the current frame is
+neighbours, every frame in ray-driven mode. For NRD it is how a spatial pyramid of the current frame is
 mixed, per 8x8 tile, in place of FidelityFX's temporal resolve. The filter stays
 hand-written and bounded, so a bad prediction can only pick a worse setting of a known-good filter,
 never invent an image. Without weights, NeuRAA runs its analytic baseline and NRD runs FidelityFX's
@@ -25,8 +25,9 @@ Both problems are the same shape, and the measurements of 2026-10-04/05 show it:
   blotches in motion; 0.2 is a compromise (`DENOISING.md` section 2). One number cannot be right both
   for a tile of rare fireflies and for a tile of genuinely bright bounce light.
 - **TAA:** it smeared under motion badly enough that it now runs only while the camera is still
-  (`modules/render.sr/README.md`), so in motion nothing anti-aliases edges. NeuRAA fills that gap with a
-  single-frame method that has no history to smear (section 3).
+  (`modules/render.sr/README.md`), so in motion nothing anti-aliases edges. NeuRAA is a single-frame
+  method with no history to smear, run every frame: motion gets anti-aliased edges, and the TAA at rest
+  starts from them (section 3).
 
 A network that looks at a tile's statistics and picks those numbers per tile addresses exactly that.
 Predicting parameters rather than pixels also:
@@ -77,18 +78,27 @@ G-buffer / visibility + signal -> [feature pass] -> records (StructuredBuffer<fl
 
 ### What it is
 
-Single-frame edge anti-aliasing, redesigned 2026-10-05. Primary visibility finds the edges; the
-network only decides how to blend each edge pixel with its neighbours. It replaces nothing in the TAA:
+Single-frame edge anti-aliasing (redesigned 2026-10-05; decisions of the same day: it runs every frame,
+TAA stays as it is, and raster mode uses MSAA instead). Primary visibility finds the edges; the network
+only decides how to blend each edge pixel with its neighbours.
 
-| camera | path | network |
+| mode | camera | path |
 |---|---|---|
-| moving | NeuRAA edge AA at render resolution, then AverSR's spatial fallback (FSR 1 EASU, which expects anti-aliased input) | yes |
-| still | AverSR's TAAU (min/max clip, section 7), no NeuRAA | no |
+| ray-driven (default) | moving | NeuRAA, then AverSR's spatial fallback (FSR 1 EASU, which expects anti-aliased input) |
+| ray-driven | still | NeuRAA, then AverSR's TAAU, unchanged ("TAA only while still" stays) |
+| raster | any | the existing MSAA setting (hardware resolve); no NeuRAA |
 
-The moving path is today's weak spot: TAA runs only while the camera is still, so in motion edges get
-no anti-aliasing at all. A single-frame method has no history, so it cannot ghost or smear, which is
-what retired TAA in motion. Keeping the network out of the still path also keeps it away from every
-claim that needs history blending (section 7).
+In motion it replaces nothing: today edges there get no anti-aliasing at all, because TAA smeared and
+now runs only while still. At rest the TAAU accumulates frames whose edges are already resolved, which
+should shorten the time it takes to converge after the camera stops. NeuRAA has no history, so it
+cannot ghost.
+
+**Raster and MSAA.** Raster mode has no triangle IDs to find edges from, and the hardware already
+resolves coverage there. But with MSAA above 1x the renderer turns the denoiser off
+(`VoxiRenderer.cpp`: the G-buffer targets would need the same sample count). Raster + MSAA therefore
+needs one fix before it is a complete path: resolve the G-buffer to one sample per pixel (nearest-depth
+sample for depth, normal and motion) for the denoiser, NRD and AverSR to read. Colour uses the plain
+hardware resolve: no edge classification with a per-group filter (section 7).
 
 ### Pipeline
 
@@ -103,8 +113,8 @@ primary visibility (gRdVisBuf / G-buffer)
 
 ### 1. Edge detection (cheapest first)
 
-The ray-driven path (the default) already writes, per pixel, `gRdVisBuf = (instance ref, triangle,
-barycentrics.xy)`; both paths write `viewZ` and `normalRoughness`. Detection reads those, nothing new:
+The ray-driven path already writes, per pixel, `gRdVisBuf = (instance ref, triangle, barycentrics.xy)`,
+plus `viewZ` and `normalRoughness`. Detection reads those, nothing new:
 
 - **Tile pre-pass:** one 8x8 group per tile computes min/max instance ref and min/max `viewZ` in LDS,
   with `WaveActiveAllEqual` on the instance ref. Tiles that are one instance with a smooth depth range
@@ -115,9 +125,6 @@ barycentrics.xy)`; both paths write `viewZ` and `normalRoughness`. Detection rea
   **normal turns** more than ~30 degrees. A different triangle of the same smooth surface is not an
   edge: the triangle ID alone fires on every tessellation edge. The result is a byte: 4 direction bits
   and a class (silhouette, crease, alpha-masked). Nothing counts the triangles in a pixel (section 7).
-- **Raster path:** no instance ID exists in its G-buffer, so it uses depth + normal only. That misses
-  coplanar object boundaries, which matter little (no geometric step to alias). An instance ID target
-  (R32) can be added later if the measurement says so.
 - **Luma** (FXAA/SMAA style) is cheaper still, but fires on texture detail and misses equal-brightness
   edges. It is used only as a network input for shading contrast, never to decide where edges are.
 - **Last frame's mask** is not reused: detection is already the cheap stage, and reprojecting a mask
@@ -140,9 +147,6 @@ the edge class is a network input, never a switch between methods (section 7):
 - **Alpha coverage.** The alpha-test texture sampled at 4 sub-pixel UVs, from the barycentrics and their
   screen derivatives (1.0 for opaque materials). Foliage and fence edges live in the texture, not the
   triangle.
-- **Raster path:** it has no triangle ID, so its G-buffer pass writes the same distances itself from
-  `SV_Barycentrics` and their derivatives (DEAA's `v / (dv/dx)`), one small extra target; without it,
-  raster edges get the depth/normal classification and alpha samples only.
 - **No extra rays in v1.** Tracing more primary rays at edge pixels is the classic answer (Whitted
   1980), but a pending NVIDIA application claims ray tracing to correct edge pixels in very broad terms
   (section 7). It stays out until that claim settles.
@@ -150,8 +154,8 @@ the edge class is a network input, never a switch between methods (section 7):
 Estimated cost at render scale 0.5: ~0.15 ms.
 
 **Known gap:** geometry thinner than a pixel that no primary ray hit is invisible to all of this and
-will flicker in motion. At rest the TAA path covers it; in motion it is the measured weak point
-(section 6's thin-geometry level).
+will flicker in motion. At rest the TAA covers it; in motion it is the measured weak point (section 6's
+thin-geometry level).
 
 ### 3. Blend weights: baseline, then network
 
@@ -188,7 +192,7 @@ the network measures worse.
 ### Cost (estimate)
 
 Detect ~0.05 ms, coverage ~0.15 ms, inference ~0.15 ms, resolve ~0.05 ms: ~0.4 ms at render scale 0.5 on
-the RX 7800 XT, in motion only.
+the RX 7800 XT, every frame in ray-driven mode.
 
 ---
 
@@ -310,8 +314,10 @@ before 4x4.
 
 - `modules/render.neural`: unchanged for v1.
 - `modules/render.sr`: `NeuRaa` beside `TemporalUpscaler` (tile pre-pass, edge detection, coverage, blend
-  and resolve), called in AverSR's moving-camera path before the spatial upscale. It reads `gRdVisBuf`,
-  `viewZ` and `normalRoughness`. Setting `RENDER.NEURAA`,
+  and resolve), called every frame in ray-driven mode before AverSR (its spatial fallback or the TAAU).
+  It reads `gRdVisBuf`, `viewZ` and `normalRoughness`.
+- `modules/render.voxi`: raster + MSAA resolves its G-buffer to one sample per pixel for its readers, so
+  the denoiser no longer has to turn off. Setting `RENDER.NEURAA`,
   `--neuraa 0|1|2` (off, baseline, network), Display > Anti-aliasing, plus an edge-class debug view.
 - `modules/render.denoise`: two new passes in `aver_denoise.hlsl`'s one-compile-per-pass scheme, a
   pyramid pass that also writes the tile records and the NRD resolve (which includes FidelityFX's
@@ -336,9 +342,12 @@ Every comparison runs in a visible window on fixed camera paths, with the linear
   off by default; it is proposed as the default only if it wins on brightness and spots without worse
   flicker, by day and by night, on NeonDistrict and NewSponza.
 - **NeuRAA:** on the moving-camera rig, error against the 64-sample reference on edge pixels, edge
-  crawl (frame-to-frame change on edges not present in the reference) and cost. The baseline ships if it
-  beats today's no-AA motion path; the network ships only if it beats the baseline, per scene. A
-  thin-geometry test level (wires, fences, distant railings) tracks the known gap.
+  crawl (frame-to-frame change on edges not present in the reference) and cost; at rest, TAA with
+  NeuRAA against TAA alone, on converged quality and on frames to converge after the camera stops. The
+  baseline ships if it beats today's no-AA motion path without making the still image worse; the network
+  ships only if it beats the baseline, per scene. A thin-geometry test level (wires, fences, distant
+  railings) tracks the known gap.
+- **Raster + MSAA:** denoiser output with the G-buffer resolve matches 1x within noise.
 
 ---
 
@@ -351,20 +360,27 @@ legal advice). The design follows them unless counsel says otherwise:
    TAA history clipped to a per-colour-channel mean +- sigma box. NRD's stabiliser clamps to the 3x3
    min/max (Karis 2014, Sousa 2013), and so should the shipped TAA. FidelityFX's own resolve, which NRD
    falls back to, keeps its box; that is the shipped-denoiser finding, not NRD's.
-2. **NeuRAA's network stays out of upscaling and history.** NVIDIA US 12,033,301 and its continuations
-   claim networks generating higher-resolution video from upsampled frames blended with prior output.
-   NeuRAA's network runs only in the moving path, at render resolution, on one frame, before a
-   non-neural spatial upscaler, and is off whenever the TAAU blends history.
+2. **NeuRAA's network never upscales and never touches history.** NVIDIA US 12,033,301 and its
+   continuations claim networks generating higher-resolution video from upsampled frames blended with
+   prior output (one pending claim: a network-predicted per-pixel blend factor with a prior frame).
+   NeuRAA runs every frame, so at rest its output feeds the TAAU, which does upscale and blend history.
+   The network works at render resolution, on one frame, and outputs only spatial 3x3 weights;
+   upscaling and history blending stay in the non-neural TAAU. Whether a network upstream of a
+   non-neural temporal upscaler is outside those claims is **counsel's question**; until answered, the
+   fallback is NeuRAA's baseline (no network) whenever the TAAU runs.
 3. **NeuRAA: one treatment, no triangle counting, no extra rays.** NVIDIA's 2018 edge-AA family claims
    selecting an AA technique from a count of primitives in a pixel (US 12,444,026, granted 2025-10-14),
-   selecting among several AA algorithms by whether pixels are edges (US 12,141,946), and, pending,
+   selecting among several AA algorithms by whether pixels are edges (US 12,141,946; with NeuRAA on
+   edges and TAA everywhere at rest, counsel should confirm that is not such a selection: the tile skip
+   only omits pixels whose result would be unchanged), and, pending,
    ray tracing to correct miscoloured pixels in very broad terms (US 2025/0299305). Every edge pixel
    gets the same computation, the edge class is only a network input, and no extra primary rays are
    traced until that application's claims settle. Qualcomm US 11,631,215 claims blending from a pixel's
    own and an auxiliary primitive's edge distances: each pixel computes only its own triangle's
    distance and reads its neighbours' own values (GBAA, 2011, practises that). AMD US 9,019,299 (to
    ~2029) claims grouping pixels by sample values with a filter per group; NeuRAA classifies from
-   visibility records, which counsel should confirm is outside it.
+   visibility records, which counsel should confirm is outside it, and raster MSAA uses the plain
+   hardware resolve, never an edge-classified one.
 4. **NRD trains in parameter space only.** The University of California's US 10,832,091 claims
    back-propagating an image error between filtered output and ground truth.
 5. **NRD's spatial footprint never depends on sample count.** NVIDIA US 11,113,792 claim 15 covers a
@@ -390,10 +406,10 @@ grants no third-party patent rights).
 
 1. **Plumbing, no visual change.** The Neural Denoise setting and the NRD resolve pass running only its
    FidelityFX branch (verified identical to today); NeuRAA's tile pre-pass, edge detection and the
-   edge-class debug view.
+   edge-class debug view; the raster + MSAA G-buffer resolve, so the denoiser stays on.
 2. **GI hit distance** in `gGiRadianceOut.a`, checked with DRED in a visible window on the RX 7800 XT
    before anything uses it.
-3. **NeuRAA baseline in motion, no network.** Own-triangle edge distances, alpha sub-samples and the
+3. **NeuRAA baseline, every frame, no network.** Own-triangle edge distances, alpha sub-samples and the
    distance-to-edge blend. This alone fixes in-motion stair-stepping.
 4. **NRD with fixed parameters**, behind a developer flag: the pyramid, hit-distance weighting and
    stabiliser with hand-tuned constants. This answers the two open questions (brightness and flicker of
