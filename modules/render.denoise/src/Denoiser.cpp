@@ -4,6 +4,7 @@
 #include "aver/rhi/ShaderFiles.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <initializer_list>
 #include <string>
@@ -33,8 +34,13 @@ struct Constants {
     u32 maxSamples;
     f32 historyClipWeight;
     f32 temporalStability;
+    f32 invViewProjRel[16];
+    f32 prevViewProj[16];
+    f32 camPos[4];
+    f32 viewport[4];
+    f32 prevViewport[4];
 };
-static_assert(sizeof(Constants) == 32, "AverDenoiseCB is two float4s");
+static_assert(sizeof(Constants) == 32 + 128 + 48, "AverDenoiseCB: two float4s, two matrices, three float4s");
 
 constexpr u32 kFlagReset        = 1u;
 constexpr u32 kFlagHalfRate     = 2u;
@@ -79,12 +85,18 @@ bool Denoiser::create(rhi::IDevice& dev) {
         return false;
     }
     u32 built = 0;
+    static const char* kVariantName[kVariants] = {"colour", "one channel", "reflection"};
     for (u32 pass = 0; pass < kPassCount; ++pass) {
-        for (u32 scalar = 0; scalar < ((pass == Scale || pass == NrdCapture) ? 1u : 2u); ++scalar) {
+        for (u32 v = 0; v < kVariants; ++v) {
+            // Scale and the capture are colour only; NRD's passes have no reflection profile.
+            if (v > 0 && (pass == Scale || pass == NrdCapture)) continue;
+            if (v == 2 && pass >= NrdResolve) continue;
+            const u32 scalar = v == 1 ? 1u : 0u;
             // AVER_HLSL_2018 is consumed by the shader compiler (D3D12Device.cpp): FidelityFX's
             // headers are written against HLSL 2018 and are vendored unmodified.
             const std::string defines = "AVER_HLSL_2018;AVER_DNSR_PASS=" + std::to_string(pass) +
-                                        ";AVER_DNSR_SCALAR=" + std::to_string(scalar);
+                                        ";AVER_DNSR_SCALAR=" + std::to_string(scalar) +
+                                        ";AVER_DNSR_REFLECTION=" + std::to_string(v == 2 ? 1 : 0);
             rhi::ShaderDesc sd{};
             sd.source  = source.c_str();
             sd.entry   = kEntry[pass];
@@ -94,12 +106,16 @@ bool Denoiser::create(rhi::IDevice& dev) {
             const rhi::ShaderHandle cs = res_->createShader(sd);
             if (!cs && pass >= NrdResolve) {
                 AVER_WARN("[Denoise] {} ({}) would not compile; Neural Denoise unavailable", kEntry[pass],
-                          scalar ? "one channel" : "colour");
+                          kVariantName[v]);
+                continue;
+            }
+            if (!cs && v == 2) {
+                AVER_WARN("[Denoise] {} (reflection) would not compile; reflections stay undenoised", kEntry[pass]);
                 continue;
             }
             if (!cs) {
                 AVER_WARN("[Denoise] {} ({}) would not compile; running undenoised", kEntry[pass],
-                          scalar ? "one channel" : "colour");
+                          kVariantName[v]);
                 destroy();
                 return false;
             }
@@ -116,7 +132,7 @@ bool Denoiser::create(rhi::IDevice& dev) {
             pd.layout.samplers[0].address = rhi::AddressMode::Clamp;
             const rhi::PipelineHandle p = res_->createComputePipeline(pd);
             res_->destroyShader(cs);   // the pipeline owns the bytecode now
-            if (!p && pass >= NrdResolve) {
+            if (!p && (pass >= NrdResolve || v == 2)) {
                 AVER_WARN("[Denoise] the {} pipeline would not build; Neural Denoise unavailable", kEntry[pass]);
                 continue;
             }
@@ -125,15 +141,15 @@ bool Denoiser::create(rhi::IDevice& dev) {
                 destroy();
                 return false;
             }
-            pipelines_[pass * 2 + scalar] = p;
+            pipelines_[pass * kVariants + v] = p;
             ++built;
         }
     }
     // Neural Denoise needs both variants; a half-built pair would only cover one signal.
     for (u32 pass : {u32(NrdResolve), u32(NrdPyramid)}) {
-        if (pipelines_[pass * 2] && pipelines_[pass * 2 + 1]) continue;
+        if (pipelines_[pass * kVariants] && pipelines_[pass * kVariants + 1]) continue;
         for (u32 v = 0; v < 2; ++v) {
-            rhi::PipelineHandle& p = pipelines_[pass * 2 + v];
+            rhi::PipelineHandle& p = pipelines_[pass * kVariants + v];
             if (p) { res_->destroyPipeline(p); p = 0; --built; }
         }
     }
@@ -236,9 +252,9 @@ bool Denoiser::resize(u32 width, u32 height) {
 
     for (u32 s = 0; s < kSignalCount && ok; ++s) {
         SignalTargets& t = sig_[s];
-        const bool colour = s == static_cast<u32>(Signal::Radiance);
+        const bool colour = s != static_cast<u32>(Signal::Occlusion);
         const rhi::Format value = colour ? rhi::Format::RGBA16F : rhi::Format::R16F;
-        const char* tag = colour ? "radiance" : "occlusion";
+        const char* tag = s == static_cast<u32>(Signal::Reflection) ? "reflection" : colour ? "radiance" : "occlusion";
         // Names live for the texture's lifetime only as debug labels the backend copies.
         const std::string n = std::string("Denoise ") + tag;
         t.history[0]     = make(value, width, height, true, (n + " history A").c_str());
@@ -278,10 +294,10 @@ bool Denoiser::resize(u32 width, u32 height) {
         return false;
     }
     failedWidth_ = failedHeight_ = 0;
-    // Value targets: 4 full-resolution colour (8 B) or one-channel (2 B) per signal, plus six R16F.
+    // Value targets: 4 full-resolution colour (8 B, two signals) or one-channel (2 B), plus six R16F each.
     const f64 px = static_cast<f64>(width) * height;
     AVER_INFO("[Denoise] targets at {}x{}: {:.1f} MiB", width, height,
-              px * ((4 * 8 + 6 * 2) + (4 * 2 + 6 * 2) + 4 + 4) / (1024.0 * 1024.0));
+              px * (2 * (4 * 8 + 6 * 2) + (4 * 2 + 6 * 2) + 4 + 4) / (1024.0 * 1024.0));
     return true;
 }
 
@@ -290,6 +306,8 @@ bool Denoiser::recordSignal(rhi::IRenderContext& ctx, u32 s, rhi::TextureHandle 
     SignalTargets& t = sig_[s];
     const u32 cur = t.parity, prev = 1u - t.parity;
     const u32 scalar = s == static_cast<u32>(Signal::Occlusion) ? 1u : 0u;
+    const bool reflection = s == static_cast<u32>(Signal::Reflection);
+    const u32 variant = reflection ? 2u : scalar;
 
     // Descriptors first, every set, before any dispatch -- a set rewritten between two dispatches
     // that use it would leave the first reading the second's resources.
@@ -355,9 +373,9 @@ bool Denoiser::recordSignal(rhi::IRenderContext& ctx, u32 s, rhi::TextureHandle 
     // Neural Denoise: NRD's spatial resolve with the network when its weights loaded (radiance only;
     // they were trained on it), or with fixed weights under the developer switch; otherwise
     // FidelityFX's resolve through NRD's pass.
-    const bool nrd = neuralResolve && pipelines_[NrdResolve * 2 + scalar] != 0;
+    const bool nrd = neuralResolve && !reflection && pipelines_[NrdResolve * kVariants + scalar] != 0;
     const bool network = nrd && net_ != 0 && s == static_cast<u32>(Signal::Radiance);
-    const bool nrdSpatial = nrd && (neuralSpatial || network) && pipelines_[NrdPyramid * 2 + scalar] != 0;
+    const bool nrdSpatial = nrd && (neuralSpatial || network) && pipelines_[NrdPyramid * kVariants + scalar] != 0;
     if (nrdSpatial) flags |= kFlagNrdSpatial;
     if (nrdSpatial && network) flags |= kFlagNrdNetwork;
 
@@ -370,6 +388,13 @@ bool Denoiser::recordSignal(rhi::IRenderContext& ctx, u32 s, rhi::TextureHandle 
     cb.maxSamples = tuning_.maxSamples ? tuning_.maxSamples : 1u;
     cb.historyClipWeight = tuning_.historyClipWeight;
     cb.temporalStability = 0.0f;
+    if (reflection) {
+        std::memcpy(cb.invViewProjRel, in.invViewProjRel, sizeof(cb.invViewProjRel));
+        std::memcpy(cb.prevViewProj, in.prevViewProj, sizeof(cb.prevViewProj));
+        for (u32 i = 0; i < 3; ++i) cb.camPos[i] = in.camPos[i];
+        std::memcpy(cb.viewport, in.viewport, sizeof(cb.viewport));
+        std::memcpy(cb.prevViewport, in.prevViewport, sizeof(cb.prevViewport));
+    }
     const u32 gx = (width_ + 7u) / 8u, gy = (height_ + 7u) / 8u;
     constexpr rhi::ResourceState kRead = rhi::ResourceState::NonPixelShaderResource;
     constexpr rhi::ResourceState kWrite = rhi::ResourceState::UnorderedAccess;
@@ -382,7 +407,8 @@ bool Denoiser::recordSignal(rhi::IRenderContext& ctx, u32 s, rhi::TextureHandle 
 
     auto dispatch = [&](Pass pass, std::initializer_list<rhi::TextureHandle> outs) {
         for (rhi::TextureHandle o : outs) ctx.textureBarrier(o, kRead, kWrite);
-        ctx.setPipeline(pipelines_[pass * 2 + scalar]);
+        // Scale is shared by both colour signals; the other passes use this signal's own variant.
+        ctx.setPipeline(pipelines_[pass * kVariants + (pass == Scale ? 0u : variant)]);
         ctx.setBindingSet(t.sets[pass]);
         ctx.setConstantBuffer(kConstantSlot, &cb, sizeof(cb));
         if (pass == Scale) ctx.dispatch(1, 1, 1);
@@ -415,9 +441,13 @@ bool Denoiser::record(rhi::IRenderContext& ctx, const Frame& frame, const Inputs
         AVER_WARN("[Denoise] record called with a null G-buffer input; skipping the pass");
         return false;
     }
+    // The reflection variant is optional: without it reflections stay undenoised.
+    const bool reflectionReady = pipelines_[Reproject * kVariants + 2] && pipelines_[Prefilter * kVariants + 2] &&
+                                 pipelines_[Resolve * kVariants + 2];
     const bool run[kSignalCount] = {frame.runOcclusion && in.occlusion != 0,
-                                    frame.runRadiance && in.radiance != 0};
-    if (!run[0] && !run[1]) {
+                                    frame.runRadiance && in.radiance != 0,
+                                    frame.runReflection && in.reflection != 0 && reflectionReady};
+    if (!run[0] && !run[1] && !run[2]) {
         for (bool& r : ranLast_) r = false;
         return false;
     }
@@ -425,7 +455,7 @@ bool Denoiser::record(rhi::IRenderContext& ctx, const Frame& frame, const Inputs
     rhi::ScopedGpuStat gpuStat(ctx, "Denoise");
     constexpr rhi::ResourceState kRead = rhi::ResourceState::NonPixelShaderResource;
     const rhi::TextureHandle gbuf[3] = {in.viewZ, in.normalRoughness, in.motionVectors};
-    const rhi::TextureHandle signal[kSignalCount] = {in.occlusion, in.radiance};
+    const rhi::TextureHandle signal[kSignalCount] = {in.occlusion, in.radiance, in.reflection};
     for (rhi::TextureHandle g : gbuf) ctx.textureBarrier(g, in.gbufferState, kRead);
     for (u32 s = 0; s < kSignalCount; ++s)
         if (run[s]) ctx.textureBarrier(signal[s], in.signalState, kRead);

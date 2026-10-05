@@ -15,3 +15,9 @@ set_target_properties(InputBridgeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAK
 add_executable(PlayMobilityTest src/PlayMobilityTest.cpp)
 target_link_libraries(PlayMobilityTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Core)
 set_target_properties(PlayMobilityTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# LevelSequenceTest -- the level sequence samplers (interpolation, wrap, key round trips) and the player clock.
+# Samplers are pure; the player case needs a real scene::World and nothing else.
+add_executable(LevelSequenceTest src/LevelSequenceTest.cpp)
+target_link_libraries(LevelSequenceTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Core)
+set_target_properties(LevelSequenceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

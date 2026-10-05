@@ -428,9 +428,9 @@ void SandboxApp::onRender(Engine& e)  {
         // "not trustworthy" fallback below (and readbackLagIsExactlyOneCall()) actually guarantees
         // no false cull -- the per-entity margin doesn't by itself prove safety.
         const f32 occlusionMoveDist = occlusionBasisValid_
-            ? (camPos_ - occlusionBasisCamPos_).size() : 1e30f;
+            ? (viewPos() - occlusionBasisCamPos_).size() : 1e30f;
         const f32 occlusionRotRad = occlusionBasisValid_
-            ? std::acos(std::clamp(dot(camForward(), occlusionBasisForward_), -1.0f, 1.0f))
+            ? std::acos(std::clamp(dot(viewForward(), occlusionBasisForward_), -1.0f, 1.0f))
             : 3.2f;   // > pi: forces "untrustworthy" before the first basis has ever landed
         // 45 degrees: keeps the tan() below from blowing up before the global fallback
         // (kOcclusionTeleportRotRad) takes over.
@@ -534,7 +534,7 @@ void SandboxApp::onRender(Engine& e)  {
                     // introduce one -- but it does not bound motion happening between now and when
                     // this readback is actually consumed.
                     const Vec3 boxCentre{(wlo2.x + whi2.x) * 0.5f, (wlo2.y + whi2.y) * 0.5f, (wlo2.z + whi2.z) * 0.5f};
-                    const f32 dist = (boxCentre - camPos_).size();
+                    const f32 dist = (boxCentre - viewPos()).size();
                     // TWO INTERVALS, NOT ONE -- covering only one is why culling still popped
                     // while moving after the margin was first added. occlusionMoveDist measures
                     // motion already elapsed, but the verdict computed here is applied on the NEXT
@@ -624,8 +624,8 @@ void SandboxApp::onRender(Engine& e)  {
             // camera mode. Deliberately AFTER buildPyramid() (so a bailed-out frame doesn't stash a
             // basis for a pyramid never built) and BEFORE testBatch() (order doesn't matter there,
             // but keeps the stash beside the call it documents).
-            occlusionBasisCamPos_ = camPos_;
-            occlusionBasisForward_ = camForward();
+            occlusionBasisCamPos_ = viewPos();
+            occlusionBasisForward_ = viewForward();
             // F7: stashed alongside the camera basis, same idiom -- see occlusionBasisRect_'s own
             // member comment.
             occlusionBasisRect_[0] = occRect[0]; occlusionBasisRect_[1] = occRect[1];
@@ -904,8 +904,8 @@ void SandboxApp::onRender(Engine& e)  {
                 // the floor in the first place.
                 constexpr f32 kMinCasterAngle = 0.02f;   // radians (~1.1 degrees)
                 if (!self.voxiAttached_ && cullRadius >= 0.0f) {
-                    const f32 dx = cullCentre.x - self.camPos_.x, dy = cullCentre.y - self.camPos_.y,
-                              dz = cullCentre.z - self.camPos_.z;
+                    const Vec3 vp = self.viewPos();
+                    const f32 dx = cullCentre.x - vp.x, dy = cullCentre.y - vp.y, dz = cullCentre.z - vp.z;
                     const f32 dsq = dx * dx + dy * dy + dz * dz;
                     if (dsq > cullRadius * cullRadius) {
                         const f32 dd = std::sqrt(dsq);
@@ -1500,6 +1500,12 @@ void SandboxApp::onRender(Engine& e)  {
         copt.onEntityDelivered = colourDelivered;
         copt.onSurfaceWarn = colourWarn;
         copt.onSkipped = colourSkipped;
+#if AVER_MODULE_SCENE
+        // The level sequence's emissive tracks, for the Animate preview and Play.
+        copt.emissiveScale = [](scene::Entity ent, f32 out[3], void* user) {
+            return static_cast<ColourWalk*>(user)->self->seqEditor_.emissiveScale(ent, out);
+        };
+#endif
         copt.user = &walk;
         // --no-walk-cache, negated -- MUST MATCH the depth-prepass call site's popt.useMeshLookupCache:
         // both walks resolve the same mesh ids, so caching one and not the other would make

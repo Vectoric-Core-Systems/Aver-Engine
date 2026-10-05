@@ -551,6 +551,12 @@ void GameApp::tickGameplay(f32 dt) {
 #endif
 }
 
+#if AVER_MODULE_SCENE
+bool GameApp::sequenceEmissiveScale(scene::Entity e, f32 outRgb[3], void* user) {
+    return static_cast<const GameApp*>(user)->sequencePlayer_.emissiveScale(e, outRgb);
+}
+#endif
+
 void GameApp::drivePlayCamera() {
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
     firstPersonPawn_ = game::drivePlayCamera(camPos_, yaw_, pitch_);
@@ -936,6 +942,7 @@ void GameApp::installLevelHooks(Engine& e) {
     hooks.groundHeightAt = [this](f64 x, f64 y, f64& outZ) { return landscape_.groundHeightAt(x, y, outZ); };
 #  endif
     hooks.afterUnload = [this, &e] {
+        sequencePlayer_ = game::SequencePlayer{};
 #  if AVER_MODULE_FLUIDS
         water_.unload();
 #  endif
@@ -957,6 +964,21 @@ void GameApp::installLevelHooks(Engine& e) {
     hooks.afterInstantiate = [this](const GameLevel::LoadedLevel& loaded) {
         levelGameMode_    = loaded.world.gameMode;      // World Settings overrides, read at begin play
         levelDefaultPawn_ = loaded.world.defaultPawn;
+        // The level's first sequence, bound to its placements' entities; it starts with the session.
+        sequencePlayer_ = game::SequencePlayer{};
+        if (!loaded.world.sequences.empty()) {
+            std::vector<scene::Entity> byPlacement(loaded.world.placements.size(), scene::kInvalidEntity);
+            const auto& inst = loaded.instance;
+            for (usize k = 0; k < inst.entities.size() && k < inst.placementIndex.size(); ++k)
+                if (inst.placementIndex[k] < byPlacement.size()) byPlacement[inst.placementIndex[k]] = inst.entities[k];
+            const fmt::OcSequence& seq = loaded.world.sequences.front();
+            sequencePlayer_.setSequence(seq);
+            sequencePlayer_.bind(byPlacement);
+            sequencePlayer_.setTime(0);
+            if (seq.autoplay) sequencePlayer_.play();
+            AVER_INFO("[Game] level sequence '{}': {} track(s), {:.1f}s{}", seq.name, seq.tracks.size(), seq.length,
+                      seq.autoplay ? ", autoplay" : "");
+        }
 #  if AVER_MODULE_VOXI
         // Load foliage after placements (matches editor)
         if (voxiAttached_) {
@@ -1751,6 +1773,8 @@ void GameApp::onInit(Engine& e) {
 #if AVER_MODULE_SCENE
     // Shipped game: booting the level starts objects (editor turns this on at Play). Marks objects movable.
     playMobility_.begin(scene::World::instance());
+    // The sequence's actors are going to move: movable from the first frame, like the physics cars.
+    if (!sequencePlayer_.empty()) playMobility_.seedMovable(sequencePlayer_.boundEntities());
     anim::animSystem().setObjectAnimationLive(true);
 #endif
     beginPlayIfGameModeDeclared();
@@ -1899,6 +1923,11 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // Animation clock ticks UNCONDITIONALLY: hanging off gameplay gates would freeze it when no session is running.
     anim::animSystem().setObjectAnimationPaused(objectsHeld);
     anim::animSystem().tick(scene::World::instance(), t.dt);
+    // Level sequence: advances with the session (not while paused), writes transforms before the flush below.
+    if (!sequencePlayer_.empty()) {
+        if (!objectsHeld) sequencePlayer_.advance(t.dt);
+        sequencePlayer_.evaluate(scene::World::instance());
+    }
     // Animated placements' kinematic bodies follow poses the tick just wrote.
     if (!objectsHeld)
         world::driveKinematicBodies(scene::World::instance(), level_.animatedBodies(), t.dt);
@@ -1931,6 +1960,18 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 
     // AFTER flush, BEFORE view matrix build. Reading pawn transforms before flush gives last frame's.
     drivePlayCamera();
+#if AVER_MODULE_SCENE
+    // A sequence's camera track takes the view while it plays (the pawn's body shows, as in a cutscene).
+    if (sequencePlayer_.sequence().camera) {
+        game::SeqCameraPose seqCam;
+        if (sequencePlayer_.camera(seqCam)) {
+            camPos_ = seqCam.position;
+            yaw_ = seqCam.yaw;
+            pitch_ = seqCam.pitch;
+            firstPersonPawn_ = scene::kInvalidEntity;
+        }
+    }
+#endif
 
     // Polled after prePass. Build takes three frames by design.
     if (cfg_.pcgVolumeTest) checkPcgVolume();
@@ -2006,6 +2047,10 @@ void GameApp::onRender(Engine& e) {
 #endif
             playMobility_.beginFrame(movableRoot);
             opts.mobility = &playMobility_;
+        }
+        if (!sequencePlayer_.empty()) {
+            opts.emissiveScale = &GameApp::sequenceEmissiveScale;
+            opts.user = this;
         }
 #if AVER_MODULE_VOXI
         // Culled and owner-hidden entities reach Voxi too, so off-screen casters keep shadow and GI.

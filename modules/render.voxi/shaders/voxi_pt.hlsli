@@ -314,10 +314,16 @@ float3 ptContinue(PtVertex v, float2 pixel, inout uint rng, uint depth) {
 }
 // Outgoing radiance toward the ray from the first surface it hits, path traced: what a reflection
 // sees in Path Tracing. `skyFallback` is the caller's own sky lookup for a miss.
+// The last ptRadiance call's first hit distance (kAverReflMissT on a miss): the reflection denoiser's
+// parallax reprojection needs it, and the path itself does not return it.
+static const float kAverReflMissT = 6.0e4;   // cm; fits RGBA16F, far enough to read as infinity
+static float gAverPtFirstT = kAverReflMissT;
 float3 ptRadiance(float3 origin, float3 dir, float tmin, float cone, float2 pixel, uint stream,
                   float3 skyFallback) {
     PtVertex v;
+    gAverPtFirstT = kAverReflMissT;
     if (!ptTrace(origin, dir, tmin, cone, v)) return skyFallback;
+    gAverPtFirstT = min(length(v.pos - origin), kAverReflMissT);
     uint rng = ptSeed(pixel, stream);
     const float3 here = v.s.emissive + ptDirect(v, pixel, rng);
 #if AVER_NEURAC

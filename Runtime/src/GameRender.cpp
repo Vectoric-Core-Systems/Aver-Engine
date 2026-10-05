@@ -520,6 +520,25 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         return built;
     };
 
+    // A level sequence's emissive multiplier, applied to a stack copy of the constants: the memoised
+    // look is shared by every entity of the material and must stay untouched. The copy is only valid
+    // until the next call, which is fine, every sink copies the bytes before returning.
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+    pbr::MaterialConstants emissiveCopy;
+    auto constantsFor = [&](scene::Entity e, const DrawLook& dl) -> const void* {
+        f32 rgb[3];
+        if (!options.emissiveScale || !dl.matConstants || !options.emissiveScale(e, rgb, options.user))
+            return dl.matConstants;
+        emissiveCopy = *static_cast<const pbr::MaterialConstants*>(dl.matConstants);
+        emissiveCopy.emissiveFactor[0] *= rgb[0];
+        emissiveCopy.emissiveFactor[1] *= rgb[1];
+        emissiveCopy.emissiveFactor[2] *= rgb[2];
+        return &emissiveCopy;
+    };
+#else
+    auto constantsFor = [](scene::Entity, const DrawLook& dl) -> const void* { return dl.matConstants; };
+#endif
+
     const u32 n = w.count();
     // Visit order is the caller's; hooks are told `oi`, the position in it, since the editor's
     // occlusion pass-1/pass-2 boundary is an index into THIS sequence, not the world's (see
@@ -903,7 +922,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 // objects behind the glass fail depth-test against it, vanishing under it instead of
                 // showing through.
                 if (dl.look.blended) continue;
-                if (dl.matBytes) device.setDrawBinding(dl.matSet, dl.matConstants, dl.matBytes);
+                if (dl.matBytes) device.setDrawBinding(dl.matSet, constantsFor(ent, dl), dl.matBytes);
                 // dl.look.col: same base colour the colour pass hands drawMesh (minus the debug
                 // tint, which only touches .g). PSDepthPrepass's alpha test multiplies by its .a;
                 // without it every alpha-masked material clipped every pixel and wrote no depth.
@@ -937,7 +956,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 // false on every ordinary frame, so `col` is a copy of dl.look.col, value for value.
                 f32 col[4] = {dl.look.col[0], dl.look.col[1], dl.look.col[2], dl.look.col[3]};
                 if (route.tint) col[1] *= 0.15f;
-                if (dl.matBytes) device.setDrawBinding(dl.matSet, dl.matConstants, dl.matBytes);
+                if (dl.matBytes) device.setDrawBinding(dl.matSet, constantsFor(ent, dl), dl.matBytes);
 
                 // Sticky on the device (RHI.hpp's setDrawBlended), so set on EVERY draw, not only
                 // when true -- skipping false would leave the flag set for whatever draws next,
@@ -1033,19 +1052,20 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 if (!pd.mesh) continue;
                 const auto dl = resolveDrawLook(pd.material);
                 const VoxiDelivery del = deliver(pd, dl.look, route);
+                const void* const directConstants = constantsFor(ent, dl);
                 f32 col[4] = {dl.look.col[0], dl.look.col[1], dl.look.col[2], dl.look.col[3]};
                 if (route.tint) col[1] *= 0.15f;
 #if AVER_MODULE_VOXI
                 if (options.voxiRenderer) {
                     options.voxiRenderer->submit(del.mesh, &wm.m[0][0], col, dl.look.metallic,
-                                                 dl.look.roughness, dl.matSet, dl.matConstants,
+                                                 dl.look.roughness, dl.matSet, directConstants,
                                                  dl.matBytes, del.translucent, del.hiddenFromOwner,
                                                  movableHere);
                 }
 #endif
                 if (options.onDirectDraw) {
                     options.onDirectDraw(del.mesh, &wm.m[0][0], col, dl.look.metallic,
-                                         dl.look.roughness, dl.matSet, dl.matConstants, dl.matBytes,
+                                         dl.look.roughness, dl.matSet, directConstants, dl.matBytes,
                                          del.translucent, del.hiddenFromOwner, options.user);
                 }
             }

@@ -134,11 +134,11 @@ void giSamplers(rhi::PipelineLayout& l) {
 
 // Wider than kGiSrvCount/kGiUavCount (SandboxApp.cpp's GPU path depends on those constants).
 // Includes extra slots for materials, backdrops, history, local lights, foliage, and radiance cache.
-constexpr u32 kVoxiSrvCount = kGiSrvCount + 14;
+constexpr u32 kVoxiSrvCount = kGiSrvCount + 15;
 
 // Wider than kGiUavCount (same reasoning as kVoxiSrvCount).
 // Includes history, ray-driven, and radiance-cache outputs. u11+ always declared, bound to placeholders when absent.
-constexpr u32 kVoxiUavCount = kGiUavCount + 19;
+constexpr u32 kVoxiUavCount = kGiUavCount + 20;
 
 // Declares slot kinds for all table 0 bindings (Vulkan requires type consistency).
 void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
@@ -165,6 +165,7 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     srv[20] = rhi::SlotKind::StructuredBuffer;      // t20 foliage part table
     srv[21] = rhi::SlotKind::StructuredBuffer;      // t21 foliage instance descs
     srv[22] = rhi::SlotKind::StructuredBuffer;      // t22 radiance-cache cascade info
+    srv[23] = rhi::SlotKind::Texture2D;             // t23 denoised reflection (read)
     uav[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
     uav[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     uav[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
@@ -188,7 +189,8 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     uav[20] = rhi::SlotKind::StructuredBuffer;      // u20 radiance-cache accumulator
     uav[21] = rhi::SlotKind::StructuredBuffer;      // u21 radiance-cache cells
     uav[22] = rhi::SlotKind::StructuredBuffer;      // u22 Path Tracing progressive accumulation
-    static_assert(kVoxiSrvCount == 23 && kVoxiUavCount == 23 && kGiSrvCount == 9 && kGiUavCount == 4,
+    uav[23] = rhi::SlotKind::Texture2D;             // u23 reflection denoiser input (write)
+    static_assert(kVoxiSrvCount == 24 && kVoxiUavCount == 24 && kGiSrvCount == 9 && kGiUavCount == 4,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -488,6 +490,10 @@ void VoxiRenderer::shutdown() {
     if (rdGiPlaceholder_)     { res_->destroyTexture(rdGiPlaceholder_);     rdGiPlaceholder_ = 0; }
     if (rdAoPlaceholder_)     { res_->destroyTexture(rdAoPlaceholder_);     rdAoPlaceholder_ = 0; }
     if (rdReflPlaceholder_)   { res_->destroyTexture(rdReflPlaceholder_);   rdReflPlaceholder_ = 0; }
+    if (rdReflDnIn_)          { res_->destroyTexture(rdReflDnIn_);          rdReflDnIn_ = 0; }
+    if (rdReflDnPlaceholder_) { res_->destroyTexture(rdReflDnPlaceholder_); rdReflDnPlaceholder_ = 0; }
+    rdReflDnBound_ = false;
+    denoiseReflOutput_ = 0;
     // Sub-stage splits' buffers and placeholders.
     if (rdGiCandBuf_) { res_->destroyBuffer(rdGiCandBuf_); rdGiCandBuf_ = 0; }
     if (rdShadowTileBuf_) { res_->destroyBuffer(rdShadowTileBuf_); rdShadowTileBuf_ = 0; }
@@ -957,6 +963,20 @@ u64 synthMaterialKey(const f32 color[4], f32 metallic, f32 roughness) {
     fnvMix(h, &metallic, sizeof(f32));
     fnvMix(h, &roughness, sizeof(f32));
     return h & ~(1ull << 63);
+}
+
+// 31-bit tag of a MaterialConstants block's emissiveFactor; 0 for exactly-zero emissive (the common case).
+// Authored material keys carry it so draws that differ only in emissive get their own table row.
+u32 emissiveKeyTag(const void* mcBytes) {
+    u32 bits[3];
+    std::memcpy(bits, static_cast<const u8*>(mcBytes) + offsetof(pbr::MaterialConstants, emissiveFactor),
+                sizeof(bits));
+    if (!(bits[0] | bits[1] | bits[2])) return 0;
+    u64 h = 1469598103934665603ull;
+    fnvMix(h, bits, sizeof(bits));
+    h ^= h >> 32;
+    const u32 tag = static_cast<u32>(h) & 0x7FFFFFFFu;
+    return tag ? tag : 1u;
 }
 
 // Mix mesh handle bits for submit()'s cache. Same shape as GameRender.cpp's mixMeshId.
@@ -1439,7 +1459,9 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         const MoverPatch patch = rtMovers_.empty() ? MoverPatch::Unchanged : patchRtMovers(drawsPrev_, false);
         if (patch != MoverPatch::Refused) {
             bool settleUploadFailed = false;
-            if (settled && patch != MoverPatch::Patched) settleUploadFailed = !uploadRtInstanceTable();
+            // Patched and MaterialsOnly already uploaded the instance table (settled rows included).
+            if (settled && patch != MoverPatch::Patched && patch != MoverPatch::MaterialsOnly)
+                settleUploadFailed = !uploadRtInstanceTable();
             if (!settleUploadFailed) {
                 rtPrevPending_.clear();
                 for (const RtMover& m : rtMovers_) {
@@ -1723,7 +1745,8 @@ bool VoxiRenderer::rtAccelMustForceRebuild() const {
 // One draw's material identity into hash `h`, for rtAccelDrawsKey() and GI keys.
 // 176-byte constant block hashed word-at-a-time; two MaterialSystem lookups per binding set, not per draw.
 // d.matSet alone is not enough: in-place material edits bypass revision bumps; hash d.mat + texture set instead.
-void VoxiRenderer::hashDrawMaterialInto(u64& h, const Draw& d, DrawMaterialMemo& memo) const {
+// skipEmissive hashes the block with emissiveFactor zeroed (mover lane: an emissive-only change keeps identity).
+void VoxiRenderer::hashDrawMaterialInto(u64& h, const Draw& d, DrawMaterialMemo& memo, bool skipEmissive) const {
     DrawMaterialMemoSlot& slot = memo[d.matSet & (kDrawMaterialMemoSlots - 1)];
     if (slot.state == 0 || slot.set != d.matSet) {
         slot.set = d.matSet;
@@ -1744,7 +1767,14 @@ void VoxiRenderer::hashDrawMaterialInto(u64& h, const Draw& d, DrawMaterialMemo&
     h ^= static_cast<u64>(d.matSet); h *= 1099511628211ull;
     h ^= authored ? 1ull : 0ull; h *= 1099511628211ull;
     if (authored) {
-        hashBytesInto(h, d.mat, sizeof(d.mat));
+        if (skipEmissive) {
+            u8 bytes[sizeof(d.mat)];
+            std::memcpy(bytes, d.mat, sizeof(bytes));
+            std::memset(bytes + offsetof(pbr::MaterialConstants, emissiveFactor), 0, sizeof(f32) * 3);
+            hashBytesInto(h, bytes, sizeof(bytes));
+        } else {
+            hashBytesInto(h, d.mat, sizeof(d.mat));
+        }
         if (slot.state & 4u) { h ^= slot.texHash; h *= 1099511628211ull; }
     } else {
         // UNAUTHORED: per-draw loop builds constants from color/metallic/roughness alone.
@@ -1780,7 +1810,8 @@ u64 VoxiRenderer::rtDrawHash(const Draw& d, DrawMaterialMemo& memo, bool moverLa
     h ^= (d.translucent ? 1ull : 0ull) | (d.hiddenFromOwner ? 2ull : 0ull) | (mover ? 4ull : 0ull);
     h *= 1099511628211ull;
 
-    hashDrawMaterialInto(h, d, memo);
+    // A mover's emissive stays out of its identity: patchRtMovers() re-keys the material row instead.
+    hashDrawMaterialInto(h, d, memo, mover);
 
     // Finalize: decorrelate low bits before addition.
     h ^= h >> 33; h *= 0xff51afd7ed558ccdull;
@@ -1914,10 +1945,18 @@ VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers(const std::vector<Draw>& li
     }
 
     bool changed = false;
+    bool matChanged = false;
     for (usize k = 0; k < rtMovers_.size(); ++k) {
         const u32 inst = rtMovers_[k].inst;
         if (inst == kRtNoInstance) continue;
-        const f32* world = list[rtMoversNow_[k].draw].world;
+        const Draw& md = list[rtMoversNow_[k].draw];
+        // Emissive is not in a mover's identity: re-key its material row from the paired draw.
+        const u64 matKey = rtMaterialKey(md.matSet, md.mat, md.color, md.metallic, md.roughness);
+        if (inst < rtInstanceMatKey_.size() && rtInstanceMatKey_[inst] != matKey) {
+            rtInstanceMatKey_[inst] = matKey;
+            matChanged = true;
+        }
+        const f32* world = md.world;
         rhi::TlasInstance& ti = tlasInstScratch_[inst];
         if (std::memcmp(ti.world, world, sizeof(ti.world)) == 0) continue;
         changed = true;
@@ -1927,9 +1966,22 @@ VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers(const std::vector<Draw>& li
         std::memcpy(ti.world, world, sizeof(ti.world));
         std::memcpy(ri.objectToWorld, world, sizeof(ri.objectToWorld));
     }
-    if (!changed) return MoverPatch::Unchanged;
+    if (!changed && !matChanged) return MoverPatch::Unchanged;
+    if (matChanged) {
+        // Drop rows nothing uses (an animated emissive makes a new key every frame), then re-row: every
+        // instance and foliage part gets its index rewritten before the uploads. The TLAS is untouched.
+        std::vector<u64> live(rtInstanceMatKey_);
+        live.insert(live.end(), foliagePartMatKey_.begin(), foliagePartMatKey_.end());
+        std::sort(live.begin(), live.end());
+        for (auto it = matConstantsScratch_.begin(); it != matConstantsScratch_.end();) {
+            if (std::binary_search(live.begin(), live.end(), it->first)) ++it;
+            else it = matConstantsScratch_.erase(it);
+        }
+        if (!buildMaterialTable(matConstantsScratch_)) return refuse("the material table could not be rebuilt");
+        if (rtGeometryReady_) uploadFoliagePartTable();
+    }
     if (!uploadRtInstanceTable()) return refuse("the instance table could not be uploaded");
-    return MoverPatch::Patched;
+    return changed ? MoverPatch::Patched : MoverPatch::MaterialsOnly;
 }
 
 // Ray-driven frames record at endFrame (D3D12), so latePatchMovers sees this frame's draw list.
@@ -2698,6 +2750,8 @@ u32 VoxiRenderer::fitCascades() {
     f32 camPos[3] = {};
     // Forward matrix captured into curViewProj_ for endShadowHistory's reprojection source.
     if (!dev_ || !dev_->camera(curViewProj_, invViewProjRel, camPos)) return 0;
+    std::memcpy(curInvViewProjRel_, invViewProjRel, sizeof(curInvViewProjRel_));
+    std::memcpy(curCamPos_, camPos, sizeof(curCamPos_));
 
     Mat4 invVPRel;
     std::memcpy(&invVPRel.m[0][0], invViewProjRel, sizeof(invViewProjRel));
@@ -3128,7 +3182,11 @@ bool VoxiRenderer::buildMaterialTable(const std::unordered_map<u64, pbr::Materia
 u64 VoxiRenderer::rtMaterialKey(rhi::BindingSetHandle matSet, const void* authoredBytes, const f32 color[4],
                                 f32 metallic, f32 roughness) {
     const bool authored = materials_.ownsBindingSet(matSet) && matSet != materials_.fallbackBindingSet();
-    const u64 matKey = authored ? ((1ull << 63) | static_cast<u64>(matSet))
+    // Authored: bit 63, emissive tag in bits 32..62, set handle in the low 32. Constants come from the
+    // first draw seen with that exact key, so a per-draw emissive change gets its own row.
+    static_assert(sizeof(rhi::BindingSetHandle) <= sizeof(u32), "authored key packs the set handle in 32 bits");
+    const u64 matKey = authored ? ((1ull << 63) | (static_cast<u64>(emissiveKeyTag(authoredBytes)) << 32) |
+                                   static_cast<u64>(matSet))
                                 : synthMaterialKey(color, metallic, roughness);
     if (matConstantsScratch_.find(matKey) != matConstantsScratch_.end()) return matKey;
     pbr::MaterialConstants mc;
@@ -4837,6 +4895,24 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
 
 // Staged ray-driven passes: (re)creates or releases resources at the given size. Simpler than
 // ensureShadowHistory above -- no ping-pong, every texture recreated outright on a size change.
+// u23 to a 1x1 stand-in: CSRdRefl reads its size as "not denoising" and falls back.
+bool VoxiRenderer::bindReflDnPlaceholder() {
+    if (!res_ || !bindings_) return false;
+    if (!rdReflDnPlaceholder_) {
+        rhi::TextureDesc pd;
+        pd.dim    = rhi::TextureDim::Tex2D;
+        pd.width  = 1; pd.height = 1; pd.mips = 1;
+        pd.format = rhi::Format::RGBA16F;
+        pd.bind   = rhi::ResourceBind::UnorderedAccess;
+        pd.initialState = rhi::ResourceState::UnorderedAccess;
+        pd.debugName    = "Voxi reflection denoiser input placeholder";
+        rdReflDnPlaceholder_ = res_->createTexture(pd);
+        if (!rdReflDnPlaceholder_) return false;
+    }
+    res_->setUav(bindings_, 23, rdReflDnPlaceholder_, 0);
+    return true;
+}
+
 bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
     if (!res_ || !bindings_) return false;
 
@@ -4922,6 +4998,11 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
             if (rdGiTex_)     { res_->destroyTexture(rdGiTex_);     rdGiTex_ = 0; }
             if (rdAoTex_)     { res_->destroyTexture(rdAoTex_);     rdAoTex_ = 0; }
             if (rdReflTex_)   { res_->destroyTexture(rdReflTex_);   rdReflTex_ = 0; }
+            if (rdReflDnIn_) {
+                if (bindReflDnPlaceholder()) rdReflDnBound_ = false;
+                res_->destroyTexture(rdReflDnIn_);
+                rdReflDnIn_ = 0;
+            }
             if (rdGiCandBuf_)     { res_->destroyBuffer(rdGiCandBuf_);     rdGiCandBuf_ = 0; }
             if (rdShadowTileBuf_) { res_->destroyBuffer(rdShadowTileBuf_); rdShadowTileBuf_ = 0; }
             rdVisBufElemCapacity_ = 0;
@@ -5022,6 +5103,25 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
         rdReflTex_ = res_->createTexture(d);
         if (!rdReflTex_) return false;
         res_->setUav(bindings_, 15, rdReflTex_, 0);
+    }
+    // The reflection denoiser's input: SRV too, the denoiser reads it next frame. Bound per frame.
+    if (rdReflDnIn_ && (rdStagedW_ != width || rdStagedH_ != height)) {
+        if (rdReflDnBound_ && bindReflDnPlaceholder()) rdReflDnBound_ = false;
+        res_->destroyTexture(rdReflDnIn_);
+        rdReflDnIn_ = 0;
+    }
+    if (!rdReflDnIn_) {
+        rhi::TextureDesc d;
+        d.dim    = rhi::TextureDim::Tex2D;
+        d.width  = width;
+        d.height = height;
+        d.mips   = 1;
+        d.format = rhi::Format::RGBA16F;
+        d.bind   = static_cast<rhi::ResourceBind>(static_cast<u32>(rhi::ResourceBind::ShaderResource) |
+                                                  static_cast<u32>(rhi::ResourceBind::UnorderedAccess));
+        d.initialState = rhi::ResourceState::UnorderedAccess;
+        d.debugName    = "Voxi reflection denoiser input";
+        rdReflDnIn_ = res_->createTexture(d);   // optional: without it reflections stay undenoised
     }
 
     // Visibility buffer: reallocated only when capacity no longer fits or overshoots by >2x.
@@ -5239,7 +5339,10 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     const bool denoiseGiSignal = giRadiance_ && giRestirWanted() && !ptReferenceWanted();
     const bool denoiseAoSignal = rtAoHitDist_ != 0 &&
                                  (!rayDrivenActive() || (lightingLegacyBits_ & 32u) != 0u);
-    if (denoiser_.valid() && gbufWritten && (denoiseAoSignal || denoiseGiSignal)) {
+    // Reflections: last frame's CSRdRefl wrote rdReflDnIn_ (u23 was bound to it).
+    const bool denoiseReflSignal = settings_.denoiseReflections && rdReflDnIn_ != 0 && rdReflDnBound_;
+    denoiseReflOutput_ = 0;
+    if (denoiser_.valid() && gbufWritten && (denoiseAoSignal || denoiseGiSignal || denoiseReflSignal)) {
         render::denoise::Denoiser::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();
         in.motionVectors   = dev_->gBufferVelocityTexture();
@@ -5249,7 +5352,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         in.radiance    = denoiseGiSignal ? giRadiance_ : 0;
         in.signalState = rhi::ResourceState::UnorderedAccess;
         rhi::TextureDesc sizeDesc{};
-        const rhi::TextureHandle sizeFrom = rtAoHitDist_ ? rtAoHitDist_ : giRadiance_;
+        const rhi::TextureHandle sizeFrom = rtAoHitDist_ ? rtAoHitDist_ : giRadiance_ ? giRadiance_ : rdReflDnIn_;
         const bool haveSize = res_->textureInfo(sizeFrom, sizeDesc);
         const u32 tw = haveSize ? sizeDesc.width : 0u, th = haveSize ? sizeDesc.height : 0u;
 
@@ -5273,8 +5376,20 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         } else if (gbufSizeOk) {
             denoiseWarnedInputSizeMismatch_ = false;
         }
+        rhi::TextureDesc reflDesc{};
+        const bool reflSizeOk = denoiseReflSignal && res_->textureInfo(rdReflDnIn_, reflDesc) &&
+                                reflDesc.width == tw && reflDesc.height == th;
+        if (reflSizeOk) {
+            in.reflection = rdReflDnIn_;
+            std::memcpy(in.invViewProjRel, prevInvViewProjRel_, sizeof(in.invViewProjRel));
+            std::memcpy(in.prevViewProj, prev2ViewProj_, sizeof(in.prevViewProj));
+            std::memcpy(in.camPos, prevCamPos_, sizeof(in.camPos));
+            std::memcpy(in.viewport, prevSceneViewport_, sizeof(in.viewport));
+            std::memcpy(in.prevViewport, prev2SceneViewport_, sizeof(in.prevViewport));
+        }
         if (gbufSizeOk && tw && th && denoiser_.resize(tw, th)) {
             render::denoise::Denoiser::Frame frame;
+            frame.runReflection = reflSizeOk;
             frame.runOcclusion = denoiseAoSignal;
             frame.runRadiance  = denoiseGiSignal;
             frame.resetHistory = !rtHistValid_;
@@ -5297,6 +5412,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
                 denoiseAoOutput_ = denoiser_.output(render::denoise::Signal::Occlusion);
                 denoiseGiOutput_ = denoiser_.output(render::denoise::Signal::Radiance);
                 denoiseGiRanThisFrame_ = denoiseGiOutput_ != 0;
+                denoiseReflOutput_ = denoiser_.output(render::denoise::Signal::Reflection);
             }
         }
     }
@@ -5307,6 +5423,15 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     else                  res_->clearSrv(bindings_, 14);
     if (denoiseGiOutput_) res_->setSrv(bindings_, 15, denoiseGiOutput_);
     else                  res_->clearSrv(bindings_, 15);
+    if (denoiseReflOutput_) res_->setSrv(bindings_, 23, denoiseReflOutput_);
+    else                    res_->clearSrv(bindings_, 23);
+    // This frame's CSRdRefl writes the denoiser's input only while it can run next frame.
+    const bool reflDnWanted = settings_.denoiseReflections && rdReflDnIn_ != 0 && denoiser_.valid() && gbufWritten;
+    if (reflDnWanted != rdReflDnBound_ || !rdReflDnPlaceholder_) {
+        if (reflDnWanted) res_->setUav(bindings_, 23, rdReflDnIn_, 0);
+        else              bindReflDnPlaceholder();
+        rdReflDnBound_ = reflDnWanted;
+    }
 
     // Read fresh every frame (scene viewport can change without full notification).
     const bool haveViewport = dev_ && dev_->sceneViewport(curSceneViewport_);
@@ -5467,8 +5592,12 @@ void VoxiRenderer::endShadowHistory() {
         for (int i = 0; i < 3; ++i) { rtHistSunDir_[i] = sky.sunDirection[i]; rtHistSunColor_[i] = sky.sunColor[i]; }
         rtHistSunIntensity_ = sky.sunIntensity;
     }
+    std::memcpy(prev2ViewProj_, prevViewProj_, sizeof(prevViewProj_));
+    std::memcpy(prev2SceneViewport_, prevSceneViewport_, sizeof(prevSceneViewport_));
     std::memcpy(prevViewProj_, curViewProj_, sizeof(curViewProj_));
     std::memcpy(prevSceneViewport_, curSceneViewport_, sizeof(curSceneViewport_));
+    std::memcpy(prevInvViewProjRel_, curInvViewProjRel_, sizeof(curInvViewProjRel_));
+    std::memcpy(prevCamPos_, curCamPos_, sizeof(curCamPos_));
     rtHistWriteIdx_ = 1 - rtHistWriteIdx_;
     rtHistValid_ = true;
     rtHistPrimed_ = true;

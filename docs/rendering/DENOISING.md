@@ -4,7 +4,9 @@
 driven by `modules/render.denoise` (`aver::render::denoise::Denoiser`). It runs FidelityFX's
 reflection pipeline at roughness 1 as a diffuse denoiser over two Voxi signals, the sky-occlusion hit
 distance and the ReSTIR GI radiance, on D3D12 only. It reads the D3D12 G-buffer (velocity, view Z,
-normal + roughness). Shadows and reflections use the hand-written filters in section 3.
+normal + roughness). Staged ray-driven reflections go through its reflection pipeline as designed
+(section 4, Denoise Reflections, on by default); shadows, and reflections elsewhere, use the
+hand-written filters in section 3.
 
 ---
 
@@ -88,6 +90,35 @@ Reflection work done for these filters (2026-08-27):
 - **Gaussian rather than flat kernels**: a box filter rings as a square-edged halo around a bright
   feature.
 - **The reflection cutoff is roughness 0.75**, with the fade a seam-hider across the last quarter.
+
+## 4. Reflections through the denoiser (2026-10-05)
+
+`Signal::Reflection`, compiled as `AVER_DNSR_REFLECTION`: real roughness from the G-buffer (glossy up
+to 0.75, mirror below 0.1), the hit distance in the input's alpha, and FidelityFX's parallax
+reprojection through the reflected point (camera block in `AverDenoiseCB`: the G-buffer frame's
+camera-relative inverse view-projection and the frame before's view-projection, kept by Voxi one
+frame deeper than its own history). `CSRdRefl` writes one raw sample + hit distance to u23
+(glossy pixels at half rate on a pixel checkerboard, skipped pixels marked a = -1 and rebuilt by the
+denoiser from their traced neighbours) and shows last frame's result from t23, read where the
+reflected point was on last frame's screen. Off (`voxi.denoiseReflections 0`), Voxi's own reflection
+history and filter run as before. Raster and Vulkan paths do not denoise reflections.
+
+**FidelityFX's prefilter is skipped for reflections.** Its radiance weights dropped sparse bright
+reflections: NeonDistrict Night moving, road patches kept 25-35% of their light (whole frame -2.6%).
+Bypassed, the light is kept (-1%) and the speckle still goes, since the temporal pass along the
+reflected point is what removes it. A 4x or 16x wider history clip changed nothing.
+
+NeonDistrict Night, render scale 0.5, moving (`--cam-wander 1.5 2.3`), GI off:
+
+| | speckles (per mille) | frame light | GPU total |
+|---|---|---|---|
+| Voxi's filter | 1.11 | 0.01121 | 45.9 ms |
+| denoiser, full rate | 0.28 | 0.01091 | 54.9 ms |
+| denoiser, half rate, no prefilter (shipped) | 0.28 | 0.01110 | 48.3 ms |
+| no reflection rays at all | 0.21 | -- | -- |
+
+Still, total image against the reference path tracer: 0.982 Voxi's filter, 0.979 denoised. Cost
+about +1.5 to 2.5 ms (run-to-run spread is ~2 ms); the reflection targets add ~74 MB at 1766x994.
 
 ## Sources
 

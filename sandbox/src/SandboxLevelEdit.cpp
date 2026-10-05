@@ -405,6 +405,9 @@ bool SandboxApp::saveLevel(const std::string& path) {
     if (levelIsLegacyOcmap_) return saveLevelAsOcmap(path);
 
     scene::World& world = scene::World::instance();
+    // THE AUTHORED PLACEMENTS ARE SAVED, NOT AN ANIMATE PREVIEW POSE: the sequence's actors go back to
+    // their bases first, and the preview re-applies on the next frame.
+    seqEditor_.restoreBases();
     // STARTS FROM WHAT THE FILE SAID, not from a default-constructed OcWorldData. Everything the
     // editor does not model -- ID, BUILD, ALGO, SPAWN, the sun's lux, the header notes (credits) --
     // rides through untouched; the lines below overwrite only what the editor genuinely owns. See
@@ -499,6 +502,9 @@ bool SandboxApp::saveLevel(const std::string& path) {
         }
     }
 
+    // THE SEQUENCE, written from the editor's model with each actor mapped to the slot it is saved in.
+    seqEditor_.save(w, slotOf);
+
     // The placement transforms of the entities Play is MOVING -- animated ones, and the physics cars --
     // from Play's own snapshot, taken before anything moved. Empty (and free) at any other time.
     std::unordered_map<u32, const Transform*> animPlaced;
@@ -512,11 +518,13 @@ bool SandboxApp::saveLevel(const std::string& path) {
 #if AVER_MODULE_PHYSICS
         for (const scene::Entity c : vehicles_.entities()) cars.insert(static_cast<u32>(c));
 #endif
-        if (clipsLive || !cars.empty())
+        const bool seqLive = seqEditor_.playRunning();
+        if (clipsLive || !cars.empty() || seqLive)
             for (const PlaySavedTransform& t : playWorldSnapshot_) {
                 const u32 key = static_cast<u32>(t.e);
                 const bool clip = clipsLive && entityAnim_.find(key) != entityAnim_.end();
-                if (clip || cars.count(key) != 0) animPlaced.emplace(key, &t.xf);
+                if (clip || cars.count(key) != 0 || (seqLive && seqEditor_.drivesTransform(t.e)))
+                    animPlaced.emplace(key, &t.xf);
             }
     }
 

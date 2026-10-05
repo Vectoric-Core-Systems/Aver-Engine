@@ -2465,6 +2465,34 @@ void CSRdPtRef(uint3 tid : SV_DispatchThreadID) {
 // Needs roughness before deciding whether to trace: see rdSurfaceRoughness's header.
 // Compiled at SM 6.6 (ddx/ddy in rtReflectionSpatial needs 2x2 quads).
 //
+// Last frame's denoised reflection at this surface, read where the reflected point was on last frame's
+// screen (the denoiser's own parallax reprojection). Leaves `refl` alone when that is off screen.
+void rdDenoisedReflection(float3 wpos, float hitT, inout float3 refl) {
+    uint w = 0, h = 0;
+    gDenoisedRefl.GetDimensions(w, h);
+    if (w == 0u || h == 0u || gGiRestirParams.y < 0.5) return;
+    const float3 v = wpos - gCamPos.xyz;
+    const float  d = max(length(v), 1e-3);
+    const float4 c = mul(float4(gCamPos.xyz + v * ((d + hitT) / d), 1.0), gPrevViewProj);
+    if (c.w <= 1e-4) return;
+    const float2 ndc = c.xy / c.w;
+    const float2 px  = gSceneViewport.xy + float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * gSceneViewport.zw;
+    if (any(px < gSceneViewport.xy) || any(px >= gSceneViewport.xy + gSceneViewport.zw)) return;
+    const float2 f = px - 0.5;
+    const int2   b = int2(floor(f));
+    const float2 t = f - float2(b);
+    float3 sum = 0.0;
+    float  wsum = 0.0;
+    [unroll] for (uint k = 0u; k < 4u; ++k) {
+        const int2 o = int2(k & 1u, k >> 1u);
+        const int2 q = clamp(b + o, int2(0, 0), int2(w, h) - 1);
+        const float wk = (o.x ? t.x : 1.0 - t.x) * (o.y ? t.y : 1.0 - t.y);
+        const float3 c4 = gDenoisedRefl.Load(int3(q, 0)).rgb;
+        if (all(isfinite(c4))) { sum += c4 * wk; wsum += wk; }
+    }
+    if (wsum > 1e-3) refl = clamp(sum / wsum, 0.0, AVER_VOX_MAXRAD);
+}
+
 // Reflection trace/filter split (Settings::rayDrivenReflSplit / AVER_RD_REFL_SPLIT):
 // R1 (split compile) traces, shades, writes gRtReflHistOut, defers spatial gather.
 // R2 (CSRdReflFilter) gathers against that write, finishes compose. Default (no split) byte-for-byte today's.
@@ -2481,6 +2509,10 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
     const uint idx = pixel.y * pitch + pixel.x;
 
     const uint4 rec = gRdVisBuf[idx];
+    uint dnW = 0, dnH = 0;
+    gRdReflDnIn.GetDimensions(dnW, dnH);
+    const bool dnIn = pixel.x < dnW && pixel.y < dnH;
+    if (dnIn) gRdReflDnIn[pixel] = float4(0.0, 0.0, 0.0, 0.0);   // overwritten below where a ray is traced
     if (rec.x == 0xFFFFFFFFu) {
         // Sky: no surface to reflect off. Stage B never reads this texel for this pixel.
         gRdReflTex[pixel] = float4(0.0, 0.0, 0.0, 0.0);
@@ -2514,6 +2546,35 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
     // Gate: PSRayDriven's predicate. Unlike Stage S/G/O, can't defer to Stage B: reads outcome off gRdReflTex's alpha.
     const bool rtReflTraced = gShadowParams.z > 0.5 && gRtParams.w > 0.5 && rough <= 0.75;
     if (!rtReflTraced) rtReflectionHistoryVacate(float2(pixel) + 0.5);
+#if AVER_RD_ABLATE != AVER_RD_ABL_REFL && AVER_RD_ABLATE != AVER_RD_ABL_ALL
+    if (rtReflTraced && dnIn) {
+        // Reflection denoising: the denoiser owns history and filtering, so this is one raw sample.
+        rtReflectionHistoryVacate(float2(pixel) + 0.5);   // Voxi's own history is not used meanwhile
+        const float lobeRough = rough < AVER_REFL_MIRROR_ROUGH ? 0.0 : rough;
+        const uint  frameIdx  = (uint)gRtHistParams.z;
+        uint dW = 0, dH = 0;
+        gDenoisedRefl.GetDimensions(dW, dH);
+        // Half rate as Voxi's own path (glossy only), on a pixel checkerboard the denoiser rebuilds:
+        // a skipped pixel marks a = -1 and shows last frame's result at its surface.
+        const bool skip = (rtGiShadowBits() & 4u) != 0u && lobeRough > 0.0 && dW > 0u &&
+                          ((pixel.x ^ pixel.y ^ frameIdx) & 1u) != 0u;
+        float3 refl = 0.0;
+        if (skip) {
+            gRdReflDnIn[pixel] = float4(0.0, 0.0, 0.0, -1.0);
+            rdDenoisedReflection(s.wpos, 0.0, refl);
+        } else {
+            bool specHit = false;
+            const float3 fresh = clamp(rtReflection(s.wpos, s.N, s.Ng, R, L, float2(pixel) + 0.5, lobeRough,
+                                                    frameIdx, specHit), 0.0, AVER_VOX_MAXRAD);
+            const float hitT = gAverReflHitT;
+            gRdReflDnIn[pixel] = float4(fresh, hitT);
+            refl = fresh;
+            rdDenoisedReflection(s.wpos, hitT, refl);
+        }
+        gRdReflTex[pixel] = float4(refl, any(refl >= AVER_VOX_MAXRAD) ? 2.0 : 1.0);
+        return;
+    }
+#endif
     if (rtReflTraced) {
         const float rdReflDzdx = rdPlaneDepthStep(s.wpos, s.Ng, dirDx);
         const float rdReflDzdy = rdPlaneDepthStep(s.wpos, s.Ng, dirDy);

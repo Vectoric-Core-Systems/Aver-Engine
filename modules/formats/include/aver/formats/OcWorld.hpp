@@ -458,6 +458,39 @@ struct OcWorldEnv {
     f64 cloudWind[2] = {900.0, 260.0};     // world units per second
 };
 
+// LEVEL SEQUENCE (docs/formats/FORMAT_SPECS.md section 11): keyframed tracks stored in the level
+// itself, not as an asset. game::SequencePlayer plays it in the editor's Animate mode, in Play and in
+// the packaged game.
+enum class OcSeqTrackKind : u8 { Transform, Camera, Material };
+enum class OcSeqInterp : u8 { Smooth, Linear, Step };   // from this key to the next
+
+struct OcSeqKey {
+    f64 t = 0;   // seconds from the sequence's start
+    // Transform: x y z (cm, the placement's local frame) yaw pitch roll (degrees, as a placement)
+    //            sx sy sz.
+    // Camera:    x y z (cm, world) yaw pitch (degrees; the editor camera's convention).
+    // Material:  r g b intensity -- the actor's emissive is multiplied by rgb * intensity.
+    f64 v[9] = {0, 0, 0, 0, 0, 0, 1, 1, 1};
+    OcSeqInterp interp = OcSeqInterp::Smooth;
+};
+
+struct OcSeqTrack {
+    OcSeqTrackKind kind = OcSeqTrackKind::Transform;
+    // Index into OcWorldData::placements (Transform, Material); -1 for Camera. The writer renumbers
+    // it to the order it emits placements in, so it always names the placement it was saved with.
+    i32 target = -1;
+    std::vector<OcSeqKey> keys;   // sorted by t
+};
+
+struct OcSequence {
+    std::string name;
+    f64  length   = 10.0;   // seconds
+    bool loop     = true;
+    bool autoplay = true;   // starts with Play and with the packaged game
+    bool camera   = true;   // its camera track drives the view while it plays
+    std::vector<OcSeqTrack> tracks;
+};
+
 struct OcWorldData : OcWorldEnv {
     int version = 1;
     u64 contentId = 0;                     // ID = FNV-1a-64(NAME)
@@ -564,6 +597,9 @@ struct OcWorldData : OcWorldEnv {
     // has no collision and is not individually selectable -- this format's job is only to name the
     // file, not to decide any of that.
     std::vector<std::string> foliageFiles;
+
+    // SEQUENCE records; the editor authors one. Empty for every level without one.
+    std::vector<OcSequence> sequences;
 };
 
 // Parses a world from memory. Unknown records are skipped, not failed.

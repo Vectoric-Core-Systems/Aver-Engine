@@ -402,6 +402,13 @@ void SandboxApp::buildModePanel(Engine& e) {
             break;
 #endif
         case EditorMode::Simulate:  buildSimulateModePanel(e);  break;
+#if AVER_MODULE_SCENE
+        case EditorMode::Animate:   buildAnimateModePanel();    break;
+#else
+        case EditorMode::Animate:
+            ImGui::TextWrapped("This build has the scene module switched off.");
+            break;
+#endif
     }
     ImGui::End();
 }
@@ -483,6 +490,38 @@ void SandboxApp::buildSimulateModePanel(Engine& e) {
                        "game mode to run and Play does nothing here.");
 #endif
 }
+
+#if AVER_MODULE_SCENE
+// What the sequencer needs from the editor for one UI call: the selection, labels, the free-fly
+// camera, and the two ways to say "the level changed" / "move the camera".
+editor::SequenceHost SandboxApp::sequenceHost() {
+    editor::SequenceHost h;
+    h.selection = selectedEntities();
+    h.label = [this](scene::Entity ent) {
+        const auto it = entityLabels_.find(static_cast<u32>(ent));
+        return it != entityLabels_.end() ? it->second : scene::World::instance().name(ent);
+    };
+    h.editorCamera.position = camPos_;
+    h.editorCamera.yaw = yaw_;
+    h.editorCamera.pitch = pitch_;
+    h.setEditorCamera = [this](const game::SeqCameraPose& p) { camPos_ = p.position; yaw_ = p.yaw; pitch_ = p.pitch; };
+    // Not undoable, so the mark has to survive an undo and clear only on save.
+    h.markLevelDirty = [this]() { markLevelUnsaved(); };
+    h.vpX = vpX_; h.vpY = vpY_; h.vpW = vpW_; h.vpH = vpH_;
+    h.levelFocused = levelFocused_;
+    return h;
+}
+
+void SandboxApp::buildAnimateModePanel() {
+    editor::SequenceHost host = sequenceHost();
+    seqEditor_.drawModePanel(host);
+}
+
+void SandboxApp::buildSequencerWindow() {
+    editor::SequenceHost host = sequenceHost();
+    seqEditor_.drawTimeline(host);
+}
+#endif
 
 #endif
 

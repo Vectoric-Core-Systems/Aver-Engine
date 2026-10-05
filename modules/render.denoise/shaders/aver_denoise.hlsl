@@ -29,6 +29,10 @@
 // AVER_DNSR_SCALAR 1 compiles the one-channel variant for sky occlusion: the value travels in .x of
 // every FidelityFX min16float3 and is stored in single-channel targets.
 //
+// AVER_DNSR_REFLECTION 1 compiles the pipeline as FidelityFX designed it, for Voxi's ray-traced
+// reflections: real roughness from the G-buffer, the hit distance in the input's alpha, and the
+// parallax reprojection through the reflected point (camera block in AverDenoiseCB).
+//
 // NO PRELUDE: this touches no engine concept beyond its own bindings.
 //
 // THE G-BUFFER IT READS is LAST frame's (the denoiser runs before this frame's scene pass), and so
@@ -62,6 +66,9 @@
 #endif
 #ifndef AVER_DNSR_SCALAR
 #define AVER_DNSR_SCALAR 0
+#endif
+#ifndef AVER_DNSR_REFLECTION
+#define AVER_DNSR_REFLECTION 0
 #endif
 
 // The 1x1 frame-scale texture's SRV slot: one past each pass's own inputs.
@@ -102,6 +109,13 @@ cbuffer AverDenoiseCB : register(b1) {
     uint   gDnsrMaxSamples;         // reproject: cap on the accumulated sample count
     float  gDnsrHistoryClipWeight;  // resolve: neighbourhood-clip width for the history
     float  gDnsrTemporalStability;  // reproject: passed through to FidelityFX (unused by this version)
+    // Reflection variant only. The G-buffer's frame (camera-relative inverse, as IDevice::camera gives
+    // it) and the one before it (world view-projection, as voxi.hlsl's gPrevViewProj). Units: cm.
+    float4x4 gDnsrInvViewProjRel;
+    float4x4 gDnsrPrevViewProj;
+    float4   gDnsrCamPos;
+    float4   gDnsrViewport;         // scene viewport x y w h in pixels
+    float4   gDnsrPrevViewport;
 };
 
 SamplerState gDnsrLinear : register(s0);   // linear, clamp
@@ -154,9 +168,17 @@ min16float3 dnsrLoadInputTexel(int2 p) { return DNSR_LOAD3(gDnsrInput.Load(int3(
 // Under half-rate ReSTIR GI only pixels with ((x ^ y ^ parity) & 1) == 0 traced this frame. A
 // skipped pixel takes its four traced edge neighbours, weighted by depth and normal agreement so a
 // silhouette does not bleed across; with no agreeing neighbour it falls back to the plain mean.
+// Reflection input marks its own skipped pixels (alpha -1, Voxi's half-rate glossy reflections).
+bool dnsrSkipped(int2 c) {
+#if AVER_DNSR_REFLECTION
+    return gDnsrInput.Load(int3(c, 0)).a < 0.0;
+#else
+    return dnsrHalfRateInput() && (((uint(c.x) ^ uint(c.y) ^ dnsrHalfRateParity()) & 1u) != 0u);
+#endif
+}
 min16float3 dnsrLoadInput(int2 p) {
     const int2 c = dnsrClampPixel(p);
-    if (dnsrHalfRateInput() && (((uint(c.x) ^ uint(c.y) ^ dnsrHalfRateParity()) & 1u) != 0u)) {
+    if (dnsrSkipped(c)) {
         const int2 offs[4] = {int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1)};
         const float  zc = dnsrLoadViewZ(c);
         const float3 nc = dnsrLoadNormal(c);
@@ -181,10 +203,18 @@ min16float3 dnsrLoadInput(int2 p) {
 // f(z) = sqrt(K ln z) turns that into exp(-2K |dz| / z), a relative test; K = 10 gives e^-1 at 5%.
 float dnsrPrefilterDepth(float viewZ) { return sqrt(10.0 * log(max(viewZ, 1.0) + 1.0)); }
 
+#if AVER_DNSR_REFLECTION
+// Voxi traces reflections up to roughness 0.75 (beyond: voxel cones, no ray, nothing to denoise) and
+// below 0.1 shoots an unjittered mirror ray, which needs history but no spatial blur.
+min16float FFX_DNSR_Reflections_LoadRoughness(int2 p) { return (min16float)gDnsrNormal.Load(int3(dnsrClampPixel(p), 0)).z; }
+bool FFX_DNSR_Reflections_IsGlossyReflection(float roughness) { return roughness <= 0.75; }
+bool FFX_DNSR_Reflections_IsMirrorReflection(float roughness) { return roughness < 0.1; }
+#else
 // ---- the roughness-1 contract (see the header) ----
 min16float FFX_DNSR_Reflections_LoadRoughness(int2 p) { return 1.0; }
 bool FFX_DNSR_Reflections_IsGlossyReflection(float roughness) { return true; }
 bool FFX_DNSR_Reflections_IsMirrorReflection(float roughness) { return false; }
+#endif
 
 // =================================================================================================
 #if AVER_DNSR_PASS == 0   // ---- reproject ----
@@ -206,9 +236,46 @@ min16float3 FFX_DNSR_Reflections_LoadRadiance(int2 p)          { return dnsrLoad
 min16float3 FFX_DNSR_Reflections_LoadWorldSpaceNormal(int2 p)  { return (min16float3)dnsrLoadNormal(p); }
 float       FFX_DNSR_Reflections_LoadDepth(int2 p)             { return dnsrLoadViewZ(p); }
 float2      FFX_DNSR_Reflections_LoadMotionVector(int2 p)      { return dnsrLoadMotion(p); }
-min16float  FFX_DNSR_Reflections_LoadRayLength(int2 p)         { return 0.0; }
 // The depth this pipeline passes around is already view-space linear depth.
 float FFX_DNSR_Reflections_GetLinearDepth(float2 uv, float depth) { return depth; }
+#if AVER_DNSR_REFLECTION
+// A skipped pixel takes the mean hit distance of its traced edge neighbours.
+min16float FFX_DNSR_Reflections_LoadRayLength(int2 p) {
+    const int2 c = dnsrClampPixel(p);
+    const float own = gDnsrInput.Load(int3(c, 0)).a;
+    if (own >= 0.0) return (min16float)own;
+    const int2 offs[4] = {int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1)};
+    float sum = 0.0, n = 0.0;
+    [unroll] for (int i = 0; i < 4; ++i) {
+        const float a = gDnsrInput.Load(int3(dnsrClampPixel(c + offs[i]), 0)).a;
+        if (a >= 0.0) { sum += a; n += 1.0; }
+    }
+    return (min16float)(n > 0.0 ? sum / n : 0.0);
+}
+// "View space" is world space relative to the camera: FidelityFX only needs the camera-to-surface
+// vector's length and direction, then extends it by the hit distance and reprojects the tip.
+float3 dnsrRelRay(float2 ndc) {
+    const float4 w = mul(float4(ndc, 0.5, 1.0), gDnsrInvViewProjRel);
+    return normalize(w.xyz / w.w);
+}
+float3 FFX_DNSR_Reflections_ScreenSpaceToViewSpace(float3 screen) {
+    const float2 px  = screen.xy * float2(gDnsrSize);
+    const float2 ndc = float2((px.x - gDnsrViewport.x) / gDnsrViewport.z * 2.0 - 1.0,
+                              1.0 - (px.y - gDnsrViewport.y) / gDnsrViewport.w * 2.0);
+    // View Z is clip w: distance along the centre ray, which a pixel's ray covers at 1 / cos.
+    const float3 dir = dnsrRelRay(ndc);
+    return dir * (screen.z / max(dot(dir, dnsrRelRay(float2(0.0, 0.0))), 1e-4));
+}
+float3 FFX_DNSR_Reflections_ViewSpaceToWorldSpace(float4 view) { return view.xyz + gDnsrCamPos.xyz; }
+float3 FFX_DNSR_Reflections_WorldSpaceToScreenSpacePrevious(float3 world) {
+    const float4 c = mul(float4(world, 1.0), gDnsrPrevViewProj);
+    if (c.w <= 1e-4) return float3(-1.0, -1.0, 0.0);   // behind last frame's camera: no history
+    const float2 ndc = c.xy / c.w;
+    const float2 px  = gDnsrPrevViewport.xy + float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * gDnsrPrevViewport.zw;
+    return float3(px * gDnsrInvSize, 0.0);
+}
+#else
+min16float  FFX_DNSR_Reflections_LoadRayLength(int2 p)         { return 0.0; }
 
 // The "parallax" reprojection with a zero hit distance (FFX_DNSR_Reflections_GetHitPositionReprojection):
 // these three are written so the ray it shoots "through the surface" has length zero beyond it and
@@ -221,6 +288,7 @@ float3 FFX_DNSR_Reflections_ViewSpaceToWorldSpace(float4 view)    { return view.
 float3 FFX_DNSR_Reflections_WorldSpaceToScreenSpacePrevious(float3 world) {
     return float3(world.xy - dnsrLoadMotion(dnsrUvToPixel(world.xy)), 0.0);
 }
+#endif
 
 // History reads. After a reset the history textures may hold anything (a fresh allocation, another
 // size, another scene): a zero sample count makes FidelityFX weigh the history at exactly zero, and
@@ -244,7 +312,14 @@ min16float FFX_DNSR_Reflections_SampleNumSamplesHistory(float2 uv) {
     if (dnsrHistoryReset()) return 0.0;
     return (min16float)gDnsrSampleCountHistory.SampleLevel(gDnsrLinear, uv, 0);
 }
+#if AVER_DNSR_REFLECTION
+min16float FFX_DNSR_Reflections_SampleRoughnessHistory(float2 uv) {
+    if (dnsrHistoryReset()) return FFX_DNSR_Reflections_LoadRoughness(dnsrUvToPixel(uv));
+    return (min16float)gDnsrNormalHistory.Load(int3(dnsrUvToPixel(uv), 0)).z;
+}
+#else
 min16float FFX_DNSR_Reflections_SampleRoughnessHistory(float2 uv) { return 1.0; }
+#endif
 float FFX_DNSR_Reflections_LoadDepthHistory(int2 p) {
     if (dnsrHistoryReset()) return dnsrLoadViewZ(p);
     return gDnsrDepthHistory.Load(int3(dnsrClampPixel(p), 0));
@@ -307,7 +382,16 @@ void FFX_DNSR_Reflections_StorePrefilteredReflections(int2 p, min16float3 radian
 
 [numthreads(8, 8, 1)]
 void CSDenoisePrefilter(int2 dtid : SV_DispatchThreadID, int2 gtid : SV_GroupThreadID) {
+#if AVER_DNSR_REFLECTION
+    // Reflections skip FidelityFX's prefilter: its radiance weights dropped sparse bright reflections
+    // (NeonDistrict Night moving: road reflections at 25-35% of their light). The temporal pass along the
+    // reflected point removes the speckle alone (docs/rendering/DENOISING.md).
+    if (any(dtid >= int2(gDnsrSize))) return;
+    gDnsrPrefilteredOut[dtid]         = DNSR_STORE(dnsrLoadInput(dtid));
+    gDnsrPrefilteredVarianceOut[dtid] = gDnsrVariance.Load(int3(dtid, 0));
+#else
     FFX_DNSR_Reflections_Prefilter(dtid, gtid, gDnsrSize);
+#endif
 }
 
 // =================================================================================================

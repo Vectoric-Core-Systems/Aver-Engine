@@ -2332,6 +2332,10 @@ void SandboxApp::buildUI(Engine& e) {
     detailsFocused_  = false;
     if (levelVisible_ || !assetEditors_.anyOpen()) {
         if (mode_ != EditorMode::Select) buildModePanel(e);
+#if AVER_MODULE_SCENE
+        // A floating timeline over the viewport's bottom edge until the user docks it.
+        if (mode_ == EditorMode::Animate) buildSequencerWindow();
+#endif
         buildPanels(e);
     }
     if (levelVisible_) buildViewportOverlay();

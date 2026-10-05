@@ -937,6 +937,44 @@ importer (`AverAssetC`, by default for a USD `PointInstancer`) or a future paint
 only** (never `VoxiRenderer::draws_`), have no collision and are not individually selectable — see
 §11b for why a flat table outside `placements` is what that requires.
 
+**`SEQUENCE` / `SEQTRACK` / `SEQKEY` / `ENDSEQUENCE`** (`OcWorldData::sequences`, `OcSequence` /
+`OcSeqTrack` / `OcSeqKey` in `OcWorld.hpp`) are a **level sequence**: keyframed tracks stored in the
+level itself, not as an asset. The editor's Animate mode authors one; `game::SequencePlayer`
+(`Runtime/include/aver/game/LevelSequence.hpp`) plays it in the editor, in Play and in the packaged game.
+One record per line, percent-encoded `name`, case-insensitive keywords:
+
+```
+SEQUENCE name Fly%20Through length 12 loop 1 autoplay 1 camera 1
+  SEQTRACK transform target 3
+    SEQKEY 0   smooth 0 0 100  0 0 0  1 1 1        # t interp x y z yaw pitch roll sx sy sz
+    SEQKEY 4.5 linear 400 0 100  90 0 0  1 1 1
+  SEQTRACK camera
+    SEQKEY 0   smooth -500 0 150  0 -10            # t interp x y z yaw pitch
+  SEQTRACK material target 5
+    SEQKEY 0   step 1 0.5 0.25 4                   # t interp r g b intensity
+ENDSEQUENCE
+```
+
+- `SEQUENCE` opens a sequence (`name` omitted when empty; `length` seconds, default 10; `loop`,
+  `autoplay` and `camera` are `0|1`, default 1). `ENDSEQUENCE` closes it; an unclosed one at end of file
+  is kept. A level may carry several. Sequences are written after `FOLIAGE` and before the placements,
+  and nothing is written when there are none, so a level without one is byte-identical to before.
+- `SEQTRACK transform|camera|material [target <n>]` attaches to the open sequence. `target` is a
+  placement index (the placement's position in file order); a camera track has none. A track of an
+  unknown kind, and every `SEQKEY` under it, is ignored.
+- `SEQKEY <t> smooth|linear|step <values...>` attaches to the last `SEQTRACK`: `t` seconds, the
+  interpolation from this key to the next, then 9 values for a transform track (cm, the placement's
+  local frame, degrees as a `PLACE` line), 5 for camera (world cm, editor-camera degrees) or 4 for
+  material (the placement's emissive is multiplied by `rgb * intensity`). Missing values keep the
+  `OcSeqKey` defaults. Keys are sorted by `t` (stable) after parsing and by the writer.
+- `SEQTRACK`/`SEQKEY` outside an open sequence or track are ignored; `BEGIN`/`END` belong to the
+  placement nesting and are not reused.
+- **Targets are renumbered on write.** In memory `OcSeqTrack::target` indexes `placements`, but the
+  writer emits placements depth-first from the roots, which can renumber them (see
+  `OcWorldPlacement::parent`). The writer therefore writes each track's target as the placement's
+  emit index, computed by the same walk the placement writer uses, so a reloaded track still names the
+  placement it was saved with. A transform or material track whose target is out of range is dropped on write.
+
 ---
 
 ## 11a. `.ocparticle` — particle effect (text)

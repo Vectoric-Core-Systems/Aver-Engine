@@ -231,8 +231,14 @@ void SandboxApp::startPlay() {
     playFromHere_.reset();
     // BEFORE anything begins, so what is recorded is the editor's level and not one frame of
     // gameplay's effect on it.
+#if AVER_MODULE_SCENE
+    // Animate's preview pose is not the level: the actors go back to their authored transforms first.
+    seqEditor_.restoreBases();
+#endif
     capturePlayWorld();
 #if AVER_MODULE_SCENE
+    // After playMobility_.begin: the sequence starts from 0 (when it autoplays) and its actors are seeded.
+    seqEditor_.beginPlay(playMobility_);
     // Object animation (a placed mesh's transform clip) plays from here until Stop. After the snapshot:
     // its first live tick is what starts moving the placements the snapshot just recorded. The two
     // begin_play failure branches below turn it back off, since nothing would ever call Stop.
@@ -648,6 +654,8 @@ void SandboxApp::stopPlay() {
 #endif
     restorePlayWorld();
 #if AVER_MODULE_SCENE
+    // The level is back where Play found it; the sequence stops and Animate's preview re-applies.
+    seqEditor_.endPlay();
     // Then the animators' authored clocks and the animated bodies, both of which need the level
     // already back where Play found it.
     restoreAnimatedEntities();
@@ -848,6 +856,20 @@ void SandboxApp::driveAnimatedBodies(f32 dt) {
         animatedBodiesBuilt_ = false;
 }
 #endif
+#endif
+
+#if AVER_MODULE_SCENE
+// The level sequence's frame step, between the object-animation tick and World::flush: advances and
+// applies it in Animate mode's preview and while Play runs it.
+void SandboxApp::tickSequence(f32 dt) {
+    editor::SequenceTickCtx c;
+    c.dt = dt;
+#if AVER_MODULE_FRAMEWORK
+    c.playActive = anyPlayActive();
+    c.playPaused = aver_fw_play_state() == AVER_FW_PLAY_PAUSED;
+#endif
+    seqEditor_.tick(c);
+}
 #endif
 
 // Aspect comes from the viewport rect (the dockspace's central node), not the whole window.

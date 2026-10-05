@@ -481,6 +481,10 @@ Texture2D<float>    gDenoisedAo   : register(t14);
 // ReSTIR GI radiance (u9/t15): indirect diffuse, denoised. Separate from AO history.
 RWTexture2D<float4> gGiRadianceOut : register(u9);
 Texture2D<float4>   gDenoisedGi    : register(t15);
+// Reflection denoising (Denoiser Signal::Reflection): last frame's result (zero size = not denoised),
+// and this frame's input -- one fresh sample per pixel, a = its hit distance (cm).
+Texture2D<float4>   gDenoisedRefl  : register(t23);
+RWTexture2D<float4> gRdReflDnIn    : register(u23);
 
 // Ray-traced reflection history: (colour, depth) ping-ponged (t7/u3).
 Texture2D<float4>   gRtReflHist    : register(t7);
@@ -1234,6 +1238,9 @@ float3 rtSampleGgxVndf(float3 Ve, float alpha, float2 u) {
 
 // Trace one reflection ray: shaded hit or sky. One ray/pixel/frame; variance paid by history and spatial filter.
 // `hit` true for traced hits (even misses, which sample the lobe like any ray). GGX lobe, sampled by VNDF (alpha=rough^2).
+// The last rtReflection call's hit distance (cm), for the reflection denoiser.
+static float gAverReflHitT = kAverReflMissT;
+
 float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2 pixel, float rough,
                     uint frameIdx, out bool hit) {
     hit = false;
@@ -1267,11 +1274,14 @@ float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2
 #if AVER_PT_PATHS
     // Path Tracing: the reflected surface is shaded as a full path vertex (voxi_pt.hlsli).
     hit = true;
-    return ptRadiance(r.Origin, dir, r.TMin, max(tanCone, 1e-3), pixel, 0x51f3u, skyColor(dir));
+    const float3 ptRefl = ptRadiance(r.Origin, dir, r.TMin, max(tanCone, 1e-3), pixel, 0x51f3u, skyColor(dir));
+    gAverReflHitT = gAverPtFirstT;
+    return ptRefl;
 #endif
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     q.TraceRayInline(gScene, RAY_FLAG_NONE | gAverRtSecondaryRayFlags, AVER_RT_MASK_OPAQUE_ALL, r);
     averRtProceedSolid(q);
+    gAverReflHitT = kAverReflMissT;
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
         hit = true;
 #if AVER_RD_ABLATE == AVER_RD_ABL_SKY || AVER_RD_ABLATE == AVER_RD_ABL_ALL
@@ -1287,6 +1297,7 @@ float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2
     // composition, the sun through the full BRDF (one shadow ray from this pixel), the lamps, and the
     // sky for its diffuse ambient.
     const RtHit h = rtHitCommitted(q, wpos, dir);
+    gAverReflHitT = min(h.t, kAverReflMissT);
     float2 rgx, rgy;
     rtHitConeGrad(h, tanCone, rgx, rgy);
     AverSurface s = rtHitSurface(h, -dir, L, rgx, rgy, AVER_RD_SINGLE_PASS ? AVER_RT_HIT_LITE : AVER_RT_HIT_FULL);

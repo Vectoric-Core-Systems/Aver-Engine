@@ -2976,6 +2976,10 @@ void SandboxApp::buildViewportOverlay() {
                         "%s releases the mouse, Tab to Select",
                         editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayReleaseMouse)).c_str());
             break;
+        case EditorMode::Animate:
+            ImGui::Text("Animate  |  K keys the selected track at the playhead  |  pose with the gizmo or fly "
+                        "the camera first, Tab to Select");
+            break;
         case EditorMode::Select:
         default:
             ImGui::Text("Select: %s  |  RMB fly (WASD/QE)  wheel speed  MMB pan  F focus  |  "
@@ -3051,6 +3055,13 @@ bool SandboxApp::editorModeAvailable(EditorMode m, const char** whyNot) const {
 #endif
         case EditorMode::Simulate:
             return true;
+        case EditorMode::Animate:
+#if AVER_MODULE_SCENE
+            if (levelEntities_.empty() && levelPath_.empty()) return no("Open or populate a level first.");
+            return true;
+#else
+            return no("This build has the scene module switched off (AVER_MODULE_SCENE).");
+#endif
     }
     return no("Unknown mode");
 }
@@ -3086,6 +3097,11 @@ void SandboxApp::setEditorMode(EditorMode m) {
     sculptCursorValid_ = false;
 #endif
     dragging_ = false;
+#if AVER_MODULE_SCENE
+    // Leaving Animate puts the actors back where they were authored; entering starts previewing.
+    if (mode_ == EditorMode::Animate) seqEditor_.leave();
+    if (m == EditorMode::Animate) seqEditor_.enter();
+#endif
     mode_ = m;
     // Leaving Select with something selected is fine and even useful -- the selection is still
     // there when you come back -- but the gizmo must stop drawing, which it does because its
@@ -3116,7 +3132,7 @@ void SandboxApp::applyStartMode() {
         for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (lower == want) { setEditorMode(static_cast<EditorMode>(i)); return; }
     }
-    AVER_WARN("[Editor] --mode '{}' is not a mode. Use select, landscape, foliage or simulate.", want);
+    AVER_WARN("[Editor] --mode '{}' is not a mode. Use select, landscape, foliage, simulate or animate.", want);
 }
 
 } // namespace aver

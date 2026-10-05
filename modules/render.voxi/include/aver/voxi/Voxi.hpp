@@ -148,6 +148,9 @@ struct Settings {
     bool neuralDenoise = false;
     // Developer (phase 4): NRD's fixed-parameter spatial-first resolve under Neural Denoise.
     bool neuralDenoiseSpatial = false;
+    // Ray-traced reflections through the denoiser's reflection pipeline while it runs (staged
+    // ray-driven reflections only); off, they keep Voxi's own reflection history and filter.
+    bool denoiseReflections = true;
 
     // ---- The denoiser's live dials (render::denoise::Denoiser::Tuning) ----
     // Applied every frame the denoiser records, so a console change takes effect next frame with no teardown.

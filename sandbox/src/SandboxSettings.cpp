@@ -1761,10 +1761,19 @@ void SandboxApp::buildRenderingSettings(int page) {
             if (ImGui::Checkbox("Neural Denoise", &nd)) { s.neuralDenoise = nd; changed = true; }
             ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Replaces the FidelityFX temporal resolve with NRD's spatial-first\n"
-                                  "resolve (docs/rendering/NEURAA_NRD.md). Phase 1: the resolve slot\n"
-                                  "only, so the image is unchanged. Needs the Denoiser on.\n\n"
+                ImGui::SetTooltip("Replaces the FidelityFX temporal resolve of the indirect diffuse with\n"
+                                  "NRD's spatial-first resolve and its trained network\n"
+                                  "(docs/rendering/NEURAA_NRD.md). Needs the Denoiser on.\n\n"
                                   "Round-trips as RENDER.NEURALDENOISE. --neural-denoise outranks it.");
+            ImGui::BeginDisabled(ndGreyed);
+            bool dr = s.denoiseReflections;
+            if (ImGui::Checkbox("Denoise Reflections", &dr)) { s.denoiseReflections = dr; changed = true; }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Ray-traced reflections through the denoiser's reflection pipeline\n"
+                                  "(history along the reflected point, roughness-aware filtering)\n"
+                                  "instead of Voxi's own reflection history. Ray-driven staged\n"
+                                  "reflections only. Needs the Denoiser on.");
         }
 
         // AMD FidelityFX tuning (filters ReSTIR diffuse GI, not the sun shadow below).

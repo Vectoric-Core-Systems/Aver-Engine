@@ -405,3 +405,10 @@ add_executable(TextureSrgbTableTest src/TextureSrgbTableTest.cpp)
 target_link_libraries(TextureSrgbTableTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(TextureSrgbTableTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OcSequenceTest -- the SEQUENCE/SEQTRACK/SEQKEY records of an .ocworld: round trip, byte stability, the
+# target remap when the writer renumbers placements depth-first, stray records, and that a level
+# without sequences writes what it always did. No add_test: aver_register_ctest_in picks *Test targets up.
+add_executable(OcSequenceTest src/OcSequenceTest.cpp)
+target_link_libraries(OcSequenceTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcSequenceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -30,6 +30,7 @@ add_executable(Sandbox WIN32
   src/PreviewChrome.cpp
   src/ActorEditor.cpp
   src/AnimEditor.cpp
+  src/SequenceEditor.cpp
   src/SkinDrawTest.cpp
   src/SkinSceneTest.cpp
   src/ReflTest.cpp

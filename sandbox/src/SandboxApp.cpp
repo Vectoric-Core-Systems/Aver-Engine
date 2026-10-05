@@ -2020,6 +2020,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     playProf_.begin(editor::PlayPhase::ObjectAnim);
     anim::animSystem().tick(scene::World::instance(), t.dt);
     playProf_.end(editor::PlayPhase::ObjectAnim);
+    // The level sequence (Animate preview, Play), after the clips so a sequenced actor wins.
+    tickSequence(t.dt);
 #if AVER_MODULE_PHYSICS
     // After the tick that moved them: animated placement's kinematic body follows it (carries standing characters).
     playProf_.begin(editor::PlayPhase::DriveBodies);
@@ -2139,6 +2141,21 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     if (playEjected()) firstPersonPawn_ = scene::kInvalidEntity;
     else                drivePlayCamera();
 #endif
+    // A sequence camera (Animate's pilot view, or Play's camera track) replaces the view for this
+    // frame only: camPos_/yaw_/pitch_ are the persisted editor camera and stay untouched.
+    viewOverride_ = false;
+#if AVER_MODULE_SCENE
+    {
+        game::SeqCameraPose sp;
+        if (seqEditor_.viewPose(playEjected(), sp)) {
+            viewOverride_ = true;
+            viewPosOv_ = sp.position;
+            viewFwdOv_ = game::cameraForward(sp.yaw, sp.pitch);
+            // The pawn is in view now, not behind the eye.
+            if (seqEditor_.playRunning()) firstPersonPawn_ = scene::kInvalidEntity;
+        }
+    }
+#endif
     // G-buffer: pushed every frame so live dropdown click or --gbuffer-debug takes effect immediately.
     // OR'd together: --gbuffer alone must write with no view selected.
     // Voxi's denoiser reads these targets every frame it runs.
@@ -2256,10 +2273,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // Confine the scene to the dockspace's central node (latched by buildUI last frame).
     e.device()->setViewportRect((u32)vpX_, (u32)vpY_, (u32)std::fmax(1.0f, vpW_), (u32)std::fmax(1.0f, vpH_));
 
-    const Vec3 fwd = camForward();
+    const Vec3 fwd = viewForward();
     const f32 aspect = viewAspect();
-    const game::CameraMatrices cam = game::pushCamera(*e.device(), camPos_, fwd, aspect);
-    invVP_ = cam.invVP; viewProj_ = cam.viewProj; eye_ = camPos_;
+    const game::CameraMatrices cam = game::pushCamera(*e.device(), viewPos(), fwd, aspect);
+    invVP_ = cam.invVP; viewProj_ = cam.viewProj; eye_ = viewPos();
 
     // One member for one value; fixes dead code in fog handling.
     f32 fog = fogDensity_;
@@ -2296,7 +2313,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     sky_.cloudTime = cloudTime_;
     // Underwater fog applied to a copy; sky_ is the authored sky and must stay unchanged.
 #if AVER_MODULE_FLUIDS
-    e.device()->setSkyAtmosphere(water_.applyUnderwaterFog(sky_, camPos_.z));
+    e.device()->setSkyAtmosphere(water_.applyUnderwaterFog(sky_, viewPos().z));
 #else
     e.device()->setSkyAtmosphere(sky_);
 #endif

@@ -416,8 +416,11 @@ struct DrawWorldOptions {
     DrawWorldDirectDrawFn onDirectDraw = nullptr;
     DrawWorldSurfaceWarnFn onSurfaceWarn = nullptr;
     DrawWorldSkippedFn onSkipped = nullptr;
+    // A level sequence's material tracks: true with rgb filled scales the entity's material
+    // emissiveFactor for this walk (every delivery path, raster and ray-traced).
+    bool (*emissiveScale)(scene::Entity e, f32 outRgb[3], void* user) = nullptr;
 
-    // ONE user pointer for all six, the same shape GameContent::setMeshLoadedHook uses. Every sink
+    // ONE user pointer for all seven, the same shape GameContent::setMeshLoadedHook uses. Every sink
     // here belongs to the one host driving the walk; a per-hook pointer would only invite two.
     void* user = nullptr;
 };

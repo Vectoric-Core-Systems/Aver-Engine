@@ -4,6 +4,7 @@
 #include "aver/core/Hash.hpp"
 #include "aver/platform/FileSystem.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -81,6 +82,82 @@ std::string percentDecode(std::string_view s) {
 // header note, or every save would add one more copy of it above the author's own comments.
 constexpr std::string_view kWriterBannerPrefix = "Written by the Aver Engine editor";
 
+// Placements in the order writeOcworld emits them: depth-first from the roots, with the BEGIN/END
+// scope steps between. Parse order is file order, so a Place step's position in this list is that
+// placement's index after a reload -- the writer remaps sequence targets through it.
+struct EmitStep {
+    enum class Kind : u8 { Place, Begin, End };
+    Kind kind;
+    i32 index;     // placement index; unused for Begin/End
+    usize depth;   // nesting level: 0 is a root; also the indent in units of two spaces
+};
+
+// ITERATIVE, not recursive: a hand-built vector can describe a cycle, and a cycle in a recursive
+// emit is a stack overflow rather than a diagnosable error. Each placement is visited once, so the
+// worst a malformed parent chain can do is leave a subtree unwritten.
+std::vector<EmitStep> placementEmitSteps(const std::vector<OcWorldPlacement>& placements) {
+    // The children lists are built once rather than rescanning the vector per parent, which would
+    // be quadratic on a level with thousands of placements -- the ordinary case, not a corner.
+    const usize n = placements.size();
+    std::vector<std::vector<i32>> kids(n);
+    std::vector<i32> roots;
+    for (usize i = 0; i < n; ++i) {
+        const i32 par = placements[i].parent;
+        // A PARENT OUT OF RANGE, OR ITSELF, IS TREATED AS A ROOT rather than dropped or trusted.
+        // parseOcworld cannot produce one, but writeOcworld also serves callers that built the
+        // vector by hand, and the alternatives are both worse: trusting it walks off the end, and
+        // dropping the placement loses geometry to a bookkeeping error nobody would see.
+        if (par >= 0 && par < static_cast<i32>(n) && par != static_cast<i32>(i))
+            kids[static_cast<usize>(par)].push_back(static_cast<i32>(i));
+        else
+            roots.push_back(static_cast<i32>(i));
+    }
+
+    std::vector<EmitStep> steps;
+    steps.reserve(n + n / 2);
+    std::vector<bool> emitted(n, false);
+    struct Frame { i32 index; usize next; bool opened; };
+    std::vector<Frame> stack;
+    for (const i32 root : roots) {
+        if (emitted[static_cast<usize>(root)]) continue;
+        emitted[static_cast<usize>(root)] = true;
+        steps.push_back({EmitStep::Kind::Place, root, 0});
+        stack.push_back(Frame{root, 0, false});
+        while (!stack.empty()) {
+            Frame& f = stack.back();
+            const std::vector<i32>& ch = kids[static_cast<usize>(f.index)];
+            if (f.next >= ch.size()) {
+                if (f.opened) steps.push_back({EmitStep::Kind::End, -1, stack.size() - 1});
+                stack.pop_back();
+                continue;
+            }
+            if (!f.opened) {
+                f.opened = true;
+                steps.push_back({EmitStep::Kind::Begin, -1, stack.size() - 1});
+            }
+            const i32 c = ch[f.next++];
+            if (emitted[static_cast<usize>(c)]) continue;
+            emitted[static_cast<usize>(c)] = true;
+            steps.push_back({EmitStep::Kind::Place, c, stack.size()});
+            stack.push_back(Frame{c, 0, false});
+        }
+    }
+    return steps;
+}
+
+// Values per key by track kind: transform 9, camera 5, material 4.
+usize seqKeyValueCount(OcSeqTrackKind k) {
+    return k == OcSeqTrackKind::Transform ? 9 : k == OcSeqTrackKind::Camera ? 5 : 4;
+}
+
+const char* seqKindName(OcSeqTrackKind k) {
+    return k == OcSeqTrackKind::Transform ? "transform" : k == OcSeqTrackKind::Camera ? "camera" : "material";
+}
+
+const char* seqInterpName(OcSeqInterp i) {
+    return i == OcSeqInterp::Linear ? "linear" : i == OcSeqInterp::Step ? "step" : "smooth";
+}
+
 } // namespace
 
 // Parses an .ocworld or .ocmap from memory. Unknown records are skipped.
@@ -130,6 +207,9 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
     // placement a BEGIN could attach to.
     std::vector<i32> scope;
     i32 lastPlacement = -1;
+    // The open SEQUENCE (index into out.sequences) and its last SEQTRACK, -1 outside one. SEQTRACK /
+    // SEQKEY outside a sequence, or after an unknown track kind, are ignored.
+    i32 seqOpen = -1, trackOpen = -1;
 
     usize pos = 0;
     while (pos <= text.size()) {
@@ -424,6 +504,46 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             // SCATTER's `mesh` -- none of those support a path with a space in it either, so this
             // does not invent an escaping scheme none of this file's other asset references have.
             out.foliageFiles.push_back(std::string(t[1]));
+        } else if (equalsCI(key, "SEQUENCE")) {
+            OcSequence sq;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "name")     && i + 1 < t.size()) sq.name     = percentDecode(t[++i]);
+                else if (equalsCI(t[i], "length")   && i + 1 < t.size()) sq.length   = parseF64(t[++i], sq.length);
+                else if (equalsCI(t[i], "loop")     && i + 1 < t.size()) sq.loop     = parseI32(t[++i], 1) != 0;
+                else if (equalsCI(t[i], "autoplay") && i + 1 < t.size()) sq.autoplay = parseI32(t[++i], 1) != 0;
+                else if (equalsCI(t[i], "camera")   && i + 1 < t.size()) sq.camera   = parseI32(t[++i], 1) != 0;
+            }
+            seqOpen = static_cast<i32>(out.sequences.size());
+            trackOpen = -1;
+            out.sequences.push_back(std::move(sq));
+        } else if (equalsCI(key, "SEQTRACK")) {
+            trackOpen = -1;
+            if (seqOpen < 0 || t.size() < 2) continue;
+            OcSeqTrack tr;
+            if      (equalsCI(t[1], "transform")) tr.kind = OcSeqTrackKind::Transform;
+            else if (equalsCI(t[1], "camera"))    tr.kind = OcSeqTrackKind::Camera;
+            else if (equalsCI(t[1], "material"))  tr.kind = OcSeqTrackKind::Material;
+            else continue;
+            for (usize i = 2; i + 1 < t.size(); ++i)
+                if (equalsCI(t[i], "target")) tr.target = parseI32(t[++i], -1);
+            if (tr.kind == OcSeqTrackKind::Camera) tr.target = -1;
+            std::vector<OcSeqTrack>& tracks = out.sequences[static_cast<usize>(seqOpen)].tracks;
+            trackOpen = static_cast<i32>(tracks.size());
+            tracks.push_back(std::move(tr));
+        } else if (equalsCI(key, "SEQKEY")) {
+            if (seqOpen < 0 || trackOpen < 0) continue;
+            OcSeqTrack& tr = out.sequences[static_cast<usize>(seqOpen)].tracks[static_cast<usize>(trackOpen)];
+            OcSeqKey k;
+            k.t = tokF(t, 1);
+            if (t.size() > 2) {
+                if      (equalsCI(t[2], "linear")) k.interp = OcSeqInterp::Linear;
+                else if (equalsCI(t[2], "step"))   k.interp = OcSeqInterp::Step;
+            }
+            const usize cnt = seqKeyValueCount(tr.kind);
+            for (usize i = 0; i < cnt && 3 + i < t.size(); ++i) k.v[i] = parseF64(t[3 + i], k.v[i]);
+            tr.keys.push_back(k);
+        } else if (equalsCI(key, "ENDSEQUENCE")) {
+            seqOpen = trackOpen = -1;
         } else if (equalsCI(key, "BEGIN")) {
             // OPENS A SCOPE ON THE MOST RECENT PLACEMENT. See the grammar note above parseOcworld.
             if (lastPlacement < 0) {
@@ -511,6 +631,12 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             out.placements.push_back(std::move(p));
         }
     }
+
+    // An unclosed SEQUENCE is kept as it stands. Keys end up in time order whatever order they were typed.
+    for (OcSequence& sq : out.sequences)
+        for (OcSeqTrack& tr : sq.tracks)
+            std::stable_sort(tr.keys.begin(), tr.keys.end(),
+                             [](const OcSeqKey& a, const OcSeqKey& b) { return a.t < b.t; });
 
     // THE PARSER'S SECOND FAILURE MODE, and its first new one since it was written. Everything else
     // in this function either matches a record or silently skips it -- the "unknown records are
@@ -808,28 +934,51 @@ std::string writeOcworld(const OcWorldData& w) {
         for (const std::string& path : w.foliageFiles) s += "FOLIAGE " + path + "\n";
     }
 
-    s += "\n";
-    // DEPTH-FIRST FROM THE ROOTS, so the nesting in the file IS the parent relation and no index is
-    // ever written down. See OcWorldPlacement::parent for why that matters: a stored index has to be
-    // kept in step with every reorder, and this tree already has a scar from that mistake.
-    //
-    // The children lists are built once rather than rescanning the vector per parent, which would be
-    // quadratic on a level with thousands of placements -- the ordinary case, not a corner.
-    const usize n = w.placements.size();
-    std::vector<std::vector<i32>> kids(n);
-    std::vector<i32> roots;
-    for (usize i = 0; i < n; ++i) {
-        const i32 par = w.placements[i].parent;
-        // A PARENT OUT OF RANGE, OR ITSELF, IS TREATED AS A ROOT rather than dropped or trusted.
-        // parseOcworld cannot produce one, but writeOcworld also serves callers that built the
-        // vector by hand, and the alternatives are both worse: trusting it walks off the end, and
-        // dropping the placement loses geometry to a bookkeeping error nobody would see.
-        if (par >= 0 && par < static_cast<i32>(n) && par != static_cast<i32>(i))
-            kids[static_cast<usize>(par)].push_back(static_cast<i32>(i));
-        else
-            roots.push_back(static_cast<i32>(i));
+    // Placements are emitted depth-first from the roots (see OcWorldPlacement::parent), which can
+    // renumber them; sequence targets are written as the emit index.
+    const std::vector<EmitStep> steps = placementEmitSteps(w.placements);
+    if (!w.sequences.empty()) {
+        std::vector<i32> emitIndex(w.placements.size(), -1);
+        i32 nextIndex = 0;
+        for (const EmitStep& st : steps)
+            if (st.kind == EmitStep::Kind::Place) emitIndex[static_cast<usize>(st.index)] = nextIndex++;
+
+        s += "\n";
+        for (const OcSequence& sq : w.sequences) {
+            s += "SEQUENCE";
+            if (!sq.name.empty()) { s += " name "; s += percentEncode(sq.name); }
+            s += " length " + num(sq.length) +
+                 " loop " + (sq.loop ? "1" : "0") +
+                 " autoplay " + (sq.autoplay ? "1" : "0") +
+                 " camera " + (sq.camera ? "1" : "0") + "\n";
+            for (const OcSeqTrack& tr : sq.tracks) {
+                const bool cam = tr.kind == OcSeqTrackKind::Camera;
+                i32 target = -1;
+                if (!cam) {
+                    if (tr.target < 0 || tr.target >= static_cast<i32>(emitIndex.size())) continue;
+                    target = emitIndex[static_cast<usize>(tr.target)];
+                    if (target < 0) continue;
+                }
+                s += "  SEQTRACK "; s += seqKindName(tr.kind);
+                if (!cam) s += " target " + std::to_string(target);
+                s += "\n";
+                std::vector<const OcSeqKey*> keys;
+                keys.reserve(tr.keys.size());
+                for (const OcSeqKey& k : tr.keys) keys.push_back(&k);
+                std::stable_sort(keys.begin(), keys.end(),
+                                 [](const OcSeqKey* x, const OcSeqKey* y) { return x->t < y->t; });
+                const usize cnt = seqKeyValueCount(tr.kind);
+                for (const OcSeqKey* k : keys) {
+                    s += "    SEQKEY " + num(k->t) + " "; s += seqInterpName(k->interp);
+                    for (usize i = 0; i < cnt; ++i) { s += " "; s += num(k->v[i]); }
+                    s += "\n";
+                }
+            }
+            s += "ENDSEQUENCE\n";
+        }
     }
 
+    s += "\n";
     const auto line = [&](const OcWorldPlacement& p, const char* keyword, const char* keywordG) {
         if (p.uniform()) {
             s += keyword; s += " " + p.asset + " " +
@@ -868,42 +1017,17 @@ std::string writeOcworld(const OcWorldData& w) {
         s += "\n";
     };
 
-    // ITERATIVE, not recursive: a hand-built vector can describe a cycle, and a cycle in a recursive
-    // emit is a stack overflow rather than a diagnosable error. `emitted` bounds the walk to each
-    // placement once, so the worst a malformed parent chain can do is leave a subtree unwritten.
-    std::vector<bool> emitted(n, false);
-    struct Frame { i32 index; usize next; bool opened; };
-    std::vector<Frame> stack;
-    for (const i32 root : roots) {
-        if (emitted[static_cast<usize>(root)]) continue;
-        emitted[static_cast<usize>(root)] = true;
-        line(w.placements[static_cast<usize>(root)], "PLACE", "PLACEG");
-        stack.push_back(Frame{root, 0, false});
-        while (!stack.empty()) {
-            Frame& f = stack.back();
-            const std::vector<i32>& ch = kids[static_cast<usize>(f.index)];
-            if (f.next >= ch.size()) {
-                if (f.opened) {
-                    s.append(static_cast<usize>(stack.size() - 1) * 2, ' ');
-                    s += "END\n";
-                }
-                stack.pop_back();
-                continue;
-            }
-            if (!f.opened) {
-                f.opened = true;
-                s.append(static_cast<usize>(stack.size() - 1) * 2, ' ');
-                s += "BEGIN\n";
-            }
-            const i32 c = ch[f.next++];
-            if (emitted[static_cast<usize>(c)]) continue;
-            emitted[static_cast<usize>(c)] = true;
-            // Indentation is COSMETIC, exactly as it is everywhere else in this format -- trim and
-            // splitWhitespace discard it before any parse sees it. The nesting is carried by the
-            // records; the spaces are for whoever opens the file.
-            s.append(stack.size() * 2, ' ');
-            line(w.placements[static_cast<usize>(c)], "CHILD", "CHILDG");
-            stack.push_back(Frame{c, 0, false});
+    for (const EmitStep& st : steps) {
+        // Indentation is COSMETIC, exactly as it is everywhere else in this format -- trim and
+        // splitWhitespace discard it before any parse sees it. The nesting is carried by the
+        // records; the spaces are for whoever opens the file.
+        s.append(st.depth * 2, ' ');
+        if (st.kind == EmitStep::Kind::Place) {
+            const OcWorldPlacement& p = w.placements[static_cast<usize>(st.index)];
+            if (st.depth == 0) line(p, "PLACE", "PLACEG");
+            else               line(p, "CHILD", "CHILDG");
+        } else {
+            s += st.kind == EmitStep::Kind::Begin ? "BEGIN\n" : "END\n";
         }
     }
     return s;

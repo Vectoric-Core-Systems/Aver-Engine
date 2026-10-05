@@ -33,8 +33,9 @@ namespace aver::render::denoise {
 enum class Signal : u32 {
     Occlusion = 0,   // one channel: the sky-occlusion normalised hit distance
     Radiance  = 1,   // rgb: the ReSTIR GI indirect diffuse radiance
+    Reflection = 2,  // rgb: Voxi's ray-traced reflection, a: its hit distance (cm)
 };
-inline constexpr u32 kSignalCount = 2;
+inline constexpr u32 kSignalCount = 3;
 
 class Denoiser {
 public:
@@ -53,14 +54,23 @@ public:
         rhi::ResourceState gbufferState    = rhi::ResourceState::RenderTarget;
 
         rhi::TextureHandle occlusion = 0;         // R16Unorm normalised hit distance
-        rhi::TextureHandle radiance  = 0;         // RGBA16F, rgb linear radiance (a unused)
+        rhi::TextureHandle radiance  = 0;         // RGBA16F, rgb linear radiance (a: hit distance, NRD)
+        rhi::TextureHandle reflection = 0;        // RGBA16F, rgb linear radiance, a hit distance (cm)
         rhi::ResourceState signalState = rhi::ResourceState::UnorderedAccess;
+        // Reflection only: the G-buffer frame's camera-relative inverse view-projection and position
+        // (IDevice::camera), and the frame before it's view-projection (voxi.hlsl's gPrevViewProj).
+        f32 invViewProjRel[16] = {};
+        f32 prevViewProj[16] = {};
+        f32 camPos[3]        = {};
+        f32 viewport[4]      = {};   // scene viewport x y w h, pixels
+        f32 prevViewport[4]  = {};
     };
 
     // Per-frame choices that are not textures.
     struct Frame {
         bool runOcclusion = false;
         bool runRadiance  = false;
+        bool runReflection = false;
         // Every signal's history is discarded this frame (a camera cut, a mode switch, a resize).
         bool resetHistory = false;
         // The radiance input was traced at half rate: only pixels with ((x ^ y ^ parity) & 1) == 0
@@ -87,13 +97,14 @@ public:
     bool create(rhi::IDevice& dev);
     void destroy();
     [[nodiscard]] bool valid() const { return pipelines_[0] != 0; }
-    [[nodiscard]] bool neuralAvailable() const { return pipelines_[NrdResolve * 2] != 0; }
+    [[nodiscard]] bool neuralAvailable() const { return pipelines_[NrdResolve * kVariants] != 0; }
     // NRD's trained network (bin/data/nrd_v1.bin). Loaded, Neural Denoise runs NRD's resolve with it;
     // without it, Neural Denoise runs FidelityFX's resolve (the developer switch aside).
     void setWeightsPath(std::string path) { weightsPath_ = std::move(path); weightsTried_ = false; }
     [[nodiscard]] bool networkLoaded() const { return net_ != 0; }
     [[nodiscard]] bool neuralSpatialAvailable() const {
-        return neuralAvailable() && pipelines_[NrdPyramid * 2] != 0 && pipelines_[NrdPyramid * 2 + 1] != 0;
+        return neuralAvailable() && pipelines_[NrdPyramid * kVariants] != 0 &&
+               pipelines_[NrdPyramid * kVariants + 1] != 0;
     }
 
     // Allocates the history and scratch textures for this resolution. Idempotent at an unchanged
@@ -176,15 +187,16 @@ private:
 
     rhi::IDevice*          dev_ = nullptr;
     rhi::IResourceFactory* res_ = nullptr;
-    // [pass * 2 + scalar]: scalar 1 is the one-channel variant.
-    rhi::PipelineHandle pipelines_[kPassCount * 2] = {};
+    // [pass * kVariants + v]. Per pass: colour (GI), one channel (sky occlusion), reflection (FidelityFX's own reflection setup).
+    static constexpr u32 kVariants = 3;
+    rhi::PipelineHandle pipelines_[kPassCount * kVariants] = {};
 
     SignalTargets      sig_[kSignalCount];
     rhi::TextureHandle depthHistory_  = 0;   // last frame's G-buffer view Z, for disocclusion
     rhi::TextureHandle normalHistory_ = 0;   // last frame's G-buffer normal
     rhi::TextureHandle output_[kSignalCount] = {};
     bool ranLast_[kSignalCount] = {};
-    bool stale_[kSignalCount]   = {true, true};
+    bool stale_[kSignalCount]   = {true, true, true};
 
     Tuning tuning_{};
     Capture cap_;

@@ -397,6 +397,19 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
         if (inst.entityBody[k] >= 0) entityBodies_[static_cast<u32>(e)] = inst.entityBody[k];
 #endif
     }
+#if AVER_MODULE_SCENE
+    // THE LEVEL'S SEQUENCE becomes the editor's: its tracks name placements, which are entities now.
+    // levelHeader_ lets go of it, since saveLevel writes the sequence from the editor's model.
+    {
+        std::vector<scene::Entity> byPlacement(w.placements.size(), scene::kInvalidEntity);
+        for (usize k = 0; k < inst.entities.size(); ++k) {
+            const usize pi = static_cast<usize>(inst.placementIndex[k]);
+            if (pi < byPlacement.size()) byPlacement[pi] = inst.entities[k];
+        }
+        seqEditor_.load(w.sequences, byPlacement);
+        levelHeader_.sequences.clear();
+    }
+#endif
     // GRAPH-AS-CLASS / any other class placement: level_ collected them (level_.classPlacements());
     // spawnClassPlacements() spawns them later -- applyProject's "Loading level" stage runs BEFORE
     // "Starting scripts", so a class declared from a .ocgraph isn't registered yet here.
@@ -840,6 +853,9 @@ void SandboxApp::unloadLevel(Engine& eng) {
     // next would write them into a file that never had them.
     levelPcgVolumes_.clear();
     levelHeader_ = fmt::OcWorldData{};
+#if AVER_MODULE_SCENE
+    seqEditor_.reset();   // its actors are gone with the level; nothing to restore
+#endif
     entityCollide_.clear();
     entityAnim_.clear();
     animEditBefore_.clear();

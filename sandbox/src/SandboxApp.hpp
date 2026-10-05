@@ -138,6 +138,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // dependency either.
 #include "InputSchemeEditor.hpp"
 #include "EditorEuler.hpp"
+#include "SequenceEditor.hpp"
 #include "AssetRefScan.hpp"
 #include "EditorTransform.hpp"   // dropRestLift, so a dropped asset rests on what it landed on
 #include "EditorNotifications.hpp"
@@ -705,17 +706,18 @@ static inline std::vector<rhi::LineVertex> buildPlayerStartArrow(f32 centerZ, f3
     return v;
 }
 
-// Editor modes: Select (objects), Landscape (terrain), Foliage (scatter), Simulate (play).
-enum class EditorMode { Select, Landscape, Foliage, Simulate };
-static const char* kEditorModeNames[4] = {"Select", "Landscape", "Foliage", "Simulate"};
+// Editor modes: Select (objects), Landscape (terrain), Foliage (scatter), Simulate (play), Animate (level sequence).
+enum class EditorMode { Select, Landscape, Foliage, Simulate, Animate };
+static const char* kEditorModeNames[5] = {"Select", "Landscape", "Foliage", "Simulate", "Animate"};
 // Mode descriptions.
-static const char* kEditorModeHints[4] = {
+static const char* kEditorModeHints[5] = {
     "Pick and transform objects",
     "Sculpt the terrain heightfield",
     "Paint scattered meshes onto the terrain",
     "Run the game in the viewport",
+    "Keyframe actors, a camera path and emissive glow on one level timeline",
 };
-static constexpr int kEditorModeCount = 4;
+static constexpr int kEditorModeCount = 5;
 
 // Object tools. Only meaningful in EditorMode::Select.
 enum class Tool { Select, Move, Rotate, Scale };
@@ -2789,6 +2791,15 @@ private:
 
     void buildSimulateModePanel(Engine& e);
 
+#if AVER_MODULE_SCENE
+    // The Animate mode's panel and timeline window; the logic lives in seqEditor_.
+    void buildAnimateModePanel();
+    void buildSequencerWindow();
+    editor::SequenceHost sequenceHost();
+    // Between animSystem().tick and World::flush, every frame.
+    void tickSequence(f32 dt);
+#endif
+
     // Water is not a terrain feature (buildWaterPanel touches levelHeader_.waters, not landscape types).
     void buildWaterPanel(Engine& e);
 
@@ -3060,6 +3071,12 @@ private:
     // Free-fly editor camera: position plus yaw/pitch.
     Vec3 camPos_{7.0f, 7.0f, 4.5f};
     f32 yaw_ = 0.0f, pitch_ = 0.0f, flySpeed_ = 800.0f, lookSpeed_ = 0.005f;   // cm/s
+    // A sequence camera showing instead of the free-fly one this frame (set where the camera is
+    // pushed; camPos_/yaw_/pitch_ are persisted and stay the editor's own).
+    bool viewOverride_ = false;
+    Vec3 viewPosOv_{0.0f, 0.0f, 0.0f}, viewFwdOv_{1.0f, 0.0f, 0.0f};
+    Vec3 viewPos() const { return viewOverride_ ? viewPosOv_ : camPos_; }
+    Vec3 viewForward() const { return viewOverride_ ? viewFwdOv_ : camForward(); }
 
     // What "1" on the camera-speed dial means, in cm/s (movement integration uses cm/s).
     // DISPLAY scale only: divide by it so default speed reads "1" not "800".
@@ -3773,6 +3790,11 @@ private:
     bool playWorldCaptured_ = false;
     // What moved during session (Voxi GI excludes it). Started in capturePlayWorld, ended in stopPlay.
     game::PlayMobility playMobility_;
+#if AVER_MODULE_SCENE
+    // The level's sequence (Animate mode, Play). Its camera and emissive reach the frame through
+    // viewOverride_ and DrawWorldOptions::emissiveScale.
+    editor::SequenceEditor seqEditor_;
+#endif
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
     // Vehicles as physics cars while Play runs. Built in capturePlayWorld, ended in stopPlay.
     world::VehicleSystem vehicles_;

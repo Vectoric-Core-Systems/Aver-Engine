@@ -342,6 +342,7 @@ private:
         Refused,     // movers no longer line up: run full build
         Unchanged,   // every mover where TLAS has it: nothing to write
         Patched,     // at least one transform rewritten, table re-uploaded
+        MaterialsOnly, // only a mover's emissive changed: material + instance tables re-uploaded, no TLAS work
     };
 
     // Per-build scratch: hoisted to avoid frame reallocation. .clear()'d at buildAccelerationStructures top.
@@ -673,7 +674,8 @@ private:
     using DrawMaterialMemo = std::array<DrawMaterialMemoSlot, kDrawMaterialMemoSlots>;
 
     // One draw's material identity folded into running hash h.
-    void hashDrawMaterialInto(u64& h, const Draw& d, DrawMaterialMemo& memo) const;
+    // skipEmissive: hash the constants with emissiveFactor zeroed (mover lane only).
+    void hashDrawMaterialInto(u64& h, const Draw& d, DrawMaterialMemo& memo, bool skipEmissive = false) const;
 
     // One draw's rtAccelDrawsKey() term; with moverLane a movable draw's term omits world matrix.
     u64 rtDrawHash(const Draw& d, DrawMaterialMemo& memo, bool moverLane) const;
@@ -978,6 +980,12 @@ private:
     render::denoise::Denoiser denoiser_;
     rhi::TextureHandle denoiseAoOutput_ = 0;
     rhi::TextureHandle denoiseGiOutput_ = 0;
+    // Reflection denoising: CSRdRefl's fresh sample + hit distance (u23), its 1x1 stand-in while off,
+    // and the denoiser's result (t23).
+    rhi::TextureHandle rdReflDnIn_ = 0, rdReflDnPlaceholder_ = 0;
+    bool bindReflDnPlaceholder();
+    rhi::TextureHandle denoiseReflOutput_ = 0;
+    bool rdReflDnBound_ = false;   // u23 holds rdReflDnIn_ this frame (CSRdRefl writes it)
     // Advanced once per frame at the top of beginShadowHistory; its low bit is half-rate GI's parity.
     u32  denoiseFrame_ = 0;
     bool denoiseWarnedMsaa_ = false;
@@ -1186,6 +1194,11 @@ private:
     // This frame's camera view-projection, captured where fitCascades() reads the camera.
     f32  curViewProj_[16] = {};
     f32  prevViewProj_[16] = {};
+    // The reflection denoiser runs a frame late, on the G-buffer's frame (prev*) and the one before.
+    f32  curInvViewProjRel_[16] = {}, prevInvViewProjRel_[16] = {};
+    f32  curCamPos_[3] = {}, prevCamPos_[3] = {};
+    f32  prev2ViewProj_[16] = {};
+    f32  prev2SceneViewport_[4] = {};
     // Same idea, for the scene viewport rect the reprojected NDC needs.
     f32  curSceneViewport_[4] = {};
     f32  prevSceneViewport_[4] = {};

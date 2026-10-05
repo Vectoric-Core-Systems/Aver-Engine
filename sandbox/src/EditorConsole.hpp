@@ -691,6 +691,10 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Developer: NRD's fixed-parameter spatial-first resolve (a pyramid of this frame plus a short stabiliser) under voxi.neuralDenoise, instead of FidelityFX's resolve",
         []{ return vBool(Renderer::get().settings().neuralDenoiseSpatial); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->neuralDenoiseSpatial = on; }); }});
+    t.push_back({"voxi.denoiseReflections", VarType::Bool, false,
+        "Ray-traced reflections through the denoiser's reflection pipeline while voxi.denoiser runs (staged ray-driven only)",
+        []{ return vBool(Renderer::get().settings().denoiseReflections); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->denoiseReflections = on; }); }});
     // ---- denoiser tuning -- LIVE: VoxiRenderer re-issues the denoiser's tuning every frame.
     // Only meaningful while voxi.denoiser is on; harmless otherwise. Ranges match Voxi.cpp's clamps.
     t.push_back({"voxi.denoiserMaxSamples", VarType::U32, false,
