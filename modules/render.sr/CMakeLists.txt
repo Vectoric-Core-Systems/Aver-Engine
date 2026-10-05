@@ -27,6 +27,18 @@ aver_add_module(Aver.Render.Sr
 
 # HLSL beside the executable -- see cmake/AvModule.cmake.
 aver_deploy_shaders(Aver.Render.Sr "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+# NeuRAA's trained network (docs/rendering/NEURAA_NRD.md), beside the executable in bin/data; the
+# host points NeuRaa::setWeightsPath at it. Same deploy rule as NeuraFI's weights.
+set(_neuraa_weights "${CMAKE_CURRENT_SOURCE_DIR}/data/neuraa_v1.bin")
+set(_neuraa_deployed "${CMAKE_BINARY_DIR}/bin/data/neuraa_v1.bin")
+add_custom_command(
+  OUTPUT  ${_neuraa_deployed}
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/bin/data"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_neuraa_weights} "${CMAKE_BINARY_DIR}/bin/data"
+  DEPENDS ${_neuraa_weights}
+  COMMENT "NeuRAA: deploying the trained weights to bin/data")
+add_custom_target(Aver.Render.Sr.weights ALL DEPENDS ${_neuraa_deployed})
+add_dependencies(Aver.Render.Sr Aver.Render.Sr.weights)
 # FSR 1's headers, which sr_fsr1.hlsl includes as "FidelityFX/<name>.h" (the denoiser's live there too).
 file(COPY "${CMAKE_SOURCE_DIR}/third_party/fidelityfx-fsr/ffx_a.h"
           "${CMAKE_SOURCE_DIR}/third_party/fidelityfx-fsr/ffx_fsr1.h"

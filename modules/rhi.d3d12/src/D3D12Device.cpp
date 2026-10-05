@@ -921,11 +921,14 @@ public:
                            std::memcmp(taaLastViewProj_, frameCB_.viewProj, sizeof(taaLastViewProj_)) != 0;
         std::memcpy(taaLastViewProj_, frameCB_.viewProj, sizeof(taaLastViewProj_));
         taaLastViewProjValid_ = true;
-        if (taaCameraMoving_) return;
-        if (!upscaler_ || !any(upscaler_->needs(), UpscalerNeeds::Jitter)) return;
-        auto halton = [](u32 i, u32 b) { f32 f = 1.0f, r = 0.0f; for (; i; i /= b) { f /= b; r += f * (i % b); } return r; };
-        const u32 i = (taaJitterIndex_++ % 8u) + 1u;
-        const f32 jx = halton(i, 2) - 0.5f, jy = halton(i, 3) - 0.5f;   // scene pixels
+        if (taaCameraMoving_ || !upscaler_) return;
+        f32 jx = 0.0f, jy = 0.0f;   // scene pixels
+        if (!upscaler_->jitterOverride(jx, jy)) {
+            if (!any(upscaler_->needs(), UpscalerNeeds::Jitter)) return;
+            auto halton = [](u32 i, u32 b) { f32 f = 1.0f, r = 0.0f; for (; i; i /= b) { f /= b; r += f * (i % b); } return r; };
+            const u32 i = (taaJitterIndex_++ % 8u) + 1u;
+            jx = halton(i, 2) - 0.5f; jy = halton(i, 3) - 0.5f;
+        }
         const f32 w = static_cast<f32>(vpW_ ? vpW_ : sceneWidth_), h = static_cast<f32>(vpH_ ? vpH_ : sceneHeight_);
         if (w <= 0.0f || h <= 0.0f) return;
         const f32 nx = 2.0f * jx / w, ny = -2.0f * jy / h;            // NDC, y up

@@ -197,6 +197,24 @@ Captures come from scripted camera paths on NeonDistrict Day and Night, NewSponz
 all run in a visible window. Weights ship in `bin/data` as an AVNN file. A gate keeps the baseline where
 the network measures worse.
 
+### Training run v1 (2026-10-05)
+
+Reproduce with `tools/neuraa/`:
+1. `capture.py <Sandbox.exe> <level> <dir> <poses>` per scene: Unlit (authored colour, so lighting noise
+   does not pollute the coverage targets), ray-driven staged, render scale 0.5, the camera drifting
+   (`--cam-wander`) and holding still for each pose. Per pose: one unjittered base frame and the mean of
+   64 frames on an 8x8 sub-pixel grid (NeuRaa's jitter override). v1: NeonDistrict Day 16 poses and
+   NewSponza 16 for training, CyberCity2099 Day 8 held out.
+2. `nraa_train.py <capture root> <weights>`: oracle 3x3 weights per edge pixel (non-negative, sum 1,
+   fitted to the reference, regularised toward the baseline), then the 36-32-32-9 MLP regressed onto
+   them; model selection on the held-out weight error. Output `modules/render.sr/data/neuraa_v1.bin`.
+3. `nraa_eval.py <weights> <captures made with --with-neuraa>`: the engine's resolved frame against the
+   script's own prediction and against the reference.
+
+v1 results on the held-out scene (edge-pixel colour error against the 64-sample reference): no AA 0.0308,
+baseline 0.0275 (-10%), network in the engine 0.0230 (-25%). The engine matches the script to 3.4e-4
+relative; pixels off the edges are bit-identical. Not yet measured: lit scenes in motion, and cost.
+
 ### Cost (estimate)
 
 Detect ~0.05 ms, coverage ~0.15 ms, inference ~0.15 ms, resolve ~0.05 ms: ~0.4 ms at render scale 0.5 on

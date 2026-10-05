@@ -1595,6 +1595,9 @@ public:
     void setLodShareVertices(bool on);
     void setCamTranslate(f32 speedCmPerFrame);
     void setCamWander(f32 amp, f32 speed);        // --cam-wander AMP SPEED
+#if AVER_MODULE_SR
+    void setNeuRaaCapture(const std::string& dir, u32 count) { neuraaCaptureDir_ = dir; neuraaCaptureCount_ = count; }
+#endif
     void setCamera(Vec3 pos, f32 pitchDeg, f32 yawDeg);
     void setScriptsDir(std::string d);            // --scripts <dir>
     void setSpawnTest(std::string cls);      // --spawn-test <ClassName>
@@ -3323,6 +3326,9 @@ private:
     std::unique_ptr<aver::sr::TemporalUpscaler> taaUpscaler_;
     // NeuRAA wraps whichever upscaler holds the slot. Phase 1: only while its debug view is selected.
     std::unique_ptr<aver::sr::NeuRaa> neuraa_;
+    std::string neuraaCaptureDir_;          // --neuraa-capture DIR COUNT (training data)
+    u32  neuraaCaptureCount_ = 0;
+    bool neuraaCaptureStarted_ = false;
     bool temporalAaEnabled_ = true;   // the project's RENDER.TAA (unstated = on); --no-taa / --taa win over it
     bool taaFromCli_ = false;
     bool neuraaEnabled_ = false;      // the project's RENDER.NEURAA (unstated = off)
@@ -3370,6 +3376,7 @@ private:
     f32  camWanderAmp_=0.0f;         // --cam-wander AMP SPEED: non-repeating drift, 0 = off
     f32  camWanderSpeed_=1.0f;
     bool camWanderBased_=false;
+    u64  camWanderHeld_=0;           // frames the wander was paused (NeuRAA capture holding a pose)
     Vec3 camWanderBasePos_{};
     f32  camWanderBaseYaw_=0.0f, camWanderBasePitch_=0.0f;
     // --mesh-heap default|upload (W4): false (default) = static mesh vertex/index buffers on the Upload heap.

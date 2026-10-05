@@ -774,6 +774,10 @@ public:
 
     // Whether this upscaler accumulates state across frames.
     virtual bool isTemporal() const { return false; }
+
+    // This frame's camera jitter in scene pixels, in place of the device's own sequence; false keeps
+    // the device's. Asked once per frame at upload, while the camera is still (NeuRAA's capture).
+    virtual bool jitterOverride(f32& x, f32& y) { (void)x; (void)y; return false; }
     virtual void reset() {}
 
     // Upscale in.color to outTarget.

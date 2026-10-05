@@ -1390,12 +1390,19 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         camPos_ += camForward() * camTranslateSpeed_;
     }
     // --cam-wander AMP SPEED: follows sum of sines at irrational frequencies (NeuraFI training trajectory).
-    if (camWanderAmp_ > 0.0f && (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {
+    // NeuRAA's training capture holds it still while it captures a pose, then it resumes where it was.
+#if AVER_MODULE_SR
+    const bool neuraaHold = neuraa_ && neuraa_->captureHolding();
+#else
+    const bool neuraaHold = false;
+#endif
+    if (neuraaHold) ++camWanderHeld_;
+    if (camWanderAmp_ > 0.0f && !neuraaHold && (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {
         if (!camWanderBased_) {
             camWanderBasePos_ = camPos_; camWanderBaseYaw_ = yaw_; camWanderBasePitch_ = pitch_;
             camWanderBased_ = true;
         }
-        const f32 s = static_cast<f32>(t.frame - 1) * camWanderSpeed_;
+        const f32 s = static_cast<f32>(t.frame - 1 - camWanderHeld_) * camWanderSpeed_;
         const f32 a = camWanderAmp_;
         yaw_ = camWanderBaseYaw_ + a * 0.4363f *   // +-25 degrees at AMP 1
                (std::sin(0.0131f * s) + 0.6f * std::sin(0.0317f * s + 1.1f) + 0.3f * std::sin(0.0719f * s + 2.3f)) / 1.9f;
