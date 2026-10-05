@@ -9,6 +9,7 @@
 #include "aver/voxi/RenderSettingsResolver.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 // The Voxi settings service and the C ABI the C# scripting layer P/Invokes.
 namespace aver::voxi {
@@ -140,6 +141,13 @@ void Renderer::setSettings(const Settings& s) {
     n.denoiserMaxSamples        = std::clamp(n.denoiserMaxSamples, 1u, 255u);
     n.denoiserHistoryClipWeight = std::clamp(n.denoiserHistoryClipWeight, 0.01f, 4.0f);
     n.denoiserSunMovingSamples  = std::clamp(n.denoiserSunMovingSamples, 1u, 255u);
+    n.denoiserKind = n.denoiserKind == 2u ? 2u : 1u;
+    // The shader clamps too (nrd2SanitiseParams); a non-finite value falls back to the default.
+    for (u32 i = 0; i < 12; ++i) {
+        const float v = n.nrd2Params[i];
+        n.nrd2Params[i] = std::isfinite(v) ? std::clamp(v, i % 6u < 3u ? -16.0f : -8.0f, i % 6u < 3u ? 16.0f : 8.0f)
+                                           : Settings{}.nrd2Params[i];
+    }
 
     // Clamp typos to ScreenSpace (1), not Off (0), to avoid silent behaviour change.
     n.refractionMode = n.refractionMode > 2u ? 1u : n.refractionMode;

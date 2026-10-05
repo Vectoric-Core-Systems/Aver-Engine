@@ -6,7 +6,8 @@
 # RUNTIME question -- the shaders compile when the renderer starts, and the G-buffer it reads exists
 # only on D3D12 -- answered by Denoiser::create() and the caller's own gating.
 add_library(Aver.Render.Denoise STATIC
-  src/Denoiser.cpp)
+  src/Denoiser.cpp
+  src/Nrd2.cpp)
 
 target_include_directories(Aver.Render.Denoise PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Render.Denoise PUBLIC cxx_std_20)

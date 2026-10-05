@@ -683,6 +683,58 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "AMD FidelityFX Denoiser over the ReSTIR indirect diffuse and the ray-traced sky occlusion. Allocates the thin G-buffer (velocity, view Z, normal/roughness -- nothing else in the engine wants it) and REQUIRES RT hardware, the RT tier not Off, something to denoise, D3D12 and MSAA 1; above 1x sample count the pass skips itself and says so once at WARN, and this always reads back what is ACTUALLY running, not merely what was last requested",
         []{ const Renderer& r = Renderer::get(); return vBool(voxi::resolve(r.settings(), r.deviceInfo()).denoiser.effective != 0); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->denoiser = on; }); }});
+    t.push_back({"voxi.denoiserMode", VarType::U32, false,
+        "Which denoiser runs: 0 off, 1 AMD FidelityFX, 2 NRD2 (docs/rendering/NRD2.md: single-frame denoising of the composed lighting, no history; D3D12 staged ray-driven only). Same value as RENDER.DENOISER and --denoiser; reads back what is ACTUALLY running",
+        []{ const Renderer& r = Renderer::get(); return vU32(voxi::resolve(r.settings(), r.deviceInfo()).denoiser.effective != 0 ? voxi::denoiserMode(r.settings()) : 0u); },
+        [](ConsoleBatch& b, VarValue v){ const u32 m=v.as.u; b.dialSetters.push_back([m](void* sp){ voxi::setDenoiserMode(*static_cast<Settings*>(sp), m); }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u > 2) { err = "denoiserMode must be 0, 1 or 2"; return false; }
+            return true;
+        }});
+    // NRD2's fixed tile parameters (Settings::nrd2Params; nrd2_resolve.hlsli). Live: copied every frame.
+    {
+        static const char* kNrd2Field[6] = {"Logit1", "Logit2", "Logit3", "DepthSens", "NormalSens", "LumSens"};
+        static const char* kNrd2Help[6] = {
+            "level logit for the 1/2 level (own pixel 0); higher leans on it",
+            "level logit for the 1/4 level (own pixel 0)",
+            "level logit for the 1/8 level (own pixel 0)",
+            "log2 relative-depth sensitivity of the upsample taps (higher = sharper at depth edges)",
+            "log2 normal-cosine power of the upsample taps (higher = sharper at creases)",
+            "log2 luminance sensitivity (higher = an outlier gives way to the levels more)"};
+        for (u32 i = 0; i < 12; ++i) {
+            const std::string name = std::string("voxi.nrd2") + (i < 6 ? "Diff" : "Spec") + kNrd2Field[i % 6];
+            t.push_back({name, VarType::F32, false,
+                std::string("NRD2 ") + (i < 6 ? "diffuse" : "specular") + ": " + kNrd2Help[i % 6] +
+                    ". Developer dial (phase 1 defaults; the network replaces them per tile in phase 4)",
+                [i]{ return vF32(Renderer::get().settings().nrd2Params[i]); },
+                [i](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([i, n](void* sp){ static_cast<Settings*>(sp)->nrd2Params[i] = n; }); }});
+        }
+    }
+    t.push_back({"voxi.nrd2Bypass", VarType::Bool, false,
+        "Developer: NRD2 recomposes its diffuse/specular split without filtering, to check the split against voxi.denoiserMode 0",
+        []{ return vBool(Renderer::get().settings().nrd2Bypass); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2Bypass = on; }); }});
+    // NRD2 half-rate tracing per feature (Settings::nrd2HalfRate*): skipped pixels filled from this frame.
+    {
+        struct HalfRateDial { const char* name; bool Settings::* field; const char* help; };
+        static const HalfRateDial kNrd2HalfRate[4] = {
+            {"voxi.nrd2HalfRateGi",    &Settings::nrd2HalfRateGi,
+             "ReSTIR GI on a checkerboard (with voxi.rayDrivenStages 2)"},
+            {"voxi.nrd2HalfRateRefl",  &Settings::nrd2HalfRateRefl,
+             "glossy reflections on a checkerboard (with voxi.rtReflectionHalfRate; mirrors stay full rate)"},
+            {"voxi.nrd2HalfRateAo",    &Settings::nrd2HalfRateAo,
+             "sky occlusion on a checkerboard (with voxi.rtSkyOcclusionHalfRate)"},
+            {"voxi.nrd2HalfRateLamps", &Settings::nrd2HalfRateLamps,
+             "lamp visibility on a checkerboard (Stage B's 5x5 lamp filter fills the rest)"}};
+        for (const HalfRateDial& d : kNrd2HalfRate) {
+            bool Settings::* f = d.field;
+            t.push_back({d.name, VarType::Bool, false,
+                std::string("NRD2 half rate: ") + d.help +
+                    ", the skipped half filled from its traced neighbours this frame. Off = full rate",
+                [f]{ return vBool(Renderer::get().settings().*f); },
+                [f](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([f, on](void* sp){ static_cast<Settings*>(sp)->*f = on; }); }});
+        }
+    }
     t.push_back({"voxi.neuralDenoise", VarType::Bool, false,
         "Neural Denoise: NRD's resolve in place of FidelityFX's (docs/rendering/NEURAA_NRD.md). Only acts while voxi.denoiser runs; reads back what is ACTUALLY running",
         []{ const Renderer& r = Renderer::get(); return vBool(voxi::resolve(r.settings(), r.deviceInfo()).neuralDenoise.effective != 0); },

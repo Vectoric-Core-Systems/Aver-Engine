@@ -965,8 +965,10 @@ void averCoatTerms(AverSurface s, AverIndirect ind, float coatWeight, float coat
 }
 #endif   // AVER_LAYERED_BSDF
 
-void averIndirectTerms(AverSurface s, AverIndirect ind,
-                       out float3 specEnv, out float3 diffAmbient, out float3 diffBounce) {
+// The split sum's three factors: FssEss (environment specular), FmsEms (multiple scattering, which
+// averIndirectTerms folds into the ambient term) and kD (what is left for diffuse). One copy, read by
+// averIndirectTerms and by voxi.hlsl's NRD2 split, which needs them apart.
+void averIndirectFactors(AverSurface s, out float3 FssEss, out float3 FmsEms, out float3 kD) {
     // THE SPLIT SUM, WITH THE MULTIPLE SCATTERING PUT BACK (Fdez-Aguera). The old form,
     // `ind.specular * (F0*dfg.x + dfg.y)` plus a full-strength diffuse term, measured wrong in two
     // directions in this engine's white furnace: a white METAL kept only 45% of its energy at
@@ -979,14 +981,14 @@ void averIndirectTerms(AverSurface s, AverIndirect ind,
     // it. Confirmed in the furnace: every cell of the 6x3 roughness/metallic grid lands on 1.000
     // rather than 0.45-1.045.
     float2 dfg    = averEnvBRDF(s.ndv, s.rough);
-    float3 FssEss = s.F0 * dfg.x + dfg.y;
+    FssEss = s.F0 * dfg.x + dfg.y;
     float  Ess    = dfg.x + dfg.y;
     float  Ems    = 1.0 - Ess;
     // The 1/21 is the analytic hemispherical average of the Schlick term, not a tuned number.
     float3 Favg   = s.F0 + (1.0 - s.F0) / 21.0;
     // Guarded because Ems*Favg reaches 1 only when a single bounce returns nothing at all, and a
     // division by zero here would paint NaN across every rough pixel in the frame.
-    float3 FmsEms = Ems * FssEss * Favg / max(1.0 - Ems * Favg, 1e-4);
+    FmsEms = Ems * FssEss * Favg / max(1.0 - Ems * Favg, 1e-4);
 
     // WHAT THE DIFFUSE LOBE LOSES IS THE DIELECTRIC REFLECTANCE, NOT THE BLENDED ONE: the diffuse
     // lobe belongs to the dielectric substrate (a metal has none, per kdAlbedo's own (1-metallic)
@@ -1003,7 +1005,13 @@ void averIndirectTerms(AverSurface s, AverIndirect ind,
     float3 FssEssD = F0d * dfg.x + dfg.y;
     float3 FavgD   = F0d + (1.0 - F0d) / 21.0;
     float3 FmsEmsD = Ems * FssEssD * FavgD / max(1.0 - Ems * FavgD, 1e-4);
-    float3 kD      = s.kdAlbedo * saturate(1.0 - FssEssD - FmsEmsD);
+    kD      = s.kdAlbedo * saturate(1.0 - FssEssD - FmsEmsD);
+}
+
+void averIndirectTerms(AverSurface s, AverIndirect ind,
+                       out float3 specEnv, out float3 diffAmbient, out float3 diffBounce) {
+    float3 FssEss, FmsEms, kD;
+    averIndirectFactors(s, FssEss, FmsEms, kD);
 
     // Occlusion is applied per lobe now: AO answers a hemisphere question and belongs with the
     // diffuse terms, while the specular lobe gets averSpecularOcclusion. Sending raw AO into a

@@ -1735,27 +1735,34 @@ void SandboxApp::buildRenderingSettings(int page) {
         // Greyed for hard reasons (hardware, tier); left clickable for soft (MSAA), fixable below.
         const bool denoiserHardGreyed = greysControl(er.denoiser.reason);
         ImGui::BeginDisabled(denoiserHardGreyed);
-        bool den = s.denoiser && !denoiserHardGreyed;
-        if (ImGui::Checkbox("Denoiser (AMD FidelityFX)", &den)) { s.denoiser = den; changed = true; }
+        static const char* kDenoiserModes[] = {"Off", "AMD FidelityFX", "NRD2 (single-frame)"};
+        int denMode = denoiserHardGreyed ? 0 : static_cast<int>(denoiserMode(s));
+        if (ImGui::Combo("Denoiser", &denMode, kDenoiserModes, 3)) {
+            setDenoiserMode(s, static_cast<u32>(denMode));
+            changed = true;
+        }
         ImGui::EndDisabled();
         if (denoiserHardGreyed) {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.denoiser.reason));
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Filters ReSTIR GI's indirect diffuse and the ray-traced sky\n"
-                                    "occlusion, with the AMD FidelityFX Denoiser (MIT,\n"
-                                    "third_party/fidelityfx-denoiser).\n\n"
+            ImGui::SetTooltip("AMD FIDELITYFX filters ReSTIR GI's indirect diffuse and the ray-traced\n"
+                                    "sky occlusion (MIT, third_party/fidelityfx-denoiser), with history.\n\n"
+                                    "NRD2 denoises the whole composed lighting (shadows, lamps, GI,\n"
+                                    "reflections) from THIS frame only: no history, so no smear or\n"
+                                    "ghosting. Fixed parameters for now (docs/rendering/NRD2.md).\n"
+                                    "Staged ray-driven frames on D3D12 only.\n\n"
                                     "COSTS THE G-BUFFER: velocity, view-space depth and packed\n"
                                     "normal/roughness -- three render targets NOTHING ELSE in\n"
                                     "this engine needs, about 54 MB at 1080p. That is why it is\n"
                                     "off by default rather than something enabled for you.\n\n"
                                     "REQUIRES the G-buffer and D3D12. Under MSAA the G-buffer is\n"
                                     "resolved to one sample a pixel (the nearest surface).\n\n"
-                                    "Round-trips as RENDER.DENOISER.");
+                                    "Round-trips as RENDER.DENOISER (0, 1, 2).");
         {
-            // Neural Denoise sits under the Denoiser and greys while it is off or unavailable.
-            const bool ndGreyed = !den || denoiserHardGreyed;
+            // Neural Denoise and reflection denoising are FidelityFX's: greyed while it is not the one.
+            const bool ndGreyed = denMode != 1 || denoiserHardGreyed;
             ImGui::BeginDisabled(ndGreyed);
             bool nd = s.neuralDenoise;
             if (ImGui::Checkbox("Neural Denoise", &nd)) { s.neuralDenoise = nd; changed = true; }

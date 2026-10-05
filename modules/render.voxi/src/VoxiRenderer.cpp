@@ -383,6 +383,7 @@ void VoxiRenderer::shutdown() {
     reportFrameTime("run total");
     // Denoiser owns device resources; destroy before res_ check below.
     denoiser_.destroy();
+    nrd2_.destroy();
     denoiseAoOutput_ = 0;
     denoiseGiOutput_ = 0;
     materials_.shutdown();
@@ -417,7 +418,7 @@ void VoxiRenderer::shutdown() {
                                         rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_, rdGiPtRcCbCsPso_, rdGiTracePtRcCbCsPso_, rdPtRefCsPso_, rdReflPtRcCsPso_, rdReflSplitPtRcCsPso_,
                                         rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                         rdReflSplitCsPso_, rdReflFilterCsPso_,
-                                        rdLocalLightsCsPso_,
+                                        rdLocalLightsCsPso_, rayDrivenSplitNrd2Pso_, rdHalfFillCsPso_,
                                         airVisPso_};
     for (rhi::PipelineHandle p : psos) if (p) res_->destroyPipeline(p);
     shadowPso_ = shadowInstancedPso_ = giShadowPso_ = giShadowInstancedPso_ = 0;
@@ -440,6 +441,7 @@ void VoxiRenderer::shutdown() {
     rdReflPtCsPso_ = rdReflSplitPtCsPso_ = 0;
     rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
     rdLocalLightsCsPso_ = 0;
+    rayDrivenSplitNrd2Pso_ = rdHalfFillCsPso_ = 0;
 
     if (voxelAccumTex_) res_->destroyTexture(voxelAccumTex_);
     if (voxelAccumPlaceholder_) res_->destroyTexture(voxelAccumPlaceholder_);
@@ -4218,7 +4220,10 @@ bool VoxiRenderer::primaryVisibility(rhi::PrimaryVisibility& out) const {
 // Staged ray-driven passes: records visibility, then optional probe/trace, then shadow/GI/sky-occ/refl.
 void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     const bool gbufBound = pickGbuf(rayDrivenPso_, rayDrivenGbufPso_) == rayDrivenGbufPso_;
-    const rhi::PipelineHandle stageBPso = gbufBound ? rayDrivenSplitTexGbufPso_ : rayDrivenSplitTexPso_;
+    // NRD2: Stage B's variant that writes the demodulated split (ensureNrd2 built it this frame).
+    const bool nrd2 = nrd2Frame_ && gbufBound && rayDrivenSplitNrd2Pso_ != 0;
+    const rhi::PipelineHandle stageBPso = nrd2 ? rayDrivenSplitNrd2Pso_
+                                        : gbufBound ? rayDrivenSplitTexGbufPso_ : rayDrivenSplitTexPso_;
 
     // Dispatch from scene viewport, not full render target; buffers sized to full target.
     const u32 dispatchW = curSceneViewport_[2] > 0.0f ? static_cast<u32>(curSceneViewport_[2]) : 0u;
@@ -4270,7 +4275,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     else cb_.ptBounceParams[0] = static_cast<f32>(static_cast<u32>(cb_.ptBounceParams[0]) & ~16u);
 
     // Reflection register/filter split: optional sub-stage C.
-    const bool reflSplit = !ptRef && (cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f) &&
+    const bool reflSplit = !ptRef && !nrd2Frame_ && (cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f) &&
                             settings_.rayDrivenReflSplit && rdReflSplitCsPso_ != 0 && rdReflFilterCsPso_ != 0;
     if (reflSplit && !rdReflSplitRunLogged_) {
         rdReflSplitRunLogged_ = true;
@@ -4306,6 +4311,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     bool usedCacheTwin = false;
     // PATH TRACING: the AVER_PT_PATHS twins take the GI-candidate and reflection dispatches.
     const bool pt = pathTracingWanted();
+    bool skyOccRan = false, reflRan = false;   // CSRdHalfFill's inputs
     {
         // Wraps every dispatch below -- see this function's comment on why no barrier or timestamp
         // sits between the four lighting stages (S1/G1 just below are the one exception).
@@ -4313,21 +4319,25 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
 
         // ReSTIR GI is chosen AND cone trace is gated on.
         const bool giDispatch = !ptRef && cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f;
-        // Half-rate ReSTIR GI: gated on rayDrivenStages==2, checkerboard variant compiled, denoiser live.
+        // Half-rate ReSTIR GI: gated on rayDrivenStages==2, checkerboard variant compiled, and something
+        // to rebuild the skipped half: FidelityFX's history, or under NRD2 CSRdHalfFill from this frame.
+        const bool nrd2GiFill = nrd2Frame_ && settings_.nrd2HalfRateGi && rdHalfFillCsPso_ != 0;
         const bool giCb = giDispatch && settings_.rayDrivenStages == 2u && rdGiCbCsPso_ != 0 &&
-                          denoiseGiRanThisFrame_;
+                          (denoiseGiRanThisFrame_ || nrd2GiFill);
         giCbWrittenThisFrame_ = giCb;
         giCbParityWritten_    = denoiseFrame_ & 1u;
         if (giCb && !rdGiCbRunLogged_) {
             rdGiCbRunLogged_ = true;
             AVER_INFO("[Voxi] half-rate ReSTIR GI running: CSRdGi traces one checkerboard half each "
-                      "frame, the denoiser reconstructs the rest");
-        } else if (settings_.rayDrivenStages == 2u && !giCb && !rdGiCbFallbackLogged_) {
+                      "frame, the denoiser (or under NRD2, CSRdHalfFill) reconstructs the rest");
+        } else if (settings_.rayDrivenStages == 2u && !giCb && !rdGiCbFallbackLogged_ &&
+                   !(nrd2Frame_ && !settings_.nrd2HalfRateGi)) {
             rdGiCbFallbackLogged_ = true;
             const char* why =
                 !giDispatch ? "ReSTIR GI is not the diffuse estimator this frame"
-                : !denoiseGiRanThisFrame_ ? "the GI denoiser did not run this frame (denoiser off, or "
-                                            "unavailable)"
+                : (!denoiseGiRanThisFrame_ && !nrd2Frame_) ? "the GI denoiser did not run this frame "
+                                                             "(denoiser off, or unavailable)"
+                : (nrd2Frame_ && !rdHalfFillCsPso_) ? "NRD2's half-rate fill did not compile"
                                       : "the checkerboard CSRdGi variant did not compile";
             AVER_INFO("[Voxi] voxi.rayDrivenStages 2 requested half-rate ReSTIR GI, but {}; behaving as "
                       "rayDrivenStages 1 for the GI stage (said once)", why);
@@ -4479,8 +4489,9 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         if (dev_) dev_->frameMidpoint();
 
         // CSRdSkyOcc: CPU mirror of PSRayDriven's own sky-occlusion condition.
-        if (!ptRef && cb_.ambientParams[0] > 0.5f &&
-            (cb_.giRestirParams[0] > 0.5f || cb_.voxelParams[3] <= 0.5f)) {
+        skyOccRan = !ptRef && cb_.ambientParams[0] > 0.5f &&
+                    (cb_.giRestirParams[0] > 0.5f || cb_.voxelParams[3] <= 0.5f);
+        if (skyOccRan) {
             stageBegin("Voxi RD sky occlusion stage");
             ctx.setPipeline(rdSkyOccCsPso_);
             ctx.setBindingSet(bindings_);
@@ -4492,7 +4503,8 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         }
 
         // CSRdRefl: CPU mirror of PSRayDriven's reflection-block condition's reflections-enabled half.
-        if (!ptRef && cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f) {
+        reflRan = !ptRef && cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f;
+        if (reflRan) {
             stageBegin("Voxi RD reflection stage");
             // Over the radiance cache when it is live: a reflected surface it covers needs no more rays.
             const rhi::PipelineHandle reflPtRc =
@@ -4543,6 +4555,32 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     if (cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f && giSurfNrmHist_[giNrmWrite])
         ctx.uavBarrierTexture(giSurfNrmHist_[giNrmWrite]);
 
+    // NRD2 half rate: CSRdHalfFill fills each skipped checkerboard half from this frame's traced one.
+    if (nrd2Frame_ && rdHalfFillCsPso_ && gx && gy) {
+        const u32 hrBits = static_cast<u32>(cb_.giShadowParams[3]);
+        const bool fillGi   = giCbWrittenThisFrame_;
+        const bool fillAo   = (hrBits & 128u) != 0u && skyOccRan;
+        const bool fillRefl = (hrBits & 4u) != 0u && reflRan;
+        if (fillGi || fillAo || fillRefl) {
+            rhi::ScopedGpuStat stat(ctx, "Voxi RD half-rate fill");
+            ctx.uavBarrierTexture(nrd2_.targets().diffuse);    // CSRdShadow's normal guide (u3)
+            ctx.uavBarrierTexture(nrd2_.targets().specular);   // CSRdRefl's skip marks and hit distances (u23)
+            ctx.setPipeline(rdHalfFillCsPso_);
+            ctx.setBindingSet(bindings_);
+            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+            ctx.setBindlessTable(rtTexTable_);
+            cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | (giCbParityWritten_ << 16) |
+                                                 (fillGi ? 1u << 17 : 0u) | (fillAo ? 1u << 18 : 0u) |
+                                                 (fillRefl ? 1u << 19 : 0u));
+            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+            cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);
+            ctx.dispatch(gx, gy, 1);
+            if (fillGi) ctx.uavBarrierTexture(rdGiTex_);
+            if (fillAo) ctx.uavBarrierTexture(rdAoTex_);
+            if (fillRefl) ctx.uavBarrierTexture(rdReflTex_);
+        }
+    }
+
     // Sub-stage C, R2: CSRdReflFilter -- reruns rtReflectionSpatial against R1's gRtReflHistOut write.
     if (reflSplit) {
         // 1u - rtHistWriteIdx_, not rtHistWriteIdx_: same reasoning as giNrmWrite above, for u3.
@@ -4570,12 +4608,38 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // the replay's eye-inside refraction.
         translucentInPath_ = settings_.translucencyInPath && rtTlasTranslucent_ > 0 && cb_.cameraMedium[0] < 0.5f;
         cb_.ptBounceParams[3] = translucentInPath_ ? 1.0f : 0.0f;
+        // NRD2: CSRdRefl wrote S (u23) and CSRdGi wrote remod A (u9); Stage B reads and overwrites them.
+        if (nrd2) {
+            ctx.uavBarrierTexture(nrd2_.targets().specular);
+            ctx.uavBarrierTexture(nrd2_.targets().remodA);
+        }
         ctx.setPipeline(stageBPso);
         ctx.setBindingSet(bindings_);
         ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
         ctx.setBindlessTable(rtTexTable_);
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
         ctx.drawFullscreen();
+    }
+    // NRD2 right after Stage B, so the sky dome, blended replay, particles and post see the result.
+    if (nrd2) {
+        render::denoise::Nrd2Params np;
+        std::memcpy(np.diffuse, settings_.nrd2Params, sizeof(np.diffuse));
+        std::memcpy(np.specular, settings_.nrd2Params + 6, sizeof(np.specular));
+        np.bypass = settings_.nrd2Bypass;
+        nrd2_.setParams(np);
+        render::denoise::Nrd2::Inputs in;
+        in.viewZ           = dev_->gBufferViewZTexture();
+        in.normalRoughness = dev_->gBufferNormalRoughnessTexture();
+        in.gbufferState    = rhi::ResourceState::RenderTarget;
+        for (u32 a = 0; a < 4; ++a) in.viewport[a] = static_cast<u32>(curSceneViewport_[a]);
+        if (nrd2_.record(ctx, in)) {
+            nrd2_.recordCompose(ctx);
+            if (!nrd2RunLogged_) {
+                nrd2RunLogged_ = true;
+                AVER_INFO("[Voxi] NRD2 running: single-frame denoising of the composed lighting, Voxi's "
+                          "histories and FidelityFX off (GPU spans 'NRD2', 'NRD2 compose')");
+            }
+        }
     }
     cb_.ptBounceParams[3] = 0.0f;
     // What stays on a frame CSRdGi traced GI at half rate, is bit 17 plus the parity in bit 16.
@@ -4913,6 +4977,99 @@ bool VoxiRenderer::bindReflDnPlaceholder() {
     return true;
 }
 
+// NRD2 asked for and possible this frame: a staged ray-driven D3D12 frame with its G-buffer, one sample
+// a pixel. Not Reference path tracing, which keeps its own accumulation and stays undenoised.
+bool VoxiRenderer::nrd2Wanted() const {
+    return settings_.denoiser && settings_.denoiserKind == 2u && !ptReferenceWanted() && dev_ && res_ &&
+           bindings_ && dev_->backend() == rhi::Backend::D3D12 && dev_->sampleCount() == 1 &&
+           rayDrivenActive() && rdStagedWanted() && !debugViewActive() && rdStagedW_ && rdStagedH_ &&
+           rayDrivenSplitTexGbufPso_ != 0;
+}
+
+// Builds NRD2 once per createScenePipelines (its pipelines, the compose draw and Stage B's AVER_NRD2
+// variant), then sizes its targets. False: this frame runs without it (FidelityFX if it is valid).
+bool VoxiRenderer::ensureNrd2() {
+    if (!nrd2Tried_) {
+        nrd2Tried_ = true;
+        if (!nrd2_.valid()) nrd2_.create(*dev_);
+        if (nrd2_.valid() && !nrd2_.composeValid()) {
+            const rhi::Format gbuf[3] = {rhi::Format::RG16F, rhi::Format::R32Float, rhi::Format::RGB10A2Unorm};
+            nrd2_.createCompose(sceneColorFmt_, gbuf, sceneDepthFmt_, sceneSampleCount_);
+        }
+        if (nrd2_.valid() && nrd2_.composeValid() && !rayDrivenSplitNrd2Pso_ && rtTexTable_) {
+            ShaderScope compile(*res_);
+            const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
+                                                                  layeredBsdf_);
+            const std::string bindless = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
+                                         std::to_string(kRtTextureCapacity);
+            const std::string ablate = rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string();
+            const rhi::ShaderHandle vs = compile("VSky", rhi::ShaderStage::Vertex, kBaseSm,
+                                                 (matDefs + ";" + bindless).c_str());
+            const rhi::ShaderHandle ps = compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
+                                                 (matDefs + ";" + bindless + ablate +
+                                                  ";AVER_GBUFFER=1;AVER_RD_SPLIT=1;AVER_NRD2=1").c_str());
+            if (vs && ps) {
+                rhi::GraphicsPipelineDesc p;
+                p.vs = vs; p.ps = ps;
+                p.layout = giLayout(kRtTextureCapacity);
+                p.cull = rhi::CullMode::None;
+                p.depth = {true, true, rhi::CompareOp::Always};
+                p.renderTargetCount = 4;
+                p.renderTargets[0] = sceneColorFmt_;
+                p.renderTargets[1] = rhi::Format::RG16F;
+                p.renderTargets[2] = rhi::Format::R32Float;
+                p.renderTargets[3] = rhi::Format::RGB10A2Unorm;
+                p.depthFormat = sceneDepthFmt_;
+                p.sampleCount = sceneSampleCount_;
+                rayDrivenSplitNrd2Pso_ = res_->createGraphicsPipeline(p);
+            }
+            // Optional: without it NRD2 frames trace every feature at full rate.
+            if (const rhi::ShaderHandle cs = compile("CSRdHalfFill", rhi::ShaderStage::Compute, 66,
+                                                     (matDefs + ";" + bindless + ablate).c_str())) {
+                rhi::ComputePipelineDesc p;
+                p.cs = cs;
+                p.layout = giLayout(kRtTextureCapacity);
+                rdHalfFillCsPso_ = res_->createComputePipeline(p);
+            }
+            if (!rdHalfFillCsPso_)
+                AVER_WARN("[Voxi] NRD2's half-rate fill (CSRdHalfFill) did not compile; NRD2 frames trace "
+                          "GI, reflections and sky occlusion at full rate");
+        }
+        if (nrd2_.valid() && nrd2_.composeValid() && rayDrivenSplitNrd2Pso_)
+            AVER_INFO("[Voxi] NRD2 ready (Stage B split variant, pyramid/resolve passes, compose draw)");
+    }
+    if (!nrd2_.valid() || !nrd2_.composeValid() || !rayDrivenSplitNrd2Pso_) {
+        if (!nrd2FallbackLogged_) {
+            nrd2FallbackLogged_ = true;
+            AVER_WARN("[Voxi] NRD2 is unavailable ({}); the denoiser setting runs FidelityFX instead (said once)",
+                      !nrd2_.valid() ? "its compute passes did not build"
+                      : !nrd2_.composeValid() ? "its compose draw did not build"
+                                              : "Stage B's AVER_NRD2 variant did not compile");
+        }
+        return false;
+    }
+    // The G-buffer it reads must match the staged targets (a resize lands on both within a frame).
+    rhi::TextureDesc gz{};
+    const rhi::TextureHandle vz = dev_->gBufferViewZTexture();
+    if (!vz || !dev_->gBufferNormalRoughnessTexture() || !res_->textureInfo(vz, gz) ||
+        gz.width != rdStagedW_ || gz.height != rdStagedH_)
+        return false;
+    return nrd2_.resize(rdStagedW_, rdStagedH_);
+}
+
+// Stage B's NRD2 targets into the table-0 slots an NRD2 frame leaves unused (voxi.hlsl's gNrd2*Out):
+// u2 and u3 (shadow/reflection history writes, off with rtHistParams.x 0), u9 (FidelityFX's GI input;
+// CSRdGi's write there is overwritten by Stage B) and u23 (CSRdRefl's raw sample, then S).
+void VoxiRenderer::bindNrd2Targets() {
+    const render::denoise::Nrd2::Targets& t = nrd2_.targets();
+    res_->setUav(bindings_, 2, t.remodB, 0);
+    res_->setUav(bindings_, 3, t.diffuse, 0);
+    res_->setUav(bindings_, 9, t.remodA, 0);
+    res_->setUav(bindings_, 23, t.specular, 0);
+    rdReflDnBound_ = false;   // u23 is not rdReflDnIn_ this frame
+    nrd2Bound_ = true;
+}
+
 bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
     if (!res_ || !bindings_) return false;
 
@@ -5230,6 +5387,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     cb_.rtDenoiseParams[3] = 0.0f;
     cb_.giRestirParams[0] = 0.0f;
     rdLocalOutThisFrame_ = 0;
+    nrd2Frame_ = false;
     // Poison-view flag published here so it reaches all giMode values.
     cb_.giRestirParams[3] = giPoisonView_ ? 1.0f : 0.0f;
     // Packed ambient-param word, recomputed each frame with current visibility state.
@@ -5330,6 +5488,8 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     bool denoiseRecorded = false;
     // Under MSAA the backend resolves its multisampled G-buffer; one that cannot reports it unwritten.
     const bool gbufWritten = dev_ && dev_->gBufferWritten();
+    // NRD2 replaces FidelityFX and every Voxi history for the frame (docs/rendering/NRD2.md).
+    nrd2Frame_ = nrd2Wanted() && gbufWritten && ensureNrd2();
     if (dev_ && dev_->gBufferEnabled() && !gbufWritten && !denoiseWarnedMsaa_) {
         AVER_WARN("[Denoise] denoising is OFF: the G-buffer is enabled but this backend cannot write it "
                   "at MSAA {}x. Set MSAA to 1 (voxi.msaa 1) to denoise.", dev_->sampleCount());
@@ -5342,7 +5502,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // Reflections: last frame's CSRdRefl wrote rdReflDnIn_ (u23 was bound to it).
     const bool denoiseReflSignal = settings_.denoiseReflections && rdReflDnIn_ != 0 && rdReflDnBound_;
     denoiseReflOutput_ = 0;
-    if (denoiser_.valid() && gbufWritten && (denoiseAoSignal || denoiseGiSignal || denoiseReflSignal)) {
+    if (!nrd2Frame_ && denoiser_.valid() && gbufWritten && (denoiseAoSignal || denoiseGiSignal || denoiseReflSignal)) {
         render::denoise::Denoiser::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();
         in.motionVectors   = dev_->gBufferVelocityTexture();
@@ -5426,12 +5586,22 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     if (denoiseReflOutput_) res_->setSrv(bindings_, 23, denoiseReflOutput_);
     else                    res_->clearSrv(bindings_, 23);
     // This frame's CSRdRefl writes the denoiser's input only while it can run next frame.
-    const bool reflDnWanted = settings_.denoiseReflections && rdReflDnIn_ != 0 && denoiser_.valid() && gbufWritten;
-    if (reflDnWanted != rdReflDnBound_ || !rdReflDnPlaceholder_) {
+    const bool reflDnWanted = !nrd2Frame_ && settings_.denoiseReflections && rdReflDnIn_ != 0 &&
+                              denoiser_.valid() && gbufWritten;
+    // Leaving NRD2: u23 (and u9) still hold its targets and must be rebound whatever was wanted before.
+    const bool nrd2Unbind = nrd2Bound_ && !nrd2Frame_;
+    if (reflDnWanted != rdReflDnBound_ || !rdReflDnPlaceholder_ || nrd2Unbind) {
         if (reflDnWanted) res_->setUav(bindings_, 23, rdReflDnIn_, 0);
         else              bindReflDnPlaceholder();
         rdReflDnBound_ = reflDnWanted;
     }
+    if (nrd2Unbind) {
+        // u2/u3 were rebound to the histories at the top of this function.
+        if (giRadiance_)               res_->setUav(bindings_, 9, giRadiance_, 0);
+        else if (rdReflDnPlaceholder_) res_->setUav(bindings_, 9, rdReflDnPlaceholder_, 0);
+        nrd2Bound_ = false;
+    }
+    if (nrd2Frame_) bindNrd2Targets();
 
     // Read fresh every frame (scene viewport can change without full notification).
     const bool haveViewport = dev_ && dev_->sceneViewport(curSceneViewport_);
@@ -5498,6 +5668,25 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     u32 tileBits = 0;
     for (u32 v = rtPixelsPerRayTile_; v > 1; v >>= 1) ++tileBits;
     cb_.rtHistParams[3] = static_cast<f32>(tileBits);
+    if (nrd2Frame_) {
+        // Single-frame: every Voxi history takes its raw path (no reprojection, no write) -- shadow,
+        // reflection, sky occlusion, lamps. Half rate stays, as checkerboards filled from this frame:
+        // bit 4 glossy reflections and bit 128 sky occlusion (CSRdHalfFill, which bit 64 enables and
+        // CSRdShadow's normal guide serves), bit 256 lamps (Stage B's 5x5). Bit 2 (8x8 tiles) needs history.
+        cb_.rtHistParams[0] = 0.0f;
+        cb_.rtHistParams[1] = 0.0f;
+        cb_.rtDenoiseParams[3] = 0.0f;
+        u32 bits = static_cast<u32>(cb_.giShadowParams[3]);
+        const bool fill = rdHalfFillCsPso_ != 0;
+        const bool refl = fill && settings_.nrd2HalfRateRefl && (bits & 4u) != 0u;
+        const bool ao   = fill && settings_.nrd2HalfRateAo && (bits & 2u) != 0u;
+        bits &= ~(2u | 4u);
+        if (refl) bits |= 4u;
+        if (ao) bits |= 128u;
+        if (settings_.nrd2HalfRateLamps) bits |= 256u;
+        if (fill && (refl || ao || settings_.nrd2HalfRateGi)) bits |= 64u;
+        cb_.giShadowParams[3] = static_cast<f32>(bits);
+    }
     // Spatial filter radius; blend amount pinned at 0 (loop runs but result discarded via constant).
     // x: bounces in the low four bits, bit 4 = Reference mode (voxi_pt.hlsli ptReferenceMode).
     cb_.ptBounceParams[0] = static_cast<f32>((pathTracingWanted() ? std::clamp(ptBounces_, 1u, 8u) : 1u) |
@@ -5528,7 +5717,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             static_cast<f32>(settings_.giMode), static_cast<f32>(settings_.giRestirMaxHistory),
             static_cast<f32>(settings_.giRestirSpatialSamples), static_cast<f32>(settings_.refractionMode),
             settings_.refractionStrength, settings_.fogOcclusion ? 1.0f : 0.0f,
-            settings_.denoiser ? 1.0f : 0.0f, static_cast<f32>(settings_.msaa)};
+            static_cast<f32>(denoiserMode(settings_)), static_cast<f32>(settings_.msaa)};
         static_assert(31 + sizeof(lit) / sizeof(f32) <= kPtAccumKeyFloats, "kPtAccumKeyFloats holds the key");
         std::memcpy(&key[31], lit, sizeof(lit));
         const bool same = haveCam && ptAccumValid_ && std::memcmp(key, ptAccumKey_, sizeof(key)) == 0;
@@ -5599,7 +5788,8 @@ void VoxiRenderer::endShadowHistory() {
     std::memcpy(prevInvViewProjRel_, curInvViewProjRel_, sizeof(curInvViewProjRel_));
     std::memcpy(prevCamPos_, curCamPos_, sizeof(curCamPos_));
     rtHistWriteIdx_ = 1 - rtHistWriteIdx_;
-    rtHistValid_ = true;
+    // An NRD2 frame wrote no history; the next frame without it must not reproject.
+    rtHistValid_ = !nrd2Frame_;
     rtHistPrimed_ = true;
     if (rdLocalOutThisFrame_) rdLocalHistPrimed_ = true;
     // Validity mirrors giRestirParams[0] (set in beginShadowHistory).
@@ -6353,7 +6543,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                         rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_, rdGiPtRcCbCsPso_, rdGiTracePtRcCbCsPso_, rdPtRefCsPso_, rdReflPtRcCsPso_, rdReflSplitPtRcCsPso_,
                                         rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                          rdReflSplitCsPso_, rdReflFilterCsPso_,
-                                         rdLocalLightsCsPso_};
+                                         rdLocalLightsCsPso_, rayDrivenSplitNrd2Pso_, rdHalfFillCsPso_};
     for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
     debugPso_ = scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
     sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
@@ -6375,6 +6565,13 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     ptTwinsTried_ = false;
     rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
     rdLocalLightsCsPso_ = 0;
+    rayDrivenSplitNrd2Pso_ = rdHalfFillCsPso_ = 0;
+    // NRD2's Stage B variant and compose draw bake these formats; rebuilt on next use.
+    nrd2_.destroyCompose();
+    nrd2Tried_ = false;
+    sceneColorFmt_ = color;
+    sceneDepthFmt_ = depth;
+    sceneSampleCount_ = sampleCount;
 
     ShaderScope compile(*res_);
     const rhi::PipelineLayout gi = giLayout();

@@ -60,7 +60,7 @@ Application* createApplication(int argc, char** argv) {
     // --gi-mode: -1 means "not given" (0 is the real value).
     int giModeArg = -1;
     int rdStagesArg = -1;   // --rd-stages 0|1|2
-    int denoiserArg = -1;   // --denoiser 0|1
+    int denoiserArg = -1;   // --denoiser 0|1|2 (2 = NRD2)
     int neuralDenoiseArg = -1;   // --neural-denoise 0|1
     int nrdSpatialArg = -1;      // --nrd-spatial 0|1 (developer)
     // Refraction tier overrides; -1 is "not given".

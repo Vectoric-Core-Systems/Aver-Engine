@@ -143,6 +143,23 @@ struct Settings {
     // AMD FidelityFX Denoiser (MIT) through Aver.Render.Denoise -- see modules/render.denoise.
     // Off by default. Requires MSAA 1 and D3D12 (the backend that provides the G-buffer it reads).
     bool denoiser = false;
+    // Which denoiser runs while `denoiser` is on: 1 AMD FidelityFX, 2 NRD2 (docs/rendering/NRD2.md:
+    // single-frame, no history; D3D12 staged ray-driven only). Read and set through denoiserMode()
+    // below: RENDER.DENOISER, --denoiser and voxi.denoiserMode carry 0 (off), 1 or 2.
+    u32 denoiserKind = 1;
+    // NRD2's fixed per-tile parameters (nrd2_resolve.hlsli), diffuse then specular: level logits for
+    // 1/2, 1/4, 1/8 (own pixel pinned at 0), then log2 depth / normal / luminance sensitivities.
+    float nrd2Params[12] = {1.0f, 2.0f, 2.0f, 4.5f, 3.0f, -1.0f, 1.0f, 2.0f, 2.0f, 4.5f, 4.0f, -1.0f};
+    // Developer: NRD2 recomposes its split without filtering (an A/B check of the split itself).
+    bool nrd2Bypass = false;
+    // NRD2 keeps half-rate tracing and fills the skipped checkerboard half from this frame's traced
+    // neighbours (CSRdHalfFill; docs/rendering/NRD2.md). Each applies where its base half rate is asked
+    // for: GI under rayDrivenStages 2, reflections under rtReflectionHalfRate (glossy only), sky
+    // occlusion under rtSkyOcclusionHalfRate. Lamps always (Stage B's 5x5 fills them). Off = full rate.
+    bool nrd2HalfRateGi = true;
+    bool nrd2HalfRateRefl = true;
+    bool nrd2HalfRateAo = true;
+    bool nrd2HalfRateLamps = true;
     // Neural Denoise: NRD's resolve replaces FidelityFX's (docs/rendering/NEURAA_NRD.md section 4).
     // Only acts while the denoiser runs. Toggling keeps history.
     bool neuralDenoise = false;
@@ -249,6 +266,14 @@ struct Settings {
     // DEVICE-GATED: needs SM 6.0 and DXC (VoxiRenderer::airVisWanted()).
     bool fogOcclusion = true;
 };
+
+// The denoiser as one value: 0 off, 1 AMD FidelityFX, 2 NRD2. Setting 0 keeps the kind, so switching
+// the denoiser back on returns to the one last chosen.
+inline u32 denoiserMode(const Settings& s) { return s.denoiser ? (s.denoiserKind == 2u ? 2u : 1u) : 0u; }
+inline void setDenoiserMode(Settings& s, u32 mode) {
+    s.denoiser = mode != 0u;
+    if (mode != 0u) s.denoiserKind = mode >= 2u ? 2u : 1u;
+}
 
 // Process-wide settings service. Single instance shared by the editor, the runtime and the C ABI.
 class AVER_VOXI_API Renderer {

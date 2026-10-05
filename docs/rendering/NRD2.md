@@ -38,6 +38,86 @@ Without weights (or with the network off) the resolve runs fixed default paramet
 on its own. FidelityFX and Voxi's per-signal reflection/shadow histories stay as the fallback behind the
 Denoiser setting until NRD2 is measured better on both scenes; then they are removed.
 
+## Phase 1 as built (2026-10-05)
+
+Denoiser mode 2 (`voxi.denoiserMode 2`, `--denoiser 2`, `RENDER.DENOISER 2`; the Rendering > Denoising
+combo). D3D12 staged ray-driven frames with the G-buffer only; anywhere else (Vulkan, single pass,
+MSAA, debug views, Reference path tracing) the frame runs as before, FidelityFX if it can.
+
+**Strictly single-frame.** An NRD2 frame runs no FidelityFX pass and no Voxi history:
+`rtHistParams.xy = 0` puts the sun shadow, reflection, sky-occlusion and lamp visibility on their raw
+paths (no reprojection, no history write) and `rtDenoiseParams.w = 0` the sky occlusion. Half-rate
+tracing stays, filled from this frame only (next section). CSRdRefl takes its denoiser branch (one raw
+lobe sample and its hit distance per pixel). ReSTIR's reservoirs (sampler-side reuse) and the lamp
+visibility's 5x5 same-frame filter are kept. The first frame after NRD2 restarts every history.
+
+**Half rate, single-frame.** Forcing full rate cost ~10 ms of "Voxi RD lighting stages" on NeonDistrict
+Night (the half rates were rebuilt from FidelityFX or Voxi history). NRD2 frames instead trace one pixel
+checkerboard half and fill the other from its four edge neighbours, all traced this frame:
+
+| feature | skipped | filled by | dial (default on) | also needs |
+|---|---|---|---|---|
+| ReSTIR GI | CSRdGi's checkerboard variant (parity `denoiseFrame_ & 1`) | CSRdHalfFill -> gRdGiTex | `voxi.nrd2HalfRateGi` | `rayDrivenStages 2` |
+| glossy reflections (mirror full rate) | CSRdRefl, `(x^y^frame)&1`, S.a = -1 | CSRdHalfFill -> gRdReflTex + S.a (hit distance) | `voxi.nrd2HalfRateRefl` | `rtReflectionHalfRate` |
+| sky occlusion | CSRdSkyOcc, the other half to reflections, a = -1 (was 8x8 tiles over history) | CSRdHalfFill -> gRdAoTex | `voxi.nrd2HalfRateAo` | `rtSkyOcclusionHalfRate` |
+| lamp visibility | CSRdLocalLights, its usual `(x+y+frame)&1`, stores -1 | Stage B's existing 5x5 `rdLocalVisFiltered`, which skips negative taps | `voxi.nrd2HalfRateLamps` | -- |
+
+Fill weight per neighbour (`rdHalfFillWeight`): view depth (gRdSunVisTex.a) within 2% + 1 cm of the
+centre's or of the plane through the centre and the opposite neighbour (grazing surfaces), times cos^8
+between the vertex normals CSRdShadow writes into u3 (NRD2's D target, unused until Stage B) as a guide.
+A 1e-3 floor keeps the plain mean of the valid neighbours where none agrees; a reflection with no traced
+neighbour (all rough or sky) stays black, a GI pixel with none keeps CSRdGi's reuse-only answer.
+CSRdHalfFill is its own dispatch after the lighting stages (GPU span "Voxi RD half-rate fill", 8x8,
+fp32, in place: it reads only the traced half and writes only the skipped one); Stage B is unchanged
+apart from the lamp tap test. Bits in `giShadowParams.w`: 4 reflections, 64 fill live (normal guide,
+lets CSRdRefl skip without FidelityFX), 128 sky occlusion, 256 lamps; bit 2 (tiles) stays off. Each
+dial at 0 traces that feature at full rate. If CSRdHalfFill fails to compile NRD2 traces GI,
+reflections and sky occlusion at full rate (lamps still half).
+
+**Stage B** (`PSRayDriven`, `AVER_NRD2=1` variant, built on first use) shades the same terms, into
+buckets instead of one radiance:
+
+| target | slot | contents |
+|---|---|---|
+| D (RGBA16F) | u3 | (sun and lamp diffuse + subsurface, ambient kD part, bounce, subsurface ambient) / max(kdAlbedo, 1e-3); a = 1 where the albedo is usable (max channel > 0.01, lit model) |
+| S (RGBA16F) | u23 | (sun and lamp specular, environment specular incl. coat, ambient multiple-scatter part FmsEms) / max(FssEss, 1e-3); a = reflection hit distance this frame (cm, 0 none, -1 unlit) |
+| remod A (RGBA16F) | u9 | rgb Rd = M kdAlbedo, a Rs.r |
+| remod B (RG16F) | u2 | Rs.gb, Rs = M FssEss |
+
+M is the fog extinction times the glass throughput (`averFogTermsAirVis`, `rdTranslucentPath`), and 0
+where the colour is replaced (unlit, debug views, the poison and NeuRaC overrides). The scene colour
+gets only the clean terms: emissive x extinction + in-scatter, the glass layers, sky, unlit and debug
+colours. The progressive Path Tracing accumulation is compiled out. The four slots are ones an NRD2
+frame leaves unused (table 0 is full at 24/24); `VoxiRenderer::bindNrd2Targets` binds them and the
+next frame without NRD2 rebinds the originals. Recomposed: final = D' Rd + S' Rs + C.
+
+**Passes** (`modules/render.denoise`, `Nrd2`, `shaders/nrd2.hlsl`, maths in `nrd2_resolve.hlsli`),
+recorded right after Stage B's draw so the sky dome, blended replay, particles and post see the result.
+All compute is fp32, 8x8 (params 64x1), no wave intrinsics or atomics, groupshared 3 KB, constants at b3.
+
+1. `CSNrd2Pyramid`: D and S from this frame only, 2x2 reductions to 1/2, 1/4, 1/8, each keeping its
+   nearest surface (others weighted exp2(-23 dz/z)); guide levels hold the averaged normal and view Z
+   (m), value levels rgb and a validity fraction.
+2. `CSNrd2Params`: the per-8x8-tile buffer (`StructuredBuffer<float>`, 12 planes, plane-major) filled
+   with the defaults. Phase 4's network writes the same buffer.
+3. `CSNrd2Resolve`: per pixel and signal, candidates = own pixel and the three levels upsampled by
+   depth- and normal-weighted fixed bilinear taps. Weight = exp(logit) x surviving tap share x
+   luminance term (log-ratio to the coarsest usable level); own logit 0. Specular adds fixed terms: a
+   smooth lobe (roughness below 0.35) and a short hit distance keep the own pixel. Writes D' Rd + S' Rs.
+4. Compose: a fullscreen additive draw of that into the scene colour (4-target PSO, G-buffer targets
+   masked), the G-buffer back in RenderTarget.
+
+**Defaults** (`Settings::nrd2Params`, console `voxi.nrd2{Diff,Spec}{Logit1,Logit2,Logit3,DepthSens,
+NormalSens,LumSens}`): logits 1, 2, 2 (NRD v1's measured {-2, -1, 0, 0} with the own pixel pinned);
+log2 depth sensitivity 4.5 (exp2(-22.6 dz/z), as v1), log2 normal power 3 (diffuse) and 4 (specular),
+log2 luminance sensitivity -1. `voxi.nrd2Bypass 1` recomposes the split unfiltered: it should match
+mode 0 apart from the histories, which checks the split itself.
+
+Not yet: un-jittering before the resolve (NEURAA_NRD.md section 7, rule 11 -- it runs on the jittered
+frame before TAA, as FidelityFX does today), a GI hit distance in D's alpha, per-channel albedo
+validity (a saturated albedo's empty channels read as dark irradiance to its neighbours), the oracle
+and network (phases 3-4).
+
 ## The network
 
 - **Shape.** A small encoder over 1/2-resolution inputs (3x3 convolutions, ReLU, stride-2 down to 1/8),

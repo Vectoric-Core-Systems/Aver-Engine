@@ -58,8 +58,8 @@ struct ProjectDesc {
     int giCones            = -1; // RENDER.GICONES          diffuse gather cones, [1,16]
     // RENDER.GIMODE: 0 = voxel cone gather (default), 1 = ReSTIR GI. -1 keeps engine default.
     int giMode             = -1; // RENDER.GIMODE           diffuse GI algorithm, [0,1]
-    // RENDER.DENOISER: AMD FidelityFX-based denoiser over ReSTIR GI radiance (needs MSAA 1).
-    int denoiser           = -1; // RENDER.DENOISER         0/1
+    // RENDER.DENOISER: 1 AMD FidelityFX over ReSTIR GI radiance, 2 NRD2 (docs/rendering/NRD2.md).
+    int denoiser           = -1; // RENDER.DENOISER         0/1/2
     // RENDER.NEURALDENOISE: NRD's resolve in place of FidelityFX's (docs/rendering/NEURAA_NRD.md).
     int neuralDenoise      = -1; // RENDER.NEURALDENOISE    0/1
     // RENDER.RESTIRVISIBILITY: ReSTIR GI visibility rays (see voxi::Settings::giRestirVisibility).

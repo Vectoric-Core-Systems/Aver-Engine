@@ -3310,7 +3310,7 @@ private:
     int  giModeOverride_=-1;
     // --restir-visibility none|reconstructed|half|full (Settings::giRestirVisibility). Sentinel is -1 (0 is a real value).
     int  restirVisibilityOverride_=-1;
-    int  denoiserOverride_=-1;       // --denoiser 0|1: -1 is "flag not given"; see setDenoiser
+    int  denoiserOverride_=-1;       // --denoiser 0|1|2: -1 is "flag not given"; see setDenoiser
     int  neuralDenoiseOverride_=-1;  // --neural-denoise 0|1, same convention
     int  nrdSpatialOverride_=-1;     // --nrd-spatial 0|1 (developer)
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]

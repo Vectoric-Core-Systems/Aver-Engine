@@ -960,7 +960,7 @@ void SandboxApp::onInit(Engine& e)  {
             AVER_WARN("[Sandbox] --gi-update-interval {} is not a frame count; the default of {} stands",
                       giUpdateIntervalOverride_, k.giUpdateInterval);
         if (giModeOverride_ >= 0) k.giMode = static_cast<u32>(giModeOverride_);
-        if (denoiserOverride_ >= 0) k.denoiser = denoiserOverride_ != 0;
+        if (denoiserOverride_ >= 0) voxi::setDenoiserMode(k, denoiserOverride_ > 2 ? 2u : static_cast<u32>(denoiserOverride_));
         if (neuralDenoiseOverride_ >= 0) k.neuralDenoise = neuralDenoiseOverride_ != 0;
         if (nrdSpatialOverride_ >= 0) k.neuralDenoiseSpatial = nrdSpatialOverride_ != 0;
         voxi::Renderer::get().setSettings(k);

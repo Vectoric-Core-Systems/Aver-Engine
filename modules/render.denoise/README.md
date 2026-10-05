@@ -7,6 +7,10 @@ The filter is AMD FidelityFX Denoiser, vendored at `third_party/fidelityfx-denoi
 licence. This module is the host around it: the compute pipelines, the history textures, the
 G-buffer history copy and every resource-state transition.
 
+It also holds `Nrd2` (`shaders/nrd2.hlsl`, `nrd2_resolve.hlsli`): NRD2 phase 1, a strictly
+single-frame denoiser of Voxi Stage B's demodulated lighting with no history at all. Design and
+what Stage B writes: `docs/rendering/NRD2.md`, "Phase 1 as built".
+
 ## How it works
 
 FidelityFX Denoiser ships two denoisers: shadows, which filters a 1-bit-per-pixel hit mask, and

@@ -288,9 +288,10 @@ void rdLocalVisTap(int2 p, int2 lo, int2 hi, float zc, inout float sum, inout fl
     const float zt = gRdSunVisTex[q].a;
     const float w  = (zt > 0.0) ? saturate(1.0 - abs(zt - zc) / (zc * 0.03 + 1.0)) : 0.0;
     // Skipped, not multiplied by a zero weight: a rejected neighbour can hold any value, and one that
-    // is not finite would turn `* 0` into NaN.
-    if (w > 0.0) {
-        sum  += gRdLocalOut[q].a * w;
+    // is not finite would turn `* 0` into NaN. Negative: not traced this frame (NRD2 half rate).
+    const float v = gRdLocalOut[q].a;
+    if (w > 0.0 && v >= 0.0) {
+        sum  += v * w;
         wsum += w;
     }
 }
@@ -302,14 +303,15 @@ float rdLocalVisFiltered(uint2 pixel) {
     const int2 lo = int2(gSceneViewportCur.xy);
     const int2 hi = lo + max(int2(gSceneViewportCur.zw), int2(1, 1)) - 1;
     const int2 c  = int2(pixel);
-    float sum  = gRdLocalOut[pixel].a;
-    float wsum = 1.0;
+    const float vc = gRdLocalOut[pixel].a;   // < 0: skipped by NRD2's half rate, the taps fill it
+    float sum  = max(vc, 0.0);
+    float wsum = vc >= 0.0 ? 1.0 : 0.0;
     [unroll] for (int oy = -2; oy <= 2; ++oy) {
         [unroll] for (int ox = -2; ox <= 2; ++ox) {
             if (ox != 0 || oy != 0) rdLocalVisTap(c + int2(ox, oy), lo, hi, zc, sum, wsum);
         }
     }
-    return sum / wsum;
+    return wsum > 0.0 ? sum / wsum : 1.0;
 }
 
 // ---- lamp HISTORY reads, at the continuous reprojected position ----
@@ -392,6 +394,8 @@ float rdLocalHistFiltered(float2 pxPrev, int2 texel) {
 // constant-buffer condition -- callers (CSRdLocalLights, SM 6.6 8x8=2x2 quads per CSRdShadow's header,
 // after only CSRdShadow's own early-outs; and the pixel shaders behind rdLocalLightCount()) hold that
 // same ordering.
+// NRD2 half rate (rtGiShadowBits 256) applies in CSRdLocalLights only, never in a pixel shader's call.
+static bool gRdLocalCbStage = false;
 float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel, bool writeHistory) {
     // gRtHistParams.x: t6/u2 are bound this frame. gRtHistParams.y > 0.25, not the shadow's > 0.75: t6
     // holds a real previous frame, and its DEPTH stays valid on a frame only the sun moved (the
@@ -427,11 +431,14 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
     // (always < 0.5) arguments -- each pixel's pick confined to half the lights' weight (a lamp that
     // shadows it never picked, the neighbour that does pick it shadowed every turn): a fixed per-pixel
     // speckle no accumulation removes. frameIdx >> 1 counts this pixel's turns one by one.
+    // NRD2 (no history): the same checkerboard; a skipped pixel stores -1 and rdLocalVisFiltered fills it
+    // from this frame's traced neighbours.
     const uint frameIdx = (uint)gRtHistParams.z;
-    const bool myTurn   = !haveHist || (((pixel.x + pixel.y + frameIdx) & 1u) == 0u);
-    const uint turn     = haveHist ? (frameIdx >> 1) : frameIdx;
+    const bool cbFill   = gRdLocalCbStage && !haveHist && (rtGiShadowBits() & 256u) != 0u;
+    const bool myTurn   = (!haveHist && !cbFill) || (((pixel.x + pixel.y + frameIdx) & 1u) == 0u);
+    const uint turn     = (haveHist || cbFill) ? (frameIdx >> 1) : frameIdx;
     float vis     = prevVisF;
-    float histVis = prevVisC;
+    float histVis = (cbFill && !myTurn) ? -1.0 : prevVisC;
     if (myTurn) {
         // LOOP 1: unshadowed sum, each light's luminance as its pick weight. Recomputed in loop 2 rather
         // than cached in a 32-entry array: loop-indexed arrays spill registers (rtShadowEx measured a 25%
@@ -785,7 +792,7 @@ float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular,
 // the background is known, which the replay's single blend alpha could not express. `background` is
 // the opaque surface Stage B already lit.
 #define AVER_RD_GLASS_LAYERS 4
-float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel) {
+float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel, out float3 throughput) {
     float3 acc = float3(0.0, 0.0, 0.0);
     float3 thr = float3(1.0, 1.0, 1.0);
     const float3 L = normalize(gLightDir.xyz);
@@ -841,6 +848,7 @@ float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel
         if (max(thr.r, max(thr.g, thr.b)) < 1e-3) break;
         tmin = h.t + ptBias(h.pos);
     }
+    throughput = thr;   // NRD2 remodulates the denoised lighting by it
     return acc + thr * background;
 }
 #endif
@@ -1612,6 +1620,39 @@ float3 viewDebugColor(uint vmode, uint instanceIndex, uint materialIndex, uint p
     else                  return viewDebugHueColor(viewDebugHashCombine(instanceIndex, primIndex)) * shapeCue; // Triangles (5)
 }
 
+#if AVER_NRD2
+#if !(AVER_RD_SPLIT && AVER_GBUFFER)
+#error AVER_NRD2 is a Stage B (AVER_RD_SPLIT) G-buffer variant
+#endif
+// NRD2 (docs/rendering/NRD2.md): Stage B's targets ride table-0 UAV slots an NRD2 frame does not use
+// (VoxiRenderer::bindNrd2Targets): u3 D, u23 S (CSRdRefl's raw sample + hit distance first),
+// u9 Rd + Rs.r, u2 Rs.gb.
+#define gNrd2DiffOut   gRtReflHistOut
+#define gNrd2SpecOut   gRdReflDnIn
+#define gNrd2RemodAOut gGiRadianceOut
+#define gNrd2RemodBOut gRtShadowHistOut
+
+// Sun + indirect into NRD2's diffuse and specular buckets: averShadeSplit's lobes, emissive left out,
+// and the multiple-scatter share of the ambient term (FmsEms, a specular quantity) routed to specular
+// so a metal's diffuse bucket stays empty.
+void nrd2ShadeSplit(AverSurface s, AverLight l, AverIndirect ind, inout float3 dif, inout float3 spec) {
+    if (s.model == AVER_MODEL_UNLIT) return;
+    float3 dD, dS, dSss;
+    float  ndl;
+    averDirectTerms(s, l, dD, dS, dSss, ndl);
+    const float3 lt = l.radiance * ndl * l.visibility;
+    dif  += dD * lt + dSss * l.radiance * l.visibility;
+    spec += dS * lt;
+    float3 specEnv, diffAmbient, diffBounce, FssEss, FmsEms, kD;
+    averIndirectTerms(s, ind, specEnv, diffAmbient, diffBounce);
+    averIndirectFactors(s, FssEss, FmsEms, kD);
+    const float3 ms = FmsEms / max(FmsEms + kD, 1e-6);
+    dif  += diffAmbient * (1.0 - ms) + diffBounce;
+    spec += specEnv + diffAmbient * ms;
+    if (s.sssWeight > 0.0) dif += averSubsurfaceAmbient(s, ind);
+}
+#endif
+
 #if AVER_GBUFFER
 struct RayDrivenGBufferOut {
     float4 col              : SV_TARGET0;
@@ -1665,6 +1706,12 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #endif
         if (gGiRestirParams.x > 0.5)
             gGiSurfNrmHistOut[uint2(i.pos.xy)] = float2(0.0, asfloat(0u));
+#if AVER_NRD2
+        gNrd2DiffOut[rdPixel]   = float4(0.0, 0.0, 0.0, 0.0);
+        gNrd2SpecOut[rdPixel]   = float4(0.0, 0.0, 0.0, -1.0);
+        gNrd2RemodAOut[rdPixel] = float4(0.0, 0.0, 0.0, 0.0);
+        gNrd2RemodBOut[rdPixel] = float2(0.0, 0.0);
+#endif
         return o;
     }
 
@@ -1794,14 +1841,24 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // Caustic term, ray-driven twin.
     sun.visibility *= 1.0 + averCausticFocus(wpos);
 
+#if AVER_NRD2
+    // The lit terms go to NRD2's buckets; `radiance` keeps only what is never denoised.
+    float3 nrdD = 0.0, nrdS = 0.0;
+    float3 radiance = 0.0;
+#else
     float3 radiance = averShadeDirect(0.0, s, sun);
+#endif
 
     // Local lights: diffuse and specular through sun's BRDF. Inside `radiance`, outside denoiser/AO.
     // Unlit (vmode 1) drops it with the rest of lighting.
 #if AVER_RD_SPLIT && !AVER_RD_SINGLE_PASS
     // Stage B: visibility already resolved by CSRdLocalLights.
     if (rdLocalLightCount() > 0u && !ptRef)
+#if AVER_NRD2
+        rdLocalLightsShadeSplit(s, wpos, rdLocalVisFiltered(uint2(i.pos.xy)), nrdD, nrdS);
+#else
         radiance += rdLocalLightsShade(s, wpos, rdLocalVisFiltered(uint2(i.pos.xy)));
+#endif
 #elif !AVER_RD_SPLIT && AVER_RD_LAMPS
     // Single pass resolves on its own hit.
     if (rdLocalLightCount() > 0u)
@@ -1950,12 +2007,39 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     if (rdRestirSuppliedDiffuse && !giDiffusePoisoned && ((uint)gAmbientParams.z & 2u) == 0u)
         ind.diffuse -= ind.ambient * ind.ambientScale * ind.occlusion * s.occlusion * gVoxelParams.y;
     const float aoView = ind.occlusion * s.occlusion;   // ViewDebug::AmbientOcclusion (vmode 6)
+#if AVER_NRD2
+    nrd2ShadeSplit(s, sun, ind, nrdD, nrdS);
+    radiance = s.emissive;
+    {
+        // Demodulated and written now, so only the clean colour stays live through fog and glass.
+        // a: D's albedo is usable (0 for metals, black and unlit, which the pyramid skips); S's hit
+        // distance this frame (cm, 0 = none; < 0 = unlit, skipped).
+        float3 FssEss, FmsEms, kD;
+        averIndirectFactors(s, FssEss, FmsEms, kD);
+        const bool  lit   = s.model != AVER_MODEL_UNLIT && !ptRef;
+        const float hitS  = rdRefl.a > 0.5 ? gNrd2SpecOut[rdPixel].a : 0.0;
+        const float kdMax = max(s.kdAlbedo.r, max(s.kdAlbedo.g, s.kdAlbedo.b));
+        gNrd2DiffOut[rdPixel] = lit ? float4(nrdD / max(s.kdAlbedo, 1e-3), kdMax > 0.01 ? 1.0 : 0.0) : 0.0;
+        gNrd2SpecOut[rdPixel] = lit ? float4(nrdS / max(FssEss, 1e-3), max(hitS, 0.0)) : float4(0.0, 0.0, 0.0, -1.0);
+    }
+#else
     radiance = averShadeIndirect(radiance, s, ind);
+#endif
 #if AVER_RD_SPLIT
     if (ptRef) radiance = gRdGiTex[uint2(i.pos.xy)].rgb;   // CSRdPtRef's path for this pixel
 #endif
 
+#if AVER_NRD2
+    // Fog is affine (c * ext + in, averFogTermsAirVis): the denoised lighting takes ext at compose.
+    float3 nrdFogExt = 1.0, nrdFogIn = 0.0;
 #if AVER_RD_ABLATE == AVER_RD_ABL_FOG
+#elif AVER_RD_ABLATE == AVER_RD_ABL_AERIAL
+    averFogTermsAirVis(wpos, false, voxiAirVisibility(wpos), nrdFogExt, nrdFogIn);
+#else
+    averFogTermsAirVis(wpos, true, voxiAirVisibility(wpos), nrdFogExt, nrdFogIn);
+#endif
+    radiance = radiance * nrdFogExt + nrdFogIn;
+#elif AVER_RD_ABLATE == AVER_RD_ABL_FOG
     // ablated: no aerial perspective and no fog inscatter march.
 #elif AVER_RD_ABLATE == AVER_RD_ABL_AERIAL
     // ablated: aerial march only (height fog still runs).
@@ -1965,7 +2049,12 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #endif
 #if AVER_RD_SPLIT
     // Glass and every other translucent material, inside the path (rdTranslucentPath).
-    if (gPtBounceParams.w > 0.5 && vmode == 0u) radiance = rdTranslucentPath(dir, hitT, radiance, i.pos.xy);
+    float3 rdGlassThr = 1.0;
+    if (gPtBounceParams.w > 0.5 && vmode == 0u) radiance = rdTranslucentPath(dir, hitT, radiance, i.pos.xy, rdGlassThr);
+#endif
+#if AVER_NRD2
+    // 0 wherever the colour below is replaced (unlit, debug views, overrides): nothing is added there.
+    float nrdKeep = (vmode == 0u && s.model != AVER_MODEL_UNLIT && !ptRef) ? 1.0 : 0.0;
 #endif
 
     // Depth for deferred sky, transparentPass, particles (otherwise they sort against cleared buffer).
@@ -1976,8 +2065,12 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // Unlit is albedo plus emissive (removes lighting, not surface's own light).
     o.col   = float4(vmode == 1u ? s.albedo + s.emissive : radiance, 1.0);
     // Applied last, after unlit and fog, so unconditionally final when fires (see PSMainVoxi for precedence).
-    if (gGiRestirParams.w > 0.5 && giPoisonSpecCeilHit && !giDiffusePoisoned)
+    if (gGiRestirParams.w > 0.5 && giPoisonSpecCeilHit && !giDiffusePoisoned) {
         o.col.rgb = float3(0.55, 0.0, 1.0);   // Violet: ray-traced specular ceiling hit
+#if AVER_NRD2
+        nrdKeep = 0.0;
+#endif
+    }
     // vmode 2-5 (ViewDebug): replace colour last, after overrides above.
     if (vmode == 6u)
         o.col.rgb = aoView.xxx;
@@ -1986,11 +2079,27 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #if AVER_RD_SPLIT
     // NeuRaC visualiser (gAmbientParams.w bits 8-10, set with live-cache bit 128).
     if (((uint)gAmbientParams.w & 128u) != 0u && (((uint)gAmbientParams.w >> 8) & 7u) != 0u &&
-        gVoxelParams.w > 0.5 && gGiRestirParams.x > 0.5)
+        gVoxelParams.w > 0.5 && gGiRestirParams.x > 0.5) {
         o.col.rgb = gRdGiTex[uint2(i.pos.xy)].rgb;
+#if AVER_NRD2
+        nrdKeep = 0.0;
+#endif
+    }
+#if AVER_NRD2
+    {
+        // Remodulation: the denoised D' and S' come back as D' * Rd + S' * Rs at compose, under the
+        // same fog extinction and glass throughput the clean colour got.
+        float3 FssEss, FmsEms, kD;
+        averIndirectFactors(s, FssEss, FmsEms, kD);
+        const float3 M = nrdFogExt * rdGlassThr * nrdKeep;
+        gNrd2RemodAOut[rdPixel] = float4(M * s.kdAlbedo, M.x * FssEss.x);
+        gNrd2RemodBOut[rdPixel] = M.yz * FssEss.yz;
+    }
+#endif
     // PATH TRACING: progressive accumulation. While the CPU key holds (gPtBounceParams.y == 2) each
     // pixel keeps a running mean of its frames, capped at gPtBounceParams.z frames (a moving average
     // after that). A pixel restarts on its own when the surface under it moves or its depth changes.
+#if !AVER_NRD2   // single-frame: no progressive accumulation under NRD2
     if (gPtBounceParams.y > 0.5 && vmode == 0u) {
         const uint   accIdx = rdPixel.y * rdPitch + rdPixel.x;
         const float  depthM = clip.w * 0.01;
@@ -2008,6 +2117,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
             o.col.rgb = acc;
         }
     }
+#endif
 #endif
 #if AVER_GBUFFER
     // clip.w is view-space linear depth (reused from o.depth divide).
@@ -2226,6 +2336,9 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     // Primary surface linear view depth (for blended-replay reuse test).
     const float rdSunVisViewZ = mul(float4(s.wpos, 1.0), gViewProj).w;
     gRdSunVisTex[pixel] = float4(sunVis, rdSunVisViewZ);
+    // NRD2 half-rate fill (rtGiShadowBits 64): CSRdHalfFill's normal guide, in u3 (NRD2's D target,
+    // unused until Stage B).
+    if ((rtGiShadowBits() & 64u) != 0u) gRtReflHistOut[pixel] = float4(s.N, 1.0);
 }
 
 #if !AVER_RD_SINGLE_PASS
@@ -2255,6 +2368,7 @@ void CSRdLocalLights(uint3 tid : SV_DispatchThreadID) {
     const RdSurface s = rdSurfaceFromRecord(rec, dir);
     averRtCutoutPolicy(AVER_RD_CUTOUTS_SHADOW, false);
     // Pixel centre, as CSRdShadow does. Stage B reads visibility back from gRdLocalOut.
+    gRdLocalCbStage = true;
     rdLocalLightsVisibility(s.wpos, s.N, float2(pixel) + 0.5, pixel, true);
 }
 #endif
@@ -2407,6 +2521,12 @@ void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID) {
         gRdAoTex[pixel] = float4(1.0, 1.0, 1.0, 1.0);
         return;
     }
+    // NRD2 half rate (rtGiShadowBits 128): the checkerboard half CSRdRefl traces is skipped here, a = -1
+    // for CSRdHalfFill.
+    if ((rtGiShadowBits() & 128u) != 0u && ((pixel.x ^ pixel.y ^ (uint)gRtHistParams.z) & 1u) == 0u) {
+        gRdAoTex[pixel] = float4(1.0, 0.0, 0.0, -1.0);
+        return;
+    }
 
     // Same pixel-centre NDC/primary-ray reconstruction.
     float2 ndc;
@@ -2555,8 +2675,10 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
         uint dW = 0, dH = 0;
         gDenoisedRefl.GetDimensions(dW, dH);
         // Half rate as Voxi's own path (glossy only), on a pixel checkerboard the denoiser rebuilds:
-        // a skipped pixel marks a = -1 and shows last frame's result at its surface.
-        const bool skip = (rtGiShadowBits() & 4u) != 0u && lobeRough > 0.0 && dW > 0u &&
+        // a skipped pixel marks a = -1 and shows last frame's result at its surface. Under NRD2 (bit 64)
+        // CSRdHalfFill fills it from this frame's traced neighbours instead.
+        const uint hrBits = rtGiShadowBits();
+        const bool skip = (hrBits & 4u) != 0u && lobeRough > 0.0 && (dW > 0u || (hrBits & 64u) != 0u) &&
                           ((pixel.x ^ pixel.y ^ frameIdx) & 1u) != 0u;
         float3 refl = 0.0;
         if (skip) {
@@ -2686,6 +2808,91 @@ void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
     const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
     gRdReflTex[pixel] = float4(clamp(specRaw, 0.0, AVER_VOX_MAXRAD),
                                any(specRaw >= AVER_VOX_MAXRAD) ? 2.0 : 1.0);
+}
+
+// ---- STAGE F: CSRdHalfFill -- NRD2's half-rate tracing, filled from this frame only ----------------
+//
+// NRD2 frames have no history to rebuild a skipped pixel (docs/rendering/NRD2.md, "Half rate"). A skipped
+// pixel's four edge neighbours are the other checkerboard half, so traced; each counts by its agreement
+// with the centre: view depth within 2% + 1 cm of the centre's, or of the plane through the centre and
+// the opposite neighbour (grazing surfaces), times cos^8 between CSRdShadow's normal guides (u3). A
+// floor weight keeps the plain mean where no neighbour agrees. In-place: every read is of the traced
+// half, every write to the skipped one.
+// gViewParams.w for this dispatch: row pitch, bit 16 GI parity, bits 17/18/19 fill GI / AO / reflections.
+float rdHalfFillWeight(uint2 q, float zq, float zc, float zOpp, float3 nc) {
+    if (zq <= 0.0) return 0.0;   // sky or outside the viewport
+    float err = abs(zq - zc);
+    if (zOpp > 0.0) err = min(err, abs(zq - (2.0 * zc - zOpp)));
+    const float wz = saturate(1.0 - err / (zc * 0.02 + 1.0));
+    float c = saturate(dot(nc, gRtReflHistOut[q].xyz));
+    c *= c; c *= c; c *= c;
+    return wz * c + 1e-3;
+}
+
+[numthreads(8, 8, 1)]
+void CSRdHalfFill(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+    const uint  word  = (uint)gViewParams.w;
+    const float zc    = gRdSunVisTex[pixel].a;
+    if (zc <= 0.0) return;   // sky: every stage wrote its own sentinel
+    const bool gi   = (word & (1u << 17)) != 0u && ((pixel.x ^ pixel.y ^ (word >> 16)) & 1u) != 0u;
+    const bool ao   = (word & (1u << 18)) != 0u && gRdAoTex[pixel].a < 0.0;
+    const bool refl = (word & (1u << 19)) != 0u && gRdReflDnIn[pixel].a < -0.5;
+    if (!(gi || ao || refl)) return;
+
+    const int2 lo = int2(gSceneViewportCur.xy);
+    const int2 hi = lo + max(int2(gSceneViewportCur.zw), int2(1, 1)) - 1;
+    const int2 offs[4] = {int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1)};
+    uint2 q[4];
+    float z[4];
+    [unroll] for (uint k = 0u; k < 4u; ++k) {
+        const int2 p = int2(pixel) + offs[k];
+        q[k] = uint2(clamp(p, lo, hi));
+        z[k] = (all(p >= lo) && all(p <= hi)) ? gRdSunVisTex[q[k]].a : 0.0;
+    }
+    const float3 nc = gRtReflHistOut[pixel].xyz;
+    float w[4];
+    [unroll] for (uint k2 = 0u; k2 < 4u; ++k2) w[k2] = rdHalfFillWeight(q[k2], z[k2], zc, z[k2 ^ 1u], nc);
+
+    // Rejected taps are skipped, never multiplied by 0 (a value there may not be finite).
+    if (gi) {
+        float3 sum = 0.0;
+        float  ws  = 0.0;
+        [unroll] for (uint k = 0u; k < 4u; ++k) {
+            if (w[k] <= 0.0) continue;
+            const float4 g = gRdGiTex[q[k]];
+            if (g.a > 0.5) { sum += g.rgb * w[k]; ws += w[k]; }
+        }
+        if (ws > 0.0) gRdGiTex[pixel] = float4(sum / ws, 1.0);   // else CSRdGi's own (reuse-only) answer
+    }
+    if (ao) {
+        float sum = 0.0, ws = 0.0;
+        [unroll] for (uint k = 0u; k < 4u; ++k) {
+            if (w[k] <= 0.0) continue;
+            const float4 a = gRdAoTex[q[k]];
+            if (a.a > 0.0) { sum += a.r * w[k]; ws += w[k]; }
+        }
+        gRdAoTex[pixel] = float4(ws > 0.0 ? sum / ws : 1.0, 0.0, 0.0, 1.0);
+    }
+    if (refl) {
+        // Traced neighbours only (a > 0.5; rough ones Stage B shades from cones are a = 0); their hit
+        // distance fills NRD2's S alpha too.
+        float3 sum = 0.0;
+        float  hit = 0.0, ws = 0.0;
+        [unroll] for (uint k = 0u; k < 4u; ++k) {
+            if (w[k] <= 0.0) continue;
+            const float4 r = gRdReflTex[q[k]];
+            const float  h = gRdReflDnIn[q[k]].a;
+            if (r.a > 0.5 && h >= 0.0) { sum += r.rgb * w[k]; hit += h * w[k]; ws += w[k]; }
+        }
+        if (ws > 0.0) {
+            gRdReflTex[pixel]  = float4(sum / ws, 1.0);
+            gRdReflDnIn[pixel] = float4(0.0, 0.0, 0.0, hit / ws);
+        } else {
+            gRdReflDnIn[pixel] = float4(0.0, 0.0, 0.0, 0.0);
+        }
+    }
 }
 #endif  // AVER_RT
 

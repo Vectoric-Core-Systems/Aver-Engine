@@ -232,7 +232,9 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
     DisableReason denoiseReason = rtGate;
     if (denoiseReason == DisableReason::None && !d.denoiserSupported)
         denoiseReason = DisableReason::RequiresDenoiserBackend;
-    if (denoiseReason == DisableReason::None && r.giMode.effective == 0 && s.giSkyOcclusionRays == 0)
+    // NRD2 (denoiserKind 2) denoises the whole composed lighting, so it always has a signal.
+    if (denoiseReason == DisableReason::None && r.giMode.effective == 0 && s.giSkyOcclusionRays == 0 &&
+        s.denoiserKind != 2u)
         denoiseReason = DisableReason::NothingToDenoise;
     r.denoiser.requested = s.denoiser ? 1u : 0u;
     r.denoiser.reason    = denoiseReason;

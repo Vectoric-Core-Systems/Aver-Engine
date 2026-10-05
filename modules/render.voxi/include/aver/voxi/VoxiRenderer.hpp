@@ -8,6 +8,7 @@
 #include "aver/voxi/Voxi.hpp"
 #include "aver/voxi/GiDispatchBounds.hpp"   // VoxelBox/GiDispatchConstants
 #include "aver/render/denoise/Denoiser.hpp"
+#include "aver/render/denoise/Nrd2.hpp"
 #include "aver/voxi/NeuRaC.hpp"      // rc_ -- the radiance cache's buffers and resolve pass
 
 #include <unordered_map>
@@ -986,6 +987,23 @@ private:
     bool bindReflDnPlaceholder();
     rhi::TextureHandle denoiseReflOutput_ = 0;
     bool rdReflDnBound_ = false;   // u23 holds rdReflDnIn_ this frame (CSRdRefl writes it)
+
+    // ---- NRD2 (docs/rendering/NRD2.md): single-frame denoiser of Stage B's demodulated lighting ----
+    // Replaces FidelityFX and every Voxi history for the frame (beginShadowHistory decides). Stage B's
+    // NRD2 variant writes its targets through u2/u3/u9/u23, slots such a frame leaves unused.
+    render::denoise::Nrd2 nrd2_;
+    rhi::PipelineHandle rayDrivenSplitNrd2Pso_ = 0;   // Stage B, AVER_NRD2=1 (built on first use)
+    rhi::PipelineHandle rdHalfFillCsPso_ = 0;         // CSRdHalfFill: half-rate tracing filled this frame
+    bool nrd2Tried_ = false;      // the build above ran since the last createScenePipelines
+    bool nrd2Frame_ = false;      // this frame runs NRD2
+    bool nrd2Bound_ = false;      // u2/u3/u9/u23 hold NRD2's targets
+    bool nrd2FallbackLogged_ = false;
+    bool nrd2RunLogged_ = false;
+    rhi::Format sceneColorFmt_ = rhi::Format::Unknown, sceneDepthFmt_ = rhi::Format::Unknown;
+    u32 sceneSampleCount_ = 1;
+    bool nrd2Wanted() const;
+    bool ensureNrd2();             // pipelines (built once) and targets for this frame; false = not this frame
+    void bindNrd2Targets();
     // Advanced once per frame at the top of beginShadowHistory; its low bit is half-rate GI's parity.
     u32  denoiseFrame_ = 0;
     bool denoiseWarnedMsaa_ = false;
