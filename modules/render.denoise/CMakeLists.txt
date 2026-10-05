@@ -7,11 +7,15 @@
 # only on D3D12 -- answered by Denoiser::create() and the caller's own gating.
 add_library(Aver.Render.Denoise STATIC
   src/Denoiser.cpp
-  src/Nrd2.cpp)
+  src/Nrd2.cpp
+  src/Nrd2Capture.cpp
+  src/Nrd2Dataset.cpp
+  src/Nrd2ResolveReference.cpp)
 
 target_include_directories(Aver.Render.Denoise PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Render.Denoise PUBLIC cxx_std_20)
-target_link_libraries(Aver.Render.Denoise PUBLIC Aver.Core Aver.RHI)
+# Aver.Render.Neural: CRC-32 and the Adam bias correction (NRD2 dataset and oracle), later the network.
+target_link_libraries(Aver.Render.Denoise PUBLIC Aver.Core Aver.RHI Aver.Render.Neural)
 set_target_properties(Aver.Render.Denoise PROPERTIES FOLDER "modules")
 
 # aver_denoise.hlsl beside the executable, like every module's shaders.

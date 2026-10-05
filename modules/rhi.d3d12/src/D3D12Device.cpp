@@ -921,7 +921,7 @@ public:
                            std::memcmp(taaLastViewProj_, frameCB_.viewProj, sizeof(taaLastViewProj_)) != 0;
         std::memcpy(taaLastViewProj_, frameCB_.viewProj, sizeof(taaLastViewProj_));
         taaLastViewProjValid_ = true;
-        if (taaCameraMoving_ || !upscaler_) return;
+        if (taaCameraMoving_ || !upscaler_ || jitterSuppressed_) return;
         f32 jx = 0.0f, jy = 0.0f;   // scene pixels
         if (!upscaler_->jitterOverride(jx, jy)) {
             if (!any(upscaler_->needs(), UpscalerNeeds::Jitter)) return;
@@ -940,6 +940,8 @@ public:
             cb.invViewProjRel[12 + c] -= nx * cb.invViewProjRel[c] + ny * cb.invViewProjRel[4 + c];
         cb.jitter[0] = jx; cb.jitter[1] = jy;
     }
+    void setJitterSuppressed(bool on) override { jitterSuppressed_ = on; }
+    bool jitterSuppressed_ = false;
     u32 taaJitterIndex_ = 0;
     f32 taaJitterThisFrame_[2] = {0.0f, 0.0f};   // what this frame's upload carried, for the upscaler
     f32 taaLastViewProj_[16] = {};

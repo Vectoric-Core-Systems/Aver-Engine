@@ -1404,6 +1404,25 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         nrdCaptureStarted_ = true;
     }
     if (voxiAttached_ && voxiRenderer_.denoiseCaptureHolding()) neuraaHold = true;
+    // --nrd2-capture: handed over once the renderer is attached and the level has a name (or after ~10 s);
+    // it starts stepping on NRD2 frames and holds the camera the same way.
+    if (nrd2CapturePoses_ && voxiAttached_ && !nrd2CaptureStarted_ && (!levelName_.empty() || t.frame > 600)) {
+        render::denoise::Nrd2CaptureConfig c;
+        c.scene = levelName_.empty() ? std::string("unnamed") : levelName_;
+        for (char& ch : c.scene)
+            if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-')) ch = '_';
+        c.dir = (nrd2CaptureDir_.empty() || nrd2CaptureDir_ == "default" || nrd2CaptureDir_ == "-")
+              ? userDataDir() + "\\nrd2_dataset\\" + c.scene : nrd2CaptureDir_;
+        c.poses = nrd2CapturePoses_;
+        c.hold = nrd2CaptureHold_;
+        c.heldOutFrom = nrd2CaptureHeldOut_;
+        c.oracle = nrd2CaptureGrid_ ? render::denoise::Nrd2OracleMode::Grid : render::denoise::Nrd2OracleMode::Grad;
+        if (camWanderAmp_ <= 0.0f)
+            AVER_WARN("[NRD2] --nrd2-capture without --cam-wander: every pose is the same view");
+        voxiRenderer_.startNrd2Capture(c);
+        nrd2CaptureStarted_ = true;
+    }
+    if (voxiAttached_ && voxiRenderer_.nrd2CaptureHolding()) neuraaHold = true;
 #endif
     if (neuraaHold) ++camWanderHeld_;
     if (camWanderAmp_ > 0.0f && !neuraaHold && (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {

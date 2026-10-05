@@ -15,7 +15,12 @@
 #include <aver/rhi/RHI.hpp>
 #include <aver/rhi/RHIResources.hpp>
 
+#include <memory>
+
 namespace aver::render::denoise {
+
+class Nrd2Capture;
+struct Nrd2CaptureConfig;
 
 // Bumped whenever what Stage B writes for NRD2 changes meaning (stamped into training datasets).
 inline constexpr u32 kNrd2StageBVersion = 1;
@@ -48,6 +53,10 @@ public:
         rhi::TextureHandle normalRoughness = 0;   // G-buffer, averPackNormalRoughness
         rhi::ResourceState gbufferState = rhi::ResourceState::RenderTarget;
         u32 viewport[4] = {};                     // scene viewport x y w h, render-target pixels
+        // Which pixels were traced this frame (the capture's fresh mask): bit 0 D on ReSTIR GI's
+        // checkerboard, bit 1 its parity (traced where ((x ^ y ^ parity) & 1) == 0); bits 2/3 the same
+        // for S on the glossy reflections' checkerboard. 0 = everything traced.
+        u32 halfRate = 0;
     };
 
     // Compute pipelines. False (said once) when nrd2.hlsl will not compile.
@@ -72,8 +81,18 @@ public:
     // Adds the resolved lighting into the bound colour target. Only after a successful record().
     void recordCompose(rhi::IRenderContext& ctx);
 
+    // Phase 3 training capture (Nrd2Capture.hpp); it steps inside record().
+    void startCapture(const Nrd2CaptureConfig& cfg);
+    [[nodiscard]] bool captureActive() const;
+    // The host freezes its camera while this is true.
+    [[nodiscard]] bool captureHolding() const;
+
 private:
+    friend class Nrd2Capture;
     void releaseTargets();
+    // CSNrd2Features into features_ (12 x 4 tilesX x 4 tilesY floats, rests in Common). Inputs as in
+    // record() after the resolve; false when the pass would not build.
+    bool recordFeatures(rhi::IRenderContext& ctx, const Inputs& in);
 
     rhi::IDevice*          dev_ = nullptr;
     rhi::IResourceFactory* res_ = nullptr;
@@ -85,6 +104,13 @@ private:
     rhi::TextureHandle lit_ = 0;
     rhi::BufferHandle  tileParams_ = 0;
     u32 tileCapacity_ = 0;
+    rhi::PipelineHandle psoFeatures_ = 0;
+    rhi::BindingSetHandle setFeatures_ = 0;
+    rhi::BufferHandle features_ = 0;
+    u32 featureFloats_ = 0;
+    bool featuresTried_ = false;
+    std::unique_ptr<Nrd2Capture> capture_;
+    bool jitterSuppressed_ = false;
     u32 width_ = 0, height_ = 0;
     u32 failedWidth_ = 0, failedHeight_ = 0;
     bool recorded_ = false;

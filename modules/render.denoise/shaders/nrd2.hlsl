@@ -4,6 +4,7 @@
 //   1 CSNrd2Params  -- fills the per-8x8-tile parameter buffer with the defaults (phase 4: the network)
 //   2 CSNrd2Resolve -- per pixel D' and S' (nrd2_resolve.hlsli), remodulated: D' * Rd + S' * Rs
 //   3 VSNrd2Compose / PSNrd2Compose -- adds that into the scene colour (additive blend)
+//   4 CSNrd2Features -- the network's 12 input channels at half resolution (phase 3 capture, phase 4)
 //
 // Portable (modules/render.neural/README.md rules): fp32, no wave intrinsics, no atomics, groupshared
 // 3 KB, every barrier in uniform control flow, constants at b3 (the Vulkan backend folds b1 into push
@@ -18,6 +19,7 @@ cbuffer Nrd2CB : register(b3) {
     uint4  gNrd2Rect;     // scene viewport x, y, w, h (render-target pixels)
     uint4  gNrd2Tiles;    // x tiles, y tiles, flags (bit 0: own pixel only), unused
     float4 gNrd2Def[3];   // default tile parameters, planes 0..11 (D then S)
+    float4 gNrd2View[3];  // world -> view rows: right, up, forward (features only)
 };
 
 uint2 nrd2LevelSize(uint shift) { return ((gNrd2Rect.zw + 7u) / 8u) * (8u >> shift); }
@@ -213,6 +215,103 @@ Nrd2VsOut VSNrd2Compose(uint id : SV_VertexID) {
 // Additive: target 0 gets the denoised lighting; the G-buffer targets bound beside it are masked.
 float4 PSNrd2Compose(Nrd2VsOut i) : SV_Target0 {
     return float4(gNrd2Lit.Load(int3(int2(i.pos.xy), 0)).rgb, 0.0);
+}
+
+#elif AVER_NRD2_PASS == 4   // ---- network input features ----
+
+// 12 channels per half-resolution texel (a 2x2 block of the viewport), NCHW fp32, plane = 4 tilesX x
+// 4 tilesY (whole tiles; texels past the viewport are 0). From this frame only: no history, no frame
+// time (NEURAA_NRD.md section 7, rule 10). Luminance only, relative to the tile's 1/8 pyramid texel.
+//   0, 1   log2 luminance of D, S (2x2 mean) minus log2 luminance of the 1/8 texel
+//   2, 3   2x2 contrast log2(max / mean) of D, S
+//   4      log2(view Z / the 1/8 texel's view Z), clamped +-4
+//   5..7   view-space normal (2x2 mean, normalised)
+//   8      roughness (2x2 mean)
+//   9      diffuse albedo luminance (Rd, 2x2 mean)
+//   10     log2(1 + specular hit distance / view Z), clamped [0, 8] (hits only)
+//   11     validity: share of the 2x2 with a surface and a usable albedo
+Texture2D<float4> gNrd2D      : register(t0);
+Texture2D<float4> gNrd2S      : register(t1);
+Texture2D<float>  gNrd2ViewZ  : register(t2);
+Texture2D<float4> gNrd2Normal : register(t3);
+Texture2D<float4> gNrd2RemodA : register(t4);
+Texture2D<float4> gNrd2G3     : register(t5);
+Texture2D<float4> gNrd2D3     : register(t6);
+Texture2D<float4> gNrd2S3     : register(t7);
+RWStructuredBuffer<float> gNrd2Feat : register(u0);
+
+float nrd2RelLog(float l, float ref) {
+    const float e = max(ref, 0.0) * 1.0e-3 + 1.0e-7;
+    return clamp(log2(max(l, 0.0) + e) - log2(max(ref, 0.0) + e), -16.0, 16.0);
+}
+
+[numthreads(8, 8, 1)]
+void CSNrd2Features(uint3 dtid : SV_DispatchThreadID) {
+    const uint hw = gNrd2Tiles.x * 4u, hh = gNrd2Tiles.y * 4u;
+    const uint2 h = dtid.xy;
+    if (h.x >= hw || h.y >= hh) return;   // no barriers in this pass
+    float f[NRD2_FEATURES];
+    [unroll] for (uint c = 0u; c < NRD2_FEATURES; ++c) f[c] = 0.0;
+
+    float dSum = 0.0, dMax = 0.0, sSum = 0.0, sMax = 0.0, zSum = 0.0, rSum = 0.0, aSum = 0.0, hSum = 0.0;
+    float nD = 0.0, nS = 0.0, nZ = 0.0, nH = 0.0;
+    float3 nSum = 0.0;
+    [unroll] for (uint i = 0u; i < 4u; ++i) {
+        const uint2 q = h * 2u + uint2(i & 1u, i >> 1);
+        if (any(q >= gNrd2Rect.zw)) continue;
+        const int3 p = int3(int2(gNrd2Rect.xy + q), 0);
+        const float z = gNrd2ViewZ.Load(p);
+        if (!(z > 0.0 && z < 1.0e6)) continue;
+        const float4 nr = gNrd2Normal.Load(p);
+        const float4 d = gNrd2D.Load(p);
+        const float4 s = gNrd2S.Load(p);
+        zSum += z; nZ += 1.0;
+        nSum += nrd2DecodeNormal(nr);
+        rSum += nr.z;
+        const float ra = nrd2Lum(gNrd2RemodA.Load(p).rgb);
+        aSum += (ra == ra) ? clamp(ra, 0.0, 4.0) : 0.0;
+        if (d.a > 0.5 && all(d.rgb == d.rgb) && all(abs(d.rgb) < 6.0e4)) {
+            const float l = max(nrd2Lum(d.rgb), 0.0);
+            dSum += l; dMax = max(dMax, l); nD += 1.0;
+        }
+        if (all(s.rgb == s.rgb) && all(abs(s.rgb) < 6.0e4)) {
+            const float l = max(nrd2Lum(s.rgb), 0.0);
+            sSum += l; sMax = max(sMax, l); nS += 1.0;
+            if (s.a > 0.0 && s.a == s.a) { hSum += clamp(log2(1.0 + s.a / z), 0.0, 8.0); nH += 1.0; }
+        }
+    }
+    if (nZ > 0.0) {
+        const int3 t = int3(int2(h / 4u), 0);   // this block's tile = the 1/8 texel
+        const float4 g3 = gNrd2G3.Load(t);
+        const float4 d3 = gNrd2D3.Load(t);
+        const float4 s3 = gNrd2S3.Load(t);
+        if (nD > 0.0) {
+            const float m = dSum / nD;
+            f[0] = d3.a > 0.0 ? nrd2RelLog(m, nrd2Lum(d3.rgb)) : 0.0;
+            f[2] = nrd2RelLog(dMax, m);
+        }
+        if (nS > 0.0) {
+            const float m = sSum / nS;
+            f[1] = s3.a > 0.0 ? nrd2RelLog(m, nrd2Lum(s3.rgb)) : 0.0;
+            f[3] = nrd2RelLog(sMax, m);
+        }
+        const float zm = zSum / nZ * 0.01;
+        f[4] = g3.w > 0.0 ? clamp(log2(zm / g3.w), -4.0, 4.0) : 0.0;
+        const float nl = length(nSum);
+        const float3 n = nl > 1.0e-4 ? nSum / nl : 0.0;
+        f[5] = dot(n, gNrd2View[0].xyz);
+        f[6] = dot(n, gNrd2View[1].xyz);
+        f[7] = dot(n, gNrd2View[2].xyz);
+        f[8] = rSum / nZ;
+        f[9] = aSum / nZ;
+        f[10] = nH > 0.0 ? hSum / nH : 0.0;
+        f[11] = nD * 0.25;
+    }
+    const uint plane = hw * hh, at = h.y * hw + h.x;
+    [unroll] for (uint c2 = 0u; c2 < NRD2_FEATURES; ++c2) {
+        const float v = f[c2];
+        gNrd2Feat[c2 * plane + at] = (v == v) ? v : 0.0;
+    }
 }
 
 #endif

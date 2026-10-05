@@ -548,6 +548,8 @@ if(AVER_BUILD_TESTS)
   add_subdirectory(tests/render.ui)
   # The neural module's CPU reference: the maths its shaders must reproduce, checked without a GPU.
   add_subdirectory(tests/render.neural)
+  # NRD2's CPU twin (pyramid, resolve forward/backward, oracle fit) and its pose files.
+  add_subdirectory(tests/render.denoise)
   # The actor preview, for the same reason and by the same means.
   add_subdirectory(tests/render.actorpreview)
   # The layered BSDF's coat lobe. Unconditional, like the PBR material system it belongs to, and

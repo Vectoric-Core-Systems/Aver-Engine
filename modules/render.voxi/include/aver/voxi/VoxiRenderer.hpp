@@ -9,6 +9,7 @@
 #include "aver/voxi/GiDispatchBounds.hpp"   // VoxelBox/GiDispatchConstants
 #include "aver/render/denoise/Denoiser.hpp"
 #include "aver/render/denoise/Nrd2.hpp"
+#include "aver/render/denoise/Nrd2Capture.hpp"
 #include "aver/voxi/NeuRaC.hpp"      // rc_ -- the radiance cache's buffers and resolve pass
 
 #include <unordered_map>
@@ -999,6 +1000,9 @@ private:
     bool nrd2Bound_ = false;      // u2/u3/u9/u23 hold NRD2's targets
     bool nrd2FallbackLogged_ = false;
     bool nrd2RunLogged_ = false;
+    // A capture asked for before NRD2 was built: handed to nrd2_ once ensureNrd2 has created it.
+    render::denoise::Nrd2CaptureConfig nrd2CaptureCfg_{};
+    bool nrd2CapturePending_ = false;
     rhi::Format sceneColorFmt_ = rhi::Format::Unknown, sceneDepthFmt_ = rhi::Format::Unknown;
     u32 sceneSampleCount_ = 1;
     bool nrd2Wanted() const;
@@ -1270,6 +1274,11 @@ public:
     // NRD's trained weights (Neural Denoise); the host knows where bin/data is.
     void setDenoiseWeightsPath(std::string path) { denoiser_.setWeightsPath(std::move(path)); }
     [[nodiscard]] bool denoiseCaptureHolding() const { return denoiser_.captureHolding(); }
+    // NRD2 phase 3 training capture (render::denoise::Nrd2Capture). Steps on NRD2 frames only, so it
+    // waits for the Denoiser setting at NRD2 (--denoiser 2).
+    void startNrd2Capture(const render::denoise::Nrd2CaptureConfig& cfg);
+    [[nodiscard]] bool nrd2CaptureHolding() const { return nrd2_.captureHolding(); }
+    [[nodiscard]] bool nrd2CaptureActive() const { return nrd2_.captureActive() || nrd2CapturePending_; }
 
 private:
     // Path tracing wanted -- a different question from ray tracing wanted, deliberately asking the other setting.

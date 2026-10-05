@@ -118,6 +118,60 @@ frame before TAA, as FidelityFX does today), a GI hit distance in D's alpha, per
 validity (a saturated albedo's empty channels read as dark irradiance to its neighbours), the oracle
 and network (phases 3-4).
 
+## Phase 3 as built (2026-10-06): capture and oracle
+
+Code: `Nrd2Capture` (state machine, host side), `shaders/nrd2_capture.hlsl` (GPU passes),
+`nrd2_resolve.hlsli` (forward and `nrd2ResolveBackward`), `Nrd2ResolveReference` (CPU twin of the
+pyramid, resolve forward/backward and the fit; the spec), `Nrd2Dataset` (pose files),
+`tests/render.denoise` (`Nrd2ResolveTest`). Not yet run in the engine.
+
+**Backward.** `nrd2ResolveBackward` returns d(output)/d(theta) (rgb, six parameters) for one pixel and
+one signal, forward-mode through the tap weights (depth, normal sensitivities), the level confidences,
+the reference level's luminance and the candidate weights. Levels, guides and the own value are data;
+the reference level's switch (conf > 0.05) and the clamps are held constant. CPU twin checked against
+central differences (100% of 7k checks), energy (equal candidates give that value and zero gradient).
+
+**Features** (`CSNrd2Features`, `nrd2.hlsl` pass 4; also phase 4's inference input): 12 channels per
+half-resolution texel, NCHW fp32 `StructuredBuffer`, plane = 4 tilesX x 4 tilesY (whole tiles, zero past
+the viewport). log2 luminance of D and S (2x2 mean) relative to the tile's 1/8 texel; 2x2 contrast
+log2(max/mean) of D and S; log2(viewZ / 1/8 texel viewZ) in +-4; view-space normal (basis from
+`IDevice::camera`); roughness; albedo luminance (Rd, which carries fog/glass M); log2(1 + specular hit
+distance / viewZ) in [0, 8]; validity = share of the 2x2 with a surface and a usable albedo. One frame
+only: no history, no frame time.
+
+**Capture** (`--nrd2-capture`, steps on NRD2 frames only): Settle(30) -> Travel(45) -> Hold(H, default
+256, min 32) -> Fit -> Readback(6) -> write -> Travel. While it holds, the host freezes the camera wander
+(as for the NRD v1 capture) and `IDevice::setJitterSuppressed` keeps the TAA jitter at zero (D3D12).
+Hold frames 2/4/8/16: D, S and their pyramids copied (K = 4 snapshots), features read back; frame 2
+also the guides and the per-pixel geometry (view Z, normal, roughness, loss mask). From frame 17: fp32
+running means of D and S per pixel over fresh pixels (D on ReSTIR GI's checkerboard, S on the glossy
+reflections'; `Nrd2::Inputs::halfRate`), split into two halves by frame pair ((h >> 1) & 1, so a pixel
+traced every other frame feeds both). The sky-occlusion half that D also carries is not separated
+(its filled half enters the mean). World time: the editor plays no animation outside Play; exposure is
+the caller's (`--set post.autoExposure 0`).
+
+**Oracle** (GPU, per 8x8 tile and signal, one 64-thread group per tile): loss = sum over the 4 snapshots,
+tile pixels and rgb of (resolve(theta, snapshot) - mean)^2 / (mean tile luminance of the mean^2 + 1e-8),
+over 4 x pixels, + 1e-3 ||theta - theta0||^2 (theta0 = the defaults). Pixels: a surface, an albedo for D,
+a mean sample. 27 starts (logits all -3/0/+3, log2 depth -1.5/0/+1.5, log2 luminance -2/0/+2 around
+theta0; start 13 is theta0 and gives the default loss), then 150 Adam steps (lr 0.05, 0.9/0.99) or, with
+`--nrd2-oracle grid`, 24 rounds of derivative-free pattern search (+-step per parameter, halved when no
+candidate improves) with the same forward. The best objective seen wins. 8 iterations per frame (each = 4
+snapshot dispatches + a step dispatch), no long dispatch. Tile weight = valid share x 1 / (1 + r / 0.1),
+r = rms(lum(even half) - lum(odd half)) / mean lum. Only these free per-tile variables are scored
+through the filter; no model is involved (patent rule 4).
+
+**Pose file** `pose_NNN.n2p` in `%LOCALAPPDATA%\AverEngine\nrd2_dataset\<level>\` or the CLI directory
+(format in `Nrd2Dataset.hpp`): header N2PS v1, `kNrd2StageBVersion`, scene id, pose index, held-out
+flag, half-res and tile sizes, K, channels; K fp16 feature frames; theta* (12 planes); tile weights
+(2); oracle and default losses (2 + 2); CRC-32. About 44 MB a pose at 1766x994. Each written pose logs
+`[NRD2] capture pose N written: ...` with per-signal "oracle beats default on a/b tiles" and mean
+losses; the last logs `[NRD2] capture finished`.
+
+Usage: `--denoiser 2 --cam-wander AMP SPEED --set post.autoExposure 0 --nrd2-capture DIR|default POSES
+[HOLD] [HELDOUT_FROM] [--nrd2-oracle grad|grid]` on the open level. GPU memory while capturing: about
+4 x (D, S and pyramids) + 22 fp32 planes per pixel + feature readbacks (~390 MiB at 1766x994).
+
 ## The network
 
 - **Shape.** A small encoder over 1/2-resolution inputs (3x3 convolutions, ReLU, stride-2 down to 1/8),

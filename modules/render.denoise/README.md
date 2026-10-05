@@ -11,6 +11,12 @@ It also holds `Nrd2` (`shaders/nrd2.hlsl`, `nrd2_resolve.hlsli`): NRD2 phase 1, 
 single-frame denoiser of Voxi Stage B's demodulated lighting with no history at all. Design and
 what Stage B writes: `docs/rendering/NRD2.md`, "Phase 1 as built".
 
+Phase 3 (`docs/rendering/NRD2.md`, "Phase 3 as built"): `CSNrd2Features` (the network's inputs),
+`Nrd2Capture` + `shaders/nrd2_capture.hlsl` (training capture and the per-tile oracle fit, GPU),
+`Nrd2Dataset` (pose files), and `Nrd2ResolveReference`, the CPU twin of the pyramid, the resolve's
+forward and backward and the fit, which is the spec the shaders keep in sync with
+(`tests/render.denoise`, `Nrd2ResolveTest`). Links `Aver.Render.Neural` (CRC-32, Adam bias correction).
+
 ## How it works
 
 FidelityFX Denoiser ships two denoisers: shadows, which filters a 1-bit-per-pixel hit mask, and

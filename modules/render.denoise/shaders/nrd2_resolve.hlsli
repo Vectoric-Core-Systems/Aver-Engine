@@ -17,6 +17,7 @@
 #define NRD2_FIELD_DEPTH     3   // log2 relative-depth sensitivity
 #define NRD2_FIELD_NORMAL    4   // log2 normal-cosine power
 #define NRD2_FIELD_LUM       5   // log2 luminance (log-ratio) sensitivity
+#define NRD2_FEATURES        12  // CSNrd2Features channels (network input)
 
 struct Nrd2TileParams {
     float logit[3];
@@ -45,34 +46,63 @@ float3 nrd2DecodeNormal(float4 e) {
     return normalize(n);
 }
 
-// One pyramid level at local pixel q: the four fixed bilinear taps, each kept by depth and normal
-// agreement with this pixel and by the texel's validity. `conf` is the share of the bilinear weight
-// that survived (0 = nothing usable). guide: xyz averaged normal, w view Z in metres (0 = empty).
+// One pyramid level's four fixed bilinear taps at local pixel q, loaded once (the oracle evaluates many
+// parameter sets on the same taps). guide: xyz averaged normal, w view Z in metres (0 = empty).
 // value: rgb, a validity fraction.
-float3 nrd2Upsample(Texture2D<float4> guide, Texture2D<float4> value, uint shift, uint2 q, uint2 lvlSize,
-                    float zm, float3 n, float depthSens, float normalPow, out float conf) {
+struct Nrd2Taps {
+    float4 g[4];
+    float4 x[4];
+    float  b[4];
+};
+
+Nrd2Taps nrd2LoadTaps(Texture2D<float4> guide, Texture2D<float4> value, uint shift, uint2 q, uint2 lvlSize) {
+    Nrd2Taps t;
     const float2 pos  = (float2(q) + 0.5) / float(1u << shift) - 0.5;
     const int2   base = int2(floor(pos));
     const float2 f    = pos - float2(base);
+    [unroll] for (uint i = 0u; i < 4u; ++i) {
+        const int2 o = int2(i & 1u, i >> 1);
+        const int2 c = clamp(base + o, int2(0, 0), int2(lvlSize) - 1);
+        t.g[i] = guide.Load(int3(c, 0));
+        t.x[i] = value.Load(int3(c, 0));
+        t.b[i] = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y);
+    }
+    return t;
+}
+
+// One tap's weight: kept by depth and normal agreement with this pixel and by the texel's validity.
+// dz and cosN come back for the backward pass (0 weight: both unused).
+float nrd2TapWeight(float4 g, float4 x, float b, float zm, float3 n, float depthSens, float normalPow,
+                    out float dz, out float cosN) {
+    dz = 0.0; cosN = 0.0;
+    const float nl = length(g.xyz);
+    if (g.w <= 0.0 || x.a <= 0.0 || nl < 1.0e-3) return 0.0;
+    dz = min(abs(g.w - zm) / max(zm, 1.0e-4), 64.0);
+    cosN = saturate(dot(n, g.xyz / nl));
+    const float wd = exp2(-depthSens * dz);
+    const float wn = pow(cosN, normalPow);
+    return b * wd * wn * saturate(x.a);
+}
+
+// The level's estimate at this pixel; `conf` is the share of the bilinear weight that survived
+// (0 = nothing usable).
+float3 nrd2UpsampleTaps(Nrd2Taps t, float zm, float3 n, float depthSens, float normalPow, out float conf) {
     float3 sum  = 0.0;
     float  wsum = 0.0;
     [unroll] for (uint i = 0u; i < 4u; ++i) {
-        const int2   o = int2(i & 1u, i >> 1);
-        const int2   t = clamp(base + o, int2(0, 0), int2(lvlSize) - 1);
-        const float4 g = guide.Load(int3(t, 0));
-        const float4 x = value.Load(int3(t, 0));
-        const float  b = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y);
-        const float  nl = length(g.xyz);
-        if (g.w <= 0.0 || x.a <= 0.0 || nl < 1.0e-3) continue;
-        const float dz = min(abs(g.w - zm) / max(zm, 1.0e-4), 64.0);
-        const float wd = exp2(-depthSens * dz);
-        const float wn = pow(saturate(dot(n, g.xyz / nl)), normalPow);
-        const float w  = b * wd * wn * saturate(x.a);
-        sum  += w * x.rgb;
+        float dz, cosN;
+        const float w = nrd2TapWeight(t.g[i], t.x[i], t.b[i], zm, n, depthSens, normalPow, dz, cosN);
+        if (w <= 0.0) continue;
+        sum  += w * t.x[i].rgb;
         wsum += w;
     }
     conf = wsum;
     return wsum > 1.0e-6 ? sum / wsum : 0.0;
+}
+
+float3 nrd2Upsample(Texture2D<float4> guide, Texture2D<float4> value, uint shift, uint2 q, uint2 lvlSize,
+                    float zm, float3 n, float depthSens, float normalPow, out float conf) {
+    return nrd2UpsampleTaps(nrd2LoadTaps(guide, value, shift, q, lvlSize), zm, n, depthSens, normalPow, conf);
 }
 
 // The pixel's estimate from its own value and the three upsampled levels. Weight of candidate k:
@@ -106,6 +136,121 @@ float3 nrd2SpecularExtraLogit(float rough, float hitT, float viewZ) {
     const float g = saturate((rough - 0.05) / 0.3);
     const float contact = hitT > 0.0 ? 1.0 - saturate(hitT / max(0.3 * viewZ, 1.0e-3)) : 0.0;
     return -kNrd2SpecRoughFall * (1.0 - g) * float3(1.0, 2.0, 3.0) - kNrd2SpecContact * contact;
+}
+
+// ---- backward (phase 3 oracle): d(output)/d(theta) for one pixel and one signal --------------------
+// theta = the six tile parameters in field order (logits l1..l3, log2 depth / normal / luminance
+// sensitivity); the own logit stays pinned at 0. Levels, guides and the pixel's own value are fixed
+// data. The reference level's switch (conf > 0.05) is treated as constant. Assumes theta inside the
+// clamp ranges of nrd2SanitiseParams (the fit keeps it there). CPU twin: Nrd2ResolveReference.cpp.
+static const float kNrd2Ln2 = 0.69314718;
+
+// A level's estimate with its derivatives by log2 depth (0) and log2 normal (1) sensitivity.
+struct Nrd2Level {
+    float3 c;
+    float  conf;
+    float3 dc[2];
+    float  dconf[2];
+};
+
+Nrd2Level nrd2UpsampleTapsGrad(Nrd2Taps t, float zm, float3 n, float log2Depth, float log2Normal) {
+    const float dS = exp2(log2Depth), nP = exp2(log2Normal);
+    float3 sum = 0.0, dsum0 = 0.0, dsum1 = 0.0;
+    float  wsum = 0.0, dw0 = 0.0, dw1 = 0.0;
+    [unroll] for (uint i = 0u; i < 4u; ++i) {
+        float dz, cosN;
+        const float w = nrd2TapWeight(t.g[i], t.x[i], t.b[i], zm, n, dS, nP, dz, cosN);
+        if (w <= 0.0) continue;
+        const float gd = -w * kNrd2Ln2 * kNrd2Ln2 * dS * dz;              // d w / d log2Depth
+        const float gn = w * log(max(cosN, 1.0e-30)) * kNrd2Ln2 * nP;     // d w / d log2Normal
+        sum += w * t.x[i].rgb;   wsum += w;
+        dsum0 += gd * t.x[i].rgb; dw0 += gd;
+        dsum1 += gn * t.x[i].rgb; dw1 += gn;
+    }
+    Nrd2Level L;
+    L.conf = wsum;
+    L.dconf[0] = dw0;
+    L.dconf[1] = dw1;
+    if (wsum > 1.0e-6) {
+        L.c = sum / wsum;
+        L.dc[0] = (dsum0 - L.c * dw0) / wsum;
+        L.dc[1] = (dsum1 - L.c * dw1) / wsum;
+    } else {
+        L.c = 0.0; L.dc[0] = 0.0; L.dc[1] = 0.0;
+    }
+    return L;
+}
+
+// Same value as nrd2Combine; dOut[k] = d(output)/d(theta_k).
+float3 nrd2ResolveBackward(float3 c0, bool ownValid, Nrd2Level lv[3], Nrd2TileParams p, float3 extraLogit,
+                           out float3 dOut[6]) {
+    [unroll] for (uint z = 0u; z < 6u; ++z) dOut[z] = 0.0;
+    const float conf[3] = {lv[0].conf, lv[1].conf, lv[2].conf};
+    float l[4];
+    l[0] = nrd2Lum(c0);
+    [unroll] for (uint a = 0u; a < 3u; ++a) l[a + 1u] = nrd2Lum(lv[a].c);
+    const uint r = conf[2] > 0.05 ? 3u : conf[1] > 0.05 ? 2u : conf[0] > 0.05 ? 1u : 0u;
+    const float ref = l[r];
+    const float eps = max(ref, 0.0) * 1.0e-3 + 1.0e-7;
+    const float sL  = exp2(p.log2Lum);
+    const float lr  = log2(max(ref, 0.0) + eps);
+    const float logitIn[3] = {p.logit[0] + extraLogit.x, p.logit[1] + extraLogit.y, p.logit[2] + extraLogit.z};
+
+    float  w[4], m[4], e[3], s[3];
+    float3 c[4];
+    c[0] = c0;
+    [unroll] for (uint k = 0u; k < 4u; ++k) {
+        if (k > 0u) c[k] = lv[k - 1u].c;
+        m[k] = min(abs(log2(max(l[k], 0.0) + eps) - lr), 16.0);
+        const float lw = exp2(-sL * m[k]);
+        if (k == 0u) { w[0] = ownValid ? lw : 0.0; continue; }
+        e[k - 1u] = exp(clamp(logitIn[k - 1u], -16.0, 16.0));
+        s[k - 1u] = saturate(conf[k - 1u]);
+        w[k] = e[k - 1u] * s[k - 1u] * lw;
+    }
+    const float wsum = w[0] + w[1] + w[2] + w[3];
+    if (!(wsum > 1.0e-8)) return ownValid ? c0 : 0.0;
+    const float3 res = (w[0] * c0 + w[1] * c[1] + w[2] * c[2] + w[3] * c[3]) / wsum;
+
+    // One tangent direction per parameter (forward mode).
+    [unroll] for (uint j = 0u; j < 6u; ++j) {
+        float  dl[4], dconf[3];
+        float3 dc[4];
+        dl[0] = 0.0; dc[0] = 0.0;
+        [unroll] for (uint b = 0u; b < 3u; ++b) {
+            const uint g = j == 3u ? 0u : 1u;
+            const bool geo = j == 3u || j == 4u;
+            dc[b + 1u] = geo ? lv[b].dc[g] : 0.0;
+            dconf[b]   = geo ? lv[b].dconf[g] : 0.0;
+            dl[b + 1u] = nrd2Lum(dc[b + 1u]);
+        }
+        const float dref = dl[r];
+        const float deps = ref > 0.0 ? 1.0e-3 * dref : 0.0;
+        const float dlr  = ((ref > 0.0 ? dref : 0.0) + deps) / ((max(ref, 0.0) + eps) * kNrd2Ln2);
+        float  dW = 0.0;
+        float3 dNum = 0.0;
+        [unroll] for (uint k2 = 0u; k2 < 4u; ++k2) {
+            const float a  = max(l[k2], 0.0) + eps;
+            const float u  = log2(a) - lr;
+            const float du = ((l[k2] > 0.0 ? dl[k2] : 0.0) + deps) / (a * kNrd2Ln2) - dlr;
+            const float dm = abs(u) < 16.0 ? (u > 0.0 ? du : u < 0.0 ? -du : 0.0) : 0.0;
+            const float lw = exp2(-sL * m[k2]);
+            const float dlw = -kNrd2Ln2 * lw * (sL * dm + (j == 5u ? kNrd2Ln2 * sL * m[k2] : 0.0));
+            float dw;
+            if (k2 == 0u) {
+                dw = ownValid ? dlw : 0.0;
+            } else {
+                const uint i = k2 - 1u;
+                const float de = (j == i && abs(logitIn[i]) < 16.0) ? e[i] : 0.0;
+                const float ds = (conf[i] > 0.0 && conf[i] < 1.0) ? dconf[i] : 0.0;
+                dw = de * s[i] * lw + e[i] * ds * lw + e[i] * s[i] * dlw;
+            }
+            dW   += dw;
+            dNum += dw * c[k2] + w[k2] * dc[k2];
+        }
+        dOut[j] = (dNum - res * dW) / wsum;
+    }
+    return res;
 }
 
 #endif  // NRD2_RESOLVE_HLSLI

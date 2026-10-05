@@ -237,6 +237,27 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--sun-sweep-frames")) sunSweepTurnsArg = std::atoi(argv[i + 1]);
     for (int i = 1; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], "--gi-history-reset-at")) giHistoryResetAtArg = std::atoi(argv[i + 1]);
+    // --nrd2-capture DIR POSES [HOLD] [HELDOUT_FROM]: NRD2 training poses of the current level (needs
+    // --denoiser 2 and --cam-wander; DIR "default" = %LOCALAPPDATA%/AverEngine/nrd2_dataset/<level>).
+    // --nrd2-oracle grad|grid: the oracle fit (gradient, or derivative-free pattern search).
+    std::string nrd2CaptureDirArg;
+    int nrd2CapturePosesArg = 0, nrd2CaptureHoldArg = 256, nrd2CaptureHeldOutArg = -1;
+    for (int i = 1; i + 2 < argc; ++i)
+        if (!std::strcmp(argv[i], "--nrd2-capture")) {
+            nrd2CaptureDirArg = argv[i + 1];
+            nrd2CapturePosesArg = std::atoi(argv[i + 2]);
+            if (i + 3 < argc && argv[i + 3][0] != '-') {
+                nrd2CaptureHoldArg = std::atoi(argv[i + 3]);
+                if (i + 4 < argc && argv[i + 4][0] != '-') nrd2CaptureHeldOutArg = std::atoi(argv[i + 4]);
+            }
+        }
+    bool nrd2OracleGridArg = false;
+    for (int i = 1; i + 1 < argc; ++i)
+        if (!std::strcmp(argv[i], "--nrd2-oracle")) {
+            if (!std::strcmp(argv[i + 1], "grid")) nrd2OracleGridArg = true;
+            else if (std::strcmp(argv[i + 1], "grad") != 0)
+                AVER_ERROR("[Sandbox] --nrd2-oracle '{}' not recognised (grad|grid); using grad", argv[i + 1]);
+        }
 
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool playWalk=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int giMethodCycle = 0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; bool dred=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool bloomSet=false, exposureSet=false; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; int taaArg=-1; int neuraaArg=-1; std::string neuraaCaptureDir; int neuraaCaptureCount=0; std::string nrdCaptureDir; int nrdCaptureCount=0; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     bool openLevelPickerArg=false; std::string openLevelArg; bool noEditorChrome=false; bool sceneCensus=false;
@@ -1114,6 +1135,12 @@ Application* createApplication(int argc, char** argv) {
     if (!consoleSetArgs.empty()) app->setConsoleSets(std::move(consoleSetArgs));
     if (camTranslateArg != 0.0f) app->setCamTranslate(camTranslateArg);
     if (camWanderAmp > 0.0f) app->setCamWander(camWanderAmp, camWanderSpeed);
+    if (nrd2CapturePosesArg > 0) {
+        app->setNrd2Capture(nrd2CaptureDirArg, static_cast<u32>(nrd2CapturePosesArg),
+                            static_cast<u32>(nrd2CaptureHoldArg > 0 ? nrd2CaptureHoldArg : 256),
+                            nrd2CaptureHeldOutArg >= 0 ? static_cast<u32>(nrd2CaptureHeldOutArg) : ~0u, nrd2OracleGridArg);
+        if (denoiserArg != 2) AVER_WARN("[Sandbox] --nrd2-capture needs --denoiser 2 (it waits for NRD2 to run)");
+    }
     app->setRenderScale(renderScale);
     if (!aversrArg.empty()) {
 #if AVER_MODULE_SR

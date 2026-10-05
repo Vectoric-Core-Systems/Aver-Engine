@@ -1598,6 +1598,12 @@ public:
     void setCamTranslate(f32 speedCmPerFrame);
     void setCamWander(f32 amp, f32 speed);        // --cam-wander AMP SPEED
     void setNrdCapture(const std::string& dir, u32 count) { nrdCaptureDir_ = dir; nrdCaptureCount_ = count; }
+    // --nrd2-capture DIR POSES [HOLD] [HELDOUT_FROM] and --nrd2-oracle grad|grid (NRD2 phase 3 dataset).
+    // DIR "default" (or "-") is %LOCALAPPDATA%/AverEngine/nrd2_dataset/<level>.
+    void setNrd2Capture(const std::string& dir, u32 poses, u32 hold, u32 heldOutFrom, bool oracleGrid) {
+        nrd2CaptureDir_ = dir; nrd2CapturePoses_ = poses; nrd2CaptureHold_ = hold;
+        nrd2CaptureHeldOut_ = heldOutFrom; nrd2CaptureGrid_ = oracleGrid;
+    }
 #if AVER_MODULE_SR
     void setNeuRaaCapture(const std::string& dir, u32 count) { neuraaCaptureDir_ = dir; neuraaCaptureCount_ = count; }
 #endif
@@ -3398,6 +3404,9 @@ private:
     std::string nrdCaptureDir_;      // --nrd-capture DIR COUNT (NRD training data)
     u32  nrdCaptureCount_=0;
     bool nrdCaptureStarted_=false;
+    std::string nrd2CaptureDir_;     // --nrd2-capture (see setNrd2Capture)
+    u32  nrd2CapturePoses_=0, nrd2CaptureHold_=256, nrd2CaptureHeldOut_=~0u;
+    bool nrd2CaptureGrid_=false, nrd2CaptureStarted_=false;
     Vec3 camWanderBasePos_{};
     f32  camWanderBaseYaw_=0.0f, camWanderBasePitch_=0.0f;
     // --mesh-heap default|upload (W4): false (default) = static mesh vertex/index buffers on the Upload heap.

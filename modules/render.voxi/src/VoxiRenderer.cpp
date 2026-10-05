@@ -4632,6 +4632,15 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         in.normalRoughness = dev_->gBufferNormalRoughnessTexture();
         in.gbufferState    = rhi::ResourceState::RenderTarget;
         for (u32 a = 0; a < 4; ++a) in.viewport[a] = static_cast<u32>(curSceneViewport_[a]);
+        // Traced this frame (the capture's fresh pixels): ReSTIR GI's checkerboard drives D, the glossy
+        // reflections' (giShadowParams.w bit 4, parity rtHistParams.z) drives S.
+        in.halfRate = (giCbWrittenThisFrame_ ? 1u : 0u) | ((giCbParityWritten_ & 1u) << 1) |
+                      ((static_cast<u32>(cb_.giShadowParams[3]) & 4u) != 0u ? 4u : 0u) |
+                      ((static_cast<u32>(cb_.rtHistParams[2]) & 1u) << 3);
+        if (nrd2CapturePending_ && nrd2_.valid()) {
+            nrd2CapturePending_ = false;
+            nrd2_.startCapture(nrd2CaptureCfg_);
+        }
         if (nrd2_.record(ctx, in)) {
             nrd2_.recordCompose(ctx);
             if (!nrd2RunLogged_) {
@@ -4979,6 +4988,13 @@ bool VoxiRenderer::bindReflDnPlaceholder() {
 
 // NRD2 asked for and possible this frame: a staged ray-driven D3D12 frame with its G-buffer, one sample
 // a pixel. Not Reference path tracing, which keeps its own accumulation and stays undenoised.
+void VoxiRenderer::startNrd2Capture(const render::denoise::Nrd2CaptureConfig& cfg) {
+    nrd2CaptureCfg_ = cfg;
+    nrd2CapturePending_ = true;
+    if (denoiserMode(settings_) != 2u)
+        AVER_WARN("[NRD2] capture requested but the Denoiser setting is not NRD2 (--denoiser 2); it waits for NRD2");
+}
+
 bool VoxiRenderer::nrd2Wanted() const {
     return settings_.denoiser && settings_.denoiserKind == 2u && !ptReferenceWanted() && dev_ && res_ &&
            bindings_ && dev_->backend() == rhi::Backend::D3D12 && dev_->sampleCount() == 1 &&

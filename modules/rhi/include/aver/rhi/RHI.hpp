@@ -488,6 +488,9 @@ public:
     virtual bool camera(f32 viewProj[16], f32 invViewProjRel[16], f32 cameraPos[3]) const {
         (void)viewProj; (void)invViewProjRel; (void)cameraPos; return false;
     }
+    // Holds the temporal-AA jitter at zero from the next uploaded frame (NRD2's training capture holds a
+    // still pose on one sample position). Backends without jitter ignore it.
+    virtual void setJitterSuppressed(bool on) { (void)on; }
     // The scene's own viewport rect in target pixels -- {x, y, w, h} -- for a feature reprojecting
     // a screen-space position between frames. NOT necessarily the whole render target: the editor docks
     // the 3D view in a sub-rect of the backbuffer. False when the backend has no viewport to give.
