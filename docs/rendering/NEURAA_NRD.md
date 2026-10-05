@@ -430,7 +430,7 @@ Every comparison runs in a visible window on fixed camera paths, with the linear
 
 ## 7. Patents and licences
 
-Sweeps were run on 2026-10-05: [NEURAA_NRD_PATENTS.md](NEURAA_NRD_PATENTS.md) (engineering mapping, not
+Sweeps were run on 2026-10-05 (a private engineering mapping, not in this repository; not
 legal advice). The design follows them unless counsel says otherwise:
 
 1. **History clamps use min/max, not mean +- sigma.** NVIDIA US 10,116,916 (in force to 2037) claims
@@ -509,7 +509,7 @@ legal advice). The design follows them unless counsel says otherwise:
    rejected as of 2026-08-12) and NVIDIA's US 2025/0299305 and US 2026/0073486.
 
 NRD's own sweep (multi-scale learned blending, hit-distance kernels, push-pull filling) is section 9 of
-the patents document. **Counsel should review before either feature ships.** Nothing is vendored: the
+the private patents document. **Counsel should review before either feature ships.** Nothing is vendored: the
 code is `Aver.Render.Neural` and the in-house filters, plus the MIT FidelityFX Denoiser (whose licence
 grants no third-party patent rights).
 
