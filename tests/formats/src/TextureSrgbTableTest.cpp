@@ -81,11 +81,12 @@ ImageData downsample(const ImageData& src, bool srgb, bool normalMap) {
 
             u8* o = &dst.pixels[(static_cast<usize>(y) * dst.width + x) * 4];
             if (normalMap) {
+                // Not renormalised (Toksvig keeps the length); floored at 0.25, as Texture.cpp.
                 const f32 len = std::sqrt(acc[0] * acc[0] + acc[1] * acc[1] + acc[2] * acc[2]);
-                const f32 inv = len > 1e-6f ? 1.0f / len : 0.0f;
-                const f32 n[3] = {len > 1e-6f ? acc[0] * inv : 0.0f,
-                                  len > 1e-6f ? acc[1] * inv : 0.0f,
-                                  len > 1e-6f ? acc[2] * inv : 1.0f};
+                const f32 k = len > 1e-6f ? (len < 0.25f ? 0.25f / len : 1.0f) : 0.0f;
+                const f32 n[3] = {len > 1e-6f ? acc[0] * k : 0.0f,
+                                  len > 1e-6f ? acc[1] * k : 0.0f,
+                                  len > 1e-6f ? acc[2] * k : 0.25f};
                 for (int c = 0; c < 3; ++c) {
                     const f32 e = n[c] * 0.5f + 0.5f;
                     o[c] = static_cast<u8>((e < 0.0f ? 0.0f : (e > 1.0f ? 1.0f : e)) * 255.0f + 0.5f);
