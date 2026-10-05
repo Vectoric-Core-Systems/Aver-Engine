@@ -822,6 +822,7 @@ float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel
         ind.ambientScale = gAmbient.r;
         ind.diffuse      = float3(0.0, 0.0, 0.0);
         ind.occlusion    = 1.0;
+        ind.specularTraced = 1.0;
         bool reflHit = false;
         ind.specular = rtReflection(h.pos, s.N, h.N, reflect(dir, s.N), L, pixel,
                                     s.rough < AVER_REFL_MIRROR_ROUGH ? 0.0 : s.rough, sampleFrame, reflHit);
@@ -1424,6 +1425,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     float3 R = reflect(-V, averShadingNormal(s));
     AverIndirect ind4;
     bool giPoisonSpecCeilHit = false;
+    ind4.specularTraced = 0.0;
     ind4.ambient      = averSkyIrradiance(averShadingNormal(s));
     ind4.ambientScale = gAmbient.r;
     // Traced sky visibility when tier supports it, else cone gather estimate.
@@ -1457,6 +1459,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
             // CSRdRefl's ceiling test in alpha (not recomputed after clamping/rounding).
             giPoisonSpecCeilHit = rdReflTexel.a > 1.5;
             ind4.specular = rdReflTexel.rgb;
+            ind4.specularTraced = 1.0;
         } else {
             bool specHit = false;
             float3 refl = rtReflectionTemporal(i.wpos, N, rNg, R, L, i.pos.xy, s.rough,
@@ -1469,6 +1472,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
             const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
             giPoisonSpecCeilHit = any(specRaw >= AVER_VOX_MAXRAD);
             ind4.specular = clamp(specRaw, 0.0, AVER_VOX_MAXRAD);
+            ind4.specularTraced = 1.0;
         }
     } else
 #endif
@@ -1811,6 +1815,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     AverIndirect ind;
     ind.ambient      = averSkyIrradiance(s.N);
     ind.ambientScale = gAmbient.r;
+    ind.specularTraced = 0.0;
 
     // ---- Diffuse indirect: cone trace as PSMainVoxi does ----
     float rdAo  = 1.0;
@@ -1853,6 +1858,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         // CSRdRefl's PRE-clamp ceiling test in alpha (2.0 = over ceiling).
         giPoisonSpecCeilHit = rdRefl.a > 1.5;
         ind.specular = rdRefl.rgb;
+        ind.specularTraced = 1.0;
     } else if (gVoxelParams.w > 0.5 && !ptRef) {
         // Voxel-cone fallback (rough > 0.75 or RT unavailable).
         float  specAperture = clamp(s.rough * 0.5 + 0.02, 0.02, 0.4);
@@ -1899,6 +1905,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
         giPoisonSpecCeilHit = any(specRaw >= AVER_VOX_MAXRAD);
         ind.specular = clamp(specRaw, 0.0, AVER_VOX_MAXRAD);
+        ind.specularTraced = 1.0;
     } else if (gVoxelParams.w > 0.5) {
         // Voxel-cone fallback (rough > 0.75 or RT unavailable).
         float  specAperture = clamp(s.rough * 0.5 + 0.02, 0.02, 0.4);

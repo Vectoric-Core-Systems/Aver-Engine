@@ -185,6 +185,7 @@ struct AverIndirect {
     float3 diffuse;      // bounced radiance (zero when the renderer traces none)
     float  occlusion;    // ambient occlusion; weights `ambient` only, never `diffuse`
     float3 specular;     // environment radiance along the reflection vector
+    float  specularTraced; // 1: `specular` came from a ray, which already met its occluders
 };
 
 // Builds an AverVertex from the shared vertex/mesh shaders' output.
@@ -936,7 +937,8 @@ void averCoatTerms(AverSurface s, AverIndirect ind, float coatWeight, float coat
     float  cEnv = coatF0 * cdfg.x + cdfg.y;
     // averSpecularOcclusion for the same reason the base gets it: a smooth lobe gathers from a narrow
     // cone and must not be dimmed by a hemisphere-shaped answer.
-    coatEnv = cEnv * coatWeight * ind.specular * averSpecularOcclusion(s.ndv, ind.occlusion, coatRough);
+    coatEnv = cEnv * coatWeight * ind.specular *
+              (ind.specularTraced > 0.5 ? 1.0 : averSpecularOcclusion(s.ndv, ind.occlusion, coatRough));
 
     // What the base is allowed to return: fresnelSchlick at the VIEW angle, not the half vector -- a
     // property of the surface and the eye alone, the same argument averBuildSurface's alpha branch
@@ -993,7 +995,8 @@ void averIndirectTerms(AverSurface s, AverIndirect ind,
     // diffuse terms, while the specular lobe gets averSpecularOcclusion. Sending raw AO into a
     // mirror cost 21% of its energy in the furnace with GI on -- measured against the same grid.
     float  diffOcc = ind.occlusion * s.occlusion;
-    float  specOcc = averSpecularOcclusion(s.ndv, ind.occlusion, s.rough);
+    // A traced reflection saw its occluders; AO on top cost the night wet road 4% of the frame.
+    float  specOcc = ind.specularTraced > 0.5 ? 1.0 : averSpecularOcclusion(s.ndv, ind.occlusion, s.rough);
 
     // FssEss multiplies RADIANCE (the reflection); everything else multiplies IRRADIANCE (the
     // sky and the bounce), which is why they are not folded into one factor.

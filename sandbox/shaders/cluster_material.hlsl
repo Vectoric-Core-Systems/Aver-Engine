@@ -64,6 +64,7 @@ float4 PSClusterMain(VSOut i) : SV_TARGET {
         id.diffuse      = float3(0, 0, 0);
         id.occlusion    = 1.0;
         id.specular     = skyColor(reflect(-sd.V, averShadingNormal(sd)));
+        id.specularTraced = 0.0;
 
         float3 a = averShadeDirect(float3(0, 0, 0), sd, dsun);
         float3 b = averShadeIndirect(a, sd, id);
@@ -159,6 +160,7 @@ float4 PSClusterMain(VSOut i) : SV_TARGET {
     AverIndirect ind;
     ind.ambient      = averSkyIrradiance(N);
     ind.ambientScale = gAmbient.r;
+    ind.specularTraced = 0.0;
 #if AVER_CLUSTER_VOXI
     // THE REAL GI CONE TRACE: Voxi's own coneTracedIndirect(), gated on gVoxelParams.w exactly the
     // way PSMainVoxi's own call site gates it (coneTracedIndirect itself does not check) -- so a
