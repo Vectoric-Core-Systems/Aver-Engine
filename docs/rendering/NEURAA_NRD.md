@@ -270,6 +270,31 @@ and prefilter see no difference, and switching per tile or toggling the setting 
    weights, a tile whose gate confidence is low runs FidelityFX's resolve for that 8x8 group: the same
    shader carries both paths, and the branch is uniform per group because the tile is the group.
 
+### Phase 4 measurements (2026-10-05)
+
+NeonDistrict Night (ReSTIR path tracing, half-rate), render scale 0.5, exposure 4, no tonemap. GI-only
+linear metric (`abgi` / `abspot`: a frame minus the same frame at `voxi.giIntensity 0`). Brightness is
+against the reference path tracer (`voxi.ptMode 1`) at a still camera; spots and grain in motion use
+`--cam-wobble 30 16`. Developer flag `--nrd-spatial 1` / `voxi.nrdSpatial`.
+
+| resolve | still: GI vs reference | still: spots / grain | moving: spots / grain |
+|---|---|---|---|
+| FidelityFX | 0.39 | 2.93 / 0.195 | 4.04 / 0.332 |
+| NRD, prefiltered + fine-leaning | 0.45 | 2.38 / 0.182 | 4.19 / 0.352 |
+| NRD, raw + coarse-leaning (now default) | 0.62 | 1.66 / 0.172 | 3.46 / 0.312 |
+| NRD, 1/8 level only | 0.71 | -- | -- |
+
+- **FidelityFX loses about half the light the input has at night** (0.39 against the input's ~0.71); NRD's
+  default loses about 13%. The input itself is ~0.71 of the reference: ReSTIR path tracing (or the
+  difference between the two tracers) is darker before any denoiser, a separate issue.
+- Using FidelityFX's prefiltered value as NRD's finest candidate inherited its darkening; the raw signal
+  is the finest candidate now.
+- **Not solved: blotches in motion.** At a still camera NRD is visibly cleaner. Moving, it trades fine
+  speckle for soft coloured blotches: the coarse levels leave low-frequency noise and history cannot
+  average it, because the sample count keeps resetting (a 4, 8 or 16-frame cap measured the same).
+  That is what the per-tile network has to decide (where to lean coarse), and the developer flag stays
+  off by default until it does.
+
 ### Hit distance
 
 FidelityFX is given a hit distance of 0 today. NRD needs the real one per pixel:

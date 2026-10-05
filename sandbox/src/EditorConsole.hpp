@@ -687,6 +687,10 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Neural Denoise: NRD's resolve in place of FidelityFX's (docs/rendering/NEURAA_NRD.md). Only acts while voxi.denoiser runs; reads back what is ACTUALLY running",
         []{ const Renderer& r = Renderer::get(); return vBool(voxi::resolve(r.settings(), r.deviceInfo()).neuralDenoise.effective != 0); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->neuralDenoise = on; }); }});
+    t.push_back({"voxi.nrdSpatial", VarType::Bool, false,
+        "Developer: NRD's fixed-parameter spatial-first resolve (a pyramid of this frame plus a short stabiliser) under voxi.neuralDenoise, instead of FidelityFX's resolve",
+        []{ return vBool(Renderer::get().settings().neuralDenoiseSpatial); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->neuralDenoiseSpatial = on; }); }});
     // ---- denoiser tuning -- LIVE: VoxiRenderer re-issues the denoiser's tuning every frame.
     // Only meaningful while voxi.denoiser is on; harmless otherwise. Ranges match Voxi.cpp's clamps.
     t.push_back({"voxi.denoiserMaxSamples", VarType::U32, false,
@@ -856,6 +860,10 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Path-tracing bounce budget; 1 means no extra bounces (ray tracing, not path tracing) (engine clamps to [1,8])",
         []{ return vU32(Renderer::get().settings().ptBounces); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->ptBounces = n; }); }});
+    t.push_back({"voxi.ptMode", VarType::U32, false,
+        "Path Tracing method: 0 ReSTIR path tracing, 1 the reference path tracer (independent paths averaged while the camera is still)",
+        []{ return vU32(Renderer::get().settings().ptMode); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->ptMode = n; }); }});
 
     // Read-only status: why tiers are stuck, device capabilities.
     t.push_back({"voxi.status.msaa", VarType::Str, true, "Why MSAA is or is not available",

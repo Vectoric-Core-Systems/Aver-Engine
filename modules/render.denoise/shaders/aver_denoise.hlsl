@@ -13,7 +13,9 @@
 //   2 CSDenoiseResolve   -- blend the prefiltered signal into the clipped reprojected history; the
 //                           result is both this frame's output and next frame's history.
 //   4 CSDenoiseNrdResolve -- Neural Denoise's resolve (docs/rendering/NEURAA_NRD.md section 4), in
-//                           place of pass 2. Phase 1: the same FidelityFX resolve, its own pipeline.
+//                           place of pass 2: FidelityFX's resolve, or with flag bit 3 the spatial-first
+//                           resolve (pyramid candidates, then a short min/max-clamped stabiliser).
+//   5 CSDenoiseNrdPyramid -- the current frame's 1/2, 1/4, 1/8 levels for pass 4's spatial path.
 //
 // WHY THE REFLECTION PIPELINE FOR A DIFFUSE SIGNAL. FidelityFX Denoiser ships two denoisers: shadows
 // (a 1-bit-per-pixel hit mask) and reflections. Neither of Voxi's signals is a hit mask; both are a
@@ -93,7 +95,8 @@
 cbuffer AverDenoiseCB : register(b1) {
     uint2  gDnsrSize;               // render resolution: every input, history and output
     float2 gDnsrInvSize;
-    uint   gDnsrFlags;              // bit 0: history invalid (reset); bit 1: half-rate input; bit 2: its parity
+    uint   gDnsrFlags;              // bit 0: history invalid (reset); bit 1: half-rate input; bit 2: its parity;
+                                    // bit 3: NRD's spatial-first resolve (pass 4)
     uint   gDnsrMaxSamples;         // reproject: cap on the accumulated sample count
     float  gDnsrHistoryClipWeight;  // resolve: neighbourhood-clip width for the history
     float  gDnsrTemporalStability;  // reproject: passed through to FidelityFX (unused by this version)
@@ -379,10 +382,179 @@ void CSDenoiseResolve(int2 dtid : SV_DispatchThreadID, int2 gtid : SV_GroupThrea
     FFX_DNSR_Reflections_ResolveTemporal(dtid, gtid, gDnsrSize, gDnsrInvSize, gDnsrHistoryClipWeight);
 }
 
-// Phase 1 runs FidelityFX's resolve only; it stays as the per-tile fallback once the pyramid lands.
+#if AVER_DNSR_PASS == 4
+// ---- NRD's spatial-first resolve (NEURAA_NRD.md section 4), fixed parameters (phase 4) ----
+// Every candidate is a normalised mix of this frame's values, so the local mean is kept: an outlier
+// spreads over the coarser levels instead of being rejected. History only steadies what is left.
+Texture2D<float4> gNrdLevel1 : register(t10);   // rgb + view Z * 0.01 (0 = no valid sample)
+Texture2D<float4> gNrdLevel2 : register(t11);
+Texture2D<float4> gNrdLevel3 : register(t12);
+
+static const float kNrdDepthSigma = 16.0;   // relative view-Z difference that halves a tap ~ 1/23
+// Measured 2026-10-05, NeonDistrict Night (NEURAA_NRD.md section 4): coarse-leaning beat fine-leaning on
+// brightness, spots and grain, still and moving.
+static const float kNrdLogit[4]   = {-2.0, -1.0, 0.0, 0.0};   // this pixel, 1/2, 1/4, 1/8
+static const uint  kNrdFramesMoving = 4u, kNrdFramesStill = 16u;
+
+bool nrdSpatial() { return (gDnsrFlags & 8u) != 0u; }
+
+float nrdLum(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+
+// A level's value at full-resolution pixel p: bilinear taps kept only on this pixel's surface.
+// `conf` is the share of the bilinear weight that survived (0 = nothing usable).
+float3 nrdUpsample(Texture2D<float4> lvl, uint shift, int2 p, float z, out float conf) {
+    uint lw, lh;
+    lvl.GetDimensions(lw, lh);
+    const float2 pos  = (float2(p) + 0.5) / float(1u << shift) - 0.5;
+    const int2   base = int2(floor(pos));
+    const float2 f    = pos - float2(base);
+    float3 sum = 0.0;
+    float  wsum = 0.0;
+    [unroll] for (uint i = 0; i < 4u; ++i) {
+        const int2   o = int2(i & 1u, i >> 1);
+        const float4 t = lvl.Load(int3(clamp(base + o, int2(0, 0), int2(lw, lh) - 1), 0));
+        const float  b = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y);
+        const float  tz = t.w * 100.0;
+        const float  w = t.w > 0.0 ? b * exp(-abs(tz - z) / max(z, 1.0e-3) * kNrdDepthSigma) : 0.0;
+        sum += w * t.rgb;
+        wsum += w;
+    }
+    conf = wsum;
+    return wsum > 1.0e-6 ? sum / wsum : 0.0;
+}
+
+// The spatial estimate S at p, in the scaled space the FidelityFX passes work in.
+float3 nrdSpatialEstimate(int2 p) {
+    p = dnsrClampPixel(p);
+    const float z = dnsrLoadViewZ(p);
+    // The raw signal, not FidelityFX's prefiltered value: its outlier rejection darkens.
+    const float3 c0 = dnsrLoadInput(p);
+    float conf[3];
+    float3 c[3];
+    c[0] = nrdUpsample(gNrdLevel1, 1u, p, z, conf[0]) * dnsrScale();
+    c[1] = nrdUpsample(gNrdLevel2, 2u, p, z, conf[1]) * dnsrScale();
+    c[2] = nrdUpsample(gNrdLevel3, 3u, p, z, conf[2]) * dnsrScale();
+
+    float logit[4] = {kNrdLogit[0], kNrdLogit[1], kNrdLogit[2], kNrdLogit[3]};
+    // An outlier against the 1/4 level leans on the coarse levels (spread, not rejected).
+    const float ratio = nrdLum(c0) / max(nrdLum(c[1]), 1.0e-4);
+    if (conf[1] > 0.25 && ratio > 4.0) {
+        const float push = log2(ratio / 4.0);
+        logit[0] -= push; logit[2] += 0.5 * push; logit[3] += 0.5 * push;
+    }
+#if !AVER_DNSR_SCALAR
+    // Light from nearby geometry changes quickly: a short hit distance leans on the fine levels.
+    const float hit = gDnsrInput.Load(int3(p, 0)).a;
+    const float contact = 1.0 - saturate(hit / max(z * 0.3, 1.0e-3));
+    logit[0] += 2.0 * contact; logit[1] += contact;
+#endif
+    float w[4];
+    w[0] = exp(logit[0]);
+    float wsum = w[0];
+    float3 s = w[0] * c0;
+    [unroll] for (uint i = 0; i < 3u; ++i) {
+        w[i + 1] = exp(logit[i + 1]) * saturate(conf[i]);
+        wsum += w[i + 1];
+        s += w[i + 1] * c[i];
+    }
+    return s / wsum;
+}
+
+groupshared float3 gsNrdS[10 * 10];
+
+void nrdResolve(int2 dtid, int2 gtid) {
+    // S for this 8x8 tile and a one-pixel apron, for the history clamp's 3x3 min/max.
+    const int2 origin = dtid - gtid - 1;
+    const uint gi = uint(gtid.y * 8 + gtid.x);
+    for (uint i = gi; i < 100u; i += 64u)
+        gsNrdS[i] = nrdSpatialEstimate(origin + int2(i % 10u, i / 10u));
+    GroupMemoryBarrierWithGroupSync();
+    if (any(dtid >= int2(gDnsrSize))) return;
+
+    const uint c = uint(gtid.y + 1) * 10u + uint(gtid.x + 1);
+    const float3 sNow = gsNrdS[c];
+    float3 lo = sNow, hi = sNow;
+    [unroll] for (int y = -1; y <= 1; ++y)
+        [unroll] for (int x = -1; x <= 1; ++x) {
+            const float3 v = gsNrdS[int(c) + y * 10 + x];
+            lo = min(lo, v); hi = max(hi, v);
+        }
+    const float3 hist = clamp(DNSR_LOAD3(gDnsrReprojected.Load(int3(dtid, 0))), lo, hi);
+    const float  n = gDnsrSampleCount.Load(int3(dtid, 0));
+    const bool   moving = dot(gDnsrMotion.Load(int3(dtid, 0)), gDnsrMotion.Load(int3(dtid, 0))) > 0.0025;
+    const float  frames = min(n, float(moving ? kNrdFramesMoving : kNrdFramesStill));
+    const float  a = (dnsrHistoryReset() || frames <= 1.0) ? 0.0 : 1.0 - 1.0 / frames;
+    float3 outS = lerp(sNow, hist, a);
+    float  var = lerp(FFX_DNSR_Reflections_ComputeTemporalVariance(outS, hist),
+                      gDnsrPrefilteredVariance.Load(int3(dtid, 0)), a);
+    if (any(isnan(outS)) || any(isinf(outS)) || isnan(var) || isinf(var)) { outS = 0.0; var = 0.0; }
+    gDnsrOut[dtid]         = DNSR_STORE(outS / dnsrScale());
+    gDnsrVarianceOut[dtid] = var;
+}
+
+// Without bit 3 (no weights, or the developer flag off) it is FidelityFX's resolve exactly.
 [numthreads(8, 8, 1)]
 void CSDenoiseNrdResolve(int2 dtid : SV_DispatchThreadID, int2 gtid : SV_GroupThreadID) {
-    FFX_DNSR_Reflections_ResolveTemporal(dtid, gtid, gDnsrSize, gDnsrInvSize, gDnsrHistoryClipWeight);
+    if (nrdSpatial()) nrdResolve(dtid, gtid);
+    else FFX_DNSR_Reflections_ResolveTemporal(dtid, gtid, gDnsrSize, gDnsrInvSize, gDnsrHistoryClipWeight);
+}
+#endif
+
+// =================================================================================================
+#elif AVER_DNSR_PASS == 5   // ---- NRD pyramid (current frame only) ----
+
+RWTexture2D<float4> gNrdLevel1Out : register(u0);
+RWTexture2D<float4> gNrdLevel2Out : register(u1);
+RWTexture2D<float4> gNrdLevel3Out : register(u2);
+
+// One 8x8 group: its 4x4 texels of level 1, 2x2 of level 2, one of level 3. Each level keeps the
+// nearest surface in its block (a thin object in front keeps its own texel), weighting the others
+// by how far they sit behind it. View Z is stored * 0.01 to stay inside fp16.
+groupshared float4 gsNrdIn[64];
+groupshared float4 gsNrdL1[16];
+groupshared float4 gsNrdL2[4];
+
+float4 nrdReduce(float4 a, float4 b, float4 c, float4 d) {
+    float zmin = 1.0e30;
+    const float4 v[4] = {a, b, c, d};
+    [unroll] for (uint i = 0; i < 4u; ++i) if (v[i].w > 0.0) zmin = min(zmin, v[i].w);
+    if (zmin >= 1.0e30) return 0.0;
+    float3 sum = 0.0;
+    float  wsum = 0.0, zsum = 0.0;
+    [unroll] for (uint j = 0; j < 4u; ++j) {
+        if (v[j].w <= 0.0) continue;
+        const float w = exp(-(v[j].w - zmin) / zmin * 16.0);
+        sum += w * v[j].rgb; zsum += w * v[j].w; wsum += w;
+    }
+    return float4(sum / wsum, zsum / wsum);
+}
+
+[numthreads(8, 8, 1)]
+void CSDenoiseNrdPyramid(int2 dtid : SV_DispatchThreadID, int2 gtid : SV_GroupThreadID) {
+    const uint gi = uint(gtid.y * 8 + gtid.x);
+    const int2 p = dnsrClampPixel(dtid);
+    const float z = dnsrLoadViewZ(p);
+    const float3 v = DNSR_LOAD3(gDnsrInput.Load(int3(p, 0)));
+    bool valid = all(dtid < int2(gDnsrSize)) && z > 0.0 && z < 1.0e6 && !any(isnan(v)) && !any(isinf(v));
+    if (dnsrHalfRateInput() && ((uint(p.x) ^ uint(p.y) ^ dnsrHalfRateParity()) & 1u) != 0u) valid = false;
+    gsNrdIn[gi] = valid ? float4(v, z * 0.01) : 0.0;
+    GroupMemoryBarrierWithGroupSync();
+
+    if (((gtid.x | gtid.y) & 1) == 0) {
+        const uint b = gi;
+        const float4 r = nrdReduce(gsNrdIn[b], gsNrdIn[b + 1], gsNrdIn[b + 8], gsNrdIn[b + 9]);
+        gsNrdL1[(gtid.y / 2) * 4 + gtid.x / 2] = r;
+        gNrdLevel1Out[dtid / 2] = r;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (((gtid.x | gtid.y) & 3) == 0) {
+        const uint b = uint(gtid.y / 2) * 4u + uint(gtid.x / 2);
+        const float4 r = nrdReduce(gsNrdL1[b], gsNrdL1[b + 1], gsNrdL1[b + 4], gsNrdL1[b + 5]);
+        gsNrdL2[(gtid.y / 4) * 2 + gtid.x / 4] = r;
+        gNrdLevel2Out[dtid / 4] = r;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (gi == 0u) gNrdLevel3Out[dtid / 8] = nrdReduce(gsNrdL2[0], gsNrdL2[1], gsNrdL2[2], gsNrdL2[3]);
 }
 
 #endif

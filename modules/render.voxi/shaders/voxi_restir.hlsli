@@ -850,10 +850,12 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     bool giPoisonDenoisedCeilHit = false;
 
     float3 outDiffuse = 0.0;
+    float  outHitDist = 0.0;   // to the chosen sample; NRD's resolve reads it (alpha of gGiRadianceOut)
     if (giIsValidReservoir(result)) {
         // Recomputed here against THIS pixel's (wpos, N), since resampling can swap the sample.
         const float3 toSample = result.position - wpos;
         const float  dist2    = dot(toSample, toSample);
+        outHitDist = sqrt(dist2);
         const float  cosR     = dist2 > 1e-8 ? saturate(dot(toSample * rsqrt(dist2), N)) : 0.0;
 
         // ---- F3 (R3): A REUSED SAMPLE HAS NEVER BEEN CHECKED FOR VISIBILITY FROM HERE ----
@@ -927,7 +929,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
 #endif
     // W6/M5: gated on gAverHistoryWrite; blended fragments don't write here.
     if (giDenoiseInWrite) {
-        if (gAverHistoryWrite) gGiRadianceOut[pixelPos] = float4(outDiffuse, 0.0);
+        if (gAverHistoryWrite) gGiRadianceOut[pixelPos] = float4(outDiffuse, outHitDist);
     }
 
     // Read last frame's denoised estimate (one frame lag). Zero dimensions means denoiser off.

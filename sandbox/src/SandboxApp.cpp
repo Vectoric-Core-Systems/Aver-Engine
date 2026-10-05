@@ -962,6 +962,7 @@ void SandboxApp::onInit(Engine& e)  {
         if (giModeOverride_ >= 0) k.giMode = static_cast<u32>(giModeOverride_);
         if (denoiserOverride_ >= 0) k.denoiser = denoiserOverride_ != 0;
         if (neuralDenoiseOverride_ >= 0) k.neuralDenoise = neuralDenoiseOverride_ != 0;
+        if (nrdSpatialOverride_ >= 0) k.neuralDenoiseSpatial = nrdSpatialOverride_ != 0;
         voxi::Renderer::get().setSettings(k);
         AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 

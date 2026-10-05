@@ -67,6 +67,9 @@ public:
         // Neural Denoise: NRD's resolve in place of FidelityFX's (NEURAA_NRD.md section 4). Same
         // targets, so switching never resets history. Ignored when that pipeline did not build.
         bool neuralResolve = false;
+        // Developer (phase 4): NRD's resolve takes its fixed-parameter spatial-first path, with the
+        // pyramid pass before it. Only with neuralResolve.
+        bool neuralSpatial = false;
     };
 
     // FidelityFX's two dials. Safe to change any frame.
@@ -82,6 +85,9 @@ public:
     void destroy();
     [[nodiscard]] bool valid() const { return pipelines_[0] != 0; }
     [[nodiscard]] bool neuralAvailable() const { return pipelines_[NrdResolve * 2] != 0; }
+    [[nodiscard]] bool neuralSpatialAvailable() const {
+        return neuralAvailable() && pipelines_[NrdPyramid * 2] != 0 && pipelines_[NrdPyramid * 2 + 1] != 0;
+    }
 
     // Allocates the history and scratch textures for this resolution. Idempotent at an unchanged
     // size; a real change discards every history.
@@ -104,7 +110,9 @@ public:
 private:
     // Scale (colour only) records first; each number matches the shader's AVER_DNSR_PASS. NrdResolve
     // records in place of Resolve when Frame::neuralResolve is set.
-    enum Pass : u32 { Reproject = 0, Prefilter = 1, Resolve = 2, Scale = 3, NrdResolve = 4, kPassCount = 5 };
+    // NrdPyramid records before NrdResolve on its spatial path.
+    enum Pass : u32 { Reproject = 0, Prefilter = 1, Resolve = 2, Scale = 3, NrdResolve = 4, NrdPyramid = 5,
+                      kPassCount = 6 };
 
     // Everything one signal keeps. Pairs ping-pong by `parity`: [parity] is written this frame,
     // [1 - parity] holds last frame's.
@@ -118,6 +126,7 @@ private:
         rhi::TextureHandle prefiltered    = 0;    // the spatially filtered input
         rhi::TextureHandle prefilteredVar = 0;
         rhi::TextureHandle scale          = 0;    // 1x1 pre-exposure scale (colour only)
+        rhi::TextureHandle nrdLevel[3]    = {};   // NRD's pyramid: 1/2, 1/4, 1/8 of this frame
         rhi::BindingSetHandle sets[kPassCount] = {};
         // history[] alone changes resting state: the one written this frame is left pixel-readable
         // for Voxi (ShaderResource); every other target rests in NonPixelShaderResource.
@@ -127,7 +136,7 @@ private:
     };
 
     bool recordSignal(rhi::IRenderContext& ctx, u32 signal, rhi::TextureHandle input,
-                      const Inputs& in, u32 flags, bool neuralResolve);
+                      const Inputs& in, u32 flags, bool neuralResolve, bool neuralSpatial);
     void releaseTargets();
 
     rhi::IDevice*          dev_ = nullptr;

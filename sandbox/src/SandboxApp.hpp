@@ -1545,6 +1545,7 @@ public:
     void setRestirVisibility(int n);
     void setDenoiser(int n);                          // --denoiser 0|1
     void setNeuralDenoise(int n);                     // --neural-denoise 0|1
+    void setNrdSpatial(int n) { nrdSpatialOverride_ = n; }   // --nrd-spatial 0|1 (developer)
     void setRenderScale(f32 s);                    // --render-scale F
 #if AVER_MODULE_SR
     void setAverSrQuality(aver::sr::Quality q);
@@ -3290,6 +3291,7 @@ private:
     int  restirVisibilityOverride_=-1;
     int  denoiserOverride_=-1;       // --denoiser 0|1: -1 is "flag not given"; see setDenoiser
     int  neuralDenoiseOverride_=-1;  // --neural-denoise 0|1, same convention
+    int  nrdSpatialOverride_=-1;     // --nrd-spatial 0|1 (developer)
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
 #if AVER_MODULE_SR
     // --aversr LEVEL / the render-settings quality combo. Off (default) = no AverSR.

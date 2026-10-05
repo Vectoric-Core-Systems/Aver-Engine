@@ -146,6 +146,8 @@ struct Settings {
     // Neural Denoise: NRD's resolve replaces FidelityFX's (docs/rendering/NEURAA_NRD.md section 4).
     // Only acts while the denoiser runs. Toggling keeps history.
     bool neuralDenoise = false;
+    // Developer (phase 4): NRD's fixed-parameter spatial-first resolve under Neural Denoise.
+    bool neuralDenoiseSpatial = false;
 
     // ---- The denoiser's live dials (render::denoise::Denoiser::Tuning) ----
     // Applied every frame the denoiser records, so a console change takes effect next frame with no teardown.

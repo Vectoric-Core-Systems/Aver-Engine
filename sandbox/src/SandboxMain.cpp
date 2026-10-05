@@ -62,6 +62,7 @@ Application* createApplication(int argc, char** argv) {
     int rdStagesArg = -1;   // --rd-stages 0|1|2
     int denoiserArg = -1;   // --denoiser 0|1
     int neuralDenoiseArg = -1;   // --neural-denoise 0|1
+    int nrdSpatialArg = -1;      // --nrd-spatial 0|1 (developer)
     // Refraction tier overrides; -1 is "not given".
     int refraction = -1;
     f32 refractionStrength = -1.0f, refractionFade = -1.0f;
@@ -109,6 +110,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--rd-stages"))            rdStagesArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--denoiser"))              denoiserArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--neural-denoise"))        neuralDenoiseArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--nrd-spatial"))           nrdSpatialArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--rt-denoise-motion"))     rtDenoiseMotionArg = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--resize-cycle"))         resizeCycleArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--pie-camera-test"))      pieCamArg = std::atoi(argv[i + 1]);
@@ -1039,6 +1041,7 @@ Application* createApplication(int argc, char** argv) {
     }
     app->setDenoiser(denoiserArg);
     app->setNeuralDenoise(neuralDenoiseArg);
+    app->setNrdSpatial(nrdSpatialArg);
     app->setRtForceOff(noRt);
     app->setRayDrivenAblation(rdAblate);
     app->setRtDenoiseMotionTaper(rtDenoiseMotionArg);

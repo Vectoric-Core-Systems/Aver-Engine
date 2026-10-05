@@ -5281,6 +5281,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             frame.radianceHalfRate       = denoiseGiSignal && denoiseGiInputHalfRate_;
             frame.radianceHalfRateParity = denoiseGiHalfRateParity_;
             frame.neuralResolve          = settings_.neuralDenoise;
+            frame.neuralSpatial          = settings_.neuralDenoiseSpatial;
             // Clamp denoiser history during sun movement.
             if (rtHistSunMoved()) denoiseSunMovingHold_ = 2u;
             else if (denoiseSunMovingHold_ > 0u) --denoiseSunMovingHold_;
