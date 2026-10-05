@@ -353,7 +353,7 @@ u32 nrd2EnsureHeldOut(std::vector<Nrd2PoseInfo>& poses) {
     for (usize i = 0; i < poses.size();) {
         usize j = i;
         bool any = false;
-        while (j < poses.size() && poses[j].scene == poses[i].scene) any = any || poses[j++].heldOut;
+        for (; j < poses.size() && poses[j].scene == poses[i].scene; ++j) any = any || poses[j].heldOut;
         const usize n = j - i;
         if (!any && n >= 2) {
             for (usize k = 0; k < n; ++k)

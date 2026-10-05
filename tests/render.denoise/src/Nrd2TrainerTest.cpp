@@ -273,6 +273,13 @@ void testDataset() {
     const u32 promoted = nrd2EnsureHeldOut(poses);
     check(promoted == 1 && poses[7].heldOut && !poses[5].heldOut, "a scene with none flagged holds out one of its poses");
     check(nrd2DatasetId(poses) != id, "the held-out split is part of the dataset id");
+    {
+        // A scene whose FIRST pose is held out (the real captures' layout) must not stall the walk.
+        std::vector<Nrd2PoseInfo> early(6);
+        for (u32 i = 0; i < 6; ++i) { early[i].scene = i < 3 ? "A" : "B"; early[i].heldOut = i == 0 || i == 3; }
+        check(nrd2EnsureHeldOut(early) == 0 && early[0].heldOut && !early[1].heldOut && early[3].heldOut,
+              "a scene that already holds poses out keeps them, wherever they sit");
+    }
     writeNrd2Pose((root / "SceneB" / poseName(1)).string(), makePose("SceneB", 1, false, 9, 8, 1, 99));
     check(nrd2DatasetId(scanNrd2Dataset({root.string()})) != id, "changed content changes the id");
     fs::remove_all(root, ec);
