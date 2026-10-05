@@ -228,10 +228,10 @@ and prefilter see no difference, and switching per tile or toggling the setting 
 
 1. **Pyramid.** One pass builds two levels from the current frame's **raw** noisy signal, not the
    prefiltered one (the prefilter's radiance weight darkens): 1/2 and 1/4 resolution, depth- and
-   normal-aware (a child sample counts only if it lies on the parent's surface). FidelityFX's reproject
-   already writes a plain 1/8 mean, reused as the third level; it is 30% reprojected history
-   (`lerp(radiance, reprojection, 0.3)` in its reproject), which is acceptable at that scale. If it
-   measures as lag, the pyramid pass writes its own 1/8 level. Pixels with no fresh sample
+   normal-aware (a child sample counts only if it lies on the parent's surface), plus a 1/8 level
+   written by the same pass. FidelityFX's own 1/8 mean is **not** reused: it is 30% reprojected history
+   (`lerp(radiance, reprojection, 0.3)` in its reproject), and every level must come from the current
+   frame only (section 7). Pixels with no fresh sample
    this frame (half-rate GI's checkerboard, sky) get weight 0; the normalised weights fill them from
    fresh neighbours, push-pull style. All four candidates per pixel are then: FidelityFX's prefiltered
    value (finest, edge-aware) and levels 1-3, each upsampled with joint bilateral weights against this
@@ -293,7 +293,9 @@ Pre-trained offline; weights ship in `bin/data` like NeuraFI's, the same for eve
    setting whose result is closest to the reference, scored by relative L2, the **energy ratio** (tile
    mean against the reference mean) and **flicker** across a short moving sequence.
 3. **Regression:** the network learns to map the tile record to the oracle parameters. No image loss is
-   back-propagated (section 7).
+   back-propagated, and the network's own output is never run through the filter and scored against
+   the reference during training: validation, checkpoint choice and early stopping all use the
+   parameter-space error. Image metrics on the rig judge only the finished weights (section 7).
 4. **Rollout:** because the stabiliser feeds back, the frames are re-captured with the trained network
    running and the oracle refit once or twice. The short history (4 frames in motion) keeps this
    stable.
@@ -305,8 +307,7 @@ a visible window; camera paths are split between training and evaluation.
 
 Pyramid + tile records ~0.1 ms, inference ~0.05 ms, resolve ~0.15 ms: ~0.3 ms, against a budget of
 **+1 ms** over FidelityFX's resolve for everything NRD runs. Within that budget the cheapest setting
-that meets the quality bar wins: two pyramid levels plus the reused 1/8 mean before three; 8x8 tiles
-before 4x4.
+that meets the quality bar wins: two pyramid levels before three; 8x8 tiles before 4x4.
 
 ---
 
@@ -382,17 +383,43 @@ legal advice). The design follows them unless counsel says otherwise:
    visibility records, which counsel should confirm is outside it, and raster MSAA uses the plain
    hardware resolve, never an edge-classified one.
 4. **NRD trains in parameter space only.** The University of California's US 10,832,091 claims
-   back-propagating an image error between filtered output and ground truth.
-5. **NRD's spatial footprint never depends on sample count.** NVIDIA US 11,113,792 claim 15 covers a
-   temporal filter followed by a spatial filter sized from the history count. NRD is spatial first, its
-   scale choice comes from hit distance and tile statistics, and sample count only sets the
-   stabiliser's history weight.
-6. **NRD's network never sees per-pixel or history colours, or frame time.** Intel US 12,374,006 (in
+   back-propagating an image error between filtered output and ground truth; its parent US 10,192,146
+   (to ~2036) claims, without the word backpropagation, a model that computes a filter's parameters, an
+   error metric applied to the filtered image, and the model corrected from it, repeated. NRD's network
+   is regressed onto oracle parameters, and its own output is never filtered and scored during training,
+   validation, checkpoint choice or early stopping.
+5. **NRD's pyramid is the current frame's, and its level choice never depends on counts.** NVIDIA US
+   11,113,792 claim 15 covers a spatial filter sized from the history count; NVIDIA US 12,182,927 (to
+   ~2041) covers choosing a resolution level of an *accumulated* render from the number of renders in
+   it, then blurring (its sibling US 11,508,113: blur radius from the accumulated-frame count). Every NRD
+   level is built from the current frame's signal (hence its own 1/8 level, not FidelityFX's
+   history-mixed one), level choice comes from the network's tile statistics and hit distance, and
+   sample count only sets the stabiliser's history weight, never a radius or a level. The stabiliser's
+   history length depends on motion, never on view angle or parallax (US 11,823,321).
+6. **NRD's per-pixel weights come from hand-written code.** Pixar/Disney US 10,672,109 (to ~2038)
+   claims a network that, from an image and its down-sampled version, generates denoised images and a
+   set of per-pixel weights to blend them. In NRD the levels are made by fixed filters, the network
+   outputs per-tile logits only, and the per-pixel terms (edge-stopping, hit distance) are fixed maths.
+   The network must never emit a per-pixel weight map or a per-level image.
+7. **NRD's stabiliser clamps to order statistics.** NVIDIA US 12,482,168 (granted 2025-11-25) claims a
+   clamp range defined from the distribution of ray-traced samples; its parent US 11,600,036 from the
+   first and second moments. The stabiliser's range is the 3x3 min and max of S, never a mean, variance
+   or fitted distribution, and its footprint is never larger than the spatial estimate's (US 11,663,701
+   claims a temporal clamp radius larger than the spatial radius; its parent US 10,991,079 a spatial
+   filter on an exponentially accumulated signal, which NRD's current-frame pyramid is not).
+8. **Fixed tap patterns.** NVIDIA US 12,423,782 (continuation of US 11,113,792, granted 2025-09-23)
+   claims spatial filter taps at locations chosen by jittering a parameter. NRD's bilateral upsample uses
+   fixed taps with no per-frame or per-pixel rotation; FidelityFX's prefilter already uses a fixed
+   15-tap pattern.
+9. **Shadows later: hit distance only biases the level.** NVIDIA US 10,740,954 claims filter dimensions
+   from occluder distance through a light-shape (penumbra) geometry. When NRD extends to RT shadows,
+   blocker distance only biases the pyramid level, never a computed penumbra footprint.
+10. **NRD's network never sees per-pixel or history colours, or frame time.** Intel US 12,374,006 (in
    force to 2043) claims a history-validation network fed, per pixel, the current colour, depth,
    auxiliary buffers, the reprojected history colour and the time between frames. NRD's network gets
    tile aggregates only and outputs spatial parameters; history is handled by hand-written code.
-7. **Un-jitter before the denoiser** (Arm US 18/497,608, granted 2026-09-29).
-8. **Watch:** AMD's pending US 2026/0094228 (any trained network in a pipeline stage; every claim
+11. **Un-jitter before the denoiser** (Arm US 18/497,608, granted 2026-09-29).
+12. **Watch:** AMD's pending US 2026/0094228 (any trained network in a pipeline stage; every claim
    rejected as of 2026-08-12) and NVIDIA's US 2025/0299305 and US 2026/0073486.
 
 NRD's own sweep (multi-scale learned blending, hit-distance kernels, push-pull filling) is section 9 of
