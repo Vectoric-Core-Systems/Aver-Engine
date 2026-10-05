@@ -315,6 +315,7 @@ AverSurface rtHitSurface(RtHit h, float3 V, float3 L, float2 gx, float2 gy, uint
     map.baseColor  = float4(1.0, 1.0, 1.0, 1.0);
     map.metalRough = float2(1.0, 1.0);
     map.normalTS   = float3(0.0, 0.0, 1.0);
+    map.normalLen  = 1.0;
     map.occlusion  = 1.0;
     map.emissive   = float3(1.0, 1.0, 1.0);
     float2 uv = h.meshUV;
@@ -332,6 +333,7 @@ AverSurface rtHitSurface(RtHit h, float3 V, float3 L, float2 gx, float2 gy, uint
 #endif
         const float3 n = averRtSampleSlot(m, 2, uv, gx, gy, float4(0.5, 0.5, 1.0, 1.0)).xyz * 2.0 - 1.0;
         map.normalTS  = float3(n.xy * m.normalScale, n.z);
+        map.normalLen = (m.flags & AVER_MAT_NORMAL_MAP) ? length(n) : 1.0;
         map.occlusion = averRtSampleSlot(m, 3, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0)).r;
         // The second layer by slope (material_prelude.hlsl's averLayerWeight), as raster blends it.
         const float lw = averLayerWeight(m, h.N);
@@ -347,6 +349,7 @@ AverSurface rtHitSurface(RtHit h, float3 V, float3 L, float2 gx, float2 gy, uint
             if (m.flags & AVER_MAT_L1_NORMAL) {
                 const float3 n1 = averRtSampleSlot(m, 7, uv1, gx * s1, gy * s1, float4(0.5, 0.5, 1.0, 1.0)).xyz * 2.0 - 1.0;
                 map.normalTS = normalize(lerp(map.normalTS, float3(n1.xy * m.normalScale, n1.z), lw));
+                map.normalLen = lerp(map.normalLen, length(n1), lw);
             }
         }
     }
@@ -432,6 +435,7 @@ bool averRtCandidateOpaque(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q
         map.baseColor  = baseMap;
         map.metalRough = float2(1.0, 1.0);
         map.normalTS   = float3(0.0, 0.0, 1.0);
+        map.normalLen  = 1.0;
         map.occlusion  = 1.0;
         map.emissive   = float3(1.0, 1.0, 1.0);
         AverAuthored a = averAuthoredFrom(mat, map);

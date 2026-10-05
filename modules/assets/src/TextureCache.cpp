@@ -110,6 +110,8 @@ u64 cacheKey(const std::string& absPathLower, u64 fileSize, u64 mtimeTicks, Text
     putU32(b, fmt::kBc7EncoderVersion);
     putU32(b, kTextureCacheFormatVersion);
     b.push_back(usage == TextureUsage::Colour ? 1 : 0);   // the "coverage flag" -- see above
+    // Normal maps only: their mips stopped renormalising (specular AA), so their old entries retire.
+    if (usage == TextureUsage::NormalMap) putU32(b, 2u);
     return fnv1a64(b.data(), b.size());
 }
 

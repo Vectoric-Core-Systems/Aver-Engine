@@ -84,11 +84,14 @@ ImageData downsample(const ImageData& src, bool srgb, bool normalMap) {
 
             u8* o = &dst.pixels[(static_cast<usize>(y) * dst.width + x) * 4];
             if (normalMap) {
+                // NOT renormalised: the averaged vector's length is how much the normals under this
+                // texel disagree, which the shader's specular anti-aliasing reads (Toksvig). Floored at
+                // 0.25 so opposing normals keep a direction to renormalise.
                 const f32 len = std::sqrt(acc[0] * acc[0] + acc[1] * acc[1] + acc[2] * acc[2]);
-                const f32 inv = len > 1e-6f ? 1.0f / len : 0.0f;
-                const f32 n[3] = {len > 1e-6f ? acc[0] * inv : 0.0f,
-                                  len > 1e-6f ? acc[1] * inv : 0.0f,
-                                  len > 1e-6f ? acc[2] * inv : 1.0f};
+                const f32 k = len > 1e-6f ? (len < 0.25f ? 0.25f / len : 1.0f) : 0.0f;
+                const f32 n[3] = {len > 1e-6f ? acc[0] * k : 0.0f,
+                                  len > 1e-6f ? acc[1] * k : 0.0f,
+                                  len > 1e-6f ? acc[2] * k : 0.25f};
                 for (int c = 0; c < 3; ++c) {
                     const f32 e = n[c] * 0.5f + 0.5f;
                     o[c] = static_cast<u8>((e < 0.0f ? 0.0f : (e > 1.0f ? 1.0f : e)) * 255.0f + 0.5f);

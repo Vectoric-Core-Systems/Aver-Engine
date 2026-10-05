@@ -23,7 +23,7 @@ namespace {
 // ---- opacity folding and the texture-size cap, ported from AverAssetC.cpp unchanged ----------------
 
 // How a texture is going to be READ, which is what decides how it may be filtered. Colour has to be
-// averaged in linear space, a normal map as vectors and then renormalised, and data (roughness,
+// averaged in linear space, a normal map as vectors (not renormalised: the length feeds specular AA), and data (roughness,
 // metal, occlusion) straight -- getting this wrong does not fail, it just shades subtly wrong, which
 // is the worst kind of wrong to ship.
 enum class TexRole { Colour, Data, Normal };

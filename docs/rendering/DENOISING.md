@@ -120,6 +120,20 @@ NeonDistrict Night, render scale 0.5, moving (`--cam-wander 1.5 2.3`), GI off:
 Still, total image against the reference path tracer: 0.982 Voxi's filter, 0.979 denoised. Cost
 about +1.5 to 2.5 ms (run-to-run spread is ~2 ms); the reflection targets add ~74 MB at 1766x994.
 
+## 5. Specular anti-aliasing (2026-10-05)
+
+The wet-road speckle left after section 4 was ALIASING, not noise: present on a still frame, gone
+without reflection rays, unchanged with deterministic hit shading. The road's normal map scatters
+near-mirror rays across a city of small bright lights, one unjittered ray per pixel, so no denoiser
+had varying samples to average. Fixed at the surface with Toksvig: normal-map mips now average as
+vectors WITHOUT renormalising (`fmt::generateMipChain`, length floored at 0.25; the texture cache
+key retires old normal-map entries), `AverMaps/AverAuthored::normalLen` carries the filtered length,
+and `averComposeSurface` widens GGX alpha^2 by (1 - len) / len for raster and ray hits alike.
+Assets cooked before this keep renormalised mips until re-imported.
+
+NeonDistrict Night moving, GI off: speckles 1.11 -> 0.35 per mille alone, 0.26 with reflection
+denoising; no measurable cost; whole still frame 11.77 -> 11.75 (8-bit mean, tonemapped).
+
 ## Sources
 
 - [AMD FidelityFX Denoiser](https://gpuopen.com/fidelityfx-denoiser/) and its

@@ -1106,7 +1106,8 @@ static void testBlendModes() {
           && d.alphaMode == pbr::AlphaMode::Opaque, "opaque -> Opaque");
 }
 
-// Checks generateMipChain: sRGB filtering in linear light, and renormalised normal maps.
+// Checks generateMipChain: sRGB filtering in linear light, and normal maps averaged as vectors that keep
+// their length (the spread specular anti-aliasing reads).
 static void testMipChain() {
     AVER_INFO("=== texture: mip chain ===");
 
@@ -1150,15 +1151,15 @@ static void testMipChain() {
     check(lean.levels.size() == 2, "2x2 normal map produces levels 2, 1");
     const u8* avg = lean.levels[1].pixels.data();
     check(avg[0] == 128, "opposed X cancels to the flat value");
-    check(avg[2] >= 253, "the average is renormalised, so Z returns to ~1 (got " + std::to_string(avg[2]) + ")");
+    check(avg[2] >= 229 && avg[2] <= 231, "the average keeps its length, 0.8 for this spread (got " + std::to_string(avg[2]) + ")");
 
     const fmt::TextureData cancel = mip1of({
         255, 128, 128, 255,     0, 127, 127, 255,
         255, 128, 128, 255,     0, 127, 127, 255,
     });
     const u8* flat = cancel.levels[1].pixels.data();
-    check(flat[0] == 128 && flat[1] == 128 && flat[2] == 255,
-          "an exactly-cancelling block falls back to the flat normal, never to a NaN");
+    check(flat[0] == 128 && flat[1] == 128 && flat[2] >= 159 && flat[2] <= 160,
+          "an exactly-cancelling block falls back to the flat direction at the 0.25 length floor, never to a NaN");
 }
 
 

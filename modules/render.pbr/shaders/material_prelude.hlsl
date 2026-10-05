@@ -247,6 +247,7 @@ struct AverMaps {
     float4 baseColor;   // linear rgb (sRGB VIEW, decoded by the texture unit) + alpha
     float2 metalRough;  // x = roughness (glTF G), y = metallic (glTF B)
     float3 normalTS;    // tangent-space normal, already scaled and re-centred
+    float  normalLen;   // the filtered map normal's length before scaling: < 1 where its mips averaged varied normals
     float  occlusion;
     float3 emissive;
 };
@@ -287,12 +288,14 @@ AverMaps averSampleMaps(float2 uv) {
     m.metalRough = float2(mr.g, mr.b);
     float3 n     = gNormalMap.Sample(gMaterialSampler, uv).xyz * 2.0 - 1.0;
     m.normalTS   = float3(n.xy * gNormalScale, n.z);
+    m.normalLen  = (gMaterialFlags & AVER_MAT_NORMAL_MAP) ? length(n) : 1.0;
     m.occlusion  = gOcclusionMap.Sample(gMaterialSampler, uv).r;
     m.emissive   = gEmissiveMap.Sample(gMaterialSampler, uv).rgb;
 #else
     m.baseColor  = float4(1, 1, 1, 1);
     m.metalRough = float2(1, 1);
     m.normalTS   = float3(0, 0, 1);
+    m.normalLen  = 1.0;
     m.occlusion  = 1.0;
     // White, not black: a.emissive = gEmissiveFactor * map.emissive multiplies, so the identity is 1
     // (black zeroed every emissiveFactor-only material, e.g. a lamp bulb with no emissive texture).
@@ -351,6 +354,7 @@ AverMaps averBlendLayers(AverMaps m, float2 uv, float3 geoN) {
         // Blended in tangent space then renormalised -- cheap, and correct enough for two layers
         // that share a tangent frame, which they do here because they share the mesh.
         m.normalTS = normalize(lerp(m.normalTS, float3(n1.xy * gNormalScale, n1.z), w));
+        m.normalLen = lerp(m.normalLen, length(n1), w);
     }
 #endif
     return m;
@@ -451,6 +455,7 @@ struct AverAuthored {
     float  metallic;    // gMetallicFactor * the map, before saturate()
     float  roughness;   // gRoughnessFactor * the map, before the 0.045 floor
     float3 normalTS;    // tangent space; (0, 0, 1) is no perturbation
+    float  normalLen;   // AverMaps::normalLen: the specular anti-aliasing's variance
     float3 emissive;    // gEmissiveFactor * the map
     float  occlusion;   // the material's OWN occlusion map, before gOcclusionStrength
     float  alphaCutoff; // read only under AVER_MAT_ALPHA_MASK
@@ -592,6 +597,7 @@ AverAuthored averAuthoredFrom(AverMaterialData m, AverMaps map) {
     a.metallic    = m.metallicFactor * map.metalRough.y;
     a.roughness   = m.roughnessFactor * map.metalRough.x;
     a.normalTS    = map.normalTS;
+    a.normalLen   = map.normalLen;
     a.emissive    = m.emissiveFactor * map.emissive;
     a.occlusion   = map.occlusion;
     a.alphaCutoff = m.alphaCutoff;
@@ -628,6 +634,14 @@ AverSurface averComposeSurface(AverVertex v, AverLight l, AverAuthored a, AverMa
     s.H = normalize(v.V + l.direction);
     s.metallic = saturate(d.metallic * a.metallic);
     s.rough = clamp(d.roughness * a.roughness, 0.045, 1.0);
+    // SPECULAR ANTI-ALIASING (Toksvig 2005): a mip-filtered normal shorter than 1 averaged normals
+    // that disagree inside this pixel; widening the GGX lobe by that variance turns sub-pixel glints
+    // (a wet road under a city of small lights) into the sheen they average to.
+    {
+        const float len = clamp(a.normalLen, 0.25, 1.0);
+        const float a2  = s.rough * s.rough * s.rough * s.rough;
+        s.rough = sqrt(sqrt(min(a2 + (1.0 - len) / len, 1.0)));
+    }
     s.alpha = d.alpha * a.opacity;
     s.model = d.model;
     s.emissive = d.emissive + a.emissive;
