@@ -218,9 +218,12 @@ clear most of the neural denoising and upscaling families (they need image or ke
 4. **NRD keeps sample count away from spatial filter size.** NVIDIA US 11,113,792 claim 15 covers a
    spatial filter sized from the temporal history count.
 
-Also open: AMD's pending US 2026/0094228 claims any trained network inside a render pipeline stage,
-which would concern NeuraFI and NeuRaC as well; and Arm's pending UK GB 2635953 claims denoising that
-preserves jitter before a TAA upsample (the shipped order), avoided by un-jittering before the denoiser.
+Status was checked live on 2026-10-05: US 10,116,916, US 11,113,792 and US 10,832,091 are in force with
+fees paid. Arm's US counterpart of GB 2635953 (appl. 18/497,608) was **granted 2026-09-29** unamended. It
+claims denoising that preserves the jitter vectors before a TAA or upsample using them. That is the
+shipped order, avoided by un-jittering before the denoiser. AMD's pending US 2026/0094228 (any trained
+network inside a render pipeline stage, which would also concern NeuraFI and NeuRaC) has every claim
+rejected as of 2026-08-12.
 **Counsel should review before either feature ships.** Nothing is vendored: the code is
 `Aver.Render.Neural` and the in-house filters, plus the MIT FidelityFX Denoiser (whose licence grants no
 third-party patent rights).
