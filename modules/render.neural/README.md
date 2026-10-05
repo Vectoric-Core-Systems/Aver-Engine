@@ -84,8 +84,10 @@ sound on its merits too.
 
 Per record: forward on the master weights (activations kept in a local array), loss gradient,
 backward. Per layer, the group reduces the quantised per-weight gradients in groupshared (a
-transposed 64x64 integer grid, 64 weights at a time) and issues **one `InterlockedAdd` per weight per
-group**, not per record. `CSAdam` then reads the accumulator, takes the mean over the live count,
+transposed 64x64 integer grid, 64 weights at a time, columns XOR-swizzled by the row so neither the row
+writes nor the column reads conflict on banks) and issues **one `InterlockedAdd` per weight per
+group**, not per record. Groupshared is at most 16,384 bytes (the grid, or a 64x64 weight matrix; biases
+are read from the weight buffer, not the tile), with a compile-time `#error` above that. `CSAdam` then reads the accumulator, takes the mean over the live count,
 clamps, adds L2, runs bias-corrected Adam, updates the EMA, and clears the accumulator.
 
 * **Fixed point, so deterministic.** D3D12 has no portable float atomic add. Each per-record,
@@ -153,8 +155,11 @@ standardisation affine, the weights, and a trailing CRC-32. `peekWeightFile` tel
 * fp32 arithmetic only; fp16 only as packed storage. No wave intrinsics, no float or int atomics in the
   conv path, `numthreads(64,1,1)`, every barrier in compile-time-constant control flow, out-of-range
   threads compute on zeros (never early-return).
-* Groupshared at most 16 KB per kernel (the Vulkan minimum); `validate` checks the conv weight block
-  (`convSharedBytes`).
+* Groupshared at most 16 KB per kernel (the Vulkan minimum; the RX 7800 XT reports 32 KB, logged at Vulkan
+  device creation); `validate` checks the conv weight block (`convSharedBytes`) and both shaders `#error`
+  above 16,384 bytes. Largest per kernel: MLP 16,384 (width 64); conv forward and backward data 4,608
+  (8 x 16 x 3 x 3 floats; the forward is floored there, see Performance), backward weights 8,784
+  (16 x 65 dz + 4 x 17 x 17 input patch, stride 2), eval 256. Each conv pipeline sizes its own block.
 * No transcendentals inside the network (ReLU or None only); ReLU is written `z > 0 ? z : 0` on GPU and CPU.
 * Tensors are `StructuredBuffer<float>`, NCHW, one buffer per tensor, explicit bounds checks.
 * Layer-streaming kernels, never fused (see Kernel structure above).
@@ -188,19 +193,20 @@ sizes and offsets in the b3 block; slots t0..t5, u0..u6):
 
 | Kernel | Threads | Does |
 |---|---|---|
-| `CSConvForward` | 8x8 outputs x 8 output channels per group | bias, then ci / ky / kx ascending; weight block (8 x min(cin, 16) x k*k) through groupshared per input chunk, input straight from global memory |
+| `CSConvForward` | 32x8 outputs (16x8 for 1x1) x 8 output channels per group; 4 (2) consecutive outputs per thread | bias, then ci / ky / kx ascending; weight block (8 x min(cin, 16) x k*k, laid out [ci][tap][co]) through groupshared per input chunk, input straight from global memory, one row segment in registers serving the thread's outputs |
 | `CSConvLossL2` | one per head element | `dY = (2 * pw * (p - t)) / lossNorm` |
 | `CSConvActBackward` | one per element | in place `dz = y > 0 ? dy : 0` (ReLU layers only) |
-| `CSConvBackwardData` | 8x8 inputs x 8 input channels per group | dX gather form, co / ky / kx ascending, invalid taps skipped |
-| `CSConvBackwardWeights` | one per (record, 8x8 output tile, weight) | row-major tile sum of `dz * x` (bias: `dz`) into partials `[p][w]`, `p = (n * tilesY + ty) * tilesX + tx` |
-| `CSConvReduceGrad` | one per weight | partials summed `p` ascending in fp32, quantised once, plain store into the accumulator |
+| `CSConvBackwardData` | 16x8 inputs x 8 input channels per group; 2 consecutive inputs per thread | dX gather form, co / ky / kx ascending, invalid taps skipped; one dz row segment per (co, ky) |
+| `CSConvBackwardWeights` | one group per (record, 8x8 output tile, 16 output x 4 input channels); one thread per (co, ci) pair | stages the layer's own dz tile and zero-padded input patch in groupshared, then row-major tile sums of `dz * x` for the pair's k*k weights (bias: `dz`, threads 0..15 of input block 0) into partials `[p][w]`, `p = (n * tilesY + ty) * tilesX + tx` |
+| `CSConvReduceGrad` | one per weight | partials summed `p` ascending in fp32 (loads issued 8 ahead), quantised once, plain store into the accumulator |
 | `CSConvEvalReduce` | one group per record | strided per-thread sums of `pw * (p - t)^2`, fixed 64 -> 1 tree, `/ lossNorm` |
 | `CSAdam`, `CSResetState` | one per weight | the common bodies, `liveCount = 1` |
 
 A training step is forward (every layer, master weights), loss, then per layer last to first: activation
 backward, weight partials, reduce, and dX for the layer below; then one Adam dispatch. Every dispatch is
-one layer (layer-streaming, as above); activations and gradients go through global memory, and each
-dispatch's resource transitions are the barrier to the next. No atomics: every accumulator slot has one
+one layer (layer-streaming, as above); activations and gradients go through global memory. Buffer states
+are tracked across a recording: a buffer is transitioned only when the next dispatch needs another state
+(a buffer written again as a UAV gets a UAV barrier), and everything returns to where it rests at the end. No atomics: every accumulator slot has one
 writer, so training is bit-deterministic per device. Each weight's gradient is clamped and quantised once
 after the fp32 sum, so the accumulator cannot overflow at any batch size (32 x 2^24 < 2^31).
 
@@ -208,20 +214,58 @@ after the fp32 sum, so the accumulator cannot overflow at any batch size (32 x 2
 
 `NeuralGpuParityTest` (tests/render.neural) runs the kernels on a device through
 `IDevice::runStandaloneCompute` and compares with the CPU twins: `NeuralGpuParityTest` (WARP),
-`hw` (the adapter), `vulkan` (also a ctest `.vulkan` row), `debug` (validation layer). MLP section:
-inference, one training step, rerun bit-identical. Conv section, on the NRD2 net (12 -> 16 -> 16 -> 32 ->
+`hw` (the adapter), `vulkan` (also a ctest `.vulkan` row), `debug` (validation layer), `bench` (timings
+only, below). MLP section: inference, one training step, rerun bit-identical, and the widest shape (64 ->
+64 -> 64 -> 16, the 16 KB groupshared case) against the CPU twin. Conv section, on the NRD2 net (12 -> 16 -> 16 -> 32 ->
 32 -> 12) at 2x12x41x57 with random non-zero weights: each layer's forward and the whole net (rel 1e-5 /
 abs 1e-6), `recordEvaluate` vs `evaluate`, master and EMA weights after 1 and 10 steps vs `trainBatch`
-(rel 1e-4, abs 2e-5), forward and a 10-step training rerun bit-identical, and a toy task learned on the GPU
-(held-out loss 1.55 -> 0.00026 in 150 steps, the CPU twin landing on the same value). Passing on D3D12
+(rel 1e-4, abs 2e-5; all 10 steps recorded in one submission), forward and a 10-step training rerun
+bit-identical, and a toy task learned on the GPU (held-out loss 1.55 -> 0.00026 in 150 steps, 30 per
+submission, the CPU twin landing on the same value). Passing on D3D12
 WARP, D3D12 and Vulkan on an RX 7800 XT, with the D3D12 debug layer and the Vulkan validation layer
-clean (2026-10-05). Measured on the RX 7800 XT: forward max abs error 8.3e-7 end to end; weights after 10
+clean (2026-10-05, again after the M4 performance pass). Measured on the RX 7800 XT: forward max abs error 8.3e-7 end to end; weights after 10
 steps within 1.1e-6 of the CPU. WARP matches the CPU forward exactly (no fused multiply-add).
 
-**Vulkan, dispatch count per submission.** The Vulkan backend allocates two constants descriptor sets per
-dispatch (pipeline bind and `setConstantBuffer`) from a pool budgeted at 512 dynamic-UBO descriptors and
-frees them after the submission retires. A conv training step is ~25 dispatches, so the test submits one
-step at a time; batching several steps into one frame on Vulkan needs that budget raised in the backend.
+**Vulkan, dispatch count per submission (resolved).** The Vulkan backend still takes two constants
+descriptor sets per dispatch (pipeline bind and `setConstantBuffer`), but they now come from per-frame-slot
+pool chains (`VulkanResourceFactory::allocConstantsSet`, 1,024 sets per pool, up to 64 pools per slot) that
+grow on demand and are reset whole when the slot retires (`beginFrame`'s wait, `runStandaloneCompute`'s
+idle), instead of a shared 512-descriptor budget freed set by set. The bench records 22 training steps
+(~550 dispatches, ~1,100 sets) in one submission under the validation layer, clean.
+
+### Performance (M4)
+
+`NeuralGpuParityTest bench` (with `hw`, or `vulkan hw`) times the NRD2 net: inference at 1x12x497x883
+(half of 1766x994) and one training step at 32x12x56x56. GPU time is the wall-clock slope between 2 and 22
+repeats recorded in ONE submission (medians of 7), which cancels submission and wait overhead; it also
+prints each layer's forward as a one-layer network. RX 7800 XT, release build, 2026-10-05:
+
+| | D3D12 inference | D3D12 train step | Vulkan inference | Vulkan train step |
+|---|---|---|---|---|
+| before M4 | 0.66 ms | 1.57 ms | 0.43 ms | 1.60 ms |
+| after M4 | 0.42-0.43 ms | 0.64-0.66 ms | 0.28 ms | 0.56 ms |
+
+Budget: inference <= 0.5 ms, train step <= 1 ms; met on both backends. Forward per layer after M4, D3D12 /
+Vulkan ms: L0 0.12-0.135 / 0.07, L1 0.10 / 0.07, L2 0.07 / 0.055, L3 0.095 / 0.08, L4 0.02 / 0.02. Every
+change keeps the spec's summation orders, so CPU parity and bit-identical reruns are unchanged:
+
+* Forward: four consecutive outputs per thread (two for 1x1), the input row segment in registers serving
+  all of them; weight block laid out [ci][tap][co] so a thread reads its 8 output channels contiguously; a
+  tile's channel blocks dispatched back to back (group x) so they share its input in cache.
+* Backward weights (the largest training cost, 0.83 -> ~0.2 ms): one thread per (co, ci) pair summing its 9
+  partials side by side from a groupshared copy of the layer's own dz tile and input patch, instead of one
+  thread per weight reading global memory twice per product.
+* Reduce: partial loads issued 8 ahead (0.35 -> ~0.06 ms; one serial fp32 chain per weight is the spec).
+* Backward data: two inputs per thread, contiguous weight reads, channel blocks along x.
+* Buffer states tracked across a recording (see above) instead of a round trip through Common per binding.
+* Forward groupshared floored at 4.5 KB: with the 12-channel input layer's natural 3.4 KB block, residency
+  rose and that layer ran 0.19-0.20 ms instead of 0.12 on D3D12 (Vulkan unaffected). Tried and dropped:
+  16 output channels per group, 2 or 8 outputs per thread, input chunks of 4 or 8 channels, `mad()`.
+
+D3D12 runs the same kernels ~1.5x slower than Vulkan on this card (DXIL vs SPIR-V through the driver; the
+D3D12 path compiles with the same DXC flags). Next levers if the budget tightens, network shape unchanged:
+fp16-packed input storage (halves the input layer's reads), the forward input-tile staging that awaits
+counsel, and fewer dispatches per step (fold the ReLU backward into the consumers of `dz`).
 
 ## The readback gap
 
@@ -246,8 +290,8 @@ they could bite.
 * **Many small networks per dispatch** (`instances > 1` in the design sketch), and a GPU-side loss
   readout.
 * **int8**: deliberately never (design doc section 2).
-* **Conv performance pass** (M4): `CSConvBackwardWeights` reads straight from global memory, one thread
-  per (tile, weight); no input-tile staging (that waits for a counsel note); no bench numbers yet.
+* **Conv forward input-tile staging**: waits for a counsel note (the forward reads its input straight from
+  global memory; Performance above).
 
 ## How the radiance cache and frame interpolation will use it
 

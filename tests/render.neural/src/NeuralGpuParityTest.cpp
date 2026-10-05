@@ -5,10 +5,12 @@
 // two must agree. Skips (77) when the backend is absent or cannot run IDevice::runStandaloneCompute.
 //
 // Arguments: `vulkan` selects the Vulkan backend (default D3D12); `hw` uses the adapter instead of WARP
-// (D3D12 only -- Vulkan has no WARP and always uses hardware).
+// (D3D12 only -- Vulkan has no WARP and always uses hardware); `debug` the validation layer; `bench`
+// times the NRD2 net (inference 1x12x497x883, train step 32x12x56x56) instead of the checks.
 //   a) inference outputs vs MlpReference::forward   rel 1e-5 / abs 1e-6
 //   b) one recordTrain step: master weights (and EMA) vs MlpReference::trainBatch   rel 1e-4
 //   c) the same inference run twice: bit-identical
+//   d) the widest MLP (64 -> 64 -> 64 -> 16): inference and one step vs the CPU twin (16 KB groupshared)
 // Then ConvNet against ConvNetReference on the NRD2-shaped net (12 -> 16 -> 16 -> 32 -> 32 -> 12, odd sizes):
 //   a) forward per layer and end to end   rel 1e-5 / abs 1e-6   (+ evaluate vs ConvNetReference::evaluate)
 //   b) 1 and 10 recordTrain steps vs trainBatch: master and EMA weights rel 1e-4
@@ -23,6 +25,7 @@
 #include "aver/rhi/RHIResources.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -357,6 +360,60 @@ void toyConvBatch(Lcg& rng, u32 n, u32 size, std::vector<f32>& in, std::vector<f
     }
 }
 
+// The widest MLP (64 inputs, 64 wide, 16 outputs, biases): the 16 KB groupshared ceiling holds and the
+// swizzled reduction grid gives the same step as the CPU twin.
+void runWideMlpParity(rhi::IDevice& dev) {
+    AVER_INFO("-- Mlp at the widest shape (64 -> 64 -> 64 -> 16)");
+    rhi::IResourceFactory& res = *dev.resources();
+    TensorPool pool;
+    pool.res = &res;
+    MlpDesc desc{};
+    desc.inputs = 64;
+    desc.outputs = 16;
+    desc.hiddenWidth = 64;
+    desc.hiddenLayers = 2;
+    desc.seed = 5;
+    const OptimiserDesc opt{};
+    constexpr u32 count = 128;
+    Mlp mlp;
+    if (!mlp.create(dev, desc, opt)) {
+        check(false, "the widest Mlp builds (groupshared within 16 KB)");
+        return;
+    }
+    Lcg rng;
+    rng.s = 4242u;
+    std::vector<f32> records(static_cast<usize>(count) * desc.inputs), targets(static_cast<usize>(count) * desc.outputs);
+    for (f32& v : records) v = rng.next();
+    for (f32& v : targets) v = 0.5f * rng.next();
+    const GpuTensor gRec = pool.make(records.size(), false, &records);
+    const GpuTensor gTgt = pool.make(targets.size(), false, &targets);
+    const GpuTensor gOut = pool.make(targets.size(), true);
+    const std::vector<f32> initial(mlp.cpuWeights(false).begin(), mlp.cpuWeights(false).end());
+    MlpReference ref(desc, opt);
+    ref.setWeights(initial);
+
+    bool inferred = false, trained = false, rb = false;
+    const bool ran = gRec.buf && gTgt.buf && gOut.buf && dev.runStandaloneCompute([&](rhi::IRenderContext& ctx) {
+        uploadTensor(ctx, gRec);
+        uploadTensor(ctx, gTgt);
+        inferred = mlp.recordInfer(ctx, gRec.buf, gOut.buf, CpuCount{count}, false);
+        copyToReadback(ctx, gOut);
+        trained = mlp.recordTrain(ctx, gRec.buf, gTgt.buf, CpuCount{count});
+        rb = mlp.recordReadback(ctx);
+    });
+    check(ran && inferred && trained && rb && mlp.collectWeights(), "the widest Mlp: inference, one step, readback ran");
+
+    std::vector<f32> cpu(targets.size());
+    for (u32 r = 0; r < count; ++r)
+        ref.forward(std::span<const f32>(&records[static_cast<usize>(r) * desc.inputs], desc.inputs),
+                    std::span<f32>(&cpu[static_cast<usize>(r) * desc.outputs], desc.outputs), false);
+    expectClose("the widest Mlp: inference matches MlpReference::forward (rel 1e-5, abs 1e-6)", readTensor(res, gOut), cpu,
+                1e-5f, 1e-6f);
+    ref.trainBatch(records, targets, count);
+    expectClose("the widest Mlp: master weights after one step match trainBatch (rel 1e-4)", mlp.cpuWeights(false),
+                ref.weights(), 1e-4f, 2e-5f);
+}
+
 void runConvParity(rhi::IDevice& dev) {
     AVER_INFO("-- ConvNet (NRD2 shape) vs ConvNetReference");
     rhi::IResourceFactory& res = *dev.resources();
@@ -480,16 +537,14 @@ void runConvParity(rhi::IDevice& dev) {
               "recordEvaluate's per-record losses sum to ConvNetReference::evaluate (rel 1e-4)");
     }
 
-    // One step per submission: the Vulkan backend allocates constant descriptors per dispatch (README).
+    // Every step in ONE submission (~25 dispatches each; on Vulkan that is ~50 constants sets per step).
     const auto trainSteps = [&](u32 steps, std::vector<f32>& master, std::vector<f32>& ema) {
-        bool ok = true;
-        for (u32 s = 0; s < steps && ok; ++s) {
-            bool recorded = false, rb = true;
-            ok = dev.runStandaloneCompute([&](rhi::IRenderContext& ctx) {
-                recorded = train.recordTrain(ctx, gIn.buf, gTarget.buf, gPosW.buf, shape, lossNorm);
-                if (s + 1 == steps) rb = train.recordReadback(ctx);
-            }) && recorded && rb;
-        }
+        bool recorded = true, rb = false;
+        bool ok = dev.runStandaloneCompute([&](rhi::IRenderContext& ctx) {
+            for (u32 s = 0; s < steps; ++s)
+                recorded = train.recordTrain(ctx, gIn.buf, gTarget.buf, gPosW.buf, shape, lossNorm) && recorded;
+            rb = train.recordReadback(ctx);
+        }) && recorded && rb;
         ok = ok && train.collectWeights();
         const std::span<const f32> m = train.cpuWeights(false), e = train.cpuWeights(true);
         master.assign(m.begin(), m.end());
@@ -580,11 +635,14 @@ void runConvParity(rhi::IDevice& dev) {
         };
         const f32 before = evalLoss(false);
         bool ok = true;
-        for (u32 s = 0; s < steps && ok; ++s) {
-            const u32 k = s % batches;
-            bool recorded = false;
+        constexpr u32 perSubmit = 30;
+        for (u32 s0 = 0; s0 < steps && ok; s0 += perSubmit) {
+            bool recorded = true;
             ok = dev.runStandaloneCompute([&](rhi::IRenderContext& ctx) {
-                recorded = net.recordTrain(ctx, bIn[k].buf, bTgt[k].buf, bPw[k].buf, bShape, bNorm);
+                for (u32 s = s0; s < std::min(steps, s0 + perSubmit); ++s) {
+                    const u32 k = s % batches;
+                    recorded = net.recordTrain(ctx, bIn[k].buf, bTgt[k].buf, bPw[k].buf, bShape, bNorm) && recorded;
+                }
             }) && recorded;
         }
         const f32 after = evalLoss(false), afterEma = evalLoss(true);
@@ -605,16 +663,122 @@ void runConvParity(rhi::IDevice& dev) {
     }
 }
 
+// ================================================================ bench
+
+// Milliseconds from the end of recording to the submission's completion (submit + GPU + wait).
+f64 submissionMs(rhi::IDevice& dev, const std::function<void(rhi::IRenderContext&)>& rec, bool& ok) {
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point recorded{};
+    ok = dev.runStandaloneCompute([&](rhi::IRenderContext& ctx) {
+        rec(ctx);
+        recorded = Clock::now();
+    }) && ok;
+    return std::chrono::duration<f64, std::milli>(Clock::now() - recorded).count();
+}
+
+f64 median(std::vector<f64> v) {
+    std::sort(v.begin(), v.end());
+    return v.empty() ? 0.0 : v[v.size() / 2];
+}
+
+// GPU ms per repeat: K repeats in ONE submission at two K; the slope cancels submission and wait overhead.
+f64 benchMs(rhi::IDevice& dev, const std::function<bool(rhi::IRenderContext&)>& once, bool& ok) {
+    constexpr u32 kLo = 2, kHi = 22, kTrials = 7;
+    const auto run = [&](u32 k) {
+        return submissionMs(dev, [&](rhi::IRenderContext& ctx) { for (u32 i = 0; i < k; ++i) ok = once(ctx) && ok; }, ok);
+    };
+    for (u32 i = 0; i < 3; ++i) run(kHi);   // warm up: clocks, caches, pipeline first use
+    std::vector<f64> lo, hi;
+    for (u32 t = 0; t < kTrials; ++t) {
+        lo.push_back(run(kLo));
+        hi.push_back(run(kHi));
+    }
+    return (median(hi) - median(lo)) / static_cast<f64>(kHi - kLo);
+}
+
+// NRD2 net: inference at 1x12x497x883 (half of 1766x994), one training step at 32x12x56x56.
+void runBench(rhi::IDevice& dev) {
+    AVER_INFO("-- bench: NRD2 ConvNet");
+    rhi::IResourceFactory& res = *dev.resources();
+    TensorPool pool;
+    pool.res = &res;
+    const ConvNetDesc desc = nrd2Desc();
+    const OptimiserDesc opt = convDefaults();
+    Lcg rng;
+    rng.s = 99u;
+    const std::vector<f32> weights = randomConvWeights(desc, rng);
+
+    const TensorShape inferShape{1, 12, 497, 883};
+    const TensorShape trainShape{32, 12, 56, 56};
+    ConvNetReference ref(desc, opt);
+    const TensorShape inferHead = ref.outputShape(inferShape), trainHead = ref.outputShape(trainShape);
+
+    std::vector<f32> inferIn(inferShape.count()), trainIn(trainShape.count()), trainTgt(trainHead.count());
+    std::vector<f32> trainPw(static_cast<usize>(trainHead.n) * trainHead.planeCount(), 1.0f);
+    for (f32& v : inferIn) v = rng.next();
+    for (f32& v : trainIn) v = rng.next();
+    for (f32& v : trainTgt) v = 0.1f * rng.next();
+    const f32 lossNorm = static_cast<f32>(trainHead.n * trainHead.planeCount());
+
+    const GpuTensor gIn = pool.make(inferIn.size(), false, &inferIn);
+    const GpuTensor gOut = pool.make(inferHead.count(), true);
+    const GpuTensor tIn = pool.make(trainIn.size(), false, &trainIn);
+    const GpuTensor tTgt = pool.make(trainTgt.size(), false, &trainTgt);
+    const GpuTensor tPw = pool.make(trainPw.size(), false, &trainPw);
+    ConvNet infer, train;
+    const TensorShape is[1] = {inferShape}, ts[1] = {trainShape};
+    bool ok = gIn.buf && gOut.buf && tIn.buf && tTgt.buf && tPw.buf &&
+              infer.create(dev, desc, opt, ConvMode::Infer) && infer.reserve(is) && infer.uploadWeights(weights) &&
+              train.create(dev, desc, opt, ConvMode::Train) && train.reserve(ts) && train.uploadWeights(weights) &&
+              dev.runStandaloneCompute([&](rhi::IRenderContext& ctx) {
+                  for (const GpuTensor* t : {&gIn, &tIn, &tTgt, &tPw}) uploadTensor(ctx, *t);
+              });
+    check(ok, "bench networks and tensors set up");
+    if (!ok) return;
+
+    const f64 inferMs = benchMs(dev, [&](rhi::IRenderContext& ctx) {
+        return infer.recordInfer(ctx, gIn.buf, gOut.buf, inferShape);
+    }, ok);
+    const f64 trainMs = benchMs(dev, [&](rhi::IRenderContext& ctx) {
+        return train.recordTrain(ctx, tIn.buf, tTgt.buf, tPw.buf, trainShape, lossNorm);
+    }, ok);
+    // Per layer: each forward as a one-layer network at its inference shape (contents irrelevant to timing).
+    std::string perLayer;
+    const ConvLayout L = ConvLayout::make(desc);
+    TensorShape cur = inferShape;
+    for (u32 l = 0; l < L.layers; ++l) {
+        ConvNetDesc one;
+        one.inChannels = desc.layers[l].cin;
+        one.layers = {desc.layers[l]};
+        const TensorShape os = L.outDims(l, cur);
+        const GpuTensor ti = pool.make(cur.count(), false);
+        const GpuTensor to = pool.make(os.count(), true);
+        const TensorShape sh[1] = {cur};
+        ConvNet net;
+        ok = ti.buf && to.buf && net.create(dev, one, opt, ConvMode::Infer) && net.reserve(sh) && ok;
+        const f64 ms = benchMs(dev, [&](rhi::IRenderContext& ctx) { return net.recordInfer(ctx, ti.buf, to.buf, cur); }, ok);
+        char part[48];
+        std::snprintf(part, sizeof part, "%sL%u %.3f", l ? ", " : "", l, ms);
+        perLayer += part;
+        cur = os;
+    }
+    check(ok, "bench submissions ran");
+    AVER_INFO("  BENCH {} ({}): inference 1x12x497x883 {:.3f} ms, train step 32x12x56x56 {:.3f} ms",
+              dev.adapterName(), rhi::backendName(dev.backend()), inferMs, trainMs);
+    AVER_INFO("  forward per layer (ms, one-layer networks): {}", perLayer);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     AVER_INFO("=== NeuralGpuParityTest ===");
 
-    bool wantVulkan = false, hardware = false, debug = false;
+    bool wantVulkan = false, hardware = false, debug = false, bench = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "vulkan") == 0) wantVulkan = true;
         if (std::strcmp(argv[i], "hw") == 0) hardware = true;
         if (std::strcmp(argv[i], "debug") == 0) debug = true;   // validation / debug layer
+        if (std::strcmp(argv[i], "bench") == 0) bench = true;   // timings only, no parity checks
     }
 
     rhi::DeviceDesc desc;
@@ -643,8 +807,13 @@ int main(int argc, char** argv) {
         return kSkip;
     }
 
-    runParity(*dev);
-    runConvParity(*dev);
+    if (bench) {
+        runBench(*dev);
+    } else {
+        runParity(*dev);
+        runWideMlpParity(*dev);
+        runConvParity(*dev);
+    }
     rhi::destroyDevice(dev);
 
     if (g_failures != 0) {

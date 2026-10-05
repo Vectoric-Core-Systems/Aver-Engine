@@ -18,6 +18,13 @@ constexpr u32 kSrvCount = 6;
 constexpr u32 kUavCount = 7;
 constexpr u32 kGroup = 64;
 constexpr u32 kMaxGroups = 65535;
+// Tiling, mirrored by aver_neural_conv.hlsl. CSConvForward: outputs per thread along x (a group covers
+// 8 * fwdPx(k) x 8 outputs x kConvCoBlock channels). CSConvBackwardData: inputs per thread along x (a multiple
+// of every stride). CSConvBackwardWeights: a group covers kBwCoBlock output x kBwCiBlock input channels.
+constexpr u32 fwdPx(u32 kernel) { return kernel == 1 ? 2u : 4u; }
+constexpr u32 kBwdPx = 2;
+constexpr u32 kBwCoBlock = 16;
+constexpr u32 kBwCiBlock = 4;
 
 using rhi::ResourceState;
 constexpr ResourceState kRest  = ResourceState::Common;
@@ -74,7 +81,10 @@ rhi::PipelineHandle ConvNet::compile(const char* entry, u32 layer) {
         "AVER_CONV_CIN=" + std::to_string(L.cin) + ";AVER_CONV_COUT=" + std::to_string(L.cout) +
         ";AVER_CONV_K=" + std::to_string(L.kernel) + ";AVER_CONV_STRIDE=" + std::to_string(L.stride) +
         ";AVER_CONV_ACT=" + std::to_string(static_cast<u32>(L.act)) + ";AVER_CONV_BIAS=" + std::to_string(L.bias ? 1 : 0) +
-        ";AVER_CONV_CO_BLOCK=" + std::to_string(kConvCoBlock) + ";AVER_CONV_CI_CHUNK=" + std::to_string(kConvCiChunk);
+        ";AVER_CONV_CO_BLOCK=" + std::to_string(kConvCoBlock) + ";AVER_CONV_CI_CHUNK=" + std::to_string(kConvCiChunk) +
+        ";AVER_CONV_PX=" + std::to_string(fwdPx(L.kernel)) + ";AVER_CONV_BPX=" + std::to_string(kBwdPx) +
+        ";AVER_CONV_BW_COB=" + std::to_string(kBwCoBlock) + ";AVER_CONV_BW_CIC=" + std::to_string(kBwCiBlock) +
+        ";AVER_CONV_ENTRY_" + entry + "=1";
 
     rhi::ShaderDesc sd{};
     sd.source = source.c_str();
@@ -232,8 +242,9 @@ bool ConvNet::reserve(std::span<const TensorShape> shapes) {
         for (u32 l = 0; l < layers; ++l) {
             const TensorShape o = layout_.outDims(l, cur);
             const u32 tiles = divUp(o.w, kConvTile) * divUp(o.h, kConvTile);
-            const bool dims = s.n * divUp(o.c, kConvCoBlock) <= kMaxGroups && s.n * divUp(cur.c, kConvCoBlock) <= kMaxGroups &&
-                              tiles <= kMaxGroups && divUp(cur.w, kConvTile) <= kMaxGroups;
+            const bool dims = s.n <= kMaxGroups && tiles <= kMaxGroups &&
+                              divUp(o.w, kConvTile) * divUp(o.c, kConvCoBlock) <= kMaxGroups &&
+                              divUp(cur.w, kConvTile) * divUp(cur.c, kConvCoBlock) <= kMaxGroups;
             if (!dims) {
                 AVER_WARN("[Neural] ConvNet::reserve: shape {}x{}x{}x{} exceeds one dispatch", s.n, s.c, s.h, s.w);
                 return false;
@@ -353,26 +364,52 @@ void ConvNet::fillCommon(Constants& cb) const {
     cb.gradClamp = opt_.gradClamp;
 }
 
-namespace {
-
-// One dispatch: SRVs to the read state, UAVs to UnorderedAccess, then back to where they rest. The
-// transitions are also the barriers between consecutive layer dispatches.
-struct Dispatcher {
+// Records dispatches with buffer states tracked across them: a buffer moves only when the next dispatch needs
+// another state, a buffer written again as a UAV gets a UAV barrier, and finish() (or the destructor) returns
+// every touched buffer to where it rests. Between dependent dispatches that is one barrier per buffer, not a
+// round trip through Common for every binding.
+struct ConvNet::Recorder {
     rhi::IRenderContext& ctx;
     Callers callers;
+    std::vector<Rest> cur;   // touched buffers and their current state
+
+    Recorder(rhi::IRenderContext& c, const Callers& rest) : ctx(c), callers(rest) {}
+    ~Recorder() { finish(); }
+    Recorder(const Recorder&) = delete;
+    Recorder& operator=(const Recorder&) = delete;
+
+    void need(rhi::BufferHandle b, ResourceState s) {
+        Rest* r = nullptr;
+        for (Rest& c : cur) if (c.b == b) { r = &c; break; }
+        if (!r) { cur.push_back({b, restOf(b, callers)}); r = &cur.back(); }
+        if (r->s != s) {
+            ctx.bufferBarrier(b, r->s, s);
+            r->s = s;
+        } else if (s == kWrite) {
+            ctx.uavBarrierBuffer(b);
+        }
+    }
 
     template <class B, class C>
     void operator()(rhi::PipelineHandle p, rhi::BindingSetHandle set, const B& b, const C& cb, u32 gx, u32 gy, u32 gz) {
-        for (u32 i = 0; i < kSrvCount; ++i) if (b.srv[i]) moveBuffers(ctx, {b.srv[i]}, restOf(b.srv[i], callers), kRead);
-        for (u32 i = 0; i < kUavCount; ++i) if (b.uav[i]) moveBuffers(ctx, {b.uav[i]}, restOf(b.uav[i], callers), kWrite);
+        for (u32 i = 0; i < kSrvCount; ++i) if (b.srv[i]) need(b.srv[i], kRead);
+        for (u32 i = 0; i < kUavCount; ++i) if (b.uav[i]) need(b.uav[i], kWrite);
         ctx.setPipeline(p);
         ctx.setBindingSet(set);
         ctx.setConstantBuffer(kConstantSlot, &cb, sizeof(cb));
         ctx.dispatch(gx, gy, gz);
-        for (u32 i = 0; i < kUavCount; ++i) if (b.uav[i]) moveBuffers(ctx, {b.uav[i]}, kWrite, restOf(b.uav[i], callers));
-        for (u32 i = 0; i < kSrvCount; ++i) if (b.srv[i]) moveBuffers(ctx, {b.srv[i]}, kRead, restOf(b.srv[i], callers));
+    }
+
+    void finish() {
+        for (const Rest& r : cur) {
+            const ResourceState rest = restOf(r.b, callers);
+            if (r.s != rest) ctx.bufferBarrier(r.b, r.s, rest);
+        }
+        cur.clear();
     }
 };
+
+namespace {
 
 // 1D grid of 64-thread groups: (gx, gy) with gx <= 65535.
 void grid1d(u32 threads, u32 groupSize, u32& gx, u32& gy) {
@@ -418,15 +455,15 @@ void ConvNet::flushPending(rhi::IRenderContext& ctx) {
         if (!set) return;
         Constants cb{};
         fillCommon(cb);
-        Dispatcher run{ctx, Callers{}};
+        Recorder run(ctx, Callers{});
         run(reset_, set, b, cb, divUp(layout_.total, kGroup), 1, 1);
         pendingReset_ = false;
         step_ = 0;
     }
 }
 
-void ConvNet::forwardLayers(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::BufferHandle out,
-                            const TensorShape& shape, bool useEma, ResourceState inRest, ResourceState outRest) {
+void ConvNet::forwardLayers(Recorder& run, rhi::BufferHandle in, rhi::BufferHandle out, const TensorShape& shape,
+                            bool useEma) {
     const u32 layers = layout_.layers;
     TensorShape cur = shape;
     for (u32 l = 0; l < layers; ++l) {
@@ -449,9 +486,8 @@ void ConvNet::forwardLayers(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi:
         cb.wOffset = layout_.wOffset[l];
         cb.bOffset = layout_.bOffset[l];
         cb.layerSize = layout_.layerSize[l];
-        Dispatcher run{ctx, Callers{{{in, inRest}, {out, outRest}}}};
-        run(pipes_[l].forward, set, b, cb, divUp(o.w, kConvTile), divUp(o.h, kConvTile),
-            cur.n * divUp(o.c, kConvCoBlock));
+        run(pipes_[l].forward, set, b, cb, divUp(o.w, kConvTile * fwdPx(desc_.layers[l].kernel)) * divUp(o.c, kConvCoBlock),
+            divUp(o.h, kConvTile), cur.n);
         cur = o;
     }
 }
@@ -468,7 +504,8 @@ bool ConvNet::recordInfer(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::B
     }
     rhi::ScopedGpuStat gpuStat(ctx, "Neural.ConvInfer");
     flushPending(ctx);
-    forwardLayers(ctx, in, out, shape, useEma, states.input, states.output);
+    Recorder run(ctx, Callers{{{in, states.input}, {out, states.output}}});
+    forwardLayers(run, in, out, shape, useEma);
     return true;
 }
 
@@ -491,8 +528,8 @@ bool ConvNet::recordTrain(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::B
     for (u32 l = 0; l < layers; ++l) shapes[l + 1] = layout_.outDims(l, shapes[l]);
     const TensorShape& head = shapes[layers];
 
-    forwardLayers(ctx, in, 0, shape, false, states.input, states.output);
-    Dispatcher run{ctx, Callers{{{in, states.input}, {target, states.input}, {posWeight, states.input}}}};
+    Recorder run(ctx, Callers{{{in, states.input}, {target, states.input}, {posWeight, states.input}}});
+    forwardLayers(run, in, 0, shape, false);
 
     // dL/d(head output).
     {
@@ -550,7 +587,8 @@ bool ConvNet::recordTrain(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::B
             b.uav[6] = partials_;  b.uavCount[6] = static_cast<u32>(partialCap_);
             const rhi::BindingSetHandle set = bindingSet(b);
             if (!set) return false;
-            run(pipes_[l].backwardWeights, set, b, base, divUp(base.layerSize, kGroup), base.tilesX * base.tilesY, os.n);
+            const u32 blocks = divUp(L.cout, kBwCoBlock) * divUp(L.cin, kBwCiBlock);
+            run(pipes_[l].backwardWeights, set, b, base, blocks, base.tilesX * base.tilesY, os.n);
         }
         {
             Binds b;
@@ -571,8 +609,8 @@ bool ConvNet::recordTrain(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::B
             b.uav[0] = grads_[l - 1]; b.uavCount[0] = static_cast<u32>(actCap_[l - 1]);
             const rhi::BindingSetHandle set = bindingSet(b);
             if (!set) return false;
-            run(pipes_[l].backwardData, set, b, base, divUp(is.w, kConvTile), divUp(is.h, kConvTile),
-                is.n * divUp(is.c, kConvCoBlock));
+            run(pipes_[l].backwardData, set, b, base, divUp(is.w, kConvTile * kBwdPx) * divUp(is.c, kConvCoBlock),
+                divUp(is.h, kConvTile), is.n);
         }
     }
 
@@ -609,7 +647,9 @@ bool ConvNet::recordEvaluate(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi
     }
     rhi::ScopedGpuStat gpuStat(ctx, "Neural.ConvEvaluate");
     flushPending(ctx);
-    forwardLayers(ctx, in, 0, shape, useEma, states.input, states.output);
+    Recorder run(ctx, Callers{{{in, states.input}, {target, states.input}, {posWeight, states.input},
+                               {lossPerRecord, states.output}}});
+    forwardLayers(run, in, 0, shape, useEma);
 
     const u32 layers = layout_.layers;
     const TensorShape head = outputShape(shape);
@@ -627,8 +667,6 @@ bool ConvNet::recordEvaluate(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi
     u32 gx = 0, gy = 0;
     grid1d(head.n, 1, gx, gy);   // one group per record
     cb.groupsX = gx;
-    Dispatcher run{ctx, Callers{{{in, states.input}, {target, states.input}, {posWeight, states.input},
-                                 {lossPerRecord, states.output}}}};
     run(eval_, set, b, cb, gx, gy, 1);
     return true;
 }

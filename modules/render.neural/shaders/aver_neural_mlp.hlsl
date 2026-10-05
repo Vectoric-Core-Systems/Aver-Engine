@@ -60,17 +60,23 @@
 #define NN_DELTA_MAX NN_MAX2(AVER_NN_WIDTH, AVER_NN_OUT)
 // One record's activations: input, then each layer's output.
 #define NN_ACT_TOTAL (AVER_NN_IN + AVER_NN_LAYERS * AVER_NN_WIDTH + AVER_NN_OUT)
-// Floats in the biggest layer slice (W + bias): what the weight tile must hold.
+// Floats in the biggest layer's weight matrix: what the weight tile must hold. Biases are read from the
+// weight buffer directly (one value per output, the same for every thread).
 #define NN_BIAS_N(n) (AVER_NN_BIAS ? (n) : 0)
-#define NN_TILE_FIRST (AVER_NN_IN * AVER_NN_WIDTH + NN_BIAS_N(AVER_NN_WIDTH))
-#define NN_TILE_MID   (AVER_NN_WIDTH * AVER_NN_WIDTH + NN_BIAS_N(AVER_NN_WIDTH))
-#define NN_TILE_LAST  (AVER_NN_WIDTH * AVER_NN_OUT + NN_BIAS_N(AVER_NN_OUT))
-// Gradient reduction: 64 rows (one per weight chunk), 64 per-record values, padded to 65 for bank-conflict free transpose.
-#define NN_REDUCE_N (AVER_NN_GROUP * (AVER_NN_GROUP + 1))
+#define NN_TILE_FIRST (AVER_NN_IN * AVER_NN_WIDTH)
+#define NN_TILE_MID   (AVER_NN_WIDTH * AVER_NN_WIDTH)
+#define NN_TILE_LAST  (AVER_NN_WIDTH * AVER_NN_OUT)
+// Gradient reduction: 64 rows (one per weight of a chunk) x 64 per-record values, columns XOR-swizzled by
+// the row (no padding) so both the row writes and the transposed column reads are bank-conflict free.
+#define NN_REDUCE_N (AVER_NN_GROUP * AVER_NN_GROUP)
 #define NN_SCRATCH_N NN_MAX2(NN_MAX2(NN_TILE_FIRST, NN_TILE_MID), NN_MAX2(NN_TILE_LAST, NN_REDUCE_N))
 
-// ONE groupshared array, aliased between float tile (forward/backward) and int grid (gradient reduction).
-// Aliasing keeps group at ~16.6 KB, under 32 KB limit; as two arrays would be ~33 KB. Stored as uint, reinterpreted with asfloat/asint.
+#if NN_SCRATCH_N * 4 > 16384
+#error "aver_neural_mlp.hlsl: groupshared block exceeds 16 KB (the Vulkan minimum)"
+#endif
+
+// ONE groupshared array (16 KB at most), aliased between the float weight tile (forward/backward) and the
+// int grid (gradient reduction). Stored as uint, reinterpreted with asfloat/asint.
 groupshared uint gScratch[NN_SCRATCH_N];
 
 // Bindings: every pipeline shares one layout; unused slots are null.
@@ -104,19 +110,19 @@ float lossGrad(float p, float y) {
 
 float fetchWeight(uint idx, uint useEma) { return useEma != 0 ? gEma[idx] : gWeights[idx]; }
 
-// ---- weight tile: cooperative load of one layer's weights into groupshared ----
+// ---- weight tile: cooperative load of one layer's weight matrix (not its biases) into groupshared ----
 // Leading barrier protects the previous layer's readers; trailing one publishes this load. Both are
 // reached by all threads (active record or not).
 void streamLayerTile(uint layer, uint tid, uint useEma) {
     const uint base = layerBase(layer);
-    const uint size = layerSize(layer);
+    const uint size = layerOut(layer) * layerIn(layer);
     GroupMemoryBarrierWithGroupSync();
     for (uint k = tid; k < size; k += AVER_NN_GROUP) gScratch[k] = asuint(fetchWeight(base + k, useEma));
     GroupMemoryBarrierWithGroupSync();
 }
 
 // Forward pass, layer by layer. `a` holds input on entry, post-activation outputs on return. z = bias, then += w * a.
-// Tile layout is flat: W[o * in + i], then output biases (twin of forwardImpl).
+// Tile layout is flat: W[o * in + i]; the biases follow it in the weight buffer (twin of forwardImpl).
 void forwardRecord(uint tid, uint useEma, inout float a[NN_ACT_TOTAL]) {
     [loop] for (uint l = 0; l < NN_LAYER_COUNT; ++l) {
         streamLayerTile(l, tid, useEma);
@@ -128,7 +134,7 @@ void forwardRecord(uint tid, uint useEma, inout float a[NN_ACT_TOTAL]) {
         [loop] for (uint o = 0; o < nout; ++o) {
             float z = 0.0;
 #if AVER_NN_BIAS
-            z = asfloat(gScratch[nout * nin + o]);
+            z = fetchWeight(layerBase(l) + nout * nin + o, useEma);
 #endif
             [loop] for (uint i = 0; i < nin; ++i) z += asfloat(gScratch[o * nin + i]) * a[inOff + i];
             a[outOff + o] = activate(act, z);
@@ -193,11 +199,11 @@ void reduceLayerGradient(uint l, uint tid, bool active, float delta[NN_DELTA_MAX
                 }
                 q = quantise(g);
             }
-            gScratch[k * (AVER_NN_GROUP + 1) + tid] = asuint(q);
+            gScratch[k * AVER_NN_GROUP + (tid ^ k)] = asuint(q);   // row k, column tid (swizzled)
         }
         GroupMemoryBarrierWithGroupSync();
         int s = 0;
-        [loop] for (uint t = 0; t < AVER_NN_GROUP; ++t) s += asint(gScratch[tid * (AVER_NN_GROUP + 1) + t]);
+        [loop] for (uint t = 0; t < AVER_NN_GROUP; ++t) s += asint(gScratch[tid * AVER_NN_GROUP + (t ^ tid)]);
         const uint w = chunk + tid;
         if (w < size && s != 0) InterlockedAdd(gGrad[base + w], s);
         GroupMemoryBarrierWithGroupSync();   // grid rewritten by next chunk

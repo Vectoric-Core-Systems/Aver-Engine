@@ -102,13 +102,14 @@ private:
         rhi::BindingSetHandle set = 0;
     };
     struct Constants;
+    struct Recorder;   // ConvNet.cpp: dispatches with tracked buffer states
 
     rhi::PipelineHandle compile(const char* entry, u32 layer);
     rhi::BindingSetHandle bindingSet(const Binds& b);
     void flushPending(rhi::IRenderContext& ctx);
     bool fits(const TensorShape& shape, bool training) const;
-    void forwardLayers(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::BufferHandle out,
-                       const TensorShape& shape, bool useEma, rhi::ResourceState inRest, rhi::ResourceState outRest);
+    void forwardLayers(Recorder& run, rhi::BufferHandle in, rhi::BufferHandle out, const TensorShape& shape,
+                       bool useEma);
     void fillCommon(Constants& cb) const;
 
     rhi::IDevice*          dev_ = nullptr;
