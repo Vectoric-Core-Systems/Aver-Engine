@@ -1102,6 +1102,7 @@ public:
     void resetGpuTiming() override;
     void beginFrame() override;
     void endFrame() override;
+    bool runStandaloneCompute(const std::function<void(IRenderContext&)>& record) override;
     void present();
     void initGpuTiming();
     u32  gpuStamp();
@@ -1277,6 +1278,9 @@ private:
     ComPtr<ID3D12CommandAllocator> allocatorsGen_[kFrameCount];
     bool submitGeneratedImage();
     ComPtr<ID3D12GraphicsCommandList> cmdList_;
+    // runStandaloneCompute's own list and allocator, made on first use. Idle outside that call.
+    ComPtr<ID3D12CommandAllocator> standaloneAlloc_;
+    ComPtr<ID3D12GraphicsCommandList> standaloneList_;
     ComPtr<ID3D12Fence> fence_;
     HANDLE fenceEvent_ = nullptr;
     // Wait-before-reuse frame sync.
@@ -2023,6 +2027,9 @@ public:
     void pushMarker(const char* label) override;
     void popMarker() override;
 
+    // Restarts the constant ring from its start; only with the GPU idle (runStandaloneCompute).
+    void resetRing() { ringEpoch_ = ~0ull; }
+
 private:
     // Suballocate `bytes` of transient upload memory for the frame being recorded.
     D3D12_GPU_VIRTUAL_ADDRESS ringAlloc(const void* data, u32 bytes);
@@ -2263,6 +2270,64 @@ D3D12Device::~D3D12Device() {
 
 IResourceFactory* D3D12Device::resources() { return rhiFactory_; }
 IRenderContext* D3D12Device::renderContext() { return rhiContext_; }
+
+// Runs `record` against the shared render context with cmdList_ pointed at a private list, so the
+// context's own binding, barrier and constant paths work with no swapchain. The GPU is idle on entry
+// and exit, which is what makes the frame ring and descriptor slots reusable here.
+bool D3D12Device::runStandaloneCompute(const std::function<void(IRenderContext&)>& record) {
+    if (!record || !rhiContext_ || !device_ || !queue_ || deviceLost_ || recording_) return false;
+
+    if (!standaloneList_) {
+        if (!hrOk(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&standaloneAlloc_)),
+                  "CreateCommandAllocator (standalone)")) return false;
+        if (!hrOk(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, standaloneAlloc_.Get(), nullptr,
+                  IID_PPV_ARGS(&standaloneList_)), "CreateCommandList (standalone)")) {
+            standaloneAlloc_.Reset();
+            return false;
+        }
+        setDebugName(standaloneList_.Get(), "Aver standalone compute list");
+        standaloneList_->Close();
+    }
+
+    waitForGpu();
+    if (deviceLost_) return false;
+    if (!hrOk(standaloneAlloc_->Reset(), "standalone allocator Reset") ||
+        !hrOk(standaloneList_->Reset(standaloneAlloc_.Get(), nullptr), "standalone list Reset")) return false;
+
+    // pushMarker/popMarker still touch the span list; timestamps stay off and the spans are dropped.
+    struct Scope {
+        D3D12Device& d;
+        bool ts;
+        usize spans;
+        explicit Scope(D3D12Device& dev) : d(dev), ts(dev.tsEnabled_), spans(dev.tsSlice_[dev.frameIndex_].size()) {
+            d.tsEnabled_ = false;
+            std::swap(d.cmdList_, d.standaloneList_);
+            d.boundRootSig_ = nullptr; d.boundPso_ = nullptr; d.boundHeap_ = nullptr;
+            d.fovValid_ = false; d.dbValid_ = false;
+        }
+        ~Scope() {
+            std::swap(d.cmdList_, d.standaloneList_);
+            d.tsEnabled_ = ts;
+            std::vector<GpuSpan>& s = d.tsSlice_[d.frameIndex_];
+            if (s.size() > spans) s.erase(s.begin() + static_cast<isize>(spans), s.end());
+            d.tsOpen_.clear();
+            d.boundRootSig_ = nullptr; d.boundPso_ = nullptr; d.boundHeap_ = nullptr;
+            d.fovValid_ = false; d.dbValid_ = false;
+        }
+    };
+    {
+        Scope scope(*this);
+        rhiContext_->resetRing();
+        record(*rhiContext_);
+    }
+
+    if (!hrOk(standaloneList_->Close(), "standalone list Close")) return false;
+    ID3D12CommandList* lists[] = {standaloneList_.Get()};
+    queue_->ExecuteCommandLists(1, lists);
+    waitForGpu();
+    if (infoQueue_) drainDebugMessages();
+    return !deviceLost_;
+}
 
 // Polls video memory budget and usage. See VideoMemoryInfo for LOCAL/NON_LOCAL split.
 VideoMemoryInfo D3D12Device::videoMemory() const {

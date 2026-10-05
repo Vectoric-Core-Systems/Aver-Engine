@@ -7,7 +7,10 @@
 # -- and Mlp::create() says so with a false return. MlpReference never touches the RHI at all.
 add_library(Aver.Render.Neural STATIC
   src/Mlp.cpp
-  src/MlpReference.cpp)
+  src/MlpReference.cpp
+  src/NeuralOptimiser.cpp
+  src/ConvNetReference.cpp
+  src/WeightFile.cpp)
 
 target_include_directories(Aver.Render.Neural PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Render.Neural PUBLIC cxx_std_20)

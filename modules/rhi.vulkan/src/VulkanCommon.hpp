@@ -503,7 +503,10 @@ inline VkBufferBarrierInfo toVkBufferBarrierInfo(ResourceState s) {
         case ResourceState::Common:
             break;
     }
-    return {VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_NONE};
+    // Common is D3D12's implicit sync point (promotion/decay), so on a buffer it means "every prior and
+    // later access": NONE here made copy -> Common -> shader-read carry no dependency at all, and a
+    // dispatch read the buffers before the upload copy landed (NeuralGpuParityTest's Vulkan row).
+    return {VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
 }
 
 // First memory type in `memProps` matching every bit of `typeBits` whose propertyFlags contain
@@ -1336,6 +1339,7 @@ public:
     ISwapchain* createSwapchain(const SwapchainDesc& desc) override;
     void beginFrame() override;
     void endFrame() override;
+    bool runStandaloneCompute(const std::function<void(IRenderContext&)>& record) override;
     void setClearColor(f32 r, f32 g, f32 b, f32 a) override { clear_[0] = r; clear_[1] = g; clear_[2] = b; clear_[3] = a; }
     void setVSync(bool on) override { vsync_ = on; }
     bool vsync() const override { return vsync_; }
@@ -1585,6 +1589,7 @@ private:
     std::vector<VkSemaphore> renderFinished_;     // one per SWAPCHAIN IMAGE (sized at swapchain creation), not per frame in flight
     u32 frameIndex_ = 0;    // 0..kFrameCount-1, the frame-IN-FLIGHT slot
     u64 frameSerial_ = 0;   // MONOTONIC, unlike frameIndex_, which wraps at kFrameCount and can't tell "this frame" from "two frames ago in the same slot"
+    bool frameOpen_ = false;   // between beginFrame and endFrame's command-buffer end; runStandaloneCompute refuses then
 
     // The installed in-window UI toolkit, or null. NON-OWNING -- see IUiBackend's own comment on
     // ownership; Sandbox holds the concrete object and outlives this device's uiShutdown().

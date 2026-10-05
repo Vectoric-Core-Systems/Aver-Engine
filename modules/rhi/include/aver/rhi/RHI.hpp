@@ -9,6 +9,7 @@
 #include "aver/rhi/RHIResources.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -347,6 +348,9 @@ public:
     virtual ISwapchain* createSwapchain(const SwapchainDesc& desc) = 0;
     virtual void beginFrame() = 0; // acquires + clears the current backbuffer
     virtual void endFrame() = 0;   // finalizes the frame's command list
+
+    // Records `record` into a private command list/buffer, submits it and waits for completion. Only when no frame is open. For tests and tools; never during a frame. False when unsupported or a frame is open.
+    virtual bool runStandaloneCompute(const std::function<void(IRenderContext&)>& record) { (void)record; return false; }
 
     // Frame clear colour (linear RGBA, 0..1).
     virtual void setClearColor(f32 r, f32 g, f32 b, f32 a) { (void)r; (void)g; (void)b; (void)a; }

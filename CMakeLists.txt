@@ -703,6 +703,7 @@ endif()
 set(AVER_CTEST_VULKAN_TARGETS
   LineMeshTest
   ShaderIncludeResolveTest
+  NeuralGpuParityTest
 )
 function(aver_register_ctest_in dir)
   get_property(_targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)

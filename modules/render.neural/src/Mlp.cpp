@@ -10,8 +10,10 @@ namespace aver::render::neural {
 
 namespace {
 
-// b1: Voxi-style root CBV. Slot 0 is the engine's per-frame block (PipelineLayout's own comment).
-constexpr u32 kConstantSlot = 1;
+// b3: a root CBV on a register no backend reserves. b1 is the per-object block, which Vulkan always
+// folds into push constants (a CBV there read zeros); b0, b2, b4 are the engine's frame, draw and
+// feature blocks.
+constexpr u32 kConstantSlot = 3;
 
 // aver_neural_mlp.hlsl's binding table, shared by every pipeline: five SRV slots (records,
 // targets, count, weights, EMA) and six UAV slots (outputs, gradient accumulator, weights, EMA,

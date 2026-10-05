@@ -2575,6 +2575,7 @@ void VulkanDevice::collectExposureReadout() {
 // ================================================================================================
 void VulkanDevice::beginFrame() {
     if (!hasSwapchain_) return;
+    frameOpen_ = true;
     // FIRST, BEFORE ANYTHING RECORDS: a render-scale change frees and recreates the depth buffer,
     // MSAA target and post chain, and doing that mid-recording is what lost the device at Present (C2-13, aver-render-scale-device-loss; see setRenderScale's comment for the full account).
     applyPendingRenderScale();
@@ -2866,6 +2867,7 @@ void VulkanDevice::endFrame() {
         pipelineBarrier(api_, cmd, &toPresent, 1);
     }
     api_.EndCommandBuffer(cmd);
+    frameOpen_ = false;
 
     const u64 signalValue = ++nextTimelineValue_;
     frameTimelineValues_[frameIndex_] = signalValue;
@@ -4009,6 +4011,52 @@ bool VulkanDevice::selfTest(const f32 in[4], f32 out[4]) {
     }
     destroyBufferCommitted(*this, readback, readbackMem);
     destroyImageCommitted(*this, img, imgMem);
+    return ok;
+}
+
+// Records `record` into a one-shot command buffer by pointing the current frame slot at it, so the
+// shared context's binding, barrier and constant-ring paths work with no swapchain. The GPU is idle
+// on entry, which is what frees that slot's descriptor ring and constant ring for reuse; the timeline
+// value this submit signals is also what lets collect() release what the recording retired.
+bool VulkanDevice::runStandaloneCompute(const std::function<void(IRenderContext&)>& record) {
+    if (!record || !rhiContext_ || !rhiFactory_ || !device_ || !queue_ || !commandPool_ || frameOpen_) return false;
+
+    waitForGpu();
+    ++frameSerial_;   // a set bound by an earlier standalone run may be rewritten now: a new "frame"
+
+    VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cbai.commandPool = commandPool_; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (!vkOk(api_.AllocateCommandBuffers(device_, &cbai, &cmd), "vkAllocateCommandBuffers (standalone)")) return false;
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (!vkOk(api_.BeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer (standalone)")) {
+        api_.FreeCommandBuffers(device_, commandPool_, 1, &cmd);
+        return false;
+    }
+
+    VkCommandBuffer& slot = commandBuffers_[frameIndex_];
+    const VkCommandBuffer saved = slot;
+    slot = cmd;
+    struct Restore { VkCommandBuffer& s; VkCommandBuffer v; ~Restore() { s = v; } } restore{slot, saved};
+    record(*rhiContext_);
+    slot = saved;
+
+    bool ok = vkOk(api_.EndCommandBuffer(cmd), "vkEndCommandBuffer (standalone)");
+    if (ok) {
+        const u64 signalValue = ++nextTimelineValue_;
+        VkSemaphoreSubmitInfo signalInfo{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+        signalInfo.semaphore = timeline_; signalInfo.value = signalValue; signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkCommandBufferSubmitInfo cbInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+        cbInfo.commandBuffer = cmd;
+        VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+        submit.commandBufferInfoCount = 1; submit.pCommandBufferInfos = &cbInfo;
+        submit.signalSemaphoreInfoCount = 1; submit.pSignalSemaphoreInfos = &signalInfo;
+        ok = vkOk(api_.QueueSubmit2(queue_, 1, &submit, VK_NULL_HANDLE), "QueueSubmit2 (standalone)") &&
+             waitTimeline(signalValue);
+    }
+    api_.FreeCommandBuffers(device_, commandPool_, 1, &cmd);
+    if (ok) rhiFactory_->collect();
     return ok;
 }
 

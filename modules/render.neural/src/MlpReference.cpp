@@ -46,20 +46,6 @@ bool validate(const MlpDesc& d, std::string* why) {
     return true;
 }
 
-bool validate(const OptimiserDesc& o, std::string* why) {
-    if (!(o.learningRate > 0.0f)) return fail(why, "learningRate must be > 0");
-    if (!(o.beta1 >= 0.0f && o.beta1 < 1.0f)) return fail(why, "beta1 must be in [0, 1)");
-    if (!(o.beta2 >= 0.0f && o.beta2 < 1.0f)) return fail(why, "beta2 must be in [0, 1)");
-    if (!(o.epsilon > 0.0f)) return fail(why, "epsilon must be > 0");
-    if (!(o.weightEma >= 0.0f && o.weightEma <= 1.0f)) return fail(why, "weightEma must be in [0, 1]");
-    if (!(o.l2 >= 0.0f)) return fail(why, "l2 must be >= 0");
-    if (!(o.gradFixedScale > 0.0f)) return fail(why, "gradFixedScale must be > 0");
-    if (!(o.gradClamp > 0.0f)) return fail(why, "gradClamp must be > 0");
-    if (static_cast<u32>(o.loss) > 1u) return fail(why, "unknown loss");
-    if (!(o.gradClamp * o.gradFixedScale <= 1.0e9f)) return fail(why, "gradClamp * gradFixedScale must be <= 1e9");
-    return true;
-}
-
 MlpLayout MlpLayout::make(const MlpDesc& d) {
     MlpLayout L;
     L.layers = d.hiddenLayers + 1;
@@ -81,43 +67,6 @@ MlpLayout MlpLayout::make(const MlpDesc& d) {
     return L;
 }
 
-f32 activate(Activation a, f32 z) {
-    switch (a) {
-        case Activation::ReLU:    return z > 0.0f ? z : 0.0f;
-        case Activation::Sigmoid: return 1.0f / (1.0f + std::exp(-z));
-        case Activation::Exp:     return std::exp(std::min(z, kExpMaxArg));
-        case Activation::None:    break;
-    }
-    return z;
-}
-
-f32 activationDerivative(Activation a, f32 y) {
-    switch (a) {
-        case Activation::ReLU:    return y > 0.0f ? 1.0f : 0.0f;
-        case Activation::Sigmoid: return y * (1.0f - y);
-        case Activation::Exp:     return y;
-        case Activation::None:    break;
-    }
-    return 1.0f;
-}
-
-f32 lossGradient(Loss l, f32 p, f32 y) {
-    if (l == Loss::RelativeL2) return 2.0f * (p - y) / (p * p + 0.01f);
-    return 2.0f * (p - y);
-}
-
-f32 lossValue(Loss l, f32 p, f32 y) {
-    const f32 e = p - y;
-    if (l == Loss::RelativeL2) return e * e / (p * p + 0.01f);
-    return e * e;
-}
-
-u32 initHash(u32 x) {
-    const u32 state = x * 747796405u + 2891336053u;
-    const u32 word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-
 std::vector<f32> initWeights(const MlpDesc& d) {
     const MlpLayout L = MlpLayout::make(d);
     std::vector<f32> w(L.total, 0.0f);   // biases stay zero
@@ -131,17 +80,6 @@ std::vector<f32> initWeights(const MlpDesc& d) {
         }
     }
     return w;
-}
-
-f32 adamBiasCorrection(f32 beta, u32 step) {
-    return static_cast<f32>(1.0 - std::pow(static_cast<f64>(beta), static_cast<f64>(step)));
-}
-
-u32 safeBatchLimit(const OptimiserDesc& o) {
-    const f64 perRecord = static_cast<f64>(o.gradClamp) * static_cast<f64>(o.gradFixedScale);
-    if (!(perRecord > 0.0)) return 0;
-    const f64 n = std::floor(2147483647.0 / perRecord);
-    return n >= 4294967295.0 ? 0xFFFFFFFFu : static_cast<u32>(n);
 }
 
 // ---------------------------------------------------------------- MlpReference
@@ -212,11 +150,8 @@ f32 MlpReference::backward(std::span<const f32> in, std::span<const f32> target,
     return loss;
 }
 
-// HLSL twin: quantise() in aver_neural_mlp.hlsl.
 i32 MlpReference::quantise(f32 g, const OptimiserDesc& o) {
-    if (!(g == g)) g = 0.0f;   // a NaN gradient quantises to 0, as on the GPU
-    const f32 c = std::min(std::max(g, -o.gradClamp), o.gradClamp);
-    return static_cast<i32>(c * o.gradFixedScale);
+    return ::aver::render::neural::quantise(g, o);
 }
 
 f32 MlpReference::accumulateRecord(std::span<const f32> in, std::span<const f32> target) {
@@ -230,24 +165,11 @@ f32 MlpReference::accumulateRecord(std::span<const f32> in, std::span<const f32>
 
 void MlpReference::clearAccumulator() { std::fill(acc_.begin(), acc_.end(), 0); }
 
-// HLSL twin: CSAdam. One GPU thread per weight, in exactly this order.
+// HLSL twin: CSAdam (the shared adamStep in NeuralOptimiser.cpp).
 void MlpReference::adamStep(u32 liveCount) {
     if (liveCount == 0) { clearAccumulator(); return; }
     ++step_;
-    const f32 bc1 = adamBiasCorrection(opt_.beta1, step_);
-    const f32 bc2 = adamBiasCorrection(opt_.beta2, step_);
-    for (u32 k = 0; k < layout_.total; ++k) {
-        f32 g = (static_cast<f32>(acc_[k]) / opt_.gradFixedScale) / static_cast<f32>(liveCount);
-        g = std::min(std::max(g, -opt_.gradClamp), opt_.gradClamp);
-        g += opt_.l2 * w_[k];
-        m_[k] = opt_.beta1 * m_[k] + (1.0f - opt_.beta1) * g;
-        v_[k] = opt_.beta2 * v_[k] + (1.0f - opt_.beta2) * g * g;
-        const f32 mhat = m_[k] / bc1;
-        const f32 vhat = v_[k] / bc2;
-        w_[k] -= opt_.learningRate * mhat / (std::sqrt(vhat) + opt_.epsilon);
-        ema_[k] = opt_.weightEma * ema_[k] + (1.0f - opt_.weightEma) * w_[k];
-    }
-    clearAccumulator();
+    ::aver::render::neural::adamStep(w_, ema_, m_, v_, acc_, opt_, step_, liveCount);
 }
 
 f32 MlpReference::trainBatch(std::span<const f32> records, std::span<const f32> targets, u32 count) {

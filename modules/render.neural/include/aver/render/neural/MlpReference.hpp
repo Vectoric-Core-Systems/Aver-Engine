@@ -6,18 +6,13 @@
 #pragma once
 
 #include <aver/core/Types.hpp>
+#include <aver/render/neural/NeuralOptimiser.hpp>
 
 #include <span>
 #include <string>
 #include <vector>
 
 namespace aver::render::neural {
-
-// Numeric values are the AVER_NN_*_ACT defines the HLSL is compiled with. Do not renumber.
-enum class Activation : u32 { None = 0, ReLU = 1, Sigmoid = 2, Exp = 3 };
-
-// RelativeL2 is NRC's loss: (y - p)^2 / (stopgrad(p)^2 + 0.01) per channel; d/dp = 2(p - y) / (p^2 + 0.01).
-enum class Loss : u32 { L2 = 0, RelativeL2 = 1 };
 
 // Fully connected network: inputs -> hiddenLayers x hiddenWidth -> outputs.
 struct MlpDesc {
@@ -26,19 +21,6 @@ struct MlpDesc {
     Activation output = Activation::None;
     bool bias = true;
     u32 seed = 1;  // Deterministic init seed; not part of weight file.
-};
-
-// Adam with fixed-point gradient accumulation (GPU needs integer adds; D3D12 has no float atomic).
-struct OptimiserDesc {
-    f32 learningRate = 1e-3f;
-    f32 beta1 = 0.9f, beta2 = 0.99f, epsilon = 1e-8f;
-    // Inference reads EMA weights, not raw weights (avoid flicker).
-    f32 weightEma = 0.99f;
-    f32 l2 = 0.0f;   // L2 weight decay
-    Loss loss = Loss::L2;
-    // Per-record gradient clamp and fixed-point scale; see safeBatchLimit for overflow headroom.
-    f32 gradFixedScale = 65536.0f;
-    f32 gradClamp = 16.0f;
 };
 
 inline constexpr u32 kMaxHiddenWidth  = 64;
@@ -50,7 +32,6 @@ inline constexpr u32 kMaxWeightLayers = kMaxHiddenLayers + 1;
 // True when the descriptor is inside the ranges the kernels are written for. On false, `why` (if
 // given) says which limit was hit.
 bool validate(const MlpDesc& d, std::string* why = nullptr);
-bool validate(const OptimiserDesc& o, std::string* why = nullptr);
 
 // ---- weight layout
 // ONE FLAT f32 ARRAY, layer by layer. Layer l maps in(l) -> out(l):
@@ -72,25 +53,8 @@ struct MlpLayout {
     static MlpLayout make(const MlpDesc& d);
 };
 
-// ---- scalar maths
-// Activation derivatives in POST-activation form y = act(z): relu' = y > 0, sigmoid' = y(1-y), exp' = y, identity' = 1.
-inline constexpr f32 kExpMaxArg = 20.0f;
-f32 activate(Activation a, f32 z);
-f32 activationDerivative(Activation a, f32 y);
-
-// d(loss)/d(prediction) for one channel; RelativeL2 holds denominator constant when differentiating.
-f32 lossGradient(Loss l, f32 p, f32 y);
-f32 lossValue(Loss l, f32 p, f32 y);
-
-// He-uniform init: w = (2u - 1) * sqrt(6 / fan_in); same weights on every machine (PCG hash of seed and index).
-u32 initHash(u32 x);
+// He-uniform init: w = (2u - 1) * sqrt(6 / fan_in); u from initHash(seed, index) (NeuralOptimiser.hpp).
 std::vector<f32> initWeights(const MlpDesc& d);
-
-// Adam bias-correction 1 - beta^t in double, rounded once for CPU/GPU agreement.
-f32 adamBiasCorrection(f32 beta, u32 step);
-
-// Worst-case largest batch before per-weight int32 accumulator overflows (clamp * gradFixedScale).
-u32 safeBatchLimit(const OptimiserDesc& o);
 
 // ---- the network
 class MlpReference {

@@ -84,8 +84,8 @@ RWStructuredBuffer<float> gEmaRW   : register(u3);
 RWStructuredBuffer<float> gM       : register(u4);   // Adam first moment
 RWStructuredBuffer<float> gV       : register(u5);   // Adam second moment
 
-// Root CBV, slot 0 is the engine's per-frame block. Matches Mlp.cpp's Constants.
-cbuffer AverNeuralCB : register(b1) {
+// Root CBV at b3 (Mlp.cpp kConstantSlot: no backend reserves it). Matches Mlp.cpp's Constants.
+cbuffer AverNeuralCB : register(b3) {
     uint  gCount;         // live record count when no count buffer is bound
     uint  gMaxCount;      // upper bound on the live count
     uint  gUseCountBuf;   // 1: count = gCountBuf[0]; 0: count = gCount

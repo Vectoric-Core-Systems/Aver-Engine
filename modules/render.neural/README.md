@@ -1,8 +1,9 @@
 # Aver.Render.Neural
 
-Small neural networks that run inside the frame. v1 is one thing: a fully connected MLP with GPU
-inference and GPU training, in portable fp32 HLSL, plus a CPU reference of the same maths that is the
-spec for the shader and what the tests check.
+Small neural networks that run inside the frame: a fully connected MLP with GPU inference and GPU
+training, in portable fp32 HLSL, plus a CPU reference of the same maths that is the spec for the shader
+and what the tests check. Convolution layers have their CPU reference and weight file (below); their GPU
+kernels follow.
 
 It is an RHI-only static module like `Aver.Render.Denoise`: it links `Aver.Core` and `Aver.RHI`,
 owns its shader (deployed beside the executable by `aver_deploy_shaders`), records into a caller's
@@ -119,6 +120,54 @@ hiddenLayers, hidden, output, bias, weightCount` as u32 (the `MlpDesc` minus its
 `weightCount` fp32 values. Readers reject a wrong magic or version, an invalid shape, a count that
 disagrees with the shape, and any size mismatch. `saveWeights` writes the EMA weights by default.
 
+## Convolution layers (CPU reference, AVNN v2)
+
+`ConvNetReference` (`ConvNetReference.hpp`, `NeuralOptimiser.hpp`, `WeightFile.hpp`) is the CPU side of
+convolution support: the **spec the GPU kernels follow** (`shaders/aver_neural_conv.hlsl`, next milestone)
+and what `tests/render.neural` (`NeuralConvTest`, no GPU) checks. The contract is the header comment in
+`ConvNetReference.hpp`; the short version:
+
+* `ConvLayerDesc {cin, cout, kernel 1|3, stride 1|2, act None|ReLU, bias}`, `ConvNetDesc` (at most 8
+  layers), NCHW tensors, `oh = ceil(h / stride)`, zero padding (3x3 reads `oy*stride - 1 + ky`, PyTorch
+  pad = 1). Channels are multiples of 4 and at most 64 (the input may be any 1..64).
+* Weights are one flat f32 array, layer by layer: `W[co][ci][ky][kx]` (OIHW) then `b[co]`.
+* Fixed summation order: `acc = bias; for ci { for ky { for kx { acc += w * x } } }` in fp32, so the CPU
+  twin and every GPU agree to FMA-contraction level (~1e-5 relative).
+* He-uniform init from the same PCG hash as the MLP; the head layer is zero-initialised.
+* Loss is weighted L2 with a per-position weight shared across channels, normalised by an explicit
+  `lossNorm`. Gradients accumulate in **GPU order**: per (record, 8x8 output tile, weight) partials, then
+  a fixed-order sum, quantised once into the shared fixed-point accumulator (no atomics, bit-deterministic
+  per device). Conv defaults: `gradFixedScale` 2^24, `gradClamp` 32 (`convDefaults()`).
+* `NeuralOptimiser` holds what the MLP and the conv net share: `OptimiserDesc`, `Activation`, `Loss`,
+  `initHash`, `quantise` and the Adam step (`adamStep`, which `MlpReference::adamStep` calls).
+* Training records are patches (56x56 half-res, tile-aligned); a patch's core tiles are bit-identical to a
+  full-frame forward over a larger frame, which `NeuralConvTest` asserts.
+
+**AVNN v2** (`WeightFile.hpp`) is the conv net's file: kind 1, a layer list, an optional input/output
+standardisation affine, the weights, and a trailing CRC-32. `peekWeightFile` tells v1 (MLP) from v2;
+`saveWeightFile` / `loadWeightFile` still read and write v1 only. Layout is documented in the header.
+
+### Portability rules (every kernel in this module)
+
+* fp32 arithmetic only; fp16 only as packed storage. No wave intrinsics, no float or int atomics in the
+  conv path, `numthreads(64,1,1)`, every barrier in compile-time-constant control flow, out-of-range
+  threads compute on zeros (never early-return).
+* Groupshared at most 16 KB per kernel (the Vulkan minimum); `validate` checks the conv weight block
+  (`convSharedBytes`).
+* No transcendentals inside the network (ReLU or None only); ReLU is written `z > 0 ? z : 0` on GPU and CPU.
+* Tensors are `StructuredBuffer<float>`, NCHW, one buffer per tensor, explicit bounds checks.
+* Layer-streaming kernels, never fused (see Kernel structure above).
+* Constants are a root CBV at **b3**. Not b1: the Vulkan backend always folds b1 (the per-object block)
+  into push constants, so a b1 CBV read zeros there (record count 0, no effect); b0/b2/b4 are the
+  engine's frame, draw and feature blocks.
+
+### GPU parity
+
+`NeuralGpuParityTest` (tests/render.neural) runs the kernels on a device through
+`IDevice::runStandaloneCompute` and compares with the CPU twins: `NeuralGpuParityTest` (WARP),
+`hw` (the adapter), `vulkan` (also a ctest `.vulkan` row), `debug` (validation layer). Passing on
+D3D12 WARP, D3D12 and Vulkan on an RX 7800 XT (2026-10-05).
+
 ## The readback gap
 
 The RHI gives a module no fence, so there is no point at which `Mlp` can know the GPU has finished and
@@ -139,9 +188,6 @@ they could bite.
 * **Cooperative matrix / LinAlg backends.** Vulkan `VK_KHR_cooperative_matrix` (RDNA3 WMMA, NVIDIA
   tensor cores) after Vulkan parity; D3D12 LinAlg (SM 6.10) when retail. RDNA3 has no D3D12 matrix
   path.
-* **Convolution layers.** Frame interpolation's network needs them. They are not written; the seam is
-  `MlpLayout` (the flat weight layout and per-layer slices) and the per-layer weight-tile streaming in
-  `forwardRecord`, which a convolution layer would replace per layer.
 * **Many small networks per dispatch** (`instances > 1` in the design sketch), and a GPU-side loss
   readout.
 * **int8**: deliberately never (design doc section 2).
@@ -155,4 +201,4 @@ they could bite.
   GPU-written. Counsel should review stage 2 before it ships (US 11,610,360).
 * **Frame interpolation:** weights are trained offline and shipped, which is what the AVNN file is
   for (`loadWeights`). Its network adds convolution layers on top of this module's per-layer weight
-  streaming and file format (version bump when layers are added).
+  streaming; conv nets use the AVNN v2 file (version bump done).
