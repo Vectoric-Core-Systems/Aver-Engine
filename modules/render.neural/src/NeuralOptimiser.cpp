@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-// Keep in step with shaders/aver_neural_mlp.hlsl (each function has an HLSL twin named in comments).
+// Keep in step with shaders/aver_neural_common.hlsli (each function has an HLSL twin named in comments).
 
 namespace aver::render::neural {
 
@@ -76,14 +76,14 @@ u32 safeBatchLimit(const OptimiserDesc& o) {
     return n >= 4294967295.0 ? 0xFFFFFFFFu : static_cast<u32>(n);
 }
 
-// HLSL twin: quantise() in aver_neural_mlp.hlsl.
+// HLSL twin: quantise() in aver_neural_common.hlsli.
 i32 quantise(f32 g, const OptimiserDesc& o) {
     if (!(g == g)) g = 0.0f;   // a NaN gradient quantises to 0, as on the GPU
     const f32 c = std::min(std::max(g, -o.gradClamp), o.gradClamp);
     return static_cast<i32>(c * o.gradFixedScale);
 }
 
-// HLSL twin: CSAdam.
+// HLSL twin: neuralAdam() in aver_neural_common.hlsli (CSAdam).
 void adamStep(std::span<f32> w, std::span<f32> ema, std::span<f32> m, std::span<f32> v, std::span<i32> acc,
               const OptimiserDesc& o, u32 step, u32 liveCount) {
     if (liveCount == 0) { std::fill(acc.begin(), acc.end(), 0); return; }

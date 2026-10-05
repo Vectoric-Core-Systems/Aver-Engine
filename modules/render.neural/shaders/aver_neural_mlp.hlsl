@@ -24,6 +24,10 @@
 // zeros) rather than returning early, to keep the barrier full.
 //
 // FP32 ONLY. No min16float, no -enable-16bit-types (v1 is the portable baseline; packed fp16 behind device caps).
+//
+// Constants, activations, quantise and the Adam / reset bodies live in aver_neural_common.hlsli.
+
+#include "aver_neural_common.hlsli"
 
 #ifndef AVER_NN_IN
 #define AVER_NN_IN 4
@@ -50,8 +54,6 @@
 #define AVER_NN_LOSS 0
 #endif
 
-#define AVER_NN_GROUP 64
-
 // Layer l maps layerIn(l) -> layerOut(l); weight layers = hidden layers + 1.
 #define NN_LAYER_COUNT (AVER_NN_LAYERS + 1)
 #define NN_MAX2(a, b) ((a) > (b) ? (a) : (b))
@@ -74,35 +76,10 @@ groupshared uint gScratch[NN_SCRATCH_N];
 // Bindings: every pipeline shares one layout; unused slots are null.
 StructuredBuffer<float>   gRecords : register(t0);   // count * IN floats
 StructuredBuffer<float>   gTargets : register(t1);   // count * OUT floats (training)
-StructuredBuffer<uint>    gCountBuf: register(t2);   // element 0 = live record count (GPU-written)
 StructuredBuffer<float>   gWeights : register(t3);   // master weights (read)
 StructuredBuffer<float>   gEma     : register(t4);   // EMA weights (read)
 RWStructuredBuffer<float> gOut     : register(u0);   // count * OUT floats
-RWStructuredBuffer<int>   gGrad    : register(u1);   // fixed-point gradient accumulator
-RWStructuredBuffer<float> gWeightsRW : register(u2);
-RWStructuredBuffer<float> gEmaRW   : register(u3);
-RWStructuredBuffer<float> gM       : register(u4);   // Adam first moment
-RWStructuredBuffer<float> gV       : register(u5);   // Adam second moment
-
-// Root CBV at b3 (Mlp.cpp kConstantSlot: no backend reserves it). Matches Mlp.cpp's Constants.
-cbuffer AverNeuralCB : register(b3) {
-    uint  gCount;         // live record count when no count buffer is bound
-    uint  gMaxCount;      // upper bound on the live count
-    uint  gUseCountBuf;   // 1: count = gCountBuf[0]; 0: count = gCount
-    uint  gUseEma;        // inference: read the EMA weights
-    uint  gWeightCount;
-    float gLr;
-    float gBeta1;
-    float gBeta2;
-    float gEps;
-    float gBc1;           // 1 - beta1^t (from CPU adamBiasCorrection)
-    float gBc2;           // 1 - beta2^t
-    float gEmaDecay;
-    float gL2;
-    float gGradScale;     // gradFixedScale
-    float gGradClamp;
-    float gPad0;
-};
+// t2 (count) and u1..u5 (accumulator, weights, EMA, Adam m, v) are declared in the common include.
 
 // ---- layer geometry: MlpLayout::make's twin ----
 uint layerIn(uint l)   { return l == 0 ? AVER_NN_IN : AVER_NN_WIDTH; }
@@ -116,36 +93,13 @@ uint layerBase(uint l) {
 // Activation vector: array 0 is input, array l+1 is layer l's output.
 uint actOff(uint l) { return l == 0 ? 0 : AVER_NN_IN + (l - 1) * AVER_NN_WIDTH; }
 
-// ---- scalar maths (twins of MlpReference.cpp functions; derivatives take post-activation value) ----
-float activate(uint act, float z) {
-    if (act == 1) return max(z, 0.0);
-    if (act == 2) return 1.0 / (1.0 + exp(-z));
-    if (act == 3) return exp(min(z, 20.0));   // kExpMaxArg
-    return z;
-}
-float activationDerivative(uint act, float y) {
-    if (act == 1) return y > 0.0 ? 1.0 : 0.0;
-    if (act == 2) return y * (1.0 - y);
-    if (act == 3) return y;
-    return 1.0;
-}
+// ---- loss (twin of lossGradient in NeuralOptimiser.cpp; activations are in the common include) ----
 float lossGrad(float p, float y) {
 #if AVER_NN_LOSS == 1
     return 2.0 * (p - y) / (p * p + 0.01);   // denominator is stopgrad: constant when differentiating
 #else
     return 2.0 * (p - y);
 #endif
-}
-
-// Quantise to fixed-point: clamp(g, -gradClamp, gradClamp) * gradFixedScale truncated to int, NaN -> 0.
-int quantise(float g) {
-    if (!(g == g)) g = 0.0;
-    return (int)(clamp(g, -gGradClamp, gGradClamp) * gGradScale);
-}
-
-uint liveCount() {
-    uint n = gUseCountBuf != 0 ? gCountBuf[0] : gCount;
-    return min(n, gMaxCount);
 }
 
 float fetchWeight(uint idx, uint useEma) { return useEma != 0 ? gEma[idx] : gWeights[idx]; }
@@ -293,39 +247,9 @@ void CSTrainGrad(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {
     }
 }
 
-// ---- CSAdam ----
-// One thread per weight: accumulator -> mean over live count -> clamp -> L2 -> Adam with bias correction -> EMA -> clear.
-// Accumulator is cleared even at zero count (next batch starts clean). Zero count leaves weights, moments, EMA alone.
+// ---- CSAdam / CSResetState: bodies in aver_neural_common.hlsli ----
 [numthreads(AVER_NN_GROUP, 1, 1)]
-void CSAdam(uint3 dtid : SV_DispatchThreadID) {
-    const uint k = dtid.x;
-    if (k >= gWeightCount) return;   // no barriers: early exit is safe
-    const int acc = gGrad[k];
-    gGrad[k] = 0;
-    const uint n = liveCount();
-    if (n == 0) return;
+void CSAdam(uint3 dtid : SV_DispatchThreadID) { neuralAdam(dtid.x); }
 
-    float g = ((float)acc / gGradScale) / (float)n;
-    g = clamp(g, -gGradClamp, gGradClamp);
-    const float w = gWeightsRW[k];
-    g += gL2 * w;
-    const float m = gBeta1 * gM[k] + (1.0 - gBeta1) * g;
-    const float v = gBeta2 * gV[k] + (1.0 - gBeta2) * g * g;
-    gM[k] = m;
-    gV[k] = v;
-    const float mhat = m / gBc1;
-    const float vhat = v / gBc2;
-    const float wn = w - gLr * mhat / (sqrt(vhat) + gEps);
-    gWeightsRW[k] = wn;
-    gEmaRW[k] = gEmaDecay * gEmaRW[k] + (1.0 - gEmaDecay) * wn;
-}
-
-// ---- CSResetState ----
 [numthreads(AVER_NN_GROUP, 1, 1)]
-void CSResetState(uint3 dtid : SV_DispatchThreadID) {
-    const uint k = dtid.x;
-    if (k >= gWeightCount) return;
-    gGrad[k] = 0;
-    gM[k] = 0.0;
-    gV[k] = 0.0;
-}
+void CSResetState(uint3 dtid : SV_DispatchThreadID) { neuralResetState(dtid.x); }

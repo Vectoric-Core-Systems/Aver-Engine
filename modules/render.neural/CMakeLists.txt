@@ -1,11 +1,12 @@
 # Aver.Render.Neural -- small neural networks that run inside the frame (see README.md): a fully
-# connected MLP with GPU inference and training, in portable fp32 HLSL, plus a CPU reference of the
-# same maths that is the spec for the shader and the thing the tests exercise.
+# connected MLP and a convolutional net (ConvNet), each with GPU inference and training in portable fp32
+# HLSL, plus CPU references of the same maths that are the spec for the shaders and what the tests exercise.
 #
 # RHI-only and unconditional, like Aver.Render.Denoise: nothing here is optional at build time.
 # Whether a network runs is a RUNTIME question -- the shaders compile when Mlp::create() is called
 # -- and Mlp::create() says so with a false return. MlpReference never touches the RHI at all.
 add_library(Aver.Render.Neural STATIC
+  src/ConvNet.cpp
   src/Mlp.cpp
   src/MlpReference.cpp
   src/NeuralOptimiser.cpp

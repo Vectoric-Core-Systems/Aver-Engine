@@ -2,8 +2,8 @@
 
 Small neural networks that run inside the frame: a fully connected MLP with GPU inference and GPU
 training, in portable fp32 HLSL, plus a CPU reference of the same maths that is the spec for the shader
-and what the tests check. Convolution layers have their CPU reference and weight file (below); their GPU
-kernels follow.
+and what the tests check. Convolution layers (`ConvNet`, for NRD2) run on the GPU too, inference and
+training, against their own CPU reference (below).
 
 It is an RHI-only static module like `Aver.Render.Denoise`: it links `Aver.Core` and `Aver.RHI`,
 owns its shader (deployed beside the executable by `aver_deploy_shaders`), records into a caller's
@@ -63,7 +63,8 @@ net.recordTrain(ctx, records, targets, CpuCount{n});
 The shape arrives as DXC defines, so every network compiles its own pipelines with constant loop
 bounds. There are no wave intrinsics and no assumption about 32 or 64 lanes; every barrier is in
 control flow that depends only on compile-time constants, so AMD wave32/64, NVIDIA and Intel behave
-alike.
+alike. The constant block, activations, `quantise` and the Adam / reset bodies are shared with the conv
+kernels through `shaders/aver_neural_common.hlsli`.
 
 **The kernel streams weights layer by layer through groupshared memory.** The thread group
 cooperatively loads one layer's weights into groupshared, syncs, each thread computes that layer for
@@ -123,7 +124,7 @@ disagrees with the shape, and any size mismatch. `saveWeights` writes the EMA we
 ## Convolution layers (CPU reference, AVNN v2)
 
 `ConvNetReference` (`ConvNetReference.hpp`, `NeuralOptimiser.hpp`, `WeightFile.hpp`) is the CPU side of
-convolution support: the **spec the GPU kernels follow** (`shaders/aver_neural_conv.hlsl`, next milestone)
+convolution support: the **spec the GPU kernels follow** (`shaders/aver_neural_conv.hlsl`, below)
 and what `tests/render.neural` (`NeuralConvTest`, no GPU) checks. The contract is the header comment in
 `ConvNetReference.hpp`; the short version:
 
@@ -161,12 +162,66 @@ standardisation affine, the weights, and a trailing CRC-32. `peekWeightFile` tel
   into push constants, so a b1 CBV read zeros there (record count 0, no effect); b0/b2/b4 are the
   engine's frame, draw and feature blocks.
 
+### Conv on the GPU (`ConvNet`)
+
+```cpp
+#include <aver/render/neural/ConvNet.hpp>
+ConvNet net;
+net.create(device, desc, convDefaults(), ConvMode::Train);   // Infer compiles the forward kernels only
+const TensorShape shapes[] = {{32, 12, 56, 56}, {1, 12, 497, 883}};
+net.reserve(shapes);                                          // network-owned tensors, max over the list
+net.recordInfer(ctx, in, out, {1, 12, 497, 883});             // EMA weights by default
+net.recordTrain(ctx, in, target, posWeight, {32, 12, 56, 56}, lossNorm);
+net.recordEvaluate(ctx, in, target, posWeight, lossPerRecord, shape, lossNorm);   // n floats
+```
+
+Buffers are `StructuredBuffer<float>` NCHW, one per tensor. The caller owns the input, output, targets,
+per-position weights and the per-record loss; the network owns weights, EMA, Adam m / v, the integer
+accumulator, one activation and one gradient buffer per layer, and the gradient partials. `reserve` must
+see every shape before it is recorded (a shape it has not seen fails with a warning) and reallocates only
+with no recorded work pending. Weights, `uploadWeights`, `recordReadback` / `collectWeights`,
+`setLearningRate`, `invalidateBindings` and the binding-set cache behave as in `Mlp`;
+`saveWeights` / `loadWeights` use AVNN v2 and carry the `ConvIoAffine` (`ioAffine()` / `setIoAffine`).
+
+Kernels, `shaders/aver_neural_conv.hlsl`, one compile per layer per kernel (shape as DXC defines, spatial
+sizes and offsets in the b3 block; slots t0..t5, u0..u6):
+
+| Kernel | Threads | Does |
+|---|---|---|
+| `CSConvForward` | 8x8 outputs x 8 output channels per group | bias, then ci / ky / kx ascending; weight block (8 x min(cin, 16) x k*k) through groupshared per input chunk, input straight from global memory |
+| `CSConvLossL2` | one per head element | `dY = (2 * pw * (p - t)) / lossNorm` |
+| `CSConvActBackward` | one per element | in place `dz = y > 0 ? dy : 0` (ReLU layers only) |
+| `CSConvBackwardData` | 8x8 inputs x 8 input channels per group | dX gather form, co / ky / kx ascending, invalid taps skipped |
+| `CSConvBackwardWeights` | one per (record, 8x8 output tile, weight) | row-major tile sum of `dz * x` (bias: `dz`) into partials `[p][w]`, `p = (n * tilesY + ty) * tilesX + tx` |
+| `CSConvReduceGrad` | one per weight | partials summed `p` ascending in fp32, quantised once, plain store into the accumulator |
+| `CSConvEvalReduce` | one group per record | strided per-thread sums of `pw * (p - t)^2`, fixed 64 -> 1 tree, `/ lossNorm` |
+| `CSAdam`, `CSResetState` | one per weight | the common bodies, `liveCount = 1` |
+
+A training step is forward (every layer, master weights), loss, then per layer last to first: activation
+backward, weight partials, reduce, and dX for the layer below; then one Adam dispatch. Every dispatch is
+one layer (layer-streaming, as above); activations and gradients go through global memory, and each
+dispatch's resource transitions are the barrier to the next. No atomics: every accumulator slot has one
+writer, so training is bit-deterministic per device. Each weight's gradient is clamped and quantised once
+after the fp32 sum, so the accumulator cannot overflow at any batch size (32 x 2^24 < 2^31).
+
 ### GPU parity
 
 `NeuralGpuParityTest` (tests/render.neural) runs the kernels on a device through
 `IDevice::runStandaloneCompute` and compares with the CPU twins: `NeuralGpuParityTest` (WARP),
-`hw` (the adapter), `vulkan` (also a ctest `.vulkan` row), `debug` (validation layer). Passing on
-D3D12 WARP, D3D12 and Vulkan on an RX 7800 XT (2026-10-05).
+`hw` (the adapter), `vulkan` (also a ctest `.vulkan` row), `debug` (validation layer). MLP section:
+inference, one training step, rerun bit-identical. Conv section, on the NRD2 net (12 -> 16 -> 16 -> 32 ->
+32 -> 12) at 2x12x41x57 with random non-zero weights: each layer's forward and the whole net (rel 1e-5 /
+abs 1e-6), `recordEvaluate` vs `evaluate`, master and EMA weights after 1 and 10 steps vs `trainBatch`
+(rel 1e-4, abs 2e-5), forward and a 10-step training rerun bit-identical, and a toy task learned on the GPU
+(held-out loss 1.55 -> 0.00026 in 150 steps, the CPU twin landing on the same value). Passing on D3D12
+WARP, D3D12 and Vulkan on an RX 7800 XT, with the D3D12 debug layer and the Vulkan validation layer
+clean (2026-10-05). Measured on the RX 7800 XT: forward max abs error 8.3e-7 end to end; weights after 10
+steps within 1.1e-6 of the CPU. WARP matches the CPU forward exactly (no fused multiply-add).
+
+**Vulkan, dispatch count per submission.** The Vulkan backend allocates two constants descriptor sets per
+dispatch (pipeline bind and `setConstantBuffer`) from a pool budgeted at 512 dynamic-UBO descriptors and
+frees them after the submission retires. A conv training step is ~25 dispatches, so the test submits one
+step at a time; batching several steps into one frame on Vulkan needs that budget raised in the backend.
 
 ## The readback gap
 
@@ -191,6 +246,8 @@ they could bite.
 * **Many small networks per dispatch** (`instances > 1` in the design sketch), and a GPU-side loss
   readout.
 * **int8**: deliberately never (design doc section 2).
+* **Conv performance pass** (M4): `CSConvBackwardWeights` reads straight from global memory, one thread
+  per (tile, weight); no input-tile staging (that waits for a counsel note); no bench numbers yet.
 
 ## How the radiance cache and frame interpolation will use it
 
