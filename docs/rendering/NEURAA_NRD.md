@@ -6,10 +6,13 @@ FidelityFX Denoiser the engine already runs and a small neural network.
 **Status:** design only (2026-10-05). Nothing is built. Every millisecond below is an estimate unless
 it says *measured*.
 
-**One-line summary:** a small per-tile network predicts the *parameters* of a filter we already have
-(the TAAU resolve for NeuRAA, FidelityFX's passes for NRD); it never paints pixels. The filter stays
-the same hand-written, bounded, energy-checked code, so a bad prediction can only pick a worse setting
-of a known-good filter, never invent an image, and without weights the engine renders exactly as today.
+**One-line summary:** a small network predicts the *parameters* of a filter we already have; it never
+paints pixels. For NeuRAA that is how each edge pixel, found from primary visibility, blends with its
+neighbours, used while the camera moves. For NRD it is how a spatial pyramid of the current frame is
+mixed, per 8x8 tile, in place of FidelityFX's temporal resolve. The filter stays
+hand-written and bounded, so a bad prediction can only pick a worse setting of a known-good filter,
+never invent an image. Without weights, NeuRAA runs its analytic baseline and NRD runs FidelityFX's
+resolve.
 
 ---
 
@@ -21,9 +24,9 @@ Both problems are the same shape, and the measurements of 2026-10-04/05 show it:
   0.6 returned 0.49 of the GI it was given; at 0 it kept 0.79 by day but turned night path tracing into
   blotches in motion; 0.2 is a compromise (`DENOISING.md` section 2). One number cannot be right both
   for a tile of rare fireflies and for a tile of genuinely bright bounce light.
-- **TAA:** the resolve's clip box (1.25 sigma), blend weight (0.1 to 0.25) and reconstruction kernel are
-  global too, and smeared under motion badly enough that TAA now runs only while the camera is still
-  (`modules/render.sr/README.md`).
+- **TAA:** it smeared under motion badly enough that it now runs only while the camera is still
+  (`modules/render.sr/README.md`), so in motion nothing anti-aliases edges. NeuRAA fills that gap with a
+  single-frame method that has no history to smear (section 3).
 
 A network that looks at a tile's statistics and picks those numbers per tile addresses exactly that.
 Predicting parameters rather than pixels also:
@@ -32,151 +35,293 @@ Predicting parameters rather than pixels also:
   (`modules/render.neural/README.md`: fp32 portable kernels; D3D12 LinAlg is SM 6.10, Vulkan cooperative
   matrix comes after Vulkan parity). An image-to-image convolutional network per output pixel is out of
   budget. NeuraFI measured 1.75M records at 3.5 ms (*measured*, its network size), so per-pixel at
-  render resolution is too slow; one record per 4x4 tile at 1766x994 is ~110k records, roughly 0.2-0.3
-  ms per small network (estimate).
+  render resolution is too slow; NRD's one record per 8x8 tile at 1766x994 is ~27k records, and
+  NeuRAA's edge pixels ~90-180k (estimates).
 - **reuses what exists.** `Aver.Render.Neural`'s `Mlp` (fp32, inputs <= 64, outputs <= 16, width <= 64,
   layers <= 6, AVNN weight files, in-engine Adam) needs no new layer types for this.
 - **follows NeuraFI's rule:** the network predicts a correction to an analytic baseline, the baseline is
   what runs until weights exist, and a gate keeps the network out where it measures worse.
-- **clears most of the patent-dense prior art**, which needs image or per-pixel-kernel outputs. Four
-  findings still constrain the design, one of them reaching the shipped TAA clamp (section 7).
+- **clears most of the patent-dense prior art**, which needs image or per-pixel-kernel outputs. The
+  findings that still constrain the design, two of them reaching shipped code, are in section 7.
 
 ---
 
 ## 2. Shared structure
 
 ```
-G-buffer + signal  ->  [feature pass]  ->  tile records (StructuredBuffer<float>)
-                                              |
-                                        Mlp::recordInfer (EMA weights)
-                                              |
-                       per-tile params  ->  [param texture, 1/4 res, bilinear]
-                                              |
-                       the existing filter reads its knobs from it, per pixel
+G-buffer / visibility + signal -> [feature pass] -> records (StructuredBuffer<float>)
+                                                       |
+                                                 Mlp::recordInfer
+                                                       |
+                       bounded parameters -> the hand-written filter, which mixes real values
 ```
 
-- **Feature pass:** one compute pass per consumer, one thread group per 4x4 tile, writing a fixed
-  feature vector per tile (section 3 and 4 list them). Features are normalised to O(1) (log-luminance,
-  ratios to the tile mean, motion in pixels / 16) so one set of weights serves every scene brightness.
-- **Parameter texture:** RGBA16F at quarter resolution; the filter samples it bilinearly so parameters
-  never step at tile edges.
-- **Bounded outputs:** every output goes through a sigmoid mapped to a hand-chosen safe range (for
-  example NRD's radiance weight in [0, 0.8]). The network cannot leave the range the filter was tested
-  in.
-- **Fallback:** with no weights loaded, or with the gate closed, the parameter texture is cleared to
-  today's constants. That path is bit-identical to the current renderer and is what ships first.
+| | NeuRAA | NRD |
+|---|---|---|
+| record | one per edge pixel (~24 floats) | one per 8x8 tile (~20 floats) |
+| outputs | 9 blend-weight corrections over the 3x3 | 4 candidate logits, edge-stopping, hit-distance coupling, gate |
+| filter | distance-to-edge blend of neighbour colours | NRD resolve: pyramid candidates + short stabiliser |
+| without weights | the analytic baseline blend | FidelityFX's own resolve |
+
+- **Features** are normalised to O(1) (log-luminance, ratios to the tile mean, motion in pixels / 16), so
+  one set of weights serves every scene brightness.
+- **Bounded outputs:** every output goes through a sigmoid or a softmax mapped to a hand-chosen safe
+  range. The network cannot leave the range the filter was tested in, and both filters only ever
+  form convex mixes of values that already exist in the frame.
+- **Gate:** a per-record confidence below threshold falls back to the "without weights" path for that
+  record.
 
 ---
 
 ## 3. NeuRAA
 
-### What it drives
+### What it is
 
-The TAAU resolve in `modules/render.sr/shaders/sr_taa.hlsl`, unchanged in structure:
+Single-frame edge anti-aliasing, redesigned 2026-10-05. Primary visibility finds the edges; the
+network only decides how to blend each edge pixel with its neighbours. It replaces nothing in the TAA:
 
-| parameter | today | NeuRAA range |
+| camera | path | network |
 |---|---|---|
-| history blend weight alpha | 0.1-0.25, scaled by `nmax` | [0.02, 1] |
-| variance clip width (sigma) | 1.25 | [0.5, 4] |
-| reconstruction sharpness (kernel scale) | fixed | [0.5, 2] |
-| RCAS sharpening | editor setting | [0, setting] |
+| moving | NeuRAA edge AA at render resolution, then AverSR's spatial fallback (FSR 1 EASU, which expects anti-aliased input) | yes |
+| still | AverSR's TAAU (min/max clip, section 7), no NeuRAA | no |
 
-### Features per tile (~16 floats)
+The moving path is today's weak spot: TAA runs only while the camera is still, so in motion edges get
+no anti-aliasing at all. A single-frame method has no history, so it cannot ghost or smear, which is
+what retired TAA in motion. Keeping the network out of the still path also keeps it away from every
+claim that needs history blending (section 7).
 
-Motion length and its spread across the tile; depth discontinuity (max relative dz); disocclusion
-fraction (pixels whose history position fails the depth test); the neighbourhood YCoCg mean and sigma;
-history-to-mean distance in sigmas (how much the current clip would cut); `nmax` (how close this
-frame's nearest jittered sample landed); luminance contrast; mean roughness; frames since the history
-last reset; and whether the tile is under the editor's chrome.
+### Pipeline
 
-### Goal
+```
+primary visibility (gRdVisBuf / G-buffer)
+   -> [1 detect]   edge code per pixel, 8x8 tile flags  -> indirect dispatch of edge tiles only
+   -> [2 coverage] own-triangle edge distances + 4 alpha sub-samples
+   -> [3 blend]    baseline weights  ->  Mlp correction (bounded)  ->  9 weights per edge pixel
+   -> [4 resolve]  colour = sum(w_i * neighbour_i); non-edge pixels untouched
+   -> AverSR spatial upscale
+```
 
-TAA that holds up in motion, so the "only while still" rule can retire. That rule stays until NeuRAA
-beats it on the moving-camera rig (section 6).
+### 1. Edge detection (cheapest first)
 
-### Training
+The ray-driven path (the default) already writes, per pixel, `gRdVisBuf = (instance ref, triangle,
+barycentrics.xy)`; both paths write `viewZ` and `normalRoughness`. Detection reads those, nothing new:
 
-The resolve is not differentiable through `Mlp`, which trains records against targets. So training
-is two steps:
+- **Tile pre-pass:** one 8x8 group per tile computes min/max instance ref and min/max `viewZ` in LDS,
+  with `WaveActiveAllEqual` on the instance ref. Tiles that are one instance with a smooth depth range
+  (most of the screen) are skipped by every later stage. Cost: one read of the visibility buffer
+  (~28 MB at 1766x994), ~0.05 ms (estimate).
+- **Per pixel, in surviving tiles:** an edge exists toward a neighbour when the **instance differs**, or
+  the instance is the same but **depth jumps** (relative dz above a slope-aware threshold) or the
+  **normal turns** more than ~30 degrees. A different triangle of the same smooth surface is not an
+  edge: the triangle ID alone fires on every tessellation edge. The result is a byte: 4 direction bits
+  and a class (silhouette, crease, alpha-masked). Nothing counts the triangles in a pixel (section 7).
+- **Raster path:** no instance ID exists in its G-buffer, so it uses depth + normal only. That misses
+  coplanar object boundaries, which matter little (no geometric step to alias). An instance ID target
+  (R32) can be added later if the measurement says so.
+- **Luma** (FXAA/SMAA style) is cheaper still, but fires on texture detail and misses equal-brightness
+  edges. It is used only as a network input for shading contrast, never to decide where edges are.
+- **Last frame's mask** is not reused: detection is already the cheap stage, and reprojecting a mask
+  costs about as much as recomputing it.
 
-1. **Oracle parameters.** For a captured frame, per tile, search the parameter range (a coarse grid,
-   then a local refine) for the setting whose resolved tile is closest to the reference. The
-   reference is the same camera pose accumulated over 64 jittered frames at the same render scale.
-2. **Regression.** Train the MLP to map the tile's features to its oracle parameters.
+Expected edge share: 5-15% of pixels; the tile flags make stages 2-4 scale with that, not the screen.
 
-The oracle search scores candidates by relative L2 against the reference, plus a temporal-stability
-term (frame-to-frame change not present in the reference) and a ghosting term (energy left behind a
-moving object's previous position). Those image-space scores are used only inside the search and the
-gate; nothing back-propagates them (section 7). Captures come from scripted camera paths (`--cam-wobble`, `--cam-translate`) on NeonDistrict
-Day and Night, NewSponza and the test levels, all run in a visible window.
+### 2. Coverage
 
-Weights ship in `bin/data` as an AVNN file, as NeuraFI's do. An optional on-device refinement can use
-the at-rest accumulation as its live reference, gated like NeuraFI's.
+How much of the pixel each side of the edge covers. Every edge pixel gets the **same** computation;
+the edge class is a network input, never a switch between methods (section 7):
+
+- **Own edge distance.** Each pixel uses only the triangle its own visibility record names: its
+  vertices are the same index and vertex loads shading does (`rdSurfaceFromRecord`). Project the
+  triangle's edges to screen space and store, per direction with a detected discontinuity, the signed
+  distance in pixels from the pixel centre to where that edge crosses (clamped to +-1 px; "no crossing"
+  is +1). This is distance-to-edge AA (Malan 2010, Persson 2011) evaluated from ray-hit data, and it
+  gives a continuous edge position rather than a few samples. A pixel never computes another
+  triangle's distance; it reads its neighbours' own stored values.
+- **Alpha coverage.** The alpha-test texture sampled at 4 sub-pixel UVs, from the barycentrics and their
+  screen derivatives (1.0 for opaque materials). Foliage and fence edges live in the texture, not the
+  triangle.
+- **Raster path:** it has no triangle ID, so its G-buffer pass writes the same distances itself from
+  `SV_Barycentrics` and their derivatives (DEAA's `v / (dv/dx)`), one small extra target; without it,
+  raster edges get the depth/normal classification and alpha samples only.
+- **No extra rays in v1.** Tracing more primary rays at edge pixels is the classic answer (Whitted
+  1980), but a pending NVIDIA application claims ray tracing to correct edge pixels in very broad terms
+  (section 7). It stays out until that claim settles.
+
+Estimated cost at render scale 0.5: ~0.15 ms.
+
+**Known gap:** geometry thinner than a pixel that no primary ray hit is invisible to all of this and
+will flicker in motion. At rest the TAA path covers it; in motion it is the measured weak point
+(section 6's thin-geometry level).
+
+### 3. Blend weights: baseline, then network
+
+- **Baseline (ships first, no network):** the closed-form distance-to-edge blend: each edge pixel mixes
+  with the neighbour across the edge by the covered fraction its own and that neighbour's stored
+  distances give (GBAA's resolve, Persson 2011), times the alpha coverage. It is what runs without
+  weights, and it alone fixes the in-motion stair-stepping.
+- **Network:** per edge pixel, an `Mlp` record (~24 floats): its own and its 8 neighbours' stored edge
+  distances, alpha coverage, the neighbours' same-instance bits, the edge class, neighbours' luma
+  relative to the pixel, and the depth gradient across the edge. It outputs 9 logits that **adjust** the
+  baseline weights (softmax of baseline log-weights plus the bounded correction). Weights are
+  non-negative and sum to 1, so the result is always a convex mix of real neighbour colours: it cannot
+  invent colour or brightness.
+- **What the network is for:** the cases the line model gets wrong: corners, two edges, thin features,
+  edges along a texture or lighting gradient, and edge pixels whose neighbours are themselves mixed.
+- **Size:** edge pixels only (~90-180k records at render scale 0.5), a 3-layer width-32 MLP; ~0.15 ms
+  (estimate, scaled from NeuraFI's measured 1.75M records in 3.5 ms).
+
+### 4. Training
+
+Parameter space only, as NRD:
+
+1. **Reference:** the same frame supersampled at 64 jittered sub-pixel positions with the camera still
+   (the ray-driven path renders this directly), so every edge pixel has a true coverage-weighted colour.
+2. **Oracle weights:** per edge pixel, the 9 non-negative weights summing to 1 whose mix of the
+   neighbour colours is closest to the reference pixel (a small non-negative least-squares fit).
+3. **Regression:** the network learns to map the record to those weights. No image loss is
+   back-propagated (section 7).
+
+Captures come from scripted camera paths on NeonDistrict Day and Night, NewSponza and the test levels,
+all run in a visible window. Weights ship in `bin/data` as an AVNN file. A gate keeps the baseline where
+the network measures worse.
 
 ### Cost (estimate)
 
-Feature pass ~0.15 ms, inference ~0.2 ms, resolve unchanged plus one bilinear fetch: ~0.4 ms at render
-scale 0.5 on the RX 7800 XT.
+Detect ~0.05 ms, coverage ~0.15 ms, inference ~0.15 ms, resolve ~0.05 ms: ~0.4 ms at render scale 0.5 on
+the RX 7800 XT, in motion only.
 
 ---
 
 ## 4. NRD
 
-### What it drives
+### What it is
 
-FidelityFX's reflection pipeline in `aver_denoise.hlsl`, which already supplies its own copy of the
-FidelityFX config. Today those are constants; under NRD three of them become per-thread values read
-from the parameter texture (a `static` set at the top of each entry point, which the config macros
-name, so the vendored headers stay untouched), and the clip weight, which FidelityFX already takes as
-an argument, is passed per pixel:
+A replacement for **one** FidelityFX pass, the temporal resolve, designed 2026-10-05. Reproject and
+prefilter stay exactly as they are. Where FidelityFX's resolve trusts history first and rejects outliers
+against an 8x8 average, NRD builds its estimate **spatially first**, from the current frame, and keeps
+only a short hand-written temporal stabiliser. The two problems measured this week come from the
+resolve: light lost to outlier rejection (denoised GI 0.84 of the true mean at the radiance weight of
+0.2, `DENOISING.md`), and blotching and smearing from long history in motion.
 
-| knob | today | NRD range |
-|---|---|---|
-| `RADIANCE_WEIGHT_BIAS` (firefly rejection) | 0.2 | [0, 0.8] |
-| history clip weight | 4 | [0.5, 6] |
-| accumulation speed / max samples | 32 | [4, 64] |
-| `PREFILTER_VARIANCE_BIAS` (spatial spread) | 0.1 | [0.1, 1] |
+```
+Scale -> Reproject (FFX) -> Prefilter (FFX) -> [NRD pyramid] -> Mlp per 8x8 tile -> [NRD resolve]
+                                                                                  \-> FFX resolve (fallback)
+```
 
-### Features per tile (~20 floats)
+### Settings
 
-Sample count (never an input to the prefilter-spread output, section 7); temporal and spatial variance; luminance relative to the 8x8 mean; **tail heaviness**
-(the fraction of the tile's energy carried by samples above 4x and 16x the mean, the quantity that
-separated "fireflies" from "real night light" in the 10-05 measurements); motion length; disocclusion
-fraction; normal and depth gradients; roughness; the signal (GI or sky occlusion) and the GI method
-(ReSTIR GI, ReSTIR PT).
+- **Denoiser** (existing, `RENDER.DENOISER`) and **Neural Denoise** beneath it, a project key
+  `RENDER.NEURALDENOISE` (absent = 0) shown on the denoiser page, greyed out while Denoiser is off.
+  `--neural-denoise 0|1` overrides it, as the other render flags do.
+- **Off by default** for every project until it beats FidelityFX's resolve on the rig (section 6).
+- It covers every signal the denoiser runs: **ReSTIR GI**, **ReSTIR PT / path tracing**, and **sky
+  occlusion** (the scalar build). Reflections and RT shadows are planned to use it later (below).
 
-### Ground truth
+### The NRD resolve
 
-- **ReSTIR path tracing:** the reference path tracer (`ptMode` 1) already accumulates a converged
-  image at a still camera (a running mean of up to 1,024 frames). That is the target.
-- **ReSTIR GI:** the same estimator accumulated at rest over a static scene.
+It writes the same targets as FidelityFX's resolve (`history[cur]`, `varHistory[cur]`), so reproject
+and prefilter see no difference, and switching per tile or toggling the setting never resets history.
+
+1. **Pyramid.** One pass builds two levels from the current frame's **raw** noisy signal, not the
+   prefiltered one (the prefilter's radiance weight darkens): 1/2 and 1/4 resolution, depth- and
+   normal-aware (a child sample counts only if it lies on the parent's surface). FidelityFX's reproject
+   already writes a plain 1/8 mean, reused as the third level; it is 30% reprojected history
+   (`lerp(radiance, reprojection, 0.3)` in its reproject), which is acceptable at that scale. If it
+   measures as lag, the pyramid pass writes its own 1/8 level. Pixels with no fresh sample
+   this frame (half-rate GI's checkerboard, sky) get weight 0; the normalised weights fill them from
+   fresh neighbours, push-pull style. All four candidates per pixel are then: FidelityFX's prefiltered
+   value (finest, edge-aware) and levels 1-3, each upsampled with joint bilateral weights against this
+   pixel's depth and normal.
+2. **Network, once per 8x8 tile** (FidelityFX's group size, ~27k records per signal at render scale 0.5).
+   The pyramid pass also writes the tile record (~20 floats):
+   - log luminance of each level relative to the tile mean;
+   - spatial variance and FidelityFX's temporal variance, as tile means;
+   - **tail heaviness**: the fraction of the tile's energy in samples above 4x and 16x its mean (what
+     separated fireflies from real night light on 10-05);
+   - hit distance: log mean and spread;
+   - depth range and normal spread; motion length; disocclusion fraction; mean roughness; half-rate
+     flag.
+   Deliberately **not** inputs: per-pixel colours, history colours, sample count and frame time
+   (section 7). Outputs, all bounded: 4 logits over the candidates, depth and normal edge-stopping
+   sharpness, hit-distance coupling, and a gate confidence.
+3. **Per-pixel spatial estimate S.** The tile's logits plus per-pixel terms (a candidate whose bilateral
+   weight failed drops out; a short **hit distance** shifts weight toward the fine candidates, since
+   nearby geometry makes indirect light change quickly) go through a softmax. The weights are
+   non-negative and sum to 1, so S keeps the local energy: a firefly is spread over its neighbourhood
+   instead of being deleted, which is what keeps brightness right.
+4. **Short stabiliser (hand-written, no network).** `out = lerp(S, clamp(H), a)`: `H` is reproject's
+   history at this pixel, clamped to the 3x3 min/max of S (Karis 2014, not a mean +- sigma box);
+   `a = 1 - 1/min(n, N)` with `n` reproject's sample count and `N` = 4 frames while the camera or the
+   surface moves, 16 at rest. History only steadies the residual flicker; it never decides brightness.
+   `varHistory` is updated with FidelityFX's formula so its prefilter keeps the same input.
+5. **Fallback.** With no weights for a signal, the whole pass runs FidelityFX's own resolve. With
+   weights, a tile whose gate confidence is low runs FidelityFX's resolve for that 8x8 group: the same
+   shader carries both paths, and the branch is uniform per group because the tile is the group.
+
+### Hit distance
+
+FidelityFX is given a hit distance of 0 today. NRD needs the real one per pixel:
+
+- **ReSTIR GI:** the reservoir already holds the sample's hit point. The GI pass writes the distance
+  into the alpha of `gGiRadianceOut`, which is written as 0 today: one store, no new target. That pass
+  is the register-pressure-sensitive `giRestirIndirect` (the RX 7800 XT hang of 10-04), so this is
+  verified with DRED in a visible window before anything else builds on it. If it adds pressure, NRD
+  reads the hit point from the reservoir buffer itself instead (~0.1 ms).
+- **Sky occlusion:** the signal *is* a normalised hit distance.
+- **ReSTIR PT:** the first bounce's distance if the PT path stores it; otherwise the input is 0 with
+  a "missing" flag, and that profile's network learns without it.
+
+### Signal profiles and later signals
+
+One AVNN weight file per profile (`nrd_gi`, `nrd_pt`, `nrd_ao`), each trained on its own signal. For
+**reflections**, the design keeps a roughness input and the reproject pass's parallax reprojection
+(FidelityFX's native case); the pyramid's footprint has to follow the lobe, so it needs its own profile
+and training. **RT shadows** would use blocker distance as the hit distance (penumbra width), with
+FidelityFX's shadow denoiser as the fallback rather than the reflection pipeline.
 
 ### Training
 
-The same oracle-then-regress scheme as NeuRAA. The oracle search scores candidate parameters by three
-terms chosen from what went wrong this week, and the network is then regressed onto the winning
-parameters only (no image-space loss is back-propagated, section 7):
+Pre-trained offline; weights ship in `bin/data` like NeuraFI's, the same for every project.
 
-- **Error:** relative L2 against the reference.
-- **Energy:** the tile's mean against the reference's mean. This is the term that stops the chosen
-  parameters from darkening, which is what every global setting did (0.49-0.84 of the true GI).
-- **Blotching:** temporal flicker and the spot metric from the 10-05 rig (`--cam-wobble 30 16`).
+1. **References:** the reference path tracer's converged still frames (up to 1,024 accumulated) for PT,
+   and the same estimator accumulated at rest for ReSTIR GI and sky occlusion.
+2. **Oracle parameters:** per tile, search the outputs (a coarse grid, then a local refine) for the
+   setting whose result is closest to the reference, scored by relative L2, the **energy ratio** (tile
+   mean against the reference mean) and **flicker** across a short moving sequence.
+3. **Regression:** the network learns to map the tile record to the oracle parameters. No image loss is
+   back-propagated (section 7).
+4. **Rollout:** because the stabiliser feeds back, the frames are re-captured with the trained network
+   running and the oracle refit once or twice. The short history (4 frames in motion) keeps this
+   stable.
 
-### Cost (estimate)
+Scenes: NeonDistrict Day and Night, NewSponza and NewSponza_Night, captured on scripted camera paths in
+a visible window; camera paths are split between training and evaluation.
 
-Feature pass ~0.15 ms, inference ~0.2 ms, denoiser unchanged: ~0.35 ms.
+### Cost (estimate, render scale 0.5, RX 7800 XT, per RGB signal)
+
+Pyramid + tile records ~0.1 ms, inference ~0.05 ms, resolve ~0.15 ms: ~0.3 ms, against a budget of
+**+1 ms** over FidelityFX's resolve for everything NRD runs. Within that budget the cheapest setting
+that meets the quality bar wins: two pyramid levels plus the reused 1/8 mean before three; 8x8 tiles
+before 4x4.
 
 ---
 
 ## 5. Where the code goes
 
 - `modules/render.neural`: unchanged for v1.
-- `modules/render.sr`: `NeuRaa` beside `TemporalUpscaler` (feature pass, parameter texture, the resolve
-  reading it). Setting `RENDER.NEURAA`, `--neuraa 0|1`, Display > Anti-aliasing.
-- `modules/render.denoise`: `Nrd` beside `Denoiser` (feature pass, parameter texture, the config statics).
-  Setting `voxi.nrd`, `--nrd 0|1`, the denoiser page.
+- `modules/render.sr`: `NeuRaa` beside `TemporalUpscaler` (tile pre-pass, edge detection, coverage, blend
+  and resolve), called in AverSR's moving-camera path before the spatial upscale. It reads `gRdVisBuf`,
+  `viewZ` and `normalRoughness`. Setting `RENDER.NEURAA`,
+  `--neuraa 0|1|2` (off, baseline, network), Display > Anti-aliasing, plus an edge-class debug view.
+- `modules/render.denoise`: two new passes in `aver_denoise.hlsl`'s one-compile-per-pass scheme, a
+  pyramid pass that also writes the tile records and the NRD resolve (which includes FidelityFX's
+  resolve header for its fallback branch), with `Mlp::recordInfer` between them. `Denoiser` records them
+  in place of the resolve when the setting is on. Setting `RENDER.NEURALDENOISE`,
+  `--neural-denoise 0|1`, a checkbox under Denoiser on the denoiser page.
+- `modules/render.voxi`: the GI hit distance in `gGiRadianceOut.a` (`voxi_restir.hlsli`).
 - A capture mode (`--neuraa-capture` / `--nrd-capture`) that writes feature records and references, and
   an offline oracle-search and training tool built on `MlpReference` (CPU) or `Mlp::recordTrain` (GPU).
+  Weights are pre-trained and shipped; there is no on-device training.
 
 ---
 
@@ -185,58 +330,75 @@ Feature pass ~0.15 ms, inference ~0.2 ms, denoiser unchanged: ~0.35 ms.
 Every comparison runs in a visible window on fixed camera paths, with the linear metrics built on
 2026-10-04/05:
 
-- **NRD:** GI-only linear mean against the reference (bias), the spot metric in motion, and temporal
-  flicker. It ships only if it beats today's constants on all three, by day and by night.
-- **NeuRAA:** error against the 64-frame reference on edges, temporal flicker, and ghost-trail length
-  behind a moving object. It replaces "TAA only while still" only if it beats both that rule and plain
-  TAA in motion.
+- **NRD:** against FidelityFX's resolve, per signal: the GI-only linear mean against the reference
+  (target within 3%, against FidelityFX's 0.84), the spot metric and temporal flicker on
+  `--cam-wobble 30 16`, and cost with `--gpu-timing` (at most +1 ms for everything NRD runs). It stays
+  off by default; it is proposed as the default only if it wins on brightness and spots without worse
+  flicker, by day and by night, on NeonDistrict and NewSponza.
+- **NeuRAA:** on the moving-camera rig, error against the 64-sample reference on edge pixels, edge
+  crawl (frame-to-frame change on edges not present in the reference) and cost. The baseline ships if it
+  beats today's no-AA motion path; the network ships only if it beats the baseline, per scene. A
+  thin-geometry test level (wires, fences, distant railings) tracks the known gap.
 
 ---
 
 ## 7. Patents and licences
 
-A sweep was run on 2026-10-05: [NEURAA_NRD_PATENTS.md](NEURAA_NRD_PATENTS.md) (engineering mapping,
-not legal advice). Predicting bounded per-tile parameters rather than pixels or per-pixel kernels does
-clear most of the neural denoising and upscaling families (they need image or kernel outputs). It does
-**not** clear four, and the design changes accordingly unless counsel says otherwise:
+Sweeps were run on 2026-10-05: [NEURAA_NRD_PATENTS.md](NEURAA_NRD_PATENTS.md) (engineering mapping, not
+legal advice). The design follows them unless counsel says otherwise:
 
-1. **The baseline clamp.** NVIDIA US 10,116,916 claims TAA history adjusted by a per-colour-channel
-   mean ± sigma axis-aligned box, which is the shipped TAAU's clip and arguably FidelityFX's resolve
-   clip, with or without a network. NeuRAA's resolve (and, ideally, the shipped TAA now) replaces the
-   box with a **scalar luminance-distance down-weighting** of history, or a neighbourhood **min/max**
-   clip; NeuRAA's "clip width" becomes that test's falloff width.
-2. **NeuRAA without a neural network in the upscaling path.** NVIDIA US 12,033,301 claims generating
-   higher-resolution video *using one or more neural networks* from upsampled frames blended with
-   prior output, its dependents name a predicted blending factor and kernel factors, and its training
-   claims reach the oracle regression. NeuRAA keeps the tile-parameter architecture, oracle search,
-   bounds, fallback and gate, but fits the per-tile parameters with a **non-neural regressor**
-   (quantised-feature lookup table, piecewise/polynomial fit or small tree ensemble) trained directly on
-   the oracle data. Whether a network may be used at native resolution only is counsel's question.
-3. **NRD trains in parameter space only.** The University of California's US 10,832,091 (Kalantari et al.)
-   claims back-propagating an image error between filtered output and ground truth. NRD regresses onto
-   oracle parameters; image-space error is used only to score the search and in the gate.
-4. **NRD keeps sample count away from spatial filter size.** NVIDIA US 11,113,792 claim 15 covers a
-   spatial filter sized from the temporal history count.
+1. **History clamps use min/max, not mean +- sigma.** NVIDIA US 10,116,916 (in force to 2037) claims
+   TAA history clipped to a per-colour-channel mean +- sigma box. NRD's stabiliser clamps to the 3x3
+   min/max (Karis 2014, Sousa 2013), and so should the shipped TAA. FidelityFX's own resolve, which NRD
+   falls back to, keeps its box; that is the shipped-denoiser finding, not NRD's.
+2. **NeuRAA's network stays out of upscaling and history.** NVIDIA US 12,033,301 and its continuations
+   claim networks generating higher-resolution video from upsampled frames blended with prior output.
+   NeuRAA's network runs only in the moving path, at render resolution, on one frame, before a
+   non-neural spatial upscaler, and is off whenever the TAAU blends history.
+3. **NeuRAA: one treatment, no triangle counting, no extra rays.** NVIDIA's 2018 edge-AA family claims
+   selecting an AA technique from a count of primitives in a pixel (US 12,444,026, granted 2025-10-14),
+   selecting among several AA algorithms by whether pixels are edges (US 12,141,946), and, pending,
+   ray tracing to correct miscoloured pixels in very broad terms (US 2025/0299305). Every edge pixel
+   gets the same computation, the edge class is only a network input, and no extra primary rays are
+   traced until that application's claims settle. Qualcomm US 11,631,215 claims blending from a pixel's
+   own and an auxiliary primitive's edge distances: each pixel computes only its own triangle's
+   distance and reads its neighbours' own values (GBAA, 2011, practises that). AMD US 9,019,299 (to
+   ~2029) claims grouping pixels by sample values with a filter per group; NeuRAA classifies from
+   visibility records, which counsel should confirm is outside it.
+4. **NRD trains in parameter space only.** The University of California's US 10,832,091 claims
+   back-propagating an image error between filtered output and ground truth.
+5. **NRD's spatial footprint never depends on sample count.** NVIDIA US 11,113,792 claim 15 covers a
+   temporal filter followed by a spatial filter sized from the history count. NRD is spatial first, its
+   scale choice comes from hit distance and tile statistics, and sample count only sets the
+   stabiliser's history weight.
+6. **NRD's network never sees per-pixel or history colours, or frame time.** Intel US 12,374,006 (in
+   force to 2043) claims a history-validation network fed, per pixel, the current colour, depth,
+   auxiliary buffers, the reprojected history colour and the time between frames. NRD's network gets
+   tile aggregates only and outputs spatial parameters; history is handled by hand-written code.
+7. **Un-jitter before the denoiser** (Arm US 18/497,608, granted 2026-09-29).
+8. **Watch:** AMD's pending US 2026/0094228 (any trained network in a pipeline stage; every claim
+   rejected as of 2026-08-12) and NVIDIA's US 2025/0299305 and US 2026/0073486.
 
-Status was checked live on 2026-10-05: US 10,116,916, US 11,113,792 and US 10,832,091 are in force with
-fees paid. Arm's US counterpart of GB 2635953 (appl. 18/497,608) was **granted 2026-09-29** unamended. It
-claims denoising that preserves the jitter vectors before a TAA or upsample using them. That is the
-shipped order, avoided by un-jittering before the denoiser. AMD's pending US 2026/0094228 (any trained
-network inside a render pipeline stage, which would also concern NeuraFI and NeuRaC) has every claim
-rejected as of 2026-08-12.
-**Counsel should review before either feature ships.** Nothing is vendored: the code is
-`Aver.Render.Neural` and the in-house filters, plus the MIT FidelityFX Denoiser (whose licence grants no
-third-party patent rights).
+NRD's own sweep (multi-scale learned blending, hit-distance kernels, push-pull filling) is section 9 of
+the patents document. **Counsel should review before either feature ships.** Nothing is vendored: the
+code is `Aver.Render.Neural` and the in-house filters, plus the MIT FidelityFX Denoiser (whose licence
+grants no third-party patent rights).
 
 ---
 
 ## 8. Phases
 
-1. **Plumbing, no visual change.** Feature passes and parameter textures, filled with today's constants.
-   Verified bit-identical.
-2. **Capture and oracle.** The capture mode, the reference accumulation and the oracle search. This
-   alone answers how much is available: oracle parameters are the ceiling any network can reach.
-3. **Train and ship NRD** (the measured problem is sharper there), with weights in `bin/data` and the
-   gate.
-4. **Train and ship NeuRAA**, then retire "TAA only while still" if it measures better.
-5. **Optional on-device refinement** at rest, behind the gate.
+1. **Plumbing, no visual change.** The Neural Denoise setting and the NRD resolve pass running only its
+   FidelityFX branch (verified identical to today); NeuRAA's tile pre-pass, edge detection and the
+   edge-class debug view.
+2. **GI hit distance** in `gGiRadianceOut.a`, checked with DRED in a visible window on the RX 7800 XT
+   before anything uses it.
+3. **NeuRAA baseline in motion, no network.** Own-triangle edge distances, alpha sub-samples and the
+   distance-to-edge blend. This alone fixes in-motion stair-stepping.
+4. **NRD with fixed parameters**, behind a developer flag: the pyramid, hit-distance weighting and
+   stabiliser with hand-tuned constants. This answers the two open questions (brightness and flicker of
+   a spatial-first resolve) before any training.
+5. **Capture and oracle.** The capture modes, references (64-sample still frames for NeuRAA, converged
+   path tracing for NRD) and the oracle fits. Oracle results are the ceiling any network can reach.
+6. **Train and ship NRD weights** (GI, PT, sky occlusion), off by default, behind the gate.
+7. **Train and ship NeuRAA's network** over the baseline, behind its gate.
