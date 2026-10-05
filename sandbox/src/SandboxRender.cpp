@@ -2404,10 +2404,12 @@ void SandboxApp::applyUpscalerSlot(rhi::IDevice* dev) {
     if (wantFsr && !averSrUpscaler_ && res) averSrUpscaler_ = std::make_unique<aver::sr::FsrUpscaler>(*res);
     rhi::IUpscaler* slot = temporalAaEnabled_ ? static_cast<rhi::IUpscaler*>(taaUpscaler_.get())
                          : wantFsr ? averSrUpscaler_.get() : nullptr;
-    if (neuraaDebugView_ && !neuraa_ && res) neuraa_ = std::make_unique<aver::sr::NeuRaa>(*res);
-    if (neuraaDebugView_ && neuraa_) {
+    const bool wantNeuRaa = neuraaEnabled_ || neuraaDebugView_;
+    if (wantNeuRaa && !neuraa_ && res) neuraa_ = std::make_unique<aver::sr::NeuRaa>(*res);
+    if (wantNeuRaa && neuraa_) {
         neuraa_->setInner(slot);
-        neuraa_->setDebugView(true);
+        neuraa_->setEnabled(neuraaEnabled_);
+        neuraa_->setDebugView(neuraaDebugView_);
         slot = neuraa_.get();
     }
     if (averSrUpscaler_) {
@@ -2421,7 +2423,7 @@ void SandboxApp::applyUpscalerSlot(rhi::IDevice* dev) {
     if (dev->upscaler() != slot) dev->setUpscaler(slot);
     if (!wantFsr && averSrUpscaler_) averSrUpscaler_.reset();
     if (!temporalAaEnabled_ && taaUpscaler_) taaUpscaler_.reset();
-    if (!neuraaDebugView_ && neuraa_) neuraa_.reset();
+    if (!wantNeuRaa && neuraa_) neuraa_.reset();
 }
 
 // Logs the [AverSR] brand-tag line: current render scale, and whether an upscaler was

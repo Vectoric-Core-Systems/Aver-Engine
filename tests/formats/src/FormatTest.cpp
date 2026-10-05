@@ -229,6 +229,15 @@ static void checkOcproject() {
         check(writeOcproject(t, w) == w, "once -- isOwnedKey covers it");
     }
     {
+        // RENDER.NEURAA: NeuRAA edge AA; absent leaves it off.
+        ProjectDesc t;
+        check(parseOcproject("OCPROJECT 1\nNAME T\nRENDER.NEURAA 1\n", t, &err), "RENDER.NEURAA parses");
+        check(t.neuraa == 1 && t.hasRenderSettings(), "NeuRAA on is a stated render setting");
+        const std::string w = writeOcproject(t, "");
+        check(w.find("RENDER.NEURAA 1") != std::string::npos, "and is written back");
+        check(writeOcproject(t, w) == w, "once -- isOwnedKey covers it");
+    }
+    {
         // RENDER.NEURALDENOISE (docs/rendering/NEURAA_NRD.md): absent leaves it off.
         ProjectDesc t;
         check(parseOcproject("OCPROJECT 1\nNAME T\nRENDER.NEURALDENOISE 1\n", t, &err), "RENDER.NEURALDENOISE parses");

@@ -172,6 +172,7 @@ void applyNewProjectRenderDefaults(fmt::ProjectDesc& d) {
     d.averSr             = 3;      // Performance: render scale 0.5
     d.frameInterp        = 1;
     d.taa                = 0;
+    d.neuraa             = 0;      // NeuRAA edge AA: off until measured
     d.msaa               = 1;
     d.meshShaders        = 1;
     d.postAutoExposure   = 1;

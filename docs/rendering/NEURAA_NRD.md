@@ -3,10 +3,12 @@
 **NeuRAA** = Neural Realtime Anti-Aliasing. **NRD** = Neural Realtime Denoising, a hybrid of the AMD
 FidelityFX Denoiser the engine already runs and a small neural network.
 
-**Status (2026-10-05):** phase 1 code is in, built but not yet run: the Neural Denoise setting and NRD's
-resolve slot (running FidelityFX's resolve), NeuRAA's edge detection with the "Edge Classes (NeuRAA)"
-view mode, and the raster + MSAA G-buffer resolve. Edge detection does not classify alpha-masked edges
-yet (the material flags live in Voxi), and its tile pass is one combined detect pass. Every millisecond
+**Status (2026-10-05):** phase 1 is in and the edge view was checked by the owner: the Neural Denoise
+setting and NRD's resolve slot (running FidelityFX's resolve), NeuRAA's edge detection with the "Edge
+Classes (NeuRAA)" view mode, and the raster + MSAA G-buffer resolve. Phase 3's baseline followed, built
+but not yet run: the project setting RENDER.NEURAA (Anti-Aliasing page, `--neuraa` / `--no-neuraa`) and
+the distance-to-edge blend. Not yet: alpha-masked edges (the material flags live in Voxi) and the
+network. Every millisecond
 below is an estimate unless it says *measured*.
 
 **One-line summary:** a small network predicts the *parameters* of a filter we already have; it never
@@ -140,8 +142,11 @@ Expected edge share: 5-15% of pixels; the tile flags make stages 2-4 scale with 
 How much of the pixel each side of the edge covers. Every edge pixel gets the **same** computation;
 the edge class is a network input, never a switch between methods (section 7):
 
-- **Own edge distance.** Each pixel uses only the triangle its own visibility record names: its
-  vertices are the same index and vertex loads shading does (`rdSurfaceFromRecord`). Project the
+- **Own edge distance.** Each pixel uses only the triangle its own visibility record names. AverSR
+  cannot read Voxi's vertex buffers (module boundary), so the distance comes from the record's
+  barycentrics instead: their change to a neighbour on the same triangle is the per-pixel gradient,
+  and the distance to the edge where a barycentric reaches 0 is `b / -(db/dx)` (DEAA's `v / (dv/dx)`);
+  with no same-triangle neighbour on that axis the pixel is left unblended. Equivalently: project the
   triangle's edges to screen space and store, per direction with a detected discontinuity, the signed
   distance in pixels from the pixel centre to where that edge crosses (clamped to +-1 px; "no crossing"
   is +1). This is distance-to-edge AA (Malan 2010, Persson 2011) evaluated from ray-hit data, and it

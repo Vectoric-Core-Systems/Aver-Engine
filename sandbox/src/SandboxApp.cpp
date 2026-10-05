@@ -2134,7 +2134,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     const bool wantGbufForFrameInterp = updateFrameInterpolation(e.device());
 #if AVER_MODULE_SR
-    const bool wantGbufForTaa = temporalAaEnabled_;   // its resolve reads velocity and view Z
+    // TAA's resolve reads velocity and view Z; NeuRAA reads view Z and normals.
+    const bool wantGbufForTaa = temporalAaEnabled_ || neuraaEnabled_;
 #else
     const bool wantGbufForTaa = false;
 #endif

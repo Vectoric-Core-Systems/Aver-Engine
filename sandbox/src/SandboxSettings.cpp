@@ -1345,6 +1345,27 @@ void SandboxApp::buildRenderingSettings(int page) {
                                    "   MSAA is %ux -- TAA needs 1x, so FSR 1 is used instead.",
                                    static_cast<u32>(s.msaa));
         }
+        {
+            bool nra = neuraaEnabled_;
+            ImGui::BeginDisabled(neuraaFromCli_);
+            if (ImGui::Checkbox("NeuRAA edge anti-aliasing", &nra)) {
+                neuraaEnabled_ = nra;
+                project_.neuraa = nra ? 1 : 0;
+                projectDirty_ = true;
+            }
+            ImGui::EndDisabled();
+            uiReg_.track("project.neuraa");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Finds geometric edges from the ray-traced primary visibility and blends\n"
+                                  "each edge pixel with its neighbour by how much of it each surface covers.\n"
+                                  "One frame, no history: it works while the camera moves, where TAA does not,\n"
+                                  "and TAA builds on it at rest. Ray-driven primary visibility only; the\n"
+                                  "rasteriser uses MSAA. View Mode > Edge Classes (NeuRAA) shows what it finds.\n\n"
+                                  "Round-trips as RENDER.NEURAA. --neuraa / --no-neuraa outrank it.");
+            if (nra && er.rtRenderMode.effective != 1)
+                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                                   "   Primary visibility is the rasteriser -- NeuRAA needs primary rays.");
+        }
 #endif
         ImGui::Separator();
 #if AVER_MODULE_SR

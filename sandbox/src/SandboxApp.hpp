@@ -1557,6 +1557,7 @@ public:
 
     void setEdgeAaOverride(bool on);   // --edge-aa
     void setTaaOverride(bool on) { temporalAaEnabled_ = on; taaFromCli_ = true; }   // --taa / --no-taa
+    void setNeuRaaOverride(bool on) { neuraaEnabled_ = on; neuraaFromCli_ = true; } // --neuraa / --no-neuraa
 
     void applyUpscalerSlot(rhi::IDevice* dev);
 
@@ -3322,6 +3323,8 @@ private:
     std::unique_ptr<aver::sr::NeuRaa> neuraa_;
     bool temporalAaEnabled_ = true;   // the project's RENDER.TAA (unstated = on); --no-taa / --taa win over it
     bool taaFromCli_ = false;
+    bool neuraaEnabled_ = false;      // the project's RENDER.NEURAA (unstated = off)
+    bool neuraaFromCli_ = false;
     // Edge AA (FXAA-class) in FSR's first pass: --edge-aa or Display > Edge anti-aliasing.
     bool edgeAaEnabled_ = false;
     f32  fsrSharpness_ = 0.2f;   // RCAS stops (0 = sharpest); Display > Sharpening

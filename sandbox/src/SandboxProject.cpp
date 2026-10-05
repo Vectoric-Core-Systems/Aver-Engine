@@ -318,6 +318,7 @@ void SandboxApp::applyProjectRenderSettings() {
     averSrProjectDefault_ = project_.averSr;
     // Mirrors too: an unstated RENDER.TAA is the engine default (on), not "keep the last project's".
     if (!taaFromCli_) temporalAaEnabled_ = project_.taa != 0;
+    if (!neuraaFromCli_) neuraaEnabled_ = project_.neuraa > 0;
 #endif
 
     if (!project_.hasRenderSettings()) return;

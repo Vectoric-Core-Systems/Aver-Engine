@@ -94,6 +94,9 @@ struct ProjectDesc {
     // RENDER.TAA: temporal anti-aliasing (AverSR TAAU). -1 / absent = engine default (on);
     // CLI --taa / --no-taa outranks it.
     int taa = -1;         // RENDER.TAA  0 off, 1 on (needs MSAA 1; otherwise FSR 1 is used)
+    // RENDER.NEURAA: NeuRAA edge anti-aliasing on ray-driven frames (docs/rendering/NEURAA_NRD.md).
+    // -1 / absent = off; CLI --neuraa / --no-neuraa outranks it.
+    int neuraa = -1;      // RENDER.NEURAA  0 off, 1 on
 
     // ---- UI SETTINGS THAT THE FILE COULD NOT HOLD (now fixed) ---------------------------------
     // These were live controls in Project Settings that applied immediately, then vanished on reopen
@@ -134,7 +137,7 @@ struct ProjectDesc {
                msaa >= 0 || meshShaders >= 0 || giUpdateInterval >= 0 || hasGiVolume ||
                postExposure >= 0.0f || postBloom >= 0.0f ||
                postAutoExposure >= 0 || postTonemap >= 0 ||
-               !backend.empty() || frameBudgetMs > 0.0f || averSr >= 0 || taa >= 0;
+               !backend.empty() || frameBudgetMs > 0.0f || averSr >= 0 || taa >= 0 || neuraa >= 0;
     }
 
     // ---- WINDOW.* -- shipped game window presentation (now persisted) -------------------------
