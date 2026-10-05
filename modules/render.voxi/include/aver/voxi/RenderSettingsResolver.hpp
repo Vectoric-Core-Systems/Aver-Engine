@@ -37,7 +37,6 @@ enum class DisableReason : u8 {
     RequiresStagedRayDriven,      // SOFT: giRestirVisibility = Cached (4) only runs in the STAGED
                                    // ray-driven path on D3D12 (rtRenderMode 1, rayDrivenStages >= 1);
                                    // anywhere else it behaves as Half resolution. Warns; does not grey.
-    RequiresDenoiser,             // neuralDenoise only acts while the denoiser itself runs
     Count
 };
 
@@ -101,8 +100,6 @@ inline const char* disableReasonText(DisableReason r) {
             return "Only applies when Primary visibility is Primary rays.";
         case DisableReason::RequiresStagedRayDriven:
             return "Cached needs staged ray-driven primary visibility on D3D12; until then it runs as Half resolution.";
-        case DisableReason::RequiresDenoiser:
-            return "Only applies when the Denoiser is on.";
         default:
             return "Unavailable.";
     }
@@ -126,7 +123,6 @@ struct FieldResolution {
 struct Resolution {
     Quality globalIllumination, rayTracing, pathTracing;
     FieldResolution giMode, rtRenderMode, refractionMode, denoiser;
-    FieldResolution neuralDenoise;        // Borrows the denoiser's reason chain
     FieldResolution giRestirVisibility;   // U1: effective == requested always (gated by giMode)
     FieldResolution giRestirMaxHistory;   // Borrows giRestirVisibility's reason chain
     FieldResolution rayDrivenStages;      // Borrows rtRenderMode's reason chain
@@ -239,10 +235,6 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
     r.denoiser.requested = s.denoiser ? 1u : 0u;
     r.denoiser.reason    = denoiseReason;
     r.denoiser.effective = (s.denoiser && denoiseReason == DisableReason::None) ? 1u : 0u;
-    r.neuralDenoise.requested = s.neuralDenoise ? 1u : 0u;
-    r.neuralDenoise.reason    = denoiseReason != DisableReason::None ? denoiseReason
-                              : (!s.denoiser ? DisableReason::RequiresDenoiser : DisableReason::None);
-    r.neuralDenoise.effective = (s.neuralDenoise && r.denoiser.effective) ? 1u : 0u;
 
     // Allocate ~54 MB G-buffer when: denoiser requested (Path Tracing turns it on in VoxiRenderer::setSettings)
     // AND (no reason, or only soft MSAA reason).

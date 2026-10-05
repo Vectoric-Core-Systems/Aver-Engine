@@ -77,7 +77,6 @@ static bool settingsEqual(const voxi::Settings& a, const voxi::Settings& b) {
            a.giUpdateInterval == b.giUpdateInterval &&
            a.giMode == b.giMode &&
            a.denoiser == b.denoiser &&
-           a.neuralDenoise == b.neuralDenoise &&
            a.giRestirMaxHistory == b.giRestirMaxHistory &&
            a.denoiserMaxSamples == b.denoiserMaxSamples &&
            near(a.denoiserHistoryClipWeight, b.denoiserHistoryClipWeight) &&
@@ -122,7 +121,6 @@ static void testEveryKeyReachesSettings() {
         p.giCones            = 11;
         p.giMode             = 1;
         p.denoiser           = 1;
-        p.neuralDenoise      = 1;
         p.refractionMode     = 2;
         p.refractionStrength = 0.42f;
         p.refractionEdgeFade = 0.05f;
@@ -147,7 +145,6 @@ static void testEveryKeyReachesSettings() {
         check(s.giCones == 11, "RENDER.GICONES -> Settings::giCones");
         check(s.giMode == 1, "RENDER.GIMODE -> Settings::giMode");
         check(s.denoiser == true, "RENDER.DENOISER -> Settings::denoiser");
-        check(s.neuralDenoise == true, "RENDER.NEURALDENOISE -> Settings::neuralDenoise");
         check(s.refractionMode == 2, "RENDER.REFRACTIONMODE -> Settings::refractionMode");
         check(near(s.refractionStrength, 0.42f), "RENDER.REFRACTIONSTRENGTH -> Settings::refractionStrength");
         check(near(s.refractionEdgeFade, 0.05f), "RENDER.REFRACTIONEDGEFADE -> Settings::refractionEdgeFade");

@@ -238,13 +238,12 @@ static void checkOcproject() {
         check(writeOcproject(t, w) == w, "once -- isOwnedKey covers it");
     }
     {
-        // RENDER.NEURALDENOISE (docs/rendering/NEURAA_NRD.md): absent leaves it off.
+        // RENDER.NEURALDENOISE (retired NRD v1): still loads, states nothing, is dropped on the next save.
+        const char* legacy = "OCPROJECT 1\nNAME T\nRENDER.NEURALDENOISE 1\n";
         ProjectDesc t;
-        check(parseOcproject("OCPROJECT 1\nNAME T\nRENDER.NEURALDENOISE 1\n", t, &err), "RENDER.NEURALDENOISE parses");
-        check(t.neuralDenoise == 1 && t.hasRenderSettings(), "Neural Denoise on is a stated render setting");
-        const std::string w = writeOcproject(t, "");
-        check(w.find("RENDER.NEURALDENOISE 1") != std::string::npos, "and is written back");
-        check(writeOcproject(t, w) == w, "once -- isOwnedKey covers it");
+        check(parseOcproject(legacy, t, &err), "a legacy RENDER.NEURALDENOISE loads");
+        check(!t.hasRenderSettings(), "and states no render setting");
+        check(writeOcproject(t, legacy).find("RENDER.NEURALDENOISE") == std::string::npos, "and the next save drops it");
     }
     {
         // ---- THE POST CHAIN, which the file could not hold at all ----------------------------

@@ -2361,7 +2361,6 @@ void SandboxApp::setGiMode(int n) { giModeOverride_ = n; }
 void SandboxApp::setRestirVisibility(int n) { restirVisibilityOverride_ = n; }
 
 void SandboxApp::setDenoiser(int n) { denoiserOverride_ = n; }
-void SandboxApp::setNeuralDenoise(int n) { neuralDenoiseOverride_ = n; }
 
 void SandboxApp::setRenderScale(f32 s) { renderScaleOverride_ = s; }
 

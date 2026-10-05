@@ -163,11 +163,6 @@ struct Settings {
     bool nrd2HalfRateRefl = true;
     bool nrd2HalfRateAo = true;
     bool nrd2HalfRateLamps = true;
-    // Neural Denoise: NRD's resolve replaces FidelityFX's (docs/rendering/NEURAA_NRD.md section 4).
-    // Only acts while the denoiser runs. Toggling keeps history.
-    bool neuralDenoise = false;
-    // Developer (phase 4): NRD's fixed-parameter spatial-first resolve under Neural Denoise.
-    bool neuralDenoiseSpatial = false;
     // Ray-traced reflections through the denoiser's reflection pipeline while it runs (staged
     // ray-driven reflections only); off, they keep Voxi's own reflection history and filter.
     bool denoiseReflections = true;

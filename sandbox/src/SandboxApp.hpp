@@ -1547,8 +1547,6 @@ public:
     void setGiMode(int n);                             // --gi-mode N
     void setRestirVisibility(int n);
     void setDenoiser(int n);                          // --denoiser 0|1
-    void setNeuralDenoise(int n);                     // --neural-denoise 0|1
-    void setNrdSpatial(int n) { nrdSpatialOverride_ = n; }   // --nrd-spatial 0|1 (developer)
     void setRenderScale(f32 s);                    // --render-scale F
 #if AVER_MODULE_SR
     void setAverSrQuality(aver::sr::Quality q);
@@ -1598,7 +1596,6 @@ public:
     void setLodShareVertices(bool on);
     void setCamTranslate(f32 speedCmPerFrame);
     void setCamWander(f32 amp, f32 speed);        // --cam-wander AMP SPEED
-    void setNrdCapture(const std::string& dir, u32 count) { nrdCaptureDir_ = dir; nrdCaptureCount_ = count; }
     // --nrd2-capture DIR POSES [HOLD] [HELDOUT_FROM] and --nrd2-oracle grad|grid (NRD2 phase 3 dataset).
     // DIR "default" (or "-") is %LOCALAPPDATA%/AverEngine/nrd2_dataset/<level>.
     void setNrd2Capture(const std::string& dir, u32 poses, u32 hold, u32 heldOutFrom, bool oracleGrid) {
@@ -3325,8 +3322,6 @@ private:
     // --restir-visibility none|reconstructed|half|full (Settings::giRestirVisibility). Sentinel is -1 (0 is a real value).
     int  restirVisibilityOverride_=-1;
     int  denoiserOverride_=-1;       // --denoiser 0|1|2: -1 is "flag not given"; see setDenoiser
-    int  neuralDenoiseOverride_=-1;  // --neural-denoise 0|1, same convention
-    int  nrdSpatialOverride_=-1;     // --nrd-spatial 0|1 (developer)
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
 #if AVER_MODULE_SR
     // --aversr LEVEL / the render-settings quality combo. Off (default) = no AverSR.
@@ -3409,9 +3404,6 @@ private:
     f32  camWanderSpeed_=1.0f;
     bool camWanderBased_=false;
     u64  camWanderHeld_=0;           // frames the wander was paused (NeuRAA capture holding a pose)
-    std::string nrdCaptureDir_;      // --nrd-capture DIR COUNT (NRD training data)
-    u32  nrdCaptureCount_=0;
-    bool nrdCaptureStarted_=false;
     std::string nrd2CaptureDir_;     // --nrd2-capture (see setNrd2Capture)
     u32  nrd2CapturePoses_=0, nrd2CaptureHold_=256, nrd2CaptureHeldOut_=~0u;
     bool nrd2CaptureGrid_=false, nrd2CaptureStarted_=false;

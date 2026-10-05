@@ -739,14 +739,6 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
                 [f](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([f, on](void* sp){ static_cast<Settings*>(sp)->*f = on; }); }});
         }
     }
-    t.push_back({"voxi.neuralDenoise", VarType::Bool, false,
-        "Neural Denoise: NRD's resolve in place of FidelityFX's (docs/rendering/NEURAA_NRD.md). Only acts while voxi.denoiser runs; reads back what is ACTUALLY running",
-        []{ const Renderer& r = Renderer::get(); return vBool(voxi::resolve(r.settings(), r.deviceInfo()).neuralDenoise.effective != 0); },
-        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->neuralDenoise = on; }); }});
-    t.push_back({"voxi.nrdSpatial", VarType::Bool, false,
-        "Developer: NRD's fixed-parameter spatial-first resolve (a pyramid of this frame plus a short stabiliser) under voxi.neuralDenoise, instead of FidelityFX's resolve",
-        []{ return vBool(Renderer::get().settings().neuralDenoiseSpatial); },
-        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->neuralDenoiseSpatial = on; }); }});
     t.push_back({"voxi.denoiseReflections", VarType::Bool, false,
         "Ray-traced reflections through the denoiser's reflection pipeline while voxi.denoiser runs (staged ray-driven only)",
         []{ return vBool(Renderer::get().settings().denoiseReflections); },

@@ -1294,11 +1294,6 @@ public:
     // The staged ray-driven visibility record, on frames CSRdVisibility wrote it (NeuRAA reads it).
     bool primaryVisibility(rhi::PrimaryVisibility& out) const override;
 
-    // NRD training capture (render::denoise::Denoiser::startCapture).
-    void startDenoiseCapture(const std::string& dir, u32 count) { denoiser_.startCapture(dir, count); }
-    // NRD's trained weights (Neural Denoise); the host knows where bin/data is.
-    void setDenoiseWeightsPath(std::string path) { denoiser_.setWeightsPath(std::move(path)); }
-    [[nodiscard]] bool denoiseCaptureHolding() const { return denoiser_.captureHolding(); }
     // NRD2 phase 3 training capture (render::denoise::Nrd2Capture). Steps on NRD2 frames only, so it
     // waits for the Denoiser setting at NRD2 (--denoiser 2).
     void startNrd2Capture(const render::denoise::Nrd2CaptureConfig& cfg);

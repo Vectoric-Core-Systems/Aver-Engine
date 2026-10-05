@@ -224,6 +224,10 @@ the RX 7800 XT, every frame in ray-driven mode.
 
 ## 4. NRD
 
+> **Retired 2026-10-06.** NRD v1 (this section: the hand-written resolve, its MLP, `nrd_v1.bin`, `tools/nrd/`,
+> Neural Denoise and `RENDER.NEURALDENOISE`) was replaced by NRD2 ([NRD2.md](NRD2.md)) and its code and weights
+> were removed. The text below is kept as history.
+
 ### What it is
 
 A replacement for **one** FidelityFX pass, the temporal resolve, designed 2026-10-05. Reproject and

@@ -22,16 +22,7 @@ set_target_properties(Aver.Render.Denoise PROPERTIES FOLDER "modules")
 
 # aver_denoise.hlsl beside the executable, like every module's shaders.
 aver_deploy_shaders(Aver.Render.Denoise "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
-# NRD's trained network (docs/rendering/NEURAA_NRD.md) in bin/data; the renderer points
-# Denoiser::setWeightsPath at it. Same deploy rule as NeuraFI's and NeuRAA's weights.
-set(_nrd_weights "${CMAKE_CURRENT_SOURCE_DIR}/data/nrd_v1.bin")
-set(_nrd_deployed "${CMAKE_BINARY_DIR}/bin/data/nrd_v1.bin")
-add_custom_command(
-  OUTPUT  ${_nrd_deployed}
-  COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/bin/data"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_nrd_weights} "${CMAKE_BINARY_DIR}/bin/data"
-  DEPENDS ${_nrd_weights}
-  COMMENT "NRD: deploying the trained weights to bin/data")
+set(_nrd2_deployed "")
 # NRD2's trained network (docs/rendering/NRD2.md, phase 4) and its .steps sidecar (the live gate reads the
 # held-out ratio from it), once they ship; the build works without them (the resolve keeps its defaults).
 set(_nrd2_weights "${CMAKE_CURRENT_SOURCE_DIR}/data/nrd2_v1.avnn")
@@ -46,9 +37,9 @@ if(EXISTS "${_nrd2_weights}")
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_nrd2_files} "${CMAKE_BINARY_DIR}/bin/data"
     DEPENDS ${_nrd2_files}
     COMMENT "NRD2: deploying the trained network to bin/data")
-  list(APPEND _nrd_deployed "${CMAKE_BINARY_DIR}/bin/data/nrd2_v1.avnn")
+  list(APPEND _nrd2_deployed "${CMAKE_BINARY_DIR}/bin/data/nrd2_v1.avnn")
 endif()
-add_custom_target(Aver.Render.Denoise.weights ALL DEPENDS ${_nrd_deployed})
+add_custom_target(Aver.Render.Denoise.weights ALL DEPENDS ${_nrd2_deployed})
 add_dependencies(Aver.Render.Denoise Aver.Render.Denoise.weights)
 
 # ---- FidelityFX Denoiser's headers, deployed under bin/shaders/FidelityFX ----

@@ -975,14 +975,11 @@ void SandboxApp::onInit(Engine& e)  {
                       giUpdateIntervalOverride_, k.giUpdateInterval);
         if (giModeOverride_ >= 0) k.giMode = static_cast<u32>(giModeOverride_);
         if (denoiserOverride_ >= 0) voxi::setDenoiserMode(k, denoiserOverride_ > 2 ? 2u : static_cast<u32>(denoiserOverride_));
-        if (neuralDenoiseOverride_ >= 0) k.neuralDenoise = neuralDenoiseOverride_ != 0;
-        if (nrdSpatialOverride_ >= 0) k.neuralDenoiseSpatial = nrdSpatialOverride_ != 0;
         voxi::Renderer::get().setSettings(k);
         AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 
         // VoxiRenderer non-owning; torn down in onShutdown. Read back settings to see clamping.
         voxiRenderer_.setSettings(voxi::Renderer::get().settings());
-        voxiRenderer_.setDenoiseWeightsPath(aver::executableDir() + "/data/nrd_v1.bin");
         // NRD2's network: the user's trained weights over the shipped ones.
         voxiRenderer_.setNrd2WeightsPaths(
             aver::userDataDir().empty() ? std::string() : aver::userDataDir() + "\\" + render::denoise::kNrd2WeightsFileName,
@@ -1416,12 +1413,6 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     bool neuraaHold = false;
 #endif
 #if AVER_MODULE_VOXI
-    // --nrd-capture: started once the renderer is attached; it holds the camera the same way.
-    if (!nrdCaptureDir_.empty() && voxiAttached_ && !nrdCaptureStarted_) {
-        voxiRenderer_.startDenoiseCapture(nrdCaptureDir_, nrdCaptureCount_);
-        nrdCaptureStarted_ = true;
-    }
-    if (voxiAttached_ && voxiRenderer_.denoiseCaptureHolding()) neuraaHold = true;
     // NRD2 training (Tools > Train Neural Denoiser, --nrd2-train): its GPU hook goes on or off here, before beginFrame.
     if (!nrd2MenuWired_ && nrd2Session_.available()) {
         tools_.setNeuralDenoiserOpener([this] { nrd2Session_.openWindow(); });

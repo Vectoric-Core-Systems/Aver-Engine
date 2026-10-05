@@ -699,7 +699,6 @@ void GameApp::attachVoxi(Engine& e) {
     if (manifestMsaa < 0) s.msaa = static_cast<voxi::Msaa>(dev->sampleCount());
     voxi::Renderer::get().setSettings(s);
     voxiRenderer_.setSettings(s);
-    voxiRenderer_.setDenoiseWeightsPath(aver::executableDir() + "/data/nrd_v1.bin");
     voxiRenderer_.setNrd2WeightsPaths(
         aver::userDataDir().empty() ? std::string() : aver::userDataDir() + "\\" + render::denoise::kNrd2WeightsFileName,
         aver::executableDir() + "\\data\\" + render::denoise::kNrd2WeightsFileName);

@@ -5,8 +5,7 @@
 // reflection pipeline (third_party/fidelityfx-denoiser, MIT), driven at roughness 1 as a diffuse
 // denoiser -- see shaders/aver_denoise.hlsl for why that pipeline and what the host callbacks
 // pin. This class owns everything around it: the compute pipelines (three passes in a colour and a
-// one-channel variant, the colour pre-exposure pass, and Neural Denoise's resolve in both variants),
-// the per-signal history textures, the G-buffer history copy, and every resource-state transition.
+// one-channel variant, plus the colour pre-exposure pass), the per-signal history textures, the G-buffer history copy, and every resource-state transition.
 //
 // RUNTIME-COMPILED HLSL through the engine's own shader compiler, like every other Voxi pass: no
 // offline shader build, no precompiled bytecode, no register spaces. FidelityFX's headers are
@@ -25,8 +24,6 @@
 #include <aver/rhi/RHI.hpp>
 #include <aver/rhi/RHIResources.hpp>
 
-#include <string>
-#include <utility>
 
 namespace aver::render::denoise {
 
@@ -77,12 +74,6 @@ public:
         // hold this frame's value, the rest are reconstructed from their four neighbours.
         bool radianceHalfRate       = false;
         u32  radianceHalfRateParity = 0;
-        // Neural Denoise: NRD's resolve in place of FidelityFX's (NEURAA_NRD.md section 4). Same
-        // targets, so switching never resets history. Ignored when that pipeline did not build.
-        bool neuralResolve = false;
-        // Developer (phase 4): NRD's resolve takes its fixed-parameter spatial-first path, with the
-        // pyramid pass before it. Only with neuralResolve.
-        bool neuralSpatial = false;
     };
 
     // FidelityFX's two dials. Safe to change any frame.
@@ -92,20 +83,10 @@ public:
     };
 
     // Compiles the pipelines. False -- said once at WARN -- when a FidelityFX shader will not compile
-    // or a pipeline will not build; the caller then runs undenoised. NRD's resolve failing only
-    // leaves neuralAvailable() false.
+    // or a pipeline will not build; the caller then runs undenoised.
     bool create(rhi::IDevice& dev);
     void destroy();
     [[nodiscard]] bool valid() const { return pipelines_[0] != 0; }
-    [[nodiscard]] bool neuralAvailable() const { return pipelines_[NrdResolve * kVariants] != 0; }
-    // NRD's trained network (bin/data/nrd_v1.bin). Loaded, Neural Denoise runs NRD's resolve with it;
-    // without it, Neural Denoise runs FidelityFX's resolve (the developer switch aside).
-    void setWeightsPath(std::string path) { weightsPath_ = std::move(path); weightsTried_ = false; }
-    [[nodiscard]] bool networkLoaded() const { return net_ != 0; }
-    [[nodiscard]] bool neuralSpatialAvailable() const {
-        return neuralAvailable() && pipelines_[NrdPyramid * kVariants] != 0 &&
-               pipelines_[NrdPyramid * kVariants + 1] != 0;
-    }
 
     // Allocates the history and scratch textures for this resolution. Idempotent at an unchanged
     // size; a real change discards every history.
@@ -121,44 +102,13 @@ public:
     // sized, a null G-buffer input, or no signal selected and present).
     bool record(rhi::IRenderContext& ctx, const Frame& frame, const Inputs& in);
 
-    // NRD training capture (docs/rendering/NEURAA_NRD.md section 4): `count` still poses, each the raw
-    // radiance at four moments after the camera stops plus its converged mean, written to `dir` as
-    // nrd_<n>.bin. The host moves the camera between poses and holds it still while captureHolding().
-    void startCapture(const std::string& dir, u32 count);
-    [[nodiscard]] bool captureHolding() const {
-        return cap_.state != CapState::Idle && cap_.state != CapState::Travel;
-    }
-
     // The denoised result, resting in ShaderResource. Zero when that signal did not run in the
     // last record() -- a caller must read zero as "not denoised this frame".
     [[nodiscard]] rhi::TextureHandle output(Signal s) const { return output_[static_cast<u32>(s)]; }
 
 private:
-    // Scale (colour only) records first; each number matches the shader's AVER_DNSR_PASS. NrdResolve
-    // records in place of Resolve when Frame::neuralResolve is set.
-    // NrdPyramid records before NrdResolve on its spatial path.
-    // NrdCapture (colour only) accumulates the training capture's converged input.
-    enum Pass : u32 { Reproject = 0, Prefilter = 1, Resolve = 2, Scale = 3, NrdResolve = 4, NrdPyramid = 5,
-                      NrdCapture = 6, kPassCount = 7 };
-
-    enum class CapState : u8 { Idle, Travel, Hold, Readback };
-    // Readbacks: raw radiance at four hold frames, view Z, normal, converged mean.
-    static constexpr u32 kCapBases = 4, kCapArrays = kCapBases + 3;
-    struct Capture {
-        std::string dir;
-        u32 remaining = 0, index = 0, frame = 0;
-        CapState state = CapState::Idle;
-        u32 w = 0, h = 0;
-        u32 baseFlags[kCapBases] = {};   // bit 0 half-rate input, bit 1 its parity
-        rhi::TextureHandle accum = 0;
-        rhi::BufferHandle  rb[kCapArrays] = {};
-        rhi::TextureCopyFootprint fp[kCapArrays] = {};
-    };
-    void captureStep(rhi::IRenderContext& ctx, const Frame& frame, const Inputs& in);
-    bool captureTargets(const Inputs& in);
-    void captureCopy(rhi::IRenderContext& ctx, u32 slot, rhi::TextureHandle t, rhi::ResourceState rest);
-    void captureWrite();
-    void captureRelease();
+    // Scale (colour only) records first; each number matches the shader's AVER_DNSR_PASS.
+    enum Pass : u32 { Reproject = 0, Prefilter = 1, Resolve = 2, Scale = 3, kPassCount = 4 };
 
     // Everything one signal keeps. Pairs ping-pong by `parity`: [parity] is written this frame,
     // [1 - parity] holds last frame's.
@@ -172,7 +122,6 @@ private:
         rhi::TextureHandle prefiltered    = 0;    // the spatially filtered input
         rhi::TextureHandle prefilteredVar = 0;
         rhi::TextureHandle scale          = 0;    // 1x1 pre-exposure scale (colour only)
-        rhi::TextureHandle nrdLevel[3]    = {};   // NRD's pyramid: 1/2, 1/4, 1/8 of this frame
         rhi::BindingSetHandle sets[kPassCount] = {};
         // history[] alone changes resting state: the one written this frame is left pixel-readable
         // for Voxi (ShaderResource); every other target rests in NonPixelShaderResource.
@@ -182,7 +131,7 @@ private:
     };
 
     bool recordSignal(rhi::IRenderContext& ctx, u32 signal, rhi::TextureHandle input,
-                      const Inputs& in, u32 flags, bool neuralResolve, bool neuralSpatial);
+                      const Inputs& in, u32 flags);
     void releaseTargets();
 
     rhi::IDevice*          dev_ = nullptr;
@@ -199,12 +148,6 @@ private:
     bool stale_[kSignalCount]   = {true, true, true};
 
     Tuning tuning_{};
-    Capture cap_;
-    void loadWeights();
-    std::string       weightsPath_;
-    bool              weightsTried_ = false;
-    rhi::BufferHandle net_ = 0, netPlaceholder_ = 0;
-    u32               netFloats_ = 0;
     u32  width_ = 0, height_ = 0;
     u32  failedWidth_ = 0, failedHeight_ = 0;   // the size whose targets would not allocate
 };

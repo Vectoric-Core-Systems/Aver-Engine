@@ -377,19 +377,6 @@ int main() {
             check(r.denoiser.effective == 1, "denoiser.effective is 1 when every prerequisite is met");
             check(r.denoiserGBufferWanted, "denoiserGBufferWanted is true when every prerequisite is met");
         }
-        {
-            Settings sn = s;
-            sn.neuralDenoise = true;
-            Resolution r = resolve(sn, fullDevice());
-            check(r.neuralDenoise.effective == 1 && r.neuralDenoise.reason == DisableReason::None,
-                  "neuralDenoise runs when the denoiser does");
-            sn.denoiser = false;
-            r = resolve(sn, fullDevice());
-            check(r.neuralDenoise.effective == 0 && r.neuralDenoise.reason == DisableReason::RequiresDenoiser,
-                  "neuralDenoise reads RequiresDenoiser with the denoiser off");
-            check(std::strcmp(disableReasonText(DisableReason::RequiresDenoiser), "Unavailable.") != 0,
-                  "disableReasonText(RequiresDenoiser) is its own sentence");
-        }
     }
 
     std::printf("[INFO ] === Overall Quality scalability preset ===\n");

@@ -3,12 +3,9 @@
 #include "aver/core/Log.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
 
-#include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <initializer_list>
 #include <string>
-#include <vector>
 
 namespace aver::render::denoise {
 
@@ -18,11 +15,10 @@ namespace {
 constexpr u32 kConstantSlot = 1;
 
 // Shader bindings per pass, matching aver_denoise.hlsl's register lists.
-constexpr u32 kSrvCount[7] = {10, 7, 10, 5, 14, 4, 4};
-constexpr u32 kUavCount[7] = {4, 2, 2, 1, 2, 3, 1};
-constexpr const char* kEntry[7] = {"CSDenoiseReproject", "CSDenoisePrefilter", "CSDenoiseResolve",
-                                   "CSDenoiseScale", "CSDenoiseNrdResolve", "CSDenoiseNrdPyramid",
-                                   "CSDenoiseCapture"};
+constexpr u32 kSrvCount[4] = {10, 7, 10, 5};
+constexpr u32 kUavCount[4] = {4, 2, 2, 1};
+constexpr const char* kEntry[4] = {"CSDenoiseReproject", "CSDenoisePrefilter", "CSDenoiseResolve",
+                                   "CSDenoiseScale"};
 // The frame-scale texture's SRV slot in each FidelityFX pass (DNSR_SCALE_SLOT).
 constexpr u32 kScaleSrv[3] = {9, 6, 9};
 
@@ -45,25 +41,11 @@ static_assert(sizeof(Constants) == 32 + 128 + 48, "AverDenoiseCB: two float4s, t
 constexpr u32 kFlagReset        = 1u;
 constexpr u32 kFlagHalfRate     = 2u;
 constexpr u32 kFlagHalfRateOdd  = 4u;
-constexpr u32 kFlagNrdSpatial   = 8u;
-constexpr u32 kFlagCaptureReset = 16u;
-constexpr u32 kFlagNrdNetwork   = 32u;
 
-// NRD's weights file (tools/nrd/nrd_train.py): "NRDW", version 1, then the layer sizes.
-constexpr u32 kNetMagic = 0x5744524Eu, kNetIn = 16, kNetH = 16, kNetOut = 4;
-constexpr u32 kNetFloats = 2 * kNetIn + kNetH * kNetIn + kNetH + kNetH * kNetH + kNetH + kNetOut * kNetH + kNetOut;
-constexpr u32 kNetSrv = 13;   // pass 4's t13
-
-// Pass 4 binds a structured buffer at t13; every other slot of every pass is a 2D texture.
+// Every shader slot of every pass is a 2D texture.
 void declareSlots(u32 pass, rhi::SlotKind* srv) {
     for (u32 i = 0; i < kSrvCount[pass]; ++i) srv[i] = rhi::SlotKind::Texture2D;
-    if (pass == 4) srv[kNetSrv] = rhi::SlotKind::StructuredBuffer;
 }
-
-// Training capture timing, in recorded frames: travel to a new pose, then hold. The raw input is taken
-// at four hold frames (fresh reservoirs, as in motion); the mean runs over the hold frames after that.
-constexpr u32 kCapTravel = 45, kCapMeanFrames = 256, kCapReadbackDelay = 6;
-constexpr u32 kCapBaseFrame[4] = {2, 4, 8, 16};
 
 // FidelityFX's reduction writes one average per 8x8 group.
 u32 averageDim(u32 d) { return (d + 7u) / 8u; }
@@ -88,9 +70,8 @@ bool Denoiser::create(rhi::IDevice& dev) {
     static const char* kVariantName[kVariants] = {"colour", "one channel", "reflection"};
     for (u32 pass = 0; pass < kPassCount; ++pass) {
         for (u32 v = 0; v < kVariants; ++v) {
-            // Scale and the capture are colour only; NRD's passes have no reflection profile.
-            if (v > 0 && (pass == Scale || pass == NrdCapture)) continue;
-            if (v == 2 && pass >= NrdResolve) continue;
+            // Scale is colour only.
+            if (v > 0 && pass == Scale) continue;
             const u32 scalar = v == 1 ? 1u : 0u;
             // AVER_HLSL_2018 is consumed by the shader compiler (D3D12Device.cpp): FidelityFX's
             // headers are written against HLSL 2018 and are vendored unmodified.
@@ -104,11 +85,6 @@ bool Denoiser::create(rhi::IDevice& dev) {
             sd.minShaderModel = 62;   // DXC, not FXC: the headers use min16float and binary literals
             sd.defines = defines.c_str();
             const rhi::ShaderHandle cs = res_->createShader(sd);
-            if (!cs && pass >= NrdResolve) {
-                AVER_WARN("[Denoise] {} ({}) would not compile; Neural Denoise unavailable", kEntry[pass],
-                          kVariantName[v]);
-                continue;
-            }
             if (!cs && v == 2) {
                 AVER_WARN("[Denoise] {} (reflection) would not compile; reflections stay undenoised", kEntry[pass]);
                 continue;
@@ -132,8 +108,9 @@ bool Denoiser::create(rhi::IDevice& dev) {
             pd.layout.samplers[0].address = rhi::AddressMode::Clamp;
             const rhi::PipelineHandle p = res_->createComputePipeline(pd);
             res_->destroyShader(cs);   // the pipeline owns the bytecode now
-            if (!p && (pass >= NrdResolve || v == 2)) {
-                AVER_WARN("[Denoise] the {} pipeline would not build; Neural Denoise unavailable", kEntry[pass]);
+            if (!p && v == 2) {
+                AVER_WARN("[Denoise] the {} (reflection) pipeline would not build; reflections stay undenoised",
+                          kEntry[pass]);
                 continue;
             }
             if (!p) {
@@ -143,14 +120,6 @@ bool Denoiser::create(rhi::IDevice& dev) {
             }
             pipelines_[pass * kVariants + v] = p;
             ++built;
-        }
-    }
-    // Neural Denoise needs both variants; a half-built pair would only cover one signal.
-    for (u32 pass : {u32(NrdResolve), u32(NrdPyramid)}) {
-        if (pipelines_[pass * kVariants] && pipelines_[pass * kVariants + 1]) continue;
-        for (u32 v = 0; v < 2; ++v) {
-            rhi::PipelineHandle& p = pipelines_[pass * kVariants + v];
-            if (p) { res_->destroyPipeline(p); p = 0; --built; }
         }
     }
     AVER_INFO("[Denoise] AMD FidelityFX Denoiser (reflection pipeline, diffuse use): {} pipelines built", built);
@@ -168,7 +137,6 @@ void Denoiser::releaseTargets() {
         drop(s.prefiltered);
         drop(s.prefilteredVar);
         drop(s.scale);
-        for (rhi::TextureHandle& l : s.nrdLevel) drop(l);
         for (rhi::BindingSetHandle& b : s.sets) { if (b) res_->destroyBindingSet(b); b = 0; }
         s.parity = 0;
         s.historyState[0] = s.historyState[1] = rhi::ResourceState::NonPixelShaderResource;
@@ -180,38 +148,7 @@ void Denoiser::releaseTargets() {
     forceHistoryReset();
 }
 
-void Denoiser::loadWeights() {
-    if (weightsTried_ || !res_) return;
-    weightsTried_ = true;
-    if (net_) { res_->destroyBuffer(net_); net_ = 0; }
-    if (weightsPath_.empty()) return;
-    std::ifstream f(weightsPath_, std::ios::binary);
-    u32 header[6] = {};
-    std::vector<f32> w(kNetFloats);
-    if (!f.read(reinterpret_cast<char*>(header), sizeof(header)) || header[0] != kNetMagic || header[1] != 1u ||
-        header[2] != kNetIn || header[3] != kNetH || header[4] != kNetH || header[5] != kNetOut ||
-        !f.read(reinterpret_cast<char*>(w.data()), static_cast<std::streamsize>(w.size() * sizeof(f32)))) {
-        AVER_WARN("[Denoise] no usable NRD weights at {}; Neural Denoise runs FidelityFX's resolve", weightsPath_);
-        return;
-    }
-    rhi::BufferDesc bd{};
-    bd.bytes = w.size() * sizeof(f32);
-    bd.kind = rhi::BufferKind::Upload;
-    bd.debugName = "NRD network weights";
-    net_ = res_->createBuffer(bd);
-    if (!net_ || !res_->writeBuffer(net_, w.data(), bd.bytes, 0)) {
-        if (net_) res_->destroyBuffer(net_);
-        net_ = 0;
-        return;
-    }
-    netFloats_ = kNetFloats;
-    AVER_INFO("[Denoise] NRD network loaded: {}", weightsPath_);
-}
-
 void Denoiser::destroy() {
-    for (rhi::BufferHandle* b : {&net_, &netPlaceholder_}) { if (res_ && *b) res_->destroyBuffer(*b); *b = 0; }
-    weightsTried_ = false;
-    captureRelease();
     releaseTargets();
     if (res_) for (rhi::PipelineHandle& p : pipelines_) { if (p) res_->destroyPipeline(p); p = 0; }
     for (rhi::PipelineHandle& p : pipelines_) p = 0;
@@ -269,11 +206,6 @@ bool Denoiser::resize(u32 width, u32 height) {
         t.prefiltered    = make(value, width, height, true, (n + " prefiltered").c_str());
         t.prefilteredVar = make(rhi::Format::R16F, width, height, true, (n + " prefiltered variance").c_str());
         t.scale          = make(rhi::Format::R32Float, 1, 1, true, (n + " scale").c_str());
-        for (u32 l = 0; l < 3; ++l) {
-            const u32 div = 2u << l;
-            t.nrdLevel[l] = make(rhi::Format::RGBA16F, (width + div - 1) / div, (height + div - 1) / div, true,
-                                 (n + " NRD level " + std::to_string(l + 1)).c_str());
-        }
         for (u32 p = 0; p < kPassCount && ok; ++p) {
             rhi::BindingSetDesc bd{};
             bd.srvCount = kSrvCount[p];
@@ -302,7 +234,7 @@ bool Denoiser::resize(u32 width, u32 height) {
 }
 
 bool Denoiser::recordSignal(rhi::IRenderContext& ctx, u32 s, rhi::TextureHandle input,
-                            const Inputs& in, u32 flags, bool neuralResolve, bool neuralSpatial) {
+                            const Inputs& in, u32 flags) {
     SignalTargets& t = sig_[s];
     const u32 cur = t.parity, prev = 1u - t.parity;
     const u32 scalar = s == static_cast<u32>(Signal::Occlusion) ? 1u : 0u;
@@ -340,44 +272,10 @@ bool Denoiser::recordSignal(rhi::IRenderContext& ctx, u32 s, rhi::TextureHandle 
     res_->setSrv(rs, 8, t.average);
     res_->setUav(rs, 0, t.history[cur], 0);
     res_->setUav(rs, 1, t.varHistory[cur], 0);
-    // NRD's resolve: the same bindings as FidelityFX's (phase 1 of NEURAA_NRD.md section 8).
-    rhi::BindingSetHandle nr = t.sets[NrdResolve];
-    res_->setSrv(nr, 4, t.prefiltered);
-    res_->setSrv(nr, 5, t.reprojected);
-    res_->setSrv(nr, 6, t.prefilteredVar);
-    res_->setSrv(nr, 7, t.sampleCount[cur]);
-    res_->setSrv(nr, 8, t.average);
-    res_->setSrv(nr, 9, t.scale);
-    res_->setUav(nr, 0, t.history[cur], 0);
-    res_->setUav(nr, 1, t.varHistory[cur], 0);
-    rhi::BindingSetHandle py = t.sets[NrdPyramid];
-    for (u32 l = 0; l < 3; ++l) {
-        res_->setSrv(nr, 10 + l, t.nrdLevel[l]);
-        res_->setUav(py, l, t.nrdLevel[l], 0);
-    }
-    if (neuralResolve) loadWeights();
-    if (!net_ && !netPlaceholder_) {
-        rhi::BufferDesc pd{};
-        pd.bytes = sizeof(f32);
-        pd.kind = rhi::BufferKind::Upload;
-        pd.debugName = "NRD weights placeholder";
-        netPlaceholder_ = res_->createBuffer(pd);
-    }
-    if (net_) res_->setSrvBuffer(nr, kNetSrv, net_, sizeof(f32), netFloats_, 0);
-    else      res_->setSrvBuffer(nr, kNetSrv, netPlaceholder_, sizeof(f32), 1, 0);
     for (u32 p = 0; p < Scale; ++p) res_->setSrv(t.sets[p], kScaleSrv[p], t.scale);
     rhi::BindingSetHandle sc = t.sets[Scale];
     res_->setSrv(sc, 4, t.average);   // still last frame's: Scale records before Reproject
     res_->setUav(sc, 0, t.scale, 0);
-
-    // Neural Denoise: NRD's spatial resolve with the network when its weights loaded (radiance only;
-    // they were trained on it), or with fixed weights under the developer switch; otherwise
-    // FidelityFX's resolve through NRD's pass.
-    const bool nrd = neuralResolve && !reflection && pipelines_[NrdResolve * kVariants + scalar] != 0;
-    const bool network = nrd && net_ != 0 && s == static_cast<u32>(Signal::Radiance);
-    const bool nrdSpatial = nrd && (neuralSpatial || network) && pipelines_[NrdPyramid * kVariants + scalar] != 0;
-    if (nrdSpatial) flags |= kFlagNrdSpatial;
-    if (nrdSpatial && network) flags |= kFlagNrdNetwork;
 
     Constants cb{};
     cb.size[0] = width_;
@@ -423,8 +321,7 @@ bool Denoiser::recordSignal(rhi::IRenderContext& ctx, u32 s, rhi::TextureHandle 
         ctx.textureBarrier(t.history[cur], t.historyState[cur], kRead);
         t.historyState[cur] = kRead;
     }
-    if (nrdSpatial) dispatch(NrdPyramid, {t.nrdLevel[0], t.nrdLevel[1], t.nrdLevel[2]});
-    dispatch(nrd ? NrdResolve : Resolve, {t.history[cur], t.varHistory[cur]});
+    dispatch(Resolve, {t.history[cur], t.varHistory[cur]});
 
     // Handed to Voxi, whose pixel shaders read it this frame.
     ctx.textureBarrier(t.history[cur], kRead, rhi::ResourceState::ShaderResource);
@@ -470,11 +367,9 @@ bool Denoiser::record(rhi::IRenderContext& ctx, const Frame& frame, const Inputs
             flags |= kFlagHalfRate;
             if (frame.radianceHalfRateParity & 1u) flags |= kFlagHalfRateOdd;
         }
-        recordSignal(ctx, s, signal[s], in, flags, frame.neuralResolve, frame.neuralSpatial);
+        recordSignal(ctx, s, signal[s], in, flags);
         stale_[s] = false;
     }
-
-    if (cap_.state != CapState::Idle && run[static_cast<u32>(Signal::Radiance)]) captureStep(ctx, frame, in);
 
     // This frame's G-buffer becomes next frame's history, after every pass has read the old one.
     ctx.textureBarrier(in.viewZ, kRead, rhi::ResourceState::CopySource);
@@ -493,141 +388,6 @@ bool Denoiser::record(rhi::IRenderContext& ctx, const Frame& frame, const Inputs
 
     for (u32 s = 0; s < kSignalCount; ++s) ranLast_[s] = run[s];
     return true;
-}
-
-// ---- NRD training capture ---------------------------------------------------------------------
-
-void Denoiser::startCapture(const std::string& dir, u32 count) {
-    cap_.dir = dir;
-    cap_.remaining = count;
-    cap_.index = 0;
-    cap_.frame = 0;
-    cap_.state = count ? CapState::Travel : CapState::Idle;
-    AVER_INFO("[Denoise] NRD training capture: {} poses into {}", count, dir);
-}
-
-void Denoiser::captureRelease() {
-    if (res_ && cap_.accum) res_->destroyTexture(cap_.accum);
-    cap_.accum = 0;
-    for (rhi::BufferHandle& b : cap_.rb) { if (res_ && b) res_->destroyBuffer(b); b = 0; }
-    cap_.w = cap_.h = 0;
-}
-
-bool Denoiser::captureTargets(const Inputs& in) {
-    if (cap_.accum && cap_.w == width_ && cap_.h == height_) return true;
-    captureRelease();
-    rhi::TextureDesc d{};
-    d.width = width_; d.height = height_;
-    d.format = rhi::Format::RGBA16F;
-    d.bind = static_cast<rhi::ResourceBind>(static_cast<u32>(rhi::ResourceBind::ShaderResource) |
-                                            static_cast<u32>(rhi::ResourceBind::UnorderedAccess));
-    d.initialState = rhi::ResourceState::NonPixelShaderResource;
-    d.debugName = "NRD capture mean";
-    cap_.accum = res_->createTexture(d);
-    const rhi::TextureHandle src[kCapArrays] = {in.radiance, in.radiance, in.radiance, in.radiance,
-                                                in.viewZ, in.normalRoughness, cap_.accum};
-    for (u32 i = 0; i < kCapArrays; ++i) {
-        if (!src[i] || !res_->textureCopyFootprint(src[i], 0, cap_.fp[i])) { captureRelease(); return false; }
-        rhi::BufferDesc bd{};
-        bd.bytes = cap_.fp[i].totalBytes;
-        bd.kind = rhi::BufferKind::Readback;
-        bd.debugName = "NRD capture readback";
-        cap_.rb[i] = res_->createBuffer(bd);
-        if (!cap_.rb[i]) { captureRelease(); return false; }
-    }
-    cap_.w = width_; cap_.h = height_;
-    return true;
-}
-
-void Denoiser::captureCopy(rhi::IRenderContext& ctx, u32 slot, rhi::TextureHandle t, rhi::ResourceState rest) {
-    ctx.textureBarrier(t, rest, rhi::ResourceState::CopySource);
-    ctx.copyTextureToBuffer(cap_.rb[slot], 0, t, 0);
-    ctx.textureBarrier(t, rhi::ResourceState::CopySource, rest);
-}
-
-// File: "NRDC" (u32 0x4344524E), version 1, width, height, base count 4, the four base flags (bit 0
-// half-rate input, bit 1 parity), all u32; then, rows tightly packed: four raw radiance frames RGBA16F
-// (alpha = GI hit distance), view Z R32F, normal RGB10A2, converged mean RGBA16F (alpha = fresh samples).
-void Denoiser::captureWrite() {
-    char name[32];
-    std::snprintf(name, sizeof(name), "nrd_%03u.bin", cap_.index);
-    const std::string path = cap_.dir + "/" + name;
-    std::ofstream f(path, std::ios::binary);
-    const u32 header[9] = {0x4344524Eu, 1u, cap_.w, cap_.h, kCapBases,
-                           cap_.baseFlags[0], cap_.baseFlags[1], cap_.baseFlags[2], cap_.baseFlags[3]};
-    f.write(reinterpret_cast<const char*>(header), sizeof(header));
-    std::vector<u8> buf;
-    for (u32 i = 0; i < kCapArrays && f; ++i) {
-        const rhi::TextureCopyFootprint& fp = cap_.fp[i];
-        buf.resize(static_cast<size_t>(fp.totalBytes));
-        if (!res_->readBuffer(cap_.rb[i], buf.data(), fp.totalBytes, 0)) { f.setstate(std::ios::failbit); break; }
-        for (u32 r = 0; r < fp.rows; ++r)
-            f.write(reinterpret_cast<const char*>(buf.data()) + static_cast<size_t>(r) * fp.rowPitch, fp.rowBytes);
-    }
-    if (f) AVER_INFO("[Denoise] NRD capture {} written: {}", cap_.index, path);
-    else   AVER_WARN("[Denoise] NRD capture {} could not be written to {}", cap_.index, path);
-}
-
-// Called inside record(), with the G-buffer and the radiance signal in NonPixelShaderResource.
-void Denoiser::captureStep(rhi::IRenderContext& ctx, const Frame& frame, const Inputs& in) {
-    constexpr rhi::ResourceState kRead = rhi::ResourceState::NonPixelShaderResource;
-    switch (cap_.state) {
-        case CapState::Travel:
-            if (++cap_.frame >= kCapTravel) { cap_.state = CapState::Hold; cap_.frame = 0; }
-            break;
-        case CapState::Hold: {
-            const u32 h = ++cap_.frame;
-            if (!captureTargets(in) || !pipelines_[NrdCapture * 2]) { cap_.state = CapState::Idle; break; }
-            for (u32 b = 0; b < kCapBases; ++b) {
-                if (h != kCapBaseFrame[b]) continue;
-                captureCopy(ctx, b, in.radiance, kRead);
-                cap_.baseFlags[b] = (frame.radianceHalfRate ? 1u : 0u) | ((frame.radianceHalfRateParity & 1u) << 1);
-            }
-            const u32 first = kCapBaseFrame[kCapBases - 1];
-            if (h == first) {
-                captureCopy(ctx, kCapBases, in.viewZ, kRead);
-                captureCopy(ctx, kCapBases + 1, in.normalRoughness, kRead);
-            }
-            if (h >= first) {
-                SignalTargets& t = sig_[static_cast<u32>(Signal::Radiance)];
-                rhi::BindingSetHandle set = t.sets[NrdCapture];
-                res_->setSrv(set, 0, in.viewZ);
-                res_->setSrv(set, 1, in.normalRoughness);
-                res_->setSrv(set, 2, in.motionVectors);
-                res_->setSrv(set, 3, in.radiance);
-                res_->setUav(set, 0, cap_.accum, 0);
-                Constants cb{};
-                cb.size[0] = width_; cb.size[1] = height_;
-                cb.invSize[0] = 1.0f / static_cast<f32>(width_); cb.invSize[1] = 1.0f / static_cast<f32>(height_);
-                cb.flags = (h == first ? kFlagCaptureReset : 0u) |
-                           (frame.radianceHalfRate ? kFlagHalfRate : 0u) |
-                           ((frame.radianceHalfRate && (frame.radianceHalfRateParity & 1u)) ? kFlagHalfRateOdd : 0u);
-                ctx.textureBarrier(cap_.accum, kRead, rhi::ResourceState::UnorderedAccess);
-                ctx.setPipeline(pipelines_[NrdCapture * 2]);
-                ctx.setBindingSet(set);
-                ctx.setConstantBuffer(kConstantSlot, &cb, sizeof(cb));
-                ctx.dispatch((width_ + 7u) / 8u, (height_ + 7u) / 8u, 1);
-                ctx.textureBarrier(cap_.accum, rhi::ResourceState::UnorderedAccess, kRead);
-            }
-            if (h >= first + kCapMeanFrames - 1) {
-                captureCopy(ctx, kCapBases + 2, cap_.accum, kRead);
-                cap_.state = CapState::Readback;
-                cap_.frame = 0;
-            }
-            break;
-        }
-        case CapState::Readback:
-            if (++cap_.frame >= kCapReadbackDelay) {
-                captureWrite();
-                ++cap_.index;
-                cap_.frame = 0;
-                cap_.state = --cap_.remaining ? CapState::Travel : CapState::Idle;
-                if (cap_.state == CapState::Idle) AVER_INFO("[Denoise] NRD training capture finished");
-            }
-            break;
-        default:
-            break;
-    }
 }
 
 }  // namespace aver::render::denoise

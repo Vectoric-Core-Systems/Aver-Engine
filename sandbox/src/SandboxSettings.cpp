@@ -1780,17 +1780,8 @@ void SandboxApp::buildRenderingSettings(int page) {
                                     "resolved to one sample a pixel (the nearest surface).\n\n"
                                     "Round-trips as RENDER.DENOISER (0, 1, 2).");
         {
-            // Neural Denoise and reflection denoising are FidelityFX's: greyed while it is not the one.
+            // Reflection denoising is FidelityFX's: greyed while it is not the one.
             const bool ndGreyed = denMode != 1 || denoiserHardGreyed;
-            ImGui::BeginDisabled(ndGreyed);
-            bool nd = s.neuralDenoise;
-            if (ImGui::Checkbox("Neural Denoise", &nd)) { s.neuralDenoise = nd; changed = true; }
-            ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Replaces the FidelityFX temporal resolve of the indirect diffuse with\n"
-                                  "NRD's spatial-first resolve and its trained network\n"
-                                  "(docs/rendering/NEURAA_NRD.md). Needs the Denoiser on.\n\n"
-                                  "Round-trips as RENDER.NEURALDENOISE. --neural-denoise outranks it.");
             ImGui::BeginDisabled(ndGreyed);
             bool dr = s.denoiseReflections;
             if (ImGui::Checkbox("Denoise Reflections", &dr)) { s.denoiseReflections = dr; changed = true; }

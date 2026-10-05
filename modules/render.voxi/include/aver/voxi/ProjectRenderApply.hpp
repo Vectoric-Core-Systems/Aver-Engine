@@ -111,7 +111,6 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
 
     if (project.giMode   >= 0) s.giMode   = static_cast<u32>(project.giMode);
     if (project.denoiser  >= 0) setDenoiserMode(s, static_cast<u32>(project.denoiser));   // 0, 1, 2 = NRD2
-    if (project.neuralDenoise >= 0) s.neuralDenoise = project.neuralDenoise != 0;
     if (project.ptMode    >= 0) s.ptMode   = static_cast<u32>(project.ptMode);
 
     // RENDER.RESTIRHISTORY rides the same plain-knob shape as giMode/denoiser just above, NOT the
@@ -251,7 +250,6 @@ struct RenderCliOverrides {
     int giMode              = -1;    // --gi-mode 0|1
     int giRestirVisibility  = -1;    // --restir-visibility N
     int denoiser            = -1;    // --denoiser 0|1|2 (2 = NRD2)
-    int neuralDenoise       = -1;    // --neural-denoise 0|1
     int rayDrivenStages     = -1;    // --rd-stages 0|1|2
 };
 
@@ -405,11 +403,6 @@ inline bool applyCliKnobs(const RenderCliOverrides& cli, Settings& s, Log&& log)
         take(cli.denoiser > 2 ? 2 : cli.denoiser, den, "--denoiser");
         setDenoiserMode(s, den);
     }
-    if (cli.neuralDenoise >= 0) {
-        u32 nd = s.neuralDenoise ? 1u : 0u;
-        take(cli.neuralDenoise != 0 ? 1 : 0, nd, "--neural-denoise");
-        s.neuralDenoise = nd != 0;
-    }
     return overridden;
 }
 
@@ -552,7 +545,6 @@ inline void captureVoxiSettings(fmt::ProjectDesc& project, const Settings& reque
     project.layeredBsdf        = static_cast<int>(requested.layeredBsdf);
     project.giMode             = static_cast<int>(requested.giMode);
     project.denoiser           = static_cast<int>(denoiserMode(requested));
-    project.neuralDenoise      = requested.neuralDenoise ? 1 : 0;
     project.ptMode             = static_cast<int>(requested.ptMode);
     project.restirHistory     = static_cast<int>(requested.giRestirMaxHistory);
     // RENDER.RDSTAGES: unconditional capture, same "EVERYTHING ELSE" rule as RESTIRHISTORY directly
