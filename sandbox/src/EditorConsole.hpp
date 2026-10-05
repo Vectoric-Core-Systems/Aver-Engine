@@ -714,6 +714,10 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Developer: NRD2 recomposes its diffuse/specular split without filtering, to check the split against voxi.denoiserMode 0",
         []{ return vBool(Renderer::get().settings().nrd2Bypass); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2Bypass = on; }); }});
+    t.push_back({"voxi.nrd2Network", VarType::Bool, false,
+        "NRD2's trained network sets the per-tile parameters when its weights pass the held-out gate (Tools > Train Neural Denoiser); 0 = the voxi.nrd2* defaults everywhere",
+        []{ return vBool(Renderer::get().settings().nrd2Network); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2Network = on; }); }});
     // NRD2 half-rate tracing per feature (Settings::nrd2HalfRate*): skipped pixels filled from this frame.
     {
         struct HalfRateDial { const char* name; bool Settings::* field; const char* help; };

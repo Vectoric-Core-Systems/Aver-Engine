@@ -51,15 +51,18 @@ public:
                      bool useEma = true, const IoStates& states = {});
 
     // One Adam step (master weights; EMA follows) on weighted L2: target is outputShape(shape).count() floats,
-    // posWeight n * oh * ow. lossNorm as ConvNetReference::trainBatch. Train mode only.
+    // posWeight n * oh * ow (PerPosition) or outputShape(shape).count() (PerElement). lossNorm as
+    // ConvNetReference::trainBatch. Train mode only.
     bool recordTrain(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::BufferHandle target,
-                     rhi::BufferHandle posWeight, const TensorShape& shape, f32 lossNorm, const IoStates& states = {});
+                     rhi::BufferHandle posWeight, const TensorShape& shape, f32 lossNorm, const IoStates& states = {},
+                     ConvLossWeight weightKind = ConvLossWeight::PerPosition);
 
     // Loss per record (lossPerRecord: n floats, allowUnorderedAccess; their sum is ConvNetReference::evaluate).
     // No state change. Train mode only.
     bool recordEvaluate(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::BufferHandle target,
                         rhi::BufferHandle posWeight, rhi::BufferHandle lossPerRecord, const TensorShape& shape,
-                        f32 lossNorm, bool useEma = true, const IoStates& states = {});
+                        f32 lossNorm, bool useEma = true, const IoStates& states = {},
+                        ConvLossWeight weightKind = ConvLossWeight::PerPosition);
 
     // Master = EMA = w; Adam state reset with the next record*() call. Staging ring as Mlp.
     bool uploadWeights(std::span<const f32> w);
@@ -77,6 +80,9 @@ public:
     }
 
     bool setLearningRate(f32 lr);
+    // Off: no "Neural.Conv*" GPU span per record*() call (a caller recording many steps a frame
+    // brackets them in one span of its own; D3D12 keeps 64 spans a frame).
+    void setGpuStats(bool on) { gpuStats_ = on; }
 
     // Binding sets are cached per bound-buffer tuple; call before destroying or reallocating a buffer
     // that was passed in.
@@ -139,6 +145,7 @@ private:
     u32  recycleNext_ = 0;
     bool warnedRecycle_ = false;
     bool warnedSize_ = false;
+    bool gpuStats_ = true;
 
     std::vector<f32> cpuMaster_, cpuEma_;
     bool pendingUpload_ = false;

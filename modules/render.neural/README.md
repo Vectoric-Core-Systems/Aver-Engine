@@ -137,8 +137,9 @@ and what `tests/render.neural` (`NeuralConvTest`, no GPU) checks. The contract i
 * Fixed summation order: `acc = bias; for ci { for ky { for kx { acc += w * x } } }` in fp32, so the CPU
   twin and every GPU agree to FMA-contraction level (~1e-5 relative).
 * He-uniform init from the same PCG hash as the MLP; the head layer is zero-initialised.
-* Loss is weighted L2 with a per-position weight shared across channels, normalised by an explicit
-  `lossNorm`. Gradients accumulate in **GPU order**: per (record, 8x8 output tile, weight) partials, then
+* Loss is weighted L2, normalised by an explicit `lossNorm`. The weight tensor is per position, shared
+  across channels (`ConvLossWeight::PerPosition`, n x oh x ow), or per element (`PerElement`, the head
+  output's shape; NRD2 weights each tile per signal). Gradients accumulate in **GPU order**: per (record, 8x8 output tile, weight) partials, then
   a fixed-order sum, quantised once into the shared fixed-point accumulator (no atomics, bit-deterministic
   per device). Conv defaults: `gradFixedScale` 2^24, `gradClamp` 32 (`convDefaults()`).
 * `NeuralOptimiser` holds what the MLP and the conv net share: `OptimiserDesc`, `Activation`, `Loss`,
@@ -178,10 +179,12 @@ net.reserve(shapes);                                          // network-owned t
 net.recordInfer(ctx, in, out, {1, 12, 497, 883});             // EMA weights by default
 net.recordTrain(ctx, in, target, posWeight, {32, 12, 56, 56}, lossNorm);
 net.recordEvaluate(ctx, in, target, posWeight, lossPerRecord, shape, lossNorm);   // n floats
+net.recordTrain(ctx, in, target, elemWeight, shape, lossNorm, {}, ConvLossWeight::PerElement);
+net.setGpuStats(false);   // no "Neural.Conv*" span per call (a caller with many steps a frame brackets them)
 ```
 
 Buffers are `StructuredBuffer<float>` NCHW, one per tensor. The caller owns the input, output, targets,
-per-position weights and the per-record loss; the network owns weights, EMA, Adam m / v, the integer
+loss weights and the per-record loss; the network owns weights, EMA, Adam m / v, the integer
 accumulator, one activation and one gradient buffer per layer, and the gradient partials. `reserve` must
 see every shape before it is recorded (a shape it has not seen fails with a warning) and reallocates only
 with no recorded work pending. Weights, `uploadWeights`, `recordReadback` / `collectWeights`,
@@ -194,7 +197,7 @@ sizes and offsets in the b3 block; slots t0..t5, u0..u6):
 | Kernel | Threads | Does |
 |---|---|---|
 | `CSConvForward` | 32x8 outputs (16x8 for 1x1) x 8 output channels per group; 4 (2) consecutive outputs per thread | bias, then ci / ky / kx ascending; weight block (8 x min(cin, 16) x k*k, laid out [ci][tap][co]) through groupshared per input chunk, input straight from global memory, one row segment in registers serving the thread's outputs |
-| `CSConvLossL2` | one per head element | `dY = (2 * pw * (p - t)) / lossNorm` |
+| `CSConvLossL2` | one per head element | `dY = (2 * pw * (p - t)) / lossNorm`, pw per position or (`gWeightPerElem`) per element |
 | `CSConvActBackward` | one per element | in place `dz = y > 0 ? dy : 0` (ReLU layers only) |
 | `CSConvBackwardData` | 16x8 inputs x 8 input channels per group; 2 consecutive inputs per thread | dX gather form, co / ky / kx ascending, invalid taps skipped; one dz row segment per (co, ky) |
 | `CSConvBackwardWeights` | one group per (record, 8x8 output tile, 16 output x 4 input channels); one thread per (co, ci) pair | stages the layer's own dz tile and zero-padded input patch in groupshared, then row-major tile sums of `dz * x` for the pair's k*k weights (bias: `dz`, threads 0..15 of input block 0) into partials `[p][w]`, `p = (n * tilesY + ty) * tilesX + tx` |

@@ -30,6 +30,9 @@ public:
     // Binds the app's auto-compile-on-save flag. Null hides the menu item.
     void setAutoCompileFlag(bool* p) { autoCompile_ = p; }
 
+    // Tools > Train Neural Denoiser... (editor::Nrd2Session). Null hides the item.
+    void setNeuralDenoiserOpener(std::function<void()> fn) { openNeuralDenoiser_ = std::move(fn); }
+
     // Draws the Tools dropdown. Called from inside BeginMainMenuBar; owns its own BeginMenu.
     void drawMenu(const fmt::ProjectDesc& project);
 
@@ -120,6 +123,7 @@ private:
     int  armReload_ = 0;            // frames left before the reload fires
     ReloadFn reload_;
     bool* autoCompile_ = nullptr;
+    std::function<void()> openNeuralDenoiser_;
     bool idesLogged_ = false;
 
     char name_[96] = {};            // shared by all four New ... modals; one at a time is open

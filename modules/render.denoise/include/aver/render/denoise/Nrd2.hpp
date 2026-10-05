@@ -1,10 +1,11 @@
 // Nrd2 -- NRD2 phase 1 (docs/rendering/NRD2.md): a strictly single-frame denoiser of the composed,
 // demodulated lighting Stage B writes. No history of any kind. Fixed maths with per-8x8-tile
-// parameters (defaults now; phase 4's network writes the same buffer).
+// parameters: the defaults, or the phase 4 network's (Nrd2Network) when its weights pass the live gate.
 //
 // Flow per frame, inside the scene pass right after Stage B's draw (D3D12 staged ray-driven only):
 //   Stage B writes D, S, remodulation (targets owned here, bound by the caller as UAVs)
-//   record():        pyramid of D and S (1/2, 1/4, 1/8), tile parameters, resolve -> D'*Rd + S'*Rs
+//   record():        pyramid of D and S (1/2, 1/4, 1/8), tile parameters (network or defaults),
+//                    resolve -> D'*Rd + S'*Rs
 //   recordCompose(): fullscreen additive draw of that into the bound scene colour
 //
 // Every pass is plain compute (fp32, no wave intrinsics, no atomics, constants at b3) so it ports to
@@ -12,10 +13,12 @@
 #pragma once
 
 #include <aver/core/Types.hpp>
+#include <aver/render/denoise/Nrd2Network.hpp>
 #include <aver/rhi/RHI.hpp>
 #include <aver/rhi/RHIResources.hpp>
 
 #include <memory>
+#include <string>
 
 namespace aver::render::denoise {
 
@@ -33,6 +36,7 @@ struct Nrd2Params {
     f32 diffuse[6]  = {1.0f, 2.0f, 2.0f, 4.5f, 3.0f, -1.0f};
     f32 specular[6] = {1.0f, 2.0f, 2.0f, 4.5f, 4.0f, -1.0f};
     bool bypass = false;   // own pixel only: the split recomposed undenoised (A/B check)
+    bool network = true;   // phase 4: the trained network sets the tile parameters when it can
 };
 
 class Nrd2 {
@@ -74,6 +78,11 @@ public:
     [[nodiscard]] const Targets& targets() const { return targets_; }
 
     void setParams(const Nrd2Params& p) { params_ = p; }
+    // The network's weights: the user's file wins over the shipped one (Nrd2Network).
+    void setNetworkWeights(std::string user, std::string shipped) {
+        network_.setWeightPaths(std::move(user), std::move(shipped));
+    }
+    [[nodiscard]] Nrd2NetworkStatus networkStatus() const { return network_.status(); }
 
     // Pyramid, parameters, resolve. Stage B's targets in UnorderedAccess and the G-buffer in
     // `gbufferState` on entry; both are back in those states on return.
@@ -110,6 +119,7 @@ private:
     u32 featureFloats_ = 0;
     bool featuresTried_ = false;
     std::unique_ptr<Nrd2Capture> capture_;
+    Nrd2Network network_;
     bool jitterSuppressed_ = false;
     u32 width_ = 0, height_ = 0;
     u32 failedWidth_ = 0, failedHeight_ = 0;

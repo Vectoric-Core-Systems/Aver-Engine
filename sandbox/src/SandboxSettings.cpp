@@ -326,6 +326,25 @@ void SandboxApp::buildEditorPrefs() {
                                     st.errNetwork);
         }
 
+#if AVER_MODULE_VOXI
+        // NRD2 phase 4: which network weights the denoiser uses (Tools > Train Neural Denoiser trains them).
+        if (voxiAttached_) {
+            const render::denoise::Nrd2NetworkStatus ns = voxiRenderer_.nrd2NetworkStatus();
+            using Src = render::denoise::Nrd2NetworkStatus::Source;
+            const char* src = ns.source == Src::User ? "user" : ns.source == Src::Shipped ? "shipped" : "none";
+            if (ns.source == Src::None)
+                ImGui::TextDisabled("Neural denoiser (NRD2): no trained weights, default tile parameters");
+            else
+                ImGui::TextDisabled("Neural denoiser (NRD2): %s weights, %llu steps, held-out ratio %.3f, live gate %s%s",
+                                    src, static_cast<unsigned long long>(ns.steps), static_cast<double>(ns.ratio),
+                                    ns.gateOpen ? "open" : "closed", ns.running ? " (in use)" : "");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The network sets NRD2's per-tile filter parameters when its held-out error is at\n"
+                                  "most 0.80 of the default parameters' (off above 0.90). Needs the NRD2 denoiser.\n%s",
+                                  ns.path.empty() ? "" : ns.path.c_str());
+        }
+#endif
+
 #if AVER_MODULE_SR
         // Combo picks an AverSR SOURCE: Auto follows CLI > Display > manifest > ladder; named items pin one level.
         std::string autoLabel = "Auto";

@@ -251,6 +251,15 @@ Application* createApplication(int argc, char** argv) {
                 if (i + 4 < argc && argv[i + 4][0] != '-') nrd2CaptureHeldOutArg = std::atoi(argv[i + 4]);
             }
         }
+    // --nrd2-train STEPS [DATASETDIR...]: trains NRD2's network inside the editor frame loop (Tools > Train
+    // Neural Denoiser); no dirs = %LOCALAPPDATA%/AverEngine/nrd2_dataset. Bounded runs: add --frames N.
+    int nrd2TrainStepsArg = 0;
+    std::vector<std::string> nrd2TrainDirsArg;
+    for (int i = 1; i + 1 < argc; ++i)
+        if (!std::strcmp(argv[i], "--nrd2-train")) {
+            nrd2TrainStepsArg = std::atoi(argv[i + 1]);
+            for (int j = i + 2; j < argc && argv[j][0] != '-'; ++j) nrd2TrainDirsArg.push_back(argv[j]);
+        }
     bool nrd2OracleGridArg = false;
     for (int i = 1; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], "--nrd2-oracle")) {
@@ -1135,6 +1144,7 @@ Application* createApplication(int argc, char** argv) {
     if (!consoleSetArgs.empty()) app->setConsoleSets(std::move(consoleSetArgs));
     if (camTranslateArg != 0.0f) app->setCamTranslate(camTranslateArg);
     if (camWanderAmp > 0.0f) app->setCamWander(camWanderAmp, camWanderSpeed);
+    if (nrd2TrainStepsArg > 0) app->setNrd2Train(static_cast<u32>(nrd2TrainStepsArg), nrd2TrainDirsArg);
     if (nrd2CapturePosesArg > 0) {
         app->setNrd2Capture(nrd2CaptureDirArg, static_cast<u32>(nrd2CapturePosesArg),
                             static_cast<u32>(nrd2CaptureHoldArg > 0 ? nrd2CaptureHoldArg : 256),

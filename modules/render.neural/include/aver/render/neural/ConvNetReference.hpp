@@ -31,7 +31,8 @@
 //   db[co]             = sum over (n, oy, ox) of dz[co][oy][ox]
 //   dX is only needed for layers > 0 on the GPU; the CPU can also return the first layer's.
 //
-// Loss: weighted L2 over the head output with a per-POSITION weight pw[n][y][x] shared across channels:
+// Loss: weighted L2 over the head output. ConvLossWeight::PerPosition: pw[n][y][x], shared across
+//   channels; PerElement: pw[n][c][y][x], one per head output element (NRD2's per-signal tile weights).
 //     L = sum pw * (p - t)^2 / lossNorm           lossNorm is passed explicitly (e.g. n * outH * outW)
 //     dL/dp = (2 * pw * (p - t)) / lossNorm       (fp32, in that order)
 //   The CPU sums L in fp64 (the GPU reduces in a fixed-order tree); only the gradient is spec.
@@ -74,6 +75,9 @@ struct ConvNetDesc {
     std::vector<ConvLayerDesc> layers;   // 1..kConvMaxLayers
     u32 seed = 1;   // Deterministic init seed; not part of the weight file.
 };
+
+// How the loss weight tensor is indexed (see the contract above).
+enum class ConvLossWeight : u32 { PerPosition = 0, PerElement = 1 };
 
 struct TensorShape {
     u32 n = 1, c = 1, h = 1, w = 1;
@@ -176,10 +180,11 @@ public:
                           std::span<f32> gradW) const;
 
     // Forward on the MASTER weights, loss gradient, backward in GPU partial order, quantise once into
-    // accumulator() (overwritten). target is outputShape(in).count() floats; posWeight n * oh * ow.
-    // Returns the loss L (already divided by lossNorm).
+    // accumulator() (overwritten). target is outputShape(in).count() floats; posWeight n * oh * ow
+    // (PerPosition) or outputShape(in).count() (PerElement). Returns the loss L (already divided by lossNorm).
     f32 accumulateBatch(const TensorShape& in, std::span<const f32> input, std::span<const f32> target,
-                        std::span<const f32> posWeight, f32 lossNorm);
+                        std::span<const f32> posWeight, f32 lossNorm,
+                        ConvLossWeight weightKind = ConvLossWeight::PerPosition);
 
     // adamStep(liveCount = 1) over the accumulator: counts the step, updates master, moments and EMA,
     // clears the accumulator.
@@ -187,11 +192,13 @@ public:
 
     // accumulateBatch then adamStep. Returns the loss before the step.
     f32 trainBatch(const TensorShape& in, std::span<const f32> input, std::span<const f32> target,
-                   std::span<const f32> posWeight, f32 lossNorm);
+                   std::span<const f32> posWeight, f32 lossNorm,
+                   ConvLossWeight weightKind = ConvLossWeight::PerPosition);
 
     // The loss L over a batch with no state change (EMA weights by default).
     f32 evaluate(const TensorShape& in, std::span<const f32> input, std::span<const f32> target,
-                 std::span<const f32> posWeight, f32 lossNorm, bool useEma = true) const;
+                 std::span<const f32> posWeight, f32 lossNorm, bool useEma = true,
+                 ConvLossWeight weightKind = ConvLossWeight::PerPosition) const;
 
 private:
     ConvNetDesc desc_;

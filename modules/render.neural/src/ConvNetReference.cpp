@@ -172,19 +172,25 @@ void backwardImpl(const ConvNetDesc& d, const ConvLayout& lay, const f32* w, con
 }
 
 // L = sum pw * (p - t)^2 (fp64), and when dOut is given dL/dp = (2 * pw * (p - t)) / lossNorm (fp32).
-f64 weightedLoss(const TensorShape& os, const f32* p, const f32* t, const f32* pw, f32 lossNorm, f32* dOut) {
+f64 weightedLoss(const TensorShape& os, const f32* p, const f32* t, const f32* pw, f32 lossNorm, f32* dOut,
+                 ConvLossWeight kind) {
     f64 sum = 0.0;
     for (u32 n = 0; n < os.n; ++n)
         for (u32 c = 0; c < os.c; ++c)
             for (u32 y = 0; y < os.h; ++y)
                 for (u32 x = 0; x < os.w; ++x) {
                     const usize i = ((static_cast<usize>(n) * os.c + c) * os.h + y) * os.w + x;
-                    const f32 w = pw[(static_cast<usize>(n) * os.h + y) * os.w + x];
+                    const f32 w = kind == ConvLossWeight::PerElement ? pw[i]
+                                                                     : pw[(static_cast<usize>(n) * os.h + y) * os.w + x];
                     const f64 e = static_cast<f64>(p[i]) - static_cast<f64>(t[i]);
                     sum += static_cast<f64>(w) * e * e;
                     if (dOut) dOut[i] = (2.0f * w * (p[i] - t[i])) / lossNorm;
                 }
     return sum / static_cast<f64>(lossNorm);
+}
+
+usize lossWeightCount(const TensorShape& os, ConvLossWeight kind) {
+    return kind == ConvLossWeight::PerElement ? os.count() : static_cast<usize>(os.n) * os.planeCount();
 }
 
 }  // namespace
@@ -322,15 +328,17 @@ void ConvNetReference::backwardGpuOrder(const TensorShape& in, std::span<const f
 }
 
 f32 ConvNetReference::accumulateBatch(const TensorShape& in, std::span<const f32> input,
-                                      std::span<const f32> target, std::span<const f32> posWeight, f32 lossNorm) {
+                                      std::span<const f32> target, std::span<const f32> posWeight, f32 lossNorm,
+                                      ConvLossWeight weightKind) {
     if (!inputOk(desc_, valid_, in) || input.size() < in.count() || !(lossNorm > 0.0f)) return 0.0f;
     const TensorShape os = outputShape(in);
-    if (target.size() < os.count() || posWeight.size() < static_cast<usize>(os.n) * os.planeCount()) return 0.0f;
+    if (target.size() < os.count() || posWeight.size() < lossWeightCount(os, weightKind)) return 0.0f;
 
     Acts acts;
     forwardActs(desc_, layout_, w_.data(), in, input.data(), acts);
     std::vector<f32> dOut(os.count());
-    const f64 loss = weightedLoss(os, acts.back().data(), target.data(), posWeight.data(), lossNorm, dOut.data());
+    const f64 loss =
+        weightedLoss(os, acts.back().data(), target.data(), posWeight.data(), lossNorm, dOut.data(), weightKind);
 
     std::vector<f32> grad(layout_.total);
     backwardImpl(desc_, layout_, w_.data(), in, input.data(), acts, dOut.data(), grad.data(), grad.size(), nullptr,
@@ -346,20 +354,22 @@ void ConvNetReference::adamStep() {
 }
 
 f32 ConvNetReference::trainBatch(const TensorShape& in, std::span<const f32> input, std::span<const f32> target,
-                                 std::span<const f32> posWeight, f32 lossNorm) {
-    const f32 loss = accumulateBatch(in, input, target, posWeight, lossNorm);
+                                 std::span<const f32> posWeight, f32 lossNorm, ConvLossWeight weightKind) {
+    const f32 loss = accumulateBatch(in, input, target, posWeight, lossNorm, weightKind);
     adamStep();
     return loss;
 }
 
 f32 ConvNetReference::evaluate(const TensorShape& in, std::span<const f32> input, std::span<const f32> target,
-                               std::span<const f32> posWeight, f32 lossNorm, bool useEma) const {
+                               std::span<const f32> posWeight, f32 lossNorm, bool useEma,
+                               ConvLossWeight weightKind) const {
     if (!inputOk(desc_, valid_, in) || input.size() < in.count() || !(lossNorm > 0.0f)) return 0.0f;
     const TensorShape os = outputShape(in);
-    if (target.size() < os.count() || posWeight.size() < static_cast<usize>(os.n) * os.planeCount()) return 0.0f;
+    if (target.size() < os.count() || posWeight.size() < lossWeightCount(os, weightKind)) return 0.0f;
     Acts acts;
     forwardActs(desc_, layout_, (useEma ? ema_ : w_).data(), in, input.data(), acts);
-    return static_cast<f32>(weightedLoss(os, acts.back().data(), target.data(), posWeight.data(), lossNorm, nullptr));
+    return static_cast<f32>(
+        weightedLoss(os, acts.back().data(), target.data(), posWeight.data(), lossNorm, nullptr, weightKind));
 }
 
 }  // namespace aver::render::neural

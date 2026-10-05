@@ -680,6 +680,59 @@ void testAdamParity() {
     check(validate(o) && !validate(OptimiserDesc{.gradClamp = 0.0f}), "validate(OptimiserDesc) lives in NeuralOptimiser");
 }
 
+// ---------------------------------------------------------------- per-element loss weight
+
+void testPerElementWeight() {
+    AVER_INFO("-- per-element loss weight (ConvLossWeight::PerElement)");
+    ConvNetReference a(toyDesc(), toyOptimiser()), b(toyDesc(), toyOptimiser());
+    Rng rng(91);
+    randomise(a, rng, 0.4f);
+    b.setWeights(a.weights());
+    const TensorShape in{2, 4, 24, 24};
+    const TensorShape os = a.outputShape(in);
+    std::vector<f32> x, tgt, pw;
+    toyBatch(rng, 2, 24, x, tgt, pw);
+    for (f32& w : pw) w = rng.range(0.0f, 1.0f);
+
+    // a) a per-position weight broadcast over the channels gives the same loss and accumulator.
+    std::vector<f32> pe(os.count());
+    for (u32 n = 0; n < os.n; ++n)
+        for (u32 c = 0; c < os.c; ++c)
+            for (usize p = 0; p < os.planeCount(); ++p)
+                pe[(static_cast<usize>(n) * os.c + c) * os.planeCount() + p] = pw[n * os.planeCount() + p];
+    const f32 la = a.accumulateBatch(in, x, tgt, pw, 72.0f);
+    const f32 lb = b.accumulateBatch(in, x, tgt, pe, 72.0f, ConvLossWeight::PerElement);
+    check(std::memcmp(&la, &lb, sizeof(f32)) == 0 && a.accumulator() == b.accumulator(),
+          "broadcast per-element weights == per-position weights (loss and accumulator bit-identical)");
+    check(a.evaluate(in, x, tgt, pw, 72.0f, false) == b.evaluate(in, x, tgt, pe, 72.0f, false, ConvLossWeight::PerElement),
+          "evaluate agrees for the broadcast weights");
+
+    // b) distinct weights per channel: the gradient is the plain backward of dL/dp = 2 w (p - t) / norm.
+    for (f32& w : pe) w = rng.range(0.0f, 1.0f);
+    for (usize p = 0; p < os.planeCount(); ++p) pe[2 * os.planeCount() + p] = 0.0f;   // record 0, channel 2 off
+    std::vector<f32> pred(os.count());
+    a.forward(in, x, pred, false);
+    std::vector<f32> dOut(os.count());
+    f64 want = 0.0;
+    for (usize i = 0; i < pred.size(); ++i) {
+        const f64 e = static_cast<f64>(pred[i]) - tgt[i];
+        want += pe[i] * e * e;
+        dOut[i] = (2.0f * pe[i] * (pred[i] - tgt[i])) / 72.0f;
+    }
+    want /= 72.0;
+    std::vector<f32> g(a.weightCount());
+    a.backwardGpuOrder(in, x, dOut, g);
+    const f32 loss = a.accumulateBatch(in, x, tgt, pe, 72.0f, ConvLossWeight::PerElement);
+    bool same = true;
+    for (u32 k = 0; k < a.weightCount(); ++k) same = same && a.accumulator()[k] == quantise(g[k], a.optimiser());
+    check(same, "per-element accumulator == quantised GPU-order backward of the per-element dL/dp");
+    check(std::fabs(loss - static_cast<f32>(want)) <= 1e-6f * static_cast<f32>(want) + 1e-9f &&
+              std::fabs(a.evaluate(in, x, tgt, pe, 72.0f, false, ConvLossWeight::PerElement) - loss) <= 1e-6f * loss,
+          "per-element loss and evaluate == sum w (p - t)^2 / norm");
+    check(a.accumulateBatch(in, x, tgt, pw, 72.0f, ConvLossWeight::PerElement) == 0.0f,
+          "a per-position-sized weight passed as per-element is rejected (too short)");
+}
+
 // ---------------------------------------------------------------- AVNN v2
 
 std::vector<char> slurp(const std::filesystem::path& p) {
@@ -866,6 +919,7 @@ int main() {
     testDeterminism();
     testPartialOrder();
     testAdamParity();
+    testPerElementWeight();
     testWeightFile();
     testToyTask();
 

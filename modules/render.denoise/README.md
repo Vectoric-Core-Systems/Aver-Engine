@@ -17,6 +17,13 @@ Phase 3 (`docs/rendering/NRD2.md`, "Phase 3 as built"): `CSNrd2Features` (the ne
 forward and backward and the fit, which is the spec the shaders keep in sync with
 (`tests/render.denoise`, `Nrd2ResolveTest`). Links `Aver.Render.Neural` (CRC-32, Adam bias correction).
 
+Phase 4 (`docs/rendering/NRD2.md`, "Phase 4 as built"): `Nrd2Trainer` (in-engine training of the per-tile
+parameter network from the pose files; parameter space only) and `Nrd2Network` (inference into the
+resolve's tile buffer), both over `Aver.Render.Neural`'s `ConvNet`; `shaders/nrd2_net.hlsl` holds the
+record gather and the standardise / de-standardise passes. Weights `nrd2_v1.avnn` (user data folder over
+`bin/data`, deployed from `data/` when it exists). Tests: `Nrd2TrainerTest` (CPU pieces) and
+`Nrd2TrainerGpuTest` (trainer and inference on a device, WARP by default).
+
 ## How it works
 
 FidelityFX Denoiser ships two denoisers: shadows, which filters a 1-bit-per-pixel hit mask, and

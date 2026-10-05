@@ -27,7 +27,7 @@
 //           prediction (loss, eval)
 //   t1 gT   target (loss, eval) or dz (backward weights)
 //   t2 count, u1..u5 accumulator / weights / EMA / m / v: aver_neural_common.hlsli
-//   t3 gW, t4 gWEma, t5 gPosW (per-position loss weight, n * oh * ow)
+//   t3 gW, t4 gWEma, t5 gPosW (loss weight: per position n * oh * ow, or per element when gWeightPerElem)
 //   u0 gY   tensor written: y, dY (loss), dz in place (act backward), dX, loss per record (eval)
 //   u6 gPartials  [p][w] per-tile gradient partials, p = (n * tilesY + ty) * tilesX + tx
 
@@ -83,7 +83,7 @@
     uint  gPartialCount; \
     float gLossNorm;     \
     uint  gGroupsX;      \
-    uint  gPad1;         \
+    uint  gWeightPerElem;\
     uint  gPad2;
 
 #include "aver_neural_common.hlsli"
@@ -243,6 +243,7 @@ void CSConvForward(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {
 
 // ---- CSConvLossL2 ----
 // One thread per head output element: dY = (2 * pw * (p - t)) / lossNorm. Compiled with the head's defines.
+// pw per position (shared across channels) or, with gWeightPerElem, per element.
 [numthreads(AVER_NN_GROUP, 1, 1)]
 void CSConvLossL2(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {
     const uint i = linearIndex(gid, gtid.x);
@@ -250,7 +251,7 @@ void CSConvLossL2(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {
     const uint plane = gOutH * gOutW;
     const uint n = i / (AVER_CONV_COUT * plane);
     const uint pos = i % plane;
-    const float w = gPosW[n * plane + pos];
+    const float w = gWeightPerElem != 0 ? gPosW[i] : gPosW[n * plane + pos];
     gY[i] = (2.0 * w * (gX[i] - gT[i])) / gLossNorm;
 }
 
@@ -468,7 +469,7 @@ void CSConvEvalReduce(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {
     float s = 0.0;
     if (active) {
         [loop] for (uint i = tid; i < per; i += AVER_NN_GROUP) {
-            const float w = gPosW[n * plane + i % plane];
+            const float w = gWeightPerElem != 0 ? gPosW[n * per + i] : gPosW[n * plane + i % plane];
             const float e = gX[n * per + i] - gT[n * per + i];
             s += w * e * e;
         }

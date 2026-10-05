@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <initializer_list>
+#include <optional>
 
 // Pattern: Mlp.cpp. Kernels and their bindings: shaders/aver_neural_conv.hlsl.
 
@@ -32,6 +33,11 @@ constexpr ResourceState kRead  = ResourceState::NonPixelShaderResource;
 constexpr ResourceState kWrite = ResourceState::UnorderedAccess;
 
 u32 divUp(u32 a, u32 b) { return (a + b - 1u) / b; }
+
+// Floats the loss weight tensor holds for a head shape.
+u32 weightFloats(const TensorShape& head, ConvLossWeight kind) {
+    return static_cast<u32>(kind == ConvLossWeight::PerElement ? head.count() : head.n * head.planeCount());
+}
 
 // Layer l's input shape for a network input shape.
 TensorShape layerInput(const ConvLayout& L, const TensorShape& in, u32 layer) {
@@ -68,7 +74,7 @@ struct ConvNet::Constants {
     u32 n, inH, inW, outH, outW, tilesX, tilesY, elemCount;
     u32 wOffset, bOffset, layerSize, partialCount;
     f32 lossNorm;
-    u32 groupsX, pad1, pad2;
+    u32 groupsX, weightPerElem, pad2;
 };
 
 ConvNet::~ConvNet() { destroy(); }
@@ -502,7 +508,8 @@ bool ConvNet::recordInfer(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::B
         }
         return false;
     }
-    rhi::ScopedGpuStat gpuStat(ctx, "Neural.ConvInfer");
+    std::optional<rhi::ScopedGpuStat> gpuStat;
+    if (gpuStats_) gpuStat.emplace(ctx, "Neural.ConvInfer");
     flushPending(ctx);
     Recorder run(ctx, Callers{{{in, states.input}, {out, states.output}}});
     forwardLayers(run, in, out, shape, useEma);
@@ -510,7 +517,8 @@ bool ConvNet::recordInfer(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::B
 }
 
 bool ConvNet::recordTrain(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::BufferHandle target,
-                          rhi::BufferHandle posWeight, const TensorShape& shape, f32 lossNorm, const IoStates& states) {
+                          rhi::BufferHandle posWeight, const TensorShape& shape, f32 lossNorm, const IoStates& states,
+                          ConvLossWeight weightKind) {
     if (!valid() || mode_ != ConvMode::Train || !in || !target || !posWeight || !(lossNorm > 0.0f)) return false;
     if (!fits(shape, true)) {
         if (!warnedSize_) {
@@ -519,7 +527,8 @@ bool ConvNet::recordTrain(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::B
         }
         return false;
     }
-    rhi::ScopedGpuStat gpuStat(ctx, "Neural.ConvTrain");
+    std::optional<rhi::ScopedGpuStat> gpuStat;
+    if (gpuStats_) gpuStat.emplace(ctx, "Neural.ConvTrain");
     flushPending(ctx);
 
     const u32 layers = layout_.layers;
@@ -536,7 +545,7 @@ bool ConvNet::recordTrain(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::B
         Binds b;
         b.srv[0] = acts_[layers - 1]; b.srvCount[0] = static_cast<u32>(actCap_[layers - 1]);
         b.srv[1] = target;            b.srvCount[1] = static_cast<u32>(head.count());
-        b.srv[5] = posWeight;         b.srvCount[5] = static_cast<u32>(head.n * head.planeCount());
+        b.srv[5] = posWeight;         b.srvCount[5] = weightFloats(head, weightKind);
         b.uav[0] = grads_[layers - 1]; b.uavCount[0] = static_cast<u32>(actCap_[layers - 1]);
         const rhi::BindingSetHandle set = bindingSet(b);
         if (!set) return false;
@@ -545,6 +554,7 @@ bool ConvNet::recordTrain(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::B
         cb.n = head.n; cb.outH = head.h; cb.outW = head.w;
         cb.elemCount = static_cast<u32>(head.count());
         cb.lossNorm = lossNorm;
+        cb.weightPerElem = weightKind == ConvLossWeight::PerElement ? 1u : 0u;
         u32 gx = 0, gy = 0;
         grid1d(cb.elemCount, kGroup, gx, gy);
         cb.groupsX = gx;
@@ -634,7 +644,7 @@ bool ConvNet::recordTrain(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::B
 
 bool ConvNet::recordEvaluate(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi::BufferHandle target,
                              rhi::BufferHandle posWeight, rhi::BufferHandle lossPerRecord, const TensorShape& shape,
-                             f32 lossNorm, bool useEma, const IoStates& states) {
+                             f32 lossNorm, bool useEma, const IoStates& states, ConvLossWeight weightKind) {
     if (!valid() || mode_ != ConvMode::Train || !in || !target || !posWeight || !lossPerRecord || !(lossNorm > 0.0f))
         return false;
     if (!fits(shape, true)) {
@@ -645,7 +655,8 @@ bool ConvNet::recordEvaluate(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi
         }
         return false;
     }
-    rhi::ScopedGpuStat gpuStat(ctx, "Neural.ConvEvaluate");
+    std::optional<rhi::ScopedGpuStat> gpuStat;
+    if (gpuStats_) gpuStat.emplace(ctx, "Neural.ConvEvaluate");
     flushPending(ctx);
     Recorder run(ctx, Callers{{{in, states.input}, {target, states.input}, {posWeight, states.input},
                                {lossPerRecord, states.output}}});
@@ -656,7 +667,7 @@ bool ConvNet::recordEvaluate(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi
     Binds b;
     b.srv[0] = acts_[layers - 1]; b.srvCount[0] = static_cast<u32>(actCap_[layers - 1]);
     b.srv[1] = target;            b.srvCount[1] = static_cast<u32>(head.count());
-    b.srv[5] = posWeight;         b.srvCount[5] = static_cast<u32>(head.n * head.planeCount());
+    b.srv[5] = posWeight;         b.srvCount[5] = weightFloats(head, weightKind);
     b.uav[0] = lossPerRecord;     b.uavCount[0] = head.n;
     const rhi::BindingSetHandle set = bindingSet(b);
     if (!set) return false;
@@ -664,6 +675,7 @@ bool ConvNet::recordEvaluate(rhi::IRenderContext& ctx, rhi::BufferHandle in, rhi
     fillCommon(cb);
     cb.n = head.n; cb.outH = head.h; cb.outW = head.w;
     cb.lossNorm = lossNorm;
+    cb.weightPerElem = weightKind == ConvLossWeight::PerElement ? 1u : 0u;
     u32 gx = 0, gy = 0;
     grid1d(head.n, 1, gx, gy);   // one group per record
     cb.groupsX = gx;

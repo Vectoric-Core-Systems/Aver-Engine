@@ -1,6 +1,6 @@
 # NRD v2: single-frame neural denoiser over the composed lighting
 
-**Status:** design (2026-10-05). Owner decisions: replace the whole denoiser stack (FidelityFX and the
+**Status:** phases 1, 3 and 4 built (2026-10-06); weights not yet trained. Owner decisions: replace the whole denoiser stack (FidelityFX and the
 per-signal plumbing); **strictly single-frame** (no denoiser history, so no smear or ghosting in
 motion); denoise the **composed lighting**; a **convolutional** network; **trained in-engine** like
 NeuraFI, not in Python. Supersedes NEURAA_NRD.md section 4 (NRD v1) once phase 1 lands.
@@ -172,6 +172,84 @@ Usage: `--denoiser 2 --cam-wander AMP SPEED --set post.autoExposure 0 --nrd2-cap
 [HOLD] [HELDOUT_FROM] [--nrd2-oracle grad|grid]` on the open level. GPU memory while capturing: about
 4 x (D, S and pyramids) + 22 fp32 planes per pixel + feature readbacks (~390 MiB at 1766x994).
 
+## Phase 4 as built (2026-10-06): training and inference
+
+Code: `Nrd2Trainer` (CPU pieces and the GPU session), `Nrd2Network` (inference), `shaders/nrd2_net.hlsl`
+(record gather, standardise in, de-standardise out), editor `sandbox/src/Nrd2Session.*` (Tools > Train
+Neural Denoiser, `--nrd2-train`). Tests: `Nrd2TrainerTest` (CPU) and `Nrd2TrainerGpuTest` (WARP: a short
+session on synthetic poses, the saved held-out ratio against the CPU twin, inference against the CPU twin,
+gate, resume, cancel); `NeuralConvTest` / `NeuralGpuParityTest` cover the per-element loss weight. Not yet
+run in the engine or on real poses.
+
+**Parameter space only** (rule 4). The loss, validation, checkpoint choice, early stop and live gate all
+compare predicted tile parameters with the oracle's; nothing runs the network's output through the resolve.
+
+**Network** (`nrd2NetworkDesc`): 12 -> 3x3 s2 16 -> 3x3 16 -> 3x3 s2 32 -> 3x3 32 -> 1x1 12 (ReLU, linear
+head, 18,348 weights). Input the 12-channel half-resolution feature tensor (4 tilesX x 4 tilesY), output
+tilesX x tilesY x 12 = the tile-parameter planes (plane = signal x 6 + field).
+
+**Standardisation** (saved as the AVNN v2 io affine): per input channel, mean and std over every texel of
+every frame of the training poses; per parameter, mean and std weighted by the signal's tile weight (std
+floors 1e-3 / 1e-2). Inputs x * (1/std) - mean/std, targets likewise; the head predicts standardised
+parameters.
+
+**Records**: 56x56 half-resolution patches (14x14 tiles) at tile-aligned origins; texels past the pose's
+edge read 0 in standardised space (the conv's padding at inference; exact for the first layer, the 3-tile
+border of a frame is approximate). Targets on all 14x14 tiles, weights only on the central 8x8 (tiles
+3..10), per tile and per signal (D's weight for parameters 0..5, S's for 6..11, `ConvLossWeight::PerElement`).
+A non-finite theta has weight 0. Core tiles of a record are bit-identical to a full-frame forward
+(`Nrd2TrainerTest`).
+
+**Sampling**: batch 32, scenes take turns record by record over the resident poses; pose, frame and core
+origin from a hash of (seed, step, record). Deterministic given the residents, which change on a fixed
+step schedule.
+
+**Pose cache**: one GPU buffer per pose ("slot": fp16 features, theta, tile weights as one
+`StructuredBuffer<uint>`), held-out poses (frame 0 only) in at most a third of `vramBudget` (1.5 GB),
+training poses in the rest. More training poses than slots: a worker thread reads the next pose, a 3-buffer
+staging ring uploads it, one resident is replaced every 62 steps (training waits if the read is late, so
+the schedule stays fixed). One upload per frame.
+
+**Training** (`IRenderFeature::prePass` of a passive feature the session registers, outside any render
+pass; GPU span "NRD2 training"): per step the 32 records are gathered (`CSNrd2Gather`, one dispatch each)
+and `ConvNet::recordTrain` runs one Adam step; learning rate 5e-4 / (1 + lifetime steps / 1000), floored
+2e-5 (NeuraFI's); EMA 0.995 for inference; loss norm 32 x 12 x 64. Steps per frame adapt to `gpuBudgetMs`
+(8 ms) from `IDevice::gpuTiming` deltas of that span (a validation batch counts 0.35 of a step); without
+timing, 2 a frame. Every 50 steps a training-batch loss is read back (4 frames later).
+
+**Validation** every 250 steps, training paused: the EMA weights over every held-out pose's records whose
+cores tile the frame once (`recordEvaluate`, loss norm 1), read back 4 frames later. Metric: sum w (p' -
+t')^2 over the default parameters' sum w (d' - t')^2 in the same standardised space, per scene and overall.
+Log: `[NRD2] train step N lr X loss Y | val V (default Z, ratio R)` (V and Z per unit weight).
+
+**Checkpoints**: a new best ratio saves `nrd2_v1.avnn` (EMA weights + io affine) and `nrd2_v1.avnn.steps`
+(`lifetimeSteps valRatio datasetId bestRatio evalsSinceBest`); every 500 steps and at the end
+`nrd2_v1.last.avnn` (master weights) + sidecar. Writes go to a temporary file then rename. Early stop after 8
+validations without improvement. Resume from `.last` when its dataset id (FNV-1a over scene, pose index,
+held-out flag and CRC of every pose) matches; Adam restarts, lifetime steps continue. Cancel validates
+where it stands, saves `.last`, then stops; editor exit saves the last read-back weights as `.last`.
+Scenes with no held-out pose hold out every 4th (logged).
+
+**Inference** (`Nrd2Network`, in `Nrd2::record` after the pyramid when `voxi.nrd2Network` is on and not
+bypassed): `CSNrd2Features` -> `CSNrd2NetIn` (standardise in place) -> `ConvNet::recordInfer` (EMA) ->
+`CSNrd2NetOut` (output affine; logits clamped +-8, log2 sensitivities +-6; non-finite -> the defaults) into
+the tile-parameter buffer; GPU span "NRD2 network". Defaults instead (said once) when the passes or the
+network do not build, there are no weights, the file will not load or has no affine, the gate is closed, or
+a buffer will not allocate. Weights: `%LOCALAPPDATA%\AverEngine\nrd2_v1.avnn` over `bin/data/nrd2_v1.avnn`
+(CMake deploys `modules/render.denoise/data/nrd2_v1.avnn` and its `.steps` when they exist), re-read when
+the file changes (polled every 120 frames). **Live gate** from the sidecar's held-out ratio: on at <= 0.8,
+off above 0.9, unchanged between; no sidecar = off. Resolution change: bindings invalidated, tensors
+re-reserved.
+
+**Editor**: Tools > Train Neural Denoiser... (dataset folder, poses and held-out counts per scene, steps,
+cache size, GPU ms a frame, resume; Start / Cancel; live status), a sticky toast with progress and Cancel,
+and an Editor Preferences line (weights source, steps, held-out ratio, gate, in use).
+CLI: `--nrd2-train STEPS [DATASETDIR...]` (steps this session; no dirs = the default dataset folder),
+bounded with `--frames N`. Training needs the device, not NRD2 as the active denoiser.
+
+Not yet: training on the captured scenes and judging the weights on the image rig (M9), shipped weights,
+NRD2 in-frame on Vulkan (the trainer itself is portable compute).
+
 ## The network
 
 - **Shape.** A small encoder over 1/2-resolution inputs (3x3 convolutions, ReLU, stride-2 down to 1/8),
@@ -184,13 +262,13 @@ Usage: `--denoiser 2 --cam-wander AMP SPEED --set post.autoExposure 0 --nrd2-cap
 
 ## Training, in-engine
 
-1. **Capture session** (editor: Tools > Train Neural Denoiser; or `--nrd2-train`): the camera travels a
+1. **Capture session** (`--nrd2-capture`, phase 3): the camera travels a
    path and holds at poses. At each hold the renderer keeps rendering the same estimator and averages
    it on the GPU (256+ frames): that mean is the target, the single frames are the inputs. Same
    estimator, so the target is exactly what a perfect denoiser of that estimator would return.
 2. **Oracle fit** (GPU): per tile, gradient descent on the resolve's parameters against the mean, over
    several noisy frames of the pose. This fits parameters, not a model.
-3. **Regression** (GPU, `Aver.Render.Neural`): the network learns to predict the oracle parameters from
+3. **Regression** (GPU, `Aver.Render.Neural`; Tools > Train Neural Denoiser or `--nrd2-train`): the network learns to predict the oracle parameters from
    the inputs. **Parameter-space loss only**: the network's own output is never run through the filter
    and scored, in training, validation, checkpointing or the live gate (rule 4, UC US 10,192,146).
 4. **Weights** save as `nrd2_v1.avnn` in the user data folder (the user's copy wins over the shipped one

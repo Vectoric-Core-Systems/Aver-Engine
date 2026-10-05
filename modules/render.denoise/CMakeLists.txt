@@ -10,11 +10,13 @@ add_library(Aver.Render.Denoise STATIC
   src/Nrd2.cpp
   src/Nrd2Capture.cpp
   src/Nrd2Dataset.cpp
-  src/Nrd2ResolveReference.cpp)
+  src/Nrd2Network.cpp
+  src/Nrd2ResolveReference.cpp
+  src/Nrd2Trainer.cpp)
 
 target_include_directories(Aver.Render.Denoise PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Render.Denoise PUBLIC cxx_std_20)
-# Aver.Render.Neural: CRC-32 and the Adam bias correction (NRD2 dataset and oracle), later the network.
+# Aver.Render.Neural: CRC-32 and the Adam bias correction (NRD2 dataset and oracle), the NRD2 network.
 target_link_libraries(Aver.Render.Denoise PUBLIC Aver.Core Aver.RHI Aver.Render.Neural)
 set_target_properties(Aver.Render.Denoise PROPERTIES FOLDER "modules")
 
@@ -30,6 +32,22 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_nrd_weights} "${CMAKE_BINARY_DIR}/bin/data"
   DEPENDS ${_nrd_weights}
   COMMENT "NRD: deploying the trained weights to bin/data")
+# NRD2's trained network (docs/rendering/NRD2.md, phase 4) and its .steps sidecar (the live gate reads the
+# held-out ratio from it), once they ship; the build works without them (the resolve keeps its defaults).
+set(_nrd2_weights "${CMAKE_CURRENT_SOURCE_DIR}/data/nrd2_v1.avnn")
+if(EXISTS "${_nrd2_weights}")
+  set(_nrd2_files "${_nrd2_weights}")
+  if(EXISTS "${_nrd2_weights}.steps")
+    list(APPEND _nrd2_files "${_nrd2_weights}.steps")
+  endif()
+  add_custom_command(
+    OUTPUT  "${CMAKE_BINARY_DIR}/bin/data/nrd2_v1.avnn"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/bin/data"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_nrd2_files} "${CMAKE_BINARY_DIR}/bin/data"
+    DEPENDS ${_nrd2_files}
+    COMMENT "NRD2: deploying the trained network to bin/data")
+  list(APPEND _nrd_deployed "${CMAKE_BINARY_DIR}/bin/data/nrd2_v1.avnn")
+endif()
 add_custom_target(Aver.Render.Denoise.weights ALL DEPENDS ${_nrd_deployed})
 add_dependencies(Aver.Render.Denoise Aver.Render.Denoise.weights)
 

@@ -105,6 +105,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 }
 #endif
 #include "ToolsMenu.hpp"
+#include "Nrd2Session.hpp"
 #include "UiRegistry.hpp"
 #if AVER_MODULE_SYNAPSE
 #include "NavBakeCommand.hpp"
@@ -1604,6 +1605,8 @@ public:
         nrd2CaptureDir_ = dir; nrd2CapturePoses_ = poses; nrd2CaptureHold_ = hold;
         nrd2CaptureHeldOut_ = heldOutFrom; nrd2CaptureGrid_ = oracleGrid;
     }
+    // --nrd2-train STEPS [DATASETDIR...] (NRD2 phase 4; no dirs = %LOCALAPPDATA%/AverEngine/nrd2_dataset).
+    void setNrd2Train(u32 steps, std::vector<std::string> dirs) { nrd2Session_.requestCli(steps, std::move(dirs)); }
 #if AVER_MODULE_SR
     void setNeuRaaCapture(const std::string& dir, u32 count) { neuraaCaptureDir_ = dir; neuraaCaptureCount_ = count; }
 #endif
@@ -3492,6 +3495,8 @@ private:
     u64 logoUiId_=0;
     f32 logoAspect_=1.0f;
     editor::ToolsMenu tools_;
+    editor::Nrd2Session nrd2Session_;   // Tools > Train Neural Denoiser, --nrd2-train
+    bool nrd2MenuWired_ = false;
     // Gizmo coordinate space. Honoured by drawGizmo, pickAxis, applyMove and applyRotate; SCALE tool always uses local.
     bool worldSpace_=true;
     bool giDebugView_=false; Vec3 giCenter_{0,0,300}; f32 giExtent_=1200.0f;   // cm

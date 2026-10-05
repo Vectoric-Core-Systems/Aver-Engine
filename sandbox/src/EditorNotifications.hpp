@@ -43,6 +43,7 @@ enum class NotifyAction : u8 {
     ShowOutputLog,      // the OUTPUT LOG, not the Console -- the Console keeps its own scrollback
     PostponeAutosave,
     RetryAutosave,
+    CancelNeuralTraining,   // editor::Nrd2Session (Tools > Train Neural Denoiser)
 };
 
 struct Notification {

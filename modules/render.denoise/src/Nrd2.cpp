@@ -172,6 +172,7 @@ void Nrd2::destroyCompose() {
 
 void Nrd2::releaseTargets() {
     if (!res_) return;
+    network_.invalidateBindings();
     auto drop = [&](rhi::TextureHandle& t) { if (t) res_->destroyTexture(t); t = 0; };
     drop(targets_.diffuse); drop(targets_.specular); drop(targets_.remodA); drop(targets_.remodB);
     for (u32 l = 0; l < 3; ++l) { drop(guide_[l]); drop(levelD_[l]); drop(levelS_[l]); }
@@ -191,6 +192,7 @@ void Nrd2::destroy() {
     jitterSuppressed_ = false;
     releaseTargets();
     destroyCompose();
+    network_.destroy();
     if (res_) {
         for (rhi::PipelineHandle* p : {&psoPyramid_, &psoParams_, &psoResolve_, &psoFeatures_}) { if (*p) res_->destroyPipeline(*p); }
         for (rhi::BindingSetHandle* s : {&setPyramid_, &setParams_, &setResolve_, &setCompose_, &setFeatures_}) {
@@ -324,13 +326,28 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
         ctx.textureBarrier(levelS_[l], kWrite, kRead);
     }
 
-    // Phase 1: the defaults. Phase 4's network writes this buffer instead.
-    ctx.bufferBarrier(tileParams_, rhi::ResourceState::Common, kWrite);
-    ctx.setPipeline(psoParams_);
-    ctx.setBindingSet(setParams_);
-    ctx.setConstantBuffer(kConstantSlot, &cb, sizeof(cb));
-    ctx.dispatch((tiles + 63u) / 64u, 1, 1);
-    ctx.bufferBarrier(tileParams_, kWrite, kRead);
+    // Tile parameters: the network's when it can (its features from this frame's pyramid), else the defaults.
+    bool net = false;
+    if (params_.network && !params_.bypass) {
+        if (network_.ready(*dev_)) {
+            if (recordFeatures(ctx, in))
+                net = network_.record(ctx, features_, featureFloats_, tileParams_, tileCapacity_ * kNrd2TileParams, tx,
+                                      ty, cb.def);
+            else
+                network_.markIdle("the feature pass would not build");
+        }
+    } else {
+        network_.markIdle(params_.bypass ? "bypass" : "off (voxi.nrd2Network 0)");
+    }
+    if (!net) {
+        ctx.bufferBarrier(tileParams_, rhi::ResourceState::Common, kWrite);
+        ctx.setPipeline(psoParams_);
+        ctx.setBindingSet(setParams_);
+        ctx.setConstantBuffer(kConstantSlot, &cb, sizeof(cb));
+        ctx.dispatch((tiles + 63u) / 64u, 1, 1);
+        ctx.bufferBarrier(tileParams_, kWrite, rhi::ResourceState::Common);
+    }
+    ctx.bufferBarrier(tileParams_, rhi::ResourceState::Common, kRead);
 
     ctx.textureBarrier(lit_, kRead, kWrite);
     ctx.setPipeline(psoResolve_);
@@ -394,6 +411,7 @@ bool Nrd2::recordFeatures(rhi::IRenderContext& ctx, const Inputs& in) {
     if (!psoFeatures_ || !setFeatures_) return false;
     const u32 tx = tilesOf(in.viewport[2]), ty = tilesOf(in.viewport[3]);
     if (tx * ty * 16u * 12u > featureFloats_) {
+        network_.invalidateBindings();
         if (features_) res_->destroyBuffer(features_);
         rhi::BufferDesc bd{};
         bd.bytes = static_cast<u64>(tileCapacity_ > tx * ty ? tileCapacity_ : tx * ty) * 16u * 12u * sizeof(f32);

@@ -2445,6 +2445,7 @@ void SandboxApp::buildUI(Engine& e) {
     pumpContentWatch();
     assetEditors_.draw(e, centralDock_, dpi_);
     tools_.drawModals(project_, dpi_);
+    nrd2Session_.drawWindow(dpi_);
     drawUpgradePrompt();
     drawAboutPrompt(e);
     drawSaveLevelAsPrompt();
@@ -3259,6 +3260,7 @@ void SandboxApp::drawNotifications() {
             case editor::NotifyAction::Dismiss:          q.dismiss(actId); break;
             case editor::NotifyAction::PostponeAutosave: autosavePostponeRequested_ = true; break;
             case editor::NotifyAction::RetryAutosave:    autosaveRetryRequested_ = true; break;
+            case editor::NotifyAction::CancelNeuralTraining: nrd2Session_.cancel(); break;
             default: break;
         }
     }

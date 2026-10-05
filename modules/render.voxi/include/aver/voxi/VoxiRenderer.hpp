@@ -1279,6 +1279,11 @@ public:
     void startNrd2Capture(const render::denoise::Nrd2CaptureConfig& cfg);
     [[nodiscard]] bool nrd2CaptureHolding() const { return nrd2_.captureHolding(); }
     [[nodiscard]] bool nrd2CaptureActive() const { return nrd2_.captureActive() || nrd2CapturePending_; }
+    // NRD2 phase 4 network weights (user file over shipped) and what the network is doing.
+    void setNrd2WeightsPaths(std::string user, std::string shipped) {
+        nrd2_.setNetworkWeights(std::move(user), std::move(shipped));
+    }
+    [[nodiscard]] render::denoise::Nrd2NetworkStatus nrd2NetworkStatus() const { return nrd2_.networkStatus(); }
 
 private:
     // Path tracing wanted -- a different question from ray tracing wanted, deliberately asking the other setting.

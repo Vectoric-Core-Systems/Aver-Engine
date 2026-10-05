@@ -4626,6 +4626,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         std::memcpy(np.diffuse, settings_.nrd2Params, sizeof(np.diffuse));
         std::memcpy(np.specular, settings_.nrd2Params + 6, sizeof(np.specular));
         np.bypass = settings_.nrd2Bypass;
+        np.network = settings_.nrd2Network;
         nrd2_.setParams(np);
         render::denoise::Nrd2::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();

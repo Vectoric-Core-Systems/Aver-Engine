@@ -52,6 +52,7 @@ add_executable(Sandbox WIN32
   src/RevisionControl.cpp
   src/NavBakeCommand.cpp
   src/ToolsMenu.cpp
+  src/Nrd2Session.cpp
   src/GraphEditorGeometry.cpp
   src/GraphEditor.cpp
   src/AnimCurveGeometry.cpp

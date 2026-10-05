@@ -170,6 +170,14 @@ void ToolsMenu::drawMenu(const fmt::ProjectDesc& project) {
 
     drawScriptItems(project);
 
+    if (openNeuralDenoiser_) {
+        ImGui::Separator();
+        if (ImGui::MenuItem("Train Neural Denoiser...")) openNeuralDenoiser_();
+        tip("Trains NRD2's per-tile parameter network on the GPU from captured poses\n"
+            "(--nrd2-capture). Weights land beside the editor's settings and are used\n"
+            "once they beat the default parameters on held-out poses.");
+    }
+
     ImGui::EndMenu();
 #endif
 }

@@ -969,6 +969,10 @@ void SandboxApp::onInit(Engine& e)  {
         // VoxiRenderer non-owning; torn down in onShutdown. Read back settings to see clamping.
         voxiRenderer_.setSettings(voxi::Renderer::get().settings());
         voxiRenderer_.setDenoiseWeightsPath(aver::executableDir() + "/data/nrd_v1.bin");
+        // NRD2's network: the user's trained weights over the shipped ones.
+        voxiRenderer_.setNrd2WeightsPaths(
+            aver::userDataDir().empty() ? std::string() : aver::userDataDir() + "\\" + render::denoise::kNrd2WeightsFileName,
+            aver::executableDir() + "\\data\\" + render::denoise::kNrd2WeightsFileName);
         if (frameTimeReport_) voxiRenderer_.setFrameTimeReport(true);
         // Set measurement dials before init().
         if (rdAblate_) {
@@ -1404,6 +1408,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         nrdCaptureStarted_ = true;
     }
     if (voxiAttached_ && voxiRenderer_.denoiseCaptureHolding()) neuraaHold = true;
+    // NRD2 training (Tools > Train Neural Denoiser, --nrd2-train): its GPU hook goes on or off here, before beginFrame.
+    if (!nrd2MenuWired_ && nrd2Session_.available()) {
+        tools_.setNeuralDenoiserOpener([this] { nrd2Session_.openWindow(); });
+        nrd2MenuWired_ = true;
+    }
+    nrd2Session_.tick(e.device());
     // --nrd2-capture: handed over once the renderer is attached and the level has a name (or after ~10 s);
     // it starts stepping on NRD2 frames and holds the camera the same way.
     if (nrd2CapturePoses_ && voxiAttached_ && !nrd2CaptureStarted_ && (!levelName_.empty() || t.frame > 600)) {
@@ -2385,6 +2395,7 @@ int SandboxApp::exitCode() const  {
 
 void SandboxApp::onShutdown(Engine& e)  {
     closePlayWindow();   // its swapchain must go before the device does
+    nrd2Session_.shutdown();   // a running NRD2 training session saves its checkpoint while the device lives
 #if AVER_MODULE_MCP
     mcp_.stop();
 #endif

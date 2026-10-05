@@ -152,6 +152,9 @@ struct Settings {
     float nrd2Params[12] = {1.0f, 2.0f, 2.0f, 4.5f, 3.0f, -1.0f, 1.0f, 2.0f, 2.0f, 4.5f, 4.0f, -1.0f};
     // Developer: NRD2 recomposes its split without filtering (an A/B check of the split itself).
     bool nrd2Bypass = false;
+    // NRD2 phase 4: the trained network sets the per-tile parameters when its weights exist and pass the
+    // held-out gate (render::denoise::Nrd2Network); off, the nrd2Params above everywhere.
+    bool nrd2Network = true;
     // NRD2 keeps half-rate tracing and fills the skipped checkerboard half from this frame's traced
     // neighbours (CSRdHalfFill; docs/rendering/NRD2.md). Each applies where its base half rate is asked
     // for: GI under rayDrivenStages 2, reflections under rtReflectionHalfRate (glossy only), sky

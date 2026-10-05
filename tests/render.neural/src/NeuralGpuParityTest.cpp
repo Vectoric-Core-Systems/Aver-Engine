@@ -16,6 +16,7 @@
 //   b) 1 and 10 recordTrain steps vs trainBatch: master and EMA weights rel 1e-4
 //   c) forward twice and a 10-step training rerun: bit-identical
 //   d) a toy task (1/4-resolution mean) learned on the GPU: held-out loss falls
+//   e) per-element loss weights: evaluate and 3 steps vs the CPU twin
 #include "aver/core/Log.hpp"
 #include "aver/render/neural/ConvNet.hpp"
 #include "aver/render/neural/ConvNetReference.hpp"
@@ -573,6 +574,37 @@ void runConvParity(rhi::IDevice& dev) {
         std::vector<f32> m10b, e10b;
         check(train.uploadWeights(weights) && trainSteps(10, m10b, e10b), "a second 10-step GPU run");
         check(bitsEqual(m10, m10b) && bitsEqual(e10, e10b), "two 10-step GPU training runs are bit-identical");
+    }
+
+    // ---- e) per-element loss weights (NRD2's per-signal tile weights): evaluate and 3 steps vs the CPU twin
+    {
+        std::vector<f32> elemW(headShape.count());
+        for (usize i = 0; i < elemW.size(); ++i) elemW[i] = (i % 5 == 1) ? 0.0f : 0.25f + 0.75f * (0.5f + 0.5f * rng.next());
+        const GpuTensor gElemW = pool.make(elemW.size(), false, &elemW);
+        ConvNetReference refE(desc, opt);
+        refE.setWeights(weights);
+        bool recorded = true, rb = false;
+        const bool ran = gElemW.buf && train.uploadWeights(weights) && dev.runStandaloneCompute([&](rhi::IRenderContext& ctx) {
+            uploadTensor(ctx, gElemW);
+            recorded = train.recordEvaluate(ctx, gIn.buf, gTarget.buf, gElemW.buf, gLoss.buf, shape, lossNorm, false, {},
+                                            ConvLossWeight::PerElement);
+            copyToReadback(ctx, gLoss);
+            for (u32 s = 0; s < 3; ++s)
+                recorded = train.recordTrain(ctx, gIn.buf, gTarget.buf, gElemW.buf, shape, lossNorm, {},
+                                             ConvLossWeight::PerElement) && recorded;
+            rb = train.recordReadback(ctx);
+        });
+        const std::vector<f32> per = ran && recorded ? readTensor(res, gLoss) : std::vector<f32>{};
+        f32 sum = 0.0f;
+        for (f32 v : per) sum += v;
+        const f32 want = refE.evaluate(shape, input, target, elemW, lossNorm, false, ConvLossWeight::PerElement);
+        check(ran && recorded && rb && train.collectWeights(), "per-element weights: evaluate and 3 steps ran");
+        check(per.size() == shape.n && std::fabs(sum - want) <= 1e-4f * std::fabs(want) + 1e-7f,
+              "per-element weights: recordEvaluate matches ConvNetReference::evaluate (rel 1e-4)");
+        for (u32 s = 0; s < 3; ++s) refE.trainBatch(shape, input, target, elemW, lossNorm, ConvLossWeight::PerElement);
+        const std::span<const f32> m = train.cpuWeights(false);
+        expectClose("per-element weights: master weights after 3 steps match trainBatch (rel 1e-4)",
+                    std::vector<f32>(m.begin(), m.end()), refE.weights(), 1e-4f, 2e-5f);
     }
 
     // ---- d) the toy task learned on the GPU
