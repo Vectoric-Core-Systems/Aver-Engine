@@ -1992,6 +1992,13 @@ public:
     // the top of every creation/destruction entry point, matching D3D12's own collect() call sites.
     void collect();
 
+    // Constants sets (kVkSetConstants): setPipeline and setConstantBuffer take a fresh one per call.
+    // They come from per-frame-slot pool chains that grow on demand and are reset whole once the slot's
+    // GPU work has retired, so one frame or standalone submission can record any number of dispatches.
+    VkDescriptorSet allocConstantsSet(VkDescriptorSetLayout layout);
+    // Only after the GPU has finished everything recorded in `slot` (beginFrame's wait, standalone's idle).
+    void resetConstantsPools(u32 slot);
+
 private:
     // Fills a freshly created image from TextureDesc::initialData. The image must already be in
     // TRANSFER_DST_OPTIMAL; on success it has been transitioned to `d.initialState` and the GPU has
@@ -2059,6 +2066,13 @@ private:
     std::vector<SamplerCacheEntry>     samplers_;
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;   // lazily built by instanceSetLayout(); owned here, destroyed in the shutdown sweep
     std::vector<RetiredObject>         retired_;
+
+    struct ConstantsPool {
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        u32 used = 0;   // sets allocated since the last reset (tracked, so allocation never fails on a full pool)
+    };
+    std::vector<ConstantsPool> constantsPools_[kFrameCount];
+    u32 constantsPoolCursor_[kFrameCount] = {};
 
     friend class VulkanRenderContext;
     friend class VulkanDevice;

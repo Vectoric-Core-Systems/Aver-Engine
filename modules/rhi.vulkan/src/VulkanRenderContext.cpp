@@ -418,13 +418,8 @@ void VulkanRenderContext::setConstantBuffer(u32 slot, const void* data, u32 byte
     }
     g_constantsInfos[slot] = VkDescriptorBufferInfo{alloc.buffer, alloc.offset, bytes};
 
-    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    ai.descriptorPool = res_->descriptorPool_;
-    ai.descriptorSetCount = 1;
-    ai.pSetLayouts = &le->constantsSetLayout;
-    VkDescriptorSet fresh = VK_NULL_HANDLE;
-    if (!vkOk(dev_->api().AllocateDescriptorSets(dev_->vkDevice(), &ai, &fresh), "vkAllocateDescriptorSets (constants set, rewrite)"))
-        return;
+    const VkDescriptorSet fresh = res_->allocConstantsSet(le->constantsSetLayout);
+    if (fresh == VK_NULL_HANDLE) return;
 
     VkDescriptorBufferInfo infos[kMaxConstantSlots]{};
     VkWriteDescriptorSet writes[kMaxConstantSlots]{};
@@ -442,17 +437,8 @@ void VulkanRenderContext::setConstantBuffer(u32 slot, const void* data, u32 byte
     }
     if (n) dev_->api().UpdateDescriptorSets(dev_->vkDevice(), n, writes, 0, nullptr);
 
-    // The set this replaces is still referenced by everything already recorded, so it goes behind
-    // the frame fence exactly like the one bindDeclaredDescriptors displaces.
-    if (g_constantsSet != VK_NULL_HANDLE) {
-        VkDescriptorSet stale = g_constantsSet;
-        VulkanDevice* devPtr = dev_;
-        VulkanResourceFactory* resPtr = res_;
-        res_->retire([devPtr, resPtr, stale]() {
-            VkDescriptorSet dead = stale;
-            devPtr->api().FreeDescriptorSets(devPtr->vkDevice(), resPtr->descriptorPool_, 1, &dead);
-        });
-    }
+    // The set this replaces stays valid for what is already recorded: its pool resets only when the
+    // frame slot retires (allocConstantsSet).
     g_constantsSet = fresh;
     rebindConstantsSet(dev_->api(), cb, pipe_, g_constantsSet);
 }
@@ -1580,8 +1566,8 @@ ConstantAllocation VulkanRenderContext::ringAlloc(const void* data, u32 bytes) {
 // zeros, not garbage or a validation-layer-visible unbound descriptor) -- setConstantBuffer()
 // overwrites just that one binding later, per-slot, when the caller actually supplies data.
 //
-// A fresh VkDescriptorSet is allocated (from VulkanResourceFactory's shared, FREE_DESCRIPTOR_SET_BIT
-// pool) on EVERY call rather than cached per (layout, frame-in-flight) pair: VulkanCommon.hpp's
+// A fresh VkDescriptorSet is allocated (VulkanResourceFactory::allocConstantsSet, per-frame-slot pools
+// reset when the slot retires) on EVERY call rather than cached per (layout, frame-in-flight) pair: VulkanCommon.hpp's
 // DescriptorLayoutEntry has no field to cache such a set in (only samplersSet, which is genuinely
 // immutable-forever and so can be), and this class has no member to hold a cross-call cache either
 // (see the file banner). The cost is one allocate + a handful of small descriptor writes per
@@ -1601,18 +1587,8 @@ void VulkanRenderContext::bindDeclaredDescriptors(const RhiPipeline* p) {
         return;
     }
 
-    // Retire the PREVIOUS pipeline's constants set once the GPU is past every frame that could still
-    // reference it -- deferred exactly like every other object this backend destroys.
-    if (g_constantsSet != VK_NULL_HANDLE) {
-        VkDescriptorSet stale = g_constantsSet;
-        VulkanDevice* devPtr = dev_;
-        VulkanResourceFactory* resPtr = res_;
-        res_->retire([devPtr, resPtr, stale]() {
-            VkDescriptorSet s = stale;
-            devPtr->api().FreeDescriptorSets(devPtr->vkDevice(), resPtr->descriptorPool_, 1, &s);
-        });
-        g_constantsSet = VK_NULL_HANDLE;
-    }
+    // The PREVIOUS pipeline's set is reclaimed with its frame slot's pools (allocConstantsSet).
+    g_constantsSet = VK_NULL_HANDLE;
 
     if (zeroCB_ == VK_NULL_HANDLE) {
         if (!createBufferCommitted(*dev_, 256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
@@ -1628,13 +1604,8 @@ void VulkanRenderContext::bindDeclaredDescriptors(const RhiPipeline* p) {
         }
     }
 
-    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    ai.descriptorPool = res_->descriptorPool_;
-    ai.descriptorSetCount = 1;
-    ai.pSetLayouts = &le.constantsSetLayout;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    if (!vkOk(dev_->api().AllocateDescriptorSets(dev_->vkDevice(), &ai, &set), "vkAllocateDescriptorSets (constants set)"))
-        return;
+    const VkDescriptorSet set = res_->allocConstantsSet(le.constantsSetLayout);
+    if (set == VK_NULL_HANDLE) return;
 
     const u32 f = dev_->frameIndexInFlight() < kFrameCount ? dev_->frameIndexInFlight() : 0;
     VkDescriptorBufferInfo infos[kMaxConstantSlots]{};

@@ -178,7 +178,7 @@ public:
         //
         // ImGui allocates VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER for every texture it draws, and
         // this backend's pool budgets none at all -- its types are SAMPLED_IMAGE, STORAGE_IMAGE,
-        // STORAGE_BUFFER, UNIFORM_BUFFER_DYNAMIC, SAMPLER and ACCELERATION_STRUCTURE, because
+        // STORAGE_BUFFER, STORAGE_BUFFER_DYNAMIC, SAMPLER and ACCELERATION_STRUCTURE, because
         // separate images and samplers are what the engine's own shaders use. Handing that pool over
         // makes every ImGui_ImplVulkan_AddTexture fail with OUT_OF_POOL_MEMORY, which is silent
         // enough to look like "the viewport is just black".

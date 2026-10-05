@@ -825,7 +825,8 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
         }
     }
 
-    AVER_INFO("[RHI.Vulkan] device ready on adapter '{}'", adapterName_);
+    AVER_INFO("[RHI.Vulkan] device ready on adapter '{}' (compute shared memory {} bytes per group)", adapterName_,
+              physicalDeviceProps_.limits.maxComputeSharedMemorySize);
     if (rhiFactory_) rhiFactory_->selfTest();
     return true;
 }
@@ -841,10 +842,13 @@ VulkanDevice::~VulkanDevice() {
     // Releases its own meshes/pipelines/shaders through rhiFactory_, so it must go BEFORE that
     // factory is deleted below.
     editorLines_.shutdown();
+    // Before the factory goes: two post targets are factory textures.
+    releasePostTargets();
     delete rhiContext_;
     delete rhiFactory_;
+    rhiContext_ = nullptr;
+    rhiFactory_ = nullptr;
 
-    releasePostTargets();
     // postSets_ come OUT of postDescriptorPool_, so the pool destroy below takes them all; the
     // vector just must not keep naming them afterwards.
     postSets_.clear();
@@ -2587,7 +2591,7 @@ void VulkanDevice::beginFrame() {
     collectExposureReadout();
     // Deferred destroys, reclaimed every frame -- D3D12Device::beginFrame's twin says why (a resource
     // freed in an idle scene otherwise waited for the next unrelated create/destroy call).
-    if (rhiFactory_) rhiFactory_->collect();
+    if (rhiFactory_) { rhiFactory_->collect(); rhiFactory_->resetConstantsPools(frameIndex_); }
     if (meshGeomPool_[frameIndex_]) api_.ResetDescriptorPool(device_, meshGeomPool_[frameIndex_], 0);
 
     api_.ResetCommandBuffer(commandBuffers_[frameIndex_], 0);
@@ -4023,6 +4027,7 @@ bool VulkanDevice::runStandaloneCompute(const std::function<void(IRenderContext&
 
     waitForGpu();
     ++frameSerial_;   // a set bound by an earlier standalone run may be rewritten now: a new "frame"
+    rhiFactory_->resetConstantsPools(frameIndex_);   // idle: nothing recorded in this slot is still in flight
 
     VkCommandBufferAllocateInfo cbai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     cbai.commandPool = commandPool_; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;

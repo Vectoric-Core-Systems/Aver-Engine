@@ -1140,6 +1140,11 @@ VulkanResourceFactory::~VulkanResourceFactory() {
     // in one shot here, which is why nothing above calls vkFreeDescriptorSets individually.
     if (descriptorPool_) api.DestroyDescriptorPool(device, descriptorPool_, nullptr);
     descriptorPool_ = VK_NULL_HANDLE;
+    for (u32 f = 0; f < kFrameCount; ++f) {
+        for (ConstantsPool& p : constantsPools_[f]) if (p.pool) api.DestroyDescriptorPool(device, p.pool, nullptr);
+        constantsPools_[f].clear();
+        constantsPoolCursor_[f] = 0;
+    }
 }
 
 bool VulkanResourceFactory::init() {
@@ -1155,7 +1160,7 @@ bool VulkanResourceFactory::init() {
         {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 16384},
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8192},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16384},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 512},
+        // No UNIFORM_BUFFER_DYNAMIC: constants sets have their own per-frame pools (allocConstantsSet).
         // gInstanceWorlds, one per instanced draw (drawMeshInstanced allocates a fresh set each
         // time and retires it a frame later, so this budget covers kFrameCount frames of them).
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 512},
@@ -1663,6 +1668,54 @@ void VulkanResourceFactory::collect() {
             ++i;
         }
     }
+}
+
+namespace {
+constexpr u32 kConstantsPoolSets = 1024;
+constexpr u32 kConstantsPoolsMax = 64;   // per slot: 65,536 sets, far past any real frame
+}  // namespace
+
+VkDescriptorSet VulkanResourceFactory::allocConstantsSet(VkDescriptorSetLayout layout) {
+    const u32 f = dev_->frameIndexInFlight() < kFrameCount ? dev_->frameIndexInFlight() : 0;
+    std::vector<ConstantsPool>& chain = constantsPools_[f];
+    u32& cur = constantsPoolCursor_[f];
+    while (cur < chain.size() && chain[cur].used >= kConstantsPoolSets) ++cur;
+    if (cur == chain.size()) {
+        if (chain.size() >= kConstantsPoolsMax) {
+            AVER_ERROR("[RHI.Vulkan] constants descriptor pools exhausted ({} sets in one frame)",
+                       kConstantsPoolSets * kConstantsPoolsMax);
+            return VK_NULL_HANDLE;
+        }
+        // Every binding of a constants set is one dynamic UBO, at most kMaxConstantSlots - 1 of them (b1 is
+        // push constants), so the set count is the only limit that can bind.
+        VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kConstantsPoolSets * (kMaxConstantSlots - 1)};
+        VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        pci.maxSets = kConstantsPoolSets;
+        pci.poolSizeCount = 1;
+        pci.pPoolSizes = &size;
+        ConstantsPool p;
+        if (!vkOk(dev_->api().CreateDescriptorPool(dev_->vkDevice(), &pci, nullptr, &p.pool), "constants descriptor pool"))
+            return VK_NULL_HANDLE;
+        chain.push_back(p);
+    }
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = chain[cur].pool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &layout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (!vkOk(dev_->api().AllocateDescriptorSets(dev_->vkDevice(), &ai, &set), "vkAllocateDescriptorSets (constants set)"))
+        return VK_NULL_HANDLE;
+    ++chain[cur].used;
+    return set;
+}
+
+void VulkanResourceFactory::resetConstantsPools(u32 slot) {
+    if (slot >= kFrameCount) return;
+    for (ConstantsPool& p : constantsPools_[slot]) {
+        if (p.used) dev_->api().ResetDescriptorPool(dev_->vkDevice(), p.pool, 0);
+        p.used = 0;
+    }
+    constantsPoolCursor_[slot] = 0;
 }
 
 // ================================================================================================
