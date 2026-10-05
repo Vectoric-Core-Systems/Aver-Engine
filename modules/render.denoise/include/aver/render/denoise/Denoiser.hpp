@@ -4,9 +4,9 @@
 // THE FILTER IS AMD's, THE PLUMBING IS OURS. The shader passes are AMD FidelityFX Denoiser's
 // reflection pipeline (third_party/fidelityfx-denoiser, MIT), driven at roughness 1 as a diffuse
 // denoiser -- see shaders/aver_denoise.hlsl for why that pipeline and what the host callbacks
-// pin. This class owns everything around it: the seven compute pipelines (three passes in a colour
-// and a one-channel variant, plus the colour pre-exposure pass), the per-signal history textures, the G-buffer history copy,
-// and every resource-state transition.
+// pin. This class owns everything around it: the compute pipelines (three passes in a colour and a
+// one-channel variant, the colour pre-exposure pass, and Neural Denoise's resolve in both variants),
+// the per-signal history textures, the G-buffer history copy, and every resource-state transition.
 //
 // RUNTIME-COMPILED HLSL through the engine's own shader compiler, like every other Voxi pass: no
 // offline shader build, no precompiled bytecode, no register spaces. FidelityFX's headers are
@@ -64,6 +64,9 @@ public:
         // hold this frame's value, the rest are reconstructed from their four neighbours.
         bool radianceHalfRate       = false;
         u32  radianceHalfRateParity = 0;
+        // Neural Denoise: NRD's resolve in place of FidelityFX's (NEURAA_NRD.md section 4). Same
+        // targets, so switching never resets history. Ignored when that pipeline did not build.
+        bool neuralResolve = false;
     };
 
     // FidelityFX's two dials. Safe to change any frame.
@@ -72,11 +75,13 @@ public:
         f32 historyClipWeight = 4.0f;   // width of the neighbourhood clip applied to the history
     };
 
-    // Compiles the seven pipelines. False -- said once at WARN -- when a shader will not compile or a
-    // pipeline will not build; the caller then runs undenoised.
+    // Compiles the pipelines. False -- said once at WARN -- when a FidelityFX shader will not compile
+    // or a pipeline will not build; the caller then runs undenoised. NRD's resolve failing only
+    // leaves neuralAvailable() false.
     bool create(rhi::IDevice& dev);
     void destroy();
     [[nodiscard]] bool valid() const { return pipelines_[0] != 0; }
+    [[nodiscard]] bool neuralAvailable() const { return pipelines_[NrdResolve * 2] != 0; }
 
     // Allocates the history and scratch textures for this resolution. Idempotent at an unchanged
     // size; a real change discards every history.
@@ -97,8 +102,9 @@ public:
     [[nodiscard]] rhi::TextureHandle output(Signal s) const { return output_[static_cast<u32>(s)]; }
 
 private:
-    // Scale (colour only) records first; its number matches the shader's AVER_DNSR_PASS.
-    enum Pass : u32 { Reproject = 0, Prefilter = 1, Resolve = 2, Scale = 3, kPassCount = 4 };
+    // Scale (colour only) records first; each number matches the shader's AVER_DNSR_PASS. NrdResolve
+    // records in place of Resolve when Frame::neuralResolve is set.
+    enum Pass : u32 { Reproject = 0, Prefilter = 1, Resolve = 2, Scale = 3, NrdResolve = 4, kPassCount = 5 };
 
     // Everything one signal keeps. Pairs ping-pong by `parity`: [parity] is written this frame,
     // [1 - parity] holds last frame's.
@@ -121,7 +127,7 @@ private:
     };
 
     bool recordSignal(rhi::IRenderContext& ctx, u32 signal, rhi::TextureHandle input,
-                      const Inputs& in, u32 flags);
+                      const Inputs& in, u32 flags, bool neuralResolve);
     void releaseTargets();
 
     rhi::IDevice*          dev_ = nullptr;

@@ -1030,6 +1030,7 @@ private:
     // The render-target size the rd*Tex_/rdVisBuf_ resources were last created at, and rdVisBuf_'s row pitch in pixels.
     u32  rdStagedW_ = 0, rdStagedH_ = 0;
     u32  rdStagedRowPitch_ = 0;
+    bool rdVisWrittenThisFrame_ = false;   // set by recordStagedRayDriven, cleared in prePass
     // MILESTONE 4: giCbWrittenThisFrame_ -- written every recordStagedRayDriven call.
     // Consumed at the top of NEXT frame's beginShadowHistory, reset here.
     bool giCbWrittenThisFrame_ = false;
@@ -1229,6 +1230,9 @@ public:
     // THE SKY-OCCLUSION RAY'S HIT DISTANCE FOR THIS FRAME, or 0 when the ray isn't running.
     // Rests in ResourceState::UnorderedAccess. 0 is the answer, not an error.
     [[nodiscard]] rhi::TextureHandle ambientHitDistanceTexture() const { return rtAoHitDist_; }
+
+    // The staged ray-driven visibility record, on frames CSRdVisibility wrote it (NeuRAA reads it).
+    bool primaryVisibility(rhi::PrimaryVisibility& out) const override;
 
 private:
     // Path tracing wanted -- a different question from ray tracing wanted, deliberately asking the other setting.

@@ -14,10 +14,10 @@ namespace {
 constexpr u32 kConstantSlot = 1;
 
 // Shader bindings per pass, matching aver_denoise.hlsl's register lists.
-constexpr u32 kSrvCount[4] = {10, 7, 10, 5};
-constexpr u32 kUavCount[4] = {4, 2, 2, 1};
-constexpr const char* kEntry[4] = {"CSDenoiseReproject", "CSDenoisePrefilter", "CSDenoiseResolve",
-                                   "CSDenoiseScale"};
+constexpr u32 kSrvCount[5] = {10, 7, 10, 5, 10};
+constexpr u32 kUavCount[5] = {4, 2, 2, 1, 2};
+constexpr const char* kEntry[5] = {"CSDenoiseReproject", "CSDenoisePrefilter", "CSDenoiseResolve",
+                                   "CSDenoiseScale", "CSDenoiseNrdResolve"};
 // The frame-scale texture's SRV slot in each FidelityFX pass (DNSR_SCALE_SLOT).
 constexpr u32 kScaleSrv[3] = {9, 6, 9};
 
@@ -55,6 +55,7 @@ bool Denoiser::create(rhi::IDevice& dev) {
         destroy();
         return false;
     }
+    u32 built = 0;
     for (u32 pass = 0; pass < kPassCount; ++pass) {
         for (u32 scalar = 0; scalar < (pass == Scale ? 1u : 2u); ++scalar) {
             // AVER_HLSL_2018 is consumed by the shader compiler (D3D12Device.cpp): FidelityFX's
@@ -68,6 +69,11 @@ bool Denoiser::create(rhi::IDevice& dev) {
             sd.minShaderModel = 62;   // DXC, not FXC: the headers use min16float and binary literals
             sd.defines = defines.c_str();
             const rhi::ShaderHandle cs = res_->createShader(sd);
+            if (!cs && pass == NrdResolve) {
+                AVER_WARN("[Denoise] {} ({}) would not compile; Neural Denoise unavailable", kEntry[pass],
+                          scalar ? "one channel" : "colour");
+                continue;
+            }
             if (!cs) {
                 AVER_WARN("[Denoise] {} ({}) would not compile; running undenoised", kEntry[pass],
                           scalar ? "one channel" : "colour");
@@ -84,15 +90,27 @@ bool Denoiser::create(rhi::IDevice& dev) {
             pd.layout.samplers[0].address = rhi::AddressMode::Clamp;
             const rhi::PipelineHandle p = res_->createComputePipeline(pd);
             res_->destroyShader(cs);   // the pipeline owns the bytecode now
+            if (!p && pass == NrdResolve) {
+                AVER_WARN("[Denoise] the {} pipeline would not build; Neural Denoise unavailable", kEntry[pass]);
+                continue;
+            }
             if (!p) {
                 AVER_WARN("[Denoise] the {} pipeline would not build; running undenoised", kEntry[pass]);
                 destroy();
                 return false;
             }
             pipelines_[pass * 2 + scalar] = p;
+            ++built;
         }
     }
-    AVER_INFO("[Denoise] AMD FidelityFX Denoiser (reflection pipeline, diffuse use): 7 pipelines built");
+    // Neural Denoise needs both variants; a half-built pair would only cover one signal.
+    if (!pipelines_[NrdResolve * 2] || !pipelines_[NrdResolve * 2 + 1]) {
+        for (u32 v = 0; v < 2; ++v) {
+            rhi::PipelineHandle& p = pipelines_[NrdResolve * 2 + v];
+            if (p) { res_->destroyPipeline(p); p = 0; --built; }
+        }
+    }
+    AVER_INFO("[Denoise] AMD FidelityFX Denoiser (reflection pipeline, diffuse use): {} pipelines built", built);
     return true;
 }
 
@@ -203,7 +221,7 @@ bool Denoiser::resize(u32 width, u32 height) {
 }
 
 bool Denoiser::recordSignal(rhi::IRenderContext& ctx, u32 s, rhi::TextureHandle input,
-                            const Inputs& in, u32 flags) {
+                            const Inputs& in, u32 flags, bool neuralResolve) {
     SignalTargets& t = sig_[s];
     const u32 cur = t.parity, prev = 1u - t.parity;
     const u32 scalar = s == static_cast<u32>(Signal::Occlusion) ? 1u : 0u;
@@ -239,6 +257,16 @@ bool Denoiser::recordSignal(rhi::IRenderContext& ctx, u32 s, rhi::TextureHandle 
     res_->setSrv(rs, 8, t.average);
     res_->setUav(rs, 0, t.history[cur], 0);
     res_->setUav(rs, 1, t.varHistory[cur], 0);
+    // NRD's resolve: the same bindings as FidelityFX's (phase 1 of NEURAA_NRD.md section 8).
+    rhi::BindingSetHandle nr = t.sets[NrdResolve];
+    res_->setSrv(nr, 4, t.prefiltered);
+    res_->setSrv(nr, 5, t.reprojected);
+    res_->setSrv(nr, 6, t.prefilteredVar);
+    res_->setSrv(nr, 7, t.sampleCount[cur]);
+    res_->setSrv(nr, 8, t.average);
+    res_->setSrv(nr, 9, t.scale);
+    res_->setUav(nr, 0, t.history[cur], 0);
+    res_->setUav(nr, 1, t.varHistory[cur], 0);
     for (u32 p = 0; p < Scale; ++p) res_->setSrv(t.sets[p], kScaleSrv[p], t.scale);
     rhi::BindingSetHandle sc = t.sets[Scale];
     res_->setSrv(sc, 4, t.average);   // still last frame's: Scale records before Reproject
@@ -280,7 +308,8 @@ bool Denoiser::recordSignal(rhi::IRenderContext& ctx, u32 s, rhi::TextureHandle 
         ctx.textureBarrier(t.history[cur], t.historyState[cur], kRead);
         t.historyState[cur] = kRead;
     }
-    dispatch(Resolve, {t.history[cur], t.varHistory[cur]});
+    const bool nrd = neuralResolve && pipelines_[NrdResolve * 2 + scalar] != 0;
+    dispatch(nrd ? NrdResolve : Resolve, {t.history[cur], t.varHistory[cur]});
 
     // Handed to Voxi, whose pixel shaders read it this frame.
     ctx.textureBarrier(t.history[cur], kRead, rhi::ResourceState::ShaderResource);
@@ -322,7 +351,7 @@ bool Denoiser::record(rhi::IRenderContext& ctx, const Frame& frame, const Inputs
             flags |= kFlagHalfRate;
             if (frame.radianceHalfRateParity & 1u) flags |= kFlagHalfRateOdd;
         }
-        recordSignal(ctx, s, signal[s], in, flags);
+        recordSignal(ctx, s, signal[s], in, flags, frame.neuralResolve);
         stale_[s] = false;
     }
 

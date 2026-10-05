@@ -185,7 +185,7 @@ backticks are where the knowledge applies. Measurements are as originally record
 - AMD FidelityFX Denoiser (MIT) through Aver.Render.Denoise.
 - Off by default: ON is real cost user chooses, not one denoiser helps itself to.
 - Needs thin G-buffer written (velocity, view Z, normal/roughness -- three more targets, ~54 MB at 1080p) nothing else engine turns on; field is that agreement.
-- Requires MSAA 1: D3D12's rule every target in one OMSetRenderTargets call shares sample count, G-buffer's three always single-sample so above 1x clear without writing and every denoiser input blank. Denoiser fed blank inputs doesn't fail -- returns confident uniformly wrong image -- so VoxiRenderer skips pass and warns once at WARN; MSAA 8x makes this no-op (UI says so next to checkbox).
+- MSAA: works since 2026-10-05; the D3D12 backend resolves its multisampled G-buffer (nearest sample) before the denoiser reads it. VoxiRenderer gates on IDevice::gBufferWritten() and warns once only when a backend cannot write it.
 - D3D12 only because G-buffer it reads is.
 
 ### denoiserMaxSamples field
@@ -1126,8 +1126,8 @@ Under ray-driven primary visibility (PSRayDriven), the ambient occlusion denoise
 ### ReSTIR GI surface history split
 Position and normal histories are split into two separate textures not because the design wanted two, but because rhi::Format has no four-channel 32-bit float. Both textures swap on the same writeIdx/readIdx and must agree frame-to-frame; one logical surface split only for RHI format constraints.
 
-### G-buffer denoiser blocking under MSAA
-Denoiser disabled when G-buffer enabled under MSAA: all render targets in one OMSetRenderTargets call must share a sample count. G-buffer targets are intentionally single-sample (for compute passes to read: FidelityFX denoiser callbacks, FSR2/3, TAA, SSR), so under MSAA the backend clears them without writing. Feeding denoiser blank inputs produces uniformly wrong images (worst outcome); skipping is the honest answer, logged once.
+### G-buffer under MSAA
+Until 2026-10-05 the denoiser was disabled under MSAA because the single-sample G-buffer could not be bound beside the multisampled scene target. The D3D12 backend now writes multisampled twins and resolves them to the nearest sample (rhi.d3d12 notes); pickGbuf and the denoiser gate ask IDevice::gBufferWritten().
 
 ### Milestone 4 latch ordering
 In beginShadowHistory, denoiseGiInputHalfRate_ and denoiseGiHalfRateParity_ latch LAST frame's half-rate state (giCbWrittenThisFrame_/giCbParityWritten_ from the previous frame's recordStagedRayDriven dispatch) before anything else, including the early return. The denoiser's dispatch reads these to know if the radiance it's filtering came from half-resolution traces. These state values must be latched before they're overwritten by this frame's dispatch, which runs later.

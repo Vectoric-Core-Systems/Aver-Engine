@@ -683,6 +683,10 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "AMD FidelityFX Denoiser over the ReSTIR indirect diffuse and the ray-traced sky occlusion. Allocates the thin G-buffer (velocity, view Z, normal/roughness -- nothing else in the engine wants it) and REQUIRES RT hardware, the RT tier not Off, something to denoise, D3D12 and MSAA 1; above 1x sample count the pass skips itself and says so once at WARN, and this always reads back what is ACTUALLY running, not merely what was last requested",
         []{ const Renderer& r = Renderer::get(); return vBool(voxi::resolve(r.settings(), r.deviceInfo()).denoiser.effective != 0); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->denoiser = on; }); }});
+    t.push_back({"voxi.neuralDenoise", VarType::Bool, false,
+        "Neural Denoise: NRD's resolve in place of FidelityFX's (docs/rendering/NEURAA_NRD.md). Only acts while voxi.denoiser runs; reads back what is ACTUALLY running",
+        []{ const Renderer& r = Renderer::get(); return vBool(voxi::resolve(r.settings(), r.deviceInfo()).neuralDenoise.effective != 0); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->neuralDenoise = on; }); }});
     // ---- denoiser tuning -- LIVE: VoxiRenderer re-issues the denoiser's tuning every frame.
     // Only meaningful while voxi.denoiser is on; harmless otherwise. Ranges match Voxi.cpp's clamps.
     t.push_back({"voxi.denoiserMaxSamples", VarType::U32, false,

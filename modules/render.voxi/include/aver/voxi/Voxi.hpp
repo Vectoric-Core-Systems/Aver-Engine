@@ -143,6 +143,9 @@ struct Settings {
     // AMD FidelityFX Denoiser (MIT) through Aver.Render.Denoise -- see modules/render.denoise.
     // Off by default. Requires MSAA 1 and D3D12 (the backend that provides the G-buffer it reads).
     bool denoiser = false;
+    // Neural Denoise: NRD's resolve replaces FidelityFX's (docs/rendering/NEURAA_NRD.md section 4).
+    // Only acts while the denoiser runs. Toggling keeps history.
+    bool neuralDenoise = false;
 
     // ---- The denoiser's live dials (render::denoise::Denoiser::Tuning) ----
     // Applied every frame the denoiser records, so a console change takes effect next frame with no teardown.

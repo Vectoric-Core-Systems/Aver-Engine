@@ -359,9 +359,9 @@ int main() {
             s4.rtRenderMode = 0;   // the rasteriser finds the first surface, so MSAA really applies
             const Resolution r = resolve(s4, fullDevice());
             check(r.sampleCount == 4, "the device runs the requested 4x under raster primary");
-            check(r.denoiser.reason == DisableReason::RequiresMsaaOne, "denoiser.reason is RequiresMsaaOne (soft) at 4x MSAA with a real signal");
-            check(r.denoiser.effective == 0, "denoiser.effective is 0 at 4x MSAA -- the denoiser really does skip itself there");
-            check(r.denoiserGBufferWanted, "denoiserGBufferWanted stays true under the soft MSAA reason");
+            check(r.denoiser.reason == DisableReason::None, "4x MSAA no longer stops the denoiser: the G-buffer is resolved");
+            check(r.denoiser.effective == 1, "denoiser.effective is 1 at 4x MSAA under raster primary");
+            check(r.denoiserGBufferWanted, "denoiserGBufferWanted is true at 4x MSAA");
         }
         {
             Settings s5 = s;
@@ -376,6 +376,19 @@ int main() {
             check(r.denoiser.reason == DisableReason::None, "denoiser has no reason when every prerequisite is met");
             check(r.denoiser.effective == 1, "denoiser.effective is 1 when every prerequisite is met");
             check(r.denoiserGBufferWanted, "denoiserGBufferWanted is true when every prerequisite is met");
+        }
+        {
+            Settings sn = s;
+            sn.neuralDenoise = true;
+            Resolution r = resolve(sn, fullDevice());
+            check(r.neuralDenoise.effective == 1 && r.neuralDenoise.reason == DisableReason::None,
+                  "neuralDenoise runs when the denoiser does");
+            sn.denoiser = false;
+            r = resolve(sn, fullDevice());
+            check(r.neuralDenoise.effective == 0 && r.neuralDenoise.reason == DisableReason::RequiresDenoiser,
+                  "neuralDenoise reads RequiresDenoiser with the denoiser off");
+            check(std::strcmp(disableReasonText(DisableReason::RequiresDenoiser), "Unavailable.") != 0,
+                  "disableReasonText(RequiresDenoiser) is its own sentence");
         }
     }
 

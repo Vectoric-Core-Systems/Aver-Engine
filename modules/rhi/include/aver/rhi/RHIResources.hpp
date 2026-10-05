@@ -632,11 +632,24 @@ private:
 
 // ---------------------------------------------------------------- feature modules
 
+// One frame's ray-traced primary visibility, for post passes that find edges from it (NeuRAA,
+// docs/rendering/NEURAA_NRD.md). uint4 per pixel: packed instance ref (0xFFFFFFFF = miss), triangle,
+// barycentrics.xy as float bits. The buffer rests in UnorderedAccess.
+struct PrimaryVisibility {
+    BufferHandle buffer = 0;
+    u32 rowPitch = 0;        // elements per row
+    u32 elementCount = 0;    // the buffer's capacity, in elements
+    u32 viewport[4] = {};    // x, y, w, h in scene pixels written this frame; the rest is stale
+};
+
 // The hook a render-feature module implements.
 class IRenderFeature {
 public:
     virtual ~IRenderFeature() = default;
     virtual const char* name() const = 0;
+
+    // This frame's primary visibility, when the feature wrote one. Read after the scene pass.
+    virtual bool primaryVisibility(PrimaryVisibility& out) const { (void)out; return false; }
 
     // Starts a frame's scene submission.
     virtual void beginScene() {}
@@ -717,6 +730,8 @@ enum class UpscalerNeeds : u32 {
     MotionVectors = 1u << 1,     // screen-space motion in texels/frame
     Jitter        = 1u << 2,     // sub-pixel offset for un-jittering
     History       = 1u << 3,     // last frame's present-resolution output
+    Normal        = 1u << 4,     // scene-resolution normal + roughness (the G-buffer's)
+    PrimaryVisibility = 1u << 5, // ray-traced primary visibility (PrimaryVisibility)
 };
 inline UpscalerNeeds operator|(UpscalerNeeds a, UpscalerNeeds b) {
     return static_cast<UpscalerNeeds>(static_cast<u32>(a) | static_cast<u32>(b));
@@ -735,6 +750,8 @@ struct UpscalerInput {
     TextureHandle motionVectors = 0;   // RG16F scene pixels, destination minus source, carrying +jitter
     f32 jitterX = 0.0f, jitterY = 0.0f;   // this frame's camera jitter in scene pixels (+y down)
     TextureHandle history       = 0;
+    TextureHandle normalRoughness = 0;   // RGB10A2 octahedral normal + roughness, 0 when unavailable
+    PrimaryVisibility visibility;        // buffer 0 when no feature wrote one this frame
     // This image is a frame-interpolation in-between, not a rendered frame: a temporal upscaler
     // must not accumulate it.
     bool generated = false;

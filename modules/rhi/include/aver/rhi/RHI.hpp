@@ -638,6 +638,9 @@ public:
     // renders BIT-IDENTICAL to a build without this declaration.
     virtual void setGBufferEnabled(bool on) { (void)on; }
     virtual bool gBufferEnabled() const { return false; }
+    // Whether the three textures below hold this frame's single-sample values for readers. Under MSAA
+    // a backend may resolve its multisampled G-buffer into them; one that cannot answers false.
+    virtual bool gBufferWritten() const { return gBufferEnabled() && sampleCount() == 1; }
 
     // Scene-resolution screen-space motion, Format::RG16F. UNITS: TEXELS PER FRAME, DESTINATION
     // TEXEL MINUS SOURCE TEXEL -- for a point shaded at THIS frame's pixel (x,y), stored (vx,vy)

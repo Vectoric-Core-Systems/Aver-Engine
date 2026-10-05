@@ -158,6 +158,7 @@ void applyNewProjectRenderDefaults(fmt::ProjectDesc& d) {
     d.restirVisibility   = 4;      // cached (NeuRaC)
     d.restirHistory      = 8;      // ReSTIR temporal reuse on (0 turns reuse off)
     d.denoiser           = 1;
+    d.neuralDenoise      = 0;      // off until it beats FidelityFX's resolve (NEURAA_NRD.md section 6)
     d.rdStages           = 2;      // staged + half-rate GI
     d.fogOcclusion       = 1;
     d.layeredBsdf        = 0;

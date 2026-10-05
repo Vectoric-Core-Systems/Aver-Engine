@@ -180,7 +180,7 @@ Successfully processed 2 of 7 assigned chunks. Total comment reduction achieved:
 
 - **GpuSpan parent nesting**: Markers were correctly nested but collectGpuTiming's old flat-list accounting double-counted spans opened while a parent was open (VoxiRenderer::prePass does this). Now parent + GpuAccum tree sums only top-level spans. kNoParent sentinel (0xFFFFFFFFu) prevents collisions: unbounded 65th spans could silently reparent their children.
 
-- **G-buffer single-sample requirement**: G-buffer targets are always single-sample, not MSAA. When sampleCount_ > 1, beginFrame's bind-time branch handles the mismatch (the targets and scene-depth/color targets have different sample counts). This forces a warning if scene-side rendering uses MSAA while G-buffer is enabled.
+- **G-buffer under MSAA (2026-10-05)**: the single-sample G-buffer targets are what readers see; under MSAA the scene pass writes multisampled twins (gbufVelocityMs_ etc., created with the sample count) and resolveGBufferMsaa() takes the nearest-depth sample into the single-sample targets after the transparent pass (shaders/gbuffer_msaa_resolve.hlsl, in modules/rhi). gBufferWritten() answers whether readers get this frame's values; it is false only if the resolve pipeline failed.
 
 - **Redundant state elision**: One drawMesh per entity (e.g. 1,656 on Electric Dreams) previously re-sent the same pipeline, table-0 set, and frame constant block every call. setPipeline rebinding a root signature per draw refetches all root data; the redundant frame CBV copy doubled a 2MB constant ring every frame. fov* and db* flags cache the last bound state.
 
@@ -224,7 +224,7 @@ Successfully processed 2 of 7 assigned chunks. Total comment reduction achieved:
 
 - `createSwapchainResources()`: The present queue is created here; swapchain belongs to the queue it was created with, so copies and Presents never queue behind next frame's rendering. Present thread's copies finish before anything else goes (on destruction).
 
-- G-buffer targets: Always single-sample, read back by COMPUTE passes (FidelityFX denoiser, eventually FSR2/3/TAA/SSR) that don't consume Texture2DMS. Velocity/depth/normal are per-sample data MSAA averaging can't correctly resolve anyway. With MSAA on, cannot bind alongside msaaColor_ (mismatch in SampleDesc). beginFrame's bind-time branch skips binding if MSAA > 1, still clears to sentinel, warns once (gbufMsaaWarned_). setGBufferEnabled(true) with MSAA on is accepted, silently yields all-sentinel G-buffer without warning.
+- G-buffer targets: readers (FidelityFX denoiser, AverSR TAA, NeuRAA) take single-sample targets. Velocity/depth/normal are per-sample data an average would corrupt, so the MSAA resolve picks the nearest sample instead of ResolveSubresource. setSampleCount rebuilds the G-buffer so the twins follow the count.
 
 - Depth resource: kDepthResourceFormat is TYPELESS, not kDepthFormat directly. Clear value must be one of the formats the resource can be viewed as (D32_FLOAT, the DSV's own view). Explicit view desc required for typeless: includes sample count (multisampled flag), not inferred from description.
 
@@ -271,7 +271,7 @@ Successfully processed 2 of 7 assigned chunks. Total comment reduction achieved:
 
 - `beginFrame` deferred destroys: collect() reclaimed every frame (not just on next create/destroy); e.g. GI injection accumulator (~2 GiB) Voxi drops after 60 quiet ticks (kGiAccumulatorQuietTicks), which may be exactly when nothing else is created (resource would stay resident indefinitely if only collected as side effect).
 
-- `beginFrame` G-buffer binding MSAA: G-buffer targets always single-sample; MSAA scene target cannot bind them (D3D12 requires every render target in one OMSetRenderTargets to share sample count). Warning once per mismatch (clears when setGBufferEnabled or setSampleCount changes), not every frame (trains reader to stop reading).
+- `beginFrame` G-buffer binding MSAA: binds the multisampled twins beside msaaColor_ (one OMSetRenderTargets call must share a sample count) and clears both sets; warns once only if the twins or the resolve are missing.
 
 - `beginFrame` G-buffer writes: gbufHistoryInvalid_ = !gbufWritable implements two-part contract (other half in notifyRenderTargetsChanged) where history invalidates next frame on feature disable or MSAA mismatch (no separate edge-trigger needed).
 

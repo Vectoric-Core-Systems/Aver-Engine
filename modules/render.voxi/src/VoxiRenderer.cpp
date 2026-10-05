@@ -1108,6 +1108,7 @@ void VoxiRenderer::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f
 
 // Runs Voxi's frame: acceleration structures, shadow map, voxelise, filter volume.
 void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
+    rdVisWrittenThisFrame_ = false;
     if (!giReady_) return;
     // Material graph appeared since pipelines were built.
     if (scenePipelineGraphRev_ != pbr::materialGraphs().revision()) {
@@ -4147,6 +4148,15 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
     ctx.drawFullscreen();
 }
 
+bool VoxiRenderer::primaryVisibility(rhi::PrimaryVisibility& out) const {
+    if (!rdVisWrittenThisFrame_ || !rdVisBuf_ || !rdStagedRowPitch_) return false;
+    out.buffer       = rdVisBuf_;
+    out.rowPitch     = rdStagedRowPitch_;
+    out.elementCount = rdVisBufElemCapacity_;
+    for (u32 i = 0; i < 4; ++i) out.viewport[i] = curSceneViewport_[i] > 0.0f ? static_cast<u32>(curSceneViewport_[i]) : 0u;
+    return out.viewport[2] && out.viewport[3];
+}
+
 // Staged ray-driven passes: records visibility, then optional probe/trace, then shadow/GI/sky-occ/refl.
 void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     const bool gbufBound = pickGbuf(rayDrivenPso_, rayDrivenGbufPso_) == rayDrivenGbufPso_;
@@ -4176,6 +4186,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         if (gx && gy) ctx.dispatch(gx, gy, 1);
     }
     ctx.uavBarrierBuffer(rdVisBuf_);
+    rdVisWrittenThisFrame_ = gx && gy;
 
     const bool perStage = settings_.rayDrivenStageTiming;
     auto stageBegin = [&](const char* label) { if (perStage) ctx.pushMarker(label); };
@@ -5217,12 +5228,11 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     denoiseGiOutput_ = 0;
     denoiseGiRanThisFrame_ = false;
     bool denoiseRecorded = false;
-    // G-buffer under MSAA: all targets must share sample count; disable denoiser rather than silently produce wrong results.
-    const bool gbufWritten = dev_ && dev_->gBufferEnabled() && dev_->sampleCount() == 1;
-    if (dev_ && dev_->gBufferEnabled() && dev_->sampleCount() != 1 && !denoiseWarnedMsaa_) {
-        AVER_WARN("[Denoise] denoising is OFF: the G-buffer is enabled but MSAA is {}x, so the backend "
-                  "clears its targets without writing them and every denoiser input would be blank. "
-                  "Set MSAA to 1 (voxi.msaa 1) to denoise.", dev_->sampleCount());
+    // Under MSAA the backend resolves its multisampled G-buffer; one that cannot reports it unwritten.
+    const bool gbufWritten = dev_ && dev_->gBufferWritten();
+    if (dev_ && dev_->gBufferEnabled() && !gbufWritten && !denoiseWarnedMsaa_) {
+        AVER_WARN("[Denoise] denoising is OFF: the G-buffer is enabled but this backend cannot write it "
+                  "at MSAA {}x. Set MSAA to 1 (voxi.msaa 1) to denoise.", dev_->sampleCount());
         denoiseWarnedMsaa_ = true;
     }
     // Skip AO signal when nothing reads it (under ray-driven primary visibility).
@@ -5270,6 +5280,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             frame.resetHistory = !rtHistValid_;
             frame.radianceHalfRate       = denoiseGiSignal && denoiseGiInputHalfRate_;
             frame.radianceHalfRateParity = denoiseGiHalfRateParity_;
+            frame.neuralResolve          = settings_.neuralDenoise;
             // Clamp denoiser history during sun movement.
             if (rtHistSunMoved()) denoiseSunMovingHold_ = 2u;
             else if (denoiseSunMovingHold_ > 0u) --denoiseSunMovingHold_;
@@ -5472,7 +5483,8 @@ void VoxiRenderer::endShadowHistory() {
 // Pick between plain and G-buffer pipelines (dev_.gBufferEnabled() must be checked directly per header).
 rhi::PipelineHandle VoxiRenderer::pickGbuf(rhi::PipelineHandle plain, rhi::PipelineHandle gbuf) const {
     if (!gbuf || !dev_ || !dev_->gBufferEnabled()) return plain;
-    if (dev_->sampleCount() > 1) return plain;
+    // Under MSAA the backend binds multisampled twins and resolves them; one that cannot says so.
+    if (!dev_->gBufferWritten()) return plain;
     return gbuf;
 }
 

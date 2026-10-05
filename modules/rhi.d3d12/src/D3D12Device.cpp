@@ -800,6 +800,10 @@ public:
     // G-buffer: velocity + view-space depth + normal/roughness.
     void setGBufferEnabled(bool on) override;
     bool gBufferEnabled() const override { return gbufferEnabled_; }
+    bool gBufferWritten() const override {
+        return gbufferEnabled_ && gbufVelocity_ &&
+               (sampleCount_ == 1 || (gbufVelocityMs_ && !gbufResolveFailed_));
+    }
     TextureHandle gBufferVelocityTexture() override;
     TextureHandle gBufferViewZTexture() override;
     TextureHandle gBufferNormalRoughnessTexture() override;
@@ -1245,6 +1249,18 @@ private:
     bool gbufTexDirty_ = true;
     // Logged once per MISMATCH, not once per frame.
     bool gbufMsaaWarned_ = false;
+    // MSAA twins of the three targets: the scene pass writes these when sampleCount_ > 1, and
+    // resolveGBufferMsaa() takes the nearest sample into the single-sample targets after the
+    // transparent pass (gbuffer_msaa_resolve.hlsl), so every reader keeps working under MSAA.
+    ComPtr<ID3D12Resource> gbufVelocityMs_, gbufViewZMs_, gbufNormalRoughMs_;
+    ComPtr<ID3D12DescriptorHeap> gbufVelocityMsRtvHeap_, gbufViewZMsRtvHeap_, gbufNormalRoughMsRtvHeap_;
+    TextureHandle    gbufMsTex_[3] = {};   // adopted, for the resolve's Texture2DMS SRVs
+    bool             gbufMsTexDirty_ = true;
+    PipelineHandle   gbufResolvePso_ = 0;
+    BindingSetHandle gbufResolveSet_ = 0;
+    bool             gbufResolveFailed_ = false;
+    bool             gbufWrittenFrame_ = false;   // this frame's scene pass bound the G-buffer
+    bool resolveGBufferMsaa();
 
     // Previous frame's view-projection (same convention as setCamera).
     f32  prevViewProj_[16] = {};
@@ -2310,6 +2326,86 @@ void D3D12Device::refreshGBufferTexHandles() {
     gbufTexDirty_ = false;
 }
 
+// Nearest-sample resolve of the MSAA G-buffer twins into the single-sample targets. Pipeline and
+// SRVs through the RHI factory; the targets are bound raw (adopted textures carry no RTV).
+bool D3D12Device::resolveGBufferMsaa() {
+    if (gbufResolveFailed_ || !rhiFactory_ || !rhiContext_) return false;
+    if (!gbufVelocityMs_ || !gbufViewZMs_ || !gbufNormalRoughMs_) return false;
+    if (!gbufResolvePso_) {
+        const std::string& src = shaderFile("gbuffer_msaa_resolve.hlsl");
+        ShaderDesc vsd{};
+        vsd.source = src.c_str(); vsd.entry = "GBufResolveVS"; vsd.stage = ShaderStage::Vertex; vsd.minShaderModel = 60;
+        ShaderDesc psd = vsd;
+        psd.entry = "GBufResolvePS"; psd.stage = ShaderStage::Pixel;
+        const ShaderHandle vs = src.empty() ? 0 : rhiFactory_->createShader(vsd);
+        const ShaderHandle ps = src.empty() ? 0 : rhiFactory_->createShader(psd);
+        if (vs && ps) {
+            GraphicsPipelineDesc d{};
+            d.vs = vs; d.ps = ps;
+            d.layout.srvCount = 3;
+            d.layout.slotKindsDeclared = true;
+            for (u32 i = 0; i < 3; ++i) d.layout.srvKinds[i] = SlotKind::Texture2DMS;
+            d.cull = CullMode::None;
+            d.depthClip = false;
+            d.renderTargetCount = 3;
+            d.renderTargets[0] = Format::RG16F;
+            d.renderTargets[1] = Format::R32Float;
+            d.renderTargets[2] = Format::RGB10A2Unorm;
+            d.sampleCount = 1;
+            gbufResolvePso_ = rhiFactory_->createGraphicsPipeline(d);
+        }
+        if (vs) rhiFactory_->destroyShader(vs);
+        if (ps) rhiFactory_->destroyShader(ps);
+        if (!gbufResolveSet_) {
+            BindingSetDesc bd{};
+            bd.srvCount = 3;
+            for (u32 i = 0; i < 3; ++i) bd.srvKinds[i] = SlotKind::Texture2DMS;
+            gbufResolveSet_ = rhiFactory_->createBindingSet(bd);
+        }
+        if (!gbufResolvePso_ || !gbufResolveSet_) {
+            gbufResolveFailed_ = true;
+            AVER_WARN("[RHI.D3D12] gbuffer_msaa_resolve.hlsl would not build; the G-buffer stays unwritten under MSAA");
+            return false;
+        }
+    }
+    if (gbufMsTexDirty_) {
+        gbufMsTex_[0] = rhiFactory_->adoptExternalRenderTargetTexture(gbufVelocityMs_.Get(), Format::RG16F,
+            sceneWidth_, sceneHeight_, "GBuffer.Velocity MSAA (adopted)", gbufMsTex_[0]);
+        gbufMsTex_[1] = rhiFactory_->adoptExternalRenderTargetTexture(gbufViewZMs_.Get(), Format::R32Float,
+            sceneWidth_, sceneHeight_, "GBuffer.ViewZ MSAA (adopted)", gbufMsTex_[1]);
+        gbufMsTex_[2] = rhiFactory_->adoptExternalRenderTargetTexture(gbufNormalRoughMs_.Get(), Format::RGB10A2Unorm,
+            sceneWidth_, sceneHeight_, "GBuffer.NormalRoughness MSAA (adopted)", gbufMsTex_[2]);
+        gbufMsTexDirty_ = false;
+    }
+    for (u32 i = 0; i < 3; ++i) rhiFactory_->setSrv(gbufResolveSet_, i, gbufMsTex_[i], kAllMips);
+
+    ID3D12Resource* ms[3] = {gbufVelocityMs_.Get(), gbufViewZMs_.Get(), gbufNormalRoughMs_.Get()};
+    D3D12_RESOURCE_BARRIER toRead[3], toRt[3];
+    for (u32 i = 0; i < 3; ++i) {
+        toRead[i] = transition(ms[i], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        toRt[i]   = transition(ms[i], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    }
+    cmdList_->ResourceBarrier(3, toRead);
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] = {
+        gbufVelocityRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+        gbufViewZRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+        gbufNormalRoughRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+    };
+    cmdList_->OMSetRenderTargets(3, rtvs, FALSE, nullptr);
+    const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<f32>(sceneWidth_), static_cast<f32>(sceneHeight_), 0.0f, 1.0f};
+    const D3D12_RECT sc{0, 0, static_cast<LONG>(sceneWidth_), static_cast<LONG>(sceneHeight_)};
+    cmdList_->RSSetViewports(1, &vp);
+    cmdList_->RSSetScissorRects(1, &sc);
+    rhiContext_->setPipeline(gbufResolvePso_);
+    rhiContext_->setBindingSet(gbufResolveSet_, 0);
+    rhiContext_->drawFullscreen();
+    cmdList_->ResourceBarrier(3, toRt);
+    // The RHI bound its own root signature, heap and pipeline.
+    boundRootSig_ = nullptr; boundPso_ = nullptr; boundHeap_ = nullptr;
+    fovValid_ = false; dbValid_ = false;
+    return true;
+}
+
 // Re-checks gbufferEnabled_ before returning (0 means off after disable, even if handles are non-zero).
 TextureHandle D3D12Device::gBufferVelocityTexture() {
     if (!gbufferEnabled_ || !gbufVelocity_ || !rhiFactory_) return 0;
@@ -2431,8 +2527,17 @@ bool D3D12Device::setSampleCount(u32 samples) {
         msaaColor_.Reset();
         if (!createDepthBuffer() || !createMsaaColor()) { AVER_ERROR("[RHI.D3D12] MSAA {}x target creation failed", samples); return false; }
         releasePostTargets();
-        // G-buffer: single-sample always. If sampleCount_ > 1, can't bind alongside msaaColor_.
+        // The G-buffer's MSAA twins follow the sample count; the single-sample targets stay.
         gbufMsaaWarned_ = false;
+        gbufHistoryInvalid_ = true;
+        if (gbufferEnabled_) {
+            releaseGBufferTargets();
+            if (!createGBufferTargets()) {
+                AVER_ERROR("[RHI.D3D12] G-buffer target creation failed at MSAA {}x; disabling it", samples);
+                releaseGBufferTargets();
+                gbufferEnabled_ = false;
+            }
+        }
     }
     notifyRenderTargetsChanged();
     AVER_INFO("[RHI.D3D12] MSAA set to {}x", samples);
@@ -3105,12 +3210,12 @@ bool D3D12Device::createGBufferTargets() {
     if (sceneWidth_ == 0 || sceneHeight_ == 0) return false;
 
     auto makeTarget = [&](DXGI_FORMAT fmt, const f32 clearColor[4], ComPtr<ID3D12Resource>& outRes,
-                          ComPtr<ID3D12DescriptorHeap>& outHeap, const char* debugName) -> bool {
+                          ComPtr<ID3D12DescriptorHeap>& outHeap, const char* debugName, u32 samples = 1) -> bool {
         D3D12_RESOURCE_DESC td{};
         td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         td.Width = sceneWidth_; td.Height = sceneHeight_;
         td.DepthOrArraySize = 1; td.MipLevels = 1;
-        td.Format = fmt; td.SampleDesc.Count = 1;
+        td.Format = fmt; td.SampleDesc.Count = samples;
         td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
         D3D12_CLEAR_VALUE cv{}; cv.Format = fmt;
@@ -3141,6 +3246,16 @@ bool D3D12Device::createGBufferTargets() {
     if (!makeTarget(kGBufNormalRoughFormat, kGBufNormalRoughClear, gbufNormalRough_, gbufNormalRoughRtvHeap_,
                     "GBuffer.NormalRoughness"))
         return false;
+    if (sampleCount_ > 1) {
+        if (!makeTarget(kGBufVelocityFormat, kGBufVelocityClear, gbufVelocityMs_, gbufVelocityMsRtvHeap_,
+                        "GBuffer.Velocity MSAA", sampleCount_) ||
+            !makeTarget(kGBufViewZFormat, kGBufViewZClear, gbufViewZMs_, gbufViewZMsRtvHeap_,
+                        "GBuffer.ViewZ MSAA", sampleCount_) ||
+            !makeTarget(kGBufNormalRoughFormat, kGBufNormalRoughClear, gbufNormalRoughMs_, gbufNormalRoughMsRtvHeap_,
+                        "GBuffer.NormalRoughness MSAA", sampleCount_))
+            return false;
+        gbufMsTexDirty_ = true;
+    }
 
     gbufTexDirty_ = true;   // freshly (re)allocated; the adopted TextureHandles must re-adopt
     return true;
@@ -3151,6 +3266,9 @@ void D3D12Device::releaseGBufferTargets() {
     gbufVelocity_.Reset();    gbufVelocityRtvHeap_.Reset();
     gbufViewZ_.Reset();       gbufViewZRtvHeap_.Reset();
     gbufNormalRough_.Reset(); gbufNormalRoughRtvHeap_.Reset();
+    gbufVelocityMs_.Reset();    gbufVelocityMsRtvHeap_.Reset();
+    gbufViewZMs_.Reset();       gbufViewZMsRtvHeap_.Reset();
+    gbufNormalRoughMs_.Reset(); gbufNormalRoughMsRtvHeap_.Reset();
 }
 
 // Rebuilds the scene colour target when setClearColor has moved off the value it was created with.
@@ -3692,28 +3810,28 @@ void D3D12Device::beginFrame() {
         if (!features_.empty()) { boundRootSig_ = nullptr; boundPso_ = nullptr; }
     }
 
-    // G-buffer bindable only when feature on, targets exist, scene 1x (not MSAA).
-    const bool gbufWritable = gbufferEnabled_ && sampleCount_ == 1 &&
-                              gbufVelocity_ && gbufViewZ_ && gbufNormalRough_;
-    if (gbufferEnabled_ && sampleCount_ > 1 && !gbufMsaaWarned_) {
-        // Once per mismatch (clears when setting changes); explains MSAA incompatibility.
-        AVER_WARN("[RHI.D3D12] G-buffer is enabled but MSAA is {}x; it REQUIRES sampleCount() == 1 "
-                  "to be bound (D3D12 requires every render target in one OMSetRenderTargets call to "
-                  "share a sample count, and the G-buffer's three targets are always single-sample) "
-                  "-- it is being CLEARED but NOT WRITTEN this frame, and every frame after, until "
-                  "MSAA drops to 1x", sampleCount_);
+    // G-buffer bindable when the feature is on and its targets exist; under MSAA the scene pass
+    // writes the multisampled twins, which the end of the frame resolves (resolveGBufferMsaa).
+    const bool gbufMs = sampleCount_ > 1;
+    const bool gbufWritable = gbufferEnabled_ && gbufVelocity_ && gbufViewZ_ && gbufNormalRough_ &&
+                              (!gbufMs || (gbufVelocityMs_ && gbufViewZMs_ && gbufNormalRoughMs_ &&
+                                           !gbufResolveFailed_));
+    if (gbufferEnabled_ && !gbufWritable && !gbufMsaaWarned_) {
+        AVER_WARN("[RHI.D3D12] G-buffer is enabled but cannot be written at MSAA {}x; readers see "
+                  "cleared targets until that is fixed", sampleCount_);
         gbufMsaaWarned_ = true;
     }
-    // Two-part contract: this frame's write status; invalidates next frame on disable/MSAA mismatch.
+    // Two-part contract: this frame's write status; invalidates next frame on disable or failure.
     gbufHistoryInvalid_ = !gbufWritable;
+    gbufWrittenFrame_ = gbufWritable;
 
     if (gbufWritable) {
         // 4 RTs: scene at slot 0, velocity/viewZ/normal-roughness at 1/2/3 (unwritten slots untouched).
         D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {
             rtv,
-            gbufVelocityRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
-            gbufViewZRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
-            gbufNormalRoughRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+            (gbufMs ? gbufVelocityMsRtvHeap_ : gbufVelocityRtvHeap_)->GetCPUDescriptorHandleForHeapStart(),
+            (gbufMs ? gbufViewZMsRtvHeap_ : gbufViewZRtvHeap_)->GetCPUDescriptorHandleForHeapStart(),
+            (gbufMs ? gbufNormalRoughMsRtvHeap_ : gbufNormalRoughRtvHeap_)->GetCPUDescriptorHandleForHeapStart(),
         };
         cmdList_->OMSetRenderTargets(4, rtvs, FALSE, &dsv);
         for (u32 i = 0; i < 4; ++i) sceneRtvs_[i] = rtvs[i];
@@ -3733,6 +3851,14 @@ void D3D12Device::beginFrame() {
                                         kGBufViewZClear, 0, nullptr);
         cmdList_->ClearRenderTargetView(gbufNormalRoughRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
                                         kGBufNormalRoughClear, 0, nullptr);
+        if (gbufWritable && gbufMs) {
+            cmdList_->ClearRenderTargetView(gbufVelocityMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+                                            kGBufVelocityClear, 0, nullptr);
+            cmdList_->ClearRenderTargetView(gbufViewZMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+                                            kGBufViewZClear, 0, nullptr);
+            cmdList_->ClearRenderTargetView(gbufNormalRoughMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+                                            kGBufNormalRoughClear, 0, nullptr);
+        }
     }
     cmdList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
@@ -4908,26 +5034,33 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
             in.jitterY = taaJitterThisFrame_[1];
             in.generated = generated;
             in.cameraMoving = taaCameraMoving_;
-            // A temporal upscaler reads this frame's G-buffer velocity and view Z; they rest as
-            // render targets, so they are made readable around execute() and put back.
-            const bool gbufForSr = any(upscaler_->needs(), UpscalerNeeds::MotionVectors) &&
-                                   gbufferEnabled_ && sampleCount_ == 1 && gbufVelocity_ && gbufViewZ_;
+            // A temporal upscaler reads this frame's G-buffer velocity and view Z, NeuRAA also the
+            // normal; they rest as render targets, so they are made readable around execute() and put back.
+            const UpscalerNeeds srNeeds = upscaler_->needs();
+            const bool gbufForSr = (any(srNeeds, UpscalerNeeds::MotionVectors) || any(srNeeds, UpscalerNeeds::Normal)) &&
+                                   gBufferWritten() && gbufWrittenFrame_ && gbufVelocity_ && gbufViewZ_ && gbufNormalRough_;
             if (gbufForSr) {
-                D3D12_RESOURCE_BARRIER b[2] = {
-                    transition(gbufVelocity_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
-                    transition(gbufViewZ_.Get(),    D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                D3D12_RESOURCE_BARRIER b[3] = {
+                    transition(gbufVelocity_.Get(),    D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                    transition(gbufViewZ_.Get(),       D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                    transition(gbufNormalRough_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
                 };
-                cmdList_->ResourceBarrier(2, b);
-                in.motionVectors = gBufferVelocityTexture();
-                in.depth         = gBufferViewZTexture();
+                cmdList_->ResourceBarrier(3, b);
+                in.motionVectors   = gBufferVelocityTexture();
+                in.depth           = gBufferViewZTexture();
+                in.normalRoughness = gBufferNormalRoughnessTexture();
             }
+            if (any(srNeeds, UpscalerNeeds::PrimaryVisibility) && !generated)
+                for (const IRenderFeature* f : features_)
+                    if (f->primaryVisibility(in.visibility)) break;
             upscaler_->execute(*rhiContext_, in, presentHdrTex_);
             if (gbufForSr) {
-                D3D12_RESOURCE_BARRIER b[2] = {
-                    transition(gbufVelocity_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
-                    transition(gbufViewZ_.Get(),    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+                D3D12_RESOURCE_BARRIER b[3] = {
+                    transition(gbufVelocity_.Get(),    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+                    transition(gbufViewZ_.Get(),       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+                    transition(gbufNormalRough_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
                 };
-                cmdList_->ResourceBarrier(2, b);
+                cmdList_->ResourceBarrier(3, b);
             }
 
             // Looked up again: execute() may create textures (an upscaler's history on first use), and
@@ -5240,6 +5373,9 @@ void D3D12Device::endFrame() {
         bindGraphicsRoot(rootSig_.Get());
         for (IRenderFeature* f : features_) f->transparentPass(*rhiContext_);
     }
+
+    // MSAA: readers get the single-sample G-buffer from here on (post chain, next frame's denoiser).
+    if (gbufWrittenFrame_ && sampleCount_ > 1 && !resolveGBufferMsaa()) gbufHistoryInvalid_ = true;
 
     // ---- frame interpolation (docs/rendering/NEURAFI.md) ----
     // Generated image from HDR scene target presented FIRST on its own swapchain image, through

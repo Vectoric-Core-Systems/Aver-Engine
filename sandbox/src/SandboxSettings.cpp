@@ -1729,15 +1729,22 @@ void SandboxApp::buildRenderingSettings(int page) {
                                     "normal/roughness -- three render targets NOTHING ELSE in\n"
                                     "this engine needs, about 54 MB at 1080p. That is why it is\n"
                                     "off by default rather than something enabled for you.\n\n"
-                                    "REQUIRES the G-buffer, MSAA 1 and D3D12. Above 1x the G-buffer is cleared\n"
-                                    "but never written, so the pass refuses to run rather than\n"
-                                    "filter blanks into a confidently wrong image.\n\n"
+                                    "REQUIRES the G-buffer and D3D12. Under MSAA the G-buffer is\n"
+                                    "resolved to one sample a pixel (the nearest surface).\n\n"
                                     "Round-trips as RENDER.DENOISER.");
-        // Warning on s.msaa (edited value), not device's live count: shows before Apply.
-        if (den && er.sampleCount != 1u)
-            ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.2f, 1.0f),
-                               "   Anti-aliasing is %ux -- set it to 1 or the denoiser stays off.",
-                               static_cast<u32>(s.msaa));
+        {
+            // Neural Denoise sits under the Denoiser and greys while it is off or unavailable.
+            const bool ndGreyed = !den || denoiserHardGreyed;
+            ImGui::BeginDisabled(ndGreyed);
+            bool nd = s.neuralDenoise;
+            if (ImGui::Checkbox("Neural Denoise", &nd)) { s.neuralDenoise = nd; changed = true; }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Replaces the FidelityFX temporal resolve with NRD's spatial-first\n"
+                                  "resolve (docs/rendering/NEURAA_NRD.md). Phase 1: the resolve slot\n"
+                                  "only, so the image is unchanged. Needs the Denoiser on.\n\n"
+                                  "Round-trips as RENDER.NEURALDENOISE. --neural-denoise outranks it.");
+        }
 
         // AMD FidelityFX tuning (filters ReSTIR diffuse GI, not the sun shadow below).
         ImGui::Spacing();

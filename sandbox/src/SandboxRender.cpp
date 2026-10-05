@@ -2346,6 +2346,7 @@ void SandboxApp::setGiMode(int n) { giModeOverride_ = n; }
 void SandboxApp::setRestirVisibility(int n) { restirVisibilityOverride_ = n; }
 
 void SandboxApp::setDenoiser(int n) { denoiserOverride_ = n; }
+void SandboxApp::setNeuralDenoise(int n) { neuralDenoiseOverride_ = n; }
 
 void SandboxApp::setRenderScale(f32 s) { renderScaleOverride_ = s; }
 
@@ -2403,6 +2404,12 @@ void SandboxApp::applyUpscalerSlot(rhi::IDevice* dev) {
     if (wantFsr && !averSrUpscaler_ && res) averSrUpscaler_ = std::make_unique<aver::sr::FsrUpscaler>(*res);
     rhi::IUpscaler* slot = temporalAaEnabled_ ? static_cast<rhi::IUpscaler*>(taaUpscaler_.get())
                          : wantFsr ? averSrUpscaler_.get() : nullptr;
+    if (neuraaDebugView_ && !neuraa_ && res) neuraa_ = std::make_unique<aver::sr::NeuRaa>(*res);
+    if (neuraaDebugView_ && neuraa_) {
+        neuraa_->setInner(slot);
+        neuraa_->setDebugView(true);
+        slot = neuraa_.get();
+    }
     if (averSrUpscaler_) {
         averSrUpscaler_->setEdgeAa(edgeAaEnabled_);
         averSrUpscaler_->setSharpness(fsrSharpness_);
@@ -2414,6 +2421,7 @@ void SandboxApp::applyUpscalerSlot(rhi::IDevice* dev) {
     if (dev->upscaler() != slot) dev->setUpscaler(slot);
     if (!wantFsr && averSrUpscaler_) averSrUpscaler_.reset();
     if (!temporalAaEnabled_ && taaUpscaler_) taaUpscaler_.reset();
+    if (!neuraaDebugView_ && neuraa_) neuraa_.reset();
 }
 
 // Logs the [AverSR] brand-tag line: current render scale, and whether an upscaler was

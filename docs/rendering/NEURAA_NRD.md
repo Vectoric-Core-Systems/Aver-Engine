@@ -3,8 +3,11 @@
 **NeuRAA** = Neural Realtime Anti-Aliasing. **NRD** = Neural Realtime Denoising, a hybrid of the AMD
 FidelityFX Denoiser the engine already runs and a small neural network.
 
-**Status:** design only (2026-10-05). Nothing is built. Every millisecond below is an estimate unless
-it says *measured*.
+**Status (2026-10-05):** phase 1 code is in, built but not yet run: the Neural Denoise setting and NRD's
+resolve slot (running FidelityFX's resolve), NeuRAA's edge detection with the "Edge Classes (NeuRAA)"
+view mode, and the raster + MSAA G-buffer resolve. Edge detection does not classify alpha-masked edges
+yet (the material flags live in Voxi), and its tile pass is one combined detect pass. Every millisecond
+below is an estimate unless it says *measured*.
 
 **One-line summary:** a small network predicts the *parameters* of a filter we already have; it never
 paints pixels. For NeuRAA that is how each edge pixel, found from primary visibility, blends with its

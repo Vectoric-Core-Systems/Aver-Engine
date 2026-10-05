@@ -400,6 +400,7 @@ void SandboxApp::applyProjectRenderSettings() {
         cli.giMode             = giModeOverride_;
         cli.giRestirVisibility = restirVisibilityOverride_;
         cli.denoiser           = denoiserOverride_;
+        cli.neuralDenoise      = neuralDenoiseOverride_;
 
         // THE SENTENCE IS THIS HOST'S, THE DECISION IS THE HEADER'S. "[Sandbox]" is the editor's
         // tag and the shipped game's is "[Game]", so the shared apply hands back a CliOverrideNote

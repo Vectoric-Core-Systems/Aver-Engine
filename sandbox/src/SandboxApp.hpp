@@ -220,6 +220,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/sr/AverSrQuality.hpp"
 #include "aver/sr/AverSrFsr.hpp"
 #include "aver/sr/AverSrTaa.hpp"
+#include "aver/sr/NeuRaa.hpp"
 // AverSR level constants must match Voxi ladder numbering.
 #if AVER_MODULE_VOXI
 static_assert(static_cast<aver::u32>(aver::sr::Quality::Off)         == aver::voxi::ladder::kAverSrOff,
@@ -1543,6 +1544,7 @@ public:
     void setGiMode(int n);                             // --gi-mode N
     void setRestirVisibility(int n);
     void setDenoiser(int n);                          // --denoiser 0|1
+    void setNeuralDenoise(int n);                     // --neural-denoise 0|1
     void setRenderScale(f32 s);                    // --render-scale F
 #if AVER_MODULE_SR
     void setAverSrQuality(aver::sr::Quality q);
@@ -3193,6 +3195,7 @@ private:
     bool showAtmosphere_=true;
     // File > Save Level As...
     bool unlit_=false;                 // View mode: Unlit (no shading, authored colour only)
+    bool neuraaDebugView_=false;       // View mode: Edge Classes (NeuRAA); forces ray-driven
     bool showAbout_=false;             // Help > About
     bool wantSaveLevelAs_=false;
     char saveLevelAsName_[128]={};
@@ -3285,6 +3288,7 @@ private:
     // --restir-visibility none|reconstructed|half|full (Settings::giRestirVisibility). Sentinel is -1 (0 is a real value).
     int  restirVisibilityOverride_=-1;
     int  denoiserOverride_=-1;       // --denoiser 0|1: -1 is "flag not given"; see setDenoiser
+    int  neuralDenoiseOverride_=-1;  // --neural-denoise 0|1, same convention
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
 #if AVER_MODULE_SR
     // --aversr LEVEL / the render-settings quality combo. Off (default) = no AverSR.
@@ -3314,6 +3318,8 @@ private:
     std::unique_ptr<aver::sr::FsrUpscaler> averSrUpscaler_;
     // Temporal AA (TAAU + RCAS): when on, it takes the slot instead of FSR, at any render scale.
     std::unique_ptr<aver::sr::TemporalUpscaler> taaUpscaler_;
+    // NeuRAA wraps whichever upscaler holds the slot. Phase 1: only while its debug view is selected.
+    std::unique_ptr<aver::sr::NeuRaa> neuraa_;
     bool temporalAaEnabled_ = true;   // the project's RENDER.TAA (unstated = on); --no-taa / --taa win over it
     bool taaFromCli_ = false;
     // Edge AA (FXAA-class) in FSR's first pass: --edge-aa or Display > Edge anti-aliasing.

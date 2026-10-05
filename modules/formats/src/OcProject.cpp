@@ -116,6 +116,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.giMode = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.DENOISER")) {
             if (t.size() > 1) out.denoiser = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.NEURALDENOISE")) {
+            if (t.size() > 1) out.neuralDenoise = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.RESTIRVISIBILITY")) {
             if (t.size() > 1) out.restirVisibility = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.RESTIRHISTORY")) {
@@ -300,7 +302,7 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
         "RENDER.RTRENDERMODE", "RENDER.RDSTAGES", "RENDER.FOGOCCLUSION", "RENDER.PTBOUNCES", "RENDER.PTMODE", "RENDER.LAYEREDBSDF",
-        "RENDER.GICONES", "RENDER.GIMODE", "RENDER.DENOISER", "RENDER.RESTIRVISIBILITY",
+        "RENDER.GICONES", "RENDER.GIMODE", "RENDER.DENOISER", "RENDER.NEURALDENOISE", "RENDER.RESTIRVISIBILITY",
         "RENDER.RESTIRHISTORY",
         "RENDER.REFRACTIONMODE", "RENDER.REFRACTIONSTRENGTH",
         "RENDER.REFRACTIONEDGEFADE", "RENDER.LODSELECT", "RENDER.LODTHRESHOLD",
@@ -361,6 +363,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.GICONES", d.giCones);
     appendKey(owned, "RENDER.GIMODE", d.giMode);
     appendKey(owned, "RENDER.DENOISER", d.denoiser);
+    appendKey(owned, "RENDER.NEURALDENOISE", d.neuralDenoise);
     appendKey(owned, "RENDER.RESTIRVISIBILITY", d.restirVisibility);
     appendKey(owned, "RENDER.RESTIRHISTORY", d.restirHistory);
     appendKey(owned, "RENDER.REFRACTIONMODE", d.refractionMode);

@@ -2,7 +2,7 @@
 // pipeline (third_party/fidelityfx-denoiser, MIT), driven as a DIFFUSE denoiser for two Voxi
 // signals -- the ReSTIR GI radiance and the sky-occlusion hit distance.
 //
-// FOUR PASSES, ONE COMPILE EACH (AVER_DNSR_PASS), because the three FidelityFX headers each declare
+// FIVE PASSES, ONE COMPILE EACH (AVER_DNSR_PASS), because the three FidelityFX headers each declare
 // their own groupshared arrays under the same names and cannot share a translation unit:
 //   3 CSDenoiseScale     -- colour only, first: the frame's pre-exposure scale (see dnsrScale).
 //   0 CSDenoiseReproject -- reproject last frame's denoised result, accumulate a per-pixel sample
@@ -12,6 +12,8 @@
 //                           input.
 //   2 CSDenoiseResolve   -- blend the prefiltered signal into the clipped reprojected history; the
 //                           result is both this frame's output and next frame's history.
+//   4 CSDenoiseNrdResolve -- Neural Denoise's resolve (docs/rendering/NEURAA_NRD.md section 4), in
+//                           place of pass 2. Phase 1: the same FidelityFX resolve, its own pipeline.
 //
 // WHY THE REFLECTION PIPELINE FOR A DIFFUSE SIGNAL. FidelityFX Denoiser ships two denoisers: shadows
 // (a 1-bit-per-pixel hit mask) and reflections. Neither of Voxi's signals is a hit mask; both are a
@@ -345,7 +347,7 @@ void CSDenoiseScale(uint gi : SV_GroupIndex) {
 }
 
 // =================================================================================================
-#else   // AVER_DNSR_PASS == 2 ---- temporal resolve ----
+#elif AVER_DNSR_PASS == 2 || AVER_DNSR_PASS == 4   // ---- temporal resolve (FidelityFX / NRD) ----
 
 Texture2D<DNSR_TEX> gDnsrPrefiltered         : register(t4);
 Texture2D<DNSR_TEX> gDnsrReprojected         : register(t5);
@@ -374,6 +376,12 @@ void FFX_DNSR_Reflections_StoreTemporalAccumulation(int2 p, min16float3 radiance
 
 [numthreads(8, 8, 1)]
 void CSDenoiseResolve(int2 dtid : SV_DispatchThreadID, int2 gtid : SV_GroupThreadID) {
+    FFX_DNSR_Reflections_ResolveTemporal(dtid, gtid, gDnsrSize, gDnsrInvSize, gDnsrHistoryClipWeight);
+}
+
+// Phase 1 runs FidelityFX's resolve only; it stays as the per-tile fallback once the pyramid lands.
+[numthreads(8, 8, 1)]
+void CSDenoiseNrdResolve(int2 dtid : SV_DispatchThreadID, int2 gtid : SV_GroupThreadID) {
     FFX_DNSR_Reflections_ResolveTemporal(dtid, gtid, gDnsrSize, gDnsrInvSize, gDnsrHistoryClipWeight);
 }
 

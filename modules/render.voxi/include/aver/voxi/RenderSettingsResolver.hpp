@@ -37,6 +37,7 @@ enum class DisableReason : u8 {
     RequiresStagedRayDriven,      // SOFT: giRestirVisibility = Cached (4) only runs in the STAGED
                                    // ray-driven path on D3D12 (rtRenderMode 1, rayDrivenStages >= 1);
                                    // anywhere else it behaves as Half resolution. Warns; does not grey.
+    RequiresDenoiser,             // neuralDenoise only acts while the denoiser itself runs
     Count
 };
 
@@ -100,6 +101,8 @@ inline const char* disableReasonText(DisableReason r) {
             return "Only applies when Primary visibility is Primary rays.";
         case DisableReason::RequiresStagedRayDriven:
             return "Cached needs staged ray-driven primary visibility on D3D12; until then it runs as Half resolution.";
+        case DisableReason::RequiresDenoiser:
+            return "Only applies when the Denoiser is on.";
         default:
             return "Unavailable.";
     }
@@ -123,6 +126,7 @@ struct FieldResolution {
 struct Resolution {
     Quality globalIllumination, rayTracing, pathTracing;
     FieldResolution giMode, rtRenderMode, refractionMode, denoiser;
+    FieldResolution neuralDenoise;        // Borrows the denoiser's reason chain
     FieldResolution giRestirVisibility;   // U1: effective == requested always (gated by giMode)
     FieldResolution giRestirMaxHistory;   // Borrows giRestirVisibility's reason chain
     FieldResolution rayDrivenStages;      // Borrows rtRenderMode's reason chain
@@ -216,23 +220,27 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
         (s.refractionMode >= 2u && rtGate != DisableReason::None) ? 1u : s.refractionMode;
 
     // ---- the device's sample count: one sample a pixel whenever a ray finds the first surface ----
-    // A ray-driven frame shades once per pixel whatever MSAA says, and the G-buffer the denoiser, TAA and
-    // frame interpolation read is only written at 1x, so the hosts push 1 (effectiveSampleCount below).
+    // A ray-driven frame shades once per pixel whatever MSAA says, so the hosts push 1 then
+    // (effectiveSampleCount below). Raster frames keep MSAA; the backend resolves their G-buffer.
     const bool rayPrimary = r.rtRenderMode.effective == 1u ||
                             (s.pathTracing != Quality::Off && rtGate == DisableReason::None);
     r.sampleCount = rayPrimary ? 1u : static_cast<u32>(s.msaa);
 
-    // ---- denoiser: RT hardware, RT tier not Off, denoiserSupported, something to denoise, MSAA 1 (soft) --
+    // ---- denoiser: RT hardware, RT tier not Off, denoiserSupported, something to denoise ----
+    // MSAA no longer blocks it: the D3D12 backend (the only one with a G-buffer) resolves its
+    // multisampled G-buffer to one sample a pixel (gbuffer_msaa_resolve.hlsl).
     DisableReason denoiseReason = rtGate;
     if (denoiseReason == DisableReason::None && !d.denoiserSupported)
         denoiseReason = DisableReason::RequiresDenoiserBackend;
     if (denoiseReason == DisableReason::None && r.giMode.effective == 0 && s.giSkyOcclusionRays == 0)
         denoiseReason = DisableReason::NothingToDenoise;
-    if (denoiseReason == DisableReason::None && r.sampleCount != 1u)
-        denoiseReason = DisableReason::RequiresMsaaOne;   // SOFT: warns, does not grey
     r.denoiser.requested = s.denoiser ? 1u : 0u;
     r.denoiser.reason    = denoiseReason;
     r.denoiser.effective = (s.denoiser && denoiseReason == DisableReason::None) ? 1u : 0u;
+    r.neuralDenoise.requested = s.neuralDenoise ? 1u : 0u;
+    r.neuralDenoise.reason    = denoiseReason != DisableReason::None ? denoiseReason
+                              : (!s.denoiser ? DisableReason::RequiresDenoiser : DisableReason::None);
+    r.neuralDenoise.effective = (s.neuralDenoise && r.denoiser.effective) ? 1u : 0u;
 
     // Allocate ~54 MB G-buffer when: denoiser requested (Path Tracing turns it on in VoxiRenderer::setSettings)
     // AND (no reason, or only soft MSAA reason).

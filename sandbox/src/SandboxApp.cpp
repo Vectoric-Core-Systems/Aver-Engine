@@ -961,6 +961,7 @@ void SandboxApp::onInit(Engine& e)  {
                       giUpdateIntervalOverride_, k.giUpdateInterval);
         if (giModeOverride_ >= 0) k.giMode = static_cast<u32>(giModeOverride_);
         if (denoiserOverride_ >= 0) k.denoiser = denoiserOverride_ != 0;
+        if (neuralDenoiseOverride_ >= 0) k.neuralDenoise = neuralDenoiseOverride_ != 0;
         voxi::Renderer::get().setSettings(k);
         AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 
@@ -2138,7 +2139,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     const bool wantGbufForTaa = false;
 #endif
     e.device()->setGBufferEnabled(gbufferOverride_ || wantGbufForDenoiser || wantGbufForFrameInterp ||
-                                  wantGbufForTaa || gbufferDebugView_ != GBufferDebugFeature::Mode::Off);
+                                  wantGbufForTaa || neuraaDebugView_ ||
+                                  gbufferDebugView_ != GBufferDebugFeature::Mode::Off);
     gbufferDebugFeature_.setDevice(e.device());
     // vpX_/vpY_/vpW_/vpH_: this frame's 3D-viewport rect (frame stale at worst on first draw).
     gbufferDebugFeature_.setViewportRect(static_cast<u32>(vpX_), static_cast<u32>(vpY_),
@@ -2168,7 +2170,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // Auto-switch: ray-hit/triangles debug views can't draw through the rasteriser; Wireframe/G-buffer can't draw through ray-driven.
         const bool needRaster = wireframe_ || gbufferDebugView_ != GBufferDebugFeature::Mode::Off;
         const bool needRayDriven = !needRaster &&
-            debugView_ != voxi::VoxiRenderer::ViewDebug::None && voxiRenderer_.rayDrivenAvailable();
+            (debugView_ != voxi::VoxiRenderer::ViewDebug::None || neuraaDebugView_) &&
+            voxiRenderer_.rayDrivenAvailable();
         // Path Tracing forces ray-driven primary (VoxiRenderer::setSettings), so a raster view mode or
         // the --pt-scene reference view turns it off for the frame.
         if (needRaster || ptTakesViewport()) { vs.rtRenderMode = 0; vs.pathTracing = voxi::Quality::Off; }

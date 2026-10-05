@@ -229,6 +229,15 @@ static void checkOcproject() {
         check(writeOcproject(t, w) == w, "once -- isOwnedKey covers it");
     }
     {
+        // RENDER.NEURALDENOISE (docs/rendering/NEURAA_NRD.md): absent leaves it off.
+        ProjectDesc t;
+        check(parseOcproject("OCPROJECT 1\nNAME T\nRENDER.NEURALDENOISE 1\n", t, &err), "RENDER.NEURALDENOISE parses");
+        check(t.neuralDenoise == 1 && t.hasRenderSettings(), "Neural Denoise on is a stated render setting");
+        const std::string w = writeOcproject(t, "");
+        check(w.find("RENDER.NEURALDENOISE 1") != std::string::npos, "and is written back");
+        check(writeOcproject(t, w) == w, "once -- isOwnedKey covers it");
+    }
+    {
         // ---- THE POST CHAIN, which the file could not hold at all ----------------------------
         //
         // docs/RUNTIME-DEDUP.md records the gap as an owner decision in one line: "A project cannot

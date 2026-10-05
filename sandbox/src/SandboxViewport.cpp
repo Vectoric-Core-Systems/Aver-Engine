@@ -2617,6 +2617,8 @@ void SandboxApp::buildViewportOverlay() {
 #endif
     if (wireframe_) {
         viewModeLabel = "Wireframe";
+    } else if (neuraaDebugView_ && gbufferDebugView_ == GBufferDebugFeature::Mode::Off) {
+        viewModeLabel = "Edge Classes (NeuRAA)";
     } else if (gbufferDebugView_ != GBufferDebugFeature::Mode::Off) {
         using GDM = GBufferDebugFeature::Mode;
         viewModeLabel = gbufferDebugView_ == GDM::Velocity ? "G-Buffer: Velocity" :
@@ -2627,7 +2629,9 @@ void SandboxApp::buildViewportOverlay() {
     }
     if (dropButton(viewModeLabel.c_str())) ImGui::OpenPopup("viewMode");
     if (ImGui::BeginPopup("viewMode")) {
-        if (ImGui::Selectable("Lit", !wireframe_ && !unlit_)) { wireframe_=false; unlit_=false; }
+        if (ImGui::Selectable("Lit", !wireframe_ && !unlit_ && !neuraaDebugView_)) {
+            wireframe_=false; unlit_=false; neuraaDebugView_=false;
+        }
         // Unlit is not gated on the rasteriser: PSRayDriven honours gViewParams.x itself, so it
         // works under ray-driven as well as under Wireframe's forced fallback.
         if (ImGui::Selectable("Unlit", unlit_ && !wireframe_)) { unlit_ = true; wireframe_ = false; }
@@ -2728,6 +2732,24 @@ void SandboxApp::buildViewportOverlay() {
         debugItem("Ray Hit: Distance", VD::RayHitDistance, "viewMode.rayHitDistance");
         debugItem("Triangles", VD::Triangles, "viewMode.triangles");
         debugItem("Ambient Occlusion", VD::AmbientOcclusion, "viewMode.ambientOcclusion");
+        // NeuRAA's edge detection (docs/rendering/NEURAA_NRD.md): drawn by the AverSR seam, not
+        // PSRayDriven, so the scene keeps its normal shading underneath.
+        ImGui::BeginDisabled(!rdAvailable);
+        if (ImGui::Selectable("Edge Classes (NeuRAA)", neuraaDebugView_)) {
+            neuraaDebugView_ = !neuraaDebugView_;
+            if (neuraaDebugView_) {
+                wireframe_ = false;
+                debugView_ = VD::None;
+                gbufferDebugView_ = GBufferDebugFeature::Mode::Off;
+            }
+        }
+        ImGui::EndDisabled();
+        uiReg_.track("viewMode.neuraaEdges");
+        if (!rdAvailable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Needs ray tracing: Settings > Rendering > Ray Tracing.");
+        else if (rdAvailable && ImGui::IsItemHovered())
+            ImGui::SetTooltip("Red: silhouette. Yellow: depth step. Cyan: crease.\n"
+                              "Needs the staged ray-driven passes (Primary rays, stages 1 or 2).");
 #endif
         // Undenoised is independent of every mode above (stays on across Lit/Unlit/Wireframe/
         // debug-view, combines with any) -- see onUpdate's UNDENOISED comment for the knobs this bundles.

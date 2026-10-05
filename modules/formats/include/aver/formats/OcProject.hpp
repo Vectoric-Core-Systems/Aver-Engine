@@ -60,6 +60,8 @@ struct ProjectDesc {
     int giMode             = -1; // RENDER.GIMODE           diffuse GI algorithm, [0,1]
     // RENDER.DENOISER: AMD FidelityFX-based denoiser over ReSTIR GI radiance (needs MSAA 1).
     int denoiser           = -1; // RENDER.DENOISER         0/1
+    // RENDER.NEURALDENOISE: NRD's resolve in place of FidelityFX's (docs/rendering/NEURAA_NRD.md).
+    int neuralDenoise      = -1; // RENDER.NEURALDENOISE    0/1
     // RENDER.RESTIRVISIBILITY: ReSTIR GI visibility rays (see voxi::Settings::giRestirVisibility).
     int restirVisibility   = -1; // RENDER.RESTIRVISIBILITY  0=no ray 1=reconstructed 2=half 3=full 4=cached
     // RENDER.RESTIRHISTORY: ReSTIR GI reuse maxHistory weight. Measured: history 0 no overshoot,
@@ -124,7 +126,7 @@ struct ProjectDesc {
                voxelResolution > 0 || giIntensity >= 0.0f || giMaxDistance >= 0.0f ||
                rtShadowRays >= 0 || rtPixelsPerRayTile >= 0 || rtShadowDenoise >= 0 ||
                rtRenderMode >= 0 || ptBounces >= 0 || ptMode >= 0 || layeredBsdf >= 0 ||
-               giCones >= 0 || giMode >= 0 || denoiser >= 0 || restirVisibility >= 0 ||
+               giCones >= 0 || giMode >= 0 || denoiser >= 0 || neuralDenoise >= 0 || restirVisibility >= 0 ||
                restirHistory >= 0 || rdStages >= 0 || fogOcclusion >= 0 ||
                refractionMode >= 0 || refractionStrength >= 0.0f ||
                refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||
