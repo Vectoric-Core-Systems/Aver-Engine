@@ -1234,6 +1234,12 @@ public:
     // The staged ray-driven visibility record, on frames CSRdVisibility wrote it (NeuRAA reads it).
     bool primaryVisibility(rhi::PrimaryVisibility& out) const override;
 
+    // NRD training capture (render::denoise::Denoiser::startCapture).
+    void startDenoiseCapture(const std::string& dir, u32 count) { denoiser_.startCapture(dir, count); }
+    // NRD's trained weights (Neural Denoise); the host knows where bin/data is.
+    void setDenoiseWeightsPath(std::string path) { denoiser_.setWeightsPath(std::move(path)); }
+    [[nodiscard]] bool denoiseCaptureHolding() const { return denoiser_.captureHolding(); }
+
 private:
     // Path tracing wanted -- a different question from ray tracing wanted, deliberately asking the other setting.
     bool pathTracingWanted() const { return rtSupported_ && settings_.pathTracing != Quality::Off; }

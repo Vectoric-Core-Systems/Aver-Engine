@@ -693,6 +693,7 @@ void GameApp::attachVoxi(Engine& e) {
     if (manifestMsaa < 0) s.msaa = static_cast<voxi::Msaa>(dev->sampleCount());
     voxi::Renderer::get().setSettings(s);
     voxiRenderer_.setSettings(s);
+    voxiRenderer_.setDenoiseWeightsPath(aver::executableDir() + "/data/nrd_v1.bin");
 
     if (voxiRenderer_.init(*dev)) {
         dev->addRenderFeature(&voxiRenderer_);

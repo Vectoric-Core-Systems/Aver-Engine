@@ -968,6 +968,7 @@ void SandboxApp::onInit(Engine& e)  {
 
         // VoxiRenderer non-owning; torn down in onShutdown. Read back settings to see clamping.
         voxiRenderer_.setSettings(voxi::Renderer::get().settings());
+        voxiRenderer_.setDenoiseWeightsPath(aver::executableDir() + "/data/nrd_v1.bin");
         if (frameTimeReport_) voxiRenderer_.setFrameTimeReport(true);
         // Set measurement dials before init().
         if (rdAblate_) {
@@ -1392,9 +1393,17 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // --cam-wander AMP SPEED: follows sum of sines at irrational frequencies (NeuraFI training trajectory).
     // NeuRAA's training capture holds it still while it captures a pose, then it resumes where it was.
 #if AVER_MODULE_SR
-    const bool neuraaHold = neuraa_ && neuraa_->captureHolding();
+    bool neuraaHold = neuraa_ && neuraa_->captureHolding();
 #else
-    const bool neuraaHold = false;
+    bool neuraaHold = false;
+#endif
+#if AVER_MODULE_VOXI
+    // --nrd-capture: started once the renderer is attached; it holds the camera the same way.
+    if (!nrdCaptureDir_.empty() && voxiAttached_ && !nrdCaptureStarted_) {
+        voxiRenderer_.startDenoiseCapture(nrdCaptureDir_, nrdCaptureCount_);
+        nrdCaptureStarted_ = true;
+    }
+    if (voxiAttached_ && voxiRenderer_.denoiseCaptureHolding()) neuraaHold = true;
 #endif
     if (neuraaHold) ++camWanderHeld_;
     if (camWanderAmp_ > 0.0f && !neuraaHold && (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {

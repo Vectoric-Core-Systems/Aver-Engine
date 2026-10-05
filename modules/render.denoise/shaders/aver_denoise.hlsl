@@ -16,6 +16,7 @@
 //                           place of pass 2: FidelityFX's resolve, or with flag bit 3 the spatial-first
 //                           resolve (pyramid candidates, then a short min/max-clamped stabiliser).
 //   5 CSDenoiseNrdPyramid -- the current frame's 1/2, 1/4, 1/8 levels for pass 4's spatial path.
+//   6 CSDenoiseCapture   -- NRD training capture (colour only): running mean of fresh raw pixels.
 //
 // WHY THE REFLECTION PIPELINE FOR A DIFFUSE SIGNAL. FidelityFX Denoiser ships two denoisers: shadows
 // (a 1-bit-per-pixel hit mask) and reflections. Neither of Voxi's signals is a hit mask; both are a
@@ -96,7 +97,8 @@ cbuffer AverDenoiseCB : register(b1) {
     uint2  gDnsrSize;               // render resolution: every input, history and output
     float2 gDnsrInvSize;
     uint   gDnsrFlags;              // bit 0: history invalid (reset); bit 1: half-rate input; bit 2: its parity;
-                                    // bit 3: NRD's spatial-first resolve (pass 4)
+                                    // bit 3: NRD's spatial-first resolve (pass 4); bit 4: restart the
+                                    // capture mean (pass 6); bit 5: NRD's network (pass 4, t13)
     uint   gDnsrMaxSamples;         // reproject: cap on the accumulated sample count
     float  gDnsrHistoryClipWeight;  // resolve: neighbourhood-clip width for the history
     float  gDnsrTemporalStability;  // reproject: passed through to FidelityFX (unused by this version)
@@ -389,6 +391,7 @@ void CSDenoiseResolve(int2 dtid : SV_DispatchThreadID, int2 gtid : SV_GroupThrea
 Texture2D<float4> gNrdLevel1 : register(t10);   // rgb + view Z * 0.01 (0 = no valid sample)
 Texture2D<float4> gNrdLevel2 : register(t11);
 Texture2D<float4> gNrdLevel3 : register(t12);
+StructuredBuffer<float> gNrdNet : register(t13);   // the trained weights (flag bit 5 uses them)
 
 static const float kNrdDepthSigma = 16.0;   // relative view-Z difference that halves a tap ~ 1/23
 // Measured 2026-10-05, NeonDistrict Night (NEURAA_NRD.md section 4): coarse-leaning beat fine-leaning on
@@ -397,6 +400,7 @@ static const float kNrdLogit[4]   = {-2.0, -1.0, 0.0, 0.0};   // this pixel, 1/2
 static const uint  kNrdFramesMoving = 4u, kNrdFramesStill = 16u;
 
 bool nrdSpatial() { return (gDnsrFlags & 8u) != 0u; }
+bool nrdNetwork() { return (gDnsrFlags & 32u) != 0u; }
 
 float nrdLum(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
@@ -423,8 +427,20 @@ float3 nrdUpsample(Texture2D<float4> lvl, uint shift, int2 p, float z, out float
     return wsum > 1.0e-6 ? sum / wsum : 0.0;
 }
 
-// The spatial estimate S at p, in the scaled space the FidelityFX passes work in.
-float3 nrdSpatialEstimate(int2 p) {
+struct NrdPixel {
+    float  lum[4];     // luminance of the four candidates
+    float  conf[3];    // the levels' surviving bilinear weight
+    float  hz;         // hit distance / view Z
+    float  contact;
+    float  push;       // 1 when the outlier rule fired
+    float  z;
+    float3 n;
+    bool   surf;
+};
+
+// The spatial estimate S at p, in the scaled space the FidelityFX passes work in. `delta` is the
+// network's per-tile correction to the four logits (zero without it); `px` reports the pixel's values.
+float3 nrdSpatialEstimate(int2 p, float4 delta, out NrdPixel px) {
     p = dnsrClampPixel(p);
     const float z = dnsrLoadViewZ(p);
     // The raw signal, not FidelityFX's prefiltered value: its outlier rejection darkens.
@@ -435,19 +451,30 @@ float3 nrdSpatialEstimate(int2 p) {
     c[1] = nrdUpsample(gNrdLevel2, 2u, p, z, conf[1]) * dnsrScale();
     c[2] = nrdUpsample(gNrdLevel3, 3u, p, z, conf[2]) * dnsrScale();
 
-    float logit[4] = {kNrdLogit[0], kNrdLogit[1], kNrdLogit[2], kNrdLogit[3]};
+    float logit[4] = {kNrdLogit[0] + delta.x, kNrdLogit[1] + delta.y, kNrdLogit[2] + delta.z, kNrdLogit[3] + delta.w};
     // An outlier against the 1/4 level leans on the coarse levels (spread, not rejected).
     const float ratio = nrdLum(c0) / max(nrdLum(c[1]), 1.0e-4);
+    px.push = 0.0;
     if (conf[1] > 0.25 && ratio > 4.0) {
         const float push = log2(ratio / 4.0);
         logit[0] -= push; logit[2] += 0.5 * push; logit[3] += 0.5 * push;
+        px.push = 1.0;
     }
+    px.contact = 0.0;
+    px.hz = 0.0;
 #if !AVER_DNSR_SCALAR
     // Light from nearby geometry changes quickly: a short hit distance leans on the fine levels.
     const float hit = gDnsrInput.Load(int3(p, 0)).a;
     const float contact = 1.0 - saturate(hit / max(z * 0.3, 1.0e-3));
     logit[0] += 2.0 * contact; logit[1] += contact;
+    px.contact = contact;
+    px.hz = hit / max(z, 1.0e-3);
 #endif
+    px.lum[0] = nrdLum(c0); px.lum[1] = nrdLum(c[0]); px.lum[2] = nrdLum(c[1]); px.lum[3] = nrdLum(c[2]);
+    px.conf[0] = saturate(conf[0]); px.conf[1] = saturate(conf[1]); px.conf[2] = saturate(conf[2]);
+    px.z = z;
+    px.n = dnsrLoadNormal(p);
+    px.surf = z > 0.0 && z < 1.0e6;
     float w[4];
     w[0] = exp(logit[0]);
     float wsum = w[0];
@@ -462,12 +489,109 @@ float3 nrdSpatialEstimate(int2 p) {
 
 groupshared float3 gsNrdS[10 * 10];
 
+// ---- the network: per 8x8 tile, 16 statistics -> 16 -> 16 -> 4 logit corrections ----
+// gNrdNet holds the weights file body: input mean[16], std[16], W1[16x16], b1, W2[16x16], b2, W3[4x16], b3.
+// The statistics must match tools/nrd/nrd_train.py's tile_features order exactly.
+#define NRD_IN 16
+#define NRD_H 16
+static const float kNrdDeltaMax = 6.0;
+groupshared float gsNrdA[64][11];   // per-pixel terms for the reductions
+groupshared float gsNrdS1[11];      // pass one totals: count, L0..L3, log(hz), conf1..3, contact, push
+groupshared float gsNrdS2[9];       // pass two totals: var, tail4, tail16, var(log hz), zmin, zmax, normal
+groupshared float4 gsNrdDelta;
+
+float4 nrdTileDelta(uint gi, NrdPixel px) {
+    const float m = px.surf ? 1.0 : 0.0;
+    const float lhz = log(max(px.hz, 0.0) + 1.0e-3);
+    gsNrdA[gi][0] = m;
+    [unroll] for (uint k = 0; k < 4u; ++k) gsNrdA[gi][1 + k] = px.lum[k] * m;
+    gsNrdA[gi][5] = lhz * m;
+    gsNrdA[gi][6] = px.conf[0] * m; gsNrdA[gi][7] = px.conf[1] * m; gsNrdA[gi][8] = px.conf[2] * m;
+    gsNrdA[gi][9] = px.contact * m; gsNrdA[gi][10] = px.push * m;
+    GroupMemoryBarrierWithGroupSync();
+    if (gi == 0u) {
+        [unroll] for (uint q = 0; q < 11u; ++q) gsNrdS1[q] = 0.0;
+        for (uint t = 0; t < 64u; ++t) [unroll] for (uint q2 = 0; q2 < 11u; ++q2) gsNrdS1[q2] += gsNrdA[t][q2];
+    }
+    GroupMemoryBarrierWithGroupSync();
+    const float cnt = max(gsNrdS1[0], 1.0);
+    const float m0 = gsNrdS1[1] / cnt, mh = gsNrdS1[5] / cnt;
+    const float L0 = px.lum[0];
+    // Pass two: what needs the tile means first.
+    gsNrdA[gi][0] = (L0 - m0) * (L0 - m0) * m;
+    gsNrdA[gi][1] = (L0 > 4.0 * m0) ? L0 * m : 0.0;
+    gsNrdA[gi][2] = (L0 > 16.0 * m0) ? L0 * m : 0.0;
+    gsNrdA[gi][3] = (lhz - mh) * (lhz - mh) * m;
+    gsNrdA[gi][4] = px.surf ? px.z : 1.0e30;
+    gsNrdA[gi][5] = px.surf ? px.z : 0.0;
+    gsNrdA[gi][6] = px.n.x * m; gsNrdA[gi][7] = px.n.y * m; gsNrdA[gi][8] = px.n.z * m;
+    GroupMemoryBarrierWithGroupSync();
+    if (gi == 0u) {
+        [unroll] for (uint q = 0; q < 9u; ++q) gsNrdS2[q] = 0.0;
+        gsNrdS2[4] = 1.0e30;
+        for (uint t = 0; t < 64u; ++t) {
+            [unroll] for (uint q2 = 0; q2 < 4u; ++q2) gsNrdS2[q2] += gsNrdA[t][q2];
+            gsNrdS2[4] = min(gsNrdS2[4], gsNrdA[t][4]);
+            gsNrdS2[5] = max(gsNrdS2[5], gsNrdA[t][5]);
+            [unroll] for (uint q3 = 6; q3 < 9u; ++q3) gsNrdS2[q3] += gsNrdA[t][q3];
+        }
+        const float tot = gsNrdS1[1] + 1.0e-12;
+        const float mean1 = gsNrdS1[2] / cnt, mean2 = gsNrdS1[3] / cnt, mean3 = gsNrdS1[4] / cnt;
+        const float eps = 1.0e-4 * (m0 + mean3) + 1.0e-12;
+        float f[NRD_IN];
+        f[0] = log((mean1 + eps) / (m0 + eps));
+        f[1] = log((mean2 + eps) / (m0 + eps));
+        f[2] = log((mean3 + eps) / (m0 + eps));
+        f[3] = log(gsNrdS2[0] / cnt / (m0 * m0 + eps * eps) + 1.0e-4);
+        f[4] = gsNrdS2[1] / tot;
+        f[5] = gsNrdS2[2] / tot;
+        f[6] = mh;
+        f[7] = sqrt(gsNrdS2[3] / cnt);
+        const float zlo = gsNrdS2[4], zhi = gsNrdS2[5];
+        f[8] = (zlo < 1.0e29 && zhi > 0.0) ? log(max(zhi, 1.0e-3) / max(zlo, 1.0e-3)) : 0.0;
+        f[9] = 1.0 - length(float3(gsNrdS2[6], gsNrdS2[7], gsNrdS2[8]) / cnt);
+        f[10] = gsNrdS1[0] / 64.0;
+        f[11] = gsNrdS1[6] / cnt; f[12] = gsNrdS1[7] / cnt; f[13] = gsNrdS1[8] / cnt;
+        f[14] = gsNrdS1[9] / cnt; f[15] = gsNrdS1[10] / cnt;
+        [unroll] for (uint n = 0; n < NRD_IN; ++n) f[n] = (f[n] - gNrdNet[n]) / gNrdNet[NRD_IN + n];
+        float h1[NRD_H], h2[NRD_H];
+        const uint w1 = 2 * NRD_IN, b1 = w1 + NRD_H * NRD_IN, w2 = b1 + NRD_H, b2 = w2 + NRD_H * NRD_H;
+        const uint w3 = b2 + NRD_H, b3 = w3 + 4 * NRD_H;
+        for (uint a = 0; a < NRD_H; ++a) {
+            float v = gNrdNet[b1 + a];
+            for (uint n2 = 0; n2 < NRD_IN; ++n2) v += gNrdNet[w1 + a * NRD_IN + n2] * f[n2];
+            h1[a] = max(v, 0.0);
+        }
+        for (uint a2 = 0; a2 < NRD_H; ++a2) {
+            float v = gNrdNet[b2 + a2];
+            for (uint n3 = 0; n3 < NRD_H; ++n3) v += gNrdNet[w2 + a2 * NRD_H + n3] * h1[n3];
+            h2[a2] = max(v, 0.0);
+        }
+        float4 outD = 0.0;
+        [unroll] for (uint o = 0; o < 4u; ++o) {
+            float v = gNrdNet[b3 + o];
+            for (uint n4 = 0; n4 < NRD_H; ++n4) v += gNrdNet[w3 + o * NRD_H + n4] * h2[n4];
+            outD[o] = kNrdDeltaMax * tanh(v);
+        }
+        gsNrdDelta = gsNrdS1[0] < 1.0 ? 0.0 : outD;   // no surface in this tile: nothing to correct
+    }
+    GroupMemoryBarrierWithGroupSync();
+    return gsNrdDelta;
+}
+
 void nrdResolve(int2 dtid, int2 gtid) {
-    // S for this 8x8 tile and a one-pixel apron, for the history clamp's 3x3 min/max.
+    // S for this 8x8 tile and a one-pixel apron, for the history clamp's 3x3 min/max. The network's
+    // correction is this tile's; the apron borrows it.
     const int2 origin = dtid - gtid - 1;
     const uint gi = uint(gtid.y * 8 + gtid.x);
+    float4 delta = 0.0;
+    NrdPixel px;
+    if (nrdNetwork()) {
+        nrdSpatialEstimate(dtid, 0.0, px);
+        delta = nrdTileDelta(gi, px);
+    }
     for (uint i = gi; i < 100u; i += 64u)
-        gsNrdS[i] = nrdSpatialEstimate(origin + int2(i % 10u, i / 10u));
+        gsNrdS[i] = nrdSpatialEstimate(origin + int2(i % 10u, i / 10u), delta, px);
     GroupMemoryBarrierWithGroupSync();
     if (any(dtid >= int2(gDnsrSize))) return;
 
@@ -555,6 +679,21 @@ void CSDenoiseNrdPyramid(int2 dtid : SV_DispatchThreadID, int2 gtid : SV_GroupTh
     }
     GroupMemoryBarrierWithGroupSync();
     if (gi == 0u) gNrdLevel3Out[dtid / 8] = nrdReduce(gsNrdL2[0], gsNrdL2[1], gsNrdL2[2], gsNrdL2[3]);
+}
+
+// =================================================================================================
+#elif AVER_DNSR_PASS == 6   // ---- NRD training capture: the converged input, from fresh pixels only ----
+
+RWTexture2D<float4> gNrdCapAccum : register(u0);   // rgb running mean, a = fresh samples so far
+
+[numthreads(8, 8, 1)]
+void CSDenoiseCapture(int2 dtid : SV_DispatchThreadID) {
+    if (any(dtid >= int2(gDnsrSize))) return;
+    float4 acc = (gDnsrFlags & 16u) != 0u ? 0.0 : gNrdCapAccum[dtid];
+    const bool fresh = !dnsrHalfRateInput() || ((uint(dtid.x) ^ uint(dtid.y) ^ dnsrHalfRateParity()) & 1u) == 0u;
+    const float3 v = DNSR_LOAD3(gDnsrInput.Load(int3(dtid, 0)));
+    if (fresh && all(isfinite(v))) { acc.a += 1.0; acc.rgb += (v - acc.rgb) / acc.a; }
+    gNrdCapAccum[dtid] = acc;
 }
 
 #endif

@@ -15,6 +15,18 @@ set_target_properties(Aver.Render.Denoise PROPERTIES FOLDER "modules")
 
 # aver_denoise.hlsl beside the executable, like every module's shaders.
 aver_deploy_shaders(Aver.Render.Denoise "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+# NRD's trained network (docs/rendering/NEURAA_NRD.md) in bin/data; the renderer points
+# Denoiser::setWeightsPath at it. Same deploy rule as NeuraFI's and NeuRAA's weights.
+set(_nrd_weights "${CMAKE_CURRENT_SOURCE_DIR}/data/nrd_v1.bin")
+set(_nrd_deployed "${CMAKE_BINARY_DIR}/bin/data/nrd_v1.bin")
+add_custom_command(
+  OUTPUT  ${_nrd_deployed}
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/bin/data"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_nrd_weights} "${CMAKE_BINARY_DIR}/bin/data"
+  DEPENDS ${_nrd_weights}
+  COMMENT "NRD: deploying the trained weights to bin/data")
+add_custom_target(Aver.Render.Denoise.weights ALL DEPENDS ${_nrd_deployed})
+add_dependencies(Aver.Render.Denoise Aver.Render.Denoise.weights)
 
 # ---- FidelityFX Denoiser's headers, deployed under bin/shaders/FidelityFX ----
 # They are .h files, which aver_deploy_shaders does not carry (it globs .hlsl/.hlsli and flattens),
