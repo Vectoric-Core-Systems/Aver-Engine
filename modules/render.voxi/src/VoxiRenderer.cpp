@@ -7358,8 +7358,11 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
         // Blended variant with textured bindless table (for glass reflections).
         const rhi::ShaderHandle vsMainTex = compile("VSMain", rhi::ShaderStage::Vertex, kBaseSm,
                                                     rasterDefs(bindlessDefs.c_str()).c_str());
+        // AVER_BLENDED_PASS: this variant leaves out decals (they skip translucent surfaces anyway); with
+        // them compiled in it hung the RX 7800 XT at NewSponza Night's default view (docs/rendering/DECALS.md).
+        const std::string blendedDefs = bindlessDefs + ";AVER_BLENDED_PASS=1";
         const rhi::ShaderHandle psMainTex = compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65,
-                                                    rasterDefs(bindlessDefs.c_str()).c_str());
+                                                    rasterDefs(blendedDefs.c_str()).c_str());
         if (vsMainTex && psMainTex) {
             rhi::GraphicsPipelineDesc p = scene;
             p.vs = vsMainTex; p.ps = psMainTex;

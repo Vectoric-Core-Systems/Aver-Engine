@@ -205,6 +205,10 @@ float averGoldenTurns(uint n) { return (float)((n * 0x9E3779B9u) >> 8) * (6.2831
 // Is this fragment a translucent (glass/water) draw, replayed blended?
 bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) != 0u || gTransmission > 0.0; }
 
+// The blended (glass) PSMainVoxi variant compiles without decals (VoxiRenderer's blended pipeline).
+#ifndef AVER_BLENDED_PASS
+#define AVER_BLENDED_PASS 0
+#endif
 #if !AVER_RT
 #include "voxi_decal.hlsli"   // the RT build gets it through voxi_rt.hlsli, ahead of rtHitSurface
 #endif
@@ -1432,7 +1436,11 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 
     AverSurface s = averEvalMaterial(vtx, sun);
     // Decals repaint the surface before anything lights it (voxi_decal.hlsli); opaque draws only.
+    // Plain raster only: with decals compiled into the ray-traced PSMainVoxi variants (here or through
+    // rtHitSurface) NewSponza Night's default view hung the RX 7800 XT (docs/rendering/DECALS.md).
+#if !AVER_RT
     if (gDecalParams.x > 0.5 && !averDrawIsTranslucent()) averApplyDecals(s, i.wpos, N, true);
+#endif
 #if AVER_GBUFFER
     // Velocity and packed normal/roughness computed once, shared by all return sites.
     const float2 gbufVelocity    = averGBufferVelocity(i.wpos);

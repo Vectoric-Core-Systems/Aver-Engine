@@ -200,3 +200,22 @@ integration step's).
 * **128 decals per frame** (nearest and largest kept); the per-pixel loop is linear in the list. A tiled
   or clustered list is the next step if scenes need hundreds on screen at once.
 * The editor's Details section has no thumbnail previews of the three images.
+
+## Where decals are compiled in (2026-10-06)
+
+Decals are applied in the plain raster `PSMainVoxi` (no `AVER_RT`) and in `rtHitSurface` for the bindless
+ray-traced passes: the staged ray-driven primary (Stage B) and its GI, reflection and Path Tracing hits.
+
+They are **left out** of:
+- the non-bindless ray-traced raster variants (`sceneRtPso_`, `sceneRtGbufPso_`);
+- the blended glass variant (`AVER_BLENDED_PASS`);
+- the single-pass kernel.
+
+Why: with the decal code compiled into the ray-traced `PSMainVoxi` variants, by either call site, NewSponza
+Night's default view hung the RX 7800 XT (TDR, in a mesh-shader draw per DRED) in every denoiser mode. The
+same hang came from the exact rectangle-light form factor earlier the same day. These shaders are at the
+limit; test the default view in all three denoiser modes after adding code to them.
+
+Consequence: with raster primary visibility and ray tracing on (`voxi.rtRenderMode 0`), primary surfaces
+show no decals; the ray-driven primary (the default) does.
+

@@ -398,9 +398,11 @@ AverSurface rtHitSurface(RtHit h, float3 V, float3 L, float2 gx, float2 gy, uint
     l.radiance   = float3(0.0, 0.0, 0.0);
     l.visibility = float3(1.0, 1.0, 1.0);
     AverSurface s = averComposeSurface(v, l, a, m, rtDrawTerms(h.inst), N);
-#if !AVER_RD_SINGLE_PASS
-    // Decals repaint opaque hits (voxi_decal.hlsli). Not in the single-pass kernel, which is at its
-    // register limit, nor on LITE secondary hits. h.N is already the geometric normal facing the ray.
+#if defined(AVER_RT_BINDLESS) && !AVER_RD_SINGLE_PASS && !AVER_BLENDED_PASS
+    // Decals repaint opaque hits (voxi_decal.hlsli): the staged ray-driven passes and their compute stages
+    // (bindless). Not in the single-pass kernel, the glass variant or the non-bindless ray-traced raster
+    // variants, all at their register limit (the last two hung the RX 7800 XT), nor on LITE secondary hits.
+    // h.N is already the geometric normal facing the ray.
     if (gDecalParams.x > 0.5 && detail != AVER_RT_HIT_LITE &&
         (m.flags & AVER_MAT_ALPHA_BLEND) == 0 && !(m.transmission > 0.0))
         averApplyDecals(s, h.pos, h.N, detail == AVER_RT_HIT_FULL);
