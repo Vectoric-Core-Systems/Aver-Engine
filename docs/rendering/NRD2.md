@@ -396,6 +396,24 @@ Another finding from the same session:
   FidelityFX selected (`--denoiser 1 --set voxi.ptMode 1`, 1500 frames). Earlier same-day figures that put NRD2
   closer to the reference than FidelityFX used such a reference and do not hold.
 
+**Darkening at the default view.** NewSponza Night's own camera is lit mostly by candle GI, so the cap's lost
+energy shows there. With the coarse-level cap 0, against the Path Tracing reference:
+
+| Despeckle | Spots | Bias |
+|---|---|---|
+| Off | 5.8% | -0.5% |
+| Cap 2 | 2.4% | -2.7% |
+| Cap 1.5 | 1.65% | -3.7% |
+| Cap 1 (default) | 0.53% | -7.1% |
+| FidelityFX | 1.23% | +0.2% |
+
+`voxi.nrd2DespeckleCap` is the trade.
+
+**Tried and reverted: returning the clamped light.** Summing it per 8x8 tile and adding it back in the resolve
+(bilinear across tiles, depth- and normal-weighted) overshot to +1.7% to +2.0% and put the light back as
+tile-sized blotches (11.7% spots at the default view), for 0.27 ms. Getting the light back needs a much wider
+and better-founded spread than one tile.
+
 ## Speckle blur (2026-10-06)
 
 The owner asked for a ReBLUR-style blur as a selectable speckle removal: Render settings, Denoising,
