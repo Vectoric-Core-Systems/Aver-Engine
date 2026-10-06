@@ -341,8 +341,9 @@ time on the raw signal. NRD2's temporal stage runs after the resolve, when the d
 GI's temporal reuse also keeps the same sample in place for up to 30 frames, so the stage cannot average it
 away either.
 
-**Fix.** `CSNrd2Despeckle` (pass 8) runs before the pyramid. For D and S separately it caps each pixel at 2x
-the 5th brightest of its 24 neighbours in a 5x5, and the pyramid, resolve and features read the result.
+**Fix.** `CSNrd2Despeckle` (pass 8) runs before the pyramid. For D and S separately it caps each pixel at
+`voxi.nrd2DespeckleCap` (default 1) times the 5th brightest of its 24 neighbours in a 5x5, and the pyramid,
+resolve and features read the result.
 - The 5th brightest is past the 4-pixel fill cross, so the whole cross goes.
 - An area brighter than a few pixels has 5 or more bright neighbours and stays.
 - A 1-pixel-wide bright line in S (a thin highlight) would be capped. None was seen on the rig; use
@@ -355,7 +356,8 @@ sample is lost: the rig showed less than the blotches had added.
 - Cost: 0.08 ms on the RX 7800 XT at 1766x994.
 - Captures keep Stage B's raw values (despeckle off while one runs), so training data is unchanged.
 
-Dial: `voxi.nrd2Despeckle`, 0 off, 1 D, 2 S, 3 both (default).
+Dials: `voxi.nrd2Despeckle`, 0 off, 1 D, 2 S, 3 both (default); `voxi.nrd2DespeckleCap` 1-8 (default 1).
+The cap trades spots for light; the owner accepted some colour accuracy for fewer spots.
 
 **Measured** on NewSponza Night, upper gallery (`--cam 600 -900 720 -12 90`, exposure 48, 400 frames). The
 metric is the 9 px blob error, mean |log ratio| of luminance after the box blur.
@@ -370,9 +372,25 @@ With lamps on, the remaining gap at rest is edges and fine texture, not spots: F
 Tracing accumulation and the Voxi histories, and NRD2 does not. In the swing, the old frames had soft glow
 blotches behind the candles and the new ones do not; FidelityFX shows fine sparkle along edges instead.
 
-Two findings from the same session:
-- **Lamp shadows: full rate is better.** `voxi.nrd2HalfRateLamps 0` lowers the moving error 3.16% to 3.05%,
-  for +0.2 ms. The default stays half rate.
+**Second round (cap and lamp rate).** Measured in motion against a Path Tracing reference at the same pose:
+the swing's captured frame is frame 397, yaw 87.649, found by matching still frames.
+- "Spots" is the share of the viewport where the 9 px blur is more than 10% brighter than the reference.
+- "Bias" is the mean log ratio.
+
+| Setting | Spots, moving | Spots, still | Bias, moving |
+|---|---|---|---|
+| Despeckle off | 3.66% | 3.34% | +1.1% |
+| Cap 2, half-rate lamps (first commit) | 2.23% | 1.96% | +0.3% |
+| Cap 1.5, full-rate lamps | 1.07% | n/a | +0.05% |
+| **Cap 1, full-rate lamps (default)** | **0.45%** | **0.32%** | **-1.7%** |
+| Cap 1, full-rate lamps, ReSTIR history 0 | 0.22% | n/a | -4.4% |
+| FidelityFX | 0.92% | 0.17% | -2.0% |
+
+With cap 1, candle-only light (lamps off) loses 6% of its energy; FidelityFX loses none there. Full-rate lamp
+shadows (`nrd2HalfRateLamps` now defaults to false) cost about 0.1 ms. The whole change is +0.3 ms on the RX
+7800 XT at 1766x994, with the despeckle at 0.09 ms of that.
+
+Another finding from the same session:
 - **A reference needs `--denoiser 1`.** Under NRD2 the Path Tracing accumulation is compiled out, so a
   `voxi.ptMode 1` reference rendered with NRD2 selected is only NRD2 on one Path Tracing frame. Render it with
   FidelityFX selected (`--denoiser 1 --set voxi.ptMode 1`, 1500 frames). Earlier same-day figures that put NRD2

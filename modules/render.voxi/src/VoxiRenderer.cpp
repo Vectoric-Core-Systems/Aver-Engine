@@ -4717,6 +4717,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         np.stabilise  = settings_.nrd2Stab;
         np.stabFrames = static_cast<f32>(settings_.nrd2StabFrames);
         np.despeckle  = settings_.nrd2Despeckle;
+        np.despeckleCap = settings_.nrd2DespeckleCap;
         nrd2_.setParams(np);
         render::denoise::Nrd2::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();

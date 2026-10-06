@@ -218,11 +218,10 @@ float3 nrd2StabFirefly(float3 c, float neighbourMaxLum) {
     return (l > cap && l > 0.0) ? c * (cap / l) : c;
 }
 
-// Input despeckle (CSNrd2Despeckle, before the pyramid): a pixel brighter than kNrd2DespeckleCap times the
-// 5th brightest of its 24 neighbours (5x5) is scaled down to that. An order statistic, never a
+// Input despeckle (CSNrd2Despeckle, before the pyramid): a pixel brighter than `cap` (gNrd2Stab.z, Settings::nrd2DespeckleCap)
+// times the 5th brightest of its 24 neighbours (5x5) is scaled down to that. An order statistic, never a
 // mean. Rank 5 looks past the 4-pixel cross the half-rate fill makes of one traced sample, so that cross goes
 // too; a bright area wider than a few pixels has more bright neighbours and stays. Single-frame, energy lost.
-static const float kNrd2DespeckleCap = 2.0;
 // Keeps the 5 largest of the values offered so far, t[0] largest (a sorting network step; -1 = empty).
 void nrd2Top5(inout float t[5], float v) {
     [unroll] for (uint k = 0u; k < 5u; ++k) {
@@ -231,9 +230,9 @@ void nrd2Top5(inout float t[5], float v) {
         t[k] = hi;
     }
 }
-float3 nrd2Despeckle(float3 c, float rankLum) {
+float3 nrd2Despeckle(float3 c, float rankLum, float capScale) {
     const float l = nrd2Lum(c);
-    const float cap = kNrd2DespeckleCap * max(rankLum, 0.0);
+    const float cap = capScale * max(rankLum, 0.0);
     return (rankLum >= 0.0 && l > cap && l > 0.0) ? c * (cap / l) : c;
 }
 

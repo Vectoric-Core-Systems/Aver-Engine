@@ -44,6 +44,7 @@ struct Nrd2Params {
     bool stabilise = false;   // the temporal stage, on jitter-free frames with the Inputs below filled
     f32 stabFrames = 32.0f;   // its history length at rest, in frames (from 8 px/frame: min(8, this))
     u32 despeckle = 0;        // CSNrd2Despeckle before the pyramid: 1 D, 2 S (not while a capture runs)
+    f32 despeckleCap = 2.0f;  // its cap, times the 5th brightest neighbour
 };
 
 class Nrd2 {

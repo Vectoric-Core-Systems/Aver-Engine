@@ -32,7 +32,7 @@ cbuffer Nrd2CB : register(b3) {
     float4 gNrd2InBias[3];
     float4 gNrd2PrevVP[4];    // stabiliser: previous view-projection about the previous eye (row vectors)
     float4 gNrd2CamDelta;     // eye - previous eye (xyz)
-    float4 gNrd2Stab;         // history frames at rest, cap at speed
+    float4 gNrd2Stab;         // history frames at rest, cap at speed, despeckle cap
 };
 
 uint2 nrd2LevelSize(uint shift) { return ((gNrd2Rect.zw + 7u) / 8u) * (8u >> shift); }
@@ -784,8 +784,8 @@ void CSNrd2Despeckle(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThre
         }
     }
     // Fewer than 5 usable neighbours: td[4] stays -1 and nothing is clamped.
-    if ((gNrd2Tiles.w & 1u) != 0u && gsLD[(gtid.y + 2u) * 12u + gtid.x + 2u] >= 0.0) d.rgb = nrd2Despeckle(d.rgb, td[4]);
-    if ((gNrd2Tiles.w & 2u) != 0u && gsLS[(gtid.y + 2u) * 12u + gtid.x + 2u] >= 0.0) s.rgb = nrd2Despeckle(s.rgb, ts[4]);
+    if ((gNrd2Tiles.w & 1u) != 0u && gsLD[(gtid.y + 2u) * 12u + gtid.x + 2u] >= 0.0) d.rgb = nrd2Despeckle(d.rgb, td[4], gNrd2Stab.z);
+    if ((gNrd2Tiles.w & 2u) != 0u && gsLS[(gtid.y + 2u) * 12u + gtid.x + 2u] >= 0.0) s.rgb = nrd2Despeckle(s.rgb, ts[4], gNrd2Stab.z);
     gNrd2DOut[p] = d;
     gNrd2SOut[p] = s;
 }

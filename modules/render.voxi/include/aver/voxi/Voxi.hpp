@@ -163,14 +163,15 @@ struct Settings {
     // NRD2 input despeckle (CSNrd2Despeckle): isolated outliers in D (1) and S (2) clamped before the pyramid,
     // so a lone bright sample (a small emitter hit by a GI ray) is not spread into a blotch.
     u32 nrd2Despeckle = 3;
+    f32 nrd2DespeckleCap = 1.0f;   // times the 5th brightest neighbour; lower = smoother, darker
     // NRD2 keeps half-rate tracing and fills the skipped checkerboard half from this frame's traced
     // neighbours (CSRdHalfFill; docs/rendering/NRD2.md). Each applies where its base half rate is asked
     // for: GI under rayDrivenStages 2, reflections under rtReflectionHalfRate (glossy only), sky
-    // occlusion under rtSkyOcclusionHalfRate. Lamps always (Stage B's 5x5 fills them). Off = full rate.
+    // occlusion under rtSkyOcclusionHalfRate. Lamps when on (Stage B's 5x5 fills them). Off = full rate.
     bool nrd2HalfRateGi = true;
     bool nrd2HalfRateRefl = true;
     bool nrd2HalfRateAo = true;
-    bool nrd2HalfRateLamps = true;
+    bool nrd2HalfRateLamps = false;   // full rate: fewer lamp-lit spots (NRD2.md "Input despeckle"), +0.1 ms
     // Ray-traced reflections through the denoiser's reflection pipeline while it runs (staged
     // ray-driven reflections only); off, they keep Voxi's own reflection history and filter.
     bool denoiseReflections = true;

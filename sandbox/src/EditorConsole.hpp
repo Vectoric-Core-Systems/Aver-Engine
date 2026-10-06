@@ -738,6 +738,14 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (v.as.u > 3) { err = "nrd2Despeckle must be 0 to 3"; return false; }
             return true;
         }});
+    t.push_back({"voxi.nrd2DespeckleCap", VarType::F32, false,
+        "NRD2 despeckle cap, times the 5th brightest of the 5x5 neighbours (1-8, default 1): lower removes more spots and loses more of their light",
+        []{ return vF32(Renderer::get().settings().nrd2DespeckleCap); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2DespeckleCap = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (!(v.as.f >= 1.0f && v.as.f <= 8.0f)) { err = "nrd2DespeckleCap must be 1 to 8"; return false; }
+            return true;
+        }});
     // NRD2 half-rate tracing per feature (Settings::nrd2HalfRate*): skipped pixels filled from this frame.
     {
         struct HalfRateDial { const char* name; bool Settings::* field; const char* help; };

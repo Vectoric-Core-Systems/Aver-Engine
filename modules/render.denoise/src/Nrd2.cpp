@@ -25,7 +25,7 @@ struct Constants {
     f32 inScale[12], inBias[12];   // the network's input standardisation (kFlagStandardise)
     f32 prevVP[16];                // previous view-projection about the previous eye, rows
     f32 camDelta[4];               // eye - previous eye
-    f32 stab[4];                   // history frames at rest, cap at speed
+    f32 stab[4];                   // history frames at rest, cap at speed, despeckle cap
 };
 static_assert(sizeof(Constants) == 320, "Nrd2CB: two uint4s, eighteen float4s");
 
@@ -506,6 +506,7 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     cb.tiles[0] = tx; cb.tiles[1] = ty;
     cb.tiles[2] = (params_.bypass ? kFlagBypass : 0u) | (stab ? kFlagStabilise : 0u) | (stab && hadHist ? kFlagHistory : 0u);
     cb.tiles[3] = despeckled_ ? (params_.despeckle & 3u) : 0u;
+    cb.stab[2] = std::max(params_.despeckleCap, 1.0f);
     std::memcpy(cb.def, params_.diffuse, sizeof(params_.diffuse));
     std::memcpy(cb.def + 6, params_.specular, sizeof(params_.specular));
     if (stab) {
