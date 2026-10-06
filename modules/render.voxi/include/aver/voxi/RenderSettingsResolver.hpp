@@ -236,7 +236,7 @@ inline Resolution resolve(const Settings& s, const DeviceInfo& d) {
     r.denoiser.reason    = denoiseReason;
     r.denoiser.effective = (s.denoiser && denoiseReason == DisableReason::None) ? 1u : 0u;
 
-    // Allocate ~54 MB G-buffer when: denoiser requested (Path Tracing turns it on in VoxiRenderer::setSettings)
+    // Allocate ~54 MB G-buffer when: denoiser requested or Path Tracing on
     // AND (no reason, or only soft MSAA reason).
     r.denoiserGBufferWanted =
         (s.denoiser || s.pathTracing != Quality::Off) &&

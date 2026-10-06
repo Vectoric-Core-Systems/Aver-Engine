@@ -575,16 +575,16 @@ void VoxiRenderer::shutdown() {
 
 void VoxiRenderer::setSettings(const Settings& in) {
     // Path Tracing runs inside the staged ray-driven frame (voxi_pt.hlsli), so it brings what that frame
-    // needs: ray-driven primary, ReSTIR GI and the denoiser with a long history. Both modes force the
-    // same set, so switching between ReSTIR and Reference reallocates nothing; ReSTIR's visibility mode
-    // is left as the project set it (forcing it flipped the history and radiance-cache resources).
+    // needs: ray-driven primary and ReSTIR GI. The denoiser stays the user's choice (None runs none); when
+    // on, it gets a long history. Both modes force the same set, so switching between ReSTIR and Reference
+    // reallocates nothing; ReSTIR's visibility mode is left as the project set it (forcing it flipped the
+    // history and radiance-cache resources).
     Settings s = in;
     if (in.pathTracing != Quality::Off) {
         s.rtRenderMode = 1u;
         if (s.rayDrivenStages == 0u) s.rayDrivenStages = 1u;
         if (s.globalIllumination == Quality::Off) s.globalIllumination = Quality::Low;
         s.giMode = 1u;
-        s.denoiser = true;
         s.denoiserMaxSamples = std::max(s.denoiserMaxSamples, 128u);
     }
     const bool wasPtRef = ptReferenceWanted();
@@ -5625,7 +5625,9 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // Reflections: last frame's CSRdRefl wrote rdReflDnIn_ (u23 was bound to it).
     const bool denoiseReflSignal = settings_.denoiseReflections && rdReflDnIn_ != 0 && rdReflDnBound_;
     denoiseReflOutput_ = 0;
-    if (!nrd2Frame_ && denoiser_.valid() && gbufWritten && (denoiseAoSignal || denoiseGiSignal || denoiseReflSignal)) {
+    // Denoiser None runs no denoiser: the G-buffer can still be on for TAA or frame interpolation.
+    if (!nrd2Frame_ && settings_.denoiser && denoiser_.valid() && gbufWritten &&
+        (denoiseAoSignal || denoiseGiSignal || denoiseReflSignal)) {
         render::denoise::Denoiser::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();
         in.motionVectors   = dev_->gBufferVelocityTexture();
@@ -5707,7 +5709,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     if (denoiseReflOutput_) res_->setSrv(bindings_, 23, denoiseReflOutput_);
     else                    res_->clearSrv(bindings_, 23);
     // This frame's CSRdRefl writes the denoiser's input only while it can run next frame.
-    const bool reflDnWanted = !nrd2Frame_ && settings_.denoiseReflections && rdReflDnIn_ != 0 &&
+    const bool reflDnWanted = !nrd2Frame_ && settings_.denoiser && settings_.denoiseReflections && rdReflDnIn_ != 0 &&
                               denoiser_.valid() && gbufWritten;
     // Leaving NRD2: u23 (and u9) still hold its targets and must be rebound whatever was wanted before.
     const bool nrd2Unbind = nrd2Bound_ && !nrd2Frame_;

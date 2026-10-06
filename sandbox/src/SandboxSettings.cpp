@@ -1494,8 +1494,8 @@ void SandboxApp::buildRenderingSettings(int page) {
                               "Path tracing (reference): one independent path per pixel per frame, every\n"
                               "lobe, no reuse and no denoiser, averaged while the view holds still. Converges\n"
                               "to the ground truth; grainy while moving.\n\n"
-                              "The path tracing methods turn on what they run on: primary rays, ReSTIR GI and\n"
-                              "the denoiser. Picking an Overall Quality preset turns path tracing off.");
+                              "The path tracing methods turn on what they run on: primary rays and ReSTIR GI.\n"
+                              "The denoiser stays as set. Picking an Overall Quality preset turns path tracing off.");
         if (s.giMode != 0 && !ptOn && er.giMode.reason != DisableReason::None)
             ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1),
                                "   ReSTIR is selected and resumes when %s",
@@ -1682,7 +1682,7 @@ void SandboxApp::buildRenderingSettings(int page) {
 
         if (s.pathTracing != Quality::Off)
             ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
-                               "Path Tracing is on: primary rays, ReSTIR GI and the denoiser are forced on.");
+                               "Path Tracing is on: primary rays and ReSTIR GI are forced on.");
         // Primary visibility: rasteriser vs ray-driven (shipped default Medium and above).
         ImGui::Spacing();
         ImGui::TextUnformatted("Primary visibility");
