@@ -40,6 +40,8 @@ add_executable(Sandbox WIN32
   src/ProjectScaffold.cpp
   src/EditorPrefs.cpp
   src/EditorNotifications.cpp
+  src/ShaderWarmup.cpp
+  src/ShaderWarmRun.cpp
   src/InputOwnership.cpp
   src/ViewportIconRenderer.cpp
   src/EngineScaffold.cpp
@@ -551,3 +553,4 @@ add_custom_target(Sandbox.UiFont DEPENDS
   ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.ocfont ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.png)
 add_dependencies(Sandbox Sandbox.UiFont)
 set_target_properties(Sandbox.UiFont PROPERTIES FOLDER "sandbox")
+

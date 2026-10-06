@@ -46,7 +46,19 @@ std::string ownerProjectOf(const std::string& mapPath) {
 }
 
 // Parse command line and build the editor. Flags run in separate loops due to MSVC C1061 nesting limit.
+int runShaderWarm(const std::string& projectPath);   // ShaderWarmRun.cpp
+
 Application* createApplication(int argc, char** argv) {
+    // --warm-shaders: the background shader-cache fill the editor starts (ShaderWarmup.cpp); no window.
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--warm-shaders") != 0) continue;
+        std::string project;
+        for (int j = 1; j + 1 < argc; ++j)
+            if (std::strcmp(argv[j], "--project") == 0) project = argv[j + 1];
+        const int rc = runShaderWarm(project);
+        aver::crash::shutdown();
+        std::exit(rc);
+    }
 #ifdef NDEBUG
     AVER_INFO("[Sandbox] {} (Release build)", argc > 0 ? argv[0] : "Sandbox.exe");
 #else

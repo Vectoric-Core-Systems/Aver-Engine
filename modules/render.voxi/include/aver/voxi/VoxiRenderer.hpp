@@ -73,6 +73,8 @@ public:
     void setPaused(bool on) { paused_ = on; }
 
     bool rayDrivenAvailable() const { return rtActive_ && rayDrivenPso_ != 0; }
+    // Some draw's first bottom-level build waits for a later frame (they are budgeted per frame).
+    bool accelBuildsPending() const { return blasBuildsDeferred_; }
     // Path Tracing ran last frame: multi-bounce ReSTIR GI and reflections in the staged frame.
     bool pathTracingRan() const { return ptRanThisFrame_; }
 

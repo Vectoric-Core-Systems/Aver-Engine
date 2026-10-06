@@ -106,6 +106,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #endif
 #include "ToolsMenu.hpp"
 #include "Nrd2Session.hpp"
+#include "ShaderWarmup.hpp"
 #include "UiRegistry.hpp"
 #if AVER_MODULE_SYNAPSE
 #include "NavBakeCommand.hpp"
@@ -3550,6 +3551,11 @@ private:
     f32 logoAspect_=1.0f;
     editor::ToolsMenu tools_;
     editor::Nrd2Session nrd2Session_;   // Tools > Train Neural Denoiser, --nrd2-train
+    editor::ShaderWarmup shaderWarmup_; // Sandbox.exe --warm-shaders after a project opens
+    // "Preparing <level>" after the loading screen while ray-tracing structures still build (SandboxRender.cpp).
+    bool levelPrepArmed_ = false;
+    u64 levelPrepToast_ = 0;
+    std::chrono::steady_clock::time_point levelPrepT0_{};
     bool nrd2MenuWired_ = false;
     // Gizmo coordinate space. Honoured by drawGizmo, pickAxis, applyMove and applyRotate; SCALE tool always uses local.
     bool worldSpace_=true;

@@ -285,13 +285,25 @@ public:
         if (FAILED(result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&obj), nullptr)) || !obj) return E_FAIL;
         if (FAILED(D3DCreateBlob(obj->GetBufferSize(), out))) return E_FAIL;
         std::memcpy((*out)->GetBufferPointer(), obj->GetBufferPointer(), obj->GetBufferSize());
-        // Best-effort cache write; failures only cost a recompile next launch.
+        // Best-effort cache write; failures only cost a recompile next launch. Written to a private temp
+        // name and renamed into place, so another process filling the same cache (the editor's --warm-shaders
+        // copy) can never be read half-written.
         if (const std::string cp = cachePath(ckey); !cp.empty()) {
             std::error_code ec;
             std::filesystem::create_directories(std::filesystem::path(cp).parent_path(), ec);
-            std::ofstream w(cp, std::ios::binary | std::ios::trunc);
-            if (w) w.write(static_cast<const char*>(obj->GetBufferPointer()),
-                           static_cast<std::streamsize>(obj->GetBufferSize()));
+            const std::string tmp = cp + "." + std::to_string(GetCurrentProcessId()) + "." +
+                                    std::to_string(GetCurrentThreadId()) + ".tmp";
+            bool written = false;
+            {
+                std::ofstream w(tmp, std::ios::binary | std::ios::trunc);
+                if (w) {
+                    w.write(static_cast<const char*>(obj->GetBufferPointer()),
+                            static_cast<std::streamsize>(obj->GetBufferSize()));
+                    written = static_cast<bool>(w);
+                }
+            }
+            if (written) std::filesystem::rename(tmp, cp, ec);
+            if (!written || ec) std::filesystem::remove(tmp, ec);
         }
         return S_OK;
     }

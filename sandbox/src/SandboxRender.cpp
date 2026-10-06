@@ -119,6 +119,43 @@ void SandboxApp::onRender(Engine& e)  {
             projectLoading_.reset();
         }
     }
+#if AVER_MODULE_VOXI
+    // After the loading screen closes the ray-tracing structures can still be building (bottom-level
+    // builds are budgeted per frame), which read as an unexplained stutter. A notification says so when it
+    // lasts past 0.3 s, and finishes when the builds are done. Interactive runs only.
+    if (projectLoading_) {
+        levelPrepArmed_ = true;
+    } else if (levelPrepArmed_ && e.window() != nullptr && maxFrames_ == 0) {
+        using Clock = std::chrono::steady_clock;
+        const bool pending = voxiRenderer_.accelBuildsPending();
+        if (levelPrepT0_ == Clock::time_point{}) levelPrepT0_ = Clock::now();
+        const double sec = std::chrono::duration<double>(Clock::now() - levelPrepT0_).count();
+        if (pending && !levelPrepToast_ && sec > 0.3) {
+            editor::Notification n;
+            n.severity = editor::NotifySeverity::Info;
+            n.title = "Preparing " + levelName_;
+            n.body = "Building the ray-tracing structures for this level; the view settles when they finish.";
+            n.sticky = true;
+            n.hasProgress = true;
+            n.progress = -1.0f;
+            n.dedupKey = "level-prep";
+            levelPrepToast_ = editor::notifications().push(std::move(n));
+        }
+        if (!pending || sec > 60.0) {
+            if (levelPrepToast_) {
+                char body[48];
+                std::snprintf(body, sizeof body, "Ready after %.1f s.", sec);
+                editor::notifications().finish(levelPrepToast_, editor::NotifySeverity::Success,
+                                               levelName_ + " ready", body, 4.0);
+            }
+            levelPrepArmed_ = false;
+            levelPrepToast_ = 0;
+            levelPrepT0_ = {};
+        }
+    } else {
+        levelPrepArmed_ = false;
+    }
+#endif
     // Restarts the GPU average once, when no load screen is up, so it covers steady state only.
     if (!gpuTimingStartupReset_ && !projectLoading_) {
         gpuTimingStartupReset_ = true;

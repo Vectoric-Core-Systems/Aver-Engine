@@ -9,6 +9,9 @@
 #include "aver/game/GameSystemsWiring.hpp"
 #include "aver/game/GameUiInput.hpp"
 #include "aver/platform/FileSystem.hpp"   // userDataDir: where the trajectory network's weights live
+#if AVER_MODULE_VOXI
+#include "ModeSwitchNotice.hpp"
+#endif
 
 namespace aver {
 // Rows ImGui draws `t` as: one per newline, plus a last partial row when it has text.
@@ -1435,6 +1438,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         nrd2MenuWired_ = true;
     }
     nrd2Session_.tick(e.device());
+    shaderWarmup_.poll();
     // --nrd2-capture: handed over once the renderer is attached and the level has a name (or after ~10 s);
     // it starts stepping on NRD2 frames and holds the camera the same way.
     if (nrd2CapturePoses_ && voxiAttached_ && !nrd2CaptureStarted_ && (!levelName_.empty() || t.frame > 600)) {
@@ -2284,7 +2288,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             vs.rtShadowDenoise = 0;
             vs.giRestirSpatialSamples = 0;
         }
-        voxiRenderer_.setSettings(vs);
+        // A heavy mode switch is announced a frame before it is applied (ModeSwitchNotice.hpp).
+        static editor::ModeSwitchNotice modeNotice;
+        if (modeNotice.shouldApply(vs, e.window() != nullptr && maxFrames_ == 0)) voxiRenderer_.setSettings(vs);
         // Consume-and-forward: console reset commands routed through singleton flags to the renderer instance.
         if (voxi::Renderer::get().consumeGiHistoryResetRequest())  voxiRenderer_.resetGiHistory();
         if (voxi::Renderer::get().consumeRtHistoryResetRequest())  voxiRenderer_.resetRtHistory();

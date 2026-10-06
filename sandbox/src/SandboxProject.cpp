@@ -244,6 +244,8 @@ void SandboxApp::applyProject(Engine& e) {
 #endif
         spawnClassPlacements();
 #endif
+    // Every renderer mode's shaders into the blob cache, in the background (interactive editor only).
+    if (e.window() != nullptr && maxFrames_ == 0) shaderWarmup_.start(project_.manifestPath);
 }
 
 #if AVER_MODULE_VOXI
