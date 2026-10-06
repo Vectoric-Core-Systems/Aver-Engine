@@ -1424,6 +1424,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     if (nrd2CapturePoses_ && voxiAttached_ && !nrd2CaptureStarted_ && (!levelName_.empty() || t.frame > 600)) {
         render::denoise::Nrd2CaptureConfig c;
         c.scene = levelName_.empty() ? std::string("unnamed") : levelName_;
+        // Path Tracing feeds NRD2 different noise: its poses form their own scene for stratified training.
+        if (voxi::Renderer::get().settings().pathTracing != voxi::Quality::Off) c.scene += "_PT";
         for (char& ch : c.scene)
             if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-')) ch = '_';
         c.dir = (nrd2CaptureDir_.empty() || nrd2CaptureDir_ == "default" || nrd2CaptureDir_ == "-")

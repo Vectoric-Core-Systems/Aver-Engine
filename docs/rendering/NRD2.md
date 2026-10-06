@@ -252,6 +252,35 @@ bounded with `--frames N`. Training needs the device, not NRD2 as the active den
 
 Not yet: NRD2 in-frame on Vulkan (the trainer itself is portable compute).
 
+## Network v2: ray-traced and Path Tracing (2026-10-06)
+
+v1 saw almost no Path Tracing input. v2 was trained on 256 poses in 8 scenes: NeonDistrict Day and Night
+and NewSponza and NewSponza_Night, each captured twice, ray-traced (`--pt 0`) and Path Tracing tier 3. A
+capture taken with Path Tracing on is now its own scene (level name + `_PT`), so training stratifies over both
+modes and validation reports them separately.
+
+Training ran to 11,250 steps over three resumed sessions, each ending on the early stop. Best held-out ratio
+0.690:
+
+| Scene | Ray-traced | Path Tracing |
+|---|---|---|
+| NeonDistrict Day | 0.736 | 0.708 |
+| NeonDistrict Night | 0.730 | 0.700 |
+| NewSponza | 0.643 | 0.663 |
+| NewSponza Night | 0.712 | 0.698 |
+
+These are not comparable to v1's 0.671, which was measured on a held-out set without Path Tracing.
+
+In-engine check on NewSponza's arcade (scale 0.5, Path Tracing tier 3, still and during a 25-degree yaw swing):
+
+- Brightness is unchanged.
+- Fine-scale residual is 0.6% below v1 in every case: 0.1436 vs 0.1445 still, 0.1340 vs 0.1349 swinging,
+  and 0.1421 vs 0.1427 swinging ray-traced.
+- FidelityFX measures 0.160 and v0.6.0 0.174.
+
+Most of the visible improvement under motion came from the stabiliser keeping its history through swings, not
+from the network.
+
 ## Network v1 (M9, 2026-10-06)
 
 Trained in-engine (`--nrd2-train 30000`) on 128 captured poses: NeonDistrict Day and Night, NewSponza and
