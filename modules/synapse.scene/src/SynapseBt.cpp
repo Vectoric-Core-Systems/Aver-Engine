@@ -5,8 +5,10 @@
 #include "aver/core/Log.hpp"
 #include "aver/synapse/SynapseAgent.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 
 namespace aver::synapse {
 namespace {
@@ -112,6 +114,8 @@ u32 BtSystem::registerComponents(scene::World& world) {
     auto b = world.registerComponent<CSynapseBehavior>("CSynapseBehavior");
     b.field("treeAssetId", scene::FieldKind::I64,
             static_cast<u16>(offsetof(CSynapseBehavior, treeAssetId)))
+        .field("teamId", scene::FieldKind::I64,
+               static_cast<u16>(offsetof(CSynapseBehavior, teamId)))
         .field("lastStatus", scene::FieldKind::I32,
                static_cast<u16>(offsetof(CSynapseBehavior, lastStatus)), 0, /*readOnly*/ true);
     AVER_ASSERTM(b.verify(sizeof(CSynapseBehavior)), "CSynapseBehavior");
@@ -131,20 +135,137 @@ u64 BtSystem::loadTree(const std::string& path) {
     const u64 id = fnv1a64(path);
     if (trees_.find(id) != trees_.end()) return id;
 
-    fmt::OcBtData data;
+    BtAsset asset;
     std::string why;
-    if (!fmt::loadOcBt(path, data, &why)) {
+    if (!loadBtAsset(path, asset, &why)) {
         AVER_WARN("[Synapse] could not load behaviour tree '{}': {}", path, why);
         return 0;
     }
-    trees_[id] = std::move(data);
+    BtRuntimeTree rt = compileBtAsset(asset);
+    rt.path = path;
+    trees_[id] = std::move(rt);
     return id;
+}
+
+u64 BtSystem::registerTree(const std::string& name, const BtAsset& asset) {
+    if (!asset.valid()) return 0;
+    const u64 id = fnv1a64(name);
+    BtRuntimeTree rt = compileBtAsset(asset);
+    rt.path = name;
+    trees_[id] = std::move(rt);
+    return id;
+}
+
+bool BtSystem::reloadTree(const std::string& path) {
+    const u64 id = fnv1a64(path);
+    BtAsset asset;
+    std::string why;
+    if (!loadBtAsset(path, asset, &why)) {
+        AVER_WARN("[Synapse] could not reload behaviour tree '{}': {}", path, why);
+        return false;
+    }
+    BtRuntimeTree rt = compileBtAsset(asset);
+    rt.path = path;
+    trees_[id] = std::move(rt);
+
+    scene::World& world = scene::World::instance();
+    for (auto& [e, state] : running_) {
+        const auto* b = world.component<CSynapseBehavior>(e, type_);
+        if (b && b->treeAssetId == id) state.reset();
+    }
+    for (auto& [e, rec] : boards_) {
+        const auto* b = world.component<CSynapseBehavior>(e, type_);
+        if (b && b->treeAssetId == id) rec->boundTree = 0;   // schema is re-applied on the next tick
+    }
+    return true;
+}
+
+const BtRuntimeTree* BtSystem::findTree(u64 id) const {
+    const auto it = trees_.find(id);
+    return it == trees_.end() ? nullptr : &it->second;
+}
+
+BtSystem::BoardRec& BtSystem::boardRec(scene::Entity e) {
+    std::unique_ptr<BoardRec>& slot = boards_[e];
+    if (!slot) slot = std::make_unique<BoardRec>();
+    return *slot;
+}
+
+Blackboard* BtSystem::blackboard(scene::Entity e, bool create) {
+    if (const auto it = boards_.find(e); it != boards_.end()) return &it->second->board;
+    if (!create || !scene::World::instance().valid(e)) return nullptr;
+    return &boardRec(e).board;
+}
+
+void BtSystem::bindBoard(scene::Entity e, BoardRec& rec, u64 team, u64 treeId, const BtRuntimeTree* tree) {
+    if (rec.team != team) {
+        rec.board.setShared(&teams_.get(team));   // before the schema, so Shared keys land on the team board
+        rec.team = team;
+    }
+    if (tree && rec.boundTree != treeId) {
+        rec.board.applySchema(tree->schema);
+        running_[e].reset();
+        rec.boundTree = treeId;
+    }
+}
+
+bool BtSystem::setTeam(scene::World& world, scene::Entity e, std::string_view team) {
+    auto* b = world.component<CSynapseBehavior>(e, type_);
+    if (!b) return false;
+    b->teamId = SharedBlackboards::idOf(team);
+    teamNames_[b->teamId] = std::string(team);
+    if (const auto it = boards_.find(e); it != boards_.end()) bindBoard(e, *it->second, b->teamId, 0, nullptr);
+    return true;
+}
+
+const std::string* BtSystem::teamName(u64 teamId) const {
+    const auto it = teamNames_.find(teamId);
+    return it == teamNames_.end() ? nullptr : &it->second;
+}
+
+void BtSystem::clearBlackboards() {
+    boards_.clear();   // entity boards first: they unregister from the team boards
+    teams_.clear();
+    teamNames_.clear();
+}
+
+bool BtSystem::debugView(scene::Entity e, BtDebugView& out) const {
+    const auto* b = scene::World::instance().component<CSynapseBehavior>(e, type_);
+    if (!b || b->treeAssetId == 0) return false;
+    out = BtDebugView{};
+    out.treeId = b->treeAssetId;
+    out.tree = findTree(b->treeAssetId);
+    if (const auto it = running_.find(e); it != running_.end()) out.state = &it->second;
+    if (const auto it = boards_.find(e); it != boards_.end()) out.board = &it->second->board;
+    return out.tree != nullptr;
+}
+
+std::vector<scene::Entity> BtSystem::entitiesUsing(scene::World& world, u64 treeId) const {
+    std::vector<scene::Entity> out;
+    scene::ComponentPool* pool = world.pool(type_);
+    if (!pool) return out;
+    for (usize i = 0; i < pool->size(); ++i) {
+        const auto* b = static_cast<const CSynapseBehavior*>(pool->dataAt(i));
+        if (b && b->treeAssetId != 0 && (treeId == 0 || b->treeAssetId == treeId)) out.push_back(pool->entityAt(i));
+    }
+    return out;
 }
 
 bool BtSystem::fireNotify(scene::Entity e, const char* name) const {
     if (!notify_ || !name) return false;
     notify_(e, name, notifyUser_);
     return true;
+}
+
+// Writes perception results into the keys a tree declares by these conventional names.
+void BtSystem::syncPerception(scene::World& world, scene::Entity e, Blackboard& board) {
+    const u32 perceptionType = perceptionSystem().componentType();
+    if (perceptionType == 0) return;
+    const auto* p = world.component<CSynapsePerception>(e, perceptionType);
+    if (!p) return;
+    if (board.has("CanSeeTarget")) board.setBool("CanSeeTarget", p->canSeeTarget != 0);
+    if (board.has("Target")) board.setEntity("Target", static_cast<u32>(p->lastKnownTargetEntity));
+    if (board.has("TimeSinceSeen")) board.setFloat("TimeSinceSeen", p->timeSinceSeenSec);
 }
 
 void BtSystem::tick(scene::World& world, f32 dt) {
@@ -159,9 +280,16 @@ void BtSystem::tick(scene::World& world, f32 dt) {
 
         const auto treeIt = trees_.find(b->treeAssetId);
         if (treeIt == trees_.end()) continue;   // the id does not resolve to a loaded tree
+        const BtRuntimeTree& rt = treeIt->second;
+
+        BoardRec& rec = boardRec(e);
+        bindBoard(e, rec, b->teamId, b->treeAssetId, &rt);
+        syncPerception(world, e, rec.board);
 
         BtRunningState& state = running_[e];   // default-constructs on first use
-        const BtStatus s = tickBt(treeIt->second, registry_, static_cast<i32>(e), dt, state);
+        state.trace = (e == watched_);
+        const BtBlackboardCtx ctx{&rt.decorators, &rec.board, &rt.children};
+        const BtStatus s = tickBt(rt.tree, registry_, static_cast<i32>(e), dt, state, &ctx);
         b->lastStatus = static_cast<i32>(s);
     }
 
@@ -181,6 +309,11 @@ void BtSystem::prune(scene::World& world) {
         else
             ++it;
     }
+    // Boards live as long as their entity does (a board can pre-date the tree that fills it).
+    for (auto it = boards_.begin(); it != boards_.end();) {
+        if (!world.valid(it->first)) it = boards_.erase(it);
+        else ++it;
+    }
 }
 
 BtSystem& btSystem() {
@@ -188,8 +321,140 @@ BtSystem& btSystem() {
     return system;
 }
 
+namespace {
+
+Blackboard* resolveBoard(i32 subject, void*) {
+    return btSystem().blackboard(static_cast<scene::Entity>(subject), true);
+}
+
+bool typeFromCode(i32 code, BbType& out) {
+    if (code < 1 || code > 6) return false;
+    out = static_cast<BbType>(code - 1);
+    return true;
+}
+
+} // namespace
+
+i32 blackboardRelay(i32 op, i32 entity, const char* key, i32 type, i64* i, f32* f, char* text,
+                    i32 textCap, void*) {
+    if (!key) return 0;
+    BtSystem& sys = btSystem();
+    scene::World& world = scene::World::instance();
+    const scene::Entity e = static_cast<scene::Entity>(entity);
+    if (!world.valid(e)) return 0;
+
+    switch (op) {
+    case kBbRelayType: {
+        Blackboard* b = sys.blackboard(e);
+        const i32 idx = b ? b->indexOf(key) : -1;
+        return idx < 0 ? 0 : 1 + static_cast<i32>(b->keyDef(idx).type);
+    }
+    case kBbRelayGet: {
+        Blackboard* b = sys.blackboard(e);
+        const BbValue* stored = b ? b->get(key) : nullptr;
+        if (!stored) return 0;
+        BbValue v = *stored;
+        BbType want;
+        if (typeFromCode(type, want) && !bbCoerce(want, *stored, v)) return 0;
+        switch (v.type) {
+            case BbType::Bool: case BbType::Int: case BbType::Entity: if (i) *i = v.i; break;
+            case BbType::Float: if (f) f[0] = v.f; break;
+            case BbType::Vec3:  if (f) { f[0] = v.v.x; f[1] = v.v.y; f[2] = v.v.z; } break;
+            case BbType::String:
+                if (text && textCap > 0) {
+                    const usize n = std::min(v.s.size(), static_cast<usize>(textCap - 1));
+                    std::memcpy(text, v.s.data(), n);
+                    text[n] = '\0';
+                }
+                break;
+        }
+        return 1;
+    }
+    case kBbRelaySet: {
+        BbType t;
+        if (!typeFromCode(type, t)) return 0;
+        BbValue v = bbDefault(t);
+        switch (t) {
+            case BbType::Bool: case BbType::Int: case BbType::Entity: if (!i) return 0; v.i = *i; break;
+            case BbType::Float: if (!f) return 0; v.f = f[0]; break;
+            case BbType::Vec3:  if (!f) return 0; v.v = Vec3{f[0], f[1], f[2]}; break;
+            case BbType::String: v.s = text ? text : ""; break;
+        }
+        if (t == BbType::Bool) v.i = v.i != 0 ? 1 : 0;
+        Blackboard* b = sys.blackboard(e, true);
+        if (!b) return 0;
+        if (!b->has(key)) {
+            BbKeyDef d;
+            d.name = key;
+            d.type = t;
+            d.defaultValue = bbDefault(t);
+            if (b->defineKey(d) < 0) return 0;
+        }
+        return b->set(key, v) ? 1 : 0;
+    }
+    case kBbRelayReset: {
+        Blackboard* b = sys.blackboard(e);
+        return (b && b->reset(key)) ? 1 : 0;
+    }
+    case kBbRelayDefine: {
+        BbType t;
+        if (!typeFromCode(type, t)) return 0;
+        Blackboard* b = sys.blackboard(e, true);
+        if (!b) return 0;
+        BbKeyDef d;
+        d.name = key;
+        d.type = t;
+        d.scope = (i && *i != 0) ? BbScope::Shared : BbScope::Agent;
+        d.defaultValue = bbDefault(t);
+        return b->defineKey(d) >= 0 ? 1 : 0;
+    }
+    case kBbRelaySetTeam:
+        return sys.setTeam(world, e, key) ? 1 : 0;
+    }
+    return 0;
+}
+
+namespace {
+
+void putValue(Blackboard& b, const char* name, const BbValue& v) {
+    if (!b.has(name)) {
+        BbKeyDef d;
+        d.name = name;
+        d.type = v.type;
+        d.defaultValue = bbDefault(v.type);
+        b.defineKey(d);
+    }
+    b.set(name, v);
+}
+
+} // namespace
+
+void BtHearingSink::onHeard(u32 listener, const HeardMemory& m) {
+    Blackboard* b = btSystem().blackboard(static_cast<scene::Entity>(listener), true);
+    if (!b) return;
+    putValue(*b, "HeardPosition", BbValue::ofVec3(m.pos));
+    putValue(*b, "HeardLevel", BbValue::ofFloat(m.level));
+    putValue(*b, "HeardTag", BbValue::ofInt(static_cast<i64>(m.tag)));
+    putValue(*b, "HeardSource", BbValue::ofEntity(m.source));
+    putValue(*b, "HeardConfidence", BbValue::ofFloat(m.confidence));
+    putValue(*b, "HasHeard", BbValue::ofBool(true));   // last, so observers of it see the rest
+}
+
+void BtHearingSink::onForgotten(u32 listener, const HeardMemory& m) {
+    Blackboard* b = btSystem().blackboard(static_cast<scene::Entity>(listener));
+    if (!b || !b->has("HasHeard")) return;
+    const Vec3 mirrored = b->getVec3("HeardPosition");
+    const bool same = mirrored.x == m.pos.x && mirrored.y == m.pos.y && mirrored.z == m.pos.z &&
+                      b->getInt("HeardTag") == static_cast<i64>(m.tag);
+    if (!same) return;
+    b->setFloat("HeardConfidence", 0.0f);
+    b->setBool("HasHeard", false);
+}
+
 void registerBuiltinBehaviors(BtSystem& system) {
     BtRegistry& reg = system.registry();
+    reg.setBoardResolver(&resolveBoard, nullptr);
+    reg.registerBlackboardLeaves();
     reg.registerCondition("HasTarget", &hasTargetCondition);
     reg.registerCondition("CanSeeTarget", &canSeeTargetCondition);
     reg.registerCondition("DistanceToTargetLess", &distanceToTargetLessCondition);
