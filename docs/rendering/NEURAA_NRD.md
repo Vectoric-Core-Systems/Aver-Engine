@@ -513,8 +513,8 @@ legal advice). The design follows them unless counsel says otherwise:
    rejected as of 2026-08-12) and NVIDIA's US 2025/0299305 and US 2026/0073486.
 13. **NRD2's temporal stabiliser (2026-10-06, docs/rendering/NRD2.md "Temporal stabiliser").** Checked
    against the rules above. Rule 1 and 7: the clamp is the per-channel 3x3 min/max of this frame's D' (S')
-   united with the four 1/8-level texels the resolve's own taps read, so its footprint is the spatial
-   estimate's and never larger; never a mean, variance or fitted distribution. **Counsel should confirm** that
+   united with the 1/8 level bilinearly interpolated at the pixel (the value the resolve's own taps blend; the
+   four raw texels made blocky clamps), so its footprint is the spatial estimate's and never larger; never a mean, variance or fitted distribution. **Counsel should confirm** that
    the union with the coarse texels is still "the 3x3 min/max" and not a larger temporal radius (US
    11,663,701); the fallback is the 3x3 alone, which leaves coarse blobs uncorrected. Rule 5: the history
    age feeds only the blend weight; no radius or level reads it, and the spatial filter runs first, on this

@@ -27,8 +27,9 @@ namespace aver::render::denoise {
 class Nrd2Capture;
 struct Nrd2CaptureConfig;
 
-// Bumped whenever what Stage B writes for NRD2 changes meaning (stamped into training datasets).
-inline constexpr u32 kNrd2StageBVersion = 1;
+// Bumped whenever what Stage B writes for NRD2, or the resolve the oracle fits, changes meaning (stamped into
+// training datasets). 2: plane-predicted tap depth.
+inline constexpr u32 kNrd2StageBVersion = 2;
 // Parameters per 8x8 tile (nrd2_resolve.hlsli): for D then S, logits l1..l3 and log2 sensitivities
 // depth / normal / luminance.
 inline constexpr u32 kNrd2TileParams = 12;

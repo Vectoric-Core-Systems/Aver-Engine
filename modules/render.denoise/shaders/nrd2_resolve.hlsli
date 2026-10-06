@@ -49,13 +49,27 @@ float3 nrd2DecodeNormal(float4 e) {
 // One pyramid level's four fixed bilinear taps at local pixel q, loaded once (the oracle evaluates many
 // parameter sets on the same taps). guide: xyz averaged normal, w view Z in metres (0 = empty).
 // value: rgb, a validity fraction.
+// off: the depth (m) this pixel's surface plane predicts at the tap's centre, relative to the pixel, from the
+// local depth slope zGrad (m per pixel). A tilted plane then keeps its coarse neighbours instead of
+// rejecting them as edges, which would leave flat 8x8 blocks.
 struct Nrd2Taps {
     float4 g[4];
     float4 x[4];
     float  b[4];
+    float  off[4];
 };
 
-Nrd2Taps nrd2LoadTaps(Texture2D<float4> guide, Texture2D<float4> value, uint shift, uint2 q, uint2 lvlSize) {
+// Local depth slope (m per pixel) from the 4-neighbour view depths (m, <= 0 = none): per axis the smaller
+// one-sided difference, so a silhouette does not tilt the plane.
+float2 nrd2DepthSlope(float zm, float zl, float zr, float zd, float zu) {
+    const float gl = zl > 0.0 ? zm - zl : 1.0e30, gr = zr > 0.0 ? zr - zm : 1.0e30;
+    const float gd = zd > 0.0 ? zm - zd : 1.0e30, gu = zu > 0.0 ? zu - zm : 1.0e30;
+    const float gx = abs(gl) < abs(gr) ? gl : gr, gy = abs(gd) < abs(gu) ? gd : gu;
+    return float2(abs(gx) < 1.0e29 ? gx : 0.0, abs(gy) < 1.0e29 ? gy : 0.0);
+}
+
+Nrd2Taps nrd2LoadTaps(Texture2D<float4> guide, Texture2D<float4> value, uint shift, uint2 q, uint2 lvlSize,
+                      float2 zGrad) {
     Nrd2Taps t;
     const float2 pos  = (float2(q) + 0.5) / float(1u << shift) - 0.5;
     const int2   base = int2(floor(pos));
@@ -66,18 +80,19 @@ Nrd2Taps nrd2LoadTaps(Texture2D<float4> guide, Texture2D<float4> value, uint shi
         t.g[i] = guide.Load(int3(c, 0));
         t.x[i] = value.Load(int3(c, 0));
         t.b[i] = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y);
+        t.off[i] = dot(zGrad, (float2(base + o) + 0.5) * float(1u << shift) - (float2(q) + 0.5));
     }
     return t;
 }
 
 // One tap's weight: kept by depth and normal agreement with this pixel and by the texel's validity.
 // dz and cosN come back for the backward pass (0 weight: both unused).
-float nrd2TapWeight(float4 g, float4 x, float b, float zm, float3 n, float depthSens, float normalPow,
+float nrd2TapWeight(float4 g, float4 x, float b, float zm, float off, float3 n, float depthSens, float normalPow,
                     out float dz, out float cosN) {
     dz = 0.0; cosN = 0.0;
     const float nl = length(g.xyz);
     if (g.w <= 0.0 || x.a <= 0.0 || nl < 1.0e-3) return 0.0;
-    dz = min(abs(g.w - zm) / max(zm, 1.0e-4), 64.0);
+    dz = min(abs(g.w - (zm + clamp(off, -0.5 * zm, 0.5 * zm))) / max(zm, 1.0e-4), 64.0);
     cosN = saturate(dot(n, g.xyz / nl));
     const float wd = exp2(-depthSens * dz);
     const float wn = pow(cosN, normalPow);
@@ -91,7 +106,7 @@ float3 nrd2UpsampleTaps(Nrd2Taps t, float zm, float3 n, float depthSens, float n
     float  wsum = 0.0;
     [unroll] for (uint i = 0u; i < 4u; ++i) {
         float dz, cosN;
-        const float w = nrd2TapWeight(t.g[i], t.x[i], t.b[i], zm, n, depthSens, normalPow, dz, cosN);
+        const float w = nrd2TapWeight(t.g[i], t.x[i], t.b[i], zm, t.off[i], n, depthSens, normalPow, dz, cosN);
         if (w <= 0.0) continue;
         sum  += w * t.x[i].rgb;
         wsum += w;
@@ -101,8 +116,8 @@ float3 nrd2UpsampleTaps(Nrd2Taps t, float zm, float3 n, float depthSens, float n
 }
 
 float3 nrd2Upsample(Texture2D<float4> guide, Texture2D<float4> value, uint shift, uint2 q, uint2 lvlSize,
-                    float zm, float3 n, float depthSens, float normalPow, out float conf) {
-    return nrd2UpsampleTaps(nrd2LoadTaps(guide, value, shift, q, lvlSize), zm, n, depthSens, normalPow, conf);
+                    float2 zGrad, float zm, float3 n, float depthSens, float normalPow, out float conf) {
+    return nrd2UpsampleTaps(nrd2LoadTaps(guide, value, shift, q, lvlSize, zGrad), zm, n, depthSens, normalPow, conf);
 }
 
 // The pixel's estimate from its own value and the three upsampled levels. Weight of candidate k:
@@ -230,7 +245,7 @@ Nrd2Level nrd2UpsampleTapsGrad(Nrd2Taps t, float zm, float3 n, float log2Depth, 
     float  wsum = 0.0, dw0 = 0.0, dw1 = 0.0;
     [unroll] for (uint i = 0u; i < 4u; ++i) {
         float dz, cosN;
-        const float w = nrd2TapWeight(t.g[i], t.x[i], t.b[i], zm, n, dS, nP, dz, cosN);
+        const float w = nrd2TapWeight(t.g[i], t.x[i], t.b[i], zm, t.off[i], n, dS, nP, dz, cosN);
         if (w <= 0.0) continue;
         const float gd = -w * kNrd2Ln2 * kNrd2Ln2 * dS * dz;              // d w / d log2Depth
         const float gn = w * log(max(cosN, 1.0e-30)) * kNrd2Ln2 * nP;     // d w / d log2Normal

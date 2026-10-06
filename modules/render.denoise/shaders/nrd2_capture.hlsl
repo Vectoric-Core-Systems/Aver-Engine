@@ -264,6 +264,7 @@ struct Nrd2cPixel {
     float3 target[2];
     float3 extra;
     float  zm;
+    float2 zg;  // local depth slope (m per pixel), nrd2DepthSlope
     float3 n;
     uint2  q;   // viewport-local, clamped inside
 };
@@ -277,6 +278,13 @@ Nrd2cPixel nrd2cLoadPixel(uint2 q, bool inside) {
     const float z = gCapGeo[at];
     const uint mask = inside ? uint(gCapGeo[5u * np + at]) : 0u;
     px.zm = z * 0.01;
+    float zn[4];
+    [unroll] for (uint k = 0u; k < 4u; ++k) {
+        const int2 qn = int2(px.q) + (k == 0u ? int2(-1, 0) : k == 1u ? int2(1, 0) : k == 2u ? int2(0, -1) : int2(0, 1));
+        const bool inb = inside && all(qn >= 0) && all(qn < int2(gCapRect.zw));
+        zn[k] = inb ? gCapGeo[uint(qn.y) * gCapRect.z + uint(qn.x)] * 0.01 : 0.0;
+    }
+    px.zg = nrd2DepthSlope(px.zm, zn[0], zn[1], zn[2], zn[3]);
     px.n = float3(gCapGeo[np + at], gCapGeo[2u * np + at], gCapGeo[3u * np + at]);
     const float rough = gCapGeo[4u * np + at];
     const float4 d0 = gCapD.Load(p);
@@ -296,16 +304,16 @@ Nrd2cPixel nrd2cLoadPixel(uint2 q, bool inside) {
 }
 
 // The pixel's taps on one signal's three levels (loaded once, reused by every candidate).
-void nrd2cLoadTaps(uint sig, uint2 q, out Nrd2Taps t[3]) {
+void nrd2cLoadTaps(uint sig, uint2 q, float2 zg, out Nrd2Taps t[3]) {
     const uint2 s1 = nrd2cLevelSize(1u), s2 = nrd2cLevelSize(2u), s3 = nrd2cLevelSize(3u);
     if (sig == 0u) {
-        t[0] = nrd2LoadTaps(gCapG1, gCapD1, 1u, q, s1);
-        t[1] = nrd2LoadTaps(gCapG2, gCapD2, 2u, q, s2);
-        t[2] = nrd2LoadTaps(gCapG3, gCapD3, 3u, q, s3);
+        t[0] = nrd2LoadTaps(gCapG1, gCapD1, 1u, q, s1, zg);
+        t[1] = nrd2LoadTaps(gCapG2, gCapD2, 2u, q, s2, zg);
+        t[2] = nrd2LoadTaps(gCapG3, gCapD3, 3u, q, s3, zg);
     } else {
-        t[0] = nrd2LoadTaps(gCapG1, gCapS1, 1u, q, s1);
-        t[1] = nrd2LoadTaps(gCapG2, gCapS2, 2u, q, s2);
-        t[2] = nrd2LoadTaps(gCapG3, gCapS3, 3u, q, s3);
+        t[0] = nrd2LoadTaps(gCapG1, gCapS1, 1u, q, s1, zg);
+        t[1] = nrd2LoadTaps(gCapG2, gCapS2, 2u, q, s2, zg);
+        t[2] = nrd2LoadTaps(gCapG3, gCapS3, 3u, q, s3, zg);
     }
 }
 
@@ -351,7 +359,7 @@ void CSNrd2CapEval(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {
         const float step = gCapState[rec + NRD2C_STEP];
         const float denom = gCapState[rec + NRD2C_DENOM];
         Nrd2Taps tp[3];
-        nrd2cLoadTaps(sig, px.q, tp);
+        nrd2cLoadTaps(sig, px.q, px.zg, tp);
         for (uint c = 0u; c < NRD2C_GRID; ++c) {   // constant bound: every barrier is uniform
             const bool live = c < gCapMode.y;
             float l = 0.0;
@@ -388,7 +396,7 @@ void CSNrd2CapGrad(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {
             const float denom = gCapState[rec + NRD2C_DENOM];
             const Nrd2TileParams p = nrd2cParams(t, sig);
             Nrd2Taps tp[3];
-            nrd2cLoadTaps(sig, px.q, tp);
+            nrd2cLoadTaps(sig, px.q, px.zg, tp);
             Nrd2Level lv[3];
             [unroll] for (uint l = 0u; l < 3u; ++l) lv[l] = nrd2UpsampleTapsGrad(tp[l], px.zm, px.n, p.log2Depth, p.log2Normal);
             float3 dOut[6];

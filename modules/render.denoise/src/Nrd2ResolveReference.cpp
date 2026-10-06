@@ -93,9 +93,19 @@ Params sanitise(const f32 v[6], const f32 d[6]) {
     return p;
 }
 
-struct Taps { V4 g[4]; V4 x[4]; f32 b[4]; };
+struct Taps { V4 g[4]; V4 x[4]; f32 b[4]; f32 off[4]; };
 
-Taps loadTaps(const Nrd2Pyramid& p, u32 signal, u32 shift, u32 qx, u32 qy) {
+// nrd2DepthSlope: per axis the smaller one-sided depth difference (m per pixel); <= 0 = no neighbour.
+void depthSlope(f32 zm, f32 zl, f32 zr, f32 zd, f32 zu, f32& gx, f32& gy) {
+    const f32 gl = zl > 0.0f ? zm - zl : 1.0e30f, gr = zr > 0.0f ? zr - zm : 1.0e30f;
+    const f32 gd = zd > 0.0f ? zm - zd : 1.0e30f, gu = zu > 0.0f ? zu - zm : 1.0e30f;
+    gx = std::fabs(gl) < std::fabs(gr) ? gl : gr;
+    gy = std::fabs(gd) < std::fabs(gu) ? gd : gu;
+    if (!(std::fabs(gx) < 1.0e29f)) gx = 0.0f;
+    if (!(std::fabs(gy) < 1.0e29f)) gy = 0.0f;
+}
+
+Taps loadTaps(const Nrd2Pyramid& p, u32 signal, u32 shift, u32 qx, u32 qy, f32 gx, f32 gy) {
     const u32 l = shift - 1;
     const i32 lw = static_cast<i32>(p.width[l]), lh = static_cast<i32>(p.height[l]);
     const f32 px = (static_cast<f32>(qx) + 0.5f) / static_cast<f32>(1u << shift) - 0.5f;
@@ -110,15 +120,18 @@ Taps loadTaps(const Nrd2Pyramid& p, u32 signal, u32 shift, u32 qx, u32 qy) {
         t.g[i] = load4(p.guide[l], at);
         t.x[i] = load4(p.value[signal][l], at);
         t.b[i] = (ox ? fx : 1.0f - fx) * (oy ? fy : 1.0f - fy);
+        const f32 sc = static_cast<f32>(1u << shift);
+        t.off[i] = gx * ((static_cast<f32>(bx + ox) + 0.5f) * sc - (static_cast<f32>(qx) + 0.5f)) +
+                   gy * ((static_cast<f32>(by + oy) + 0.5f) * sc - (static_cast<f32>(qy) + 0.5f));
     }
     return t;
 }
 
-f32 tapWeight(V4 g, V4 x, f32 b, f32 zm, V3 n, f32 dS, f32 nP, f32& dz, f32& cosN) {
+f32 tapWeight(V4 g, V4 x, f32 b, f32 zm, f32 off, V3 n, f32 dS, f32 nP, f32& dz, f32& cosN) {
     dz = 0.0f; cosN = 0.0f;
     const f32 nl = std::sqrt(g.x * g.x + g.y * g.y + g.z * g.z);
     if (g.w <= 0.0f || x.w <= 0.0f || nl < 1.0e-3f) return 0.0f;
-    dz = std::min(std::fabs(g.w - zm) / std::max(zm, 1.0e-4f), 64.0f);
+    dz = std::min(std::fabs(g.w - (zm + std::clamp(off, -0.5f * zm, 0.5f * zm))) / std::max(zm, 1.0e-4f), 64.0f);
     cosN = sat((n.x * g.x + n.y * g.y + n.z * g.z) / nl);
     const f32 wd = std::exp2(-dS * dz);
     const f32 wn = std::pow(cosN, nP);
@@ -133,7 +146,7 @@ Level upsample(const Taps& t, f32 zm, V3 n, f32 log2Depth, f32 log2Normal) {
     f32 wsum = 0, dw0 = 0, dw1 = 0;
     for (u32 i = 0; i < 4; ++i) {
         f32 dz, cosN;
-        const f32 w = tapWeight(t.g[i], t.x[i], t.b[i], zm, n, dS, nP, dz, cosN);
+        const f32 w = tapWeight(t.g[i], t.x[i], t.b[i], zm, t.off[i], n, dS, nP, dz, cosN);
         if (w <= 0.0f) continue;
         const f32 gd = -w * kLn2 * kLn2 * dS * dz;
         const f32 gn = w * std::log(std::max(cosN, 1.0e-30f)) * kLn2 * nP;
@@ -330,8 +343,16 @@ std::array<f32, 3> nrd2ResolvePixel(const Nrd2Frame& f, const Nrd2Pyramid& py, u
     const std::array<f32, 6> def = nrd2DefaultTheta(signal);
     const Params p = sanitise(theta, def.data());
     const f32 zm = z * 0.01f;
+    const auto zAt = [&](i32 xx, i32 yy) {
+        if (xx < 0 || yy < 0 || xx >= static_cast<i32>(f.width) || yy >= static_cast<i32>(f.height)) return 0.0f;
+        const f32 v = f.viewZ[static_cast<usize>(yy) * f.width + static_cast<usize>(xx)];
+        return (v > 0.0f && v < 1.0e6f) ? v * 0.01f : 0.0f;
+    };
+    const i32 ix = static_cast<i32>(x), iy = static_cast<i32>(y);
+    f32 gx, gy;
+    depthSlope(zm, zAt(ix - 1, iy), zAt(ix + 1, iy), zAt(ix, iy - 1), zAt(ix, iy + 1), gx, gy);
     Level lv[3];
-    for (u32 l = 0; l < 3; ++l) lv[l] = upsample(loadTaps(py, signal, l + 1, x, y), zm, n, p.log2Depth, p.log2Normal);
+    for (u32 l = 0; l < 3; ++l) lv[l] = upsample(loadTaps(py, signal, l + 1, x, y, gx, gy), zm, n, p.log2Depth, p.log2Normal);
     const V3 extra = signal ? specularExtraLogit(nr.z, v0.w, z) : V3{};
     V3 out;
     if (dOut) {

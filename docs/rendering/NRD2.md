@@ -252,6 +252,14 @@ bounded with `--frames N`. Training needs the device, not NRD2 as the active den
 
 Not yet: NRD2 in-frame on Vulkan (the trainer itself is portable compute).
 
+## Plane-predicted tap depth (2026-10-06)
+
+Upsampling taps are accepted by depth against the depth the pixel's surface plane predicts at the tap's
+centre (`nrd2DepthSlope`: per axis the smaller one-sided depth difference), not against the pixel's own
+depth. A tilted floor, wall or vault no longer rejects its coarse neighbours as if they were edges. The
+oracle fits this resolve, so `kNrd2StageBVersion` is 2 and older captures are refused. The shipped network
+v2 was trained against the previous form and still applies; a recapture and retrain would match it exactly.
+
 ## Network v2: ray-traced and Path Tracing (2026-10-06)
 
 v1 saw almost no Path Tracing input. v2 was trained on 256 poses in 8 scenes: NeonDistrict Day and Night
@@ -344,9 +352,12 @@ never blurs; D and S separately, so the clamp box is in lighting units):
    than half the bilinear weight left, a position outside the viewport, or no valid previous frame: no
    history for this pixel (age 0), which is plain single-frame NRD2. A rigid mover fails the camera-only
    depth test and so gets none either.
-2. The clamp box is the per-channel min and max of this frame's valid 3x3 of D' (S'), united with the four
-   1/8-level texels the resolve's own taps read (`nrd2LoadTaps` at the coarsest level): the footprint of the
-   spatial estimate, never larger. History outside the box is clamped to its edge. Never a mean or variance.
+2. The clamp box is the per-channel min and max of this frame's valid 7x7 of D' (S'), a sliding window,
+   united with the 1/8 level bilinearly interpolated at the pixel: inside the spatial estimate's footprint,
+   never larger. (The first version used the four raw 1/8 texels; the box, and so the clamped history, then
+   stepped at every 8x8 block and showed as squares on vaults and flat walls. A 3x3 box without them was
+   smooth but too tight to remove blotches.) Before the box, a firefly clamp scales a pixel down to 2x its
+   brightest 8-neighbour. Costs 0.44 ms at scale 0.5 on NewSponza (was 0.17 ms with the 3x3). History outside the box is clamped to its edge. Never a mean or variance.
 3. Blend weight `a = 1 - 1/min(age + 1, N)`, so 0, 1/2, 2/3, 3/4 ... The age is the youngest of the taps that
    carry weight (> 0.1), and the stored age counts frames up to 255. It feeds this weight only. `N` comes from
    motion alone: `voxi.nrd2StabFrames` (12) up to 0.25 px per frame, a log-space ramp to min(8, that) at

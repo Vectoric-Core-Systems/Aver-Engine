@@ -194,20 +194,28 @@ void CSNrd2Resolve(uint3 dtid : SV_DispatchThreadID) {
         const uint tile  = (q.y / 8u) * gNrd2Tiles.x + q.x / 8u;
         const float zm = z * 0.01;
         const uint2 s1 = nrd2LevelSize(1u), s2 = nrd2LevelSize(2u), s3 = nrd2LevelSize(3u);
+        float zn[4];
+        [unroll] for (uint k = 0u; k < 4u; ++k) {
+            const int2 qn = int2(q) + (k == 0u ? int2(-1, 0) : k == 1u ? int2(1, 0) : k == 2u ? int2(0, -1) : int2(0, 1));
+            const bool inb = all(qn >= 0) && all(qn < int2(gNrd2Rect.zw));
+            const float v = inb ? gNrd2ViewZ.Load(int3(int2(gNrd2Rect.xy) + qn, 0)) : 0.0;
+            zn[k] = (v > 0.0 && v < 1.0e6) ? v * 0.01 : 0.0;
+        }
+        const float2 zg = nrd2DepthSlope(zm, zn[0], zn[1], zn[2], zn[3]);
 
         const Nrd2TileParams pd = nrd2LoadParams(tile, tiles, 0u);
         float cf1, cf2, cf3;
         const float dS = exp2(pd.log2Depth), nP = exp2(pd.log2Normal);
-        const float3 d1 = nrd2Upsample(gNrd2G1, gNrd2D1, 1u, q, s1, zm, n, dS, nP, cf1);
-        const float3 d2 = nrd2Upsample(gNrd2G2, gNrd2D2, 2u, q, s2, zm, n, dS, nP, cf2);
-        const float3 d3 = nrd2Upsample(gNrd2G3, gNrd2D3, 3u, q, s3, zm, n, dS, nP, cf3);
+        const float3 d1 = nrd2Upsample(gNrd2G1, gNrd2D1, 1u, q, s1, zg, zm, n, dS, nP, cf1);
+        const float3 d2 = nrd2Upsample(gNrd2G2, gNrd2D2, 2u, q, s2, zg, zm, n, dS, nP, cf2);
+        const float3 d3 = nrd2Upsample(gNrd2G3, gNrd2D3, 3u, q, s3, zg, zm, n, dS, nP, cf3);
         dRes = nrd2Combine(d0.rgb, dOwn, d1, d2, d3, cf1, cf2, cf3, pd, 0.0);
 
         const Nrd2TileParams ps = nrd2LoadParams(tile, tiles, 1u);
         const float sS = exp2(ps.log2Depth), sP = exp2(ps.log2Normal);
-        const float3 e1 = nrd2Upsample(gNrd2G1, gNrd2S1, 1u, q, s1, zm, n, sS, sP, cf1);
-        const float3 e2 = nrd2Upsample(gNrd2G2, gNrd2S2, 2u, q, s2, zm, n, sS, sP, cf2);
-        const float3 e3 = nrd2Upsample(gNrd2G3, gNrd2S3, 3u, q, s3, zm, n, sS, sP, cf3);
+        const float3 e1 = nrd2Upsample(gNrd2G1, gNrd2S1, 1u, q, s1, zg, zm, n, sS, sP, cf1);
+        const float3 e2 = nrd2Upsample(gNrd2G2, gNrd2S2, 2u, q, s2, zg, zm, n, sS, sP, cf2);
+        const float3 e3 = nrd2Upsample(gNrd2G3, gNrd2S3, 3u, q, s3, zg, zm, n, sS, sP, cf3);
         sRes = nrd2Combine(s0.rgb, sOwn, e1, e2, e3, cf1, cf2, cf3, ps,
                            nrd2SpecularExtraLogit(nr.z, s0.a, z));
     }
@@ -346,8 +354,8 @@ void CSNrd2Features(uint3 dtid : SV_DispatchThreadID) {
 // Per pixel: this frame's D' and S' (the resolve's, spatially filtered) against last frame's stabilised ones
 // at the velocity-reprojected position, in irradiance so albedo detail never blurs. History is accepted per
 // bilinear tap by reprojected view depth, blended with a weight from motion/disocclusion age alone, and
-// clamped to the min/max of this frame's 3x3 of D' (S') united with the four 1/8-level texels the resolve's
-// own taps read. Never a mean or variance, never a network input (NEURAA_NRD.md section 7).
+// clamped to the min/max of this frame's 7x7 of D' (S') united with the 1/8 level interpolated at the pixel
+// (the value the resolve's own taps blend). Never a mean or variance, never a network input (NEURAA_NRD.md section 7).
 Texture2D<float4> gNrd2DRes   : register(t0);   // D', a = 1 on surfaces
 Texture2D<float4> gNrd2SRes   : register(t1);
 Texture2D<float>  gNrd2ViewZ  : register(t2);
@@ -363,8 +371,10 @@ RWTexture2D<float4> gNrd2Lit  : register(u0);
 RWTexture2D<float4> gNrd2OutD : register(u1);
 RWTexture2D<float4> gNrd2OutS : register(u2);
 
-groupshared float4 gsStabD[100];   // 10x10 halo of D' and S'
-groupshared float4 gsStabS[100];
+#define NRD2_STAB_R 3   // clamp-box radius: 7x7, inside the spatial estimate's footprint
+#define NRD2_STAB_W (8 + 2 * NRD2_STAB_R)
+groupshared float4 gsStabD[NRD2_STAB_W * NRD2_STAB_W];   // 14x14 halo of D' and S' (6.3 KB)
+groupshared float4 gsStabS[NRD2_STAB_W * NRD2_STAB_W];
 
 // View Z (cm) at a viewport-local texel, or `fallback` outside the viewport or off a surface.
 float nrd2StabZ(int2 q, float fallback) {
@@ -375,12 +385,12 @@ float nrd2StabZ(int2 q, float fallback) {
 
 [numthreads(8, 8, 1)]
 void CSNrd2Stabilise(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
-    const int2 org = int2(gid.xy) * 8 - 1;   // halo origin, viewport-local
+    const int2 org = int2(gid.xy) * 8 - NRD2_STAB_R;   // halo origin, viewport-local
     const uint gi = gtid.y * 8u + gtid.x;
-    [unroll] for (uint k = 0u; k < 2u; ++k) {
+    [unroll] for (uint k = 0u; k < 4u; ++k) {
         const uint i = gi + k * 64u;
-        if (i < 100u) {
-            const int2 qq = org + int2(i % 10u, i / 10u);
+        if (i < uint(NRD2_STAB_W * NRD2_STAB_W)) {
+            const int2 qq = org + int2(i % uint(NRD2_STAB_W), i / uint(NRD2_STAB_W));
             const bool ok = all(qq >= 0) && all(qq < int2(gNrd2Rect.zw));
             const int3 pp = int3(int2(gNrd2Rect.xy) + qq, 0);
             gsStabD[i] = ok ? gNrd2DRes.Load(pp) : 0.0;
@@ -396,32 +406,43 @@ void CSNrd2Stabilise(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThre
     if (!(z > 0.0 && z < 1.0e6)) { gNrd2Lit[p] = 0.0; gNrd2OutD[p] = 0.0; gNrd2OutS[p] = 0.0; return; }
     const float zm = z * 0.01;
 
-    // The clamp box: this frame's valid 3x3, united with the resolve's own 1/8 taps.
-    const int li = int((gtid.y + 1u) * 10u + gtid.x + 1u);
+    // The clamp box: this frame's valid 7x7 (a sliding window, so it never steps at tile borders), united with
+    // the 1/8 level interpolated here.
+    const int li = int((gtid.y + uint(NRD2_STAB_R)) * uint(NRD2_STAB_W) + gtid.x + uint(NRD2_STAB_R));
     float nmD = 0.0, nmS = 0.0;
     [unroll] for (uint f = 0u; f < 9u; ++f) {
         if (f == 4u) continue;
-        const int fi = li + (int(f / 3u) - 1) * 10 + int(f % 3u) - 1;
+        const int fi = li + (int(f / 3u) - 1) * NRD2_STAB_W + int(f % 3u) - 1;
         if (gsStabD[fi].a > 0.5) nmD = max(nmD, dot(gsStabD[fi].rgb, float3(0.2126, 0.7152, 0.0722)));
         if (gsStabS[fi].a > 0.5) nmS = max(nmS, dot(gsStabS[fi].rgb, float3(0.2126, 0.7152, 0.0722)));
     }
     const float3 curD = nrd2StabFirefly(gsStabD[li].rgb, nmD), curS = nrd2StabFirefly(gsStabS[li].rgb, nmS);
     float3 loD = curD, hiD = curD, loS = curS, hiS = curS;
-    [unroll] for (uint n = 0u; n < 9u; ++n) {
-        if (n == 4u) continue;   // the centre is curD/curS, already clamped
-        const int ni = li + (int(n / 3u) - 1) * 10 + int(n % 3u) - 1;
+    const uint nb = 2u * NRD2_STAB_R + 1u;
+    [unroll] for (uint n = 0u; n < nb * nb; ++n) {
+        if (n == (nb * nb) / 2u) continue;   // the centre is curD/curS, already clamped
+        const int ni = li + (int(n / nb) - NRD2_STAB_R) * NRD2_STAB_W + int(n % nb) - NRD2_STAB_R;
         if (gsStabD[ni].a > 0.5) { loD = min(loD, gsStabD[ni].rgb); hiD = max(hiD, gsStabD[ni].rgb); }
         if (gsStabS[ni].a > 0.5) { loS = min(loS, gsStabS[ni].rgb); hiS = max(hiS, gsStabS[ni].rgb); }
     }
     {
+        // The 1/8 level bilinearly interpolated at this pixel (validity-weighted), so the box varies smoothly:
+        // its four raw texels made the box, and clamped history, constant across each 8x8 block.
         const uint2 ls = nrd2LevelSize(3u);
-        const int2 cbase = int2(floor((float2(q) + 0.5) / 8.0 - 0.5));
+        const float2 cpos = (float2(q) + 0.5) / 8.0 - 0.5;
+        const int2 cbase = int2(floor(cpos));
+        const float2 cf = cpos - float2(cbase);
+        float4 sd = 0.0, ss = 0.0;
         [unroll] for (uint c = 0u; c < 4u; ++c) {
-            const int3 ct = int3(clamp(cbase + int2(c & 1u, c >> 1), int2(0, 0), int2(ls) - 1), 0);
+            const int2 o = int2(c & 1u, c >> 1);
+            const int3 ct = int3(clamp(cbase + o, int2(0, 0), int2(ls) - 1), 0);
+            const float b = (o.x ? cf.x : 1.0 - cf.x) * (o.y ? cf.y : 1.0 - cf.y);
             const float4 cd = gNrd2D3.Load(ct), cs = gNrd2S3.Load(ct);
-            if (cd.a > 0.0) { loD = min(loD, cd.rgb); hiD = max(hiD, cd.rgb); }
-            if (cs.a > 0.0) { loS = min(loS, cs.rgb); hiS = max(hiS, cs.rgb); }
+            if (cd.a > 0.0) sd += float4(b * cd.rgb, b);
+            if (cs.a > 0.0) ss += float4(b * cs.rgb, b);
         }
+        if (sd.a > 1.0e-4) { const float3 v = sd.rgb / sd.a; loD = min(loD, v); hiD = max(hiD, v); }
+        if (ss.a > 1.0e-4) { const float3 v = ss.rgb / ss.a; loS = min(loS, v); hiS = max(hiS, v); }
     }
 
     // Where this surface point was last frame: the velocity (exact for rigid motion; no jitter on these
