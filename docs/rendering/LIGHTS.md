@@ -66,6 +66,14 @@ irradiance exactly). The caller's normal multiply is unchanged, so the BRDF code
 case. The edge cross products use `a x (b - a)` on unnormalised vertices, which keeps the digits for
 a small distant panel; normalising first leaves a percent-level error at 50 m / 20 cm.
 
+**Only the path tracer uses the exact form** (`AVER_LIGHTS_RECT_EXACT 1` in `pt_pathtrace.hlsl`). Voxi's
+shaders take the representative point instead: solid angle = area x cos(emission angle) / d^2, with d held at
+the equal-area disc's radius near the panel. That is exact far from the panel, and near it the exact form is
+dimmer at grazing receivers. Why (2026-10-06): with the exact form compiled into Voxi's shaders, NewSponza
+Night's default view hung the RX 7800 XT (TDR), with or without a rectangle in the scene and also with the
+vertex arrays removed. The point form, or no rectangle code at all, did not hang. The clip now streams its
+vertices into the edge sum with no array (`aversQuadVector`). Shadows still sample the rectangle.
+
 Chosen over LTC: it is exact for the diffuse term with no lookup tables to ship or validate, and the
 panel's specular response uses that same centroid direction with the lobe widened by the panel's
 angular size (as emissive lamps widen theirs). That is an approximation: a glossy surface shows one

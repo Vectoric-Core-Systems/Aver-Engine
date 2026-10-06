@@ -43,6 +43,7 @@ SamplerState gPtSamp                           : register(s0);
 #endif
 
 // Scene lights (point, spot, rect; IES and cookie textures live in the table above). t5, count in gPtTrace.w.
+#define AVER_LIGHTS_RECT_EXACT 1   // the reference: exact rectangle form factor (aver_lights.hlsli)
 #include "aver_lights.hlsli"
 StructuredBuffer<AverLightRec> gPtLights : register(t5);
 

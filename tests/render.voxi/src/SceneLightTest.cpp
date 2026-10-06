@@ -157,7 +157,7 @@ int main() {
         check(has("struct AverLightRec") && has("float4 posRadius;") && has("float4 radianceRange;") &&
                   has("float4 axisKind;") && has("float4 shape;") && has("float4 right;"),
               "the 80-byte record has the five float4 fields PackedLight packs");
-        check(has("aversLightEval") && has("aversClipQuad") && has("aversPolygonVector"), "the rectangle maths is there");
+        check(has("aversLightEval") && has("aversQuadVector") && has("aversEdgeVector"), "the rectangle maths is there");
         check(has("(l.axisKind.w + 0.5)) >> 3") || has("((uint)(l.axisKind.w + 0.5)) >> 3"),
               "the no-shadow bit is bit 3 of the kind, as kLightNoShadowBit says");
         check(has("(1e4 / max(d2, r * r))"), "the sphere falloff keeps the emissive-lamp constant (1 m in cm^2)");
