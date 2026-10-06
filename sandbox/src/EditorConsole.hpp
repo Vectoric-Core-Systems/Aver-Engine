@@ -739,7 +739,7 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             return true;
         }});
     t.push_back({"voxi.nrd2Speckle", VarType::U32, false,
-        "NRD2 speckle removal after the resolve: 0 none, 1 blur (default; an edge-aware Gaussian of voxi.nrd2BlurRadius pixels on this frame's lighting, stopped at depth and normal edges)",
+        "NRD2 speckle removal after the resolve: 0 none (default), 1 blur (an edge-aware Gaussian of voxi.nrd2BlurRadius pixels on this frame's lighting, stopped at depth and normal edges)",
         []{ return vU32(Renderer::get().settings().nrd2Speckle); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2Speckle = n; }); },
         [](const VarValue& v, std::string& err) -> bool {
@@ -752,6 +752,14 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2BlurRadius = n; }); },
         [](const VarValue& v, std::string& err) -> bool {
             if (!(v.as.f >= 1.0f && v.as.f <= 32.0f)) { err = "nrd2BlurRadius must be 1 to 32"; return false; }
+            return true;
+        }});
+    t.push_back({"voxi.nrd2CoarseCap", VarType::F32, false,
+        "NRD2: cap on the 1/8 pyramid level's logit at inference, network or defaults (-16 to 16, default 0; 16 = uncapped). Lower keeps lamp light out of near-field shadows and halos, at a little more noise",
+        []{ return vF32(Renderer::get().settings().nrd2CoarseCap); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2CoarseCap = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (!(v.as.f >= -16.0f && v.as.f <= 16.0f)) { err = "nrd2CoarseCap must be -16 to 16"; return false; }
             return true;
         }});
     t.push_back({"voxi.nrd2DespeckleCap", VarType::F32, false,

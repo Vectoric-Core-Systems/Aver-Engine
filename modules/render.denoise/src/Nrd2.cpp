@@ -26,8 +26,9 @@ struct Constants {
     f32 prevVP[16];                // previous view-projection about the previous eye, rows
     f32 camDelta[4];               // eye - previous eye
     f32 stab[4];                   // history frames at rest, cap at speed, despeckle cap, blur radius
+    f32 extra[4];                  // x: 1/8 level logit cap
 };
-static_assert(sizeof(Constants) == 320, "Nrd2CB: two uint4s, eighteen float4s");
+static_assert(sizeof(Constants) == 336, "Nrd2CB: two uint4s, nineteen float4s");
 
 constexpr u32 kFlagBypass = 1u, kFlagStabilise = 2u, kFlagHistory = 4u, kFlagStandardise = 8u, kFlagBlur = 16u;
 
@@ -542,6 +543,7 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     cb.tiles[3] = despeckled_ ? (params_.despeckle & 3u) : 0u;
     cb.stab[2] = std::max(params_.despeckleCap, 1.0f);
     cb.stab[3] = std::min(std::max(params_.blurRadius, 1.0f), 32.0f);
+    cb.extra[0] = std::min(std::max(params_.coarseCap, -16.0f), 16.0f);
     std::memcpy(cb.def, params_.diffuse, sizeof(params_.diffuse));
     std::memcpy(cb.def + 6, params_.specular, sizeof(params_.specular));
     if (stab) {

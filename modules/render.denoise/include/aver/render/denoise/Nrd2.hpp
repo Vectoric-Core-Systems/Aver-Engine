@@ -47,6 +47,7 @@ struct Nrd2Params {
     f32 despeckleCap = 2.0f;  // its cap, times the 5th brightest neighbour
     u32 speckle = 0;          // after the resolve: 0 none, 1 blur (CSNrd2Blur; not while a capture runs)
     f32 blurRadius = 8.0f;    // its radius, pixels
+    f32 coarseCap = 16.0f;    // inference cap on the 1/8 level's logit (16 = none)
 };
 
 class Nrd2 {

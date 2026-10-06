@@ -166,8 +166,11 @@ struct Settings {
     f32 nrd2DespeckleCap = 1.0f;   // times the 5th brightest neighbour; lower = smoother, darker
     // NRD2 speckle removal after the resolve: 0 none, 1 blur (CSNrd2Blur, a fixed edge-aware Gaussian of
     // nrd2BlurRadius pixels on this frame's lighting; docs/rendering/NRD2.md "Speckle blur").
-    u32 nrd2Speckle = 1;
+    u32 nrd2Speckle = 0;
     f32 nrd2BlurRadius = 8.0f;
+    // Cap on the 1/8 pyramid level's logit at inference, network or defaults (docs/rendering/NRD2.md
+    // "Coarse-level cap"): 0 halves the lamp-light halos at rest; 16 = uncapped.
+    f32 nrd2CoarseCap = 0.0f;
     // NRD2 keeps half-rate tracing and fills the skipped checkerboard half from this frame's traced
     // neighbours (CSRdHalfFill; docs/rendering/NRD2.md). Each applies where its base half rate is asked
     // for: GI under rayDrivenStages 2, reflections under rtReflectionHalfRate (glossy only), sky

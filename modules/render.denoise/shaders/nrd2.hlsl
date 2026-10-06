@@ -35,6 +35,7 @@ cbuffer Nrd2CB : register(b3) {
     float4 gNrd2PrevVP[4];    // stabiliser: previous view-projection about the previous eye (row vectors)
     float4 gNrd2CamDelta;     // eye - previous eye (xyz)
     float4 gNrd2Stab;         // history frames at rest, cap at speed, despeckle cap, blur radius (px)
+    float4 gNrd2Extra;        // x: cap on the 1/8 level's logit at inference (Settings::nrd2CoarseCap)
 };
 
 uint2 nrd2LevelSize(uint shift) { return ((gNrd2Rect.zw + 7u) / 8u) * (8u >> shift); }
@@ -166,7 +167,11 @@ Nrd2TileParams nrd2LoadParams(uint tile, uint tiles, uint signal) {
         v[k] = gNrd2Params[plane * tiles + tile];
         d[k] = gNrd2Def[plane >> 2][plane & 3u];
     }
-    return nrd2SanitiseParams(v, d);
+    // Inference only (training and the CPU twin see the uncapped parameters): the 1/8 level spread lamp
+    // light across near-field shadow edges and into halos (docs/rendering/NRD2.md "Coarse-level cap").
+    Nrd2TileParams p = nrd2SanitiseParams(v, d);
+    p.logit[2] = min(p.logit[2], gNrd2Extra.x);
+    return p;
 }
 
 [numthreads(8, 8, 1)]

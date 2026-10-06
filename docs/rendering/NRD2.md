@@ -399,7 +399,7 @@ Another finding from the same session:
 ## Speckle blur (2026-10-06)
 
 The owner asked for a ReBLUR-style blur as a selectable speckle removal: Render settings, Denoising,
-**Speckle Removal**, None or Blur (default Blur). Console: `voxi.nrd2Speckle` (0 none, 1 blur) and
+**Speckle Removal**, None or Blur. The default is None: Blur measured worse (below). Console: `voxi.nrd2Speckle` (0 none, 1 blur) and
 `voxi.nrd2BlurRadius` (1-32 px, default 8).
 
 How it works: `CSNrd2Blur` (pass 9) runs after the resolve, on its demodulated D' and S'. Without the temporal
@@ -428,6 +428,34 @@ Measured on NewSponza Night, upper gallery, 4 degree swing, against the Path Tra
 - In that view the remaining error is lamp light spread past shadow edges, which the blur adds to rather than
   removes. The despeckle had already taken the blotches there. The setting is for views where blotches
   remain; judge it there.
+
+## Coarse-level cap (2026-10-06)
+
+What is left at rest is not noise. NRD2 puts a bright halo around lamps (a lantern's dark rim filled in) and
+brightens the glow around bright areas. That is the 1/8 pyramid level mixing lamp light across near-field
+shadow edges.
+
+**Fix.** An inference-only cap on that level's logit: `min(logit3, voxi.nrd2CoarseCap)`, default 0. It
+applies to the network's tile parameters and to the hand defaults. Training, the oracle and the CPU twin see
+the parameters uncapped. The constants buffer grows to 336 bytes (`gNrd2Extra`).
+
+**Measured** on NewSponza Night, upper gallery, network on, Speckle Removal None, against the Path Tracing
+reference. Spots are counted as in "Input despeckle".
+
+| | Still | Moving (4 degree swing) | Bias, moving |
+|---|---|---|---|
+| Uncapped (logit3 up to 16) | 0.37% | 0.52% | -2.0% |
+| Cap 0 (default) | 0.17% | 0.34% | -2.2% |
+| Cap 0, plus Blur 8 px | 0.35% | 0.49% | -1.9% |
+| FidelityFX | 0.20% | 1.01% | -2.2% |
+
+- Overall blob error is unchanged (2.27% to 2.28% moving), and so is fine noise.
+- With the network off, lowering the default 1/8 logit from 2 to 0 gave the same numbers, and -1 gave no
+  further gain; the network did no better than the defaults here.
+- The pixel-shift check (the owner's idea): the frame matches the reference best at offset (0, 0) for NRD2
+  and FidelityFX alike. On lighting-scale blur, the per-tile best offsets of the spot tiles scattered evenly
+  around zero (26 of 110 tiles at (0, 0), the rest split between the four neighbours) for about 5% gain:
+  noise, not a consistent shift.
 
 ## Temporal stabiliser (2026-10-06, rewritten 2026-10-06 after FidelityFX's design)
 
