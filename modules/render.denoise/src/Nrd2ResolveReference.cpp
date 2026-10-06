@@ -380,8 +380,22 @@ f32 nrd2StabMaxFrames(f32 speed, f32 nStill, f32 nFast) {
     return std::exp2(a + (b - a) * t);
 }
 
-f32 nrd2StabAlpha(f32 age, f32 nMax) {
-    return sat(1.0f - 1.0f / std::max(std::min(age + 1.0f, nMax), 1.0f));
+f32 nrd2StabSpecMaxFrames(f32 nMax, f32 roughness) {
+    if (!(nMax > 0.0f)) return 0.0f;
+    return std::min(nMax, std::max(8.0f, nMax * (1.0f - std::exp(-100.0f * std::max(roughness, 0.0f)))));
+}
+
+f32 nrd2StabSamples(f32 prevCount, f32 nMax) {
+    if (!(prevCount > 0.0f) || !(nMax > 0.0f)) return 1.0f;
+    return std::max(std::min(nMax, prevCount + 1.0f), 1.0f);
+}
+
+f32 nrd2StabBlend(f32 n) { return 1.0f - 1.0f / std::max(n, 1.0f); }
+
+f32 nrd2StabRelVar(f32 lumA, f32 lumB, f32 scale) {
+    const f32 m = std::max(std::max(lumA, lumB), 0.5f * scale);
+    const f32 d = std::fabs(lumA - lumB) / std::max(m, 1.0e-6f);
+    return d * d;
 }
 
 void nrd2StabBox(const std::vector<std::array<f32, 3>>& values, f32 lo[3], f32 hi[3]) {
@@ -390,28 +404,45 @@ void nrd2StabBox(const std::vector<std::array<f32, 3>>& values, f32 lo[3], f32 h
         for (u32 c = 0; c < 3; ++c) { lo[c] = std::min(lo[c], v[c]); hi[c] = std::max(hi[c], v[c]); }
 }
 
-Nrd2StabOut nrd2StabilisePixel(const Nrd2StabIn& in) {
-    f32 wsum = 0.0f, nAge = 1.0e9f;
-    f32 hd[3] = {}, hs[3] = {};
-    for (const Nrd2StabTap& t : in.tap) {
-        if (!(in.historyValid && t.b > 0.0f && t.age > 0.0f && std::fabs(t.zm - in.zExp) <= in.zTol)) continue;
-        wsum += t.b;
-        for (u32 c = 0; c < 3; ++c) { hd[c] += t.b * t.d[c]; hs[c] += t.b * t.s[c]; }
-        if (t.b > 0.1f) nAge = std::min(nAge, t.age);
+f32 nrd2AnchorWeight(f32 lum, f32 tileScale) {
+    return std::max(std::exp(-0.3f * std::min(std::max(lum, 0.0f) / std::max(tileScale, 1.0e-6f), 1.0e4f)), 0.01f);
+}
+
+void nrd2TileAnchor(const std::vector<std::array<f32, 3>>& values, f32 out[3]) {
+    out[0] = out[1] = out[2] = 0.0f;
+    if (values.empty()) return;
+    f32 lumSum = 0.0f;
+    for (const auto& v : values) lumSum += std::max(0.2126f * v[0] + 0.7152f * v[1] + 0.0722f * v[2], 0.0f);
+    const f32 scale = lumSum / static_cast<f32>(values.size()) + 1.0e-6f;
+    f32 w = 0.0f, acc[3] = {};
+    for (const auto& v : values) {
+        const f32 l = std::max(0.2126f * v[0] + 0.7152f * v[1] + 0.0722f * v[2], 0.0f);
+        const f32 wi = nrd2AnchorWeight(l, scale);
+        w += wi;
+        for (u32 k = 0; k < 3; ++k) acc[k] += wi * v[k];
     }
-    Nrd2StabOut o;
-    if (wsum >= 0.5f && in.nMax > 0.0f) {
-        o.alphaD = nrd2StabAlpha(nAge, in.nMax);
-        o.alphaS = o.alphaD * sat((in.roughness - 0.35f) / 0.3f);
-        o.age = std::min(nAge + 1.0f, 255.0f);
-        for (u32 c = 0; c < 3; ++c) {
-            hd[c] = std::clamp(hd[c] / wsum, in.loD[c], in.hiD[c]);
-            hs[c] = std::clamp(hs[c] / wsum, in.loS[c], in.hiS[c]);
-        }
-    }
+    for (u32 k = 0; k < 3; ++k) out[k] = acc[k] / w;
+}
+
+f32 nrd2PrefilterCentreWeight(f32 radDiffRel, f32 variance) {
+    return std::max(std::exp(-(0.6f + variance * 0.1f) * std::min(radDiffRel, 1.0e4f)), 0.01f);
+}
+
+f32 nrd2PrefilterWeight(f32 cosN, f32 dzRel, f32 radDiffRel, f32 variance) {
+    const f32 wn = std::pow(std::max(cosN, 0.0f), 512.0f);
+    const f32 wd = std::exp(-30.0f * std::min(dzRel, 64.0f));
+    return wn * wd * nrd2PrefilterCentreWeight(radDiffRel, variance) * std::max(0.1f, 1.0f - std::exp(-variance * 4.4f));
+}
+
+Nrd2TemporalOut nrd2TemporalBlend(const f32 cur[3], const f32 anchor[3], const f32 lo[3], const f32 hi[3],
+                                  const f32 hist[3], f32 n) {
+    Nrd2TemporalOut o;
+    const f32 a = 1.0f / std::max(n + 1.0f, 1.0f), w = nrd2StabBlend(n);
     for (u32 c = 0; c < 3; ++c) {
-        o.d[c] = in.curD[c] + (hd[c] - in.curD[c]) * o.alphaD;
-        o.s[c] = in.curS[c] + (hs[c] - in.curS[c]) * o.alphaS;
+        const f32 l = std::min(lo[c], anchor[c]), h = std::max(hi[c], anchor[c]);
+        o.cur[c] = std::clamp(cur[c] + (anchor[c] - cur[c]) * a, l, h);
+        o.hist[c] = std::clamp(hist[c], l, h);
+        o.out[c] = o.cur[c] + (o.hist[c] - o.cur[c]) * w;
     }
     return o;
 }

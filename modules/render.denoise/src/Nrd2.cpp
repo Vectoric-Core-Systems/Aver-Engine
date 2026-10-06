@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <initializer_list>
 #include <string>
 
 namespace aver::render::denoise {
@@ -34,7 +35,9 @@ constexpr u32 kFlagBypass = 1u, kFlagStabilise = 2u, kFlagHistory = 4u, kFlagSta
 constexpr u32 kPyramidSrv = 4, kPyramidUav = 9;
 constexpr u32 kResolveSrv = 16, kResolveUav = 3;
 constexpr u32 kResolveParamsSrv = 15;
-constexpr u32 kStabSrv = 11, kStabUav = 3;
+constexpr u32 kReprojectSrv = 9, kReprojectUav = 5;
+constexpr u32 kPrefilterSrv = 7, kPrefilterUav = 2;
+constexpr u32 kTemporalSrv = 10, kTemporalUav = 5;
 constexpr f32 kStabNFast = 8.0f, kStabNSunMoved = 2.0f, kStabNMax = 64.0f;
 
 constexpr rhi::ResourceState kRead  = rhi::ResourceState::NonPixelShaderResource;
@@ -149,8 +152,10 @@ bool Nrd2::create(rhi::IDevice& dev) {
     psoParams_  = build(1, "CSNrd2Params", 0, 1, ~0u, true);
     psoResolve_ = build(2, "CSNrd2Resolve", kResolveSrv, kResolveUav, kResolveParamsSrv, false);
     if (!valid()) { destroy(); return false; }
-    // Optional: without it NRD2 stays single-frame.
-    psoStab_ = build(5, "CSNrd2Stabilise", kStabSrv, kStabUav, ~0u, false);
+    // Optional: without them NRD2 stays single-frame.
+    psoReproject_ = build(5, "CSNrd2Reproject", kReprojectSrv, kReprojectUav, ~0u, false);
+    psoPrefilter_ = build(6, "CSNrd2Prefilter", kPrefilterSrv, kPrefilterUav, ~0u, false);
+    psoTemporal_  = build(7, "CSNrd2Temporal", kTemporalSrv, kTemporalUav, ~0u, false);
 
     rhi::BindingSetDesc bd{};
     bd.srvCount = kPyramidSrv; bd.uavCount = kPyramidUav;
@@ -165,11 +170,18 @@ bool Nrd2::create(rhi::IDevice& dev) {
     bd = {};
     bd.srvCount = 1;
     setCompose_ = res_->createBindingSet(bd);
-    if (psoStab_) {
+    if (psoReproject_ && psoPrefilter_ && psoTemporal_) {
         bd = {};
-        bd.srvCount = kStabSrv; bd.uavCount = kStabUav;
-        setStab_ = res_->createBindingSet(bd);
-        if (!setStab_) AVER_WARN("[NRD2] the stabiliser's binding set could not be created; single-frame only");
+        bd.srvCount = kReprojectSrv; bd.uavCount = kReprojectUav;
+        setReproject_ = res_->createBindingSet(bd);
+        bd = {};
+        bd.srvCount = kPrefilterSrv; bd.uavCount = kPrefilterUav;
+        setPrefilter_ = res_->createBindingSet(bd);
+        bd = {};
+        bd.srvCount = kTemporalSrv; bd.uavCount = kTemporalUav;
+        setTemporal_ = res_->createBindingSet(bd);
+        if (!(setReproject_ && setPrefilter_ && setTemporal_))
+            AVER_WARN("[NRD2] the temporal stage's binding sets could not be created; single-frame only");
     }
     if (!setPyramid_ || !setParams_ || !setResolve_ || !setCompose_) {
         AVER_WARN("[NRD2] binding sets could not be created; NRD2 unavailable");
@@ -177,7 +189,7 @@ bool Nrd2::create(rhi::IDevice& dev) {
         return false;
     }
     AVER_INFO("[NRD2] denoiser pipelines built (pyramid, tile parameters, resolve{})",
-              psoStab_ && setStab_ ? ", stabiliser" : "");
+              stabReady() ? ", temporal stage" : "");
     return true;
 }
 
@@ -223,10 +235,16 @@ void Nrd2::destroyCompose() {
     compose_ = 0;
 }
 
+bool Nrd2::stabReady() const {
+    return psoReproject_ && psoPrefilter_ && psoTemporal_ && setReproject_ && setPrefilter_ && setTemporal_;
+}
+
 void Nrd2::releaseStab() {
     histValid_ = false;
     if (!res_) return;
-    for (rhi::TextureHandle* t : {&dRes_, &sRes_, &histD_[0], &histD_[1], &histS_[0], &histS_[1]}) {
+    for (rhi::TextureHandle* t : {&dRes_, &sRes_, &rpD_, &rpS_, &rpV_, &anchD_, &anchS_, &prefD_, &prefS_,
+                                  &histD_[0], &histD_[1], &histS_[0], &histS_[1], &histG_[0], &histG_[1],
+                                  &histV_[0], &histV_[1]}) {
         if (*t) res_->destroyTexture(*t);
         *t = 0;
     }
@@ -234,21 +252,37 @@ void Nrd2::releaseStab() {
 
 bool Nrd2::allocStab() {
     if (dRes_) return true;
-    const rhi::Format f = rhi::Format::RGBA16F;
-    // D' and S' rest as UAVs (the resolve writes them, the stabiliser reads them in between); history rests readable.
-    dRes_ = makeTexture(res_, f, width_, height_, kWrite, "NRD2 resolved D");
-    sRes_ = makeTexture(res_, f, width_, height_, kWrite, "NRD2 resolved S");
+    const rhi::Format f = rhi::Format::RGBA16F, f2 = rhi::Format::RG16F;
+    bool ok = true;
+    auto make = [&](rhi::Format fmt, u32 w, u32 h, rhi::ResourceState state, const char* name) {
+        const rhi::TextureHandle t = makeTexture(res_, fmt, w, h, state, name);
+        if (!t) ok = false;
+        return t;
+    };
+    // D' and S' rest as UAVs (the resolve writes them, the temporal stage reads them in between); everything
+    // else rests readable. The anchors are one texel per 8x8 tile.
+    dRes_ = make(f, width_, height_, kWrite, "NRD2 resolved D");
+    sRes_ = make(f, width_, height_, kWrite, "NRD2 resolved S");
+    rpD_ = make(f, width_, height_, kRead, "NRD2 reprojected D");
+    rpS_ = make(f, width_, height_, kRead, "NRD2 reprojected S");
+    rpV_ = make(f2, width_, height_, kRead, "NRD2 reprojected noise");
+    anchD_ = make(f, tilesOf(width_), tilesOf(height_), kRead, "NRD2 anchor D");
+    anchS_ = make(f, tilesOf(width_), tilesOf(height_), kRead, "NRD2 anchor S");
+    prefD_ = make(f, width_, height_, kRead, "NRD2 prefiltered D");
+    prefS_ = make(f, width_, height_, kRead, "NRD2 prefiltered S");
     for (u32 i = 0; i < 2; ++i) {
-        histD_[i] = makeTexture(res_, f, width_, height_, kRead, "NRD2 history D");
-        histS_[i] = makeTexture(res_, f, width_, height_, kRead, "NRD2 history S");
+        histD_[i] = make(f, width_, height_, kRead, "NRD2 history D");
+        histS_[i] = make(f, width_, height_, kRead, "NRD2 history S");
+        histG_[i] = make(f, width_, height_, kRead, "NRD2 history Z and normal");
+        histV_[i] = make(f2, width_, height_, kRead, "NRD2 history noise");
     }
-    if (!(dRes_ && sRes_ && histD_[0] && histD_[1] && histS_[0] && histS_[1])) {
+    if (!ok) {
         releaseStab();
         return false;
     }
     histValid_ = false;
-    AVER_INFO("[NRD2] temporal stabiliser targets at {}x{}: {:.1f} MiB", width_, height_,
-              static_cast<f64>(width_) * height_ * 6 * 8 / (1024.0 * 1024.0));
+    AVER_INFO("[NRD2] temporal stage targets at {}x{}: {:.1f} MiB", width_, height_,
+              static_cast<f64>(width_) * height_ * 108 / (1024.0 * 1024.0));
     return true;
 }
 
@@ -277,15 +311,18 @@ void Nrd2::destroy() {
     destroyCompose();
     network_.destroy();
     if (res_) {
-        for (rhi::PipelineHandle* p : {&psoPyramid_, &psoParams_, &psoResolve_, &psoFeatures_, &psoStab_}) {
+        for (rhi::PipelineHandle* p : {&psoPyramid_, &psoParams_, &psoResolve_, &psoFeatures_, &psoReproject_,
+                                       &psoPrefilter_, &psoTemporal_}) {
             if (*p) res_->destroyPipeline(*p);
         }
-        for (rhi::BindingSetHandle* s : {&setPyramid_, &setParams_, &setResolve_, &setCompose_, &setFeatures_, &setStab_}) {
+        for (rhi::BindingSetHandle* s : {&setPyramid_, &setParams_, &setResolve_, &setCompose_, &setFeatures_,
+                                         &setReproject_, &setPrefilter_, &setTemporal_}) {
             if (*s) res_->destroyBindingSet(*s);
         }
     }
-    psoPyramid_ = psoParams_ = psoResolve_ = psoFeatures_ = psoStab_ = 0;
-    setPyramid_ = setParams_ = setResolve_ = setCompose_ = setFeatures_ = setStab_ = 0;
+    psoPyramid_ = psoParams_ = psoResolve_ = psoFeatures_ = psoReproject_ = psoPrefilter_ = psoTemporal_ = 0;
+    setPyramid_ = setParams_ = setResolve_ = setCompose_ = setFeatures_ = 0;
+    setReproject_ = setPrefilter_ = setTemporal_ = 0;
     featuresTried_ = false;
     dev_ = nullptr;
     res_ = nullptr;
@@ -349,14 +386,14 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     const u32 vw = in.viewport[2], vh = in.viewport[3];
     if (!vw || !vh || vx + vw > width_ || vy + vh > height_) return false;
 
-    // The stabiliser runs on jitter-free frames with a continuous previous frame (TAAU owns the rest).
+    // The temporal stage runs on jitter-free frames with a continuous previous frame (TAAU owns the rest).
     if (in.sunMoved) sunHold_ = 2u;
     else if (sunHold_ > 0u) --sunHold_;
     if (!params_.stabilise) releaseStab();
     Constants cb{};
     const bool basisOk = viewBasis(dev_, cb.view);
     f32 eye[3] = {};
-    bool stab = params_.stabilise && !params_.bypass && psoStab_ && setStab_ && in.velocity && in.historyValid &&
+    bool stab = params_.stabilise && !params_.bypass && stabReady() && in.velocity && in.historyValid &&
                 in.jitter[0] == 0.0f && in.jitter[1] == 0.0f && !(capture_ && capture_->active()) && basisOk &&
                 dev_->camera(nullptr, nullptr, eye) && prevViewProjRel(in.prevViewProj, in.prevCamPos, cb.prevVP);
     if (stab && !allocStab()) stab = false;
@@ -388,26 +425,50 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     }
     res_->setSrvBuffer(setResolve_, kResolveParamsSrv, tileParams_, sizeof(f32), tileCapacity_ * kNrd2TileParams, 0);
     res_->setUav(setResolve_, 0, lit_, 0);
-    // Without the stabiliser the resolve never writes u1/u2; lit_ stands in so the set stays valid.
+    // Without the temporal stage the resolve never writes u1/u2; lit_ stands in so the set stays valid.
     res_->setUav(setResolve_, 1, stab ? dRes_ : lit_, 0);
     res_->setUav(setResolve_, 2, stab ? sRes_ : lit_, 0);
     res_->setSrv(setCompose_, 0, lit_);
     const u32 rd = histLast_, wr = 1u - histLast_;
     if (stab) {
-        res_->setSrv(setStab_, 0, dRes_);
-        res_->setSrv(setStab_, 1, sRes_);
-        res_->setSrv(setStab_, 2, in.viewZ);
-        res_->setSrv(setStab_, 3, in.normalRoughness);
-        res_->setSrv(setStab_, 4, in.velocity);
-        res_->setSrv(setStab_, 5, targets_.remodA);
-        res_->setSrv(setStab_, 6, targets_.remodB);
-        res_->setSrv(setStab_, 7, histD_[rd]);
-        res_->setSrv(setStab_, 8, histS_[rd]);
-        res_->setSrv(setStab_, 9, levelD_[2]);
-        res_->setSrv(setStab_, 10, levelS_[2]);
-        res_->setUav(setStab_, 0, lit_, 0);
-        res_->setUav(setStab_, 1, histD_[wr], 0);
-        res_->setUav(setStab_, 2, histS_[wr], 0);
+        res_->setSrv(setReproject_, 0, dRes_);
+        res_->setSrv(setReproject_, 1, sRes_);
+        res_->setSrv(setReproject_, 2, in.viewZ);
+        res_->setSrv(setReproject_, 3, in.normalRoughness);
+        res_->setSrv(setReproject_, 4, in.velocity);
+        res_->setSrv(setReproject_, 5, histD_[rd]);
+        res_->setSrv(setReproject_, 6, histS_[rd]);
+        res_->setSrv(setReproject_, 7, histG_[rd]);
+        res_->setSrv(setReproject_, 8, histV_[rd]);
+        res_->setUav(setReproject_, 0, rpD_, 0);
+        res_->setUav(setReproject_, 1, rpS_, 0);
+        res_->setUav(setReproject_, 2, rpV_, 0);
+        res_->setUav(setReproject_, 3, anchD_, 0);
+        res_->setUav(setReproject_, 4, anchS_, 0);
+        res_->setSrv(setPrefilter_, 0, dRes_);
+        res_->setSrv(setPrefilter_, 1, sRes_);
+        res_->setSrv(setPrefilter_, 2, in.viewZ);
+        res_->setSrv(setPrefilter_, 3, in.normalRoughness);
+        res_->setSrv(setPrefilter_, 4, rpV_);
+        res_->setSrv(setPrefilter_, 5, anchD_);
+        res_->setSrv(setPrefilter_, 6, anchS_);
+        res_->setUav(setPrefilter_, 0, prefD_, 0);
+        res_->setUav(setPrefilter_, 1, prefS_, 0);
+        res_->setSrv(setTemporal_, 0, prefD_);
+        res_->setSrv(setTemporal_, 1, prefS_);
+        res_->setSrv(setTemporal_, 2, in.viewZ);
+        res_->setSrv(setTemporal_, 3, in.normalRoughness);
+        res_->setSrv(setTemporal_, 4, targets_.remodA);
+        res_->setSrv(setTemporal_, 5, targets_.remodB);
+        res_->setSrv(setTemporal_, 6, rpD_);
+        res_->setSrv(setTemporal_, 7, rpS_);
+        res_->setSrv(setTemporal_, 8, anchD_);
+        res_->setSrv(setTemporal_, 9, anchS_);
+        res_->setUav(setTemporal_, 0, lit_, 0);
+        res_->setUav(setTemporal_, 1, histD_[wr], 0);
+        res_->setUav(setTemporal_, 2, histS_[wr], 0);
+        res_->setUav(setTemporal_, 3, histG_[wr], 0);
+        res_->setUav(setTemporal_, 4, histV_[wr], 0);
     }
 
     cb.rect[0] = vx; cb.rect[1] = vy; cb.rect[2] = vw; cb.rect[3] = vh;
@@ -475,18 +536,22 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     ctx.bufferBarrier(tileParams_, kRead, rhi::ResourceState::Common);
 
     if (stab) {
-        rhi::ScopedGpuStat stabStat(ctx, "NRD2.Stabilise");
         ctx.textureBarrier(dRes_, kWrite, kRead);
         ctx.textureBarrier(sRes_, kWrite, kRead);
-        ctx.textureBarrier(histD_[wr], kRead, kWrite);
-        ctx.textureBarrier(histS_[wr], kRead, kWrite);
         ctx.textureBarrier(in.velocity, in.gbufferState, kRead);
-        ctx.setPipeline(psoStab_);
-        ctx.setBindingSet(setStab_);
-        ctx.setConstantBuffer(kConstantSlot, &cb, sizeof(cb));
-        ctx.dispatch(gx, gy, 1);
-        ctx.textureBarrier(histD_[wr], kWrite, kRead);
-        ctx.textureBarrier(histS_[wr], kWrite, kRead);
+        auto pass = [&](const char* name, rhi::PipelineHandle pso, rhi::BindingSetHandle set,
+                        std::initializer_list<rhi::TextureHandle> out) {
+            rhi::ScopedGpuStat passStat(ctx, name);
+            for (rhi::TextureHandle t : out) ctx.textureBarrier(t, kRead, kWrite);
+            ctx.setPipeline(pso);
+            ctx.setBindingSet(set);
+            ctx.setConstantBuffer(kConstantSlot, &cb, sizeof(cb));
+            ctx.dispatch(gx, gy, 1);
+            for (rhi::TextureHandle t : out) ctx.textureBarrier(t, kWrite, kRead);
+        };
+        pass("NRD2.Reproject", psoReproject_, setReproject_, {rpD_, rpS_, rpV_, anchD_, anchS_});
+        pass("NRD2.Prefilter", psoPrefilter_, setPrefilter_, {prefD_, prefS_});
+        pass("NRD2.Temporal", psoTemporal_, setTemporal_, {histD_[wr], histS_[wr], histG_[wr], histV_[wr]});
         ctx.textureBarrier(dRes_, kRead, kWrite);
         ctx.textureBarrier(sRes_, kRead, kWrite);
         histLast_ = wr;

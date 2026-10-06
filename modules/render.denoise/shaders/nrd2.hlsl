@@ -3,14 +3,16 @@
 //   0 CSNrd2Pyramid -- this frame's D and S reduced to 1/2, 1/4, 1/8 (edge-aware 2x2, fixed)
 //   1 CSNrd2Params  -- fills the per-8x8-tile parameter buffer with the defaults (phase 4: the network)
 //   2 CSNrd2Resolve -- per pixel D' and S' (nrd2_resolve.hlsli), remodulated: D' * Rd + S' * Rs
-//                      (stabiliser on: D' and S' go to u1/u2 instead and lit is left to pass 5)
+//                      (temporal stage on: D' and S' go to u1/u2 instead and lit is left to pass 7)
 //   3 VSNrd2Compose / PSNrd2Compose -- adds that into the scene colour (additive blend)
 //   4 CSNrd2Features -- the network's 12 input channels at half resolution (phase 3 capture, phase 4)
-//   5 CSNrd2Stabilise -- jitter-free frames only: D' and S' blended with their reprojected history inside a
-//                      min/max box of this frame's values, then remodulated into lit
-//
+//   5 CSNrd2Reproject, 6 CSNrd2Prefilter, 7 CSNrd2Temporal -- jitter-free frames only: the temporal stage, after
+//                      the resolve (docs/rendering/NRD2.md "Temporal stabiliser"): history reprojection with a sample
+//                      count, noise estimate and per-tile anchor; a fixed 15-tap prefilter; the min/max-clipped blend
+//                      with history, remodulated into lit
+
 // Portable (modules/render.neural/README.md rules): fp32, no wave intrinsics, no atomics, groupshared
-// 3 KB, every barrier in uniform control flow, constants at b3 (the Vulkan backend folds b1 into push
+// <= 16 KB, every barrier in uniform control flow, constants at b3 (the Vulkan backend folds b1 into push
 // constants). Texel coordinates of D/S/guides are render-target pixels; the pyramid is viewport-local.
 #include "nrd2_resolve.hlsli"
 
@@ -149,10 +151,8 @@ Texture2D<float4> gNrd2S2 : register(t13);
 Texture2D<float4> gNrd2S3 : register(t14);
 StructuredBuffer<float> gNrd2Params : register(t15);
 RWTexture2D<float4> gNrd2Lit : register(u0);    // D' * Rd + S' * Rs (left to the stabiliser when it runs)
-RWTexture2D<float4> gNrd2DRes : register(u1);   // stabiliser input: D' and S', a = 1 on surfaces
+RWTexture2D<float4> gNrd2DRes : register(u1);   // temporal stage input: D' and S', a = 1 on surfaces
 RWTexture2D<float4> gNrd2SRes : register(u2);
-
-float3 nrd2StabSane(float3 v) { return all(v == v) ? clamp(v, -6.0e4, 6.0e4) : 0.0; }
 
 Nrd2TileParams nrd2LoadParams(uint tile, uint tiles, uint signal) {
     float v[6], d[6];
@@ -349,32 +349,64 @@ void CSNrd2Features(uint3 dtid : SV_DispatchThreadID) {
     }
 }
 
-#elif AVER_NRD2_PASS == 5   // ---- temporal stabiliser ----
+#elif AVER_NRD2_PASS == 5   // ---- temporal 1/3: reproject ----
 
-// Per pixel: this frame's D' and S' (the resolve's, spatially filtered) against last frame's stabilised ones
-// at the velocity-reprojected position, in irradiance so albedo detail never blurs. History is accepted per
-// bilinear tap by reprojected view depth, blended with a weight from motion/disocclusion age alone, and
-// clamped to the min/max of this frame's 7x7 of D' (S') united with the 1/8 level interpolated at the pixel
-// (the value the resolve's own taps blend). Never a mean or variance, never a network input (NEURAA_NRD.md section 7).
+// FidelityFX's reflections-denoiser temporal design (MIT), rewritten (docs/rendering/NRD2.md "Temporal
+// stabiliser"). Per pixel: D' and S' against last frame's stabilised ones at the velocity-reprojected position,
+// by reprojected view depth and normal; a failed bilinear set falls back to the best-matching 3x3 neighbour.
+// Out: the reprojected history with its sample count n, the noise estimate, and per 8x8 tile a
+// brightness-weighted anchor (bright outliers down-weighted relative to the tile).
 Texture2D<float4> gNrd2DRes   : register(t0);   // D', a = 1 on surfaces
 Texture2D<float4> gNrd2SRes   : register(t1);
 Texture2D<float>  gNrd2ViewZ  : register(t2);
 Texture2D<float4> gNrd2Normal : register(t3);
 Texture2D<float2> gNrd2Vel    : register(t4);   // G-buffer velocity: texels per frame, destination minus source
-Texture2D<float4> gNrd2RemodA : register(t5);
-Texture2D<float2> gNrd2RemodB : register(t6);
-Texture2D<float4> gNrd2HistD  : register(t7);   // last frame's D'' rgb, a = age (frames)
-Texture2D<float4> gNrd2HistS  : register(t8);   // last frame's S'' rgb, a = view Z (m)
-Texture2D<float4> gNrd2D3     : register(t9);   // 1/8 level values
-Texture2D<float4> gNrd2S3     : register(t10);
-RWTexture2D<float4> gNrd2Lit  : register(u0);
-RWTexture2D<float4> gNrd2OutD : register(u1);
-RWTexture2D<float4> gNrd2OutS : register(u2);
+Texture2D<float4> gNrd2HistD  : register(t5);   // last frame's D'' rgb, a = sample count (0 = none)
+Texture2D<float4> gNrd2HistS  : register(t6);
+Texture2D<float4> gNrd2HistG  : register(t7);   // x view Z (m), yz the G-buffer's packed normal xy
+Texture2D<float2> gNrd2HistV  : register(t8);   // noise estimate of D'', S''
+RWTexture2D<float4> gNrd2RpD   : register(u0);  // reprojected D history rgb, a = sample count n (1 = none)
+RWTexture2D<float4> gNrd2RpS   : register(u1);
+RWTexture2D<float2> gNrd2RpV   : register(u2);  // noise estimate after this frame's reprojection
+RWTexture2D<float4> gNrd2AnchD : register(u3);  // per-tile anchor rgb, a = 1 when valid
+RWTexture2D<float4> gNrd2AnchS : register(u4);
 
-#define NRD2_STAB_R 3   // clamp-box radius: 7x7, inside the spatial estimate's footprint
-#define NRD2_STAB_W (8 + 2 * NRD2_STAB_R)
-groupshared float4 gsStabD[NRD2_STAB_W * NRD2_STAB_W];   // 14x14 halo of D' and S' (6.3 KB)
-groupshared float4 gsStabS[NRD2_STAB_W * NRD2_STAB_W];
+groupshared float4 gsA[64];   // tile sums: luminance and count of D and S
+groupshared float4 gsB[64];   // anchor sums: w * D, w
+groupshared float4 gsC[64];   // w * S, w
+
+struct Nrd2HistSet {
+    float  wsum, score;   // bilinear weight kept, its sum of search scores
+    float3 d, s;          // weighted sums
+    float2 v;
+    float2 n;             // youngest count among the taps that carry weight: D, S
+};
+
+// The four history texels from `base`, bilinear weights f, each kept by normal and reprojected-depth agreement.
+Nrd2HistSet nrd2GatherHistory(int2 base, float2 f, float3 n, float zExp, float zTol) {
+    Nrd2HistSet h;
+    h.wsum = 0.0; h.score = 0.0; h.d = 0.0; h.s = 0.0; h.v = 0.0; h.n = 1.0e9;
+    const int2 lo = int2(gNrd2Rect.xy), hi = int2(gNrd2Rect.xy + gNrd2Rect.zw);
+    [unroll] for (uint t = 0u; t < 4u; ++t) {
+        const int2 o = int2(t & 1u, t >> 1);
+        const int3 tc = int3(base + o, 0);
+        if (any(tc.xy < lo) || any(tc.xy >= hi)) continue;
+        const float4 hd = gNrd2HistD.Load(tc);
+        if (!(hd.a > 0.0)) continue;
+        const float4 hg = gNrd2HistG.Load(tc);
+        const float cosN = dot(n, nrd2DecodeNormal(float4(hg.yz, 0.0, 0.0)));
+        const float dz = abs(hg.x - zExp);
+        if (cosN < kNrd2StabNormalCos || dz > zTol) continue;
+        const float4 hs = gNrd2HistS.Load(tc);
+        const float b = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y);
+        h.wsum += b;
+        h.score += b * nrd2StabScore(cosN, dz, zExp);
+        h.d += b * hd.rgb; h.s += b * hs.rgb;
+        h.v += b * gNrd2HistV.Load(tc);
+        if (b > kNrd2StabAgeWeight) h.n = min(h.n, float2(hd.a, hs.a));
+    }
+    return h;
+}
 
 // View Z (cm) at a viewport-local texel, or `fallback` outside the viewport or off a surface.
 float nrd2StabZ(int2 q, float fallback) {
@@ -384,17 +416,255 @@ float nrd2StabZ(int2 q, float fallback) {
 }
 
 [numthreads(8, 8, 1)]
-void CSNrd2Stabilise(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
-    const int2 org = int2(gid.xy) * 8 - NRD2_STAB_R;   // halo origin, viewport-local
+void CSNrd2Reproject(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
+    const uint gi = gtid.y * 8u + gtid.x;
+    const uint2 q = dtid.xy;
+    const bool inside = all(q < gNrd2Rect.zw);
+    const int2 p = int2(gNrd2Rect.xy + min(q, max(gNrd2Rect.zw, 1u) - 1u));
+    const float z = gNrd2ViewZ.Load(int3(p, 0));
+    const bool surf = inside && z > 0.0 && z < 1.0e6;
+
+    float3 curD = 0.0, curS = 0.0, hD = 0.0, hS = 0.0;
+    float2 vPrev = 1.0;
+    float  nD = 1.0, nS = 1.0;
+    bool   ok = false;
+    if (surf) {
+        curD = nrd2StabSane(gNrd2DRes.Load(int3(p, 0)).rgb);
+        curS = nrd2StabSane(gNrd2SRes.Load(int3(p, 0)).rgb);
+        if ((gNrd2Tiles.z & 4u) != 0u) {
+            const float4 nr = gNrd2Normal.Load(int3(p, 0));
+            const float3 n  = nrd2DecodeNormal(nr);
+            const float2 mv = gNrd2Vel.Load(int3(p, 0));
+            const float nMaxD = nrd2StabMaxFrames(length(mv), gNrd2Stab.x, gNrd2Stab.y);
+            const float nMaxS = nrd2StabSpecMaxFrames(nMaxD, nr.z);
+            // Where this surface point was last frame: the velocity (exact for rigid motion; no jitter on these
+            // frames), and the view depth it should have there (camera motion only, so a mover fails the depth test).
+            const float zm = z * 0.01;
+            const float2 ndc = float2((float(q.x) + 0.5) / float(gNrd2Rect.z) * 2.0 - 1.0,
+                                      1.0 - (float(q.y) + 0.5) / float(gNrd2Rect.w) * 2.0);
+            const float3 off = z * (gNrd2View[2].xyz + ndc.x * gNrd2View[0].w * gNrd2View[0].xyz +
+                                    ndc.y * gNrd2View[1].w * gNrd2View[1].xyz) + gNrd2CamDelta.xyz;
+            const float zExp = (off.x * gNrd2PrevVP[0] + off.y * gNrd2PrevVP[1] + off.z * gNrd2PrevVP[2] + gNrd2PrevVP[3]).w * 0.01;
+            // Depth slope, per axis the smaller one-sided difference so a silhouette does not widen the test.
+            const int2 qi = int2(q);
+            float slope = 0.0;
+            [unroll] for (uint a = 0u; a < 2u; ++a) {
+                const int2 st = a == 0u ? int2(1, 0) : int2(0, 1);
+                const float zl = nrd2StabZ(qi - st, -1.0), zr = nrd2StabZ(qi + st, -1.0);
+                const float dm = min(zl > 0.0 ? abs(zl - z) : 1.0e30, zr > 0.0 ? abs(zr - z) : 1.0e30);
+                slope = max(slope, dm < 1.0e30 ? dm * 0.01 : 0.0);
+            }
+            const float zTol = zExp > 0.0 ? kNrd2StabDepthRel * zExp + kNrd2StabDepthAbs + slope : -1.0;
+
+            if (nMaxD > 0.0) {
+                const float2 hp = float2(p) - mv;   // p + 0.5 - mv, as a texel corner
+                const int2 hb = int2(floor(hp));
+                const float2 hf = hp - float2(hb);
+                Nrd2HistSet h = nrd2GatherHistory(hb, hf, n, zExp, zTol);
+                if (h.wsum < kNrd2StabMinWeight) {
+                    // Disocclusion fallback: the best-matching of the 3x3 neighbouring sets, each already
+                    // dropping the taps that do not match.
+                    float best = 0.0;
+                    [loop] for (uint k = 0u; k < 9u; ++k) {
+                        if (k == 4u) continue;
+                        const Nrd2HistSet c = nrd2GatherHistory(hb + int2(int(k % 3u) - 1, int(k / 3u) - 1), hf, n, zExp, zTol);
+                        if (c.wsum >= kNrd2StabMinWeight && c.score > best) { best = c.score; h = c; }
+                    }
+                }
+                ok = h.wsum >= kNrd2StabMinWeight;
+                if (ok) {
+                    hD = h.d / h.wsum; hS = h.s / h.wsum; vPrev = h.v / h.wsum;
+                    nD = nrd2StabSamples(h.n.x, nMaxD);
+                    nS = nrd2StabSamples(h.n.y, nMaxS);
+                }
+            }
+        }
+    }
+
+    // Tile scale: the plain mean luminance of the tile's surface pixels (fixed-order tree sum).
+    const float3 rD = ok ? lerp(curD, hD, kNrd2AnchorMix) : curD;
+    const float3 rS = ok ? lerp(curS, hS, kNrd2AnchorMix) : curS;
+    const float lD = surf ? max(nrd2Lum(rD), 0.0) : 0.0, lS = surf ? max(nrd2Lum(rS), 0.0) : 0.0;
+    gsA[gi] = surf ? float4(lD, 1.0, lS, 1.0) : 0.0;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint s1 = 32u; s1 > 0u; s1 >>= 1u) {
+        if (gi < s1) gsA[gi] += gsA[gi + s1];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    const float scaleD = gsA[0].x / max(gsA[0].y, 1.0) + 1.0e-6;
+    const float scaleS = gsA[0].z / max(gsA[0].w, 1.0) + 1.0e-6;
+    const float wD = surf ? nrd2AnchorWeight(lD, scaleD) : 0.0, wS = surf ? nrd2AnchorWeight(lS, scaleS) : 0.0;
+    gsB[gi] = float4(wD * rD, wD);
+    gsC[gi] = float4(wS * rS, wS);
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint s2 = 32u; s2 > 0u; s2 >>= 1u) {
+        if (gi < s2) { gsB[gi] += gsB[gi + s2]; gsC[gi] += gsC[gi + s2]; }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    const float4 aD = gsB[0], aS = gsC[0];
+    if (gi == 0u) {
+        gNrd2AnchD[gid.xy] = aD.w > 0.0 ? float4(aD.rgb / aD.w, 1.0) : 0.0;
+        gNrd2AnchS[gid.xy] = aS.w > 0.0 ? float4(aS.rgb / aS.w, 1.0) : 0.0;
+    }
+    if (!inside) return;   // after the last barrier
+    if (!surf) { gNrd2RpD[p] = 0.0; gNrd2RpS[p] = 0.0; gNrd2RpV[p] = 0.0; return; }
+
+    // Noise estimate: this frame's luminance against the reprojected history's, 1/n of the old estimate mixed in.
+    float2 var = 1.0;
+    if (ok) {
+        const float sD = max(aD.w > 0.0 ? nrd2Lum(aD.rgb / aD.w) : 0.0, 0.0) + 1.0e-6;
+        const float sS = max(aS.w > 0.0 ? nrd2Lum(aS.rgb / aS.w) : 0.0, 0.0) + 1.0e-6;
+        var = float2(lerp(nrd2StabRelVar(nrd2Lum(curD), nrd2Lum(hD), sD), vPrev.x, 1.0 / nD),
+                     lerp(nrd2StabRelVar(nrd2Lum(curS), nrd2Lum(hS), sS), vPrev.y, 1.0 / nS));
+    }
+    gNrd2RpD[p] = float4(ok ? hD : 0.0, nD);
+    gNrd2RpS[p] = float4(ok ? hS : 0.0, nS);
+    gNrd2RpV[p] = var;
+}
+
+#elif AVER_NRD2_PASS == 6   // ---- temporal 2/3: prefilter ----
+
+// FidelityFX's prefilter in NRD2's terms: a fixed 15-tap pattern (radius 3, never rotated) over the resolved D'
+// and S'. Weights are normal, relative-depth and radiance stops (the radiance one measured against the tile
+// anchor, in units of the pixel's luminance) times a gain that grows with the noise estimate. The estimate
+// only weights; it never sets a radius or a level. a of the outputs = the filtered noise estimate, -1 = no surface.
+Texture2D<float4> gNrd2DRes   : register(t0);
+Texture2D<float4> gNrd2SRes   : register(t1);
+Texture2D<float>  gNrd2ViewZ  : register(t2);
+Texture2D<float4> gNrd2Normal : register(t3);
+Texture2D<float2> gNrd2RpV    : register(t4);
+Texture2D<float4> gNrd2AnchD  : register(t5);
+Texture2D<float4> gNrd2AnchS  : register(t6);
+RWTexture2D<float4> gNrd2PrefD : register(u0);
+RWTexture2D<float4> gNrd2PrefS : register(u1);
+
+#define NRD2_PF_R 3
+#define NRD2_PF_W (8 + 2 * NRD2_PF_R)
+#if NRD2_PF_W * NRD2_PF_W * 56 > 16384
+#error nrd2 prefilter groupshared exceeds 16 KB
+#endif
+groupshared float4 gsPfD[NRD2_PF_W * NRD2_PF_W];   // D' rgb, view Z (m); z <= 0 = no surface (11 KB in all)
+groupshared float4 gsPfS[NRD2_PF_W * NRD2_PF_W];   // S' rgb, roughness
+groupshared float4 gsPfN[NRD2_PF_W * NRD2_PF_W];   // normal xyz
+groupshared float2 gsPfV[NRD2_PF_W * NRD2_PF_W];   // noise estimate D, S
+
+// FidelityFX's 15 Halton(2,3) offsets stretched to [-3, 3], the centre skipped.
+static const int2 kNrd2PfTaps[15] = {int2(0, 1),  int2(-2, 1),  int2(2, -3), int2(-3, 0),  int2(1, 2), int2(-1, -2), int2(3, 0), int2(-3, 3),
+                                     int2(0, -3), int2(-1, -1), int2(2, 1),  int2(-2, -2), int2(1, 0), int2(0, 2),   int2(3, -1)};
+
+void nrd2PrefilterSignal(uint signal, int li, float4 anchor, float3 n, float zm, float2 grad, out float3 outV,
+                         out float outVar) {
+    const float3 c0 = signal == 0u ? gsPfD[li].rgb : gsPfS[li].rgb;
+    const float var = signal == 0u ? gsPfV[li].x : gsPfV[li].y;
+    outV = c0; outVar = var;
+    if (!(var > 0.0) || (signal == 1u && gsPfS[li].w < kNrd2PfMirror)) return;
+    const float3 a = anchor.a > 0.0 ? anchor.rgb : c0;
+    const float scale = max(nrd2Lum(a), 0.0) + 1.0e-6;
+    const float wc = nrd2PfCentreWeight(length(a - c0) / scale, var);
+    float3 acc = c0 * wc;
+    float  accW = wc, accVar = var * wc * wc;
+    [unroll] for (uint i = 0u; i < 15u; ++i) {
+        const int2 o = kNrd2PfTaps[i];
+        const int idx = li + o.y * NRD2_PF_W + o.x;
+        const float zn = gsPfD[idx].w;
+        if (!(zn > 0.0)) continue;
+        const float dzRel = abs(zn - (zm + clamp(dot(grad, float2(o)), -0.5 * zm, 0.5 * zm))) / max(zm, 1.0e-4);
+        const float3 v = signal == 0u ? gsPfD[idx].rgb : gsPfS[idx].rgb;
+        const float w = nrd2PfWeight(dot(n, gsPfN[idx].xyz), dzRel, length(a - v) / scale, var);
+        acc += w * v;
+        accW += w;
+        accVar += w * w * (signal == 0u ? gsPfV[idx].x : gsPfV[idx].y);
+    }
+    outV = acc / accW;
+    outVar = accVar / (accW * accW);
+}
+
+[numthreads(8, 8, 1)]
+void CSNrd2Prefilter(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
+    const int2 org = int2(gid.xy) * 8 - NRD2_PF_R;   // halo origin, viewport-local
     const uint gi = gtid.y * 8u + gtid.x;
     [unroll] for (uint k = 0u; k < 4u; ++k) {
         const uint i = gi + k * 64u;
-        if (i < uint(NRD2_STAB_W * NRD2_STAB_W)) {
-            const int2 qq = org + int2(i % uint(NRD2_STAB_W), i / uint(NRD2_STAB_W));
+        if (i < uint(NRD2_PF_W * NRD2_PF_W)) {
+            const int2 qq = org + int2(i % uint(NRD2_PF_W), i / uint(NRD2_PF_W));
+            float4 d = 0.0, s = 0.0, nn = 0.0;
+            float2 v = 0.0;
+            if (all(qq >= 0) && all(qq < int2(gNrd2Rect.zw))) {
+                const int3 pp = int3(int2(gNrd2Rect.xy) + qq, 0);
+                const float z = gNrd2ViewZ.Load(pp);
+                if (z > 0.0 && z < 1.0e6) {
+                    const float4 nr = gNrd2Normal.Load(pp);
+                    d  = float4(nrd2StabSane(gNrd2DRes.Load(pp).rgb), z * 0.01);
+                    s  = float4(nrd2StabSane(gNrd2SRes.Load(pp).rgb), nr.z);
+                    nn = float4(nrd2DecodeNormal(nr), 0.0);
+                    v  = gNrd2RpV.Load(pp);
+                }
+            }
+            gsPfD[i] = d; gsPfS[i] = s; gsPfN[i] = nn; gsPfV[i] = v;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    const uint2 q = dtid.xy;
+    if (any(q >= gNrd2Rect.zw)) return;   // after the barrier
+    const int2 p = int2(gNrd2Rect.xy + q);
+    const int li = int((gtid.y + uint(NRD2_PF_R)) * uint(NRD2_PF_W) + gtid.x + uint(NRD2_PF_R));
+    const float zm = gsPfD[li].w;
+    if (!(zm > 0.0)) { gNrd2PrefD[p] = float4(0.0, 0.0, 0.0, -1.0); gNrd2PrefS[p] = float4(0.0, 0.0, 0.0, -1.0); return; }
+
+    const float2 grad = nrd2DepthSlope(zm, gsPfD[li - 1].w, gsPfD[li + 1].w, gsPfD[li - NRD2_PF_W].w, gsPfD[li + NRD2_PF_W].w);
+    const float3 n = gsPfN[li].xyz;
+    const uint2 ls = nrd2LevelSize(3u);
+    float3 outD, outS;
+    float  varD, varS;
+    nrd2PrefilterSignal(0u, li, nrd2SampleAnchor(gNrd2AnchD, q, ls), n, zm, grad, outD, varD);
+    nrd2PrefilterSignal(1u, li, nrd2SampleAnchor(gNrd2AnchS, q, ls), n, zm, grad, outS, varS);
+    gNrd2PrefD[p] = float4(nrd2StabSane(outD), varD);
+    gNrd2PrefS[p] = float4(nrd2StabSane(outS), varS);
+}
+
+#elif AVER_NRD2_PASS == 7   // ---- temporal 3/3: resolve ----
+
+// Per pixel: the prefiltered value pulled toward the tile anchor by 1/(n + 1), clipped to this frame's 5x5
+// min/max united with the anchor; the reprojected history clipped to the same box and blended in with weight
+// 1 - 1/n (nrd2TemporalBlend). Never a mean or variance in a clip (NEURAA_NRD.md section 7, rules 1 and 7);
+// the firefly clamp runs on the current value first. Writes the new history and the remodulated lit target.
+Texture2D<float4> gNrd2PrefD  : register(t0);   // a = noise estimate, -1 = no surface
+Texture2D<float4> gNrd2PrefS  : register(t1);
+Texture2D<float>  gNrd2ViewZ  : register(t2);
+Texture2D<float4> gNrd2Normal : register(t3);
+Texture2D<float4> gNrd2RemodA : register(t4);
+Texture2D<float2> gNrd2RemodB : register(t5);
+Texture2D<float4> gNrd2RpD    : register(t6);   // reprojected history rgb, a = n
+Texture2D<float4> gNrd2RpS    : register(t7);
+Texture2D<float4> gNrd2AnchD  : register(t8);
+Texture2D<float4> gNrd2AnchS  : register(t9);
+RWTexture2D<float4> gNrd2Lit   : register(u0);
+RWTexture2D<float4> gNrd2OutD  : register(u1);  // new history: D'' rgb, a = n
+RWTexture2D<float4> gNrd2OutS  : register(u2);
+RWTexture2D<float4> gNrd2OutG  : register(u3);  // x view Z (m), yz the G-buffer's packed normal xy
+RWTexture2D<float2> gNrd2OutV  : register(u4);  // noise estimate
+
+#define NRD2_TP_R 2   // box radius: 5x5, inside the prefilter's footprint
+#define NRD2_TP_W (8 + 2 * NRD2_TP_R)
+#if NRD2_TP_W * NRD2_TP_W * 32 > 16384
+#error nrd2 temporal groupshared exceeds 16 KB
+#endif
+groupshared float4 gsTpD[NRD2_TP_W * NRD2_TP_W];   // prefiltered D' rgb, a = noise estimate (< 0 = no surface)
+groupshared float4 gsTpS[NRD2_TP_W * NRD2_TP_W];
+
+[numthreads(8, 8, 1)]
+void CSNrd2Temporal(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
+    const int2 org = int2(gid.xy) * 8 - NRD2_TP_R;   // halo origin, viewport-local
+    const uint gi = gtid.y * 8u + gtid.x;
+    [unroll] for (uint k = 0u; k < 3u; ++k) {
+        const uint i = gi + k * 64u;
+        if (i < uint(NRD2_TP_W * NRD2_TP_W)) {
+            const int2 qq = org + int2(i % uint(NRD2_TP_W), i / uint(NRD2_TP_W));
             const bool ok = all(qq >= 0) && all(qq < int2(gNrd2Rect.zw));
             const int3 pp = int3(int2(gNrd2Rect.xy) + qq, 0);
-            gsStabD[i] = ok ? gNrd2DRes.Load(pp) : 0.0;
-            gsStabS[i] = ok ? gNrd2SRes.Load(pp) : 0.0;
+            gsTpD[i] = ok ? gNrd2PrefD.Load(pp) : float4(0.0, 0.0, 0.0, -1.0);
+            gsTpS[i] = ok ? gNrd2PrefS.Load(pp) : float4(0.0, 0.0, 0.0, -1.0);
         }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -403,88 +673,56 @@ void CSNrd2Stabilise(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThre
     if (any(q >= gNrd2Rect.zw)) return;   // after the barrier
     const int2 p = int2(gNrd2Rect.xy + q);
     const float z = gNrd2ViewZ.Load(int3(p, 0));
-    if (!(z > 0.0 && z < 1.0e6)) { gNrd2Lit[p] = 0.0; gNrd2OutD[p] = 0.0; gNrd2OutS[p] = 0.0; return; }
-    const float zm = z * 0.01;
+    if (!(z > 0.0 && z < 1.0e6)) {
+        gNrd2Lit[p] = 0.0; gNrd2OutD[p] = 0.0; gNrd2OutS[p] = 0.0; gNrd2OutG[p] = 0.0; gNrd2OutV[p] = 0.0;
+        return;
+    }
 
-    // The clamp box: this frame's valid 7x7 (a sliding window, so it never steps at tile borders), united with
-    // the 1/8 level interpolated here.
-    const int li = int((gtid.y + uint(NRD2_STAB_R)) * uint(NRD2_STAB_W) + gtid.x + uint(NRD2_STAB_R));
-    float nmD = 0.0, nmS = 0.0;
+    // This frame's 5x5 (a sliding window, so it never steps at tile borders): the firefly clamp's neighbour
+    // maximum, then the per-channel min/max with the clamped centre.
+    const int li = int((gtid.y + uint(NRD2_TP_R)) * uint(NRD2_TP_W) + gtid.x + uint(NRD2_TP_R));
+    float nmD = 0.0, nmS = 0.0, nvD = 0.0, nvS = 0.0;
     [unroll] for (uint f = 0u; f < 9u; ++f) {
         if (f == 4u) continue;
-        const int fi = li + (int(f / 3u) - 1) * NRD2_STAB_W + int(f % 3u) - 1;
-        if (gsStabD[fi].a > 0.5) nmD = max(nmD, dot(gsStabD[fi].rgb, float3(0.2126, 0.7152, 0.0722)));
-        if (gsStabS[fi].a > 0.5) nmS = max(nmS, dot(gsStabS[fi].rgb, float3(0.2126, 0.7152, 0.0722)));
+        const int fi = li + (int(f / 3u) - 1) * NRD2_TP_W + int(f % 3u) - 1;
+        if (gsTpD[fi].a >= 0.0) { nmD = max(nmD, nrd2Lum(gsTpD[fi].rgb)); nvD += 1.0; }
+        if (gsTpS[fi].a >= 0.0) { nmS = max(nmS, nrd2Lum(gsTpS[fi].rgb)); nvS += 1.0; }
     }
-    const float3 curD = nrd2StabFirefly(gsStabD[li].rgb, nmD), curS = nrd2StabFirefly(gsStabS[li].rgb, nmS);
+    const float3 curD = nvD > 0.0 ? nrd2StabFirefly(gsTpD[li].rgb, nmD) : gsTpD[li].rgb;
+    const float3 curS = nvS > 0.0 ? nrd2StabFirefly(gsTpS[li].rgb, nmS) : gsTpS[li].rgb;
     float3 loD = curD, hiD = curD, loS = curS, hiS = curS;
-    const uint nb = 2u * NRD2_STAB_R + 1u;
+    const uint nb = 2u * NRD2_TP_R + 1u;
     [unroll] for (uint n = 0u; n < nb * nb; ++n) {
         if (n == (nb * nb) / 2u) continue;   // the centre is curD/curS, already clamped
-        const int ni = li + (int(n / nb) - NRD2_STAB_R) * NRD2_STAB_W + int(n % nb) - NRD2_STAB_R;
-        if (gsStabD[ni].a > 0.5) { loD = min(loD, gsStabD[ni].rgb); hiD = max(hiD, gsStabD[ni].rgb); }
-        if (gsStabS[ni].a > 0.5) { loS = min(loS, gsStabS[ni].rgb); hiS = max(hiS, gsStabS[ni].rgb); }
-    }
-    {
-        // The 1/8 level bilinearly interpolated at this pixel (validity-weighted), so the box varies smoothly:
-        // its four raw texels made the box, and clamped history, constant across each 8x8 block.
-        const uint2 ls = nrd2LevelSize(3u);
-        const float2 cpos = (float2(q) + 0.5) / 8.0 - 0.5;
-        const int2 cbase = int2(floor(cpos));
-        const float2 cf = cpos - float2(cbase);
-        float4 sd = 0.0, ss = 0.0;
-        [unroll] for (uint c = 0u; c < 4u; ++c) {
-            const int2 o = int2(c & 1u, c >> 1);
-            const int3 ct = int3(clamp(cbase + o, int2(0, 0), int2(ls) - 1), 0);
-            const float b = (o.x ? cf.x : 1.0 - cf.x) * (o.y ? cf.y : 1.0 - cf.y);
-            const float4 cd = gNrd2D3.Load(ct), cs = gNrd2S3.Load(ct);
-            if (cd.a > 0.0) sd += float4(b * cd.rgb, b);
-            if (cs.a > 0.0) ss += float4(b * cs.rgb, b);
-        }
-        if (sd.a > 1.0e-4) { const float3 v = sd.rgb / sd.a; loD = min(loD, v); hiD = max(hiD, v); }
-        if (ss.a > 1.0e-4) { const float3 v = ss.rgb / ss.a; loS = min(loS, v); hiS = max(hiS, v); }
+        const int ni = li + (int(n / nb) - NRD2_TP_R) * NRD2_TP_W + int(n % nb) - NRD2_TP_R;
+        if (gsTpD[ni].a >= 0.0) { loD = min(loD, gsTpD[ni].rgb); hiD = max(hiD, gsTpD[ni].rgb); }
+        if (gsTpS[ni].a >= 0.0) { loS = min(loS, gsTpS[ni].rgb); hiS = max(hiS, gsTpS[ni].rgb); }
     }
 
-    // Where this surface point was last frame: the velocity (exact for rigid motion; no jitter on these
-    // frames), and the view depth it should have there (camera motion only, so a mover fails the depth test).
-    const float2 mv = gNrd2Vel.Load(int3(p, 0));
-    const float2 ndc = float2((float(q.x) + 0.5) / float(gNrd2Rect.z) * 2.0 - 1.0,
-                              1.0 - (float(q.y) + 0.5) / float(gNrd2Rect.w) * 2.0);
-    const float3 off = z * (gNrd2View[2].xyz + ndc.x * gNrd2View[0].w * gNrd2View[0].xyz +
-                            ndc.y * gNrd2View[1].w * gNrd2View[1].xyz) + gNrd2CamDelta.xyz;
-    const float zExp = (off.x * gNrd2PrevVP[0] + off.y * gNrd2PrevVP[1] + off.z * gNrd2PrevVP[2] + gNrd2PrevVP[3]).w * 0.01;
-    // Depth slope, per axis the smaller one-sided difference so a silhouette does not widen the test.
-    const int2 qi = int2(q);
-    float slope = 0.0;
-    [unroll] for (uint a = 0u; a < 2u; ++a) {
-        const int2 st = a == 0u ? int2(1, 0) : int2(0, 1);
-        const float zl = nrd2StabZ(qi - st, -1.0), zr = nrd2StabZ(qi + st, -1.0);
-        const float dm = min(zl > 0.0 ? abs(zl - z) : 1.0e30, zr > 0.0 ? abs(zr - z) : 1.0e30);
-        slope = max(slope, dm < 1.0e30 ? dm * 0.01 : 0.0);
-    }
-    const float zTol = zExp > 0.0 ? kNrd2StabDepthRel * zExp + kNrd2StabDepthAbs + slope : -1.0;
+    const uint2 ls = nrd2LevelSize(3u);
+    const float4 aD4 = nrd2SampleAnchor(gNrd2AnchD, q, ls), aS4 = nrd2SampleAnchor(gNrd2AnchS, q, ls);
+    const float3 aD = aD4.a > 0.0 ? aD4.rgb : curD, aS = aS4.a > 0.0 ? aS4.rgb : curS;
+    const float4 rpD = gNrd2RpD.Load(int3(p, 0)), rpS = gNrd2RpS.Load(int3(p, 0));
+    const float nD = max(rpD.a, 1.0), nS = max(rpS.a, 1.0);
 
-    const float2 hp = float2(p) - mv;   // p + 0.5 - mv, as a texel corner
-    const int2 hb = int2(floor(hp));
-    const float2 hf = hp - float2(hb);
-    Nrd2StabTap tap[4];
-    [unroll] for (uint t = 0u; t < 4u; ++t) {
-        const int2 o = int2(t & 1u, t >> 1);
-        const int2 tc = hb + o;
-        const bool inside = all(tc >= int2(gNrd2Rect.xy)) && all(tc < int2(gNrd2Rect.xy + gNrd2Rect.zw));
-        const float4 hd = inside ? gNrd2HistD.Load(int3(tc, 0)) : 0.0;
-        const float4 hs = inside ? gNrd2HistS.Load(int3(tc, 0)) : 0.0;
-        tap[t].b = inside ? (o.x ? hf.x : 1.0 - hf.x) * (o.y ? hf.y : 1.0 - hf.y) : 0.0;
-        tap[t].age = hd.a; tap[t].zm = hs.a; tap[t].d = hd.rgb; tap[t].s = hs.rgb;
-    }
+    float3 curD2, histD2, curS2, histS2;
+    const float3 outD = nrd2StabSane(nrd2TemporalBlend(curD, aD, loD, hiD, rpD.rgb, nD, curD2, histD2));
+    const float3 outS = nrd2StabSane(nrd2TemporalBlend(curS, aS, loS, hiS, rpS.rgb, nS, curS2, histS2));
 
-    float3 outD, outS;
-    float  outAge;
-    nrd2StabCombine(curD, curS, loD, hiD, loS, hiS, tap, zExp, zTol,
-                    nrd2StabMaxFrames(length(mv), gNrd2Stab.x, gNrd2Stab.y), gNrd2Normal.Load(int3(p, 0)).z,
-                    (gNrd2Tiles.z & 4u) != 0u, outD, outS, outAge);
-    gNrd2OutD[p] = float4(outD, outAge);
-    gNrd2OutS[p] = float4(outS, zm);
+    // The noise estimate to carry: the prefiltered one, mixed with this frame's change against the history.
+    float2 var = 1.0;
+    if (nD > 1.0) var.x = lerp(nrd2StabRelVar(nrd2Lum(curD2), nrd2Lum(histD2), max(nrd2Lum(aD), 0.0) + 1.0e-6),
+                               max(gsTpD[li].a, 0.0), nrd2StabBlend(nD));
+    if (nS > 1.0) var.y = lerp(nrd2StabRelVar(nrd2Lum(curS2), nrd2Lum(histS2), max(nrd2Lum(aS), 0.0) + 1.0e-6),
+                               max(gsTpS[li].a, 0.0), nrd2StabBlend(nS));
+    if (!(var.x == var.x)) var.x = 1.0;
+    if (!(var.y == var.y)) var.y = 1.0;
+
+    const float4 nr = gNrd2Normal.Load(int3(p, 0));
+    gNrd2OutD[p] = float4(outD, nD);
+    gNrd2OutS[p] = float4(outS, nS);
+    gNrd2OutG[p] = float4(z * 0.01, nr.x, nr.y, 0.0);
+    gNrd2OutV[p] = var;
 
     const float4 ra = gNrd2RemodA.Load(int3(p, 0));
     const float3 Rs = float3(ra.a, gNrd2RemodB.Load(int3(p, 0)));

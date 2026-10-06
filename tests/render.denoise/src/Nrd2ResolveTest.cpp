@@ -278,114 +278,132 @@ void testOracle(Nrd2OracleMode mode) {
     check(errFit < 0.5f * errDef, buf);
 }
 
-// A frame's worth of one pixel with a static camera: taps all on the same texel's history.
-Nrd2StabIn stabPixel(f32 cur, f32 hist, f32 age, f32 lo, f32 hi, f32 nMax) {
-    Nrd2StabIn in;
-    for (u32 c = 0; c < 3; ++c) {
-        in.curD[c] = cur; in.curS[c] = cur;
-        in.loD[c] = in.loS[c] = lo; in.hiD[c] = in.hiS[c] = hi;
-    }
-    for (Nrd2StabTap& t : in.tap) {
-        t.b = 0.25f; t.age = age; t.zm = 10.0f;
-        for (u32 c = 0; c < 3; ++c) { t.d[c] = hist; t.s[c] = hist; }
-    }
-    in.zExp = 10.0f; in.zTol = 0.3f; in.nMax = nMax;
-    return in;
-}
+bool nearly(f32 a, f32 b, f32 tol = 1e-5f) { return std::fabs(a - b) <= tol; }
 
-void testStabiliser() {
-    AVER_INFO("temporal stabiliser");
+void testTemporal() {
+    AVER_INFO("temporal stage");
     // History length: rest, ramp, fast, cut.
-    check(std::fabs(nrd2StabMaxFrames(0.0f, 12.0f, 4.0f) - 12.0f) < 1e-4f && std::fabs(nrd2StabMaxFrames(0.25f, 12.0f, 4.0f) - 12.0f) < 1e-4f,
-          "full history length at rest");
-    check(std::fabs(nrd2StabMaxFrames(8.0f, 12.0f, 4.0f) - 4.0f) < 1e-4f &&
-              std::fabs(nrd2StabMaxFrames(20.0f, 12.0f, 4.0f) - 4.0f) < 1e-4f,
-          "min(4, N) from 8 px per frame");
-    const f32 mid = nrd2StabMaxFrames(1.41f, 12.0f, 4.0f);   // 2.5 octaves above 0.25 px: halfway in log space
-    check(mid > 6.5f && mid < 7.2f, "log-space ramp between (" + std::to_string(mid) + ")");
-    check(nrd2StabMaxFrames(100.0f, 12.0f, 4.0f) > 0.0f && nrd2StabMaxFrames(128.0f, 12.0f, 4.0f) == 0.0f &&
-              nrd2StabMaxFrames(std::nanf(""), 12.0f, 4.0f) == 0.0f,
+    check(nearly(nrd2StabMaxFrames(0.0f, 32.0f, 8.0f), 32.0f, 1e-3f) && nearly(nrd2StabMaxFrames(0.25f, 32.0f, 8.0f), 32.0f, 1e-3f),
+          "full history length (32) at rest");
+    check(nearly(nrd2StabMaxFrames(8.0f, 32.0f, 8.0f), 8.0f, 1e-3f) && nearly(nrd2StabMaxFrames(20.0f, 32.0f, 8.0f), 8.0f, 1e-3f),
+          "min(8, N) from 8 px per frame");
+    const f32 mid = nrd2StabMaxFrames(1.4142f, 32.0f, 8.0f);   // 2.5 of the 5 octaves: halfway in log space
+    check(mid > 15.5f && mid < 16.5f, "log-space ramp between (" + std::to_string(mid) + ")");
+    check(nrd2StabMaxFrames(100.0f, 32.0f, 8.0f) > 0.0f && nrd2StabMaxFrames(128.0f, 32.0f, 8.0f) == 0.0f &&
+              nrd2StabMaxFrames(std::nanf(""), 32.0f, 8.0f) == 0.0f,
           "history kept through a fast pan, none from 128 px per frame or for a NaN speed");
-    check(std::fabs(nrd2StabMaxFrames(0.0f, 2.0f, 4.0f) - 2.0f) < 1e-5f && std::fabs(nrd2StabMaxFrames(130.0f, 2.0f, 4.0f)) == 0.0f, "the fast cap never exceeds the rest length");
+    check(nearly(nrd2StabMaxFrames(0.0f, 2.0f, 8.0f), 2.0f) && nrd2StabMaxFrames(130.0f, 2.0f, 8.0f) == 0.0f,
+          "the fast cap never exceeds the rest length");
+
+    // Specular: glossy keeps 8 frames, rough takes the full count, never above the diffuse cap.
+    check(nearly(nrd2StabSpecMaxFrames(32.0f, 0.0f), 8.0f) && nearly(nrd2StabSpecMaxFrames(32.0f, 1.0f), 32.0f, 1e-3f) &&
+              nrd2StabSpecMaxFrames(32.0f, 0.02f) > 8.0f && nrd2StabSpecMaxFrames(4.0f, 0.0f) == 4.0f &&
+              nrd2StabSpecMaxFrames(0.0f, 1.0f) == 0.0f,
+          "specular cap: max(8, N (1 - exp(-100 r))), within the diffuse cap, none in a whip");
+
+    // Sample count and blend weight: 1 from a disocclusion, +1 per frame, capped at N.
+    f32 n = nrd2StabSamples(0.0f, 32.0f);
+    bool ramp = n == 1.0f && nrd2StabBlend(n) == 0.0f;
+    const f32 want[4] = {0.5f, 2.0f / 3.0f, 0.75f, 0.8f};
+    for (u32 f = 0; f < 4; ++f) {
+        n = nrd2StabSamples(n, 32.0f);
+        ramp = ramp && nearly(nrd2StabBlend(n), want[f]);
+    }
+    check(ramp, "blend weight ramps 0, 1/2, 2/3, 3/4, 4/5 from a first frame");
+    for (u32 f = 0; f < 80; ++f) n = nrd2StabSamples(n, 32.0f);
+    check(n == 32.0f && nearly(nrd2StabBlend(n), 1.0f - 1.0f / 32.0f), "and caps at 1 - 1/32");
+    check(nrd2StabSamples(20.0f, 8.0f) == 8.0f && nrd2StabSamples(20.0f, 0.0f) == 1.0f && nrd2StabBlend(nrd2StabSamples(20.0f, 0.0f)) == 0.0f,
+          "a fast pan caps the count; a whip takes no history");
 
     {
         f32 glint[3] = {9.0f, 9.0f, 9.0f}, edge[3] = {1.5f, 1.5f, 1.5f};
         nrd2StabFirefly(glint, 1.0f);
         nrd2StabFirefly(edge, 1.0f);
-        check(std::fabs(glint[0] - 2.0f) < 1e-5f && edge[0] == 1.5f,
+        check(nearly(glint[0], 2.0f) && edge[0] == 1.5f,
               "firefly clamp: a lone glint drops to 2x its brightest neighbour; a pixel within 2x is untouched");
     }
 
-    // Weight ramp from a disocclusion: 0, 1/2, 2/3, 3/4 ... capped by N.
-    f32 age = 0.0f;
-    bool ramp = true, cap = true;
-    const f32 want[5] = {0.0f, 0.5f, 2.0f / 3.0f, 0.75f, 0.8f};
-    for (u32 f = 0; f < 5; ++f) {
-        const Nrd2StabIn in = stabPixel(1.0f, 1.0f, age, 0.5f, 1.5f, 12.0f);
-        Nrd2StabIn first = in;
-        first.historyValid = f > 0;
-        const Nrd2StabOut o = nrd2StabilisePixel(first);
-        ramp = ramp && std::fabs(o.alphaD - want[f]) < 1e-6f;
-        age = o.age;
+    // Noise estimate: relative, bounded, floored at half the tile scale.
+    check(nrd2StabRelVar(1.0f, 1.0f, 1.0f) == 0.0f && nearly(nrd2StabRelVar(1.0f, 0.0f, 2.0f), 1.0f) &&
+              nearly(nrd2StabRelVar(0.1f, 0.0f, 2.0f), 0.01f) && nearly(nrd2StabRelVar(10.0f, 0.0f, 2.0f), 1.0f) &&
+              nearly(nrd2StabRelVar(4.0f, 2.0f, 1.0f), 0.25f),
+          "relative luminance change squared, in [0, 1]");
+
+    // Anchor: a bright outlier is down-weighted against the tile, and the weight is unit-free.
+    {
+        std::vector<std::array<f32, 3>> tile(63, {1.0f, 1.0f, 1.0f});
+        tile.push_back({100.0f, 100.0f, 100.0f});
+        f32 a[3];
+        nrd2TileAnchor(tile, a);
+        const f32 plain = (63.0f + 100.0f) / 64.0f;
+        check(a[0] > 0.99f && a[0] < 1.1f && a[0] < 0.5f * plain, "anchor of 63 ones and a 100: ~1, not the plain mean " + std::to_string(plain));
+        std::vector<std::array<f32, 3>> scaled;
+        for (const auto& v : tile) scaled.push_back({v[0] * 37.0f, v[1] * 37.0f, v[2] * 37.0f});
+        f32 b[3];
+        nrd2TileAnchor(scaled, b);
+        check(nearly(b[0], 37.0f * a[0], 1e-3f), "the anchor scales with the signal (units do not matter)");
+        check(nrd2AnchorWeight(0.1f, 1.0f) > nrd2AnchorWeight(1.0f, 1.0f) && nrd2AnchorWeight(1.0f, 1.0f) > nrd2AnchorWeight(10.0f, 1.0f) &&
+                  nearly(nrd2AnchorWeight(1.0e6f, 1.0f), 0.01f) && nearly(nrd2AnchorWeight(5.0f * 3.0f, 3.0f), nrd2AnchorWeight(5.0f, 1.0f)),
+              "anchor weight falls with brightness, floors at 0.01, depends on lum / scale only");
+        f32 e[3];
+        nrd2TileAnchor({}, e);
+        check(e[0] == 0.0f, "an empty tile has no anchor");
     }
-    check(ramp, "weight ramps 0, 1/2, 2/3, 3/4, 4/5 from a first frame");
-    for (u32 f = 0; f < 40; ++f) age = nrd2StabilisePixel(stabPixel(1.0f, 1.0f, age, 0.5f, 1.5f, 12.0f)).age;
-    cap = std::fabs(nrd2StabilisePixel(stabPixel(1.0f, 1.0f, age, 0.5f, 1.5f, 12.0f)).alphaD - (1.0f - 1.0f / 12.0f)) < 1e-6f;
-    check(cap && age == 45.0f, "and caps at 1 - 1/N while the age keeps counting");
 
-    // Weight 0 returns the input; a constant history over a constant input is a fixed point.
-    Nrd2StabIn in = stabPixel(0.7f, 3.0f, 0.0f, 0.5f, 0.9f, 12.0f);
-    Nrd2StabOut o = nrd2StabilisePixel(in);
-    check(o.age == 1.0f && o.alphaD == 0.0f && o.d[0] == 0.7f && o.s[2] == 0.7f, "no history (age 0): the input, age 1");
-    in = stabPixel(0.7f, 0.7f, 9.0f, 0.5f, 0.9f, 12.0f);
-    o = nrd2StabilisePixel(in);
-    check(std::fabs(o.d[1] - 0.7f) < 1e-6f && std::fabs(o.s[0] - 0.7f) < 1e-6f && o.age == 10.0f,
-          "a constant history over a constant input is a fixed point");
-    in = stabPixel(0.7f, 0.7f, 9.0f, 0.5f, 0.9f, 0.0f);
-    check(nrd2StabilisePixel(in).alphaD == 0.0f, "nMax 0 (a fast pan) takes no history");
-
-    // The clamp: history outside the box is pulled to its edge, so the output stays inside [lo, hi].
-    Rng rng(41);
-    bool inside = true;
-    for (u32 t = 0; t < 200; ++t) {
-        const f32 lo = rng.range(0.1f, 1.0f), hi = lo + rng.range(0.0f, 1.0f), cur = rng.range(lo, hi);
-        const f32 hist = rng.range(-2.0f, 6.0f);
-        const Nrd2StabOut r = nrd2StabilisePixel(stabPixel(cur, hist, rng.range(1.0f, 30.0f), lo, hi, 12.0f));
-        for (u32 c = 0; c < 3; ++c) inside = inside && r.d[c] >= lo - 1e-6f && r.d[c] <= hi + 1e-6f && r.s[c] >= lo - 1e-6f && r.s[c] <= hi + 1e-6f;
+    // Prefilter weight: each stop cuts, the variance gain opens, the radiance floor keeps a sliver.
+    {
+        const f32 base = nrd2PrefilterWeight(1.0f, 0.0f, 0.0f, 1.0f);
+        check(nearly(base, 1.0f - std::exp(-4.4f), 1e-4f), "an identical neighbour takes the variance gain alone");
+        check(nrd2PrefilterWeight(0.99f, 0.0f, 0.0f, 1.0f) < 0.01f * base && nrd2PrefilterWeight(0.8f, 0.0f, 0.0f, 1.0f) < 1e-6f &&
+                  nrd2PrefilterWeight(-0.5f, 0.0f, 0.0f, 1.0f) == 0.0f,
+              "the weight falls with normal mismatch (cos^512)");
+        check(nrd2PrefilterWeight(1.0f, 0.05f, 0.0f, 1.0f) < 0.3f * base && nrd2PrefilterWeight(1.0f, 0.5f, 0.0f, 1.0f) < 1e-5f,
+              "and with relative depth error");
+        check(nrd2PrefilterWeight(1.0f, 0.0f, 5.0f, 1.0f) < 0.1f * base &&
+                  nearly(nrd2PrefilterWeight(1.0f, 0.0f, 1.0e4f, 0.0f), 0.01f * 0.1f, 1e-6f),
+              "and with distance from the anchor, down to a 0.01 radiance floor");
+        check(nrd2PrefilterWeight(1.0f, 0.0f, 0.0f, 0.0f) == 0.1f && nrd2PrefilterWeight(1.0f, 0.0f, 0.0f, 0.1f) > 0.1f &&
+                  nrd2PrefilterWeight(1.0f, 0.0f, 0.0f, 1.0f) > nrd2PrefilterWeight(1.0f, 0.0f, 0.0f, 0.1f),
+              "noisier pixels take more of their neighbours");
+        check(nrd2PrefilterCentreWeight(0.0f, 1.0f) == 1.0f && nrd2PrefilterCentreWeight(5.0f, 0.0f) < nrd2PrefilterCentreWeight(1.0f, 0.0f),
+              "the centre's own weight is its radiance stop");
     }
-    check(inside, "the output stays inside the min/max box however far the history is");
-    o = nrd2StabilisePixel(stabPixel(1.0f, 5.0f, 11.0f, 0.8f, 1.2f, 12.0f));
-    check(std::fabs(o.d[0] - (1.0f + (1.2f - 1.0f) * (1.0f - 1.0f / 12.0f))) < 1e-5f, "a spike in history lands on the box edge, then blends");
 
-    // Depth test: a tap that fails drops out; with too little weight left it is a disocclusion (age resets).
-    in = stabPixel(1.0f, 1.0f, 20.0f, 0.5f, 1.5f, 12.0f);
-    in.tap[0].zm = 14.0f; in.tap[1].zm = 14.0f; in.tap[2].zm = 14.0f;
-    o = nrd2StabilisePixel(in);
-    check(o.age == 1.0f && o.alphaD == 0.0f && o.d[0] == 1.0f, "a failed depth test resets the age and takes the input");
-    in = stabPixel(1.0f, 2.0f, 20.0f, 0.5f, 3.0f, 12.0f);
-    in.tap[0].zm = 14.0f;   // one of four fails: 0.75 of the weight remains
-    o = nrd2StabilisePixel(in);
-    check(o.age == 21.0f && o.alphaD > 0.9f, "one failed tap of four still leaves a valid history");
-    in.zTol = 5.0f;
-    check(nrd2StabilisePixel(in).age == 21.0f, "a looser tolerance accepts the same taps");
+    // Temporal blend. The history is clipped to [min(lo, anchor), max(hi, anchor)], the blend ramps to 1 - 1/32.
+    {
+        const f32 cur[3] = {1.0f, 1.0f, 1.0f}, anc[3] = {1.0f, 1.0f, 1.0f}, lo[3] = {0.5f, 0.5f, 0.5f}, hi[3] = {3.0f, 3.0f, 3.0f};
+        const f32 hist[3] = {2.0f, 2.0f, 2.0f};
+        check(nearly(nrd2TemporalBlend(cur, anc, lo, hi, hist, 32.0f).out[1], 1.0f + 1.0f * (1.0f - 1.0f / 32.0f)) &&
+                  nearly(nrd2TemporalBlend(cur, anc, lo, hi, hist, 2.0f).out[0], 1.5f) &&
+                  nrd2TemporalBlend(cur, anc, lo, hi, hist, 1.0f).out[2] == 1.0f,
+              "history weight 1 - 1/n: 31/32 at the cap, 1/2 at n = 2, none at n = 1");
 
-    // The age is the minimum over the taps that carry weight; a tap with a sliver of weight does not count.
-    in = stabPixel(1.0f, 1.0f, 20.0f, 0.5f, 1.5f, 12.0f);
-    in.tap[0].age = 2.0f; in.tap[0].b = 0.3f; in.tap[1].b = 0.3f; in.tap[2].b = 0.3f; in.tap[3].b = 0.05f; in.tap[3].age = 1.0f;
-    check(nrd2StabilisePixel(in).age == 3.0f, "age = 1 + the youngest tap with weight > 0.1");
+        Rng rng(41);
+        bool inside = true, histInside = true;
+        for (u32 k = 0; k < 400; ++k) {
+            f32 c[3], an[3], l[3], h[3], hs[3];
+            for (u32 j = 0; j < 3; ++j) {
+                l[j] = rng.range(0.1f, 1.0f); h[j] = l[j] + rng.range(0.0f, 1.0f);
+                c[j] = rng.range(l[j], h[j]); an[j] = rng.range(0.0f, 2.0f); hs[j] = rng.range(-2.0f, 8.0f);
+            }
+            const Nrd2TemporalOut o = nrd2TemporalBlend(c, an, l, h, hs, rng.range(1.0f, 32.0f));
+            for (u32 j = 0; j < 3; ++j) {
+                const f32 bl = std::min(l[j], an[j]) - 1e-6f, bh = std::max(h[j], an[j]) + 1e-6f;
+                inside = inside && o.out[j] >= bl && o.out[j] <= bh && o.cur[j] >= bl && o.cur[j] <= bh;
+                histInside = histInside && o.hist[j] >= bl && o.hist[j] <= bh;
+            }
+        }
+        check(inside && histInside, "the output and the clipped history stay inside the min/max box united with the anchor");
 
-    // Specular follows the roughness gate: a mirror takes no history, a rough lobe does.
-    in = stabPixel(1.0f, 1.2f, 20.0f, 0.5f, 1.5f, 12.0f);
-    in.roughness = 0.1f;
-    o = nrd2StabilisePixel(in);
-    check(o.s[0] == 1.0f && o.alphaS == 0.0f && o.alphaD > 0.9f, "a smooth lobe's specular stays single-frame, diffuse does not");
-    in.roughness = 0.9f;
-    check(nrd2StabilisePixel(in).alphaS == nrd2StabilisePixel(in).alphaD, "a rough lobe takes the full weight");
-
-    // Without a valid previous frame nothing is taken.
-    in = stabPixel(1.0f, 1.2f, 20.0f, 0.5f, 1.5f, 12.0f);
-    in.historyValid = false;
-    check(nrd2StabilisePixel(in).alphaD == 0.0f, "an invalid history is ignored");
+        const f32 spike[3] = {100.0f, 100.0f, 100.0f};
+        check(nearly(nrd2TemporalBlend(cur, anc, lo, hi, spike, 32.0f).hist[0], 3.0f), "a history spike lands on the box edge");
+        const f32 farAnchor[3] = {5.0f, 5.0f, 5.0f}, lo2[3] = {1.0f, 1.0f, 1.0f}, hi2[3] = {2.0f, 2.0f, 2.0f}, high[3] = {9.0f, 9.0f, 9.0f};
+        const Nrd2TemporalOut u = nrd2TemporalBlend(lo2, farAnchor, lo2, hi2, high, 4.0f);
+        check(nearly(u.hist[0], 5.0f) && nearly(u.cur[0], 1.0f + 4.0f * 0.2f),
+              "the anchor widens the box; the current value moves toward it by 1/(n + 1)");
+        const f32 c3[3] = {1.0f, 1.0f, 1.0f}, a3[3] = {3.0f, 3.0f, 3.0f}, lo3[3] = {0.0f, 0.0f, 0.0f}, hi3[3] = {10.0f, 10.0f, 10.0f};
+        check(nearly(nrd2TemporalBlend(c3, a3, lo3, hi3, hist, 1.0f).out[0], 2.0f), "with no history (n = 1) the output is the current value pulled halfway to the anchor");
+    }
 
     // The box helper.
     f32 lo[3], hi[3];
@@ -481,7 +499,7 @@ int main() {
     testPyramidConstant();
     testEnergy();
     testFiniteDifferences();
-    testStabiliser();
+    testTemporal();
     testCandidates();
     testOracle(Nrd2OracleMode::Grad);
     testOracle(Nrd2OracleMode::Grid);

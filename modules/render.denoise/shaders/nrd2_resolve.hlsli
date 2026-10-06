@@ -153,26 +153,37 @@ float3 nrd2SpecularExtraLogit(float rough, float hitT, float viewZ) {
     return -kNrd2SpecRoughFall * (1.0 - g) * float3(1.0, 2.0, 3.0) - kNrd2SpecContact * contact;
 }
 
-// ---- temporal stabiliser (docs/rendering/NRD2.md): maths shared with the CPU twin ------------------------
-// Runs on jitter-free frames only, on the resolve's D' and S' (irradiance), after the spatial filter. History
-// length comes from motion and disocclusion only and feeds the blend weight alone (NEURAA_NRD.md rule 5).
+// ---- temporal stage (docs/rendering/NRD2.md "Temporal stabiliser"): maths shared with the CPU twin --------
+// Runs on jitter-free frames only, on the resolve's D' and S' (irradiance), after the spatial filter. The design
+// is AMD FidelityFX's reflections denoiser (reproject, prefilter, temporal resolve; MIT), rewritten: min/max
+// order statistics instead of mean +- sigma, luminance relative to the tile, surface-motion reprojection only.
+// History length (the sample count n) comes from motion and disocclusion; it weights blends and the prefilter's
+// noise estimate, never a radius or a level (NEURAA_NRD.md section 7, rules 1, 5, 7).
 static const float kNrd2StabSpeedStill = 0.25;   // px per frame: full history length at or below
-static const float kNrd2StabSpeedFast  = 8.0;    // log-space ramp down to Nfast here
+static const float kNrd2StabSpeedFast  = 8.0;    // log-space ramp down to nFast here
 static const float kNrd2StabSpeedCut   = 128.0;  // no history from here (a whip)
-static const float kNrd2StabRoughLo    = 0.35;   // S takes history only for rough lobes (the resolve's smooth threshold)
-static const float kNrd2StabRoughSpan  = 0.3;
+static const float kNrd2StabSpecMin    = 8.0;    // glossy specular still keeps this many frames
+static const float kNrd2StabSpecRough  = 100.0;  // n_S = max(8, n * (1 - exp(-100 roughness)))
 static const float kNrd2StabDepthRel   = 0.02;   // reprojected-depth acceptance: relative + 1 cm + local plane slope
 static const float kNrd2StabDepthAbs   = 0.01;
+static const float kNrd2StabNormalCos  = 0.9;    // a history texel's normal must agree this much
+static const float kNrd2StabNormalK    = 1.4;    // search score: exp(-K (1 - cos)) * exp(-Z |dz| / z)
+static const float kNrd2StabDepthK     = 30.0;
 static const float kNrd2StabMinWeight  = 0.5;    // valid bilinear weight needed for any history
-static const float kNrd2StabAgeWeight  = 0.1;
-static const float kNrd2StabAgeCap     = 255.0;
+static const float kNrd2StabAgeWeight  = 0.1;    // taps lighter than this do not set the history's count
+static const float kNrd2AnchorK        = 0.3;    // anchor weight exp(-K lum / tile scale)
+static const float kNrd2AnchorMin      = 0.01;
+static const float kNrd2AnchorMix      = 0.3;    // share of the reprojected history in the value the anchor sees
+static const float kNrd2PfNormalPow    = 512.0;  // prefilter: cos^512
+static const float kNrd2PfDepthK       = 30.0;   // exp(-K |dz| / z), plane-predicted
+static const float kNrd2PfRadBias      = 0.6;    // exp(-(bias + var * VarK) * |anchor - value| / scale)
+static const float kNrd2PfRadVarK      = 0.1;
+static const float kNrd2PfRadMin       = 0.01;
+static const float kNrd2PfVarK         = 4.4;    // neighbour gain max(VarMin, 1 - exp(-K var))
+static const float kNrd2PfVarMin       = 0.1;
+static const float kNrd2PfMirror       = 0.1;    // smoother specular is not prefiltered
 
-struct Nrd2StabTap {
-    float  b;      // bilinear weight (0 outside the viewport)
-    float  age;    // frames of history behind this texel (0 = none)
-    float  zm;     // its view Z, metres
-    float3 d, s;   // stabilised D'' and S''
-};
+float3 nrd2StabSane(float3 v) { return all(v == v) ? clamp(v, -6.0e4, 6.0e4) : 0.0; }
 
 // Frames of history allowed at this screen speed (px per frame): nStill at rest, nFast from 8 px, none from 128 px.
 float nrd2StabMaxFrames(float speed, float nStill, float nFast) {
@@ -183,6 +194,21 @@ float nrd2StabMaxFrames(float speed, float nStill, float nFast) {
     return exp2(lerp(log2(hi), log2(clamp(nFast, 1.0, hi)), t));
 }
 
+// Specular's cap: smooth lobes keep the floor, rough ones the full count (never above the diffuse cap).
+float nrd2StabSpecMaxFrames(float nMax, float roughness) {
+    if (!(nMax > 0.0)) return 0.0;
+    return min(nMax, max(kNrd2StabSpecMin, nMax * (1.0 - exp(-kNrd2StabSpecRough * max(roughness, 0.0)))));
+}
+
+// History count after this frame: the accepted history's count + 1, capped; 1 (no history) otherwise.
+float nrd2StabSamples(float prevCount, float nMax) {
+    if (!(prevCount > 0.0) || !(nMax > 0.0)) return 1.0;
+    return max(min(nMax, prevCount + 1.0), 1.0);
+}
+
+// Weight of the history after n samples: 0 at n = 1, 1/2, 2/3 ... 1 - 1/n.
+float nrd2StabBlend(float n) { return 1.0 - 1.0 / max(n, 1.0); }
+
 // Firefly clamp: a pixel brighter than kNrd2StabFirefly times the brightest of its 8 neighbours is scaled
 // down to that (an order statistic, never a mean). Isolated glints go; highlights wider than a pixel stay.
 static const float kNrd2StabFirefly = 2.0;
@@ -192,36 +218,61 @@ float3 nrd2StabFirefly(float3 c, float neighbourMaxLum) {
     return (l > cap && l > 0.0) ? c * (cap / l) : c;
 }
 
-// Weight of the history: 0, 1/2, 2/3, ... up to 1 - 1/nMax.
-float nrd2StabAlpha(float age, float nMax) {
-    return saturate(1.0 - 1.0 / max(min(age + 1.0, nMax), 1.0));
+// Ranking of a history texel in the 3x3 search: normal agreement and relative depth error.
+float nrd2StabScore(float cosN, float dzAbs, float zExp) {
+    return exp(-kNrd2StabNormalK * (1.0 - max(cosN, 0.0))) * exp(-kNrd2StabDepthK * min(dzAbs / max(zExp, 1.0e-4), 64.0));
 }
 
-// cur, the clamp box (min/max of this frame's values only), the four reprojected history taps and the depth
-// they must match (zExp +- zTol). Out: the blended D'' / S'' and the history age to store.
-void nrd2StabCombine(float3 curD, float3 curS, float3 loD, float3 hiD, float3 loS, float3 hiS, Nrd2StabTap t[4],
-                     float zExp, float zTol, float nMax, float rough, bool historyValid, out float3 outD,
-                     out float3 outS, out float outAge) {
-    float  wsum = 0.0, nAge = 1.0e9;
-    float3 hd = 0.0, hs = 0.0;
+// Squared relative luminance change, the noise estimate: ((a - b) / max(a, b, scale / 2))^2, in [0, 1].
+float nrd2StabRelVar(float lumA, float lumB, float scale) {
+    const float m = max(max(lumA, lumB), 0.5 * scale);
+    const float d = abs(lumA - lumB) / max(m, 1.0e-6);
+    return d * d;
+}
+
+// Weight of a pixel in its 8x8 tile's anchor: bright outliers fall away. lum / tileScale is unit-free.
+float nrd2AnchorWeight(float lum, float tileScale) {
+    return max(exp(-kNrd2AnchorK * min(max(lum, 0.0) / max(tileScale, 1.0e-6), 1.0e4)), kNrd2AnchorMin);
+}
+
+// The 1/8 anchor texture bilinearly at viewport pixel q (validity-weighted Loads); a = 1 when any tap was valid.
+float4 nrd2SampleAnchor(Texture2D<float4> t, uint2 q, uint2 size) {
+    const float2 pos  = (float2(q) + 0.5) / 8.0 - 0.5;
+    const int2   base = int2(floor(pos));
+    const float2 f    = pos - float2(base);
+    float4 acc = 0.0;
     [unroll] for (uint i = 0u; i < 4u; ++i) {
-        if (!(historyValid && t[i].b > 0.0 && t[i].age > 0.0 && abs(t[i].zm - zExp) <= zTol)) continue;
-        wsum += t[i].b;
-        hd += t[i].b * t[i].d;
-        hs += t[i].b * t[i].s;
-        if (t[i].b > kNrd2StabAgeWeight) nAge = min(nAge, t[i].age);
+        const int2 o = int2(i & 1u, i >> 1);
+        const float4 v = t.Load(int3(clamp(base + o, int2(0, 0), int2(size) - 1), 0));
+        if (v.a > 0.0) { const float b = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y); acc += float4(b * v.rgb, b); }
     }
-    float aD = 0.0, aS = 0.0;
-    outAge = 1.0;
-    if (wsum >= kNrd2StabMinWeight && nMax > 0.0) {
-        aD = nrd2StabAlpha(nAge, nMax);
-        aS = aD * saturate((rough - kNrd2StabRoughLo) / kNrd2StabRoughSpan);
-        hd = clamp(hd / wsum, loD, hiD);
-        hs = clamp(hs / wsum, loS, hiS);
-        outAge = min(nAge + 1.0, kNrd2StabAgeCap);
-    }
-    outD = lerp(curD, hd, aD);
-    outS = lerp(curS, hs, aS);
+    return acc.a > 1.0e-4 ? float4(acc.rgb / acc.a, 1.0) : 0.0;
+}
+
+// Prefilter weight of one neighbour: normal, depth (relative error vs the plane prediction) and radiance
+// (distance to the tile anchor in units of the pixel's luminance scale) stops, times the variance gain.
+float nrd2PfWeight(float cosN, float dzRel, float radDiffRel, float variance) {
+    const float wn = pow(max(cosN, 0.0), kNrd2PfNormalPow);
+    const float wd = exp(-kNrd2PfDepthK * min(dzRel, 64.0));
+    const float wr = max(exp(-(kNrd2PfRadBias + variance * kNrd2PfRadVarK) * min(radDiffRel, 1.0e4)), kNrd2PfRadMin);
+    return wn * wd * wr * max(kNrd2PfVarMin, 1.0 - exp(-variance * kNrd2PfVarK));
+}
+
+// The centre's own weight: the radiance stop alone (it keeps firefly energy out of the sum).
+float nrd2PfCentreWeight(float radDiffRel, float variance) {
+    return max(exp(-(kNrd2PfRadBias + variance * kNrd2PfRadVarK) * min(radDiffRel, 1.0e4)), kNrd2PfRadMin);
+}
+
+// The temporal resolve of one signal: cur (prefiltered, firefly-clamped) pulled toward the anchor by
+// 1/(n + 1), clipped to this frame's min/max box united with the anchor; the history clipped to the same box
+// (order statistics only, never a mean or variance) and blended in with weight 1 - 1/n.
+float3 nrd2TemporalBlend(float3 cur, float3 anchor, float3 lo, float3 hi, float3 hist, float n, out float3 outCur,
+                         out float3 outHist) {
+    lo = min(lo, anchor);
+    hi = max(hi, anchor);
+    outCur  = clamp(lerp(cur, anchor, 1.0 / max(n + 1.0, 1.0)), lo, hi);
+    outHist = clamp(hist, lo, hi);
+    return lerp(outCur, outHist, nrd2StabBlend(n));
 }
 
 // ---- backward (phase 3 oracle): d(output)/d(theta) for one pixel and one signal --------------------

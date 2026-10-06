@@ -511,23 +511,38 @@ legal advice). The design follows them unless counsel says otherwise:
 11. **Un-jitter before the denoiser** (Arm US 18/497,608, granted 2026-09-29).
 12. **Watch:** AMD's pending US 2026/0094228 (any trained network in a pipeline stage; every claim
    rejected as of 2026-08-12) and NVIDIA's US 2025/0299305 and US 2026/0073486.
-13. **NRD2's temporal stabiliser (2026-10-06, docs/rendering/NRD2.md "Temporal stabiliser").** Checked
-   against the rules above. Rule 1 and 7: the clamp is the per-channel 3x3 min/max of this frame's D' (S')
-   united with the 1/8 level bilinearly interpolated at the pixel (the value the resolve's own taps blend; the
-   four raw texels made blocky clamps), so its footprint is the spatial estimate's and never larger; never a mean, variance or fitted distribution. **Counsel should confirm** that
-   the union with the coarse texels is still "the 3x3 min/max" and not a larger temporal radius (US
-   11,663,701); the fallback is the 3x3 alone, which leaves coarse blobs uncorrected. Rule 5: the history
-   age feeds only the blend weight; no radius or level reads it, and the spatial filter runs first, on this
-   frame only, so it is not a spatial filter on an accumulated signal (US 10,991,079). The weight's length
-   comes from screen-space motion and disocclusion, never view angle or parallax (US 11,823,321); specular
-   history is gated by roughness, a material property. Rule 6 and 10: the network runs before the resolve,
-   never sees history and writes tile parameters only. Rule 4: nothing here is trained and no image error
-   is scored through it. Rule 11: it runs on jitter-free frames only, so no jittered sample is accumulated
-   (the existing denoise-then-TAAU order is unchanged and still open). **Not covered by any rule above,
-   flag to counsel:** the per-tap depth test (a binary reprojection check with a slope allowance, not a
-   history length; it sits near US 11,823,321 and the order-statistics claims), and the optional
-   clamp-distance confidence if it is ever added (a function of the min/max box only). The shipped TAAU's
-   mean +- sigma clip (`sr_taa.hlsl`) still breaks rule 1; the stabiliser does not reuse it.
+13. **NRD2's temporal stage (2026-10-06, rewritten; docs/rendering/NRD2.md "Temporal stabiliser").** A clean-room
+   re-implementation of the temporal design of AMD FidelityFX's reflections denoiser (MIT, no code or headers
+   used), checked against the rules above. Mapping: FidelityFX reproject = `CSNrd2Reproject` (surface
+   reprojection by velocity, depth and normal; the 3x3 neighbour fallback; sample count n; temporal noise
+   estimate; the 8x8 brightness-weighted anchor); FidelityFX prefilter = `CSNrd2Prefilter` (15 fixed taps);
+   FidelityFX temporal resolve = `CSNrd2Temporal` (blend toward the anchor, clipped blend with history).
+   Rule 1 and 7: **every clip is per-channel min/max.** The current value and the history are clipped to
+   [min(localMin, anchor), max(localMax, anchor)], `localMin/Max` the min and max of this frame's prefiltered
+   5x5 (inside the prefilter's 7x7 and the spatial estimate's footprint, never larger). FidelityFX's mean +-
+   (std + |mean - anchor|) clip is *not* used, and no mean, variance or standard deviation enters any clip,
+   clamp or history-rejection test. **Counsel should confirm** that the anchor, a brightness-weighted mean of
+   the 8x8 tile that widens the box and is the current value's blend target (1/(n + 1)), is outside US
+   10,116,916 (mean +- sigma box) and US 12,482,168 / US 11,600,036 (range from the distribution or moments of
+   samples): it is a bound and a target, not a centre with a spread, but it is a mean. Fallback: take it out
+   of the clip bounds (box = the 5x5 min/max alone), then out of the blend. Rule 5: **32-frame history** (was 12). The
+   sample count n depends on motion (screen speed ramp, none from 128 px), disocclusion and, for specular,
+   roughness (a material property: max(8, N (1 - exp(-100 r)))), never view angle or parallax (US
+   11,823,321; there is no hit or virtual reprojection); it feeds the blend weight and the noise estimate only,
+   never a radius, a level or a tap position (the prefilter's 15 taps are fixed: rule 8). **Flag to counsel:
+   noise-guided spatial weights.** The prefilter's neighbour weights use a per-pixel noise estimate built from
+   the temporal luminance difference (relative squared difference, lerp by 1/n with last frame's estimate),
+   which is SVGF-like (Schied 2017: variance-guided spatial filtering on an accumulated signal) and sits near
+   US 10,991,079 and US 11,663,701 (spatial filter on an accumulated signal; temporal radius vs spatial radius).
+   The spatial filters still run on the current frame only (the resolve first, then the prefilter on its output)
+   and the estimate sets weights, never footprints. Fallback: fix the prefilter's variance input to a constant
+   (a single-frame prefilter) or drop the pass. Also flag: the per-tap depth and normal reprojection test and the
+   3x3 neighbour search for the best-matching history texel (FidelityFX's own; near US 11,823,321 and the
+   order-statistics claims, as the earlier binary depth check was). Rule 6 and 10: the network runs before the
+   resolve, never sees history or the noise estimate and writes tile parameters only. Rule 4: nothing here is
+   trained and no image error is scored through it. Rule 11: it runs on jitter-free frames only, so no jittered
+   sample is accumulated (the existing denoise-then-TAAU order is unchanged and still open). The shipped TAAU's
+   mean +- sigma clip (`sr_taa.hlsl`) still breaks rule 1; the stage does not reuse it.
 
 NRD's own sweep (multi-scale learned blending, hit-distance kernels, push-pull filling) is section 9 of
 the private patents document. **Counsel should review before either feature ships.** Nothing is vendored: the
