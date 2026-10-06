@@ -222,6 +222,9 @@ float3 averRtPerturbNormal(RtMaterial mat, RtInstance inst, float3 N, float3 nTS
 // Material buffer slot t9.
 StructuredBuffer<RtMaterial> gRtMaterials : register(t9);
 
+// Projected decals (t24). Before rtHitSurface, which applies them to every ray hit it builds.
+#include "voxi_decal.hlsli"
+
 // ================= ONE SURFACE FOR EVERY RAY HIT =================
 // Where a ray landed, as the surface its material describes. The primary ray (PSRayDriven / Stage B),
 // ReSTIR GI candidates, reflections and Path Tracing vertices all build it here: the material's maps
@@ -394,7 +397,15 @@ AverSurface rtHitSurface(RtHit h, float3 V, float3 L, float2 gx, float2 gy, uint
     l.direction  = L;
     l.radiance   = float3(0.0, 0.0, 0.0);
     l.visibility = float3(1.0, 1.0, 1.0);
-    return averComposeSurface(v, l, a, m, rtDrawTerms(h.inst), N);
+    AverSurface s = averComposeSurface(v, l, a, m, rtDrawTerms(h.inst), N);
+#if !AVER_RD_SINGLE_PASS
+    // Decals repaint opaque hits (voxi_decal.hlsli). Not in the single-pass kernel, which is at its
+    // register limit, nor on LITE secondary hits. h.N is already the geometric normal facing the ray.
+    if (gDecalParams.x > 0.5 && detail != AVER_RT_HIT_LITE &&
+        (m.flags & AVER_MAT_ALPHA_BLEND) == 0 && !(m.transmission > 0.0))
+        averApplyDecals(s, h.pos, h.N, detail == AVER_RT_HIT_FULL);
+#endif
+    return s;
 }
 // ---- ALPHA-TESTED GEOMETRY ----
 // Opaque by default; BLENDED instances un-opaqued. Alpha-masked geometry (foliage, grates) is

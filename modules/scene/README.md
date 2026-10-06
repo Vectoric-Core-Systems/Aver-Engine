@@ -15,7 +15,7 @@ Data-oriented entity/component world: entities, component storage, transforms, h
 | `Entity.hpp` | The handle: 24 bits of index, 7 of generation, bit 31 always clear |
 | `ComponentPool.hpp` | One sparse set per component type |
 | `Fields.hpp` | Field kinds and the `ComponentBuilder` that declares a table |
-| `Components.hpp` | The **15** built-in components and their fixed dense ids: `CLocal`, `CWorld`, `CHierarchy`, `CName`, `CTags`, `CMeshRenderer`, `CLight`, `CCamera`, `CSkeletalMesh`, `CAnimator`, `CParticleEmitter`, `CAttachment`, `CSoftBody`, `CRigidBody`, `CJoint`. `scene_abi.h` names fixed `AVER_SCENE_COMP_*` constants only for the first twelve (up to `CAttachment`); the three physics ones are appended the same way but resolved by name / qualified field id rather than a published constant |
+| `Components.hpp` | The **16** built-in components and their fixed dense ids: `CLocal`, `CWorld`, `CHierarchy`, `CName`, `CTags`, `CMeshRenderer`, `CLight`, `CCamera`, `CSkeletalMesh`, `CAnimator`, `CParticleEmitter`, `CAttachment`, `CSoftBody`, `CRigidBody`, `CJoint`, `CDecal` (id 16; `docs/rendering/DECALS.md`). Components registered at run time (`CReverbZone`, `CPrefabLink`, `CAnimGraph`, ...) each moved up one id when `CDecal` took 16; they are resolved by name. `scene_abi.h` names fixed `AVER_SCENE_COMP_*` constants only for the first twelve (up to `CAttachment`); the three physics ones are appended the same way but resolved by name / qualified field id rather than a published constant |
 | `World.hpp` | Lifetime, registry, hierarchy and propagation pass |
 | `LightGather.hpp` | Header-only: every `CLight` entity resolved to a world-space `WorldLight` (axes, defaults) for the renderers; see `docs/rendering/LIGHTS.md` |
 

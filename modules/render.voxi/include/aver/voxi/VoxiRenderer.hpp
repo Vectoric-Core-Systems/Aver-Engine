@@ -7,6 +7,7 @@
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/voxi/Voxi.hpp"
 #include "aver/voxi/SceneLight.hpp"
+#include "aver/voxi/SceneDecal.hpp"
 #include "aver/voxi/GiDispatchBounds.hpp"   // VoxelBox/GiDispatchConstants
 #include "aver/render/denoise/Denoiser.hpp"
 #include "aver/render/denoise/Nrd2.hpp"
@@ -130,6 +131,20 @@ public:
     // Registers an sRGB RGBA8 cookie image under `id`.
     bool registerCookie(u64 id, u32 width, u32 height, const u8* rgba8);
     bool hasLightAsset(u64 id) const { return lightAssetsCpu_.find(id) != lightAssetsCpu_.end(); }
+
+    // ---- projected decals (CDecal): box projectors that repaint colour, normal and roughness ----
+    // World space (SceneDecal.hpp), filled by the host from scene::gatherDecals. Applied to the surface
+    // before it is lit, so the raster scene and the staged ray-driven path (primary, reflection and GI
+    // hits) all see them. At most kMaxSceneDecals per frame; textured decals need the bindless texture
+    // table (ray-tracing capable devices) and are skipped without it. docs/rendering/DECALS.md.
+    // Replaces the set; call once per frame before the frame renders. Copies. An empty set costs nothing.
+    void setSceneDecals(const SceneDecal* decals, u32 count);
+    // Registers an RGBA8 decal image under `id` (an sRGB colour image for kind Colour). A mip chain is
+    // built on first use. An id is immutable for the session: a repeat registration is ignored.
+    bool registerDecalTexture(u64 id, u32 width, u32 height, const u8* rgba8, DecalImageKind kind);
+    bool hasDecalTexture(u64 id) const { return decalTexCpu_.find(id) != decalTexCpu_.end(); }
+    // Decals the last prePass uploaded (after culling and the cap).
+    u32 decalsDrawnLastFrame() const { return decalCount_; }
     void submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                     f32 metallic, f32 roughness, rhi::BindingSetHandle drawBinding,
                     const void* drawConstants, u32 drawConstantBytes, bool blended = false) override;
@@ -629,6 +644,30 @@ private:
     u32 lightAssetIndex(u64 id);
     void releaseLightAssets();
     void appendSceneLightCandidates(const f32 eye[3]);
+
+    // ---- DECALS: per-frame record list at t24 (gDecals), count in cb_.decalParams[0] ----
+    static_assert(sizeof(PackedDecal) == 192, "PackedDecal is the HLSL AverDecalRec ABI");
+    // Upload-heap ring, as the local-light list: rotate before writing, never touch the bound copy.
+    rhi::BufferHandle decalBuf_[kRtInstanceRing] = {};
+    u32 decalBufSlot_ = 0;
+    u32 decalBufCapacity_ = 0;
+    rhi::BufferHandle decalPlaceholder_ = 0;   // bound while the list is empty: every slot needs a descriptor
+    rhi::BufferHandle decalBound_ = 0;
+    u32 decalCount_ = 0;
+    std::vector<SceneDecal> sceneDecals_;
+    struct DecalCand { f32 importance; f32 dist; i32 order; PackedDecal packed; };
+    std::vector<DecalCand> decalCand_;
+    std::vector<PackedDecal> decalData_;
+    struct DecalTexCpu { std::vector<std::vector<u8>> levels; u32 width = 0, height = 0; DecalImageKind kind = DecalImageKind::Colour; };
+    struct DecalTexGpu { rhi::TextureHandle tex = 0; u32 index = 0xFFFFFFFFu; bool failed = false; };
+    std::unordered_map<u64, DecalTexCpu> decalTexCpu_;
+    std::unordered_map<u64, DecalTexGpu> decalTexGpu_;
+    bool decalFailLogged_ = false;
+    bool decalLoggedRun_ = false;
+    // Bindless index of a registered decal image (uploading it on first use), or kUnboundTexture.
+    u32 decalTextureIndex(u64 id);
+    void releaseDecalTextures();
+    void buildDecals();
     std::vector<RdLocalLightCand> rdLocalLightCand_;
     bool rdLocalLightsFailLogged_ = false;
     void buildLocalLights();
@@ -850,11 +889,13 @@ private:
         f32 viewParams[4] = {};
         // ReSTIR GI control: x = running, y = history valid, z = write buffer slice, w = poison debug view.
         f32 giRestirParams[4] = {};
+        // Projected decals: x = records in t24 this frame (0 = every decal call is skipped); yzw unused.
+        f32 decalParams[4] = {};
     } cb_;
 
     // `cbuffer VoxiFrame : register(b4)` in voxi.hlsl and voxi_gi.hlsli mirrors this byte-for-byte (no guard).
     // Append/insert changes must update both and voxi_gi.hlsli's copy.
-    static_assert(sizeof(FrameConstants) == 736,
+    static_assert(sizeof(FrameConstants) == 752,
                   "cbuffer VoxiFrame in modules/render.voxi/shaders/voxi.hlsl mirrors this byte for byte");
     static_assert(sizeof(FrameConstants) % 16 == 0, "must be a legal constant-buffer size");
 

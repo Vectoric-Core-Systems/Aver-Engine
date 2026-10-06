@@ -149,6 +149,9 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     // it needs the ray-tracing toolkit (gScene, RtInstance, gRtMaterials) this cone-only prelude's
     // callers never bind, so the actual switch never reaches this file.
     float4   gGiRestirParams;
+    // Projected-decal control -- mirrors gDecalParams in voxi.hlsl. NOTHING IN THIS PRELUDE READS IT;
+    // it is here so the block stays the full FrameConstants layout (see the note above).
+    float4   gDecalParams;
 };
 
 // t(AVER_GI_SRV) the GI volume, t(AVER_GI_SRV_1) the shadow map -- the only two of Voxi's table-0
