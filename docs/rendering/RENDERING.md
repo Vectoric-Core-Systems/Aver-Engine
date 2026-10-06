@@ -306,7 +306,7 @@ It **suppresses the raster scene** while registered and draws its own accumulato
 
 ### 4b.3 What it deliberately does NOT do (stated here so the first user does not file a bug)
 
-**LIGHT SOURCE:** `ptEnvironment()` is `skyColor()` only — no `CLight`, no emissive term, no next-event estimation. **This view is only physically meaningful for scenes lit by the procedural sky: outdoor levels or interiors that see sky through real openings.** Pointed at an indoor/artificially-lit level, it will correctly, honestly render BLACK. That is not a bug; that is a feature limitation.
+**LIGHT SOURCE:** `ptEnvironment()` is `skyColor()` for bounces that escape, `ptDirectSun` fires a shadow ray at the sun, and scene lights (`CLight`: point, spot, rectangle, IES, cookie — `docs/rendering/LIGHTS.md`) are next-event estimated by `ptDirectLights` once the host calls `PtSceneView::setLights`. Emissive surfaces glow but are not next-event estimated. Without sky, sun or lights an interior renders BLACK; that is a feature limitation, not a bug.
 
 **GEOMETRY:** Includes only static draws (no compute-written vertex buffers, per line 132 of PtSceneView.cpp, drifted from 129 — the same predicate `IDevice::meshVertexBuffer()` applies). Skinned characters, particles, and anything else that writes its own vertices every frame are silently absent.
 

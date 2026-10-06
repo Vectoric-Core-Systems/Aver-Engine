@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "LightLevelIo.hpp"
 // applyLevelSky below calls assets::applyLevelEnv, and the only thing that brings that declaration
 // in is SandboxApp.hpp's AVER_MODULE_PBR include block -- so a PBR-off build lost the header while
 // the call, guarded on AVER_MODULE_SCENE, stayed compiled in. Named here rather than left to the
@@ -276,6 +277,7 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         levelHeader_ = w;
         levelHeader_.placements.clear();
         levelHeader_.pcgVolumes.clear();
+        levelHeader_.lights.clear();   // rebuilt from the live CLight entities by saveLevel
         if (!levelPcgVolumes_.empty())
             AVER_INFO("[Level] carrying {} PCGVOLUME record(s) through the editor unchanged",
                       levelPcgVolumes_.size());
@@ -363,6 +365,18 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
 #if AVER_MODULE_PHYSICS
     levelBodies_ = inst.bodies;
 #endif
+    {
+        // LIGHT records: one bare CLight entity each (the instantiator does not know them).
+        scene::World& lw = scene::World::instance();
+        for (const fmt::OcLight& r : w.lights) {
+            const scene::Entity le = lw.create(r.name.empty() ? std::string("Light") : r.name, scene::kInvalidEntity,
+                                               editor::transformFromRecord(r));
+            if (le == scene::kInvalidEntity) continue;
+            if (auto* c = static_cast<scene::CLight*>(lw.addComponent(le, scene::kComponentLight)))
+                *c = editor::lightFromRecord(r);
+            entityLabels_[static_cast<u32>(le)] = r.name.empty() ? std::string("Light") : r.name;
+        }
+    }
     for (usize k = 0; k < inst.entities.size(); ++k) {
         const scene::Entity e = inst.entities[k];
         const fmt::OcWorldPlacement& p = w.placements[inst.placementIndex[k]];
@@ -832,6 +846,14 @@ void SandboxApp::unloadLevel(Engine& eng) {
     scene::World& world = scene::World::instance();
     for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);
     levelEntities_.clear();
+#if AVER_MODULE_SCENE
+    // LIGHT RECORDS are bare CLight entities that levelEntities_ does not hold (they are not placements).
+    if (scene::ComponentPool* lights = world.pool(scene::kComponentLight)) {
+        std::vector<scene::Entity> doomed;
+        for (usize i = 0; i < lights->size(); ++i) doomed.push_back(lights->entityAt(i));
+        for (const scene::Entity e : doomed) if (world.valid(e)) world.destroy(e);
+    }
+#endif
 #if AVER_MODULE_SCENE
     // THE PLAYERSTART MARKER needs its own line here for the reason it's not in levelEntities_:
     // deliberately transient, so saving doesn't emit it as a PLACE record. Consequence: loadLevel

@@ -138,6 +138,10 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // Unconditional for the identical reason: OcInput.hpp's own comment states it needs no engine
 // dependency either.
 #include "InputSchemeEditor.hpp"
+#include "SoftBodyPanel.hpp"
+#if AVER_MODULE_VOXI
+#include "SceneLightFeed.hpp"
+#endif
 #include "EditorEuler.hpp"
 #include "SequenceEditor.hpp"
 #include "AssetRefScan.hpp"
@@ -2309,6 +2313,10 @@ private:
 #endif
 
     void addPlayerStart(Engine&);
+#if AVER_MODULE_SCENE
+    // "Add > Point/Spot/Rect Light": a CLight entity in front of the camera, selected, with an undo entry.
+    void spawnLightAtCamera(i32 kind);
+#endif
 
     void spawnPrimitive(Engine& engine, const char* assetPath, const char* label);
 
@@ -3224,6 +3232,9 @@ private:
     // Window > World Outliner / Details. Default ON: these are the editor's two primary panels.
     bool showOutliner_=true;
     bool showDetails_=true;
+    // Window > Soft Body (plastic): the plastic-material test bar. Not persisted.
+    bool showSoftBody_=false;
+    editor::SoftBodyPanelState softBody_;
     // Viewport Show flags. Both default ON.
     bool showStaticMeshes_=true;
     bool showAtmosphere_=true;
@@ -3505,6 +3516,7 @@ private:
     bool viewModeFromCli_=false;
 #if AVER_MODULE_VOXI
     voxi::VoxiRenderer voxiRenderer_;
+    editor::SceneLightFeed sceneLightFeed_;   // CLight entities -> Voxi lamps + path-tracer lights, per frame
     bool voxiAttached_=false;
     // Viewport's ray-hit/triangles debug view (Ray Hit: Instances/Materials/Distance, Triangles), or None. NOT PERSISTED: reasserted every frame.
     voxi::VoxiRenderer::ViewDebug debugView_ = voxi::VoxiRenderer::ViewDebug::None;

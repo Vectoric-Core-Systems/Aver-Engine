@@ -3,6 +3,7 @@
 // class is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "LightDetails.hpp"
 
 namespace aver {
 #if AVER_MODULE_SCENE
@@ -840,6 +841,7 @@ void SandboxApp::buildPanels(Engine& e) {
     // Takes the Engine now (previously `(void)e`, since nothing here needed one): the Level
     // branch edits the WATER record, and applying it to the live surface needs a device.
     if (showDetails_)  buildDetailsPanel(e);
+    if (showSoftBody_) editor::softBodyPanelDraw(softBody_, &showSoftBody_);
 }
 
 #endif
@@ -2322,6 +2324,13 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         }
 #endif
 
+        // ---- Light (CLight): type, intensity, IES profile, cookie ----
+        if (auto* lt = w.component<scene::CLight>(selEntity_, scene::kComponentLight)) {
+            if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (editor::drawLightDetails(*lt, project_.contentDir())) markLevelUnsaved();
+            }
+        }
+
         // ---- Add Component ----
         // Previously impossible from the editor: every panel above renders only when its
         // component already exists, so one no importer/template attaches needed a hand-edited file.
@@ -2334,6 +2343,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             static const Addable kAddable[] = {
                 {scene::kComponentSoftBody, ICON_TUNE " Soft Body",
                  "Simulate this entity's mesh instead of posing it: sag, drape, squash, collide."},
+                {scene::kComponentLight, "Light",
+                 "A point, spot or rectangular area light, optionally shaped by an IES profile and a cookie."},
             };
             for (const Addable& a : kAddable) {
                 const bool present = w.hasComponent(selEntity_, a.id);
@@ -2345,6 +2356,9 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                         if (auto* c = static_cast<scene::CSoftBody*>(
                                 w.addComponent(selEntity_, a.id)))
                             *c = scene::CSoftBody{};
+                    } else if (a.id == scene::kComponentLight) {
+                        if (auto* c = static_cast<scene::CLight*>(w.addComponent(selEntity_, a.id)))
+                            *c = editor::makeNewLight(scene::kLightPoint);
                     }
                     cbStatus_ = std::string("Added ") + a.name;
                     // Not undoable, so at least mark dirty: adding pushes no EditCmd, so without
@@ -2372,6 +2386,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             struct Removable { u32 id; const char* name; };
             static const Removable kRemovable[] = {
                 {scene::kComponentSoftBody, ICON_TUNE " Soft Body"},
+                {scene::kComponentLight, "Light"},
             };
             bool anyPresent = false;
             for (const Removable& r : kRemovable) {

@@ -732,13 +732,16 @@ float3 rtShadowOpaque(float3 wpos, float3 N, float3 L, float2 pixel, float frame
 }
 
 // ---- LOCAL LIGHTS: lamps lit like the sun ----
-// Material lightIntensity > 0 becomes a SPHERE light in gRdLocalLights. Lit pixels get one stochastic
-// shadow ray toward one light, accumulated via the sun history. Each light shaded through the sun's BRDF.
+// Material lightIntensity > 0 becomes a SPHERE light in gRdLocalLights; scene CLights (point, spot, rect,
+// with IES and cookies) join the same list. Lit pixels get one stochastic shadow ray toward one light,
+// accumulated via the sun history. Each light shaded through the sun's BRDF.
 // Declared here (before voxi_restir.hlsli) because that file needs rdLocalCarriesEmitters().
-// posRadius     = world centre (cm), sphere radius (cm, >= 1).
-// radianceRange = rgb: colour * sphere's 1-metre irradiance; w: range in cm.
-// MIRRORS the C++ RdLocalLight (32 bytes) field for field.
-struct RdLocalLight { float4 posRadius; float4 radianceRange; };
+// MIRRORS the C++ RdLocalLight (80 bytes) field for field; the record is documented in aver_lights.hlsli.
+#if AVER_RD_SINGLE_PASS
+#define AVER_LIGHTS_SIMPLE 1
+#endif
+#include "aver_lights.hlsli"
+typedef AverLightRec RdLocalLight;
 // The light list (at most 32). Declared here, not in voxi.hlsl, so voxi_pt.hlsli below can read it.
 StructuredBuffer<RdLocalLight> gRdLocalLights : register(t18);
 
@@ -756,34 +759,36 @@ bool rdLocalHistValid()  { return ((uint)(gCameraMedium.w + 0.5) & 1u) != 0u; }
 // True when all lamp-flagged draws made the 32-cap list (bit 2), so GI hits can skip their emission.
 bool rdLocalCarriesEmitters() { return ((uint)(gCameraMedium.w + 0.5) & 2u) != 0u; }
 
-// Diffuse irradiance from one sphere light: inverse square, clamped at radius, faded by (1-(d/range)^4)^2.
+// Diffuse irradiance from one light (N.L included): inverse square clamped at the emitter radius, faded by
+// (1-(d/range)^4)^2, shaped by cone / IES / cookie; a rectangle through its polygonal form factor.
 float3 rdLocalIrradiance(RdLocalLight l, float3 wpos, float3 N) {
-    const float3 toC   = l.posRadius.xyz - wpos;
-    const float  d2    = dot(toC, toC);
-    const float  range = l.radianceRange.w;
-    if (d2 >= range * range) return float3(0.0, 0.0, 0.0);
-    const float r   = l.posRadius.w;
-    const float x2  = d2 / (range * range);
-    const float win = saturate(1.0 - x2 * x2);
-    const float ndl = saturate(dot(N, toC) * rsqrt(max(d2, 1e-8)));
-    return l.radianceRange.rgb * (1e4 / max(d2, r * r)) * (win * win) * ndl;
+    return aversLightIrradiance(l, wpos, N);
 }
 
-// One opaque shadow ray from wpos toward a point on the light's sphere. TMax stops short of the sphere.
-float rdLocalShadow(float3 wpos, float3 N, RdLocalLight l, float2 pixel, float frameJitter) {
+// One opaque shadow ray from wpos toward a point on the light: its sphere (TMax stops short of it), or a
+// uniform point u2 on a rectangle. A light flagged no-shadow returns 1.
+float rdLocalShadow(float3 wpos, float3 N, RdLocalLight l, float2 pixel, float frameJitter, float2 u2) {
+    if (aversLightNoShadow(l)) return 1.0;
     const float3 toC  = l.posRadius.xyz - wpos;
     const float  dist = length(toC);
-    const float  tMax = dist - l.posRadius.w * 1.25;
+    float3 target;
+    float  tMax;
+    if (aversLightKind(l) == AVER_LIGHT_RECT) {
+        target = aversRectShadowTarget(l, u2, wpos, N);
+        tMax   = length(target - wpos) - 0.5;
+    } else {
+        tMax = dist - l.posRadius.w * 1.25;
+        if (tMax <= 0.0) return 1.0;
+        const float3 Lc = toC / dist;
+        float3 up = abs(Lc.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+        float3 T  = normalize(cross(up, Lc));
+        float3 B  = cross(Lc, T);
+        const float  ang0 = rtHash(pixel) * 6.2831853 + frameJitter;
+        const float2 disc = rtDiscSample(0, ang0);
+        target = l.posRadius.xyz + (T * disc.x + B * disc.y) * l.posRadius.w;
+    }
     if (tMax <= 0.0) return 1.0;
-
-    const float3 Lc = toC / dist;
-    float3 up = abs(Lc.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
-    float3 T  = normalize(cross(up, Lc));
-    float3 B  = cross(Lc, T);
-    const float  ang0   = rtHash(pixel) * 6.2831853 + frameJitter;
-    const float2 disc   = rtDiscSample(0, ang0);
-    const float3 target = l.posRadius.xyz + (T * disc.x + B * disc.y) * l.posRadius.w;
-    const float3 dir    = normalize(target - wpos);
+    const float3 dir = normalize(target - wpos);
 
     float3 origin;
     float  bias;
@@ -1156,6 +1161,20 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
 
 // Luminance of shadow tint: scales colour to greyscale for denoiser input.
 float averShadowLum(float3 v) { return dot(v, float3(0.2126, 0.7152, 0.0722)); }
+
+#if AVER_RD_LAMPS
+// Weight for picking which light gets this pixel's shadow ray: its unshadowed luminance, 0 for a light
+// that casts no shadow (it never needs a ray and is added unshadowed).
+float rdLocalPickWeight(RdLocalLight l, float3 wpos, float3 N) {
+    return aversLightNoShadow(l) ? 0.0 : averShadowLum(rdLocalIrradiance(l, wpos, N));
+}
+// Two quasi-random numbers in [0,1) for a rectangle sample: radical inverse and golden Weyl of the
+// pixel's turn, rotated per pixel.
+float2 rdLocalRectSample(float2 pixel, uint turn) {
+    const float2 rot = float2(rtHash(pixel + float2(5.1, 2.3)), rtHash(pixel + float2(7.7, 1.9)));
+    return frac(rot + float2(rtRadicalInverse2(turn + 1u), (float)(turn & 0xFFFFu) * 0.7548776662));
+}
+#endif
 
 // Normalised colour of tinted visibility: white when no tint.
 float3 averShadowTint(float3 v, float lum) {

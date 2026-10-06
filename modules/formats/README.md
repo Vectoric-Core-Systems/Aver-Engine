@@ -20,7 +20,8 @@ Everything else this module owns, none of which existed when the list above was 
 |---|---|---|
 | `OcMesh.hpp` | `.ocmesh` | the engine's own mesh container |
 | `OcAnim.hpp` | skeleton + animation | |
-| `OcWorld.hpp` | `.ocworld` | levels |
+| `OcWorld.hpp` | `.ocworld` | levels (including `LIGHT` records for scene lights) |
+| `IesProfile.hpp` | `.ies` | IES LM-63 photometric profiles (type C): parser, symmetry unfolding, GPU table bake; see `docs/rendering/LIGHTS.md` |
 | `OcProject.hpp` | `.ocproject` | the project manifest. **Now writable** — `writeOcproject` preserves comments and unknown keys, so a manifest survives a round trip through an older editor |
 | `Json.hpp` | JSON | a DOM, used by the glTF importer and the Roslyn backend |
 | `GltfImport.hpp` | `.gltf` / `.glb` | behind the Content Browser's Import button |

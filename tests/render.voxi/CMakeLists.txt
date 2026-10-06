@@ -108,6 +108,17 @@ target_include_directories(NeuRaCTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render
 target_compile_definitions(NeuRaCTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(NeuRaCTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# SceneLightTest -- scene lights' CPU half (aver/voxi/SceneLight.hpp): candela -> engine-unit conversion,
+# packing into the 80-byte AverLightRec, and the rectangle's clipped polygonal form factor against closed
+# forms (distant point limit, infinite plane = pi, horizon clipping = pi/2). Links Aver.Core and
+# Aver.Platform (to read the HLSL for the final layout check) and reaches the header by include path, as
+# CameraFactorTest does.
+add_executable(SceneLightTest src/SceneLightTest.cpp)
+target_link_libraries(SceneLightTest PRIVATE Aver.Core Aver.Platform)
+target_include_directories(SceneLightTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include)
+target_compile_definitions(SceneLightTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(SceneLightTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # RenderSettingsResolverTest -- the quality ladder (QualityLadder.hpp), the prerequisite resolver that
 # decides what greys and why (RenderSettingsResolver.hpp), and the UE-style Overall Quality scalability
 # preset (Scalability.hpp).

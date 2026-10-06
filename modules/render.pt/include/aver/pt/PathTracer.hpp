@@ -70,6 +70,19 @@ struct PtSurface {
     f32 emissive[3] = {0, 0, 0};
 };
 
+// A scene light for next-event estimation: point, spot or rectangular, optionally shaped by an IES
+// profile and a cookie. 80 bytes, byte-identical to AverLightRec (shaders/aver_lights.hlsli, which
+// documents the fields) and to voxi::PackedLight, whose packSceneLight builds it.
+struct PtLight {
+    f32 posRadius[4];
+    f32 radianceRange[4];
+    f32 axisKind[4];
+    f32 shape[4];
+    f32 right[4];
+};
+static_assert(sizeof(PtLight) == 80, "PtLight is the HLSL AverLightRec ABI");
+inline constexpr u32 kPtMaxLights = 32;
+
 // The pinhole camera primary rays are generated from. Carried in the pass's own constants rather
 // than read from the engine's gViewProj, so a test scene is not also a statement about the editor.
 struct PtCamera {
@@ -131,6 +144,15 @@ public:
     // APPEND-ONLY AND NEVER FREED: the index travels into PtSceneView::drawsKey(); if an index could
     // be reused, a scene whose visible set merely changed would hash differently and re-arm every frame.
     u32 residentTexture(rhi::TextureHandle h);
+
+    // Replaces the light set (at most kPtMaxLights). Cheap to call every frame; lightsHash() moves only
+    // when the set does, which is what a caller restarts accumulation on.
+    void setLights(const PtLight* lights, u32 count);
+    u64  lightsHash() const { return lightsHash_; }
+    // Uploads an IES table (R16F, ies = true, `pixels` half floats) or an sRGB RGBA8 cookie, makes it
+    // resident, and returns its texture index for PtLight::shape; memoised by `id`. kUnboundTexture
+    // when the device has no bindless table.
+    u32 lightTexture(u64 id, u32 width, u32 height, bool ies, const void* pixels);
 
     // The tracer samples textures only once something has actually been made resident. Until then it
     // dispatches the ORIGINAL, texture-free pipeline -- which keeps PtFurnaceTest running the identical
@@ -234,6 +256,17 @@ private:
     // inter-facet scattering the single-scatter model has no term for. Integrated with the shader's
     // own estimator rather than taken from a published analytic fit.
     rhi::BufferHandle energyLut_ = 0;
+
+    // Light list: a ring of upload buffers, rotated when the set changes so a dispatch in flight
+    // never reads a buffer being rewritten.
+    static constexpr u32 kLightRing = 3;
+    rhi::BufferHandle lightBuf_[kLightRing] = {};
+    u32 lightSlot_ = 0;
+    std::vector<PtLight> lights_;
+    u64  lightsHash_ = 0;
+    bool lightsDirty_ = false;
+    struct LightTex { rhi::TextureHandle tex = 0; u32 index = kUnboundTexture; };
+    std::unordered_map<u64, LightTex> lightTex_;
 
     rhi::ShaderHandle   cs_ = 0;
     rhi::PipelineHandle pipeline_ = 0;

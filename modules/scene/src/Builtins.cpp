@@ -80,7 +80,13 @@ void registerBuiltinComponents(World& world) {
             .field("intensityLux", FieldKind::F32, static_cast<u16>(offsetof(CLight, intensityLux)))
             .field("rangeCm", FieldKind::F32, static_cast<u16>(offsetof(CLight, rangeCm)))
             .field("innerCos", FieldKind::F32, static_cast<u16>(offsetof(CLight, innerCos)))
-            .field("outerCos", FieldKind::F32, static_cast<u16>(offsetof(CLight, outerCos)));
+            .field("outerCos", FieldKind::F32, static_cast<u16>(offsetof(CLight, outerCos)))
+            .field("widthCm", FieldKind::F32, static_cast<u16>(offsetof(CLight, widthCm)))
+            .field("heightCm", FieldKind::F32, static_cast<u16>(offsetof(CLight, heightCm)))
+            .field("iesProfile", FieldKind::I64, static_cast<u16>(offsetof(CLight, iesProfile)))
+            .field("cookie", FieldKind::I64, static_cast<u16>(offsetof(CLight, cookie)))
+            .field("flags", FieldKind::I32, static_cast<u16>(offsetof(CLight, flags)))
+            .field("sourceRadiusCm", FieldKind::F32, static_cast<u16>(offsetof(CLight, sourceRadiusCm)));
         expect(b.verify(sizeof(CLight)), b.typeId(), kComponentLight, "CLight");
     }
     {

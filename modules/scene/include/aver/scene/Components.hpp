@@ -105,7 +105,21 @@ inline constexpr u32 kMeshRendererVisible = 0x1;
 // "does this mesh draw", not a second one an author has to remember to attach alongside it.
 inline constexpr u32 kMeshRendererHiddenFromOwner = 0x2;
 
-// A light's kind, colour, brightness and cone shaping.
+// Light kinds (CLight::kind). 0-2 predate the renderers reading the component and keep their values.
+inline constexpr i32 kLightPoint       = 0;
+inline constexpr i32 kLightSpot        = 1;
+inline constexpr i32 kLightDirectional = 2;
+inline constexpr i32 kLightRect        = 3;
+
+// CLight::flags bits.
+inline constexpr i32 kLightNoShadows = 0x1;
+inline constexpr i32 kLightIesPeak   = 0x2;   // normalise the IES profile to its peak, not its luminous flux
+
+// A light's kind, colour, brightness, cone shaping, rectangle size, and optional IES profile and cookie.
+//
+// Emits along the entity's local +X. intensityLux is candela (lux at 1 m on axis), and for Rect the
+// panel's intensity along its normal. New fields are zero-filled by the pool: 0 means "default"
+// (see docs/rendering/LIGHTS.md), so a CLight saved before they existed reads the same.
 struct CLight {
     i32 kind          = 0;
     f32 colour[3]     = {1, 1, 1};
@@ -113,6 +127,12 @@ struct CLight {
     f32 rangeCm       = 0.0f;
     f32 innerCos      = 1.0f;
     f32 outerCos      = 0.7f;
+    f32 widthCm       = 0.0f;   // Rect: full extent along local +Y; 0 = 100 cm
+    f32 heightCm      = 0.0f;   // Rect: full extent along local +Z; 0 = 100 cm
+    i64 iesProfile    = 0;      // ObjectId of the .ies path; 0 = none
+    i64 cookie        = 0;      // ObjectId of the cookie texture path; 0 = none
+    i32 flags         = 0;      // kLight* bits
+    f32 sourceRadiusCm = 0.0f;  // Point/Spot: emitter radius for soft shadows; 0 = 1 cm
 };
 
 // Perspective camera parameters, plus the priority that picks between cameras.

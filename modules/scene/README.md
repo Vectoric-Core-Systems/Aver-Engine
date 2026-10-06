@@ -17,6 +17,7 @@ Data-oriented entity/component world: entities, component storage, transforms, h
 | `Fields.hpp` | Field kinds and the `ComponentBuilder` that declares a table |
 | `Components.hpp` | The **15** built-in components and their fixed dense ids: `CLocal`, `CWorld`, `CHierarchy`, `CName`, `CTags`, `CMeshRenderer`, `CLight`, `CCamera`, `CSkeletalMesh`, `CAnimator`, `CParticleEmitter`, `CAttachment`, `CSoftBody`, `CRigidBody`, `CJoint`. `scene_abi.h` names fixed `AVER_SCENE_COMP_*` constants only for the first twelve (up to `CAttachment`); the three physics ones are appended the same way but resolved by name / qualified field id rather than a published constant |
 | `World.hpp` | Lifetime, registry, hierarchy and propagation pass |
+| `LightGather.hpp` | Header-only: every `CLight` entity resolved to a world-space `WorldLight` (axes, defaults) for the renderers; see `docs/rendering/LIGHTS.md` |
 
 **Index 0 is never handed out and a live generation starts at 1**, so no legal handle encodes to 0 and a default-constructed `Entity` is invalid. Bit 31 stays clear so the same value crosses the C ABI as a positive `int32_t` and can never be confused with an error return. Seven generation bits is few, so a slot whose generation would wrap past 127 is **retired** rather than recycled — an aliased handle that silently addresses the wrong entity is the failure the packing exists to prevent. `World::retiredSlotCount()` exists so a world churning hard enough to retire slots in bulk is visible rather than merely slow.
 

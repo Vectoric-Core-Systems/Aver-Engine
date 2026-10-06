@@ -792,6 +792,36 @@ void SandboxApp::addPlayerStart(Engine&) {
 #endif
 }
 
+#if AVER_MODULE_SCENE
+// "Add > Point / Spot / Rect Light". A bare CLight entity in front of the camera, facing the way the
+// camera does (yaw only). Not in levelEntities_ (it is no placement); saveLevel writes it as a LIGHT
+// record and unloadLevel destroys it by the CLight pool.
+void SandboxApp::spawnLightAtCamera(i32 kind) {
+    scene::World& world = scene::World::instance();
+    Vec3 at = camPos_ + camForward() * kAddDistance;
+    if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
+    const Vec3 f = camForward();
+    const f32 yaw = degrees(std::atan2(f.y, f.x));
+    Transform xf;
+    xf.position = at;
+    xf.rotation = quatFromEulerDeg(Vec3{0.0f, 0.0f, yaw});
+    const char* label = kind == scene::kLightSpot ? "Spot Light" : kind == scene::kLightRect ? "Rect Light" : "Point Light";
+    const scene::Entity e = world.create(label, scene::kInvalidEntity, xf);
+    if (e == scene::kInvalidEntity) { AVER_WARN("[Editor] Add: the world refused a new light"); return; }
+    if (auto* c = static_cast<scene::CLight*>(world.addComponent(e, scene::kComponentLight)))
+        *c = editor::makeNewLight(kind);
+    entityLabels_[static_cast<u32>(e)] = label;
+    sel_ = kSelScene; selEntity_ = e;
+    {
+        EditCmd c = describeEntity(e);
+        c.kind = EditCmd::Kind::Create;
+        pushEdit(std::move(c));
+    }
+    markLevelUnsaved();
+    AVER_INFO("[Editor] added {} at ({:.0f}, {:.0f}, {:.0f})", label, at.x, at.y, at.z);
+}
+#endif
+
 // Adds a built-in primitive in front of the camera and selects it. Cube and sphere are both
 // synthesised at startup (appendBox/appendSphere) and registered in content_'s meshes/bounds and
 // meshTris_, so "Add > Sphere" needed no new asset/loader/bounds, only this function to stop

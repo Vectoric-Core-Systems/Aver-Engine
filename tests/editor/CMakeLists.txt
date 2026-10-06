@@ -103,6 +103,16 @@ target_include_directories(LevelListTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src
 target_link_libraries(LevelListTest PRIVATE Aver.Core Aver.Platform)
 set_target_properties(LevelListTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# LightDetailsTest -- the Details panel's Light section (sandbox/src/LightDetails.hpp), its pure half:
+# the .ies / cookie listing a picker offers, the ObjectId a CLight stores for a path, cone degrees <->
+# cosines, and the defaults a newly added light gets. Header-only and window-free, exactly like
+# LevelListTest above; the ImGui widgets are visual-only.
+add_executable(LightDetailsTest src/LightDetailsTest.cpp)
+target_include_directories(LightDetailsTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src
+                                                  ${CMAKE_SOURCE_DIR}/modules/world/include)
+target_link_libraries(LightDetailsTest PRIVATE Aver.Formats Aver.Scene Aver.Core Aver.Platform)
+set_target_properties(LightDetailsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # MaterialResolveTest -- the editor's material-name resolution (sandbox/src/MaterialResolve.hpp):
 # which of Binaries\Materials, Content\Materials or a bare content-relative path a surface name
 # resolves to, and the project-wide enumeration loadProjectMaterials() drives off the same header.

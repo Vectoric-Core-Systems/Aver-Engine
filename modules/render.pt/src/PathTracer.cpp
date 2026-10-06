@@ -18,7 +18,7 @@ namespace aver::pt {
 namespace {
 
 // t0 acceleration structure, t1 vertices, t2 indices, t3 instances, t4 the energy-compensation table.
-constexpr u32 kSrvCount = 5;
+constexpr u32 kSrvCount = 6;   // t5: the scene light list
 
 // E(cos(theta), roughness) table: 32x32 bilinear under 5e-3 furnace tolerance, 4 KB total.
 constexpr u32 kEnergyLutDim = 32;
@@ -171,6 +171,20 @@ bool PathTracer::init(rhi::IDevice& dev) {
     if (!pipeline_) { AVER_ERROR("[PT] integrator pipeline unavailable"); shutdown(); return false; }
 
     // Built before any target; createTarget binds it into every target's descriptor table.
+    for (u32 i = 0; i < kLightRing; ++i) {
+        rhi::BufferDesc ld;
+        ld.bytes = sizeof(PtLight) * kPtMaxLights;
+        ld.kind = rhi::BufferKind::Upload;
+        ld.debugName = "pt scene lights";
+        lightBuf_[i] = res_->createBuffer(ld);
+        const std::vector<PtLight> zero(kPtMaxLights);
+        if (!lightBuf_[i] || !res_->writeBuffer(lightBuf_[i], zero.data(), ld.bytes)) {
+            AVER_ERROR("[PT] the light list buffer could not be created");
+            shutdown();
+            return false;
+        }
+    }
+
     {
         const std::vector<f32> lut = buildEnergyLut();
         rhi::BufferDesc ed;
@@ -263,6 +277,8 @@ u32 PathTracer::residentTexture(rhi::TextureHandle h) {
 void PathTracer::shutdown() {
     if (res_) {
         if (energyLut_)   res_->destroyBuffer(energyLut_);
+        for (rhi::BufferHandle& b : lightBuf_) { if (b) res_->destroyBuffer(b); b = 0; }
+        for (auto& kv : lightTex_) if (kv.second.tex) res_->destroyTexture(kv.second.tex);
         if (verts_)       res_->destroyBuffer(verts_);
         if (indices_)     res_->destroyBuffer(indices_);
         if (instanceBuf_) res_->destroyBuffer(instanceBuf_);
@@ -277,6 +293,11 @@ void PathTracer::shutdown() {
         // Texture table not destroyed (descriptors unsafe to recycle until frames complete).
         // Index map is cleared alongside, so re-init cannot use stale handles.
     }
+    lightTex_.clear();
+    lights_.clear();
+    lightsHash_ = 0;
+    lightsDirty_ = false;
+    lightSlot_ = 0;
     texTable_ = 0;
     texIndex_.clear();
     texCount_ = 0;
@@ -521,6 +542,42 @@ bool PathTracer::buildScenes(rhi::IRenderContext& ctx) {
     return true;
 }
 
+void PathTracer::setLights(const PtLight* lights, u32 count) {
+    count = std::min(count, kPtMaxLights);
+    if (!lights) count = 0;
+    lights_.assign(lights, lights + count);
+    u64 h = 1469598103934665603ull;
+    const u8* bytes = reinterpret_cast<const u8*>(lights_.data());
+    for (usize i = 0; i < lights_.size() * sizeof(PtLight); ++i) { h ^= bytes[i]; h *= 1099511628211ull; }
+    h ^= lights_.size();
+    h *= 1099511628211ull;
+    if (h != lightsHash_) {
+        lightsHash_ = h;
+        lightsDirty_ = true;
+    }
+}
+
+u32 PathTracer::lightTexture(u64 id, u32 width, u32 height, bool ies, const void* pixels) {
+    if (!res_ || !pixels || width == 0 || height == 0) return kUnboundTexture;
+    if (const auto it = lightTex_.find(id); it != lightTex_.end()) return it->second.index;
+    LightTex lt;
+    rhi::TextureDesc d;
+    d.width = width;
+    d.height = height;
+    d.format = ies ? rhi::Format::R16F : rhi::Format::RGBA8UnormSrgb;
+    d.bind = rhi::ResourceBind::ShaderResource;
+    d.initialState = rhi::ResourceState::ShaderResource;
+    const void* levels[1] = {pixels};
+    d.initialData = levels;
+    d.initialDataCount = 1;
+    d.initialRowPitch = width * (ies ? 2u : 4u);
+    d.debugName = ies ? "pt light IES profile" : "pt light cookie";
+    lt.tex = res_->createTexture(d);
+    if (lt.tex) lt.index = residentTexture(lt.tex);
+    lightTex_.emplace(id, lt);
+    return lt.index;
+}
+
 bool PathTracer::createTarget(u32 scene, u32 width, u32 height, PtTarget& out) {
     out = {};
     if (!res_ || !prepared_ || scene >= scenes_.size() || width == 0 || height == 0) return false;
@@ -538,6 +595,7 @@ bool PathTracer::createTarget(u32 scene, u32 width, u32 height, PtTarget& out) {
     bd.srvKinds[0] = rhi::SlotKind::AccelerationStructure;
     bd.srvKinds[1] = bd.srvKinds[2] = bd.srvKinds[3] = rhi::SlotKind::StructuredBuffer;
     bd.srvKinds[4] = rhi::SlotKind::StructuredBuffer;
+    bd.srvKinds[5] = rhi::SlotKind::StructuredBuffer;
     bd.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
     out.set = res_->createBindingSet(bd);
 
@@ -554,6 +612,7 @@ bool PathTracer::createTarget(u32 scene, u32 width, u32 height, PtTarget& out) {
     res_->setSrvBuffer(out.set, 3, instanceBuf_, sizeof(Instance),
                        static_cast<u32>(instances_.size()), 0);
     res_->setSrvBuffer(out.set, 4, energyLut_, sizeof(f32), kEnergyLutDim * kEnergyLutDim, 0);
+    res_->setSrvBuffer(out.set, 5, lightBuf_[lightSlot_], sizeof(PtLight), kPtMaxLights, 0);
     res_->setUavBuffer(out.set, 0, out.accum, kPtAccumStride,
                        width * height * kPtAccumElementsPerPixel, 0);
 
@@ -616,6 +675,15 @@ void PathTracer::accumulate(rhi::IRenderContext& ctx, const PtTarget& t, const P
     cb.trace[1] = d.tMax;
     // trace[2]: sky environment. 1.0 = legacy pre-fix behaviour; 0.0 = default.
     cb.trace[2] = d.legacyEnvironment ? 1.0f : 0.0f;
+    // trace[3]: scene light count; the list itself is t5.
+    cb.trace[3] = static_cast<f32>(lights_.size());
+    if (lightsDirty_) {
+        lightSlot_ = (lightSlot_ + 1) % kLightRing;
+        if (!lights_.empty())
+            res_->writeBuffer(lightBuf_[lightSlot_], lights_.data(), sizeof(PtLight) * lights_.size(), 0);
+        lightsDirty_ = false;
+    }
+    res_->setSrvBuffer(t.set, 5, lightBuf_[lightSlot_], sizeof(PtLight), kPtMaxLights, 0);
 
     rhi::ScopedGpuStat gpuStat(ctx, "PT accumulate");
     ctx.pushMarker("Aver.PathTracer");

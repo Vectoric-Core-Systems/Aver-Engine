@@ -6,6 +6,7 @@
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/voxi/Voxi.hpp"
+#include "aver/voxi/SceneLight.hpp"
 #include "aver/voxi/GiDispatchBounds.hpp"   // VoxelBox/GiDispatchConstants
 #include "aver/render/denoise/Denoiser.hpp"
 #include "aver/render/denoise/Nrd2.hpp"
@@ -116,6 +117,19 @@ public:
                 const void* drawConstants, u32 drawConstantBytes, bool translucent = false,
                 bool hiddenFromOwner = false, bool movable = false);
     void setSubmitMovable(bool on) { submitMovable_ = on; }
+
+    // ---- scene lights (CLight): point, spot and rectangular area lights ----
+    // World space (SceneLight.hpp), filled by the host from scene::gatherLights. They share the staged
+    // ray-driven lamp list with emissive-material lamps (32 per frame in all), D3D12 only.
+    // docs/rendering/LIGHTS.md.
+    // Replaces the set; call once per frame before the frame renders. Copies.
+    void setSceneLights(const SceneLight* lights, u32 count);
+    // Registers a baked IES table (kIesTableV * kIesTableH half floats, fmt::bakeIesTable +
+    // iesTableToHalf) under `id`. An id is immutable for the session: a repeat registration is ignored.
+    bool registerIesProfile(u64 id, const u16* tableHalf, f32 peakOverMean);
+    // Registers an sRGB RGBA8 cookie image under `id`.
+    bool registerCookie(u64 id, u32 width, u32 height, const u8* rgba8);
+    bool hasLightAsset(u64 id) const { return lightAssetsCpu_.find(id) != lightAssetsCpu_.end(); }
     void submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                     f32 metallic, f32 roughness, rhi::BindingSetHandle drawBinding,
                     const void* drawConstants, u32 drawConstantBytes, bool blended = false) override;
@@ -581,13 +595,10 @@ private:
     u64 foliageKey() const;
 
     // ---- LOCAL LIGHTS (LAMPS): per-frame light list at t18 (gRdLocalLights) ----
-    // One entry per authored draw with MaterialFlag_Light (lightIntensity > 0): world sphere colored by emission.
-    // HLSL mirror: `struct RdLocalLight { float4 posRadius; float4 radianceRange; }` (32-byte stride).
-    struct RdLocalLight {
-        f32 posRadius[4];
-        f32 radianceRange[4];
-    };
-    static_assert(sizeof(RdLocalLight) == 32, "RdLocalLight is the HLSL RdLocalLight ABI");
+    // One entry per authored draw with MaterialFlag_Light (lightIntensity > 0): world sphere colored by emission,
+    // plus one per scene light. HLSL mirror: AverLightRec (render.pt/shaders/aver_lights.hlsli), 80-byte stride.
+    using RdLocalLight = PackedLight;
+    static_assert(sizeof(RdLocalLight) == 80, "RdLocalLight is the HLSL AverLightRec ABI");
     // At most this many per frame, sorted by 1-metre irradiance over max(distance², 1).
     static constexpr u32 kMaxLocalLights = 32;
     // Upload-heap ring: writeBuffer is unsynchronised, so rotate before write to avoid reading old frame's copy.
@@ -605,7 +616,19 @@ private:
     struct RdLocalLightCand {
         f32 importance;
         RdLocalLight light;
+        bool fromDraw;   // an emissive-material lamp rather than a scene light
     };
+    std::vector<SceneLight> sceneLights_;
+    // Light assets: CPU copy from the register calls, GPU texture made on first use and made resident
+    // in the ray path's bindless table.
+    struct LightAssetCpu { std::vector<u8> bytes; u32 width = 0, height = 0; bool ies = false; f32 peakOverMean = 1.0f; };
+    struct LightAssetGpu { rhi::TextureHandle tex = 0; u32 index = 0xFFFFFFFFu; bool failed = false; };
+    std::unordered_map<u64, LightAssetCpu> lightAssetsCpu_;
+    std::unordered_map<u64, LightAssetGpu> lightAssetsGpu_;
+    // Bindless index of a registered asset (creating its texture on first use), or kUnboundTexture.
+    u32 lightAssetIndex(u64 id);
+    void releaseLightAssets();
+    void appendSceneLightCandidates(const f32 eye[3]);
     std::vector<RdLocalLightCand> rdLocalLightCand_;
     bool rdLocalLightsFailLogged_ = false;
     void buildLocalLights();

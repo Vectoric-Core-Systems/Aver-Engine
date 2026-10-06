@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "LightLevelIo.hpp"
 
 namespace aver {
 #if AVER_MODULE_LANDSCAPE
@@ -486,6 +487,19 @@ bool SandboxApp::saveLevel(const std::string& path) {
     // Straight back out, in the order they were read. See loadLevel.
     w.pcgVolumes = levelPcgVolumes_;
 
+    // LIGHT records, from every live CLight entity (they are not placements; see spawnLightAtCamera).
+    w.lights.clear();
+    if (scene::ComponentPool* lp = world.pool(scene::kComponentLight)) {
+        const editor::LightAssetPaths paths = editor::LightAssetPaths::scan(project_.contentDir());
+        for (usize i = 0; i < lp->size(); ++i) {
+            const scene::Entity le = lp->entityAt(i);
+            if (!world.valid(le)) continue;
+            const auto* lc = static_cast<const scene::CLight*>(lp->dataAt(i));
+            w.lights.push_back(editor::recordFromLight(*lc, transformFromMatrix(world.worldMatrix(le)),
+                                                       world.name(le), paths));
+        }
+    }
+
     // WHICH PLACEMENT SLOT EACH ENTITY WILL OCCUPY, decided BEFORE any is written, because a
     // child may be reached before its parent -- levelEntities_ is the swap-removed dense array
     // and carries no ordering guarantee at all. Without this the parent index would be "the one
@@ -498,6 +512,8 @@ bool SandboxApp::saveLevel(const std::string& path) {
         for (const scene::Entity e : levelEntities_) {
             if (!world.valid(e)) continue;
             if (!world.component<scene::CLocal>(e, scene::kComponentLocal)) continue;
+            if (!world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer) &&
+                world.hasComponent(e, scene::kComponentLight)) continue;   // saved as a LIGHT record
             slotOf.emplace(static_cast<u32>(e), slot++);
         }
     }
@@ -540,6 +556,7 @@ bool SandboxApp::saveLevel(const std::string& path) {
         const auto* loc = world.component<scene::CLocal>(e, scene::kComponentLocal);
         const auto* mr  = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
         if (!loc) continue;
+        if (!mr && world.hasComponent(e, scene::kComponentLight)) continue;   // saved as a LIGHT record
         fmt::OcWorldPlacement p;
         // THE PARENT, AND WITH IT THE REASON CLocal IS NOW CORRECT TO WRITE. This loop has always
         // written loc->xf -- the LOCAL transform -- into a format that read every placement back

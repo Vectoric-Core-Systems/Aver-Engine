@@ -491,6 +491,27 @@ struct OcSequence {
     std::vector<OcSeqTrack> tracks;
 };
 
+// One authored light (LIGHT record): world-space, no parent. Maps onto scene::CLight on load; the
+// asset references are content-relative paths, resolved to ObjectIds by the loader.
+enum class OcLightKind : u8 { Point, Spot, Rect };
+
+struct OcLight {
+    std::string name;
+    OcLightKind kind = OcLightKind::Point;
+    f64 x = 0, y = 0, z = 0;                // cm
+    f64 yaw = 0, pitch = 0, roll = 0;       // degrees, as a placement; emits along local +X
+    f64 colour[3] = {1, 1, 1};
+    f64 intensityCd = 1000.0;               // CLight::intensityLux
+    f64 rangeCm = 0.0;                      // 0 = derived from intensity
+    f64 innerDeg = 0.0, outerDeg = 45.0;    // Spot cone half-angles (and the cookie frustum for Point/Rect)
+    f64 widthCm = 100.0, heightCm = 100.0;  // Rect only
+    f64 radiusCm = 1.0;                     // Point/Spot emitter radius (soft shadow)
+    std::string ies;                        // .ies path; empty = none
+    std::string cookie;                     // cookie texture path; empty = none
+    bool castShadows = true;
+    bool iesPeak = false;                   // normalise the profile to its peak, not its flux
+};
+
 struct OcWorldData : OcWorldEnv {
     int version = 1;
     u64 contentId = 0;                     // ID = FNV-1a-64(NAME)
@@ -574,6 +595,10 @@ struct OcWorldData : OcWorldEnv {
     // The waves each water surface above is given, cross-referenced by name exactly as
     // scatterSpecies is cross-referenced to pcgVolumes above. Order is the file's order.
     std::vector<OcGerstnerWave> waves;
+
+    // LIGHT records, in file order. Empty is the ordinary case: a level with no LIGHT record is lit
+    // exactly as before (the sun, the sky, emissive lamps).
+    std::vector<OcLight> lights;
 
     std::vector<OcWorldPlacement> placements;
 

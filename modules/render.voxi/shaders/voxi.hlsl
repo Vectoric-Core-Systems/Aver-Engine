@@ -447,7 +447,7 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
         float wsum    = 0.0;
         uint  lastLit = 0u;
         [loop] for (uint i = 0u; i < n; ++i) {
-            const float w = averShadowLum(rdLocalIrradiance(gRdLocalLights[i], wpos, N));
+            const float w = rdLocalPickWeight(gRdLocalLights[i], wpos, N);
             wsum += w;
             if (w > 0.0) lastLit = i;
         }
@@ -467,14 +467,15 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
             uint  pick = lastLit;
             float acc  = 0.0;
             [loop] for (uint j = 0u; j < n; ++j) {
-                acc += averShadowLum(rdLocalIrradiance(gRdLocalLights[j], wpos, N));
+                acc += rdLocalPickWeight(gRdLocalLights[j], wpos, N);
                 if (target < acc) { pick = j; break; }
             }
 
             // The sun's golden-angle jitter (rtShadowTemporalEx's untiled branch), stepped per TURN so the
             // disc sample advances one golden angle each time this pixel traces.
             const float frameJitter = averGoldenTurns(turn);
-            const float v = rdLocalShadow(wpos, N, gRdLocalLights[pick], pixelC, frameJitter);
+            const float v = rdLocalShadow(wpos, N, gRdLocalLights[pick], pixelC, frameJitter,
+                                          rdLocalRectSample(pixelC, turn));
 
             // Exponential accumulation: 0.95 history at rest (~20 turns), rising only to 0.2 fresh by 32
             // px/frame (the sun's own measured budget, rtShadowTemporalEx). Was 0.5 by 8 px/frame: an
@@ -519,16 +520,10 @@ bool rdLocalLightAt(RdLocalLight ll, AverSurface s, float3 wpos, out AverLight l
     l.direction  = float3(0.0, 0.0, 1.0);
     l.radiance   = float3(0.0, 0.0, 0.0);
     l.visibility = float3(1.0, 1.0, 1.0);
-    const float3 toC   = ll.posRadius.xyz - wpos;
-    const float  d2    = dot(toC, toC);
-    const float  range = ll.radianceRange.w;
-    if (d2 >= range * range) return false;   // also the zero-range guard, as in rdLocalIrradiance
-    const float r    = ll.posRadius.w;
-    const float x2   = d2 / (range * range);
-    const float win  = saturate(1.0 - x2 * x2);
-    const float invD = rsqrt(max(d2, 1e-8));
-    l.direction = toC * invD;
-    l.radiance  = ll.radianceRange.rgb * (1e4 / max(d2, r * r)) * (win * win);
+    float r;
+    // False past range (also the zero-range guard, as in rdLocalIrradiance) or off a rectangle's lit side.
+    if (!aversLightEval(ll, wpos, s.N, l.direction, l.radiance, r)) return false;
+    const float invD = rsqrt(max(dot(ll.posRadius.xyz - wpos, ll.posRadius.xyz - wpos), 1e-8));
     sL.rough = clamp(s.rough + r * 0.5 * invD, s.rough, 1.0);
     sL.H     = normalize(s.V + l.direction);
     sL.F     = fresnelSchlick(saturate(dot(sL.H, s.V)), s.F0, s.f90);
@@ -540,14 +535,16 @@ bool rdLocalLightAt(RdLocalLight ll, AverSurface s, float3 wpos, out AverLight l
 // why one stands for all). Diffuse+specular radiance, for the caller to add beside the sun's.
 float3 rdLocalLightsShade(AverSurface s, float3 wpos, float vis) {
     float3 acc = float3(0.0, 0.0, 0.0);
+    float3 accUnshadowed = float3(0.0, 0.0, 0.0);   // lights flagged no-shadow skip the shared visibility
     const uint n = min(rdLocalLightCount(), 32u);
     [loop] for (uint i = 0u; i < n; ++i) {
         AverLight   l;
         AverSurface sL;
-        if (rdLocalLightAt(gRdLocalLights[i], s, wpos, l, sL))
-            acc = averShadeDirect(acc, sL, l);
+        if (!rdLocalLightAt(gRdLocalLights[i], s, wpos, l, sL)) continue;
+        if (aversLightNoShadow(gRdLocalLights[i])) accUnshadowed = averShadeDirect(accUnshadowed, sL, l);
+        else                                       acc = averShadeDirect(acc, sL, l);
     }
-    return acc * vis;
+    return acc * vis + accUnshadowed;
 }
 
 // Same lamps for a BLENDED surface, split into averShadeSplit's two buckets instead of summed: specular
@@ -559,6 +556,8 @@ void rdLocalLightsShadeSplit(AverSurface s, float3 wpos, float vis,
     if (s.model == AVER_MODEL_UNLIT) return;
     float3 dAcc = float3(0.0, 0.0, 0.0);
     float3 sAcc = float3(0.0, 0.0, 0.0);
+    float3 dAccU = float3(0.0, 0.0, 0.0);
+    float3 sAccU = float3(0.0, 0.0, 0.0);
     const uint n = min(rdLocalLightCount(), 32u);
     [loop] for (uint i = 0u; i < n; ++i) {
         AverLight   l;
@@ -568,11 +567,16 @@ void rdLocalLightsShadeSplit(AverSurface s, float3 wpos, float vis,
         float  ndl;
         averDirectTerms(sL, l, dDiffuse, dSpecular, dSubsurface, ndl);
         const float3 lightTerm = l.radiance * ndl;
-        dAcc += dDiffuse * lightTerm + dSubsurface * l.radiance;
-        sAcc += dSpecular * lightTerm;
+        if (aversLightNoShadow(gRdLocalLights[i])) {
+            dAccU += dDiffuse * lightTerm + dSubsurface * l.radiance;
+            sAccU += dSpecular * lightTerm;
+        } else {
+            dAcc += dDiffuse * lightTerm + dSubsurface * l.radiance;
+            sAcc += dSpecular * lightTerm;
+        }
     }
-    diffuse  += dAcc * vis;
-    specular += sAcc * vis;
+    diffuse  += dAcc * vis + dAccU;
+    specular += sAcc * vis + sAccU;
 }
 #endif
 
