@@ -344,6 +344,13 @@ std::array<f32, 3> nrd2ResolvePixel(const Nrd2Frame& f, const Nrd2Pyramid& py, u
     return {out.x, out.y, out.z};
 }
 
+void nrd2StabFirefly(f32 c[3], f32 neighbourMaxLum) {
+    const f32 l = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+    const f32 cap = 2.0f * neighbourMaxLum;
+    if (l > cap && l > 0.0f)
+        for (u32 k = 0; k < 3; ++k) c[k] *= cap / l;
+}
+
 f32 nrd2StabMaxFrames(f32 speed, f32 nStill, f32 nFast) {
     if (!(speed < 128.0f)) return 0.0f;
     const f32 t = sat(std::log2(std::max(speed, 0.25f) / 0.25f) / std::log2(8.0f / 0.25f));

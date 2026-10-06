@@ -308,6 +308,14 @@ void testStabiliser() {
           "history kept through a fast pan, none from 128 px per frame or for a NaN speed");
     check(std::fabs(nrd2StabMaxFrames(0.0f, 2.0f, 4.0f) - 2.0f) < 1e-5f && std::fabs(nrd2StabMaxFrames(130.0f, 2.0f, 4.0f)) == 0.0f, "the fast cap never exceeds the rest length");
 
+    {
+        f32 glint[3] = {9.0f, 9.0f, 9.0f}, edge[3] = {1.5f, 1.5f, 1.5f};
+        nrd2StabFirefly(glint, 1.0f);
+        nrd2StabFirefly(edge, 1.0f);
+        check(std::fabs(glint[0] - 2.0f) < 1e-5f && edge[0] == 1.5f,
+              "firefly clamp: a lone glint drops to 2x its brightest neighbour; a pixel within 2x is untouched");
+    }
+
     // Weight ramp from a disocclusion: 0, 1/2, 2/3, 3/4 ... capped by N.
     f32 age = 0.0f;
     bool ramp = true, cap = true;

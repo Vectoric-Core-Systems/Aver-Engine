@@ -50,6 +50,8 @@ std::array<f32, 3> nrd2ResolvePixel(const Nrd2Frame& f, const Nrd2Pyramid& p, u3
 // Frames of history allowed at this screen speed (px per frame): nStill at rest, min(nFast, nStill) from
 // 8 px, none from 128 px (or for a non-finite speed).
 f32 nrd2StabMaxFrames(f32 speed, f32 nStill, f32 nFast);
+// Firefly clamp (nrd2StabFirefly): c scaled down to 2x the brightest neighbour's luminance when above it.
+void nrd2StabFirefly(f32 c[3], f32 neighbourMaxLum);
 // Weight of the history after `age` frames: 0, 1/2, 2/3 ... up to 1 - 1/nMax.
 f32 nrd2StabAlpha(f32 age, f32 nMax);
 // Per-channel min/max over the given rgb values (the clamp box of one signal).

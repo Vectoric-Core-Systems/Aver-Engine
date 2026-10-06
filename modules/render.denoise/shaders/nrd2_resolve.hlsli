@@ -168,6 +168,15 @@ float nrd2StabMaxFrames(float speed, float nStill, float nFast) {
     return exp2(lerp(log2(hi), log2(clamp(nFast, 1.0, hi)), t));
 }
 
+// Firefly clamp: a pixel brighter than kNrd2StabFirefly times the brightest of its 8 neighbours is scaled
+// down to that (an order statistic, never a mean). Isolated glints go; highlights wider than a pixel stay.
+static const float kNrd2StabFirefly = 2.0;
+float3 nrd2StabFirefly(float3 c, float neighbourMaxLum) {
+    const float l = dot(c, float3(0.2126, 0.7152, 0.0722));
+    const float cap = kNrd2StabFirefly * neighbourMaxLum;
+    return (l > cap && l > 0.0) ? c * (cap / l) : c;
+}
+
 // Weight of the history: 0, 1/2, 2/3, ... up to 1 - 1/nMax.
 float nrd2StabAlpha(float age, float nMax) {
     return saturate(1.0 - 1.0 / max(min(age + 1.0, nMax), 1.0));

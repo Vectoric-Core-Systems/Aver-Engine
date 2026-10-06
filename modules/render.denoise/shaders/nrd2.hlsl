@@ -398,9 +398,17 @@ void CSNrd2Stabilise(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThre
 
     // The clamp box: this frame's valid 3x3, united with the resolve's own 1/8 taps.
     const int li = int((gtid.y + 1u) * 10u + gtid.x + 1u);
-    const float3 curD = gsStabD[li].rgb, curS = gsStabS[li].rgb;
+    float nmD = 0.0, nmS = 0.0;
+    [unroll] for (uint f = 0u; f < 9u; ++f) {
+        if (f == 4u) continue;
+        const int fi = li + (int(f / 3u) - 1) * 10 + int(f % 3u) - 1;
+        if (gsStabD[fi].a > 0.5) nmD = max(nmD, dot(gsStabD[fi].rgb, float3(0.2126, 0.7152, 0.0722)));
+        if (gsStabS[fi].a > 0.5) nmS = max(nmS, dot(gsStabS[fi].rgb, float3(0.2126, 0.7152, 0.0722)));
+    }
+    const float3 curD = nrd2StabFirefly(gsStabD[li].rgb, nmD), curS = nrd2StabFirefly(gsStabS[li].rgb, nmS);
     float3 loD = curD, hiD = curD, loS = curS, hiS = curS;
     [unroll] for (uint n = 0u; n < 9u; ++n) {
+        if (n == 4u) continue;   // the centre is curD/curS, already clamped
         const int ni = li + (int(n / 3u) - 1) * 10 + int(n % 3u) - 1;
         if (gsStabD[ni].a > 0.5) { loD = min(loD, gsStabD[ni].rgb); hiD = max(hiD, gsStabD[ni].rgb); }
         if (gsStabS[ni].a > 0.5) { loS = min(loS, gsStabS[ni].rgb); hiS = max(hiS, gsStabS[ni].rgb); }
