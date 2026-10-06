@@ -143,7 +143,7 @@ float3 nrd2SpecularExtraLogit(float rough, float hitT, float viewZ) {
 // length comes from motion and disocclusion only and feeds the blend weight alone (NEURAA_NRD.md rule 5).
 static const float kNrd2StabSpeedStill = 0.25;   // px per frame: full history length at or below
 static const float kNrd2StabSpeedFast  = 8.0;    // log-space ramp down to Nfast here
-static const float kNrd2StabSpeedCut   = 32.0;   // no history from here
+static const float kNrd2StabSpeedCut   = 128.0;  // no history from here (a whip)
 static const float kNrd2StabRoughLo    = 0.35;   // S takes history only for rough lobes (the resolve's smooth threshold)
 static const float kNrd2StabRoughSpan  = 0.3;
 static const float kNrd2StabDepthRel   = 0.02;   // reprojected-depth acceptance: relative + 1 cm + local plane slope
@@ -159,7 +159,7 @@ struct Nrd2StabTap {
     float3 d, s;   // stabilised D'' and S''
 };
 
-// Frames of history allowed at this screen speed (px per frame): nStill at rest, nFast from 8 px, none from 32 px.
+// Frames of history allowed at this screen speed (px per frame): nStill at rest, nFast from 8 px, none from 128 px.
 float nrd2StabMaxFrames(float speed, float nStill, float nFast) {
     if (!(speed < kNrd2StabSpeedCut)) return 0.0;
     const float t = saturate(log2(max(speed, kNrd2StabSpeedStill) / kNrd2StabSpeedStill) /

@@ -48,7 +48,7 @@ std::array<f32, 3> nrd2ResolvePixel(const Nrd2Frame& f, const Nrd2Pyramid& p, u3
 // ---- temporal stabiliser (nrd2_resolve.hlsli: nrd2StabMaxFrames / nrd2StabCombine) ----
 
 // Frames of history allowed at this screen speed (px per frame): nStill at rest, min(nFast, nStill) from
-// 8 px, none from 32 px (or for a non-finite speed).
+// 8 px, none from 128 px (or for a non-finite speed).
 f32 nrd2StabMaxFrames(f32 speed, f32 nStill, f32 nFast);
 // Weight of the history after `age` frames: 0, 1/2, 2/3 ... up to 1 - 1/nMax.
 f32 nrd2StabAlpha(f32 age, f32 nMax);

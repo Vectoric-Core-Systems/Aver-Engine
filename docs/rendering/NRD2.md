@@ -320,8 +320,9 @@ never blurs; D and S separately, so the clamp box is in lighting units):
    spatial estimate, never larger. History outside the box is clamped to its edge. Never a mean or variance.
 3. Blend weight `a = 1 - 1/min(age + 1, N)`, so 0, 1/2, 2/3, 3/4 ... The age is the youngest of the taps that
    carry weight (> 0.1), and the stored age counts frames up to 255. It feeds this weight only. `N` comes from
-   motion alone: `voxi.nrd2StabFrames` (12) up to 0.25 px per frame, a log-space ramp to min(4, that) at
-   8 px, flat to 32 px, none beyond (a whip pan takes no history); 2 for two frames after the sun changes
+   motion alone: `voxi.nrd2StabFrames` (12) up to 0.25 px per frame, a log-space ramp to min(8, that) at
+   8 px, flat to 128 px, none beyond (only a whip takes no history; a normal camera swing keeps it, as
+   FidelityFX does, with the clamp box and depth test guarding against smear); 2 for two frames after the sun changes
    (the hold FidelityFX gets). Specular takes `a` times saturate((roughness - 0.35) / 0.3): a glossy
    reflection does not move with its surface, so smooth lobes stay single-frame.
 4. out = lerp(current, clamp(history, box), a), stored as the next history (D'' with the age, S'' with the

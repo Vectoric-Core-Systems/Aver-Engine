@@ -345,7 +345,7 @@ std::array<f32, 3> nrd2ResolvePixel(const Nrd2Frame& f, const Nrd2Pyramid& py, u
 }
 
 f32 nrd2StabMaxFrames(f32 speed, f32 nStill, f32 nFast) {
-    if (!(speed < 32.0f)) return 0.0f;
+    if (!(speed < 128.0f)) return 0.0f;
     const f32 t = sat(std::log2(std::max(speed, 0.25f) / 0.25f) / std::log2(8.0f / 0.25f));
     const f32 hi = std::max(nStill, 1.0f);
     const f32 a = std::log2(hi), b = std::log2(std::clamp(nFast, 1.0f, hi));

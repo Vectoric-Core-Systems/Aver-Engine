@@ -35,7 +35,7 @@ constexpr u32 kPyramidSrv = 4, kPyramidUav = 9;
 constexpr u32 kResolveSrv = 16, kResolveUav = 3;
 constexpr u32 kResolveParamsSrv = 15;
 constexpr u32 kStabSrv = 11, kStabUav = 3;
-constexpr f32 kStabNFast = 4.0f, kStabNSunMoved = 2.0f, kStabNMax = 64.0f;
+constexpr f32 kStabNFast = 8.0f, kStabNSunMoved = 2.0f, kStabNMax = 64.0f;
 
 constexpr rhi::ResourceState kRead  = rhi::ResourceState::NonPixelShaderResource;
 constexpr rhi::ResourceState kWrite = rhi::ResourceState::UnorderedAccess;

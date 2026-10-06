@@ -303,9 +303,10 @@ void testStabiliser() {
           "min(4, N) from 8 px per frame");
     const f32 mid = nrd2StabMaxFrames(1.41f, 12.0f, 4.0f);   // 2.5 octaves above 0.25 px: halfway in log space
     check(mid > 6.5f && mid < 7.2f, "log-space ramp between (" + std::to_string(mid) + ")");
-    check(nrd2StabMaxFrames(32.0f, 12.0f, 4.0f) == 0.0f && nrd2StabMaxFrames(std::nanf(""), 12.0f, 4.0f) == 0.0f,
-          "no history from 32 px per frame or for a NaN speed");
-    check(std::fabs(nrd2StabMaxFrames(0.0f, 2.0f, 4.0f) - 2.0f) < 1e-5f && std::fabs(nrd2StabMaxFrames(40.0f, 2.0f, 4.0f)) == 0.0f, "the fast cap never exceeds the rest length");
+    check(nrd2StabMaxFrames(100.0f, 12.0f, 4.0f) > 0.0f && nrd2StabMaxFrames(128.0f, 12.0f, 4.0f) == 0.0f &&
+              nrd2StabMaxFrames(std::nanf(""), 12.0f, 4.0f) == 0.0f,
+          "history kept through a fast pan, none from 128 px per frame or for a NaN speed");
+    check(std::fabs(nrd2StabMaxFrames(0.0f, 2.0f, 4.0f) - 2.0f) < 1e-5f && std::fabs(nrd2StabMaxFrames(130.0f, 2.0f, 4.0f)) == 0.0f, "the fast cap never exceeds the rest length");
 
     // Weight ramp from a disocclusion: 0, 1/2, 2/3, 3/4 ... capped by N.
     f32 age = 0.0f;
