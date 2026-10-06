@@ -11,6 +11,15 @@ aver_add_module(Aver.Synapse
     # The behaviour-tree evaluator -- pure for the identical reason Nav.cpp is: a hand-built tree
     # and a pair of fake Condition/Action functions test the whole algorithm with no world at all.
     src/Bt.cpp
+    # Typed blackboard (pure) and the .ocbt asset with blackboard schema + decorators.
+    src/Blackboard.cpp
+    src/BtAsset.cpp
+    # Steering, ORCA crowd avoidance, hearing and cover/squad tactics -- all pure.
+    src/Steering.cpp
+    src/CrowdOrca.cpp
+    src/Crowd.cpp
+    src/Hearing.cpp
+    src/Cover.cpp
   DEPS
     Aver.Formats
     Aver.Core

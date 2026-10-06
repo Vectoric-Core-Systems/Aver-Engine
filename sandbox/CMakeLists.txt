@@ -58,6 +58,13 @@ add_executable(Sandbox WIN32
   src/GraphEditor.cpp
   src/AnimCurveGeometry.cpp
   src/BtEditor.cpp
+  src/BtGraphEditor.cpp
+  src/AiDebugOverlay.cpp
+  src/UiLayoutEditor.cpp
+  src/BlendSpaceEditor.cpp
+  src/AnimStateMachineEditor.cpp
+  src/PrefabEditorModel.cpp
+  src/PrefabEditorUi.cpp
   src/SoundEditor.cpp
   src/ParticleEditor.cpp
   src/FoliageTypeEditor.cpp
@@ -267,6 +274,25 @@ if(TARGET Aver.Synapse.Scene)
   # CSynapseAgent + AgentSystem (brings AVER_MODULE_SYNAPSE_SCENE=1) -- the join between the grid
   # above and a live scene::World, so the editor can register the component and tick agents in Play.
   target_link_libraries(Sandbox PRIVATE Aver.Synapse.Scene)
+endif()
+# Crowds / hearing / cover live in the ONE SynapseAi instance inside this DLL; the host drives it
+# through synapse_ai_abi.h. The GPU crowd backend is installed from the host through the same seam.
+if(TARGET Aver.Synapse.Abi)
+  target_link_libraries(Sandbox PRIVATE Aver.Synapse.Abi)
+  target_compile_definitions(Sandbox PRIVATE AVER_WITH_SYNAPSE_AI=1)
+endif()
+# The retained widget tree's host half (GameUiInput.hpp) is compiled in for the editor's Play session too.
+target_compile_definitions(Sandbox PRIVATE AVER_WITH_UI_ABI=1)
+if(TARGET Aver.Synapse.Gpu)
+  target_link_libraries(Sandbox PRIVATE Aver.Synapse.Gpu)
+endif()
+# Reverb zones and audio occlusion (CReverbZone / CAudioOcclusion).
+if(TARGET Aver.Audio.Scene)
+  target_link_libraries(Sandbox PRIVATE Aver.Audio.Scene)
+endif()
+# Prefab instances: the system for the editor, the stateless ABI DLL for scripts.
+if(TARGET Aver.Prefab)
+  target_link_libraries(Sandbox PRIVATE Aver.Prefab Aver.Prefab.Abi)
 endif()
 if(TARGET Aver.Framework)
   # Gameplay (brings AVER_MODULE_FRAMEWORK=1). It carries Aver.Scene transitively, but the scene is

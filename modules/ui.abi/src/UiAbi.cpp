@@ -1,5 +1,6 @@
 // The Aver.UI C ABI: one process-wide draw list, and the exports that write into it.
 #include "aver/ui/ui_abi.h"
+#include "UiAbiState.hpp"
 #include "aver/ui/UiDrawList.hpp"
 #include "aver/ui/UiFont.hpp"
 
@@ -25,6 +26,16 @@ const aver::ui::UiFont* usableFont() {
 }
 
 } // namespace
+
+namespace aver::ui::abi {
+
+UiDrawList& drawList() { return g_list; }
+const UiFont* font() { return usableFont(); }
+void viewport(float out[4]) { for (int i = 0; i < 4; ++i) out[i] = g_viewport[i]; }
+void pointer(float& x, float& y, std::uint32_t& buttons) { x = g_pointer[0]; y = g_pointer[1]; buttons = g_buttons; }
+bool frameStarted() { return g_started; }
+
+} // namespace aver::ui::abi
 
 extern "C" {
 

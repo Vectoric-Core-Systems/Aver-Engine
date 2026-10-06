@@ -30,6 +30,17 @@
 #endif
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
+#if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
+#  include "aver/synapse/CrowdGpu.hpp"
+#endif
+#if AVER_MODULE_SCENE
+#  include "aver/prefab/PrefabAbiHost.hpp"
+#  include "aver/prefab/PrefabSystem.hpp"
+#  include "aver/prefab/prefab_abi.h"
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_VOXI
+#  include "aver/game/SceneDecalFeed.hpp"
+#endif
 #if AVER_MODULE_LANDSCAPE
 #  include "aver/game/GameLandscape.hpp"
 #endif
@@ -318,6 +329,9 @@ private:
     // Registered NON-OWNING with addRenderFeature. Must outlive the device.
     voxi::VoxiRenderer voxiRenderer_;
     bool voxiAttached_ = false;
+#if AVER_MODULE_SCENE
+    SceneDecalFeed sceneDecalFeed_;   // CDecal entities -> Voxi's projected-decal list, per frame
+#endif
     u32  msaaPushed_ = 0;   // sample count last given to the device
     // Frame-budget state. Ticked once a frame and seeded from project_.frameBudgetMs.
     voxi::FrameBudgetState frameBudget_;
@@ -388,6 +402,18 @@ private:
     std::string echoHeld_, echoLast_;
     fmt::ProjectDesc project_;
     GameContent content_;
+#if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
+    // The GPU crowd-avoidance backend, installed behind the Synapse ABI's one SynapseAi (game::installCrowdGpu).
+    synapse::GpuCrowdBackend crowdGpu_;
+    bool crowdGpuAttached_ = false;
+#endif
+#if AVER_MODULE_SCENE
+    // Prefab instances (docs/PREFABS.md): the library loads .ocprefab out of the project content, the system
+    // spawns level PREFABINST records and serves the scripting ABI. Built in init, after content_.
+    prefab::PrefabLibrary prefabLib_;
+    std::unique_ptr<prefab::PrefabSystem> prefabSys_;
+    AverPrefabHost prefabHost_{};
+#endif
     GameLevel level_;
 #if AVER_MODULE_LANDSCAPE
     // The level's terrain. Loaded/unloaded with the level (LoadHooks).

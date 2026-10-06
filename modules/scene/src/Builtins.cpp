@@ -1,4 +1,4 @@
-// Registers the fifteen built-in components and their field tables, through the same public API a
+// Registers the sixteen built-in components and their field tables, through the same public API a
 // script-declared component uses.
 #include "aver/scene/Components.hpp"
 
@@ -177,6 +177,37 @@ void registerBuiltinComponents(World& world) {
             // process-local physics handle must never reach a serialised chunk.
             .field("joint", FieldKind::I32, static_cast<u16>(offsetof(CJoint, joint)), 0, /*readOnly*/ true);
         expect(b.verify(sizeof(CJoint)), b.typeId(), kComponentJoint, "CJoint");
+    }
+    {
+        auto b = world.registerComponent<CDecal>("CDecal");
+        b.field("sizeCm", FieldKind::Vec3, static_cast<u16>(offsetof(CDecal, sizeCm)))
+            .field("tint", FieldKind::Vec3, static_cast<u16>(offsetof(CDecal, tint)))
+            .field("transparency", FieldKind::F32, static_cast<u16>(offsetof(CDecal, transparency)))
+            .field("normalStrength", FieldKind::F32, static_cast<u16>(offsetof(CDecal, normalStrength)))
+            .field("roughness", FieldKind::F32, static_cast<u16>(offsetof(CDecal, roughness)))
+            .field("metallic", FieldKind::F32, static_cast<u16>(offsetof(CDecal, metallic)))
+            .field("edgeFade", FieldKind::F32, static_cast<u16>(offsetof(CDecal, edgeFade)))
+            .field("angleFadeStartDeg", FieldKind::F32, static_cast<u16>(offsetof(CDecal, angleFadeStartDeg)))
+            .field("angleFadeEndDeg", FieldKind::F32, static_cast<u16>(offsetof(CDecal, angleFadeEndDeg)))
+            .field("fadeDistanceCm", FieldKind::F32, static_cast<u16>(offsetof(CDecal, fadeDistanceCm)))
+            .field("sortOrder", FieldKind::I32, static_cast<u16>(offsetof(CDecal, sortOrder)))
+            .field("flags", FieldKind::I32, static_cast<u16>(offsetof(CDecal, flags)))
+            .field("baseTexture", FieldKind::I64, static_cast<u16>(offsetof(CDecal, baseTexture)))
+            .field("normalTexture", FieldKind::I64, static_cast<u16>(offsetof(CDecal, normalTexture)))
+            .field("ormTexture", FieldKind::I64, static_cast<u16>(offsetof(CDecal, ormTexture)))
+            // Two floats, which the field kinds cannot name as a pair: stored as two scalars at the
+            // member's own offsets so verify() still sees an unbroken table.
+            .field("uvScaleU", FieldKind::F32, static_cast<u16>(offsetof(CDecal, uvScale)))
+            .field("uvScaleV", FieldKind::F32, static_cast<u16>(offsetof(CDecal, uvScale) + sizeof(f32)))
+            .field("uvOffsetU", FieldKind::F32, static_cast<u16>(offsetof(CDecal, uvOffset)))
+            .field("uvOffsetV", FieldKind::F32, static_cast<u16>(offsetof(CDecal, uvOffset) + sizeof(f32)))
+            .field("lifetimeSec", FieldKind::F32, static_cast<u16>(offsetof(CDecal, lifetimeSec)))
+            .field("fadeOutSec", FieldKind::F32, static_cast<u16>(offsetof(CDecal, fadeOutSec)))
+            // READ-ONLY runtime state (docs/CHUNKS.md 5.1): a pool's clock and ordering mean nothing
+            // in another run, so they must never reach a serialised chunk.
+            .field("age", FieldKind::F32, static_cast<u16>(offsetof(CDecal, age)), 0, /*readOnly*/ true)
+            .field("serial", FieldKind::I32, static_cast<u16>(offsetof(CDecal, serial)), 0, true);
+        expect(b.verify(sizeof(CDecal)), b.typeId(), kComponentDecal, "CDecal");
     }
 }
 

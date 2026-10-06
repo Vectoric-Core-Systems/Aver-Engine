@@ -200,6 +200,6 @@ Components are registered dynamically at each composition root, so no edit to
 - **No local avoidance.** Agents push through each other via Jolt.
 - **No off-mesh links.** No jumping, ladders or dropped ledges; `NLNK` is reserved, unwritten.
 - **No runtime nav baking.** A level with no `.ocnav` beside it has no navigation.
-- **No hearing.** `MakeNoise`/`OnHearNoise` were designed and not built; only sight exists.
-- **No node canvas in the `.ocbt` editor.** It is a tree view plus a parameter panel; reparenting is a combo box.
+- **Hearing exists now**, as a separate system from sight: noise events with occlusion, a decaying last-known-position memory per listener, and its blackboard seam. See [AI_CROWDS_HEARING_COVER.md](AI_CROWDS_HEARING_COVER.md).
+- **The `.ocbt` editor has a node canvas now**, with decorators, a blackboard schema and live debugging; the old list editor remains registered as the fallback. See [BLACKBOARD_BT.md](BLACKBOARD_BT.md).
 - **One target, globally.** The resolver answers per tick, not per agent.

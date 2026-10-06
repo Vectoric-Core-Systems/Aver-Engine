@@ -15,6 +15,8 @@ aver_add_module(Aver.Anim.Scene
     # than in Aver.Anim because it needs a World to find the component on -- the SOLVERS it
     # calls are pure and live one tier down, in Aver.Anim, with no scene at all.
     src/ControlRig.cpp
+    # Animation state machines on entities (CAnimGraph), driving poses through AnimSystem's pose source.
+    src/AnimGraphSystem.cpp
   DEPS
     Aver.Anim
     Aver.Scene

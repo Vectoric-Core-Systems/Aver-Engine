@@ -66,6 +66,12 @@ public class Node
     public required string Type { get; init; }  // "Const", "Add", "Multiply", etc.
     public List<Pin> Pins { get; init; } = new();
 
+    // Every key=value token on the NODE line, verbatim, case-insensitive on the key. The typed
+    // properties below (EventName, SavePath, ...) are each one hand-picked key; this is what the
+    // table-driven node families (GraphGameSystemNodes.cs) read their string arguments from, so a new
+    // node needs no new property here and no new parser branch.
+    public Dictionary<string, string> Attrs { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     // Which graph PARAMETER a "param" node reads, e.g. "entity" or "time". Set from the NODE
     // line's "param=<name>" attribute. Null for every other node type.
     public string? ParamName { get; set; }

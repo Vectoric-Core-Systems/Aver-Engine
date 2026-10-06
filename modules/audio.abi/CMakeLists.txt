@@ -9,12 +9,14 @@
 # their managed halves and each needs a NativeResolver to stop DllImport loading the managed
 # assembly as a native library; naming these apart removes the problem instead of working around it.
 if(WIN32 AND TARGET Aver.Audio.Wasapi AND TARGET Aver.Formats.Audio)
-  add_library(Aver.Audio.Abi SHARED src/AudioAbi.cpp)
+  add_library(Aver.Audio.Abi SHARED src/AudioAbi.cpp src/StreamSources.cpp)
   target_include_directories(Aver.Audio.Abi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_compile_features(Aver.Audio.Abi PUBLIC cxx_std_20)
   # PRIVATE: nothing that includes this header needs the mixer on its own link line.
   target_link_libraries(Aver.Audio.Abi PRIVATE Aver.Core Aver.Audio Aver.Audio.Wasapi Aver.Formats.Audio)
   target_compile_definitions(Aver.Audio.Abi PRIVATE AVER_AUDIO_ABI_BUILD)
+  # Media Foundation, read incrementally for streamed music (the importer already links it for whole-file decode).
+  target_link_libraries(Aver.Audio.Abi PRIVATE mfplat mfreadwrite mfuuid ole32)
   set_target_properties(Aver.Audio.Abi PROPERTIES
     FOLDER "modules"
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)   # beside the exe, where DllImport looks

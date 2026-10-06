@@ -14,7 +14,8 @@ add_library(Aver.Scene SHARED
   src/ComponentPool.cpp
   src/Fields.cpp
   src/Builtins.cpp
-  src/SceneAbi.cpp)
+  src/SceneAbi.cpp
+  src/DecalAbi.cpp)
 
 target_include_directories(Aver.Scene PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Scene PUBLIC cxx_std_20)

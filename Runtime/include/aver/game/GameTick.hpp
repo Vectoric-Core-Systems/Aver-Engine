@@ -34,6 +34,16 @@
 // framework_hooks.h -- both hosts already include this same pair together for the identical reason.
 #  include "aver/framework/framework_abi.h"
 #  include "aver/framework/framework_hooks.h"
+#  include "aver/framework/framework_timers_abi.h"
+#endif
+#if AVER_MODULE_SCENE
+#  include "aver/scene/decal_abi.h"
+#endif
+#if AVER_MODULE_AUDIO_SCENE
+#  include "aver/audio/AudioScene.hpp"
+#endif
+#if AVER_WITH_SYNAPSE_AI
+#  include "aver/synapse/synapse_ai_abi.h"
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE
 #  include "aver/scene/World.hpp"
@@ -134,6 +144,10 @@ inline void applyProjectAudioMix(const fmt::ProjectDesc& project) {
 // than last frame's. Reordering to match "bracket" literally would make every PHYSICS-group actor
 // read stale transforms.
 inline i32 tickGameplayGroups(f32 dt) {
+    // Timers fire and posted events are delivered before any group runs, so a graph or actor reached by
+    // either sees this frame's PrePhysics as the first thing after its callback.
+    aver_fw_timers_update(dt);
+    aver_fw_events_flush();
     aver_fw_tick(AVER_FW_TICK_PRE_PHYSICS, dt);
     i32 steps = 0;
 #if AVER_MODULE_PHYSICS
@@ -141,6 +155,13 @@ inline i32 tickGameplayGroups(f32 dt) {
 #endif
     aver_fw_tick(AVER_FW_TICK_PHYSICS, dt);
     aver_fw_tick(AVER_FW_TICK_POST_PHYSICS, dt);
+#if AVER_MODULE_SCENE
+    aver_decal_tick(dt);   // lifetimes of pooled decals
+#endif
+#if AVER_MODULE_AUDIO_SCENE
+    // Reverb zones and audio occlusion probes, after this frame's movement.
+    aver::audio::audioSceneSystem().tick(scene::World::instance(), dt);
+#endif
     return steps;
 }
 #endif
@@ -156,6 +177,11 @@ inline void tickAi(f32 dt, fmt::OcNavData* nav) {
     // Same "after flush" reasoning -- needs dt (unlike AgentSystem::tick) for its own
     // think-interval throttle.
     synapse::perceptionSystem().tick(scene::World::instance(), dt);
+#if AVER_WITH_SYNAPSE_AI
+    // Crowd avoidance, hearing memory and cover/squad tactics: after the agents have their waypoints,
+    // before the behaviour tree reads what they produce.
+    aver_syn_ai_tick(nav, dt);
+#endif
     // AFTER perceptionSystem: a behaviour's own "CanSeeTarget"/"HasTarget" conditions read THIS
     // frame's sight state, not last frame's.
     synapse::btSystem().tick(scene::World::instance(), dt);

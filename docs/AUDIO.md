@@ -15,10 +15,10 @@ the tree rather than assumed:
   shape, and the deviation is recorded as deliberate rather than as drift.
 - **The shipped format is `.ocaudio` with an `AHDR` header chunk and an `APCM` sample chunk**
   (`modules/formats/include/aver/formats/OcAudio.hpp`), not the `.ocsound`/`SNDH` naming §4 proposes.
-- **There is no streaming and no Ogg Vorbis importer.** `modules/audio/README.md`'s own "what it does
-  not do" list says so directly: "no streaming — every sound is resident." §4's resident-vs-streamed
-  design and §2's `stb_vorbis` choice were never built; only a WAV reader (plus, per
-  `Aver.Formats.Audio`, Windows Media Foundation for compressed formats other than Ogg) exists.
+- **Streaming now exists; there is still no Ogg Vorbis importer.** A decoder thread and ring buffer
+  stream WAV and Media Foundation files ([AUDIO_STREAMING.md](AUDIO_STREAMING.md)), with crossfades,
+  raycast occlusion and reverb zones. §2's `stb_vorbis` choice was never built; the decoders are a WAV
+  reader and Windows Media Foundation for the compressed formats other than Ogg.
 - **The C ABI is shaped differently from §6's sketch.** The real `audio_abi.h` splits a plan-shaped
   `aver_audio_play(path, volume, pitch)` into `aver_audio_load(path)` (returns a *sound* handle,
   decoding once) and `aver_audio_play(sound, volume, pitch, looping, bus)` (returns a *voice* handle)

@@ -315,7 +315,8 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         p.skel = skel;
         restPose(*skel, p.pose);
 
-        if (const fmt::OcAnimation* c = clip(a->clip)) {
+        const bool sourced = poseSrc_ && poseSrc_(e, *skel, p.pose, poseSrcUser_);
+        if (const fmt::OcAnimation* c = sourced ? nullptr : clip(a->clip)) {
             // The loop flag lives on the COMPONENT, not the clip, so one clip can be looped by one
             // actor and played once by another.
             const f32 t = wrapClipTime(*c, a->time, (a->flags & scene::kAnimatorOnce) != 0);

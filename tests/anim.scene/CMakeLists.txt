@@ -54,3 +54,10 @@ target_compile_definitions(ControlRigTest PRIVATE
 add_executable(ObjectAnimTest src/ObjectAnimTest.cpp)
 target_link_libraries(ObjectAnimTest PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(ObjectAnimTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AnimGraphSystemTest -- CAnimGraph on an entity: component registration, asset resolution through the
+# same asset-id path a clip uses, parameter slots driving the machine, and the machine's pose reaching
+# the skinning output through AnimSystem's pose source. No scripting host, no GPU.
+add_executable(AnimGraphSystemTest src/AnimGraphSystemTest.cpp)
+target_link_libraries(AnimGraphSystemTest PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(AnimGraphSystemTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

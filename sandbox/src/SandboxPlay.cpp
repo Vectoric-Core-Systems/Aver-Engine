@@ -5,6 +5,8 @@
 #include "SandboxApp.hpp"
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameInput.hpp"
+#include "aver/game/GameSystemsWiring.hpp"
+#include "aver/game/GameUiInput.hpp"
 #include "aver/game/GamePawn.hpp"
 
 #include <cfloat>
@@ -605,6 +607,8 @@ void SandboxApp::stopPlay() {
     playEjected_ = false;
     playFrameStepPending_ = false;
     preplayViewValid_ = false;
+    // A session's state machines, boards, crowds and cover claims end with it.
+    game::resetGameSystems();
     // PHYSICS FIRST, because the handles live IN the components: an entity destroyed by the
     // session takes its CRigidBody (and the body handle inside it) with it, and a body whose
     // handle is gone can never be removed. Tearing down here first is what keeps Play/Stop from leaking a Jolt body per destroyed entity.
@@ -776,6 +780,8 @@ void SandboxApp::pushInput(bool uiActive) {
     }
 #endif
 
+    // An open game-UI menu takes the keyboard, mouse and pad away from gameplay until it closes.
+    game::uiGateInput(policy);
     game::publishInput(input_, policy);
 }
 

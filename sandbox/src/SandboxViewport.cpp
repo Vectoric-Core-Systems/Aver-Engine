@@ -822,6 +822,29 @@ void SandboxApp::spawnLightAtCamera(i32 kind) {
 }
 #endif
 
+#if AVER_MODULE_SCENE
+// "Add > Decal". A bare CDecal entity in front of the camera, facing the way the camera does (yaw only), with
+// new-decal defaults. Like a light it is no placement: saveLevel writes it as a DECAL record and unloadLevel
+// destroys it by the CDecal pool.
+void SandboxApp::spawnDecalAtCamera() {
+    scene::World& world = scene::World::instance();
+    Vec3 at = camPos_ + camForward() * kAddDistance;
+    if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
+    const Vec3 f = camForward();
+    const scene::Entity e = editor::createEditorDecal(world, at, degrees(std::atan2(f.y, f.x)));
+    if (e == scene::kInvalidEntity) { AVER_WARN("[Editor] Add: the world refused a new decal"); return; }
+    entityLabels_[static_cast<u32>(e)] = "Decal";
+    sel_ = kSelScene; selEntity_ = e;
+    {
+        EditCmd c = describeEntity(e);
+        c.kind = EditCmd::Kind::Create;
+        pushEdit(std::move(c));
+    }
+    markLevelUnsaved();
+    AVER_INFO("[Editor] added Decal at ({:.0f}, {:.0f}, {:.0f})", at.x, at.y, at.z);
+}
+#endif
+
 // Adds a built-in primitive in front of the camera and selects it. Cube and sphere are both
 // synthesised at startup (appendBox/appendSphere) and registered in content_'s meshes/bounds and
 // meshTris_, so "Add > Sphere" needed no new asset/loader/bounds, only this function to stop
@@ -1078,6 +1101,38 @@ bool SandboxApp::pickSurfacePoint(f32 screenX, f32 screenY, Vec3& out) {
 void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 screenX, f32 screenY) {
     const std::string ext = lowerExt(std::filesystem::path(full));
     const std::string fileName = std::filesystem::path(full).filename().string();
+#if AVER_MODULE_SCENE
+    // A prefab drops as an instance (its own undo entry); its entities come through the prefab hooks.
+    if (ext == ".ocprefab") {
+        if (!(hideEditorScene_ || !levelPath_.empty())) {
+            cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
+            return;
+        }
+        prefabModel_.setContentDir(project_.contentDir());
+        const std::string ref = editor::PrefabEditorModel::assetRefFor(project_.contentDir(), full);
+        if (ref.empty()) { cbStatus_ = "Could not resolve '" + fileName + "' to a project-relative path"; return; }
+        Transform xf;
+        xf.position = dropWorldPoint(screenX, screenY);
+        if (!(std::isfinite(xf.position.x) && std::isfinite(xf.position.y) && std::isfinite(xf.position.z))) {
+            cbStatus_ = "Could not find a valid drop position";
+            return;
+        }
+        if (snapMove_) for (int k = 0; k < 3; ++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
+        scene::Entity root = scene::kInvalidEntity;
+        editor::PrefabEdit edit;
+        std::string why;
+        if (!prefabModel_.place(ref, xf, scene::kInvalidEntity, root, edit, &why)) {
+            cbStatus_ = "Could not place '" + fileName + "': " + why;
+            AVER_WARN("[Editor] drop: prefab '{}' not placed: {}", ref, why);
+            return;
+        }
+        sel_ = kSelScene; selEntity_ = root;
+        pushPrefabEdit(edit);
+        markLevelUnsaved();
+        cbStatus_ = "Placed " + fileName;
+        return;
+    }
+#endif
     const bool isMesh = ext == ".ocmesh";
     bool isParticle = false;
 #if AVER_MODULE_PARTICLES
@@ -1435,7 +1490,36 @@ void SandboxApp::handleManip(Engine& e) {
 #endif
 #endif
     {
-        if (ImGui::IsMouseClicked(0) && overScene) {
+#if AVER_MODULE_SCENE
+        // A selected decal's box handles come before any pick: grabbing one resizes the box (the drag
+        // continues below until the button is released), and the click is not also a selection change.
+        bool decalHandleGrabbed = false;
+        if (ImGui::IsMouseClicked(0) && overScene && !noEditorChrome_ && sel_ == kSelScene &&
+            selEntity_ != scene::kInvalidEntity &&
+            scene::World::instance().hasComponent(selEntity_, scene::kComponentDecal)) {
+            Vec3 ro0, rd0, ro1, rd1;
+            viewportRay(mx, my, ro0, rd0);
+            viewportRay(mx + 1.0f, my, ro1, rd1);
+            const Mat4& dm = scene::World::instance().worldMatrix(selEntity_);
+            const Vec3 dp{dm.m[3][0], dm.m[3][1], dm.m[3][2]};
+            const f32 pixelWorldCm = dist(ro0, dp) * dist(rd0, rd1);
+            decalHandleGrabbed = decalGizmo_.beginDrag(scene::World::instance(), selEntity_, ro0, rd0, pixelWorldCm);
+        }
+        if (decalGizmo_.dragging()) {
+            if (io.MouseDown[0]) {
+                Vec3 ro, rd;
+                viewportRay(mx, my, ro, rd);
+                if (decalGizmo_.updateDrag(scene::World::instance(), ro, rd)) markLevelUnsaved();
+            } else {
+                decalGizmo_.endDrag();
+            }
+        }
+#endif
+        if (ImGui::IsMouseClicked(0) && overScene
+#if AVER_MODULE_SCENE
+            && !decalHandleGrabbed
+#endif
+            ) {
             int ax = -1;
             if (haveGizmo)
                 ax = pickAxis(gx.pos, gaxis, gizmoLen(gx.pos), mx, my);
@@ -2274,6 +2358,26 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
             f32 tTri;
             if (aver::editor::rayPickGeometry(*geo, c.lo, c.ld, /*skipBackFaces=*/c.insideBox, bestT, tTri))
                 { bestT = tTri; bestEnt = c.ent; best = -1; }
+        }
+    }
+#endif
+#if AVER_MODULE_SCENE
+    // A DECAL has no surface of its own, only a projector box, and its box nearly always sits on the
+    // geometry it paints -- so a click that reaches geometry means the geometry. Only a click that hits
+    // NOTHING else selects a decal by its box; every other way in is the Outliner, Add > Decal (which selects
+    // what it creates) and Show > Decals' drawn boxes.
+    if (best == -1 && bestEnt == kInvalidId && showDecals_ && !noEditorChrome_) {
+        scene::World& w = scene::World::instance();
+        if (scene::ComponentPool* dp = w.pool(scene::kComponentDecal)) {
+            for (usize i = 0; i < dp->size(); ++i) {
+                const scene::Entity de = dp->entityAt(i);
+                if (!w.valid(de) || w.destroyPending(de)) continue;
+                const auto* dc = static_cast<const scene::CDecal*>(dp->dataAt(i));
+                if (dc->flags & (scene::kDecalDisabled | scene::kDecalPooled)) continue;
+                f32 tHit;
+                if (editor::rayHitsDecalBox(ro, rd, editor::decalBoxOf(*dc, w.worldMatrix(de)), tHit) && tHit < bestT)
+                    { bestT = tHit; bestEnt = de; }
+            }
         }
     }
 #endif

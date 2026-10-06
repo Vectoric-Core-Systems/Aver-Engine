@@ -134,8 +134,8 @@ void giSamplers(rhi::PipelineLayout& l) {
 }
 
 // Wider than kGiSrvCount/kGiUavCount (SandboxApp.cpp's GPU path depends on those constants).
-// Includes extra slots for materials, backdrops, history, local lights, foliage, and radiance cache.
-constexpr u32 kVoxiSrvCount = kGiSrvCount + 15;
+// Includes extra slots for materials, backdrops, history, local lights, foliage, radiance cache and decals.
+constexpr u32 kVoxiSrvCount = kGiSrvCount + 16;
 
 // Wider than kGiUavCount (same reasoning as kVoxiSrvCount).
 // Includes history, ray-driven, and radiance-cache outputs. u11+ always declared, bound to placeholders when absent.
@@ -167,6 +167,7 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     srv[21] = rhi::SlotKind::StructuredBuffer;      // t21 foliage instance descs
     srv[22] = rhi::SlotKind::StructuredBuffer;      // t22 radiance-cache cascade info
     srv[23] = rhi::SlotKind::Texture2D;             // t23 denoised reflection (read)
+    srv[24] = rhi::SlotKind::StructuredBuffer;      // t24 projected decal records
     uav[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
     uav[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     uav[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
@@ -191,7 +192,7 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     uav[21] = rhi::SlotKind::StructuredBuffer;      // u21 radiance-cache cells
     uav[22] = rhi::SlotKind::StructuredBuffer;      // u22 Path Tracing progressive accumulation
     uav[23] = rhi::SlotKind::Texture2D;             // u23 reflection denoiser input (write)
-    static_assert(kVoxiSrvCount == 24 && kVoxiUavCount == 24 && kGiSrvCount == 9 && kGiUavCount == 4,
+    static_assert(kVoxiSrvCount == 25 && kVoxiUavCount == 24 && kGiSrvCount == 9 && kGiUavCount == 4,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -475,6 +476,14 @@ void VoxiRenderer::shutdown() {
     for (rhi::BufferHandle& b : rdLocalLights_)  { if (b) res_->destroyBuffer(b); b = 0; }
     if (rdLocalLightsPlaceholder_) { res_->destroyBuffer(rdLocalLightsPlaceholder_); rdLocalLightsPlaceholder_ = 0; }
     releaseLightAssets();
+    // Decals: record ring, placeholder, images.
+    for (rhi::BufferHandle& b : decalBuf_) { if (b) res_->destroyBuffer(b); b = 0; }
+    if (decalPlaceholder_) { res_->destroyBuffer(decalPlaceholder_); decalPlaceholder_ = 0; }
+    releaseDecalTextures();
+    decalTexCpu_.clear();   // their CPU copies are dropped after upload; the host registers them again
+    decalBufCapacity_ = decalBufSlot_ = decalCount_ = 0;
+    decalBound_ = 0;
+    cb_.decalParams[0] = 0.0f;
     rdLocalLightCapacity_ = rdLocalLightSlot_ = rdLocalLightCount_ = 0;
     rdLocalLightsBound_ = 0;
     rdLocalOutThisFrame_ = 0;
@@ -1260,6 +1269,7 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         }
     }
     buildLocalLights();
+    buildDecals();
     // Radiance cache: create/destroy, record clear dispatch, rebind t22/u20/u21 BEFORE shadowPass.
     updateNeuRaC(ctx);
     // Sky-occlusion rays: gated on rtActive_ (no TLAS = nowhere to trace).
@@ -3613,6 +3623,166 @@ void VoxiRenderer::releaseLightAssets() {
         for (auto& kv : lightAssetsGpu_)
             if (kv.second.tex) res_->destroyTexture(kv.second.tex);
     lightAssetsGpu_.clear();
+}
+
+// ---- projected decals ---------------------------------------------------------------------------------
+
+static_assert(kDecalUnboundTexture == pbr::kUnboundTexture, "SceneDecal.hpp mirrors the material system's unbound index");
+
+void VoxiRenderer::setSceneDecals(const SceneDecal* decals, u32 count) {
+    sceneDecals_.assign(decals, decals ? decals + count : decals);
+}
+
+bool VoxiRenderer::registerDecalTexture(u64 id, u32 width, u32 height, const u8* rgba8, DecalImageKind kind) {
+    if (!id || !rgba8 || width == 0 || height == 0) return false;
+    if (decalTexCpu_.count(id)) return true;
+    DecalTexCpu t;
+    t.width = width;
+    t.height = height;
+    t.kind = kind;
+    t.levels.emplace_back(rgba8, rgba8 + static_cast<usize>(width) * height * 4u);   // level 0 only: mips at upload
+    decalTexCpu_.emplace(id, std::move(t));
+    return true;
+}
+
+// Makes a registered decal image resident in the ray path's bindless table, uploading it (with its mip
+// chain) on first use. The CPU copy is dropped once the texture exists.
+u32 VoxiRenderer::decalTextureIndex(u64 id) {
+    if (!id || !res_) return pbr::kUnboundTexture;
+    const auto cpu = decalTexCpu_.find(id);
+    if (cpu == decalTexCpu_.end()) return pbr::kUnboundTexture;
+    DecalTexGpu& gpu = decalTexGpu_[id];
+    if (gpu.failed) return pbr::kUnboundTexture;
+    if (!gpu.tex) {
+        ensureTextureTable();
+        if (!rtTexTable_) return pbr::kUnboundTexture;   // no bindless table: textured decals are skipped
+        DecalTexCpu& a = cpu->second;
+        if (a.levels.empty()) { gpu.failed = true; return pbr::kUnboundTexture; }
+        const std::vector<std::vector<u8>> levels = buildDecalMips(a.levels.front().data(), a.width, a.height, a.kind);
+        std::vector<const void*> ptrs;
+        ptrs.reserve(levels.size());
+        for (const std::vector<u8>& l : levels) ptrs.push_back(l.data());
+        rhi::TextureDesc d;
+        d.width = a.width;
+        d.height = a.height;
+        d.mips = static_cast<u32>(levels.size());
+        d.format = a.kind == DecalImageKind::Colour ? rhi::Format::RGBA8UnormSrgb : rhi::Format::RGBA8Unorm;
+        d.bind = rhi::ResourceBind::ShaderResource;
+        d.initialState = rhi::ResourceState::ShaderResource;
+        d.initialData = ptrs.data();
+        d.initialDataCount = static_cast<u32>(ptrs.size());
+        d.debugName = "Voxi decal image";
+        gpu.tex = res_->createTexture(d);
+        if (!gpu.tex) {
+            gpu.failed = true;
+            AVER_WARN("[Voxi] decal image {:016x} could not be uploaded; decals using it are not drawn", id);
+            return pbr::kUnboundTexture;
+        }
+        a.levels.clear();
+        a.levels.shrink_to_fit();
+    }
+    if (gpu.index == pbr::kUnboundTexture) gpu.index = residentTexture(gpu.tex);
+    return gpu.index;
+}
+
+void VoxiRenderer::releaseDecalTextures() {
+    if (res_)
+        for (auto& kv : decalTexGpu_)
+            if (kv.second.tex) res_->destroyTexture(kv.second.tex);
+    decalTexGpu_.clear();
+}
+
+// Culls this frame's decals, packs them eye-relative, sorts them into paint order and uploads the list
+// to t24. Zero decals leave the placeholder bound and cb_.decalParams[0] at 0, so the shaders skip
+// every decal call.
+void VoxiRenderer::buildDecals() {
+    cb_.decalParams[0] = 0.0f;
+    decalCount_ = 0;
+    decalData_.clear();
+    decalCand_.clear();
+    if (!res_ || !bindings_) return;
+
+    if (!sceneDecals_.empty()) {
+        f32 vp[16], eye[3] = {};
+        if (!(dev_ && dev_->camera(vp, nullptr, eye))) eye[0] = eye[1] = eye[2] = 0.0f;
+        for (const SceneDecal& d : sceneDecals_) {
+            if (!(d.opacity > 0.0f) || !std::isfinite(d.opacity)) continue;
+            f32 c[3], r = 0.0f;
+            decalBounds(d, c, r);
+            const f32 dx = c[0] - eye[0], dy = c[1] - eye[1], dz = c[2] - eye[2];
+            const f32 dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            SceneDecal e = d;
+            e.opacity *= decalDistanceFade(dist, d.fadeDistanceCm);
+            if (!(e.opacity > 0.0f)) continue;
+
+            // Every image the decal names must be resident, or it would draw as a flat tinted box.
+            DecalTextureIndices tx;
+            bool resident = true;
+            if (d.baseId)   { tx.base   = decalTextureIndex(d.baseId);   resident = resident && tx.base   != kDecalUnboundTexture; }
+            if (d.normalId) { tx.normal = decalTextureIndex(d.normalId); resident = resident && tx.normal != kDecalUnboundTexture; }
+            if (d.ormId)    { tx.orm    = decalTextureIndex(d.ormId);    resident = resident && tx.orm    != kDecalUnboundTexture; }
+            if (!resident) continue;
+
+            DecalCand cand{};
+            if (!packSceneDecal(e, eye, tx, cand.packed)) continue;
+            cand.importance = r / std::max(dist, 1.0f);
+            cand.dist = dist;
+            cand.order = d.sortOrder;
+            decalCand_.push_back(cand);
+        }
+    }
+    if (decalCand_.size() > kMaxSceneDecals) {
+        // Nearest and largest survive; the rest are too small or far to be worth a pixel test.
+        std::partial_sort(decalCand_.begin(), decalCand_.begin() + kMaxSceneDecals, decalCand_.end(),
+                          [](const DecalCand& a, const DecalCand& b) { return a.importance > b.importance; });
+        decalCand_.resize(kMaxSceneDecals);
+    }
+    std::stable_sort(decalCand_.begin(), decalCand_.end(), [](const DecalCand& a, const DecalCand& b) {
+        return decalPaintsBefore(a.order, a.dist, b.order, b.dist);
+    });
+    decalData_.reserve(decalCand_.size());
+    for (const DecalCand& c : decalCand_) decalData_.push_back(c.packed);
+
+    if (!decalData_.empty()) {
+        // Grown straight to the cap on first need, every slot or none (a half-built ring would bind a
+        // null buffer on its missing turns).
+        if (decalBufCapacity_ < kMaxSceneDecals) {
+            bool ok = true;
+            for (u32 i = 0; i < kRtInstanceRing; ++i) {
+                if (decalBuf_[i]) res_->destroyBuffer(decalBuf_[i]);
+                rhi::BufferDesc bd;
+                bd.bytes = sizeof(PackedDecal) * kMaxSceneDecals;
+                bd.kind = rhi::BufferKind::Upload;
+                bd.debugName = "Voxi decals";
+                decalBuf_[i] = res_->createBuffer(bd);
+                ok = ok && decalBuf_[i] != 0;
+            }
+            decalBufCapacity_ = ok ? kMaxSceneDecals : 0;
+        }
+        if (decalBufCapacity_ >= decalData_.size()) {
+            // Rotate BEFORE writing, so this frame never touches the buffer the previous one bound.
+            decalBufSlot_ = (decalBufSlot_ + 1) % kRtInstanceRing;
+            const rhi::BufferHandle buf = decalBuf_[decalBufSlot_];
+            const u32 count = static_cast<u32>(decalData_.size());
+            res_->writeBuffer(buf, decalData_.data(), sizeof(PackedDecal) * count, 0);
+            res_->setSrvBuffer(bindings_, 24, buf, sizeof(PackedDecal), count, 0);
+            decalBound_ = buf;
+            decalCount_ = count;
+            cb_.decalParams[0] = static_cast<f32>(count);
+            if (!decalLoggedRun_) {
+                decalLoggedRun_ = true;
+                AVER_INFO("[Voxi] decals running: {} this frame{}", count,
+                          rtTexTable_ ? "" : " (flat only: no bindless texture table, textured decals are skipped)");
+            }
+        } else if (!decalFailLogged_) {
+            decalFailLogged_ = true;
+            AVER_ERROR("[Voxi] decal list buffer could not be created; decals are not drawn (said once)");
+        }
+    }
+    if (decalCount_ == 0 && decalPlaceholder_ && decalBound_ != decalPlaceholder_) {
+        res_->setSrvBuffer(bindings_, 24, decalPlaceholder_, sizeof(PackedDecal), 1, 0);
+        decalBound_ = decalPlaceholder_;
+    }
 }
 
 // Packs this frame's scene lights into the candidate list the lamp list is cut from.
@@ -6442,6 +6612,17 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     }
     res_->setSrvBuffer(bindings_, 18, rdLocalLightsPlaceholder_, sizeof(RdLocalLight), 1, 0);
     rdLocalLightsBound_ = rdLocalLightsPlaceholder_;
+    // Decals: t24 holds a one-record stand-in until buildDecals() has a real list.
+    if (!decalPlaceholder_) {
+        rhi::BufferDesc pd;
+        pd.bytes = sizeof(PackedDecal);
+        pd.kind  = rhi::BufferKind::Default;
+        pd.debugName = "Voxi decal list placeholder";
+        decalPlaceholder_ = res_->createBuffer(pd);
+        if (!decalPlaceholder_) { AVER_ERROR("[Voxi] decal list placeholder could not be created"); return false; }
+    }
+    res_->setSrvBuffer(bindings_, 24, decalPlaceholder_, sizeof(PackedDecal), 1, 0);
+    decalBound_ = decalPlaceholder_;
     res_->setSrv(bindings_, 19, rdLocalHistPlaceholder_);
     res_->setUav(bindings_, 19, rdLocalHistPlaceholder_, 0);
     // Path Tracing's accumulation (u22): a one-element stand-in until ensurePtAccum sizes the real one.

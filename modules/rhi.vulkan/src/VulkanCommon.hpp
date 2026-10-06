@@ -613,7 +613,7 @@ constexpr u32 kVkSetConstants = 2;
 constexpr u32 kVkSetSamplers  = 3;
 constexpr u32 kVkSetInstances = 4;   // PER-INSTANCE WORLD MATRICES (GraphicsPipelineDesc::instanced), one StructuredBuffer<float4x4>; own set because the HLSL declares it at register t(declaredSrvCount), one past the layout's SRVs, else landing on UAV slot 0 in set 0. Absent from a non-instanced pipeline.
 constexpr u32 kVkDescriptorSetCount = 5;   // table0, table1, constants, samplers, instances
-constexpr u32 kVkUavBindingBase = kMaxBindingSlots;   // UAV bindings start here so a growing srvCount never renumbers an already-cached UAV binding; kMaxBindingSlots (24) bounds one set's slot count so SRV/UAV ranges never collide
+constexpr u32 kVkUavBindingBase = kMaxBindingSlots;   // UAV bindings start here so a growing srvCount never renumbers an already-cached UAV binding; kMaxBindingSlots (25) bounds one set's slot count so SRV/UAV ranges never collide
 
 // Moves the shared prelude's per-frame constant buffer to the descriptor set this backend
 // actually binds it in. MUST be applied to any HLSL including sharedShaderPrelude() before

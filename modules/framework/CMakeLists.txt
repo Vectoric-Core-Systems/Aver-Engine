@@ -13,7 +13,9 @@
 # this boundary, so that property holds. Collapsing the two DLLs into one would satisfy a narrower
 # reading of "SHARED depends on Core only" while destroying the separation the split exists for.
 add_library(Aver.Framework SHARED
-  src/FrameworkAbi.cpp)
+  src/FrameworkAbi.cpp
+  src/TimersEventsAbi.cpp
+  src/BlackboardAbi.cpp)
 
 target_include_directories(Aver.Framework PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Framework PUBLIC cxx_std_20)

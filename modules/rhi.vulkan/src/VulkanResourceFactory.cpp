@@ -735,7 +735,7 @@ u32 buildRegisterBinds(const PipelineLayout& layout, VkRegisterBind* out, u32 ma
 u32 shaderVariantKey(const PipelineLayout& layout, bool mesh, bool instanced) {
     // EVERY input the per-layout compile depends on must be in here, or two layouts differing only
     // in an omitted field silently share one module (buildRegisterBinds made SRV/UAV/sampler counts
-    // matter, not just the constant-slot mask). kMaxBindingSlots (24, raised from 16 in
+    // matter, not just the constant-slot mask). kMaxBindingSlots (25, raised from 16 in
     // optimisation-wave-2) must fit the 5-bit field each count gets below (covers 0..31) --
     // raising it past 31 would corrupt every field after.
     static_assert(kMaxBindingSlots <= 31, "shaderVariantKey packs each *Count into a 5-bit field below");

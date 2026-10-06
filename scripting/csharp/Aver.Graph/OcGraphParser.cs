@@ -381,6 +381,7 @@ public class OcGraphParser
                     if (parts.Length != 2) continue;
                     var k = parts[0];
                     var v = parts[1];
+                    node.Attrs[k] = v;
 
                     // For any node, value= provides the constant output for Const nodes or constant data.
                     if (k == "value")
@@ -2513,6 +2514,12 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "weight", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            default:
+                // The table-driven families (timers, blackboard, audio streaming, anim state machines,
+                // game UI, prefabs, decals, crowds): GameSystemNodes carries their pins.
+                GameSystemNodes.AddDefaultPins(node, graph);
                 break;
         }
     }

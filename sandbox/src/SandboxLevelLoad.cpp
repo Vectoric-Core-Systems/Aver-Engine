@@ -278,6 +278,8 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         levelHeader_.placements.clear();
         levelHeader_.pcgVolumes.clear();
         levelHeader_.lights.clear();   // rebuilt from the live CLight entities by saveLevel
+        levelHeader_.decals.clear();   // ...and the DECAL records from the live CDecal entities
+        levelHeader_.prefabInstances.clear();   // ...and the PREFABINST records from the live instances
         if (!levelPcgVolumes_.empty())
             AVER_INFO("[Level] carrying {} PCGVOLUME record(s) through the editor unchanged",
                       levelPcgVolumes_.size());
@@ -375,6 +377,17 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
             if (auto* c = static_cast<scene::CLight*>(lw.addComponent(le, scene::kComponentLight)))
                 *c = editor::lightFromRecord(r);
             entityLabels_[static_cast<u32>(le)] = r.name.empty() ? std::string("Light") : r.name;
+        }
+        // PREFABINST records: each instance is rebuilt from its asset, with its overrides applied. The hooks add the
+        // entities to levelEntities_ and label them.
+        prefabModel_.setContentDir(project_.contentDir());
+        prefabSys_.instantiateLevelInstances(w.prefabInstances);
+        // DECAL records, the same way: one bare CDecal entity each.
+        {
+            const std::vector<scene::Entity> decals = editor::spawnDecalsFromRecords(lw, w.decals);
+            for (usize k = 0; k < decals.size() && k < w.decals.size(); ++k)
+                entityLabels_[static_cast<u32>(decals[k])] =
+                    w.decals[k].name.empty() ? std::string("Decal") : w.decals[k].name;
         }
     }
     for (usize k = 0; k < inst.entities.size(); ++k) {
@@ -851,6 +864,12 @@ void SandboxApp::unloadLevel(Engine& eng) {
     if (scene::ComponentPool* lights = world.pool(scene::kComponentLight)) {
         std::vector<scene::Entity> doomed;
         for (usize i = 0; i < lights->size(); ++i) doomed.push_back(lights->entityAt(i));
+        for (const scene::Entity e : doomed) if (world.valid(e)) world.destroy(e);
+    }
+    // ...and DECAL RECORDS, by the CDecal pool, for the same reason (pooled gameplay decals die with it too).
+    if (scene::ComponentPool* decals = world.pool(scene::kComponentDecal)) {
+        std::vector<scene::Entity> doomed;
+        for (usize i = 0; i < decals->size(); ++i) doomed.push_back(decals->entityAt(i));
         for (const scene::Entity e : doomed) if (world.valid(e)) world.destroy(e);
     }
 #endif

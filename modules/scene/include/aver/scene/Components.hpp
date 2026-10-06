@@ -1,4 +1,4 @@
-// The fifteen built-in component structs and their fixed dense type ids.
+// The sixteen built-in component structs and their fixed dense type ids.
 #pragma once
 #include "aver/core/Math.hpp"
 #include "aver/core/Types.hpp"
@@ -22,7 +22,8 @@ inline constexpr u32 kComponentAttachment   = 12;
 inline constexpr u32 kComponentSoftBody     = 13;
 inline constexpr u32 kComponentRigidBody    = 14;
 inline constexpr u32 kComponentJoint        = 15;
-inline constexpr u32 kComponentBuiltinMax   = 15;
+inline constexpr u32 kComponentDecal        = 16;
+inline constexpr u32 kComponentBuiltinMax   = 16;
 
 // Authored local transform, plus the revision the world-matrix pass compares against.
 struct CLocal {
@@ -422,6 +423,46 @@ struct CJoint {
     i32 joint = 0;
 };
 
+// CDecal::flags bits. NEGATIVE-SENSE like every flag above: zero-filled storage is an active decal
+// that applies every channel it has data for.
+inline constexpr u32 kDecalDisabled    = 0x1;   // not projected (a pool's idle slot, or a toggled-off decal)
+inline constexpr u32 kDecalNoColour    = 0x2;   // leave the surface's base colour alone
+inline constexpr u32 kDecalNoNormal    = 0x4;   // leave the surface's normal alone
+inline constexpr u32 kDecalNoRoughness = 0x8;   // leave roughness and metallic alone
+inline constexpr u32 kDecalPooled      = 0x10;  // owned by a DecalPool: never saved with the level
+
+// A projected decal: a box that paints base colour, normal and roughness onto whatever surface is
+// inside it (docs/rendering/DECALS.md). Projects along the entity's local +X; local Y is the
+// texture's u axis (right), local Z its v axis (up). The entity's scale scales the box.
+//
+// ZERO MEANS "UNSET" for every field whose sane default is not zero, read through the helpers in
+// DecalGather.hpp (the ComponentPool zero-fill rule, see CSoftBody). The one accepted ambiguity:
+// a genuinely black tint, zero opacity multiplier or perfectly smooth roughness need a tiny
+// non-zero value instead.
+struct CDecal {
+    f32 sizeCm[3]     = {0, 0, 0};   // full box size: x depth (projection), y width, z height; <=0 = 100
+    f32 tint[3]       = {0, 0, 0};   // linear colour multiplying the base texture; all 0 = white
+    f32 transparency  = 0.0f;        // 0 opaque .. 1 invisible
+    f32 normalStrength = 0.0f;       // 0 = 1
+    f32 roughness     = 0.0f;        // multiplies the ORM texture's green; with no ORM texture the value itself. 0 = unset
+    f32 metallic      = 0.0f;        // multiplies the ORM texture's blue; 0 = none
+    f32 edgeFade      = 0.0f;        // soft edge as a fraction of the half extent; 0 = 0.1
+    f32 angleFadeStartDeg = 0.0f;    // full strength up to this angle between surface and projector; 0 = 60
+    f32 angleFadeEndDeg   = 0.0f;    // gone beyond this angle; 0 = 85
+    f32 fadeDistanceCm = 0.0f;       // fades out with camera distance, gone at this; 0 = never
+    i32 sortOrder     = 0;           // higher paints over lower
+    u32 flags         = 0;           // kDecal* bits
+    i64 baseTexture   = 0;           // ObjectId of the base colour image (alpha = coverage); 0 = none
+    i64 normalTexture = 0;           // ObjectId of the tangent-space normal image; 0 = none
+    i64 ormTexture    = 0;           // ObjectId of the packed image: green roughness, blue metallic; 0 = none
+    f32 uvScale[2]    = {0, 0};      // 0,0 = 1,1
+    f32 uvOffset[2]   = {0, 0};
+    f32 lifetimeSec   = 0.0f;        // 0 = permanent
+    f32 fadeOutSec    = 0.0f;        // fade-out at the end of the lifetime; 0 = vanish at once
+    f32 age           = 0.0f;        // seconds since spawn; advanced by the pool's tick, never saved
+    u32 serial        = 0;           // spawn order stamped by a DecalPool (oldest recycles first); never saved
+};
+
 // Field order is chosen so neither struct gets padding: World::verifyComponent is byte-exact and
 // turns a mismatch into an abort inside World's constructor, so a padded component kills the editor
 // at startup rather than failing a test.
@@ -432,11 +473,12 @@ static_assert(sizeof(CAnimator) == 24, "CAnimator must be padding-free");
 static_assert(sizeof(CParticleEmitter) == 24, "CParticleEmitter must be padding-free");
 static_assert(sizeof(CRigidBody) == 56, "CRigidBody must be padding-free");
 static_assert(sizeof(CJoint) == 64, "CJoint must be padding-free");
+static_assert(sizeof(CDecal) == 120, "CDecal must be padding-free");
 
 class World;
 
 namespace detail {
-// Registers the fifteen built-ins. Called once by World's constructor.
+// Registers the sixteen built-ins. Called once by World's constructor.
 void registerBuiltinComponents(World& world);
 } // namespace detail
 

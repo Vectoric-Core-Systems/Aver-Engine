@@ -12,6 +12,20 @@ aver_add_module(Aver.UI
   SOURCES
     src/UiDrawList.cpp
     src/UiFont.cpp
+    # The retained widget system (docs/GAME_UI.md): maths, properties, tree, screens, layout asset.
+    src/UiText.cpp
+    src/UiLayout.cpp
+    src/UiStyle.cpp
+    src/UiFocus.cpp
+    src/UiWidget.cpp
+    src/UiProps.cpp
+    src/UiTree.cpp
+    src/UiTreeLayout.cpp
+    src/UiTreeInput.cpp
+    src/UiTreeDraw.cpp
+    src/UiLayoutAsset.cpp
+    src/UiScreens.cpp
+    src/UiHostInput.cpp
   DEPS
     Aver.Core
 )

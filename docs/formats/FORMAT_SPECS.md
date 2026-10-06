@@ -598,6 +598,8 @@ OVERRIDE root.MeshRenderer.materials[0].baseColorFactor 0.8 0.0 0.0 1.0
 
 Rules: nodes form a tree via `parent=`; components are named + typed with key=value props; asset refs by `{kind:pathOrGuid}`; `OVERRIDE <node>.<component>.<prop>` patches. A prefab may reference other prefabs (`COMPONENT PrefabInstance prefab={guid:…}` + overrides) → nested prefabs. References the legacy `.ocbeam`/`.ocaero` directly, so vehicle content composes cleanly. Cooked → `PREF` chunk (flattened node/component/override tables) in `.ocpak`.
 
+**As built.** The text form that shipped is not the sketch above: nodes carry stable uids and by-name components and fields, nested prefabs are nodes of their own, and a level (`.ocworld`) records its instances with `PREFABINST` / `POVERRIDE` / `ENDPREFABINST` after the placements (an older reader skips them). The grammar, the override semantics and the propagation rules are in [../PREFABS.md](../PREFABS.md).
+
 ---
 
 ## 10a. `.ocgraph` — visual scripting graph (Aver Node, text)

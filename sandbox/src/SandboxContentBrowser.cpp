@@ -3,6 +3,7 @@
 // the class is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/anim/AnimGraphAsset.hpp"
 #if AVER_MODULE_PBR
 #include "aver/formats/ImportCook.hpp"
 #endif
@@ -540,20 +541,52 @@ void SandboxApp::cbCreateBehaviourTree() {
     const std::filesystem::path target = cbFreeAssetPath("NewBehaviour", ".ocbt");
     if (target.empty()) return;
 
-    const fmt::OcBtData bt = editor::btStarterTree();
-
-    // Checked here rather than trusted: valid() is the same predicate the loader applies, so a
-    // starter that fails it would be written and then refused by the editor that just opened it.
-    if (!bt.valid()) {
-        cbStatus_ = "Internal error: the starter behaviour tree is not valid";
-        AVER_ERROR("[Editor] starter .ocbt failed OcBtData::valid()");
-        return;
-    }
-
+    // The visual editor's starter: a valid tree (a refused file would fail one step after the moment
+    // that looks like success) plus a blackboard schema with the keys the built-in leaves read.
     std::string why;
-    if (!fmt::saveOcBt(target.string(), bt, &why)) {
+    if (!editor::btGraphWriteStarter(target.string(), &why)) {
         cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new behaviour tree failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
+// Writes a starter .ocui (a game UI layout) and opens it. The text is editor::uiStarterLayoutText, which the
+// layout editor itself loads, so the file that was just created is never one the editor refuses.
+void SandboxApp::cbCreateUiLayout() {
+    const std::filesystem::path target = cbFreeAssetPath("NewLayout", ".ocui");
+    if (target.empty()) return;
+    std::string why;
+    if (!editor::writeNewFile(target.string(), editor::uiStarterLayoutText(), &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new UI layout failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
+// Starter .ocblend (a blend space) and .ocasm (an animation state machine), each from its editor's own
+// starter so the tab that opens them accepts what was written.
+void SandboxApp::cbCreateBlendSpace() {
+    const std::filesystem::path target = cbFreeAssetPath("NewBlendSpace", ".ocblend");
+    if (target.empty()) return;
+    std::string why;
+    if (!anim::saveBlendSpace(target.string(), editor::bsStarterSpace(), &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new blend space failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
+void SandboxApp::cbCreateStateMachine() {
+    const std::filesystem::path target = cbFreeAssetPath("NewStateMachine", ".ocasm");
+    if (target.empty()) return;
+    std::string why;
+    if (!anim::saveStateMachine(target.string(), editor::asmStarterMachine(), &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new state machine failed: {}", why);
         return;
     }
     cbAdoptNewAsset(target);
@@ -1084,6 +1117,12 @@ void SandboxApp::drawContentBrowser() {
         uiReg_.track("cb.add.nodeGraph");
         if (ImGui::MenuItem("New Behaviour Tree"))  cbCreateBehaviourTree();
         uiReg_.track("cb.add.behaviourTree");
+        if (ImGui::MenuItem("New UI Layout"))       cbCreateUiLayout();
+        uiReg_.track("cb.add.uiLayout");
+        if (ImGui::MenuItem("New Blend Space"))     cbCreateBlendSpace();
+        uiReg_.track("cb.add.blendSpace");
+        if (ImGui::MenuItem("New State Machine"))   cbCreateStateMachine();
+        uiReg_.track("cb.add.stateMachine");
         if (ImGui::MenuItem("New Sound Graph"))     cbCreateSoundGraph();
         uiReg_.track("cb.add.soundGraph");
 #if AVER_MODULE_PARTICLES
@@ -1666,6 +1705,10 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         {".wav",        {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
         {".ogg",        {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
         {".ocbt",       {ICON_TREE,       IM_COL32( 63, 126, 255, 255), "Behaviour Tree"}},
+        {".ocui",       {ICON_TUNE,       IM_COL32(120, 200, 255, 255), "UI Layout"}},
+        {".ocblend",    {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Blend Space"}},
+        {".ocasm",      {ICON_TREE,       IM_COL32(190, 140, 255, 255), "Animation State Machine"}},
+        {".ocprefab",   {ICON_FILE,       IM_COL32( 90, 170, 255, 255), "Prefab"}},
         {".ocgraph",    {ICON_LINK,       IM_COL32( 63, 126, 255, 255), "Graph"}},
         {".ocnav",      {ICON_TERRAIN,    IM_COL32(150, 200, 120, 255), "Navigation"}},
         // A soft-body vehicle cage (nodes/beams/panels), NOT a skeletal mesh -- see OcBeam.hpp.

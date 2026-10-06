@@ -23,6 +23,10 @@ extern "C" {
 #define AVER_AUDIO_BUS_VOICE 2
 #define AVER_AUDIO_BUS_UI    3
 
+// Fade curves, matching aver::audio::FadeCurve.
+#define AVER_AUDIO_FADE_LINEAR      0
+#define AVER_AUDIO_FADE_EQUAL_POWER 1
+
 // Opens the default output device and starts the mixer. Returns 0 when there is no output, which is
 // a legitimate configuration: everything below then succeeds and does nothing.
 AVER_AUDIO_API int32_t aver_audio_init(void);
@@ -86,6 +90,9 @@ AVER_AUDIO_API void aver_audio_set_listener(float px, float py, float pz,
                                             float fx, float fy, float fz,
                                             float rx, float ry, float rz);
 
+// Reads back the listener last set: position, forward and right (three floats each; any may be null).
+AVER_AUDIO_API void aver_audio_get_listener(float* outPosition, float* outForward, float* outRight);
+
 // Sets one bus's volume.
 AVER_AUDIO_API void  aver_audio_set_bus_volume(int32_t bus, float volume);
 // One bus's volume.
@@ -99,6 +106,49 @@ AVER_AUDIO_API float aver_audio_master_volume(void);
 AVER_AUDIO_API int32_t aver_audio_active_voices(void);
 // Voices cut short because the pool was full. A tuning fact, not an error.
 AVER_AUDIO_API int32_t aver_audio_stolen_voices(void);
+
+/* ---- streaming, fades, music, occlusion, reverb ---------------------------------------------
+ * Streamed voices are ordinary voices: aver_audio_stop, _playing, _set_voice_* all work on them.
+ * A stream owns a decoder thread; the decoder is freed by aver_audio_collect once the voice ends,
+ * so keep calling that once a frame. Mono and stereo sources only. */
+
+// Streams a file from disk (WAV and Media Foundation formats decode incrementally). The voice is
+// silent until a quarter second is buffered. Flat in both ears. Returns a VOICE handle, or 0.
+AVER_AUDIO_API int32_t aver_audio_stream_play(const char* utf8Path, float volume, float pitch,
+                                              int32_t looping, int32_t bus, float fadeInSeconds);
+// The positioned counterpart; radii in CENTIMETRES as for aver_audio_play_at.
+AVER_AUDIO_API int32_t aver_audio_stream_play_at(const char* utf8Path, float x, float y, float z,
+                                                 float volume, float pitch, int32_t looping, int32_t bus,
+                                                 float innerCm, float outerCm, float fadeInSeconds);
+
+// Ramps a voice's fade gain (a multiplier on top of its volume) to `targetGain` over `seconds`.
+// With stopWhenDone nonzero the voice ends when the ramp does.
+AVER_AUDIO_API void aver_audio_fade_voice(int32_t voice, float targetGain, float seconds,
+                                          int32_t curve, int32_t stopWhenDone);
+
+// The music slot: starting a track crossfades from the current one over `fadeSeconds`
+// (equal-power by default). Returns the new track's VOICE handle, or 0, in which case the current
+// track keeps playing. Plays on the Music bus.
+AVER_AUDIO_API int32_t aver_audio_music_play(const char* utf8Path, float volume, float fadeSeconds,
+                                             int32_t looping, int32_t curve);
+// Fades the current music track out and ends it.
+AVER_AUDIO_API void    aver_audio_music_stop(float fadeSeconds);
+// The current music voice, or 0.
+AVER_AUDIO_API int32_t aver_audio_music_voice(void);
+
+// 0 clear .. 1 fully blocked. The mixer low-passes and ducks the voice and smooths the change.
+AVER_AUDIO_API void aver_audio_set_voice_occlusion(int32_t voice, float occlusion);
+// What fraction of a voice feeds the reverb return, 0..1. Sfx and Voice buses default to 1.
+AVER_AUDIO_API void aver_audio_set_voice_reverb_send(int32_t voice, float send);
+// The low-pass cutoff (Hz) and linear volume a fully occluded voice reaches.
+AVER_AUDIO_API void aver_audio_set_occlusion_curve(float minCutoffHz, float minVolume);
+// The listener-side reverb. wet 0 turns it off; decay is the RT60 in seconds; damping 0..1.
+AVER_AUDIO_API void aver_audio_set_reverb(float wet, float decaySeconds, float damping);
+
+// Blocks in which a stream ran out of decoded audio and went silent. Each is audible.
+AVER_AUDIO_API int32_t aver_audio_stream_underruns(void);
+// Streams currently held by a playing voice.
+AVER_AUDIO_API int32_t aver_audio_active_streams(void);
 
 #ifdef __cplusplus
 } // extern "C"

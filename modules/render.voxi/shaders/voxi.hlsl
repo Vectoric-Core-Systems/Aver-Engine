@@ -98,6 +98,8 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     float4   gViewParams;
     // x = ReSTIR GI running; y = history valid; z = reservoir slice; w = poison debug view mode.
     float4   gGiRestirParams;
+    // x = projected decals this frame (voxi_decal.hlsli; 0 skips every decal call); yzw unused.
+    float4   gDecalParams;
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -203,6 +205,9 @@ float averGoldenTurns(uint n) { return (float)((n * 0x9E3779B9u) >> 8) * (6.2831
 // Is this fragment a translucent (glass/water) draw, replayed blended?
 bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) != 0u || gTransmission > 0.0; }
 
+#if !AVER_RT
+#include "voxi_decal.hlsli"   // the RT build gets it through voxi_rt.hlsli, ahead of rtHitSurface
+#endif
 #if AVER_RT
 #include "voxi_rt.hlsli"
 
@@ -1426,6 +1431,8 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         sun.visibility *= 1.0 + averCausticFocus(vtx.wpos);
 
     AverSurface s = averEvalMaterial(vtx, sun);
+    // Decals repaint the surface before anything lights it (voxi_decal.hlsli); opaque draws only.
+    if (gDecalParams.x > 0.5 && !averDrawIsTranslucent()) averApplyDecals(s, i.wpos, N, true);
 #if AVER_GBUFFER
     // Velocity and packed normal/roughness computed once, shared by all return sites.
     const float2 gbufVelocity    = averGBufferVelocity(i.wpos);

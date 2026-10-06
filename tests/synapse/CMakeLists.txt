@@ -51,3 +51,6 @@ if(TARGET Aver.Synapse.Scene)
                                              Aver.Core Aver.Platform)
   set_target_properties(BtSystemTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# Steering, ORCA crowds, hearing, cover/squads (docs/AI_CROWDS_HEARING_COVER.md).
+include(${CMAKE_CURRENT_LIST_DIR}/SynapseAiTests.cmake)
