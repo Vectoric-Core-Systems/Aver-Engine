@@ -99,22 +99,16 @@ bool ptTrace(float3 origin, float3 dir, float tmin, float cone, out PtVertex v,
 }
 
 #if AVER_RD_LAMPS
-// A lamp as a light at `pos`, unshadowed: its sphere widens the surface's roughness (rdLocalLightAt).
+// A lamp as a light at `pos`, unshadowed: its emitter size widens the surface's roughness (rdLocalLightAt).
 bool ptLampLight(RdLocalLight ll, AverSurface s, float3 pos, out AverLight l, out AverSurface sL) {
     sL = s;
     l.direction  = float3(0.0, 0.0, 1.0);
     l.radiance   = float3(0.0, 0.0, 0.0);
     l.visibility = float3(1.0, 1.0, 1.0);
-    const float3 toC   = ll.posRadius.xyz - pos;
-    const float  d2    = dot(toC, toC);
-    const float  range = ll.radianceRange.w;
-    if (d2 >= range * range) return false;
-    const float r    = ll.posRadius.w;
-    const float x2   = d2 / (range * range);
-    const float win  = saturate(1.0 - x2 * x2);
-    const float invD = rsqrt(max(d2, 1e-8));
-    l.direction = toC * invD;
-    l.radiance  = ll.radianceRange.rgb * (1e4 / max(d2, r * r)) * (win * win);
+    float r;
+    if (!aversLightEval(ll, pos, s.N, l.direction, l.radiance, r)) return false;
+    const float3 toC = ll.posRadius.xyz - pos;
+    const float  invD = rsqrt(max(dot(toC, toC), 1e-8));
     sL.rough = clamp(s.rough + r * 0.5 * invD, s.rough, 1.0);
     ptAim(sL, l.direction);
     return true;
@@ -142,7 +136,10 @@ float3 ptLamp(AverSurface s, float3 pos, float2 pixel, inout uint rng) {
     AverLight l;
     AverSurface sL;
     if (!ptLampLight(ll, s, pos, l, sL)) return float3(0.0, 0.0, 0.0);
-    l.visibility = rdLocalShadow(pos, s.N, ll, pixel, ptRand(rng) * 6.2831853).xxx;
+    const float  jitter = ptRand(rng) * 6.2831853;
+    float2 u2 = float2(0.5, 0.5);
+    if (aversLightKind(ll) == AVER_LIGHT_RECT) u2 = float2(ptRand(rng), ptRand(rng));
+    l.visibility = rdLocalShadow(pos, s.N, ll, pixel, jitter, u2).xxx;
     return averShadeDirect(float3(0.0, 0.0, 0.0), sL, l) * (wsum / wPick);
 #else
     return float3(0.0, 0.0, 0.0);

@@ -697,6 +697,13 @@ void PtSceneView::prePass(rhi::IRenderContext& ctx) {
         }
     }
 
+    // ---- 2c. have the scene lights changed? Samples drawn under the old set must not blend with the new. ----
+    if (pt_.lightsHash() != lightsSeen_) {
+        lightsSeen_ = pt_.lightsHash();
+        sampleCursor_ = 0;
+        convergedLogged_ = false;
+    }
+
     // ---- 3. accumulate one bounded step, unless this image has already converged ----
     if (sampleCursor_ >= kMaxSamples) {
         if (!convergedLogged_) {

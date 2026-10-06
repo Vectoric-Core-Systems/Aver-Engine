@@ -499,6 +499,36 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "steepness")    && i + 1 < t.size()) gw.steepness    = parseF64(t[++i]);
             }
             out.waves.push_back(std::move(gw));
+        } else if (equalsCI(key, "LIGHT")) {
+            OcLight lt;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "name")      && i + 1 < t.size()) lt.name = percentDecode(t[++i]);
+                else if (equalsCI(t[i], "kind")      && i + 1 < t.size()) {
+                    ++i;
+                    if      (equalsCI(t[i], "spot")) lt.kind = OcLightKind::Spot;
+                    else if (equalsCI(t[i], "rect")) lt.kind = OcLightKind::Rect;
+                    else                             lt.kind = OcLightKind::Point;
+                }
+                else if (equalsCI(t[i], "pos")       && i + 3 < t.size()) {
+                    lt.x = parseF64(t[i+1]); lt.y = parseF64(t[i+2]); lt.z = parseF64(t[i+3]); i += 3;
+                } else if (equalsCI(t[i], "rot")     && i + 3 < t.size()) {
+                    lt.yaw = parseF64(t[i+1]); lt.pitch = parseF64(t[i+2]); lt.roll = parseF64(t[i+3]); i += 3;
+                } else if (equalsCI(t[i], "colour")  && i + 3 < t.size()) {
+                    for (usize c = 0; c < 3; ++c) lt.colour[c] = parseF64(t[i + 1 + c], 1.0);
+                    i += 3;
+                } else if (equalsCI(t[i], "intensity") && i + 1 < t.size()) lt.intensityCd = parseF64(t[++i], lt.intensityCd);
+                else if (equalsCI(t[i], "range")     && i + 1 < t.size()) lt.rangeCm = parseF64(t[++i]);
+                else if (equalsCI(t[i], "cone")      && i + 2 < t.size()) {
+                    lt.innerDeg = parseF64(t[i+1]); lt.outerDeg = parseF64(t[i+2], lt.outerDeg); i += 2;
+                } else if (equalsCI(t[i], "size")    && i + 2 < t.size()) {
+                    lt.widthCm = parseF64(t[i+1], lt.widthCm); lt.heightCm = parseF64(t[i+2], lt.heightCm); i += 2;
+                } else if (equalsCI(t[i], "radius")  && i + 1 < t.size()) lt.radiusCm = parseF64(t[++i], lt.radiusCm);
+                else if (equalsCI(t[i], "ies")       && i + 1 < t.size()) lt.ies = std::string(t[++i]);
+                else if (equalsCI(t[i], "cookie")    && i + 1 < t.size()) lt.cookie = std::string(t[++i]);
+                else if (equalsCI(t[i], "noshadow")) lt.castShadows = false;
+                else if (equalsCI(t[i], "iespeak"))  lt.iesPeak = true;
+            }
+            out.lights.push_back(std::move(lt));
         } else if (equalsCI(key, "FOLIAGE") && t.size() >= 2) {
             // A single token, exactly like PLACE's own asset column, LANDSCAPE's `section` and
             // SCATTER's `mesh` -- none of those support a path with a space in it either, so this
@@ -924,6 +954,28 @@ std::string writeOcworld(const OcWorldData& w) {
                  " wavelength " + num(gw.wavelengthCm) +
                  " amplitude " + num(gw.amplitudeCm) +
                  " steepness " + num(gw.steepness) + "\n";
+        }
+    }
+
+    if (!w.lights.empty()) {
+        s += "\n";
+        for (const OcLight& lt : w.lights) {
+            s += "LIGHT";
+            if (!lt.name.empty()) { s += " name "; s += percentEncode(lt.name); }
+            s += lt.kind == OcLightKind::Spot ? " kind spot" : lt.kind == OcLightKind::Rect ? " kind rect" : " kind point";
+            s += " pos " + num(lt.x) + " " + num(lt.y) + " " + num(lt.z) +
+                 " rot " + num(lt.yaw) + " " + num(lt.pitch) + " " + num(lt.roll) +
+                 " colour " + num(lt.colour[0]) + " " + num(lt.colour[1]) + " " + num(lt.colour[2]) +
+                 " intensity " + num(lt.intensityCd);
+            if (lt.rangeCm > 0.0) s += " range " + num(lt.rangeCm);
+            if (lt.kind == OcLightKind::Rect) s += " size " + num(lt.widthCm) + " " + num(lt.heightCm);
+            else                              s += " cone " + num(lt.innerDeg) + " " + num(lt.outerDeg) +
+                                                   " radius " + num(lt.radiusCm);
+            if (!lt.ies.empty())    s += " ies " + lt.ies;
+            if (!lt.cookie.empty()) s += " cookie " + lt.cookie;
+            if (!lt.castShadows) s += " noshadow";
+            if (lt.iesPeak)      s += " iespeak";
+            s += "\n";
         }
     }
 

@@ -5,6 +5,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/scene/Components.hpp"
+#include "aver/scene/LightGather.hpp"
 #include "aver/scene/World.hpp"
 #include "aver/scene/scene_abi.h"
 
@@ -355,6 +356,12 @@ static void testFields(World& world) {
         {"CMeshRenderer.dirty", kComponentMeshRenderer, FieldKind::I32,
          static_cast<u16>(offsetof(CMeshRenderer, dirty)), 0},
         {"CLight.colour", kComponentLight, FieldKind::Vec3, static_cast<u16>(offsetof(CLight, colour)), 3},
+        {"CLight.widthCm", kComponentLight, FieldKind::F32, static_cast<u16>(offsetof(CLight, widthCm)), 1},
+        {"CLight.heightCm", kComponentLight, FieldKind::F32, static_cast<u16>(offsetof(CLight, heightCm)), 1},
+        {"CLight.iesProfile", kComponentLight, FieldKind::I64, static_cast<u16>(offsetof(CLight, iesProfile)), 0},
+        {"CLight.cookie", kComponentLight, FieldKind::I64, static_cast<u16>(offsetof(CLight, cookie)), 0},
+        {"CLight.flags", kComponentLight, FieldKind::I32, static_cast<u16>(offsetof(CLight, flags)), 0},
+        {"CLight.sourceRadiusCm", kComponentLight, FieldKind::F32, static_cast<u16>(offsetof(CLight, sourceRadiusCm)), 1},
         {"CCamera.fovYRad", kComponentCamera, FieldKind::F32,
          static_cast<u16>(offsetof(CCamera, fovYRad)), 1},
     };
@@ -990,6 +997,86 @@ static void testSceneAbiErrors(World& world) {
     world.flush();
 }
 
+// ---------------------------------------------------------------------------------------------- lights
+
+// CLight's rect/IES/cookie fields and scene::gatherLights: what the renderer is handed.
+static void testLights(World& world) {
+    AVER_INFO("=== lights ===");
+    check(sizeof(CLight) == 64, "CLight is 64 bytes with its new fields");
+
+    // A rect light at (100, 200, 300), turned a quarter turn about Z.
+    Transform xf;
+    xf.position = {100, 200, 300};
+    xf.rotation = Quat::fromAxisAngle({0, 0, 1}, kPi * 0.5f);
+    const Entity rect = world.create("rect light", kInvalidEntity, xf);
+    *static_cast<CLight*>(world.addComponent(rect, kComponentLight)) = CLight{};
+    CLight* c = world.component<CLight>(rect, kComponentLight);
+    c->kind = kLightRect;
+    c->intensityLux = 5000.0f;
+    c->widthCm = 200.0f;     // heightCm left 0: the default applies
+    c->iesProfile = 0x1234;
+    c->cookie = 0x5678;
+    c->flags = kLightNoShadows;
+
+    const Entity sun = world.create("sun", kInvalidEntity, Transform{});
+    CLight* s = static_cast<CLight*>(world.addComponent(sun, kComponentLight));
+    *s = CLight{};
+    s->kind = kLightDirectional;
+    const Entity dark = world.create("dark", kInvalidEntity, Transform{});
+    CLight* d = static_cast<CLight*>(world.addComponent(dark, kComponentLight));
+    *d = CLight{};
+    d->intensityLux = 0.0f;
+    // A pool-fresh component is all zeroes: intensity 0 means no light, not a crash.
+    const Entity bare = world.create("bare", kInvalidEntity, Transform{});
+    world.addComponent(bare, kComponentLight);
+    world.flush();
+
+    std::vector<WorldLight> lights;
+    gatherLights(world, lights);
+    check(lights.size() == 1, "only the rect contributes: directional, zero-intensity and zero-filled are skipped");
+    if (lights.size() == 1) {
+        const WorldLight& w = lights[0];
+        check(w.entity == rect && w.kind == kLightRect, "the rect light, as a rect");
+        check(w.pos[0] == 100 && w.pos[1] == 200 && w.pos[2] == 300, "world position");
+        const f32 al = std::sqrt(w.axis[0] * w.axis[0] + w.axis[1] * w.axis[1] + w.axis[2] * w.axis[2]);
+        const f32 rl = std::sqrt(w.right[0] * w.right[0] + w.right[1] * w.right[1] + w.right[2] * w.right[2]);
+        const f32 ar = w.axis[0] * w.right[0] + w.axis[1] * w.right[1] + w.axis[2] * w.right[2];
+        check(std::fabs(al - 1.0f) < 1e-5f && std::fabs(rl - 1.0f) < 1e-5f && std::fabs(ar) < 1e-5f,
+              "axis and right are unit and perpendicular");
+        check(std::fabs(w.axis[2]) < 1e-5f && std::fabs(std::fabs(w.axis[1]) - 1.0f) < 1e-5f,
+              "a quarter turn about Z swings +X onto +-Y");
+        check(w.widthCm == 200.0f && w.heightCm == kLightDefaultRectCm, "a zero height reads as the 100 cm default");
+        check(w.sourceRadiusCm == kLightDefaultRadiusCm, "a zero radius reads as 1 cm");
+        check(!w.castShadows && w.iesProfile == 0x1234 && w.cookie == 0x5678, "flags and asset ids carry through");
+    }
+
+    // Scale must not leak into the axes.
+    Transform big;
+    big.scale = {3, 5, 7};
+    const Entity scaled = world.create("scaled", kInvalidEntity, big);
+    CLight* sc = static_cast<CLight*>(world.addComponent(scaled, kComponentLight));
+    *sc = CLight{};
+    sc->intensityLux = 100.0f;
+    world.flush();
+    lights.clear();
+    gatherLights(world, lights);
+    bool found = false;
+    for (const WorldLight& w : lights)
+        if (w.entity == scaled) {
+            found = true;
+            check(std::fabs(w.axis[0] - 1.0f) < 1e-5f && std::fabs(w.right[1] - 1.0f) < 1e-5f,
+                  "a non-uniformly scaled entity still has unit axes");
+        }
+    check(found, "the scaled light is gathered");
+
+    world.destroy(rect);
+    world.destroy(sun);
+    world.destroy(dark);
+    world.destroy(bare);
+    world.destroy(scaled);
+    world.flush();
+}
+
 // ---------------------------------------------------------------------------------------------- main
 
 // Runs every scene test in order. Returns the failure count.
@@ -1009,6 +1096,7 @@ int main() {
     testSceneAbiRepairs(world);
     testSceneAbiQuery(world);
     testSceneAbiErrors(world);
+    testLights(world);
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);

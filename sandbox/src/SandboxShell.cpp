@@ -2006,6 +2006,8 @@ void SandboxApp::buildUI(Engine& e) {
             uiReg_.track("window.worldOutliner");
             ImGui::MenuItem("Details", nullptr, &showDetails_);
             uiReg_.track("window.details");
+            ImGui::MenuItem("Soft Body (plastic)", nullptr, &showSoftBody_);
+            uiReg_.track("window.softBody");
             if (ImGui::MenuItem("Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
             uiReg_.track("window.contentBrowser");
             if (ImGui::MenuItem("Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
@@ -2187,9 +2189,14 @@ void SandboxApp::buildUI(Engine& e) {
         ImGui::Selectable("Plane",   false, ImGuiSelectableFlags_Disabled);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("No plane primitive yet.\nA flattened cube is the convention: add a Cube and scale Z down.");
-        ImGui::Selectable("Point Light", false, ImGuiSelectableFlags_Disabled);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("CLight exists as a component, but no renderer reads it yet.\nLighting is the sun plus voxel cone-traced GI.");
+#if AVER_MODULE_SCENE
+        if (ImGui::Selectable("Point Light")) spawnLightAtCamera(scene::kLightPoint);
+        uiReg_.track("toolbar.add.pointLight");
+        if (ImGui::Selectable("Spot Light")) spawnLightAtCamera(scene::kLightSpot);
+        uiReg_.track("toolbar.add.spotLight");
+        if (ImGui::Selectable("Rect Light")) spawnLightAtCamera(scene::kLightRect);
+        uiReg_.track("toolbar.add.rectLight");
+#endif
         ImGui::EndPopup();
     }
     ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();

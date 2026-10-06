@@ -284,6 +284,8 @@ add_subdirectory(modules/sound)
 if(AVER_MODULE_DEFORM)
   add_subdirectory(modules/deform)
 endif()
+# Plastic soft bodies (dents that stay, tearing). Core only, a leaf module like Synapse.
+add_subdirectory(modules/softbody)
 # Trifactor, beside Deform for the same reason: it needs only Core + Formats and is optional.
 if(AVER_MODULE_TRIFACTOR)
   add_subdirectory(modules/trifactor)
@@ -568,6 +570,9 @@ if(AVER_BUILD_TESTS)
   add_subdirectory(tests/anim)
   if(AVER_MODULE_DEFORM)
     add_subdirectory(tests/deform)
+  endif()
+  if(TARGET Aver.SoftBody)
+    add_subdirectory(tests/softbody)
   endif()
   # Trifactor's runtime selection maths -- screen-space error, frustum and cone culling. A separate
   # directory from tests/formats (which holds TrifactorTest, the COOK side) because the two halves

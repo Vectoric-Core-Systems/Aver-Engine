@@ -10,6 +10,7 @@
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/pbr/PbrShaders.hpp"
 #include "aver/voxi/VoxiGiShaders.hpp"   // kGiSrvCount/kGiUavCount: the "typed twice" fix below
+#include "aver/formats/IesProfile.hpp"   // kIesTableV/H: the table's one definition
 #include "aver/voxi/GiVisibility.hpp"   // givis::packAmbientW/halfDim -- the C++/HLSL bit-table's one definition
 
 #include "VoxiShaders.hpp"
@@ -473,6 +474,7 @@ void VoxiRenderer::shutdown() {
     if (rdLocalHistPlaceholder_) { res_->destroyTexture(rdLocalHistPlaceholder_); rdLocalHistPlaceholder_ = 0; }
     for (rhi::BufferHandle& b : rdLocalLights_)  { if (b) res_->destroyBuffer(b); b = 0; }
     if (rdLocalLightsPlaceholder_) { res_->destroyBuffer(rdLocalLightsPlaceholder_); rdLocalLightsPlaceholder_ = 0; }
+    releaseLightAssets();
     rdLocalLightCapacity_ = rdLocalLightSlot_ = rdLocalLightCount_ = 0;
     rdLocalLightsBound_ = 0;
     rdLocalOutThisFrame_ = 0;
@@ -3541,6 +3543,106 @@ u64 VoxiRenderer::foliageKey() const {
     return h;
 }
 
+static_assert(kEngineUnitCdm2 == rhi::kLuminanceToCdm2, "SceneLight.hpp mirrors the engine's radiance unit");
+static_assert(fmt::kIesTableV == 64 && fmt::kIesTableH == 32, "AVER_IES_V/H in aver_lights.hlsli mirror these");
+
+void VoxiRenderer::setSceneLights(const SceneLight* lights, u32 count) {
+    sceneLights_.assign(lights, lights ? lights + count : lights);
+}
+
+bool VoxiRenderer::registerIesProfile(u64 id, const u16* tableHalf, f32 peakOverMean) {
+    if (!id || !tableHalf) return false;
+    if (lightAssetsCpu_.count(id)) return true;
+    LightAssetCpu a;
+    a.width = fmt::kIesTableH;
+    a.height = fmt::kIesTableV;
+    a.ies = true;
+    a.peakOverMean = peakOverMean > 0.0f ? peakOverMean : 1.0f;
+    a.bytes.resize(static_cast<usize>(a.width) * a.height * sizeof(u16));
+    std::memcpy(a.bytes.data(), tableHalf, a.bytes.size());
+    lightAssetsCpu_.emplace(id, std::move(a));
+    return true;
+}
+
+bool VoxiRenderer::registerCookie(u64 id, u32 width, u32 height, const u8* rgba8) {
+    if (!id || !rgba8 || width == 0 || height == 0) return false;
+    if (lightAssetsCpu_.count(id)) return true;
+    LightAssetCpu a;
+    a.width = width;
+    a.height = height;
+    a.bytes.assign(rgba8, rgba8 + static_cast<usize>(width) * height * 4u);
+    lightAssetsCpu_.emplace(id, std::move(a));
+    return true;
+}
+
+// Makes a registered asset resident in the ray path's bindless table, creating its texture on first use.
+u32 VoxiRenderer::lightAssetIndex(u64 id) {
+    if (!id || !res_) return pbr::kUnboundTexture;
+    const auto cpu = lightAssetsCpu_.find(id);
+    if (cpu == lightAssetsCpu_.end()) return pbr::kUnboundTexture;
+    LightAssetGpu& gpu = lightAssetsGpu_[id];
+    if (gpu.failed) return pbr::kUnboundTexture;
+    if (!gpu.tex) {
+        ensureTextureTable();
+        if (!rtTexTable_) return pbr::kUnboundTexture;   // no bindless: lights keep their plain shape
+        const LightAssetCpu& a = cpu->second;
+        rhi::TextureDesc d;
+        d.width = a.width;
+        d.height = a.height;
+        d.format = a.ies ? rhi::Format::R16F : rhi::Format::RGBA8UnormSrgb;
+        d.bind = rhi::ResourceBind::ShaderResource;
+        d.initialState = rhi::ResourceState::ShaderResource;
+        const void* levels[1] = {a.bytes.data()};
+        d.initialData = levels;
+        d.initialDataCount = 1;
+        d.initialRowPitch = a.width * (a.ies ? 2u : 4u);
+        d.debugName = a.ies ? "Voxi light IES profile" : "Voxi light cookie";
+        gpu.tex = res_->createTexture(d);
+        if (!gpu.tex) {
+            gpu.failed = true;
+            AVER_WARN("[Voxi] light asset {:016x} could not be uploaded; the light renders without it", id);
+            return pbr::kUnboundTexture;
+        }
+    }
+    if (gpu.index == pbr::kUnboundTexture) gpu.index = residentTexture(gpu.tex);
+    return gpu.index;
+}
+
+void VoxiRenderer::releaseLightAssets() {
+    if (res_)
+        for (auto& kv : lightAssetsGpu_)
+            if (kv.second.tex) res_->destroyTexture(kv.second.tex);
+    lightAssetsGpu_.clear();
+}
+
+// Packs this frame's scene lights into the candidate list the lamp list is cut from.
+void VoxiRenderer::appendSceneLightCandidates(const f32 eye[3]) {
+    for (const SceneLight& s : sceneLights_) {
+        if (!(s.intensityCd > 0.0f) || !std::isfinite(s.intensityCd)) continue;
+        SceneLightAssets a;
+        if (s.iesId) {
+            const u32 idx = lightAssetIndex(s.iesId);
+            if (idx != pbr::kUnboundTexture) {
+                a.iesIndex = static_cast<f32>(idx);
+                a.iesPeakOverMean = lightAssetsCpu_[s.iesId].peakOverMean;
+            }
+        }
+        if (s.cookieId) {
+            const u32 idx = lightAssetIndex(s.cookieId);
+            if (idx != pbr::kUnboundTexture) a.cookieIndex = static_cast<f32>(idx);
+        }
+        RdLocalLightCand c{};
+        c.fromDraw = false;
+        f32 e1m = 0.0f;
+        c.light = packSceneLight(s, a, &e1m);
+        const f32 dx = (s.pos[0] - eye[0]) * 0.01f;   // cm -> m
+        const f32 dy = (s.pos[1] - eye[1]) * 0.01f;
+        const f32 dz = (s.pos[2] - eye[2]) * 0.01f;
+        c.importance = e1m / std::max(dx * dx + dy * dy + dz * dz, 1.0f);
+        rdLocalLightCand_.push_back(c);
+    }
+}
+
 // Local lights (lamps): non-empty when any draw has MaterialFlag_Light with lightIntensity > 0.
 // Range scales with emissive factor and bounding-sphere radius; lit to kLocalLightRangeCutoff of sun units.
 void VoxiRenderer::buildLocalLights() {
@@ -3596,6 +3698,10 @@ void VoxiRenderer::buildLocalLights() {
                                        5000.0f);
 
             RdLocalLightCand c{};
+            c.fromDraw = true;
+            c.light.axisKind[2] = 1.0f;   // kind 0 (sphere); the axis is unused
+            c.light.shape[2] = c.light.shape[3] = -1.0f;   // no IES, no cookie
+            c.light.right[0] = 1.0f;
             c.light.posRadius[0] = d.boundsCentre[0];
             c.light.posRadius[1] = d.boundsCentre[1];
             c.light.posRadius[2] = d.boundsCentre[2];
@@ -3610,6 +3716,7 @@ void VoxiRenderer::buildLocalLights() {
             c.importance = output / std::max(dx * dx + dy * dy + dz * dz, 1.0f);
             rdLocalLightCand_.push_back(c);
         }
+        appendSceneLightCandidates(eye);
     }
 
     // Byte order of the light itself: a total order independent of where a draw sat in the list.
@@ -3666,7 +3773,10 @@ void VoxiRenderer::buildLocalLights() {
             AVER_ERROR("[Voxi] local-light list buffer could not be created; lamps stay unlit (said once)");
         }
     }
-    rdLocalLightsCarryAll_ = rdLocalLightCount_ > 0 && rdLocalLightCount_ == flagged;
+    // Scene lights have no emissive geometry to drop, so only the lamp-flagged draws count here.
+    u32 drawLamps = 0;
+    for (const RdLocalLightCand& c : rdLocalLightCand_) drawLamps += c.fromDraw ? 1u : 0u;
+    rdLocalLightsCarryAll_ = rdLocalLightCount_ > 0 && drawLamps > 0 && drawLamps == flagged;
     // Empty (or the ring failed): the placeholder, rebound only when t18 names something else.
     if (rdLocalLightCount_ == 0 && rdLocalLightsPlaceholder_ && rdLocalLightsBound_ != rdLocalLightsPlaceholder_) {
         res_->setSrvBuffer(bindings_, 18, rdLocalLightsPlaceholder_, sizeof(RdLocalLight), 1, 0);

@@ -460,3 +460,23 @@ Everything else in this file (physics sim flags, Niagara FX, convex cook) is eng
 - `CrashEnergyAbsorb` (`VehicleDamage.h:461`) is documented as **superseded** by `ReboundCoefficient` for the chassis bounce; `OnHit` uses only the rebound path (`VehicleDamage.cpp:2671-2695`). Treat `CrashEnergyAbsorb` as legacy/unused in the solver.
 - The `id(` prefix on PART lines is parsed but discarded (PARTs have no numeric ID field); only Name/Role/Material/panels are used.
 - Determinism for MP relies on identical `Dt` and iteration order; the async path uses a fixed `1/Hz` step and the same static `SolveStep`, so a faithful port must preserve float evaluation order in Phases 1–3.
+
+---
+
+## 15. As built (`modules/softbody`)
+
+The solver in §4–§7 and §10 is implemented in `modules/softbody`; docs/SOFTBODY.md is the usage guide.
+Where the implementation differs from this spec, deliberately:
+
+| Spec | As built | Why |
+|---|---|---|
+| Pinned nodes snap to `LocalRest` every substep (§5 Phase 1) | Pinned nodes are **kinematic**: the solver leaves `pos` alone and zeroes velocity; the host moves them | A cage can be driven by a chassis, a hand, a test rig; snapping to rest made the pin a fixture |
+| Damage runs only while a post-impact window is open; Verlet is frozen outside it (§5, §6) | Damage runs every step; idle cost is covered by `settled` | The window is a rigid-ride optimisation for a cage attached to a chassis; a general solver does not know when it is being driven |
+| Break = force or accumulated set | Also `Material::breakStrain`, a stretch limit on the **original** length | A tear limit must not creep away as the rest length yields; this is what a cloth wants |
+| Tear = a beam stops constraining; `bTorn`/`TearNodeFraction` mark nodes where the skin opens (§6) | A line of broken triangle edges **duplicates** particles (`resolveTears`), logs `SplitEvent`s, and marks triangles with 2+ broken edges dead; `RenderBinding` replays the splits | The spec only hides geometry; a real slit needs the lips to separate |
+| Gravity on freed nodes only | Same, plus `StepConfig::gravityAll` | Cloth and flags are not riding a chassis |
+| `RestLength` unbounded | Clamped to at least 10% of the as-authored length | A creeping beam must not collapse to zero length |
+| Snapshot is per-node `Disp` + bit-packed broken flags (§10) | Snapshot carries all particle positions (the count grows with tears), dead-triangle flags and the split events since last taken | Tears change the particle count, so a fixed index-parallel displacement array is not enough |
+| Async worker idles ~50 ms (§10) | Idles on a condition variable until a command arrives; paced mode waits only the remainder of the step | Same behaviour without the polling latency |
+| `.ocbeam` parser, parts, whole-panel detach, repair of fracturable parts, debris (§2, §8, §11) | **Not implemented** | Out of this task's scope; the data model carries the hooks (`origin`, `freed`, per-beam material) |
+| Node mass, strain-rate dashpot, work hardening (opt-in realism) | `useNodeMass` and `Material::hardening` only; no dashpot | Base solve stays massless and byte-stable |

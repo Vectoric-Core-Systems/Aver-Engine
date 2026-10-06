@@ -198,6 +198,11 @@ void SandboxApp::onRender(Engine& e)  {
     }
 #endif
 
+#if AVER_MODULE_SCENE && AVER_MODULE_VOXI
+    // CLight entities -> Voxi's lamp list and the path tracer's lights, before the frame's draws.
+    sceneLightFeed_.update(scene::World::instance(), voxiRenderer_, ptSceneView_.get(), project_.contentDir());
+#endif
+
 #if AVER_MODULE_SCENE
     // Scene-entity pass: draws every live entity carrying a CMeshRenderer.
     {

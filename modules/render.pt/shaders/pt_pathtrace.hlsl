@@ -42,6 +42,10 @@ SamplerState gPtSamp                           : register(s0);
 #define AVER_PT_TEX_UNBOUND 0xFFFFFFFFu
 #endif
 
+// Scene lights (point, spot, rect; IES and cookie textures live in the table above). t5, count in gPtTrace.w.
+#include "aver_lights.hlsli"
+StructuredBuffer<AverLightRec> gPtLights : register(t5);
+
 // The progressive accumulator: TWO float4 elements per pixel; the second is not decoration.
 //
 //   [2p+0] .rgb  summed radiance, LINEAR units, never tonemapped
@@ -238,6 +242,33 @@ float ptSpecularProbability(float3 F0, float metal) {
     return clamp(max(lum, metal), 0.1, 0.9);
 }
 
+// The surface's response to light from direction L, times cosine, per unit irradiance: Lambert when
+// the surface has no specular lobe, else the same diffuse + GGX the bounce path uses. Shared by the sun
+// and the scene lights.
+float3 ptDirectBrdfCos(float3 nWS, float3 albedo, float3 V, float3 L, float ndl, float rough, float metal) {
+    if (!ptHasSpecular(rough)) return albedo * (1.0 / PI) * ndl;
+
+    // THE PBR SURFACE, evaluated not sampled: D appears in full here (unlike ptScatterSpecular, where
+    // importance sampling cancels it), since this direction was chosen, not drawn.
+    const float3 F0  = ptF0(albedo, metal);
+    const float  ndv = dot(nWS, V);
+    // The SAME energy bookkeeping the bounce path uses, so direct and bounce lighting agree.
+    const float  E   = ptEnergyE(max(ndv, 1e-3), rough);
+    const float3 kd  = ptDiffuseAlbedo(albedo, metal) * (1.0 - ptSpecAlbedo(F0, E));
+    float3 brdf = kd * (1.0 / PI);
+    if (ndv > 0.0) {
+        const float3 H = normalize(V + L);
+        const float ndh = saturate(dot(nWS, H)), vdh = saturate(dot(V, H));
+        const float a = max(rough * rough, 1e-3);
+        const float k = a * 0.5;   // the same pairing ptScatterSpecular uses; they must not drift
+        const float  D = plainDistGGX(ndh, a);
+        const float  G = plainGeomSchlick(ndv, k) * plainGeomSchlick(ndl, k);
+        const float3 F = plainFresnelSchlick(vdh, F0);
+        brdf += D * G * F / max(4.0 * ndv * ndl, 1e-6) * ptSpecCompensation(F0, E);
+    }
+    return brdf * ndl;
+}
+
 // Direct light from the sun, by NEXT-EVENT ESTIMATION rather than hoping a bounce finds it.
 //
 // THE PROBLEM: averSunRadiance() (RHIShaders.cpp) has zero angular size, so no BRDF-sampled ray
@@ -276,29 +307,67 @@ float3 ptDirectSun(float3 hitPos, float3 nWS, float3 albedo, float bias, float t
     q.Proceed();
     if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) return float3(0, 0, 0);   // occluded
 
-    // Lambertian BRDF (albedo/PI) times cosine times light radiance. NO PDF DIVISION: this direction
-    // was CHOSEN (the sun's), not drawn, so there's no density here to divide out.
-    if (!ptHasSpecular(rough)) return albedo * (1.0 / PI) * ndl * averSunRadiance();
+    // BRDF times cosine times light radiance. NO PDF DIVISION: this direction was CHOSEN (the sun's),
+    // not drawn, so there's no density here to divide out.
+    return ptDirectBrdfCos(nWS, albedo, V, L, ndl, rough, metal) * averSunRadiance();
+}
 
-    // THE PBR SURFACE, evaluated not sampled: D appears in full here (unlike ptScatterSpecular, where
-    // importance sampling cancels it), since this direction was chosen, not drawn.
-    const float3 F0  = ptF0(albedo, metal);
-    const float  ndv = dot(nWS, V);
-    // The SAME energy bookkeeping the bounce path uses, so direct and bounce lighting agree.
-    const float  E   = ptEnergyE(max(ndv, 1e-3), rough);
-    const float3 kd  = ptDiffuseAlbedo(albedo, metal) * (1.0 - ptSpecAlbedo(F0, E));
-    float3 brdf = kd * (1.0 / PI);
-    if (ndv > 0.0) {
-        const float3 H = normalize(V + L);
-        const float ndh = saturate(dot(nWS, H)), vdh = saturate(dot(V, H));
-        const float a = max(rough * rough, 1e-3);
-        const float k = a * 0.5;   // the same pairing ptScatterSpecular uses; they must not drift
-        const float  D = plainDistGGX(ndh, a);
-        const float  G = plainGeomSchlick(ndv, k) * plainGeomSchlick(ndl, k);
-        const float3 F = plainFresnelSchlick(vdh, F0);
-        brdf += D * G * F / max(4.0 * ndv * ndl, 1e-6) * ptSpecCompensation(F0, E);
+// Direct light from the scene lights, by next-event estimation: one light picked in proportion to its
+// unshadowed irradiance, one shadow ray at a point on its emitter (a disc for point/spot, a uniform
+// point on a rectangle), the estimate divided by the pick probability. See docs/rendering/LIGHTS.md.
+float3 ptDirectLights(float3 hitPos, float3 nWS, float3 albedo, float bias, float tMax,
+                      float3 V, float rough, float metal, inout uint rng) {
+    const uint n = min((uint)(gPtTrace.w + 0.5), 32u);
+    if (n == 0u) return float3(0, 0, 0);
+
+    float wsum = 0.0, wPick = 0.0;
+    uint  pick = 0u;
+    [loop] for (uint j = 0u; j < n; ++j) {
+        const float wj = dot(aversLightIrradiance(gPtLights[j], hitPos, nWS), float3(0.2126, 0.7152, 0.0722));
+        if (!(wj > 0.0)) continue;
+        wsum += wj;
+        if (ptRand(rng) * wsum < wj) { pick = j; wPick = wj; }
     }
-    return brdf * ndl * averSunRadiance();
+    if (!(wPick > 0.0)) return float3(0, 0, 0);
+
+    const AverLightRec ll = gPtLights[pick];
+    float3 L, rad;
+    float  srcRadius;
+    if (!aversLightEval(ll, hitPos, nWS, L, rad, srcRadius)) return float3(0, 0, 0);
+    const float ndl = dot(nWS, L);
+    if (!(ndl > 0.0)) return float3(0, 0, 0);
+
+    if (!aversLightNoShadow(ll)) {
+        const float2 u = float2(ptRand(rng), ptRand(rng));
+        float3 target;
+        float  stop;
+        if (aversLightKind(ll) == AVER_LIGHT_RECT) {
+            target = aversRectShadowTarget(ll, u, hitPos, nWS);
+            stop   = 0.5;
+        } else {
+            const float3 Lc = normalize(ll.posRadius.xyz - hitPos);
+            float3 T, B;
+            ptBasis(Lc, T, B);
+            const float rr = sqrt(u.x) * ll.posRadius.w;
+            const float aa = 6.28318530718 * u.y;
+            target = ll.posRadius.xyz + T * (rr * cos(aa)) + B * (rr * sin(aa));
+            stop   = ll.posRadius.w * 1.25;
+        }
+        const float3 toT  = target - hitPos;
+        const float  dist = length(toT);
+        if (dist - stop > bias) {
+            RayDesc ray;
+            ray.Origin    = hitPos + nWS * bias;
+            ray.Direction = toT / dist;
+            ray.TMin      = bias;
+            ray.TMax      = min(dist - stop, tMax);
+            RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
+            q.TraceRayInline(gPtScene, RAY_FLAG_NONE, 0xFF, ray);
+            q.Proceed();
+            if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) return float3(0, 0, 0);
+        }
+    }
+    return ptDirectBrdfCos(nWS, albedo, V, L, ndl, rough, metal) * rad * (wsum / wPick);
 }
 
 // Traces one ray and resolves the surface it hit. False means the ray left the scene.
@@ -590,6 +659,8 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
                 // -dir is the view vector this hit's BRDF is evaluated against.
                 radiance += throughput * ptDirectSun(hitPos, nWS, albedo, bias, gPtTrace.y,
                                                      -dir, rough, metal);
+                radiance += throughput * ptDirectLights(hitPos, nWS, albedo, bias, gPtTrace.y,
+                                                        -dir, rough, metal, rng);
             }
 
             // Out of bounces: the path is TRUNCATED, contributing no further INDIRECT light -- why

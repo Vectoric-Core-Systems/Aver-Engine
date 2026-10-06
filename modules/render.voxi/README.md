@@ -256,3 +256,10 @@ Full hardware matrix and launcher-ready spec text: `docs/MINIMUM_SPECS.md`.
 Temporal accumulation to soften flicker; a cascaded volume for large scenes; cone-traced specular
 (diffuse + AO only today); RT ambient occlusion and reflections, which mostly reuse the TLAS that
 already exists. Open items are tracked in `docs/STATUS.md` §4d.
+
+## Scene lights
+
+`CLight` entities (point, spot, rectangular area) with IES profiles and cookies join the emissive-material
+lamps in the staged ray-driven local-light list. The host calls `VoxiRenderer::setSceneLights` each frame
+(`sandbox/src/SceneLightFeed.hpp`); the shared HLSL is `modules/render.pt/shaders/aver_lights.hlsli`. Units,
+the rectangle model and the limits are in `docs/rendering/LIGHTS.md`.

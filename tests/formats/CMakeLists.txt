@@ -412,3 +412,10 @@ set_target_properties(TextureSrgbTableTest PROPERTIES
 add_executable(OcSequenceTest src/OcSequenceTest.cpp)
 target_link_libraries(OcSequenceTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(OcSequenceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# LightFormatTest -- IES (LM-63) profiles and the .ocworld LIGHT record: symmetry unfolding, the
+# flux-preserving table normalisation, half-float packing, refusals with a reason, and the LIGHT
+# round trip. No device: the parser and baker are text and arithmetic.
+add_executable(LightFormatTest src/LightFormatTest.cpp)
+target_link_libraries(LightFormatTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(LightFormatTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

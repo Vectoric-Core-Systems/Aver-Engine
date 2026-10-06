@@ -21,6 +21,7 @@ add_executable(Sandbox WIN32
   src/SandboxShell.cpp
   src/SandboxContentBrowser.cpp
   src/SandboxPanels.cpp
+  src/SoftBodyPanel.cpp
   src/SandboxSettings.cpp
   src/SandboxLevelEdit.cpp
   src/SandboxAutosave.cpp
@@ -103,6 +104,8 @@ endif()
 # out twice, and every future change to it -- chunk ownership first -- would have had to be made
 # twice and stay agreeing.
 target_link_libraries(Sandbox PRIVATE Aver.World)
+# The plastic soft-body bench (Window > Soft Body). Core-only module, no scene/physics coupling.
+target_link_libraries(Sandbox PRIVATE Aver.SoftBody)
 # The Roslyn escalation for an actor script the built-in scanner declines. Linked here rather
 # than pulled in by Aver.Formats, which must stay dependency-free -- see its own CMakeLists.
 if(TARGET Aver.Formats.Roslyn)

@@ -35,8 +35,10 @@
 //     NOT NEXT-EVENT ESTIMATED like the sun: nothing aims a ray at an emitter, so a small one is found
 //     only when a bounce happens to hit it -- noisy, not biased.
 //
-//     THERE IS STILL NO CLight (point/spot/area). A room lit only by placed lights, with no sky
-//     above it, no sun and no emissive geometry, still renders BLACK -- that is not a bug.
+//     Scene lights (CLight: point, spot, rectangle, with IES profiles and cookies) are next-event
+//     estimated at every diffuse hit once the host hands them over with setLights(); without that
+//     call a room lit only by placed lights, with no sky, sun or emissive geometry, renders BLACK.
+//     See docs/rendering/LIGHTS.md.
 //   - GEOMETRY. Only draws whose mesh has no compute-written vertex buffer are included -- the same
 //     predicate VoxiRenderer::buildAccelerationStructures already applies (VoxiRenderer.cpp, gated on
 //     IDevice::meshVertexBuffer). Skinned characters, particles, and anything else that writes its
@@ -121,6 +123,13 @@ public:
     using AlbedoResolver = std::function<bool(rhi::BindingSetHandle set, const void* constants,
                                               u32 bytes, ResolvedMaterial& out)>;
     void setAlbedoResolver(AlbedoResolver r) { resolveAlbedo_ = std::move(r); }
+
+    // Scene lights: forwarded to the integrator, which next-event-estimates them at every diffuse hit.
+    // Accumulation restarts when the set changes. See PathTracer::setLights / lightTexture.
+    void setLights(const PtLight* lights, u32 count) { pt_.setLights(lights, count); }
+    u32  lightTexture(u64 id, u32 width, u32 height, bool ies, const void* pixels) {
+        return pt_.lightTexture(id, width, height, ies, pixels);
+    }
 
     const char* name() const override { return "Aver.PathTracer.SceneView"; }
 
@@ -256,6 +265,7 @@ private:
     bool     camResetLogged_ = false;
 
     u64  sceneKey_ = 0;
+    u64  lightsSeen_ = 0;
     bool sceneReady_ = false;
     u32  sampleCursor_ = 0;
 

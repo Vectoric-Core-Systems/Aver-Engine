@@ -1,17 +1,29 @@
 # Aver.SoftBody  (`modules/softbody`)
 
 - **Language:** C++
-- **Depends on:** Core
-- **Planned phase:** 4
+- **Depends on:** Core (only)
+- **Status:** implemented, not yet wired into the root build (see docs/SOFTBODY.md "Wiring")
 
-[opt] The OpenConstructor cage solver, UE-free: Verlet → damage/plasticity → Gauss-Seidel PBD, break/tear, crush-curve impacts, async fixed-Hz worker. See docs/recon/softbody-solver.md + docs/physics-net/.
+The plastic half of soft bodies: a UE-free cage solver — Verlet, then damage/plasticity, then Gauss-Seidel
+PBD — with a material yield curve (elastic to yield, then permanent set), break and tear that duplicates
+particles along the cut, a render-mesh mapping that follows tears, crush-curve impacts, and an async
+fixed-Hz worker. Plus a C ABI (`softbody_abi.h`). Spec: docs/recon/softbody-solver.md. Design and usage:
+**docs/SOFTBODY.md**.
 
-> **Still a skeleton, and for a narrower reason than before.**
->
-> **Soft body for skeletal meshes does NOT live here.** It is Jolt's, exposed through `Aver.Physics`'s plain-C ABI as `aver_phys_softbody_*` (see `modules/physics/include/aver/physics/physics_abi.h`). Jolt 5.6 is vendored and already compiling in this tree, and its soft body brings `Skinned` constraints — a particle tethered to where ordinary bone skinning would have put it, free to move up to a max distance — which is exactly the feature, plus **collision against the real world**, which a cage solver of our own would not have. `tests/physics/src/SoftBodyTest.cpp` is the evidence.
->
-> **What Jolt cannot do, and is therefore all this module would still be for:** Jolt soft bodies are purely **elastic**. No plastic deformation, no permanent set, no material yield curve, no break/tear, no `.ocbeam`. A dent that *stays* is a genuinely different solver, and that — not soft body in general — is what `docs/recon/softbody-solver.md` specifies.
->
-> This stays unwired (`add_subdirectory(modules/softbody)` is still absent from the top-level `CMakeLists.txt`) until vehicle damage is actually wanted. Anyone reaching for "soft body" before then wants the Jolt path above, and building a second elastic solver here would be duplicating something that already works.
->
-> See [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the full module DAG.
+**Soft body for skeletal meshes and cloth that springs back is still Jolt's**, through `Aver.Physics`'s
+plain-C ABI as `aver_phys_softbody_*`: it brings `Skinned` constraints and collision against the real
+world, which this module does not. What Jolt cannot do — dents that stay, yield curves, break/tear — is
+all this module is for. The two never share state and this module does not link `Aver.Physics`.
+
+| File | What |
+|---|---|
+| `Material.hpp` | `Material`, `Behavior`, the crush curve, tear radius |
+| `Cage.hpp` / `Cage.cpp` | particles, beams, triangles; build/repair; tear resolution; queries |
+| `Solver.cpp` | `step`, `applyImpact` |
+| `RenderBinding.hpp` | render vertices/triangles following tears |
+| `AsyncSolver.hpp` | the fixed-rate worker and its snapshots |
+| `softbody_abi.h` | the C ABI (`aver_sb_*`) |
+
+Tests: `tests/softbody` (`PlasticSoftBodyTest`, `PlasticSoftBodyAsyncTest`).
+
+See [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the full module DAG.

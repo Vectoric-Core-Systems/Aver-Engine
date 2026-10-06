@@ -6,6 +6,8 @@ aver_add_module(Aver.Formats
     src/GiCache.cpp
     src/GltfImport.cpp
     src/Json.cpp
+    # IES (LM-63) photometric profiles for lights: a text parser and a table bake, no device.
+    src/IesProfile.cpp
     src/OcAnim.cpp
     src/OcBeam.cpp
     src/OcGraph.cpp
