@@ -49,6 +49,12 @@ using AnimNotifyFn = void (*)(scene::Entity e, const char* name, void* user);
 // modified pose rather than the sampled one.
 using PoseModifierFn = void (*)(scene::Entity e, const fmt::OcSkeleton& skel, Pose& pose, void* user);
 
+// A pose SOURCE: something other than the entity's CAnimator clip that produces its pose (an
+// animation state machine, see AnimGraphSystem). Called with `pose` already seeded from the rest
+// pose; return true after writing it and the clip sampling is skipped. The pose modifier above still
+// runs on the result, so a control rig layers on a state machine exactly as it does on a clip.
+using PoseSourceFn = bool (*)(scene::Entity e, const fmt::OcSkeleton& skel, Pose& pose, void* user);
+
 // Owns the loaded rigs and clips, and the pose of every animated entity.
 class AnimSystem {
 public:
@@ -76,6 +82,8 @@ public:
     // existed -- sample, blend, skin -- so the cost of having this hook and not using it is one null
     // check per animated entity per frame.
     void setPoseModifier(PoseModifierFn fn, void* user) { poseMod_ = fn; poseModUser_ = user; }
+    void setPoseSource(PoseSourceFn fn, void* user) { poseSrc_ = fn; poseSrcUser_ = user; }
+    bool hasPoseSource() const { return poseSrc_ != nullptr; }
     bool hasPoseModifier() const { return poseMod_ != nullptr; }
 
     // How many notifies this system has delivered since the last clear(). Exists so a test can
@@ -326,6 +334,8 @@ private:
     AnimNotifyFn notify_ = nullptr;
     void* notifyUser_ = nullptr;
 
+    PoseSourceFn poseSrc_ = nullptr;
+    void* poseSrcUser_ = nullptr;
     PoseModifierFn poseMod_ = nullptr;
     void* poseModUser_ = nullptr;
     u64 fired_ = 0;

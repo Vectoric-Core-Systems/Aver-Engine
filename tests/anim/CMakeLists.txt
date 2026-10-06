@@ -12,3 +12,16 @@ set_target_properties(AnimTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINAR
 add_executable(IkTest src/IkTest.cpp)
 target_link_libraries(IkTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(IkTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Blend spaces + animation state machines (docs/ANIM_BLEND_STATE.md). Same link set and the same
+# reason as AnimTest: weights, sync phase, transition timing and the asset round trip are all
+# arithmetic on structs, so a device would only hide a wrong answer.
+add_executable(AnimBlendSpaceTest src/BlendSpaceTest.cpp)
+target_link_libraries(AnimBlendSpaceTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(AnimBlendSpaceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_executable(AnimStateMachineTest src/AnimStateMachineTest.cpp)
+target_link_libraries(AnimStateMachineTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(AnimStateMachineTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_executable(AnimGraphAssetTest src/AnimGraphAssetTest.cpp)
+target_link_libraries(AnimGraphAssetTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(AnimGraphAssetTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

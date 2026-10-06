@@ -593,3 +593,18 @@ add_executable(PlayProfileTest src/PlayProfileTest.cpp)
 target_include_directories(PlayProfileTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(PlayProfileTest PRIVATE Aver.Core)
 set_target_properties(PlayProfileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AnimGraphEditorTest -- the .ocblend and .ocasm editor tabs' headless core: the structural edits
+# (which renumber every index that points past what they remove), the canvas geometry, and each tab's
+# load / save / dirty / undo bookkeeping.
+#
+# Same BtEditorTest arrangement above (Sandbox is add_executable-only, so this compiles the two editor
+# sources directly), and AVER_WITH_IMGUI is likewise left undefined. Needs Aver.Anim for the asset
+# format and the runtime types the tabs edit.
+add_executable(AnimGraphEditorTest
+  src/AnimGraphEditorTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/BlendSpaceEditor.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/AnimStateMachineEditor.cpp)
+target_include_directories(AnimGraphEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(AnimGraphEditorTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(AnimGraphEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

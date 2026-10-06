@@ -11,6 +11,10 @@ aver_add_module(Aver.Anim
     src/Pose.cpp
     src/AnimSampler.cpp
     src/Ik.cpp
+    # Blend spaces, state machines and their .ocblend/.ocasm assets: arithmetic and JSON only.
+    src/BlendSpace.cpp
+    src/AnimStateMachine.cpp
+    src/AnimGraphAsset.cpp
   DEPS
     Aver.Core
     Aver.Formats
