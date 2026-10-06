@@ -11,6 +11,17 @@
 aver_add_module(Aver.Audio
   SOURCES
     src/Mixer.cpp
+    src/Dsp.cpp
+    src/Stream.cpp
+    src/WavStream.cpp
+    src/Reverb.cpp
+    src/Music.cpp
   DEPS
     Aver.Core
 )
+
+# The stream decoder runs on its own std::thread.
+find_package(Threads QUIET)
+if(Threads_FOUND)
+  target_link_libraries(Aver.Audio PUBLIC Threads::Threads)
+endif()

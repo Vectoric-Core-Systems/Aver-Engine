@@ -25,3 +25,17 @@ if(TARGET Aver.Audio.Wasapi)
   target_link_libraries(AudioProbe PRIVATE Aver.Audio Aver.Audio.Wasapi Aver.Core Aver.Platform)
   set_target_properties(AudioProbe PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# AudioStreamTest -- streamed playback (under-run handling, ring wrap, looping, WAV), crossfades,
+# the occlusion filter and reverb zones. Links only the mixer: the decoder thread and the file
+# source are in Aver.Audio, so none of it needs a device or a scene.
+add_executable(AudioStreamTest src/AudioStreamTest.cpp)
+target_link_libraries(AudioStreamTest PRIVATE Aver.Audio Aver.Core Aver.Platform)
+set_target_properties(AudioStreamTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AudioSceneTest -- CReverbZone and CAudioOcclusion on a real scene::World, mixer and raycast faked.
+if(TARGET Aver.Audio.Scene)
+  add_executable(AudioSceneTest src/AudioSceneTest.cpp)
+  target_link_libraries(AudioSceneTest PRIVATE Aver.Audio.Scene Aver.Audio Aver.Scene Aver.Core Aver.Platform)
+  set_target_properties(AudioSceneTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

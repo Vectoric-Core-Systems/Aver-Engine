@@ -56,7 +56,19 @@ The engine's: centimetres, **+X forward, +Y right, +Z up, left-handed**. Named e
 handedness error puts every sound on the wrong side of the player's head, which reads as a bug in the
 pan law rather than as a sign three files away. `tests/audio` asserts both sides.
 
+## Streaming, fades, occlusion, reverb
+
+Added later, under the same real-time rule; see [docs/AUDIO_STREAMING.md](../../docs/AUDIO_STREAMING.md).
+A **stream voice** reads a ring of decoded frames kept full by a decoder thread (`Stream.hpp`; WAV is
+streamed from disk by `WavStream.cpp`, the Media Foundation and `.ocaudio` sources live in
+`modules/audio.abi`). An under-run is silence plus a counter, never a stall. Every voice carries a fade
+gain ramped on the audio thread (crossfades), an occlusion value (smoothed, low-passed and ducked by
+`Dsp.hpp`) and a reverb send; the mixer owns one send reverb (`Reverb.hpp`). The pure parts, the
+crossfade curves, the occlusion ray probe and the reverb zone blend, are all asserted in
+`tests/audio/AudioStreamTest`. The scene components that drive them are in `modules/audio.scene`, so this
+module stays Core-only.
+
 ## What it does not do
 
-No reverb, no occlusion, no HRTF, no DSP chain, and no streaming — every sound is resident. Those are
-`docs/AUDIO.md` §5 and §8, and none is worth having before something makes a noise.
+No HRTF, no per-source environment (one listener-side reverb), no occlusion by diffraction, no stream
+seek, and no general DSP chain. Those are `docs/AUDIO.md` §5 and §8.

@@ -120,7 +120,7 @@ public readonly struct Sound : IEquatable<Sound>
 /// <remarks>A voice handle goes stale on its own: the mixer reclaims the slot when the sound
 /// finishes, and every call here answers harmlessly for a handle that has already ended, so a script
 /// holding one across frames never has to guard. Ask <see cref="IsPlaying"/> if it needs to know.</remarks>
-public readonly struct Voice : IEquatable<Voice>
+public readonly partial struct Voice : IEquatable<Voice>
 {
     /// <summary>The raw handle. 0 is invalid — which is what a refused play returns.</summary>
     public readonly int Handle;
@@ -166,7 +166,7 @@ public readonly struct Voice : IEquatable<Voice>
 /// modules switched off, leaves <see cref="Ready"/> false and every call here a harmless no-op that
 /// returns <see cref="Voice.None"/> — the same contract the native layer states for
 /// aver_audio_init. A game never has to branch on whether sound exists.</remarks>
-public static class Audio
+public static partial class Audio
 {
     /// <summary>True when a device is open and the mixer thread is running. False, rather than
     /// throwing, on a build with no audio DLL at all — matching Physics.Ready's own guard.</summary>
