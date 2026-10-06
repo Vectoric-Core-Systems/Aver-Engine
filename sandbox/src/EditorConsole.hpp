@@ -738,6 +738,22 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (v.as.u > 3) { err = "nrd2Despeckle must be 0 to 3"; return false; }
             return true;
         }});
+    t.push_back({"voxi.nrd2Speckle", VarType::U32, false,
+        "NRD2 speckle removal after the resolve: 0 none, 1 blur (default; an edge-aware Gaussian of voxi.nrd2BlurRadius pixels on this frame's lighting, stopped at depth and normal edges)",
+        []{ return vU32(Renderer::get().settings().nrd2Speckle); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2Speckle = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u > 1) { err = "nrd2Speckle must be 0 (none) or 1 (blur)"; return false; }
+            return true;
+        }});
+    t.push_back({"voxi.nrd2BlurRadius", VarType::F32, false,
+        "NRD2 speckle blur radius in pixels (1-32, default 8): larger hides bigger blotches and softens lamp shadow edges more",
+        []{ return vF32(Renderer::get().settings().nrd2BlurRadius); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2BlurRadius = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (!(v.as.f >= 1.0f && v.as.f <= 32.0f)) { err = "nrd2BlurRadius must be 1 to 32"; return false; }
+            return true;
+        }});
     t.push_back({"voxi.nrd2DespeckleCap", VarType::F32, false,
         "NRD2 despeckle cap, times the 5th brightest of the 5x5 neighbours (1-8, default 1): lower removes more spots and loses more of their light",
         []{ return vF32(Renderer::get().settings().nrd2DespeckleCap); },

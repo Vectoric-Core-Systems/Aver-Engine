@@ -12,6 +12,8 @@
 //                      with history, remodulated into lit
 //   8 CSNrd2Despeckle -- before the pyramid when on: D and S with isolated outliers clamped (nrd2Despeckle), which
 //                      the pyramid, resolve and features then read instead of Stage B's targets
+//   9 CSNrd2Blur      -- speckle blur after the resolve when on (nrd2BlurWeight): into the temporal stage's input,
+//                      or remodulated into lit without it
 
 // Portable (modules/render.neural/README.md rules): fp32, no wave intrinsics, no atomics, groupshared
 // <= 16 KB, every barrier in uniform control flow, constants at b3 (the Vulkan backend folds b1 into push
@@ -24,15 +26,15 @@
 
 cbuffer Nrd2CB : register(b3) {
     uint4  gNrd2Rect;     // scene viewport x, y, w, h (render-target pixels)
-    uint4  gNrd2Tiles;    // x tiles, y tiles, flags (1 own pixel only, 2 stabilise, 4 history valid, 8 standardise),
-                          // despeckle mask (1 D, 2 S)
+    uint4  gNrd2Tiles;    // x tiles, y tiles, flags (1 own pixel only, 2 stabilise, 4 history valid, 8 standardise,
+                          // 16 blur: the resolve writes D'/S'), despeckle mask (1 D, 2 S)
     float4 gNrd2Def[3];   // default tile parameters, planes 0..11 (D then S)
     float4 gNrd2View[3];  // world -> view rows: right, up, forward (xyz); w of right and up: tan of the half FOV
     float4 gNrd2InScale[3];   // features: the network's input standardisation x * scale + bias (flag 8)
     float4 gNrd2InBias[3];
     float4 gNrd2PrevVP[4];    // stabiliser: previous view-projection about the previous eye (row vectors)
     float4 gNrd2CamDelta;     // eye - previous eye (xyz)
-    float4 gNrd2Stab;         // history frames at rest, cap at speed, despeckle cap
+    float4 gNrd2Stab;         // history frames at rest, cap at speed, despeckle cap, blur radius (px)
 };
 
 uint2 nrd2LevelSize(uint shift) { return ((gNrd2Rect.zw + 7u) / 8u) * (8u >> shift); }
@@ -173,7 +175,7 @@ void CSNrd2Resolve(uint3 dtid : SV_DispatchThreadID) {
     if (any(q >= gNrd2Rect.zw)) return;   // no barriers in this pass
     const int2 p = int2(gNrd2Rect.xy + q);
     const float z = gNrd2ViewZ.Load(int3(p, 0));
-    const bool stab = (gNrd2Tiles.z & 2u) != 0u;
+    const bool stab = (gNrd2Tiles.z & 18u) != 0u;   // D' and S' out: for the temporal stage or the blur
     if (!(z > 0.0 && z < 1.0e6)) {
         if (stab) { gNrd2DRes[p] = 0.0; gNrd2SRes[p] = 0.0; }
         else gNrd2Lit[p] = 0.0;
@@ -788,6 +790,83 @@ void CSNrd2Despeckle(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThre
     if ((gNrd2Tiles.w & 2u) != 0u && gsLS[(gtid.y + 2u) * 12u + gtid.x + 2u] >= 0.0) s.rgb = nrd2Despeckle(s.rgb, ts[4], gNrd2Stab.z);
     gNrd2DOut[p] = d;
     gNrd2SOut[p] = s;
+}
+
+#elif AVER_NRD2_PASS == 9   // ---- speckle blur ----
+
+Texture2D<float4> gNrd2DIn    : register(t0);   // the resolve's D', a = 1 on surfaces
+Texture2D<float4> gNrd2SIn    : register(t1);
+Texture2D<float>  gNrd2ViewZ  : register(t2);
+Texture2D<float4> gNrd2Normal : register(t3);
+Texture2D<float4> gNrd2RemodA : register(t4);
+Texture2D<float2> gNrd2RemodB : register(t5);
+RWTexture2D<float4> gNrd2Lit  : register(u0);   // without the temporal stage: D' Rd + S' Rs
+RWTexture2D<float4> gNrd2DOut : register(u1);   // with it: the blurred D' and S' it reads instead
+RWTexture2D<float4> gNrd2SOut : register(u2);
+
+float3 nrd2BlurSignal(Texture2D<float4> tex, float3 c0, int2 q, float zm, float2 zg, float3 n, float radius) {
+    float3 sum = c0;
+    float  wsum = 1.0;
+    [unroll] for (uint ring = 1u; ring <= 3u; ++ring) {
+        const float rr = radius * float(ring) / 3.0;
+        [unroll] for (uint k = 0u; k < 8u; ++k) {
+            const float  a   = (float(k) + 0.5 * float(ring & 1u)) * 0.78539816;   // odd rings turned half a step
+            const int2   off = int2(round(float2(cos(a), sin(a)) * rr));
+            const int2   qt  = q + off;
+            if (any(qt < 0) || any(qt >= int2(gNrd2Rect.zw))) continue;
+            const int2  pt = int2(gNrd2Rect.xy) + qt;
+            const float zt = gNrd2ViewZ.Load(int3(pt, 0));
+            if (!(zt > 0.0 && zt < 1.0e6)) continue;
+            const float4 v = tex.Load(int3(pt, 0));
+            if (v.a < 0.5) continue;
+            const float zp = zm + dot(zg, float2(off));
+            const float cosN = dot(n, nrd2DecodeNormal(gNrd2Normal.Load(int3(pt, 0))));
+            const float w = nrd2BlurWeight(length(float2(off)), radius, abs(zt * 0.01 - zp) / max(zm, 1.0e-4), cosN);
+            sum += w * v.rgb;
+            wsum += w;
+        }
+    }
+    return sum / wsum;
+}
+
+[numthreads(8, 8, 1)]
+void CSNrd2Blur(uint3 dtid : SV_DispatchThreadID) {
+    const uint2 q = dtid.xy;
+    if (any(q >= gNrd2Rect.zw)) return;   // no barriers in this pass
+    const int2 p = int2(gNrd2Rect.xy + q);
+    const bool stab = (gNrd2Tiles.z & 2u) != 0u;
+    const float z = gNrd2ViewZ.Load(int3(p, 0));
+    if (!(z > 0.0 && z < 1.0e6)) {
+        if (stab) { gNrd2DOut[p] = 0.0; gNrd2SOut[p] = 0.0; }
+        else gNrd2Lit[p] = 0.0;
+        return;
+    }
+    const float4 nr = gNrd2Normal.Load(int3(p, 0));
+    const float3 n  = nrd2DecodeNormal(nr);
+    const float  zm = z * 0.01;
+    float zn[4];
+    [unroll] for (uint k = 0u; k < 4u; ++k) {
+        const int2 qn = int2(q) + (k == 0u ? int2(-1, 0) : k == 1u ? int2(1, 0) : k == 2u ? int2(0, -1) : int2(0, 1));
+        const bool inb = all(qn >= 0) && all(qn < int2(gNrd2Rect.zw));
+        const float v = inb ? gNrd2ViewZ.Load(int3(int2(gNrd2Rect.xy) + qn, 0)) : 0.0;
+        zn[k] = (v > 0.0 && v < 1.0e6) ? v * 0.01 : 0.0;
+    }
+    const float2 zg = nrd2DepthSlope(zm, zn[0], zn[1], zn[2], zn[3]);
+    const float radius = max(gNrd2Stab.w, 1.0);
+    const float rS = radius * nrd2BlurSpecScale(nr.z);
+    const float3 d = nrd2BlurSignal(gNrd2DIn, gNrd2DIn.Load(int3(p, 0)).rgb, int2(q), zm, zg, n, radius);
+    const float3 sc = gNrd2SIn.Load(int3(p, 0)).rgb;
+    const float3 s = rS >= 1.0 ? nrd2BlurSignal(gNrd2SIn, sc, int2(q), zm, zg, n, rS) : sc;
+    if (stab) {
+        gNrd2DOut[p] = float4(nrd2StabSane(d), 1.0);
+        gNrd2SOut[p] = float4(nrd2StabSane(s), 1.0);
+        return;
+    }
+    const float4 ra = gNrd2RemodA.Load(int3(p, 0));
+    const float2 rb = gNrd2RemodB.Load(int3(p, 0));
+    float3 lit = d * ra.rgb + s * float3(ra.a, rb);
+    if (!all(lit == lit)) lit = 0.0;
+    gNrd2Lit[p] = float4(clamp(lit, 0.0, 6.0e4), 0.0);
 }
 
 #endif

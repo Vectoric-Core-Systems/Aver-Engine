@@ -554,6 +554,13 @@ legal advice). The design follows them unless counsel says otherwise:
       (the US 12,482,168 / US 11,600,036 area named in rule 13), the same kind as the temporal stage's
       shipped firefly clamp (2x the 8-neighbour max). Fallback: `voxi.nrd2Despeckle 0`.
 
+15. **NRD2's speckle blur (2026-10-06; docs/rendering/NRD2.md "Speckle blur").**
+    - What it does: a fixed-radius edge-aware Gaussian on this frame's resolved lighting.
+    - Rule 5: the radius never depends on the history count (ReBLUR's does; that part is not copied).
+    - Rule 8: it is a fixed footprint.
+    - Rule 10: it uses this frame only.
+    - Its only per-pixel input is roughness (a material property), which scales the specular radius.
+
 NRD's own sweep (multi-scale learned blending, hit-distance kernels, push-pull filling) is section 9 of
 the private patents document. **Counsel should review before either feature ships.** Nothing is vendored: the
 code is `Aver.Render.Neural` and the in-house filters, plus the MIT FidelityFX Denoiser (whose licence

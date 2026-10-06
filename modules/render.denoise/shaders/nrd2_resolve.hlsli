@@ -236,6 +236,19 @@ float3 nrd2Despeckle(float3 c, float rankLum, float capScale) {
     return (rankLum >= 0.0 && l > cap && l > 0.0) ? c * (cap / l) : c;
 }
 
+// Speckle blur (CSNrd2Blur, Settings::nrd2Speckle 1): a fixed 3-ring, 24-tap Gaussian (sigma = radius / 2)
+// on this frame's D' and S', stopped at depth (against the plane-predicted depth) and normal edges. No
+// luminance stop, so a blotch spreads out instead of being kept. Specular blurs over a roughness-scaled
+// radius, none below 0.1 (mirrors).
+static const float kNrd2BlurDepthK  = 30.0;   // exp(-k |dz| / z)
+static const float kNrd2BlurNormalP = 8.0;    // cos^p, loose: the G-buffer normals carry the normal maps
+float nrd2BlurWeight(float dist, float radius, float dzRel, float cosN) {
+    const float s = 0.5 * radius;
+    return exp(-dist * dist / (2.0 * s * s)) * exp(-kNrd2BlurDepthK * min(dzRel, 64.0)) *
+           pow(saturate(cosN), kNrd2BlurNormalP);
+}
+float nrd2BlurSpecScale(float rough) { return saturate((rough - 0.1) / 0.3); }
+
 // Ranking of a history texel in the 3x3 search: normal agreement and relative depth error.
 float nrd2StabScore(float cosN, float dzAbs, float zExp) {
     return exp(-kNrd2StabNormalK * (1.0 - max(cosN, 0.0))) * exp(-kNrd2StabDepthK * min(dzAbs / max(zExp, 1.0e-4), 64.0));

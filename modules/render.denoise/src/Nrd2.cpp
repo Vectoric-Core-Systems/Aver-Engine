@@ -25,11 +25,11 @@ struct Constants {
     f32 inScale[12], inBias[12];   // the network's input standardisation (kFlagStandardise)
     f32 prevVP[16];                // previous view-projection about the previous eye, rows
     f32 camDelta[4];               // eye - previous eye
-    f32 stab[4];                   // history frames at rest, cap at speed, despeckle cap
+    f32 stab[4];                   // history frames at rest, cap at speed, despeckle cap, blur radius
 };
 static_assert(sizeof(Constants) == 320, "Nrd2CB: two uint4s, eighteen float4s");
 
-constexpr u32 kFlagBypass = 1u, kFlagStabilise = 2u, kFlagHistory = 4u, kFlagStandardise = 8u;
+constexpr u32 kFlagBypass = 1u, kFlagStabilise = 2u, kFlagHistory = 4u, kFlagStandardise = 8u, kFlagBlur = 16u;
 
 // Per pass: SRV / UAV counts matching nrd2.hlsl's register lists.
 constexpr u32 kPyramidSrv = 4, kPyramidUav = 9;
@@ -39,6 +39,7 @@ constexpr u32 kReprojectSrv = 9, kReprojectUav = 5;
 constexpr u32 kPrefilterSrv = 7, kPrefilterUav = 2;
 constexpr u32 kTemporalSrv = 10, kTemporalUav = 5;
 constexpr u32 kDespeckleSrv = 3, kDespeckleUav = 2;
+constexpr u32 kBlurSrv = 6, kBlurUav = 3;
 constexpr f32 kStabNFast = 8.0f, kStabNSunMoved = 2.0f, kStabNMax = 64.0f;
 
 constexpr rhi::ResourceState kRead  = rhi::ResourceState::NonPixelShaderResource;
@@ -158,6 +159,7 @@ bool Nrd2::create(rhi::IDevice& dev) {
     psoPrefilter_ = build(6, "CSNrd2Prefilter", kPrefilterSrv, kPrefilterUav, ~0u, false);
     psoTemporal_  = build(7, "CSNrd2Temporal", kTemporalSrv, kTemporalUav, ~0u, false);
     psoDespeckle_ = build(8, "CSNrd2Despeckle", kDespeckleSrv, kDespeckleUav, ~0u, false);
+    psoBlur_      = build(9, "CSNrd2Blur", kBlurSrv, kBlurUav, ~0u, false);
 
     rhi::BindingSetDesc bd{};
     bd.srvCount = kPyramidSrv; bd.uavCount = kPyramidUav;
@@ -189,6 +191,11 @@ bool Nrd2::create(rhi::IDevice& dev) {
         bd = {};
         bd.srvCount = kDespeckleSrv; bd.uavCount = kDespeckleUav;
         setDespeckle_ = res_->createBindingSet(bd);
+    }
+    if (psoBlur_) {
+        bd = {};
+        bd.srvCount = kBlurSrv; bd.uavCount = kBlurUav;
+        setBlur_ = res_->createBindingSet(bd);
     }
     if (!setPyramid_ || !setParams_ || !setResolve_ || !setCompose_) {
         AVER_WARN("[NRD2] binding sets could not be created; NRD2 unavailable");
@@ -249,7 +256,7 @@ bool Nrd2::stabReady() const {
 void Nrd2::releaseStab() {
     histValid_ = false;
     if (!res_) return;
-    for (rhi::TextureHandle* t : {&dRes_, &sRes_, &rpD_, &rpS_, &rpV_, &anchD_, &anchS_, &prefD_, &prefS_,
+    for (rhi::TextureHandle* t : {&rpD_, &rpS_, &rpV_, &anchD_, &anchS_, &prefD_, &prefS_,
                                   &histD_[0], &histD_[1], &histS_[0], &histS_[1], &histG_[0], &histG_[1],
                                   &histV_[0], &histV_[1]}) {
         if (*t) res_->destroyTexture(*t);
@@ -258,7 +265,7 @@ void Nrd2::releaseStab() {
 }
 
 bool Nrd2::allocStab() {
-    if (dRes_) return true;
+    if (rpD_) return true;
     const rhi::Format f = rhi::Format::RGBA16F, f2 = rhi::Format::RG16F;
     bool ok = true;
     auto make = [&](rhi::Format fmt, u32 w, u32 h, rhi::ResourceState state, const char* name) {
@@ -266,10 +273,7 @@ bool Nrd2::allocStab() {
         if (!t) ok = false;
         return t;
     };
-    // D' and S' rest as UAVs (the resolve writes them, the temporal stage reads them in between); everything
-    // else rests readable. The anchors are one texel per 8x8 tile.
-    dRes_ = make(f, width_, height_, kWrite, "NRD2 resolved D");
-    sRes_ = make(f, width_, height_, kWrite, "NRD2 resolved S");
+    // Everything rests readable. The anchors are one texel per 8x8 tile.
     rpD_ = make(f, width_, height_, kRead, "NRD2 reprojected D");
     rpS_ = make(f, width_, height_, kRead, "NRD2 reprojected S");
     rpV_ = make(f2, width_, height_, kRead, "NRD2 reprojected noise");
@@ -289,8 +293,19 @@ bool Nrd2::allocStab() {
     }
     histValid_ = false;
     AVER_INFO("[NRD2] temporal stage targets at {}x{}: {:.1f} MiB", width_, height_,
-              static_cast<f64>(width_) * height_ * 108 / (1024.0 * 1024.0));
+              static_cast<f64>(width_) * height_ * 92 / (1024.0 * 1024.0));
     return true;
+}
+
+bool Nrd2::allocDemod(bool blurOut) {
+    auto make = [&](rhi::TextureHandle& t, rhi::ResourceState state, const char* name) {
+        if (!t) t = makeTexture(res_, rhi::Format::RGBA16F, width_, height_, state, name);
+        return t != 0;
+    };
+    // D' and S' rest as UAVs: the resolve writes them, the blur or the temporal stage reads them in between.
+    bool ok = make(dRes_, kWrite, "NRD2 resolved D") && make(sRes_, kWrite, "NRD2 resolved S");
+    if (ok && blurOut) ok = make(dBlur_, kRead, "NRD2 blurred D") && make(sBlur_, kRead, "NRD2 blurred S");
+    return ok;
 }
 
 bool Nrd2::allocDespeckle() {
@@ -313,6 +328,7 @@ void Nrd2::releaseTargets() {
     for (u32 l = 0; l < 3; ++l) { drop(guide_[l]); drop(levelD_[l]); drop(levelS_[l]); }
     drop(lit_);
     drop(despD_); drop(despS_);
+    drop(dRes_); drop(sRes_); drop(dBlur_); drop(sBlur_);
     despeckled_ = false;
     if (tileParams_) res_->destroyBuffer(tileParams_);
     if (features_) res_->destroyBuffer(features_);
@@ -332,18 +348,18 @@ void Nrd2::destroy() {
     network_.destroy();
     if (res_) {
         for (rhi::PipelineHandle* p : {&psoPyramid_, &psoParams_, &psoResolve_, &psoFeatures_, &psoReproject_,
-                                       &psoPrefilter_, &psoTemporal_, &psoDespeckle_}) {
+                                       &psoPrefilter_, &psoTemporal_, &psoDespeckle_, &psoBlur_}) {
             if (*p) res_->destroyPipeline(*p);
         }
         for (rhi::BindingSetHandle* s : {&setPyramid_, &setParams_, &setResolve_, &setCompose_, &setFeatures_,
-                                         &setReproject_, &setPrefilter_, &setTemporal_, &setDespeckle_}) {
+                                         &setReproject_, &setPrefilter_, &setTemporal_, &setDespeckle_, &setBlur_}) {
             if (*s) res_->destroyBindingSet(*s);
         }
     }
     psoPyramid_ = psoParams_ = psoResolve_ = psoFeatures_ = psoReproject_ = psoPrefilter_ = psoTemporal_ = 0;
-    psoDespeckle_ = 0;
+    psoDespeckle_ = psoBlur_ = 0;
     setPyramid_ = setParams_ = setResolve_ = setCompose_ = setFeatures_ = 0;
-    setReproject_ = setPrefilter_ = setTemporal_ = setDespeckle_ = 0;
+    setReproject_ = setPrefilter_ = setTemporal_ = setDespeckle_ = setBlur_ = 0;
     featuresTried_ = false;
     dev_ = nullptr;
     res_ = nullptr;
@@ -418,6 +434,10 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
                 in.jitter[0] == 0.0f && in.jitter[1] == 0.0f && !(capture_ && capture_->active()) && basisOk &&
                 dev_->camera(nullptr, nullptr, eye) && prevViewProjRel(in.prevViewProj, in.prevCamPos, cb.prevVP);
     if (stab && !allocStab()) stab = false;
+    // Captures keep the resolve as trained (no blur).
+    bool blur = params_.speckle == 1u && !params_.bypass && psoBlur_ && setBlur_ && !(capture_ && capture_->active());
+    if ((stab || blur) && !allocDemod(blur && stab)) stab = blur = false;
+    const bool demod = stab || blur;
     // Captures keep Stage B's raw values (the training data).
     despeckled_ = params_.despeckle != 0u && !params_.bypass && psoDespeckle_ && setDespeckle_ &&
                   !(capture_ && capture_->active()) && allocDespeckle();
@@ -456,14 +476,27 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     }
     res_->setSrvBuffer(setResolve_, kResolveParamsSrv, tileParams_, sizeof(f32), tileCapacity_ * kNrd2TileParams, 0);
     res_->setUav(setResolve_, 0, lit_, 0);
-    // Without the temporal stage the resolve never writes u1/u2; lit_ stands in so the set stays valid.
-    res_->setUav(setResolve_, 1, stab ? dRes_ : lit_, 0);
-    res_->setUav(setResolve_, 2, stab ? sRes_ : lit_, 0);
+    // Without the temporal stage or the blur the resolve never writes u1/u2; lit_ stands in so the set stays valid.
+    res_->setUav(setResolve_, 1, demod ? dRes_ : lit_, 0);
+    res_->setUav(setResolve_, 2, demod ? sRes_ : lit_, 0);
+    if (blur) {
+        res_->setSrv(setBlur_, 0, dRes_);
+        res_->setSrv(setBlur_, 1, sRes_);
+        res_->setSrv(setBlur_, 2, in.viewZ);
+        res_->setSrv(setBlur_, 3, in.normalRoughness);
+        res_->setSrv(setBlur_, 4, targets_.remodA);
+        res_->setSrv(setBlur_, 5, targets_.remodB);
+        res_->setUav(setBlur_, 0, lit_, 0);
+        res_->setUav(setBlur_, 1, stab ? dBlur_ : lit_, 0);
+        res_->setUav(setBlur_, 2, stab ? sBlur_ : lit_, 0);
+    }
+    // What the temporal stage reads: the blur's output when it ran, else the resolve's.
+    const rhi::TextureHandle stageD = blur ? dBlur_ : dRes_, stageS = blur ? sBlur_ : sRes_;
     res_->setSrv(setCompose_, 0, lit_);
     const u32 rd = histLast_, wr = 1u - histLast_;
     if (stab) {
-        res_->setSrv(setReproject_, 0, dRes_);
-        res_->setSrv(setReproject_, 1, sRes_);
+        res_->setSrv(setReproject_, 0, stageD);
+        res_->setSrv(setReproject_, 1, stageS);
         res_->setSrv(setReproject_, 2, in.viewZ);
         res_->setSrv(setReproject_, 3, in.normalRoughness);
         res_->setSrv(setReproject_, 4, in.velocity);
@@ -476,8 +509,8 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
         res_->setUav(setReproject_, 2, rpV_, 0);
         res_->setUav(setReproject_, 3, anchD_, 0);
         res_->setUav(setReproject_, 4, anchS_, 0);
-        res_->setSrv(setPrefilter_, 0, dRes_);
-        res_->setSrv(setPrefilter_, 1, sRes_);
+        res_->setSrv(setPrefilter_, 0, stageD);
+        res_->setSrv(setPrefilter_, 1, stageS);
         res_->setSrv(setPrefilter_, 2, in.viewZ);
         res_->setSrv(setPrefilter_, 3, in.normalRoughness);
         res_->setSrv(setPrefilter_, 4, rpV_);
@@ -505,8 +538,10 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     cb.rect[0] = vx; cb.rect[1] = vy; cb.rect[2] = vw; cb.rect[3] = vh;
     cb.tiles[0] = tx; cb.tiles[1] = ty;
     cb.tiles[2] = (params_.bypass ? kFlagBypass : 0u) | (stab ? kFlagStabilise : 0u) | (stab && hadHist ? kFlagHistory : 0u);
+    cb.tiles[2] |= blur ? kFlagBlur : 0u;
     cb.tiles[3] = despeckled_ ? (params_.despeckle & 3u) : 0u;
     cb.stab[2] = std::max(params_.despeckleCap, 1.0f);
+    cb.stab[3] = std::min(std::max(params_.blurRadius, 1.0f), 32.0f);
     std::memcpy(cb.def, params_.diffuse, sizeof(params_.diffuse));
     std::memcpy(cb.def + 6, params_.specular, sizeof(params_.specular));
     if (stab) {
@@ -579,9 +614,20 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     ctx.dispatch(gx, gy, 1);
     ctx.bufferBarrier(tileParams_, kRead, rhi::ResourceState::Common);
 
-    if (stab) {
+    if (demod) {
         ctx.textureBarrier(dRes_, kWrite, kRead);
         ctx.textureBarrier(sRes_, kWrite, kRead);
+    }
+    if (blur) {
+        rhi::ScopedGpuStat blurStat(ctx, "NRD2.Blur");
+        if (stab) { ctx.textureBarrier(dBlur_, kRead, kWrite); ctx.textureBarrier(sBlur_, kRead, kWrite); }
+        ctx.setPipeline(psoBlur_);
+        ctx.setBindingSet(setBlur_);
+        ctx.setConstantBuffer(kConstantSlot, &cb, sizeof(cb));
+        ctx.dispatch(gx, gy, 1);
+        if (stab) { ctx.textureBarrier(dBlur_, kWrite, kRead); ctx.textureBarrier(sBlur_, kWrite, kRead); }
+    }
+    if (stab) {
         ctx.textureBarrier(in.velocity, in.gbufferState, kRead);
         auto pass = [&](const char* name, rhi::PipelineHandle pso, rhi::BindingSetHandle set,
                         std::initializer_list<rhi::TextureHandle> out) {
@@ -596,11 +642,13 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
         pass("NRD2.Reproject", psoReproject_, setReproject_, {rpD_, rpS_, rpV_, anchD_, anchS_});
         pass("NRD2.Prefilter", psoPrefilter_, setPrefilter_, {prefD_, prefS_});
         pass("NRD2.Temporal", psoTemporal_, setTemporal_, {histD_[wr], histS_[wr], histG_[wr], histV_[wr]});
-        ctx.textureBarrier(dRes_, kRead, kWrite);
-        ctx.textureBarrier(sRes_, kRead, kWrite);
         histLast_ = wr;
         histValid_ = true;
         std::memcpy(histViewport_, in.viewport, sizeof(histViewport_));
+    }
+    if (demod) {
+        ctx.textureBarrier(dRes_, kRead, kWrite);
+        ctx.textureBarrier(sRes_, kRead, kWrite);
     }
     ctx.textureBarrier(lit_, kWrite, rhi::ResourceState::ShaderResource);
 

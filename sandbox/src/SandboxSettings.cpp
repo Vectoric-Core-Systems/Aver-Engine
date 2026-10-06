@@ -1780,6 +1780,23 @@ void SandboxApp::buildRenderingSettings(int page) {
                                     "resolved to one sample a pixel (the nearest surface).\n\n"
                                     "Round-trips as RENDER.DENOISER (0, 1, 2).");
         {
+            // NRD2's speckle removal: greyed unless NRD2 is the denoiser.
+            ImGui::BeginDisabled(denMode != 2 || denoiserHardGreyed);
+            static const char* kSpeckleModes[] = {"None", "Blur"};
+            int speckle = s.nrd2Speckle > 1u ? 1 : static_cast<int>(s.nrd2Speckle);
+            if (ImGui::Combo("Speckle Removal", &speckle, kSpeckleModes, 2)) {
+                s.nrd2Speckle = static_cast<u32>(speckle);
+                changed = true;
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("NRD2 only. What happens to the blotches left after NRD2 filters the frame.\n\n"
+                                  "BLUR: an edge-aware blur (voxi.nrd2BlurRadius, 8 px) over this frame's\n"
+                                  "lighting, stopped at depth and normal edges; textures stay sharp, lamp\n"
+                                  "shadow edges soften. NONE: off.\n\n"
+                                  "Not captured to the project manifest.");
+        }
+        {
             // Reflection denoising is FidelityFX's: greyed while it is not the one.
             const bool ndGreyed = denMode != 1 || denoiserHardGreyed;
             ImGui::BeginDisabled(ndGreyed);

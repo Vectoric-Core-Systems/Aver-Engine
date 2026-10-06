@@ -396,6 +396,39 @@ Another finding from the same session:
   FidelityFX selected (`--denoiser 1 --set voxi.ptMode 1`, 1500 frames). Earlier same-day figures that put NRD2
   closer to the reference than FidelityFX used such a reference and do not hold.
 
+## Speckle blur (2026-10-06)
+
+The owner asked for a ReBLUR-style blur as a selectable speckle removal: Render settings, Denoising,
+**Speckle Removal**, None or Blur (default Blur). Console: `voxi.nrd2Speckle` (0 none, 1 blur) and
+`voxi.nrd2BlurRadius` (1-32 px, default 8).
+
+How it works: `CSNrd2Blur` (pass 9) runs after the resolve, on its demodulated D' and S'. Without the temporal
+stage it writes the lit target; with it, the temporal stage reads the blurred D' and S'.
+- Kernel: a fixed 3-ring, 24-tap Gaussian (sigma = radius / 2).
+- Edge stops: depth against the plane-predicted depth (exp(-30 |dz| / z)) and normal (cos^8, loose because the
+  G-buffer normals carry the normal maps; cos^32 left the blur almost inert on stone).
+- No luminance stop, so a blotch spreads out instead of being kept.
+- Specular blurs over radius x saturate((roughness - 0.1) / 0.3), so mirrors are not blurred.
+- It is off while a capture runs.
+
+**Not ReBLUR.** ReBLUR picks its radius per pixel from the accumulated frame count and hit distance. The
+history-count part is exactly what NEURAA_NRD.md rule 5 forbids, so this radius is fixed and the blur uses this
+frame only.
+
+Measured on NewSponza Night, upper gallery, 4 degree swing, against the Path Tracing reference at the same pose:
+
+| Setting | Spots | Bias |
+|---|---|---|
+| None | 0.52% | -2.0% |
+| Blur 8 px | 0.70% | -1.8% |
+| Blur 16 px | 1.13% | -1.6% |
+
+- Cost: 0.60 ms on the RX 7800 XT at 1766x994.
+- Spots are counted only below the viewport toolbar, which differs between editor sessions.
+- In that view the remaining error is lamp light spread past shadow edges, which the blur adds to rather than
+  removes. The despeckle had already taken the blotches there. The setting is for views where blotches
+  remain; judge it there.
+
 ## Temporal stabiliser (2026-10-06, rewritten 2026-10-06 after FidelityFX's design)
 
 The owner asked for smoothing of the speckle that remains in motion, where there is no temporal stage at
