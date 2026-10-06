@@ -5002,6 +5002,8 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         np.speckle      = settings_.nrd2Speckle;
         np.blurRadius   = settings_.nrd2BlurRadius;
         np.coarseCap    = settings_.nrd2CoarseCap;
+        np.combineRef   = settings_.nrd2CombineRef;
+        np.midCap       = settings_.nrd2MidCap;
         nrd2_.setParams(np);
         render::denoise::Nrd2::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();

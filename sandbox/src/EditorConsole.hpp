@@ -754,6 +754,22 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (!(v.as.f >= 1.0f && v.as.f <= 32.0f)) { err = "nrd2BlurRadius must be 1 to 32"; return false; }
             return true;
         }});
+    t.push_back({"voxi.nrd2CombineRef", VarType::U32, false,
+        "NRD2 combine reference at inference: 0 the coarsest level, 1 the median of the own pixel and the three levels (default; keeps a lone bright sample from growing into a disc)",
+        []{ return vU32(Renderer::get().settings().nrd2CombineRef); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2CombineRef = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u > 1) { err = "nrd2CombineRef must be 0 or 1"; return false; }
+            return true;
+        }});
+    t.push_back({"voxi.nrd2MidCap", VarType::F32, false,
+        "NRD2: cap on the 1/4 pyramid level's logit at inference (-16 to 16, default 0; 16 = uncapped)",
+        []{ return vF32(Renderer::get().settings().nrd2MidCap); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2MidCap = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (!(v.as.f >= -16.0f && v.as.f <= 16.0f)) { err = "nrd2MidCap must be -16 to 16"; return false; }
+            return true;
+        }});
     t.push_back({"voxi.nrd2CoarseCap", VarType::F32, false,
         "NRD2: cap on the 1/8 pyramid level's logit at inference, network or defaults (-16 to 16, default 0; 16 = uncapped). Lower keeps lamp light out of near-field shadows and halos, at a little more noise",
         []{ return vF32(Renderer::get().settings().nrd2CoarseCap); },

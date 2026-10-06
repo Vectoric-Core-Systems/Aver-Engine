@@ -171,6 +171,8 @@ struct Settings {
     // Cap on the 1/8 pyramid level's logit at inference, network or defaults (docs/rendering/NRD2.md
     // "Coarse-level cap"): 0 halves the lamp-light halos at rest; 16 = uncapped.
     f32 nrd2CoarseCap = 0.0f;
+    u32 nrd2CombineRef = 1;      // 0 coarsest level, 1 median of the candidates (NRD2.md "Combine reference")
+    f32 nrd2MidCap = 0.0f;       // cap on the 1/4 level's logit at inference; 16 = uncapped
     // NRD2 keeps half-rate tracing and fills the skipped checkerboard half from this frame's traced
     // neighbours (CSRdHalfFill; docs/rendering/NRD2.md). Each applies where its base half rate is asked
     // for: GI under rayDrivenStages 2, reflections under rtReflectionHalfRate (glossy only), sky

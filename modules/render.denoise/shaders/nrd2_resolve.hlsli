@@ -120,14 +120,31 @@ float3 nrd2Upsample(Texture2D<float4> guide, Texture2D<float4> value, uint shift
     return nrd2UpsampleTaps(nrd2LoadTaps(guide, value, shift, q, lvlSize, zGrad), zm, n, depthSens, normalPow, conf);
 }
 
+// Median luminance of the usable candidates (an order statistic): the mean of the middle two of up to four.
+float nrd2MedianLum(float l0, bool v0, float l1, bool v1, float l2, bool v2, float l3, bool v3) {
+    float a[4] = {v0 ? l0 : 1.0e30, v1 ? l1 : 1.0e30, v2 ? l2 : 1.0e30, v3 ? l3 : 1.0e30};
+    const uint n = (v0 ? 1u : 0u) + (v1 ? 1u : 0u) + (v2 ? 1u : 0u) + (v3 ? 1u : 0u);
+    [unroll] for (uint i = 0u; i < 3u; ++i)
+        [unroll] for (uint j = 0u; j < 3u - i; ++j) {
+            const float lo = min(a[j], a[j + 1]), hi = max(a[j], a[j + 1]);
+            a[j] = lo; a[j + 1] = hi;
+        }
+    return n >= 4u ? 0.5 * (a[1] + a[2]) : n == 3u ? a[1] : n == 2u ? 0.5 * (a[0] + a[1]) : n == 1u ? a[0] : 0.0;
+}
+
 // The pixel's estimate from its own value and the three upsampled levels. Weight of candidate k:
 // exp(logit_k + extra_k) * conf_k * luminance term; the own pixel's logit is 0. The luminance term
-// compares each candidate's log luminance with the coarsest usable level's, so an outlier gives way to
-// the levels around it (spread, not rejected: the levels kept it in their means).
+// compares each candidate's log luminance with a reference, so an outlier gives way to the others.
+// refMode 0: the coarsest usable level (training and the oracle use this). refMode 1 (inference,
+// voxi.nrd2CombineRef): the median of the usable candidates. The coarse levels already hold a lone bright
+// sample's energy, so with them as the reference the neighbours' own values gave way and the sample grew
+// into a disc (docs/rendering/NRD2.md "Combine reference").
 float3 nrd2Combine(float3 c0, bool ownValid, float3 c1, float3 c2, float3 c3, float conf1, float conf2,
-                   float conf3, Nrd2TileParams p, float3 extraLogit) {
+                   float conf3, Nrd2TileParams p, float3 extraLogit, uint refMode = 0u) {
     const float l0 = nrd2Lum(c0), l1 = nrd2Lum(c1), l2 = nrd2Lum(c2), l3 = nrd2Lum(c3);
-    const float ref = conf3 > 0.05 ? l3 : conf2 > 0.05 ? l2 : conf1 > 0.05 ? l1 : l0;
+    const float ref = refMode == 1u
+        ? nrd2MedianLum(l0, ownValid, l1, conf1 > 0.05, l2, conf2 > 0.05, l3, conf3 > 0.05)
+        : conf3 > 0.05 ? l3 : conf2 > 0.05 ? l2 : conf1 > 0.05 ? l1 : l0;
     const float eps = max(ref, 0.0) * 1.0e-3 + 1.0e-7;
     const float sL  = exp2(p.log2Lum);
     const float lr  = log2(max(ref, 0.0) + eps);

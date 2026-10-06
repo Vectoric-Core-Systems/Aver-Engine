@@ -476,6 +476,37 @@ Spots above 10% went from 0.26% to 0.36% at this threshold. FidelityFX at 400 fr
 +4.0%. The darkening is gone because the despeckle sees the averaged input, which has few outliers. Moving
 frames are unchanged, since the accumulation restarts.
 
+## Combine reference and 1/4-level cap (2026-10-06)
+
+From the FidelityFX study (a read-only Sonnet workflow, 2026-10-06). FidelityFX has no pyramid: its prefilter
+reaches 3 px and trusts the local pixel. In NRD2's combine, the luminance term compared each candidate with the
+**coarsest level**. Around a lone bright sample that level already holds its energy, so the neighbours' own
+values gave way and the sample grew into a disc.
+
+**Changes, both at inference only.** `nrd2_capture.hlsl` (the oracle) keeps reference 0, and training is unchanged.
+- **Reference:** the median of the usable candidates (own pixel and three levels), an order statistic
+  (`voxi.nrd2CombineRef 1`).
+- **1/4 level:** its logit is capped like the 1/8 level (`voxi.nrd2MidCap 0`).
+
+**Measured** on NewSponza Night against the Path Tracing references (spots as in "Input despeckle"):
+
+| View | Before | Both | Bias change |
+|---|---|---|---|
+| Gallery, still | 0.17% | 0.12% | -0.1% |
+| Gallery, moving | 0.33% | 0.28% | -0.07% |
+| Gallery, `--pt 3` still | 0.36% | 0.26% | -0.09% |
+| Default view, still | 0.53% | 0.35% | -0.4% |
+
+Each change alone gave about half of the gain. Blob error is unchanged in the gallery; PT goes 1.38% to 1.36%,
+and the default view 5.23% to 5.37% (its extra darkening).
+
+Not adopted from the study:
+- a luminance-aware pyramid reduce, which changes the network's input statistics;
+- FidelityFX-style soft weights in the despeckle;
+- running the temporal stage at rest under TAA (rule 11, counsel).
+
+The study also listed what must not be copied: `ClipAABB` and the variance-based history tests, among others.
+
 ## Coarse-level cap (2026-10-06)
 
 What is left at rest is not noise. NRD2 puts a bright halo around lamps (a lantern's dark rim filled in) and

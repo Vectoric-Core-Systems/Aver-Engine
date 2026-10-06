@@ -48,6 +48,8 @@ struct Nrd2Params {
     u32 speckle = 0;          // after the resolve: 0 none, 1 blur (CSNrd2Blur; not while a capture runs)
     f32 blurRadius = 8.0f;    // its radius, pixels
     f32 coarseCap = 16.0f;    // inference cap on the 1/8 level's logit (16 = none)
+    u32 combineRef = 0;       // inference combine reference: 0 coarsest level, 1 median of the candidates
+    f32 midCap = 16.0f;       // inference cap on the 1/4 level's logit (16 = none)
 };
 
 class Nrd2 {

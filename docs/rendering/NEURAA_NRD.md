@@ -561,6 +561,12 @@ legal advice). The design follows them unless counsel says otherwise:
     - Rule 10: it uses this frame only.
     - Its only per-pixel input is roughness (a material property), which scales the specular radius.
 
+16. **NRD2's combine reference and level caps (2026-10-06; docs/rendering/NRD2.md "Combine reference").**
+    - The luminance weight's reference is the median of the candidates, an order statistic (rules 1 and 7).
+    - The 1/4 and 1/8 logits are capped by fixed constants.
+    - Inference only, current frame only (rule 10), fixed footprint (rule 8).
+    - Not a clip: no value is clamped to the median, it only sets weights. Same counsel family as rule 14.
+
 NRD's own sweep (multi-scale learned blending, hit-distance kernels, push-pull filling) is section 9 of
 the private patents document. **Counsel should review before either feature ships.** Nothing is vendored: the
 code is `Aver.Render.Neural` and the in-house filters, plus the MIT FidelityFX Denoiser (whose licence

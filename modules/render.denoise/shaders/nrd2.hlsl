@@ -35,7 +35,8 @@ cbuffer Nrd2CB : register(b3) {
     float4 gNrd2PrevVP[4];    // stabiliser: previous view-projection about the previous eye (row vectors)
     float4 gNrd2CamDelta;     // eye - previous eye (xyz)
     float4 gNrd2Stab;         // history frames at rest, cap at speed, despeckle cap, blur radius (px)
-    float4 gNrd2Extra;        // x: cap on the 1/8 level's logit at inference (Settings::nrd2CoarseCap)
+    float4 gNrd2Extra;        // x: cap on the 1/8 level's logit, y: combine reference (0 coarsest, 1 median),
+                              // z: cap on the 1/4 level's logit -- all at inference only
 };
 
 uint2 nrd2LevelSize(uint shift) { return ((gNrd2Rect.zw + 7u) / 8u) * (8u >> shift); }
@@ -171,6 +172,7 @@ Nrd2TileParams nrd2LoadParams(uint tile, uint tiles, uint signal) {
     // light across near-field shadow edges and into halos (docs/rendering/NRD2.md "Coarse-level cap").
     Nrd2TileParams p = nrd2SanitiseParams(v, d);
     p.logit[2] = min(p.logit[2], gNrd2Extra.x);
+    p.logit[1] = min(p.logit[1], gNrd2Extra.z);
     return p;
 }
 
@@ -219,7 +221,8 @@ void CSNrd2Resolve(uint3 dtid : SV_DispatchThreadID) {
         const float3 d1 = nrd2Upsample(gNrd2G1, gNrd2D1, 1u, q, s1, zg, zm, n, dS, nP, cf1);
         const float3 d2 = nrd2Upsample(gNrd2G2, gNrd2D2, 2u, q, s2, zg, zm, n, dS, nP, cf2);
         const float3 d3 = nrd2Upsample(gNrd2G3, gNrd2D3, 3u, q, s3, zg, zm, n, dS, nP, cf3);
-        dRes = nrd2Combine(d0.rgb, dOwn, d1, d2, d3, cf1, cf2, cf3, pd, 0.0);
+        const uint refMode = (uint)(gNrd2Extra.y + 0.5);
+        dRes = nrd2Combine(d0.rgb, dOwn, d1, d2, d3, cf1, cf2, cf3, pd, 0.0, refMode);
 
         const Nrd2TileParams ps = nrd2LoadParams(tile, tiles, 1u);
         const float sS = exp2(ps.log2Depth), sP = exp2(ps.log2Normal);
@@ -227,7 +230,7 @@ void CSNrd2Resolve(uint3 dtid : SV_DispatchThreadID) {
         const float3 e2 = nrd2Upsample(gNrd2G2, gNrd2S2, 2u, q, s2, zg, zm, n, sS, sP, cf2);
         const float3 e3 = nrd2Upsample(gNrd2G3, gNrd2S3, 3u, q, s3, zg, zm, n, sS, sP, cf3);
         sRes = nrd2Combine(s0.rgb, sOwn, e1, e2, e3, cf1, cf2, cf3, ps,
-                           nrd2SpecularExtraLogit(nr.z, s0.a, z));
+                           nrd2SpecularExtraLogit(nr.z, s0.a, z), refMode);
     }
     if (stab) {
         gNrd2DRes[p] = float4(nrd2StabSane(dRes), 1.0);
