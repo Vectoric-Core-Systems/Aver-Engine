@@ -544,6 +544,16 @@ legal advice). The design follows them unless counsel says otherwise:
    sample is accumulated (the existing denoise-then-TAAU order is unchanged and still open). The shipped TAAU's
    mean +- sigma clip (`sr_taa.hlsl`) still breaks rule 1; the stage does not reuse it.
 
+14. **NRD2's input despeckle (2026-10-06; docs/rendering/NRD2.md "Input despeckle").**
+    - What it does: caps a pixel at 2x the 5th brightest of its 5x5 neighbours before the pyramid.
+    - Rules 1 and 7: it is an order statistic, with no mean, variance or sigma.
+    - Rule 10: it uses this frame only and touches no history.
+    - Rule 8: it is a fixed footprint.
+    - It does not decide anything from the network, and the network does not decide it.
+    - **Flag to counsel:** a cap from a neighbourhood rank is a bound taken from the samples' distribution
+      (the US 12,482,168 / US 11,600,036 area named in rule 13), the same kind as the temporal stage's
+      shipped firefly clamp (2x the 8-neighbour max). Fallback: `voxi.nrd2Despeckle 0`.
+
 NRD's own sweep (multi-scale learned blending, hit-distance kernels, push-pull filling) is section 9 of
 the private patents document. **Counsel should review before either feature ships.** Nothing is vendored: the
 code is `Aver.Render.Neural` and the in-house filters, plus the MIT FidelityFX Denoiser (whose licence

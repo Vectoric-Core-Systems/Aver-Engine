@@ -19,7 +19,7 @@ constexpr u32 kConstantSlot = 3;   // b3 (modules/render.neural/README.md: why n
 // nrd2.hlsl's Nrd2CB, byte for byte.
 struct Constants {
     u32 rect[4];
-    u32 tiles[4];   // x, y, flags, unused
+    u32 tiles[4];   // x, y, flags, despeckle mask
     f32 def[12];
     f32 view[12];   // world -> view rows: right, up, forward (xyz); w of right and up: tan of the half FOV
     f32 inScale[12], inBias[12];   // the network's input standardisation (kFlagStandardise)
@@ -38,6 +38,7 @@ constexpr u32 kResolveParamsSrv = 15;
 constexpr u32 kReprojectSrv = 9, kReprojectUav = 5;
 constexpr u32 kPrefilterSrv = 7, kPrefilterUav = 2;
 constexpr u32 kTemporalSrv = 10, kTemporalUav = 5;
+constexpr u32 kDespeckleSrv = 3, kDespeckleUav = 2;
 constexpr f32 kStabNFast = 8.0f, kStabNSunMoved = 2.0f, kStabNMax = 64.0f;
 
 constexpr rhi::ResourceState kRead  = rhi::ResourceState::NonPixelShaderResource;
@@ -156,6 +157,7 @@ bool Nrd2::create(rhi::IDevice& dev) {
     psoReproject_ = build(5, "CSNrd2Reproject", kReprojectSrv, kReprojectUav, ~0u, false);
     psoPrefilter_ = build(6, "CSNrd2Prefilter", kPrefilterSrv, kPrefilterUav, ~0u, false);
     psoTemporal_  = build(7, "CSNrd2Temporal", kTemporalSrv, kTemporalUav, ~0u, false);
+    psoDespeckle_ = build(8, "CSNrd2Despeckle", kDespeckleSrv, kDespeckleUav, ~0u, false);
 
     rhi::BindingSetDesc bd{};
     bd.srvCount = kPyramidSrv; bd.uavCount = kPyramidUav;
@@ -182,6 +184,11 @@ bool Nrd2::create(rhi::IDevice& dev) {
         setTemporal_ = res_->createBindingSet(bd);
         if (!(setReproject_ && setPrefilter_ && setTemporal_))
             AVER_WARN("[NRD2] the temporal stage's binding sets could not be created; single-frame only");
+    }
+    if (psoDespeckle_) {
+        bd = {};
+        bd.srvCount = kDespeckleSrv; bd.uavCount = kDespeckleUav;
+        setDespeckle_ = res_->createBindingSet(bd);
     }
     if (!setPyramid_ || !setParams_ || !setResolve_ || !setCompose_) {
         AVER_WARN("[NRD2] binding sets could not be created; NRD2 unavailable");
@@ -286,6 +293,17 @@ bool Nrd2::allocStab() {
     return true;
 }
 
+bool Nrd2::allocDespeckle() {
+    if (despD_ && despS_) return true;
+    despD_ = makeTexture(res_, rhi::Format::RGBA16F, width_, height_, kRead, "NRD2 despeckled D");
+    despS_ = makeTexture(res_, rhi::Format::RGBA16F, width_, height_, kRead, "NRD2 despeckled S");
+    if (despD_ && despS_) return true;
+    if (despD_) res_->destroyTexture(despD_);
+    if (despS_) res_->destroyTexture(despS_);
+    despD_ = despS_ = 0;
+    return false;
+}
+
 void Nrd2::releaseTargets() {
     if (!res_) return;
     network_.invalidateBindings();
@@ -294,6 +312,8 @@ void Nrd2::releaseTargets() {
     drop(targets_.diffuse); drop(targets_.specular); drop(targets_.remodA); drop(targets_.remodB);
     for (u32 l = 0; l < 3; ++l) { drop(guide_[l]); drop(levelD_[l]); drop(levelS_[l]); }
     drop(lit_);
+    drop(despD_); drop(despS_);
+    despeckled_ = false;
     if (tileParams_) res_->destroyBuffer(tileParams_);
     if (features_) res_->destroyBuffer(features_);
     tileParams_ = features_ = 0;
@@ -312,17 +332,18 @@ void Nrd2::destroy() {
     network_.destroy();
     if (res_) {
         for (rhi::PipelineHandle* p : {&psoPyramid_, &psoParams_, &psoResolve_, &psoFeatures_, &psoReproject_,
-                                       &psoPrefilter_, &psoTemporal_}) {
+                                       &psoPrefilter_, &psoTemporal_, &psoDespeckle_}) {
             if (*p) res_->destroyPipeline(*p);
         }
         for (rhi::BindingSetHandle* s : {&setPyramid_, &setParams_, &setResolve_, &setCompose_, &setFeatures_,
-                                         &setReproject_, &setPrefilter_, &setTemporal_}) {
+                                         &setReproject_, &setPrefilter_, &setTemporal_, &setDespeckle_}) {
             if (*s) res_->destroyBindingSet(*s);
         }
     }
     psoPyramid_ = psoParams_ = psoResolve_ = psoFeatures_ = psoReproject_ = psoPrefilter_ = psoTemporal_ = 0;
+    psoDespeckle_ = 0;
     setPyramid_ = setParams_ = setResolve_ = setCompose_ = setFeatures_ = 0;
-    setReproject_ = setPrefilter_ = setTemporal_ = 0;
+    setReproject_ = setPrefilter_ = setTemporal_ = setDespeckle_ = 0;
     featuresTried_ = false;
     dev_ = nullptr;
     res_ = nullptr;
@@ -397,12 +418,22 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
                 in.jitter[0] == 0.0f && in.jitter[1] == 0.0f && !(capture_ && capture_->active()) && basisOk &&
                 dev_->camera(nullptr, nullptr, eye) && prevViewProjRel(in.prevViewProj, in.prevCamPos, cb.prevVP);
     if (stab && !allocStab()) stab = false;
+    // Captures keep Stage B's raw values (the training data).
+    despeckled_ = params_.despeckle != 0u && !params_.bypass && psoDespeckle_ && setDespeckle_ &&
+                  !(capture_ && capture_->active()) && allocDespeckle();
 
     rhi::ScopedGpuStat stat(ctx, "NRD2");
     // Descriptors first, every set, before any dispatch (Denoiser.cpp: a set rewritten between two
     // dispatches that use it would leave the first reading the second's resources).
-    res_->setSrv(setPyramid_, 0, targets_.diffuse);
-    res_->setSrv(setPyramid_, 1, targets_.specular);
+    if (despeckled_) {
+        res_->setSrv(setDespeckle_, 0, targets_.diffuse);
+        res_->setSrv(setDespeckle_, 1, targets_.specular);
+        res_->setSrv(setDespeckle_, 2, in.viewZ);
+        res_->setUav(setDespeckle_, 0, despD_, 0);
+        res_->setUav(setDespeckle_, 1, despS_, 0);
+    }
+    res_->setSrv(setPyramid_, 0, inD());
+    res_->setSrv(setPyramid_, 1, inS());
     res_->setSrv(setPyramid_, 2, in.viewZ);
     res_->setSrv(setPyramid_, 3, in.normalRoughness);
     for (u32 l = 0; l < 3; ++l) {
@@ -412,8 +443,8 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     }
     const u32 tx = tilesOf(vw), ty = tilesOf(vh), tiles = tx * ty;
     res_->setUavBuffer(setParams_, 0, tileParams_, sizeof(f32), tileCapacity_ * kNrd2TileParams, 0);
-    res_->setSrv(setResolve_, 0, targets_.diffuse);
-    res_->setSrv(setResolve_, 1, targets_.specular);
+    res_->setSrv(setResolve_, 0, inD());
+    res_->setSrv(setResolve_, 1, inS());
     res_->setSrv(setResolve_, 2, in.viewZ);
     res_->setSrv(setResolve_, 3, in.normalRoughness);
     res_->setSrv(setResolve_, 4, targets_.remodA);
@@ -474,6 +505,7 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     cb.rect[0] = vx; cb.rect[1] = vy; cb.rect[2] = vw; cb.rect[3] = vh;
     cb.tiles[0] = tx; cb.tiles[1] = ty;
     cb.tiles[2] = (params_.bypass ? kFlagBypass : 0u) | (stab ? kFlagStabilise : 0u) | (stab && hadHist ? kFlagHistory : 0u);
+    cb.tiles[3] = despeckled_ ? (params_.despeckle & 3u) : 0u;
     std::memcpy(cb.def, params_.diffuse, sizeof(params_.diffuse));
     std::memcpy(cb.def + 6, params_.specular, sizeof(params_.specular));
     if (stab) {
@@ -490,6 +522,17 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     ctx.textureBarrier(in.normalRoughness, in.gbufferState, kRead);
 
     const u32 gx = (vw + 7u) / 8u, gy = (vh + 7u) / 8u;
+    if (despeckled_) {
+        rhi::ScopedGpuStat despStat(ctx, "NRD2.Despeckle");
+        ctx.textureBarrier(despD_, kRead, kWrite);
+        ctx.textureBarrier(despS_, kRead, kWrite);
+        ctx.setPipeline(psoDespeckle_);
+        ctx.setBindingSet(setDespeckle_);
+        ctx.setConstantBuffer(kConstantSlot, &cb, sizeof(cb));
+        ctx.dispatch(gx, gy, 1);
+        ctx.textureBarrier(despD_, kWrite, kRead);
+        ctx.textureBarrier(despS_, kWrite, kRead);
+    }
     for (u32 l = 0; l < 3; ++l) {
         ctx.textureBarrier(guide_[l], kRead, kWrite);
         ctx.textureBarrier(levelD_[l], kRead, kWrite);
@@ -626,8 +669,8 @@ bool Nrd2::recordFeatures(rhi::IRenderContext& ctx, const Inputs& in, const f32*
         featureFloats_ = features_ ? static_cast<u32>(bd.bytes / sizeof(f32)) : 0u;
         if (!features_) return false;
     }
-    res_->setSrv(setFeatures_, 0, targets_.diffuse);
-    res_->setSrv(setFeatures_, 1, targets_.specular);
+    res_->setSrv(setFeatures_, 0, inD());
+    res_->setSrv(setFeatures_, 1, inS());
     res_->setSrv(setFeatures_, 2, in.viewZ);
     res_->setSrv(setFeatures_, 3, in.normalRoughness);
     res_->setSrv(setFeatures_, 4, targets_.remodA);

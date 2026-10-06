@@ -160,6 +160,9 @@ struct Settings {
     // last frame's inside a min/max box of this frame's values. nrd2StabFrames is its history length at rest.
     bool nrd2Stab = true;
     u32 nrd2StabFrames = 32;
+    // NRD2 input despeckle (CSNrd2Despeckle): isolated outliers in D (1) and S (2) clamped before the pyramid,
+    // so a lone bright sample (a small emitter hit by a GI ray) is not spread into a blotch.
+    u32 nrd2Despeckle = 3;
     // NRD2 keeps half-rate tracing and fills the skipped checkerboard half from this frame's traced
     // neighbours (CSRdHalfFill; docs/rendering/NRD2.md). Each applies where its base half rate is asked
     // for: GI under rayDrivenStages 2, reflections under rtReflectionHalfRate (glossy only), sky

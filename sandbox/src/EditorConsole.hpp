@@ -730,6 +730,14 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (v.as.u < 1 || v.as.u > 64) { err = "nrd2StabFrames must be 1 to 64"; return false; }
             return true;
         }});
+    t.push_back({"voxi.nrd2Despeckle", VarType::U32, false,
+        "NRD2 input despeckle before the pyramid: a pixel over 2x the 5th brightest of its 5x5 neighbours is clamped to that, so a lone bright sample does not spread into a blotch. 0 off, 1 diffuse, 2 specular, 3 both (default)",
+        []{ return vU32(Renderer::get().settings().nrd2Despeckle); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2Despeckle = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u > 3) { err = "nrd2Despeckle must be 0 to 3"; return false; }
+            return true;
+        }});
     // NRD2 half-rate tracing per feature (Settings::nrd2HalfRate*): skipped pixels filled from this frame.
     {
         struct HalfRateDial { const char* name; bool Settings::* field; const char* help; };

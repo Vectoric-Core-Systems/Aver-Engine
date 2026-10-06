@@ -43,6 +43,7 @@ struct Nrd2Params {
     bool network = true;   // phase 4: the trained network sets the tile parameters when it can
     bool stabilise = false;   // the temporal stage, on jitter-free frames with the Inputs below filled
     f32 stabFrames = 32.0f;   // its history length at rest, in frames (from 8 px/frame: min(8, this))
+    u32 despeckle = 0;        // CSNrd2Despeckle before the pyramid: 1 D, 2 S (not while a capture runs)
 };
 
 class Nrd2 {
@@ -127,13 +128,20 @@ private:
     rhi::IDevice*          dev_ = nullptr;
     rhi::IResourceFactory* res_ = nullptr;
     rhi::PipelineHandle psoPyramid_ = 0, psoParams_ = 0, psoResolve_ = 0, compose_ = 0;
-    rhi::PipelineHandle psoReproject_ = 0, psoPrefilter_ = 0, psoTemporal_ = 0;
+    rhi::PipelineHandle psoReproject_ = 0, psoPrefilter_ = 0, psoTemporal_ = 0, psoDespeckle_ = 0;
     rhi::BindingSetHandle setPyramid_ = 0, setParams_ = 0, setResolve_ = 0, setCompose_ = 0;
-    rhi::BindingSetHandle setReproject_ = 0, setPrefilter_ = 0, setTemporal_ = 0;
+    rhi::BindingSetHandle setReproject_ = 0, setPrefilter_ = 0, setTemporal_ = 0, setDespeckle_ = 0;
 
     Targets targets_{};
     rhi::TextureHandle guide_[3] = {}, levelD_[3] = {}, levelS_[3] = {};
     rhi::TextureHandle lit_ = 0;
+    // Despeckled D and S (allocated on the first despeckled frame, rest readable); what the pyramid, resolve
+    // and features read this frame (inD/inS).
+    rhi::TextureHandle despD_ = 0, despS_ = 0;
+    bool despeckled_ = false;
+    rhi::TextureHandle inD() const { return despeckled_ ? despD_ : targets_.diffuse; }
+    rhi::TextureHandle inS() const { return despeckled_ ? despS_ : targets_.specular; }
+    bool allocDespeckle();
     // Temporal stage (allocated on the first stabilised frame): the resolve's D' and S' (rest as UAVs); this
     // frame's scratch (reprojected history rgb + sample count, noise estimate, 1/8 anchors, prefiltered D' and
     // S' with their noise estimate); and ping-pong history: D'' rgb + count, S'' rgb + count, view Z (m) + packed

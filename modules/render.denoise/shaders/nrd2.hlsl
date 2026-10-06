@@ -10,6 +10,8 @@
 //                      the resolve (docs/rendering/NRD2.md "Temporal stabiliser"): history reprojection with a sample
 //                      count, noise estimate and per-tile anchor; a fixed 15-tap prefilter; the min/max-clipped blend
 //                      with history, remodulated into lit
+//   8 CSNrd2Despeckle -- before the pyramid when on: D and S with isolated outliers clamped (nrd2Despeckle), which
+//                      the pyramid, resolve and features then read instead of Stage B's targets
 
 // Portable (modules/render.neural/README.md rules): fp32, no wave intrinsics, no atomics, groupshared
 // <= 16 KB, every barrier in uniform control flow, constants at b3 (the Vulkan backend folds b1 into push
@@ -22,7 +24,8 @@
 
 cbuffer Nrd2CB : register(b3) {
     uint4  gNrd2Rect;     // scene viewport x, y, w, h (render-target pixels)
-    uint4  gNrd2Tiles;    // x tiles, y tiles, flags (1 own pixel only, 2 stabilise, 4 history valid, 8 standardise), unused
+    uint4  gNrd2Tiles;    // x tiles, y tiles, flags (1 own pixel only, 2 stabilise, 4 history valid, 8 standardise),
+                          // despeckle mask (1 D, 2 S)
     float4 gNrd2Def[3];   // default tile parameters, planes 0..11 (D then S)
     float4 gNrd2View[3];  // world -> view rows: right, up, forward (xyz); w of right and up: tan of the half FOV
     float4 gNrd2InScale[3];   // features: the network's input standardisation x * scale + bias (flag 8)
@@ -729,6 +732,62 @@ void CSNrd2Temporal(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThrea
     float3 lit = outD * ra.rgb + outS * Rs;
     if (!all(lit == lit)) lit = 0.0;
     gNrd2Lit[p] = float4(clamp(lit, 0.0, 6.0e4), 0.0);
+}
+
+#elif AVER_NRD2_PASS == 8   // ---- input despeckle ----
+
+Texture2D<float4> gNrd2D     : register(t0);
+Texture2D<float4> gNrd2S     : register(t1);
+Texture2D<float>  gNrd2ViewZ : register(t2);
+RWTexture2D<float4> gNrd2DOut : register(u0);
+RWTexture2D<float4> gNrd2SOut : register(u1);
+
+// The group's 8x8 plus a 2-pixel apron: luminance of D and S, -1 where there is no usable value.
+groupshared float gsLD[144];
+groupshared float gsLS[144];
+
+[numthreads(8, 8, 1)]
+void CSNrd2Despeckle(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
+    const uint gi = gtid.y * 8u + gtid.x;
+    const int2 origin = int2(gid.xy * 8u) - 2;   // viewport-local
+    for (uint i = gi; i < 144u; i += 64u) {
+        const int2 q = origin + int2(i % 12u, i / 12u);
+        float ld = -1.0, ls = -1.0;
+        if (all(q >= 0) && all(q < int2(gNrd2Rect.zw))) {
+            const int2 p = int2(gNrd2Rect.xy) + q;
+            const float z = gNrd2ViewZ.Load(int3(p, 0));
+            if (z > 0.0 && z < 1.0e6) {
+                const float4 d = gNrd2D.Load(int3(p, 0));
+                const float4 s = gNrd2S.Load(int3(p, 0));
+                if (d.a > 0.5 && all(d.rgb == d.rgb)) ld = max(nrd2Lum(d.rgb), 0.0);
+                if (all(s.rgb == s.rgb)) ls = max(nrd2Lum(s.rgb), 0.0);
+            }
+        }
+        gsLD[i] = ld;
+        gsLS[i] = ls;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    const uint2 q = dtid.xy;
+    if (any(q >= gNrd2Rect.zw)) return;   // after the only barrier
+    const int2 p = int2(gNrd2Rect.xy + q);
+    float4 d = gNrd2D.Load(int3(p, 0));
+    float4 s = gNrd2S.Load(int3(p, 0));
+    float td[5] = {-1.0, -1.0, -1.0, -1.0, -1.0};
+    float ts[5] = {-1.0, -1.0, -1.0, -1.0, -1.0};
+    [unroll] for (uint y = 0u; y < 5u; ++y) {
+        [unroll] for (uint x = 0u; x < 5u; ++x) {
+            if (x == 2u && y == 2u) continue;
+            const uint k = (gtid.y + y) * 12u + gtid.x + x;
+            nrd2Top5(td, gsLD[k]);
+            nrd2Top5(ts, gsLS[k]);
+        }
+    }
+    // Fewer than 5 usable neighbours: td[4] stays -1 and nothing is clamped.
+    if ((gNrd2Tiles.w & 1u) != 0u && gsLD[(gtid.y + 2u) * 12u + gtid.x + 2u] >= 0.0) d.rgb = nrd2Despeckle(d.rgb, td[4]);
+    if ((gNrd2Tiles.w & 2u) != 0u && gsLS[(gtid.y + 2u) * 12u + gtid.x + 2u] >= 0.0) s.rgb = nrd2Despeckle(s.rgb, ts[4]);
+    gNrd2DOut[p] = d;
+    gNrd2SOut[p] = s;
 }
 
 #endif

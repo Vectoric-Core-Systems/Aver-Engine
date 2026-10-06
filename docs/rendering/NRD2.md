@@ -329,6 +329,55 @@ reference, because its history accumulates. That is the price of being single-fr
 NRD2 cannot smear. The next levers are more poses per scene, more scenes, and a second network input
 level (1/4).
 
+## Input despeckle (2026-10-06)
+
+**Problem.** The owner saw soft spots only where candles light the scene (NewSponza Night), worse in motion.
+With the lamps off (`voxi.localLights 0`), the light left is candle emission found by GI rays, and it showed
+exactly those spots. The raw input (`voxi.nrd2Bypass 1`) has them as lone bright samples, each a small cross,
+because the half-rate fill copies one traced sample into its four neighbours. The pyramid is plain 2x2
+averaging, so a sample F becomes F/4, F/16 and F/64 at 1/2, 1/4 and 1/8, and the resolve spreads that into a
+soft 8-16 px disc. FidelityFX sees the same samples but down-weights bright outliers and averages them over
+time on the raw signal. NRD2's temporal stage runs after the resolve, when the disc already exists. ReSTIR
+GI's temporal reuse also keeps the same sample in place for up to 30 frames, so the stage cannot average it
+away either.
+
+**Fix.** `CSNrd2Despeckle` (pass 8) runs before the pyramid. For D and S separately it caps each pixel at 2x
+the 5th brightest of its 24 neighbours in a 5x5, and the pyramid, resolve and features read the result.
+- The 5th brightest is past the 4-pixel fill cross, so the whole cross goes.
+- An area brighter than a few pixels has 5 or more bright neighbours and stays.
+- A 1-pixel-wide bright line in S (a thin highlight) would be capped. None was seen on the rig; use
+  `voxi.nrd2Despeckle 1` (diffuse only) if one turns up.
+
+It is single-frame and an order statistic (no mean or sigma). It never sees history. The energy in a capped
+sample is lost: the rig showed less than the blotches had added.
+- Implementation: one 8x8 group with a 12x12 groupshared apron of luminance, and two RGBA16F targets
+  allocated on the first frame.
+- Cost: 0.08 ms on the RX 7800 XT at 1766x994.
+- Captures keep Stage B's raw values (despeckle off while one runs), so training data is unchanged.
+
+Dial: `voxi.nrd2Despeckle`, 0 off, 1 D, 2 S, 3 both (default).
+
+**Measured** on NewSponza Night, upper gallery (`--cam 600 -900 720 -12 90`, exposure 48, 400 frames). The
+metric is the 9 px blob error, mean |log ratio| of luminance after the box blur.
+
+| Case | Despeckle off | Despeckle on | FidelityFX |
+|---|---|---|---|
+| Lamps off, still, against the reference | 11.2% | 3.8% | 3.9% |
+| Lamps on, still, against the reference | 2.35% | 2.23% | 0.83% |
+| Lamps on, 4 degree swing (`--cam-wobble 4 60`), against FidelityFX | 3.4% | 3.2% | n/a |
+
+With lamps on, the remaining gap at rest is edges and fine texture, not spots: FidelityFX keeps the Path
+Tracing accumulation and the Voxi histories, and NRD2 does not. In the swing, the old frames had soft glow
+blotches behind the candles and the new ones do not; FidelityFX shows fine sparkle along edges instead.
+
+Two findings from the same session:
+- **Lamp shadows: full rate is better.** `voxi.nrd2HalfRateLamps 0` lowers the moving error 3.16% to 3.05%,
+  for +0.2 ms. The default stays half rate.
+- **A reference needs `--denoiser 1`.** Under NRD2 the Path Tracing accumulation is compiled out, so a
+  `voxi.ptMode 1` reference rendered with NRD2 selected is only NRD2 on one Path Tracing frame. Render it with
+  FidelityFX selected (`--denoiser 1 --set voxi.ptMode 1`, 1500 frames). Earlier same-day figures that put NRD2
+  closer to the reference than FidelityFX used such a reference and do not hold.
+
 ## Temporal stabiliser (2026-10-06, rewritten 2026-10-06 after FidelityFX's design)
 
 The owner asked for smoothing of the speckle that remains in motion, where there is no temporal stage at
