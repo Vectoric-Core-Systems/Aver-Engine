@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The Synapse AI binding for crowds, hearing, cover and squads: the P/Invoke surface for the
+       Aver.Synapse.Abi C ABI (modules/synapse.abi) and the game-facing API on top of it.
+
+       A LEAF, like Aver.Physics and Aver.UI: it references nothing, so Aver.Framework can forward to
+       it for graph nodes without a cycle. Entities are plain ints here; the framework's Entity type
+       lives a layer up.
+
+       The native library is Aver.Synapse.Abi, a different file name from this assembly, so no
+       NativeResolver is needed. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Synapse</AssemblyName>
+    <RootNamespace>Aver.Synapse</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+</Project>
