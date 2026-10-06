@@ -4993,7 +4993,8 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         std::memcpy(np.diffuse, settings_.nrd2Params, sizeof(np.diffuse));
         std::memcpy(np.specular, settings_.nrd2Params + 6, sizeof(np.specular));
         np.bypass = settings_.nrd2Bypass;
-        np.network = settings_.nrd2Network;
+        // Off while Path Tracing accumulates (ptBounceParams.y == 2): the network never sees history.
+        np.network = settings_.nrd2Network && !(pathTracingWanted() && cb_.ptBounceParams[1] > 1.5f);
         np.stabilise  = settings_.nrd2Stab;
         np.stabFrames = static_cast<f32>(settings_.nrd2StabFrames);
         np.despeckle  = settings_.nrd2Despeckle;
@@ -5747,12 +5748,12 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
     return ensurePtAccum();
 }
 
-// Path Tracing's accumulation buffer (u22): one float4 per staged pixel while Path Tracing is wanted,
-// released otherwise. Called wherever the staged resources are sized, and on a Path Tracing edge.
+// Path Tracing's accumulation buffer (u22): two float4 planes per staged pixel while Path Tracing is
+// wanted (the composed colour uses the first; under NRD2, D the first and S the second), released otherwise. Called wherever the staged resources are sized, and on a Path Tracing edge.
 bool VoxiRenderer::ensurePtAccum() {
     if (!res_ || !bindings_) return false;
     const bool want = pathTracingWanted() && rdStagedResourcesWanted() && rdStagedRowPitch_ && rdStagedH_;
-    const u32 elems = want ? rdStagedRowPitch_ * rdStagedH_ : 0u;
+    const u32 elems = want ? 2u * rdStagedRowPitch_ * rdStagedH_ : 0u;
     if (ptAccumBuf_ && (!want || ptAccumElemCapacity_ < elems)) {
         // Rebind before destroy (aver-view-outlives-its-buffer).
         if (ptAccumPlaceholder_) res_->setUavBuffer(bindings_, 22, ptAccumPlaceholder_, kPtAccumElemBytes, 1, 0);

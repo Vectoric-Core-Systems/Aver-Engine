@@ -447,6 +447,35 @@ Measured on NewSponza Night, upper gallery, 4 degree swing, against the Path Tra
   removes. The despeckle had already taken the blotches there. The setting is for views where blotches
   remain; judge it there.
 
+## Path Tracing accumulation (2026-10-06)
+
+In Path Tracing (ReSTIR PT, `--pt` > 0) the spots stayed at rest. FidelityFX mode averages the path-traced
+frames while the view holds, and NRD2 mode had that compiled out, so NRD2 only ever saw one frame.
+
+**What it does now.** Under NRD2, Stage B averages the noisy halves instead: demodulated D and S each get a
+running mean in u22. The buffer is now two planes:
+- plane 1: D, with the count and depth in w;
+- plane 2: S.
+
+The same keep rule as FidelityFX mode applies, and NRD2 then filters the averaged input. While a pixel keeps
+(`gPtBounceParams.y` 2), the **network is off** for the frame and the default tile parameters run
+(NEURAA_NRD.md rule 10: it never sees history colours). This is the progressive path tracer, not a denoiser
+history, and it is the same accumulation FidelityFX mode ships (its jitter order, rule 11, is unchanged and
+still open).
+
+**Measured** on NewSponza Night, upper gallery, `--pt 3`, 400 frames, against FidelityFX mode accumulated
+for 1500 frames:
+
+| | Before | After |
+|---|---|---|
+| Blob error | 2.36% | 1.38% |
+| Pixel MAE | 0.0089 | 0.0065 |
+| Bias | -2.3% | -0.2% |
+
+Spots above 10% went from 0.26% to 0.36% at this threshold. FidelityFX at 400 frames: blob error 2.53%, bias
++4.0%. The darkening is gone because the despeckle sees the averaged input, which has few outliers. Moving
+frames are unchanged, since the accumulation restarts.
+
 ## Coarse-level cap (2026-10-06)
 
 What is left at rest is not noise. NRD2 puts a bright halo around lamps (a lantern's dark rim filled in) and

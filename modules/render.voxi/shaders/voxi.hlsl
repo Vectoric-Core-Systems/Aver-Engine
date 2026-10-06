@@ -1864,6 +1864,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #if AVER_NRD2
     // The lit terms go to NRD2's buckets; `radiance` keeps only what is never denoised.
     float3 nrdD = 0.0, nrdS = 0.0;
+    float4 nrdDOut = 0.0, nrdSOut = 0.0;   // what was written to NRD2's D and S (Path Tracing accumulates them)
     float3 radiance = 0.0;
 #else
     float3 radiance = averShadeDirect(0.0, s, sun);
@@ -2039,8 +2040,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         const bool  lit   = s.model != AVER_MODEL_UNLIT && !ptRef;
         const float hitS  = rdRefl.a > 0.5 ? gNrd2SpecOut[rdPixel].a : 0.0;
         const float kdMax = max(s.kdAlbedo.r, max(s.kdAlbedo.g, s.kdAlbedo.b));
-        gNrd2DiffOut[rdPixel] = lit ? float4(nrdD / max(s.kdAlbedo, 1e-3), kdMax > 0.01 ? 1.0 : 0.0) : 0.0;
-        gNrd2SpecOut[rdPixel] = lit ? float4(nrdS / max(FssEss, 1e-3), max(hitS, 0.0)) : float4(0.0, 0.0, 0.0, -1.0);
+        nrdDOut = lit ? float4(nrdD / max(s.kdAlbedo, 1e-3), kdMax > 0.01 ? 1.0 : 0.0) : 0.0;
+        nrdSOut = lit ? float4(nrdS / max(FssEss, 1e-3), max(hitS, 0.0)) : float4(0.0, 0.0, 0.0, -1.0);
+        gNrd2DiffOut[rdPixel] = nrdDOut;
+        gNrd2SpecOut[rdPixel] = nrdSOut;
     }
 #else
     radiance = averShadeIndirect(radiance, s, ind);
@@ -2119,7 +2122,39 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // PATH TRACING: progressive accumulation. While the CPU key holds (gPtBounceParams.y == 2) each
     // pixel keeps a running mean of its frames, capped at gPtBounceParams.z frames (a moving average
     // after that). A pixel restarts on its own when the surface under it moves or its depth changes.
-#if !AVER_NRD2   // single-frame: no progressive accumulation under NRD2
+#if AVER_NRD2
+    // Under NRD2 the noisy halves accumulate instead, before NRD2 reads them: demodulated D in u22's first
+    // plane (with the count and depth in w), S in its second; the composed colour is assembled at compose.
+    // Same keep rule as below. While a pixel keeps (gPtBounceParams.y == 2) the network is off for the frame
+    // (NEURAA_NRD.md rule 10: it never sees history). docs/rendering/NRD2.md "Path Tracing accumulation".
+    if (gPtBounceParams.y > 0.5) {
+        uint accCount, accStride;
+        gPtAccum.GetDimensions(accCount, accStride);
+        const uint   plane  = accCount / 2u;
+        const uint   accIdx = rdPixel.y * rdPitch + rdPixel.x;
+        const float  depthM = clip.w * 0.01;
+        const float4 prevD  = gPtAccum[accIdx];
+        const float4 prevS  = gPtAccum[plane + accIdx];
+        const uint   packed = asuint(prevD.w);
+        const float  n      = (float)(packed & 0xFFFFu);
+        const float  prevZ  = f16tof32(packed >> 16);
+        const bool   moved  = dot(gAverReprojDelta, gAverReprojDelta) > 1e-4;
+        const bool   use    = nrdKeep > 0.0 && accIdx < plane;
+        const bool   keep   = use && gPtBounceParams.y > 1.5 && !moved && n > 0.0 && all(isfinite(prevD.rgb)) &&
+                              all(isfinite(prevS.rgb)) && abs(prevZ - depthM) <= depthM * 0.01 + 0.01;
+        const float  nn     = use ? (keep ? min(n + 1.0, gPtBounceParams.z) : 1.0) : 0.0;
+        const float3 accD   = keep ? lerp(prevD.rgb, nrdDOut.rgb, 1.0 / nn) : nrdDOut.rgb;
+        const float3 accS   = keep ? lerp(prevS.rgb, nrdSOut.rgb, 1.0 / nn) : nrdSOut.rgb;
+        if (accIdx < plane && all(isfinite(accD)) && all(isfinite(accS))) {
+            gPtAccum[accIdx]         = float4(accD, asfloat((f32tof16(depthM) << 16) | (uint)nn));
+            gPtAccum[plane + accIdx] = float4(accS, 0.0);
+            if (keep) {
+                gNrd2DiffOut[rdPixel] = float4(accD, nrdDOut.a);
+                gNrd2SpecOut[rdPixel] = float4(accS, nrdSOut.a);
+            }
+        }
+    }
+#else
     if (gPtBounceParams.y > 0.5 && vmode == 0u) {
         const uint   accIdx = rdPixel.y * rdPitch + rdPixel.x;
         const float  depthM = clip.w * 0.01;
