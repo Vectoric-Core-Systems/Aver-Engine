@@ -24,7 +24,7 @@ namespace Aver.Graph;
 public delegate bool FieldResolver(string qualifiedName, out int fieldId, out int kind);
 
 /// Compiles a graph to a DynamicMethod and invokes it.
-public class GraphCompiler
+public partial class GraphCompiler
 {
     // aver::scene::FieldKind (Fields.hpp): checked by getfield/setfield (F32) and
     // getfieldvec3/setfieldvec3 (Vec3 -- CLocal.position, CLight.colour, etc, Builtins.cpp). Vec3
@@ -699,6 +699,13 @@ public class GraphCompiler
                     "CompileEntryPoint() instead.");
 
             default:
+                // The table-driven families (GraphGameSystemNodes.cs): a pure read is computed here once
+                // into its pin locals; an exec node is refused like every other side effect.
+                if (GameSystemNodes.TryGet(node.Type, out var gameSpec))
+                {
+                    if (gameSpec.Kind == GenericKind.Pure) { EmitGenericPureTopological(node, gameSpec); break; }
+                    if (gameSpec.Kind == GenericKind.Exec) throw GenericPushOnly(node);
+                }
                 // A PUSH-only node here is not an unknown node type -- saying so sent authors looking
                 // for a node they already had. See IsPushOnlySideEffectType.
                 if (IsPushOnlySideEffectType(node.Type))
@@ -2749,6 +2756,7 @@ public class GraphCompiler
                     else if (IsExecCapableRebindActionType(node.Type)) EmitExecRebindAction(node);
                     else if (IsExecCapableCreateEntityType(node.Type)) EmitExecCreateEntity(node);
                     else if (IsExecCapableAudioType(node.Type)) EmitExecAudio(node);
+                    else if (GameSystemNodes.IsExec(node.Type)) EmitExecGeneric(node);
                     EmitExecFanOut(node);
                     return;
             }
@@ -4020,7 +4028,8 @@ public class GraphCompiler
         IsExecCapableTransformWriteType(type) || IsExecCapablePhysicsWriteType(type) ||
         IsExecCapablePhysicsCreateType(type) || IsExecCapableSaveLoadType(type) ||
         IsExecCapableJointCreateType(type) || IsExecCapableJointOpType(type) ||
-        IsExecCapableInputBindingOpType(type) || IsExecCapableRebindActionType(type);
+        IsExecCapableInputBindingOpType(type) || IsExecCapableRebindActionType(type) ||
+        GameSystemNodes.IsExec(type);
 
     /// Node kinds that exist only to be walked by the exec/PUSH compiler, with no data value to
     /// pull -- Compile() skips these rather than failing, since a graph may carry both halves with
@@ -4035,7 +4044,7 @@ public class GraphCompiler
     {
         "onstart" or "ontick" or "onhit" or "customevent" or "branch" or "sequence" or "while" or "foreach"
             or "funcentry" or "switchint" => true,
-        _ => false,
+        _ => GameSystemNodes.IsTrigger(type),
     };
 
     /// Pushes node `source`'s output pin `pinName` onto the IL stack, computed fresh every call (no
@@ -4073,6 +4082,13 @@ public class GraphCompiler
                 "bounded. Break the cycle by removing one of the data links into this node.");
         try
         {
+
+        // Pure reads from the table-driven families (GraphGameSystemNodes.cs).
+        if (GameSystemNodes.TryGet(source.Type, out var gameSpec) && gameSpec.Kind == GenericKind.Pure)
+        {
+            EmitGenericPurePull(source, gameSpec, pinName);
+            return;
+        }
 
         switch (source.Type.ToLowerInvariant())
         {

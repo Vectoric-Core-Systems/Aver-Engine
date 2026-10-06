@@ -101,6 +101,11 @@ inline GraphAttributeSpec attr(std::string key, std::string label) {
     return GraphAttributeSpec{std::move(key), std::move(label)};
 }
 
+// The game-systems node families, each in its own file so this one stays the readable core table:
+// crowds/hearing/cover, then timers/blackboard/streamed audio/anim state machines/UI/prefabs/decals.
+#include "GraphNodeDefsSynapseAi.hpp"
+#include "GraphNodeDefsGameSystems.hpp"
+
 // One line per node type. This is the "one entry" the build task and Slice 6 both call for.
 inline std::vector<GraphNodeDesc> buildCatalog() {
     std::vector<GraphNodeDesc> t;
@@ -1025,6 +1030,8 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("CoatF0", "float", false)},
         {}, kDomainMaterial});
 
+    appendSynapseAiNodeDefs(t);
+    appendGameSystemNodeDefs(t);
     return t;
 }
 

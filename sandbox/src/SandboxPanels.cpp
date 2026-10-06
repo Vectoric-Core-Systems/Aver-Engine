@@ -4,6 +4,7 @@
 
 #include "SandboxApp.hpp"
 #include "LightDetails.hpp"
+#include "DecalDetails.hpp"
 
 namespace aver {
 #if AVER_MODULE_SCENE
@@ -1629,6 +1630,16 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             ImGui::TextDisabled("%d entities selected -- Transform/Mesh/Material below apply to "
                                 "all of them; name/components affect the anchor only.",
                                 (int)multiSelected.size());
+        // PREFAB: what this is an instance of, its overrides, Apply / Revert / Unpack; or, for an ordinary entity,
+        // the way to turn it (and everything under it) into a prefab.
+        if (multiSelected.size() <= 1) {
+            editor::prefabDetailsDraw(prefabModel_, selEntity_, prefabUiCallbacks());
+            if (!prefabSys_.isLinked(selEntity_) && ImGui::SmallButton("Create Prefab...")) {
+                prefabModel_.setContentDir(project_.contentDir());
+                editor::prefabCreateDialogOpen(prefabDlg_, selEntity_, lit != entityLabels_.end() ? lit->second : nm, "Prefabs");
+            }
+            uiReg_.track("details.createPrefab");
+        }
         if (const auto* loc = w.component<scene::CLocal>(selEntity_, scene::kComponentLocal)) {
             if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
               if (multiSelected.size() <= 1) {
@@ -2331,6 +2342,13 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             }
         }
 
+        // ---- Decal (CDecal): the projector box, appearance, which channels it paints ----
+        if (auto* dc = w.component<scene::CDecal>(selEntity_, scene::kComponentDecal)) {
+            if (ImGui::CollapsingHeader("Decal", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (editor::drawDecalDetails(*dc, project_.contentDir())) markLevelUnsaved();
+            }
+        }
+
         // ---- Add Component ----
         // Previously impossible from the editor: every panel above renders only when its
         // component already exists, so one no importer/template attaches needed a hand-edited file.
@@ -2345,6 +2363,8 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                  "Simulate this entity's mesh instead of posing it: sag, drape, squash, collide."},
                 {scene::kComponentLight, "Light",
                  "A point, spot or rectangular area light, optionally shaped by an IES profile and a cookie."},
+                {scene::kComponentDecal, "Decal",
+                 "A box that projects colour, normal and roughness onto the surfaces inside it."},
             };
             for (const Addable& a : kAddable) {
                 const bool present = w.hasComponent(selEntity_, a.id);
@@ -2359,6 +2379,9 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                     } else if (a.id == scene::kComponentLight) {
                         if (auto* c = static_cast<scene::CLight*>(w.addComponent(selEntity_, a.id)))
                             *c = editor::makeNewLight(scene::kLightPoint);
+                    } else if (a.id == scene::kComponentDecal) {
+                        if (auto* c = static_cast<scene::CDecal*>(w.addComponent(selEntity_, a.id)))
+                            *c = editor::makeNewDecal();
                     }
                     cbStatus_ = std::string("Added ") + a.name;
                     // Not undoable, so at least mark dirty: adding pushes no EditCmd, so without
@@ -2387,6 +2410,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             static const Removable kRemovable[] = {
                 {scene::kComponentSoftBody, ICON_TUNE " Soft Body"},
                 {scene::kComponentLight, "Light"},
+                {scene::kComponentDecal, "Decal"},
             };
             bool anyPresent = false;
             for (const Removable& r : kRemovable) {

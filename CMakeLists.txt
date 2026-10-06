@@ -397,10 +397,14 @@ if(AVER_MODULE_SCENE)
   # Save/load of a whole world. Guarded on SCENE for the same reason anim.scene is: it is the edge
   # between the world and the container format, and a build with no scene has no world to save.
   add_subdirectory(modules/save)
+  # Prefab instances in a live world (spawn, overrides, propagation); see docs/PREFABS.md.
+  add_subdirectory(modules/prefab)
   # The scene/navigation join, same shape as anim.scene immediately above and for the same reason:
   # Aver.Synapse stays pure grid-and-arithmetic (added unconditionally, above), and this is the
   # "somebody" that turns a goal into a scene::Entity's actual path.
   add_subdirectory(modules/synapse.scene)
+  # The plain-C seam onto steering/crowds, hearing, cover and squads (docs/AI_CROWDS_HEARING_COVER.md).
+  add_subdirectory(modules/synapse.abi)
 endif()
 if(AVER_MODULE_FRAMEWORK)
   add_subdirectory(modules/framework)     # optional: gameplay vocabulary over the world
@@ -468,9 +472,15 @@ add_subdirectory(modules/render.pt)
 add_subdirectory(modules/render.denoise)
 # Small neural networks that run inside the frame (MLP inference + training). Unconditional and RHI-only, like the denoiser.
 add_subdirectory(modules/render.neural)
+# The GPU crowd-avoidance backend. RHI-only, like the modules above; the pure solver stays device-free.
+add_subdirectory(modules/synapse.gpu)
 # The audio seam. Added down HERE rather than beside the mixer because it links the WAV reader,
 # which is a target inside modules/formats and so does not exist until that has been added.
 add_subdirectory(modules/audio.abi)
+# The scene join for audio (reverb zones, occlusion probes). After audio.abi, which it optionally links.
+if(AVER_MODULE_SCENE)
+  add_subdirectory(modules/audio.scene)
+endif()
 # The control channel. Core-only, so it could sit anywhere; here because it is the editor that uses it.
 if(AVER_MODULE_MCP AND WIN32)
   add_subdirectory(modules/mcp)
@@ -627,6 +637,10 @@ if(AVER_BUILD_TESTS)
     add_subdirectory(tests/scene)
     add_subdirectory(tests/anim.scene)
     add_subdirectory(tests/save)
+    add_subdirectory(tests/prefab)
+    if(TARGET Aver.Formats)
+      add_subdirectory(tests/decals)
+    endif()
     # The placement -> entity loop the editor and the game runtime now share. Guarded on the scene
     # for the same reason the module's own source is: without it there is nothing to instantiate into.
     add_subdirectory(tests/world)
@@ -637,10 +651,12 @@ if(AVER_BUILD_TESTS)
 
   if(TARGET Aver.Synapse)
     add_subdirectory(tests/synapse)
+    add_subdirectory(tests/synapse_bt)
     add_subdirectory(tests/sound)
   endif()
   if(AVER_MODULE_FRAMEWORK)
     add_subdirectory(tests/framework)
+    add_subdirectory(tests/framework_timers)
   endif()
   if(AVER_MODULE_PARTICLES)
     # The CPU simulation only -- spawn rate, lifetime, gravity/damping integration. Guarded by the

@@ -9,6 +9,10 @@ aver_add_module(Aver.Synapse.Scene
     src/SynapseAgent.cpp
     src/SynapsePerception.cpp
     src/SynapseBt.cpp
+    src/SynapseCrowd.cpp
+    src/SynapseHearing.cpp
+    src/SynapseTactics.cpp
+    src/SynapseAi.cpp
   DEPS
     Aver.Synapse
     Aver.Scene

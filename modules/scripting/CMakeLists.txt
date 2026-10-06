@@ -118,7 +118,13 @@ file(GLOB AVER_BRIDGE_SOURCES CONFIGURE_DEPENDS
   # sources are not a dependency means editing Hud.cs restages nothing, and the running editor keeps
   # the previous build with no sign anything was skipped.
   ${AVER_CSHARP_DIR}/Aver.UI/*.cs
-  ${AVER_CSHARP_DIR}/Aver.UI/*.csproj)
+  ${AVER_CSHARP_DIR}/Aver.UI/*.csproj
+  # Synapse AI binding (crowds/hearing/cover) and the prefab binding: both are referenced by the
+  # framework / graph projects, so the same stale-staging rule applies.
+  ${AVER_CSHARP_DIR}/Aver.Synapse/*.cs
+  ${AVER_CSHARP_DIR}/Aver.Synapse/*.csproj
+  ${AVER_CSHARP_DIR}/Aver.Prefab/*.cs
+  ${AVER_CSHARP_DIR}/Aver.Prefab/*.csproj)
 
 # EVERY ASSEMBLY THE COMMAND ACTUALLY EMITS, not just the ones somebody remembered. `dotnet build -o`
 # stages the named project's whole transitive ProjectReference closure into the output directory, so
@@ -150,6 +156,8 @@ set(AVER_BRIDGE_OUTPUTS
   ${AVER_BRIDGE_DIR}/Aver.Scene.dll
   ${AVER_BRIDGE_DIR}/Aver.Physics.dll
   ${AVER_BRIDGE_DIR}/Aver.UI.dll
+  ${AVER_BRIDGE_DIR}/Aver.Synapse.dll
+  ${AVER_BRIDGE_DIR}/Aver.Prefab.dll
   ${AVER_BRIDGE_DIR}/Aver.Graph.dll)
 
 add_custom_command(

@@ -18,6 +18,7 @@
     <FileVersion>1.0.0.0</FileVersion>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <DefineConstants>$(DefineConstants);AVER_SYNAPSE_AI</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -31,6 +32,10 @@
          scripts already use keeps its exact surface, and the 125-function ABI lives in the assembly
          named after the native module it binds. -->
     <ProjectReference Include="..\Aver.Physics\Aver.Physics.csproj" />
+    <!-- Game UI widgets (UiGameSettings / UiGraphInterop) and the Synapse crowd/hearing/cover binding
+         (GraphInteropSynapseAi, compiled only under AVER_SYNAPSE_AI). Both are leaves. -->
+    <ProjectReference Include="..\Aver.UI\Aver.UI.csproj" />
+    <ProjectReference Include="..\Aver.Synapse\Aver.Synapse.csproj" />
   </ItemGroup>
 
   <ItemGroup>

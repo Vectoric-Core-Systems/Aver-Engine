@@ -2105,6 +2105,21 @@ void SandboxApp::buildUI(Engine& e) {
 #endif
             // Show Navigation works even without SCENE (reads a baked .ocnav).
             ImGui::MenuItem("Show Navigation", nullptr, &showNav_);
+#if AVER_MODULE_SCENE
+            ImGui::MenuItem("Show Decals", nullptr, &showDecals_);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Draws every decal's projector box, not just the selected one's.");
+            if (ImGui::BeginMenu("Show AI")) {
+                ImGui::MenuItem("Sight Cones", nullptr, &aiDebug_.sight);
+                ImGui::MenuItem("Hearing", nullptr, &aiDebug_.hearing);
+                ImGui::MenuItem("Path / Goal", nullptr, &aiDebug_.path);
+                ImGui::MenuItem("Steering", nullptr, &aiDebug_.steering);
+                ImGui::MenuItem("Behaviour Tree State", nullptr, &aiDebug_.btState);
+                ImGui::MenuItem("Cover", nullptr, &aiDebug_.cover);
+                ImGui::EndMenu();
+            }
+            uiReg_.track("view.showAi");
+#endif
 #if AVER_MODULE_PHYSICS
             // Toggling forgets the overlay; rebuildColliderOverlay skips unchanged frames.
             if (ImGui::MenuItem("Show Colliders", nullptr, &showColliders_))
@@ -2196,6 +2211,8 @@ void SandboxApp::buildUI(Engine& e) {
         uiReg_.track("toolbar.add.spotLight");
         if (ImGui::Selectable("Rect Light")) spawnLightAtCamera(scene::kLightRect);
         uiReg_.track("toolbar.add.rectLight");
+        if (ImGui::Selectable("Decal")) spawnDecalAtCamera();
+        uiReg_.track("toolbar.add.decal");
 #endif
         ImGui::EndPopup();
     }
@@ -2349,6 +2366,9 @@ void SandboxApp::buildUI(Engine& e) {
     drawDrawer(e);
     // drawNotifications after drawDrawer (needs drawerPixelH_ from this frame).
     drawNotifications();
+#if AVER_MODULE_SCENE
+    editor::prefabCreateDialogDraw(prefabDlg_, prefabModel_, prefabUiCallbacks());
+#endif
     buildEditorPrefs();
     buildProjectSettings();
     buildWorldSettings();

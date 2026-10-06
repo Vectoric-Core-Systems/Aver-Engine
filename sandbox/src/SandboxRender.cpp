@@ -201,6 +201,10 @@ void SandboxApp::onRender(Engine& e)  {
 #if AVER_MODULE_SCENE && AVER_MODULE_VOXI
     // CLight entities -> Voxi's lamp list and the path tracer's lights, before the frame's draws.
     sceneLightFeed_.update(scene::World::instance(), voxiRenderer_, ptSceneView_.get(), project_.contentDir());
+    // CDecal entities -> Voxi's projected-decal list (raster and ray hits both paint them).
+    if (prefabModel_.contentDir() != project_.contentDir()) prefabModel_.setContentDir(project_.contentDir());
+    decalImages_.setContentDir(project_.contentDir());
+    sceneDecalFeed_.update(scene::World::instance(), voxiRenderer_, decalImages_.loader());
 #endif
 
 #if AVER_MODULE_SCENE
@@ -1912,6 +1916,19 @@ void SandboxApp::onRender(Engine& e)  {
         e.device()->drawLines(navMesh_, &n.m[0][0]);
     }
 #endif
+#if AVER_MODULE_SYNAPSE_SCENE
+    // AI debug overlays: collect this frame's lines and labels, upload the lines like the navmesh, draw them.
+    if (aiDebugMesh_) { e.device()->destroyLineMesh(aiDebugMesh_); aiDebugMesh_ = 0; }
+    editor::aiDebugCollect(aiDebug_);
+    if (aiDebug_.any() && !noEditorChrome_) {
+        const std::vector<rhi::LineVertex> aiVerts = editor::aiDebugLineVertices(synapse::aiDebug());
+        if (!aiVerts.empty()) {
+            aiDebugMesh_ = e.device()->createLineMesh(aiVerts.data(), static_cast<u32>(aiVerts.size()));
+            const Mat4 ai = Mat4::identity();   // vertices are in world space
+            if (aiDebugMesh_) e.device()->drawLines(aiDebugMesh_, &ai.m[0][0]);
+        }
+    }
+#endif
 #if AVER_MODULE_PHYSICS
     // ---- COLLIDERS, which could not be seen at all until now --------------------------------
     // No collider overlay, toggle or wireframe existed before; the drawLines infrastructure was
@@ -1930,11 +1947,21 @@ void SandboxApp::onRender(Engine& e)  {
     // it draws on top of geometry by design.
     if (!noEditorChrome_) {
         drawGizmo(e);
+#if AVER_MODULE_SCENE
+        // The selected decal's projector box and face handles (dim boxes for every decal under Show > Decals).
+        decalGizmo_.draw(*e.device(), scene::World::instance(),
+                         sel_ == kSelScene ? selEntity_ : scene::kInvalidEntity, showDecals_);
+#endif
 #if AVER_MODULE_LANDSCAPE
         drawSculptCursor(e);
 #endif
     }
     buildUI(e);
+#if AVER_MODULE_SYNAPSE_SCENE && AVER_WITH_IMGUI
+    if (aiDebug_.any() && !noEditorChrome_)
+        editor::aiDebugDrawLabels(synapse::aiDebug(), viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
+                                  static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, aiDebug_.labelMaxDistanceCm);
+#endif
 #if AVER_WITH_IMGUI
     uiReg_.endFrame();
 #endif

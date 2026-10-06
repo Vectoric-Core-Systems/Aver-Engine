@@ -124,6 +124,10 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "AnimEditor.hpp"
 #include "GraphEditor.hpp"
 #include "BtEditor.hpp"
+#include "BtGraphEditor.hpp"
+#include "UiLayoutEditor.hpp"
+#include "BlendSpaceEditor.hpp"
+#include "AnimStateMachineEditor.hpp"
 #include "SoundEditor.hpp"
 // Guarded: ParticleEditor.hpp includes OcParticle.hpp, which sandbox/CMakeLists.txt links only
 // `if(TARGET Aver.Formats.Particles)` (gated on Aver.Particles). With AVER_MODULE_PARTICLES=OFF
@@ -141,6 +145,15 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "SoftBodyPanel.hpp"
 #if AVER_MODULE_VOXI
 #include "SceneLightFeed.hpp"
+#include "DecalLevelIo.hpp"
+#include "DecalGizmo.hpp"
+#include "DecalAssets.hpp"
+#include "PrefabEditorUi.hpp"
+#include "AiDebugOverlay.hpp"
+#if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
+#include "aver/synapse/CrowdGpu.hpp"
+#endif
+#include "aver/game/SceneDecalFeed.hpp"
 #endif
 #include "EditorEuler.hpp"
 #include "SequenceEditor.hpp"
@@ -1932,7 +1945,7 @@ private:
 
     // One undoable edit (transform, create/destroy). Components captured via EntitySnapshot.
     struct EditCmd {
-        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility, Collision, Animation };
+        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility, Collision, Animation, Prefab };
         Kind kind = Kind::Transform;
         // Monotonic serial for save points; never reused so undo/redo cross saves correctly.
         u64 serial = 0;
@@ -1974,6 +1987,12 @@ private:
 #endif
         // Rename payload (display name, not CName).
         std::string renameBefore, renameAfter;
+
+#if AVER_MODULE_SCENE
+        // Prefab payload: the prefab state before and after one operation (create, place, apply, revert,
+        // unpack, ...). Shared so copying a command around the undo stacks stays cheap.
+        std::shared_ptr<editor::PrefabEdit> prefab;
+#endif
 
 #if AVER_MODULE_SCENE
         // Removed component type and byte-exact contents (EntitySnapshot::Comp shape).
@@ -2316,6 +2335,8 @@ private:
 #if AVER_MODULE_SCENE
     // "Add > Point/Spot/Rect Light": a CLight entity in front of the camera, selected, with an undo entry.
     void spawnLightAtCamera(i32 kind);
+    // "Add > Decal": a CDecal entity in front of the camera, selected, with an undo entry.
+    void spawnDecalAtCamera();
 #endif
 
     void spawnPrimitive(Engine& engine, const char* assetPath, const char* label);
@@ -2629,6 +2650,9 @@ private:
     void cbCreateNodeGraph();
 
     void cbCreateBehaviourTree();
+    void cbCreateUiLayout();
+    void cbCreateBlendSpace();
+    void cbCreateStateMachine();
 
     // Writes a starter .ocinput (Input Scheme) and opens it.
     void cbCreateInputScheme();
@@ -2994,6 +3018,23 @@ private:
     bool wantMeshReload_ = false;
     // Outliner display names (not scene::World::name which holds asset path).
     std::unordered_map<u32, std::string> entityLabels_;
+#if AVER_MODULE_SCENE
+    editor::DecalImageResolver decalImages_;  // a decal's image id -> a file under the project's content folder
+    editor::DecalGizmo decalGizmo_;           // the selected decal's box and its face handles
+    bool showDecals_ = true;                  // Show > Decals: dim boxes for every decal, not just the selected one
+    editor::AiDebugOptions aiDebug_;          // Show > AI: sight cones, hearing, path, steering, BT state, cover
+    rhi::LineHandle aiDebugMesh_ = 0;         // this frame's AI debug lines (rebuilt every frame an option is on)
+    // PREFABS: the library (loaded assets), the system (instances in the world), the editor's operations on
+    // them and the Create Prefab dialog. The system's hooks keep levelEntities_, labels and bodies in step.
+    prefab::PrefabLibrary prefabLib_;
+    prefab::PrefabSystem prefabSys_{scene::World::instance(), prefabLib_};
+    editor::PrefabEditorModel prefabModel_{scene::World::instance(), prefabLib_, prefabSys_};
+    editor::PrefabCreateDialog prefabDlg_;
+    void installPrefabHooks();
+    editor::PrefabUiCallbacks prefabUiCallbacks();
+    // One undo entry for a prefab operation.
+    void pushPrefabEdit(const editor::PrefabEdit& edit);
+#endif
     std::unordered_map<std::string, int> labelCounts_;
     std::unordered_map<u32, int32_t> entityBodies_;
 
@@ -3259,6 +3300,11 @@ private:
     // Registered once in onInit, unregistered in onShutdown. Never rebuilt: one instance for the whole run.
     GBufferDebugFeature gbufferDebugFeature_;
     bool gbufferDebugAttached_ = false;
+#if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
+    // The GPU crowd-avoidance backend, installed behind the Synapse ABI's one SynapseAi (game::installCrowdGpu).
+    synapse::GpuCrowdBackend crowdGpu_;
+    bool crowdGpuAttached_ = false;
+#endif
     // Window > Neural Visualiser's NeuraFI overlay. Registered beside gbufferDebugFeature_, for the run.
     NeuraFiVizFeature neurafiViz_;
     // --occlusion-cull: hierarchical-Z two-pass box culling (modules/occlusion). OFF (default) never calls occluder_.
@@ -3517,6 +3563,7 @@ private:
 #if AVER_MODULE_VOXI
     voxi::VoxiRenderer voxiRenderer_;
     editor::SceneLightFeed sceneLightFeed_;   // CLight entities -> Voxi lamps + path-tracer lights, per frame
+    game::SceneDecalFeed sceneDecalFeed_;     // CDecal entities -> Voxi's projected-decal list, per frame
     bool voxiAttached_=false;
     // Viewport's ray-hit/triangles debug view (Ray Hit: Instances/Materials/Distance, Triangles), or None. NOT PERSISTED: reasserted every frame.
     voxi::VoxiRenderer::ViewDebug debugView_ = voxi::VoxiRenderer::ViewDebug::None;

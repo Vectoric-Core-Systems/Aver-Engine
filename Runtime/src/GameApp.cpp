@@ -1,6 +1,9 @@
 #include "aver/game/GameApp.hpp"
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
+#include "aver/game/GameSystemsWiring.hpp"
+#include "aver/game/GameUiInput.hpp"
+#include "aver/game/LevelDecals.hpp"
 
 #include <filesystem>
 
@@ -966,6 +969,10 @@ void GameApp::installLevelHooks(Engine& e) {
     hooks.afterInstantiate = [this](const GameLevel::LoadedLevel& loaded) {
         levelGameMode_    = loaded.world.gameMode;      // World Settings overrides, read at begin play
         levelDefaultPawn_ = loaded.world.defaultPawn;
+        // Records the placement loop does not know: bare CDecal entities, and prefab instances rebuilt from
+        // their assets with their overrides on top.
+        game::spawnLevelDecals(scene::World::instance(), loaded.world.decals);
+        if (prefabSys_) prefabSys_->instantiateLevelInstances(loaded.world.prefabInstances);
         // The level's first sequence, bound to its placements' entities; it starts with the session.
         sequencePlayer_ = game::SequencePlayer{};
         if (!loaded.world.sequences.empty()) {
@@ -1660,6 +1667,10 @@ void GameApp::onInit(Engine& e) {
         AVER_INFO("[Game] --trace-opens: every engine file read is logged with an [open] prefix");
     }
 
+#if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
+    // GPU crowd backend: selectable through the Synapse ABI once installed; CPU stays the default.
+    if (rhi::IDevice* gdev = e.device()) crowdGpuAttached_ = game::installCrowdGpu(*gdev, crowdGpu_);
+#endif
     // Platform-side InputState: games read the window's event stream, not ImGui.
     window_ = e.window();
     if (Window* w = e.window()) {
@@ -1713,6 +1724,22 @@ void GameApp::onInit(Engine& e) {
     // Control rig: registered in editor onInit but never before in shipped game. Class placements must find the type.
     anim::controlRigSystem().registerComponents(scene::World::instance());
     anim::controlRigSystem().install(anim::animSystem(), scene::World::instance());
+#endif
+    // Animation state machines, reverb zones, blackboard relay, crowd/hearing/cover behaviours.
+    game::registerGameSystems();
+#if AVER_MODULE_SCENE
+    // Prefab assets come out of the project's content index (the same id space every other asset uses).
+    prefabLib_.setLoader([this](const std::string& path, fmt::OcPrefabData& out, std::string* why) {
+        const std::string full = content_.pathFor(fnv1a64(std::string_view(path)));
+        if (full.empty()) {
+            if (why) *why = "'" + path + "' is not in the project content";
+            return false;
+        }
+        return fmt::loadOcPrefab(full, out, why);
+    });
+    prefabSys_ = std::make_unique<prefab::PrefabSystem>(scene::World::instance(), prefabLib_);
+    prefabHost_ = prefab::makeAbiHost(*prefabSys_);
+    aver_prefab_set_host(&prefabHost_);
 #endif
     openProject(e);
 #if AVER_MODULE_VOXI
@@ -1849,6 +1876,8 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 #endif
         // Framework ABI: free cursor when aver_fw_cursor_requested()==1 regardless of play state.
         if (aver_fw_cursor_requested()) wantCapture = false;
+        // An open menu frees the cursor so the player can reach it (retained widgets, docs/GAME_UI.md).
+        if (game::uiWantsCursor()) wantCapture = false;
         setMouseCaptured(wantCapture);
         pollCapturedMouse();
     }
@@ -1865,6 +1894,8 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     inputPolicy.capturedDx = mouse_.dx();
     inputPolicy.capturedDy = mouse_.dy();
     // inputPolicy.eaten stays all-false: only editor's drawer uses chords.
+    // An open menu takes the keyboard, mouse and pad away from gameplay until it closes.
+    game::uiGateInput(inputPolicy);
     publishInput(input_, inputPolicy, cfg_.inputEcho ? &echoHeld_ : nullptr);
     if (cfg_.inputEcho && echoHeld_ != echoLast_) {
         AVER_INFO("[Game] input: {}", echoHeld_);
@@ -1893,6 +1924,9 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // HUD draw call: "Draw(dt) into whatever rect aver_ui_begin_frame last established". Index 0 is first-declared [AverHud].
     if (scriptsReady_ && scripts_.hudCount() > 0) scripts_.hudDraw(0, t.dt);
 #endif
+    // Retained widgets: this frame's keyboard/pad/wheel in, then lay out, update, raise events, draw.
+    game::uiFeedInput(input_, t.dt, !mouse_.captured());
+    aver_ui_widgets_frame(t.dt);
 #endif
 #if AVER_MODULE_SCENE
     // Play PAUSED holds object animation. Sampled BEFORE gameplay tick, tested for PAUSED (not "not PLAYING").
@@ -1924,6 +1958,7 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 #if AVER_MODULE_SCENE
     // Animation clock ticks UNCONDITIONALLY: hanging off gameplay gates would freeze it when no session is running.
     anim::animSystem().setObjectAnimationPaused(objectsHeld);
+    game::tickAnimGraphs(t.dt);   // state machines write the pose the clip sampler would
     anim::animSystem().tick(scene::World::instance(), t.dt);
     // Level sequence: advances with the session (not while paused), writes transforms before the flush below.
     if (!sequencePlayer_.empty()) {
@@ -2025,6 +2060,17 @@ void GameApp::onRender(Engine& e) {
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
         if (voxiAttached_) ms = &voxiRenderer_.materials();
 #endif
+#if AVER_MODULE_VOXI
+        // CDecal entities -> Voxi's projected-decal list. A decal's image id resolves through the project's
+        // content index, like every other asset.
+        if (voxiAttached_)
+            sceneDecalFeed_.update(scene::World::instance(), voxiRenderer_,
+                                   [this](u64 id, voxi::DecalImageKind, ImageData& out) {
+                                       const std::string full = content_.pathFor(id);
+                                       std::string err;
+                                       return !full.empty() && decodeImage(full, out, &err) && out.valid();
+                                   });
+#endif
 #if AVER_MODULE_FLUIDS
         // Simulated fluid volumes, drawn first (editor's pattern).
         water_.draw(*dev, content_, ms);
@@ -2098,6 +2144,9 @@ void GameApp::onShutdown(Engine& e) {
     // Exact reverse registration order: device holds bare pointers to render features.
     // voxiRenderer_ is a MEMBER by value, so it outlives the device if unregistered first.
     rhi::IDevice* dev = e.device();
+#if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
+    if (crowdGpuAttached_) { game::removeCrowdGpu(dev, crowdGpu_); crowdGpuAttached_ = false; }
+#endif
     // Detach before destroy: device holds raw pointer into averSrUpscaler_. Both calls no-op when never installed.
     if (dev) dev->setUpscaler(nullptr);
     averSrUpscaler_.reset();

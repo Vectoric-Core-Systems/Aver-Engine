@@ -500,6 +500,18 @@ bool SandboxApp::saveLevel(const std::string& path) {
         }
     }
 
+    // PREFABINST records: every instance root, with its overrides. The linked entities are skipped as
+    // placements below, and any prefab asset edited through an instance is written out with the level.
+    w.prefabInstances = prefabSys_.captureLevelInstances();
+    {
+        std::string prefabWhy;
+        if (!prefabModel_.saveDirtyAssets(&prefabWhy))
+            AVER_WARN("[Editor] could not write an edited prefab asset: {}", prefabWhy);
+    }
+
+    // DECAL records, from every authored CDecal entity (pooled gameplay decals are skipped inside).
+    w.decals = editor::recordsFromDecalEntities(world, editor::LightAssetPaths::scan(project_.contentDir()));
+
     // WHICH PLACEMENT SLOT EACH ENTITY WILL OCCUPY, decided BEFORE any is written, because a
     // child may be reached before its parent -- levelEntities_ is the swap-removed dense array
     // and carries no ordering guarantee at all. Without this the parent index would be "the one
@@ -514,6 +526,9 @@ bool SandboxApp::saveLevel(const std::string& path) {
             if (!world.component<scene::CLocal>(e, scene::kComponentLocal)) continue;
             if (!world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer) &&
                 world.hasComponent(e, scene::kComponentLight)) continue;   // saved as a LIGHT record
+            if (!world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer) &&
+                world.hasComponent(e, scene::kComponentDecal)) continue;   // saved as a DECAL record
+            if (prefabSys_.isLinked(e)) continue;                          // saved inside a PREFABINST record
             slotOf.emplace(static_cast<u32>(e), slot++);
         }
     }
@@ -557,6 +572,8 @@ bool SandboxApp::saveLevel(const std::string& path) {
         const auto* mr  = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
         if (!loc) continue;
         if (!mr && world.hasComponent(e, scene::kComponentLight)) continue;   // saved as a LIGHT record
+        if (!mr && world.hasComponent(e, scene::kComponentDecal)) continue;   // saved as a DECAL record
+        if (prefabSys_.isLinked(e)) continue;                                 // saved inside a PREFABINST record
         fmt::OcWorldPlacement p;
         // THE PARENT, AND WITH IT THE REASON CLocal IS NOW CORRECT TO WRITE. This loop has always
         // written loc->xf -- the LOCAL transform -- into a format that read every placement back

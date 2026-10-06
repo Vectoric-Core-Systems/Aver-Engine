@@ -7,6 +7,7 @@
 // Engine space: centimetres, +X forward, +Y right, +Z up, left-handed. Positions are f64.
 #include "aver/core/Types.hpp"
 #include "aver/assets/AssetId.hpp"
+#include "aver/formats/OcPrefab.hpp"
 
 #include <limits>
 #include <string>
@@ -512,6 +513,32 @@ struct OcLight {
     bool iesPeak = false;                   // normalise the profile to its peak, not its flux
 };
 
+// One authored projected decal (DECAL record): world-space, no parent. Maps onto scene::CDecal on load.
+// The box projects along local +X; sizeCm is x depth, y width, z height. Image references are
+// content-relative paths, resolved to ObjectIds by the loader. A pooled gameplay decal is never
+// written, and CDecal's lifetime fields are not carried: an authored decal is permanent.
+// docs/rendering/DECALS.md.
+struct OcDecal {
+    std::string name;
+    f64 x = 0, y = 0, z = 0;                // cm
+    f64 yaw = 0, pitch = 0, roll = 0;       // degrees, as a placement
+    f64 sx = 1, sy = 1, sz = 1;             // scale of the projector (scales the box)
+    f64 sizeCm[3] = {100, 100, 100};
+    f64 tint[3] = {1, 1, 1};                // linear
+    f64 opacity = 1.0;                      // 1 - CDecal::transparency
+    f64 normalStrength = 1.0;
+    f64 roughness = 0.0, metallic = 0.0;    // 0 = unset (see CDecal)
+    f64 edgeFade = 0.1;
+    f64 angleStartDeg = 60.0, angleEndDeg = 85.0;
+    f64 fadeDistanceCm = 0.0;               // 0 = never fades
+    i32 order = 0;                          // CDecal::sortOrder
+    std::string base, normal, orm;          // images; empty = none
+    f64 uvScale[2] = {1, 1};
+    f64 uvOffset[2] = {0, 0};
+    bool noColour = false, noNormal = false, noRoughness = false;
+    bool disabled = false;                  // present but not projected
+};
+
 struct OcWorldData : OcWorldEnv {
     int version = 1;
     u64 contentId = 0;                     // ID = FNV-1a-64(NAME)
@@ -600,7 +627,13 @@ struct OcWorldData : OcWorldEnv {
     // exactly as before (the sun, the sky, emissive lamps).
     std::vector<OcLight> lights;
 
+    // DECAL records, in file order. Empty is the ordinary case: a level with none loads and writes as before.
+    std::vector<OcDecal> decals;
+
     std::vector<OcWorldPlacement> placements;
+
+    // PREFABINST records: prefab instances kept as a link plus overrides, not expanded into placements.
+    std::vector<OcPrefabInstance> prefabInstances;
 
     // Baked instanced foliage: one content-relative path per `FOLIAGE <path>` record, each naming an
     // `.ocinst` file (OcInstances.hpp) -- a flat, potentially multi-million-row transform table, kept

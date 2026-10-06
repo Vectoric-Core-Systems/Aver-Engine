@@ -45,6 +45,8 @@ AverCrashReporter.exe
 # contain it.
 Aver.Audio.Abi.dll
 Aver.UI.Abi.dll
+Aver.Synapse.Abi.dll   ?AVER_MODULE_SCENE
+Aver.Prefab.Abi.dll     ?AVER_MODULE_SCENE
 
 # SETTINGS IS NOT ONE THE EDITOR LOAD-TIME LINKS -- it is the exception this block used to claim did
 # not exist, and the reason it was absent from this file entirely.

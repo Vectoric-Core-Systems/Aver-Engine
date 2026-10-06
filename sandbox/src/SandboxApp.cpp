@@ -6,6 +6,8 @@
 #include "TextureEditor.hpp"   // makeTextureEditor; SandboxApp.hpp does not pull this one in
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
+#include "aver/game/GameSystemsWiring.hpp"
+#include "aver/game/GameUiInput.hpp"
 #include "aver/platform/FileSystem.hpp"   // userDataDir: where the trajectory network's weights live
 
 namespace aver {
@@ -399,6 +401,9 @@ void SandboxApp::onInit(Engine& e)  {
     // Register GBuffer debug unconditionally (mode defaults to Off). Per-frame write gated in onUpdate.
     e.device()->addRenderFeature(&gbufferDebugFeature_);
     gbufferDebugAttached_ = true;
+#if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
+    crowdGpuAttached_ = game::installCrowdGpu(*e.device(), crowdGpu_);
+#endif
     // NeuraFI viz draws nothing until Neural Visualiser picks a view.
     e.device()->addRenderFeature(&neurafiViz_);
 
@@ -421,8 +426,14 @@ void SandboxApp::onInit(Engine& e)  {
     });
     scripts_.graphSetHitRecording(true);
 #endif  // AVER_MODULE_SCRIPTING
+    // The visual behaviour-tree editor claims .ocbt ahead of the plain list editor (registration order is
+    // precedence); BtEditor stays registered as the fallback.
+    assetEditors_.registerFactory(&editor::makeBtGraphEditor);
     // Append BtEditor (claims .ocbt).
     assetEditors_.registerFactory(&editor::makeBtEditor);
+    assetEditors_.registerFactory(&editor::makeUiLayoutEditor);            // .ocui
+    assetEditors_.registerFactory(&editor::makeBlendSpaceEditor);          // .ocblend
+    assetEditors_.registerFactory(&editor::makeAnimStateMachineEditor);    // .ocasm
     // Append SoundEditor (claims .ocsnd).
     assetEditors_.registerFactory(&editor::makeSoundEditor);
 #if AVER_MODULE_PARTICLES
@@ -508,6 +519,11 @@ void SandboxApp::onInit(Engine& e)  {
     // Control rig: register and install before project opens (needs no level).
     anim::controlRigSystem().registerComponents(scene::World::instance());
     anim::controlRigSystem().install(anim::animSystem(), scene::World::instance());
+#endif
+    // Animation state machines, reverb zones, blackboard relay, crowd/hearing/cover behaviours.
+    game::registerGameSystems();
+#if AVER_MODULE_SCENE
+    installPrefabHooks();
 #endif
 
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
@@ -1912,7 +1928,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                 }
             }
         }
-        const bool wantCapture = playSessionActive() && !releasedByUser_ && !playEjected();
+        // A game-UI menu that wants the cursor frees it, exactly like releasing the mouse by hand.
+        const bool wantCapture = playSessionActive() && !releasedByUser_ && !playEjected() && !game::uiWantsCursor();
         // Alt+P/Alt+S start Play (same anyPlayActive() precondition the toolbar Play button uses).
         if (!ImGui::GetIO().WantTextInput && !anyPlayActive() &&
             keybinds_.pressed(editor::CommandId::PlayStart, ImGui::GetIO()))
@@ -2007,6 +2024,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #if AVER_MODULE_SCRIPTING
     if (hudPreviewActive()) scripts_.hudDraw(hudPreviewIndex_, t.dt);
 #endif
+    // Retained game-UI widgets: Play feeds them this frame's keyboard/pad/wheel; the tree itself lays out,
+    // updates and draws every frame (it is empty unless a script or graph made a widget).
+    if (playSessionActive()) game::uiFeedInput(input_, t.dt, !mouse_.captured());
+    aver_ui_widgets_frame(t.dt);
     maybeSpawnTestActor();
     maybePlayTest();
     maybePieCameraTest();
@@ -2054,6 +2075,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     anim::animSystem().setObjectAnimationPaused(aver_fw_play_state() == AVER_FW_PLAY_PAUSED);
 #endif
     playProf_.begin(editor::PlayPhase::ObjectAnim);
+    game::tickAnimGraphs(t.dt);   // state machines write the pose the clip sampler would
     anim::animSystem().tick(scene::World::instance(), t.dt);
     playProf_.end(editor::PlayPhase::ObjectAnim);
     // The level sequence (Animate preview, Play), after the clips so a sequenced actor wins.
@@ -2447,6 +2469,9 @@ editor::shutdownAnimEditors();
     }
 #endif
     // Remove render features before the device tears down.
+#if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
+    if (crowdGpuAttached_) { game::removeCrowdGpu(e.device(), crowdGpu_); crowdGpuAttached_ = false; }
+#endif
     e.device()->removeRenderFeature(&gbufferDebugFeature_);
     gbufferDebugFeature_.shutdown();
     e.device()->removeRenderFeature(&neurafiViz_);

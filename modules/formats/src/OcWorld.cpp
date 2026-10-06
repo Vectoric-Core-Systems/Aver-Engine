@@ -210,6 +210,7 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
     // The open SEQUENCE (index into out.sequences) and its last SEQTRACK, -1 outside one. SEQTRACK /
     // SEQKEY outside a sequence, or after an unknown track kind, are ignored.
     i32 seqOpen = -1, trackOpen = -1;
+    i32 prefabOpen = -1;   // the open PREFABINST, -1 outside one
 
     usize pos = 0;
     while (pos <= text.size()) {
@@ -246,6 +247,8 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
         std::string_view key = t[0];
 
         if (!equalsCI(key, "OCWORLD") && !equalsCI(key, "OCMAP")) sawRecord = true;
+        // PREFABINST / POVERRIDE / ENDPREFABINST (OcPrefab.cpp); the open instance is its only state.
+        if (parseOcPrefabInstanceLine(t, out.prefabInstances, prefabOpen)) continue;
         if (equalsCI(key, "OCWORLD") || equalsCI(key, "OCMAP")) {
             out.version = t.size() > 1 ? parseI32(t[1], 1) : 1;
             sawHeader = true;
@@ -529,6 +532,44 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "iespeak"))  lt.iesPeak = true;
             }
             out.lights.push_back(std::move(lt));
+        } else if (equalsCI(key, "DECAL")) {
+            OcDecal dc;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "name")     && i + 1 < t.size()) dc.name = percentDecode(t[++i]);
+                else if (equalsCI(t[i], "pos")      && i + 3 < t.size()) {
+                    dc.x = parseF64(t[i+1]); dc.y = parseF64(t[i+2]); dc.z = parseF64(t[i+3]); i += 3;
+                } else if (equalsCI(t[i], "rot")    && i + 3 < t.size()) {
+                    dc.yaw = parseF64(t[i+1]); dc.pitch = parseF64(t[i+2]); dc.roll = parseF64(t[i+3]); i += 3;
+                } else if (equalsCI(t[i], "scale")  && i + 3 < t.size()) {
+                    dc.sx = parseF64(t[i+1], 1.0); dc.sy = parseF64(t[i+2], 1.0); dc.sz = parseF64(t[i+3], 1.0); i += 3;
+                } else if (equalsCI(t[i], "size")   && i + 3 < t.size()) {
+                    for (usize c = 0; c < 3; ++c) dc.sizeCm[c] = parseF64(t[i + 1 + c], 100.0);
+                    i += 3;
+                } else if (equalsCI(t[i], "tint")   && i + 3 < t.size()) {
+                    for (usize c = 0; c < 3; ++c) dc.tint[c] = parseF64(t[i + 1 + c], 1.0);
+                    i += 3;
+                } else if (equalsCI(t[i], "opacity")   && i + 1 < t.size()) dc.opacity = parseF64(t[++i], dc.opacity);
+                else if (equalsCI(t[i], "normalstrength") && i + 1 < t.size()) dc.normalStrength = parseF64(t[++i], dc.normalStrength);
+                else if (equalsCI(t[i], "roughness")   && i + 1 < t.size()) dc.roughness = parseF64(t[++i]);
+                else if (equalsCI(t[i], "metallic")    && i + 1 < t.size()) dc.metallic = parseF64(t[++i]);
+                else if (equalsCI(t[i], "edge")        && i + 1 < t.size()) dc.edgeFade = parseF64(t[++i], dc.edgeFade);
+                else if (equalsCI(t[i], "angle")       && i + 2 < t.size()) {
+                    dc.angleStartDeg = parseF64(t[i+1], dc.angleStartDeg); dc.angleEndDeg = parseF64(t[i+2], dc.angleEndDeg); i += 2;
+                } else if (equalsCI(t[i], "fadedist")  && i + 1 < t.size()) dc.fadeDistanceCm = parseF64(t[++i]);
+                else if (equalsCI(t[i], "order")       && i + 1 < t.size()) dc.order = parseI32(t[++i]);
+                else if (equalsCI(t[i], "base")        && i + 1 < t.size()) dc.base = std::string(t[++i]);
+                else if (equalsCI(t[i], "normalmap")   && i + 1 < t.size()) dc.normal = std::string(t[++i]);
+                else if (equalsCI(t[i], "orm")         && i + 1 < t.size()) dc.orm = std::string(t[++i]);
+                else if (equalsCI(t[i], "uvscale")     && i + 2 < t.size()) {
+                    dc.uvScale[0] = parseF64(t[i+1], 1.0); dc.uvScale[1] = parseF64(t[i+2], 1.0); i += 2;
+                } else if (equalsCI(t[i], "uvoffset")  && i + 2 < t.size()) {
+                    dc.uvOffset[0] = parseF64(t[i+1]); dc.uvOffset[1] = parseF64(t[i+2]); i += 2;
+                } else if (equalsCI(t[i], "nocolour"))    dc.noColour = true;
+                else if (equalsCI(t[i], "nonormal"))      dc.noNormal = true;
+                else if (equalsCI(t[i], "noroughness"))   dc.noRoughness = true;
+                else if (equalsCI(t[i], "disabled"))      dc.disabled = true;
+            }
+            out.decals.push_back(std::move(dc));
         } else if (equalsCI(key, "FOLIAGE") && t.size() >= 2) {
             // A single token, exactly like PLACE's own asset column, LANDSCAPE's `section` and
             // SCATTER's `mesh` -- none of those support a path with a space in it either, so this
@@ -979,6 +1020,40 @@ std::string writeOcworld(const OcWorldData& w) {
         }
     }
 
+    if (!w.decals.empty()) {
+        s += "\n";
+        for (const OcDecal& dc : w.decals) {
+            s += "DECAL";
+            if (!dc.name.empty()) { s += " name "; s += percentEncode(dc.name); }
+            s += " pos " + num(dc.x) + " " + num(dc.y) + " " + num(dc.z) +
+                 " rot " + num(dc.yaw) + " " + num(dc.pitch) + " " + num(dc.roll);
+            if (dc.sx != 1.0 || dc.sy != 1.0 || dc.sz != 1.0)
+                s += " scale " + num(dc.sx) + " " + num(dc.sy) + " " + num(dc.sz);
+            s += " size " + num(dc.sizeCm[0]) + " " + num(dc.sizeCm[1]) + " " + num(dc.sizeCm[2]);
+            if (dc.tint[0] != 1.0 || dc.tint[1] != 1.0 || dc.tint[2] != 1.0)
+                s += " tint " + num(dc.tint[0]) + " " + num(dc.tint[1]) + " " + num(dc.tint[2]);
+            if (dc.opacity != 1.0)        s += " opacity " + num(dc.opacity);
+            if (dc.normalStrength != 1.0) s += " normalstrength " + num(dc.normalStrength);
+            if (dc.roughness != 0.0)      s += " roughness " + num(dc.roughness);
+            if (dc.metallic != 0.0)       s += " metallic " + num(dc.metallic);
+            s += " edge " + num(dc.edgeFade) + " angle " + num(dc.angleStartDeg) + " " + num(dc.angleEndDeg);
+            if (dc.fadeDistanceCm > 0.0)  s += " fadedist " + num(dc.fadeDistanceCm);
+            if (dc.order != 0)            s += " order " + std::to_string(dc.order);
+            if (!dc.base.empty())   s += " base " + dc.base;
+            if (!dc.normal.empty()) s += " normalmap " + dc.normal;
+            if (!dc.orm.empty())    s += " orm " + dc.orm;
+            if (dc.uvScale[0] != 1.0 || dc.uvScale[1] != 1.0)
+                s += " uvscale " + num(dc.uvScale[0]) + " " + num(dc.uvScale[1]);
+            if (dc.uvOffset[0] != 0.0 || dc.uvOffset[1] != 0.0)
+                s += " uvoffset " + num(dc.uvOffset[0]) + " " + num(dc.uvOffset[1]);
+            if (dc.noColour)    s += " nocolour";
+            if (dc.noNormal)    s += " nonormal";
+            if (dc.noRoughness) s += " noroughness";
+            if (dc.disabled)    s += " disabled";
+            s += "\n";
+        }
+    }
+
     if (!w.foliageFiles.empty()) {
         s += "\n";
         // One token, same "no escaping this file's other asset paths do not have either" rule
@@ -1029,6 +1104,8 @@ std::string writeOcworld(const OcWorldData& w) {
             s += "ENDSEQUENCE\n";
         }
     }
+
+    appendOcPrefabInstances(s, w.prefabInstances);   // nothing for a level without prefabs
 
     s += "\n";
     const auto line = [&](const OcWorldPlacement& p, const char* keyword, const char* keywordG) {

@@ -290,6 +290,8 @@ public static class HostBridge
         s_classes.Clear();
         s_graphClasses.Clear();
         s_graphInstances.Clear();
+        // Timers and event subscribers are callbacks into the context being unloaded: drop them first.
+        try { Timers.Shutdown(); Events.Shutdown(); } catch { }
 
         ScriptLoadContext? ctx = s_context;
         s_context = null;
@@ -456,6 +458,7 @@ public static class HostBridge
                 return 0;
             }
             s_graphs[entity] = host;
+            if (host.Graph != null) GraphTimerEvents.BindGraph(entity, host.Graph);   // AN_OnEvent entries
             return 1;
         }
         catch (Exception ex)
@@ -483,6 +486,7 @@ public static class HostBridge
             Emit((int)Log.Level.Error,
                  $"[Graph] entity {entity}: tick threw: {Describe(ex)} - the graph has been unloaded");
             s_graphs.Remove(entity);
+            GraphTimerEvents.UnbindEntity(entity);
         }
     }
 
@@ -490,7 +494,7 @@ public static class HostBridge
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     public static void GraphUnload(int entity)
     {
-        try { s_graphs.Remove(entity); } catch { }
+        try { s_graphs.Remove(entity); GraphTimerEvents.UnbindEntity(entity); } catch { }
     }
 
     /// <summary>Raises <paramref name="utf8EventName"/> on whatever graph is bound to
@@ -845,6 +849,7 @@ public static class HostBridge
                 Emit((int)Log.Level.Error,
                      $"[Graph] class instance entity {entity}: tick threw: {Describe(ex)} - unloaded");
                 s_graphInstances.Remove(entity);
+                GraphTimerEvents.UnbindEntity(entity);
             }
         }
     }
@@ -1422,6 +1427,7 @@ public static class HostBridge
                 }
 
                 s_graphInstances[entity] = new GraphInstanceLive { Host = host, Ticks = ginfo.Ticks };
+                if (host.Graph != null) GraphTimerEvents.BindGraph(entity, host.Graph);   // AN_OnEvent entries
                 return 1;
             }
 
@@ -1457,6 +1463,10 @@ public static class HostBridge
     private static void DispTickAll(int group, float dt)
     {
         if (group < 0 || group >= TickGroupCount) return;
+
+        // Game-UI events (a click, a changed slider, a command) reach their handlers once a frame, before
+        // anything ticks: the first group's tick is the earliest point every graph and actor can see them.
+        if (group == 0) { try { Aver.UI.UiSystem.Pump(); } catch (DllNotFoundException) { } }
 
         // EnhancedInput needs no per-frame snapshot here: that call is gone, not relocated -- it's now
         // a thin wrapper over aver_fw_action_held/pressed/released/value2 (framework_abi.h NAMED
@@ -1551,6 +1561,7 @@ public static class HostBridge
         // tables were mutually exclusive -- once both held one entity, it leaked the GraphHost (and its
         // VAR storage) and left GraphTickBoundInstances ticking a destroyed entity forever.
         s_graphInstances.Remove(entity);
+        GraphTimerEvents.UnbindEntity(entity);   // its AN_OnEvent subscriptions and the timers it owns
 
         // Drop this entity's warn-once memory (s_fireWarnedOnce's own comment): a reused entity id
         // deserves its own first FireEvent warning, not inherited silence. RemoveWhere has no

@@ -45,6 +45,7 @@
          below). References Aver.Scene itself, which is already transitive through Aver.Framework
          above, so this adds no new native surface, just the managed graph runtime. -->
     <ProjectReference Include="..\Aver.Graph\Aver.Graph.csproj" />
+    <ProjectReference Include="..\Aver.Prefab\Aver.Prefab.csproj" />
   </ItemGroup>
 
 </Project>

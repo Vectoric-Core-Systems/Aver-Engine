@@ -504,6 +504,67 @@ bool SandboxApp::removeComponentFromSelection(u32 type) {
 
 #endif
 
+#if AVER_MODULE_SCENE
+void SandboxApp::pushPrefabEdit(const editor::PrefabEdit& edit) {
+    EditCmd c;
+    c.kind = EditCmd::Kind::Prefab;
+    c.label = edit.label;
+    c.prefab = std::make_shared<editor::PrefabEdit>(edit);
+    pushEdit(std::move(c));
+}
+
+// The prefab system creates and destroys entities itself (an instance, a propagated edit), so the editor's own
+// per-entity bookkeeping has to follow through these: the level's entity list, the outliner label, the static
+// body. The same things destroyEntity and the placement paths keep.
+void SandboxApp::installPrefabHooks() {
+    prefab::Hooks h;
+    h.created = [this](scene::Entity e) {
+        scene::World& w = scene::World::instance();
+        if (std::find(levelEntities_.begin(), levelEntities_.end(), e) == levelEntities_.end())
+            levelEntities_.push_back(e);
+        entityLabels_[static_cast<u32>(e)] = w.name(e);
+#if AVER_MODULE_PHYSICS
+        if (w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) rebuildEntityBody(e);
+#endif
+    };
+    h.changed = [this](scene::Entity e) {
+#if AVER_MODULE_PHYSICS
+        if (scene::World::instance().component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer))
+            rebuildEntityBody(e);
+#else
+        (void)e;
+#endif
+    };
+    h.destroying = [this](scene::Entity e) {
+        levelEntities_.erase(std::remove(levelEntities_.begin(), levelEntities_.end(), e), levelEntities_.end());
+        entityLabels_.erase(static_cast<u32>(e));
+        entityCollide_.erase(static_cast<u32>(e));
+        entityAnim_.erase(static_cast<u32>(e));
+        entitySnapZ_.erase(static_cast<u32>(e));
+        if (sel_ == kSelScene && e == selEntity_) { sel_ = -1; selEntity_ = scene::kInvalidEntity; }
+#if AVER_MODULE_PHYSICS
+        if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
+            aver_phys_remove_body(it->second);
+            levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second), levelBodies_.end());
+            entityBodies_.erase(it);
+            ++colliderRev_;
+        }
+#endif
+    };
+    prefabSys_.setHooks(std::move(h));
+}
+
+editor::PrefabUiCallbacks SandboxApp::prefabUiCallbacks() {
+    editor::PrefabUiCallbacks cb;
+    cb.pushUndo = [this](const editor::PrefabEdit& e) { pushPrefabEdit(e); };
+    cb.select = [this](scene::Entity e) { sel_ = kSelScene; selEntity_ = e; };
+    cb.openAsset = [this](const std::string& ref) { assetEditors_.open(prefabModel_.fullPathFor(ref)); };
+    cb.markDirty = [this] { markLevelUnsaved(); };
+    cb.status = [this](const std::string& s) { cbStatus_ = s; };
+    return cb;
+}
+#endif
+
 void SandboxApp::pushEdit(EditCmd c) {
     c.serial = ++editSerialNext_;
     undoStack_.push_back(std::move(c));
@@ -1186,6 +1247,8 @@ void SandboxApp::undo() {
         case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::Collision:  applyCollideTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/true); break;
+        case EditCmd::Kind::Prefab:     if (c.prefab) prefabModel_.undo(*c.prefab);
+                                        sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
 #endif
         case EditCmd::Kind::CreateObj:   // undo a create: take it back out
             if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
@@ -1239,6 +1302,8 @@ void SandboxApp::redo() {
         case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::Collision:  applyCollideTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/false); break;
+        case EditCmd::Kind::Prefab:     if (c.prefab) prefabModel_.redo(*c.prefab);
+                                        sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
 #endif
         case EditCmd::Kind::CreateObj:   // redo a create: put it back
             if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size())
