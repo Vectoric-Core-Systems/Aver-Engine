@@ -209,21 +209,12 @@ struct CpuTimingReport {
 // ---------------------------------------------------------------------------------------------
 // Runtime kill switch.
 // ---------------------------------------------------------------------------------------------
-// GATING: tested at each boundary (CpuLap::to(), both of CpuLap's ends, both of CpuNest's ends).
-// When true this costs one global bool load and a predicted-taken branch before a handful of
-// instructions -- a couple of cycles, negligible even at 100,000 boundaries a frame. When false, it
-// is one load and a NOT-taken branch that skips the tick read and the accumulator write entirely --
-// which is the actual saving, since the read is the expensive half. See AVER_CPU_TIMING's own
-// comment for why this is a second, runtime-only switch rather than a rebuild.
-//
-// TOGGLING THIS MID-WALK (between one boundary and the next, rather than between one drawWorld()
-// call and the next) is not a case this header defends against: a CpuLap or CpuNest whose start_
-// tick was taken before the flag flipped off, and which closes after it flipped back on, folds one
-// stale delta into whatever span happens to close next. That is a bounded, one-time, self-correcting
-// error -- the FOLLOWING boundary re-synchronises to a fresh, valid tick -- and accepting it is what
-// keeps every boundary a single branch instead of two. The flag is meant to be flipped between
-// measurement runs (an editor checkbox, a launch argument), never inside one.
-inline bool cpuTimingEnabled = true;
+// OFF BY DEFAULT: the boundaries cost ~7 tick reads per drawn entity, so the host turns this on only
+// while something will read the report (see cpuTimingSetEnabled below). A CpuLap latches the flag at
+// construction, so one walk is wholly timed or wholly untimed; a CpuNest latches its own. When off,
+// each boundary is one load and a not-taken branch -- the tick read and the accumulator write, the
+// expensive half, are skipped. See AVER_CPU_TIMING's comment for why this is a runtime switch.
+inline bool cpuTimingEnabled = false;
 
 namespace detail {
 
@@ -361,6 +352,18 @@ inline void cpuOnLapOpen() {
 
 } // namespace detail
 
+// Turns the instrument on or off between walks. Switching on drops both windows so a report never
+// shows a stale window from the last time it was on; switching off keeps them.
+inline void cpuTimingSetEnabled(bool on) {
+    if (on && !cpuTimingEnabled) {
+        std::memset(detail::cpuLiveAccum, 0, sizeof(detail::cpuLiveAccum));
+        std::memset(detail::cpuPublishedAccum, 0, sizeof(detail::cpuPublishedAccum));
+        detail::cpuLiveOccurrences = 0;
+        detail::cpuPublishedOccurrences = 0;
+    }
+    cpuTimingEnabled = on;
+}
+
 // ---------------------------------------------------------------------------------------------
 // CpuLap -- an EXCLUSIVE phase marker.
 // ---------------------------------------------------------------------------------------------
@@ -395,11 +398,9 @@ public:
                first != CpuSpan::Count &&
                "CpuLap must open on a real leaf span -- SceneWalk and TimingOverhead are computed at "
                "report time, never measured directly (see this class's own comment).");
-        // The Lap's own open/close bracket runs once or twice a frame (see CpuTimingReport::
-        // framesAccumulated's comment on the depth-prepass case) -- nowhere near the ~100,000-a-frame
-        // hot path the runtime gate exists to protect, which is .to() below. Reading a tick here
-        // unconditionally, regardless of cpuTimingEnabled, keeps start_ always valid even if the flag
-        // flips between this constructor and the first .to() call, at a cost too small to matter.
+        // Latched: an untimed walk skips window rotation and every tick read below.
+        active_ = cpuTimingEnabled;
+        if (!active_) return;
         detail::cpuOnLapOpen();
         start_ = detail::cpuReadTicks();
         detail::cpuActiveSpan = {span_, start_};
@@ -408,7 +409,7 @@ public:
 
     ~CpuLap() {
 #if AVER_CPU_TIMING
-        if (!cpuTimingEnabled) return;
+        if (!active_) return;
         const u64 now = detail::cpuReadTicks();
         detail::cpuSpanClose(span_, now - start_);
         detail::cpuActiveSpan = {CpuSpan::Count, 0};
@@ -420,8 +421,7 @@ public:
 #if AVER_CPU_TIMING
         assert(next != CpuSpan::SceneWalk && next != CpuSpan::TimingOverhead &&
                next != CpuSpan::Count && "see CpuLap's own comment: neither is ever measured directly.");
-        if (!cpuTimingEnabled) { span_ = next; return; }  // see cpuTimingEnabled's own comment on
-                                                           // mid-walk toggling for why this is safe
+        if (!active_) return;
         const u64 now = detail::cpuReadTicks();
         detail::cpuSpanClose(span_, now - start_);
         span_ = next;
@@ -438,6 +438,9 @@ public:
 private:
     CpuSpan span_;
     u64 start_ = 0;
+#if AVER_CPU_TIMING
+    bool active_ = false;
+#endif
 };
 
 // ---------------------------------------------------------------------------------------------

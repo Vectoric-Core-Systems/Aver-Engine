@@ -1,8 +1,9 @@
 # NRD v2: single-frame neural denoiser over the composed lighting
 
 **Status:** phases 1, 3 and 4 built (2026-10-06); weights not yet trained. Owner decisions: replace the whole denoiser stack (FidelityFX and the
-per-signal plumbing); **strictly single-frame** (no denoiser history, so no smear or ghosting in
-motion); denoise the **composed lighting**; a **convolutional** network; **trained in-engine** like
+per-signal plumbing); **single-frame** (the spatial filter and the network never see history, so no
+smear or ghosting from them; an optional temporal stabiliser on jitter-free frames was added later, see
+"Temporal stabiliser"); denoise the **composed lighting**; a **convolutional** network; **trained in-engine** like
 NeuraFI, not in Python. Supersedes NEURAA_NRD.md section 4 (NRD v1) once phase 1 lands.
 
 ## Why
@@ -44,7 +45,8 @@ Denoiser mode 2 (`voxi.denoiserMode 2`, `--denoiser 2`, `RENDER.DENOISER 2`; the
 combo). D3D12 staged ray-driven frames with the G-buffer only; anywhere else (Vulkan, single pass,
 MSAA, debug views, Reference path tracing) the frame runs as before, FidelityFX if it can.
 
-**Strictly single-frame.** An NRD2 frame runs no FidelityFX pass and no Voxi history:
+**Single-frame filter.** (The stabiliser added later is a separate pass after the resolve.) An NRD2 frame
+runs no FidelityFX pass and no Voxi history:
 `rtHistParams.xy = 0` puts the sun shadow, reflection, sky-occlusion and lamp visibility on their raw
 paths (no reprojection, no history write) and `rtDenoiseParams.w = 0` the sky occlusion. Half-rate
 tracing stays, filled from this frame only (next section). CSRdRefl takes its denoiser branch (one raw
@@ -103,7 +105,8 @@ All compute is fp32, 8x8 (params 64x1), no wave intrinsics or atomics, groupshar
 3. `CSNrd2Resolve`: per pixel and signal, candidates = own pixel and the three levels upsampled by
    depth- and normal-weighted fixed bilinear taps. Weight = exp(logit) x surviving tap share x
    luminance term (log-ratio to the coarsest usable level); own logit 0. Specular adds fixed terms: a
-   smooth lobe (roughness below 0.35) and a short hit distance keep the own pixel. Writes D' Rd + S' Rs.
+   smooth lobe (roughness below 0.35) and a short hit distance keep the own pixel. Writes D' Rd + S' Rs
+   (with the stabiliser on, D' and S' go to two more targets and pass 5 writes the lit target).
 4. Compose: a fullscreen additive draw of that into the scene colour (4-target PSO, G-buffer targets
    masked), the G-buffer back in RenderTarget.
 
@@ -231,8 +234,8 @@ where it stands, saves `.last`, then stops; editor exit saves the last read-back
 Scenes with no held-out pose hold out every 4th (logged).
 
 **Inference** (`Nrd2Network`, in `Nrd2::record` after the pyramid when `voxi.nrd2Network` is on and not
-bypassed): `CSNrd2Features` -> `CSNrd2NetIn` (standardise in place) -> `ConvNet::recordInfer` (EMA) ->
-`CSNrd2NetOut` (output affine; logits clamped +-8, log2 sensitivities +-6; non-finite -> the defaults) into
+bypassed): `CSNrd2Features` (stores the tensor already standardised with the weights' input affine; the
+capture asks it for the raw features instead) -> `ConvNet::recordInfer` (EMA) -> `CSNrd2NetOut` (output affine; logits clamped +-8, log2 sensitivities +-6; non-finite -> the defaults) into
 the tile-parameter buffer; GPU span "NRD2 network". Defaults instead (said once) when the passes or the
 network do not build, there are no weights, the file will not load or has no affine, the gate is closed, or
 a buffer will not allocate. Weights: `%LOCALAPPDATA%\AverEngine\nrd2_v1.avnn` over `bin/data/nrd2_v1.avnn`
@@ -288,6 +291,68 @@ In motion it beats FidelityFX on speckle, energy and cost. At rest FidelityFX is
 reference, because its history accumulates. That is the price of being single-frame, which is also why
 NRD2 cannot smear. The next levers are more poses per scene, more scenes, and a second network input
 level (1/4).
+
+## Temporal stabiliser (2026-10-06)
+
+The owner asked for smoothing of the speckle that remains in motion, where there is no temporal stage at
+all: the camera moving zeroes the TAA jitter and TAAU falls back to its spatial path with no history, and
+FidelityFX is off. The stabiliser (`CSNrd2Stabilise`, `AVER_NRD2_PASS 5`, GPU span `NRD2.Stabilise`) fills
+that gap and nothing else. Default on; `voxi.nrd2Stab 0` is the A/B.
+
+**Gate.** It runs when `Settings::nrd2Stab`, the frame's TAA jitter is exactly (0, 0) (`IDevice::taaJitter`),
+the G-buffer history is valid, the velocity target and previous matrix are supplied, and no capture is
+active. Otherwise the resolve writes the lit target itself, as before, and the history is dropped, so the
+first stabilised frame after a rest or a toggle has none. Jitter-free only means history never mixes
+jittered samples, and TAAU keeps the camera-at-rest case (TAA on and still: jitter non-zero, no stabiliser).
+
+**What it does.** Per pixel, on the resolve's D' and S' (irradiance, before remodulation, so albedo detail
+never blurs; D and S separately, so the clamp box is in lighting units):
+
+1. History position from the G-buffer velocity (rigid motion, exact on jitter-free frames). Four bilinear
+   taps by `Load`; each is kept or dropped by its reprojected view depth: the stored depth must match the
+   depth this surface point should have in last frame's camera within 2% + 1 cm + the local depth slope
+   (per axis the smaller one-sided difference to the neighbours, so a silhouette does not widen it). Less
+   than half the bilinear weight left, a position outside the viewport, or no valid previous frame: no
+   history for this pixel (age 0), which is plain single-frame NRD2. A rigid mover fails the camera-only
+   depth test and so gets none either.
+2. The clamp box is the per-channel min and max of this frame's valid 3x3 of D' (S'), united with the four
+   1/8-level texels the resolve's own taps read (`nrd2LoadTaps` at the coarsest level): the footprint of the
+   spatial estimate, never larger. History outside the box is clamped to its edge. Never a mean or variance.
+3. Blend weight `a = 1 - 1/min(age + 1, N)`, so 0, 1/2, 2/3, 3/4 ... The age is the youngest of the taps that
+   carry weight (> 0.1), and the stored age counts frames up to 255. It feeds this weight only. `N` comes from
+   motion alone: `voxi.nrd2StabFrames` (12) up to 0.25 px per frame, a log-space ramp to min(4, that) at
+   8 px, flat to 32 px, none beyond (a whip pan takes no history); 2 for two frames after the sun changes
+   (the hold FidelityFX gets). Specular takes `a` times saturate((roughness - 0.35) / 0.3): a glossy
+   reflection does not move with its surface, so smooth lobes stay single-frame.
+4. out = lerp(current, clamp(history, box), a), stored as the next history (D'' with the age, S'' with the
+   view Z in metres), and lit = D'' Rd + S'' Rs, clamped as the resolve does.
+
+Why it should not smear: the velocity is exact for a camera pan, so history is aligned and only bilinear
+blur of already smooth irradiance remains; strips entering the screen and disocclusions get age 0; `N` falls
+with speed; the box bounds any misaligned history to this frame's neighbourhood; reflections that swim with
+parallax are excluded. Remaining risks: a moving object's shadow on static ground (velocity 0, the edge moves:
+lag up to `N` frames inside the box), skinned or soft-body motion (not in the velocity; the depth test and the
+box bound it), lamp flicker (the clamp snaps past the box, so no lag for global changes).
+
+**Resources.** D' and S' (RGBA16F) and two ping-pong pairs of history (D'' + age, S'' + Z), all render size,
+allocated on the first stabilised frame and freed when the dial is off: about 84 MiB at 1766x994 (estimate).
+Cost, also an estimate and not measured: about +0.3 ms (0.2-0.4) on jitter-free frames, none otherwise.
+Constants grow from 128 to 320 bytes (stabiliser rows and the features' input affine).
+
+**Dials.** `voxi.nrd2Stab` (bool), `voxi.nrd2StabFrames` (1-64). The speed cut-offs, the depth tolerance and the
+roughness ramp are constants at the top of `nrd2_resolve.hlsli`, starting values to tune on the rig.
+
+**Not done.** Glossy road reflections stay single-frame (no reflected-point reprojection; a later option, and
+the parallax rule needs counsel first); no jitter-aware variant to run under TAAU at rest; perspective
+cameras only (the view-depth reprojection assumes a symmetric frustum); the speckle that is specular aliasing
+or a heavy-tailed sample is only averaged down, not removed. An estimate from the rig numbers above: at most
+about a third of the 0.21 moving speckle (toward the 0.14 still level) is lack of accumulation.
+
+**Check (owner-run, headed).** TAA off so jitter is 0, a moving camera, `voxi.nrd2Stab` 0 against 1:
+speckles per mille and the 9 px blob error; energy against `voxi.ptMode 1` (target no worse than about 0.5%
+lost on Night); a fast pan at 8, 32 and 64 px per frame against stab-off frames for lag; one lamp toggle and
+one sun-time step; the `NRD2.Stabilise` span (budget 0.3 ms). CPU twin: `Nrd2ResolveReference`
+(`nrd2StabilisePixel`), checked by `Nrd2ResolveTest`. Patent mapping: NEURAA_NRD.md section 7, rule 13.
 
 ## The network
 

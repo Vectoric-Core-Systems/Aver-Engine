@@ -941,6 +941,10 @@ public:
         cb.jitter[0] = jx; cb.jitter[1] = jy;
     }
     void setJitterSuppressed(bool on) override { jitterSuppressed_ = on; }
+    bool taaJitter(f32 out[2]) const override {
+        out[0] = taaJitterThisFrame_[0]; out[1] = taaJitterThisFrame_[1];
+        return true;
+    }
     bool jitterSuppressed_ = false;
     u32 taaJitterIndex_ = 0;
     f32 taaJitterThisFrame_[2] = {0.0f, 0.0f};   // what this frame's upload carried, for the upscaler

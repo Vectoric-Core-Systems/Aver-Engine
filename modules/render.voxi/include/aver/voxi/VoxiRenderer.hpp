@@ -141,6 +141,9 @@ public:
     // This frame's translucent draws were composited inside the ray-driven frame; skip their replay.
     bool blendedDrawsResolvedInScene() const override { return translucentInPath_; }
 
+    // Builds the variants otherwise compiled on first use (NRD2 Stage B, Path Tracing and NeuRaC
+    // twins). For tests and loading screens; call after onRenderTargetsChanged.
+    void buildAllVariants();
     void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
                                 u32 width, u32 height) override;
 
@@ -437,7 +440,7 @@ private:
 
     // Instance table: RING on upload heap. Rewritten every frame while GPU reads previous copy.
     // One buffer per frame in flight; 3 matches PcgVolume's readback window.
-    static constexpr u32 kRtInstanceRing = 8;   // two uploads a frame (prePass + late movers) x frames in flight
+    static constexpr u32 kRtInstanceRing = 8;   // up to two uploads a frame (prePass settle + late movers) x frames in flight
 
     // Distinct textures ray can sample. Fixed, not grown (baked into root signature). 4096 limit: 6% of 65536-descriptor heap.
     static constexpr u32 kRtTextureCapacity = 4096;
@@ -710,12 +713,17 @@ private:
     std::vector<Draw> draws_, drawsPrev_;
     // Pairs movers against list (drawsPrev_ in prePass; this frame's draws_ in the late scene pass)
     // and writes their transforms. late skips the key-pass check (the late pass builds its own movers).
-    MoverPatch patchRtMovers(const std::vector<Draw>& list, bool late);
+    // deferGpu: a Patched result leaves the instance-table upload to the caller (see rtRefitDeferred_).
+    MoverPatch patchRtMovers(const std::vector<Draw>& list, bool late, bool deferGpu);
+    // The instance-table upload and TLAS/dynamic-BLAS refit a prePass mover patch left to the late pass
+    // (wantsLateScenePass); held until latePatchMovers or a prePass that cannot defer runs them.
+    bool rtRefitDeferred_ = false;
     // Late scene pass: brings movers to THIS frame's transforms before anything traces (D3D12).
     void latePatchMovers(rhi::IRenderContext& ctx);
     // Two facts about the list recorded as each draw appends and swapped by beginScene().
     std::vector<u32> translucentDraws_, translucentDrawsPrev_;
-    u32 lightFlaggedDraws_ = 0, lightFlaggedDrawsPrev_ = 0;
+    // Indices into draws_ / drawsPrev_ of light-flagged draws, in list order.
+    std::vector<u32> lampDraws_, lampDrawsPrev_;
 
     // ---- the blended-draw census ----
     // submitDraw() drops every blended draw before it reaches draws_ (silent drop would be indistinguishable from a bug).
@@ -1076,7 +1084,7 @@ private:
     rhi::TextureHandle rdReflTex_ = 0;
     // ---- SUB-STAGE SPLITS' OWN BUFFERS (Settings::rayDrivenShadowTiles / rayDrivenGiSplit): u17/u18,
     // sharing rdVisBuf_'s StructuredBuffer shape.
-    // rdGiCandBuf_: one RdGiCand (48 bytes, voxi_restir.hlsli) per pixel.
+    // rdGiCandBuf_: one RdGiCand (64 bytes, voxi_restir.hlsli) per pixel.
     rhi::BufferHandle rdGiCandBuf_ = 0;
     u32  rdGiCandBufElemCapacity_ = 0;
     // rdShadowTileBuf_: one uint mask per 8x8 tile (ceil(W/8) x ceil(H/8) tiles).

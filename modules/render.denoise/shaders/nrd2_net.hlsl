@@ -1,9 +1,9 @@
 // NRD2 phase 4 (docs/rendering/NRD2.md): the network's data paths around Aver.Render.Neural's ConvNet.
 // One file, one pass per compile (AVER_NRD2_NET_PASS):
 //   0 CSNrd2Gather  -- one training/validation record from a GPU pose slot (CPU twin nrd2ExtractPatch)
-//   1 CSNrd2NetIn   -- standardises CSNrd2Features' tensor in place (x * inScale + inBias)
-//   2 CSNrd2NetOut  -- the network's standardised tile parameters -> the resolve's parameter buffer
+//   1 CSNrd2NetOut  -- the network's standardised tile parameters -> the resolve's parameter buffer
 //                      (y * outScale + outBias, clamped, non-finite -> defaults)
+// The input standardisation (x * inScale + inBias) is folded into nrd2.hlsl's CSNrd2Features on the live path.
 // Parameter space only: nothing here runs the resolve on the network's output (patent rule 4).
 // Portable: fp32 (fp16 only as packed storage), no wave intrinsics, no atomics, no groupshared, 64-thread
 // groups, constants at b3, explicit bounds checks.
@@ -87,38 +87,21 @@ void CSNrd2Gather(uint3 dtid : SV_DispatchThreadID) {
     }
 }
 
-#else   // ---- inference: standardise in, de-standardise out ----
+#else   // ---- inference: the network's output -> tile parameters ----
 
 cbuffer Nrd2NetCB : register(b3) {
-    uint4  gNetDims;    // x: texels per feature plane (4 tilesX x 4 tilesY), y: tiles
+    uint4  gNetTiles;   // x: tiles
     float4 gNetScale[3];
     float4 gNetBias[3];
-    float4 gNetDef[3];  // default parameters (out pass)
+    float4 gNetDef[3];  // default parameters
 };
-
-#if AVER_NRD2_NET_PASS == 1
-
-RWStructuredBuffer<float> gFeat : register(u0);
-
-[numthreads(64, 1, 1)]
-void CSNrd2NetIn(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {
-    // 2D grid of groups: x up to 65535 (Nrd2Network::record).
-    const uint i = (gid.y * 65535u + gid.x) * 64u + gtid.x;
-    const uint plane = gNetDims.x;
-    if (i >= plane * NRD2_NET_CH) return;   // no barriers
-    const uint c = i / plane;
-    const float x = gFeat[i];
-    gFeat[i] = nrd2NetFinite(x) ? x * nrd2NetPick(gNetScale, c) + nrd2NetPick(gNetBias, c) : 0.0;
-}
-
-#else   // AVER_NRD2_NET_PASS == 2
 
 StructuredBuffer<float>   gNetOut : register(t0);   // [12][tilesY][tilesX], standardised
 RWStructuredBuffer<float> gParams : register(u0);   // the resolve's buffer, plane-major
 
 [numthreads(64, 1, 1)]
 void CSNrd2NetOut(uint3 dtid : SV_DispatchThreadID) {
-    const uint tiles = gNetDims.y;
+    const uint tiles = gNetTiles.x;
     if (dtid.x >= tiles) return;
     [unroll] for (uint p = 0u; p < NRD2_NET_CH; ++p) {
         const float y = gNetOut[p * tiles + dtid.x];
@@ -128,5 +111,4 @@ void CSNrd2NetOut(uint3 dtid : SV_DispatchThreadID) {
     }
 }
 
-#endif
 #endif

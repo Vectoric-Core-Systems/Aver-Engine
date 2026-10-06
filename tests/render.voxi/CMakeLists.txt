@@ -122,3 +122,19 @@ if(TARGET Aver.Render.Voxi)
   target_link_libraries(RenderSettingsResolverTest PRIVATE Aver.Render.Voxi Aver.Core)
   set_target_properties(RenderSettingsResolverTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# VoxiShaderCompileTest -- compiles every staged ray-driven Voxi pipeline and every NRD2 pass on the
+# adapter (no window, no scene), so shader errors fail here instead of in the editor. Skips (77)
+# without ray tracing 1.1 / SM 6.6.
+if(TARGET Aver.Render.Voxi.Renderer AND AVER_RHI_D3D12)
+  add_executable(VoxiShaderCompileTest src/VoxiShaderCompileTest.cpp)
+  target_link_libraries(VoxiShaderCompileTest PRIVATE Aver.Render.Voxi.Renderer Aver.Render.Voxi Aver.Render.Denoise Aver.Render.PBR Aver.RHI
+                        Aver.RHI.D3D12 Aver.Core Aver.Platform)
+  if(AVER_RHI_D3D11)
+    target_link_libraries(VoxiShaderCompileTest PRIVATE Aver.RHI.D3D11)
+  endif()
+  if(AVER_RHI_VULKAN)
+    target_link_libraries(VoxiShaderCompileTest PRIVATE Aver.RHI.Vulkan)
+  endif()
+  set_target_properties(VoxiShaderCompileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

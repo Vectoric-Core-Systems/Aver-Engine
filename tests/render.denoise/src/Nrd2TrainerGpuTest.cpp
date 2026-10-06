@@ -174,7 +174,6 @@ void runTrainer(rhi::IDevice& dev) {
         const rhi::BufferHandle up = buf(raw.size() * 4, rhi::BufferKind::Upload, false);
         const rhi::BufferHandle params = buf(12 * tiles * 4, rhi::BufferKind::Default, true);
         const rhi::BufferHandle rb = buf(12 * tiles * 4, rhi::BufferKind::Readback, false);
-        res.writeBuffer(up, raw.data(), raw.size() * 4);
         f32 def[12];
         nrd2DefaultParams(def);
 
@@ -182,10 +181,20 @@ void runTrainer(rhi::IDevice& dev) {
         net.setWeightPaths(inferPath, "");
         bool ready = false, recorded = false;
         const bool ran = feat && up && params && rb && dev.runStandaloneCompute([&](rhi::IRenderContext& ctx) {
+            ready = net.ready(dev);
+            // The live path standardises in CSNrd2Features; the network reads standardised features.
+            if (ready) {
+                std::vector<f32> stdz(raw.size());
+                for (usize i = 0; i < raw.size(); ++i) {
+                    const usize c = i / plane;
+                    const f32 v = raw[i] == raw[i] ? raw[i] : 0.0f;   // NaN -> 0 first, as the features pass
+                    stdz[i] = std::fabs(v) < 3.0e38f ? v * net.inScale()[c] + net.inBias()[c] : 0.0f;
+                }
+                res.writeBuffer(up, stdz.data(), stdz.size() * 4);
+            }
             ctx.bufferBarrier(feat, rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
             ctx.copyBuffer(feat, up, raw.size() * 4);
             ctx.bufferBarrier(feat, rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
-            ready = net.ready(dev);
             if (ready)
                 recorded = net.record(ctx, feat, static_cast<u32>(raw.size()), params, static_cast<u32>(12 * tiles),
                                       p.tilesX, p.tilesY, def);

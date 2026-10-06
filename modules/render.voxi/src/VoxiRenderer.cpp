@@ -54,8 +54,8 @@ constexpr u32 kRdVisElemBytes = 16;
 // Sub-stage splits (Settings::rayDrivenShadowTiles / rayDrivenGiSplit): candidate buffers
 // CSRdShadowProbe/CSRdGiTrace write and CSRdShadow/CSRdGi read back.
 // kRdGiCandElemBytes: sizeof(RdGiCand) (voxi_restir.hlsli) -- float3 pos, uint flags, float3 nrm,
-// f2LumTraced, float3 rad, f2LumSky = 48 bytes, one per pixel, same row pitch as rdVisBuf_.
-constexpr u32 kRdGiCandElemBytes = 48;
+// f2LumTraced, float3 rad, f2LumSky, float4 vis = 64 bytes, one per pixel, same row pitch as rdVisBuf_.
+constexpr u32 kRdGiCandElemBytes = 64;
 // kRdShadowTileElemBytes: one uint mask per 8x8 tile (ceil(W/8)*ceil(H/8) tiles, not per pixel) --
 // orders of magnitude smaller than rdVisBuf_/rdGiCandBuf_.
 constexpr u32 kRdShadowTileElemBytes = 4;
@@ -550,7 +550,9 @@ void VoxiRenderer::shutdown() {
     drawsPrev_.clear();
     translucentDraws_.clear();
     translucentDrawsPrev_.clear();
-    lightFlaggedDraws_ = lightFlaggedDrawsPrev_ = 0;
+    lampDraws_.clear();
+    lampDrawsPrev_.clear();
+    rtRefitDeferred_ = false;
     rebuiltThisFrame_.clear();
     lastBlasRebuilds_ = 0xFFFFFFFFu;
     // Next full build has no previous frame for transform carry-over.
@@ -1014,8 +1016,8 @@ void VoxiRenderer::beginScene() {
     draws_.clear();
     translucentDrawsPrev_.swap(translucentDraws_);
     translucentDraws_.clear();
-    lightFlaggedDrawsPrev_ = lightFlaggedDraws_;
-    lightFlaggedDraws_ = 0;
+    lampDrawsPrev_.swap(lampDraws_);
+    lampDraws_.clear();
     dropMeshSubmitCache();
 }
 
@@ -1053,7 +1055,7 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
     }
     // Nested CpuNest for submit() timing.
     CpuNest voxiSubmitTiming(CpuSpan::VoxiSubmit);
-    Draw d;
+    Draw& d = draws_.emplace_back();
     d.mesh = mesh;
     // Depth mesh and bounds resolved once per distinct mesh id, cached until beginScene().
     MeshSubmitCacheSlot* const cacheSlot =
@@ -1109,13 +1111,13 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
         d.boundsRadius = localRadius * maxAxisScale(w);
     }
     // Record translucent and light-flagged facts discovered here, not per-pass.
-    if (d.translucent) translucentDraws_.push_back(static_cast<u32>(draws_.size()));
+    const u32 drawIndex = static_cast<u32>(draws_.size() - 1);
+    if (d.translucent) translucentDraws_.push_back(drawIndex);
     if (d.matBytes >= sizeof(pbr::MaterialConstants)) {
         u32 matFlags = 0;
         std::memcpy(&matFlags, d.mat + offsetof(pbr::MaterialConstants, flags), sizeof(matFlags));
-        if (matFlags & pbr::MaterialFlag_Light) ++lightFlaggedDraws_;
+        if (matFlags & pbr::MaterialFlag_Light) lampDraws_.push_back(drawIndex);
     }
-    draws_.push_back(d);
 }
 
 // IRenderFeature entry point for every draw. Blended draws filtered here: unfiltered,
@@ -1449,6 +1451,8 @@ void VoxiRenderer::manageInjectionAccumulator(rhi::IRenderContext& ctx) {
 // Builds BLAS for each mesh and TLAS over drawsPrev_. Publishes shadowParams.z.
 // rtSkipUnchangedTlas gates TLAS rebuild on rtAccelSnapshotUnchanged(); rtRefitAccel enables refits.
 void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
+    // Read before rtActive_ resets: the device asked the same at beginFrame, so a late scene pass follows.
+    const bool lateScene = wantsLateScenePass();
     rtActive_ = false;
     cb_.shadowParams[2] = 0.0f;
     rtAccelListKeyValid_ = false;
@@ -1486,11 +1490,17 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
             settled = true;
         }
         // Mover patch lane: rtMovers_ collects current movers; empty means lane off or no movable draws.
-        const MoverPatch patch = rtMovers_.empty() ? MoverPatch::Unchanged : patchRtMovers(drawsPrev_, false);
+        // With a late scene pass the instance upload and refit wait for latePatchMovers: one per frame, fed
+        // with this frame's transforms. owed: an earlier frame deferred them and its late pass never ran.
+        const bool defer = lateScene;
+        const bool owed = rtRefitDeferred_;
+        const MoverPatch patch = rtMovers_.empty() ? MoverPatch::Unchanged : patchRtMovers(drawsPrev_, false, defer);
         if (patch != MoverPatch::Refused) {
+            const bool gpuDue = patch == MoverPatch::Patched || owed;
             bool settleUploadFailed = false;
-            // Patched and MaterialsOnly already uploaded the instance table (settled rows included).
-            if (settled && patch != MoverPatch::Patched && patch != MoverPatch::MaterialsOnly)
+            // MaterialsOnly, and Patched unless deferred, already uploaded the instance table (settled rows included).
+            const bool uploaded = patch == MoverPatch::MaterialsOnly || (patch == MoverPatch::Patched && !defer);
+            if (!uploaded && !(gpuDue && defer) && (settled || owed))
                 settleUploadFailed = !uploadRtInstanceTable();
             if (!settleUploadFailed) {
                 rtPrevPending_.clear();
@@ -1501,12 +1511,17 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
                         rtPrevPending_.push_back(m.inst);
                 }
             }
-            if (patch == MoverPatch::Patched) {
-                if (!rtDynamicMeshes_.empty()) {
-                    refitDynamicAccelStructures(ctx);
+            if (gpuDue) {
+                if (defer) {
+                    rtRefitDeferred_ = true;
                 } else {
-                    rhi::ScopedGpuStat gpuStat(ctx, "Voxi acceleration structures");
-                    refitOrRebuildTlas(ctx);
+                    rtRefitDeferred_ = false;
+                    if (!rtDynamicMeshes_.empty()) {
+                        refitDynamicAccelStructures(ctx);
+                    } else {
+                        rhi::ScopedGpuStat gpuStat(ctx, "Voxi acceleration structures");
+                        refitOrRebuildTlas(ctx);
+                    }
                 }
                 ++rtAccelMoverPatched_;
             } else if (settings_.rtRefitAccel && !rtDynamicMeshes_.empty()) {
@@ -1524,6 +1539,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         }
     }
     if (settings_.rtSkipUnchangedTlas) ++rtAccelRebuilt_;
+    rtRefitDeferred_ = false;   // the build below rewrites and uploads every table
 
     rhi::ScopedGpuStat gpuStat(ctx, "Voxi acceleration structures");
     tlasTranslucentThisBuild_ = 0;
@@ -1941,7 +1957,7 @@ void VoxiRenderer::takeRtAccelSnapshot() {
 // Verifies before writing: movers must pair off identity-for-identity. Refusal leaves both unchanged.
 // Pairing by identity: reshuffled but unchanged list still matches. TIE-BREAK BY NEAREST: movers stay in instances.
 // Only changed instances written; unchanged movers returns MoverPatch::Unchanged.
-VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers(const std::vector<Draw>& list, bool late) {
+VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers(const std::vector<Draw>& list, bool late, bool deferGpu) {
     const auto refuse = [this](const char* why) {
         if (!(rtAccelGateWhyMask_ & (1u << 3))) {
             rtAccelGateWhyMask_ |= (1u << 3);
@@ -2043,6 +2059,7 @@ VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers(const std::vector<Draw>& li
         if (!buildMaterialTable(matConstantsScratch_)) return refuse("the material table could not be rebuilt");
         if (rtGeometryReady_) uploadFoliagePartTable();
     }
+    if (changed && deferGpu) return MoverPatch::Patched;
     if (!uploadRtInstanceTable()) return refuse("the instance table could not be uploaded");
     return changed ? MoverPatch::Patched : MoverPatch::MaterialsOnly;
 }
@@ -2057,22 +2074,31 @@ bool VoxiRenderer::wantsLateScenePass() const {
 // changes with every frame time: jitter against everything that is current. Called from the late
 // scene pass, this re-pairs the movers against this frame's draws_ and refits before any ray is traced.
 void VoxiRenderer::latePatchMovers(rhi::IRenderContext& ctx) {
-    if (!rtActive_ || !rtMoverPatchActive() || rtMovers_.empty() || draws_.empty()) return;
-    DrawMaterialMemo memo{};
-    rtMoversNow_.clear();
-    u32 drawIndex = 0;
-    for (const Draw& d : draws_) {
-        if (d.movable) rtMoversNow_.push_back({rtDrawHash(d, memo, true), drawIndex, kRtNoInstance});
-        ++drawIndex;
+    if (!rtActive_) return;
+    MoverPatch patch = MoverPatch::Unchanged;
+    if (rtMoverPatchActive() && !rtMovers_.empty() && !draws_.empty()) {
+        DrawMaterialMemo memo{};
+        rtMoversNow_.clear();
+        u32 drawIndex = 0;
+        for (const Draw& d : draws_) {
+            if (d.movable) rtMoversNow_.push_back({rtDrawHash(d, memo, true), drawIndex, kRtNoInstance});
+            ++drawIndex;
+        }
+        patch = patchRtMovers(draws_, true, true);
     }
-    if (patchRtMovers(draws_, true) != MoverPatch::Patched) return;
-    rtPrevPending_.clear();
-    for (const RtMover& m : rtMovers_) {
-        if (m.inst == kRtNoInstance || m.inst >= rtInstanceData_.size()) continue;
-        const RtInstance& r = rtInstanceData_[m.inst];
-        if (std::memcmp(r.prevObjectToWorld, r.objectToWorld, sizeof(r.objectToWorld)) != 0)
-            rtPrevPending_.push_back(m.inst);
+    // Refit when this pass patched, or when prePass patched and left the upload and refit to here.
+    if (patch != MoverPatch::Patched && !rtRefitDeferred_) return;
+    rtRefitDeferred_ = false;
+    if (patch == MoverPatch::Patched) {
+        rtPrevPending_.clear();
+        for (const RtMover& m : rtMovers_) {
+            if (m.inst == kRtNoInstance || m.inst >= rtInstanceData_.size()) continue;
+            const RtInstance& r = rtInstanceData_[m.inst];
+            if (std::memcmp(r.prevObjectToWorld, r.objectToWorld, sizeof(r.objectToWorld)) != 0)
+                rtPrevPending_.push_back(m.inst);
+        }
     }
+    if (patch != MoverPatch::MaterialsOnly) uploadRtInstanceTable();
     if (!rtDynamicMeshes_.empty()) {
         refitDynamicAccelStructures(ctx);
     } else {
@@ -3532,14 +3558,10 @@ void VoxiRenderer::buildLocalLights() {
     u32 flagged = 0;
     // Cutoff below display precision: kLocalLightRangeCutoff / pi ~ 3e-4 of lamp radiance.
     constexpr f32 kLocalLightRangeCutoff = 0.001f;
-    // If no draws carry MaterialFlag_Light, this loop is skipped entirely.
-    if (wanted && lightFlaggedDrawsPrev_ != 0) {
-        for (const Draw& d : drawsPrev_) {
-            if (d.matBytes < sizeof(pbr::MaterialConstants)) continue;
-            // Two fields first, whole block only for a lamp.
-            u32 flags = 0;
-            std::memcpy(&flags, d.mat + offsetof(pbr::MaterialConstants, flags), sizeof(flags));
-            if (!(flags & pbr::MaterialFlag_Light)) continue;
+    // submit() listed the light-flagged draws; with none this loop does not run.
+    if (wanted) {
+        for (const u32 lampIndex : lampDrawsPrev_) {
+            const Draw& d = drawsPrev_[lampIndex];
             f32 intensity = 0.0f;
             std::memcpy(&intensity, d.mat + offsetof(pbr::MaterialConstants, lightIntensity),
                         sizeof(intensity));
@@ -4200,7 +4222,7 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
     ptRanThisFrame_ = false;
     translucentInPath_ = false;
     // Recorded late (wantsLateScenePass) this frame's draws exist; bring the movers up to date first.
-    if (!draws_.empty() && !debugViewActive() && rayDrivenActive()) latePatchMovers(ctx);
+    if ((!draws_.empty() || rtRefitDeferred_) && !debugViewActive() && rayDrivenActive()) latePatchMovers(ctx);
     if (pathTracingWanted() && !debugViewActive()) {
         const char* why = nullptr;
         const bool staged = rayDrivenActive() && rdStagedActive(&why);
@@ -4676,11 +4698,8 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // the replay's eye-inside refraction.
         translucentInPath_ = settings_.translucencyInPath && rtTlasTranslucent_ > 0 && cb_.cameraMedium[0] < 0.5f;
         cb_.ptBounceParams[3] = translucentInPath_ ? 1.0f : 0.0f;
-        // NRD2: CSRdRefl wrote S (u23) and CSRdGi wrote remod A (u9); Stage B reads and overwrites them.
-        if (nrd2) {
-            ctx.uavBarrierTexture(nrd2_.targets().specular);
-            ctx.uavBarrierTexture(nrd2_.targets().remodA);
-        }
+        // NRD2: CSRdRefl wrote S (u23); Stage B reads its hit distance and overwrites it.
+        if (nrd2) ctx.uavBarrierTexture(nrd2_.targets().specular);
         ctx.setPipeline(stageBPso);
         ctx.setBindingSet(bindings_);
         ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
@@ -4695,6 +4714,8 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         std::memcpy(np.specular, settings_.nrd2Params + 6, sizeof(np.specular));
         np.bypass = settings_.nrd2Bypass;
         np.network = settings_.nrd2Network;
+        np.stabilise  = settings_.nrd2Stab;
+        np.stabFrames = static_cast<f32>(settings_.nrd2StabFrames);
         nrd2_.setParams(np);
         render::denoise::Nrd2::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();
@@ -4706,6 +4727,14 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         in.halfRate = (giCbWrittenThisFrame_ ? 1u : 0u) | ((giCbParityWritten_ & 1u) << 1) |
                       ((static_cast<u32>(cb_.giShadowParams[3]) & 4u) != 0u ? 4u : 0u) |
                       ((static_cast<u32>(cb_.rtHistParams[2]) & 1u) << 3);
+        // Stabiliser inputs. prevCamPos_ already holds this frame's eye here; the fold only needs one point
+        // used consistently for the previous matrix and the eye offset.
+        in.velocity = dev_->gBufferVelocityTexture();
+        dev_->gBufferPrevViewProj(in.prevViewProj);
+        std::memcpy(in.prevCamPos, prevCamPos_, sizeof(in.prevCamPos));
+        in.historyValid = !dev_->gBufferHistoryInvalid();
+        in.sunMoved     = rtHistSunMoved();
+        dev_->taaJitter(in.jitter);
         if (nrd2CapturePending_ && nrd2_.valid()) {
             nrd2CapturePending_ = false;
             nrd2_.startCapture(nrd2CaptureCfg_);
@@ -5073,6 +5102,13 @@ bool VoxiRenderer::nrd2Wanted() const {
 
 // Builds NRD2 once per createScenePipelines (its pipelines, the compose draw and Stage B's AVER_NRD2
 // variant), then sizes its targets. False: this frame runs without it (FidelityFX if it is valid).
+void VoxiRenderer::buildAllVariants() {
+    if (!res_ || !giReady_) return;
+    ensureNrd2();
+    if (!ptTwinsTried_) createPathTraceTwins();
+    if (!rcTwinsTried_) createNeuRaCTwins();
+}
+
 bool VoxiRenderer::ensureNrd2() {
     if (!nrd2Tried_) {
         nrd2Tried_ = true;
@@ -5144,7 +5180,7 @@ bool VoxiRenderer::ensureNrd2() {
 
 // Stage B's NRD2 targets into the table-0 slots an NRD2 frame leaves unused (voxi.hlsl's gNrd2*Out):
 // u2 and u3 (shadow/reflection history writes, off with rtHistParams.x 0), u9 (FidelityFX's GI input;
-// CSRdGi's write there is overwritten by Stage B) and u23 (CSRdRefl's raw sample, then S).
+// CSRdGi skips its write there under NRD2) and u23 (CSRdRefl's raw sample, then S).
 void VoxiRenderer::bindNrd2Targets() {
     const render::denoise::Nrd2::Targets& t = nrd2_.targets();
     res_->setUav(bindings_, 2, t.remodB, 0);
@@ -5673,6 +5709,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
                               denoiser_.valid() && gbufWritten;
     // Leaving NRD2: u23 (and u9) still hold its targets and must be rebound whatever was wanted before.
     const bool nrd2Unbind = nrd2Bound_ && !nrd2Frame_;
+    if (!nrd2Frame_) nrd2_.resetHistory();
     if (reflDnWanted != rdReflDnBound_ || !rdReflDnPlaceholder_ || nrd2Unbind) {
         if (reflDnWanted) res_->setUav(bindings_, 23, rdReflDnIn_, 0);
         else              bindReflDnPlaceholder();
@@ -5768,6 +5805,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         if (ao) bits |= 128u;
         if (settings_.nrd2HalfRateLamps) bits |= 256u;
         if (fill && (refl || ao || settings_.nrd2HalfRateGi)) bits |= 64u;
+        bits |= 512u;   // shader-visible NRD2 frame (rtNrd2Frame)
         cb_.giShadowParams[3] = static_cast<f32>(bits);
     }
     // Spatial filter radius; blend amount pinned at 0 (loop runs but result discarded via constant).

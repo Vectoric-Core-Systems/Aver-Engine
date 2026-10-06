@@ -491,6 +491,9 @@ public:
     // Holds the temporal-AA jitter at zero from the next uploaded frame (NRD2's training capture holds a
     // still pose on one sample position). Backends without jitter ignore it.
     virtual void setJitterSuppressed(bool on) { (void)on; }
+    // This frame's temporal-AA jitter in scene pixels, as the uploaded camera carries it ((0, 0) = none).
+    // False, `out` untouched: unknown (backends without jitter reporting).
+    virtual bool taaJitter(f32 out[2]) const { (void)out; return false; }
     // The scene's own viewport rect in target pixels -- {x, y, w, h} -- for a feature reprojecting
     // a screen-space position between frames. NOT necessarily the whole render target: the editor docks
     // the 3D view in a sub-rect of the backbuffer. False when the backend has no viewport to give.

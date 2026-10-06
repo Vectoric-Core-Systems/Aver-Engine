@@ -276,8 +276,12 @@ AverDrawTerms rtDrawTerms(RtInstance inst) {
 
 // How many of the material's maps a hit samples. FULL: all eight. LITE: base colour and metal/rough
 // (plus emissive outside the single pass) -- the single-pass shader's secondary hits, at its register limit.
-#define AVER_RT_HIT_FULL 0u
-#define AVER_RT_HIT_LITE 1u
+// ROUGHNORMAL: only what s.rough and s.N read (metal/rough, normal, their layer-1 maps), bit-identical to
+// FULL for those two; every other field is unspecified. A material graph can rewrite them from any map, so
+// it takes FULL.
+#define AVER_RT_HIT_FULL        0u
+#define AVER_RT_HIT_LITE        1u
+#define AVER_RT_HIT_ROUGHNORMAL 2u
 
 // Normal maps on ray hits, as on raster. Every user of the hit's shading normal (direct light, the
 // reflection ray, sky ambient, the G-buffer) takes the same perturbed s.N.
@@ -311,6 +315,10 @@ void rtHitConeGrad(RtHit h, float tanCone, out float2 gx, out float2 gy) {
 // THE HIT'S SURFACE. V points back along the ray; L is the light the half vector is first aimed at.
 AverSurface rtHitSurface(RtHit h, float3 V, float3 L, float2 gx, float2 gy, uint detail) {
     const RtMaterial m = h.mat;
+#if defined(AVER_RT_BINDLESS) && defined(AVER_MATERIAL_GRAPH)
+    if (detail == AVER_RT_HIT_ROUGHNORMAL && m.graphId != 0u) detail = AVER_RT_HIT_FULL;
+#endif
+    const bool rn = detail == AVER_RT_HIT_ROUGHNORMAL;
     AverMaps map;
     map.baseColor  = float4(1.0, 1.0, 1.0, 1.0);
     map.metalRough = float2(1.0, 1.0);
@@ -321,26 +329,26 @@ AverSurface rtHitSurface(RtHit h, float3 V, float3 L, float2 gx, float2 gy, uint
     float2 uv = h.meshUV;
 #ifdef AVER_RT_BINDLESS
     uv = averRtSurfaceUV(m, h.inst, h.pos, h.N, h.meshUV);
-    map.baseColor = averRtSampleSlot(m, 0, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0));
+    if (!rn) map.baseColor = averRtSampleSlot(m, 0, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0));
     const float4 mr = averRtSampleSlot(m, 1, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0));
     map.metalRough = float2(mr.g, mr.b);   // glTF: roughness G, metallic B
 #if !AVER_RD_SINGLE_PASS
-    map.emissive = averRtSampleSlot(m, 4, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0)).rgb;
+    if (!rn) map.emissive = averRtSampleSlot(m, 4, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0)).rgb;
 #endif
-    if (detail == AVER_RT_HIT_FULL) {
+    if (detail != AVER_RT_HIT_LITE) {
 #if AVER_RD_SINGLE_PASS
-        map.emissive  = averRtSampleSlot(m, 4, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0)).rgb;
+        if (!rn) map.emissive = averRtSampleSlot(m, 4, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0)).rgb;
 #endif
         const float3 n = averRtSampleSlot(m, 2, uv, gx, gy, float4(0.5, 0.5, 1.0, 1.0)).xyz * 2.0 - 1.0;
         map.normalTS  = float3(n.xy * m.normalScale, n.z);
         map.normalLen = (m.flags & AVER_MAT_NORMAL_MAP) ? length(n) : 1.0;
-        map.occlusion = averRtSampleSlot(m, 3, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0)).r;
+        if (!rn) map.occlusion = averRtSampleSlot(m, 3, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0)).r;
         // The second layer by slope (material_prelude.hlsl's averLayerWeight), as raster blends it.
         const float lw = averLayerWeight(m, h.N);
         if (lw > 0.001) {
             const float  s1  = m.layer1UvScale;
             const float2 uv1 = uv * s1;
-            if (m.flags & AVER_MAT_L1_BASECOLOR)
+            if (!rn && (m.flags & AVER_MAT_L1_BASECOLOR))
                 map.baseColor = lerp(map.baseColor, averRtSampleSlot(m, 5, uv1, gx * s1, gy * s1, map.baseColor), lw);
             if (m.flags & AVER_MAT_L1_METALROUGH) {
                 const float4 mr1 = averRtSampleSlot(m, 6, uv1, gx * s1, gy * s1, float4(1.0, mr.g, mr.b, 1.0));
@@ -375,7 +383,7 @@ AverSurface rtHitSurface(RtHit h, float3 V, float3 L, float2 gx, float2 gy, uint
 
     float3 N = h.N;
 #if defined(AVER_RT_BINDLESS) && AVER_RT_NORMAL_MAPPING
-    if (detail == AVER_RT_HIT_FULL && (m.flags & (AVER_MAT_NORMAL_MAP | AVER_MAT_L1_NORMAL))) {
+    if (detail != AVER_RT_HIT_LITE && (m.flags & (AVER_MAT_NORMAL_MAP | AVER_MAT_L1_NORMAL))) {
         N = averRtPerturbNormal(m, h.inst, h.N, a.normalTS,
                                 gRtVerts[h.i0].pos, gRtVerts[h.i1].pos, gRtVerts[h.i2].pos,
                                 gRtVerts[h.i0].uv,  gRtVerts[h.i1].uv,  gRtVerts[h.i2].uv);
@@ -536,6 +544,12 @@ uint rtGiShadowBits() { return 1u; }
 #else
 uint rtGiShadowBits() { return (uint)gGiShadowParams.w; }
 #endif
+
+// NRD2 frame (bit 512): u9 and u23's rgb belong to Stage B's targets, so the stages' writes there are dead.
+bool rtNrd2Frame() { return (rtGiShadowBits() & 512u) != 0u; }
+
+// False where the sun's radiance is exactly 0 (a night scene): every consumer multiplies visibility by it.
+bool rdSunLit() { return any(averSunRadiance() != 0.0); }
 
 // Sun-shadow rays: 0..1 visibility over disc. Penumbra from pixel footprint (dpx/dpy), not just disc.
 // Bias scales with distance. Secondary rays can request fewer samples than primary.
@@ -1278,7 +1292,7 @@ float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2
 #if AVER_PT_PATHS
     // Path Tracing: the reflected surface is shaded as a full path vertex (voxi_pt.hlsli).
     hit = true;
-    const float3 ptRefl = ptRadiance(r.Origin, dir, r.TMin, max(tanCone, 1e-3), pixel, 0x51f3u, skyColor(dir));
+    const float3 ptRefl = ptRadiance(r.Origin, dir, r.TMin, max(tanCone, 1e-3), pixel, 0x51f3u);
     gAverReflHitT = gAverPtFirstT;
     return ptRefl;
 #endif
@@ -1313,7 +1327,9 @@ float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2
     AverLight sun;
     sun.direction = L;
     sun.radiance  = averSunRadiance();
-    if ((rtGiShadowBits() & 1u) != 0u) {
+    if (!rdSunLit()) {
+        sun.visibility = float3(0.0, 0.0, 0.0);
+    } else if ((rtGiShadowBits() & 1u) != 0u) {
         sun.visibility = rtShadowOpaque(h.pos, s.N, L, pixel, frameJitter);
     } else {
         sun.visibility = rtShadow(h.pos, s.N, L, pixel, float3(0,0,0), float3(0,0,0), 1u, frameJitter);

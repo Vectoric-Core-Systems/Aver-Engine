@@ -278,6 +278,113 @@ void testOracle(Nrd2OracleMode mode) {
     check(errFit < 0.5f * errDef, buf);
 }
 
+// A frame's worth of one pixel with a static camera: taps all on the same texel's history.
+Nrd2StabIn stabPixel(f32 cur, f32 hist, f32 age, f32 lo, f32 hi, f32 nMax) {
+    Nrd2StabIn in;
+    for (u32 c = 0; c < 3; ++c) {
+        in.curD[c] = cur; in.curS[c] = cur;
+        in.loD[c] = in.loS[c] = lo; in.hiD[c] = in.hiS[c] = hi;
+    }
+    for (Nrd2StabTap& t : in.tap) {
+        t.b = 0.25f; t.age = age; t.zm = 10.0f;
+        for (u32 c = 0; c < 3; ++c) { t.d[c] = hist; t.s[c] = hist; }
+    }
+    in.zExp = 10.0f; in.zTol = 0.3f; in.nMax = nMax;
+    return in;
+}
+
+void testStabiliser() {
+    AVER_INFO("temporal stabiliser");
+    // History length: rest, ramp, fast, cut.
+    check(std::fabs(nrd2StabMaxFrames(0.0f, 12.0f, 4.0f) - 12.0f) < 1e-4f && std::fabs(nrd2StabMaxFrames(0.25f, 12.0f, 4.0f) - 12.0f) < 1e-4f,
+          "full history length at rest");
+    check(std::fabs(nrd2StabMaxFrames(8.0f, 12.0f, 4.0f) - 4.0f) < 1e-4f &&
+              std::fabs(nrd2StabMaxFrames(20.0f, 12.0f, 4.0f) - 4.0f) < 1e-4f,
+          "min(4, N) from 8 px per frame");
+    const f32 mid = nrd2StabMaxFrames(1.41f, 12.0f, 4.0f);   // 2.5 octaves above 0.25 px: halfway in log space
+    check(mid > 6.5f && mid < 7.2f, "log-space ramp between (" + std::to_string(mid) + ")");
+    check(nrd2StabMaxFrames(32.0f, 12.0f, 4.0f) == 0.0f && nrd2StabMaxFrames(std::nanf(""), 12.0f, 4.0f) == 0.0f,
+          "no history from 32 px per frame or for a NaN speed");
+    check(std::fabs(nrd2StabMaxFrames(0.0f, 2.0f, 4.0f) - 2.0f) < 1e-5f && std::fabs(nrd2StabMaxFrames(40.0f, 2.0f, 4.0f)) == 0.0f, "the fast cap never exceeds the rest length");
+
+    // Weight ramp from a disocclusion: 0, 1/2, 2/3, 3/4 ... capped by N.
+    f32 age = 0.0f;
+    bool ramp = true, cap = true;
+    const f32 want[5] = {0.0f, 0.5f, 2.0f / 3.0f, 0.75f, 0.8f};
+    for (u32 f = 0; f < 5; ++f) {
+        const Nrd2StabIn in = stabPixel(1.0f, 1.0f, age, 0.5f, 1.5f, 12.0f);
+        Nrd2StabIn first = in;
+        first.historyValid = f > 0;
+        const Nrd2StabOut o = nrd2StabilisePixel(first);
+        ramp = ramp && std::fabs(o.alphaD - want[f]) < 1e-6f;
+        age = o.age;
+    }
+    check(ramp, "weight ramps 0, 1/2, 2/3, 3/4, 4/5 from a first frame");
+    for (u32 f = 0; f < 40; ++f) age = nrd2StabilisePixel(stabPixel(1.0f, 1.0f, age, 0.5f, 1.5f, 12.0f)).age;
+    cap = std::fabs(nrd2StabilisePixel(stabPixel(1.0f, 1.0f, age, 0.5f, 1.5f, 12.0f)).alphaD - (1.0f - 1.0f / 12.0f)) < 1e-6f;
+    check(cap && age == 45.0f, "and caps at 1 - 1/N while the age keeps counting");
+
+    // Weight 0 returns the input; a constant history over a constant input is a fixed point.
+    Nrd2StabIn in = stabPixel(0.7f, 3.0f, 0.0f, 0.5f, 0.9f, 12.0f);
+    Nrd2StabOut o = nrd2StabilisePixel(in);
+    check(o.age == 1.0f && o.alphaD == 0.0f && o.d[0] == 0.7f && o.s[2] == 0.7f, "no history (age 0): the input, age 1");
+    in = stabPixel(0.7f, 0.7f, 9.0f, 0.5f, 0.9f, 12.0f);
+    o = nrd2StabilisePixel(in);
+    check(std::fabs(o.d[1] - 0.7f) < 1e-6f && std::fabs(o.s[0] - 0.7f) < 1e-6f && o.age == 10.0f,
+          "a constant history over a constant input is a fixed point");
+    in = stabPixel(0.7f, 0.7f, 9.0f, 0.5f, 0.9f, 0.0f);
+    check(nrd2StabilisePixel(in).alphaD == 0.0f, "nMax 0 (a fast pan) takes no history");
+
+    // The clamp: history outside the box is pulled to its edge, so the output stays inside [lo, hi].
+    Rng rng(41);
+    bool inside = true;
+    for (u32 t = 0; t < 200; ++t) {
+        const f32 lo = rng.range(0.1f, 1.0f), hi = lo + rng.range(0.0f, 1.0f), cur = rng.range(lo, hi);
+        const f32 hist = rng.range(-2.0f, 6.0f);
+        const Nrd2StabOut r = nrd2StabilisePixel(stabPixel(cur, hist, rng.range(1.0f, 30.0f), lo, hi, 12.0f));
+        for (u32 c = 0; c < 3; ++c) inside = inside && r.d[c] >= lo - 1e-6f && r.d[c] <= hi + 1e-6f && r.s[c] >= lo - 1e-6f && r.s[c] <= hi + 1e-6f;
+    }
+    check(inside, "the output stays inside the min/max box however far the history is");
+    o = nrd2StabilisePixel(stabPixel(1.0f, 5.0f, 11.0f, 0.8f, 1.2f, 12.0f));
+    check(std::fabs(o.d[0] - (1.0f + (1.2f - 1.0f) * (1.0f - 1.0f / 12.0f))) < 1e-5f, "a spike in history lands on the box edge, then blends");
+
+    // Depth test: a tap that fails drops out; with too little weight left it is a disocclusion (age resets).
+    in = stabPixel(1.0f, 1.0f, 20.0f, 0.5f, 1.5f, 12.0f);
+    in.tap[0].zm = 14.0f; in.tap[1].zm = 14.0f; in.tap[2].zm = 14.0f;
+    o = nrd2StabilisePixel(in);
+    check(o.age == 1.0f && o.alphaD == 0.0f && o.d[0] == 1.0f, "a failed depth test resets the age and takes the input");
+    in = stabPixel(1.0f, 2.0f, 20.0f, 0.5f, 3.0f, 12.0f);
+    in.tap[0].zm = 14.0f;   // one of four fails: 0.75 of the weight remains
+    o = nrd2StabilisePixel(in);
+    check(o.age == 21.0f && o.alphaD > 0.9f, "one failed tap of four still leaves a valid history");
+    in.zTol = 5.0f;
+    check(nrd2StabilisePixel(in).age == 21.0f, "a looser tolerance accepts the same taps");
+
+    // The age is the minimum over the taps that carry weight; a tap with a sliver of weight does not count.
+    in = stabPixel(1.0f, 1.0f, 20.0f, 0.5f, 1.5f, 12.0f);
+    in.tap[0].age = 2.0f; in.tap[0].b = 0.3f; in.tap[1].b = 0.3f; in.tap[2].b = 0.3f; in.tap[3].b = 0.05f; in.tap[3].age = 1.0f;
+    check(nrd2StabilisePixel(in).age == 3.0f, "age = 1 + the youngest tap with weight > 0.1");
+
+    // Specular follows the roughness gate: a mirror takes no history, a rough lobe does.
+    in = stabPixel(1.0f, 1.2f, 20.0f, 0.5f, 1.5f, 12.0f);
+    in.roughness = 0.1f;
+    o = nrd2StabilisePixel(in);
+    check(o.s[0] == 1.0f && o.alphaS == 0.0f && o.alphaD > 0.9f, "a smooth lobe's specular stays single-frame, diffuse does not");
+    in.roughness = 0.9f;
+    check(nrd2StabilisePixel(in).alphaS == nrd2StabilisePixel(in).alphaD, "a rough lobe takes the full weight");
+
+    // Without a valid previous frame nothing is taken.
+    in = stabPixel(1.0f, 1.2f, 20.0f, 0.5f, 1.5f, 12.0f);
+    in.historyValid = false;
+    check(nrd2StabilisePixel(in).alphaD == 0.0f, "an invalid history is ignored");
+
+    // The box helper.
+    f32 lo[3], hi[3];
+    nrd2StabBox({{1.0f, 5.0f, 2.0f}, {3.0f, 4.0f, 2.5f}, {2.0f, 6.0f, 0.5f}}, lo, hi);
+    check(lo[0] == 1.0f && hi[0] == 3.0f && lo[1] == 4.0f && hi[1] == 6.0f && lo[2] == 0.5f && hi[2] == 2.5f,
+          "the clamp box is the per-channel min and max");
+}
+
 void testCandidates() {
     AVER_INFO("grid, pattern and tile weight");
     const auto def = nrd2DefaultTheta(0);
@@ -365,6 +472,7 @@ int main() {
     testPyramidConstant();
     testEnergy();
     testFiniteDifferences();
+    testStabiliser();
     testCandidates();
     testOracle(Nrd2OracleMode::Grad);
     testOracle(Nrd2OracleMode::Grid);

@@ -1,11 +1,13 @@
-// Nrd2 -- NRD2 phase 1 (docs/rendering/NRD2.md): a strictly single-frame denoiser of the composed,
-// demodulated lighting Stage B writes. No history of any kind. Fixed maths with per-8x8-tile
-// parameters: the defaults, or the phase 4 network's (Nrd2Network) when its weights pass the live gate.
+// Nrd2 -- NRD2 phase 1 (docs/rendering/NRD2.md): a single-frame denoiser of the composed, demodulated
+// lighting Stage B writes. Fixed maths with per-8x8-tile parameters: the defaults, or the phase 4
+// network's (Nrd2Network) when its weights pass the live gate. The spatial filter and the network never
+// see history; on jitter-free frames an optional stabiliser (CSNrd2Stabilise, "Temporal stabiliser" in
+// the doc) then blends its output with last frame's.
 //
 // Flow per frame, inside the scene pass right after Stage B's draw (D3D12 staged ray-driven only):
 //   Stage B writes D, S, remodulation (targets owned here, bound by the caller as UAVs)
 //   record():        pyramid of D and S (1/2, 1/4, 1/8), tile parameters (network or defaults),
-//                    resolve -> D'*Rd + S'*Rs
+//                    resolve -> D'*Rd + S'*Rs (or D', S' -> stabiliser -> the same compose)
 //   recordCompose(): fullscreen additive draw of that into the bound scene colour
 //
 // Every pass is plain compute (fp32, no wave intrinsics, no atomics, constants at b3) so it ports to
@@ -37,6 +39,8 @@ struct Nrd2Params {
     f32 specular[6] = {1.0f, 2.0f, 2.0f, 4.5f, 4.0f, -1.0f};
     bool bypass = false;   // own pixel only: the split recomposed undenoised (A/B check)
     bool network = true;   // phase 4: the trained network sets the tile parameters when it can
+    bool stabilise = false;   // the temporal stabiliser, on jitter-free frames with the Inputs below filled
+    f32 stabFrames = 12.0f;   // its history length at rest, in frames (from 8 px/frame: min(4, this))
 };
 
 class Nrd2 {
@@ -61,6 +65,14 @@ public:
         // checkerboard, bit 1 its parity (traced where ((x ^ y ^ parity) & 1) == 0); bits 2/3 the same
         // for S on the glossy reflections' checkerboard. 0 = everything traced.
         u32 halfRate = 0;
+
+        // Temporal stabiliser. The defaults leave it off: it runs only when all of these are filled.
+        rhi::TextureHandle velocity = 0;          // G-buffer velocity, RG16F texels/frame (destination minus source)
+        f32 prevViewProj[16] = {};                // IDevice::gBufferPrevViewProj (all zero = not filled)
+        f32 prevCamPos[3] = {};                   // the camera position that matrix belongs to
+        bool historyValid = false;                // !IDevice::gBufferHistoryInvalid()
+        bool sunMoved = false;                    // the sun changed since last frame (history shortens for 2 frames)
+        f32 jitter[2] = {1.0f, 1.0f};             // this frame's TAA jitter (IDevice::taaJitter); only exactly 0, 0 stabilises
     };
 
     // Compute pipelines. False (said once) when nrd2.hlsl will not compile.
@@ -78,6 +90,8 @@ public:
     [[nodiscard]] const Targets& targets() const { return targets_; }
 
     void setParams(const Nrd2Params& p) { params_ = p; }
+    // Drops the stabiliser's history: call on a frame NRD2 did not run (it cannot see those).
+    void resetHistory() { histValid_ = false; }
     // The network's weights: the user's file wins over the shipped one (Nrd2Network).
     void setNetworkWeights(std::string user, std::string shipped) {
         network_.setWeightPaths(std::move(user), std::move(shipped));
@@ -99,18 +113,29 @@ public:
 private:
     friend class Nrd2Capture;
     void releaseTargets();
+    void releaseStab();
+    bool allocStab();
     // CSNrd2Features into features_ (12 x 4 tilesX x 4 tilesY floats, rests in Common). Inputs as in
-    // record() after the resolve; false when the pass would not build.
-    bool recordFeatures(rhi::IRenderContext& ctx, const Inputs& in);
+    // record() after the resolve; false when the pass would not build. inScale/inBias: the network's input
+    // standardisation applied as it stores (null = the raw features, as the capture needs them).
+    bool recordFeatures(rhi::IRenderContext& ctx, const Inputs& in, const f32* inScale = nullptr,
+                        const f32* inBias = nullptr);
 
     rhi::IDevice*          dev_ = nullptr;
     rhi::IResourceFactory* res_ = nullptr;
-    rhi::PipelineHandle psoPyramid_ = 0, psoParams_ = 0, psoResolve_ = 0, compose_ = 0;
-    rhi::BindingSetHandle setPyramid_ = 0, setParams_ = 0, setResolve_ = 0, setCompose_ = 0;
+    rhi::PipelineHandle psoPyramid_ = 0, psoParams_ = 0, psoResolve_ = 0, compose_ = 0, psoStab_ = 0;
+    rhi::BindingSetHandle setPyramid_ = 0, setParams_ = 0, setResolve_ = 0, setCompose_ = 0, setStab_ = 0;
 
     Targets targets_{};
     rhi::TextureHandle guide_[3] = {}, levelD_[3] = {}, levelS_[3] = {};
     rhi::TextureHandle lit_ = 0;
+    // Stabiliser (allocated on the first stabilised frame): the resolve's D' and S' (rest as UAVs), and
+    // ping-pong history: D'' rgb + age, S'' rgb + view Z (metres).
+    rhi::TextureHandle dRes_ = 0, sRes_ = 0, histD_[2] = {}, histS_[2] = {};
+    u32 histLast_ = 0;               // which of the pair the last stabilised frame wrote
+    bool histValid_ = false;
+    u32 histViewport_[4] = {};
+    u32 sunHold_ = 0;
     rhi::BufferHandle  tileParams_ = 0;
     u32 tileCapacity_ = 0;
     rhi::PipelineHandle psoFeatures_ = 0;

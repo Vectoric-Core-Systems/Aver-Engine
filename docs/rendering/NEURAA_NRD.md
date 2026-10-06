@@ -511,6 +511,23 @@ legal advice). The design follows them unless counsel says otherwise:
 11. **Un-jitter before the denoiser** (Arm US 18/497,608, granted 2026-09-29).
 12. **Watch:** AMD's pending US 2026/0094228 (any trained network in a pipeline stage; every claim
    rejected as of 2026-08-12) and NVIDIA's US 2025/0299305 and US 2026/0073486.
+13. **NRD2's temporal stabiliser (2026-10-06, docs/rendering/NRD2.md "Temporal stabiliser").** Checked
+   against the rules above. Rule 1 and 7: the clamp is the per-channel 3x3 min/max of this frame's D' (S')
+   united with the four 1/8-level texels the resolve's own taps read, so its footprint is the spatial
+   estimate's and never larger; never a mean, variance or fitted distribution. **Counsel should confirm** that
+   the union with the coarse texels is still "the 3x3 min/max" and not a larger temporal radius (US
+   11,663,701); the fallback is the 3x3 alone, which leaves coarse blobs uncorrected. Rule 5: the history
+   age feeds only the blend weight; no radius or level reads it, and the spatial filter runs first, on this
+   frame only, so it is not a spatial filter on an accumulated signal (US 10,991,079). The weight's length
+   comes from screen-space motion and disocclusion, never view angle or parallax (US 11,823,321); specular
+   history is gated by roughness, a material property. Rule 6 and 10: the network runs before the resolve,
+   never sees history and writes tile parameters only. Rule 4: nothing here is trained and no image error
+   is scored through it. Rule 11: it runs on jitter-free frames only, so no jittered sample is accumulated
+   (the existing denoise-then-TAAU order is unchanged and still open). **Not covered by any rule above,
+   flag to counsel:** the per-tap depth test (a binary reprojection check with a slope allowance, not a
+   history length; it sits near US 11,823,321 and the order-statistics claims), and the optional
+   clamp-distance confidence if it is ever added (a function of the min/max box only). The shipped TAAU's
+   mean +- sigma clip (`sr_taa.hlsl`) still breaks rule 1; the stabiliser does not reuse it.
 
 NRD's own sweep (multi-scale learned blending, hit-distance kernels, push-pull filling) is section 9 of
 the private patents document. **Counsel should review before either feature ships.** Nothing is vendored: the

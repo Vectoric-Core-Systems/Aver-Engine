@@ -718,6 +718,18 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "NRD2's trained network sets the per-tile parameters when its weights pass the held-out gate (Tools > Train Neural Denoiser); 0 = the voxi.nrd2* defaults everywhere",
         []{ return vBool(Renderer::get().settings().nrd2Network); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2Network = on; }); }});
+    t.push_back({"voxi.nrd2Stab", VarType::Bool, false,
+        "NRD2's temporal stabiliser: on frames without TAA jitter (camera moving, or RENDER.TAA 0) the filtered lighting is blended with last frame's inside a min/max box of this frame's values; 0 = single-frame NRD2 everywhere (A/B)",
+        []{ return vBool(Renderer::get().settings().nrd2Stab); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2Stab = on; }); }});
+    t.push_back({"voxi.nrd2StabFrames", VarType::U32, false,
+        "NRD2 stabiliser history length at rest, in frames (1-64); it shortens with screen speed to min(4, this) from 8 px per frame and is off from 32",
+        []{ return vU32(Renderer::get().settings().nrd2StabFrames); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2StabFrames = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u < 1 || v.as.u > 64) { err = "nrd2StabFrames must be 1 to 64"; return false; }
+            return true;
+        }});
     // NRD2 half-rate tracing per feature (Settings::nrd2HalfRate*): skipped pixels filled from this frame.
     {
         struct HalfRateDial { const char* name; bool Settings::* field; const char* help; };

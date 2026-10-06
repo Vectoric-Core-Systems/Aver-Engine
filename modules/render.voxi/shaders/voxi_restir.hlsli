@@ -57,7 +57,8 @@ Texture2D<float4>   gGiVisHist    : register(t16);
 RWTexture2D<float4> gGiVisHistOut : register(u10);
 
 // Candidate hand-off between CSRdGiTrace (traces) and CSRdGi (resamples); same-frame relay.
-struct RdGiCand { float3 pos; uint flags; float3 nrm; float f2LumTraced; float3 rad; float f2LumSky; };
+// flags: 1 ok, 2 non-finite, 4 f2Observed, 8 vis.valid. vis: giVisReconstruct's (v3, g, b, motionPx).
+struct RdGiCand { float3 pos; uint flags; float3 nrm; float f2LumTraced; float3 rad; float f2LumSky; float4 vis; };
 RWStructuredBuffer<RdGiCand> gRdGiCand : register(u17);
 // Set by CSRdGi per invocation before calling giRestirIndirect: row-pitch pixel index.
 // `static`, not a parameter, like gGiPoisonPdfHit -- giRestirIndirect's signature is shared.
@@ -357,9 +358,12 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     sun.radiance  = averSunRadiance();
     // One fresh shadow ray (not temporal gRtShadowHist): keyed by screen pixel, this sample is world-space.
     // T1 (Settings::rtSecondaryShadowOpaque): hitPos is the secondary hit.
+    const bool sunLit = rdSunLit();
     float mapVis = -1.0;
-    if ((rtGiShadowBits() & 8u) != 0u) mapVis = giHitShadowMapVisibility(hitPos, s.N, L);
-    if (mapVis >= 0.0) {
+    if (sunLit && (rtGiShadowBits() & 8u) != 0u) mapVis = giHitShadowMapVisibility(hitPos, s.N, L);
+    if (!sunLit) {
+        sun.visibility = 0.0;
+    } else if (mapVis >= 0.0) {
         sun.visibility = mapVis;
     } else if ((rtGiShadowBits() & 1u) != 0u) {
         sun.visibility = rtShadowOpaque(hitPos, s.N, L, pixel, frameJitter);
@@ -516,7 +520,8 @@ struct GiPathDecode {
     uint       f3Path;
     float      rho2;
 };
-GiPathDecode giDecodePaths(float3 wpos, float3 N, float2 pixel, uint frameIdx) {
+// Everything giDecodePaths derives from the reconstruction `rec`, which the caller supplies.
+GiPathDecode giDecodePathsFrom(GiVisRecon rec, float2 pixel, uint frameIdx) {
     const uint2 pixelPos = uint2(pixel);
     const uint visMode   = (uint)gAmbientParams.w & 3u;
     const bool halfBound = visMode == 2u && ((uint)gAmbientParams.w & 4u) != 0u;
@@ -525,9 +530,6 @@ GiPathDecode giDecodePaths(float3 wpos, float3 N, float2 pixel, uint frameIdx) {
     const uint spatialSamples = ((uint)gAmbientParams.w >> 12) & 15u;
     // maxHistory: bits 18-22 of gAmbientParams.w; caps M from previous-frame reservoirs (default 0 disables reuse).
     const uint maxHistory     = ((uint)gAmbientParams.w >> 18) & 31u;
-    // HLSL conditional operator doesn't support struct results; use if instead.
-    GiVisRecon rec = (GiVisRecon)0;
-    if (halfBound) rec = giVisReconstruct(wpos, N, pixel, frameIdx);
     // Path numbers: 3=trace, 2=half-res ratio, 1=reconstructed, 0=legacy/no-ray.
     uint f2Path = 3u, f3Path = 3u;
     if (visMode == 1u)                       { f2Path = 1u; f3Path = 1u; }
@@ -555,6 +557,21 @@ GiPathDecode giDecodePaths(float3 wpos, float3 N, float2 pixel, uint frameIdx) {
     d.spatialSamples = spatialSamples; d.maxHistory = maxHistory;
     d.f2Path = f2Path; d.f3Path = f3Path; d.rho2 = rho2;
     return d;
+}
+
+GiPathDecode giDecodePaths(float3 wpos, float3 N, float2 pixel, uint frameIdx) {
+    const uint visMode   = (uint)gAmbientParams.w & 3u;
+    const bool halfBound = visMode == 2u && ((uint)gAmbientParams.w & 4u) != 0u;
+    // HLSL conditional operator doesn't support struct results; use if instead.
+    GiVisRecon rec = (GiVisRecon)0;
+#if AVER_GI_CHECKERBOARD
+    // A skipped pixel with no reuse (maxHistory 0) ends with an empty reservoir: nothing reads rec.
+    const bool recUnused = gGiCbSkip && (((uint)gAmbientParams.w >> 18) & 31u) == 0u;
+#else
+    const bool recUnused = false;
+#endif
+    if (halfBound && !recUnused) rec = giVisReconstruct(wpos, N, pixel, frameIdx);
+    return giDecodePathsFrom(rec, pixel, frameIdx);
 }
 
 // ---- THE REUSE PASS: one fused spatio-temporal resample over last frame's reservoirs ----
@@ -717,8 +734,30 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // Reset poison-view flag before anything below can set it.
     gGiPoisonPdfHit = false;
 
-    // Decode visibility mode and paths (U1, 2.10 A / B2); see giDecodePaths.
+    // Decode visibility mode and paths (U1, 2.10 A / B2); see giDecodePaths. Split compile: a traced
+    // pixel takes the reconstruction CSRdGiTrace already made from its candidate record.
+#if AVER_GI_SPLIT
+    RdGiCand cand = (RdGiCand)0;
+    bool haveCand = true;
+#if AVER_GI_CHECKERBOARD
+    haveCand = !gGiCbSkip;
+#endif
+    GiPathDecode gd;
+    if (haveCand) {
+        cand = gRdGiCand[gGiCandIdx];
+        GiVisRecon candRec;
+        candRec.valid    = (cand.flags & 8u) != 0u;
+        candRec.v3       = cand.vis.x;
+        candRec.g        = cand.vis.y;
+        candRec.b        = cand.vis.z;
+        candRec.motionPx = cand.vis.w;
+        gd = giDecodePathsFrom(candRec, pixel, frameIdx);
+    } else {
+        gd = giDecodePaths(wpos, N, pixel, frameIdx);
+    }
+#else
     const GiPathDecode gd     = giDecodePaths(wpos, N, pixel, frameIdx);
+#endif
     const uint         visMode        = gd.visMode;
     const bool         halfBound      = gd.halfBound;
     const bool         tracedPx       = gd.tracedPx;
@@ -737,11 +776,7 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // Skipped pixels trace no fresh candidate; initial stays empty; spatio-temporal reuse still runs.
 #if AVER_GI_SPLIT
     // B4: candidate already traced by CSRdGiTrace (voxi.hlsl); read from gRdGiCand[gGiCandIdx].
-#if AVER_GI_CHECKERBOARD
-    if (!gGiCbSkip)
-#endif
-    {
-        const RdGiCand cand = gRdGiCand[gGiCandIdx];
+    if (haveCand) {
         samplePos          = cand.pos;
         sampleNormal       = cand.nrm;
         sampleRadiance     = cand.rad;
@@ -927,8 +962,9 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     if ((giHalfRateWord & 0x20000u) != 0u)
         giDenoiseInWrite = giDenoiseInWrite && ((pixelPos.x ^ pixelPos.y ^ (giHalfRateWord >> 16)) & 1u) == 0u;
 #endif
-    // W6/M5: gated on gAverHistoryWrite; blended fragments don't write here.
-    if (giDenoiseInWrite) {
+    // W6/M5: gated on gAverHistoryWrite; blended fragments don't write here. NRD2 binds u9 to Stage B's
+    // remod A target, which Stage B overwrites: no write.
+    if (giDenoiseInWrite && !rtNrd2Frame()) {
         if (gAverHistoryWrite) gGiRadianceOut[pixelPos] = float4(outDiffuse, outHitDist);
     }
 

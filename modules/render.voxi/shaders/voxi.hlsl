@@ -662,10 +662,10 @@ float rdPlaneDepthStep(float3 wpos, float3 Ng, float3 dirN) {
     return mul(float4(Pn, 1.0), gViewProj).w - mul(float4(wpos, 1.0), gViewProj).w;
 }
 
-// The full surface at a staged pixel, through the one builder every ray hit uses (voxi_rt.hlsli's
+// The surface at a staged pixel, through the one builder every ray hit uses (voxi_rt.hlsli's
 // rtHitSurface): what CSRdRefl needs before tracing -- the roughness for its gate and the shading
 // (normal-mapped) normal to reflect about -- is exactly what Stage B shades with.
-AverSurface rdHitSurface(RdSurface s, float3 dir, float3 rdRayDx, float3 rdRayDy) {
+AverSurface rdHitSurface(RdSurface s, float3 dir, float3 rdRayDx, float3 rdRayDy, uint detail) {
     RtHit h;
     h.inst   = s.inst;
     h.mat    = s.mat;
@@ -677,7 +677,7 @@ AverSurface rdHitSurface(RdSurface s, float3 dir, float3 rdRayDx, float3 rdRayDy
     h.t      = s.hitT;
     float2 gx, gy;
     rtHitGrad(h, rdRayDx, rdRayDy, gx, gy);
-    return rtHitSurface(h, -dir, normalize(gLightDir.xyz), gx, gy, AVER_RT_HIT_FULL);
+    return rtHitSurface(h, -dir, normalize(gLightDir.xyz), gx, gy, detail);
 }
 // Is a real backdrop bound? Null-filled Texture2D reports zero dimensions.
 bool averBlendBackdropValid(out float2 invSize) {
@@ -822,8 +822,9 @@ float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel
         AverLight sun;
         sun.direction  = L;
         sun.radiance   = averSunRadiance();
-        sun.visibility = rtShadow(h.pos, s.N, L, pixel, float3(0, 0, 0), float3(0, 0, 0), 1u,
-                                  averGoldenTurns(sampleFrame + k));
+        sun.visibility = rdSunLit() ? rtShadow(h.pos, s.N, L, pixel, float3(0, 0, 0), float3(0, 0, 0), 1u,
+                                               averGoldenTurns(sampleFrame + k))
+                                    : float3(0.0, 0.0, 0.0);
         AverIndirect ind;
         ind.ambient      = averSkyIrradiance(s.N);
         ind.ambientScale = gAmbient.r;
@@ -2230,30 +2231,34 @@ void CSRdShadowProbe(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, ui
 #if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
             bit = 2u;   // ablated: fully lit, no ray
 #else
-            float2 ndc;
-            const float3 dir = rdPrimaryRayDir(pixel, ndc);
-            const RdSurface s = rdSurfaceFromRecord(rec, dir);
-            averRtCutoutPolicy(AVER_RD_CUTOUTS_SHADOW, false);
-            float3 dpx, dpy;
-            rdShadowFootprint(ndc, dir, s, dpx, dpy);
+            if (!rdSunLit()) {
+                bit = 1u;   // sun radiance 0: visibility cannot show; CSRdShadow skips its rays too
+            } else {
+                float2 ndc;
+                const float3 dir = rdPrimaryRayDir(pixel, ndc);
+                const RdSurface s = rdSurfaceFromRecord(rec, dir);
+                averRtCutoutPolicy(AVER_RD_CUTOUTS_SHADOW, false);
+                float3 dpx, dpy;
+                rdShadowFootprint(ndc, dir, s, dpx, dpy);
 
-            const float3 L = normalize(gLightDir.xyz);
-            // Same jitter rtShadowTemporal's non-tiled branch passes to agree with CSRdShadow's fresh trace.
-            const float jitter = (gRtHistParams.x < 0.5) ? 0.0
-                                : averGoldenTurns((uint)gRtHistParams.z);
-            // Which sample the probe traces: rotated by pixel/frame to cover all radii in every tile.
-            // Rotating keeps row/column neighbours on different samples.
-            const uint rays   = (uint)max(gRtParams.y, 1.0);
-            const uint kProbe = (pixel.x + 3u * pixel.y + (uint)gRtHistParams.z) % rays;
-            // From same side CSRdShadow will trace from (subsurface handling).
-            gAverShadowOriginPush = averSubsurfaceShadowPush(s.mat.flags, s.mat.subsurfaceRadius, s.N, L);
-            const float3 fresh = rtShadowEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy, 1u, jitter,
-                                            kProbe);
-            gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
+                const float3 L = normalize(gLightDir.xyz);
+                // Same jitter rtShadowTemporal's non-tiled branch passes to agree with CSRdShadow's fresh trace.
+                const float jitter = (gRtHistParams.x < 0.5) ? 0.0
+                                    : averGoldenTurns((uint)gRtHistParams.z);
+                // Which sample the probe traces: rotated by pixel/frame to cover all radii in every tile.
+                // Rotating keeps row/column neighbours on different samples.
+                const uint rays   = (uint)max(gRtParams.y, 1.0);
+                const uint kProbe = (pixel.x + 3u * pixel.y + (uint)gRtHistParams.z) % rays;
+                // From same side CSRdShadow will trace from (subsurface handling).
+                gAverShadowOriginPush = averSubsurfaceShadowPush(s.mat.flags, s.mat.subsurfaceRadius, s.N, L);
+                const float3 fresh = rtShadowEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy, 1u, jitter,
+                                                kProbe);
+                gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
 
-            if (all(fresh == 0.0))      bit = 1u;   // fully blocked
-            else if (all(fresh == 1.0)) bit = 2u;   // fully lit
-            else                        bit = 4u;   // penumbra or tinted hit
+                if (all(fresh == 0.0))      bit = 1u;   // fully blocked
+                else if (all(fresh == 1.0)) bit = 2u;   // fully lit
+                else                        bit = 4u;   // penumbra or tinted hit
+            }
 #endif
         }
     }
@@ -2323,13 +2328,16 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
         }
     }
     // One call with verdict as runtime flag, not ?: between two calls (avoids double-inlining).
-    const bool   probeAgrees = (m == 2u || m == 1u);
+    // Sun radiance 0: no ray; the zero stands in for the trace and the history writes stay.
+    const bool   sunLit      = rdSunLit();
+    const bool   probeAgrees = !sunLit || (m == 2u || m == 1u);
     const float3 sunVis = rtShadowTemporalEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy,
                                              (uint)max(gRtParams.y, 1.0), probeAgrees,
-                                             float3(1.0, 1.0, 1.0) * (m == 2u ? 1.0 : 0.0));
+                                             float3(1.0, 1.0, 1.0) * ((sunLit && m == 2u) ? 1.0 : 0.0));
 #else
-    const float3 sunVis = rtShadowTemporal(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy,
-                                           (uint)max(gRtParams.y, 1.0));
+    const bool   sunLit = rdSunLit();
+    const float3 sunVis = rtShadowTemporalEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy,
+                                             (uint)max(gRtParams.y, 1.0), !sunLit, float3(0.0, 0.0, 0.0));
 #endif
     gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
 #endif
@@ -2363,6 +2371,13 @@ void CSRdLocalLights(uint3 tid : SV_DispatchThreadID) {
         return;
     }
 
+    // NRD2 half rate, no history: the off-turn pixel only stores the skip marker (see rdLocalLightsVisibility).
+    if (gRtHistParams.x < 0.5 && (rtGiShadowBits() & 256u) != 0u &&
+        ((pixel.x + pixel.y + (uint)gRtHistParams.z) & 1u) != 0u) {
+        gRdLocalOut[pixel] = float4(0.0, 0.0, 0.0, -1.0);
+        return;
+    }
+
     float2 ndc;
     const float3 dir = rdPrimaryRayDir(pixel, ndc);
     const RdSurface s = rdSurfaceFromRecord(rec, dir);
@@ -2377,8 +2392,8 @@ void CSRdLocalLights(uint3 tid : SV_DispatchThreadID) {
 //
 // GI candidate trace/resample split (Settings::rayDrivenGiSplit). Runs giTraceInitialCandidate for
 // every pixel CSRdGi would trace -- same surface reconstruction, frameJitter, and f2Path/rho2
-// (giDecodePaths) -- storing out params in gRdGiCand. CSRdGi's AVER_GI_SPLIT=1 compile reads that
-// record back inside giRestirIndirect, agreeing bit-for-bit.
+// (giDecodePaths) -- storing out params and the visibility reconstruction in gRdGiCand. CSRdGi's
+// AVER_GI_SPLIT=1 compile reads that record back inside giRestirIndirect, agreeing bit-for-bit.
 //
 // NON-CHECKERBOARD: one thread per pixel. CHECKERBOARD (milestone 4): compacted, only half-res
 // threads. gGiCbSkip forced false here since dispatch by construction covers only the traced half.
@@ -2430,11 +2445,12 @@ void CSRdGiTrace(uint3 tid : SV_DispatchThreadID) {
     // Write every out param and the bool: CSRdGi's split read needs a defined record for every pixel.
     RdGiCand cand;
     cand.pos         = pos;
-    cand.flags       = (ok ? 1u : 0u) | (nonFinite ? 2u : 0u) | (f2Observed ? 4u : 0u);
+    cand.flags       = (ok ? 1u : 0u) | (nonFinite ? 2u : 0u) | (f2Observed ? 4u : 0u) | (gd.rec.valid ? 8u : 0u);
     cand.nrm         = nrm;
     cand.f2LumTraced = f2LumTraced;
     cand.rad         = rad;
     cand.f2LumSky    = f2LumSky;
+    cand.vis         = float4(gd.rec.v3, gd.rec.g, gd.rec.b, gd.rec.motionPx);
     gRdGiCand[idx] = cand;
 #endif
 }
@@ -2573,7 +2589,7 @@ void CSRdPtRef(uint3 tid : SV_DispatchThreadID) {
     const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0), 2.0 / max(gSceneViewport.w, 1.0));
     const float3 rdRayDx = (averViewRayDir(ndc + float2(ndcPixelStep.x, 0.0)) - dir) * s.hitT;
     const float3 rdRayDy = (averViewRayDir(ndc + float2(0.0, ndcPixelStep.y)) - dir) * s.hitT;
-    const AverSurface hs = rdHitSurface(s, dir, rdRayDx, rdRayDy);
+    const AverSurface hs = rdHitSurface(s, dir, rdRayDx, rdRayDy, AVER_RT_HIT_FULL);
     gRdGiTex[pixel] = float4(ptReferencePixel(hs, s.wpos, float2(pixel) + 0.5), 1.0);
 }
 
@@ -2632,9 +2648,10 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
     uint dnW = 0, dnH = 0;
     gRdReflDnIn.GetDimensions(dnW, dnH);
     const bool dnIn = pixel.x < dnW && pixel.y < dnH;
-    if (dnIn) gRdReflDnIn[pixel] = float4(0.0, 0.0, 0.0, 0.0);   // overwritten below where a ray is traced
     if (rec.x == 0xFFFFFFFFu) {
-        // Sky: no surface to reflect off. Stage B never reads this texel for this pixel.
+        // Sky: no surface to reflect off. Stage B never reads this texel for this pixel. NRD2's S there
+        // is Stage B's own to write.
+        if (dnIn && !rtNrd2Frame()) gRdReflDnIn[pixel] = float4(0.0, 0.0, 0.0, 0.0);
         gRdReflTex[pixel] = float4(0.0, 0.0, 0.0, 0.0);
         return;
     }
@@ -2655,7 +2672,7 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
 
     const float3 L = normalize(gLightDir.xyz);
     // The surface Stage B shades: its roughness gates the ray, its shading normal reflects it.
-    const AverSurface hs = rdHitSurface(s, dir, rdRayDx, rdRayDy);
+    const AverSurface hs = rdHitSurface(s, dir, rdRayDx, rdRayDy, AVER_RT_HIT_ROUGHNORMAL);
     const float3 R = reflect(dir, hs.N);
     const float rough = hs.rough;
     averRtCutoutPolicy(AVER_RD_CUTOUTS_REFL, rough > AVER_RD_REFL_SOLID_CUTOUT_ROUGH);
@@ -2667,7 +2684,14 @@ void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
     const bool rtReflTraced = gShadowParams.z > 0.5 && gRtParams.w > 0.5 && rough <= 0.75;
     if (!rtReflTraced) rtReflectionHistoryVacate(float2(pixel) + 0.5);
 #if AVER_RD_ABLATE != AVER_RD_ABL_REFL && AVER_RD_ABLATE != AVER_RD_ABL_ALL
-    if (rtReflTraced && dnIn) {
+    const bool dnTraced = rtReflTraced && dnIn;
+#else
+    const bool dnTraced = false;
+#endif
+    // The traced denoiser branch writes its own S; every other pixel takes the zero.
+    if (dnIn && !dnTraced) gRdReflDnIn[pixel] = float4(0.0, 0.0, 0.0, 0.0);
+#if AVER_RD_ABLATE != AVER_RD_ABL_REFL && AVER_RD_ABLATE != AVER_RD_ABL_ALL
+    if (dnTraced) {
         // Reflection denoising: the denoiser owns history and filtering, so this is one raw sample.
         rtReflectionHistoryVacate(float2(pixel) + 0.5);   // Voxi's own history is not used meanwhile
         const float lobeRough = rough < AVER_REFL_MIRROR_ROUGH ? 0.0 : rough;
@@ -2785,7 +2809,7 @@ void CSRdReflFilter(uint3 tid : SV_DispatchThreadID) {
     const float rdReflDzdy = rdPlaneDepthStep(s.wpos, s.Ng, dirDy);
 
     // Roughness and depth recomputed, not read. Pending marker is plain -1.0 flag.
-    const float rough    = rdHitSurface(s, dir, rdRayDx, rdRayDy).rough;
+    const float rough    = rdHitSurface(s, dir, rdRayDx, rdRayDy, AVER_RT_HIT_ROUGHNORMAL).rough;
     const float curDepth = mul(float4(s.wpos, 1.0), gViewProj).w;
 
     // Mirror cutoff same as rtReflectionTemporal(Ex): agrees with R1's filter radius.

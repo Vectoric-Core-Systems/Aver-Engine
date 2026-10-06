@@ -232,7 +232,7 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
         if (!w.supported) {
             ImGui::TextDisabled("CPU span timing is not available in this build.");
         } else if (w.nodes.empty() || w.framesAccumulated == 0) {
-            ImGui::TextDisabled("No scene-walk window has completed yet.");
+            ImGui::TextDisabled("No scene-walk window has completed yet (timing runs only while this panel is open).");
         } else {
             const f64 perWalk = 1.0 / static_cast<f64>(w.framesAccumulated);
             const usize walkIdx = static_cast<usize>(CpuSpan::SceneWalk);

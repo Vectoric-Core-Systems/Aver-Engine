@@ -155,6 +155,11 @@ struct Settings {
     // NRD2 phase 4: the trained network sets the per-tile parameters when its weights exist and pass the
     // held-out gate (render::denoise::Nrd2Network); off, the nrd2Params above everywhere.
     bool nrd2Network = true;
+    // NRD2's temporal stabiliser (docs/rendering/NRD2.md): on jitter-free frames (camera moving, or TAA off) the
+    // filtered D and S are blended with last frame's inside a min/max box of this frame's values. nrd2StabFrames
+    // is its history length at rest.
+    bool nrd2Stab = true;
+    u32 nrd2StabFrames = 12;
     // NRD2 keeps half-rate tracing and fills the skipped checkerboard half from this frame's traced
     // neighbours (CSRdHalfFill; docs/rendering/NRD2.md). Each applies where its base half rate is asked
     // for: GI under rayDrivenStages 2, reflections under rtReflectionHalfRate (glossy only), sky

@@ -4,7 +4,6 @@
 #include "aver/render/denoise/Nrd2Trainer.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
 
-#include <algorithm>
 #include <cstring>
 #include <filesystem>
 
@@ -14,7 +13,6 @@ namespace {
 
 constexpr u32 kConstantSlot = 3;
 constexpr u32 kCh = 12;
-constexpr u32 kMaxGroups = 65535;
 
 constexpr rhi::ResourceState kCommon = rhi::ResourceState::Common;
 constexpr rhi::ResourceState kRead   = rhi::ResourceState::NonPixelShaderResource;
@@ -22,7 +20,7 @@ constexpr rhi::ResourceState kWrite  = rhi::ResourceState::UnorderedAccess;
 
 // nrd2_net.hlsl's Nrd2NetCB, byte for byte.
 struct NetCB {
-    u32 dims[4];   // texels per feature plane, tiles
+    u32 tiles[4];   // x: tiles
     f32 scale[12], bias[12], def[12];
 };
 static_assert(sizeof(NetCB) == 160, "Nrd2NetCB: one uint4, nine float4s");
@@ -48,12 +46,12 @@ void Nrd2Network::setWeightPaths(std::string user, std::string shipped) {
 void Nrd2Network::destroy() {
     net_.destroy();
     if (res_) {
-        for (rhi::PipelineHandle p : {psoIn_, psoOut_}) if (p) res_->destroyPipeline(p);
-        for (rhi::BindingSetHandle s : {setIn_, setOut_}) if (s) res_->destroyBindingSet(s);
+        if (psoOut_) res_->destroyPipeline(psoOut_);
+        if (setOut_) res_->destroyBindingSet(setOut_);
         if (out_) res_->destroyBuffer(out_);
     }
-    psoIn_ = psoOut_ = 0;
-    setIn_ = setOut_ = 0;
+    psoOut_ = 0;
+    setOut_ = 0;
     out_ = 0;
     outFloats_ = 0;
     invalidateBindings();
@@ -89,43 +87,37 @@ void Nrd2Network::markIdle(const char* why) {
 }
 
 bool Nrd2Network::ensurePipelines(rhi::IDevice& dev) {
-    if (pipelinesTried_) return psoIn_ && psoOut_ && setIn_ && setOut_;
+    if (pipelinesTried_) return psoOut_ && setOut_;
     pipelinesTried_ = true;
     res_ = dev.resources();
     if (!res_) return false;
     const std::string& source = rhi::shaderFile("nrd2_net.hlsl");
     if (source.empty()) return false;
-    auto build = [&](const char* entry, const char* defines, u32 srv) {
-        rhi::ShaderDesc sd{};
-        sd.source = source.c_str();
-        sd.entry = entry;
-        sd.stage = rhi::ShaderStage::Compute;
-        sd.minShaderModel = 60;
-        sd.defines = defines;
-        const rhi::ShaderHandle cs = res_->createShader(sd);
-        if (!cs) return rhi::PipelineHandle(0);
-        rhi::ComputePipelineDesc pd{};
-        pd.cs = cs;
-        pd.layout.srvCount = srv;
-        pd.layout.uavCount = 1;
-        pd.layout.slotKindsDeclared = true;
-        if (srv) pd.layout.srvKinds[0] = rhi::SlotKind::StructuredBuffer;
-        pd.layout.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
-        pd.layout.constantDwords[kConstantSlot] = 0;   // root CBV
-        const rhi::PipelineHandle p = res_->createComputePipeline(pd);
-        res_->destroyShader(cs);
-        return p;
-    };
-    psoIn_ = build("CSNrd2NetIn", "AVER_NRD2_NET_PASS=1", 0);
-    psoOut_ = build("CSNrd2NetOut", "AVER_NRD2_NET_PASS=2", 1);
+    rhi::ShaderDesc sd{};
+    sd.source = source.c_str();
+    sd.entry = "CSNrd2NetOut";
+    sd.stage = rhi::ShaderStage::Compute;
+    sd.minShaderModel = 60;
+    sd.defines = "AVER_NRD2_NET_PASS=1";
+    const rhi::ShaderHandle cs = res_->createShader(sd);
+    if (!cs) return false;
+    rhi::ComputePipelineDesc pd{};
+    pd.cs = cs;
+    pd.layout.srvCount = 1;
+    pd.layout.uavCount = 1;
+    pd.layout.slotKindsDeclared = true;
+    pd.layout.srvKinds[0] = rhi::SlotKind::StructuredBuffer;
+    pd.layout.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
+    pd.layout.constantDwords[kConstantSlot] = 0;   // root CBV
+    psoOut_ = res_->createComputePipeline(pd);
+    res_->destroyShader(cs);
     rhi::BindingSetDesc bd{};
-    bd.uavCount = 1;
-    bd.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
-    if (psoIn_) setIn_ = res_->createBindingSet(bd);
     bd.srvCount = 1;
+    bd.uavCount = 1;
     bd.srvKinds[0] = rhi::SlotKind::StructuredBuffer;
+    bd.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
     if (psoOut_) setOut_ = res_->createBindingSet(bd);
-    return psoIn_ && psoOut_ && setIn_ && setOut_;
+    return psoOut_ && setOut_;
 }
 
 void Nrd2Network::reload(rhi::IDevice& dev) {
@@ -199,7 +191,7 @@ bool Nrd2Network::ready(rhi::IDevice& dev) {
 
 bool Nrd2Network::record(rhi::IRenderContext& ctx, rhi::BufferHandle features, u32 featureFloats,
                          rhi::BufferHandle params, u32 paramFloats, u32 tilesX, u32 tilesY, const f32 defaults[12]) {
-    if (!loaded_ || !status_.gateOpen || !psoIn_ || !psoOut_) return fail("not ready", true);
+    if (!loaded_ || !status_.gateOpen || !psoOut_) return fail("not ready", true);
     const u32 tiles = tilesX * tilesY;
     if (!features || !params || !tiles || featureFloats < 16u * kCh * tiles || paramFloats < kCh * tiles)
         return fail("its buffers are smaller than the frame", true);
@@ -223,7 +215,6 @@ bool Nrd2Network::record(rhi::IRenderContext& ctx, rhi::BufferHandle features, u
         tilesY_ = tilesY;
     }
     if (features != boundFeatures_ || featureFloats != boundFeatureFloats_) {
-        res_->setUavBuffer(setIn_, 0, features, sizeof(f32), featureFloats, 0);
         net_.invalidateBindings();
         boundFeatures_ = features;
         boundFeatureFloats_ = featureFloats;
@@ -237,19 +228,8 @@ bool Nrd2Network::record(rhi::IRenderContext& ctx, rhi::BufferHandle features, u
 
     rhi::ScopedGpuStat stat(ctx, "NRD2 network");
     NetCB cb{};
-    cb.dims[0] = 16u * tiles;
-    cb.dims[1] = tiles;
-    std::memcpy(cb.scale, inScale_, sizeof(inScale_));
-    std::memcpy(cb.bias, inBias_, sizeof(inBias_));
+    cb.tiles[0] = tiles;
     std::memcpy(cb.def, defaults, sizeof(cb.def));
-    const u32 groups = (kCh * 16u * tiles + 63u) / 64u;
-    const u32 gx = std::min(groups, kMaxGroups), gy = (groups + gx - 1u) / gx;
-    ctx.bufferBarrier(features, kCommon, kWrite);
-    ctx.setPipeline(psoIn_);
-    ctx.setBindingSet(setIn_);
-    ctx.setConstantBuffer(kConstantSlot, &cb, sizeof(cb));
-    ctx.dispatch(gx, gy, 1);
-    ctx.bufferBarrier(features, kWrite, kCommon);
 
     const neural::TensorShape shape{1, kCh, 4 * tilesY, 4 * tilesX};
     if (!net_.recordInfer(ctx, features, out_, shape, true)) return fail("the network could not record", true);

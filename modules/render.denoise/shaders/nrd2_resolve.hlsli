@@ -138,6 +138,68 @@ float3 nrd2SpecularExtraLogit(float rough, float hitT, float viewZ) {
     return -kNrd2SpecRoughFall * (1.0 - g) * float3(1.0, 2.0, 3.0) - kNrd2SpecContact * contact;
 }
 
+// ---- temporal stabiliser (docs/rendering/NRD2.md): maths shared with the CPU twin ------------------------
+// Runs on jitter-free frames only, on the resolve's D' and S' (irradiance), after the spatial filter. History
+// length comes from motion and disocclusion only and feeds the blend weight alone (NEURAA_NRD.md rule 5).
+static const float kNrd2StabSpeedStill = 0.25;   // px per frame: full history length at or below
+static const float kNrd2StabSpeedFast  = 8.0;    // log-space ramp down to Nfast here
+static const float kNrd2StabSpeedCut   = 32.0;   // no history from here
+static const float kNrd2StabRoughLo    = 0.35;   // S takes history only for rough lobes (the resolve's smooth threshold)
+static const float kNrd2StabRoughSpan  = 0.3;
+static const float kNrd2StabDepthRel   = 0.02;   // reprojected-depth acceptance: relative + 1 cm + local plane slope
+static const float kNrd2StabDepthAbs   = 0.01;
+static const float kNrd2StabMinWeight  = 0.5;    // valid bilinear weight needed for any history
+static const float kNrd2StabAgeWeight  = 0.1;
+static const float kNrd2StabAgeCap     = 255.0;
+
+struct Nrd2StabTap {
+    float  b;      // bilinear weight (0 outside the viewport)
+    float  age;    // frames of history behind this texel (0 = none)
+    float  zm;     // its view Z, metres
+    float3 d, s;   // stabilised D'' and S''
+};
+
+// Frames of history allowed at this screen speed (px per frame): nStill at rest, nFast from 8 px, none from 32 px.
+float nrd2StabMaxFrames(float speed, float nStill, float nFast) {
+    if (!(speed < kNrd2StabSpeedCut)) return 0.0;
+    const float t = saturate(log2(max(speed, kNrd2StabSpeedStill) / kNrd2StabSpeedStill) /
+                             log2(kNrd2StabSpeedFast / kNrd2StabSpeedStill));
+    const float hi = max(nStill, 1.0);
+    return exp2(lerp(log2(hi), log2(clamp(nFast, 1.0, hi)), t));
+}
+
+// Weight of the history: 0, 1/2, 2/3, ... up to 1 - 1/nMax.
+float nrd2StabAlpha(float age, float nMax) {
+    return saturate(1.0 - 1.0 / max(min(age + 1.0, nMax), 1.0));
+}
+
+// cur, the clamp box (min/max of this frame's values only), the four reprojected history taps and the depth
+// they must match (zExp +- zTol). Out: the blended D'' / S'' and the history age to store.
+void nrd2StabCombine(float3 curD, float3 curS, float3 loD, float3 hiD, float3 loS, float3 hiS, Nrd2StabTap t[4],
+                     float zExp, float zTol, float nMax, float rough, bool historyValid, out float3 outD,
+                     out float3 outS, out float outAge) {
+    float  wsum = 0.0, nAge = 1.0e9;
+    float3 hd = 0.0, hs = 0.0;
+    [unroll] for (uint i = 0u; i < 4u; ++i) {
+        if (!(historyValid && t[i].b > 0.0 && t[i].age > 0.0 && abs(t[i].zm - zExp) <= zTol)) continue;
+        wsum += t[i].b;
+        hd += t[i].b * t[i].d;
+        hs += t[i].b * t[i].s;
+        if (t[i].b > kNrd2StabAgeWeight) nAge = min(nAge, t[i].age);
+    }
+    float aD = 0.0, aS = 0.0;
+    outAge = 1.0;
+    if (wsum >= kNrd2StabMinWeight && nMax > 0.0) {
+        aD = nrd2StabAlpha(nAge, nMax);
+        aS = aD * saturate((rough - kNrd2StabRoughLo) / kNrd2StabRoughSpan);
+        hd = clamp(hd / wsum, loD, hiD);
+        hs = clamp(hs / wsum, loS, hiS);
+        outAge = min(nAge + 1.0, kNrd2StabAgeCap);
+    }
+    outD = lerp(curD, hd, aD);
+    outS = lerp(curS, hs, aS);
+}
+
 // ---- backward (phase 3 oracle): d(output)/d(theta) for one pixel and one signal --------------------
 // theta = the six tile parameters in field order (logits l1..l3, log2 depth / normal / luminance
 // sensitivity); the own logit stays pinned at 0. Levels, guides and the pixel's own value are fixed

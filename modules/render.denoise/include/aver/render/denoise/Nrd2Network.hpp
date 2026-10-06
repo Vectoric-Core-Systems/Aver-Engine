@@ -1,10 +1,10 @@
 // Nrd2Network -- NRD2 phase 4 inference (docs/rendering/NRD2.md): the trained ConvNet writes the
 // per-8x8-tile parameter buffer the resolve reads, in place of CSNrd2Params' defaults.
 //
-// Per frame (inside Nrd2::record, after the pyramid): CSNrd2Features (raw) -> CSNrd2NetIn (standardised
-// in place with the weight file's input affine) -> ConvNet::recordInfer (EMA weights) -> CSNrd2NetOut
-// (output affine, clamped: logits +-8, log2 sensitivities +-6, non-finite -> defaults). Only per-tile
-// parameters come out (patent rule 6); the resolve stays fixed maths.
+// Per frame (inside Nrd2::record, after the pyramid): CSNrd2Features (standardised with the weight file's
+// input affine as it stores) -> ConvNet::recordInfer (EMA weights) -> CSNrd2NetOut (output affine,
+// clamped: logits +-8, log2 sensitivities +-6, non-finite -> defaults). Only per-tile parameters come out
+// (patent rule 6); the resolve stays fixed maths.
 //
 // Weights: the user's %LOCALAPPDATA%\AverEngine\nrd2_v1.avnn over the shipped bin/data copy, reloaded when
 // the file changes (training saves a new best). Live gate from the "<file>.steps" sidecar's held-out
@@ -47,8 +47,11 @@ public:
     // Builds on first use, polls the weight file, checks the live gate. False: the defaults this frame
     // (the reason in status().problem, logged once).
     bool ready(rhi::IDevice& dev);
-    // After ready(). features: CSNrd2Features' tensor (12 x 4 tilesY x 4 tilesX floats, Common;
-    // standardised in place). params: the resolve's tile buffer (12 x tilesX x tilesY floats, Common on
+    // The loaded weights' input standardisation (x * scale + bias, 12 channels); valid after ready().
+    [[nodiscard]] const f32* inScale() const { return inScale_; }
+    [[nodiscard]] const f32* inBias() const { return inBias_; }
+    // After ready(). features: CSNrd2Features' tensor (12 x 4 tilesY x 4 tilesX floats, Common; already
+    // standardised with inScale/inBias). params: the resolve's tile buffer (12 x tilesX x tilesY floats, Common on
     // entry and exit). False when it could not record; nothing was written then.
     bool record(rhi::IRenderContext& ctx, rhi::BufferHandle features, u32 featureFloats, rhi::BufferHandle params,
                 u32 paramFloats, u32 tilesX, u32 tilesY, const f32 defaults[12]);
@@ -68,8 +71,8 @@ private:
 
     rhi::IResourceFactory* res_ = nullptr;
     neural::ConvNet net_;
-    rhi::PipelineHandle psoIn_ = 0, psoOut_ = 0;
-    rhi::BindingSetHandle setIn_ = 0, setOut_ = 0;
+    rhi::PipelineHandle psoOut_ = 0;
+    rhi::BindingSetHandle setOut_ = 0;
     rhi::BufferHandle out_ = 0;
     u32 outFloats_ = 0;
     rhi::BufferHandle boundFeatures_ = 0, boundParams_ = 0;

@@ -83,6 +83,18 @@ static SceneRenderLogState g_sceneRenderLog;
 // Submits the frame: the editor scene, the level world, gizmos, and the overlays.
 void SandboxApp::onRender(Engine& e)  {
     handleManip(e);
+    {
+        // CPU span timing runs only while something reads it: the profiler panel, --gpu-timing, or
+        // the lead-up to a power-of-two scene-walk log line (the report averages the last 30 walks).
+        bool wantCpuTiming = gpuTiming_;
+#if AVER_WITH_IMGUI
+        wantCpuTiming = wantCpuTiming || showProfiler_;
+#endif
+        u32 nextReport = sceneWalkReports_;   // smallest 2^k-1 not below the current count
+        for (u32 sh = 1; sh < 32; sh <<= 1) nextReport |= nextReport >> sh;
+        wantCpuTiming = wantCpuTiming || nextReport - sceneWalkReports_ <= 32;
+        cpuTimingSetEnabled(wantCpuTiming);
+    }
 #if AVER_MODULE_LANDSCAPE
     // Drains an undo/redo that changed terrain heights; deferred to here as the first point after
     // those run that has a device (see GameLandscape::applyHeightRect's own comment).

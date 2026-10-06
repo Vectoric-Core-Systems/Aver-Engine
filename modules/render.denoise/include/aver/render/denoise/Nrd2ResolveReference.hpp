@@ -1,6 +1,7 @@
 // Nrd2ResolveReference -- CPU twin of NRD2's fixed maths and of the phase 3 oracle fit: the pyramid
-// (CSNrd2Pyramid), the resolve forward and backward (nrd2_resolve.hlsli) and the per-tile fit
-// (nrd2_capture.hlsl). The spec the shaders follow and what Nrd2ResolveTest checks.
+// (CSNrd2Pyramid), the resolve forward and backward (nrd2_resolve.hlsli), the temporal stabiliser's
+// per-pixel blend and the per-tile fit (nrd2_capture.hlsl). The spec the shaders follow and what
+// Nrd2ResolveTest checks.
 //
 // KEEP IN SYNC WITH nrd2.hlsl / nrd2_resolve.hlsli / nrd2_capture.hlsl.
 //
@@ -43,6 +44,39 @@ std::array<f32, 6> nrd2DefaultTheta(u32 signal);
 // as the fallback). dOut, when given, receives d(output)/d(theta_k) for k = 0..5.
 std::array<f32, 3> nrd2ResolvePixel(const Nrd2Frame& f, const Nrd2Pyramid& p, u32 x, u32 y, u32 signal,
                                     const f32 theta[6], f32 (*dOut)[3] = nullptr);
+
+// ---- temporal stabiliser (nrd2_resolve.hlsli: nrd2StabMaxFrames / nrd2StabCombine) ----
+
+// Frames of history allowed at this screen speed (px per frame): nStill at rest, min(nFast, nStill) from
+// 8 px, none from 32 px (or for a non-finite speed).
+f32 nrd2StabMaxFrames(f32 speed, f32 nStill, f32 nFast);
+// Weight of the history after `age` frames: 0, 1/2, 2/3 ... up to 1 - 1/nMax.
+f32 nrd2StabAlpha(f32 age, f32 nMax);
+// Per-channel min/max over the given rgb values (the clamp box of one signal).
+void nrd2StabBox(const std::vector<std::array<f32, 3>>& values, f32 lo[3], f32 hi[3]);
+
+struct Nrd2StabTap {
+    f32 b = 0.0f, age = 0.0f, zm = 0.0f;   // bilinear weight, frames of history (0 = none), view Z (m)
+    f32 d[3] = {}, s[3] = {};              // last frame's stabilised D'' and S''
+};
+
+struct Nrd2StabIn {
+    f32 curD[3] = {}, curS[3] = {};
+    f32 loD[3] = {}, hiD[3] = {}, loS[3] = {}, hiS[3] = {};   // the clamp box
+    Nrd2StabTap tap[4];
+    f32 zExp = 0.0f, zTol = 0.0f;   // the view depth (m) a tap must match, and by how much
+    f32 nMax = 12.0f;               // nrd2StabMaxFrames of this pixel's speed
+    f32 roughness = 1.0f;
+    bool historyValid = true;
+};
+
+struct Nrd2StabOut {
+    f32 d[3] = {}, s[3] = {};
+    f32 age = 1.0f;                  // history age to store
+    f32 alphaD = 0.0f, alphaS = 0.0f;
+};
+
+Nrd2StabOut nrd2StabilisePixel(const Nrd2StabIn& in);
 
 // ---- oracle fit (one 8x8 tile, one signal) ----
 

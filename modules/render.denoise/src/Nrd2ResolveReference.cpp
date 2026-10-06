@@ -344,6 +344,50 @@ std::array<f32, 3> nrd2ResolvePixel(const Nrd2Frame& f, const Nrd2Pyramid& py, u
     return {out.x, out.y, out.z};
 }
 
+f32 nrd2StabMaxFrames(f32 speed, f32 nStill, f32 nFast) {
+    if (!(speed < 32.0f)) return 0.0f;
+    const f32 t = sat(std::log2(std::max(speed, 0.25f) / 0.25f) / std::log2(8.0f / 0.25f));
+    const f32 hi = std::max(nStill, 1.0f);
+    const f32 a = std::log2(hi), b = std::log2(std::clamp(nFast, 1.0f, hi));
+    return std::exp2(a + (b - a) * t);
+}
+
+f32 nrd2StabAlpha(f32 age, f32 nMax) {
+    return sat(1.0f - 1.0f / std::max(std::min(age + 1.0f, nMax), 1.0f));
+}
+
+void nrd2StabBox(const std::vector<std::array<f32, 3>>& values, f32 lo[3], f32 hi[3]) {
+    for (u32 c = 0; c < 3; ++c) { lo[c] = 3.0e38f; hi[c] = -3.0e38f; }
+    for (const auto& v : values)
+        for (u32 c = 0; c < 3; ++c) { lo[c] = std::min(lo[c], v[c]); hi[c] = std::max(hi[c], v[c]); }
+}
+
+Nrd2StabOut nrd2StabilisePixel(const Nrd2StabIn& in) {
+    f32 wsum = 0.0f, nAge = 1.0e9f;
+    f32 hd[3] = {}, hs[3] = {};
+    for (const Nrd2StabTap& t : in.tap) {
+        if (!(in.historyValid && t.b > 0.0f && t.age > 0.0f && std::fabs(t.zm - in.zExp) <= in.zTol)) continue;
+        wsum += t.b;
+        for (u32 c = 0; c < 3; ++c) { hd[c] += t.b * t.d[c]; hs[c] += t.b * t.s[c]; }
+        if (t.b > 0.1f) nAge = std::min(nAge, t.age);
+    }
+    Nrd2StabOut o;
+    if (wsum >= 0.5f && in.nMax > 0.0f) {
+        o.alphaD = nrd2StabAlpha(nAge, in.nMax);
+        o.alphaS = o.alphaD * sat((in.roughness - 0.35f) / 0.3f);
+        o.age = std::min(nAge + 1.0f, 255.0f);
+        for (u32 c = 0; c < 3; ++c) {
+            hd[c] = std::clamp(hd[c] / wsum, in.loD[c], in.hiD[c]);
+            hs[c] = std::clamp(hs[c] / wsum, in.loS[c], in.hiS[c]);
+        }
+    }
+    for (u32 c = 0; c < 3; ++c) {
+        o.d[c] = in.curD[c] + (hd[c] - in.curD[c]) * o.alphaD;
+        o.s[c] = in.curS[c] + (hs[c] - in.curS[c]) * o.alphaS;
+    }
+    return o;
+}
+
 void nrd2ClampTheta(f32 t[6]) {
     for (u32 k = 0; k < 3; ++k) t[k] = std::clamp(t[k], -16.0f, 16.0f);
     for (u32 k = 3; k < 6; ++k) t[k] = std::clamp(t[k], -8.0f, 8.0f);
