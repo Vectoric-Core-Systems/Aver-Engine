@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The prefab binding: every aver_prefab_* export of prefab_abi.h, the game-author-facing Prefabs
+       API on top of them, and the seam the AN_SpawnPrefab family of Aver Node nodes call.
+
+       A LEAF, like Aver.UI: it references nothing, because spawning a prefab is a string and some
+       numbers in, an entity handle out. The native library is Aver.Prefab.Abi, a different file name
+       from this assembly, so no NativeResolver is needed. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Prefab</AssemblyName>
+    <RootNamespace>Aver.Prefab</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+</Project>
