@@ -3738,7 +3738,7 @@ void VoxiRenderer::buildLocalLights() {
     std::sort(rdLocalLightData_.begin(), rdLocalLightData_.end(), canonicalLess);
 
     if (!rdLocalLightData_.empty()) {
-        // Grown straight to the cap on first need: 32 x 32 bytes per slot, so there is never a reason
+        // Grown straight to the cap on first need: 32 records per slot, so there is never a reason
         // to reallocate again as lamps come and go.
         if (rdLocalLightCapacity_ < rdLocalLightData_.size()) {
             // Every slot or none: a half-built ring would bind a null buffer on its missing turns.

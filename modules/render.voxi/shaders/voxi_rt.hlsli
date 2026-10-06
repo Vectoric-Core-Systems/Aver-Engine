@@ -1163,10 +1163,32 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
 float averShadowLum(float3 v) { return dot(v, float3(0.2126, 0.7152, 0.0722)); }
 
 #if AVER_RD_LAMPS
-// Weight for picking which light gets this pixel's shadow ray: its unshadowed luminance, 0 for a light
-// that casts no shadow (it never needs a ray and is added unshadowed).
+// Weight for picking which light gets this pixel's shadow ray, 0 for a light that casts no shadow (it never
+// needs a ray and is added unshadowed). Only chooses the ray, the shading evaluates every light exactly, so
+// it is the cheap sphere estimate (range window, inverse square, N.L to the centre, spot cone) without IES,
+// cookies or the rectangle's form factor: two loops over 32 lights per pixel. A rectangle keeps N.L >= 0.1
+// while the receiver faces it, since part of it can be above the horizon when the centre is not.
 float rdLocalPickWeight(RdLocalLight l, float3 wpos, float3 N) {
-    return aversLightNoShadow(l) ? 0.0 : averShadowLum(rdLocalIrradiance(l, wpos, N));
+    if (aversLightNoShadow(l)) return 0.0;
+    const float3 toC   = l.posRadius.xyz - wpos;
+    const float  d2    = dot(toC, toC);
+    const float  range = l.radianceRange.w;
+    if (d2 >= range * range) return 0.0;
+    const float  x2   = d2 / (range * range);
+    const float  win  = saturate(1.0 - x2 * x2);
+    const float  invD = rsqrt(max(d2, 1e-8));
+    const uint   kind = aversLightKind(l);
+    float ndl = saturate(dot(N, toC) * invD);
+    if (kind == AVER_LIGHT_RECT) {
+        if (dot(-toC, l.axisKind.xyz) <= 0.0) return 0.0;
+        ndl = max(ndl, 0.1);
+    }
+    if (kind == AVER_LIGHT_SPOT) {
+        const float c = dot(-toC * invD, l.axisKind.xyz);
+        if (c <= l.shape.y) return 0.0;
+    }
+    const float r = l.posRadius.w;
+    return averShadowLum(l.radianceRange.rgb) * (1e4 / max(d2, r * r)) * (win * win) * ndl;
 }
 // Two quasi-random numbers in [0,1) for a rectangle sample: radical inverse and golden Weyl of the
 // pixel's turn, rotated per pixel.
