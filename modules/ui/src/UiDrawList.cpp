@@ -100,20 +100,25 @@ void UiDrawList::addTexturedRect(f32 x, f32 y, f32 w, f32 h, u64 texture,
 // One textured quad per glyph, all on the font's atlas. See the header for why the pen is the
 // baseline rather than a box corner.
 f32 UiDrawList::addText(f32 x, f32 y, std::string_view text, const UiFont& font, u32 rgba) {
-    if (!font.valid() || text.empty()) return x;
+    return addTextScaled(x, y, text, font, rgba, 1.0f);
+}
+
+f32 UiDrawList::addTextScaled(f32 x, f32 y, std::string_view text, const UiFont& font, u32 rgba,
+                              f32 scale) {
+    if (!font.valid() || text.empty() || scale <= 0.0f) return x;
     f32 penX = x;
     f32 penY = y;
     for (const char ch : text) {
-        if (ch == '\n') { penX = x; penY += font.lineHeight; continue; }
+        if (ch == '\n') { penX = x; penY += font.lineHeight * scale; continue; }
         const UiGlyph* g = font.glyph(static_cast<u32>(static_cast<unsigned char>(ch)));
         if (!g) continue;   // no tofu box: a missing glyph costs a gap, not a wall
         // A SPACE HAS AN ADVANCE AND NO BITMAP, and emitting a zero-area quad for it would add two
         // triangles per space to every string for nothing.
         if (g->w > 0.0f && g->h > 0.0f) {
-            addTexturedRect(penX + g->offX, penY + g->offY, g->w, g->h,
+            addTexturedRect(penX + g->offX * scale, penY + g->offY * scale, g->w * scale, g->h * scale,
                             font.atlasTexture, g->u0, g->v0, g->u1, g->v1, rgba);
         }
-        penX += g->advance;
+        penX += g->advance * scale;
     }
     return penX;
 }

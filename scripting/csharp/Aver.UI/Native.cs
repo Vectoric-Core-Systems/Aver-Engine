@@ -48,4 +48,74 @@ internal static class Native
 
     [DllImport(Lib)] internal static extern int aver_ui_vertex_count();
     [DllImport(Lib)] internal static extern int aver_ui_command_count();
+
+    // ---- the retained widget system (ui_widget_abi.h) -----------------------------------------------
+    // The frame and the input feeds are the HOST's. A game reads state and handles events.
+    [DllImport(Lib)] internal static extern void aver_ui_widgets_frame(float dt);
+    [DllImport(Lib)] internal static extern uint aver_ui_wants_input();
+    [DllImport(Lib)] internal static extern void aver_ui_set_theme([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(Lib)] internal static extern void aver_ui_set_dpi(int mode, float refWidth, float refHeight, float userScale);
+    [DllImport(Lib)] internal static extern float aver_ui_scale();
+
+    [DllImport(Lib)] internal static extern uint aver_ui_widget_create(int kind, uint parent,
+                                                  [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(Lib)] internal static extern int  aver_ui_widget_destroy(uint id);
+    [DllImport(Lib)] internal static extern int  aver_ui_widget_reparent(uint id, uint newParent, int index);
+    [DllImport(Lib)] internal static extern uint aver_ui_widget_find([MarshalAs(UnmanagedType.LPUTF8Str)] string name, uint under);
+    [DllImport(Lib)] internal static extern uint aver_ui_widget_parent(uint id);
+    [DllImport(Lib)] internal static extern uint aver_ui_widget_root(uint id);
+    [DllImport(Lib)] internal static extern int  aver_ui_widget_child_count(uint id);
+    [DllImport(Lib)] internal static extern uint aver_ui_widget_child_at(uint id, int index);
+    [DllImport(Lib)] internal static extern int  aver_ui_widget_kind(uint id);
+    [DllImport(Lib)] internal static extern int  aver_ui_widget_exists(uint id);
+    [DllImport(Lib)] internal static extern int  aver_ui_widget_set_prop(uint id, [MarshalAs(UnmanagedType.LPUTF8Str)] string key,
+                                                  [MarshalAs(UnmanagedType.LPUTF8Str)] string value);
+    [DllImport(Lib)] internal static extern IntPtr aver_ui_widget_get_prop(uint id, [MarshalAs(UnmanagedType.LPUTF8Str)] string key);
+    [DllImport(Lib)] internal static extern void aver_ui_widget_set_text(uint id, [MarshalAs(UnmanagedType.LPUTF8Str)] string text);
+    [DllImport(Lib)] internal static extern IntPtr aver_ui_widget_get_text(uint id);
+    [DllImport(Lib)] internal static extern void  aver_ui_widget_set_value(uint id, float value);
+    [DllImport(Lib)] internal static extern float aver_ui_widget_get_value(uint id);
+    [DllImport(Lib)] internal static extern void aver_ui_widget_set_checked(uint id, int value);
+    [DllImport(Lib)] internal static extern int  aver_ui_widget_get_checked(uint id);
+    [DllImport(Lib)] internal static extern void aver_ui_widget_set_selected(uint id, int index);
+    [DllImport(Lib)] internal static extern int  aver_ui_widget_get_selected(uint id);
+    [DllImport(Lib)] internal static extern void aver_ui_widget_set_items(uint id, [MarshalAs(UnmanagedType.LPUTF8Str)] string items);
+    [DllImport(Lib)] internal static extern void aver_ui_widget_set_visible(uint id, int visible);
+    [DllImport(Lib)] internal static extern int  aver_ui_widget_get_visible(uint id);
+    [DllImport(Lib)] internal static extern void aver_ui_widget_set_enabled(uint id, int enabled);
+    [DllImport(Lib)] internal static extern void aver_ui_widget_set_texture(uint id, ulong texture);
+    [DllImport(Lib)] internal static extern void aver_ui_widget_rect(uint id, float[] outXYWH);
+    [DllImport(Lib)] internal static extern int  aver_ui_set_focus(uint id);
+    [DllImport(Lib)] internal static extern uint aver_ui_focused();
+    [DllImport(Lib)] internal static extern uint aver_ui_hit_widget(float x, float y);
+
+    [DllImport(Lib)] internal static extern uint aver_ui_layout_open([MarshalAs(UnmanagedType.LPUTF8Str)] string text, int applyEnvironment);
+    [DllImport(Lib)] internal static extern IntPtr aver_ui_layout_error();
+    [DllImport(Lib)] internal static extern IntPtr aver_ui_layout_capture(uint root);
+
+    [DllImport(Lib)] internal static extern int aver_ui_event_poll(out int type, out uint widget, out float value,
+                                                  out int index, byte[] textBuf, int textCap);
+
+    [DllImport(Lib)] internal static extern uint aver_ui_menu_create([MarshalAs(UnmanagedType.LPUTF8Str)] string rootName,
+                                                  [MarshalAs(UnmanagedType.LPUTF8Str)] string title,
+                                                  [MarshalAs(UnmanagedType.LPUTF8Str)] string entries,
+                                                  int modal, [MarshalAs(UnmanagedType.LPUTF8Str)] string cancelCommand);
+    [DllImport(Lib)] internal static extern void aver_ui_settings_reset_default();
+    [DllImport(Lib)] internal static extern void aver_ui_settings_clear();
+    [DllImport(Lib)] internal static extern void aver_ui_settings_add(int type, [MarshalAs(UnmanagedType.LPUTF8Str)] string key,
+                                                  [MarshalAs(UnmanagedType.LPUTF8Str)] string label,
+                                                  [MarshalAs(UnmanagedType.LPUTF8Str)] string tab,
+                                                  float value, float min, float max, float step,
+                                                  [MarshalAs(UnmanagedType.LPUTF8Str)] string choices);
+    [DllImport(Lib)] internal static extern void  aver_ui_settings_set_value([MarshalAs(UnmanagedType.LPUTF8Str)] string key, float value);
+    [DllImport(Lib)] internal static extern float aver_ui_settings_value([MarshalAs(UnmanagedType.LPUTF8Str)] string key);
+    [DllImport(Lib)] internal static extern void aver_ui_rebind_clear();
+    [DllImport(Lib)] internal static extern void aver_ui_rebind_add([MarshalAs(UnmanagedType.LPUTF8Str)] string action, int slot,
+                                                  [MarshalAs(UnmanagedType.LPUTF8Str)] string label,
+                                                  [MarshalAs(UnmanagedType.LPUTF8Str)] string binding, int rebindable);
+    [DllImport(Lib)] internal static extern void aver_ui_rebind_set_binding(int row, [MarshalAs(UnmanagedType.LPUTF8Str)] string binding);
+    [DllImport(Lib)] internal static extern uint aver_ui_settings_build([MarshalAs(UnmanagedType.LPUTF8Str)] string rootName);
+
+    /// <summary>Decodes a native UTF-8 string the ABI lent (valid only until its next string call).</summary>
+    internal static string Utf8(IntPtr p) => p == IntPtr.Zero ? string.Empty : Marshal.PtrToStringUTF8(p) ?? string.Empty;
 }

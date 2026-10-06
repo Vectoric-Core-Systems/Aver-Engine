@@ -73,7 +73,8 @@ that looks like a filtering artefact and is not one.
 ## Status
 
 The path compiles and all test suites pass. The sandbox carries a hand-written demo draw list
-behind **Window → Game UI Demo** — off by default, because the gates compare backbuffer pixels and a
-HUD over the viewport would move every one of them. There is no text and no widget tree yet. Text is
-blocked on a font decision (vendor `stb_truetype.h`, or bitmap fonts); the widget tree is the next
-thing above this.
+behind **Window -> Game UI Demo** -- off by default, because the gates compare backbuffer pixels and a
+HUD over the viewport would move every one of them. Text is drawn from a baked `.ocfont`, and the
+retained widget tree (`Aver.UI`: panels, buttons, sliders, lists, text input, layout, focus, themes, the
+`.ocui` layout asset and its editor tab) draws into the same list through `UiDrawListPainter`, so this
+module needed no change for it. See docs/GAME_UI.md.

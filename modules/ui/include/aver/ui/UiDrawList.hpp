@@ -76,6 +76,10 @@ public:
     // without measuring twice.
     f32 addText(f32 x, f32 y, std::string_view text, const UiFont& font, u32 rgba);
 
+    // The same, with every glyph (metrics and advance) multiplied by `scale`. The widget system
+    // draws at a size that follows the DPI scale, from a font baked at one size.
+    f32 addTextScaled(f32 x, f32 y, std::string_view text, const UiFont& font, u32 rgba, f32 scale);
+
     // ---- HIT TESTING, which this draw list could not do either -----------------------------------
     //
     // A rectangle registered under a caller-chosen id. The draw list already knows the clip stack
