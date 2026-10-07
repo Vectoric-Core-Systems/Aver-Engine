@@ -466,6 +466,9 @@ public:
     virtual void destroyBuffer(BufferHandle h) = 0;
     virtual void destroyShader(ShaderHandle h) = 0;
     virtual void destroyPipeline(PipelineHandle h) = 0;
+    // True when createShader / createGraphicsPipeline / createComputePipeline (and destroyShader) may be called from
+    // a worker thread while the render thread keeps using the factory. Everything else stays on the creating thread.
+    virtual bool threadSafePipelineCreation() const { return false; }
     virtual void destroyBindingSet(BindingSetHandle h) = 0;
 
     // Releases an acceleration structure. Not pure.
