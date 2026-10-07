@@ -1385,6 +1385,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
         }
     } frameStepGuard;
+    // A project picked in the browser opens here, before anything of this frame is recorded.
+    if (projectOpenPending_) { projectOpenPending_ = false; applyProject(e); }
     // --set NAME VALUE applied at frame 5 (after project's RENDER.* apply).
 #if AVER_WITH_IMGUI
     if (!consoleSetsApplied_ && !consoleSets_.empty() && t.frame >= 5 && e.device()) {

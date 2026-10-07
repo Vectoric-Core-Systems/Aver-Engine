@@ -3505,6 +3505,7 @@ private:
     std::string projectPath_;        // <path>.ocproject given on the command line
     std::string openMapPath_;        // <path>.ocmap given on the command line, if any
     bool browserActive_=false;
+    bool projectOpenPending_=false;   // browser chose a project; applied at the top of onUpdate
     // Whether THIS launch's own command line was eligible to register as the single-instance primary.
     bool singleInstanceEligible_ = false;
     // ONE PENDING OPEN, whatever asked for it: File > Open Level's picker, a Content Browser double-click, or a path forwarded from a second launch.
