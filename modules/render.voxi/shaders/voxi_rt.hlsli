@@ -560,8 +560,6 @@ uint rtGiShadowBits() { return (uint)gGiShadowParams.w; }
 
 // NRD2 frame (bit 512): u9 and u23's rgb belong to Stage B's targets, so the stages' writes there are dead.
 bool rtNrd2Frame() { return (rtGiShadowBits() & 512u) != 0u; }
-// Denoiser None: no Voxi history or spatial filter runs (VoxiRenderer.cpp, beginShadowHistory).
-bool rtFiltersOff() { return (rtGiShadowBits() & 1024u) != 0u; }
 
 // False where the sun's radiance is exactly 0 (a night scene): every consumer multiplies visibility by it.
 bool rdSunLit() { return any(averSunRadiance() != 0.0); }
@@ -777,8 +775,6 @@ StructuredBuffer<RdLocalLight> gRdLocalLights : register(t18);
 uint rdLocalLightCount() { return (uint)(gCameraMedium.z + 0.5); }
 // True when this frame's light set is valid for reprojection.
 bool rdLocalHistValid()  { return ((uint)(gCameraMedium.w + 0.5) & 1u) != 0u; }
-// True when last frame's CSRdShadow wrote gRdLocalHist's light keys (bit 8), whatever became of the list.
-bool rdLocalKeysValid()  { return ((uint)(gCameraMedium.w + 0.5) & 8u) != 0u; }
 // True when all lamp-flagged draws made the 32-cap list (bit 2), so GI hits can skip their emission.
 bool rdLocalCarriesEmitters() { return ((uint)(gCameraMedium.w + 0.5) & 2u) != 0u; }
 // ---- THE LIGHT GRID (UNIFIED_LIGHTS.md phase 3), stored after the lights in t18 as floats ----
@@ -989,14 +985,15 @@ float rtSkyOcclusion(float3 wpos, float3 N, float2 pixel, uint rays) {
 }
 
 // Reprojects wpos through last frame's camera to sample shadow history. False when unusable
-// (off-screen, behind near plane, or disocclusion). The history holds plain visibility; which light it belongs
-// to is gRdLocalHist's key (AVER_RD_SHADOW_KEYED, CSRdShadow only: the one pass whose exact light varies).
-#ifndef AVER_RD_SHADOW_KEYED
-#define AVER_RD_SHADOW_KEYED 0
-#endif
-#if AVER_RD_SHADOW_KEYED
-bool rdShadowHistKeyOk(int2 texel);
-#endif
+// (off-screen, behind near plane, or disocclusion).
+// Shadow history .x holds the light's key with its visibility: key * 2 + vis (vis in [0, 1]; the key is below 4096,
+// so RG32F keeps vis to about 1e-3). Unpack fails when the texel belongs to another light.
+float rtShadowHistPack(float vis) { return gAverShadowLightId * 2.0 + saturate(vis); }
+bool  rtShadowHistUnpack(float x, out float vis) {
+    const float id = floor(max(x, 0.0) * 0.5);
+    vis = saturate(x - 2.0 * id);
+    return id == gAverShadowLightId;
+}
 
 bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 velocityPx) {
     hist = 0.0;
@@ -1019,10 +1016,8 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
     // Tolerance follows depth gradient: 3% relative + 1cm floor + surface slope.
     const float tol = max(clip.w, stored.y) * 0.03 + 1.0 + (abs(dzdx) + abs(dzdy)) * 2.0;
     if (abs(clip.w - stored.y) > tol) return false;
-#if AVER_RD_SHADOW_KEYED
-    if (!rdShadowHistKeyOk(texel)) return false;   // the texel last held another light: start fresh
-#endif
-    hist = stored.x;
+    // Only this light's history (rtShadowHistPack): a texel that last held another light starts fresh.
+    if (!rtShadowHistUnpack(stored.x, hist)) return false;
     velocityPx = px - pixel;
     return true;
 }
@@ -1289,12 +1284,12 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
 float averShadowLum(float3 v) { return dot(v, float3(0.2126, 0.7152, 0.0722)); }
 
 #if AVER_RD_LAMPS
-// A light's stable key from its position (cm), 1..2047; 0 is a directional light. Unlike its list index, it survives
-// the list reordering as the camera moves. Below 2048 so gRdLocalOut's half-precision .y holds it exactly.
+// A light's stable key from its position (cm), 1..4095; 0 is a directional light. Unlike its list index, it survives
+// the list reordering as the camera moves.
 float rdLightKey(RdLocalLight l) {
     if (aversLightKind(l) == AVER_LIGHT_DIRECTIONAL) return 0.0;
     const uint3 q = (uint3)(int3(round(l.posRadius.xyz)) + 1048576);
-    return (float)(1u + (((q.x * 73856093u) ^ (q.y * 19349663u) ^ (q.z * 83492791u)) % 2047u));
+    return (float)(1u + (((q.x * 73856093u) ^ (q.y * 19349663u) ^ (q.z * 83492791u)) % 4095u));
 }
 
 // The direction toward list entry `l` from `wpos`, and the shadow kernels' disc, ray length and history key for it
@@ -1429,7 +1424,7 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
             const float weight = rtShadowChanged(fresh, histV) ? kAverShadowChangeHistory : lerp(0.9, 0.5, t);
             vis = lerp(fresh, histV, weight);
         }
-        if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
+        if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(rtShadowHistPack(vis), curDepth);
         return saturate(rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint);
     }
 
@@ -1463,7 +1458,7 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
         vis = hist;
     }
 
-    if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
+    if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(rtShadowHistPack(vis), curDepth);
     return saturate(rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint);
 }
 

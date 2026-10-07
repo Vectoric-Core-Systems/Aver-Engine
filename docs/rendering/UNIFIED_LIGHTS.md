@@ -85,13 +85,13 @@ the exact set from those slots and adds the tail.
 
 ## As built (2026-10-07)
 
-- **List (t18):** lamps and scene lights in importance order (no 32 cap, up to `kMaxListLights` = 2047, so every index fits `gRdLocalOut`'s half precision), then the
+- **List (t18):** lamps and scene lights in importance order (no 32 cap, up to `kMaxListLights` = 4000), then the
   sun as a directional entry whenever ray tracing runs and it has radiance, then the **light grid**: a header record
   (`gDecalParams.y` names it; 0 = no grid), a cell table and an index pool, all packed as floats in the same buffer.
   Up to 32 cells per axis, at least 50 cm, bounded to 200 m around the camera; each cell keeps its 24 most important
   lights. Directional lights are global, not in cells. `rdLightsAt` / `rdLightIndex` (`voxi_rt.hlsli`) walk it.
 - **Visible surface (`CSRdShadow`):** one exact light per pixel (the largest unshadowed contribution, the sun's
-  full kernel: disc, history reused only under the same light: `gRdLocalHist.y` key, see DENOISING.md 3b; tiles). Last frame's exact light keeps the slot while it delivers
+  full kernel: disc, history keyed by light id, tiles). Last frame's exact light keeps the slot while it delivers
   at least 80% of the strongest, so near-equal candles do not trade places. **Every other light (the tail) is
   treated the way the sun is:** shaded exactly and unshadowed in Stage B (`rdTailLights`), times ONE shadow
   fraction in [0, 1] (`rdTailVisibility`): one light picked by irradiance, one ray, its 0/1 answer accumulated
