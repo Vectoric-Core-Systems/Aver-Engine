@@ -264,6 +264,10 @@ private:
     void adoptTwins(bool pathTrace, const std::vector<rhi::PipelineHandle>& built);
     bool createTwins(bool pathTrace);
     void requestTwins(bool pathTrace);
+    void beginExclusiveBuild();
+    void exclusiveBuildLanded();
+    void buildNrd2Variants(u32 sampleCount, rhi::Format color, rhi::Format depth);
+    bool nrd2InFlight_ = false;            // NRD2's build is queued or running
     rhi::PipelineHandle pickGbuf(rhi::PipelineHandle plain, rhi::PipelineHandle gbuf) const;
     void shadowPass(rhi::IRenderContext& ctx);
     // Both take the slice [begin, end) of drawsPrev_: `first` clears, `last` finishes (a staged

@@ -118,16 +118,26 @@ bool prevViewProjRel(const f32 m[16], const f32 eye[3], f32 out[16]) {
 Nrd2::~Nrd2() { destroy(); }
 
 bool Nrd2::create(rhi::IDevice& dev) {
+    if (!beginCreate(dev)) return false;
+    compilePipelines();
+    return finishCreate();
+}
+
+bool Nrd2::beginCreate(rhi::IDevice& dev) {
     destroy();
     dev_ = &dev;
     res_ = dev.resources();
     if (!res_) { dev_ = nullptr; return false; }
-    const std::string& source = rhi::shaderFile("nrd2.hlsl");
-    if (source.empty()) {
+    if (rhi::shaderFile("nrd2.hlsl").empty()) {
         AVER_WARN("[NRD2] nrd2.hlsl is not deployed beside the executable; NRD2 unavailable");
         destroy();
         return false;
     }
+    return true;
+}
+
+void Nrd2::compilePipelines() {
+    const std::string& source = rhi::shaderFile("nrd2.hlsl");
     auto build = [&](u32 pass, const char* entry, u32 srv, u32 uav, u32 bufferSrv, bool bufferUav) {
         const std::string defines = "AVER_NRD2_PASS=" + std::to_string(pass);
         rhi::ShaderDesc sd{};
@@ -154,14 +164,17 @@ bool Nrd2::create(rhi::IDevice& dev) {
     psoPyramid_ = build(0, "CSNrd2Pyramid", kPyramidSrv, kPyramidUav, ~0u, false);
     psoParams_  = build(1, "CSNrd2Params", 0, 1, ~0u, true);
     psoResolve_ = build(2, "CSNrd2Resolve", kResolveSrv, kResolveUav, kResolveParamsSrv, false);
-    if (!valid()) { destroy(); return false; }
+    if (!valid()) return;
     // Optional: without them NRD2 stays single-frame.
     psoReproject_ = build(5, "CSNrd2Reproject", kReprojectSrv, kReprojectUav, ~0u, false);
     psoPrefilter_ = build(6, "CSNrd2Prefilter", kPrefilterSrv, kPrefilterUav, ~0u, false);
     psoTemporal_  = build(7, "CSNrd2Temporal", kTemporalSrv, kTemporalUav, ~0u, false);
     psoDespeckle_ = build(8, "CSNrd2Despeckle", kDespeckleSrv, kDespeckleUav, ~0u, false);
     psoBlur_      = build(9, "CSNrd2Blur", kBlurSrv, kBlurUav, ~0u, false);
+}
 
+bool Nrd2::finishCreate() {
+    if (!valid()) { destroy(); return false; }
     rhi::BindingSetDesc bd{};
     bd.srvCount = kPyramidSrv; bd.uavCount = kPyramidUav;
     setPyramid_ = res_->createBindingSet(bd);

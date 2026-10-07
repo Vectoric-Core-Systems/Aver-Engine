@@ -406,6 +406,12 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
         device.setDefaultDrawBinding(materials_.fallbackBindingSet(), &materials_.fallbackConstants(),
                                      sizeof(pbr::MaterialConstants));
 
+    if (asyncBuilds_) {
+        AVER_INFO("[Voxi] ready: conservative raster {}, ray tracing {}; the pipelines are building off the main "
+                  "thread (the frame stays black until they land)",
+                  caps_.conservativeRaster ? "on" : "off", rtSupported_ ? "supported" : "unsupported");
+        return true;
+    }
     AVER_INFO("[Voxi] ready: conservative raster {}, mesh-shader variants {}, ray-tracing variants {}, "
               "blended (glass) variant {}, G-buffer variant {} (off by default -- dev_->gBufferEnabled() "
               "is what turns it on per frame; see pickGbuf())",
@@ -5673,62 +5679,101 @@ bool VoxiRenderer::nrd2Wanted() const {
 // variant), then sizes its targets. False: this frame runs without it (FidelityFX if it is valid).
 void VoxiRenderer::buildAllVariants() {
     if (!res_ || !giReady_) return;
-    finishPipelineBuilds();   // the lazy variants below build on the main thread, after the scene set landed
+    finishPipelineBuilds();   // the scene set first: the variants below are built for its formats
     ensureNrd2();
+    finishPipelineBuilds();   // NRD2 builds as an exclusive job when the factory allows it
     if (!ptTwinsTried_) createPathTraceTwins();
     if (!rcTwinsTried_) createNeuRaCTwins();
 }
 
+// Voxi's NRD2 variants: Stage B with AVER_NRD2 and CSRdHalfFill (any thread: writes only those two handles).
+void VoxiRenderer::buildNrd2Variants(u32 sampleCount, rhi::Format color, rhi::Format depth) {
+    if (rayDrivenSplitNrd2Pso_ || !rtTexTable_) return;
+    ShaderScope compile(*res_);
+    const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
+                                                          layeredBsdf_);
+    const std::string bindless = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
+                                 std::to_string(kRtTextureCapacity);
+    const std::string ablate = rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string();
+    const rhi::ShaderHandle vs = compile("VSky", rhi::ShaderStage::Vertex, kBaseSm,
+                                         (matDefs + ";" + bindless).c_str());
+    const rhi::ShaderHandle ps = compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
+                                         (matDefs + ";" + bindless + ablate +
+                                          ";AVER_GBUFFER=1;AVER_RD_SPLIT=1;AVER_NRD2=1").c_str());
+    if (vs && ps) {
+        rhi::GraphicsPipelineDesc p;
+        p.vs = vs; p.ps = ps;
+        p.layout = giLayout(kRtTextureCapacity);
+        p.cull = rhi::CullMode::None;
+        p.depth = {true, true, rhi::CompareOp::Always};
+        p.renderTargetCount = 4;
+        p.renderTargets[0] = color;
+        p.renderTargets[1] = rhi::Format::RG16F;
+        p.renderTargets[2] = rhi::Format::R32Float;
+        p.renderTargets[3] = rhi::Format::RGB10A2Unorm;
+        p.depthFormat = depth;
+        p.sampleCount = sampleCount;
+        rayDrivenSplitNrd2Pso_ = res_->createGraphicsPipeline(p);
+    }
+    // Optional: without it NRD2 frames trace every feature at full rate.
+    if (const rhi::ShaderHandle cs = compile("CSRdHalfFill", rhi::ShaderStage::Compute, 66,
+                                             (matDefs + ";" + bindless + ablate).c_str())) {
+        rhi::ComputePipelineDesc p;
+        p.cs = cs;
+        p.layout = giLayout(kRtTextureCapacity);
+        rdHalfFillCsPso_ = res_->createComputePipeline(p);
+    }
+    if (!rdHalfFillCsPso_)
+        AVER_WARN("[Voxi] NRD2's half-rate fill (CSRdHalfFill) did not compile; NRD2 frames trace "
+                  "GI, reflections and sky occlusion at full rate");
+}
+
+// NRD2's pipelines (its passes, the compose draw, Voxi's two variants) as one build: on the worker when the factory
+// allows it, as an exclusive job (the frame draws nothing and scene rebuilds wait, so nothing reads the handles it
+// writes), else here and now.
 bool VoxiRenderer::ensureNrd2() {
     if (!nrd2Tried_) {
         nrd2Tried_ = true;
-        if (!nrd2_.valid()) nrd2_.create(*dev_);
-        if (nrd2_.valid() && !nrd2_.composeValid()) {
-            const rhi::Format gbuf[3] = {rhi::Format::RG16F, rhi::Format::R32Float, rhi::Format::RGB10A2Unorm};
-            nrd2_.createCompose(sceneColorFmt_, gbuf, sceneDepthFmt_, sceneSampleCount_);
-        }
-        if (nrd2_.valid() && nrd2_.composeValid() && !rayDrivenSplitNrd2Pso_ && rtTexTable_) {
-            ShaderScope compile(*res_);
-            const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
-                                                                  layeredBsdf_);
-            const std::string bindless = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
-                                         std::to_string(kRtTextureCapacity);
-            const std::string ablate = rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string();
-            const rhi::ShaderHandle vs = compile("VSky", rhi::ShaderStage::Vertex, kBaseSm,
-                                                 (matDefs + ";" + bindless).c_str());
-            const rhi::ShaderHandle ps = compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
-                                                 (matDefs + ";" + bindless + ablate +
-                                                  ";AVER_GBUFFER=1;AVER_RD_SPLIT=1;AVER_NRD2=1").c_str());
-            if (vs && ps) {
-                rhi::GraphicsPipelineDesc p;
-                p.vs = vs; p.ps = ps;
-                p.layout = giLayout(kRtTextureCapacity);
-                p.cull = rhi::CullMode::None;
-                p.depth = {true, true, rhi::CompareOp::Always};
-                p.renderTargetCount = 4;
-                p.renderTargets[0] = sceneColorFmt_;
-                p.renderTargets[1] = rhi::Format::RG16F;
-                p.renderTargets[2] = rhi::Format::R32Float;
-                p.renderTargets[3] = rhi::Format::RGB10A2Unorm;
-                p.depthFormat = sceneDepthFmt_;
-                p.sampleCount = sceneSampleCount_;
-                rayDrivenSplitNrd2Pso_ = res_->createGraphicsPipeline(p);
+        const rhi::Format gbuf[3] = {rhi::Format::RG16F, rhi::Format::R32Float, rhi::Format::RGB10A2Unorm};
+        const bool needCreate = !nrd2_.valid();
+        if (asyncBuilds_) {
+            if (!needCreate || nrd2_.beginCreate(*dev_)) {
+                const u32 sc = sceneSampleCount_;
+                const rhi::Format color = sceneColorFmt_, depth = sceneDepthFmt_;
+                auto prelude = std::make_shared<std::string>(voxiShaderPrelude());
+                beginExclusiveBuild();
+                nrd2InFlight_ = true;
+                queueBuild(
+                    [this, needCreate, sc, color, depth, prelude] {
+                        tl_voxiPrelude = prelude.get();
+                        if (needCreate) nrd2_.compilePipelines();
+                        if (!nrd2_.composeValid()) {
+                            const rhi::Format g[3] = {rhi::Format::RG16F, rhi::Format::R32Float,
+                                                      rhi::Format::RGB10A2Unorm};
+                            nrd2_.createCompose(color, g, depth, sc);   // its handle is 0: nothing to destroy
+                        }
+                        buildNrd2Variants(sc, color, depth);
+                        tl_voxiPrelude = nullptr;
+                    },
+                    [this, needCreate] {
+                        if (needCreate) nrd2_.finishCreate();
+                        nrd2InFlight_ = false;
+                        if (nrd2_.valid() && nrd2_.composeValid() && rayDrivenSplitNrd2Pso_)
+                            AVER_INFO("[Voxi] NRD2 ready (Stage B split variant, pyramid/resolve passes, compose draw)");
+                        exclusiveBuildLanded();
+                    });
+                return false;
             }
-            // Optional: without it NRD2 frames trace every feature at full rate.
-            if (const rhi::ShaderHandle cs = compile("CSRdHalfFill", rhi::ShaderStage::Compute, 66,
-                                                     (matDefs + ";" + bindless + ablate).c_str())) {
-                rhi::ComputePipelineDesc p;
-                p.cs = cs;
-                p.layout = giLayout(kRtTextureCapacity);
-                rdHalfFillCsPso_ = res_->createComputePipeline(p);
-            }
-            if (!rdHalfFillCsPso_)
-                AVER_WARN("[Voxi] NRD2's half-rate fill (CSRdHalfFill) did not compile; NRD2 frames trace "
-                          "GI, reflections and sky occlusion at full rate");
+        } else {
+            if (needCreate) nrd2_.create(*dev_);
+            if (nrd2_.valid() && !nrd2_.composeValid())
+                nrd2_.createCompose(sceneColorFmt_, gbuf, sceneDepthFmt_, sceneSampleCount_);
+            if (nrd2_.valid() && nrd2_.composeValid()) buildNrd2Variants(sceneSampleCount_, sceneColorFmt_, sceneDepthFmt_);
+            if (nrd2_.valid() && nrd2_.composeValid() && rayDrivenSplitNrd2Pso_)
+                AVER_INFO("[Voxi] NRD2 ready (Stage B split variant, pyramid/resolve passes, compose draw)");
         }
-        if (nrd2_.valid() && nrd2_.composeValid() && rayDrivenSplitNrd2Pso_)
-            AVER_INFO("[Voxi] NRD2 ready (Stage B split variant, pyramid/resolve passes, compose draw)");
     }
+    if (nrd2InFlight_) return false;   // building: this frame runs without it
     if (!nrd2_.valid() || !nrd2_.composeValid() || !rayDrivenSplitNrd2Pso_) {
         if (!nrd2FallbackLogged_) {
             nrd2FallbackLogged_ = true;
@@ -7328,6 +7373,26 @@ void VoxiRenderer::compileProgress(u32& done, u32& total) const {
     total = lastBuildCompiles_;
 }
 
+// An exclusive build (scene set, NRD2): the frame draws nothing until it lands and scene rebuilds wait for it.
+void VoxiRenderer::beginExclusiveBuild() {
+    if (sceneJobs_.load() == 0) { buildCompileBase_ = g_voxiCompiles.load(); buildT0_ = std::chrono::steady_clock::now(); }
+    ++sceneJobs_;
+    sceneInFlight_ = true;
+}
+void VoxiRenderer::exclusiveBuildLanded() {
+    sceneInFlight_ = false;
+    if (--sceneJobs_ == 0) {
+        lastBuildCompiles_ = g_voxiCompiles.load() - buildCompileBase_;
+        AVER_INFO("[Voxi] pipelines ready: {} shader compile(s) in {:.1f} s (built off the main thread)",
+                  lastBuildCompiles_,
+                  std::chrono::duration<f64>(std::chrono::steady_clock::now() - buildT0_).count());
+    }
+    if (sceneWantPending_) {   // asked for while this one built (new formats, a shader or graph change): build it now
+        sceneWantPending_ = false;
+        requestScenePipelines(sceneWantSamples_, sceneWantColor_, sceneWantDepth_);
+    }
+}
+
 void VoxiRenderer::requestScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth) {
     if (!asyncBuilds_) {
         if (!createScenePipelines(sampleCount, color, depth))
@@ -7351,9 +7416,7 @@ void VoxiRenderer::requestScenePipelines(u32 sampleCount, rhi::Format color, rhi
     const u64 graphRev = pbr::materialGraphs().revision();
     const u64 shaderRev = rhi::shaderFileRevision();
     auto prelude = std::make_shared<std::string>(voxiShaderPrelude());
-    if (sceneJobs_.load() == 0) { buildCompileBase_ = g_voxiCompiles.load(); buildT0_ = std::chrono::steady_clock::now(); }
-    ++sceneJobs_;
-    sceneInFlight_ = true;
+    beginExclusiveBuild();
     queueBuild(
         [this, sampleCount, color, depth, prelude] {
             tl_voxiPrelude = prelude.get();
@@ -7363,20 +7426,8 @@ void VoxiRenderer::requestScenePipelines(u32 sampleCount, rhi::Format color, rhi
         [this, graphRev, shaderRev] {
             scenePipelineGraphRev_ = graphRev;
             scenePipelineShaderRev_ = shaderRev;
-            sceneInFlight_ = false;
             if (!scenePso_) AVER_ERROR("[Voxi] the scene pipeline could not be built; the scene stays dark");
-            if (--sceneJobs_ == 0) {
-                lastBuildCompiles_ = g_voxiCompiles.load() - buildCompileBase_;
-                AVER_INFO("[Voxi] pipelines ready: {} shader compile(s) in {:.1f} s (built off the main thread)",
-                          lastBuildCompiles_,
-                          std::chrono::duration<f64>(std::chrono::steady_clock::now() - buildT0_).count());
-            }
-            if (sceneWantPending_) {
-                sceneWantPending_ = false;
-                if (sceneWantSamples_ != sceneSampleCount_ || sceneWantColor_ != sceneColorFmt_ ||
-                    sceneWantDepth_ != sceneDepthFmt_)
-                    requestScenePipelines(sceneWantSamples_, sceneWantColor_, sceneWantDepth_);
-            }
+            exclusiveBuildLanded();
         });
 }
 

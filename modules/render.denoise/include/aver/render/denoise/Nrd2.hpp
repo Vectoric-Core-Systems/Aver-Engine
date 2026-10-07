@@ -86,6 +86,12 @@ public:
 
     // Compute pipelines. False (said once) when nrd2.hlsl will not compile.
     bool create(rhi::IDevice& dev);
+    // create() in three steps, for a build off the render thread: beginCreate (render thread: drops the old
+    // pipelines, binds the device), compilePipelines (any thread: shader compiles and pipeline creation only), then
+    // finishCreate (render thread: binding sets; false when the required passes did not build).
+    bool beginCreate(rhi::IDevice& dev);
+    void compilePipelines();
+    bool finishCreate();
     void destroy();
     [[nodiscard]] bool valid() const { return psoPyramid_ != 0 && psoParams_ != 0 && psoResolve_ != 0; }
 
