@@ -3,6 +3,7 @@
 #include "aver/rhi/Atmosphere.hpp"
 
 #include <cmath>
+#include <cstring>
 
 namespace aver::rhi {
 
@@ -212,7 +213,7 @@ void atmoAerialPerspective(const AtmosphereProfile& a, f32 altitudeKm,
 }
 
 // Fits the two-colour dome and its exponent to the model at this sun elevation.
-void atmoFitDome(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCosZenith,
+static void atmoFitDomeUncached(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCosZenith,
                  const f32 sunIrradiance[3], f32 sunAngularRadiusRad, AtmosphereDome& out) {
     const f32 sunSin = sinFromCos(sunCosZenith);
 
@@ -281,7 +282,7 @@ void atmoFitDome(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCosZenith,
 //
 // 128 samples. The sky at L2 is extremely smooth (that is the whole premise of using nine
 // coefficients), so this is far past what the fit needs; it is chosen for margin, not resolution.
-void atmoSkyRadianceSH(const AtmosphereProfile& a, f32 altitudeKm, const f32 sunDir[3],
+static void atmoSkyRadianceSHUncached(const AtmosphereProfile& a, f32 altitudeKm, const f32 sunDir[3],
                        const f32 sunIrradiance[3], f32 sunAngularRadiusRad, AtmosphereSkySH& out) {
     for (int k = 0; k < 9; ++k) out.c[k][0] = out.c[k][1] = out.c[k][2] = 0.0f;
 
@@ -346,7 +347,7 @@ void atmoSkyRadianceSH(const AtmosphereProfile& a, f32 altitudeKm, const f32 sun
 // lost either way -- averFogInscatter already blends toward averSkyPhysical(dir) as real
 // aerial-perspective transmittance falls, which is the large-scale fade this local reference was never
 // the right place to produce.
-void atmoFogInscatterRef(const AtmosphereProfile& a, f32 altitudeKm, const f32 sunDir[3],
+static void atmoFogInscatterRefUncached(const AtmosphereProfile& a, f32 altitudeKm, const f32 sunDir[3],
                          const f32 sunIrradiance[3], f32 sunAngularRadiusRad, f32 outRgb[3]) {
     const f32 len = std::sqrt(sunDir[0] * sunDir[0] + sunDir[1] * sunDir[1] + sunDir[2] * sunDir[2]);
     const f32 Lx = len > 1e-6f ? sunDir[0] / len : 0.0f;
@@ -398,6 +399,60 @@ void atmoFogInscatterRef(const AtmosphereProfile& a, f32 altitudeKm, const f32 s
 
     const f32 lum = 0.2126f * blended[0] + 0.7152f * blended[1] + 0.0722f * blended[2];
     for (int c = 0; c < 3; ++c) outRgb[c] = blended[c] + lum * shortfall[c] * 1.5f;
+}
+
+// ---- exact-input memo: the devices bake these every frame (setSkyAtmosphere), almost always with the
+// inputs of the frame before (about 170 sky marches, ~2 ms of CPU). Bit-identical: keyed on the exact bits.
+namespace {
+struct AtmoKey {
+    u32 v[32] = {};
+    u32 n = 0;
+    void add(f32 f) { std::memcpy(&v[n++], &f, 4); }
+    void add(i32 i) { std::memcpy(&v[n++], &i, 4); }
+    void add3(const f32 f[3]) { add(f[0]); add(f[1]); add(f[2]); }
+    bool operator==(const AtmoKey& o) const { return n == o.n && std::memcmp(v, o.v, n * 4) == 0; }
+};
+// Every AtmosphereProfile field: a field added there must be added here (the size check says so).
+static_assert(sizeof(AtmosphereProfile) == 19 * 4, "AtmosphereProfile changed: update atmoKey");
+AtmoKey atmoKey(const AtmosphereProfile& a, f32 altitudeKm, f32 sunAngularRadiusRad, const f32 sunIrradiance[3]) {
+    AtmoKey k;
+    k.add(a.planetRadiusKm); k.add(a.atmosphereHeightKm); k.add3(a.rayleighScatter); k.add(a.rayleighScaleKm);
+    k.add(a.mieScatter); k.add(a.mieExtinction); k.add(a.mieScaleKm); k.add(a.miePhaseG);
+    k.add3(a.ozoneAbsorb); k.add(a.ozoneCentreKm); k.add(a.ozoneWidthKm); k.add(a.multiScatterGain);
+    k.add(a.groundAlbedo); k.add(a.viewSteps); k.add(a.aerialSteps);
+    k.add(altitudeKm); k.add(sunAngularRadiusRad); k.add3(sunIrradiance);
+    return k;
+}
+} // namespace
+
+void atmoFitDome(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCosZenith,
+                 const f32 sunIrradiance[3], f32 sunAngularRadiusRad, AtmosphereDome& out) {
+    thread_local AtmoKey key;
+    thread_local AtmosphereDome memo{};
+    AtmoKey k = atmoKey(a, altitudeKm, sunAngularRadiusRad, sunIrradiance);
+    k.add(sunCosZenith);
+    if (!(k == key)) { atmoFitDomeUncached(a, altitudeKm, sunCosZenith, sunIrradiance, sunAngularRadiusRad, memo); key = k; }
+    out = memo;
+}
+
+void atmoSkyRadianceSH(const AtmosphereProfile& a, f32 altitudeKm, const f32 sunDir[3],
+                       const f32 sunIrradiance[3], f32 sunAngularRadiusRad, AtmosphereSkySH& out) {
+    thread_local AtmoKey key;
+    thread_local AtmosphereSkySH memo{};
+    AtmoKey k = atmoKey(a, altitudeKm, sunAngularRadiusRad, sunIrradiance);
+    k.add3(sunDir);
+    if (!(k == key)) { atmoSkyRadianceSHUncached(a, altitudeKm, sunDir, sunIrradiance, sunAngularRadiusRad, memo); key = k; }
+    out = memo;
+}
+
+void atmoFogInscatterRef(const AtmosphereProfile& a, f32 altitudeKm, const f32 sunDir[3],
+                         const f32 sunIrradiance[3], f32 sunAngularRadiusRad, f32 outRgb[3]) {
+    thread_local AtmoKey key;
+    thread_local f32 memo[3] = {};
+    AtmoKey k = atmoKey(a, altitudeKm, sunAngularRadiusRad, sunIrradiance);
+    k.add3(sunDir);
+    if (!(k == key)) { atmoFogInscatterRefUncached(a, altitudeKm, sunDir, sunIrradiance, sunAngularRadiusRad, memo); key = k; }
+    outRgb[0] = memo[0]; outRgb[1] = memo[1]; outRgb[2] = memo[2];
 }
 
 } // namespace aver::rhi
