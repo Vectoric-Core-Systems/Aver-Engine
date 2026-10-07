@@ -107,6 +107,11 @@ BootConfig SandboxApp::config() const  {
 
 // Has project reached screen? Returns true when draw count settles for kSettleFrames frames.
 bool SandboxApp::startupComplete() const  {
+#if AVER_MODULE_VOXI
+    // Pipelines still building off the main thread: the viewport is black with its own notification, so the splash
+    // need not wait for a scene that cannot draw yet.
+    if (voxiAttached_ && voxiRenderer_.pipelinesBuilding()) return true;
+#endif
 #if AVER_MODULE_SCENE
     if (lastSceneDrawn_ < 0) return false;
     if (project_.manifestPath.empty()) return true;    // no project loading
@@ -2294,7 +2299,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         }
         // A heavy mode switch is announced a frame before it is applied (ModeSwitchNotice.hpp).
         static editor::ModeSwitchNotice modeNotice;
-        if (modeNotice.shouldApply(vs, e.window() != nullptr && maxFrames_ == 0, &shaderWarmup_))
+        if (modeNotice.shouldApply(vs, e.window() != nullptr && maxFrames_ == 0))
             voxiRenderer_.setSettings(vs);
         // Consume-and-forward: console reset commands routed through singleton flags to the renderer instance.
         if (voxi::Renderer::get().consumeGiHistoryResetRequest())  voxiRenderer_.resetGiHistory();

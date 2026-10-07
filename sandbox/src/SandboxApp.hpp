@@ -3556,6 +3556,9 @@ private:
     bool levelPrepArmed_ = false;
     u64 levelPrepToast_ = 0;
     std::chrono::steady_clock::time_point levelPrepT0_{};
+    // "Compiling shaders N of M" while the renderer's pipelines build off the main thread (black viewport).
+    u64 shaderBuildToast_ = 0;
+    std::chrono::steady_clock::time_point shaderBuildT0_{};
     bool nrd2MenuWired_ = false;
     // Gizmo coordinate space. Honoured by drawGizmo, pickAxis, applyMove and applyRotate; SCALE tool always uses local.
     bool worldSpace_=true;

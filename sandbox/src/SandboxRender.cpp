@@ -156,6 +156,43 @@ void SandboxApp::onRender(Engine& e)  {
     } else {
         levelPrepArmed_ = false;
     }
+    // Shaders compiling in the background (async pipeline builds, docs/rendering/ASYNC_SHADERS.md): the viewport is
+    // black until they land, so say so, with progress against the last build's count.
+    if (voxiAttached_ && e.window() != nullptr && maxFrames_ == 0) {
+        using Clock = std::chrono::steady_clock;
+        if (voxiRenderer_.pipelinesBuilding()) {
+            u32 done = 0, total = 0;
+            voxiRenderer_.compileProgress(done, total);
+            char note[64];
+            f32 frac = -1.0f;
+            if (total > 0) {
+                std::snprintf(note, sizeof note, "%u of %u shaders", std::min(done, total), total);
+                frac = std::min(static_cast<f32>(done) / static_cast<f32>(total), 0.99f);
+            } else {
+                std::snprintf(note, sizeof note, "%u shaders", done);
+            }
+            if (!shaderBuildToast_) {
+                editor::Notification n;
+                n.severity = editor::NotifySeverity::Info;
+                n.title = "Compiling shaders";
+                n.body = "The viewport fills in once the renderer's shaders are built; the editor stays usable meanwhile.";
+                n.sticky = true;
+                n.hasProgress = true;
+                n.progress = frac;
+                n.dedupKey = "shader-build";
+                shaderBuildToast_ = editor::notifications().push(std::move(n));
+                shaderBuildT0_ = Clock::now();
+            }
+            editor::notifications().setProgress(shaderBuildToast_, frac, note);
+        } else if (shaderBuildToast_) {
+            char body[48];
+            std::snprintf(body, sizeof body, "Built in %.1f s.",
+                          std::chrono::duration<double>(Clock::now() - shaderBuildT0_).count());
+            editor::notifications().setSticky(shaderBuildToast_, false);   // finish() leaves sticky set
+            editor::notifications().finish(shaderBuildToast_, editor::NotifySeverity::Success, "Shaders ready", body, 3.0);
+            shaderBuildToast_ = 0;
+        }
+    }
 #endif
     // Restarts the GPU average once, when no load screen is up, so it covers steady state only.
     if (!gpuTimingStartupReset_ && !projectLoading_) {

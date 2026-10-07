@@ -4905,7 +4905,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
 
     // Path Tracing, Reference mode: Stage B traces each pixel's whole path itself, so the GI, sky-occlusion,
     // lamp and reflection stages have nothing to give it (lamps are still published for its next-event pick).
-    if (pathTracingWanted() && !ptTwinsTried_) createPathTraceTwins();
+    if (pathTracingWanted() && !ptTwinsTried_) requestTwins(true);   // ReSTIR RT until they land
     const bool ptRef = ptReferenceWanted() && rdPtRefCsPso_ != 0;
     if (ptRef) ptRanThisFrame_ = true;
     // Without its pass Stage B must not take the reference branch (bit 4 of ptBounceParams.x).
@@ -6528,7 +6528,7 @@ void VoxiRenderer::updateNeuRaC(rhi::IRenderContext& ctx) {
         return;
     }
 
-    if (!rcTwinsTried_) createNeuRaCTwins();
+    if (!rcTwinsTried_) requestTwins(false);
     const bool anyTwin = rdGiCacheCsPso_ || rdGiCacheCbCsPso_ || rdGiTraceCacheCsPso_ ||
                          rdGiTraceCacheCbCsPso_;
     if (!anyTwin) return;
@@ -6561,99 +6561,136 @@ void VoxiRenderer::updateNeuRaC(rhi::IRenderContext& ctx) {
 }
 
 // Build AVER_NEURAC=1 compute twins (CSRdGi/CSRdGiTrace, plain/checkerboard variants).
-bool VoxiRenderer::createNeuRaCTwins() {
-    rcTwinsTried_ = true;
-    if (rdGiCacheCsPso_ && rdGiCacheCbCsPso_ && rdGiTraceCacheCsPso_ && rdGiTraceCacheCbCsPso_)
-        return true;
-    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 66 && caps_.dxcAvailable;
-    if (!res_ || !rtOk || !rtTexTable_) {
-        AVER_WARN("[Voxi] NeuRaC twins not built: needs ray tracing, shader model 6.6 and the "
-                  "bindless texture table (said once per pipeline build)");
-        return false;
-    }
-    ShaderScope compile(*res_);
-    const rhi::PipelineLayout giTex = giLayout(kRtTextureCapacity);
-    const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
-                                                          layeredBsdf_);
-    const std::string bindlessDefs = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
-                                     std::to_string(kRtTextureCapacity);
-    const std::string csDefs = bindlessDefs + (rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_))
-                                                          : std::string());
-    const auto build = [&](const char* entry, const char* extra, rhi::PipelineHandle& out) {
-        if (out) return;
-        const std::string defs = matDefs + ";" + csDefs + ";AVER_NEURAC=1" + extra;
-        const rhi::ShaderHandle cs = compile(entry, rhi::ShaderStage::Compute, 66, defs.c_str());
-        if (!cs) return;
-        rhi::ComputePipelineDesc p;
-        p.cs = cs;
-        p.layout = giTex;
-        out = res_->createComputePipeline(p);
+// ---- TWIN PIPELINES (NeuRaC, Path Tracing): built on first use, from a table so one routine serves the inline
+// build and the worker's (requestTwins) ----
+const VoxiRenderer::TwinSpec* VoxiRenderer::twinSpecs(bool pathTrace, u32& count) {
+    static const TwinSpec kNeuRaC[] = {
+        {"CSRdGi",      ";AVER_NEURAC=1",                        &VoxiRenderer::rdGiCacheCsPso_},
+        {"CSRdGi",      ";AVER_NEURAC=1;AVER_GI_CHECKERBOARD=1", &VoxiRenderer::rdGiCacheCbCsPso_},
+        {"CSRdGiTrace", ";AVER_NEURAC=1",                        &VoxiRenderer::rdGiTraceCacheCsPso_},
+        {"CSRdGiTrace", ";AVER_NEURAC=1;AVER_GI_CHECKERBOARD=1", &VoxiRenderer::rdGiTraceCacheCbCsPso_},
     };
-    build("CSRdGi",      "",                        rdGiCacheCsPso_);
-    build("CSRdGi",      ";AVER_GI_CHECKERBOARD=1", rdGiCacheCbCsPso_);
-    build("CSRdGiTrace", "",                        rdGiTraceCacheCsPso_);
-    build("CSRdGiTrace", ";AVER_GI_CHECKERBOARD=1", rdGiTraceCacheCbCsPso_);
-    const u32 built = (rdGiCacheCsPso_ ? 1u : 0u) + (rdGiCacheCbCsPso_ ? 1u : 0u) +
-                      (rdGiTraceCacheCsPso_ ? 1u : 0u) + (rdGiTraceCacheCbCsPso_ ? 1u : 0u);
-    if (built == 4u)
-        AVER_INFO("[Voxi] NeuRaC twin pipelines ready (CSRdGi/CSRdGiTrace x plain/checkerboard)");
-    else
-        AVER_WARN("[Voxi] NeuRaC twin pipelines: {} of 4 compiled; a variant without its twin "
-                  "runs as plain HalfResolution", built);
-    return built == 4u;
+    static const TwinSpec kPathTrace[] = {
+        {"CSRdGi",      ";AVER_PT_PATHS=1",                          &VoxiRenderer::rdGiPtCsPso_},
+        {"CSRdGi",      ";AVER_PT_PATHS=1;AVER_GI_CHECKERBOARD=1",   &VoxiRenderer::rdGiPtCbCsPso_},
+        {"CSRdGiTrace", ";AVER_PT_PATHS=1",                          &VoxiRenderer::rdGiTracePtCsPso_},
+        {"CSRdGiTrace", ";AVER_PT_PATHS=1;AVER_GI_CHECKERBOARD=1",   &VoxiRenderer::rdGiTracePtCbCsPso_},
+        {"CSRdRefl",    ";AVER_PT_PATHS=1",                          &VoxiRenderer::rdReflPtCsPso_},
+        {"CSRdRefl",    ";AVER_PT_PATHS=1;AVER_RD_REFL_SPLIT=1",     &VoxiRenderer::rdReflSplitPtCsPso_},
+        // Over the radiance cache, plain and half-rate checkerboard.
+        {"CSRdGi",      ";AVER_PT_PATHS=1;AVER_NEURAC=1",                          &VoxiRenderer::rdGiPtRcCsPso_},
+        {"CSRdGiTrace", ";AVER_PT_PATHS=1;AVER_NEURAC=1",                          &VoxiRenderer::rdGiTracePtRcCsPso_},
+        {"CSRdGi",      ";AVER_PT_PATHS=1;AVER_NEURAC=1;AVER_GI_CHECKERBOARD=1",   &VoxiRenderer::rdGiPtRcCbCsPso_},
+        {"CSRdGiTrace", ";AVER_PT_PATHS=1;AVER_NEURAC=1;AVER_GI_CHECKERBOARD=1",   &VoxiRenderer::rdGiTracePtRcCbCsPso_},
+        {"CSRdPtRef",   ";AVER_PT_PATHS=1",                          &VoxiRenderer::rdPtRefCsPso_},
+        {"CSRdRefl",    ";AVER_PT_PATHS=1;AVER_NEURAC=1",                          &VoxiRenderer::rdReflPtRcCsPso_},
+        {"CSRdRefl",    ";AVER_PT_PATHS=1;AVER_NEURAC=1;AVER_RD_REFL_SPLIT=1",     &VoxiRenderer::rdReflSplitPtRcCsPso_},
+    };
+    count = pathTrace ? static_cast<u32>(std::size(kPathTrace)) : static_cast<u32>(std::size(kNeuRaC));
+    return pathTrace ? kPathTrace : kNeuRaC;
 }
 
-// Build AVER_PT_PATHS=1 compute twins: CSRdGi/CSRdGiTrace (plain/checkerboard) and CSRdRefl (plain/split).
-bool VoxiRenderer::createPathTraceTwins() {
-    ptTwinsTried_ = true;
+// The defines every twin shares (material system + bindless ray path); "" when this device cannot build them.
+std::string VoxiRenderer::twinDefines(bool pathTrace) const {
     const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 66 && caps_.dxcAvailable;
     if (!res_ || !rtOk || !rtTexTable_) {
-        AVER_WARN("[Voxi] Path Tracing pipelines not built: needs ray tracing, shader model 6.6 and the "
-                  "bindless texture table (said once per pipeline build)");
-        return false;
+        AVER_WARN("[Voxi] {} not built: needs ray tracing, shader model 6.6 and the bindless texture table "
+                  "(said once per pipeline build)", pathTrace ? "Path Tracing pipelines" : "NeuRaC twins");
+        return {};
     }
+    return pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot, layeredBsdf_) + ";" +
+           "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" + std::to_string(kRtTextureCapacity) +
+           (rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string());
+}
+
+// Compiles a twin table into `out` (any thread: touches no member).
+void VoxiRenderer::buildTwins(const TwinSpec* specs, u32 count, const std::string& defs,
+                              std::vector<rhi::PipelineHandle>& out) const {
     ShaderScope compile(*res_);
     const rhi::PipelineLayout giTex = giLayout(kRtTextureCapacity);
-    const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
-                                                          layeredBsdf_);
-    const std::string csDefs = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
-                               std::to_string(kRtTextureCapacity) +
-                               (rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string());
-    const auto build = [&](const char* entry, const char* extra, rhi::PipelineHandle& out) {
-        if (out) return;
-        const std::string defs = matDefs + ";" + csDefs + ";AVER_PT_PATHS=1" + extra;
-        const rhi::ShaderHandle cs = compile(entry, rhi::ShaderStage::Compute, 66, defs.c_str());
-        if (!cs) return;
+    out.assign(count, 0);
+    for (u32 i = 0; i < count; ++i) {
+        const std::string d = defs + specs[i].extra;
+        const rhi::ShaderHandle cs = compile(specs[i].entry, rhi::ShaderStage::Compute, 66, d.c_str());
+        if (!cs) continue;
         rhi::ComputePipelineDesc p;
         p.cs = cs;
         p.layout = giTex;
-        out = res_->createComputePipeline(p);
-    };
-    build("CSRdGi",      "",                        rdGiPtCsPso_);
-    build("CSRdGi",      ";AVER_GI_CHECKERBOARD=1", rdGiPtCbCsPso_);
-    build("CSRdGiTrace", "",                        rdGiTracePtCsPso_);
-    build("CSRdGiTrace", ";AVER_GI_CHECKERBOARD=1", rdGiTracePtCbCsPso_);
-    build("CSRdRefl",    "",                        rdReflPtCsPso_);
-    build("CSRdRefl",    ";AVER_RD_REFL_SPLIT=1",   rdReflSplitPtCsPso_);
-    // Over the radiance cache, plain and half-rate checkerboard.
-    build("CSRdGi",      ";AVER_NEURAC=1",          rdGiPtRcCsPso_);
-    build("CSRdGiTrace", ";AVER_NEURAC=1",          rdGiTracePtRcCsPso_);
-    build("CSRdGi",      ";AVER_NEURAC=1;AVER_GI_CHECKERBOARD=1", rdGiPtRcCbCsPso_);
-    build("CSRdGiTrace", ";AVER_NEURAC=1;AVER_GI_CHECKERBOARD=1", rdGiTracePtRcCbCsPso_);
-    build("CSRdPtRef",   "",                        rdPtRefCsPso_);
-    build("CSRdRefl",    ";AVER_NEURAC=1",                         rdReflPtRcCsPso_);
-    build("CSRdRefl",    ";AVER_NEURAC=1;AVER_RD_REFL_SPLIT=1",   rdReflSplitPtRcCsPso_);
-    if (!rdPtRefCsPso_)
-        AVER_WARN("[Voxi] the reference path tracing pass did not compile; Reference mode runs as ReSTIR");
-    if (!rdGiPtRcCsPso_ || !rdGiTracePtRcCsPso_)
-        AVER_WARN("[Voxi] the Path Tracing pipelines over the radiance cache did not compile; paths run "
-                  "without it");
-    const bool ok =rdGiPtCsPso_ && rdGiPtCbCsPso_ && rdGiTracePtCsPso_ && rdGiTracePtCbCsPso_ &&
-                    rdReflPtCsPso_ && rdReflSplitPtCsPso_;
-    if (ok) AVER_INFO("[Voxi] Path Tracing pipelines ready (ReSTIR GI paths and reflection paths)");
-    else    AVER_WARN("[Voxi] some Path Tracing pipelines did not compile; those stages run as ordinary "
-                      "ray-driven passes");
-    return ok;
+        out[i] = res_->createComputePipeline(p);
+    }
+}
+
+// Main thread: takes a built table into the members (one already set keeps its own; the duplicate is destroyed).
+void VoxiRenderer::adoptTwins(bool pathTrace, const std::vector<rhi::PipelineHandle>& built) {
+    u32 count = 0;
+    const TwinSpec* specs = twinSpecs(pathTrace, count);
+    for (u32 i = 0; i < count && i < built.size(); ++i) {
+        rhi::PipelineHandle& m = this->*specs[i].member;
+        if (!m) m = built[i];
+        else if (built[i]) res_->destroyPipeline(built[i]);
+    }
+    if (pathTrace) {
+        if (!rdPtRefCsPso_)
+            AVER_WARN("[Voxi] the reference path tracing pass did not compile; Reference mode runs as ReSTIR");
+        if (!rdGiPtRcCsPso_ || !rdGiTracePtRcCsPso_)
+            AVER_WARN("[Voxi] the Path Tracing pipelines over the radiance cache did not compile; paths run "
+                      "without it");
+        const bool ok = rdGiPtCsPso_ && rdGiPtCbCsPso_ && rdGiTracePtCsPso_ && rdGiTracePtCbCsPso_ &&
+                        rdReflPtCsPso_ && rdReflSplitPtCsPso_;
+        if (ok) AVER_INFO("[Voxi] Path Tracing pipelines ready (ReSTIR GI paths and reflection paths)");
+        else    AVER_WARN("[Voxi] some Path Tracing pipelines did not compile; those stages run as ordinary "
+                          "ray-driven passes");
+    } else {
+        const u32 have = (rdGiCacheCsPso_ ? 1u : 0u) + (rdGiCacheCbCsPso_ ? 1u : 0u) +
+                         (rdGiTraceCacheCsPso_ ? 1u : 0u) + (rdGiTraceCacheCbCsPso_ ? 1u : 0u);
+        if (have == 4u)
+            AVER_INFO("[Voxi] NeuRaC twin pipelines ready (CSRdGi/CSRdGiTrace x plain/checkerboard)");
+        else
+            AVER_WARN("[Voxi] NeuRaC twin pipelines: {} of 4 compiled; a variant without its twin "
+                      "runs as plain HalfResolution", have);
+    }
+}
+
+bool VoxiRenderer::createTwins(bool pathTrace) {
+    (pathTrace ? ptTwinsTried_ : rcTwinsTried_) = true;
+    const std::string defs = twinDefines(pathTrace);
+    if (defs.empty()) return false;
+    u32 count = 0;
+    const TwinSpec* specs = twinSpecs(pathTrace, count);
+    std::vector<rhi::PipelineHandle> built;
+    buildTwins(specs, count, defs, built);
+    adoptTwins(pathTrace, built);
+    for (u32 i = 0; i < count; ++i) if (!(this->*specs[i].member)) return false;
+    return true;
+}
+bool VoxiRenderer::createNeuRaCTwins() { return createTwins(false); }
+bool VoxiRenderer::createPathTraceTwins() { return createTwins(true); }
+
+// First use, off the main thread when the factory allows it: the consumers run their plain variants until these
+// land. A scene rebuild in the meantime (sceneGen_) makes the result stale: destroyed, and asked for again.
+void VoxiRenderer::requestTwins(bool pathTrace) {
+    if (!asyncBuilds_) { createTwins(pathTrace); return; }
+    (pathTrace ? ptTwinsTried_ : rcTwinsTried_) = true;
+    const std::string defs = twinDefines(pathTrace);
+    if (defs.empty()) return;
+    u32 count = 0;
+    const TwinSpec* specs = twinSpecs(pathTrace, count);
+    auto prelude = std::make_shared<std::string>(voxiShaderPrelude());
+    auto built = std::make_shared<std::vector<rhi::PipelineHandle>>();
+    const u32 gen = sceneGen_;
+    queueBuild(
+        [this, specs, count, defs, prelude, built] {
+            tl_voxiPrelude = prelude.get();
+            buildTwins(specs, count, defs, *built);
+            tl_voxiPrelude = nullptr;
+        },
+        [this, pathTrace, gen, built] {
+            if (gen != sceneGen_) {
+                for (const rhi::PipelineHandle p : *built) if (p) res_->destroyPipeline(p);
+                return;
+            }
+            adoptTwins(pathTrace, *built);
+        });
 }
 
 // Release cache: unbind t22/u20/u21, then destroy (bound descriptor outliving its buffer faults GPU).
@@ -7366,6 +7403,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
 
 // Destroys the scene set and its lazy twins (main thread: destroyPipeline retires through the frame fence).
 void VoxiRenderer::destroyScenePipelines() {
+    ++sceneGen_;   // twin builds still in flight belong to the set being destroyed
 
     const rhi::PipelineHandle stale[] = {debugPso_, scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_,
                                          sceneBlendedPso_, sceneMsBlendedPso_, sceneRtBlendedPso_,

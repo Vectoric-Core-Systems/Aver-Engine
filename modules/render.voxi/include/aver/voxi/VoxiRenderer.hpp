@@ -253,6 +253,17 @@ private:
     void stopBuildWorker();
     void queueBuild(std::function<void()> work, std::function<void()> done);
     void pumpBuilds();
+    u32 sceneGen_ = 0;                     // bumped when the scene set (and its twins) is destroyed
+
+    // Twin pipelines (NeuRaC, Path Tracing), table-driven: see twinSpecs.
+    struct TwinSpec { const char* entry; const char* extra; rhi::PipelineHandle VoxiRenderer::* member; };
+    static const TwinSpec* twinSpecs(bool pathTrace, u32& count);
+    std::string twinDefines(bool pathTrace) const;
+    void buildTwins(const TwinSpec* specs, u32 count, const std::string& defs,
+                    std::vector<rhi::PipelineHandle>& out) const;
+    void adoptTwins(bool pathTrace, const std::vector<rhi::PipelineHandle>& built);
+    bool createTwins(bool pathTrace);
+    void requestTwins(bool pathTrace);
     rhi::PipelineHandle pickGbuf(rhi::PipelineHandle plain, rhi::PipelineHandle gbuf) const;
     void shadowPass(rhi::IRenderContext& ctx);
     // Both take the slice [begin, end) of drawsPrev_: `first` clears, `last` finishes (a staged
