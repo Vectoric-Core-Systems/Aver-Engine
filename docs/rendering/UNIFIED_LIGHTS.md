@@ -141,6 +141,18 @@ Measured (RX 7800 XT, NewSponza Night default view, scale 0.5, still, GPU ms):
 | top 6 / 3, no interleave | 17.3 | 10.0 | 8.1 | 45.1 |
 | interleaved 2 / 1 (default) | 14.2 | 6.5 | 4.9 | 35.4 |
 | interleaved 1 / 1 | 10.2 | 6.5 | 5.0 | 31.5 |
-| quarter-res tail pass (6 / block), one-loop hits (default) | 3.6 + 4.4 | 4.6 | 3.0 | 25.0 |
+| quarter-res tail pass (6 / block), one-loop hits | 3.6 + 4.4 | 4.6 | 3.0 | 25.0 |
+| + opaque first-hit lamp rays, exact lamp 1 ray, flat list <= 48 lights (default) | 1.4 + 2.7 | 4.0 | 2.6 | 19.35 |
 
 A lamp ray costs about 3 ms per pixel here (long, incoherent rays); the exact light's ray about 2 ms.
+
+Later findings (2026-10-07):
+- Lamp rays had taken the transmittance walk (the scene has glass), and the exact lamp the tier's 8 sun rays. Lamp
+  rays now take the opaque first-hit path, as lamp rays always did, and the exact lamp 1 ray (2 looked identical).
+- A list of at most 48 lights is walked whole (`kFlatLightList`): every lane then loads the same light (uniform), where
+  per-lane grid cells load different ones. The grid is for scenes with many lights.
+- Tried and reverted: a full-resolution tail pass with the quad sharing its rays (6.2 ms vs 2.7: per-pixel surface
+  rebuild, divergent lights); tracing a block's second surface at edges (+1 ms; the filter's fallback to the exact
+  light's visibility, instead of "fully lit", fixes the white rims alone); a 12-light cell cap (no gain).
+- `voxi.lightRaysPerBlock 4` saves 0.6 ms for bright-spot area 0.08% -> 0.31% of the view.
+- Per-stage timings (`voxi.rayDrivenStageTiming`) add a barrier after every stage; confirm a win on the total without it.
