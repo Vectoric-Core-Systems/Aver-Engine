@@ -108,10 +108,9 @@ constexpr u32 kLocalExpCellBytes = 8;
 // Compiles HLSL through DXC (shader model 6.x) when dxcompiler.dll is present, else FXC (SM 5.1).
 class ShaderCompiler {
 public:
-    // Loads DXC once, or settles on FXC.
-    void init() {
-        if (tried_) return;
-        tried_ = true;
+    // Loads DXC once, or settles on FXC. Safe from any thread; the device calls it first, on the main thread.
+    void init() { std::call_once(once_, [this] { load(); }); }
+    void load() {
         if (capsOverride().active && capsOverride().noDxc) {
             AVER_INFO("[RHI.D3D12] shader compiler: FXC (SM 5.1) - DXC suppressed by --force-caps no-dxc");
             return;
@@ -120,15 +119,17 @@ public:
         if (!dll_) { AVER_WARN("[RHI.D3D12] dxcompiler.dll not found - falling back to FXC (SM 5.1)"); return; }
         auto create = reinterpret_cast<DxcCreateInstanceProc>(reinterpret_cast<void*>(GetProcAddress(dll_, "DxcCreateInstance")));
         if (!create) { AVER_WARN("[RHI.D3D12] DxcCreateInstance missing - falling back to FXC"); return; }
-        if (FAILED(create(CLSID_DxcUtils, IID_PPV_ARGS(&utils_))) ||
-            FAILED(create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler_)))) {
-            utils_.Reset(); compiler_.Reset();
+        // One instance to prove it loads; every thread that compiles makes its own (IDxcCompiler3 is not
+        // safe to share between concurrent Compile calls).
+        Dxc probe;
+        if (!probe.make(create)) {
             AVER_WARN("[RHI.D3D12] DXC init failed - falling back to FXC");
             return;
         }
+        create_ = create;
         AVER_INFO("[RHI.D3D12] shader compiler: DXC (shader model 6.x)");
     }
-    bool usingDxc() const { return compiler_ != nullptr; }
+    bool usingDxc() const { return create_ != nullptr; }
 
     // Compiles one entry point to bytecode. `target51` is the FXC target; `sm6` overrides the derived
     // SM6 target and requires DXC. `define` is a semicolon-separated -D list.
@@ -136,7 +137,8 @@ public:
     // kCacheVersion: bump when shipped compiler changes.
     static constexpr u32 kCacheVersion = 1;
 
-    static u64 cacheKey(const char* src, const char* entry, const char* target, const std::vector<std::string>& defs) {
+    static u64 cacheKey(const char* src, const char* entry, const char* target, const std::vector<std::string>& defs,
+                        u64 corpus) {
         u64 h = 0xcbf29ce484222325ull;
         const auto mix = [&h](const char* p, size_t n) {
             for (size_t i = 0; i < n; ++i) { h ^= static_cast<unsigned char>(p[i]); h *= 0x100000001b3ull; }
@@ -144,8 +146,8 @@ public:
         };
         const u32 v = kCacheVersion;
         mix(reinterpret_cast<const char*>(&v), sizeof v);
-        // Every shader file (memoised, one directory walk per process).
-        const u64 corpus = shaderCorpusHash();
+        // Every shader file (memoised, one directory walk per process). The caller's snapshot: a batch
+        // fixes it when it is recorded, so a reload mid-build cannot file old text under the new key.
         mix(reinterpret_cast<const char*>(&corpus), sizeof corpus);
         mix(src, std::strlen(src));
         mix(entry, std::strlen(entry));
@@ -164,27 +166,34 @@ public:
     }
 
     // Running totals for shader-compile cost (reported on power-of-two cadence).
-    static inline u32 s_compiles = 0;
-    static inline f64 s_compileMs = 0.0;
-    static inline u32 s_cacheHits = 0;
-    static inline IDevice::ShaderRequestObserver s_observer = nullptr;
-    static inline void* s_observerUser = nullptr;
+    // Atomic: shader build workers compile concurrently.
+    static inline std::atomic<u32> s_compiles{0};
+    static inline std::atomic<u64> s_compileUs{0};
+    static inline std::atomic<u32> s_cacheHits{0};
+    static inline std::atomic<IDevice::ShaderRequestObserver> s_observer{nullptr};
+    static inline std::atomic<void*> s_observerUser{nullptr};
 
+    // `corpus` is shaderCorpusHash() as of the caller's snapshot (0 = take it now). `cacheWriteOk`, when set,
+    // is asked just before a compiled blob is written: false (shader files reloaded mid-build) skips the write.
     HRESULT compile(const char* src, const char* entry, const char* target51, ID3DBlob** out,
-                    const char* sm6 = nullptr, const char* define = nullptr) {
+                    const char* sm6 = nullptr, const char* define = nullptr, u64 corpus = 0,
+                    bool (*cacheWriteOk)(void*) = nullptr, void* cacheUser = nullptr) {
         init();
+        if (!corpus) corpus = shaderCorpusHash();
         const auto t0 = std::chrono::steady_clock::now();
         struct Report {
             std::chrono::steady_clock::time_point t0;
             ~Report() {
-                s_compileMs += std::chrono::duration<f64, std::milli>(
-                                   std::chrono::steady_clock::now() - t0).count();
-                ++s_compiles;
-                if ((s_compiles & (s_compiles - 1)) == 0)
+                const u64 us = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - t0).count());
+                const u64 totalUs = s_compileUs.fetch_add(us) + us;
+                const u32 n = s_compiles.fetch_add(1) + 1;
+                const u32 hits = s_cacheHits.load();
+                if ((n & (n - 1)) == 0)
                     AVER_INFO("[RHI.D3D12] {} shader request(s): {} served from the blob cache, "
                               "{} compiled in {:.0f} ms",
-                              s_compiles, s_cacheHits, s_compiles - s_cacheHits, s_compileMs);
-                if (s_observer) s_observer(s_compiles, s_cacheHits, s_observerUser);
+                              n, hits, n - hits, static_cast<f64>(totalUs) / 1000.0);
+                if (const auto obs = s_observer.load()) obs(n, hits, s_observerUser.load());
             }
         } report{t0};
         std::vector<std::string> defs;
@@ -234,6 +243,8 @@ public:
             }
         }
 
+        Dxc& dxc = threadDxc();
+        if (!dxc.compiler) return E_FAIL;
         DxcBuffer buf{src, std::strlen(src), DXC_CP_UTF8};
         std::vector<LPCWSTR> args = {
             L"-E", wEntry.c_str(),
@@ -257,7 +268,7 @@ public:
         if (want16Bit) args.push_back(L"-enable-16bit-types");
         for (const std::wstring& d : wDefines) { args.push_back(L"-D"); args.push_back(d.c_str()); }
         // Custom include handler for hot reload and per-file caching. Cache miss falls through to compile.
-        const u64 ckey = cacheKey(src, entry, t6.c_str(), defs);
+        const u64 ckey = cacheKey(src, entry, t6.c_str(), defs, corpus);
         if (const std::string cp = cachePath(ckey); !cp.empty()) {
             std::ifstream f(cp, std::ios::binary | std::ios::ate);
             if (f) {
@@ -274,9 +285,9 @@ public:
             }
         }
 
-        DxcShaderInclude includes(utils_.Get());
+        DxcShaderInclude includes(dxc.utils.Get());
         ComPtr<IDxcResult> result;
-        HRESULT hr = compiler_->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), &includes, IID_PPV_ARGS(&result));
+        HRESULT hr = dxc.compiler->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), &includes, IID_PPV_ARGS(&result));
         if (SUCCEEDED(hr)) result->GetStatus(&hr);
         if (FAILED(hr)) {
             ComPtr<IDxcBlobUtf8> errs;
@@ -291,7 +302,7 @@ public:
         // Best-effort cache write; failures only cost a recompile next launch. Written to a private temp
         // name and renamed into place, so another process filling the same cache (the editor's --warm-shaders
         // copy) can never be read half-written.
-        if (const std::string cp = cachePath(ckey); !cp.empty()) {
+        if (const std::string cp = cachePath(ckey); !cp.empty() && (!cacheWriteOk || cacheWriteOk(cacheUser))) {
             std::error_code ec;
             std::filesystem::create_directories(std::filesystem::path(cp).parent_path(), ec);
             const std::string tmp = cp + "." + std::to_string(GetCurrentProcessId()) + "." +
@@ -311,10 +322,23 @@ public:
         return S_OK;
     }
 private:
-    bool tried_ = false;
+    // A compiler instance of its own per thread.
+    struct Dxc {
+        ComPtr<IDxcUtils> utils;
+        ComPtr<IDxcCompiler3> compiler;
+        bool make(DxcCreateInstanceProc create) {
+            return create && SUCCEEDED(create(CLSID_DxcUtils, IID_PPV_ARGS(&utils))) &&
+                   SUCCEEDED(create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)));
+        }
+    };
+    Dxc& threadDxc() {
+        thread_local Dxc d;
+        if (!d.compiler) d.make(create_);
+        return d;
+    }
+    std::once_flag once_;
     HMODULE dll_ = nullptr;
-    ComPtr<IDxcUtils> utils_;
-    ComPtr<IDxcCompiler3> compiler_;
+    DxcCreateInstanceProc create_ = nullptr;   // non-null = DXC is in use
 };
 
 // The process-wide shader compiler.
@@ -1665,7 +1689,7 @@ private:
     f32 sceneClear_[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     std::string adapterName_ = "D3D12 Device";
     bool softwareAdapter_ = false;   // True when running on WARP.
-    bool warpConsRasterLogged_ = false;
+    std::atomic<bool> warpConsRasterLogged_{false};   // set by whichever thread builds the first such pipeline
     // IDXGIAdapter3 for QueryVideoMemoryInfo. Null on older DXGI or unavailable driver.
     ComPtr<IDXGIAdapter3> adapter3_;
 
@@ -1887,6 +1911,58 @@ struct BufferUploadItem {
     u64 bytes = 0;
 };
 
+// Worker threads for shader and pipeline creation off the render thread (D3D12PipelineBatch). Tasks run in
+// submission order; the pool never touches a GPU object on its own.
+class PipelinePool {
+public:
+    explicit PipelinePool(u32 threads) {
+        for (u32 i = 0; i < threads; ++i) threads_.emplace_back([this] { run(); });
+    }
+    // Joins the workers: a task in flight finishes, queued tasks are dropped.
+    ~PipelinePool() {
+        {
+            std::lock_guard<std::mutex> lock(m_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        for (std::thread& t : threads_) t.join();
+    }
+    PipelinePool(const PipelinePool&) = delete;
+    PipelinePool& operator=(const PipelinePool&) = delete;
+
+    void submit(std::function<void()> fn) {
+        {
+            std::lock_guard<std::mutex> lock(m_);
+            q_.push_back(std::move(fn));
+        }
+        cv_.notify_one();
+    }
+
+private:
+    void run() {
+        // Behind the render thread and the GPU driver's own work.
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        for (;;) {
+            std::function<void()> fn;
+            {
+                std::unique_lock<std::mutex> lock(m_);
+                cv_.wait(lock, [this] { return stop_ || !q_.empty(); });
+                if (stop_) return;
+                fn = std::move(q_.front());
+                q_.pop_front();
+            }
+            fn();
+        }
+    }
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::deque<std::function<void()>> q_;
+    std::vector<std::thread> threads_;
+    bool stop_ = false;
+};
+
+class D3D12PipelineBatch;
+
 // The generic RHI factory: handle tables, the shared descriptor heap, and deferred destruction.
 class D3D12ResourceFactory final : public IResourceFactory {
 public:
@@ -1901,6 +1977,7 @@ public:
     ShaderHandle     createShader(const ShaderDesc& d) override;
     PipelineHandle   createGraphicsPipeline(const GraphicsPipelineDesc& d) override;
     PipelineHandle   createComputePipeline(const ComputePipelineDesc& d) override;
+    std::unique_ptr<IPipelineBatch> createPipelineBatchAsync() override;
     BindlessTableHandle createBindlessTextureTable(u32 capacity) override;
     void destroyBindlessTextureTable(BindlessTableHandle h) override;
     bool setBindlessTexture(BindlessTableHandle h, u32 index, TextureHandle t) override;
@@ -1981,6 +2058,18 @@ private:
     RhiTlas*       tlas(TlasHandle h);
 
     const RootSigEntry* rootSignature(const PipelineLayout& layout, bool mesh, bool instanced = false);
+
+    // The builders behind createShader / createGraphicsPipeline / createComputePipeline. They touch no handle
+    // table, collect() nothing and retire nothing, so a shader build worker may run them: what they read is the
+    // immutable device caps, the process-wide compiler (one DXC instance per thread) and the mutex-guarded
+    // root-signature cache. `corpus` and the cache-write guard are the shader-file snapshot of the caller.
+    bool buildShader(const ShaderDesc& d, RhiShader& out, u64 corpus = 0,
+                     bool (*cacheWriteOk)(void*) = nullptr, void* cacheUser = nullptr);
+    bool buildGraphicsPipeline(const GraphicsPipelineDesc& d, const RhiShader* vs, const RhiShader* gs,
+                               const RhiShader* ms, const RhiShader* ps, const RhiShader* as, RhiPipeline& out);
+    bool buildComputePipeline(const ComputePipelineDesc& d, const RhiShader* cs, RhiPipeline& out);
+    PipelinePool& pipelinePool();
+    std::unique_ptr<PipelinePool> pool_;
     // Descriptor slot in the shared SHADER-VISIBLE heap (CPU side for writing, GPU side for binding).
     D3D12_CPU_DESCRIPTOR_HANDLE cpuSlot(u32 index) const;
     D3D12_GPU_DESCRIPTOR_HANDLE gpuSlot(u32 index) const;
@@ -2021,7 +2110,10 @@ private:
     std::vector<RhiBindlessTable> bindlessTables_;
     std::vector<RhiBlas>       blases_;
     std::vector<RhiTlas>       tlases_;
-    std::vector<RootSigEntry>  rootSigs_;
+    // Deque and mutex: shader build workers look up and add root signatures concurrently with the main thread,
+    // and RhiPipeline keeps a raw pointer into an entry for as long as the factory lives (never erased).
+    std::deque<RootSigEntry>   rootSigs_;
+    std::mutex                 rootSigMutex_;
     std::vector<RetiredObject> retired_;
     std::vector<RetiredRange>  pendingRanges_;   // Returned, still behind the fence.
     std::vector<RetiredRange>  freeRanges_;
@@ -2030,12 +2122,15 @@ private:
 
     friend class D3D12RenderContext;
     friend class D3D12Device;
+    friend class D3D12PipelineBatch;
 };
 
 // Records a render feature's generic RHI commands into the device's frame command list.
 class D3D12RenderContext final : public IRenderContext {
 public:
     D3D12RenderContext(D3D12Device* dev, D3D12ResourceFactory* res) : dev_(dev), res_(res) {}
+    // A bad setPipeline does not carry over into the next frame's command list.
+    void beginFrame() { pipeInvalid_ = false; }
 
     void setPipeline(PipelineHandle p) override;
     void setViewport(u32 x, u32 y, u32 w, u32 h) override;
@@ -2094,6 +2189,10 @@ private:
     D3D12Device* dev_;
     D3D12ResourceFactory* res_;
     const RhiPipeline* pipe_ = nullptr;
+    // The last setPipeline named a handle with no pipeline behind it. The command list still holds the PREVIOUS
+    // pipeline, so every draw and dispatch is dropped until a valid setPipeline: running the old one against
+    // bindings meant for the new one is a GPU hang, not a visual glitch.
+    bool pipeInvalid_ = false;
     ComPtr<ID3D12Resource> zeroCB_;   // Shared zero-filled CBV for declared-but-unsupplied slots.
 
     ComPtr<ID3D12Resource> ring_[kFrameCount];
@@ -3877,6 +3976,7 @@ void D3D12Device::beginFrame() {
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
     recording_ = true;
+    if (rhiContext_) rhiContext_->beginFrame();
     boundRootSig_ = nullptr;
     boundPso_ = pso_.Get();   // Reset's second argument IS the command list's initial bound PSO
     // Reset doesn't carry heaps/root-sig forward; cache dies here.
@@ -6212,6 +6312,7 @@ bool D3D12Device::selfTest(const f32 in[4], f32 out[4]) {
 
 // Drains the GPU, then releases everything the factory still owns.
 D3D12ResourceFactory::~D3D12ResourceFactory() {
+    pool_.reset();   // workers first: they read the device and the root-signature cache
     dev_->waitForGpu();
     retired_.clear();
 }
@@ -6472,6 +6573,7 @@ void D3D12ResourceFactory::collect() {
 // ---- root-signature cache
 // Returns the cached root signature for `layout`, building it on first use.
 const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& layout, bool mesh, bool instanced) {
+    std::lock_guard<std::mutex> lock(rootSigMutex_);
     for (const RootSigEntry& e : rootSigs_)
         if (e.mesh == mesh && e.instanced == instanced && sameLayout(e.layout, layout)) return &e;
 
@@ -7012,7 +7114,15 @@ const char* stagePrefixFor(ShaderStage s) {
 // Compiles one shader and returns its handle.
 ShaderHandle D3D12ResourceFactory::createShader(const ShaderDesc& d) {
     collect();
+    RhiShader s;
+    if (!buildShader(d, s)) return 0;
+    shaders_.push_back(std::move(s));
+    return static_cast<ShaderHandle>(shaders_.size());
+}
 
+// The compile itself, for the calling thread or a build worker (see the declaration).
+bool D3D12ResourceFactory::buildShader(const ShaderDesc& d, RhiShader& out, u64 corpus,
+                                       bool (*cacheWriteOk)(void*), void* cacheUser) {
     // Precompiled path: DXIL bytecode bypasses checks that require source/entry (see ShaderDesc::bytecode).
     if (d.precompiled()) {
         // Mesh and Amplification need hardware support, not bytecode property.
@@ -7020,41 +7130,39 @@ ShaderHandle D3D12ResourceFactory::createShader(const ShaderDesc& d) {
             && dev_->caps_.meshShaderTier == 0) {
             AVER_WARN("[RHI.D3D12] createShader (precompiled) needs mesh-shader hardware, which this "
                       "device reports as tier 0");
-            return 0;
+            return false;
         }
         // DXIL container fourcc check (prevents SPIR-V being passed to D3D12).
         const u8* src = static_cast<const u8*>(d.bytecode);
         if (d.bytecodeSize < 4 || src[0] != 'D' || src[1] != 'X' || src[2] != 'B' || src[3] != 'C') {
             AVER_ERROR("[RHI.D3D12] createShader (precompiled): {} bytes not beginning with the DXIL "
                        "container fourcc -- SPIR-V, or a truncated blob?", d.bytecodeSize);
-            return 0;
+            return false;
         }
-        RhiShader s;
-        s.bytes.assign(src, src + d.bytecodeSize);
-        s.stage = d.stage;
-        shaders_.push_back(std::move(s));
-        return static_cast<ShaderHandle>(shaders_.size());
+        out.bytes.assign(src, src + d.bytecodeSize);
+        out.stage = d.stage;
+        return true;
     }
 
-    if (!d.source || !d.entry) { AVER_ERROR("[RHI.D3D12] createShader without source or entry point"); return 0; }
+    if (!d.source || !d.entry) { AVER_ERROR("[RHI.D3D12] createShader without source or entry point"); return false; }
 
     // Mesh and Amplification: D3D12 Ultimate stages, tier-1+ mesh-shader hardware required.
     const bool isMeshFamily = d.stage == ShaderStage::Mesh || d.stage == ShaderStage::Amplification;
     if (isMeshFamily && dev_->caps_.meshShaderTier == 0) {
         AVER_WARN("[RHI.D3D12] createShader '{}' needs mesh-shader hardware, which this device reports as tier 0", d.entry);
-        return 0;
+        return false;
     }
 
     u32 model = d.minShaderModel;
     if (isMeshFamily && model < 65) model = 65;
     if (model > dev_->caps_.shaderModel) {
         AVER_WARN("[RHI.D3D12] createShader '{}' wants SM {} but the device reports {}", d.entry, model, dev_->caps_.shaderModel);
-        return 0;
+        return false;
     }
     const bool needsDxc = model > 60 || isMeshFamily;
     if (needsDxc && !dev_->caps_.dxcAvailable) {
         AVER_WARN("[RHI.D3D12] createShader '{}' needs DXC, which is unavailable", d.entry);
-        return 0;
+        return false;
     }
 
     std::string src;
@@ -7069,28 +7177,19 @@ ShaderHandle D3D12ResourceFactory::createShader(const ShaderDesc& d) {
     }
 
     ComPtr<ID3DBlob> blob;
-    if (FAILED(shaderCompiler().compile(src.c_str(), d.entry, fxcTargetFor(d.stage), &blob, sm6Target, d.defines)) || !blob) {
+    if (FAILED(shaderCompiler().compile(src.c_str(), d.entry, fxcTargetFor(d.stage), &blob, sm6Target, d.defines,
+                                        corpus, cacheWriteOk, cacheUser)) || !blob) {
         AVER_ERROR("[RHI.D3D12] createShader '{}' failed to compile", d.entry);
-        return 0;
+        return false;
     }
-    RhiShader s;
-    s.blob = std::move(blob);
-    s.stage = d.stage;
-    shaders_.push_back(std::move(s));
-    return static_cast<ShaderHandle>(shaders_.size());
+    out.blob = std::move(blob);
+    out.stage = d.stage;
+    return true;
 }
 
 // Creates a graphics pipeline, on either the input-assembler or the mesh-shader path.
 PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipelineDesc& d) {
     collect();
-    if ((d.vs == 0) == (d.ms == 0)) {
-        AVER_ERROR("[RHI.D3D12] createGraphicsPipeline needs exactly one of vs / ms");
-        return 0;
-    }
-    if (d.as != 0 && d.ms == 0) {
-        AVER_ERROR("[RHI.D3D12] createGraphicsPipeline: an amplification shader (as) needs a mesh shader (ms) alongside it");
-        return 0;
-    }
     RhiShader* vs = shader(d.vs);
     RhiShader* gs = shader(d.gs);
     RhiShader* ms = shader(d.ms);
@@ -7100,11 +7199,27 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
         AVER_ERROR("[RHI.D3D12] createGraphicsPipeline given an invalid shader handle");
         return 0;
     }
-
-    const RootSigEntry* rs = rootSignature(d.layout, d.ms != 0, d.instanced);
-    if (!rs) return 0;
-
     RhiPipeline p;
+    if (!buildGraphicsPipeline(d, vs, gs, ms, ps, as, p)) return 0;
+    pipelines_.push_back(std::move(p));
+    return static_cast<PipelineHandle>(pipelines_.size());
+}
+
+// The pipeline-state creation, for the calling thread or a build worker (see the declaration).
+bool D3D12ResourceFactory::buildGraphicsPipeline(const GraphicsPipelineDesc& d, const RhiShader* vs,
+                                                 const RhiShader* gs, const RhiShader* ms, const RhiShader* ps,
+                                                 const RhiShader* as, RhiPipeline& p) {
+    if ((d.vs == 0) == (d.ms == 0)) {
+        AVER_ERROR("[RHI.D3D12] createGraphicsPipeline needs exactly one of vs / ms");
+        return false;
+    }
+    if (d.as != 0 && d.ms == 0) {
+        AVER_ERROR("[RHI.D3D12] createGraphicsPipeline: an amplification shader (as) needs a mesh shader (ms) alongside it");
+        return false;
+    }
+    const RootSigEntry* rs = rootSignature(d.layout, d.ms != 0, d.instanced);
+    if (!rs) return false;
+
     p.rootSig = rs->sig.Get();
     p.mesh = d.ms != 0;
     p.amplification = d.as != 0;
@@ -7126,8 +7241,7 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
     raster.DepthBias = static_cast<INT>(d.depthBias);
     raster.SlopeScaledDepthBias = d.slopeScaledDepthBias;
     const bool warpMeshConservative = d.conservativeRaster && d.ms != 0 && dev_->softwareAdapter_;
-    if (warpMeshConservative && !dev_->warpConsRasterLogged_) {
-        dev_->warpConsRasterLogged_ = true;
+    if (warpMeshConservative && !dev_->warpConsRasterLogged_.exchange(true)) {
         AVER_WARN("[RHI.D3D12] conservative rasterisation disabled for mesh-shader pipelines on the "
                   "WARP software rasteriser (it faults); voxel coverage is thinner on this adapter");
     }
@@ -7189,7 +7303,7 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
         ComPtr<ID3D12Device2> device2;
         if (FAILED(dev_->device_.As(&device2))) {
             AVER_ERROR("[RHI.D3D12] mesh pipeline needs ID3D12Device2");
-            return 0;
+            return false;
         }
         MeshPsoStream s{};
         s.rootSig = rs->sig.Get();
@@ -7205,7 +7319,7 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
         s.dsv = toDxgiDsvFormat(d.depthFormat);
         s.sample.value.Count = samples;
         D3D12_PIPELINE_STATE_STREAM_DESC sd{sizeof(s), &s};
-        if (!hrOk(device2->CreatePipelineState(&sd, IID_PPV_ARGS(&p.pso)), "rhi mesh pipeline")) return 0;
+        if (!hrOk(device2->CreatePipelineState(&sd, IID_PPV_ARGS(&p.pso)), "rhi mesh pipeline")) return false;
     } else {
         D3D12_INPUT_ELEMENT_DESC elems[kMaxVertexAttribs] = {};
         const UINT elemCount = buildInputLayout(d.vertexLayout, elems);
@@ -7226,10 +7340,9 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
         for (u32 i = 0; i < rtCount; ++i) pd.RTVFormats[i] = toDxgiFormat(d.renderTargets[i]);
         pd.DSVFormat = toDxgiDsvFormat(d.depthFormat);
         pd.SampleDesc.Count = samples;
-        if (!hrOk(dev_->device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&p.pso)), "rhi graphics pipeline")) return 0;
+        if (!hrOk(dev_->device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&p.pso)), "rhi graphics pipeline")) return false;
     }
-    pipelines_.push_back(std::move(p));
-    return static_cast<PipelineHandle>(pipelines_.size());
+    return true;
 }
 
 // Creates a compute pipeline.
@@ -7240,10 +7353,16 @@ PipelineHandle D3D12ResourceFactory::createComputePipeline(const ComputePipeline
         AVER_ERROR("[RHI.D3D12] createComputePipeline given a handle that is not a compute shader");
         return 0;
     }
-    const RootSigEntry* rs = rootSignature(d.layout, false);
-    if (!rs) return 0;
-
     RhiPipeline p;
+    if (!buildComputePipeline(d, cs, p)) return 0;
+    pipelines_.push_back(std::move(p));
+    return static_cast<PipelineHandle>(pipelines_.size());
+}
+
+// The pipeline-state creation, for the calling thread or a build worker (see the declaration).
+bool D3D12ResourceFactory::buildComputePipeline(const ComputePipelineDesc& d, const RhiShader* cs, RhiPipeline& p) {
+    const RootSigEntry* rs = rootSignature(d.layout, false);
+    if (!rs) return false;
     p.compute = true;
     p.rootSig = rs->sig.Get();
     for (u32 t = 0; t < kBindingTableCount; ++t) { p.srvParam[t] = rs->srvParam[t]; p.uavParam[t] = rs->uavParam[t]; }
@@ -7254,9 +7373,269 @@ PipelineHandle D3D12ResourceFactory::createComputePipeline(const ComputePipeline
     D3D12_COMPUTE_PIPELINE_STATE_DESC cp{};
     cp.pRootSignature = rs->sig.Get();
     cp.CS = cs->code();
-    if (!hrOk(dev_->device_->CreateComputePipelineState(&cp, IID_PPV_ARGS(&p.pso)), "rhi compute pipeline")) return 0;
-    pipelines_.push_back(std::move(p));
-    return static_cast<PipelineHandle>(pipelines_.size());
+    if (!hrOk(dev_->device_->CreateComputePipelineState(&cp, IID_PPV_ARGS(&p.pso)), "rhi compute pipeline")) return false;
+    return true;
+}
+
+// ---- off-thread shader and pipeline creation
+// A batch of create requests (IPipelineBatch) run on the factory's PipelinePool. The design rules, each of which
+// is a way an earlier attempt could have corrupted GPU state (docs/rendering/ASYNC_SHADERS.md):
+//   - A worker reads the request and writes only its own slot. It never touches shaders_, pipelines_,
+//     retired_ or any handle table, and never retires or collects anything.
+//   - Handles are batch-local. A pipeline reaches pipelines_ only in adopt(), on the owner's thread.
+//   - What a pipeline's creation reads is immutable or locked: device caps, the root-signature cache
+//     (deque + mutex, entries never erased), and the shader blobs of its own batch.
+//   - A request is a pure value: strings are copied (or shared, immutable) when it is recorded.
+class D3D12PipelineBatch final : public IPipelineBatch {
+public:
+    explicit D3D12PipelineBatch(D3D12ResourceFactory& f) : f_(f), s_(std::make_shared<Shared>()) {
+        s_->f = &f;
+        // Fixed on the owner's thread now: the key every blob this batch writes is filed under, and the
+        // revision a reload since then would invalidate.
+        s_->corpus = shaderCorpusHash();
+        s_->revision = shaderFileRevision();
+    }
+    ~D3D12PipelineBatch() override { cancel(); }
+
+    ShaderHandle createShader(const ShaderDesc& d) override {
+        Shared& s = *s_;
+        ShaderSlot& sl = s.shaders.emplace_back();
+        sl.source = intern(d.source);
+        sl.prelude = intern(d.prelude);
+        if (d.entry) { sl.entry = d.entry; sl.hasEntry = true; }
+        if (d.defines) { sl.defines = d.defines; sl.hasDefines = true; }
+        if (d.precompiled())
+            sl.bytes.assign(static_cast<const u8*>(d.bytecode), static_cast<const u8*>(d.bytecode) + d.bytecodeSize);
+        sl.stage = d.stage;
+        sl.minShaderModel = d.minShaderModel;
+        ++s.total;
+        return static_cast<ShaderHandle>(s.shaders.size());
+    }
+    PipelineHandle createGraphicsPipeline(const GraphicsPipelineDesc& d) override {
+        PipeSlot& p = newPipe(false);
+        p.g = d;
+        for (ShaderHandle h : {d.vs, d.gs, d.ms, d.ps, d.as}) dependOn(p, h);
+        return static_cast<PipelineHandle>(s_->pipes.size());
+    }
+    PipelineHandle createComputePipeline(const ComputePipelineDesc& d) override {
+        PipeSlot& p = newPipe(true);
+        p.c = d;
+        dependOn(p, d.cs);
+        return static_cast<PipelineHandle>(s_->pipes.size());
+    }
+
+    void start() override {
+        std::shared_ptr<Shared> sh = s_;
+        if (sh->started.load()) return;
+        sh->outstanding = sh->total.load();
+        sh->started = true;
+        if (sh->total == 0) return;
+        PipelinePool& pool = f_.pipelinePool();
+        sh->pool = &pool;
+        // Which pipelines can run at once, BEFORE any shader task exists: once one does, workers decrement
+        // `remaining` and queue the pipelines it frees, and this loop must not see (and queue) them too.
+        std::vector<u32> ready;
+        for (u32 i = 0; i < sh->pipes.size(); ++i)
+            if (sh->pipes[i].remaining == 0) ready.push_back(i);
+        for (u32 i = 0; i < sh->shaders.size(); ++i)
+            pool.submit([sh, i] { runShader(sh, i); });
+        for (u32 i : ready)
+            pool.submit([sh, i] { runPipe(sh, i); });
+    }
+    bool finished() const override {
+        const Shared& s = *s_;
+        return s.started.load() && s.outstanding.load() == 0;
+    }
+    void progress(u32& done, u32& total) const override {
+        done = s_->done.load();
+        total = s_->total.load();
+    }
+    void waitFinished() override {
+        if (!s_->started) start();
+        std::unique_lock<std::mutex> lock(s_->m);
+        s_->cv.wait(lock, [this] { return s_->outstanding.load() == 0; });
+    }
+
+    void adopt() override {
+        Shared& s = *s_;
+        if (adopted_ || !finished() || s.cancelled) return;
+        adopted_ = true;
+        for (PipeSlot& p : s.pipes) {
+            if (!p.ok) continue;
+            f_.pipelines_.push_back(std::move(p.built));
+            p.real = static_cast<PipelineHandle>(f_.pipelines_.size());
+        }
+        s.shaders.clear();   // blobs: the pipeline states own their code now
+    }
+    PipelineHandle resolve(PipelineHandle local) const override {
+        const Shared& s = *s_;
+        if (!adopted_ || local == 0 || local > s.pipes.size()) return 0;
+        return s.pipes[local - 1].real;
+    }
+    void cancel() override {
+        // In-flight tasks keep the shared state alive and skip or discard their work.
+        s_->cancelled = true;
+    }
+
+private:
+    struct ShaderSlot {
+        std::shared_ptr<const std::string> source, prelude;
+        std::string entry, defines;
+        bool hasEntry = false, hasDefines = false;
+        std::vector<u8> bytes;
+        ShaderStage stage = ShaderStage::Vertex;
+        u32 minShaderModel = 60;
+        std::vector<u32> dependents;   // pipelines waiting on this shader (recorded before start)
+        RhiShader built;               // written by this shader's one task
+    };
+    struct PipeSlot {
+        bool compute = false;
+        GraphicsPipelineDesc g{};
+        ComputePipelineDesc c{};
+        u32 remaining = 0;             // shaders still to finish; guarded by Shared::m once started
+        bool depFailed = false;        // a shader it names failed to compile (or was never recorded)
+        bool ok = false;
+        RhiPipeline built;             // written by this pipeline's one task
+        PipelineHandle real = 0;       // adopt()
+    };
+    struct Shared {
+        D3D12ResourceFactory* f = nullptr;
+        PipelinePool* pool = nullptr;      // set by start(); workers submit follow-up tasks through it
+        u64 corpus = 0, revision = 0;
+        std::deque<ShaderSlot> shaders;   // fixed once start() runs
+        std::deque<PipeSlot> pipes;
+        std::vector<std::pair<const char*, std::shared_ptr<const std::string>>> interned;
+        std::mutex m;
+        std::condition_variable cv;
+        std::atomic<u32> total{0}, done{0}, outstanding{0};
+        std::atomic<bool> started{false}, cancelled{false};
+    };
+
+    PipeSlot& newPipe(bool compute) {
+        PipeSlot& p = s_->pipes.emplace_back();
+        p.compute = compute;
+        ++s_->total;
+        return p;
+    }
+    void dependOn(PipeSlot& p, ShaderHandle h) {
+        if (h == 0) return;
+        Shared& s = *s_;
+        if (h > s.shaders.size()) {
+            AVER_ERROR("[RHI.D3D12] pipeline batch: a pipeline names shader {} which is not in the batch", h);
+            p.depFailed = true;
+            return;
+        }
+        const u32 pipeIdx = static_cast<u32>(s.pipes.size() - 1);
+        std::vector<u32>& dep = s.shaders[h - 1].dependents;
+        if (!dep.empty() && dep.back() == pipeIdx) return;   // the same shader named twice
+        dep.push_back(pipeIdx);
+        ++p.remaining;
+    }
+
+    // The caller's big strings (the shader source, the prelude) are handed in by the same pointer over and
+    // over; keep one immutable copy per distinct text.
+    std::shared_ptr<const std::string> intern(const char* text) {
+        if (!text) return nullptr;
+        const usize n = std::strlen(text);
+        for (auto& [ptr, str] : s_->interned) {
+            if (str->size() != n) continue;
+            if (ptr == text) {
+                // Same address, same length: check a few windows rather than every byte.
+                const usize w = n < 64 ? n : 64;
+                if (std::memcmp(str->data(), text, w) == 0 && std::memcmp(str->data() + n - w, text + n - w, w) == 0 &&
+                    std::memcmp(str->data() + n / 2 - w / 2, text + n / 2 - w / 2, w) == 0)
+                    return str;
+            } else if (std::memcmp(str->data(), text, n) == 0) {
+                return str;
+            }
+        }
+        auto str = std::make_shared<const std::string>(text, n);
+        s_->interned.emplace_back(text, str);
+        return str;
+    }
+
+    static bool cacheWriteOk(void* user) {
+        const Shared* s = static_cast<const Shared*>(user);
+        return !s->cancelled && shaderFileRevision() == s->revision;
+    }
+
+    // One bookkeeping step per finished task: progress, and the wake-up for waitFinished().
+    static void finishTask(Shared& s) {
+        ++s.done;
+        std::lock_guard<std::mutex> lock(s.m);
+        if (--s.outstanding == 0) s.cv.notify_all();
+    }
+
+    static void runShader(const std::shared_ptr<Shared>& sh, u32 idx) {
+        Shared& s = *sh;
+        ShaderSlot& sl = s.shaders[idx];
+        bool ok = false;
+        if (!s.cancelled) {
+            ShaderDesc d;
+            d.stage = sl.stage;
+            d.minShaderModel = sl.minShaderModel;
+            if (sl.source)  d.source = sl.source->c_str();
+            if (sl.prelude) d.prelude = sl.prelude->c_str();
+            if (sl.hasEntry) d.entry = sl.entry.c_str();
+            if (sl.hasDefines) d.defines = sl.defines.c_str();
+            if (!sl.bytes.empty()) { d.bytecode = sl.bytes.data(); d.bytecodeSize = sl.bytes.size(); }
+            try {
+                ok = s.f->buildShader(d, sl.built, s.corpus, &cacheWriteOk, &s);
+            } catch (...) {
+                AVER_ERROR("[RHI.D3D12] pipeline batch: shader '{}' threw while compiling", sl.entry);
+            }
+        }
+        // Release the dependents whose last shader this was. Their tasks start after this one is fully done.
+        std::vector<u32> ready;
+        {
+            std::lock_guard<std::mutex> lock(s.m);
+            for (u32 pi : sl.dependents) {
+                PipeSlot& p = s.pipes[pi];
+                if (!ok) p.depFailed = true;
+                if (--p.remaining == 0) ready.push_back(pi);
+            }
+        }
+        for (u32 pi : ready) s.pool->submit([sh, pi] { runPipe(sh, pi); });
+        finishTask(s);
+    }
+
+    static void runPipe(const std::shared_ptr<Shared>& sh, u32 idx) {
+        Shared& s = *sh;
+        PipeSlot& p = s.pipes[idx];
+        bool ok = false;
+        if (!s.cancelled && !p.depFailed) {
+            auto code = [&s](ShaderHandle h) -> const RhiShader* {
+                return h ? &s.shaders[h - 1].built : nullptr;
+            };
+            try {
+                if (p.compute) ok = s.f->buildComputePipeline(p.c, code(p.c.cs), p.built);
+                else           ok = s.f->buildGraphicsPipeline(p.g, code(p.g.vs), code(p.g.gs), code(p.g.ms),
+                                                               code(p.g.ps), code(p.g.as), p.built);
+            } catch (...) {
+                AVER_ERROR("[RHI.D3D12] pipeline batch: a pipeline threw while it was built");
+            }
+        }
+        p.ok = ok;
+        finishTask(s);
+    }
+
+    D3D12ResourceFactory& f_;
+    std::shared_ptr<Shared> s_;
+    bool adopted_ = false;
+};
+
+PipelinePool& D3D12ResourceFactory::pipelinePool() {
+    if (!pool_) {
+        const u32 hw = std::thread::hardware_concurrency();
+        const u32 n = hw >= 8 ? (hw / 2 > 8 ? 8u : hw / 2) : 2u;
+        pool_ = std::make_unique<PipelinePool>(n);
+        AVER_INFO("[RHI.D3D12] shader build pool: {} worker thread(s)", n);
+    }
+    return *pool_;
+}
+
+std::unique_ptr<IPipelineBatch> D3D12ResourceFactory::createPipelineBatchAsync() {
+    return std::make_unique<D3D12PipelineBatch>(*this);
 }
 
 // Reserves a descriptor range for a binding set, null-fills it, and returns its handle.
@@ -8098,7 +8477,8 @@ void D3D12ResourceFactory::selfTest() {
 void D3D12RenderContext::setPipeline(PipelineHandle h) {
     pipe_ = nullptr;
     RhiPipeline* p = res_->pipeline(h);
-    if (!p) { AVER_ERROR("[RHI.D3D12] setPipeline with an invalid handle"); return; }
+    if (!p) { pipeInvalid_ = true; AVER_ERROR("[RHI.D3D12] setPipeline with an invalid handle"); return; }
+    pipeInvalid_ = false;
     if (!dev_->cmdList_) return;
     if (p->compute) {
         dev_->cmdList_->SetComputeRootSignature(p->rootSig);
@@ -8410,7 +8790,7 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderContext::ringAlloc(const void* data, u32 by
 
 // Draws a device mesh through the input assembler.
 void D3D12RenderContext::drawMesh(MeshHandle mesh) {
-    if (!dev_->cmdList_) return;
+    if (!dev_->cmdList_ || pipeInvalid_) return;
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] drawMesh with an invalid mesh handle"); return; }
     const GpuMesh& m = dev_->meshes_[mesh - 1];
     applyDrawBinding();
@@ -8424,7 +8804,7 @@ void D3D12RenderContext::drawMesh(MeshHandle mesh) {
 // transforms read from a root-SRV-bound StructuredBuffer -- see IRenderContext::drawMeshInstanced and
 // RHIResources.hpp's comment above GraphicsPipelineDesc::instanced for the whole mechanism.
 void D3D12RenderContext::drawMeshInstanced(MeshHandle mesh, const f32* worlds, u32 instanceCount) {
-    if (!dev_->cmdList_) return;
+    if (!dev_->cmdList_ || pipeInvalid_) return;
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] drawMeshInstanced with an invalid mesh handle"); return; }
     if (instanceCount == 0) return;
     if (!pipe_ || pipe_->instanceWorldParam < 0) {
@@ -8447,6 +8827,7 @@ void D3D12RenderContext::drawMeshInstanced(MeshHandle mesh, const f32* worlds, u
 
 // Draws a device mesh through the mesh-shader path.
 void D3D12RenderContext::dispatchMeshFor(MeshHandle mesh) {
+    if (pipeInvalid_) return;
     if (!pipe_ || !pipe_->mesh) { AVER_ERROR("[RHI.D3D12] dispatchMeshFor without a mesh-shader pipeline"); return; }
     if (!dev_->cmdList6_) { AVER_ERROR("[RHI.D3D12] DispatchMesh is unavailable on this command list"); return; }
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] dispatchMeshFor with an invalid mesh handle"); return; }
@@ -8464,6 +8845,7 @@ void D3D12RenderContext::dispatchMeshFor(MeshHandle mesh) {
 // Dispatches an amplification+mesh-shader pipeline over one cluster cut.
 // Cluster arrays are pre-bound; this supplies group count and vertex buffer.
 void D3D12RenderContext::dispatchMeshClusters(MeshHandle mesh, u32 clusterCount) {
+    if (pipeInvalid_) return;
     if (!pipe_ || !pipe_->mesh || !pipe_->amplification) {
         AVER_ERROR("[RHI.D3D12] dispatchMeshClusters without an amplification-shader pipeline");
         return;
@@ -8489,6 +8871,7 @@ void D3D12RenderContext::dispatchMeshClusters(MeshHandle mesh, u32 clusterCount)
 
 // Dispatches the bound compute pipeline.
 void D3D12RenderContext::dispatch(u32 gx, u32 gy, u32 gz) {
+    if (pipeInvalid_) return;
     if (!pipe_ || !pipe_->compute) { AVER_ERROR("[RHI.D3D12] dispatch without a compute pipeline"); return; }
     if (dev_->cmdList_) dev_->cmdList_->Dispatch(gx, gy, gz);
 }
@@ -8597,7 +8980,7 @@ void D3D12RenderContext::copyTexture(TextureHandle dst, TextureHandle src) {
 
 // Draws a fullscreen triangle; the vertex shader builds it from SV_VertexID.
 void D3D12RenderContext::drawFullscreen() {
-    if (!dev_->cmdList_) return;
+    if (!dev_->cmdList_ || pipeInvalid_) return;
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     dev_->cmdList_->IASetVertexBuffers(0, 0, nullptr);
     dev_->cmdList_->DrawInstanced(3, 1, 0, 0);
@@ -8634,7 +9017,7 @@ void D3D12RenderContext::setIndexBuffer(BufferHandle h, Format indexFormat) {
 
 // Draws indexed geometry from the currently bound caller-owned buffers.
 void D3D12RenderContext::drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVertex) {
-    if (!dev_->cmdList_ || indexCount == 0) return;
+    if (!dev_->cmdList_ || pipeInvalid_ || indexCount == 0) return;
     applyDrawBinding();
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     dev_->cmdList_->DrawIndexedInstanced(indexCount, 1, firstIndex, baseVertex, 0);

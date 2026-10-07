@@ -40,6 +40,10 @@ namespace aver::rhi {
 // tried. Empty is deliberately not fatal here: the caller concatenates preludes and hands the
 // result to DXC, which will fail with its own diagnostic pointing at the missing declarations, and
 // two errors describing one cause is better than an abort that describes none.
+//
+// THREADS. Every function here is safe from any thread, but the REFERENCES shaderFile() and
+// shaderFileIfPresent() return die at the next reloadShaderFiles(). A thread that is not the one that
+// reloads (a shader build worker, the DXC include handler) uses the Copy variants below.
 const std::string& shaderFile(std::string_view name);
 
 // The same lookup, silent when the file is absent. For a caller that EXPECTS misses: the DXC include
@@ -47,6 +51,10 @@ const std::string& shaderFile(std::string_view name);
 // expected to fail and shaderFile()'s (deliberately loud) error would be noise on every include.
 // Returns nullptr rather than an empty string so "absent" and "empty file" stay distinguishable.
 const std::string* shaderFileIfPresent(std::string_view name);
+
+// Copies of the two lookups above, for threads that may race a reload. False / empty when absent.
+bool shaderFileCopyIfPresent(std::string_view name, std::string& out);
+std::string shaderFileCopy(std::string_view name);
 
 // A hash of EVERY shader file that could take part in a compile, for a cache key to fold in.
 //
