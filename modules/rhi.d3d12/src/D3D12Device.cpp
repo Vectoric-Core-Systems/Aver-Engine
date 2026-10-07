@@ -1368,6 +1368,7 @@ private:
     bool frameInterpolated_ = false;           // this frame presented a generated image ahead of the real one
     bool frameInterpCut_ = true;               // the next frame must not be interpolated across
     u32  frameInterpOffReason_ = 0;            // last reason logged
+    std::chrono::steady_clock::time_point frameInterpSettleUntil_{};   // held off until then after any blocked frame
     TextureHandle fgInputTex_ = 0;          // frame N's scene colour, copied
     u32 fgInputW_ = 0, fgInputH_ = 0;
     f32 fgPrevCamPos_[3] = {};
@@ -5766,6 +5767,11 @@ u32 D3D12Device::frameInterpBlocker() {
     } else if (wireframeFrame_ || frameSuppressed_) {
         why = 5;   // per-frame view states: not worth a log line
     }
+    // Resumes only after 1 s of drawable frames: restarting on the first frame after a load or pipeline
+    // rebuild lost the device (owner, RX 7800 XT), the scene's own histories still settling.
+    const auto now = std::chrono::steady_clock::now();
+    if (why != 0) frameInterpSettleUntil_ = now + std::chrono::seconds(1);
+    else if (now < frameInterpSettleUntil_) why = 6;
     if (why != frameInterpOffReason_) {
         if (text) AVER_INFO("[RHI.D3D12] frame interpolation paused: {}", text);
         else if (why == 0) AVER_INFO("[RHI.D3D12] frame interpolation running");
