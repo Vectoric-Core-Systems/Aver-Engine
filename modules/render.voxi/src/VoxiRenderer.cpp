@@ -3967,7 +3967,11 @@ void VoxiRenderer::buildLocalLights() {
         }
         u32 dim[3] = {1, 1, 1};
         f32 cell = 100.0f;
-        const bool anyLocal = lo[0] < hi[0] && lo[1] < hi[1] && lo[2] < hi[2];
+        // A short list is walked whole (FLAT): every thread then reads the same light at once (a uniform load, cheap on
+        // any GPU), where per-thread grid cells make each lane load a different light. The grid pays off only for
+        // many lights.
+        const bool flat = lightCount <= kFlatLightList;
+        const bool anyLocal = !flat && lo[0] < hi[0] && lo[1] < hi[1] && lo[2] < hi[2];
         if (anyLocal) {
             const f32 ext = std::max(hi[0] - lo[0], std::max(hi[1] - lo[1], hi[2] - lo[2]));
             cell = std::max(ext / static_cast<f32>(kLightGridMaxDim), 50.0f);
@@ -3997,6 +4001,7 @@ void VoxiRenderer::buildLocalLights() {
             mix(dim[a]);
         }
         mix(anyLocal ? 1u : 0u);
+        mix(flat ? 1u : 0u);
         mix(lightCount);
         for (const u32 g : globals) mix(g);
         if (rdGridCacheValid_ && rdGridCacheKey_ == key) {
@@ -4082,6 +4087,7 @@ void VoxiRenderer::buildLocalLights() {
         for (u32 g = 0; g < 3; ++g) header.axisKind[g] = g < globals.size() ? static_cast<f32>(globals[g]) : -1.0f;
         header.axisKind[3] = static_cast<f32>(globals.size());
         header.shape[0] = static_cast<f32>(poolRec);
+        header.shape[1] = flat ? static_cast<f32>(lightCount) : 0.0f;   // > 0: walk lights [0, n) whole
         rdLocalLightData_.push_back(header);
         const usize base = rdLocalLightData_.size();
         rdLocalLightData_.resize(base + tableRecs + poolRecs);
