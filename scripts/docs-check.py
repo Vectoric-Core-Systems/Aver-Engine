@@ -54,8 +54,7 @@ def main():
     for d in docs:
         text = open(d, encoding="utf-8", errors="replace").read()
         # Lines about another project (the Drift comparison) name ITS paths; placeholders like <mod> are not paths.
-        ours = "
-".join(l for l in text.splitlines() if "Drift" not in l and "drft" not in l)
+        ours = "\n".join(l for l in text.splitlines() if "Drift" not in l and "drft" not in l)
         for tok in set(candidates(ours)):
             if "..." in tok or "…" in tok or "<" in tok or not tok.isascii():
                 continue   # elided or a placeholder
