@@ -145,6 +145,7 @@ void MaterialSystem::shutdown() {
     // gpuIndexOf_/gpuTable_ above would have been, for the same reason.
     indexOfScratch_.clear();
     tableScratch_.clear();
+    seenLibraryChanges_ = ~u64{0};
     res_ = nullptr;
 }
 
@@ -364,6 +365,20 @@ void MaterialSystem::update() {
     MaterialLibrary& lib = MaterialLibrary::get();
 
     const u32 n = lib.count();
+    const u64 libChanges = lib.changeCount();
+    // The tail every call ends with, shared by the early-out below.
+    const auto finish = [&] {
+        buildsPendingAtLastUpdateEnd_ = buildsPending_;
+
+        // M2(a): total update() cost, on the same power-of-two cadence D3D12Device.cpp already uses for
+        // its shader-compile report. UNMEASURED against a profiler -- this is a wall-clock straddle of
+        // the function body and nothing more.
+        const f64 ms = std::chrono::duration<f64, std::milli>(
+                           std::chrono::steady_clock::now() - t0).count();
+        ++updateCalls_;
+        if ((updateCalls_ & (updateCalls_ - 1)) == 0)
+            AVER_INFO("[PBR] material update {:.3f} ms over {} material(s)", ms, n);
+    };
     // False means the live table already holds exactly what a rebuild would produce, so the rebuild
     // and swap below are skipped and the previous generation stays in place.
     bool tableChanged = gpuTable_.size() != n + 1u || gpuIndexOf_.size() != n;
@@ -380,6 +395,10 @@ void MaterialSystem::update() {
         buildsInUpdate_ = 0;
         buildsOnDraw_ = 0;
     }
+
+    // Nothing was created, destroyed or marked dirty since the last full walk, so the walk would find
+    // every flag clear and the table already current. The report above still ran.
+    if (libChanges == seenLibraryChanges_) { finish(); return; }
 
     // Reading the flag clears it, so this is the one consumer. Driven off the library's own
     // enumeration, because a material created this frame has no entry yet.
@@ -481,16 +500,8 @@ void MaterialSystem::update() {
         gpuTable_.swap(tableScratch_);
     }
 
-    buildsPendingAtLastUpdateEnd_ = buildsPending_;
-
-    // M2(a): total update() cost, on the same power-of-two cadence D3D12Device.cpp already uses for
-    // its shader-compile report. UNMEASURED against a profiler -- this is a wall-clock straddle of
-    // the function body and nothing more.
-    const f64 ms = std::chrono::duration<f64, std::milli>(
-                       std::chrono::steady_clock::now() - t0).count();
-    ++updateCalls_;
-    if ((updateCalls_ & (updateCalls_ - 1)) == 0)
-        AVER_INFO("[PBR] material update {:.3f} ms over {} material(s)", ms, n);
+    seenLibraryChanges_ = libChanges;
+    finish();
 }
 
 // `h`'s row in gpuMaterialTable() as of the last update(), or 0 (the fallback row) for a handle this
