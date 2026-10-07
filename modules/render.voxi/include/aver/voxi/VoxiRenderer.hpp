@@ -689,7 +689,8 @@ private:
     static_assert(sizeof(RdLocalLight) == 80, "RdLocalLight is the HLSL AverLightRec ABI");
     // At most this many per frame, sorted by 1-metre irradiance over max(distance², 1).
     static constexpr u32 kMaxLocalLights = 32;      // the raster path's working set (shaders' AVER_LIGHT_LIST_MAX)
-    static constexpr u32 kMaxListLights = 4000;     // every emitter, up to this (UNIFIED_LIGHTS.md phase 3)
+    static constexpr u32 kMaxListLights = 2047;     // every emitter, up to this; with the sun every index stays below 2048,
+                                                    // which gRdLocalOut's half-precision .x holds exactly (UNIFIED_LIGHTS.md)
     static constexpr u32 kMaxLightsPerCell = 24;    // a light-grid cell keeps its most important lights
     static constexpr u32 kLightGridMaxDim = 32;     // cells per axis
     static constexpr f32 kLightGridHalfExtent = 20000.0f;   // cm around the camera
@@ -1316,6 +1317,8 @@ private:
     // CONTENT TRUST: the rtFrameIndex_ of the last frame a scene pass wrote u19 and the light-list hash it wrote under.
     u32 rdLocalHistFrame_ = 0;
     u64 rdLocalHistHash_ = 0;
+    // The rtFrameIndex_ CSRdShadow last wrote u19's light keys in: the sun's shadow history is reused only under them.
+    u32 rdKeyFrame_ = 0;
     // "Local lights running" said once, the first frame any scene pass shades with lamps.
     bool rdLocalLightsRunLogged_ = false;
     // Settings::giRestirVisibility, cached at setSettings. 2 (HalfResolution) is the struct default.

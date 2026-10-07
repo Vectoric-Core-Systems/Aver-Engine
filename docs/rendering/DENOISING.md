@@ -91,6 +91,33 @@ Reflection work done for these filters (2026-08-27):
   feature.
 - **The reflection cutoff is roughness 0.75**, with the fade a seam-hider across the last quarter.
 
+## 3b. Unified lights, white rims and Denoiser None (2026-10-07)
+
+The FidelityFX plumbing (`Denoiser.cpp`, `aver_denoise.hlsl`, the G-buffer writers, the dispatch) did not change
+with the unified lights; the white rims came from the hand-written shadow filter reading a changed history.
+
+- **Cause:** the unified-lights commits packed the light's key into the shadow history's `.x` (`2 * key + vis`), and
+  `rtShadowSpatial` read it raw. Any neighbour whose exact light was a lamp gave a value of 2 to 4000, the outlier clamp
+  and the average passed 1, and the pixel came out fully lit: bright halos at every crease where the exact light
+  changes. NRD2 never ran the filter.
+- **Fix:** the history holds plain visibility again (`rtShadowSpatial` and every pass but `CSRdShadow` are the text they
+  had before the unified lights). Which light a texel belongs to is `gRdLocalHist.y`, the key `CSRdShadow` already
+  stores per pixel: `CSRdShadow` alone is compiled with `AVER_RD_SHADOW_KEYED`, and its `rtReprojectHistory` refuses a
+  texel whose last exact light had another key (`rdShadowHistKeyOk`). Neighbours of another light can still blur a few
+  pixels at a light border, but nothing can pass 1. An earlier fix that unpacked inside `rtShadowSpatial` hung the
+  driver; no code in the filter, `PSMainVoxi` or the blended and single passes changed here (they lost code).
+- **Keys and indices fit half precision:** `gRdLocalOut` is RGBA16F, exact to 2048. Light keys are 1..2047 and the list
+  is capped at 2047 lamps plus the sun (`kMaxListLights`), so the stored key and list index no longer round, which had
+  broken the 80% exact-light stickiness for half the lamps and mis-indexed Stage B past 2048 entries.
+- **Denoiser None filters nothing:** `beginShadowHistory` sets shadow history "not usable" (`rtHistParams.y = 0`, the
+  state every reset uses), which turns off the exact light's temporal blend and spatial filter, the reflection history
+  and spatial filter, sky-occlusion history and the lamp tail's history, and the half-rate skips that depend on
+  them. The reflection lobe and the sun's jitter stay (reflections are not mirrors). Bit 1024 of `giShadowParams.w`
+  (`rtFiltersOff`) makes `CSRdTailFilter` keep each pixel's own tail fraction instead of the 5x5. ReSTIR's reservoir reuse
+  and the tail's 2x2 block sharing stay: they are the estimators.
+- **One FidelityFX decision per frame** (`ffxFrame`, `reflDnWanted` in `beginShadowHistory`) drives the dispatch and what
+  `CSRdRefl` writes for it.
+
 ## 4. Reflections through the denoiser (2026-10-05)
 
 `Signal::Reflection`, compiled as `AVER_DNSR_REFLECTION`: real roughness from the G-buffer (glossy up
