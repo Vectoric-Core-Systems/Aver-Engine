@@ -74,7 +74,8 @@ captured, so each plausible cause is excluded by construction:
 * Initial: `init()` creates resources, starts Base+Scene, returns. `blocked_` until the set lands.
 * Target change (resize, sample count): the old set is unusable (formats are baked in), so the frame goes blank
   again until the new set lands.
-* Material-graph or shader-file change: the old set keeps drawing; the new one swaps in whole when ready. If its
+* Material-graph or shader-file change: the frame goes blank until the new set lands (materials may already name
+  a graph the old shaders lack; drawing them lost the device at project open). If its
   scene or debug pipeline would not build (a shader edit with an error), the set that stands is kept.
 * Lazy groups (NRD2, Path Tracing, NeuRaC twins): requested by the code that wants them, built in the background;
   until they land the frame uses what it already used when they were absent (FidelityFX, ordinary ray-driven
