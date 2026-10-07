@@ -823,7 +823,7 @@ void PtSceneView::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi
     if (presentPso_) { res_->destroyPipeline(presentPso_); presentPso_ = 0; }
 
     // VSky: the SAME fullscreen-triangle vertex shader VoxiRenderer's own debug view compiles against
-    // (VoxiRenderer.cpp's createScenePipelines, "shares the prelude's fullscreen triangle"), read out
+    // (VoxiRenderer.cpp's recordScenePipelines, "shares the prelude's fullscreen triangle"), read out
     // of the shared prelude rather than duplicated here.
     // SM 5.1, the SAME minimum VoxiRenderer's own VSky compile uses (VoxiRenderer.cpp's kBaseSm) and
     // AverSR's upscale shaders use (AverSrSpatial.cpp) -- a fullscreen triangle and a
