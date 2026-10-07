@@ -4663,10 +4663,10 @@ rhi::BindlessTableHandle VoxiRenderer::sceneBindlessTable() const { return rtTex
 
 // While the scene set builds (blocked_, latched at prePass) Voxi claims the scene and records nothing: the
 // frame is blank rather than drawn by a half-built renderer.
-bool VoxiRenderer::suppressesScene() const { return blocked_ || debugViewActive() || rayDrivenActive(); }
+bool VoxiRenderer::suppressesScene() const { return blocked_ || targetsStale_ || debugViewActive() || rayDrivenActive(); }
 
 // Debug raymarch has no depth; ray-driven writes real depth so sky lands on ray misses.
-bool VoxiRenderer::suppressesWholeFrame() const { return blocked_ || debugViewActive(); }
+bool VoxiRenderer::suppressesWholeFrame() const { return blocked_ || targetsStale_ || debugViewActive(); }
 
 // Draws the scene pass replacement (debug view or ray-driven); debug wins if both are active.
 void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
@@ -7426,28 +7426,28 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psVoxi;
         p.depth = {true, false, rhi::CompareOp::LessEqual};
-        scenePsoPrepassed_ = res_->createGraphicsPipeline(p);
+        out.scenePsoPrepassed_ = b.createGraphicsPipeline(p);
     }
 
     if (vsMain && psVoxiGbuf) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
         p.vs = vsMain; p.ps = psVoxiGbuf;
         p.depth = {true, false, rhi::CompareOp::LessEqual};
-        scenePsoPrepassedGbuf_ = res_->createGraphicsPipeline(p);
+        out.scenePsoPrepassedGbuf_ = b.createGraphicsPipeline(p);
     }
 
     if (rtOk && vsMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psRt;
         p.depth = {true, false, rhi::CompareOp::LessEqual};
-        sceneRtPsoPrepassed_ = res_->createGraphicsPipeline(p);
+        out.sceneRtPsoPrepassed_ = b.createGraphicsPipeline(p);
     }
 
     if (rtOk && vsMain && psRtGbuf) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
         p.vs = vsMain; p.ps = psRtGbuf;
         p.depth = {true, false, rhi::CompareOp::LessEqual};
-        sceneRtPsoPrepassedGbuf_ = res_->createGraphicsPipeline(p);
+        out.sceneRtPsoPrepassedGbuf_ = b.createGraphicsPipeline(p);
     }
 
 }
@@ -7585,7 +7585,8 @@ bool VoxiRenderer::shaderBuildProgress(u32& done, u32& total) const {
 // synchronous mode built and adopted before this returns.
 void VoxiRenderer::requestBuild(unsigned group) {
     lazyRequested_ |= group;
-    if (!asyncBuilds_) pumpBuilds(true);
+    // Mid-frame in synchronous mode: build what was asked for, but leave the scene set to the next boundary.
+    if (!asyncBuilds_) pumpBuilds(true, false);
 }
 
 void VoxiRenderer::startBuild(unsigned groups) {
@@ -7630,11 +7631,11 @@ void VoxiRenderer::startBuild(unsigned groups) {
 
 // What is due now: the scene set again when the targets, the material graphs or the shader text moved from
 // what the last one was recorded against, and the lazy groups something asked for. Frame boundary only.
-void VoxiRenderer::startDueBuilds() {
+void VoxiRenderer::startDueBuilds(bool sceneDue) {
     const u64 graphRev = pbr::materialGraphs().revision();
     const u64 shaderRev = rhi::shaderFileRevision();
     const bool targetsMoved = recSamples_ != wantSamples_ || recColor_ != wantColor_ || recDepth_ != wantDepth_;
-    if (targetsMoved || scenePipelineGraphRev_ != graphRev || scenePipelineShaderRev_ != shaderRev) {
+    if (sceneDue && (targetsMoved || scenePipelineGraphRev_ != graphRev || scenePipelineShaderRev_ != shaderRev)) {
         if (targetsMoved)
             AVER_INFO("[Voxi] rebuilding scene pipelines for the new render targets ({} sample(s))", wantSamples_);
         else if (scenePipelineGraphRev_ != graphRev)
@@ -7657,7 +7658,7 @@ void VoxiRenderer::startDueBuilds() {
 
 // Adopts what finished and starts what is due. `wait` blocks until every build has landed (init, synchronous
 // mode, buildAllVariants); the frame boundary never waits.
-void VoxiRenderer::pumpBuilds(bool wait) {
+void VoxiRenderer::pumpBuilds(bool wait, bool sceneDue) {
     if (!initialised_ || failed_ || !res_) return;
     for (;;) {
         for (usize i = 0; i < builds_.size();) {
@@ -7670,7 +7671,7 @@ void VoxiRenderer::pumpBuilds(bool wait) {
             if (failed_) break;
         }
         if (failed_) break;
-        startDueBuilds();
+        startDueBuilds(sceneDue);
         if (!wait || builds_.empty()) break;
     }
     refreshReady();

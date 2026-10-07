@@ -240,8 +240,8 @@ private:
     void recordPtTwins(rhi::IPipelineBatch& b, PsoLocal& out);
     void recordNrd2Pipelines(rhi::IPipelineBatch& b, Build& bd);
     void startBuild(unsigned groups);
-    void startDueBuilds();
-    void pumpBuilds(bool wait);
+    void startDueBuilds(bool sceneDue);
+    void pumpBuilds(bool wait, bool sceneDue = true);
     void adoptBuild(Build& bd);
     void validateCore();
     void refreshReady();

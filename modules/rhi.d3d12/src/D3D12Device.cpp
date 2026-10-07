@@ -7361,6 +7361,10 @@ PipelineHandle D3D12ResourceFactory::createComputePipeline(const ComputePipeline
 
 // The pipeline-state creation, for the calling thread or a build worker (see the declaration).
 bool D3D12ResourceFactory::buildComputePipeline(const ComputePipelineDesc& d, const RhiShader* cs, RhiPipeline& p) {
+    if (!cs || cs->stage != ShaderStage::Compute) {
+        AVER_ERROR("[RHI.D3D12] createComputePipeline given a handle that is not a compute shader");
+        return false;
+    }
     const RootSigEntry* rs = rootSignature(d.layout, false);
     if (!rs) return false;
     p.compute = true;
@@ -7532,22 +7536,14 @@ private:
         ++p.remaining;
     }
 
-    // The caller's big strings (the shader source, the prelude) are handed in by the same pointer over and
-    // over; keep one immutable copy per distinct text.
+    // The caller's big strings (the shader source, the prelude) are handed in over and over; keep one immutable
+    // copy per distinct text. Compared in full: a caller may rewrite a buffer in place between requests.
     std::shared_ptr<const std::string> intern(const char* text) {
         if (!text) return nullptr;
         const usize n = std::strlen(text);
         for (auto& [ptr, str] : s_->interned) {
-            if (str->size() != n) continue;
-            if (ptr == text) {
-                // Same address, same length: check a few windows rather than every byte.
-                const usize w = n < 64 ? n : 64;
-                if (std::memcmp(str->data(), text, w) == 0 && std::memcmp(str->data() + n - w, text + n - w, w) == 0 &&
-                    std::memcmp(str->data() + n / 2 - w / 2, text + n / 2 - w / 2, w) == 0)
-                    return str;
-            } else if (std::memcmp(str->data(), text, n) == 0) {
-                return str;
-            }
+            (void)ptr;
+            if (str->size() == n && std::memcmp(str->data(), text, n) == 0) return str;
         }
         auto str = std::make_shared<const std::string>(text, n);
         s_->interned.emplace_back(text, str);
