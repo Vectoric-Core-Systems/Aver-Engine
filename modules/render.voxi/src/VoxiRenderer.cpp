@@ -4973,6 +4973,9 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             if (gx && gy) ctx.dispatch(gx, gy, 1);
             stageEndBuffer(rdShadowTileBuf_);
         }
+        // The shadow stage reads the probe's tiles; CSRdGiTrace (G1) does not, so it is recorded after this barrier
+        // and overlaps the shadow stage, its own barrier waiting until CSRdGi reads gRdGiCand.
+        if (shadowTiles) ctx.uavBarrierBuffer(rdShadowTileBuf_);
         // G1: CSRdGiTrace, writing gRdGiCand (u17) -- compacted to the traced half's pixels alone in
         // checkerboard mode (giCb), the identical parity bit CSRdGi's own checkerboard dispatch below
         // carries. Copied here rather than shared.
@@ -5004,10 +5007,6 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             if (g1x && gy) ctx.dispatch(g1x, gy, 1);
             stageEndBuffer(rdGiCandBuf_);
         }
-        // Barriers between S1/G1 and their readers.
-        if (shadowTiles) ctx.uavBarrierBuffer(rdShadowTileBuf_);
-        if (giSplit) ctx.uavBarrierBuffer(rdGiCandBuf_);
-
         stageBegin("Voxi RD shadow stage");
         ctx.setPipeline(shadowTiles ? rdShadowTiledCsPso_ : rdShadowCsPso_);
         ctx.setBindingSet(bindings_);
@@ -5015,6 +5014,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         ctx.setBindlessTable(rtTexTable_);
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
         if (gx && gy) ctx.dispatch(gx, gy, 1);
+        if (giSplit) ctx.uavBarrierBuffer(rdGiCandBuf_);   // G1's candidates, for CSRdGi below
         // CSRdTailVis reads CSRdShadow's exact light (gRdLocalOut.x) and depth (gRdSunVisTex.a), then writes the tail's
         // shadow fraction (gRdLocalOut.a, next frame's lamp history).
         if (localLights && rdTailVisCsPso_ && rdLocalOutThisFrame_ && gx && gy) {
