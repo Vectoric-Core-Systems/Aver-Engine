@@ -5009,6 +5009,9 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     const u32 dispatchH = curSceneViewport_[3] > 0.0f ? static_cast<u32>(curSceneViewport_[3]) : 0u;
     const u32 gx = (dispatchW + 7u) / 8u;   // every staged compute stage declares [numthreads(8,8,1)]
     const u32 gy = (dispatchH + 7u) / 8u;
+    // Wave-coherent half rate (voxi.hlsl rdHrThread): gViewParams.w bit 20, and twice the groups over 16-wide blocks.
+    constexpr u32 kHrCoherentBit = 1u << 20;
+    const u32 hrGx = 2u * ((dispatchW + 15u) / 16u);
 
     // Row pitch rides viewParams.w for these uploads only.
     cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);
@@ -5092,6 +5095,26 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     // PATH TRACING: the AVER_PT_PATHS twins take the GI-candidate and reflection dispatches.
     const bool pt = pathTracingWanted();
     bool skyOccRan = false, reflRan = false;   // CSRdHalfFill's inputs
+    const bool tailOn = localLights && rdTailVisCsPso_ && rdTailFilterCsPso_ && rdLocalOutThisFrame_ && gx && gy;
+    const bool tailDeferred = tailOn && !perStage;
+    auto recordTailVis = [&] {
+        ctx.setPipeline(rdTailVisCsPso_);
+        ctx.setBindingSet(bindings_);
+        ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+        ctx.setBindlessTable(rtTexTable_);
+        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+        ctx.dispatch(((dispatchW + 1u) / 2u + 7u) / 8u, ((dispatchH + 1u) / 2u + 7u) / 8u, 1);
+    };
+    auto recordTailFilter = [&] {
+        ctx.setPipeline(rdTailFilterCsPso_);
+        ctx.setBindingSet(bindings_);
+        ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+        ctx.setBindlessTable(rtTexTable_);
+        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+        ctx.dispatch(gx, gy, 1);
+        rdLocalHistFrame_ = rtFrameIndex_;
+        rdLocalHistHash_ = rdLocalLightHash_;
+    };
     {
         // Wraps every dispatch below -- see this function's comment on why no barrier or timestamp
         // sits between the four lighting stages (S1/G1 just below are the one exception).
@@ -5208,28 +5231,21 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         if (localLights && gx && gy) rdKeyFrame_ = rtFrameIndex_;
         if (giSplit) ctx.uavBarrierBuffer(rdGiCandBuf_);   // G1's candidates, for CSRdGi below
         // CSRdTailVis reads CSRdShadow's exact light (gRdLocalOut.x) and depth (gRdSunVisTex.a), then writes the tail's
-        // shadow fraction (gRdLocalOut.a, next frame's lamp history); CSRdTailFilter its 5x5 (.z).
-        if (localLights && rdTailVisCsPso_ && rdTailFilterCsPso_ && rdLocalOutThisFrame_ && gx && gy) {
+        // shadow fraction (gRdLocalOut.a, next frame's lamp history); CSRdTailFilter its 5x5 (.z). GI, sky occlusion and
+        // reflections read neither, so outside per-stage timing TailVis shares their barrier-free group and the filter
+        // runs after it (with CSRdHalfFill).
+        if (tailOn && !tailDeferred) {
             stageEnd(rdSunVisTex_);
             stageBegin("Voxi RD tail lights");
             ctx.uavBarrierTexture(rdLocalOutThisFrame_);
             ctx.uavBarrierTexture(rdSunVisTex_);
-            ctx.setPipeline(rdTailVisCsPso_);
-            ctx.setBindingSet(bindings_);
-            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
-            ctx.setBindlessTable(rtTexTable_);
-            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-            ctx.dispatch(((dispatchW + 1u) / 2u + 7u) / 8u, ((dispatchH + 1u) / 2u + 7u) / 8u, 1);
-            // The 5x5 reads the neighbours' fractions.
+            recordTailVis();
+            ctx.uavBarrierTexture(rdLocalOutThisFrame_);   // the 5x5 reads the neighbours' fractions
+            recordTailFilter();
+        } else if (tailDeferred) {
             ctx.uavBarrierTexture(rdLocalOutThisFrame_);
-            ctx.setPipeline(rdTailFilterCsPso_);
-            ctx.setBindingSet(bindings_);
-            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
-            ctx.setBindlessTable(rtTexTable_);
-            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-            ctx.dispatch(gx, gy, 1);
-            rdLocalHistFrame_ = rtFrameIndex_;
-            rdLocalHistHash_ = rdLocalLightHash_;
+            ctx.uavBarrierTexture(rdSunVisTex_);
+            recordTailVis();
         }
         if (perStage && rdLocalOutThisFrame_) ctx.uavBarrierTexture(rdLocalOutThisFrame_);   // the light slots
         stageEnd(rdSunVisTex_);
@@ -5254,15 +5270,18 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
+            // NRD2 frames: wave-coherent checkerboard (bit 20, voxi.hlsl rdHrThread), twice the groups in X.
+            const bool giCoherent = giCb && nrd2Frame_;
             if (giCb) {
                 // Bit 16 carries the checkerboard parity, for this one upload only.
-                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | (giCbParityWritten_ << 16));
+                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | (giCbParityWritten_ << 16) |
+                                                     (giCoherent ? kHrCoherentBit : 0u));
                 ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
                 cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);   // restore before any later upload
             } else {
                 ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
             }
-            if (gx && gy) ctx.dispatch(gx, gy, 1);
+            if (gx && gy) ctx.dispatch(giCoherent ? hrGx : gx, gy, 1);
             stageEnd(rdGiTex_);
         }
         // Reference path tracing: one path per pixel into gRdGiTex, which Stage B shades the pixel with.
@@ -5289,8 +5308,11 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
+            const bool aoCoherent = nrd2Frame_ && (static_cast<u32>(cb_.giShadowParams[3]) & 128u) != 0u;
+            if (aoCoherent) cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | kHrCoherentBit);
             ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-            if (gx && gy) ctx.dispatch(gx, gy, 1);
+            cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);
+            if (gx && gy) ctx.dispatch(aoCoherent ? hrGx : gx, gy, 1);
             stageEnd(rdAoTex_);
         }
 
@@ -5307,8 +5329,11 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
+            const bool reflCoherent = nrd2Frame_ && !reflSplit && (static_cast<u32>(cb_.giShadowParams[3]) & 4u) != 0u;
+            if (reflCoherent) cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | kHrCoherentBit);
             ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-            if (gx && gy) ctx.dispatch(gx, gy, 1);
+            cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);
+            if (gx && gy) ctx.dispatch(reflCoherent ? hrGx : gx, gy, 1);
             stageEnd(rdReflTex_);
         }
         if (!perStage) ctx.popMarker();
@@ -5347,6 +5372,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     if (cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f && giSurfNrmHist_[giNrmWrite])
         ctx.uavBarrierTexture(giSurfNrmHist_[giNrmWrite]);
 
+    bool tailFilterPending = tailDeferred;   // after the group's barriers above; shares CSRdHalfFill's group
     // NRD2 half rate: CSRdHalfFill fills each skipped checkerboard half from this frame's traced one.
     if (nrd2Frame_ && rdHalfFillCsPso_ && gx && gy) {
         const u32 hrBits = static_cast<u32>(cb_.giShadowParams[3]);
@@ -5357,6 +5383,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             rhi::ScopedGpuStat stat(ctx, "Voxi RD half-rate fill");
             ctx.uavBarrierTexture(nrd2_.targets().diffuse);    // CSRdShadow's normal guide (u3)
             ctx.uavBarrierTexture(nrd2_.targets().specular);   // CSRdRefl's skip marks and hit distances (u23)
+            if (tailFilterPending) { recordTailFilter(); tailFilterPending = false; }
             ctx.setPipeline(rdHalfFillCsPso_);
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
@@ -5372,6 +5399,9 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             if (fillRefl) ctx.uavBarrierTexture(rdReflTex_);
         }
     }
+
+    if (tailFilterPending) recordTailFilter();
+    if (tailDeferred) ctx.uavBarrierTexture(rdLocalOutThisFrame_);   // the filtered fractions, for Stage B
 
     // Sub-stage C, R2: CSRdReflFilter -- reruns rtReflectionSpatial against R1's gRtReflHistOut write.
     if (reflSplit) {
