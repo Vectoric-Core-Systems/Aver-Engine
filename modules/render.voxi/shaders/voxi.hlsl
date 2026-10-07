@@ -732,6 +732,17 @@ void rdTailLightsSplit(AverSurface s, float3 wpos, uint e0, float vis, inout flo
 // it's in scope before every stage that decodes a pitch.
 uint rdRowPitch() { return (uint)gViewParams.w & 0xFFFFu; }
 
+// Wave-coherent half rate (gViewParams.w bit 20, set for CSRdRefl / CSRdSkyOcc / CSRdGi's checkerboard dispatch only):
+// the grid has 2*ceil(w/16) groups in X and group 2p+q takes the pixels of the 16x8 block p whose
+// ((x ^ y ^ f) & 1) == q, so a wave never mixes traced and skipped pixels and a skipped wave exits early.
+bool rdHrCoherent() { return (((uint)gViewParams.w >> 20) & 1u) != 0u; }
+uint2 rdHrThread(uint3 gid, uint gidx, uint f) {
+    const uint ty = gid.y * 8u + (gidx >> 3u);
+    const uint2 org = (uint2)gSceneViewportCur.xy;
+    const uint tx = (gid.x >> 1u) * 16u + 2u * (gidx & 7u) + (((gid.x & 1u) ^ f ^ org.x ^ org.y ^ ty) & 1u);
+    return uint2(tx, ty);
+}
+
 // The surface PSRayDriven reconstructs from a ray hit, minus what the hit itself already computed (bary,
 // dir, pre-flip N): what Stage S/Stage B's AVER_RD_SPLIT branch both need, nothing more -- dpx/dpy (the
 // shadow-ray footprint) and L (the light direction) are cheap and hit-independent, so each caller computes
@@ -2765,9 +2776,13 @@ void CSRdGiTrace(uint3 tid : SV_DispatchThreadID) {
 // MILESTONE 4: Also compiled with AVER_GI_CHECKERBOARD=1 (half-rate GI).
 // Skip decided here (gGiCbSkip); changes live inside giRestirIndirect.
 [numthreads(8, 8, 1)]
-void CSRdGi(uint3 tid : SV_DispatchThreadID) {
-    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
-    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+void CSRdGi(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gidx : SV_GroupIndex) {
+    uint2 t = tid.xy;
+#if AVER_GI_CHECKERBOARD
+    if (rdHrCoherent()) t = rdHrThread(gid, gidx, ((uint)gViewParams.w >> 16) & 1u);
+#endif
+    if (any(t >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + t;
 
     const uint pitch = rdRowPitch();
     if (pitch == 0u) return;
@@ -2819,9 +2834,11 @@ void CSRdGi(uint3 tid : SV_DispatchThreadID) {
 // Same pixel-centre argument, same AO history pair and denoiser hand-off.
 // Compiled at SM 6.6 (derivative intrinsics in rtAoSpatial require 8x8 threads in 2x2 quads).
 [numthreads(8, 8, 1)]
-void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID) {
-    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
-    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gidx : SV_GroupIndex) {
+    uint2 t = tid.xy;
+    if (rdHrCoherent()) t = rdHrThread(gid, gidx, (uint)gRtHistParams.z);
+    if (any(t >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + t;
 
     const uint pitch = rdRowPitch();
     if (pitch == 0u) return;
@@ -2935,9 +2952,11 @@ void rdDenoisedReflection(float3 wpos, float hitT, inout float3 refl) {
 #define AVER_RD_REFL_SPLIT 0
 #endif
 [numthreads(8, 8, 1)]
-void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
-    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
-    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+void CSRdRefl(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gidx : SV_GroupIndex) {
+    uint2 t = tid.xy;
+    if (rdHrCoherent()) t = rdHrThread(gid, gidx, (uint)gRtHistParams.z);
+    if (any(t >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + t;
 
     const uint pitch = rdRowPitch();
     if (pitch == 0u) return;

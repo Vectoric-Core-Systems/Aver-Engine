@@ -5046,6 +5046,9 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     const u32 dispatchH = curSceneViewport_[3] > 0.0f ? static_cast<u32>(curSceneViewport_[3]) : 0u;
     const u32 gx = (dispatchW + 7u) / 8u;   // every staged compute stage declares [numthreads(8,8,1)]
     const u32 gy = (dispatchH + 7u) / 8u;
+    // Wave-coherent half rate (voxi.hlsl rdHrThread): gViewParams.w bit 20, and twice the groups over 16-wide blocks.
+    constexpr u32 kHrCoherentBit = 1u << 20;
+    const u32 hrGx = 2u * ((dispatchW + 15u) / 16u);
 
     // Row pitch rides viewParams.w for these uploads only.
     cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);
@@ -5303,15 +5306,18 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
+            // NRD2 frames: wave-coherent checkerboard (bit 20, voxi.hlsl rdHrThread), twice the groups in X.
+            const bool giCoherent = giCb && nrd2Frame_;
             if (giCb) {
                 // Bit 16 carries the checkerboard parity, for this one upload only.
-                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | (giCbParityWritten_ << 16));
+                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | (giCbParityWritten_ << 16) |
+                                                     (giCoherent ? kHrCoherentBit : 0u));
                 ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
                 cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);   // restore before any later upload
             } else {
                 ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
             }
-            if (gx && gy) ctx.dispatch(gx, gy, 1);
+            if (gx && gy) ctx.dispatch(giCoherent ? hrGx : gx, gy, 1);
             stageEnd(rdGiTex_);
         }
         // Reference path tracing: one path per pixel into gRdGiTex, which Stage B shades the pixel with.
@@ -5338,8 +5344,11 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
+            const bool aoCoherent = nrd2Frame_ && (static_cast<u32>(cb_.giShadowParams[3]) & 128u) != 0u;
+            if (aoCoherent) cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | kHrCoherentBit);
             ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-            if (gx && gy) ctx.dispatch(gx, gy, 1);
+            cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);
+            if (gx && gy) ctx.dispatch(aoCoherent ? hrGx : gx, gy, 1);
             stageEnd(rdAoTex_);
         }
 
@@ -5356,8 +5365,11 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
+            const bool reflCoherent = nrd2Frame_ && !reflSplit && (static_cast<u32>(cb_.giShadowParams[3]) & 4u) != 0u;
+            if (reflCoherent) cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | kHrCoherentBit);
             ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-            if (gx && gy) ctx.dispatch(gx, gy, 1);
+            cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);
+            if (gx && gy) ctx.dispatch(reflCoherent ? hrGx : gx, gy, 1);
             stageEnd(rdReflTex_);
         }
         if (!perStage) ctx.popMarker();
