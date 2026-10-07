@@ -806,11 +806,6 @@ RdLightRange rdLightsAt(float3 pos) {
         return r;
     }
     const AverLightRec h = gRdLocalLights[hdr];
-    if (h.shape.y > 0.5) {   // a short list, walked whole: the same light in every lane at once (a uniform load)
-        r.count = (uint)(h.shape.y + 0.5);
-        r.cellStart = 0xFFFFFFFFu;
-        return r;
-    }
     r.globals = (uint)(h.axisKind.w + 0.5);
     r.g0 = (uint)max(h.axisKind.x, 0.0); r.g1 = (uint)max(h.axisKind.y, 0.0); r.g2 = (uint)max(h.axisKind.z, 0.0);
     r.count = r.globals;
