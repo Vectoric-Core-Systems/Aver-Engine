@@ -643,6 +643,31 @@ private:
     bool rdGridCacheValid_ = false;
     u64 rdGridKeyNow_ = 0;                       // this frame's grid key (0 = no grid)
     u64 rdGridSlotKey_[kRtInstanceRing] = {};     // grid key each upload ring slot already holds
+    // The light grid built once in canonical (byte) light order. A frame whose list only reorders the same lights (the
+    // list is importance-ordered from the camera) deals the cached cells out through the new list indices (fill())
+    // instead of rebuilding them: same table, same pool, same order within every cell.
+    struct LightGridCanon {
+        bool valid = false;
+        f32 lo[3] = {}, cell = 0.0f;
+        u32 dim[3] = {};
+        std::vector<RdLocalLight> lights;   // non-directional lights, sorted by bytes
+        std::vector<u32> slots;             // open addressing over identical-light runs: first canonical id + 1, 0 = empty
+        std::vector<u32> runLen;            // per canonical id: length of the identical-light run it starts
+        std::vector<u32> box;               // 6 per canonical id: cell range, c0 > c1 = not in the grid
+        std::vector<u32> cellN;             // lights covering each cell
+        std::vector<u32> cursorInit;        // pool offset per cell, kLarge for cells that keep a cut list
+        std::vector<u32> largeCells;        // cells with more than kMaxLightsPerCell lights
+        std::vector<u32> bigOff, bigCnt;    // per cell: stored cut list (bigOff into big)
+        std::vector<std::pair<f32, u32>> big;   // (importance, canonical id): best first, plus any tied with the cut
+        std::vector<f32> table, pool;       // pool is rewritten by fill()
+        std::vector<u32> poolOff, canonOf, listOf, used, cursor;
+        std::vector<std::pair<f32, u32>> cut;
+        static constexpr u32 kLarge = 0xFFFFFFFFu;
+        bool build(const RdLocalLight* lights, u32 lightCount, const f32 lo[3], f32 cell, const u32 dim[3]);
+        bool fill(const RdLocalLight* lights, u32 lightCount, const f32 lo[3], f32 cell, const u32 dim[3]);
+    };
+    LightGridCanon rdGridCanon_;
+    u64 rdGridLastSet_ = 0;                      // order-independent hash of the last frame's grid lights
     // True when every light-flagged draw made the list (none cut by 32-light cap); allows GI to omit lamp emission.
     bool rdLocalLightsCarryAll_ = false;
     struct RdLocalLightCand {
@@ -797,6 +822,9 @@ private:
     // The instance-table upload and TLAS/dynamic-BLAS refit a prePass mover patch left to the late pass
     // (wantsLateScenePass); held until latePatchMovers or a prePass that cannot defer runs them.
     bool rtRefitDeferred_ = false;
+    // rtFrameIndex_ of the frame whose prePass already refitted the dynamic BLASes: their vertices are final by then,
+    // so the late pass refits only the TLAS.
+    u32 rtDynBlasRefitFrame_ = 0;
     // Late scene pass: brings movers to THIS frame's transforms before anything traces (D3D12).
     void latePatchMovers(rhi::IRenderContext& ctx);
     // Two facts about the list recorded as each draw appends and swapped by beginScene().
