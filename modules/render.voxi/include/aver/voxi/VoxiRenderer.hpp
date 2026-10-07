@@ -623,6 +623,7 @@ private:
     // At most this many per frame, sorted by 1-metre irradiance over max(distance², 1).
     static constexpr u32 kMaxLocalLights = 32;      // the raster path's working set (shaders' AVER_LIGHT_LIST_MAX)
     static constexpr u32 kMaxListLights = 4000;     // every emitter, up to this (UNIFIED_LIGHTS.md phase 3)
+    static constexpr u32 kFlatLightList = 48;       // up to this many lights, every point walks the whole list
     static constexpr u32 kMaxLightsPerCell = 24;    // a light-grid cell keeps its most important lights
     static constexpr u32 kLightGridMaxDim = 32;     // cells per axis
     static constexpr f32 kLightGridHalfExtent = 20000.0f;   // cm around the camera
