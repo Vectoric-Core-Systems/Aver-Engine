@@ -3824,6 +3824,8 @@ void VoxiRenderer::buildLocalLights() {
     rdLocalLightData_.clear();
     rdLocalLightCand_.clear();
     cb_.decalParams[1] = 0.0f;   // no light grid until one is uploaded
+    cb_.decalParams[2] = static_cast<f32>(std::clamp(settings_.lightRaysPerPixel, 1u, 8u));
+    cb_.decalParams[3] = static_cast<f32>(std::clamp(settings_.lightRaysPerHit, 1u, 8u));
     rdGridKeyNow_ = 0;
     if (!res_ || !bindings_) return;
 

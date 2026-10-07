@@ -113,3 +113,28 @@ the exact set from those slots and adds the tail.
   own glow at hits; `rdLocalLightsCarryAll_` holds whenever every flagged lamp is listed.
 - **Not done:** the `rtShadowTemporal*` sun-only kernels and `rdLocalLightsVisibility` stay (raster uses them);
   the stratified picks stay for the raster loops. Nothing here has been rendered yet.
+
+## Ray budget (2026-10-07)
+
+Every light traced every frame (`df91ecd7`) fixed the flicker but cost 85 ms a frame at NewSponza Night's default
+view (v0.6.0: 14.8 ms). The budget keeps the rule that fixed it, **no light picked at random**:
+- **Visible surface:** the exact light keeps the sun's kernel. The strongest tail lights (up to
+  4 x `voxi.lightRaysPerPixel`, at most 8) are dealt round each 2x2 pixel block in a fixed pattern, one ray each per
+  frame; Stage B's 5x5 depth-aware filter joins the block. The rest share their irradiance-weighted visibility.
+  History follows the sun's rule (0.9 at rest, 0.5 by 32 px/frame, 0.35 where the shadow changed; bilinear read, no
+  3x3 box), which removed the trailing of lamp light behind camera moves.
+- **Hits (GI, reflection, path):** the strongest `voxi.lightRaysPerHit` lights get their own ray; the rest share
+  their visibility, diffuse-only on rough non-metals; lights under 1/32 of the strongest skipped.
+- **Ranking** uses the cheap sphere estimate (`rdLightWeight`); shading stays exact.
+
+Measured (RX 7800 XT, NewSponza Night default view, scale 0.5, still, GPU ms):
+
+| Build | Shadow stage | GI trace | Reflection | Total |
+|---|---|---|---|---|
+| v0.6.0 | 1.5 (incl. lamp pass) | 3.1 | 1.5 | 14.8 |
+| every light traced | 28.7 | 24.1 | 20.5 | 85.5 |
+| top 6 / 3, no interleave | 17.3 | 10.0 | 8.1 | 45.1 |
+| interleaved 2 / 1 (default) | 14.2 | 6.5 | 4.9 | 35.4 |
+| interleaved 1 / 1 | 10.2 | 6.5 | 5.0 | 31.5 |
+
+A lamp ray costs about 3 ms per pixel here (long, incoherent rays); the exact light's ray about 2 ms.

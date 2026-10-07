@@ -826,6 +826,33 @@ uint rdLightIndex(RdLightRange r, uint k) {
     return (uint)(rdListFloat(r.cellStart + k - r.globals) + 0.5);
 }
 
+// THE RAY BUDGET (UNIFIED_LIGHTS.md): the n-th largest of up to 8 weights, kept sorted in registers (fully unrolled
+// compare-swaps, no indexed array). Lights at or above it get their own shadow ray.
+struct RdTopWeights { float t0, t1, t2, t3, t4, t5, t6, t7; };
+RdTopWeights rdTopInit() { RdTopWeights r; r.t0 = r.t1 = r.t2 = r.t3 = r.t4 = r.t5 = r.t6 = r.t7 = 0.0; return r; }
+void rdTopAdd(inout RdTopWeights r, float w) {
+    float x = w, h;
+    h = max(r.t0, x); x = min(r.t0, x); r.t0 = h;
+    h = max(r.t1, x); x = min(r.t1, x); r.t1 = h;
+    h = max(r.t2, x); x = min(r.t2, x); r.t2 = h;
+    h = max(r.t3, x); x = min(r.t3, x); r.t3 = h;
+    h = max(r.t4, x); x = min(r.t4, x); r.t4 = h;
+    h = max(r.t5, x); x = min(r.t5, x); r.t5 = h;
+    h = max(r.t6, x); x = min(r.t6, x); r.t6 = h;
+    r.t7 = max(r.t7, x);
+}
+float rdTopNth(RdTopWeights r, uint n) {
+    return n <= 1u ? r.t0 : n == 2u ? r.t1 : n == 3u ? r.t2 : n == 4u ? r.t3
+         : n == 5u ? r.t4 : n == 6u ? r.t5 : n == 7u ? r.t6 : r.t7;
+}
+// How many of the 8 kept weights are above x.
+uint rdTopCountAbove(RdTopWeights r, float x) {
+    return (uint)(r.t0 > x) + (uint)(r.t1 > x) + (uint)(r.t2 > x) + (uint)(r.t3 > x)
+         + (uint)(r.t4 > x) + (uint)(r.t5 > x) + (uint)(r.t6 > x) + (uint)(r.t7 > x);
+}
+uint rdLightRaysPerPixel() { return clamp((uint)(gDecalParams.z + 0.5), 1u, 8u); }
+uint rdLightRaysPerHit()   { return clamp((uint)(gDecalParams.w + 0.5), 1u, 8u); }
+
 // True when this pass's visible-surface lamp visibility exists (bit 4). The list itself is always published.
 bool rdLocalLampsLive() { return ((uint)(gCameraMedium.w + 0.5) & 4u) != 0u; }
 // True when an emitter a ray hit at `hitPos` is one of the listed lamps (inside its bounding sphere): its light is
@@ -1296,9 +1323,18 @@ void rdResetShadowLight() {
 // it is the cheap sphere estimate (range window, inverse square, N.L to the centre, spot cone) without IES,
 // cookies or the rectangle's form factor: two loops over 32 lights per pixel. A rectangle keeps N.L >= 0.1
 // while the receiver faces it, since part of it can be above the horizon when the centre is not.
+float rdLightWeight(RdLocalLight l, float3 wpos, float3 N);
 float rdLocalPickWeight(RdLocalLight l, float3 wpos, float3 N) {
-    // UNIFIED_LIGHTS phase 1: the visible surface still lights the directional entry its old way (gRdSunVisTex).
+    // The raster lamp loops leave the directional entry to the sun's own path (gRdSunVisTex).
     if (aversLightNoShadow(l) || aversLightKind(l) == AVER_LIGHT_DIRECTIONAL) return 0.0;
+    return rdLightWeight(l, wpos, N);
+}
+// A light's ranking weight at a point (UNIFIED_LIGHTS.md "Ray budget"): the cheap sphere estimate of its irradiance
+// (range window, inverse square, N.L to the centre, spot cone), without IES, cookies or the rectangle's form factor.
+// Every loop that only RANKS lights uses it; the shading evaluates each light exactly.
+float rdLightWeight(RdLocalLight l, float3 wpos, float3 N) {
+    if (aversLightKind(l) == AVER_LIGHT_DIRECTIONAL)
+        return averShadowLum(l.radianceRange.rgb) * saturate(dot(N, normalize(l.axisKind.xyz)));
     const float3 toC   = l.posRadius.xyz - wpos;
     const float  d2    = dot(toC, toC);
     const float  range = l.radianceRange.w;

@@ -900,7 +900,8 @@ private:
         f32 viewParams[4] = {};
         // ReSTIR GI control: x = running, y = history valid, z = write buffer slice, w = poison debug view.
         f32 giRestirParams[4] = {};
-        // x = projected decals in t24 (0 = every decal call is skipped); y = light-grid header record in t18 (0 = none).
+        // x = projected decals in t24 (0 = every decal call is skipped); y = light-grid header record in t18 (0 = none);
+        // z, w = shadow rays per pixel / per hit for the light list (Settings::lightRaysPerPixel / PerHit).
         f32 decalParams[4] = {};
     } cb_;
 

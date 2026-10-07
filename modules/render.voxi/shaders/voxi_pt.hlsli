@@ -153,26 +153,50 @@ float3 averLightVisibility(RdLocalLight ll, float3 pos, float3 N, float2 pixel, 
 
 float3 averDirectLights(AverSurface s, float3 pos, float2 pixel, inout uint rng, bool allowMap) {
 #if AVER_RD_LAMPS
-    // EVERY LIGHT THE SUN'S WAY: exact shading and its own shadow ray, nothing picked at random. Lights under 1/512
-    // of the strongest here are skipped (under 0.2% each). One visibility call in the loop: each call site inlines
-    // the whole shadow kernel (three took the path tracer's compile over 10 minutes).
+    // EVERY LIGHT THE SUN'S WAY, within a ray budget: every light is shaded exactly; the strongest lightRaysPerHit get
+    // their own shadow ray and the rest take those rays' irradiance-weighted visibility. Nothing is picked at random.
+    // Lights under 1/32 of the strongest are skipped (indirect light, attenuated by the hit's albedo); the shared
+    // ones on a rough non-metal are shaded diffuse-only. One shading and one visibility call site in the loop: each
+    // visibility call inlines the whole shadow kernel (three took the path tracer's compile over 10 minutes).
     const RdLightRange lr = rdLightsAt(pos);
-    float wMax = 0.0;
-    [loop] for (uint k = 0u; k < lr.count; ++k)
-        wMax = max(wMax, averShadowLum(aversLightIrradiance(gRdLocalLights[rdLightIndex(lr, k)], pos, s.N)));
-    const float floorW = wMax * (1.0 / 512.0);
-    float3 sum = float3(0.0, 0.0, 0.0);
+    RdTopWeights top = rdTopInit();
     [loop] for (uint k = 0u; k < lr.count; ++k) {
-        const uint j = rdLightIndex(lr, k);
-        const RdLocalLight ll = gRdLocalLights[j];
-        if (!(averShadowLum(aversLightIrradiance(ll, pos, s.N)) > floorW)) continue;
+        const RdLocalLight ll = gRdLocalLights[rdLightIndex(lr, k)];
+        if (!aversLightNoShadow(ll)) rdTopAdd(top, rdLightWeight(ll, pos, s.N));
+    }
+    const float floorW = top.t0 * (1.0 / 32.0);
+    const float thr    = max(rdTopNth(top, rdLightRaysPerHit()), floorW);
+    const bool  cheap  = s.rough >= 0.5 && max(s.F0.x, max(s.F0.y, s.F0.z)) <= 0.08 && s.sssWeight <= 0.0 &&
+                         s.model != AVER_MODEL_UNLIT;
+    float3 traced = float3(0.0, 0.0, 0.0);   // lights with their own ray (or none needed), visibility applied
+    float3 rest   = float3(0.0, 0.0, 0.0);   // the others, unshadowed, scaled by the traced fraction below
+    float  sumW = 0.0, sumV = 0.0;
+    [loop] for (uint k = 0u; k < lr.count; ++k) {
+        const RdLocalLight ll = gRdLocalLights[rdLightIndex(lr, k)];
+        const bool  noShadow = aversLightNoShadow(ll);
+        const float w = rdLightWeight(ll, pos, s.N);   // ranking only; ptLampLight evaluates the light exactly
+        if (!(w > floorW) && !noShadow) continue;
         AverLight   l;
         AverSurface sL;
+        if (cheap && !noShadow && w < thr) {
+            float srcR;
+            if (!aversLightEval(ll, pos, s.N, l.direction, l.radiance, srcR)) continue;
+            rest += s.kdAlbedo * (1.0 / PI) * l.radiance * saturate(dot(s.N, l.direction));
+            continue;
+        }
         if (!ptLampLight(ll, s, pos, l, sL) || dot(s.N, l.direction) <= 0.0) continue;
-        l.visibility = averLightVisibility(ll, pos, s.N, pixel, rng, allowMap);
-        sum = averShadeDirect(sum, sL, l);
+        const float3 c = averShadeDirect(float3(0.0, 0.0, 0.0), sL, l);   // l.visibility is 1 here
+        if (noShadow) { traced += c; continue; }
+        if (w >= thr) {
+            const float3 v = averLightVisibility(ll, pos, s.N, pixel, rng, allowMap);
+            traced += c * v;
+            sumW += w;
+            sumV += w * saturate(averShadowLum(v));
+        } else {
+            rest += c;
+        }
     }
-    return sum;
+    return traced + rest * (sumW > 0.0 ? sumV / sumW : 1.0);
 #else
     // No light list in this compile (single pass without lamps): nothing to light with.
     return float3(0.0, 0.0, 0.0);

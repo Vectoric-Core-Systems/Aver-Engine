@@ -907,6 +907,16 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "a staged-lit surface.",
         []{ return vBool(Renderer::get().settings().localLights); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->localLights = on; }); }});
+    t.push_back({"voxi.lightRaysPerPixel", VarType::U32, false,
+        "Shadow rays per pixel for the visible surface's lights besides its brightest (1-8): the strongest get their "
+        "own ray, the rest share those rays' visibility. Higher is more exact shadows from many lamps, slower.",
+        []{ return vU32(Renderer::get().settings().lightRaysPerPixel); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->lightRaysPerPixel = n; }); }});
+    t.push_back({"voxi.lightRaysPerHit", VarType::U32, false,
+        "Shadow rays per GI, reflection and path hit for the lights reaching it (1-8): the strongest get their own "
+        "ray, the rest share those rays' visibility.",
+        []{ return vU32(Renderer::get().settings().lightRaysPerHit); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->lightRaysPerHit = n; }); }});
     t.push_back({"voxi.rtSkipUnchangedTlas", VarType::Bool, false,
         "Skips the TLAS rebuild and instance/material table rewrite when nothing "
         "buildAccelerationStructures() reads from the draw list has changed since the last build -- "
