@@ -313,8 +313,9 @@ void rdLocalVisTap(int2 p, int2 lo, int2 hi, float zc, inout float sum, inout fl
     }
 }
 
-// Staged read of lamp visibility: 5x5 around pixel, weighted by view-depth similarity. Returns 1 if no surface.
-float rdLocalVisFiltered(uint2 pixel) {
+// The lamp shadow fraction's 5x5 around pixel, weighted by view-depth similarity; 1 if no surface. Run once per pixel
+// by CSRdTailFilter, which stores it in gRdLocalOut.z for rdLocalVisFiltered.
+float rdLocalVisFilter5x5(uint2 pixel) {
     const float zc = gRdSunVisTex[pixel].a;
     if (zc <= 0.0) return 1.0;
     const int2 lo = int2(gSceneViewportCur.xy);
@@ -329,6 +330,11 @@ float rdLocalVisFiltered(uint2 pixel) {
         }
     }
     return wsum > 0.0 ? sum / wsum : 1.0;
+}
+// The filtered lamp shadow fraction CSRdTailFilter stored (gRdLocalOut.z); 1 where none was (no surface, no tail).
+float rdLocalVisFiltered(uint2 pixel) {
+    const float z = gRdLocalOut[pixel].z;
+    return z >= 0.0 ? z : 1.0;
 }
 
 // ---- lamp HISTORY reads, at the continuous reprojected position ----
@@ -527,7 +533,7 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
     // Only .a is ever read back (rdLocalVisFiltered this frame; prevVisC and prevVisF, through
     // rdLocalHistFiltered, next frame); the shading re-evaluates each lamp itself, so the irradiance sum
     // is weights for the pick and nothing more.
-    if (writeHistory && gAverHistoryWrite) gRdLocalOut[pixel] = float4(0.0, 0.0, 0.0, histVis);
+    if (writeHistory && gAverHistoryWrite) gRdLocalOut[pixel] = float4(0.0, 0.0, -1.0, histVis);
     return vis;
 }
 
@@ -2566,9 +2572,9 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
 #endif
     rdResetShadowLight();
-    // gRdLocalOut = (exact light's index, its key, unused, tail shadow fraction). .a is filled by CSRdTailVis at
-    // quarter resolution; -1 until then (and where it leaves a pixel untraced, Stage B's 5x5 fills it).
-    gRdLocalOut[pixel] = float4(haveE0 ? (float)e0 : -1.0, haveE0 ? rdLightKey(gRdLocalLights[e0]) : -1.0, 0.0, -1.0);
+    // gRdLocalOut = (exact light's index, its key, filtered tail fraction, tail fraction). .a is filled by CSRdTailVis
+    // and .z by CSRdTailFilter (its 5x5); -1 until then, which readers take as unshadowed.
+    gRdLocalOut[pixel] = float4(haveE0 ? (float)e0 : -1.0, haveE0 ? rdLightKey(gRdLocalLights[e0]) : -1.0, -1.0, -1.0);
     // Primary surface linear view depth (for blended-replay reuse test).
     const float rdSunVisViewZ = mul(float4(s.wpos, 1.0), gViewProj).w;
     gRdSunVisTex[pixel] = float4(sunVis, rdSunVisViewZ);
@@ -2583,8 +2589,8 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
 // surface pixel ranks the lights reaching it (all but its exact light, gRdLocalOut.x from CSRdShadow); the strongest
 // lightRaysPerBlock get one ray each, every frame, nothing picked at random. Their irradiance-weighted unblocked share
 // is the tail's fraction, blended with history by the sun's rule (FidelityFX mode; NRD2 frames have none), and
-// written to every pixel of the block at the same depth; a pixel across an edge gets -1 and Stage B's depth-aware
-// 5x5 (rdLocalVisFiltered) fills it. Lights under 1/128 of the tail's total are skipped.
+// written to every pixel of the block at the same depth; a pixel across an edge gets -1 and CSRdTailFilter's
+// depth-aware 5x5 fills it. Lights under 1/128 of the tail's total are skipped.
 [numthreads(8, 8, 1)]
 void CSRdTailVis(uint3 tid : SV_DispatchThreadID) {
     const uint2 vp = (uint2)gSceneViewportCur.zw;
@@ -2664,6 +2670,19 @@ void CSRdTailVis(uint3 tid : SV_DispatchThreadID) {
         o.a = abs(zt - zc) <= zc * 0.03 + 1.0 ? vis : -1.0;
         gRdLocalOut[p] = o;
     }
+}
+
+// ---- STAGE S3: CSRdTailFilter -- the tail fraction's depth-aware 5x5, once per pixel, into gRdLocalOut.z ----
+// Stage B and the glass replay then read one texel (rdLocalVisFiltered) instead of 48. Each thread rewrites only its
+// own texel and leaves .a as it was, so the neighbours' .a it reads cannot change under it.
+[numthreads(8, 8, 1)]
+void CSRdTailFilter(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+    if (gRdSunVisTex[pixel].a <= 0.0) return;
+    float4 o = gRdLocalOut[pixel];
+    o.z = rdLocalVisFilter5x5(pixel);
+    gRdLocalOut[pixel] = o;
 }
 
 // ---- STAGE G0: CSRdGiTrace -- trace ReSTIR GI's fresh candidate for CSRdGi's resample --------

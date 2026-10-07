@@ -524,7 +524,8 @@ private:
     // ---- SUB-STAGE SPLITS ----
     rhi::PipelineHandle rdShadowProbeCsPso_ = 0;
     rhi::PipelineHandle rdShadowTiledCsPso_ = 0;
-    rhi::PipelineHandle rdTailVisCsPso_ = 0;   // CSRdTailVis: the tail lights' shadow fraction, quarter resolution
+    rhi::PipelineHandle rdTailVisCsPso_ = 0;      // CSRdTailVis: the tail lights' shadow fraction
+    rhi::PipelineHandle rdTailFilterCsPso_ = 0;   // CSRdTailFilter: its 5x5, into gRdLocalOut.z
     rhi::PipelineHandle rdGiTraceCsPso_   = 0;
     rhi::PipelineHandle rdGiTraceCbCsPso_ = 0;
     rhi::PipelineHandle rdGiSplitCsPso_   = 0;
