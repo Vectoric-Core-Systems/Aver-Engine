@@ -117,14 +117,7 @@ bool ptLampLight(RdLocalLight ll, AverSurface s, float3 pos, out AverLight l, ou
 
 // ---- THE DIRECT-LIGHT EVALUATOR (docs/rendering/UNIFIED_LIGHTS.md) ----
 // Every emitter is one entry of the light list (t18), the sun its directional entry; this is the one way they light
-// a point off the visible surface (GI candidates, reflection hits, path vertices). At each point the K lights that
-// deliver the most here (unshadowed irradiance) are evaluated exactly, each with its own shadow ray -- the
-// treatment that kept the sun clean. The rest (the tail) get the same: shaded exactly, times ONE shadow fraction
-// from one ray to a light picked in proportion to its irradiance (the visible surface's rdTailVisibility, without
-// history). Never a light divided by its pick probability: that made rare, unbounded GI and reflection spikes
-// that flashed under lamps. By day the sun is in the exact set because it delivers the most.
-// K is 2 in the bindless staged passes and 1 in the ray-traced raster, glass and single-pass variants, which are at
-// their register limit (three GPU hangs on the RX 7800 XT came from growing them).
+// a point off the visible surface (GI candidates, reflection hits, path vertices). See averDirectLights.
 
 #if AVER_RD_LAMPS
 float giHitShadowMapVisibility(float3 wpos, float3 N, float3 L);   // voxi_restir.hlsli
@@ -153,50 +146,58 @@ float3 averLightVisibility(RdLocalLight ll, float3 pos, float3 N, float2 pixel, 
 
 float3 averDirectLights(AverSurface s, float3 pos, float2 pixel, inout uint rng, bool allowMap) {
 #if AVER_RD_LAMPS
-    // EVERY LIGHT THE SUN'S WAY, within a ray budget: every light is shaded exactly; the strongest lightRaysPerHit get
-    // their own shadow ray and the rest take those rays' irradiance-weighted visibility. Nothing is picked at random.
-    // Lights under 1/32 of the strongest are skipped (indirect light, attenuated by the hit's albedo); the shared
-    // ones on a rough non-metal are shaded diffuse-only. One shading and one visibility call site in the loop: each
-    // visibility call inlines the whole shadow kernel (three took the path tracer's compile over 10 minutes).
+    // EVERY LIGHT THE SUN'S WAY, within a ray budget, nothing picked at random (UNIFIED_LIGHTS.md "Ray budget"):
+    // the strongest lightRaysPerHit lights (at most 4) are shaded exactly with their own shadow ray; every other light
+    // is summed as diffuse irradiance in ONE cheap loop and takes those rays' irradiance-weighted visibility. Hits are
+    // indirect (their light is attenuated by the hit's albedo), so the rest's specular is left out. A light that is not
+    // a plain sphere (rect, spot, IES, cookie) outside the traced set is shaded exactly instead.
     const RdLightRange lr = rdLightsAt(pos);
-    RdTopWeights top = rdTopInit();
+    RdTop4 top = rdTop4Init();
+    float3 eShared = float3(0.0, 0.0, 0.0);   // simple shadowable lights: cheap diffuse irradiance
+    float3 eFree   = float3(0.0, 0.0, 0.0);   // simple no-shadow lights
     [loop] for (uint k = 0u; k < lr.count; ++k) {
-        const RdLocalLight ll = gRdLocalLights[rdLightIndex(lr, k)];
-        if (!aversLightNoShadow(ll)) rdTopAdd(top, rdLightWeight(ll, pos, s.N));
+        const uint j = rdLightIndex(lr, k);
+        const RdLocalLight ll = gRdLocalLights[j];
+        const float3 e = rdLightIrradianceCheap(ll, pos, s.N);
+        const float  w = averShadowLum(e);
+        if (!(w > 0.0)) continue;
+        if (aversLightNoShadow(ll)) { if (rdLightIsSimple(ll)) eFree += e; continue; }
+        rdTop4Add(top, w, j);
+        if (rdLightIsSimple(ll)) eShared += e;
     }
-    const float floorW = top.t0 * (1.0 / 32.0);
-    const float thr    = max(rdTopNth(top, rdLightRaysPerHit()), floorW);
-    const bool  cheap  = s.rough >= 0.5 && max(s.F0.x, max(s.F0.y, s.F0.z)) <= 0.08 && s.sssWeight <= 0.0 &&
-                         s.model != AVER_MODEL_UNLIT;
-    float3 traced = float3(0.0, 0.0, 0.0);   // lights with their own ray (or none needed), visibility applied
-    float3 rest   = float3(0.0, 0.0, 0.0);   // the others, unshadowed, scaled by the traced fraction below
+    const uint  K = min(rdLightRaysPerHit(), 4u);
+    float3 traced = float3(0.0, 0.0, 0.0);
+    float3 exactShared = float3(0.0, 0.0, 0.0);   // non-simple lights outside the traced set, shaded exactly
     float  sumW = 0.0, sumV = 0.0;
-    [loop] for (uint k = 0u; k < lr.count; ++k) {
-        const RdLocalLight ll = gRdLocalLights[rdLightIndex(lr, k)];
-        const bool  noShadow = aversLightNoShadow(ll);
-        const float w = rdLightWeight(ll, pos, s.N);   // ranking only; ptLampLight evaluates the light exactly
-        if (!(w > floorW) && !noShadow) continue;
+    // Traced lights, then (k >= K) every non-simple light: one shading and one visibility call site in the loop, as
+    // each visibility call inlines the whole shadow kernel.
+    [loop] for (uint k = 0u; k < K + lr.count; ++k) {
+        uint j;
+        if (k < K) {
+            j = k == 0u ? top.i0 : k == 1u ? top.i1 : k == 2u ? top.i2 : top.i3;
+            if (j == 0xFFFFFFFFu) continue;
+        } else {
+            j = rdLightIndex(lr, k - K);
+            const RdLocalLight lc = gRdLocalLights[j];
+            if (rdLightIsSimple(lc) || j == top.i0 || (K > 1u && j == top.i1) || (K > 2u && j == top.i2) ||
+                (K > 3u && j == top.i3)) continue;
+        }
+        const RdLocalLight ll = gRdLocalLights[j];
         AverLight   l;
         AverSurface sL;
-        if (cheap && !noShadow && w < thr) {
-            float srcR;
-            if (!aversLightEval(ll, pos, s.N, l.direction, l.radiance, srcR)) continue;
-            rest += s.kdAlbedo * (1.0 / PI) * l.radiance * saturate(dot(s.N, l.direction));
-            continue;
-        }
+        if (k < K && rdLightIsSimple(ll)) eShared -= rdLightIrradianceCheap(ll, pos, s.N);   // traced, not shared
         if (!ptLampLight(ll, s, pos, l, sL) || dot(s.N, l.direction) <= 0.0) continue;
         const float3 c = averShadeDirect(float3(0.0, 0.0, 0.0), sL, l);   // l.visibility is 1 here
-        if (noShadow) { traced += c; continue; }
-        if (w >= thr) {
-            const float3 v = averLightVisibility(ll, pos, s.N, pixel, rng, allowMap);
-            traced += c * v;
-            sumW += w;
-            sumV += w * saturate(averShadowLum(v));
-        } else {
-            rest += c;
-        }
+        if (k >= K) { if (aversLightNoShadow(ll)) traced += c; else exactShared += c; continue; }
+        const float3 v = averLightVisibility(ll, pos, s.N, pixel, rng, allowMap);
+        const float  w = averShadowLum(rdLightIrradianceCheap(ll, pos, s.N));
+        traced += c * v;
+        sumW += w;
+        sumV += w * saturate(averShadowLum(v));
     }
-    return traced + rest * (sumW > 0.0 ? sumV / sumW : 1.0);
+    const float  frac = sumW > 0.0 ? sumV / sumW : 1.0;
+    const float3 kd   = s.model == AVER_MODEL_UNLIT ? float3(0.0, 0.0, 0.0) : s.kdAlbedo * (1.0 / PI);
+    return traced + exactShared * frac + kd * (max(eShared, 0.0) * frac + eFree);
 #else
     // No light list in this compile (single pass without lamps): nothing to light with.
     return float3(0.0, 0.0, 0.0);

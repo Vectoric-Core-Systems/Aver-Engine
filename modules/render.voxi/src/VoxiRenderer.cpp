@@ -412,7 +412,7 @@ void VoxiRenderer::shutdown() {
                                         rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdGiCbCsPso_,
                                         rdSkyOccCsPso_, rdReflCsPso_,
                                         rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_,
-                                        rdShadowProbeCsPso_, rdShadowTiledCsPso_,
+                                        rdShadowProbeCsPso_, rdShadowTiledCsPso_, rdTailVisCsPso_,
                                         rdGiTraceCsPso_, rdGiTraceCbCsPso_,
                                         rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                         rdGiCacheCsPso_, rdGiCacheCbCsPso_,
@@ -435,7 +435,7 @@ void VoxiRenderer::shutdown() {
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
     rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdGiCbCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
-    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = 0;
+    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = rdTailVisCsPso_ = 0;
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
     rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
@@ -3824,7 +3824,7 @@ void VoxiRenderer::buildLocalLights() {
     rdLocalLightData_.clear();
     rdLocalLightCand_.clear();
     cb_.decalParams[1] = 0.0f;   // no light grid until one is uploaded
-    cb_.decalParams[2] = static_cast<f32>(std::clamp(settings_.lightRaysPerPixel, 1u, 8u));
+    cb_.decalParams[2] = static_cast<f32>(std::clamp(settings_.lightRaysPerBlock, 1u, 8u));
     cb_.decalParams[3] = static_cast<f32>(std::clamp(settings_.lightRaysPerHit, 1u, 8u));
     rdGridKeyNow_ = 0;
     if (!res_ || !bindings_) return;
@@ -5015,12 +5015,21 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         ctx.setBindlessTable(rtTexTable_);
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
         if (gx && gy) ctx.dispatch(gx, gy, 1);
-        if (perStage && rdLocalOutThisFrame_) ctx.uavBarrierTexture(rdLocalOutThisFrame_);   // the light slots
-        // CSRdShadow wrote the tail's shadow fraction (gRdLocalOut.a), next frame's lamp history.
-        if (localLights && gx && gy) {
+        // CSRdTailVis reads CSRdShadow's exact light (gRdLocalOut.x) and depth (gRdSunVisTex.a), then writes the tail's
+        // shadow fraction (gRdLocalOut.a, next frame's lamp history).
+        if (localLights && rdTailVisCsPso_ && rdLocalOutThisFrame_ && gx && gy) {
+            ctx.uavBarrierTexture(rdLocalOutThisFrame_);
+            ctx.uavBarrierTexture(rdSunVisTex_);
+            ctx.setPipeline(rdTailVisCsPso_);
+            ctx.setBindingSet(bindings_);
+            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+            ctx.setBindlessTable(rtTexTable_);
+            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+            ctx.dispatch(((dispatchW + 1u) / 2u + 7u) / 8u, ((dispatchH + 1u) / 2u + 7u) / 8u, 1);
             rdLocalHistFrame_ = rtFrameIndex_;
             rdLocalHistHash_ = rdLocalLightHash_;
         }
+        if (perStage && rdLocalOutThisFrame_) ctx.uavBarrierTexture(rdLocalOutThisFrame_);   // the light slots
         stageEnd(rdSunVisTex_);
 
         if (giDispatch) {
@@ -7168,7 +7177,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdGiCbCsPso_,
                                          rdSkyOccCsPso_, rdReflCsPso_,
                                          rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_,
-                                         rdShadowProbeCsPso_, rdShadowTiledCsPso_,
+                                         rdShadowProbeCsPso_, rdShadowTiledCsPso_, rdTailVisCsPso_,
                                          rdGiTraceCsPso_, rdGiTraceCbCsPso_,
                                          rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                          rdGiCacheCsPso_, rdGiCacheCbCsPso_,
@@ -7188,7 +7197,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
     rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdGiCbCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
-    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = 0;
+    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = rdTailVisCsPso_ = 0;
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
     rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
@@ -7413,6 +7422,15 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
             p.cs = csShadowTiled;
             p.layout = giTex;
             rdShadowTiledCsPso_ = res_->createComputePipeline(p);
+        }
+        // CSRdTailVis: the tail lights' shadow fraction at quarter resolution, after CSRdShadow.
+        const rhi::ShaderHandle csTailVis = compile("CSRdTailVis", rhi::ShaderStage::Compute, 66,
+                                                    rasterDefs(csDefs.c_str()).c_str());
+        if (csTailVis) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csTailVis;
+            p.layout = giTex;
+            rdTailVisCsPso_ = res_->createComputePipeline(p);
         }
         // CSRdGi and CSRdSkyOcc: same SM 6.6 requirement as csShadow.
         const rhi::ShaderHandle csGi = compile("CSRdGi", rhi::ShaderStage::Compute, 66,

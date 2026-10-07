@@ -524,6 +524,7 @@ private:
     // ---- SUB-STAGE SPLITS ----
     rhi::PipelineHandle rdShadowProbeCsPso_ = 0;
     rhi::PipelineHandle rdShadowTiledCsPso_ = 0;
+    rhi::PipelineHandle rdTailVisCsPso_ = 0;   // CSRdTailVis: the tail lights' shadow fraction, quarter resolution
     rhi::PipelineHandle rdGiTraceCsPso_   = 0;
     rhi::PipelineHandle rdGiTraceCbCsPso_ = 0;
     rhi::PipelineHandle rdGiSplitCsPso_   = 0;
@@ -901,7 +902,7 @@ private:
         // ReSTIR GI control: x = running, y = history valid, z = write buffer slice, w = poison debug view.
         f32 giRestirParams[4] = {};
         // x = projected decals in t24 (0 = every decal call is skipped); y = light-grid header record in t18 (0 = none);
-        // z, w = shadow rays per pixel / per hit for the light list (Settings::lightRaysPerPixel / PerHit).
+        // z, w = shadow rays per pixel / per hit for the light list (Settings::lightRaysPerBlock / PerHit).
         f32 decalParams[4] = {};
     } cb_;
 

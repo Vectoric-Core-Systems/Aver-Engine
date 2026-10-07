@@ -227,7 +227,7 @@ struct Settings {
     bool localLights = true;
     // Shadow rays per point for the light list (docs/rendering/UNIFIED_LIGHTS.md "Ray budget"): the strongest N
     // lights at a point get their own ray; the rest take those rays' irradiance-weighted visibility. No random picks.
-    u32 lightRaysPerPixel = 2;   // visible surface, besides the exact light's own; a 2x2 block covers 4x (max 8)
+    u32 lightRaysPerBlock = 6;   // visible surface: rays per 2x2 pixel block for the lights besides each pixel's exact one (1-8)
     u32 lightRaysPerHit   = 1;   // GI, reflection and path hits (clamped to [1, 8])
 
     // ---- staged ray-driven bit-field toggles (cb_.giShadowParams.w / gGiShadowParams.w) ---------

@@ -347,8 +347,9 @@ void rdLocalHistTap(int2 q, int2 lo, int2 hi, float zc, float area, inout float 
     if (area <= 0.0 || any(q < lo) || any(q > hi)) return;
     const float zt = gRtShadowHist.Load(int3(q, 0)).y;
     const float w  = (zt > 0.0) ? area * saturate(1.0 - abs(zt - zc) / (zc * 0.03 + 1.0)) : 0.0;
-    if (w > 0.0) {
-        sum  += gRdLocalHist.Load(int3(q, 0)).a * w;
+    const float v  = gRdLocalHist.Load(int3(q, 0)).a;   // < 0: a texel the quarter-res tail pass left untraced
+    if (w > 0.0 && v >= 0.0) {
+        sum  += v * w;
         wsum += w;
     }
 }
@@ -367,7 +368,7 @@ float rdLocalHistBilinear(float2 pxPrev, int2 texel) {
     rdLocalHistTap(q0 + int2(1, 0), lo, hi, zc, t.x * (1.0 - t.y),         sum, wsum);
     rdLocalHistTap(q0 + int2(0, 1), lo, hi, zc, (1.0 - t.x) * t.y,         sum, wsum);
     rdLocalHistTap(q0 + int2(1, 1), lo, hi, zc, t.x * t.y,                 sum, wsum);
-    return wsum > 0.0 ? sum / wsum : gRdLocalHist.Load(int3(texel, 0)).a;
+    return wsum > 0.0 ? sum / wsum : gRdLocalHist.Load(int3(texel, 0)).a;   // may be -1: no history
 }
 
 // History read blended by rdLocalLightsVisibility: depth-weighted box centred on pxPrev, area-weighted taps.
@@ -385,7 +386,7 @@ float rdLocalHistFiltered(float2 pxPrev, int2 texel) {
             rdLocalHistTap(q, lo, hi, zc, ov.x * ov.y, sum, wsum);
         }
     }
-    return wsum > 0.0 ? sum / wsum : gRdLocalHist.Load(int3(texel, 0)).a;
+    return wsum > 0.0 ? sum / wsum : gRdLocalHist.Load(int3(texel, 0)).a;   // may be -1: no history
 }
 
 // ---- THE VISIBILITY HALF: one shadow ray for every lamp, accumulated the way the sun's is ----
@@ -643,60 +644,6 @@ void rdListLightSplit(uint i, AverSurface s, float3 wpos, float3 vis, inout floa
 float rdTailWeight(uint j, uint e0, float3 wpos, float3 N) {
     if (j == e0 || aversLightNoShadow(gRdLocalLights[j])) return 0.0;
     return rdLightWeight(gRdLocalLights[j], wpos, N);
-}
-
-// CSRdShadow's tail shadow fraction. Returns the value to shade with; histOut is what is stored in gRdLocalOut.a
-// (next frame's history), through the lamp history pair and the sun's reprojection.
-// DERIVATIVES: rtReprojectTexel runs first, behind constant-buffer conditions only.
-float rdTailVisibility(uint e0, float twS, RdTopWeights top, bool e0Ranked, float3 wpos, float3 N, float2 pixelC,
-                       uint2 pixel, out float histOut) {
-    int2   texel      = int2(0, 0);
-    float2 velocityPx = float2(0.0, 0.0);
-    bool   haveHist   = false;
-    // > 0.25, not the sun's 0.75: the "sun moved" state leaves lamp shadows valid.
-    if (gRtHistParams.x > 0.5 && gRtHistParams.y > 0.25 && rdLocalHistValid())
-        haveHist = rtReprojectTexel(wpos, pixelC, texel, velocityPx);
-    float hist = 1.0;
-    if (haveHist) hist = rdLocalHistBilinear(pixelC + velocityPx, texel);
-    // THE RAY BUDGET, INTERLEAVED (UNIFIED_LIGHTS.md): the strongest tail lights (up to 4 x lightRaysPerPixel, at most
-    // 8) are dealt round a 2x2 pixel block in a fixed pattern, each pixel tracing its share, one ray each, every frame;
-    // Stage B's 5x5 depth-aware filter (rdLocalVisFiltered) joins the block's answers. The rest share them. Fixed,
-    // never random, so nothing flickers. Lights under 1/128 of the tail's total are skipped.
-    float vis = 1.0;
-    if (twS > 0.0) {
-        const float floorW = twS * (1.0 / 128.0);
-        const uint  skipE0 = e0Ranked ? 1u : 0u;   // the exact light holds the top rank when it is shadowable
-        const uint  ranked = rdTopCountAbove(top, floorW);
-        const uint  lights = min(ranked > skipE0 ? ranked - skipE0 : 0u, min(4u * rdLightRaysPerPixel(), 8u - skipE0));
-        const uint  phases = clamp(lights, 1u, 4u);
-        const uint  phase  = ((pixel.x & 1u) + 2u * (pixel.y & 1u)) % phases;
-        const RdLightRange lr = rdLightsAt(wpos);
-        const uint turn = (uint)gRtHistParams.z;
-        float sumW = 0.0, sumV = 0.0;
-        [loop] for (uint k = 0u; k < lr.count && lights > 0u; ++k) {
-            const uint  j = rdLightIndex(lr, k);
-            const float w = rdTailWeight(j, e0, wpos, N);
-            if (!(w > floorW)) continue;
-            const uint aboveAll = rdTopCountAbove(top, w);
-            const uint rank = aboveAll > skipE0 ? aboveAll - skipE0 : 0u;   // 0 = the strongest tail light
-            if (rank >= lights || (rank % phases) != phase) continue;
-            const float3 Lt = rdSetShadowLight(gRdLocalLights[j], wpos);
-            const float  v  = averShadowLum(rtShadowEx(wpos, N, Lt, pixelC, float3(0, 0, 0), float3(0, 0, 0), 1u,
-                                                       averGoldenTurns(turn), 0u));
-            sumW += w;
-            sumV += w * v;
-        }
-        rdResetShadowLight();
-        if (sumW > 0.0) vis = sumV / sumW;
-        // The sun's history rule (rtShadowTemporalEx): 0.9 at rest, 0.5 by 32 px/frame, 0.35 where the shadow
-        // changed. FidelityFX mode only; NRD2 frames have none.
-        if (haveHist) {
-            const float t = saturate(length(velocityPx) / 32.0);
-            vis = lerp(vis, hist, rtShadowChanged(vis, hist) ? kAverShadowChangeHistory : lerp(0.9, 0.5, t));
-        }
-    }
-    histOut = vis;
-    return vis;
 }
 
 // Stage B: every tail light shaded exactly, the shadowable ones times the tail fraction `vis`.
@@ -2553,27 +2500,23 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     rdShadowFootprint(ndc, dir, s, dpx, dpy);
 
     // THE VISIBLE SURFACE'S LIGHTS (docs/rendering/UNIFIED_LIGHTS.md). Every emitter is a list entry, the sun its
-    // directional one. Here the entry that delivers the most (unshadowed irradiance) is the pixel's EXACT light and
-    // gets the full shadow kernel the sun always had: the disc, several rays, history keyed by light, the spatial
-    // filter, the probe tiles. The rest are the tail: one picked in proportion to its irradiance, one ray, divided by
-    // its pick probability. Stage B shades both from gRdSunVisTex (exact light's visibility) and gRdLocalOut
-    // (x exact index, y tail index, z tail visibility / pick probability; -1 none; a the lamp visibility the glass
-    // replay's 5x5 reads). By day the exact light is the sun because it delivers the most.
+    // directional one. The entry that delivers the most here is the pixel's EXACT light and gets the sun's full shadow
+    // kernel (disc, history keyed by light, probe tiles). Every other light (the tail) is shaded exactly in Stage B
+    // times one shadow fraction, which CSRdTailVis traces next at quarter resolution. By day the exact light is the
+    // sun because it delivers the most.
     // STABLE EXACT LIGHT: last frame's exact light at this pixel (by its key, gRdLocalOut.y, not its list index, which
     // moves as the list reorders) stays exact while it delivers at least 80% of the strongest, so near-equal candles do
     // not trade places (each swap restarts the exact light's shadow history).
     const float prevKey = rdLocalHistValid() ? gRdLocalHist.Load(int3(pixel, 0)).y : -1.0;
     uint  prevE0 = 0xFFFFFFFFu;
     uint  e0 = 0xFFFFFFFFu;
-    float w0 = 0.0, wPrev = 0.0, wShadow = 0.0;   // wShadow: every shadowable light's weight
-    RdTopWeights top = rdTopInit();                // the shadowable lights' largest weights (the ray budget)
+    float w0 = 0.0, wPrev = 0.0;
     {
         const RdLightRange lr = rdLightsAt(s.wpos);
         [loop] for (uint k = 0u; k < lr.count; ++k) {
             const uint  j = rdLightIndex(lr, k);
             const float w = rdLightWeight(gRdLocalLights[j], s.wpos, s.N);
             if (!(w > 0.0)) continue;
-            if (!aversLightNoShadow(gRdLocalLights[j])) { wShadow += w; rdTopAdd(top, w); }
             if (prevKey >= 0.0 && rdLightKey(gRdLocalLights[j]) == prevKey && w > wPrev) { prevE0 = j; wPrev = w; }
             if (w > w0) { e0 = j; w0 = w; }
         }
@@ -2621,14 +2564,9 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
 #endif
     rdResetShadowLight();
-    // THE TAIL's shadow fraction (rdTailVisibility). gRdLocalOut = (exact light's index, its key, unused, tail
-    // fraction); .y and .a are next frame's history, .a also what Stage B's (and the glass replay's) 5x5 reads.
-    const float twS = wShadow - ((haveE0 && !e0NoShadow) ? w0 : 0.0);
-    float tailHist;
-    rdTailVisibility(e0, twS, top, haveE0 && !e0NoShadow && w0 >= top.t0, s.wpos, s.N, float2(pixel) + 0.5, pixel,
-                     tailHist);
-    gRdLocalOut[pixel] = float4(haveE0 ? (float)e0 : -1.0, haveE0 ? rdLightKey(gRdLocalLights[e0]) : -1.0, 0.0,
-                                tailHist);
+    // gRdLocalOut = (exact light's index, its key, unused, tail shadow fraction). .a is filled by CSRdTailVis at
+    // quarter resolution; -1 until then (and where it leaves a pixel untraced, Stage B's 5x5 fills it).
+    gRdLocalOut[pixel] = float4(haveE0 ? (float)e0 : -1.0, haveE0 ? rdLightKey(gRdLocalLights[e0]) : -1.0, 0.0, -1.0);
     // Primary surface linear view depth (for blended-replay reuse test).
     const float rdSunVisViewZ = mul(float4(s.wpos, 1.0), gViewProj).w;
     gRdSunVisTex[pixel] = float4(sunVis, rdSunVisViewZ);
@@ -2637,6 +2575,94 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     if ((rtGiShadowBits() & 64u) != 0u) gRtReflHistOut[pixel] = float4(s.N, 1.0);
 }
 
+
+// ---- STAGE S2: CSRdTailVis -- the tail lights' shadow fraction at quarter resolution (UNIFIED_LIGHTS.md) ----
+// One thread per 2x2 block, so a wave's rays go to the same lights in the same order (coherent). The block's first
+// surface pixel ranks the lights reaching it (all but its exact light, gRdLocalOut.x from CSRdShadow); the strongest
+// lightRaysPerBlock get one ray each, every frame, nothing picked at random. Their irradiance-weighted unblocked share
+// is the tail's fraction, blended with history by the sun's rule (FidelityFX mode; NRD2 frames have none), and
+// written to every pixel of the block at the same depth; a pixel across an edge gets -1 and Stage B's depth-aware
+// 5x5 (rdLocalVisFiltered) fills it. Lights under 1/128 of the tail's total are skipped.
+[numthreads(8, 8, 1)]
+void CSRdTailVis(uint3 tid : SV_DispatchThreadID) {
+    const uint2 vp = (uint2)gSceneViewportCur.zw;
+    if (any(tid.xy * 2u >= vp)) return;
+    const uint2 base  = (uint2)gSceneViewportCur.xy + tid.xy * 2u;
+    const uint  pitch = rdRowPitch();
+    if (pitch == 0u) return;
+    // The representative: the block's first pixel with a surface.
+    uint2 rep = base;
+    bool  found = false;
+    [unroll] for (uint q = 0u; q < 4u; ++q) {
+        const uint2 p = base + uint2(q & 1u, q >> 1u);
+        if (!found && all(p - (uint2)gSceneViewportCur.xy < vp) && gRdVisBuf[p.y * pitch + p.x].x != 0xFFFFFFFFu) {
+            rep = p;
+            found = true;
+        }
+    }
+    float2 ndc;
+    const float3 dir = rdPrimaryRayDir(rep, ndc);
+    const RdSurface s = rdSurfaceFromRecord(gRdVisBuf[rep.y * pitch + rep.x], dir);
+    const float2 repC = float2(rep) + 0.5;
+    // History first, behind constant-buffer conditions only (rtReprojectTexel takes derivatives). > 0.25, not the
+    // sun's 0.75: the "sun moved" state leaves lamp shadows valid.
+    int2   texel = int2(0, 0);
+    float2 velocityPx = float2(0.0, 0.0);
+    bool   haveHist = false;
+    if (gRtHistParams.x > 0.5 && gRtHistParams.y > 0.25 && rdLocalHistValid())
+        haveHist = rtReprojectTexel(s.wpos, repC, texel, velocityPx);
+    float hist = -1.0;
+    if (haveHist) hist = rdLocalHistBilinear(repC + velocityPx, texel);
+    if (!found) return;
+
+    averRtCutoutPolicy(AVER_RD_CUTOUTS_SHADOW, false);
+    const float e0f = gRdLocalOut[rep].x;
+    const uint  e0  = e0f >= 0.0 ? (uint)e0f : 0xFFFFFFFFu;
+    const RdLightRange lr = rdLightsAt(s.wpos);
+    RdTopWeights top = rdTopInit();
+    float twS = 0.0;
+    [loop] for (uint k = 0u; k < lr.count; ++k) {
+        const float w = rdTailWeight(rdLightIndex(lr, k), e0, s.wpos, s.N);
+        if (!(w > 0.0)) continue;
+        twS += w;
+        rdTopAdd(top, w);
+    }
+    float vis = 1.0;
+    if (twS > 0.0) {
+        const float floorW = twS * (1.0 / 128.0);
+        const uint  budget = rdLightRaysPerBlock();
+        const uint  turn   = (uint)gRtHistParams.z;
+        float sumW = 0.0, sumV = 0.0;
+        [loop] for (uint k = 0u; k < lr.count; ++k) {
+            const uint  j = rdLightIndex(lr, k);
+            const float w = rdTailWeight(j, e0, s.wpos, s.N);
+            if (!(w > floorW) || rdTopCountAbove(top, w) >= budget) continue;
+            const float3 Lt = rdSetShadowLight(gRdLocalLights[j], s.wpos);
+            const float  v  = averShadowLum(rtShadowEx(s.wpos, s.N, Lt, repC, float3(0, 0, 0), float3(0, 0, 0), 1u,
+                                                       averGoldenTurns(turn), 0u));
+            sumW += w;
+            sumV += w * v;
+        }
+        rdResetShadowLight();
+        if (sumW > 0.0) vis = sumV / sumW;
+        // The sun's history rule (rtShadowTemporalEx): 0.9 at rest, 0.5 by 32 px/frame, 0.35 where the shadow changed.
+        if (haveHist && hist >= 0.0) {
+            const float t = saturate(length(velocityPx) / 32.0);
+            vis = lerp(vis, hist, rtShadowChanged(vis, hist) ? kAverShadowChangeHistory : lerp(0.9, 0.5, t));
+        }
+    }
+    // Every pixel of the block on the representative's surface (the depth test rdLocalVisTap uses); sky keeps 1.
+    const float zc = gRdSunVisTex[rep].a;
+    [unroll] for (uint q = 0u; q < 4u; ++q) {
+        const uint2 p = base + uint2(q & 1u, q >> 1u);
+        if (any(p - (uint2)gSceneViewportCur.xy >= vp)) continue;
+        const float zt = gRdSunVisTex[p].a;
+        if (zt <= 0.0) continue;
+        float4 o = gRdLocalOut[p];
+        o.a = abs(zt - zc) <= zc * 0.03 + 1.0 ? vis : -1.0;
+        gRdLocalOut[p] = o;
+    }
+}
 
 // ---- STAGE G0: CSRdGiTrace -- trace ReSTIR GI's fresh candidate for CSRdGi's resample --------
 //

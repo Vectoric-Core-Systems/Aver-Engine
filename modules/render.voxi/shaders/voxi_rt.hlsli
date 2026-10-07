@@ -841,16 +841,12 @@ void rdTopAdd(inout RdTopWeights r, float w) {
     h = max(r.t6, x); x = min(r.t6, x); r.t6 = h;
     r.t7 = max(r.t7, x);
 }
-float rdTopNth(RdTopWeights r, uint n) {
-    return n <= 1u ? r.t0 : n == 2u ? r.t1 : n == 3u ? r.t2 : n == 4u ? r.t3
-         : n == 5u ? r.t4 : n == 6u ? r.t5 : n == 7u ? r.t6 : r.t7;
-}
 // How many of the 8 kept weights are above x.
 uint rdTopCountAbove(RdTopWeights r, float x) {
     return (uint)(r.t0 > x) + (uint)(r.t1 > x) + (uint)(r.t2 > x) + (uint)(r.t3 > x)
          + (uint)(r.t4 > x) + (uint)(r.t5 > x) + (uint)(r.t6 > x) + (uint)(r.t7 > x);
 }
-uint rdLightRaysPerPixel() { return clamp((uint)(gDecalParams.z + 0.5), 1u, 8u); }
+uint rdLightRaysPerBlock() { return clamp((uint)(gDecalParams.z + 0.5), 1u, 8u); }
 uint rdLightRaysPerHit()   { return clamp((uint)(gDecalParams.w + 0.5), 1u, 8u); }
 
 // True when this pass's visible-surface lamp visibility exists (bit 4). The list itself is always published.
@@ -1332,9 +1328,19 @@ float rdLocalPickWeight(RdLocalLight l, float3 wpos, float3 N) {
 // A light's ranking weight at a point (UNIFIED_LIGHTS.md "Ray budget"): the cheap sphere estimate of its irradiance
 // (range window, inverse square, N.L to the centre, spot cone), without IES, cookies or the rectangle's form factor.
 // Every loop that only RANKS lights uses it; the shading evaluates each light exactly.
+float3 rdLightIrradianceCheap(RdLocalLight l, float3 wpos, float3 N);
 float rdLightWeight(RdLocalLight l, float3 wpos, float3 N) {
+    return averShadowLum(rdLightIrradianceCheap(l, wpos, N));
+}
+// rdLightWeight's estimate in colour: irradiance (N.L included). Exact for a sphere or point light without IES or
+// cookie (rdLightIsSimple); a ranking estimate for the rest.
+bool rdLightIsSimple(RdLocalLight l) {
+    const uint kind = aversLightKind(l);
+    return (kind == AVER_LIGHT_POINT || kind == AVER_LIGHT_DIRECTIONAL) && l.shape.z < 0.0 && l.shape.w < 0.0;
+}
+float3 rdLightIrradianceCheap(RdLocalLight l, float3 wpos, float3 N) {
     if (aversLightKind(l) == AVER_LIGHT_DIRECTIONAL)
-        return averShadowLum(l.radianceRange.rgb) * saturate(dot(N, normalize(l.axisKind.xyz)));
+        return l.radianceRange.rgb * saturate(dot(N, normalize(l.axisKind.xyz)));
     const float3 toC   = l.posRadius.xyz - wpos;
     const float  d2    = dot(toC, toC);
     const float  range = l.radianceRange.w;
@@ -1353,7 +1359,23 @@ float rdLightWeight(RdLocalLight l, float3 wpos, float3 N) {
         if (c <= l.shape.y) return 0.0;
     }
     const float r = l.posRadius.w;
-    return averShadowLum(l.radianceRange.rgb) * (1e4 / max(d2, r * r)) * (win * win) * ndl;
+    return l.radianceRange.rgb * ((1e4 / max(d2, r * r)) * (win * win) * ndl);
+}
+
+// The strongest 4 lights at a point with their list indices, sorted in registers (fully unrolled compare-swaps).
+struct RdTop4 { float w0, w1, w2, w3; uint i0, i1, i2, i3; };
+RdTop4 rdTop4Init() {
+    RdTop4 r;
+    r.w0 = r.w1 = r.w2 = r.w3 = 0.0;
+    r.i0 = r.i1 = r.i2 = r.i3 = 0xFFFFFFFFu;
+    return r;
+}
+void rdTop4Add(inout RdTop4 r, float w, uint i) {
+    float x = w; uint xi = i; bool sw;
+    sw = x > r.w0; { const float tw = sw ? r.w0 : x; const uint ti = sw ? r.i0 : xi; r.w0 = sw ? x : r.w0; r.i0 = sw ? xi : r.i0; x = tw; xi = ti; }
+    sw = x > r.w1; { const float tw = sw ? r.w1 : x; const uint ti = sw ? r.i1 : xi; r.w1 = sw ? x : r.w1; r.i1 = sw ? xi : r.i1; x = tw; xi = ti; }
+    sw = x > r.w2; { const float tw = sw ? r.w2 : x; const uint ti = sw ? r.i2 : xi; r.w2 = sw ? x : r.w2; r.i2 = sw ? xi : r.i2; x = tw; xi = ti; }
+    sw = x > r.w3; if (sw) { r.w3 = x; r.i3 = xi; }
 }
 // Two quasi-random numbers in [0,1) for a rectangle sample: radical inverse and golden Weyl of the
 // pixel's turn, rotated per pixel.
