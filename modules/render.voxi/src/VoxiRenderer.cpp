@@ -240,6 +240,8 @@ const char* voxiHlsl() {
 thread_local const std::string* tl_voxiPrelude = nullptr;
 // Shader compiles made by Voxi's ShaderScope, any thread (the editor's "Compiling shaders N of M").
 std::atomic<u32> g_voxiCompiles{0};
+// --sync-shaders turns the async pipeline builds off (VoxiRenderer::allowAsyncPipelineBuilds, before init).
+std::atomic<bool> g_asyncBuildsAllowed{true};
 const char* voxiShaderPrelude() {
     if (tl_voxiPrelude) return tl_voxiPrelude->c_str();
     static std::string s;   // owned by a static, because the caller borrows it
@@ -318,7 +320,9 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
     createVoxelVolume(settings_.voxelResolution);
     // Off the main thread when the factory allows it: the init set is queued here, the scene set by the
     // onRenderTargetsChanged that follows (it knows the real scene formats). Until both land, the frame draws nothing.
-    asyncBuilds_ = res_->threadSafePipelineCreation();
+    asyncBuilds_ = g_asyncBuildsAllowed.load() && res_->threadSafePipelineCreation();
+    if (!asyncBuilds_ && res_->threadSafePipelineCreation())
+        AVER_INFO("[Voxi] pipelines build on the main thread (--sync-shaders)");
     if (asyncBuilds_) {
         startBuildWorker();
         ensureTextureTable();
@@ -1205,7 +1209,8 @@ void VoxiRenderer::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f
 void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     rdVisWrittenThisFrame_ = false;
     if (!giReady_) return;
-    pumpBuilds();   // adopt whatever the build worker finished
+    pumpBuilds();          // adopt whatever the build worker finished
+    startPendingBuilds();  // and start what was asked for since: only here, at the frame boundary
     // While the init or scene set builds, the frame draws nothing (the hooks below all say so).
     if (pipelinesBuilding()) return;
     const u32 rebuildSamples = sceneSampleCount_ ? sceneSampleCount_ : dev_->sampleCount();
@@ -5346,8 +5351,12 @@ void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rh
     // The scene pipelines bake only the sample count and the two formats (and the shader/graph revisions prePass
     // watches): a resize, render-scale change or G-buffer toggle that keeps them reuses the set. Rebuilding anyway
     // compiled ~41 pipelines twice at startup (addRenderFeature) and again on every resize.
-    const bool same = (scenePso_ || sceneInFlight_) && sampleCount == sceneSampleCount_ && color == sceneColorFmt_ &&
-                      depth == sceneDepthFmt_ && scenePipelineGraphRev_ == pbr::materialGraphs().revision() &&
+    const u32 haveSamples = sceneRequestPending_ ? sceneWantSamples_ : sceneSampleCount_;
+    const rhi::Format haveColor = sceneRequestPending_ ? sceneWantColor_ : sceneColorFmt_;
+    const rhi::Format haveDepth = sceneRequestPending_ ? sceneWantDepth_ : sceneDepthFmt_;
+    const bool same = (scenePso_ || sceneInFlight_ || sceneRequestPending_) && sampleCount == haveSamples &&
+                      color == haveColor && depth == haveDepth &&
+                      scenePipelineGraphRev_ == pbr::materialGraphs().revision() &&
                       scenePipelineShaderRev_ == rhi::shaderFileRevision();
     if (!same) requestScenePipelines(sampleCount, color, depth);
     // Remembered even when the call below decides to allocate nothing: setSettings needs a size to
@@ -5728,6 +5737,38 @@ void VoxiRenderer::buildNrd2Variants(u32 sampleCount, rhi::Format color, rhi::Fo
                   "GI, reflections and sky occlusion at full rate");
 }
 
+// Queues NRD2's build (frame boundary only, from startPendingBuilds).
+void VoxiRenderer::startNrd2Build() {
+    const bool needCreate = !nrd2_.valid();
+    if (needCreate && !nrd2_.beginCreate(*dev_)) {
+        nrd2InFlight_ = false;   // ensureNrd2 then reports NRD2 unavailable
+        return;
+    }
+    const u32 sc = sceneSampleCount_;
+    const rhi::Format color = sceneColorFmt_, depth = sceneDepthFmt_;
+    auto prelude = std::make_shared<std::string>(voxiShaderPrelude());
+    beginExclusiveBuild();
+    queueBuild(
+        [this, needCreate, sc, color, depth, prelude] {
+            tl_voxiPrelude = prelude.get();
+            if (needCreate) nrd2_.compilePipelines();
+            if (!nrd2_.composeValid()) {
+                const rhi::Format g[3] = {rhi::Format::RG16F, rhi::Format::R32Float,
+                                          rhi::Format::RGB10A2Unorm};
+                nrd2_.createCompose(color, g, depth, sc);   // its handle is 0: nothing to destroy
+            }
+            buildNrd2Variants(sc, color, depth);
+            tl_voxiPrelude = nullptr;
+        },
+        [this, needCreate] {
+            if (needCreate) nrd2_.finishCreate();
+            nrd2InFlight_ = false;
+            if (nrd2_.valid() && nrd2_.composeValid() && rayDrivenSplitNrd2Pso_)
+                AVER_INFO("[Voxi] NRD2 ready (Stage B split variant, pyramid/resolve passes, compose draw)");
+            exclusiveBuildLanded();
+        });
+}
+
 // NRD2's pipelines (its passes, the compose draw, Voxi's two variants) as one build: on the worker when the factory
 // allows it, as an exclusive job (the frame draws nothing and scene rebuilds wait, so nothing reads the handles it
 // writes), else here and now.
@@ -5737,33 +5778,9 @@ bool VoxiRenderer::ensureNrd2() {
         const rhi::Format gbuf[3] = {rhi::Format::RG16F, rhi::Format::R32Float, rhi::Format::RGB10A2Unorm};
         const bool needCreate = !nrd2_.valid();
         if (asyncBuilds_) {
-            if (!needCreate || nrd2_.beginCreate(*dev_)) {
-                const u32 sc = sceneSampleCount_;
-                const rhi::Format color = sceneColorFmt_, depth = sceneDepthFmt_;
-                auto prelude = std::make_shared<std::string>(voxiShaderPrelude());
-                beginExclusiveBuild();
-                nrd2InFlight_ = true;
-                queueBuild(
-                    [this, needCreate, sc, color, depth, prelude] {
-                        tl_voxiPrelude = prelude.get();
-                        if (needCreate) nrd2_.compilePipelines();
-                        if (!nrd2_.composeValid()) {
-                            const rhi::Format g[3] = {rhi::Format::RG16F, rhi::Format::R32Float,
-                                                      rhi::Format::RGB10A2Unorm};
-                            nrd2_.createCompose(color, g, depth, sc);   // its handle is 0: nothing to destroy
-                        }
-                        buildNrd2Variants(sc, color, depth);
-                        tl_voxiPrelude = nullptr;
-                    },
-                    [this, needCreate] {
-                        if (needCreate) nrd2_.finishCreate();
-                        nrd2InFlight_ = false;
-                        if (nrd2_.valid() && nrd2_.composeValid() && rayDrivenSplitNrd2Pso_)
-                            AVER_INFO("[Voxi] NRD2 ready (Stage B split variant, pyramid/resolve passes, compose draw)");
-                        exclusiveBuildLanded();
-                    });
-                return false;
-            }
+            nrd2StartPending_ = true;   // started at the next frame boundary (startPendingBuilds)
+            nrd2InFlight_ = true;
+            return false;
         } else {
             if (needCreate) nrd2_.create(*dev_);
             if (nrd2_.valid() && !nrd2_.composeValid())
@@ -7303,6 +7320,8 @@ bool VoxiRenderer::buildInitPipelines() {
 }
 
 // ---- ASYNC PIPELINE BUILDS ----
+void VoxiRenderer::allowAsyncPipelineBuilds(bool allowed) { g_asyncBuildsAllowed = allowed; }
+
 void VoxiRenderer::startBuildWorker() {
     if (buildThread_.joinable()) return;
     buildStop_ = false;
@@ -7360,9 +7379,12 @@ void VoxiRenderer::pumpBuilds() {
 void VoxiRenderer::finishPipelineBuilds() {
     for (;;) {
         pumpBuilds();
+        startPendingBuilds();
         {
             std::lock_guard<std::mutex> lk(buildMu_);
-            if (buildQueue_.empty() && !buildBusy_ && buildDone_.empty()) break;
+            if (buildQueue_.empty() && !buildBusy_ && buildDone_.empty() && !sceneRequestPending_ &&
+                !nrd2StartPending_)
+                break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
@@ -7387,12 +7409,9 @@ void VoxiRenderer::exclusiveBuildLanded() {
                   lastBuildCompiles_,
                   std::chrono::duration<f64>(std::chrono::steady_clock::now() - buildT0_).count());
     }
-    if (sceneWantPending_) {   // asked for while this one built (new formats, a shader or graph change): build it now
-        sceneWantPending_ = false;
-        requestScenePipelines(sceneWantSamples_, sceneWantColor_, sceneWantDepth_);
-    }
 }
 
+// Records the scene set wanted (the latest request wins); startPendingBuilds starts it at the next frame boundary.
 void VoxiRenderer::requestScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth) {
     if (!asyncBuilds_) {
         if (!createScenePipelines(sampleCount, color, depth))
@@ -7401,13 +7420,29 @@ void VoxiRenderer::requestScenePipelines(u32 sampleCount, rhi::Format color, rhi
         scenePipelineShaderRev_ = rhi::shaderFileRevision();
         return;
     }
-    if (sceneInFlight_) {   // the handles belong to that build until it lands: rebuild after it
-        sceneWantPending_ = true;
-        sceneWantSamples_ = sampleCount;
-        sceneWantColor_ = color;
-        sceneWantDepth_ = depth;
+    sceneRequestPending_ = true;
+    sceneWantSamples_ = sampleCount;
+    sceneWantColor_ = color;
+    sceneWantDepth_ = depth;
+}
+
+// FRAME BOUNDARY ONLY (top of prePass, or a tool waiting on the queue): starts the exclusive builds asked for since.
+// Starting one mid-frame flipped pipelinesBuilding() inside a frame whose prePass had already recorded half its work
+// and whose scene pass then did not run: mismatched resource states, the suspect in a GPU hang at project open.
+void VoxiRenderer::startPendingBuilds() {
+    if (!asyncBuilds_ || sceneInFlight_) return;
+    if (sceneRequestPending_) {
+        sceneRequestPending_ = false;
+        startScenePipelines(sceneWantSamples_, sceneWantColor_, sceneWantDepth_);
         return;
     }
+    if (nrd2StartPending_) {
+        nrd2StartPending_ = false;
+        startNrd2Build();
+    }
+}
+
+void VoxiRenderer::startScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth) {
     destroyScenePipelines();
     sceneColorFmt_ = color;
     sceneDepthFmt_ = depth;

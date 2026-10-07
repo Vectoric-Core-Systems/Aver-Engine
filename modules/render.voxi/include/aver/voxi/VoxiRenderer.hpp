@@ -188,7 +188,9 @@ public:
     // responsive. pipelinesBuilding(): such a build is queued or running. compileProgress(): shader compiles of the
     // current build so far, and the last build's total (0 = not known yet). finishPipelineBuilds() blocks until every
     // queued build has landed (tools, tests, the warm-up).
-    bool pipelinesBuilding() const { return sceneJobs_.load() > 0; }
+    bool pipelinesBuilding() const { return sceneJobs_.load() > 0 || (sceneRequestPending_ && !scenePso_); }
+    // --sync-shaders: build on the main thread as before (call before init).
+    static void allowAsyncPipelineBuilds(bool allowed);
     void compileProgress(u32& done, u32& total) const;
     void finishPipelineBuilds();
     void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
@@ -243,7 +245,7 @@ private:
     bool asyncBuilds_ = false;
     std::atomic<int> sceneJobs_{0};        // init/scene-set builds queued or running: the frame draws nothing
     bool sceneInFlight_ = false;           // a scene-set build is queued or running
-    bool sceneWantPending_ = false;        // formats changed while one was: rebuild when it lands
+    bool sceneRequestPending_ = false;     // a scene set asked for, started at the next frame boundary
     u32 sceneWantSamples_ = 0;
     rhi::Format sceneWantColor_ = rhi::Format::Unknown, sceneWantDepth_ = rhi::Format::Unknown;
     u32 buildCompileBase_ = 0;             // g_voxiCompiles when the current build started
@@ -264,6 +266,10 @@ private:
     void adoptTwins(bool pathTrace, const std::vector<rhi::PipelineHandle>& built);
     bool createTwins(bool pathTrace);
     void requestTwins(bool pathTrace);
+    void startPendingBuilds();
+    void startScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth);
+    void startNrd2Build();
+    bool nrd2StartPending_ = false;
     void beginExclusiveBuild();
     void exclusiveBuildLanded();
     void buildNrd2Variants(u32 sampleCount, rhi::Format color, rhi::Format depth);
