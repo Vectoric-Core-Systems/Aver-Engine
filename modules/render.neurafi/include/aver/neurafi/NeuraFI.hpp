@@ -107,10 +107,13 @@ private:
     u32 w_ = 0, h_ = 0, qw_ = 0, qh_ = 0;   // scene size; acceleration-image size
     u32 block_ = 2;                         // scene pixels per acceleration texel, each axis
     static constexpr u64 kMaxAccelTexels = 262144;   // ~512x512: the network's per-frame record budget
-    // The previous real frame (N-1); with training also N-2 and N-3 (copied down each frame). Rest in
+    // The previous real frame's colour. Rests in NonPixelShaderResource.
+    rhi::TextureHandle histColor_ = 0;
+    // Motion/depth of N-1..N-3 as a ring of three: N-1 is [ring_], N-2 [(ring_+1)%3], N-3 [(ring_+2)%3].
+    // The frame just rendered is copied over the oldest slot, which then becomes N-1. Rest in
     // NonPixelShaderResource.
-    rhi::TextureHandle histColor_ = 0, histVel_ = 0, histZ_ = 0;
-    rhi::TextureHandle histVel2_ = 0, histZ2_ = 0, histVel3_ = 0, histZ3_ = 0;
+    rhi::TextureHandle histVel_[3] = {}, histZ_[3] = {};
+    u32 ring_ = 0;
     // The generated image and the fill's ping-pong partner. Rest in ShaderResource.
     rhi::TextureHandle out_ = 0, tmp_ = 0;
     // The acceleration image and the network's share of it. Both rest in NonPixelShaderResource.
@@ -125,8 +128,9 @@ private:
     // gather: t0-t2 frame N, t3-t5 the previous frame, t6 acceleration, t7 its network share, u0 out_,
     // u1 the visualisation.
     // fillA: out_ -> tmp_; fillB: tmp_ -> out_.  traj: see neurafi.hlsl's trajectory section.
-    rhi::BindingSetHandle gatherSet_ = 0, fillSetA_ = 0, fillSetB_ = 0, trajSet_ = 0;
-    rhi::TextureHandle boundColor_ = 0, boundVel_ = 0, boundZ_ = 0;   // what gatherSet_/trajSet_ hold
+    // gather and traj have one set per ring_ value (their history slots differ).
+    rhi::BindingSetHandle gatherSet_[3] = {}, fillSetA_ = 0, fillSetB_ = 0, trajSet_[3] = {};
+    rhi::TextureHandle boundColor_ = 0, boundVel_ = 0, boundZ_ = 0;   // what the gather and traj sets hold
 
     render::neural::Mlp mlp_;
     Trajectory trajectory_ = Trajectory::Linear;
