@@ -2530,10 +2530,11 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     // its pick probability. Stage B shades both from gRdSunVisTex (exact light's visibility) and gRdLocalOut
     // (x exact index, y tail index, z tail visibility / pick probability; -1 none; a the lamp visibility the glass
     // replay's 5x5 reads). By day the exact light is the sun because it delivers the most.
-    // STABLE EXACT LIGHT: last frame's exact light at this pixel stays exact while it delivers at least 80% of the
-    // strongest, so near-equal candles do not trade places (each swap restarts the exact light's shadow history).
-    const uint prevE0 = (rdLocalHistValid() && gRdLocalHist.Load(int3(pixel, 0)).x >= 0.0)
-                      ? (uint)gRdLocalHist.Load(int3(pixel, 0)).x : 0xFFFFFFFFu;
+    // STABLE EXACT LIGHT: last frame's exact light at this pixel (by its key, gRdLocalOut.y, not its list index, which
+    // moves as the list reorders) stays exact while it delivers at least 80% of the strongest, so near-equal candles do
+    // not trade places (each swap restarts the exact light's shadow history).
+    const float prevKey = rdLocalHistValid() ? gRdLocalHist.Load(int3(pixel, 0)).y : -1.0;
+    uint  prevE0 = 0xFFFFFFFFu;
     uint  e0 = 0xFFFFFFFFu;
     float w0 = 0.0, wPrev = 0.0, wShadow = 0.0;   // wShadow: every shadowable light's weight
     {
@@ -2543,10 +2544,10 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
             const float w = averShadowLum(aversLightIrradiance(gRdLocalLights[j], s.wpos, s.N));
             if (!(w > 0.0)) continue;
             if (!aversLightNoShadow(gRdLocalLights[j])) wShadow += w;
-            if (j == prevE0) wPrev = w;
+            if (prevKey >= 0.0 && rdLightKey(gRdLocalLights[j]) == prevKey && w > wPrev) { prevE0 = j; wPrev = w; }
             if (w > w0) { e0 = j; w0 = w; }
         }
-        if (wPrev >= 0.8 * w0 && wPrev > 0.0) { e0 = prevE0; w0 = wPrev; }
+        if (prevE0 != 0xFFFFFFFFu && wPrev >= 0.8 * w0) { e0 = prevE0; w0 = wPrev; }
     }
     const bool  haveE0 = e0 != 0xFFFFFFFFu;
     const float3 L = haveE0 ? rdSetShadowLight(gRdLocalLights[e0], s.wpos) : normalize(gLightDir.xyz);
@@ -2590,12 +2591,13 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
 #endif
     rdResetShadowLight();
-    // THE TAIL's shadow fraction (rdTailVisibility). gRdLocalOut = (exact light, unused, unused, tail fraction); .a
-    // is next frame's history and what Stage B's (and the glass replay's) 5x5 reads.
+    // THE TAIL's shadow fraction (rdTailVisibility). gRdLocalOut = (exact light's index, its key, unused, tail
+    // fraction); .y and .a are next frame's history, .a also what Stage B's (and the glass replay's) 5x5 reads.
     const float twS = wShadow - ((haveE0 && !e0NoShadow) ? w0 : 0.0);
     float tailHist;
     rdTailVisibility(e0, twS, s.wpos, s.N, float2(pixel) + 0.5, pixel, tailHist);
-    gRdLocalOut[pixel] = float4(haveE0 ? (float)e0 : -1.0, -1.0, 0.0, tailHist);
+    gRdLocalOut[pixel] = float4(haveE0 ? (float)e0 : -1.0, haveE0 ? rdLightKey(gRdLocalLights[e0]) : -1.0, 0.0,
+                                tailHist);
     // Primary surface linear view depth (for blended-replay reuse test).
     const float rdSunVisViewZ = mul(float4(s.wpos, 1.0), gViewProj).w;
     gRdSunVisTex[pixel] = float4(sunVis, rdSunVisViewZ);

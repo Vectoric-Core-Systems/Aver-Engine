@@ -1256,6 +1256,14 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
 float averShadowLum(float3 v) { return dot(v, float3(0.2126, 0.7152, 0.0722)); }
 
 #if AVER_RD_LAMPS
+// A light's stable key from its position (cm), 1..4095; 0 is a directional light. Unlike its list index, it survives
+// the list reordering as the camera moves.
+float rdLightKey(RdLocalLight l) {
+    if (aversLightKind(l) == AVER_LIGHT_DIRECTIONAL) return 0.0;
+    const uint3 q = (uint3)(int3(round(l.posRadius.xyz)) + 1048576);
+    return (float)(1u + (((q.x * 73856093u) ^ (q.y * 19349663u) ^ (q.z * 83492791u)) % 4095u));
+}
+
 // The direction toward list entry `l` from `wpos`, and the shadow kernels' disc, ray length and history key for it
 // (gAverShadow*). A rectangle is traced toward its centre with the disc of its equal-area circle.
 float3 rdSetShadowLight(RdLocalLight l, float3 wpos) {
@@ -1271,9 +1279,7 @@ float3 rdSetShadowLight(RdLocalLight l, float3 wpos) {
                                                              : l.posRadius.w;
     gAverShadowTanR = rad / dist;
     gAverShadowTMax = max(dist - rad * 1.25, 0.0);
-    // A stable key from the light's position (cm), 1..4095; 0 is a directional light.
-    const uint3 q = (uint3)(int3(round(l.posRadius.xyz)) + 1048576);
-    gAverShadowLightId = (float)(1u + (((q.x * 73856093u) ^ (q.y * 19349663u) ^ (q.z * 83492791u)) % 4095u));
+    gAverShadowLightId = rdLightKey(l);
     return toC / dist;
 }
 void rdResetShadowLight() {

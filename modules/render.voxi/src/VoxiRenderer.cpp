@@ -4067,11 +4067,20 @@ void VoxiRenderer::buildLocalLights() {
             rdLocalLightsBound_ = buf;
             // The raster path's working set: the first lamps (the list is importance-ordered), never the sun.
             rdLocalLightCount_ = std::min(rdLocalLampCount_, kMaxLocalLights);
-            u64 h = 1469598103934665603ull;
-            // The working set only: lamp visibility history is keyed on it, and a moving sun must not invalidate it.
+            // Lamp visibility history is valid while the SET of lamps is the same: an order-independent sum of
+            // per-lamp hashes, since the list is ordered by importance from the camera and reorders as it moves (an
+            // ordered hash threw the history away on every camera move). The sun is left out: it moves every frame.
+            u64 h = 0;
             const u8* bytes = reinterpret_cast<const u8*>(rdLocalLightData_.data());
-            for (usize i = 0; i < sizeof(RdLocalLight) * rdLocalLightCount_; ++i) { h ^= bytes[i]; h *= 1099511628211ull; }
-            h ^= rdLocalLightCount_; h *= 1099511628211ull;
+            for (u32 l = 0; l < rdLocalLampCount_; ++l) {
+                u64 one = 1469598103934665603ull;
+                for (usize i = 0; i < sizeof(RdLocalLight); ++i) {
+                    one ^= bytes[l * sizeof(RdLocalLight) + i];
+                    one *= 1099511628211ull;
+                }
+                h += one;
+            }
+            h ^= rdLocalLampCount_; h *= 1099511628211ull;
             rdLocalLightHash_ = h;
         } else {
             cb_.decalParams[1] = 0.0f;
