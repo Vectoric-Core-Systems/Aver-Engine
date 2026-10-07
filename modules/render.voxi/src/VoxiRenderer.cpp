@@ -4470,6 +4470,7 @@ void VoxiRenderer::giBuildStep(rhi::IRenderContext& ctx) {
 // Clears the accumulator, rasterises the scene into it with direct lighting applied, then resolves
 // it into mip 0 of the radiance volume.
 void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx, usize begin, usize end, bool first, bool last) {
+    if (!clearPso_ || !voxelPso_ || !resolvePso_) return;   // pipelines not built (yet): draws would use a stale PSO
     end = std::min(end, drawsPrev_.size());
     if (!voxelAccumTex_) {
         static bool sNoAccumWarned = false;
@@ -4655,6 +4656,7 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx, usize begin, usize end
 // Box-filters each level of the radiance volume into the next, then hands the whole chain back as
 // a shader resource.
 void VoxiRenderer::filterMips(rhi::IRenderContext& ctx) {
+    if (!mipPso_) return;
     rhi::ScopedGpuStat gpuStat(ctx, "Voxi mip filter");
     ++voxelGen_;
     ctx.uavBarrierTexture(voxelTex_);
@@ -5289,10 +5291,18 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
 void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
                                           u32 width, u32 height) {
     if (!res_ || !giReady_) return;
-    if (!createScenePipelines(sampleCount, color, depth))
-        AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for {} sample(s)", sampleCount);
-    scenePipelineGraphRev_ = pbr::materialGraphs().revision();
-    scenePipelineShaderRev_ = rhi::shaderFileRevision();   // same reason as the line above
+    // The scene pipelines bake only the sample count and the two formats (and the shader/graph revisions prePass
+    // watches): a resize, render-scale change or G-buffer toggle that keeps them reuses the set. Rebuilding anyway
+    // compiled ~41 pipelines twice at startup (addRenderFeature) and again on every resize.
+    const bool same = scenePso_ && sampleCount == sceneSampleCount_ && color == sceneColorFmt_ &&
+                      depth == sceneDepthFmt_ && scenePipelineGraphRev_ == pbr::materialGraphs().revision() &&
+                      scenePipelineShaderRev_ == rhi::shaderFileRevision();
+    if (!same) {
+        if (!createScenePipelines(sampleCount, color, depth))
+            AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for {} sample(s)", sampleCount);
+        scenePipelineGraphRev_ = pbr::materialGraphs().revision();
+        scenePipelineShaderRev_ = rhi::shaderFileRevision();   // same reason as the line above
+    }
     // Remembered even when the call below decides to allocate nothing: setSettings needs a size to
     // create at if ray tracing is switched on later.
     rtHistWantW_ = width;

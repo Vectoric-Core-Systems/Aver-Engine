@@ -8410,7 +8410,9 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderContext::ringAlloc(const void* data, u32 by
 
 // Draws a device mesh through the input assembler.
 void D3D12RenderContext::drawMesh(MeshHandle mesh) {
-    if (!dev_->cmdList_) return;
+    // No pipeline bound (setPipeline(0): one still compiling or never built): skip, rather than draw with whatever
+    // PSO and root signature the command list last had.
+    if (!dev_->cmdList_ || !pipe_) return;
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] drawMesh with an invalid mesh handle"); return; }
     const GpuMesh& m = dev_->meshes_[mesh - 1];
     applyDrawBinding();
@@ -8597,7 +8599,7 @@ void D3D12RenderContext::copyTexture(TextureHandle dst, TextureHandle src) {
 
 // Draws a fullscreen triangle; the vertex shader builds it from SV_VertexID.
 void D3D12RenderContext::drawFullscreen() {
-    if (!dev_->cmdList_) return;
+    if (!dev_->cmdList_ || !pipe_) return;   // as drawMesh: never with a stale PSO
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     dev_->cmdList_->IASetVertexBuffers(0, 0, nullptr);
     dev_->cmdList_->DrawInstanced(3, 1, 0, 0);
