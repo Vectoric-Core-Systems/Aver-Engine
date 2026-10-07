@@ -3,7 +3,9 @@
 #include "EditorNotifications.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Types.hpp"
+#include "aver/platform/FileSystem.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -39,6 +41,34 @@ struct ShaderWarmup::Impl {
     bool done = false;
     std::chrono::steady_clock::time_point t0{};
     std::string lastNote;
+    long long total = 0;      // shader requests of the last finished run (warm_total.txt), 0 = not known yet
+    long long requests = 0;
+
+    // The total persists next to the shader blob cache: the request count barely changes between runs.
+    static std::filesystem::path totalPath() {
+        const std::string dir = userDataDir();
+        return dir.empty() ? std::filesystem::path() : std::filesystem::path(dir) / "ShaderCache" / "warm_total.txt";
+    }
+    void loadTotal() {
+        const std::filesystem::path p = totalPath();
+        if (p.empty()) return;
+        if (FILE* f = _wfopen(p.c_str(), L"rb")) {
+            char buf[32] = {};
+            std::fread(buf, 1, sizeof buf - 1, f);
+            std::fclose(f);
+            total = std::atoll(buf);
+        }
+    }
+    void saveTotal(long long n) {
+        const std::filesystem::path p = totalPath();
+        if (p.empty() || n <= 0) return;
+        std::error_code ec;
+        std::filesystem::create_directories(p.parent_path(), ec);
+        if (FILE* f = _wfopen(p.c_str(), L"wb")) {
+            std::fprintf(f, "%lld", n);
+            std::fclose(f);
+        }
+    }
 
     void readLoop() {
 #ifdef _WIN32
@@ -94,6 +124,8 @@ void ShaderWarmup::start(const std::string& projectManifest) {
     impl_->done = false;
     impl_->exited = false;
     impl_->toast = 0;
+    impl_->requests = 0;
+    impl_->loadTotal();
     impl_->t0 = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::mutex> lk(impl_->mu);
@@ -166,11 +198,26 @@ void ShaderWarmup::poll() {
             const std::string rest = l.substr(14);
             const usize sp = rest.find(' ');
             const long long compiled = sp == std::string::npos ? 0 : std::atoll(rest.c_str() + sp + 1);
+            impl_->requests = std::atoll(rest.c_str());
             if (compiled > 0) showToast();
-            impl_->lastNote = std::to_string(compiled) + " compiled so far";
-            if (impl_->toast) q.setProgress(impl_->toast, -1.0f, impl_->lastNote);
+            // "<done> of <total> shaders" with a bar; the first run ever (no total yet) counts without one.
+            const long long total = std::max(impl_->total, impl_->requests);
+            float frac = -1.0f;
+            if (impl_->total > 0) {
+                impl_->lastNote = std::to_string(impl_->requests) + " of " + std::to_string(total) + " shaders";
+                frac = std::min(static_cast<float>(impl_->requests) / static_cast<float>(total), 0.99f);
+            } else {
+                impl_->lastNote = std::to_string(impl_->requests) + " shaders";
+            }
+            if (impl_->toast) q.setProgress(impl_->toast, frac, impl_->lastNote);
         } else if (l.rfind("warm: done ", 0) == 0) {
             const double sec = std::atof(l.c_str() + 11) / 1000.0;
+            const usize sp = l.find(' ', 11);
+            if (sp != std::string::npos) {
+                impl_->requests = std::atoll(l.c_str() + sp + 1);
+                impl_->saveTotal(impl_->requests);
+                impl_->lastNote = std::to_string(impl_->requests) + " shaders";
+            }
             char body[96];
             std::snprintf(body, sizeof body, "Shader cache ready (%.0f s, %s).", sec,
                           impl_->lastNote.empty() ? "pipelines built" : impl_->lastNote.c_str());

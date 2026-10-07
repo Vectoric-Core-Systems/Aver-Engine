@@ -515,6 +515,10 @@ public:
     // The sun's linear radiance exactly as the shaders' averSunRadiance() reads it (decoded colour times
     // intensity, 0 in the plain furnace). False where the backend does not know it.
     virtual bool sunRadianceLinear(f32 out[3]) const { out[0] = out[1] = out[2] = 0.0f; return false; }
+    // Called after every shader request (compiled or served from the blob cache) with the running totals; null
+    // clears it. Process-wide, any thread that compiles. For progress reporting (the editor's shader warm-up).
+    using ShaderRequestObserver = void (*)(u32 requests, u32 cacheHits, void* user);
+    virtual void setShaderRequestObserver(ShaderRequestObserver, void*) {}
     // Sets the camera post-processing chain.
     virtual void setPostProcess(const PostSettings& p) { (void)p; }
     virtual PostSettings postProcess() const { return {}; }

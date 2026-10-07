@@ -167,6 +167,8 @@ public:
     static inline u32 s_compiles = 0;
     static inline f64 s_compileMs = 0.0;
     static inline u32 s_cacheHits = 0;
+    static inline IDevice::ShaderRequestObserver s_observer = nullptr;
+    static inline void* s_observerUser = nullptr;
 
     HRESULT compile(const char* src, const char* entry, const char* target51, ID3DBlob** out,
                     const char* sm6 = nullptr, const char* define = nullptr) {
@@ -182,6 +184,7 @@ public:
                     AVER_INFO("[RHI.D3D12] {} shader request(s): {} served from the blob cache, "
                               "{} compiled in {:.0f} ms",
                               s_compiles, s_cacheHits, s_compiles - s_cacheHits, s_compileMs);
+                if (s_observer) s_observer(s_compiles, s_cacheHits, s_observerUser);
             }
         } report{t0};
         std::vector<std::string> defs;
@@ -1000,6 +1003,10 @@ public:
     }
     void setSkyAtmosphere(const SkyAtmosphere& s) override;
     SkyAtmosphere skyAtmosphere() const override { return sky_; }
+    void setShaderRequestObserver(ShaderRequestObserver fn, void* user) override {
+        ShaderCompiler::s_observerUser = user;
+        ShaderCompiler::s_observer = fn;
+    }
     bool sunRadianceLinear(f32 out[3]) const override {
         // averSunRadiance(): srgbToLin (pow 2.2) of the uploaded colour, times gSkyParams.z; off in the plain furnace.
         const bool off = frameCB_.furnace[0] > 0.5f && frameCB_.furnace[2] < 0.5f;

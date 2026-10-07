@@ -11,7 +11,6 @@
 //
 // stdout, one line each, for the editor to read: "warm: start", "warm: shaders <requests> <compiled>",
 // "warm: done <ms>" or "warm: fail <reason>". Returns 0 done, 1 failed, 77 no capable device.
-#include "aver/core/Log.hpp"
 #include "aver/formats/OcProject.hpp"
 #include "aver/render/denoise/Nrd2.hpp"
 #include "aver/rhi/RHI.hpp"
@@ -35,18 +34,16 @@ void say(const std::string& line) {
     std::fflush(stdout);
 }
 
-// The RHI reports "<n> shader request(s): <h> served from the blob cache, <c> compiled in <t> ms" at a
-// power-of-two cadence; forwarded as progress.
-void sink(void*, LogLevel, std::string_view msg) {
-    const usize at = msg.find(" shader request(s): ");
-    if (at == std::string_view::npos) return;
-    usize b = at;
-    while (b > 0 && msg[b - 1] >= '0' && msg[b - 1] <= '9') --b;
-    const std::string requests(msg.substr(b, at - b));
-    const usize c = msg.find("cache, ", at);
-    const usize e = c == std::string_view::npos ? c : msg.find(" compiled", c);
-    if (c == std::string_view::npos || e == std::string_view::npos) return;
-    say("warm: shaders " + requests + " " + std::string(msg.substr(c + 7, e - (c + 7))));
+// Every shader request, forwarded as "warm: shaders <requests> <compiled>" at most every 200 ms (and the last one
+// at the end, with "warm: done").
+std::chrono::steady_clock::time_point g_lastSay{};
+u32 g_requests = 0;
+void onShaderRequest(u32 requests, u32 cacheHits, void*) {
+    g_requests = requests;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g_lastSay < std::chrono::milliseconds(200)) return;
+    g_lastSay = now;
+    say("warm: shaders " + std::to_string(requests) + " " + std::to_string(requests - cacheHits));
 }
 
 }  // namespace
@@ -54,7 +51,6 @@ void sink(void*, LogLevel, std::string_view msg) {
 int runShaderWarm(const std::string& projectPath) {
     const auto t0 = std::chrono::steady_clock::now();
     say("warm: start");
-    setLogSink(&sink, nullptr);
 
     rhi::DeviceDesc desc;
     desc.preferred[0] = rhi::Backend::D3D12;
@@ -65,6 +61,7 @@ int runShaderWarm(const std::string& projectPath) {
         if (dev) rhi::destroyDevice(dev);
         return 77;
     }
+    dev->setShaderRequestObserver(&onShaderRequest, nullptr);
     const rhi::DeviceCaps caps = dev->caps();
     if (caps.rayTracingTier < 11 || caps.shaderModel < 66 || !caps.dxcAvailable) {
         say("warm: fail no ray tracing 1.1 / SM 6.6 / DXC");
@@ -97,10 +94,11 @@ int runShaderWarm(const std::string& projectPath) {
         render::denoise::Nrd2 nrd2;
         if (nrd2.create(*dev)) nrd2.destroy();
     }
-    setLogSink(nullptr, nullptr);
+    dev->setShaderRequestObserver(nullptr, nullptr);
     rhi::destroyDevice(dev);
     const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    if (rc == 0) say("warm: done " + std::to_string(static_cast<long long>(ms)));
+    // "warm: done <ms> <requests>": the editor keeps the request count as the next run's total.
+    if (rc == 0) say("warm: done " + std::to_string(static_cast<long long>(ms)) + " " + std::to_string(g_requests));
     return rc;
 }
 

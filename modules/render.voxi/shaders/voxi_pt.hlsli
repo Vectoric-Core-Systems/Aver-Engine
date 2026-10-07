@@ -125,13 +125,6 @@ bool ptLampLight(RdLocalLight ll, AverSurface s, float3 pos, out AverLight l, ou
 // that flashed under lamps. By day the sun is in the exact set because it delivers the most.
 // K is 2 in the bindless staged passes and 1 in the ray-traced raster, glass and single-pass variants, which are at
 // their register limit (three GPU hangs on the RX 7800 XT came from growing them).
-#ifndef AVER_LIGHTS_EXACT_K
-#if defined(AVER_RT_BINDLESS) && !AVER_BLENDED_PASS && !AVER_RD_SINGLE_PASS
-#define AVER_LIGHTS_EXACT_K 2u
-#else
-#define AVER_LIGHTS_EXACT_K 1u
-#endif
-#endif
 
 #if AVER_RD_LAMPS
 float giHitShadowMapVisibility(float3 wpos, float3 N, float3 L);   // voxi_restir.hlsli
@@ -160,79 +153,24 @@ float3 averLightVisibility(RdLocalLight ll, float3 pos, float3 N, float2 pixel, 
 
 float3 averDirectLights(AverSurface s, float3 pos, float2 pixel, inout uint rng, bool allowMap) {
 #if AVER_RD_LAMPS
+    // EVERY LIGHT THE SUN'S WAY: exact shading and its own shadow ray, nothing picked at random. Lights under 1/512
+    // of the strongest here are skipped (under 0.2% each). One visibility call in the loop: each call site inlines
+    // the whole shadow kernel (three took the path tracer's compile over 10 minutes).
     const RdLightRange lr = rdLightsAt(pos);
-    uint  e0 = 0xFFFFFFFFu, e1 = 0xFFFFFFFFu, tp = 0xFFFFFFFFu;
-    float w0 = 0.0, w1 = 0.0, tw = 0.0;
-    bool  tail = false;   // any light outside the exact set reaches this point
+    float wMax = 0.0;
+    [loop] for (uint k = 0u; k < lr.count; ++k)
+        wMax = max(wMax, averShadowLum(aversLightIrradiance(gRdLocalLights[rdLightIndex(lr, k)], pos, s.N)));
+    const float floorW = wMax * (1.0 / 512.0);
+    float3 sum = float3(0.0, 0.0, 0.0);
     [loop] for (uint k = 0u; k < lr.count; ++k) {
         const uint j = rdLightIndex(lr, k);
-        float w  = averShadowLum(aversLightIrradiance(gRdLocalLights[j], pos, s.N));
-        if (!(w > 0.0)) continue;
-        uint  ci = j;
-        // Insert into the exact set; whatever it displaces (or this light, if it does not get in) joins the tail.
-        if (w > w0) { const uint ti = e0; const float tww = w0; e0 = ci; w0 = w; ci = ti; w = tww; }
-#if AVER_LIGHTS_EXACT_K >= 2
-        if (w > w1) { const uint ti = e1; const float tww = w1; e1 = ci; w1 = w; ci = ti; w = tww; }
-#endif
-        if (ci != 0xFFFFFFFFu && w > 0.0) {
-            tail = true;
-            // The shadow ray's light: a reservoir over the tail's shadowable lights, by irradiance.
-            if (!aversLightNoShadow(gRdLocalLights[ci])) {
-                tw += w;
-                if (ptRand(rng) * tw < w) tp = ci;
-            }
-        }
-    }
-    // Shadow rays: the exact lights' own, then the tail's one (its 0/1 answer is the tail's shadow fraction). One
-    // visibility call in a loop, not one per light: each call inlines the whole shadow kernel, and three copies per
-    // evaluator took the path tracer's compile from ~30 s to over 10 minutes.
-    float3 sum = float3(0.0, 0.0, 0.0);
-    float  tailVis = 1.0;
-    [loop] for (uint k = 0u; k < 3u; ++k) {
-        const uint li = k == 0u ? e0 : k == 1u ? e1 : tp;
-        if (li == 0xFFFFFFFFu) continue;
-        const RdLocalLight ll = gRdLocalLights[li];
+        const RdLocalLight ll = gRdLocalLights[j];
+        if (!(averShadowLum(aversLightIrradiance(ll, pos, s.N)) > floorW)) continue;
         AverLight   l;
         AverSurface sL;
         if (!ptLampLight(ll, s, pos, l, sL) || dot(s.N, l.direction) <= 0.0) continue;
-        const float3 v = averLightVisibility(ll, pos, s.N, pixel, rng, allowMap);
-        if (k == 2u) { tailVis = saturate(averShadowLum(v)); continue; }
-        l.visibility = v;
+        l.visibility = averLightVisibility(ll, pos, s.N, pixel, rng, allowMap);
         sum = averShadeDirect(sum, sL, l);
-    }
-    // The tail: every other light exact, unshadowed, times that one fraction (no-shadow lights at 1).
-    if (tail) {
-#if AVER_LIGHTS_EXACT_K >= 2
-        // Compute passes only: a tail light under 1/512 of the strongest is dropped, and on a rough, non-metal,
-        // non-subsurface surface it is shaded diffuse-only (its GGX lobe is a few percent of a dim light).
-        const float floorW = w0 * (1.0 / 512.0);
-        const bool cheapTail = s.rough >= 0.5 && max(s.F0.x, max(s.F0.y, s.F0.z)) <= 0.08 && s.sssWeight <= 0.0 &&
-                               s.model != AVER_MODEL_UNLIT;
-#endif
-        [loop] for (uint k = 0u; k < lr.count; ++k) {
-            const uint j = rdLightIndex(lr, k);
-            if (j == e0 || j == e1) continue;
-            const RdLocalLight ll = gRdLocalLights[j];
-            AverLight   l;
-            AverSurface sL;
-#if AVER_LIGHTS_EXACT_K >= 2
-            if (cheapTail) {
-                float srcR;
-                if (!aversLightEval(ll, pos, s.N, l.direction, l.radiance, srcR)) continue;
-                const float ndl = saturate(dot(s.N, l.direction));
-                if (averShadowLum(l.radiance) * ndl <= floorW) continue;
-                const float vis = aversLightNoShadow(ll) ? 1.0 : tailVis;
-                sum += s.kdAlbedo * (1.0 / PI) * l.radiance * (ndl * vis);
-                continue;
-            }
-#endif
-            if (!ptLampLight(ll, s, pos, l, sL)) continue;
-#if AVER_LIGHTS_EXACT_K >= 2
-            if (averShadowLum(l.radiance) * saturate(dot(s.N, l.direction)) <= floorW) continue;
-#endif
-            l.visibility = (aversLightNoShadow(ll) ? 1.0 : tailVis).xxx;
-            sum = averShadeDirect(sum, sL, l);
-        }
     }
     return sum;
 #else

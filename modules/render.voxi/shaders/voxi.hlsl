@@ -634,12 +634,9 @@ void rdListLightSplit(uint i, AverSurface s, float3 wpos, float3 vis, inout floa
 }
 
 // ---- THE TAIL: every light but the exact one, lit the way the sun is (UNIFIED_LIGHTS.md "Tail") ----
-// Shading is exact and noise-free: every tail light through the BRDF, unshadowed. Only the SHADOW is estimated:
-// one fraction in [0, 1] for all of them, the irradiance-weighted share that is unblocked (one light picked in
-// proportion to its irradiance, one ray; its 0/1 answer is an unbiased estimate of that share). Like the sun's
-// visibility it is accumulated over frames (FidelityFX mode) and filtered over 5x5 in Stage B, so the noise is a
-// bounded fraction, never a light's radiance divided by its pick probability. Colour is approximate where tail
-// lights are blocked differently (one fraction for all, as the lamp system always had).
+// Shading is exact: every tail light through the BRDF. Every tail light also gets its own shadow ray every frame,
+// as the sun does; their answers are stored as one irradiance-weighted unblocked fraction (one texel per pixel), so
+// colour is approximate only where tail lights of different colours are blocked differently.
 
 // The tail's light weight at a point: the exact light and no-shadow lights excluded (those need no ray).
 float rdTailWeight(uint j, uint e0, float3 wpos, float3 N) {
@@ -648,8 +645,7 @@ float rdTailWeight(uint j, uint e0, float3 wpos, float3 N) {
 }
 
 // CSRdShadow's tail shadow fraction. Returns the value to shade with; histOut is what is stored in gRdLocalOut.a
-// (next frame's history). History through the lamp history pair and the sun's reprojection, exactly as the lamp
-// visibility always was (rdLocalHistBilinear / rdLocalHistFiltered, alternate-frame tracing once history holds).
+// (next frame's history), through the lamp history pair and the sun's reprojection.
 // DERIVATIVES: rtReprojectTexel runs first, behind constant-buffer conditions only.
 float rdTailVisibility(uint e0, float twS, float3 wpos, float3 N, float2 pixelC, uint2 pixel, out float histOut) {
     int2   texel      = int2(0, 0);
@@ -657,49 +653,32 @@ float rdTailVisibility(uint e0, float twS, float3 wpos, float3 N, float2 pixelC,
     bool   haveHist   = false;
     if (gRtHistParams.x > 0.5 && gRtHistParams.y > 0.25 && rdLocalHistValid())
         haveHist = rtReprojectTexel(wpos, pixelC, texel, velocityPx);
-    float prevVisC = 1.0, prevVisF = 1.0;
-    if (haveHist) {
-        const float2 pxPrev = pixelC + velocityPx;
-        prevVisC = rdLocalHistBilinear(pxPrev, texel);
-        prevVisF = rdLocalHistFiltered(pxPrev, texel);
-    }
-    const uint frameIdx = (uint)gRtHistParams.z;
-    const bool myTurn   = !haveHist || (((pixel.x + pixel.y + frameIdx) & 1u) == 0u);
-    const uint turn     = haveHist ? (frameIdx >> 1) : frameIdx;
-    float vis = prevVisF;
-    histOut   = prevVisC;
-    if (myTurn) {
-        vis = 1.0;
-        if (twS > 0.0) {
-            // NRD2 frames (no history): each pixel of a 5x5 block takes its own 25th of the weight CDF, so Stage B's
-            // 5x5 averages an even sample of the tail (rdLocalLightsVisibility's stratified pick).
-            const uint  sa   = pixel.x % 5u, sb = pixel.y % 5u;
-            const float uPix = rtNrd2Frame() ? ((float)(5u * ((sa + 2u * sb) % 5u) + (2u * sa + sb) % 5u) + 0.5) / 25.0
-                                             : rtHash(pixelC + float2(0.37, 11.0));
-            const float target = frac(uPix + rtRadicalInverse2(turn + 1u)) * twS;
-            const RdLightRange lr = rdLightsAt(wpos);
-            uint  pick = 0xFFFFFFFFu, last = 0xFFFFFFFFu;
-            float acc  = 0.0;
-            [loop] for (uint k = 0u; k < lr.count; ++k) {
-                const uint  j = rdLightIndex(lr, k);
-                const float w = rdTailWeight(j, e0, wpos, N);
-                if (!(w > 0.0)) continue;
-                last = j;
-                acc += w;
-                if (target < acc) { pick = j; break; }
-            }
-            if (pick == 0xFFFFFFFFu) pick = last;   // target rounded up to the sum
-            if (pick != 0xFFFFFFFFu) {
-                const float3 Lt = rdSetShadowLight(gRdLocalLights[pick], wpos);
-                const float  v  = averShadowLum(rtShadowEx(wpos, N, Lt, pixelC, float3(0, 0, 0), float3(0, 0, 0), 1u,
-                                                           averGoldenTurns(turn), 0u));
-                rdResetShadowLight();
-                // The lamp history's measured blend: 0.05 at rest, 0.2 by 32 px/frame, into the filtered history.
-                vis = haveHist ? lerp(prevVisF, v, lerp(0.05, 0.2, saturate(length(velocityPx) / 32.0))) : v;
-            }
+    float prevVisF = 1.0;
+    if (haveHist) prevVisF = rdLocalHistFiltered(pixelC + velocityPx, texel);
+    // EVERY TAIL LIGHT ITS OWN RAY, EVERY FRAME, as the sun gets: the irradiance-weighted share of them that is
+    // unblocked, exact up to each ray's disc sample. Lights under 1/512 of the tail's total are skipped.
+    float vis = 1.0;
+    if (twS > 0.0) {
+        const uint turn = (uint)gRtHistParams.z;
+        const float floorW = twS * (1.0 / 512.0);
+        const RdLightRange lr = rdLightsAt(wpos);
+        float sumW = 0.0, sumV = 0.0;
+        [loop] for (uint k = 0u; k < lr.count; ++k) {
+            const uint  j = rdLightIndex(lr, k);
+            const float w = rdTailWeight(j, e0, wpos, N);
+            if (!(w > floorW)) continue;
+            const float3 Lt = rdSetShadowLight(gRdLocalLights[j], wpos);
+            const float  v  = averShadowLum(rtShadowEx(wpos, N, Lt, pixelC, float3(0, 0, 0), float3(0, 0, 0), 1u,
+                                                       averGoldenTurns(turn), 0u));
+            sumW += w;
+            sumV += w * v;
         }
-        histOut = vis;
+        rdResetShadowLight();
+        if (sumW > 0.0) vis = sumV / sumW;
+        // History as the sun's (FidelityFX mode only; NRD2 frames have none): 0.05 at rest, 0.2 by 32 px/frame.
+        if (haveHist) vis = lerp(prevVisF, vis, lerp(0.05, 0.2, saturate(length(velocityPx) / 32.0)));
     }
+    histOut = vis;
     return vis;
 }
 
