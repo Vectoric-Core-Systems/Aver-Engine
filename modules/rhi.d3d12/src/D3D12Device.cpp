@@ -7431,20 +7431,15 @@ public:
     void start() override {
         std::shared_ptr<Shared> sh = s_;
         if (sh->started.load()) return;
-        sh->outstanding = sh->total.load();
+        // Workers only compile (DXC, CPU). Pipeline states are created in adopt(), on the owner thread:
+        // concurrent Create*PipelineState beside frame submission lost the device on an RX 7800 XT.
+        sh->outstanding = static_cast<u32>(sh->shaders.size());
         sh->started = true;
-        if (sh->total == 0) return;
+        if (sh->shaders.empty()) return;
         PipelinePool& pool = f_.pipelinePool();
         sh->pool = &pool;
-        // Which pipelines can run at once, BEFORE any shader task exists: once one does, workers decrement
-        // `remaining` and queue the pipelines it frees, and this loop must not see (and queue) them too.
-        std::vector<u32> ready;
-        for (u32 i = 0; i < sh->pipes.size(); ++i)
-            if (sh->pipes[i].remaining == 0) ready.push_back(i);
         for (u32 i = 0; i < sh->shaders.size(); ++i)
             pool.submit([sh, i] { runShader(sh, i); });
-        for (u32 i : ready)
-            pool.submit([sh, i] { runPipe(sh, i); });
     }
     bool finished() const override {
         const Shared& s = *s_;
@@ -7464,6 +7459,7 @@ public:
         Shared& s = *s_;
         if (adopted_ || !finished() || s.cancelled) return;
         adopted_ = true;
+        for (u32 i = 0; i < s.pipes.size(); ++i) runPipe(s_, i);
         for (PipeSlot& p : s.pipes) {
             if (!p.ok) continue;
             f_.pipelines_.push_back(std::move(p.built));
@@ -7581,17 +7577,10 @@ private:
                 AVER_ERROR("[RHI.D3D12] pipeline batch: shader '{}' threw while compiling", sl.entry);
             }
         }
-        // Release the dependents whose last shader this was. Their tasks start after this one is fully done.
-        std::vector<u32> ready;
-        {
+        if (!ok) {
             std::lock_guard<std::mutex> lock(s.m);
-            for (u32 pi : sl.dependents) {
-                PipeSlot& p = s.pipes[pi];
-                if (!ok) p.depFailed = true;
-                if (--p.remaining == 0) ready.push_back(pi);
-            }
+            for (u32 pi : sl.dependents) s.pipes[pi].depFailed = true;
         }
-        for (u32 pi : ready) s.pool->submit([sh, pi] { runPipe(sh, pi); });
         finishTask(s);
     }
 
@@ -7612,7 +7601,7 @@ private:
             }
         }
         p.ok = ok;
-        finishTask(s);
+        ++s.done;
     }
 
     D3D12ResourceFactory& f_;
