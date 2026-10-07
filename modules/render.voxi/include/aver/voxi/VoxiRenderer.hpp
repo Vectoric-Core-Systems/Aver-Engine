@@ -254,6 +254,14 @@ private:
     // The scene set stands and matches the targets: every recorder may run. Changes only at frame boundaries,
     // except that a target change (onRenderTargetsChanged) clears it at once.
     bool canRecord() const { return giReady_ && !targetsStale_; }
+    // Just after a scene set lands, ray-driven is meant to paint but its acceleration structure is not built
+    // yet: the frame stays blank instead of the raster path drawing it (its ray-traced glass replay hung the
+    // RX 7800 XT at project open). Ends when rtActive_ is set, or after rdSettle_ frames.
+    u32 rdSettle_ = 0;
+    bool rdSettling() const {
+        return rdSettle_ > 0 && canRecord() && !rtActive_ && rtSupported_ && settings_.rayTracing != Quality::Off &&
+               rtRenderMode_ == 1u && rayDrivenPso_ != 0;
+    }
 
     bool asyncBuilds_ = false;
     bool initialised_ = false;      // init() succeeded and shutdown() has not run
@@ -1469,7 +1477,7 @@ public:
         const bool rayDrivenWillBeActive = rtSupported_ && settings_.rayTracing != Quality::Off &&
                                             !draws_.empty() && rtRenderMode_ == 1u &&
                                             rayDrivenPso_ != 0;
-        return blocked_ || debugViewActive() || (canRecord() && rayDrivenWillBeActive);
+        return blocked_ || debugViewActive() || rdSettling() || (canRecord() && rayDrivenWillBeActive);
     }
 
 private:

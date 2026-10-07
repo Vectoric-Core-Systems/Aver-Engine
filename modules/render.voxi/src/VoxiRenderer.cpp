@@ -1129,6 +1129,7 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // suppressesWholeFrame) to leave the frame blank, and no pass of ours records at all.
     pumpBuilds(false);
     if (!canRecord()) return;
+    if (rdSettle_) --rdSettle_;
     ++rtFrameIndex_;
     // Sample frame time at the TOP of the feature's frame.
     if (frameTimeReport_) {
@@ -4663,10 +4664,12 @@ rhi::BindlessTableHandle VoxiRenderer::sceneBindlessTable() const { return rtTex
 
 // While the scene set builds (blocked_, latched at prePass) Voxi claims the scene and records nothing: the
 // frame is blank rather than drawn by a half-built renderer.
-bool VoxiRenderer::suppressesScene() const { return blocked_ || targetsStale_ || debugViewActive() || rayDrivenActive(); }
+bool VoxiRenderer::suppressesScene() const {
+    return blocked_ || targetsStale_ || rdSettling() || debugViewActive() || rayDrivenActive();
+}
 
 // Debug raymarch has no depth; ray-driven writes real depth so sky lands on ray misses.
-bool VoxiRenderer::suppressesWholeFrame() const { return blocked_ || targetsStale_ || debugViewActive(); }
+bool VoxiRenderer::suppressesWholeFrame() const { return blocked_ || targetsStale_ || rdSettling() || debugViewActive(); }
 
 // Draws the scene pass replacement (debug view or ray-driven); debug wins if both are active.
 void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
@@ -7822,6 +7825,7 @@ void VoxiRenderer::refreshReady() {
 void VoxiRenderer::onSceneLanded() {
     AVER_INFO("[Voxi] scene pipelines ready; the frame draws from here");
     resetHistoriesForNewPipelines();
+    rdSettle_ = 8;
     if (dev_) {
         dev_->noteSceneCut();
         if (rhi::IUpscaler* u = dev_->upscaler()) u->reset();
