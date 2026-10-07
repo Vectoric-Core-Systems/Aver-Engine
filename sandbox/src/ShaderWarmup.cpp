@@ -110,6 +110,10 @@ struct ShaderWarmup::Impl {
 ShaderWarmup::ShaderWarmup() : impl_(std::make_unique<Impl>()) {}
 ShaderWarmup::~ShaderWarmup() { impl_->close(); }
 
+bool ShaderWarmup::finished() const {
+    return impl_->done && impl_->t0 != std::chrono::steady_clock::time_point{};
+}
+
 bool ShaderWarmup::running() const {
 #ifdef _WIN32
     return impl_->process != nullptr && !impl_->done;

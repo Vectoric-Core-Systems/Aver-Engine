@@ -5684,10 +5684,22 @@ void VoxiRenderer::buildAllVariants() {
 
 void VoxiRenderer::syncLightPath() {
     const bool want = denoiserMode(settings_) != 2u;
-    g_voxiLightsLegacy = want;
-    if (want == lightsLegacy_) return;
-    lightsLegacy_ = want;
-    if (!res_ || sceneColorFmt_ == rhi::Format::Unknown) return;   // the first build takes the path as set
+    if (want == lightsLegacy_) { g_voxiLightsLegacy = lightsLegacy_; return; }
+    if (!res_ || sceneColorFmt_ == rhi::Format::Unknown) {   // nothing built yet: the first build takes the path
+        lightsLegacy_ = g_voxiLightsLegacy = want;
+        return;
+    }
+    if (!lightPathAllowed_) {
+        // Rebuilding every scene pipeline with a cold cache froze the editor at project open: wait for the warm-up.
+        if (!lightPathWaitLogged_) {
+            lightPathWaitLogged_ = true;
+            AVER_INFO("[Voxi] light path switch to {} waits for the shader warm-up; {} until then",
+                      want ? "legacy" : "unified", lightsLegacy_ ? "FidelityFX lighting" : "unified lighting");
+        }
+        return;
+    }
+    lightPathWaitLogged_ = false;
+    lightsLegacy_ = g_voxiLightsLegacy = want;
     res_->waitIdle();
     createScenePipelines(sceneSampleCount_, sceneColorFmt_, sceneDepthFmt_);
     // The two paths store different things in the same histories (packed shadow keys, the lamp texture).
@@ -6199,7 +6211,8 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // Under MSAA the backend resolves its multisampled G-buffer; one that cannot reports it unwritten.
     const bool gbufWritten = dev_ && dev_->gBufferWritten();
     // NRD2 replaces FidelityFX and every Voxi history for the frame (docs/rendering/NRD2.md).
-    nrd2Frame_ = nrd2Wanted() && gbufWritten && ensureNrd2();
+    // NRD2 needs the unified light shaders; while a switch to them waits (syncLightPath), frames run without it.
+    nrd2Frame_ = !lightsLegacy_ && nrd2Wanted() && gbufWritten && ensureNrd2();
     if (dev_ && dev_->gBufferEnabled() && !gbufWritten && !denoiseWarnedMsaa_) {
         AVER_WARN("[Denoise] denoising is OFF: the G-buffer is enabled but this backend cannot write it "
                   "at MSAA {}x. Set MSAA to 1 (voxi.msaa 1) to denoise.", dev_->sampleCount());
