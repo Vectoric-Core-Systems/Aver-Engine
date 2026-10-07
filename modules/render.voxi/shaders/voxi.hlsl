@@ -704,15 +704,36 @@ float rdTailVisibility(uint e0, float twS, float3 wpos, float3 N, float2 pixelC,
 }
 
 // Stage B: every tail light shaded exactly, the shadowable ones times the tail fraction `vis`.
+// A tail light under 1/512 of the exact light's irradiance is dropped; on a rough, non-metal, non-subsurface surface
+// the rest are shaded diffuse-only (the GGX lobe of a dim light is a few percent).
+float rdTailFloor(uint e0, float3 wpos, float3 N) {
+    return averShadowLum(aversLightIrradiance(gRdLocalLights[e0], wpos, N)) * (1.0 / 512.0);
+}
+bool rdTailCheap(AverSurface s) {
+    return s.rough >= 0.5 && max(s.F0.x, max(s.F0.y, s.F0.z)) <= 0.08 && s.sssWeight <= 0.0;
+}
 float3 rdTailLights(AverSurface s, float3 wpos, uint e0, float vis) {
     float3 acc = float3(0.0, 0.0, 0.0);
+    if (s.model == AVER_MODEL_UNLIT) return acc;
     const RdLightRange lr = rdLightsAt(wpos);
+    const float floorW = rdTailFloor(e0, wpos, s.N);
+    const bool  cheap  = rdTailCheap(s);
     [loop] for (uint k = 0u; k < lr.count; ++k) {
         const uint j = rdLightIndex(lr, k);
         if (j == e0) continue;
         AverLight   l;
         AverSurface sL;
+        if (cheap) {
+            float r;
+            if (!aversLightEval(gRdLocalLights[j], wpos, s.N, l.direction, l.radiance, r)) continue;
+            const float ndl = saturate(dot(s.N, l.direction));
+            if (averShadowLum(l.radiance) * ndl <= floorW) continue;
+            const float3 v = rdListLightVis(j, wpos, (aversLightNoShadow(gRdLocalLights[j]) ? 1.0 : vis).xxx);
+            acc += s.kdAlbedo * (1.0 / PI) * l.radiance * v * ndl;
+            continue;
+        }
         if (!rdLocalLightAt(gRdLocalLights[j], s, wpos, l, sL)) continue;
+        if (averShadowLum(l.radiance) * saturate(dot(s.N, l.direction)) <= floorW) continue;
         l.visibility = rdListLightVis(j, wpos, (aversLightNoShadow(gRdLocalLights[j]) ? 1.0 : vis).xxx);
         acc = averShadeDirect(acc, sL, l);
     }
@@ -721,12 +742,24 @@ float3 rdTailLights(AverSurface s, float3 wpos, uint e0, float vis) {
 void rdTailLightsSplit(AverSurface s, float3 wpos, uint e0, float vis, inout float3 diffuse, inout float3 specular) {
     if (s.model == AVER_MODEL_UNLIT) return;
     const RdLightRange lr = rdLightsAt(wpos);
+    const float floorW = rdTailFloor(e0, wpos, s.N);
+    const bool  cheap  = rdTailCheap(s);
     [loop] for (uint k = 0u; k < lr.count; ++k) {
         const uint j = rdLightIndex(lr, k);
         if (j == e0) continue;
         AverLight   l;
         AverSurface sL;
+        if (cheap) {
+            float r;
+            if (!aversLightEval(gRdLocalLights[j], wpos, s.N, l.direction, l.radiance, r)) continue;
+            const float ndl = saturate(dot(s.N, l.direction));
+            if (averShadowLum(l.radiance) * ndl <= floorW) continue;
+            const float3 v = rdListLightVis(j, wpos, (aversLightNoShadow(gRdLocalLights[j]) ? 1.0 : vis).xxx);
+            diffuse += s.kdAlbedo * (1.0 / PI) * l.radiance * v * ndl;
+            continue;
+        }
         if (!rdLocalLightAt(gRdLocalLights[j], s, wpos, l, sL)) continue;
+        if (averShadowLum(l.radiance) * saturate(dot(s.N, l.direction)) <= floorW) continue;
         l.visibility = rdListLightVis(j, wpos, (aversLightNoShadow(gRdLocalLights[j]) ? 1.0 : vis).xxx);
         float3 dD, dS, dSss;
         float  ndl;

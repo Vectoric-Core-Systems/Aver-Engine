@@ -485,6 +485,8 @@ void VoxiRenderer::shutdown() {
     cb_.decalParams[0] = 0.0f;
     rdLocalLightCapacity_ = rdLocalLightSlot_ = rdLocalLightCount_ = rdLocalLampCount_ = 0;
     rdLocalLightsBound_ = 0;
+    for (u64& k : rdGridSlotKey_) k = 0;
+    rdGridCacheValid_ = false;
     rdLocalOutThisFrame_ = 0;
     rdLocalHistPrimed_ = false;
     rdLocalHistFrame_ = 0;
@@ -3822,6 +3824,7 @@ void VoxiRenderer::buildLocalLights() {
     rdLocalLightData_.clear();
     rdLocalLightCand_.clear();
     cb_.decalParams[1] = 0.0f;   // no light grid until one is uploaded
+    rdGridKeyNow_ = 0;
     if (!res_ || !bindings_) return;
 
     f32 vp[16], eye[3] = {};
@@ -3972,10 +3975,55 @@ void VoxiRenderer::buildLocalLights() {
             lo[0] = lo[1] = lo[2] = 0.0f;
         }
         const u32 cells = dim[0] * dim[1] * dim[2];
-        std::vector<std::vector<std::pair<f32, u32>>> perCell(anyLocal ? cells : 0);
+        constexpr u32 kF = sizeof(RdLocalLight) / sizeof(f32);   // 20 floats a record
+        const u32 headerRec = lightCount;
+        // The grid depends only on the ordered non-directional lights, its box and the globals: a still camera (or a
+        // clamp that does not bind) reuses last frame's records. The sun moving does not invalidate it.
+        u64 key = 1469598103934665603ull;
+        auto mix = [&key](u64 v) { key = (key ^ v) * 1099511628211ull; key ^= key >> 29; };
+        for (u32 i = 0; i < lightCount; ++i) {
+            const RdLocalLight& l = rdLocalLightData_[i];
+            if (static_cast<u32>(l.axisKind[3] + 0.5f) % 8u == kLightKindDirectional) continue;
+            u64 w[sizeof(RdLocalLight) / 8];
+            std::memcpy(w, &l, sizeof(w));
+            for (const u64 x : w) mix(x);
+        }
+        for (int a = 0; a < 3; ++a) {
+            u32 b;
+            std::memcpy(&b, &lo[a], 4); mix(b);
+            std::memcpy(&b, &hi[a], 4); mix(b);
+            mix(dim[a]);
+        }
+        mix(anyLocal ? 1u : 0u);
+        mix(lightCount);
+        for (const u32 g : globals) mix(g);
+        if (rdGridCacheValid_ && rdGridCacheKey_ == key) {
+            rdLocalLightData_.insert(rdLocalLightData_.end(), rdGridCache_.begin(), rdGridCache_.end());
+            cb_.decalParams[1] = static_cast<f32>(headerRec);
+        } else {
+        // Counting-sort layout, scratch reused across frames (no per-cell vectors).
+        thread_local std::vector<u32> start, cursor, boxes;
+        thread_local std::vector<std::pair<f32, u32>> entries;
+        start.assign(static_cast<usize>(anyLocal ? cells : 0u) + 1, 0u);
+        boxes.clear();
+        entries.clear();
+        auto cellImp = [&](const RdLocalLight& l, u32 x, u32 y, u32 z) {
+            const f32 lum = 0.2126f * l.radianceRange[0] + 0.7152f * l.radianceRange[1] + 0.0722f * l.radianceRange[2];
+            const f32 r2 = std::max(l.posRadius[3] * l.posRadius[3], 1.0f);
+            const f32 cx = lo[0] + (x + 0.5f) * cell - l.posRadius[0];
+            const f32 cy = lo[1] + (y + 0.5f) * cell - l.posRadius[1];
+            const f32 cz = lo[2] + (z + 0.5f) * cell - l.posRadius[2];
+            // Distance to the cell's nearest point, so a light inside the cell ranks first.
+            const f32 h = cell * 0.866f;
+            const f32 d = std::max(std::sqrt(cx * cx + cy * cy + cz * cz) - h, 0.0f);
+            return lum * 1e4f / std::max(d * d, r2);
+        };
         if (anyLocal) {
+            boxes.assign(static_cast<usize>(lightCount) * 6, 0u);   // c0[3], c1[3]; c0 > c1 = not in the grid
             for (u32 i = 0; i < lightCount; ++i) {
                 const RdLocalLight& l = rdLocalLightData_[i];
+                u32* bx = &boxes[static_cast<usize>(i) * 6];
+                bx[0] = bx[1] = bx[2] = 1u; bx[3] = bx[4] = bx[5] = 0u;
                 if (static_cast<u32>(l.axisKind[3] + 0.5f) % 8u == kLightKindDirectional) continue;
                 const f32 range = l.radianceRange[3];
                 u32 c0[3], c1[3];
@@ -3987,37 +4035,39 @@ void VoxiRenderer::buildLocalLights() {
                     c1[a] = std::min(static_cast<u32>(std::max(a1, 0.0f)), dim[a] - 1);
                 }
                 if (!inside) continue;
-                const f32 lum = 0.2126f * l.radianceRange[0] + 0.7152f * l.radianceRange[1] + 0.0722f * l.radianceRange[2];
-                const f32 r2 = std::max(l.posRadius[3] * l.posRadius[3], 1.0f);
+                for (int a = 0; a < 3; ++a) { bx[a] = c0[a]; bx[3 + a] = c1[a]; }
                 for (u32 z = c0[2]; z <= c1[2]; ++z)
                     for (u32 y = c0[1]; y <= c1[1]; ++y)
-                        for (u32 x = c0[0]; x <= c1[0]; ++x) {
-                            const f32 cx = lo[0] + (x + 0.5f) * cell - l.posRadius[0];
-                            const f32 cy = lo[1] + (y + 0.5f) * cell - l.posRadius[1];
-                            const f32 cz = lo[2] + (z + 0.5f) * cell - l.posRadius[2];
-                            // Distance to the cell's nearest point, so a light inside the cell ranks first.
-                            const f32 h = cell * 0.866f;
-                            const f32 d = std::max(std::sqrt(cx * cx + cy * cy + cz * cz) - h, 0.0f);
-                            const f32 imp = lum * 1e4f / std::max(d * d, r2);
-                            perCell[(z * dim[1] + y) * dim[0] + x].push_back({imp, i});
-                        }
+                        for (u32 x = c0[0]; x <= c1[0]; ++x) ++start[((z * dim[1] + y) * dim[0] + x) + 1];
+            }
+            for (u32 c = 0; c < cells; ++c) start[c + 1] += start[c];
+            entries.resize(start[cells]);
+            cursor.assign(start.begin(), start.end() - 1);
+            for (u32 i = 0; i < lightCount; ++i) {
+                const u32* bx = &boxes[static_cast<usize>(i) * 6];
+                if (bx[0] > bx[3] || bx[1] > bx[4] || bx[2] > bx[5]) continue;
+                const RdLocalLight& l = rdLocalLightData_[i];
+                for (u32 z = bx[2]; z <= bx[5]; ++z)
+                    for (u32 y = bx[1]; y <= bx[4]; ++y)
+                        for (u32 x = bx[0]; x <= bx[3]; ++x)
+                            entries[cursor[(z * dim[1] + y) * dim[0] + x]++] = {cellImp(l, x, y, z), i};
             }
         }
         // Encode.
         std::vector<f32> table(static_cast<usize>(cells) * 2, 0.0f), pool;
+        pool.reserve(entries.size());
         for (u32 c = 0; c < (anyLocal ? cells : 0u); ++c) {
-            auto& v = perCell[c];
-            if (v.size() > kMaxLightsPerCell) {
-                std::partial_sort(v.begin(), v.begin() + kMaxLightsPerCell, v.end(),
-                                  [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
-                v.resize(kMaxLightsPerCell);
+            auto* b = entries.data() + start[c];
+            u32 n = start[c + 1] - start[c];
+            if (n > kMaxLightsPerCell) {
+                std::partial_sort(b, b + kMaxLightsPerCell, b + n,
+                                  [](const auto& a, const auto& b2) { return a.first != b2.first ? a.first > b2.first : a.second < b2.second; });
+                n = kMaxLightsPerCell;
             }
             table[c * 2] = static_cast<f32>(pool.size());
-            table[c * 2 + 1] = static_cast<f32>(v.size());
-            for (const auto& e : v) pool.push_back(static_cast<f32>(e.second));
+            table[c * 2 + 1] = static_cast<f32>(n);
+            for (u32 k = 0; k < n; ++k) pool.push_back(static_cast<f32>(b[k].second));
         }
-        constexpr u32 kF = sizeof(RdLocalLight) / sizeof(f32);   // 20 floats a record
-        const u32 headerRec = lightCount;
         const u32 tableRec  = headerRec + 1;
         const u32 tableRecs = static_cast<u32>((table.size() + kF - 1) / kF);
         const u32 poolRec   = tableRec + tableRecs;
@@ -4038,6 +4088,11 @@ void VoxiRenderer::buildLocalLights() {
         std::memcpy(raw + static_cast<usize>(tableRec) * kF, table.data(), table.size() * sizeof(f32));
         std::memcpy(raw + static_cast<usize>(poolRec) * kF, pool.data(), pool.size() * sizeof(f32));
         cb_.decalParams[1] = static_cast<f32>(headerRec);
+        rdGridCache_.assign(rdLocalLightData_.begin() + headerRec, rdLocalLightData_.end());
+        rdGridCacheKey_ = key;
+        rdGridCacheValid_ = true;
+        }
+        rdGridKeyNow_ = key;
     }
 
     if (!rdLocalLightData_.empty()) {
@@ -4056,13 +4111,21 @@ void VoxiRenderer::buildLocalLights() {
                 ok = ok && rdLocalLights_[i] != 0;
             }
             rdLocalLightCapacity_ = ok ? want : 0;
+            for (u64& k : rdGridSlotKey_) k = 0;
         }
         if (rdLocalLightCapacity_ >= rdLocalLightData_.size()) {
             // Rotate BEFORE writing, so this frame never touches the buffer the previous one bound.
             rdLocalLightSlot_ = (rdLocalLightSlot_ + 1) % kRtInstanceRing;
             const rhi::BufferHandle buf = rdLocalLights_[rdLocalLightSlot_];
             const u32 records = static_cast<u32>(rdLocalLightData_.size());
-            res_->writeBuffer(buf, rdLocalLightData_.data(), sizeof(RdLocalLight) * records, 0);
+            // The grid tail (up to ~3 MB) is rewritten only when this ring slot does not already hold it.
+            u32 writeRecords = records;
+            if (rdGridKeyNow_ != 0 && cb_.decalParams[1] > 0.5f) {
+                const u32 headRecords = static_cast<u32>(cb_.decalParams[1]);
+                if (rdGridSlotKey_[rdLocalLightSlot_] == rdGridKeyNow_) writeRecords = headRecords;
+                else rdGridSlotKey_[rdLocalLightSlot_] = rdGridKeyNow_;
+            }
+            res_->writeBuffer(buf, rdLocalLightData_.data(), sizeof(RdLocalLight) * writeRecords, 0);
             res_->setSrvBuffer(bindings_, 18, buf, sizeof(RdLocalLight), records, 0);
             rdLocalLightsBound_ = buf;
             // The raster path's working set: the first lamps (the list is importance-ordered), never the sun.
@@ -4074,9 +4137,11 @@ void VoxiRenderer::buildLocalLights() {
             const u8* bytes = reinterpret_cast<const u8*>(rdLocalLightData_.data());
             for (u32 l = 0; l < rdLocalLampCount_; ++l) {
                 u64 one = 1469598103934665603ull;
-                for (usize i = 0; i < sizeof(RdLocalLight); ++i) {
-                    one ^= bytes[l * sizeof(RdLocalLight) + i];
-                    one *= 1099511628211ull;
+                for (usize i = 0; i < sizeof(RdLocalLight); i += 8) {
+                    u64 w;
+                    std::memcpy(&w, bytes + l * sizeof(RdLocalLight) + i, 8);
+                    one = (one ^ w) * 1099511628211ull;
+                    one ^= one >> 29;
                 }
                 h += one;
             }

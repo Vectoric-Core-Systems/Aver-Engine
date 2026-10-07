@@ -202,13 +202,34 @@ float3 averDirectLights(AverSurface s, float3 pos, float2 pixel, inout uint rng,
     }
     // The tail: every other light exact, unshadowed, times that one fraction (no-shadow lights at 1).
     if (tail) {
+#if AVER_LIGHTS_EXACT_K >= 2
+        // Compute passes only: a tail light under 1/512 of the strongest is dropped, and on a rough, non-metal,
+        // non-subsurface surface it is shaded diffuse-only (its GGX lobe is a few percent of a dim light).
+        const float floorW = w0 * (1.0 / 512.0);
+        const bool cheapTail = s.rough >= 0.5 && max(s.F0.x, max(s.F0.y, s.F0.z)) <= 0.08 && s.sssWeight <= 0.0 &&
+                               s.model != AVER_MODEL_UNLIT;
+#endif
         [loop] for (uint k = 0u; k < lr.count; ++k) {
             const uint j = rdLightIndex(lr, k);
             if (j == e0 || j == e1) continue;
             const RdLocalLight ll = gRdLocalLights[j];
             AverLight   l;
             AverSurface sL;
+#if AVER_LIGHTS_EXACT_K >= 2
+            if (cheapTail) {
+                float srcR;
+                if (!aversLightEval(ll, pos, s.N, l.direction, l.radiance, srcR)) continue;
+                const float ndl = saturate(dot(s.N, l.direction));
+                if (averShadowLum(l.radiance) * ndl <= floorW) continue;
+                const float vis = aversLightNoShadow(ll) ? 1.0 : tailVis;
+                sum += s.kdAlbedo * (1.0 / PI) * l.radiance * (ndl * vis);
+                continue;
+            }
+#endif
             if (!ptLampLight(ll, s, pos, l, sL)) continue;
+#if AVER_LIGHTS_EXACT_K >= 2
+            if (averShadowLum(l.radiance) * saturate(dot(s.N, l.direction)) <= floorW) continue;
+#endif
             l.visibility = (aversLightNoShadow(ll) ? 1.0 : tailVis).xxx;
             sum = averShadeDirect(sum, sL, l);
         }

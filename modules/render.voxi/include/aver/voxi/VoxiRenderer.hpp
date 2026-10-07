@@ -632,6 +632,11 @@ private:
     u32 rdLocalLightCount_ = 0;   // the raster path's working set: the first lamps, at most kMaxLocalLights
     u32 rdLocalLampCount_ = 0;    // every lamp and scene light in the list (the sun and the grid follow them)
     u64 rdLocalLightHash_ = 0;
+    std::vector<RdLocalLight> rdGridCache_;   // header + cell table + pool records of the last grid build
+    u64 rdGridCacheKey_ = 0;
+    bool rdGridCacheValid_ = false;
+    u64 rdGridKeyNow_ = 0;                       // this frame's grid key (0 = no grid)
+    u64 rdGridSlotKey_[kRtInstanceRing] = {};     // grid key each upload ring slot already holds
     // True when every light-flagged draw made the list (none cut by 32-light cap); allows GI to omit lamp emission.
     bool rdLocalLightsCarryAll_ = false;
     struct RdLocalLightCand {

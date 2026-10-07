@@ -778,10 +778,13 @@ bool rdLocalCarriesEmitters() { return ((uint)(gCameraMedium.w + 0.5) & 2u) != 0
 // ---- THE LIGHT GRID (UNIFIED_LIGHTS.md phase 3), stored after the lights in t18 as floats ----
 // gDecalParams.y: the header record (0 = no grid). See VoxiRenderer::buildLocalLights for the layout.
 float rdListFloat(uint f) {
-    const AverLightRec r = gRdLocalLights[f / 20u];
-    const uint c = f % 20u, q = c >> 2u;
-    const float4 v = q == 0u ? r.posRadius : q == 1u ? r.radianceRange : q == 2u ? r.axisKind : q == 3u ? r.shape : r.right;
-    return v[c & 3u];
+    const uint i = f / 20u, c = f % 20u, q = c >> 2u;
+    // One float4 per read: selecting among a loaded record's five made the whole 80 bytes load.
+    if (q == 0u) return gRdLocalLights[i].posRadius[c & 3u];
+    if (q == 1u) return gRdLocalLights[i].radianceRange[c & 3u];
+    if (q == 2u) return gRdLocalLights[i].axisKind[c & 3u];
+    if (q == 3u) return gRdLocalLights[i].shape[c & 3u];
+    return gRdLocalLights[i].right[c & 3u];
 }
 struct RdLightRange {
     uint globals;            // directional lights, reaching every point
