@@ -52,11 +52,8 @@ public:
         const Key k = keyOf(s);
         if (!inited_) { inited_ = true; applied_ = k; return true; }
         NotificationQueue& q = notifications();
-        // Path Tracing switched on, or the light path changing (NRD2 builds the unified light shaders, FidelityFX and
-        // None the legacy ones), while the warm-up still runs: hold everything until it is done.
-        const bool ptOn       = k.pt != 0u && applied_.pt == 0u;
-        const bool lightsFlip = (k.denoiser == 2u) != (applied_.denoiser == 2u);
-        if (k != applied_ && interactive && (ptOn || lightsFlip) && warm && warm->running()) {
+        // Path Tracing switched on while the warm-up still runs: hold everything until it is done.
+        if (k != applied_ && interactive && k.pt != 0u && applied_.pt == 0u && warm && warm->running()) {
             warm->boost();
             std::string note;
             const float frac = warm->progress(note);
@@ -64,7 +61,7 @@ public:
                 Notification n;
                 n.severity = NotifySeverity::Info;
                 n.title = "Preparing " + describe(s);
-                n.body = "Switches once its shaders are in the cache; the editor keeps running meanwhile.";
+                n.body = "Path Tracing starts once its shaders are in the cache; the editor keeps running meanwhile.";
                 n.sticky = true;
                 n.hasProgress = true;
                 n.progress = frac;

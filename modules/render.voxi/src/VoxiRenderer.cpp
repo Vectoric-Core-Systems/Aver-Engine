@@ -227,12 +227,10 @@ rhi::PipelineLayout giLayout(u32 bindlessTextures = 0) {
 }
 
 // Voxi's shader body, read from shaders/voxi.hlsl (here for test access without RHI dependency).
-// The light path the next Voxi compiles use (VoxiRenderer::lightsLegacy_; one renderer per process).
-bool g_voxiLightsLegacy = false;
 const char* voxiHlsl() {
     // No static: the loader owns the cache and reloadShaderFiles() clears it. A static here would
     // survive a reload and hand back the shader that was read at startup for the rest of the run.
-    return rhi::shaderFile(g_voxiLightsLegacy ? "voxi_legacy.hlsl" : "voxi.hlsl").c_str();
+    return rhi::shaderFile("voxi.hlsl").c_str();
 }
 
 // Prelude for Voxi HLSL: RHI declarations, material system contract, and material graphs.
@@ -300,7 +298,6 @@ struct ShaderScope {
 bool VoxiRenderer::init(rhi::IDevice& device) {
     dev_ = &device;
     res_ = device.resources();
-    g_voxiLightsLegacy = lightsLegacy_;   // the first pipeline build takes this renderer's light path
     if (!res_) {
         AVER_WARN("[Voxi] init declined: backend exposes no resource factory (no GPU support)");
         return false;
@@ -415,7 +412,7 @@ void VoxiRenderer::shutdown() {
                                         rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdGiCbCsPso_,
                                         rdSkyOccCsPso_, rdReflCsPso_,
                                         rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_,
-                                        rdShadowProbeCsPso_, rdShadowTiledCsPso_, rdTailVisCsPso_, rdTailFilterCsPso_, rdLocalLightsCsPso_,
+                                        rdShadowProbeCsPso_, rdShadowTiledCsPso_, rdTailVisCsPso_, rdTailFilterCsPso_,
                                         rdGiTraceCsPso_, rdGiTraceCbCsPso_,
                                         rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                         rdGiCacheCsPso_, rdGiCacheCbCsPso_,
@@ -438,7 +435,7 @@ void VoxiRenderer::shutdown() {
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
     rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdGiCbCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
-    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = rdTailVisCsPso_ = rdTailFilterCsPso_ = rdLocalLightsCsPso_ = 0;
+    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = rdTailVisCsPso_ = rdTailFilterCsPso_ = 0;
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
     rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
@@ -694,9 +691,6 @@ void VoxiRenderer::setSettings(const Settings& in) {
     if (airVisWanted() != wasAirVisWanted)
         if (!ensureAirVis())
             AVER_ERROR("[Voxi] air sky-visibility volume could not follow a voxi.fogOcclusion change");
-
-    // FidelityFX / None and NRD2 build different light shaders.
-    syncLightPath();
 }
 
 // Places the GI volume: centre in world units, half-edge extent.
@@ -4188,26 +4182,6 @@ void VoxiRenderer::buildLocalLights() {
 // here since lamps don't depend on the sun). Which mode wrote it doesn't matter: all three write the
 // same quantity into the same pair.
 bool VoxiRenderer::publishLocalLights(bool live, const char* pass) {
-    if (lightsLegacy_) {
-        // The legacy shaders' contract: count 0 unless the lamp pass runs; they light only the first
-        // kMaxLocalLights lamps, so emission is dropped at hits only when those are all of them.
-        if (!live) {
-            cb_.cameraMedium[2] = 0.0f;
-            cb_.cameraMedium[3] = 0.0f;
-            return false;
-        }
-        const bool histValid = cb_.rtHistParams[1] > 0.25f && rdLocalHistFrame_ != 0 &&
-                               rdLocalHistFrame_ + 1u == rtFrameIndex_ && rdLocalHistHash_ == rdLocalLightHash_;
-        const bool carryAll = rdLocalLightsCarryAll_ && rdLocalLampCount_ <= kMaxLocalLights;
-        cb_.cameraMedium[2] = static_cast<f32>(rdLocalLightCount_);
-        cb_.cameraMedium[3] = (histValid ? 1.0f : 0.0f) + (carryAll ? 2.0f : 0.0f);
-        if (!rdLocalLightsRunLogged_) {
-            rdLocalLightsRunLogged_ = true;
-            AVER_INFO("[Voxi] local lights running (legacy path): {} lamp(s) this frame, shaded by {}",
-                      rdLocalLightCount_, pass);
-        }
-        return true;
-    }
     // The list is published whatever the lamp pass does: it carries the sun, and secondary hits trace their own
     // shadows. `live` (bit 4) says the visible-surface lamp visibility for this pass exists.
     cb_.cameraMedium[2] = static_cast<f32>(rdLocalLightCount_);
@@ -5049,20 +5023,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         if (giSplit) ctx.uavBarrierBuffer(rdGiCandBuf_);   // G1's candidates, for CSRdGi below
         // CSRdTailVis reads CSRdShadow's exact light (gRdLocalOut.x) and depth (gRdSunVisTex.a), then writes the tail's
         // shadow fraction (gRdLocalOut.a, next frame's lamp history); CSRdTailFilter its 5x5 (.z).
-        if (lightsLegacy_ && localLights && !ptRef && rdLocalLightsCsPso_ && gx && gy) {
-            // Legacy path: the lamps' one shared visibility (CSRdLocalLights), as before unification.
-            stageEnd(rdSunVisTex_);
-            stageBegin("Voxi RD local lights");
-            ctx.setPipeline(rdLocalLightsCsPso_);
-            ctx.setBindingSet(bindings_);
-            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
-            ctx.setBindlessTable(rtTexTable_);
-            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-            ctx.dispatch(gx, gy, 1);
-            rdLocalHistFrame_ = rtFrameIndex_;
-            rdLocalHistHash_ = rdLocalLightHash_;
-        }
-        if (!lightsLegacy_ && localLights && rdTailVisCsPso_ && rdTailFilterCsPso_ && rdLocalOutThisFrame_ && gx && gy) {
+        if (localLights && rdTailVisCsPso_ && rdTailFilterCsPso_ && rdLocalOutThisFrame_ && gx && gy) {
             stageEnd(rdSunVisTex_);
             stageBegin("Voxi RD tail lights");
             ctx.uavBarrierTexture(rdLocalOutThisFrame_);
@@ -5667,35 +5628,9 @@ bool VoxiRenderer::nrd2Wanted() const {
 // variant), then sizes its targets. False: this frame runs without it (FidelityFX if it is valid).
 void VoxiRenderer::buildAllVariants() {
     if (!res_ || !giReady_) return;
-    // Both light paths, so a denoiser switch in the editor loads instead of compiling; back to this one after.
-    for (int pass = 0; pass < 3; ++pass) {
-        if (pass > 0) {
-            lightsLegacy_ = !lightsLegacy_;
-            g_voxiLightsLegacy = lightsLegacy_;
-            if (sceneColorFmt_ != rhi::Format::Unknown)
-                createScenePipelines(sceneSampleCount_, sceneColorFmt_, sceneDepthFmt_);
-        }
-        if (pass == 2) break;
-        if (!lightsLegacy_) ensureNrd2();
-        if (!ptTwinsTried_) createPathTraceTwins();
-        if (!rcTwinsTried_) createNeuRaCTwins();
-    }
-}
-
-void VoxiRenderer::syncLightPath() {
-    const bool want = denoiserMode(settings_) != 2u;
-    g_voxiLightsLegacy = want;
-    if (want == lightsLegacy_) return;
-    lightsLegacy_ = want;
-    if (!res_ || sceneColorFmt_ == rhi::Format::Unknown) return;   // the first build takes the path as set
-    res_->waitIdle();
-    createScenePipelines(sceneSampleCount_, sceneColorFmt_, sceneDepthFmt_);
-    // The two paths store different things in the same histories (packed shadow keys, the lamp texture).
-    rtHistValid_ = false;
-    rdLocalHistFrame_ = 0;
-    denoiser_.forceHistoryReset();
-    AVER_INFO("[Voxi] light path: {} (denoiser {})", want ? "legacy (pre-unification)" : "unified",
-              want ? "FidelityFX or None" : "NRD2");
+    ensureNrd2();
+    if (!ptTwinsTried_) createPathTraceTwins();
+    if (!rcTwinsTried_) createNeuRaCTwins();
 }
 
 bool VoxiRenderer::ensureNrd2() {
@@ -7258,7 +7193,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdGiCbCsPso_,
                                          rdSkyOccCsPso_, rdReflCsPso_,
                                          rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_,
-                                         rdShadowProbeCsPso_, rdShadowTiledCsPso_, rdTailVisCsPso_, rdTailFilterCsPso_, rdLocalLightsCsPso_,
+                                         rdShadowProbeCsPso_, rdShadowTiledCsPso_, rdTailVisCsPso_, rdTailFilterCsPso_,
                                          rdGiTraceCsPso_, rdGiTraceCbCsPso_,
                                          rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                          rdGiCacheCsPso_, rdGiCacheCbCsPso_,
@@ -7278,7 +7213,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
     rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdGiCbCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
-    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = rdTailVisCsPso_ = rdTailFilterCsPso_ = rdLocalLightsCsPso_ = 0;
+    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = rdTailVisCsPso_ = rdTailFilterCsPso_ = 0;
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
     rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
@@ -7504,34 +7439,22 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
             p.layout = giTex;
             rdShadowTiledCsPso_ = res_->createComputePipeline(p);
         }
-        // Current path: CSRdTailVis (the tail lights' shadow fraction) and CSRdTailFilter (its 5x5), after CSRdShadow.
-        // Legacy path: CSRdLocalLights, the lamps' one shared visibility.
-        if (!lightsLegacy_) {
-            const rhi::ShaderHandle csTailVis = compile("CSRdTailVis", rhi::ShaderStage::Compute, 66,
-                                                        rasterDefs(csDefs.c_str()).c_str());
-            if (csTailVis) {
-                rhi::ComputePipelineDesc p;
-                p.cs = csTailVis;
-                p.layout = giTex;
-                rdTailVisCsPso_ = res_->createComputePipeline(p);
-            }
-            const rhi::ShaderHandle csTailFilter = compile("CSRdTailFilter", rhi::ShaderStage::Compute, 66,
-                                                           rasterDefs(csDefs.c_str()).c_str());
-            if (csTailFilter) {
-                rhi::ComputePipelineDesc p;
-                p.cs = csTailFilter;
-                p.layout = giTex;
-                rdTailFilterCsPso_ = res_->createComputePipeline(p);
-            }
-        } else {
-            const rhi::ShaderHandle csLocalLights = compile("CSRdLocalLights", rhi::ShaderStage::Compute, 66,
-                                                            rasterDefs(csDefs.c_str()).c_str());
-            if (csLocalLights) {
-                rhi::ComputePipelineDesc p;
-                p.cs = csLocalLights;
-                p.layout = giTex;
-                rdLocalLightsCsPso_ = res_->createComputePipeline(p);
-            }
+        // CSRdTailVis (the tail lights' shadow fraction) and CSRdTailFilter (its 5x5), after CSRdShadow.
+        const rhi::ShaderHandle csTailVis = compile("CSRdTailVis", rhi::ShaderStage::Compute, 66,
+                                                    rasterDefs(csDefs.c_str()).c_str());
+        if (csTailVis) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csTailVis;
+            p.layout = giTex;
+            rdTailVisCsPso_ = res_->createComputePipeline(p);
+        }
+        const rhi::ShaderHandle csTailFilter = compile("CSRdTailFilter", rhi::ShaderStage::Compute, 66,
+                                                       rasterDefs(csDefs.c_str()).c_str());
+        if (csTailFilter) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csTailFilter;
+            p.layout = giTex;
+            rdTailFilterCsPso_ = res_->createComputePipeline(p);
         }
         // CSRdGi and CSRdSkyOcc: same SM 6.6 requirement as csShadow.
         const rhi::ShaderHandle csGi = compile("CSRdGi", rhi::ShaderStage::Compute, 66,
