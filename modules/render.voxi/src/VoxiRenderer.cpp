@@ -5018,6 +5018,8 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // CSRdTailVis reads CSRdShadow's exact light (gRdLocalOut.x) and depth (gRdSunVisTex.a), then writes the tail's
         // shadow fraction (gRdLocalOut.a, next frame's lamp history).
         if (localLights && rdTailVisCsPso_ && rdLocalOutThisFrame_ && gx && gy) {
+            stageEnd(rdSunVisTex_);
+            stageBegin("Voxi RD tail lights");
             ctx.uavBarrierTexture(rdLocalOutThisFrame_);
             ctx.uavBarrierTexture(rdSunVisTex_);
             ctx.setPipeline(rdTailVisCsPso_);

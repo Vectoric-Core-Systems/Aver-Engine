@@ -2517,7 +2517,7 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
             const uint  j = rdLightIndex(lr, k);
             const float w = rdLightWeight(gRdLocalLights[j], s.wpos, s.N);
             if (!(w > 0.0)) continue;
-            if (prevKey >= 0.0 && rdLightKey(gRdLocalLights[j]) == prevKey && w > wPrev) { prevE0 = j; wPrev = w; }
+            if (w > wPrev && prevKey >= 0.0 && rdLightKey(gRdLocalLights[j]) == prevKey) { prevE0 = j; wPrev = w; }
             if (w > w0) { e0 = j; w0 = w; }
         }
         if (prevE0 != 0xFFFFFFFFu && wPrev >= 0.8 * w0) { e0 = prevE0; w0 = wPrev; }

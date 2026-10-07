@@ -155,12 +155,14 @@ float3 averDirectLights(AverSurface s, float3 pos, float2 pixel, inout uint rng,
     RdTop4 top = rdTop4Init();
     float3 eShared = float3(0.0, 0.0, 0.0);   // simple shadowable lights: cheap diffuse irradiance
     float3 eFree   = float3(0.0, 0.0, 0.0);   // simple no-shadow lights
+    bool   anyComplex = false;                  // a rect/spot/IES/cookie light reaches here: the exact walk below
     [loop] for (uint k = 0u; k < lr.count; ++k) {
         const uint j = rdLightIndex(lr, k);
         const RdLocalLight ll = gRdLocalLights[j];
         const float3 e = rdLightIrradianceCheap(ll, pos, s.N);
         const float  w = averShadowLum(e);
         if (!(w > 0.0)) continue;
+        anyComplex = anyComplex || !rdLightIsSimple(ll);
         if (aversLightNoShadow(ll)) { if (rdLightIsSimple(ll)) eFree += e; continue; }
         rdTop4Add(top, w, j);
         if (rdLightIsSimple(ll)) eShared += e;
@@ -171,7 +173,7 @@ float3 averDirectLights(AverSurface s, float3 pos, float2 pixel, inout uint rng,
     float  sumW = 0.0, sumV = 0.0;
     // Traced lights, then (k >= K) every non-simple light: one shading and one visibility call site in the loop, as
     // each visibility call inlines the whole shadow kernel.
-    [loop] for (uint k = 0u; k < K + lr.count; ++k) {
+    [loop] for (uint k = 0u; k < K + (anyComplex ? lr.count : 0u); ++k) {
         uint j;
         if (k < K) {
             j = k == 0u ? top.i0 : k == 1u ? top.i1 : k == 2u ? top.i2 : top.i3;

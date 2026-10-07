@@ -118,13 +118,18 @@ the exact set from those slots and adds the tail.
 
 Every light traced every frame (`df91ecd7`) fixed the flicker but cost 85 ms a frame at NewSponza Night's default
 view (v0.6.0: 14.8 ms). The budget keeps the rule that fixed it, **no light picked at random**:
-- **Visible surface:** the exact light keeps the sun's kernel. The strongest tail lights (up to
-  4 x `voxi.lightRaysPerPixel`, at most 8) are dealt round each 2x2 pixel block in a fixed pattern, one ray each per
-  frame; Stage B's 5x5 depth-aware filter joins the block. The rest share their irradiance-weighted visibility.
+- **Visible surface:** the exact light keeps the sun's kernel (CSRdShadow). `CSRdTailVis` runs at quarter
+  resolution, one thread per 2x2 block, so a wave's rays go to the same lights in the same order: the block's
+  strongest `voxi.lightRaysPerBlock` (default 6) tail lights get one ray each per frame, the rest share their
+  irradiance-weighted visibility, and the result goes to the block's same-depth pixels (-1 across an edge, which
+  Stage B's 5x5 fills). An earlier per-pixel interleave was 3 ms slower for fewer lights (incoherent rays).
+  3 rays per block saves 1.8 ms but raises bright-spot area from 0.08% to 0.71% of the view.
   History follows the sun's rule (0.9 at rest, 0.5 by 32 px/frame, 0.35 where the shadow changed; bilinear read, no
   3x3 box), which removed the trailing of lamp light behind camera moves.
-- **Hits (GI, reflection, path):** the strongest `voxi.lightRaysPerHit` lights get their own ray; the rest share
-  their visibility, diffuse-only on rough non-metals; lights under 1/32 of the strongest skipped.
+- **Hits (GI, reflection, path):** one cheap loop sums every plain sphere light's diffuse irradiance and keeps the
+  top 4 with indices; the strongest `voxi.lightRaysPerHit` (default 1) are shaded exactly with their own ray, the
+  rest take their visibility as diffuse light. Rect, spot, IES and cookie lights outside the traced set are shaded
+  exactly (that walk is skipped where none reach).
 - **Ranking** uses the cheap sphere estimate (`rdLightWeight`); shading stays exact.
 
 Measured (RX 7800 XT, NewSponza Night default view, scale 0.5, still, GPU ms):
@@ -136,5 +141,6 @@ Measured (RX 7800 XT, NewSponza Night default view, scale 0.5, still, GPU ms):
 | top 6 / 3, no interleave | 17.3 | 10.0 | 8.1 | 45.1 |
 | interleaved 2 / 1 (default) | 14.2 | 6.5 | 4.9 | 35.4 |
 | interleaved 1 / 1 | 10.2 | 6.5 | 5.0 | 31.5 |
+| quarter-res tail pass (6 / block), one-loop hits (default) | 3.6 + 4.4 | 4.6 | 3.0 | 25.0 |
 
 A lamp ray costs about 3 ms per pixel here (long, incoherent rays); the exact light's ray about 2 ms.
