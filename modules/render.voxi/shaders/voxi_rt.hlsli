@@ -1253,7 +1253,12 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
             if (ox == 0 && oy == 0) continue;
             const int2 t = base + int2(ox, oy);
             if (any(t < 0) || t.x >= (int)texW || t.y >= (int)texH) continue;
-            const float2 st = gRtShadowHist.Load(int3(t, 0));
+            const float2 raw = gRtShadowHist.Load(int3(t, 0));
+            float2 st = raw;
+            // .x packs the light the texel's shadow belongs to (rtShadowHistPack): a neighbour lit mainly by another
+            // light is not this one's shadow, and read raw (2 x id + vis) it made white rims at every crease where
+            // the main light changes (sun-lit face against a lamp-lit groove).
+            if (!rtShadowHistUnpack(raw.x, st.x)) continue;
             const float predicted = planeDepth + dzdx * (float)ox + dzdy * (float)oy;
             const float tol = max(abs(predicted), 1.0) * 0.02 + 1.0;
             if (abs(st.y - predicted) > tol) continue;
