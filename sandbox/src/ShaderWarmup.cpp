@@ -43,6 +43,7 @@ struct ShaderWarmup::Impl {
     std::string lastNote;
     long long total = 0;      // shader requests of the last finished run (warm_total.txt), 0 = not known yet
     long long requests = 0;
+    bool boosted = false;     // raised to normal priority because a mode switch waits on it
 
     // The total persists next to the shader blob cache: the request count barely changes between runs.
     static std::filesystem::path totalPath() {
@@ -117,6 +118,22 @@ bool ShaderWarmup::running() const {
 #endif
 }
 
+float ShaderWarmup::progress(std::string& note) const {
+    note = impl_->lastNote;
+    return impl_->total > 0 ? std::min(static_cast<float>(impl_->requests) / static_cast<float>(impl_->total), 0.99f)
+                            : -1.0f;
+}
+
+void ShaderWarmup::boost() {
+#ifdef _WIN32
+    if (impl_->process && !impl_->done && !impl_->boosted) {
+        impl_->boosted = true;
+        SetPriorityClass(impl_->process, NORMAL_PRIORITY_CLASS);
+        AVER_INFO("[ShaderWarm] a mode switch is waiting on the shader cache: warm-up raised to normal priority");
+    }
+#endif
+}
+
 void ShaderWarmup::start(const std::string& projectManifest) {
 #ifdef _WIN32
     if (running()) return;
@@ -125,6 +142,7 @@ void ShaderWarmup::start(const std::string& projectManifest) {
     impl_->exited = false;
     impl_->toast = 0;
     impl_->requests = 0;
+    impl_->boosted = false;
     impl_->loadTotal();
     impl_->t0 = std::chrono::steady_clock::now();
     {

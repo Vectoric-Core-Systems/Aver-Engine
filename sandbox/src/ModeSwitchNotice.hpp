@@ -6,7 +6,14 @@
 // editor froze with nothing on screen. Now the change is held back one frame so the notification draws first,
 // applied the next, and the notification finishes after the frame that rendered with it (the lazy pipeline
 // builds land in that frame). Only interactive runs: a capture applies settings the frame they are set.
+//
+// PATH TRACING WAITS FOR THE SHADER WARM-UP: its pipelines (createPathTraceTwins, 13 heavy compute shaders) are
+// built the first time it is switched on. Built on the main thread while the background warm-up had not reached
+// them yet, they took minutes and Windows closed the editor as not responding. While the warm-up runs, the switch
+// to Path Tracing is held (the editor keeps rendering, the other settings wait with it), the warm-up is raised to
+// normal priority, and the notification shows its progress; once it is done the pipelines load from the cache.
 #include "EditorNotifications.hpp"
+#include "ShaderWarmup.hpp"
 #include "aver/core/Types.hpp"
 #include "aver/voxi/Voxi.hpp"
 
@@ -40,11 +47,34 @@ public:
     }
 
     // Called once a frame with the settings about to be applied. False: hold them back this frame.
-    bool shouldApply(const voxi::Settings& s, bool interactive) {
+    bool shouldApply(const voxi::Settings& s, bool interactive, ShaderWarmup* warm = nullptr) {
         using Clock = std::chrono::steady_clock;
         const Key k = keyOf(s);
         if (!inited_) { inited_ = true; applied_ = k; return true; }
         NotificationQueue& q = notifications();
+        // Path Tracing switched on while the warm-up still runs: hold everything until it is done.
+        if (k != applied_ && interactive && k.pt != 0u && applied_.pt == 0u && warm && warm->running()) {
+            warm->boost();
+            std::string note;
+            const float frac = warm->progress(note);
+            if (!waitToast_) {
+                Notification n;
+                n.severity = NotifySeverity::Info;
+                n.title = "Preparing " + describe(s);
+                n.body = "Path Tracing starts once its shaders are in the cache; the editor keeps running meanwhile.";
+                n.sticky = true;
+                n.hasProgress = true;
+                n.progress = frac;
+                n.dedupKey = "mode-switch-wait";
+                waitToast_ = q.push(std::move(n));
+            }
+            q.setProgress(waitToast_, frac, note);
+            return false;
+        }
+        if (waitToast_) {
+            q.close(waitToast_);
+            waitToast_ = 0;
+        }
         if (stage_ == Stage::Measuring) {
             const double sec = std::chrono::duration<double>(Clock::now() - t0_).count();
             char body[64];
@@ -82,6 +112,7 @@ private:
     Stage stage_ = Stage::Idle;
     Key applied_{};
     u64 toast_ = 0;
+    u64 waitToast_ = 0;   // "Preparing Path Tracing" while the warm-up finishes
     std::chrono::steady_clock::time_point t0_{};
 };
 

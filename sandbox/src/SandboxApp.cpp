@@ -2294,7 +2294,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         }
         // A heavy mode switch is announced a frame before it is applied (ModeSwitchNotice.hpp).
         static editor::ModeSwitchNotice modeNotice;
-        if (modeNotice.shouldApply(vs, e.window() != nullptr && maxFrames_ == 0)) voxiRenderer_.setSettings(vs);
+        if (modeNotice.shouldApply(vs, e.window() != nullptr && maxFrames_ == 0, &shaderWarmup_))
+            voxiRenderer_.setSettings(vs);
         // Consume-and-forward: console reset commands routed through singleton flags to the renderer instance.
         if (voxi::Renderer::get().consumeGiHistoryResetRequest())  voxiRenderer_.resetGiHistory();
         if (voxi::Renderer::get().consumeRtHistoryResetRequest())  voxiRenderer_.resetRtHistory();
