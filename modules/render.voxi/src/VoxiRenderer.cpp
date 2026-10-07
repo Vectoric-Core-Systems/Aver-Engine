@@ -4940,6 +4940,11 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
         if (gx && gy) ctx.dispatch(gx, gy, 1);
         if (perStage && rdLocalOutThisFrame_) ctx.uavBarrierTexture(rdLocalOutThisFrame_);   // the light slots
+        // CSRdShadow wrote the tail's shadow fraction (gRdLocalOut.a), next frame's lamp history.
+        if (localLights && gx && gy) {
+            rdLocalHistFrame_ = rtFrameIndex_;
+            rdLocalHistHash_ = rdLocalLightHash_;
+        }
         stageEnd(rdSunVisTex_);
 
         if (giDispatch) {

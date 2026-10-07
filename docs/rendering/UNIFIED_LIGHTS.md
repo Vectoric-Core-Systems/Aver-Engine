@@ -91,9 +91,18 @@ the exact set from those slots and adds the tail.
   Up to 32 cells per axis, at least 50 cm, bounded to 200 m around the camera; each cell keeps its 24 most important
   lights. Directional lights are global, not in cells. `rdLightsAt` / `rdLightIndex` (`voxi_rt.hlsli`) walk it.
 - **Visible surface (`CSRdShadow`):** one exact light per pixel (the largest unshadowed contribution, the sun's
-  full kernel: disc, history keyed by light id, tiles), plus one tail light by weighted reservoir with one shadow
-  ray. `gRdLocalOut` = (exact id, tail id, tail visibility, lamp visibility for the raster replay). Stage B shades
-  both with the shared `averDirectTerms`. `CSRdLocalLights` is gone.
+  full kernel: disc, history keyed by light id, tiles). Last frame's exact light keeps the slot while it delivers
+  at least 80% of the strongest, so near-equal candles do not trade places. **Every other light (the tail) is
+  treated the way the sun is:** shaded exactly and unshadowed in Stage B (`rdTailLights`), times ONE shadow
+  fraction in [0, 1] (`rdTailVisibility`): one light picked by irradiance, one ray, its 0/1 answer accumulated
+  with the lamp history pair (FidelityFX mode; raw and stratified on NRD2 frames) and filtered 5x5 in Stage B.
+  This is the ratio estimator of Heitz, Hill and McGuire (I3D 2018). It replaced a first version whose tail was
+  one light divided by its pick probability, unfiltered: an unbounded per-pixel spike that the FidelityFX mode
+  never denoises (FidelityFX gets AO, GI and reflections only), and the spots that remained under lamps.
+  `gRdLocalOut` = (exact id, unused, unused, tail fraction). Colour is approximate where tail lights are blocked
+  differently. Patent check 2026-10-07: the paper is not patented as far as found; NVIDIA's shadow-denoising
+  patents (US10740954, anisotropic kernels from light and occluder geometry; US11600036, self-guided
+  spatiotemporal) are avoided: the filter is the fixed depth-weighted 5x5 and a fixed-rate history.
 - **Hits (`averDirectLights`, `voxi_pt.hlsli`):** GI candidates, reflection hits and path vertices. Top K exact
   (K = 2 in the bindless staged passes, 1 elsewhere) plus a reservoir-sampled tail, one shading call in a loop
   (inlining it per light multiplied the compile time). `ptLamp`, `ptLampsAll` and the hand-built sun sites are gone.
