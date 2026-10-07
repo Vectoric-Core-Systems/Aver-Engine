@@ -235,7 +235,13 @@ const char* voxiHlsl() {
 
 // Prelude for Voxi HLSL: RHI declarations, material system contract, and material graphs.
 // Rebuilt when material graph registry revision changes (cached by revision).
+// A pipeline build on the worker reads the prelude the main thread snapshot when it queued the job (the registry and
+// the static below are main-thread state).
+thread_local const std::string* tl_voxiPrelude = nullptr;
+// Shader compiles made by Voxi's ShaderScope, any thread (the editor's "Compiling shaders N of M").
+std::atomic<u32> g_voxiCompiles{0};
 const char* voxiShaderPrelude() {
+    if (tl_voxiPrelude) return tl_voxiPrelude->c_str();
     static std::string s;   // owned by a static, because the caller borrows it
     static u64 built = ~0ull;
     // Both revisions, because either can move independently: a project can register a material
@@ -283,6 +289,7 @@ struct ShaderScope {
         sd.minShaderModel = sm;
         sd.defines = defines;
         const rhi::ShaderHandle h = res.createShader(sd);
+        ++g_voxiCompiles;
         if (h) owned.push_back(h);
         return h;
     }
@@ -309,7 +316,33 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
 
     createShadowResources();
     createVoxelVolume(settings_.voxelResolution);
-    createPipelines();
+    // Off the main thread when the factory allows it: the init set is queued here, the scene set by the
+    // onRenderTargetsChanged that follows (it knows the real scene formats). Until both land, the frame draws nothing.
+    asyncBuilds_ = res_->threadSafePipelineCreation();
+    if (asyncBuilds_) {
+        startBuildWorker();
+        ensureTextureTable();
+        auto prelude = std::make_shared<std::string>(voxiShaderPrelude());
+        buildCompileBase_ = g_voxiCompiles.load();
+        buildT0_ = std::chrono::steady_clock::now();
+        ++sceneJobs_;
+        queueBuild(
+            [this, prelude] {
+                tl_voxiPrelude = prelude.get();
+                buildInitPipelines();
+                tl_voxiPrelude = nullptr;
+            },
+            [this] {
+                if (!shadowPso_ || !voxelPso_ || !clearPso_ || !resolvePso_ || !mipPso_)
+                    AVER_ERROR("[Voxi] core pipelines missing (shadow {}, voxel {}, clear {}, resolve {}, mip {}); GI "
+                               "stays off", shadowPso_, voxelPso_, clearPso_, resolvePso_, mipPso_);
+                --sceneJobs_;
+            });
+        // The scene set, for the device's own formats; onRenderTargetsChanged re-requests it if the scene's differ.
+        requestScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(), dev_->depthFormat());
+    } else {
+        createPipelines();
+    }
 
     // Upgrade air visibility placeholder to real texture if setting and device allow it.
     if (!ensureAirVis())
@@ -325,6 +358,7 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
     else if (!resolveBindings_)  missing = "resolve binding set";
     else if (!airVisPlaceholder_) missing = "air sky-visibility placeholder";
     else if (mipBindings_.size() + 1 != voxelMips_) missing = "mip binding sets (count)";
+    else if (asyncBuilds_)       {}   // the pipelines are still building; their build reports what is missing
     else if (!shadowPso_)        missing = "shadow pipeline";
     else if (!voxelPso_)         missing = "voxelise pipeline";
     else if (!clearPso_)         missing = "volume clear pipeline";
@@ -352,7 +386,10 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
     }
 
     giReady_    = true;
-    rtSupported_ = sceneRtPso_ != 0;
+    // Async: the ray-traced pipelines have not landed yet, so the device's capabilities decide (the same test
+    // buildScenePipelines makes before building them).
+    rtSupported_ = asyncBuilds_ ? (caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable)
+                                : sceneRtPso_ != 0;
 
     // TLAS sized for draw-list cap, rebound only on foliage reallocation.
     if (rtSupported_) {
@@ -382,6 +419,7 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
 
 // Destroys every resource and returns the feature to its uninitialised state.
 void VoxiRenderer::shutdown() {
+    stopBuildWorker();   // a build in progress finishes first; queued ones are dropped
     reportFrameTime("run total");
     // Denoiser owns device resources; destroy before res_ check below.
     denoiser_.destroy();
@@ -1161,22 +1199,27 @@ void VoxiRenderer::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f
 void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     rdVisWrittenThisFrame_ = false;
     if (!giReady_) return;
+    pumpBuilds();   // adopt whatever the build worker finished
+    // While the init or scene set builds, the frame draws nothing (the hooks below all say so).
+    if (pipelinesBuilding()) return;
+    const u32 rebuildSamples = sceneSampleCount_ ? sceneSampleCount_ : dev_->sampleCount();
+    const rhi::Format rebuildColor = sceneColorFmt_ != rhi::Format::Unknown ? sceneColorFmt_ : dev_->backbufferFormat();
+    const rhi::Format rebuildDepth = sceneDepthFmt_ != rhi::Format::Unknown ? sceneDepthFmt_ : dev_->depthFormat();
     // Material graph appeared since pipelines were built.
     if (scenePipelineGraphRev_ != pbr::materialGraphs().revision()) {
         scenePipelineGraphRev_ = pbr::materialGraphs().revision();
         AVER_INFO("[Voxi] rebuilding scene pipelines for {} material graph(s)",
                   pbr::materialGraphs().count());
-        if (!createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(), dev_->depthFormat()))
-            AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for the material graphs");
+        requestScenePipelines(rebuildSamples, rebuildColor, rebuildDepth);
+        if (pipelinesBuilding()) return;
     }
     // Shader file changed on disk; only safe to rebuild here.
     if (scenePipelineShaderRev_ != rhi::shaderFileRevision()) {
         scenePipelineShaderRev_ = rhi::shaderFileRevision();
         AVER_INFO("[Voxi] rebuilding scene pipelines: shader files changed (revision {})",
                   scenePipelineShaderRev_);
-        if (!createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(), dev_->depthFormat()))
-            AVER_ERROR("[Voxi] scene pipelines could not be rebuilt from the changed shader files -- "
-                       "the previous pipelines are still bound, so the last good shader keeps drawing");
+        requestScenePipelines(rebuildSamples, rebuildColor, rebuildDepth);
+        if (pipelinesBuilding()) return;
     }
     ++rtFrameIndex_;
     // Sample frame time at the TOP of the feature's frame.
@@ -2079,7 +2122,7 @@ VoxiRenderer::MoverPatch VoxiRenderer::patchRtMovers(const std::vector<Draw>& li
 
 // Ray-driven frames record at endFrame (D3D12), so latePatchMovers sees this frame's draw list.
 bool VoxiRenderer::wantsLateScenePass() const {
-    return rayDrivenActive() && !debugViewActive() && rtMoverPatchActive();
+    return !pipelinesBuilding() && rayDrivenActive() && !debugViewActive() && rtMoverPatchActive();
 }
 
 // The TLAS and instance table are built in prePass from LAST frame's draws (this frame's are submitted
@@ -4690,7 +4733,7 @@ void VoxiRenderer::filterMips(rhi::IRenderContext& ctx) {
 
 // Hands the backend Voxi's per-frame constant block.
 bool VoxiRenderer::sceneConstants(const void** data, u32* bytes) const {
-    if (!giReady_) return false;
+    if (!giReady_ || pipelinesBuilding()) return false;
     *data = &cb_; *bytes = sizeof(cb_);
     return true;
 }
@@ -4703,7 +4746,7 @@ bool VoxiRenderer::blendedDrawReadsBackdrop(const void* materialConstants, u32 b
 }
 
 // True once the feature is up: shadowing and the bounce are terms inside Voxi's lit pixel shader.
-bool VoxiRenderer::overridesScenePipeline() const { return giReady_; }
+bool VoxiRenderer::overridesScenePipeline() const { return giReady_ && !pipelinesBuilding(); }
 
 // True while the debug view replaces the scene, including the backend's line draws.
 // Two reasons to replace the scene, not interchangeable -- see shadowHistoryActive() in the header,
@@ -4712,15 +4755,18 @@ bool VoxiRenderer::overridesScenePipeline() const { return giReady_; }
 // feature is not on the stack then -- see IRenderFeature::sceneBindlessTable.
 rhi::BindlessTableHandle VoxiRenderer::sceneBindlessTable() const { return rtTexTable_; }
 
-bool VoxiRenderer::suppressesScene() const { return debugViewActive() || rayDrivenActive(); }
+// While the pipelines build (async), Voxi claims the whole frame and draws nothing: a black viewport, not the
+// backend's unlit raster fallback.
+bool VoxiRenderer::suppressesScene() const { return pipelinesBuilding() || debugViewActive() || rayDrivenActive(); }
 
 // Debug raymarch has no depth; ray-driven writes real depth so sky lands on ray misses.
-bool VoxiRenderer::suppressesWholeFrame() const { return debugViewActive(); }
+bool VoxiRenderer::suppressesWholeFrame() const { return pipelinesBuilding() || debugViewActive(); }
 
 // Draws the scene pass replacement (debug view or ray-driven); debug wins if both are active.
 void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
     ptRanThisFrame_ = false;
     translucentInPath_ = false;
+    if (pipelinesBuilding()) return;   // black until the pipelines land
     // Recorded late (wantsLateScenePass) this frame's draws exist; bring the movers up to date first.
     if ((!draws_.empty() || rtRefitDeferred_) && !debugViewActive() && rayDrivenActive()) latePatchMovers(ctx);
     if (pathTracingWanted() && !debugViewActive()) {
@@ -5294,15 +5340,10 @@ void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rh
     // The scene pipelines bake only the sample count and the two formats (and the shader/graph revisions prePass
     // watches): a resize, render-scale change or G-buffer toggle that keeps them reuses the set. Rebuilding anyway
     // compiled ~41 pipelines twice at startup (addRenderFeature) and again on every resize.
-    const bool same = scenePso_ && sampleCount == sceneSampleCount_ && color == sceneColorFmt_ &&
+    const bool same = (scenePso_ || sceneInFlight_) && sampleCount == sceneSampleCount_ && color == sceneColorFmt_ &&
                       depth == sceneDepthFmt_ && scenePipelineGraphRev_ == pbr::materialGraphs().revision() &&
                       scenePipelineShaderRev_ == rhi::shaderFileRevision();
-    if (!same) {
-        if (!createScenePipelines(sampleCount, color, depth))
-            AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for {} sample(s)", sampleCount);
-        scenePipelineGraphRev_ = pbr::materialGraphs().revision();
-        scenePipelineShaderRev_ = rhi::shaderFileRevision();   // same reason as the line above
-    }
+    if (!same) requestScenePipelines(sampleCount, color, depth);
     // Remembered even when the call below decides to allocate nothing: setSettings needs a size to
     // create at if ray tracing is switched on later.
     rtHistWantW_ = width;
@@ -5632,6 +5673,7 @@ bool VoxiRenderer::nrd2Wanted() const {
 // variant), then sizes its targets. False: this frame runs without it (FidelityFX if it is valid).
 void VoxiRenderer::buildAllVariants() {
     if (!res_ || !giReady_) return;
+    finishPipelineBuilds();   // the lazy variants below build on the main thread, after the scene set landed
     ensureNrd2();
     if (!ptTwinsTried_) createPathTraceTwins();
     if (!rcTwinsTried_) createNeuRaCTwins();
@@ -6695,6 +6737,7 @@ bool VoxiRenderer::rdStagedActive(const char** reason) const {
 // Returns the lit pipeline for this frame, or 0 to decline and let the backend use its own.
 rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool depthPrepassed,
                                                 bool blended) const {
+    if (pipelinesBuilding()) return 0;
     // Blended is answered first: glass outranks a prepass. If blended fails to create, drops the draw.
     if (blended) {
         // Blended draws never write the G-buffer: opaque surface behind is the denoiser's geometry.
@@ -6716,6 +6759,7 @@ rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool depthPrep
 
 // Depth-only prepass pipeline. Returns 0 if the LessEqual/no-write twin does not exist.
 rhi::PipelineHandle VoxiRenderer::depthPrepassPipeline() const {
+    if (pipelinesBuilding()) return 0;
     const rhi::PipelineHandle twin = rtActive_ ? sceneRtPsoPrepassed_ : scenePsoPrepassed_;
     return twin ? depthPrepassPso_ : 0;
 }
@@ -7008,7 +7052,9 @@ void VoxiRenderer::bindGiResources(rhi::IResourceFactory& res, rhi::BindingSetHa
 }
 
 // Creates every pipeline the feature runs.
-bool VoxiRenderer::createPipelines() {
+// The init set (shadow, voxelise, clear, resolve, mip, air visibility): no member but these pipeline handles is written,
+// so it may run on the build worker.
+bool VoxiRenderer::buildInitPipelines() {
     const bool msOk = caps_.meshShaderTier > 0 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
 
     ShaderScope compile(*res_);
@@ -7171,19 +7217,155 @@ bool VoxiRenderer::createPipelines() {
                   "voxi.fogOcclusion has no effect on this device (placeholder stays bound)",
                   caps_.shaderModel, caps_.dxcAvailable ? "yes" : "no");
 
+    return shadowPso_ && voxelPso_ && clearPso_ && mipPso_;
+}
+
+// ---- ASYNC PIPELINE BUILDS ----
+void VoxiRenderer::startBuildWorker() {
+    if (buildThread_.joinable()) return;
+    buildStop_ = false;
+    buildThread_ = std::thread([this] {
+        for (;;) {
+            BuildJob job;
+            {
+                std::unique_lock<std::mutex> lk(buildMu_);
+                buildCv_.wait(lk, [this] { return buildStop_ || !buildQueue_.empty(); });
+                if (buildStop_) return;
+                job = std::move(buildQueue_.front());
+                buildQueue_.pop_front();
+                buildBusy_ = true;
+            }
+            if (job.work) job.work();
+            std::lock_guard<std::mutex> lk(buildMu_);
+            if (job.done) buildDone_.push_back(std::move(job.done));
+            buildBusy_ = false;
+        }
+    });
+}
+
+void VoxiRenderer::stopBuildWorker() {
+    if (!buildThread_.joinable()) return;
+    {
+        std::lock_guard<std::mutex> lk(buildMu_);
+        buildStop_ = true;
+        buildQueue_.clear();   // not started: dropped (shutdown destroys whatever the handles hold)
+    }
+    buildCv_.notify_all();
+    buildThread_.join();       // a job in progress finishes first
+    std::lock_guard<std::mutex> lk(buildMu_);
+    buildDone_.clear();
+    sceneJobs_ = 0;
+}
+
+void VoxiRenderer::queueBuild(std::function<void()> work, std::function<void()> done) {
+    {
+        std::lock_guard<std::mutex> lk(buildMu_);
+        buildQueue_.push_back({std::move(work), std::move(done)});
+    }
+    buildCv_.notify_one();
+}
+
+// Main thread: runs the `done` of every finished job (adopting its pipelines).
+void VoxiRenderer::pumpBuilds() {
+    std::vector<std::function<void()>> done;
+    {
+        std::lock_guard<std::mutex> lk(buildMu_);
+        done.swap(buildDone_);
+    }
+    for (auto& f : done) f();
+}
+
+void VoxiRenderer::finishPipelineBuilds() {
+    for (;;) {
+        pumpBuilds();
+        {
+            std::lock_guard<std::mutex> lk(buildMu_);
+            if (buildQueue_.empty() && !buildBusy_ && buildDone_.empty()) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+}
+
+void VoxiRenderer::compileProgress(u32& done, u32& total) const {
+    done = g_voxiCompiles.load() - buildCompileBase_;
+    total = lastBuildCompiles_;
+}
+
+void VoxiRenderer::requestScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth) {
+    if (!asyncBuilds_) {
+        if (!createScenePipelines(sampleCount, color, depth))
+            AVER_ERROR("[Voxi] scene pipelines could not be built for {} sample(s)", sampleCount);
+        scenePipelineGraphRev_ = pbr::materialGraphs().revision();
+        scenePipelineShaderRev_ = rhi::shaderFileRevision();
+        return;
+    }
+    if (sceneInFlight_) {   // the handles belong to that build until it lands: rebuild after it
+        sceneWantPending_ = true;
+        sceneWantSamples_ = sampleCount;
+        sceneWantColor_ = color;
+        sceneWantDepth_ = depth;
+        return;
+    }
+    destroyScenePipelines();
+    sceneColorFmt_ = color;
+    sceneDepthFmt_ = depth;
+    sceneSampleCount_ = sampleCount;
+    ensureTextureTable();   // a GPU resource: here, before the worker reads it
+    const u64 graphRev = pbr::materialGraphs().revision();
+    const u64 shaderRev = rhi::shaderFileRevision();
+    auto prelude = std::make_shared<std::string>(voxiShaderPrelude());
+    if (sceneJobs_.load() == 0) { buildCompileBase_ = g_voxiCompiles.load(); buildT0_ = std::chrono::steady_clock::now(); }
+    ++sceneJobs_;
+    sceneInFlight_ = true;
+    queueBuild(
+        [this, sampleCount, color, depth, prelude] {
+            tl_voxiPrelude = prelude.get();
+            buildScenePipelines(sampleCount, color, depth);
+            tl_voxiPrelude = nullptr;
+        },
+        [this, graphRev, shaderRev] {
+            scenePipelineGraphRev_ = graphRev;
+            scenePipelineShaderRev_ = shaderRev;
+            sceneInFlight_ = false;
+            if (!scenePso_) AVER_ERROR("[Voxi] the scene pipeline could not be built; the scene stays dark");
+            if (--sceneJobs_ == 0) {
+                lastBuildCompiles_ = g_voxiCompiles.load() - buildCompileBase_;
+                AVER_INFO("[Voxi] pipelines ready: {} shader compile(s) in {:.1f} s (built off the main thread)",
+                          lastBuildCompiles_,
+                          std::chrono::duration<f64>(std::chrono::steady_clock::now() - buildT0_).count());
+            }
+            if (sceneWantPending_) {
+                sceneWantPending_ = false;
+                if (sceneWantSamples_ != sceneSampleCount_ || sceneWantColor_ != sceneColorFmt_ ||
+                    sceneWantDepth_ != sceneDepthFmt_)
+                    requestScenePipelines(sceneWantSamples_, sceneWantColor_, sceneWantDepth_);
+            }
+        });
+}
+
+// The init set, then the scene set for the device's own formats (the synchronous path).
+bool VoxiRenderer::createPipelines() {
+    const bool initOk = buildInitPipelines();
     // --- 6-10. scene pipelines (bake sample count and formats) ---
     const bool sceneOk = createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(),
                                               dev_->depthFormat());
     scenePipelineGraphRev_ = pbr::materialGraphs().revision();
     scenePipelineShaderRev_ = rhi::shaderFileRevision();
-
-    return shadowPso_ && voxelPso_ && clearPso_ && mipPso_ && sceneOk;
+    return initOk && sceneOk;
 }
 
 // Creates the five pipelines that bake sample count and render-target formats.
 bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth) {
-    const bool msOk = caps_.meshShaderTier > 0 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
-    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
+    destroyScenePipelines();
+    sceneColorFmt_ = color;
+    sceneDepthFmt_ = depth;
+    sceneSampleCount_ = sampleCount;
+    ensureTextureTable();
+    return buildScenePipelines(sampleCount, color, depth);
+}
+
+// Destroys the scene set and its lazy twins (main thread: destroyPipeline retires through the frame fence).
+void VoxiRenderer::destroyScenePipelines() {
 
     const rhi::PipelineHandle stale[] = {debugPso_, scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_,
                                          sceneBlendedPso_, sceneMsBlendedPso_, sceneRtBlendedPso_,
@@ -7230,10 +7412,13 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // NRD2's Stage B variant and compose draw bake these formats; rebuilt on next use.
     nrd2_.destroyCompose();
     nrd2Tried_ = false;
-    sceneColorFmt_ = color;
-    sceneDepthFmt_ = depth;
-    sceneSampleCount_ = sampleCount;
+}
 
+// Builds the scene set for these formats into the (destroyed) handles. Writes nothing but those handles and the
+// twins' "tried" flags, so it may run on the build worker; the bindless texture table must already exist.
+bool VoxiRenderer::buildScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth) {
+    const bool msOk = caps_.meshShaderTier > 0 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
+    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
     ShaderScope compile(*res_);
     const rhi::PipelineLayout gi = giLayout();
     const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot,
