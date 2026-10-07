@@ -1703,7 +1703,7 @@ private:
 
     // ---- AverSR ----
     IUpscaler* upscaler_ = nullptr;   // Null unless a host set one.
-    // Alias of scene colour for IUpscaler::execute. Updated per-frame.
+    // Adopted handle onto the scene colour for IUpscaler::execute; rests at PIXEL_SHADER_RESOURCE.
     TextureHandle sceneColorTex_ = 0;
     u32           sceneColorTexW_ = 0, sceneColorTexH_ = 0;
     // Blended pass backdrop.
@@ -4832,14 +4832,13 @@ bool D3D12Device::createPostTargets() {
 
     if (upscaler_) {
         if (D3D12ResourceFactory* f = rhiFactory_) {
-            // #1: Factory-created alias of scene colour (SRV only, filled by CopyResource each frame).
-            TextureDesc sc;
-            sc.width = sceneWidth_; sc.height = sceneHeight_;
-            sc.format = fromDxgiFormat(kSceneColorFormat);
-            sc.bind = ResourceBind::ShaderResource;
-            sc.initialState = ResourceState::ShaderResource;
-            sc.debugName = "AverSR.SceneColor";
-            sceneColorTex_ = f->createTexture(sc);
+            // #1: Handle onto the scene colour itself; runPostChain narrows the scene to PIXEL_SHADER_RESOURCE
+            // around the upscale, which is the alias's rest state.
+            sceneColorTex_ = f->adoptExternalRenderTargetTexture(
+                scene, fromDxgiFormat(kSceneColorFormat), sceneWidth_, sceneHeight_, "AverSR.SceneColor (adopted)", 0);
+#if AVER_RHI_TRACK_STATE
+            if (RhiTexture* sct = f->texture(sceneColorTex_)) sct->states.assign(1, ResourceState::ShaderResource);
+#endif
             sceneColorTexW_ = sceneWidth_; sceneColorTexH_ = sceneHeight_;
 
             // #2: AverSR output at present size (upscale on radiance before tonemap).
@@ -5216,22 +5215,12 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         RhiTexture* srcT = rhiFactory_->texture(sceneColorTex_);
         RhiTexture* dstT = rhiFactory_->texture(presentHdrTex_);
         if (srcT && srcT->res && dstT && dstT->res && dstT->rtvHeap) {
-            // Copy to upscaler's input: scene is COPY_SOURCE, not COPY_DEST.
+            // sceneColorTex_ aliases the scene; the upscaler expects it at exactly PIXEL_SHADER_RESOURCE.
             D3D12_RESOURCE_BARRIER pre[2] = {
-                transition(scene, kSceneRead, D3D12_RESOURCE_STATE_COPY_SOURCE),
-                transition(srcT->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST),
+                transition(scene, kSceneRead, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                transition(dstT->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
             };
             cmdList_->ResourceBarrier(2, pre);
-            cmdList_->CopyResource(srcT->res.Get(), scene);
-            D3D12_RESOURCE_BARRIER post[2] = {
-                transition(scene, D3D12_RESOURCE_STATE_COPY_SOURCE, kSceneRead),
-                transition(srcT->res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
-            };
-            cmdList_->ResourceBarrier(2, post);
-
-            auto toRt = transition(dstT->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
-            cmdList_->ResourceBarrier(1, &toRt);
             D3D12_CPU_DESCRIPTOR_HANDLE srRtv = dstT->rtvHeap->GetCPUDescriptorHandleForHeapStart();
             cmdList_->OMSetRenderTargets(1, &srRtv, FALSE, nullptr);
             // Caller binds target and sets viewport/scissor to destination size; implementation records
@@ -5281,11 +5270,14 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
             // Looked up again: execute() may create textures (an upscaler's history on first use), and
             // a grown texture table moves, leaving the earlier dstT dangling (a NULL barrier, device lost).
             dstT = rhiFactory_->texture(presentHdrTex_);
-            if (dstT && dstT->res) {
-                auto backToSrv = transition(dstT->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
-                                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                cmdList_->ResourceBarrier(1, &backToSrv);
-            }
+            D3D12_RESOURCE_BARRIER back[2] = {
+                transition(scene, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kSceneRead),
+            };
+            UINT backN = 1;
+            if (dstT && dstT->res)
+                back[backN++] = transition(dstT->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            cmdList_->ResourceBarrier(backN, back);
 
             // Restore post chain's descriptor heap and root signature.
             ID3D12DescriptorHeap* heaps[] = {postSrvHeap_.Get()};
