@@ -2224,14 +2224,18 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // Frame interpolation reads motion and depth from G-buffer.
 #if AVER_MODULE_VOXI
     voxi::Renderer& vx = voxi::Renderer::get();
-    const bool wantGbufForDenoiser = voxi::resolve(vx.settings(), vx.deviceInfo()).denoiserGBufferWanted;
+    const voxi::Resolution gbufRes = voxi::resolve(vx.settings(), vx.deviceInfo());
+    const bool wantGbufForDenoiser = gbufRes.denoiserGBufferWanted;
+    // NeuRAA runs only on ray-found first surfaces (it needs the visibility buffer); raster frames use MSAA.
+    [[maybe_unused]] const bool rayPrimaryFrame = gbufRes.rtRenderMode.effective == 1u || vx.settings().pathTracing != voxi::Quality::Off;
 #else
     const bool wantGbufForDenoiser = false;
+    [[maybe_unused]] const bool rayPrimaryFrame = true;
 #endif
     const bool wantGbufForFrameInterp = updateFrameInterpolation(e.device());
 #if AVER_MODULE_SR
     // TAA's resolve reads velocity and view Z; NeuRAA reads view Z and normals.
-    const bool wantGbufForTaa = temporalAaEnabled_ || neuraaEnabled_;
+    const bool wantGbufForTaa = temporalAaEnabled_ || (neuraaEnabled_ && rayPrimaryFrame);
 #else
     const bool wantGbufForTaa = false;
 #endif
