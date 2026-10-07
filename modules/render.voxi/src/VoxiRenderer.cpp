@@ -490,6 +490,7 @@ void VoxiRenderer::shutdown() {
     rdLocalOutThisFrame_ = 0;
     rdLocalHistPrimed_ = false;
     rdLocalHistFrame_ = 0;
+    rdKeyFrame_ = 0;
     if (giRadiance_) { res_->destroyTexture(giRadiance_); giRadiance_ = 0; }
     if (giReservoirs_) { res_->destroyBuffer(giReservoirs_); giReservoirs_ = 0; }
     giReservoirElemCapacity_ = 0;
@@ -4189,7 +4190,10 @@ bool VoxiRenderer::publishLocalLights(bool live, const char* pass) {
     cb_.cameraMedium[2] = static_cast<f32>(rdLocalLightCount_);
     // Two bits: 1 = history valid; 2 = every lamp-flagged draw is a live light this frame, so the GI
     // estimators may drop an emitter's own emission (rdLocalLightsCarryAll_).
-    cb_.cameraMedium[3] = (histValid ? 1.0f : 0.0f) + (rdLocalLightsCarryAll_ ? 2.0f : 0.0f) + 4.0f;
+    // Bit 8: last frame's CSRdShadow wrote the light keys in u19 (the sun's shadow history is reused only under them).
+    const bool keysValid = rdKeyFrame_ != 0 && rdKeyFrame_ + 1u == rtFrameIndex_;
+    cb_.cameraMedium[3] = (histValid ? 1.0f : 0.0f) + (rdLocalLightsCarryAll_ ? 2.0f : 0.0f) + 4.0f +
+                          (keysValid ? 8.0f : 0.0f);
     if (!rdLocalLightsRunLogged_) {
         rdLocalLightsRunLogged_ = true;
         AVER_INFO("[Voxi] local lights running: {} lamp(s) this frame, shaded by {}",
@@ -5014,6 +5018,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         ctx.setBindlessTable(rtTexTable_);
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
         if (gx && gy) ctx.dispatch(gx, gy, 1);
+        if (localLights && gx && gy) rdKeyFrame_ = rtFrameIndex_;
         if (giSplit) ctx.uavBarrierBuffer(rdGiCandBuf_);   // G1's candidates, for CSRdGi below
         // CSRdTailVis reads CSRdShadow's exact light (gRdLocalOut.x) and depth (gRdSunVisTex.a), then writes the tail's
         // shadow fraction (gRdLocalOut.a, next frame's lamp history); CSRdTailFilter its 5x5 (.z).
@@ -5314,6 +5319,7 @@ void VoxiRenderer::releaseLocalHistory() {
     rdLocalOutThisFrame_ = 0;
     rdLocalHistPrimed_ = false;
     rdLocalHistFrame_ = 0;
+    rdKeyFrame_ = 0;
 }
 
 // (Re)creates the ray-traced shadow AND reflection histories at the given resolution. All four
@@ -6139,11 +6145,13 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     const bool denoiseAoSignal = rtAoHitDist_ != 0 &&
                                  (!rayDrivenActive() || (lightingLegacyBits_ & 32u) != 0u);
     // Reflections: last frame's CSRdRefl wrote rdReflDnIn_ (u23 was bound to it).
-    const bool denoiseReflSignal = settings_.denoiseReflections && rdReflDnIn_ != 0 && rdReflDnBound_;
-    denoiseReflOutput_ = 0;
+    // ONE FidelityFX decision per frame: dispatch below, and whether this frame's CSRdRefl feeds it (u23).
     // Denoiser None runs no denoiser: the G-buffer can still be on for TAA or frame interpolation.
-    if (!nrd2Frame_ && settings_.denoiser && denoiser_.valid() && gbufWritten &&
-        (denoiseAoSignal || denoiseGiSignal || denoiseReflSignal)) {
+    const bool ffxFrame = !nrd2Frame_ && settings_.denoiser && denoiser_.valid() && gbufWritten;
+    const bool reflDnWanted = ffxFrame && settings_.denoiseReflections && rdReflDnIn_ != 0;
+    const bool denoiseReflSignal = reflDnWanted && rdReflDnBound_;
+    denoiseReflOutput_ = 0;
+    if (ffxFrame && (denoiseAoSignal || denoiseGiSignal || denoiseReflSignal)) {
         render::denoise::Denoiser::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();
         in.motionVectors   = dev_->gBufferVelocityTexture();
@@ -6224,9 +6232,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     else                  res_->clearSrv(bindings_, 15);
     if (denoiseReflOutput_) res_->setSrv(bindings_, 23, denoiseReflOutput_);
     else                    res_->clearSrv(bindings_, 23);
-    // This frame's CSRdRefl writes the denoiser's input only while it can run next frame.
-    const bool reflDnWanted = !nrd2Frame_ && settings_.denoiser && settings_.denoiseReflections && rdReflDnIn_ != 0 &&
-                              denoiser_.valid() && gbufWritten;
+    // This frame's CSRdRefl writes the denoiser's input only while it can run next frame (reflDnWanted).
     // Leaving NRD2: u23 (and u9) still hold its targets and must be rebound whatever was wanted before.
     const bool nrd2Unbind = nrd2Bound_ && !nrd2Frame_;
     if (!nrd2Frame_) nrd2_.resetHistory();
@@ -6326,6 +6332,13 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         if (fill && (refl || ao || settings_.nrd2HalfRateGi)) bits |= 64u;
         bits |= 512u;   // shader-visible NRD2 frame (rtNrd2Frame)
         cb_.giShadowParams[3] = static_cast<f32>(bits);
+    } else if (denoiserMode(settings_) == 0u) {
+        // Denoiser None: nothing filters. History "not usable" (the state every reset uses) turns off every
+        // reprojection read, so no temporal blend, spatial filter, half-rate fill or lamp history runs, while the
+        // reflection lobe and the sun's jitter stay. Bit 1024 drops the tail's 5x5 (rtFiltersOff). ReSTIR's
+        // reservoir reuse stays: it is the GI estimator. The tail's 2x2 block sharing is part of its estimator.
+        cb_.rtHistParams[1] = 0.0f;
+        cb_.giShadowParams[3] = static_cast<f32>(static_cast<u32>(cb_.giShadowParams[3]) | 1024u);
     }
     // Spatial filter radius; blend amount pinned at 0 (loop runs but result discarded via constant).
     // x: bounces in the low four bits, bit 4 = Reference mode (voxi_pt.hlsli ptReferenceMode).
@@ -7406,8 +7419,10 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
             rdVisCsPso_ = res_->createComputePipeline(p);
         }
         // SM 6.6: compute-shader derivatives exist only from 6.6; below that, compile fails.
-        const rhi::ShaderHandle csShadow = compile("CSRdShadow", rhi::ShaderStage::Compute, 66,
-                                                   rasterDefs(csDefs.c_str()).c_str());
+        // AVER_RD_SHADOW_KEYED: the sun's shadow history is only reused under the light it was traced for.
+        const rhi::ShaderHandle csShadow =
+            compile("CSRdShadow", rhi::ShaderStage::Compute, 66,
+                    rasterDefs((csDefs + ";AVER_RD_SHADOW_KEYED=1").c_str()).c_str());
         if (csShadow) {
             rhi::ComputePipelineDesc p;
             p.cs = csShadow;
@@ -7426,7 +7441,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
         // CSRdShadow + AVER_RD_SHADOW_TILES=1: ORs 3x3 probe neighbourhood, skips per-pixel ray where probes agree.
         const rhi::ShaderHandle csShadowTiled =
             compile("CSRdShadow", rhi::ShaderStage::Compute, 66,
-                    rasterDefs((csDefs + ";AVER_RD_SHADOW_TILES=1").c_str()).c_str());
+                    rasterDefs((csDefs + ";AVER_RD_SHADOW_TILES=1;AVER_RD_SHADOW_KEYED=1").c_str()).c_str());
         if (csShadowTiled) {
             rhi::ComputePipelineDesc p;
             p.cs = csShadowTiled;

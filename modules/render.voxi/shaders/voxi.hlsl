@@ -296,6 +296,14 @@ RWTexture2D<float4>            gRdLocalOut    : register(u19);
 
 // AVER_RD_LAMPS (voxi_rt.hlsli): every compile but a single-pass one with AVER_RD_SINGLE_PASS_LAMPS 0.
 #if AVER_RD_LAMPS
+#if AVER_RD_SHADOW_KEYED
+// The shadow history texel belongs to the light now being traced iff last frame's exact light there had its key.
+// Without a key texture (no lamp pass this frame) there is nothing to compare against.
+bool rdShadowHistKeyOk(int2 texel) {
+    if (!rdLocalLampsLive()) return true;
+    return rdLocalKeysValid() && gRdLocalHist.Load(int3(texel, 0)).y == gAverShadowLightId;
+}
+#endif
 // One neighbour of rdLocalVisFiltered's 5x5. Weight falls linearly to zero at the reprojection depth
 // test's tolerance (3% of depth + 1 cm, rtReprojectTexel), so a tap across a silhouette contributes
 // nothing; a sky tap (alpha <= 0) is skipped outright. Clamped into THIS frame's viewport -- texels
@@ -2706,7 +2714,8 @@ void CSRdTailFilter(uint3 tid : SV_DispatchThreadID) {
     const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
     if (gRdSunVisTex[pixel].a <= 0.0) return;
     float4 o = gRdLocalOut[pixel];
-    o.z = rdLocalVisFilter5x5(pixel);
+    // Denoiser None: the pixel's own block-shared fraction; the 5x5 only fills pixels the blocks left empty.
+    o.z = (rtFiltersOff() && o.a >= 0.0) ? o.a : rdLocalVisFilter5x5(pixel);
     gRdLocalOut[pixel] = o;
 }
 
