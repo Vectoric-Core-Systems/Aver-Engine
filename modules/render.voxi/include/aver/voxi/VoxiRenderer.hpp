@@ -175,11 +175,6 @@ public:
     // Builds the variants otherwise compiled on first use (NRD2 Stage B, Path Tracing and NeuRaC
     // twins). For tests and loading screens; call after onRenderTargetsChanged.
     void buildAllVariants();
-    // The light path follows the denoiser (NRD2: unified, else legacy; see lightsLegacy_). A switch rebuilds every scene
-    // pipeline, so the editor allows it only once the shader warm-up has filled the cache; until then the current path
-    // stays and NRD2 waits. Called every frame (cheap when nothing changes).
-    void setLightPathSwitchAllowed(bool allowed) { lightPathAllowed_ = allowed; }
-    void syncLightPath();
     void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
                                 u32 width, u32 height) override;
 
@@ -1127,8 +1122,7 @@ private:
     // TWO LIGHT PATHS (UNIFIED_LIGHTS.md "Two light paths"): FidelityFX and None frames build the pre-unification
     // shaders (voxi_legacy.hlsl), NRD2 frames the current ones. syncLightPath rebuilds the scene pipelines on a change.
     bool lightsLegacy_ = true;
-    bool lightPathAllowed_ = false;   // until the editor says the cache is warm (or the run has no editor window)
-    bool lightPathWaitLogged_ = false;
+    void syncLightPath();
     bool ensureNrd2();             // pipelines (built once) and targets for this frame; false = not this frame
     void bindNrd2Targets();
     // Advanced once per frame at the top of beginShadowHistory; its low bit is half-rate GI's parity.

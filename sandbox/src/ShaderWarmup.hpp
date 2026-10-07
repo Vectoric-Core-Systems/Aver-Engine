@@ -19,8 +19,6 @@ public:
     // Main thread, once a frame: turns the tool's output into the notification.
     void poll();
     bool running() const;
-    // This project's warm-up has run to its end (done or failed): the shader cache is as full as it will get.
-    bool finished() const;
     // The last progress line ("412 of 1032 shaders") and its fraction (-1 = unknown).
     float progress(std::string& note) const;
     // Someone is waiting on this run: raise it from idle to normal priority.

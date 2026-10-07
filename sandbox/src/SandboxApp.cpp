@@ -2294,13 +2294,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         }
         // A heavy mode switch is announced a frame before it is applied (ModeSwitchNotice.hpp).
         static editor::ModeSwitchNotice modeNotice;
-        // The light path switches (a full pipeline rebuild) only once this project's warm-up has filled the cache;
-        // a run without the editor window (captures, tests) never waits.
-        const bool interactiveRun = e.window() != nullptr && maxFrames_ == 0;
-        voxiRenderer_.setLightPathSwitchAllowed(!interactiveRun || shaderWarmup_.finished());
-        if (modeNotice.shouldApply(vs, interactiveRun, &shaderWarmup_))
+        if (modeNotice.shouldApply(vs, e.window() != nullptr && maxFrames_ == 0, &shaderWarmup_))
             voxiRenderer_.setSettings(vs);
-        voxiRenderer_.syncLightPath();
         // Consume-and-forward: console reset commands routed through singleton flags to the renderer instance.
         if (voxi::Renderer::get().consumeGiHistoryResetRequest())  voxiRenderer_.resetGiHistory();
         if (voxi::Renderer::get().consumeRtHistoryResetRequest())  voxiRenderer_.resetRtHistory();
