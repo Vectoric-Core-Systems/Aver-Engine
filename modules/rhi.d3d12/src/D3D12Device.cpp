@@ -5372,6 +5372,11 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
 // Closes the frame: post chain, overlay, UI, capture, then submit.
 void D3D12Device::endFrame() {
     if (!hasSwapchain_) return;
+    // A feature can learn mid-frame that its pipelines no longer fit what was submitted (a material graph
+    // loaded): the frame's late work (blended replay, sky, post) is dropped from here.
+    if (!frameSuppressed_)
+        for (IRenderFeature* f : features_)
+            if (f->suppressesWholeFrame()) { frameSuppressed_ = true; break; }
     // LATE SCENE (wantsLateScenePass): the scene's targets, viewport and root are rebound, since draw
     // submission may have changed them, and the winner records inside the still-open "scene draw" span.
     if (IRenderFeature* late = lateSceneWinner_) {

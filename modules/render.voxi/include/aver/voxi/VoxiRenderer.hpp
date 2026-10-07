@@ -253,7 +253,10 @@ private:
     bool buildInFlight(unsigned groups) const;
     // The scene set stands and matches the targets: every recorder may run. Changes only at frame boundaries,
     // except that a target change (onRenderTargetsChanged) clears it at once.
-    bool canRecord() const { return giReady_ && !targetsStale_; }
+    bool canRecord() const { return giReady_ && !targetsStale_ && !graphStale(); }
+    // Live, not latched: a material graph loaded mid-frame leaves the standing set's shaders without it, and a
+    // material already naming it hung the GPU in that frame's blended replay.
+    bool graphStale() const;
     // Just after a scene set lands, ray-driven is meant to paint but its acceleration structure is not built
     // yet: the frame stays blank instead of the raster path drawing it (its ray-traced glass replay hung the
     // RX 7800 XT at project open). Ends when rtActive_ is set, or after rdSettle_ frames.

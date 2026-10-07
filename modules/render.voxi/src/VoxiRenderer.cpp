@@ -4669,11 +4669,18 @@ rhi::BindlessTableHandle VoxiRenderer::sceneBindlessTable() const { return rtTex
 // While the scene set builds (blocked_, latched at prePass) Voxi claims the scene and records nothing: the
 // frame is blank rather than drawn by a half-built renderer.
 bool VoxiRenderer::suppressesScene() const {
-    return blocked_ || targetsStale_ || rdSettling() || debugViewActive() || rayDrivenActive();
+    return blocked_ || targetsStale_ || graphStale() || rdSettling() || debugViewActive() || rayDrivenActive();
 }
 
 // Debug raymarch has no depth; ray-driven writes real depth so sky lands on ray misses.
-bool VoxiRenderer::suppressesWholeFrame() const { return blocked_ || targetsStale_ || rdSettling() || debugViewActive(); }
+bool VoxiRenderer::suppressesWholeFrame() const {
+    return blocked_ || targetsStale_ || graphStale() || rdSettling() || debugViewActive();
+}
+
+bool VoxiRenderer::graphStale() const {
+    return sceneAdopted_ && (builtGraphRev_ != pbr::materialGraphs().revision() ||
+                             builtShaderRev_ != rhi::shaderFileRevision());
+}
 
 // Draws the scene pass replacement (debug view or ray-driven); debug wins if both are active.
 void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
