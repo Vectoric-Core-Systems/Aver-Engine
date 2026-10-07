@@ -2526,6 +2526,8 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     const float3 L = haveE0 ? rdSetShadowLight(gRdLocalLights[e0], s.wpos) : normalize(gLightDir.xyz);
     const bool  e0Directional = haveE0 && aversLightKind(gRdLocalLights[e0]) == AVER_LIGHT_DIRECTIONAL;
     const bool  e0NoShadow    = haveE0 && aversLightNoShadow(gRdLocalLights[e0]);
+    // The tier's ray count (up to 8) is the sun's; a lamp's small penumbra takes at most 2.
+    const uint  e0Rays = (uint)max(gRtParams.y, 1.0) > 2u && haveE0 && !e0Directional ? 2u : (uint)max(gRtParams.y, 1.0);
 
     // History writes always live for this pass: blended draws never reach ray-driven primary.
     gAverHistoryWrite = true;
@@ -2553,12 +2555,12 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     // light (nothing reaches this point) or a no-shadow one: no ray; the stand-in keeps the history writes.
     const bool   probeAgrees = !haveE0 || e0NoShadow || (e0Directional && (m == 2u || m == 1u));
     const float3 sunVis = rtShadowTemporalEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy,
-                                             (uint)max(gRtParams.y, 1.0), probeAgrees,
+                                             e0Rays, probeAgrees,
                                              float3(1.0, 1.0, 1.0) * ((e0NoShadow || (e0Directional && m == 2u)) ? 1.0 : 0.0));
 #else
     const bool   noRay  = !haveE0 || e0NoShadow;
     const float3 sunVis = rtShadowTemporalEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy,
-                                             (uint)max(gRtParams.y, 1.0), noRay,
+                                             e0Rays, noRay,
                                              float3(1.0, 1.0, 1.0) * (e0NoShadow ? 1.0 : 0.0));
 #endif
     gAverShadowOriginPush = float3(0.0, 0.0, 0.0);

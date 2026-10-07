@@ -573,7 +573,9 @@ float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, flo
     const float tanR = gAverShadowTanR >= 0.0 ? gAverShadowTanR : max(gRtParams.x, 0.0);
     const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
 #if AVER_RD_ABLATE != AVER_RD_ABL_SHADOW_FIRSTHIT
-    const bool firstHitOnly = (rtGiShadowBits() & 32u) != 0u;
+    // A lamp's ray (rdSetShadowLight gave it a disc: gAverShadowTanR >= 0) takes the opaque first-hit path too, as
+    // lamp rays always did: the transmittance walk through glass cost ~2x and lamps were never tinted by it.
+    const bool firstHitOnly = (rtGiShadowBits() & 32u) != 0u || gAverShadowTanR >= 0.0;
 #endif
 
     // Frame around light direction.
