@@ -525,6 +525,7 @@ private:
     rhi::PipelineHandle rdShadowProbeCsPso_ = 0;
     rhi::PipelineHandle rdShadowTiledCsPso_ = 0;
     rhi::PipelineHandle rdTailVisCsPso_ = 0;      // CSRdTailVis: the tail lights' shadow fraction
+    rhi::PipelineHandle rdLocalLightsCsPso_ = 0;  // CSRdLocalLights: the legacy lamp pass (FidelityFX / None frames)
     rhi::PipelineHandle rdTailFilterCsPso_ = 0;   // CSRdTailFilter: its 5x5, into gRdLocalOut.z
     rhi::PipelineHandle rdGiTraceCsPso_   = 0;
     rhi::PipelineHandle rdGiTraceCbCsPso_ = 0;
@@ -1118,6 +1119,10 @@ private:
     rhi::Format sceneColorFmt_ = rhi::Format::Unknown, sceneDepthFmt_ = rhi::Format::Unknown;
     u32 sceneSampleCount_ = 1;
     bool nrd2Wanted() const;
+    // TWO LIGHT PATHS (UNIFIED_LIGHTS.md "Two light paths"): FidelityFX and None frames build the pre-unification
+    // shaders (voxi_legacy.hlsl), NRD2 frames the current ones. syncLightPath rebuilds the scene pipelines on a change.
+    bool lightsLegacy_ = true;
+    void syncLightPath();
     bool ensureNrd2();             // pipelines (built once) and targets for this frame; false = not this frame
     void bindNrd2Targets();
     // Advanced once per frame at the top of beginShadowHistory; its low bit is half-rate GI's parity.

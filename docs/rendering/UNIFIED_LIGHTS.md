@@ -156,3 +156,21 @@ Later findings (2026-10-07):
   light's visibility, instead of "fully lit", fixes the white rims alone); a 12-light cell cap (no gain).
 - `voxi.lightRaysPerBlock 4` saves 0.6 ms for bright-spot area 0.08% -> 0.31% of the view.
 - Per-stage timings (`voxi.rayDrivenStageTiming`) add a barrier after every stage; confirm a win on the total without it.
+
+## Two light paths (2026-10-07)
+
+The owner's call after FidelityFX mode showed white rims and a fix for them lost the device: **FidelityFX and None
+frames run the pre-unification lighting, NRD2 frames the unified one.** The legacy path is this morning's shaders
+(commit 33de447e) kept whole as `voxi_legacy.hlsl`, `voxi_rt_legacy.hlsli`, `voxi_pt_legacy.hlsli` and
+`voxi_restir_legacy.hlsli` (they include each other; `aver_lights.hlsli` is shared, its directional kind unused there):
+sun as its own path, lamps through CSRdLocalLights (one shared visibility, history), ptLamp at hits.
+
+- `VoxiRenderer::lightsLegacy_` follows `denoiserMode != 2` (`syncLightPath`, from `setSettings`); a change rebuilds the
+  scene pipelines from the other source (`createScenePipelines`, cached after the warm-up), resets the shadow and lamp
+  histories (the two paths store different things in them) and the denoiser's.
+- Host differences on the legacy path: CSRdLocalLights is dispatched instead of CSRdTailVis/CSRdTailFilter, and
+  `publishLocalLights` keeps the old contract (count 0 unless the lamp pass runs; emission dropped at hits only when
+  the first 32 lamps are all of them). The list itself is shared: the legacy shaders read its first lamps.
+- `buildAllVariants` (the warm-up and VoxiShaderCompileTest) compiles both paths; the editor holds a switch between
+  NRD2 and the others until the warm-up is done, as it does for Path Tracing.
+- The legacy files are not edited for features: a fix goes in place, a feature goes to the unified path.
