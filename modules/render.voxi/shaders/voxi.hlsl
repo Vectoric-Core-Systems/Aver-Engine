@@ -2534,8 +2534,8 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     const float3 L = haveE0 ? rdSetShadowLight(gRdLocalLights[e0], s.wpos) : normalize(gLightDir.xyz);
     const bool  e0Directional = haveE0 && aversLightKind(gRdLocalLights[e0]) == AVER_LIGHT_DIRECTIONAL;
     const bool  e0NoShadow    = haveE0 && aversLightNoShadow(gRdLocalLights[e0]);
-    // The tier's ray count (up to 8) is the sun's; a lamp's small penumbra takes at most 2.
-    const uint  e0Rays = (uint)max(gRtParams.y, 1.0) > 2u && haveE0 && !e0Directional ? 2u : (uint)max(gRtParams.y, 1.0);
+    // The tier's ray count (up to 8) is the sun's; a lamp's small penumbra takes 1 (2 measured no different).
+    const uint  e0Rays = haveE0 && !e0Directional ? 1u : (uint)max(gRtParams.y, 1.0);
 
     // History writes always live for this pass: blended draws never reach ray-driven primary.
     gAverHistoryWrite = true;
