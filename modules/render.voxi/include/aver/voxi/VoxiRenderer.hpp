@@ -230,6 +230,7 @@ private:
         PsoLocal local;                           // batch-local handles of what it asked for
         u32 samples = 1;                          // what the scene group bakes
         rhi::Format color = rhi::Format::Unknown, depth = rhi::Format::Unknown;
+        u64 graphRev = 0, shaderRev = 0;          // material-graph and shader-file revisions it was recorded at
         render::denoise::Nrd2::BuildPlan nrd2Plan;
         bool nrd2Compute = false;
     };
@@ -267,6 +268,8 @@ private:
     u32 recSamples_ = 0, builtSamples_ = 0, wantSamples_ = 1;
     rhi::Format recColor_ = rhi::Format::Unknown, recDepth_ = rhi::Format::Unknown;
     rhi::Format builtColor_ = rhi::Format::Unknown, builtDepth_ = rhi::Format::Unknown;
+    // Revisions the standing scene set was recorded at. Ahead of them, materials may name graphs its shaders lack.
+    u64 builtGraphRev_ = 0, builtShaderRev_ = 0;
     rhi::Format wantColor_ = rhi::Format::Unknown, wantDepth_ = rhi::Format::Unknown;
     rhi::PipelineHandle pickGbuf(rhi::PipelineHandle plain, rhi::PipelineHandle gbuf) const;
     void shadowPass(rhi::IRenderContext& ctx);

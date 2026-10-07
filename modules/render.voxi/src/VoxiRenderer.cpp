@@ -7635,6 +7635,8 @@ void VoxiRenderer::startBuild(unsigned groups) {
         recDepth_ = bd->depth;
         scenePipelineGraphRev_ = pbr::materialGraphs().revision();
         scenePipelineShaderRev_ = rhi::shaderFileRevision();
+        bd->graphRev = scenePipelineGraphRev_;
+        bd->shaderRev = scenePipelineShaderRev_;
         recordScenePipelines(b, bd->local, bd->samples, bd->color, bd->depth);
     }
     if (groups & kPsoRc) { rcTwinsTried_ = true; recordRcTwins(b, bd->local); }
@@ -7724,6 +7726,8 @@ void VoxiRenderer::adoptBuild(Build& bd) {
     if ((apply & kPsoScene) && sceneAdopted_ && builtSamples_ == bd.samples && builtColor_ == bd.color &&
         builtDepth_ == bd.depth && (!b.resolve(bd.local.scenePso_) || !b.resolve(bd.local.debugPso_))) {
         AVER_ERROR("[Voxi] scene pipelines could not be rebuilt; the previous pipelines keep drawing");
+        builtGraphRev_ = bd.graphRev;
+        builtShaderRev_ = bd.shaderRev;
         tossGroups(apply);
         apply &= kPsoBase;
         if (!apply) return;
@@ -7750,6 +7754,8 @@ void VoxiRenderer::adoptBuild(Build& bd) {
         builtSamples_ = bd.samples;
         builtColor_ = bd.color;
         builtDepth_ = bd.depth;
+        builtGraphRev_ = bd.graphRev;
+        builtShaderRev_ = bd.shaderRev;
         sceneSampleCount_ = bd.samples;
         sceneColorFmt_ = bd.color;
         sceneDepthFmt_ = bd.depth;
@@ -7812,7 +7818,11 @@ void VoxiRenderer::validateCore() {
 void VoxiRenderer::refreshReady() {
     const bool formatsOk = sceneAdopted_ && builtSamples_ == wantSamples_ && builtColor_ == wantColor_ &&
                            builtDepth_ == wantDepth_;
-    const bool ready = initialised_ && !failed_ && coreChecked_ && formatsOk;
+    // A material graph or shader edit blanks the frame until its rebuild lands, as the first build does: the
+    // standing set's shaders may not know a graph the materials already name (the device loss at project open).
+    const bool revsOk = builtGraphRev_ == pbr::materialGraphs().revision() &&
+                        builtShaderRev_ == rhi::shaderFileRevision();
+    const bool ready = initialised_ && !failed_ && coreChecked_ && formatsOk && revsOk;
     targetsStale_ = sceneAdopted_ && !formatsOk;
     if (ready && !giReady_) {
         giReady_ = true;
