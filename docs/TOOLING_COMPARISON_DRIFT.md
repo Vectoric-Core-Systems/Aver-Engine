@@ -15,13 +15,13 @@ artifacts (shaders, capability registry, manual code blocks, size floors) are co
 ## Gaps worth closing (ranked by value / effort)
 | # | Drift tool | Aver today | Proposal | Effort |
 |---|---|---|---|---|
-| 1 | `scripts/claimAudit.sh` | none | `scripts/claim-audit.ps1 <gate|ctest> <file> <old> <new>`: apply one edit, rebuild, run the check, report caught/survived; MCP tool `aver_claim_audit` | S-M |
-| 2 | `heldFrame.ts` + `shots.mjs` | `gates.ps1` sparse probes, `--screenshot` | `scripts/shots.py capture|diff`: level/camera list -> PNGs; diff reports mean/p99/max delta and connected islands above the run-to-run noise floor | M |
+| 1 | `scripts/claimAudit.sh` | none | **DONE.** `python scripts/claim-audit.py --file F --old X --new Y --check CMD [--build CMD]`: one edit, rebuild, run the check, restore + rebuild; CAUGHT/SURVIVED (checked: a `kPi` edit is caught by AtmosphereTest). Open: an MCP tool | S-M |
+| 2 | `heldFrame.ts` + `shots.mjs` | `gates.ps1` sparse probes, `--screenshot` | **DONE.** `python scripts/shots.py capture <dir> [--list]` and `diff <a> <b> [--ignore x0,y0,x1,y1]`: mean/p99/max delta and 8x8-tile islands over a threshold (exit 1 on an island) | M |
 | 3 | `AGENTS.md` | rules live outside the repo | a checked-in agent guide: gate costs and order, "never delete build\\", which checks need a GPU, DRED/stderr capture | S |
 | 4 | `frame-audit.mjs` | timing only (`--gpu-timing`) | **DONE.** `AVER_FRAME_AUDIT=1` makes the D3D12 backend count draws, dispatches, barriers, copies (and bytes), clears, PSO binds and submits per GPU timing span; see below | M |
 | 5 | `gpu-parity.mjs`, `inference-parity.mjs` | `--nrd2-oracle`, `--furnace-test` | GPU-labelled CTests that dispatch a pass on tiny inputs and compare with its C++ reference | M |
 | 6 | `manual-sync`, `docs:check` | hand-written docs (`docs/STALE_CODE.md`) | `scripts/docs-check.py`: code blocks tagged with a source region fail when the region changes; flag table generated from `aver_flags` | M |
-| 7 | `drft-diff`, `bake:check` | none | `tools/OcmeshDiff.cpp`: compare two `.ocmesh` by meaning (counts, materials, LODs, bounds); CTest bakes twice and diffs | S |
+| 7 | `drft-diff`, `bake:check` | none | **DONE.** `OcmeshDiff.exe a.ocmesh b.ocmesh [--tol cm]`: counts, slots, submeshes, LOD ladder, meshlets, bounds, flags, version, LOD 0 geometry as a triangle multiset. Open: the bake-twice CTest | S |
 | 8 | `probe-check.mjs`, `packages/tools` overlay | `ShaderWarmup`, editor profiler | `--shader-report` (compile cost per shader, refusals under `--force-caps`); an F3 stats overlay in `Runtime/` | S-M |
 
 Smaller: per-artifact size floors next to `verify-payload.ps1`; a static determinism scan for simulation code;
