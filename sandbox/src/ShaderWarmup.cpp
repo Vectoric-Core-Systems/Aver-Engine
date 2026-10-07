@@ -1,7 +1,9 @@
 #include "ShaderWarmup.hpp"
 
+#include "EditorNotifications.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Types.hpp"
+#include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -35,7 +37,40 @@ struct ShaderWarmup::Impl {
     std::mutex mu;
     std::vector<std::string> lines;     // from the reader thread, drained by poll()
     std::atomic<bool> exited{false};
+    u64 toast = 0;
     bool done = false;
+    std::chrono::steady_clock::time_point t0{};
+    std::string lastNote;
+    long long total = 0;      // shader requests of the last finished run (warm_total.txt), 0 = not known yet
+    long long requests = 0;
+    bool boosted = false;     // raised to normal priority because a mode switch waits on it
+
+    // The total persists next to the shader blob cache: the request count barely changes between runs.
+    static std::filesystem::path totalPath() {
+        const std::string dir = userDataDir();
+        return dir.empty() ? std::filesystem::path() : std::filesystem::path(dir) / "ShaderCache" / "warm_total.txt";
+    }
+    void loadTotal() {
+        const std::filesystem::path p = totalPath();
+        if (p.empty()) return;
+        if (FILE* f = _wfopen(p.c_str(), L"rb")) {
+            char buf[32] = {};
+            std::fread(buf, 1, sizeof buf - 1, f);
+            std::fclose(f);
+            total = std::atoll(buf);
+        }
+    }
+    void saveTotal(long long n) {
+        const std::filesystem::path p = totalPath();
+        if (p.empty() || n <= 0) return;
+        std::error_code ec;
+        std::filesystem::create_directories(p.parent_path(), ec);
+        if (FILE* f = _wfopen(p.c_str(), L"wb")) {
+            std::fprintf(f, "%lld", n);
+            std::fclose(f);
+        }
+    }
+
     void readLoop() {
 #ifdef _WIN32
         std::string buf;
@@ -83,12 +118,33 @@ bool ShaderWarmup::running() const {
 #endif
 }
 
+float ShaderWarmup::progress(std::string& note) const {
+    note = impl_->lastNote;
+    return impl_->total > 0 ? std::min(static_cast<float>(impl_->requests) / static_cast<float>(impl_->total), 0.99f)
+                            : -1.0f;
+}
+
+void ShaderWarmup::boost() {
+#ifdef _WIN32
+    if (impl_->process && !impl_->done && !impl_->boosted) {
+        impl_->boosted = true;
+        SetPriorityClass(impl_->process, NORMAL_PRIORITY_CLASS);
+        AVER_INFO("[ShaderWarm] a mode switch is waiting on the shader cache: warm-up raised to normal priority");
+    }
+#endif
+}
+
 void ShaderWarmup::start(const std::string& projectManifest) {
 #ifdef _WIN32
     if (running()) return;
     impl_->close();
     impl_->done = false;
     impl_->exited = false;
+    impl_->toast = 0;
+    impl_->requests = 0;
+    impl_->boosted = false;
+    impl_->loadTotal();
+    impl_->t0 = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::mutex> lk(impl_->mu);
         impl_->lines.clear();
@@ -130,8 +186,6 @@ void ShaderWarmup::start(const std::string& projectManifest) {
 #endif
 }
 
-// Main thread, once a frame. The warm-up is a silent cache pre-filler now: the editor's own pipelines build off
-// the main thread with their own "Compiling shaders" notification, so this only logs its end.
 void ShaderWarmup::poll() {
 #ifdef _WIN32
     if (!impl_->process || impl_->done) return;
@@ -140,15 +194,69 @@ void ShaderWarmup::poll() {
         std::lock_guard<std::mutex> lk(impl_->mu);
         got.swap(impl_->lines);
     }
+    NotificationQueue& q = notifications();
+    // Shown once there is something to wait for: a real compile, or a run past 3 s (the driver's own
+    // pipeline compiles report nothing). A warm cache finishes in about a second and stays silent.
+    const auto showToast = [&] {
+        if (impl_->toast) return;
+        Notification n;
+        n.severity = NotifySeverity::Info;
+        n.title = "Preparing shaders";
+        n.body = "Compiling renderer shaders in the background, so switching between ReSTIR RT, "
+                 "Path Tracing and the denoisers loads from the cache.";
+        n.sticky = true;
+        n.hasProgress = true;
+        n.progress = -1.0f;
+        n.dedupKey = "shader-warmup";
+        impl_->toast = q.push(std::move(n));
+    };
     for (const std::string& l : got) {
-        if (l.rfind("warm: done ", 0) == 0) {
-            AVER_INFO("[ShaderWarm] shader cache filled in {:.0f} s", std::atof(l.c_str() + 11) / 1000.0);
+        if (l.rfind("warm: shaders ", 0) == 0) {
+            // "warm: shaders <requests> <compiled>": the toast appears with the first real compile.
+            const std::string rest = l.substr(14);
+            const usize sp = rest.find(' ');
+            const long long compiled = sp == std::string::npos ? 0 : std::atoll(rest.c_str() + sp + 1);
+            impl_->requests = std::atoll(rest.c_str());
+            if (compiled > 0) showToast();
+            // "<done> of <total> shaders" with a bar; the first run ever (no total yet) counts without one.
+            const long long total = std::max(impl_->total, impl_->requests);
+            float frac = -1.0f;
+            if (impl_->total > 0) {
+                impl_->lastNote = std::to_string(impl_->requests) + " of " + std::to_string(total) + " shaders";
+                frac = std::min(static_cast<float>(impl_->requests) / static_cast<float>(total), 0.99f);
+            } else {
+                impl_->lastNote = std::to_string(impl_->requests) + " shaders";
+            }
+            if (impl_->toast) q.setProgress(impl_->toast, frac, impl_->lastNote);
+        } else if (l.rfind("warm: done ", 0) == 0) {
+            const double sec = std::atof(l.c_str() + 11) / 1000.0;
+            const usize sp = l.find(' ', 11);
+            if (sp != std::string::npos) {
+                impl_->requests = std::atoll(l.c_str() + sp + 1);
+                impl_->saveTotal(impl_->requests);
+                impl_->lastNote = std::to_string(impl_->requests) + " shaders";
+            }
+            char body[96];
+            std::snprintf(body, sizeof body, "Shader cache ready (%.0f s, %s).", sec,
+                          impl_->lastNote.empty() ? "pipelines built" : impl_->lastNote.c_str());
+            if (impl_->toast) {
+                q.setSticky(impl_->toast, false);   // finish() leaves sticky set; it must fade
+                q.finish(impl_->toast, NotifySeverity::Success, "Shaders ready", body, 3.0);
+            }
+            AVER_INFO("[ShaderWarm] {}", body);
             impl_->done = true;
         } else if (l.rfind("warm: fail", 0) == 0) {
             AVER_INFO("[ShaderWarm] {}", l);
         }
     }
-    if (!impl_->done && impl_->exited) impl_->done = true;   // ended without "done": the log says why
+    if (!impl_->done && !impl_->exited &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - impl_->t0).count() > 3.0)
+        showToast();
+    if (!impl_->done && impl_->exited) {
+        // Ended without "done" (failed, or no capable device): nothing to tell the user beyond the log.
+        if (impl_->toast) q.close(impl_->toast);
+        impl_->done = true;
+    }
 #endif
 }
 

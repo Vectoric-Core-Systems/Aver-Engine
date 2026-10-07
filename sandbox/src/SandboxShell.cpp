@@ -1845,8 +1845,7 @@ void SandboxApp::buildUI(Engine& e) {
 
     if (browserActive_) {
         switch (browser_.draw(dpi_, fontMedium_, logoUiId_, logoAspect_)) {
-            // Opened at the next onUpdate: here the frame's draws are already submitted.
-            case editor::BrowserAction::Open: projectOpenPending_ = true; browserActive_ = false; break;
+            case editor::BrowserAction::Open: applyProject(e); browserActive_ = false; break;
             case editor::BrowserAction::Skip: browserActive_ = false; break;
             case editor::BrowserAction::Quit: requestExitChecked(e); break;
             case editor::BrowserAction::Stay: break;
