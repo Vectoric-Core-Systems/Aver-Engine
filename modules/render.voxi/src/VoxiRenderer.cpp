@@ -7689,18 +7689,29 @@ void VoxiRenderer::adoptBuild(Build& bd) {
         return;
     }
     b.adopt();
-    // Built but not taken (the scene generation moved on): straight back.
-    const unsigned drop = bd.groups & ~apply;
-    if (drop) {
+    // Built but not taken: straight back to the factory.
+    const auto tossGroups = [&](unsigned groups) {
         const auto toss = [&](rhi::PipelineHandle local) {
             if (const rhi::PipelineHandle h = b.resolve(local)) res_->destroyPipeline(h);
         };
 #define AVER_VOXI_TOSS(n) toss(bd.local.n);
-        if (drop & kPsoScene) { AVER_VOXI_PSO_SCENE(AVER_VOXI_TOSS) }
-        if (drop & kPsoRc)    { AVER_VOXI_PSO_RC(AVER_VOXI_TOSS) }
-        if (drop & kPsoPt)    { AVER_VOXI_PSO_PT(AVER_VOXI_TOSS) }
-        if (drop & kPsoNrd2)  { AVER_VOXI_PSO_NRD2(AVER_VOXI_TOSS) nrd2_.discardBuild(b, bd.nrd2Plan); }
+        if (groups & kPsoScene) { AVER_VOXI_PSO_SCENE(AVER_VOXI_TOSS) }
+        if (groups & kPsoRc)    { AVER_VOXI_PSO_RC(AVER_VOXI_TOSS) }
+        if (groups & kPsoPt)    { AVER_VOXI_PSO_PT(AVER_VOXI_TOSS) }
+        if (groups & kPsoNrd2)  { AVER_VOXI_PSO_NRD2(AVER_VOXI_TOSS) nrd2_.discardBuild(b, bd.nrd2Plan); }
 #undef AVER_VOXI_TOSS
+    };
+    // The scene generation moved on since this was recorded.
+    tossGroups(bd.groups & ~apply);
+    // A rebuild for the same targets (material graph, edited shader) whose core pipeline would not build: the
+    // set that stands keeps drawing, as it did before sets were swapped whole. Nothing is retried until the
+    // next change, since the revisions it was recorded against are already noted.
+    if ((apply & kPsoScene) && sceneAdopted_ && builtSamples_ == bd.samples && builtColor_ == bd.color &&
+        builtDepth_ == bd.depth && (!b.resolve(bd.local.scenePso_) || !b.resolve(bd.local.debugPso_))) {
+        AVER_ERROR("[Voxi] scene pipelines could not be rebuilt; the previous pipelines keep drawing");
+        tossGroups(apply);
+        apply &= kPsoBase;
+        if (!apply) return;
     }
 
     // A new scene set replaces the lazy groups too: those that were live are in this build, the rest are 0.
