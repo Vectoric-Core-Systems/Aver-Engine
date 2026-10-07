@@ -1,7 +1,7 @@
 // Sandbox.exe --warm-shaders [--project <manifest>]: fills the shader caches in the background so the editor's
 // first switch to a renderer mode (ReSTIR RT, ReSTIR PT, NRD2, NeuRaC) loads instead of compiling.
 //
-// The editor starts a second copy of ITSELF in this mode at below-normal priority after a project opens
+// The editor starts a second copy of ITSELF in this mode at idle priority after a project opens
 // (editor::ShaderWarmup). Itself, not a separate tool: the GPU driver keeps its compiled-pipeline cache per
 // executable, so only Sandbox.exe warming fills the cache the editor reads (a separate tool took 144 s to
 // fill its own and helped the editor only with DXIL). It creates its own windowless D3D12 device, applies the project's render settings the way the editor does (cache keys

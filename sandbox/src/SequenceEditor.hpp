@@ -84,6 +84,7 @@ public:
     void drawModePanel(SequenceHost& host);
     void drawTimeline(SequenceHost& host);
     bool pilotCamera() const { return pilot_; }
+    bool emissiveActive() const { return previewing(); }
 
 private:
     bool previewing() const { return playRunning_ || (active_ && !playActiveLast_); }

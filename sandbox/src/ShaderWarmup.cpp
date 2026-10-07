@@ -119,7 +119,7 @@ void ShaderWarmup::start(const std::string& projectManifest) {
     if (!projectManifest.empty()) cmd += L" --project \"" + std::filesystem::path(projectManifest).wstring() + L"\"";
     PROCESS_INFORMATION pi{};
     const BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE,
-                                   CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, nullptr, dir.c_str(), &si, &pi);
+                                   CREATE_NO_WINDOW | IDLE_PRIORITY_CLASS, nullptr, dir.c_str(), &si, &pi);
     CloseHandle(wr);
     if (!ok) {
         CloseHandle(rd);
@@ -130,7 +130,7 @@ void ShaderWarmup::start(const std::string& projectManifest) {
     impl_->process = pi.hProcess;
     impl_->readPipe = rd;
     impl_->reader = std::thread([this] { impl_->readLoop(); });
-    AVER_INFO("[ShaderWarm] filling the shader caches in the background (--warm-shaders, below-normal priority)");
+    AVER_INFO("[ShaderWarm] filling the shader caches in the background (--warm-shaders, idle priority)");
 #else
     (void)projectManifest;
 #endif

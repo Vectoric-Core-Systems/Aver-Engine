@@ -1570,9 +1570,11 @@ void SandboxApp::onRender(Engine& e)  {
         copt.onSkipped = colourSkipped;
 #if AVER_MODULE_SCENE
         // The level sequence's emissive tracks, for the Animate preview and Play.
-        copt.emissiveScale = [](scene::Entity ent, f32 out[3], void* user) {
-            return static_cast<ColourWalk*>(user)->self->seqEditor_.emissiveScale(ent, out);
-        };
+        // Left null unless previewing: an always-false per-draw call is wasted on 50k draws.
+        if (seqEditor_.emissiveActive())
+            copt.emissiveScale = [](scene::Entity ent, f32 out[3], void* user) {
+                return static_cast<ColourWalk*>(user)->self->seqEditor_.emissiveScale(ent, out);
+            };
 #endif
         copt.user = &walk;
         // --no-walk-cache, negated -- MUST MATCH the depth-prepass call site's popt.useMeshLookupCache:
