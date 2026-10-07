@@ -2591,8 +2591,8 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
 // surface pixel ranks the lights reaching it (all but its exact light, gRdLocalOut.x from CSRdShadow); the strongest
 // lightRaysPerBlock get one ray each, every frame, nothing picked at random. Their irradiance-weighted unblocked share
 // is the tail's fraction, blended with history by the sun's rule (FidelityFX mode; NRD2 frames have none), and
-// written to every pixel of the block at the same depth; a block across an edge also traces its second surface, and
-// a pixel on neither gets -1 for CSRdTailFilter's depth-aware 5x5. Lights under 1/128 of the tail's total are skipped.
+// written to every pixel of the block at the same depth; a pixel across an edge gets -1 and CSRdTailFilter's
+// depth-aware 5x5 fills it. Lights under 1/128 of the tail's total are skipped.
 [numthreads(8, 8, 1)]
 void CSRdTailVis(uint3 tid : SV_DispatchThreadID) {
     const uint2 vp = (uint2)gSceneViewportCur.zw;
@@ -2626,73 +2626,50 @@ void CSRdTailVis(uint3 tid : SV_DispatchThreadID) {
     if (!found) return;
 
     averRtCutoutPolicy(AVER_RD_CUTOUTS_SHADOW, false);
-    // A block across an edge has a second surface: its first pixel off the representative's depth gets its own
-    // estimate (no history: the reprojection above is the representative's), so thin objects and silhouettes are not
-    // left to the filter's fallback. One trace site in the loop: each rtShadowEx call inlines the shadow kernel.
-    const float zc = gRdSunVisTex[rep].a;
-    uint2 rep2 = rep;
-    bool  two  = false;
-    [unroll] for (uint q = 0u; q < 4u; ++q) {
-        const uint2 p  = base + uint2(q & 1u, q >> 1u);
-        const float zt = all(p - (uint2)gSceneViewportCur.xy < vp) ? gRdSunVisTex[p].a : 0.0;
-        if (!two && zt > 0.0 && abs(zt - zc) > zc * 0.03 + 1.0) { rep2 = p; two = true; }
+    const float e0f = gRdLocalOut[rep].x;
+    const uint  e0  = e0f >= 0.0 ? (uint)e0f : 0xFFFFFFFFu;
+    const RdLightRange lr = rdLightsAt(s.wpos);
+    RdTopWeights top = rdTopInit();
+    float twS = 0.0;
+    [loop] for (uint k = 0u; k < lr.count; ++k) {
+        const float w = rdTailWeight(rdLightIndex(lr, k), e0, s.wpos, s.N);
+        if (!(w > 0.0)) continue;
+        twS += w;
+        rdTopAdd(top, w);
     }
-    float vis0 = 1.0, vis1 = 1.0;
-    const uint turn = (uint)gRtHistParams.z;
-    [loop] for (uint r = 0u; r < (two ? 2u : 1u); ++r) {
-        const uint2 rp  = r == 0u ? rep : rep2;
-        const float2 rpC = float2(rp) + 0.5;
-        RdSurface sr = s;
-        if (r != 0u) {
-            float2 ndc2;
-            sr = rdSurfaceFromRecord(gRdVisBuf[rp.y * pitch + rp.x], rdPrimaryRayDir(rp, ndc2));
-        }
-        const float e0f = gRdLocalOut[rp].x;
-        const uint  e0  = e0f >= 0.0 ? (uint)e0f : 0xFFFFFFFFu;
-        const RdLightRange lr = rdLightsAt(sr.wpos);
-        RdTopWeights top = rdTopInit();
-        float twS = 0.0;
+    float vis = 1.0;
+    if (twS > 0.0) {
+        const float floorW = twS * (1.0 / 128.0);
+        const uint  budget = rdLightRaysPerBlock();
+        const uint  turn   = (uint)gRtHistParams.z;
+        float sumW = 0.0, sumV = 0.0;
         [loop] for (uint k = 0u; k < lr.count; ++k) {
-            const float w = rdTailWeight(rdLightIndex(lr, k), e0, sr.wpos, sr.N);
-            if (!(w > 0.0)) continue;
-            twS += w;
-            rdTopAdd(top, w);
+            const uint  j = rdLightIndex(lr, k);
+            const float w = rdTailWeight(j, e0, s.wpos, s.N);
+            if (!(w > floorW) || rdTopCountAbove(top, w) >= budget) continue;
+            const float3 Lt = rdSetShadowLight(gRdLocalLights[j], s.wpos);
+            const float  v  = averShadowLum(rtShadowEx(s.wpos, s.N, Lt, repC, float3(0, 0, 0), float3(0, 0, 0), 1u,
+                                                       averGoldenTurns(turn), 0u));
+            sumW += w;
+            sumV += w * v;
         }
-        float vis = 1.0;
-        if (twS > 0.0) {
-            const float floorW = twS * (1.0 / 128.0);
-            const uint  budget = rdLightRaysPerBlock();
-            float sumW = 0.0, sumV = 0.0;
-            [loop] for (uint k = 0u; k < lr.count; ++k) {
-                const uint  j = rdLightIndex(lr, k);
-                const float w = rdTailWeight(j, e0, sr.wpos, sr.N);
-                if (!(w > floorW) || rdTopCountAbove(top, w) >= budget) continue;
-                const float3 Lt = rdSetShadowLight(gRdLocalLights[j], sr.wpos);
-                const float  v  = averShadowLum(rtShadowEx(sr.wpos, sr.N, Lt, rpC, float3(0, 0, 0), float3(0, 0, 0), 1u,
-                                                           averGoldenTurns(turn), 0u));
-                sumW += w;
-                sumV += w * v;
-            }
-            rdResetShadowLight();
-            if (sumW > 0.0) vis = sumV / sumW;
-            // The sun's history rule (rtShadowTemporalEx): 0.9 at rest, 0.5 by 32 px/frame, 0.35 where it changed.
-            if (r == 0u && haveHist && hist >= 0.0) {
-                const float t = saturate(length(velocityPx) / 32.0);
-                vis = lerp(vis, hist, rtShadowChanged(vis, hist) ? kAverShadowChangeHistory : lerp(0.9, 0.5, t));
-            }
+        rdResetShadowLight();
+        if (sumW > 0.0) vis = sumV / sumW;
+        // The sun's history rule (rtShadowTemporalEx): 0.9 at rest, 0.5 by 32 px/frame, 0.35 where the shadow changed.
+        if (haveHist && hist >= 0.0) {
+            const float t = saturate(length(velocityPx) / 32.0);
+            vis = lerp(vis, hist, rtShadowChanged(vis, hist) ? kAverShadowChangeHistory : lerp(0.9, 0.5, t));
         }
-        if (r == 0u) vis0 = vis; else vis1 = vis;
     }
-    // Each pixel of the block takes the estimate of the surface it is on (the depth test rdLocalVisTap uses); a pixel
-    // on neither gets -1 for CSRdTailFilter to fill; sky keeps its 1.
-    const float z2 = gRdSunVisTex[rep2].a;
+    // Every pixel of the block on the representative's surface (the depth test rdLocalVisTap uses); sky keeps 1.
+    const float zc = gRdSunVisTex[rep].a;
     [unroll] for (uint q = 0u; q < 4u; ++q) {
         const uint2 p = base + uint2(q & 1u, q >> 1u);
         if (any(p - (uint2)gSceneViewportCur.xy >= vp)) continue;
         const float zt = gRdSunVisTex[p].a;
         if (zt <= 0.0) continue;
         float4 o = gRdLocalOut[p];
-        o.a = abs(zt - zc) <= zc * 0.03 + 1.0 ? vis0 : (two && abs(zt - z2) <= z2 * 0.03 + 1.0) ? vis1 : -1.0;
+        o.a = abs(zt - zc) <= zc * 0.03 + 1.0 ? vis : -1.0;
         gRdLocalOut[p] = o;
     }
 }
