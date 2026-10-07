@@ -2,6 +2,7 @@
 #include "aver/sr/AverSrFsr.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
+#include "aver/sr/SrConfine.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -124,10 +125,12 @@ bool FsrUpscaler::ensureTargets(u32 srcW, u32 srcH, u32 dstW, u32 dstH) {
 }
 
 void FsrUpscaler::draw(rhi::IRenderContext& ctx, rhi::PipelineHandle p, rhi::BindingSetHandle set,
-                       rhi::TextureHandle src, rhi::TextureHandle& bound, const void* cb, u32 w, u32 h) {
+                       rhi::TextureHandle src, rhi::TextureHandle& bound, const void* cb, u32 w, u32 h,
+                       const PxRect* sc) {
     if (src != bound) { res_.setSrv(set, 0, src); bound = src; }
     ctx.setViewport(0, 0, w, h);
-    ctx.setScissor(0, 0, w, h);
+    if (sc) ctx.setScissor(sc->x0, sc->y0, sc->x1 - sc->x0, sc->y1 - sc->y0);
+    else    ctx.setScissor(0, 0, w, h);
     ctx.setPipeline(p);
     ctx.setBindingSet(set);
     ctx.setConstantBuffer(kFsrConstantRegister, cb, sizeof(FsrCB));
@@ -156,10 +159,18 @@ void FsrUpscaler::execute(rhi::IRenderContext& ctx, const rhi::UpscalerInput& in
     constexpr auto kRead = rhi::ResourceState::ShaderResource;
     constexpr auto kWrite = rhi::ResourceState::RenderTarget;
 
+    // Only the displayed rect: RCAS writes it, EASU its 1-texel ring, prep what EASU reads.
+    PxRect rcasR, easuR, prepR;
+    const bool confine = displayedDst(in, rcasR);
+    if (confine) {
+        easuR = growRect(rcasR, 1, in.dstWidth, in.dstHeight);
+        prepR = srcReadOf(easuR, in, kEasuReach);
+    }
+
     // 1. Edge AA (optional) + squash, at source size.
     ctx.textureBarrier(squashed_, kRead, kWrite);
     ctx.setRenderTargets(&squashed_, 1, 0);
-    draw(ctx, prep_[edgeAa_ ? 1 : 0], prepSet_, in.color, prepBound_, &cb, in.srcWidth, in.srcHeight);
+    draw(ctx, prep_[edgeAa_ ? 1 : 0], prepSet_, in.color, prepBound_, &cb, in.srcWidth, in.srcHeight, confine ? &prepR : nullptr);
     ctx.textureBarrier(squashed_, kWrite, kRead);
 
     // 2. EASU to output size.
@@ -167,14 +178,15 @@ void FsrUpscaler::execute(rhi::IRenderContext& ctx, const rhi::UpscalerInput& in
                   static_cast<f32>(in.dstWidth), static_cast<f32>(in.dstHeight));
     ctx.textureBarrier(upscaled_, kRead, kWrite);
     ctx.setRenderTargets(&upscaled_, 1, 0);
-    draw(ctx, easu_, easuSet_, squashed_, easuBound_, &cb, in.dstWidth, in.dstHeight);
+    draw(ctx, easu_, easuSet_, squashed_, easuBound_, &cb, in.dstWidth, in.dstHeight, confine ? &easuR : nullptr);
     ctx.textureBarrier(upscaled_, kWrite, kRead);
 
     // 3. RCAS (ffx_fsr1.h's FsrRcasCon: con.x = 2^-sharpness) and un-squash, into outTarget.
     cb.con0[0] = bitsOf(std::exp2(-sharpness_));
     cb.con0[1] = cb.con0[2] = cb.con0[3] = 0;
     ctx.setRenderTargets(&outTarget, 1, 0);
-    draw(ctx, rcas_, rcasSet_, upscaled_, rcasBound_, &cb, in.dstWidth, in.dstHeight);
+    draw(ctx, rcas_, rcasSet_, upscaled_, rcasBound_, &cb, in.dstWidth, in.dstHeight, confine ? &rcasR : nullptr);
+    if (confine) ctx.setScissor(0, 0, in.dstWidth, in.dstHeight);
 }
 
 const char* fsrShaderSource() {

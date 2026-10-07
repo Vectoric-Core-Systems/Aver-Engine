@@ -1,6 +1,7 @@
 // SpatialUpscaler: AverSR's built-in implementation of the rhi::IUpscaler seam (see
 // AverSrSpatial.hpp for what it is and why it is deliberately not FSR).
 #include "aver/sr/AverSrSpatial.hpp"
+#include "aver/sr/SrConfine.hpp"
 #include "aver/core/Log.hpp"
 
 #include <string>
@@ -108,7 +109,11 @@ void SpatialUpscaler::execute(rhi::IRenderContext& ctx, const rhi::UpscalerInput
     ctx.setPipeline(pipeline_);
     ctx.setBindingSet(binding_);
     ctx.setConstantBuffer(kUpscaleConstantRegister, &cb, sizeof(cb));
+    PxRect show;
+    const bool confine = displayedDst(in, show);
+    if (confine) ctx.setScissor(show.x0, show.y0, show.x1 - show.x0, show.y1 - show.y0);
     ctx.drawFullscreen();
+    if (confine) ctx.setScissor(0, 0, in.dstWidth, in.dstHeight);
 }
 
 // rhi::postShaderSource() stays self-contained (no rhi::sharedShaderPrelude()); this pass follows
