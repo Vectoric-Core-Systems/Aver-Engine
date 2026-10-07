@@ -743,8 +743,22 @@ bool logBreadcrumbNodeIfUnfinished(u32 nodeIndex, const NodeT* node, ContextFn&&
                "completed{}", nodeIndex, dredNarrow(node->pCommandListDebugNameW),
                dredNarrow(node->pCommandQueueDebugNameW), last, count,
                lastPtr ? "" : " (driver never reported a completed count for this list)");
+    // The passes the stop point sits in: walk back over balanced Begin/EndEvent pairs to the enclosing BeginEvents
+    // and print their marker names (the breadcrumb context), innermost first.
+    if (count > 0) {
+        int depth = 0, shown = 0;
+        for (UINT i = (last < count ? last : count) ; i-- > 0 && shown < 4;) {
+            const D3D12_AUTO_BREADCRUMB_OP op = node->pCommandHistory[i];
+            if (op == D3D12_AUTO_BREADCRUMB_OP_ENDEVENT) { ++depth; continue; }
+            if (op != D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT) continue;
+            if (depth > 0) { --depth; continue; }
+            const std::string ctx = contextFor(i);
+            AVER_ERROR("[RHI.D3D12][DRED]   inside pass opened at op {}:{}", i, ctx.empty() ? " (no name recorded)" : ctx);
+            ++shown;
+        }
+    }
     // Show ops around the stop point (not the entire rest of the list).
-    const UINT windowStart = last > 3 ? last - 3 : 0;
+    const UINT windowStart = last > 12 ? last - 12 : 0;
     const UINT windowEnd = (count == 0) ? 0 : (last < count ? last : count - 1);
     for (UINT i = windowStart; i <= windowEnd && i < count; ++i) {
         const D3D12_AUTO_BREADCRUMB_OP op = node->pCommandHistory[i];

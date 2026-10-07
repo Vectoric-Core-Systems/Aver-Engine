@@ -145,7 +145,37 @@ float3 averLightVisibility(RdLocalLight ll, float3 pos, float3 N, float2 pixel, 
 #endif
 
 float3 averDirectLights(AverSurface s, float3 pos, float2 pixel, inout uint rng, bool allowMap) {
-#if AVER_RD_LAMPS
+#if AVER_RD_LAMPS && !(defined(AVER_RT_BINDLESS) && !AVER_BLENDED_PASS && !AVER_RD_SINGLE_PASS)
+    // LITE, for the ray-traced raster, glass and single-pass shaders: at their register limit, they hung the
+    // RX 7800 XT whenever their code grew (rect lights, decals, stratified picks, and this evaluator's full form in
+    // the glass replay's reflections under FidelityFX, 2026-10-07). One cheap loop sums every light's diffuse
+    // irradiance and finds the strongest; it alone is shaded exactly with its own ray, and the rest take that ray's
+    // visibility as diffuse light. Still nothing random.
+    const RdLightRange lr = rdLightsAt(pos);
+    float3 eAll = float3(0.0, 0.0, 0.0);
+    float  wBest = 0.0;
+    uint   best = 0xFFFFFFFFu;
+    [loop] for (uint k = 0u; k < lr.count; ++k) {
+        const uint j = rdLightIndex(lr, k);
+        const float3 e = rdLightIrradianceCheap(gRdLocalLights[j], pos, s.N);
+        const float  w = averShadowLum(e);
+        eAll += e;
+        if (w > wBest) { wBest = w; best = j; }
+    }
+    if (best == 0xFFFFFFFFu) return float3(0.0, 0.0, 0.0);
+    const RdLocalLight ll = gRdLocalLights[best];
+    AverLight   l;
+    AverSurface sL;
+    float3 lit = float3(0.0, 0.0, 0.0);
+    float  v = 1.0;
+    if (ptLampLight(ll, s, pos, l, sL) && dot(s.N, l.direction) > 0.0) {
+        l.visibility = averLightVisibility(ll, pos, s.N, pixel, rng, allowMap);
+        v = saturate(averShadowLum(l.visibility));
+        lit = averShadeDirect(float3(0.0, 0.0, 0.0), sL, l);
+    }
+    const float3 kd = s.model == AVER_MODEL_UNLIT ? float3(0.0, 0.0, 0.0) : s.kdAlbedo * (1.0 / PI);
+    return lit + kd * max(eAll - rdLightIrradianceCheap(ll, pos, s.N), 0.0) * v;
+#elif AVER_RD_LAMPS
     // EVERY LIGHT THE SUN'S WAY, within a ray budget, nothing picked at random (UNIFIED_LIGHTS.md "Ray budget"):
     // the strongest lightRaysPerHit lights (at most 4) are shaded exactly with their own shadow ray; every other light
     // is summed as diffuse irradiance in ONE cheap loop and takes those rays' irradiance-weighted visibility. Hits are
