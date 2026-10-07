@@ -341,6 +341,10 @@ private:
     // system owns no device" reasoning as that comment already gives.
     std::unordered_map<MaterialHandle, u32> indexOfScratch_;
     std::vector<MaterialConstants> tableScratch_;
+
+    // MaterialLibrary::changeCount() as of the last full walk in update(); ~0 means no walk yet, or
+    // shutdown() since. An update() that finds it unchanged has nothing to re-upload or re-table.
+    u64 seenLibraryChanges_ = ~u64{0};
 };
 
 } // namespace aver::pbr
