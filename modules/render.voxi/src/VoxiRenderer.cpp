@@ -6332,15 +6332,6 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         if (fill && (refl || ao || settings_.nrd2HalfRateGi)) bits |= 64u;
         bits |= 512u;   // shader-visible NRD2 frame (rtNrd2Frame)
         cb_.giShadowParams[3] = static_cast<f32>(bits);
-    } else if (denoiserMode(settings_) == 0u) {
-        // Denoiser None means no filtering at all: every Voxi history (shadow, reflection, sky occlusion, lamps) takes
-        // its raw single-frame path and their spatial filters with it, and the half-rate stages that need history to
-        // fill their skipped pixels (bits 2 and 4) trace every pixel instead. ReSTIR's reservoir reuse stays: it is
-        // the GI estimator, not a filter.
-        cb_.rtHistParams[0] = 0.0f;
-        cb_.rtHistParams[1] = 0.0f;
-        cb_.rtDenoiseParams[3] = 0.0f;
-        cb_.giShadowParams[3] = static_cast<f32>(static_cast<u32>(cb_.giShadowParams[3]) & ~(2u | 4u));
     }
     // Spatial filter radius; blend amount pinned at 0 (loop runs but result discarded via constant).
     // x: bounces in the low four bits, bit 4 = Reference mode (voxi_pt.hlsli ptReferenceMode).
