@@ -1,7 +1,7 @@
 #pragma once
 // Runs a second copy of the editor in --warm-shaders mode (ShaderWarmRun.cpp) after a project opens, so the
-// shader caches hold every renderer variant before the user switches mode. Silent (it logs its end): the editor's
-// own pipelines build off the main thread with their own notification. Windows only; elsewhere a no-op.
+// shader caches hold every renderer variant before the user switches mode. Its progress shows as a notification,
+// only when something actually compiles; a warm cache stays silent. Windows only; elsewhere a no-op.
 #include <memory>
 #include <string>
 
@@ -19,6 +19,10 @@ public:
     // Main thread, once a frame: turns the tool's output into the notification.
     void poll();
     bool running() const;
+    // The last progress line ("412 of 1032 shaders") and its fraction (-1 = unknown).
+    float progress(std::string& note) const;
+    // Someone is waiting on this run: raise it from idle to normal priority.
+    void boost();
 
 private:
     struct Impl;

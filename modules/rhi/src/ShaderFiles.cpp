@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <filesystem>
 #include <map>
-#include <mutex>
 #include <system_error>
 #include <vector>
 #include <string>
@@ -22,11 +21,6 @@ std::map<std::string, std::string, std::less<>> g_cache;
 std::string g_sourceDir;
 u64         g_revision = 0;
 u64         g_corpusHash = 0;   // 0 = not computed yet; see shaderCorpusHash()
-// Pipelines are built on a worker as well as the render thread: one lock over everything above. Recursive because
-// shaderCorpusHash() reads files through shaderFile(). A reload RETIRES the texts instead of freeing them, since a
-// compile in flight may still hold one (a dev-only cost of a few MB per reload).
-std::recursive_mutex g_mu;
-std::vector<std::map<std::string, std::string, std::less<>>> g_retired;
 
 // CRLF -> LF, in place. See the header's note on why this is not optional.
 void normaliseNewlines(std::string& s) {
@@ -57,10 +51,8 @@ void setShaderSourceDir(std::string_view dir) {
 const std::string& shaderSourceDir() { return g_sourceDir; }
 
 usize reloadShaderFiles() {
-    std::lock_guard<std::recursive_mutex> lk(g_mu);
     const usize n = g_cache.size();
     if (n == 0) return 0;
-    g_retired.push_back(std::move(g_cache));
     g_cache.clear();
     g_corpusHash = 0;   // recomputed on demand; the texts it summarised are gone
     ++g_revision;
@@ -68,7 +60,7 @@ usize reloadShaderFiles() {
     return n;
 }
 
-u64 shaderFileRevision() { std::lock_guard<std::recursive_mutex> lk(g_mu); return g_revision; }
+u64 shaderFileRevision() { return g_revision; }
 
 // See the header for why a blob cache cannot key on one shader's own text alone.
 //
@@ -77,7 +69,6 @@ u64 shaderFileRevision() { std::lock_guard<std::recursive_mutex> lk(g_mu); retur
 // first -- a key that changes with call order is worse than no key at all. The source directory is
 // searched first, matching shaderFile()'s own order, so a --shader-source edit invalidates too.
 u64 shaderCorpusHash() {
-    std::lock_guard<std::recursive_mutex> lk(g_mu);
     if (g_corpusHash) return g_corpusHash;
     u64 h = 0xcbf29ce484222325ull;
     const auto mix = [&h](std::string_view sv) {
@@ -111,7 +102,6 @@ u64 shaderCorpusHash() {
 }
 
 const std::string* shaderFileIfPresent(std::string_view name) {
-    std::lock_guard<std::recursive_mutex> lk(g_mu);
     if (const auto it = g_cache.find(name); it != g_cache.end())
         return it->second.empty() ? nullptr : &it->second;
     const std::string candidates[2] = {
@@ -132,7 +122,6 @@ const std::string* shaderFileIfPresent(std::string_view name) {
 }
 
 const std::string& shaderFile(std::string_view name) {
-    std::lock_guard<std::recursive_mutex> lk(g_mu);
     if (const auto it = g_cache.find(name); it != g_cache.end()) return it->second;
 
     // The source directory first when one was named, the executable's own always. Both are tried
