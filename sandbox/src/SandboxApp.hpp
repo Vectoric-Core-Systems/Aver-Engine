@@ -3505,6 +3505,7 @@ private:
     std::string projectPath_;        // <path>.ocproject given on the command line
     std::string openMapPath_;        // <path>.ocmap given on the command line, if any
     bool browserActive_=false;
+    bool projectOpenPending_=false;   // browser chose a project; applied at the top of onUpdate
     // Whether THIS launch's own command line was eligible to register as the single-instance primary.
     bool singleInstanceEligible_ = false;
     // ONE PENDING OPEN, whatever asked for it: File > Open Level's picker, a Content Browser double-click, or a path forwarded from a second launch.
@@ -3556,6 +3557,9 @@ private:
     bool levelPrepArmed_ = false;
     u64 levelPrepToast_ = 0;
     std::chrono::steady_clock::time_point levelPrepT0_{};
+    // "Compiling shaders N of M" while the renderer's pipelines build off the main thread (black viewport).
+    u64 shaderBuildToast_ = 0;
+    std::chrono::steady_clock::time_point shaderBuildT0_{};
     bool nrd2MenuWired_ = false;
     // Gizmo coordinate space. Honoured by drawGizmo, pickAxis, applyMove and applyRotate; SCALE tool always uses local.
     bool worldSpace_=true;

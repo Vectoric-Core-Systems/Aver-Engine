@@ -18,6 +18,13 @@
 #include "aver/formats/GiCache.hpp"
 
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -175,6 +182,17 @@ public:
     // Builds the variants otherwise compiled on first use (NRD2 Stage B, Path Tracing and NeuRaC
     // twins). For tests and loading screens; call after onRenderTargetsChanged.
     void buildAllVariants();
+
+    // ASYNC PIPELINE BUILDS (docs/rendering/ASYNC_SHADERS.md): with a thread-safe factory the init and scene pipeline
+    // sets are compiled on a worker; until they land the frame draws nothing (black viewport) and the editor stays
+    // responsive. pipelinesBuilding(): such a build is queued or running. compileProgress(): shader compiles of the
+    // current build so far, and the last build's total (0 = not known yet). finishPipelineBuilds() blocks until every
+    // queued build has landed (tools, tests, the warm-up).
+    bool pipelinesBuilding() const { return sceneJobs_.load() > 0 || (sceneRequestPending_ && !scenePso_); }
+    // --sync-shaders: build on the main thread as before (call before init).
+    static void allowAsyncPipelineBuilds(bool allowed);
+    void compileProgress(u32& done, u32& total) const;
+    void finishPipelineBuilds();
     void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
                                 u32 width, u32 height) override;
 
@@ -208,7 +226,54 @@ private:
     bool createInjectionAccumulator(u32 resolution);
     void manageInjectionAccumulator(rhi::IRenderContext& ctx);
     bool createPipelines();
+    bool buildInitPipelines();
     bool createScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth);
+    void destroyScenePipelines();
+    bool buildScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth);
+    // The scene set for these formats: built on the worker when asyncBuilds_, else here and now.
+    void requestScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth);
+
+    // ---- the build worker (one thread, jobs in order; a job's `done` runs on the main thread in pumpBuilds) ----
+    struct BuildJob { std::function<void()> work, done; };
+    std::thread buildThread_;
+    std::mutex buildMu_;
+    std::condition_variable buildCv_;
+    std::deque<BuildJob> buildQueue_;
+    std::vector<std::function<void()>> buildDone_;
+    bool buildStop_ = false;
+    bool buildBusy_ = false;
+    bool asyncBuilds_ = false;
+    std::atomic<int> sceneJobs_{0};        // init/scene-set builds queued or running: the frame draws nothing
+    bool sceneInFlight_ = false;           // a scene-set build is queued or running
+    bool sceneRequestPending_ = false;     // a scene set asked for, started at the next frame boundary
+    u32 sceneWantSamples_ = 0;
+    rhi::Format sceneWantColor_ = rhi::Format::Unknown, sceneWantDepth_ = rhi::Format::Unknown;
+    u32 buildCompileBase_ = 0;             // g_voxiCompiles when the current build started
+    u32 lastBuildCompiles_ = 0;            // shader compiles the last init+scene build took
+    std::chrono::steady_clock::time_point buildT0_{};
+    void startBuildWorker();
+    void stopBuildWorker();
+    void queueBuild(std::function<void()> work, std::function<void()> done);
+    void pumpBuilds();
+    u32 sceneGen_ = 0;                     // bumped when the scene set (and its twins) is destroyed
+
+    // Twin pipelines (NeuRaC, Path Tracing), table-driven: see twinSpecs.
+    struct TwinSpec { const char* entry; const char* extra; rhi::PipelineHandle VoxiRenderer::* member; };
+    static const TwinSpec* twinSpecs(bool pathTrace, u32& count);
+    std::string twinDefines(bool pathTrace) const;
+    void buildTwins(const TwinSpec* specs, u32 count, const std::string& defs,
+                    std::vector<rhi::PipelineHandle>& out) const;
+    void adoptTwins(bool pathTrace, const std::vector<rhi::PipelineHandle>& built);
+    bool createTwins(bool pathTrace);
+    void requestTwins(bool pathTrace);
+    void startPendingBuilds();
+    void startScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth);
+    void startNrd2Build();
+    bool nrd2StartPending_ = false;
+    void beginExclusiveBuild();
+    void exclusiveBuildLanded();
+    void buildNrd2Variants(u32 sampleCount, rhi::Format color, rhi::Format depth);
+    bool nrd2InFlight_ = false;            // NRD2's build is queued or running
     rhi::PipelineHandle pickGbuf(rhi::PipelineHandle plain, rhi::PipelineHandle gbuf) const;
     void shadowPass(rhi::IRenderContext& ctx);
     // Both take the slice [begin, end) of drawsPrev_: `first` clears, `last` finishes (a staged

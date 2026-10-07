@@ -112,6 +112,21 @@ if(AVER_RHI_D3D12)
   set_target_properties(PrecompiledShaderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# ConcurrentPipelineTest -- createShader / createComputePipeline / destroyShader from four threads at once
+# (WARP): the contract IResourceFactory::threadSafePipelineCreation() promises, which async shader compilation
+# relies on. D3D12 only: the Vulkan factory does not make that promise yet.
+if(AVER_RHI_D3D12)
+  add_executable(ConcurrentPipelineTest src/ConcurrentPipelineTest.cpp)
+  target_link_libraries(ConcurrentPipelineTest PRIVATE Aver.RHI Aver.RHI.D3D12 Aver.Core Aver.Platform)
+  if(AVER_RHI_D3D11)
+    target_link_libraries(ConcurrentPipelineTest PRIVATE Aver.RHI.D3D11)
+  endif()
+  if(AVER_RHI_VULKAN)
+    target_link_libraries(ConcurrentPipelineTest PRIVATE Aver.RHI.Vulkan)
+  endif()
+  set_target_properties(ConcurrentPipelineTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # ShaderIncludeResolveTest -- can a deployed shader #include a file in a SUBDIRECTORY, and can it do
 # it with ANGLED brackets? Against a real D3D12 device (WARP, so no GPU required).
 #
