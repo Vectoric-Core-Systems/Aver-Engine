@@ -6,8 +6,10 @@
 #include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <map>
+#include <mutex>
 #include <system_error>
 #include <vector>
 #include <string>
@@ -19,8 +21,11 @@ namespace {
 // did this build actually load" log readable when something is missing.
 std::map<std::string, std::string, std::less<>> g_cache;
 std::string g_sourceDir;
-u64         g_revision = 0;
+std::atomic<u64> g_revision{0};
 u64         g_corpusHash = 0;   // 0 = not computed yet; see shaderCorpusHash()
+// Shader worker threads (async pipeline builds) read through the include handler while the main thread may
+// reload; every entry point takes this. Recursive: shaderCorpusHash() reads files through shaderFile().
+std::recursive_mutex g_mutex;
 
 // CRLF -> LF, in place. See the header's note on why this is not optional.
 void normaliseNewlines(std::string& s) {
@@ -43,6 +48,7 @@ std::string join(std::string_view dir, std::string_view name) {
 }   // namespace
 
 void setShaderSourceDir(std::string_view dir) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
     g_sourceDir.assign(dir);
     if (!g_sourceDir.empty())
         AVER_INFO("[RHI.Shaders] source directory: {} (searched before the executable's own)", g_sourceDir);
@@ -51,16 +57,17 @@ void setShaderSourceDir(std::string_view dir) {
 const std::string& shaderSourceDir() { return g_sourceDir; }
 
 usize reloadShaderFiles() {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
     const usize n = g_cache.size();
     if (n == 0) return 0;
     g_cache.clear();
     g_corpusHash = 0;   // recomputed on demand; the texts it summarised are gone
     ++g_revision;
-    AVER_INFO("[RHI.Shaders] dropped {} cached shader file(s); revision {}", n, g_revision);
+    AVER_INFO("[RHI.Shaders] dropped {} cached shader file(s); revision {}", n, g_revision.load());
     return n;
 }
 
-u64 shaderFileRevision() { return g_revision; }
+u64 shaderFileRevision() { return g_revision.load(std::memory_order_acquire); }
 
 // See the header for why a blob cache cannot key on one shader's own text alone.
 //
@@ -69,6 +76,7 @@ u64 shaderFileRevision() { return g_revision; }
 // first -- a key that changes with call order is worse than no key at all. The source directory is
 // searched first, matching shaderFile()'s own order, so a --shader-source edit invalidates too.
 u64 shaderCorpusHash() {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (g_corpusHash) return g_corpusHash;
     u64 h = 0xcbf29ce484222325ull;
     const auto mix = [&h](std::string_view sv) {
@@ -102,6 +110,7 @@ u64 shaderCorpusHash() {
 }
 
 const std::string* shaderFileIfPresent(std::string_view name) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (const auto it = g_cache.find(name); it != g_cache.end())
         return it->second.empty() ? nullptr : &it->second;
     const std::string candidates[2] = {
@@ -122,6 +131,7 @@ const std::string* shaderFileIfPresent(std::string_view name) {
 }
 
 const std::string& shaderFile(std::string_view name) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
     if (const auto it = g_cache.find(name); it != g_cache.end()) return it->second;
 
     // The source directory first when one was named, the executable's own always. Both are tried
@@ -160,6 +170,19 @@ const std::string& shaderFile(std::string_view name) {
         normaliseNewlines(text);
     }
     return g_cache.emplace(std::string(name), std::move(text)).first->second;
+}
+
+bool shaderFileCopyIfPresent(std::string_view name, std::string& out) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    const std::string* t = shaderFileIfPresent(name);
+    if (!t) return false;
+    out = *t;
+    return true;
+}
+
+std::string shaderFileCopy(std::string_view name) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    return shaderFile(name);
 }
 
 }   // namespace aver::rhi

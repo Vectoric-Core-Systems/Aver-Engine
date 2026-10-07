@@ -3,6 +3,7 @@ aver_add_module(Aver.RHI
     src/RHI.cpp
     src/RHIShaders.cpp
     src/ShaderFiles.cpp
+    src/PipelineBatch.cpp
     src/Atmosphere.cpp
     src/EditorLines.cpp
     src/null/NullDevice.cpp

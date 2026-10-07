@@ -79,9 +79,11 @@ public:
         std::string rel(w.begin(), w.end());   // shader filenames are ASCII by construction
         while (rel.rfind("./", 0) == 0) rel.erase(0, 2);
 
-        const std::string* found = nullptr;
+        // COPIES, not references: shader build workers run this while the main thread may reload the cache.
+        std::string text;
+        bool found = false;
         for (size_t at = 0; at != std::string::npos;) {
-            if (const std::string* t = shaderFileIfPresent(rel.substr(at))) { found = t; break; }
+            if (shaderFileCopyIfPresent(rel.substr(at), text)) { found = true; break; }
             const size_t next = rel.find('/', at);
             at = (next == std::string::npos) ? std::string::npos : next + 1;
         }
@@ -89,7 +91,7 @@ public:
         // shaderFile()'s own error explains where it was looked for.
         const size_t lastSlash = rel.find_last_of('/');
         const std::string name = lastSlash == std::string::npos ? rel : rel.substr(lastSlash + 1);
-        const std::string& text = found ? *found : shaderFile(name);
+        if (!found) text = shaderFileCopy(name);
         // E_FAIL, NOT AN EMPTY BLOB. shaderFile() answers a missing file with an empty string so the
         // caller can carry on; here that would compile an empty include and report the failure as
         // whatever declaration went missing three files away. Failing the load makes DXC say "cannot

@@ -107,6 +107,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "ToolsMenu.hpp"
 #include "Nrd2Session.hpp"
 #include "ShaderWarmup.hpp"
+#include "ShaderBuildNotice.hpp"
 #include "UiRegistry.hpp"
 #if AVER_MODULE_SYNAPSE
 #include "NavBakeCommand.hpp"
@@ -3552,6 +3553,7 @@ private:
     editor::ToolsMenu tools_;
     editor::Nrd2Session nrd2Session_;   // Tools > Train Neural Denoiser, --nrd2-train
     editor::ShaderWarmup shaderWarmup_; // Sandbox.exe --warm-shaders after a project opens
+    editor::ShaderBuildNotice shaderBuildNotice_;   // "Compiling shaders N of M" while Voxi builds in the background
     // "Preparing <level>" after the loading screen while ray-tracing structures still build (SandboxRender.cpp).
     bool levelPrepArmed_ = false;
     u64 levelPrepToast_ = 0;

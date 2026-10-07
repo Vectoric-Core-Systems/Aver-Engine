@@ -119,48 +119,126 @@ Nrd2::~Nrd2() { destroy(); }
 
 bool Nrd2::create(rhi::IDevice& dev) {
     destroy();
-    dev_ = &dev;
-    res_ = dev.resources();
+    rhi::IResourceFactory* res = dev.resources();
+    if (!res) return false;
+    // Inline batch: the same record/adopt path as the renderer's background build, run to completion here.
+    const std::unique_ptr<rhi::IPipelineBatch> batch = rhi::createPipelineBatch(*res, false);
+    BuildPlan plan;
+    if (!recordBuild(dev, *batch, true, false, rhi::Format::Unknown, nullptr, rhi::Format::Unknown, 1, plan)) return false;
+    batch->start();
+    batch->waitFinished();
+    batch->adopt();
+    return finishBuild(*batch, plan, true, false);
+}
+
+bool Nrd2::createCompose(rhi::Format color, const rhi::Format gbuffer[3], rhi::Format depth, u32 sampleCount) {
+    if (!res_ || !dev_) return false;
+    const std::unique_ptr<rhi::IPipelineBatch> batch = rhi::createPipelineBatch(*res_, false);
+    BuildPlan plan;
+    if (!recordBuild(*dev_, *batch, false, true, color, gbuffer, depth, sampleCount, plan)) return false;
+    batch->start();
+    batch->waitFinished();
+    batch->adopt();
+    return finishBuild(*batch, plan, false, true);
+}
+
+bool Nrd2::recordBuild(rhi::IDevice& dev, rhi::IPipelineBatch& b, bool compute, bool compose, rhi::Format color,
+                       const rhi::Format gbuffer[3], rhi::Format depth, u32 sampleCount, BuildPlan& plan) {
+    plan = BuildPlan{};
+    if (compute) destroy();   // a failed or absent earlier build; nothing of it is in use
+    if (!dev_) {
+        dev_ = &dev;
+        res_ = dev.resources();
+    }
     if (!res_) { dev_ = nullptr; return false; }
-    const std::string& source = rhi::shaderFile("nrd2.hlsl");
+    const std::string source = rhi::shaderFileCopy("nrd2.hlsl");
     if (source.empty()) {
         AVER_WARN("[NRD2] nrd2.hlsl is not deployed beside the executable; NRD2 unavailable");
-        destroy();
+        if (compute) destroy();
         return false;
     }
-    auto build = [&](u32 pass, const char* entry, u32 srv, u32 uav, u32 bufferSrv, bool bufferUav) {
-        const std::string defines = "AVER_NRD2_PASS=" + std::to_string(pass);
+    auto shader = [&](const char* entry, rhi::ShaderStage stage, const char* defines) {
         rhi::ShaderDesc sd{};
         sd.source = source.c_str();
         sd.entry = entry;
-        sd.stage = rhi::ShaderStage::Compute;
+        sd.stage = stage;
         sd.minShaderModel = 60;
-        sd.defines = defines.c_str();
-        const rhi::ShaderHandle cs = res_->createShader(sd);
-        if (!cs) { AVER_WARN("[NRD2] {} would not compile", entry); return rhi::PipelineHandle(0); }
+        sd.defines = defines;
+        return b.createShader(sd);
+    };
+    auto pso = [&](u32 pass, const char* entry, u32 srv, u32 uav, u32 bufferSrv, bool bufferUav) {
+        const std::string defines = "AVER_NRD2_PASS=" + std::to_string(pass);
         rhi::ComputePipelineDesc pd{};
-        pd.cs = cs;
+        pd.cs = shader(entry, rhi::ShaderStage::Compute, defines.c_str());
         pd.layout.srvCount = srv;
         pd.layout.uavCount = uav;
         pd.layout.slotKindsDeclared = true;
         if (bufferSrv < srv) pd.layout.srvKinds[bufferSrv] = rhi::SlotKind::StructuredBuffer;
         if (bufferUav) pd.layout.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
         pd.layout.constantDwords[kConstantSlot] = 0;   // root CBV
-        const rhi::PipelineHandle p = res_->createComputePipeline(pd);
-        res_->destroyShader(cs);
-        if (!p) AVER_WARN("[NRD2] the {} pipeline would not build", entry);
-        return p;
+        return b.createComputePipeline(pd);
     };
-    psoPyramid_ = build(0, "CSNrd2Pyramid", kPyramidSrv, kPyramidUav, ~0u, false);
-    psoParams_  = build(1, "CSNrd2Params", 0, 1, ~0u, true);
-    psoResolve_ = build(2, "CSNrd2Resolve", kResolveSrv, kResolveUav, kResolveParamsSrv, false);
-    if (!valid()) { destroy(); return false; }
-    // Optional: without them NRD2 stays single-frame.
-    psoReproject_ = build(5, "CSNrd2Reproject", kReprojectSrv, kReprojectUav, ~0u, false);
-    psoPrefilter_ = build(6, "CSNrd2Prefilter", kPrefilterSrv, kPrefilterUav, ~0u, false);
-    psoTemporal_  = build(7, "CSNrd2Temporal", kTemporalSrv, kTemporalUav, ~0u, false);
-    psoDespeckle_ = build(8, "CSNrd2Despeckle", kDespeckleSrv, kDespeckleUav, ~0u, false);
-    psoBlur_      = build(9, "CSNrd2Blur", kBlurSrv, kBlurUav, ~0u, false);
+    if (compute) {
+        plan.pyramid  = pso(0, "CSNrd2Pyramid", kPyramidSrv, kPyramidUav, ~0u, false);
+        plan.params   = pso(1, "CSNrd2Params", 0, 1, ~0u, true);
+        plan.resolve  = pso(2, "CSNrd2Resolve", kResolveSrv, kResolveUav, kResolveParamsSrv, false);
+        // Optional: without them NRD2 stays single-frame.
+        plan.reproject = pso(5, "CSNrd2Reproject", kReprojectSrv, kReprojectUav, ~0u, false);
+        plan.prefilter = pso(6, "CSNrd2Prefilter", kPrefilterSrv, kPrefilterUav, ~0u, false);
+        plan.temporal  = pso(7, "CSNrd2Temporal", kTemporalSrv, kTemporalUav, ~0u, false);
+        plan.despeckle = pso(8, "CSNrd2Despeckle", kDespeckleSrv, kDespeckleUav, ~0u, false);
+        plan.blur      = pso(9, "CSNrd2Blur", kBlurSrv, kBlurUav, ~0u, false);
+    }
+    if (compose) {
+        rhi::GraphicsPipelineDesc p{};
+        p.vs = shader("VSNrd2Compose", rhi::ShaderStage::Vertex, "AVER_NRD2_PASS=3");
+        p.ps = shader("PSNrd2Compose", rhi::ShaderStage::Pixel, "AVER_NRD2_PASS=3");
+        p.layout.srvCount = 1;
+        p.layout.slotKindsDeclared = true;
+        p.cull = rhi::CullMode::None;
+        p.depth = {false, false, rhi::CompareOp::Always};
+        // The backend masks targets 1..3 of a blended pipeline: only the colour is added to.
+        p.blend = rhi::BlendMode::Additive;
+        p.renderTargetCount = 4;
+        p.renderTargets[0] = color;
+        for (u32 i = 0; i < 3; ++i) p.renderTargets[1 + i] = gbuffer[i];
+        p.depthFormat = depth;
+        p.sampleCount = sampleCount;
+        plan.compose = b.createGraphicsPipeline(p);
+    }
+    return true;
+}
+
+void Nrd2::discardBuild(const rhi::IPipelineBatch& b, const BuildPlan& plan) {
+    if (!res_) return;
+    for (const rhi::PipelineHandle local : {plan.pyramid, plan.params, plan.resolve, plan.reproject, plan.prefilter,
+                                            plan.temporal, plan.despeckle, plan.blur, plan.compose})
+        if (const rhi::PipelineHandle h = b.resolve(local)) res_->destroyPipeline(h);
+}
+
+bool Nrd2::finishBuild(const rhi::IPipelineBatch& b, const BuildPlan& plan, bool compute, bool compose) {
+    if (!res_) return false;
+    if (compose) {
+        destroyCompose();
+        compose_ = b.resolve(plan.compose);
+        if (!compose_) AVER_WARN("[NRD2] the compose pipeline would not build; NRD2 unavailable");
+    }
+    if (!compute) return !compose || compose_ != 0;
+
+    psoPyramid_ = b.resolve(plan.pyramid);
+    psoParams_  = b.resolve(plan.params);
+    psoResolve_ = b.resolve(plan.resolve);
+    if (!valid()) {
+        AVER_WARN("[NRD2] a compute pipeline would not build (pyramid {}, parameters {}, resolve {}); NRD2 unavailable",
+                  psoPyramid_ ? "ok" : "failed", psoParams_ ? "ok" : "failed", psoResolve_ ? "ok" : "failed");
+        destroy();
+        return false;
+    }
+    psoReproject_ = b.resolve(plan.reproject);
+    psoPrefilter_ = b.resolve(plan.prefilter);
+    psoTemporal_  = b.resolve(plan.temporal);
+    psoDespeckle_ = b.resolve(plan.despeckle);
+    psoBlur_      = b.resolve(plan.blur);
 
     rhi::BindingSetDesc bd{};
     bd.srvCount = kPyramidSrv; bd.uavCount = kPyramidUav;
@@ -206,43 +284,6 @@ bool Nrd2::create(rhi::IDevice& dev) {
     AVER_INFO("[NRD2] denoiser pipelines built (pyramid, tile parameters, resolve{})",
               stabReady() ? ", temporal stage" : "");
     return true;
-}
-
-bool Nrd2::createCompose(rhi::Format color, const rhi::Format gbuffer[3], rhi::Format depth, u32 sampleCount) {
-    destroyCompose();
-    if (!res_) return false;
-    const std::string& source = rhi::shaderFile("nrd2.hlsl");
-    if (source.empty()) return false;
-    rhi::ShaderDesc sd{};
-    sd.source = source.c_str();
-    sd.minShaderModel = 60;
-    sd.defines = "AVER_NRD2_PASS=3";
-    sd.entry = "VSNrd2Compose";
-    sd.stage = rhi::ShaderStage::Vertex;
-    const rhi::ShaderHandle vs = res_->createShader(sd);
-    sd.entry = "PSNrd2Compose";
-    sd.stage = rhi::ShaderStage::Pixel;
-    const rhi::ShaderHandle ps = res_->createShader(sd);
-    if (vs && ps) {
-        rhi::GraphicsPipelineDesc p{};
-        p.vs = vs; p.ps = ps;
-        p.layout.srvCount = 1;
-        p.layout.slotKindsDeclared = true;
-        p.cull = rhi::CullMode::None;
-        p.depth = {false, false, rhi::CompareOp::Always};
-        // The backend masks targets 1..3 of a blended pipeline: only the colour is added to.
-        p.blend = rhi::BlendMode::Additive;
-        p.renderTargetCount = 4;
-        p.renderTargets[0] = color;
-        for (u32 i = 0; i < 3; ++i) p.renderTargets[1 + i] = gbuffer[i];
-        p.depthFormat = depth;
-        p.sampleCount = sampleCount;
-        compose_ = res_->createGraphicsPipeline(p);
-    }
-    if (vs) res_->destroyShader(vs);
-    if (ps) res_->destroyShader(ps);
-    if (!compose_) AVER_WARN("[NRD2] the compose pipeline would not build; NRD2 unavailable");
-    return compose_ != 0;
 }
 
 void Nrd2::destroyCompose() {
