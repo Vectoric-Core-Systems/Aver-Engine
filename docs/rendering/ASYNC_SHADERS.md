@@ -11,12 +11,12 @@ it is asked). Vulkan, captures (`--frames`, `--headless`, `--play-test`), tests,
 ```
 main thread                          worker pool (D3D12PipelineBatch)
 -----------                          --------------------------------
-record requests into a batch   -->   compile shader  (DXC instance per thread, blob cache)
-  (copies of every desc/string)      create PSO      (device is free-threaded; root-signature cache locked)
-start()                              results into the batch's OWN slots
+record requests into a batch   -->   compile shader  (DXC instance per thread, blob cache; no driver calls)
+  (copies of every desc/string)      results into the batch's OWN slots
+start()
   ...frames keep running...
 frame boundary (prePass top):
-  finished()? adopt(): move PSOs into the factory table, swap the handle group, reset histories
+  finished()? adopt(): create the PSOs HERE, move them into the factory table, swap the group, reset histories
 ```
 
 * `rhi::IPipelineBatch` (RHIResources.hpp): `createShader` / `createGraphicsPipeline` / `createComputePipeline`
@@ -24,7 +24,9 @@ frame boundary (prePass top):
   batch-local. `rhi::createPipelineBatch(res, async)` returns the D3D12 pool batch, or an **inline** batch that runs
   every request on the calling thread through the factory's ordinary create calls (Vulkan, `--sync-shaders`).
   Recording code is the same either way.
-* Shaders are tasks; a pipeline becomes a task when its last shader finishes (no worker ever waits on another).
+* Shaders are worker tasks. Pipeline states are created on the owner thread in `adopt()`: with workers inside
+  `Create*PipelineState` beside frame submission the RX 7800 XT lost the device (DRED: every command list
+  complete), so workers never call the driver.
 * `VoxiRenderer` builds five **groups** (VoxiPsoSet.hpp): Base, Scene, Rc (NeuRaC twins), Pt (Path Tracing twins),
   Nrd2. A group is recorded into one batch and replaces its handles together. NRD2's own pipelines go through the
   same batch (`Nrd2::recordBuild` / `finishBuild`).
