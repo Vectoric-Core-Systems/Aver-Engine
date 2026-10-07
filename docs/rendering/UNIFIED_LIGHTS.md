@@ -156,3 +156,11 @@ Later findings (2026-10-07):
   light's visibility, instead of "fully lit", fixes the white rims alone); a 12-light cell cap (no gain).
 - `voxi.lightRaysPerBlock 4` saves 0.6 ms for bright-spot area 0.08% -> 0.31% of the view.
 - Per-stage timings (`voxi.rayDrivenStageTiming`) add a barrier after every stage; confirm a win on the total without it.
+- Barrier-free group (2026-10-08): CSRdTailVis is recorded with GI, sky occlusion and reflections (none reads
+  `gRdLocalOut` or `gRdSunVisTex`), and CSRdTailFilter runs after the group with CSRdHalfFill; per-stage timing keeps
+  the old order. 19.0 -> 18.8 ms (NRD2, NewSponza_Night).
+- Half-rate checkerboards were not saving what they should: with one parity per lane pair every wave held both, so
+  switching reflection half rate off cost +22% and sky occlusion +19%. On NRD2 frames CSRdRefl, CSRdSkyOcc and
+  CSRdGi's checkerboard variant now take a wave-coherent mapping (`gViewParams.w` bit 20, `rdHrThread`: group 2p+q =
+  the q parity of 16x8 block p). Same traced pixels, 18.8 -> 17.7 ms; reflections 2.57 -> 1.82, sky 0.87 -> 0.62,
+  GI 1.08 -> 0.98 (stage timing). FidelityFX frames keep the old mapping (unmeasured; their paths use derivatives).
