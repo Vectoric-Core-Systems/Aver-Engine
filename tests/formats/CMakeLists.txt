@@ -279,6 +279,12 @@ if (AVER_MODULE_TRIFACTOR)
     set_target_properties(RelodTool PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# OcmeshDiff -- compares two .ocmesh files by meaning (counts, slots, LOD ladder, geometry as a triangle
+# multiset), ignoring byte layout. docs/TOOLING_COMPARISON_DRIFT.md #7.
+add_executable(OcmeshDiff ${CMAKE_SOURCE_DIR}/tools/OcmeshDiff.cpp)
+target_link_libraries(OcmeshDiff PRIVATE Aver.Formats Aver.Core)
+set_target_properties(OcmeshDiff PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(MakeSamples ${CMAKE_SOURCE_DIR}/tools/MakeSamples.cpp)
 target_link_libraries(MakeSamples PRIVATE Aver.Core)
 set_target_properties(MakeSamples PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
