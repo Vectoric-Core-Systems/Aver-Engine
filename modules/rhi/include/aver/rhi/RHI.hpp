@@ -512,6 +512,9 @@ public:
     // Sets the sky, the sun and the air. Supersedes setLight for the sun.
     virtual void setSkyAtmosphere(const SkyAtmosphere& s) { (void)s; }
     virtual SkyAtmosphere skyAtmosphere() const { return {}; }
+    // The sun's linear radiance exactly as the shaders' averSunRadiance() reads it (decoded colour times
+    // intensity, 0 in the plain furnace). False where the backend does not know it.
+    virtual bool sunRadianceLinear(f32 out[3]) const { out[0] = out[1] = out[2] = 0.0f; return false; }
     // Sets the camera post-processing chain.
     virtual void setPostProcess(const PostSettings& p) { (void)p; }
     virtual PostSettings postProcess() const { return {}; }

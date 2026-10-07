@@ -570,7 +570,7 @@ bool rdSunLit() { return any(averSunRadiance() != 0.0); }
 float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
                   float frameJitter, uint kFirst) {
     const uint  n    = max(rays, 1u);
-    const float tanR = max(gRtParams.x, 0.0);
+    const float tanR = gAverShadowTanR >= 0.0 ? gAverShadowTanR : max(gRtParams.x, 0.0);
     const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
 #if AVER_RD_ABLATE != AVER_RD_ABL_SHADOW_FIRSTHIT
     const bool firstHitOnly = (rtGiShadowBits() & 32u) != 0u;
@@ -598,7 +598,7 @@ float3 rtShadowEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, flo
         r.Origin    = org + N * bias + dir * bias + gAverShadowOriginPush;
         r.Direction = dir;
         r.TMin      = bias;
-        r.TMax      = 100000.0;
+        r.TMax      = max(gAverShadowTMax, bias);
 #if AVER_RD_ABLATE != AVER_RD_ABL_SHADOW_FIRSTHIT
         // FIRST-HIT FAST PATH for opaque geometry (bit 32).
         if (firstHitOnly) {
@@ -716,7 +716,7 @@ void rtShadowRay0(float3 wpos, float3 N, float3 L, float2 pixel, float frameJitt
     float3 up = abs(L.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
     float3 T  = normalize(cross(up, L));
     float3 B  = cross(L, T);
-    const float tanR  = max(gRtParams.x, 0.0);
+    const float tanR  = gAverShadowTanR >= 0.0 ? gAverShadowTanR : max(gRtParams.x, 0.0);
     const float ang0  = rtHash(pixel) * 6.2831853 + frameJitter;
     const float2 disc = rtDiscSample(0, ang0);
     dir    = normalize(L + (T * disc.x + B * disc.y) * tanR);
@@ -735,7 +735,7 @@ float3 rtShadowOpaque(float3 wpos, float3 N, float3 L, float2 pixel, float frame
     r.Origin    = origin;
     r.Direction = dir;
     r.TMin      = bias;
-    r.TMax      = 100000.0;
+    r.TMax      = max(gAverShadowTMax, bias);
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | gAverRtSecondaryRayFlags, AVER_RT_MASK_OPAQUE_ALL, r);
@@ -754,6 +754,10 @@ float3 rtShadowOpaque(float3 wpos, float3 N, float3 L, float2 pixel, float frame
 #define AVER_LIGHTS_SIMPLE 1
 #endif
 #include "aver_lights.hlsli"
+// The light list (t18) holds every emitter, the sun as its directional entry, then the light grid
+// (docs/rendering/UNIFIED_LIGHTS.md). AVER_LIGHT_LIST_MAX bounds the raster path's working set (gCameraMedium.z):
+// the first, most important lamps. The ray-driven passes and every hit read the grid instead.
+#define AVER_LIGHT_LIST_MAX 32u
 typedef AverLightRec RdLocalLight;
 // The light list (at most 32). Declared here, not in voxi.hlsl, so voxi_pt.hlsli below can read it.
 StructuredBuffer<RdLocalLight> gRdLocalLights : register(t18);
@@ -771,6 +775,73 @@ uint rdLocalLightCount() { return (uint)(gCameraMedium.z + 0.5); }
 bool rdLocalHistValid()  { return ((uint)(gCameraMedium.w + 0.5) & 1u) != 0u; }
 // True when all lamp-flagged draws made the 32-cap list (bit 2), so GI hits can skip their emission.
 bool rdLocalCarriesEmitters() { return ((uint)(gCameraMedium.w + 0.5) & 2u) != 0u; }
+// ---- THE LIGHT GRID (UNIFIED_LIGHTS.md phase 3), stored after the lights in t18 as floats ----
+// gDecalParams.y: the header record (0 = no grid). See VoxiRenderer::buildLocalLights for the layout.
+float rdListFloat(uint f) {
+    const AverLightRec r = gRdLocalLights[f / 20u];
+    const uint c = f % 20u, q = c >> 2u;
+    const float4 v = q == 0u ? r.posRadius : q == 1u ? r.radianceRange : q == 2u ? r.axisKind : q == 3u ? r.shape : r.right;
+    return v[c & 3u];
+}
+struct RdLightRange {
+    uint globals;            // directional lights, reaching every point
+    uint g0, g1, g2;
+    uint cellStart;          // float index of the cell's first pool entry
+    uint count;              // globals + the cell's lights
+};
+// The lights that can reach `pos`: the directional ones, then those of its grid cell. Without a grid, the raster
+// working set [0, gCameraMedium.z).
+RdLightRange rdLightsAt(float3 pos) {
+    RdLightRange r;
+    r.globals = 0u; r.g0 = r.g1 = r.g2 = 0u; r.cellStart = 0u; r.count = 0u;
+    const uint hdr = (uint)(gDecalParams.y + 0.5);
+    if (hdr == 0u) {
+        r.count = min((uint)(gCameraMedium.z + 0.5), AVER_LIGHT_LIST_MAX);
+        r.cellStart = 0xFFFFFFFFu;   // marks the identity mapping
+        return r;
+    }
+    const AverLightRec h = gRdLocalLights[hdr];
+    r.globals = (uint)(h.axisKind.w + 0.5);
+    r.g0 = (uint)max(h.axisKind.x, 0.0); r.g1 = (uint)max(h.axisKind.y, 0.0); r.g2 = (uint)max(h.axisKind.z, 0.0);
+    r.count = r.globals;
+    const uint3 dim = (uint3)(h.radianceRange.xyz + 0.5);
+    if (all(dim > 0u)) {
+        const float3 c = (pos - h.posRadius.xyz) / max(h.posRadius.w, 1.0);
+        if (all(c >= 0.0) && all(c < (float3)dim)) {
+            const uint3 ci = (uint3)c;
+            const uint cell = (ci.z * dim.y + ci.y) * dim.x + ci.x;
+            const uint tf = (uint)(h.radianceRange.w + 0.5) * 20u + cell * 2u;
+            r.cellStart = (uint)(h.shape.x + 0.5) * 20u + (uint)(rdListFloat(tf) + 0.5);
+            r.count += (uint)(rdListFloat(tf + 1u) + 0.5);
+        }
+    }
+    return r;
+}
+uint rdLightIndex(RdLightRange r, uint k) {
+    if (r.cellStart == 0xFFFFFFFFu) return k;
+    if (k < r.globals) return k == 0u ? r.g0 : k == 1u ? r.g1 : r.g2;
+    return (uint)(rdListFloat(r.cellStart + k - r.globals) + 0.5);
+}
+
+// True when this pass's visible-surface lamp visibility exists (bit 4). The list itself is always published.
+bool rdLocalLampsLive() { return ((uint)(gCameraMedium.w + 0.5) & 4u) != 0u; }
+// True when an emitter a ray hit at `hitPos` is one of the listed lamps (inside its bounding sphere): its light is
+// already in the direct lamp term, so the hit drops its glow. Every listed lamp, not only when all are listed:
+// a lamp past kMaxListLights, or outside the grid, keeps its glow at hits; it is its only path. Looked up through
+// the light grid, the same lights the hit's direct term sees.
+// Only reached on hits with a light-flagged material, so the loop is rare.
+bool rdLocalEmitterCarried(float3 hitPos) {
+    if (rdLocalCarriesEmitters()) return true;
+    const RdLightRange lr = rdLightsAt(hitPos);
+    [loop] for (uint k = 0u; k < lr.count; ++k) {
+        const uint i = rdLightIndex(lr, k);
+        if (aversLightKind(gRdLocalLights[i]) == AVER_LIGHT_DIRECTIONAL) continue;
+        const float4 pr = gRdLocalLights[i].posRadius;
+        const float3 d  = hitPos - pr.xyz;
+        if (dot(d, d) <= pr.w * pr.w * 1.0404) return true;   // 2% margin on the bound
+    }
+    return false;
+}
 
 // Diffuse irradiance from one light (N.L included): inverse square clamped at the emitter radius, faded by
 // (1-(d/range)^4)^2, shaped by cone / IES / cookie; a rectangle through its polygonal form factor.
@@ -887,6 +958,15 @@ float rtSkyOcclusion(float3 wpos, float3 N, float2 pixel, uint rays) {
 
 // Reprojects wpos through last frame's camera to sample shadow history. False when unusable
 // (off-screen, behind near plane, or disocclusion).
+// Shadow history .x holds the light's key with its visibility: key * 2 + vis (vis in [0, 1]; the key is below 4096,
+// so RG32F keeps vis to about 1e-3). Unpack fails when the texel belongs to another light.
+float rtShadowHistPack(float vis) { return gAverShadowLightId * 2.0 + saturate(vis); }
+bool  rtShadowHistUnpack(float x, out float vis) {
+    const float id = floor(max(x, 0.0) * 0.5);
+    vis = saturate(x - 2.0 * id);
+    return id == gAverShadowLightId;
+}
+
 bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 velocityPx) {
     hist = 0.0;
     velocityPx = 0.0;
@@ -908,8 +988,8 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
     // Tolerance follows depth gradient: 3% relative + 1cm floor + surface slope.
     const float tol = max(clip.w, stored.y) * 0.03 + 1.0 + (abs(dzdx) + abs(dzdy)) * 2.0;
     if (abs(clip.w - stored.y) > tol) return false;
-
-    hist = stored.x;
+    // Only this light's history (rtShadowHistPack): a texel that last held another light starts fresh.
+    if (!rtShadowHistUnpack(stored.x, hist)) return false;
     velocityPx = px - pixel;
     return true;
 }
@@ -1176,13 +1256,40 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
 float averShadowLum(float3 v) { return dot(v, float3(0.2126, 0.7152, 0.0722)); }
 
 #if AVER_RD_LAMPS
+// The direction toward list entry `l` from `wpos`, and the shadow kernels' disc, ray length and history key for it
+// (gAverShadow*). A rectangle is traced toward its centre with the disc of its equal-area circle.
+float3 rdSetShadowLight(RdLocalLight l, float3 wpos) {
+    if (aversLightKind(l) == AVER_LIGHT_DIRECTIONAL) {
+        gAverShadowTanR    = -1.0;
+        gAverShadowTMax    = 100000.0;
+        gAverShadowLightId = 0.0;
+        return normalize(l.axisKind.xyz);
+    }
+    const float3 toC  = l.posRadius.xyz - wpos;
+    const float  dist = max(length(toC), 1e-3);
+    const float  rad  = aversLightKind(l) == AVER_LIGHT_RECT ? 1.13 * sqrt(max(l.shape.x * l.shape.y, 0.0))
+                                                             : l.posRadius.w;
+    gAverShadowTanR = rad / dist;
+    gAverShadowTMax = max(dist - rad * 1.25, 0.0);
+    // A stable key from the light's position (cm), 1..4095; 0 is a directional light.
+    const uint3 q = (uint3)(int3(round(l.posRadius.xyz)) + 1048576);
+    gAverShadowLightId = (float)(1u + (((q.x * 73856093u) ^ (q.y * 19349663u) ^ (q.z * 83492791u)) % 4095u));
+    return toC / dist;
+}
+void rdResetShadowLight() {
+    gAverShadowTanR    = -1.0;
+    gAverShadowTMax    = 100000.0;
+    gAverShadowLightId = 0.0;
+}
+
 // Weight for picking which light gets this pixel's shadow ray, 0 for a light that casts no shadow (it never
 // needs a ray and is added unshadowed). Only chooses the ray, the shading evaluates every light exactly, so
 // it is the cheap sphere estimate (range window, inverse square, N.L to the centre, spot cone) without IES,
 // cookies or the rectangle's form factor: two loops over 32 lights per pixel. A rectangle keeps N.L >= 0.1
 // while the receiver faces it, since part of it can be above the horizon when the centre is not.
 float rdLocalPickWeight(RdLocalLight l, float3 wpos, float3 N) {
-    if (aversLightNoShadow(l)) return 0.0;
+    // UNIFIED_LIGHTS phase 1: the visible surface still lights the directional entry its old way (gRdSunVisTex).
+    if (aversLightNoShadow(l) || aversLightKind(l) == AVER_LIGHT_DIRECTIONAL) return 0.0;
     const float3 toC   = l.posRadius.xyz - wpos;
     const float  d2    = dot(toC, toC);
     const float  range = l.radianceRange.w;
@@ -1248,7 +1355,7 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
             const float weight = rtShadowChanged(fresh, histV) ? kAverShadowChangeHistory : lerp(0.9, 0.5, t);
             vis = lerp(fresh, histV, weight);
         }
-        if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
+        if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(rtShadowHistPack(vis), curDepth);
         return saturate(rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint);
     }
 
@@ -1282,7 +1389,7 @@ float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 
         vis = hist;
     }
 
-    if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
+    if (gAverHistoryWrite) gRtShadowHistOut[uint2(pixel)] = float2(rtShadowHistPack(vis), curDepth);
     return saturate(rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint);
 }
 
@@ -1375,23 +1482,11 @@ float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2
     AverSurface s = rtHitSurface(h, -dir, L, rgx, rgy, AVER_RD_SINGLE_PASS ? AVER_RT_HIT_LITE : AVER_RT_HIT_FULL);
 #if AVER_RD_LAMPS
     // A listed lamp's glow is already its sphere light's specular on the surface this ray left.
-    if ((h.mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalCarriesEmitters()) s.emissive = float3(0.0, 0.0, 0.0);
+    if ((h.mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalEmitterCarried(h.pos)) s.emissive = float3(0.0, 0.0, 0.0);
 #endif
 
-    AverLight sun;
-    sun.direction = L;
-    sun.radiance  = averSunRadiance();
-    if (!rdSunLit()) {
-        sun.visibility = float3(0.0, 0.0, 0.0);
-    } else if ((rtGiShadowBits() & 1u) != 0u) {
-        sun.visibility = rtShadowOpaque(h.pos, s.N, L, pixel, frameJitter);
-    } else {
-        sun.visibility = rtShadow(h.pos, s.N, L, pixel, float3(0,0,0), float3(0,0,0), 1u, frameJitter);
-    }
-    float3 radiance = averShadeDirect(s.emissive, s, sun);
-#if AVER_RD_LAMPS && !AVER_RD_SINGLE_PASS
-    // Every lamp, unshadowed: a random one-lamp pick here sparkled through the reflection history.
-    if (rdLocalLightCount() > 0u) radiance += ptLampsAll(s, h.pos);
-#endif
+    // Every emitter, the sun included, through the one evaluator (voxi_pt.hlsli averDirectLights).
+    uint lrng = ptSeed(pixel, 0x5e11u);
+    const float3 radiance = s.emissive + averDirectLights(s, h.pos, pixel, lrng, false);
     return radiance + s.kdAlbedo * averSkyIrradiance(s.N) * gAmbient.r;
 }

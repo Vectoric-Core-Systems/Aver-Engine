@@ -550,7 +550,6 @@ private:
     rhi::PipelineHandle rdReflSplitPtCsPso_ = 0;
     rhi::PipelineHandle rdReflSplitCsPso_  = 0;
     rhi::PipelineHandle rdReflFilterCsPso_ = 0;
-    rhi::PipelineHandle rdLocalLightsCsPso_ = 0;
     // Stage B compose: rayDrivenTexPso_ variants with AVER_RD_SPLIT=1.
     rhi::PipelineHandle rayDrivenSplitTexPso_     = 0;
     rhi::PipelineHandle rayDrivenSplitTexGbufPso_ = 0;
@@ -617,7 +616,11 @@ private:
     using RdLocalLight = PackedLight;
     static_assert(sizeof(RdLocalLight) == 80, "RdLocalLight is the HLSL AverLightRec ABI");
     // At most this many per frame, sorted by 1-metre irradiance over max(distance², 1).
-    static constexpr u32 kMaxLocalLights = 32;
+    static constexpr u32 kMaxLocalLights = 32;      // the raster path's working set (shaders' AVER_LIGHT_LIST_MAX)
+    static constexpr u32 kMaxListLights = 4000;     // every emitter, up to this (UNIFIED_LIGHTS.md phase 3)
+    static constexpr u32 kMaxLightsPerCell = 24;    // a light-grid cell keeps its most important lights
+    static constexpr u32 kLightGridMaxDim = 32;     // cells per axis
+    static constexpr f32 kLightGridHalfExtent = 20000.0f;   // cm around the camera
     // Upload-heap ring: writeBuffer is unsynchronised, so rotate before write to avoid reading old frame's copy.
     rhi::BufferHandle rdLocalLights_[kRtInstanceRing] = {};
     u32 rdLocalLightSlot_ = 0;
@@ -626,7 +629,8 @@ private:
     rhi::BufferHandle rdLocalLightsPlaceholder_ = 0;
     rhi::BufferHandle rdLocalLightsBound_ = 0;
     std::vector<RdLocalLight> rdLocalLightData_;
-    u32 rdLocalLightCount_ = 0;
+    u32 rdLocalLightCount_ = 0;   // the raster path's working set: the first lamps, at most kMaxLocalLights
+    u32 rdLocalLampCount_ = 0;    // every lamp and scene light in the list (the sun and the grid follow them)
     u64 rdLocalLightHash_ = 0;
     // True when every light-flagged draw made the list (none cut by 32-light cap); allows GI to omit lamp emission.
     bool rdLocalLightsCarryAll_ = false;
@@ -674,7 +678,7 @@ private:
     bool rdLocalLightsFailLogged_ = false;
     void buildLocalLights();
     bool localLightsReady() const {
-        return rdLocalLightCount_ > 0 && settings_.localLights && rdLocalOutThisFrame_ != 0;
+        return rdLocalLampCount_ > 0 && settings_.localLights && rdLocalOutThisFrame_ != 0;
     }
     // Writes cb_.cameraMedium[2]/[3] for the scene pass; returns live so caller marks history written.
     bool publishLocalLights(bool live, const char* pass);
@@ -891,7 +895,7 @@ private:
         f32 viewParams[4] = {};
         // ReSTIR GI control: x = running, y = history valid, z = write buffer slice, w = poison debug view.
         f32 giRestirParams[4] = {};
-        // Projected decals: x = records in t24 this frame (0 = every decal call is skipped); yzw unused.
+        // x = projected decals in t24 (0 = every decal call is skipped); y = light-grid header record in t18 (0 = none).
         f32 decalParams[4] = {};
     } cb_;
 
@@ -1222,7 +1226,7 @@ private:
 
     // ---- LOCAL LIGHTS (LAMPS): the visibility history pair, t19 (read) / u19 (write) ----
     // Two RGBA16F textures at the shadow history's size. a = accumulated visibility (only channel used; rgb stays 0).
-    // Rests in ShaderResource like rtShadowHist_. CSRdLocalLights visits NonPixelShaderResource; Stage B reads the u19 side (UnorderedAccess).
+    // Rests in ShaderResource like rtShadowHist_. The raster pixel shaders read t19 and write u19.
     rhi::TextureHandle rdLocalHist_[2] = {0, 0};
     // A 1x1 RGBA16F SRV+UAV stand-in bound at both t19/u19 when the pair doesn't exist.
     rhi::TextureHandle rdLocalHistPlaceholder_ = 0;
@@ -1354,7 +1358,9 @@ private:
 
     // LOCAL LIGHTS (LAMPS): whether rdLocalHist_ is worth allocating.
     bool rdLocalHistWanted() const {
-        return rayTracingWanted() && settings_.localLights && dev_ && dev_->backend() == rhi::Backend::D3D12;
+        // Always with ray tracing: the staged visible-surface pass writes the pixel's light slots here (u19),
+        // the sun's among them (UNIFIED_LIGHTS.md), whether or not lamps are on.
+        return rayTracingWanted() && dev_ && dev_->backend() == rhi::Backend::D3D12;
     }
 
     // Fog occlusion: whether airVisTex_ will ACTUALLY be created/kept.

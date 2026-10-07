@@ -789,15 +789,13 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     // NRD2 half-rate tracing per feature (Settings::nrd2HalfRate*): skipped pixels filled from this frame.
     {
         struct HalfRateDial { const char* name; bool Settings::* field; const char* help; };
-        static const HalfRateDial kNrd2HalfRate[4] = {
+        static const HalfRateDial kNrd2HalfRate[3] = {
             {"voxi.nrd2HalfRateGi",    &Settings::nrd2HalfRateGi,
              "ReSTIR GI on a checkerboard (with voxi.rayDrivenStages 2)"},
             {"voxi.nrd2HalfRateRefl",  &Settings::nrd2HalfRateRefl,
              "glossy reflections on a checkerboard (with voxi.rtReflectionHalfRate; mirrors stay full rate)"},
             {"voxi.nrd2HalfRateAo",    &Settings::nrd2HalfRateAo,
-             "sky occlusion on a checkerboard (with voxi.rtSkyOcclusionHalfRate)"},
-            {"voxi.nrd2HalfRateLamps", &Settings::nrd2HalfRateLamps,
-             "lamp visibility on a checkerboard (Stage B's 5x5 lamp filter fills the rest)"}};
+             "sky occlusion on a checkerboard (with voxi.rtSkyOcclusionHalfRate)"}};
         for (const HalfRateDial& d : kNrd2HalfRate) {
             bool Settings::* f = d.field;
             t.push_back({d.name, VarType::Bool, false,

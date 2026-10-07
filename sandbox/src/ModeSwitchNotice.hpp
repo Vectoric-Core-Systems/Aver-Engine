@@ -49,7 +49,8 @@ public:
             const double sec = std::chrono::duration<double>(Clock::now() - t0_).count();
             char body[64];
             std::snprintf(body, sizeof body, "Took %.1f s.", sec);
-            q.finish(toast_, NotifySeverity::Success, describe(s) + " ready", body, 4.0);
+            q.setSticky(toast_, false);   // finish() leaves sticky set; it must fade
+            q.finish(toast_, NotifySeverity::Success, describe(s) + " ready", body, 3.0);
             stage_ = Stage::Idle;
         }
         if (stage_ == Stage::Announced) {

@@ -1000,6 +1000,13 @@ public:
     }
     void setSkyAtmosphere(const SkyAtmosphere& s) override;
     SkyAtmosphere skyAtmosphere() const override { return sky_; }
+    bool sunRadianceLinear(f32 out[3]) const override {
+        // averSunRadiance(): srgbToLin (pow 2.2) of the uploaded colour, times gSkyParams.z; off in the plain furnace.
+        const bool off = frameCB_.furnace[0] > 0.5f && frameCB_.furnace[2] < 0.5f;
+        for (int i = 0; i < 3; ++i)
+            out[i] = off ? 0.0f : std::pow(std::fmax(frameCB_.lightColor[i], 0.0f), 2.2f) * frameCB_.skyParams[2];
+        return true;
+    }
     // Packs the physical atmosphere fields and derives four more for the per-frame block.
     void packAtmosphere(const SkyAtmosphere& s);
     void setPostProcess(const PostSettings& p) override { post_ = p; }

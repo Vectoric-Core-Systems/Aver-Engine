@@ -119,8 +119,9 @@ aliases), multiplied into the light's colour.
 
 ## The light list and its limits
 
-Scene lights join the emissive-material lamps in one list, **32 per frame in all**, ranked by 1 m
-irradiance over distance squared from the camera (`kMaxLocalLights`). The record is 80 bytes
+Scene lights join the emissive-material lamps and the sun in one list, ranked by 1 m irradiance over
+distance squared from the camera, with no 32 cap since the unified lights work (UNIFIED_LIGHTS.md: up to
+`kMaxListLights`, found per point through a light grid; the raster path keeps the first `kMaxLocalLights`). The record is 80 bytes
 (`AverLightRec`, five `float4`). The existing machinery applies unchanged: one stochastic shadow ray per
 pixel per turn at a light picked by unshadowed luminance, accumulated with reprojection history, with
 visibility shared across lights.

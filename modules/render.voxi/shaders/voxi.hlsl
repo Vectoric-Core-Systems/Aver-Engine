@@ -98,7 +98,8 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     float4   gViewParams;
     // x = ReSTIR GI running; y = history valid; z = reservoir slice; w = poison debug view mode.
     float4   gGiRestirParams;
-    // x = projected decals this frame (voxi_decal.hlsli; 0 skips every decal call); yzw unused.
+    // x = projected decals this frame (voxi_decal.hlsli; 0 skips every decal call); y = light-grid header record
+    // in t18 (0 = none, voxi_rt.hlsli rdLightsAt); zw unused.
     float4   gDecalParams;
 };
 
@@ -193,6 +194,13 @@ static bool gAverHistoryWrite = true;
 // ---- SUBSURFACE: where the primary sun-shadow rays start (averSubsurfaceShadowPush) ----
 // Added to ray origin in rtShadowEx only (temporal wrapper operates at real surface). Reset after each call.
 static float3 gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
+// THE LIGHT THE SHADOW KERNELS TRACE TOWARD (docs/rendering/UNIFIED_LIGHTS.md). rtShadowEx, rtShadowOpaque and
+// rtShadowTemporalEx serve every light: a light's disc (tan of its angular radius), how far a ray may go before it
+// reaches the light, and the key its history is stored under. Defaults: a directional light (the sun's disc from
+// gRtParams.x, unbounded rays, key 0). rdSetShadowLight sets them for one list entry.
+static float gAverShadowTanR    = -1.0;      // < 0: gRtParams.x
+static float gAverShadowTMax    = 100000.0;
+static float gAverShadowLightId = 0.0;
 
 // ---- OBJECT MOTION: this pixel's surface point, last frame's position minus this frame's ----
 // History reprojection projects wpos + this through last frame's camera, so an animated object (or the
@@ -400,11 +408,8 @@ float rdLocalHistFiltered(float2 pxPrev, int2 texel) {
 // rdLocalHistFiltered widens it to a depth-weighted 3x3 first.
 //
 // DERIVATIVES: rtReprojectTexel takes ddx/ddy of depth, so it must run first, behind only a
-// constant-buffer condition -- callers (CSRdLocalLights, SM 6.6 8x8=2x2 quads per CSRdShadow's header,
-// after only CSRdShadow's own early-outs; and the pixel shaders behind rdLocalLightCount()) hold that
-// same ordering.
-// NRD2 half rate (rtGiShadowBits 256) applies in CSRdLocalLights only, never in a pixel shader's call.
-static bool gRdLocalCbStage = false;
+// constant-buffer condition -- the raster pixel shaders (its only callers; the ray-driven path lights through
+// CSRdShadow's list kernel) call it behind rdLocalLampsLive().
 float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel, bool writeHistory) {
     // gRtHistParams.x: t6/u2 are bound this frame. gRtHistParams.y > 0.25, not the shadow's > 0.75: t6
     // holds a real previous frame, and its DEPTH stays valid on a frame only the sun moved (the
@@ -440,19 +445,16 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
     // (always < 0.5) arguments -- each pixel's pick confined to half the lights' weight (a lamp that
     // shadows it never picked, the neighbour that does pick it shadowed every turn): a fixed per-pixel
     // speckle no accumulation removes. frameIdx >> 1 counts this pixel's turns one by one.
-    // NRD2 (no history): the same checkerboard; a skipped pixel stores -1 and rdLocalVisFiltered fills it
-    // from this frame's traced neighbours.
     const uint frameIdx = (uint)gRtHistParams.z;
-    const bool cbFill   = gRdLocalCbStage && !haveHist && (rtGiShadowBits() & 256u) != 0u;
-    const bool myTurn   = (!haveHist && !cbFill) || (((pixel.x + pixel.y + frameIdx) & 1u) == 0u);
-    const uint turn     = (haveHist || cbFill) ? (frameIdx >> 1) : frameIdx;
+    const bool myTurn   = !haveHist || (((pixel.x + pixel.y + frameIdx) & 1u) == 0u);
+    const uint turn     = haveHist ? (frameIdx >> 1) : frameIdx;
     float vis     = prevVisF;
-    float histVis = (cbFill && !myTurn) ? -1.0 : prevVisC;
+    float histVis = prevVisC;
     if (myTurn) {
         // LOOP 1: unshadowed sum, each light's luminance as its pick weight. Recomputed in loop 2 rather
         // than cached in a 32-entry array: loop-indexed arrays spill registers (rtShadowEx measured a 25%
         // regression), and a light's irradiance is a few ALU ops.
-        const uint n = min(rdLocalLightCount(), 32u);
+        const uint n = min(rdLocalLightCount(), AVER_LIGHT_LIST_MAX);
         float wsum    = 0.0;
         uint  lastLit = 0u;
         [loop] for (uint i = 0u; i < n; ++i) {
@@ -471,7 +473,21 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
             // rdLocalShadow's disc angle) rotated by the radical inverse of its turn -- spreads picks
             // evenly across turns rather than in runs. lastLit, not n-1: u*wsum can round up to wsum, and
             // the last light may contribute nothing here.
-            const float u      = frac(rtHash(pixelC + float2(0.37, 11.0)) + rtRadicalInverse2(turn + 1u));
+            // NRD2 frames have no visibility history, so Stage B's 5x5 filter is the whole estimate: the pick is
+            // STRATIFIED there, each pixel of a 5x5 block taking its own 25th of the weight CDF (a bijection of
+            // (x mod 5, y mod 5), so every 5x5 window holds each stratum once). The filter then averages an even
+            // sample of the lamps rather than 25 random ones, the noise that showed as spots only where lamps
+            // light (the sun is one light). docs/rendering/NRD2.md "Stratified lamp picks". Compiled only into the
+            // bindless staged passes (where NRD2 frames compute lamp visibility): in the non-bindless ray-traced
+            // raster variants and the glass variant it hung the RX 7800 XT, as decals did (DECALS.md).
+#if defined(AVER_RT_BINDLESS) && !AVER_BLENDED_PASS && !AVER_RD_SINGLE_PASS
+            const uint  sa     = pixel.x % 5u, sb = pixel.y % 5u;
+            const float uPix   = rtNrd2Frame() ? ((float)(5u * ((sa + 2u * sb) % 5u) + (2u * sa + sb) % 5u) + 0.5) / 25.0
+                                               : rtHash(pixelC + float2(0.37, 11.0));
+#else
+            const float uPix   = rtHash(pixelC + float2(0.37, 11.0));
+#endif
+            const float u      = frac(uPix + rtRadicalInverse2(turn + 1u));
             const float target = u * wsum;
             uint  pick = lastLit;
             float acc  = 0.0;
@@ -545,10 +561,12 @@ bool rdLocalLightAt(RdLocalLight ll, AverSurface s, float3 wpos, out AverLight l
 float3 rdLocalLightsShade(AverSurface s, float3 wpos, float vis) {
     float3 acc = float3(0.0, 0.0, 0.0);
     float3 accUnshadowed = float3(0.0, 0.0, 0.0);   // lights flagged no-shadow skip the shared visibility
-    const uint n = min(rdLocalLightCount(), 32u);
+    const uint n = min(rdLocalLightCount(), AVER_LIGHT_LIST_MAX);
     [loop] for (uint i = 0u; i < n; ++i) {
         AverLight   l;
         AverSurface sL;
+        // UNIFIED_LIGHTS phase 1: the visible surface still lights the directional entry its old way.
+        if (aversLightKind(gRdLocalLights[i]) == AVER_LIGHT_DIRECTIONAL) continue;
         if (!rdLocalLightAt(gRdLocalLights[i], s, wpos, l, sL)) continue;
         if (aversLightNoShadow(gRdLocalLights[i])) accUnshadowed = averShadeDirect(accUnshadowed, sL, l);
         else                                       acc = averShadeDirect(acc, sL, l);
@@ -567,8 +585,9 @@ void rdLocalLightsShadeSplit(AverSurface s, float3 wpos, float vis,
     float3 sAcc = float3(0.0, 0.0, 0.0);
     float3 dAccU = float3(0.0, 0.0, 0.0);
     float3 sAccU = float3(0.0, 0.0, 0.0);
-    const uint n = min(rdLocalLightCount(), 32u);
+    const uint n = min(rdLocalLightCount(), AVER_LIGHT_LIST_MAX);
     [loop] for (uint i = 0u; i < n; ++i) {
+        if (aversLightKind(gRdLocalLights[i]) == AVER_LIGHT_DIRECTIONAL) continue;   // phase 1, as above
         AverLight   l;
         AverSurface sL;
         if (!rdLocalLightAt(gRdLocalLights[i], s, wpos, l, sL)) continue;
@@ -586,6 +605,32 @@ void rdLocalLightsShadeSplit(AverSurface s, float3 wpos, float vis,
     }
     diffuse  += dAcc * vis + dAccU;
     specular += sAcc * vis + sAccU;
+}
+
+// One list entry on the visible surface with the visibility CSRdShadow resolved for it (UNIFIED_LIGHTS.md):
+// re-aimed through rdLocalLightAt (a directional entry keeps its roughness), caustic focus for a directional light.
+float3 rdListLightVis(uint i, float3 wpos, float3 vis) {
+    return aversLightKind(gRdLocalLights[i]) == AVER_LIGHT_DIRECTIONAL ? vis * (1.0 + averCausticFocus(wpos)) : vis;
+}
+float3 rdListLight(uint i, AverSurface s, float3 wpos, float3 vis) {
+    AverLight   l;
+    AverSurface sL;
+    if (!rdLocalLightAt(gRdLocalLights[i], s, wpos, l, sL)) return float3(0.0, 0.0, 0.0);
+    l.visibility = rdListLightVis(i, wpos, vis);
+    return averShadeDirect(float3(0.0, 0.0, 0.0), sL, l);
+}
+void rdListLightSplit(uint i, AverSurface s, float3 wpos, float3 vis, inout float3 diffuse, inout float3 specular) {
+    if (s.model == AVER_MODEL_UNLIT) return;
+    AverLight   l;
+    AverSurface sL;
+    if (!rdLocalLightAt(gRdLocalLights[i], s, wpos, l, sL)) return;
+    l.visibility = rdListLightVis(i, wpos, vis);
+    float3 dD, dS, dSss;
+    float  ndl;
+    averDirectTerms(sL, l, dD, dS, dSss, ndl);
+    const float3 lt = l.radiance * ndl * l.visibility;
+    diffuse  += dD * lt + dSss * l.radiance * l.visibility;
+    specular += dS * lt;
 }
 #endif
 
@@ -850,7 +895,7 @@ float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel
         float3 diffuse, specular;
         averShadeSplit(s, sun, ind, diffuse, specular);
 #if AVER_RD_LAMPS
-        if (rdLocalLightCount() > 0u) rdLocalLightsShadeSplit(s, h.pos, 1.0, diffuse, specular);
+        if (rdLocalLampsLive()) rdLocalLightsShadeSplit(s, h.pos, 1.0, diffuse, specular);
 #endif
         float3 T = float3(1.0, 1.0, 1.0);
         if (s.attenuationDistance > 0.0)
@@ -1522,7 +1567,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         averShadeSplit(s, sun, ind4, dif, spc);
 #if AVER_RT && AVER_RD_LAMPS
         // Local lights on a pane, shadowed where reusing staged surface underneath.
-        if (rdLocalLightCount() > 0u) {
+        if (rdLocalLampsLive()) {
             float lampVis = 1.0;
             if (rdReuse) lampVis = rdLocalVisFiltered(uint2(i.pos.xy));
             rdLocalLightsShadeSplit(s, i.wpos, lampVis, dif, spc);
@@ -1558,7 +1603,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     radiance = averShadeDirect(radiance, s, sun);
 #if AVER_RT && AVER_RD_LAMPS
     // Local lights on opaque surface.
-    if (rdLocalLightCount() > 0u)
+    if (rdLocalLampsLive())
         radiance += rdLocalLightsShade(s, i.wpos,
                                        rdLocalLightsVisibility(i.wpos, vtx.N, i.pos.xy, uint2(i.pos.xy), true));
 #endif
@@ -1854,35 +1899,50 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #else
     const bool ptRef = false;
 #endif
+#if AVER_RD_SPLIT && !AVER_RD_SINGLE_PASS
+    // THE PIXEL'S LIGHTS (UNIFIED_LIGHTS.md), as CSRdShadow chose them: the exact light with its full visibility
+    // (sunVis, from gRdSunVisTex) and the tail light with its one-ray estimate. The sun is one of them by day.
+    // `sun` stays only as nrd2ShadeSplit's argument for the indirect terms, with no radiance of its own.
+    AverLight sun;
+    sun.direction  = L;
+    sun.radiance   = 0.0;
+    sun.visibility = 0.0;
+    const float4 lightSlots = gRdLocalOut[uint2(i.pos.xy)];
+#if AVER_NRD2
+    // The lit terms go to NRD2's buckets; `radiance` keeps only what is never denoised.
+    float3 nrdD = 0.0, nrdS = 0.0;
+    float4 nrdDOut = 0.0, nrdSOut = 0.0;   // what was written to NRD2's D and S (Path Tracing accumulates them)
+    float3 radiance = 0.0;
+    if (!ptRef) {
+        if (lightSlots.x >= 0.0) rdListLightSplit((uint)lightSlots.x, s, wpos, sunVis, nrdD, nrdS);
+        if (lightSlots.y >= 0.0) rdListLightSplit((uint)lightSlots.y, s, wpos, lightSlots.zzz, nrdD, nrdS);
+    }
+#else
+    float3 radiance = 0.0;
+    if (!ptRef) {
+        if (lightSlots.x >= 0.0) radiance += rdListLight((uint)lightSlots.x, s, wpos, sunVis);
+        if (lightSlots.y >= 0.0) radiance += rdListLight((uint)lightSlots.y, s, wpos, lightSlots.zzz);
+    }
+#endif
+#else
     AverLight sun;
     sun.direction  = L;
     sun.radiance   = averSunRadiance();
     sun.visibility = sunVis;
     // Caustic term, ray-driven twin.
     sun.visibility *= 1.0 + averCausticFocus(wpos);
-
 #if AVER_NRD2
-    // The lit terms go to NRD2's buckets; `radiance` keeps only what is never denoised.
     float3 nrdD = 0.0, nrdS = 0.0;
-    float4 nrdDOut = 0.0, nrdSOut = 0.0;   // what was written to NRD2's D and S (Path Tracing accumulates them)
+    float4 nrdDOut = 0.0, nrdSOut = 0.0;
     float3 radiance = 0.0;
 #else
     float3 radiance = averShadeDirect(0.0, s, sun);
 #endif
-
-    // Local lights: diffuse and specular through sun's BRDF. Inside `radiance`, outside denoiser/AO.
-    // Unlit (vmode 1) drops it with the rest of lighting.
-#if AVER_RD_SPLIT && !AVER_RD_SINGLE_PASS
-    // Stage B: visibility already resolved by CSRdLocalLights.
-    if (rdLocalLightCount() > 0u && !ptRef)
-#if AVER_NRD2
-        rdLocalLightsShadeSplit(s, wpos, rdLocalVisFiltered(uint2(i.pos.xy)), nrdD, nrdS);
-#else
-        radiance += rdLocalLightsShade(s, wpos, rdLocalVisFiltered(uint2(i.pos.xy)));
 #endif
-#elif !AVER_RD_SPLIT && AVER_RD_LAMPS
+
+#if !AVER_RD_SPLIT && AVER_RD_LAMPS
     // Single pass resolves on its own hit.
-    if (rdLocalLightCount() > 0u)
+    if (rdLocalLampsLive())
         radiance += rdLocalLightsShade(s, wpos,
                                        rdLocalLightsVisibility(wpos, N, i.pos.xy, uint2(i.pos.xy), true));
 #endif
@@ -2342,8 +2402,9 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
 
     const uint4 rec = gRdVisBuf[idx];
     if (rec.x == 0xFFFFFFFFu) {
-        // Sky pixel: no surface. Set alpha 0.0 as miss sentinel (not a depth).
+        // Sky pixel: no surface. Set alpha 0.0 as miss sentinel (not a depth). No lights.
         gRdSunVisTex[pixel] = float4(1.0, 1.0, 1.0, 0.0);
+        gRdLocalOut[pixel]  = float4(-1.0, -1.0, 0.0, 1.0);
         return;
     }
 
@@ -2358,7 +2419,34 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     float3 dpx, dpy;
     rdShadowFootprint(ndc, dir, s, dpx, dpy);
 
-    const float3 L = normalize(gLightDir.xyz);
+    // THE VISIBLE SURFACE'S LIGHTS (docs/rendering/UNIFIED_LIGHTS.md). Every emitter is a list entry, the sun its
+    // directional one. Here the entry that delivers the most (unshadowed irradiance) is the pixel's EXACT light and
+    // gets the full shadow kernel the sun always had: the disc, several rays, history keyed by light, the spatial
+    // filter, the probe tiles. The rest are the tail: one picked in proportion to its irradiance, one ray, divided by
+    // its pick probability. Stage B shades both from gRdSunVisTex (exact light's visibility) and gRdLocalOut
+    // (x exact index, y tail index, z tail visibility / pick probability; -1 none; a the lamp visibility the glass
+    // replay's 5x5 reads). By day the exact light is the sun because it delivers the most.
+    uint  e0 = 0xFFFFFFFFu, tp = 0xFFFFFFFFu;
+    float w0 = 0.0, tw = 0.0, twp = 0.0;
+    {
+        uint rng = ptSeed(float2(pixel), 0x11c7u);
+        const RdLightRange lr = rdLightsAt(s.wpos);
+        [loop] for (uint k = 0u; k < lr.count; ++k) {
+            const uint j = rdLightIndex(lr, k);
+            float w = averShadowLum(aversLightIrradiance(gRdLocalLights[j], s.wpos, s.N));
+            if (!(w > 0.0)) continue;
+            uint ci = j;
+            if (w > w0) { const uint ti = e0; const float tww = w0; e0 = ci; w0 = w; ci = ti; w = tww; }
+            if (ci != 0xFFFFFFFFu && w > 0.0) {
+                tw += w;
+                if (ptRand(rng) * tw < w) { tp = ci; twp = w; }
+            }
+        }
+    }
+    const bool  haveE0 = e0 != 0xFFFFFFFFu;
+    const float3 L = haveE0 ? rdSetShadowLight(gRdLocalLights[e0], s.wpos) : normalize(gLightDir.xyz);
+    const bool  e0Directional = haveE0 && aversLightKind(gRdLocalLights[e0]) == AVER_LIGHT_DIRECTIONAL;
+    const bool  e0NoShadow    = haveE0 && aversLightNoShadow(gRdLocalLights[e0]);
 
     // History writes always live for this pass: blended draws never reach ray-driven primary.
     gAverHistoryWrite = true;
@@ -2382,19 +2470,35 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
         }
     }
     // One call with verdict as runtime flag, not ?: between two calls (avoids double-inlining).
-    // Sun radiance 0: no ray; the zero stands in for the trace and the history writes stay.
-    const bool   sunLit      = rdSunLit();
-    const bool   probeAgrees = !sunLit || (m == 2u || m == 1u);
+    // The probe traced the directional light, so its verdict only stands for a directional exact light. No exact
+    // light (nothing reaches this point) or a no-shadow one: no ray; the stand-in keeps the history writes.
+    const bool   probeAgrees = !haveE0 || e0NoShadow || (e0Directional && (m == 2u || m == 1u));
     const float3 sunVis = rtShadowTemporalEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy,
                                              (uint)max(gRtParams.y, 1.0), probeAgrees,
-                                             float3(1.0, 1.0, 1.0) * ((sunLit && m == 2u) ? 1.0 : 0.0));
+                                             float3(1.0, 1.0, 1.0) * ((e0NoShadow || (e0Directional && m == 2u)) ? 1.0 : 0.0));
 #else
-    const bool   sunLit = rdSunLit();
+    const bool   noRay  = !haveE0 || e0NoShadow;
     const float3 sunVis = rtShadowTemporalEx(s.wpos, s.N, L, float2(pixel) + 0.5, dpx, dpy,
-                                             (uint)max(gRtParams.y, 1.0), !sunLit, float3(0.0, 0.0, 0.0));
+                                             (uint)max(gRtParams.y, 1.0), noRay,
+                                             float3(1.0, 1.0, 1.0) * (e0NoShadow ? 1.0 : 0.0));
 #endif
     gAverShadowOriginPush = float3(0.0, 0.0, 0.0);
 #endif
+    // The tail light: one ray through the same kernel (no history), weighted by 1 / its pick probability.
+    float tailVis = 0.0;
+    if (tp != 0xFFFFFFFFu && twp > 0.0) {
+        const RdLocalLight tl = gRdLocalLights[tp];
+        const float3 Lt = rdSetShadowLight(tl, s.wpos);
+        const float  v  = aversLightNoShadow(tl) ? 1.0
+                        : averShadowLum(rtShadowEx(s.wpos, s.N, Lt, float2(pixel) + 0.5, float3(0, 0, 0), float3(0, 0, 0), 1u,
+                                                   averGoldenTurns((uint)gRtHistParams.z), 0u));
+        tailVis = v * (tw / twp);
+    }
+    rdResetShadowLight();
+    // .a: the visibility the glass replay's lamp 5x5 (rdLocalVisFiltered) reads -- the exact light's when it is a
+    // lamp, else the tail's raw ray.
+    const float lampA = (haveE0 && !e0Directional) ? averShadowLum(sunVis) : (twp > 0.0 ? tailVis * (twp / tw) : 1.0);
+    gRdLocalOut[pixel] = float4(haveE0 ? (float)e0 : -1.0, tp != 0xFFFFFFFFu ? (float)tp : -1.0, tailVis, lampA);
     // Primary surface linear view depth (for blended-replay reuse test).
     const float rdSunVisViewZ = mul(float4(s.wpos, 1.0), gViewProj).w;
     gRdSunVisTex[pixel] = float4(sunVis, rdSunVisViewZ);
@@ -2403,44 +2507,6 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     if ((rtGiShadowBits() & 64u) != 0u) gRtReflHistOut[pixel] = float4(s.N, 1.0);
 }
 
-#if !AVER_RD_SINGLE_PASS
-// ---- STAGE L: CSRdLocalLights -- lamps lit the way the sun is -----------------------------------------
-// Dispatched after CSRdShadow when lights present. One shadow ray per pixel, accumulated into gRdLocalOut.
-[numthreads(8, 8, 1)]
-void CSRdLocalLights(uint3 tid : SV_DispatchThreadID) {
-    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
-    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
-
-    const uint pitch = rdRowPitch();
-    if (pitch == 0u) return;
-    const uint idx = pixel.y * pitch + pixel.x;
-
-    // History writes always live: no blended draw reaches a staged pass.
-    gAverHistoryWrite = true;
-
-    const uint4 rec = gRdVisBuf[idx];
-    if (rec.x == 0xFFFFFFFFu) {
-        // Sky: every history texel must be written each frame (ping-pong). Visibility 1.0 for lit reprojection.
-        if (gAverHistoryWrite) gRdLocalOut[pixel] = float4(0.0, 0.0, 0.0, 1.0);
-        return;
-    }
-
-    // NRD2 half rate, no history: the off-turn pixel only stores the skip marker (see rdLocalLightsVisibility).
-    if (gRtHistParams.x < 0.5 && (rtGiShadowBits() & 256u) != 0u &&
-        ((pixel.x + pixel.y + (uint)gRtHistParams.z) & 1u) != 0u) {
-        gRdLocalOut[pixel] = float4(0.0, 0.0, 0.0, -1.0);
-        return;
-    }
-
-    float2 ndc;
-    const float3 dir = rdPrimaryRayDir(pixel, ndc);
-    const RdSurface s = rdSurfaceFromRecord(rec, dir);
-    averRtCutoutPolicy(AVER_RD_CUTOUTS_SHADOW, false);
-    // Pixel centre, as CSRdShadow does. Stage B reads visibility back from gRdLocalOut.
-    gRdLocalCbStage = true;
-    rdLocalLightsVisibility(s.wpos, s.N, float2(pixel) + 0.5, pixel, true);
-}
-#endif
 
 // ---- STAGE G0: CSRdGiTrace -- trace ReSTIR GI's fresh candidate for CSRdGi's resample --------
 //

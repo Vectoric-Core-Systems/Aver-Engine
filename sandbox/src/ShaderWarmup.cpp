@@ -174,7 +174,10 @@ void ShaderWarmup::poll() {
             char body[96];
             std::snprintf(body, sizeof body, "Shader cache ready (%.0f s, %s).", sec,
                           impl_->lastNote.empty() ? "pipelines built" : impl_->lastNote.c_str());
-            if (impl_->toast) q.finish(impl_->toast, NotifySeverity::Success, "Shaders ready", body, 5.0);
+            if (impl_->toast) {
+                q.setSticky(impl_->toast, false);   // finish() leaves sticky set; it must fade
+                q.finish(impl_->toast, NotifySeverity::Success, "Shaders ready", body, 3.0);
+            }
             AVER_INFO("[ShaderWarm] {}", body);
             impl_->done = true;
         } else if (l.rfind("warm: fail", 0) == 0) {

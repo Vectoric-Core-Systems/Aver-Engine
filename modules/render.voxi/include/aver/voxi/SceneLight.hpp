@@ -38,7 +38,7 @@ struct PackedLight {
 };
 static_assert(sizeof(PackedLight) == 80, "PackedLight is the HLSL AverLightRec ABI");
 
-inline constexpr u32 kLightKindPoint = 0, kLightKindSpot = 1, kLightKindRect = 2;
+inline constexpr u32 kLightKindPoint = 0, kLightKindSpot = 1, kLightKindRect = 2, kLightKindDirectional = 3;
 inline constexpr u32 kLightNoShadowBit = 8;
 
 // One engine radiance unit in cd/m^2; equals rhi::kLuminanceToCdm2 (checked in VoxiRenderer.cpp).

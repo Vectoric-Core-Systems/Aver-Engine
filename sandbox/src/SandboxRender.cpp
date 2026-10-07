@@ -145,8 +145,9 @@ void SandboxApp::onRender(Engine& e)  {
             if (levelPrepToast_) {
                 char body[48];
                 std::snprintf(body, sizeof body, "Ready after %.1f s.", sec);
+                editor::notifications().setSticky(levelPrepToast_, false);   // finish() leaves sticky set
                 editor::notifications().finish(levelPrepToast_, editor::NotifySeverity::Success,
-                                               levelName_ + " ready", body, 4.0);
+                                               levelName_ + " ready", body, 3.0);
             }
             levelPrepArmed_ = false;
             levelPrepToast_ = 0;

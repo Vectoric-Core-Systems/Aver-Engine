@@ -34,6 +34,9 @@
 #define AVER_LIGHT_POINT 0u
 #define AVER_LIGHT_SPOT  1u
 #define AVER_LIGHT_RECT  2u
+// A light at infinity (the sun): axisKind.xyz the unit direction TOWARD the light, radianceRange.rgb the
+// irradiance at normal incidence, posRadius.w tan of the disc's half angle. No position, range, cone or profile.
+#define AVER_LIGHT_DIRECTIONAL 3u
 
 // Mirrors kIesTableV / kIesTableH (IesProfile.hpp).
 #define AVER_IES_V 64.0
@@ -137,6 +140,11 @@ bool aversLightEval(AverLightRec ll, float3 p, float3 N, out float3 dir, out flo
     dir = float3(0.0, 0.0, 1.0);
     radiance = float3(0.0, 0.0, 0.0);
     srcRadius = 0.0;
+    if (aversLightKind(ll) == AVER_LIGHT_DIRECTIONAL) {
+        dir = normalize(ll.axisKind.xyz);
+        radiance = ll.radianceRange.rgb;
+        return true;
+    }
 
     const float3 toC   = ll.posRadius.xyz - p;
     const float  d2    = dot(toC, toC);

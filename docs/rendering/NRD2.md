@@ -62,7 +62,6 @@ checkerboard half and fill the other from its four edge neighbours, all traced t
 | ReSTIR GI | CSRdGi's checkerboard variant (parity `denoiseFrame_ & 1`) | CSRdHalfFill -> gRdGiTex | `voxi.nrd2HalfRateGi` | `rayDrivenStages 2` |
 | glossy reflections (mirror full rate) | CSRdRefl, `(x^y^frame)&1`, S.a = -1 | CSRdHalfFill -> gRdReflTex + S.a (hit distance) | `voxi.nrd2HalfRateRefl` | `rtReflectionHalfRate` |
 | sky occlusion | CSRdSkyOcc, the other half to reflections, a = -1 (was 8x8 tiles over history) | CSRdHalfFill -> gRdAoTex | `voxi.nrd2HalfRateAo` | `rtSkyOcclusionHalfRate` |
-| lamp visibility | CSRdLocalLights, its usual `(x+y+frame)&1`, stores -1 | Stage B's existing 5x5 `rdLocalVisFiltered`, which skips negative taps | `voxi.nrd2HalfRateLamps` | -- |
 
 Fill weight per neighbour (`rdHalfFillWeight`): view depth (gRdSunVisTex.a) within 2% + 1 cm of the
 centre's or of the plane through the centre and the opposite neighbour (grazing surfaces), times cos^8
@@ -387,7 +386,7 @@ the swing's captured frame is frame 397, yaw 87.649, found by matching still fra
 | FidelityFX | 0.92% | 0.17% | -2.0% |
 
 With cap 1, candle-only light (lamps off) loses 6% of its energy; FidelityFX loses none there. Full-rate lamp
-shadows (`nrd2HalfRateLamps` now defaults to false) cost about 0.1 ms. The whole change is +0.3 ms on the RX
+shadows (the `nrd2HalfRateLamps` setting, since removed) cost about 0.1 ms. The whole change is +0.3 ms on the RX
 7800 XT at 1766x994, with the despeckle at 0.09 ms of that.
 
 Another finding from the same session:

@@ -350,34 +350,12 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     AverSurface s = rtHitSurface(h, -dir, L, hgx, hgy, AVER_RD_SINGLE_PASS ? AVER_RT_HIT_LITE : AVER_RT_HIT_FULL);
 #if AVER_RD_LAMPS
     // Lamp glow already lit by direct term (rdLocalLightsShade); don't double-count.
-    if ((h.mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalCarriesEmitters())
+    if ((h.mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalEmitterCarried(hitPos))
         s.emissive = float3(0.0, 0.0, 0.0);
 #endif
-    AverLight sun;
-    sun.direction = L;
-    sun.radiance  = averSunRadiance();
-    // One fresh shadow ray (not temporal gRtShadowHist): keyed by screen pixel, this sample is world-space.
-    // T1 (Settings::rtSecondaryShadowOpaque): hitPos is the secondary hit.
-    const bool sunLit = rdSunLit();
-    float mapVis = -1.0;
-    if (sunLit && (rtGiShadowBits() & 8u) != 0u) mapVis = giHitShadowMapVisibility(hitPos, s.N, L);
-    if (!sunLit) {
-        sun.visibility = 0.0;
-    } else if (mapVis >= 0.0) {
-        sun.visibility = mapVis;
-    } else if ((rtGiShadowBits() & 1u) != 0u) {
-        sun.visibility = rtShadowOpaque(hitPos, s.N, L, pixel, frameJitter);
-    } else {
-        sun.visibility = rtShadow(hitPos, s.N, L, pixel, float3(0, 0, 0), float3(0, 0, 0), 1u, frameJitter);
-    }
-    sun.visibility *= 1.0 + averCausticFocus(hitPos);
-
-    // The hit's emission is the seed; averShadeDirect adds the direct sun term.
-    float3 radiance = averShadeDirect(s.emissive, s, sun);
-    // One lamp, picked by its light here, with its own shadow ray: lamps bounce light too (their glow
-    // at a hit is zeroed above in favour of this).
+    // The hit's emission, plus every emitter (the sun included) through the one evaluator (voxi_pt.hlsli).
     uint rng = ptSeed(pixel, 0x2c1bu);
-    radiance += ptLamp(s, hitPos, pixel, rng);
+    float3 radiance = s.emissive + averDirectLights(s, hitPos, pixel, rng, true);
 
 #if AVER_PT_PATHS
     // PATH TRACING: the candidate is a whole path. The path continues through its BSDF for

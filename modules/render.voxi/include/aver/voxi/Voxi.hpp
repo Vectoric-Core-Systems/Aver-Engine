@@ -180,7 +180,6 @@ struct Settings {
     bool nrd2HalfRateGi = true;
     bool nrd2HalfRateRefl = true;
     bool nrd2HalfRateAo = true;
-    bool nrd2HalfRateLamps = false;   // full rate: fewer lamp-lit spots (NRD2.md "Input despeckle"), +0.1 ms
     // Ray-traced reflections through the denoiser's reflection pipeline while it runs (staged
     // ray-driven reflections only); off, they keep Voxi's own reflection history and filter.
     bool denoiseReflections = true;

@@ -93,7 +93,7 @@ bool ptTrace(float3 origin, float3 dir, float tmin, float cone, out PtVertex v,
     v.cover = (h.mat.flags & AVER_MAT_ALPHA_MASK) != 0u ? 1.0 : saturate(v.s.alpha);
 #if AVER_RD_LAMPS
     // A listed lamp is reached by next-event estimation (ptLamp); its glow would count twice.
-    if ((h.mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalCarriesEmitters()) v.s.emissive = float3(0.0, 0.0, 0.0);
+    if ((h.mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalEmitterCarried(h.pos)) v.s.emissive = float3(0.0, 0.0, 0.0);
 #endif
     return true;
 }
@@ -115,65 +115,96 @@ bool ptLampLight(RdLocalLight ll, AverSurface s, float3 pos, out AverLight l, ou
 }
 #endif
 
-// One lamp, picked in proportion to its unshadowed irradiance here, with one shadow ray, divided by its
-// pick probability. Shaded through the same GGX as the sun, with rdLocalLightAt's sphere widening.
-float3 ptLamp(AverSurface s, float3 pos, float2 pixel, inout uint rng) {
-#if AVER_RD_LAMPS
-    const uint n = min(rdLocalLightCount(), 32u);
-    if (n == 0u) return float3(0.0, 0.0, 0.0);
-    // One pass of weighted reservoir sampling: lamp j is kept with probability w_j / (sum so far).
-    float wsum = 0.0, wPick = 0.0;
-    uint  pick = 0u;
-    [loop] for (uint j = 0u; j < n; ++j) {
-        const float wj = averShadowLum(rdLocalIrradiance(gRdLocalLights[j], pos, s.N));
-        if (!(wj > 0.0)) continue;
-        wsum += wj;
-        if (ptRand(rng) * wsum < wj) { pick = j; wPick = wj; }
-    }
-    if (!(wPick > 0.0)) return float3(0.0, 0.0, 0.0);
+// ---- THE DIRECT-LIGHT EVALUATOR (docs/rendering/UNIFIED_LIGHTS.md) ----
+// Every emitter is one entry of the light list (t18), the sun its directional entry; this is the one way they light
+// a point off the visible surface (GI candidates, reflection hits, path vertices). At each point the K lights that
+// deliver the most here (unshadowed irradiance) are evaluated exactly, each with its own shadow ray -- the
+// treatment that kept the sun clean -- and the rest are sampled: one picked in proportion to its irradiance, one
+// ray, divided by its pick probability. By day the sun is in the exact set because it delivers the most.
+// K is 2 in the bindless staged passes and 1 in the ray-traced raster, glass and single-pass variants, which are at
+// their register limit (three GPU hangs on the RX 7800 XT came from growing them).
+#ifndef AVER_LIGHTS_EXACT_K
+#if defined(AVER_RT_BINDLESS) && !AVER_BLENDED_PASS && !AVER_RD_SINGLE_PASS
+#define AVER_LIGHTS_EXACT_K 2u
+#else
+#define AVER_LIGHTS_EXACT_K 1u
+#endif
+#endif
 
-    const RdLocalLight ll = gRdLocalLights[pick];
-    AverLight l;
-    AverSurface sL;
-    if (!ptLampLight(ll, s, pos, l, sL)) return float3(0.0, 0.0, 0.0);
-    const float  jitter = ptRand(rng) * 6.2831853;
+#if AVER_RD_LAMPS
+float giHitShadowMapVisibility(float3 wpos, float3 N, float3 L);   // voxi_restir.hlsli
+
+// A light's visibility from `pos`, tinted. Directional: the shadow map where the GI hit allows it (allowMap,
+// Settings::rtGiHitShadowMap) and it can answer, else one opaque ray (rtSecondaryShadowOpaque) or a transmittance
+// ray; caustic focus on top. Others: one ray to a point on the emitter (rdLocalShadow).
+float3 averLightVisibility(RdLocalLight ll, float3 pos, float3 N, float2 pixel, inout uint rng, bool allowMap) {
+    const float jitter = ptRand(rng) * 6.2831853;
+    if (aversLightKind(ll) == AVER_LIGHT_DIRECTIONAL) {
+        if (aversLightNoShadow(ll)) return 1.0;
+        const float3 L = normalize(ll.axisKind.xyz);
+        float3 v;
+        const float mapVis = (allowMap && (rtGiShadowBits() & 8u) != 0u) ? giHitShadowMapVisibility(pos, N, L) : -1.0;
+        if (mapVis >= 0.0)                        v = mapVis;
+        else if ((rtGiShadowBits() & 1u) != 0u)   v = rtShadowOpaque(pos, N, L, pixel, jitter);
+        else                                      v = rtShadow(pos, N, L, pixel, float3(0, 0, 0), float3(0, 0, 0), 1u, jitter);
+        return v * (1.0 + averCausticFocus(pos));
+    }
     float2 u2 = float2(0.5, 0.5);
     if (aversLightKind(ll) == AVER_LIGHT_RECT) u2 = float2(ptRand(rng), ptRand(rng));
-    l.visibility = rdLocalShadow(pos, s.N, ll, pixel, jitter, u2).xxx;
-    return averShadeDirect(float3(0.0, 0.0, 0.0), sL, l) * (wsum / wPick);
+    return rdLocalShadow(pos, N, ll, pixel, jitter, u2).xxx;
+}
+
+// One list entry lit at `pos` with its visibility. No ray where it cannot add light (facing away).
+float3 averShadeListLight(uint i, AverSurface s, float3 pos, float2 pixel, inout uint rng, bool allowMap) {
+    const RdLocalLight ll = gRdLocalLights[i];
+    AverLight l;
+    AverSurface sL;
+    if (!ptLampLight(ll, s, pos, l, sL) || dot(s.N, l.direction) <= 0.0) return float3(0.0, 0.0, 0.0);
+    l.visibility = averLightVisibility(ll, pos, s.N, pixel, rng, allowMap);
+    return averShadeDirect(float3(0.0, 0.0, 0.0), sL, l);
+}
+#endif
+
+float3 averDirectLights(AverSurface s, float3 pos, float2 pixel, inout uint rng, bool allowMap) {
+#if AVER_RD_LAMPS
+    const RdLightRange lr = rdLightsAt(pos);
+    uint  e0 = 0xFFFFFFFFu, e1 = 0xFFFFFFFFu, tp = 0xFFFFFFFFu;
+    float w0 = 0.0, w1 = 0.0, tw = 0.0, twp = 0.0;
+    [loop] for (uint k = 0u; k < lr.count; ++k) {
+        const uint j = rdLightIndex(lr, k);
+        float w  = averShadowLum(aversLightIrradiance(gRdLocalLights[j], pos, s.N));
+        if (!(w > 0.0)) continue;
+        uint  ci = j;
+        // Insert into the exact set; whatever it displaces (or this light, if it does not get in) joins the tail.
+        if (w > w0) { const uint ti = e0; const float tww = w0; e0 = ci; w0 = w; ci = ti; w = tww; }
+#if AVER_LIGHTS_EXACT_K >= 2
+        if (w > w1) { const uint ti = e1; const float tww = w1; e1 = ci; w1 = w; ci = ti; w = tww; }
+#endif
+        if (ci != 0xFFFFFFFFu && w > 0.0) {
+            tw += w;   // weighted reservoir: keep ci with probability w / (tail sum so far)
+            if (ptRand(rng) * tw < w) { tp = ci; twp = w; }
+        }
+    }
+    // One shading call in a loop over the chosen lights, not one per light: each call inlines the whole shadow
+    // kernel, and three copies per evaluator multiplied the path tracer's shaders (compile time went from ~30 s
+    // to over 10 minutes).
+    float3 sum = float3(0.0, 0.0, 0.0);
+    [loop] for (uint k = 0u; k < 3u; ++k) {
+        const uint  li = k == 0u ? e0 : k == 1u ? e1 : tp;
+        const float wk = k == 2u ? (twp > 0.0 ? tw / twp : 0.0) : 1.0;
+        if (li == 0xFFFFFFFFu || !(wk > 0.0)) continue;
+        sum += averShadeListLight(li, s, pos, pixel, rng, allowMap) * wk;
+    }
+    return sum;
 #else
+    // No light list in this compile (single pass without lamps): nothing to light with.
     return float3(0.0, 0.0, 0.0);
 #endif
 }
 
-// Every listed lamp, unshadowed: the same answer every frame, for a hit nothing averages over time
-// (reflection hits outside Path Tracing). ptLamp is the unbiased, shadowed pick paths use.
-float3 ptLampsAll(AverSurface s, float3 pos) {
-    float3 sum = float3(0.0, 0.0, 0.0);
-#if AVER_RD_LAMPS
-    const uint n = min(rdLocalLightCount(), 32u);
-    [loop] for (uint i = 0u; i < n; ++i) {
-        AverLight l;
-        AverSurface sL;
-        if (ptLampLight(gRdLocalLights[i], s, pos, l, sL)) sum = averShadeDirect(sum, sL, l);
-    }
-#endif
-    return sum;
-}
-
-// Direct light at a vertex: the sun (one shadow ray) and one lamp.
+// Direct light at a path vertex: every emitter through the evaluator.
 float3 ptDirect(PtVertex v, float2 pixel, inout uint rng) {
-    const float3 L = normalize(gLightDir.xyz);
-    AverLight sun;
-    sun.direction  = L;
-    sun.radiance   = averSunRadiance();
-    // No shadow ray where the sun can add nothing: facing away, or set (a night scene).
-    const float jitter = ptRand(rng) * 6.2831853;
-    sun.visibility = (dot(v.s.N, L) > 0.0 && averShadowLum(sun.radiance) > 1e-6)
-                   ? rtShadowOpaque(v.pos, v.s.N, L, pixel, jitter) : float3(0.0, 0.0, 0.0);
-    AverSurface s = v.s;
-    ptAim(s, L);
-    return averShadeDirect(float3(0.0, 0.0, 0.0), s, sun) + ptLamp(v.s, v.pos, pixel, rng);
+    return averDirectLights(v.s, v.pos, pixel, rng, false);
 }
 
 // Smith G1 for GGX, alpha = rough^2.

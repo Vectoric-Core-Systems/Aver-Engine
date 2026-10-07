@@ -420,7 +420,7 @@ void VoxiRenderer::shutdown() {
                                         rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_, rdGiPtRcCbCsPso_, rdGiTracePtRcCbCsPso_, rdPtRefCsPso_, rdReflPtRcCsPso_, rdReflSplitPtRcCsPso_,
                                         rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                         rdReflSplitCsPso_, rdReflFilterCsPso_,
-                                        rdLocalLightsCsPso_, rayDrivenSplitNrd2Pso_, rdHalfFillCsPso_,
+                                        rayDrivenSplitNrd2Pso_, rdHalfFillCsPso_,
                                         airVisPso_};
     for (rhi::PipelineHandle p : psos) if (p) res_->destroyPipeline(p);
     shadowPso_ = shadowInstancedPso_ = giShadowPso_ = giShadowInstancedPso_ = 0;
@@ -442,7 +442,6 @@ void VoxiRenderer::shutdown() {
     rdGiPtRcCsPso_ = rdGiTracePtRcCsPso_ = rdGiPtRcCbCsPso_ = rdGiTracePtRcCbCsPso_ = rdPtRefCsPso_ = rdReflPtRcCsPso_ = rdReflSplitPtRcCsPso_ = 0;
     rdReflPtCsPso_ = rdReflSplitPtCsPso_ = 0;
     rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
-    rdLocalLightsCsPso_ = 0;
     rayDrivenSplitNrd2Pso_ = rdHalfFillCsPso_ = 0;
 
     if (voxelAccumTex_) res_->destroyTexture(voxelAccumTex_);
@@ -484,7 +483,7 @@ void VoxiRenderer::shutdown() {
     decalBufCapacity_ = decalBufSlot_ = decalCount_ = 0;
     decalBound_ = 0;
     cb_.decalParams[0] = 0.0f;
-    rdLocalLightCapacity_ = rdLocalLightSlot_ = rdLocalLightCount_ = 0;
+    rdLocalLightCapacity_ = rdLocalLightSlot_ = rdLocalLightCount_ = rdLocalLampCount_ = 0;
     rdLocalLightsBound_ = 0;
     rdLocalOutThisFrame_ = 0;
     rdLocalHistPrimed_ = false;
@@ -3817,10 +3816,12 @@ void VoxiRenderer::appendSceneLightCandidates(const f32 eye[3]) {
 // Range scales with emissive factor and bounding-sphere radius; lit to kLocalLightRangeCutoff of sun units.
 void VoxiRenderer::buildLocalLights() {
     rdLocalLightCount_ = 0;
+    rdLocalLampCount_ = 0;
     rdLocalLightHash_ = 0;
     rdLocalLightsCarryAll_ = false;
     rdLocalLightData_.clear();
     rdLocalLightCand_.clear();
+    cb_.decalParams[1] = 0.0f;   // no light grid until one is uploaded
     if (!res_ || !bindings_) return;
 
     f32 vp[16], eye[3] = {};
@@ -3893,62 +3894,201 @@ void VoxiRenderer::buildLocalLights() {
     auto canonicalLess = [](const RdLocalLight& a, const RdLocalLight& b) {
         return std::memcmp(&a, &b, sizeof(RdLocalLight)) < 0;
     };
-    if (rdLocalLightCand_.size() > kMaxLocalLights) {
-        // Ties broken canonically too, so which lamp is dropped at the cut does not depend on draw order.
-        std::partial_sort(rdLocalLightCand_.begin(), rdLocalLightCand_.begin() + kMaxLocalLights,
-                          rdLocalLightCand_.end(),
+    // EVERY EMITTER IS A LIGHT (docs/rendering/UNIFIED_LIGHTS.md phase 3): no 32 cap. Ordered by importance from the
+    // camera (ties canonical, so draw order never decides); the first kMaxLocalLights are the raster path's working
+    // set (rdLocalLightCount_). A light grid (below) bounds what any one point loops over.
+    if (rdLocalLightCand_.size() > kMaxListLights) {
+        std::partial_sort(rdLocalLightCand_.begin(), rdLocalLightCand_.begin() + kMaxListLights, rdLocalLightCand_.end(),
                           [&](const RdLocalLightCand& a, const RdLocalLightCand& b) {
                               if (a.importance != b.importance) return a.importance > b.importance;
                               return canonicalLess(a.light, b.light);
                           });
-        rdLocalLightCand_.resize(kMaxLocalLights);
+        rdLocalLightCand_.resize(kMaxListLights);
+    } else {
+        std::sort(rdLocalLightCand_.begin(), rdLocalLightCand_.end(),
+                  [&](const RdLocalLightCand& a, const RdLocalLightCand& b) {
+                      if (a.importance != b.importance) return a.importance > b.importance;
+                      return canonicalLess(a.light, b.light);
+                  });
     }
-    rdLocalLightData_.reserve(rdLocalLightCand_.size());
+    rdLocalLightData_.reserve(rdLocalLightCand_.size() + 1);
     for (const RdLocalLightCand& c : rdLocalLightCand_) rdLocalLightData_.push_back(c.light);
-    std::sort(rdLocalLightData_.begin(), rdLocalLightData_.end(), canonicalLess);
+    rdLocalLampCount_ = static_cast<u32>(rdLocalLightData_.size());
+    // THE SUN IS AN ENTRY LIKE ANY OTHER: a directional light after the lamps whenever ray tracing runs. Not at night
+    // (no radiance), as rdSunLit() never was.
+    if (rtActive_ && dev_ && dev_->backend() == rhi::Backend::D3D12) {
+        f32 rad[3] = {};
+        if (dev_->sunRadianceLinear(rad) && (rad[0] > 0.0f || rad[1] > 0.0f || rad[2] > 0.0f)) {
+            const rhi::SkyAtmosphere sky = dev_->skyAtmosphere();
+            RdLocalLight sun{};
+            for (int a = 0; a < 3; ++a) {
+                sun.axisKind[a] = sky.sunDirection[a];
+                sun.radianceRange[a] = rad[a];
+            }
+            sun.axisKind[3] = static_cast<f32>(kLightKindDirectional);
+            sun.posRadius[3] = std::tan(sky.sunAngularDiameterDeg * 0.5f * 0.017453292f);
+            sun.shape[2] = sun.shape[3] = -1.0f;   // no IES, no cookie
+            sun.right[0] = 1.0f;
+            rdLocalLightData_.push_back(sun);
+        }
+    }
+    const u32 lightCount = static_cast<u32>(rdLocalLightData_.size());
+
+    // ---- THE LIGHT GRID, stored after the lights in the same buffer (t18) as floats, no new binding ----
+    // Header record: posRadius = grid min (cm) + cell size, radianceRange = dims + cell-table base record,
+    // axisKind = up to three directional (global) light indices + their count, shape.x = index-pool base record.
+    // Cell table: per cell (offset into the pool, count), two floats. Pool: light indices as floats. Each cell keeps
+    // its kMaxLightsPerCell most important lights (irradiance at the cell centre); directional lights reach every
+    // point and are not in the cells. Indices and offsets are exact in floats (well below 2^24).
+    cb_.decalParams[1] = 0.0f;
+    if (lightCount > 0) {
+        std::vector<u32> globals;
+        f32 lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        for (u32 i = 0; i < lightCount; ++i) {
+            const RdLocalLight& l = rdLocalLightData_[i];
+            if (static_cast<u32>(l.axisKind[3] + 0.5f) % 8u == kLightKindDirectional) {
+                if (globals.size() < 3) globals.push_back(i);
+                continue;
+            }
+            for (int a = 0; a < 3; ++a) {
+                lo[a] = std::min(lo[a], l.posRadius[a] - l.radianceRange[3]);
+                hi[a] = std::max(hi[a], l.posRadius[a] + l.radianceRange[3]);
+            }
+        }
+        // Bounded around the camera: a light influence beyond kLightGridHalfExtent is not worth cells.
+        for (int a = 0; a < 3; ++a) {
+            lo[a] = std::max(lo[a], eye[a] - kLightGridHalfExtent);
+            hi[a] = std::min(hi[a], eye[a] + kLightGridHalfExtent);
+        }
+        u32 dim[3] = {1, 1, 1};
+        f32 cell = 100.0f;
+        const bool anyLocal = lo[0] < hi[0] && lo[1] < hi[1] && lo[2] < hi[2];
+        if (anyLocal) {
+            const f32 ext = std::max(hi[0] - lo[0], std::max(hi[1] - lo[1], hi[2] - lo[2]));
+            cell = std::max(ext / static_cast<f32>(kLightGridMaxDim), 50.0f);
+            for (int a = 0; a < 3; ++a)
+                dim[a] = std::clamp(static_cast<u32>(std::ceil((hi[a] - lo[a]) / cell)), 1u, kLightGridMaxDim);
+        } else {
+            lo[0] = lo[1] = lo[2] = 0.0f;
+        }
+        const u32 cells = dim[0] * dim[1] * dim[2];
+        std::vector<std::vector<std::pair<f32, u32>>> perCell(anyLocal ? cells : 0);
+        if (anyLocal) {
+            for (u32 i = 0; i < lightCount; ++i) {
+                const RdLocalLight& l = rdLocalLightData_[i];
+                if (static_cast<u32>(l.axisKind[3] + 0.5f) % 8u == kLightKindDirectional) continue;
+                const f32 range = l.radianceRange[3];
+                u32 c0[3], c1[3];
+                bool inside = true;
+                for (int a = 0; a < 3; ++a) {
+                    const f32 a0 = (l.posRadius[a] - range - lo[a]) / cell, a1 = (l.posRadius[a] + range - lo[a]) / cell;
+                    if (a1 < 0.0f || a0 >= static_cast<f32>(dim[a])) { inside = false; break; }
+                    c0[a] = static_cast<u32>(std::max(a0, 0.0f));
+                    c1[a] = std::min(static_cast<u32>(std::max(a1, 0.0f)), dim[a] - 1);
+                }
+                if (!inside) continue;
+                const f32 lum = 0.2126f * l.radianceRange[0] + 0.7152f * l.radianceRange[1] + 0.0722f * l.radianceRange[2];
+                const f32 r2 = std::max(l.posRadius[3] * l.posRadius[3], 1.0f);
+                for (u32 z = c0[2]; z <= c1[2]; ++z)
+                    for (u32 y = c0[1]; y <= c1[1]; ++y)
+                        for (u32 x = c0[0]; x <= c1[0]; ++x) {
+                            const f32 cx = lo[0] + (x + 0.5f) * cell - l.posRadius[0];
+                            const f32 cy = lo[1] + (y + 0.5f) * cell - l.posRadius[1];
+                            const f32 cz = lo[2] + (z + 0.5f) * cell - l.posRadius[2];
+                            // Distance to the cell's nearest point, so a light inside the cell ranks first.
+                            const f32 h = cell * 0.866f;
+                            const f32 d = std::max(std::sqrt(cx * cx + cy * cy + cz * cz) - h, 0.0f);
+                            const f32 imp = lum * 1e4f / std::max(d * d, r2);
+                            perCell[(z * dim[1] + y) * dim[0] + x].push_back({imp, i});
+                        }
+            }
+        }
+        // Encode.
+        std::vector<f32> table(static_cast<usize>(cells) * 2, 0.0f), pool;
+        for (u32 c = 0; c < (anyLocal ? cells : 0u); ++c) {
+            auto& v = perCell[c];
+            if (v.size() > kMaxLightsPerCell) {
+                std::partial_sort(v.begin(), v.begin() + kMaxLightsPerCell, v.end(),
+                                  [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
+                v.resize(kMaxLightsPerCell);
+            }
+            table[c * 2] = static_cast<f32>(pool.size());
+            table[c * 2 + 1] = static_cast<f32>(v.size());
+            for (const auto& e : v) pool.push_back(static_cast<f32>(e.second));
+        }
+        constexpr u32 kF = sizeof(RdLocalLight) / sizeof(f32);   // 20 floats a record
+        const u32 headerRec = lightCount;
+        const u32 tableRec  = headerRec + 1;
+        const u32 tableRecs = static_cast<u32>((table.size() + kF - 1) / kF);
+        const u32 poolRec   = tableRec + tableRecs;
+        const u32 poolRecs  = static_cast<u32>((pool.size() + kF - 1) / kF);
+        RdLocalLight header{};
+        for (int a = 0; a < 3; ++a) header.posRadius[a] = lo[a];
+        header.posRadius[3] = cell;
+        for (int a = 0; a < 3; ++a) header.radianceRange[a] = static_cast<f32>(anyLocal ? dim[a] : 0u);
+        header.radianceRange[3] = static_cast<f32>(tableRec);
+        for (u32 g = 0; g < 3; ++g) header.axisKind[g] = g < globals.size() ? static_cast<f32>(globals[g]) : -1.0f;
+        header.axisKind[3] = static_cast<f32>(globals.size());
+        header.shape[0] = static_cast<f32>(poolRec);
+        rdLocalLightData_.push_back(header);
+        const usize base = rdLocalLightData_.size();
+        rdLocalLightData_.resize(base + tableRecs + poolRecs);
+        f32* raw = reinterpret_cast<f32*>(rdLocalLightData_.data());
+        std::memset(raw + base * kF, 0, (tableRecs + poolRecs) * sizeof(RdLocalLight));
+        std::memcpy(raw + static_cast<usize>(tableRec) * kF, table.data(), table.size() * sizeof(f32));
+        std::memcpy(raw + static_cast<usize>(poolRec) * kF, pool.data(), pool.size() * sizeof(f32));
+        cb_.decalParams[1] = static_cast<f32>(headerRec);
+    }
 
     if (!rdLocalLightData_.empty()) {
-        // Grown straight to the cap on first need: 32 records per slot, so there is never a reason
-        // to reallocate again as lamps come and go.
+        // Grown when the list outgrows it, with headroom, never shrunk.
         if (rdLocalLightCapacity_ < rdLocalLightData_.size()) {
             // Every slot or none: a half-built ring would bind a null buffer on its missing turns.
+            const u32 want = static_cast<u32>(rdLocalLightData_.size() * 3 / 2 + 64);
             bool ok = true;
             for (u32 i = 0; i < kRtInstanceRing; ++i) {
                 if (rdLocalLights_[i]) res_->destroyBuffer(rdLocalLights_[i]);
                 rhi::BufferDesc bd;
-                bd.bytes = sizeof(RdLocalLight) * kMaxLocalLights;
+                bd.bytes = sizeof(RdLocalLight) * want;
                 bd.kind  = rhi::BufferKind::Upload;
-                bd.debugName = "Voxi local lights";
+                bd.debugName = "Voxi light list + grid";
                 rdLocalLights_[i] = res_->createBuffer(bd);
                 ok = ok && rdLocalLights_[i] != 0;
             }
-            rdLocalLightCapacity_ = ok ? kMaxLocalLights : 0;
+            rdLocalLightCapacity_ = ok ? want : 0;
         }
         if (rdLocalLightCapacity_ >= rdLocalLightData_.size()) {
             // Rotate BEFORE writing, so this frame never touches the buffer the previous one bound.
             rdLocalLightSlot_ = (rdLocalLightSlot_ + 1) % kRtInstanceRing;
             const rhi::BufferHandle buf = rdLocalLights_[rdLocalLightSlot_];
-            const u32 count = static_cast<u32>(rdLocalLightData_.size());
-            res_->writeBuffer(buf, rdLocalLightData_.data(), sizeof(RdLocalLight) * count, 0);
-            res_->setSrvBuffer(bindings_, 18, buf, sizeof(RdLocalLight), count, 0);
+            const u32 records = static_cast<u32>(rdLocalLightData_.size());
+            res_->writeBuffer(buf, rdLocalLightData_.data(), sizeof(RdLocalLight) * records, 0);
+            res_->setSrvBuffer(bindings_, 18, buf, sizeof(RdLocalLight), records, 0);
             rdLocalLightsBound_ = buf;
-            rdLocalLightCount_ = count;
+            // The raster path's working set: the first lamps (the list is importance-ordered), never the sun.
+            rdLocalLightCount_ = std::min(rdLocalLampCount_, kMaxLocalLights);
             u64 h = 1469598103934665603ull;
+            // The working set only: lamp visibility history is keyed on it, and a moving sun must not invalidate it.
             const u8* bytes = reinterpret_cast<const u8*>(rdLocalLightData_.data());
-            for (usize i = 0; i < sizeof(RdLocalLight) * count; ++i) { h ^= bytes[i]; h *= 1099511628211ull; }
-            h ^= count; h *= 1099511628211ull;
+            for (usize i = 0; i < sizeof(RdLocalLight) * rdLocalLightCount_; ++i) { h ^= bytes[i]; h *= 1099511628211ull; }
+            h ^= rdLocalLightCount_; h *= 1099511628211ull;
             rdLocalLightHash_ = h;
-        } else if (!rdLocalLightsFailLogged_) {
-            rdLocalLightsFailLogged_ = true;
-            AVER_ERROR("[Voxi] local-light list buffer could not be created; lamps stay unlit (said once)");
+        } else {
+            cb_.decalParams[1] = 0.0f;
+            if (!rdLocalLightsFailLogged_) {
+                rdLocalLightsFailLogged_ = true;
+                AVER_ERROR("[Voxi] light list buffer could not be created; lamps stay unlit (said once)");
+            }
         }
     }
     // Scene lights have no emissive geometry to drop, so only the lamp-flagged draws count here.
     u32 drawLamps = 0;
     for (const RdLocalLightCand& c : rdLocalLightCand_) drawLamps += c.fromDraw ? 1u : 0u;
-    rdLocalLightsCarryAll_ = rdLocalLightCount_ > 0 && drawLamps > 0 && drawLamps == flagged;
+    // Every flagged lamp is a list entry (no cap below kMaxListLights), so GI may drop an emitter's own emission.
+    const bool listed = cb_.decalParams[1] > 0.5f;
+    rdLocalLightsCarryAll_ = listed && rdLocalLampCount_ > 0 && drawLamps > 0 && drawLamps == flagged;
     // Empty (or the ring failed): the placeholder, rebound only when t18 names something else.
-    if (rdLocalLightCount_ == 0 && rdLocalLightsPlaceholder_ && rdLocalLightsBound_ != rdLocalLightsPlaceholder_) {
+    if (!listed && rdLocalLightsPlaceholder_ && rdLocalLightsBound_ != rdLocalLightsPlaceholder_) {
         res_->setSrvBuffer(bindings_, 18, rdLocalLightsPlaceholder_, sizeof(RdLocalLight), 1, 0);
         rdLocalLightsBound_ = rdLocalLightsPlaceholder_;
     }
@@ -3960,9 +4100,11 @@ void VoxiRenderer::buildLocalLights() {
 // here since lamps don't depend on the sun). Which mode wrote it doesn't matter: all three write the
 // same quantity into the same pair.
 bool VoxiRenderer::publishLocalLights(bool live, const char* pass) {
+    // The list is published whatever the lamp pass does: it carries the sun, and secondary hits trace their own
+    // shadows. `live` (bit 4) says the visible-surface lamp visibility for this pass exists.
+    cb_.cameraMedium[2] = static_cast<f32>(rdLocalLightCount_);
     if (!live) {
-        cb_.cameraMedium[2] = 0.0f;
-        cb_.cameraMedium[3] = 0.0f;
+        cb_.cameraMedium[3] = rdLocalLightsCarryAll_ ? 2.0f : 0.0f;
         return false;
     }
     const bool histValid = cb_.rtHistParams[1] > 0.25f && rdLocalHistFrame_ != 0 &&
@@ -3971,11 +4113,11 @@ bool VoxiRenderer::publishLocalLights(bool live, const char* pass) {
     cb_.cameraMedium[2] = static_cast<f32>(rdLocalLightCount_);
     // Two bits: 1 = history valid; 2 = every lamp-flagged draw is a live light this frame, so the GI
     // estimators may drop an emitter's own emission (rdLocalLightsCarryAll_).
-    cb_.cameraMedium[3] = (histValid ? 1.0f : 0.0f) + (rdLocalLightsCarryAll_ ? 2.0f : 0.0f);
+    cb_.cameraMedium[3] = (histValid ? 1.0f : 0.0f) + (rdLocalLightsCarryAll_ ? 2.0f : 0.0f) + 4.0f;
     if (!rdLocalLightsRunLogged_) {
         rdLocalLightsRunLogged_ = true;
         AVER_INFO("[Voxi] local lights running: {} lamp(s) this frame, shaded by {}",
-                  rdLocalLightCount_, pass);
+                  rdLocalLampCount_, pass);
     }
     return true;
 }
@@ -4605,9 +4747,10 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);
 
     // Decide local lights here, before stages that read the count.
-    const bool localLights = publishLocalLights(localLightsReady() && rdLocalLightsCsPso_ != 0 && gx && gy,
-                                                "CSRdLocalLights (GPU span 'Voxi RD local lights' under "
-                                                "voxi.rayDrivenStageTiming)");
+    // UNIFIED_LIGHTS.md: CSRdShadow resolves every light the visible surface uses (the sun is one list entry) and
+    // writes the pixel's light slots to u19; no separate lamp pass. The list is published for the hits.
+    // `live` still means "lamps present" for the glass replay, which reads a lamp visibility from the slots' .a.
+    const bool localLights = publishLocalLights(localLightsReady() && gx && gy, "CSRdShadow (the visible surface's lights)");
 
     {
         rhi::ScopedGpuStat stat(ctx, "Voxi RD visibility");
@@ -4796,21 +4939,8 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         ctx.setBindlessTable(rtTexTable_);
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
         if (gx && gy) ctx.dispatch(gx, gy, 1);
+        if (perStage && rdLocalOutThisFrame_) ctx.uavBarrierTexture(rdLocalOutThisFrame_);   // the light slots
         stageEnd(rdSunVisTex_);
-
-        // Local lights stage: only runs if there are lamps.
-        if (localLights && !ptRef) {
-            stageBegin("Voxi RD local lights");
-            ctx.setPipeline(rdLocalLightsCsPso_);
-            ctx.setBindingSet(bindings_);
-            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
-            ctx.setBindlessTable(rtTexTable_);
-            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-            ctx.dispatch(gx, gy, 1);
-            stageEnd(rdLocalOutThisFrame_);
-            rdLocalHistFrame_ = rtFrameIndex_;
-            rdLocalHistHash_ = rdLocalLightHash_;
-        }
 
         if (giDispatch) {
             stageBegin("Voxi RD GI stage");
@@ -4919,7 +5049,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     ctx.uavBarrierTexture(rdAoTex_);
     ctx.uavBarrierTexture(rdReflTex_);
     // Local lights: Stage B reads gRdLocalOut through u19 the way it reads u12 above.
-    if (localLights) ctx.uavBarrierTexture(rdLocalOutThisFrame_);
+    if (rdLocalOutThisFrame_) ctx.uavBarrierTexture(rdLocalOutThisFrame_);   // CSRdShadow's light slots
     // The GI surface-normal history (u8) has two writers: CSRdGi and Stage B's own miss branch.
     const u32 giNrmWrite = 1u - rtHistWriteIdx_;
     if (cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f && giSurfNrmHist_[giNrmWrite])
@@ -6093,7 +6223,6 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         bits &= ~(2u | 4u);
         if (refl) bits |= 4u;
         if (ao) bits |= 128u;
-        if (settings_.nrd2HalfRateLamps) bits |= 256u;
         if (fill && (refl || ao || settings_.nrd2HalfRateGi)) bits |= 64u;
         bits |= 512u;   // shader-visible NRD2 frame (rtNrd2Frame)
         cb_.giShadowParams[3] = static_cast<f32>(bits);
@@ -6966,7 +7095,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                         rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_, rdGiPtRcCbCsPso_, rdGiTracePtRcCbCsPso_, rdPtRefCsPso_, rdReflPtRcCsPso_, rdReflSplitPtRcCsPso_,
                                         rdReflPtCsPso_, rdReflSplitPtCsPso_,
                                          rdReflSplitCsPso_, rdReflFilterCsPso_,
-                                         rdLocalLightsCsPso_, rayDrivenSplitNrd2Pso_, rdHalfFillCsPso_};
+                                         rayDrivenSplitNrd2Pso_, rdHalfFillCsPso_};
     for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
     debugPso_ = scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
     sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
@@ -6987,7 +7116,6 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     rcTwinsTried_ = false;
     ptTwinsTried_ = false;
     rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
-    rdLocalLightsCsPso_ = 0;
     rayDrivenSplitNrd2Pso_ = rdHalfFillCsPso_ = 0;
     // NRD2's Stage B variant and compose draw bake these formats; rebuilt on next use.
     nrd2_.destroyCompose();
@@ -7295,15 +7423,6 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
             p.layout = giTex;
             rdReflFilterCsPso_ = res_->createComputePipeline(p);
         }
-        // CSRdLocalLights: optional; rdStagedActive() ignores if not compiled.
-        const rhi::ShaderHandle csLocalLights = compile("CSRdLocalLights", rhi::ShaderStage::Compute, 66,
-                                                        rasterDefs(csDefs.c_str()).c_str());
-        if (csLocalLights) {
-            rhi::ComputePipelineDesc p;
-            p.cs = csLocalLights;
-            p.layout = giTex;
-            rdLocalLightsCsPso_ = res_->createComputePipeline(p);
-        }
         // Stage B: pixel shader with AVER_RD_SPLIT=1; reads precomputed visibility, reuses vskyTex.
         const rhi::ShaderHandle psSplit =
             compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
@@ -7343,15 +7462,14 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
             AVER_INFO("[Voxi] staged ray-driven passes ready for voxi.rayDrivenStages ({} texture slots, "
                       "G-buffer twin {}, GI stage {}, sky occlusion stage {}, reflection stage {}, "
                       "half-rate GI checkerboard stage {}, shadow-tile sub-stage {}, GI-trace "
-                      "sub-stage {}, reflection register/filter sub-stage {}, local lights stage {})",
+                      "sub-stage {}, reflection register/filter sub-stage {})",
                       kRtTextureCapacity,
                       rayDrivenSplitTexGbufPso_ ? "ready" : "unavailable",
                       rdGiCsPso_ ? "ready" : "unavailable", rdSkyOccCsPso_ ? "ready" : "unavailable",
                       rdReflCsPso_ ? "ready" : "unavailable", rdGiCbCsPso_ ? "ready" : "unavailable",
                       (rdShadowProbeCsPso_ && rdShadowTiledCsPso_) ? "ready" : "unavailable",
                       (rdGiTraceCsPso_ && rdGiSplitCsPso_) ? "ready" : "unavailable",
-                      (rdReflSplitCsPso_ && rdReflFilterCsPso_) ? "ready" : "unavailable",
-                      rdLocalLightsCsPso_ ? "ready" : "unavailable");
+                      (rdReflSplitCsPso_ && rdReflFilterCsPso_) ? "ready" : "unavailable");
         else
             AVER_WARN("[Voxi] staged ray-driven passes unavailable (visibility cs {}, shadow cs {}, "
                       "split pixel shader {}); voxi.rayDrivenStages 1 or 2 falls back to the single pass",
