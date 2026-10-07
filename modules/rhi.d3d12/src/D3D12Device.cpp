@@ -22,6 +22,7 @@
 #include <string>
 #include <wrl/client.h>
 
+#include <array>
 #include <algorithm>   // std::find (the once-per-shape binding warning) and std::sort (the blended-mesh flush's back-to-front replay)
 #include <cmath>
 #include <cstdio>
@@ -1180,6 +1181,7 @@ public:
     void collectExposureReadout();
     // GPU timing markers for phases outside render features.
     void beginGpuSpan(const char* label) {
+        if (auditOn_) auditPush(label);
         if (!tsEnabled_) return;
         // Parent is whatever is already open (kNoParent if none); cap enforced to prevent dropped spans reparenting incorrectly.
         if (tsSlice_[frameIndex_].size() >= kMaxGpuSpans) { ++tsDropped_; return; }
@@ -1188,6 +1190,7 @@ public:
         tsOpen_.push_back(static_cast<u32>(tsSlice_[frameIndex_].size() - 1));
     }
     void endGpuSpan() {
+        if (auditOn_) auditPop();
         if (!tsEnabled_) return;
         if (tsDropped_) { --tsDropped_; return; }   // pairs with a refused open
         if (tsOpen_.empty()) return;
@@ -1195,6 +1198,36 @@ public:
         tsOpen_.pop_back();
         tsSlice_[frameIndex_][i].end = gpuStamp();
     }
+    // ---- FRAME AUDIT (AVER_FRAME_AUDIT=1) ----
+    // Counts what the recorded frame asks of the GPU (draws, dispatches, barriers, copies and their
+    // bytes, clears, PSO binds, submits) per GPU timing span, so the report reads like the timing
+    // tree and is identical on every run of one scene. Off, each hook is one never-taken branch.
+    enum AuditKind : u32 { kAuDraw, kAuCompute, kAuMesh, kAuRay, kAuBarrier, kAuCopy, kAuCopyBytes,
+                           kAuClear, kAuPso, kAuSubmit, kAuKinds };
+    static constexpr u32 kAuditWindow = 128;   // frames per report
+    void audit(AuditKind k, u64 n = 1) { if (auditOn_) auditNodes_[auditCur_].c[k] += n; }
+    // Work off the render thread: side 0 = present thread, side 1 = one-shot upload / readback lists.
+    void auditSide(u32 side, AuditKind k, u64 n = 1) {
+        if (auditOn_) auditSide_[side][k].fetch_add(n, std::memory_order_relaxed);
+    }
+    void auditCopyBuf(u64 bytes) { if (auditOn_) { audit(kAuCopy); audit(kAuCopyBytes, bytes); } }
+    void auditCopyBufSide(u32 side, u64 bytes) {
+        if (auditOn_) { auditSide(side, kAuCopy); auditSide(side, kAuCopyBytes, bytes); }
+    }
+    void auditCopyRes(ID3D12Resource* r) { if (auditOn_) auditCopyBuf(auditBytes(r, 0, 0, nullptr)); }
+    void auditCopyResSide(u32 side, ID3D12Resource* r) {
+        if (auditOn_) auditCopyBufSide(side, auditBytes(r, 0, 0, nullptr));
+    }
+    void auditCopyTex(const D3D12_TEXTURE_COPY_LOCATION& d, const D3D12_TEXTURE_COPY_LOCATION& s,
+                      const D3D12_BOX* box) {
+        if (auditOn_) auditCopyBuf(auditTexBytes(d, s, box));
+    }
+    void auditCopyTexSide(u32 side, const D3D12_TEXTURE_COPY_LOCATION& d,
+                          const D3D12_TEXTURE_COPY_LOCATION& s, const D3D12_BOX* box) {
+        if (auditOn_) auditCopyBufSide(side, auditTexBytes(d, s, box));
+    }
+    void auditPush(const char* label);
+    void auditPop();
     void resize(u32 w, u32 h);
     u32 width() const { return width_; }
     u32 height() const { return height_; }
@@ -1438,6 +1471,21 @@ private:
     u32  tsAccumFrames_ = 0;
     u32  tsReports_ = 0;
     bool tsEnabled_ = false;
+
+    // Frame audit state (see the public block). Node 0 holds work outside any span; the tree is keyed
+    // like tsAccum_ and its counts are summed over the window.
+    struct AuditNode { std::string label; u32 parent = kNoParent; u64 c[kAuKinds] = {}; };
+    bool auditOn_ = false;
+    std::vector<AuditNode> auditNodes_;
+    std::vector<u32> auditOpen_;
+    u32 auditCur_ = 0;
+    u32 auditFrames_ = 0;
+    std::atomic<u64> auditSide_[2][kAuKinds] = {};
+    void initAudit();
+    void auditReport();
+    u64 auditBytes(ID3D12Resource* r, UINT firstSub, UINT numSubs, const D3D12_BOX* box);
+    u64 auditTexBytes(const D3D12_TEXTURE_COPY_LOCATION& d, const D3D12_TEXTURE_COPY_LOCATION& s,
+                      const D3D12_BOX* box);
 
     // Redundant-state elision: one drawMesh per entity previously re-sent the same pipeline and frame constant block.
     PipelineHandle   fovPso_ = 0;
@@ -2306,6 +2354,7 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     if (!hrOk(device_->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue_)), "CreateCommandQueue")) return false;
     setDebugName(queue_.Get(), "Aver main direct queue");
     initGpuTiming();
+    initAudit();
 
     {
         const VideoMemoryInfo vmem = videoMemory();
@@ -2469,7 +2518,7 @@ bool D3D12Device::runStandaloneCompute(const std::function<void(IRenderContext&)
 
     if (!hrOk(standaloneList_->Close(), "standalone list Close")) return false;
     ID3D12CommandList* lists[] = {standaloneList_.Get()};
-    queue_->ExecuteCommandLists(1, lists);
+    audit(kAuSubmit); queue_->ExecuteCommandLists(1, lists);
     waitForGpu();
     if (infoQueue_) drainDebugMessages();
     return !deviceLost_;
@@ -2599,7 +2648,7 @@ bool D3D12Device::resolveGBufferMsaa() {
         toRead[i] = transition(ms[i], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         toRt[i]   = transition(ms[i], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
     }
-    cmdList_->ResourceBarrier(3, toRead);
+    audit(kAuBarrier, 3); cmdList_->ResourceBarrier(3, toRead);
     const D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] = {
         gbufVelocityRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
         gbufViewZRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
@@ -2613,7 +2662,7 @@ bool D3D12Device::resolveGBufferMsaa() {
     rhiContext_->setPipeline(gbufResolvePso_);
     rhiContext_->setBindingSet(gbufResolveSet_, 0);
     rhiContext_->drawFullscreen();
-    cmdList_->ResourceBarrier(3, toRt);
+    audit(kAuBarrier, 3); cmdList_->ResourceBarrier(3, toRt);
     // The RHI bound its own root signature, heap and pipeline.
     boundRootSig_ = nullptr; boundPso_ = nullptr; boundHeap_ = nullptr;
     fovValid_ = false; dbValid_ = false;
@@ -3295,13 +3344,13 @@ void D3D12Device::presentThreadMain() {
             transition(dst, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST),
             transition(src, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE),
         };
-        presentList_->ResourceBarrier(2, pre);
-        presentList_->CopyResource(dst, src);
+        auditSide(0, kAuBarrier, 2); presentList_->ResourceBarrier(2, pre);
+        auditCopyResSide(0, dst); presentList_->CopyResource(dst, src);
         D3D12_RESOURCE_BARRIER post[2] = {
             transition(dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT),
             transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
         };
-        presentList_->ResourceBarrier(2, post);
+        auditSide(0, kAuBarrier, 2); presentList_->ResourceBarrier(2, post);
         const bool mirror = r.mirror && mirrorSwap_ && mirrorImages_[r.image];
         if (mirror) {
             ID3D12Resource* mdst = mirrorSwapBuffers_[mirrorSwap_->GetCurrentBackBufferIndex()].Get();
@@ -3310,17 +3359,17 @@ void D3D12Device::presentThreadMain() {
                 transition(mdst, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST),
                 transition(msrc, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE),
             };
-            presentList_->ResourceBarrier(2, mpre);
-            presentList_->CopyResource(mdst, msrc);
+            auditSide(0, kAuBarrier, 2); presentList_->ResourceBarrier(2, mpre);
+            auditCopyResSide(0, mdst); presentList_->CopyResource(mdst, msrc);
             D3D12_RESOURCE_BARRIER mpost[2] = {
                 transition(mdst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT),
                 transition(msrc, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
             };
-            presentList_->ResourceBarrier(2, mpost);
+            auditSide(0, kAuBarrier, 2); presentList_->ResourceBarrier(2, mpost);
         }
         presentList_->Close();
         ID3D12CommandList* lists[] = {presentList_.Get()};
-        presentQueue_->ExecuteCommandLists(1, lists);
+        auditSide(0, kAuSubmit); presentQueue_->ExecuteCommandLists(1, lists);
 
         const i64 t0 = qpcNow();
         const HRESULT hr = swapChain_->Present(r.sync, r.flags);
@@ -3781,17 +3830,17 @@ void D3D12Device::seedSkinTargets() {
             RhiBuffer* srb = rhiFactory_->buffer(s.vbBuffer);
             return srb && srb->desc.kind == BufferKind::Default;
         }();
-        cmdList_->CopyBufferRegion(d.vb.Get(), 0, s.vb.Get(), 0, d.vbv.SizeInBytes);
+        auditCopyBuf(d.vbv.SizeInBytes); cmdList_->CopyBufferRegion(d.vb.Get(), 0, s.vb.Get(), 0, d.vbv.SizeInBytes);
 
         // Promotion lasts for this command list (decay at submit); skinning pass must find COMMON.
         auto back = transition(d.vb.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                                D3D12_RESOURCE_STATE_COMMON);
-        cmdList_->ResourceBarrier(1, &back);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &back);
         if (srcIsDefault) {
             // Mirror COPY_SOURCE transition (same lifetime, same reason for explicit undo).
             auto srcBack = transition(s.vb.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
                                       D3D12_RESOURCE_STATE_COMMON);
-            cmdList_->ResourceBarrier(1, &srcBack);
+            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &srcBack);
         }
         AVER_TRACE("[RHI.D3D12] skin target {} seeded with the rest pose of mesh {}", sd.dst, sd.src);
     }
@@ -3931,6 +3980,124 @@ GpuTimingReport D3D12Device::gpuTiming() const {
     return report;
 }
 
+// Reads AVER_FRAME_AUDIT once; node 0 collects work outside any marked span.
+void D3D12Device::initAudit() {
+    const char* v = std::getenv("AVER_FRAME_AUDIT");
+    if (!v || v[0] != '1') return;
+    AuditNode root;
+    root.label = "(outside spans)";
+    auditNodes_.push_back(root);
+    auditOn_ = true;
+    AVER_INFO("[Audit] frame audit on: one count report every {} frames", kAuditWindow);
+}
+
+// Finds or adds the (label, parent) node and makes it current. Linear search: spans number in the dozens.
+void D3D12Device::auditPush(const char* label) {
+    const u32 parent = auditOpen_.empty() ? kNoParent : auditOpen_.back();
+    u32 idx = 0;
+    for (u32 i = 1; i < auditNodes_.size() && idx == 0; ++i)
+        if (auditNodes_[i].parent == parent && auditNodes_[i].label == label) idx = i;
+    if (idx == 0) {
+        AuditNode n;
+        n.label = label;
+        n.parent = parent;
+        auditNodes_.push_back(n);
+        idx = static_cast<u32>(auditNodes_.size() - 1);
+    }
+    auditOpen_.push_back(idx);
+    auditCur_ = idx;
+}
+
+void D3D12Device::auditPop() {
+    if (auditOpen_.empty()) return;
+    auditOpen_.pop_back();
+    auditCur_ = auditOpen_.empty() ? 0u : auditOpen_.back();
+}
+
+// Tight bytes of subresources [firstSub, firstSub + numSubs) (numSubs 0 = all), or of `box` in one.
+u64 D3D12Device::auditBytes(ID3D12Resource* r, UINT firstSub, UINT numSubs, const D3D12_BOX* box) {
+    if (!r || !device_) return 0;
+    const D3D12_RESOURCE_DESC d = r->GetDesc();
+    if (d.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) return d.Width;
+    const bool vol = d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    if (numSubs == 0) numSubs = static_cast<UINT>(d.MipLevels) * (vol ? 1u : static_cast<UINT>(d.DepthOrArraySize));
+    std::vector<UINT> rows(numSubs);
+    std::vector<UINT64> rowBytes(numSubs);
+    device_->GetCopyableFootprints(&d, firstSub, numSubs, 0, nullptr, rows.data(), rowBytes.data(), nullptr);
+    u64 total = 0;
+    for (UINT i = 0; i < numSubs; ++i) {
+        const UINT mip = (firstSub + i) % d.MipLevels;
+        const u64 mipW = std::max<u64>(1, d.Width >> mip);
+        const u64 mipD = vol ? std::max<u64>(1, d.DepthOrArraySize >> mip) : 1;
+        if (box) {   // pixels in the box times bytes per pixel (block formats: per-block average)
+            total += (rowBytes[i] * (box->right - box->left) / mipW) * (box->bottom - box->top) * (box->back - box->front);
+        } else {
+            total += rowBytes[i] * rows[i] * mipD;
+        }
+    }
+    return total;
+}
+
+// The texture side of a texture copy decides the byte count; a texture-to-buffer copy has one.
+u64 D3D12Device::auditTexBytes(const D3D12_TEXTURE_COPY_LOCATION& d, const D3D12_TEXTURE_COPY_LOCATION& s,
+                               const D3D12_BOX* box) {
+    const D3D12_TEXTURE_COPY_LOCATION& t = d.Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX ? d : s;
+    return auditBytes(t.pResource, t.SubresourceIndex, 1, box);
+}
+
+// One "[Audit]" tree per window, per-frame averages; inclusive counts (a span includes its children).
+void D3D12Device::auditReport() {
+    using Counts = std::array<u64, kAuKinds>;
+    const f64 n = static_cast<f64>(auditFrames_);
+    const size_t N = auditNodes_.size();
+    std::vector<Counts> inc(N);
+    for (size_t i = 0; i < N; ++i) std::copy(std::begin(auditNodes_[i].c), std::end(auditNodes_[i].c), inc[i].begin());
+    std::vector<std::vector<u32>> kids(N);
+    std::vector<u32> top;
+    for (size_t i = 0; i < N; ++i) {
+        if (auditNodes_[i].parent == kNoParent) top.push_back(static_cast<u32>(i));
+        else kids[auditNodes_[i].parent].push_back(static_cast<u32>(i));
+    }
+    for (size_t i = N; i-- > 0;)   // parents are created before children, so one reverse pass sums subtrees
+        if (auditNodes_[i].parent != kNoParent)
+            for (u32 k = 0; k < kAuKinds; ++k) inc[auditNodes_[i].parent][k] += inc[i][k];
+    Counts side[2], all{};
+    for (u32 sd = 0; sd < 2; ++sd)
+        for (u32 k = 0; k < kAuKinds; ++k) side[sd][k] = auditSide_[sd][k].exchange(0, std::memory_order_relaxed);
+    for (u32 k = 0; k < kAuKinds; ++k) {
+        for (u32 t : top) all[k] += inc[t][k];
+        all[k] += side[0][k] + side[1][k];
+    }
+    const auto line = [&](u32 depth, const char* label, const Counts& c) {
+        char buf[320];
+        const auto v = [&](u32 k) { return static_cast<f64>(c[k]) / n; };
+        std::snprintf(buf, sizeof buf,
+                      "%*s%s  draw %.2f  cs %.2f  ms %.2f  rt %.2f  bar %.2f  cpy %.2f (%.3f MB)  clr %.2f  pso %.2f  exec %.2f",
+                      static_cast<int>(depth) * 2 + 2, "", label, v(kAuDraw), v(kAuCompute), v(kAuMesh), v(kAuRay),
+                      v(kAuBarrier), v(kAuCopy), v(kAuCopyBytes) / 1048576.0, v(kAuClear), v(kAuPso), v(kAuSubmit));
+        AVER_INFO("[Audit] {}", buf);
+    };
+    const auto any = [](const Counts& c) { for (u64 x : c) if (x) return true; return false; };
+    const auto ull = [](u64 x) { return static_cast<unsigned long long>(x); };
+    char tot[256];
+    std::snprintf(tot, sizeof tot, "draw %llu cs %llu ms %llu rt %llu bar %llu cpy %llu bytes %llu clr %llu pso %llu exec %llu",
+                  ull(all[kAuDraw]), ull(all[kAuCompute]), ull(all[kAuMesh]), ull(all[kAuRay]), ull(all[kAuBarrier]),
+                  ull(all[kAuCopy]), ull(all[kAuCopyBytes]), ull(all[kAuClear]), ull(all[kAuPso]), ull(all[kAuSubmit]));
+    AVER_INFO("[Audit] per-frame counts over {} frames (hardware-independent; spans include their children); window totals: {}",
+              auditFrames_, tot);
+    line(0, "ALL", all);
+    const auto walk = [&](const auto& self, u32 i, u32 depth) -> void {
+        if (!any(inc[i])) return;
+        line(depth + 1, auditNodes_[i].label.c_str(), inc[i]);
+        for (u32 c : kids[i]) self(self, c, depth + 1);
+    };
+    for (u32 t : top) walk(walk, t, 0);
+    if (any(side[0])) line(1, "(present thread)", side[0]);
+    if (any(side[1])) line(1, "(uploads and readbacks)", side[1]);
+    for (AuditNode& a : auditNodes_) std::fill(std::begin(a.c), std::end(a.c), 0);
+    auditFrames_ = 0;
+}
+
 // Drop tree and frame count (restarts cadence); in-flight unchanged; tsSpanToAccum_ rebuilt per call.
 void D3D12Device::resetGpuTiming() {
     tsAccum_.clear();
@@ -3999,10 +4166,13 @@ void D3D12Device::beginFrame() {
     if (rhiFactory_) rhiFactory_->collect();
     // Fence retired previous use; collect before reusing counters.
     collectGpuTiming();
+    if (auditOn_ && auditFrames_ >= kAuditWindow) auditReport();
     // Same fence, same slot, same reasoning -- see collectExposureReadout's own comment.
     collectExposureReadout();
     tsCount_ = 0;
     tsOpen_.clear();
+    auditOpen_.clear();
+    auditCur_ = 0;
     tsDropped_ = 0;
     tsSlice_[frameIndex_].clear();
     tsSliceBegin_[frameIndex_] = gpuStamp();
@@ -4057,25 +4227,25 @@ void D3D12Device::beginFrame() {
         // Exactly pre-G-buffer bind (feature disabled or MSAA conflict; render oracle depends on this).
         cmdList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
     }
-    cmdList_->ClearRenderTargetView(rtv, sceneClear_, 0, nullptr);
+    audit(kAuClear); cmdList_->ClearRenderTargetView(rtv, sceneClear_, 0, nullptr);
     if (gbufferEnabled_ && gbufVelocity_ && gbufViewZ_ && gbufNormalRough_) {
         // Cleared regardless of gbufWritable (MSAA mismatch: readers find sentinel, not stale value).
-        cmdList_->ClearRenderTargetView(gbufVelocityRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+        audit(kAuClear); cmdList_->ClearRenderTargetView(gbufVelocityRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
                                         kGBufVelocityClear, 0, nullptr);
-        cmdList_->ClearRenderTargetView(gbufViewZRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+        audit(kAuClear); cmdList_->ClearRenderTargetView(gbufViewZRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
                                         kGBufViewZClear, 0, nullptr);
-        cmdList_->ClearRenderTargetView(gbufNormalRoughRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+        audit(kAuClear); cmdList_->ClearRenderTargetView(gbufNormalRoughRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
                                         kGBufNormalRoughClear, 0, nullptr);
         if (gbufWritable && gbufMs) {
-            cmdList_->ClearRenderTargetView(gbufVelocityMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+            audit(kAuClear); cmdList_->ClearRenderTargetView(gbufVelocityMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
                                             kGBufVelocityClear, 0, nullptr);
-            cmdList_->ClearRenderTargetView(gbufViewZMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+            audit(kAuClear); cmdList_->ClearRenderTargetView(gbufViewZMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
                                             kGBufViewZClear, 0, nullptr);
-            cmdList_->ClearRenderTargetView(gbufNormalRoughMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+            audit(kAuClear); cmdList_->ClearRenderTargetView(gbufNormalRoughMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
                                             kGBufNormalRoughClear, 0, nullptr);
         }
     }
-    cmdList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    audit(kAuClear); cmdList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
     // Opened here rather than after the suppressesScene loop below, which can return early.
     beginGpuSpan("scene draw");
@@ -4128,14 +4298,14 @@ void D3D12Device::beginFrame() {
         // submitted, so moving objects are drawn where they are this frame (not last frame).
         if (winner->wantsLateScenePass()) lateSceneWinner_ = winner;
         else if (rhiContext_) winner->scenePass(*rhiContext_);
-        cmdList_->SetPipelineState(pso_.Get());
+        audit(kAuPso); cmdList_->SetPipelineState(pso_.Get());
         sceneSuppressed_ = true;
         if (winner->suppressesWholeFrame()) frameSuppressed_ = true;
         return;
     }
 
     // Sky now draws at frame start, after real depth exists (was depth-disabled first).
-    cmdList_->SetPipelineState(pso_.Get());
+    audit(kAuPso); cmdList_->SetPipelineState(pso_.Get());
 }
 
 // Draws one mesh into the scene, through whichever pipeline owns the lit pass.
@@ -4353,7 +4523,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     bindGraphicsRoot(useMs ? msRootSig_.Get() : rootSig_.Get());
     // Cache PSO: skip re-issuing SetPipelineState if unchanged (hundreds to thousands calls per scene).
     ID3D12PipelineState* wantPso = useMs ? msPso_.Get() : pso_.Get();
-    if (wantPso != boundPso_) { cmdList_->SetPipelineState(wantPso); boundPso_ = wantPso; }
+    if (wantPso != boundPso_) { audit(kAuPso); cmdList_->SetPipelineState(wantPso); boundPso_ = wantPso; }
     f32 consts[kObjectConstantDwords];
     std::memcpy(consts, world, 16 * sizeof(f32));
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
@@ -4364,7 +4534,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
     cmdList_->IASetIndexBuffer(&m.ibv);
-    cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+    audit(kAuDraw); cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
 }
 
 // Mesh-shader draw via DispatchMesh; group count from triangle count (must match AVER_MS_TRIS).
@@ -4375,7 +4545,7 @@ void D3D12Device::dispatchMesh(const GpuMesh& m) {
     cmdList_->SetGraphicsRootShaderResourceView(kMeshIndexParam, m.ib->GetGPUVirtualAddress());
     const u32 tc[4] = {tris, 0, 0, 0};
     cmdList_->SetGraphicsRoot32BitConstants(kMeshCountParam, 4, tc, 0);
-    cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
+    audit(kAuMesh); cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
 }
 
 // Uploads line list to GPU; EditorLines owns buffers and slot table.
@@ -4902,7 +5072,7 @@ bool D3D12Device::createPostTargets() {
             transition(localGridBuf_.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
             transition(localGridBlurBuf_.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
         };
-        cmdList_->ResourceBarrier(2, toUav);
+        audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, toUav);
 
         uav.ptr += postSrvSize_;
         ud.Buffer.NumElements = static_cast<UINT>(gridBytes / 4);   // raw view: one element per DWORD
@@ -4959,7 +5129,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         static bool said = false;
         if (!said) { AVER_ERROR("[RHI.D3D12] the post chain is unavailable; the scene cannot be presented"); said = true; }
         auto toRt = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        cmdList_->ResourceBarrier(1, &toRt);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toRt);
         return;
     }
 
@@ -4981,14 +5151,14 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                 transition(histBuf_.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST),
                 transition(expBuf_.Get(),  D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST),
             };
-            cmdList_->ResourceBarrier(2, toCopy);
-            cmdList_->CopyBufferRegion(histBuf_.Get(), 0, postCBs_[f].Get(), off, 256 * sizeof(u32));
-            cmdList_->CopyBufferRegion(expBuf_.Get(), 0, postCBs_[f].Get(), off, 2 * sizeof(u32));
+            audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, toCopy);
+            auditCopyBuf(256 * sizeof(u32)); cmdList_->CopyBufferRegion(histBuf_.Get(), 0, postCBs_[f].Get(), off, 256 * sizeof(u32));
+            auditCopyBuf(2 * sizeof(u32)); cmdList_->CopyBufferRegion(expBuf_.Get(), 0, postCBs_[f].Get(), off, 2 * sizeof(u32));
             D3D12_RESOURCE_BARRIER back[2] = {
                 transition(histBuf_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
                 transition(expBuf_.Get(),  D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
             };
-            cmdList_->ResourceBarrier(2, back);
+            audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, back);
             expSeeded_ = true;
         }
     }
@@ -4998,13 +5168,13 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         D3D12_RESOURCE_BARRIER pre[1] = {
             transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RESOLVE_SOURCE),
         };
-        cmdList_->ResourceBarrier(1, pre);
-        cmdList_->ResolveSubresource(scene, 0, msaaColor_.Get(), 0, kSceneColorFormat);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, pre);
+        auditCopyRes(scene); cmdList_->ResolveSubresource(scene, 0, msaaColor_.Get(), 0, kSceneColorFormat);
         auto toSrv = transition(scene, D3D12_RESOURCE_STATE_RESOLVE_DEST, kSceneRead);
-        cmdList_->ResourceBarrier(1, &toSrv);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toSrv);
     } else {
         auto toSrv = transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET, kSceneRead);
-        cmdList_->ResourceBarrier(1, &toSrv);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toSrv);
     }
 
     ID3D12DescriptorHeap* heaps[] = {postSrvHeap_.Get()};
@@ -5067,7 +5237,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
     // vx/vy: destination's top-left offset, default 0 for passes filling whole target. Composite only.
     auto fullscreen = [&](ID3D12PipelineState* pso, u32 triple, u32 w, u32 h,
                           const D3D12_CPU_DESCRIPTOR_HANDLE* rtv, u32 vx = 0, u32 vy = 0) {
-        cmdList_->SetPipelineState(pso);
+        audit(kAuPso); cmdList_->SetPipelineState(pso);
         cmdList_->OMSetRenderTargets(1, rtv, FALSE, nullptr);
         D3D12_VIEWPORT vp{static_cast<f32>(vx), static_cast<f32>(vy), static_cast<f32>(w), static_cast<f32>(h), 0.0f, 1.0f};
         D3D12_RECT sc{static_cast<LONG>(vx), static_cast<LONG>(vy),
@@ -5077,7 +5247,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         cmdList_->SetGraphicsRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         cmdList_->SetGraphicsRootDescriptorTable(1, postTriple(triple));
         cmdList_->SetGraphicsRootDescriptorTable(2, uavTable);
-        cmdList_->DrawInstanced(3, 1, 0, 0);
+        audit(kAuDraw); cmdList_->DrawInstanced(3, 1, 0, 0);
     };
 
     auto bloomRtv = [&](u32 mip) {
@@ -5089,7 +5259,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         if (bloomState_[mip] == to) return;
         D3D12_RESOURCE_BARRIER b = transition(bloomTex_.Get(), bloomState_[mip], to);
         b.Transition.Subresource = mip;
-        cmdList_->ResourceBarrier(1, &b);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &b);
         bloomState_[mip] = to;
     };
     auto mipW = [&](u32 m) { return bloomW_ >> m ? bloomW_ >> m : 1u; };
@@ -5106,22 +5276,22 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         fillCommon(hw, hh, sceneWidth_, sceneHeight_);
 
         cmdList_->SetComputeRootSignature(postRootSig_.Get());
-        cmdList_->SetPipelineState(histogramPso_.Get());
+        audit(kAuPso); cmdList_->SetPipelineState(histogramPso_.Get());
         cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
         cmdList_->SetComputeRootDescriptorTable(2, uavTable);
-        cmdList_->Dispatch((hw + 15) / 16, (hh + 15) / 16, 1);
+        audit(kAuCompute); cmdList_->Dispatch((hw + 15) / 16, (hh + 15) / 16, 1);
 
         D3D12_RESOURCE_BARRIER uavB{};
         uavB.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         uavB.UAV.pResource = histBuf_.Get();
-        cmdList_->ResourceBarrier(1, &uavB);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &uavB);
 
-        cmdList_->SetPipelineState(exposurePso_.Get());
+        audit(kAuPso); cmdList_->SetPipelineState(exposurePso_.Get());
         cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
         cmdList_->SetComputeRootDescriptorTable(2, uavTable);
-        cmdList_->Dispatch(1, 1, 1);
+        audit(kAuCompute); cmdList_->Dispatch(1, 1, 1);
 
         cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
         dbValid_ = false;
@@ -5135,30 +5305,30 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         fillCommon(sceneWidth_, sceneHeight_, sceneWidth_, sceneHeight_);
 
         cmdList_->SetComputeRootSignature(postRootSig_.Get());
-        cmdList_->SetPipelineState(localGridPso_.Get());
+        audit(kAuPso); cmdList_->SetPipelineState(localGridPso_.Get());
         cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         // kPostTripleHistogram: t0/t1/t2 all scene (CSHistogram's same triple).
         cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
         cmdList_->SetComputeRootDescriptorTable(2, uavTable);
-        cmdList_->Dispatch(localGridW_, localGridH_, 1);
+        audit(kAuCompute); cmdList_->Dispatch(localGridW_, localGridH_, 1);
 
         // CSLocalGrid's write must land before CSLocalBlur reads it.
         D3D12_RESOURCE_BARRIER gridUav{};
         gridUav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         gridUav.UAV.pResource = localGridBuf_.Get();
-        cmdList_->ResourceBarrier(1, &gridUav);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &gridUav);
 
-        cmdList_->SetPipelineState(localBlurPso_.Get());
+        audit(kAuPso); cmdList_->SetPipelineState(localBlurPso_.Get());
         cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
         cmdList_->SetComputeRootDescriptorTable(2, uavTable);
-        cmdList_->Dispatch((localGridW_ + 7) / 8, (localGridH_ + 7) / 8, 1);
+        audit(kAuCompute); cmdList_->Dispatch((localGridW_ + 7) / 8, (localGridH_ + 7) / 8, 1);
 
         // CSLocalBlur's write must land before PSComposite reads it.
         D3D12_RESOURCE_BARRIER blurUav{};
         blurUav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         blurUav.UAV.pResource = localGridBlurBuf_.Get();
-        cmdList_->ResourceBarrier(1, &blurUav);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &blurUav);
 
         cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
         dbValid_ = false;
@@ -5172,16 +5342,16 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
             const u32 f = frameIndex_ < kFrameCount ? frameIndex_ : 0;
             auto expToCopy = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                         D3D12_RESOURCE_STATE_COPY_SOURCE);
-            cmdList_->ResourceBarrier(1, &expToCopy);
-            cmdList_->CopyBufferRegion(expReadback_[f].Get(), 0, expBuf_.Get(), 0, 2 * sizeof(u32));
+            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &expToCopy);
+            auditCopyBuf(2 * sizeof(u32)); cmdList_->CopyBufferRegion(expReadback_[f].Get(), 0, expBuf_.Get(), 0, 2 * sizeof(u32));
             auto copyToSrv = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            cmdList_->ResourceBarrier(1, &copyToSrv);
+            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &copyToSrv);
             expReadbackPending_[f] = true;
         } else {
             auto expToSrv = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            cmdList_->ResourceBarrier(1, &expToSrv);
+            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &expToSrv);
         }
     }
 
@@ -5220,7 +5390,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                 transition(scene, kSceneRead, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
                 transition(dstT->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
             };
-            cmdList_->ResourceBarrier(2, pre);
+            audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, pre);
             D3D12_CPU_DESCRIPTOR_HANDLE srRtv = dstT->rtvHeap->GetCPUDescriptorHandleForHeapStart();
             cmdList_->OMSetRenderTargets(1, &srRtv, FALSE, nullptr);
             // Caller binds target and sets viewport/scissor to destination size; implementation records
@@ -5249,7 +5419,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                     transition(gbufViewZ_.Get(),       D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
                     transition(gbufNormalRough_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
                 };
-                cmdList_->ResourceBarrier(3, b);
+                audit(kAuBarrier, 3); cmdList_->ResourceBarrier(3, b);
                 in.motionVectors   = gBufferVelocityTexture();
                 in.depth           = gBufferViewZTexture();
                 in.normalRoughness = gBufferNormalRoughnessTexture();
@@ -5264,7 +5434,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                     transition(gbufViewZ_.Get(),       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
                     transition(gbufNormalRough_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
                 };
-                cmdList_->ResourceBarrier(3, b);
+                audit(kAuBarrier, 3); cmdList_->ResourceBarrier(3, b);
             }
 
             // Looked up again: execute() may create textures (an upscaler's history on first use), and
@@ -5277,7 +5447,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
             if (dstT && dstT->res)
                 back[backN++] = transition(dstT->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
                                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            cmdList_->ResourceBarrier(backN, back);
+            audit(kAuBarrier, backN); cmdList_->ResourceBarrier(backN, back);
 
             // Restore post chain's descriptor heap and root signature.
             ID3D12DescriptorHeap* heaps[] = {postSrvHeap_.Get()};
@@ -5316,7 +5486,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
     if (compositeY + compositeH > height_) compositeH = height_ - compositeY;
     {
         auto toRt = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        cmdList_->ResourceBarrier(1, &toRt);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toRt);
         D3D12_CPU_DESCRIPTOR_HANDLE bbRtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
         bbRtv.ptr += static_cast<SIZE_T>(bbIdx) * rtvSize_;
 
@@ -5324,11 +5494,11 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                              ? rhiFactory_->texture(viewportTex_) : nullptr;
         if (vt && vt->rtvHeap) {
             const f32 blank[4] = {clear_[0], clear_[1], clear_[2], 1.0f};
-            cmdList_->ClearRenderTargetView(bbRtv, blank, 0, nullptr);
+            audit(kAuClear); cmdList_->ClearRenderTargetView(bbRtv, blank, 0, nullptr);
 
             auto toRtTex = transition(vt->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                       D3D12_RESOURCE_STATE_RENDER_TARGET);
-            cmdList_->ResourceBarrier(1, &toRtTex);
+            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toRtTex);
             // Outside sub-rect, vt keeps prior content. Confined viewport/scissor means DrawInstanced
             // never rasterizes there. Only SandboxShell's Level ImGui::Image reads vt, with same crop.
             D3D12_CPU_DESCRIPTOR_HANDLE trtv = vt->rtvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -5336,7 +5506,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                        compositeW, compositeH, &trtv, compositeX, compositeY);
             auto backToSrv = transition(vt->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            cmdList_->ResourceBarrier(1, &backToSrv);
+            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &backToSrv);
             cmdList_->OMSetRenderTargets(1, &bbRtv, FALSE, nullptr);
         } else {
             fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), compositeTriple,
@@ -5348,16 +5518,16 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
     {
         auto expBack = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cmdList_->ResourceBarrier(1, &expBack);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &expBack);
     }
     auto sceneBack = msaa
         ? transition(scene, kSceneRead, D3D12_RESOURCE_STATE_RESOLVE_DEST)
         : transition(scene, kSceneRead, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    cmdList_->ResourceBarrier(1, &sceneBack);
+    audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &sceneBack);
     if (msaa) {
         auto msaaBack = transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RESOLVE_SOURCE,
                                    D3D12_RESOURCE_STATE_RENDER_TARGET);
-        cmdList_->ResourceBarrier(1, &msaaBack);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &msaaBack);
     }
 }
 
@@ -5384,7 +5554,7 @@ void D3D12Device::endFrame() {
             bindGraphicsRoot(rootSig_.Get());
             cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             late->scenePass(*rhiContext_);
-            cmdList_->SetPipelineState(pso_.Get());
+            audit(kAuPso); cmdList_->SetPipelineState(pso_.Get());
             boundPso_ = pso_.Get();
         }
     }
@@ -5411,10 +5581,10 @@ void D3D12Device::endFrame() {
         cmdList_->RSSetScissorRects(1, &sceneSc);
         bindGraphicsRoot(rootSig_.Get());
         cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        cmdList_->SetPipelineState(skyPso_.Get());
+        audit(kAuPso); cmdList_->SetPipelineState(skyPso_.Get());
         boundPso_ = skyPso_.Get();
         cmdList_->IASetVertexBuffers(0, 0, nullptr);
-        cmdList_->DrawInstanced(3, 1, 0, 0);
+        audit(kAuDraw); cmdList_->DrawInstanced(3, 1, 0, 0);
         endGpuSpan();
     }
 
@@ -5441,7 +5611,8 @@ void D3D12Device::endFrame() {
                             transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, srcTo),
                             transition(bt->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, dstTo),
                         };
-                        cmdList_->ResourceBarrier(2, pre);
+                        audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, pre);
+                        auditCopyRes(bt->res.Get());   // the resolve and the plain copy each move the target once
                         if (ms) cmdList_->ResolveSubresource(bt->res.Get(), 0, msaaColor_.Get(), 0,
                                                              kSceneColorFormat);
                         else    cmdList_->CopyResource(bt->res.Get(), msaaColor_.Get());
@@ -5449,7 +5620,7 @@ void D3D12Device::endFrame() {
                             transition(msaaColor_.Get(), srcTo, D3D12_RESOURCE_STATE_RENDER_TARGET),
                             transition(bt->res.Get(), dstTo, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
                         };
-                        cmdList_->ResourceBarrier(2, post);
+                        audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, post);
                         if (!blendBackdropCopyLogged_) {
                             blendBackdropCopyLogged_ = true;
                             AVER_INFO("[RHI.D3D12] blended backdrop: {} {}x{} from the scene target",
@@ -5622,13 +5793,13 @@ void D3D12Device::endFrame() {
                     transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE),
                     transition(it->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST),
                 };
-                cmdList_->ResourceBarrier(2, pre);
-                cmdList_->CopyResource(it->res.Get(), scene);
+                audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, pre);
+                auditCopyRes(it->res.Get()); cmdList_->CopyResource(it->res.Get(), scene);
                 D3D12_RESOURCE_BARRIER post[2] = {
                     transition(scene, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
                     transition(it->res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
                 };
-                cmdList_->ResourceBarrier(2, post);
+                audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, post);
 
                 FrameInterpInput in{};
                 in.color = fgInputTex_;
@@ -5656,13 +5827,13 @@ void D3D12Device::endFrame() {
             transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST),
             transition(st->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE),
         };
-        cmdList_->ResourceBarrier(2, pre);
-        cmdList_->CopyResource(scene, st->res.Get());
+        audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, pre);
+        auditCopyRes(scene); cmdList_->CopyResource(scene, st->res.Get());
         D3D12_RESOURCE_BARRIER post[2] = {
             transition(scene, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET),
             transition(st->res.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
         };
-        cmdList_->ResourceBarrier(2, post);
+        audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, post);
     };
     RhiTexture* genT = generatedImage ? rhiFactory_->texture(generatedImage) : nullptr;
     if (genT && genT->res) {
@@ -5694,7 +5865,8 @@ void D3D12Device::endFrame() {
     recording_ = false;
     ID3D12CommandList* lists[] = {cmdList_.Get()};
     waitImageFree(realImage_);
-    queue_->ExecuteCommandLists(1, lists);
+    audit(kAuSubmit); queue_->ExecuteCommandLists(1, lists);
+    if (auditOn_) ++auditFrames_;
     if (infoQueue_) drainDebugMessages();
 }
 
@@ -5705,7 +5877,7 @@ bool D3D12Device::submitGeneratedImage() {
     cmdList_->Close();
     ID3D12CommandList* lists[] = {cmdList_.Get()};
     waitImageFree(bbIndex_);
-    queue_->ExecuteCommandLists(1, lists);
+    audit(kAuSubmit); queue_->ExecuteCommandLists(1, lists);
     if (pendingReal_) {
         pendingReal_ = false;
         if (!queuePresent(pendingRealImage_, pendingRealSync_, pendingRealFlags_)) return false;
@@ -5723,7 +5895,7 @@ void D3D12Device::frameMidpoint() {
     if (!pendingReal_ || !recording_ || deviceLost_) return;
     cmdList_->Close();
     ID3D12CommandList* lists[] = {cmdList_.Get()};
-    queue_->ExecuteCommandLists(1, lists);
+    audit(kAuSubmit); queue_->ExecuteCommandLists(1, lists);
     pendingReal_ = false;
     queuePresent(pendingRealImage_, pendingRealSync_, pendingRealFlags_);
     allocatorsMid_[frameIndex_]->Reset();
@@ -5832,16 +6004,17 @@ void D3D12Device::copyToMirror(u32 bbIdx) {
         transition(src, srcState, D3D12_RESOURCE_STATE_COPY_SOURCE),
         transition(dst, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST),
     };
-    cmdList_->ResourceBarrier(2, pre);
+    audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, pre);
     D3D12_TEXTURE_COPY_LOCATION s{}; s.pResource = src; s.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     D3D12_TEXTURE_COPY_LOCATION d{}; d.pResource = dst; d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     const D3D12_BOX box{x, y, 0, x + w, y + h, 1};
+    auditCopyTex(d, s, &box);
     cmdList_->CopyTextureRegion(&d, 0, 0, 0, &s, &box);
     D3D12_RESOURCE_BARRIER post[2] = {
         transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE, srcState),
         transition(dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON),
     };
-    cmdList_->ResourceBarrier(2, post);
+    audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, post);
 }
 
 // One presented image: post chain, editor lines and overlay features, UI, then PRESENT.
@@ -5871,7 +6044,7 @@ void D3D12Device::presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool
         if (intoTexture) {
             auto toRt = transition(ovt->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                    D3D12_RESOURCE_STATE_RENDER_TARGET);
-            cmdList_->ResourceBarrier(1, &toRt);
+            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toRt);
             overlayRtv = ovt->rtvHeap->GetCPUDescriptorHandleForHeapStart();
         }
         cmdList_->OMSetRenderTargets(1, &overlayRtv, FALSE, nullptr);
@@ -5903,7 +6076,7 @@ void D3D12Device::presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool
         if (intoTexture) {
             auto backToSrv = transition(ovt->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            cmdList_->ResourceBarrier(1, &backToSrv);
+            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &backToSrv);
             cmdList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         }
     } else {
@@ -5926,15 +6099,16 @@ void D3D12Device::presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool
     if (captureReq_ && captureBuf_ && (fgCaptureGenerated_ ? generated : lastOfFrame)) {
         captureRecorded_ = true;
         auto toCopy = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        cmdList_->ResourceBarrier(1, &toCopy);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toCopy);
         D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = bb; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
         D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = captureBuf_.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = captureFp_;
+        auditCopyTex(dst, src, nullptr);
         cmdList_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
         auto toPresent = transition(bb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
-        cmdList_->ResourceBarrier(1, &toPresent);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toPresent);
     } else {
         auto toPresent = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
-        cmdList_->ResourceBarrier(1, &toPresent);
+        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toPresent);
     }
 }
 
@@ -6761,17 +6935,18 @@ bool D3D12ResourceFactory::uploadInitialData(ID3D12Resource* res, const D3D12_RE
         dst.pResource = res;
         dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         dst.SubresourceIndex = s;
+        dev_->auditCopyTexSide(1, dst, src, nullptr);
         list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     }
 
     const D3D12_RESOURCE_STATES want = toResourceStates(d.initialState);
     if (want != D3D12_RESOURCE_STATE_COPY_DEST) {
         auto b = transition(res, D3D12_RESOURCE_STATE_COPY_DEST, want);
-        list->ResourceBarrier(1, &b);
+        dev_->auditSide(1, D3D12Device::kAuBarrier, 1); list->ResourceBarrier(1, &b);
     }
     list->Close();
     ID3D12CommandList* lists[] = {list.Get()};
-    dev_->queue_->ExecuteCommandLists(1, lists);
+    dev_->auditSide(1, D3D12Device::kAuSubmit); dev_->queue_->ExecuteCommandLists(1, lists);
 
     ComPtr<ID3D12Fence> f;
     if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi upload fence")) return false;
@@ -6826,7 +7001,10 @@ bool D3D12ResourceFactory::uploadBuffers(std::initializer_list<BufferUploadItem>
     {
         size_t idx = 0;
         for (const auto& it : items) {
-            if (it.dst && it.bytes) list->CopyBufferRegion(it.dst, 0, staging.Get(), offsets[idx], it.bytes);
+            if (it.dst && it.bytes) {
+                dev_->auditCopyBufSide(1, it.bytes);
+                list->CopyBufferRegion(it.dst, 0, staging.Get(), offsets[idx], it.bytes);
+            }
             ++idx;
         }
     }
@@ -6837,11 +7015,14 @@ bool D3D12ResourceFactory::uploadBuffers(std::initializer_list<BufferUploadItem>
     for (const auto& it : items)
         if (it.dst && it.bytes)
             back.push_back(transition(it.dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON));
-    if (!back.empty()) list->ResourceBarrier(static_cast<UINT>(back.size()), back.data());
+    if (!back.empty()) {
+        dev_->auditSide(1, D3D12Device::kAuBarrier, back.size());
+        list->ResourceBarrier(static_cast<UINT>(back.size()), back.data());
+    }
 
     list->Close();
     ID3D12CommandList* lists[] = {list.Get()};
-    dev_->queue_->ExecuteCommandLists(1, lists);
+    dev_->auditSide(1, D3D12Device::kAuSubmit); dev_->queue_->ExecuteCommandLists(1, lists);
 
     ComPtr<ID3D12Fence> f;
     if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi buffer upload fence"))
@@ -6880,12 +7061,12 @@ bool D3D12ResourceFactory::uploadBufferFilled(ID3D12Resource* dst, u64 bytes, co
               "rhi buffer upload alloc")) return false;
     if (!hrOk(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr,
               IID_PPV_ARGS(&list)), "rhi buffer upload list")) return false;
-    list->CopyBufferRegion(dst, 0, staging.Get(), 0, bytes);
+    dev_->auditCopyBufSide(1, bytes); list->CopyBufferRegion(dst, 0, staging.Get(), 0, bytes);
     const D3D12_RESOURCE_BARRIER back = transition(dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
-    list->ResourceBarrier(1, &back);
+    dev_->auditSide(1, D3D12Device::kAuBarrier, 1); list->ResourceBarrier(1, &back);
     list->Close();
     ID3D12CommandList* lists[] = {list.Get()};
-    dev_->queue_->ExecuteCommandLists(1, lists);
+    dev_->auditSide(1, D3D12Device::kAuSubmit); dev_->queue_->ExecuteCommandLists(1, lists);
 
     ComPtr<ID3D12Fence> f;
     if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi buffer upload fence"))
@@ -8474,7 +8655,7 @@ void D3D12RenderContext::setPipeline(PipelineHandle h) {
         dev_->cmdList_->SetGraphicsRootSignature(p->rootSig);
         dev_->boundRootSig_ = nullptr;
     }
-    dev_->cmdList_->SetPipelineState(p->pso.Get());
+    dev_->audit(D3D12Device::kAuPso); dev_->cmdList_->SetPipelineState(p->pso.Get());
     dev_->boundPso_ = p->pso.Get();   // matches what the line above just bound.
     dev_->fovValid_ = false;          // pipeline changed; see fovValid_.
     dev_->dbValid_ = false;           // root signature change discards all bound arguments.
@@ -8555,7 +8736,7 @@ void D3D12RenderContext::setRenderTargets(const TextureHandle* colors, u32 count
 void D3D12RenderContext::clearDepth(TextureHandle depth, f32 value) {
     RhiTexture* t = res_->texture(depth);
     if (!t || !t->dsvHeap || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] clearDepth on a non-depth texture"); return; }
-    dev_->cmdList_->ClearDepthStencilView(t->dsvHeap->GetCPUDescriptorHandleForHeapStart(),
+    dev_->audit(D3D12Device::kAuClear); dev_->cmdList_->ClearDepthStencilView(t->dsvHeap->GetCPUDescriptorHandleForHeapStart(),
                                           D3D12_CLEAR_FLAG_DEPTH, value, 0, 0, nullptr);
 }
 
@@ -8566,7 +8747,7 @@ void D3D12RenderContext::clearDepth(TextureHandle depth, f32 value) {
 void D3D12RenderContext::clearColor(TextureHandle target, const f32 color[4]) {
     RhiTexture* t = res_->texture(target);
     if (!t || !t->rtvHeap || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] clearColor on a non-render-target texture"); return; }
-    dev_->cmdList_->ClearRenderTargetView(t->rtvHeap->GetCPUDescriptorHandleForHeapStart(), color, 0, nullptr);
+    dev_->audit(D3D12Device::kAuClear); dev_->cmdList_->ClearRenderTargetView(t->rtvHeap->GetCPUDescriptorHandleForHeapStart(), color, 0, nullptr);
 }
 
 // Binds a binding set's descriptors at the given table index of the current pipeline.
@@ -8785,7 +8966,7 @@ void D3D12RenderContext::drawMesh(MeshHandle mesh) {
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     dev_->cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
     dev_->cmdList_->IASetIndexBuffer(&m.ibv);
-    dev_->cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+    dev_->audit(D3D12Device::kAuDraw); dev_->cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
 }
 
 // Draws `instanceCount` copies of a device mesh in one DrawIndexedInstanced, with per-instance world
@@ -8810,7 +8991,7 @@ void D3D12RenderContext::drawMeshInstanced(MeshHandle mesh, const f32* worlds, u
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     dev_->cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
     dev_->cmdList_->IASetIndexBuffer(&m.ibv);
-    dev_->cmdList_->DrawIndexedInstanced(m.indexCount, instanceCount, 0, 0, 0);
+    dev_->audit(D3D12Device::kAuDraw); dev_->cmdList_->DrawIndexedInstanced(m.indexCount, instanceCount, 0, 0, 0);
 }
 
 // Draws a device mesh through the mesh-shader path.
@@ -8827,7 +9008,7 @@ void D3D12RenderContext::dispatchMeshFor(MeshHandle mesh) {
     dev_->cmdList_->SetGraphicsRootShaderResourceView(static_cast<UINT>(pipe_->msIndexParam), m.ib->GetGPUVirtualAddress());
     const u32 tc[4] = {tris, 0, 0, 0};
     dev_->cmdList_->SetGraphicsRoot32BitConstants(static_cast<UINT>(pipe_->msCountParam), 4, tc, 0);
-    dev_->cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
+    dev_->audit(D3D12Device::kAuMesh); dev_->cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
 }
 
 // Dispatches an amplification+mesh-shader pipeline over one cluster cut.
@@ -8854,14 +9035,14 @@ void D3D12RenderContext::dispatchMeshClusters(MeshHandle mesh, u32 clusterCount)
         dev_->cmdList_->SetGraphicsRoot32BitConstants(static_cast<UINT>(pipe_->msCountParam), 4, block, 0);
     }
     const u32 groups = (clusterCount + kClusterAmplificationGroupSize - 1) / kClusterAmplificationGroupSize;
-    dev_->cmdList6_->DispatchMesh(groups, 1, 1);
+    dev_->audit(D3D12Device::kAuMesh); dev_->cmdList6_->DispatchMesh(groups, 1, 1);
 }
 
 // Dispatches the bound compute pipeline.
 void D3D12RenderContext::dispatch(u32 gx, u32 gy, u32 gz) {
     if (pipeInvalid_) return;
     if (!pipe_ || !pipe_->compute) { AVER_ERROR("[RHI.D3D12] dispatch without a compute pipeline"); return; }
-    if (dev_->cmdList_) dev_->cmdList_->Dispatch(gx, gy, gz);
+    if (dev_->cmdList_) { dev_->audit(D3D12Device::kAuCompute); dev_->cmdList_->Dispatch(gx, gy, gz); }
 }
 
 // Copies whole bytes between two buffers. Both must already be in the right state.
@@ -8871,7 +9052,7 @@ void D3D12RenderContext::copyBuffer(BufferHandle dst, BufferHandle src, u64 byte
     ID3D12Resource* d = res_->bufferResource(dst);
     ID3D12Resource* s = res_->bufferResource(src);
     if (!d || !s) { AVER_ERROR("[RHI.D3D12] copyBuffer with an invalid handle"); return; }
-    dev_->cmdList_->CopyBufferRegion(d, dstOffset, s, srcOffset, bytes);
+    dev_->auditCopyBuf(bytes); dev_->cmdList_->CopyBufferRegion(d, dstOffset, s, srcOffset, bytes);
 }
 
 // Layout for a texture<->buffer copy of one mip. Use GetCopyableFootprints, not width*bpp arithmetic.
@@ -8920,6 +9101,7 @@ void D3D12RenderContext::copyTextureToBuffer(BufferHandle dst, u64 dstOffset, Te
     sl.pResource = s->res.Get();
     sl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     sl.SubresourceIndex = mip;
+    dev_->auditCopyTex(dl, sl, nullptr);
     dev_->cmdList_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
 }
 
@@ -8946,6 +9128,7 @@ void D3D12RenderContext::copyBufferToTexture(TextureHandle dst, u32 mip, BufferH
     sl.pResource = s;
     sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     sl.PlacedFootprint = fp;
+    dev_->auditCopyTex(dl, sl, nullptr);
     dev_->cmdList_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
 }
 
@@ -8962,7 +9145,7 @@ void D3D12RenderContext::copyTexture(TextureHandle dst, TextureHandle src) {
         AVER_ERROR("[RHI.D3D12] copyTexture between mismatched textures -- refused");
         return;
     }
-    dev_->cmdList_->CopyResource(d->res.Get(), s->res.Get());
+    dev_->auditCopyRes(d->res.Get()); dev_->cmdList_->CopyResource(d->res.Get(), s->res.Get());
 }
 
 
@@ -8971,7 +9154,7 @@ void D3D12RenderContext::drawFullscreen() {
     if (!dev_->cmdList_ || pipeInvalid_) return;
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     dev_->cmdList_->IASetVertexBuffers(0, 0, nullptr);
-    dev_->cmdList_->DrawInstanced(3, 1, 0, 0);
+    dev_->audit(D3D12Device::kAuDraw); dev_->cmdList_->DrawInstanced(3, 1, 0, 0);
 }
 
 // Binds a caller-owned vertex buffer at slot 0.
@@ -9008,7 +9191,7 @@ void D3D12RenderContext::drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVer
     if (!dev_->cmdList_ || pipeInvalid_ || indexCount == 0) return;
     applyDrawBinding();
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    dev_->cmdList_->DrawIndexedInstanced(indexCount, 1, firstIndex, baseVertex, 0);
+    dev_->audit(D3D12Device::kAuDraw); dev_->cmdList_->DrawIndexedInstanced(indexCount, 1, firstIndex, baseVertex, 0);
 }
 
 // Records a bottom-level acceleration structure build for its mesh.
@@ -9036,11 +9219,11 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
         }
         bd.ScratchAccelerationStructureData = b->scratch->GetGPUVirtualAddress();
         bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
-        dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+        dev_->audit(D3D12Device::kAuRay); dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
         D3D12_RESOURCE_BARRIER bar{};
         bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         bar.UAV.pResource = b->as.Get();
-        dev_->cmdList_->ResourceBarrier(1, &bar);
+        dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
         b->built = true;
         return;
     }
@@ -9051,11 +9234,11 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
     bd.Inputs = blasInputs(m, geo, b->allowUpdate);
     bd.ScratchAccelerationStructureData = b->scratch->GetGPUVirtualAddress();
     bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
-    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    dev_->audit(D3D12Device::kAuRay); dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     bar.UAV.pResource = b->as.Get();
-    dev_->cmdList_->ResourceBarrier(1, &bar);
+    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
     b->built = true;
     b->builtVertexCount = m.vertexCount;
     b->builtIndexCount = m.indexCount;
@@ -9104,11 +9287,11 @@ bool D3D12RenderContext::refitBlas(BlasHandle h) {
     bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
     // In place: DXR allows Source == Dest for an update, and that is what "refit" means here.
     bd.SourceAccelerationStructureData = b->as->GetGPUVirtualAddress();
-    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    dev_->audit(D3D12Device::kAuRay); dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     bar.UAV.pResource = b->as.Get();
-    dev_->cmdList_->ResourceBarrier(1, &bar);
+    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
     return true;
 }
 
@@ -9168,13 +9351,13 @@ void D3D12RenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, 
         D3D12_RESOURCE_BARRIER pre{};
         pre.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         pre.UAV.pResource = t->as.Get();
-        dev_->cmdList_->ResourceBarrier(1, &pre);
+        dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &pre);
     }
-    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    dev_->audit(D3D12Device::kAuRay); dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     bar.UAV.pResource = t->as.Get();
-    dev_->cmdList_->ResourceBarrier(1, &bar);
+    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
     t->built = true;
     t->builtStatic = staticUsed;
     t->builtSlots.swap(t->pendingSlots);
@@ -9206,16 +9389,17 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderContext::tlasBuildDescs(RhiTlas& t, u32 sta
     if (written) {
         if (t.staticDescsState != D3D12_RESOURCE_STATE_COPY_DEST) {
             const D3D12_RESOURCE_BARRIER toCopy = transition(descs, t.staticDescsState, D3D12_RESOURCE_STATE_COPY_DEST);
-            dev_->cmdList_->ResourceBarrier(1, &toCopy);
+            dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &toCopy);
             t.staticDescsState = D3D12_RESOURCE_STATE_COPY_DEST;
         }
+        dev_->auditCopyBuf(static_cast<u64>(written) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
         dev_->cmdList_->CopyBufferRegion(descs, static_cast<u64>(staticUsed) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC),
                                          t.instances[f].Get(), 0,
                                          static_cast<u64>(written) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
     }
     if (t.staticDescsState != kRead) {
         const D3D12_RESOURCE_BARRIER toRead = transition(descs, t.staticDescsState, kRead);
-        dev_->cmdList_->ResourceBarrier(1, &toRead);
+        dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &toRead);
         t.staticDescsState = kRead;
     }
     return descs->GetGPUVirtualAddress();
@@ -9257,18 +9441,18 @@ bool D3D12RenderContext::refitTlas(TlasHandle h, const TlasInstance* instances, 
         D3D12_RESOURCE_BARRIER pre{};
         pre.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         pre.UAV.pResource = t->as.Get();
-        dev_->cmdList_->ResourceBarrier(1, &pre);
+        dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &pre);
     }
     if (eligible) {
         bd.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
         // In place: DXR allows Source == Dest for an update, and that is what "refit" means here.
         bd.SourceAccelerationStructureData = t->as->GetGPUVirtualAddress();
     }
-    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    dev_->audit(D3D12Device::kAuRay); dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     bar.UAV.pResource = t->as.Get();
-    dev_->cmdList_->ResourceBarrier(1, &bar);
+    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
     t->built = true;
     t->builtStatic = staticUsed;
     t->builtSlots.swap(t->pendingSlots);
@@ -9338,7 +9522,7 @@ void D3D12RenderContext::textureBarrier(TextureHandle h, ResourceState from, Res
     trackTextureBarrier(*t, from, to, subresource);
     D3D12_RESOURCE_BARRIER b = transition(t->res.Get(), toResourceStates(from), toResourceStates(to));
     b.Transition.Subresource = (subresource == kAllSubresources) ? D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES : subresource;
-    dev_->cmdList_->ResourceBarrier(1, &b);
+    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &b);
 }
 
 // Records a buffer transition barrier.
@@ -9348,7 +9532,7 @@ void D3D12RenderContext::bufferBarrier(BufferHandle h, ResourceState from, Resou
     if (!b || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] bufferBarrier with an invalid handle"); return; }
     trackBufferBarrier(*b, from, to);
     D3D12_RESOURCE_BARRIER bar = transition(b->res.Get(), toResourceStates(from), toResourceStates(to));
-    dev_->cmdList_->ResourceBarrier(1, &bar);
+    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
 }
 
 // Records a UAV barrier on a texture.
@@ -9358,7 +9542,7 @@ void D3D12RenderContext::uavBarrierTexture(TextureHandle h) {
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     b.UAV.pResource = t->res.Get();
-    dev_->cmdList_->ResourceBarrier(1, &b);
+    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &b);
 }
 
 // Records a UAV barrier on a buffer.
@@ -9368,12 +9552,13 @@ void D3D12RenderContext::uavBarrierBuffer(BufferHandle h) {
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     bar.UAV.pResource = b->res.Get();
-    dev_->cmdList_->ResourceBarrier(1, &bar);
+    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
 }
 
 // Opens a debug marker region and nested GPU timing span (prefer ScopedGpuStat when possible).
 void D3D12RenderContext::pushMarker(const char* label) {
     if (!label || !dev_->cmdList_) return;
+    if (dev_->auditOn_) dev_->auditPush(label);
     dev_->cmdList_->BeginEvent(1, label, static_cast<UINT>(std::strlen(label) + 1));
     // Label is always a string literal (safe to store pointer, allocation-free); parent tracks nesting.
     if (dev_->tsSlice_[dev_->frameIndex_].size() >= D3D12Device::kMaxGpuSpans) {
@@ -9388,6 +9573,7 @@ void D3D12RenderContext::pushMarker(const char* label) {
 
 void D3D12RenderContext::popMarker() {
     if (!dev_->cmdList_) return;
+    if (dev_->auditOn_) dev_->auditPop();
     if (dev_->tsDropped_) { --dev_->tsDropped_; dev_->cmdList_->EndEvent(); return; }
     if (!dev_->tsOpen_.empty()) {
         const u32 i = dev_->tsOpen_.back();
