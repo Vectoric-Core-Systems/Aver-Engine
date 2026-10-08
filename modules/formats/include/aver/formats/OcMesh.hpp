@@ -295,6 +295,11 @@ struct OcMeshData {
 // whole mesh and aver::trifactor::simplifyMesh treats it so; both refuse any other failing table.
 bool submeshesPartitionIndices(const OcMeshData& m, std::string* why = nullptr);
 
+// Merges submeshes that are neighbours in the index buffer and name the same material (slots deduplicated by
+// name). Indices are not moved, so meshlets and LODs stay valid. For merged scenes over the format's 255-submesh
+// limit (a USD prefab of hundreds of unmaterialled parts). Returns the submesh count after.
+usize coalesceAdjacentSubmeshes(OcMeshData& m);
+
 // Reads and writes .ocmesh on disk. `why` is set on failure and untouched on success.
 bool loadOcMesh(const std::string& path, OcMeshData& out, std::string* why = nullptr);
 bool saveOcMesh(const std::string& path, const OcMeshData& in, std::string* why = nullptr);

@@ -177,6 +177,38 @@ void OcMeshData::computeBounds() {
     boundsMin = lo; boundsMax = hi;
 }
 
+usize coalesceAdjacentSubmeshes(OcMeshData& m) {
+    if (m.submeshes.size() < 2) return m.submeshes.size();
+    std::vector<std::string> slots;
+    std::vector<u32> remap(m.materialSlots.size());
+    for (usize i = 0; i < m.materialSlots.size(); ++i) {
+        const auto it = std::find(slots.begin(), slots.end(), m.materialSlots[i]);
+        remap[i] = static_cast<u32>(it - slots.begin());
+        if (it == slots.end()) slots.push_back(m.materialSlots[i]);
+    }
+    std::vector<OcMeshSubmesh> subs = m.submeshes;
+    for (OcMeshSubmesh& s : subs)
+        if (s.materialSlot < remap.size()) s.materialSlot = remap[s.materialSlot];
+    std::sort(subs.begin(), subs.end(), [](const OcMeshSubmesh& a, const OcMeshSubmesh& b) { return a.indexStart < b.indexStart; });
+    std::vector<OcMeshSubmesh> out;
+    for (const OcMeshSubmesh& s : subs) {
+        if (!out.empty() && out.back().materialSlot == s.materialSlot &&
+            out.back().indexStart + out.back().indexCount == s.indexStart) {
+            OcMeshSubmesh& p = out.back();
+            const u32 lo = std::min(p.baseVertex, s.baseVertex);
+            const u32 hi = std::max(p.baseVertex + p.vertexCount, s.baseVertex + s.vertexCount);
+            p.indexCount += s.indexCount;
+            p.baseVertex = lo;
+            p.vertexCount = hi - lo;
+        } else {
+            out.push_back(s);
+        }
+    }
+    m.submeshes = std::move(out);
+    m.materialSlots = std::move(slots);
+    return m.submeshes.size();
+}
+
 bool submeshesPartitionIndices(const OcMeshData& m, std::string* why) {
     // Walked in indexStart order through a sorted list of positions into the table, so a table
     // listed out of order still passes: coverage is the rule, not ordering.

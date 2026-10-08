@@ -707,6 +707,14 @@ void applyLodAndClustering(fmt::OcMeshData& m, f32 lodRatio, const std::string& 
 bool writeAndVerifyMesh(const std::string& input, const std::string& path, const fmt::OcMeshData& m,
                         RunStats& stats) {
     std::string why;
+    if (m.submeshes.size() > 255) {   // a merged USD prefab of many unmaterialled parts
+        fmt::OcMeshData merged = m;
+        const usize before = merged.submeshes.size();
+        fmt::coalesceAdjacentSubmeshes(merged);
+        AVER_INFO("{}: {} submeshes merged to {} (neighbours naming the same material)", path, before,
+                  merged.submeshes.size());
+        if (merged.submeshes.size() <= 255) return writeAndVerifyMesh(input, path, merged, stats);
+    }
     if (!fmt::saveOcMesh(path, m, &why)) {
         emitArtifact(input, path, "mesh", false, false, why, stats);
         return false;
