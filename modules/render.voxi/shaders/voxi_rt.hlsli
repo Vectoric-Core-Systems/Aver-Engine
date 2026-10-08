@@ -6,6 +6,17 @@
 #define AVER_RD_SINGLE_PASS 0
 #endif
 
+// The blended (glass) replay reads no history: t6/t7/t11/t19 describe the opaque surface behind the glass, and
+// taking those paths in this fragile variant hung the RX 7800 XT on FidelityFX/None frames (NRD2 frames, whose
+// rtHistParams.x is 0, never took them). Compile-time, so it only removes code.
+#ifndef AVER_HISTORY_FREE
+#if defined(AVER_BLENDED_PASS) && AVER_BLENDED_PASS
+#define AVER_HISTORY_FREE 1
+#else
+#define AVER_HISTORY_FREE 0
+#endif
+#endif
+
 // DXR 1.1 inline ray tracing.
 RaytracingAccelerationStructure gScene : register(t2);
 
@@ -1157,7 +1168,7 @@ float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDe
 float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, float coneAo,
                              bool coneAoIsGather, bool denoisedAoUsable) {
     // AO history pair allocated only when sky occlusion ray wanted (VoxiRenderer::aoHistoryWanted).
-    if (gRtDenoiseParams.w < 0.5) {
+    if (AVER_HISTORY_FREE || gRtDenoiseParams.w < 0.5) {
         const AverAmbientTraced amb = rtAmbientTraced(wpos, N, pixel, rays);
         return coneAoIsGather ? coneAo : amb.open;
     }
@@ -1410,7 +1421,7 @@ bool rtShadowChanged(float fresh, float hist) { return abs(fresh - hist) > 0.75;
 // Primary sun-shadow with temporal accumulation and optional tiling (ray amortisation).
 float3 rtShadowTemporalEx(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
                           bool haveFresh, float3 freshIn) {
-    if (gRtHistParams.x < 0.5) {
+    if (AVER_HISTORY_FREE || gRtHistParams.x < 0.5) {
         if (haveFresh) return freshIn;
         return rtShadow(wpos, N, L, pixel, dpx, dpy, rays, 0.0);
     }

@@ -217,6 +217,7 @@ bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) !=
 #ifndef AVER_BLENDED_PASS
 #define AVER_BLENDED_PASS 0
 #endif
+#define AVER_HISTORY_FREE AVER_BLENDED_PASS   // see voxi_rt.hlsli
 #if !AVER_RT
 #include "voxi_decal.hlsli"   // the RT build gets it through voxi_rt.hlsli, ahead of rtHitSurface
 #endif
@@ -435,7 +436,7 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
     int2   texel      = int2(0, 0);
     float2 velocityPx = float2(0.0, 0.0);
     bool   haveHist   = false;
-    if (gRtHistParams.x > 0.5 && gRtHistParams.y > 0.25 && rdLocalHistValid())
+    if (!AVER_HISTORY_FREE && gRtHistParams.x > 0.5 && gRtHistParams.y > 0.25 && rdLocalHistValid())
         haveHist = rtReprojectTexel(wpos, pixelC, texel, velocityPx);
     // prevVisC: the reprojected texel alone -- what gets STORED, so the spatial filter below is folded in
     // once per turn rather than compounding on every carried frame. prevVisF: rdLocalHistFiltered's
@@ -1104,7 +1105,7 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 Ng, float3 R, float3
     const float lobeRough = rough < AVER_REFL_MIRROR_ROUGH ? 0.0 : rough;
 
     // No history texture: lobe stays closed. rough=0 reduces to exact mirror ray.
-    if (gRtHistParams.x < 0.5) return rtReflection(wpos, N, Ng, R, L, pixel, 0.0, 0u, hit);
+    if (AVER_HISTORY_FREE || gRtHistParams.x < 0.5) return rtReflection(wpos, N, Ng, R, L, pixel, 0.0, 0u, hit);
 
     const float4 curClip = mul(float4(wpos, 1.0), gViewProj);
     const uint frameIdx  = (uint)gRtHistParams.z;
@@ -1204,7 +1205,7 @@ float3 rtReflectionTemporal(float3 wpos, float3 N, float3 Ng, float3 R, float3 L
 
 // Mark pixels gated away from reflection tracing (rough > 0.75).
 void rtReflectionHistoryVacate(float2 pixel) {
-    if (gRtHistParams.x >= 0.5 && gAverHistoryWrite)
+    if (!AVER_HISTORY_FREE && gRtHistParams.x >= 0.5 && gAverHistoryWrite)
         gRtReflHistOut[uint2(pixel)] = float4(0.0, 0.0, 0.0, -1.0);
 }
 #endif
