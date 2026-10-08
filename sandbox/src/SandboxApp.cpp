@@ -1017,9 +1017,6 @@ void SandboxApp::onInit(Engine& e)  {
                       "as the gather centre reprojects. 0 (the default) is no taper.",
                       rtDenoiseMotionTaper_);
         }
-        // Interactive editor: pipelines build in the background (blank viewport + notification until they land).
-        // Captures, tests and --sync-shaders keep every build synchronous.
-        voxiRenderer_.setAsyncBuilds(maxFrames_ == 0 && !headless_ && !playTest_ && rhi::asyncShaderBuildsAllowed());
         if (voxiRenderer_.init(*e.device())) {
             e.device()->addRenderFeature(&voxiRenderer_);
             voxiAttached_ = true;
@@ -1442,11 +1439,6 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     }
     nrd2Session_.tick(e.device());
     shaderWarmup_.poll();
-    {
-        u32 shadersDone = 0, shadersTotal = 0;
-        const bool building = voxiAttached_ && voxiRenderer_.shaderBuildProgress(shadersDone, shadersTotal);
-        shaderBuildNotice_.poll(building, building && voxiRenderer_.sceneBlocked(), shadersDone, shadersTotal);
-    }
     // --nrd2-capture: handed over once the renderer is attached and the level has a name (or after ~10 s);
     // it starts stepping on NRD2 frames and holds the camera the same way.
     if (nrd2CapturePoses_ && voxiAttached_ && !nrd2CaptureStarted_ && (!levelName_.empty() || t.frame > 600)) {

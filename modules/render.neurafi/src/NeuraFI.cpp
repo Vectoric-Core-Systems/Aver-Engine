@@ -194,17 +194,15 @@ bool NeuraFI::ensureTrajectory() {
 void NeuraFI::releaseTargets() {
     // Network caches bindings on our buffers; drop bindings before destroying buffers.
     mlp_.invalidateBindings();
-    for (rhi::BindingSetHandle* s : {&gatherSet_[0], &gatherSet_[1], &gatherSet_[2], &fillSetA_, &fillSetB_,
-                                     &trajSet_[0], &trajSet_[1], &trajSet_[2]}) {
+    for (rhi::BindingSetHandle* s : {&gatherSet_, &fillSetA_, &fillSetB_, &trajSet_}) {
         if (*s) res_.destroyBindingSet(*s);
         *s = 0;
     }
-    for (rhi::TextureHandle* t : {&histColor_, &histVel_[0], &histVel_[1], &histVel_[2], &histZ_[0], &histZ_[1],
-                                  &histZ_[2], &out_, &tmp_, &accel_, &accelNet_, &vizTex_}) {
+    for (rhi::TextureHandle* t : {&histColor_, &histVel_, &histZ_, &histVel2_, &histZ2_, &histVel3_, &histZ3_,
+                                  &out_, &tmp_, &accel_, &accelNet_, &vizTex_}) {
         if (*t) res_.destroyTexture(*t);
         *t = 0;
     }
-    ring_ = 0;
     for (rhi::BufferHandle* b : {&records_, &netOut_, &trainRec_, &trainTgt_, &trainCount_, &evalRec_, &evalTgt_,
                                  &evalCount_}) {
         if (*b) res_.destroyBuffer(*b);
@@ -236,10 +234,12 @@ bool NeuraFI::ensureTargets(u32 w, u32 h) {
         return res_.createTexture(td);
     };
     histColor_ = make(w, h, rhi::Format::RGBA16F, false, RS::NonPixelShaderResource, "FrameInterp N-1 colour");
-    for (u32 i = 0; i < 3; ++i) {
-        histVel_[i] = make(w, h, rhi::Format::RG16F, false, RS::NonPixelShaderResource, "FrameInterp history motion");
-        histZ_[i]   = make(w, h, rhi::Format::R32Float, false, RS::NonPixelShaderResource, "FrameInterp history view depth");
-    }
+    histVel_   = make(w, h, rhi::Format::RG16F, false, RS::NonPixelShaderResource, "FrameInterp N-1 motion");
+    histZ_     = make(w, h, rhi::Format::R32Float, false, RS::NonPixelShaderResource, "FrameInterp N-1 view depth");
+    histVel2_  = make(w, h, rhi::Format::RG16F, false, RS::NonPixelShaderResource, "FrameInterp N-2 motion");
+    histZ2_    = make(w, h, rhi::Format::R32Float, false, RS::NonPixelShaderResource, "FrameInterp N-2 view depth");
+    histVel3_  = make(w, h, rhi::Format::RG16F, false, RS::NonPixelShaderResource, "FrameInterp N-3 motion");
+    histZ3_    = make(w, h, rhi::Format::R32Float, false, RS::NonPixelShaderResource, "FrameInterp N-3 view depth");
     out_       = make(w, h, rhi::Format::RGBA16F, true, RS::ShaderResource, "FrameInterp generated frame");
     tmp_       = make(w, h, rhi::Format::RGBA16F, true, RS::ShaderResource, "FrameInterp fill scratch");
     accel_     = make(qw, qh, rhi::Format::RG16F, true, RS::NonPixelShaderResource, "FrameInterp acceleration");
@@ -269,8 +269,8 @@ bool NeuraFI::ensureTargets(u32 w, u32 h) {
     evalRec_   = readback(static_cast<u64>(kTrainSamples) * kRecordFloats * 4, "FrameInterp evaluation records");
     evalTgt_   = readback(static_cast<u64>(kTrainSamples) * kOutputFloats * 4, "FrameInterp evaluation targets");
     evalCount_ = readback(16, "FrameInterp evaluation count");
-    if (!histColor_ || !histVel_[0] || !histVel_[1] || !histVel_[2] || !histZ_[0] || !histZ_[1] || !histZ_[2] ||
-        !out_ || !tmp_ || !accel_ || !accelNet_ || !vizTex_ || !records_|| !netOut_ || !trainRec_ || !trainTgt_ || !trainCount_ || !evalRec_ ||
+    if (!histColor_ || !histVel_ || !histZ_ || !histVel2_ || !histZ2_ || !histVel3_ || !histZ3_ || !out_ ||
+        !tmp_ || !accel_ || !accelNet_ || !vizTex_ || !records_|| !netOut_ || !trainRec_ || !trainTgt_ || !trainCount_ || !evalRec_ ||
         !evalTgt_ || !evalCount_) {
         AVER_WARN("[NeuraFI] could not create the {}x{} targets", w, h);
         releaseTargets();
@@ -280,7 +280,7 @@ bool NeuraFI::ensureTargets(u32 w, u32 h) {
     rhi::BindingSetDesc gd;
     gd.srvCount = 8;
     gd.uavCount = 2;
-    for (u32 i = 0; i < 3; ++i) gatherSet_[i] = res_.createBindingSet(gd);
+    gatherSet_ = res_.createBindingSet(gd);
     rhi::BindingSetDesc fd;
     fd.srvCount = 1;
     fd.uavCount = 1;
@@ -296,42 +296,36 @@ bool NeuraFI::ensureTargets(u32 w, u32 h) {
     td.uavKinds[4] = rhi::SlotKind::StructuredBuffer;
     td.uavKinds[5] = rhi::SlotKind::StructuredBuffer;
     td.uavKinds[6] = rhi::SlotKind::Texture2D;
-    for (u32 i = 0; i < 3; ++i) trajSet_[i] = res_.createBindingSet(td);
-    if (!gatherSet_[0] || !gatherSet_[1] || !gatherSet_[2] || !fillSetA_ || !fillSetB_ || !trajSet_[0] ||
-        !trajSet_[1] || !trajSet_[2]) {
+    trajSet_ = res_.createBindingSet(td);
+    if (!gatherSet_ || !fillSetA_ || !fillSetB_ || !trajSet_) {
         AVER_WARN("[NeuraFI] could not create the binding sets");
         releaseTargets();
         return false;
     }
-    for (u32 i = 0; i < 3; ++i) {
-        res_.setSrv(gatherSet_[i], 3, histColor_);
-        res_.setSrv(gatherSet_[i], 4, histVel_[i]);
-        res_.setSrv(gatherSet_[i], 5, histZ_[i]);
-        res_.setSrv(gatherSet_[i], 6, accel_);
-        res_.setSrv(gatherSet_[i], 7, accelNet_);
-        res_.setUav(gatherSet_[i], 0, out_, 0);
-        res_.setUav(gatherSet_[i], 1, vizTex_, 0);
-    }
+    res_.setSrv(gatherSet_, 3, histColor_);
+    res_.setSrv(gatherSet_, 4, histVel_);
+    res_.setSrv(gatherSet_, 5, histZ_);
+    res_.setSrv(gatherSet_, 6, accel_);
+    res_.setSrv(gatherSet_, 7, accelNet_);
+    res_.setUav(gatherSet_, 0, out_, 0);
+    res_.setUav(gatherSet_, 1, vizTex_, 0);
     res_.setSrv(fillSetA_, 0, out_);
     res_.setUav(fillSetA_, 0, tmp_, 0);
     res_.setSrv(fillSetB_, 0, tmp_);
     res_.setUav(fillSetB_, 0, out_, 0);
-    for (u32 i = 0; i < 3; ++i) {
-        const u32 j = (i + 1) % 3, k = (i + 2) % 3;
-        res_.setSrv(trajSet_[i], 2, histVel_[i]);
-        res_.setSrv(trajSet_[i], 3, histZ_[i]);
-        res_.setSrv(trajSet_[i], 4, histVel_[j]);
-        res_.setSrv(trajSet_[i], 5, histZ_[j]);
-        res_.setSrv(trajSet_[i], 6, histVel_[k]);
-        res_.setSrv(trajSet_[i], 7, histZ_[k]);
-        res_.setUavBuffer(trajSet_[i], 0, records_, 4, static_cast<u32>(qCount * kRecordFloats), 0);
-        res_.setUav(trajSet_[i], 1, accel_, 0);
-        res_.setUavBuffer(trajSet_[i], 2, trainRec_, 4, kTrainSamples * kRecordFloats, 0);
-        res_.setUavBuffer(trajSet_[i], 3, trainTgt_, 4, kTrainSamples * kOutputFloats, 0);
-        res_.setUavBuffer(trajSet_[i], 4, trainCount_, 4, 4, 0);
-        res_.setUavBuffer(trajSet_[i], 5, netOut_, 4, static_cast<u32>(qCount * kOutputFloats), 0);
-        res_.setUav(trajSet_[i], 6, accelNet_, 0);
-    }
+    res_.setSrv(trajSet_, 2, histVel_);
+    res_.setSrv(trajSet_, 3, histZ_);
+    res_.setSrv(trajSet_, 4, histVel2_);
+    res_.setSrv(trajSet_, 5, histZ2_);
+    res_.setSrv(trajSet_, 6, histVel3_);
+    res_.setSrv(trajSet_, 7, histZ3_);
+    res_.setUavBuffer(trajSet_, 0, records_, 4, static_cast<u32>(qCount * kRecordFloats), 0);
+    res_.setUav(trajSet_, 1, accel_, 0);
+    res_.setUavBuffer(trajSet_, 2, trainRec_, 4, kTrainSamples * kRecordFloats, 0);
+    res_.setUavBuffer(trajSet_, 3, trainTgt_, 4, kTrainSamples * kOutputFloats, 0);
+    res_.setUavBuffer(trajSet_, 4, trainCount_, 4, 4, 0);
+    res_.setUavBuffer(trajSet_, 5, netOut_, 4, static_cast<u32>(qCount * kOutputFloats), 0);
+    res_.setUav(trajSet_, 6, accelNet_, 0);
 
     w_ = w;
     h_ = h;
@@ -410,22 +404,15 @@ NeuraFI::TrainingStatus NeuraFI::trainingStatus() const {
 
 // Input textures kept across frames; bindings rewritten only on resize.
 void NeuraFI::bindInputs(const rhi::FrameInterpInput& in) {
-    if (in.color != boundColor_) {
-        for (rhi::BindingSetHandle set : gatherSet_) res_.setSrv(set, 0, in.color);
-        boundColor_ = in.color;
-    }
+    if (in.color != boundColor_) { res_.setSrv(gatherSet_, 0, in.color); boundColor_ = in.color; }
     if (in.velocity != boundVel_) {
-        for (u32 i = 0; i < 3; ++i) {
-            res_.setSrv(gatherSet_[i], 1, in.velocity);
-            res_.setSrv(trajSet_[i], 0, in.velocity);
-        }
+        res_.setSrv(gatherSet_, 1, in.velocity);
+        res_.setSrv(trajSet_, 0, in.velocity);
         boundVel_ = in.velocity;
     }
     if (in.viewZ != boundZ_) {
-        for (u32 i = 0; i < 3; ++i) {
-            res_.setSrv(gatherSet_[i], 2, in.viewZ);
-            res_.setSrv(trajSet_[i], 1, in.viewZ);
-        }
+        res_.setSrv(gatherSet_, 2, in.viewZ);
+        res_.setSrv(trajSet_, 1, in.viewZ);
         boundZ_ = in.viewZ;
     }
 }
@@ -467,10 +454,6 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
     const bool records = keepHistory && histDepth_ >= 3;
     const bool train = records && training_;
     const bool neural = bend && trajectory_ == Trajectory::Neural && networkReady();
-    // The check records are read only by training and by the 100th check's readback.
-    const bool checkDue = records && (checkFrames_ + 1) % kEvalEverySteps == 0 && collectAtFrame_ == 0;
-    const bool buildRecords = train || checkDue;
-    const rhi::BindingSetHandle trajSet = trajSet_[ring_];
 
     const u32 gx = (in.width + kGroup - 1) / kGroup, gy = (in.height + kGroup - 1) / kGroup;
     const u32 qgx = (qw_ + kGroup - 1) / kGroup, qgy = (qh_ + kGroup - 1) / kGroup;
@@ -482,11 +465,9 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
     ctx.textureBarrier(in.color, RS::ShaderResource, RS::NonPixelShaderResource);
     ctx.textureBarrier(in.velocity, RS::RenderTarget, RS::NonPixelShaderResource);
     ctx.textureBarrier(in.viewZ, RS::RenderTarget, RS::NonPixelShaderResource);
-    const rhi::BufferHandle bendBufs[] = {records_, netOut_}, recordBufs[] = {trainRec_, trainTgt_, trainCount_};
-    if (bend)
-        for (rhi::BufferHandle b : bendBufs) ctx.bufferBarrier(b, RS::Common, RS::UnorderedAccess);
-    if (buildRecords)
-        for (rhi::BufferHandle b : recordBufs) ctx.bufferBarrier(b, RS::Common, RS::UnorderedAccess);
+    const rhi::BufferHandle bufs[] = {records_, netOut_, trainRec_, trainTgt_, trainCount_};
+    if (bend || records)
+        for (rhi::BufferHandle b : bufs) ctx.bufferBarrier(b, RS::Common, RS::UnorderedAccess);
 
     rhi::TextureHandle result = 0;
     if (!cut) {
@@ -494,7 +475,7 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
         if (bend) {
             if (neural) {
                 ctx.setPipeline(featuresPso_);
-                ctx.setBindingSet(trajSet);
+                ctx.setBindingSet(trajSet_);
                 ctx.setConstants(kConstantSlot, &k, kConstantDwords);
                 ctx.dispatch(qgx, qgy, 1);
                 ctx.uavBarrierBuffer(records_);
@@ -512,7 +493,7 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
             ctx.textureBarrier(accel_, RS::NonPixelShaderResource, RS::UnorderedAccess);
             ctx.textureBarrier(accelNet_, RS::NonPixelShaderResource, RS::UnorderedAccess);
             ctx.setPipeline(accelPso_);
-            ctx.setBindingSet(trajSet);
+            ctx.setBindingSet(trajSet_);
             ctx.setConstants(kConstantSlot, &k, kConstantDwords);
             ctx.dispatch(qgx, qgy, 1);
             ctx.textureBarrier(accel_, RS::UnorderedAccess, RS::NonPixelShaderResource);
@@ -522,7 +503,7 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
         ctx.textureBarrier(out_, RS::ShaderResource, RS::UnorderedAccess);
         ctx.textureBarrier(vizTex_, RS::ShaderResource, RS::UnorderedAccess);
         ctx.setPipeline(gatherPso_);
-        ctx.setBindingSet(gatherSet_[ring_]);
+        ctx.setBindingSet(gatherSet_);
         ctx.setConstants(kConstantSlot, &k, kConstantDwords);
         ctx.dispatch(gx, gy, 1);
         ctx.textureBarrier(vizTex_, RS::UnorderedAccess, RS::ShaderResource);
@@ -550,16 +531,15 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
     }
 
     // Check records from frames N..N-3: scored always, trained if on.
-    if (records) ++checkFrames_;
-    if (buildRecords) {
+    if (records) {
         rhi::ScopedGpuStat stat(ctx, train ? "Frame interpolation training" : "Frame interpolation check");
         ctx.setPipeline(clearCountPso_);
-        ctx.setBindingSet(trajSet);
+        ctx.setBindingSet(trajSet_);
         ctx.setConstants(kConstantSlot, &k, kConstantDwords);
         ctx.dispatch(1, 1, 1);
         ctx.uavBarrierBuffer(trainCount_);
         ctx.setPipeline(trainRecordsPso_);
-        ctx.setBindingSet(trajSet);
+        ctx.setBindingSet(trajSet_);
         ctx.setConstants(kConstantSlot, &k, kConstantDwords);
         ctx.dispatch((kTrainSamples + 63) / 64, 1, 1);
         ctx.uavBarrierBuffer(trainRec_);
@@ -578,7 +558,8 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
             }
         }
         // Every kEvalEverySteps frames: copy records to readback buffer for evaluation.
-        if (checkDue && (!training_ || mlp_.recordReadback(ctx))) {
+        ++checkFrames_;
+        if (checkFrames_ % kEvalEverySteps == 0 && collectAtFrame_ == 0 && (!training_ || mlp_.recordReadback(ctx))) {
             const rhi::BufferHandle src[] = {trainRec_, trainTgt_, trainCount_};
             for (rhi::BufferHandle b : src) ctx.bufferBarrier(b, RS::UnorderedAccess, RS::CopySource);
             ctx.copyBuffer(evalRec_, trainRec_, static_cast<u64>(kTrainSamples) * kRecordFloats * 4);
@@ -590,28 +571,37 @@ rhi::TextureHandle NeuraFI::generate(rhi::IRenderContext& ctx, const rhi::FrameI
             saveOnCollect_ = training_ && checkFrames_ % kSaveEverySteps == 0;
         }
     }
-    if (bend)
-        for (rhi::BufferHandle b : bendBufs) ctx.bufferBarrier(b, RS::UnorderedAccess, RS::Common);
-    if (buildRecords)
-        for (rhi::BufferHandle b : recordBufs) ctx.bufferBarrier(b, RS::UnorderedAccess, RS::Common);
+    if (bend || records)
+        for (rhi::BufferHandle b : bufs) ctx.bufferBarrier(b, RS::UnorderedAccess, RS::Common);
 
-    // Frame N becomes the previous frame: it overwrites the oldest ring slot, which then is N-1.
-    if (keepHistory) histDepth_ = histDepth_ < 3 ? histDepth_ + 1 : 3;
-    else histDepth_ = 1;   // only N-1 valid after this frame is stored
-    ring_ = (ring_ + 2) % 3;
-    const rhi::TextureHandle newVel = histVel_[ring_], newZ = histZ_[ring_];
+    // Frame N becomes the previous frame; motion history shifts down.
     ctx.textureBarrier(in.color, RS::NonPixelShaderResource, RS::CopySource);
     ctx.textureBarrier(in.velocity, RS::NonPixelShaderResource, RS::CopySource);
     ctx.textureBarrier(in.viewZ, RS::NonPixelShaderResource, RS::CopySource);
+    if (keepHistory) {
+        // N-2 -> N-3, then N-1 -> N-2 (oldest first).
+        const rhi::TextureHandle shift[][2] = {
+            {histVel3_, histVel2_}, {histZ3_, histZ2_}, {histVel2_, histVel_}, {histZ2_, histZ_}};
+        for (const auto& s : shift) {
+            ctx.textureBarrier(s[1], RS::NonPixelShaderResource, RS::CopySource);
+            ctx.textureBarrier(s[0], RS::NonPixelShaderResource, RS::CopyDest);
+            ctx.copyTexture(s[0], s[1]);
+            ctx.textureBarrier(s[0], RS::CopyDest, RS::NonPixelShaderResource);
+            ctx.textureBarrier(s[1], RS::CopySource, RS::NonPixelShaderResource);
+        }
+        histDepth_ = histDepth_ < 3 ? histDepth_ + 1 : 3;
+    } else {
+        histDepth_ = 1;   // only N-1 valid after this frame is stored
+    }
     ctx.textureBarrier(histColor_, RS::NonPixelShaderResource, RS::CopyDest);
-    ctx.textureBarrier(newVel, RS::NonPixelShaderResource, RS::CopyDest);
-    ctx.textureBarrier(newZ, RS::NonPixelShaderResource, RS::CopyDest);
+    ctx.textureBarrier(histVel_, RS::NonPixelShaderResource, RS::CopyDest);
+    ctx.textureBarrier(histZ_, RS::NonPixelShaderResource, RS::CopyDest);
     ctx.copyTexture(histColor_, in.color);
-    ctx.copyTexture(newVel, in.velocity);
-    ctx.copyTexture(newZ, in.viewZ);
+    ctx.copyTexture(histVel_, in.velocity);
+    ctx.copyTexture(histZ_, in.viewZ);
     ctx.textureBarrier(histColor_, RS::CopyDest, RS::NonPixelShaderResource);
-    ctx.textureBarrier(newVel, RS::CopyDest, RS::NonPixelShaderResource);
-    ctx.textureBarrier(newZ, RS::CopyDest, RS::NonPixelShaderResource);
+    ctx.textureBarrier(histVel_, RS::CopyDest, RS::NonPixelShaderResource);
+    ctx.textureBarrier(histZ_, RS::CopyDest, RS::NonPixelShaderResource);
     ctx.textureBarrier(in.color, RS::CopySource, RS::ShaderResource);
     ctx.textureBarrier(in.velocity, RS::CopySource, RS::RenderTarget);
     ctx.textureBarrier(in.viewZ, RS::CopySource, RS::RenderTarget);

@@ -265,13 +265,16 @@ void writeShadingConstants(f32* block) {
 // The shader model every Voxi pipeline that is not a mesh shader or a RayQuery variant asks for.
 constexpr u32 kBaseSm = 51;
 
-// Records Voxi's shaders into a pipeline batch, which owns them (there is nothing to destroy).
+// Compiles Voxi shaders and destroys every one of them when it leaves scope.
 struct ShaderScope {
-    explicit ShaderScope(rhi::IPipelineBatch& b) : batch(b) {}
+    explicit ShaderScope(rhi::IResourceFactory& r) : res(r) {}
+    ~ShaderScope() { for (rhi::ShaderHandle h : owned) res.destroyShader(h); }
+    ShaderScope(const ShaderScope&) = delete;
+    ShaderScope& operator=(const ShaderScope&) = delete;
 
-    // Records one entry point of Voxi's HLSL. The batch copies the text, so the statics behind
-    // voxiHlsl() / voxiShaderPrelude() may move on afterwards.
-    rhi::ShaderHandle operator()(const char* entry, rhi::ShaderStage stage, u32 sm, const char* defines) {
+    // Compiles one entry point of Voxi's HLSL. Returns 0 on failure.
+    rhi::ShaderHandle operator()(const char* entry, rhi::ShaderStage stage, u32 sm,
+                                 const char* defines) {
         rhi::ShaderDesc sd;
         sd.source  = voxiHlsl();
         sd.prelude = voxiShaderPrelude();
@@ -279,17 +282,19 @@ struct ShaderScope {
         sd.stage   = stage;
         sd.minShaderModel = sm;
         sd.defines = defines;
-        return batch.createShader(sd);
+        const rhi::ShaderHandle h = res.createShader(sd);
+        if (h) owned.push_back(h);
+        return h;
     }
 
-    rhi::IPipelineBatch& batch;
+    rhi::IResourceFactory& res;
+    std::vector<rhi::ShaderHandle> owned;
 };
 
 } // namespace
 
-// Creates every GPU resource Voxi needs and starts building its pipelines. Returns false, and names the first
-// missing handle, if the device cannot support the baseline. The pipelines are waited for here in synchronous
-// mode; in asynchronous mode they land at a later frame boundary (pumpBuilds) and the frame is blank until then.
+// Creates every GPU resource Voxi needs. Returns false, and names the first missing handle, if the
+// device cannot support the baseline.
 bool VoxiRenderer::init(rhi::IDevice& device) {
     dev_ = &device;
     res_ = device.resources();
@@ -298,24 +303,15 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
         return false;
     }
     caps_ = device.caps();
-    // Only D3D12 has worker-thread builds; elsewhere the (inline) batch would just land a frame late.
-    if (device.backend() != rhi::Backend::D3D12 || !rhi::asyncShaderBuildsAllowed()) asyncBuilds_ = false;
 
     if (!materials_.init(device, giLayout().srvCount))
         AVER_WARN("[Voxi] the material system declined to initialise; draws fall back to an unbound table 1");
 
     createShadowResources();
     createVoxelVolume(settings_.voxelResolution);
+    createPipelines();
 
-    wantColor_ = device.backbufferFormat();
-    wantDepth_ = device.depthFormat();
-    wantSamples_ = device.sampleCount();
-    // Optimistic until the scene set lands (validateCore drops it if the ray-tracing variant would not build):
-    // the same capability test that decides whether that variant is compiled at all.
-    rtSupported_ = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
-
-    // Upgrade air visibility placeholder to real texture if setting and device allow it. The real volume also
-    // needs CSAirVis, which is not built yet: validateCore tries again.
+    // Upgrade air visibility placeholder to real texture if setting and device allow it.
     if (!ensureAirVis())
         AVER_WARN("[Voxi] air sky-visibility volume unavailable at startup; fog stays unoccluded "
                   "(voxi.fogOcclusion has no effect until it can be created)");
@@ -329,15 +325,34 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
     else if (!resolveBindings_)  missing = "resolve binding set";
     else if (!airVisPlaceholder_) missing = "air sky-visibility placeholder";
     else if (mipBindings_.size() + 1 != voxelMips_) missing = "mip binding sets (count)";
+    else if (!shadowPso_)        missing = "shadow pipeline";
+    else if (!voxelPso_)         missing = "voxelise pipeline";
+    else if (!clearPso_)         missing = "volume clear pipeline";
+    else if (!resolvePso_)       missing = "injection resolve pipeline";
+    else if (!mipPso_)           missing = "mip filter pipeline";
+    else if (!debugPso_)         missing = "voxel debug pipeline";
+    else if (!scenePso_)         missing = "scene pipeline";
     for (usize m = 0; !missing && m < mipBindings_.size(); ++m)
         if (!mipBindings_[m]) missing = "mip binding set";
+
+    AVER_INFO("[Voxi] init: shadow tex={} volume={} accum={} ({}^3, {} mips) bindings={}/{}/{}/+{} "
+              "pipelines shadow={}/{} voxel={} voxelMs={} clear={} resolve={} mip={} debug={} "
+              "scene={}/{}/{}/{} blended={}/{}/{}/{} airVis={}/{} ({}^3)",
+              shadowTex_, voxelTex_, voxelAccumTex_, voxelResBuilt_, voxelMips_,
+              bindings_, clearBindings_, resolveBindings_, static_cast<u32>(mipBindings_.size()),
+              shadowPso_, shadowInstancedPso_, voxelPso_, voxelMsPso_, clearPso_, resolvePso_, mipPso_, debugPso_,
+              scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_,
+              sceneBlendedPso_, sceneMsBlendedPso_, sceneRtBlendedPso_, sceneMsRtBlendedPso_,
+              airVisPso_, airVisTex_, kAirVisResolution);
 
     if (missing) {
         AVER_ERROR("[Voxi] init FAILED: {} has a zero handle", missing);
         shutdown();
         return false;
     }
-    initialised_ = true;
+
+    giReady_    = true;
+    rtSupported_ = sceneRtPso_ != 0;
 
     // TLAS sized for draw-list cap, rebound only on foliage reallocation.
     if (rtSupported_) {
@@ -354,36 +369,20 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
         device.setDefaultDrawBinding(materials_.fallbackBindingSet(), &materials_.fallbackConstants(),
                                      sizeof(pbr::MaterialConstants));
 
-    AVER_INFO("[Voxi] init: resources ready (shadow tex={} volume={} accum={} ({}^3, {} mips) bindings={}/{}/{}/+{}); "
-              "pipelines build {}",
-              shadowTex_, voxelTex_, voxelAccumTex_, voxelResBuilt_, voxelMips_,
-              bindings_, clearBindings_, resolveBindings_, static_cast<u32>(mipBindings_.size()),
-              asyncBuilds_ ? "in the background" : "now");
-
-    startBuild(kPsoBase | kPsoScene);
-    if (asyncBuilds_) {
-        blocked_ = true;   // blank until the scene set lands; prePass re-latches this every frame
-        return true;
-    }
-    pumpBuilds(true);
-    if (failed_) {
-        shutdown();
-        return false;
-    }
+    AVER_INFO("[Voxi] ready: conservative raster {}, mesh-shader variants {}, ray-tracing variants {}, "
+              "blended (glass) variant {}, G-buffer variant {} (off by default -- dev_->gBufferEnabled() "
+              "is what turns it on per frame; see pickGbuf())",
+              caps_.conservativeRaster ? "on" : "off",
+              (voxelMsPso_ && sceneMsPso_) ? "built" : "absent",
+              rtSupported_ ? "built" : "absent",
+              sceneBlendedPso_ ? "built" : "absent",
+              sceneGbufPso_ ? "built" : "absent");
     return true;
 }
 
 // Destroys every resource and returns the feature to its uninitialised state.
 void VoxiRenderer::shutdown() {
     reportFrameTime("run total");
-    // Builds in flight are dropped unseen: their pipelines were never adopted, so nothing of theirs is
-    // in the factory to free.
-    for (std::unique_ptr<Build>& bd : builds_) bd->batch->cancel();
-    builds_.clear();
-    initialised_ = failed_ = blocked_ = targetsStale_ = false;
-    baseReady_ = sceneAdopted_ = coreChecked_ = baseStarted_ = false;
-    lazyRequested_ = 0;
-    ++sceneGen_;
     // Denoiser owns device resources; destroy before res_ check below.
     denoiser_.destroy();
     nrd2_.destroy();
@@ -398,13 +397,52 @@ void VoxiRenderer::shutdown() {
     if (bindings_)      res_->destroyBindingSet(bindings_);
     resolveBindings_ = clearBindings_ = bindings_ = 0;
 
-#define AVER_VOXI_DROP(n) do { if (n) res_->destroyPipeline(n); n = 0; } while (0);
-    AVER_VOXI_PSO_BASE(AVER_VOXI_DROP)
-    AVER_VOXI_PSO_SCENE(AVER_VOXI_DROP)
-    AVER_VOXI_PSO_RC(AVER_VOXI_DROP)
-    AVER_VOXI_PSO_PT(AVER_VOXI_DROP)
-    AVER_VOXI_PSO_NRD2(AVER_VOXI_DROP)
-#undef AVER_VOXI_DROP
+    const rhi::PipelineHandle psos[] = {shadowPso_, shadowInstancedPso_, giShadowPso_,
+                                        giShadowInstancedPso_, voxelPso_, voxelMsPso_, mipPso_,
+                                        clearPso_, resolvePso_, debugPso_, scenePso_, sceneMsPso_,
+                                        sceneRtPso_, sceneMsRtPso_, sceneBlendedPso_,
+                                        sceneMsBlendedPso_, sceneRtBlendedPso_, sceneMsRtBlendedPso_,
+                                        depthPrepassPso_, scenePsoPrepassed_, sceneRtPsoPrepassed_,
+                                        rayDrivenPso_,
+                                        sceneGbufPso_, sceneMsGbufPso_, sceneRtGbufPso_, sceneMsRtGbufPso_,
+                                        scenePsoPrepassedGbuf_, sceneRtPsoPrepassedGbuf_,
+                                        rayDrivenTexPso_, sceneRtBlendedTexPso_,
+                                        rayDrivenTexGbufPso_,
+                                        rayDrivenGbufPso_,
+                                        rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdGiCbCsPso_,
+                                        rdSkyOccCsPso_, rdReflCsPso_,
+                                        rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_,
+                                        rdShadowProbeCsPso_, rdShadowTiledCsPso_, rdTailVisCsPso_, rdTailFilterCsPso_,
+                                        rdGiTraceCsPso_, rdGiTraceCbCsPso_,
+                                        rdGiSplitCsPso_, rdGiSplitCbCsPso_,
+                                        rdGiCacheCsPso_, rdGiCacheCbCsPso_,
+                                        rdGiTraceCacheCsPso_, rdGiTraceCacheCbCsPso_,
+                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_, rdGiPtRcCbCsPso_, rdGiTracePtRcCbCsPso_, rdPtRefCsPso_, rdReflPtRcCsPso_, rdReflSplitPtRcCsPso_,
+                                        rdReflPtCsPso_, rdReflSplitPtCsPso_,
+                                        rdReflSplitCsPso_, rdReflFilterCsPso_,
+                                        rayDrivenSplitNrd2Pso_, rdHalfFillCsPso_,
+                                        airVisPso_};
+    for (rhi::PipelineHandle p : psos) if (p) res_->destroyPipeline(p);
+    shadowPso_ = shadowInstancedPso_ = giShadowPso_ = giShadowInstancedPso_ = 0;
+    voxelPso_ = voxelMsPso_ = mipPso_ = clearPso_ = resolvePso_ = debugPso_ = airVisPso_ = 0;
+    scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
+    sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
+    depthPrepassPso_ = scenePsoPrepassed_ = sceneRtPsoPrepassed_ = 0;
+    rayDrivenPso_ = rayDrivenTexPso_ = 0;
+    sceneRtBlendedTexPso_ = 0;
+    sceneGbufPso_ = sceneMsGbufPso_ = sceneRtGbufPso_ = sceneMsRtGbufPso_ = 0;
+    scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
+    rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
+    rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdGiCbCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
+    rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
+    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = rdTailVisCsPso_ = rdTailFilterCsPso_ = 0;
+    rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
+    rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
+    rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
+    rdGiPtRcCsPso_ = rdGiTracePtRcCsPso_ = rdGiPtRcCbCsPso_ = rdGiTracePtRcCbCsPso_ = rdPtRefCsPso_ = rdReflPtRcCsPso_ = rdReflSplitPtRcCsPso_ = 0;
+    rdReflPtCsPso_ = rdReflSplitPtCsPso_ = 0;
+    rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
+    rayDrivenSplitNrd2Pso_ = rdHalfFillCsPso_ = 0;
 
     if (voxelAccumTex_) res_->destroyTexture(voxelAccumTex_);
     if (voxelAccumPlaceholder_) res_->destroyTexture(voxelAccumPlaceholder_);
@@ -449,12 +487,9 @@ void VoxiRenderer::shutdown() {
     rdLocalLightsBound_ = 0;
     for (u64& k : rdGridSlotKey_) k = 0;
     rdGridCacheValid_ = false;
-    rdGridCanon_.valid = false;
-    rdGridLastSet_ = 0;
     rdLocalOutThisFrame_ = 0;
     rdLocalHistPrimed_ = false;
     rdLocalHistFrame_ = 0;
-    rdKeyFrame_ = 0;
     if (giRadiance_) { res_->destroyTexture(giRadiance_); giRadiance_ = 0; }
     if (giReservoirs_) { res_->destroyBuffer(giReservoirs_); giReservoirs_ = 0; }
     giReservoirElemCapacity_ = 0;
@@ -493,7 +528,6 @@ void VoxiRenderer::shutdown() {
     rcCreateFailed_ = false;
     rcTwinsTried_ = false;
     ptTwinsTried_ = false;
-    nrd2Tried_ = false;
     rdVisBufElemCapacity_ = 0;
     rdGiCandBufElemCapacity_ = rdShadowTileElemCapacity_ = 0;
     rdStagedW_ = rdStagedH_ = rdStagedRowPitch_ = 0;
@@ -1126,13 +1160,24 @@ void VoxiRenderer::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f
 // Runs Voxi's frame: acceleration structures, shadow map, voxelise, filter volume.
 void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     rdVisWrittenThisFrame_ = false;
-    // THE FRAME BOUNDARY for pipelines. Finished builds are adopted and new ones started here, before anything
-    // of this frame has been recorded, so a frame sees one consistent set of handles from its first command to
-    // its last. Everything below runs only when the set it needs stands; otherwise the device is told (through
-    // suppressesWholeFrame) to leave the frame blank, and no pass of ours records at all.
-    pumpBuilds(false);
-    if (!canRecord()) return;
-    if (rdSettle_) --rdSettle_;
+    if (!giReady_) return;
+    // Material graph appeared since pipelines were built.
+    if (scenePipelineGraphRev_ != pbr::materialGraphs().revision()) {
+        scenePipelineGraphRev_ = pbr::materialGraphs().revision();
+        AVER_INFO("[Voxi] rebuilding scene pipelines for {} material graph(s)",
+                  pbr::materialGraphs().count());
+        if (!createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(), dev_->depthFormat()))
+            AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for the material graphs");
+    }
+    // Shader file changed on disk; only safe to rebuild here.
+    if (scenePipelineShaderRev_ != rhi::shaderFileRevision()) {
+        scenePipelineShaderRev_ = rhi::shaderFileRevision();
+        AVER_INFO("[Voxi] rebuilding scene pipelines: shader files changed (revision {})",
+                  scenePipelineShaderRev_);
+        if (!createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(), dev_->depthFormat()))
+            AVER_ERROR("[Voxi] scene pipelines could not be rebuilt from the changed shader files -- "
+                       "the previous pipelines are still bound, so the last good shader keeps drawing");
+    }
     ++rtFrameIndex_;
     // Sample frame time at the TOP of the feature's frame.
     if (frameTimeReport_) {
@@ -1494,7 +1539,6 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
                 ++rtAccelMoverPatched_;
             } else if (settings_.rtRefitAccel && !rtDynamicMeshes_.empty()) {
                 refitDynamicAccelStructures(ctx);
-                rtDynBlasRefitFrame_ = rtFrameIndex_;
                 ++rtAccelRefitOnly_;
             } else {
                 ++rtAccelSkipped_;
@@ -2068,7 +2112,7 @@ void VoxiRenderer::latePatchMovers(rhi::IRenderContext& ctx) {
         }
     }
     if (patch != MoverPatch::MaterialsOnly) uploadRtInstanceTable();
-    if (!rtDynamicMeshes_.empty() && rtDynBlasRefitFrame_ != rtFrameIndex_) {
+    if (!rtDynamicMeshes_.empty()) {
         refitDynamicAccelStructures(ctx);
     } else {
         rhi::ScopedGpuStat gpuStat(ctx, "Voxi acceleration structures (movers)");
@@ -3770,210 +3814,6 @@ void VoxiRenderer::appendSceneLightCandidates(const f32 eye[3]) {
     }
 }
 
-// ---- Light grid helpers (buildLocalLights) ----
-static inline bool lightIsDirectional(const PackedLight& l) {
-    return static_cast<u32>(l.axisKind[3] + 0.5f) % 8u == kLightKindDirectional;
-}
-
-static u64 lightBytesHash(const PackedLight& l) {
-    u64 w[sizeof(PackedLight) / 8];
-    std::memcpy(w, &l, sizeof(w));
-    u64 h = 1469598103934665603ull;
-    for (const u64 x : w) { h = (h ^ x) * 1099511628211ull; h ^= h >> 29; }
-    return h;
-}
-
-// The grid cells a light reaches (inclusive); false when it lies outside the grid.
-static bool lightGridBox(const PackedLight& l, const f32 lo[3], f32 cell, const u32 dim[3], u32 c0[3], u32 c1[3]) {
-    const f32 range = l.radianceRange[3];
-    for (int a = 0; a < 3; ++a) {
-        const f32 a0 = (l.posRadius[a] - range - lo[a]) / cell, a1 = (l.posRadius[a] + range - lo[a]) / cell;
-        if (a1 < 0.0f || a0 >= static_cast<f32>(dim[a])) return false;
-        c0[a] = static_cast<u32>(std::max(a0, 0.0f));
-        c1[a] = std::min(static_cast<u32>(std::max(a1, 0.0f)), dim[a] - 1);
-    }
-    return true;
-}
-
-static f32 lightGridCellImp(const PackedLight& l, const f32 lo[3], f32 cell, u32 x, u32 y, u32 z) {
-    const f32 lum = 0.2126f * l.radianceRange[0] + 0.7152f * l.radianceRange[1] + 0.0722f * l.radianceRange[2];
-    const f32 r2 = std::max(l.posRadius[3] * l.posRadius[3], 1.0f);
-    const f32 cx = lo[0] + (x + 0.5f) * cell - l.posRadius[0];
-    const f32 cy = lo[1] + (y + 0.5f) * cell - l.posRadius[1];
-    const f32 cz = lo[2] + (z + 0.5f) * cell - l.posRadius[2];
-    // Distance to the cell's nearest point, so a light inside the cell ranks first.
-    const f32 h = cell * 0.866f;
-    const f32 d = std::max(std::sqrt(cx * cx + cy * cy + cz * cz) - h, 0.0f);
-    return lum * 1e4f / std::max(d * d, r2);
-}
-
-// Builds the cells in canonical light order. false (and not valid) if an importance is NaN, which has no order.
-bool VoxiRenderer::LightGridCanon::build(const RdLocalLight* L, u32 lightCount, const f32 loIn[3], f32 cellIn,
-                                         const u32 dimIn[3]) {
-    valid = false;
-    std::vector<u32> order;
-    order.reserve(lightCount);
-    for (u32 i = 0; i < lightCount; ++i)
-        if (!lightIsDirectional(L[i])) order.push_back(i);
-    std::sort(order.begin(), order.end(), [&](u32 a, u32 b) {
-        return std::memcmp(&L[a], &L[b], sizeof(RdLocalLight)) < 0;
-    });
-    const u32 M = static_cast<u32>(order.size());
-    lights.resize(M);
-    for (u32 k = 0; k < M; ++k) lights[k] = L[order[k]];
-    runLen.assign(M, 1u);
-    u32 runs = 0;
-    for (u32 k = 0; k < M;) {
-        u32 j = k + 1;
-        while (j < M && std::memcmp(&lights[j], &lights[k], sizeof(RdLocalLight)) == 0) ++j;
-        runLen[k] = j - k;
-        ++runs;
-        k = j;
-    }
-    usize cap = 16;
-    while (cap < static_cast<usize>(runs) * 2) cap <<= 1;
-    slots.assign(cap, 0u);
-    for (u32 k = 0; k < M; k += runLen[k]) {
-        usize s = lightBytesHash(lights[k]) & (cap - 1);
-        while (slots[s]) s = (s + 1) & (cap - 1);
-        slots[s] = k + 1;
-    }
-    for (int a = 0; a < 3; ++a) { lo[a] = loIn[a]; dim[a] = dimIn[a]; }
-    cell = cellIn;
-    const u32 cells = dim[0] * dim[1] * dim[2];
-    box.assign(static_cast<usize>(M) * 6, 0u);
-    cellN.assign(cells, 0u);
-    for (u32 k = 0; k < M; ++k) {
-        u32* bx = &box[static_cast<usize>(k) * 6];
-        bx[0] = bx[1] = bx[2] = 1u; bx[3] = bx[4] = bx[5] = 0u;
-        u32 c0[3], c1[3];
-        if (!lightGridBox(lights[k], lo, cell, dim, c0, c1)) continue;
-        for (int a = 0; a < 3; ++a) { bx[a] = c0[a]; bx[3 + a] = c1[a]; }
-        for (u32 z = c0[2]; z <= c1[2]; ++z)
-            for (u32 y = c0[1]; y <= c1[1]; ++y)
-                for (u32 x = c0[0]; x <= c1[0]; ++x) ++cellN[(z * dim[1] + y) * dim[0] + x];
-    }
-    poolOff.assign(cells, 0u);
-    cursorInit.assign(cells, 0u);
-    largeCells.clear();
-    table.assign(static_cast<usize>(cells) * 2, 0.0f);
-    u32 total = 0;
-    for (u32 c = 0; c < cells; ++c) {
-        const u32 n = cellN[c], take = std::min(n, kMaxLightsPerCell);
-        poolOff[c] = total;
-        table[c * 2] = static_cast<f32>(total);
-        table[c * 2 + 1] = static_cast<f32>(take);
-        cursorInit[c] = n > kMaxLightsPerCell ? kLarge : total;
-        if (n > kMaxLightsPerCell) largeCells.push_back(c);
-        total += take;
-    }
-    pool.assign(total, 0.0f);
-    bigOff.assign(cells, 0u);
-    bigCnt.assign(cells, 0u);
-    big.clear();
-    if (!largeCells.empty()) {
-        std::vector<u32> gOff(cells, 0u);
-        u32 g = 0;
-        for (const u32 c : largeCells) { gOff[c] = g; g += cellN[c]; }
-        std::vector<std::pair<f32, u32>> gather(g);
-        std::vector<u32> gCur = gOff;
-        for (u32 k = 0; k < M; ++k) {
-            const u32* bx = &box[static_cast<usize>(k) * 6];
-            if (bx[0] > bx[3] || bx[1] > bx[4] || bx[2] > bx[5]) continue;
-            for (u32 z = bx[2]; z <= bx[5]; ++z)
-                for (u32 y = bx[1]; y <= bx[4]; ++y)
-                    for (u32 x = bx[0]; x <= bx[3]; ++x) {
-                        const u32 c = (z * dim[1] + y) * dim[0] + x;
-                        if (cellN[c] <= kMaxLightsPerCell) continue;
-                        const f32 imp = lightGridCellImp(lights[k], lo, cell, x, y, z);
-                        if (imp != imp) return false;
-                        gather[gCur[c]++] = {imp, k};
-                    }
-        }
-        for (const u32 c : largeCells) {
-            auto* b = gather.data() + gOff[c];
-            const u32 n = cellN[c];
-            std::partial_sort(b, b + kMaxLightsPerCell, b + n, [](const auto& a, const auto& b2) {
-                return a.first != b2.first ? a.first > b2.first : a.second < b2.second;
-            });
-            // Whatever ties the last kept importance may still win a place once the list order breaks the tie.
-            const f32 edge = b[kMaxLightsPerCell - 1].first;
-            u32 keep = kMaxLightsPerCell;
-            for (u32 j = kMaxLightsPerCell; j < n; ++j)
-                if (b[j].first == edge) std::swap(b[keep++], b[j]);
-            bigOff[c] = static_cast<u32>(big.size());
-            bigCnt[c] = keep;
-            big.insert(big.end(), b, b + keep);
-        }
-    }
-    valid = true;
-    return true;
-}
-
-// Deals the cached cells out through this list's indices. false when the list is not exactly the cached lights (in
-// any order) under the same grid box; the caller rebuilds then.
-bool VoxiRenderer::LightGridCanon::fill(const RdLocalLight* L, u32 lightCount, const f32 loIn[3], f32 cellIn,
-                                        const u32 dimIn[3]) {
-    if (!valid || std::memcmp(lo, loIn, sizeof(lo)) != 0 || std::memcmp(&cell, &cellIn, sizeof(cell)) != 0 ||
-        std::memcmp(dim, dimIn, sizeof(dim)) != 0)
-        return false;
-    const u32 M = static_cast<u32>(lights.size());
-    canonOf.resize(lightCount);
-    listOf.resize(M);
-    used.assign(M, 0u);
-    const usize mask = slots.size() - 1;
-    u32 seen = 0;
-    for (u32 i = 0; i < lightCount; ++i) {
-        if (lightIsDirectional(L[i])) continue;
-        if (++seen > M) return false;
-        usize s = lightBytesHash(L[i]) & mask;
-        for (;;) {
-            const u32 e = slots[s];
-            if (!e) return false;
-            const u32 k = e - 1;
-            if (std::memcmp(&lights[k], &L[i], sizeof(RdLocalLight)) == 0) {
-                if (used[k] >= runLen[k]) return false;
-                canonOf[i] = k + used[k]++;
-                listOf[canonOf[i]] = i;
-                break;
-            }
-            s = (s + 1) & mask;
-        }
-    }
-    if (seen != M) return false;
-    // Small cells: lights in list order, as the rebuild scatters them. Large cells are cut below.
-    cursor = cursorInit;
-    f32* out = pool.data();
-    for (u32 i = 0; i < lightCount; ++i) {
-        if (lightIsDirectional(L[i])) continue;
-        const u32* bx = &box[static_cast<usize>(canonOf[i]) * 6];
-        if (bx[0] > bx[3] || bx[1] > bx[4] || bx[2] > bx[5]) continue;
-        const f32 fi = static_cast<f32>(i);
-        for (u32 z = bx[2]; z <= bx[5]; ++z)
-            for (u32 y = bx[1]; y <= bx[4]; ++y) {
-                u32* row = &cursor[(z * dim[1] + y) * dim[0]];
-                for (u32 x = bx[0]; x <= bx[3]; ++x)
-                    if (row[x] != kLarge) out[row[x]++] = fi;
-            }
-    }
-    // Large cells: best first by the cached importance, equal importances by list index (the rebuild's tie-break).
-    for (const u32 c : largeCells) {
-        const auto* b = &big[bigOff[c]];
-        const u32 n = bigCnt[c];
-        cut.resize(n);
-        for (u32 j = 0; j < n; ++j) cut[j] = {b[j].first, listOf[b[j].second]};
-        for (u32 r = 0; r < n;) {
-            u32 e = r + 1;
-            while (e < n && cut[e].first == cut[r].first) ++e;
-            if (e - r > 1)
-                std::sort(cut.begin() + r, cut.begin() + e, [](const auto& a, const auto& b2) { return a.second < b2.second; });
-            r = e;
-        }
-        for (u32 j = 0; j < kMaxLightsPerCell; ++j) out[poolOff[c] + j] = static_cast<f32>(cut[j].second);
-    }
-    return true;
-}
-
 // Local lights (lamps): non-empty when any draw has MaterialFlag_Light with lightIntensity > 0.
 // Range scales with emissive factor and bounding-sphere radius; lit to kLocalLightRangeCutoff of sun units.
 void VoxiRenderer::buildLocalLights() {
@@ -4106,9 +3946,6 @@ void VoxiRenderer::buildLocalLights() {
     // its kMaxLightsPerCell most important lights (irradiance at the cell centre); directional lights reach every
     // point and are not in the cells. Indices and offsets are exact in floats (well below 2^24).
     cb_.decalParams[1] = 0.0f;
-    // The cached grid tail of a hit stays in rdGridCache_; the upload reads it from there.
-    const RdLocalLight* gridTail = nullptr;
-    usize gridTailRecs = 0;
     if (lightCount > 0) {
         std::vector<u32> globals;
         f32 lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
@@ -4130,11 +3967,7 @@ void VoxiRenderer::buildLocalLights() {
         }
         u32 dim[3] = {1, 1, 1};
         f32 cell = 100.0f;
-        // A short list is walked whole (FLAT): every thread then reads the same light at once (a uniform load, cheap on
-        // any GPU), where per-thread grid cells make each lane load a different light. The grid pays off only for
-        // many lights.
-        const bool flat = lightCount <= kFlatLightList;
-        const bool anyLocal = !flat && lo[0] < hi[0] && lo[1] < hi[1] && lo[2] < hi[2];
+        const bool anyLocal = lo[0] < hi[0] && lo[1] < hi[1] && lo[2] < hi[2];
         if (anyLocal) {
             const f32 ext = std::max(hi[0] - lo[0], std::max(hi[1] - lo[1], hi[2] - lo[2]));
             cell = std::max(ext / static_cast<f32>(kLightGridMaxDim), 50.0f);
@@ -4150,13 +3983,12 @@ void VoxiRenderer::buildLocalLights() {
         // clamp that does not bind) reuses last frame's records. The sun moving does not invalidate it.
         u64 key = 1469598103934665603ull;
         auto mix = [&key](u64 v) { key = (key ^ v) * 1099511628211ull; key ^= key >> 29; };
-        u64 setKey = 0;   // the same lights in any order
         for (u32 i = 0; i < lightCount; ++i) {
             const RdLocalLight& l = rdLocalLightData_[i];
-            if (lightIsDirectional(l)) continue;
-            const u64 lh = lightBytesHash(l);
-            setKey += lh;
-            mix(lh);
+            if (static_cast<u32>(l.axisKind[3] + 0.5f) % 8u == kLightKindDirectional) continue;
+            u64 w[sizeof(RdLocalLight) / 8];
+            std::memcpy(w, &l, sizeof(w));
+            for (const u64 x : w) mix(x);
         }
         for (int a = 0; a < 3; ++a) {
             u32 b;
@@ -4165,33 +3997,29 @@ void VoxiRenderer::buildLocalLights() {
             mix(dim[a]);
         }
         mix(anyLocal ? 1u : 0u);
-        mix(flat ? 1u : 0u);
         mix(lightCount);
         for (const u32 g : globals) mix(g);
         if (rdGridCacheValid_ && rdGridCacheKey_ == key) {
-            gridTail = rdGridCache_.data();
-            gridTailRecs = rdGridCache_.size();
+            rdLocalLightData_.insert(rdLocalLightData_.end(), rdGridCache_.begin(), rdGridCache_.end());
             cb_.decalParams[1] = static_cast<f32>(headerRec);
         } else {
-        // The same lights as a cached build, only reordered: deal the cached cells out instead of rebuilding them. A
-        // set seen on two frames in a row gets that cache built; a set that changes every frame never pays for it.
-        bool dealt = false;
-        if (anyLocal) {
-            dealt = rdGridCanon_.fill(rdLocalLightData_.data(), lightCount, lo, cell, dim);
-            if (!dealt && setKey == rdGridLastSet_ &&
-                rdGridCanon_.build(rdLocalLightData_.data(), lightCount, lo, cell, dim))
-                dealt = rdGridCanon_.fill(rdLocalLightData_.data(), lightCount, lo, cell, dim);
-        }
-        rdGridLastSet_ = setKey;
-        std::vector<f32> table, pool;
-        if (!dealt) {
         // Counting-sort layout, scratch reused across frames (no per-cell vectors).
         thread_local std::vector<u32> start, cursor, boxes;
         thread_local std::vector<std::pair<f32, u32>> entries;
         start.assign(static_cast<usize>(anyLocal ? cells : 0u) + 1, 0u);
         boxes.clear();
         entries.clear();
-        auto cellImp = [&](const RdLocalLight& l, u32 x, u32 y, u32 z) { return lightGridCellImp(l, lo, cell, x, y, z); };
+        auto cellImp = [&](const RdLocalLight& l, u32 x, u32 y, u32 z) {
+            const f32 lum = 0.2126f * l.radianceRange[0] + 0.7152f * l.radianceRange[1] + 0.0722f * l.radianceRange[2];
+            const f32 r2 = std::max(l.posRadius[3] * l.posRadius[3], 1.0f);
+            const f32 cx = lo[0] + (x + 0.5f) * cell - l.posRadius[0];
+            const f32 cy = lo[1] + (y + 0.5f) * cell - l.posRadius[1];
+            const f32 cz = lo[2] + (z + 0.5f) * cell - l.posRadius[2];
+            // Distance to the cell's nearest point, so a light inside the cell ranks first.
+            const f32 h = cell * 0.866f;
+            const f32 d = std::max(std::sqrt(cx * cx + cy * cy + cz * cz) - h, 0.0f);
+            return lum * 1e4f / std::max(d * d, r2);
+        };
         if (anyLocal) {
             boxes.assign(static_cast<usize>(lightCount) * 6, 0u);   // c0[3], c1[3]; c0 > c1 = not in the grid
             for (u32 i = 0; i < lightCount; ++i) {
@@ -4199,8 +4027,16 @@ void VoxiRenderer::buildLocalLights() {
                 u32* bx = &boxes[static_cast<usize>(i) * 6];
                 bx[0] = bx[1] = bx[2] = 1u; bx[3] = bx[4] = bx[5] = 0u;
                 if (static_cast<u32>(l.axisKind[3] + 0.5f) % 8u == kLightKindDirectional) continue;
+                const f32 range = l.radianceRange[3];
                 u32 c0[3], c1[3];
-                if (!lightGridBox(l, lo, cell, dim, c0, c1)) continue;
+                bool inside = true;
+                for (int a = 0; a < 3; ++a) {
+                    const f32 a0 = (l.posRadius[a] - range - lo[a]) / cell, a1 = (l.posRadius[a] + range - lo[a]) / cell;
+                    if (a1 < 0.0f || a0 >= static_cast<f32>(dim[a])) { inside = false; break; }
+                    c0[a] = static_cast<u32>(std::max(a0, 0.0f));
+                    c1[a] = std::min(static_cast<u32>(std::max(a1, 0.0f)), dim[a] - 1);
+                }
+                if (!inside) continue;
                 for (int a = 0; a < 3; ++a) { bx[a] = c0[a]; bx[3 + a] = c1[a]; }
                 for (u32 z = c0[2]; z <= c1[2]; ++z)
                     for (u32 y = c0[1]; y <= c1[1]; ++y)
@@ -4220,7 +4056,7 @@ void VoxiRenderer::buildLocalLights() {
             }
         }
         // Encode.
-        table.assign(static_cast<usize>(cells) * 2, 0.0f);
+        std::vector<f32> table(static_cast<usize>(cells) * 2, 0.0f), pool;
         pool.reserve(entries.size());
         for (u32 c = 0; c < (anyLocal ? cells : 0u); ++c) {
             auto* b = entries.data() + start[c];
@@ -4234,13 +4070,10 @@ void VoxiRenderer::buildLocalLights() {
             table[c * 2 + 1] = static_cast<f32>(n);
             for (u32 k = 0; k < n; ++k) pool.push_back(static_cast<f32>(b[k].second));
         }
-        }
-        const std::vector<f32>& tableF = dealt ? rdGridCanon_.table : table;
-        const std::vector<f32>& poolF = dealt ? rdGridCanon_.pool : pool;
         const u32 tableRec  = headerRec + 1;
-        const u32 tableRecs = static_cast<u32>((tableF.size() + kF - 1) / kF);
+        const u32 tableRecs = static_cast<u32>((table.size() + kF - 1) / kF);
         const u32 poolRec   = tableRec + tableRecs;
-        const u32 poolRecs  = static_cast<u32>((poolF.size() + kF - 1) / kF);
+        const u32 poolRecs  = static_cast<u32>((pool.size() + kF - 1) / kF);
         RdLocalLight header{};
         for (int a = 0; a < 3; ++a) header.posRadius[a] = lo[a];
         header.posRadius[3] = cell;
@@ -4249,14 +4082,13 @@ void VoxiRenderer::buildLocalLights() {
         for (u32 g = 0; g < 3; ++g) header.axisKind[g] = g < globals.size() ? static_cast<f32>(globals[g]) : -1.0f;
         header.axisKind[3] = static_cast<f32>(globals.size());
         header.shape[0] = static_cast<f32>(poolRec);
-        header.shape[1] = flat ? static_cast<f32>(lightCount) : 0.0f;   // > 0: walk lights [0, n) whole
         rdLocalLightData_.push_back(header);
         const usize base = rdLocalLightData_.size();
         rdLocalLightData_.resize(base + tableRecs + poolRecs);
         f32* raw = reinterpret_cast<f32*>(rdLocalLightData_.data());
         std::memset(raw + base * kF, 0, (tableRecs + poolRecs) * sizeof(RdLocalLight));
-        std::memcpy(raw + static_cast<usize>(tableRec) * kF, tableF.data(), tableF.size() * sizeof(f32));
-        std::memcpy(raw + static_cast<usize>(poolRec) * kF, poolF.data(), poolF.size() * sizeof(f32));
+        std::memcpy(raw + static_cast<usize>(tableRec) * kF, table.data(), table.size() * sizeof(f32));
+        std::memcpy(raw + static_cast<usize>(poolRec) * kF, pool.data(), pool.size() * sizeof(f32));
         cb_.decalParams[1] = static_cast<f32>(headerRec);
         rdGridCache_.assign(rdLocalLightData_.begin() + headerRec, rdLocalLightData_.end());
         rdGridCacheKey_ = key;
@@ -4266,11 +4098,10 @@ void VoxiRenderer::buildLocalLights() {
     }
 
     if (!rdLocalLightData_.empty()) {
-        const usize totalRecs = rdLocalLightData_.size() + gridTailRecs;
         // Grown when the list outgrows it, with headroom, never shrunk.
-        if (rdLocalLightCapacity_ < totalRecs) {
+        if (rdLocalLightCapacity_ < rdLocalLightData_.size()) {
             // Every slot or none: a half-built ring would bind a null buffer on its missing turns.
-            const u32 want = static_cast<u32>(totalRecs * 3 / 2 + 64);
+            const u32 want = static_cast<u32>(rdLocalLightData_.size() * 3 / 2 + 64);
             bool ok = true;
             for (u32 i = 0; i < kRtInstanceRing; ++i) {
                 if (rdLocalLights_[i]) res_->destroyBuffer(rdLocalLights_[i]);
@@ -4284,11 +4115,11 @@ void VoxiRenderer::buildLocalLights() {
             rdLocalLightCapacity_ = ok ? want : 0;
             for (u64& k : rdGridSlotKey_) k = 0;
         }
-        if (rdLocalLightCapacity_ >= totalRecs) {
+        if (rdLocalLightCapacity_ >= rdLocalLightData_.size()) {
             // Rotate BEFORE writing, so this frame never touches the buffer the previous one bound.
             rdLocalLightSlot_ = (rdLocalLightSlot_ + 1) % kRtInstanceRing;
             const rhi::BufferHandle buf = rdLocalLights_[rdLocalLightSlot_];
-            const u32 records = static_cast<u32>(totalRecs);
+            const u32 records = static_cast<u32>(rdLocalLightData_.size());
             // The grid tail (up to ~3 MB) is rewritten only when this ring slot does not already hold it.
             u32 writeRecords = records;
             if (rdGridKeyNow_ != 0 && cb_.decalParams[1] > 0.5f) {
@@ -4296,14 +4127,7 @@ void VoxiRenderer::buildLocalLights() {
                 if (rdGridSlotKey_[rdLocalLightSlot_] == rdGridKeyNow_) writeRecords = headRecords;
                 else rdGridSlotKey_[rdLocalLightSlot_] = rdGridKeyNow_;
             }
-            if (gridTail) {
-                const usize headRecs = rdLocalLightData_.size();
-                res_->writeBuffer(buf, rdLocalLightData_.data(), sizeof(RdLocalLight) * headRecs, 0);
-                if (writeRecords > headRecs)
-                    res_->writeBuffer(buf, gridTail, sizeof(RdLocalLight) * gridTailRecs, sizeof(RdLocalLight) * headRecs);
-            } else {
-                res_->writeBuffer(buf, rdLocalLightData_.data(), sizeof(RdLocalLight) * writeRecords, 0);
-            }
+            res_->writeBuffer(buf, rdLocalLightData_.data(), sizeof(RdLocalLight) * writeRecords, 0);
             res_->setSrvBuffer(bindings_, 18, buf, sizeof(RdLocalLight), records, 0);
             rdLocalLightsBound_ = buf;
             // The raster path's working set: the first lamps (the list is importance-ordered), never the sun.
@@ -4365,10 +4189,7 @@ bool VoxiRenderer::publishLocalLights(bool live, const char* pass) {
     cb_.cameraMedium[2] = static_cast<f32>(rdLocalLightCount_);
     // Two bits: 1 = history valid; 2 = every lamp-flagged draw is a live light this frame, so the GI
     // estimators may drop an emitter's own emission (rdLocalLightsCarryAll_).
-    // Bit 8: last frame's CSRdShadow wrote the light keys in u19 (the sun's shadow history is reused only under them).
-    const bool keysValid = rdKeyFrame_ != 0 && rdKeyFrame_ + 1u == rtFrameIndex_;
-    cb_.cameraMedium[3] = (histValid ? 1.0f : 0.0f) + (rdLocalLightsCarryAll_ ? 2.0f : 0.0f) + 4.0f +
-                          (keysValid ? 8.0f : 0.0f);
+    cb_.cameraMedium[3] = (histValid ? 1.0f : 0.0f) + (rdLocalLightsCarryAll_ ? 2.0f : 0.0f) + 4.0f;
     if (!rdLocalLightsRunLogged_) {
         rdLocalLightsRunLogged_ = true;
         AVER_INFO("[Voxi] local lights running: {} lamp(s) this frame, shaded by {}",
@@ -4734,7 +4555,7 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx, usize begin, usize end
     // own mesh-shader pipeline, off by default as a real behaviour change). Voxelisation has no such
     // wrinkle: same `vox` desc, same PSVoxel pixel shader either way, MSVoxel running the identical
     // dominant-axis projection VSVoxel+GSVoxel do (see MSVoxel's comment for the normal-transform bug
-    // this depended on fixing first). recordBasePipelines() builds voxelMsPso_ regardless of
+    // this depended on fixing first). createPipelines() already validates voxelMsPso_ regardless of
     // the setting, so `voxelMsPso_ != 0` alone means the device proved it can do this; GSVoxel is the
     // fallback for no mesh-shader tier.
     const bool useMs = voxelMsPso_ != 0;
@@ -4867,7 +4688,7 @@ void VoxiRenderer::filterMips(rhi::IRenderContext& ctx) {
 
 // Hands the backend Voxi's per-frame constant block.
 bool VoxiRenderer::sceneConstants(const void** data, u32* bytes) const {
-    if (!canRecord()) return false;
+    if (!giReady_) return false;
     *data = &cb_; *bytes = sizeof(cb_);
     return true;
 }
@@ -4880,7 +4701,7 @@ bool VoxiRenderer::blendedDrawReadsBackdrop(const void* materialConstants, u32 b
 }
 
 // True once the feature is up: shadowing and the bounce are terms inside Voxi's lit pixel shader.
-bool VoxiRenderer::overridesScenePipeline() const { return canRecord(); }
+bool VoxiRenderer::overridesScenePipeline() const { return giReady_; }
 
 // True while the debug view replaces the scene, including the backend's line draws.
 // Two reasons to replace the scene, not interchangeable -- see shadowHistoryActive() in the header,
@@ -4889,26 +4710,14 @@ bool VoxiRenderer::overridesScenePipeline() const { return canRecord(); }
 // feature is not on the stack then -- see IRenderFeature::sceneBindlessTable.
 rhi::BindlessTableHandle VoxiRenderer::sceneBindlessTable() const { return rtTexTable_; }
 
-// While the scene set builds (blocked_, latched at prePass) Voxi claims the scene and records nothing: the
-// frame is blank rather than drawn by a half-built renderer.
-bool VoxiRenderer::suppressesScene() const {
-    return blocked_ || targetsStale_ || graphStale() || rdSettling() || debugViewActive() || rayDrivenActive();
-}
+bool VoxiRenderer::suppressesScene() const { return debugViewActive() || rayDrivenActive(); }
 
 // Debug raymarch has no depth; ray-driven writes real depth so sky lands on ray misses.
-bool VoxiRenderer::suppressesWholeFrame() const {
-    return blocked_ || targetsStale_ || graphStale() || rdSettling() || debugViewActive();
-}
-
-bool VoxiRenderer::graphStale() const {
-    return sceneAdopted_ && (builtGraphRev_ != pbr::materialGraphs().revision() ||
-                             builtShaderRev_ != rhi::shaderFileRevision());
-}
+bool VoxiRenderer::suppressesWholeFrame() const { return debugViewActive(); }
 
 // Draws the scene pass replacement (debug view or ray-driven); debug wins if both are active.
 void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
     ptRanThisFrame_ = false;
-    if (!canRecord()) return;   // blank frame, or the targets changed under a late scene pass
     translucentInPath_ = false;
     // Recorded late (wantsLateScenePass) this frame's draws exist; bring the movers up to date first.
     if ((!draws_.empty() || rtRefitDeferred_) && !debugViewActive() && rayDrivenActive()) latePatchMovers(ctx);
@@ -5009,9 +4818,6 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     const u32 dispatchH = curSceneViewport_[3] > 0.0f ? static_cast<u32>(curSceneViewport_[3]) : 0u;
     const u32 gx = (dispatchW + 7u) / 8u;   // every staged compute stage declares [numthreads(8,8,1)]
     const u32 gy = (dispatchH + 7u) / 8u;
-    // Wave-coherent half rate (voxi.hlsl rdHrThread): gViewParams.w bit 20, and twice the groups over 16-wide blocks.
-    constexpr u32 kHrCoherentBit = 1u << 20;
-    const u32 hrGx = 2u * ((dispatchW + 15u) / 16u);
 
     // Row pitch rides viewParams.w for these uploads only.
     cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);
@@ -5051,7 +4857,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
 
     // Path Tracing, Reference mode: Stage B traces each pixel's whole path itself, so the GI, sky-occlusion,
     // lamp and reflection stages have nothing to give it (lamps are still published for its next-event pick).
-    if (pathTracingWanted() && !ptTwinsTried_) requestBuild(kPsoPt);
+    if (pathTracingWanted() && !ptTwinsTried_) createPathTraceTwins();
     const bool ptRef = ptReferenceWanted() && rdPtRefCsPso_ != 0;
     if (ptRef) ptRanThisFrame_ = true;
     // Without its pass Stage B must not take the reference branch (bit 4 of ptBounceParams.x).
@@ -5095,26 +4901,6 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     // PATH TRACING: the AVER_PT_PATHS twins take the GI-candidate and reflection dispatches.
     const bool pt = pathTracingWanted();
     bool skyOccRan = false, reflRan = false;   // CSRdHalfFill's inputs
-    const bool tailOn = localLights && rdTailVisCsPso_ && rdTailFilterCsPso_ && rdLocalOutThisFrame_ && gx && gy;
-    const bool tailDeferred = tailOn && !perStage;
-    auto recordTailVis = [&] {
-        ctx.setPipeline(rdTailVisCsPso_);
-        ctx.setBindingSet(bindings_);
-        ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
-        ctx.setBindlessTable(rtTexTable_);
-        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-        ctx.dispatch(((dispatchW + 1u) / 2u + 7u) / 8u, ((dispatchH + 1u) / 2u + 7u) / 8u, 1);
-    };
-    auto recordTailFilter = [&] {
-        ctx.setPipeline(rdTailFilterCsPso_);
-        ctx.setBindingSet(bindings_);
-        ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
-        ctx.setBindlessTable(rtTexTable_);
-        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-        ctx.dispatch(gx, gy, 1);
-        rdLocalHistFrame_ = rtFrameIndex_;
-        rdLocalHistHash_ = rdLocalLightHash_;
-    };
     {
         // Wraps every dispatch below -- see this function's comment on why no barrier or timestamp
         // sits between the four lighting stages (S1/G1 just below are the one exception).
@@ -5228,24 +5014,30 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         ctx.setBindlessTable(rtTexTable_);
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
         if (gx && gy) ctx.dispatch(gx, gy, 1);
-        if (localLights && gx && gy) rdKeyFrame_ = rtFrameIndex_;
         if (giSplit) ctx.uavBarrierBuffer(rdGiCandBuf_);   // G1's candidates, for CSRdGi below
         // CSRdTailVis reads CSRdShadow's exact light (gRdLocalOut.x) and depth (gRdSunVisTex.a), then writes the tail's
-        // shadow fraction (gRdLocalOut.a, next frame's lamp history); CSRdTailFilter its 5x5 (.z). GI, sky occlusion and
-        // reflections read neither, so outside per-stage timing TailVis shares their barrier-free group and the filter
-        // runs after it (with CSRdHalfFill).
-        if (tailOn && !tailDeferred) {
+        // shadow fraction (gRdLocalOut.a, next frame's lamp history); CSRdTailFilter its 5x5 (.z).
+        if (localLights && rdTailVisCsPso_ && rdTailFilterCsPso_ && rdLocalOutThisFrame_ && gx && gy) {
             stageEnd(rdSunVisTex_);
             stageBegin("Voxi RD tail lights");
             ctx.uavBarrierTexture(rdLocalOutThisFrame_);
             ctx.uavBarrierTexture(rdSunVisTex_);
-            recordTailVis();
-            ctx.uavBarrierTexture(rdLocalOutThisFrame_);   // the 5x5 reads the neighbours' fractions
-            recordTailFilter();
-        } else if (tailDeferred) {
+            ctx.setPipeline(rdTailVisCsPso_);
+            ctx.setBindingSet(bindings_);
+            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+            ctx.setBindlessTable(rtTexTable_);
+            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+            ctx.dispatch(((dispatchW + 1u) / 2u + 7u) / 8u, ((dispatchH + 1u) / 2u + 7u) / 8u, 1);
+            // The 5x5 reads the neighbours' fractions.
             ctx.uavBarrierTexture(rdLocalOutThisFrame_);
-            ctx.uavBarrierTexture(rdSunVisTex_);
-            recordTailVis();
+            ctx.setPipeline(rdTailFilterCsPso_);
+            ctx.setBindingSet(bindings_);
+            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+            ctx.setBindlessTable(rtTexTable_);
+            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+            ctx.dispatch(gx, gy, 1);
+            rdLocalHistFrame_ = rtFrameIndex_;
+            rdLocalHistHash_ = rdLocalLightHash_;
         }
         if (perStage && rdLocalOutThisFrame_) ctx.uavBarrierTexture(rdLocalOutThisFrame_);   // the light slots
         stageEnd(rdSunVisTex_);
@@ -5270,18 +5062,15 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
-            // NRD2 frames: wave-coherent checkerboard (bit 20, voxi.hlsl rdHrThread), twice the groups in X.
-            const bool giCoherent = giCb && nrd2Frame_;
             if (giCb) {
                 // Bit 16 carries the checkerboard parity, for this one upload only.
-                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | (giCbParityWritten_ << 16) |
-                                                     (giCoherent ? kHrCoherentBit : 0u));
+                cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | (giCbParityWritten_ << 16));
                 ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
                 cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);   // restore before any later upload
             } else {
                 ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
             }
-            if (gx && gy) ctx.dispatch(giCoherent ? hrGx : gx, gy, 1);
+            if (gx && gy) ctx.dispatch(gx, gy, 1);
             stageEnd(rdGiTex_);
         }
         // Reference path tracing: one path per pixel into gRdGiTex, which Stage B shades the pixel with.
@@ -5308,11 +5097,8 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
-            const bool aoCoherent = nrd2Frame_ && (static_cast<u32>(cb_.giShadowParams[3]) & 128u) != 0u;
-            if (aoCoherent) cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | kHrCoherentBit);
             ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-            cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);
-            if (gx && gy) ctx.dispatch(aoCoherent ? hrGx : gx, gy, 1);
+            if (gx && gy) ctx.dispatch(gx, gy, 1);
             stageEnd(rdAoTex_);
         }
 
@@ -5329,11 +5115,8 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
             ctx.setBindlessTable(rtTexTable_);
-            const bool reflCoherent = nrd2Frame_ && !reflSplit && (static_cast<u32>(cb_.giShadowParams[3]) & 4u) != 0u;
-            if (reflCoherent) cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_ | kHrCoherentBit);
             ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
-            cb_.viewParams[3] = static_cast<f32>(rdStagedRowPitch_);
-            if (gx && gy) ctx.dispatch(reflCoherent ? hrGx : gx, gy, 1);
+            if (gx && gy) ctx.dispatch(gx, gy, 1);
             stageEnd(rdReflTex_);
         }
         if (!perStage) ctx.popMarker();
@@ -5372,7 +5155,6 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     if (cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f && giSurfNrmHist_[giNrmWrite])
         ctx.uavBarrierTexture(giSurfNrmHist_[giNrmWrite]);
 
-    bool tailFilterPending = tailDeferred;   // after the group's barriers above; shares CSRdHalfFill's group
     // NRD2 half rate: CSRdHalfFill fills each skipped checkerboard half from this frame's traced one.
     if (nrd2Frame_ && rdHalfFillCsPso_ && gx && gy) {
         const u32 hrBits = static_cast<u32>(cb_.giShadowParams[3]);
@@ -5383,7 +5165,6 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             rhi::ScopedGpuStat stat(ctx, "Voxi RD half-rate fill");
             ctx.uavBarrierTexture(nrd2_.targets().diffuse);    // CSRdShadow's normal guide (u3)
             ctx.uavBarrierTexture(nrd2_.targets().specular);   // CSRdRefl's skip marks and hit distances (u23)
-            if (tailFilterPending) { recordTailFilter(); tailFilterPending = false; }
             ctx.setPipeline(rdHalfFillCsPso_);
             ctx.setBindingSet(bindings_);
             ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
@@ -5399,9 +5180,6 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
             if (fillRefl) ctx.uavBarrierTexture(rdReflTex_);
         }
     }
-
-    if (tailFilterPending) recordTailFilter();
-    if (tailDeferred) ctx.uavBarrierTexture(rdLocalOutThisFrame_);   // the filtered fractions, for Stage B
 
     // Sub-stage C, R2: CSRdReflFilter -- reruns rtReflectionSpatial against R1's gRtReflHistOut write.
     if (reflSplit) {
@@ -5506,18 +5284,15 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     }
 }
 
-// Remembers the new targets, resizes the ray-traced histories to match, and asks for scene pipelines that bake
-// the new sample count and formats. This can run in the middle of a frame (a setting applied from the UI), so
-// the pipelines are neither built nor swapped here: targetsStale_ stops every recorder at once, and pumpBuilds
-// starts the build at the next frame boundary. In synchronous mode it rebuilds on the spot, as it always did.
+// Rebuilds the pipelines that bake the sample count and the target formats, and resizes the
+// ray-traced shadow history to match the new resolution.
 void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
                                           u32 width, u32 height) {
-    if (!res_ || !initialised_) return;
-    wantSamples_ = sampleCount;
-    wantColor_ = color;
-    wantDepth_ = depth;
-    if (sceneAdopted_ && (builtSamples_ != sampleCount || builtColor_ != color || builtDepth_ != depth))
-        targetsStale_ = true;
+    if (!res_ || !giReady_) return;
+    if (!createScenePipelines(sampleCount, color, depth))
+        AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for {} sample(s)", sampleCount);
+    scenePipelineGraphRev_ = pbr::materialGraphs().revision();
+    scenePipelineShaderRev_ = rhi::shaderFileRevision();   // same reason as the line above
     // Remembered even when the call below decides to allocate nothing: setSettings needs a size to
     // create at if ray tracing is switched on later.
     rtHistWantW_ = width;
@@ -5526,7 +5301,6 @@ void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rh
         AVER_ERROR("[Voxi] ray-traced shadow history could not be (re)created at {}x{}", width, height);
     if (!ensureRdStagedResources(width, height))
         AVER_ERROR("[Voxi] staged ray-driven resources could not be (re)created at {}x{}", width, height);
-    if (!asyncBuilds_) pumpBuilds(true);
 }
 
 // Local lights: points t19/u19 back at the placeholder, THEN destroys the pair -- never outlive.
@@ -5540,7 +5314,6 @@ void VoxiRenderer::releaseLocalHistory() {
     rdLocalOutThisFrame_ = 0;
     rdLocalHistPrimed_ = false;
     rdLocalHistFrame_ = 0;
-    rdKeyFrame_ = 0;
 }
 
 // (Re)creates the ray-traced shadow AND reflection histories at the given resolution. All four
@@ -5845,22 +5618,65 @@ bool VoxiRenderer::nrd2Wanted() const {
            rayDrivenSplitTexGbufPso_ != 0;
 }
 
-// Builds, and waits for, the variants otherwise made on first use: NRD2 (its pipelines, the compose draw and
-// Stage B's AVER_NRD2 variant), the Path Tracing twins and the NeuRaC twins. Outside a frame only.
+// Builds NRD2 once per createScenePipelines (its pipelines, the compose draw and Stage B's AVER_NRD2
+// variant), then sizes its targets. False: this frame runs without it (FidelityFX if it is valid).
 void VoxiRenderer::buildAllVariants() {
-    if (!res_ || !initialised_) return;
-    lazyRequested_ |= kPsoRc | kPsoPt | kPsoNrd2;
-    pumpBuilds(true);
+    if (!res_ || !giReady_) return;
+    ensureNrd2();
+    if (!ptTwinsTried_) createPathTraceTwins();
+    if (!rcTwinsTried_) createNeuRaCTwins();
 }
 
-// NRD2 asked for and the frame can use it: built (once per scene set), then sized. False: this frame runs
-// without it (FidelityFX if it is valid), including while its pipelines are still building.
 bool VoxiRenderer::ensureNrd2() {
     if (!nrd2Tried_) {
-        requestBuild(kPsoNrd2);   // synchronous mode has built and adopted it when this returns
-        if (!nrd2Tried_) return false;
+        nrd2Tried_ = true;
+        if (!nrd2_.valid()) nrd2_.create(*dev_);
+        if (nrd2_.valid() && !nrd2_.composeValid()) {
+            const rhi::Format gbuf[3] = {rhi::Format::RG16F, rhi::Format::R32Float, rhi::Format::RGB10A2Unorm};
+            nrd2_.createCompose(sceneColorFmt_, gbuf, sceneDepthFmt_, sceneSampleCount_);
+        }
+        if (nrd2_.valid() && nrd2_.composeValid() && !rayDrivenSplitNrd2Pso_ && rtTexTable_) {
+            ShaderScope compile(*res_);
+            const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
+                                                                  layeredBsdf_);
+            const std::string bindless = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
+                                         std::to_string(kRtTextureCapacity);
+            const std::string ablate = rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string();
+            const rhi::ShaderHandle vs = compile("VSky", rhi::ShaderStage::Vertex, kBaseSm,
+                                                 (matDefs + ";" + bindless).c_str());
+            const rhi::ShaderHandle ps = compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
+                                                 (matDefs + ";" + bindless + ablate +
+                                                  ";AVER_GBUFFER=1;AVER_RD_SPLIT=1;AVER_NRD2=1").c_str());
+            if (vs && ps) {
+                rhi::GraphicsPipelineDesc p;
+                p.vs = vs; p.ps = ps;
+                p.layout = giLayout(kRtTextureCapacity);
+                p.cull = rhi::CullMode::None;
+                p.depth = {true, true, rhi::CompareOp::Always};
+                p.renderTargetCount = 4;
+                p.renderTargets[0] = sceneColorFmt_;
+                p.renderTargets[1] = rhi::Format::RG16F;
+                p.renderTargets[2] = rhi::Format::R32Float;
+                p.renderTargets[3] = rhi::Format::RGB10A2Unorm;
+                p.depthFormat = sceneDepthFmt_;
+                p.sampleCount = sceneSampleCount_;
+                rayDrivenSplitNrd2Pso_ = res_->createGraphicsPipeline(p);
+            }
+            // Optional: without it NRD2 frames trace every feature at full rate.
+            if (const rhi::ShaderHandle cs = compile("CSRdHalfFill", rhi::ShaderStage::Compute, 66,
+                                                     (matDefs + ";" + bindless + ablate).c_str())) {
+                rhi::ComputePipelineDesc p;
+                p.cs = cs;
+                p.layout = giLayout(kRtTextureCapacity);
+                rdHalfFillCsPso_ = res_->createComputePipeline(p);
+            }
+            if (!rdHalfFillCsPso_)
+                AVER_WARN("[Voxi] NRD2's half-rate fill (CSRdHalfFill) did not compile; NRD2 frames trace "
+                          "GI, reflections and sky occlusion at full rate");
+        }
+        if (nrd2_.valid() && nrd2_.composeValid() && rayDrivenSplitNrd2Pso_)
+            AVER_INFO("[Voxi] NRD2 ready (Stage B split variant, pyramid/resolve passes, compose draw)");
     }
-    if (buildInFlight(kPsoNrd2)) return false;
     if (!nrd2_.valid() || !nrd2_.composeValid() || !rayDrivenSplitNrd2Pso_) {
         if (!nrd2FallbackLogged_) {
             nrd2FallbackLogged_ = true;
@@ -6323,13 +6139,11 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     const bool denoiseAoSignal = rtAoHitDist_ != 0 &&
                                  (!rayDrivenActive() || (lightingLegacyBits_ & 32u) != 0u);
     // Reflections: last frame's CSRdRefl wrote rdReflDnIn_ (u23 was bound to it).
-    // ONE FidelityFX decision per frame: dispatch below, and whether this frame's CSRdRefl feeds it (u23).
-    // Denoiser None runs no denoiser: the G-buffer can still be on for TAA or frame interpolation.
-    const bool ffxFrame = !nrd2Frame_ && settings_.denoiser && denoiser_.valid() && gbufWritten;
-    const bool reflDnWanted = ffxFrame && settings_.denoiseReflections && rdReflDnIn_ != 0;
-    const bool denoiseReflSignal = reflDnWanted && rdReflDnBound_;
+    const bool denoiseReflSignal = settings_.denoiseReflections && rdReflDnIn_ != 0 && rdReflDnBound_;
     denoiseReflOutput_ = 0;
-    if (ffxFrame && (denoiseAoSignal || denoiseGiSignal || denoiseReflSignal)) {
+    // Denoiser None runs no denoiser: the G-buffer can still be on for TAA or frame interpolation.
+    if (!nrd2Frame_ && settings_.denoiser && denoiser_.valid() && gbufWritten &&
+        (denoiseAoSignal || denoiseGiSignal || denoiseReflSignal)) {
         render::denoise::Denoiser::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();
         in.motionVectors   = dev_->gBufferVelocityTexture();
@@ -6410,7 +6224,9 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     else                  res_->clearSrv(bindings_, 15);
     if (denoiseReflOutput_) res_->setSrv(bindings_, 23, denoiseReflOutput_);
     else                    res_->clearSrv(bindings_, 23);
-    // This frame's CSRdRefl writes the denoiser's input only while it can run next frame (reflDnWanted).
+    // This frame's CSRdRefl writes the denoiser's input only while it can run next frame.
+    const bool reflDnWanted = !nrd2Frame_ && settings_.denoiser && settings_.denoiseReflections && rdReflDnIn_ != 0 &&
+                              denoiser_.valid() && gbufWritten;
     // Leaving NRD2: u23 (and u9) still hold its targets and must be rebound whatever was wanted before.
     const bool nrd2Unbind = nrd2Bound_ && !nrd2Frame_;
     if (!nrd2Frame_) nrd2_.resetHistory();
@@ -6510,13 +6326,6 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         if (fill && (refl || ao || settings_.nrd2HalfRateGi)) bits |= 64u;
         bits |= 512u;   // shader-visible NRD2 frame (rtNrd2Frame)
         cb_.giShadowParams[3] = static_cast<f32>(bits);
-    } else if (denoiserMode(settings_) == 0u) {
-        // Denoiser None: nothing filters. History "not usable" (the state every reset uses) turns off every
-        // reprojection read, so no temporal blend, spatial filter, half-rate fill or lamp history runs, while the
-        // reflection lobe and the sun's jitter stay. Bit 1024 drops the tail's 5x5 (rtFiltersOff). ReSTIR's
-        // reservoir reuse stays: it is the GI estimator. The tail's 2x2 block sharing is part of its estimator.
-        cb_.rtHistParams[1] = 0.0f;
-        cb_.giShadowParams[3] = static_cast<f32>(static_cast<u32>(cb_.giShadowParams[3]) | 1024u);
     }
     // Spatial filter radius; blend amount pinned at 0 (loop runs but result discarded via constant).
     // x: bounces in the low four bits, bit 4 = Reference mode (voxi_pt.hlsli ptReferenceMode).
@@ -6667,7 +6476,7 @@ void VoxiRenderer::updateNeuRaC(rhi::IRenderContext& ctx) {
         return;
     }
 
-    if (!rcTwinsTried_) requestBuild(kPsoRc);
+    if (!rcTwinsTried_) createNeuRaCTwins();
     const bool anyTwin = rdGiCacheCsPso_ || rdGiCacheCbCsPso_ || rdGiTraceCacheCsPso_ ||
                          rdGiTraceCacheCbCsPso_;
     if (!anyTwin) return;
@@ -6697,6 +6506,102 @@ void VoxiRenderer::updateNeuRaC(rhi::IRenderContext& ctx) {
                   b.cellCount, b.cellStride);
     }
     neuracLive_ = true;
+}
+
+// Build AVER_NEURAC=1 compute twins (CSRdGi/CSRdGiTrace, plain/checkerboard variants).
+bool VoxiRenderer::createNeuRaCTwins() {
+    rcTwinsTried_ = true;
+    if (rdGiCacheCsPso_ && rdGiCacheCbCsPso_ && rdGiTraceCacheCsPso_ && rdGiTraceCacheCbCsPso_)
+        return true;
+    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 66 && caps_.dxcAvailable;
+    if (!res_ || !rtOk || !rtTexTable_) {
+        AVER_WARN("[Voxi] NeuRaC twins not built: needs ray tracing, shader model 6.6 and the "
+                  "bindless texture table (said once per pipeline build)");
+        return false;
+    }
+    ShaderScope compile(*res_);
+    const rhi::PipelineLayout giTex = giLayout(kRtTextureCapacity);
+    const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
+                                                          layeredBsdf_);
+    const std::string bindlessDefs = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
+                                     std::to_string(kRtTextureCapacity);
+    const std::string csDefs = bindlessDefs + (rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_))
+                                                          : std::string());
+    const auto build = [&](const char* entry, const char* extra, rhi::PipelineHandle& out) {
+        if (out) return;
+        const std::string defs = matDefs + ";" + csDefs + ";AVER_NEURAC=1" + extra;
+        const rhi::ShaderHandle cs = compile(entry, rhi::ShaderStage::Compute, 66, defs.c_str());
+        if (!cs) return;
+        rhi::ComputePipelineDesc p;
+        p.cs = cs;
+        p.layout = giTex;
+        out = res_->createComputePipeline(p);
+    };
+    build("CSRdGi",      "",                        rdGiCacheCsPso_);
+    build("CSRdGi",      ";AVER_GI_CHECKERBOARD=1", rdGiCacheCbCsPso_);
+    build("CSRdGiTrace", "",                        rdGiTraceCacheCsPso_);
+    build("CSRdGiTrace", ";AVER_GI_CHECKERBOARD=1", rdGiTraceCacheCbCsPso_);
+    const u32 built = (rdGiCacheCsPso_ ? 1u : 0u) + (rdGiCacheCbCsPso_ ? 1u : 0u) +
+                      (rdGiTraceCacheCsPso_ ? 1u : 0u) + (rdGiTraceCacheCbCsPso_ ? 1u : 0u);
+    if (built == 4u)
+        AVER_INFO("[Voxi] NeuRaC twin pipelines ready (CSRdGi/CSRdGiTrace x plain/checkerboard)");
+    else
+        AVER_WARN("[Voxi] NeuRaC twin pipelines: {} of 4 compiled; a variant without its twin "
+                  "runs as plain HalfResolution", built);
+    return built == 4u;
+}
+
+// Build AVER_PT_PATHS=1 compute twins: CSRdGi/CSRdGiTrace (plain/checkerboard) and CSRdRefl (plain/split).
+bool VoxiRenderer::createPathTraceTwins() {
+    ptTwinsTried_ = true;
+    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 66 && caps_.dxcAvailable;
+    if (!res_ || !rtOk || !rtTexTable_) {
+        AVER_WARN("[Voxi] Path Tracing pipelines not built: needs ray tracing, shader model 6.6 and the "
+                  "bindless texture table (said once per pipeline build)");
+        return false;
+    }
+    ShaderScope compile(*res_);
+    const rhi::PipelineLayout giTex = giLayout(kRtTextureCapacity);
+    const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
+                                                          layeredBsdf_);
+    const std::string csDefs = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
+                               std::to_string(kRtTextureCapacity) +
+                               (rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string());
+    const auto build = [&](const char* entry, const char* extra, rhi::PipelineHandle& out) {
+        if (out) return;
+        const std::string defs = matDefs + ";" + csDefs + ";AVER_PT_PATHS=1" + extra;
+        const rhi::ShaderHandle cs = compile(entry, rhi::ShaderStage::Compute, 66, defs.c_str());
+        if (!cs) return;
+        rhi::ComputePipelineDesc p;
+        p.cs = cs;
+        p.layout = giTex;
+        out = res_->createComputePipeline(p);
+    };
+    build("CSRdGi",      "",                        rdGiPtCsPso_);
+    build("CSRdGi",      ";AVER_GI_CHECKERBOARD=1", rdGiPtCbCsPso_);
+    build("CSRdGiTrace", "",                        rdGiTracePtCsPso_);
+    build("CSRdGiTrace", ";AVER_GI_CHECKERBOARD=1", rdGiTracePtCbCsPso_);
+    build("CSRdRefl",    "",                        rdReflPtCsPso_);
+    build("CSRdRefl",    ";AVER_RD_REFL_SPLIT=1",   rdReflSplitPtCsPso_);
+    // Over the radiance cache, plain and half-rate checkerboard.
+    build("CSRdGi",      ";AVER_NEURAC=1",          rdGiPtRcCsPso_);
+    build("CSRdGiTrace", ";AVER_NEURAC=1",          rdGiTracePtRcCsPso_);
+    build("CSRdGi",      ";AVER_NEURAC=1;AVER_GI_CHECKERBOARD=1", rdGiPtRcCbCsPso_);
+    build("CSRdGiTrace", ";AVER_NEURAC=1;AVER_GI_CHECKERBOARD=1", rdGiTracePtRcCbCsPso_);
+    build("CSRdPtRef",   "",                        rdPtRefCsPso_);
+    build("CSRdRefl",    ";AVER_NEURAC=1",                         rdReflPtRcCsPso_);
+    build("CSRdRefl",    ";AVER_NEURAC=1;AVER_RD_REFL_SPLIT=1",   rdReflSplitPtRcCsPso_);
+    if (!rdPtRefCsPso_)
+        AVER_WARN("[Voxi] the reference path tracing pass did not compile; Reference mode runs as ReSTIR");
+    if (!rdGiPtRcCsPso_ || !rdGiTracePtRcCsPso_)
+        AVER_WARN("[Voxi] the Path Tracing pipelines over the radiance cache did not compile; paths run "
+                  "without it");
+    const bool ok =rdGiPtCsPso_ && rdGiPtCbCsPso_ && rdGiTracePtCsPso_ && rdGiTracePtCbCsPso_ &&
+                    rdReflPtCsPso_ && rdReflSplitPtCsPso_;
+    if (ok) AVER_INFO("[Voxi] Path Tracing pipelines ready (ReSTIR GI paths and reflection paths)");
+    else    AVER_WARN("[Voxi] some Path Tracing pipelines did not compile; those stages run as ordinary "
+                      "ray-driven passes");
+    return ok;
 }
 
 // Release cache: unbind t22/u20/u21, then destroy (bound descriptor outliving its buffer faults GPU).
@@ -6780,7 +6685,6 @@ bool VoxiRenderer::rdStagedActive(const char** reason) const {
 // Returns the lit pipeline for this frame, or 0 to decline and let the backend use its own.
 rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool depthPrepassed,
                                                 bool blended) const {
-    if (!canRecord()) return 0;
     // Blended is answered first: glass outranks a prepass. If blended fails to create, drops the draw.
     if (blended) {
         // Blended draws never write the G-buffer: opaque surface behind is the denoiser's geometry.
@@ -6802,7 +6706,6 @@ rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool depthPrep
 
 // Depth-only prepass pipeline. Returns 0 if the LessEqual/no-write twin does not exist.
 rhi::PipelineHandle VoxiRenderer::depthPrepassPipeline() const {
-    if (!canRecord()) return 0;
     const rhi::PipelineHandle twin = rtActive_ ? sceneRtPsoPrepassed_ : scenePsoPrepassed_;
     return twin ? depthPrepassPso_ : 0;
 }
@@ -7094,11 +6997,11 @@ void VoxiRenderer::bindGiResources(rhi::IResourceFactory& res, rhi::BindingSetHa
     if (shadowTex_) res.setSrv(set, srvBase + 1, shadowTex_);
 }
 
-// Records the Base group: the pipelines that do not bake the render-target formats.
-void VoxiRenderer::recordBasePipelines(rhi::IPipelineBatch& b, PsoLocal& out) {
+// Creates every pipeline the feature runs.
+bool VoxiRenderer::createPipelines() {
     const bool msOk = caps_.meshShaderTier > 0 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
 
-    ShaderScope compile(b);
+    ShaderScope compile(*res_);
 
     const rhi::PipelineLayout gi = giLayout();
     const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot,
@@ -7119,8 +7022,9 @@ void VoxiRenderer::recordBasePipelines(rhi::IPipelineBatch& b, PsoLocal& out) {
         p.depthFormat = rhi::Format::D32Float;
         p.sampleCount = 1;
         p.slopeScaledDepthBias = 1.5f;
-        out.shadowPso_ = b.createGraphicsPipeline(p);
+        shadowPso_ = res_->createGraphicsPipeline(p);
     }
+    if (!shadowPso_) AVER_ERROR("[Voxi] shadow pipeline unavailable");
 
     // --- 1b. instanced depth pass: one DrawIndexedInstanced per mesh instead of one drawMesh() per draw.
     const std::string instDefs = rasterDefs(("AVER_INSTANCE_SRV=" + std::to_string(rhi::declaredSrvCount(gi))).c_str());
@@ -7141,8 +7045,10 @@ void VoxiRenderer::recordBasePipelines(rhi::IPipelineBatch& b, PsoLocal& out) {
         p.depthFormat = rhi::Format::D32Float;
         p.sampleCount = 1;
         p.slopeScaledDepthBias = 1.5f;
-        out.shadowInstancedPso_ = b.createGraphicsPipeline(p);
+        shadowInstancedPso_ = res_->createGraphicsPipeline(p);
     }
+    if (!shadowInstancedPso_ && instancedShadowsOk)
+        AVER_WARN("[Voxi] instanced shadow pipeline unavailable; shadowPass falls back to one draw per instance");
 
     // --- 1c. GI-only depth pass (plain and instanced).
     if (const rhi::ShaderHandle vsGi = compile("VSGiShadow", rhi::ShaderStage::Vertex, kBaseSm,
@@ -7156,7 +7062,7 @@ void VoxiRenderer::recordBasePipelines(rhi::IPipelineBatch& b, PsoLocal& out) {
         p.depthFormat = rhi::Format::D32Float;
         p.sampleCount = 1;
         p.slopeScaledDepthBias = 1.5f;
-        out.giShadowPso_ = b.createGraphicsPipeline(p);
+        giShadowPso_ = res_->createGraphicsPipeline(p);
     }
     if (instancedShadowsOk)
     if (const rhi::ShaderHandle vsGiInst = compile("VSGiShadowInstanced", rhi::ShaderStage::Vertex,
@@ -7171,8 +7077,10 @@ void VoxiRenderer::recordBasePipelines(rhi::IPipelineBatch& b, PsoLocal& out) {
         p.depthFormat = rhi::Format::D32Float;
         p.sampleCount = 1;
         p.slopeScaledDepthBias = 1.5f;
-        out.giShadowInstancedPso_ = b.createGraphicsPipeline(p);
+        giShadowInstancedPso_ = res_->createGraphicsPipeline(p);
     }
+    if (!giShadowPso_)
+        AVER_WARN("[Voxi] GI-only shadow pipeline unavailable; indirect light is injected unshadowed");
 
     // --- 2/3. voxelisation + light injection: rasterise with no render target ---
     const rhi::ShaderHandle psVoxel = compile("PSVoxel", rhi::ShaderStage::Pixel, kBaseSm, rasterDefs(nullptr).c_str());
@@ -7190,16 +7098,18 @@ void VoxiRenderer::recordBasePipelines(rhi::IPipelineBatch& b, PsoLocal& out) {
     if (vsVoxel && gsVoxel && psVoxel) {
         rhi::GraphicsPipelineDesc p = vox;
         p.vs = vsVoxel; p.gs = gsVoxel; p.ps = psVoxel;
-        out.voxelPso_ = b.createGraphicsPipeline(p);
+        voxelPso_ = res_->createGraphicsPipeline(p);
     }
+    if (!voxelPso_) AVER_ERROR("[Voxi] voxelise pipeline unavailable");
 
     if (msOk && psVoxel) {
         const std::string msDefs = rasterDefs("AVER_MS=1") + ";" + rhi::meshGeometryDefines(vox.layout);
         if (const rhi::ShaderHandle ms = compile("MSVoxel", rhi::ShaderStage::Mesh, 65, msDefs.c_str())) {
             rhi::GraphicsPipelineDesc p = vox;
             p.ms = ms; p.ps = psVoxel;
-            out.voxelMsPso_ = b.createGraphicsPipeline(p);
+            voxelMsPso_ = res_->createGraphicsPipeline(p);
         }
+        if (!voxelMsPso_) AVER_WARN("[Voxi] mesh-shader voxelise variant unavailable; the GS path stands in");
     }
 
     // --- 4. clear the accumulator, and reduce it into mip 0 ---
@@ -7209,16 +7119,18 @@ void VoxiRenderer::recordBasePipelines(rhi::IPipelineBatch& b, PsoLocal& out) {
         p.layout.uavCount = 2;
         // b3: root constant block for dispatch bounds (set before every dispatch).
         p.layout.constantDwords[3] = kGiDispatchConstantDwords;
-        out.clearPso_ = b.createComputePipeline(p);
+        clearPso_ = res_->createComputePipeline(p);
     }
+    if (!clearPso_) AVER_ERROR("[Voxi] volume clear pipeline unavailable");
 
     if (const rhi::ShaderHandle cs = compile("CSResolve", rhi::ShaderStage::Compute, kBaseSm, nullptr)) {
         rhi::ComputePipelineDesc p;
         p.cs = cs;
         p.layout.uavCount = 2;
         p.layout.constantDwords[3] = kGiDispatchConstantDwords;
-        out.resolvePso_ = b.createComputePipeline(p);
+        resolvePso_ = res_->createComputePipeline(p);
     }
+    if (!resolvePso_) AVER_ERROR("[Voxi] injection resolve pipeline unavailable");
 
     // --- 5. mip filter: one source mip in, one destination mip out ---
     if (const rhi::ShaderHandle cs = compile("CSMip", rhi::ShaderStage::Compute, kBaseSm, nullptr)) {
@@ -7228,8 +7140,9 @@ void VoxiRenderer::recordBasePipelines(rhi::IPipelineBatch& b, PsoLocal& out) {
         p.layout.uavCount = 1;
         // b3: source mip + dispatch box (expanded from 4 dwords to full block).
         p.layout.constantDwords[3] = kGiDispatchConstantDwords;
-        out.mipPso_ = b.createComputePipeline(p);
+        mipPso_ = res_->createComputePipeline(p);
     }
+    if (!mipPso_) AVER_ERROR("[Voxi] mip filter pipeline unavailable");
 
     // --- 5b. CSAirVis (air sky-visibility volume march, for occlusion-aware fog) ---
     // Compiled against full Voxi layout (reads t0 via gVoxelSamp, writes u16).
@@ -7241,18 +7154,77 @@ void VoxiRenderer::recordBasePipelines(rhi::IPipelineBatch& b, PsoLocal& out) {
         p.cs = csAirVis;
         p.layout = gi;
         p.layout.constantDwords[3] = kGiDispatchConstantDwords;
-        out.airVisPso_ = b.createComputePipeline(p);
+        airVisPso_ = res_->createComputePipeline(p);
     }
+    if (!airVisPso_)
+        AVER_WARN("[Voxi] air sky-visibility pipeline unavailable (SM {}, DXC {}); "
+                  "voxi.fogOcclusion has no effect on this device (placeholder stays bound)",
+                  caps_.shaderModel, caps_.dxcAvailable ? "yes" : "no");
+
+    // --- 6-10. scene pipelines (bake sample count and formats) ---
+    const bool sceneOk = createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(),
+                                              dev_->depthFormat());
+    scenePipelineGraphRev_ = pbr::materialGraphs().revision();
+    scenePipelineShaderRev_ = rhi::shaderFileRevision();
+
+    return shadowPso_ && voxelPso_ && clearPso_ && mipPso_ && sceneOk;
 }
 
-// Records the Scene group: everything that bakes the sample count and render-target formats, the
-// material graphs or the shader text.
-void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u32 sampleCount,
-                                        rhi::Format color, rhi::Format depth) {
+// Creates the five pipelines that bake sample count and render-target formats.
+bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth) {
     const bool msOk = caps_.meshShaderTier > 0 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
     const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
 
-    ShaderScope compile(b);
+    const rhi::PipelineHandle stale[] = {debugPso_, scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_,
+                                         sceneBlendedPso_, sceneMsBlendedPso_, sceneRtBlendedPso_,
+                                         sceneMsRtBlendedPso_,
+                                         depthPrepassPso_, scenePsoPrepassed_, sceneRtPsoPrepassed_,
+                                         rayDrivenPso_,
+                                         sceneGbufPso_, sceneMsGbufPso_, sceneRtGbufPso_, sceneMsRtGbufPso_,
+                                         scenePsoPrepassedGbuf_, sceneRtPsoPrepassedGbuf_,
+                                         rayDrivenTexPso_, sceneRtBlendedTexPso_,
+                                         rayDrivenTexGbufPso_, rayDrivenGbufPso_,
+                                         rdVisCsPso_, rdShadowCsPso_, rdGiCsPso_, rdGiCbCsPso_,
+                                         rdSkyOccCsPso_, rdReflCsPso_,
+                                         rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_,
+                                         rdShadowProbeCsPso_, rdShadowTiledCsPso_, rdTailVisCsPso_, rdTailFilterCsPso_,
+                                         rdGiTraceCsPso_, rdGiTraceCbCsPso_,
+                                         rdGiSplitCsPso_, rdGiSplitCbCsPso_,
+                                         rdGiCacheCsPso_, rdGiCacheCbCsPso_,
+                                         rdGiTraceCacheCsPso_, rdGiTraceCacheCbCsPso_,
+                                        rdGiPtCsPso_, rdGiPtCbCsPso_, rdGiTracePtCsPso_, rdGiTracePtCbCsPso_, rdGiPtRcCsPso_, rdGiTracePtRcCsPso_, rdGiPtRcCbCsPso_, rdGiTracePtRcCbCsPso_, rdPtRefCsPso_, rdReflPtRcCsPso_, rdReflSplitPtRcCsPso_,
+                                        rdReflPtCsPso_, rdReflSplitPtCsPso_,
+                                         rdReflSplitCsPso_, rdReflFilterCsPso_,
+                                         rayDrivenSplitNrd2Pso_, rdHalfFillCsPso_};
+    for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
+    debugPso_ = scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
+    sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
+    depthPrepassPso_ = scenePsoPrepassed_ = sceneRtPsoPrepassed_ = 0;
+    rayDrivenPso_ = rayDrivenTexPso_ = 0;
+    sceneRtBlendedTexPso_ = 0;
+    sceneGbufPso_ = sceneMsGbufPso_ = sceneRtGbufPso_ = sceneMsRtGbufPso_ = 0;
+    scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
+    rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
+    rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdGiCbCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
+    rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
+    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = rdTailVisCsPso_ = rdTailFilterCsPso_ = 0;
+    rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
+    rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
+    rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
+    rdGiPtRcCsPso_ = rdGiTracePtRcCsPso_ = rdGiPtRcCbCsPso_ = rdGiTracePtRcCbCsPso_ = rdPtRefCsPso_ = rdReflPtRcCsPso_ = rdReflSplitPtRcCsPso_ = 0;
+    rdReflPtCsPso_ = rdReflSplitPtCsPso_ = 0;
+    rcTwinsTried_ = false;
+    ptTwinsTried_ = false;
+    rdReflSplitCsPso_ = rdReflFilterCsPso_ = 0;
+    rayDrivenSplitNrd2Pso_ = rdHalfFillCsPso_ = 0;
+    // NRD2's Stage B variant and compose draw bake these formats; rebuilt on next use.
+    nrd2_.destroyCompose();
+    nrd2Tried_ = false;
+    sceneColorFmt_ = color;
+    sceneDepthFmt_ = depth;
+    sceneSampleCount_ = sampleCount;
+
+    ShaderScope compile(*res_);
     const rhi::PipelineLayout gi = giLayout();
     const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot,
                                                           layeredBsdf_);
@@ -7268,8 +7240,9 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
         p.renderTargetCount = 1;
         p.renderTargets[0] = color;
         p.sampleCount = sampleCount;
-        out.debugPso_ = b.createGraphicsPipeline(p);
+        debugPso_ = res_->createGraphicsPipeline(p);
     }
+    if (!debugPso_) AVER_ERROR("[Voxi] voxel debug pipeline unavailable");
 
     // --- 7-10. scene lit variants: cone trace and RayQuery live inside pixel shader ---
     rhi::GraphicsPipelineDesc scene;
@@ -7293,8 +7266,9 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
     if (vsMain && psVoxi) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psVoxi;
-        out.scenePso_ = b.createGraphicsPipeline(p);
+        scenePso_ = res_->createGraphicsPipeline(p);
     }
+    if (!scenePso_) AVER_ERROR("[Voxi] scene pipeline unavailable");
 
     // PSMainVoxi + AVER_GBUFFER changes return type (four SV_TARGETs); needs separate ShaderHandle.
     const rhi::ShaderHandle psVoxiGbuf =
@@ -7302,8 +7276,10 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
     if (vsMain && psVoxiGbuf) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
         p.vs = vsMain; p.ps = psVoxiGbuf;
-        out.sceneGbufPso_ = b.createGraphicsPipeline(p);
+        sceneGbufPso_ = res_->createGraphicsPipeline(p);
     }
+    if (!sceneGbufPso_)
+        AVER_WARN("[Voxi] G-buffer scene pipeline unavailable; the G-buffer stays off even if requested");
 
     // Mesh-shader variants.
     const std::string msDefs = rasterDefs("AVER_MS=1") + ";" + rhi::meshGeometryDefines(scene.layout);
@@ -7311,14 +7287,16 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
     if (msMain && psVoxi) {
         rhi::GraphicsPipelineDesc p = scene;
         p.ms = msMain; p.ps = psVoxi;
-        out.sceneMsPso_ = b.createGraphicsPipeline(p);
+        sceneMsPso_ = res_->createGraphicsPipeline(p);
     }
+    if (msOk && !sceneMsPso_) AVER_WARN("[Voxi] mesh-shader scene variant unavailable");
 
     if (msMain && psVoxiGbuf) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
         p.ms = msMain; p.ps = psVoxiGbuf;
-        out.sceneMsGbufPso_ = b.createGraphicsPipeline(p);
+        sceneMsGbufPso_ = res_->createGraphicsPipeline(p);
     }
+    if (msOk && !sceneMsGbufPso_) AVER_WARN("[Voxi] mesh-shader G-buffer scene variant unavailable");
 
     // RayQuery replaces shadow-map lookup with exact occlusion ray.
     const auto rdAblateDefs = [&]() -> std::string {
@@ -7331,8 +7309,9 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
     if (vsMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psRt;
-        out.sceneRtPso_ = b.createGraphicsPipeline(p);
+        sceneRtPso_ = res_->createGraphicsPipeline(p);
     }
+    if (rtOk && !sceneRtPso_) AVER_WARN("[Voxi] ray-tracing scene variant unavailable");
 
     // Same shader with AVER_RT and AVER_GBUFFER: PSMainVoxi nests both #if blocks.
     const rhi::ShaderHandle psRtGbuf =
@@ -7342,8 +7321,9 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
     if (vsMain && psRtGbuf) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
         p.vs = vsMain; p.ps = psRtGbuf;
-        out.sceneRtGbufPso_ = b.createGraphicsPipeline(p);
+        sceneRtGbufPso_ = res_->createGraphicsPipeline(p);
     }
+    if (rtOk && !sceneRtGbufPso_) AVER_WARN("[Voxi] ray-tracing G-buffer scene variant unavailable");
 
     // Ray-driven primary visibility: traces camera ray instead of marching volume. Writes SV_DEPTH.
     const rhi::ShaderHandle psRayDriven =
@@ -7359,8 +7339,9 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
         p.renderTargets[0] = color;
         p.depthFormat = depth;
         p.sampleCount = sampleCount;
-        out.rayDrivenPso_ = b.createGraphicsPipeline(p);
+        rayDrivenPso_ = res_->createGraphicsPipeline(p);
     }
+    if (rtOk && !rayDrivenPso_) AVER_WARN("[Voxi] ray-driven primary-visibility pass unavailable");
 
     // Textured variant: bindless table is a root-signature difference (can't be runtime toggle).
     ensureTextureTable();
@@ -7382,8 +7363,13 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             p.renderTargets[0] = color;
             p.depthFormat = depth;
             p.sampleCount = sampleCount;
-            out.rayDrivenTexPso_ = b.createGraphicsPipeline(p);
+            rayDrivenTexPso_ = res_->createGraphicsPipeline(p);
         }
+        if (!rayDrivenTexPso_)
+            AVER_WARN("[Voxi] textured ray-driven pass unavailable; hits will shade from material "
+                      "factors alone");
+        else
+            AVER_INFO("[Voxi] textured ray-driven pass ready ({} texture slots)", kRtTextureCapacity);
 
         // Textured G-buffer twin: same shader/bindless layout plus AVER_GBUFFER=1.
         const rhi::ShaderHandle psTexGbuf =
@@ -7403,8 +7389,11 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             p.renderTargets[3] = rhi::Format::RGB10A2Unorm;
             p.depthFormat = depth;
             p.sampleCount = sampleCount;
-            out.rayDrivenTexGbufPso_ = b.createGraphicsPipeline(p);
+            rayDrivenTexGbufPso_ = res_->createGraphicsPipeline(p);
         }
+        if (!rayDrivenTexGbufPso_)
+            AVER_WARN("[Voxi] textured G-buffer ray-driven pass unavailable; --gbuffer will fall back "
+                      "to the flat-albedo G-buffer pipeline");
 
         // ---- Staged ray-driven passes (SM 6.6 for derivatives; root signature shared via giTex layout). ----
         const std::string csDefs = bindlessDefs + rdAblateDefs();
@@ -7414,18 +7403,16 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csVis;
             p.layout = giTex;
-            out.rdVisCsPso_ = b.createComputePipeline(p);
+            rdVisCsPso_ = res_->createComputePipeline(p);
         }
         // SM 6.6: compute-shader derivatives exist only from 6.6; below that, compile fails.
-        // AVER_RD_SHADOW_KEYED: the sun's shadow history is only reused under the light it was traced for.
-        const rhi::ShaderHandle csShadow =
-            compile("CSRdShadow", rhi::ShaderStage::Compute, 66,
-                    rasterDefs((csDefs + ";AVER_RD_SHADOW_KEYED=1").c_str()).c_str());
+        const rhi::ShaderHandle csShadow = compile("CSRdShadow", rhi::ShaderStage::Compute, 66,
+                                                   rasterDefs(csDefs.c_str()).c_str());
         if (csShadow) {
             rhi::ComputePipelineDesc p;
             p.cs = csShadow;
             p.layout = giTex;
-            out.rdShadowCsPso_ = b.createComputePipeline(p);
+            rdShadowCsPso_ = res_->createComputePipeline(p);
         }
         // SUB-STAGE SPLIT A: CSRdShadowProbe, one group per 8x8 tile, writes to gRdShadowTiles (u18).
         const rhi::ShaderHandle csShadowProbe = compile("CSRdShadowProbe", rhi::ShaderStage::Compute, 66,
@@ -7434,17 +7421,17 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csShadowProbe;
             p.layout = giTex;
-            out.rdShadowProbeCsPso_ = b.createComputePipeline(p);
+            rdShadowProbeCsPso_ = res_->createComputePipeline(p);
         }
         // CSRdShadow + AVER_RD_SHADOW_TILES=1: ORs 3x3 probe neighbourhood, skips per-pixel ray where probes agree.
         const rhi::ShaderHandle csShadowTiled =
             compile("CSRdShadow", rhi::ShaderStage::Compute, 66,
-                    rasterDefs((csDefs + ";AVER_RD_SHADOW_TILES=1;AVER_RD_SHADOW_KEYED=1").c_str()).c_str());
+                    rasterDefs((csDefs + ";AVER_RD_SHADOW_TILES=1").c_str()).c_str());
         if (csShadowTiled) {
             rhi::ComputePipelineDesc p;
             p.cs = csShadowTiled;
             p.layout = giTex;
-            out.rdShadowTiledCsPso_ = b.createComputePipeline(p);
+            rdShadowTiledCsPso_ = res_->createComputePipeline(p);
         }
         // CSRdTailVis (the tail lights' shadow fraction) and CSRdTailFilter (its 5x5), after CSRdShadow.
         const rhi::ShaderHandle csTailVis = compile("CSRdTailVis", rhi::ShaderStage::Compute, 66,
@@ -7453,7 +7440,7 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csTailVis;
             p.layout = giTex;
-            out.rdTailVisCsPso_ = b.createComputePipeline(p);
+            rdTailVisCsPso_ = res_->createComputePipeline(p);
         }
         const rhi::ShaderHandle csTailFilter = compile("CSRdTailFilter", rhi::ShaderStage::Compute, 66,
                                                        rasterDefs(csDefs.c_str()).c_str());
@@ -7461,7 +7448,7 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csTailFilter;
             p.layout = giTex;
-            out.rdTailFilterCsPso_ = b.createComputePipeline(p);
+            rdTailFilterCsPso_ = res_->createComputePipeline(p);
         }
         // CSRdGi and CSRdSkyOcc: same SM 6.6 requirement as csShadow.
         const rhi::ShaderHandle csGi = compile("CSRdGi", rhi::ShaderStage::Compute, 66,
@@ -7470,7 +7457,7 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csGi;
             p.layout = giTex;
-            out.rdGiCsPso_ = b.createComputePipeline(p);
+            rdGiCsPso_ = res_->createComputePipeline(p);
         }
         // CSRdGi + AVER_GI_CHECKERBOARD=1: optional variant; rdStagedActive() ignores if not compiled.
         const rhi::ShaderHandle csGiCb = compile("CSRdGi", rhi::ShaderStage::Compute, 66,
@@ -7479,7 +7466,7 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csGiCb;
             p.layout = giTex;
-            out.rdGiCbCsPso_ = b.createComputePipeline(p);
+            rdGiCbCsPso_ = res_->createComputePipeline(p);
         }
         // SUB-STAGE SPLIT B: CSRdGiTrace, writes gRdGiCand (u17); checkerboard twin compacted to traced half's pixels.
         const rhi::ShaderHandle csGiTrace = compile("CSRdGiTrace", rhi::ShaderStage::Compute, 66,
@@ -7488,7 +7475,7 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csGiTrace;
             p.layout = giTex;
-            out.rdGiTraceCsPso_ = b.createComputePipeline(p);
+            rdGiTraceCsPso_ = res_->createComputePipeline(p);
         }
         const rhi::ShaderHandle csGiTraceCb =
             compile("CSRdGiTrace", rhi::ShaderStage::Compute, 66,
@@ -7497,7 +7484,7 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csGiTraceCb;
             p.layout = giTex;
-            out.rdGiTraceCbCsPso_ = b.createComputePipeline(p);
+            rdGiTraceCbCsPso_ = res_->createComputePipeline(p);
         }
         // CSRdGi + AVER_GI_SPLIT=1: loads gRdGiCand instead of tracing; mirrors plain/checkerboard pair.
         const rhi::ShaderHandle csGiSplit =
@@ -7507,7 +7494,7 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csGiSplit;
             p.layout = giTex;
-            out.rdGiSplitCsPso_ = b.createComputePipeline(p);
+            rdGiSplitCsPso_ = res_->createComputePipeline(p);
         }
         const rhi::ShaderHandle csGiSplitCb =
             compile("CSRdGi", rhi::ShaderStage::Compute, 66,
@@ -7516,7 +7503,7 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csGiSplitCb;
             p.layout = giTex;
-            out.rdGiSplitCbCsPso_ = b.createComputePipeline(p);
+            rdGiSplitCbCsPso_ = res_->createComputePipeline(p);
         }
         const rhi::ShaderHandle csSkyOcc = compile("CSRdSkyOcc", rhi::ShaderStage::Compute, 66,
                                                    rasterDefs(csDefs.c_str()).c_str());
@@ -7524,7 +7511,7 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csSkyOcc;
             p.layout = giTex;
-            out.rdSkyOccCsPso_ = b.createComputePipeline(p);
+            rdSkyOccCsPso_ = res_->createComputePipeline(p);
         }
         // CSRdRefl: ray-traced reflection lighting stage, same SM 6.6 requirement as csShadow.
         const rhi::ShaderHandle csRefl = compile("CSRdRefl", rhi::ShaderStage::Compute, 66,
@@ -7533,7 +7520,7 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csRefl;
             p.layout = giTex;
-            out.rdReflCsPso_ = b.createComputePipeline(p);
+            rdReflCsPso_ = res_->createComputePipeline(p);
         }
         // SUB-STAGE C: R1 traces and writes PENDING marker; R2 (CSRdReflFilter) finishes the compose.
         const rhi::ShaderHandle csReflSplit =
@@ -7543,7 +7530,7 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csReflSplit;
             p.layout = giTex;
-            out.rdReflSplitCsPso_ = b.createComputePipeline(p);
+            rdReflSplitCsPso_ = res_->createComputePipeline(p);
         }
         const rhi::ShaderHandle csReflFilter = compile("CSRdReflFilter", rhi::ShaderStage::Compute, 66,
                                                         rasterDefs(csDefs.c_str()).c_str());
@@ -7551,7 +7538,7 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             rhi::ComputePipelineDesc p;
             p.cs = csReflFilter;
             p.layout = giTex;
-            out.rdReflFilterCsPso_ = b.createComputePipeline(p);
+            rdReflFilterCsPso_ = res_->createComputePipeline(p);
         }
         // Stage B: pixel shader with AVER_RD_SPLIT=1; reads precomputed visibility, reuses vskyTex.
         const rhi::ShaderHandle psSplit =
@@ -7567,7 +7554,7 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             p.renderTargets[0] = color;
             p.depthFormat = depth;
             p.sampleCount = sampleCount;
-            out.rayDrivenSplitTexPso_ = b.createGraphicsPipeline(p);
+            rayDrivenSplitTexPso_ = res_->createGraphicsPipeline(p);
         }
         const rhi::ShaderHandle psSplitGbuf =
             compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
@@ -7585,9 +7572,26 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             p.renderTargets[3] = rhi::Format::RGB10A2Unorm;
             p.depthFormat = depth;
             p.sampleCount = sampleCount;
-            out.rayDrivenSplitTexGbufPso_ = b.createGraphicsPipeline(p);
+            rayDrivenSplitTexGbufPso_ = res_->createGraphicsPipeline(p);
         }
         // Log once when staged pipelines are ready.
+        if (rdVisCsPso_ && rdShadowCsPso_ && rayDrivenSplitTexPso_)
+            AVER_INFO("[Voxi] staged ray-driven passes ready for voxi.rayDrivenStages ({} texture slots, "
+                      "G-buffer twin {}, GI stage {}, sky occlusion stage {}, reflection stage {}, "
+                      "half-rate GI checkerboard stage {}, shadow-tile sub-stage {}, GI-trace "
+                      "sub-stage {}, reflection register/filter sub-stage {})",
+                      kRtTextureCapacity,
+                      rayDrivenSplitTexGbufPso_ ? "ready" : "unavailable",
+                      rdGiCsPso_ ? "ready" : "unavailable", rdSkyOccCsPso_ ? "ready" : "unavailable",
+                      rdReflCsPso_ ? "ready" : "unavailable", rdGiCbCsPso_ ? "ready" : "unavailable",
+                      (rdShadowProbeCsPso_ && rdShadowTiledCsPso_) ? "ready" : "unavailable",
+                      (rdGiTraceCsPso_ && rdGiSplitCsPso_) ? "ready" : "unavailable",
+                      (rdReflSplitCsPso_ && rdReflFilterCsPso_) ? "ready" : "unavailable");
+        else
+            AVER_WARN("[Voxi] staged ray-driven passes unavailable (visibility cs {}, shadow cs {}, "
+                      "split pixel shader {}); voxi.rayDrivenStages 1 or 2 falls back to the single pass",
+                      rdVisCsPso_ ? "ready" : "missing", rdShadowCsPso_ ? "ready" : "missing",
+                      rayDrivenSplitTexPso_ ? "ready" : "missing");
 
         // Blended variant with textured bindless table (for glass reflections).
         const rhi::ShaderHandle vsMainTex = compile("VSMain", rhi::ShaderStage::Vertex, kBaseSm,
@@ -7604,9 +7608,16 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
             p.blend = rhi::BlendMode::PremultipliedAlpha;   // see sceneBlendedPso_ for why
             p.depth.test = true;
             p.depth.write = false;
-            out.sceneRtBlendedTexPso_ = b.createGraphicsPipeline(p);
+            sceneRtBlendedTexPso_ = res_->createGraphicsPipeline(p);
         }
+        if (!sceneRtBlendedTexPso_)
+            AVER_WARN("[Voxi] textured blended (glass) variant unavailable; reflections in glass "
+                      "will stay flat");
+        else
+            AVER_INFO("[Voxi] textured blended (glass) variant ready");
 
+        // Radiance cache twins, only when Cached mode is already requested.
+        if (giRestirVisibility_ == 4u) createNeuRaCTwins();
     }
 
     // PSRayDriven's own G-buffer twin: RayDrivenGBufferOut (five targets); built with Always/write-on depth.
@@ -7627,20 +7638,25 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
         p.renderTargets[3] = rhi::Format::RGB10A2Unorm;
         p.depthFormat = depth;
         p.sampleCount = sampleCount;
-        out.rayDrivenGbufPso_ = b.createGraphicsPipeline(p);
+        rayDrivenGbufPso_ = res_->createGraphicsPipeline(p);
     }
+    if (rtOk && !rayDrivenGbufPso_)
+        AVER_WARN("[Voxi] ray-driven G-buffer primary-visibility pass unavailable");
 
     if (msMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
         p.ms = msMain; p.ps = psRt;
-        out.sceneMsRtPso_ = b.createGraphicsPipeline(p);
+        sceneMsRtPso_ = res_->createGraphicsPipeline(p);
     }
+    if (msOk && rtOk && !sceneMsRtPso_) AVER_WARN("[Voxi] mesh-shader + ray-tracing scene variant unavailable");
 
     if (msMain && psRtGbuf) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
         p.ms = msMain; p.ps = psRtGbuf;
-        out.sceneMsRtGbufPso_ = b.createGraphicsPipeline(p);
+        sceneMsRtGbufPso_ = res_->createGraphicsPipeline(p);
     }
+    if (msOk && rtOk && !sceneMsRtGbufPso_)
+        AVER_WARN("[Voxi] mesh-shader + ray-tracing G-buffer scene variant unavailable");
 
     // Blended twins: PremultipliedAlpha + depth write off.
     if (vsMain && psVoxi) {
@@ -7649,8 +7665,10 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
         p.blend = rhi::BlendMode::PremultipliedAlpha;
         p.depth.test = true;    // inherited from `scene`
         p.depth.write = false;
-        out.sceneBlendedPso_ = b.createGraphicsPipeline(p);
+        sceneBlendedPso_ = res_->createGraphicsPipeline(p);
     }
+    if (!sceneBlendedPso_)
+        AVER_WARN("[Voxi] blended scene pipeline unavailable; translucent materials will not draw");
 
 
     if (msMain && psVoxi) {
@@ -7659,8 +7677,10 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
         p.blend = rhi::BlendMode::PremultipliedAlpha;   // see sceneBlendedPso_ above for why
         p.depth.test = true;    // same test-on/write-off state as sceneBlendedPso_ above
         p.depth.write = false;
-        out.sceneMsBlendedPso_ = b.createGraphicsPipeline(p);
+        sceneMsBlendedPso_ = res_->createGraphicsPipeline(p);
     }
+    if (msOk && !sceneMsBlendedPso_)
+        AVER_WARN("[Voxi] mesh-shader blended scene variant unavailable");
 
 
     if (vsMain && psRt) {
@@ -7669,8 +7689,10 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
         p.blend = rhi::BlendMode::PremultipliedAlpha;   // see sceneBlendedPso_ above for why
         p.depth.test = true;    // same test-on/write-off state as sceneBlendedPso_ above
         p.depth.write = false;
-        out.sceneRtBlendedPso_ = b.createGraphicsPipeline(p);
+        sceneRtBlendedPso_ = res_->createGraphicsPipeline(p);
     }
+    if (rtOk && !sceneRtBlendedPso_)
+        AVER_WARN("[Voxi] ray-traced blended scene variant unavailable");
 
 
     if (msMain && psRt) {
@@ -7679,8 +7701,10 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
         p.blend = rhi::BlendMode::PremultipliedAlpha;   // see sceneBlendedPso_ above for why
         p.depth.test = true;    // same test-on/write-off state as sceneBlendedPso_ above
         p.depth.write = false;
-        out.sceneMsRtBlendedPso_ = b.createGraphicsPipeline(p);
+        sceneMsRtBlendedPso_ = res_->createGraphicsPipeline(p);
     }
+    if (msOk && rtOk && !sceneMsRtBlendedPso_)
+        AVER_WARN("[Voxi] mesh-shader + ray-traced blended scene variant unavailable");
 
 
     // Depth prepass and two scene variants that trust it.
@@ -7696,523 +7720,53 @@ void VoxiRenderer::recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u
         p.renderTargetCount = 0;        // depth-only pass.
         p.depthFormat = depth;
         p.sampleCount = sampleCount;
-        out.depthPrepassPso_ = b.createGraphicsPipeline(p);
+        depthPrepassPso_ = res_->createGraphicsPipeline(p);
     }
+    if (!depthPrepassPso_)
+        AVER_WARN("[Voxi] depth prepass pipeline unavailable; --depth-prepass will have no effect");
 
     // Colour-pass twins: LessEqual depth test with writes OFF. LessEqual allows bit-identical geometry.
-    if (vsMain && psVoxi) {
+    if (vsMain && psVoxi && depthPrepassPso_) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psVoxi;
         p.depth = {true, false, rhi::CompareOp::LessEqual};
-        out.scenePsoPrepassed_ = b.createGraphicsPipeline(p);
+        scenePsoPrepassed_ = res_->createGraphicsPipeline(p);
     }
+    if (depthPrepassPso_ && !scenePsoPrepassed_)
+        AVER_WARN("[Voxi] prepassed scene pipeline unavailable; --depth-prepass will have no effect");
 
-    if (vsMain && psVoxiGbuf) {
+    if (vsMain && psVoxiGbuf && depthPrepassPso_) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
         p.vs = vsMain; p.ps = psVoxiGbuf;
         p.depth = {true, false, rhi::CompareOp::LessEqual};
-        out.scenePsoPrepassedGbuf_ = b.createGraphicsPipeline(p);
+        scenePsoPrepassedGbuf_ = res_->createGraphicsPipeline(p);
     }
+    if (depthPrepassPso_ && !scenePsoPrepassedGbuf_)
+        AVER_WARN("[Voxi] prepassed G-buffer scene pipeline unavailable; --depth-prepass and the "
+                  "G-buffer will not combine even though each works alone");
 
-    if (rtOk && vsMain && psRt) {
+    if (rtOk && vsMain && psRt && depthPrepassPso_) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psRt;
         p.depth = {true, false, rhi::CompareOp::LessEqual};
-        out.sceneRtPsoPrepassed_ = b.createGraphicsPipeline(p);
+        sceneRtPsoPrepassed_ = res_->createGraphicsPipeline(p);
     }
+    if (rtOk && depthPrepassPso_ && !sceneRtPsoPrepassed_)
+        AVER_WARN("[Voxi] prepassed ray-traced scene pipeline unavailable; ray tracing keeps its "
+                  "normal depth state under --depth-prepass");
 
-    if (rtOk && vsMain && psRtGbuf) {
+    if (rtOk && vsMain && psRtGbuf && depthPrepassPso_) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
         p.vs = vsMain; p.ps = psRtGbuf;
         p.depth = {true, false, rhi::CompareOp::LessEqual};
-        out.sceneRtPsoPrepassedGbuf_ = b.createGraphicsPipeline(p);
+        sceneRtPsoPrepassedGbuf_ = res_->createGraphicsPipeline(p);
     }
+    if (rtOk && depthPrepassPso_ && !sceneRtPsoPrepassedGbuf_)
+        AVER_WARN("[Voxi] prepassed ray-traced G-buffer scene pipeline unavailable; ray tracing keeps "
+                  "its normal depth state under --depth-prepass with the G-buffer on, same as without it");
 
-}
-
-// Records the radiance-cache twins: AVER_NEURAC=1 variants of CSRdGi / CSRdGiTrace, plain and checkerboard.
-void VoxiRenderer::recordRcTwins(rhi::IPipelineBatch& b, PsoLocal& out) {
-    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 66 && caps_.dxcAvailable;
-    if (!rtOk || !rtTexTable_) {
-        AVER_WARN("[Voxi] NeuRaC twins not built: needs ray tracing, shader model 6.6 and the "
-                  "bindless texture table (said once per pipeline build)");
-        return;
-    }
-    ShaderScope compile(b);
-    const rhi::PipelineLayout giTex = giLayout(kRtTextureCapacity);
-    const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
-                                                          layeredBsdf_);
-    const std::string bindlessDefs = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
-                                     std::to_string(kRtTextureCapacity);
-    const std::string csDefs = bindlessDefs + (rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_))
-                                                          : std::string());
-    const auto build = [&](const char* entry, const char* extra, rhi::PipelineHandle& slot) {
-        const std::string defs = matDefs + ";" + csDefs + ";AVER_NEURAC=1" + extra;
-        rhi::ComputePipelineDesc p;
-        p.cs = compile(entry, rhi::ShaderStage::Compute, 66, defs.c_str());
-        p.layout = giTex;
-        slot = b.createComputePipeline(p);
-    };
-    build("CSRdGi",      "",                        out.rdGiCacheCsPso_);
-    build("CSRdGi",      ";AVER_GI_CHECKERBOARD=1", out.rdGiCacheCbCsPso_);
-    build("CSRdGiTrace", "",                        out.rdGiTraceCacheCsPso_);
-    build("CSRdGiTrace", ";AVER_GI_CHECKERBOARD=1", out.rdGiTraceCacheCbCsPso_);
-}
-
-// Records the Path Tracing twins: AVER_PT_PATHS=1 variants of CSRdGi / CSRdGiTrace (plain and checkerboard)
-// and CSRdRefl (plain and split), the same over the radiance cache, and the Reference mode's CSRdPtRef.
-void VoxiRenderer::recordPtTwins(rhi::IPipelineBatch& b, PsoLocal& out) {
-    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 66 && caps_.dxcAvailable;
-    if (!rtOk || !rtTexTable_) {
-        AVER_WARN("[Voxi] Path Tracing pipelines not built: needs ray tracing, shader model 6.6 and the "
-                  "bindless texture table (said once per pipeline build)");
-        return;
-    }
-    ShaderScope compile(b);
-    const rhi::PipelineLayout giTex = giLayout(kRtTextureCapacity);
-    const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
-                                                          layeredBsdf_);
-    const std::string csDefs = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
-                               std::to_string(kRtTextureCapacity) +
-                               (rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string());
-    const auto build = [&](const char* entry, const char* extra, rhi::PipelineHandle& slot) {
-        const std::string defs = matDefs + ";" + csDefs + ";AVER_PT_PATHS=1" + extra;
-        rhi::ComputePipelineDesc p;
-        p.cs = compile(entry, rhi::ShaderStage::Compute, 66, defs.c_str());
-        p.layout = giTex;
-        slot = b.createComputePipeline(p);
-    };
-    build("CSRdGi",      "",                        out.rdGiPtCsPso_);
-    build("CSRdGi",      ";AVER_GI_CHECKERBOARD=1", out.rdGiPtCbCsPso_);
-    build("CSRdGiTrace", "",                        out.rdGiTracePtCsPso_);
-    build("CSRdGiTrace", ";AVER_GI_CHECKERBOARD=1", out.rdGiTracePtCbCsPso_);
-    build("CSRdRefl",    "",                        out.rdReflPtCsPso_);
-    build("CSRdRefl",    ";AVER_RD_REFL_SPLIT=1",   out.rdReflSplitPtCsPso_);
-    // Over the radiance cache, plain and half-rate checkerboard.
-    build("CSRdGi",      ";AVER_NEURAC=1",          out.rdGiPtRcCsPso_);
-    build("CSRdGiTrace", ";AVER_NEURAC=1",          out.rdGiTracePtRcCsPso_);
-    build("CSRdGi",      ";AVER_NEURAC=1;AVER_GI_CHECKERBOARD=1", out.rdGiPtRcCbCsPso_);
-    build("CSRdGiTrace", ";AVER_NEURAC=1;AVER_GI_CHECKERBOARD=1", out.rdGiTracePtRcCbCsPso_);
-    build("CSRdPtRef",   "",                        out.rdPtRefCsPso_);
-    build("CSRdRefl",    ";AVER_NEURAC=1",                         out.rdReflPtRcCsPso_);
-    build("CSRdRefl",    ";AVER_NEURAC=1;AVER_RD_REFL_SPLIT=1",   out.rdReflSplitPtRcCsPso_);
-}
-
-// Records the NRD2 group: its compute set when it has none yet, its compose draw, and Voxi's own Stage B
-// NRD2 variant and half-rate fill. The compose draw and Stage B bake the formats of the scene set.
-void VoxiRenderer::recordNrd2Pipelines(rhi::IPipelineBatch& b, Build& bd) {
-    const rhi::Format gbuf[3] = {rhi::Format::RG16F, rhi::Format::R32Float, rhi::Format::RGB10A2Unorm};
-    bd.nrd2Compute = !nrd2_.valid();
-    if (!nrd2_.recordBuild(*dev_, b, bd.nrd2Compute, true, bd.color, gbuf, bd.depth, bd.samples, bd.nrd2Plan))
-        return;
-    if (!rtTexTable_) return;
-    ShaderScope compile(b);
-    const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
-                                                          layeredBsdf_);
-    const std::string bindless = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
-                                 std::to_string(kRtTextureCapacity);
-    const std::string ablate = rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string();
-    {
-        rhi::GraphicsPipelineDesc p;
-        p.vs = compile("VSky", rhi::ShaderStage::Vertex, kBaseSm, (matDefs + ";" + bindless).c_str());
-        p.ps = compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
-                       (matDefs + ";" + bindless + ablate + ";AVER_GBUFFER=1;AVER_RD_SPLIT=1;AVER_NRD2=1").c_str());
-        p.layout = giLayout(kRtTextureCapacity);
-        p.cull = rhi::CullMode::None;
-        p.depth = {true, true, rhi::CompareOp::Always};
-        p.renderTargetCount = 4;
-        p.renderTargets[0] = bd.color;
-        p.renderTargets[1] = rhi::Format::RG16F;
-        p.renderTargets[2] = rhi::Format::R32Float;
-        p.renderTargets[3] = rhi::Format::RGB10A2Unorm;
-        p.depthFormat = bd.depth;
-        p.sampleCount = bd.samples;
-        bd.local.rayDrivenSplitNrd2Pso_ = b.createGraphicsPipeline(p);
-    }
-    // Optional: without it NRD2 frames trace every feature at full rate.
-    rhi::ComputePipelineDesc p;
-    p.cs = compile("CSRdHalfFill", rhi::ShaderStage::Compute, 66, (matDefs + ";" + bindless + ablate).c_str());
-    p.layout = giLayout(kRtTextureCapacity);
-    bd.local.rdHalfFillCsPso_ = b.createComputePipeline(p);
-}
-
-// ---------------------------------------------------------------- pipeline builds
-// docs/rendering/ASYNC_SHADERS.md. A build is recorded on this thread into a pipeline batch (a pure list of
-// requests, copied), run by workers (or inline in synchronous mode), and adopted here, on this thread, at a
-// frame boundary: prePass before it records anything, or init() / a synchronous request outside a frame.
-// Nothing on a worker touches this renderer.
-
-bool VoxiRenderer::buildInFlight(unsigned groups) const {
-    for (const std::unique_ptr<Build>& b : builds_)
-        if (b->groups & groups) return true;
-    return false;
-}
-
-bool VoxiRenderer::shaderBuildProgress(u32& done, u32& total) const {
-    done = total = 0;
-    for (const std::unique_ptr<Build>& b : builds_) {
-        u32 d = 0, t = 0;
-        b->batch->progress(d, t);
-        done += d;
-        total += t;
-    }
-    return !builds_.empty();
-}
-
-// A lazy group (NRD2, Path Tracing, NeuRaC twins) is wanted. Started at the next frame boundary; in
-// synchronous mode built and adopted before this returns.
-void VoxiRenderer::requestBuild(unsigned group) {
-    lazyRequested_ |= group;
-    // Mid-frame in synchronous mode: build what was asked for, but leave the scene set to the next boundary.
-    if (!asyncBuilds_) pumpBuilds(true, false);
-}
-
-void VoxiRenderer::startBuild(unsigned groups) {
-    if (groups & kPsoScene) {
-        // The scene generation moves on: whatever was recorded against the old one is dropped when it
-        // lands, and builds that carry nothing else are not worth finishing.
-        ++sceneGen_;
-        for (const std::unique_ptr<Build>& o : builds_)
-            if (!(o->groups & kPsoBase)) o->batch->cancel();
-        // A rebuild covers the lazy groups that are live, so they swap with the set they were built for.
-        if (rcTwinsTried_) groups |= kPsoRc;
-        if (ptTwinsTried_) groups |= kPsoPt;
-        if (nrd2Tried_)    groups |= kPsoNrd2;
-    }
-    std::unique_ptr<Build> bd = std::make_unique<Build>();
-    bd->groups = groups;
-    bd->sceneGen = sceneGen_;
-    bd->samples = wantSamples_;
-    bd->color = wantColor_;
-    bd->depth = wantDepth_;
-    bd->batch = rhi::createPipelineBatch(*res_, asyncBuilds_);
-    rhi::IPipelineBatch& b = *bd->batch;
-    if (groups & kPsoBase) {
-        baseStarted_ = true;
-        recordBasePipelines(b, bd->local);
-    }
-    if (groups & kPsoScene) {
-        ensureTextureTable();
-        recSamples_ = bd->samples;
-        recColor_ = bd->color;
-        recDepth_ = bd->depth;
-        scenePipelineGraphRev_ = pbr::materialGraphs().revision();
-        scenePipelineShaderRev_ = rhi::shaderFileRevision();
-        bd->graphRev = scenePipelineGraphRev_;
-        bd->shaderRev = scenePipelineShaderRev_;
-        recordScenePipelines(b, bd->local, bd->samples, bd->color, bd->depth);
-    }
-    if (groups & kPsoRc) { rcTwinsTried_ = true; recordRcTwins(b, bd->local); }
-    if (groups & kPsoPt) { ptTwinsTried_ = true; recordPtTwins(b, bd->local); }
-    if (groups & kPsoNrd2) { nrd2Tried_ = true; recordNrd2Pipelines(b, *bd); }
-    bd->batch->start();
-    builds_.push_back(std::move(bd));
-}
-
-// What is due now: the scene set again when the targets, the material graphs or the shader text moved from
-// what the last one was recorded against, and the lazy groups something asked for. Frame boundary only.
-void VoxiRenderer::startDueBuilds(bool sceneDue) {
-    const u64 graphRev = pbr::materialGraphs().revision();
-    const u64 shaderRev = rhi::shaderFileRevision();
-    const bool targetsMoved = recSamples_ != wantSamples_ || recColor_ != wantColor_ || recDepth_ != wantDepth_;
-    if (sceneDue && (targetsMoved || scenePipelineGraphRev_ != graphRev || scenePipelineShaderRev_ != shaderRev)) {
-        if (targetsMoved)
-            AVER_INFO("[Voxi] rebuilding scene pipelines for the new render targets ({} sample(s))", wantSamples_);
-        else if (scenePipelineGraphRev_ != graphRev)
-            AVER_INFO("[Voxi] rebuilding scene pipelines for {} material graph(s)", pbr::materialGraphs().count());
-        else
-            AVER_INFO("[Voxi] rebuilding scene pipelines: shader files changed (revision {})", shaderRev);
-        startBuild(kPsoScene);
-        return;
-    }
-    // The lazy groups are keyed to the scene set: only once it stands and nothing replaces it.
-    if (!giReady_ || buildInFlight(kPsoBase | kPsoScene)) return;
-    unsigned due = 0;
-    if (!rcTwinsTried_ && ((lazyRequested_ & kPsoRc) || giRestirVisibility_ == 4u)) due |= kPsoRc;
-    if (!ptTwinsTried_ && ((lazyRequested_ & kPsoPt) || pathTracingWanted())) due |= kPsoPt;
-    if (!nrd2Tried_ && (lazyRequested_ & kPsoNrd2)) due |= kPsoNrd2;
-    due &= ~(buildInFlight(kPsoRc) ? kPsoRc : 0u) & ~(buildInFlight(kPsoPt) ? kPsoPt : 0u) &
-           ~(buildInFlight(kPsoNrd2) ? kPsoNrd2 : 0u);
-    if (due) startBuild(due);
-}
-
-// Adopts what finished and starts what is due. `wait` blocks until every build has landed (init, synchronous
-// mode, buildAllVariants); the frame boundary never waits.
-void VoxiRenderer::pumpBuilds(bool wait, bool sceneDue) {
-    if (!initialised_ || failed_ || !res_) return;
-    for (;;) {
-        for (usize i = 0; i < builds_.size();) {
-            Build& bd = *builds_[i];
-            if (wait) bd.batch->waitFinished();
-            if (!bd.batch->finished()) { ++i; continue; }
-            std::unique_ptr<Build> done = std::move(builds_[i]);
-            builds_.erase(builds_.begin() + static_cast<isize>(i));
-            adoptBuild(*done);
-            if (failed_) break;
-        }
-        if (failed_) break;
-        startDueBuilds(sceneDue);
-        if (!wait || builds_.empty()) break;
-    }
-    refreshReady();
-}
-
-// Takes a finished build's pipelines. A group replaces its previous handles together, so the frame that
-// follows sees all of the new or all of the old.
-void VoxiRenderer::adoptBuild(Build& bd) {
-    rhi::IPipelineBatch& b = *bd.batch;
-    // The scene generation moved on since this was recorded: only the base group is still good.
-    unsigned apply = bd.groups;
-    if (bd.sceneGen != sceneGen_) apply &= kPsoBase;
-    if (!apply) {
-        b.cancel();   // never adopted: the batch frees what it built
-        return;
-    }
-    b.adopt();
-    // Built but not taken: straight back to the factory.
-    const auto tossGroups = [&](unsigned groups) {
-        const auto toss = [&](rhi::PipelineHandle local) {
-            if (const rhi::PipelineHandle h = b.resolve(local)) res_->destroyPipeline(h);
-        };
-#define AVER_VOXI_TOSS(n) toss(bd.local.n);
-        if (groups & kPsoScene) { AVER_VOXI_PSO_SCENE(AVER_VOXI_TOSS) }
-        if (groups & kPsoRc)    { AVER_VOXI_PSO_RC(AVER_VOXI_TOSS) }
-        if (groups & kPsoPt)    { AVER_VOXI_PSO_PT(AVER_VOXI_TOSS) }
-        if (groups & kPsoNrd2)  { AVER_VOXI_PSO_NRD2(AVER_VOXI_TOSS) nrd2_.discardBuild(b, bd.nrd2Plan); }
-#undef AVER_VOXI_TOSS
-    };
-    // The scene generation moved on since this was recorded.
-    tossGroups(bd.groups & ~apply);
-    // A rebuild for the same targets (material graph, edited shader) whose core pipeline would not build: the
-    // set that stands keeps drawing, as it did before sets were swapped whole. Nothing is retried until the
-    // next change, since the revisions it was recorded against are already noted.
-    if ((apply & kPsoScene) && sceneAdopted_ && builtSamples_ == bd.samples && builtColor_ == bd.color &&
-        builtDepth_ == bd.depth && (!b.resolve(bd.local.scenePso_) || !b.resolve(bd.local.debugPso_))) {
-        AVER_ERROR("[Voxi] scene pipelines could not be rebuilt; the previous pipelines keep drawing");
-        builtGraphRev_ = bd.graphRev;
-        builtShaderRev_ = bd.shaderRev;
-        tossGroups(apply);
-        apply &= kPsoBase;
-        if (!apply) return;
-    }
-
-    // A new scene set replaces the lazy groups too: those that were live are in this build, the rest are 0.
-    const unsigned replace = apply | ((apply & kPsoScene) ? (kPsoRc | kPsoPt | kPsoNrd2) : 0u);
-#define AVER_VOXI_TAKE(n) { if (n) res_->destroyPipeline(n); n = b.resolve(bd.local.n); }
-    if (replace & kPsoBase)  { AVER_VOXI_PSO_BASE(AVER_VOXI_TAKE) baseReady_ = true; }
-    if (replace & kPsoScene) { AVER_VOXI_PSO_SCENE(AVER_VOXI_TAKE) }
-    if (replace & kPsoRc)    { AVER_VOXI_PSO_RC(AVER_VOXI_TAKE) }
-    if (replace & kPsoPt)    { AVER_VOXI_PSO_PT(AVER_VOXI_TAKE) }
-    if (replace & kPsoNrd2)  { AVER_VOXI_PSO_NRD2(AVER_VOXI_TAKE) }
-#undef AVER_VOXI_TAKE
-
-    if (apply & kPsoNrd2) {
-        const bool ok = nrd2_.finishBuild(b, bd.nrd2Plan, bd.nrd2Compute, true);
-        if (ok && rayDrivenSplitNrd2Pso_)
-            AVER_INFO("[Voxi] NRD2 ready (Stage B split variant, pyramid/resolve passes, compose draw)");
-    } else if (replace & kPsoNrd2) {
-        nrd2_.destroyCompose();   // it baked the old formats
-    }
-    if (apply & kPsoScene) {
-        builtSamples_ = bd.samples;
-        builtColor_ = bd.color;
-        builtDepth_ = bd.depth;
-        builtGraphRev_ = bd.graphRev;
-        builtShaderRev_ = bd.shaderRev;
-        sceneSampleCount_ = bd.samples;
-        sceneColorFmt_ = bd.color;
-        sceneDepthFmt_ = bd.depth;
-        sceneAdopted_ = true;
-        rcTwinsTried_ = (apply & kPsoRc) != 0;
-        ptTwinsTried_ = (apply & kPsoPt) != 0;
-        nrd2Tried_ = (apply & kPsoNrd2) != 0;
-    }
-    reportPsoResults(bd.local, apply);
-
-    if (!coreChecked_ && baseReady_ && sceneAdopted_) validateCore();
-    // A lazy group landing under a running frame changes which estimator or denoiser it uses next: start
-    // those histories over (a scene landing does it itself, in refreshReady).
-    if (!failed_ && giReady_ && (apply & (kPsoRc | kPsoPt | kPsoNrd2)) && !(apply & kPsoScene)) resetHistoriesForNewPipelines();
-}
-
-// The checks init() used to make once the pipelines existed.
-void VoxiRenderer::validateCore() {
-    const char* missing = !shadowPso_  ? "shadow pipeline"
-                        : !voxelPso_   ? "voxelise pipeline"
-                        : !clearPso_   ? "volume clear pipeline"
-                        : !resolvePso_ ? "injection resolve pipeline"
-                        : !mipPso_     ? "mip filter pipeline"
-                        : !debugPso_   ? "voxel debug pipeline"
-                        : !scenePso_   ? "scene pipeline"
-                                       : nullptr;
-    AVER_INFO("[Voxi] pipelines: shadow={}/{} voxel={} voxelMs={} clear={} resolve={} mip={} debug={} "
-              "scene={}/{}/{}/{} blended={}/{}/{}/{} airVis={}",
-              shadowPso_, shadowInstancedPso_, voxelPso_, voxelMsPso_, clearPso_, resolvePso_, mipPso_, debugPso_,
-              scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_,
-              sceneBlendedPso_, sceneMsBlendedPso_, sceneRtBlendedPso_, sceneMsRtBlendedPso_, airVisPso_);
-    if (missing) {
-        AVER_ERROR("[Voxi] init FAILED: {} has a zero handle", missing);
-        failed_ = true;
-        return;
-    }
-    coreChecked_ = true;
-    // The ray-tracing variant is what rtSupported_ stands for; init assumed it from the device's capabilities.
-    if (rtSupported_ && !sceneRtPso_) {
-        AVER_WARN("[Voxi] the ray-tracing scene variant did not build; ray tracing stays off");
-        rtSupported_ = false;
-        tlas_ = 0;
-    }
-    // CSAirVis exists now, so the fog-occlusion volume can be made.
-    if (!ensureAirVis())
-        AVER_WARN("[Voxi] air sky-visibility volume unavailable; fog stays unoccluded "
-                  "(voxi.fogOcclusion has no effect until it can be created)");
-    AVER_INFO("[Voxi] ready: conservative raster {}, mesh-shader variants {}, ray-tracing variants {}, "
-              "blended (glass) variant {}, G-buffer variant {} (off by default -- dev_->gBufferEnabled() "
-              "is what turns it on per frame; see pickGbuf())",
-              caps_.conservativeRaster ? "on" : "off",
-              (voxelMsPso_ && sceneMsPso_) ? "built" : "absent",
-              rtSupported_ ? "built" : "absent",
-              sceneBlendedPso_ ? "built" : "absent",
-              sceneGbufPso_ ? "built" : "absent");
-}
-
-// Recomputes whether the renderer can draw. The only place giReady_ and the blank-frame latch change, always
-// at a frame boundary (or outside a frame): a frame sees one value from its first command to its last.
-void VoxiRenderer::refreshReady() {
-    const bool formatsOk = sceneAdopted_ && builtSamples_ == wantSamples_ && builtColor_ == wantColor_ &&
-                           builtDepth_ == wantDepth_;
-    // A material graph or shader edit blanks the frame until its rebuild lands, as the first build does: the
-    // standing set's shaders may not know a graph the materials already name (the device loss at project open).
-    const bool revsOk = builtGraphRev_ == pbr::materialGraphs().revision() &&
-                        builtShaderRev_ == rhi::shaderFileRevision();
-    const bool ready = initialised_ && !failed_ && coreChecked_ && formatsOk && revsOk;
-    targetsStale_ = sceneAdopted_ && !formatsOk;
-    if (ready && !giReady_) {
-        giReady_ = true;
-        onSceneLanded();
-    } else if (!ready) {
-        giReady_ = false;
-    }
-    blocked_ = initialised_ && !failed_ && !giReady_;
-}
-
-// The scene set stands after not standing: every history was written under a different (or no) renderer.
-void VoxiRenderer::onSceneLanded() {
-    AVER_INFO("[Voxi] scene pipelines ready; the frame draws from here");
-    resetHistoriesForNewPipelines();
-    rdSettle_ = 8;
-    if (dev_) {
-        dev_->noteSceneCut();
-        if (rhi::IUpscaler* u = dev_->upscaler()) u->reset();
-    }
-}
-
-void VoxiRenderer::resetHistoriesForNewPipelines() {
-    resetGiHistory(true);
-    resetRtHistory(true);
-    resetDenoiserHistory(true);
-    ptAccumValid_ = false;
-    nrd2_.resetHistory();
-}
-
-// Says which requested pipelines did not build (a request is a nonzero local handle; the result a zero one).
-void VoxiRenderer::reportPsoResults(const PsoLocal& l, unsigned groups) const {
-    const auto note = [](rhi::PipelineHandle asked, rhi::PipelineHandle got, bool error, const char* text) {
-        if (!asked || got) return;
-        if (error) AVER_ERROR("[Voxi] {}", text);
-        else       AVER_WARN("[Voxi] {}", text);
-    };
-    if (groups & kPsoBase) {
-        note(l.shadowPso_, shadowPso_, true, "shadow pipeline unavailable");
-        note(l.shadowInstancedPso_, shadowInstancedPso_, false,
-             "instanced shadow pipeline unavailable; shadowPass falls back to one draw per instance");
-        note(l.giShadowPso_, giShadowPso_, false,
-             "GI-only shadow pipeline unavailable; indirect light is injected unshadowed");
-        note(l.giShadowInstancedPso_, giShadowInstancedPso_, false, "instanced GI-only shadow pipeline unavailable");
-        note(l.voxelPso_, voxelPso_, true, "voxelise pipeline unavailable");
-        note(l.voxelMsPso_, voxelMsPso_, false, "mesh-shader voxelise variant unavailable; the GS path stands in");
-        note(l.clearPso_, clearPso_, true, "volume clear pipeline unavailable");
-        note(l.resolvePso_, resolvePso_, true, "injection resolve pipeline unavailable");
-        note(l.mipPso_, mipPso_, true, "mip filter pipeline unavailable");
-        if (!airVisPso_)
-            AVER_WARN("[Voxi] air sky-visibility pipeline unavailable (SM {}, DXC {}); "
-                      "voxi.fogOcclusion has no effect on this device (placeholder stays bound)",
-                      caps_.shaderModel, caps_.dxcAvailable ? "yes" : "no");
-    }
-    if (groups & kPsoScene) {
-        note(l.debugPso_, debugPso_, true, "voxel debug pipeline unavailable");
-        note(l.scenePso_, scenePso_, true, "scene pipeline unavailable");
-        note(l.sceneGbufPso_, sceneGbufPso_, false, "G-buffer scene pipeline unavailable; the G-buffer stays off even if requested");
-        note(l.sceneMsPso_, sceneMsPso_, false, "mesh-shader scene variant unavailable");
-        note(l.sceneMsGbufPso_, sceneMsGbufPso_, false, "mesh-shader G-buffer scene variant unavailable");
-        note(l.sceneRtPso_, sceneRtPso_, false, "ray-tracing scene variant unavailable");
-        note(l.sceneRtGbufPso_, sceneRtGbufPso_, false, "ray-tracing G-buffer scene variant unavailable");
-        note(l.rayDrivenPso_, rayDrivenPso_, false, "ray-driven primary-visibility pass unavailable");
-        note(l.rayDrivenTexPso_, rayDrivenTexPso_, false,
-             "textured ray-driven pass unavailable; hits will shade from material factors alone");
-        note(l.rayDrivenTexGbufPso_, rayDrivenTexGbufPso_, false,
-             "textured G-buffer ray-driven pass unavailable; --gbuffer will fall back to the flat-albedo G-buffer pipeline");
-        note(l.sceneRtBlendedTexPso_, sceneRtBlendedTexPso_, false,
-             "textured blended (glass) variant unavailable; reflections in glass will stay flat");
-        note(l.rayDrivenGbufPso_, rayDrivenGbufPso_, false, "ray-driven G-buffer primary-visibility pass unavailable");
-        note(l.sceneMsRtPso_, sceneMsRtPso_, false, "mesh-shader + ray-tracing scene variant unavailable");
-        note(l.sceneMsRtGbufPso_, sceneMsRtGbufPso_, false, "mesh-shader + ray-tracing G-buffer scene variant unavailable");
-        note(l.sceneBlendedPso_, sceneBlendedPso_, false, "blended scene pipeline unavailable; translucent materials will not draw");
-        note(l.sceneMsBlendedPso_, sceneMsBlendedPso_, false, "mesh-shader blended scene variant unavailable");
-        note(l.sceneRtBlendedPso_, sceneRtBlendedPso_, false, "ray-traced blended scene variant unavailable");
-        note(l.sceneMsRtBlendedPso_, sceneMsRtBlendedPso_, false, "mesh-shader + ray-traced blended scene variant unavailable");
-        note(l.depthPrepassPso_, depthPrepassPso_, false, "depth prepass pipeline unavailable; --depth-prepass will have no effect");
-        note(l.scenePsoPrepassed_, scenePsoPrepassed_, false, "prepassed scene pipeline unavailable; --depth-prepass will have no effect");
-        note(l.scenePsoPrepassedGbuf_, scenePsoPrepassedGbuf_, false,
-             "prepassed G-buffer scene pipeline unavailable; --depth-prepass and the G-buffer will not combine even though each works alone");
-        note(l.sceneRtPsoPrepassed_, sceneRtPsoPrepassed_, false,
-             "prepassed ray-traced scene pipeline unavailable; ray tracing keeps its normal depth state under --depth-prepass");
-        note(l.sceneRtPsoPrepassedGbuf_, sceneRtPsoPrepassedGbuf_, false,
-             "prepassed ray-traced G-buffer scene pipeline unavailable; ray tracing keeps its normal depth state under --depth-prepass with the G-buffer on, same as without it");
-        if (l.rdVisCsPso_) {
-            if (rdVisCsPso_ && rdShadowCsPso_ && rayDrivenSplitTexPso_)
-                AVER_INFO("[Voxi] staged ray-driven passes ready for voxi.rayDrivenStages ({} texture slots, "
-                          "G-buffer twin {}, GI stage {}, sky occlusion stage {}, reflection stage {}, "
-                          "half-rate GI checkerboard stage {}, shadow-tile sub-stage {}, GI-trace "
-                          "sub-stage {}, reflection register/filter sub-stage {})",
-                          kRtTextureCapacity,
-                          rayDrivenSplitTexGbufPso_ ? "ready" : "unavailable",
-                          rdGiCsPso_ ? "ready" : "unavailable", rdSkyOccCsPso_ ? "ready" : "unavailable",
-                          rdReflCsPso_ ? "ready" : "unavailable", rdGiCbCsPso_ ? "ready" : "unavailable",
-                          (rdShadowProbeCsPso_ && rdShadowTiledCsPso_) ? "ready" : "unavailable",
-                          (rdGiTraceCsPso_ && rdGiSplitCsPso_) ? "ready" : "unavailable",
-                          (rdReflSplitCsPso_ && rdReflFilterCsPso_) ? "ready" : "unavailable");
-            else
-                AVER_WARN("[Voxi] staged ray-driven passes unavailable (visibility cs {}, shadow cs {}, "
-                          "split pixel shader {}); voxi.rayDrivenStages 1 or 2 falls back to the single pass",
-                          rdVisCsPso_ ? "ready" : "missing", rdShadowCsPso_ ? "ready" : "missing",
-                          rayDrivenSplitTexPso_ ? "ready" : "missing");
-        }
-    }
-    if ((groups & kPsoRc) && l.rdGiCacheCsPso_) {
-        const u32 built = (rdGiCacheCsPso_ ? 1u : 0u) + (rdGiCacheCbCsPso_ ? 1u : 0u) +
-                          (rdGiTraceCacheCsPso_ ? 1u : 0u) + (rdGiTraceCacheCbCsPso_ ? 1u : 0u);
-        if (built == 4u)
-            AVER_INFO("[Voxi] NeuRaC twin pipelines ready (CSRdGi/CSRdGiTrace x plain/checkerboard)");
-        else
-            AVER_WARN("[Voxi] NeuRaC twin pipelines: {} of 4 compiled; a variant without its twin "
-                      "runs as plain HalfResolution", built);
-    }
-    if ((groups & kPsoPt) && l.rdGiPtCsPso_) {
-        if (!rdPtRefCsPso_)
-            AVER_WARN("[Voxi] the reference path tracing pass did not compile; Reference mode runs as ReSTIR");
-        if (!rdGiPtRcCsPso_ || !rdGiTracePtRcCsPso_)
-            AVER_WARN("[Voxi] the Path Tracing pipelines over the radiance cache did not compile; paths run "
-                      "without it");
-        const bool ok = rdGiPtCsPso_ && rdGiPtCbCsPso_ && rdGiTracePtCsPso_ && rdGiTracePtCbCsPso_ &&
-                        rdReflPtCsPso_ && rdReflSplitPtCsPso_;
-        if (ok) AVER_INFO("[Voxi] Path Tracing pipelines ready (ReSTIR GI paths and reflection paths)");
-        else    AVER_WARN("[Voxi] some Path Tracing pipelines did not compile; those stages run as ordinary "
-                          "ray-driven passes");
-    }
-    if ((groups & kPsoNrd2) && l.rdHalfFillCsPso_ && !rdHalfFillCsPso_)
-        AVER_WARN("[Voxi] NRD2's half-rate fill (CSRdHalfFill) did not compile; NRD2 frames trace "
-                  "GI, reflections and sky occlusion at full rate");
+    // Only the two mandatory ones; scenePipeline() falls back for optional variants.
+    return debugPso_ && scenePso_;
 }
 
 } // namespace aver::voxi

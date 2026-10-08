@@ -2,8 +2,6 @@
 #include "aver/sr/NeuRaa.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
-#include "aver/sr/AverSrFsr.hpp"
-#include "aver/sr/SrConfine.hpp"
 
 #include <cstdio>
 #include <fstream>
@@ -18,9 +16,8 @@ namespace {
 struct NeuRaaCB {   // cbuffer AverNeuRaaCB in sr_neuraa.hlsl
     u32 vp[4];
     u32 info[4];
-    u32 org[4];
 };
-static_assert(sizeof(NeuRaaCB) == 48, "mirrors the HLSL cbuffer");
+static_assert(sizeof(NeuRaaCB) == 32, "mirrors the HLSL cbuffer");
 
 constexpr u32 kConstantRegister = 1;   // b1, as every AverSR pass
 
@@ -244,25 +241,12 @@ rhi::TextureHandle NeuRaa::run(rhi::IRenderContext& ctx, const rhi::UpscalerInpu
 
     if (resolve) {
         cb.info[3] = (net_ && !taaAtRest) ? 1u : 0u;
-        // Resolve only what the wrapped upscaler reads for the displayed rect. Not with a temporal
-        // upscaler (its history would take the unresolved rest) or during a capture (it writes aa_ whole).
-        u32 rw = in.srcWidth, rh = in.srcHeight;
-        PxRect show;
-        if (cap_.state == CapState::Idle && (!inner_ || dynamic_cast<const FsrUpscaler*>(inner_)) &&
-            displayedDst(in, show)) {
-            const PxRect need = growRect(srcReadOf(growRect(show, 1, in.dstWidth, in.dstHeight), in, kEasuReach),
-                                         1, in.srcWidth, in.srcHeight);
-            cb.org[0] = need.x0 & ~7u;
-            cb.org[1] = need.y0 & ~7u;
-            rw = need.x1 - cb.org[0];
-            rh = need.y1 - cb.org[1];
-        }
         ctx.textureBarrier(aa_, RS::ShaderResource, RS::UnorderedAccess);
         rhi::ScopedGpuStat stat(ctx, "NeuRAA resolve");
         ctx.setPipeline(resolve_);
         ctx.setBindingSet(resolveSet_);
         ctx.setConstantBuffer(kConstantRegister, &cb, sizeof(cb));
-        ctx.dispatch((rw + 7u) / 8u, (rh + 7u) / 8u, 1);
+        ctx.dispatch((in.srcWidth + 7u) / 8u, (in.srcHeight + 7u) / 8u, 1);
         ctx.textureBarrier(aa_, RS::UnorderedAccess, RS::ShaderResource);
     }
 

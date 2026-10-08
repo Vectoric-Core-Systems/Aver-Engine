@@ -15,7 +15,6 @@
 cbuffer AverNeuRaaCB : register(b1) {
     uint4 gVp;     // scene viewport x, y, w, h: the pixels the visibility buffer holds this frame
     uint4 gInfo;   // visibility row pitch, debug view flag, tiles per row, unused
-    uint4 gOrg;    // resolve: the first pixel its dispatch covers (x, y), a multiple of 8
 };
 
 static const int2 kDir[4] = {int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1)};
@@ -251,7 +250,7 @@ void nraaNetwork(int2 p, uint code, float4 dp, float zp, float wb[5], out float 
 // uncovered part toward the far side, and the far pixel takes the part it overlaps.
 [numthreads(8, 8, 1)]
 void CSNeuRaaResolve(uint2 dtid : SV_DispatchThreadID) {
-    const int2 p = int2(dtid) + int2(gOrg.xy);
+    const int2 p = int2(dtid);
     uint w, h;
     gColor.GetDimensions(w, h);
     if (p.x >= int(w) || p.y >= int(h)) return;

@@ -85,13 +85,13 @@ the exact set from those slots and adds the tail.
 
 ## As built (2026-10-07)
 
-- **List (t18):** lamps and scene lights in importance order (no 32 cap, up to `kMaxListLights` = 2047, so every index fits `gRdLocalOut`'s half precision), then the
+- **List (t18):** lamps and scene lights in importance order (no 32 cap, up to `kMaxListLights` = 4000), then the
   sun as a directional entry whenever ray tracing runs and it has radiance, then the **light grid**: a header record
   (`gDecalParams.y` names it; 0 = no grid), a cell table and an index pool, all packed as floats in the same buffer.
   Up to 32 cells per axis, at least 50 cm, bounded to 200 m around the camera; each cell keeps its 24 most important
   lights. Directional lights are global, not in cells. `rdLightsAt` / `rdLightIndex` (`voxi_rt.hlsli`) walk it.
 - **Visible surface (`CSRdShadow`):** one exact light per pixel (the largest unshadowed contribution, the sun's
-  full kernel: disc, history reused only under the same light: `gRdLocalHist.y` key, see DENOISING.md 3b; tiles). Last frame's exact light keeps the slot while it delivers
+  full kernel: disc, history keyed by light id, tiles). Last frame's exact light keeps the slot while it delivers
   at least 80% of the strongest, so near-equal candles do not trade places. **Every other light (the tail) is
   treated the way the sun is:** shaded exactly and unshadowed in Stage B (`rdTailLights`), times ONE shadow
   fraction in [0, 1] (`rdTailVisibility`): one light picked by irradiance, one ray, its 0/1 answer accumulated
@@ -156,11 +156,3 @@ Later findings (2026-10-07):
   light's visibility, instead of "fully lit", fixes the white rims alone); a 12-light cell cap (no gain).
 - `voxi.lightRaysPerBlock 4` saves 0.6 ms for bright-spot area 0.08% -> 0.31% of the view.
 - Per-stage timings (`voxi.rayDrivenStageTiming`) add a barrier after every stage; confirm a win on the total without it.
-- Barrier-free group (2026-10-08): CSRdTailVis is recorded with GI, sky occlusion and reflections (none reads
-  `gRdLocalOut` or `gRdSunVisTex`), and CSRdTailFilter runs after the group with CSRdHalfFill; per-stage timing keeps
-  the old order. 19.0 -> 18.8 ms (NRD2, NewSponza_Night).
-- Half-rate checkerboards were not saving what they should: with one parity per lane pair every wave held both, so
-  switching reflection half rate off cost +22% and sky occlusion +19%. On NRD2 frames CSRdRefl, CSRdSkyOcc and
-  CSRdGi's checkerboard variant now take a wave-coherent mapping (`gViewParams.w` bit 20, `rdHrThread`: group 2p+q =
-  the q parity of 16x8 block p). Same traced pixels, 18.8 -> 17.7 ms; reflections 2.57 -> 1.82, sky 0.87 -> 0.62,
-  GI 1.08 -> 0.98 (stage timing). FidelityFX frames keep the old mapping (unmeasured; their paths use derivatives).

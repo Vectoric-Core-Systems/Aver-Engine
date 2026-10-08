@@ -435,10 +435,13 @@ void AnimSystem::updateAttachments(scene::World& world) {
         Mat4 m;
         if (!socketModelMatrix(model, *sock, m)) continue;
 
-        // THROUGH World, NOT A RAW ++rev: World::flush() skips its pass when no writer went through
-        // World, and CWorld is recomposed only when composedLocalRev disagrees with the revision,
-        // so an attachment written any other way is correct in memory and never moves on screen.
-        if (!world.setLocalTransform(e, transformFromMatrix(m))) continue;
+        auto* loc = world.component<scene::CLocal>(e, scene::kComponentLocal);
+        if (!loc) continue;
+        loc->xf = transformFromMatrix(m);
+        // THE REVISION MUST BE BUMPED OR NOTHING DOWNSTREAM NOTICES. CWorld is recomposed only
+        // when composedLocalRev disagrees with this, so writing the transform and leaving the
+        // revision alone gives an attachment that is correct in memory and never moves on screen.
+        ++loc->rev;
         ++attachmentsPlaced_;
     }
 }

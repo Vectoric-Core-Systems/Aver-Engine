@@ -20,7 +20,6 @@ struct MaterialLibrary::Impl {
     std::vector<Slot> slots;
     std::vector<u32>  freeIndices;
     std::vector<MaterialHandle> liveHandles;   // dense, for the editor's enumeration
-    u64 changes = 0;   // bumped wherever a slot's dirty flag is set or the live set changes
 };
 
 namespace {
@@ -121,7 +120,6 @@ MaterialHandle MaterialLibrary::create(const MaterialDesc& desc) {
     sanitise(s.desc);
     s.live = true;
     s.dirty = true;   // never uploaded, so the first consumer owes it an upload
-    ++impl_->changes;
 
     const MaterialHandle h = makeMaterialHandle(index, s.generation);
     impl_->liveHandles.push_back(h);
@@ -148,7 +146,6 @@ bool MaterialLibrary::destroy(MaterialHandle h) {
     if (s.generation == 0) s.generation = 1;
     impl_->freeIndices.push_back(materialIndex(h));
     eraseHandle(impl_->liveHandles, h);
-    ++impl_->changes;
     return true;
 }
 
@@ -169,7 +166,6 @@ bool MaterialLibrary::update(MaterialHandle h, const MaterialDesc& d) {
     s.desc = d;
     sanitise(s.desc);
     s.dirty = true;
-    ++impl_->changes;
     return true;
 }
 
@@ -179,7 +175,6 @@ void MaterialLibrary::touch(MaterialHandle h) {
     Impl::Slot& s = impl_->slots[materialIndex(h)];
     sanitise(s.desc);
     s.dirty = true;
-    ++impl_->changes;
 }
 
 // True when this material still owes the GPU an upload. Reading it clears it.
@@ -190,9 +185,6 @@ bool MaterialLibrary::consumeDirty(MaterialHandle h) {
     s.dirty = false;
     return d;
 }
-
-// Advances on every create, destroy, update and touch.
-u64 MaterialLibrary::changeCount() const { return impl_->changes; }
 
 // How many materials are live.
 u32 MaterialLibrary::count() const { return static_cast<u32>(impl_->liveHandles.size()); }

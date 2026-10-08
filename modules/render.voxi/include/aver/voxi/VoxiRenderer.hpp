@@ -6,7 +6,6 @@
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/voxi/Voxi.hpp"
-#include "aver/voxi/VoxiPsoSet.hpp"
 #include "aver/voxi/SceneLight.hpp"
 #include "aver/voxi/SceneDecal.hpp"
 #include "aver/voxi/GiDispatchBounds.hpp"   // VoxelBox/GiDispatchConstants
@@ -19,7 +18,6 @@
 #include "aver/formats/GiCache.hpp"
 
 #include <array>
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -174,20 +172,9 @@ public:
     // This frame's translucent draws were composited inside the ray-driven frame; skip their replay.
     bool blendedDrawsResolvedInScene() const override { return translucentInPath_; }
 
-    // Builds, and waits for, the variants otherwise compiled on first use (NRD2 Stage B, Path Tracing and
-    // NeuRaC twins). For tests and loading screens; call after onRenderTargetsChanged, outside a frame.
+    // Builds the variants otherwise compiled on first use (NRD2 Stage B, Path Tracing and NeuRaC
+    // twins). For tests and loading screens; call after onRenderTargetsChanged.
     void buildAllVariants();
-
-    // ---- background pipeline builds (docs/rendering/ASYNC_SHADERS.md) ----
-    // On: shader compilation and pipeline creation run on worker threads (D3D12; elsewhere it stays
-    // synchronous). The scene set builds while the frame is left BLANK, and the scene appears when it lands;
-    // later rebuilds (material graphs, shader edits) keep drawing with the old set until the new one is ready.
-    // Off (the default): every build is waited for where it is asked, exactly as before. Set before init().
-    void setAsyncBuilds(bool on) { asyncBuilds_ = on; }
-    // A build is in flight: `done` of `total` shader compiles and pipeline creations so far.
-    bool shaderBuildProgress(u32& done, u32& total) const;
-    // The frame is blank because the scene set is not ready (the editor shows a notification meanwhile).
-    bool sceneBlocked() const { return blocked_; }
     void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
                                 u32 width, u32 height) override;
 
@@ -220,68 +207,8 @@ private:
     bool createVoxelVolume(u32 resolution);
     bool createInjectionAccumulator(u32 resolution);
     void manageInjectionAccumulator(rhi::IRenderContext& ctx);
-    // ---- pipeline builds ----
-    // A group of pipelines is recorded into one batch, built off-thread, and adopted together at a frame
-    // boundary (pumpBuilds, from prePass). Handles change only there.
-    struct Build {
-        unsigned groups = 0;                      // PsoGroup bits
-        u64 sceneGen = 0;                         // sceneGen_ when it was recorded
-        std::unique_ptr<rhi::IPipelineBatch> batch;
-        PsoLocal local;                           // batch-local handles of what it asked for
-        u32 samples = 1;                          // what the scene group bakes
-        rhi::Format color = rhi::Format::Unknown, depth = rhi::Format::Unknown;
-        u64 graphRev = 0, shaderRev = 0;          // material-graph and shader-file revisions it was recorded at
-        render::denoise::Nrd2::BuildPlan nrd2Plan;
-        bool nrd2Compute = false;
-    };
-    void recordBasePipelines(rhi::IPipelineBatch& b, PsoLocal& out);
-    void recordScenePipelines(rhi::IPipelineBatch& b, PsoLocal& out, u32 sampleCount, rhi::Format color,
-                              rhi::Format depth);
-    void recordRcTwins(rhi::IPipelineBatch& b, PsoLocal& out);
-    void recordPtTwins(rhi::IPipelineBatch& b, PsoLocal& out);
-    void recordNrd2Pipelines(rhi::IPipelineBatch& b, Build& bd);
-    void startBuild(unsigned groups);
-    void startDueBuilds(bool sceneDue);
-    void pumpBuilds(bool wait, bool sceneDue = true);
-    void adoptBuild(Build& bd);
-    void validateCore();
-    void refreshReady();
-    void onSceneLanded();
-    void resetHistoriesForNewPipelines();
-    void reportPsoResults(const PsoLocal& l, unsigned groups) const;
-    void requestBuild(unsigned group);
-    bool buildInFlight(unsigned groups) const;
-    // The scene set stands and matches the targets: every recorder may run. Changes only at frame boundaries,
-    // except that a target change (onRenderTargetsChanged) clears it at once.
-    bool canRecord() const { return giReady_ && !targetsStale_ && !graphStale(); }
-    // Live, not latched: a material graph loaded mid-frame leaves the standing set's shaders without it, and a
-    // material already naming it hung the GPU in that frame's blended replay.
-    bool graphStale() const;
-    // Just after a scene set lands, ray-driven is meant to paint but its acceleration structure is not built
-    // yet: the frame stays blank instead of the raster path drawing it (its ray-traced glass replay hung the
-    // RX 7800 XT at project open). Ends when rtActive_ is set, or after rdSettle_ frames.
-    u32 rdSettle_ = 0;
-    bool rdSettling() const {
-        return rdSettle_ > 0 && canRecord() && !rtActive_ && rtSupported_ && settings_.rayTracing != Quality::Off &&
-               rtRenderMode_ == 1u && rayDrivenPso_ != 0;
-    }
-
-    bool asyncBuilds_ = false;
-    bool initialised_ = false;      // init() succeeded and shutdown() has not run
-    bool failed_ = false;           // the core set would not build: Voxi stands down, the device draws itself
-    bool blocked_ = false;          // latched at prePass: the scene set is not ready, so the frame is blank
-    bool targetsStale_ = false;     // the targets changed since the adopted scene set was recorded
-    bool baseStarted_ = false, baseReady_ = false, sceneAdopted_ = false, coreChecked_ = false;
-    std::vector<std::unique_ptr<Build>> builds_;
-    u64 sceneGen_ = 1;              // bumped each time a scene set is recorded; older results are stale
-    unsigned lazyRequested_ = 0;    // PsoGroup bits something asked for (NRD2, Path Tracing, NeuRaC twins)
-    // Formats the latest recorded / the adopted scene set baked, and the ones the device last announced.
-    u32 recSamples_ = 0, builtSamples_ = 0, wantSamples_ = 1;
-    rhi::Format recColor_ = rhi::Format::Unknown, recDepth_ = rhi::Format::Unknown;
-    rhi::Format builtColor_ = rhi::Format::Unknown, builtDepth_ = rhi::Format::Unknown;
-    // Revisions the standing scene set was recorded at. Ahead of them, materials may name graphs its shaders lack.
-    u64 builtGraphRev_ = 0, builtShaderRev_ = 0;
-    rhi::Format wantColor_ = rhi::Format::Unknown, wantDepth_ = rhi::Format::Unknown;
+    bool createPipelines();
+    bool createScenePipelines(u32 sampleCount, rhi::Format color, rhi::Format depth);
     rhi::PipelineHandle pickGbuf(rhi::PipelineHandle plain, rhi::PipelineHandle gbuf) const;
     void shadowPass(rhi::IRenderContext& ctx);
     // Both take the slice [begin, end) of drawsPrev_: `first` clears, `last` finishes (a staged
@@ -692,9 +619,7 @@ private:
     static_assert(sizeof(RdLocalLight) == 80, "RdLocalLight is the HLSL AverLightRec ABI");
     // At most this many per frame, sorted by 1-metre irradiance over max(distance², 1).
     static constexpr u32 kMaxLocalLights = 32;      // the raster path's working set (shaders' AVER_LIGHT_LIST_MAX)
-    static constexpr u32 kMaxListLights = 2047;     // every emitter, up to this; with the sun every index stays below 2048,
-                                                    // which gRdLocalOut's half-precision .x holds exactly (UNIFIED_LIGHTS.md)
-    static constexpr u32 kFlatLightList = 48;       // up to this many lights, every point walks the whole list
+    static constexpr u32 kMaxListLights = 4000;     // every emitter, up to this (UNIFIED_LIGHTS.md phase 3)
     static constexpr u32 kMaxLightsPerCell = 24;    // a light-grid cell keeps its most important lights
     static constexpr u32 kLightGridMaxDim = 32;     // cells per axis
     static constexpr f32 kLightGridHalfExtent = 20000.0f;   // cm around the camera
@@ -714,31 +639,6 @@ private:
     bool rdGridCacheValid_ = false;
     u64 rdGridKeyNow_ = 0;                       // this frame's grid key (0 = no grid)
     u64 rdGridSlotKey_[kRtInstanceRing] = {};     // grid key each upload ring slot already holds
-    // The light grid built once in canonical (byte) light order. A frame whose list only reorders the same lights (the
-    // list is importance-ordered from the camera) deals the cached cells out through the new list indices (fill())
-    // instead of rebuilding them: same table, same pool, same order within every cell.
-    struct LightGridCanon {
-        bool valid = false;
-        f32 lo[3] = {}, cell = 0.0f;
-        u32 dim[3] = {};
-        std::vector<RdLocalLight> lights;   // non-directional lights, sorted by bytes
-        std::vector<u32> slots;             // open addressing over identical-light runs: first canonical id + 1, 0 = empty
-        std::vector<u32> runLen;            // per canonical id: length of the identical-light run it starts
-        std::vector<u32> box;               // 6 per canonical id: cell range, c0 > c1 = not in the grid
-        std::vector<u32> cellN;             // lights covering each cell
-        std::vector<u32> cursorInit;        // pool offset per cell, kLarge for cells that keep a cut list
-        std::vector<u32> largeCells;        // cells with more than kMaxLightsPerCell lights
-        std::vector<u32> bigOff, bigCnt;    // per cell: stored cut list (bigOff into big)
-        std::vector<std::pair<f32, u32>> big;   // (importance, canonical id): best first, plus any tied with the cut
-        std::vector<f32> table, pool;       // pool is rewritten by fill()
-        std::vector<u32> poolOff, canonOf, listOf, used, cursor;
-        std::vector<std::pair<f32, u32>> cut;
-        static constexpr u32 kLarge = 0xFFFFFFFFu;
-        bool build(const RdLocalLight* lights, u32 lightCount, const f32 lo[3], f32 cell, const u32 dim[3]);
-        bool fill(const RdLocalLight* lights, u32 lightCount, const f32 lo[3], f32 cell, const u32 dim[3]);
-    };
-    LightGridCanon rdGridCanon_;
-    u64 rdGridLastSet_ = 0;                      // order-independent hash of the last frame's grid lights
     // True when every light-flagged draw made the list (none cut by 32-light cap); allows GI to omit lamp emission.
     bool rdLocalLightsCarryAll_ = false;
     struct RdLocalLightCand {
@@ -893,9 +793,6 @@ private:
     // The instance-table upload and TLAS/dynamic-BLAS refit a prePass mover patch left to the late pass
     // (wantsLateScenePass); held until latePatchMovers or a prePass that cannot defer runs them.
     bool rtRefitDeferred_ = false;
-    // rtFrameIndex_ of the frame whose prePass already refitted the dynamic BLASes: their vertices are final by then,
-    // so the late pass refits only the TLAS.
-    u32 rtDynBlasRefitFrame_ = 0;
     // Late scene pass: brings movers to THIS frame's transforms before anything traces (D3D12).
     void latePatchMovers(rhi::IRenderContext& ctx);
     // Two facts about the list recorded as each draw appends and swapped by beginScene().
@@ -1209,7 +1106,7 @@ private:
     render::denoise::Nrd2 nrd2_;
     rhi::PipelineHandle rayDrivenSplitNrd2Pso_ = 0;   // Stage B, AVER_NRD2=1 (built on first use)
     rhi::PipelineHandle rdHalfFillCsPso_ = 0;         // CSRdHalfFill: half-rate tracing filled this frame
-    bool nrd2Tried_ = false;      // the NRD2 group was recorded for the current scene set
+    bool nrd2Tried_ = false;      // the build above ran since the last createScenePipelines
     bool nrd2Frame_ = false;      // this frame runs NRD2
     bool nrd2Bound_ = false;      // u2/u3/u9/u23 hold NRD2's targets
     bool nrd2FallbackLogged_ = false;
@@ -1349,8 +1246,6 @@ private:
     // CONTENT TRUST: the rtFrameIndex_ of the last frame a scene pass wrote u19 and the light-list hash it wrote under.
     u32 rdLocalHistFrame_ = 0;
     u64 rdLocalHistHash_ = 0;
-    // The rtFrameIndex_ CSRdShadow last wrote u19's light keys in: the sun's shadow history is reused only under them.
-    u32 rdKeyFrame_ = 0;
     // "Local lights running" said once, the first frame any scene pass shades with lamps.
     bool rdLocalLightsRunLogged_ = false;
     // Settings::giRestirVisibility, cached at setSettings. 2 (HalfResolution) is the struct default.
@@ -1371,7 +1266,7 @@ private:
     bool rcUnsupportedLogged_ = false;
     // rc_.create() failed: do not retry every frame. Cleared when Cached stops being the wanted mode.
     bool rcCreateFailed_ = false;
-    // The radiance-cache group was recorded for the current scene set.
+    // createNeuRaCTwins ran since the last createScenePipelines.
     bool rcTwinsTried_ = false;
     // Path Tracing's progressive accumulation (u22, Stage B): per pixel, the running mean in rgb and
     // (half-float depth in m << 16 | frame count) in w. Sized by ensurePtAccum; restarted by key change.
@@ -1390,14 +1285,16 @@ private:
     // passes are skipped and Stage B traces one path per pixel.
     bool ptReferenceWanted() const { return pathTracingWanted() && settings_.ptMode == 1u; }
     bool ensurePtAccum();
-    // The Path Tracing group was recorded for the current scene set; the mode ran this frame; said-once logs.
+    // createPathTraceTwins ran since the last createScenePipelines; the mode ran this frame; said-once logs.
     bool ptTwinsTried_ = false;
     bool translucentInPath_ = false;   // Stage B composited translucency this frame (ptBounceParams.w)
     bool ptRanThisFrame_ = false;
     bool ptRunLogged_ = false;
     bool ptFallbackLogged_ = false;
+    bool createPathTraceTwins();
     // Build/teardown/per-frame hooks (VoxiRenderer.cpp).
     void updateNeuRaC(rhi::IRenderContext& ctx);
+    bool createNeuRaCTwins();
     void teardownNeuRaC();
     // Settings::giRestirSpatialSamples, cached defensively.
     u32 giRestirSpatialSamples_ = 0;
@@ -1500,9 +1397,9 @@ private:
     // Path tracing wanted -- a different question from ray tracing wanted, deliberately asking the other setting.
     bool pathTracingWanted() const { return rtSupported_ && settings_.pathTracing != Quality::Off; }
     // The DEBUG RAYMARCH has taken over the scene.
-    bool debugViewActive() const { return canRecord() && giEnabled() && debugView_; }
+    bool debugViewActive() const { return giReady_ && giEnabled() && debugView_; }
     // RAY-DRIVEN PRIMARY VISIBILITY is running this frame.
-    bool rayDrivenActive() const { return canRecord() && rtActive_ && rtRenderMode_ == 1u && rayDrivenPso_ != 0; }
+    bool rayDrivenActive() const { return rtActive_ && rtRenderMode_ == 1u && rayDrivenPso_ != 0; }
 
 public:
     // PREDICTS suppressesScene() (debugViewActive() || rayDrivenActive()) for THIS frame.
@@ -1512,7 +1409,7 @@ public:
         const bool rayDrivenWillBeActive = rtSupported_ && settings_.rayTracing != Quality::Off &&
                                             !draws_.empty() && rtRenderMode_ == 1u &&
                                             rayDrivenPso_ != 0;
-        return blocked_ || debugViewActive() || rdSettling() || (canRecord() && rayDrivenWillBeActive);
+        return debugViewActive() || rayDrivenWillBeActive;
     }
 
 private:

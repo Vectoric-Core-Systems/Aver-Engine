@@ -18,7 +18,7 @@ artifacts (shaders, capability registry, manual code blocks, size floors) are co
 | 1 | `scripts/claimAudit.sh` | none | **DONE.** `python scripts/claim-audit.py --file F --old X --new Y --check CMD [--build CMD]`: one edit, rebuild, run the check, restore + rebuild; CAUGHT/SURVIVED (checked: a `kPi` edit is caught by AtmosphereTest). Open: an MCP tool | S-M |
 | 2 | `heldFrame.ts` + `shots.mjs` | `gates.ps1` sparse probes, `--screenshot` | **DONE.** `python scripts/shots.py capture <dir> [--list]` and `diff <a> <b> [--ignore x0,y0,x1,y1]`: mean/p99/max delta and 8x8-tile islands over a threshold (exit 1 on an island) | M |
 | 3 | `AGENTS.md` | rules live outside the repo | a checked-in agent guide: gate costs and order, "never delete build\\", which checks need a GPU, DRED/stderr capture | S |
-| 4 | `frame-audit.mjs` | timing only (`--gpu-timing`) | **DONE.** `AVER_FRAME_AUDIT=1` makes the D3D12 backend count draws, dispatches, barriers, copies (and bytes), clears, PSO binds and submits per GPU timing span; see below | M |
+| 4 | `frame-audit.mjs` | timing only (`--gpu-timing`) | **Built (bb025212), not in the tree:** reverted with the engine to 1623ceee on 2026-10-08; re-apply with `git cherry-pick bb025212`. `AVER_FRAME_AUDIT=1` makes the D3D12 backend count draws, dispatches, barriers, copies (and bytes), clears, PSO binds and submits per GPU timing span; see below | M |
 | 5 | `gpu-parity.mjs`, `inference-parity.mjs` | `--nrd2-oracle`, `--furnace-test` | GPU-labelled CTests that dispatch a pass on tiny inputs and compare with its C++ reference | M |
 | 6 | `manual-sync`, `docs:check` | hand-written docs (`docs/STALE_CODE.md`) | `scripts/docs-check.py`: code blocks tagged with a source region fail when the region changes; flag table generated from `aver_flags` | M |
 | 7 | `drft-diff`, `bake:check` | none | **DONE.** `OcmeshDiff.exe a.ocmesh b.ocmesh [--tol cm]`: counts, slots, submeshes, LOD ladder, meshlets, bounds, flags, version, LOD 0 geometry as a triangle multiset. Open: the bake-twice CTest | S |
@@ -27,7 +27,7 @@ artifacts (shaders, capability registry, manual code blocks, size floors) are co
 Smaller: per-artifact size floors next to `verify-payload.ps1`; a static determinism scan for simulation code;
 auto-captured example stills; generated changelog; a lint step in `.github/workflows/ci.yml` (which has not run yet).
 
-## Frame audit (gap 4, done)
+## Frame audit (gap 4; reverted 2026-10-08, see the table)
 Counting, not timing: how much work a frame asks of the GPU, which does not move with the machine, the clocks or the
 driver, so two runs of one scene print the same numbers and a change that adds a pass, a barrier or a copy shows up as a
 diff in a log instead of a noisy millisecond.

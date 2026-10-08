@@ -217,7 +217,6 @@ bool averDrawIsTranslucent() { return (gMaterialFlags & AVER_MAT_ALPHA_BLEND) !=
 #ifndef AVER_BLENDED_PASS
 #define AVER_BLENDED_PASS 0
 #endif
-#define AVER_HISTORY_FREE AVER_BLENDED_PASS   // see voxi_rt.hlsli
 #if !AVER_RT
 #include "voxi_decal.hlsli"   // the RT build gets it through voxi_rt.hlsli, ahead of rtHitSurface
 #endif
@@ -297,14 +296,6 @@ RWTexture2D<float4>            gRdLocalOut    : register(u19);
 
 // AVER_RD_LAMPS (voxi_rt.hlsli): every compile but a single-pass one with AVER_RD_SINGLE_PASS_LAMPS 0.
 #if AVER_RD_LAMPS
-#if AVER_RD_SHADOW_KEYED
-// The shadow history texel belongs to the light now being traced iff last frame's exact light there had its key.
-// Without a key texture (no lamp pass this frame) there is nothing to compare against.
-bool rdShadowHistKeyOk(int2 texel) {
-    if (!rdLocalLampsLive()) return true;
-    return rdLocalKeysValid() && gRdLocalHist.Load(int3(texel, 0)).y == gAverShadowLightId;
-}
-#endif
 // One neighbour of rdLocalVisFiltered's 5x5. Weight falls linearly to zero at the reprojection depth
 // test's tolerance (3% of depth + 1 cm, rtReprojectTexel), so a tap across a silhouette contributes
 // nothing; a sky tap (alpha <= 0) is skipped outright. Clamped into THIS frame's viewport -- texels
@@ -436,7 +427,7 @@ float rdLocalLightsVisibility(float3 wpos, float3 N, float2 pixelC, uint2 pixel,
     int2   texel      = int2(0, 0);
     float2 velocityPx = float2(0.0, 0.0);
     bool   haveHist   = false;
-    if (!AVER_HISTORY_FREE && gRtHistParams.x > 0.5 && gRtHistParams.y > 0.25 && rdLocalHistValid())
+    if (gRtHistParams.x > 0.5 && gRtHistParams.y > 0.25 && rdLocalHistValid())
         haveHist = rtReprojectTexel(wpos, pixelC, texel, velocityPx);
     // prevVisC: the reprojected texel alone -- what gets STORED, so the spatial filter below is folded in
     // once per turn rather than compounding on every carried frame. prevVisF: rdLocalHistFiltered's
@@ -740,17 +731,6 @@ void rdTailLightsSplit(AverSurface s, float3 wpos, uint e0, float vis, inout flo
 // half. Declared here so
 // it's in scope before every stage that decodes a pitch.
 uint rdRowPitch() { return (uint)gViewParams.w & 0xFFFFu; }
-
-// Wave-coherent half rate (gViewParams.w bit 20, set for CSRdRefl / CSRdSkyOcc / CSRdGi's checkerboard dispatch only):
-// the grid has 2*ceil(w/16) groups in X and group 2p+q takes the pixels of the 16x8 block p whose
-// ((x ^ y ^ f) & 1) == q, so a wave never mixes traced and skipped pixels and a skipped wave exits early.
-bool rdHrCoherent() { return (((uint)gViewParams.w >> 20) & 1u) != 0u; }
-uint2 rdHrThread(uint3 gid, uint gidx, uint f) {
-    const uint ty = gid.y * 8u + (gidx >> 3u);
-    const uint2 org = (uint2)gSceneViewportCur.xy;
-    const uint tx = (gid.x >> 1u) * 16u + 2u * (gidx & 7u) + (((gid.x & 1u) ^ f ^ org.x ^ org.y ^ ty) & 1u);
-    return uint2(tx, ty);
-}
 
 // The surface PSRayDriven reconstructs from a ray hit, minus what the hit itself already computed (bary,
 // dir, pre-flip N): what Stage S/Stage B's AVER_RD_SPLIT branch both need, nothing more -- dpx/dpy (the
@@ -1105,7 +1085,7 @@ float3 rtReflectionTemporalEx(float3 wpos, float3 N, float3 Ng, float3 R, float3
     const float lobeRough = rough < AVER_REFL_MIRROR_ROUGH ? 0.0 : rough;
 
     // No history texture: lobe stays closed. rough=0 reduces to exact mirror ray.
-    if (AVER_HISTORY_FREE || gRtHistParams.x < 0.5) return rtReflection(wpos, N, Ng, R, L, pixel, 0.0, 0u, hit);
+    if (gRtHistParams.x < 0.5) return rtReflection(wpos, N, Ng, R, L, pixel, 0.0, 0u, hit);
 
     const float4 curClip = mul(float4(wpos, 1.0), gViewProj);
     const uint frameIdx  = (uint)gRtHistParams.z;
@@ -1205,7 +1185,7 @@ float3 rtReflectionTemporal(float3 wpos, float3 N, float3 Ng, float3 R, float3 L
 
 // Mark pixels gated away from reflection tracing (rough > 0.75).
 void rtReflectionHistoryVacate(float2 pixel) {
-    if (!AVER_HISTORY_FREE && gRtHistParams.x >= 0.5 && gAverHistoryWrite)
+    if (gRtHistParams.x >= 0.5 && gAverHistoryWrite)
         gRtReflHistOut[uint2(pixel)] = float4(0.0, 0.0, 0.0, -1.0);
 }
 #endif
@@ -2554,8 +2534,8 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     const float3 L = haveE0 ? rdSetShadowLight(gRdLocalLights[e0], s.wpos) : normalize(gLightDir.xyz);
     const bool  e0Directional = haveE0 && aversLightKind(gRdLocalLights[e0]) == AVER_LIGHT_DIRECTIONAL;
     const bool  e0NoShadow    = haveE0 && aversLightNoShadow(gRdLocalLights[e0]);
-    // The tier's ray count (up to 8) is the sun's; a lamp's small penumbra takes 1 (2 measured no different).
-    const uint  e0Rays = haveE0 && !e0Directional ? 1u : (uint)max(gRtParams.y, 1.0);
+    // The tier's ray count (up to 8) is the sun's; a lamp's small penumbra takes at most 2.
+    const uint  e0Rays = (uint)max(gRtParams.y, 1.0) > 2u && haveE0 && !e0Directional ? 2u : (uint)max(gRtParams.y, 1.0);
 
     // History writes always live for this pass: blended draws never reach ray-driven primary.
     gAverHistoryWrite = true;
@@ -2611,8 +2591,8 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
 // surface pixel ranks the lights reaching it (all but its exact light, gRdLocalOut.x from CSRdShadow); the strongest
 // lightRaysPerBlock get one ray each, every frame, nothing picked at random. Their irradiance-weighted unblocked share
 // is the tail's fraction, blended with history by the sun's rule (FidelityFX mode; NRD2 frames have none), and
-// written to every pixel of the block at the same depth; a pixel across an edge gets -1 and CSRdTailFilter's
-// depth-aware 5x5 fills it. Lights under 1/128 of the tail's total are skipped.
+// written to every pixel of the block at the same depth; a block across an edge also traces its second surface, and
+// a pixel on neither gets -1 for CSRdTailFilter's depth-aware 5x5. Lights under 1/128 of the tail's total are skipped.
 [numthreads(8, 8, 1)]
 void CSRdTailVis(uint3 tid : SV_DispatchThreadID) {
     const uint2 vp = (uint2)gSceneViewportCur.zw;
@@ -2646,50 +2626,73 @@ void CSRdTailVis(uint3 tid : SV_DispatchThreadID) {
     if (!found) return;
 
     averRtCutoutPolicy(AVER_RD_CUTOUTS_SHADOW, false);
-    const float e0f = gRdLocalOut[rep].x;
-    const uint  e0  = e0f >= 0.0 ? (uint)e0f : 0xFFFFFFFFu;
-    const RdLightRange lr = rdLightsAt(s.wpos);
-    RdTopWeights top = rdTopInit();
-    float twS = 0.0;
-    [loop] for (uint k = 0u; k < lr.count; ++k) {
-        const float w = rdTailWeight(rdLightIndex(lr, k), e0, s.wpos, s.N);
-        if (!(w > 0.0)) continue;
-        twS += w;
-        rdTopAdd(top, w);
-    }
-    float vis = 1.0;
-    if (twS > 0.0) {
-        const float floorW = twS * (1.0 / 128.0);
-        const uint  budget = rdLightRaysPerBlock();
-        const uint  turn   = (uint)gRtHistParams.z;
-        float sumW = 0.0, sumV = 0.0;
-        [loop] for (uint k = 0u; k < lr.count; ++k) {
-            const uint  j = rdLightIndex(lr, k);
-            const float w = rdTailWeight(j, e0, s.wpos, s.N);
-            if (!(w > floorW) || rdTopCountAbove(top, w) >= budget) continue;
-            const float3 Lt = rdSetShadowLight(gRdLocalLights[j], s.wpos);
-            const float  v  = averShadowLum(rtShadowEx(s.wpos, s.N, Lt, repC, float3(0, 0, 0), float3(0, 0, 0), 1u,
-                                                       averGoldenTurns(turn), 0u));
-            sumW += w;
-            sumV += w * v;
-        }
-        rdResetShadowLight();
-        if (sumW > 0.0) vis = sumV / sumW;
-        // The sun's history rule (rtShadowTemporalEx): 0.9 at rest, 0.5 by 32 px/frame, 0.35 where the shadow changed.
-        if (haveHist && hist >= 0.0) {
-            const float t = saturate(length(velocityPx) / 32.0);
-            vis = lerp(vis, hist, rtShadowChanged(vis, hist) ? kAverShadowChangeHistory : lerp(0.9, 0.5, t));
-        }
-    }
-    // Every pixel of the block on the representative's surface (the depth test rdLocalVisTap uses); sky keeps 1.
+    // A block across an edge has a second surface: its first pixel off the representative's depth gets its own
+    // estimate (no history: the reprojection above is the representative's), so thin objects and silhouettes are not
+    // left to the filter's fallback. One trace site in the loop: each rtShadowEx call inlines the shadow kernel.
     const float zc = gRdSunVisTex[rep].a;
+    uint2 rep2 = rep;
+    bool  two  = false;
+    [unroll] for (uint q = 0u; q < 4u; ++q) {
+        const uint2 p  = base + uint2(q & 1u, q >> 1u);
+        const float zt = all(p - (uint2)gSceneViewportCur.xy < vp) ? gRdSunVisTex[p].a : 0.0;
+        if (!two && zt > 0.0 && abs(zt - zc) > zc * 0.03 + 1.0) { rep2 = p; two = true; }
+    }
+    float vis0 = 1.0, vis1 = 1.0;
+    const uint turn = (uint)gRtHistParams.z;
+    [loop] for (uint r = 0u; r < (two ? 2u : 1u); ++r) {
+        const uint2 rp  = r == 0u ? rep : rep2;
+        const float2 rpC = float2(rp) + 0.5;
+        RdSurface sr = s;
+        if (r != 0u) {
+            float2 ndc2;
+            sr = rdSurfaceFromRecord(gRdVisBuf[rp.y * pitch + rp.x], rdPrimaryRayDir(rp, ndc2));
+        }
+        const float e0f = gRdLocalOut[rp].x;
+        const uint  e0  = e0f >= 0.0 ? (uint)e0f : 0xFFFFFFFFu;
+        const RdLightRange lr = rdLightsAt(sr.wpos);
+        RdTopWeights top = rdTopInit();
+        float twS = 0.0;
+        [loop] for (uint k = 0u; k < lr.count; ++k) {
+            const float w = rdTailWeight(rdLightIndex(lr, k), e0, sr.wpos, sr.N);
+            if (!(w > 0.0)) continue;
+            twS += w;
+            rdTopAdd(top, w);
+        }
+        float vis = 1.0;
+        if (twS > 0.0) {
+            const float floorW = twS * (1.0 / 128.0);
+            const uint  budget = rdLightRaysPerBlock();
+            float sumW = 0.0, sumV = 0.0;
+            [loop] for (uint k = 0u; k < lr.count; ++k) {
+                const uint  j = rdLightIndex(lr, k);
+                const float w = rdTailWeight(j, e0, sr.wpos, sr.N);
+                if (!(w > floorW) || rdTopCountAbove(top, w) >= budget) continue;
+                const float3 Lt = rdSetShadowLight(gRdLocalLights[j], sr.wpos);
+                const float  v  = averShadowLum(rtShadowEx(sr.wpos, sr.N, Lt, rpC, float3(0, 0, 0), float3(0, 0, 0), 1u,
+                                                           averGoldenTurns(turn), 0u));
+                sumW += w;
+                sumV += w * v;
+            }
+            rdResetShadowLight();
+            if (sumW > 0.0) vis = sumV / sumW;
+            // The sun's history rule (rtShadowTemporalEx): 0.9 at rest, 0.5 by 32 px/frame, 0.35 where it changed.
+            if (r == 0u && haveHist && hist >= 0.0) {
+                const float t = saturate(length(velocityPx) / 32.0);
+                vis = lerp(vis, hist, rtShadowChanged(vis, hist) ? kAverShadowChangeHistory : lerp(0.9, 0.5, t));
+            }
+        }
+        if (r == 0u) vis0 = vis; else vis1 = vis;
+    }
+    // Each pixel of the block takes the estimate of the surface it is on (the depth test rdLocalVisTap uses); a pixel
+    // on neither gets -1 for CSRdTailFilter to fill; sky keeps its 1.
+    const float z2 = gRdSunVisTex[rep2].a;
     [unroll] for (uint q = 0u; q < 4u; ++q) {
         const uint2 p = base + uint2(q & 1u, q >> 1u);
         if (any(p - (uint2)gSceneViewportCur.xy >= vp)) continue;
         const float zt = gRdSunVisTex[p].a;
         if (zt <= 0.0) continue;
         float4 o = gRdLocalOut[p];
-        o.a = abs(zt - zc) <= zc * 0.03 + 1.0 ? vis : -1.0;
+        o.a = abs(zt - zc) <= zc * 0.03 + 1.0 ? vis0 : (two && abs(zt - z2) <= z2 * 0.03 + 1.0) ? vis1 : -1.0;
         gRdLocalOut[p] = o;
     }
 }
@@ -2703,8 +2706,7 @@ void CSRdTailFilter(uint3 tid : SV_DispatchThreadID) {
     const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
     if (gRdSunVisTex[pixel].a <= 0.0) return;
     float4 o = gRdLocalOut[pixel];
-    // Denoiser None: the pixel's own block-shared fraction; the 5x5 only fills pixels the blocks left empty.
-    o.z = (rtFiltersOff() && o.a >= 0.0) ? o.a : rdLocalVisFilter5x5(pixel);
+    o.z = rdLocalVisFilter5x5(pixel);
     gRdLocalOut[pixel] = o;
 }
 
@@ -2786,13 +2788,9 @@ void CSRdGiTrace(uint3 tid : SV_DispatchThreadID) {
 // MILESTONE 4: Also compiled with AVER_GI_CHECKERBOARD=1 (half-rate GI).
 // Skip decided here (gGiCbSkip); changes live inside giRestirIndirect.
 [numthreads(8, 8, 1)]
-void CSRdGi(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gidx : SV_GroupIndex) {
-    uint2 t = tid.xy;
-#if AVER_GI_CHECKERBOARD
-    if (rdHrCoherent()) t = rdHrThread(gid, gidx, ((uint)gViewParams.w >> 16) & 1u);
-#endif
-    if (any(t >= (uint2)gSceneViewportCur.zw)) return;
-    const uint2 pixel = (uint2)gSceneViewportCur.xy + t;
+void CSRdGi(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
 
     const uint pitch = rdRowPitch();
     if (pitch == 0u) return;
@@ -2844,11 +2842,9 @@ void CSRdGi(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gidx :
 // Same pixel-centre argument, same AO history pair and denoiser hand-off.
 // Compiled at SM 6.6 (derivative intrinsics in rtAoSpatial require 8x8 threads in 2x2 quads).
 [numthreads(8, 8, 1)]
-void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gidx : SV_GroupIndex) {
-    uint2 t = tid.xy;
-    if (rdHrCoherent()) t = rdHrThread(gid, gidx, (uint)gRtHistParams.z);
-    if (any(t >= (uint2)gSceneViewportCur.zw)) return;
-    const uint2 pixel = (uint2)gSceneViewportCur.xy + t;
+void CSRdSkyOcc(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
 
     const uint pitch = rdRowPitch();
     if (pitch == 0u) return;
@@ -2962,11 +2958,9 @@ void rdDenoisedReflection(float3 wpos, float hitT, inout float3 refl) {
 #define AVER_RD_REFL_SPLIT 0
 #endif
 [numthreads(8, 8, 1)]
-void CSRdRefl(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint gidx : SV_GroupIndex) {
-    uint2 t = tid.xy;
-    if (rdHrCoherent()) t = rdHrThread(gid, gidx, (uint)gRtHistParams.z);
-    if (any(t >= (uint2)gSceneViewportCur.zw)) return;
-    const uint2 pixel = (uint2)gSceneViewportCur.xy + t;
+void CSRdRefl(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
 
     const uint pitch = rdRowPitch();
     if (pitch == 0u) return;

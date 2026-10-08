@@ -59,10 +59,6 @@ Application* createApplication(int argc, char** argv) {
         aver::crash::shutdown();
         std::exit(rc);
     }
-    // --sync-shaders: shader and pipeline creation stays on the render thread (docs/rendering/ASYNC_SHADERS.md).
-    // Its own loop, ahead of the device: the flag chains below are at MSVC's nesting limit (C1061).
-    for (int i = 1; i < argc; ++i)
-        if (std::strcmp(argv[i], "--sync-shaders") == 0) aver::rhi::setAsyncShaderBuilds(false);
 #ifdef NDEBUG
     AVER_INFO("[Sandbox] {} (Release build)", argc > 0 ? argv[0] : "Sandbox.exe");
 #else

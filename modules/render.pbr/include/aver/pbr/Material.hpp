@@ -329,9 +329,6 @@ public:
 
     // True when the caller still owes the GPU an upload. Reading the flag clears it.
     bool consumeDirty(MaterialHandle h);
-    // Advances whenever a material is created, destroyed, updated or touched, i.e. whenever
-    // consumeDirty() could newly answer true or count()/at() could change.
-    u64 changeCount() const;
 
     // How many materials are live. Indices are dense over live materials and shift on destroy.
     u32 count() const;

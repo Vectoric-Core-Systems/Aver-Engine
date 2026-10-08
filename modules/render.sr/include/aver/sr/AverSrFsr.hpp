@@ -5,7 +5,6 @@
 
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/sr/AverSrSpatial.hpp"
-#include "aver/sr/SrConfine.hpp"
 
 namespace aver::sr {
 
@@ -33,8 +32,7 @@ private:
     bool ensureTargets(u32 srcW, u32 srcH, u32 dstW, u32 dstH);
     void releaseTargets();
     void draw(rhi::IRenderContext& ctx, rhi::PipelineHandle p, rhi::BindingSetHandle set,
-              rhi::TextureHandle src, rhi::TextureHandle& bound, const void* cb, u32 w, u32 h,
-              const PxRect* scissor);
+              rhi::TextureHandle src, rhi::TextureHandle& bound, const void* cb, u32 w, u32 h);
 
     rhi::IResourceFactory& res_;
     SpatialUpscaler        fallback_;   // used if FSR's pipelines will not build

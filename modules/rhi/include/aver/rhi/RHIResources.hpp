@@ -4,7 +4,6 @@
 #include "aver/core/Types.hpp"
 
 #include <cstring>
-#include <memory>
 #include <string>
 namespace aver::rhi {
 
@@ -410,45 +409,6 @@ struct BlasGeometry {
     bool opaque = true;
 };
 
-// ---------------------------------------------------------------- pipeline batches
-// Shader compilation and pipeline creation off the render thread (docs/rendering/ASYNC_SHADERS.md).
-//
-// A batch is a list of create requests that is built on the owner's thread, run (on workers or inline),
-// and then ADOPTED into the factory on the owner's thread at a frame boundary. Workers never touch the
-// factory's handle tables or anything the GPU is using; they read the immutable request and write only
-// the batch's own results.
-//
-// Handles a batch hands out are LOCAL to it: a ShaderHandle is only valid in this batch's pipeline
-// descs, a PipelineHandle only in resolve() after adopt(). Neither is a factory handle.
-class IPipelineBatch {
-public:
-    virtual ~IPipelineBatch() = default;
-
-    // ---- recording: owner thread, before start(). Strings in the descs are copied. ----
-    virtual ShaderHandle   createShader(const ShaderDesc& d) = 0;
-    virtual PipelineHandle createGraphicsPipeline(const GraphicsPipelineDesc& d) = 0;
-    virtual PipelineHandle createComputePipeline(const ComputePipelineDesc& d) = 0;
-
-    // Runs the recorded requests: handed to workers (returns at once), or run inline (returns when
-    // done). Once.
-    virtual void start() = 0;
-    // Every request has finished. Any thread.
-    virtual bool finished() const = 0;
-    // Finished and total requests (shader compiles and pipeline creations). Any thread.
-    virtual void progress(u32& done, u32& total) const = 0;
-    // Blocks until finished().
-    virtual void waitFinished() = 0;
-
-    // ---- owner thread, once finished(): moves the built pipelines into the factory. ----
-    // Call only where no command list can be using a handle that is about to change.
-    virtual void adopt() = 0;
-    // The factory handle for a local pipeline handle, or 0 when it failed (or before adopt()).
-    virtual PipelineHandle resolve(PipelineHandle local) const = 0;
-
-    // Drops the results. Requests not yet started are skipped; one in flight completes unseen.
-    virtual void cancel() = 0;
-};
-
 // ---------------------------------------------------------------- resource factory
 
 // Creates and destroys GPU resources.
@@ -547,20 +507,7 @@ public:
 
     // Blocks until the GPU is idle.
     virtual void waitIdle() = 0;
-
-    // A batch that builds on worker threads, or null when this backend has none (see
-    // rhi::createPipelineBatch, which falls back to an inline one). Owner thread.
-    virtual std::unique_ptr<IPipelineBatch> createPipelineBatchAsync() { return nullptr; }
 };
-
-// A batch for `res`: on worker threads when `async` and the backend supports it, else inline (start()
-// runs every request on the calling thread through the factory's own create calls).
-std::unique_ptr<IPipelineBatch> createPipelineBatch(IResourceFactory& res, bool async);
-
-// Process-wide opt-out (--sync-shaders): false makes every createPipelineBatch inline and tells hosts to
-// leave their renderers synchronous. Set before a device exists.
-void setAsyncShaderBuilds(bool allowed);
-bool asyncShaderBuildsAllowed();
 
 // ---------------------------------------------------------------- command recording
 

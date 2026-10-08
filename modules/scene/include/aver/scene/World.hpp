@@ -142,9 +142,7 @@ public:
     bool             setLocalRotation(Entity e, const Quat& q);
     // Sets local scale and bumps the revision.
     bool             setLocalScale(Entity e, const Vec3& s);
-    // Bumps CLocal::rev after a caller wrote the transform through the pool directly. Required, not
-    // optional: flush() and worldMatrix() skip all work while no World writer has run, so a raw
-    // write or a raw rev bump is never seen.
+    // Bumps CLocal::rev after a caller wrote the transform through the pool directly.
     bool             touchLocal(Entity e);
 
     // The entity's world matrix, composing its ancestor chain on demand if it is stale.

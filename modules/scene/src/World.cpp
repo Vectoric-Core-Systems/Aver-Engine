@@ -22,11 +22,6 @@ inline void bumpRevision(u32& rev) {
     if (rev == 0) rev = 1;
 }
 
-// The three components world-matrix composition reads or writes.
-inline bool isTransformType(u32 type) {
-    return type == kComponentLocal || type == kComponentWorld || type == kComponentHierarchy;
-}
-
 // Builds a quaternion from three normalised rotation ROWS, matching Mat4::fromQuat's convention.
 Quat quatFromRows(const Vec3& r0, const Vec3& r1, const Vec3& r2) {
     const f32 trace = r0.x + r1.y + r2.z;
@@ -105,13 +100,6 @@ struct World::Impl {
     std::vector<Entity> chain;
     std::vector<Entity> depthStack;   // scratch for refreshSubtreeDepth, kept off `stack`
     bool                topoDirty = false;
-
-    // Bumped by every writer a world matrix depends on: transform writes, reparenting, adding or
-    // removing CLocal/CWorld/CHierarchy, retiring entities. cleanEpoch is writeEpoch as of the last
-    // flush that left every matrix composed, so equal means nothing is stale. Anything that bumps
-    // CLocal::rev must go through World (touchLocal), or flush() and worldMatrix() will not see it.
-    u64                 writeEpoch = 1;
-    u64                 cleanEpoch = 0;
 
     // The entity's CHierarchy, or nullptr.
     CHierarchy* hier(Entity e) {
@@ -203,41 +191,6 @@ struct World::Impl {
         for (usize i = chain.size(); i-- > 0;) composeIfStale(chain[i]);
     }
 
-#ifndef NDEBUG
-    u32 verifyTick = 0;
-
-    // True when composeIfStale would recompose `e`.
-    bool isStale(Entity e) {
-        const CWorld* w = wor(e);
-        const CLocal* l = loc(e);
-        if (!w || !l) return false;
-        const Entity  p  = parentOf(e);
-        const CWorld* pw = (p != kInvalidEntity) ? wor(p) : nullptr;
-        return w->composedLocalRev != l->rev || w->composedParentRev != (pw ? pw->rev : 0);
-    }
-
-    // Debug only: a clean epoch must mean no matrix is stale. On a mismatch a writer bypassed World;
-    // the epoch is bumped so the old full path runs and the frame stays correct.
-    bool epochHolds(const char* where, Entity e) {
-        bool ok = true;
-        if (e != kInvalidEntity) {
-            for (Entity a = e; a != kInvalidEntity && ok; a = parentOf(a)) ok = !isStale(a);
-        } else {
-            for (const Entity a : live) {
-                if (!isStale(a)) continue;
-                ok = false;
-                break;
-            }
-        }
-        if (!ok) {
-            AVER_ERROR("Aver.Scene: {}: the write epoch says every world matrix is fresh but one is stale "
-                       "- a transform writer bypassed World (touchLocal)", where);
-            ++writeEpoch;
-        }
-        return ok;
-    }
-#endif
-
     // Rebuilds the topological order: a pre-order walk of every root, refreshing depth as it goes.
     void rebuildOrder() {
         order.clear();
@@ -301,7 +254,6 @@ struct World::Impl {
 
     // Expands the destroy queue to whole subtrees, then unlinks and retires every entity in it.
     void collectAndRetire() {
-        ++writeEpoch;
         doomed.clear();
         for (const Entity queued : destroyQueue) {
             stack.clear();
@@ -666,7 +618,6 @@ ComponentPool* World::pool(u32 type) {
 // Attaches zero-filled storage for `type` to `e`, or returns what it already has.
 void* World::addComponent(Entity e, u32 type) {
     ComponentPool* p = pool(type);
-    if (isTransformType(type)) ++impl_->writeEpoch;
     return (p && valid(e)) ? p->add(e) : nullptr;
 }
 
@@ -690,7 +641,6 @@ bool World::hasComponent(Entity e, u32 type) const {
 // Drops the component from `e`.
 bool World::removeComponent(Entity e, u32 type) {
     ComponentPool* p = pool(type);
-    if (isTransformType(type)) ++impl_->writeEpoch;
     return p && p->remove(e);
 }
 
@@ -713,7 +663,6 @@ bool World::setParent(Entity e, Entity newParent, bool keepWorld) {
     Mat4 keep;
     if (keepWorld) keep = worldMatrix(e);
 
-    ++d.writeEpoch;
     d.unlinkFromParent(e);
     if (newParent != kInvalidEntity) {
         d.linkToParent(e, newParent);
@@ -781,7 +730,6 @@ bool World::setLocalTransform(Entity e, const Transform& xf) {
     if (!l) return false;
     l->xf = xf;
     bumpRevision(l->rev);
-    ++impl_->writeEpoch;
     return true;
 }
 
@@ -791,7 +739,6 @@ bool World::setLocalPosition(Entity e, const Vec3& p) {
     if (!l) return false;
     l->xf.position = p;
     bumpRevision(l->rev);
-    ++impl_->writeEpoch;
     return true;
 }
 
@@ -801,7 +748,6 @@ bool World::setLocalRotation(Entity e, const Quat& q) {
     if (!l) return false;
     l->xf.rotation = q;
     bumpRevision(l->rev);
-    ++impl_->writeEpoch;
     return true;
 }
 
@@ -811,7 +757,6 @@ bool World::setLocalScale(Entity e, const Vec3& s) {
     if (!l) return false;
     l->xf.scale = s;
     bumpRevision(l->rev);
-    ++impl_->writeEpoch;
     return true;
 }
 
@@ -820,22 +765,13 @@ bool World::touchLocal(Entity e) {
     CLocal* l = component<CLocal>(e, kComponentLocal);
     if (!l) return false;
     bumpRevision(l->rev);
-    ++impl_->writeEpoch;
     return true;
 }
 
 // The entity's world matrix, composing its ancestor chain on demand. Identity for a stale handle.
 const Mat4& World::worldMatrix(Entity e) {
     Impl& d = *impl_;
-    if (d.cleanEpoch != d.writeEpoch) {
-        d.composeChain(e);
-    }
-#ifndef NDEBUG
-    else if ((++d.verifyTick & 255u) == 0) {
-        d.epochHolds("worldMatrix", e);
-        d.composeChain(e);
-    }
-#endif
+    d.composeChain(e);
     const CWorld* w = d.wor(e);
     return w ? w->m : kIdentityMatrix;
 }
@@ -852,13 +788,6 @@ u32 World::worldRevision(Entity e) const {
 // Returns how many were recomposed.
 u32 World::flush() {
     Impl& d = *impl_;
-    if (d.cleanEpoch == d.writeEpoch && d.destroyQueue.empty() && !d.topoDirty) {
-#ifndef NDEBUG
-        if ((++d.verifyTick & 63u) != 0 || d.epochHolds("flush", kInvalidEntity)) return 0;
-#else
-        return 0;
-#endif
-    }
     if (!d.destroyQueue.empty()) {
         d.collectAndRetire();
         d.topoDirty = true;
@@ -869,9 +798,6 @@ u32 World::flush() {
     for (const Entity e : d.order) {
         if (d.composeIfStale(e)) ++recomposed;
     }
-    // An order that misses a live entity (a parent link to a dead entity) leaves it to worldMatrix()'s
-    // on-demand compose, so that world never takes the fast paths.
-    if (d.order.size() == d.live.size()) d.cleanEpoch = d.writeEpoch;
     return recomposed;
 }
 

@@ -84,22 +84,8 @@ public:
         f32 jitter[2] = {1.0f, 1.0f};             // this frame's TAA jitter (IDevice::taaJitter); only exactly 0, 0 stabilises
     };
 
-    // Compute pipelines. False (said once) when nrd2.hlsl will not compile. Built and waited for here.
+    // Compute pipelines. False (said once) when nrd2.hlsl will not compile.
     bool create(rhi::IDevice& dev);
-
-    // The same builds split for a background batch (VoxiRenderer): recordBuild() puts the requests in `b`
-    // and creates nothing; once b is started, finished and adopted, finishBuild() takes the pipelines and
-    // creates the binding sets. `compute` is the compute set (only when !valid()), `compose` the compose
-    // draw (which bakes the formats, so it is rebuilt with them). BuildPlan holds batch-local handles.
-    struct BuildPlan {
-        rhi::PipelineHandle pyramid = 0, params = 0, resolve = 0, reproject = 0, prefilter = 0, temporal = 0,
-                            despeckle = 0, blur = 0, compose = 0;
-    };
-    bool recordBuild(rhi::IDevice& dev, rhi::IPipelineBatch& b, bool compute, bool compose, rhi::Format color,
-                     const rhi::Format gbuffer[3], rhi::Format depth, u32 sampleCount, BuildPlan& plan);
-    bool finishBuild(const rhi::IPipelineBatch& b, const BuildPlan& plan, bool compute, bool compose);
-    // A batch that was adopted but whose plan is not wanted after all: frees what it built.
-    void discardBuild(const rhi::IPipelineBatch& b, const BuildPlan& plan);
     void destroy();
     [[nodiscard]] bool valid() const { return psoPyramid_ != 0 && psoParams_ != 0 && psoResolve_ != 0; }
 

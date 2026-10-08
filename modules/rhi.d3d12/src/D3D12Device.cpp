@@ -16,14 +16,12 @@
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
 #include <dxcapi.h>
-#include <cwchar>
 #include <chrono>
 #include <fstream>
 #include <filesystem>
 #include <string>
 #include <wrl/client.h>
 
-#include <array>
 #include <algorithm>   // std::find (the once-per-shape binding warning) and std::sort (the blended-mesh flush's back-to-front replay)
 #include <cmath>
 #include <cstdio>
@@ -110,9 +108,10 @@ constexpr u32 kLocalExpCellBytes = 8;
 // Compiles HLSL through DXC (shader model 6.x) when dxcompiler.dll is present, else FXC (SM 5.1).
 class ShaderCompiler {
 public:
-    // Loads DXC once, or settles on FXC. Safe from any thread; the device calls it first, on the main thread.
-    void init() { std::call_once(once_, [this] { load(); }); }
-    void load() {
+    // Loads DXC once, or settles on FXC.
+    void init() {
+        if (tried_) return;
+        tried_ = true;
         if (capsOverride().active && capsOverride().noDxc) {
             AVER_INFO("[RHI.D3D12] shader compiler: FXC (SM 5.1) - DXC suppressed by --force-caps no-dxc");
             return;
@@ -121,17 +120,15 @@ public:
         if (!dll_) { AVER_WARN("[RHI.D3D12] dxcompiler.dll not found - falling back to FXC (SM 5.1)"); return; }
         auto create = reinterpret_cast<DxcCreateInstanceProc>(reinterpret_cast<void*>(GetProcAddress(dll_, "DxcCreateInstance")));
         if (!create) { AVER_WARN("[RHI.D3D12] DxcCreateInstance missing - falling back to FXC"); return; }
-        // One instance to prove it loads; every thread that compiles makes its own (IDxcCompiler3 is not
-        // safe to share between concurrent Compile calls).
-        Dxc probe;
-        if (!probe.make(create)) {
+        if (FAILED(create(CLSID_DxcUtils, IID_PPV_ARGS(&utils_))) ||
+            FAILED(create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler_)))) {
+            utils_.Reset(); compiler_.Reset();
             AVER_WARN("[RHI.D3D12] DXC init failed - falling back to FXC");
             return;
         }
-        create_ = create;
         AVER_INFO("[RHI.D3D12] shader compiler: DXC (shader model 6.x)");
     }
-    bool usingDxc() const { return create_ != nullptr; }
+    bool usingDxc() const { return compiler_ != nullptr; }
 
     // Compiles one entry point to bytecode. `target51` is the FXC target; `sm6` overrides the derived
     // SM6 target and requires DXC. `define` is a semicolon-separated -D list.
@@ -139,8 +136,7 @@ public:
     // kCacheVersion: bump when shipped compiler changes.
     static constexpr u32 kCacheVersion = 1;
 
-    static u64 cacheKey(const char* src, const char* entry, const char* target, const std::vector<std::string>& defs,
-                        u64 corpus) {
+    static u64 cacheKey(const char* src, const char* entry, const char* target, const std::vector<std::string>& defs) {
         u64 h = 0xcbf29ce484222325ull;
         const auto mix = [&h](const char* p, size_t n) {
             for (size_t i = 0; i < n; ++i) { h ^= static_cast<unsigned char>(p[i]); h *= 0x100000001b3ull; }
@@ -148,8 +144,8 @@ public:
         };
         const u32 v = kCacheVersion;
         mix(reinterpret_cast<const char*>(&v), sizeof v);
-        // Every shader file (memoised, one directory walk per process). The caller's snapshot: a batch
-        // fixes it when it is recorded, so a reload mid-build cannot file old text under the new key.
+        // Every shader file (memoised, one directory walk per process).
+        const u64 corpus = shaderCorpusHash();
         mix(reinterpret_cast<const char*>(&corpus), sizeof corpus);
         mix(src, std::strlen(src));
         mix(entry, std::strlen(entry));
@@ -168,34 +164,27 @@ public:
     }
 
     // Running totals for shader-compile cost (reported on power-of-two cadence).
-    // Atomic: shader build workers compile concurrently.
-    static inline std::atomic<u32> s_compiles{0};
-    static inline std::atomic<u64> s_compileUs{0};
-    static inline std::atomic<u32> s_cacheHits{0};
-    static inline std::atomic<IDevice::ShaderRequestObserver> s_observer{nullptr};
-    static inline std::atomic<void*> s_observerUser{nullptr};
+    static inline u32 s_compiles = 0;
+    static inline f64 s_compileMs = 0.0;
+    static inline u32 s_cacheHits = 0;
+    static inline IDevice::ShaderRequestObserver s_observer = nullptr;
+    static inline void* s_observerUser = nullptr;
 
-    // `corpus` is shaderCorpusHash() as of the caller's snapshot (0 = take it now). `cacheWriteOk`, when set,
-    // is asked just before a compiled blob is written: false (shader files reloaded mid-build) skips the write.
     HRESULT compile(const char* src, const char* entry, const char* target51, ID3DBlob** out,
-                    const char* sm6 = nullptr, const char* define = nullptr, u64 corpus = 0,
-                    bool (*cacheWriteOk)(void*) = nullptr, void* cacheUser = nullptr) {
+                    const char* sm6 = nullptr, const char* define = nullptr) {
         init();
-        if (!corpus) corpus = shaderCorpusHash();
         const auto t0 = std::chrono::steady_clock::now();
         struct Report {
             std::chrono::steady_clock::time_point t0;
             ~Report() {
-                const u64 us = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                   std::chrono::steady_clock::now() - t0).count());
-                const u64 totalUs = s_compileUs.fetch_add(us) + us;
-                const u32 n = s_compiles.fetch_add(1) + 1;
-                const u32 hits = s_cacheHits.load();
-                if ((n & (n - 1)) == 0)
+                s_compileMs += std::chrono::duration<f64, std::milli>(
+                                   std::chrono::steady_clock::now() - t0).count();
+                ++s_compiles;
+                if ((s_compiles & (s_compiles - 1)) == 0)
                     AVER_INFO("[RHI.D3D12] {} shader request(s): {} served from the blob cache, "
                               "{} compiled in {:.0f} ms",
-                              n, hits, n - hits, static_cast<f64>(totalUs) / 1000.0);
-                if (const auto obs = s_observer.load()) obs(n, hits, s_observerUser.load());
+                              s_compiles, s_cacheHits, s_compiles - s_cacheHits, s_compileMs);
+                if (s_observer) s_observer(s_compiles, s_cacheHits, s_observerUser);
             }
         } report{t0};
         std::vector<std::string> defs;
@@ -245,8 +234,6 @@ public:
             }
         }
 
-        Dxc& dxc = threadDxc();
-        if (!dxc.compiler) return E_FAIL;
         DxcBuffer buf{src, std::strlen(src), DXC_CP_UTF8};
         std::vector<LPCWSTR> args = {
             L"-E", wEntry.c_str(),
@@ -270,7 +257,7 @@ public:
         if (want16Bit) args.push_back(L"-enable-16bit-types");
         for (const std::wstring& d : wDefines) { args.push_back(L"-D"); args.push_back(d.c_str()); }
         // Custom include handler for hot reload and per-file caching. Cache miss falls through to compile.
-        const u64 ckey = cacheKey(src, entry, t6.c_str(), defs, corpus);
+        const u64 ckey = cacheKey(src, entry, t6.c_str(), defs);
         if (const std::string cp = cachePath(ckey); !cp.empty()) {
             std::ifstream f(cp, std::ios::binary | std::ios::ate);
             if (f) {
@@ -287,9 +274,9 @@ public:
             }
         }
 
-        DxcShaderInclude includes(dxc.utils.Get());
+        DxcShaderInclude includes(utils_.Get());
         ComPtr<IDxcResult> result;
-        HRESULT hr = dxc.compiler->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), &includes, IID_PPV_ARGS(&result));
+        HRESULT hr = compiler_->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), &includes, IID_PPV_ARGS(&result));
         if (SUCCEEDED(hr)) result->GetStatus(&hr);
         if (FAILED(hr)) {
             ComPtr<IDxcBlobUtf8> errs;
@@ -304,7 +291,7 @@ public:
         // Best-effort cache write; failures only cost a recompile next launch. Written to a private temp
         // name and renamed into place, so another process filling the same cache (the editor's --warm-shaders
         // copy) can never be read half-written.
-        if (const std::string cp = cachePath(ckey); !cp.empty() && (!cacheWriteOk || cacheWriteOk(cacheUser))) {
+        if (const std::string cp = cachePath(ckey); !cp.empty()) {
             std::error_code ec;
             std::filesystem::create_directories(std::filesystem::path(cp).parent_path(), ec);
             const std::string tmp = cp + "." + std::to_string(GetCurrentProcessId()) + "." +
@@ -324,23 +311,10 @@ public:
         return S_OK;
     }
 private:
-    // A compiler instance of its own per thread.
-    struct Dxc {
-        ComPtr<IDxcUtils> utils;
-        ComPtr<IDxcCompiler3> compiler;
-        bool make(DxcCreateInstanceProc create) {
-            return create && SUCCEEDED(create(CLSID_DxcUtils, IID_PPV_ARGS(&utils))) &&
-                   SUCCEEDED(create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)));
-        }
-    };
-    Dxc& threadDxc() {
-        thread_local Dxc d;
-        if (!d.compiler) d.make(create_);
-        return d;
-    }
-    std::once_flag once_;
+    bool tried_ = false;
     HMODULE dll_ = nullptr;
-    DxcCreateInstanceProc create_ = nullptr;   // non-null = DXC is in use
+    ComPtr<IDxcUtils> utils_;
+    ComPtr<IDxcCompiler3> compiler_;
 };
 
 // The process-wide shader compiler.
@@ -1182,7 +1156,6 @@ public:
     void collectExposureReadout();
     // GPU timing markers for phases outside render features.
     void beginGpuSpan(const char* label) {
-        if (auditOn_) auditPush(label);
         if (!tsEnabled_) return;
         // Parent is whatever is already open (kNoParent if none); cap enforced to prevent dropped spans reparenting incorrectly.
         if (tsSlice_[frameIndex_].size() >= kMaxGpuSpans) { ++tsDropped_; return; }
@@ -1191,7 +1164,6 @@ public:
         tsOpen_.push_back(static_cast<u32>(tsSlice_[frameIndex_].size() - 1));
     }
     void endGpuSpan() {
-        if (auditOn_) auditPop();
         if (!tsEnabled_) return;
         if (tsDropped_) { --tsDropped_; return; }   // pairs with a refused open
         if (tsOpen_.empty()) return;
@@ -1199,36 +1171,6 @@ public:
         tsOpen_.pop_back();
         tsSlice_[frameIndex_][i].end = gpuStamp();
     }
-    // ---- FRAME AUDIT (AVER_FRAME_AUDIT=1) ----
-    // Counts what the recorded frame asks of the GPU (draws, dispatches, barriers, copies and their
-    // bytes, clears, PSO binds, submits) per GPU timing span, so the report reads like the timing
-    // tree and is identical on every run of one scene. Off, each hook is one never-taken branch.
-    enum AuditKind : u32 { kAuDraw, kAuCompute, kAuMesh, kAuRay, kAuBarrier, kAuCopy, kAuCopyBytes,
-                           kAuClear, kAuPso, kAuSubmit, kAuKinds };
-    static constexpr u32 kAuditWindow = 128;   // frames per report
-    void audit(AuditKind k, u64 n = 1) { if (auditOn_) auditNodes_[auditCur_].c[k] += n; }
-    // Work off the render thread: side 0 = present thread, side 1 = one-shot upload / readback lists.
-    void auditSide(u32 side, AuditKind k, u64 n = 1) {
-        if (auditOn_) auditSide_[side][k].fetch_add(n, std::memory_order_relaxed);
-    }
-    void auditCopyBuf(u64 bytes) { if (auditOn_) { audit(kAuCopy); audit(kAuCopyBytes, bytes); } }
-    void auditCopyBufSide(u32 side, u64 bytes) {
-        if (auditOn_) { auditSide(side, kAuCopy); auditSide(side, kAuCopyBytes, bytes); }
-    }
-    void auditCopyRes(ID3D12Resource* r) { if (auditOn_) auditCopyBuf(auditBytes(r, 0, 0, nullptr)); }
-    void auditCopyResSide(u32 side, ID3D12Resource* r) {
-        if (auditOn_) auditCopyBufSide(side, auditBytes(r, 0, 0, nullptr));
-    }
-    void auditCopyTex(const D3D12_TEXTURE_COPY_LOCATION& d, const D3D12_TEXTURE_COPY_LOCATION& s,
-                      const D3D12_BOX* box) {
-        if (auditOn_) auditCopyBuf(auditTexBytes(d, s, box));
-    }
-    void auditCopyTexSide(u32 side, const D3D12_TEXTURE_COPY_LOCATION& d,
-                          const D3D12_TEXTURE_COPY_LOCATION& s, const D3D12_BOX* box) {
-        if (auditOn_) auditCopyBufSide(side, auditTexBytes(d, s, box));
-    }
-    void auditPush(const char* label);
-    void auditPop();
     void resize(u32 w, u32 h);
     u32 width() const { return width_; }
     u32 height() const { return height_; }
@@ -1402,7 +1344,6 @@ private:
     bool frameInterpolated_ = false;           // this frame presented a generated image ahead of the real one
     bool frameInterpCut_ = true;               // the next frame must not be interpolated across
     u32  frameInterpOffReason_ = 0;            // last reason logged
-    std::chrono::steady_clock::time_point frameInterpSettleUntil_{};   // held off until then after any blocked frame
     TextureHandle fgInputTex_ = 0;          // frame N's scene colour, copied
     u32 fgInputW_ = 0, fgInputH_ = 0;
     f32 fgPrevCamPos_[3] = {};
@@ -1473,21 +1414,6 @@ private:
     u32  tsReports_ = 0;
     bool tsEnabled_ = false;
 
-    // Frame audit state (see the public block). Node 0 holds work outside any span; the tree is keyed
-    // like tsAccum_ and its counts are summed over the window.
-    struct AuditNode { std::string label; u32 parent = kNoParent; u64 c[kAuKinds] = {}; };
-    bool auditOn_ = false;
-    std::vector<AuditNode> auditNodes_;
-    std::vector<u32> auditOpen_;
-    u32 auditCur_ = 0;
-    u32 auditFrames_ = 0;
-    std::atomic<u64> auditSide_[2][kAuKinds] = {};
-    void initAudit();
-    void auditReport();
-    u64 auditBytes(ID3D12Resource* r, UINT firstSub, UINT numSubs, const D3D12_BOX* box);
-    u64 auditTexBytes(const D3D12_TEXTURE_COPY_LOCATION& d, const D3D12_TEXTURE_COPY_LOCATION& s,
-                      const D3D12_BOX* box);
-
     // Redundant-state elision: one drawMesh per entity previously re-sent the same pipeline and frame constant block.
     PipelineHandle   fovPso_ = 0;
     BindingSetHandle fovSet_ = 0;
@@ -1540,7 +1466,6 @@ private:
     };
     // Filled by drawMesh(), drained (sorted back-to-front) by endFrame(), cleared at next beginFrame.
     std::vector<BlendedDraw> blendedDraws_;
-    std::string blendDredListLogged_;   // --dred: last blended order logged
     // Missing blended pipeline warning (per-frame, unlike drawBindingIgnored_).
     bool blendedPipelineMissingWarned_ = false;
 
@@ -1740,7 +1665,7 @@ private:
     f32 sceneClear_[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     std::string adapterName_ = "D3D12 Device";
     bool softwareAdapter_ = false;   // True when running on WARP.
-    std::atomic<bool> warpConsRasterLogged_{false};   // set by whichever thread builds the first such pipeline
+    bool warpConsRasterLogged_ = false;
     // IDXGIAdapter3 for QueryVideoMemoryInfo. Null on older DXGI or unavailable driver.
     ComPtr<IDXGIAdapter3> adapter3_;
 
@@ -1753,7 +1678,7 @@ private:
 
     // ---- AverSR ----
     IUpscaler* upscaler_ = nullptr;   // Null unless a host set one.
-    // Adopted handle onto the scene colour for IUpscaler::execute; rests at PIXEL_SHADER_RESOURCE.
+    // Alias of scene colour for IUpscaler::execute. Updated per-frame.
     TextureHandle sceneColorTex_ = 0;
     u32           sceneColorTexW_ = 0, sceneColorTexH_ = 0;
     // Blended pass backdrop.
@@ -1962,58 +1887,6 @@ struct BufferUploadItem {
     u64 bytes = 0;
 };
 
-// Worker threads for shader and pipeline creation off the render thread (D3D12PipelineBatch). Tasks run in
-// submission order; the pool never touches a GPU object on its own.
-class PipelinePool {
-public:
-    explicit PipelinePool(u32 threads) {
-        for (u32 i = 0; i < threads; ++i) threads_.emplace_back([this] { run(); });
-    }
-    // Joins the workers: a task in flight finishes, queued tasks are dropped.
-    ~PipelinePool() {
-        {
-            std::lock_guard<std::mutex> lock(m_);
-            stop_ = true;
-        }
-        cv_.notify_all();
-        for (std::thread& t : threads_) t.join();
-    }
-    PipelinePool(const PipelinePool&) = delete;
-    PipelinePool& operator=(const PipelinePool&) = delete;
-
-    void submit(std::function<void()> fn) {
-        {
-            std::lock_guard<std::mutex> lock(m_);
-            q_.push_back(std::move(fn));
-        }
-        cv_.notify_one();
-    }
-
-private:
-    void run() {
-        // Behind the render thread and the GPU driver's own work.
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-        for (;;) {
-            std::function<void()> fn;
-            {
-                std::unique_lock<std::mutex> lock(m_);
-                cv_.wait(lock, [this] { return stop_ || !q_.empty(); });
-                if (stop_) return;
-                fn = std::move(q_.front());
-                q_.pop_front();
-            }
-            fn();
-        }
-    }
-    std::mutex m_;
-    std::condition_variable cv_;
-    std::deque<std::function<void()>> q_;
-    std::vector<std::thread> threads_;
-    bool stop_ = false;
-};
-
-class D3D12PipelineBatch;
-
 // The generic RHI factory: handle tables, the shared descriptor heap, and deferred destruction.
 class D3D12ResourceFactory final : public IResourceFactory {
 public:
@@ -2028,7 +1901,6 @@ public:
     ShaderHandle     createShader(const ShaderDesc& d) override;
     PipelineHandle   createGraphicsPipeline(const GraphicsPipelineDesc& d) override;
     PipelineHandle   createComputePipeline(const ComputePipelineDesc& d) override;
-    std::unique_ptr<IPipelineBatch> createPipelineBatchAsync() override;
     BindlessTableHandle createBindlessTextureTable(u32 capacity) override;
     void destroyBindlessTextureTable(BindlessTableHandle h) override;
     bool setBindlessTexture(BindlessTableHandle h, u32 index, TextureHandle t) override;
@@ -2109,18 +1981,6 @@ private:
     RhiTlas*       tlas(TlasHandle h);
 
     const RootSigEntry* rootSignature(const PipelineLayout& layout, bool mesh, bool instanced = false);
-
-    // The builders behind createShader / createGraphicsPipeline / createComputePipeline. They touch no handle
-    // table, collect() nothing and retire nothing, so a shader build worker may run them: what they read is the
-    // immutable device caps, the process-wide compiler (one DXC instance per thread) and the mutex-guarded
-    // root-signature cache. `corpus` and the cache-write guard are the shader-file snapshot of the caller.
-    bool buildShader(const ShaderDesc& d, RhiShader& out, u64 corpus = 0,
-                     bool (*cacheWriteOk)(void*) = nullptr, void* cacheUser = nullptr);
-    bool buildGraphicsPipeline(const GraphicsPipelineDesc& d, const RhiShader* vs, const RhiShader* gs,
-                               const RhiShader* ms, const RhiShader* ps, const RhiShader* as, RhiPipeline& out);
-    bool buildComputePipeline(const ComputePipelineDesc& d, const RhiShader* cs, RhiPipeline& out);
-    PipelinePool& pipelinePool();
-    std::unique_ptr<PipelinePool> pool_;
     // Descriptor slot in the shared SHADER-VISIBLE heap (CPU side for writing, GPU side for binding).
     D3D12_CPU_DESCRIPTOR_HANDLE cpuSlot(u32 index) const;
     D3D12_GPU_DESCRIPTOR_HANDLE gpuSlot(u32 index) const;
@@ -2161,10 +2021,7 @@ private:
     std::vector<RhiBindlessTable> bindlessTables_;
     std::vector<RhiBlas>       blases_;
     std::vector<RhiTlas>       tlases_;
-    // Deque and mutex: shader build workers look up and add root signatures concurrently with the main thread,
-    // and RhiPipeline keeps a raw pointer into an entry for as long as the factory lives (never erased).
-    std::deque<RootSigEntry>   rootSigs_;
-    std::mutex                 rootSigMutex_;
+    std::vector<RootSigEntry>  rootSigs_;
     std::vector<RetiredObject> retired_;
     std::vector<RetiredRange>  pendingRanges_;   // Returned, still behind the fence.
     std::vector<RetiredRange>  freeRanges_;
@@ -2173,15 +2030,12 @@ private:
 
     friend class D3D12RenderContext;
     friend class D3D12Device;
-    friend class D3D12PipelineBatch;
 };
 
 // Records a render feature's generic RHI commands into the device's frame command list.
 class D3D12RenderContext final : public IRenderContext {
 public:
     D3D12RenderContext(D3D12Device* dev, D3D12ResourceFactory* res) : dev_(dev), res_(res) {}
-    // A bad setPipeline does not carry over into the next frame's command list.
-    void beginFrame() { pipeInvalid_ = false; }
 
     void setPipeline(PipelineHandle p) override;
     void setViewport(u32 x, u32 y, u32 w, u32 h) override;
@@ -2240,10 +2094,6 @@ private:
     D3D12Device* dev_;
     D3D12ResourceFactory* res_;
     const RhiPipeline* pipe_ = nullptr;
-    // The last setPipeline named a handle with no pipeline behind it. The command list still holds the PREVIOUS
-    // pipeline, so every draw and dispatch is dropped until a valid setPipeline: running the old one against
-    // bindings meant for the new one is a GPU hang, not a visual glitch.
-    bool pipeInvalid_ = false;
     ComPtr<ID3D12Resource> zeroCB_;   // Shared zero-filled CBV for declared-but-unsupplied slots.
 
     ComPtr<ID3D12Resource> ring_[kFrameCount];
@@ -2356,7 +2206,6 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     if (!hrOk(device_->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue_)), "CreateCommandQueue")) return false;
     setDebugName(queue_.Get(), "Aver main direct queue");
     initGpuTiming();
-    initAudit();
 
     {
         const VideoMemoryInfo vmem = videoMemory();
@@ -2520,7 +2369,7 @@ bool D3D12Device::runStandaloneCompute(const std::function<void(IRenderContext&)
 
     if (!hrOk(standaloneList_->Close(), "standalone list Close")) return false;
     ID3D12CommandList* lists[] = {standaloneList_.Get()};
-    audit(kAuSubmit); queue_->ExecuteCommandLists(1, lists);
+    queue_->ExecuteCommandLists(1, lists);
     waitForGpu();
     if (infoQueue_) drainDebugMessages();
     return !deviceLost_;
@@ -2650,7 +2499,7 @@ bool D3D12Device::resolveGBufferMsaa() {
         toRead[i] = transition(ms[i], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         toRt[i]   = transition(ms[i], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
     }
-    audit(kAuBarrier, 3); cmdList_->ResourceBarrier(3, toRead);
+    cmdList_->ResourceBarrier(3, toRead);
     const D3D12_CPU_DESCRIPTOR_HANDLE rtvs[3] = {
         gbufVelocityRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
         gbufViewZRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
@@ -2664,7 +2513,7 @@ bool D3D12Device::resolveGBufferMsaa() {
     rhiContext_->setPipeline(gbufResolvePso_);
     rhiContext_->setBindingSet(gbufResolveSet_, 0);
     rhiContext_->drawFullscreen();
-    audit(kAuBarrier, 3); cmdList_->ResourceBarrier(3, toRt);
+    cmdList_->ResourceBarrier(3, toRt);
     // The RHI bound its own root signature, heap and pipeline.
     boundRootSig_ = nullptr; boundPso_ = nullptr; boundHeap_ = nullptr;
     fovValid_ = false; dbValid_ = false;
@@ -3346,13 +3195,13 @@ void D3D12Device::presentThreadMain() {
             transition(dst, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST),
             transition(src, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE),
         };
-        auditSide(0, kAuBarrier, 2); presentList_->ResourceBarrier(2, pre);
-        auditCopyResSide(0, dst); presentList_->CopyResource(dst, src);
+        presentList_->ResourceBarrier(2, pre);
+        presentList_->CopyResource(dst, src);
         D3D12_RESOURCE_BARRIER post[2] = {
             transition(dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT),
             transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
         };
-        auditSide(0, kAuBarrier, 2); presentList_->ResourceBarrier(2, post);
+        presentList_->ResourceBarrier(2, post);
         const bool mirror = r.mirror && mirrorSwap_ && mirrorImages_[r.image];
         if (mirror) {
             ID3D12Resource* mdst = mirrorSwapBuffers_[mirrorSwap_->GetCurrentBackBufferIndex()].Get();
@@ -3361,17 +3210,17 @@ void D3D12Device::presentThreadMain() {
                 transition(mdst, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST),
                 transition(msrc, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE),
             };
-            auditSide(0, kAuBarrier, 2); presentList_->ResourceBarrier(2, mpre);
-            auditCopyResSide(0, mdst); presentList_->CopyResource(mdst, msrc);
+            presentList_->ResourceBarrier(2, mpre);
+            presentList_->CopyResource(mdst, msrc);
             D3D12_RESOURCE_BARRIER mpost[2] = {
                 transition(mdst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT),
                 transition(msrc, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
             };
-            auditSide(0, kAuBarrier, 2); presentList_->ResourceBarrier(2, mpost);
+            presentList_->ResourceBarrier(2, mpost);
         }
         presentList_->Close();
         ID3D12CommandList* lists[] = {presentList_.Get()};
-        auditSide(0, kAuSubmit); presentQueue_->ExecuteCommandLists(1, lists);
+        presentQueue_->ExecuteCommandLists(1, lists);
 
         const i64 t0 = qpcNow();
         const HRESULT hr = swapChain_->Present(r.sync, r.flags);
@@ -3832,17 +3681,17 @@ void D3D12Device::seedSkinTargets() {
             RhiBuffer* srb = rhiFactory_->buffer(s.vbBuffer);
             return srb && srb->desc.kind == BufferKind::Default;
         }();
-        auditCopyBuf(d.vbv.SizeInBytes); cmdList_->CopyBufferRegion(d.vb.Get(), 0, s.vb.Get(), 0, d.vbv.SizeInBytes);
+        cmdList_->CopyBufferRegion(d.vb.Get(), 0, s.vb.Get(), 0, d.vbv.SizeInBytes);
 
         // Promotion lasts for this command list (decay at submit); skinning pass must find COMMON.
         auto back = transition(d.vb.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                                D3D12_RESOURCE_STATE_COMMON);
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &back);
+        cmdList_->ResourceBarrier(1, &back);
         if (srcIsDefault) {
             // Mirror COPY_SOURCE transition (same lifetime, same reason for explicit undo).
             auto srcBack = transition(s.vb.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
                                       D3D12_RESOURCE_STATE_COMMON);
-            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &srcBack);
+            cmdList_->ResourceBarrier(1, &srcBack);
         }
         AVER_TRACE("[RHI.D3D12] skin target {} seeded with the rest pose of mesh {}", sd.dst, sd.src);
     }
@@ -3982,124 +3831,6 @@ GpuTimingReport D3D12Device::gpuTiming() const {
     return report;
 }
 
-// Reads AVER_FRAME_AUDIT once; node 0 collects work outside any marked span.
-void D3D12Device::initAudit() {
-    const char* v = std::getenv("AVER_FRAME_AUDIT");
-    if (!v || v[0] != '1') return;
-    AuditNode root;
-    root.label = "(outside spans)";
-    auditNodes_.push_back(root);
-    auditOn_ = true;
-    AVER_INFO("[Audit] frame audit on: one count report every {} frames", kAuditWindow);
-}
-
-// Finds or adds the (label, parent) node and makes it current. Linear search: spans number in the dozens.
-void D3D12Device::auditPush(const char* label) {
-    const u32 parent = auditOpen_.empty() ? kNoParent : auditOpen_.back();
-    u32 idx = 0;
-    for (u32 i = 1; i < auditNodes_.size() && idx == 0; ++i)
-        if (auditNodes_[i].parent == parent && auditNodes_[i].label == label) idx = i;
-    if (idx == 0) {
-        AuditNode n;
-        n.label = label;
-        n.parent = parent;
-        auditNodes_.push_back(n);
-        idx = static_cast<u32>(auditNodes_.size() - 1);
-    }
-    auditOpen_.push_back(idx);
-    auditCur_ = idx;
-}
-
-void D3D12Device::auditPop() {
-    if (auditOpen_.empty()) return;
-    auditOpen_.pop_back();
-    auditCur_ = auditOpen_.empty() ? 0u : auditOpen_.back();
-}
-
-// Tight bytes of subresources [firstSub, firstSub + numSubs) (numSubs 0 = all), or of `box` in one.
-u64 D3D12Device::auditBytes(ID3D12Resource* r, UINT firstSub, UINT numSubs, const D3D12_BOX* box) {
-    if (!r || !device_) return 0;
-    const D3D12_RESOURCE_DESC d = r->GetDesc();
-    if (d.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) return d.Width;
-    const bool vol = d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-    if (numSubs == 0) numSubs = static_cast<UINT>(d.MipLevels) * (vol ? 1u : static_cast<UINT>(d.DepthOrArraySize));
-    std::vector<UINT> rows(numSubs);
-    std::vector<UINT64> rowBytes(numSubs);
-    device_->GetCopyableFootprints(&d, firstSub, numSubs, 0, nullptr, rows.data(), rowBytes.data(), nullptr);
-    u64 total = 0;
-    for (UINT i = 0; i < numSubs; ++i) {
-        const UINT mip = (firstSub + i) % d.MipLevels;
-        const u64 mipW = std::max<u64>(1, d.Width >> mip);
-        const u64 mipD = vol ? std::max<u64>(1, d.DepthOrArraySize >> mip) : 1;
-        if (box) {   // pixels in the box times bytes per pixel (block formats: per-block average)
-            total += (rowBytes[i] * (box->right - box->left) / mipW) * (box->bottom - box->top) * (box->back - box->front);
-        } else {
-            total += rowBytes[i] * rows[i] * mipD;
-        }
-    }
-    return total;
-}
-
-// The texture side of a texture copy decides the byte count; a texture-to-buffer copy has one.
-u64 D3D12Device::auditTexBytes(const D3D12_TEXTURE_COPY_LOCATION& d, const D3D12_TEXTURE_COPY_LOCATION& s,
-                               const D3D12_BOX* box) {
-    const D3D12_TEXTURE_COPY_LOCATION& t = d.Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX ? d : s;
-    return auditBytes(t.pResource, t.SubresourceIndex, 1, box);
-}
-
-// One "[Audit]" tree per window, per-frame averages; inclusive counts (a span includes its children).
-void D3D12Device::auditReport() {
-    using Counts = std::array<u64, kAuKinds>;
-    const f64 n = static_cast<f64>(auditFrames_);
-    const size_t N = auditNodes_.size();
-    std::vector<Counts> inc(N);
-    for (size_t i = 0; i < N; ++i) std::copy(std::begin(auditNodes_[i].c), std::end(auditNodes_[i].c), inc[i].begin());
-    std::vector<std::vector<u32>> kids(N);
-    std::vector<u32> top;
-    for (size_t i = 0; i < N; ++i) {
-        if (auditNodes_[i].parent == kNoParent) top.push_back(static_cast<u32>(i));
-        else kids[auditNodes_[i].parent].push_back(static_cast<u32>(i));
-    }
-    for (size_t i = N; i-- > 0;)   // parents are created before children, so one reverse pass sums subtrees
-        if (auditNodes_[i].parent != kNoParent)
-            for (u32 k = 0; k < kAuKinds; ++k) inc[auditNodes_[i].parent][k] += inc[i][k];
-    Counts side[2], all{};
-    for (u32 sd = 0; sd < 2; ++sd)
-        for (u32 k = 0; k < kAuKinds; ++k) side[sd][k] = auditSide_[sd][k].exchange(0, std::memory_order_relaxed);
-    for (u32 k = 0; k < kAuKinds; ++k) {
-        for (u32 t : top) all[k] += inc[t][k];
-        all[k] += side[0][k] + side[1][k];
-    }
-    const auto line = [&](u32 depth, const char* label, const Counts& c) {
-        char buf[320];
-        const auto v = [&](u32 k) { return static_cast<f64>(c[k]) / n; };
-        std::snprintf(buf, sizeof buf,
-                      "%*s%s  draw %.2f  cs %.2f  ms %.2f  rt %.2f  bar %.2f  cpy %.2f (%.3f MB)  clr %.2f  pso %.2f  exec %.2f",
-                      static_cast<int>(depth) * 2 + 2, "", label, v(kAuDraw), v(kAuCompute), v(kAuMesh), v(kAuRay),
-                      v(kAuBarrier), v(kAuCopy), v(kAuCopyBytes) / 1048576.0, v(kAuClear), v(kAuPso), v(kAuSubmit));
-        AVER_INFO("[Audit] {}", buf);
-    };
-    const auto any = [](const Counts& c) { for (u64 x : c) if (x) return true; return false; };
-    const auto ull = [](u64 x) { return static_cast<unsigned long long>(x); };
-    char tot[256];
-    std::snprintf(tot, sizeof tot, "draw %llu cs %llu ms %llu rt %llu bar %llu cpy %llu bytes %llu clr %llu pso %llu exec %llu",
-                  ull(all[kAuDraw]), ull(all[kAuCompute]), ull(all[kAuMesh]), ull(all[kAuRay]), ull(all[kAuBarrier]),
-                  ull(all[kAuCopy]), ull(all[kAuCopyBytes]), ull(all[kAuClear]), ull(all[kAuPso]), ull(all[kAuSubmit]));
-    AVER_INFO("[Audit] per-frame counts over {} frames (hardware-independent; spans include their children); window totals: {}",
-              auditFrames_, tot);
-    line(0, "ALL", all);
-    const auto walk = [&](const auto& self, u32 i, u32 depth) -> void {
-        if (!any(inc[i])) return;
-        line(depth + 1, auditNodes_[i].label.c_str(), inc[i]);
-        for (u32 c : kids[i]) self(self, c, depth + 1);
-    };
-    for (u32 t : top) walk(walk, t, 0);
-    if (any(side[0])) line(1, "(present thread)", side[0]);
-    if (any(side[1])) line(1, "(uploads and readbacks)", side[1]);
-    for (AuditNode& a : auditNodes_) std::fill(std::begin(a.c), std::end(a.c), 0);
-    auditFrames_ = 0;
-}
-
 // Drop tree and frame count (restarts cadence); in-flight unchanged; tsSpanToAccum_ rebuilt per call.
 void D3D12Device::resetGpuTiming() {
     tsAccum_.clear();
@@ -4146,7 +3877,6 @@ void D3D12Device::beginFrame() {
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
     recording_ = true;
-    if (rhiContext_) rhiContext_->beginFrame();
     boundRootSig_ = nullptr;
     boundPso_ = pso_.Get();   // Reset's second argument IS the command list's initial bound PSO
     // Reset doesn't carry heaps/root-sig forward; cache dies here.
@@ -4168,13 +3898,10 @@ void D3D12Device::beginFrame() {
     if (rhiFactory_) rhiFactory_->collect();
     // Fence retired previous use; collect before reusing counters.
     collectGpuTiming();
-    if (auditOn_ && auditFrames_ >= kAuditWindow) auditReport();
     // Same fence, same slot, same reasoning -- see collectExposureReadout's own comment.
     collectExposureReadout();
     tsCount_ = 0;
     tsOpen_.clear();
-    auditOpen_.clear();
-    auditCur_ = 0;
     tsDropped_ = 0;
     tsSlice_[frameIndex_].clear();
     tsSliceBegin_[frameIndex_] = gpuStamp();
@@ -4229,25 +3956,25 @@ void D3D12Device::beginFrame() {
         // Exactly pre-G-buffer bind (feature disabled or MSAA conflict; render oracle depends on this).
         cmdList_->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
     }
-    audit(kAuClear); cmdList_->ClearRenderTargetView(rtv, sceneClear_, 0, nullptr);
+    cmdList_->ClearRenderTargetView(rtv, sceneClear_, 0, nullptr);
     if (gbufferEnabled_ && gbufVelocity_ && gbufViewZ_ && gbufNormalRough_) {
         // Cleared regardless of gbufWritable (MSAA mismatch: readers find sentinel, not stale value).
-        audit(kAuClear); cmdList_->ClearRenderTargetView(gbufVelocityRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+        cmdList_->ClearRenderTargetView(gbufVelocityRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
                                         kGBufVelocityClear, 0, nullptr);
-        audit(kAuClear); cmdList_->ClearRenderTargetView(gbufViewZRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+        cmdList_->ClearRenderTargetView(gbufViewZRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
                                         kGBufViewZClear, 0, nullptr);
-        audit(kAuClear); cmdList_->ClearRenderTargetView(gbufNormalRoughRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+        cmdList_->ClearRenderTargetView(gbufNormalRoughRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
                                         kGBufNormalRoughClear, 0, nullptr);
         if (gbufWritable && gbufMs) {
-            audit(kAuClear); cmdList_->ClearRenderTargetView(gbufVelocityMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+            cmdList_->ClearRenderTargetView(gbufVelocityMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
                                             kGBufVelocityClear, 0, nullptr);
-            audit(kAuClear); cmdList_->ClearRenderTargetView(gbufViewZMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+            cmdList_->ClearRenderTargetView(gbufViewZMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
                                             kGBufViewZClear, 0, nullptr);
-            audit(kAuClear); cmdList_->ClearRenderTargetView(gbufNormalRoughMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
+            cmdList_->ClearRenderTargetView(gbufNormalRoughMsRtvHeap_->GetCPUDescriptorHandleForHeapStart(),
                                             kGBufNormalRoughClear, 0, nullptr);
         }
     }
-    audit(kAuClear); cmdList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    cmdList_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
     // Opened here rather than after the suppressesScene loop below, which can return early.
     beginGpuSpan("scene draw");
@@ -4300,14 +4027,14 @@ void D3D12Device::beginFrame() {
         // submitted, so moving objects are drawn where they are this frame (not last frame).
         if (winner->wantsLateScenePass()) lateSceneWinner_ = winner;
         else if (rhiContext_) winner->scenePass(*rhiContext_);
-        audit(kAuPso); cmdList_->SetPipelineState(pso_.Get());
+        cmdList_->SetPipelineState(pso_.Get());
         sceneSuppressed_ = true;
         if (winner->suppressesWholeFrame()) frameSuppressed_ = true;
         return;
     }
 
     // Sky now draws at frame start, after real depth exists (was depth-disabled first).
-    audit(kAuPso); cmdList_->SetPipelineState(pso_.Get());
+    cmdList_->SetPipelineState(pso_.Get());
 }
 
 // Draws one mesh into the scene, through whichever pipeline owns the lit pass.
@@ -4525,7 +4252,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     bindGraphicsRoot(useMs ? msRootSig_.Get() : rootSig_.Get());
     // Cache PSO: skip re-issuing SetPipelineState if unchanged (hundreds to thousands calls per scene).
     ID3D12PipelineState* wantPso = useMs ? msPso_.Get() : pso_.Get();
-    if (wantPso != boundPso_) { audit(kAuPso); cmdList_->SetPipelineState(wantPso); boundPso_ = wantPso; }
+    if (wantPso != boundPso_) { cmdList_->SetPipelineState(wantPso); boundPso_ = wantPso; }
     f32 consts[kObjectConstantDwords];
     std::memcpy(consts, world, 16 * sizeof(f32));
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
@@ -4536,7 +4263,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
     cmdList_->IASetIndexBuffer(&m.ibv);
-    audit(kAuDraw); cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+    cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
 }
 
 // Mesh-shader draw via DispatchMesh; group count from triangle count (must match AVER_MS_TRIS).
@@ -4547,7 +4274,7 @@ void D3D12Device::dispatchMesh(const GpuMesh& m) {
     cmdList_->SetGraphicsRootShaderResourceView(kMeshIndexParam, m.ib->GetGPUVirtualAddress());
     const u32 tc[4] = {tris, 0, 0, 0};
     cmdList_->SetGraphicsRoot32BitConstants(kMeshCountParam, 4, tc, 0);
-    audit(kAuMesh); cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
+    cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
 }
 
 // Uploads line list to GPU; EditorLines owns buffers and slot table.
@@ -5004,13 +4731,14 @@ bool D3D12Device::createPostTargets() {
 
     if (upscaler_) {
         if (D3D12ResourceFactory* f = rhiFactory_) {
-            // #1: Handle onto the scene colour itself; runPostChain narrows the scene to PIXEL_SHADER_RESOURCE
-            // around the upscale, which is the alias's rest state.
-            sceneColorTex_ = f->adoptExternalRenderTargetTexture(
-                scene, fromDxgiFormat(kSceneColorFormat), sceneWidth_, sceneHeight_, "AverSR.SceneColor (adopted)", 0);
-#if AVER_RHI_TRACK_STATE
-            if (RhiTexture* sct = f->texture(sceneColorTex_)) sct->states.assign(1, ResourceState::ShaderResource);
-#endif
+            // #1: Factory-created alias of scene colour (SRV only, filled by CopyResource each frame).
+            TextureDesc sc;
+            sc.width = sceneWidth_; sc.height = sceneHeight_;
+            sc.format = fromDxgiFormat(kSceneColorFormat);
+            sc.bind = ResourceBind::ShaderResource;
+            sc.initialState = ResourceState::ShaderResource;
+            sc.debugName = "AverSR.SceneColor";
+            sceneColorTex_ = f->createTexture(sc);
             sceneColorTexW_ = sceneWidth_; sceneColorTexH_ = sceneHeight_;
 
             // #2: AverSR output at present size (upscale on radiance before tonemap).
@@ -5074,7 +4802,7 @@ bool D3D12Device::createPostTargets() {
             transition(localGridBuf_.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
             transition(localGridBlurBuf_.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
         };
-        audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, toUav);
+        cmdList_->ResourceBarrier(2, toUav);
 
         uav.ptr += postSrvSize_;
         ud.Buffer.NumElements = static_cast<UINT>(gridBytes / 4);   // raw view: one element per DWORD
@@ -5131,7 +4859,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         static bool said = false;
         if (!said) { AVER_ERROR("[RHI.D3D12] the post chain is unavailable; the scene cannot be presented"); said = true; }
         auto toRt = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toRt);
+        cmdList_->ResourceBarrier(1, &toRt);
         return;
     }
 
@@ -5153,14 +4881,14 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                 transition(histBuf_.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST),
                 transition(expBuf_.Get(),  D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST),
             };
-            audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, toCopy);
-            auditCopyBuf(256 * sizeof(u32)); cmdList_->CopyBufferRegion(histBuf_.Get(), 0, postCBs_[f].Get(), off, 256 * sizeof(u32));
-            auditCopyBuf(2 * sizeof(u32)); cmdList_->CopyBufferRegion(expBuf_.Get(), 0, postCBs_[f].Get(), off, 2 * sizeof(u32));
+            cmdList_->ResourceBarrier(2, toCopy);
+            cmdList_->CopyBufferRegion(histBuf_.Get(), 0, postCBs_[f].Get(), off, 256 * sizeof(u32));
+            cmdList_->CopyBufferRegion(expBuf_.Get(), 0, postCBs_[f].Get(), off, 2 * sizeof(u32));
             D3D12_RESOURCE_BARRIER back[2] = {
                 transition(histBuf_.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
                 transition(expBuf_.Get(),  D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
             };
-            audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, back);
+            cmdList_->ResourceBarrier(2, back);
             expSeeded_ = true;
         }
     }
@@ -5170,13 +4898,13 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         D3D12_RESOURCE_BARRIER pre[1] = {
             transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RESOLVE_SOURCE),
         };
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, pre);
-        auditCopyRes(scene); cmdList_->ResolveSubresource(scene, 0, msaaColor_.Get(), 0, kSceneColorFormat);
+        cmdList_->ResourceBarrier(1, pre);
+        cmdList_->ResolveSubresource(scene, 0, msaaColor_.Get(), 0, kSceneColorFormat);
         auto toSrv = transition(scene, D3D12_RESOURCE_STATE_RESOLVE_DEST, kSceneRead);
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toSrv);
+        cmdList_->ResourceBarrier(1, &toSrv);
     } else {
         auto toSrv = transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET, kSceneRead);
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toSrv);
+        cmdList_->ResourceBarrier(1, &toSrv);
     }
 
     ID3D12DescriptorHeap* heaps[] = {postSrvHeap_.Get()};
@@ -5239,7 +4967,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
     // vx/vy: destination's top-left offset, default 0 for passes filling whole target. Composite only.
     auto fullscreen = [&](ID3D12PipelineState* pso, u32 triple, u32 w, u32 h,
                           const D3D12_CPU_DESCRIPTOR_HANDLE* rtv, u32 vx = 0, u32 vy = 0) {
-        audit(kAuPso); cmdList_->SetPipelineState(pso);
+        cmdList_->SetPipelineState(pso);
         cmdList_->OMSetRenderTargets(1, rtv, FALSE, nullptr);
         D3D12_VIEWPORT vp{static_cast<f32>(vx), static_cast<f32>(vy), static_cast<f32>(w), static_cast<f32>(h), 0.0f, 1.0f};
         D3D12_RECT sc{static_cast<LONG>(vx), static_cast<LONG>(vy),
@@ -5249,7 +4977,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         cmdList_->SetGraphicsRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         cmdList_->SetGraphicsRootDescriptorTable(1, postTriple(triple));
         cmdList_->SetGraphicsRootDescriptorTable(2, uavTable);
-        audit(kAuDraw); cmdList_->DrawInstanced(3, 1, 0, 0);
+        cmdList_->DrawInstanced(3, 1, 0, 0);
     };
 
     auto bloomRtv = [&](u32 mip) {
@@ -5261,7 +4989,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         if (bloomState_[mip] == to) return;
         D3D12_RESOURCE_BARRIER b = transition(bloomTex_.Get(), bloomState_[mip], to);
         b.Transition.Subresource = mip;
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &b);
+        cmdList_->ResourceBarrier(1, &b);
         bloomState_[mip] = to;
     };
     auto mipW = [&](u32 m) { return bloomW_ >> m ? bloomW_ >> m : 1u; };
@@ -5278,22 +5006,22 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         fillCommon(hw, hh, sceneWidth_, sceneHeight_);
 
         cmdList_->SetComputeRootSignature(postRootSig_.Get());
-        audit(kAuPso); cmdList_->SetPipelineState(histogramPso_.Get());
+        cmdList_->SetPipelineState(histogramPso_.Get());
         cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
         cmdList_->SetComputeRootDescriptorTable(2, uavTable);
-        audit(kAuCompute); cmdList_->Dispatch((hw + 15) / 16, (hh + 15) / 16, 1);
+        cmdList_->Dispatch((hw + 15) / 16, (hh + 15) / 16, 1);
 
         D3D12_RESOURCE_BARRIER uavB{};
         uavB.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         uavB.UAV.pResource = histBuf_.Get();
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &uavB);
+        cmdList_->ResourceBarrier(1, &uavB);
 
-        audit(kAuPso); cmdList_->SetPipelineState(exposurePso_.Get());
+        cmdList_->SetPipelineState(exposurePso_.Get());
         cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
         cmdList_->SetComputeRootDescriptorTable(2, uavTable);
-        audit(kAuCompute); cmdList_->Dispatch(1, 1, 1);
+        cmdList_->Dispatch(1, 1, 1);
 
         cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
         dbValid_ = false;
@@ -5307,30 +5035,30 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         fillCommon(sceneWidth_, sceneHeight_, sceneWidth_, sceneHeight_);
 
         cmdList_->SetComputeRootSignature(postRootSig_.Get());
-        audit(kAuPso); cmdList_->SetPipelineState(localGridPso_.Get());
+        cmdList_->SetPipelineState(localGridPso_.Get());
         cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         // kPostTripleHistogram: t0/t1/t2 all scene (CSHistogram's same triple).
         cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
         cmdList_->SetComputeRootDescriptorTable(2, uavTable);
-        audit(kAuCompute); cmdList_->Dispatch(localGridW_, localGridH_, 1);
+        cmdList_->Dispatch(localGridW_, localGridH_, 1);
 
         // CSLocalGrid's write must land before CSLocalBlur reads it.
         D3D12_RESOURCE_BARRIER gridUav{};
         gridUav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         gridUav.UAV.pResource = localGridBuf_.Get();
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &gridUav);
+        cmdList_->ResourceBarrier(1, &gridUav);
 
-        audit(kAuPso); cmdList_->SetPipelineState(localBlurPso_.Get());
+        cmdList_->SetPipelineState(localBlurPso_.Get());
         cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
         cmdList_->SetComputeRootDescriptorTable(2, uavTable);
-        audit(kAuCompute); cmdList_->Dispatch((localGridW_ + 7) / 8, (localGridH_ + 7) / 8, 1);
+        cmdList_->Dispatch((localGridW_ + 7) / 8, (localGridH_ + 7) / 8, 1);
 
         // CSLocalBlur's write must land before PSComposite reads it.
         D3D12_RESOURCE_BARRIER blurUav{};
         blurUav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         blurUav.UAV.pResource = localGridBlurBuf_.Get();
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &blurUav);
+        cmdList_->ResourceBarrier(1, &blurUav);
 
         cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
         dbValid_ = false;
@@ -5344,16 +5072,16 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
             const u32 f = frameIndex_ < kFrameCount ? frameIndex_ : 0;
             auto expToCopy = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                         D3D12_RESOURCE_STATE_COPY_SOURCE);
-            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &expToCopy);
-            auditCopyBuf(2 * sizeof(u32)); cmdList_->CopyBufferRegion(expReadback_[f].Get(), 0, expBuf_.Get(), 0, 2 * sizeof(u32));
+            cmdList_->ResourceBarrier(1, &expToCopy);
+            cmdList_->CopyBufferRegion(expReadback_[f].Get(), 0, expBuf_.Get(), 0, 2 * sizeof(u32));
             auto copyToSrv = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &copyToSrv);
+            cmdList_->ResourceBarrier(1, &copyToSrv);
             expReadbackPending_[f] = true;
         } else {
             auto expToSrv = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &expToSrv);
+            cmdList_->ResourceBarrier(1, &expToSrv);
         }
     }
 
@@ -5387,12 +5115,22 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         RhiTexture* srcT = rhiFactory_->texture(sceneColorTex_);
         RhiTexture* dstT = rhiFactory_->texture(presentHdrTex_);
         if (srcT && srcT->res && dstT && dstT->res && dstT->rtvHeap) {
-            // sceneColorTex_ aliases the scene; the upscaler expects it at exactly PIXEL_SHADER_RESOURCE.
+            // Copy to upscaler's input: scene is COPY_SOURCE, not COPY_DEST.
             D3D12_RESOURCE_BARRIER pre[2] = {
-                transition(scene, kSceneRead, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
-                transition(dstT->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+                transition(scene, kSceneRead, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                transition(srcT->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST),
             };
-            audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, pre);
+            cmdList_->ResourceBarrier(2, pre);
+            cmdList_->CopyResource(srcT->res.Get(), scene);
+            D3D12_RESOURCE_BARRIER post[2] = {
+                transition(scene, D3D12_RESOURCE_STATE_COPY_SOURCE, kSceneRead),
+                transition(srcT->res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+            };
+            cmdList_->ResourceBarrier(2, post);
+
+            auto toRt = transition(dstT->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cmdList_->ResourceBarrier(1, &toRt);
             D3D12_CPU_DESCRIPTOR_HANDLE srRtv = dstT->rtvHeap->GetCPUDescriptorHandleForHeapStart();
             cmdList_->OMSetRenderTargets(1, &srRtv, FALSE, nullptr);
             // Caller binds target and sets viewport/scissor to destination size; implementation records
@@ -5421,7 +5159,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                     transition(gbufViewZ_.Get(),       D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
                     transition(gbufNormalRough_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
                 };
-                audit(kAuBarrier, 3); cmdList_->ResourceBarrier(3, b);
+                cmdList_->ResourceBarrier(3, b);
                 in.motionVectors   = gBufferVelocityTexture();
                 in.depth           = gBufferViewZTexture();
                 in.normalRoughness = gBufferNormalRoughnessTexture();
@@ -5436,20 +5174,17 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                     transition(gbufViewZ_.Get(),       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
                     transition(gbufNormalRough_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
                 };
-                audit(kAuBarrier, 3); cmdList_->ResourceBarrier(3, b);
+                cmdList_->ResourceBarrier(3, b);
             }
 
             // Looked up again: execute() may create textures (an upscaler's history on first use), and
             // a grown texture table moves, leaving the earlier dstT dangling (a NULL barrier, device lost).
             dstT = rhiFactory_->texture(presentHdrTex_);
-            D3D12_RESOURCE_BARRIER back[2] = {
-                transition(scene, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kSceneRead),
-            };
-            UINT backN = 1;
-            if (dstT && dstT->res)
-                back[backN++] = transition(dstT->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
-                                           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            audit(kAuBarrier, backN); cmdList_->ResourceBarrier(backN, back);
+            if (dstT && dstT->res) {
+                auto backToSrv = transition(dstT->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                cmdList_->ResourceBarrier(1, &backToSrv);
+            }
 
             // Restore post chain's descriptor heap and root signature.
             ID3D12DescriptorHeap* heaps[] = {postSrvHeap_.Get()};
@@ -5488,7 +5223,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
     if (compositeY + compositeH > height_) compositeH = height_ - compositeY;
     {
         auto toRt = transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toRt);
+        cmdList_->ResourceBarrier(1, &toRt);
         D3D12_CPU_DESCRIPTOR_HANDLE bbRtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
         bbRtv.ptr += static_cast<SIZE_T>(bbIdx) * rtvSize_;
 
@@ -5496,11 +5231,11 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                              ? rhiFactory_->texture(viewportTex_) : nullptr;
         if (vt && vt->rtvHeap) {
             const f32 blank[4] = {clear_[0], clear_[1], clear_[2], 1.0f};
-            audit(kAuClear); cmdList_->ClearRenderTargetView(bbRtv, blank, 0, nullptr);
+            cmdList_->ClearRenderTargetView(bbRtv, blank, 0, nullptr);
 
             auto toRtTex = transition(vt->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                       D3D12_RESOURCE_STATE_RENDER_TARGET);
-            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toRtTex);
+            cmdList_->ResourceBarrier(1, &toRtTex);
             // Outside sub-rect, vt keeps prior content. Confined viewport/scissor means DrawInstanced
             // never rasterizes there. Only SandboxShell's Level ImGui::Image reads vt, with same crop.
             D3D12_CPU_DESCRIPTOR_HANDLE trtv = vt->rtvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -5508,7 +5243,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                        compositeW, compositeH, &trtv, compositeX, compositeY);
             auto backToSrv = transition(vt->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &backToSrv);
+            cmdList_->ResourceBarrier(1, &backToSrv);
             cmdList_->OMSetRenderTargets(1, &bbRtv, FALSE, nullptr);
         } else {
             fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0].Get(), compositeTriple,
@@ -5520,27 +5255,22 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
     {
         auto expBack = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &expBack);
+        cmdList_->ResourceBarrier(1, &expBack);
     }
     auto sceneBack = msaa
         ? transition(scene, kSceneRead, D3D12_RESOURCE_STATE_RESOLVE_DEST)
         : transition(scene, kSceneRead, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &sceneBack);
+    cmdList_->ResourceBarrier(1, &sceneBack);
     if (msaa) {
         auto msaaBack = transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RESOLVE_SOURCE,
                                    D3D12_RESOURCE_STATE_RENDER_TARGET);
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &msaaBack);
+        cmdList_->ResourceBarrier(1, &msaaBack);
     }
 }
 
 // Closes the frame: post chain, overlay, UI, capture, then submit.
 void D3D12Device::endFrame() {
     if (!hasSwapchain_) return;
-    // A feature can learn mid-frame that its pipelines no longer fit what was submitted (a material graph
-    // loaded): the frame's late work (blended replay, sky, post) is dropped from here.
-    if (!frameSuppressed_)
-        for (IRenderFeature* f : features_)
-            if (f->suppressesWholeFrame()) { frameSuppressed_ = true; break; }
     // LATE SCENE (wantsLateScenePass): the scene's targets, viewport and root are rebound, since draw
     // submission may have changed them, and the winner records inside the still-open "scene draw" span.
     if (IRenderFeature* late = lateSceneWinner_) {
@@ -5556,7 +5286,7 @@ void D3D12Device::endFrame() {
             bindGraphicsRoot(rootSig_.Get());
             cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             late->scenePass(*rhiContext_);
-            audit(kAuPso); cmdList_->SetPipelineState(pso_.Get());
+            cmdList_->SetPipelineState(pso_.Get());
             boundPso_ = pso_.Get();
         }
     }
@@ -5583,10 +5313,10 @@ void D3D12Device::endFrame() {
         cmdList_->RSSetScissorRects(1, &sceneSc);
         bindGraphicsRoot(rootSig_.Get());
         cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        audit(kAuPso); cmdList_->SetPipelineState(skyPso_.Get());
+        cmdList_->SetPipelineState(skyPso_.Get());
         boundPso_ = skyPso_.Get();
         cmdList_->IASetVertexBuffers(0, 0, nullptr);
-        audit(kAuDraw); cmdList_->DrawInstanced(3, 1, 0, 0);
+        cmdList_->DrawInstanced(3, 1, 0, 0);
         endGpuSpan();
     }
 
@@ -5613,8 +5343,7 @@ void D3D12Device::endFrame() {
                             transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, srcTo),
                             transition(bt->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, dstTo),
                         };
-                        audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, pre);
-                        auditCopyRes(bt->res.Get());   // the resolve and the plain copy each move the target once
+                        cmdList_->ResourceBarrier(2, pre);
                         if (ms) cmdList_->ResolveSubresource(bt->res.Get(), 0, msaaColor_.Get(), 0,
                                                              kSceneColorFormat);
                         else    cmdList_->CopyResource(bt->res.Get(), msaaColor_.Get());
@@ -5622,7 +5351,7 @@ void D3D12Device::endFrame() {
                             transition(msaaColor_.Get(), srcTo, D3D12_RESOURCE_STATE_RENDER_TARGET),
                             transition(bt->res.Get(), dstTo, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
                         };
-                        audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, post);
+                        cmdList_->ResourceBarrier(2, post);
                         if (!blendBackdropCopyLogged_) {
                             blendBackdropCopyLogged_ = true;
                             AVER_INFO("[RHI.D3D12] blended backdrop: {} {}x{} from the scene target",
@@ -5637,7 +5366,6 @@ void D3D12Device::endFrame() {
         bool blendBackdropCaptured = false;
         u32 blendBackdropCaptures = 0;
         u32 blendDrawsDone = 0;
-        std::string blendDredList;   // --dred: the draw order, logged when it changes
         bool blendCapReached = false;
 
         beginGpuSpan("blended replay");
@@ -5676,14 +5404,6 @@ void D3D12Device::endFrame() {
                 // Stale handle: capture can outlive its mesh within the same frame.
                 if (bd.mesh == 0 || bd.mesh > meshes_.size() || !meshes_[bd.mesh - 1].alive) continue;
                 ++blendDrawsDone;
-                if (dredEnabled()) {   // a DRED dump counts these markers; the log below says which draw each is
-                    wchar_t mark[80];
-                    const int n = std::swprintf(mark, 80, L"blended draw %u: mesh %u, %u triangles", blendDrawsDone,
-                                                bd.mesh, meshes_[bd.mesh - 1].indexCount / 3);
-                    if (n > 0) cmdList_->SetMarker(0, mark, static_cast<UINT>((n + 1) * sizeof(wchar_t)));
-                    blendDredList += " " + std::to_string(blendDrawsDone) + ":mesh" + std::to_string(bd.mesh) + "/" +
-                                     std::to_string(meshes_[bd.mesh - 1].indexCount / 3) + "tris";
-                }
 
                 // Only draws that sample backdrop need it captured.
                 if (owner->blendedDrawReadsBackdrop(bd.binding.constants, bd.binding.bytes)) {
@@ -5742,11 +5462,6 @@ void D3D12Device::endFrame() {
             dbValid_ = false;
         }
 
-        if (!blendDredList.empty() && blendDredList != blendDredListLogged_) {
-            AVER_INFO("[RHI.D3D12][DRED] blended replay order (n:mesh/triangles; a hang at the k-th blended DispatchMesh is draw k):{}",
-                      blendDredList);
-            blendDredListLogged_ = blendDredList;
-        }
         // Logged on CHANGE, not every frame.
         if (blendDrawsDone != blendStatDrawsLogged_ || blendLayerResolves != blendStatResolvesLogged_ ||
             blendBackdropCaptures != blendStatCapturesLogged_) {
@@ -5809,13 +5524,13 @@ void D3D12Device::endFrame() {
                     transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE),
                     transition(it->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST),
                 };
-                audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, pre);
-                auditCopyRes(it->res.Get()); cmdList_->CopyResource(it->res.Get(), scene);
+                cmdList_->ResourceBarrier(2, pre);
+                cmdList_->CopyResource(it->res.Get(), scene);
                 D3D12_RESOURCE_BARRIER post[2] = {
                     transition(scene, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
                     transition(it->res.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
                 };
-                audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, post);
+                cmdList_->ResourceBarrier(2, post);
 
                 FrameInterpInput in{};
                 in.color = fgInputTex_;
@@ -5843,13 +5558,13 @@ void D3D12Device::endFrame() {
             transition(scene, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST),
             transition(st->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE),
         };
-        audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, pre);
-        auditCopyRes(scene); cmdList_->CopyResource(scene, st->res.Get());
+        cmdList_->ResourceBarrier(2, pre);
+        cmdList_->CopyResource(scene, st->res.Get());
         D3D12_RESOURCE_BARRIER post[2] = {
             transition(scene, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET),
             transition(st->res.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
         };
-        audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, post);
+        cmdList_->ResourceBarrier(2, post);
     };
     RhiTexture* genT = generatedImage ? rhiFactory_->texture(generatedImage) : nullptr;
     if (genT && genT->res) {
@@ -5881,8 +5596,7 @@ void D3D12Device::endFrame() {
     recording_ = false;
     ID3D12CommandList* lists[] = {cmdList_.Get()};
     waitImageFree(realImage_);
-    audit(kAuSubmit); queue_->ExecuteCommandLists(1, lists);
-    if (auditOn_) ++auditFrames_;
+    queue_->ExecuteCommandLists(1, lists);
     if (infoQueue_) drainDebugMessages();
 }
 
@@ -5893,7 +5607,7 @@ bool D3D12Device::submitGeneratedImage() {
     cmdList_->Close();
     ID3D12CommandList* lists[] = {cmdList_.Get()};
     waitImageFree(bbIndex_);
-    audit(kAuSubmit); queue_->ExecuteCommandLists(1, lists);
+    queue_->ExecuteCommandLists(1, lists);
     if (pendingReal_) {
         pendingReal_ = false;
         if (!queuePresent(pendingRealImage_, pendingRealSync_, pendingRealFlags_)) return false;
@@ -5911,7 +5625,7 @@ void D3D12Device::frameMidpoint() {
     if (!pendingReal_ || !recording_ || deviceLost_) return;
     cmdList_->Close();
     ID3D12CommandList* lists[] = {cmdList_.Get()};
-    audit(kAuSubmit); queue_->ExecuteCommandLists(1, lists);
+    queue_->ExecuteCommandLists(1, lists);
     pendingReal_ = false;
     queuePresent(pendingRealImage_, pendingRealSync_, pendingRealFlags_);
     allocatorsMid_[frameIndex_]->Reset();
@@ -5952,11 +5666,6 @@ u32 D3D12Device::frameInterpBlocker() {
     } else if (wireframeFrame_ || frameSuppressed_) {
         why = 5;   // per-frame view states: not worth a log line
     }
-    // Resumes only after 1 s of drawable frames: restarting on the first frame after a load or pipeline
-    // rebuild lost the device (owner, RX 7800 XT), the scene's own histories still settling.
-    const auto now = std::chrono::steady_clock::now();
-    if (why != 0) frameInterpSettleUntil_ = now + std::chrono::seconds(1);
-    else if (now < frameInterpSettleUntil_) why = 6;
     if (why != frameInterpOffReason_) {
         if (text) AVER_INFO("[RHI.D3D12] frame interpolation paused: {}", text);
         else if (why == 0) AVER_INFO("[RHI.D3D12] frame interpolation running");
@@ -6020,17 +5729,16 @@ void D3D12Device::copyToMirror(u32 bbIdx) {
         transition(src, srcState, D3D12_RESOURCE_STATE_COPY_SOURCE),
         transition(dst, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST),
     };
-    audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, pre);
+    cmdList_->ResourceBarrier(2, pre);
     D3D12_TEXTURE_COPY_LOCATION s{}; s.pResource = src; s.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     D3D12_TEXTURE_COPY_LOCATION d{}; d.pResource = dst; d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     const D3D12_BOX box{x, y, 0, x + w, y + h, 1};
-    auditCopyTex(d, s, &box);
     cmdList_->CopyTextureRegion(&d, 0, 0, 0, &s, &box);
     D3D12_RESOURCE_BARRIER post[2] = {
         transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE, srcState),
         transition(dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON),
     };
-    audit(kAuBarrier, 2); cmdList_->ResourceBarrier(2, post);
+    cmdList_->ResourceBarrier(2, post);
 }
 
 // One presented image: post chain, editor lines and overlay features, UI, then PRESENT.
@@ -6060,7 +5768,7 @@ void D3D12Device::presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool
         if (intoTexture) {
             auto toRt = transition(ovt->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                    D3D12_RESOURCE_STATE_RENDER_TARGET);
-            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toRt);
+            cmdList_->ResourceBarrier(1, &toRt);
             overlayRtv = ovt->rtvHeap->GetCPUDescriptorHandleForHeapStart();
         }
         cmdList_->OMSetRenderTargets(1, &overlayRtv, FALSE, nullptr);
@@ -6092,7 +5800,7 @@ void D3D12Device::presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool
         if (intoTexture) {
             auto backToSrv = transition(ovt->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
                                         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &backToSrv);
+            cmdList_->ResourceBarrier(1, &backToSrv);
             cmdList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         }
     } else {
@@ -6115,16 +5823,15 @@ void D3D12Device::presentPass(u32 bbIdx, bool generated, bool firstOfFrame, bool
     if (captureReq_ && captureBuf_ && (fgCaptureGenerated_ ? generated : lastOfFrame)) {
         captureRecorded_ = true;
         auto toCopy = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toCopy);
+        cmdList_->ResourceBarrier(1, &toCopy);
         D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = bb; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
         D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = captureBuf_.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = captureFp_;
-        auditCopyTex(dst, src, nullptr);
         cmdList_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
         auto toPresent = transition(bb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toPresent);
+        cmdList_->ResourceBarrier(1, &toPresent);
     } else {
         auto toPresent = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
-        audit(kAuBarrier, 1); cmdList_->ResourceBarrier(1, &toPresent);
+        cmdList_->ResourceBarrier(1, &toPresent);
     }
 }
 
@@ -6505,7 +6212,6 @@ bool D3D12Device::selfTest(const f32 in[4], f32 out[4]) {
 
 // Drains the GPU, then releases everything the factory still owns.
 D3D12ResourceFactory::~D3D12ResourceFactory() {
-    pool_.reset();   // workers first: they read the device and the root-signature cache
     dev_->waitForGpu();
     retired_.clear();
 }
@@ -6766,7 +6472,6 @@ void D3D12ResourceFactory::collect() {
 // ---- root-signature cache
 // Returns the cached root signature for `layout`, building it on first use.
 const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& layout, bool mesh, bool instanced) {
-    std::lock_guard<std::mutex> lock(rootSigMutex_);
     for (const RootSigEntry& e : rootSigs_)
         if (e.mesh == mesh && e.instanced == instanced && sameLayout(e.layout, layout)) return &e;
 
@@ -6951,18 +6656,17 @@ bool D3D12ResourceFactory::uploadInitialData(ID3D12Resource* res, const D3D12_RE
         dst.pResource = res;
         dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         dst.SubresourceIndex = s;
-        dev_->auditCopyTexSide(1, dst, src, nullptr);
         list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     }
 
     const D3D12_RESOURCE_STATES want = toResourceStates(d.initialState);
     if (want != D3D12_RESOURCE_STATE_COPY_DEST) {
         auto b = transition(res, D3D12_RESOURCE_STATE_COPY_DEST, want);
-        dev_->auditSide(1, D3D12Device::kAuBarrier, 1); list->ResourceBarrier(1, &b);
+        list->ResourceBarrier(1, &b);
     }
     list->Close();
     ID3D12CommandList* lists[] = {list.Get()};
-    dev_->auditSide(1, D3D12Device::kAuSubmit); dev_->queue_->ExecuteCommandLists(1, lists);
+    dev_->queue_->ExecuteCommandLists(1, lists);
 
     ComPtr<ID3D12Fence> f;
     if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi upload fence")) return false;
@@ -7017,10 +6721,7 @@ bool D3D12ResourceFactory::uploadBuffers(std::initializer_list<BufferUploadItem>
     {
         size_t idx = 0;
         for (const auto& it : items) {
-            if (it.dst && it.bytes) {
-                dev_->auditCopyBufSide(1, it.bytes);
-                list->CopyBufferRegion(it.dst, 0, staging.Get(), offsets[idx], it.bytes);
-            }
+            if (it.dst && it.bytes) list->CopyBufferRegion(it.dst, 0, staging.Get(), offsets[idx], it.bytes);
             ++idx;
         }
     }
@@ -7031,14 +6732,11 @@ bool D3D12ResourceFactory::uploadBuffers(std::initializer_list<BufferUploadItem>
     for (const auto& it : items)
         if (it.dst && it.bytes)
             back.push_back(transition(it.dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON));
-    if (!back.empty()) {
-        dev_->auditSide(1, D3D12Device::kAuBarrier, back.size());
-        list->ResourceBarrier(static_cast<UINT>(back.size()), back.data());
-    }
+    if (!back.empty()) list->ResourceBarrier(static_cast<UINT>(back.size()), back.data());
 
     list->Close();
     ID3D12CommandList* lists[] = {list.Get()};
-    dev_->auditSide(1, D3D12Device::kAuSubmit); dev_->queue_->ExecuteCommandLists(1, lists);
+    dev_->queue_->ExecuteCommandLists(1, lists);
 
     ComPtr<ID3D12Fence> f;
     if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi buffer upload fence"))
@@ -7077,12 +6775,12 @@ bool D3D12ResourceFactory::uploadBufferFilled(ID3D12Resource* dst, u64 bytes, co
               "rhi buffer upload alloc")) return false;
     if (!hrOk(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr,
               IID_PPV_ARGS(&list)), "rhi buffer upload list")) return false;
-    dev_->auditCopyBufSide(1, bytes); list->CopyBufferRegion(dst, 0, staging.Get(), 0, bytes);
+    list->CopyBufferRegion(dst, 0, staging.Get(), 0, bytes);
     const D3D12_RESOURCE_BARRIER back = transition(dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
-    dev_->auditSide(1, D3D12Device::kAuBarrier, 1); list->ResourceBarrier(1, &back);
+    list->ResourceBarrier(1, &back);
     list->Close();
     ID3D12CommandList* lists[] = {list.Get()};
-    dev_->auditSide(1, D3D12Device::kAuSubmit); dev_->queue_->ExecuteCommandLists(1, lists);
+    dev_->queue_->ExecuteCommandLists(1, lists);
 
     ComPtr<ID3D12Fence> f;
     if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi buffer upload fence"))
@@ -7314,15 +7012,7 @@ const char* stagePrefixFor(ShaderStage s) {
 // Compiles one shader and returns its handle.
 ShaderHandle D3D12ResourceFactory::createShader(const ShaderDesc& d) {
     collect();
-    RhiShader s;
-    if (!buildShader(d, s)) return 0;
-    shaders_.push_back(std::move(s));
-    return static_cast<ShaderHandle>(shaders_.size());
-}
 
-// The compile itself, for the calling thread or a build worker (see the declaration).
-bool D3D12ResourceFactory::buildShader(const ShaderDesc& d, RhiShader& out, u64 corpus,
-                                       bool (*cacheWriteOk)(void*), void* cacheUser) {
     // Precompiled path: DXIL bytecode bypasses checks that require source/entry (see ShaderDesc::bytecode).
     if (d.precompiled()) {
         // Mesh and Amplification need hardware support, not bytecode property.
@@ -7330,39 +7020,41 @@ bool D3D12ResourceFactory::buildShader(const ShaderDesc& d, RhiShader& out, u64 
             && dev_->caps_.meshShaderTier == 0) {
             AVER_WARN("[RHI.D3D12] createShader (precompiled) needs mesh-shader hardware, which this "
                       "device reports as tier 0");
-            return false;
+            return 0;
         }
         // DXIL container fourcc check (prevents SPIR-V being passed to D3D12).
         const u8* src = static_cast<const u8*>(d.bytecode);
         if (d.bytecodeSize < 4 || src[0] != 'D' || src[1] != 'X' || src[2] != 'B' || src[3] != 'C') {
             AVER_ERROR("[RHI.D3D12] createShader (precompiled): {} bytes not beginning with the DXIL "
                        "container fourcc -- SPIR-V, or a truncated blob?", d.bytecodeSize);
-            return false;
+            return 0;
         }
-        out.bytes.assign(src, src + d.bytecodeSize);
-        out.stage = d.stage;
-        return true;
+        RhiShader s;
+        s.bytes.assign(src, src + d.bytecodeSize);
+        s.stage = d.stage;
+        shaders_.push_back(std::move(s));
+        return static_cast<ShaderHandle>(shaders_.size());
     }
 
-    if (!d.source || !d.entry) { AVER_ERROR("[RHI.D3D12] createShader without source or entry point"); return false; }
+    if (!d.source || !d.entry) { AVER_ERROR("[RHI.D3D12] createShader without source or entry point"); return 0; }
 
     // Mesh and Amplification: D3D12 Ultimate stages, tier-1+ mesh-shader hardware required.
     const bool isMeshFamily = d.stage == ShaderStage::Mesh || d.stage == ShaderStage::Amplification;
     if (isMeshFamily && dev_->caps_.meshShaderTier == 0) {
         AVER_WARN("[RHI.D3D12] createShader '{}' needs mesh-shader hardware, which this device reports as tier 0", d.entry);
-        return false;
+        return 0;
     }
 
     u32 model = d.minShaderModel;
     if (isMeshFamily && model < 65) model = 65;
     if (model > dev_->caps_.shaderModel) {
         AVER_WARN("[RHI.D3D12] createShader '{}' wants SM {} but the device reports {}", d.entry, model, dev_->caps_.shaderModel);
-        return false;
+        return 0;
     }
     const bool needsDxc = model > 60 || isMeshFamily;
     if (needsDxc && !dev_->caps_.dxcAvailable) {
         AVER_WARN("[RHI.D3D12] createShader '{}' needs DXC, which is unavailable", d.entry);
-        return false;
+        return 0;
     }
 
     std::string src;
@@ -7377,19 +7069,28 @@ bool D3D12ResourceFactory::buildShader(const ShaderDesc& d, RhiShader& out, u64 
     }
 
     ComPtr<ID3DBlob> blob;
-    if (FAILED(shaderCompiler().compile(src.c_str(), d.entry, fxcTargetFor(d.stage), &blob, sm6Target, d.defines,
-                                        corpus, cacheWriteOk, cacheUser)) || !blob) {
+    if (FAILED(shaderCompiler().compile(src.c_str(), d.entry, fxcTargetFor(d.stage), &blob, sm6Target, d.defines)) || !blob) {
         AVER_ERROR("[RHI.D3D12] createShader '{}' failed to compile", d.entry);
-        return false;
+        return 0;
     }
-    out.blob = std::move(blob);
-    out.stage = d.stage;
-    return true;
+    RhiShader s;
+    s.blob = std::move(blob);
+    s.stage = d.stage;
+    shaders_.push_back(std::move(s));
+    return static_cast<ShaderHandle>(shaders_.size());
 }
 
 // Creates a graphics pipeline, on either the input-assembler or the mesh-shader path.
 PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipelineDesc& d) {
     collect();
+    if ((d.vs == 0) == (d.ms == 0)) {
+        AVER_ERROR("[RHI.D3D12] createGraphicsPipeline needs exactly one of vs / ms");
+        return 0;
+    }
+    if (d.as != 0 && d.ms == 0) {
+        AVER_ERROR("[RHI.D3D12] createGraphicsPipeline: an amplification shader (as) needs a mesh shader (ms) alongside it");
+        return 0;
+    }
     RhiShader* vs = shader(d.vs);
     RhiShader* gs = shader(d.gs);
     RhiShader* ms = shader(d.ms);
@@ -7399,27 +7100,11 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
         AVER_ERROR("[RHI.D3D12] createGraphicsPipeline given an invalid shader handle");
         return 0;
     }
-    RhiPipeline p;
-    if (!buildGraphicsPipeline(d, vs, gs, ms, ps, as, p)) return 0;
-    pipelines_.push_back(std::move(p));
-    return static_cast<PipelineHandle>(pipelines_.size());
-}
 
-// The pipeline-state creation, for the calling thread or a build worker (see the declaration).
-bool D3D12ResourceFactory::buildGraphicsPipeline(const GraphicsPipelineDesc& d, const RhiShader* vs,
-                                                 const RhiShader* gs, const RhiShader* ms, const RhiShader* ps,
-                                                 const RhiShader* as, RhiPipeline& p) {
-    if ((d.vs == 0) == (d.ms == 0)) {
-        AVER_ERROR("[RHI.D3D12] createGraphicsPipeline needs exactly one of vs / ms");
-        return false;
-    }
-    if (d.as != 0 && d.ms == 0) {
-        AVER_ERROR("[RHI.D3D12] createGraphicsPipeline: an amplification shader (as) needs a mesh shader (ms) alongside it");
-        return false;
-    }
     const RootSigEntry* rs = rootSignature(d.layout, d.ms != 0, d.instanced);
-    if (!rs) return false;
+    if (!rs) return 0;
 
+    RhiPipeline p;
     p.rootSig = rs->sig.Get();
     p.mesh = d.ms != 0;
     p.amplification = d.as != 0;
@@ -7441,7 +7126,8 @@ bool D3D12ResourceFactory::buildGraphicsPipeline(const GraphicsPipelineDesc& d, 
     raster.DepthBias = static_cast<INT>(d.depthBias);
     raster.SlopeScaledDepthBias = d.slopeScaledDepthBias;
     const bool warpMeshConservative = d.conservativeRaster && d.ms != 0 && dev_->softwareAdapter_;
-    if (warpMeshConservative && !dev_->warpConsRasterLogged_.exchange(true)) {
+    if (warpMeshConservative && !dev_->warpConsRasterLogged_) {
+        dev_->warpConsRasterLogged_ = true;
         AVER_WARN("[RHI.D3D12] conservative rasterisation disabled for mesh-shader pipelines on the "
                   "WARP software rasteriser (it faults); voxel coverage is thinner on this adapter");
     }
@@ -7503,7 +7189,7 @@ bool D3D12ResourceFactory::buildGraphicsPipeline(const GraphicsPipelineDesc& d, 
         ComPtr<ID3D12Device2> device2;
         if (FAILED(dev_->device_.As(&device2))) {
             AVER_ERROR("[RHI.D3D12] mesh pipeline needs ID3D12Device2");
-            return false;
+            return 0;
         }
         MeshPsoStream s{};
         s.rootSig = rs->sig.Get();
@@ -7519,7 +7205,7 @@ bool D3D12ResourceFactory::buildGraphicsPipeline(const GraphicsPipelineDesc& d, 
         s.dsv = toDxgiDsvFormat(d.depthFormat);
         s.sample.value.Count = samples;
         D3D12_PIPELINE_STATE_STREAM_DESC sd{sizeof(s), &s};
-        if (!hrOk(device2->CreatePipelineState(&sd, IID_PPV_ARGS(&p.pso)), "rhi mesh pipeline")) return false;
+        if (!hrOk(device2->CreatePipelineState(&sd, IID_PPV_ARGS(&p.pso)), "rhi mesh pipeline")) return 0;
     } else {
         D3D12_INPUT_ELEMENT_DESC elems[kMaxVertexAttribs] = {};
         const UINT elemCount = buildInputLayout(d.vertexLayout, elems);
@@ -7540,9 +7226,10 @@ bool D3D12ResourceFactory::buildGraphicsPipeline(const GraphicsPipelineDesc& d, 
         for (u32 i = 0; i < rtCount; ++i) pd.RTVFormats[i] = toDxgiFormat(d.renderTargets[i]);
         pd.DSVFormat = toDxgiDsvFormat(d.depthFormat);
         pd.SampleDesc.Count = samples;
-        if (!hrOk(dev_->device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&p.pso)), "rhi graphics pipeline")) return false;
+        if (!hrOk(dev_->device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&p.pso)), "rhi graphics pipeline")) return 0;
     }
-    return true;
+    pipelines_.push_back(std::move(p));
+    return static_cast<PipelineHandle>(pipelines_.size());
 }
 
 // Creates a compute pipeline.
@@ -7553,20 +7240,10 @@ PipelineHandle D3D12ResourceFactory::createComputePipeline(const ComputePipeline
         AVER_ERROR("[RHI.D3D12] createComputePipeline given a handle that is not a compute shader");
         return 0;
     }
-    RhiPipeline p;
-    if (!buildComputePipeline(d, cs, p)) return 0;
-    pipelines_.push_back(std::move(p));
-    return static_cast<PipelineHandle>(pipelines_.size());
-}
-
-// The pipeline-state creation, for the calling thread or a build worker (see the declaration).
-bool D3D12ResourceFactory::buildComputePipeline(const ComputePipelineDesc& d, const RhiShader* cs, RhiPipeline& p) {
-    if (!cs || cs->stage != ShaderStage::Compute) {
-        AVER_ERROR("[RHI.D3D12] createComputePipeline given a handle that is not a compute shader");
-        return false;
-    }
     const RootSigEntry* rs = rootSignature(d.layout, false);
-    if (!rs) return false;
+    if (!rs) return 0;
+
+    RhiPipeline p;
     p.compute = true;
     p.rootSig = rs->sig.Get();
     for (u32 t = 0; t < kBindingTableCount; ++t) { p.srvParam[t] = rs->srvParam[t]; p.uavParam[t] = rs->uavParam[t]; }
@@ -7577,250 +7254,9 @@ bool D3D12ResourceFactory::buildComputePipeline(const ComputePipelineDesc& d, co
     D3D12_COMPUTE_PIPELINE_STATE_DESC cp{};
     cp.pRootSignature = rs->sig.Get();
     cp.CS = cs->code();
-    if (!hrOk(dev_->device_->CreateComputePipelineState(&cp, IID_PPV_ARGS(&p.pso)), "rhi compute pipeline")) return false;
-    return true;
-}
-
-// ---- off-thread shader and pipeline creation
-// A batch of create requests (IPipelineBatch) run on the factory's PipelinePool. The design rules, each of which
-// is a way an earlier attempt could have corrupted GPU state (docs/rendering/ASYNC_SHADERS.md):
-//   - A worker reads the request and writes only its own slot. It never touches shaders_, pipelines_,
-//     retired_ or any handle table, and never retires or collects anything.
-//   - Handles are batch-local. A pipeline reaches pipelines_ only in adopt(), on the owner's thread.
-//   - What a pipeline's creation reads is immutable or locked: device caps, the root-signature cache
-//     (deque + mutex, entries never erased), and the shader blobs of its own batch.
-//   - A request is a pure value: strings are copied (or shared, immutable) when it is recorded.
-class D3D12PipelineBatch final : public IPipelineBatch {
-public:
-    explicit D3D12PipelineBatch(D3D12ResourceFactory& f) : f_(f), s_(std::make_shared<Shared>()) {
-        s_->f = &f;
-        // Fixed on the owner's thread now: the key every blob this batch writes is filed under, and the
-        // revision a reload since then would invalidate.
-        s_->corpus = shaderCorpusHash();
-        s_->revision = shaderFileRevision();
-    }
-    ~D3D12PipelineBatch() override { cancel(); }
-
-    ShaderHandle createShader(const ShaderDesc& d) override {
-        Shared& s = *s_;
-        ShaderSlot& sl = s.shaders.emplace_back();
-        sl.source = intern(d.source);
-        sl.prelude = intern(d.prelude);
-        if (d.entry) { sl.entry = d.entry; sl.hasEntry = true; }
-        if (d.defines) { sl.defines = d.defines; sl.hasDefines = true; }
-        if (d.precompiled())
-            sl.bytes.assign(static_cast<const u8*>(d.bytecode), static_cast<const u8*>(d.bytecode) + d.bytecodeSize);
-        sl.stage = d.stage;
-        sl.minShaderModel = d.minShaderModel;
-        ++s.total;
-        return static_cast<ShaderHandle>(s.shaders.size());
-    }
-    PipelineHandle createGraphicsPipeline(const GraphicsPipelineDesc& d) override {
-        PipeSlot& p = newPipe(false);
-        p.g = d;
-        for (ShaderHandle h : {d.vs, d.gs, d.ms, d.ps, d.as}) dependOn(p, h);
-        return static_cast<PipelineHandle>(s_->pipes.size());
-    }
-    PipelineHandle createComputePipeline(const ComputePipelineDesc& d) override {
-        PipeSlot& p = newPipe(true);
-        p.c = d;
-        dependOn(p, d.cs);
-        return static_cast<PipelineHandle>(s_->pipes.size());
-    }
-
-    void start() override {
-        std::shared_ptr<Shared> sh = s_;
-        if (sh->started.load()) return;
-        // Workers only compile (DXC, CPU). Pipeline states are created in adopt(), on the owner thread:
-        // concurrent Create*PipelineState beside frame submission lost the device on an RX 7800 XT.
-        sh->outstanding = static_cast<u32>(sh->shaders.size());
-        sh->started = true;
-        if (sh->shaders.empty()) return;
-        PipelinePool& pool = f_.pipelinePool();
-        sh->pool = &pool;
-        for (u32 i = 0; i < sh->shaders.size(); ++i)
-            pool.submit([sh, i] { runShader(sh, i); });
-    }
-    bool finished() const override {
-        const Shared& s = *s_;
-        return s.started.load() && s.outstanding.load() == 0;
-    }
-    void progress(u32& done, u32& total) const override {
-        done = s_->done.load();
-        total = s_->total.load();
-    }
-    void waitFinished() override {
-        if (!s_->started) start();
-        std::unique_lock<std::mutex> lock(s_->m);
-        s_->cv.wait(lock, [this] { return s_->outstanding.load() == 0; });
-    }
-
-    void adopt() override {
-        Shared& s = *s_;
-        if (adopted_ || !finished() || s.cancelled) return;
-        adopted_ = true;
-        for (u32 i = 0; i < s.pipes.size(); ++i) runPipe(s_, i);
-        for (PipeSlot& p : s.pipes) {
-            if (!p.ok) continue;
-            f_.pipelines_.push_back(std::move(p.built));
-            p.real = static_cast<PipelineHandle>(f_.pipelines_.size());
-        }
-        s.shaders.clear();   // blobs: the pipeline states own their code now
-    }
-    PipelineHandle resolve(PipelineHandle local) const override {
-        const Shared& s = *s_;
-        if (!adopted_ || local == 0 || local > s.pipes.size()) return 0;
-        return s.pipes[local - 1].real;
-    }
-    void cancel() override {
-        // In-flight tasks keep the shared state alive and skip or discard their work.
-        s_->cancelled = true;
-    }
-
-private:
-    struct ShaderSlot {
-        std::shared_ptr<const std::string> source, prelude;
-        std::string entry, defines;
-        bool hasEntry = false, hasDefines = false;
-        std::vector<u8> bytes;
-        ShaderStage stage = ShaderStage::Vertex;
-        u32 minShaderModel = 60;
-        std::vector<u32> dependents;   // pipelines waiting on this shader (recorded before start)
-        RhiShader built;               // written by this shader's one task
-    };
-    struct PipeSlot {
-        bool compute = false;
-        GraphicsPipelineDesc g{};
-        ComputePipelineDesc c{};
-        u32 remaining = 0;             // shaders still to finish; guarded by Shared::m once started
-        bool depFailed = false;        // a shader it names failed to compile (or was never recorded)
-        bool ok = false;
-        RhiPipeline built;             // written by this pipeline's one task
-        PipelineHandle real = 0;       // adopt()
-    };
-    struct Shared {
-        D3D12ResourceFactory* f = nullptr;
-        PipelinePool* pool = nullptr;      // set by start(); workers submit follow-up tasks through it
-        u64 corpus = 0, revision = 0;
-        std::deque<ShaderSlot> shaders;   // fixed once start() runs
-        std::deque<PipeSlot> pipes;
-        std::vector<std::pair<const char*, std::shared_ptr<const std::string>>> interned;
-        std::mutex m;
-        std::condition_variable cv;
-        std::atomic<u32> total{0}, done{0}, outstanding{0};
-        std::atomic<bool> started{false}, cancelled{false};
-    };
-
-    PipeSlot& newPipe(bool compute) {
-        PipeSlot& p = s_->pipes.emplace_back();
-        p.compute = compute;
-        ++s_->total;
-        return p;
-    }
-    void dependOn(PipeSlot& p, ShaderHandle h) {
-        if (h == 0) return;
-        Shared& s = *s_;
-        if (h > s.shaders.size()) {
-            AVER_ERROR("[RHI.D3D12] pipeline batch: a pipeline names shader {} which is not in the batch", h);
-            p.depFailed = true;
-            return;
-        }
-        const u32 pipeIdx = static_cast<u32>(s.pipes.size() - 1);
-        std::vector<u32>& dep = s.shaders[h - 1].dependents;
-        if (!dep.empty() && dep.back() == pipeIdx) return;   // the same shader named twice
-        dep.push_back(pipeIdx);
-        ++p.remaining;
-    }
-
-    // The caller's big strings (the shader source, the prelude) are handed in over and over; keep one immutable
-    // copy per distinct text. Compared in full: a caller may rewrite a buffer in place between requests.
-    std::shared_ptr<const std::string> intern(const char* text) {
-        if (!text) return nullptr;
-        const usize n = std::strlen(text);
-        for (auto& [ptr, str] : s_->interned) {
-            (void)ptr;
-            if (str->size() == n && std::memcmp(str->data(), text, n) == 0) return str;
-        }
-        auto str = std::make_shared<const std::string>(text, n);
-        s_->interned.emplace_back(text, str);
-        return str;
-    }
-
-    static bool cacheWriteOk(void* user) {
-        const Shared* s = static_cast<const Shared*>(user);
-        return !s->cancelled && shaderFileRevision() == s->revision;
-    }
-
-    // One bookkeeping step per finished task: progress, and the wake-up for waitFinished().
-    static void finishTask(Shared& s) {
-        ++s.done;
-        std::lock_guard<std::mutex> lock(s.m);
-        if (--s.outstanding == 0) s.cv.notify_all();
-    }
-
-    static void runShader(const std::shared_ptr<Shared>& sh, u32 idx) {
-        Shared& s = *sh;
-        ShaderSlot& sl = s.shaders[idx];
-        bool ok = false;
-        if (!s.cancelled) {
-            ShaderDesc d;
-            d.stage = sl.stage;
-            d.minShaderModel = sl.minShaderModel;
-            if (sl.source)  d.source = sl.source->c_str();
-            if (sl.prelude) d.prelude = sl.prelude->c_str();
-            if (sl.hasEntry) d.entry = sl.entry.c_str();
-            if (sl.hasDefines) d.defines = sl.defines.c_str();
-            if (!sl.bytes.empty()) { d.bytecode = sl.bytes.data(); d.bytecodeSize = sl.bytes.size(); }
-            try {
-                ok = s.f->buildShader(d, sl.built, s.corpus, &cacheWriteOk, &s);
-            } catch (...) {
-                AVER_ERROR("[RHI.D3D12] pipeline batch: shader '{}' threw while compiling", sl.entry);
-            }
-        }
-        if (!ok) {
-            std::lock_guard<std::mutex> lock(s.m);
-            for (u32 pi : sl.dependents) s.pipes[pi].depFailed = true;
-        }
-        finishTask(s);
-    }
-
-    static void runPipe(const std::shared_ptr<Shared>& sh, u32 idx) {
-        Shared& s = *sh;
-        PipeSlot& p = s.pipes[idx];
-        bool ok = false;
-        if (!s.cancelled && !p.depFailed) {
-            auto code = [&s](ShaderHandle h) -> const RhiShader* {
-                return h ? &s.shaders[h - 1].built : nullptr;
-            };
-            try {
-                if (p.compute) ok = s.f->buildComputePipeline(p.c, code(p.c.cs), p.built);
-                else           ok = s.f->buildGraphicsPipeline(p.g, code(p.g.vs), code(p.g.gs), code(p.g.ms),
-                                                               code(p.g.ps), code(p.g.as), p.built);
-            } catch (...) {
-                AVER_ERROR("[RHI.D3D12] pipeline batch: a pipeline threw while it was built");
-            }
-        }
-        p.ok = ok;
-        ++s.done;
-    }
-
-    D3D12ResourceFactory& f_;
-    std::shared_ptr<Shared> s_;
-    bool adopted_ = false;
-};
-
-PipelinePool& D3D12ResourceFactory::pipelinePool() {
-    if (!pool_) {
-        const u32 hw = std::thread::hardware_concurrency();
-        const u32 n = hw >= 8 ? (hw / 2 > 8 ? 8u : hw / 2) : 2u;
-        pool_ = std::make_unique<PipelinePool>(n);
-        AVER_INFO("[RHI.D3D12] shader build pool: {} worker thread(s)", n);
-    }
-    return *pool_;
-}
-
-std::unique_ptr<IPipelineBatch> D3D12ResourceFactory::createPipelineBatchAsync() {
-    return std::make_unique<D3D12PipelineBatch>(*this);
+    if (!hrOk(dev_->device_->CreateComputePipelineState(&cp, IID_PPV_ARGS(&p.pso)), "rhi compute pipeline")) return 0;
+    pipelines_.push_back(std::move(p));
+    return static_cast<PipelineHandle>(pipelines_.size());
 }
 
 // Reserves a descriptor range for a binding set, null-fills it, and returns its handle.
@@ -8662,8 +8098,7 @@ void D3D12ResourceFactory::selfTest() {
 void D3D12RenderContext::setPipeline(PipelineHandle h) {
     pipe_ = nullptr;
     RhiPipeline* p = res_->pipeline(h);
-    if (!p) { pipeInvalid_ = true; AVER_ERROR("[RHI.D3D12] setPipeline with an invalid handle"); return; }
-    pipeInvalid_ = false;
+    if (!p) { AVER_ERROR("[RHI.D3D12] setPipeline with an invalid handle"); return; }
     if (!dev_->cmdList_) return;
     if (p->compute) {
         dev_->cmdList_->SetComputeRootSignature(p->rootSig);
@@ -8671,7 +8106,7 @@ void D3D12RenderContext::setPipeline(PipelineHandle h) {
         dev_->cmdList_->SetGraphicsRootSignature(p->rootSig);
         dev_->boundRootSig_ = nullptr;
     }
-    dev_->audit(D3D12Device::kAuPso); dev_->cmdList_->SetPipelineState(p->pso.Get());
+    dev_->cmdList_->SetPipelineState(p->pso.Get());
     dev_->boundPso_ = p->pso.Get();   // matches what the line above just bound.
     dev_->fovValid_ = false;          // pipeline changed; see fovValid_.
     dev_->dbValid_ = false;           // root signature change discards all bound arguments.
@@ -8752,7 +8187,7 @@ void D3D12RenderContext::setRenderTargets(const TextureHandle* colors, u32 count
 void D3D12RenderContext::clearDepth(TextureHandle depth, f32 value) {
     RhiTexture* t = res_->texture(depth);
     if (!t || !t->dsvHeap || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] clearDepth on a non-depth texture"); return; }
-    dev_->audit(D3D12Device::kAuClear); dev_->cmdList_->ClearDepthStencilView(t->dsvHeap->GetCPUDescriptorHandleForHeapStart(),
+    dev_->cmdList_->ClearDepthStencilView(t->dsvHeap->GetCPUDescriptorHandleForHeapStart(),
                                           D3D12_CLEAR_FLAG_DEPTH, value, 0, 0, nullptr);
 }
 
@@ -8763,7 +8198,7 @@ void D3D12RenderContext::clearDepth(TextureHandle depth, f32 value) {
 void D3D12RenderContext::clearColor(TextureHandle target, const f32 color[4]) {
     RhiTexture* t = res_->texture(target);
     if (!t || !t->rtvHeap || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] clearColor on a non-render-target texture"); return; }
-    dev_->audit(D3D12Device::kAuClear); dev_->cmdList_->ClearRenderTargetView(t->rtvHeap->GetCPUDescriptorHandleForHeapStart(), color, 0, nullptr);
+    dev_->cmdList_->ClearRenderTargetView(t->rtvHeap->GetCPUDescriptorHandleForHeapStart(), color, 0, nullptr);
 }
 
 // Binds a binding set's descriptors at the given table index of the current pipeline.
@@ -8975,21 +8410,21 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderContext::ringAlloc(const void* data, u32 by
 
 // Draws a device mesh through the input assembler.
 void D3D12RenderContext::drawMesh(MeshHandle mesh) {
-    if (!dev_->cmdList_ || pipeInvalid_) return;
+    if (!dev_->cmdList_) return;
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] drawMesh with an invalid mesh handle"); return; }
     const GpuMesh& m = dev_->meshes_[mesh - 1];
     applyDrawBinding();
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     dev_->cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
     dev_->cmdList_->IASetIndexBuffer(&m.ibv);
-    dev_->audit(D3D12Device::kAuDraw); dev_->cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+    dev_->cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
 }
 
 // Draws `instanceCount` copies of a device mesh in one DrawIndexedInstanced, with per-instance world
 // transforms read from a root-SRV-bound StructuredBuffer -- see IRenderContext::drawMeshInstanced and
 // RHIResources.hpp's comment above GraphicsPipelineDesc::instanced for the whole mechanism.
 void D3D12RenderContext::drawMeshInstanced(MeshHandle mesh, const f32* worlds, u32 instanceCount) {
-    if (!dev_->cmdList_ || pipeInvalid_) return;
+    if (!dev_->cmdList_) return;
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] drawMeshInstanced with an invalid mesh handle"); return; }
     if (instanceCount == 0) return;
     if (!pipe_ || pipe_->instanceWorldParam < 0) {
@@ -9007,12 +8442,11 @@ void D3D12RenderContext::drawMeshInstanced(MeshHandle mesh, const f32* worlds, u
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     dev_->cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
     dev_->cmdList_->IASetIndexBuffer(&m.ibv);
-    dev_->audit(D3D12Device::kAuDraw); dev_->cmdList_->DrawIndexedInstanced(m.indexCount, instanceCount, 0, 0, 0);
+    dev_->cmdList_->DrawIndexedInstanced(m.indexCount, instanceCount, 0, 0, 0);
 }
 
 // Draws a device mesh through the mesh-shader path.
 void D3D12RenderContext::dispatchMeshFor(MeshHandle mesh) {
-    if (pipeInvalid_) return;
     if (!pipe_ || !pipe_->mesh) { AVER_ERROR("[RHI.D3D12] dispatchMeshFor without a mesh-shader pipeline"); return; }
     if (!dev_->cmdList6_) { AVER_ERROR("[RHI.D3D12] DispatchMesh is unavailable on this command list"); return; }
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] dispatchMeshFor with an invalid mesh handle"); return; }
@@ -9024,13 +8458,12 @@ void D3D12RenderContext::dispatchMeshFor(MeshHandle mesh) {
     dev_->cmdList_->SetGraphicsRootShaderResourceView(static_cast<UINT>(pipe_->msIndexParam), m.ib->GetGPUVirtualAddress());
     const u32 tc[4] = {tris, 0, 0, 0};
     dev_->cmdList_->SetGraphicsRoot32BitConstants(static_cast<UINT>(pipe_->msCountParam), 4, tc, 0);
-    dev_->audit(D3D12Device::kAuMesh); dev_->cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
+    dev_->cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
 }
 
 // Dispatches an amplification+mesh-shader pipeline over one cluster cut.
 // Cluster arrays are pre-bound; this supplies group count and vertex buffer.
 void D3D12RenderContext::dispatchMeshClusters(MeshHandle mesh, u32 clusterCount) {
-    if (pipeInvalid_) return;
     if (!pipe_ || !pipe_->mesh || !pipe_->amplification) {
         AVER_ERROR("[RHI.D3D12] dispatchMeshClusters without an amplification-shader pipeline");
         return;
@@ -9051,14 +8484,13 @@ void D3D12RenderContext::dispatchMeshClusters(MeshHandle mesh, u32 clusterCount)
         dev_->cmdList_->SetGraphicsRoot32BitConstants(static_cast<UINT>(pipe_->msCountParam), 4, block, 0);
     }
     const u32 groups = (clusterCount + kClusterAmplificationGroupSize - 1) / kClusterAmplificationGroupSize;
-    dev_->audit(D3D12Device::kAuMesh); dev_->cmdList6_->DispatchMesh(groups, 1, 1);
+    dev_->cmdList6_->DispatchMesh(groups, 1, 1);
 }
 
 // Dispatches the bound compute pipeline.
 void D3D12RenderContext::dispatch(u32 gx, u32 gy, u32 gz) {
-    if (pipeInvalid_) return;
     if (!pipe_ || !pipe_->compute) { AVER_ERROR("[RHI.D3D12] dispatch without a compute pipeline"); return; }
-    if (dev_->cmdList_) { dev_->audit(D3D12Device::kAuCompute); dev_->cmdList_->Dispatch(gx, gy, gz); }
+    if (dev_->cmdList_) dev_->cmdList_->Dispatch(gx, gy, gz);
 }
 
 // Copies whole bytes between two buffers. Both must already be in the right state.
@@ -9068,7 +8500,7 @@ void D3D12RenderContext::copyBuffer(BufferHandle dst, BufferHandle src, u64 byte
     ID3D12Resource* d = res_->bufferResource(dst);
     ID3D12Resource* s = res_->bufferResource(src);
     if (!d || !s) { AVER_ERROR("[RHI.D3D12] copyBuffer with an invalid handle"); return; }
-    dev_->auditCopyBuf(bytes); dev_->cmdList_->CopyBufferRegion(d, dstOffset, s, srcOffset, bytes);
+    dev_->cmdList_->CopyBufferRegion(d, dstOffset, s, srcOffset, bytes);
 }
 
 // Layout for a texture<->buffer copy of one mip. Use GetCopyableFootprints, not width*bpp arithmetic.
@@ -9117,7 +8549,6 @@ void D3D12RenderContext::copyTextureToBuffer(BufferHandle dst, u64 dstOffset, Te
     sl.pResource = s->res.Get();
     sl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     sl.SubresourceIndex = mip;
-    dev_->auditCopyTex(dl, sl, nullptr);
     dev_->cmdList_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
 }
 
@@ -9144,7 +8575,6 @@ void D3D12RenderContext::copyBufferToTexture(TextureHandle dst, u32 mip, BufferH
     sl.pResource = s;
     sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     sl.PlacedFootprint = fp;
-    dev_->auditCopyTex(dl, sl, nullptr);
     dev_->cmdList_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
 }
 
@@ -9161,16 +8591,16 @@ void D3D12RenderContext::copyTexture(TextureHandle dst, TextureHandle src) {
         AVER_ERROR("[RHI.D3D12] copyTexture between mismatched textures -- refused");
         return;
     }
-    dev_->auditCopyRes(d->res.Get()); dev_->cmdList_->CopyResource(d->res.Get(), s->res.Get());
+    dev_->cmdList_->CopyResource(d->res.Get(), s->res.Get());
 }
 
 
 // Draws a fullscreen triangle; the vertex shader builds it from SV_VertexID.
 void D3D12RenderContext::drawFullscreen() {
-    if (!dev_->cmdList_ || pipeInvalid_) return;
+    if (!dev_->cmdList_) return;
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     dev_->cmdList_->IASetVertexBuffers(0, 0, nullptr);
-    dev_->audit(D3D12Device::kAuDraw); dev_->cmdList_->DrawInstanced(3, 1, 0, 0);
+    dev_->cmdList_->DrawInstanced(3, 1, 0, 0);
 }
 
 // Binds a caller-owned vertex buffer at slot 0.
@@ -9204,10 +8634,10 @@ void D3D12RenderContext::setIndexBuffer(BufferHandle h, Format indexFormat) {
 
 // Draws indexed geometry from the currently bound caller-owned buffers.
 void D3D12RenderContext::drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVertex) {
-    if (!dev_->cmdList_ || pipeInvalid_ || indexCount == 0) return;
+    if (!dev_->cmdList_ || indexCount == 0) return;
     applyDrawBinding();
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    dev_->audit(D3D12Device::kAuDraw); dev_->cmdList_->DrawIndexedInstanced(indexCount, 1, firstIndex, baseVertex, 0);
+    dev_->cmdList_->DrawIndexedInstanced(indexCount, 1, firstIndex, baseVertex, 0);
 }
 
 // Records a bottom-level acceleration structure build for its mesh.
@@ -9235,11 +8665,11 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
         }
         bd.ScratchAccelerationStructureData = b->scratch->GetGPUVirtualAddress();
         bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
-        dev_->audit(D3D12Device::kAuRay); dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+        dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
         D3D12_RESOURCE_BARRIER bar{};
         bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         bar.UAV.pResource = b->as.Get();
-        dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
+        dev_->cmdList_->ResourceBarrier(1, &bar);
         b->built = true;
         return;
     }
@@ -9250,11 +8680,11 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
     bd.Inputs = blasInputs(m, geo, b->allowUpdate);
     bd.ScratchAccelerationStructureData = b->scratch->GetGPUVirtualAddress();
     bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
-    dev_->audit(D3D12Device::kAuRay); dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     bar.UAV.pResource = b->as.Get();
-    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
+    dev_->cmdList_->ResourceBarrier(1, &bar);
     b->built = true;
     b->builtVertexCount = m.vertexCount;
     b->builtIndexCount = m.indexCount;
@@ -9303,11 +8733,11 @@ bool D3D12RenderContext::refitBlas(BlasHandle h) {
     bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
     // In place: DXR allows Source == Dest for an update, and that is what "refit" means here.
     bd.SourceAccelerationStructureData = b->as->GetGPUVirtualAddress();
-    dev_->audit(D3D12Device::kAuRay); dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     bar.UAV.pResource = b->as.Get();
-    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
+    dev_->cmdList_->ResourceBarrier(1, &bar);
     return true;
 }
 
@@ -9367,13 +8797,13 @@ void D3D12RenderContext::buildTlas(TlasHandle h, const TlasInstance* instances, 
         D3D12_RESOURCE_BARRIER pre{};
         pre.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         pre.UAV.pResource = t->as.Get();
-        dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &pre);
+        dev_->cmdList_->ResourceBarrier(1, &pre);
     }
-    dev_->audit(D3D12Device::kAuRay); dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     bar.UAV.pResource = t->as.Get();
-    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
+    dev_->cmdList_->ResourceBarrier(1, &bar);
     t->built = true;
     t->builtStatic = staticUsed;
     t->builtSlots.swap(t->pendingSlots);
@@ -9405,17 +8835,16 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderContext::tlasBuildDescs(RhiTlas& t, u32 sta
     if (written) {
         if (t.staticDescsState != D3D12_RESOURCE_STATE_COPY_DEST) {
             const D3D12_RESOURCE_BARRIER toCopy = transition(descs, t.staticDescsState, D3D12_RESOURCE_STATE_COPY_DEST);
-            dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &toCopy);
+            dev_->cmdList_->ResourceBarrier(1, &toCopy);
             t.staticDescsState = D3D12_RESOURCE_STATE_COPY_DEST;
         }
-        dev_->auditCopyBuf(static_cast<u64>(written) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
         dev_->cmdList_->CopyBufferRegion(descs, static_cast<u64>(staticUsed) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC),
                                          t.instances[f].Get(), 0,
                                          static_cast<u64>(written) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
     }
     if (t.staticDescsState != kRead) {
         const D3D12_RESOURCE_BARRIER toRead = transition(descs, t.staticDescsState, kRead);
-        dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &toRead);
+        dev_->cmdList_->ResourceBarrier(1, &toRead);
         t.staticDescsState = kRead;
     }
     return descs->GetGPUVirtualAddress();
@@ -9457,18 +8886,18 @@ bool D3D12RenderContext::refitTlas(TlasHandle h, const TlasInstance* instances, 
         D3D12_RESOURCE_BARRIER pre{};
         pre.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         pre.UAV.pResource = t->as.Get();
-        dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &pre);
+        dev_->cmdList_->ResourceBarrier(1, &pre);
     }
     if (eligible) {
         bd.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
         // In place: DXR allows Source == Dest for an update, and that is what "refit" means here.
         bd.SourceAccelerationStructureData = t->as->GetGPUVirtualAddress();
     }
-    dev_->audit(D3D12Device::kAuRay); dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     bar.UAV.pResource = t->as.Get();
-    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
+    dev_->cmdList_->ResourceBarrier(1, &bar);
     t->built = true;
     t->builtStatic = staticUsed;
     t->builtSlots.swap(t->pendingSlots);
@@ -9538,7 +8967,7 @@ void D3D12RenderContext::textureBarrier(TextureHandle h, ResourceState from, Res
     trackTextureBarrier(*t, from, to, subresource);
     D3D12_RESOURCE_BARRIER b = transition(t->res.Get(), toResourceStates(from), toResourceStates(to));
     b.Transition.Subresource = (subresource == kAllSubresources) ? D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES : subresource;
-    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &b);
+    dev_->cmdList_->ResourceBarrier(1, &b);
 }
 
 // Records a buffer transition barrier.
@@ -9548,7 +8977,7 @@ void D3D12RenderContext::bufferBarrier(BufferHandle h, ResourceState from, Resou
     if (!b || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] bufferBarrier with an invalid handle"); return; }
     trackBufferBarrier(*b, from, to);
     D3D12_RESOURCE_BARRIER bar = transition(b->res.Get(), toResourceStates(from), toResourceStates(to));
-    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
+    dev_->cmdList_->ResourceBarrier(1, &bar);
 }
 
 // Records a UAV barrier on a texture.
@@ -9558,7 +8987,7 @@ void D3D12RenderContext::uavBarrierTexture(TextureHandle h) {
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     b.UAV.pResource = t->res.Get();
-    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &b);
+    dev_->cmdList_->ResourceBarrier(1, &b);
 }
 
 // Records a UAV barrier on a buffer.
@@ -9568,20 +8997,13 @@ void D3D12RenderContext::uavBarrierBuffer(BufferHandle h) {
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     bar.UAV.pResource = b->res.Get();
-    dev_->audit(D3D12Device::kAuBarrier, 1); dev_->cmdList_->ResourceBarrier(1, &bar);
+    dev_->cmdList_->ResourceBarrier(1, &bar);
 }
 
 // Opens a debug marker region and nested GPU timing span (prefer ScopedGpuStat when possible).
 void D3D12RenderContext::pushMarker(const char* label) {
     if (!label || !dev_->cmdList_) return;
-    if (dev_->auditOn_) dev_->auditPush(label);
-    // Wide (metadata 0), not ANSI: DRED's breadcrumb context records only wide event strings, which is what
-    // names the pass a hang sits in. Labels are short ASCII literals.
-    wchar_t wide[96];
-    u32 n = 0;
-    for (; label[n] && n + 1 < 96; ++n) wide[n] = static_cast<wchar_t>(static_cast<unsigned char>(label[n]));
-    wide[n] = 0;
-    dev_->cmdList_->BeginEvent(0, wide, static_cast<UINT>((n + 1) * sizeof(wchar_t)));
+    dev_->cmdList_->BeginEvent(1, label, static_cast<UINT>(std::strlen(label) + 1));
     // Label is always a string literal (safe to store pointer, allocation-free); parent tracks nesting.
     if (dev_->tsSlice_[dev_->frameIndex_].size() >= D3D12Device::kMaxGpuSpans) {
         ++dev_->tsDropped_;   // see tsDropped_: popMarker consumes this instead of popping
@@ -9595,7 +9017,6 @@ void D3D12RenderContext::pushMarker(const char* label) {
 
 void D3D12RenderContext::popMarker() {
     if (!dev_->cmdList_) return;
-    if (dev_->auditOn_) dev_->auditPop();
     if (dev_->tsDropped_) { --dev_->tsDropped_; dev_->cmdList_->EndEvent(); return; }
     if (!dev_->tsOpen_.empty()) {
         const u32 i = dev_->tsOpen_.back();
