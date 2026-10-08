@@ -166,6 +166,9 @@ public:
     rhi::BindlessTableHandle sceneBindlessTable() const override;
     bool suppressesScene() const override;
     bool suppressesWholeFrame() const override;
+    // Live, not latched: a material graph loaded mid-frame (a Project Browser open) leaves the scene set's
+    // shaders without it, and drawing a material that names it (the blended replay) hung the GPU.
+    bool graphStale() const;
     void scenePass(rhi::IRenderContext& ctx) override;
     // Ray-driven frames record at endFrame so moving objects use this frame's transforms.
     bool wantsLateScenePass() const override;

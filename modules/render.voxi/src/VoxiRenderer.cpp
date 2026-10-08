@@ -4710,14 +4710,19 @@ bool VoxiRenderer::overridesScenePipeline() const { return giReady_; }
 // feature is not on the stack then -- see IRenderFeature::sceneBindlessTable.
 rhi::BindlessTableHandle VoxiRenderer::sceneBindlessTable() const { return rtTexTable_; }
 
-bool VoxiRenderer::suppressesScene() const { return debugViewActive() || rayDrivenActive(); }
+bool VoxiRenderer::suppressesScene() const { return graphStale() || debugViewActive() || rayDrivenActive(); }
 
 // Debug raymarch has no depth; ray-driven writes real depth so sky lands on ray misses.
-bool VoxiRenderer::suppressesWholeFrame() const { return debugViewActive(); }
+bool VoxiRenderer::suppressesWholeFrame() const { return graphStale() || debugViewActive(); }
+
+bool VoxiRenderer::graphStale() const {
+    return scenePso_ != 0 && scenePipelineGraphRev_ != pbr::materialGraphs().revision();
+}
 
 // Draws the scene pass replacement (debug view or ray-driven); debug wins if both are active.
 void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
     ptRanThisFrame_ = false;
+    if (graphStale()) return;   // blank frame; prePass rebuilds the scene set at the next frame boundary
     translucentInPath_ = false;
     // Recorded late (wantsLateScenePass) this frame's draws exist; bring the movers up to date first.
     if ((!draws_.empty() || rtRefitDeferred_) && !debugViewActive() && rayDrivenActive()) latePatchMovers(ctx);
@@ -5206,7 +5211,11 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // primary ray crosses over the opaque background (voxi.hlsl), and the device then skips their
         // blended replay (blendedDrawsResolvedInScene). Not with the eye inside a medium: that case keeps
         // the replay's eye-inside refraction.
-        translucentInPath_ = settings_.translucencyInPath && rtTlasTranslucent_ > 0 && cb_.cameraMedium[0] < 0.5f;
+        // Also while bottom-level builds are still spread over frames (a big level just loaded): the translucent
+        // draws may have no BLAS yet, and the replay they would fall back to (the full ray-traced pixel shader under
+        // mesh shaders) hung the RX 7800 XT on a lamp-glass pane. They are simply absent for those frames.
+        translucentInPath_ = settings_.translucencyInPath && (rtTlasTranslucent_ > 0 || blasBuildsDeferred_) &&
+                             cb_.cameraMedium[0] < 0.5f;
         cb_.ptBounceParams[3] = translucentInPath_ ? 1.0f : 0.0f;
         // NRD2: CSRdRefl wrote S (u23); Stage B reads its hit distance and overwrites it.
         if (nrd2) ctx.uavBarrierTexture(nrd2_.targets().specular);

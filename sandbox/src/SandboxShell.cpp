@@ -1,5 +1,6 @@
 // Editor UI: menu bar/toolbar, prompts, log/console, drawer/notifications, reference/profiler/nav panels.
 
+#include <cstdlib>
 #include "SandboxApp.hpp"
 #include "aver/core/CpuTiming.hpp"
 
@@ -1844,6 +1845,13 @@ void SandboxApp::buildUI(Engine& e) {
     ++frameNo_;   // the Content Browser's directory-cache freshness clock
 
     if (browserActive_) {
+        // Test hook: AVER_TEST_BROWSER_OPEN=<.ocproject> opens it through this browser path after 120 frames.
+        static const char* testOpen = std::getenv("AVER_TEST_BROWSER_OPEN");
+        if (testOpen && *testOpen && frameNo_ >= 120 && browser_.open(testOpen, nullptr)) {
+            applyProject(e);
+            browserActive_ = false;
+            return;
+        }
         switch (browser_.draw(dpi_, fontMedium_, logoUiId_, logoAspect_)) {
             case editor::BrowserAction::Open: applyProject(e); browserActive_ = false; break;
             case editor::BrowserAction::Skip: browserActive_ = false; break;
@@ -1853,6 +1861,19 @@ void SandboxApp::buildUI(Engine& e) {
         return;
     }
 
+    // Test hook: AVER_TEST_OPEN_LEVEL=<level path> opens it as the Content Browser does, 300 frames after the
+    // project is up (the mid-session level open a user does).
+#if AVER_MODULE_SCENE
+    {
+        static const char* testLevel = std::getenv("AVER_TEST_OPEN_LEVEL");
+        static u64 projectUpAt = 0;
+        static bool levelDone = false;
+        if (testLevel && *testLevel && !levelDone) {
+            if (!projectUpAt) projectUpAt = frameNo_;
+            else if (frameNo_ >= projectUpAt + 300) { levelDone = true; requestOpenLevel(testLevel, "test hook"); }
+        }
+    }
+#endif
     // Before anything draws; reaps finished workers and may start one.
     revisionControlTick();
 
