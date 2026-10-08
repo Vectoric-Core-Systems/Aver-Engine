@@ -349,6 +349,16 @@ bool hiddenPrim(Stage& st, const Stack& sk, const std::string& path) {
     return false;
 }
 
+// "/p{set=sel}" for each variant selection authored on `path`: the specs a selected variant adds to the prim.
+std::vector<std::string> selectedVariants(Stage& st, const Stack& sk, const std::string& path) {
+    UsdCrateValue v;
+    std::vector<std::string> out;
+    if (!fieldOf(st, sk, path, "variantSelection", v)) return out;
+    for (usize k = 0; k + 1 < v.s.size(); k += 2)
+        if (!v.s[k + 1].empty()) out.push_back(path + "{" + v.s[k] + "=" + v.s[k + 1] + "}");
+    return out;
+}
+
 std::vector<std::string> relTargets(Stage& st, const Stack& sk, const std::string& prim, const std::string& rel) {
     UsdCrateValue v;
     return fieldOf(st, sk, prim + "." + rel, "targetPaths", v) ? v.s : std::vector<std::string>{};
@@ -681,12 +691,14 @@ void contents(Stage& st, const Loc& loc, const M4& toOut, std::vector<Piece>& ou
             Loc t;
             if (resolveRef(st, loc, from, ref, t)) contents(st, t, toOut, out, depth + 1);
         }
+    const std::vector<std::string> variants = selectedVariants(st, sk, loc.path);
+    for (const std::string& vp : variants) contents(st, Loc{loc.stack, -1, vp}, toOut, out, depth + 1);
     for (const i32 li : sk.layers) {
         const UsdCrate& cr = *st.sources[static_cast<usize>(li)]->cr;
         const i32 spec = cr.specIndex(loc.path);
         if (spec < 0) continue;
         if (cr.hasField(spec, "specializes")) st.note("specializes arcs were not composed");
-        if (cr.hasField(spec, "variantSetNames")) st.c.sawVariant = true;
+        if (cr.hasField(spec, "variantSetNames") && variants.empty()) st.c.sawVariant = true;
     }
 
     for (const std::string& name : childrenOf(st, sk, loc.path)) {
@@ -1079,6 +1091,8 @@ void nestedInstancers(Stage& st, const Loc& loc, const M4& toWorld, int depth) {
                 Loc t;
                 if (resolveRef(st, loc, from, ref, t)) nestedInstancers(st, t, toWorld, depth + 1);
             }
+    for (const std::string& vp : selectedVariants(st, sk, loc.path))
+        nestedInstancers(st, Loc{loc.stack, -1, vp}, toWorld, depth + 1);
     for (const std::string& name : childrenOf(st, sk, loc.path)) {
         const std::string cp = childPath(loc.path, name);
         if (specifierOf(st, sk, cp) == 2 || !isActive(st, sk, cp) || hiddenPrim(st, sk, cp)) continue;
@@ -1145,8 +1159,13 @@ void walkStatic(Stage& st, Stack& sk, const std::string& path, const M4& parent,
         if (type == "RectLight" || type == "SphereLight" || type == "DiskLight" || type == "CylinderLight")
             st.note("UsdLux area lights are not imported (a DistantLight or a DomeLight's sun becomes the level's sun)");
         // A prim that brings geometry in through an arc is placed like a one-off instance of it.
-        const bool arcs = fieldOf(st, sk, cp, "references", v) || fieldOf(st, sk, cp, "inheritPaths", v) ||
-                          fieldOf(st, sk, cp, "payload", v);
+        const auto hasArcs = [&](const std::string& p) {
+            return fieldOf(st, sk, p, "references", v) || fieldOf(st, sk, p, "inheritPaths", v) ||
+                   fieldOf(st, sk, p, "payload", v);
+        };
+        const std::vector<std::string> variants = selectedVariants(st, sk, cp);
+        bool arcs = hasArcs(cp);
+        for (const std::string& vp : variants) arcs = arcs || hasArcs(vp);
         if (arcs) {
             const i32 proto = buildProto(st, loc);
             if (proto >= 0) {
@@ -1165,6 +1184,7 @@ void walkStatic(Stage& st, Stack& sk, const std::string& path, const M4& parent,
             buildStatic(st, rm, world, sk.prefix, groupOf(st, sk, cp));
         }
         walkStatic(st, sk, cp, world, depth + 1);
+        for (const std::string& vp : variants) walkStatic(st, sk, vp, world, depth + 1);
     }
 }
 

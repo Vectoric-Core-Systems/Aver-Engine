@@ -761,6 +761,18 @@ bool UsdCrate::decode(u64 rep, UsdCrateValue& v, std::string* why) const {
             v.refs.push_back(std::move(ref));
             return true;
         }
+        case VariantSelectionMap: {   // map<string, string>: count, then (key, value) string indices
+            const u64 n = r.get<u64>();
+            if (!r.ok || n > r.n / 8) return fail(why, "USDC: bad variant selection map");
+            for (u64 k = 0; k < n; ++k) {
+                std::string key, val;
+                if (!stringAt(r.get<u32>(), key) || !stringAt(r.get<u32>(), val) || !r.ok)
+                    return fail(why, "USDC: bad variant selection map");
+                v.s.push_back(std::move(key));
+                v.s.push_back(std::move(val));
+            }
+            return true;
+        }
         case TimeSamples:
             return fail(why, "USDC: time-sampled value (not decoded; use the attribute's default)");
         case Dictionary:
