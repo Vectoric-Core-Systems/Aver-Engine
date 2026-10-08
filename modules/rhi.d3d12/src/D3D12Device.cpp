@@ -16,6 +16,7 @@
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
 #include <dxcapi.h>
+#include <cwchar>
 #include <chrono>
 #include <fstream>
 #include <filesystem>
@@ -5673,6 +5674,12 @@ void D3D12Device::endFrame() {
                 // Stale handle: capture can outlive its mesh within the same frame.
                 if (bd.mesh == 0 || bd.mesh > meshes_.size() || !meshes_[bd.mesh - 1].alive) continue;
                 ++blendDrawsDone;
+                if (dredEnabled()) {   // names the draw in a DRED dump
+                    wchar_t mark[80];
+                    const int n = std::swprintf(mark, 80, L"blended draw %u: mesh %u, %u triangles", blendDrawsDone,
+                                                bd.mesh, meshes_[bd.mesh - 1].indexCount / 3);
+                    if (n > 0) cmdList_->SetMarker(0, mark, static_cast<UINT>((n + 1) * sizeof(wchar_t)));
+                }
 
                 // Only draws that sample backdrop need it captured.
                 if (owner->blendedDrawReadsBackdrop(bd.binding.constants, bd.binding.bytes)) {
@@ -9559,7 +9566,13 @@ void D3D12RenderContext::uavBarrierBuffer(BufferHandle h) {
 void D3D12RenderContext::pushMarker(const char* label) {
     if (!label || !dev_->cmdList_) return;
     if (dev_->auditOn_) dev_->auditPush(label);
-    dev_->cmdList_->BeginEvent(1, label, static_cast<UINT>(std::strlen(label) + 1));
+    // Wide (metadata 0), not ANSI: DRED's breadcrumb context records only wide event strings, which is what
+    // names the pass a hang sits in. Labels are short ASCII literals.
+    wchar_t wide[96];
+    u32 n = 0;
+    for (; label[n] && n + 1 < 96; ++n) wide[n] = static_cast<wchar_t>(static_cast<unsigned char>(label[n]));
+    wide[n] = 0;
+    dev_->cmdList_->BeginEvent(0, wide, static_cast<UINT>((n + 1) * sizeof(wchar_t)));
     // Label is always a string literal (safe to store pointer, allocation-free); parent tracks nesting.
     if (dev_->tsSlice_[dev_->frameIndex_].size() >= D3D12Device::kMaxGpuSpans) {
         ++dev_->tsDropped_;   // see tsDropped_: popMarker consumes this instead of popping
