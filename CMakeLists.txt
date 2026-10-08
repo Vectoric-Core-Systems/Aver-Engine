@@ -229,6 +229,10 @@ option(AVER_MODULE_RENDER_SOFTBODY "Draw meshes whose vertices come from a simul
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
+  # Release ships a PDB next to each binary so crash reports and minidumps resolve to functions. /Zi adds
+  # debug info without changing codegen; /OPT:REF /OPT:ICF restate what /DEBUG would otherwise turn off.
+  add_compile_options($<$<CONFIG:Release>:/Zi>)
+  add_link_options($<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
   add_compile_definitions(
     AVER_PLATFORM_WINDOWS=1
     NOMINMAX WIN32_LEAN_AND_MEAN

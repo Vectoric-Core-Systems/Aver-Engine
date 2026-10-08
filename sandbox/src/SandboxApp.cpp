@@ -2523,6 +2523,7 @@ editor::shutdownAnimEditors();
     e.device()->setUpscaler(nullptr);
     averSrUpscaler_.reset();
     taaUpscaler_.reset();
+    neuraa_.reset();   // holds the device's factory: must go while the device lives (it crashed in ~SandboxApp)
 #endif
     // Same order: clear device pointer before destroying the object.
     e.device()->setFrameInterpolation(false);
