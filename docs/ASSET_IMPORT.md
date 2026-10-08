@@ -265,6 +265,12 @@ UVs and a transform.
   a mosaic of triangles; any mesh without the contradiction keeps its authored normals.
 - **`meshGroups`** names the folder of each mesh's source layer; `AverAssetC` writes a multi-folder
   stage into matching subfolders instead of one flat directory.
+- **Purpose and visibility**: prims with `purpose` guide or proxy, or `visibility = invisible`, are skipped
+  with their subtrees (collision, occlusion and lighting volumes in game data such as Activision's Caldera).
+- **`--material-map <file>`**: a stage with no materials but named `familyName = materialBind` subsets
+  (Caldera) keeps each subset as its own submesh; each line `<substring> <material stem>` assigns the
+  first matching stem to subsets whose name contains it (`*` matches all, stem `-` drops the faces), and
+  the mesh is regrouped to one submesh per material (`groupSubmeshesByMaterial`) before clustering.
 
 `AverAssetC convert <root.usda> --out-dir … --content-dir …` takes `--instances-as foliage|entities`
 (`foliage`), `--max-instances` (4000000 in `foliage` mode, 12000 in `entities` mode), `--max-instance-tris`
