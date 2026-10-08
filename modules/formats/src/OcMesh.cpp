@@ -209,6 +209,38 @@ usize coalesceAdjacentSubmeshes(OcMeshData& m) {
     return m.submeshes.size();
 }
 
+usize groupSubmeshesByMaterial(OcMeshData& m) {
+    if (!m.meshlets.empty() || !m.coarserLods.empty()) return m.submeshes.size();
+    std::vector<std::string> slots;
+    std::vector<std::vector<u32>> tris;
+    for (const OcMeshSubmesh& s : m.submeshes) {
+        const std::string& name = s.materialSlot < m.materialSlots.size() ? m.materialSlots[s.materialSlot] : std::string();
+        usize k = std::find(slots.begin(), slots.end(), name) - slots.begin();
+        if (k == slots.size()) { slots.push_back(name); tris.emplace_back(); }
+        const usize end = std::min<usize>(usize(s.indexStart) + s.indexCount, m.indices.size());
+        tris[k].insert(tris[k].end(), m.indices.begin() + std::min<usize>(s.indexStart, end), m.indices.begin() + end);
+    }
+    std::vector<u32> indices;
+    std::vector<OcMeshSubmesh> subs;
+    for (usize k = 0; k < slots.size(); ++k) {
+        if (tris[k].empty()) continue;
+        OcMeshSubmesh sm;
+        sm.name = slots[k].empty() ? std::string("default") : slots[k];
+        sm.materialSlot = static_cast<u32>(subs.size());
+        sm.indexStart = static_cast<u32>(indices.size());
+        sm.indexCount = static_cast<u32>(tris[k].size());
+        sm.vertexCount = m.vertexCount();
+        indices.insert(indices.end(), tris[k].begin(), tris[k].end());
+        subs.push_back(std::move(sm));
+    }
+    std::vector<std::string> kept;
+    for (const OcMeshSubmesh& sm : subs) kept.push_back(sm.name == "default" ? std::string() : sm.name);
+    m.indices = std::move(indices);
+    m.submeshes = std::move(subs);
+    m.materialSlots = std::move(kept);
+    return m.submeshes.size();
+}
+
 bool submeshesPartitionIndices(const OcMeshData& m, std::string* why) {
     // Walked in indexStart order through a sorted list of positions into the table, so a table
     // listed out of order still passes: coverage is the rule, not ordering.

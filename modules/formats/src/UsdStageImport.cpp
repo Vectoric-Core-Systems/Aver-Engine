@@ -473,10 +473,11 @@ void gatherMesh(Stage& st, const Stack& sk, const std::string& path, RawMesh& ou
         if (tokenOf(st, sk, sp, "typeName") != "GeomSubset") continue;
         if (tokenOf(st, sk, sp + ".elementType", "default") != "face") continue;
         const std::vector<std::string> sb = relTargets(st, sk, sp, "material:binding");
-        if (sb.empty()) continue;
+        // An unbound materialBind subset still names its material (Caldera); kept so a material map can use it.
+        if (sb.empty() && tokenOf(st, sk, sp + ".familyName", "default") != "materialBind") continue;
         GeomSubsetDef g;
         g.name = name;
-        g.binding = sb[0];
+        if (!sb.empty()) g.binding = sb[0];
         if (attr(st, sk, sp, "indices", v)) g.faces = v.asInts();
         if (!g.faces.empty()) out.subsets.push_back(std::move(g));
     }

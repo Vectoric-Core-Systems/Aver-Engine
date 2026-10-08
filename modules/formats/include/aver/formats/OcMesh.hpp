@@ -300,6 +300,10 @@ bool submeshesPartitionIndices(const OcMeshData& m, std::string* why = nullptr);
 // limit (a USD prefab of hundreds of unmaterialled parts). Returns the submesh count after.
 usize coalesceAdjacentSubmeshes(OcMeshData& m);
 
+// One submesh per distinct material, triangles reordered to make each contiguous; submeshes not listed in
+// `m.submeshes` are dropped. Only before clustering: a mesh with meshlets or LODs is left alone.
+usize groupSubmeshesByMaterial(OcMeshData& m);
+
 // Reads and writes .ocmesh on disk. `why` is set on failure and untouched on success.
 bool loadOcMesh(const std::string& path, OcMeshData& out, std::string* why = nullptr);
 bool saveOcMesh(const std::string& path, const OcMeshData& in, std::string* why = nullptr);

@@ -81,6 +81,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -700,6 +702,56 @@ void applyLodAndClustering(fmt::OcMeshData& m, f32 lodRatio, const std::string& 
 }
 #endif
 
+// ---- --material-map: unbound USD subsets to materials by name ----
+
+struct MaterialRule { std::string pattern, stem; };   // pattern "*" matches anything; stem "-" drops the faces
+
+bool loadMaterialMap(const std::string& path, std::vector<MaterialRule>& rules) {
+    std::ifstream f(path);
+    if (!f) return false;
+    std::string line;
+    while (std::getline(f, line)) {
+        std::istringstream ls(line);
+        MaterialRule r;
+        if (!(ls >> r.pattern) || r.pattern[0] == '#' || !(ls >> r.stem)) continue;
+        for (char& ch : r.pattern) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        rules.push_back(std::move(r));
+    }
+    return true;
+}
+
+// Empty slots take the first rule whose pattern is in their submesh's leaf name (a GeomSubset's name), then
+// each touched mesh is regrouped to one submesh per material.
+void applyMaterialMap(std::vector<fmt::OcMeshData>& meshes, const std::vector<MaterialRule>& rules) {
+    usize mapped = 0, dropped = 0, unmatched = 0;
+    for (fmt::OcMeshData& m : meshes) {
+        bool touched = false;
+        std::vector<fmt::OcMeshSubmesh> keep;
+        for (fmt::OcMeshSubmesh& sm : m.submeshes) {
+            if (sm.materialSlot >= m.materialSlots.size() || !m.materialSlots[sm.materialSlot].empty()) {
+                keep.push_back(sm);
+                continue;
+            }
+            std::string leaf = sm.name.substr(sm.name.find_last_of('/') + 1);
+            for (char& ch : leaf) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            const MaterialRule* hit = nullptr;
+            for (const MaterialRule& r : rules)
+                if (r.pattern == "*" || leaf.find(r.pattern) != std::string::npos) { hit = &r; break; }
+            if (!hit) { ++unmatched; keep.push_back(sm); continue; }
+            touched = true;
+            if (hit->stem == "-") { ++dropped; continue; }
+            // Each subset has its own slot (buildMesh), so writing it in place touches no other submesh.
+            m.materialSlots[sm.materialSlot] = hit->stem;
+            ++mapped;
+            keep.push_back(sm);
+        }
+        if (!touched && m.submeshes.size() <= 255) continue;
+        m.submeshes = std::move(keep);
+        fmt::groupSubmeshesByMaterial(m);
+    }
+    AVER_INFO("--material-map: {} submesh(es) mapped, {} dropped, {} matched no rule", mapped, dropped, unmatched);
+}
+
 // ---- writing and verifying one mesh, ported from ConvertTool.cpp unchanged ----
 
 // Writes one .ocmesh, reloads it, and confirms the skin (the one stream that used to be dropped
@@ -1162,6 +1214,8 @@ int main(int argc, char** argv) {
         "\n                                                              defaults depend on --instances-as (see docs/ASSET_IMPORT.md)"
         "\n                          [--focus camera|none|<x>,<y>] [--focus-radius <cm>] [--keep-all-below <n>]"
         "\n                          [--exclude <prim path>[,<prim path>...]]   USD prims to leave out"
+        "\n                          [--material-map <file>]   USD: '<name substring> <material stem|->' per line,"
+        "\n                                                              for subsets with no bound material"
 #if AVER_HAVE_MATERIAL_COMPILE
         "\n                          [--content-dir <dir>]   write materials and textures too"
         "\n                          [--max-texture <n>]     downscale imported textures to n px"
@@ -1210,6 +1264,7 @@ int main(int argc, char** argv) {
     f32 focusRadius = 10000.0f;
     u64 keepAllBelow = 2000;
     std::vector<std::string> excludePrims;   // --exclude, repeatable and/or comma-separated
+    std::string materialMapPath;              // --material-map
     bool merge = false;
     bool haveInput = false;
     f32 lodRatio = 0.0f;
@@ -1259,6 +1314,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--focus-radius" && i + 1 < argc) focusRadius = static_cast<f32>(std::atof(argv[++i]));
         else if (a == "--keep-all-below" && i + 1 < argc) keepAllBelow = std::strtoull(argv[++i], nullptr, 10);
+        else if (a == "--material-map" && i + 1 < argc) materialMapPath = argv[++i];
         else if (a == "--exclude" && i + 1 < argc) {
             const std::string list = argv[++i];
             usize start = 0;
@@ -1526,6 +1582,15 @@ int main(int argc, char** argv) {
         // mesh whose slot stayed empty -- no binding, or one behind a reference this importer does
         // not compose -- is untouched, and the import said so under `unsupported`.
         cookAndRewriteSlots(res.materials, res.images, contentDir, base, res.meshes, maxTexture);
+        if (!materialMapPath.empty()) {
+            std::vector<MaterialRule> rules;
+            if (!loadMaterialMap(materialMapPath, rules)) {
+                emitArtifact(input, {}, "mesh", false, false, "cannot read --material-map " + materialMapPath, stats);
+                emitSummary(input, stats, 1);
+                return exitCode(ExitCode::Failed);
+            }
+            applyMaterialMap(res.meshes, rules);
+        }
 
         // A stage spread over several folders is written the same way, one subfolder per source
         // folder; a single-folder stage stays flat.
