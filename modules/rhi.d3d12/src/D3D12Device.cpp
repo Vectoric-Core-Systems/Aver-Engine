@@ -1540,6 +1540,7 @@ private:
     };
     // Filled by drawMesh(), drained (sorted back-to-front) by endFrame(), cleared at next beginFrame.
     std::vector<BlendedDraw> blendedDraws_;
+    std::string blendDredListLogged_;   // --dred: last blended order logged
     // Missing blended pipeline warning (per-frame, unlike drawBindingIgnored_).
     bool blendedPipelineMissingWarned_ = false;
 
@@ -5636,6 +5637,7 @@ void D3D12Device::endFrame() {
         bool blendBackdropCaptured = false;
         u32 blendBackdropCaptures = 0;
         u32 blendDrawsDone = 0;
+        std::string blendDredList;   // --dred: the draw order, logged when it changes
         bool blendCapReached = false;
 
         beginGpuSpan("blended replay");
@@ -5674,11 +5676,13 @@ void D3D12Device::endFrame() {
                 // Stale handle: capture can outlive its mesh within the same frame.
                 if (bd.mesh == 0 || bd.mesh > meshes_.size() || !meshes_[bd.mesh - 1].alive) continue;
                 ++blendDrawsDone;
-                if (dredEnabled()) {   // names the draw in a DRED dump
+                if (dredEnabled()) {   // a DRED dump counts these markers; the log below says which draw each is
                     wchar_t mark[80];
                     const int n = std::swprintf(mark, 80, L"blended draw %u: mesh %u, %u triangles", blendDrawsDone,
                                                 bd.mesh, meshes_[bd.mesh - 1].indexCount / 3);
                     if (n > 0) cmdList_->SetMarker(0, mark, static_cast<UINT>((n + 1) * sizeof(wchar_t)));
+                    blendDredList += " " + std::to_string(blendDrawsDone) + ":mesh" + std::to_string(bd.mesh) + "/" +
+                                     std::to_string(meshes_[bd.mesh - 1].indexCount / 3) + "tris";
                 }
 
                 // Only draws that sample backdrop need it captured.
@@ -5738,6 +5742,11 @@ void D3D12Device::endFrame() {
             dbValid_ = false;
         }
 
+        if (!blendDredList.empty() && blendDredList != blendDredListLogged_) {
+            AVER_INFO("[RHI.D3D12][DRED] blended replay order (n:mesh/triangles; a hang at the k-th blended DispatchMesh is draw k):{}",
+                      blendDredList);
+            blendDredListLogged_ = blendDredList;
+        }
         // Logged on CHANGE, not every frame.
         if (blendDrawsDone != blendStatDrawsLogged_ || blendLayerResolves != blendStatResolvesLogged_ ||
             blendBackdropCaptures != blendStatCapturesLogged_) {
