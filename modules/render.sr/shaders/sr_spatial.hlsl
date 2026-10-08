@@ -8,7 +8,7 @@
 // mapped source position. Sharper than a bilinear stretch without reading anything but the source
 // texture: no depth, no motion vectors, no jitter, no history -- see SpatialUpscaler::needs().
 
-cbuffer AverSrSpatialCB : register(b1) {
+cbuffer AverSrSpatialCB : register(b3) {
     float4 gUpscaleSrc;   // xy source size in texels, zw its reciprocal
 };
 

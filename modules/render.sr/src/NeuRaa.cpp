@@ -22,7 +22,7 @@ struct NeuRaaCB {   // cbuffer AverNeuRaaCB in sr_neuraa.hlsl
 };
 static_assert(sizeof(NeuRaaCB) == 48, "mirrors the HLSL cbuffer");
 
-constexpr u32 kConstantRegister = 1;   // b1, as every AverSR pass
+constexpr u32 kConstantRegister = 3;   // b3, as every AverSR pass: Vulkan makes b1 push constants, never a CBV
 
 // Pass 0: t0 viewZ, t1 normal, t2 colour; u0 visibility, u1 edges, u2 debug, u3 tiles, u4 distances.
 constexpr u32 kDetectSrv = 3, kDetectUav = 5;

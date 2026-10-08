@@ -12,7 +12,7 @@
 #define AVER_NEURAA_PASS 0
 #endif
 
-cbuffer AverNeuRaaCB : register(b1) {
+cbuffer AverNeuRaaCB : register(b3) {
     uint4 gVp;     // scene viewport x, y, w, h: the pixels the visibility buffer holds this frame
     uint4 gInfo;   // visibility row pitch, debug view flag, tiles per row, unused
     uint4 gOrg;    // resolve: the first pixel its dispatch covers (x, y), a multiple of 8

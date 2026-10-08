@@ -14,12 +14,9 @@ struct SpatialUpscalerCB {
     f32 srcSize[4];   // xy source size in texels, zw its reciprocal
 };
 
-// Root CBV register the pass's constants land at. Not rhi::kFeatureFrameConstantRegister (b4) or
-// rhi::kObjectConstantRegister (b1)'s shared-prelude meaning: this shader never includes the shared
-// prelude (see spatialUpscaleShaderSource()'s own comment), so those conventions do not apply to
-// it -- b0 stays reserved for the engine's per-frame block same as every pipeline, and b1 here is
-// this pass's own, unrelated to what b1 means to a pipeline that DOES compile against the prelude.
-constexpr u32 kUpscaleConstantRegister = 1;
+// Root CBV register for the pass constants: b3, not b1. The Vulkan backend always makes b1 push constants and
+// never a CBV, so a b1 cbuffer read zeros there (render.neural chose b3 for the same reason).
+constexpr u32 kUpscaleConstantRegister = 3;   // b3: Vulkan makes b1 push constants, never a CBV
 
 SpatialUpscaler::~SpatialUpscaler() {
     if (pipeline_) res_.destroyPipeline(pipeline_);

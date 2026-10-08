@@ -20,7 +20,7 @@ struct RcasCB {  // cbuffer AverSrFsrCB in sr_fsr1.hlsl; RCAS reads only con0.x
 };
 static_assert(sizeof(TaaCB) == 48 && sizeof(RcasCB) == 80, "mirrors the HLSL cbuffers");
 
-constexpr u32 kConstantRegister = 1;   // b1, as every AverSR pass
+constexpr u32 kConstantRegister = 3;   // b3, as every AverSR pass: Vulkan makes b1 push constants, never a CBV
 
 u32 bitsOf(f32 v) { u32 u; std::memcpy(&u, &v, sizeof u); return u; }
 

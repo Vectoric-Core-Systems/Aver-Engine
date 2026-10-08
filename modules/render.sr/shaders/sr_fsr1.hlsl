@@ -11,7 +11,7 @@
 #define A_HLSL 1
 #include "FidelityFX/ffx_a.h"
 
-cbuffer AverSrFsrCB : register(b1) {
+cbuffer AverSrFsrCB : register(b3) {
     uint4  gCon0;      // EASU constants (FsrEasuCon); gCon0.x is RCAS's for the RCAS pass
     uint4  gCon1;
     uint4  gCon2;

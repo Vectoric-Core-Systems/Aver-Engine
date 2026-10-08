@@ -4,7 +4,7 @@
 // Works in the squashed space c / (1 + max(c)) (see sr_fsr1.hlsl) so bright pixels cannot dominate;
 // the history is stored squashed and FSR's RCAS pass un-squashes after sharpening.
 
-cbuffer AverSrTaaCB : register(b1) {
+cbuffer AverSrTaaCB : register(b3) {
     float4 gTaaSrc;   // xy scene size, zw reciprocal
     float4 gTaaDst;   // xy output size, zw reciprocal
     float4 gTaaJit;   // xy this frame's jitter in scene pixels (+y down), z 1 = no usable history, w 1 = velocity bound

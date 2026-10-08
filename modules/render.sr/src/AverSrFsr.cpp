@@ -19,7 +19,7 @@ struct FsrCB {
 };
 static_assert(sizeof(FsrCB) == 80, "AverSrFsrCB is five 16-byte rows");
 
-constexpr u32 kFsrConstantRegister = 1;   // b1, as every AverSR pass (see AverSrSpatial.cpp)
+constexpr u32 kFsrConstantRegister = 3;   // b3, as every AverSR pass: Vulkan makes b1 push constants, never a CBV
 
 u32 bitsOf(f32 v) { u32 u; std::memcpy(&u, &v, sizeof u); return u; }
 
