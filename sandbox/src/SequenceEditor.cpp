@@ -544,6 +544,7 @@ void SequenceEditor::keyCamera() {
 void SequenceEditor::keySelectedTrack() { addKeyAtPlayhead(); }
 
 void SequenceEditor::addKeyAtPlayhead() {
+    clampSelection();   // keySel_ must match the keys before one is inserted into it
     if (selTrack_ < 0 || static_cast<usize>(selTrack_) >= model_.tracks.size()) {
         status_ = "Select a track to key";
         return;
@@ -638,7 +639,7 @@ int SequenceEditor::moveKey(OcSeqTrack& tr, int index, f64 t) {
 // Shifts every selected key to its press-time position + delta. Pure in the press snapshot, so a
 // drag that wanders back lands exactly where it started.
 void SequenceEditor::applyDrag(OcSeqTrack& tr, f64 delta) {
-    f64 lo = 0, hi = model_.length;   // the group stays inside [0, length]
+    f64 lo = -model_.length, hi = model_.length;   // the group stays inside [0, length]
     for (const DragItem& it : dragOrig_)
         if (it.selected) { lo = std::fmax(lo, -it.key.t); hi = std::fmin(hi, model_.length - it.key.t); }
     delta = std::clamp(delta, lo, std::fmax(lo, hi));
@@ -825,6 +826,7 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
     ImGui::SetNextWindowPos(ImVec2(host.vpX + 8.0f, host.vpY + host.vpH - winH - 8.0f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(std::fmax(360.0f * ui, host.vpW - 16.0f), winH), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Sequencer", nullptr, ImGuiWindowFlags_NoCollapse)) {
+        dragKey_ = dragRuler_ = false;   // a hidden window sees no mouse-up; a stuck scrub would pin the pilot view
         ImGui::End();
         host_ = nullptr;
         return;

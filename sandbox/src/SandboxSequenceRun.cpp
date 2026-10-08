@@ -76,9 +76,16 @@ void SandboxApp::sequenceRunStep(Engine& e) {
             if (r.waited > kGiveUpFrames) fail("the level was not ready after 6000 frames");
             return;
         }
+        // Frame 0's pose is held through the warmup, so the temporal histories settle on the first view
+        // instead of meeting a camera jump at frame 0. A level reload during the wait drops the run
+        // state (running() false), which starts it over.
+        if (!seqEditor_.running()) {
+            setEditorMode(EditorMode::Animate);
+            if (mode_ != EditorMode::Animate) { fail("could not enter Animate mode"); return; }
+            seqEditor_.beginRun();
+            seqEditor_.runFrame(0);
+        }
         if (++r.readyFrames < static_cast<u32>(r.args.warmup)) return;
-        setEditorMode(EditorMode::Animate);
-        seqEditor_.beginRun();
         r.frames = seqEditor_.runFrameCount();
         r.frame = 0;
         r.frameSet = false;

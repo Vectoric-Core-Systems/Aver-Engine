@@ -1,7 +1,7 @@
 """A/B a level's camera path: the same fixed-step fly-through, rendered once per setting, compared frame by frame.
 
     python scripts/seq-ab.py <level.ocworld> --out <dir> --denoiser 0 1 2
-    python scripts/seq-ab.py <level.ocworld> --out <dir> --run "ffx=--denoiser 1" --run "nrd2=--denoiser 2 --denoiser-strength 2"
+    python scripts/seq-ab.py <level.ocworld> --out <dir> --run "ffx=--denoiser 1" --run "nrd2=--denoiser 2 --render-scale 0.5"
     python scripts/seq-ab.py --out <dir> --compare-only            # re-run only the comparison on <dir>
 
 The level must carry a camera path (Animate mode: fly the camera, press K at each stop, save the level).
@@ -78,8 +78,8 @@ def run_one(a, name, args):
         r = subprocess.run(cmd, capture_output=True, text=True, cwd=os.path.dirname(exe), timeout=a.timeout)
         log, code = r.stdout + "\n---stderr---\n" + r.stderr, r.returncode
     except subprocess.TimeoutExpired as e:
-        out = e.stdout or ""   # bytes on timeout even with text=True
-        log = out.decode(errors="replace") if isinstance(out, bytes) else out
+        partial = e.stdout or ""   # bytes on timeout even with text=True
+        log = partial.decode(errors="replace") if isinstance(partial, bytes) else partial
         code = None
     open(os.path.join(out, "run.log"), "w", encoding="utf-8").write(log)
     n = len(glob.glob(os.path.join(out, FRAME_GLOB)))
