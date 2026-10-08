@@ -111,6 +111,13 @@ struct Piece {
     std::string group;           // UsdImportResult::meshGroups
 };
 
+// A prim inside a prototype that brings its own geometry in through an arc, with the matrix from its space to
+// the prototype's (contents() stops there when asked, so a repeated asset becomes one shared mesh).
+struct NestedArc {
+    Loc loc;
+    M4 toProto;
+};
+
 struct Proto {
     i32 meshIndex = -1;
     u64 tris = 0;
@@ -158,6 +165,7 @@ struct Stage {
     std::unordered_map<std::string, i32> protoByKey;        // piece signature -> proto
     std::unordered_map<std::string, i32> protoByTarget;     // stack prefix + target path -> proto
     std::vector<Instancer> instancers;
+    std::vector<usize> nestedPlacements;                    // indices into out->placements placed by placeArc
     std::unordered_set<std::string> notes;                  // unsupported lines, deduplicated
     std::string rootError;
     // The first DistantLight and the first DomeLight that yielded a sun; a DistantLight wins.
@@ -662,9 +670,21 @@ M4 composedLocal(Stage& st, const Loc& loc) {
     return m;
 }
 
+bool hasArcs(Stage& st, const Stack& sk, const std::string& path) {
+    UsdCrateValue v;
+    const auto own = [&](const std::string& p) {
+        return fieldOf(st, sk, p, "references", v) || fieldOf(st, sk, p, "inheritPaths", v) ||
+               fieldOf(st, sk, p, "payload", v);
+    };
+    if (own(path)) return true;
+    for (const std::string& vp : selectedVariants(st, sk, path)) if (own(vp)) return true;
+    return false;
+}
+
 // Everything geometric INSIDE a prim -- its descendants and whatever its arcs bring -- expressed in
 // the prim's own space and carried by `toOut`. The prim's own transform is the caller's to apply.
-void contents(Stage& st, const Loc& loc, const M4& toOut, std::vector<Piece>& out, int depth) {
+void contents(Stage& st, const Loc& loc, const M4& toOut, std::vector<Piece>& out, int depth,
+              std::vector<NestedArc>* nested = nullptr) {
     if (depth > 64) { st.note("composition nested deeper than 64 levels; the rest was not followed"); return; }
     if (loc.text >= 0) {
         const Source& s = *st.sources[static_cast<usize>(loc.text)];
@@ -682,20 +702,20 @@ void contents(Stage& st, const Loc& loc, const M4& toOut, std::vector<Piece>& ou
 
     UsdCrateValue v;
     if (fieldOf(st, sk, loc.path, "inheritPaths", v))
-        for (const std::string& cls : v.s) contents(st, Loc{loc.stack, -1, cls}, toOut, out, depth + 1);
+        for (const std::string& cls : v.s) contents(st, Loc{loc.stack, -1, cls}, toOut, out, depth + 1, nested);
     i32 from = -1;
     if (fieldOf(st, sk, loc.path, "references", v, &from))
         for (const UsdCrateRef& ref : v.refs) {
             Loc t;
-            if (resolveRef(st, loc, from, ref, t)) contents(st, t, toOut, out, depth + 1);
+            if (resolveRef(st, loc, from, ref, t)) contents(st, t, toOut, out, depth + 1, nested);
         }
     if (fieldOf(st, sk, loc.path, "payload", v, &from))
         for (const UsdCrateRef& ref : v.refs) {
             Loc t;
-            if (resolveRef(st, loc, from, ref, t)) contents(st, t, toOut, out, depth + 1);
+            if (resolveRef(st, loc, from, ref, t)) contents(st, t, toOut, out, depth + 1, nested);
         }
     const std::vector<std::string> variants = selectedVariants(st, sk, loc.path);
-    for (const std::string& vp : variants) contents(st, Loc{loc.stack, -1, vp}, toOut, out, depth + 1);
+    for (const std::string& vp : variants) contents(st, Loc{loc.stack, -1, vp}, toOut, out, depth + 1, nested);
     for (const i32 li : sk.layers) {
         const UsdCrate& cr = *st.sources[static_cast<usize>(li)]->cr;
         const i32 spec = cr.specIndex(loc.path);
@@ -711,7 +731,8 @@ void contents(Stage& st, const Loc& loc, const M4& toOut, std::vector<Piece>& ou
         if (type == "Material" || type == "Shader" || type == "GeomSubset") continue;
         if (type == "PointInstancer") { st.note("a PointInstancer nested inside a prototype was not expanded"); continue; }
         const Loc child{loc.stack, -1, cp};
-        contents(st, child, mul(composedLocal(st, child), toOut), out, depth + 1);
+        if (nested && hasArcs(st, sk, cp)) { nested->push_back(NestedArc{child, mul(composedLocal(st, child), toOut)}); continue; }
+        contents(st, child, mul(composedLocal(st, child), toOut), out, depth + 1, nested);
     }
 }
 
@@ -742,10 +763,12 @@ void appendMesh(OcMeshData& dst, OcMeshData&& src) {
 
 // Builds the prototype at `loc` as ONE mesh, in the prototype prim's PARENT space (its own transform
 // baked in), or returns the one already built from identical pieces. -1 when it has no geometry.
-i32 buildProto(Stage& st, const Loc& loc) {
-    const M4 local = composedLocal(st, loc);
+// `nested` non-null: built in the prim's OWN space (so every copy of an asset shares the mesh), stopping at
+// nested arcs and returning them instead.
+i32 buildProto(Stage& st, const Loc& loc, std::vector<NestedArc>* nested = nullptr) {
+    const M4 local = nested ? M4::identity() : composedLocal(st, loc);
     std::vector<Piece> pieces;
-    contents(st, loc, local, pieces, 0);
+    contents(st, loc, local, pieces, 0, nested);
     if (pieces.empty()) return -1;
 
     // Identity is the geometry it would build: the same meshes under the same matrices. Two
@@ -1128,6 +1151,28 @@ void buildStatic(Stage& st, const RawMesh& rm, const M4& world, const std::strin
     c.out->placements.push_back(std::move(pl));
 }
 
+// An arc's own geometry as one shared mesh at `world`, then each arc nested inside it the same way.
+void placeArc(Stage& st, const Loc& loc, const M4& world, const std::string& name, int depth) {
+    std::vector<NestedArc> nested;
+    const i32 proto = buildProto(st, loc, &nested);
+    if (proto >= 0) {
+        UsdPlacement pl = placementFor(st.c, st.protos[static_cast<usize>(proto)].meshIndex, world);
+        pl.name = name;
+        if (depth > 0) st.nestedPlacements.push_back(st.c.out->placements.size());
+        st.c.out->placements.push_back(std::move(pl));
+    }
+    if (depth >= 32) { if (!nested.empty()) st.note("arcs nested deeper than 32 levels were not placed"); return; }
+    for (const NestedArc& n : nested) placeArc(st, n.loc, mul(n.toProto, world), name, depth + 1);
+}
+
+// A nested asset placed many times is scatter (props, rocks, furniture): an empty name sends it to foliage.
+void demoteRepeatedPlacements(Stage& st, usize minCopies) {
+    std::unordered_map<i32, usize> copies;
+    for (const usize i : st.nestedPlacements) ++copies[st.c.out->placements[i].meshIndex];
+    for (const usize i : st.nestedPlacements)
+        if (copies[st.c.out->placements[i].meshIndex] >= minCopies) st.c.out->placements[i].name.clear();
+}
+
 void walkStatic(Stage& st, Stack& sk, const std::string& path, const M4& parent, int depth) {
     if (depth > 256) return;
     for (const std::string& name : childrenOf(st, sk, path)) {
@@ -1162,20 +1207,9 @@ void walkStatic(Stage& st, Stack& sk, const std::string& path, const M4& parent,
         if (type == "RectLight" || type == "SphereLight" || type == "DiskLight" || type == "CylinderLight")
             st.note("UsdLux area lights are not imported (a DistantLight or a DomeLight's sun becomes the level's sun)");
         // A prim that brings geometry in through an arc is placed like a one-off instance of it.
-        const auto hasArcs = [&](const std::string& p) {
-            return fieldOf(st, sk, p, "references", v) || fieldOf(st, sk, p, "inheritPaths", v) ||
-                   fieldOf(st, sk, p, "payload", v);
-        };
         const std::vector<std::string> variants = selectedVariants(st, sk, cp);
-        bool arcs = hasArcs(cp);
-        for (const std::string& vp : variants) arcs = arcs || hasArcs(vp);
-        if (arcs) {
-            const i32 proto = buildProto(st, loc);
-            if (proto >= 0) {
-                UsdPlacement pl = placementFor(st.c, st.protos[static_cast<usize>(proto)].meshIndex, parent);
-                pl.name = cp;
-                st.c.out->placements.push_back(std::move(pl));
-            }
+        if (hasArcs(st, sk, cp)) {
+            placeArc(st, loc, world, cp, 0);
             nestedInstancers(st, loc, world, 0);
             continue;
         }
@@ -1517,6 +1551,7 @@ bool importUsdStage(const std::string& path, UsdImportResult& out, const UsdImpo
         }
     }
     if (!rootStack.layers.empty()) walkStatic(st, rootStack, "/", M4::identity(), 0);
+    demoteRepeatedPlacements(st, 8);
     bool mixed = false;
     for (const i32 li : order) {
         const Source& s = *st.sources[static_cast<usize>(li)];
