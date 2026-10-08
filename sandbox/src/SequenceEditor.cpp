@@ -3,16 +3,20 @@
 
 #if AVER_MODULE_SCENE
 #include "aver/core/Log.hpp"
+#include "aver/game/GameCamera.hpp"
 #include "aver/game/PlayMobility.hpp"
+#include "aver/rhi/RHI.hpp"
 #include "aver/scene/World.hpp"
 
 #if AVER_WITH_IMGUI
+#include "EditorKeybinds.hpp"
 #include "imgui.h"
 #endif
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <iterator>
 
 namespace aver::editor {
@@ -28,6 +32,8 @@ constexpr f64 kSameKeySec = 1e-3;   // a key this close to the playhead is the s
 
 i32 targetOf(scene::Entity e) { return static_cast<i32>(static_cast<u32>(e)); }
 scene::Entity entityOfTarget(i32 t) { return static_cast<scene::Entity>(static_cast<u32>(t)); }
+
+u64 mix(u64 h, u64 v) { return (h ^ v) * 1099511628211ull; }
 
 #if AVER_WITH_IMGUI
 ImU32 kindColor(OcSeqTrackKind k) {
@@ -46,13 +52,18 @@ void SequenceEditor::reset() {
     model_.name = "Main";
     player_ = game::SequencePlayer{};
     bases_.clear();
+    undo_.clear();
     playRunning_ = false;
+    running_ = false;
     evalDirty_ = true;
     editTime_ = 0;
     selTrack_ = -1;
     selKey_ = -1;
-    dragKey_ = dragRuler_ = false;
+    keySel_.clear();
+    dragKey_ = dragRuler_ = dragStarted_ = false;
+    dragOrig_.clear();
     status_.clear();
+    ++editRev_;
     syncPlayer();
 }
 
@@ -135,7 +146,11 @@ void SequenceEditor::tick(const SequenceTickCtx& c) {
         return;
     }
     if (!active_ || c.playActive) return;
-    if (player_.playing()) { player_.advance(c.dt); evalDirty_ = true; }
+    if (running_) {   // the host sets the time per frame (runFrame); nothing advances here
+        if (evalDirty_) { captureMissingBases(); evaluateNow(); }
+        return;
+    }
+    if (player_.playing()) { player_.advance(fixedStep_ ? game::seqStepSeconds(model_) : c.dt); evalDirty_ = true; }
     if (evalDirty_) { captureMissingBases(); evaluateNow(); }
 }
 
@@ -163,6 +178,17 @@ void SequenceEditor::restoreBases() {
     }
     bases_.clear();
     evalDirty_ = true;
+}
+
+// An actor with no transform track left goes back to where it was authored.
+void SequenceEditor::releaseUndrivenBases() {
+    scene::World& w = scene::World::instance();
+    for (auto it = bases_.begin(); it != bases_.end();) {
+        const scene::Entity e = static_cast<scene::Entity>(it->first);
+        if (drivesTransform(e)) { ++it; continue; }
+        if (w.valid(e)) w.setLocalTransform(e, it->second);
+        it = bases_.erase(it);
+    }
 }
 
 // ---- Play --------------------------------------------------------------------------------------
@@ -199,12 +225,121 @@ bool SequenceEditor::drivesTransform(scene::Entity e) const {
 
 bool SequenceEditor::viewPose(bool playEjected, game::SeqCameraPose& out) const {
     if (playRunning_) return !playEjected && model_.camera && player_.camera(out);
-    if (active_ && pilot_ && !playActiveLast_) return player_.camera(out);
+    if (viewIsPilot()) return player_.camera(out);
     return false;
 }
 
 bool SequenceEditor::emissiveScale(scene::Entity e, f32 out[3]) const {
     return previewing() && player_.emissiveScale(e, out);
+}
+
+// ---- camera path overlay -----------------------------------------------------------------------
+
+bool SequenceEditor::pathLines(std::vector<rhi::LineVertex>& out) const {
+    out.clear();
+    const OcSeqTrack* cam = nullptr;
+    int camIndex = -1;
+    for (usize i = 0; i < model_.tracks.size(); ++i)
+        if (model_.tracks[i].kind == OcSeqTrackKind::Camera && !model_.tracks[i].keys.empty()) {
+            cam = &model_.tracks[i];
+            camIndex = static_cast<int>(i);
+            break;
+        }
+    if (!cam) return false;
+
+    const auto keyPos = [](const OcSeqKey& k) { return Vec3{(f32)k.v[0], (f32)k.v[1], (f32)k.v[2]}; };
+    Vec3 lo = keyPos(cam->keys.front()), hi = lo;
+    for (const OcSeqKey& k : cam->keys) {
+        const Vec3 p = keyPos(k);
+        lo = {std::fmin(lo.x, p.x), std::fmin(lo.y, p.y), std::fmin(lo.z, p.z)};
+        hi = {std::fmax(hi.x, p.x), std::fmax(hi.y, p.y), std::fmax(hi.z, p.z)};
+    }
+    const f32 size = std::clamp((hi - lo).size() * 0.012f, 8.0f, 60.0f);   // marker half-extent, cm
+
+    const auto line = [&](const Vec3& a, const Vec3& b, f32 r, f32 g, f32 bl) {
+        out.push_back({a.x, a.y, a.z, r, g, bl});
+        out.push_back({b.x, b.y, b.z, r, g, bl});
+    };
+    const auto cross = [&](const Vec3& c, f32 s, f32 r, f32 g, f32 bl) {
+        line(c - Vec3{s, 0, 0}, c + Vec3{s, 0, 0}, r, g, bl);
+        line(c - Vec3{0, s, 0}, c + Vec3{0, s, 0}, r, g, bl);
+        line(c - Vec3{0, 0, s}, c + Vec3{0, 0, s}, r, g, bl);
+    };
+
+    // The curve, as the sampler gives it.
+    constexpr int kPerSegment = 24;
+    game::SeqCameraPose prev, cur;
+    for (usize i = 0; i + 1 < cam->keys.size(); ++i) {
+        const f64 t0 = cam->keys[i].t, t1 = cam->keys[i + 1].t;
+        for (int j = 0; j <= kPerSegment; ++j) {
+            const f64 t = t0 + (t1 - t0) * (static_cast<f64>(j) / kPerSegment);
+            if (!game::sampleSeqCamera(*cam, t, cur)) continue;
+            if (j > 0) line(prev.position, cur.position, 0.45f, 0.75f, 1.0f);
+            prev = cur;
+        }
+    }
+
+    // A marker and a view direction at every key; the selected ones are white.
+    const bool trackSel = selTrack_ == camIndex;
+    for (usize k = 0; k < cam->keys.size(); ++k) {
+        const OcSeqKey& key = cam->keys[k];
+        const bool sel = trackSel && k < keySel_.size() && keySel_[k] != 0;
+        const f32 r = 1.0f, g = sel ? 1.0f : 0.6f, b = sel ? 1.0f : 0.2f;
+        const Vec3 p = keyPos(key);
+        cross(p, size * (sel ? 1.4f : 1.0f), r, g, b);
+        const f32 yaw = static_cast<f32>(key.v[3] * 3.14159265358979 / 180.0);
+        const f32 pitch = static_cast<f32>(key.v[4] * 3.14159265358979 / 180.0);
+        line(p, p + game::cameraForward(yaw, pitch) * (size * 4.0f), r, g, b);
+    }
+
+    // The playhead's pose.
+    if (game::sampleSeqCamera(*cam, player_.time(), cur)) {
+        cross(cur.position, size * 1.8f, 0.4f, 1.0f, 0.5f);
+        line(cur.position, cur.position + game::cameraForward(cur.yaw, cur.pitch) * (size * 6.0f), 0.4f, 1.0f, 0.5f);
+    }
+    return !out.empty();
+}
+
+u64 SequenceEditor::pathStamp() const {
+    u64 h = 1469598103934665603ull;
+    h = mix(h, editRev_);
+    f64 t = player_.time();
+    u64 bits;
+    std::memcpy(&bits, &t, sizeof bits);
+    return mix(h, bits);
+}
+
+// ---- run mode ----------------------------------------------------------------------------------
+
+bool SequenceEditor::hasCameraKeys() const {
+    for (const OcSeqTrack& tr : model_.tracks)
+        if (tr.kind == OcSeqTrackKind::Camera && !tr.keys.empty()) return true;
+    return false;
+}
+
+void SequenceEditor::beginRun() {
+    running_ = true;
+    fixedStep_ = true;
+    pilot_ = true;
+    player_.pause();
+    player_.setTime(0);
+    evalDirty_ = true;
+}
+
+void SequenceEditor::endRun() {
+    running_ = false;
+    pilot_ = false;
+}
+
+i64 SequenceEditor::runFrameCount() const {
+    return std::max<i64>(1, static_cast<i64>(std::ceil(model_.length / game::seqStepSeconds(model_) - 1e-6)));
+}
+
+bool SequenceEditor::runFrame(i64 n) {
+    if (n < 0 || n >= runFrameCount()) return false;
+    player_.setTime(static_cast<f64>(n) * game::seqStepSeconds(model_));
+    evalDirty_ = true;
+    return true;
 }
 
 // ---- model -------------------------------------------------------------------------------------
@@ -239,7 +374,24 @@ void SequenceEditor::syncPlayer() {
 void SequenceEditor::edited() {
     syncPlayer();
     evalDirty_ = true;
+    ++editRev_;
     if (host_ && host_->markLevelDirty) host_->markLevelDirty();
+}
+
+void SequenceEditor::undoEdit() {
+    if (!undo_.undo(model_)) return;
+    status_ = "Undo";
+    releaseUndrivenBases();
+    clampSelection();
+    edited();
+}
+
+void SequenceEditor::redoEdit() {
+    if (!undo_.redo(model_)) return;
+    status_ = "Redo";
+    releaseUndrivenBases();
+    clampSelection();
+    edited();
 }
 
 int SequenceEditor::findTrack(OcSeqTrackKind kind, scene::Entity e) const {
@@ -258,9 +410,37 @@ fmt::OcSeqKey* SequenceEditor::selectedKey() {
     return &tr.keys[static_cast<usize>(selKey_)];
 }
 
+void SequenceEditor::selectTrack(int index) {
+    if (index == selTrack_) return;
+    selTrack_ = index;
+    selKey_ = -1;
+    keySel_.clear();
+    if (index >= 0 && static_cast<usize>(index) < model_.tracks.size())
+        keySel_.assign(model_.tracks[static_cast<usize>(index)].keys.size(), 0);
+    ++editRev_;
+}
+
+void SequenceEditor::selectOnly(int key) {
+    std::fill(keySel_.begin(), keySel_.end(), char(0));
+    selKey_ = key;
+    if (key >= 0 && static_cast<usize>(key) < keySel_.size()) keySel_[static_cast<usize>(key)] = 1;
+    ++editRev_;
+}
+
+int SequenceEditor::selectedCount() const {
+    return static_cast<int>(std::count(keySel_.begin(), keySel_.end(), char(1)));
+}
+
 void SequenceEditor::clampSelection() {
-    if (selTrack_ < 0 || static_cast<usize>(selTrack_) >= model_.tracks.size()) { selTrack_ = -1; selKey_ = -1; return; }
-    if (selKey_ >= static_cast<int>(model_.tracks[static_cast<usize>(selTrack_)].keys.size())) selKey_ = -1;
+    if (selTrack_ < 0 || static_cast<usize>(selTrack_) >= model_.tracks.size()) {
+        selTrack_ = -1;
+        selKey_ = -1;
+        keySel_.clear();
+        return;
+    }
+    const usize n = model_.tracks[static_cast<usize>(selTrack_)].keys.size();
+    if (keySel_.size() != n) { keySel_.assign(n, 0); selKey_ = -1; }
+    if (selKey_ >= static_cast<int>(n)) selKey_ = -1;
 }
 
 // The key's values from the live scene: the actor's transform, the editor camera, or (for a new
@@ -303,7 +483,8 @@ void SequenceEditor::addTrack(OcSeqTrackKind kind, scene::Entity e) {
     scene::World& w = scene::World::instance();
     if (kind != OcSeqTrackKind::Camera && !w.valid(e)) return;
     const int existing = findTrack(kind, e);
-    if (existing >= 0) { selTrack_ = existing; selKey_ = -1; return; }
+    if (existing >= 0) { selectTrack(existing); return; }
+    pushUndo();
     OcSeqTrack tr;
     tr.kind = kind;
     tr.target = kind == OcSeqTrackKind::Camera ? -1 : targetOf(e);
@@ -315,37 +496,62 @@ void SequenceEditor::addTrack(OcSeqTrackKind kind, scene::Entity e) {
     fillKey(tr, k);
     tr.keys.push_back(k);
     model_.tracks.push_back(std::move(tr));
-    selTrack_ = static_cast<int>(model_.tracks.size()) - 1;
-    selKey_ = 0;
+    selTrack_ = -1;
+    selectTrack(static_cast<int>(model_.tracks.size()) - 1);
+    selectOnly(0);
     edited();
 }
 
 void SequenceEditor::removeTrack(int index) {
     if (index < 0 || static_cast<usize>(index) >= model_.tracks.size()) return;
-    const OcSeqTrack gone = model_.tracks[static_cast<usize>(index)];
+    pushUndo();
     model_.tracks.erase(model_.tracks.begin() + index);
-    // An actor with no transform track left goes back to where it was authored.
-    if (gone.kind == OcSeqTrackKind::Transform && !drivesTransform(entityOfTarget(gone.target))) {
-        const auto it = bases_.find(static_cast<u32>(gone.target));
-        if (it != bases_.end()) {
-            scene::World& w = scene::World::instance();
-            const scene::Entity e = entityOfTarget(gone.target);
-            if (w.valid(e)) w.setLocalTransform(e, it->second);
-            bases_.erase(it);
-        }
-    }
-    if (selTrack_ == index) { selTrack_ = -1; selKey_ = -1; }
+    releaseUndrivenBases();
+    if (selTrack_ == index) { selTrack_ = -1; selKey_ = -1; keySel_.clear(); }
     else if (selTrack_ > index) --selTrack_;
     edited();
 }
 
+void SequenceEditor::clearTrack(int index) {
+    if (index < 0 || static_cast<usize>(index) >= model_.tracks.size()) return;
+    if (model_.tracks[static_cast<usize>(index)].keys.empty()) return;
+    pushUndo();
+    model_.tracks[static_cast<usize>(index)].keys.clear();
+    if (selTrack_ == index) { selKey_ = -1; keySel_.clear(); }
+    status_ = "Track cleared";
+    edited();
+}
+
+void SequenceEditor::keyCamera() {
+    if (!host_) return;
+    if (viewIsPilot()) {
+        status_ = player_.playing() ? "Pause playback to key the camera"
+                                    : "Untick 'Lock viewport' to key the editor camera";
+        return;
+    }
+    const int ti = findTrack(OcSeqTrackKind::Camera, scene::kInvalidEntity);
+    if (ti < 0) {
+        addTrack(OcSeqTrackKind::Camera, scene::kInvalidEntity);   // seeds a key at the playhead
+        char buf[96];
+        std::snprintf(buf, sizeof buf, "Camera key at %.2f s", player_.time());
+        status_ = buf;
+        return;
+    }
+    selectTrack(ti);
+    addKeyAtPlayhead();
+}
+
+void SequenceEditor::keySelectedTrack() { addKeyAtPlayhead(); }
+
 void SequenceEditor::addKeyAtPlayhead() {
+    clampSelection();   // keySel_ must match the keys before one is inserted into it
     if (selTrack_ < 0 || static_cast<usize>(selTrack_) >= model_.tracks.size()) {
         status_ = "Select a track to key";
         return;
     }
+    pushUndo();
     OcSeqTrack& tr = model_.tracks[static_cast<usize>(selTrack_)];
-    const f64 t = player_.time();
+    const f64 t = std::clamp(player_.time(), 0.0, model_.length);
     int idx = -1;
     for (usize i = 0; i < tr.keys.size(); ++i)
         if (std::fabs(tr.keys[i].t - t) < kSameKeySec) { idx = static_cast<int>(i); break; }
@@ -358,20 +564,62 @@ void SequenceEditor::addKeyAtPlayhead() {
         k.t = t;
         fillKey(tr, k);
         idx = insertKeySorted(tr, k);
+        keySel_.insert(keySel_.begin() + idx, char(0));
     }
-    selKey_ = idx;
+    selectOnly(idx);
     char buf[160];
     std::snprintf(buf, sizeof buf, "Key at %.2f s on %s", t, trackLabel(tr).c_str());
     status_ = buf;
     edited();
 }
 
-void SequenceEditor::removeSelectedKey() {
-    if (!selectedKey()) return;
+void SequenceEditor::removeSelectedKeys() {
+    if (selTrack_ < 0 || static_cast<usize>(selTrack_) >= model_.tracks.size() || selectedCount() == 0) return;
+    pushUndo();
     OcSeqTrack& tr = model_.tracks[static_cast<usize>(selTrack_)];
-    tr.keys.erase(tr.keys.begin() + selKey_);
+    for (usize i = tr.keys.size(); i-- > 0;)
+        if (i < keySel_.size() && keySel_[i]) tr.keys.erase(tr.keys.begin() + static_cast<std::ptrdiff_t>(i));
+    keySel_.assign(tr.keys.size(), 0);
     selKey_ = -1;
     edited();
+}
+
+void SequenceEditor::setSelectedInterp(OcSeqInterp interp) {
+    if (selTrack_ < 0 || static_cast<usize>(selTrack_) >= model_.tracks.size() || selectedCount() == 0) return;
+    pushUndo();
+    OcSeqTrack& tr = model_.tracks[static_cast<usize>(selTrack_)];
+    for (usize i = 0; i < tr.keys.size() && i < keySel_.size(); ++i)
+        if (keySel_[i]) tr.keys[i].interp = interp;
+    edited();
+}
+
+// Playhead to the key and, when there is a camera track, the editor camera to the sequence camera
+// there, so the viewport is looking where the key was set.
+void SequenceEditor::goToKey(int track, int key) {
+    if (track < 0 || static_cast<usize>(track) >= model_.tracks.size()) return;
+    const OcSeqTrack& tr = model_.tracks[static_cast<usize>(track)];
+    if (key < 0 || static_cast<usize>(key) >= tr.keys.size()) return;
+    player_.pause();
+    player_.setTime(tr.keys[static_cast<usize>(key)].t);
+    evalDirty_ = true;
+    ++editRev_;
+    if (!host_ || !host_->setEditorCamera) return;
+    for (const OcSeqTrack& cam : model_.tracks) {
+        game::SeqCameraPose pose;
+        if (cam.kind == OcSeqTrackKind::Camera && game::sampleSeqCamera(cam, player_.time(), pose)) {
+            host_->setEditorCamera(pose);
+            break;
+        }
+    }
+}
+
+void SequenceEditor::stepFrames(int frames) {
+    player_.pause();
+    const f64 step = game::seqStepSeconds(model_);
+    const f64 n = std::round(player_.time() / step) + frames;
+    player_.setTime(std::clamp(n * step, 0.0, model_.loop ? std::max(0.0, model_.length - step) : model_.length));
+    evalDirty_ = true;
+    ++editRev_;
 }
 
 // Retimes a key; the list is re-sorted, so the key's index can change. Returns the new index.
@@ -379,7 +627,35 @@ int SequenceEditor::moveKey(OcSeqTrack& tr, int index, f64 t) {
     OcSeqKey k = tr.keys[static_cast<usize>(index)];
     k.t = std::clamp(t, 0.0, model_.length);
     tr.keys.erase(tr.keys.begin() + index);
-    return insertKeySorted(tr, k);
+    const int at = insertKeySorted(tr, k);
+    if (static_cast<usize>(index) < keySel_.size()) {   // the flag follows its key
+        const char flag = keySel_[static_cast<usize>(index)];
+        keySel_.erase(keySel_.begin() + index);
+        keySel_.insert(keySel_.begin() + at, flag);
+    }
+    return at;
+}
+
+// Shifts every selected key to its press-time position + delta. Pure in the press snapshot, so a
+// drag that wanders back lands exactly where it started.
+void SequenceEditor::applyDrag(OcSeqTrack& tr, f64 delta) {
+    f64 lo = -model_.length, hi = model_.length;   // the group stays inside [0, length]
+    for (const DragItem& it : dragOrig_)
+        if (it.selected) { lo = std::fmax(lo, -it.key.t); hi = std::fmin(hi, model_.length - it.key.t); }
+    delta = std::clamp(delta, lo, std::fmax(lo, hi));
+    std::vector<DragItem> items = dragOrig_;
+    for (DragItem& it : items)
+        if (it.selected) it.key.t += delta;
+    std::stable_sort(items.begin(), items.end(),
+                     [](const DragItem& a, const DragItem& b) { return a.key.t < b.key.t; });
+    tr.keys.clear();
+    keySel_.clear();
+    selKey_ = -1;
+    for (usize i = 0; i < items.size(); ++i) {
+        tr.keys.push_back(items[i].key);
+        keySel_.push_back(items[i].selected ? char(1) : char(0));
+        if (items[i].primary) selKey_ = static_cast<int>(i);
+    }
 }
 
 // ---- UI ----------------------------------------------------------------------------------------
@@ -390,21 +666,57 @@ void SequenceEditor::drawModePanel(SequenceHost& host) {
     host_ = &host;
     const std::vector<scene::Entity>& sel = host.selection;
 
+    ImGui::TextDisabled("CAMERA PATH");
+    ImGui::BeginDisabled(viewIsPilot());
+    if (ImGui::Button("Key camera  (K)", ImVec2(-1, 0))) keyCamera();
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Writes the viewport camera (position, yaw, pitch) as a key on the camera track\n"
+                          "at the playhead; a key already there is replaced. The track is created if needed.");
+    ImGui::BeginDisabled(!hasCameraKeys());
+    if (ImGui::Button("Clear camera keys", ImVec2(-1, 0)))
+        clearTrack(findTrack(OcSeqTrackKind::Camera, scene::kInvalidEntity));
+    ImGui::EndDisabled();
+    ImGui::Checkbox("Lock viewport to sequence camera", &pilot_);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Playing and scrubbing always look through the sequence camera; this keeps\n"
+                          "doing it when stopped. Untick it to fly the editor camera and key that pose.");
+    game::SeqCameraPose pose;
+    ImGui::BeginDisabled(!player_.camera(pose));
+    if (ImGui::Button("Fly editor camera to playhead", ImVec2(-1, 0)) && host.setEditorCamera)
+        host.setEditorCamera(pose);
+    ImGui::EndDisabled();
+
+    ImGui::Spacing();
     ImGui::TextDisabled("SEQUENCE");
     f32 len = static_cast<f32>(model_.length);
     ImGui::TextUnformatted("Length");
     ImGui::SetNextItemWidth(-1);
-    if (ImGui::DragFloat("##seqLen", &len, 0.1f, 0.5f, 3600.0f, "%.1f s")) {
+    const bool lenChanged = ImGui::DragFloat("##seqLen", &len, 0.1f, 0.5f, 3600.0f, "%.1f s");
+    if (ImGui::IsItemActivated()) pushUndo();
+    if (lenChanged) {
         model_.length = std::fmax(0.5f, len);
         edited();
     }
+    int fps = model_.fps;
+    ImGui::TextUnformatted("Frames per second");
+    ImGui::SetNextItemWidth(-1);
+    const bool fpsChanged = ImGui::DragInt("##seqFps", &fps, 0.2f, 1, 240);
+    if (ImGui::IsItemActivated()) pushUndo();
+    if (fpsChanged) { model_.fps = std::clamp(fps, 1, 240); edited(); }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The step of fixed-step playback and of --sequence-play");
+    ImGui::Checkbox("Fixed step", &fixedStep_);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Preview advances exactly 1 / fps seconds per frame instead of by wall-clock time,\n"
+                          "so every run gives the same camera on the same frame. Slower than real time\n"
+                          "when the editor runs below that frame rate.");
     bool b = model_.loop;
-    if (ImGui::Checkbox("Loop", &b)) { model_.loop = b; edited(); }
+    if (ImGui::Checkbox("Loop", &b)) { pushUndo(); model_.loop = b; edited(); }
     b = model_.autoplay;
-    if (ImGui::Checkbox("Autoplay in Play", &b)) { model_.autoplay = b; edited(); }
+    if (ImGui::Checkbox("Autoplay in Play", &b)) { pushUndo(); model_.autoplay = b; edited(); }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Starts from 0 when Play starts, and with the packaged game");
     b = model_.camera;
-    if (ImGui::Checkbox("Use sequence camera in Play", &b)) { model_.camera = b; edited(); }
+    if (ImGui::Checkbox("Use sequence camera in Play", &b)) { pushUndo(); model_.camera = b; edited(); }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("The camera track drives the view while the sequence plays");
 
     ImGui::Spacing();
@@ -431,10 +743,8 @@ void SequenceEditor::drawModePanel(SequenceHost& host) {
         const f32 xW = ImGui::GetFrameHeight();
         const std::string label = trackLabel(tr) + "  (" + std::to_string(tr.keys.size()) + ")";
         if (ImGui::Selectable(label.c_str(), selTrack_ == static_cast<int>(i), 0,
-                              ImVec2(ImGui::GetContentRegionAvail().x - xW - 4.0f, 0))) {
-            selTrack_ = static_cast<int>(i);
-            selKey_ = -1;
-        }
+                              ImVec2(ImGui::GetContentRegionAvail().x - xW - 4.0f, 0)))
+            selectTrack(static_cast<int>(i));
         ImGui::SameLine();
         if (ImGui::SmallButton("x")) removeIdx = static_cast<int>(i);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this track");
@@ -442,7 +752,8 @@ void SequenceEditor::drawModePanel(SequenceHost& host) {
     }
     if (removeIdx >= 0) removeTrack(removeIdx);
     if (model_.tracks.empty())
-        ImGui::TextWrapped("Select an actor, then add a track. K keys the selected track at the playhead.");
+        ImGui::TextWrapped("Fly the camera and press K to key it, or select an actor and add a track. "
+                           "Shift+K keys the selected track.");
 
     // The selected key.
     if (OcSeqKey* key = selectedKey()) {
@@ -452,7 +763,9 @@ void SequenceEditor::drawModePanel(SequenceHost& host) {
         f32 t = static_cast<f32>(key->t);
         ImGui::TextUnformatted("Time");
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::DragFloat("##keyT", &t, 0.01f, 0.0f, static_cast<f32>(model_.length), "%.2f s")) {
+        const bool tChanged = ImGui::DragFloat("##keyT", &t, 0.01f, 0.0f, static_cast<f32>(model_.length), "%.2f s");
+        if (ImGui::IsItemActivated()) pushUndo();
+        if (tChanged) {
             selKey_ = moveKey(tr, selKey_, t);
             edited();
         }
@@ -462,6 +775,7 @@ void SequenceEditor::drawModePanel(SequenceHost& host) {
             ImGui::TextUnformatted("Interpolation to next key");
             ImGui::SetNextItemWidth(-1);
             if (ImGui::Combo("##keyInterp", &interp, "Smooth\0Linear\0Step\0")) {
+                pushUndo();
                 key->interp = static_cast<OcSeqInterp>(interp);
                 edited();
             }
@@ -469,14 +783,18 @@ void SequenceEditor::drawModePanel(SequenceHost& host) {
                 f32 col[3] = {static_cast<f32>(key->v[0]), static_cast<f32>(key->v[1]), static_cast<f32>(key->v[2])};
                 ImGui::TextUnformatted("Emissive colour");
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::ColorEdit3("##keyCol", col, ImGuiColorEditFlags_Float)) {
+                const bool cChanged = ImGui::ColorEdit3("##keyCol", col, ImGuiColorEditFlags_Float);
+                if (ImGui::IsItemActivated()) pushUndo();
+                if (cChanged) {
                     key->v[0] = col[0]; key->v[1] = col[1]; key->v[2] = col[2];
                     edited();
                 }
                 f32 inten = static_cast<f32>(key->v[3]);
                 ImGui::TextUnformatted("Intensity");
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::DragFloat("##keyInt", &inten, 0.05f, 0.0f, 1000.0f, "%.2f")) {
+                const bool iChanged = ImGui::DragFloat("##keyInt", &inten, 0.05f, 0.0f, 1000.0f, "%.2f");
+                if (ImGui::IsItemActivated()) pushUndo();
+                if (iChanged) {
                     key->v[3] = std::fmax(0.0f, inten);
                     edited();
                 }
@@ -484,27 +802,19 @@ void SequenceEditor::drawModePanel(SequenceHost& host) {
                 ImGui::TextDisabled("pos %.0f %.0f %.0f", key->v[0], key->v[1], key->v[2]);
                 ImGui::TextDisabled("rot %.0f %.0f %.0f", key->v[3], key->v[4], key->v[5]);
                 ImGui::TextDisabled("scl %.2f %.2f %.2f", key->v[6], key->v[7], key->v[8]);
-                if (ImGui::Button("Set from actor now", ImVec2(-1, 0))) { fillKey(tr, *key); edited(); }
+                if (ImGui::Button("Set from actor now", ImVec2(-1, 0))) { pushUndo(); fillKey(tr, *key); edited(); }
             } else {
                 ImGui::TextDisabled("pos %.0f %.0f %.0f", key->v[0], key->v[1], key->v[2]);
                 ImGui::TextDisabled("yaw %.1f  pitch %.1f", key->v[3], key->v[4]);
-                if (ImGui::Button("Set from viewport camera", ImVec2(-1, 0))) { fillKey(tr, *key); edited(); }
+                ImGui::BeginDisabled(viewIsPilot());
+                if (ImGui::Button("Set from viewport camera", ImVec2(-1, 0))) { pushUndo(); fillKey(tr, *key); edited(); }
+                ImGui::EndDisabled();
+                if (ImGui::Button("Go to key", ImVec2(-1, 0))) goToKey(selTrack_, selKey_);
             }
-            if (ImGui::Button("Delete key", ImVec2(-1, 0))) removeSelectedKey();
+            if (ImGui::Button("Delete key", ImVec2(-1, 0))) removeSelectedKeys();
         }
     }
 
-    ImGui::Spacing();
-    ImGui::TextDisabled("VIEW");
-    ImGui::Checkbox("Pilot camera in viewport", &pilot_);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("The viewport shows the sequence camera at the playhead.\n"
-                          "Untick it to fly the editor camera, then press K to key that pose.");
-    game::SeqCameraPose pose;
-    ImGui::BeginDisabled(!player_.camera(pose));
-    if (ImGui::Button("Fly editor camera to playhead", ImVec2(-1, 0)) && host.setEditorCamera)
-        host.setEditorCamera(pose);
-    ImGui::EndDisabled();
     if (!status_.empty()) { ImGui::Spacing(); ImGui::TextDisabled("%s", status_.c_str()); }
     host_ = nullptr;
 }
@@ -516,6 +826,7 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
     ImGui::SetNextWindowPos(ImVec2(host.vpX + 8.0f, host.vpY + host.vpH - winH - 8.0f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(std::fmax(360.0f * ui, host.vpW - 16.0f), winH), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Sequencer", nullptr, ImGuiWindowFlags_NoCollapse)) {
+        dragKey_ = dragRuler_ = false;   // a hidden window sees no mouse-up; a stuck scrub would pin the pilot view
         ImGui::End();
         host_ = nullptr;
         return;
@@ -526,7 +837,7 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
     // ---- transport ----
     const f64 len = std::fmax(model_.length, 0.01);
     ImGui::BeginDisabled(playActiveLast_);
-    if (ImGui::Button("|<")) { player_.pause(); player_.setTime(0); evalDirty_ = true; }
+    if (ImGui::Button("|<")) { player_.setTime(0); evalDirty_ = true; ++editRev_; }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("To start");
     ImGui::SameLine();
     auto togglePlay = [&]() {
@@ -538,24 +849,56 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
     };
     if (ImGui::Button(player_.playing() ? "Pause" : "Play ")) togglePlay();
     ImGui::SameLine();
+    if (ImGui::Button("Stop")) { player_.pause(); player_.setTime(0); evalDirty_ = true; ++editRev_; }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pause and return to the start; the viewport goes back to the editor camera");
+    ImGui::SameLine();
     bool loop = model_.loop;
-    if (ImGui::Checkbox("Loop", &loop)) { model_.loop = loop; edited(); }
+    if (ImGui::Checkbox("Loop", &loop)) { pushUndo(); model_.loop = loop; edited(); }
     ImGui::SameLine();
-    ImGui::Text("%.2f / %.2f s", player_.time(), model_.length);
+    ImGui::Checkbox("Fixed step", &fixedStep_);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Advance 1 / fps per frame, not by wall-clock time");
     ImGui::SameLine();
-    if (ImGui::Button("Key")) addKeyAtPlayhead();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Key the selected track at the playhead  (K)");
+    int fps = model_.fps;
+    ImGui::SetNextItemWidth(64.0f * ui);
+    const bool fpsChanged = ImGui::DragInt("fps", &fps, 0.2f, 1, 240);
+    if (ImGui::IsItemActivated()) pushUndo();
+    if (fpsChanged) { model_.fps = std::clamp(fps, 1, 240); edited(); }
+    ImGui::SameLine();
+    ImGui::Text("%.2f / %.2f s  f%d", player_.time(), model_.length,
+                static_cast<int>(std::lround(player_.time() / game::seqStepSeconds(model_))));
+    ImGui::SameLine();
+    ImGui::BeginDisabled(viewIsPilot());
+    if (ImGui::Button("Key camera")) keyCamera();
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Key the viewport camera at the playhead  (K)");
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (playActiveLast_) ImGui::TextDisabled("Play is running");
     else if (!status_.empty()) ImGui::TextDisabled("%s", status_.c_str());
 
     // ---- hotkeys ----
-    if (!playActiveLast_ && (winFocused || host.levelFocused) && !io.WantTextInput && !io.KeyCtrl &&
-        !io.KeyAlt && !io.MouseDown[1]) {
-        if (ImGui::IsKeyPressed(ImGuiKey_K, false)) addKeyAtPlayhead();
-        if (winFocused && ImGui::IsKeyPressed(ImGuiKey_Delete, false)) removeSelectedKey();
-        if (winFocused && ImGui::IsKeyPressed(ImGuiKey_Space, false)) togglePlay();
+    if (!playActiveLast_ && !io.WantTextInput && !io.KeyCtrl && !io.KeyAlt && !io.MouseDown[1] &&
+        (winFocused || host.levelFocused)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_K, false)) {
+            if (io.KeyShift) keySelectedTrack(); else keyCamera();
+        }
+    }
+    if (!playActiveLast_ && winFocused && !io.WantTextInput) {
+        if (keybinds().pressed(CommandId::EditUndo, io)) undoEdit();
+        if (keybinds().pressed(CommandId::EditRedo, io) ||
+            (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false))) redoEdit();
+        if (!io.KeyCtrl && !io.KeyAlt) {
+            if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) removeSelectedKeys();
+            if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) togglePlay();
+            if (ImGui::IsKeyPressed(ImGuiKey_Home, false)) { player_.setTime(0); evalDirty_ = true; ++editRev_; }
+            if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true)) stepFrames(-1);
+            if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true)) stepFrames(1);
+        }
+        if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_A, false) && selTrack_ >= 0 &&
+            static_cast<usize>(selTrack_) < model_.tracks.size()) {
+            std::fill(keySel_.begin(), keySel_.end(), char(1));
+            ++editRev_;
+        }
     }
 
     // ---- ruler ----
@@ -590,6 +933,7 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
         player_.pause();
         player_.setTime(model_.loop ? std::min(u * len, len * 0.9999) : u * len);
         evalDirty_ = true;
+        ++editRev_;
     }
     {
         const f32 x = laneX(player_.time());
@@ -605,7 +949,7 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
     if (laneChild) {
         ImDrawList* cdl = ImGui::GetWindowDrawList();
         if (model_.tracks.empty())
-            ImGui::TextDisabled("No tracks. Select an actor and add one from the Mode panel.");
+            ImGui::TextDisabled("No tracks. Fly the camera and press K, or select an actor and add a track from the Mode panel.");
         const f32 hitR = 8.0f * ui;
         for (usize i = 0; i < model_.tracks.size(); ++i) {
             OcSeqTrack& tr = model_.tracks[i];
@@ -613,10 +957,8 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
             ImGui::PushID(static_cast<int>(i));
             const std::string name = trackLabel(tr);
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kindColor(tr.kind)));
-            if (ImGui::Selectable(name.c_str(), trackSel, 0, ImVec2(nameW - 6.0f * ui, rowH))) {
-                selTrack_ = static_cast<int>(i);
-                selKey_ = -1;
-            }
+            if (ImGui::Selectable(name.c_str(), trackSel, 0, ImVec2(nameW - 6.0f * ui, rowH)))
+                selectTrack(static_cast<int>(i));
             ImGui::PopStyleColor();
             ImGui::SameLine(nameW);
             ImGui::InvisibleButton("##lane", ImVec2(laneW, rowH));
@@ -632,7 +974,7 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
             const ImU32 col = kindColor(tr.kind);
             for (usize k = 0; k < tr.keys.size(); ++k) {
                 const f32 x = lx(tr.keys[k].t);
-                const bool ks = trackSel && selKey_ == static_cast<int>(k);
+                const bool ks = trackSel && k < keySel_.size() && keySel_[k] != 0;
                 const f32 r = (ks ? 6.0f : 4.5f) * ui;
                 if (tr.keys[k].interp == OcSeqInterp::Step) {
                     cdl->AddRectFilled(ImVec2(x - r * 0.8f, cy - r * 0.8f), ImVec2(x + r * 0.8f, cy + r * 0.8f),
@@ -647,7 +989,7 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
             const f32 phx = lx(player_.time());
             cdl->AddLine(ImVec2(phx, p0.y), ImVec2(phx, p1.y), IM_COL32(255, 190, 70, 170), 1.0f);
 
-            // Press decides once what it landed on; the drag then follows that key.
+            // Press decides once what it landed on; a drag then moves every selected key of the track.
             if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 int hit = -1;
                 f32 best = hitR;
@@ -655,25 +997,62 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
                     const f32 d = std::fabs(io.MousePos.x - lx(tr.keys[k].t));
                     if (d <= best) { best = d; hit = static_cast<int>(k); }
                 }
-                selTrack_ = static_cast<int>(i);
-                selKey_ = hit;
-                dragKey_ = hit >= 0;
+                selectTrack(static_cast<int>(i));
+                clampSelection();
+                const bool additive = io.KeyCtrl || io.KeyShift;
+                if (hit >= 0) {
+                    if (additive) {
+                        keySel_[static_cast<usize>(hit)] = keySel_[static_cast<usize>(hit)] ? char(0) : char(1);
+                        selKey_ = keySel_[static_cast<usize>(hit)] ? hit : -1;
+                    } else if (!keySel_[static_cast<usize>(hit)]) {
+                        selectOnly(hit);   // pressing a selected key keeps the group, so it can be dragged
+                    } else {
+                        selKey_ = hit;
+                    }
+                    dragKey_ = keySel_[static_cast<usize>(hit)] != 0;
+                    dragStarted_ = false;
+                    dragX0_ = io.MousePos.x;
+                    dragOrig_.clear();
+                    for (usize k = 0; k < tr.keys.size(); ++k)
+                        dragOrig_.push_back({tr.keys[k], keySel_[k] != 0, static_cast<int>(k) == selKey_});
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) goToKey(static_cast<int>(i), hit);
+                } else if (!additive) {
+                    selectOnly(-1);
+                }
+                ++editRev_;
             }
-            if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) { selTrack_ = static_cast<int>(i); }
+            if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) selectTrack(static_cast<int>(i));
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) dragKey_ = false;
-            if (dragKey_ && active && trackSel && selKey_ >= 0 && static_cast<usize>(selKey_) < tr.keys.size()) {
-                const f64 u = std::clamp(static_cast<f64>((io.MousePos.x - p0.x) / std::fmax(1.0f, p1.x - p0.x)), 0.0, 1.0);
-                const f64 nt = std::round(u * len * 100.0) / 100.0;
-                if (std::fabs(nt - tr.keys[static_cast<usize>(selKey_)].t) > 1e-9) {
-                    selKey_ = moveKey(tr, selKey_, nt);
+            if (dragKey_ && active && trackSel && !dragOrig_.empty() && dragOrig_.size() == tr.keys.size()) {
+                const f64 raw = static_cast<f64>(io.MousePos.x - dragX0_) / std::fmax(1.0f, p1.x - p0.x) * len;
+                const f64 delta = std::round(raw * 100.0) / 100.0;
+                if (dragStarted_ || std::fabs(delta) > 1e-9) {
+                    if (!dragStarted_) { pushUndo(); dragStarted_ = true; }
+                    applyDrag(tr, delta);
                     edited();
                 }
             }
 
             if (ImGui::BeginPopupContextItem("##laneCtx")) {
-                if (ImGui::MenuItem("Key at playhead")) { selTrack_ = static_cast<int>(i); addKeyAtPlayhead(); }
-                if (ImGui::MenuItem("Delete selected key", nullptr, false, trackSel && selectedKey() != nullptr))
-                    removeSelectedKey();
+                const bool haveSel = trackSel && selectedCount() > 0;
+                if (ImGui::MenuItem("Key at playhead")) { selectTrack(static_cast<int>(i)); addKeyAtPlayhead(); }
+                if (ImGui::MenuItem("Go to selected key", nullptr, false, haveSel && selKey_ >= 0))
+                    goToKey(selTrack_, selKey_);
+                if (ImGui::MenuItem("Select all keys", "Ctrl+A", false, !tr.keys.empty())) {
+                    selectTrack(static_cast<int>(i));
+                    clampSelection();
+                    std::fill(keySel_.begin(), keySel_.end(), char(1));
+                    ++editRev_;
+                }
+                if (ImGui::BeginMenu("Interpolation of selected", haveSel)) {
+                    if (ImGui::MenuItem("Smooth")) setSelectedInterp(OcSeqInterp::Smooth);
+                    if (ImGui::MenuItem("Linear")) setSelectedInterp(OcSeqInterp::Linear);
+                    if (ImGui::MenuItem("Step"))   setSelectedInterp(OcSeqInterp::Step);
+                    ImGui::EndMenu();
+                }
+                if (ImGui::MenuItem("Delete selected keys", "Del", false, haveSel)) removeSelectedKeys();
+                ImGui::Separator();
+                if (ImGui::MenuItem("Clear track", nullptr, false, !tr.keys.empty())) clearTrack(static_cast<int>(i));
                 if (ImGui::MenuItem("Remove track")) removeIdx = static_cast<int>(i);
                 ImGui::EndPopup();
             }

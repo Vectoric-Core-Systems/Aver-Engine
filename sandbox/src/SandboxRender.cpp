@@ -1943,6 +1943,9 @@ void SandboxApp::onRender(Engine& e)  {
     // Explicit, not relying on the selection outline/marker above resetting it themselves: the grid,
     // nav mesh and collider overlay below must stay hairline-thin regardless of what drew before them.
     e.device()->setLineWidth(1.0f);
+#if AVER_MODULE_SCENE
+    drawSequencePath(e);
+#endif
     if (showGrid_ && !noEditorChrome_) {
         const Mat4 g = Mat4::identity();
         e.device()->drawLines(gridMesh_, &g.m[0][0]);
@@ -2040,6 +2043,9 @@ void SandboxApp::onRender(Engine& e)  {
     // request for this tick has already run and capDone_ has latched it out of the slot for the
     // rest of the run.
     serviceViewportScreenshot(e);
+#if AVER_MODULE_SCENE
+    serviceSequenceCapture(e);
+#endif
     lumaSweepCheck(e);
     resizeCheck(e);
     gpuTimingCheck(e);

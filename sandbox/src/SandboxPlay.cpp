@@ -867,7 +867,8 @@ void SandboxApp::driveAnimatedBodies(f32 dt) {
 #if AVER_MODULE_SCENE
 // The level sequence's frame step, between the object-animation tick and World::flush: advances and
 // applies it in Animate mode's preview and while Play runs it.
-void SandboxApp::tickSequence(f32 dt) {
+void SandboxApp::tickSequence(Engine& e, f32 dt) {
+    sequenceRunStep(e);
     editor::SequenceTickCtx c;
     c.dt = dt;
 #if AVER_MODULE_FRAMEWORK

@@ -580,6 +580,7 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             for (usize i = 1; i < t.size(); ++i) {
                 if      (equalsCI(t[i], "name")     && i + 1 < t.size()) sq.name     = percentDecode(t[++i]);
                 else if (equalsCI(t[i], "length")   && i + 1 < t.size()) sq.length   = parseF64(t[++i], sq.length);
+                else if (equalsCI(t[i], "fps")      && i + 1 < t.size()) sq.fps      = std::clamp(parseI32(t[++i], 60), 1, 1000);
                 else if (equalsCI(t[i], "loop")     && i + 1 < t.size()) sq.loop     = parseI32(t[++i], 1) != 0;
                 else if (equalsCI(t[i], "autoplay") && i + 1 < t.size()) sq.autoplay = parseI32(t[++i], 1) != 0;
                 else if (equalsCI(t[i], "camera")   && i + 1 < t.size()) sq.camera   = parseI32(t[++i], 1) != 0;
@@ -1074,8 +1075,9 @@ std::string writeOcworld(const OcWorldData& w) {
         for (const OcSequence& sq : w.sequences) {
             s += "SEQUENCE";
             if (!sq.name.empty()) { s += " name "; s += percentEncode(sq.name); }
-            s += " length " + num(sq.length) +
-                 " loop " + (sq.loop ? "1" : "0") +
+            s += " length " + num(sq.length);
+            if (sq.fps != 60) s += " fps " + std::to_string(sq.fps);
+            s += std::string(" loop ") + (sq.loop ? "1" : "0") +
                  " autoplay " + (sq.autoplay ? "1" : "0") +
                  " camera " + (sq.camera ? "1" : "0") + "\n";
             for (const OcSeqTrack& tr : sq.tracks) {

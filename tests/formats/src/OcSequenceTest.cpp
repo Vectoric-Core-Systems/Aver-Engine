@@ -119,6 +119,7 @@ int main() {
         const fmt::OcSequence& a = back.sequences[0];
         check(a.name == "Fly Through", "the name (with a space) survives percent-encoding");
         check(a.length == 12.5 && !a.loop && a.autoplay && !a.camera, "length / loop / autoplay / camera survive");
+        check(a.fps == 60 && !contains(text1, " fps "), "the default 60 fps is not written");
         check(a.tracks.size() == 4, "all four tracks come back");
         if (a.tracks.size() == 4) {
             using K = fmt::OcSeqTrackKind;
@@ -296,6 +297,28 @@ int main() {
         check(out == golden, "no SEQUENCE block, and the placement section is exactly the old text");
         check(!contains(out, "SEQ"), "no SEQ record of any kind is written");
         check(fmt::writeOcworld(r) == out, "and it still round-trips byte-identically");
+    }
+
+    // ---- fps: written only when it is not 60, read back, clamped ------------------------------
+    {
+        fmt::OcWorldData w;
+        w.name = "Fps";
+        fmt::OcSequence sq;
+        sq.fps = 30;
+        fmt::OcSeqTrack cam;
+        cam.kind = fmt::OcSeqTrackKind::Camera;
+        cam.keys.push_back(key(0.0, fmt::OcSeqInterp::Smooth, {0, 0, 100, 0, 0}));
+        sq.tracks.push_back(cam);
+        w.sequences.push_back(sq);
+        const std::string out = fmt::writeOcworld(w);
+        fmt::OcWorldData r;
+        std::string err;
+        check(contains(out, " fps 30 ") && fmt::parseOcworld(out, r, &err) && r.sequences.size() == 1 && r.sequences[0].fps == 30,
+              "a non-default fps is written and read back");
+        fmt::OcWorldData z;
+        check(fmt::parseOcworld("OCWORLD 1\nSEQUENCE fps 0\nENDSEQUENCE\nSEQUENCE fps 99999\nENDSEQUENCE\n", z, &err) &&
+              z.sequences.size() == 2 && z.sequences[0].fps == 1 && z.sequences[1].fps == 1000,
+              "fps is clamped to 1..1000 on read");
     }
 
     AVER_INFO("==================================================");

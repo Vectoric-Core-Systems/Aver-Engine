@@ -957,7 +957,8 @@ SEQUENCE name Fly%20Through length 12 loop 1 autoplay 1 camera 1
 ENDSEQUENCE
 ```
 
-- `SEQUENCE` opens a sequence (`name` omitted when empty; `length` seconds, default 10; `loop`,
+- `SEQUENCE` opens a sequence (`name` omitted when empty; `length` seconds, default 10; `fps` 1..1000, default 60, the step of fixed-step
+  playback and of `--sequence-play`, written only when it is not 60; `loop`,
   `autoplay` and `camera` are `0|1`, default 1). `ENDSEQUENCE` closes it; an unclosed one at end of file
   is kept. A level may carry several. Sequences are written after `FOLIAGE` and before the placements,
   and nothing is written when there are none, so a level without one is byte-identical to before.
@@ -967,7 +968,9 @@ ENDSEQUENCE
 - `SEQKEY <t> smooth|linear|step <values...>` attaches to the last `SEQTRACK`: `t` seconds, the
   interpolation from this key to the next, then 9 values for a transform track (cm, the placement's
   local frame, degrees as a `PLACE` line), 5 for camera (world cm, editor-camera degrees) or 4 for
-  material (the placement's emissive is multiplied by `rgb * intensity`). Missing values keep the
+  material (the placement's emissive is multiplied by `rgb * intensity`). A smooth camera key interpolates its
+  position on a centripetal Catmull-Rom spline and yaw / pitch by quaternion squad (`docs/EDITOR.md`, Phase 15).
+  Missing values keep the
   `OcSeqKey` defaults. Keys are sorted by `t` (stable) after parsing and by the writer.
 - `SEQTRACK`/`SEQKEY` outside an open sequence or track are ignored; `BEGIN`/`END` belong to the
   placement nesting and are not reused.

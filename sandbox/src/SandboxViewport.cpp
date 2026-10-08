@@ -3111,8 +3111,8 @@ void SandboxApp::buildViewportOverlay() {
                         editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayReleaseMouse)).c_str());
             break;
         case EditorMode::Animate:
-            ImGui::Text("Animate  |  K keys the selected track at the playhead  |  pose with the gizmo or fly "
-                        "the camera first, Tab to Select");
+            ImGui::Text("Animate  |  fly the camera and press K to key it  |  Shift+K keys the selected track  |  "
+                        "Space plays, Tab to Select");
             break;
         case EditorMode::Select:
         default:

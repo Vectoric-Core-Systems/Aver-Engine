@@ -2083,7 +2083,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     anim::animSystem().tick(scene::World::instance(), t.dt);
     playProf_.end(editor::PlayPhase::ObjectAnim);
     // The level sequence (Animate preview, Play), after the clips so a sequenced actor wins.
-    tickSequence(t.dt);
+    tickSequence(e, t.dt);
 #if AVER_MODULE_PHYSICS
     // After the tick that moved them: animated placement's kinematic body follows it (carries standing characters).
     playProf_.begin(editor::PlayPhase::DriveBodies);
@@ -2430,6 +2430,9 @@ int SandboxApp::exitCode() const  {
                    "not finish)" : "FAIL");
         return skinDrawExit_;
     }
+#if AVER_MODULE_SCENE
+    if (const int rc = sequenceRunExit()) return rc;
+#endif
     return 0;
 }
 
