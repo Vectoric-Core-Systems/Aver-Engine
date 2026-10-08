@@ -1063,6 +1063,34 @@ void registerInstancer(Stage& st, Stack& sk, const std::string& path, const M4& 
     st.instancers.push_back(std::move(in));
 }
 
+// PointInstancers inside what an arc brings in (a terrain tile's clutter), registered at their world transform.
+// Follows the same arcs and skips as contents(); `toWorld` carries `loc`'s own space to the root.
+void nestedInstancers(Stage& st, const Loc& loc, const M4& toWorld, int depth) {
+    if (depth > 64 || loc.text >= 0) return;
+    Stack& sk = *loc.stack;
+    if (hiddenPrim(st, sk, loc.path)) return;
+    UsdCrateValue v;
+    if (fieldOf(st, sk, loc.path, "inheritPaths", v))
+        for (const std::string& cls : v.s) nestedInstancers(st, Loc{loc.stack, -1, cls}, toWorld, depth + 1);
+    i32 from = -1;
+    for (const char* arc : {"references", "payload"})
+        if (fieldOf(st, sk, loc.path, arc, v, &from))
+            for (const UsdCrateRef& ref : v.refs) {
+                Loc t;
+                if (resolveRef(st, loc, from, ref, t)) nestedInstancers(st, t, toWorld, depth + 1);
+            }
+    for (const std::string& name : childrenOf(st, sk, loc.path)) {
+        const std::string cp = childPath(loc.path, name);
+        if (specifierOf(st, sk, cp) == 2 || !isActive(st, sk, cp) || hiddenPrim(st, sk, cp)) continue;
+        const std::string type = tokenOf(st, sk, cp, "typeName");
+        if (type == "Material" || type == "Shader" || type == "GeomSubset" || type == "Mesh") continue;
+        const Loc child{loc.stack, -1, cp};
+        const M4 world = mul(composedLocal(st, child), toWorld);
+        if (type == "PointInstancer") registerInstancer(st, sk, cp, world);
+        else nestedInstancers(st, child, world, depth + 1);
+    }
+}
+
 void buildStatic(Stage& st, const RawMesh& rm, const M4& world, const std::string& prefix,
                  const std::string& group) {
     // THE TRANSLATION BECOMES A PLACEMENT and rotation/scale stay in the vertices -- importUsd's
@@ -1126,6 +1154,7 @@ void walkStatic(Stage& st, Stack& sk, const std::string& path, const M4& parent,
                 pl.name = cp;
                 st.c.out->placements.push_back(std::move(pl));
             }
+            nestedInstancers(st, loc, world, 0);
             continue;
         }
         if (type == "Mesh") {
