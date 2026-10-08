@@ -32,6 +32,7 @@ add_executable(Sandbox WIN32
   src/ActorEditor.cpp
   src/AnimEditor.cpp
   src/SequenceEditor.cpp
+  src/SandboxSequenceRun.cpp
   src/SkinDrawTest.cpp
   src/SkinSceneTest.cpp
   src/ReflTest.cpp

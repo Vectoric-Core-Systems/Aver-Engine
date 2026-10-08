@@ -2379,14 +2379,20 @@ void SandboxApp::buildUI(Engine& e) {
         if (mode_ != EditorMode::Select) buildModePanel(e);
 #if AVER_MODULE_SCENE
         // A floating timeline over the viewport's bottom edge until the user docks it.
-        if (mode_ == EditorMode::Animate) buildSequencerWindow();
+        if (mode_ == EditorMode::Animate && !sequenceRunActive()) buildSequencerWindow();
 #endif
         buildPanels(e);
     }
-    if (levelVisible_) buildViewportOverlay();
+    // A --sequence-play run keeps the viewport free of overlays: its captures are the comparison.
+#if AVER_MODULE_SCENE
+    const bool runClean = sequenceRunActive();
+#else
+    const bool runClean = false;
+#endif
+    if (levelVisible_ && !runClean) buildViewportOverlay();
     drawDrawer(e);
     // drawNotifications after drawDrawer (needs drawerPixelH_ from this frame).
-    drawNotifications();
+    if (!runClean) drawNotifications();
 #if AVER_MODULE_SCENE
     editor::prefabCreateDialogDraw(prefabDlg_, prefabModel_, prefabUiCallbacks());
 #endif

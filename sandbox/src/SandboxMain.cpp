@@ -59,6 +59,20 @@ Application* createApplication(int argc, char** argv) {
         aver::crash::shutdown();
         std::exit(rc);
     }
+    // --sequence-play [--sequence-capture <dir>] [--sequence-every N] [--sequence-warmup N]: taken out of
+    // argv here, so the flag chain below never reads the directory as a bare path.
+    SandboxApp::SequenceRunArgs seqRun;
+    for (int i = 1; i < argc;) {
+        int used = 0;
+        if (!std::strcmp(argv[i], "--sequence-play")) { seqRun.play = true; used = 1; }
+        else if (i + 1 < argc && !std::strcmp(argv[i], "--sequence-capture")) { seqRun.play = true; seqRun.dir = argv[i + 1]; used = 2; }
+        else if (i + 1 < argc && !std::strcmp(argv[i], "--sequence-every"))   { seqRun.every = std::atoi(argv[i + 1]); used = 2; }
+        else if (i + 1 < argc && !std::strcmp(argv[i], "--sequence-warmup"))  { seqRun.warmup = std::atoi(argv[i + 1]); used = 2; }
+        if (!used) { ++i; continue; }
+        for (int j = i; j + used < argc; ++j) argv[j] = argv[j + used];
+        argc -= used;
+        argv[argc] = nullptr;
+    }
 #ifdef NDEBUG
     AVER_INFO("[Sandbox] {} (Release build)", argc > 0 ? argv[0] : "Sandbox.exe");
 #else
@@ -945,7 +959,10 @@ Application* createApplication(int argc, char** argv) {
         }
     }
 
+    // A sequence run is a bounded run (no editor prefs written, no splash) that ends itself at the sequence's end.
+    if (seqRun.play && frames == 0) frames = 1ull << 40;
     auto* app = new SandboxApp(frames, headless, beam, shot, tool);
+    if (seqRun.play) app->setSequenceRun(seqRun);
     // Single-instance forwarding, receiver side: superset of sender gate, allows bare .ocbeam to be primary.
     // Reading only argc/argv[1][0] keeps the two gates in lockstep.
     app->setSingleInstanceEligible(argc == 1 || (argc == 2 && argv[1][0] != '-'));

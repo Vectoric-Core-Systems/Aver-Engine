@@ -1639,6 +1639,14 @@ public:
     void driveDefaultPawnFly(const Vec3& velocity, f32 dt);    // per frame; dt 0 = no drift (hard set)
     void setProjectPath(std::string p);          // <path>.ocproject
     void setStartMode(std::string m);
+    // --sequence-play [--sequence-capture dir] [--sequence-every N] [--sequence-warmup N]: SandboxSequenceRun.cpp.
+    struct SequenceRunArgs {
+        bool play = false;
+        std::string dir;      // numbered PNGs go here; empty = play without capturing
+        int every = 1;        // capture every Nth frame
+        int warmup = 120;     // frames to wait after the level is ready before frame 0
+    };
+    void setSequenceRun(const SequenceRunArgs& a);
     void setOpenMap(std::string p);
     void armBrowser(bool on);   // shows the start screen
     void setSingleInstanceEligible(bool b);
@@ -2840,7 +2848,15 @@ private:
     void buildSequencerWindow();
     editor::SequenceHost sequenceHost();
     // Between animSystem().tick and World::flush, every frame.
-    void tickSequence(f32 dt);
+    void tickSequence(Engine& e, f32 dt);
+    // The --sequence-play driver (SandboxSequenceRun.cpp): steps the run before the sequence ticks,
+    // reads and writes the numbered captures in onRender, and ends the process with its verdict.
+    void sequenceRunStep(Engine& e);
+    void serviceSequenceCapture(Engine& e);
+    bool sequenceRunActive() const { return seqRun_.phase != SequenceRunState::Phase::Off && seqRun_.phase != SequenceRunState::Phase::Done; }
+    int  sequenceRunExit() const;
+    // The Animate mode's camera path as a line mesh, rebuilt when the sequence or the playhead moves.
+    void drawSequencePath(Engine& e);
 #endif
 
     // Water is not a terrain feature (buildWaterPanel touches levelHeader_.waters, not landscape types).
@@ -3870,6 +3886,20 @@ private:
     // The level's sequence (Animate mode, Play). Its camera and emissive reach the frame through
     // viewOverride_ and DrawWorldOptions::emissiveScale.
     editor::SequenceEditor seqEditor_;
+    rhi::LineHandle seqPathMesh_ = 0;
+    u64 seqPathStamp_ = 0;
+    struct SequenceRunState {
+        enum class Phase : u8 { Off, Waiting, Running, Draining, Done };
+        SequenceRunArgs args;
+        Phase phase = Phase::Off;
+        u32 waited = 0, readyFrames = 0;
+        i64 frame = 0, frames = 0;      // the frame being shown, and frames in the pass
+        bool frameSet = false;
+        i64 pendingFrame = -1;          // a capture requested for this frame and not yet read
+        u64 pendingEngineFrame = 0;
+        u32 tries = 0, written = 0, missed = 0;
+        bool failed = false;
+    } seqRun_;
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
     // Vehicles as physics cars while Play runs. Built in capturePlayWorld, ended in stopPlay.
