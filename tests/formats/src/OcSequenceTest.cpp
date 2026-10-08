@@ -316,12 +316,7 @@ int main() {
         check(contains(out, " fps 30 ") && fmt::parseOcworld(out, r, &err) && r.sequences.size() == 1 && r.sequences[0].fps == 30,
               "a non-default fps is written and read back");
         fmt::OcWorldData z;
-        check(fmt::parseOcworld("OCWORLD 1
-SEQUENCE fps 0
-ENDSEQUENCE
-SEQUENCE fps 99999
-ENDSEQUENCE
-", z, &err) &&
+        check(fmt::parseOcworld("OCWORLD 1\nSEQUENCE fps 0\nENDSEQUENCE\nSEQUENCE fps 99999\nENDSEQUENCE\n", z, &err) &&
               z.sequences.size() == 2 && z.sequences[0].fps == 1 && z.sequences[1].fps == 1000,
               "fps is clamped to 1..1000 on read");
     }

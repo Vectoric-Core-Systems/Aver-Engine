@@ -120,7 +120,8 @@ void SandboxApp::serviceSequenceCapture(Engine& e) {
     if (r.pendingFrame >= 0 && e.time().frame > r.pendingEngineFrame) {
         std::vector<u8> img;
         u32 iw = 0, ih = 0;
-        if (e.device()->getFrameImage(img, iw, ih) && iw && ih) {
+        f32 probe[4];   // true once THIS request was serviced; getFrameImage alone would hand back the last image
+        if (e.device()->getCapture(probe) && e.device()->getFrameImage(img, iw, ih) && iw && ih) {
             std::vector<u8> crop;
             u32 ow = 0, oh = 0;
             cropViewport(img, iw, ih, vpX_, vpY_, vpW_, vpH_, crop, ow, oh);
