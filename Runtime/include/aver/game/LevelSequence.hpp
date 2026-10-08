@@ -30,9 +30,17 @@ struct SeqCameraPose {
 // Time t mapped into [0, length]: wrapped when the sequence loops, clamped when it does not.
 f64 seqWrapTime(const fmt::OcSequence& seq, f64 t);
 
+// The fixed step of fixed-step playback and capture runs: 1 / fps seconds (fps clamped to 1..1000).
+inline f64 seqStepSeconds(const fmt::OcSequence& seq) {
+    return 1.0 / static_cast<f64>(seq.fps < 1 ? 1 : (seq.fps > 1000 ? 1000 : seq.fps));
+}
+
 // The track's value at t. False when the track has no keys or is the wrong kind.
-// Smooth = Catmull-Rom through the neighbouring keys (positions, scales, angles, material values;
-// rotations slerp with the same eased parameter), Linear = lerp / slerp, Step = hold the key.
+// Smooth = Catmull-Rom through the neighbouring keys (positions, scales, material values; rotations slerp
+// with the same eased parameter), Linear = lerp / slerp, Step = hold the key. A camera track differs in
+// Smooth: position follows a centripetal Catmull-Rom spline and yaw / pitch go through squad on
+// quaternions (no flip across +-180 degrees, shortest arc); before the first key and after the last the
+// pose is held.
 bool sampleSeqTransform(const fmt::OcSeqTrack& track, f64 t, Transform& out);
 bool sampleSeqCamera(const fmt::OcSeqTrack& track, f64 t, SeqCameraPose& out);
 bool sampleSeqMaterial(const fmt::OcSeqTrack& track, f64 t, f32 outScale[3]);   // rgb * intensity

@@ -486,6 +486,7 @@ struct OcSeqTrack {
 struct OcSequence {
     std::string name;
     f64  length   = 10.0;   // seconds
+    i32  fps      = 60;     // fixed-step playback and the frame readout; written only when not 60
     bool loop     = true;
     bool autoplay = true;   // starts with Play and with the packaged game
     bool camera   = true;   // its camera track drives the view while it plays

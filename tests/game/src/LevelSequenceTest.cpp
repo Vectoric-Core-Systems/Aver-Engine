@@ -109,7 +109,7 @@ static void testCamera() {
     tr.keys = {a, b};
     check(game::sampleSeqCamera(tr, 1.0, p), "camera samples");
     check(approx(p.position.x, 100), "camera position lerps");
-    check(approx(std::fabs(p.yaw), 3.14159265, 1e-3), "camera yaw unwraps through 180 degrees");
+    check(std::fabs(p.yaw) > 3.1, "camera yaw takes the short way through 180 degrees");
     check(approx(p.pitch, 15.0 * 3.14159265 / 180.0, 1e-3), "camera pitch is radians");
 
     game::SeqCameraPose back;
@@ -119,6 +119,43 @@ static void testCamera() {
     one.kind = OcSeqTrackKind::Camera;
     one.keys = {k};
     check(game::sampleSeqCamera(one, 0.0, back) && approx(back.pitch, p.pitch, 1e-4), "camera key round trip");
+}
+
+static OcSeqKey camKey(f64 t, f64 x, f64 y, f64 z, f64 yawDeg, f64 pitchDeg) {
+    OcSeqKey k = key(t, x, y, z);
+    k.v[3] = yawDeg; k.v[4] = pitchDeg;
+    return k;
+}
+
+// Smooth camera: the spline passes through the keys, is held outside them, and the orientation never
+// flips (yaw crossing 180 degrees, steps between samples stay small).
+static void testCameraSpline() {
+    OcSeqTrack tr;
+    tr.kind = OcSeqTrackKind::Camera;
+    tr.keys = {camKey(0, 0, 0, 100, 0, 0), camKey(2, 500, 0, 100, 90, 10), camKey(4, 500, 500, 200, 170, -5),
+               camKey(6, 0, 500, 100, -170, 0)};
+    game::SeqCameraPose p;
+    for (const OcSeqKey& k : tr.keys) {
+        check(game::sampleSeqCamera(tr, k.t, p) && approx(p.position.x, k.v[0], 0.01) && approx(p.position.y, k.v[1], 0.01) &&
+              approx(p.position.z, k.v[2], 0.01), "the camera passes through its keys");
+    }
+    check(game::sampleSeqCamera(tr, -3.0, p) && approx(p.position.x, 0, 0.01), "held before the first key");
+    check(game::sampleSeqCamera(tr, 99.0, p) && approx(p.position.y, 500, 0.01), "held after the last key");
+
+    game::SeqCameraPose prev;
+    game::sampleSeqCamera(tr, 0.0, prev);
+    f64 maxStep = 0, maxYawStep = 0;
+    for (int i = 1; i <= 600; ++i) {
+        game::sampleSeqCamera(tr, i * 0.01, p);
+        maxStep = std::fmax(maxStep, std::sqrt(std::pow(p.position.x - prev.position.x, 2) + std::pow(p.position.y - prev.position.y, 2) +
+                                                 std::pow(p.position.z - prev.position.z, 2)));
+        f64 dy = std::fmod(p.yaw - prev.yaw + 3.14159265358979, 6.28318530717959);
+        if (dy < 0) dy += 6.28318530717959;
+        maxYawStep = std::fmax(maxYawStep, std::fabs(dy - 3.14159265358979));
+        prev = p;
+    }
+    check(maxStep < 12.0, "the camera path has no jumps");
+    check(maxYawStep < 0.05, "the camera yaw has no flips across +-180 degrees");
 }
 
 static void testMaterial() {
@@ -191,6 +228,7 @@ int main() {
     testWrap();
     testTransform();
     testCamera();
+    testCameraSpline();
     testMaterial();
 #if AVER_MODULE_SCENE
     testPlayer();
