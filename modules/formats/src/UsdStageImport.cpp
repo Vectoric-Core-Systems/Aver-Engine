@@ -10,8 +10,11 @@
 //     a text layer uses the text reader's own walk, so its materials come out identical to importUsd.
 //   - POINTINSTANCERS: each prototype is resolved and built ONCE, as its own mesh, with the prototype
 //     root's transform baked in (UsdGeomPointInstancer's IncludeProtoXform); each kept instance is a
-//     placement carrying scale * orientation * position * the instancer's own transform.
-// Not composed: variant sets, specializes, relocates, and text layers are not merged by path with
+//     placement carrying scale * orientation * position * the instancer's own transform. Instancers inside
+//     referenced prims are expanded too (nestedInstancers).
+//   - VARIANTS: the authored selection only (variantSelection); a prim's selected variant adds its arcs
+//     and children. Guide/proxy-purpose and invisible prims are skipped.
+// Not composed: specializes, relocates, and text layers are not merged by path with
 // binary ones (each text layer contributes what it defines itself). Time-sampled attributes use their
 // default. Each of these is reported in `unsupported` when met, never silently skipped.
 #include "aver/formats/UsdImport.hpp"
