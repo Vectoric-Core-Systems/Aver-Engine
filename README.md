@@ -14,6 +14,13 @@ Alternatively you can download from the releases here but download the [.zip](ht
 
 You can also choose to download the entire source folder which has Engine Documentation, this README, GNU Lesser General Public License as well as the [Source Code](https://github.com/Vectoric-Core-Systems/Aver-Engine)
 
+The branches of this engine available:
+| Name | Release | Remarks |
+|---|---|---|
+| main | 0.6.0 Stable | Latest stable release of the engine |
+| 0.6-main-evlgkl | 0.6.0 Stable | Locked to release 0.6.0 |
+| 0.7-main-nrdneuraa | 0.7 development | Currently in development with addition of tooling as well as NeuRAA(Neural Realtimw Anti Aliasing) and NRD(Nerual Realtime Denoiser |
+
 BY DOWNLOADING THIS ENGINE, YOU AGREE TO THE GNU Lesser General Public License
 
 
