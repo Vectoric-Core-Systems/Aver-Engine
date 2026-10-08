@@ -335,6 +335,20 @@ bool isActive(Stage& st, const Stack& sk, const std::string& path) {
     return !(fieldOf(st, sk, path, "active", v) && !v.i.empty() && v.i[0] == 0);
 }
 
+// Guide/proxy purpose and invisible prims (collision, occlusion, lighting volumes) are not rendered geometry.
+bool hiddenPrim(Stage& st, const Stack& sk, const std::string& path) {
+    UsdCrateValue v;
+    if (attr(st, sk, path, "purpose", v) && v.str() && (*v.str() == "guide" || *v.str() == "proxy")) {
+        st.note("prims with purpose guide/proxy were skipped");
+        return true;
+    }
+    if (attr(st, sk, path, "visibility", v) && v.str() && *v.str() == "invisible") {
+        st.note("invisible prims were skipped");
+        return true;
+    }
+    return false;
+}
+
 std::vector<std::string> relTargets(Stage& st, const Stack& sk, const std::string& prim, const std::string& rel) {
     UsdCrateValue v;
     return fieldOf(st, sk, prim + "." + rel, "targetPaths", v) ? v.s : std::vector<std::string>{};
@@ -648,6 +662,7 @@ void contents(Stage& st, const Loc& loc, const M4& toOut, std::vector<Piece>& ou
         return;
     }
     Stack& sk = *loc.stack;
+    if (hiddenPrim(st, sk, loc.path)) return;
     if (tokenOf(st, sk, loc.path, "typeName") == "Mesh")
         out.push_back(Piece{gatherCached(st, sk, loc.path), toOut, sk.prefix, groupOf(st, sk, loc.path)});
 
@@ -675,7 +690,7 @@ void contents(Stage& st, const Loc& loc, const M4& toOut, std::vector<Piece>& ou
 
     for (const std::string& name : childrenOf(st, sk, loc.path)) {
         const std::string cp = childPath(loc.path, name);
-        if (specifierOf(st, sk, cp) == 2 || !isActive(st, sk, cp)) continue;
+        if (specifierOf(st, sk, cp) == 2 || !isActive(st, sk, cp) || hiddenPrim(st, sk, cp)) continue;
         const std::string type = tokenOf(st, sk, cp, "typeName");
         if (type == "Material" || type == "Shader" || type == "GeomSubset") continue;
         if (type == "PointInstancer") { st.note("a PointInstancer nested inside a prototype was not expanded"); continue; }
@@ -1071,7 +1086,7 @@ void walkStatic(Stage& st, Stack& sk, const std::string& path, const M4& parent,
     if (depth > 256) return;
     for (const std::string& name : childrenOf(st, sk, path)) {
         const std::string cp = childPath(path, name);
-        if (specifierOf(st, sk, cp) != 0 || !isActive(st, sk, cp)) continue;   // classes and bare overs
+        if (specifierOf(st, sk, cp) != 0 || !isActive(st, sk, cp) || hiddenPrim(st, sk, cp)) continue;   // classes and bare overs
         if (excluded(st, cp)) continue;
         const std::string type = tokenOf(st, sk, cp, "typeName");
         if (type == "Material" || type == "Shader" || type == "GeomSubset") continue;
