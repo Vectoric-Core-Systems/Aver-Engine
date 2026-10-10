@@ -119,6 +119,12 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
     app.meshTris_[id] = static_cast<u32>(md.indices.size() / 3);
     if (md.hasSkin()) app.skinnedMeshIds_.insert(id);
     const bool quiet = pass->streamed;
+#if AVER_MODULE_TRIFACTOR
+    // Streamed meshes skip what only the off-by-default cluster paths read (per-cluster LOD, cluster
+    // stats) and share LOD0's vertex buffer across the ladder: both were most of a streamed upload.
+    const bool clusterData = !pass->streamed || app.lodPerClusterEnabled_ || app.lodClusterStatsEnabled_;
+    const bool shareVertices = app.lodShareVertices_ || pass->streamed;
+#endif
     if (!quiet) AVER_INFO("[Mesh] '{}' -> {} verts, {} indices, lodCount={}, coarserLods={}, meshlets={}",
               rel, verts.size(), md.indices.size(), md.lodCount(), md.coarserLods.size(),
               md.meshlets.size());
@@ -136,7 +142,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
             ladder.handles.push_back(h);
             ladder.triCounts.push_back(app.meshTris_[id]);
             ladder.errorCm.push_back(0.0f);
-            trifactor::buildLevelClusterViews(md, 0, ladder.clusters[0]);
+            if (clusterData) trifactor::buildLevelClusterViews(md, 0, ladder.clusters[0]);
 
             bool ok = true;
             for (u32 lvl = 1; lvl < levels && ok; ++lvl) {
@@ -146,7 +152,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
                 // compute-written, e.g. a skin target -- see createMeshSharingVertices' own
                 // comment for the full list) and the caller MUST fall back, exactly as if the flag
                 // were off. Off by default, so this is a no-op call on the common path.
-                rhi::MeshHandle lh = app.lodShareVertices_
+                rhi::MeshHandle lh = shareVertices
                     ? e.device()->createMeshSharingVertices(h, lod.indices.data(), (u32)lod.indices.size())
                     : 0;
                 if (lh) {
@@ -166,7 +172,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
                 ladder.handles.push_back(lh);
                 ladder.triCounts.push_back(trifactor::levelTriangleCount(md, lvl));
                 ladder.errorCm.push_back(trifactor::levelWorldErrorCm(md, lvl));
-                trifactor::buildLevelClusterViews(md, lvl, ladder.clusters[lvl]);
+                if (clusterData) trifactor::buildLevelClusterViews(md, lvl, ladder.clusters[lvl]);
             }
             if (!quiet) AVER_INFO("[Mesh] '{}' LOD ladder: {} level(s), {} tris at LOD0 -> {} tris at the coarsest",
                       rel, ladder.handles.size(), ladder.triCounts.front(), ladder.triCounts.back());
@@ -194,8 +200,8 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
 
             // Flat cluster data for per-cluster path. verts is copied (LOD0 MeshHandle already created from it).
             MeshClusterData cd;
-            cd.verts = verts;
-            trifactor::buildMeshClusterViews(md, cd.clusters, cd.clusterIndices);
+            if (clusterData) cd.verts = verts;
+            if (clusterData) trifactor::buildMeshClusterViews(md, cd.clusters, cd.clusterIndices);
             if (!cd.clusters.empty()) {
                 // Built once from resident data; never recomputed per frame or instance.
                 trifactor::buildMeshClusterLevelBounds(cd.clusters, cd.levelBounds);

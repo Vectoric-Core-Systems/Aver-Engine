@@ -1,4 +1,5 @@
 #include "aver/game/LevelStreaming.hpp"
+#include "aver/core/HitchMarks.hpp"
 
 #if AVER_MODULE_SCENE
 #  include "aver/game/GameContent.hpp"
@@ -183,6 +184,8 @@ void LevelStreaming::bindMeshMaterials(u64 meshId) {
 
 void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& items) {
     (void)world;   // instantiate() creates into the process-global World
+    HitchMarks hm(items.size() == 1 && !items_[items[0]].placements.empty()
+                      ? records_[items_[items[0]].placements.front()].asset.c_str() : "load batch", 0.25);
     // One instantiate for the batch: a sub-level of the items' placements, parents remapped.
     fmt::OcWorldData sub;
     std::vector<u32> globalOf;
@@ -209,8 +212,10 @@ void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& item
             }
         }
     }
+    hm.mark("meshes");
     opt_.meshShapes = &meshShapes_;
     const world::LevelInstance inst = world::instantiate(sub, opt_);
+    hm.mark("instantiate");
     std::vector<scene::Entity> loaded;
     std::vector<u32> loadedPlacement;
     std::vector<i32> loadedBody;
@@ -235,15 +240,19 @@ void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& item
         streamer_.markLoaded(item);
     }
     if (!inst.animatedBodies.empty()) rebuildAnimated();
+    hm.mark("bookkeeping");
     if (hooks_.afterLoad && !loaded.empty()) hooks_.afterLoad(loaded, loadedPlacement, loadedBody);
+    hm.mark("hook");
 }
 
 void LevelStreaming::evictItem(scene::World& world, u32 item, bool writeBack) {
     Item& it = items_[item];
+    HitchMarks hm(it.placements.empty() ? "evict" : records_[it.placements.front()].asset.c_str(), 0.25);
     for (const scene::Entity e : it.entities) {
         const auto pl = placementOf_.find(e);
         if (pl != placementOf_.end() && hooks_.beforeEvict && world.valid(e)) hooks_.beforeEvict(e, pl->second, writeBack);
     }
+    hm.mark("evict:hook");
 #if AVER_MODULE_PHYSICS
     for (const auto& eb : it.bodies) if (eb.second >= 0) aver_phys_remove_body(eb.second);
 #endif
@@ -253,7 +262,9 @@ void LevelStreaming::evictItem(scene::World& world, u32 item, bool writeBack) {
         if (pl != placementOf_.end()) { entityOf_.erase(pl->second); placementOf_.erase(pl); }
         if (world.valid(*e)) world.destroy(*e);
     }
+    hm.mark("evict:destroy");
     for (const u64 mesh : it.meshes) content_->releaseMesh(*device_, mesh);
+    hm.mark("evict:releaseMesh");
     it.entities.clear();
     it.bodies.clear();
     it.meshes.clear();
@@ -300,13 +311,14 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewers)
     for (const u32 item : toLoad) {
         if (item >= items_.size() || items_[item].loaded) continue;
         if (streamer_.pinned(item)) { now.push_back(item); continue; }
+        const f32 dist = streamer_.distance(item, viewers);
         bool read = true;
         for (const u32 pi : items_[item].placements) {
             if (removed(pi)) continue;
-            content_->prefetchMesh(records_[pi].objectId);
+            content_->prefetchMesh(records_[pi].objectId, dist);
             read = read && content_->meshReady(records_[pi].objectId);
         }
-        nearestMissing = std::min(nearestMissing, streamer_.distance(item, viewers));
+        nearestMissing = std::min(nearestMissing, dist);
         if (read) ready.push_back(item);
     }
     if (!now.empty()) {

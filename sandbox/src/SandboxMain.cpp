@@ -95,6 +95,7 @@ Application* createApplication(int argc, char** argv) {
     int frameInterpArg = -1;   // --frame-interp 0|1|2
     bool vsyncOn = false;   // --vsync
     f32 camWanderAmp = 0.0f, camWanderSpeed = 1.0f;   // --cam-wander AMP SPEED
+    f32 camFlyX = 0.0f, camFlyY = 0.0f;               // --cam-fly DX DY (cm per frame)
     int frameInterpTrajectory = -1;  // --frame-interp-trajectory: 0 linear, 1 quadratic, 2 neural
     bool frameInterpTrain = false;   // --frame-interp-train
     int neurafiVizArg = -1;          // --neurafi-view 0-4
@@ -697,6 +698,10 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--cam-wander") && i+2<argc) {
             camWanderAmp=(f32)std::atof(argv[++i]); camWanderSpeed=(f32)std::atof(argv[++i]);
         }
+        // --cam-fly DX DY: straight flight, cm per frame (streaming tests).
+        else if (!std::strcmp(argv[i],"--cam-fly") && i+2<argc) {
+            camFlyX=(f32)std::atof(argv[++i]); camFlyY=(f32)std::atof(argv[++i]);
+        }
         // --rt-rays: sun occlusion rays per pixel.
         else if (!std::strcmp(argv[i],"--rt-rays") && i+1<argc) rtRays=std::atoi(argv[++i]);
         // --rt-pixels-per-ray: temporal amortisation tile edge.
@@ -1163,6 +1168,7 @@ Application* createApplication(int argc, char** argv) {
     if (!consoleSetArgs.empty()) app->setConsoleSets(std::move(consoleSetArgs));
     if (camTranslateArg != 0.0f) app->setCamTranslate(camTranslateArg);
     if (camWanderAmp > 0.0f) app->setCamWander(camWanderAmp, camWanderSpeed);
+    if (camFlyX != 0.0f || camFlyY != 0.0f) app->setCamFly(camFlyX, camFlyY);
     if (nrd2TrainStepsArg > 0) app->setNrd2Train(static_cast<u32>(nrd2TrainStepsArg), nrd2TrainDirsArg);
     if (nrd2CapturePosesArg > 0) {
         app->setNrd2Capture(nrd2CaptureDirArg, static_cast<u32>(nrd2CapturePosesArg),

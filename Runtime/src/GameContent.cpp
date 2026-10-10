@@ -2,6 +2,7 @@
 
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/core/HitchMarks.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -12,6 +13,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <system_error>
@@ -386,11 +388,14 @@ void GameContent::prepareMeshCpu(const fmt::OcMeshData& md, const std::string& r
 
 bool GameContent::uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, const std::string& rel,
                              MeshCpu* cpu) {
+    HitchMarks hm(rel.c_str(), 0.25);
     MeshCpu local;
     if (!cpu) { prepareMeshCpu(md, rel, local); cpu = &local; }
+    hm.mark("upload:prepare");
     const std::vector<rhi::MeshVertex>& verts = cpu->verts;
     const rhi::MeshHandle h = device.createMesh(verts.data(), (u32)verts.size(),
                                                md.indices.data(), (u32)md.indices.size());
+    hm.mark("upload:createMesh");
     if (!h) { AVER_WARN("[Mesh] the device refused '{}'", rel); return false; }
 
     sceneMeshes_[id] = h;
@@ -402,9 +407,11 @@ bool GameContent::uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData
     }
     // The per-submesh split: a mesh naming several materials draws one part per material.
     buildMeshParts(device, id, md, cpu->parts, rel);
+    hm.mark("upload:parts");
     projectMeshIds_.push_back(id);
     if (meshLoaded_) meshLoaded_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshLoadedUser_);
     if (lazyLoading_ && meshAcquired_) meshAcquired_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshAcquiredUser_);
+    hm.mark("upload:hooks");
 
     // Coarse LOD for shadow/GI/voxelise passes (depth-only). 20cm target error (one shadow texel).
 #if AVER_MODULE_TRIFACTOR
@@ -513,10 +520,7 @@ bool GameContent::acquireMesh(rhi::IDevice& device, u64 id) {
                 AVER_WARN("[Mesh] {}", why);
             } else {
                 ok = uploadMesh(device, id, md, lit->second, &cpu);
-                if (ok && collision && !collisionMeshCache_.count(id)) {
-                    collisionMeshCache_[id] = std::move(collision);
-                    ++collisionCacheHits_;
-                }
+                if (ok && collision && !collisionMeshCache_.count(id)) collisionMeshCache_[id] = std::move(collision);
                 if (ok && shape) { readyShapes_[id] = shape; shape = 0; }
             }
 #  if AVER_MODULE_PHYSICS
@@ -958,196 +962,12 @@ bool writeCollisionCacheFile(const std::string& cachePath, const std::string& me
     return true;
 }
 
-} // namespace
-
-// Two workers read .ocmesh files and collision caches; uploads stay on the main thread.
-struct GameContent::MeshPrefetch {
-    struct Job {
-        std::string path, rel, projectDir;
-        fmt::OcMeshData md;
-        MeshCpu cpu;
-        bool meshOk = false;
-        std::string why;
-        std::unique_ptr<CollisionMesh> collision;
-        i32 shape = 0;   // released here unless taken
-        std::atomic<bool> done{false};
-        u64 order = 0;
-        ~Job() {
-#  if AVER_MODULE_PHYSICS
-            if (shape) aver_phys_release_mesh_shape(shape);
-#  endif
-        }
-    };
-    std::mutex m;
-    std::condition_variable cv;
-    std::deque<std::shared_ptr<Job>> queue;
-    std::vector<std::thread> workers;
-    bool stop = false;
-    std::unordered_map<u64, std::shared_ptr<Job>> jobs;   // main thread only
-    u64 nextOrder = 0;
-
-    ~MeshPrefetch() {
-        { std::lock_guard<std::mutex> l(m); stop = true; }
-        cv.notify_all();
-        for (std::thread& t : workers) t.join();
-    }
-    void push(std::shared_ptr<Job> j) {
-        if (workers.empty())
-            for (int i = 0; i < 2; ++i) workers.emplace_back([this] { run(); });
-        { std::lock_guard<std::mutex> l(m); queue.push_back(std::move(j)); }
-        cv.notify_one();
-    }
-    void run() {
-        for (;;) {
-            std::shared_ptr<Job> j;
-            {
-                std::unique_lock<std::mutex> l(m);
-                cv.wait(l, [this] { return stop || !queue.empty(); });
-                if (stop) return;
-                j = std::move(queue.front());
-                queue.pop_front();
-            }
-            j->meshOk = fmt::loadOcMesh(j->path, j->md, &j->why);
-            if (j->meshOk) prepareMeshCpu(j->md, j->rel, j->cpu);
-            if (j->meshOk && !j->projectDir.empty()) {
-                std::error_code ec;
-                const u64 size = static_cast<u64>(std::filesystem::file_size(j->path, ec));
-                const i64 mtime = ec ? 0 : static_cast<i64>(
-                    std::filesystem::last_write_time(j->path, ec).time_since_epoch().count());
-                if (!ec) {
-                    const std::string cachePath = collisionCachePathFor(j->projectDir, j->path, size, mtime);
-                    auto c = std::make_unique<CollisionMesh>();
-                    if (!cachePath.empty() && readCollisionCacheFile(cachePath, j->path, size, mtime, *c))
-                        j->collision = std::move(c);
-                }
-            }
-#  if AVER_MODULE_PHYSICS
-            // The mesh's shared collision shape (its BVH build is the costly part of a placement's body).
-            if (j->collision && j->collision->indices.size() >= 3 && aver_phys_ready())
-                j->shape = aver_phys_create_mesh_shape(
-                    j->collision->positions.data(), static_cast<i32>(j->collision->positions.size() / 3),
-                    reinterpret_cast<const i32*>(j->collision->indices.data()), static_cast<i32>(j->collision->indices.size()));
-#  endif
-            j->done.store(true, std::memory_order_release);
-        }
-    }
-};
-
-void GameContent::prefetchMesh(u64 id) {
-    if (!lazyRel_.count(id) || sceneMeshes_.count(id)) return;
-    const auto pit = contentIndex_.find(id);
-    if (pit == contentIndex_.end()) return;
-    if (!prefetch_) prefetch_ = std::make_shared<MeshPrefetch>();
-    MeshPrefetch& pf = *prefetch_;
-    if (const auto it = pf.jobs.find(id); it != pf.jobs.end()) { it->second->order = ++pf.nextOrder; return; }
-    // Finished reads the viewer turned away from are dropped, oldest request first.
-    constexpr usize kMaxJobs = 512;
-    if (pf.jobs.size() >= kMaxJobs) {
-        std::vector<std::pair<u64, u64>> finished;
-        for (const auto& [jid, j] : pf.jobs)
-            if (j->done.load(std::memory_order_acquire)) finished.emplace_back(j->order, jid);
-        std::sort(finished.begin(), finished.end());
-        for (usize i = 0; i < finished.size() && pf.jobs.size() > kMaxJobs * 3 / 4; ++i) pf.jobs.erase(finished[i].second);
-        if (pf.jobs.size() >= kMaxJobs) return;
-    }
-    auto j = std::make_shared<MeshPrefetch::Job>();
-    j->path = pit->second;
-    j->rel = lazyRel_[id];
-    j->projectDir = project_.dir;
-    j->order = ++pf.nextOrder;
-    pf.jobs.emplace(id, j);
-    pf.push(std::move(j));
-}
-
-bool GameContent::meshReady(u64 id) const {
-    if (!prefetch_) return true;
-    const auto it = prefetch_->jobs.find(id);
-    return it == prefetch_->jobs.end() || it->second->done.load(std::memory_order_acquire);
-}
-
-int GameContent::takePrefetch(u64 id, fmt::OcMeshData& md, MeshCpu& cpu, std::unique_ptr<CollisionMesh>& collision,
-                              i32& shape, std::string& why) {
-    if (!prefetch_) return -1;
-    const auto it = prefetch_->jobs.find(id);
-    if (it == prefetch_->jobs.end()) return -1;
-    const std::shared_ptr<MeshPrefetch::Job> j = it->second;
-    prefetch_->jobs.erase(it);   // a read still running finishes into its own job and is dropped
-    if (!j->done.load(std::memory_order_acquire)) return -1;
-    if (!j->meshOk) { why = std::move(j->why); return 0; }
-    md = std::move(j->md);
-    cpu = std::move(j->cpu);
-    collision = std::move(j->collision);
-    shape = j->shape;
-    j->shape = 0;
-    return 1;
-}
-
-i32 GameContent::takeMeshShape(u64 id) {
-    const auto it = readyShapes_.find(id);
-    if (it == readyShapes_.end()) return 0;
-    const i32 h = it->second;
-    readyShapes_.erase(it);
-    return h;
-}
-
-void GameContent::dropPrefetches() {
-    if (prefetch_) prefetch_->jobs.clear();
-#  if AVER_MODULE_PHYSICS
-    for (const auto& [mesh, shape] : readyShapes_) aver_phys_release_mesh_shape(shape);
-#  endif
-    readyShapes_.clear();
-}
-
-#if AVER_MODULE_PBR
-// Material slot collision filter.
-bool GameContent::collisionSlotCollides(const std::string& slotName) {
-    if (slotName.empty()) return true;
-    const pbr::MaterialHandle mh = materialForSurface(slotName);
-    if (!mh) return true;   // no authored .ocmat: cannot resolve
-    const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(mh);
-    if (!d) return true;
-    return d->alphaMode != pbr::AlphaMode::Mask && d->alphaMode != pbr::AlphaMode::Blend;
-}
-#else
-// Every slot collides (no PBR module).
-bool GameContent::collisionSlotCollides(const std::string&) { return true; }
-#endif
-
-// Filters and simplifies collision geometry from meshes with multiple per-material submeshes.
-const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
-    if (const auto it = collisionMeshCache_.find(id); it != collisionMeshCache_.end())
-        return it->second.get();
-
-    // Cache null entries so failed lookups are O(1) on retry.
-    std::unique_ptr<CollisionMesh>& slot = collisionMeshCache_[id];
-
-    const std::string path = pathFor(id);
-    if (path.empty()) return nullptr;   // built-in or unrecognized id
-
-    // Disk cache: check source file size and mtime.
-    std::error_code statEc;
-    const u64 srcSize = static_cast<u64>(std::filesystem::file_size(path, statEc));
-    const i64 srcMtime = statEc ? 0 : static_cast<i64>(
-        std::filesystem::last_write_time(path, statEc).time_since_epoch().count());
-    const bool canCache = !statEc && !project_.dir.empty();
-    const std::string cachePath = canCache ? collisionCachePathFor(project_.dir, path, srcSize, srcMtime)
-                                           : std::string();
-    if (!cachePath.empty()) {
-        auto cached = std::make_unique<CollisionMesh>();
-        if (readCollisionCacheFile(cachePath, path, srcSize, srcMtime, *cached)) {
-            ++collisionCacheHits_;
-            AVER_INFO("[Collision] {}: {} tris from the disk cache", path, cached->indices.size() / 3);
-            slot = std::move(cached);
-            return slot.get();
-        }
-    }
-
-    fmt::OcMeshData md;
-    std::string why;
-    if (!fmt::loadOcMesh(path, md, &why)) {
-        AVER_WARN("[Collision] {}", why);
-        return nullptr;
-    }
+// Collision geometry for a parsed mesh: slots `collides` rejects are dropped, then the cheaper of a
+// meshoptimizer simplification and a Trifactor LOD is kept. Touches no GameContent state (prefetch
+// workers run it).
+std::unique_ptr<GameContent::CollisionMesh> buildCollisionMesh(const fmt::OcMeshData& md, const std::string& path,
+                                                              const std::function<bool(const std::string&)>& collides) {
+    using CollisionMesh = GameContent::CollisionMesh;
     const u32 vertexCount = md.vertexCount();
     if (vertexCount == 0 || md.indices.size() < 3) return nullptr;
 
@@ -1165,7 +985,7 @@ const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
             if (end > md.indices.size()) continue;   // malformed range
             const std::string slotName =
                 sm.materialSlot < md.materialSlots.size() ? md.materialSlots[sm.materialSlot] : std::string();
-            if (!collisionSlotCollides(slotName)) { anyDropped = true; ++droppedSlots; continue; }
+            if (!collides(slotName)) { anyDropped = true; ++droppedSlots; continue; }
             keptIndices.insert(keptIndices.end(),
                                md.indices.begin() + static_cast<std::ptrdiff_t>(sm.indexStart),
                                md.indices.begin() + static_cast<std::ptrdiff_t>(end));
@@ -1251,6 +1071,279 @@ const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
 
     AVER_INFO("[Collision] {}: {} ({} tris from {} at LOD 0, {:.1f} cm error)", path, wonBy,
               mesh->indices.size() / 3, md.indices.size() / 3, mesh->errorCm);
+    return mesh;
+}
+
+#  if AVER_MODULE_PBR
+// collisionSlotCollides without the material library: the same file lookup materialForSurface makes,
+// parsed directly (thread-free).
+bool slotCollidesFromFiles(const std::string& binariesDir, const std::string& contentDir, const std::string& name) {
+    if (name.empty() || contentDir.empty()) return true;
+    const std::string candidates[3] = {
+        binariesDir + "\\Materials\\" + name + ".ocmat",
+        contentDir + "\\Materials\\" + name + ".ocmat",
+        contentDir + "\\" + name,
+    };
+    for (const std::string& path : candidates) {
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) continue;
+        pbr::MaterialDesc d;
+        fmt::OcMatExtras extras;
+        std::string err;
+        if (!fmt::loadOcmat(path, d, &extras, &err)) return true;
+        return d.alphaMode != pbr::AlphaMode::Mask && d.alphaMode != pbr::AlphaMode::Blend;
+    }
+    return true;
+}
+#  endif
+
+} // namespace
+
+// Two workers read .ocmesh files and collision caches; uploads stay on the main thread.
+struct GameContent::MeshPrefetch {
+    struct Job {
+        std::string path, rel, projectDir, binariesDir, contentDir;
+        bool collisionBuilt = false;   // made on the worker (not read from the disk cache)
+        fmt::OcMeshData md;
+        MeshCpu cpu;
+        bool meshOk = false;
+        std::string why;
+        std::unique_ptr<CollisionMesh> collision;
+        i32 shape = 0;   // released here unless taken
+        std::atomic<bool> done{false};
+        u64 order = 0;
+        f32 priority = 0.0f;   // guarded by MeshPrefetch::m while queued
+        ~Job() {
+#  if AVER_MODULE_PHYSICS
+            if (shape) aver_phys_release_mesh_shape(shape);
+#  endif
+        }
+    };
+    std::mutex m;
+    std::condition_variable cv;
+    std::deque<std::shared_ptr<Job>> queue;
+    std::vector<std::thread> workers;
+    bool stop = false;
+    std::unordered_map<u64, std::shared_ptr<Job>> jobs;   // main thread only
+    u64 nextOrder = 0;
+    std::mutex slotMutex;
+    std::unordered_map<std::string, bool> slotCollidesMemo;   // material slot -> collides (workers)
+
+    bool slotCollides(const Job& j, const std::string& slot) {
+#  if AVER_MODULE_PBR
+        {
+            std::lock_guard<std::mutex> l(slotMutex);
+            if (const auto it = slotCollidesMemo.find(slot); it != slotCollidesMemo.end()) return it->second;
+        }
+        const bool c = slotCollidesFromFiles(j.binariesDir, j.contentDir, slot);
+        std::lock_guard<std::mutex> l(slotMutex);
+        slotCollidesMemo.emplace(slot, c);
+        return c;
+#  else
+        (void)j; (void)slot;
+        return true;
+#  endif
+    }
+
+    ~MeshPrefetch() {
+        { std::lock_guard<std::mutex> l(m); stop = true; }
+        cv.notify_all();
+        for (std::thread& t : workers) t.join();
+    }
+    void push(std::shared_ptr<Job> j) {
+        if (workers.empty())
+            for (int i = 0; i < 3; ++i) workers.emplace_back([this] { run(); });
+        { std::lock_guard<std::mutex> l(m); queue.push_back(std::move(j)); }
+        cv.notify_one();
+    }
+    void run() {
+        for (;;) {
+            std::shared_ptr<Job> j;
+            {
+                std::unique_lock<std::mutex> l(m);
+                cv.wait(l, [this] { return stop || !queue.empty(); });
+                if (stop) return;
+                // Nearest first: the queue holds what the streamer asked for over many ticks.
+                auto best = queue.begin();
+                for (auto it = queue.begin(); it != queue.end(); ++it)
+                    if ((*it)->priority < (*best)->priority) best = it;
+                j = std::move(*best);
+                queue.erase(best);
+            }
+            j->meshOk = fmt::loadOcMesh(j->path, j->md, &j->why);
+            if (j->meshOk) prepareMeshCpu(j->md, j->rel, j->cpu);
+            if (j->meshOk && !j->projectDir.empty()) {
+                std::error_code ec;
+                const u64 size = static_cast<u64>(std::filesystem::file_size(j->path, ec));
+                const i64 mtime = ec ? 0 : static_cast<i64>(
+                    std::filesystem::last_write_time(j->path, ec).time_since_epoch().count());
+                if (!ec) {
+                    const std::string cachePath = collisionCachePathFor(j->projectDir, j->path, size, mtime);
+                    auto c = std::make_unique<CollisionMesh>();
+                    if (!cachePath.empty() && readCollisionCacheFile(cachePath, j->path, size, mtime, *c)) {
+                        j->collision = std::move(c);
+                    } else {
+                        // First visit: build it here and fill the disk cache.
+                        j->collision = buildCollisionMesh(j->md, j->path, [this, &j](const std::string& slot) {
+                            return slotCollides(*j, slot);
+                        });
+                        if (j->collision && !cachePath.empty()) {
+                            std::string why;
+                            if (!writeCollisionCacheFile(cachePath, j->path, size, mtime, *j->collision, &why))
+                                AVER_WARN("[Collision] {}: could not write the disk cache: {}", j->path, why);
+                        }
+                        j->collisionBuilt = true;
+                    }
+                }
+            }
+#  if AVER_MODULE_PHYSICS
+            // The mesh's shared collision shape (its BVH build is the costly part of a placement's body).
+            if (j->collision && j->collision->indices.size() >= 3 && aver_phys_ready())
+                j->shape = aver_phys_create_mesh_shape(
+                    j->collision->positions.data(), static_cast<i32>(j->collision->positions.size() / 3),
+                    reinterpret_cast<const i32*>(j->collision->indices.data()), static_cast<i32>(j->collision->indices.size()));
+#  endif
+            j->done.store(true, std::memory_order_release);
+        }
+    }
+};
+
+void GameContent::prefetchMesh(u64 id, f32 priority) {
+    if (!lazyRel_.count(id) || sceneMeshes_.count(id)) return;
+    const auto pit = contentIndex_.find(id);
+    if (pit == contentIndex_.end()) return;
+    if (!prefetch_) prefetch_ = std::make_shared<MeshPrefetch>();
+    MeshPrefetch& pf = *prefetch_;
+    if (const auto it = pf.jobs.find(id); it != pf.jobs.end()) {
+        it->second->order = ++pf.nextOrder;
+        std::lock_guard<std::mutex> l(pf.m);
+        it->second->priority = priority;
+        return;
+    }
+    // Finished reads the viewer turned away from are dropped, oldest request first.
+    constexpr usize kMaxJobs = 512;
+    if (pf.jobs.size() >= kMaxJobs) {
+        std::vector<std::pair<u64, u64>> finished;
+        for (const auto& [jid, j] : pf.jobs)
+            if (j->done.load(std::memory_order_acquire)) finished.emplace_back(j->order, jid);
+        std::sort(finished.begin(), finished.end());
+        for (usize i = 0; i < finished.size() && pf.jobs.size() > kMaxJobs * 3 / 4; ++i) pf.jobs.erase(finished[i].second);
+        if (pf.jobs.size() >= kMaxJobs) {
+            // Still full of queued reads: the farthest gives way to a nearer one.
+            std::lock_guard<std::mutex> l(pf.m);
+            auto far = pf.queue.end();
+            for (auto it = pf.queue.begin(); it != pf.queue.end(); ++it)
+                if (far == pf.queue.end() || (*it)->priority > (*far)->priority) far = it;
+            if (far == pf.queue.end() || (*far)->priority <= priority) return;
+            for (auto it = pf.jobs.begin(); it != pf.jobs.end(); ++it)
+                if (it->second == *far) { pf.jobs.erase(it); break; }
+            pf.queue.erase(far);
+        }
+    }
+    auto j = std::make_shared<MeshPrefetch::Job>();
+    j->path = pit->second;
+    j->rel = lazyRel_[id];
+    j->projectDir = project_.dir;
+    j->binariesDir = project_.binariesDir();
+    j->contentDir = project_.contentDir();
+    j->order = ++pf.nextOrder;
+    j->priority = priority;
+    pf.jobs.emplace(id, j);
+    pf.push(std::move(j));
+}
+
+bool GameContent::meshReady(u64 id) const {
+    if (!lazyRel_.count(id) || sceneMeshes_.count(id)) return true;
+    if (!prefetch_) return false;
+    const auto it = prefetch_->jobs.find(id);
+    return it != prefetch_->jobs.end() && it->second->done.load(std::memory_order_acquire);
+}
+
+int GameContent::takePrefetch(u64 id, fmt::OcMeshData& md, MeshCpu& cpu, std::unique_ptr<CollisionMesh>& collision,
+                              i32& shape, std::string& why) {
+    if (!prefetch_) return -1;
+    const auto it = prefetch_->jobs.find(id);
+    if (it == prefetch_->jobs.end()) return -1;
+    const std::shared_ptr<MeshPrefetch::Job> j = it->second;
+    prefetch_->jobs.erase(it);   // a read still running finishes into its own job and is dropped
+    if (!j->done.load(std::memory_order_acquire)) return -1;
+    if (!j->meshOk) { why = std::move(j->why); return 0; }
+    md = std::move(j->md);
+    cpu = std::move(j->cpu);
+    collision = std::move(j->collision);
+    shape = j->shape;
+    j->shape = 0;
+    return 1;
+}
+
+i32 GameContent::takeMeshShape(u64 id) {
+    const auto it = readyShapes_.find(id);
+    if (it == readyShapes_.end()) return 0;
+    const i32 h = it->second;
+    readyShapes_.erase(it);
+    return h;
+}
+
+void GameContent::dropPrefetches() {
+    if (prefetch_) prefetch_->jobs.clear();
+#  if AVER_MODULE_PHYSICS
+    for (const auto& [mesh, shape] : readyShapes_) aver_phys_release_mesh_shape(shape);
+#  endif
+    readyShapes_.clear();
+}
+
+#if AVER_MODULE_PBR
+// Material slot collision filter.
+bool GameContent::collisionSlotCollides(const std::string& slotName) {
+    if (slotName.empty()) return true;
+    const pbr::MaterialHandle mh = materialForSurface(slotName);
+    if (!mh) return true;   // no authored .ocmat: cannot resolve
+    const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(mh);
+    if (!d) return true;
+    return d->alphaMode != pbr::AlphaMode::Mask && d->alphaMode != pbr::AlphaMode::Blend;
+}
+#else
+// Every slot collides (no PBR module).
+bool GameContent::collisionSlotCollides(const std::string&) { return true; }
+#endif
+
+// Filters and simplifies collision geometry from meshes with multiple per-material submeshes.
+const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
+    if (const auto it = collisionMeshCache_.find(id); it != collisionMeshCache_.end())
+        return it->second.get();
+
+    // Cache null entries so failed lookups are O(1) on retry.
+    std::unique_ptr<CollisionMesh>& slot = collisionMeshCache_[id];
+
+    const std::string path = pathFor(id);
+    if (path.empty()) return nullptr;   // built-in or unrecognized id
+
+    // Disk cache: check source file size and mtime.
+    std::error_code statEc;
+    const u64 srcSize = static_cast<u64>(std::filesystem::file_size(path, statEc));
+    const i64 srcMtime = statEc ? 0 : static_cast<i64>(
+        std::filesystem::last_write_time(path, statEc).time_since_epoch().count());
+    const bool canCache = !statEc && !project_.dir.empty();
+    const std::string cachePath = canCache ? collisionCachePathFor(project_.dir, path, srcSize, srcMtime)
+                                           : std::string();
+    if (!cachePath.empty()) {
+        auto cached = std::make_unique<CollisionMesh>();
+        if (readCollisionCacheFile(cachePath, path, srcSize, srcMtime, *cached)) {
+            ++collisionCacheHits_;
+            AVER_INFO("[Collision] {}: {} tris from the disk cache", path, cached->indices.size() / 3);
+            slot = std::move(cached);
+            return slot.get();
+        }
+    }
+
+    fmt::OcMeshData md;
+    std::string why;
+    if (!fmt::loadOcMesh(path, md, &why)) {
+        AVER_WARN("[Collision] {}", why);
+        return nullptr;
+    }
+    auto mesh = buildCollisionMesh(md, path, [this](const std::string& slotName) { return collisionSlotCollides(slotName); });
+    if (!mesh) return nullptr;
 
     if (!cachePath.empty()) {
         std::string saveWhy;

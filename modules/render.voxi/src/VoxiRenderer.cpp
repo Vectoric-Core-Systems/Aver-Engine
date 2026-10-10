@@ -2,6 +2,7 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 #include "aver/voxi/VoxiRenderer.hpp"
+#include "aver/core/HitchMarks.hpp"
 #include "aver/core/CpuTiming.hpp"   // CpuNest(CpuSpan::VoxiSubmit) below -- Types.hpp + stdlib only,
                                      // so no AVER_MODULE_VOXI guard needed, same as Log.hpp/Math.hpp.
 #include "aver/core/Log.hpp"
@@ -1406,6 +1407,8 @@ void VoxiRenderer::manageInjectionAccumulator(rhi::IRenderContext& ctx) {
             res_->setUav(resolveBindings_, 1, voxelAccumTex_, 0);
             giAccumWanted_ = false;
             giQuietTicks_ = 0;
+            if (giAccumFreedFrame_ && rtFrameIndex_ + 1 - giAccumFreedFrame_ < kGiAccumChurnFrames)
+                giAccumQuietNeeded_ = std::min(giAccumQuietNeeded_ * 2, kGiAccumulatorQuietTicksMax);
             giAccumRecreateFailedLogged_ = false;
             giAccumRecreateBackoffNext_ = 0;   // the next failure, if any, starts cold again
             const f64 mib = static_cast<f64>(static_cast<u64>(voxelResBuilt_) * voxelResBuilt_ *
@@ -1424,7 +1427,7 @@ void VoxiRenderer::manageInjectionAccumulator(rhi::IRenderContext& ctx) {
                                                     kGiAccumRecreateBackoffMax);
         }
     } else if (giFreeAccumulator_ && voxelAccumTex_ && giEnabled() && !giForceRebuild_ &&
-              giConvergeTicks_ == 0 && giQuietTicks_ >= kGiAccumulatorQuietTicks) {
+              giConvergeTicks_ == 0 && giQuietTicks_ >= giAccumQuietNeeded_) {
         // Free: rebind to placeholder first (aver-view-outlives-its-buffer.md), then destroy.
         if (!voxelAccumPlaceholder_) {
             rhi::TextureDesc pd;
@@ -1458,6 +1461,7 @@ void VoxiRenderer::manageInjectionAccumulator(rhi::IRenderContext& ctx) {
             // factory is asked to do that frame.
             res_->destroyTexture(voxelAccumTex_);
             voxelAccumTex_ = 0;
+            giAccumFreedFrame_ = rtFrameIndex_ + 1;
             AVER_INFO("[Voxi] injection accumulator freed after {} quiet GI tick(s): {:.0f} MiB "
                       "queued for release (fence-deferred)", giQuietTicks_, mib);
         }
@@ -1559,6 +1563,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     rtRefitDeferred_ = false;   // the build below rewrites and uploads every table
 
     rhi::ScopedGpuStat gpuStat(ctx, "Voxi acceleration structures");
+    HitchMarks hm("voxi accel build", 0.25);
     tlasTranslucentThisBuild_ = 0;
     tlasAlphaMaskedThisBuild_ = 0;
     // tlasInstScratch_/matConstantsScratch_: hoisted members, .clear() keeps storage for reuse.
@@ -1706,7 +1711,9 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     }
 
     // Refits TLAS in place if rtRefitAccel allows, else full build.
+    hm.mark("drawLoop");
     refitOrRebuildTlas(ctx);
+    hm.mark("tlas");
     if (tlasTranslucentThisBuild_ && tlasTranslucentLogged_ != tlasTranslucentThisBuild_) {
         tlasTranslucentLogged_ = tlasTranslucentThisBuild_;
         AVER_INFO("[Voxi] acceleration structure: {} instance(s), {} in the translucent lane "
@@ -1728,8 +1735,10 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     ensureTextureTable();
     resolveFoliageMaterials();
     const bool matTableReady = buildMaterialTable(matConstantsScratch_);
+    hm.mark("materialTable");
     // Reflection ray may trace only if geometry table exists.
     const bool geomTableReady = buildGeometryTable(ctx);
+    hm.mark("geometryTable");
     cb_.rtParams[3] = geomTableReady ? 1.0f : 0.0f;
     // After both tables: foliage part records carry indices into each.
     if (geomTableReady) uploadFoliagePartTable();

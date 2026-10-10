@@ -108,10 +108,12 @@ public:
     bool acquireMesh(rhi::IDevice& device, u64 id);
     void releaseMesh(rhi::IDevice& device, u64 id);
     bool meshLoaded(u64 id) const;
-    // Reads a lazy mesh (and its cached collision) on a worker thread so a later acquireMesh does not
-    // touch the disk. No-op for eager, loaded or already-queued meshes.
-    void prefetchMesh(u64 id);
-    // False only while a prefetch of `id` is still reading.
+    // Prepares a lazy mesh on a worker thread (read, vertices and parts, collision mesh and shape) so a
+    // later acquireMesh only uploads. Workers take the lowest `priority` first (a streamer passes the
+    // distance); asking again updates it. No-op for eager or loaded meshes.
+    void prefetchMesh(u64 id, f32 priority = 0.0f);
+    // True for eager, loaded or unknown meshes and for finished prefetches; false while a lazy mesh is
+    // still being prepared or has no prefetch yet (the queue was full).
     bool meshReady(u64 id) const;
     // The physics mesh shape a prefetch built from this mesh's collision (0 if none); the caller owns it.
     i32 takeMeshShape(u64 id);

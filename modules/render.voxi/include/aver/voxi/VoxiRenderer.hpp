@@ -1015,6 +1015,13 @@ private:
     // Quiet GI ticks before freeing (~1 s). 240 kept 2 GiB alive through a level load's first seconds,
     // longer still while paging slowed the frame rate; a later rebuild waits one tick for the recreate.
     static constexpr u32 kGiAccumulatorQuietTicks = 60;
+    // Freed and needed again within kGiAccumChurnFrames: the quiet ticks before the next free double (to
+    // kGiAccumulatorQuietTicksMax). A 2 GiB create or release is a 60-200 ms frame; flying through a
+    // streamed level would otherwise pay it every few seconds.
+    static constexpr u32 kGiAccumulatorQuietTicksMax = 3840;
+    static constexpr u64 kGiAccumChurnFrames = 1200;
+    u32 giAccumQuietNeeded_ = kGiAccumulatorQuietTicks;
+    u64 giAccumFreedFrame_ = 0;   // rtFrameIndex_ + 1 at the last free, 0 never
     // Per-frame BLAS build budget (structure bytes; scratch is of the same order). See buildAccelerationStructures.
     // ~1.4 ms per MB (NeonDistrict: 512 MB was ~0.7 s in one submission); 8 MB keeps a streamed level's
     // builds near 10 ms a frame.

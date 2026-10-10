@@ -342,6 +342,17 @@ generic `Crash` — throwing away the assert's message, file and line. It is now
 
 ---
 
+## Stutter hunting (`AVER_HITCH_MS`)
+
+Set `AVER_HITCH_MS=<ms>` before starting the editor (or a `--frames` run) and every frame longer than that
+logs `[FrameHitch]` with its phases (update, beginFrame, render, endFrame, present). Scoped
+`aver::HitchMarks` (`modules/core/include/aver/core/HitchMarks.hpp`) break a phase down further and log
+`[HitchMarks] <where> <total>: <stretch> <ms> | ...` when their own scope runs long: the editor's update,
+D3D12 `endFrame` (late scene pass vs the rest), Voxi's acceleration-structure build, and each streamed
+root's load (meshes / instantiate / hook), eviction and mesh upload, named by asset. Unset, each costs
+one cached `getenv`. `--cam-fly DX DY` (cm per frame) flies the editor camera in a straight line, which
+is what exercises level streaming.
+
 ## Diagnostic codes (`AVR####`) — reserved, not yet issued
 
 The ranges below are allocated so a code names its owner on sight. The retrofit itself is not done —

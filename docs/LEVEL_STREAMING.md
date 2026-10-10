@@ -90,11 +90,17 @@ Runtime (GameLevel/GameApp) and editor (Sandbox) share one driver, `game::LevelS
 filtered instantiate of a set of roots (hierarchies whole; same InstantiateOptions as a full load), and
 destroys entities and their bodies on eviction. Hosts call `tick(viewers)` once a frame.
 
-Hitch budget (2026-10-10; before it, every tick that loaded its 128 roots took 150-370 ms on Caldera):
-- Off the main thread (GameContent's prefetch workers): the `.ocmesh` read, vertex conversion, the
-  per-material part split, the collision disk-cache read and the Jolt mesh shape (its BVH build;
-  `aver_phys_create_mesh_shape` is thread-safe). A root loads once every mesh it names is prepared;
-  pinned roots load at once.
+Hitch budget (2026-10-10; before it, every tick that loaded its 128 roots took 150-370 ms on Caldera,
+and in the Debug editor single roots took 30-200 ms (collision built on the main thread) and terrain
+tiles 0.6-6.7 s):
+- Off the main thread (GameContent's three prefetch workers, nearest request first): the `.ocmesh`
+  read, vertex conversion, the per-material part split, the collision mesh (read from the disk cache,
+  or on a first visit built and written there; material slots are judged from their `.ocmat` files)
+  and the Jolt mesh shape (its BVH build; `aver_phys_create_mesh_shape` is thread-safe). A root loads
+  once every mesh it names is prepared; a mesh with no prefetch yet (the 512-job queue was full, and
+  the farthest queued job only gives way to a nearer one) is not ready. Pinned roots load at once.
+- The editor's mesh hook, for streamed meshes, shares LOD0's vertex buffer across the LOD ladder and
+  skips the cluster data only `--lod-per-cluster` and `--lod-cluster-stats` read.
 - On the main thread, budgeted: GPU buffer creation, material binding, entities and bodies. Loads run
   nearest first one root at a time within 12 ms per tick while the nearest missing root is within a
   quarter of the load distance (a level opening, a teleport), falling to 3 ms at three quarters.

@@ -9,6 +9,9 @@
 #include "aver/core/Log.hpp"
 #include "aver/core/Version.hpp"
 
+#include <chrono>
+#include <cstdlib>
+
 namespace aver {
 
 Engine::Engine() = default;
@@ -285,12 +288,27 @@ void Engine::frameStep() {
         return;
     }
 
+    // AVER_HITCH_MS=<ms>: log the phases of any frame longer than that (stutter hunting).
+    static const f64 hitchMs = [] { const char* v = std::getenv("AVER_HITCH_MS"); return v ? std::atof(v) : 0.0; }();
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point t0 = Clock::now();
     app_->onUpdate(*this, time_);
+    const Clock::time_point t1 = Clock::now();
     device_->beginFrame();
+    const Clock::time_point t2 = Clock::now();
     device_->uiNewFrame();   // ImGui NewFrame; the app builds widgets in onRender
     app_->onRender(*this);
+    const Clock::time_point t3 = Clock::now();
     device_->endFrame();     // records ImGui draw data before present
+    const Clock::time_point t4 = Clock::now();
     if (swapchain_) swapchain_->present();
+    if (hitchMs > 0.0) {
+        const Clock::time_point t5 = Clock::now();
+        auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<f64, std::milli>(b - a).count(); };
+        if (ms(t0, t5) > hitchMs)
+            AVER_INFO("[FrameHitch] frame {} {:.1f} ms | update {:.1f} | beginFrame {:.1f} | render {:.1f} | endFrame {:.1f} | present {:.1f}",
+                      time_.frame, ms(t0, t5), ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4), ms(t4, t5));
+    }
 
     inFrame_ = false;
 }

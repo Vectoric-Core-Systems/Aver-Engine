@@ -4,6 +4,7 @@
 // DirectX 12 backend for Aver.RHI: device, swapchain, scene pipelines, the camera post chain,
 // and the generic resource factory and render context. Hand-rolled D3D12 structs (no d3dx12.h).
 #include "aver/rhi/RHI.hpp"
+#include "aver/core/HitchMarks.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/rhi/ShaderCacheSweep.hpp"
 #include "aver/rhi/FrameConstants.hpp"
@@ -3422,9 +3423,11 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
     {
         f32 lo[3] = {verts[0].px, verts[0].py, verts[0].pz};
         f32 hi[3] = {verts[0].px, verts[0].py, verts[0].pz};
-        for (u32 i = 1; i < vcount; ++i) {
-            const f32 p[3] = {verts[i].px, verts[i].py, verts[i].pz};
-            for (int a = 0; a < 3; ++a) { lo[a] = std::fmin(lo[a], p[a]); hi[a] = std::fmax(hi[a], p[a]); }
+        for (u32 i = 1; i < vcount; ++i) {   // plain compares: std::fmin per component crawls in Debug
+            const MeshVertex& v = verts[i];
+            if (v.px < lo[0]) lo[0] = v.px; if (v.px > hi[0]) hi[0] = v.px;
+            if (v.py < lo[1]) lo[1] = v.py; if (v.py > hi[1]) hi[1] = v.py;
+            if (v.pz < lo[2]) lo[2] = v.pz; if (v.pz > hi[2]) hi[2] = v.pz;
         }
         for (int a = 0; a < 3; ++a) { m.boundsMin[a] = lo[a]; m.boundsMax[a] = hi[a]; }
         for (int a = 0; a < 3; ++a) m.boundsCentre[a] = 0.5f * (lo[a] + hi[a]);
@@ -5265,6 +5268,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
 // Closes the frame: post chain, overlay, UI, capture, then submit.
 void D3D12Device::endFrame() {
     if (!hasSwapchain_) return;
+    HitchMarks hm("endFrame", 0.25);
     // A feature can learn mid-frame that its pipelines no longer fit what was submitted (a material graph
     // loaded): the frame's late work (late scene pass, sky, blended replay, post) is dropped from here.
     if (!frameSuppressed_)
@@ -5289,6 +5293,7 @@ void D3D12Device::endFrame() {
             boundPso_ = pso_.Get();
         }
     }
+    hm.mark("lateScene");
     // Closes scene draw, opens one covering post chain, composite, editor viewport, overlay, ImGui.
     endGpuSpan();
     beginGpuSpan("sky+post+ui");
