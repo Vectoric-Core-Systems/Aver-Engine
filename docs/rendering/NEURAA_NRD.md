@@ -215,6 +215,20 @@ v1 results on the held-out scene (edge-pixel colour error against the 64-sample 
 baseline 0.0275 (-10%), network in the engine 0.0230 (-25%). The engine matches the script to 3.4e-4
 relative; pixels off the edges are bit-identical. Not yet measured: lit scenes in motion, and cost.
 
+### Training run v2 (2026-10-10)
+
+Same tools; `nraa_train.py` now takes `--train dir,dir --val dir,dir`. Captures: Caldera_Capital (24, street
+level), NewSponza (16), CyberCity2099 Day (8); two thirds of each scene trained, the rest held out per scene.
+Edge-pixel colour error against the 64-sample reference, held out:
+
+| Scene | v1 | v2 | Baseline |
+|---|---|---|---|
+| Caldera_Capital | 0.01374 | 0.01285 | 0.01512 |
+| NewSponza | 0.00997 | 0.01002 | 0.01301 |
+| CyberCity2099 Day | 0.02286 | 0.02209 | 0.02821 |
+
+v2 replaces `neuraa_v1.bin` (same format and file name).
+
 ### Cost (estimate)
 
 Detect ~0.05 ms, coverage ~0.15 ms, inference ~0.15 ms, resolve ~0.05 ms: ~0.4 ms at render scale 0.5 on
