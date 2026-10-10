@@ -16,6 +16,22 @@ The status bar shows usage against the OS budget (`IDevice::videoMemory()`): amb
 
 Total about 14.4 GB against a 14.0 GB budget. Voxi logs its share as `[Voxi] VRAM by category (MiB)`.
 
+## Caldera pass (2026-10-10)
+
+From the editor's VRAM log on Caldera_Capital (ReSTIR GI fed by Path Tracing, NRD2, 1766x994 render size):
+radiance 1170 MiB and injection accumulator 2048 MiB (the 512^3 GI volume), BLAS 1.5-2 GB, the ray-traced
+geometry table 1.5-2 GB, NRD2's stabiliser ~180 MiB; about 10-12 GB local of 15.4.
+
+- **The voxel volume is a fallback under ReSTIR GI or Path Tracing** (rough reflections over 0.75 roughness, one
+  ambient path); it was sized by the GI tier as if it were the GI. `applyManifestKnobs`: with RENDER.GIMODE 1 or
+  Path Tracing on, the tier default stops at 256^3 (146 + 256 MiB, ~2.8 GB less). RENDER.VOXELRES still wins.
+  Applied at project load, when the volume is created (it is never resized later).
+- **The geometry table's next size** is allocated on a worker once the table is 90% full (was 75%) and released
+  when unused for ~30 s (it is up to 1.5x the table; at 75% on a level that stopped growing it was held for good).
+- The log now has `[Voxi] VRAM, ray-traced geometry table (MiB): N (P% used)[, next size held M]`.
+- **Not done:** BLAS compaction (`ALLOW_COMPACTION` + postbuild size + compacting copy; typically 40-60% of BLAS
+  memory), and packing the geometry table's vertices (32 to 16-20 bytes).
+
 ## BLAS build scratch freed after build (D3D12)
 
 Static BLASes now get scratch in `buildBlas` and retire it behind the frame fence once the build is recorded. `beginFrame`'s per-frame `collect()` frees it when the GPU is done. Updatable (refit) BLASes keep theirs, as every refit needs it. No acceleration structure moves; TLAS is unaffected.

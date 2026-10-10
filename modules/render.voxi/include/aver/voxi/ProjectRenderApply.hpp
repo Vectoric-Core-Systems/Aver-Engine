@@ -110,6 +110,11 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
     else                        s.giCones = ladder::giCones(s.globalIllumination);
 
     if (project.giMode   >= 0) s.giMode   = static_cast<u32>(project.giMode);
+    // ReSTIR GI or Path Tracing supply the diffuse GI; the voxel volume is only their fallback (rough
+    // reflections, one ambient path), so its tier default stops at 256^3: 512^3 was 3.2 GB of VRAM (radiance
+    // and injection accumulator). An explicit RENDER.VOXELRES still wins.
+    if (project.voxelResolution <= 0 && (s.giMode == 1u || s.pathTracing != Quality::Off))
+        s.voxelResolution = s.voxelResolution < 256u ? s.voxelResolution : 256u;
     if (project.denoiser  >= 0) setDenoiserMode(s, static_cast<u32>(project.denoiser));   // 0, 1, 2 = NRD2
     if (project.ptMode    >= 0) s.ptMode   = static_cast<u32>(project.ptMode);
 

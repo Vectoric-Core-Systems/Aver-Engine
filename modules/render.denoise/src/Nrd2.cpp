@@ -44,7 +44,7 @@ constexpr u32 kTemporalSrv = 10, kTemporalUav = 5;
 constexpr u32 kDespeckleSrv = 3, kDespeckleUav = 2;
 constexpr u32 kBlurSrv = 6, kBlurUav = 3;
 constexpr u32 kConvergeSrv = 4, kConvergeUav = 1;
-constexpr f32 kStabNFast = 8.0f, kStabNSunMoved = 2.0f, kStabNMax = 64.0f;
+constexpr f32 kStabNSunMoved = 2.0f, kStabNMax = 64.0f;
 
 constexpr rhi::ResourceState kRead  = rhi::ResourceState::NonPixelShaderResource;
 constexpr rhi::ResourceState kWrite = rhi::ResourceState::UnorderedAccess;
@@ -606,7 +606,7 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
         f32 nStill = std::min(std::max(params_.stabFrames, 1.0f), kStabNMax);
         if (sunHold_ > 0u) nStill = std::min(nStill, kStabNSunMoved);
         cb.stab[0] = nStill;
-        cb.stab[1] = std::min(kStabNFast, nStill);
+        cb.stab[1] = std::min(std::min(std::max(params_.stabFramesMoving, 1.0f), kStabNMax), nStill);
     }
 
     const rhi::TextureHandle stageB[4] = {targets_.diffuse, targets_.specular, targets_.remodA, targets_.remodB};

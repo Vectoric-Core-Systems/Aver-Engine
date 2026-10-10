@@ -731,11 +731,19 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ return vBool(Renderer::get().settings().nrd2ObjectStop); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2ObjectStop = on; }); }});
     t.push_back({"voxi.nrd2StabFrames", VarType::U32, false,
-        "NRD2 temporal history length at rest, in frames (1-64, default 32); it shortens with screen speed to min(8, this) from 8 px per frame and is off from 128 px per frame",
+        "NRD2 temporal history length at rest, in frames (1-64, default 32); it shortens with screen speed to min(voxi.nrd2StabFramesMoving, this) from 8 px per frame and is off from 128 px per frame",
         []{ return vU32(Renderer::get().settings().nrd2StabFrames); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2StabFrames = n; }); },
         [](const VarValue& v, std::string& err) -> bool {
             if (v.as.u < 1 || v.as.u > 64) { err = "nrd2StabFrames must be 1 to 64"; return false; }
+            return true;
+        }});
+    t.push_back({"voxi.nrd2StabFramesMoving", VarType::U32, false,
+        "NRD2 temporal history length in motion, in frames (1-64, default 16): what it ramps down to from 8 px per frame. Longer averages the patchy shadow and bounce noise while moving, at more lag on lighting changes",
+        []{ return vU32(Renderer::get().settings().nrd2StabFramesMoving); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2StabFramesMoving = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u < 1 || v.as.u > 64) { err = "nrd2StabFramesMoving must be 1 to 64"; return false; }
             return true;
         }});
     t.push_back({"voxi.nrd2Despeckle", VarType::U32, false,

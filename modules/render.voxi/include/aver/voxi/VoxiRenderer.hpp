@@ -477,11 +477,12 @@ private:
 
     rhi::BufferHandle rtVerts_ = 0, rtIndices_ = 0;
     u32  rtVertCapacity_ = 0, rtIndexCapacity_ = 0, rtInstanceCapacity_ = 0;
-    // The geometry table's next grow, allocated on a worker once it is three quarters full (a 1.5 GB
+    // The geometry table's next grow, allocated on a worker once it is 90% full (a 1.5 GB
     // allocation was ~170 ms of the frame that grew it). Sizes in vertices / indices.
     struct RtGrowAhead { std::unique_ptr<rhi::BufferStaging> verts, indices; };
     std::future<RtGrowAhead> rtGrowAhead_;
     u64 rtGrowAheadVerts_ = 0, rtGrowAheadIndices_ = 0;
+    u64 rtGrowAheadReadyFrame_ = 0;   // rtFrameIndex_ when it was asked for; dropped unused after ~30 s
     void growGeometryTableAhead();
 
     // Instance table: RING on upload heap. Rewritten every frame while GPU reads previous copy.

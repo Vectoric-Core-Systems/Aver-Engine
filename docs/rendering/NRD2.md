@@ -563,6 +563,17 @@ Looked at and dropped with the owner after reading the code:
 - **Un-jittering NRD2's input.** NeuRAA and FSR request no jitter; only TAA does, and the stabiliser already runs
   without it.
 
+## History in motion (2026-10-10)
+
+The owner: patchiness in shadows and bounce lighting while moving. The stabiliser's history ramps from
+`nrd2StabFrames` (32) at rest down to a fixed 8 frames at 8 px/frame and faster, which is nearly always while
+flying; 8 frames do not average out the low-frequency blotches the coarse levels and one-ray lamp and bounce
+noise leave. The floor is now `Settings::nrd2StabFramesMoving` (default 16, `voxi.nrd2StabFramesMoving` 1-64;
+`Nrd2Params::stabFramesMoving`, sent as `gNrd2Stab.y`): a speed-dependent cap, not a per-pixel count, so the
+shader, its CPU twin and NEURAA_NRD.md rule 5 are unchanged. Static geometry reprojects exactly under camera
+motion and movers fail the history's depth test, so the cost is lag on lighting changes while moving, bounded by
+the min/max box. Try 24-32 if patches remain; lower if lamp flicker or a sun step trails.
+
 ## Combine reference and 1/4-level cap (2026-10-06)
 
 From the FidelityFX study (a read-only Sonnet workflow, 2026-10-06). FidelityFX has no pyramid: its prefilter

@@ -899,6 +899,12 @@ void VoxiRenderer::reportVramUsage() {
     vramReportedFoliagePrefixBytes_ = foliagePrefixBytes_;
 
     const auto mib = [](u64 bytes) { return static_cast<f64>(bytes) / (1024.0 * 1024.0); };
+    const u64 geomBytes  = u64(rtVertCapacity_) * sizeof(rhi::MeshVertex) + u64(rtIndexCapacity_) * sizeof(u32);
+    const u64 aheadBytes = rtGrowAhead_.valid() ? rtGrowAheadVerts_ * sizeof(rhi::MeshVertex) + rtGrowAheadIndices_ * sizeof(u32) : 0;
+    char ahead[64] = "";
+    if (aheadBytes) std::snprintf(ahead, sizeof(ahead), ", next size held %.0f", mib(aheadBytes));
+    AVER_INFO("[Voxi] VRAM, ray-traced geometry table (MiB): {:.0f} ({:.0f}% used){}", mib(geomBytes),
+              rtVertCapacity_ ? 100.0 * rtVertUsed_ / rtVertCapacity_ : 0.0, ahead);
     if (voxelAccumTex_) {
         AVER_INFO("[Voxi] VRAM by category (MiB): radiance {:.0f}, injection accumulator {:.0f}, "
                   "GI cache staging {:.0f}, ray-driven per-pixel {:.0f}, BLAS {:.0f}, TLAS {:.0f} "
@@ -3441,9 +3447,12 @@ void VoxiRenderer::growGeometryTableAhead() {
     const bool ready = rtGrowAhead_.valid() &&
                        rtGrowAhead_.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
     if (rtGrowAhead_.valid() && !ready) return;   // still allocating
-    if (ready && rtGrowAheadVerts_ > rtVertCapacity_ && rtGrowAheadIndices_ > rtIndexCapacity_) return;   // waiting for use
-    if (ready) rtGrowAhead_.get();   // outgrown: freed
-    const bool full = u64(rtVertUsed_) * 4 > u64(rtVertCapacity_) * 3 || u64(rtIndexUsed_) * 4 > u64(rtIndexCapacity_) * 3;
+    // Waiting for use, but not forever: held unused it is up to 1.5x the table in VRAM. ~30 s at 60 fps.
+    if (ready && rtGrowAheadVerts_ > rtVertCapacity_ && rtGrowAheadIndices_ > rtIndexCapacity_ &&
+        rtFrameIndex_ - rtGrowAheadReadyFrame_ < 1800u) return;
+    if (ready) rtGrowAhead_.get();   // outgrown or stale: freed
+    if (ready) { rtGrowAheadVerts_ = rtGrowAheadIndices_ = 0; return; }   // not straight back
+    const bool full = u64(rtVertUsed_) * 10 > u64(rtVertCapacity_) * 9 || u64(rtIndexUsed_) * 10 > u64(rtIndexCapacity_) * 9;
     if (!full || !rtVertCapacity_ || vramTight()) return;
     const std::shared_ptr<rhi::IBufferStager> stager = res_->bufferStager();
     if (!stager) return;
@@ -3458,6 +3467,7 @@ void VoxiRenderer::growGeometryTableAhead() {
     id.bytes = rtGrowAheadIndices_ * sizeof(u32);
     id.kind  = rhi::BufferKind::Default;
     id.debugName = "rt indices";
+    rtGrowAheadReadyFrame_ = rtFrameIndex_;
     rtGrowAhead_ = std::async(std::launch::async, [stager, vd, id] {
         RtGrowAhead a;
         a.verts = stager->stage(vd);
@@ -5902,6 +5912,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         np.network = settings_.nrd2Network && !(pathTracingWanted() && cb_.ptBounceParams[1] > 1.5f);
         np.stabilise  = settings_.nrd2Stab;
         np.stabFrames = static_cast<f32>(settings_.nrd2StabFrames);
+        np.stabFramesMoving = static_cast<f32>(settings_.nrd2StabFramesMoving);
         np.despeckle  = settings_.nrd2Despeckle;
         np.despeckleCap = settings_.nrd2DespeckleCap;
         np.speckle      = settings_.nrd2Speckle;

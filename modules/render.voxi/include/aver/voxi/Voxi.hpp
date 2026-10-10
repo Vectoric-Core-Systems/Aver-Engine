@@ -160,6 +160,9 @@ struct Settings {
     // last frame's inside a min/max box of this frame's values. nrd2StabFrames is its history length at rest.
     bool nrd2Stab = true;
     u32 nrd2StabFrames = 32;
+    // ...and the length it ramps down to in motion (8 px/frame and faster). Was a fixed 8: too short to average
+    // the patchy low-frequency noise in shadows and bounce light while moving; longer = more lag on change.
+    u32 nrd2StabFramesMoving = 16;
     // The sun's lighting skips NRD2 and is added clean, its shadow's penumbra averaged over a depth-weighted
     // 5x5 instead (docs/rendering/NRD2.md "Sun outside the filter"); off = the sun is denoised with the rest.
     bool nrd2SunClean = true;
