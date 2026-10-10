@@ -833,6 +833,7 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
 }
 
 VulkanDevice::~VulkanDevice() {
+    if (stagerState_) { std::lock_guard<std::mutex> l(stagerState_->m); stagerState_->dev = nullptr; }
     // UI TOOLKIT FIRST, unconditionally (as ~D3D12Device does): its Vulkan objects (descriptor pool,
     // font atlas, per-frame vertex/index rings) otherwise outlive VkDevice destruction --
     //     [Vulkan Loader] ERROR: vkDestroyBuffer: Invalid device
@@ -1772,6 +1773,130 @@ void VulkanDevice::waitForGpu() {
 //    per-frame CBs use createBufferCommitted directly instead: nothing needs a descriptor over a
 //    line list or this device's own per-frame constants.
 // ================================================================================================
+namespace {
+// createMesh's Upload-heap path minus the device's tables, on any thread (Vulkan creation and
+// allocation calls need no external sync on the VkDevice); see IMeshStager.
+struct VulkanMeshStaging final : MeshStaging {
+    std::shared_ptr<VulkanDevice::StagerState> state;
+    GpuMesh m;   // bounds and counts
+    VkBuffer vb = VK_NULL_HANDLE, ib = VK_NULL_HANDLE;
+    VkDeviceMemory vbMemory = VK_NULL_HANDLE, ibMemory = VK_NULL_HANDLE;
+    VkDeviceAddress vbAddress = 0, ibAddress = 0;
+    u8* vbMapped = nullptr;
+    u8* ibMapped = nullptr;
+    u64 vbytes = 0, ibytes = 0;
+    ~VulkanMeshStaging() override {   // unadopted: never seen by the GPU
+        if (!state || (!vb && !ib)) return;
+        std::lock_guard<std::mutex> l(state->m);
+        if (!state->dev) return;
+        destroyBufferCommitted(*state->dev, vb, vbMemory);
+        destroyBufferCommitted(*state->dev, ib, ibMemory);
+    }
+};
+
+class VulkanMeshStager final : public IMeshStager {
+public:
+    explicit VulkanMeshStager(std::shared_ptr<VulkanDevice::StagerState> state) : state_(std::move(state)) {}
+    std::unique_ptr<MeshStaging> stage(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override {
+        if (!verts || !indices || vcount == 0 || icount == 0) return nullptr;
+        auto s = std::make_unique<VulkanMeshStaging>();
+        s->m.indexCount = icount;
+        s->m.vertexCount = vcount;
+        f32 lo[3] = {verts[0].px, verts[0].py, verts[0].pz};
+        f32 hi[3] = {verts[0].px, verts[0].py, verts[0].pz};
+        for (u32 i = 1; i < vcount; ++i) {
+            const f32 p[3] = {verts[i].px, verts[i].py, verts[i].pz};
+            for (int a = 0; a < 3; ++a) { lo[a] = std::fmin(lo[a], p[a]); hi[a] = std::fmax(hi[a], p[a]); }
+        }
+        for (int a = 0; a < 3; ++a) s->m.boundsCentre[a] = 0.5f * (lo[a] + hi[a]);
+        const f32 dx = hi[0] - s->m.boundsCentre[0], dy = hi[1] - s->m.boundsCentre[1], dz = hi[2] - s->m.boundsCentre[2];
+        s->m.boundsRadius = std::sqrt(dx * dx + dy * dy + dz * dz);
+        s->vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
+        s->ibytes = static_cast<u64>(icount) * sizeof(u32);
+
+        std::lock_guard<std::mutex> l(state_->m);
+        VulkanDevice* dev = state_->dev;
+        if (!dev) return nullptr;
+        if (!make(*dev, s->vbytes, "mesh vertices", verts, s->vb, s->vbMemory, s->vbAddress, s->vbMapped) ||
+            !make(*dev, s->ibytes, "mesh indices", indices, s->ib, s->ibMemory, s->ibAddress, s->ibMapped)) {
+            destroyBufferCommitted(*dev, s->vb, s->vbMemory);
+            destroyBufferCommitted(*dev, s->ib, s->ibMemory);
+            return nullptr;   // s->state unset: its destructor frees nothing again
+        }
+        s->state = state_;
+        return s;
+    }
+    std::unique_ptr<MeshStaging> stageIndices(const u32* indices, u32 icount) override {
+        if (!indices || icount == 0) return nullptr;
+        auto s = std::make_unique<VulkanMeshStaging>();
+        s->m.indexCount = icount;
+        s->ibytes = static_cast<u64>(icount) * sizeof(u32);
+        std::lock_guard<std::mutex> l(state_->m);
+        VulkanDevice* dev = state_->dev;
+        if (!dev) return nullptr;
+        if (!make(*dev, s->ibytes, "mesh indices (LOD, shared vertices)", indices, s->ib, s->ibMemory, s->ibAddress,
+                  s->ibMapped)) {
+            destroyBufferCommitted(*dev, s->ib, s->ibMemory);
+            return nullptr;
+        }
+        s->state = state_;
+        return s;
+    }
+
+private:
+    static bool make(VulkanDevice& dev, u64 bytes, const char* name, const void* src, VkBuffer& buffer,
+                     VkDeviceMemory& memory, VkDeviceAddress& address, u8*& mapped) {
+        BufferDesc d;
+        d.bytes = bytes;
+        d.kind = BufferKind::Upload;
+        const bool rtAvailable = dev.api().CreateAccelerationStructureKHR != nullptr;
+        if (!createBufferCommitted(dev, bytes, toVkBufferUsage(d, rtAvailable),
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                   buffer, memory, &address, name)) return false;
+        if (!vkOk(dev.api().MapMemory(dev.vkDevice(), memory, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&mapped)),
+                  "rhi mesh staging map")) return false;
+        std::memcpy(mapped, src, bytes);
+        return true;
+    }
+    std::shared_ptr<VulkanDevice::StagerState> state_;
+};
+} // namespace
+
+std::shared_ptr<IMeshStager> VulkanDevice::meshStager() {
+    if (!device_ || !rhiFactory_ || staticMeshDefaultHeap_) return nullptr;
+    if (!meshStager_) meshStager_ = std::make_shared<VulkanMeshStager>(stagerState());
+    return meshStager_;
+}
+
+std::shared_ptr<VulkanDevice::StagerState> VulkanDevice::stagerState() {
+    if (!stagerState_) {
+        stagerState_ = std::make_shared<StagerState>();
+        stagerState_->dev = this;
+    }
+    return stagerState_;
+}
+
+MeshHandle VulkanDevice::adoptMeshSharingVertices(MeshHandle source, std::unique_ptr<MeshStaging> indices) {
+    auto* s = dynamic_cast<VulkanMeshStaging*>(indices.get());
+    if (!s || !s->ib || s->vb || !s->state || s->state->dev != this) return 0;
+    return shareVertices(source, nullptr, s->m.indexCount, /*posed=*/false, s);
+}
+
+MeshHandle VulkanDevice::adoptMesh(std::unique_ptr<MeshStaging> staged) {
+    auto* s = dynamic_cast<VulkanMeshStaging*>(staged.get());
+    if (!s || !rhiFactory_ || !s->vb || !s->ib || !s->state || s->state->dev != this) return 0;
+    GpuMesh m = s->m;
+    BufferDesc vd; vd.bytes = s->vbytes; vd.kind = BufferKind::Upload; vd.debugName = "mesh vertices";
+    BufferDesc idd; idd.bytes = s->ibytes; idd.kind = BufferKind::Upload; idd.debugName = "mesh indices";
+    m.vbBuffer = rhiFactory_->adoptHostBuffer(s->vb, s->vbMemory, s->vbAddress, s->vbMapped, vd);
+    m.ibBuffer = rhiFactory_->adoptHostBuffer(s->ib, s->ibMemory, s->ibAddress, s->ibMapped, idd);
+    m.vb = s->vb; m.vbMemory = s->vbMemory; m.vbAddress = s->vbAddress;
+    m.ib = s->ib; m.ibMemory = s->ibMemory; m.ibAddress = s->ibAddress;
+    s->vb = s->ib = VK_NULL_HANDLE;   // owned by the factory from here
+    meshes_.push_back(std::move(m));
+    return static_cast<MeshHandle>(meshes_.size());
+}
+
 MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) {
     if (!device_ || !rhiFactory_ || vcount == 0 || icount == 0) return 0;
     GpuMesh m;
@@ -1880,9 +2005,12 @@ MeshHandle VulkanDevice::createPosedPartMesh(MeshHandle posedSource, const u32* 
 }
 // Shared body -- D3D12Device::shareVertices' twin. `posed` flips which source is accepted, whether
 // every index is range-checked, and whether the result is itself compute-written.
-MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u32 indexCount, bool posed) {
+MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u32 indexCount, bool posed,
+                                       MeshStaging* staged) {
+    auto* st = static_cast<VulkanMeshStaging*>(staged);   // adoptMeshSharingVertices checked it
+    if ((!indices && !st) || (st && posed)) return 0;
     const char* what = posed ? "createPosedPartMesh" : "createMeshSharingVertices";
-    if (!device_ || !rhiFactory_ || !indices || indexCount == 0) return 0;
+    if (!device_ || !rhiFactory_ || indexCount == 0) return 0;
     if (source == 0 || source > meshes_.size()) {
         AVER_ERROR("[RHI.Vulkan] {} with an invalid source handle", what);
         return 0;
@@ -1919,11 +2047,17 @@ MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u3
     if (!rootMesh.alive || !rootMesh.vb) return 0;
 
     const u64 ibytes = static_cast<u64>(indexCount) * sizeof(u32);
-    const bool useDefaultHeap = staticMeshDefaultHeap_;
+    const bool useDefaultHeap = staticMeshDefaultHeap_ && !st;
     const BufferKind kind = useDefaultHeap ? BufferKind::Default : BufferKind::Upload;
     const char* ibName = posed ? "mesh indices (posed part)" : "mesh indices (LOD, shared vertices)";
     BufferDesc idd; idd.bytes = ibytes; idd.kind = kind; idd.debugName = ibName;
-    const BufferHandle ibBuffer = rhiFactory_->createBuffer(idd);
+    BufferHandle ibBuffer = 0;
+    if (st) {
+        ibBuffer = rhiFactory_->adoptHostBuffer(st->ib, st->ibMemory, st->ibAddress, st->ibMapped, idd);
+        st->ib = VK_NULL_HANDLE;   // owned by the factory from here
+    } else {
+        ibBuffer = rhiFactory_->createBuffer(idd);
+    }
     if (!ibBuffer) { AVER_ERROR("[RHI.Vulkan] {} could not allocate its index buffer", what); return 0; }
     RhiBuffer* irb = rhiFactory_->buffer(ibBuffer);
     if (!irb || !irb->buffer) { rhiFactory_->destroyBuffer(ibBuffer); return 0; }
@@ -1976,7 +2110,7 @@ MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u3
             m.ib = irb->buffer; m.ibMemory = irb->memory; m.ibAddress = irb->address;
             rhiFactory_->writeBuffer(m.ibBuffer, indices, ibytes, 0);
         }
-    } else {
+    } else if (!st) {
         rhiFactory_->writeBuffer(m.ibBuffer, indices, ibytes, 0);
     }
 

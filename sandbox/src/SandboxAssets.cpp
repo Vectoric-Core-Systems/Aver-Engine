@@ -2,6 +2,7 @@
 // tables (pick geometry, LOD ladder, depth proxies, cluster data).
 
 #include "SandboxApp.hpp"
+#include "aver/core/HitchMarks.hpp"
 
 namespace aver {
 #if AVER_MODULE_VOXI && AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
@@ -125,6 +126,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
     app.meshTris_[id] = static_cast<u32>(md.indices.size() / 3);
     if (md.hasSkin()) app.skinnedMeshIds_.insert(id);
     const bool quiet = pass->streamed;
+    HitchMarks hm(rel.c_str(), 0.25);
 #if AVER_MODULE_TRIFACTOR
     // Streamed meshes skip what only the off-by-default cluster paths read (per-cluster LOD, cluster
     // stats) and share LOD0's vertex buffer across the ladder: both were most of a streamed upload.
@@ -158,9 +160,13 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
                 // compute-written, e.g. a skin target -- see createMeshSharingVertices' own
                 // comment for the full list) and the caller MUST fall back, exactly as if the flag
                 // were off. Off by default, so this is a no-op call on the common path.
-                rhi::MeshHandle lh = shareVertices
-                    ? e.device()->createMeshSharingVertices(h, lod.indices.data(), (u32)lod.indices.size())
-                    : 0;
+                // Index buffer staged on a prefetch worker, when there is one.
+                std::unique_ptr<rhi::MeshStaging>* staged =
+                    m.lodStaged && lvl - 1 < m.lodStaged->size() ? &(*m.lodStaged)[lvl - 1] : nullptr;
+                rhi::MeshHandle lh = shareVertices && staged && *staged
+                    ? e.device()->adoptMeshSharingVertices(h, std::move(*staged)) : 0;
+                if (!lh && shareVertices)
+                    lh = e.device()->createMeshSharingVertices(h, lod.indices.data(), (u32)lod.indices.size());
                 if (lh) {
                     ++pass->lodSharedLevels;
                     pass->lodSharedVertexBytesSaved += static_cast<u64>(verts.size()) * sizeof(rhi::MeshVertex);
@@ -180,6 +186,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
                 ladder.errorCm.push_back(trifactor::levelWorldErrorCm(md, lvl));
                 if (clusterData) trifactor::buildLevelClusterViews(md, lvl, ladder.clusters[lvl]);
             }
+            hm.mark("hook:ladder");
             if (!quiet) AVER_INFO("[Mesh] '{}' LOD ladder: {} level(s), {} tris at LOD0 -> {} tris at the coarsest",
                       rel, ladder.handles.size(), ladder.triCounts.front(), ladder.triCounts.back());
 
@@ -203,6 +210,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
                 }
             }
             app.meshLods_[id] = std::move(ladder);
+            hm.mark("hook:proxy");
 
             // Flat cluster data for per-cluster path. verts is copied (LOD0 MeshHandle already created from it).
             MeshClusterData cd;

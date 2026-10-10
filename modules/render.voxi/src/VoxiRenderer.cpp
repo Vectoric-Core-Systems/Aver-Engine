@@ -1624,6 +1624,22 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // Each new BLAS takes its own build scratch until the frame's fence passes, so a level's whole
     // build wave in one frame held ~2.6 GB at once on NeonDistrict. Builds past the budget wait.
     u64 blasBytesThisFrame = 0;
+    // CPU time making new structures (two allocations each): 120 small meshes arriving at once were
+    // ~100 ms of one frame; past kBlasCreateMsPerFrame the rest wait like the byte budget's.
+    f64 blasCreateMs = 0.0;
+    auto blasBudgetSpent = [&] { return blasBytesThisFrame >= kBlasBuildBytesPerFrame || blasCreateMs >= kBlasCreateMsPerFrame; };
+    // Made and recorded (a static structure's scratch is allocated by its build).
+    auto timedCreate = [&](auto&& make) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const rhi::BlasHandle b = make();
+        if (b) ctx.buildBlas(b);
+        const f64 ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        blasCreateMs += ms;
+        if (ms > 20.0 && hitchVerbose())
+            AVER_INFO("[Voxi] a bottom-level structure took {:.1f} ms to make ({:.1f} MiB)", ms,
+                      b ? static_cast<f64>(res_->blasMemoryBytes(b)) / (1024.0 * 1024.0) : 0.0);
+        return b;
+    };
     u32 blasDeferred = 0;
 
     // CPU cost of walking drawsPrev_ and filling rtInstanceData_/rtInstanceMesh_/rtInstanceMatKey_.
@@ -1695,14 +1711,13 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
                 bool waiting = false;
                 for (usize c = 0; c < ch->blas.size(); ++c) {
                     if (!ch->blas[c]) {
-                        if (blasBytesThisFrame >= kBlasBuildBytesPerFrame) { waiting = true; continue; }
+                        if (blasBudgetSpent()) { waiting = true; continue; }
                         rhi::BlasGeometry g;
                         g.mesh = d.mesh;
                         g.firstIndex = ch->firstIndex[c];
                         g.indexCount = ch->indexCount[c];
-                        ch->blas[c] = res_->createBlasMulti(&g, 1);
+                        ch->blas[c] = timedCreate([&] { return res_->createBlasMulti(&g, 1); });
                         if (!ch->blas[c]) continue;
-                        ctx.buildBlas(ch->blas[c]);
                         ++firstBuilds;
                         blasBytesThisFrame += res_->blasMemoryBytes(ch->blas[c]);
                         ++blasRevision_;
@@ -1722,12 +1737,13 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
             dynamicBlasRefits_.erase(d.mesh);
         }
         if (it == blas_.end()) {
-            if (blasBytesThisFrame >= kBlasBuildBytesPerFrame) { ++blasDeferred; continue; }
+            if (blasBudgetSpent()) { ++blasDeferred; continue; }
             // createBlas returns 0 for destroyed mesh. Updatable only for compute-written mesh with rtRefitAccel on.
             const bool dynamic = settings_.rtRefitAccel && dev_->meshVertexBuffer(d.mesh) != 0;
-            const rhi::BlasHandle nb = dynamic ? res_->createBlasUpdatable(d.mesh) : res_->createBlas(d.mesh);
+            const rhi::BlasHandle nb = timedCreate([&] {
+                return dynamic ? res_->createBlasUpdatable(d.mesh) : res_->createBlas(d.mesh);
+            });
             if (nb) {
-                ctx.buildBlas(nb);
                 ++firstBuilds;
                 blasBytesThisFrame += res_->blasMemoryBytes(nb);   // scratch is of the same order
                 if (res_->blasMemoryBytes(nb) > (64ull << 20)) {
@@ -1841,8 +1857,10 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     cb_.rtParams[3] = geomTableReady ? 1.0f : 0.0f;
     // After both tables: foliage part records carry indices into each.
     if (geomTableReady) uploadFoliagePartTable();
+    hm.mark("foliageParts");
     // STALE-POSE FIX: refreshes compute-skinned mesh slices every frame, not just on set change.
     if (geomTableReady) refreshDynamicVertexSlices(ctx);
+    hm.mark("dynamicSlices");
     if (!rtLogged_) {
         AVER_INFO("[Voxi] RayQuery active ({} instances, {} bottom-level structures)",
                   static_cast<u32>(tlasInstScratch_.size()), static_cast<u32>(blas_.size()));
@@ -1870,6 +1888,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
 
     // Gate bookkeeping: negligible cost next to TLAS build. Turning on mid-session primes after one full build.
     takeRtAccelSnapshot();
+    hm.mark("snapshot");
     // Patch re-sends rtInstanceData_ as left by buildGeometryTable, safe only over complete tables.
     // If geometry/material table incomplete, forget snapshot and retry full build next tick.
     if (!rtMovers_.empty() && (!geomTableReady || !matTableReady)) {
@@ -3169,7 +3188,7 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
     std::vector<u8> fromOld(rtGeomMeshes_.size(), 0);
     struct Copy { bool verts; rhi::BufferHandle src; u64 bytes, dst, srcOffset; };
     std::vector<Copy> copies;
-    auto grow = [](u64 n) { return std::min<u64>(n + std::max<u64>(n / 4, 1ull << 20), 0xFFFFFFFFull); };
+    auto grow = [](u64 n) { return std::min<u64>(n + std::max<u64>(n / 2, 1ull << 20), 0xFFFFFFFFull); };
     // Out of room but mostly live: GROW -- the old buffers' used ranges move whole (two copies, slots
     // unchanged) and new meshes append. Re-laying every mesh out (one copy per range, ~17k) was 350-720 ms
     // of CPU on Caldera; that compaction now runs only when over half the table is dead ranges.
@@ -3185,8 +3204,24 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
         growOnly = liveVerts * 2 >= rtVertUsed_ && liveIndices * 2 >= rtIndexUsed_;
     }
     if (growOnly) {
-        const u64 vcap = grow(u64(rtVertUsed_) + needVerts), icap = grow(u64(rtIndexUsed_) + needIndices);
+        u64 vcap = grow(u64(rtVertUsed_) + needVerts), icap = grow(u64(rtIndexUsed_) + needIndices);
         if (vcap > 0xFFFFFFFFull || icap > 0xFFFFFFFFull) return false;
+        rhi::BufferHandle nv = 0, ni = 0;
+        // Made ahead on a worker, when it is done and large enough.
+        if (rtGrowAhead_.valid() && rtGrowAhead_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            RtGrowAhead ahead = rtGrowAhead_.get();
+            if (ahead.verts && ahead.indices && rtGrowAheadVerts_ >= u64(rtVertUsed_) + needVerts &&
+                rtGrowAheadIndices_ >= u64(rtIndexUsed_) + needIndices) {
+                nv = res_->adoptBuffer(std::move(ahead.verts));
+                ni = res_->adoptBuffer(std::move(ahead.indices));
+                if (nv && ni) { vcap = rtGrowAheadVerts_; icap = rtGrowAheadIndices_; }
+                else {
+                    if (nv) res_->destroyBuffer(nv);
+                    if (ni) res_->destroyBuffer(ni);
+                    nv = ni = 0;
+                }
+            }
+        }
         rhi::BufferDesc vd;
         vd.bytes = vcap * sizeof(rhi::MeshVertex);
         vd.kind  = rhi::BufferKind::Default;
@@ -3195,7 +3230,7 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
         id.bytes = icap * sizeof(u32);
         id.kind  = rhi::BufferKind::Default;
         id.debugName = "rt indices";
-        const rhi::BufferHandle nv = res_->createBuffer(vd), ni = res_->createBuffer(id);
+        if (!nv) { nv = res_->createBuffer(vd); ni = res_->createBuffer(id); }
         if (!nv || !ni) {
             if (nv) res_->destroyBuffer(nv);
             if (ni) res_->destroyBuffer(ni);
@@ -3389,6 +3424,7 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
 
     rtGeometryReady_ = true;
     rtDynamicVertexSlices_.swap(rtDynamicVertexSlicesPending_);
+    growGeometryTableAhead();
     if (key == rtGeometryKey_ && !repack && copies.empty()) return true;
     rtGeometryKey_ = key;
     res_->setSrvBuffer(bindings_, 3, rtVerts_, sizeof(rhi::MeshVertex), rtVertUsed_, 0);
@@ -3399,6 +3435,35 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
                   rtInstanceData_.size(), foliageParts_.size(), rtGeomMeshes_.size(), rtVertUsed_, rtIndexUsed_,
                   rtVertCapacity_, rtIndexCapacity_);
     return true;
+}
+
+void VoxiRenderer::growGeometryTableAhead() {
+    const bool ready = rtGrowAhead_.valid() &&
+                       rtGrowAhead_.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+    if (rtGrowAhead_.valid() && !ready) return;   // still allocating
+    if (ready && rtGrowAheadVerts_ > rtVertCapacity_ && rtGrowAheadIndices_ > rtIndexCapacity_) return;   // waiting for use
+    if (ready) rtGrowAhead_.get();   // outgrown: freed
+    const bool full = u64(rtVertUsed_) * 4 > u64(rtVertCapacity_) * 3 || u64(rtIndexUsed_) * 4 > u64(rtIndexCapacity_) * 3;
+    if (!full || !rtVertCapacity_ || vramTight()) return;
+    const std::shared_ptr<rhi::IBufferStager> stager = res_->bufferStager();
+    if (!stager) return;
+    auto grow = [](u64 n) { return std::min<u64>(n + std::max<u64>(n / 2, 1ull << 20), 0xFFFFFFFFull); };
+    rtGrowAheadVerts_ = grow(rtVertCapacity_);
+    rtGrowAheadIndices_ = grow(rtIndexCapacity_);
+    rhi::BufferDesc vd;
+    vd.bytes = rtGrowAheadVerts_ * sizeof(rhi::MeshVertex);
+    vd.kind  = rhi::BufferKind::Default;
+    vd.debugName = "rt vertices";
+    rhi::BufferDesc id;
+    id.bytes = rtGrowAheadIndices_ * sizeof(u32);
+    id.kind  = rhi::BufferKind::Default;
+    id.debugName = "rt indices";
+    rtGrowAhead_ = std::async(std::launch::async, [stager, vd, id] {
+        RtGrowAhead a;
+        a.verts = stager->stage(vd);
+        a.indices = stager->stage(id);
+        return a;
+    });
 }
 
 // Instance table rewritten every frame (transforms move). Upload buffer ring: every slot holds the largest table.
@@ -3603,7 +3668,9 @@ u64 VoxiRenderer::rtMaterialKey(rhi::BindingSetHandle matSet, const void* author
 void VoxiRenderer::setFoliage(std::vector<FoliagePrototype> prototypes, std::vector<FoliageInstance> instances) {
     // A resident-cell change only changes the instances: prototype BLASes are kept (foliageBlasCache_),
     // not rebuilt -- rebuilding all of them was ~1 s of CPU and ~0.5 s of GPU per cell change on Caldera.
+    HitchMarks hm("voxi setFoliage", 0.25);
     clearFoliage(true);
+    hm.mark("clear");
     if (prototypes.empty() || instances.empty()) return;
     if (!res_ || !rtSupported_ || !tlas_) {
         AVER_WARN("[Voxi] foliage refused: {} instance(s) of {} prototype(s) -- foliage is ray-traced only, and "
@@ -3663,6 +3730,7 @@ void VoxiRenderer::setFoliage(std::vector<FoliagePrototype> prototypes, std::vec
         foliageBlas_.push_back(b);
     }
 
+    hm.mark("prototypes");
     std::vector<rhi::TlasInstance> tlasInst;
     tlasInst.reserve(instances.size());
     u32 droppedInstances = 0;
@@ -3685,6 +3753,7 @@ void VoxiRenderer::setFoliage(std::vector<FoliagePrototype> prototypes, std::vec
     instances.clear();
     instances.shrink_to_fit();
 
+    hm.mark("instances");
     const u64 tlasBytesBefore = res_->tlasMemoryBytes(tlas_);
     if (tlasInst.empty() ||
         !res_->setTlasStaticInstances(tlas_, tlasInst.data(), static_cast<u32>(tlasInst.size()))) {
@@ -3694,6 +3763,7 @@ void VoxiRenderer::setFoliage(std::vector<FoliagePrototype> prototypes, std::vec
         clearFoliage();
         return;
     }
+    hm.mark("prefix");
     const u64 tlasBytesAfter = res_->tlasMemoryBytes(tlas_);
     foliagePrefixBytes_ = tlasBytesAfter > tlasBytesBefore ? tlasBytesAfter - tlasBytesBefore : 0;
     for (rhi::BlasHandle b : foliageBlas_) foliageBlasBytes_ += res_->blasMemoryBytes(b);
@@ -3783,7 +3853,9 @@ void VoxiRenderer::clearFoliage(bool keepBlases) {
     if (foliageBlas_.empty() && foliageParts_.empty() && foliageInstances_ == 0) return;
     if (res_) {
         if (tlas_) res_->setTlasStaticInstances(tlas_, nullptr, 0);
-        for (rhi::BufferHandle& b : foliagePartBuf_) { if (b) res_->destroyBuffer(b); b = 0; }
+        // Kept for the next set: recreating them every cell change was up to ~200 ms of allocation.
+        if (!keepBlases)
+            for (rhi::BufferHandle& b : foliagePartBuf_) { if (b) res_->destroyBuffer(b); b = 0; }
     }
     if (foliageInstances_)
         AVER_INFO("[Voxi] foliage cleared: {} instance(s) of {} prototype(s) released",
@@ -3796,7 +3868,7 @@ void VoxiRenderer::clearFoliage(bool keepBlases) {
     foliagePartMatKey_.clear();
     foliageInstances_ = 0;
     foliageBlasBytes_ = foliagePrefixBytes_ = 0;
-    foliagePartCapacity_ = foliagePartSlot_ = 0;
+    if (!keepBlases) foliagePartCapacity_ = foliagePartSlot_ = 0;
     foliageBlasPending_ = !foliageBlasToBuild_.empty();
     foliageBindingsDirty_ = true;
     ++foliageGeneration_;
@@ -3835,9 +3907,10 @@ void VoxiRenderer::uploadFoliagePartTable() {
         foliagePartUploaded_.clear();
         foliagePartCapacity_ = 0;
         for (rhi::BufferHandle& b : foliagePartBuf_) { if (b) res_->destroyBuffer(b); b = 0; }
+        const usize capacity = foliagePartData_.size() + foliagePartData_.size() / 2;
         for (rhi::BufferHandle& b : foliagePartBuf_) {
             rhi::BufferDesc d;
-            d.bytes = sizeof(RtInstance) * foliagePartData_.size();
+            d.bytes = sizeof(RtInstance) * capacity;
             d.kind  = rhi::BufferKind::Upload;
             d.debugName = "Voxi foliage part table";
             b = res_->createBuffer(d);
@@ -3848,7 +3921,7 @@ void VoxiRenderer::uploadFoliagePartTable() {
                 return;
             }
         }
-        foliagePartCapacity_ = static_cast<u32>(foliagePartData_.size());
+        foliagePartCapacity_ = static_cast<u32>(capacity);
     }
     // Rotate before writing so this build never touches the slot an in-flight frame may read.
     foliagePartSlot_ = (foliagePartSlot_ + 1) % kRtInstanceRing;

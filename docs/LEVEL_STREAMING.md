@@ -137,9 +137,23 @@ tiles 0.6-6.7 s):
   memory is past 80% of the budget; each free and recreate was a 150-230 ms frame while flying.
 - The editor logs `[Hitch]` lines (frame time, stream time, loaded/evicted/resident, foliage) when a
   frame passes 100 ms or a streaming step 40 ms.
-- What remains on the main thread (Caldera, Release, path tracing): a large mesh's GPU buffers and
-  copy, 25-75 ms for one terrain tile or large prop. On a 1500-frame flight, 24 frames passed 50 ms
-  (worst 98 ms); none passed 100 ms after the level opened.
+- GPU memory, off the main thread (2026-10-10 round 4):
+  - A streamed mesh's buffers -- whole mesh, per-material parts, each coarser LOD's index buffer -- are
+    made and filled by the prefetch workers through `IDevice::meshStager()` and registered on the main
+    thread by `adoptMesh` / `adoptMeshSharingVertices` (25-75 ms per large mesh before). Not under
+    `--mesh-heap default`, which keeps the synchronous Default-heap upload.
+  - The ray-traced geometry table's next size is allocated on a worker (`IResourceFactory::
+    bufferStager()`) once it is three quarters full, and grows by half (a 1.5 GB allocation was ~170 ms).
+  - D3D12: retired objects are released on a background thread, paced (as much pause as work): a
+    release holds a driver lock allocations and Present wait on. Small static BLASes share 64 MB pool
+    buffers and static builds share a per-frame scratch, so streaming no longer makes and frees a
+    buffer per structure. New BLASes also stop at 4 ms of CPU a frame. TLAS prefix staging and
+    foliage part buffers are reused.
+  - Measured (Caldera, Release, path tracing, owner settings, 1500-frame flight): 10-20 frames over
+    50 ms, 3-5 over 100 ms, with the streamer now keeping the full load radius resident (~7,400 roots,
+    was ~2,700 while it lagged). What remains are driver stalls: a single release of a small object
+    occasionally takes 60-900 ms inside the driver near the VRAM budget (~11.6 of 15 GB), and whatever
+    allocates at that moment waits.
 
 Editor rules (fully editable; sandbox/src/SandboxLevelStream.cpp):
 - Before an entity is evicted its live state is written back into the placement record (transform,

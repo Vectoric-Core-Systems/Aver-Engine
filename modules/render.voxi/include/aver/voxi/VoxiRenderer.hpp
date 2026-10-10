@@ -19,6 +19,7 @@
 #include "aver/formats/GiCache.hpp"
 
 #include <array>
+#include <future>
 #include <string>
 #include <vector>
 
@@ -476,6 +477,12 @@ private:
 
     rhi::BufferHandle rtVerts_ = 0, rtIndices_ = 0;
     u32  rtVertCapacity_ = 0, rtIndexCapacity_ = 0, rtInstanceCapacity_ = 0;
+    // The geometry table's next grow, allocated on a worker once it is three quarters full (a 1.5 GB
+    // allocation was ~170 ms of the frame that grew it). Sizes in vertices / indices.
+    struct RtGrowAhead { std::unique_ptr<rhi::BufferStaging> verts, indices; };
+    std::future<RtGrowAhead> rtGrowAhead_;
+    u64 rtGrowAheadVerts_ = 0, rtGrowAheadIndices_ = 0;
+    void growGeometryTableAhead();
 
     // Instance table: RING on upload heap. Rewritten every frame while GPU reads previous copy.
     // One buffer per frame in flight; 3 matches PcgVolume's readback window.
@@ -1043,6 +1050,7 @@ private:
     // ~1.4 ms per MB (NeonDistrict: 512 MB was ~0.7 s in one submission); 8 MB keeps a streamed level's
     // builds near 10 ms a frame.
     static constexpr u64 kBlasBuildBytesPerFrame = 8ull << 20;
+    static constexpr f64 kBlasCreateMsPerFrame = 4.0;
     bool blasBuildsDeferred_ = false;   // some draw's first BLAS build waits for the next frame
     // Foliage prototype BLASes by their geometry (mesh + opacity per part), kept across setFoliage calls;
     // dropped after kFoliageBlasKeepSets sets without use. foliageBlasToBuild_: made, not built yet.

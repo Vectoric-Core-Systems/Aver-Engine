@@ -393,8 +393,10 @@ bool GameContent::uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData
     if (!cpu) { prepareMeshCpu(md, rel, local); cpu = &local; }
     hm.mark("upload:prepare");
     const std::vector<rhi::MeshVertex>& verts = cpu->verts;
-    const rhi::MeshHandle h = device.createMesh(verts.data(), (u32)verts.size(),
-                                               md.indices.data(), (u32)md.indices.size());
+    const bool staged = cpu->staged != nullptr;
+    rhi::MeshHandle h = staged ? device.adoptMesh(std::move(cpu->staged)) : 0;
+    if (hitchVerbose() && !h && meshStager_) AVER_INFO("[Mesh] {} not staged ({})", rel, staged ? "adopt refused" : "none");
+    if (!h) h = device.createMesh(verts.data(), (u32)verts.size(), md.indices.data(), (u32)md.indices.size());
     hm.mark("upload:createMesh");
     if (!h) { AVER_WARN("[Mesh] the device refused '{}'", rel); return false; }
 
@@ -410,7 +412,8 @@ bool GameContent::uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData
     hm.mark("upload:parts");
     projectMeshIds_.push_back(id);
     if (meshLoaded_) meshLoaded_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshLoadedUser_);
-    if (lazyLoading_ && meshAcquired_) meshAcquired_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshAcquiredUser_);
+    if (lazyLoading_ && meshAcquired_)
+        meshAcquired_(LoadedMesh{id, rel, &md, verts, md.indices, h, &cpu->lodStaged}, meshAcquiredUser_);
     hm.mark("upload:hooks");
 
     // Coarse LOD for shadow/GI/voxelise passes (depth-only). 20cm target error (one shadow texel).
@@ -449,6 +452,9 @@ bool GameContent::uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData
 void GameContent::loadProjectMeshes(rhi::IDevice& device) {
     const std::string dir = project_.contentDir();
     if (dir.empty()) return;
+    meshStager_ = device.meshStager();
+    AVER_INFO("[Mesh] streamed meshes' GPU buffers are made {}",
+              meshStager_ ? "on the prefetch workers" : "on the main thread (no stager on this device)");
     std::error_code ec;
     if (!std::filesystem::exists(dir, ec)) return;
 
@@ -649,8 +655,10 @@ void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMesh
     std::vector<std::vector<u32>> baseIndices;
     for (PartCpu& pc : cpuParts) {
         MeshPart part;
-        part.mesh = device.createMesh(pc.verts.data(), static_cast<u32>(pc.verts.size()),
-                                       pc.indices.data(), static_cast<u32>(pc.indices.size()));
+        part.mesh = pc.staged ? device.adoptMesh(std::move(pc.staged)) : 0;
+        if (!part.mesh)
+            part.mesh = device.createMesh(pc.verts.data(), static_cast<u32>(pc.verts.size()),
+                                          pc.indices.data(), static_cast<u32>(pc.indices.size()));
         if (!part.mesh) {
             AVER_WARN("[Mesh] the device refused submesh '{}' of '{}'", pc.name, rel);
             continue;
@@ -1123,6 +1131,7 @@ struct GameContent::MeshPrefetch {
         MeshCpu cpu;
         bool meshOk = false;
         std::string why;
+        std::shared_ptr<rhi::IMeshStager> stager;   // null: the main thread creates the GPU mesh
         std::unique_ptr<CollisionMesh> collision;
         i32 shape = 0;   // released here unless taken
         std::atomic<bool> done{false};
@@ -1189,6 +1198,17 @@ struct GameContent::MeshPrefetch {
             }
             j->meshOk = fmt::loadOcMesh(j->path, j->md, &j->why);
             if (j->meshOk) prepareMeshCpu(j->md, j->rel, j->cpu);
+            // The GPU buffers too: allocating and filling a large mesh's was 25-75 ms on the main thread.
+            if (j->meshOk && j->stager) {
+                j->cpu.staged = j->stager->stage(j->cpu.verts.data(), static_cast<u32>(j->cpu.verts.size()),
+                                                 j->md.indices.data(), static_cast<u32>(j->md.indices.size()));
+                for (PartCpu& p : j->cpu.parts)
+                    p.staged = j->stager->stage(p.verts.data(), static_cast<u32>(p.verts.size()),
+                                                p.indices.data(), static_cast<u32>(p.indices.size()));
+                for (const fmt::OcMeshLod& lod : j->md.coarserLods)
+                    j->cpu.lodStaged.push_back(j->stager->stageIndices(lod.indices.data(),
+                                                                       static_cast<u32>(lod.indices.size())));
+            }
             if (j->meshOk && !j->projectDir.empty()) {
                 std::error_code ec;
                 const u64 size = static_cast<u64>(std::filesystem::file_size(j->path, ec));
@@ -1266,6 +1286,7 @@ void GameContent::prefetchMesh(u64 id, f32 priority) {
     j->projectDir = project_.dir;
     j->binariesDir = project_.binariesDir();
     j->contentDir = project_.contentDir();
+    j->stager = meshStager_;
     j->order = ++pf.nextOrder;
     j->touchedTick = pf.tick;
     j->priority = priority;

@@ -65,6 +65,8 @@
 #include <cstring>
 #include <deque>      // pipelines_ -- see its declaration for why it is not a vector
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <cstdlib>
 #include <string>
 #include <unordered_map>
@@ -1361,6 +1363,13 @@ public:
     u64 viewportTextureId() override;
     bool selfTest(const f32 inRGBA[4], f32 outRGBA[4]) override;
     MeshHandle createMesh(const MeshVertex* verts, u32 vertexCount, const u32* indices, u32 indexCount) override;
+    std::shared_ptr<IMeshStager> meshStager() override;
+    MeshHandle adoptMesh(std::unique_ptr<MeshStaging> staged) override;
+    MeshHandle adoptMeshSharingVertices(MeshHandle source, std::unique_ptr<MeshStaging> indices) override;
+    // Shared with the mesh and buffer stagers and their staging: cleared at teardown so none touches
+    // a destroyed device.
+    struct StagerState { std::mutex m; VulkanDevice* dev = nullptr; };
+    std::shared_ptr<StagerState> stagerState();
     // W4: chooses the heap createMesh() (and createMeshSharingVertices()'s new index buffer)
     // uploads to for every call made after this one -- trivial store/load, exactly like setVSync/
     // vsync() beside it; see IDevice's own contract (RHI.hpp) for the false=Upload/true=Default
@@ -1550,7 +1559,9 @@ private:
     bool ensureViewportTexture();
     void seedSkinTargets();
     // Shared body of createMeshSharingVertices and createPosedPartMesh; see D3D12Device's twin.
-    MeshHandle shareVertices(MeshHandle source, const u32* indices, u32 indexCount, bool posed);
+    // staged: the index buffer from IMeshStager::stageIndices, used instead of `indices`.
+    MeshHandle shareVertices(MeshHandle source, const u32* indices, u32 indexCount, bool posed,
+                             MeshStaging* staged = nullptr);
     void packAtmosphere(const SkyAtmosphere& s);
 
     // ---- bootstrap ----
@@ -1852,6 +1863,8 @@ private:
 
     // ---- generic RHI (render-feature modules) ----
     VulkanResourceFactory* rhiFactory_ = nullptr;
+    std::shared_ptr<StagerState> stagerState_;
+    std::shared_ptr<IMeshStager> meshStager_;
     VulkanRenderContext* rhiContext_ = nullptr;
     std::vector<IRenderFeature*> features_;   // non-owning
 
@@ -1883,6 +1896,12 @@ public:
 
     TextureHandle    createTexture(const TextureDesc& d) override;
     BufferHandle     createBuffer(const BufferDesc& d) override;
+    std::shared_ptr<IBufferStager> bufferStager() override;
+    BufferHandle     adoptBuffer(std::unique_ptr<BufferStaging> staged) override;
+    std::shared_ptr<IBufferStager> bufferStager_;
+    // An Upload-kind buffer made elsewhere (a mesh stager), kept mapped at `mapped`.
+    BufferHandle     adoptHostBuffer(VkBuffer buffer, VkDeviceMemory memory, VkDeviceAddress address, u8* mapped,
+                                     const BufferDesc& d);
     ShaderHandle     createShader(const ShaderDesc& d) override;
     PipelineHandle   createGraphicsPipeline(const GraphicsPipelineDesc& d) override;
     PipelineHandle   createComputePipeline(const ComputePipelineDesc& d) override;

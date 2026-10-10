@@ -4,6 +4,7 @@
 #include "aver/core/Types.hpp"
 
 #include <cstring>
+#include <memory>
 #include <string>
 namespace aver::rhi {
 
@@ -417,9 +418,28 @@ struct BlasGeometry {
 // ---------------------------------------------------------------- resource factory
 
 // Creates and destroys GPU resources.
+// A buffer made off the render thread by an IBufferStager, registered by IResourceFactory::adoptBuffer.
+// Dropped unadopted, its memory is freed (the GPU never saw it).
+struct BufferStaging {
+    virtual ~BufferStaging() = default;
+};
+
+// Thread-safe buffer creation (any thread), for allocations too large to make mid-frame. Keeps what
+// it needs of its device alive by itself.
+class IBufferStager {
+public:
+    virtual ~IBufferStager() = default;
+    virtual std::unique_ptr<BufferStaging> stage(const BufferDesc& d) = 0;   // null on failure
+};
+
 class IResourceFactory {
 public:
     virtual ~IResourceFactory() = default;
+
+    // Off-thread buffer creation: a stager (null where the backend has none) and the render-thread
+    // registration of what it made, as createBuffer's result. adoptBuffer: 0 for another device's.
+    virtual std::shared_ptr<IBufferStager> bufferStager() { return nullptr; }
+    virtual BufferHandle adoptBuffer(std::unique_ptr<BufferStaging> staged) { (void)staged; return 0; }
 
     // Creation. Each returns 0 when the resource could not be made.
     virtual TextureHandle    createTexture(const TextureDesc& d) = 0;

@@ -353,7 +353,9 @@ D3D12 `endFrame` (late scene pass vs the rest), Voxi's acceleration-structure bu
 the level-stream tick (streamer / evict / prefetch / pinned / loads, then mesh releases), a foliage
 cell change (acquire / rebuild / release, and `setFoliage`), and each streamed root's load (meshes /
 instantiate / hook), eviction and mesh upload, named by asset. With the variable set, a mesh read on
-the main thread logs `[Mesh] ... read on the main thread (reason, tag)`. Unset, each costs
+the main thread logs `[Mesh] ... read on the main thread (reason, tag)`, a streamed mesh made without a
+staged buffer `[Mesh] ... not staged`, a BLAS over 20 ms to make `[Voxi] a bottom-level structure took`,
+and a D3D12 background release over 20 ms `[RHI.D3D12] releasing one ... (background)`. Unset, each costs
 one cached `getenv`. `--cam-fly DX DY` (cm per frame) flies the editor camera in a straight line, which
 is what exercises level streaming; a third value turns the camera that many degrees a frame.
 

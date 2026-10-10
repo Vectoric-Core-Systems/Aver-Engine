@@ -135,6 +135,9 @@ public:
         const std::vector<rhi::MeshVertex>& vertices;
         const std::vector<u32>& indices;
         rhi::MeshHandle handle;
+        // Coarser LOD levels' index buffers, staged by a prefetch worker (IDevice::adoptMeshSharingVertices);
+        // null, or a null entry, when there are none.
+        std::vector<std::unique_ptr<rhi::MeshStaging>>* lodStaged = nullptr;
     };
     using MeshLoadedFn = void (*)(const LoadedMesh& mesh, void* user);
     void setMeshLoadedHook(MeshLoadedFn fn, void* user) { meshLoaded_ = fn; meshLoadedUser_ = user; }
@@ -241,16 +244,21 @@ private:
     // Uploads one .ocmesh and fills every per-mesh table. False (nothing kept) on failure.
     bool loadOneMesh(rhi::IDevice& device, u64 id, const std::string& full, const std::string& rel);
     // CPU half of an upload (vertices, per-material parts), made on a prefetch worker or inline.
+    // staged: the GPU buffers a prefetch worker made (IMeshStager), adopted instead of createMesh.
     struct PartCpu {
         std::vector<rhi::MeshVertex> verts;
         std::vector<u32> indices, baseIndices;   // baseIndices: skinned meshes only
         u32 slot = ~0u;
         std::string name;
+        std::unique_ptr<rhi::MeshStaging> staged;
     };
     struct MeshCpu {
         std::vector<rhi::MeshVertex> verts;
         std::vector<PartCpu> parts;
+        std::unique_ptr<rhi::MeshStaging> staged;
+        std::vector<std::unique_ptr<rhi::MeshStaging>> lodStaged;   // per coarser LOD level
     };
+    std::shared_ptr<rhi::IMeshStager> meshStager_;   // the device's, for prefetch workers
     static void prepareMeshCpu(const fmt::OcMeshData& md, const std::string& rel, MeshCpu& out);
     bool uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, const std::string& rel, MeshCpu* cpu = nullptr);
     std::unordered_map<u64, i32> readyShapes_;   // mesh id -> prefetched physics shape, until taken

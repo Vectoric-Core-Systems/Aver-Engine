@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -293,6 +294,26 @@ struct GpuTimingReport {
 // split it: LOCAL is memory on the GPU's own bus (VRAM discrete, whole pool on UMA); NON_LOCAL is
 // everything else spillable (system memory over PCIe on discrete, unused on UMA).
 // `supported`: false means the backend could not answer this call, and every numeric field is then 0.
+// A mesh's GPU buffers made and filled off the render thread by an IMeshStager, registered by
+// IDevice::adoptMesh. Dropped unadopted, its memory is freed (the GPU never saw it).
+struct MeshStaging {
+    virtual ~MeshStaging() = default;
+};
+
+// Thread-safe mesh buffer creation (any thread, any number at once), valid for as long as it is
+// held -- it keeps what it needs of its device alive by itself.
+class IMeshStager {
+public:
+    virtual ~IMeshStager() = default;
+    // Null on failure; the caller then uses IDevice::createMesh on the render thread.
+    virtual std::unique_ptr<MeshStaging> stage(const MeshVertex* verts, u32 vertexCount,
+                                               const u32* indices, u32 indexCount) = 0;
+    // An index buffer alone, for IDevice::adoptMeshSharingVertices (an LOD level).
+    virtual std::unique_ptr<MeshStaging> stageIndices(const u32* indices, u32 indexCount) {
+        (void)indices; (void)indexCount; return nullptr;
+    }
+};
+
 struct VideoMemoryInfo {
     bool supported = false;
     u64  localBudgetBytes = 0;      // D3D12 DXGI_MEMORY_SEGMENT_GROUP_LOCAL Budget / Vulkan sum of heapBudget
@@ -425,6 +446,16 @@ public:
     virtual MeshHandle createMesh(const MeshVertex* verts, u32 vertexCount,
                                   const u32* indices, u32 indexCount) {
         (void)verts; (void)vertexCount; (void)indices; (void)indexCount; return 0;
+    }
+
+    // Off-thread mesh creation: a stager (null where the backend has none, or while createMesh uploads
+    // to the Default heap), and the render-thread registration of what it staged -- as createMesh's
+    // result, without its allocation and copy. adoptMesh: 0 for staging from another device.
+    virtual std::shared_ptr<IMeshStager> meshStager() { return nullptr; }
+    virtual MeshHandle adoptMesh(std::unique_ptr<MeshStaging> staged) { (void)staged; return 0; }
+    // createMeshSharingVertices with indices from IMeshStager::stageIndices.
+    virtual MeshHandle adoptMeshSharingVertices(MeshHandle source, std::unique_ptr<MeshStaging> indices) {
+        (void)source; (void)indices; return 0;
     }
 
     // Polls the adapter's current video memory budget and usage. Defaults to an unsupported, all-zero

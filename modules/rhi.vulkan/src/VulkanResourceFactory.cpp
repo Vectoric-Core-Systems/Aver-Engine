@@ -2002,39 +2002,103 @@ TextureHandle VulkanResourceFactory::adoptExternalDepthTexture(VkImage image, Vk
     return static_cast<TextureHandle>(textures_.size());
 }
 
-BufferHandle VulkanResourceFactory::createBuffer(const BufferDesc& d) {
-    collect();
-    if (d.bytes == 0) { AVER_ERROR("[RHI.Vulkan] createBuffer of zero bytes"); return 0; }
-
-    const bool upload = d.kind == BufferKind::Upload;
-    const bool readback = d.kind == BufferKind::Readback;
-    const bool hostVisible = upload || readback;
-
-    RhiBuffer b{};
-    b.desc = d;
+namespace {
+// The buffer for `d`; touches no factory state, so stagers call it on any thread.
+bool makeBuffer(VulkanDevice& dev, const BufferDesc& d, RhiBuffer& b) {
+    const bool hostVisible = d.kind == BufferKind::Upload || d.kind == BufferKind::Readback;
     const VkMemoryPropertyFlags required = hostVisible
         ? (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
         : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     // A null CreateAccelerationStructureKHR is how this backend knows the extension is absent --
     // the loader leaves every unavailable entry point null (see VulkanApi).
-    const bool rtAvailable = dev_->api().CreateAccelerationStructureKHR != nullptr;
-    if (!createBufferCommitted(*dev_, d.bytes, toVkBufferUsage(d, rtAvailable), required, b.buffer, b.memory, &b.address, d.debugName))
-        return 0;
-
+    const bool rtAvailable = dev.api().CreateAccelerationStructureKHR != nullptr;
+    if (!createBufferCommitted(dev, d.bytes, toVkBufferUsage(d, rtAvailable), required, b.buffer, b.memory, &b.address, d.debugName))
+        return false;
     if (hostVisible) {
-        if (!vkOk(dev_->api().MapMemory(dev_->vkDevice(), b.memory, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&b.mapped)), "rhi buffer map")) {
-            destroyBufferCommitted(*dev_, b.buffer, b.memory);
-            return 0;
+        if (!vkOk(dev.api().MapMemory(dev.vkDevice(), b.memory, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&b.mapped)), "rhi buffer map")) {
+            destroyBufferCommitted(dev, b.buffer, b.memory);
+            b.buffer = VK_NULL_HANDLE;
+            b.memory = VK_NULL_HANDLE;
+            return false;
         }
         b.coherent = true;   // required flags above always ask for HOST_COHERENT; only findMemoryType's
                               // HOST_VISIBLE-only fallback (see createBufferCommitted) could make this
                               // untrue, and this engine's hardware is not expected to need it -- flagged, not assumed.
     }
+    b.desc = d;
     b.desc.debugName = nullptr;
     if (d.debugName) b.debugName = d.debugName;
 #if AVER_RHI_TRACK_STATE
     b.state = (d.kind == BufferKind::AccelStructure) ? ResourceState::AccelerationStructure : ResourceState::Common;
-    b.stateFixed = upload || d.kind == BufferKind::AccelStructure;
+    b.stateFixed = d.kind == BufferKind::Upload || d.kind == BufferKind::AccelStructure;
+#endif
+    return true;
+}
+
+struct VulkanBufferStaging final : BufferStaging {
+    std::shared_ptr<VulkanDevice::StagerState> state;
+    RhiBuffer b;
+    ~VulkanBufferStaging() override {   // unadopted: never seen by the GPU
+        if (!state || !b.buffer) return;
+        std::lock_guard<std::mutex> l(state->m);
+        if (state->dev) destroyBufferCommitted(*state->dev, b.buffer, b.memory);
+    }
+};
+
+class VulkanBufferStager final : public IBufferStager {
+public:
+    explicit VulkanBufferStager(std::shared_ptr<VulkanDevice::StagerState> state) : state_(std::move(state)) {}
+    std::unique_ptr<BufferStaging> stage(const BufferDesc& d) override {
+        if (d.bytes == 0) return nullptr;
+        auto s = std::make_unique<VulkanBufferStaging>();
+        std::lock_guard<std::mutex> l(state_->m);
+        if (!state_->dev || !makeBuffer(*state_->dev, d, s->b)) return nullptr;
+        s->state = state_;
+        return s;
+    }
+
+private:
+    std::shared_ptr<VulkanDevice::StagerState> state_;
+};
+} // namespace
+
+BufferHandle VulkanResourceFactory::createBuffer(const BufferDesc& d) {
+    collect();
+    if (d.bytes == 0) { AVER_ERROR("[RHI.Vulkan] createBuffer of zero bytes"); return 0; }
+    RhiBuffer b{};
+    if (!makeBuffer(*dev_, d, b)) return 0;
+    buffers_.push_back(std::move(b));
+    return static_cast<BufferHandle>(buffers_.size());
+}
+
+std::shared_ptr<IBufferStager> VulkanResourceFactory::bufferStager() {
+    if (!bufferStager_) bufferStager_ = std::make_shared<VulkanBufferStager>(dev_->stagerState());
+    return bufferStager_;
+}
+
+BufferHandle VulkanResourceFactory::adoptBuffer(std::unique_ptr<BufferStaging> staged) {
+    auto* s = dynamic_cast<VulkanBufferStaging*>(staged.get());
+    if (!s || !s->b.buffer || !s->state || s->state->dev != dev_) return 0;
+    collect();
+    buffers_.push_back(std::move(s->b));
+    s->b.buffer = VK_NULL_HANDLE;   // owned by the factory from here
+    return static_cast<BufferHandle>(buffers_.size());
+}
+
+BufferHandle VulkanResourceFactory::adoptHostBuffer(VkBuffer buffer, VkDeviceMemory memory, VkDeviceAddress address,
+                                                    u8* mapped, const BufferDesc& d) {
+    collect();
+    RhiBuffer b{};
+    b.buffer = buffer;
+    b.memory = memory;
+    b.address = address;
+    b.mapped = mapped;
+    b.coherent = true;
+    b.desc = d;
+    b.desc.debugName = nullptr;
+    if (d.debugName) b.debugName = d.debugName;
+#if AVER_RHI_TRACK_STATE
+    b.stateFixed = true;
 #endif
     buffers_.push_back(std::move(b));
     return static_cast<BufferHandle>(buffers_.size());

@@ -1042,6 +1042,9 @@ public:
     }
 
     MeshHandle createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override;
+    std::shared_ptr<IMeshStager> meshStager() override;
+    MeshHandle adoptMesh(std::unique_ptr<MeshStaging> staged) override;
+    MeshHandle adoptMeshSharingVertices(MeshHandle source, std::unique_ptr<MeshStaging> indices) override;
     MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
     bool destroyMesh(MeshHandle mesh) override;
 
@@ -1340,6 +1343,8 @@ private:
     u64 fenceValues_[kFrameCount] = {0, 0};
     u64 nextFence_ = 0;
     u32 frameIndex_ = 0;   // frame-in-flight slot
+    // Static BLAS builds' scratch, one per frame in flight, grown on demand (D3D12RenderContext::buildBlas).
+    ComPtr<ID3D12Resource> blasScratch_[kFrameCount];
     // Advanced ONLY by beginFrame after its fence wait.
     u64 frameSerial_ = 0;
     u32 bbIndex_ = 0;      // swapchain image this frame draws first
@@ -1559,7 +1564,9 @@ private:
     std::vector<SkinSeed> skinSeeds_;
     void seedSkinTargets();
     // Shared body of createMeshSharingVertices and createPosedPartMesh.
-    MeshHandle shareVertices(MeshHandle source, const u32* indices, u32 indexCount, bool posed);
+    // staged: the index buffer from IMeshStager::stageIndices, used instead of `indices`.
+    MeshHandle shareVertices(MeshHandle source, const u32* indices, u32 indexCount, bool posed,
+                             MeshStaging* staged = nullptr);
 
     // Static mesh default heap (false = Upload heap, the default).
     bool staticMeshDefaultHeap_ = false;
@@ -1678,6 +1685,7 @@ private:
 
     // ---- generic RHI (render-feature modules) ----
     D3D12ResourceFactory* rhiFactory_ = nullptr;
+    std::shared_ptr<IMeshStager> meshStager_;
     D3D12RenderContext* rhiContext_ = nullptr;
     std::vector<IRenderFeature*> features_;   // Non-owning.
     // Editor chrome (grid, gizmos, selection, collider/nav overlays).
@@ -1802,6 +1810,11 @@ struct RhiBlas {
     u32 builtVertexCount = 0;   // Counts as of last full build.
     u32 builtIndexCount = 0;
     std::vector<BlasGeometry> geometries;   // For createBlasMulti; mesh = geometries[0].mesh.
+    // A small static structure lives in a shared pool buffer (`as` is the pool's) at asOffset, asPool its
+    // index; ~0u when it has a buffer of its own. asBytes: its share of `as`.
+    u32 asPool = ~0u;
+    u64 asOffset = 0, asBytes = 0;
+    D3D12_GPU_VIRTUAL_ADDRESS asVa() const { return as->GetGPUVirtualAddress() + asOffset; }
 };
 
 // One instance as it was packed into a TLAS's last build or refit.
@@ -1839,7 +1852,12 @@ struct RhiTlas {
     // own list: setTlasStaticInstances never waits for the queue (that wait was a foliage cell change's
     // 50-150 ms on Caldera).
     ComPtr<ID3D12Resource> staticStaging;
-    u64 staticStagingBytes = 0;
+    u8* staticStagingMapped = nullptr;
+    u64 staticStagingBytes = 0;   // to copy
+    // Copied staging buffers, reused once `fence` has passed: making a new one per prefix was up to
+    // ~150 ms of allocation while streaming.
+    struct StagingSpare { ComPtr<ID3D12Resource> res; u8* mapped = nullptr; u64 fence = 0; };
+    std::vector<StagingSpare> stagingSpares;
 };
 
 // A root signature plus the parameter indices it was built with; shared by identical layouts.
@@ -1910,6 +1928,11 @@ public:
 
     TextureHandle    createTexture(const TextureDesc& d) override;
     BufferHandle     createBuffer(const BufferDesc& d) override;
+    std::shared_ptr<IBufferStager> bufferStager() override;
+    BufferHandle     adoptBuffer(std::unique_ptr<BufferStaging> staged) override;
+    // A buffer made elsewhere (createBuffer's makeBufferResource, a stager), Upload/Readback kept mapped.
+    BufferHandle     registerBuffer(ComPtr<ID3D12Resource> res, u8* mapped, const BufferDesc& d);
+    std::shared_ptr<IBufferStager> bufferStager_;
     ShaderHandle     createShader(const ShaderDesc& d) override;
     PipelineHandle   createGraphicsPipeline(const GraphicsPipelineDesc& d) override;
     PipelineHandle   createComputePipeline(const ComputePipelineDesc& d) override;
@@ -2035,6 +2058,22 @@ private:
     std::vector<RhiTlas>       tlases_;
     std::vector<RootSigEntry>  rootSigs_;
     std::vector<RetiredObject> retired_;
+    // Small static BLASes share 64 MB pool buffers: a buffer made and released per structure churned the
+    // driver's allocator, whose occasional cleanup inside a release stalled allocations for 60-180 ms.
+    struct AsPool { ComPtr<ID3D12Resource> res; std::vector<std::pair<u64, u64>> free; };   // offset, bytes; sorted
+    std::vector<AsPool> asPools_;
+    struct AsPoolFree { u32 pool; u64 offset, bytes, fence; };
+    std::vector<AsPoolFree> asPoolPending_;   // freed ranges, still behind the fence
+    static constexpr u64 kAsPoolBytes = 64ull << 20, kAsPoolMaxBlas = 4ull << 20;
+    bool allocBlasMemory(RhiBlas& b, u64 bytes);
+    // Retired objects past their fence are released on releaser_: freeing a large one (an old geometry
+    // table, a TLAS) was 50-400 ms of whichever main-thread call collected it.
+    std::thread releaser_;
+    std::mutex releaseMutex_;
+    std::condition_variable releaseCv_;
+    std::vector<ComPtr<IUnknown>> releaseQueue_;
+    bool releaseStop_ = false;
+    void releaseLater(std::vector<ComPtr<IUnknown>>& objs);
     std::vector<RetiredRange>  pendingRanges_;   // Returned, still behind the fence.
     std::vector<RetiredRange>  freeRanges_;
     std::vector<RetiredRange>  stagePendingRanges_;
@@ -3465,27 +3504,121 @@ void D3D12Device::reconcileClearValue() {
 }
 
 // Uploads a mesh to the GPU and returns its handle.
+namespace {
+// AABB, not tight sphere; radius conservatively rounds up (false positives cost GPU, false negatives wrong pictures).
+void boundsOfVertices(const MeshVertex* verts, u32 vcount, GpuMesh& m) {
+    f32 lo[3] = {verts[0].px, verts[0].py, verts[0].pz};
+    f32 hi[3] = {verts[0].px, verts[0].py, verts[0].pz};
+    for (u32 i = 1; i < vcount; ++i) {   // plain compares: std::fmin per component crawls in Debug
+        const MeshVertex& v = verts[i];
+        if (v.px < lo[0]) lo[0] = v.px; if (v.px > hi[0]) hi[0] = v.px;
+        if (v.py < lo[1]) lo[1] = v.py; if (v.py > hi[1]) hi[1] = v.py;
+        if (v.pz < lo[2]) lo[2] = v.pz; if (v.pz > hi[2]) hi[2] = v.pz;
+    }
+    for (int a = 0; a < 3; ++a) { m.boundsMin[a] = lo[a]; m.boundsMax[a] = hi[a]; }
+    for (int a = 0; a < 3; ++a) m.boundsCentre[a] = 0.5f * (lo[a] + hi[a]);
+    const f32 dx = hi[0] - m.boundsCentre[0], dy = hi[1] - m.boundsCentre[1], dz = hi[2] - m.boundsCentre[2];
+    m.boundsRadius = std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// What createMesh does on the Upload heap, minus the device's tables: committed resources are
+// free-threaded, so streamed meshes are made on the loader's workers (a large one was 25-75 ms here).
+struct D3D12MeshStaging final : MeshStaging {
+    GpuMesh m;   // bounds and counts; buffers below until adopted
+    ID3D12Device* device = nullptr;   // the one that made them
+    ComPtr<ID3D12Resource> vb, ib;
+    u8* vbMapped = nullptr;
+    u8* ibMapped = nullptr;
+    u64 vbytes = 0, ibytes = 0;
+};
+
+class D3D12MeshStager final : public IMeshStager {
+public:
+    explicit D3D12MeshStager(ComPtr<ID3D12Device> device) : device_(std::move(device)) {}
+    std::unique_ptr<MeshStaging> stage(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override {
+        if (!device_ || !verts || !indices || vcount == 0 || icount == 0) return nullptr;
+        auto s = std::make_unique<D3D12MeshStaging>();
+        s->device = device_.Get();
+        s->m.indexCount = icount;
+        s->m.vertexCount = vcount;
+        boundsOfVertices(verts, vcount, s->m);
+        s->vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
+        s->ibytes = static_cast<u64>(icount) * sizeof(u32);
+        if (!make(s->vbytes, "mesh vertices", verts, s->vb, s->vbMapped) ||
+            !make(s->ibytes, "mesh indices", indices, s->ib, s->ibMapped)) return nullptr;
+        return s;
+    }
+    std::unique_ptr<MeshStaging> stageIndices(const u32* indices, u32 icount) override {
+        if (!device_ || !indices || icount == 0) return nullptr;
+        auto s = std::make_unique<D3D12MeshStaging>();
+        s->device = device_.Get();
+        s->m.indexCount = icount;
+        s->ibytes = static_cast<u64>(icount) * sizeof(u32);
+        if (!make(s->ibytes, "mesh indices (shared vertices)", indices, s->ib, s->ibMapped)) return nullptr;
+        return s;
+    }
+
+private:
+    bool make(u64 bytes, const char* name, const void* src, ComPtr<ID3D12Resource>& res, u8*& mapped) {
+        auto hp = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+        const D3D12_RESOURCE_DESC rd = bufferDesc(bytes);
+        if (FAILED(device_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                    nullptr, IID_PPV_ARGS(&res)))) return false;
+        setDebugName(res.Get(), name);
+        D3D12_RANGE none{0, 0};
+        if (FAILED(res->Map(0, &none, reinterpret_cast<void**>(&mapped)))) return false;
+        std::memcpy(mapped, src, bytes);
+        return true;
+    }
+    ComPtr<ID3D12Device> device_;
+};
+} // namespace
+
+std::shared_ptr<IMeshStager> D3D12Device::meshStager() {
+    if (!device_ || !rhiFactory_ || staticMeshDefaultHeap_) return nullptr;
+    if (!meshStager_) meshStager_ = std::make_shared<D3D12MeshStager>(device_);
+    return meshStager_;
+}
+
+MeshHandle D3D12Device::adoptMeshSharingVertices(MeshHandle source, std::unique_ptr<MeshStaging> indices) {
+    auto* s = dynamic_cast<D3D12MeshStaging*>(indices.get());
+    if (!s || !s->ib || s->vb || s->device != device_.Get()) return 0;
+    return shareVertices(source, nullptr, s->m.indexCount, /*posed=*/false, s);
+}
+
+MeshHandle D3D12Device::adoptMesh(std::unique_ptr<MeshStaging> staged) {
+    auto* s = dynamic_cast<D3D12MeshStaging*>(staged.get());
+    if (!s || !rhiFactory_ || !s->vb || !s->ib || s->device != device_.Get()) return 0;
+    GpuMesh m = s->m;
+    BufferDesc vd;
+    vd.bytes = s->vbytes;
+    vd.kind = BufferKind::Upload;
+    vd.debugName = "mesh vertices";
+    m.vbBuffer = rhiFactory_->registerBuffer(s->vb, s->vbMapped, vd);
+    BufferDesc idd;
+    idd.bytes = s->ibytes;
+    idd.kind = BufferKind::Upload;
+    idd.debugName = "mesh indices";
+    m.ibBuffer = rhiFactory_->registerBuffer(s->ib, s->ibMapped, idd);
+    m.vb = s->vb;
+    m.ib = s->ib;
+    m.vbv.BufferLocation = m.vb->GetGPUVirtualAddress();
+    m.vbv.SizeInBytes = static_cast<UINT>(s->vbytes);
+    m.vbv.StrideInBytes = sizeof(MeshVertex);
+    m.ibv.BufferLocation = m.ib->GetGPUVirtualAddress();
+    m.ibv.SizeInBytes = static_cast<UINT>(s->ibytes);
+    m.ibv.Format = DXGI_FORMAT_R32_UINT;
+    meshes_.push_back(std::move(m));
+    return static_cast<MeshHandle>(meshes_.size());
+}
+
 MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) {
     if (!device_ || !rhiFactory_ || vcount == 0 || icount == 0) return 0;
     GpuMesh m;
     m.indexCount = icount;
     m.vertexCount = vcount;
 
-    // AABB, not tight sphere; radius conservatively rounds up (false positives cost GPU, false negatives wrong pictures).
-    {
-        f32 lo[3] = {verts[0].px, verts[0].py, verts[0].pz};
-        f32 hi[3] = {verts[0].px, verts[0].py, verts[0].pz};
-        for (u32 i = 1; i < vcount; ++i) {   // plain compares: std::fmin per component crawls in Debug
-            const MeshVertex& v = verts[i];
-            if (v.px < lo[0]) lo[0] = v.px; if (v.px > hi[0]) hi[0] = v.px;
-            if (v.py < lo[1]) lo[1] = v.py; if (v.py > hi[1]) hi[1] = v.py;
-            if (v.pz < lo[2]) lo[2] = v.pz; if (v.pz > hi[2]) hi[2] = v.pz;
-        }
-        for (int a = 0; a < 3; ++a) { m.boundsMin[a] = lo[a]; m.boundsMax[a] = hi[a]; }
-        for (int a = 0; a < 3; ++a) m.boundsCentre[a] = 0.5f * (lo[a] + hi[a]);
-        const f32 dx = hi[0] - m.boundsCentre[0], dy = hi[1] - m.boundsCentre[1], dz = hi[2] - m.boundsCentre[2];
-        m.boundsRadius = std::sqrt(dx * dx + dy * dy + dz * dz);
-    }
+    boundsOfVertices(verts, vcount, m);
     const u64 vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
     const u64 ibytes = static_cast<u64>(icount) * sizeof(u32);
 
@@ -3566,9 +3699,11 @@ MeshHandle D3D12Device::createPosedPartMesh(MeshHandle posedSource, const u32* i
     return shareVertices(posedSource, indices, indexCount, /*posed=*/true);
 }
 // Shared body. `posed` flips: which source accepted, range-check, and compute-writeable status.
-MeshHandle D3D12Device::shareVertices(MeshHandle source, const u32* indices, u32 indexCount, bool posed) {
+MeshHandle D3D12Device::shareVertices(MeshHandle source, const u32* indices, u32 indexCount, bool posed,
+                                      MeshStaging* staged) {
     const char* what = posed ? "createPosedPartMesh" : "createMeshSharingVertices";
-    if (!device_ || !rhiFactory_ || !indices || indexCount == 0) return 0;
+    auto* st = static_cast<D3D12MeshStaging*>(staged);   // adoptMeshSharingVertices checked it
+    if (!device_ || !rhiFactory_ || (!indices && !st) || indexCount == 0 || (st && posed)) return 0;
     if (source == 0 || source > meshes_.size()) {
         AVER_ERROR("[RHI.D3D12] {} with an invalid source handle", what);
         return 0;
@@ -3643,7 +3778,14 @@ MeshHandle D3D12Device::shareVertices(MeshHandle source, const u32* indices, u32
         return true;
     };
 
-    if (!allocateIndices(useDefault)) {
+    if (st) {
+        BufferDesc idd;
+        idd.bytes = ibytes;
+        idd.kind = BufferKind::Upload;
+        idd.debugName = "mesh indices (shared vertices)";
+        m.ib = st->ib;
+        m.ibBuffer = rhiFactory_->registerBuffer(st->ib, st->ibMapped, idd);
+    } else if (!allocateIndices(useDefault)) {
         if (!useDefault) return 0;
         useDefault = false;
         if (!allocateIndices(useDefault)) return 0;
@@ -6292,6 +6434,50 @@ bool D3D12Device::selfTest(const f32 in[4], f32 out[4]) {
 D3D12ResourceFactory::~D3D12ResourceFactory() {
     dev_->waitForGpu();
     retired_.clear();
+    if (releaser_.joinable()) {
+        { std::lock_guard<std::mutex> l(releaseMutex_); releaseStop_ = true; }
+        releaseCv_.notify_one();
+        releaser_.join();
+    }
+}
+
+void D3D12ResourceFactory::releaseLater(std::vector<ComPtr<IUnknown>>& objs) {
+    if (!releaser_.joinable())
+        releaser_ = std::thread([this] {
+            std::vector<ComPtr<IUnknown>> batch;
+            for (;;) {
+                {
+                    std::unique_lock<std::mutex> l(releaseMutex_);
+                    releaseCv_.wait(l, [this] { return releaseStop_ || !releaseQueue_.empty(); });
+                    if (releaseQueue_.empty()) return;   // stopping, nothing left
+                    batch.swap(releaseQueue_);
+                }
+                // Paced, as much pause as work: a release holds a driver lock that allocations and Present
+                // wait on, and releases back to back starved the render thread for their length (80-760 ms).
+                auto slice = std::chrono::steady_clock::now();
+                for (ComPtr<IUnknown>& o : batch) {
+                    u64 width = 0;
+                    if (ComPtr<ID3D12Resource> r; hitchVerbose() && SUCCEEDED(o.As(&r))) width = r->GetDesc().Width;
+                    const auto t0 = std::chrono::steady_clock::now();
+                    o.Reset();
+                    const auto now = std::chrono::steady_clock::now();
+                    if (hitchVerbose() && now - t0 > std::chrono::milliseconds(20))
+                        AVER_INFO("[RHI.D3D12] releasing one {:.1f} MiB object took {:.1f} ms (background)",
+                                  static_cast<f64>(width) / (1024.0 * 1024.0),
+                                  std::chrono::duration<f64, std::milli>(now - t0).count());
+                    if (now - slice > std::chrono::milliseconds(1)) {
+                        std::this_thread::sleep_for(now - slice);
+                        slice = std::chrono::steady_clock::now();
+                    }
+                }
+                batch.clear();
+            }
+        });
+    {
+        std::lock_guard<std::mutex> l(releaseMutex_);
+        for (ComPtr<IUnknown>& o : objs) releaseQueue_.push_back(std::move(o));
+    }
+    releaseCv_.notify_one();
 }
 
 // Creates the shader-visible descriptor heap and CPU-only staging heap.
@@ -6525,12 +6711,29 @@ void D3D12ResourceFactory::retire(ComPtr<IUnknown> obj) {
 
 // Releases every retired object and descriptor range whose fence has passed.
 void D3D12ResourceFactory::collect() {
-    if (!dev_->fence_ || (retired_.empty() && pendingRanges_.empty() && stagePendingRanges_.empty())) return;
+    if (!dev_->fence_ || (retired_.empty() && pendingRanges_.empty() && stagePendingRanges_.empty() &&
+                          asPoolPending_.empty())) return;
     const u64 done = dev_->fence_->GetCompletedValue();
-    for (usize i = 0; i < retired_.size();) {
-        if (retired_[i].fence <= done) { retired_[i] = std::move(retired_.back()); retired_.pop_back(); }
-        else ++i;
+    for (usize i = 0; i < asPoolPending_.size();) {
+        const AsPoolFree f = asPoolPending_[i];
+        if (f.fence > done) { ++i; continue; }
+        asPoolPending_[i] = asPoolPending_.back();
+        asPoolPending_.pop_back();
+        std::vector<std::pair<u64, u64>>& fl = asPools_[f.pool].free;
+        auto it = fl.insert(std::lower_bound(fl.begin(), fl.end(), std::make_pair(f.offset, u64(0))),
+                            {f.offset, f.bytes});
+        if (it + 1 != fl.end() && it->first + it->second == (it + 1)->first) { it->second += (it + 1)->second; fl.erase(it + 1); }
+        if (it != fl.begin() && (it - 1)->first + (it - 1)->second == it->first) { (it - 1)->second += it->second; fl.erase(it); }
     }
+    std::vector<ComPtr<IUnknown>> ready;
+    for (usize i = 0; i < retired_.size();) {
+        if (retired_[i].fence <= done) {
+            ready.push_back(std::move(retired_[i].obj));
+            retired_[i] = std::move(retired_.back());
+            retired_.pop_back();
+        } else ++i;
+    }
+    if (!ready.empty()) releaseLater(ready);
     for (usize i = 0; i < pendingRanges_.size();) {
         if (pendingRanges_[i].fence <= done) {
             freeRanges_.push_back({pendingRanges_[i].first, pendingRanges_[i].count, 0});
@@ -7023,14 +7226,12 @@ TextureHandle D3D12ResourceFactory::adoptExternalRenderTargetTexture(ID3D12Resou
 }
 
 // Creates a buffer, mapping it when it is an upload buffer, and returns its handle.
-BufferHandle D3D12ResourceFactory::createBuffer(const BufferDesc& d) {
-    collect();
-    if (d.bytes == 0) { AVER_ERROR("[RHI.D3D12] createBuffer of zero bytes"); return 0; }
-
+namespace {
+// The resource for `d`; touches no factory state, so stagers call it on any thread.
+bool makeBufferResource(ID3D12Device* device, const BufferDesc& d, ComPtr<ID3D12Resource>& res, u8*& mapped) {
     D3D12_RESOURCE_DESC rd = bufferDesc(d.bytes);
     if (d.allowUnorderedAccess || d.kind == BufferKind::AccelStructure)
         rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-
     const bool upload = d.kind == BufferKind::Upload;
     const bool readback = d.kind == BufferKind::Readback;
     // Readback buffer stays in COPY_DEST (copy-only target).
@@ -7039,25 +7240,77 @@ BufferHandle D3D12ResourceFactory::createBuffer(const BufferDesc& d) {
       : readback ? D3D12_RESOURCE_STATE_COPY_DEST
                : (d.kind == BufferKind::AccelStructure ? D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE
                                                        : D3D12_RESOURCE_STATE_COMMON);
-    RhiBuffer b;
     auto hp = heapProps(upload ? D3D12_HEAP_TYPE_UPLOAD
                       : readback ? D3D12_HEAP_TYPE_READBACK : D3D12_HEAP_TYPE_DEFAULT);
-    if (!hrOk(dev_->device_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr,
-              IID_PPV_ARGS(&b.res)), "rhi buffer")) return 0;
-    setDebugName(b.res.Get(), d.debugName);
+    if (!hrOk(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&res)),
+              "rhi buffer")) return false;
+    setDebugName(res.Get(), d.debugName);
+    mapped = nullptr;
     if (upload || readback) {
         D3D12_RANGE none{0, 0};
-        b.res->Map(0, &none, reinterpret_cast<void**>(&b.mapped));
+        res->Map(0, &none, reinterpret_cast<void**>(&mapped));
     }
+    return true;
+}
+
+struct D3D12BufferStaging final : BufferStaging {
+    ID3D12Device* device = nullptr;   // the one that made it
+    ComPtr<ID3D12Resource> res;
+    u8* mapped = nullptr;
+    BufferDesc desc;
+};
+
+class D3D12BufferStager final : public IBufferStager {
+public:
+    explicit D3D12BufferStager(ComPtr<ID3D12Device> device) : device_(std::move(device)) {}
+    std::unique_ptr<BufferStaging> stage(const BufferDesc& d) override {
+        if (!device_ || d.bytes == 0) return nullptr;
+        auto s = std::make_unique<D3D12BufferStaging>();
+        s->device = device_.Get();
+        s->desc = d;
+        if (!makeBufferResource(device_.Get(), d, s->res, s->mapped)) return nullptr;
+        return s;
+    }
+
+private:
+    ComPtr<ID3D12Device> device_;
+};
+} // namespace
+
+BufferHandle D3D12ResourceFactory::createBuffer(const BufferDesc& d) {
+    collect();
+    if (d.bytes == 0) { AVER_ERROR("[RHI.D3D12] createBuffer of zero bytes"); return 0; }
+    ComPtr<ID3D12Resource> res;
+    u8* mapped = nullptr;
+    if (!makeBufferResource(dev_->device_.Get(), d, res, mapped)) return 0;
+    return registerBuffer(std::move(res), mapped, d);
+}
+
+BufferHandle D3D12ResourceFactory::registerBuffer(ComPtr<ID3D12Resource> res, u8* mapped, const BufferDesc& d) {
+    collect();
+    RhiBuffer b;
+    b.res = std::move(res);
+    b.mapped = mapped;
     b.desc = d;
     b.desc.debugName = nullptr;
     if (d.debugName) b.debugName = d.debugName;
 #if AVER_RHI_TRACK_STATE
     b.state = d.kind == BufferKind::AccelStructure ? ResourceState::AccelerationStructure : ResourceState::Common;
-    b.stateFixed = upload || d.kind == BufferKind::AccelStructure;
+    b.stateFixed = d.kind == BufferKind::Upload || d.kind == BufferKind::AccelStructure;
 #endif
     buffers_.push_back(std::move(b));
     return static_cast<BufferHandle>(buffers_.size());
+}
+
+std::shared_ptr<IBufferStager> D3D12ResourceFactory::bufferStager() {
+    if (!bufferStager_ && dev_->device_) bufferStager_ = std::make_shared<D3D12BufferStager>(dev_->device_);
+    return bufferStager_;
+}
+
+BufferHandle D3D12ResourceFactory::adoptBuffer(std::unique_ptr<BufferStaging> staged) {
+    auto* s = dynamic_cast<D3D12BufferStaging*>(staged.get());
+    if (!s || !s->res || s->device != dev_->device_.Get()) return 0;
+    return registerBuffer(std::move(s->res), s->mapped, s->desc);
 }
 
 namespace {
@@ -7553,7 +7806,7 @@ BlasHandle D3D12ResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpdat
     RhiBlas b;
     b.mesh = mesh;
     b.allowUpdate = allowUpdate;
-    b.as = makeAsBuffer(dev_->device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+    allocBlasMemory(b, info.ResultDataMaxSizeInBytes);
     // An updatable structure's scratch must cover whichever of a build or an update asks for more --
     // it is reused for both, and D3D12 sizes the two independently.
     b.scratchBytes = allowUpdate ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
@@ -7563,6 +7816,40 @@ BlasHandle D3D12ResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpdat
     if (!b.as || (allowUpdate && !b.scratch)) { AVER_ERROR("[RHI.D3D12] createBlas allocation failed"); return 0; }
     blases_.push_back(std::move(b));
     return static_cast<BlasHandle>(blases_.size());
+}
+
+bool D3D12ResourceFactory::allocBlasMemory(RhiBlas& b, u64 bytes) {
+    b.asPool = ~0u;
+    b.asOffset = 0;
+    b.asBytes = bytes;
+    if (!b.allowUpdate && bytes <= kAsPoolMaxBlas) {
+        const u64 need = (bytes + D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT - 1) &
+                         ~u64(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT - 1);
+        for (u32 p = 0; p <= asPools_.size(); ++p) {
+            if (p == asPools_.size()) {
+                AsPool np;
+                np.res = makeAsBuffer(dev_->device_.Get(), kAsPoolBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+                if (!np.res) break;
+                setDebugName(np.res.Get(), "rhi BLAS pool");
+                np.free.push_back({0, kAsPoolBytes});
+                asPools_.push_back(std::move(np));
+            }
+            std::vector<std::pair<u64, u64>>& fl = asPools_[p].free;
+            for (usize i = 0; i < fl.size(); ++i) {
+                if (fl[i].second < need) continue;
+                b.as = asPools_[p].res;
+                b.asPool = p;
+                b.asOffset = fl[i].first;
+                b.asBytes = need;
+                fl[i].first += need;
+                fl[i].second -= need;
+                if (fl[i].second == 0) fl.erase(fl.begin() + static_cast<std::ptrdiff_t>(i));
+                return true;
+            }
+        }
+    }
+    b.as = makeAsBuffer(dev_->device_.Get(), bytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+    return b.as != nullptr;
 }
 
 // Acceleration structure over multiple meshes; sized by prebuild query.
@@ -7581,7 +7868,7 @@ BlasHandle D3D12ResourceFactory::createBlasMulti(const BlasGeometry* geometries,
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
     dev_->device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
     b.mesh = geometries[0].mesh;
-    b.as = makeAsBuffer(dev_->device_.Get(), info.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+    allocBlasMemory(b, info.ResultDataMaxSizeInBytes);
     b.scratchBytes = info.ScratchDataSizeInBytes;
     if (!b.as) { AVER_ERROR("[RHI.D3D12] createBlasMulti allocation failed"); return 0; }
     blases_.push_back(std::move(b));
@@ -7701,25 +7988,42 @@ bool D3D12ResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInstan
             descs = createBuffer(bd);
             newDescs = true;
         }
-        auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
-        auto ud = bufferDesc(stagingBytes);
         u8* mapped = nullptr;
-        D3D12_RANGE none{0, 0};
-        const bool filled = bufferResource(descs) &&
-            SUCCEEDED(dev_->device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &ud,
-                      D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging))) &&
-            SUCCEEDED(staging->Map(0, &none, reinterpret_cast<void**>(&mapped)));
+        // An unbuilt earlier prefix's staging, or a spare the GPU is done with, when large enough.
+        if (t->staticStaging && t->staticStaging->GetDesc().Width >= stagingBytes) {
+            staging = std::move(t->staticStaging);
+            mapped = t->staticStagingMapped;
+        } else {
+            const u64 done = dev_->fence_ ? dev_->fence_->GetCompletedValue() : 0;
+            for (auto it = t->stagingSpares.begin(); it != t->stagingSpares.end(); ++it)
+                if (it->fence <= done && it->res->GetDesc().Width >= stagingBytes) {
+                    staging = std::move(it->res);
+                    mapped = it->mapped;
+                    t->stagingSpares.erase(it);
+                    break;
+                }
+        }
+        if (!staging) {
+            auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+            auto ud = bufferDesc(roomy(stagingBytes));
+            D3D12_RANGE none{0, 0};
+            if (SUCCEEDED(dev_->device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &ud,
+                          D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging))) &&
+                FAILED(staging->Map(0, &none, reinterpret_cast<void**>(&mapped))))
+                staging.Reset();
+            if (staging) setDebugName(staging.Get(), "rhi TLAS static instances staging");
+        }
+        const bool filled = bufferResource(descs) && staging && mapped;
         if (!filled) {
             AVER_ERROR("[RHI.D3D12] setTlasStaticInstances: the {:.1f} MiB instance buffer could not be created "
                        "or filled -- the previous prefix kept", static_cast<f64>(descBytes) / (1024.0 * 1024.0));
             if (newDescs && descs) destroyBuffer(descs);
             return false;
         }
-        setDebugName(staging.Get(), "rhi TLAS static instances staging");
         auto* out = reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(mapped);
         for (u32 i = 0; i < count; ++i)
-            out[i] = toInstanceDesc(instances[i], blases_[instances[i].blas - 1].as->GetGPUVirtualAddress());
-        staging->Unmap(0, nullptr);
+            out[i] = toInstanceDesc(instances[i], blases_[instances[i].blas - 1].asVa());
+        t->staticStagingMapped = mapped;   // kept mapped for reuse
 #if AVER_RHI_TRACK_STATE
         // State managed by build; caller's bufferBarrier on it is reported, not obeyed.
         if (newDescs) buffers_[descs - 1].stateFixed = true;
@@ -7732,7 +8036,7 @@ bool D3D12ResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInstan
     if (t->staticDescs && descs && descs != t->staticDescs) destroyBuffer(t->staticDescs);
     if (descs) t->staticDescs = descs;
     if (newDescs) t->staticDescsState = D3D12_RESOURCE_STATE_COMMON;
-    retire(t->staticStaging);   // an earlier prefix never built
+    retire(t->staticStaging);   // an earlier prefix never built, too small to reuse
     t->staticStaging = staging;
     t->staticStagingBytes = staging ? stagingBytes : 0;
     t->staticCount = count;
@@ -7759,7 +8063,7 @@ BufferHandle D3D12ResourceFactory::tlasStaticInstanceBuffer(TlasHandle h) const 
 u64 D3D12ResourceFactory::blasMemoryBytes(BlasHandle h) const {
     if (h == 0 || h > blases_.size()) return 0;
     const RhiBlas& b = blases_[h - 1];
-    return (b.as ? b.as->GetDesc().Width : 0) + (b.scratch ? b.scratch->GetDesc().Width : 0);
+    return (b.as ? (b.asPool != ~0u ? b.asBytes : b.as->GetDesc().Width) : 0) + (b.scratch ? b.scratch->GetDesc().Width : 0);
 }
 
 u64 D3D12ResourceFactory::tlasMemoryBytes(TlasHandle h) const {
@@ -7803,7 +8107,9 @@ void D3D12ResourceFactory::destroyBlas(BlasHandle h) {
     if (h == 0 || h > blases_.size()) return;
     RhiBlas& b = blases_[h - 1];
     if (!b.as && !b.scratch) return;
-    retire(b.as);
+    if (b.asPool != ~0u) asPoolPending_.push_back({b.asPool, b.asOffset, b.asBytes, retireFence()});
+    else retire(b.as);
+    b.asPool = ~0u;
     retire(b.scratch);
     b.as.Reset();
     b.scratch.Reset();
@@ -8751,15 +9057,30 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
     if (!b) { AVER_ERROR("[RHI.D3D12] buildBlas with an invalid handle"); return; }
     if (!dev_->cmdList4_ || !dev_->device5_) { AVER_ERROR("[RHI.D3D12] buildBlas without ray-tracing support"); return; }
     if (b->mesh == 0 || b->mesh > dev_->meshes_.size()) return;
-    if (!b->scratch) {
+    // A static structure builds from the frame's shared scratch: one allocation and one release per
+    // build churned the allocator (tiny structures took 40-170 ms to make while streaming). Builds
+    // in a frame take turns on it behind a UAV barrier; frames in flight each have their own.
+    ID3D12Resource* scratch = b->scratch.Get();
+    if (!b->allowUpdate) {
+        const u32 f = dev_->frameIndex_ < kFrameCount ? dev_->frameIndex_ : 0;
+        ComPtr<ID3D12Resource>& pool = dev_->blasScratch_[f];
+        if (!pool || pool->GetDesc().Width < b->scratchBytes) {
+            const u64 bytes = std::max<u64>(b->scratchBytes + b->scratchBytes / 2, 16ull << 20);
+            ComPtr<ID3D12Resource> grown = makeAsBuffer(dev_->device_.Get(), bytes, D3D12_RESOURCE_STATE_COMMON);
+            if (!grown) { AVER_ERROR("[RHI.D3D12] buildBlas: no build scratch for BLAS {}", h); return; }
+            if (pool) res_->retire(pool);
+            pool = grown;
+        }
+        scratch = pool.Get();
+        D3D12_RESOURCE_BARRIER turn{};
+        turn.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        turn.UAV.pResource = scratch;
+        dev_->cmdList_->ResourceBarrier(1, &turn);
+    } else if (!scratch) {
         b->scratch = makeAsBuffer(dev_->device_.Get(), b->scratchBytes, D3D12_RESOURCE_STATE_COMMON);
         if (!b->scratch) { AVER_ERROR("[RHI.D3D12] buildBlas: no build scratch for BLAS {}", h); return; }
+        scratch = b->scratch.Get();
     }
-    // A static BLAS's scratch is retired behind this frame's fence once the build is recorded.
-    struct ReleaseScratch {
-        D3D12ResourceFactory* res; RhiBlas* b;
-        ~ReleaseScratch() { if (!b->allowUpdate && b->scratch) { res->retire(b->scratch); b->scratch.Reset(); } }
-    } releaseScratch{res_, b};
     if (!b->geometries.empty()) {
         // createBlasMulti: every geometry at once, into the allocation its prebuild query sized.
         std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geos;
@@ -8768,8 +9089,8 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
             AVER_ERROR("[RHI.D3D12] buildBlas: multi-geometry BLAS {} names a mesh that is gone", h);
             return;
         }
-        bd.ScratchAccelerationStructureData = b->scratch->GetGPUVirtualAddress();
-        bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
+        bd.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
+        bd.DestAccelerationStructureData = b->asVa();
         dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
         D3D12_RESOURCE_BARRIER bar{};
         bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -8783,8 +9104,8 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
     D3D12_RAYTRACING_GEOMETRY_DESC geo{};
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
     bd.Inputs = blasInputs(m, geo, b->allowUpdate);
-    bd.ScratchAccelerationStructureData = b->scratch->GetGPUVirtualAddress();
-    bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
+    bd.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
+    bd.DestAccelerationStructureData = b->asVa();
     dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -8818,7 +9139,7 @@ bool D3D12RenderContext::refitBlas(BlasHandle h) {
             const u64 scratchBytes = b->allowUpdate
                 ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
                 : info.ScratchDataSizeInBytes;
-            if (info.ResultDataMaxSizeInBytes > b->as->GetDesc().Width || scratchBytes > b->scratchBytes) {
+            if (info.ResultDataMaxSizeInBytes > b->asBytes || scratchBytes > b->scratchBytes) {
                 AVER_ERROR("[RHI.D3D12] refitBlas: mesh {} moved from {}v/{}i to {}v/{}i, past what its BLAS "
                            "was allocated for at creation -- rebuilding it in place would write past that "
                            "allocation, so this refit is refused; the caller must destroy and recreate the BLAS",
@@ -8835,9 +9156,9 @@ bool D3D12RenderContext::refitBlas(BlasHandle h) {
     bd.Inputs = blasInputs(m, geo, /*allowUpdate=*/true);
     bd.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
     bd.ScratchAccelerationStructureData = b->scratch->GetGPUVirtualAddress();
-    bd.DestAccelerationStructureData = b->as->GetGPUVirtualAddress();
+    bd.DestAccelerationStructureData = b->asVa();
     // In place: DXR allows Source == Dest for an update, and that is what "refit" means here.
-    bd.SourceAccelerationStructureData = b->as->GetGPUVirtualAddress();
+    bd.SourceAccelerationStructureData = b->asVa();
     dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -8871,7 +9192,7 @@ u32 D3D12RenderContext::packTlasInstances(RhiTlas& t, const TlasInstance* instan
                        caller, i, instances[i].instanceId);
             continue;
         }
-        const D3D12_RAYTRACING_INSTANCE_DESC id = toInstanceDesc(instances[i], b->as->GetGPUVirtualAddress());
+        const D3D12_RAYTRACING_INSTANCE_DESC id = toInstanceDesc(instances[i], b->asVa());
         dst[written++] = id;
         // The mask as the GPU keeps it (InstanceMask is 8 bits), so bits it never sees can't defeat a refit.
         outSlots.push_back({id.AccelerationStructure, id.Flags, instances[i].mask & 0xFFu});
@@ -8944,8 +9265,13 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderContext::tlasBuildDescs(RhiTlas& t, u32 sta
             t.staticDescsState = D3D12_RESOURCE_STATE_COPY_DEST;
         }
         dev_->cmdList_->CopyBufferRegion(descs, 0, t.staticStaging.Get(), 0, t.staticStagingBytes);
-        res_->retire(std::move(t.staticStaging));
+        if (t.stagingSpares.size() >= 2) {   // a couple are enough at one prefix per quarter second
+            res_->retire(t.stagingSpares.front().res);
+            t.stagingSpares.erase(t.stagingSpares.begin());
+        }
+        t.stagingSpares.push_back({std::move(t.staticStaging), t.staticStagingMapped, res_->retireFence()});
         t.staticStaging.Reset();
+        t.staticStagingMapped = nullptr;
         t.staticStagingBytes = 0;
     }
     if (written) {
