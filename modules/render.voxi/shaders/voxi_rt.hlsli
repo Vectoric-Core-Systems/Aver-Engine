@@ -560,6 +560,9 @@ uint rtGiShadowBits() { return (uint)gGiShadowParams.w; }
 
 // NRD2 frame (bit 512): u9 and u23's rgb belong to Stage B's targets, so the stages' writes there are dead.
 bool rtNrd2Frame() { return (rtGiShadowBits() & 512u) != 0u; }
+// NRD2 frame with the sun outside the filter (bit 1024, Settings::nrd2SunClean): the sun's lighting is added
+// clean, its visibility averaged over a depth-weighted 5x5 (rdSunVisFiltered).
+bool rtNrd2SunClean() { return (rtGiShadowBits() & 1024u) != 0u; }
 
 // False where the sun's radiance is exactly 0 (a night scene): every consumer multiplies visibility by it.
 bool rdSunLit() { return any(averSunRadiance() != 0.0); }

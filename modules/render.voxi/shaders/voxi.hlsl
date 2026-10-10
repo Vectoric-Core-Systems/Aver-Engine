@@ -294,6 +294,27 @@ RWTexture2D<float4>       gRdReflTex   : register(u15);
 Texture2D<float4>              gRdLocalHist   : register(t19);
 RWTexture2D<float4>            gRdLocalOut    : register(u19);
 
+// The sun's visibility over a 5x5 around pixel, weighted by view-depth similarity (as rdLocalVisTap):
+// NRD2's sun-outside-the-filter path. Only the penumbra is noisy (its few rays a pixel, no history on NRD2
+// frames), so this softens that band by two pixels and leaves the lit shading itself untouched.
+float3 rdSunVisFiltered(uint2 pixel, float3 centre) {
+    const float zc = gRdSunVisTex[pixel].a;
+    if (zc <= 0.0) return centre;
+    const int2 lo = int2(gSceneViewportCur.xy);
+    const int2 hi = lo + max(int2(gSceneViewportCur.zw), int2(1, 1)) - 1;
+    float3 sum  = centre;
+    float  wsum = 1.0;
+    [unroll] for (int oy = -2; oy <= 2; ++oy) {
+        [unroll] for (int ox = -2; ox <= 2; ++ox) {
+            if (ox == 0 && oy == 0) continue;
+            const float4 t = gRdSunVisTex[uint2(clamp(int2(pixel) + int2(ox, oy), lo, hi))];
+            const float  w = (t.a > 0.0) ? saturate(1.0 - abs(t.a - zc) / (zc * 0.03 + 1.0)) : 0.0;
+            if (w > 0.0) { sum += t.rgb * w; wsum += w; }
+        }
+    }
+    return sum / wsum;
+}
+
 // AVER_RD_LAMPS (voxi_rt.hlsli): every compile but a single-pass one with AVER_RD_SINGLE_PASS_LAMPS 0.
 #if AVER_RD_LAMPS
 // One neighbour of rdLocalVisFiltered's 5x5. Weight falls linearly to zero at the reprojection depth
@@ -1798,15 +1819,21 @@ float3 viewDebugColor(uint vmode, uint instanceIndex, uint materialIndex, uint p
 
 // Sun + indirect into NRD2's diffuse and specular buckets: averShadeSplit's lobes, emissive left out,
 // and the multiple-scatter share of the ambient term (FmsEms, a specular quantity) routed to specular
-// so a metal's diffuse bucket stays empty.
-void nrd2ShadeSplit(AverSurface s, AverLight l, AverIndirect ind, inout float3 dif, inout float3 spec) {
+// so a metal's diffuse bucket stays empty. sunClean: the sun goes to `clean` instead, never filtered
+// (noise-free but for its penumbra; through the filter it lost normal-map and contact detail).
+void nrd2ShadeSplit(AverSurface s, AverLight l, AverIndirect ind, bool sunClean, inout float3 dif,
+                    inout float3 spec, inout float3 clean) {
     if (s.model == AVER_MODEL_UNLIT) return;
     float3 dD, dS, dSss;
     float  ndl;
     averDirectTerms(s, l, dD, dS, dSss, ndl);
     const float3 lt = l.radiance * ndl * l.visibility;
-    dif  += dD * lt + dSss * l.radiance * l.visibility;
-    spec += dS * lt;
+    if (sunClean) {
+        clean += dD * lt + dSss * l.radiance * l.visibility + dS * lt;
+    } else {
+        dif  += dD * lt + dSss * l.radiance * l.visibility;
+        spec += dS * lt;
+    }
     float3 specEnv, diffAmbient, diffBounce, FssEss, FmsEms, kD;
     averIndirectTerms(s, ind, specEnv, diffAmbient, diffBounce);
     averIndirectFactors(s, FssEss, FmsEms, kD);
@@ -1964,6 +1991,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     float3 sunVis = float3(1.0, 1.0, 1.0);   // ablated: fully lit, no ray
 #else
     float3 sunVis = gRdSunVisTex[uint2(i.pos.xy)].rgb;
+#if AVER_NRD2
+    if (rtNrd2SunClean()) sunVis = rdSunVisFiltered(uint2(i.pos.xy), sunVis);
+#endif
 #endif
 #else
 #if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
@@ -2188,8 +2218,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         ind.diffuse -= ind.ambient * ind.ambientScale * ind.occlusion * s.occlusion * gVoxelParams.y;
     const float aoView = ind.occlusion * s.occlusion;   // ViewDebug::AmbientOcclusion (vmode 6)
 #if AVER_NRD2
-    nrd2ShadeSplit(s, sun, ind, nrdD, nrdS);
-    radiance = s.emissive;
+    float3 nrdSunClean = 0.0;
+    nrd2ShadeSplit(s, sun, ind, rtNrd2SunClean() && !ptRef, nrdD, nrdS, nrdSunClean);
+    radiance = s.emissive + nrdSunClean;
     {
         // Demodulated and written now, so only the clean colour stays live through fog and glass.
         // a: D's albedo is usable (0 for metals, black and unlit, which the pyramid skips); S's hit

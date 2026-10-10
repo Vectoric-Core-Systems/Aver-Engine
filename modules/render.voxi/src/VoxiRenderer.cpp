@@ -7001,6 +7001,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         if (ao) bits |= 128u;
         if (fill && (refl || ao || settings_.nrd2HalfRateGi)) bits |= 64u;
         bits |= 512u;   // shader-visible NRD2 frame (rtNrd2Frame)
+        if (settings_.nrd2SunClean) bits |= 1024u;   // the sun outside the filter (rtNrd2SunClean)
         cb_.giShadowParams[3] = static_cast<f32>(bits);
     }
     // Spatial filter radius; blend amount pinned at 0 (loop runs but result discarded via constant).

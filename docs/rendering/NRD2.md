@@ -499,6 +499,31 @@ after 1200 still frames (scratchpad cmp.py):
 
 The unfiltered mean beats the filter from about 100 frames on, hence the default of 128.
 
+## Sun outside the filter (2026-10-10)
+
+The owner: NRD2 is better overall than FidelityFX but less crisp. Two reasons, found in the code:
+
+- **The sun went through the filter.** Its lighting is noise-free apart from its shadow's penumbra, but it
+  sat in D and S, so the pyramid and resolve (1/2 to 1/8 levels) smoothed the normal-mapped and contact
+  shading the sun lights. FidelityFX filters only the noisy terms.
+- **No temporal help under TAA.** The stabiliser runs only on jitter-free frames (the Arm US 18/497,608
+  design-around, NEURAA_NRD.md). Since TAAU and its jitter run in motion too, jitter is never zero with TAA
+  on, so NRD2 is single-frame throughout and the spatial filter carries all the noise. Changing this is the
+  owner's call (counsel, or the un-jitter design-around); not done.
+
+**Fix (the first).** `Settings::nrd2SunClean` (default on, `voxi.nrd2SunClean`; NRD2 frames set bit 1024,
+`rtNrd2SunClean`): `nrd2ShadeSplit` adds the exact light's diffuse, subsurface and specular to the clean term
+(beside emissive, fogged and glass-pathed the same way) instead of D and S, so NRD2 filters indirect light and
+the lamps only. The sun's visibility, which NRD2 frames trace raw (no shadow history), is averaged in Stage B
+over a depth-weighted 5x5 (`rdSunVisFiltered`, the lamp shadows' tap weights): the penumbra band softens by two
+pixels and the lit shading is untouched. Not under Reference path tracing. Patent-neutral: a spatial
+visibility filter, no history, no jitter.
+
+**Expect** crisper sunlit surfaces (brick, normal maps, contact detail) in motion and at rest; penumbras a little
+noisier than FidelityFX's (no temporal shadow history: its texture u2 is NRD2's remodulation target on these
+frames). The network was trained with the sun inside D: retrain in-engine (NRD2.md "Training") for its best,
+though the resolve is unchanged. Not measured yet (owner tests): `voxi.nrd2SunClean 0` is the A/B.
+
 ## Combine reference and 1/4-level cap (2026-10-06)
 
 From the FidelityFX study (a read-only Sonnet workflow, 2026-10-06). FidelityFX has no pyramid: its prefilter
