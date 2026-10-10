@@ -206,7 +206,9 @@ Alternatives considered and ranked lower: N2 (learned motion-vector reliability 
     - NeonDistrict: 52 off; on, 43 real and 2.00 per frame (86 shown).
   - Debug layer: 0 errors, once the midpoint restored the scene's render targets, viewport and topology after reopening the list (without that: debug-layer message #615 twice a frame).
   - Patent note: the display time comes from where the present sits in the GPU work, not from metrics of rendered frames (AMD US 2025/0299287 claims timing derived from rendering metrics). Counsel to confirm.
-- **Without vsync (tearing), since 2026-10-03:** frame interpolation runs on a **fixed present clock** (`D3D12Device::frameInterpWaitForTick`). Each image, generated then real, is presented with `ALLOW_TEARING` on the next tick of a clock running at a **constant** rate: the display's refresh rate (read from the display mode, `EnumDisplaySettingsW`), or the rate the user sets (Editor Preferences, `--frame-interp-clock`). That is an ordinary frame-rate cap. No frame time, GPU time or present statistic sets the rate or a tick. The render thread sleeps to the tick *after* submitting the GPU work, so the GPU is never held. A present later than one whole tick restarts the clock from "now". **This is the one place the schedule reads the clock at all; counsel should confirm that a fixed-rate limiter which re-anchors on a missed tick is not "display timing determined from rendering metrics"** (AMD US 2025/0299287 claim 1; claim 15 covers metrics of the interpolated frame). Rejected alternative: timing each present from the measured frame period (FSR3-style pacing), which is the claimed method. It also delays no CPU work to align with GPU availability (Intel US 12,057,090): the sleep aligns to the fixed clock, never to a fence.
+- **Without vsync (tearing), 2026-10-03, replaced the same day by the midpoint present above** (the clock,
+  `frameInterpWaitForTick` and the `display.frameInterpClock` preference are gone; a stale key in an
+  editor.ini is ignored). As it was: frame interpolation ran on a **fixed present clock** (`D3D12Device::frameInterpWaitForTick`). Each image, generated then real, is presented with `ALLOW_TEARING` on the next tick of a clock running at a **constant** rate: the display's refresh rate (read from the display mode, `EnumDisplaySettingsW`), or the rate the user sets (Editor Preferences, `--frame-interp-clock`). That is an ordinary frame-rate cap. No frame time, GPU time or present statistic sets the rate or a tick. The render thread sleeps to the tick *after* submitting the GPU work, so the GPU is never held. A present later than one whole tick restarts the clock from "now". **This is the one place the schedule reads the clock at all; counsel should confirm that a fixed-rate limiter which re-anchors on a missed tick is not "display timing determined from rendering metrics"** (AMD US 2025/0299287 claim 1; claim 15 covers metrics of the interpolated frame). Rejected alternative: timing each present from the measured frame period (FSR3-style pacing), which is the claimed method. It also delays no CPU work to align with GPU availability (Intel US 12,057,090): the sleep aligns to the fixed clock, never to a fence.
 - **The 200 ms present stall (fixed 2026-10-10).** With interpolation on, `Present` blocked for exactly
   200 ms every 15-25 frames (Caldera, Release and Debug, vsync on or off): the present thread signalled
   `doneFence_` only after `Present` returned, the render queue waited on it (`waitImageFree`) before
@@ -214,12 +216,15 @@ Alternatives considered and ranked lower: N2 (learned motion-vector reliability 
   DXGI gave up. Now the present thread waits on the CPU until the image is drawn (`readyFence_`), signals
   `doneFence_` once the copy is queued (the image is free then), and only then presents. *Measured:*
   30-39 stalls in 700 frames -> 0, Release and the owner's Debug build.
-- **Refresh cap in the present thread (2026-10-10):** while interpolation produces images, presents are
-  at least one display refresh apart (the rate from the display mode, constant). Images queued faster
-  than the display shows them used to go out in pairs ~0 ms apart. *Measured* at 60 Hz: present
-  intervals p10/p50/p90 16.7/16.7/16.8 ms, against 0.3/20/36 before. Like the fixed clock above, a
-  constant-rate cap; no frame time or present statistic sets it. A pacer spacing presents by the
-  measured arrival interval was tried and removed for AMD US 2025/0299287.
+- **Refresh cap in the present thread (2026-10-10), vsync only:** while interpolation produces images
+  under vsync, presents are at least one display refresh apart (the rate from the display mode,
+  constant). Images queued faster than the display shows them used to go out in pairs ~0 ms apart.
+  *Measured* at 60 Hz: present intervals p10/p50/p90 16.7/16.7/16.8 ms, against 0.3/20/36 before. A
+  constant-rate cap; no frame time or present statistic sets it. **Not without vsync:** there it held
+  real frames to half the refresh rate (60 Hz: 30 real + 30 generated where the scene ran 45 without
+  interpolation), undoing the midpoint present's doubling; since the follow-up it applies only when
+  Present syncs to vblank. A pacer spacing presents by the measured arrival interval was tried and
+  removed for AMD US 2025/0299287.
 - **Variable refresh:** still not adapted to. The fixed clock simply runs; the display shows what arrives.
 - **Below 30 fps base:** warning in the stats overlay (decision 3); the cadence stays the same (the real frame simply holds for more vblanks).
 - **Latency reduction is separate:** the waitable object with latency 1, and nothing else. A CPU frame-start delay from measured GPU time is **dropped**: Intel US 12,057,090 (granted) claims delaying CPU work to align with GPU availability.

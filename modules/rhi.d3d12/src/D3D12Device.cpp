@@ -5792,7 +5792,9 @@ void D3D12Device::endFrame() {
         realImage_ = (bbIndex_ + 1) % kBackBufferCount;
         presentPass(realImage_, false, false, true);
         frameInterpolated_ = true;
-        presentRefreshCap_.store(true, std::memory_order_relaxed);
+        // One present per refresh only under vsync, where it evens the spacing. Without vsync it held real
+        // frames to half the refresh rate; there the midpoint present doubles at any rate (NEURAFI.md 5).
+        presentRefreshCap_.store(presentSync() != 0, std::memory_order_relaxed);
     } else {
         realImage_ = bbIndex_;
         presentPass(bbIndex_, false, true, true);

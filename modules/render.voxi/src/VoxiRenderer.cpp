@@ -3470,16 +3470,18 @@ void VoxiRenderer::growGeometryTableAhead() {
 bool VoxiRenderer::uploadRtInstanceTable() {
     if (rtInstanceData_.empty()) return true;
     if (rtInstanceCapacity_ < rtInstanceData_.size()) {
+        // Headroom: sized exactly, streaming grew it (a new ring of buffers) almost every frame, ~10 ms.
+        const usize capacity = rtInstanceData_.size() + rtInstanceData_.size() / 2 + 256;
         for (u32 i = 0; i < kRtInstanceRing; ++i) {
             if (rtInstances_[i]) res_->destroyBuffer(rtInstances_[i]);
             rhi::BufferDesc d;
-            d.bytes = sizeof(RtInstance) * rtInstanceData_.size();
+            d.bytes = sizeof(RtInstance) * capacity;
             d.kind  = rhi::BufferKind::Upload;
             d.debugName = "rt instances";
             rtInstances_[i] = res_->createBuffer(d);
             if (!rtInstances_[i]) { rtInstanceCapacity_ = 0; return false; }
         }
-        rtInstanceCapacity_ = static_cast<u32>(rtInstanceData_.size());
+        rtInstanceCapacity_ = static_cast<u32>(capacity);
     }
     // Rotate before writing so this frame never touches the buffer the previous frame reads.
     rtInstanceSlot_ = (rtInstanceSlot_ + 1) % kRtInstanceRing;
@@ -3582,11 +3584,12 @@ bool VoxiRenderer::buildMaterialTable(const std::unordered_map<u64, pbr::Materia
     if (!changed && !needGrow && rtMaterialsReady_) return true;   // GPU content already correct
 
     if (needGrow) {
-        // Upload-heap ring, matching rtInstances_ exactly.
+        // Upload-heap ring like rtInstances_, with the same headroom.
+        const usize capacity = rtMaterialData_.size() + rtMaterialData_.size() / 2 + 64;
         for (u32 i = 0; i < kRtInstanceRing; ++i) {
             if (rtMaterials_[i]) res_->destroyBuffer(rtMaterials_[i]);
             rhi::BufferDesc d;
-            d.bytes = sizeof(pbr::MaterialConstants) * rtMaterialData_.size();
+            d.bytes = sizeof(pbr::MaterialConstants) * capacity;
             d.kind  = rhi::BufferKind::Upload;
             d.debugName = "rt materials";
             rtMaterials_[i] = res_->createBuffer(d);
@@ -3602,7 +3605,7 @@ bool VoxiRenderer::buildMaterialTable(const std::unordered_map<u64, pbr::Materia
                 return false;
             }
         }
-        rtMaterialCapacity_ = static_cast<u32>(rtMaterialData_.size());
+        rtMaterialCapacity_ = static_cast<u32>(capacity);
     }
 
     // Rotate before writing so this build never touches the slot a previous frame reads.

@@ -508,8 +508,12 @@ static void CreateOrResizeBuffer(VkBuffer& buffer, VkDeviceMemory& buffer_memory
     buffer_info.size = buffer_size_aligned;
     buffer_info.usage = usage;
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    buffer = VK_NULL_HANDLE;
+    buffer_memory = VK_NULL_HANDLE;
+    buffer_size = 0;
     err = vkCreateBuffer(v->Device, &buffer_info, v->Allocator, &buffer);
     check_vk_result(err);
+    if (err != VK_SUCCESS) { buffer = VK_NULL_HANDLE; return; }   // AVER PATCH: out of memory
 
     VkMemoryRequirements req;
     vkGetBufferMemoryRequirements(v->Device, buffer, &req);
@@ -520,6 +524,13 @@ static void CreateOrResizeBuffer(VkBuffer& buffer, VkDeviceMemory& buffer_memory
     alloc_info.memoryTypeIndex = ImGui_ImplVulkan_MemoryType(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, req.memoryTypeBits);
     err = vkAllocateMemory(v->Device, &alloc_info, v->Allocator, &buffer_memory);
     check_vk_result(err);
+    // AVER PATCH: a refused allocation used to be bound as VK_NULL_HANDLE (the driver fail-fasts).
+    if (err != VK_SUCCESS) {
+        vkDestroyBuffer(v->Device, buffer, v->Allocator);
+        buffer = VK_NULL_HANDLE;
+        buffer_memory = VK_NULL_HANDLE;
+        return;
+    }
 
     err = vkBindBufferMemory(v->Device, buffer, buffer_memory, 0);
     check_vk_result(err);
@@ -594,6 +605,12 @@ void ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer comm
         for (ImTextureData* tex : *draw_data->Textures)
             if (tex->Status != ImTextureStatus_OK)
                 ImGui_ImplVulkan_UpdateTexture(tex);
+    // AVER PATCH: a texture whose creation was refused (out of memory) is retried next frame; until
+    // then nothing is drawn rather than binding its missing descriptor set.
+    if (draw_data->Textures != nullptr)
+        for (ImTextureData* tex : *draw_data->Textures)
+            if (tex->Status == ImTextureStatus_WantCreate)
+                return;
 
     ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
     ImGui_ImplVulkan_InitInfo* v = &bd->VulkanInitInfo;
@@ -624,6 +641,9 @@ void ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer comm
             CreateOrResizeBuffer(rb->VertexBuffer, rb->VertexBufferMemory, rb->VertexBufferSize, vertex_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         if (rb->IndexBuffer == VK_NULL_HANDLE || rb->IndexBufferSize < index_size)
             CreateOrResizeBuffer(rb->IndexBuffer, rb->IndexBufferMemory, rb->IndexBufferSize, index_size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+        // AVER PATCH: out of memory -- no UI this frame, retried next frame.
+        if (rb->VertexBufferMemory == VK_NULL_HANDLE || rb->IndexBufferMemory == VK_NULL_HANDLE)
+            return;
 
         // Upload vertex/index data into a single contiguous GPU buffer
         ImDrawVert* vtx_dst = nullptr;
@@ -790,6 +810,7 @@ void ImGui_ImplVulkan_UpdateTexture(ImTextureData* tex)
             info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             err = vkCreateImage(v->Device, &info, v->Allocator, &backend_tex->Image);
             check_vk_result(err);
+            if (err != VK_SUCCESS) { IM_DELETE(backend_tex); return; }   // AVER PATCH: retried next frame
             VkMemoryRequirements req;
             vkGetImageMemoryRequirements(v->Device, backend_tex->Image, &req);
             VkMemoryAllocateInfo alloc_info = {};
@@ -798,6 +819,13 @@ void ImGui_ImplVulkan_UpdateTexture(ImTextureData* tex)
             alloc_info.memoryTypeIndex = ImGui_ImplVulkan_MemoryType(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, req.memoryTypeBits);
             err = vkAllocateMemory(v->Device, &alloc_info, v->Allocator, &backend_tex->Memory);
             check_vk_result(err);
+            // AVER PATCH: a refused allocation used to be bound as VK_NULL_HANDLE (the driver fail-fasts);
+            // the texture stays WantCreate and is retried next frame.
+            if (err != VK_SUCCESS) {
+                vkDestroyImage(v->Device, backend_tex->Image, v->Allocator);
+                IM_DELETE(backend_tex);
+                return;
+            }
             err = vkBindImageMemory(v->Device, backend_tex->Image, backend_tex->Memory, 0);
             check_vk_result(err);
         }
@@ -850,6 +878,10 @@ void ImGui_ImplVulkan_UpdateTexture(ImTextureData* tex)
             buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
             err = vkCreateBuffer(v->Device, &buffer_info, v->Allocator, &upload_buffer);
             check_vk_result(err);
+            if (err != VK_SUCCESS) {   // AVER PATCH: out of memory, retried next frame (a new texture from scratch)
+                if (tex->Status == ImTextureStatus_WantCreate) { ImGui_ImplVulkan_DestroyTexture(tex); tex->SetStatus(ImTextureStatus_WantCreate); }
+                return;
+            }
             VkMemoryRequirements req;
             vkGetBufferMemoryRequirements(v->Device, upload_buffer, &req);
             bd->BufferMemoryAlignment = (bd->BufferMemoryAlignment > req.alignment) ? bd->BufferMemoryAlignment : req.alignment;
@@ -859,6 +891,11 @@ void ImGui_ImplVulkan_UpdateTexture(ImTextureData* tex)
             alloc_info.memoryTypeIndex = ImGui_ImplVulkan_MemoryType(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, req.memoryTypeBits);
             err = vkAllocateMemory(v->Device, &alloc_info, v->Allocator, &upload_buffer_memory);
             check_vk_result(err);
+            if (err != VK_SUCCESS) {   // AVER PATCH: out of memory, retried next frame (a new texture from scratch)
+                vkDestroyBuffer(v->Device, upload_buffer, v->Allocator);
+                if (tex->Status == ImTextureStatus_WantCreate) { ImGui_ImplVulkan_DestroyTexture(tex); tex->SetStatus(ImTextureStatus_WantCreate); }
+                return;
+            }
             err = vkBindBufferMemory(v->Device, upload_buffer, upload_buffer_memory, 0);
             check_vk_result(err);
         }
