@@ -524,6 +524,31 @@ noisier than FidelityFX's (no temporal shadow history: its texture u2 is NRD2's 
 frames). The network was trained with the sun inside D: retrain in-engine (NRD2.md "Training") for its best,
 though the resolve is unchanged. Not measured yet (owner tests): `voxi.nrd2SunClean 0` is the A/B.
 
+## Object stop, shared with NeuRAA (2026-10-10)
+
+NRD2's stops were depth and normal only, so where two objects meet at a similar depth and facing (a post on a
+wall, a crate on a floor, a sign on a facade) the 1/4 and 1/8 levels mixed their lighting across the contact,
+which reads as softness. NeuRAA already knows objects: the primary-visibility record (`rhi::PrimaryVisibility`,
+Voxi's visibility stage) with a tree's parts as one object. That definition now lives once in
+`modules/rhi/shaders/aver_visibility.hlsli` (`averObjectOf`), read by NeuRAA's edge classes and by NRD2.
+
+`Settings::nrd2ObjectStop` (default on, `voxi.nrd2ObjectStop`; `Nrd2Params::objectStop`, `Nrd2::Inputs::visibility`):
+- `CSNrd2Pyramid` reads the visibility buffer once (UAV u13, as NeuRAA binds it) and writes each pixel's object
+  (`objFull_`, R32Uint) and each level texel's (`objLevel_`): a texel takes its nearest child's object and averages
+  only that object's children.
+- `CSNrd2Resolve` (`nrd2UpsampleObj`): a level tap of another object keeps no bilinear weight, so its confidence
+  drops and the combine leans on finer levels and the pixel itself.
+- `CSNrd2Prefilter` (stabiliser): taps of another object are skipped.
+
+Inference only, like the level caps: training, the capture and the CPU twin never see it (captures turn it off).
+Off, or with no visibility this frame, every object is 0 and the frame is as before. Cost: one buffer read per
+pixel and two uint compares per tap; 4 B a pixel plus a third of that for the levels.
+
+**Expect** crisper silhouettes and contact edges, slightly more noise in a thin band along them (fewer samples
+there). `voxi.nrd2ObjectStop 0` is the A/B. The temporal stage logs `[NRD2] temporal stage running` / `off (why)`
+when it changes (Sandbox.log), which shows whether it runs on a given setup (TAA jitter stops it; NeuRAA and FSR
+do not jitter).
+
 ## Combine reference and 1/4-level cap (2026-10-06)
 
 From the FidelityFX study (a read-only Sonnet workflow, 2026-10-06). FidelityFX has no pyramid: its prefilter

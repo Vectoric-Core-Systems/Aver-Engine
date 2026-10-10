@@ -27,17 +27,19 @@ struct Constants {
     f32 camDelta[4];               // eye - previous eye
     f32 stab[4];                   // history frames at rest, cap at speed, despeckle cap, blur radius
     f32 extra[4];                  // x: 1/8 level logit cap, y: combine reference, z: 1/4 level logit cap
+    u32 vis[4];                    // object stop: x visibility row pitch, y on
 };
-static_assert(sizeof(Constants) == 336, "Nrd2CB: two uint4s, nineteen float4s");
+static_assert(sizeof(Constants) == 352, "Nrd2CB: three uint4s, nineteen float4s");
 
 constexpr u32 kFlagBypass = 1u, kFlagStabilise = 2u, kFlagHistory = 4u, kFlagStandardise = 8u, kFlagBlur = 16u;
 
 // Per pass: SRV / UAV counts matching nrd2.hlsl's register lists.
-constexpr u32 kPyramidSrv = 4, kPyramidUav = 9;
-constexpr u32 kResolveSrv = 16, kResolveUav = 3;
+constexpr u32 kPyramidSrv = 4, kPyramidUav = 14;
+constexpr u32 kPyramidVisUav = 13;   // the primary-visibility buffer (structured)
+constexpr u32 kResolveSrv = 20, kResolveUav = 3;
 constexpr u32 kResolveParamsSrv = 15;
 constexpr u32 kReprojectSrv = 9, kReprojectUav = 5;
-constexpr u32 kPrefilterSrv = 7, kPrefilterUav = 2;
+constexpr u32 kPrefilterSrv = 8, kPrefilterUav = 2;
 constexpr u32 kTemporalSrv = 10, kTemporalUav = 5;
 constexpr u32 kDespeckleSrv = 3, kDespeckleUav = 2;
 constexpr u32 kBlurSrv = 6, kBlurUav = 3;
@@ -129,7 +131,7 @@ bool Nrd2::create(rhi::IDevice& dev) {
         destroy();
         return false;
     }
-    auto build = [&](u32 pass, const char* entry, u32 srv, u32 uav, u32 bufferSrv, bool bufferUav) {
+    auto build = [&](u32 pass, const char* entry, u32 srv, u32 uav, u32 bufferSrv, u32 bufferUav) {
         const std::string defines = "AVER_NRD2_PASS=" + std::to_string(pass);
         rhi::ShaderDesc sd{};
         sd.source = source.c_str();
@@ -145,28 +147,37 @@ bool Nrd2::create(rhi::IDevice& dev) {
         pd.layout.uavCount = uav;
         pd.layout.slotKindsDeclared = true;
         if (bufferSrv < srv) pd.layout.srvKinds[bufferSrv] = rhi::SlotKind::StructuredBuffer;
-        if (bufferUav) pd.layout.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
+        if (bufferUav < uav) pd.layout.uavKinds[bufferUav] = rhi::SlotKind::StructuredBuffer;
         pd.layout.constantDwords[kConstantSlot] = 0;   // root CBV
         const rhi::PipelineHandle p = res_->createComputePipeline(pd);
         res_->destroyShader(cs);
         if (!p) AVER_WARN("[NRD2] the {} pipeline would not build", entry);
         return p;
     };
-    psoPyramid_ = build(0, "CSNrd2Pyramid", kPyramidSrv, kPyramidUav, ~0u, false);
-    psoParams_  = build(1, "CSNrd2Params", 0, 1, ~0u, true);
-    psoResolve_ = build(2, "CSNrd2Resolve", kResolveSrv, kResolveUav, kResolveParamsSrv, false);
+    psoPyramid_ = build(0, "CSNrd2Pyramid", kPyramidSrv, kPyramidUav, ~0u, kPyramidVisUav);
+    psoParams_  = build(1, "CSNrd2Params", 0, 1, ~0u, 0u);
+    psoResolve_ = build(2, "CSNrd2Resolve", kResolveSrv, kResolveUav, kResolveParamsSrv, ~0u);
     if (!valid()) { destroy(); return false; }
     // Optional: without them NRD2 stays single-frame.
-    psoReproject_ = build(5, "CSNrd2Reproject", kReprojectSrv, kReprojectUav, ~0u, false);
-    psoPrefilter_ = build(6, "CSNrd2Prefilter", kPrefilterSrv, kPrefilterUav, ~0u, false);
-    psoTemporal_  = build(7, "CSNrd2Temporal", kTemporalSrv, kTemporalUav, ~0u, false);
-    psoDespeckle_ = build(8, "CSNrd2Despeckle", kDespeckleSrv, kDespeckleUav, ~0u, false);
-    psoBlur_      = build(9, "CSNrd2Blur", kBlurSrv, kBlurUav, ~0u, false);
-    psoConverge_  = build(10, "CSNrd2Converge", kConvergeSrv, kConvergeUav, ~0u, false);
+    psoReproject_ = build(5, "CSNrd2Reproject", kReprojectSrv, kReprojectUav, ~0u, ~0u);
+    psoPrefilter_ = build(6, "CSNrd2Prefilter", kPrefilterSrv, kPrefilterUav, ~0u, ~0u);
+    psoTemporal_  = build(7, "CSNrd2Temporal", kTemporalSrv, kTemporalUav, ~0u, ~0u);
+    psoDespeckle_ = build(8, "CSNrd2Despeckle", kDespeckleSrv, kDespeckleUav, ~0u, ~0u);
+    psoBlur_      = build(9, "CSNrd2Blur", kBlurSrv, kBlurUav, ~0u, ~0u);
+    psoConverge_  = build(10, "CSNrd2Converge", kConvergeSrv, kConvergeUav, ~0u, ~0u);
 
     rhi::BindingSetDesc bd{};
     bd.srvCount = kPyramidSrv; bd.uavCount = kPyramidUav;
+    bd.uavKinds[kPyramidVisUav] = rhi::SlotKind::StructuredBuffer;
     setPyramid_ = res_->createBindingSet(bd);
+    {
+        rhi::BufferDesc vd{};
+        vd.bytes = 16;
+        vd.kind = rhi::BufferKind::Default;
+        vd.allowUnorderedAccess = true;
+        vd.debugName = "NRD2 no-visibility stand-in";
+        visDummy_ = res_->createBuffer(vd);
+    }
     bd = {};
     bd.uavCount = 1; bd.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
     setParams_ = res_->createBindingSet(bd);
@@ -333,7 +344,8 @@ void Nrd2::releaseTargets() {
     releaseStab();
     auto drop = [&](rhi::TextureHandle& t) { if (t) res_->destroyTexture(t); t = 0; };
     drop(targets_.diffuse); drop(targets_.specular); drop(targets_.remodA); drop(targets_.remodB);
-    for (u32 l = 0; l < 3; ++l) { drop(guide_[l]); drop(levelD_[l]); drop(levelS_[l]); }
+    for (u32 l = 0; l < 3; ++l) { drop(guide_[l]); drop(levelD_[l]); drop(levelS_[l]); drop(objLevel_[l]); }
+    drop(objFull_);
     drop(lit_);
     drop(despD_); drop(despS_);
     drop(dRes_); drop(sRes_); drop(dBlur_); drop(sBlur_);
@@ -354,6 +366,8 @@ void Nrd2::destroy() {
     releaseTargets();
     destroyCompose();
     network_.destroy();
+    if (res_ && visDummy_) res_->destroyBuffer(visDummy_);
+    visDummy_ = 0;
     if (res_) {
         for (rhi::PipelineHandle* p : {&psoPyramid_, &psoParams_, &psoResolve_, &psoFeatures_, &psoReproject_,
                                        &psoPrefilter_, &psoTemporal_, &psoDespeckle_, &psoBlur_, &psoConverge_}) {
@@ -398,7 +412,9 @@ bool Nrd2::resize(u32 width, u32 height) {
         guide_[l]  = make(rhi::Format::RGBA16F, w, h, kRead, kLevel[0][l]);
         levelD_[l] = make(rhi::Format::RGBA16F, w, h, kRead, kLevel[1][l]);
         levelS_[l] = make(rhi::Format::RGBA16F, w, h, kRead, kLevel[2][l]);
+        objLevel_[l] = make(rhi::Format::R32Uint, w, h, kRead, "NRD2 objects (level)");
     }
+    objFull_ = make(rhi::Format::R32Uint, width, height, kRead, "NRD2 objects");
     lit_ = make(rhi::Format::RGBA16F, width, height, kRead, "NRD2 denoised lighting");
     tileCapacity_ = tilesOf(width) * tilesOf(height);
     rhi::BufferDesc bd{};
@@ -430,6 +446,11 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     const u32 vx = in.viewport[0], vy = in.viewport[1];
     const u32 vw = in.viewport[2], vh = in.viewport[3];
     if (!vw || !vh || vx + vw > width_ || vy + vh > height_) return false;
+    // The object stop reads this frame's visibility where it covers the viewport; captures keep the trained resolve.
+    const rhi::PrimaryVisibility& vis = in.visibility;
+    const bool objStop = params_.objectStop && !params_.bypass && vis.buffer && vis.rowPitch &&
+                         !(capture_ && capture_->active()) &&
+                         static_cast<u64>(vy + vh - 1) * vis.rowPitch + vx + vw <= vis.elementCount;
 
     // The temporal stage runs on jitter-free frames with a continuous previous frame (TAAU owns the rest).
     if (in.sunMoved) sunHold_ = 2u;
@@ -442,6 +463,21 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
                 in.jitter[0] == 0.0f && in.jitter[1] == 0.0f && !(capture_ && capture_->active()) && basisOk &&
                 dev_->camera(nullptr, nullptr, eye) && prevViewProjRel(in.prevViewProj, in.prevCamPos, cb.prevVP);
     if (stab && !allocStab()) stab = false;
+    {   // Said when it changes: whether the temporal stage runs, and the first reason it does not.
+        const char* state = stab ? "running"
+            : !params_.stabilise ? "off (voxi.nrd2Stab 0)"
+            : params_.bypass ? "off (bypassed)"
+            : !stabReady() ? "off (its pipelines are missing)"
+            : !in.velocity ? "off (no motion vectors)"
+            : !in.historyValid ? "off (no previous frame)"
+            : (in.jitter[0] != 0.0f || in.jitter[1] != 0.0f) ? "off (the frame is jittered: TAA)"
+            : (capture_ && capture_->active()) ? "off (a training capture is running)"
+            : "off (no camera history, or its targets could not be made)";
+        if (state != stabSaid_) {
+            AVER_INFO("[NRD2] temporal stage {}", state);
+            stabSaid_ = state;
+        }
+    }
     // Captures keep the resolve as trained (no blur).
     bool blur = params_.speckle == 1u && !params_.bypass && psoBlur_ && setBlur_ && !(capture_ && capture_->active());
     if ((stab || blur) && !allocDemod(blur && stab)) stab = blur = false;
@@ -464,10 +500,14 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     res_->setSrv(setPyramid_, 1, inS());
     res_->setSrv(setPyramid_, 2, in.viewZ);
     res_->setSrv(setPyramid_, 3, in.normalRoughness);
+    res_->setUav(setPyramid_, 9, objFull_, 0);
+    if (objStop) res_->setUavBuffer(setPyramid_, kPyramidVisUav, vis.buffer, 16, vis.elementCount, 0);
+    else         res_->setUavBuffer(setPyramid_, kPyramidVisUav, visDummy_, 16, 1, 0);
     for (u32 l = 0; l < 3; ++l) {
         res_->setUav(setPyramid_, l, guide_[l], 0);
         res_->setUav(setPyramid_, 3 + l, levelD_[l], 0);
         res_->setUav(setPyramid_, 6 + l, levelS_[l], 0);
+        res_->setUav(setPyramid_, 10 + l, objLevel_[l], 0);
     }
     const u32 tx = tilesOf(vw), ty = tilesOf(vh), tiles = tx * ty;
     res_->setUavBuffer(setParams_, 0, tileParams_, sizeof(f32), tileCapacity_ * kNrd2TileParams, 0);
@@ -477,10 +517,12 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     res_->setSrv(setResolve_, 3, in.normalRoughness);
     res_->setSrv(setResolve_, 4, targets_.remodA);
     res_->setSrv(setResolve_, 5, targets_.remodB);
+    res_->setSrv(setResolve_, 16, objFull_);
     for (u32 l = 0; l < 3; ++l) {
         res_->setSrv(setResolve_, 6 + l, guide_[l]);
         res_->setSrv(setResolve_, 9 + l, levelD_[l]);
         res_->setSrv(setResolve_, 12 + l, levelS_[l]);
+        res_->setSrv(setResolve_, 17 + l, objLevel_[l]);
     }
     res_->setSrvBuffer(setResolve_, kResolveParamsSrv, tileParams_, sizeof(f32), tileCapacity_ * kNrd2TileParams, 0);
     res_->setUav(setResolve_, 0, lit_, 0);
@@ -524,6 +566,7 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
         res_->setSrv(setPrefilter_, 4, rpV_);
         res_->setSrv(setPrefilter_, 5, anchD_);
         res_->setSrv(setPrefilter_, 6, anchS_);
+        res_->setSrv(setPrefilter_, 7, objFull_);
         res_->setUav(setPrefilter_, 0, prefD_, 0);
         res_->setUav(setPrefilter_, 1, prefS_, 0);
         res_->setSrv(setTemporal_, 0, prefD_);
@@ -554,6 +597,8 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     cb.extra[1] = static_cast<f32>(params_.combineRef > 1u ? 1u : params_.combineRef);
     cb.extra[2] = std::min(std::max(params_.midCap, -16.0f), 16.0f);
     cb.extra[3] = std::min(std::max(params_.converge, 0.0f), 16384.0f);
+    cb.vis[0] = objStop ? vis.rowPitch : 0u;
+    cb.vis[1] = objStop ? 1u : 0u;
     std::memcpy(cb.def, params_.diffuse, sizeof(params_.diffuse));
     std::memcpy(cb.def + 6, params_.specular, sizeof(params_.specular));
     if (stab) {
@@ -585,7 +630,9 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
         ctx.textureBarrier(guide_[l], kRead, kWrite);
         ctx.textureBarrier(levelD_[l], kRead, kWrite);
         ctx.textureBarrier(levelS_[l], kRead, kWrite);
+        ctx.textureBarrier(objLevel_[l], kRead, kWrite);
     }
+    ctx.textureBarrier(objFull_, kRead, kWrite);
     ctx.setPipeline(psoPyramid_);
     ctx.setBindingSet(setPyramid_);
     ctx.setConstantBuffer(kConstantSlot, &cb, sizeof(cb));
@@ -594,7 +641,9 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
         ctx.textureBarrier(guide_[l], kWrite, kRead);
         ctx.textureBarrier(levelD_[l], kWrite, kRead);
         ctx.textureBarrier(levelS_[l], kWrite, kRead);
+        ctx.textureBarrier(objLevel_[l], kWrite, kRead);
     }
+    ctx.textureBarrier(objFull_, kWrite, kRead);
 
     // Tile parameters: the network's when it can (its features from this frame's pyramid), else the defaults.
     bool net = false;

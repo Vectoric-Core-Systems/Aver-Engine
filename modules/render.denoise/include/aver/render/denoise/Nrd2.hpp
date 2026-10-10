@@ -51,6 +51,7 @@ struct Nrd2Params {
     u32 combineRef = 0;       // inference combine reference: 0 coarsest level, 1 median of the candidates
     f32 midCap = 16.0f;       // inference cap on the 1/4 level's logit (16 = none)
     f32 converge = 0.0f;      // Path Tracing at rest: frames until a pixel is its accumulated input (0 = off)
+    bool objectStop = false;  // no lighting mixed across objects (Inputs::visibility; not while a capture runs)
 };
 
 class Nrd2 {
@@ -83,6 +84,9 @@ public:
         bool historyValid = false;                // !IDevice::gBufferHistoryInvalid()
         bool sunMoved = false;                    // the sun changed since last frame (history shortens for 2 frames)
         f32 jitter[2] = {1.0f, 1.0f};             // this frame's TAA jitter (IDevice::taaJitter); only exactly 0, 0 stabilises
+
+        // The object stop: this frame's primary visibility (IRenderFeature::primaryVisibility), NeuRAA's too.
+        rhi::PrimaryVisibility visibility;
     };
 
     // Compute pipelines. False (said once) when nrd2.hlsl will not compile.
@@ -125,7 +129,10 @@ private:
     void releaseTargets();
     void releaseStab();
     bool allocStab();
-    [[nodiscard]] bool stabReady() const;   // the temporal stage's three pipelines and binding sets exist
+    [[nodiscard]] bool stabReady() const;
+    const char* stabSaid_ = nullptr;   // the temporal stage's last logged state
+    rhi::TextureHandle objFull_ = 0, objLevel_[3] = {};   // the object stop's per-pixel and per-level objects
+    rhi::BufferHandle  visDummy_ = 0;                    // bound in the visibility slot when there is none   // the temporal stage's three pipelines and binding sets exist
     // CSNrd2Features into features_ (12 x 4 tilesX x 4 tilesY floats, rests in Common). Inputs as in
     // record() after the resolve; false when the pass would not build. inScale/inBias: the network's input
     // standardisation applied as it stores (null = the raw features, as the capture needs them).

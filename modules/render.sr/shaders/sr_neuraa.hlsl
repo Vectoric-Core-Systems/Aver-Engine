@@ -34,16 +34,12 @@ RWTexture2D<float4>       gDebug : register(u2);
 RWStructuredBuffer<uint>  gTiles : register(u3);
 RWTexture2D<float4>       gDist  : register(u4);   // per direction: own-triangle edge distance, px (1 = none)
 
-static const uint  kRefMiss      = 0xFFFFFFFFu;
-static const uint  kRefFoliage   = 0x80000000u;   // voxi_rt.hlsli's AVER_RT_REF_FOLIAGE
-static const uint  kRefIndexMask = 0x07FFFFFFu;   // ... AVER_RT_REF_INDEX_MASK
+#include "aver_visibility.hlsli"
+static const uint  kRefMiss      = kAverRefMiss;   // aver_visibility.hlsli, shared with NRD2
 static const float kDepthStep    = 0.03;          // 1/z second difference, relative
 static const float kCreaseCos    = 0.866;         // ~30 degrees
 
-// A foliage ref also carries its part (trunk, leaves) in bits 27-30; parts of one tree are one object.
-uint objectOf(uint ref) {
-    return (ref != kRefMiss && (ref & kRefFoliage) != 0u) ? (ref & (kRefFoliage | kRefIndexMask)) : ref;
-}
+uint objectOf(uint ref) { return averObjectOf(ref); }
 
 // voxi.hlsl's averPackNormalRoughness, decoded (as aver_denoise.hlsl's dnsrDecodeNormal).
 float3 decodeNormal(float4 e) {

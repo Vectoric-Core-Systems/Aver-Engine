@@ -163,6 +163,9 @@ struct Settings {
     // The sun's lighting skips NRD2 and is added clean, its shadow's penumbra averaged over a depth-weighted
     // 5x5 instead (docs/rendering/NRD2.md "Sun outside the filter"); off = the sun is denoised with the rest.
     bool nrd2SunClean = true;
+    // NRD2 mixes no lighting across objects (the primary visibility's, as NeuRAA reads them): pyramid levels
+    // keep one object, the resolve and the stabiliser's prefilter skip taps of another (NRD2.md "Object stop").
+    bool nrd2ObjectStop = true;
     // NRD2 input despeckle (CSNrd2Despeckle): isolated outliers in D (1) and S (2) clamped before the pyramid,
     // so a lone bright sample (a small emitter hit by a GI ray) is not spread into a blotch.
     u32 nrd2Despeckle = 3;

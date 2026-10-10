@@ -5910,6 +5910,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         np.combineRef   = settings_.nrd2CombineRef;
         np.midCap       = settings_.nrd2MidCap;
         np.converge     = pathTracingWanted() && cb_.ptBounceParams[1] > 1.5f ? static_cast<f32>(settings_.nrd2Converge) : 0.0f;
+        np.objectStop   = settings_.nrd2ObjectStop;
         nrd2_.setParams(np);
         render::denoise::Nrd2::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();
@@ -5929,6 +5930,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         in.historyValid = !dev_->gBufferHistoryInvalid();
         in.sunMoved     = rtHistSunMoved();
         dev_->taaJitter(in.jitter);
+        primaryVisibility(in.visibility);   // NeuRAA's objects, for the object stop
         if (nrd2CapturePending_ && nrd2_.valid()) {
             nrd2CapturePending_ = false;
             nrd2_.startCapture(nrd2CaptureCfg_);

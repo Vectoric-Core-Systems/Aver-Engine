@@ -19,6 +19,7 @@
 // <= 16 KB, every barrier in uniform control flow, constants at b3 (the Vulkan backend folds b1 into push
 // constants). Texel coordinates of D/S/guides are render-target pixels; the pyramid is viewport-local.
 #include "nrd2_resolve.hlsli"
+#include "aver_visibility.hlsli"
 
 #ifndef AVER_NRD2_PASS
 #define AVER_NRD2_PASS 0
@@ -37,7 +38,12 @@ cbuffer Nrd2CB : register(b3) {
     float4 gNrd2Stab;         // history frames at rest, cap at speed, despeckle cap, blur radius (px)
     float4 gNrd2Extra;        // x: cap on the 1/8 level's logit, y: combine reference (0 coarsest, 1 median),
                               // z: cap on the 1/4 level's logit -- all at inference only; w: converge frames
+    uint4  gNrd2Vis;          // object stop: x primary-visibility row pitch, y 1 = on (inference only)
 };
+
+// The object stop (docs/rendering/NRD2.md "Object stop"): no lighting mixed across objects (NeuRAA's
+// objects, aver_visibility.hlsli). Off, every pixel's object is 0 and nothing changes.
+bool nrd2ObjectStop() { return gNrd2Vis.y != 0u; }
 
 uint2 nrd2LevelSize(uint shift) { return ((gNrd2Rect.zw + 7u) / 8u) * (8u >> shift); }
 
@@ -56,6 +62,11 @@ RWTexture2D<float4> gNrd2D3 : register(u5);
 RWTexture2D<float4> gNrd2S1 : register(u6);
 RWTexture2D<float4> gNrd2S2 : register(u7);
 RWTexture2D<float4> gNrd2S3 : register(u8);
+RWTexture2D<uint> gNrd2O0 : register(u9);      // object per pixel (render-target pixels; kAverRefMiss off-surface)
+RWTexture2D<uint> gNrd2O1 : register(u10);     // object per level texel: its nearest child's
+RWTexture2D<uint> gNrd2O2 : register(u11);
+RWTexture2D<uint> gNrd2O3 : register(u12);
+RWStructuredBuffer<uint4> gNrd2VisBuf : register(u13);   // primary visibility (read only)
 
 // Each 2x2 keeps the nearest surface in its block: the others weigh by how far behind it they sit,
 // so a thin object in front keeps its own texel. Fixed falloff.
@@ -64,18 +75,22 @@ static const float kNrd2ReduceDepth = 23.0;   // exp2(-23 * dz/z): 1/2 at 3% beh
 groupshared float4 gsG[64];
 groupshared float4 gsD[64];
 groupshared float4 gsS[64];
+groupshared uint   gsO[64];
 
-void nrd2Reduce(uint a, uint b, uint c, uint d, out float4 g, out float4 dv, out float4 sv) {
+// The texel takes its nearest child's object, and only that object's children (object stop on).
+void nrd2Reduce(uint a, uint b, uint c, uint d, out float4 g, out float4 dv, out float4 sv, out uint obj) {
     const uint idx[4] = {a, b, c, d};
     float zmin = 1.0e30;
-    [unroll] for (uint i = 0u; i < 4u; ++i) if (gsG[idx[i]].w > 0.0) zmin = min(zmin, gsG[idx[i]].w);
+    obj = kAverRefMiss;
+    [unroll] for (uint i = 0u; i < 4u; ++i)
+        if (gsG[idx[i]].w > 0.0 && gsG[idx[i]].w < zmin) { zmin = gsG[idx[i]].w; obj = gsO[idx[i]]; }
     g = 0.0; dv = 0.0; sv = 0.0;
     if (zmin >= 1.0e30) return;
     float3 nsum = 0.0, dsum = 0.0, ssum = 0.0;
     float  zsum = 0.0, wsum = 0.0, dw = 0.0, sw = 0.0;
     [unroll] for (uint j = 0u; j < 4u; ++j) {
         const float4 G = gsG[idx[j]];
-        if (G.w <= 0.0) continue;
+        if (G.w <= 0.0 || gsO[idx[j]] != obj) continue;
         const float w = exp2(-min((G.w - zmin) / zmin, 64.0) * kNrd2ReduceDepth);
         const float4 D = gsD[idx[j]];
         const float4 S = gsS[idx[j]];
@@ -104,28 +119,33 @@ void CSNrd2Pyramid(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
     gsG[gi] = surf ? float4(nrd2DecodeNormal(gNrd2Normal.Load(int3(p, 0))), z * 0.01) : 0.0;
     gsD[gi] = (surf && d.a > 0.5 && nrd2Finite(d.rgb)) ? float4(d.rgb, 1.0) : 0.0;
     gsS[gi] = (surf && nrd2Finite(s.rgb)) ? float4(s.rgb, 1.0) : 0.0;
+    const uint obj = !surf ? kAverRefMiss
+                   : nrd2ObjectStop() ? averObjectOf(gNrd2VisBuf[uint(p.y) * gNrd2Vis.x + uint(p.x)].x) : 0u;
+    gsO[gi] = obj;
+    if (inside) gNrd2O0[p] = obj;
     GroupMemoryBarrierWithGroupSync();
 
     // In place: each level's results land on even-even slots no other reducer of that level reads.
     float4 g, dv, sv;
+    uint o;
     if (((gtid.x | gtid.y) & 1u) == 0u) {
-        nrd2Reduce(gi, gi + 1u, gi + 8u, gi + 9u, g, dv, sv);
+        nrd2Reduce(gi, gi + 1u, gi + 8u, gi + 9u, g, dv, sv, o);
         const uint2 t = dtid.xy / 2u;
-        gNrd2G1[t] = g; gNrd2D1[t] = dv; gNrd2S1[t] = sv;
-        gsG[gi] = g; gsD[gi] = dv; gsS[gi] = sv;
+        gNrd2G1[t] = g; gNrd2D1[t] = dv; gNrd2S1[t] = sv; gNrd2O1[t] = o;
+        gsG[gi] = g; gsD[gi] = dv; gsS[gi] = sv; gsO[gi] = o;
     }
     GroupMemoryBarrierWithGroupSync();
     if (((gtid.x | gtid.y) & 3u) == 0u) {
-        nrd2Reduce(gi, gi + 2u, gi + 16u, gi + 18u, g, dv, sv);
+        nrd2Reduce(gi, gi + 2u, gi + 16u, gi + 18u, g, dv, sv, o);
         const uint2 t = dtid.xy / 4u;
-        gNrd2G2[t] = g; gNrd2D2[t] = dv; gNrd2S2[t] = sv;
-        gsG[gi] = g; gsD[gi] = dv; gsS[gi] = sv;
+        gNrd2G2[t] = g; gNrd2D2[t] = dv; gNrd2S2[t] = sv; gNrd2O2[t] = o;
+        gsG[gi] = g; gsD[gi] = dv; gsS[gi] = sv; gsO[gi] = o;
     }
     GroupMemoryBarrierWithGroupSync();
     if (gi == 0u) {
-        nrd2Reduce(0u, 4u, 32u, 36u, g, dv, sv);
+        nrd2Reduce(0u, 4u, 32u, 36u, g, dv, sv, o);
         const uint2 t = dtid.xy / 8u;
-        gNrd2G3[t] = g; gNrd2D3[t] = dv; gNrd2S3[t] = sv;
+        gNrd2G3[t] = g; gNrd2D3[t] = dv; gNrd2S3[t] = sv; gNrd2O3[t] = o;
     }
 }
 
@@ -158,6 +178,10 @@ Texture2D<float4> gNrd2S1 : register(t12);
 Texture2D<float4> gNrd2S2 : register(t13);
 Texture2D<float4> gNrd2S3 : register(t14);
 StructuredBuffer<float> gNrd2Params : register(t15);
+Texture2D<uint> gNrd2O0 : register(t16);        // the pyramid's objects: per pixel, then per level texel
+Texture2D<uint> gNrd2O1 : register(t17);
+Texture2D<uint> gNrd2O2 : register(t18);
+Texture2D<uint> gNrd2O3 : register(t19);
 RWTexture2D<float4> gNrd2Lit : register(u0);    // D' * Rd + S' * Rs (left to the stabiliser when it runs)
 RWTexture2D<float4> gNrd2DRes : register(u1);   // temporal stage input: D' and S', a = 1 on surfaces
 RWTexture2D<float4> gNrd2SRes : register(u2);
@@ -175,6 +199,21 @@ Nrd2TileParams nrd2LoadParams(uint tile, uint tiles, uint signal) {
     p.logit[2] = min(p.logit[2], gNrd2Extra.x);
     p.logit[1] = min(p.logit[1], gNrd2Extra.z);
     return p;
+}
+
+// nrd2Upsample with the object stop: a level texel of another object keeps no bilinear weight.
+float3 nrd2UpsampleObj(Texture2D<float4> guide, Texture2D<float4> value, Texture2D<uint> objs, uint obj, uint shift,
+                       uint2 q, uint2 lvlSize, float2 zGrad, float zm, float3 n, float depthSens, float normalPow,
+                       out float conf) {
+    Nrd2Taps t = nrd2LoadTaps(guide, value, shift, q, lvlSize, zGrad);
+    if (nrd2ObjectStop()) {
+        const int2 base = int2(floor((float2(q) + 0.5) / float(1u << shift) - 0.5));
+        [unroll] for (uint i = 0u; i < 4u; ++i) {
+            const int2 c = clamp(base + int2(i & 1u, i >> 1), int2(0, 0), int2(lvlSize) - 1);
+            if (objs.Load(int3(c, 0)) != obj) t.b[i] = 0.0;
+        }
+    }
+    return nrd2UpsampleTaps(t, zm, n, depthSens, normalPow, conf);
 }
 
 [numthreads(8, 8, 1)]
@@ -215,21 +254,22 @@ void CSNrd2Resolve(uint3 dtid : SV_DispatchThreadID) {
             zn[k] = (v > 0.0 && v < 1.0e6) ? v * 0.01 : 0.0;
         }
         const float2 zg = nrd2DepthSlope(zm, zn[0], zn[1], zn[2], zn[3]);
+        const uint obj = gNrd2O0.Load(int3(p, 0));
 
         const Nrd2TileParams pd = nrd2LoadParams(tile, tiles, 0u);
         float cf1, cf2, cf3;
         const float dS = exp2(pd.log2Depth), nP = exp2(pd.log2Normal);
-        const float3 d1 = nrd2Upsample(gNrd2G1, gNrd2D1, 1u, q, s1, zg, zm, n, dS, nP, cf1);
-        const float3 d2 = nrd2Upsample(gNrd2G2, gNrd2D2, 2u, q, s2, zg, zm, n, dS, nP, cf2);
-        const float3 d3 = nrd2Upsample(gNrd2G3, gNrd2D3, 3u, q, s3, zg, zm, n, dS, nP, cf3);
+        const float3 d1 = nrd2UpsampleObj(gNrd2G1, gNrd2D1, gNrd2O1, obj, 1u, q, s1, zg, zm, n, dS, nP, cf1);
+        const float3 d2 = nrd2UpsampleObj(gNrd2G2, gNrd2D2, gNrd2O2, obj, 2u, q, s2, zg, zm, n, dS, nP, cf2);
+        const float3 d3 = nrd2UpsampleObj(gNrd2G3, gNrd2D3, gNrd2O3, obj, 3u, q, s3, zg, zm, n, dS, nP, cf3);
         const uint refMode = (uint)(gNrd2Extra.y + 0.5);
         dRes = nrd2Combine(d0.rgb, dOwn, d1, d2, d3, cf1, cf2, cf3, pd, 0.0, refMode);
 
         const Nrd2TileParams ps = nrd2LoadParams(tile, tiles, 1u);
         const float sS = exp2(ps.log2Depth), sP = exp2(ps.log2Normal);
-        const float3 e1 = nrd2Upsample(gNrd2G1, gNrd2S1, 1u, q, s1, zg, zm, n, sS, sP, cf1);
-        const float3 e2 = nrd2Upsample(gNrd2G2, gNrd2S2, 2u, q, s2, zg, zm, n, sS, sP, cf2);
-        const float3 e3 = nrd2Upsample(gNrd2G3, gNrd2S3, 3u, q, s3, zg, zm, n, sS, sP, cf3);
+        const float3 e1 = nrd2UpsampleObj(gNrd2G1, gNrd2S1, gNrd2O1, obj, 1u, q, s1, zg, zm, n, sS, sP, cf1);
+        const float3 e2 = nrd2UpsampleObj(gNrd2G2, gNrd2S2, gNrd2O2, obj, 2u, q, s2, zg, zm, n, sS, sP, cf2);
+        const float3 e3 = nrd2UpsampleObj(gNrd2G3, gNrd2S3, gNrd2O3, obj, 3u, q, s3, zg, zm, n, sS, sP, cf3);
         sRes = nrd2Combine(s0.rgb, sOwn, e1, e2, e3, cf1, cf2, cf3, ps,
                            nrd2SpecularExtraLogit(nr.z, s0.a, z), refMode);
     }
@@ -549,18 +589,20 @@ Texture2D<float4> gNrd2Normal : register(t3);
 Texture2D<float2> gNrd2RpV    : register(t4);
 Texture2D<float4> gNrd2AnchD  : register(t5);
 Texture2D<float4> gNrd2AnchS  : register(t6);
+Texture2D<uint>   gNrd2O0     : register(t7);   // the pyramid's object per pixel (object stop)
 RWTexture2D<float4> gNrd2PrefD : register(u0);
 RWTexture2D<float4> gNrd2PrefS : register(u1);
 
 #define NRD2_PF_R 3
 #define NRD2_PF_W (8 + 2 * NRD2_PF_R)
-#if NRD2_PF_W * NRD2_PF_W * 56 > 16384
+#if NRD2_PF_W * NRD2_PF_W * 60 > 16384
 #error nrd2 prefilter groupshared exceeds 16 KB
 #endif
 groupshared float4 gsPfD[NRD2_PF_W * NRD2_PF_W];   // D' rgb, view Z (m); z <= 0 = no surface (11 KB in all)
 groupshared float4 gsPfS[NRD2_PF_W * NRD2_PF_W];   // S' rgb, roughness
 groupshared float4 gsPfN[NRD2_PF_W * NRD2_PF_W];   // normal xyz
 groupshared float2 gsPfV[NRD2_PF_W * NRD2_PF_W];   // noise estimate D, S
+groupshared uint   gsPfO[NRD2_PF_W * NRD2_PF_W];   // object (object stop)
 
 // FidelityFX's 15 Halton(2,3) offsets stretched to [-3, 3], the centre skipped.
 static const int2 kNrd2PfTaps[15] = {int2(0, 1),  int2(-2, 1),  int2(2, -3), int2(-3, 0),  int2(1, 2), int2(-1, -2), int2(3, 0), int2(-3, 3),
@@ -581,7 +623,7 @@ void nrd2PrefilterSignal(uint signal, int li, float4 anchor, float3 n, float zm,
         const int2 o = kNrd2PfTaps[i];
         const int idx = li + o.y * NRD2_PF_W + o.x;
         const float zn = gsPfD[idx].w;
-        if (!(zn > 0.0)) continue;
+        if (!(zn > 0.0) || gsPfO[idx] != gsPfO[li]) continue;
         const float dzRel = abs(zn - (zm + clamp(dot(grad, float2(o)), -0.5 * zm, 0.5 * zm))) / max(zm, 1.0e-4);
         const float3 v = signal == 0u ? gsPfD[idx].rgb : gsPfS[idx].rgb;
         const float w = nrd2PfWeight(dot(n, gsPfN[idx].xyz), dzRel, length(a - v) / scale, var);
@@ -603,6 +645,7 @@ void CSNrd2Prefilter(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThre
             const int2 qq = org + int2(i % uint(NRD2_PF_W), i / uint(NRD2_PF_W));
             float4 d = 0.0, s = 0.0, nn = 0.0;
             float2 v = 0.0;
+            uint   ob = kAverRefMiss;
             if (all(qq >= 0) && all(qq < int2(gNrd2Rect.zw))) {
                 const int3 pp = int3(int2(gNrd2Rect.xy) + qq, 0);
                 const float z = gNrd2ViewZ.Load(pp);
@@ -612,9 +655,10 @@ void CSNrd2Prefilter(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThre
                     s  = float4(nrd2StabSane(gNrd2SRes.Load(pp).rgb), nr.z);
                     nn = float4(nrd2DecodeNormal(nr), 0.0);
                     v  = gNrd2RpV.Load(pp);
+                    ob = gNrd2O0.Load(pp);
                 }
             }
-            gsPfD[i] = d; gsPfS[i] = s; gsPfN[i] = nn; gsPfV[i] = v;
+            gsPfD[i] = d; gsPfS[i] = s; gsPfN[i] = nn; gsPfV[i] = v; gsPfO[i] = ob;
         }
     }
     GroupMemoryBarrierWithGroupSync();

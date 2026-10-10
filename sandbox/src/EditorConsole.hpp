@@ -726,6 +726,10 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "The sun's lighting skips NRD2 and is added clean, its shadow penumbra averaged over a depth-weighted 5x5 (crisper sunlit normal maps and contact detail); 0 = the sun is denoised with the rest (A/B)",
         []{ return vBool(Renderer::get().settings().nrd2SunClean); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2SunClean = on; }); }});
+    t.push_back({"voxi.nrd2ObjectStop", VarType::Bool, false,
+        "NRD2 mixes no lighting across objects (the primary visibility's, shared with NeuRAA): crisper silhouettes and contact edges; 0 = depth and normal stops only (A/B)",
+        []{ return vBool(Renderer::get().settings().nrd2ObjectStop); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2ObjectStop = on; }); }});
     t.push_back({"voxi.nrd2StabFrames", VarType::U32, false,
         "NRD2 temporal history length at rest, in frames (1-64, default 32); it shortens with screen speed to min(8, this) from 8 px per frame and is off from 128 px per frame",
         []{ return vU32(Renderer::get().settings().nrd2StabFrames); },
