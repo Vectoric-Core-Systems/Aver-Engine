@@ -32,6 +32,7 @@ namespace aver::editor {
 struct SequenceHost {
     std::vector<scene::Entity> selection;                      // the editor's selected entities
     std::function<std::string(scene::Entity)> label;           // an entity's outliner label
+    std::function<bool(scene::Entity)> canKey;                 // a saved placement a transform track may drive
     game::SeqCameraPose editorCamera;                          // the free-fly camera right now
     std::function<void(const game::SeqCameraPose&)> setEditorCamera;
     std::function<void()> markLevelDirty;                      // the level differs from its file
@@ -72,6 +73,8 @@ public:
     void endPlay();
     bool playRunning() const { return playRunning_; }
     bool drivesTransform(scene::Entity e) const;
+    // Every entity a track names (a streamed level keeps them loaded).
+    std::vector<scene::Entity> trackEntities() const;
 
     // ---- bases ----
     // Writes the pre-sequence transforms back and forgets them (the next evaluate re-applies).
@@ -137,6 +140,8 @@ private:
     void clearTrack(int index);
     void keyCamera();                                // K: the editor camera on the camera track at the playhead
     void keySelectedTrack();                         // Shift+K: the selected track at the playhead
+    void keyObjects(const std::vector<scene::Entity>& ents);   // a transform key at the playhead, tracks created as needed
+    void drawKeyObjectButton(const char* idLabel, f32 width);  // "Key <name>" for the keyable part of the selection
     void addKeyAtPlayhead();
     void removeSelectedKeys();
     void goToKey(int track, int key);
@@ -175,6 +180,13 @@ private:
     f32  dragX0_ = 0;
     std::vector<DragItem> dragOrig_;                 // the track's keys as they were at the press
     std::string status_;
+
+    // Timeline view: pxPerSec_ 0 = the whole sequence fits the lane; viewStart_ is the time at the lane's left edge.
+    f32  pxPerSec_ = 0;
+    f64  viewStart_ = 0;
+    f64  followTime_ = -1;                           // the playhead last frame, to scroll it into view on a change
+    f32  scrollGrab_ = 0;                            // scrollbar: where in the thumb it was grabbed, px
+    f64  dragView0_ = 0;                             // viewStart_ at the key-drag press
 };
 
 } // namespace aver::editor

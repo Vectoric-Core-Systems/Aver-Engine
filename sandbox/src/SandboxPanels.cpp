@@ -506,6 +506,15 @@ editor::SequenceHost SandboxApp::sequenceHost() {
     h.editorCamera.position = camPos_;
     h.editorCamera.yaw = yaw_;
     h.editorCamera.pitch = pitch_;
+    // What a transform track can drive: a saved placement (not a light or decal record, not inside a prefab).
+    h.canKey = [this](scene::Entity ent) {
+        scene::World& w = scene::World::instance();
+        if (!w.valid(ent) || !w.component<scene::CLocal>(ent, scene::kComponentLocal)) return false;
+        if (!w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer) &&
+            (w.hasComponent(ent, scene::kComponentLight) || w.hasComponent(ent, scene::kComponentDecal)))
+            return false;
+        return !prefabSys_.isLinked(ent);
+    };
     h.setEditorCamera = [this](const game::SeqCameraPose& p) { camPos_ = p.position; yaw_ = p.yaw; pitch_ = p.pitch; };
     // Not undoable, so the mark has to survive an undo and clear only on save.
     h.markLevelDirty = [this]() { markLevelUnsaved(); };

@@ -62,6 +62,9 @@ void SequenceEditor::reset() {
     keySel_.clear();
     dragKey_ = dragRuler_ = dragStarted_ = false;
     dragOrig_.clear();
+    pxPerSec_ = 0;
+    viewStart_ = 0;
+    followTime_ = -1;
     status_.clear();
     ++editRev_;
     syncPlayer();
@@ -213,6 +216,13 @@ void SequenceEditor::endPlay() {
     player_.pause();
     player_.setTime(editTime_);
     evalDirty_ = true;
+}
+
+std::vector<scene::Entity> SequenceEditor::trackEntities() const {
+    std::vector<scene::Entity> out;
+    for (const OcSeqTrack& tr : model_.tracks)
+        if (tr.target >= 0) out.push_back(static_cast<scene::Entity>(tr.target));
+    return out;
 }
 
 bool SequenceEditor::drivesTransform(scene::Entity e) const {
@@ -543,6 +553,28 @@ void SequenceEditor::keyCamera() {
 
 void SequenceEditor::keySelectedTrack() { addKeyAtPlayhead(); }
 
+// A transform key at the playhead for each entity, from its live transform; the track is created
+// (seeded with that key) when the actor has none.
+void SequenceEditor::keyObjects(const std::vector<scene::Entity>& ents) {
+    if (playActiveLast_ || player_.playing()) { status_ = "Pause playback to key an object"; return; }
+    scene::World& w = scene::World::instance();
+    int n = 0;
+    std::string last;
+    for (const scene::Entity e : ents) {
+        if (!w.valid(e) || (host_ && host_->canKey && !host_->canKey(e))) continue;
+        const int ti = findTrack(OcSeqTrackKind::Transform, e);
+        if (ti < 0) addTrack(OcSeqTrackKind::Transform, e);
+        else { selectTrack(ti); addKeyAtPlayhead(); }
+        last = trackLabel(model_.tracks[static_cast<usize>(selTrack_ >= 0 ? selTrack_ : 0)]);
+        ++n;
+    }
+    if (n == 0) { status_ = "Select an object in the level to key"; return; }
+    char buf[160];
+    if (n == 1) std::snprintf(buf, sizeof buf, "Key at %.2f s on %s", player_.time(), last.c_str());
+    else        std::snprintf(buf, sizeof buf, "Keyed %d objects at %.2f s", n, player_.time());
+    status_ = buf;
+}
+
 void SequenceEditor::addKeyAtPlayhead() {
     clampSelection();   // keySel_ must match the keys before one is inserted into it
     if (selTrack_ < 0 || static_cast<usize>(selTrack_) >= model_.tracks.size()) {
@@ -662,6 +694,31 @@ void SequenceEditor::applyDrag(OcSeqTrack& tr, f64 delta) {
 
 #if AVER_WITH_IMGUI
 
+// "Key <name>": a transform key at the playhead for the selected objects the level can save.
+void SequenceEditor::drawKeyObjectButton(const char* idLabel, f32 width) {
+    constexpr usize kMaxBatch = 256;
+    std::vector<scene::Entity> ok;
+    if (host_) {
+        scene::World& w = scene::World::instance();
+        for (const scene::Entity e : host_->selection) {
+            if (ok.size() >= kMaxBatch) break;
+            if (w.valid(e) && (!host_->canKey || host_->canKey(e))) ok.push_back(e);
+        }
+    }
+    std::string text = "Key object";
+    if (ok.size() == 1) text = "Key " + (host_->label ? host_->label(ok[0]) : std::string("object"));
+    else if (ok.size() > 1) text = "Key " + std::to_string(ok.size()) + " objects";
+    text += std::string("###") + idLabel;
+    const bool off = ok.empty() || playActiveLast_ || player_.playing();
+    ImGui::BeginDisabled(off);
+    if (ImGui::Button(text.c_str(), ImVec2(width, 0))) keyObjects(ok);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", ok.empty() ? "Select an object in the level (lights, decals and prefab instances can't be keyed)."
+                                           : "Writes the selected object's transform as a key on its track at the playhead;\n"
+                                             "a key already there is replaced. The track is created if needed.");
+}
+
 void SequenceEditor::drawModePanel(SequenceHost& host) {
     host_ = &host;
     const std::vector<scene::Entity>& sel = host.selection;
@@ -673,6 +730,7 @@ void SequenceEditor::drawModePanel(SequenceHost& host) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Writes the viewport camera (position, yaw, pitch) as a key on the camera track\n"
                           "at the playhead; a key already there is replaced. The track is created if needed.");
+    drawKeyObjectButton("modeKeyObj", -1.0f);
     ImGui::BeginDisabled(!hasCameraKeys());
     if (ImGui::Button("Clear camera keys", ImVec2(-1, 0)))
         clearTrack(findTrack(OcSeqTrackKind::Camera, scene::kInvalidEntity));
@@ -692,7 +750,9 @@ void SequenceEditor::drawModePanel(SequenceHost& host) {
     f32 len = static_cast<f32>(model_.length);
     ImGui::TextUnformatted("Length");
     ImGui::SetNextItemWidth(-1);
-    const bool lenChanged = ImGui::DragFloat("##seqLen", &len, 0.1f, 0.5f, 3600.0f, "%.1f s");
+    const bool lenChanged = ImGui::DragFloat("##seqLen", &len, std::fmax(0.1f, len * 0.004f), 0.5f, 3600.0f, "%.1f s",
+                                             ImGuiSliderFlags_AlwaysClamp);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Up to 3600 s. Ctrl+click to type a value; the timeline scrolls and zooms.");
     if (ImGui::IsItemActivated()) pushUndo();
     if (lenChanged) {
         model_.length = std::fmax(0.5f, len);
@@ -871,6 +931,8 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
     if (ImGui::Button("Key camera")) keyCamera();
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Key the viewport camera at the playhead  (K)");
+    ImGui::SameLine();
+    drawKeyObjectButton("tlKeyObj", 0.0f);
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (playActiveLast_) ImGui::TextDisabled("Play is running");
@@ -901,37 +963,134 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
         }
     }
 
-    // ---- ruler ----
+    // ---- view: zoom, scroll, follow ----
     const f32 nameW = 170.0f * ui;
     const f32 rowH = ImGui::GetTextLineHeightWithSpacing() + 4.0f * ui;
     const f32 laneW = std::fmax(80.0f * ui, ImGui::GetContentRegionAvail().x - nameW - ImGui::GetStyle().ScrollbarSize - 6.0f * ui);
+    // pxPerSec_ 0 fits the whole sequence in the lane; viewStart_ is the time at the lane's left edge.
+    const f32 minPps = static_cast<f32>(laneW / len);
+    const f32 maxPps = std::fmax(minPps, 4000.0f * ui);
+    auto ppsNow = [&]() { return pxPerSec_ > minPps ? std::fmin(pxPerSec_, maxPps) : minPps; };
+    auto clampView = [&]() { viewStart_ = std::clamp(viewStart_, 0.0, std::fmax(0.0, len - laneW / ppsNow())); };
+    // Zoom to pps keeping anchorT at anchorPx from the lane's left edge.
+    auto setZoom = [&](f32 pps, f64 anchorT, f32 anchorPx) {
+        pps = std::clamp(pps, minPps, maxPps);
+        pxPerSec_ = pps <= minPps * 1.001f ? 0.0f : pps;
+        viewStart_ = anchorT - anchorPx / ppsNow();
+        clampView();
+    };
+    clampView();
+    {   // a playhead that moved out of view (playback, stepping, Go to key) brings the view with it
+        const f64 ph = player_.time();
+        if (ph != followTime_) {
+            followTime_ = ph;
+            const f64 vis = laneW / ppsNow();
+            if (!dragRuler_ && (ph < viewStart_ || ph > viewStart_ + vis * 0.98)) {
+                viewStart_ = player_.playing() ? ph - vis * 0.1 : ph - vis * 0.5;
+                clampView();
+            }
+        }
+    }
+
+    // Zoom slider and horizontal scrollbar.
+    {
+        f32 z = ppsNow();
+        ImGui::SetNextItemWidth(nameW - 52.0f * ui);
+        if (ImGui::SliderFloat("##seqZoom", &z, minPps, maxPps, "%.0f px/s", ImGuiSliderFlags_Logarithmic))
+            setZoom(z, viewStart_ + laneW / ppsNow() * 0.5, laneW * 0.5f);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Timeline zoom  (Ctrl+wheel over the timeline)");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Fit")) { pxPerSec_ = 0; viewStart_ = 0; }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show the whole sequence");
+        ImGui::SameLine(nameW);
+        ImGui::InvisibleButton("##seqScroll", ImVec2(laneW, ImGui::GetFrameHeight()));
+        const ImVec2 s0 = ImGui::GetItemRectMin(), s1 = ImGui::GetItemRectMax();
+        const f64 vis = laneW / ppsNow();
+        const f64 travel = len - vis;
+        const bool scrollable = travel > 1e-6;
+        const f32 thumbW = scrollable ? std::fmax(24.0f * ui, static_cast<f32>(laneW * vis / len)) : laneW;
+        const f32 room = std::fmax(0.0f, laneW - thumbW);
+        if (scrollable && ImGui::IsItemActivated()) {
+            const f32 x0 = s0.x + static_cast<f32>(viewStart_ / travel) * room;
+            scrollGrab_ = (io.MousePos.x >= x0 && io.MousePos.x <= x0 + thumbW) ? io.MousePos.x - x0 : thumbW * 0.5f;
+        }
+        if (scrollable && ImGui::IsItemActive() && room > 0.0f) {
+            viewStart_ = std::clamp(static_cast<f64>((io.MousePos.x - scrollGrab_ - s0.x) / room), 0.0, 1.0) * travel;
+            clampView();
+        }
+        const f32 my = (s0.y + s1.y) * 0.5f, th = 4.0f * ui;
+        const f32 tx = s0.x + (scrollable ? static_cast<f32>(viewStart_ / travel) * room : 0.0f);
+        ImDrawList* sdl = ImGui::GetWindowDrawList();
+        sdl->AddRectFilled(ImVec2(s0.x, my - th), ImVec2(s1.x, my + th), IM_COL32(30, 30, 34, 255), th);
+        sdl->AddRectFilled(ImVec2(tx, my - th), ImVec2(tx + thumbW, my + th),
+                           scrollable && ImGui::IsItemHovered() ? IM_COL32(150, 150, 165, 255) : IM_COL32(100, 100, 112, 255), th);
+    }
+
+    // ---- ruler ----
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("%d track(s)", static_cast<int>(model_.tracks.size()));
     ImGui::SameLine(nameW);
     ImGui::InvisibleButton("##ruler", ImVec2(laneW, rowH));
     const ImVec2 r0 = ImGui::GetItemRectMin(), r1 = ImGui::GetItemRectMax();
-    auto laneX = [&](f64 t) { return r0.x + static_cast<f32>(t / len) * (r1.x - r0.x); };
+    // Ctrl+wheel zooms about the mouse, Shift+wheel or a horizontal wheel scrolls, middle-drag pans.
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && !dragRuler_ && !dragKey_ &&
+        io.MousePos.x >= r0.x && io.MousePos.x < r1.x && io.MousePos.y >= r0.y) {
+        const f32 mx = io.MousePos.x - r0.x;
+        if (io.KeyCtrl && io.MouseWheel != 0.0f) {
+            setZoom(ppsNow() * std::pow(1.2f, io.MouseWheel), viewStart_ + mx / ppsNow(), mx);
+        } else if (io.MouseWheelH != 0.0f || (io.KeyShift && io.MouseWheel != 0.0f)) {
+            const f32 wheel = io.MouseWheelH != 0.0f ? io.MouseWheelH : io.MouseWheel;
+            viewStart_ -= wheel * (laneW / ppsNow()) * 0.1;
+            clampView();
+        }
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
+            viewStart_ -= io.MouseDelta.x / ppsNow();
+            clampView();
+        }
+    }
+    // Holding a scrub or a key drag past either end of the lane scrolls toward it.
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && (dragRuler_ || dragKey_)) {
+        const f32 over = io.MousePos.x < r0.x ? io.MousePos.x - r0.x : io.MousePos.x > r1.x ? io.MousePos.x - r1.x : 0.0f;
+        if (over != 0.0f) {
+            viewStart_ += over * 6.0f * io.DeltaTime / ppsNow();
+            clampView();
+        }
+    }
+    const f32 pps = ppsNow();
+    auto laneX = [&](f64 t) { return r0.x + static_cast<f32>((t - viewStart_) * pps); };
+    dl->PushClipRect(r0, r1, true);
     dl->AddRectFilled(r0, r1, IM_COL32(36, 36, 42, 255));
     {
-        static const f64 kSteps[] = {0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300};
+        static const f64 kSteps[] = {0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600};
         f64 step = kSteps[std::size(kSteps) - 1];
         for (const f64 s : kSteps)
-            if (static_cast<f32>(s / len) * (r1.x - r0.x) >= 70.0f * ui) { step = s; break; }
-        for (f64 t = 0; t <= len + 1e-6; t += step) {
+            if (static_cast<f32>(s * pps) >= 70.0f * ui) { step = s; break; }
+        const f64 tEnd = viewStart_ + laneW / pps;
+        for (f64 i = std::floor(viewStart_ / step); i * step <= tEnd + step; ++i) {
+            const f64 t = i * step;
+            if (t < 0) continue;
+            if (t > len + 1e-6) break;
             const f32 x = laneX(t);
             dl->AddLine(ImVec2(x, r1.y - 7.0f * ui), ImVec2(x, r1.y), IM_COL32(150, 150, 160, 255));
+            if (static_cast<f32>(step * pps) >= 24.0f * ui) {   // a half-step tick
+                const f32 hx = x + static_cast<f32>(step * pps) * 0.5f;
+                dl->AddLine(ImVec2(hx, r1.y - 4.0f * ui), ImVec2(hx, r1.y), IM_COL32(110, 110, 120, 255));
+            }
             char tb[24];
-            std::snprintf(tb, sizeof tb, "%g", t);
+            if (step >= 60.0) std::snprintf(tb, sizeof tb, "%d:%02d", static_cast<int>(t) / 60, static_cast<int>(std::lround(t)) % 60);
+            else              std::snprintf(tb, sizeof tb, "%g", t);
             dl->AddText(ImVec2(x + 3.0f * ui, r0.y), IM_COL32(170, 170, 178, 255), tb);
         }
+        const f32 ex = laneX(len);   // the sequence's end
+        dl->AddLine(ImVec2(ex, r0.y), ImVec2(ex, r1.y), IM_COL32(220, 90, 90, 200), 2.0f);
     }
     if (ImGui::IsItemActivated()) dragRuler_ = true;
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) dragRuler_ = false;
     if (dragRuler_ && !playActiveLast_) {
-        const f64 u = std::clamp(static_cast<f64>((io.MousePos.x - r0.x) / std::fmax(1.0f, r1.x - r0.x)), 0.0, 1.0);
+        const f64 u = std::clamp(viewStart_ + static_cast<f64>(io.MousePos.x - r0.x) / pps, 0.0, len);
         player_.pause();
-        player_.setTime(model_.loop ? std::min(u * len, len * 0.9999) : u * len);
+        player_.setTime(model_.loop ? std::min(u, len * 0.9999) : u);
         evalDirty_ = true;
         ++editRev_;
     }
@@ -940,6 +1099,7 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
         const ImVec2 tri[3] = {ImVec2(x - 5.0f * ui, r0.y), ImVec2(x + 5.0f * ui, r0.y), ImVec2(x, r0.y + 9.0f * ui)};
         dl->AddConvexPolyFilled(tri, 3, IM_COL32(255, 190, 70, 255));
     }
+    dl->PopClipRect();
 
     // ---- track lanes ----
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -957,16 +1117,17 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
             ImGui::PushID(static_cast<int>(i));
             const std::string name = trackLabel(tr);
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(kindColor(tr.kind)));
-            if (ImGui::Selectable(name.c_str(), trackSel, 0, ImVec2(nameW - 6.0f * ui, rowH)))
+            if (ImGui::Selectable(name.c_str(), trackSel, 0, ImVec2(nameW - ImGui::GetStyle().WindowPadding.x - 6.0f * ui, rowH)))
                 selectTrack(static_cast<int>(i));
             ImGui::PopStyleColor();
-            ImGui::SameLine(nameW);
+            ImGui::SameLine(r0.x - ImGui::GetWindowPos().x);   // the lane starts where the ruler does
             ImGui::InvisibleButton("##lane", ImVec2(laneW, rowH));
             const ImVec2 p0 = ImGui::GetItemRectMin(), p1 = ImGui::GetItemRectMax();
             const bool hovered = ImGui::IsItemHovered(), active = ImGui::IsItemActive();
             const f32 cy = (p0.y + p1.y) * 0.5f;
-            auto lx = [&](f64 t) { return p0.x + static_cast<f32>(t / len) * (p1.x - p0.x); };
+            auto lx = [&](f64 t) { return p0.x + static_cast<f32>((t - viewStart_) * pps); };
 
+            cdl->PushClipRect(p0, p1, true);
             cdl->AddRectFilled(p0, p1, trackSel ? IM_COL32(46, 40, 36, 255) : IM_COL32(30, 30, 34, 255));
             if (tr.keys.size() >= 2)
                 cdl->AddLine(ImVec2(lx(tr.keys.front().t), cy), ImVec2(lx(tr.keys.back().t), cy),
@@ -988,6 +1149,7 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
             if (trackSel) cdl->AddRect(p0, p1, IM_COL32(255, 220, 140, 150));
             const f32 phx = lx(player_.time());
             cdl->AddLine(ImVec2(phx, p0.y), ImVec2(phx, p1.y), IM_COL32(255, 190, 70, 170), 1.0f);
+            cdl->PopClipRect();
 
             // Press decides once what it landed on; a drag then moves every selected key of the track.
             if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -1012,6 +1174,7 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
                     dragKey_ = keySel_[static_cast<usize>(hit)] != 0;
                     dragStarted_ = false;
                     dragX0_ = io.MousePos.x;
+                    dragView0_ = viewStart_;
                     dragOrig_.clear();
                     for (usize k = 0; k < tr.keys.size(); ++k)
                         dragOrig_.push_back({tr.keys[k], keySel_[k] != 0, static_cast<int>(k) == selKey_});
@@ -1024,8 +1187,10 @@ void SequenceEditor::drawTimeline(SequenceHost& host) {
             if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) selectTrack(static_cast<int>(i));
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) dragKey_ = false;
             if (dragKey_ && active && trackSel && !dragOrig_.empty() && dragOrig_.size() == tr.keys.size()) {
-                const f64 raw = static_cast<f64>(io.MousePos.x - dragX0_) / std::fmax(1.0f, p1.x - p0.x) * len;
-                const f64 delta = std::round(raw * 100.0) / 100.0;
+                // Pixels moved plus the scroll since the press, in seconds; whole 10 ms (1 ms when zoomed in).
+                const f64 raw = static_cast<f64>(io.MousePos.x - dragX0_) / pps + (viewStart_ - dragView0_);
+                const f64 snap = pps >= 600.0f * ui ? 1000.0 : 100.0;
+                const f64 delta = std::round(raw * snap) / snap;
                 if (dragStarted_ || std::fabs(delta) > 1e-9) {
                     if (!dragStarted_) { pushUndo(); dragStarted_ = true; }
                     applyDrag(tr, delta);
