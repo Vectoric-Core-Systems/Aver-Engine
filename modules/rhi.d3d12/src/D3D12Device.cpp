@@ -7461,6 +7461,8 @@ bool blasMultiInputs(const std::vector<GpuMesh>& meshes, const std::vector<BlasG
         const MeshHandle h = parts[i].mesh;
         if (h == 0 || h > meshes.size() || !meshes[h - 1].alive || meshes[h - 1].indexCount == 0) return false;
         const GpuMesh& m = meshes[h - 1];
+        const u32 count = parts[i].indexCount ? parts[i].indexCount : m.indexCount - parts[i].firstIndex;
+        if (parts[i].firstIndex >= m.indexCount || count > m.indexCount - parts[i].firstIndex || count < 3) return false;
         D3D12_RAYTRACING_GEOMETRY_DESC& geo = geos[i];
         geo.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
         geo.Flags = parts[i].opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
@@ -7468,8 +7470,8 @@ bool blasMultiInputs(const std::vector<GpuMesh>& meshes, const std::vector<BlasG
         geo.Triangles.VertexBuffer.StrideInBytes = sizeof(MeshVertex);
         geo.Triangles.VertexCount = m.vbv.SizeInBytes / sizeof(MeshVertex);
         geo.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-        geo.Triangles.IndexBuffer = m.ib->GetGPUVirtualAddress();
-        geo.Triangles.IndexCount = m.indexCount;
+        geo.Triangles.IndexBuffer = m.ib->GetGPUVirtualAddress() + static_cast<u64>(parts[i].firstIndex) * sizeof(u32);
+        geo.Triangles.IndexCount = count - count % 3;
         geo.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
     }
     in = {};

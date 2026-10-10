@@ -551,6 +551,8 @@ void VoxiRenderer::shutdown() {
     if (foliagePartPlaceholder_) { res_->destroyBuffer(foliagePartPlaceholder_); foliagePartPlaceholder_ = 0; }
     if (foliageDescPlaceholder_) { res_->destroyBuffer(foliageDescPlaceholder_); foliageDescPlaceholder_ = 0; }
     blas_.clear();
+    rtChunks_.clear();
+    rtUnchunked_.clear();
     ++blasRevision_;
     tlas_ = 0;
     rtTlasTranslucent_ = 0;
@@ -1468,6 +1470,32 @@ void VoxiRenderer::manageInjectionAccumulator(rhi::IRenderContext& ctx) {
     }
 }
 
+// The chunk record for a mesh past kRtChunkTriangles * 2, or null (traced whole). A record whose built
+// structures no longer name the mesh (it was destroyed) starts over.
+VoxiRenderer::RtChunks* VoxiRenderer::rtChunksFor(rhi::MeshHandle mesh) {
+    if (const auto it = rtChunks_.find(mesh); it != rtChunks_.end()) {
+        RtChunks& ch = it->second;
+        for (const rhi::BlasHandle b : ch.blas)
+            if (b && res_->blasMesh(b) != mesh) { std::fill(ch.blas.begin(), ch.blas.end(), rhi::BlasHandle(0)); break; }
+        return &ch;
+    }
+    if (rtUnchunked_.count(mesh)) return nullptr;
+    if (rtUnchunked_.size() > (1u << 16)) rtUnchunked_.clear();   // handles are never reused; keep it bounded
+    u32 ic = 0;
+    if (!dev_->meshGeometry(mesh, nullptr, nullptr, nullptr, &ic) || ic / 3 <= kRtChunkTriangles * 2) {
+        rtUnchunked_.insert(mesh);
+        return nullptr;
+    }
+    RtChunks& ch = rtChunks_[mesh];
+    for (u32 first = 0; first < ic; first += kRtChunkTriangles * 3) {
+        ch.firstIndex.push_back(first);
+        ch.indexCount.push_back(std::min(kRtChunkTriangles * 3, ic - first));
+    }
+    ch.blas.assign(ch.firstIndex.size(), 0);
+    AVER_INFO("[Voxi] mesh {} ({} triangles) is ray-traced as {} BLASes built over frames", mesh, ic / 3, ch.blas.size());
+    return &ch;
+}
+
 // Builds BLAS for each mesh and TLAS over drawsPrev_. Publishes shadowParams.z.
 // rtSkipUnchangedTlas gates TLAS rebuild on rtAccelSnapshotUnchanged(); rtRefitAccel enables refits.
 void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
@@ -1574,6 +1602,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     buildRtCarryLookup();
     rtInstanceData_.clear();
     rtInstanceMesh_.clear();
+    rtInstanceIndexOffset_.clear();
     rtInstanceMatKey_.clear();
     rtInstanceGroupKey_.clear();
     rtPrevPending_.clear();
@@ -1592,56 +1621,8 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // CPU cost of walking drawsPrev_ and filling rtInstanceData_/rtInstanceMesh_/rtInstanceMatKey_.
     const auto accelBuildCpuStart = std::chrono::steady_clock::now();
 
-    for (const Draw& d : drawsPrev_) {
-        // Mover patch lane: record this movable draw before BLAS check (must sync with current list).
-        u32 moverSlot = kRtNoInstance;
-        if (moverLane && d.movable) {
-            moverSlot = static_cast<u32>(rtMovers_.size());
-            rtMovers_.push_back({rtDrawHash(d, moverMemo, true), static_cast<u32>(&d - drawsPrev_.data()),
-                                 kRtNoInstance});
-        }
-
-        auto it = blas_.find(d.mesh);
-        // Mesh destroyed beneath us: handing stale structure to TLAS would have GPU traverse freed memory.
-        if (it != blas_.end() && it->second && res_->blasMesh(it->second) != d.mesh) {
-            blas_.erase(it);
-            ++blasRevision_;
-            it = blas_.end();
-            dynamicBlasRefits_.erase(d.mesh);
-        }
-        if (it == blas_.end()) {
-            if (blasBytesThisFrame >= kBlasBuildBytesPerFrame) { ++blasDeferred; continue; }
-            // createBlas returns 0 for destroyed mesh. Updatable only for compute-written mesh with rtRefitAccel on.
-            const bool dynamic = settings_.rtRefitAccel && dev_->meshVertexBuffer(d.mesh) != 0;
-            const rhi::BlasHandle nb = dynamic ? res_->createBlasUpdatable(d.mesh) : res_->createBlas(d.mesh);
-            if (nb) {
-                ctx.buildBlas(nb);
-                ++firstBuilds;
-                blasBytesThisFrame += res_->blasMemoryBytes(nb);   // scratch is of the same order
-            }
-            it = blas_.emplace(d.mesh, nb).first;
-            ++blasRevision_;
-        } else if (it->second && dev_->meshVertexBuffer(d.mesh)) {
-            // Compute-written mesh: structure invalidated every frame. Refit if rtRefitAccel is on.
-            if (std::find(rebuiltThisFrame_.begin(), rebuiltThisFrame_.end(), d.mesh) ==
-                rebuiltThisFrame_.end()) {
-                refitOrRebuildDynamicBlas(ctx, it->second, d.mesh);
-                rebuiltThisFrame_.push_back(d.mesh);
-            }
-            if (!dynamicBlasLogged_) {
-                AVER_INFO("[Voxi] mesh {} has compute-written vertices; its bottom-level structure is "
-                          "refit (or rebuilt, if voxi.rtRefitAccel is off) every frame rather than "
-                          "cached outright", d.mesh);
-                dynamicBlasLogged_ = true;
-            }
-        }
-        const rhi::BlasHandle b = it->second;
-        if (!b) continue;
-        // Compute-written meshes with usable BLAS: refreshed by refitDynamicAccelStructures().
-        if (dev_->meshVertexBuffer(d.mesh) &&
-            std::find(rtDynamicMeshes_.begin(), rtDynamicMeshes_.end(), d.mesh) == rtDynamicMeshes_.end()) {
-            rtDynamicMeshes_.push_back(d.mesh);
-        }
+    // One TLAS instance and its RtInstance row; indexOffset is a chunk's first index (0: whole mesh).
+    auto emitInstance = [&](const Draw& d, rhi::BlasHandle b, u32 indexOffset, u32 moverSlot) {
         rhi::TlasInstance i;
         std::memcpy(i.world, d.world, sizeof(i.world));
         // Three mask lanes: translucency, hiddenFromOwner, and opaque. Cannot co-occur.
@@ -1687,6 +1668,88 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         rtInstanceData_.push_back(ri);
         rtInstanceMesh_.push_back(d.mesh);
         rtInstanceGroupKey_.push_back(groupKey);
+        rtInstanceIndexOffset_.push_back(indexOffset);
+    };
+
+    for (const Draw& d : drawsPrev_) {
+        // Mover patch lane: record this movable draw before BLAS check (must sync with current list).
+        u32 moverSlot = kRtNoInstance;
+        if (moverLane && d.movable) {
+            moverSlot = static_cast<u32>(rtMovers_.size());
+            rtMovers_.push_back({rtDrawHash(d, moverMemo, true), static_cast<u32>(&d - drawsPrev_.data()),
+                                 kRtNoInstance});
+        }
+
+        // A huge static mesh (a terrain tile) is ray-traced as several BLASes over ranges of its index
+        // buffer, each a first build within the per-frame budget: it fills in over frames, never one stall.
+        if (!d.movable && !dev_->meshVertexBuffer(d.mesh)) {
+            if (RtChunks* ch = rtChunksFor(d.mesh)) {
+                bool waiting = false;
+                for (usize c = 0; c < ch->blas.size(); ++c) {
+                    if (!ch->blas[c]) {
+                        if (blasBytesThisFrame >= kBlasBuildBytesPerFrame) { waiting = true; continue; }
+                        rhi::BlasGeometry g;
+                        g.mesh = d.mesh;
+                        g.firstIndex = ch->firstIndex[c];
+                        g.indexCount = ch->indexCount[c];
+                        ch->blas[c] = res_->createBlasMulti(&g, 1);
+                        if (!ch->blas[c]) continue;
+                        ctx.buildBlas(ch->blas[c]);
+                        ++firstBuilds;
+                        blasBytesThisFrame += res_->blasMemoryBytes(ch->blas[c]);
+                        ++blasRevision_;
+                    }
+                    emitInstance(d, ch->blas[c], ch->firstIndex[c], moverSlot);
+                }
+                if (waiting) ++blasDeferred;
+                continue;
+            }
+        }
+        auto it = blas_.find(d.mesh);
+        // Mesh destroyed beneath us: handing stale structure to TLAS would have GPU traverse freed memory.
+        if (it != blas_.end() && it->second && res_->blasMesh(it->second) != d.mesh) {
+            blas_.erase(it);
+            ++blasRevision_;
+            it = blas_.end();
+            dynamicBlasRefits_.erase(d.mesh);
+        }
+        if (it == blas_.end()) {
+            if (blasBytesThisFrame >= kBlasBuildBytesPerFrame) { ++blasDeferred; continue; }
+            // createBlas returns 0 for destroyed mesh. Updatable only for compute-written mesh with rtRefitAccel on.
+            const bool dynamic = settings_.rtRefitAccel && dev_->meshVertexBuffer(d.mesh) != 0;
+            const rhi::BlasHandle nb = dynamic ? res_->createBlasUpdatable(d.mesh) : res_->createBlas(d.mesh);
+            if (nb) {
+                ctx.buildBlas(nb);
+                ++firstBuilds;
+                blasBytesThisFrame += res_->blasMemoryBytes(nb);   // scratch is of the same order
+                if (res_->blasMemoryBytes(nb) > (64ull << 20))
+                    AVER_INFO("[Voxi] mesh {} built as one {:.0f} MiB BLAS", d.mesh,
+                              static_cast<f64>(res_->blasMemoryBytes(nb)) / (1024.0 * 1024.0));
+            }
+            it = blas_.emplace(d.mesh, nb).first;
+            ++blasRevision_;
+        } else if (it->second && dev_->meshVertexBuffer(d.mesh)) {
+            // Compute-written mesh: structure invalidated every frame. Refit if rtRefitAccel is on.
+            if (std::find(rebuiltThisFrame_.begin(), rebuiltThisFrame_.end(), d.mesh) ==
+                rebuiltThisFrame_.end()) {
+                refitOrRebuildDynamicBlas(ctx, it->second, d.mesh);
+                rebuiltThisFrame_.push_back(d.mesh);
+            }
+            if (!dynamicBlasLogged_) {
+                AVER_INFO("[Voxi] mesh {} has compute-written vertices; its bottom-level structure is "
+                          "refit (or rebuilt, if voxi.rtRefitAccel is off) every frame rather than "
+                          "cached outright", d.mesh);
+                dynamicBlasLogged_ = true;
+            }
+        }
+        const rhi::BlasHandle b = it->second;
+        if (!b) continue;
+        // Compute-written meshes with usable BLAS: refreshed by refitDynamicAccelStructures().
+        if (dev_->meshVertexBuffer(d.mesh) &&
+            std::find(rtDynamicMeshes_.begin(), rtDynamicMeshes_.end(), d.mesh) == rtDynamicMeshes_.end()) {
+            rtDynamicMeshes_.push_back(d.mesh);
+        }
+        emitInstance(d, b, 0u, moverSlot);
     }
 
     // Finalize mover patch lane record: sort movers or clear if none have instances.
@@ -1710,10 +1773,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         foliageBlasPending_ = false;
     }
 
-    // Refits TLAS in place if rtRefitAccel allows, else full build.
     hm.mark("drawLoop");
-    refitOrRebuildTlas(ctx);
-    hm.mark("tlas");
     if (tlasTranslucentThisBuild_ && tlasTranslucentLogged_ != tlasTranslucentThisBuild_) {
         tlasTranslucentLogged_ = tlasTranslucentThisBuild_;
         AVER_INFO("[Voxi] acceleration structure: {} instance(s), {} in the translucent lane "
@@ -1739,6 +1799,13 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // Reflection ray may trace only if geometry table exists.
     const bool geomTableReady = buildGeometryTable(ctx);
     hm.mark("geometryTable");
+    // After the geometry table, which masks instances whose geometry is still being copied.
+    // Refits TLAS in place if rtRefitAccel allows, else full build.
+    {
+        rhi::ScopedGpuStat tlasStat(ctx, "Voxi TLAS");
+        refitOrRebuildTlas(ctx);
+    }
+    hm.mark("tlas");
     cb_.rtParams[3] = geomTableReady ? 1.0f : 0.0f;
     // After both tables: foliage part records carry indices into each.
     if (geomTableReady) uploadFoliagePartTable();
@@ -1749,7 +1816,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
                   static_cast<u32>(tlasInstScratch_.size()), static_cast<u32>(blas_.size()));
         rtLogged_ = true;
     }
-    blasBuildsDeferred_ = blasDeferred > 0;
+    blasBuildsDeferred_ = blasDeferred > 0 || !rtGeomPending_.empty();   // both finish over frames
     if (blasDeferred && !blasDeferLogged_) {
         AVER_INFO("[Voxi] bottom-level builds spread over frames: {:.0f} MiB this frame, {} draw(s) wait "
                   "for the next (budget {} MiB/frame)", static_cast<f64>(blasBytesThisFrame) / (1024.0 * 1024.0),
@@ -3054,6 +3121,18 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
     }
     const bool repack = !rtGeometryReady_ || u64(rtVertUsed_) + needVerts > rtVertCapacity_ ||
                         u64(rtIndexUsed_) + needIndices > rtIndexCapacity_;
+
+    // A repack moves every mesh the table already holds: those whose data is complete are copied from
+    // the old buffers (GPU to GPU), not again from their upload-heap sources -- that re-read was ~290 ms
+    // of one frame on Caldera. Copies from the old buffers are not budgeted; uploads are (below).
+    rhi::BufferHandle oldVerts = 0, oldIndices = 0;
+    // Retired behind this frame's fence on every return (destruction is deferred by contract).
+    struct ReleaseOld {
+        rhi::IResourceFactory* res; rhi::BufferHandle& v; rhi::BufferHandle& i;
+        ~ReleaseOld() { if (v) res->destroyBuffer(v); if (i) res->destroyBuffer(i); }
+    } releaseOld{res_, oldVerts, oldIndices};
+    std::unordered_map<rhi::MeshHandle, RtGeomSlot> oldSlots;
+    std::vector<u8> fromOld(rtGeomMeshes_.size(), 0);
     if (repack) {
         u64 totalVerts = 0, totalIndices = 0;
         std::unordered_set<u64> seen;
@@ -3065,6 +3144,17 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
         // Headroom, so the next streamed meshes append instead of repacking.
         auto grow = [](u64 n) { return std::min<u64>(n + std::max<u64>(n / 4, 1ull << 20), 0xFFFFFFFFull); };
         if (totalVerts > 0xFFFFFFFFull || totalIndices > 0xFFFFFFFFull) return false;
+        if (rtGeometryReady_ && rtVerts_ && rtIndices_) {
+            oldVerts = rtVerts_;
+            oldIndices = rtIndices_;
+            oldSlots = std::move(rtGeomSlots_);
+            for (usize m = 0; m < rtGeomMeshes_.size(); ++m) {
+                const auto it = oldSlots.find(rtGeomMeshes_[m]);
+                fromOld[m] = kept[m] && it != oldSlots.end() && it->second.indexDone && it->second.vertsDone;
+            }
+            rtVerts_ = rtIndices_ = 0;
+            rtVertCapacity_ = rtIndexCapacity_ = 0;
+        }
         if (rtVertCapacity_ < totalVerts) {
             if (rtVerts_) res_->destroyBuffer(rtVerts_);
             const u64 cap = grow(totalVerts);
@@ -3086,6 +3176,7 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
             rtIndexCapacity_ = rtIndices_ ? static_cast<u32>(cap) : 0;
         }
         rtGeomSlots_.clear();
+        rtGeomPending_.clear();   // their destinations were in the old buffers
         rtVertUsed_ = rtIndexUsed_ = 0;
         rtGeometryReady_ = false;
         if (!rtVerts_ || !rtIndices_) return false;
@@ -3097,23 +3188,73 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
                                                                                            : rtGeomSlots_.erase(it);
     }
 
-    // New meshes append; only they are copied. Not ready until the copies are recorded.
+    // New meshes append. Immediate copies (from the old buffers) are recorded now; uploads join
+    // rtGeomPending_ and are copied within kRtGeomCopyBytesPerFrame, in pieces, over frames.
     rtGeometryReady_ = false;
-    struct Copy { rhi::BufferHandle src; u64 bytes, dst; };
-    std::vector<Copy> vertCopies, indexCopies;
+    struct Copy { bool verts; rhi::BufferHandle src; u64 bytes, dst, srcOffset; };
+    std::vector<Copy> copies;
     for (usize m = 0; m < rtGeomMeshes_.size(); ++m) {
         if (kept[m]) continue;
         const Geo& g = geo[m];
+        const RtGeomSlot* old = nullptr;
+        if (fromOld[m]) {
+            const auto it = oldSlots.find(rtGeomMeshes_[m]);
+            old = it != oldSlots.end() ? &it->second : nullptr;
+        }
+        RtGeomSlot sl{g.vb, g.ib, g.vc, g.ic, 0, rtIndexUsed_};
         const auto [sit, isNew] = slice.try_emplace(sliceKeyOf(g), rtVertUsed_);
+        sl.firstVertex = sit->second;
         if (isNew) {
+            const u64 bytes = u64(g.vc) * sizeof(rhi::MeshVertex), dst = u64(rtVertUsed_) * sizeof(rhi::MeshVertex);
             // Compute-written vertices are filled every frame by refreshDynamicVertexSlices, not here.
-            if (!dev_->meshVertexBuffer(rtGeomMeshes_[m]))
-                vertCopies.push_back({g.vb, u64(g.vc) * sizeof(rhi::MeshVertex), u64(rtVertUsed_) * sizeof(rhi::MeshVertex)});
+            if (!dev_->meshVertexBuffer(rtGeomMeshes_[m])) {
+                if (old) copies.push_back({true, oldVerts, bytes, dst, u64(old->firstVertex) * sizeof(rhi::MeshVertex)});
+                else     rtGeomPending_.push_back({true, rtGeomMeshes_[m], sliceKeyOf(g), g.vb, 0, dst, bytes, 0});
+            }
             rtVertUsed_ += g.vc;
         }
-        indexCopies.push_back({g.ib, u64(g.ic) * sizeof(u32), u64(rtIndexUsed_) * sizeof(u32)});
-        rtGeomSlots_[rtGeomMeshes_[m]] = RtGeomSlot{g.vb, g.ib, g.vc, g.ic, sit->second, rtIndexUsed_};
+        const u64 ibytes = u64(g.ic) * sizeof(u32), idst = u64(rtIndexUsed_) * sizeof(u32);
+        if (old) { copies.push_back({false, oldIndices, ibytes, idst, u64(old->firstIndex) * sizeof(u32)}); sl.indexDone = true; }
+        else     rtGeomPending_.push_back({false, rtGeomMeshes_[m], sliceKeyOf(g), g.ib, 0, idst, ibytes, 0});
+        rtGeomSlots_[rtGeomMeshes_[m]] = sl;
         rtIndexUsed_ += g.ic;
+    }
+
+    // Pending uploads: drop those for meshes / slices no longer in the set, then copy within the budget.
+    // Foliage meshes copy whole at once (their prefix is never masked).
+    {
+        std::unordered_set<u64> liveSlices;
+        for (usize m = 0; m < rtGeomMeshes_.size(); ++m) liveSlices.insert(sliceKeyOf(geo[m]));
+        rtGeomPending_.erase(std::remove_if(rtGeomPending_.begin(), rtGeomPending_.end(), [&](const RtGeomCopy& p) {
+            return p.verts ? !liveSlices.count(p.sliceKey)
+                           : !std::binary_search(rtGeomMeshes_.begin(), rtGeomMeshes_.end(), p.mesh);
+        }), rtGeomPending_.end());
+    }
+    std::unordered_set<rhi::MeshHandle> foliageSet(foliageMeshes_.begin(), foliageMeshes_.end());
+    u64 budget = kRtGeomCopyBytesPerFrame;
+    for (RtGeomCopy& p : rtGeomPending_) {
+        const bool whole = foliageSet.count(p.mesh) != 0;
+        if (!whole && budget == 0) break;
+        const u64 n = whole ? p.bytes - p.done : std::min(p.bytes - p.done, budget);
+        if (n == 0) continue;
+        copies.push_back({p.verts, p.src, n, p.dst + p.done, p.srcOffset + p.done});
+        p.done += n;
+        if (!whole) budget -= n;
+    }
+    // Finished pieces: a mesh is complete once its indices and its vertex slice are both in.
+    std::unordered_set<u64> slicesPending;
+    std::unordered_set<rhi::MeshHandle> indicesPending;
+    for (const RtGeomCopy& p : rtGeomPending_) {
+        if (p.done >= p.bytes) continue;
+        if (p.verts) slicesPending.insert(p.sliceKey);
+        else indicesPending.insert(p.mesh);
+    }
+    rtGeomPending_.erase(std::remove_if(rtGeomPending_.begin(), rtGeomPending_.end(),
+                                        [](const RtGeomCopy& p) { return p.done >= p.bytes; }), rtGeomPending_.end());
+    for (usize m = 0; m < rtGeomMeshes_.size(); ++m) {
+        RtGeomSlot& sl = rtGeomSlots_[rtGeomMeshes_[m]];
+        sl.indexDone = !indicesPending.count(rtGeomMeshes_[m]);
+        sl.vertsDone = !slicesPending.count(sliceKeyOf(geo[m]));
     }
 
     rtGeomFirstVertex_.resize(rtGeomMeshes_.size());
@@ -3128,13 +3269,17 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
             rtDynamicVertexSlicesPending_.push_back({geo[m].vb, geo[m].vc, sl.firstVertex});
     }
 
-    // Every instance points at its mesh's slice. Rewritten every frame as instance list changes.
+    // Every instance points at its mesh's slice; one whose mesh is still being copied is masked out of
+    // every ray (the TLAS is built after this). Rewritten every frame as instance list changes.
     for (usize i = 0; i < rtInstanceMesh_.size(); ++i) {
         const auto it = std::lower_bound(rtGeomMeshes_.begin(), rtGeomMeshes_.end(), rtInstanceMesh_[i]);
         if (it == rtGeomMeshes_.end() || *it != rtInstanceMesh_[i]) return false;
         const usize slot = static_cast<usize>(it - rtGeomMeshes_.begin());
         rtInstanceData_[i].firstVertex = rtGeomFirstVertex_[slot];
-        rtInstanceData_[i].firstIndex  = rtGeomFirstIndex_[slot];
+        rtInstanceData_[i].firstIndex  = rtGeomFirstIndex_[slot] +
+                                         (i < rtInstanceIndexOffset_.size() ? rtInstanceIndexOffset_[i] : 0u);
+        const RtGeomSlot& sl = rtGeomSlots_[rtInstanceMesh_[i]];
+        if ((!sl.indexDone || !sl.vertsDone) && i < tlasInstScratch_.size()) tlasInstScratch_[i].mask = 0;
     }
     // Foliage parts point at their slices the same way.
     for (usize i = 0; i < foliageParts_.size(); ++i) {
@@ -3149,19 +3294,23 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
     // Instance table goes up every call.
     if (!uploadRtInstanceTable()) return false;
 
-    if (!vertCopies.empty() || !indexCopies.empty()) {
+    if (!copies.empty()) {
+        rhi::ScopedGpuStat copyStat(ctx, "Voxi RT geometry copies");
         // Explicit state transitions for RHI tracking accuracy.
         ctx.bufferBarrier(rtVerts_,   rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
         ctx.bufferBarrier(rtIndices_, rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
-        for (const Copy& c : vertCopies)  ctx.copyBuffer(rtVerts_, c.src, c.bytes, c.dst, 0);
-        for (const Copy& c : indexCopies) ctx.copyBuffer(rtIndices_, c.src, c.bytes, c.dst, 0);
+        if (oldVerts)   ctx.bufferBarrier(oldVerts,   rhi::ResourceState::Common, rhi::ResourceState::CopySource);
+        if (oldIndices) ctx.bufferBarrier(oldIndices, rhi::ResourceState::Common, rhi::ResourceState::CopySource);
+        for (const Copy& c : copies) ctx.copyBuffer(c.verts ? rtVerts_ : rtIndices_, c.src, c.bytes, c.dst, c.srcOffset);
         ctx.bufferBarrier(rtVerts_,   rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
         ctx.bufferBarrier(rtIndices_, rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
+        if (oldVerts)   ctx.bufferBarrier(oldVerts,   rhi::ResourceState::CopySource, rhi::ResourceState::Common);
+        if (oldIndices) ctx.bufferBarrier(oldIndices, rhi::ResourceState::CopySource, rhi::ResourceState::Common);
     }
 
     rtGeometryReady_ = true;
     rtDynamicVertexSlices_.swap(rtDynamicVertexSlicesPending_);
-    if (key == rtGeometryKey_ && !repack && indexCopies.empty()) return true;
+    if (key == rtGeometryKey_ && !repack && copies.empty()) return true;
     rtGeometryKey_ = key;
     res_->setSrvBuffer(bindings_, 3, rtVerts_, sizeof(rhi::MeshVertex), rtVertUsed_, 0);
     res_->setSrvBuffer(bindings_, 4, rtIndices_, sizeof(u32), rtIndexUsed_, 0);

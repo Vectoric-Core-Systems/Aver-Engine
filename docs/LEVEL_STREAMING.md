@@ -107,9 +107,16 @@ tiles 0.6-6.7 s):
   Evictions (furthest first) get 2 ms per tick; the rest wait for the next tick.
 - Physics mesh shapes are shared across batches (`InstantiateOptions::meshShapes`, owned by
   LevelStreaming) and released when their mesh unloads.
-- Render side (Voxi): the ray-traced geometry table keeps each mesh's range while it stays in the set
-  and appends only new meshes (it re-copied every mesh, ~1 GB on Caldera, whenever one arrived);
-  first-time BLAS builds are capped at 8 MB a frame.
+- Render side (Voxi), all staged over frames:
+  - The ray-traced geometry table keeps each mesh's range while it stays in the set and appends only
+    new meshes (it re-copied every mesh, ~1 GB on Caldera, whenever one arrived). New meshes are copied
+    from the upload heap 16 MB a frame, in pieces; their instances are masked out of every ray until
+    complete. A repack (the table out of room) moves held meshes from the old buffers, GPU to GPU.
+  - First-time BLAS builds are capped at 8 MB a frame. A mesh over 262k triangles (a terrain tile) is
+    traced as BLASes over 131k-triangle ranges of its index buffer (`BlasGeometry::firstIndex/
+    indexCount`), each a first build under that cap, appearing as it is built.
+  - Measured on a Caldera flight: the frame a 2M-triangle tile arrived was 300 ms of GPU (one BLAS,
+    then ~260 ms of copies); now its acceleration-structure work is ~7 ms a frame. Same final image.
 - The editor logs `[Hitch]` lines (frame time, stream time, loaded/evicted/resident, foliage) when a
   frame passes 100 ms or a streaming step 40 ms.
 

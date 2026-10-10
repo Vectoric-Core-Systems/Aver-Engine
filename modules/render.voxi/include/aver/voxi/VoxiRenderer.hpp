@@ -15,6 +15,7 @@
 #include "aver/voxi/NeuRaC.hpp"      // rc_ -- the radiance cache's buffers and resolve pass
 
 #include <unordered_map>
+#include <unordered_set>
 #include "aver/formats/GiCache.hpp"
 
 #include <array>
@@ -490,7 +491,18 @@ private:
     std::vector<u32> rtGeomFirstVertex_, rtGeomFirstIndex_;
     // Each mesh's range in rtVerts_/rtIndices_, kept while it stays in the set; one vertex slice per
     // vertex buffer (LOD/posed parts share their root's). The used counts are the append points.
-    struct RtGeomSlot { rhi::BufferHandle vb = 0, ib = 0; u32 vc = 0, ic = 0, firstVertex = 0, firstIndex = 0; };
+    struct RtGeomSlot {
+        rhi::BufferHandle vb = 0, ib = 0; u32 vc = 0, ic = 0, firstVertex = 0, firstIndex = 0;
+        bool indexDone = false, vertsDone = false;   // copied in; until both, its instances are masked out
+    };
+    // Uploads into rtVerts_/rtIndices_ still to finish, copied in pieces within kRtGeomCopyBytesPerFrame:
+    // a terrain tile's ~200 MB read from the upload heap was one ~260 ms frame.
+    struct RtGeomCopy {
+        bool verts; rhi::MeshHandle mesh; u64 sliceKey; rhi::BufferHandle src;
+        u64 srcOffset, dst, bytes, done;
+    };
+    std::vector<RtGeomCopy> rtGeomPending_;
+    static constexpr u64 kRtGeomCopyBytesPerFrame = 16ull << 20;
     std::unordered_map<rhi::MeshHandle, RtGeomSlot> rtGeomSlots_;
     u32 rtVertUsed_ = 0, rtIndexUsed_ = 0;
 
@@ -1027,6 +1039,14 @@ private:
     // builds near 10 ms a frame.
     static constexpr u64 kBlasBuildBytesPerFrame = 8ull << 20;
     bool blasBuildsDeferred_ = false;   // some draw's first BLAS build waits for the next frame
+    // Meshes past 2 * kRtChunkTriangles are traced as BLASes over index ranges of kRtChunkTriangles,
+    // built a few a frame (rtChunksFor). rtUnchunked_: meshes already found small enough.
+    static constexpr u32 kRtChunkTriangles = 131072;
+    struct RtChunks { std::vector<rhi::BlasHandle> blas; std::vector<u32> firstIndex, indexCount; };
+    std::unordered_map<rhi::MeshHandle, RtChunks> rtChunks_;
+    std::unordered_set<rhi::MeshHandle> rtUnchunked_;
+    RtChunks* rtChunksFor(rhi::MeshHandle mesh);
+    std::vector<u32> rtInstanceIndexOffset_;   // per RT instance: its chunk's first index (0 = whole mesh)
     bool blasDeferLogged_ = false;
 
     // ---- the GI derived-data cache ----

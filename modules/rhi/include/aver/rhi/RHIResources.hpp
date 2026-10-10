@@ -409,6 +409,9 @@ struct BlasGeometry {
     MeshHandle mesh = 0;
     // OPAQUE geometry flag or none, per geometry.
     bool opaque = true;
+    // A range of the mesh's index buffer (indexCount 0 = all of it). Primitive indices a ray reports
+    // count from firstIndex / 3, so a huge mesh can be built as several BLASes over frames.
+    u32 firstIndex = 0, indexCount = 0;
 };
 
 // ---------------------------------------------------------------- resource factory

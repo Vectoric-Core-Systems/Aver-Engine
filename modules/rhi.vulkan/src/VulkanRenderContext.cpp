@@ -996,7 +996,11 @@ bool VulkanRenderContext::recordBlasBuildMulti(RhiBlas& b) {
         if (h == 0 || h > dev_->meshes_.size() || !dev_->meshes_[h - 1].alive) return false;
         geoms[i] = vkMultiBlasGeometry(dev_->meshes_[h - 1], b.geometries[i].opaque);
         ranges[i] = VkAccelerationStructureBuildRangeInfoKHR{};
-        ranges[i].primitiveCount = dev_->meshes_[h - 1].indexCount / 3;
+        const u32 ic = dev_->meshes_[h - 1].indexCount;
+        const u32 first = std::min(b.geometries[i].firstIndex, ic);
+        const u32 count = b.geometries[i].indexCount ? std::min(b.geometries[i].indexCount, ic - first) : ic - first;
+        ranges[i].primitiveOffset = first * static_cast<u32>(sizeof(u32));   // bytes into the index data
+        ranges[i].primitiveCount = count / 3;
     }
     VkCommandBuffer cb = cmd();
     VkBufferDeviceAddressInfo scratchInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};

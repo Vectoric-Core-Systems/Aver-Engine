@@ -2813,7 +2813,14 @@ BlasHandle VulkanResourceFactory::createBlasMulti(const BlasGeometry* geometries
             return 0;
         }
         geoms[i] = vkMultiBlasGeometry(dev_->meshes_[h - 1], geometries[i].opaque);
-        primCounts[i] = dev_->meshes_[h - 1].indexCount / 3;
+        const u32 ic = dev_->meshes_[h - 1].indexCount;
+        if (geometries[i].firstIndex >= ic) {
+            AVER_ERROR("[RHI.Vulkan] createBlasMulti: geometry {} starts past its mesh's indices", i);
+            return 0;
+        }
+        const u32 count = geometries[i].indexCount ? std::min(geometries[i].indexCount, ic - geometries[i].firstIndex)
+                                                    : ic - geometries[i].firstIndex;
+        primCounts[i] = count / 3;
     }
 
     const VulkanApi& api = dev_->api();
