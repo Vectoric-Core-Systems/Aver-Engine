@@ -16,6 +16,7 @@
 // reflectTableSlotKinds() below, and its own comment for the descriptorLayout() smuggling trick.
 #include "VulkanCommon.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
@@ -920,6 +921,14 @@ bool createBufferCommitted(VulkanDevice& dev, VkDeviceSize bytes, VkBufferUsageF
     ai.allocationSize = req.size;
     ai.memoryTypeIndex = typeIndex;
     if (!vkOk(api.AllocateMemory(device, &ai, nullptr, &outMemory), debugName ? debugName : "rhi buffer memory")) {
+        static std::atomic<int> told{0};
+        if (told.fetch_add(1) < 8) {
+            const VideoMemoryInfo vm = dev.videoMemory();
+            AVER_WARN("[RHI.Vulkan] allocation of {:.1f} MiB (type {}, heap {}) refused: local {} of {} MiB, "
+                      "non-local {} of {} MiB", static_cast<f64>(req.size) / (1024.0 * 1024.0), typeIndex,
+                      dev.memoryProperties().memoryTypes[typeIndex].heapIndex, vm.localUsageBytes >> 20,
+                      vm.localBudgetBytes >> 20, vm.nonLocalUsageBytes >> 20, vm.nonLocalBudgetBytes >> 20);
+        }
         api.DestroyBuffer(device, outBuffer, nullptr);
         outBuffer = VK_NULL_HANDLE;
         return false;
@@ -1113,6 +1122,7 @@ VulkanResourceFactory::~VulkanResourceFactory() {
         destroyBufferCommitted(*dev_, t.asBuffer, t.asMemory);
         destroyBufferCommitted(*dev_, t.scratchBuffer, t.scratchMemory);
         for (u32 i = 0; i < kFrameCount; ++i) destroyBufferCommitted(*dev_, t.instanceBuffers[i], t.instanceMemory[i]);
+        destroyBufferCommitted(*dev_, t.staticStaging, t.staticStagingMemory);   // a prefix never built
     }
     tlases_.clear();
 
@@ -3271,9 +3281,13 @@ void VulkanResourceFactory::destroyBlas(BlasHandle h) {
         destroyBufferCommitted(*dev_, asBuf, asMem);
         destroyBufferCommitted(*dev_, scratchBuf, scratchMem);
     });
+    // The memory handles too: the destructor frees what each record still names, and a stale
+    // asMemory freed a second time there was the AMD driver's fail-fast on exit after streaming.
     b.as = VK_NULL_HANDLE;
     b.asBuffer = VK_NULL_HANDLE;
+    b.asMemory = VK_NULL_HANDLE;
     b.scratchBuffer = VK_NULL_HANDLE;
+    b.scratchMemory = VK_NULL_HANDLE;
     b.mesh = 0;
     b.built = false;
     b.allowUpdate = false;
