@@ -109,11 +109,11 @@ float4 AverSrTaaResolvePS(AverSrTaaVSOut i) : SV_TARGET {
     // Clip toward the box centre: history this frame's neighbourhood cannot explain (a disocclusion,
     // a moving shadow) is pulled to the box edge instead of ghosting.
     const float3 hYc = averTaaToYCoCg(history);
-    const float3 centre = 0.5 * (boxMin + boxMax);
-    const float3 toH = hYc - centre;
+    const float3 boxCentre = 0.5 * (boxMin + boxMax);
+    const float3 toH = hYc - boxCentre;
     const float3 ext = max((boxMax - boxMin) * 0.5, 1e-5);
     const float  t = max(abs(toH.x) / ext.x, max(abs(toH.y) / ext.y, abs(toH.z) / ext.z));
-    history = averTaaFromYCoCg(t > 1.0 ? centre + toH / t : hYc);
+    history = averTaaFromYCoCg(t > 1.0 ? boxCentre + toH / t : hYc);
 
     // Up to 10% new per frame when still, more while moving, scaled by how close this frame's
     // nearest sample is to the pixel. The floor rises with motion (3% still, 12% from 4 scene pixels a
