@@ -13,6 +13,7 @@
 #  endif
 
 #  include <algorithm>
+#  include <chrono>
 #  include <filesystem>
 #  include <set>
 #  include <unordered_set>
@@ -192,12 +193,24 @@ void SandboxApp::tickLevelStreaming(f32 dt) {
         }
         streamPlayWas_ = playing;
     }
+    const auto t0 = std::chrono::steady_clock::now();
     level_.tickStreaming(viewers);
+    const auto t1 = std::chrono::steady_clock::now();
 #  if AVER_MODULE_VOXI
+    const u32 rebuilds = levelFoliage_.rebuilds();
     if (voxiAttached_) levelFoliage_.update(camPos_, dt);
+    const bool foliageRebuilt = levelFoliage_.rebuilds() != rebuilds;
 #  else
-    (void)dt;
+    const bool foliageRebuilt = false;
 #  endif
+    const auto t2 = std::chrono::steady_clock::now();
+    const f64 streamMs = std::chrono::duration<f64, std::milli>(t1 - t0).count();
+    const f64 foliageMs = std::chrono::duration<f64, std::milli>(t2 - t1).count();
+    // A long frame, or a streaming step past its budget: what streaming did in it (dt is the last frame's).
+    if (ls.active() && (dt > 0.1f || streamMs > 40.0 || foliageMs > 8.0))
+        AVER_INFO("[Hitch] frame {:.0f} ms | level stream {:.1f} ms ({} loaded, {} evicted, {} resident) | foliage {:.1f} ms{}",
+                  dt * 1000.0f, streamMs, ls.lastLoaded(), ls.lastEvicted(), ls.residentRoots(), foliageMs,
+                  foliageRebuilt ? " (rebuilt)" : "");
 }
 
 // Before a save: resident records take their entity's state, and every record (resident or not) is

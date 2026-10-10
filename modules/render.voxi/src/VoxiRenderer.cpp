@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstring>
 #include <string>
+#include <unordered_set>
 
 // Voxi's GPU side: resources, passes and pipelines, expressed only in terms of the generic RHI.
 namespace aver::voxi {
@@ -3015,31 +3016,107 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
         key *= 1099511628211ull;
     }
 
-    rtGeomFirstVertex_.clear();
-    rtGeomFirstIndex_.clear();
-    rtGeomCopiesVerts_.clear();
-    rtGeomVertSlice_.clear();
-    // Rebuilt alongside rtGeomFirstVertex_/rtGeomCopiesVerts_, swapped in only when this returns true.
-    rtDynamicVertexSlices_.clear();
+    // Persistent slots: a mesh keeps its range while it stays in the set, so a streamed-in mesh copies
+    // only itself. Ranges of meshes that left are reclaimed by a full repack when the buffers run out.
+    struct Geo { rhi::BufferHandle vb = 0, ib = 0; u32 vc = 0, ic = 0; };
+    std::vector<Geo> geo(rtGeomMeshes_.size());
+    for (usize m = 0; m < rtGeomMeshes_.size(); ++m)
+        if (!dev_->meshGeometry(rtGeomMeshes_[m], &geo[m].vb, &geo[m].ib, &geo[m].vc, &geo[m].ic)) return false;
+    auto sliceKeyOf = [](const Geo& g) { return (static_cast<u64>(g.vb) << 32) | g.vc; };   // both u32: exact
+    std::vector<u8> kept(rtGeomMeshes_.size(), 0);
+    for (usize m = 0; m < rtGeomMeshes_.size(); ++m) {
+        const auto it = rtGeomSlots_.find(rtGeomMeshes_[m]);
+        kept[m] = rtGeometryReady_ && it != rtGeomSlots_.end() && it->second.vb == geo[m].vb &&
+                  it->second.ib == geo[m].ib && it->second.vc == geo[m].vc && it->second.ic == geo[m].ic;
+    }
+
+    // Shared vertices (createMeshSharingVertices, createPosedPartMesh) name one slice: kept slices first.
+    std::unordered_map<u64, u32> slice;
+    for (usize m = 0; m < rtGeomMeshes_.size(); ++m)
+        if (kept[m]) slice.try_emplace(sliceKeyOf(geo[m]), rtGeomSlots_[rtGeomMeshes_[m]].firstVertex);
+    u64 needVerts = 0, needIndices = 0;
+    {
+        std::unordered_set<u64> newSlices;
+        for (usize m = 0; m < rtGeomMeshes_.size(); ++m) {
+            if (kept[m]) continue;
+            needIndices += geo[m].ic;
+            if (!slice.count(sliceKeyOf(geo[m])) && newSlices.insert(sliceKeyOf(geo[m])).second) needVerts += geo[m].vc;
+        }
+    }
+    const bool repack = !rtGeometryReady_ || u64(rtVertUsed_) + needVerts > rtVertCapacity_ ||
+                        u64(rtIndexUsed_) + needIndices > rtIndexCapacity_;
+    if (repack) {
+        u64 totalVerts = 0, totalIndices = 0;
+        std::unordered_set<u64> seen;
+        for (usize m = 0; m < rtGeomMeshes_.size(); ++m) {
+            totalIndices += geo[m].ic;
+            if (seen.insert(sliceKeyOf(geo[m])).second) totalVerts += geo[m].vc;
+        }
+        if (totalVerts == 0 || totalIndices == 0) return false;
+        // Headroom, so the next streamed meshes append instead of repacking.
+        auto grow = [](u64 n) { return std::min<u64>(n + std::max<u64>(n / 4, 1ull << 20), 0xFFFFFFFFull); };
+        if (totalVerts > 0xFFFFFFFFull || totalIndices > 0xFFFFFFFFull) return false;
+        if (rtVertCapacity_ < totalVerts) {
+            if (rtVerts_) res_->destroyBuffer(rtVerts_);
+            const u64 cap = grow(totalVerts);
+            rhi::BufferDesc d;
+            d.bytes = cap * sizeof(rhi::MeshVertex);
+            d.kind  = rhi::BufferKind::Default;
+            d.debugName = "rt vertices";
+            rtVerts_ = res_->createBuffer(d);
+            rtVertCapacity_ = rtVerts_ ? static_cast<u32>(cap) : 0;
+        }
+        if (rtIndexCapacity_ < totalIndices) {
+            if (rtIndices_) res_->destroyBuffer(rtIndices_);
+            const u64 cap = grow(totalIndices);
+            rhi::BufferDesc d;
+            d.bytes = cap * sizeof(u32);
+            d.kind  = rhi::BufferKind::Default;
+            d.debugName = "rt indices";
+            rtIndices_ = res_->createBuffer(d);
+            rtIndexCapacity_ = rtIndices_ ? static_cast<u32>(cap) : 0;
+        }
+        rtGeomSlots_.clear();
+        rtVertUsed_ = rtIndexUsed_ = 0;
+        rtGeometryReady_ = false;
+        if (!rtVerts_ || !rtIndices_) return false;
+        slice.clear();
+        std::fill(kept.begin(), kept.end(), u8(0));
+    } else {
+        for (auto it = rtGeomSlots_.begin(); it != rtGeomSlots_.end();)
+            it = std::binary_search(rtGeomMeshes_.begin(), rtGeomMeshes_.end(), it->first) ? std::next(it)
+                                                                                           : rtGeomSlots_.erase(it);
+    }
+
+    // New meshes append; only they are copied. Not ready until the copies are recorded.
+    rtGeometryReady_ = false;
+    struct Copy { rhi::BufferHandle src; u64 bytes, dst; };
+    std::vector<Copy> vertCopies, indexCopies;
+    for (usize m = 0; m < rtGeomMeshes_.size(); ++m) {
+        if (kept[m]) continue;
+        const Geo& g = geo[m];
+        const auto [sit, isNew] = slice.try_emplace(sliceKeyOf(g), rtVertUsed_);
+        if (isNew) {
+            // Compute-written vertices are filled every frame by refreshDynamicVertexSlices, not here.
+            if (!dev_->meshVertexBuffer(rtGeomMeshes_[m]))
+                vertCopies.push_back({g.vb, u64(g.vc) * sizeof(rhi::MeshVertex), u64(rtVertUsed_) * sizeof(rhi::MeshVertex)});
+            rtVertUsed_ += g.vc;
+        }
+        indexCopies.push_back({g.ib, u64(g.ic) * sizeof(u32), u64(rtIndexUsed_) * sizeof(u32)});
+        rtGeomSlots_[rtGeomMeshes_[m]] = RtGeomSlot{g.vb, g.ib, g.vc, g.ic, sit->second, rtIndexUsed_};
+        rtIndexUsed_ += g.ic;
+    }
+
+    rtGeomFirstVertex_.resize(rtGeomMeshes_.size());
+    rtGeomFirstIndex_.resize(rtGeomMeshes_.size());
     rtDynamicVertexSlicesPending_.clear();
-    rtGeomFirstVertex_.reserve(rtGeomMeshes_.size());
-    rtGeomFirstIndex_.reserve(rtGeomMeshes_.size());
-    rtGeomCopiesVerts_.reserve(rtGeomMeshes_.size());
-    u32 totalVerts = 0, totalIndices = 0;
-    for (rhi::MeshHandle h : rtGeomMeshes_) {
-        rhi::BufferHandle vb = 0, ib = 0;
-        u32 vc = 0, ic = 0;
-        if (!dev_->meshGeometry(h, &vb, &ib, &vc, &ic)) return false;
-        // Shared vertices: createMeshSharingVertices and createPosedPartMesh hand out handles naming the same vertex buffer.
-        const u64 sliceKey = (static_cast<u64>(vb) << 32) | vc;   // both u32: exact, no collisions
-        const auto [sit, fresh] = rtGeomVertSlice_.try_emplace(sliceKey, totalVerts);
-        rtGeomFirstVertex_.push_back(sit->second);
-        rtGeomFirstIndex_.push_back(totalIndices);
-        rtGeomCopiesVerts_.push_back(fresh ? 1u : 0u);
-        // Compute-written mesh slice: record for refreshDynamicVertexSlices to re-copy every frame.
-        if (fresh && dev_->meshVertexBuffer(h)) rtDynamicVertexSlicesPending_.push_back({vb, vc, sit->second});
-        if (fresh) totalVerts += vc;
-        totalIndices += ic;
+    std::unordered_set<u64> dynSeen;
+    for (usize m = 0; m < rtGeomMeshes_.size(); ++m) {
+        const RtGeomSlot& sl = rtGeomSlots_[rtGeomMeshes_[m]];
+        rtGeomFirstVertex_[m] = sl.firstVertex;
+        rtGeomFirstIndex_[m] = sl.firstIndex;
+        if (dev_->meshVertexBuffer(rtGeomMeshes_[m]) && dynSeen.insert(sliceKeyOf(geo[m])).second)
+            rtDynamicVertexSlicesPending_.push_back({geo[m].vb, geo[m].vc, sl.firstVertex});
     }
 
     // Every instance points at its mesh's slice. Rewritten every frame as instance list changes.
@@ -3058,70 +3135,32 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
         foliagePartData_[i].firstVertex = rtGeomFirstVertex_[slot];
         foliagePartData_[i].firstIndex  = rtGeomFirstIndex_[slot];
     }
-    if (totalVerts == 0 || totalIndices == 0) return false;
+    if (rtVertUsed_ == 0 || rtIndexUsed_ == 0) return false;
 
     // Instance table goes up every call.
     if (!uploadRtInstanceTable()) return false;
 
-    if (key == rtGeometryKey_ && rtGeometryReady_) {
-        // Same set, same layout as GPU -- pending slices are valid.
-        rtDynamicVertexSlices_.swap(rtDynamicVertexSlicesPending_);
-        return true;
+    if (!vertCopies.empty() || !indexCopies.empty()) {
+        // Explicit state transitions for RHI tracking accuracy.
+        ctx.bufferBarrier(rtVerts_,   rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
+        ctx.bufferBarrier(rtIndices_, rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
+        for (const Copy& c : vertCopies)  ctx.copyBuffer(rtVerts_, c.src, c.bytes, c.dst, 0);
+        for (const Copy& c : indexCopies) ctx.copyBuffer(rtIndices_, c.src, c.bytes, c.dst, 0);
+        ctx.bufferBarrier(rtVerts_,   rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
+        ctx.bufferBarrier(rtIndices_, rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
     }
 
-    // Geometry buffers. Default-heap: written once, read by every reflection ray.
-    if (rtVertCapacity_ < totalVerts) {
-        if (rtVerts_) res_->destroyBuffer(rtVerts_);
-        rhi::BufferDesc d;
-        d.bytes = static_cast<u64>(totalVerts) * sizeof(rhi::MeshVertex);
-        d.kind  = rhi::BufferKind::Default;
-        d.debugName = "rt vertices";
-        rtVerts_ = res_->createBuffer(d);
-        rtVertCapacity_ = rtVerts_ ? totalVerts : 0;
-    }
-    if (rtIndexCapacity_ < totalIndices) {
-        if (rtIndices_) res_->destroyBuffer(rtIndices_);
-        rhi::BufferDesc d;
-        d.bytes = static_cast<u64>(totalIndices) * sizeof(u32);
-        d.kind  = rhi::BufferKind::Default;
-        d.debugName = "rt indices";
-        rtIndices_ = res_->createBuffer(d);
-        rtIndexCapacity_ = rtIndices_ ? totalIndices : 0;
-    }
-    if (!rtVerts_ || !rtIndices_) return false;
-
-    // Explicit state transitions for RHI tracking accuracy.
-    ctx.bufferBarrier(rtVerts_,   rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
-    ctx.bufferBarrier(rtIndices_, rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
-    // Two copies per distinct mesh.
-    u32 distinctSlices = 0;
-    for (usize m = 0; m < rtGeomMeshes_.size(); ++m) {
-        rhi::BufferHandle vb = 0, ib = 0;
-        u32 vc = 0, ic = 0;
-        if (!dev_->meshGeometry(rtGeomMeshes_[m], &vb, &ib, &vc, &ic)) return false;
-        if (rtGeomCopiesVerts_[m]) {
-            ++distinctSlices;
-            // Compute-written mesh: filled every frame by refreshDynamicVertexSlices, not here.
-            if (!dev_->meshVertexBuffer(rtGeomMeshes_[m])) {
-                ctx.copyBuffer(rtVerts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
-                               static_cast<u64>(rtGeomFirstVertex_[m]) * sizeof(rhi::MeshVertex), 0);
-            }
-        }
-        ctx.copyBuffer(rtIndices_, ib, static_cast<u64>(ic) * sizeof(u32),
-                       static_cast<u64>(rtGeomFirstIndex_[m]) * sizeof(u32), 0);
-    }
-    ctx.bufferBarrier(rtVerts_,   rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
-    ctx.bufferBarrier(rtIndices_, rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
-
-    rtGeometryKey_ = key;
     rtGeometryReady_ = true;
     rtDynamicVertexSlices_.swap(rtDynamicVertexSlicesPending_);
-    res_->setSrvBuffer(bindings_, 3, rtVerts_, sizeof(rhi::MeshVertex), totalVerts, 0);
-    res_->setSrvBuffer(bindings_, 4, rtIndices_, sizeof(u32), totalIndices, 0);
-    AVER_INFO("[Voxi] ray-traced reflection table: {} instances + {} foliage part(s) over {} distinct "
-              "mesh(es) ({} vertex slice(s)), {} vertices, {} indices",
-              rtInstanceData_.size(), foliageParts_.size(), rtGeomMeshes_.size(), distinctSlices, totalVerts,
-              totalIndices);
+    if (key == rtGeometryKey_ && !repack && indexCopies.empty()) return true;
+    rtGeometryKey_ = key;
+    res_->setSrvBuffer(bindings_, 3, rtVerts_, sizeof(rhi::MeshVertex), rtVertUsed_, 0);
+    res_->setSrvBuffer(bindings_, 4, rtIndices_, sizeof(u32), rtIndexUsed_, 0);
+    if (repack)
+        AVER_INFO("[Voxi] ray-traced reflection table: {} instances + {} foliage part(s) over {} distinct "
+                  "mesh(es), {} vertices, {} indices (room for {} / {})",
+                  rtInstanceData_.size(), foliageParts_.size(), rtGeomMeshes_.size(), rtVertUsed_, rtIndexUsed_,
+                  rtVertCapacity_, rtIndexCapacity_);
     return true;
 }
 

@@ -35,7 +35,7 @@ stays loaded rather than being guessed at.
 
 ```cpp
 struct PlacementStreamSettings { f32 cellCm = 6400, loadCm = 25000, evictCm = 30000;
-                                 u32 loadBudget = 512, evictBudget = 2048; };
+                                 u32 loadBudget = 128, evictBudget = 2048; };
 class PlacementStreamer {
 public:
     // Item i = one ROOT placement (with its descendants); bounds are the subtree's world AABB.
@@ -66,6 +66,9 @@ Meshes under a level's `lazy=` folders are indexed at project open but not uploa
   collision source). `void releaseMesh(rhi::IDevice&, u64 id)`: refcount--; at 0 the GPU mesh and its
   parts are destroyed through the device's deferred-destruction path (never mid-frame on in-flight data).
 - `bool meshLoaded(u64 id) const`. A draw of an unloaded mesh is skipped, never a fallback cube.
+- `void prefetchMesh(u64 id)` / `bool meshReady(u64 id) const`: two worker threads read the `.ocmesh`
+  and its collision disk cache ahead of `acquireMesh`, which then only uploads. The workers touch no
+  engine state; finished reads nobody acquired are dropped oldest first past 512.
 
 ## 4. Foliage
 
@@ -86,6 +89,19 @@ Runtime (GameLevel/GameApp) and editor (Sandbox) share one driver, `game::LevelS
 (Runtime): it owns the PlacementStreamer, the placement->entity map, mesh acquire/release and the
 filtered instantiate of a set of roots (hierarchies whole; same InstantiateOptions as a full load), and
 destroys entities and their bodies on eviction. Hosts call `tick(viewers)` once a frame.
+
+Hitch budget (2026-10-10; before it, every tick that loaded its 128 roots took 150-370 ms on Caldera):
+- A root loads once every mesh it names is read (prefetch above); pinned roots load at once.
+- Loads run nearest first in chunks of 4 within a time budget per tick: 25 ms while the nearest missing
+  root is within a quarter of the load distance (a level opening, a teleport), falling to 4 ms at three
+  quarters, so the far edge fills in a few roots a frame.
+- Physics mesh shapes are shared across batches (`InstantiateOptions::meshShapes`, owned by
+  LevelStreaming) and released when their mesh unloads, instead of one BVH build per mesh per batch.
+- Render side (Voxi): the ray-traced geometry table keeps each mesh's range while it stays in the set
+  and appends only new meshes (it re-copied every mesh, ~1 GB on Caldera, whenever one arrived);
+  first-time BLAS builds are capped at 16 MB a frame.
+- The editor logs `[Hitch]` lines (frame time, stream time, loaded/evicted/resident, foliage) when a
+  frame passes 100 ms or a streaming step 40 ms.
 
 Editor rules (fully editable; sandbox/src/SandboxLevelStream.cpp):
 - Before an entity is evicted its live state is written back into the placement record (transform,

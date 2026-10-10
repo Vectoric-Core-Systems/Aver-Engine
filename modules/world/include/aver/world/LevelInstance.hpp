@@ -23,6 +23,7 @@
 #include "aver/core/Math.hpp"
 #include "aver/world/LevelTransform.hpp"
 
+#include <unordered_map>
 #include <vector>
 
 namespace aver::world {
@@ -179,6 +180,9 @@ struct InstantiateOptions {
     // that names the mesh.
     std::function<bool(u64 meshId, const f32*& outPositions, u32& outVertexCount,
                        const u32*& outIndices, u32& outIndexCount)> localTrianglesFor;
+    // Physics mesh shapes by mesh id, kept by the caller across calls (a streamer's batches) and released
+    // by it; null gives each call its own cache, released at its end.
+    std::unordered_map<u64, i32>* meshShapes = nullptr;
 
     // How far through the placement loop instantiate() is: called with (done, w.placements.size())
     // at least every 256th placement, and once more at the very end with done == total -- even for a

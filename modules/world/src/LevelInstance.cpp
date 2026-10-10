@@ -192,11 +192,12 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
     std::vector<char> movesWithClip(w.placements.size(), 0);
 
 #if AVER_MODULE_PHYSICS
-    // MESH ID -> the shared physics shape built for it by THIS call, or 0 for "already asked and
+    // MESH ID -> the shared physics shape for it (this call's own, or the caller's opt.meshShapes), or 0 for "already asked and
     // Jolt refused" (cached too, so a mesh whose triangles Jolt cannot use is not retried once per
-    // placement that names it). Released once every placement below has made its own body from it --
+    // placement that names it). This call's own are released once every placement below has made its own body from it --
     // see the end of this function -- because a body's own ScaledShape keeps the shape alive by then.
-    std::unordered_map<u64, i32> meshShapeCache;
+    std::unordered_map<u64, i32> localShapes;
+    std::unordered_map<u64, i32>& meshShapeCache = opt.meshShapes ? *opt.meshShapes : localShapes;
     // So a level of many animated placements that cannot be made kinematic logs one warning, not one each.
     bool warnedStaticAnimated = false;
 #endif
@@ -459,7 +460,7 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
     // reference (through the ScaledShape aver_phys_add_mesh_shape_body wraps it in), so this call's
     // own claim on the handle is no longer needed once the loop is done handing them out. A shape
     // this call built but every placement naming it refused (0 in the cache) has nothing to release.
-    for (const auto& [meshId, handle] : meshShapeCache) {
+    for (const auto& [meshId, handle] : localShapes) {
         (void)meshId;
         if (handle) aver_phys_release_mesh_shape(handle);
     }

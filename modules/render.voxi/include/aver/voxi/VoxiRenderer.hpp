@@ -480,7 +480,7 @@ private:
     static constexpr u32 kRtTextureCapacity = 4096;
     rhi::BufferHandle rtInstances_[kRtInstanceRing] = {};
     u32               rtInstanceSlot_ = 0;
-    // Table built from this. Rebuilt only when changed (concatenating every mesh every frame costs more).
+    // Table built from this. Only meshes new to the set are copied.
     u64  rtGeometryKey_ = 0;
     bool rtGeometryReady_ = false;
     std::vector<RtInstance> rtInstanceData_;
@@ -488,9 +488,11 @@ private:
     // Distinct meshes those instances name, sorted, with position in shared table. One per mesh, not per instance.
     std::vector<rhi::MeshHandle> rtGeomMeshes_;
     std::vector<u32> rtGeomFirstVertex_, rtGeomFirstIndex_;
-    // One slice per vertex buffer (LOD/posed part shares root's slice). Non-zero where copy fills.
-    std::vector<u8> rtGeomCopiesVerts_;
-    std::unordered_map<u64, u32> rtGeomVertSlice_;
+    // Each mesh's range in rtVerts_/rtIndices_, kept while it stays in the set; one vertex slice per
+    // vertex buffer (LOD/posed parts share their root's). The used counts are the append points.
+    struct RtGeomSlot { rhi::BufferHandle vb = 0, ib = 0; u32 vc = 0, ic = 0, firstVertex = 0, firstIndex = 0; };
+    std::unordered_map<rhi::MeshHandle, RtGeomSlot> rtGeomSlots_;
+    u32 rtVertUsed_ = 0, rtIndexUsed_ = 0;
 
     // ---- per-frame vertex refresh for compute-skinned slices ----
     struct DynamicVertexSlice {
@@ -1014,8 +1016,9 @@ private:
     // longer still while paging slowed the frame rate; a later rebuild waits one tick for the recreate.
     static constexpr u32 kGiAccumulatorQuietTicks = 60;
     // Per-frame BLAS build budget (structure bytes; scratch is of the same order). See buildAccelerationStructures.
-    // 128 MB: NeonDistrict's first frame at 512 MB was ~0.7 s of builds in one submission.
-    static constexpr u64 kBlasBuildBytesPerFrame = 128ull << 20;
+    // ~1.4 ms per MB (NeonDistrict: 512 MB was ~0.7 s in one submission); 16 MB keeps a streamed level's
+    // builds near 20 ms a frame.
+    static constexpr u64 kBlasBuildBytesPerFrame = 16ull << 20;
     bool blasBuildsDeferred_ = false;   // some draw's first BLAS build waits for the next frame
     bool blasDeferLogged_ = false;
 

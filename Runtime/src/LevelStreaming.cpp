@@ -11,6 +11,7 @@
 #  endif
 
 #  include <algorithm>
+#  include <chrono>
 #  include <cfloat>
 
 namespace aver::game {
@@ -89,6 +90,11 @@ void LevelStreaming::end(scene::World& world) {
     if (!active_) return;
     for (u32 i = 0; i < items_.size(); ++i)
         if (items_[i].loaded) evictItem(world, i);
+    releaseUnusedShapes();
+#  if AVER_MODULE_PHYSICS
+    for (const auto& [mesh, shape] : meshShapes_) if (shape) aver_phys_release_mesh_shape(shape);
+#  endif
+    meshShapes_.clear();
     active_ = false;
     records_.clear();
     items_.clear();
@@ -200,6 +206,7 @@ void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& item
             }
         }
     }
+    opt_.meshShapes = &meshShapes_;
     const world::LevelInstance inst = world::instantiate(sub, opt_);
     std::vector<scene::Entity> loaded;
     std::vector<u32> loadedPlacement;
@@ -257,16 +264,60 @@ void LevelStreaming::rebuildAnimated() {
     for (const auto& [item, list] : animatedByItem_) animated_.insert(animated_.end(), list.begin(), list.end());
 }
 
+void LevelStreaming::releaseUnusedShapes() {
+#  if AVER_MODULE_PHYSICS
+    for (auto it = meshShapes_.begin(); it != meshShapes_.end();) {
+        if (content_->meshLoaded(it->first)) { ++it; continue; }
+        if (it->second) aver_phys_release_mesh_shape(it->second);   // live bodies keep their own reference
+        it = meshShapes_.erase(it);
+    }
+#  endif
+}
+
 void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewers) {
     if (!active_) return;
     std::vector<u32> toLoad, toEvict;
     streamer_.update(viewers, toLoad, toEvict);
+    lastLoaded_ = 0;
+    lastEvicted_ = static_cast<u32>(toEvict.size());
     for (const u32 item : toEvict)
         if (item < items_.size() && items_[item].loaded) evictItem(world, item);
-    std::vector<u32> load;
-    for (const u32 item : toLoad)
-        if (item < items_.size() && !items_[item].loaded) load.push_back(item);
-    if (!load.empty()) loadItems(world, load);
+    if (!toEvict.empty()) releaseUnusedShapes();
+
+    // Pinned roots load now; the rest once their meshes are read.
+    std::vector<u32> now, ready;
+    f32 nearestMissing = FLT_MAX;
+    for (const u32 item : toLoad) {
+        if (item >= items_.size() || items_[item].loaded) continue;
+        if (streamer_.pinned(item)) { now.push_back(item); continue; }
+        bool read = true;
+        for (const u32 pi : items_[item].placements) {
+            if (removed(pi)) continue;
+            content_->prefetchMesh(records_[pi].objectId);
+            read = read && content_->meshReady(records_[pi].objectId);
+        }
+        nearestMissing = std::min(nearestMissing, streamer_.distance(item, viewers));
+        if (read) ready.push_back(item);
+    }
+    if (!now.empty()) {
+        loadItems(world, now);
+        lastLoaded_ += static_cast<u32>(now.size());
+    }
+    if (ready.empty()) return;
+    const f32 loadCm = streamer_.settings().loadCm;
+    const f64 t = std::clamp((static_cast<f64>(nearestMissing) / loadCm - 0.25) / 0.5, 0.0, 1.0);
+    const f64 budgetMs = kNearLoadMs + (kFarLoadMs - kNearLoadMs) * t;
+    const auto start = std::chrono::steady_clock::now();
+    constexpr usize kChunk = 4;
+    std::vector<u32> chunk;
+    for (usize i = 0; i < ready.size(); i += kChunk) {
+        if (i > 0 && std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count() >= budgetMs)
+            break;
+        chunk.assign(ready.begin() + static_cast<std::ptrdiff_t>(i),
+                     ready.begin() + static_cast<std::ptrdiff_t>(std::min(i + kChunk, ready.size())));
+        loadItems(world, chunk);
+        lastLoaded_ += static_cast<u32>(chunk.size());
+    }
 }
 
 const fmt::OcWorldPlacement* LevelStreaming::recordOf(scene::Entity e) const {

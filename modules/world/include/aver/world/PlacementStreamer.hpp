@@ -34,6 +34,10 @@ public:
     void markEvicted(u32 item);
     bool resident(u32 item) const;
     usize residentCount() const { return residents_.size(); }
+    bool pinned(u32 item) const { return item < items_.size() && items_[item].pinned; }
+    // Horizontal distance from the nearest viewer to the item's bounds (0 inside).
+    f32 distance(u32 item, const std::vector<Vec3>& viewers) const { return nearest(items_[item].b, viewers); }
+    const PlacementStreamSettings& settings() const { return s_; }
 
 private:
     struct Item {

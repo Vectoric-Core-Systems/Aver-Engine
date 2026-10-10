@@ -41,7 +41,8 @@ public:
     void end(scene::World& world);
     bool active() const { return active_; }
 
-    // One step: loads and evicts around `viewers` (world cm), within the budgets.
+    // One step: loads and evicts around `viewers` (world cm). Meshes are read on worker threads first;
+    // loads run nearest first within a per-tick time budget, larger while something close is missing.
     void tick(scene::World& world, const std::vector<Vec3>& viewers);
 
     // ---- records (the editor's view) ----
@@ -74,6 +75,9 @@ public:
     usize residentRoots() const { return streamer_.residentCount(); }
     usize rootCount() const { return rootPlacements_.size(); }
     usize residentEntities() const { return placementOf_.size(); }
+    // What the last tick() did: roots loaded and evicted.
+    u32 lastLoaded() const { return lastLoaded_; }
+    u32 lastEvicted() const { return lastEvicted_; }
 
 private:
     struct Item {
@@ -89,8 +93,14 @@ private:
     void evictItem(scene::World& world, u32 item, bool writeBack = true);
     void bindMeshMaterials(u64 meshId);
     void rebuildAnimated();
+    void releaseUnusedShapes();
+
+    // Load time per tick: kNearLoadMs while the nearest missing root is within a quarter of the load
+    // distance, falling to kFarLoadMs at three quarters.
+    static constexpr f64 kNearLoadMs = 25.0, kFarLoadMs = 4.0;
 
     bool active_ = false;
+    u32 lastLoaded_ = 0, lastEvicted_ = 0;
     GameContent* content_ = nullptr;
     rhi::IDevice* device_ = nullptr;
     world::InstantiateOptions opt_;
@@ -106,6 +116,8 @@ private:
     std::unordered_map<u32, std::vector<world::AnimatedBody>> animatedByItem_;
     std::vector<world::AnimatedBody> animated_;
     std::unordered_map<u64, bool> materialsBound_;
+    // Physics shapes by mesh id, shared by every batch; released once the mesh is unloaded.
+    std::unordered_map<u64, i32> meshShapes_;
 };
 
 } // namespace aver::game

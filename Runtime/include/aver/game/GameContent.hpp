@@ -108,6 +108,11 @@ public:
     bool acquireMesh(rhi::IDevice& device, u64 id);
     void releaseMesh(rhi::IDevice& device, u64 id);
     bool meshLoaded(u64 id) const;
+    // Reads a lazy mesh (and its cached collision) on a worker thread so a later acquireMesh does not
+    // touch the disk. No-op for eager, loaded or already-queued meshes.
+    void prefetchMesh(u64 id);
+    // False only while a prefetch of `id` is still reading.
+    bool meshReady(u64 id) const;
     // D3D12Device::destroyMesh frees the mesh's resources immediately, so released meshes' handles wait
     // here. Call once per frame; destroys those released at least 3 frames before `frameIndex`.
     void flushMeshReleases(rhi::IDevice& device, u64 frameIndex);
@@ -225,6 +230,14 @@ private:
 
     // Uploads one .ocmesh and fills every per-mesh table. False (nothing kept) on failure.
     bool loadOneMesh(rhi::IDevice& device, u64 id, const std::string& full, const std::string& rel);
+    bool uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, const std::string& rel);
+
+    // prefetchMesh's workers and finished reads. takePrefetch: 1 read (md/collision filled), 0 the read
+    // failed (why filled), -1 nothing finished for `id`.
+    struct MeshPrefetch;
+    std::shared_ptr<MeshPrefetch> prefetch_;
+    int takePrefetch(u64 id, fmt::OcMeshData& md, std::unique_ptr<CollisionMesh>& collision, std::string& why);
+    void dropPrefetches();
     // Erases every table entry for `id` and queues its GPU handles for flushMeshReleases.
     void unloadToPending(u64 id);
 
