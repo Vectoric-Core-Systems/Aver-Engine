@@ -269,7 +269,8 @@ UVs and a transform.
   with their subtrees (collision, occlusion and lighting volumes in game data such as Activision's Caldera).
 - **`--material-map <file>`**: a stage with no materials but named `familyName = materialBind` subsets
   (Caldera) keeps each subset as its own submesh; each line `<substring> <material stem>` assigns the
-  first matching stem to subsets whose name contains it (`*` matches all, stem `-` drops the faces), and
+  first matching stem to subsets whose name contains it (`*` matches all; stem `-` drops the faces and
+  matches whole `_`-separated name tokens only, and every mesh it empties is logged), and
   the mesh is regrouped to one submesh per material (`groupSubmeshesByMaterial`) before clustering.
 
 `AverAssetC convert <root.usda> --out-dir … --content-dir …` takes `--instances-as foliage|entities`
