@@ -7,7 +7,8 @@
 // compared as a multiset of quantised (--tol, default 0.01 cm) corner positions, sorted per triangle. Reported
 // besides: vertex/triangle counts, submeshes (name, slot, triangles), material slots, skinning, LOD ladder
 // (triangles per level), meshlet counts, bounds, flags and builder version.
-// Exit code: 0 same meaning, 1 different, 2 a file did not load.
+// Exit code (core/ErrorCodes.hpp): Ok same meaning, Failed different, Usage a file did not load.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/formats/OcMesh.hpp"
 
 #include <algorithm>
@@ -69,7 +70,7 @@ void cmpStr(const char* what, const std::string& a, const std::string& b) {
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr, "usage: OcmeshDiff <a.ocmesh> <b.ocmesh> [--tol <cm>]\n");
-        return 2;
+        return exitCode(ExitCode::Usage);
     }
     f64 tol = 0.01;
     for (int i = 3; i + 1 < argc; ++i)
@@ -77,8 +78,8 @@ int main(int argc, char** argv) {
 
     OcMeshData a, b;
     std::string why;
-    if (!loadOcMesh(argv[1], a, &why)) { std::fprintf(stderr, "%s: %s\n", argv[1], why.c_str()); return 2; }
-    if (!loadOcMesh(argv[2], b, &why)) { std::fprintf(stderr, "%s: %s\n", argv[2], why.c_str()); return 2; }
+    if (!loadOcMesh(argv[1], a, &why)) { std::fprintf(stderr, "%s: %s\n", argv[1], why.c_str()); return exitCode(ExitCode::Usage); }
+    if (!loadOcMesh(argv[2], b, &why)) { std::fprintf(stderr, "%s: %s\n", argv[2], why.c_str()); return exitCode(ExitCode::Usage); }
 
     std::printf("a: %s\nb: %s\n", argv[1], argv[2]);
     cmp("vertices", a.positions.size() / 3, b.positions.size() / 3);
@@ -119,5 +120,5 @@ int main(int argc, char** argv) {
                     onlyB.size(), ta.size(), tb.size());
     }
     std::printf(differences ? "DIFFERENT (%d)\n" : "SAME MEANING\n", differences);
-    return differences ? 1 : 0;
+    return exitCode(differences ? ExitCode::Failed : ExitCode::Ok);
 }

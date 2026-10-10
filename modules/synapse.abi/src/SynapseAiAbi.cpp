@@ -1,5 +1,6 @@
 #include "aver/synapse/synapse_ai_abi.h"
 
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/scene/World.hpp"
 #include "aver/synapse/SynapseAi.hpp"
 
@@ -15,7 +16,27 @@ SynapseAi& inst() {
 
 scene::World& world() { return scene::World::instance(); }
 
-bool live(int32_t e) { return e > 0 && world().valid(static_cast<scene::Entity>(e)); }
+// The reason channel (aver_syn_last_error): fail() records and returns 0, ok() records Ok and returns 1.
+int32_t fail(AbiError e) {
+    setAbiError(e);
+    return 0;
+}
+int32_t ok() {
+    setAbiError(AbiError::Ok);
+    return 1;
+}
+// A valid question with no answer yet is not an error: it records Ok so a stale reason cannot survive.
+int32_t none() {
+    setAbiError(AbiError::Ok);
+    return 0;
+}
+
+// Records BadHandle when false.
+bool live(int32_t e) {
+    if (e > 0 && world().valid(static_cast<scene::Entity>(e))) return true;
+    setAbiError(AbiError::BadHandle);
+    return false;
+}
 scene::Entity ent(int32_t e) { return static_cast<scene::Entity>(e); }
 
 struct CallbackSink final : IHearingMemorySink {
@@ -36,17 +57,25 @@ CallbackSink& sink() {
     return s;
 }
 
-CSynapseCrowd* crowdOf(int32_t e) {
-    return live(e) ? world().component<CSynapseCrowd>(ent(e), inst().crowd().componentType()) : nullptr;
+// Null records why: a dead entity or a missing component is BadHandle, an unregistered type NotInitialised.
+template <class T>
+T* componentOf(int32_t e, u32 type) {
+    if (!live(e)) return nullptr;
+    if (type == 0) {
+        setAbiError(AbiError::NotInitialised);
+        return nullptr;
+    }
+    T* c = world().component<T>(ent(e), type);
+    if (!c) setAbiError(AbiError::BadHandle);
+    return c;
 }
 
-CSynapseHearing* hearingOf(int32_t e) {
-    return live(e) ? world().component<CSynapseHearing>(ent(e), inst().hearing().componentType()) : nullptr;
-}
+CSynapseCrowd* crowdOf(int32_t e) { return componentOf<CSynapseCrowd>(e, inst().crowd().componentType()); }
+CSynapseHearing* hearingOf(int32_t e) { return componentOf<CSynapseHearing>(e, inst().hearing().componentType()); }
+CSynapseSquad* squadOf(int32_t e) { return componentOf<CSynapseSquad>(e, inst().tactics().squadType()); }
 
-CSynapseSquad* squadOf(int32_t e) {
-    return live(e) ? world().component<CSynapseSquad>(ent(e), inst().tactics().squadType()) : nullptr;
-}
+// A live entity whose attach returned null: the type was never registered, or the add failed.
+int32_t attachFailed(u32 type) { return fail(type == 0 ? AbiError::NotInitialised : AbiError::AllocationFailed); }
 
 } // namespace
 
@@ -56,7 +85,7 @@ extern "C" {
 
 int32_t aver_syn_ai_register(void) {
     inst().registerComponents(world());
-    return 1;
+    return ok();
 }
 
 void aver_syn_ai_tick(const void* nav, float dt) {
@@ -71,10 +100,14 @@ void* aver_syn_ai_instance(void) { return &inst(); }
 
 void aver_syn_ai_reset(void) { inst().reset(); }
 
+int32_t aver_syn_last_error(void) { return static_cast<int32_t>(lastAbiError()); }
+
 // ---- crowd ----------------------------------------------------------------------------------------
 
 int32_t aver_syn_crowd_attach(int32_t entity) {
-    return live(entity) && inst().crowd().attach(world(), ent(entity)) ? 1 : 0;
+    if (!live(entity)) return 0;
+    if (!inst().crowd().attach(world(), ent(entity))) return attachFailed(inst().crowd().componentType());
+    return ok();
 }
 
 int32_t aver_syn_crowd_configure(int32_t entity, float radiusCm, float maxSpeedCm, float maxAccelCm,
@@ -85,40 +118,42 @@ int32_t aver_syn_crowd_configure(int32_t entity, float radiusCm, float maxSpeedC
     c->maxSpeedCm = maxSpeedCm;
     c->maxAccelCm = maxAccelCm;
     c->priority = priority;
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_crowd_set_mode(int32_t entity, int32_t mode, float x, float y, float z) {
     CSynapseCrowd* c = crowdOf(entity);
-    if (!c || mode < 0 || mode > AVER_SYN_MODE_HOLD) return 0;
+    if (!c) return 0;
+    if (mode < 0 || mode > AVER_SYN_MODE_HOLD) return fail(AbiError::InvalidArgument);
     c->mode = mode;
     c->steerXCm = x;
     c->steerYCm = y;
     c->steerZCm = z;
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_crowd_set_enabled(int32_t entity, int32_t enabled) {
     CSynapseCrowd* c = crowdOf(entity);
     if (!c) return 0;
     c->enabled = enabled ? 1 : 0;
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_crowd_velocity(int32_t entity, float* vx, float* vy, float* speed) {
     const CSynapseCrowd* c = crowdOf(entity);
-    if (!c || !c->active) return 0;
+    if (!c) return 0;
+    if (!c->active) return none();
     if (vx) *vx = c->velXCm;
     if (vy) *vy = c->velYCm;
     if (speed) *speed = c->speedCm;
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_crowd_set_backend(int32_t backend) {
-    if (backend != AVER_SYN_BACKEND_CPU && backend != AVER_SYN_BACKEND_GPU) return 0;
+    if (backend != AVER_SYN_BACKEND_CPU && backend != AVER_SYN_BACKEND_GPU) return fail(AbiError::InvalidArgument);
     CrowdSystem& c = inst().crowd();
     c.sim().setBackendKind(backend == AVER_SYN_BACKEND_GPU ? CrowdBackendKind::Gpu : CrowdBackendKind::Cpu);
-    return 1;
+    return ok();   // GPU with no backend installed falls back to CPU: not an error
 }
 
 int32_t aver_syn_crowd_backend(void) {
@@ -132,9 +167,9 @@ void aver_syn_crowd_set_gpu_backend(void* icrowdBackend) {
 }
 
 int32_t aver_syn_crowd_set_max_agents(int32_t maxAgents) {
-    if (maxAgents < 0) return 0;
+    if (maxAgents < 0) return fail(AbiError::InvalidArgument);
     inst().crowd().setMaxAgents(static_cast<u32>(maxAgents));
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_crowd_max_agents(void) { return static_cast<int32_t>(inst().crowd().maxAgents()); }
@@ -142,15 +177,17 @@ int32_t aver_syn_crowd_agent_count(void) { return static_cast<int32_t>(inst().cr
 int32_t aver_syn_crowd_overflow_count(void) { return static_cast<int32_t>(inst().crowd().overflowCount()); }
 
 int32_t aver_syn_crowd_set_drive(int32_t drive) {
-    if (drive != AVER_SYN_DRIVE_ADVISE && drive != AVER_SYN_DRIVE_MOVE) return 0;
+    if (drive != AVER_SYN_DRIVE_ADVISE && drive != AVER_SYN_DRIVE_MOVE) return fail(AbiError::InvalidArgument);
     inst().crowd().setDrive(drive == AVER_SYN_DRIVE_MOVE ? CrowdDrive::Move : CrowdDrive::Advise);
-    return 1;
+    return ok();
 }
 
 // ---- hearing --------------------------------------------------------------------------------------
 
 int32_t aver_syn_hearing_attach(int32_t entity) {
-    return live(entity) && inst().hearing().attach(world(), ent(entity)) ? 1 : 0;
+    if (!live(entity)) return 0;
+    if (!inst().hearing().attach(world(), ent(entity))) return attachFailed(inst().hearing().componentType());
+    return ok();
 }
 
 int32_t aver_syn_hearing_configure(int32_t entity, float sensitivity, float maxRangeCm, float memorySec) {
@@ -159,7 +196,7 @@ int32_t aver_syn_hearing_configure(int32_t entity, float sensitivity, float maxR
     h->sensitivity = sensitivity;
     h->maxRangeCm = maxRangeCm;
     h->memorySec = memorySec;
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_emit_noise(float x, float y, float z, float loudnessCm, int32_t tag, int32_t sourceEntity) {
@@ -168,13 +205,15 @@ int32_t aver_syn_emit_noise(float x, float y, float z, float loudnessCm, int32_t
     ev.loudnessCm = loudnessCm;
     ev.tag = static_cast<u32>(tag);
     ev.source = sourceEntity > 0 ? static_cast<u32>(sourceEntity) : 0u;
-    return inst().hearing().emit(ev) ? 1 : 0;
+    if (!inst().hearing().emit(ev)) return fail(AbiError::OutOfRange);   // the noise queue is full
+    return ok();
 }
 
 int32_t aver_syn_hearing_get(int32_t entity, float* x, float* y, float* z, float* level, int32_t* tag,
                              float* confidence, float* timeSince) {
     const CSynapseHearing* h = hearingOf(entity);
-    if (!h || !h->hasMemory) return 0;
+    if (!h) return 0;
+    if (!h->hasMemory) return none();
     if (x) *x = h->heardXCm;
     if (y) *y = h->heardYCm;
     if (z) *z = h->heardZCm;
@@ -182,13 +221,13 @@ int32_t aver_syn_hearing_get(int32_t entity, float* x, float* y, float* z, float
     if (tag) *tag = h->heardTag;
     if (confidence) *confidence = h->confidence;
     if (timeSince) *timeSince = h->timeSinceHeardSec;
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_hearing_forget(int32_t entity) {
     if (!live(entity)) return 0;
     inst().hearing().forget(ent(entity));
-    return 1;
+    return ok();
 }
 
 void aver_syn_hearing_set_memory_callback(aver_syn_memory_fn fn, void* user) {
@@ -200,32 +239,34 @@ void aver_syn_hearing_set_memory_callback(aver_syn_memory_fn fn, void* user) {
 // ---- cover ----------------------------------------------------------------------------------------
 
 int32_t aver_syn_cover_add(float x, float y, float dirX, float dirY, int32_t height, float arcHalfAngleDeg) {
-    return static_cast<int32_t>(inst().tactics().covers().addAuthored(
-        V2{x, y}, V2{dirX, dirY}, height ? CoverHeight::High : CoverHeight::Low, arcHalfAngleDeg));
+    const u32 id = inst().tactics().covers().addAuthored(
+        V2{x, y}, V2{dirX, dirY}, height ? CoverHeight::High : CoverHeight::Low, arcHalfAngleDeg);
+    setAbiError(AbiError::Ok);
+    return static_cast<int32_t>(id);
 }
 
 int32_t aver_syn_cover_remove(int32_t coverId) {
-    if (coverId <= 0) return 0;
+    if (coverId <= 0) return fail(AbiError::BadHandle);
     TacticsSystem& t = inst().tactics();
     const u32 id = static_cast<u32>(coverId);
     t.reservations().release(id, t.reservations().ownerOf(id));
-    return t.covers().remove(id) ? 1 : 0;
+    return t.covers().remove(id) ? ok() : fail(AbiError::BadHandle);
 }
 
 int32_t aver_syn_cover_marker_attach(int32_t entity, int32_t height, float arcHalfAngleDeg) {
     if (!live(entity)) return 0;
     CSynapseCoverMarker* m = inst().tactics().attachMarker(world(), ent(entity));
-    if (!m) return 0;
+    if (!m) return attachFailed(inst().tactics().markerType());
     m->height = height ? 1 : 0;
     m->arcHalfAngleDeg = arcHalfAngleDeg;
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_cover_set_auto_generate(int32_t on, float minSpacingCm) {
     CoverGenParams p;
     if (minSpacingCm > 0.0f) p.minSpacingCm = minSpacingCm;
     inst().tactics().setAutoGenerate(on != 0, p);
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_cover_count(void) { return static_cast<int32_t>(inst().tactics().covers().points().size()); }
@@ -238,20 +279,22 @@ int32_t aver_syn_cover_find(int32_t seeker, float tx, float ty, float tz, float 
     if (minThreatDistCm > 0.0f) s.minThreatDistCm = minThreatDistCm;
     s.requireHigh = requireHigh != 0;
     CoverResult r;
-    if (!inst().tactics().findCover(world(), ent(seeker), Vec3{tx, ty, tz}, s, r)) return 0;
+    if (!inst().tactics().findCover(world(), ent(seeker), Vec3{tx, ty, tz}, s, r)) return none();
     if (outX) *outX = r.pos.x;
     if (outY) *outY = r.pos.y;
+    setAbiError(AbiError::Ok);
     return static_cast<int32_t>(r.id);
 }
 
 int32_t aver_syn_cover_release(int32_t seeker) {
-    if (seeker <= 0) return 0;
+    if (seeker <= 0) return fail(AbiError::BadHandle);
     inst().tactics().releaseCover(ent(seeker));
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_cover_is_covered(int32_t seeker, float tx, float ty, float tz) {
-    return live(seeker) && inst().tactics().isCovered(world(), ent(seeker), Vec3{tx, ty, tz}) ? 1 : 0;
+    if (!live(seeker)) return 0;
+    return inst().tactics().isCovered(world(), ent(seeker), Vec3{tx, ty, tz}) ? ok() : none();
 }
 
 // ---- squads ---------------------------------------------------------------------------------------
@@ -259,30 +302,31 @@ int32_t aver_syn_cover_is_covered(int32_t seeker, float tx, float ty, float tz) 
 int32_t aver_syn_squad_attach(int32_t entity, int32_t squadId, float spacingCm) {
     if (!live(entity)) return 0;
     CSynapseSquad* s = inst().tactics().attachSquad(world(), ent(entity));
-    if (!s) return 0;
+    if (!s) return attachFailed(inst().tactics().squadType());
     s->squadId = squadId;
     if (spacingCm > 0.0f) s->spacingCm = spacingCm;
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_squad_set_target(int32_t squadId, float x, float y, float z) {
     inst().tactics().setSquadTarget(squadId, Vec3{x, y, z});
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_squad_clear_target(int32_t squadId) {
     inst().tactics().clearSquadTarget(squadId);
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_squad_slot(int32_t entity, int32_t* role, float* x, float* y, float* z) {
     const CSynapseSquad* s = squadOf(entity);
-    if (!s || !s->hasSlot) return 0;
+    if (!s) return 0;
+    if (!s->hasSlot) return none();
     if (role) *role = s->role;
     if (x) *x = s->slotXCm;
     if (y) *y = s->slotYCm;
     if (z) *z = s->slotZCm;
-    return 1;
+    return ok();
 }
 
 int32_t aver_syn_squad_spacing_push(int32_t entity, float* dx, float* dy) {
@@ -290,7 +334,7 @@ int32_t aver_syn_squad_spacing_push(int32_t entity, float* dx, float* dy) {
     const V2 p = inst().tactics().spacingPush(world(), ent(entity));
     if (dx) *dx = p.x;
     if (dy) *dy = p.y;
-    return 1;
+    return ok();
 }
 
 } // extern "C"

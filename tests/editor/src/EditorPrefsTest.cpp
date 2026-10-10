@@ -12,6 +12,7 @@
 using namespace aver;
 
 static int g_failures = 0;
+static constexpr int kSkip = 77;  // ctest SKIP_RETURN_CODE (root CMakeLists.txt); not a pass
 
 // Records one assertion and logs it.
 static void check(bool cond, const std::string& what) {
@@ -31,7 +32,7 @@ int main() {
 
     if (path.empty()) {
         AVER_WARN("=== SKIPPED: no user data directory on this machine ===");
-        return 0;
+        return kSkip;
     }
     AVER_INFO("  store: {}", path);
 

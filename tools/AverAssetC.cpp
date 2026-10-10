@@ -669,7 +669,7 @@ int runMaterial(int argc, char** argv) {
     }
 
     emitSummary(allInputs, stats, anyFailed ? 1 : 0);
-    return anyFailed ? 1 : 0;
+    return exitCode(anyFailed ? ExitCode::Failed : ExitCode::Ok);
 }
 
 #endif // AVER_HAVE_MATERIAL_COMPILE
@@ -1292,7 +1292,8 @@ int runStream(int argc, char** argv) {
 // see runMaterial's own comment for why it is a separate subcommand rather than another `convert`
 // extension. Every result, and a final summary, are reported as JSON Lines on stdout; AVER_* log
 // lines (always '['-prefixed) may be interleaved and are for human troubleshooting only. Exit 0:
-// everything declared verified. Exit 1: an import or verify failure. Exit 2: bad usage.
+// everything declared verified. Exit 1: an import or verify failure. Exit 2: bad usage (incl.
+// unsupported format or unreadable --material-map).
 int main(int argc, char** argv) {
     static const char* kUsage =
         "usage: AverAssetC convert <input-file> --out-dir <dir> [--base <name>] [--merge] [--lod <ratio>]"
@@ -1574,7 +1575,7 @@ int main(int argc, char** argv) {
         }
 
         emitSummary(input, stats, anyFailed ? 1 : 0);
-        return anyFailed ? 1 : 0;
+        return exitCode(anyFailed ? ExitCode::Failed : ExitCode::Ok);
     }
 
     if (ext == ".obj") {
@@ -1616,7 +1617,7 @@ int main(int argc, char** argv) {
         }
         const bool anyFailed = writeMeshItems(input, outDir, base, items, merge, lodRatio, stats);
         emitSummary(input, stats, anyFailed ? 1 : 0);
-        return anyFailed ? 1 : 0;
+        return exitCode(anyFailed ? ExitCode::Failed : ExitCode::Ok);
     }
 
     if (ext == ".usd" || ext == ".usda" || ext == ".usdc") {
@@ -1678,8 +1679,8 @@ int main(int argc, char** argv) {
             std::vector<MaterialRule> rules;
             if (!loadMaterialMap(materialMapPath, rules)) {
                 emitArtifact(input, {}, "mesh", false, false, "cannot read --material-map " + materialMapPath, stats);
-                emitSummary(input, stats, 1);
-                return exitCode(ExitCode::Failed);
+                emitSummary(input, stats, 2);
+                return exitCode(ExitCode::Usage);
             }
             applyMaterialMap(res.meshes, res.meshNames, rules);
         }
@@ -1745,7 +1746,7 @@ int main(int argc, char** argv) {
                              foliageInstances.empty() ? nullptr : &foliageInstances))
             anyFailed = true;
         emitSummary(input, stats, anyFailed ? 1 : 0);
-        return anyFailed ? 1 : 0;
+        return exitCode(anyFailed ? ExitCode::Failed : ExitCode::Ok);
     }
 
 #if AVER_HAVE_AUDIO_IMPORT
@@ -1784,6 +1785,6 @@ int main(int argc, char** argv) {
 
     AVER_ERROR("unsupported input format: {}", input);
     emitArtifact(input, {}, "unknown", false, false, "unsupported input format", stats);
-    emitSummary(input, stats, 1);
-    return exitCode(ExitCode::Failed);
+    emitSummary(input, stats, 2);
+    return exitCode(ExitCode::Usage);
 }

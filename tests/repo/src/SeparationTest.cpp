@@ -50,6 +50,7 @@ using namespace aver;
 namespace fs = std::filesystem;
 
 static int g_failures = 0;
+static constexpr int kSkip = 77;  // ctest SKIP_RETURN_CODE (root CMakeLists.txt); not a pass
 
 static void check(bool cond, const std::string& what) {
     if (cond) { AVER_INFO("  ok    {}", what); return; }
@@ -558,13 +559,13 @@ static std::string lineTextAt(const std::string& src, size_t pos) {
 int main() {
 #ifndef AVER_REPO_ROOT
     AVER_INFO("SeparationTest: SKIP -- built without AVER_REPO_ROOT");
-    return 0;
+    return kSkip;
 #else
     const fs::path root = AVER_REPO_ROOT;
     std::error_code ec;
     if (!fs::is_directory(root, ec)) {
         AVER_INFO("SeparationTest: SKIP -- {} is not a directory (packaged build?)", root.string());
-        return 0;
+        return kSkip;
     }
     AVER_INFO("scanning {}", root.string());
     const std::vector<std::string> files = walk(root);

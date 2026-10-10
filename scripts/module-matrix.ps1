@@ -111,7 +111,7 @@ $configs = [ordered]@{
 # routinely run from a plain shell with no MSVC environment.
 $cache = Join-Path $repo "build\CMakeCache.txt"
 if (-not (Test-Path $cache)) {
-    Write-Error "No build/CMakeCache.txt. Configure the normal build once first, so this script can reuse its toolchain."
+    Write-Host "[matrix] No build/CMakeCache.txt. Configure the normal build once first, so this script can reuse its toolchain." -ForegroundColor Red; exit 3  # ExitCode.Environment (core/ErrorCodes.hpp)
 }
 function Get-Cached([string] $key) {
     # "^${key}:" and NOT "^$key:". PowerShell parses `$key:` as a DRIVE-QUALIFIED variable -- the
@@ -146,7 +146,7 @@ function Invoke-Native {
 
 $cmake = Join-Path (Split-Path -Parent (Get-Cached "CMAKE_MAKE_PROGRAM")) "..\CMake\bin\cmake.exe"
 if (-not (Test-Path $cmake)) { $cmake = (Get-Command cmake -ErrorAction SilentlyContinue).Source }
-if (-not $cmake) { Write-Error "Could not locate cmake.exe." }
+if (-not $cmake) { Write-Host "[matrix] Could not locate cmake.exe." -ForegroundColor Red; exit 3 }  # ExitCode.Environment
 
 # THE COMPILER NEEDS ITS ENVIRONMENT, not just its path. The cached CMAKE_CXX_COMPILER above is
 # where cl.exe lives; INCLUDE and LIB are what let it find a standard header, and those come from
@@ -161,7 +161,7 @@ if (-not $cmake) { Write-Error "Could not locate cmake.exe." }
 if (-not $env:INCLUDE) {
     $vcvars = "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
     if (-not (Test-Path $vcvars)) {
-        Write-Error "No MSVC environment (INCLUDE is unset) and no vcvars64.bat at $vcvars. Run this from a Developer prompt, or correct the path here."
+        Write-Host "[matrix] No MSVC environment (INCLUDE is unset) and no vcvars64.bat at $vcvars. Run this from a Developer prompt, or correct the path here." -ForegroundColor Red; exit 3  # ExitCode.Environment
     }
     # Import what vcvars sets rather than re-launching this script under cmd: one process, and the
     # variables are then visible to ninja too, which needs them just as much as the configure does.
@@ -175,7 +175,7 @@ if (-not $env:INCLUDE) {
     $vc.Output | ForEach-Object {
         if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] -ErrorAction SilentlyContinue }
     }
-    if (-not $env:INCLUDE) { Write-Error "vcvars64 ran but INCLUDE is still unset; the MSVC environment did not take." }
+    if (-not $env:INCLUDE) { Write-Host "[matrix] vcvars64 ran but INCLUDE is still unset; the MSVC environment did not take." -ForegroundColor Red; exit 3 }  # ExitCode.Environment
     Write-Host "[matrix] MSVC environment imported from vcvars64" -ForegroundColor DarkGray
 }
 $ninja = Get-Cached "CMAKE_MAKE_PROGRAM"
@@ -229,7 +229,7 @@ if (-not $KeepDirs) { Remove-Item -Recurse -Force $BuildRoot -ErrorAction Silent
 
 if ($failed.Count -gt 0) {
     Write-Host "$($failed.Count) of $($results.Count) configurations FAILED" -ForegroundColor Red
-    exit $failed.Count
+    exit 1  # ExitCode.Failed (core/ErrorCodes.hpp); the count is printed above
 }
 Write-Host "all $($results.Count) configurations build" -ForegroundColor Green
 exit 0

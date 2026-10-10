@@ -917,21 +917,25 @@ int main() {
     }
 
     // AbiError is mirrored in C# ONCE PER MODULE that exposes the channel, because each module's
-    // slot is its own (Aver.Core is a static library linked into each ABI DLL). Three copies of one
+    // slot is its own (Aver.Core is a static library linked into each ABI DLL). Five copies of one
     // numbering is exactly the shape this whole suite exists for, so they are compared here rather
-    // than trusted. Derived on both sides: adding a code to all three needs no edit in this file.
+    // than trusted. Derived on both sides: adding a code to all five needs no edit in this file.
     {
-        std::string hpp, phys, scene;
+        std::string hpp, phys, scene, syn, pre;
         const bool ok = readText(root + "modules/core/include/aver/core/ErrorCodes.hpp", hpp) &
                         readText(root + "scripting/csharp/Aver.Physics/Enums.cs", phys) &
-                        readText(root + "scripting/csharp/Aver.Scene/Native.cs", scene);
-        check(ok, "abi errors: can read ErrorCodes.hpp and both C# mirrors");
+                        readText(root + "scripting/csharp/Aver.Scene/Native.cs", scene) &
+                        readText(root + "scripting/csharp/Aver.Synapse/Native.cs", syn) &
+                        readText(root + "scripting/csharp/Aver.Prefab/Native.cs", pre);
+        check(ok, "abi errors: can read ErrorCodes.hpp and every C# mirror");
         if (ok) {
             const std::map<std::string, long long> c = cppEnumValues(hpp, "AbiError");
             check(!c.empty(), "abi errors: AbiError parses");
             const struct { const char* label; const std::string* text; const char* type; } kMirrors[] = {
                 {"Aver.Physics.PhysicsError", &phys,  "PhysicsError"},
                 {"Aver.Scene.SceneError",     &scene, "SceneError"},
+                {"Aver.Synapse.SynapseError", &syn,   "SynapseError"},
+                {"Aver.Prefab.PrefabError",   &pre,   "PrefabError"},
             };
             for (const auto& mi : kMirrors) {
                 const std::map<std::string, long long> m = csMembers(*mi.text, mi.type);

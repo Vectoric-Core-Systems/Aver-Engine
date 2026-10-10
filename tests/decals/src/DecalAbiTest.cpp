@@ -78,8 +78,20 @@ int main() {
     check(aver_decal_active_count() == 0, "clear releases everything");
 
     check(aver_decal_spawn(nullptr) == 0, "a null descriptor spawns nothing");
-    aver_decal_pool_set_capacity(0);
+    check(aver_scene_last_error() == static_cast<int32_t>(AbiError::NullPointer), "and records NullPointer (-2)");
+    check(aver_decal_release(999999) == 0 && aver_scene_last_error() == static_cast<int32_t>(AbiError::BadHandle),
+          "releasing a non-pooled entity records BadHandle (-1)");
+    AverDecalSpawnDesc nan = d;
+    nan.position[0] = std::nanf("");
+    check(aver_decal_spawn(&nan) == 0 && aver_scene_last_error() == static_cast<int32_t>(AbiError::InvalidArgument),
+          "a non-finite position records InvalidArgument (-6)");
+    const int32_t good = aver_decal_spawn(&d);
+    check(good > 0 && aver_scene_last_error() == static_cast<int32_t>(AbiError::Ok), "a good spawn records Ok (0)");
+    check(aver_decal_release(good) == 1 && aver_scene_last_error() == static_cast<int32_t>(AbiError::Ok), "a good release records Ok");
+    aver_decal_pool_set_capacity(-5);
+    check(aver_scene_last_error() == static_cast<int32_t>(AbiError::InvalidArgument), "a clamped capacity records InvalidArgument");
     check(aver_decal_spawn(&d) == 0, "a pool of zero spawns nothing");
+    check(aver_scene_last_error() == static_cast<int32_t>(AbiError::Unsupported), "and records Unsupported (-5)");
     aver_decal_pool_set_capacity(256);
     w.flush();
 

@@ -470,6 +470,19 @@ static void testLastError() {
     check(aver_phys_body_position(999999, p) == 0, "a handle never issued fails");
     check(aver_phys_last_error() == -1, "  reason: bad handle");
 
+    // REFUSALS AFTER A GOOD LOOKUP. findBody has just recorded Ok, so each of these read 0 (Ok) until the
+    // refusing line set its own reason -- a failure that asserted there was none.
+    check(aver_phys_body_move_kinematic(box, 0, 0, 0, 0, 0, 0, 1, 0.016f) == 0,
+          "moving a static body kinematically is refused");
+    check(aver_phys_last_error() == -5, "  reason: unsupported, not ok");
+    check(aver_phys_body_move_kinematic(box, std::nanf(""), 0, 0, 0, 0, 0, 1, 0.016f) == 0,
+          "a non-finite pose is refused");
+    check(aver_phys_last_error() == -6, "  reason: invalid argument");
+    check(aver_phys_body_set_motion_type(box, 7) == 0, "an unknown motion type is refused");
+    check(aver_phys_last_error() == -6, "  reason: invalid argument");
+    check(aver_phys_body_angular_velocity(box, nullptr) == 0, "a null out-pointer is refused");
+    check(aver_phys_last_error() == -2, "  reason: null pointer");
+
     check(aver_phys_remove_body(box) == 1, "the body is removed");
     check(aver_phys_body_position(box, p) == 0, "and its handle no longer resolves");
     check(aver_phys_last_error() == -1, "  reason: bad handle, with the world still very much alive");

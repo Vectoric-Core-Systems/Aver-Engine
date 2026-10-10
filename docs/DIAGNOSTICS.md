@@ -73,16 +73,42 @@ A tool with a count **prints** it and returns `Failed`. Every count in this repo
 
 ### Who follows it
 
-`AverAssetC`, `ActorSweep`, `MakeRig`, `MakeFoliage`, `MakeSamples`, `RelodTool`, `DumpClusterPs`,
-`LevelInspect`, every `*Test.exe`, and `scripts/{gates,record-gates,test,stage-game,verify-game}.ps1`.
+C++ tools: `AverAssetC` (`convert`, `material`, `stream`, `--material-map`), `ActorSweep`, `MakeRig`,
+`MakeFoliage`, `MakeSamples`, `RelodTool`, `DumpClusterPs`, `LevelInspect` and `OcmeshDiff`. Every
+`*Test.exe` returns 0 or 1 (77 for a skip, below): many write the literals, and a failure count is never
+returned.
 
-Two deliberate exceptions:
+Scripts: `scripts/{gates,record-gates,test,stage-game,verify-game,module-matrix,pt-compare,rt-spread,
+stage-payload,verify-payload}.ps1`, and the Python drivers `seq-ab.py`, `shots.py`, `tools/neuraa/*` and
+`tools/mcp/aver_mcp.py`. Python and PowerShell cannot include the header, so they restate the numbers
+0/1/2/3/4 with a comment naming `ExitCode`.
+
+Deliberate exceptions:
 
 - **`AverCrashReporter`** restates the table in a comment rather than including the header. It links
   nothing from the engine (see below), and a shared header is shared code.
 - **`build.ps1`** passes the toolchain's own exit code straight through. `test.ps1` does *not* —
   ctest has its own vocabulary (`8` for "some tests failed"), and forwarding it would put a foreign
   number where `8` means nothing here.
+- **Scripts with their own small vocabularies.** Three Python scripts keep their own
+  small vocabularies: `claim-audit.py` (0 caught, 1 the edit survived, 2 an unusable edit),
+  `docs-check.py` (1 when a doc names a missing path) and `module-guard-audit.py` (2 for an unknown
+  argument). These are known deviations, not the standard.
+
+### Skipped is 77
+
+A test that cannot run on this machine (no GPU or device, `averdesign` not staged, no user data
+directory, no `AVER_REPO_ROOT`) returns **77**, and the root `CMakeLists.txt` registers every `*Test`
+target with `SKIP_RETURN_CODE 77`, so ctest shows *Skipped* and never *Passed*. A skip that returned 0
+would read as coverage that did not happen. 77 sits above the reserved 0–15 band, so it does not conflict
+with the table. Several suites define it as a local `kSkip` constant.
+
+### Traps in scripts
+
+- `throw`, and `Write-Error` under `$ErrorActionPreference = 'Stop'`, exit **1**. A PowerShell script that
+  wants to report Usage or Environment prints with `Write-Host` and then calls an explicit `exit 2` / `exit 3`.
+- `sys.exit("text")` in Python prints the text and exits **1**. Scripts use a small helper that prints
+  and exits with the right code (`die(code, msg)` in `seq-ab.py` and `shots.py`).
 
 ---
 
@@ -133,22 +159,43 @@ call, and the first caller to trust it is misled.
 | `aver_scene_set_vec` | the value pointer was null | `NullPointer` |
 | `aver_scene_set_i32` | the field is real, and a `Vec3` | `InvalidArgument` |
 | `aver_scene_set_vec` | the field is real, right kind, **read-only** | `Unsupported` |
+| `aver_phys_character_set_shape` | the new shape is blocked by geometry | `Unsupported` |
+| `aver_phys_body_move_kinematic` | the body is not kinematic | `Unsupported` |
+| `aver_decal_spawn` | the pool capacity is 0 | `Unsupported` |
+| `aver_syn_crowd_configure` | the entity has no such component | `BadHandle` |
+| `aver_prefab_spawn` | no host is installed | `NotInitialised` |
+| `aver_sb_step` | `aver_sb_build` has not run | `NotInitialised` |
 
 That last row is `CWorld.matrix`, and it is the case that has actually confused people: a write that
 fails for a reason no amount of fixing the handle will address.
 
 ### Implemented in
 
-`aver_phys_last_error()` (physics) and `aver_scene_last_error()` (scene, ABI minor 5). Mirrored in C#
-as `Aver.Physics.Physics.LastError` / `PhysicsError` and `Aver.Scene.Scene.LastError` / `SceneError`,
-and the three numberings are compared by `AbiEnumTest`. The other ABIs — audio, ui, framework,
-settings, voxi, pbr — do **not** have a channel yet; adding one is per-module work, and the two above
-are the worked reference.
+Channels:
 
-Behaviour is covered by `testLastError()` in `tests/physics/src/PhysicsTest.cpp` and
-`testSceneAbiErrors()` in `tests/scene/src/SceneTest.cpp`. Both were falsified: collapsing the
-read-only case into "wrong kind", and reporting a dead handle where there is no world, each turn the
-relevant suite red.
+- `aver_phys_last_error()` (physics: bodies, characters and vehicles — `physics_vehicle_abi.h` records
+  into the same slot) and `aver_scene_last_error()` (scene, ABI minor 5) are the two reference
+  implementations. `aver_decal_*` lives in `Aver.Scene.dll`, so decals share the scene channel.
+- `aver_syn_last_error()` (`Synapse.Abi`) and `aver_prefab_last_error()` (`Prefab.Abi`, ABI minor 1).
+- `aver_sb_last_error()` (soft body): a static library with no DLL decoration, so it reports through
+  whichever DLL re-exports it and shares that DLL's single Core slot (`Aver.Physics.dll` per the header).
+
+Mirrored in C# as `Aver.Physics.Physics.LastError` / `PhysicsError`, `Aver.Scene.Scene.LastError` /
+`SceneError`, `SynapseError` and `PrefabError`; `AbiEnumTest` compares five numberings (the core
+`AbiError` and the four mirrors). The soft body has no managed binding yet.
+
+Audio, ui (`ui_abi` and `ui_widget_abi`), framework (including timers/events and the blackboard),
+settings, voxi, scripting and pbr do **not** have a channel yet. They are older modules, and adding a
+channel is per-module work. The first candidates are the blackboard ("missing key" vs "wrong type" vs
+"no provider") and the timers ("NaN delay" vs "table full"), where one `0` hides several causes. A new
+entry point that lands in a module that already has a channel must set `AbiError` (`Ok` on success).
+
+Behaviour is covered by `testLastError()` in `tests/physics/src/PhysicsTest.cpp`,
+`testSceneAbiErrors()` in `tests/scene/src/SceneTest.cpp`, the extended `CharacterTest` and
+`PhysicsTest` cases, `SynapseAbiTest`, `DecalAbiTest` and `SoftBodyTest`. The prefab channel has no
+behavioural test yet (its reasons come from the host it forwards to). The first two were
+falsified: collapsing the read-only case into "wrong kind", and reporting a dead handle where there is
+no world, each turn the relevant suite red.
 
 ---
 
@@ -306,11 +353,15 @@ intended approach is to attach codes at the few choke points that cover most gro
 
 | Range | Owner |
 |---|---|
-| `AVR0001–0999` | core, runtime, asserts |
-| `AVR1000–1499` | RHI D3D12 |
-| `AVR1500–1999` | RHI Vulkan |
-| `AVR2000–2999` | formats, AVR1 container, importers |
-| `AVR3000–3999` | rendering (voxi, pbr, pt, skin, particles, fluids) |
-| `AVR4000–4999` | scene, framework, scripting |
-| `AVR5000–5999` | editor / sandbox |
-| `AVR6000–6999` | audio, physics, anim |
+| `AVR0001–0999` | core, runtime, asserts: `0001–0099` core and asserts; `0100–0299` runtime, game content and level loading; `0300–0399` packaging and payload; `0400–0999` reserved |
+| `AVR1000–1499` | RHI D3D12: `1000–1099` device and `hrOk`; `1100–1199` shader and pipeline creation, including async pipeline batches; `1200–1299` device loss and DRED; `1300–1499` reserved |
+| `AVR1500–1999` | RHI Vulkan: `1500–1599` device; `1600–1699` descriptors and bindless; `1700–1799` `DeviceCaps` gating of neural features; `1800–1999` reserved |
+| `AVR2000–2999` | formats, AVR1, importers: `2000–2199` AVR1 container; `2200–2399` glTF, OBJ and texture importers; `2400–2599` USD import (stage, instancers, variants, purpose and visibility) and `AverAssetC --material-map` and mesh merge; `2600–2799` native asset formats (`.ocsequence`, `.ocstream`, `.ocworld`, `.ocui`, decal and light formats) and `AverAssetC stream`; `2800–2999` reserved |
+| `AVR3000–3999` | rendering: `3000–3199` voxi (GI, RT, lights, atmosphere, async scene and pipeline sets); `3200–3299` pbr, materials and material graphs; `3300–3399` path tracing (render.pt, ReSTIR PT, reference PT); `3400–3499` render.neural core (conv and MLP modules, weights loading); `3500–3599` NRD2 and render.denoise (FFX temporal, despeckle, converge); `3600–3699` NeuRAA and AverSR (render.sr); `3700–3799` NeuraFI frame interpolation and NeuRaC; `3800–3849` skin, deform and softbody render; `3850–3899` particles; `3900–3949` fluids; `3950–3999` decal rendering |
+| `AVR4000–4999` | scene, framework, scripting: `4000–4199` scene, world and decal ABI; `4200–4299` framework (timers and events, blackboard, prefabs); `4300–4399` synapse AI (behaviour trees, steering, ORCA crowds, hearing, cover, squads); `4400–4599` scripting; `4600–4699` sequencer and level sequences; `4700–4799` game UI; `4800–4899` level streaming and the world module (PlacementStreamer, LevelInstance, chunks); `4900–4999` reserved |
+| `AVR5000–5999` | editor / sandbox: `5000–5399` editor panels and viewport; `5400–5599` project browser, projects and migration; `5600–5799` Animate mode, sequence editor and camera paths; `5800–5899` packaging and stage tools; `5900–5999` reserved |
+| `AVR6000–6999` | audio, physics, anim: `6000–6299` audio (WASAPI, sound design, streamed audio, fades, reverb zones); `6300–6599` physics (Jolt, vehicles, soft body, fracture); `6600–6999` anim (blend spaces, state machines, IK, control rigs) |
+
+The top-level ranges are fixed. The sub-ranges are allocations only: codes are appended within a
+sub-range, never renumbered. Async shader-batch failures, device loss and DRED reports are the first
+candidates for codes, since `hrOk` and the DRED path are the existing choke points.

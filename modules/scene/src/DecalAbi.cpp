@@ -1,11 +1,13 @@
 // The decal C ABI's translation unit: one process-wide DecalPool over the global world.
 #include "aver/scene/decal_abi.h"
 
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/DecalPool.hpp"
 #include "aver/scene/World.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 using namespace aver;
@@ -27,6 +29,11 @@ DecalPool& pool() {
 }
 DecalPool& active() { return pool(); }
 
+bool finite(const float* v, int n) {
+    for (int i = 0; i < n; ++i) if (!std::isfinite(v[i])) return false;
+    return true;
+}
+
 } // namespace
 
 extern "C" {
@@ -38,11 +45,19 @@ int32_t aver_decal_pool_set_capacity(int32_t capacity) {
     const u32 n = static_cast<u32>(std::min<int32_t>(std::max<int32_t>(capacity, 0), static_cast<int32_t>(kMaxCapacity)));
     active().destroyAll(w);   // the old pool's entities are queued for destruction
     active() = DecalPool(n);
+    setAbiError(static_cast<int32_t>(n) == capacity ? AbiError::Ok : AbiError::InvalidArgument);   // clamped
     return static_cast<int32_t>(n);
 }
 
 int32_t aver_decal_spawn(const AverDecalSpawnDesc* d) {
-    if (!d) return 0;
+    if (!d) { setAbiError(AbiError::NullPointer); return 0; }
+    if (active().capacity() == 0) { setAbiError(AbiError::Unsupported); return 0; }   // spawning is switched off
+    const bool hasNormal = Vec3{d->normal[0], d->normal[1], d->normal[2]}.sizeSquared() > 1e-8f;
+    if (!finite(d->position, 3) || !finite(d->sizeCm, 3) || !finite(d->normal, 3) ||
+        (hasNormal ? !finite(d->up, 3) || !std::isfinite(d->rollRad) : !finite(d->rotation, 4))) {
+        setAbiError(AbiError::InvalidArgument);
+        return 0;
+    }
     DecalSpawn sp;
     sp.position = Vec3{d->position[0], d->position[1], d->position[2]};
     const Vec3 n{d->normal[0], d->normal[1], d->normal[2]};
@@ -63,11 +78,15 @@ int32_t aver_decal_spawn(const AverDecalSpawnDesc* d) {
     c.lifetimeSec = d->lifetimeSec; c.fadeOutSec = d->fadeOutSec;
     c.sortOrder = d->sortOrder;
     c.flags = d->flags & (kDecalNoColour | kDecalNoNormal | kDecalNoRoughness);
-    return static_cast<int32_t>(active().spawn(World::instance(), sp));
+    const Entity e = active().spawn(World::instance(), sp);
+    setAbiError(e == kInvalidEntity ? AbiError::AllocationFailed : AbiError::Ok);
+    return static_cast<int32_t>(e);
 }
 
 int32_t aver_decal_release(int32_t entity) {
-    return active().release(World::instance(), static_cast<Entity>(entity)) ? 1 : 0;
+    const bool ok = active().release(World::instance(), static_cast<Entity>(entity));
+    setAbiError(ok ? AbiError::Ok : AbiError::BadHandle);   // not pooled, or already released
+    return ok ? 1 : 0;
 }
 
 void aver_decal_clear(void) { active().clear(World::instance()); }

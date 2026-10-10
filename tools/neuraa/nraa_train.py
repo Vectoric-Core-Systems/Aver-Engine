@@ -162,12 +162,19 @@ def colour_error(w, C, R):
 
 
 def main():
+    if len(sys.argv) < 3:
+        print(__doc__.split('usage:')[1].strip())
+        return 2   # ExitCode.Usage
     root, out = sys.argv[1], sys.argv[2]
     # Scene folders under the root: --train a,b --val c (default: v1's nd_day,sponza / cyber).
     opt = {k: v.split(',') for k, v in zip(sys.argv[3::2], sys.argv[4::2]) if k in ('--train', '--val')}
     pick = lambda dirs: sorted(f for d in dirs for f in glob.glob(os.path.join(root, d, '*.bin')))
     train = pick(opt.get('--train', ['nd_day', 'sponza']))
     val = pick(opt.get('--val', ['cyber']))
+    for name, files in (('train', train), ('val', val)):
+        if not files:
+            print('no *.bin captures for %s under %s' % (name, root))
+            return 2   # ExitCode.Usage
     t0 = time.time()
     print('train captures', len(train)); Xt, Wt, Tt, Ct, Rt = load_set(train, 60000)
     print('held-out captures', len(val)); Xv, Wv, Tv, Cv, Rv = load_set(val, 60000)
@@ -207,4 +214,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main() or 0)   # codes per core/ErrorCodes.hpp

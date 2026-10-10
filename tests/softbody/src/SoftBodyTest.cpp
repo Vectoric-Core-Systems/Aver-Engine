@@ -301,6 +301,34 @@ int main() {
         check(aver_sb_particle_count(h) == 0, "a destroyed handle is dead");
     }
 
+    AVER_INFO("the C ABI says why a call failed");
+    {
+        const int32_t h = aver_sb_create();
+        check(aver_sb_last_error() == 0, "a successful create leaves Ok");
+        AverSbMaterial m;
+        aver_sb_default_material(&m);
+        const int32_t mat = aver_sb_add_material(h, &m);
+        const int32_t p0 = aver_sb_add_particle(h, 0, 0, 0, 1);
+        const int32_t p1 = aver_sb_add_particle(h, 10, 0, 0, 0);
+        check(aver_sb_add_beam(h, p0, p1, mat) == 0 && aver_sb_last_error() == 0, "a good add leaves Ok");
+        check(aver_sb_add_beam(h, p0, 99, mat) == -1 && aver_sb_last_error() == -4, "a particle past the end is OutOfRange");
+        check(aver_sb_add_beam(h, p0, p0, mat) == -1 && aver_sb_last_error() == -6, "a beam to itself is InvalidArgument");
+        check(aver_sb_step(h) == -1 && aver_sb_last_error() == -3, "step before build is NotInitialised");
+        check(aver_sb_impact(h, 0, 0, 0, 0, 0, -1, 5.0f, 10.0f) == 0 && aver_sb_last_error() == -3,
+              "an impact before build is NotInitialised");
+        check(aver_sb_build(h) == 1 && aver_sb_last_error() == 0, "build leaves Ok");
+        check(aver_sb_add_particle(h, 1, 1, 1, 0) == -1 && aver_sb_last_error() == -5, "adding after build is Unsupported");
+        check(aver_sb_move_particle(h, 99, 0, 0, 0) == 0 && aver_sb_last_error() == -4, "a particle past the end is OutOfRange");
+        check(aver_sb_move_particle(h, p1, 5, 0, 0) == 1 && aver_sb_last_error() == 0, "a good move clears the reason");
+        check(aver_sb_positions(h, nullptr, 2) == 0 && aver_sb_last_error() == -2, "a null out buffer is NullPointer");
+        check(aver_sb_set_config(h, nullptr) == 0 && aver_sb_last_error() == -2, "a null config is NullPointer");
+        check(aver_sb_async_poll(h, nullptr, 0, nullptr) == -1 && aver_sb_last_error() == -3,
+              "polling with no worker is NotInitialised");
+        aver_sb_destroy(h);
+        check(aver_sb_step(h) == -1 && aver_sb_last_error() == -1, "a destroyed handle is BadHandle");
+        check(aver_sb_repair(h) == 0 && aver_sb_last_error() == -1, "and so for every other call");
+    }
+
     AVER_INFO(g_failures ? "SoftBodyTest: {} FAILURES" : "SoftBodyTest: all checks passed ({})", g_failures);
     return g_failures ? 1 : 0;
 }

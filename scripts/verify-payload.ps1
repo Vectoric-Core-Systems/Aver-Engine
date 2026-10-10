@@ -48,7 +48,10 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
 $stagedExe = Join-Path $Payload 'bin\Sandbox.exe'
-if (-not (Test-Path -LiteralPath $stagedExe)) { throw "[verify] no Sandbox.exe at $stagedExe" }
+if (-not (Test-Path -LiteralPath $stagedExe)) {
+    Write-Host "[verify] no Sandbox.exe at $stagedExe" -ForegroundColor Red
+    exit 2  # ExitCode.Usage (bad -Payload path; core/ErrorCodes.hpp)
+}
 
 # The tree the payload was cut from. payload.json records the config it was staged from, so the
 # comparison cannot accidentally be made against the other build type.
@@ -59,7 +62,10 @@ if (Test-Path -LiteralPath $payloadJson) {
 }
 $treeDir = if ($cfgName -eq 'Debug') { 'build' } else { "build-$($cfgName.ToLower())" }
 $treeExe = Join-Path $root "$treeDir\bin\Sandbox.exe"
-if (-not (Test-Path -LiteralPath $treeExe)) { throw "[verify] no build tree exe at $treeExe" }
+if (-not (Test-Path -LiteralPath $treeExe)) {
+    Write-Host "[verify] no build tree exe at $treeExe" -ForegroundColor Red
+    exit 3  # ExitCode.Environment
+}
 
 if (-not $WorkDir) { $WorkDir = Join-Path ([System.IO.Path]::GetTempPath()) ("aver-verify-" + [guid]::NewGuid().ToString('N').Substring(0,8)) }
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
@@ -259,7 +265,7 @@ if ($hashSame -eq 0) {
 }
 if ($hashDiff -gt 0) {
     Write-Host ("[verify] {0} STAGED BINARIES ARE NOT THE TREE'S - the payload is not what was tested" -f $hashDiff) -ForegroundColor Red
-    exit 2
+    exit 1  # ExitCode.Failed (2 is Usage)
 }
 if ($live -eq 0) {
     Write-Host '[verify] FAIL every staged probe was NO-PROBE - the payload did not render anything' -ForegroundColor Red
@@ -273,4 +279,4 @@ if ($total -eq 0) {
     Write-Host "[verify] $total PROBE(S) DISAGREE - the staged payload is not the tree it came from" -ForegroundColor Red
     Write-Host "[verify] full output: $treeOut  /  $stagedOut"
 }
-exit $total
+exit $(if ($total -eq 0) { 0 } else { 1 })  # ExitCode.Failed; the count is printed above

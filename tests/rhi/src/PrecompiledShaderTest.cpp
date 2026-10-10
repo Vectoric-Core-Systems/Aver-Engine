@@ -35,6 +35,7 @@
 using namespace aver;
 
 static int g_failures = 0;
+static constexpr int kSkip = 77;  // ctest SKIP_RETURN_CODE (root CMakeLists.txt); not a pass
 
 static void check(bool cond, const std::string& what) {
     if (cond) { AVER_INFO("  ok    {}", what); return; }
@@ -58,13 +59,13 @@ int main() {
     if (!dev || dev->backend() == rhi::Backend::Null) {
         AVER_WARN("  SKIP  no D3D12 device (not even WARP) on this machine");
         if (dev) rhi::destroyDevice(dev);
-        return 0;
+        return kSkip;
     }
     rhi::IResourceFactory* res = dev->resources();
     if (!res) {
         AVER_WARN("  SKIP  this device exposes no resource factory");
         rhi::destroyDevice(dev);
-        return 0;
+        return kSkip;
     }
 
     // What the fixture declares (see precompiled_space1.hlsl): one SRV (t0) and one UAV (u0) in

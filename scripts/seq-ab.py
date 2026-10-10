@@ -34,6 +34,11 @@ DENOISER_NAMES = {0: "none", 1: "ffx", 2: "nrd2"}
 FRAME_GLOB = "seq_*.png"
 
 
+def die(code, msg):
+    print(msg, file=sys.stderr)
+    sys.exit(code)  # code per core/ErrorCodes.hpp ExitCode: 1 failed, 2 usage, 3 environment
+
+
 def parse_runs(a):
     runs = []
     for v in a.denoiser or []:
@@ -41,11 +46,11 @@ def parse_runs(a):
     for spec in a.run or []:
         name, sep, args = spec.partition("=")
         if not sep:
-            sys.exit(f"--run needs NAME=ARGS, got '{spec}'")
+            die(2, f"--run needs NAME=ARGS, got '{spec}'")
         runs.append((name.strip(), args.split()))
     names = [n for n, _ in runs]
     if len(set(names)) != len(names):
-        sys.exit(f"run names must be unique: {names}")
+        die(2, f"run names must be unique: {names}")
     return runs
 
 
@@ -152,12 +157,12 @@ def compare(a, names):
     runs = {n: load_run(os.path.join(a.out, n)) for n in names}
     for n in names:
         if not runs[n]:
-            sys.exit(f"no frames for run '{n}' in {os.path.join(a.out, n)}")
+            die(1, f"no frames for run '{n}' in {os.path.join(a.out, n)}")
     ref = a.ref if a.ref in names else (names[int(a.ref)] if a.ref and a.ref.isdigit() and int(a.ref) < len(names) else names[0])
     names = [ref] + [n for n in names if n != ref]   # the reference leads every sheet
     common = sorted(set.intersection(*[set(r) for r in runs.values()]))
     if not common:
-        sys.exit("the runs have no frame in common")
+        die(1, "the runs have no frame in common")
     skipped = {n: len(runs[n]) - len(common) for n in names}
     if any(skipped.values()):
         print("frames not in every run (left out): " + ", ".join(f"{n} {v}" for n, v in skipped.items() if v))
@@ -234,17 +239,17 @@ def main():
     if a.compare_only:
         names = sorted(d for d in os.listdir(a.out) if os.path.isdir(os.path.join(a.out, d)) and load_run(os.path.join(a.out, d)))
         if len(names) < 2:
-            sys.exit("--compare-only needs at least two run directories with seq_*.png in --out")
+            die(2, "--compare-only needs at least two run directories with seq_*.png in --out")
     else:
         if not a.level:
-            sys.exit("a level is needed (or --compare-only)")
+            die(2, "a level is needed (or --compare-only)")
         runs = parse_runs(a)
         if len(runs) < 2:
-            sys.exit("give at least two runs: --denoiser 0 2, or --run NAME=ARGS twice")
+            die(2, "give at least two runs: --denoiser 0 2, or --run NAME=ARGS twice")
         if not os.path.exists(a.exe):
-            sys.exit(f"{a.exe} does not exist; pass --exe")
+            die(3, f"{a.exe} does not exist; pass --exe")
         if not a.allow_running and sandbox_running():
-            sys.exit("a Sandbox.exe is already running; close it first (runs share the GPU), or --allow-running")
+            die(3, "a Sandbox.exe is already running; close it first (runs share the GPU), or --allow-running")
         os.makedirs(a.out, exist_ok=True)
         names = [n for n, _ in runs]
         if not all(run_one(a, n, args) for n, args in runs):

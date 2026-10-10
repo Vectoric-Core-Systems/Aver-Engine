@@ -18,3 +18,12 @@ if(TARGET Aver.Synapse.Scene)
                                                    Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(SynapseAiSceneTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# SynapseAbiTest -- aver_syn_last_error against the real ABI DLL: dead entity, missing component, bad
+# value, and the "nothing yet" answers that must record Ok rather than leave a stale reason.
+if(TARGET Aver.Synapse.Abi)
+  add_executable(SynapseAbiTest src/SynapseAbiTest.cpp)
+  target_link_libraries(SynapseAbiTest PRIVATE Aver.Synapse.Abi Aver.Scene Aver.Synapse Aver.Formats
+                                               Aver.Core Aver.Platform)
+  set_target_properties(SynapseAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

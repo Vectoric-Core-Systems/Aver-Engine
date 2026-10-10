@@ -21,11 +21,17 @@ def load_weights(path):
     return mu, sd, net
 
 
+if len(sys.argv) < 3:
+    print(__doc__.split('usage:')[1].strip())
+    sys.exit(1)  # ExitCode.Failed (core/ErrorCodes.hpp)
 mu, sd, net = load_weights(sys.argv[1])
 tot = {k: [] for k in ('off', 'base', 'engine', 'python')}
 mism = []
 for path in sys.argv[2:]:
-    c = nraa_io.load(path)
+    try:
+        c = nraa_io.load(path)
+    except (OSError, ValueError) as e:
+        print(path, 'unreadable:', e); continue
     if c['resolved'] is None: print(path, 'no resolved frame'); continue
     X, wb9, C9, m = T.features(c)
     ref = T.shift(c['ref'], 0, 0); eng = T.shift(c['resolved'], 0, 0); base = T.shift(c['base'], 0, 0)
@@ -41,6 +47,9 @@ for path in sys.argv[2:]:
     off_edge = np.abs(eng[~m] - base[~m]).max()
     print('%s: edge px %d | engine vs python %.2e (relative) | off-edge max change %.2e' % (
         path[-14:], m.sum(), mism[-1], off_edge))
+if not mism:
+    print('no readable capture with a resolved frame')
+    sys.exit(2)  # ExitCode.Usage
 print('edge colour error vs 64-sample reference (held-out):')
 for k in ('off', 'base', 'engine', 'python'):
     print('  %-7s %.5f' % (k, np.mean(tot[k])))

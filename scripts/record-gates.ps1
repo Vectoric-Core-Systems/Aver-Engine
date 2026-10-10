@@ -240,4 +240,4 @@ if ($bad -eq 0) {
     Say "  git add scripts/gates.baseline*.txt" 'DarkGray'
     Say "  git commit    # say WHICH values moved and WHY -- see the table above" 'DarkGray'
 }
-exit $bad
+exit $(if ($bad -eq 0) { 0 } else { 1 })  # ExitCode Ok/Failed (core/ErrorCodes.hpp); the failing trees are listed in the Summary

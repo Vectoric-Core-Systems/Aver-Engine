@@ -1196,7 +1196,7 @@ int main(int argc, char** argv) {
     // wrote and the answer is a byte count, not an opinion.
     if (argc > 2 && std::string(argv[1]) == "--roundtrip") {
         std::string text, err;
-        if (!readFileText(argv[2], text)) { AVER_ERROR("could not read {}", argv[2]); return 1; }
+        if (!readFileText(argv[2], text)) { AVER_ERROR("could not read {}", argv[2]); return exitCode(ExitCode::Usage); }
         fmt::OcGraphData g;
         if (!fmt::parseOcgraph(text, g, &err)) { AVER_ERROR("parse: {}", err); return 1; }
         const std::string out = fmt::writeOcgraph(g, text);

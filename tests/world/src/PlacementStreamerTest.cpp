@@ -1,4 +1,5 @@
-// PlacementStreamer residency: load/evict radii, ordering, budgets, pinning. Exit code = failure count.
+// PlacementStreamer residency: load/evict radii, ordering, budgets, pinning. Exits 0 or 1 (ExitCode).
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/world/PlacementStreamer.hpp"
 
@@ -72,5 +73,5 @@ int main() {
     for (u32 i : load) sawRemoved = sawRemoved || i == 0;
     check(!sawRemoved, "a removed item is never reported");
 
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

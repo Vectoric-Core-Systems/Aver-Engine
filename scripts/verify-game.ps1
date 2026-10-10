@@ -88,7 +88,7 @@ $stagedConfig = ''
 function Fail([string] $m) { $script:failures.Add($m); Write-Host "[verify] ERROR $m" -ForegroundColor Red }
 function Note([string] $m) { Write-Host "[verify] $m" }
 
-if (-not (Test-Path -LiteralPath $Package)) { throw "[verify] no package at $Package" }
+if (-not (Test-Path -LiteralPath $Package)) { Write-Host "[verify] no package at $Package" -ForegroundColor Red; exit 2 }  # ExitCode.Usage (core/ErrorCodes.hpp)
 $pkg = (Resolve-Path -LiteralPath $Package).Path
 
 # ---------------------------------------------------------------------------------------------

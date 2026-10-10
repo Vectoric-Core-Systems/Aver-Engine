@@ -25,7 +25,9 @@ extern "C" {
 #endif
 
 #define AVER_PREFAB_ABI_VERSION_MAJOR 1
-#define AVER_PREFAB_ABI_VERSION_MINOR 0
+/* MINOR 1 adds aver_prefab_last_error, the reason channel. Additive only -- every existing
+ * entry point keeps its 0 / non-zero return exactly, which is the whole design; see that function. */
+#define AVER_PREFAB_ABI_VERSION_MINOR 1
 #define AVER_PREFAB_ABI_VERSION \
     ((AVER_PREFAB_ABI_VERSION_MAJOR << 16) | AVER_PREFAB_ABI_VERSION_MINOR)
 
@@ -45,6 +47,21 @@ typedef struct AverPrefabHost {
 
 /* The version this DLL was built with, so a caller can catch a stale binary. */
 AVER_PREFAB_API int32_t aver_prefab_abi_version(void);
+
+/* WHY the last call failed, as an aver::AbiError (modules/core/include/aver/core/ErrorCodes.hpp):
+   0 ok, -1 bad handle, -3 not initialised (no host installed), -5 unsupported (the host lacks that
+   function), -6 invalid argument (null or empty spawn path, or a spawn the host refused).
+   The host callbacks carry no reason, so a host refusal reads as -1 for a root-taking call and -6 for
+   spawn; the reason cannot be finer without changing AverPrefabHost.
+
+   THREAD-LOCAL, and per-DLL: it reports failures seen by this DLL's own calls. Aver.Core is linked
+   statically into each ABI DLL, so this slot and aver_scene_last_error's are different slots.
+
+   SET ON SUCCESS TOO (to 0), so a stale reason cannot outlive the failure that produced it.
+   aver_prefab_root_of / is_instance returning 0 ("not part of an instance") and
+   aver_prefab_override_count returning 0 ("no overrides") are ordinary answers and record 0 when a
+   host is installed. */
+AVER_PREFAB_API int32_t aver_prefab_last_error(void);
 
 /* Installs (or, with NULL, removes) the host. The struct is copied. */
 AVER_PREFAB_API void aver_prefab_set_host(const AverPrefabHost* host);

@@ -77,8 +77,8 @@ function Note([string] $msg) { Write-Host "[game] $msg" }
 
 . (Join-Path $PSScriptRoot 'PeImports.ps1')
 
-if (-not (Test-Path -LiteralPath $bin))     { throw "[game] no build tree at $bin -- run ./scripts/build.ps1 first" }
-if (-not (Test-Path -LiteralPath $Project)) { throw "[game] no project manifest at $Project" }
+if (-not (Test-Path -LiteralPath $bin))     { Write-Host "[game] no build tree at $bin -- run ./scripts/build.ps1 first" -ForegroundColor Red; exit 3 }  # ExitCode.Environment (core/ErrorCodes.hpp)
+if (-not (Test-Path -LiteralPath $Project)) { Write-Host "[game] no project manifest at $Project" -ForegroundColor Red; exit 2 }  # ExitCode.Usage (core/ErrorCodes.hpp)
 
 $projectDir = Split-Path -Parent (Resolve-Path -LiteralPath $Project).Path
 
@@ -86,7 +86,7 @@ $projectDir = Split-Path -Parent (Resolve-Path -LiteralPath $Project).Path
 # 1. The build tree's identity.
 # ---------------------------------------------------------------------------------------------
 $cachePath = Join-Path $tree 'CMakeCache.txt'
-if (-not (Test-Path -LiteralPath $cachePath)) { throw "[game] no CMakeCache.txt in $tree" }
+if (-not (Test-Path -LiteralPath $cachePath)) { Write-Host "[game] no CMakeCache.txt in $tree" -ForegroundColor Red; exit 3 }  # ExitCode.Environment (core/ErrorCodes.hpp)
 $cache = Get-Content -LiteralPath $cachePath
 
 $options = @{}
@@ -302,7 +302,7 @@ if ($authoredScripts.Count -eq 0) {
 # 3. Allowlist.
 # ---------------------------------------------------------------------------------------------
 $allowPath = Join-Path $PSScriptRoot 'game.allowlist'
-if (-not (Test-Path -LiteralPath $allowPath)) { throw "[game] missing $allowPath" }
+if (-not (Test-Path -LiteralPath $allowPath)) { Write-Host "[game] missing $allowPath" -ForegroundColor Red; exit 3 }  # ExitCode.Environment (core/ErrorCodes.hpp)
 
 $sections = @{ bin = @(); scripting = @(); crt = @() }
 $current = $null
@@ -311,10 +311,10 @@ foreach ($raw in Get-Content -LiteralPath $allowPath) {
     if ($line -eq '' -or $line.StartsWith('#')) { continue }
     if ($line -match '^\[(\w+)\]$') {
         $current = $Matches[1]
-        if (-not $sections.ContainsKey($current)) { throw "[game] unknown allowlist section [$current]" }
+        if (-not $sections.ContainsKey($current)) { Write-Host "[game] unknown allowlist section [$current]" -ForegroundColor Red; exit 1 }  # ExitCode.Failed (core/ErrorCodes.hpp)
         continue
     }
-    if (-not $current) { throw "[game] allowlist entry '$line' appears before any [section]" }
+    if (-not $current) { Write-Host "[game] allowlist entry '$line' appears before any [section]" -ForegroundColor Red; exit 1 }  # ExitCode.Failed (core/ErrorCodes.hpp)
     $cond = $null
     if ($line -match '^(.*?)\s+\?([A-Za-z0-9_]+)\s*$') {
         $line = $Matches[1].Trim(); $cond = $Matches[2]
@@ -329,7 +329,7 @@ foreach ($raw in Get-Content -LiteralPath $allowPath) {
 if (Test-Path -LiteralPath $Out) {
     $existing = @(Get-ChildItem -LiteralPath $Out -Force)
     if ($existing.Count -gt 0) {
-        if (-not $Force) { throw "[game] $Out is not empty -- pass -Force to replace it" }
+        if (-not $Force) { Write-Host "[game] $Out is not empty -- pass -Force to replace it" -ForegroundColor Red; exit 2 }  # ExitCode.Usage (core/ErrorCodes.hpp)
         Remove-Item -LiteralPath $Out -Recurse -Force
     }
 }

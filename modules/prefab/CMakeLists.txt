@@ -31,6 +31,8 @@ add_library(Aver.Prefab.Abi SHARED abi/PrefabAbi.cpp)
 target_include_directories(Aver.Prefab.Abi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Prefab.Abi PUBLIC cxx_std_20)
 target_compile_definitions(Aver.Prefab.Abi PRIVATE AVER_PREFAB_ABI_BUILD)
+# Core is static, so this DLL gets its own aver_prefab_last_error slot.
+target_link_libraries(Aver.Prefab.Abi PRIVATE Aver.Core)
 set_target_properties(Aver.Prefab.Abi PROPERTIES
   FOLDER "modules"
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)   # next to the exe, where DllImport looks

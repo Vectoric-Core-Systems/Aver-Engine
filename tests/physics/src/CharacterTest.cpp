@@ -178,9 +178,11 @@ static void testShapeSwapAndItsFailure() {
     check(aver_phys_character_set_shape(ch, 30.0f, 180.0f, 5.0f) == 0,
           "and standing up into the ceiling is REFUSED -- which is what stops the character growing "
           "into the geometry above it");
+    check(aver_phys_last_error() == -5, "  reason: unsupported (would not fit), distinct from a dead handle");
 
     check(aver_phys_character_set_shape(ch, 30.0f, 40.0f, 5.0f) == 0,
           "a shape too short for its own radius is refused, like character_create's own guard");
+    check(aver_phys_last_error() == -6, "  reason: invalid argument");
 
     // The getter reads the capsule the character HAS, so after the two refusals above it must still
     // say crouched -- a getter that echoed the last numbers asked for would say 40 here.
@@ -215,6 +217,44 @@ static void testDeadHandles() {
     check(aver_phys_character_shape(ch, nullptr, tmp) == 0 && aver_phys_character_shape(ch, tmp, nullptr) == 0,
           "and the shape getter refuses either null out-pointer");
     aver_phys_shutdown();
+}
+
+// The reason channel on the character calls: findCharacter alone never touched the slot, so a dead
+// handle used to read back whatever an unrelated call had left there.
+static void testCharacterLastError() {
+    AVER_INFO("=== aver_phys_last_error on the character calls ===");
+    const int32_t ch = worldWithCharacterOnFloor();
+    float tmp[3];
+    float mass = -1.0f;
+
+    check(aver_phys_character_mass(ch, &mass) == 1 && aver_phys_last_error() == 0, "a live call leaves ok");
+    check(aver_phys_character_set_mass(ch, -1.0f) == 0 && aver_phys_last_error() == -6,
+          "  set_mass(-1): invalid argument");
+    check(aver_phys_character_set_gravity_factor(ch, -1.0f) == 0 && aver_phys_last_error() == -6,
+          "  negative gravity factor: invalid argument");
+    check(aver_phys_character_ground_normal(ch, nullptr) == 0 && aver_phys_last_error() == -2,
+          "  null out pointer: null pointer");
+    check(aver_phys_character_mass(ch, &mass) == 1 && aver_phys_last_error() == 0 && mass > 0.0f,
+          "a following successful call resets the reason to ok");
+
+    check(aver_phys_character_of_entity(12345) == 0 && aver_phys_last_error() == 0,
+          "no match for an entity is an ordinary answer, ok");
+
+    const int32_t dead = ch;
+    aver_phys_character_destroy(dead);
+    mass = -1.0f;
+    check(aver_phys_character_mass(dead, &mass) == 0 && aver_phys_last_error() == -1,
+          "  destroyed handle: bad handle");
+    check(aver_phys_character_ground_state(dead) == -1 && aver_phys_last_error() == -1,
+          "  ground_state keeps its -1 sentinel and records bad handle");
+    check(aver_phys_character_ground_velocity(dead, tmp) == 0 && aver_phys_last_error() == -1,
+          "  and a dead handle wins over a valid out pointer");
+
+    aver_phys_shutdown();
+    check(aver_phys_character_mass(ch, &mass) == 0 && aver_phys_last_error() == -3,
+          "  no world: not initialised");
+    check(aver_phys_character_of_entity(1) == 0 && aver_phys_last_error() == -3,
+          "  of_entity with no world: not initialised");
 }
 
 // A CharacterVirtual is not a rigid body, so no friction ever reaches it: riding a moving deck is the
@@ -402,6 +442,7 @@ int main() {
     testGroundInformation();
     testShapeSwapAndItsFailure();
     testDeadHandles();
+    testCharacterLastError();
     testRidesAMovingDeck();
     testEntityToCharacter();
     testGravityFactor();

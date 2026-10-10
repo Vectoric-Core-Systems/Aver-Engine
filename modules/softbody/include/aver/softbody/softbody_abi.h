@@ -41,6 +41,12 @@ typedef struct AverSbConfig {
     float settleThresholdCm;
 } AverSbConfig;
 
+// Why the last call on this thread failed: an aver::AbiError (core/ErrorCodes.hpp) -- 0 Ok, -1 BadHandle,
+// -2 NullPointer, -3 NotInitialised (not built), -4 OutOfRange, -5 Unsupported (frozen topology, async
+// running), -6 InvalidArgument. Thread-local and set on success too. The slot is Aver.Core's, so a DLL that
+// re-exports this library (Aver.Physics.dll) shares it with its own *_last_error.
+int32_t aver_sb_last_error(void);
+
 // A new empty cage with default config. 0 on failure.
 int32_t aver_sb_create(void);
 void    aver_sb_destroy(int32_t h);

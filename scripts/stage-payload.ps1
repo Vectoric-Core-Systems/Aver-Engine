@@ -68,7 +68,8 @@ function Note([string] $msg) { Write-Host "[stage] $msg" }
 $osProvided = $AverOsProvidedDlls
 
 if (-not (Test-Path -LiteralPath $bin)) {
-    throw "[stage] no build tree at $bin -- run ./scripts/build.ps1 $(if ($Config -ne 'Debug') {'-Release'}) first"
+    Write-Host "[stage] no build tree at $bin -- run ./scripts/build.ps1 $(if ($Config -ne 'Debug') {'-Release'}) first" -ForegroundColor Red
+    exit 3  # ExitCode.Environment (core/ErrorCodes.hpp)
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -81,7 +82,10 @@ if (-not (Test-Path -LiteralPath $bin)) {
 #    entirely for a week while looking like a normal Release tree.
 # ---------------------------------------------------------------------------------------------
 $cachePath = Join-Path $tree 'CMakeCache.txt'
-if (-not (Test-Path -LiteralPath $cachePath)) { throw "[stage] no CMakeCache.txt in $tree" }
+if (-not (Test-Path -LiteralPath $cachePath)) {
+    Write-Host "[stage] no CMakeCache.txt in $tree" -ForegroundColor Red
+    exit 3  # ExitCode.Environment
+}
 $cache = Get-Content -LiteralPath $cachePath
 
 $expected = @(
@@ -133,7 +137,10 @@ Note "engine $version  config=$Config  tree=$BuildDir  commit=$(if ($commit) { $
 # 2. Parse the allowlist.
 # ---------------------------------------------------------------------------------------------
 $allowPath = Join-Path $PSScriptRoot 'payload.allowlist'
-if (-not (Test-Path -LiteralPath $allowPath)) { throw "[stage] missing $allowPath" }
+if (-not (Test-Path -LiteralPath $allowPath)) {
+    Write-Host "[stage] missing $allowPath" -ForegroundColor Red
+    exit 3  # ExitCode.Environment
+}
 
 $sections = @{ bin = @(); samples = @(); engine = @() }
 $current = $null
@@ -142,10 +149,16 @@ foreach ($raw in Get-Content -LiteralPath $allowPath) {
     if ($line -eq '' -or $line.StartsWith('#')) { continue }
     if ($line -match '^\[(\w+)\]$') {
         $current = $Matches[1]
-        if (-not $sections.ContainsKey($current)) { throw "[stage] unknown allowlist section [$current]" }
+        if (-not $sections.ContainsKey($current)) {
+            Write-Host "[stage] unknown allowlist section [$current]" -ForegroundColor Red
+            exit 1  # ExitCode.Failed (malformed allowlist)
+        }
         continue
     }
-    if (-not $current) { throw "[stage] allowlist entry '$line' appears before any [section]" }
+    if (-not $current) {
+        Write-Host "[stage] allowlist entry '$line' appears before any [section]" -ForegroundColor Red
+        exit 1  # ExitCode.Failed (malformed allowlist)
+    }
 
     # `<pattern>  ?AVER_SOMETHING` ties an entry to a CMake option, which is what lets one allowlist
     # describe every edition instead of one per edition.
@@ -254,7 +267,7 @@ if ($excludedByOption -gt 0) {
 
 if ($failures.Count -gt 0) {
     Write-Host "[stage] FAILED with $($failures.Count) error(s) before copying anything" -ForegroundColor Red
-    exit $failures.Count
+    exit 1  # ExitCode.Failed (core/ErrorCodes.hpp); count printed above
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -263,7 +276,10 @@ if ($failures.Count -gt 0) {
 if (Test-Path -LiteralPath $Out) {
     $existing = @(Get-ChildItem -LiteralPath $Out -Force)
     if ($existing.Count -gt 0) {
-        if (-not $Force) { throw "[stage] $Out is not empty -- pass -Force to replace it" }
+        if (-not $Force) {
+            Write-Host "[stage] $Out is not empty -- pass -Force to replace it" -ForegroundColor Red
+            exit 2  # ExitCode.Usage
+        }
         Remove-Item -LiteralPath $Out -Recurse -Force
     }
 }
@@ -511,7 +527,7 @@ Write-Host ''
 Note ("payload: {0} files, {1:N2} MB" -f $staged.Count, (($staged | Measure-Object Length -Sum).Sum / 1MB))
 if ($failures.Count -gt 0) {
     Write-Host "[stage] FAILED with $($failures.Count) error(s)" -ForegroundColor Red
-    exit $failures.Count
+    exit 1  # ExitCode.Failed (core/ErrorCodes.hpp); count printed above
 }
 Note "OK -> $outFull"
 exit 0

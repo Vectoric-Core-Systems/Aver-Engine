@@ -1666,7 +1666,7 @@ def serve_http(port):
     try:
         httpd = _McpHTTPServer((_HTTP_HOST, port), _McpHTTPHandler)
     except OSError as e:
-        # A BOUND PORT IS AN OPERATOR MISTAKE, NOT A CRASH. Unhandled, this surfaced as a raw
+        # A BOUND PORT IS AN ENVIRONMENT FAULT, NOT A CRASH. Unhandled, this surfaced as a raw
         # WinError 10013 traceback and exit 1, which reads as a broken server rather than as
         # "something is already there". The editor's own control channel already answers this
         # situation by logging why and carrying on (McpBridge::start returns false); a tool server
@@ -1676,16 +1676,17 @@ def serve_http(port):
         log("something is probably already listening there. Find it with: "
             "netstat -ano | findstr :%d   (then choose another port with --port, or in mcp.conf's "
             "tool_server.port)" % port)
-        return 2
+        return 3   # ExitCode.Environment (core/ErrorCodes.hpp)
     log("serving from %s over http://%s:%d%s (Streamable HTTP; POST only, GET replies 405)"
         % (ROOT, _HTTP_HOST, port, _HTTP_PATH))
+    rc = 0
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        pass
+        rc = 4   # ExitCode.Interrupted
     finally:
         httpd.server_close()
-    return 0
+    return rc
 
 
 def main():

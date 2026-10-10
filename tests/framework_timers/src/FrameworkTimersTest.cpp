@@ -1,5 +1,6 @@
 // Test for the framework timer service and event bus: ordering, pause, time dilation, cancel and add
-// inside a callback, re-entrancy, payloads, and the C ABI over both. Exit code = failure count.
+// inside a callback, re-entrancy, payloads, and the C ABI over both. Exits 0 or 1 (ExitCode).
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/framework/EventBus.hpp"
 #include "aver/framework/TimerService.hpp"
@@ -701,5 +702,5 @@ int main() {
     testAbiEvents();
     if (g_failures == 0) AVER_INFO("=== all {} checks passed ===", g_checks);
     else AVER_ERROR("=== FAILED === {} of {} checks failed", g_failures, g_checks);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

@@ -12,6 +12,7 @@
 #endif
 #include "aver/formats/OcMesh.hpp"
 #include "aver/formats/OcAnim.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 // Clustering is entirely OPTIONAL: ConvertTool must still import and write the .oc* triple with
@@ -86,11 +87,11 @@ std::string safe(const std::string& in, const std::string& fallback) {
 } // namespace
 
 // Converts argv[1] into argv[2] (a directory), naming everything after argv[3] or the source stem.
-// Returns 0 on success, 1 on a conversion error, 2 on bad usage.
+// Returns ExitCode::Ok on success, Failed on a conversion error, Usage on bad arguments.
 int main(int argc, char** argv) {
     if (argc < 3) {
         AVER_ERROR("usage: ConvertTool <in.gltf|in.glb> <out-directory> [base-name] [--lod <ratio>]");
-        return 2;
+        return exitCode(ExitCode::Usage);
     }
     // --lod <ratio> decimates to roughly that fraction of the triangles at cook time. Parsed out of
     // argv before the positional arguments are read, so it can be written anywhere on the line and
@@ -116,9 +117,9 @@ int main(int argc, char** argv) {
 
     fmt::GltfImportResult res;
     std::string why;
-    if (!fmt::importGltf(argv[1], res, {}, &why)) { AVER_ERROR("import: {}", why); return 1; }
+    if (!fmt::importGltf(argv[1], res, {}, &why)) { AVER_ERROR("import: {}", why); return exitCode(ExitCode::Failed); }
     for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
-    if (res.meshes.empty()) { AVER_ERROR("no meshes"); return 1; }
+    if (res.meshes.empty()) { AVER_ERROR("no meshes"); return exitCode(ExitCode::Failed); }
 
     std::string dir = argv[2];
     while (!dir.empty() && (dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
@@ -282,22 +283,22 @@ int main(int argc, char** argv) {
 #endif
 
     const std::string meshPath = dir + "/" + base + ".ocmesh";
-    if (!fmt::saveOcMesh(meshPath, m, &why)) { AVER_ERROR("save mesh: {}", why); return 1; }
+    if (!fmt::saveOcMesh(meshPath, m, &why)) { AVER_ERROR("save mesh: {}", why); return exitCode(ExitCode::Failed); }
     AVER_INFO("wrote {}", meshPath);
 
     fmt::OcMeshData back;
-    if (!fmt::loadOcMesh(meshPath, back, &why)) { AVER_ERROR("reload mesh: {}", why); return 1; }
+    if (!fmt::loadOcMesh(meshPath, back, &why)) { AVER_ERROR("reload mesh: {}", why); return exitCode(ExitCode::Failed); }
     // Reported rather than assumed: the skin is the one stream that used to be dropped silently,
     // and "it reloaded" is not the same claim as "it reloaded with its rig intact".
     AVER_INFO("reloaded: {} verts, {} tris, skin {}",
               back.vertexCount(), back.indices.size() / 3, back.hasSkin() ? "yes" : "no");
-    if (m.hasSkin() && !back.hasSkin()) { AVER_ERROR("the skin did not survive the round trip"); return 1; }
+    if (m.hasSkin() && !back.hasSkin()) { AVER_ERROR("the skin did not survive the round trip"); return exitCode(ExitCode::Failed); }
 
     // ---- the skeleton. Named after the base rather than after the skin, because a clip's
     //      skeletonRef is resolved by FILE STEM and the two have to agree. ----
     for (usize i = 0; i < res.skeletons.size(); ++i) {
         const std::string p = dir + "/" + base + (i == 0 ? "" : std::to_string(i)) + ".ocskel";
-        if (!fmt::saveOcSkel(p, res.skeletons[i], &why)) { AVER_ERROR("save skeleton: {}", why); return 1; }
+        if (!fmt::saveOcSkel(p, res.skeletons[i], &why)) { AVER_ERROR("save skeleton: {}", why); return exitCode(ExitCode::Failed); }
         AVER_INFO("wrote {} ({} bones)", p, res.skeletons[i].bones.size());
     }
     if (m.hasSkin() && res.skeletons.empty())
@@ -311,7 +312,7 @@ int main(int argc, char** argv) {
         const std::string name = safe(i < res.animationNames.size() ? res.animationNames[i] : "",
                                       "Clip" + std::to_string(i));
         const std::string p = dir + "/" + base + "_" + name + ".ocanim";
-        if (!fmt::saveOcAnim(p, clip, &why)) { AVER_ERROR("save clip: {}", why); return 1; }
+        if (!fmt::saveOcAnim(p, clip, &why)) { AVER_ERROR("save clip: {}", why); return exitCode(ExitCode::Failed); }
         AVER_INFO("wrote {} ({:.2f}s, {} tracks, skeletonRef '{}')",
                   p, clip.duration, clip.tracks.size(), clip.skeletonRef);
     }
@@ -337,7 +338,7 @@ int main(int argc, char** argv) {
                 for (int n = 2; !taken.insert(lowered(name = root + "_" + std::to_string(n))).second; ++n) {}
             }
             const std::string p = dir + "/" + base + "_" + name + ".ocanim";
-            if (!fmt::saveOcAnim(p, res.objectAnimations[i], &why)) { AVER_ERROR("save object clip: {}", why); return 1; }
+            if (!fmt::saveOcAnim(p, res.objectAnimations[i], &why)) { AVER_ERROR("save object clip: {}", why); return exitCode(ExitCode::Failed); }
             AVER_INFO("wrote {} (object clip, {:.2f}s)", p, res.objectAnimations[i].duration);
         }
         AVER_WARN("{} object clip(s) written but bound to no mesh: this tool writes no level. Import the "
@@ -345,5 +346,5 @@ int main(int argc, char** argv) {
                   res.objectAnimations.size());
     }
 
-    return 0;
+    return exitCode(ExitCode::Ok);
 }

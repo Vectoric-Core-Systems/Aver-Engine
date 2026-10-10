@@ -22,6 +22,11 @@ DEFAULT_SHOTS = [
 ]
 
 
+def die(code, msg):
+    print(msg, file=sys.stderr)
+    sys.exit(code)  # code per core/ErrorCodes.hpp ExitCode: 1 failed, 2 usage, 3 environment
+
+
 def parse_list(path):
     shots = []
     lines = open(path, encoding="utf-8").read().splitlines() if path else DEFAULT_SHOTS
@@ -38,7 +43,7 @@ def capture(a):
     exe = os.path.abspath(a.exe)
     if "Sandbox.exe" in subprocess.run(["tasklist", "/FI", "IMAGENAME eq Sandbox.exe"],
                                        capture_output=True, text=True).stdout:
-        sys.exit("a Sandbox.exe is already running; close it first (shots share the GPU)")
+        die(3, "a Sandbox.exe is already running; close it first (shots share the GPU)")
     os.makedirs(a.out, exist_ok=True)
     bad = 0
     for name, args in parse_list(a.list):
@@ -85,7 +90,7 @@ def diff(a):
     from PIL import Image
     names = sorted(f[:-4] for f in os.listdir(a.a) if f.endswith(".png") and os.path.exists(os.path.join(a.b, f)))
     if not names:
-        sys.exit("no shot exists in both directories")
+        die(2, "no shot exists in both directories")
     fail = 0
     for name in names:
         x = np.asarray(Image.open(os.path.join(a.a, name + ".png")).convert("RGB"), dtype=np.float32)

@@ -9,6 +9,9 @@
  * aver_syn_ai_instance) rather than construct its own, or the C# side would talk to a different
  * crowd than the one being ticked.
  */
+/* MINOR 1 adds aver_syn_last_error, the reason channel. Additive only -- every existing entry point
+ * keeps its 1/0 return exactly, which is the whole design; see that function. */
+
 #include <stdint.h>
 
 #if defined(_WIN32)
@@ -38,6 +41,24 @@ AVER_SYN_API void    aver_syn_ai_register_behaviors(void* btRegistry);
 AVER_SYN_API void*   aver_syn_ai_instance(void);
 /* Drops every cover point, reservation, agent and memory. */
 AVER_SYN_API void    aver_syn_ai_reset(void);
+
+/* WHY the last call failed, as an aver::AbiError (modules/core/include/aver/core/ErrorCodes.hpp):
+   0 ok, -1 bad handle, -2 null pointer, -3 not initialised, -4 out of range, -5 unsupported,
+   -6 invalid argument, -7 allocation failed. Every code except 0 is negative, so `< 0` means
+   "failed" even for one added after your binding.
+
+   A SEPARATE ENTRY POINT, not a changed return value: every call here returns 1/0 and every caller
+   writes `if (aver_syn_crowd_configure(...))`, so a negative code on those returns would be TRUE.
+
+   WHAT IT SEPARATES. A 0 from a setter is a dead or non-positive entity (-1), an entity that lacks
+   the component (-1), a component type never registered (-3), or a bad value such as an unknown
+   mode, backend or drive or a negative agent cap (-6). A 0 from aver_syn_crowd_velocity,
+   aver_syn_hearing_get, aver_syn_squad_slot, aver_syn_cover_find or aver_syn_cover_is_covered with
+   last_error 0 is NOT a failure: a valid question that has no answer yet.
+
+   THREAD-LOCAL, and per-DLL: it reports Aver.Synapse.Abi failures only. SET ON SUCCESS TOO (to 0),
+   so a stale reason cannot outlive the failure that produced it. */
+AVER_SYN_API int32_t aver_syn_last_error(void);
 
 /* ---- Crowd ------------------------------------------------------------------------------------ */
 

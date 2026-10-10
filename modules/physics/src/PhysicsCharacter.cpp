@@ -14,6 +14,7 @@
 #include "Convert.hpp"
 #include "PhysicsInternal.hpp"
 
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <Jolt/Jolt.h>
@@ -65,6 +66,18 @@ int32_t handleOfBody(const JPH::BodyID& id) {
     return 0;
 }
 
+// Lookup with the three-way error shape of findVehicle (PhysicsVehicle.cpp). detail::findCharacter
+// leaves the slot alone, so this wraps it rather than replacing it.
+JPH::CharacterVirtual* character(int32_t h) {
+    if (!g_world) { setAbiError(AbiError::NotInitialised); return nullptr; }
+    JPH::CharacterVirtual* c = findCharacter(h);
+    setAbiError(c ? AbiError::Ok : AbiError::BadHandle);
+    return c;
+}
+
+// An argument refusal: the 0 return stays, the reason goes on aver_phys_last_error().
+int32_t refuse(AbiError e) { setAbiError(e); return 0; }
+
 } // namespace
 
 extern "C" {
@@ -72,15 +85,16 @@ extern "C" {
 // ---- Max slope angle ---------------------------------------------------------------------------
 
 int32_t aver_phys_character_set_max_slope_angle(int32_t ch, float radians) {
-    JPH::CharacterVirtual* c = findCharacter(ch);
+    JPH::CharacterVirtual* c = character(ch);
     if (!c) return 0;
     c->SetMaxSlopeAngle(radians);
     return 1;
 }
 
 int32_t aver_phys_character_max_slope_angle(int32_t ch, float* outRadians) {
-    JPH::CharacterVirtual* c = findCharacter(ch);
-    if (!c || !outRadians) return 0;
+    JPH::CharacterVirtual* c = character(ch);
+    if (!c) return 0;
+    if (!outRadians) return refuse(AbiError::NullPointer);
     // CharacterBase stores only the COSINE (mCosMaxSlopeAngle) and GetCosMaxSlopeAngle is its one
     // accessor -- acos recovers the angle this same setter put in, not a second definition of it.
     *outRadians = std::acos(c->GetCosMaxSlopeAngle());
@@ -90,13 +104,14 @@ int32_t aver_phys_character_max_slope_angle(int32_t ch, float* outRadians) {
 // ---- Stair stepping -----------------------------------------------------------------------------
 
 int32_t aver_phys_character_set_stair_stepping(int32_t ch, float stepUpCm, float stepDownCm) {
-    if (!findCharacter(ch)) return 0;
+    if (!character(ch)) return 0;
     g_stairSettings[ch] = StairSettings{stepUpCm, stepDownCm};
     return 1;
 }
 
 int32_t aver_phys_character_stair_stepping(int32_t ch, float* outStepUpCm, float* outStepDownCm) {
-    if (!findCharacter(ch) || !outStepUpCm || !outStepDownCm) return 0;
+    if (!character(ch)) return 0;
+    if (!outStepUpCm || !outStepDownCm) return refuse(AbiError::NullPointer);
     const auto it = g_stairSettings.find(ch);
     const StairSettings s = it != g_stairSettings.end() ? it->second : StairSettings{};
     *outStepUpCm = s.stepUpCm;
@@ -107,13 +122,15 @@ int32_t aver_phys_character_stair_stepping(int32_t ch, float* outStepUpCm, float
 // ---- Gravity factor ----------------------------------------------------------------------------
 
 int32_t aver_phys_character_set_gravity_factor(int32_t ch, float factor) {
-    if (!findCharacter(ch) || !std::isfinite(factor) || factor < 0.0f) return 0;
+    if (!character(ch)) return 0;
+    if (!std::isfinite(factor) || factor < 0.0f) return refuse(AbiError::InvalidArgument);
     g_world->characterGravity[ch] = factor;
     return 1;
 }
 
 int32_t aver_phys_character_gravity_factor(int32_t ch, float* outFactor) {
-    if (!findCharacter(ch) || !outFactor) return 0;
+    if (!character(ch)) return 0;
+    if (!outFactor) return refuse(AbiError::NullPointer);
     const auto it = g_world->characterGravity.find(ch);
     *outFactor = it != g_world->characterGravity.end() ? it->second : 1.0f;
     return 1;
@@ -122,7 +139,7 @@ int32_t aver_phys_character_gravity_factor(int32_t ch, float* outFactor) {
 // ---- Ground state ------------------------------------------------------------------------------
 
 int32_t aver_phys_character_ground_state(int32_t ch) {
-    JPH::CharacterVirtual* c = findCharacter(ch);
+    JPH::CharacterVirtual* c = character(ch);
     if (!c) return -1;   // not 0: 0 is OnGround, a real answer -- same convention as body motion type
     switch (c->GetGroundState()) {
         case JPH::CharacterBase::EGroundState::OnGround:      return AVER_PHYS_GROUND_ON_GROUND;
@@ -136,8 +153,9 @@ int32_t aver_phys_character_ground_state(int32_t ch) {
 // ---- What the character is standing on ----------------------------------------------------------
 
 int32_t aver_phys_character_ground_normal(int32_t ch, float* outXyz) {
-    JPH::CharacterVirtual* c = findCharacter(ch);
-    if (!c || !outXyz) return 0;
+    JPH::CharacterVirtual* c = character(ch);
+    if (!c) return 0;
+    if (!outXyz) return refuse(AbiError::NullPointer);
     // fromJoltUnit, not fromJoltDir: a ground normal is a unit vector, same as a contact normal in
     // EventListener::OnContactAdded (PhysicsWorld.cpp).
     writeVec(outXyz, fromJoltUnit(c->GetGroundNormal()));
@@ -145,21 +163,23 @@ int32_t aver_phys_character_ground_normal(int32_t ch, float* outXyz) {
 }
 
 int32_t aver_phys_character_ground_position(int32_t ch, float* outXyz) {
-    JPH::CharacterVirtual* c = findCharacter(ch);
-    if (!c || !outXyz) return 0;
+    JPH::CharacterVirtual* c = character(ch);
+    if (!c) return 0;
+    if (!outXyz) return refuse(AbiError::NullPointer);
     writeVec(outXyz, fromJolt(c->GetGroundPosition()));
     return 1;
 }
 
 int32_t aver_phys_character_ground_body(int32_t ch) {
-    JPH::CharacterVirtual* c = findCharacter(ch);
+    JPH::CharacterVirtual* c = character(ch);
     if (!c) return 0;
     return handleOfBody(c->GetGroundBodyID());
 }
 
 int32_t aver_phys_character_ground_velocity(int32_t ch, float* outXyz) {
-    JPH::CharacterVirtual* c = findCharacter(ch);
-    if (!c || !outXyz) return 0;
+    JPH::CharacterVirtual* c = character(ch);
+    if (!c) return 0;
+    if (!outXyz) return refuse(AbiError::NullPointer);
     writeVec(outXyz, fromJoltDir(c->GetGroundVelocity()));
     return 1;
 }
@@ -169,23 +189,26 @@ int32_t aver_phys_character_ground_velocity(int32_t ch, float* outXyz) {
 // units and axes there.
 
 int32_t aver_phys_character_inherited_velocity(int32_t ch, float* outXyz) {
-    if (!findCharacter(ch) || !outXyz) return 0;
+    if (!character(ch)) return 0;
+    if (!outXyz) return refuse(AbiError::NullPointer);
     const auto it = g_world->characterCarry.find(ch);
     writeVec(outXyz, it != g_world->characterCarry.end() ? fromJoltDir(it->second) : Vec3(0.0f, 0.0f, 0.0f));
     return 1;
 }
 
 int32_t aver_phys_character_set_inherited_velocity(int32_t ch, float x, float y, float z) {
-    if (!findCharacter(ch)) return 0;
+    if (!character(ch)) return 0;
     g_world->characterCarry.insert_or_assign(ch, toJoltDir(Vec3(x, y, z)));
     return 1;
 }
 
 // ---- Shape (crouching) --------------------------------------------------------------------------
 
+// Returns 0 with Unsupported when SetShape refuses because the new shape would not fit (a ceiling
+// above a standing request); InvalidArgument when the dimensions or the Jolt capsule are illegal.
 int32_t aver_phys_character_set_shape(int32_t ch, float radius, float height, float maxPenetrationCm) {
-    JPH::CharacterVirtual* c = findCharacter(ch);
-    if (!c || !g_world) return 0;
+    JPH::CharacterVirtual* c = character(ch);
+    if (!c) return 0;
 
     // Same derivation as aver_phys_character_create: Jolt's capsule takes the HALF height of its
     // cylinder, so the two caps come out of the total height first.
@@ -193,12 +216,12 @@ int32_t aver_phys_character_set_shape(int32_t ch, float radius, float height, fl
     const float halfCyl = cmToM(height) * 0.5f - rM;
     if (halfCyl <= 0.0f) {
         AVER_WARN("[Physics] character shape {}cm tall is too short for radius {}cm", height, radius);
-        return 0;
+        return refuse(AbiError::InvalidArgument);
     }
     JPH::CapsuleShapeSettings capsule(halfCyl, rM);
     capsule.SetEmbedded();
     auto res = capsule.Create();
-    if (res.HasError()) { AVER_WARN("[Physics] character shape: {}", res.GetError().c_str()); return 0; }
+    if (res.HasError()) { AVER_WARN("[Physics] character shape: {}", res.GetError().c_str()); return refuse(AbiError::InvalidArgument); }
 
     // SetShape checks the NEW shape against the world before committing and reports failure rather
     // than embedding the character in whatever it no longer fits under -- that refusal is the entire
@@ -208,7 +231,7 @@ int32_t aver_phys_character_set_shape(int32_t ch, float radius, float height, fl
                                 g_world->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
                                 g_world->system.GetDefaultLayerFilter(Layers::MOVING),
                                 {}, {}, *g_world->temp);
-    if (!ok) return 0;
+    if (!ok) return refuse(AbiError::Unsupported);
 
     // The inner body is a separate shape reference Jolt does not update on its own (its own doc
     // comment on SetInnerBodyShape says to call this after a successful SetShape) -- skipping it
@@ -225,13 +248,14 @@ int32_t aver_phys_character_set_shape(int32_t ch, float radius, float height, fl
 }
 
 int32_t aver_phys_character_shape(int32_t ch, float* outRadius, float* outHeight) {
-    JPH::CharacterVirtual* c = findCharacter(ch);
-    if (!c || !outRadius || !outHeight) return 0;
+    JPH::CharacterVirtual* c = character(ch);
+    if (!c) return 0;
+    if (!outRadius || !outHeight) return refuse(AbiError::NullPointer);
     // A capsule is the only shape either creator (aver_phys_character_create, and set_shape above)
     // ever gives a character, which is what makes the downcast safe; the sub-type is still asked
     // rather than assumed, so a third creator with another shape reads as a refusal, not as garbage.
     const JPH::Shape* shape = c->GetShape();
-    if (!shape || shape->GetSubType() != JPH::EShapeSubType::Capsule) return 0;
+    if (!shape || shape->GetSubType() != JPH::EShapeSubType::Capsule) return refuse(AbiError::Unsupported);
     const JPH::CapsuleShape* capsule = static_cast<const JPH::CapsuleShape*>(shape);
     // The creators' derivation run backwards: the caps go back onto the cylinder's half height.
     *outRadius = mToCm(capsule->GetRadius());
@@ -242,25 +266,26 @@ int32_t aver_phys_character_shape(int32_t ch, float* outRadius, float* outHeight
 // ---- Mass and push strength -----------------------------------------------------------------------
 
 int32_t aver_phys_character_set_mass(int32_t ch, float massKg) {
-    JPH::CharacterVirtual* c = findCharacter(ch);
+    JPH::CharacterVirtual* c = character(ch);
     if (!c) return 0;
     if (massKg <= 0.0f) {
         AVER_WARN("[Physics] character mass must be positive; {} kg refused", massKg);
-        return 0;
+        return refuse(AbiError::InvalidArgument);
     }
     c->SetMass(massKg);
     return 1;
 }
 
 int32_t aver_phys_character_mass(int32_t ch, float* outMassKg) {
-    JPH::CharacterVirtual* c = findCharacter(ch);
-    if (!c || !outMassKg) return 0;
+    JPH::CharacterVirtual* c = character(ch);
+    if (!c) return 0;
+    if (!outMassKg) return refuse(AbiError::NullPointer);
     *outMassKg = c->GetMass();
     return 1;
 }
 
 int32_t aver_phys_character_set_max_strength(int32_t ch, float maxStrengthKgCmS2) {
-    JPH::CharacterVirtual* c = findCharacter(ch);
+    JPH::CharacterVirtual* c = character(ch);
     if (!c) return 0;
     // Same conversion as any other force in this ABI (physics_abi.h's force/impulse block): one
     // length dimension, centimetres here and metres (Jolt's Newtons) there.
@@ -269,8 +294,9 @@ int32_t aver_phys_character_set_max_strength(int32_t ch, float maxStrengthKgCmS2
 }
 
 int32_t aver_phys_character_max_strength(int32_t ch, float* outMaxStrengthKgCmS2) {
-    JPH::CharacterVirtual* c = findCharacter(ch);
-    if (!c || !outMaxStrengthKgCmS2) return 0;
+    JPH::CharacterVirtual* c = character(ch);
+    if (!c) return 0;
+    if (!outMaxStrengthKgCmS2) return refuse(AbiError::NullPointer);
     *outMaxStrengthKgCmS2 = mToCm(c->GetMaxStrength());
     return 1;
 }
@@ -278,8 +304,11 @@ int32_t aver_phys_character_max_strength(int32_t ch, float* outMaxStrengthKgCmS2
 // ---- Entity to character ------------------------------------------------------------------------------
 
 int32_t aver_phys_character_of_entity(int32_t entity) {
+    // No match is an ordinary answer, so a live world records Ok.
+    if (!g_world) { setAbiError(AbiError::NotInitialised); return 0; }
+    setAbiError(AbiError::Ok);
     // 0 is every unstamped character's user data, so asking for it would name one at random.
-    if (!g_world || entity == 0) return 0;
+    if (entity == 0) return 0;
     // A walk of the character table, like handleOfBody above: a world holds a handful of characters.
     // The same truncation aver_phys_raycast reads the stamp back with.
     for (const auto& [h, c] : g_world->characters)

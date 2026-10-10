@@ -57,14 +57,18 @@ typedef struct AverDecalSpawnDesc {
 AVER_SCENE_ABI int32_t aver_decal_abi_version(void);
 
 /* Sets how many pooled decals may be alive at once (default 256), dropping the old pool. 0 disables
- * spawning. Returns the capacity in force. */
+ * spawning. Returns the capacity in force; a clamped request records InvalidArgument on
+ * aver_scene_last_error. */
 AVER_SCENE_ABI int32_t aver_decal_pool_set_capacity(int32_t capacity);
 
 /* Spawns a decal, recycling the oldest when the pool is full. Returns its entity (> 0), or 0 when
- * the pool is disabled or the world refused an entity. */
+ * desc is null, a position/size/orientation value is not finite, the pool is disabled, or the world
+ * refused an entity.
+ * Reason on aver_scene_last_error (same DLL); see ErrorCodes.hpp. */
 AVER_SCENE_ABI int32_t aver_decal_spawn(const AverDecalSpawnDesc* desc);
 
-/* Gives one decal back now. 1 when `entity` was an active pooled decal. */
+/* Gives one decal back now. 1 when `entity` was an active pooled decal.
+ * Reason on aver_scene_last_error (same DLL); see ErrorCodes.hpp. */
 AVER_SCENE_ABI int32_t aver_decal_release(int32_t entity);
 
 /* Releases every pooled decal. */

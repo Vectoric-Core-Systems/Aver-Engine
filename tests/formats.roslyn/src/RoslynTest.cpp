@@ -16,6 +16,7 @@ using namespace aver;
 
 static int g_failures = 0;
 static int g_skipped = 0;
+static constexpr int kSkip = 77;  // ctest SKIP_RETURN_CODE (root CMakeLists.txt); not a pass
 
 // Records one assertion. Counts a failure and logs it when the condition is false.
 static void check(bool cond, const std::string& what) {
@@ -68,7 +69,7 @@ int main() {
     if (!fmt::averDesignAvailable()) {
         AVER_WARN("=== SKIPPED: averdesign is not staged at {} ===", fmt::averDesignPath());
         AVER_WARN("=== nothing about the Roslyn backend was checked in this run ===");
-        return 0;
+        return kSkip;
     }
 
     std::error_code ec;

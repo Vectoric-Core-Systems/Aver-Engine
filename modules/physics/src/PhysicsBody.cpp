@@ -13,6 +13,7 @@
 #include "Convert.hpp"
 #include "PhysicsInternal.hpp"
 
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
@@ -30,6 +31,12 @@ using namespace aver::physics;
 using namespace aver::physics::detail;
 
 namespace {
+
+// A refusal AFTER the handle resolved: findBody has already recorded Ok, so the reason is set here.
+int32_t refuse(AbiError e) {
+    setAbiError(e);
+    return 0;
+}
 
 // THE MOTION PROPERTIES, OR NULL -- and null is the ordinary answer, not an error.
 //
@@ -54,9 +61,9 @@ int32_t withMotionProperties(int32_t handle, Fn&& fn) {
     const JPH::BodyID* id = findBody(handle);
     if (!id) return 0;
     JPH::BodyLockWrite lock(g_world->system.GetBodyLockInterface(), *id);
-    if (!lock.Succeeded()) return 0;
+    if (!lock.Succeeded()) return refuse(AbiError::BadHandle);
     JPH::MotionProperties* mp = lock.GetBody().GetMotionPropertiesUnchecked();
-    if (!mp) return 0;
+    if (!mp) return refuse(AbiError::Unsupported);
     fn(*mp, lock.GetBody());
     return 1;
 }
@@ -95,7 +102,7 @@ bool giveMotionProperties(int32_t handle) {
     JPH::BodyCreationSettings s;
     {
         JPH::BodyLockRead lock(g_world->system.GetBodyLockInterface(), oldId);
-        if (!lock.Succeeded()) return false;
+        if (!lock.Succeeded()) { setAbiError(AbiError::BadHandle); return false; }
         if (lock.GetBody().CanBeKinematicOrDynamic()) return true;
         s = lock.GetBody().GetBodyCreationSettings();
     }
@@ -111,6 +118,7 @@ bool giveMotionProperties(int32_t handle) {
                       "kinematic/dynamic would rebuild the body under the joint, so it stays static "
                       "(create the body movable, or add the joint after the switch)", handle);
         }
+        setAbiError(AbiError::Unsupported);
         return false;
     }
 
@@ -135,6 +143,7 @@ bool giveMotionProperties(int32_t handle) {
     JPH::Body* fresh = bi().CreateBody(s);
     if (!fresh) {
         AVER_WARN("[Physics] body limit reached; body {} stays static", handle);
+        setAbiError(AbiError::AllocationFailed);
         return false;
     }
     const JPH::BodyID newId = fresh->GetID();
@@ -163,18 +172,18 @@ int32_t aver_phys_body_set_motion_type(int32_t body, int32_t motionType) {
         default:
             AVER_WARN("[Physics] motion type {} is not one of static(0)/kinematic(1)/dynamic(2)",
                       motionType);
-            return 0;
+            return refuse(AbiError::InvalidArgument);
     }
     // DYNAMIC NEEDS A SHAPE WITH MASS. A triangle mesh (or height field) has no volume, so Jolt reports
     // zero mass for it, and giveMotionProperties' placeholder mass exists only so a KINEMATIC body can
     // be built from one -- a dynamic body on it would fall as a 1000 kg box with mesh collision.
     if (t == JPH::EMotionType::Dynamic) {
         JPH::BodyLockRead lock(g_world->system.GetBodyLockInterface(), *id);
-        if (!lock.Succeeded()) return 0;
+        if (!lock.Succeeded()) return refuse(AbiError::BadHandle);
         if (!(lock.GetBody().GetShape()->GetMassProperties().mMass > 0.0f)) {
             AVER_WARN("[Physics] body {} has a shape with no mass (a triangle mesh): it can be static or "
                       "kinematic, not dynamic", body);
-            return 0;
+            return refuse(AbiError::Unsupported);
         }
     }
     // A static body has to be rebuilt to move at all; `id` reads the rebuilt body's id afterwards.
@@ -218,17 +227,18 @@ int32_t aver_phys_body_move_kinematic(int32_t body, float x, float y, float z,
     // velocity derived from it would launch whatever stands on the body.
     if (!(dt > 0.0f) || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
         !std::isfinite(qx) || !std::isfinite(qy) || !std::isfinite(qz) || !std::isfinite(qw))
-        return 0;
+        return refuse(AbiError::InvalidArgument);
     // Kinematic only: MoveKinematic asserts on a static body, and a velocity written into a dynamic
     // one is a push the solver then fights.
-    if (bi().GetMotionType(*id) != JPH::EMotionType::Kinematic) return 0;
+    if (bi().GetMotionType(*id) != JPH::EMotionType::Kinematic)
+        return refuse(AbiError::Unsupported);
     bi().MoveKinematic(*id, toJolt(Vec3(x, y, z)), toJolt(Quat(qx, qy, qz, qw).normalized()), dt);
     return 1;
 }
 
 int32_t aver_phys_body_angular_velocity(int32_t body, float* outXyz) {
     AVER_PHYS_BODY_OR_ZERO(body);
-    if (!outXyz) return 0;
+    if (!outXyz) return refuse(AbiError::NullPointer);
     writeVec(outXyz, fromJoltAngular(bi().GetAngularVelocity(*id)));
     return 1;
 }
@@ -301,7 +311,7 @@ int32_t aver_phys_body_set_friction(int32_t body, float friction) {
 
 int32_t aver_phys_body_friction(int32_t body, float* outFriction) {
     AVER_PHYS_BODY_OR_ZERO(body);
-    if (!outFriction) return 0;
+    if (!outFriction) return refuse(AbiError::NullPointer);
     *outFriction = bi().GetFriction(*id);
     return 1;
 }
@@ -314,7 +324,7 @@ int32_t aver_phys_body_set_restitution(int32_t body, float restitution) {
 
 int32_t aver_phys_body_restitution(int32_t body, float* outRestitution) {
     AVER_PHYS_BODY_OR_ZERO(body);
-    if (!outRestitution) return 0;
+    if (!outRestitution) return refuse(AbiError::NullPointer);
     *outRestitution = bi().GetRestitution(*id);
     return 1;
 }
@@ -327,7 +337,7 @@ int32_t aver_phys_body_set_gravity_factor(int32_t body, float factor) {
 
 int32_t aver_phys_body_gravity_factor(int32_t body, float* outFactor) {
     AVER_PHYS_BODY_OR_ZERO(body);
-    if (!outFactor) return 0;
+    if (!outFactor) return refuse(AbiError::NullPointer);
     *outFactor = bi().GetGravityFactor(*id);
     return 1;
 }
@@ -346,7 +356,7 @@ int32_t aver_phys_body_set_damping(int32_t body, float linear, float angular) {
 }
 
 int32_t aver_phys_body_damping(int32_t body, float* outLinear, float* outAngular) {
-    if (!outLinear || !outAngular) return 0;
+    if (!outLinear || !outAngular) return refuse(AbiError::NullPointer);
     return withMotionProperties(body, [&](const JPH::MotionProperties& mp, JPH::Body&) {
         *outLinear  = mp.GetLinearDamping();
         *outAngular = mp.GetAngularDamping();
@@ -377,7 +387,7 @@ int32_t aver_phys_body_set_mass(int32_t body, float massKg) {
 }
 
 int32_t aver_phys_body_mass(int32_t body, float* outMassKg) {
-    if (!outMassKg) return 0;
+    if (!outMassKg) return refuse(AbiError::NullPointer);
     return withMotionProperties(body, [&](const JPH::MotionProperties& mp, JPH::Body&) {
         const float inv = mp.GetInverseMass();
         *outMassKg = inv > 0.0f ? 1.0f / inv : 0.0f;
