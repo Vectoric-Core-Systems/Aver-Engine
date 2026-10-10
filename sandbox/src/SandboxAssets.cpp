@@ -45,6 +45,34 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
     content_.loadProjectMeshes(*e.device());
     content_.setMeshLoadedHook(nullptr, nullptr);
 
+    // Lazy (streamed) meshes upload later via acquireMesh: run the same registration for them. The pass
+    // is static so it outlives this call (app and engine outlive the content).
+    static MeshLoadPass s_lazyPass;
+    s_lazyPass.app = this;
+    s_lazyPass.engine = &e;
+    content_.setMeshAcquiredHook(&SandboxApp::onMeshLoaded, &s_lazyPass);
+    content_.setMeshReleasedHook([](u64 id, void* user) {
+        auto* p = static_cast<MeshLoadPass*>(user);
+        if (!p || !p->app || !p->engine) return;
+        SandboxApp& app = *p->app;
+        app.meshTris_.erase(id);
+        app.pickGeometry_.erase(id);
+        app.skinnedMeshIds_.erase(id);   // meshPathById_ stays: it is only a path lookup
+#if AVER_MODULE_PBR
+        if (const auto oit = app.selOutlineLines_.find(id); oit != app.selOutlineLines_.end()) {
+            if (oit->second) p->engine->device()->destroyLineMesh(oit->second);
+            app.selOutlineLines_.erase(oit);
+        }
+#endif
+#if AVER_MODULE_TRIFACTOR
+        if (const auto lit = app.meshLods_.find(id); lit != app.meshLods_.end()) {
+            for (const rhi::MeshHandle lh : lit->second.handles) app.depthProxy_.erase(lh);
+            app.meshLods_.erase(lit);
+        }
+        app.meshClusterData_.erase(id);
+#endif
+    }, &s_lazyPass);
+
 #if AVER_MODULE_TRIFACTOR
     // Run-wide LOD summary: vertex-buffer sharing trade is measured against this.
     if (pass.lodCoarserLevels || pass.lodSharedLevels)

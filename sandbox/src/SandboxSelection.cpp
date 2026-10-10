@@ -284,6 +284,9 @@ SandboxApp::EditId SandboxApp::editIdFor(AvId e) {
     const EditId id = nextEditId_++;
     entityToEdit_[key] = id;
     editToEntity_[id]  = e;
+#if AVER_MODULE_SCENE
+    pinStreamed(static_cast<scene::Entity>(e));   // an entity an undo entry names must never stream out
+#endif
     return id;
 }
 
@@ -1117,6 +1120,9 @@ void SandboxApp::destroyEntity(scene::Entity e) {
 
     std::vector<scene::Entity> doomed;
     collectSubtree(w, e, doomed);
+#if AVER_MODULE_SCENE
+    onStreamedEntityDestroyed(e);   // a streamed placement's record goes with it
+#endif
 
     w.destroy(e);
     for (const scene::Entity d : doomed) {

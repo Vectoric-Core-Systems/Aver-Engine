@@ -1,6 +1,7 @@
 #include "aver/game/GameLevel.hpp"
 
 #include "aver/game/GameContent.hpp"
+#include "aver/formats/OcStream.hpp"
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 
@@ -124,6 +125,36 @@ void GameLevel::load(const std::string& path, GameContent& content) {
 
     // The placement loop is aver::world::instantiate now, shared with the editor. What is left here
     // is the part that is genuinely the GAME's: which material cache to bind into, and what to keep.
+    // LEVEL STREAMING (docs/LEVEL_STREAMING.md): bounds come from the generated .ocstream, by id.
+    const bool streamed = !legacy && w.stream.enabled && device_;
+    streamFoliage_.clear();
+    streamDataStale_ = false;
+    if (streamed) {
+        fmt::OcStreamData sd;
+        std::string sdWhy;
+        const std::string projectDir = content.project().dir;
+        if (w.stream.dataPath.empty() ||
+            !fmt::loadOcStream((std::filesystem::path(projectDir) / w.stream.dataPath).string(), sd, &sdWhy)) {
+            streamDataStale_ = true;
+            AVER_WARN("[Level] streamed level has no streaming data ({}); every object stays loaded until it is "
+                      "regenerated (World Settings > Regenerate Streaming Data)",
+                      w.stream.dataPath.empty() ? std::string("no data= on its STREAM record") : sdWhy);
+        } else {
+            const usize matched = fmt::applyOcStreamBounds(w, sd);
+            streamFoliage_ = sd.foliage;
+            streamDataStale_ = sd.sourceHash != fmt::hashPlacements(w) || matched < w.placements.size();
+            AVER_INFO("[Level] streaming data {}: bounds for {} of {} placement(s){}", w.stream.dataPath, matched,
+                      w.placements.size(), streamDataStale_ ? " -- out of date, regenerate it" : "");
+        }
+    } else if (device_) {
+        // A whole level holds its own meshes, so one in another level's on-demand folder is uploaded too.
+        for (const fmt::OcWorldPlacement& p : w.placements) {
+            if (p.className.empty() && std::find(heldMeshes_.begin(), heldMeshes_.end(), p.objectId) == heldMeshes_.end() &&
+                content.acquireMesh(*device_, p.objectId))
+                heldMeshes_.push_back(p.objectId);
+        }
+    }
+
     world::InstantiateOptions opt;
     if (!legacy) opt.groundHeightAt = hooks_.groundHeightAt;
     // A mesh's local bounds, by the objectId CMeshRenderer::mesh carries -- see LevelInstance.hpp's
@@ -179,7 +210,8 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     // All LODs of a mesh share one materialSlots table (Trifactor's ladder never renames a slot), so
     // binding the base mesh id's slots covers every LOD that stands in for it too.
     std::unordered_set<u64> meshMaterialsBound;
-    for (const fmt::OcWorldPlacement& p : w.placements) {
+    // A streamed level binds a mesh's slot materials when the mesh streams in (LevelStreaming).
+    for (const fmt::OcWorldPlacement& p : streamed ? std::vector<fmt::OcWorldPlacement>{} : w.placements) {
         const u64 meshId = fnv1a64(std::string_view(p.asset));
         if (!meshMaterialsBound.insert(meshId).second) continue;   // an earlier placement already did this mesh
         const i32 slot0Token = content.meshDefaultMaterial(meshId);
@@ -214,7 +246,10 @@ void GameLevel::load(const std::string& path, GameContent& content) {
 #if AVER_MODULE_PHYSICS
     const u32 collisionCacheHitsBefore = content.collisionCacheHits();   // the counter is per process
 #endif
-    const world::LevelInstance inst = world::instantiate(w, opt);
+    content_ = &content;
+    world::LevelInstance inst;
+    if (streamed) streaming_.begin(w, content, *device_, opt, streamHooks_);
+    else inst = world::instantiate(w, opt);
     // load()'s OWN span ends here regardless of what opt.progress reported -- a level with zero
     // placements never calls it at all, and this is what still lands the fraction on 75% for one.
     if (hooks_.progress) hooks_.progress("Placing objects", 0.75f);
@@ -365,6 +400,14 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     const Vec3 kCorner[8] = {{-1,-1,-1},{1,-1,-1},{-1,1,-1},{1,1,-1},
                              {-1,-1, 1},{1,-1, 1},{-1,1, 1},{1,1, 1}};
     for (const fmt::OcWorldPlacement& p : w.placements) {
+        if (p.hasBounds) {   // baked world bounds (streamed levels: the mesh is not loaded yet)
+            const Vec3 lo{p.boundsMin[0], p.boundsMin[1], p.boundsMin[2]}, hi{p.boundsMax[0], p.boundsMax[1], p.boundsMax[2]};
+            if (!hasBounds_) { boundsLo_ = lo; boundsHi_ = hi; hasBounds_ = true; continue; }
+            boundsLo_.x = std::fmin(boundsLo_.x, lo.x); boundsHi_.x = std::fmax(boundsHi_.x, hi.x);
+            boundsLo_.y = std::fmin(boundsLo_.y, lo.y); boundsHi_.y = std::fmax(boundsHi_.y, hi.y);
+            boundsLo_.z = std::fmin(boundsLo_.z, lo.z); boundsHi_.z = std::fmax(boundsHi_.z, hi.z);
+            continue;
+        }
         const Vec3 c{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)};
         // An asset this content set never loaded (a typo, or a mesh the cook skipped) has no bounds
         // to ask for. Contributing just its position is right: it occupies no space we can prove,
@@ -502,6 +545,8 @@ void GameLevel::spawnClassPlacements() {
 const std::string* GameLevel::vehiclePresetOf(scene::Entity e) const {
     for (const VehiclePlacement& vp : vehiclePlacements_)
         if (vp.entity == e) return &vp.preset;
+    // A streamed placement's token lives on its record (streamed cars park; they are not driven).
+    if (const fmt::OcWorldPlacement* r = streaming_.recordOf(e); r && !r->vehiclePreset.empty()) return &r->vehiclePreset;
     return nullptr;
 }
 
@@ -612,6 +657,21 @@ bool GameLevel::placementBounds(Vec3& lo, Vec3& hi, f32& radius) const {
     return true;
 }
 
+std::vector<std::string> GameLevel::foliageTablePaths(const std::vector<std::string>& foliageFiles) const {
+    std::vector<std::string> out(foliageFiles.size());
+    if (!content_) return out;
+    for (usize i = 0; i < foliageFiles.size(); ++i)
+        for (const fmt::OcStreamFoliage& f : streamFoliage_)
+            if (f.source == foliageFiles[i])
+                out[i] = (std::filesystem::path(content_->project().dir) / f.cells).string();
+    return out;
+}
+
+void GameLevel::tickStreaming(const std::vector<Vec3>& viewers) {
+    if (streaming_.active()) streaming_.tick(scene::World::instance(), viewers);
+    if (content_ && device_) content_->flushMeshReleases(*device_, ++streamFrame_);
+}
+
 void GameLevel::unload() {
 #if AVER_MODULE_FRAMEWORK
     // BEFORE the raw-entity loop below, and through aver_fw_destroy rather than world.destroy(): a
@@ -623,6 +683,10 @@ void GameLevel::unload() {
     classPlacements_.clear();   // in case unload() runs before spawnClassPlacements() ever did
 #endif
     scene::World& world = scene::World::instance();
+    streaming_.end(world);
+    if (content_ && device_) for (const u64 id : heldMeshes_) content_->releaseMesh(*device_, id);
+    heldMeshes_.clear();
+    streamFoliage_.clear();
     animatedBodies_.clear();
     for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);
     levelEntities_.clear();

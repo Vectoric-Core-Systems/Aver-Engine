@@ -23,11 +23,13 @@
 #include "aver/formats/OcMesh.hpp"
 #include "aver/formats/OcWorld.hpp"   // the scene level a multi-node glTF now writes
 #include "aver/formats/OcInstances.hpp"   // .ocinst -- where a PointInstancer's instances go by default
+#include "aver/formats/OcStream.hpp"      // .ocstream -- `AverAssetC stream`
 #include "aver/world/LevelTransform.hpp"   // its Euler encoding, for rotated USD instances
 #include "aver/platform/FileSystem.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/core/Hash.hpp"
 
 #if AVER_HAVE_AUDIO_IMPORT
 #include "aver/formats/OcAudio.hpp"
@@ -80,6 +82,9 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <cmath>
+#include <functional>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -1196,6 +1201,59 @@ void cookAndRewriteSlots(std::vector<fmt::ImportedMaterial>& materials,
 #endif
 }
 
+// ---- stream: generate a level's streaming data (docs/LEVEL_STREAMING.md) -------------------------
+//
+// The level gets STREAM settings, a data= reference and placement ids; bounds and cell-sorted foliage go
+// to <project>/Binaries/Streaming (fmt::bakeOcStream, shared with the editor's Regenerate button).
+int runStream(int argc, char** argv) {
+    std::string levelPath, contentDir, projectDir;
+    f32 cellM = 64.0f, loadM = 250.0f, evictM = 300.0f, foliageCellM = 64.0f;
+    for (int i = 2; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--content-dir" && i + 1 < argc)       contentDir = argv[++i];
+        else if (a == "--project-dir" && i + 1 < argc)  projectDir = argv[++i];
+        else if (a == "--cell" && i + 1 < argc)         cellM = static_cast<f32>(std::atof(argv[++i]));
+        else if (a == "--load" && i + 1 < argc)         loadM = static_cast<f32>(std::atof(argv[++i]));
+        else if (a == "--evict" && i + 1 < argc)        evictM = static_cast<f32>(std::atof(argv[++i]));
+        else if (a == "--foliage-cell" && i + 1 < argc) foliageCellM = static_cast<f32>(std::atof(argv[++i]));
+        else if (!a.empty() && a[0] != '-' && levelPath.empty()) levelPath = a;
+        else { AVER_ERROR("[stream] unknown argument '{}'", a); return exitCode(ExitCode::Usage); }
+    }
+    if (levelPath.empty() || contentDir.empty() || cellM <= 0 || foliageCellM <= 0 || loadM <= 0 ||
+        evictM <= loadM) {
+        AVER_ERROR("[stream] usage: AverAssetC stream <level.ocworld> --content-dir <dir> [--project-dir <dir>] "
+                   "[--cell m] [--load m] [--evict m (> load)] [--foliage-cell m]");
+        return exitCode(ExitCode::Usage);
+    }
+    if (projectDir.empty()) projectDir = std::filesystem::path(contentDir).parent_path().string();
+
+    fmt::OcWorldData w;
+    std::string err;
+    if (!fmt::loadOcworld(levelPath, w, &err)) {
+        AVER_ERROR("[stream] cannot load '{}': {}", levelPath, err);
+        return exitCode(ExitCode::Failed);
+    }
+    w.stream.enabled = true;
+    w.stream.cellCm = cellM * 100.0f;
+    w.stream.loadCm = loadM * 100.0f;
+    w.stream.evictCm = evictM * 100.0f;
+    fmt::OcStreamBakeOptions opt;
+    opt.foliageCellCm = foliageCellM * 100.0f;
+    fmt::OcStreamBakeReport rep;
+    const std::string stem = std::filesystem::path(levelPath).stem().string();
+    if (!fmt::bakeOcStream(w, stem, contentDir, projectDir, opt, rep, &err) || !fmt::saveOcworld(levelPath, w, &err)) {
+        AVER_ERROR("[stream] {}", err);
+        return exitCode(ExitCode::Failed);
+    }
+    std::string dirs;
+    for (const std::string& d : w.stream.lazyDirs) dirs += (dirs.empty() ? "" : ",") + d;
+    AVER_INFO("[stream] {}: {} placements ({} with bounds, {} new ids), foliage {} instances in {} cells of {} "
+              "table(s), data {}, lazy dirs: {}", levelPath, rep.placements, rep.withBounds, rep.newIds,
+              rep.foliageInstances, rep.foliageCells, rep.foliageTables, w.stream.dataPath,
+              dirs.empty() ? "(none)" : dirs);
+    return exitCode(ExitCode::Ok);
+}
+
 } // namespace
 
 // `convert` converts argv[2] (a glTF/GLB, OBJ, USD stage, or -- when this build has audio import -- a
@@ -1223,6 +1281,8 @@ int main(int argc, char** argv) {
 #if AVER_HAVE_MATERIAL_COMPILE
         "\n       AverAssetC material <texture-file>... --out-dir <dir> --base <name>"
 #endif
+        "\n       AverAssetC stream <level.ocworld> --content-dir <dir> [--cell m] [--load m] [--evict m]"
+        "\n                          [--foliage-cell m]   bake placement bounds, ids, STREAM record, foliage cells"
         ;
 
     if (argc < 2) {
@@ -1234,6 +1294,8 @@ int main(int argc, char** argv) {
 #if AVER_HAVE_MATERIAL_COMPILE
     if (subcommand == "material") return runMaterial(argc, argv);
 #endif
+
+    if (subcommand == "stream") return runStream(argc, argv);
 
     if (subcommand != "convert") {
         AVER_ERROR("{}", kUsage);

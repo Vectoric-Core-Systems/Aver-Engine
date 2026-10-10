@@ -19,6 +19,7 @@
 #include "aver/game/GameLevel.hpp"
 #include "aver/game/GameWater.hpp"
 #include "aver/game/GameStreaming.hpp"
+#include "aver/game/GameFoliage.hpp"
 #include "aver/game/GameLandscape.hpp"
 #include "aver/game/MouseCapture.hpp"
 #include "aver/game/PlayMobility.hpp"
@@ -3834,6 +3835,45 @@ private:
     // Hooks after loadLevel: editor setup (labels, body map, camera, GI). One per file kind.
     void onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded);
     void onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& loaded);
+
+#if AVER_MODULE_SCENE
+    // LEVEL STREAMING (SandboxLevelStream.cpp, docs/LEVEL_STREAMING.md).
+    void installLevelStreamHooks(Engine& eng);
+    void onStreamedIn(const std::vector<scene::Entity>& es, const std::vector<u32>& placements,
+                      const std::vector<i32>& bodies);
+    void onStreamedOut(scene::Entity e, u32 placement, bool writeBack);
+    bool streamRecordFromEntity(scene::Entity e, const std::unordered_map<u32, const Transform*>* animPlaced,
+                                fmt::OcWorldPlacement& p, bool& keepParent);
+    void adoptNewLevelEntities();
+    void appendStreamedSequenceTracks(fmt::OcWorldData& w);
+    bool regenerateStreamData(std::string& report);
+    void refreshStreamRecord(scene::Entity e, u32 placement, fmt::OcWorldPlacement p);
+    void pinStreamed(scene::Entity e);
+    void onStreamedEntityDestroyed(scene::Entity e);
+    void tickLevelStreaming(f32 dt);
+    void buildStreamedPlacements(fmt::OcWorldData& w, const std::unordered_map<u32, const Transform*>& animPlaced,
+                                 std::unordered_map<u32, i32>& slotOf);
+    bool fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement& p,
+                                 const std::unordered_map<u32, const Transform*>* animPlaced);
+    bool entityWorldBounds(scene::Entity e, f32 outMin[3], f32 outMax[3]);
+    void stampStreamFields(fmt::OcWorldData& w, const std::unordered_map<u32, i32>& slotOf);
+    void buildLevelStreamingSettings();
+    std::string streamRegenReport_;
+    usize streamSeenCount_ = 0;                  // levelEntities_ size at the last adoption pass
+    std::unordered_set<u32> streamAdopted_;      // checked by adoptNewLevelEntities (adopted or not a placement)
+    std::unordered_set<u32> streamSelPinned_;    // pinned because selected
+    bool streamPlayWas_ = false;
+    std::unordered_set<u32> streamPlayResident_; // streamed entities resident when Play started
+    std::vector<i32> streamOutSlot_;             // record index -> saved placement line, last save
+    std::vector<fmt::OcSeqTrack> streamSeqTracks_;   // object tracks of a streamed level, kept aside
+    fmt::OcSequence streamSeqHeader_;
+    // Label each streamed entity got when it streamed in (a changed label is a rename), and what is pinned.
+    std::unordered_map<u32, std::string> streamLabel_;
+    std::unordered_set<u32> streamPinned_;
+#  if AVER_MODULE_VOXI
+    game::LevelFoliage levelFoliage_;
+#  endif
+#endif
 
 #if AVER_MODULE_FRAMEWORK
     void spawnClassPlacements();

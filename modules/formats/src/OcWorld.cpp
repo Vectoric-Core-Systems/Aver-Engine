@@ -26,6 +26,26 @@ std::string num(f64 v) {
     return buf;
 }
 
+// Splits `s` on ',' into trimmed-free pieces (empty pieces kept).
+std::vector<std::string_view> splitCommas(std::string_view s) {
+    std::vector<std::string_view> r;
+    usize b = 0;
+    for (;;) {
+        const usize c = s.find(',', b);
+        if (c == std::string_view::npos) { r.push_back(s.substr(b)); break; }
+        r.push_back(s.substr(b, c - b));
+        b = c + 1;
+    }
+    return r;
+}
+
+// True when `tok` starts with `prefix` (case-insensitive); `rest` receives the remainder.
+bool keyValue(std::string_view tok, std::string_view prefix, std::string_view& rest) {
+    if (tok.size() < prefix.size() || !equalsCI(tok.substr(0, prefix.size()), prefix)) return false;
+    rest = tok.substr(prefix.size());
+    return true;
+}
+
 // PLACE's `name` argument is free text -- an outliner label like "Player Start" or "T-Rex 2" -- and
 // splitWhitespace (TextScan.hpp) has no quoting: a raw space would split the name across two tokens,
 // and a raw '%' would make a round trip ambiguous with an escape of this function's own making. So
@@ -570,6 +590,19 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "disabled"))      dc.disabled = true;
             }
             out.decals.push_back(std::move(dc));
+        } else if (equalsCI(key, "STREAM")) {
+            out.stream.enabled = true;
+            for (usize i = 1; i < t.size(); ++i) {
+                std::string_view v;
+                if      (keyValue(t[i], "cell=", v))  out.stream.cellCm  = static_cast<f32>(parseF64(v, out.stream.cellCm));
+                else if (keyValue(t[i], "load=", v))  out.stream.loadCm  = static_cast<f32>(parseF64(v, out.stream.loadCm));
+                else if (keyValue(t[i], "evict=", v)) out.stream.evictCm = static_cast<f32>(parseF64(v, out.stream.evictCm));
+                else if (keyValue(t[i], "data=", v))  out.stream.dataPath = std::string(v);
+                else if (keyValue(t[i], "lazy=", v)) {
+                    for (std::string_view d : splitCommas(v))
+                        if (!d.empty()) out.stream.lazyDirs.emplace_back(d);
+                }
+            }
         } else if (equalsCI(key, "FOLIAGE") && t.size() >= 2) {
             // A single token, exactly like PLACE's own asset column, LANDSCAPE's `section` and
             // SCATTER's `mesh` -- none of those support a path with a space in it either, so this
@@ -651,6 +684,7 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 p.sx = p.sy = p.sz = (s == 0.0 ? 1.0 : s);
                 next = 9;
             }
+            std::string_view kv;
             for (usize i = next; i < t.size(); ++i) {
                 if (equalsCI(t[i], "nocollide")) p.collide = false;
                 // Bare token, beside `nocollide`, parsed the identical way and for the identical
@@ -696,6 +730,18 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 // fallback for the same reason. Percent-decoded though a preset is a plain word, so a
                 // hand-written odd one still survives the round trip as ONE token.
                 else if (equalsCI(t[i], "vehicle") && i + 1 < t.size()) { p.vehiclePreset = percentDecode(t[++i]); }
+                // Streaming tokens `id=<hex>` and `aabb=a,b,c,d,e,f`, before the material fallback.
+                else if (keyValue(t[i], "id=", kv)) p.placementId = parseU64(std::string("0x") + std::string(kv));
+                else if (keyValue(t[i], "aabb=", kv)) {
+                    const std::vector<std::string_view> c = splitCommas(kv);
+                    if (c.size() == 6) {
+                        for (usize k = 0; k < 3; ++k) {
+                            p.boundsMin[k] = static_cast<f32>(parseF64(c[k]));
+                            p.boundsMax[k] = static_cast<f32>(parseF64(c[3 + k]));
+                        }
+                        p.hasBounds = true;
+                    }
+                }
                 else if (p.material.empty()) p.material = std::string(t[i]);
             }
             p.objectId = fnv1a64(std::string_view(p.asset));
@@ -808,6 +854,19 @@ std::string writeOcworld(const OcWorldData& w) {
     if (w.hasCamera) {
         s += "CAMERA " + num(w.camX) + " " + num(w.camY) + " " + num(w.camZ) +
              " " + num(w.camYaw) + " " + num(w.camPitch) + " " + num(w.camSpeed) + "\n";
+    }
+    if (w.stream.enabled) {
+        s += "STREAM cell=" + num(w.stream.cellCm) + " load=" + num(w.stream.loadCm) +
+             " evict=" + num(w.stream.evictCm);
+        if (!w.stream.lazyDirs.empty()) {
+            s += " lazy=";
+            for (usize i = 0; i < w.stream.lazyDirs.size(); ++i) {
+                if (i) s += ',';
+                s += w.stream.lazyDirs[i];
+            }
+        }
+        if (!w.stream.dataPath.empty()) s += " data=" + w.stream.dataPath;
+        s += "\n";
     }
     if (w.hasSun) {
         // The VECTOR is written, because it round-trips exactly where degrees do not. The elevation
@@ -1145,6 +1204,12 @@ std::string writeOcworld(const OcWorldData& w) {
         }
         // Omitted when empty, same rule again. After the anim tokens, matching the parser's read order.
         if (!p.vehiclePreset.empty()) { s += " vehicle "; s += percentEncode(p.vehiclePreset); }
+        if (p.placementId) {
+            char ib[32];
+            std::snprintf(ib, sizeof ib, " id=%016llx", static_cast<unsigned long long>(p.placementId));
+            s += ib;
+        }
+        // Bounds are generated data: they live in the level's .ocstream, never here.
         s += "\n";
     };
 

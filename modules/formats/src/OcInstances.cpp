@@ -4,6 +4,7 @@
 
 #include "aver/platform/FileSystem.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -42,6 +43,9 @@ bool fail(std::string* why, std::string msg) { if (why) *why = std::move(msg); r
 constexpr usize kGroupRecordBytes = sizeof(u32) * 4;
 // IHDR layout: u32 groupCount, u32 instanceCount.
 constexpr usize kHeaderBytes = sizeof(u32) * 2;
+// ICEL cell record: i32 cx, cy; f32 min[3], max[3]; u32 firstRun, runCount. IRUN run: u32 x3.
+constexpr usize kCellRecordBytes = sizeof(u32) * 10;
+constexpr usize kRunRecordBytes = sizeof(u32) * 3;
 
 } // namespace
 
@@ -56,6 +60,14 @@ bool OcInstanceData::valid() const {
         // the identical rearrangement, for the identical reason.
         if (g.first > instanceCount || instanceCount - g.first < g.count) return false;
     }
+    for (const OcInstanceRun& r : runs) {
+        if (r.group >= groups.size()) return false;
+        if (r.first > instanceCount || instanceCount - r.first < r.count) return false;
+    }
+    for (const OcInstanceCell& c : cells) {
+        if (c.firstRun > runs.size() || runs.size() - c.firstRun < c.runCount) return false;
+    }
+    if (!cells.empty() && !(cellCm > 0.0f && std::isfinite(cellCm))) return false;
     for (f32 v : transforms) if (!std::isfinite(v)) return false;
     return true;
 }
@@ -107,6 +119,32 @@ bool parseOcInstances(const u8* bytes, usize size, OcInstanceData& out, std::str
         tmp.groups.push_back(std::move(g));
     }
 
+    if (const AvrChunk* cel = f.find(kOcInstChunkCells)) {
+        Cursor cc{cel->data.data(), cel->data.size()};
+        tmp.cellCm = cc.take<f32>();
+        const u32 cellCount = cc.take<u32>();
+        if (!cc.ok || cc.left / kCellRecordBytes < cellCount)
+            return fail(why, ".ocinst: ICEL is smaller than cellCount implies");
+        tmp.cells.resize(cellCount);
+        for (OcInstanceCell& c : tmp.cells) {
+            c.cx = cc.take<i32>(); c.cy = cc.take<i32>();
+            for (f32& v : c.min) v = cc.take<f32>();
+            for (f32& v : c.max) v = cc.take<f32>();
+            c.firstRun = cc.take<u32>();
+            c.runCount = cc.take<u32>();
+        }
+        const AvrChunk* run = f.find(kOcInstChunkRuns);
+        const usize runBytes = run ? run->data.size() : 0;
+        if (runBytes % kRunRecordBytes != 0) return fail(why, ".ocinst: IRUN size is not a whole number of runs");
+        tmp.runs.resize(runBytes / kRunRecordBytes);
+        if (run) {
+            Cursor rc{run->data.data(), run->data.size()};
+            for (OcInstanceRun& r : tmp.runs) {
+                r.group = rc.take<u32>(); r.first = rc.take<u32>(); r.count = rc.take<u32>();
+            }
+        }
+    }
+
     // THE FAST PATH: one bulk memcpy of the whole span, not a per-instance or per-float loop --
     // see the header's own top comment for why a multi-million-instance file needs this to stay a
     // single allocation and a single copy rather than 12 million individual f32 reads.
@@ -116,6 +154,15 @@ bool parseOcInstances(const u8* bytes, usize size, OcInstanceData& out, std::str
 
     for (f32 v : tmp.transforms)
         if (!std::isfinite(v)) return fail(why, ".ocinst: a transform contains a non-finite float");
+
+    for (const OcInstanceRun& r : tmp.runs) {
+        if (r.group >= groupCount) return fail(why, ".ocinst: an IRUN run names a group that does not exist");
+        if (r.first > instanceCount || instanceCount - r.first < r.count)
+            return fail(why, ".ocinst: an IRUN run's range runs past instanceCount");
+    }
+    for (const OcInstanceCell& c : tmp.cells)
+        if (c.firstRun > tmp.runs.size() || tmp.runs.size() - c.firstRun < c.runCount)
+            return fail(why, ".ocinst: an ICEL cell's run range runs past the IRUN table");
 
     out = std::move(tmp);
     return true;
@@ -177,6 +224,22 @@ bool writeOcInstances(const OcInstanceData& in, std::vector<u8>& out, std::strin
     file.add(kOcInstChunkStrings, strt.bytes());
     file.add(kOcInstChunkGroups, std::move(grp), kAvrChunkRequired);
     file.add(kOcInstChunkTransforms, std::move(xfm), kAvrChunkGpuUploadable);
+    if (!in.cells.empty()) {
+        std::vector<u8> cel, run;
+        put<f32>(cel, in.cellCm);
+        put<u32>(cel, static_cast<u32>(in.cells.size()));
+        for (const OcInstanceCell& c : in.cells) {
+            put<i32>(cel, c.cx); put<i32>(cel, c.cy);
+            for (f32 v : c.min) put<f32>(cel, v);
+            for (f32 v : c.max) put<f32>(cel, v);
+            put<u32>(cel, c.firstRun); put<u32>(cel, c.runCount);
+        }
+        for (const OcInstanceRun& r : in.runs) {
+            put<u32>(run, r.group); put<u32>(run, r.first); put<u32>(run, r.count);
+        }
+        file.add(kOcInstChunkCells, std::move(cel));
+        file.add(kOcInstChunkRuns, std::move(run));
+    }
     return writeAvr1(file, out, why);
 }
 
@@ -195,6 +258,77 @@ bool saveOcInstances(const std::string& path, const OcInstanceData& in, std::str
     // product where that matters.
     if (!writeFileBytesAtomic(path, bytes.data(), bytes.size()))
         return fail(why, ".ocinst: write failed on " + path);
+    return true;
+}
+
+bool cellOcInstances(OcInstanceData& in, f32 cellCm, const std::vector<f32>& groupRadiusCm, std::string* why) {
+    if (!(cellCm > 0.0f)) { if (why) *why = "cell size must be positive"; return false; }
+    const usize rows = in.transforms.size() / 12;
+    std::vector<u32> rowGroup(rows, 0xFFFFFFFFu);
+    if (!in.runs.empty()) {
+        for (const OcInstanceRun& r : in.runs)
+            for (u32 k = 0; k < r.count && usize(r.first) + k < rows; ++k) rowGroup[usize(r.first) + k] = r.group;
+    } else {
+        for (usize g = 0; g < in.groups.size(); ++g)
+            for (u32 k = 0; k < in.groups[g].count && usize(in.groups[g].first) + k < rows; ++k)
+                rowGroup[usize(in.groups[g].first) + k] = static_cast<u32>(g);
+    }
+    for (const u32 g : rowGroup)
+        if (g == 0xFFFFFFFFu) { if (why) *why = "a row lies in no group"; return false; }
+
+    struct Key { i32 cx, cy; u32 group, row; };
+    std::vector<Key> keys(rows);
+    for (usize r = 0; r < rows; ++r) {
+        const f32* m = &in.transforms[r * 12];
+        keys[r] = Key{static_cast<i32>(std::floor(m[9] / cellCm)), static_cast<i32>(std::floor(m[10] / cellCm)),
+                      rowGroup[r], static_cast<u32>(r)};
+    }
+    std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
+        if (a.cx != b.cx) return a.cx < b.cx;
+        if (a.cy != b.cy) return a.cy < b.cy;
+        if (a.group != b.group) return a.group < b.group;
+        return a.row < b.row;
+    });
+
+    std::vector<f32> sorted(in.transforms.size());
+    in.cells.clear();
+    in.runs.clear();
+    in.cellCm = cellCm;
+    f32 lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+    const auto closeCell = [&] {
+        OcInstanceCell& c = in.cells.back();
+        for (int a = 0; a < 3; ++a) { c.min[a] = lo[a]; c.max[a] = hi[a]; }
+    };
+    for (usize r = 0; r < rows; ++r) {
+        const Key& k = keys[r];
+        std::memcpy(&sorted[r * 12], &in.transforms[usize(k.row) * 12], 12 * sizeof(f32));
+        const bool newCell = r == 0 || k.cx != keys[r - 1].cx || k.cy != keys[r - 1].cy;
+        if (newCell) {
+            if (r) closeCell();
+            OcInstanceCell c{};
+            c.cx = k.cx;
+            c.cy = k.cy;
+            c.firstRun = static_cast<u32>(in.runs.size());
+            in.cells.push_back(c);
+        }
+        if (newCell || k.group != keys[r - 1].group) {
+            in.runs.push_back(OcInstanceRun{k.group, static_cast<u32>(r), 0});
+            ++in.cells.back().runCount;
+        }
+        ++in.runs.back().count;
+        const f32* m = &sorted[r * 12];
+        f32 s2 = 0.0f;
+        for (int row = 0; row < 3; ++row)
+            s2 = std::max(s2, m[row * 3] * m[row * 3] + m[row * 3 + 1] * m[row * 3 + 1] + m[row * 3 + 2] * m[row * 3 + 2]);
+        const f32 rad = (k.group < groupRadiusCm.size() ? groupRadiusCm[k.group] : 0.0f) * std::sqrt(s2);
+        for (int a = 0; a < 3; ++a) {
+            const f32 vlo = m[9 + a] - rad, vhi = m[9 + a] + rad;
+            if (newCell) { lo[a] = vlo; hi[a] = vhi; }
+            else { lo[a] = std::min(lo[a], vlo); hi[a] = std::max(hi[a], vhi); }
+        }
+    }
+    if (rows) closeCell();
+    in.transforms = std::move(sorted);
     return true;
 }
 

@@ -402,6 +402,68 @@ void SandboxApp::openLevelDirect(Engine& eng, const std::string& path) {
 // everything below, not a parallel "which writer" decision made some other way (the path's
 // extension, an unreliable signal). levelIsLegacyOcmap_ is the answer loadLevel already computed
 // at open time; re-deriving it independently here would be a second place it could drift from the first.
+// One entity's placement record, as saveLevel writes it: everything but its parent and its name.
+// False for an entity that is saved some other way (a light, a decal, a prefab instance).
+bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement& p,
+                                         const std::unordered_map<u32, const Transform*>* animPlacedPtr) {
+    scene::World& world = scene::World::instance();
+    const auto* loc = world.component<scene::CLocal>(e, scene::kComponentLocal);
+    const auto* mr  = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+    if (!loc) return false;
+    if (!mr && world.hasComponent(e, scene::kComponentLight)) return false;
+    if (!mr && world.hasComponent(e, scene::kComponentDecal)) return false;
+    if (prefabSys_.isLinked(e)) return false;
+    static const std::unordered_map<u32, const Transform*> kNone;
+    const std::unordered_map<u32, const Transform*>& animPlaced = animPlacedPtr ? *animPlacedPtr : kNone;
+    p.asset = world.name(e);
+    // WHILE PLAY MOVES IT -- a clip, or a car driving -- an entity's CLocal is a moment on its route, not
+    // its placement (an autosave or a save from the MCP can land mid-Play), so it is written from what
+    // Play found.
+    const auto placedIt = animPlaced.find(static_cast<u32>(e));
+    const Transform& xf = placedIt == animPlaced.end() ? loc->xf : *placedIt->second;
+    p.x = xf.position.x; p.y = xf.position.y; p.z = xf.position.z;
+    const Vec3 euler = eulerDegFromQuat(xf.rotation);
+    p.roll = euler.x; p.pitch = euler.y; p.yaw = euler.z;
+    p.sx = xf.scale.x; p.sy = xf.scale.y; p.sz = xf.scale.z;
+    // THE SURFACE, WHICH USED TO BE DROPPED ON EVERY SAVE: `(void)mr;` sat here and the
+    // material line was simply missing. The token itself must never be written -- it's a
+    // process-local intern id (docs/CHUNKS.md 5.1) -- so it goes back out as the NAME it was interned under.
+    if (mr && mr->material) p.material = aver_scene_material_name(mr->material);
+    // `nocollide` now round-trips. This was hardcoded true, so a placement authored
+    // nocollide came back colliding and quietly gained a static body on the next load.
+    // Entities created in the editor are absent from the map and keep the true default.
+    const auto collideIt = entityCollide_.find(static_cast<u32>(e));
+    p.collide = collideIt == entityCollide_.end() ? true : collideIt->second;
+    // `hidden`: the Details panel's Visible checkbox, saved with the level (owner decision,
+    // Unreal-style). AUTHORED, not the raw kMeshRendererVisible bit -- an entity H is
+    // currently hiding must still write visible, or Ctrl+H's own claim of being temporary
+    // would be false the moment anyone saved with it on. See authoredVisible's own comment.
+    p.visible = authoredVisible(e);
+    // THE AUTHORED ANIMATION, from the side map and NEVER from the entity's CAnimator: Play
+    // advances that clock, and reading it here would write a session's progress into the level.
+    if (const auto animIt = entityAnim_.find(static_cast<u32>(e)); animIt != entityAnim_.end()) {
+        p.animClip  = animIt->second.clip;
+        p.animSpeed = animIt->second.speed;
+        p.animTime  = animIt->second.time;
+        p.animOnce  = animIt->second.once;
+    }
+    // THE VEHICLE TOKEN, which has no component either: level_ remembers which entities were placed as
+    // cars (and the editor keeps that current through an undone delete and a placement added over MCP),
+    // and a save that rebuilt the placement without it turned every car into a plain, collider-less mesh.
+    if (const std::string* vehicle = level_.vehiclePresetOf(e)) p.vehiclePreset = *vehicle;
+    // A SNAPPED PLACEMENT KEEPS ITS OFFSET, not the resolved world height. See the load site
+    // for why writing loc->xf.position.z here bakes the terrain into the level.
+    //
+    // The offset is restored VERBATIM rather than recomputed as (live z - ground): the
+    // ground under it may have been sculpted since the load, and re-deriving would silently
+    // rewrite an authored number the user never touched. Moving a snapped object in the
+    // viewport therefore does not yet move it in the file -- which is the honest behaviour
+    // until the editor grows a way to show and edit a snap offset.
+    const auto snapIt = entitySnapZ_.find(static_cast<u32>(e));
+    if (snapIt != entitySnapZ_.end()) { p.snapToGround = true; p.z = snapIt->second; }
+    return true;
+}
+
 bool SandboxApp::saveLevel(const std::string& path) {
     if (levelIsLegacyOcmap_) return saveLevelAsOcmap(path);
 
@@ -518,8 +580,9 @@ bool SandboxApp::saveLevel(const std::string& path) {
     // written so far, if we happened to have got to it", which is the shape of bug this file
     // already has a scar from (LevelClassSave.hpp: "Pairing by position would write one
     // placement's transform onto another's line").
+    const bool streamedSave = level_.streaming().active();
     std::unordered_map<u32, i32> slotOf;
-    {
+    if (!streamedSave) {
         i32 slot = static_cast<i32>(w.placements.size());
         for (const scene::Entity e : levelEntities_) {
             if (!world.valid(e)) continue;
@@ -533,8 +596,6 @@ bool SandboxApp::saveLevel(const std::string& path) {
         }
     }
 
-    // THE SEQUENCE, written from the editor's model with each actor mapped to the slot it is saved in.
-    seqEditor_.save(w, slotOf);
 
     // The placement transforms of the entities Play is MOVING -- animated ones, and the physics cars --
     // from Play's own snapshot, taken before anything moved. Empty (and free) at any other time.
@@ -566,7 +627,9 @@ bool SandboxApp::saveLevel(const std::string& path) {
     // too (unloadLevel clears it before the next level's entities are created).
     std::unordered_map<std::string, u32> shadowLabelCounts;
 
-    for (const scene::Entity e : levelEntities_) {
+    // A streamed level writes its placement records, resident or not (docs/LEVEL_STREAMING.md).
+    if (streamedSave) buildStreamedPlacements(w, animPlaced, slotOf);
+    for (const scene::Entity e : streamedSave ? std::vector<scene::Entity>{} : levelEntities_) {
         if (!world.valid(e)) continue;
         const auto* loc = world.component<scene::CLocal>(e, scene::kComponentLocal);
         const auto* mr  = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
@@ -593,52 +656,7 @@ bool SandboxApp::saveLevel(const std::string& path) {
                           ? slotOf.end() : slotOf.find(static_cast<u32>(par));
             p.parent = it == slotOf.end() ? -1 : it->second;
         }
-        p.asset = world.name(e);
-        // WHILE PLAY MOVES IT -- a clip, or a car driving -- an entity's CLocal is a moment on its route, not
-        // its placement (an autosave or a save from the MCP can land mid-Play), so it is written from what
-        // Play found.
-        const auto placedIt = animPlaced.find(static_cast<u32>(e));
-        const Transform& xf = placedIt == animPlaced.end() ? loc->xf : *placedIt->second;
-        p.x = xf.position.x; p.y = xf.position.y; p.z = xf.position.z;
-        const Vec3 euler = eulerDegFromQuat(xf.rotation);
-        p.roll = euler.x; p.pitch = euler.y; p.yaw = euler.z;
-        p.sx = xf.scale.x; p.sy = xf.scale.y; p.sz = xf.scale.z;
-        // THE SURFACE, WHICH USED TO BE DROPPED ON EVERY SAVE: `(void)mr;` sat here and the
-        // material line was simply missing. The token itself must never be written -- it's a
-        // process-local intern id (docs/CHUNKS.md 5.1) -- so it goes back out as the NAME it was interned under.
-        if (mr && mr->material) p.material = aver_scene_material_name(mr->material);
-        // `nocollide` now round-trips. This was hardcoded true, so a placement authored
-        // nocollide came back colliding and quietly gained a static body on the next load.
-        // Entities created in the editor are absent from the map and keep the true default.
-        const auto collideIt = entityCollide_.find(static_cast<u32>(e));
-        p.collide = collideIt == entityCollide_.end() ? true : collideIt->second;
-        // `hidden`: the Details panel's Visible checkbox, saved with the level (owner decision,
-        // Unreal-style). AUTHORED, not the raw kMeshRendererVisible bit -- an entity H is
-        // currently hiding must still write visible, or Ctrl+H's own claim of being temporary
-        // would be false the moment anyone saved with it on. See authoredVisible's own comment.
-        p.visible = authoredVisible(e);
-        // THE AUTHORED ANIMATION, from the side map and NEVER from the entity's CAnimator: Play
-        // advances that clock, and reading it here would write a session's progress into the level.
-        if (const auto animIt = entityAnim_.find(static_cast<u32>(e)); animIt != entityAnim_.end()) {
-            p.animClip  = animIt->second.clip;
-            p.animSpeed = animIt->second.speed;
-            p.animTime  = animIt->second.time;
-            p.animOnce  = animIt->second.once;
-        }
-        // THE VEHICLE TOKEN, which has no component either: level_ remembers which entities were placed as
-        // cars (and the editor keeps that current through an undone delete and a placement added over MCP),
-        // and a save that rebuilt the placement without it turned every car into a plain, collider-less mesh.
-        if (const std::string* vehicle = level_.vehiclePresetOf(e)) p.vehiclePreset = *vehicle;
-        // A SNAPPED PLACEMENT KEEPS ITS OFFSET, not the resolved world height. See the load site
-        // for why writing loc->xf.position.z here bakes the terrain into the level.
-        //
-        // The offset is restored VERBATIM rather than recomputed as (live z - ground): the
-        // ground under it may have been sculpted since the load, and re-deriving would silently
-        // rewrite an authored number the user never touched. Moving a snapped object in the
-        // viewport therefore does not yet move it in the file -- which is the honest behaviour
-        // until the editor grows a way to show and edit a snap offset.
-        const auto snapIt = entitySnapZ_.find(static_cast<u32>(e));
-        if (snapIt != entitySnapZ_.end()) { p.snapToGround = true; p.z = snapIt->second; }
+        fillPlacementFromEntity(e, p, &animPlaced);
         // THE OUTLINER LABEL, PERSISTED ONLY WHEN IT IS NOT THE ONE makeEntityLabel WOULD HAND
         // BACK ANYWAY. makeEntityLabel (SandboxViewport.cpp) numbers entityLabelBase's word with an
         // ordinal from labelCounts_ -- reproduced here with the same entityLabelBase against
@@ -667,6 +685,12 @@ bool SandboxApp::saveLevel(const std::string& path) {
         }
         w.placements.push_back(std::move(p));
     }
+
+    // Ids, world bounds and on-demand mesh folders for a level World Settings set to stream.
+    stampStreamFields(w, slotOf);
+    // THE SEQUENCE, written from the editor's model with each actor mapped to the slot it is saved in.
+    seqEditor_.save(w, slotOf);
+    if (streamedSave) appendStreamedSequenceTracks(w);
 
     // CLASS PLACEMENTS GO BACK OUT TOO, AND UNTIL NOW THEY DID NOT: this loop rebuilds a
     // placement from SCENE COMPONENTS, and a `class=` placement has none -- opening a level and

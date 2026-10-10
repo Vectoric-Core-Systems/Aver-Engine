@@ -11,14 +11,19 @@
 // with their own GameContent and voxi::VoxiRenderer.
 #pragma once
 #include "aver/core/Types.hpp"
+#include "aver/core/Math.hpp"
 
 #include <functional>
 #include <string>
+#include <vector>
 
 #if AVER_MODULE_SCENE && AVER_MODULE_VOXI
 #include "aver/formats/OcWorld.hpp"
 
+#include "aver/formats/OcInstances.hpp"
+
 namespace aver::voxi { class VoxiRenderer; }
+namespace aver::rhi { class IDevice; }
 
 namespace aver::game {
 
@@ -58,6 +63,68 @@ struct FoliageLoadResult {
 FoliageLoadResult loadLevelFoliage(const fmt::OcWorldData& w, GameContent& content,
                                     voxi::VoxiRenderer* voxi, const std::string& contentDir,
                                     const std::function<void(f32 fraction)>& progress = {});
+
+// Foliage with distance residency (docs/LEVEL_STREAMING.md section 4). Keeps the parsed instance
+// tables on the CPU. Without cells, or with streaming off, or with no device, load() pushes
+// everything once (same as loadLevelFoliage). With cells, update() keeps only cells within the
+// level's loadCm of the viewer (evicted past evictCm) and re-pushes through setFoliage when that
+// set changes, at most every kCheckSeconds; prototype meshes are acquired/released through
+// GameContent. setFoliage rebuilds every BLAS and the TLAS static prefix per call (full cost, not
+// incremental), so the throttle matters. The objects must outlive this; the renderer's foliage is
+// NOT cleared by the destructor, only by clear().
+class LevelFoliage {
+public:
+    static constexpr f32 kCheckSeconds = 0.25f;
+
+    // `device` null: meshes are not acquired and every cell is resident (non-streamed behaviour).
+    // `tablePaths`: absolute paths parallel to w.foliageFiles; a non-empty entry replaces
+    // contentDir/<foliageFile> (the cell-sorted copy under Binaries/Streaming).
+    // Every emitted group's mesh is acquired while `device` is given (cell-less files: until clear()).
+    // `viewerCm` seeds the first residency so the initial push is already the right set.
+    bool load(const fmt::OcWorldData& w, GameContent& content, rhi::IDevice* device,
+              voxi::VoxiRenderer* voxi, const std::string& contentDir,
+              const std::function<void(f32 fraction)>& progress = {}, const Vec3& viewerCm = {},
+              const std::vector<std::string>* tablePaths = nullptr);
+    void update(const Vec3& viewerCm, f32 dt);
+    void clear();   // clears the renderer's foliage and releases held meshes
+
+    bool streamed() const { return streamed_; }
+    u32 totalCells() const { return static_cast<u32>(cells_.size()); }
+    u32 residentCells() const { return residentCount_; }
+    u32 instances() const { return result_.instances; }       // in the last push
+    u32 rebuilds() const { return rebuilds_; }
+    f32 lastRebuildMs() const { return lastRebuildMs_; }
+    const FoliageLoadResult& result() const { return result_; }
+
+private:
+    struct File {
+        fmt::OcInstanceData data;
+        std::string path;
+        std::vector<u64> objectIds;     // per group, fnv1a64(asset)
+        std::vector<u32> use;           // per group: resident cells referencing it
+        std::vector<char> held;         // per group: mesh acquired
+        std::vector<char> warned;       // per group: missing-mesh warning issued
+    };
+    struct CellRef { u32 file, cell; };
+
+    void rebuild();
+    void applyResidency(const std::vector<char>& next);
+
+    GameContent* content_ = nullptr;
+    rhi::IDevice* device_ = nullptr;
+    voxi::VoxiRenderer* voxi_ = nullptr;
+    std::vector<File> files_;
+    std::vector<CellRef> cells_;
+    std::vector<char> resident_;
+    u32 residentCount_ = 0;
+    f32 loadCm_ = 0, evictCm_ = 0;
+    f32 accum_ = 0;
+    bool streamed_ = false;
+    bool loaded_ = false;
+    u32 rebuilds_ = 0;
+    f32 lastRebuildMs_ = 0;
+    FoliageLoadResult result_;
+};
 
 } // namespace aver::game
 

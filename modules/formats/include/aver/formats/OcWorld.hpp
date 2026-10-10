@@ -116,6 +116,12 @@ struct OcWorldPlacement {
     // save write CLocal straight out.
     i32 parent = -1;
 
+    // Streaming identity and world bounds (docs/LEVEL_STREAMING.md). 0 / false = unset, nothing written.
+    u64  placementId = 0;
+    bool hasBounds = false;
+    f32  boundsMin[3] = {0, 0, 0};   // world-space AABB in cm
+    f32  boundsMax[3] = {0, 0, 0};
+
     bool uniform() const { return sx == sy && sy == sz; }
 };
 
@@ -540,6 +546,18 @@ struct OcDecal {
     bool disabled = false;                  // present but not projected
 };
 
+// STREAM header record: residency policy for the level's placements (docs/LEVEL_STREAMING.md).
+struct OcStreamSettings {
+    bool enabled = false;
+    f32 cellCm = 6400.0f;
+    f32 loadCm = 25000.0f;
+    f32 evictCm = 30000.0f;
+    std::vector<std::string> lazyDirs;
+    // The generated streaming data (bounds, foliage cells), relative to the project root
+    // (`Binaries/Streaming/<level>.ocstream`); see OcStream.hpp. Empty = none generated yet.
+    std::string dataPath;
+};
+
 struct OcWorldData : OcWorldEnv {
     int version = 1;
     u64 contentId = 0;                     // ID = FNV-1a-64(NAME)
@@ -571,6 +589,7 @@ struct OcWorldData : OcWorldEnv {
     // DEFAULTPAWN: the pawn class this level spawns instead of the GameMode's own default, by class
     // name (same reasoning as gameMode). Empty: the GameMode's default pawn.
     std::string defaultPawn;
+    OcStreamSettings stream;
     u32 build = 0;
     u32 algo = 3;
 

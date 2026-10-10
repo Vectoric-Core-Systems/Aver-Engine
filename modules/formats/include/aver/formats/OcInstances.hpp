@@ -57,6 +57,10 @@ inline constexpr u32 kOcInstChunkGroups     = avrFourCC("IGRP");
 // GPU-uploadable: this is the array a TLAS-instance build reads straight out of, unmodified.
 inline constexpr u32 kOcInstChunkTransforms = avrFourCC("IXFM");
 
+// Optional spatial cells (docs/LEVEL_STREAMING.md): ICEL = cell table, IRUN = per-cell row ranges.
+inline constexpr u32 kOcInstChunkCells      = avrFourCC("ICEL");
+inline constexpr u32 kOcInstChunkRuns       = avrFourCC("IRUN");
+
 // A reserved bit for a per-group flag word. Cast-shadow is not actually optional today -- foliage
 // casts shadows unconditionally, so every group this tree writes carries `flags = kOcInstanceFlagCastShadow`
 // -- but the bit is named and reserved now rather than left as a bare `1` a future no-shadow toggle
@@ -74,9 +78,28 @@ struct OcInstanceGroup {
     u32 count = 0;
 };
 
+// One grid cell: world-space AABB (cm) of its instances and its range in OcInstanceData::runs.
+struct OcInstanceCell {
+    i32 cx = 0, cy = 0;
+    f32 min[3] = {0, 0, 0};
+    f32 max[3] = {0, 0, 0};
+    u32 firstRun = 0;
+    u32 runCount = 0;
+};
+
+// A contiguous range of transform rows (not floats) belonging to one group.
+struct OcInstanceRun {
+    u32 group = 0;
+    u32 first = 0;
+    u32 count = 0;
+};
+
 // A whole instance table: every group's range, and the flat transform buffer they index into.
 struct OcInstanceData {
     std::vector<OcInstanceGroup> groups;
+    f32 cellCm = 0;                        // 0 = no cells (one always-resident table)
+    std::vector<OcInstanceCell> cells;
+    std::vector<OcInstanceRun> runs;
     // 12 f32 per instance -- see this header's own top comment for the exact row-vector convention.
     std::vector<f32> transforms;
 
@@ -100,5 +123,11 @@ bool loadOcInstances(const std::string& path, OcInstanceData& out, std::string* 
 // Writes an instance table. Refuses (returns false) an OcInstanceData that fails valid().
 bool writeOcInstances(const OcInstanceData& in, std::vector<u8>& out, std::string* why = nullptr);
 bool saveOcInstances(const std::string& path, const OcInstanceData& in, std::string* why = nullptr);
+
+// Re-sorts rows into XY cells of `cellCm` (cells, runs, cellCm; docs/LEVEL_STREAMING.md). Each cell's
+// bounds cover its instances' origins grown by groupRadiusCm[group] times the instance's largest scale
+// (0 where unknown). False, data untouched, when a row lies in no group.
+bool cellOcInstances(OcInstanceData& in, f32 cellCm, const std::vector<f32>& groupRadiusCm,
+                     std::string* why = nullptr);
 
 } // namespace aver::fmt

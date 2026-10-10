@@ -141,3 +141,9 @@ add_executable(VehicleLaneTest src/VehicleLaneTest.cpp)
 target_link_libraries(VehicleLaneTest PRIVATE Aver.World Aver.Formats Aver.Core)
 set_target_properties(VehicleLaneTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PlacementStreamerTest -- distance residency of authored placements (pure logic).
+add_executable(PlacementStreamerTest src/PlacementStreamerTest.cpp)
+target_link_libraries(PlacementStreamerTest PRIVATE Aver.World Aver.Core)
+set_target_properties(PlacementStreamerTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

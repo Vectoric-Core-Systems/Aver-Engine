@@ -2181,6 +2181,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
         streaming_.tick(camPos_, t.dt, nullptr, tris);
     }
+#if AVER_MODULE_SCENE
+    tickLevelStreaming(t.dt);
+#endif
     playProf_.begin(editor::PlayPhase::WorldFlush);
     scene::World::instance().flush();
     playProf_.end(editor::PlayPhase::WorldFlush);

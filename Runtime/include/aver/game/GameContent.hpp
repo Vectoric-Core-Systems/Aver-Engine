@@ -101,6 +101,17 @@ public:
     // Uploads every .ocmesh under the project's content root.
     void loadProjectMeshes(rhi::IDevice& device);
 
+    // On-demand meshes (those under a level's STREAM lazy= folders; indexed, not uploaded, by
+    // loadProjectMeshes). Refcounted: the first acquire uploads, the last release forgets the mesh and
+    // queues its GPU handles. True on success. Eager meshes are permanently loaded: acquire returns
+    // whether they are, release is a no-op.
+    bool acquireMesh(rhi::IDevice& device, u64 id);
+    void releaseMesh(rhi::IDevice& device, u64 id);
+    bool meshLoaded(u64 id) const;
+    // D3D12Device::destroyMesh frees the mesh's resources immediately, so released meshes' handles wait
+    // here. Call once per frame; destroys those released at least 3 frames before `frameIndex`.
+    void flushMeshReleases(rhi::IDevice& device, u64 frameIndex);
+
     // Callback after each mesh is uploaded, before split parts are built. `data` is null for built-ins.
     struct LoadedMesh {
         u64 id;
@@ -112,6 +123,12 @@ public:
     };
     using MeshLoadedFn = void (*)(const LoadedMesh& mesh, void* user);
     void setMeshLoadedHook(MeshLoadedFn fn, void* user) { meshLoaded_ = fn; meshLoadedUser_ = user; }
+
+    // Fired after a lazy mesh is uploaded by acquireMesh (same payload as the loaded hook).
+    void setMeshAcquiredHook(MeshLoadedFn fn, void* user) { meshAcquired_ = fn; meshAcquiredUser_ = user; }
+    // Fired when a lazy mesh is unloaded (last release); its tables are already erased.
+    using MeshReleasedFn = void (*)(u64 id, void* user);
+    void setMeshReleasedHook(MeshReleasedFn fn, void* user) { meshReleased_ = fn; meshReleasedUser_ = user; }
 
     // Whether loadProjectMeshes uploads a coarser LOD per mesh as its depth-pass stand-in.
     void setBuildDepthProxies(bool on) { buildDepthProxies_ = on; }
@@ -131,7 +148,8 @@ public:
     const std::vector<MeshPart>* posedPartsFor(rhi::IDevice& device, u64 id,
                                                rhi::MeshHandle baseMesh, rhi::MeshHandle posedMesh);
 
-    // Forgets every project mesh. If `destroyBaseHandles` is false, only forgets the handles.
+    // Forgets every project mesh (lazy refcounts survive; the next loadProjectMeshes re-uploads held
+    // ones; adopt() drops them). If `destroyBaseHandles` is false, only forgets the handles.
     void releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHandles = true);
 
     usize meshCount() const { return sceneMeshes_.size(); }
@@ -199,6 +217,27 @@ private:
     MeshLoadedFn meshLoaded_ = nullptr;
     void* meshLoadedUser_ = nullptr;
     bool buildDepthProxies_ = true;
+    MeshLoadedFn meshAcquired_ = nullptr;
+    void* meshAcquiredUser_ = nullptr;
+    MeshReleasedFn meshReleased_ = nullptr;
+    void* meshReleasedUser_ = nullptr;
+    bool lazyLoading_ = false;   // true while acquireMesh uploads
+
+    // Uploads one .ocmesh and fills every per-mesh table. False (nothing kept) on failure.
+    bool loadOneMesh(rhi::IDevice& device, u64 id, const std::string& full, const std::string& rel);
+    // Erases every table entry for `id` and queues its GPU handles for flushMeshReleases.
+    void unloadToPending(u64 id);
+
+    struct PendingMesh {
+        rhi::MeshHandle base = 0;
+        std::vector<rhi::MeshHandle> others;   // parts, posed parts, depth proxy
+        u64 releasedAt = 0;
+        bool warned = false;
+    };
+    std::vector<PendingMesh> pendingMeshes_;
+    u64 lastFlushFrame_ = 0;
+    std::unordered_map<u64, std::string> lazyRel_;   // lazy mesh id -> content-relative path
+    std::unordered_map<u64, u32>         meshRefs_;  // lazy mesh id -> acquire count
 
     // Whether a material-slot NAME should collide: false only for Mask or Blend alphaMode.
     bool collisionSlotCollides(const std::string& slotName);

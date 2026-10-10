@@ -71,6 +71,8 @@ aver_add_module(Aver.Formats
     # Aver.Voxi or a GPU device -- see OcInstances.hpp for the transform convention and why a
     # multi-million-instance file still fits this base target.
     src/OcInstances.cpp
+    src/OcStream.cpp
+    src/OcStreamBake.cpp
     # .oclanes -- a level's traffic lanes, the sidecar world::VehicleSystem follows. TEXT, written by the
     # generator's Python pipeline, so it needs only the line scanner every other text reader here
     # shares; beside .ocinst because both are level-adjacent tables no entity represents.
@@ -83,6 +85,9 @@ aver_add_module(Aver.Formats
     Aver.Platform
     Aver.Assets
 )
+# OcStreamBake.cpp composes placement transforms with world::quatFromEulerDeg: header-only, Core-only
+# (aver/world/LevelTransform.hpp), so an include directory and no link, as AverAssetC does.
+target_include_directories(Aver.Formats PRIVATE ${CMAKE_SOURCE_DIR}/modules/world/include)
 
 # Aver.Formats.Material — the .ocmat reader/writer, deliberately a THIRD target.
 #

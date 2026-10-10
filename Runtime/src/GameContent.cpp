@@ -4,6 +4,7 @@
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -44,6 +45,11 @@ namespace aver::game {
 void GameContent::adopt(const fmt::ProjectDesc& project) {
     project_ = project;
     contentIndex_.clear();
+#if AVER_MODULE_SCENE
+    // A project switch is the one place lazy refcounts are dropped (a reload keeps them).
+    meshRefs_.clear();
+    lazyRel_.clear();
+#endif
 
     const std::string content = project_.contentDir();
     if (content.empty()) return;
@@ -266,13 +272,130 @@ void GameContent::registerBuiltins(rhi::IDevice& device) {
     AVER_INFO("[Mesh] {} built-in primitive(s), {} named surface(s)", sceneMeshes_.size(), surfaceLooks_.size());
 }
 
+namespace {
+
+// Lowercased, forward-slash, no trailing slash: how lazy folders and relative paths are compared.
+std::string lazyKey(std::string s) {
+    for (char& c : s) { if (c == '\\') c = '/'; c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); }
+    while (s.size() >= 2 && s[0] == '.' && s[1] == '/') s.erase(0, 2);
+    while (!s.empty() && s.back() == '/') s.pop_back();
+    return s;
+}
+
+// The `lazy=` folders from the STREAM header record of every Content/Maps/*.ocworld. Header lines only:
+// stops at the first PLACE/PLACEG/CHILD record.
+std::vector<std::string> collectLazyFolders(const std::string& contentDir) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    const std::filesystem::path maps = std::filesystem::path(contentDir) / "Maps";
+    if (!std::filesystem::is_directory(maps, ec)) return out;
+    for (std::filesystem::directory_iterator it(maps, ec), end; it != end; it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec)) continue;
+        std::string ext = it->path().extension().string();
+        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (ext != ".ocworld") continue;
+        std::ifstream in(it->path());
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.rfind("PLACE", 0) == 0 || line.rfind("CHILD", 0) == 0) break;
+            if (line.rfind("STREAM", 0) != 0) continue;
+            usize p = 6;
+            while (p < line.size()) {
+                while (p < line.size() && (line[p] == ' ' || line[p] == '\t' || line[p] == '\r')) ++p;
+                const usize s = p;
+                while (p < line.size() && line[p] != ' ' && line[p] != '\t' && line[p] != '\r') ++p;
+                const std::string_view tok(line.data() + s, p - s);
+                if (tok.rfind("lazy=", 0) != 0) continue;
+                usize q = 5;
+                while (q <= tok.size()) {
+                    usize e = tok.find(',', q);
+                    if (e == std::string_view::npos) e = tok.size();
+                    std::string dir = lazyKey(std::string(tok.substr(q, e - q)));
+                    if (!dir.empty() && std::find(out.begin(), out.end(), dir) == out.end()) out.push_back(std::move(dir));
+                    q = e + 1;
+                }
+            }
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+bool GameContent::loadOneMesh(rhi::IDevice& device, u64 id, const std::string& full, const std::string& rel) {
+    fmt::OcMeshData md;
+    std::string why;
+    if (!fmt::loadOcMesh(full, md, &why)) { AVER_WARN("[Mesh] {}", why); return false; }
+
+    // Position, normal, uv only. rhi::MeshVertex has nowhere to put joints/weights.
+    std::vector<rhi::MeshVertex> verts(md.vertexCount());
+    for (u32 i = 0; i < md.vertexCount(); ++i) {
+        rhi::MeshVertex& v = verts[i];
+        v.px = md.positions[usize(i)*3+0]; v.py = md.positions[usize(i)*3+1]; v.pz = md.positions[usize(i)*3+2];
+        v.nx = md.normals[usize(i)*3+0];   v.ny = md.normals[usize(i)*3+1];   v.nz = md.normals[usize(i)*3+2];
+        v.u  = md.uvs[usize(i)*2+0];       v.v  = md.uvs[usize(i)*2+1];
+    }
+    const rhi::MeshHandle h = device.createMesh(verts.data(), (u32)verts.size(),
+                                               md.indices.data(), (u32)md.indices.size());
+    if (!h) { AVER_WARN("[Mesh] the device refused '{}'", rel); return false; }
+
+    sceneMeshes_[id] = h;
+    meshBounds_[id] = {md.boundsMin, md.boundsMax};
+    // Mesh's own material slot; see GameContent.hpp::meshDefaultMaterial.
+    if (!md.materialSlots.empty() && !md.materialSlots[0].empty()) {
+        meshSlot0Material_[id] = aver_scene_material(0, md.materialSlots[0].c_str());
+        meshSlot0Name_[id] = md.materialSlots[0];
+    }
+    // The per-submesh split: a mesh naming several materials draws one part per material.
+    buildMeshParts(device, id, md, verts, rel);
+    projectMeshIds_.push_back(id);
+    if (meshLoaded_) meshLoaded_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshLoadedUser_);
+    if (lazyLoading_ && meshAcquired_) meshAcquired_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshAcquiredUser_);
+
+    // Coarse LOD for shadow/GI/voxelise passes (depth-only). 20cm target error (one shadow texel).
+#if AVER_MODULE_TRIFACTOR
+    if (buildDepthProxies_ && md.lodCount() > 1) {
+        constexpr f32 kShadowErrorCm = 20.0f;
+        u32 pick = 0;
+        for (u32 lvl = 1; lvl < md.lodCount(); ++lvl)
+            if (trifactor::levelWorldErrorCm(md, lvl) <= kShadowErrorCm) pick = lvl;
+
+        // Only upload if it's actually cheaper than LOD 0.
+        const u32 tris0 = trifactor::levelTriangleCount(md, 0);
+        if (pick > 0 && trifactor::levelTriangleCount(md, pick) < tris0) {
+            const fmt::OcMeshLod& lod = md.coarserLods[pick - 1];
+            // LOD 0's OWN vertex array: a coarser level owns its index buffer but shares the one
+            // VTXS block (see OcMeshData::coarserLods), which is why `verts` is correct here.
+            const rhi::MeshHandle ph = device.createMesh(verts.data(), (u32)verts.size(),
+                                                         lod.indices.data(), (u32)lod.indices.size());
+            if (ph) {
+                depthProxyMap_[h] = ph;
+                AVER_INFO("[Mesh] '{}' depth proxy: LOD {} ({} tris, {:.1f}x less than LOD 0, {:.1f}cm error)",
+                          rel, pick, trifactor::levelTriangleCount(md, pick),
+                          static_cast<f64>(tris0) /
+                              static_cast<f64>(trifactor::levelTriangleCount(md, pick)),
+                          trifactor::levelWorldErrorCm(md, pick));
+            } else {
+                AVER_WARN("[Mesh] '{}' depth proxy LOD {} refused by the device; it draws at full detail",
+                          rel, pick);
+            }
+        }
+    }
+#endif
+    return true;
+}
+
 void GameContent::loadProjectMeshes(rhi::IDevice& device) {
     const std::string dir = project_.contentDir();
     if (dir.empty()) return;
     std::error_code ec;
     if (!std::filesystem::exists(dir, ec)) return;
 
-    u32 loaded = 0, failed = 0;
+    const std::vector<std::string> lazyDirs = collectLazyFolders(dir);
+    lazyRel_.clear();   // rebuilt by the scan below; refcounts stay
+
+    u32 loaded = 0, failed = 0, lazy = 0;
     for (std::filesystem::recursive_directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
         if (ec) break;
         if (!it->is_regular_file(ec)) continue;
@@ -283,74 +406,127 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
         if (ec) continue;
         for (char& c : rel) if (c == '\\') c = '/';
 
-        fmt::OcMeshData md;
-        std::string why;
-        if (!fmt::loadOcMesh(full, md, &why)) { AVER_WARN("[Mesh] {}", why); ++failed; continue; }
-
-        // Position, normal, uv only. rhi::MeshVertex has nowhere to put joints/weights.
-        std::vector<rhi::MeshVertex> verts(md.vertexCount());
-        for (u32 i = 0; i < md.vertexCount(); ++i) {
-            rhi::MeshVertex& v = verts[i];
-            v.px = md.positions[usize(i)*3+0]; v.py = md.positions[usize(i)*3+1]; v.pz = md.positions[usize(i)*3+2];
-            v.nx = md.normals[usize(i)*3+0];   v.ny = md.normals[usize(i)*3+1];   v.nz = md.normals[usize(i)*3+2];
-            v.u  = md.uvs[usize(i)*2+0];       v.v  = md.uvs[usize(i)*2+1];
-        }
-        const rhi::MeshHandle h = device.createMesh(verts.data(), (u32)verts.size(),
-                                                   md.indices.data(), (u32)md.indices.size());
-        if (!h) { AVER_WARN("[Mesh] the device refused '{}'", rel); ++failed; continue; }
-
         const u64 id = fnv1a64(std::string_view(rel));
-        sceneMeshes_[id] = h;
-        meshBounds_[id] = {md.boundsMin, md.boundsMax};
-        // Mesh's own material slot; see GameContent.hpp::meshDefaultMaterial.
-        if (!md.materialSlots.empty() && !md.materialSlots[0].empty()) {
-            meshSlot0Material_[id] = aver_scene_material(0, md.materialSlots[0].c_str());
-            meshSlot0Name_[id] = md.materialSlots[0];
-        }
-        // THE PER-SUBMESH SPLIT. .ocmesh has always carried a submeshes table alongside
-        // materialSlots, and until now nothing here read it either: a mesh naming several materials
-        // (bark and leaves, say) drew as one mesh in slot 0's material end to end. See MeshPart's own
-        // comment (GameContent.hpp) and buildMeshParts' (below) for the shape this mirrors.
-        buildMeshParts(device, id, md, verts, rel);
-        projectMeshIds_.push_back(id);
-        if (meshLoaded_) meshLoaded_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshLoadedUser_);
-
-        // Coarse LOD for shadow/GI/voxelise passes (depth-only). 20cm target error (one shadow texel).
-#if AVER_MODULE_TRIFACTOR
-        if (buildDepthProxies_ && md.lodCount() > 1) {
-            constexpr f32 kShadowErrorCm = 20.0f;
-            u32 pick = 0;
-            for (u32 lvl = 1; lvl < md.lodCount(); ++lvl)
-                if (trifactor::levelWorldErrorCm(md, lvl) <= kShadowErrorCm) pick = lvl;
-
-            // Only upload if it's actually cheaper than LOD 0.
-            const u32 tris0 = trifactor::levelTriangleCount(md, 0);
-            if (pick > 0 && trifactor::levelTriangleCount(md, pick) < tris0) {
-                const fmt::OcMeshLod& lod = md.coarserLods[pick - 1];
-                // LOD 0's OWN vertex array: a coarser level owns its index buffer but shares the one
-                // VTXS block (see OcMeshData::coarserLods), which is why `verts` is correct here.
-                const rhi::MeshHandle ph = device.createMesh(verts.data(), (u32)verts.size(),
-                                                             lod.indices.data(), (u32)lod.indices.size());
-                if (ph) {
-                    depthProxyMap_[h] = ph;
-                    AVER_INFO("[Mesh] '{}' depth proxy: LOD {} ({} tris, {:.1f}x less than LOD 0, {:.1f}cm error)",
-                              rel, pick, trifactor::levelTriangleCount(md, pick),
-                              static_cast<f64>(tris0) /
-                                  static_cast<f64>(trifactor::levelTriangleCount(md, pick)),
-                              trifactor::levelWorldErrorCm(md, pick));
-                } else {
-                    AVER_WARN("[Mesh] '{}' depth proxy LOD {} refused by the device; it draws at full detail",
-                              rel, pick);
-                }
+        if (!lazyDirs.empty()) {
+            const std::string key = lazyKey(rel);
+            bool isLazy = false;
+            for (const std::string& d : lazyDirs)
+                if (key.size() > d.size() && key.compare(0, d.size(), d) == 0 && key[d.size()] == '/') { isLazy = true; break; }
+            if (isLazy) {
+                contentIndex_[id] = full;
+                lazyRel_[id] = rel;
+                ++lazy;
+                continue;
             }
+            lazyRel_.erase(id);   // stale entry from an earlier load: this mesh is eager now
         }
-#endif
 
-        ++loaded;
+        if (loadOneMesh(device, id, full, rel)) ++loaded; else ++failed;
     }
-    if (loaded || failed)
-        AVER_INFO("[Mesh] {} project mesh(es) loaded from {}{}", loaded, dir,
-                  failed ? (", " + std::to_string(failed) + " failed") : "");
+    // A reload keeps refcounts: re-upload lazy meshes still held by resident entities/foliage.
+    for (const auto& [id, refs] : meshRefs_) {
+        if (refs == 0 || sceneMeshes_.count(id)) continue;
+        const auto lit = lazyRel_.find(id);
+        const auto pit = contentIndex_.find(id);
+        if (lit == lazyRel_.end() || pit == contentIndex_.end() || !loadOneMesh(device, id, pit->second, lit->second)) {
+            ++failed;
+            AVER_WARN("[Mesh] held lazy mesh {} could not be re-uploaded after reload", id);
+        } else ++loaded;
+    }
+    if (loaded || failed || lazy)
+        AVER_INFO("[Mesh] {} project mesh(es) loaded from {}{}{}", loaded, dir,
+                  failed ? (", " + std::to_string(failed) + " failed") : "",
+                  lazy ? (", " + std::to_string(lazy) + " indexed for on-demand load") : "");
+}
+
+bool GameContent::acquireMesh(rhi::IDevice& device, u64 id) {
+    const auto lit = lazyRel_.find(id);
+    if (lit == lazyRel_.end()) return sceneMeshes_.count(id) != 0;   // eager: permanently loaded
+    u32& refs = meshRefs_[id];
+    if (refs == 0 && sceneMeshes_.count(id) == 0) {
+        const auto pit = contentIndex_.find(id);
+        lazyLoading_ = true;
+        const bool ok = pit != contentIndex_.end() && loadOneMesh(device, id, pit->second, lit->second);
+        lazyLoading_ = false;
+        if (!ok) {
+            meshRefs_.erase(id);
+            return false;
+        }
+    }
+    ++refs;
+    return true;
+}
+
+void GameContent::releaseMesh(rhi::IDevice& device, u64 id) {
+    (void)device;
+    if (!lazyRel_.count(id)) return;
+    const auto rit = meshRefs_.find(id);
+    if (rit == meshRefs_.end() || rit->second == 0) return;
+    if (--rit->second > 0) return;
+    meshRefs_.erase(rit);
+    unloadToPending(id);
+}
+
+bool GameContent::meshLoaded(u64 id) const { return sceneMeshes_.count(id) != 0; }
+
+// Forgets every table entry for `id` at once (nothing can draw it) and queues its handles; the GPU
+// frees wait in flushMeshReleases because D3D12Device::destroyMesh frees the mesh's own resources now.
+void GameContent::unloadToPending(u64 id) {
+    PendingMesh p;
+    p.releasedAt = lastFlushFrame_;
+    for (auto it = posedParts_.begin(); it != posedParts_.end();) {
+        if (it->second.meshId == id) {
+            for (const MeshPart& q : it->second.parts) if (q.mesh) p.others.push_back(q.mesh);
+            it = posedParts_.erase(it);
+        } else ++it;
+    }
+    meshPartBaseIndices_.erase(id);
+    if (const auto pit = meshParts_.find(id); pit != meshParts_.end()) {
+        for (const MeshPart& q : pit->second) if (q.mesh) p.others.push_back(q.mesh);
+        meshParts_.erase(pit);
+    }
+    if (const auto sit = sceneMeshes_.find(id); sit != sceneMeshes_.end()) {
+        if (const auto dit = depthProxyMap_.find(sit->second); dit != depthProxyMap_.end()) {
+            if (dit->second) p.others.push_back(dit->second);
+            depthProxyMap_.erase(dit);
+        }
+        p.base = sit->second;
+        sceneMeshes_.erase(sit);
+    }
+    meshBounds_.erase(id);
+    meshSlot0Material_.erase(id);
+    meshSlot0Name_.erase(id);
+    collisionMeshCache_.erase(id);
+    projectMeshIds_.erase(std::remove(projectMeshIds_.begin(), projectMeshIds_.end(), id), projectMeshIds_.end());
+    pendingMeshes_.push_back(std::move(p));
+    if (meshReleased_) meshReleased_(id, meshReleasedUser_);
+}
+
+void GameContent::flushMeshReleases(rhi::IDevice& device, u64 frameIndex) {
+    lastFlushFrame_ = frameIndex;
+    usize w = 0;
+    for (usize i = 0; i < pendingMeshes_.size(); ++i) {
+        PendingMesh& p = pendingMeshes_[i];
+        if (frameIndex < p.releasedAt + 3) {
+            if (w != i) pendingMeshes_[w] = std::move(p);
+            ++w;
+            continue;
+        }
+        // destroyMesh refuses while shared buffers are still referenced: keep those and retry.
+        usize kept = 0;
+        for (const rhi::MeshHandle m : p.others)
+            if (!device.destroyMesh(m)) p.others[kept++] = m;
+        p.others.resize(kept);
+        if (p.base && device.destroyMesh(p.base)) p.base = 0;
+        if (p.others.empty() && !p.base) continue;
+        if (!p.warned) {
+            p.warned = true;
+            AVER_WARN("[Mesh] a released mesh could not be destroyed yet (shared buffers still referenced); retrying");
+        }
+        if (w != i) pendingMeshes_[w] = std::move(p);
+        ++w;
+    }
+    pendingMeshes_.resize(w);
 }
 
 // Splits a mesh that names more than one material into one MeshHandle per slot. Ported from
@@ -518,6 +694,12 @@ void GameContent::releaseProjectMeshes(rhi::IDevice& device, bool destroyBaseHan
         collisionMeshCache_.erase(id);
     }
     projectMeshIds_.clear();
+    // Lazy meshes already released but still waiting out their frames: nothing draws them, free now.
+    for (const PendingMesh& p : pendingMeshes_) {
+        for (const rhi::MeshHandle m : p.others) device.destroyMesh(m);
+        if (destroyBaseHandles && p.base) device.destroyMesh(p.base);
+    }
+    pendingMeshes_.clear();
 }
 
 const std::pair<Vec3, Vec3>* GameContent::boundsFor(u64 id) const {

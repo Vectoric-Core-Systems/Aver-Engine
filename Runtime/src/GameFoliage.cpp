@@ -11,7 +11,9 @@
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -127,82 +129,214 @@ void buildFoliageParts(GameContent& content, u64 objectId, rhi::MeshHandle whole
 
 } // namespace
 
-FoliageLoadResult loadLevelFoliage(const fmt::OcWorldData& w, GameContent& content,
-                                    voxi::VoxiRenderer* voxi, const std::string& contentDir,
-                                    const std::function<void(f32 fraction)>& progress) {
-    FoliageLoadResult result;
-    if (!voxi) return result;
+bool LevelFoliage::load(const fmt::OcWorldData& w, GameContent& content, rhi::IDevice* device,
+                        voxi::VoxiRenderer* voxi, const std::string& contentDir,
+                        const std::function<void(f32 fraction)>& progress, const Vec3& viewerCm,
+                        const std::vector<std::string>* tablePaths) {
+    clear();
+    result_ = {};
+    content_ = &content;
+    device_ = device;
+    voxi_ = voxi;
+    if (!voxi) return true;
 
     if (w.foliageFiles.empty()) {
         voxi->clearFoliage();
-        return result;
+        loaded_ = true;
+        return true;
     }
 
-    const auto started = std::chrono::steady_clock::now();
-    std::vector<voxi::VoxiRenderer::FoliagePrototype> prototypes;
-    std::vector<voxi::VoxiRenderer::FoliageInstance> instances;
-
     for (usize fi = 0; fi < w.foliageFiles.size(); ++fi) {
-        const std::string& rel = w.foliageFiles[fi];
-        const std::string path = resolveContentPath(contentDir, rel);
-
-        fmt::OcInstanceData data;
+        File f;
+        f.path = (tablePaths && fi < tablePaths->size() && !(*tablePaths)[fi].empty())
+                     ? (*tablePaths)[fi] : resolveContentPath(contentDir, w.foliageFiles[fi]);
         std::string why;
-        if (!fmt::loadOcInstances(path, data, &why)) {
-            AVER_WARN("[Foliage] '{}' could not be read: {}", path, why);
-            result.error = why;
+        if (!fmt::loadOcInstances(f.path, f.data, &why)) {
+            AVER_WARN("[Foliage] '{}' could not be read: {}", f.path, why);
+            result_.error = why;
             if (progress) progress(static_cast<f32>(fi + 1) / static_cast<f32>(w.foliageFiles.size()));
             continue;
         }
-        ++result.files;
-
-        for (const fmt::OcInstanceGroup& g : data.groups) {
-            // THE SAME objectId A PLACEMENT NAMING THIS ASSET WOULD CARRY -- OcWorld.cpp interns
-            // every PLACE/PLACEG's own objectId as fnv1a64(asset), and content_'s mesh/parts tables
-            // are keyed by that identical id, so a species already used as an ordinary placement
-            // resolves through the same cache entry here.
-            const u64 objectId = fnv1a64(std::string_view(g.asset));
-            const rhi::MeshHandle wholeMesh = content.meshFor(objectId);
-            if (!wholeMesh) {
-                AVER_WARN("[Foliage] '{}' names asset '{}', which is not loaded -- group skipped",
-                          path, g.asset);
-                continue;   // none of this group's instance range is consumed
-            }
-
-            voxi::VoxiRenderer::FoliagePrototype proto;
-            buildFoliageParts(content, objectId, wholeMesh, proto.parts, result.droppedParts, g.asset);
-            const u32 prototypeIndex = static_cast<u32>(prototypes.size());
-            prototypes.push_back(std::move(proto));
-            ++result.groups;
-
-            const u64 end = static_cast<u64>(g.first) + g.count;
-            for (u64 k = static_cast<u64>(g.first); k < end; ++k) {
-                const usize base = static_cast<usize>(k) * 12;
-                if (base + 12 > data.transforms.size()) {
-                    AVER_WARN("[Foliage] '{}' group '{}' runs past its transform table; the rest of "
-                              "it is skipped", path, g.asset);
-                    break;
-                }
-                voxi::VoxiRenderer::FoliageInstance inst;
-                // STRAIGHT COPY, NO MATHS: data.transforms and FoliageInstance::world share the
-                // identical 12-float row-vector convention (see this function's own header comment
-                // and OcInstances.hpp's).
-                for (int c = 0; c < 12; ++c) inst.world[c] = data.transforms[base + static_cast<usize>(c)];
-                inst.prototype = prototypeIndex;
-                instances.push_back(inst);
-            }
-        }
-
+        ++result_.files;
+        const usize ng = f.data.groups.size();
+        f.objectIds.resize(ng);
+        for (usize g = 0; g < ng; ++g)
+            f.objectIds[g] = fnv1a64(std::string_view(f.data.groups[g].asset));   // as a placement's objectId
+        f.use.assign(ng, 0);
+        f.held.assign(ng, 0);
+        f.warned.assign(ng, 0);
+        const u32 fileIndex = static_cast<u32>(files_.size());
+        for (usize c = 0; c < f.data.cells.size(); ++c) cells_.push_back({fileIndex, static_cast<u32>(c)});
+        files_.push_back(std::move(f));
         if (progress) progress(static_cast<f32>(fi + 1) / static_cast<f32>(w.foliageFiles.size()));
     }
 
-    result.instances = static_cast<u32>(instances.size());
-    voxi->setFoliage(std::move(prototypes), std::move(instances));
+    loadCm_ = w.stream.loadCm;
+    evictCm_ = std::max(w.stream.evictCm, w.stream.loadCm);
+    streamed_ = w.stream.enabled && device && !cells_.empty();
+    loaded_ = true;
+    accum_ = 0;
 
-    const f64 ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - started).count();
-    AVER_INFO("[Foliage] {} file(s), {} group(s), {} instance(s), {} translucent part(s) dropped, "
-              "{:.1f} ms", result.files, result.groups, result.instances, result.droppedParts, ms);
-    return result;
+    if (streamed_) {
+        resident_.assign(cells_.size(), 0);
+        update(viewerCm, kCheckSeconds);   // first residency is immediate
+    } else {
+        const std::vector<char> all(cells_.size(), 1);
+        if (device_) {
+            applyResidency(all);   // acquires every emitted group's mesh
+        } else {
+            resident_ = all;
+            residentCount_ = static_cast<u32>(cells_.size());
+            rebuild();
+        }
+    }
+    return result_.error.empty();
+}
+
+void LevelFoliage::update(const Vec3& viewerCm, f32 dt) {
+    if (!loaded_ || !streamed_) return;
+    accum_ += dt;
+    if (accum_ < kCheckSeconds) return;
+    accum_ = 0;
+
+    std::vector<char> next(cells_.size(), 0);
+    bool changed = false;
+    for (usize i = 0; i < cells_.size(); ++i) {
+        const fmt::OcInstanceCell& c = files_[cells_[i].file].data.cells[cells_[i].cell];
+        const f32 dx = std::max({c.min[0] - viewerCm.x, 0.0f, viewerCm.x - c.max[0]});
+        const f32 dy = std::max({c.min[1] - viewerCm.y, 0.0f, viewerCm.y - c.max[1]});
+        const f32 d = std::sqrt(dx * dx + dy * dy);
+        next[i] = d <= (resident_[i] ? evictCm_ : loadCm_) ? 1 : 0;   // hysteresis
+        if (next[i] != resident_[i]) changed = true;
+    }
+    if (!changed && rebuilds_ > 0) return;
+    applyResidency(next);
+}
+
+void LevelFoliage::applyResidency(const std::vector<char>& next) {
+    for (File& f : files_) std::fill(f.use.begin(), f.use.end(), f.data.cells.empty() ? 1u : 0u);   // cell-less files are always resident
+    u32 count = 0;
+    for (usize i = 0; i < cells_.size(); ++i) {
+        if (!next[i]) continue;
+        ++count;
+        File& f = files_[cells_[i].file];
+        const fmt::OcInstanceCell& c = f.data.cells[cells_[i].cell];
+        const u64 re = static_cast<u64>(c.firstRun) + c.runCount;
+        for (u64 r = c.firstRun; r < re && r < f.data.runs.size(); ++r) {
+            const u32 g = f.data.runs[static_cast<usize>(r)].group;
+            if (g < f.use.size()) ++f.use[g];
+        }
+    }
+    // Acquire before the rebuild so the new meshes exist; release after it so the old BLASes are gone first.
+    for (File& f : files_)
+        for (usize g = 0; g < f.use.size(); ++g)
+            if (f.use[g] && !f.held[g] && content_->acquireMesh(*device_, f.objectIds[g])) f.held[g] = 1;
+    resident_ = next;
+    residentCount_ = count;
+    rebuild();
+    for (File& f : files_)
+        for (usize g = 0; g < f.use.size(); ++g)
+            if (!f.use[g] && f.held[g]) { content_->releaseMesh(*device_, f.objectIds[g]); f.held[g] = 0; }
+}
+
+void LevelFoliage::rebuild() {
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<voxi::VoxiRenderer::FoliagePrototype> prototypes;
+    std::vector<voxi::VoxiRenderer::FoliageInstance> instances;
+    std::vector<std::vector<i32>> protoOf(files_.size());   // -1 = not built yet, -2 = unusable
+    for (usize fi = 0; fi < files_.size(); ++fi) protoOf[fi].assign(files_[fi].data.groups.size(), -1);
+    u32 droppedParts = 0;
+
+    auto emit = [&](usize fi, u32 group, u32 first, u32 count) {
+        File& f = files_[fi];
+        if (group >= f.data.groups.size()) return;
+        i32& slot = protoOf[fi][group];
+        const std::string& asset = f.data.groups[group].asset;
+        if (slot == -1) {
+            const rhi::MeshHandle wholeMesh = content_->meshFor(f.objectIds[group]);
+            if (!wholeMesh) {
+                if (!f.warned[group]) {
+                    f.warned[group] = 1;
+                    AVER_WARN("[Foliage] '{}' names asset '{}', which is not loaded -- group skipped",
+                              f.path, asset);
+                }
+                slot = -2;
+            } else {
+                voxi::VoxiRenderer::FoliagePrototype proto;
+                buildFoliageParts(*content_, f.objectIds[group], wholeMesh, proto.parts, droppedParts, asset);
+                slot = static_cast<i32>(prototypes.size());
+                prototypes.push_back(std::move(proto));
+            }
+        }
+        if (slot < 0) return;
+        const u64 end = static_cast<u64>(first) + count;
+        for (u64 k = first; k < end; ++k) {
+            const usize base = static_cast<usize>(k) * 12;
+            if (base + 12 > f.data.transforms.size()) {
+                AVER_WARN("[Foliage] '{}' group '{}' runs past its transform table; the rest of "
+                          "it is skipped", f.path, asset);
+                break;
+            }
+            voxi::VoxiRenderer::FoliageInstance inst;
+            // Straight copy: same 12-float row-vector convention as FoliageInstance::world.
+            for (int c = 0; c < 12; ++c) inst.world[c] = f.data.transforms[base + static_cast<usize>(c)];
+            inst.prototype = static_cast<u32>(slot);
+            instances.push_back(inst);
+        }
+    };
+
+    for (usize fi = 0; fi < files_.size(); ++fi) {
+        const fmt::OcInstanceData& d = files_[fi].data;
+        if (!d.cells.empty()) continue;   // cell files are walked below
+        for (usize g = 0; g < d.groups.size(); ++g)
+            emit(fi, static_cast<u32>(g), d.groups[g].first, d.groups[g].count);
+    }
+    for (usize i = 0; i < cells_.size(); ++i) {
+        if (!resident_[i]) continue;
+        const fmt::OcInstanceData& d = files_[cells_[i].file].data;
+        const fmt::OcInstanceCell& c = d.cells[cells_[i].cell];
+        const u64 re = static_cast<u64>(c.firstRun) + c.runCount;
+        for (u64 r = c.firstRun; r < re && r < d.runs.size(); ++r) {
+            const fmt::OcInstanceRun& run = d.runs[static_cast<usize>(r)];
+            emit(cells_[i].file, run.group, run.first, run.count);
+        }
+    }
+
+    result_.groups = static_cast<u32>(prototypes.size());
+    result_.instances = static_cast<u32>(instances.size());
+    result_.droppedParts = droppedParts;
+    voxi_->setFoliage(std::move(prototypes), std::move(instances));
+    ++rebuilds_;
+
+    lastRebuildMs_ = static_cast<f32>(std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - started).count());
+    AVER_INFO("[Foliage] {} file(s), {}/{} cell(s) resident, {} group(s), {} instance(s), {} translucent "
+              "part(s) dropped, {:.1f} ms", result_.files, residentCount_, cells_.size(), result_.groups,
+              result_.instances, result_.droppedParts, lastRebuildMs_);
+}
+
+void LevelFoliage::clear() {
+    if (device_ && content_)
+        for (File& f : files_)
+            for (usize g = 0; g < f.held.size(); ++g)
+                if (f.held[g]) content_->releaseMesh(*device_, f.objectIds[g]);
+    if (voxi_ && loaded_) voxi_->clearFoliage();
+    files_.clear();
+    cells_.clear();
+    resident_.clear();
+    residentCount_ = 0;
+    streamed_ = false;
+    loaded_ = false;
+    accum_ = 0;
+    rebuilds_ = 0;
+    lastRebuildMs_ = 0;
+}
+
+FoliageLoadResult loadLevelFoliage(const fmt::OcWorldData& w, GameContent& content,
+                                    voxi::VoxiRenderer* voxi, const std::string& contentDir,
+                                    const std::function<void(f32 fraction)>& progress) {
+    LevelFoliage lf;   // no device: everything resident, nothing acquired -- one push, as before
+    lf.load(w, content, nullptr, voxi, contentDir, progress);
+    return lf.result();
 }
 
 } // namespace aver::game

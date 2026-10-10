@@ -673,6 +673,8 @@ void SandboxApp::buildWorldSettings() {
         }
         ImGui::TextDisabled("Takes effect when streaming is next enabled (Window > Chunk Streaming).");
     }
+    ImGui::Dummy(ImVec2(0, 6.0f * dpi_));
+    buildLevelStreamingSettings();
 
     ImGui::End();
 #endif

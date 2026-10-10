@@ -30,6 +30,7 @@
 #endif
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
+#include "aver/game/GameFoliage.hpp"
 #if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
 #  include "aver/synapse/CrowdGpu.hpp"
 #endif
@@ -426,6 +427,9 @@ private:
 #if AVER_MODULE_SCENE
     // PCG scatter streamed around the camera.
     GameStreaming streaming_;
+#if AVER_MODULE_VOXI
+    LevelFoliage levelFoliage_;   // cell-streamed when the level streams (docs/LEVEL_STREAMING.md)
+#endif
     // Frames left before streaming switches on; 0 = off or already done.
     int chunkStreamFramesLeft_ = 0;
 #endif

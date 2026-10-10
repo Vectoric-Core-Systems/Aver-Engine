@@ -14,6 +14,8 @@
 #  include "aver/formats/OcWorld.hpp"
 #  include "aver/formats/OcMap.hpp"
 #  include "aver/world/LevelInstance.hpp"
+#  include "aver/game/LevelStreaming.hpp"
+#  include "aver/formats/OcStream.hpp"
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
 #  include "aver/formats/OcLanes.hpp"
@@ -103,10 +105,26 @@ public:
     void spawnClassPlacements();
 #endif
 
-    usize entityCount() const { return levelEntities_.size(); }
+    usize entityCount() const { return levelEntities_.size() + streaming_.residentEntities(); }
     // The animated placements load() made kinematic bodies for: what the host hands to
     // world::driveKinematicBodies each frame after the animation tick. Empty without physics.
-    const std::vector<world::AnimatedBody>& animatedBodies() const { return animatedBodies_; }
+    const std::vector<world::AnimatedBody>& animatedBodies() const {
+        return streaming_.active() ? streaming_.animatedBodies() : animatedBodies_;
+    }
+
+    // LEVEL STREAMING (docs/LEVEL_STREAMING.md): a level with a STREAM record is streamed by
+    // streaming() instead of instantiated whole, when a device was given before load().
+    void setDevice(rhi::IDevice* device) { device_ = device; }
+    void setStreamHooks(LevelStreaming::Hooks hooks) { streamHooks_ = std::move(hooks); }
+    LevelStreaming& streaming() { return streaming_; }
+    const LevelStreaming& streaming() const { return streaming_; }
+    // Once a frame, before World::flush: streams around `viewers` and retires released meshes.
+    void tickStreaming(const std::vector<Vec3>& viewers);
+    // The loaded streaming data's foliage tables, and whether it no longer matches the level.
+    const std::vector<fmt::OcStreamFoliage>& streamFoliage() const { return streamFoliage_; }
+    bool streamDataStale() const { return streamDataStale_; }
+    // Absolute cell-table paths parallel to `foliageFiles` (empty entry = the Content original).
+    std::vector<std::string> foliageTablePaths(const std::vector<std::string>& foliageFiles) const;
     // THE LEVEL'S VEHICLE PLACEMENTS: every placement that carried a `vehicle <preset>` token, by entity,
     // WHETHER OR NOT it can become a car right now -- the record is what a save writes the token back
     // from, and a placement whose mesh has no bounds today (or a build with no physics module at all)
@@ -203,6 +221,14 @@ public:
 
 private:
 #if AVER_MODULE_SCENE
+    LevelStreaming streaming_;
+    LevelStreaming::Hooks streamHooks_;
+    rhi::IDevice* device_ = nullptr;
+    GameContent* content_ = nullptr;
+    u64 streamFrame_ = 0;
+    std::vector<u64> heldMeshes_;   // a whole level's meshes, acquired at load
+    std::vector<fmt::OcStreamFoliage> streamFoliage_;
+    bool streamDataStale_ = false;
     std::vector<scene::Entity> levelEntities_;
     // See animatedBodies(). Cleared by unload() before the bodies go.
     std::vector<world::AnimatedBody> animatedBodies_;

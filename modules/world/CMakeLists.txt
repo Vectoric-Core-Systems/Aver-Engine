@@ -22,6 +22,7 @@ aver_add_module(Aver.World
     src/RegionIndex.cpp
     src/ChunkSource.cpp
     src/ChunkStreamer.cpp
+    src/PlacementStreamer.cpp
     src/ChunkGenerator.cpp
     src/ScatterPalette.cpp
     src/ChunkWorld.cpp

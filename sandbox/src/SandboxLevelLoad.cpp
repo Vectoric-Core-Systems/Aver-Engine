@@ -333,7 +333,7 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
     hooks.progress = [this](const std::string& stage, f32 fraction) {
         if (projectLoading_) projectLoading_->stage(stage.c_str(), fraction);
     };
-    hooks.afterInstantiate = [this](const game::GameLevel::LoadedLevel& loaded) {
+    hooks.afterInstantiate = [this, &eng](const game::GameLevel::LoadedLevel& loaded) {
         if (loaded.legacy) onLegacyOcmapInstantiated(loaded);
         else               onLevelInstantiated(loaded);
 #if AVER_MODULE_VOXI
@@ -346,15 +346,19 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         // has given the renderer a device.
         if (voxiAttached_) {
             if (projectLoading_) projectLoading_->stage("Loading foliage", 0.75f);
-            const game::FoliageLoadResult fr = game::loadLevelFoliage(
-                loaded.world, content_, &voxiRenderer_, project_.contentDir(),
-                [this](f32 f) { if (projectLoading_) projectLoading_->progress(0.75f + f * 0.15f); });
-            if (!fr.error.empty()) AVER_WARN("[Foliage] {}", fr.error);
+            const std::vector<std::string> tables = level_.foliageTablePaths(loaded.world.foliageFiles);
+            levelFoliage_.load(loaded.world, content_, eng.device(), &voxiRenderer_, project_.contentDir(),
+                [this](f32 f) { if (projectLoading_) projectLoading_->progress(0.75f + f * 0.15f); }, camPos_,
+                &tables);
+            if (!levelFoliage_.result().error.empty()) AVER_WARN("[Foliage] {}", levelFoliage_.result().error);
         }
         if (projectLoading_) projectLoading_->stage("Finishing", 0.90f);
 #endif
     };
     level_.setLoadHooks(std::move(hooks));
+#if AVER_MODULE_SCENE
+    installLevelStreamHooks(eng);
+#endif
     level_.load(path, content_);
 }
 
@@ -433,7 +437,21 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
             const usize pi = static_cast<usize>(inst.placementIndex[k]);
             if (pi < byPlacement.size()) byPlacement[pi] = inst.entities[k];
         }
-        seqEditor_.load(w.sequences, byPlacement);
+        // A streamed level's objects are not loaded yet: their tracks are kept aside and written back by
+        // saveLevel (appendStreamedSequenceTracks); the camera track is edited as usual.
+        streamSeqTracks_.clear();
+        if (level_.streaming().active() && !w.sequences.empty()) {
+            std::vector<fmt::OcSequence> camOnly = w.sequences;
+            streamSeqHeader_ = camOnly.front();
+            streamSeqHeader_.tracks.clear();
+            std::vector<fmt::OcSeqTrack> keep;
+            for (fmt::OcSeqTrack& tr : camOnly.front().tracks)
+                (tr.target >= 0 ? streamSeqTracks_ : keep).push_back(tr);
+            camOnly.front().tracks = std::move(keep);
+            seqEditor_.load(camOnly, byPlacement);
+        } else {
+            seqEditor_.load(w.sequences, byPlacement);
+        }
         levelHeader_.sequences.clear();
     }
 #endif
@@ -942,7 +960,17 @@ void SandboxApp::unloadLevel(Engine& eng) {
     // that fails after this point must not leave the PREVIOUS level's trees standing in an
     // otherwise-empty world. Gated on voxiAttached_ like every other post-init voxiRenderer_ call
     // this function's neighbours make (e.g. GameApp's identical hooks.afterUnload).
-    if (voxiAttached_) voxiRenderer_.clearFoliage();
+    if (voxiAttached_) levelFoliage_.clear();
+#endif
+#if AVER_MODULE_SCENE
+    streamLabel_.clear();
+    streamPinned_.clear();
+    streamAdopted_.clear();
+    streamSelPinned_.clear();
+    streamPlayResident_.clear();
+    streamPlayWas_ = false;
+    streamSeenCount_ = 0;
+    streamSeqTracks_.clear();
 #endif
 #if AVER_MODULE_PBR
     // LEVEL-SCOPED MATERIAL RESIDENCY (docs: PACKAGE level-materials): every way OUT of a level goes

@@ -957,7 +957,7 @@ void GameApp::installLevelHooks(Engine& e) {
 #  endif
 #  if AVER_MODULE_VOXI
         // Clear foliage (outside entity list)
-        if (voxiAttached_) voxiRenderer_.clearFoliage();
+        if (voxiAttached_) levelFoliage_.clear();
 #  endif
         (void)e;
     };
@@ -966,7 +966,7 @@ void GameApp::installLevelHooks(Engine& e) {
         e.setLoadingStatus(stage);
         e.setLoadingProgress(fraction);
     };
-    hooks.afterInstantiate = [this](const GameLevel::LoadedLevel& loaded) {
+    hooks.afterInstantiate = [this, &e](const GameLevel::LoadedLevel& loaded) {
         levelGameMode_    = loaded.world.gameMode;      // World Settings overrides, read at begin play
         levelDefaultPawn_ = loaded.world.defaultPawn;
         // Records the placement loop does not know: bare CDecal entities, and prefab instances rebuilt from
@@ -991,15 +991,17 @@ void GameApp::installLevelHooks(Engine& e) {
 #  if AVER_MODULE_VOXI
         // Load foliage after placements (matches editor)
         if (voxiAttached_) {
-            const FoliageLoadResult fr =
-                loadLevelFoliage(loaded.world, content_, &voxiRenderer_, project_.contentDir());
-            if (!fr.error.empty()) AVER_WARN("[Foliage] {}", fr.error);
+            const std::vector<std::string> tables = level_.foliageTablePaths(loaded.world.foliageFiles);
+            levelFoliage_.load(loaded.world, content_, e.device(), &voxiRenderer_, project_.contentDir(), {}, camPos_,
+                               &tables);
+            if (!levelFoliage_.result().error.empty()) AVER_WARN("[Foliage] {}", levelFoliage_.result().error);
         }
 #  else
         (void)loaded;
 #  endif
     };
     level_.setLoadHooks(std::move(hooks));
+    level_.setDevice(e.device());
 #  if AVER_MODULE_LANDSCAPE
     // Restart streaming on terrain change
     landscape_.setTerrainChangedHook([this] {
@@ -1980,6 +1982,10 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // Chunk streaming: switched on after level camera settles, stepped every frame, evictions retired by flush.
     if (chunkStreamFramesLeft_ > 0 && --chunkStreamFramesLeft_ == 0) enableChunkStreaming();
     if (streaming_.enabled()) streaming_.tick(camPos_, t.dt);
+    level_.tickStreaming({camPos_});
+#  if AVER_MODULE_VOXI
+    if (voxiAttached_) levelFoliage_.update(camPos_, t.dt);
+#  endif
 #endif
     // Retires deferred destroys, rebuilds topological order, recomposes stale world matrices.
     scene::World::instance().flush();
