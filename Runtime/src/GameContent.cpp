@@ -515,6 +515,10 @@ bool GameContent::acquireMesh(rhi::IDevice& device, u64 id) {
             std::string why;
             const int got = takePrefetch(id, md, cpu, collision, shape, why);
             if (got < 0) {
+                if (hitchVerbose())
+                    AVER_INFO("[Mesh] {} read on the main thread ({}, {})", lit->second,
+                              got == -2 ? "its prefetch was still reading" : "never prefetched",
+                              acquireTag ? acquireTag : "other");
                 ok = loadOneMesh(device, id, pit->second, lit->second);
             } else if (got == 0) {
                 AVER_WARN("[Mesh] {}", why);
@@ -1123,6 +1127,7 @@ struct GameContent::MeshPrefetch {
         i32 shape = 0;   // released here unless taken
         std::atomic<bool> done{false};
         u64 order = 0;
+        u64 touchedTick = 0;   // prefetchTick() count when last asked for
         f32 priority = 0.0f;   // guarded by MeshPrefetch::m while queued
         ~Job() {
 #  if AVER_MODULE_PHYSICS
@@ -1137,6 +1142,7 @@ struct GameContent::MeshPrefetch {
     bool stop = false;
     std::unordered_map<u64, std::shared_ptr<Job>> jobs;   // main thread only
     u64 nextOrder = 0;
+    u64 tick = 0;
     std::mutex slotMutex;
     std::unordered_map<std::string, bool> slotCollidesMemo;   // material slot -> collides (workers)
 
@@ -1227,16 +1233,19 @@ void GameContent::prefetchMesh(u64 id, f32 priority) {
     MeshPrefetch& pf = *prefetch_;
     if (const auto it = pf.jobs.find(id); it != pf.jobs.end()) {
         it->second->order = ++pf.nextOrder;
+        it->second->touchedTick = pf.tick;
         std::lock_guard<std::mutex> l(pf.m);
         it->second->priority = priority;
         return;
     }
-    // Finished reads the viewer turned away from are dropped, oldest request first.
-    constexpr usize kMaxJobs = 512;
+    // Finished reads the viewer turned away from are dropped, oldest request first -- never one asked
+    // for in the last two streaming ticks (a streamer may be about to take it).
+    constexpr usize kMaxJobs = 1024;
     if (pf.jobs.size() >= kMaxJobs) {
         std::vector<std::pair<u64, u64>> finished;
         for (const auto& [jid, j] : pf.jobs)
-            if (j->done.load(std::memory_order_acquire)) finished.emplace_back(j->order, jid);
+            if (j->done.load(std::memory_order_acquire) && j->touchedTick + 2 < pf.tick)
+                finished.emplace_back(j->order, jid);
         std::sort(finished.begin(), finished.end());
         for (usize i = 0; i < finished.size() && pf.jobs.size() > kMaxJobs * 3 / 4; ++i) pf.jobs.erase(finished[i].second);
         if (pf.jobs.size() >= kMaxJobs) {
@@ -1258,9 +1267,14 @@ void GameContent::prefetchMesh(u64 id, f32 priority) {
     j->binariesDir = project_.binariesDir();
     j->contentDir = project_.contentDir();
     j->order = ++pf.nextOrder;
+    j->touchedTick = pf.tick;
     j->priority = priority;
     pf.jobs.emplace(id, j);
     pf.push(std::move(j));
+}
+
+void GameContent::prefetchTick() {
+    if (prefetch_) ++prefetch_->tick;
 }
 
 bool GameContent::meshReady(u64 id) const {
@@ -1277,7 +1291,7 @@ int GameContent::takePrefetch(u64 id, fmt::OcMeshData& md, MeshCpu& cpu, std::un
     if (it == prefetch_->jobs.end()) return -1;
     const std::shared_ptr<MeshPrefetch::Job> j = it->second;
     prefetch_->jobs.erase(it);   // a read still running finishes into its own job and is dropped
-    if (!j->done.load(std::memory_order_acquire)) return -1;
+    if (!j->done.load(std::memory_order_acquire)) return -2;   // still reading: the caller reads it itself
     if (!j->meshOk) { why = std::move(j->why); return 0; }
     md = std::move(j->md);
     cpu = std::move(j->cpu);

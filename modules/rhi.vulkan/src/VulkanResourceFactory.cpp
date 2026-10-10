@@ -3043,6 +3043,9 @@ bool VulkanResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInsta
     }
 
     BufferHandle descs = 0;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    u64 fillBytes = 0;
     const u64 descBytes = static_cast<u64>(total) * sizeof(VkAccelerationStructureInstanceKHR);
     if (count) {
         BufferDesc bd;
@@ -3051,10 +3054,8 @@ bool VulkanResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInsta
         bd.debugName = "rhi TLAS static instances";
         descs = createBuffer(bd);
         // Packed STRAIGHT into the mapped staging memory -- uploadToDeviceBuffers would need the whole
-        // prefix built once more on the CPU first, at up to hundreds of MiB. Same one-shot copy and wait.
-        const u64 fillBytes = static_cast<u64>(count) * sizeof(VkAccelerationStructureInstanceKHR);
-        VkBuffer staging = VK_NULL_HANDLE;
-        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+        // prefix built once more on the CPU first, at up to hundreds of MiB. The copy is the next build's.
+        fillBytes = static_cast<u64>(count) * sizeof(VkAccelerationStructureInstanceKHR);
         u8* mapped = nullptr;
         bool filled = descs &&
             createBufferCommitted(*dev_, fillBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -3067,14 +3068,9 @@ bool VulkanResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInsta
             for (u32 i = 0; i < count; ++i)
                 out[i] = vkInstanceFromTlas(instances[i], blases_[instances[i].blas - 1].asAddress);
             api.UnmapMemory(device, stagingMemory);
-            const VkBuffer dst = buffers_[descs - 1].buffer;
-            filled = runOneShotCommands(*dev_, [&](VkCommandBuffer cmd) {
-                VkBufferCopy region{0, 0, fillBytes};
-                api.CmdCopyBuffer(cmd, staging, dst, 1, &region);
-            }, "rhi TLAS static instances copy");
         }
-        destroyBufferCommitted(*dev_, staging, stagingMemory);
         if (!filled) {
+            destroyBufferCommitted(*dev_, staging, stagingMemory);
             AVER_ERROR("[RHI.Vulkan] setTlasStaticInstances: the {:.1f} MiB instance buffer could not be created "
                        "or filled -- the previous prefix kept", static_cast<f64>(descBytes) / (1024.0 * 1024.0));
             if (descs) destroyBuffer(descs);
@@ -3113,6 +3109,14 @@ bool VulkanResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInsta
     if (t->staticDescs) destroyBuffer(t->staticDescs);
     t->staticDescs = descs;
     t->staticCount = count;
+    if (t->staticStaging) {   // an earlier prefix never built
+        VkBuffer b = t->staticStaging;
+        VkDeviceMemory m = t->staticStagingMemory;
+        retire([this, b, m]() { destroyBufferCommitted(*dev_, b, m); });
+    }
+    t->staticStaging = staging;
+    t->staticStagingMemory = stagingMemory;
+    t->staticStagingBytes = staging ? fillBytes : 0;
     t->staticBlases = std::move(distinct);
     t->staticBrokenLogged = false;
     t->built = false;

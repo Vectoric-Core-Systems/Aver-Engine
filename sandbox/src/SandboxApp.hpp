@@ -3875,6 +3875,10 @@ private:
     std::unordered_set<u32> streamPinned_;
 #  if AVER_MODULE_VOXI
     game::LevelFoliage levelFoliage_;
+    // The start level's foliage, kept until the renderer attaches (see afterInstantiate).
+    fmt::OcWorldData foliagePendingWorld_;
+    std::vector<std::string> foliagePendingTables_;
+    bool foliagePending_ = false;
 #  endif
 #endif
 

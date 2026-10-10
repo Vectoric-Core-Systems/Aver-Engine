@@ -9,6 +9,7 @@
 #include "aver/pbr/Material.hpp"
 #include "aver/scene/scene_abi.h"
 #include "aver/core/Hash.hpp"
+#include "aver/core/HitchMarks.hpp"
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
@@ -199,7 +200,7 @@ void LevelFoliage::update(const Vec3& viewerCm, f32 dt) {
     if (accum_ < kCheckSeconds) return;
     accum_ = 0;
 
-    std::vector<char> next(cells_.size(), 0);
+    std::vector<char> next(cells_.size(), 0), soon(cells_.size(), 0);
     bool changed = false;
     for (usize i = 0; i < cells_.size(); ++i) {
         const fmt::OcInstanceCell& c = files_[cells_[i].file].data.cells[cells_[i].cell];
@@ -207,9 +208,76 @@ void LevelFoliage::update(const Vec3& viewerCm, f32 dt) {
         const f32 dy = std::max({c.min[1] - viewerCm.y, 0.0f, viewerCm.y - c.max[1]});
         const f32 d = std::sqrt(dx * dx + dy * dy);
         next[i] = d <= (resident_[i] ? evictCm_ : loadCm_) ? 1 : 0;   // hysteresis
+        soon[i] = d <= loadCm_ * kPrefetchFactor ? 1 : 0;
         if (next[i] != resident_[i]) changed = true;
     }
+    // Prototype meshes of cells about to load are read on GameContent's workers ahead of time, nearest
+    // first; a residency change waits until every mesh it adds is read, so nothing loads on this thread.
+    bool ready = true;
+    for (usize i = 0; i < cells_.size(); ++i) {
+        if (!soon[i]) continue;
+        File& f = files_[cells_[i].file];
+        const fmt::OcInstanceCell& c = f.data.cells[cells_[i].cell];
+        const u64 re = static_cast<u64>(c.firstRun) + c.runCount;
+        for (u64 r = c.firstRun; r < re && r < f.data.runs.size(); ++r) {
+            const u32 g = f.data.runs[static_cast<usize>(r)].group;
+            if (g >= f.held.size() || f.held[g]) continue;
+            content_->prefetchMesh(f.objectIds[g], next[i] ? 0.0f : loadCm_);
+            if (next[i] && !content_->meshReady(f.objectIds[g])) ready = false;
+        }
+    }
     if (!changed && rebuilds_ > 0) return;
+    if (!ready && rebuilds_ > 0) { accum_ = kCheckSeconds; return; }   // look again next frame
+    // The meshes a change adds go to the GPU within kAcquireMs a frame (one frame for all was 45-75 ms);
+    // the change applies once every one is held.
+    if (rebuilds_ > 0) {
+        const auto start = std::chrono::steady_clock::now();
+        bool first = true;
+        for (usize i = 0; i < cells_.size(); ++i) {
+            if (!next[i] || resident_[i]) continue;
+            File& f = files_[cells_[i].file];
+            const fmt::OcInstanceCell& c = f.data.cells[cells_[i].cell];
+            const u64 re = static_cast<u64>(c.firstRun) + c.runCount;
+            for (u64 r = c.firstRun; r < re && r < f.data.runs.size(); ++r) {
+                const u32 g = f.data.runs[static_cast<usize>(r)].group;
+                if (g >= f.held.size() || f.held[g]) continue;
+                if (!first && std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count() >=
+                                  kAcquireMs) {
+                    accum_ = kCheckSeconds;
+                    return;
+                }
+                first = false;
+                content_->acquireTag = "foliage";
+                if (content_->acquireMesh(*device_, f.objectIds[g])) f.held[g] = 1;
+                content_->acquireTag = nullptr;
+            }
+        }
+        // Their ray-tracing structures next, built by the renderer within its own budget a frame
+        // (all of a new area's at once was ~200 ms of CPU and ~130 ms of GPU).
+        bool built = true;
+        for (usize i = 0; i < cells_.size(); ++i) {
+            if (!next[i] || resident_[i]) continue;
+            File& f = files_[cells_[i].file];
+            const fmt::OcInstanceCell& c = f.data.cells[cells_[i].cell];
+            const u64 re = static_cast<u64>(c.firstRun) + c.runCount;
+            for (u64 r = c.firstRun; r < re && r < f.data.runs.size(); ++r) {
+                const u32 g = f.data.runs[static_cast<usize>(r)].group;
+                if (g >= f.held.size() || !f.held[g]) continue;
+                const rhi::MeshHandle wholeMesh = content_->meshFor(f.objectIds[g]);
+                if (!wholeMesh) continue;
+                voxi::VoxiRenderer::FoliagePrototype proto;
+                u32 dropped = 0;
+                buildFoliageParts(*content_, f.objectIds[g], wholeMesh, proto.parts, dropped, f.data.groups[g].asset);
+                if (!voxi_->prepareFoliagePrototype(proto)) built = false;
+                if (!built && std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count() >=
+                                  kAcquireMs) {
+                    accum_ = kCheckSeconds;
+                    return;
+                }
+            }
+        }
+        if (!built) { accum_ = kCheckSeconds; return; }
+    }
     applyResidency(next);
 }
 
@@ -227,16 +295,24 @@ void LevelFoliage::applyResidency(const std::vector<char>& next) {
             if (g < f.use.size()) ++f.use[g];
         }
     }
+    HitchMarks hm("foliage residency", 0.25);
     // Acquire before the rebuild so the new meshes exist; release after it so the old BLASes are gone first.
     for (File& f : files_)
         for (usize g = 0; g < f.use.size(); ++g)
-            if (f.use[g] && !f.held[g] && content_->acquireMesh(*device_, f.objectIds[g])) f.held[g] = 1;
+            if (f.use[g] && !f.held[g]) {
+                content_->acquireTag = "foliage";
+                if (content_->acquireMesh(*device_, f.objectIds[g])) f.held[g] = 1;
+                content_->acquireTag = nullptr;
+            }
+    hm.mark("acquire");
     resident_ = next;
     residentCount_ = count;
     rebuild();
+    hm.mark("rebuild");
     for (File& f : files_)
         for (usize g = 0; g < f.use.size(); ++g)
             if (!f.use[g] && f.held[g]) { content_->releaseMesh(*device_, f.objectIds[g]); f.held[g] = 0; }
+    hm.mark("release");
 }
 
 void LevelFoliage::rebuild() {
@@ -305,7 +381,9 @@ void LevelFoliage::rebuild() {
     result_.groups = static_cast<u32>(prototypes.size());
     result_.instances = static_cast<u32>(instances.size());
     result_.droppedParts = droppedParts;
+    HitchMarks hm("foliage setFoliage", 0.25);
     voxi_->setFoliage(std::move(prototypes), std::move(instances));
+    hm.mark("setFoliage");
     ++rebuilds_;
 
     lastRebuildMs_ = static_cast<f32>(std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - started).count());

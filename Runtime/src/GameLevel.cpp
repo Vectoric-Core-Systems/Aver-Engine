@@ -3,6 +3,7 @@
 #include "aver/game/GameContent.hpp"
 #include "aver/formats/OcStream.hpp"
 #include "aver/core/Hash.hpp"
+#include "aver/core/HitchMarks.hpp"
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
@@ -668,8 +669,11 @@ std::vector<std::string> GameLevel::foliageTablePaths(const std::vector<std::str
 }
 
 void GameLevel::tickStreaming(const std::vector<Vec3>& viewers) {
+    HitchMarks hm("level stream", 0.25);
     if (streaming_.active()) streaming_.tick(scene::World::instance(), viewers);
+    hm.mark("tick");
     if (content_ && device_) content_->flushMeshReleases(*device_, ++streamFrame_);
+    hm.mark("meshReleases");
 }
 
 void GameLevel::unload() {

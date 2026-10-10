@@ -1138,6 +1138,11 @@ struct RhiTlas {
     // only legal over the same instances its build had.
     u32 builtStatic = 0;
     bool staticBrokenLogged = false;
+    // The prefix's instances in host memory, copied into staticDescs by the next build on the frame's own
+    // command buffer: setTlasStaticInstances never waits for the queue (see D3D12's twin).
+    VkBuffer staticStaging = VK_NULL_HANDLE;
+    VkDeviceMemory staticStagingMemory = VK_NULL_HANDLE;
+    VkDeviceSize staticStagingBytes = 0;
 };
 
 // A destroyed object the GPU may still be reading, released once `fence` retires. Vulkan analog

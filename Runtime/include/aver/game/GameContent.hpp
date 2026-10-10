@@ -106,12 +106,15 @@ public:
     // queues its GPU handles. True on success. Eager meshes are permanently loaded: acquire returns
     // whether they are, release is a no-op.
     bool acquireMesh(rhi::IDevice& device, u64 id);
+    const char* acquireTag = nullptr;   // diagnostics: who is acquiring (AVER_HITCH_MS sync-read lines)
     void releaseMesh(rhi::IDevice& device, u64 id);
     bool meshLoaded(u64 id) const;
     // Prepares a lazy mesh on a worker thread (read, vertices and parts, collision mesh and shape) so a
     // later acquireMesh only uploads. Workers take the lowest `priority` first (a streamer passes the
     // distance); asking again updates it. No-op for eager or loaded meshes.
     void prefetchMesh(u64 id, f32 priority = 0.0f);
+    // One streaming tick passed: reads not asked for in the last two are the ones a full queue drops.
+    void prefetchTick();
     // True for eager, loaded or unknown meshes and for finished prefetches; false while a lazy mesh is
     // still being prepared or has no prefetch yet (the queue was full).
     bool meshReady(u64 id) const;

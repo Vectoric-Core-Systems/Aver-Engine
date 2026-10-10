@@ -190,6 +190,7 @@ void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& item
     fmt::OcWorldData sub;
     std::vector<u32> globalOf;
     std::unordered_map<u32, i32> localOf;
+    std::vector<u64> toBind;
     for (const u32 item : items) {
         Item& it = items_[item];
         for (const u32 pi : it.placements) {
@@ -202,9 +203,12 @@ void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& item
             globalOf.push_back(pi);
             const u64 mesh = records_[pi].objectId;
             if (std::find(it.meshes.begin(), it.meshes.end(), mesh) == it.meshes.end()) {
-                if (content_->acquireMesh(*device_, mesh)) {
+                content_->acquireTag = "level";
+                const bool got = content_->acquireMesh(*device_, mesh);
+                content_->acquireTag = nullptr;
+                if (got) {
                     it.meshes.push_back(mesh);
-                    bindMeshMaterials(mesh);
+                    toBind.push_back(mesh);
                     // Built on the prefetch worker; instantiate reuses it instead of building one here.
                     if (!meshShapes_.count(mesh))
                         if (const i32 shape = content_->takeMeshShape(mesh)) meshShapes_.emplace(mesh, shape);
@@ -213,6 +217,8 @@ void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& item
         }
     }
     hm.mark("meshes");
+    for (const u64 mesh : toBind) bindMeshMaterials(mesh);
+    hm.mark("materials");
     opt_.meshShapes = &meshShapes_;
     const world::LevelInstance inst = world::instantiate(sub, opt_);
     hm.mark("instantiate");
@@ -290,8 +296,10 @@ void LevelStreaming::releaseUnusedShapes() {
 
 void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewers) {
     if (!active_) return;
+    HitchMarks hm("level stream tick", 0.25);
     std::vector<u32> toLoad, toEvict;
     streamer_.update(viewers, toLoad, toEvict);
+    hm.mark("streamer");
     lastLoaded_ = 0;
     lastEvicted_ = 0;
     using Clock = std::chrono::steady_clock;
@@ -304,27 +312,34 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewers)
         if (item < items_.size() && items_[item].loaded) { evictItem(world, item); ++lastEvicted_; }
     }
     if (lastEvicted_) releaseUnusedShapes();
+    hm.mark("evict");
 
     // Pinned roots load now; the rest once their meshes are read.
     std::vector<u32> now, ready;
     f32 nearestMissing = FLT_MAX;
+    // Every request first, then readiness: a request may trim finished reads, never one just checked.
+    content_->prefetchTick();
+    for (const u32 item : toLoad) {
+        if (item >= items_.size() || items_[item].loaded || streamer_.pinned(item)) continue;
+        const f32 dist = streamer_.distance(item, viewers);
+        for (const u32 pi : items_[item].placements)
+            if (!removed(pi)) content_->prefetchMesh(records_[pi].objectId, dist);
+    }
     for (const u32 item : toLoad) {
         if (item >= items_.size() || items_[item].loaded) continue;
         if (streamer_.pinned(item)) { now.push_back(item); continue; }
-        const f32 dist = streamer_.distance(item, viewers);
         bool read = true;
-        for (const u32 pi : items_[item].placements) {
-            if (removed(pi)) continue;
-            content_->prefetchMesh(records_[pi].objectId, dist);
-            read = read && content_->meshReady(records_[pi].objectId);
-        }
-        nearestMissing = std::min(nearestMissing, dist);
+        for (const u32 pi : items_[item].placements)
+            if (!removed(pi)) read = read && content_->meshReady(records_[pi].objectId);
+        nearestMissing = std::min(nearestMissing, streamer_.distance(item, viewers));
         if (read) ready.push_back(item);
     }
+    hm.mark("prefetch");
     if (!now.empty()) {
         loadItems(world, now);
         lastLoaded_ += static_cast<u32>(now.size());
     }
+    hm.mark("pinned");
     if (ready.empty()) return;
     const f32 loadCm = streamer_.settings().loadCm;
     const f64 t = std::clamp((static_cast<f64>(nearestMissing) / loadCm - 0.25) / 0.5, 0.0, 1.0);
@@ -337,6 +352,7 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewers)
         loadItems(world, one);
         ++lastLoaded_;
     }
+    hm.mark("loads");
 }
 
 const fmt::OcWorldPlacement* LevelStreaming::recordOf(scene::Entity e) const {

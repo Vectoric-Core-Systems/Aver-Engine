@@ -349,8 +349,11 @@ kept as `Sandbox-prev.log`). Every frame longer than `AVER_HITCH_MS` (250 ms whe
 logs `[FrameHitch]` with its phases (update, beginFrame, render, endFrame, present). Scoped
 `aver::HitchMarks` (`modules/core/include/aver/core/HitchMarks.hpp`) break a phase down further and log
 `[HitchMarks] <where> <total>: <stretch> <ms> | ...` when their own scope runs long: the editor's update,
-D3D12 `endFrame` (late scene pass vs the rest), Voxi's acceleration-structure build, and each streamed
-root's load (meshes / instantiate / hook), eviction and mesh upload, named by asset. Unset, each costs
+D3D12 `endFrame` (late scene pass vs the rest), Voxi's acceleration-structure build and geometry table,
+the level-stream tick (streamer / evict / prefetch / pinned / loads, then mesh releases), a foliage
+cell change (acquire / rebuild / release, and `setFoliage`), and each streamed root's load (meshes /
+instantiate / hook), eviction and mesh upload, named by asset. With the variable set, a mesh read on
+the main thread logs `[Mesh] ... read on the main thread (reason, tag)`. Unset, each costs
 one cached `getenv`. `--cam-fly DX DY` (cm per frame) flies the editor camera in a straight line, which
 is what exercises level streaming; a third value turns the camera that many degrees a frame.
 

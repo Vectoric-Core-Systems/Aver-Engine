@@ -202,7 +202,11 @@ public:
     static constexpr u32 kMaxFoliagePartsPerPrototype = 16;
     static constexpr u32 kMaxFoliageInstances = voxi::kMaxFoliageInstances;
     void setFoliage(std::vector<FoliagePrototype> prototypes, std::vector<FoliageInstance> instances);
-    void clearFoliage();
+    // Ahead of a setFoliage that will name it: the prototype's BLAS is made now and built within the
+    // frame budget. True once built (that set then builds nothing for it).
+    bool prepareFoliagePrototype(const FoliagePrototype& prototype);
+    // keepBlases: setFoliage's own clear; prototype BLASes stay in foliageBlasCache_ for the next set.
+    void clearFoliage(bool keepBlases = false);
     struct FoliageStats { u32 prototypes = 0, parts = 0, instances = 0; u64 gpuBytes = 0; };
     FoliageStats foliageStats() const;
 
@@ -1034,11 +1038,22 @@ private:
     static constexpr u64 kGiAccumChurnFrames = 1200;
     u32 giAccumQuietNeeded_ = kGiAccumulatorQuietTicks;
     u64 giAccumFreedFrame_ = 0;   // rtFrameIndex_ + 1 at the last free, 0 never
+    bool vramTight() const;   // local usage past 80% of the budget (or unknown): the quiet free may run
     // Per-frame BLAS build budget (structure bytes; scratch is of the same order). See buildAccelerationStructures.
     // ~1.4 ms per MB (NeonDistrict: 512 MB was ~0.7 s in one submission); 8 MB keeps a streamed level's
     // builds near 10 ms a frame.
     static constexpr u64 kBlasBuildBytesPerFrame = 8ull << 20;
     bool blasBuildsDeferred_ = false;   // some draw's first BLAS build waits for the next frame
+    // Foliage prototype BLASes by their geometry (mesh + opacity per part), kept across setFoliage calls;
+    // dropped after kFoliageBlasKeepSets sets without use. foliageBlasToBuild_: made, not built yet.
+    // foliageBlasPrepared_: made by prepareFoliagePrototype, built kBlasBuildBytesPerFrame a frame.
+    struct FoliageBlasEntry { rhi::BlasHandle blas = 0; u64 lastUsed = 0; bool built = false; };
+    std::unordered_map<u64, FoliageBlasEntry> foliageBlasCache_;
+    std::vector<u64> foliageBlasToBuild_, foliageBlasPrepared_;
+    // The prototype's geometries (parts with a mesh, in order) and their cache key.
+    u64 foliageGeoms(const FoliagePrototype& p, std::vector<rhi::BlasGeometry>& geoms);
+    FoliageBlasEntry& foliageBlasFor(u64 key, const std::vector<rhi::BlasGeometry>& geoms);
+    static constexpr u64 kFoliageBlasKeepSets = 8;
     // Meshes past 2 * kRtChunkTriangles are traced as BLASes over index ranges of kRtChunkTriangles,
     // built a few a frame (rtChunksFor). rtUnchunked_: meshes already found small enough.
     static constexpr u32 kRtChunkTriangles = 131072;

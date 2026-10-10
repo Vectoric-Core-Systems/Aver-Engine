@@ -1021,6 +1021,12 @@ void SandboxApp::onInit(Engine& e)  {
         if (voxiRenderer_.init(*e.device())) {
             e.device()->addRenderFeature(&voxiRenderer_);
             voxiAttached_ = true;
+            if (foliagePending_) {
+                foliagePending_ = false;
+                levelFoliage_.load(foliagePendingWorld_, content_, e.device(), &voxiRenderer_, project_.contentDir(),
+                                   {}, camPos_, &foliagePendingTables_);
+                if (!levelFoliage_.result().error.empty()) AVER_WARN("[Foliage] {}", levelFoliage_.result().error);
+            }
             if (projectRenderPending_) applyProjectRenderSettings();
             if (saveProject_ && !saveProjectDone_) { saveProjectDone_ = true; seedAndSaveProject(); }
 #if AVER_WITH_IMGUI

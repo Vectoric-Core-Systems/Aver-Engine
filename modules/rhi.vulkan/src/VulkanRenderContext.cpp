@@ -1176,8 +1176,20 @@ void VulkanRenderContext::recordTlasBuild(RhiTlas& t, u32 staticUsed, u32 writte
                                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
                                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
         const VkAccessFlags2 kReads = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
-        if (written) {
+        if (written || t.staticStaging)
             barrier(kReaders, kReads, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        if (t.staticStaging) {   // the prefix itself, staged by setTlasStaticInstances
+            VkBufferCopy region{0, 0, t.staticStagingBytes};
+            dev_->api().CmdCopyBuffer(cb, t.staticStaging, descs, 1, &region);
+            VkBuffer b = t.staticStaging;
+            VkDeviceMemory m = t.staticStagingMemory;
+            VulkanDevice* d = dev_;
+            res_->retire([d, b, m]() { destroyBufferCommitted(*d, b, m); });
+            t.staticStaging = VK_NULL_HANDLE;
+            t.staticStagingMemory = VK_NULL_HANDLE;
+            t.staticStagingBytes = 0;
+        }
+        if (written) {
             VkBufferCopy region{0, static_cast<VkDeviceSize>(staticUsed) * sizeof(VkAccelerationStructureInstanceKHR),
                                 static_cast<VkDeviceSize>(written) * sizeof(VkAccelerationStructureInstanceKHR)};
             dev_->api().CmdCopyBuffer(cb, t.instanceBuffers[f], descs, 1, &region);

@@ -66,16 +66,30 @@ Meshes under a level's `lazy=` folders are indexed at project open but not uploa
   collision source). `void releaseMesh(rhi::IDevice&, u64 id)`: refcount--; at 0 the GPU mesh and its
   parts are destroyed through the device's deferred-destruction path (never mid-frame on in-flight data).
 - `bool meshLoaded(u64 id) const`. A draw of an unloaded mesh is skipped, never a fallback cube.
-- `void prefetchMesh(u64 id)` / `bool meshReady(u64 id) const`: two worker threads read the `.ocmesh`
+- `void prefetchMesh(u64 id)` / `bool meshReady(u64 id) const`: three worker threads read the `.ocmesh`
   and its collision disk cache ahead of `acquireMesh`, which then only uploads. The workers touch no
-  engine state; finished reads nobody acquired are dropped oldest first past 512.
+  engine state. Past 1024 jobs, finished reads nobody acquired are dropped oldest first, never one
+  requested or checked in the last two ticks (`prefetchTick`); the stream tick requests everything
+  before it checks readiness, so a check never sees its read trimmed.
 
 ## 4. Foliage
 
 `game::loadLevelFoliage` keeps the parsed tables on the CPU. With cells, only cells whose AABB is within
 the level's `loadCm` (evict at `evictCm`) of the viewer are pushed through `setFoliage`; the push is
 redone only when the resident cell set changes, at most every 0.25 s. Prototype meshes are acquired
-for groups in resident cells and released when none remain.
+for groups in resident cells and released when none remain. A level opened before the renderer
+attached (the editor's start level) loads its foliage on attach.
+
+A cell change is staged, and applies only once all of it is ready (2026-10-10; before, every change
+on Caldera was 0.7-1.4 s of CPU and ~0.5 s of GPU, then 50-200 ms):
+- Prototype meshes of cells within 1.3x `loadCm` are read on GameContent's prefetch workers.
+- The change's new meshes go to the GPU within 6 ms a frame (`LevelFoliage::kAcquireMs`).
+- Their BLASes are made through `VoxiRenderer::prepareFoliagePrototype` and built 8 MB a frame.
+- `setFoliage` keeps prototype BLASes across calls (cached by geometry, dropped after 8 sets unused)
+  and only re-sets the TLAS static prefix. The prefix's descriptors are staged and copied by the next
+  build on the frame's own command list (both backends); the structure, scratch and descriptor
+  buffers are reused when large enough. That upload used to wait for the queue to drain.
+- Measured: a cell change is 20-40 ms of CPU on Caldera.
 
 ## 5. Bake -- `AverAssetC stream` / Regenerate
 
@@ -97,7 +111,7 @@ tiles 0.6-6.7 s):
   read, vertex conversion, the per-material part split, the collision mesh (read from the disk cache,
   or on a first visit built and written there; material slots are judged from their `.ocmat` files)
   and the Jolt mesh shape (its BVH build; `aver_phys_create_mesh_shape` is thread-safe). A root loads
-  once every mesh it names is prepared; a mesh with no prefetch yet (the 512-job queue was full, and
+  once every mesh it names is prepared; a mesh with no prefetch yet (the 1024-job queue was full, and
   the farthest queued job only gives way to a nearer one) is not ready. Pinned roots load at once.
 - The editor's mesh hook, for streamed meshes, shares LOD0's vertex buffer across the LOD ladder and
   skips the cluster data only `--lod-per-cluster` and `--lod-cluster-stats` read.
@@ -111,14 +125,21 @@ tiles 0.6-6.7 s):
   - The ray-traced geometry table keeps each mesh's range while it stays in the set and appends only
     new meshes (it re-copied every mesh, ~1 GB on Caldera, whenever one arrived). New meshes are copied
     from the upload heap 16 MB a frame, in pieces; their instances are masked out of every ray until
-    complete. A repack (the table out of room) moves held meshes from the old buffers, GPU to GPU.
+    complete. Out of room, the table grows: the old buffers' used ranges move whole (two GPU copies,
+    ~20 ms of CPU). It compacts, moving each held mesh, only when over half of it is dead ranges
+    (compacting every time was 350-720 ms of CPU).
   - First-time BLAS builds are capped at 8 MB a frame. A mesh over 262k triangles (a terrain tile) is
     traced as BLASes over 131k-triangle ranges of its index buffer (`BlasGeometry::firstIndex/
     indexCount`), each a first build under that cap, appearing as it is built.
   - Measured on a Caldera flight: the frame a 2M-triangle tile arrived was 300 ms of GPU (one BLAS,
     then ~260 ms of copies); now its acceleration-structure work is ~7 ms a frame. Same final image.
+- Voxi frees the GI injection accumulator (2 GiB at the top tier) when GI goes quiet only while video
+  memory is past 80% of the budget; each free and recreate was a 150-230 ms frame while flying.
 - The editor logs `[Hitch]` lines (frame time, stream time, loaded/evicted/resident, foliage) when a
   frame passes 100 ms or a streaming step 40 ms.
+- What remains on the main thread (Caldera, Release, path tracing): a large mesh's GPU buffers and
+  copy, 25-75 ms for one terrain tile or large prop. On a 1500-frame flight, 24 frames passed 50 ms
+  (worst 98 ms); none passed 100 ms after the level opened.
 
 Editor rules (fully editable; sandbox/src/SandboxLevelStream.cpp):
 - Before an entity is evicted its live state is written back into the placement record (transform,

@@ -1835,6 +1835,11 @@ struct RhiTlas {
     // an update is only legal over the same descs its build had.
     u32 builtStatic = 0;
     bool staticBrokenLogged = false;
+    // The prefix's descs in an upload buffer, copied into staticDescs by the next build on the frame's
+    // own list: setTlasStaticInstances never waits for the queue (that wait was a foliage cell change's
+    // 50-150 ms on Caldera).
+    ComPtr<ID3D12Resource> staticStaging;
+    u64 staticStagingBytes = 0;
 };
 
 // A root signature plus the parameter indices it was built with; shared by identical layouts.
@@ -7625,7 +7630,7 @@ bool D3D12ResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInstan
     RhiTlas* t = tlas(h);
     if (!t) { AVER_ERROR("[RHI.D3D12] setTlasStaticInstances with an invalid handle"); return false; }
     if (!dev_->device5_) { AVER_WARN("[RHI.D3D12] setTlasStaticInstances without ray-tracing support"); return false; }
-    if (count == 0 && t->staticCount == 0 && !t->staticDescs) return true;   // no prefix to remove
+    if (count == 0 && t->staticCount == 0) return true;   // no prefix to remove
     if (count && !instances) { AVER_ERROR("[RHI.D3D12] setTlasStaticInstances: {} instances and no array", count); return false; }
     if (static_cast<u64>(count) + t->maxInstances > kMaxTlasInstances) {
         AVER_ERROR("[RHI.D3D12] setTlasStaticInstances: {} static + {} per-frame instances is past the {} one "
@@ -7659,9 +7664,17 @@ bool D3D12ResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInstan
     dev_->device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
     const u64 scratchBytes = t->allowUpdate ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
                                             : info.ScratchDataSizeInBytes;
-    ComPtr<ID3D12Resource> as = makeAsBuffer(dev_->device_.Get(), info.ResultDataMaxSizeInBytes,
-                                             D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-    ComPtr<ID3D12Resource> scratch = makeAsBuffer(dev_->device_.Get(), scratchBytes, D3D12_RESOURCE_STATE_COMMON);
+    // Large enough already: kept. Every build rewrites the structure in place on the queue anyway, so
+    // frames in flight are ordered before the next one; a grow takes headroom so cell changes rarely
+    // reallocate.
+    auto roomy = [](u64 n) { return n + n / 4; };
+    const bool keepAs = t->as && t->as->GetDesc().Width >= info.ResultDataMaxSizeInBytes;
+    const bool keepScratch = t->scratch && t->scratch->GetDesc().Width >= scratchBytes;
+    ComPtr<ID3D12Resource> as = keepAs ? t->as
+        : makeAsBuffer(dev_->device_.Get(), roomy(info.ResultDataMaxSizeInBytes),
+                       D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+    ComPtr<ID3D12Resource> scratch = keepScratch ? t->scratch
+        : makeAsBuffer(dev_->device_.Get(), roomy(scratchBytes), D3D12_RESOURCE_STATE_COMMON);
     if (!as || !scratch) {
         AVER_ERROR("[RHI.D3D12] setTlasStaticInstances: {:.1f} MiB structure / {:.1f} MiB scratch for {} instances "
                    "could not be allocated -- the previous prefix kept",
@@ -7670,42 +7683,59 @@ bool D3D12ResourceFactory::setTlasStaticInstances(TlasHandle h, const TlasInstan
         return false;
     }
 
+    // Kept when large enough: the next build's copy into it is ordered after every earlier read on the queue.
     BufferHandle descs = 0;
+    bool newDescs = false;
+    ComPtr<ID3D12Resource> staging;
     const u64 descBytes = static_cast<u64>(total) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+    const u64 stagingBytes = static_cast<u64>(count) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
     if (count) {
-        BufferDesc bd;
-        bd.bytes = descBytes;
-        bd.kind = BufferKind::Default;
-        bd.debugName = "rhi TLAS static instances";
-        descs = createBuffer(bd);
-        ID3D12Resource* descRes = bufferResource(descs);
-        const bool filled = descRes && uploadBufferFilled(descRes, static_cast<u64>(count) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC),
-            [&](u8* dst) {
-                auto* out = reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(dst);
-                for (u32 i = 0; i < count; ++i)
-                    out[i] = toInstanceDesc(instances[i], blases_[instances[i].blas - 1].as->GetGPUVirtualAddress());
-            });
+        ID3D12Resource* held = t->staticDescs ? bufferResource(t->staticDescs) : nullptr;
+        if (held && held->GetDesc().Width >= descBytes) {
+            descs = t->staticDescs;
+        } else {
+            BufferDesc bd;
+            bd.bytes = roomy(descBytes);
+            bd.kind = BufferKind::Default;
+            bd.debugName = "rhi TLAS static instances";
+            descs = createBuffer(bd);
+            newDescs = true;
+        }
+        auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+        auto ud = bufferDesc(stagingBytes);
+        u8* mapped = nullptr;
+        D3D12_RANGE none{0, 0};
+        const bool filled = bufferResource(descs) &&
+            SUCCEEDED(dev_->device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &ud,
+                      D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging))) &&
+            SUCCEEDED(staging->Map(0, &none, reinterpret_cast<void**>(&mapped)));
         if (!filled) {
             AVER_ERROR("[RHI.D3D12] setTlasStaticInstances: the {:.1f} MiB instance buffer could not be created "
                        "or filled -- the previous prefix kept", static_cast<f64>(descBytes) / (1024.0 * 1024.0));
-            if (descs) destroyBuffer(descs);
+            if (newDescs && descs) destroyBuffer(descs);
             return false;
         }
+        setDebugName(staging.Get(), "rhi TLAS static instances staging");
+        auto* out = reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(mapped);
+        for (u32 i = 0; i < count; ++i)
+            out[i] = toInstanceDesc(instances[i], blases_[instances[i].blas - 1].as->GetGPUVirtualAddress());
+        staging->Unmap(0, nullptr);
 #if AVER_RHI_TRACK_STATE
         // State managed by build; caller's bufferBarrier on it is reported, not obeyed.
-        buffers_[descs - 1].stateFixed = true;
+        if (newDescs) buffers_[descs - 1].stateFixed = true;
 #endif
     }
 
-    // Replaced, never written in place; frames in flight traverse old structure until fence retires it.
-    retire(t->as);
-    retire(t->scratch);
-    t->as = as;
-    t->scratch = scratch;
-    if (t->staticDescs) destroyBuffer(t->staticDescs);
-    t->staticDescs = descs;
+    if (!keepAs) { retire(t->as); t->as = as; }
+    if (!keepScratch) { retire(t->scratch); t->scratch = scratch; }
+    // count 0 keeps the buffer for the next prefix.
+    if (t->staticDescs && descs && descs != t->staticDescs) destroyBuffer(t->staticDescs);
+    if (descs) t->staticDescs = descs;
+    if (newDescs) t->staticDescsState = D3D12_RESOURCE_STATE_COMMON;
+    retire(t->staticStaging);   // an earlier prefix never built
+    t->staticStaging = staging;
+    t->staticStagingBytes = staging ? stagingBytes : 0;
     t->staticCount = count;
-    t->staticDescsState = D3D12_RESOURCE_STATE_COMMON;
     t->staticBlases = std::move(distinct);
     t->staticBrokenLogged = false;
     t->built = false;
@@ -8907,6 +8937,17 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12RenderContext::tlasBuildDescs(RhiTlas& t, u32 sta
     ID3D12Resource* descs = res_->bufferResource(t.staticDescs);
     const D3D12_RESOURCE_STATES kRead =
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    if (t.staticStaging) {
+        if (t.staticDescsState != D3D12_RESOURCE_STATE_COPY_DEST) {
+            const D3D12_RESOURCE_BARRIER toCopy = transition(descs, t.staticDescsState, D3D12_RESOURCE_STATE_COPY_DEST);
+            dev_->cmdList_->ResourceBarrier(1, &toCopy);
+            t.staticDescsState = D3D12_RESOURCE_STATE_COPY_DEST;
+        }
+        dev_->cmdList_->CopyBufferRegion(descs, 0, t.staticStaging.Get(), 0, t.staticStagingBytes);
+        res_->retire(std::move(t.staticStaging));
+        t.staticStaging.Reset();
+        t.staticStagingBytes = 0;
+    }
     if (written) {
         if (t.staticDescsState != D3D12_RESOURCE_STATE_COPY_DEST) {
             const D3D12_RESOURCE_BARRIER toCopy = transition(descs, t.staticDescsState, D3D12_RESOURCE_STATE_COPY_DEST);

@@ -351,6 +351,14 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
                 [this](f32 f) { if (projectLoading_) projectLoading_->progress(0.75f + f * 0.15f); }, camPos_,
                 &tables);
             if (!levelFoliage_.result().error.empty()) AVER_WARN("[Foliage] {}", levelFoliage_.result().error);
+            foliagePending_ = false;
+        } else {
+            // A level opened before the renderer attached (the start level): its foliage loads on attach.
+            foliagePendingWorld_ = fmt::OcWorldData{};
+            foliagePendingWorld_.foliageFiles = loaded.world.foliageFiles;
+            foliagePendingWorld_.stream = loaded.world.stream;
+            foliagePendingTables_ = level_.foliageTablePaths(loaded.world.foliageFiles);
+            foliagePending_ = !loaded.world.foliageFiles.empty();
         }
         if (projectLoading_) projectLoading_->stage("Finishing", 0.90f);
 #endif

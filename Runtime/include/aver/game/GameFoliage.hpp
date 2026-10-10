@@ -69,12 +69,15 @@ FoliageLoadResult loadLevelFoliage(const fmt::OcWorldData& w, GameContent& conte
 // everything once (same as loadLevelFoliage). With cells, update() keeps only cells within the
 // level's loadCm of the viewer (evicted past evictCm) and re-pushes through setFoliage when that
 // set changes, at most every kCheckSeconds; prototype meshes are acquired/released through
-// GameContent. setFoliage rebuilds every BLAS and the TLAS static prefix per call (full cost, not
-// incremental), so the throttle matters. The objects must outlive this; the renderer's foliage is
+// GameContent. setFoliage keeps prototype BLASes but re-sets the TLAS static prefix per call, so the
+// throttle matters. The objects must outlive this; the renderer's foliage is
 // NOT cleared by the destructor, only by clear().
 class LevelFoliage {
 public:
     static constexpr f32 kCheckSeconds = 0.25f;
+    // Cells within loadCm * this have their prototype meshes read ahead (GameContent::prefetchMesh).
+    static constexpr f32 kPrefetchFactor = 1.3f;
+    static constexpr f64 kAcquireMs = 6.0;   // GPU uploads of a change's new meshes, per frame
 
     // `device` null: meshes are not acquired and every cell is resident (non-streamed behaviour).
     // `tablePaths`: absolute paths parallel to w.foliageFiles; a non-empty entry replaces
