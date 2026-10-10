@@ -1400,7 +1400,7 @@ private:
     bool rdLocalHistWanted() const {
         // Always with ray tracing: the staged visible-surface pass writes the pixel's light slots here (u19),
         // the sun's among them (UNIFIED_LIGHTS.md), whether or not lamps are on.
-        return rayTracingWanted() && dev_ && dev_->backend() == rhi::Backend::D3D12;
+        return rayTracingWanted() && dev_ && dev_->caps().computeInScenePass;
     }
 
     // Fog occlusion: whether airVisTex_ will ACTUALLY be created/kept.

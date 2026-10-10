@@ -303,6 +303,8 @@ struct GraphicsPipelineDesc {
     Format depthFormat       = Format::Unknown;
     u32    sampleCount       = 1;
 
+    // Opaque applies to every render target. Any other mode blends target 0 only: targets 1+ of a blended
+    // multi-target pipeline are left unwritten (a compose draw beside the G-buffer must not touch it).
     BlendMode blend = BlendMode::Opaque;
 
     // Reserves one extra root SRV past every t-register layout declares:

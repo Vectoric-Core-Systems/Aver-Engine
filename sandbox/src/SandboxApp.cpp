@@ -949,7 +949,7 @@ void SandboxApp::onInit(Engine& e)  {
         di.shaderModel = caps.shaderModel; di.meshShaderTier = caps.meshShaderTier;
         di.dxcAvailable = caps.dxcAvailable;
         // Denoiser support (D3D12-specific; mirrored in GameApp::attachVoxi).
-        di.denoiserSupported = e.device()->backend() == rhi::Backend::D3D12;
+        di.denoiserSupported = e.device()->caps().gBuffer;
         voxi::Renderer::get().setDeviceInfo(di);
 
         // Apply project Voxi settings BEFORE flags and BEFORE init() (createVoxelVolume uses them).

@@ -708,6 +708,7 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     if (wantRayQuery)    { rqFeat.pNext = tail;   tail = &rqFeat; }
     f2.pNext = tail;
     api_.GetPhysicalDeviceFeatures2(physicalDevice_, &f2);
+    independentBlend_ = f2.features.independentBlend == VK_TRUE;   // enabled with the rest of f2
     v12.bufferDeviceAddress = VK_TRUE;   // already confirmed supported above
     v12.timelineSemaphore = VK_TRUE;
 
@@ -1064,6 +1065,8 @@ void VulkanDevice::removeRenderFeature(IRenderFeature* f) {
 void VulkanDevice::queryCaps() {
     caps_ = {};
     caps_.computeShaders = true;   // core 1.0 mandates a compute-capable queue existing
+    // computeInScenePass, gBuffer and blendedReplay stay false until this backend implements them:
+    // the scene scope would have to end around a dispatch, and the G-buffer getters are not overridden.
 
     caps_.msaaMask = 1;
     caps_.maxMsaaSamples = 1;

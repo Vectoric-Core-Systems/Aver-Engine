@@ -11,8 +11,8 @@ namespace aver::render::denoise {
 
 namespace {
 
-// b1: Voxi-style root CBV. Slot 0 is the engine's per-frame block (PipelineLayout's own comment).
-constexpr u32 kConstantSlot = 1;
+// b3: a root CBV. Not b1: on Vulkan b1 is push constants and a CBV there reads zeros.
+constexpr u32 kConstantSlot = 3;
 
 // Shader bindings per pass, matching aver_denoise.hlsl's register lists.
 constexpr u32 kSrvCount[4] = {10, 7, 10, 5};

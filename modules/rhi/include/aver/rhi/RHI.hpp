@@ -87,6 +87,15 @@ struct DeviceCaps {
 
     // Whether a shader may perform 64-bit atomics on a buffer -- needed by a lock-free hash map.
     bool shaderInt64Atomics = false;
+
+    // Frame features a backend provides (features gate on these, never on backend()):
+    // compute dispatches, copies and barriers may be recorded inside the scene pass (Voxi's staged
+    // ray-driven passes, NRD2 and NeuRaC record there);
+    bool computeInScenePass = false;
+    // the G-buffer is written and its getters answer (viewZ, normal-roughness, velocity, previous view-proj);
+    bool gBuffer = false;
+    // blended draws are replayed after the opaque scene (Voxi's ray-traced glass composite).
+    bool blendedReplay = false;
 };
 
 // A development clamp on what a device REPORTS, so capability-gated fallback paths can be run on

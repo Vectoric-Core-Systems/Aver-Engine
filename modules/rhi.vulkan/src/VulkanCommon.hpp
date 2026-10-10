@@ -1824,6 +1824,7 @@ private:
     bool msSupported_ = false, msActive_ = false, msRefusalLogged_ = false;
     // ---- ray tracing: VK_KHR_acceleration_structure + VK_KHR_ray_query present ----
     bool rtSupported_ = false;
+    bool independentBlend_ = false;   // the device feature (blended multi-target pipelines mask targets 1+)
 
     // Whether the descriptor-indexing features the ray path's bindless texture table needs were
     // both SUPPORTED and ENABLED at device creation, the only place that knows. Read by queryCaps

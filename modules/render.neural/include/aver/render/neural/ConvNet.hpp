@@ -81,7 +81,7 @@ public:
 
     bool setLearningRate(f32 lr);
     // Off: no "Neural.Conv*" GPU span per record*() call (a caller recording many steps a frame
-    // brackets them in one span of its own; D3D12 keeps 64 spans a frame).
+    // brackets them in one span of its own; a device keeps a limited number of spans a frame).
     void setGpuStats(bool on) { gpuStats_ = on; }
 
     // Binding sets are cached per bound-buffer tuple; call before destroying or reallocating a buffer

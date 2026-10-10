@@ -2559,6 +2559,9 @@ void D3D12Device::removeRenderFeature(IRenderFeature* f) {
 void D3D12Device::queryCaps() {
     caps_ = {};
     caps_.computeShaders = true;
+    caps_.computeInScenePass = true;
+    caps_.gBuffer = true;
+    caps_.blendedReplay = true;
     caps_.msaaMask = 1;
     caps_.maxMsaaSamples = 1;
     for (u32 s : {2u, 4u, 8u}) {

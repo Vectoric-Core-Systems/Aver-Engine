@@ -567,10 +567,9 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
     // D3D12's opaque pipelines apply RenderTarget[0]'s state to every active render target
     // (IndependentBlendEnable FALSE). Mirror that here by writing the identical
     // VkPipelineColorBlendAttachmentState into every entry up to rtCount, rather than leaving entries
-    // 1..rtCount-1 at Vulkan's own all-zero (blend-disabled) default. ONE DIVERGENCE: D3D12 masks
-    // targets 1+ of a BLENDED multi-target pipeline (see its createGraphicsPipeline); doing the same
-    // here needs the independentBlend device feature, which this backend does not enable. No such
-    // pipeline exists today -- Voxi's blended draws are one-target (VoxiRenderer::scenePipeline).
+    // 1..rtCount-1 at Vulkan's own all-zero (blend-disabled) default. A BLENDED multi-target pipeline
+    // writes target 0 only, as on D3D12 (IResourceFactory::createGraphicsPipeline's contract): targets 1+
+    // are masked, which needs the independentBlend feature (enabled whenever the device has it).
     const u32 rtCount = d.renderTargetCount < 4 ? d.renderTargetCount : 4;
     VkPipelineColorBlendAttachmentState blendAttachments[4] = {};
     for (u32 i = 0; i < rtCount; ++i) {
@@ -601,6 +600,14 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
                 a.dstColorBlendFactor = a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
                 a.colorBlendOp = a.alphaBlendOp = VK_BLEND_OP_ADD;
                 break;
+        }
+    }
+    if (d.blend != BlendMode::Opaque && rtCount > 1) {
+        if (dev_->independentBlend_) {
+            for (u32 i = 1; i < rtCount; ++i) blendAttachments[i] = VkPipelineColorBlendAttachmentState{};
+        } else {
+            AVER_WARN("[Vulkan] a blended {}-target pipeline needs independentBlend to leave targets 1+ alone; "
+                      "this device lacks it, so they are blended too", rtCount);
         }
     }
     VkPipelineColorBlendStateCreateInfo blendState{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};

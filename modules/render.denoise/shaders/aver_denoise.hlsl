@@ -95,7 +95,7 @@
 #define DNSR_STORE(v) (float4((v), 0.0))
 #endif
 
-cbuffer AverDenoiseCB : register(b1) {
+cbuffer AverDenoiseCB : register(b3) {   // b3, not b1: Vulkan's b1 is push constants
     uint2  gDnsrSize;               // render resolution: every input, history and output
     float2 gDnsrInvSize;
     uint   gDnsrFlags;              // bit 0: history invalid (reset); bit 1: half-rate input; bit 2: its parity

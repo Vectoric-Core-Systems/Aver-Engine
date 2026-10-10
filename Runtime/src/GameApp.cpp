@@ -671,7 +671,7 @@ void GameApp::attachVoxi(Engine& e) {
     di.shaderModel = caps.shaderModel; di.meshShaderTier = caps.meshShaderTier;
     di.dxcAvailable = caps.dxcAvailable;
     // Denoiser needs G-buffer (D3D12 only)
-    di.denoiserSupported = dev->backend() == rhi::Backend::D3D12;
+    di.denoiserSupported = dev->caps().gBuffer;
     voxi::Renderer::get().setDeviceInfo(di);
 
     // Seed render settings before init() to set voxel volume size and layered BSDF

@@ -4038,7 +4038,7 @@ void VoxiRenderer::buildLocalLights() {
 
     f32 vp[16], eye[3] = {};
     const bool wanted = settings_.localLights && rtActive_ && dev_ &&
-                        dev_->backend() == rhi::Backend::D3D12 && dev_->camera(vp, nullptr, eye);
+                        dev_->caps().computeInScenePass && dev_->camera(vp, nullptr, eye);
     // Every draw whose material asks to be a light.
     u32 flagged = 0;
     // Cutoff below display precision: kLocalLightRangeCutoff / pi ~ 3e-4 of lamp radiance.
@@ -4128,7 +4128,7 @@ void VoxiRenderer::buildLocalLights() {
     rdLocalLampCount_ = static_cast<u32>(rdLocalLightData_.size());
     // THE SUN IS AN ENTRY LIKE ANY OTHER: a directional light after the lamps whenever ray tracing runs. Not at night
     // (no radiance), as rdSunLit() never was.
-    if (rtActive_ && dev_ && dev_->backend() == rhi::Backend::D3D12) {
+    if (rtActive_ && dev_ && dev_->caps().computeInScenePass) {
         f32 rad[3] = {};
         if (dev_->sunRadianceLinear(rad) && (rad[0] > 0.0f || rad[1] > 0.0f || rad[2] > 0.0f)) {
             const rhi::SkyAtmosphere sky = dev_->skyAtmosphere();
@@ -4983,9 +4983,9 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
         // (a pipeline that failed to compile, a missing resource) is a real fault and stays WARN.
         if (stagedFallbackReason && !rdStagedFallbackLogged_) {
             rdStagedFallbackLogged_ = true;
-            if (dev_ && dev_->backend() != rhi::Backend::D3D12)
-                AVER_INFO("[Voxi] staged ray-driven passes are D3D12-only; this backend runs the "
-                          "single-pass ray-driven primary (said once)");
+            if (dev_ && !dev_->caps().computeInScenePass)
+                AVER_INFO("[Voxi] staged ray-driven passes need compute inside the scene pass, which this "
+                          "backend does not offer; it runs the single-pass ray-driven primary (said once)");
             else
                 AVER_WARN("[Voxi] voxi.rayDrivenStages (1 or 2) requested the staged ray-driven passes, "
                           "but {}; falling back to the single-pass ray-driven primary (said once)",
@@ -5496,6 +5496,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         np.coarseCap    = settings_.nrd2CoarseCap;
         np.combineRef   = settings_.nrd2CombineRef;
         np.midCap       = settings_.nrd2MidCap;
+        np.converge     = pathTracingWanted() && cb_.ptBounceParams[1] > 1.5f ? static_cast<f32>(settings_.nrd2Converge) : 0.0f;
         nrd2_.setParams(np);
         render::denoise::Nrd2::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();
@@ -5875,7 +5876,7 @@ void VoxiRenderer::startNrd2Capture(const render::denoise::Nrd2CaptureConfig& cf
 
 bool VoxiRenderer::nrd2Wanted() const {
     return settings_.denoiser && settings_.denoiserKind == 2u && !ptReferenceWanted() && dev_ && res_ &&
-           bindings_ && dev_->backend() == rhi::Backend::D3D12 && dev_->sampleCount() == 1 &&
+           bindings_ && dev_->caps().computeInScenePass && dev_->caps().gBuffer && dev_->sampleCount() == 1 &&
            rayDrivenActive() && rdStagedWanted() && !debugViewActive() && rdStagedW_ && rdStagedH_ &&
            rayDrivenSplitTexGbufPso_ != 0;
 }
@@ -6294,7 +6295,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // Packed ambient-param word, recomputed each frame with current visibility state.
     const u32 wireVisMode = giRestirVisibility_ == 4u ? 2u : giRestirVisibility_;
     const u32 ambW = givis::packAmbientW(wireVisMode, /*histBound=*/false, /*histValid=*/false,
-                                         blendedGiCone_, dev_ && dev_->backend() == rhi::Backend::D3D12,
+                                         blendedGiCone_, dev_ && dev_->caps().blendedReplay,
                                          giVisPathView_, giRestirSpatialSamples_, giRestirMaxHistory_,
                                          /*neurac=*/neuracLive_, neuracLive_ ? neuracView_ : 0u);
     cb_.ambientParams[3] = static_cast<f32>(ambW);
@@ -6374,7 +6375,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             // Recompute ambientParams.w with histBound/histValid now known.
             const u32 ambW2 = givis::packAmbientW(wireVisMode, /*histBound=*/true,
                                                   giVisHistValid_, blendedGiCone_,
-                                                  dev_ && dev_->backend() == rhi::Backend::D3D12,
+                                                  dev_ && dev_->caps().blendedReplay,
                                                   giVisPathView_, giRestirSpatialSamples_,
                                                   giRestirMaxHistory_,
                                                   /*neurac=*/neuracLive_, neuracLive_ ? neuracView_ : 0u);
@@ -6722,8 +6723,8 @@ void VoxiRenderer::updateNeuRaC(rhi::IRenderContext& ctx) {
     if (!res_ || !dev_) return;
 
     const char* why = nullptr;
-    if (dev_->backend() != rhi::Backend::D3D12)
-        why = "the backend is not D3D12 (the cache runs inside the staged compute passes)";
+    if (!dev_->caps().computeInScenePass)
+        why = "the backend cannot record compute inside the scene pass (the cache runs in the staged passes)";
     else if (!rdStagedWanted())
         why = "voxi.rayDrivenStages is 0 (the cache needs the staged ray-driven passes)";
     else if (!rayDrivenActive())
@@ -6893,10 +6894,9 @@ void VoxiRenderer::teardownNeuRaC() {
 bool VoxiRenderer::rdStagedActive(const char** reason) const {
     if (!rdStagedWanted()) return false;
     if (!rayDrivenActive()) return false;
-    // Recording compute inside the scene pass is Vulkan-illegal; only D3D12 verified.
-    if (!(dev_ && dev_->backend() == rhi::Backend::D3D12)) {
-        if (reason) *reason = "the backend is not D3D12 (recording compute inside the scene pass is "
-                              "Vulkan-illegal)";
+    // The staged passes record compute inside the scene pass (DeviceCaps::computeInScenePass).
+    if (!(dev_ && dev_->caps().computeInScenePass)) {
+        if (reason) *reason = "the backend cannot record compute inside the scene pass";
         return false;
     }
     if (!rdVisCsPso_ || !rdShadowCsPso_) {
