@@ -334,6 +334,7 @@ AVER_PHYS_API int32_t aver_phys_add_mesh(const float* verticesXyz, int32_t verte
 // out-of-range-index handling as aver_phys_add_mesh, but handed back as a shape handle instead of
 // being wrapped in a body immediately. Returns 0 on the same refusals aver_phys_add_mesh already logs
 // (fewer than 3 vertices/indices, every triangle degenerate or out of range, or Jolt itself refused).
+// Safe from any thread (level streaming builds shapes on workers), as is aver_phys_release_mesh_shape.
 AVER_PHYS_API int32_t aver_phys_create_mesh_shape(const float* verticesXyz, int32_t vertexCount,
                                                   const int32_t* indices, int32_t indexCount);
 

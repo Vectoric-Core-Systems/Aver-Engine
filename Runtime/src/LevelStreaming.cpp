@@ -202,6 +202,9 @@ void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& item
                 if (content_->acquireMesh(*device_, mesh)) {
                     it.meshes.push_back(mesh);
                     bindMeshMaterials(mesh);
+                    // Built on the prefetch worker; instantiate reuses it instead of building one here.
+                    if (!meshShapes_.count(mesh))
+                        if (const i32 shape = content_->takeMeshShape(mesh)) meshShapes_.emplace(mesh, shape);
                 }
             }
         }
@@ -279,10 +282,17 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewers)
     std::vector<u32> toLoad, toEvict;
     streamer_.update(viewers, toLoad, toEvict);
     lastLoaded_ = 0;
-    lastEvicted_ = static_cast<u32>(toEvict.size());
-    for (const u32 item : toEvict)
-        if (item < items_.size() && items_[item].loaded) evictItem(world, item);
-    if (!toEvict.empty()) releaseUnusedShapes();
+    lastEvicted_ = 0;
+    using Clock = std::chrono::steady_clock;
+    auto msSince = [](Clock::time_point t) { return std::chrono::duration<f64, std::milli>(Clock::now() - t).count(); };
+    // Evictions are past the evict distance and never urgent: furthest first, within kEvictMs; the
+    // streamer reports the rest again next tick.
+    const auto evictStart = Clock::now();
+    for (const u32 item : toEvict) {
+        if (lastEvicted_ > 0 && msSince(evictStart) >= kEvictMs) break;
+        if (item < items_.size() && items_[item].loaded) { evictItem(world, item); ++lastEvicted_; }
+    }
+    if (lastEvicted_) releaseUnusedShapes();
 
     // Pinned roots load now; the rest once their meshes are read.
     std::vector<u32> now, ready;
@@ -307,16 +317,13 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewers)
     const f32 loadCm = streamer_.settings().loadCm;
     const f64 t = std::clamp((static_cast<f64>(nearestMissing) / loadCm - 0.25) / 0.5, 0.0, 1.0);
     const f64 budgetMs = kNearLoadMs + (kFarLoadMs - kNearLoadMs) * t;
-    const auto start = std::chrono::steady_clock::now();
-    constexpr usize kChunk = 4;
-    std::vector<u32> chunk;
-    for (usize i = 0; i < ready.size(); i += kChunk) {
-        if (i > 0 && std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count() >= budgetMs)
-            break;
-        chunk.assign(ready.begin() + static_cast<std::ptrdiff_t>(i),
-                     ready.begin() + static_cast<std::ptrdiff_t>(std::min(i + kChunk, ready.size())));
-        loadItems(world, chunk);
-        lastLoaded_ += static_cast<u32>(chunk.size());
+    const auto start = Clock::now();
+    std::vector<u32> one(1);
+    for (usize i = 0; i < ready.size(); ++i) {
+        if (i > 0 && msSince(start) >= budgetMs) break;
+        one[0] = ready[i];
+        loadItems(world, one);
+        ++lastLoaded_;
     }
 }
 

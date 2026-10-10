@@ -1319,6 +1319,7 @@ public:
         u32 lodCoarserLevels = 0;
         u32 lodSharedLevels = 0;
         u64 lodSharedVertexBytesSaved = 0;
+        bool streamed = false;   // level streaming's uploads: no per-mesh log lines
     };
     // Per-mesh load callback (user = MeshLoadPass).
     static void onMeshLoaded(const game::GameContent::LoadedMesh& mesh, void* user);

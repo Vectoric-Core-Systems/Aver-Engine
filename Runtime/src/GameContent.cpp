@@ -32,6 +32,9 @@
 #  include "aver/anim/AnimSystem.hpp"
 #  include "aver/formats/OcMesh.hpp"
 #  include "aver/scene/scene_abi.h"
+#  if AVER_MODULE_PHYSICS
+#    include "aver/physics/physics_abi.h"
+#  endif
 #  include "GameMath.hpp"
 #  if AVER_MODULE_TRIFACTOR
 #    include "aver/trifactor/ClusterAdapt.hpp"
@@ -335,16 +338,57 @@ bool GameContent::loadOneMesh(rhi::IDevice& device, u64 id, const std::string& f
     return uploadMesh(device, id, md, rel);
 }
 
-bool GameContent::uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, const std::string& rel) {
-
+// Thread-free: touches no table and no device, so prefetch workers run it.
+void GameContent::prepareMeshCpu(const fmt::OcMeshData& md, const std::string& rel, MeshCpu& out) {
     // Position, normal, uv only. rhi::MeshVertex has nowhere to put joints/weights.
-    std::vector<rhi::MeshVertex> verts(md.vertexCount());
+    std::vector<rhi::MeshVertex>& verts = out.verts;
+    verts.resize(md.vertexCount());
     for (u32 i = 0; i < md.vertexCount(); ++i) {
         rhi::MeshVertex& v = verts[i];
         v.px = md.positions[usize(i)*3+0]; v.py = md.positions[usize(i)*3+1]; v.pz = md.positions[usize(i)*3+2];
         v.nx = md.normals[usize(i)*3+0];   v.ny = md.normals[usize(i)*3+1];   v.nz = md.normals[usize(i)*3+2];
         v.u  = md.uvs[usize(i)*2+0];       v.v  = md.uvs[usize(i)*2+1];
     }
+    // Per-material split, compacted per part (see buildMeshParts).
+    out.parts.clear();
+    if (md.submeshes.size() <= 1) return;   // common case: nothing to split
+    std::unordered_map<u32, u32> remap;
+    const bool keepBaseIndices = md.hasSkin();
+    for (const fmt::OcMeshSubmesh& sm : md.submeshes) {
+        if (sm.indexCount == 0) continue;
+        const usize end = usize(sm.indexStart) + sm.indexCount;
+        if (end > md.indices.size()) {
+            AVER_WARN("[Mesh] '{}' submesh '{}' runs past the index buffer; skipped", rel, sm.name);
+            continue;
+        }
+        PartCpu part;
+        remap.clear();
+        part.indices.reserve(sm.indexCount);
+        bool bad = false;
+        for (usize k = sm.indexStart; k < end; ++k) {
+            const u32 vi = md.indices[k];
+            if (vi >= verts.size()) { bad = true; break; }
+            const auto [it2, inserted] = remap.try_emplace(vi, static_cast<u32>(part.verts.size()));
+            if (inserted) part.verts.push_back(verts[vi]);
+            part.indices.push_back(it2->second);
+        }
+        if (bad || part.verts.empty()) {
+            AVER_WARN("[Mesh] '{}' submesh '{}' indexes a vertex it does not have; skipped", rel, sm.name);
+            continue;
+        }
+        part.slot = sm.materialSlot;
+        part.name = sm.name;
+        // baseIndices[i] is the slice parts[i] was cut from (lockstep).
+        if (keepBaseIndices) part.baseIndices.assign(md.indices.data() + sm.indexStart, md.indices.data() + end);
+        out.parts.push_back(std::move(part));
+    }
+}
+
+bool GameContent::uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, const std::string& rel,
+                             MeshCpu* cpu) {
+    MeshCpu local;
+    if (!cpu) { prepareMeshCpu(md, rel, local); cpu = &local; }
+    const std::vector<rhi::MeshVertex>& verts = cpu->verts;
     const rhi::MeshHandle h = device.createMesh(verts.data(), (u32)verts.size(),
                                                md.indices.data(), (u32)md.indices.size());
     if (!h) { AVER_WARN("[Mesh] the device refused '{}'", rel); return false; }
@@ -357,7 +401,7 @@ bool GameContent::uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData
         meshSlot0Name_[id] = md.materialSlots[0];
     }
     // The per-submesh split: a mesh naming several materials draws one part per material.
-    buildMeshParts(device, id, md, verts, rel);
+    buildMeshParts(device, id, md, cpu->parts, rel);
     projectMeshIds_.push_back(id);
     if (meshLoaded_) meshLoaded_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshLoadedUser_);
     if (lazyLoading_ && meshAcquired_) meshAcquired_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshAcquiredUser_);
@@ -458,20 +502,26 @@ bool GameContent::acquireMesh(rhi::IDevice& device, u64 id) {
         bool ok = false;
         if (pit != contentIndex_.end()) {
             fmt::OcMeshData md;
+            MeshCpu cpu;
             std::unique_ptr<CollisionMesh> collision;
+            i32 shape = 0;
             std::string why;
-            const int got = takePrefetch(id, md, collision, why);
+            const int got = takePrefetch(id, md, cpu, collision, shape, why);
             if (got < 0) {
                 ok = loadOneMesh(device, id, pit->second, lit->second);
             } else if (got == 0) {
                 AVER_WARN("[Mesh] {}", why);
             } else {
-                ok = uploadMesh(device, id, md, lit->second);
+                ok = uploadMesh(device, id, md, lit->second, &cpu);
                 if (ok && collision && !collisionMeshCache_.count(id)) {
                     collisionMeshCache_[id] = std::move(collision);
                     ++collisionCacheHits_;
                 }
+                if (ok && shape) { readyShapes_[id] = shape; shape = 0; }
             }
+#  if AVER_MODULE_PHYSICS
+            if (shape) aver_phys_release_mesh_shape(shape);
+#  endif
         }
         lazyLoading_ = false;
         if (!ok) {
@@ -523,6 +573,12 @@ void GameContent::unloadToPending(u64 id) {
     meshSlot0Material_.erase(id);
     meshSlot0Name_.erase(id);
     collisionMeshCache_.erase(id);
+    if (const auto rs = readyShapes_.find(id); rs != readyShapes_.end()) {
+#  if AVER_MODULE_PHYSICS
+        aver_phys_release_mesh_shape(rs->second);
+#  endif
+        readyShapes_.erase(rs);
+    }
     projectMeshIds_.erase(std::remove(projectMeshIds_.begin(), projectMeshIds_.end(), id), projectMeshIds_.end());
     pendingMeshes_.push_back(std::move(p));
     if (meshReleased_) meshReleased_(id, meshReleasedUser_);
@@ -566,56 +622,27 @@ void GameContent::flushMeshReleases(rhi::IDevice& device, u64 frameIndex) {
 // per part. The remap also gives each part honest bounds, which a future per-part culler would want
 // anyway.
 void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md,
-                                  const std::vector<rhi::MeshVertex>& verts, const std::string& rel) {
-    if (md.submeshes.size() <= 1) return;   // common case: nothing to split
-
+                                  std::vector<PartCpu>& cpuParts, const std::string& rel) {
+    if (cpuParts.empty()) return;
     std::vector<MeshPart> parts;
-    parts.reserve(md.submeshes.size());
-    std::unordered_map<u32, u32> remap;
-    std::vector<rhi::MeshVertex> pv;
-    std::vector<u32> pi;
-    // Unremapped slices for skinned meshes only (skin targets share base index buffer verbatim).
+    parts.reserve(cpuParts.size());
     const bool keepBaseIndices = md.hasSkin();
     std::vector<std::vector<u32>> baseIndices;
-
-    for (const fmt::OcMeshSubmesh& sm : md.submeshes) {
-        if (sm.indexCount == 0) continue;
-        const usize end = usize(sm.indexStart) + sm.indexCount;
-        if (end > md.indices.size()) {
-            AVER_WARN("[Mesh] '{}' submesh '{}' runs past the index buffer; skipped", rel, sm.name);
-            continue;
-        }
-        remap.clear(); pv.clear(); pi.clear();
-        pi.reserve(sm.indexCount);
-        bool bad = false;
-        for (usize k = sm.indexStart; k < end; ++k) {
-            const u32 vi = md.indices[k];
-            if (vi >= verts.size()) { bad = true; break; }
-            const auto [it2, inserted] = remap.try_emplace(vi, static_cast<u32>(pv.size()));
-            if (inserted) pv.push_back(verts[vi]);
-            pi.push_back(it2->second);
-        }
-        if (bad || pv.empty()) {
-            AVER_WARN("[Mesh] '{}' submesh '{}' indexes a vertex it does not have; skipped", rel, sm.name);
-            continue;
-        }
-
+    for (PartCpu& pc : cpuParts) {
         MeshPart part;
-        part.mesh = device.createMesh(pv.data(), static_cast<u32>(pv.size()),
-                                       pi.data(), static_cast<u32>(pi.size()));
+        part.mesh = device.createMesh(pc.verts.data(), static_cast<u32>(pc.verts.size()),
+                                       pc.indices.data(), static_cast<u32>(pc.indices.size()));
         if (!part.mesh) {
-            AVER_WARN("[Mesh] the device refused submesh '{}' of '{}'", sm.name, rel);
+            AVER_WARN("[Mesh] the device refused submesh '{}' of '{}'", pc.name, rel);
             continue;
         }
         // Slot names the material, resolving through the same path as an authored material.
-        if (sm.materialSlot < md.materialSlots.size()) {
-            const std::string& slot = md.materialSlots[sm.materialSlot];
+        if (pc.slot < md.materialSlots.size()) {
+            const std::string& slot = md.materialSlots[pc.slot];
             if (!slot.empty()) part.material = aver_scene_material(0, slot.c_str());
         }
         parts.push_back(part);
-        // baseIndices[i] is the slice parts[i] was cut from (lockstep).
-        if (keepBaseIndices)
-            baseIndices.emplace_back(md.indices.data() + sm.indexStart, md.indices.data() + end);
+        if (keepBaseIndices) baseIndices.push_back(std::move(pc.baseIndices));
     }
 
     // One surviving part is not a split; falling through costs one less draw call.
@@ -623,8 +650,9 @@ void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMesh
         for (const MeshPart& p : parts) if (p.mesh) device.destroyMesh(p.mesh);
         return;
     }
-    AVER_INFO("[Mesh] '{}' names {} materials; split into {} part(s) so each draws its own",
-              rel, md.materialSlots.size(), parts.size());
+    if (!lazyLoading_)
+        AVER_INFO("[Mesh] '{}' names {} materials; split into {} part(s) so each draws its own",
+                  rel, md.materialSlots.size(), parts.size());
     meshParts_[id] = std::move(parts);
     if (keepBaseIndices) meshPartBaseIndices_[id] = std::move(baseIndices);
 }
@@ -935,13 +963,20 @@ bool writeCollisionCacheFile(const std::string& cachePath, const std::string& me
 // Two workers read .ocmesh files and collision caches; uploads stay on the main thread.
 struct GameContent::MeshPrefetch {
     struct Job {
-        std::string path, projectDir;
+        std::string path, rel, projectDir;
         fmt::OcMeshData md;
+        MeshCpu cpu;
         bool meshOk = false;
         std::string why;
         std::unique_ptr<CollisionMesh> collision;
+        i32 shape = 0;   // released here unless taken
         std::atomic<bool> done{false};
         u64 order = 0;
+        ~Job() {
+#  if AVER_MODULE_PHYSICS
+            if (shape) aver_phys_release_mesh_shape(shape);
+#  endif
+        }
     };
     std::mutex m;
     std::condition_variable cv;
@@ -973,6 +1008,7 @@ struct GameContent::MeshPrefetch {
                 queue.pop_front();
             }
             j->meshOk = fmt::loadOcMesh(j->path, j->md, &j->why);
+            if (j->meshOk) prepareMeshCpu(j->md, j->rel, j->cpu);
             if (j->meshOk && !j->projectDir.empty()) {
                 std::error_code ec;
                 const u64 size = static_cast<u64>(std::filesystem::file_size(j->path, ec));
@@ -985,6 +1021,13 @@ struct GameContent::MeshPrefetch {
                         j->collision = std::move(c);
                 }
             }
+#  if AVER_MODULE_PHYSICS
+            // The mesh's shared collision shape (its BVH build is the costly part of a placement's body).
+            if (j->collision && j->collision->indices.size() >= 3 && aver_phys_ready())
+                j->shape = aver_phys_create_mesh_shape(
+                    j->collision->positions.data(), static_cast<i32>(j->collision->positions.size() / 3),
+                    reinterpret_cast<const i32*>(j->collision->indices.data()), static_cast<i32>(j->collision->indices.size()));
+#  endif
             j->done.store(true, std::memory_order_release);
         }
     }
@@ -1009,6 +1052,7 @@ void GameContent::prefetchMesh(u64 id) {
     }
     auto j = std::make_shared<MeshPrefetch::Job>();
     j->path = pit->second;
+    j->rel = lazyRel_[id];
     j->projectDir = project_.dir;
     j->order = ++pf.nextOrder;
     pf.jobs.emplace(id, j);
@@ -1021,7 +1065,8 @@ bool GameContent::meshReady(u64 id) const {
     return it == prefetch_->jobs.end() || it->second->done.load(std::memory_order_acquire);
 }
 
-int GameContent::takePrefetch(u64 id, fmt::OcMeshData& md, std::unique_ptr<CollisionMesh>& collision, std::string& why) {
+int GameContent::takePrefetch(u64 id, fmt::OcMeshData& md, MeshCpu& cpu, std::unique_ptr<CollisionMesh>& collision,
+                              i32& shape, std::string& why) {
     if (!prefetch_) return -1;
     const auto it = prefetch_->jobs.find(id);
     if (it == prefetch_->jobs.end()) return -1;
@@ -1030,12 +1075,27 @@ int GameContent::takePrefetch(u64 id, fmt::OcMeshData& md, std::unique_ptr<Colli
     if (!j->done.load(std::memory_order_acquire)) return -1;
     if (!j->meshOk) { why = std::move(j->why); return 0; }
     md = std::move(j->md);
+    cpu = std::move(j->cpu);
     collision = std::move(j->collision);
+    shape = j->shape;
+    j->shape = 0;
     return 1;
+}
+
+i32 GameContent::takeMeshShape(u64 id) {
+    const auto it = readyShapes_.find(id);
+    if (it == readyShapes_.end()) return 0;
+    const i32 h = it->second;
+    readyShapes_.erase(it);
+    return h;
 }
 
 void GameContent::dropPrefetches() {
     if (prefetch_) prefetch_->jobs.clear();
+#  if AVER_MODULE_PHYSICS
+    for (const auto& [mesh, shape] : readyShapes_) aver_phys_release_mesh_shape(shape);
+#  endif
+    readyShapes_.clear();
 }
 
 #if AVER_MODULE_PBR

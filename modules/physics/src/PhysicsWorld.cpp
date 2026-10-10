@@ -137,13 +137,16 @@ bool g_joltStarted = false;
 // way a body handle or a water-volume override (see aver_phys_shutdown's own comment on that leak)
 // would if carried into a freshly created world. A shape handle a caller forgot to release simply
 // outlives the world that last used it, exactly as it would if nothing had been shut down at all.
+// Guarded: level streaming builds shapes on worker threads.
+std::mutex g_meshShapesMutex;
 std::unordered_map<int32_t, JPH::Ref<JPH::Shape>> g_meshShapes;
 int32_t g_nextMeshShape = 1;
 
-// The shape behind a handle, or nullptr.
-JPH::Shape* meshShapeFor(int32_t h) {
+// The shape behind a handle, or null.
+JPH::Ref<JPH::Shape> meshShapeFor(int32_t h) {
+    std::lock_guard<std::mutex> lock(g_meshShapesMutex);
     const auto it = g_meshShapes.find(h);
-    return it == g_meshShapes.end() ? nullptr : it->second.GetPtr();
+    return it == g_meshShapes.end() ? JPH::Ref<JPH::Shape>() : it->second;
 }
 
 } // namespace
@@ -854,12 +857,14 @@ int32_t aver_phys_create_mesh_shape(const float* verts, int32_t vertexCount,
     auto res = s.Create();
     if (res.HasError()) { AVER_WARN("[Physics] mesh shape: {}", res.GetError().c_str()); return 0; }
 
+    std::lock_guard<std::mutex> lock(g_meshShapesMutex);
     const int32_t h = g_nextMeshShape++;
     g_meshShapes.emplace(h, res.Get());
     return h;
 }
 
 int32_t aver_phys_release_mesh_shape(int32_t shape) {
+    std::lock_guard<std::mutex> lock(g_meshShapesMutex);
     return g_meshShapes.erase(shape) ? 1 : 0;
 }
 
@@ -887,7 +892,7 @@ int32_t aver_phys_add_mesh_shape_body(int32_t shape, float px, float py, float p
                                       float qx, float qy, float qz, float qw,
                                       float sx, float sy, float sz) {
     if (!g_world) return 0;
-    JPH::Shape* base = meshShapeFor(shape);
+    const JPH::Ref<JPH::Shape> base = meshShapeFor(shape);
     if (!base) return 0;
 
     // Shape::ScaleShape also covers the near-unit case (hands back `base` itself, no wrapper) and the

@@ -113,6 +113,8 @@ public:
     void prefetchMesh(u64 id);
     // False only while a prefetch of `id` is still reading.
     bool meshReady(u64 id) const;
+    // The physics mesh shape a prefetch built from this mesh's collision (0 if none); the caller owns it.
+    i32 takeMeshShape(u64 id);
     // D3D12Device::destroyMesh frees the mesh's resources immediately, so released meshes' handles wait
     // here. Call once per frame; destroys those released at least 3 frames before `frameIndex`.
     void flushMeshReleases(rhi::IDevice& device, u64 frameIndex);
@@ -230,13 +232,27 @@ private:
 
     // Uploads one .ocmesh and fills every per-mesh table. False (nothing kept) on failure.
     bool loadOneMesh(rhi::IDevice& device, u64 id, const std::string& full, const std::string& rel);
-    bool uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, const std::string& rel);
+    // CPU half of an upload (vertices, per-material parts), made on a prefetch worker or inline.
+    struct PartCpu {
+        std::vector<rhi::MeshVertex> verts;
+        std::vector<u32> indices, baseIndices;   // baseIndices: skinned meshes only
+        u32 slot = ~0u;
+        std::string name;
+    };
+    struct MeshCpu {
+        std::vector<rhi::MeshVertex> verts;
+        std::vector<PartCpu> parts;
+    };
+    static void prepareMeshCpu(const fmt::OcMeshData& md, const std::string& rel, MeshCpu& out);
+    bool uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, const std::string& rel, MeshCpu* cpu = nullptr);
+    std::unordered_map<u64, i32> readyShapes_;   // mesh id -> prefetched physics shape, until taken
 
     // prefetchMesh's workers and finished reads. takePrefetch: 1 read (md/collision filled), 0 the read
     // failed (why filled), -1 nothing finished for `id`.
     struct MeshPrefetch;
     std::shared_ptr<MeshPrefetch> prefetch_;
-    int takePrefetch(u64 id, fmt::OcMeshData& md, std::unique_ptr<CollisionMesh>& collision, std::string& why);
+    int takePrefetch(u64 id, fmt::OcMeshData& md, MeshCpu& cpu, std::unique_ptr<CollisionMesh>& collision,
+                     i32& shape, std::string& why);
     void dropPrefetches();
     // Erases every table entry for `id` and queues its GPU handles for flushMeshReleases.
     void unloadToPending(u64 id);
@@ -265,7 +281,7 @@ private:
     // unconditionally from loadProjectMeshes, not gated on AVER_MODULE_LANDSCAPE the way the editor's
     // call site is -- see MeshPart's own comment for why that guard does not belong here.
     void buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md,
-                         const std::vector<rhi::MeshVertex>& verts, const std::string& rel);
+                         std::vector<PartCpu>& cpuParts, const std::string& rel);
 #endif
 
 #if AVER_MODULE_PBR

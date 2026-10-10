@@ -1016,9 +1016,9 @@ private:
     // longer still while paging slowed the frame rate; a later rebuild waits one tick for the recreate.
     static constexpr u32 kGiAccumulatorQuietTicks = 60;
     // Per-frame BLAS build budget (structure bytes; scratch is of the same order). See buildAccelerationStructures.
-    // ~1.4 ms per MB (NeonDistrict: 512 MB was ~0.7 s in one submission); 16 MB keeps a streamed level's
-    // builds near 20 ms a frame.
-    static constexpr u64 kBlasBuildBytesPerFrame = 16ull << 20;
+    // ~1.4 ms per MB (NeonDistrict: 512 MB was ~0.7 s in one submission); 8 MB keeps a streamed level's
+    // builds near 10 ms a frame.
+    static constexpr u64 kBlasBuildBytesPerFrame = 8ull << 20;
     bool blasBuildsDeferred_ = false;   // some draw's first BLAS build waits for the next frame
     bool blasDeferLogged_ = false;
 

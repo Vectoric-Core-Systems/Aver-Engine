@@ -50,6 +50,7 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
     static MeshLoadPass s_lazyPass;
     s_lazyPass.app = this;
     s_lazyPass.engine = &e;
+    s_lazyPass.streamed = true;
     content_.setMeshAcquiredHook(&SandboxApp::onMeshLoaded, &s_lazyPass);
     content_.setMeshReleasedHook([](u64 id, void* user) {
         auto* p = static_cast<MeshLoadPass*>(user);
@@ -117,7 +118,8 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
     app.meshPathById_[id] = rel;
     app.meshTris_[id] = static_cast<u32>(md.indices.size() / 3);
     if (md.hasSkin()) app.skinnedMeshIds_.insert(id);
-    AVER_INFO("[Mesh] '{}' -> {} verts, {} indices, lodCount={}, coarserLods={}, meshlets={}",
+    const bool quiet = pass->streamed;
+    if (!quiet) AVER_INFO("[Mesh] '{}' -> {} verts, {} indices, lodCount={}, coarserLods={}, meshlets={}",
               rel, verts.size(), md.indices.size(), md.lodCount(), md.coarserLods.size(),
               md.meshlets.size());
 
@@ -166,7 +168,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
                 ladder.errorCm.push_back(trifactor::levelWorldErrorCm(md, lvl));
                 trifactor::buildLevelClusterViews(md, lvl, ladder.clusters[lvl]);
             }
-            AVER_INFO("[Mesh] '{}' LOD ladder: {} level(s), {} tris at LOD0 -> {} tris at the coarsest",
+            if (!quiet) AVER_INFO("[Mesh] '{}' LOD ladder: {} level(s), {} tris at LOD0 -> {} tris at the coarsest",
                       rel, ladder.handles.size(), ladder.triCounts.front(), ladder.triCounts.back());
 
             // Depth/voxel passes use coarser LOD (threshold: shadow-map texel ~20cm error).
@@ -180,7 +182,7 @@ void SandboxApp::onMeshLoaded(const game::GameContent::LoadedMesh& m, void* user
                     for (u32 lvl = 0; lvl < ladder.handles.size(); ++lvl)
                         if (ladder.triCounts[lvl] > ladder.triCounts[pick])
                             app.depthProxy_[ladder.handles[lvl]] = ladder.handles[pick];
-                    AVER_INFO("[Mesh] '{}' depth proxy: LOD {} ({} tris, {:.1f}x less than LOD 0, "
+                    if (!quiet) AVER_INFO("[Mesh] '{}' depth proxy: LOD {} ({} tris, {:.1f}x less than LOD 0, "
                               "{:.1f}cm error)",
                               rel, pick, ladder.triCounts[pick],
                               static_cast<f64>(ladder.triCounts.front()) /

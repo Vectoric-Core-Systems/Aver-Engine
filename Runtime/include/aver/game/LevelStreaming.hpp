@@ -41,8 +41,10 @@ public:
     void end(scene::World& world);
     bool active() const { return active_; }
 
-    // One step: loads and evicts around `viewers` (world cm). Meshes are read on worker threads first;
-    // loads run nearest first within a per-tick time budget, larger while something close is missing.
+    // One step: loads and evicts around `viewers` (world cm). Mesh reads, vertex/part preparation and
+    // collision shapes are made on worker threads; what stays here (GPU buffers, entities, bodies) runs
+    // nearest first within a per-tick time budget, larger while something close is missing. Evictions
+    // have their own budget.
     void tick(scene::World& world, const std::vector<Vec3>& viewers);
 
     // ---- records (the editor's view) ----
@@ -97,7 +99,9 @@ private:
 
     // Load time per tick: kNearLoadMs while the nearest missing root is within a quarter of the load
     // distance, falling to kFarLoadMs at three quarters.
-    static constexpr f64 kNearLoadMs = 25.0, kFarLoadMs = 4.0;
+    static constexpr f64 kNearLoadMs = 12.0, kFarLoadMs = 3.0;
+    // Eviction time per tick (at least one root).
+    static constexpr f64 kEvictMs = 2.0;
 
     bool active_ = false;
     u32 lastLoaded_ = 0, lastEvicted_ = 0;

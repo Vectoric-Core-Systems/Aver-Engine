@@ -91,15 +91,19 @@ filtered instantiate of a set of roots (hierarchies whole; same InstantiateOptio
 destroys entities and their bodies on eviction. Hosts call `tick(viewers)` once a frame.
 
 Hitch budget (2026-10-10; before it, every tick that loaded its 128 roots took 150-370 ms on Caldera):
-- A root loads once every mesh it names is read (prefetch above); pinned roots load at once.
-- Loads run nearest first in chunks of 4 within a time budget per tick: 25 ms while the nearest missing
-  root is within a quarter of the load distance (a level opening, a teleport), falling to 4 ms at three
-  quarters, so the far edge fills in a few roots a frame.
+- Off the main thread (GameContent's prefetch workers): the `.ocmesh` read, vertex conversion, the
+  per-material part split, the collision disk-cache read and the Jolt mesh shape (its BVH build;
+  `aver_phys_create_mesh_shape` is thread-safe). A root loads once every mesh it names is prepared;
+  pinned roots load at once.
+- On the main thread, budgeted: GPU buffer creation, material binding, entities and bodies. Loads run
+  nearest first one root at a time within 12 ms per tick while the nearest missing root is within a
+  quarter of the load distance (a level opening, a teleport), falling to 3 ms at three quarters.
+  Evictions (furthest first) get 2 ms per tick; the rest wait for the next tick.
 - Physics mesh shapes are shared across batches (`InstantiateOptions::meshShapes`, owned by
-  LevelStreaming) and released when their mesh unloads, instead of one BVH build per mesh per batch.
+  LevelStreaming) and released when their mesh unloads.
 - Render side (Voxi): the ray-traced geometry table keeps each mesh's range while it stays in the set
   and appends only new meshes (it re-copied every mesh, ~1 GB on Caldera, whenever one arrived);
-  first-time BLAS builds are capped at 16 MB a frame.
+  first-time BLAS builds are capped at 8 MB a frame.
 - The editor logs `[Hitch]` lines (frame time, stream time, loaded/evicted/resident, foliage) when a
   frame passes 100 ms or a streaming step 40 ms.
 
