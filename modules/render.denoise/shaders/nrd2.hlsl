@@ -36,7 +36,7 @@ cbuffer Nrd2CB : register(b3) {
     float4 gNrd2CamDelta;     // eye - previous eye (xyz)
     float4 gNrd2Stab;         // history frames at rest, cap at speed, despeckle cap, blur radius (px)
     float4 gNrd2Extra;        // x: cap on the 1/8 level's logit, y: combine reference (0 coarsest, 1 median),
-                              // z: cap on the 1/4 level's logit -- all at inference only
+                              // z: cap on the 1/4 level's logit -- all at inference only; w: converge frames
 };
 
 uint2 nrd2LevelSize(uint shift) { return ((gNrd2Rect.zw + 7u) / 8u) * (8u >> shift); }
@@ -80,7 +80,8 @@ void nrd2Reduce(uint a, uint b, uint c, uint d, out float4 g, out float4 dv, out
         const float4 D = gsD[idx[j]];
         const float4 S = gsS[idx[j]];
         nsum += w * G.xyz; zsum += w * G.w; wsum += w;
-        dsum += w * D.a * D.rgb; dw += w * D.a;
+        const float dA = saturate(D.a);   // under Path Tracing a carries 1 + frames/16384
+        dsum += w * dA * D.rgb; dw += w * dA;
         ssum += w * S.a * S.rgb; sw += w * S.a;
     }
     g  = float4(nsum / wsum, zsum / wsum);
@@ -742,6 +743,38 @@ void CSNrd2Temporal(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThrea
     float3 lit = outD * ra.rgb + outS * Rs;
     if (!all(lit == lit)) lit = 0.0;
     gNrd2Lit[p] = float4(clamp(lit, 0.0, 6.0e4), 0.0);
+}
+
+#elif AVER_NRD2_PASS == 10   // ---- converge: Path Tracing at rest, toward the accumulated input ----
+
+// Under Path Tracing at rest Stage B hands NRD2 each pixel's running mean, with its frame count in D.a
+// (1 + frames / 16384). Past gNrd2Extra.w / 16 frames the filtered lighting blends toward that mean, all of
+// it at gNrd2Extra.w: a converged image keeps its detail. A pixel that restarted (moved, disoccluded) has
+// no count and stays filtered.
+Texture2D<float4> gNrd2D      : register(t0);
+Texture2D<float4> gNrd2S      : register(t1);
+Texture2D<float4> gNrd2RemodA : register(t2);
+Texture2D<float2> gNrd2RemodB : register(t3);
+RWTexture2D<float4> gNrd2Lit  : register(u0);
+
+[numthreads(8, 8, 1)]
+void CSNrd2Converge(uint3 dtid : SV_DispatchThreadID) {
+    const uint2 q = dtid.xy;
+    if (any(q >= gNrd2Rect.zw)) return;
+    const int2 p = int2(gNrd2Rect.xy + q);
+    const float4 d = gNrd2D.Load(int3(p, 0));
+    const float frames = d.a > 1.0 ? (d.a - 1.0) * 16384.0 : 0.0;
+    const float full = max(gNrd2Extra.w, 1.0), from = full / 16.0;
+    const float w = saturate((frames - from) / max(full - from, 1.0));
+    if (!(w > 0.0)) return;
+    const float4 s  = gNrd2S.Load(int3(p, 0));
+    const float4 ra = gNrd2RemodA.Load(int3(p, 0));
+    const float2 rb = gNrd2RemodB.Load(int3(p, 0));
+    const float3 sv = s.a >= 0.0 ? s.rgb : 0.0;
+    const float3 mean = d.rgb * ra.rgb + sv * float3(ra.a, rb);
+    if (!all(mean == mean)) return;
+    const float4 lit = gNrd2Lit[p];
+    gNrd2Lit[p] = float4(lerp(lit.rgb, clamp(mean, 0.0, 6.0e4), w), lit.a);
 }
 
 #elif AVER_NRD2_PASS == 8   // ---- input despeckle ----

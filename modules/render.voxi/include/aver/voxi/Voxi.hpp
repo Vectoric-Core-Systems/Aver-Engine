@@ -48,8 +48,8 @@ struct DeviceInfo {
     u32 meshShaderTier = 0;    // 0 = none, 1 = Tier 1
     bool dxcAvailable = false; // DXIL compiler present
     // The denoiser can run on this backend (see RenderSettingsResolver.hpp's
-    // DisableReason::RequiresDenoiserBackend): it reads the G-buffer, which only D3D12 provides.
-    // Computed by the host as `backend() == rhi::Backend::D3D12` at the same two call sites
+    // DisableReason::RequiresDenoiserBackend): it reads the G-buffer (DeviceCaps::gBuffer).
+    // Computed by the host from `caps().gBuffer` at the same two call sites
     // (SandboxApp.cpp, GameApp.cpp); this struct only carries the answer so it stays free of any RHI
     // dependency.
     bool denoiserSupported = false;
@@ -173,6 +173,9 @@ struct Settings {
     f32 nrd2CoarseCap = 0.0f;
     u32 nrd2CombineRef = 1;      // 0 coarsest level, 1 median of the candidates (NRD2.md "Combine reference")
     f32 nrd2MidCap = 0.0f;       // cap on the 1/4 level's logit at inference; 16 = uncapped
+    // Path Tracing at rest: frames of accumulation after which each pixel is its accumulated input rather
+    // than the filtered one (blended in from 1/16 of it); 0 = always filtered. NRD2.md "Converge at rest".
+    u32 nrd2Converge = 128;
     // NRD2 keeps half-rate tracing and fills the skipped checkerboard half from this frame's traced
     // neighbours (CSRdHalfFill; docs/rendering/NRD2.md). Each applies where its base half rate is asked
     // for: GI under rayDrivenStages 2, reflections under rtReflectionHalfRate (glossy only), sky

@@ -475,6 +475,30 @@ Spots above 10% went from 0.26% to 0.36% at this threshold. FidelityFX at 400 fr
 +4.0%. The darkening is gone because the despeckle sees the averaged input, which has few outliers. Moving
 frames are unchanged, since the accumulation restarts.
 
+## Converge at rest (2026-10-10)
+
+Under Path Tracing at rest the filter kept blurring an input that had already converged: on Caldera's arcade
+at 1200 still frames NRD2 smoothed the normal-mapped brick that the accumulated input showed crisply. Stage B
+now stores each pixel's accumulated frame count in D's alpha (`1 + frames / 16384` while the albedo is usable;
+every `a > 0.5` test still holds, and the pyramid weight saturates it), and `CSNrd2Converge` (pass 10, after
+every other stage) blends the final lighting toward the pixel's own accumulated input: none below
+`voxi.nrd2Converge / 16` frames, all of it at `voxi.nrd2Converge` (default 128; 0 = off). A pixel that
+restarted (moved, disoccluded) has no count and stays filtered. It reads `lit_` back through its UAV, so it
+needs `DeviceCaps::typedUavLoads`.
+
+Measured on Caldera_Capital's arcade, Path Tracing tier 3, render scale 0.5, against the unfiltered input
+after 1200 still frames (scratchpad cmp.py):
+
+| | Pixel MAE | Fine detail (ref 35.14) |
+|---|---|---|
+| Filtered, 96 frames | 0.0132 | 32.58 |
+| Filtered, 1200 frames | 0.0119 | 32.63 |
+| Unfiltered input, 96 frames | 0.0062 | 35.46 |
+| Converge 512, 300 frames | 0.0068 | 33.53 |
+| Converge 512, 1200 frames | 0.0001 | 35.15 |
+
+The unfiltered mean beats the filter from about 100 frames on, hence the default of 128.
+
 ## Combine reference and 1/4-level cap (2026-10-06)
 
 From the FidelityFX study (a read-only Sonnet workflow, 2026-10-06). FidelityFX has no pyramid: its prefilter

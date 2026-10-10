@@ -50,6 +50,7 @@ struct Nrd2Params {
     f32 coarseCap = 16.0f;    // inference cap on the 1/8 level's logit (16 = none)
     u32 combineRef = 0;       // inference combine reference: 0 coarsest level, 1 median of the candidates
     f32 midCap = 16.0f;       // inference cap on the 1/4 level's logit (16 = none)
+    f32 converge = 0.0f;      // Path Tracing at rest: frames until a pixel is its accumulated input (0 = off)
 };
 
 class Nrd2 {
@@ -134,9 +135,9 @@ private:
     rhi::IDevice*          dev_ = nullptr;
     rhi::IResourceFactory* res_ = nullptr;
     rhi::PipelineHandle psoPyramid_ = 0, psoParams_ = 0, psoResolve_ = 0, compose_ = 0;
-    rhi::PipelineHandle psoReproject_ = 0, psoPrefilter_ = 0, psoTemporal_ = 0, psoDespeckle_ = 0, psoBlur_ = 0;
+    rhi::PipelineHandle psoReproject_ = 0, psoPrefilter_ = 0, psoTemporal_ = 0, psoDespeckle_ = 0, psoBlur_ = 0, psoConverge_ = 0;
     rhi::BindingSetHandle setPyramid_ = 0, setParams_ = 0, setResolve_ = 0, setCompose_ = 0;
-    rhi::BindingSetHandle setReproject_ = 0, setPrefilter_ = 0, setTemporal_ = 0, setDespeckle_ = 0, setBlur_ = 0;
+    rhi::BindingSetHandle setReproject_ = 0, setPrefilter_ = 0, setTemporal_ = 0, setDespeckle_ = 0, setBlur_ = 0, setConverge_ = 0;
 
     Targets targets_{};
     rhi::TextureHandle guide_[3] = {}, levelD_[3] = {}, levelS_[3] = {};

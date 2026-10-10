@@ -2308,7 +2308,8 @@ RayDrivenOut PSRayDriven(SkyOut i) {
             gPtAccum[accIdx]         = float4(accD, asfloat((f32tof16(depthM) << 16) | (uint)nn));
             gPtAccum[plane + accIdx] = float4(accS, 0.0);
             if (keep) {
-                gNrd2DiffOut[rdPixel] = float4(accD, nrdDOut.a);
+                // a: 1 + frames / 16384 while the albedo is usable, so NRD2 can converge to the mean (nrd2Converge).
+                gNrd2DiffOut[rdPixel] = float4(accD, nrdDOut.a > 0.5 ? 1.0 + nn / 16384.0 : 0.0);
                 gNrd2SpecOut[rdPixel] = float4(accS, nrdSOut.a);
             }
         }

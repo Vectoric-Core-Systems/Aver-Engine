@@ -41,6 +41,7 @@ constexpr u32 kPrefilterSrv = 7, kPrefilterUav = 2;
 constexpr u32 kTemporalSrv = 10, kTemporalUav = 5;
 constexpr u32 kDespeckleSrv = 3, kDespeckleUav = 2;
 constexpr u32 kBlurSrv = 6, kBlurUav = 3;
+constexpr u32 kConvergeSrv = 4, kConvergeUav = 1;
 constexpr f32 kStabNFast = 8.0f, kStabNSunMoved = 2.0f, kStabNMax = 64.0f;
 
 constexpr rhi::ResourceState kRead  = rhi::ResourceState::NonPixelShaderResource;
@@ -161,6 +162,7 @@ bool Nrd2::create(rhi::IDevice& dev) {
     psoTemporal_  = build(7, "CSNrd2Temporal", kTemporalSrv, kTemporalUav, ~0u, false);
     psoDespeckle_ = build(8, "CSNrd2Despeckle", kDespeckleSrv, kDespeckleUav, ~0u, false);
     psoBlur_      = build(9, "CSNrd2Blur", kBlurSrv, kBlurUav, ~0u, false);
+    psoConverge_  = build(10, "CSNrd2Converge", kConvergeSrv, kConvergeUav, ~0u, false);
 
     rhi::BindingSetDesc bd{};
     bd.srvCount = kPyramidSrv; bd.uavCount = kPyramidUav;
@@ -197,6 +199,11 @@ bool Nrd2::create(rhi::IDevice& dev) {
         bd = {};
         bd.srvCount = kBlurSrv; bd.uavCount = kBlurUav;
         setBlur_ = res_->createBindingSet(bd);
+    }
+    if (psoConverge_) {
+        bd = {};
+        bd.srvCount = kConvergeSrv; bd.uavCount = kConvergeUav;
+        setConverge_ = res_->createBindingSet(bd);
     }
     if (!setPyramid_ || !setParams_ || !setResolve_ || !setCompose_) {
         AVER_WARN("[NRD2] binding sets could not be created; NRD2 unavailable");
@@ -349,18 +356,18 @@ void Nrd2::destroy() {
     network_.destroy();
     if (res_) {
         for (rhi::PipelineHandle* p : {&psoPyramid_, &psoParams_, &psoResolve_, &psoFeatures_, &psoReproject_,
-                                       &psoPrefilter_, &psoTemporal_, &psoDespeckle_, &psoBlur_}) {
+                                       &psoPrefilter_, &psoTemporal_, &psoDespeckle_, &psoBlur_, &psoConverge_}) {
             if (*p) res_->destroyPipeline(*p);
         }
         for (rhi::BindingSetHandle* s : {&setPyramid_, &setParams_, &setResolve_, &setCompose_, &setFeatures_,
-                                         &setReproject_, &setPrefilter_, &setTemporal_, &setDespeckle_, &setBlur_}) {
+                                         &setReproject_, &setPrefilter_, &setTemporal_, &setDespeckle_, &setBlur_, &setConverge_}) {
             if (*s) res_->destroyBindingSet(*s);
         }
     }
     psoPyramid_ = psoParams_ = psoResolve_ = psoFeatures_ = psoReproject_ = psoPrefilter_ = psoTemporal_ = 0;
-    psoDespeckle_ = psoBlur_ = 0;
+    psoDespeckle_ = psoBlur_ = psoConverge_ = 0;
     setPyramid_ = setParams_ = setResolve_ = setCompose_ = setFeatures_ = 0;
-    setReproject_ = setPrefilter_ = setTemporal_ = setDespeckle_ = setBlur_ = 0;
+    setReproject_ = setPrefilter_ = setTemporal_ = setDespeckle_ = setBlur_ = setConverge_ = 0;
     featuresTried_ = false;
     dev_ = nullptr;
     res_ = nullptr;
@@ -546,6 +553,7 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     cb.extra[0] = std::min(std::max(params_.coarseCap, -16.0f), 16.0f);
     cb.extra[1] = static_cast<f32>(params_.combineRef > 1u ? 1u : params_.combineRef);
     cb.extra[2] = std::min(std::max(params_.midCap, -16.0f), 16.0f);
+    cb.extra[3] = std::min(std::max(params_.converge, 0.0f), 16384.0f);
     std::memcpy(cb.def, params_.diffuse, sizeof(params_.diffuse));
     std::memcpy(cb.def + 6, params_.specular, sizeof(params_.specular));
     if (stab) {
@@ -653,6 +661,22 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     if (demod) {
         ctx.textureBarrier(dRes_, kRead, kWrite);
         ctx.textureBarrier(sRes_, kRead, kWrite);
+    }
+    // Path Tracing at rest: converged pixels toward their accumulated input (nrd2.hlsl pass 10).
+    // It reads lit_ back through its UAV: a typed load of RGBA16F (DeviceCaps::typedUavLoads).
+    if (cb.extra[3] > 0.0f && psoConverge_ && setConverge_ && dev_->caps().typedUavLoads && !params_.bypass &&
+        !(capture_ && capture_->active())) {
+        rhi::ScopedGpuStat convergeStat(ctx, "NRD2.Converge");
+        res_->setSrv(setConverge_, 0, targets_.diffuse);
+        res_->setSrv(setConverge_, 1, targets_.specular);
+        res_->setSrv(setConverge_, 2, targets_.remodA);
+        res_->setSrv(setConverge_, 3, targets_.remodB);
+        res_->setUav(setConverge_, 0, lit_, 0);
+        ctx.uavBarrierTexture(lit_);
+        ctx.setPipeline(psoConverge_);
+        ctx.setBindingSet(setConverge_);
+        ctx.setConstantBuffer(kConstantSlot, &cb, sizeof(cb));
+        ctx.dispatch(gx, gy, 1);
     }
     ctx.textureBarrier(lit_, kWrite, rhi::ResourceState::ShaderResource);
 

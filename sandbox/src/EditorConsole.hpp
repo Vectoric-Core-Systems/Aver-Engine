@@ -770,6 +770,14 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (!(v.as.f >= -16.0f && v.as.f <= 16.0f)) { err = "nrd2MidCap must be -16 to 16"; return false; }
             return true;
         }});
+    t.push_back({"voxi.nrd2Converge", VarType::U32, false,
+        "NRD2: Path Tracing at rest, frames until a pixel shows its accumulated input unfiltered (0 off, default 128)",
+        []{ return vU32(Renderer::get().settings().nrd2Converge); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2Converge = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u > 16384) { err = "nrd2Converge must be 0 to 16384"; return false; }
+            return true;
+        }});
     t.push_back({"voxi.nrd2CoarseCap", VarType::F32, false,
         "NRD2: cap on the 1/8 pyramid level's logit at inference, network or defaults (-16 to 16, default 0; 16 = uncapped). Lower keeps lamp light out of near-field shadows and halos, at a little more noise",
         []{ return vF32(Renderer::get().settings().nrd2CoarseCap); },
