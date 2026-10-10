@@ -588,6 +588,17 @@ void GameContent::unloadToPending(u64 id) {
     if (meshReleased_) meshReleased_(id, meshReleasedUser_);
 }
 
+void GameContent::releaseMeshHandle(rhi::MeshHandle h) {
+    if (!h) return;
+    // Into the entry the released hook's own mesh just made, whose `others` go before its base.
+    if (pendingMeshes_.empty() || pendingMeshes_.back().releasedAt != lastFlushFrame_) {
+        PendingMesh p;
+        p.releasedAt = lastFlushFrame_;
+        pendingMeshes_.push_back(std::move(p));
+    }
+    pendingMeshes_.back().others.push_back(h);
+}
+
 void GameContent::flushMeshReleases(rhi::IDevice& device, u64 frameIndex) {
     lastFlushFrame_ = frameIndex;
     usize w = 0;

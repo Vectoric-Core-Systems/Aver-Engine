@@ -67,7 +67,13 @@ void SandboxApp::loadProjectMeshes(Engine& e) {
 #endif
 #if AVER_MODULE_TRIFACTOR
         if (const auto lit = app.meshLods_.find(id); lit != app.meshLods_.end()) {
-            for (const rhi::MeshHandle lh : lit->second.handles) app.depthProxy_.erase(lh);
+            // Level 0 is the released mesh itself; the coarser levels are this hook's to free (they
+            // share its vertex buffer, which cannot go while they live).
+            const std::vector<rhi::MeshHandle>& levels = lit->second.handles;
+            for (usize lvl = 0; lvl < levels.size(); ++lvl) {
+                app.depthProxy_.erase(levels[lvl]);
+                if (lvl > 0) app.content_.releaseMeshHandle(levels[lvl]);
+            }
             app.meshLods_.erase(lit);
         }
         app.meshClusterData_.erase(id);

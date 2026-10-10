@@ -32,6 +32,7 @@
 #include <functional> // D3D12ResourceFactory::uploadBufferFilled's fill callback
 #include <initializer_list>   // D3D12ResourceFactory::uploadBuffers' parameter (W4 Default-heap meshes)
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <atomic>               // the present thread's counters
@@ -980,6 +981,7 @@ public:
     f32 taaLastViewProj_[16] = {};
     bool taaLastViewProjValid_ = false;
     bool taaCameraMoving_ = false;
+    std::unordered_set<MeshHandle> destroyRefusedWarned_;   // destroyMesh's sharing refusal, said once
     bool camera(f32 viewProj[16], f32 invViewProjRel[16], f32 cameraPos[3]) const override {
         if (viewProj)       std::memcpy(viewProj, frameCB_.viewProj, sizeof(frameCB_.viewProj));
         if (invViewProjRel) std::memcpy(invViewProjRel, frameCB_.invViewProjRel, sizeof(frameCB_.invViewProjRel));
@@ -4114,8 +4116,10 @@ bool D3D12Device::destroyMesh(MeshHandle mesh) {
     }
     // Mirror refusal for vertex-sharing ROOT (would corrupt unrelated renders).
     if (m.vbShares > 0) {
-        AVER_WARN("[RHI.D3D12] destroyMesh({}) refused: {} mesh(es) still share its vertices",
-                  mesh, m.vbShares);
+        // Once per mesh: a caller retries until the sharers are gone (GameContent::flushMeshReleases).
+        if (destroyRefusedWarned_.insert(mesh).second)
+            AVER_WARN("[RHI.D3D12] destroyMesh({}) refused: {} mesh(es) still share its vertices",
+                      mesh, m.vbShares);
         return false;
     }
 

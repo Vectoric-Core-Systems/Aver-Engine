@@ -120,6 +120,9 @@ public:
     // D3D12Device::destroyMesh frees the mesh's resources immediately, so released meshes' handles wait
     // here. Call once per frame; destroys those released at least 3 frames before `frameIndex`.
     void flushMeshReleases(rhi::IDevice& device, u64 frameIndex);
+    // A host-made mesh derived from a released one (an editor LOD level), destroyed with it and before
+    // it -- called from the released hook. Waits like any released handle.
+    void releaseMeshHandle(rhi::MeshHandle h);
 
     // Callback after each mesh is uploaded, before split parts are built. `data` is null for built-ins.
     struct LoadedMesh {
