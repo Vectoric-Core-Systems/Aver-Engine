@@ -112,13 +112,6 @@ bool TemporalUpscaler::ensureTargets(u32 dstW, u32 dstH) {
 // Same contract as FsrUpscaler::execute: outTarget arrives bound, and is left bound.
 void TemporalUpscaler::execute(rhi::IRenderContext& ctx, const rhi::UpscalerInput& in, rhi::TextureHandle outTarget) {
     if (!in.color || !outTarget || !in.srcWidth || !in.srcHeight || !in.dstWidth || !in.dstHeight) return;
-    // TAA accumulates only while the camera is still: a moving camera gets the spatial upscale, and
-    // history restarts once it stops (blending reprojected history is what smears in motion).
-    if (in.cameraMoving) {
-        fallback_.execute(ctx, in, outTarget);
-        resetPending_ = true;
-        return;
-    }
     rhi::TextureDesc outDesc{};
     const bool ready = in.canRetarget && in.motionVectors && in.depth && !failed_ &&
                        res_.textureInfo(outTarget, outDesc) && ensurePipelines(outDesc.format) &&

@@ -72,14 +72,17 @@ TAAU (temporal anti-aliasing with upscale) followed by FSR 1's RCAS. The editor'
   the point at `n + 0.5 - j`, and the G-buffer velocity (written against an unjittered previous
   matrix) carries `+j`; the resolve subtracts it.
 - **Resolve** (one pass at output size, squashed space): a wide reconstruction (kernel in scene
-  pixels) for the YCoCg variance clip box and for pixels without history, a narrow one (kernel in
-  output pixels) for the blend, weighted by how close the nearest sample landed; history fetched
-  with a 9-tap Catmull-Rom at `uv - motion`, clipped, blended at up to 10% (25% under motion).
+  pixels) for pixels without history, a narrow one (kernel in output pixels) for the blend, weighted
+  by how close the nearest sample landed; history fetched with a 9-tap Catmull-Rom at `uv - motion`,
+  clipped to the YCoCg min/max of the 3x3 scene neighbourhood averaged with the cross's (Karis 2014;
+  not mean +- sigma, see `docs/rendering/NEURAA_NRD.md` section 7), blended at up to 10% (25% under
+  motion) and never under a floor that rises with motion (3% still, 12% from 4 scene pixels a frame).
   Generated (frame-interpolation) images are resolved but never written to history.
-- **Still camera only.** While the camera moves (its unjittered view-projection changed since the
-  last frame, `UpscalerInput::cameraMoving`) the device stops jittering and the resolve hands the
-  frame to FSR 1; history restarts when the camera stops. No smear while moving, and a cut needs no
-  reset signal.
+- **Still and moving.** Jitter and history run whether or not the camera moves. From 2026-10-04 to
+  10-10 a moving camera fell back to FSR 1 (to stop a smear); at render scale 0.5 that halved detail
+  in motion. The smear was history kept at ~97% wherever no sample landed close to the pixel and a
+  loose clip box; the motion floor and the min/max clip replace the fallback. A cut reprojects out
+  of the screen or is clipped within a few frames.
 - **Needs the G-buffer** (velocity + view Z, so MSAA 1): the editor enables it while TAA is on.
   Without it, or on a backend whose caller cannot let it retarget (Vulkan), it falls back to FSR 1.
 - **Measured** on NeonDistrict_Day at 0.5 scale: edges anti-aliased (no stair-steps on the sign

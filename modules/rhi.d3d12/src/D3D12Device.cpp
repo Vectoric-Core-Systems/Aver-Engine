@@ -944,13 +944,12 @@ public:
     // unjittered previous matrix therefore carries +jitter, which the resolve subtracts.
     void jitterForUpload(PerFrameCB& cb) {
         cb.jitter[0] = cb.jitter[1] = cb.jitter[2] = cb.jitter[3] = 0.0f;
-        // Camera motion: compared on the unjittered matrix, once per uploaded frame. No jitter while
-        // moving -- the temporal upscaler resolves without history then (UpscalerInput::cameraMoving).
+        // Camera motion: compared on the unjittered matrix, once per uploaded frame (UpscalerInput::cameraMoving).
         taaCameraMoving_ = taaLastViewProjValid_ &&
                            std::memcmp(taaLastViewProj_, frameCB_.viewProj, sizeof(taaLastViewProj_)) != 0;
         std::memcpy(taaLastViewProj_, frameCB_.viewProj, sizeof(taaLastViewProj_));
         taaLastViewProjValid_ = true;
-        if (taaCameraMoving_ || !upscaler_ || jitterSuppressed_) return;
+        if (!upscaler_ || jitterSuppressed_) return;
         f32 jx = 0.0f, jy = 0.0f;   // scene pixels
         if (!upscaler_->jitterOverride(jx, jy)) {
             if (!any(upscaler_->needs(), UpscalerNeeds::Jitter)) return;

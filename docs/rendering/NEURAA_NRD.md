@@ -29,10 +29,10 @@ Both problems are the same shape, and the measurements of 2026-10-04/05 show it:
   0.6 returned 0.49 of the GI it was given; at 0 it kept 0.79 by day but turned night path tracing into
   blotches in motion; 0.2 is a compromise (`DENOISING.md` section 2). One number cannot be right both
   for a tile of rare fireflies and for a tile of genuinely bright bounce light.
-- **TAA:** it smeared under motion badly enough that it now runs only while the camera is still
-  (`modules/render.sr/README.md`), so in motion nothing anti-aliases edges. NeuRAA is a single-frame
-  method with no history to smear, run every frame: motion gets anti-aliased edges, and the TAA at rest
-  starts from them (section 3).
+- **TAA:** it smeared under motion, so from 2026-10-04 it ran only while the camera was still and
+  nothing anti-aliased edges in motion. NeuRAA is a single-frame method with no history to smear, run
+  every frame (section 3). Since 2026-10-10 the TAAU runs in motion too (`modules/render.sr/README.md`),
+  which puts NeuRAA's network out of the temporal path entirely (section 7, item 2).
 
 A network that looks at a tile's statistics and picks those numbers per tile addresses exactly that.
 Predicting parameters rather than pixels also:
@@ -89,13 +89,12 @@ only decides how to blend each edge pixel with its neighbours.
 
 | mode | camera | path |
 |---|---|---|
-| ray-driven (default) | moving | NeuRAA, then AverSR's spatial fallback (FSR 1 EASU, which expects anti-aliased input) |
-| ray-driven | still | NeuRAA, then AverSR's TAAU, unchanged ("TAA only while still" stays) |
+| ray-driven (default) | any, AverSR spatial | NeuRAA, then FSR 1 EASU (which expects anti-aliased input) |
+| ray-driven | any, AverSR temporal | NeuRAA's baseline (no network while TAAU blends), then the TAAU |
 | raster | any | the existing MSAA setting (hardware resolve); no NeuRAA |
 
-In motion it replaces nothing: today edges there get no anti-aliasing at all, because TAA smeared and
-now runs only while still. At rest the TAAU accumulates frames whose edges are already resolved, which
-should shorten the time it takes to converge after the camera stops. NeuRAA has no history, so it
+Until 2026-10-10 the TAAU ran only at rest, so in motion NeuRAA was the only edge AA; now the TAAU runs
+in motion too and the network matters only with the spatial upscaler. NeuRAA has no history, so it
 cannot ghost.
 
 **Raster and MSAA.** Raster mode has no triangle IDs to find edges from, and the hardware already

@@ -1,6 +1,7 @@
 // AverSR: temporal anti-aliasing with upscale (TAAU). One pass, at OUTPUT resolution:
 //   reconstruct this frame from the jittered scene samples around the output pixel, reproject last
-//   frame's result with the G-buffer velocity, clip it to this frame's neighbourhood, blend.
+//   frame's result with the G-buffer velocity, clip it to this frame's neighbourhood min/max, blend.
+// Runs still and moving: under motion the blend takes more of the current frame.
 // Works in the squashed space c / (1 + max(c)) (see sr_fsr1.hlsl) so bright pixels cannot dominate;
 // the history is stored squashed and FSR's RCAS pass un-squashes after sharpening.
 
@@ -69,7 +70,8 @@ float4 AverSrTaaResolvePS(AverSrTaaVSOut i) : SV_TARGET {
     // the nearest sample landed -- over the jitter cycle every output pixel gets one close to it,
     // which is what makes the accumulated image as sharp as the output grid.
     const float  scale = gTaaDst.x * gTaaSrc.z;                // output pixels per scene pixel
-    float3 sum = 0.0, m1 = 0.0, m2 = 0.0, nsum = 0.0;
+    float3 sum = 0.0, nsum = 0.0;
+    float3 boxMin9 = 1.0e30, boxMax9 = -1.0e30, boxMin5 = 1.0e30, boxMax5 = -1.0e30;
     float  wsum = 0.0, nwsum = 0.0, nmax = 0.0;
     float  bestZ = 1.0e30;
     int2   bestPx = clamp(centre, int2(0, 0), maxPx);
@@ -84,15 +86,16 @@ float4 AverSrTaaResolvePS(AverSrTaaVSOut i) : SV_TARGET {
             const float  wn = exp(-2.29 * dot(dn, dn));        // the same, in output pixels
             nsum += c * wn; nwsum += wn; nmax = max(nmax, wn);
             const float3 yc = averTaaToYCoCg(c);
-            m1 += yc; m2 += yc * yc;
+            boxMin9 = min(boxMin9, yc); boxMax9 = max(boxMax9, yc);
+            if (x == 0 || y == 0) { boxMin5 = min(boxMin5, yc); boxMax5 = max(boxMax5, yc); }
             const float z = gTaaViewZ.Load(int3(p, 0));
             if (z > 0.0 && z < bestZ) { bestZ = z; bestPx = p; }   // nearest surface leads the motion
         }
     }
     const float3 wide    = sum / max(wsum, 1e-6);
     const float3 narrow  = nwsum > 1e-4 ? nsum / nwsum : wide;
-    const float3 mean  = m1 / 9.0;
-    const float3 sigma = sqrt(max(m2 / 9.0 - mean * mean, 0.0));
+    // 3x3 and cross min/max averaged (Karis 2014): one outlier sample widens the box only half as much.
+    const float3 boxMin = 0.5 * (boxMin9 + boxMin5), boxMax = 0.5 * (boxMax9 + boxMax5);
 
     // Pure motion: velocity minus this frame's jitter (it is written against an unjittered
     // previous camera). Where nothing wrote the G-buffer, the surface is treated as static.
@@ -103,19 +106,21 @@ float4 AverSrTaaResolvePS(AverSrTaaVSOut i) : SV_TARGET {
     const bool  histOk = gTaaJit.z < 0.5 && all(histUv > 0.0) && all(histUv < 1.0);
     float3 history = averTaaHistoryCatmullRom(histUv);
 
-    // Variance clip toward the mean: history that this frame's neighbourhood cannot explain (a
-    // disocclusion, a moving shadow) is pulled to its edge instead of ghosting.
+    // Clip toward the box centre: history this frame's neighbourhood cannot explain (a disocclusion,
+    // a moving shadow) is pulled to the box edge instead of ghosting.
     const float3 hYc = averTaaToYCoCg(history);
-    const float3 boxMin = mean - sigma * 1.25, boxMax = mean + sigma * 1.25;
-    const float3 toH = hYc - mean;
+    const float3 centre = 0.5 * (boxMin + boxMax);
+    const float3 toH = hYc - centre;
     const float3 ext = max((boxMax - boxMin) * 0.5, 1e-5);
     const float  t = max(abs(toH.x) / ext.x, max(abs(toH.y) / ext.y, abs(toH.z) / ext.z));
-    history = averTaaFromYCoCg(t > 1.0 ? mean + toH / t : hYc);
+    history = averTaaFromYCoCg(t > 1.0 ? centre + toH / t : hYc);
 
     // Up to 10% new per frame when still, more while moving, scaled by how close this frame's
-    // nearest sample is to the pixel. Without history, the wide estimate stands alone.
+    // nearest sample is to the pixel. The floor rises with motion (3% still, 12% from 4 scene pixels a
+    // frame) so a moving pixel never runs on history alone. Without history, the wide estimate stands alone.
     const float3 current = histOk ? narrow : wide;
-    float alpha = histOk ? max(lerp(0.1, 0.25, saturate(length(motion) / 16.0)) * nmax, 0.03) : 1.0;
+    const float  moving = saturate(length(motion) / 4.0);
+    float alpha = histOk ? max(lerp(0.1, 0.25, saturate(length(motion) / 16.0)) * nmax, lerp(0.03, 0.12, moving)) : 1.0;
     // Luma weighting keeps one flickering sample from swinging the result.
     const float wc = alpha / (1.0 + current.g), wh = (1.0 - alpha) / (1.0 + history.g);
     const float3 result = (current * wc + history * wh) / max(wc + wh, 1e-6);

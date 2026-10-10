@@ -1358,8 +1358,8 @@ void SandboxApp::buildRenderingSettings(int page) {
                 ImGui::SetTooltip("Jitters the camera by a fraction of a pixel each frame and blends the frames,\n"
                                   "reprojected with motion vectors: smooth edges and stable detail, upscaled to\n"
                                   "the window. Needs MSAA 1 (it reads the G-buffer); otherwise FSR 1 is used.\n"
-                                  "Runs only while the camera is still: a moving camera gets FSR 1, so\n"
-                                  "nothing smears, and TAA settles again a few frames after it stops.\n\n"
+                                  "Runs moving and still; in motion it leans on the current frame so\n"
+                                  "nothing trails.\n\n"
                                   "Round-trips as RENDER.TAA. --taa / --no-taa outrank it.");
             if (taa && er.sampleCount != 1u)
                 ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),

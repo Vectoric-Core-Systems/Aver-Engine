@@ -211,7 +211,7 @@ rhi::TextureHandle NeuRaa::run(rhi::IRenderContext& ctx, const rhi::UpscalerInpu
     res_.setUavBuffer(detectSet_, 3, tiles_, sizeof(u32), tileCount_, 0);
     res_.setUav(detectSet_, 4, dist_, 0);
     // The network only while no TAA is blending history (NEURAA_NRD.md section 7, item 2).
-    const bool taaAtRest = inner_ && inner_->isTemporal() && !in.cameraMoving;
+    const bool taaBlends = inner_ && inner_->isTemporal();
     if (resolve) {
         loadWeights();
         if (!net_ && !netPlaceholder_) {
@@ -243,7 +243,7 @@ rhi::TextureHandle NeuRaa::run(rhi::IRenderContext& ctx, const rhi::UpscalerInpu
     for (rhi::TextureHandle t : {edges_, dist_}) ctx.textureBarrier(t, RS::UnorderedAccess, RS::NonPixelShaderResource);
 
     if (resolve) {
-        cb.info[3] = (net_ && !taaAtRest) ? 1u : 0u;
+        cb.info[3] = (net_ && !taaBlends) ? 1u : 0u;
         // Resolve only what the wrapped upscaler reads for the displayed rect. Not with a temporal
         // upscaler (its history would take the unresolved rest) or during a capture (it writes aa_ whole).
         u32 rw = in.srcWidth, rh = in.srcHeight;
