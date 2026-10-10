@@ -353,6 +353,12 @@ root's load (meshes / instantiate / hook), eviction and mesh upload, named by as
 one cached `getenv`. `--cam-fly DX DY` (cm per frame) flies the editor camera in a straight line, which
 is what exercises level streaming.
 
+The D3D12 backend adds, under the same variable: `[GpuHitch]` (a GPU frame over the threshold, its spans
+of 2 ms or more), `[PresentStall]` (a `Present` or a present-allocator wait over 50 ms) and
+`[PresentPacing]` (every 240 presents: interval percentiles and the first 32 intervals -- the cadence
+images reach the display at). A GPU span much longer than its marked children is usually a queue wait,
+not work.
+
 ## Diagnostic codes (`AVR####`) — reserved, not yet issued
 
 The ranges below are allocated so a code names its owner on sight. The retrofit itself is not done —

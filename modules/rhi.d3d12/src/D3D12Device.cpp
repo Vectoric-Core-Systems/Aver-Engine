@@ -1264,6 +1264,11 @@ private:
     HRESULT presentError_ = S_OK;
     std::atomic<u64> presentBlockedUs_{0};         // time the present thread spent inside Present
     std::atomic<u64> presentCount_{0};             // Presents the present thread made
+    // Frame interpolation: presents at most one display refresh apart (a constant-rate cap from the
+    // display mode; nothing measured -- docs/rendering/NEURAFI.md section 5).
+    std::atomic<bool> presentRefreshCap_{false};
+    std::atomic<f32> presentRefreshMs_{0.0f};
+    HANDLE readyEvent_ = nullptr;
     bool startPresentThread();
     void stopPresentThread();
     void drainPresents();                          // waits until every queued image has been presented
@@ -2302,6 +2307,7 @@ D3D12Device::~D3D12Device() {
     stopPresentThread();
     drainPresents();
     if (presentEvent_) CloseHandle(presentEvent_);
+    if (readyEvent_) CloseHandle(readyEvent_);
     if (infoQueue_) {
         drainDebugMessages();
         AVER_INFO("[RHI.D3D12] debug layer totals: {} corruption, {} error, {} warning",
@@ -3143,6 +3149,7 @@ bool D3D12Device::startPresentThread() {
         presentList_->Close();
     }
     if (!presentEvent_) presentEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!readyEvent_) readyEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     presentStop_ = false;
     presentError_ = S_OK;
     presentThread_ = std::thread([this] { presentThreadMain(); });
@@ -3174,6 +3181,7 @@ void D3D12Device::drainPresents() {
 void D3D12Device::presentThreadMain() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     u32 slot = 0;
+    i64 lastPresent = 0;
     for (;;) {
         PresentRequest r;
         {
@@ -3182,13 +3190,28 @@ void D3D12Device::presentThreadMain() {
             if (presentQ_.empty()) return;
             r = presentQ_.front();
         }
-        // Image drawn once render queue passes `ready`; present queue waits on GPU.
+        // Image drawn once render queue passes `ready`. Waited for here, before Present: a Present whose
+        // copy still waits on the render queue blocked ~200 ms whenever frame interpolation's two images
+        // a frame filled the queue. The present queue keeps its own Wait for a timed-out event.
+        if (readyEvent_ && readyFence_->GetCompletedValue() < r.ready) {
+            readyFence_->SetEventOnCompletion(r.ready, readyEvent_);
+            WaitForSingleObject(readyEvent_, 1000);
+        }
         presentQueue_->Wait(readyFence_.Get(), r.ready);
-
+        if (presentRefreshCap_.load(std::memory_order_relaxed) && lastPresent) {
+            const f64 refreshMs = presentRefreshMs_.load(std::memory_order_relaxed);
+            for (f64 left = refreshMs - qpcMs(lastPresent, qpcNow()); left > 0.0; left = refreshMs - qpcMs(lastPresent, qpcNow())) {
+                if (left > 2.0) Sleep(1);
+                else YieldProcessor();
+            }
+        }
         slot = (slot + 1) % kPresentAllocs;
         if (presentAllocUse_[slot] && doneFence_->GetCompletedValue() < presentAllocUse_[slot]) {
+            const i64 w0 = qpcNow();
             doneFence_->SetEventOnCompletion(presentAllocUse_[slot], presentEvent_);
             WaitForSingleObject(presentEvent_, 2000);
+            if (hitchThresholdMs() > 0.0 && qpcMs(w0, qpcNow()) > 50.0)
+                AVER_INFO("[PresentStall] waited {:.0f} ms for a present allocator", qpcMs(w0, qpcNow()));
         }
         presentAllocs_[slot]->Reset();
         presentList_->Reset(presentAllocs_[slot].Get(), nullptr);
@@ -3224,8 +3247,13 @@ void D3D12Device::presentThreadMain() {
         presentList_->Close();
         ID3D12CommandList* lists[] = {presentList_.Get()};
         presentQueue_->ExecuteCommandLists(1, lists);
+        // The image is free once copied: signalled before Present, not after it. The render queue waits on
+        // this (waitImageFree) and Present can wait on GPU work queued behind that wait, so a signal only
+        // enqueued after Present returned locked the two until DXGI gave up after 200 ms.
+        presentQueue_->Signal(doneFence_.Get(), r.serial);
 
         const i64 t0 = qpcNow();
+        lastPresent = t0;
         const HRESULT hr = swapChain_->Present(r.sync, r.flags);
         // The mirror never waits for vblank and never fails the main present.
         if (mirror) {
@@ -3235,8 +3263,25 @@ void D3D12Device::presentThreadMain() {
             }
         }
         presentBlockedUs_ += static_cast<u64>(qpcMs(t0, qpcNow()) * 1000.0);
+        if (hitchThresholdMs() > 0.0 && qpcMs(t0, qpcNow()) > 50.0)
+            AVER_INFO("[PresentStall] Present took {:.0f} ms (sync {}, flags {:#x})", qpcMs(t0, qpcNow()), r.sync, r.flags);
         ++presentCount_;
-        presentQueue_->Signal(doneFence_.Get(), r.serial);
+        if (hitchThresholdMs() > 0.0) {   // AVER_HITCH_MS: the cadence images reach the display at
+            static i64 last = 0;
+            static std::vector<f64> gaps;
+            const i64 now = qpcNow();
+            if (last) gaps.push_back(qpcMs(last, now));
+            last = now;
+            if (gaps.size() >= 240) {
+                std::string seq;
+                for (usize i = 0; i < 32; ++i) seq += std::to_string(static_cast<int>(gaps[i] + 0.5)) + " ";
+                std::vector<f64> sorted = gaps;
+                std::sort(sorted.begin(), sorted.end());
+                AVER_INFO("[PresentPacing] {} presents: p10 {:.1f} p50 {:.1f} p90 {:.1f} max {:.1f} ms | first 32: {}",
+                          gaps.size(), sorted[24], sorted[120], sorted[216], sorted.back(), seq);
+                gaps.clear();
+            }
+        }
         presentAllocUse_[slot] = r.serial;
         {
             std::lock_guard<std::mutex> lk(presentMu_);
@@ -3773,8 +3818,20 @@ void D3D12Device::collectGpuTiming() {
             tsSpanToAccum_[i] = static_cast<u32>(it - tsAccum_.begin());
         }
     }
-    if (tsSliceBegin_[frameIndex_] < kMaxGpuStamps && tsSliceEnd_[frameIndex_] < kMaxGpuStamps)
-        tsAccumFrameMs_ += ms(stamps[tsSliceBegin_[frameIndex_]], stamps[tsSliceEnd_[frameIndex_]]);
+    if (tsSliceBegin_[frameIndex_] < kMaxGpuStamps && tsSliceEnd_[frameIndex_] < kMaxGpuStamps) {
+        const f64 frameMs = ms(stamps[tsSliceBegin_[frameIndex_]], stamps[tsSliceEnd_[frameIndex_]]);
+        tsAccumFrameMs_ += frameMs;
+        // AVER_HITCH_MS: one GPU frame over the threshold, span by span.
+        if (hitchThresholdMs() > 0.0 && frameMs > hitchThresholdMs()) {
+            std::string parts;
+            for (const GpuSpan& sp : tsSlice_[frameIndex_]) {
+                if (sp.begin >= kMaxGpuStamps || sp.end >= kMaxGpuStamps) continue;
+                const f64 d = ms(stamps[sp.begin], stamps[sp.end]);
+                if (d >= 2.0) parts += std::string(" | ") + sp.label + " " + std::to_string(static_cast<int>(d + 0.5));
+            }
+            AVER_INFO("[GpuHitch] GPU frame {:.1f} ms{}", frameMs, parts);
+        }
+    }
     D3D12_RANGE none{0, 0};
     tsReadback_->Unmap(0, &none);
     ++tsAccumFrames_;
@@ -5499,6 +5556,7 @@ void D3D12Device::endFrame() {
     // ---- frame interpolation (docs/rendering/NEURAFI.md) ----
     // Generated image from HDR scene target presented FIRST on its own swapchain image, through
     // post chain, overlays, and UI; real frame follows on next image.
+    hm.mark("skyBlendedTransparent");
     frameInterpolated_ = false;
     TextureHandle generatedImage = 0;
     if (frameInterpOn_ && frameInterp_) {
@@ -5570,20 +5628,26 @@ void D3D12Device::endFrame() {
         };
         cmdList_->ResourceBarrier(2, post);
     };
+    hm.mark("fi:generate");
     RhiTexture* genT = generatedImage ? rhiFactory_->texture(generatedImage) : nullptr;
     if (genT && genT->res) {
         toScene(generatedImage);
         presentPass(bbIndex_, true, true, false);
+        hm.mark("fi:generatedPost");
         // Generated image goes to present thread ahead of real frame's post chain and UI.
         if (!submitGeneratedImage()) return;
+        hm.mark("fi:submitGenerated");
         toScene(fgShowGeneratedOnly_ ? generatedImage : fgInputTex_);
         realImage_ = (bbIndex_ + 1) % kBackBufferCount;
         presentPass(realImage_, false, false, true);
         frameInterpolated_ = true;
+        presentRefreshCap_.store(true, std::memory_order_relaxed);
     } else {
         realImage_ = bbIndex_;
         presentPass(bbIndex_, false, true, true);
+        presentRefreshCap_.store(false, std::memory_order_relaxed);
     }
+    hm.mark("realPost");
     imageNext_ = (realImage_ + 1) % kBackBufferCount;
 
     // Frame-end timestamp, then resolve every stamp issued this frame.
@@ -5655,6 +5719,7 @@ void D3D12Device::queryDisplayRefresh() {
     dm.dmSize = sizeof(dm);
     if (EnumDisplaySettingsW(od.DeviceName, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
         fgDisplayHz_ = static_cast<f32>(dm.dmDisplayFrequency);
+    presentRefreshMs_.store(fgDisplayHz_ > 1.0f ? 1000.0f / fgDisplayHz_ : 0.0f, std::memory_order_relaxed);
 }
 
 // Why frame interpolation cannot run this frame; 0 when it can.
