@@ -42,6 +42,8 @@ void logWrite(LogLevel level, std::string_view message);
 using LogSinkFn = void (*)(void* ctx, LogLevel level, std::string_view message);
 // Installs the sink, or removes it with {nullptr, nullptr}.
 void setLogSink(LogSinkFn fn, void* ctx);
+// Also writes every line to `path` (truncated), or stops with nullptr. False if it cannot be opened.
+bool setLogFile(const char* path);
 
 // Formats and writes one log line.
 template <class... Args>

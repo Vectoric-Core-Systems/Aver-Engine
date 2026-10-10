@@ -8,6 +8,7 @@
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Version.hpp"
+#include "aver/core/HitchMarks.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -288,8 +289,8 @@ void Engine::frameStep() {
         return;
     }
 
-    // AVER_HITCH_MS=<ms>: log the phases of any frame longer than that (stutter hunting).
-    static const f64 hitchMs = [] { const char* v = std::getenv("AVER_HITCH_MS"); return v ? std::atof(v) : 0.0; }();
+    // Phases of any frame longer than AVER_HITCH_MS (250 ms when unset; 0 off).
+    const f64 hitchMs = hitchThresholdMs();
     using Clock = std::chrono::steady_clock;
     const Clock::time_point t0 = Clock::now();
     app_->onUpdate(*this, time_);

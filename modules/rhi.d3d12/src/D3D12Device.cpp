@@ -3266,7 +3266,7 @@ void D3D12Device::presentThreadMain() {
         if (hitchThresholdMs() > 0.0 && qpcMs(t0, qpcNow()) > 50.0)
             AVER_INFO("[PresentStall] Present took {:.0f} ms (sync {}, flags {:#x})", qpcMs(t0, qpcNow()), r.sync, r.flags);
         ++presentCount_;
-        if (hitchThresholdMs() > 0.0) {   // AVER_HITCH_MS: the cadence images reach the display at
+        if (hitchVerbose()) {   // AVER_HITCH_MS: the cadence images reach the display at
             static i64 last = 0;
             static std::vector<f64> gaps;
             const i64 now = qpcNow();

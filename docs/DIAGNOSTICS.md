@@ -344,18 +344,19 @@ generic `Crash` — throwing away the assert's message, file and line. It is now
 
 ## Stutter hunting (`AVER_HITCH_MS`)
 
-Set `AVER_HITCH_MS=<ms>` before starting the editor (or a `--frames` run) and every frame longer than that
+The editor's log is also written to `%LOCALAPPDATA%\AverEngine\Logs\Sandbox.log` (the previous session
+kept as `Sandbox-prev.log`). Every frame longer than `AVER_HITCH_MS` (250 ms when unset, 0 turns it off)
 logs `[FrameHitch]` with its phases (update, beginFrame, render, endFrame, present). Scoped
 `aver::HitchMarks` (`modules/core/include/aver/core/HitchMarks.hpp`) break a phase down further and log
 `[HitchMarks] <where> <total>: <stretch> <ms> | ...` when their own scope runs long: the editor's update,
 D3D12 `endFrame` (late scene pass vs the rest), Voxi's acceleration-structure build, and each streamed
 root's load (meshes / instantiate / hook), eviction and mesh upload, named by asset. Unset, each costs
 one cached `getenv`. `--cam-fly DX DY` (cm per frame) flies the editor camera in a straight line, which
-is what exercises level streaming.
+is what exercises level streaming; a third value turns the camera that many degrees a frame.
 
 The D3D12 backend adds, under the same variable: `[GpuHitch]` (a GPU frame over the threshold, its spans
 of 2 ms or more), `[PresentStall]` (a `Present` or a present-allocator wait over 50 ms) and
-`[PresentPacing]` (every 240 presents: interval percentiles and the first 32 intervals -- the cadence
+`[PresentPacing]` (only with `AVER_HITCH_MS` set; every 240 presents: interval percentiles and the first 32 intervals -- the cadence
 images reach the display at). A GPU span much longer than its marked children is usually a queue wait,
 not work.
 

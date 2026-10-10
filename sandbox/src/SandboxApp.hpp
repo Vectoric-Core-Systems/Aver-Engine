@@ -1616,7 +1616,7 @@ public:
     void setLodShareVertices(bool on);
     void setCamTranslate(f32 speedCmPerFrame);
     void setCamWander(f32 amp, f32 speed);        // --cam-wander AMP SPEED
-    void setCamFly(f32 dx, f32 dy) { camFlyX_ = dx; camFlyY_ = dy; }   // --cam-fly DX DY
+    void setCamFly(f32 dx, f32 dy, f32 yawDeg) { camFlyX_ = dx; camFlyY_ = dy; camFlyYaw_ = yawDeg; }   // --cam-fly
     // --nrd2-capture DIR POSES [HOLD] [HELDOUT_FROM] and --nrd2-oracle grad|grid (NRD2 phase 3 dataset).
     // DIR "default" (or "-") is %LOCALAPPDATA%/AverEngine/nrd2_dataset/<level>.
     void setNrd2Capture(const std::string& dir, u32 poses, u32 hold, u32 heldOutFrom, bool oracleGrid) {
@@ -3479,7 +3479,7 @@ private:
     f32  camTranslateSpeed_=0.0f;    // --cam-translate SPEED: forward-flight, cm/frame, 0 = no motion
     f32  camWanderAmp_=0.0f;         // --cam-wander AMP SPEED: non-repeating drift, 0 = off
     f32  camWanderSpeed_=1.0f;
-    f32  camFlyX_=0.0f, camFlyY_=0.0f;   // --cam-fly: cm per frame
+    f32  camFlyX_=0.0f, camFlyY_=0.0f, camFlyYaw_=0.0f;   // --cam-fly: cm and degrees per frame
     bool camWanderBased_=false;
     u64  camWanderHeld_=0;           // frames the wander was paused (NeuRAA capture holding a pose)
     std::string nrd2CaptureDir_;     // --nrd2-capture (see setNrd2Capture)

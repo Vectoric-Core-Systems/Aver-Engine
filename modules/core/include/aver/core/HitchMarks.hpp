@@ -1,6 +1,7 @@
 #pragma once
-// Stutter hunting: set AVER_HITCH_MS=<ms> and a HitchMarks logs, when its scope took longer than that,
-// how long each marked stretch of it took. Off (one getenv, cached) when the variable is unset.
+// Stutter hunting: a HitchMarks logs, when its scope took longer than the threshold, how long each
+// marked stretch of it took. The threshold is AVER_HITCH_MS (0 turns it off), 250 ms when unset, so a
+// long hitch always explains itself in the log.
 #include "aver/core/Log.hpp"
 #include "aver/core/Types.hpp"
 
@@ -11,7 +12,12 @@
 namespace aver {
 
 inline f64 hitchThresholdMs() {
-    static const f64 v = [] { const char* e = std::getenv("AVER_HITCH_MS"); return e ? std::atof(e) : 0.0; }();
+    static const f64 v = [] { const char* e = std::getenv("AVER_HITCH_MS"); return e ? std::atof(e) : 250.0; }();
+    return v;
+}
+// AVER_HITCH_MS was set: also the periodic reports (present cadence) that would be noise by default.
+inline bool hitchVerbose() {
+    static const bool v = std::getenv("AVER_HITCH_MS") != nullptr;
     return v;
 }
 

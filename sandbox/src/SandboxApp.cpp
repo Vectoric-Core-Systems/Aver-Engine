@@ -1481,6 +1481,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
                                            a * 60.0f * std::sin(0.0213f * s + 0.7f)};    // +-0.6 m up/down (Z up)
     }
     if (camFlyX_ != 0.0f || camFlyY_ != 0.0f) { camPos_.x += camFlyX_; camPos_.y += camFlyY_; }
+    if (camFlyYaw_ != 0.0f) yaw_ += camFlyYaw_ * 0.0174533f;
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
     // --no-occlusion-cull: reasserted every frame (applyProjectVoxiSettings rewrites it during level load).
     if (occlusionCullForceOff_) occlusionCullEnabled_ = false;

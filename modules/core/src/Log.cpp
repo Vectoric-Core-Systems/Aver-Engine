@@ -12,7 +12,16 @@ namespace {
 std::mutex& logMutex() { static std::mutex m; return m; }
 LogSinkFn   g_sink    = nullptr;
 void*       g_sinkCtx = nullptr;
+std::FILE*  g_file    = nullptr;
 } // namespace
+
+bool setLogFile(const char* path) {
+    std::lock_guard<std::mutex> lock(logMutex());
+    if (g_file) { std::fclose(g_file); g_file = nullptr; }
+    if (!path) return true;
+    g_file = std::fopen(path, "w");
+    return g_file != nullptr;
+}
 
 // Installs or removes the application's log sink.
 void setLogSink(LogSinkFn fn, void* ctx) {
@@ -58,6 +67,10 @@ void logWrite(LogLevel level, std::string_view message) {
         std::fprintf(out, "[%s] %.*s\n", levelTag(level),
                      static_cast<int>(message.size()), message.data());
         std::fflush(out);
+        if (g_file) {
+            std::fprintf(g_file, "[%s] %.*s\n", levelTag(level), static_cast<int>(message.size()), message.data());
+            std::fflush(g_file);
+        }
         if (g_sink) g_sink(g_sinkCtx, level, message);
     }
 

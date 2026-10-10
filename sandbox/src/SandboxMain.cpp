@@ -3,6 +3,11 @@
 
 #include "aver/runtime/EntryPoint.hpp"
 #include "SandboxApp.hpp"
+#include "aver/core/Log.hpp"
+#include "aver/platform/FileSystem.hpp"
+
+#include <cctype>
+#include <filesystem>
 
 namespace aver {
 
@@ -49,6 +54,14 @@ std::string ownerProjectOf(const std::string& mapPath) {
 int runShaderWarm(const std::string& projectPath);   // ShaderWarmRun.cpp
 
 Application* createApplication(int argc, char** argv) {
+    // The editor's log, also on disk: <user data>\Logs\Sandbox.log, the previous session kept as -prev.
+    if (const std::string dir = aver::userDataDir(); !dir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(dir + "\\Logs", ec);
+        const std::string log = dir + "\\Logs\\Sandbox.log";
+        std::filesystem::rename(log, dir + "\\Logs\\Sandbox-prev.log", ec);
+        aver::setLogFile(log.c_str());
+    }
     // --warm-shaders: the background shader-cache fill the editor starts (ShaderWarmup.cpp); no window.
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--warm-shaders") != 0) continue;
@@ -95,7 +108,7 @@ Application* createApplication(int argc, char** argv) {
     int frameInterpArg = -1;   // --frame-interp 0|1|2
     bool vsyncOn = false;   // --vsync
     f32 camWanderAmp = 0.0f, camWanderSpeed = 1.0f;   // --cam-wander AMP SPEED
-    f32 camFlyX = 0.0f, camFlyY = 0.0f;               // --cam-fly DX DY (cm per frame)
+    f32 camFlyX = 0.0f, camFlyY = 0.0f, camFlyYaw = 0.0f;   // --cam-fly DX DY [YAW] (cm, degrees per frame)
     int frameInterpTrajectory = -1;  // --frame-interp-trajectory: 0 linear, 1 quadratic, 2 neural
     bool frameInterpTrain = false;   // --frame-interp-train
     int neurafiVizArg = -1;          // --neurafi-view 0-4
@@ -701,6 +714,8 @@ Application* createApplication(int argc, char** argv) {
         // --cam-fly DX DY: straight flight, cm per frame (streaming tests).
         else if (!std::strcmp(argv[i],"--cam-fly") && i+2<argc) {
             camFlyX=(f32)std::atof(argv[++i]); camFlyY=(f32)std::atof(argv[++i]);
+            if (i+1<argc && (std::isdigit((unsigned char)argv[i+1][0]) || argv[i+1][0]=='-' || argv[i+1][0]=='.') &&
+                argv[i+1][1] != '-') camFlyYaw=(f32)std::atof(argv[++i]);
         }
         // --rt-rays: sun occlusion rays per pixel.
         else if (!std::strcmp(argv[i],"--rt-rays") && i+1<argc) rtRays=std::atoi(argv[++i]);
@@ -1168,7 +1183,7 @@ Application* createApplication(int argc, char** argv) {
     if (!consoleSetArgs.empty()) app->setConsoleSets(std::move(consoleSetArgs));
     if (camTranslateArg != 0.0f) app->setCamTranslate(camTranslateArg);
     if (camWanderAmp > 0.0f) app->setCamWander(camWanderAmp, camWanderSpeed);
-    if (camFlyX != 0.0f || camFlyY != 0.0f) app->setCamFly(camFlyX, camFlyY);
+    if (camFlyX != 0.0f || camFlyY != 0.0f || camFlyYaw != 0.0f) app->setCamFly(camFlyX, camFlyY, camFlyYaw);
     if (nrd2TrainStepsArg > 0) app->setNrd2Train(static_cast<u32>(nrd2TrainStepsArg), nrd2TrainDirsArg);
     if (nrd2CapturePosesArg > 0) {
         app->setNrd2Capture(nrd2CaptureDirArg, static_cast<u32>(nrd2CapturePosesArg),
