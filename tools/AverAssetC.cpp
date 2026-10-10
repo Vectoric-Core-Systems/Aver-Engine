@@ -725,13 +725,29 @@ bool loadMaterialMap(const std::string& path, std::vector<MaterialRule>& rules) 
     return true;
 }
 
+// A drop rule matches whole name tokens only ('_'-separated; trailing digits allowed), so `clip` drops
+// clip_player_ai but not a clipboard prop, and `stain` drops wall_stain_01 but not metal_stainless_steel.
+bool tokenMatch(const std::string& name, const std::string& pat) {
+    for (usize at = name.find(pat); at != std::string::npos; at = name.find(pat, at + 1)) {
+        const usize end = at + pat.size();
+        const bool startOk = at == 0 || name[at - 1] == '_';
+        const bool endOk = end == name.size() || name[end] == '_' || std::isdigit(static_cast<unsigned char>(name[end]));
+        if (startOk && endOk) return true;
+    }
+    return false;
+}
+
 // Empty slots take the first rule whose pattern is in their submesh's leaf name (a GeomSubset's name), then
-// each touched mesh is regrouped to one submesh per material.
-void applyMaterialMap(std::vector<fmt::OcMeshData>& meshes, const std::vector<MaterialRule>& rules) {
-    usize mapped = 0, dropped = 0, unmatched = 0;
-    for (fmt::OcMeshData& m : meshes) {
+// each touched mesh is regrouped to one submesh per material. A mesh the drops empty entirely is logged
+// with what emptied it, so a rule that eats real geometry shows up in the import log.
+void applyMaterialMap(std::vector<fmt::OcMeshData>& meshes, const std::vector<std::string>& names,
+                      const std::vector<MaterialRule>& rules) {
+    usize mapped = 0, dropped = 0, unmatched = 0, emptied = 0;
+    for (usize mi = 0; mi < meshes.size(); ++mi) {
+        fmt::OcMeshData& m = meshes[mi];
         bool touched = false;
         std::vector<fmt::OcMeshSubmesh> keep;
+        std::vector<std::string> droppedHere;
         for (fmt::OcMeshSubmesh& sm : m.submeshes) {
             if (sm.materialSlot >= m.materialSlots.size() || !m.materialSlots[sm.materialSlot].empty()) {
                 keep.push_back(sm);
@@ -740,21 +756,35 @@ void applyMaterialMap(std::vector<fmt::OcMeshData>& meshes, const std::vector<Ma
             std::string leaf = sm.name.substr(sm.name.find_last_of('/') + 1);
             for (char& ch : leaf) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
             const MaterialRule* hit = nullptr;
-            for (const MaterialRule& r : rules)
-                if (r.pattern == "*" || leaf.find(r.pattern) != std::string::npos) { hit = &r; break; }
+            for (const MaterialRule& r : rules) {
+                const bool match = r.pattern == "*" || (r.stem == "-" ? tokenMatch(leaf, r.pattern)
+                                                                       : leaf.find(r.pattern) != std::string::npos);
+                if (match) { hit = &r; break; }
+            }
             if (!hit) { ++unmatched; keep.push_back(sm); continue; }
             touched = true;
-            if (hit->stem == "-") { ++dropped; continue; }
+            if (hit->stem == "-") {
+                ++dropped;
+                if (droppedHere.size() < 6) droppedHere.push_back(leaf + " (" + hit->pattern + ")");
+                continue;
+            }
             // Each subset has its own slot (buildMesh), so writing it in place touches no other submesh.
             m.materialSlots[sm.materialSlot] = hit->stem;
             ++mapped;
             keep.push_back(sm);
         }
         if (!touched && m.submeshes.size() <= 255) continue;
+        if (keep.empty() && !m.submeshes.empty()) {
+            ++emptied;
+            std::string why;
+            for (const std::string& d : droppedHere) why += (why.empty() ? "" : ", ") + d;
+            AVER_INFO("--material-map: '{}' dropped whole: {}", mi < names.size() ? names[mi] : std::string("?"), why);
+        }
         m.submeshes = std::move(keep);
         fmt::groupSubmeshesByMaterial(m);
     }
-    AVER_INFO("--material-map: {} submesh(es) mapped, {} dropped, {} matched no rule", mapped, dropped, unmatched);
+    AVER_INFO("--material-map: {} submesh(es) mapped, {} dropped, {} matched no rule, {} mesh(es) emptied",
+              mapped, dropped, unmatched, emptied);
 }
 
 // ---- writing and verifying one mesh, ported from ConvertTool.cpp unchanged ----
@@ -1651,7 +1681,7 @@ int main(int argc, char** argv) {
                 emitSummary(input, stats, 1);
                 return exitCode(ExitCode::Failed);
             }
-            applyMaterialMap(res.meshes, rules);
+            applyMaterialMap(res.meshes, res.meshNames, rules);
         }
 
         // A stage spread over several folders is written the same way, one subfolder per source
