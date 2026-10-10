@@ -549,6 +549,20 @@ there). `voxi.nrd2ObjectStop 0` is the A/B. The temporal stage logs `[NRD2] temp
 when it changes (Sandbox.log), which shows whether it runs on a given setup (TAA jitter stops it; NeuRAA and FSR
 do not jitter).
 
+## Sharing with the other neural passes: what was not done (2026-10-10)
+
+Looked at and dropped with the owner after reading the code:
+- **One device-owned previous-frame G-buffer history** for NRD2's stabiliser and NeuraFI (NeuraFI copies view Z
+  and motion into a ring of three; the stabiliser keeps view Z and the normal). It would save about 8-12 bytes a
+  pixel (15-20 MB at 1766x994) and one copy, but means reworking the G-buffer's resource states at the end of the
+  D3D12 frame and NeuraFI's history handling. A shared reprojection-validity pass does not fit either: NeuraFI's
+  gather deliberately has no validity test (NEURAFI.md, its patent design).
+- **NeuRAA on `render.neural`.** Its 36-32-32-9 MLP runs inline per edge pixel in the resolve; `render.neural`'s
+  networks are buffer-in, buffer-out compute passes, so moving it adds two passes and a 36-float record per edge
+  pixel for the same image.
+- **Un-jittering NRD2's input.** NeuRAA and FSR request no jitter; only TAA does, and the stabiliser already runs
+  without it.
+
 ## Combine reference and 1/4-level cap (2026-10-06)
 
 From the FidelityFX study (a read-only Sonnet workflow, 2026-10-06). FidelityFX has no pyramid: its prefilter
