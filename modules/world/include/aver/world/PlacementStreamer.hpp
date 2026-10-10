@@ -38,6 +38,12 @@ public:
     // Horizontal distance from the nearest viewer to the item's bounds (0 inside).
     f32 distance(u32 item, const std::vector<Vec3>& viewers) const { return nearest(items_[item].b, viewers); }
     const PlacementStreamSettings& settings() const { return s_; }
+    // Load / unload distances changed in place (the cell grid stays); the next update applies them.
+    void setDistances(f32 loadCm, f32 evictCm) {
+        s_.loadCm = loadCm;
+        s_.evictCm = evictCm > loadCm ? evictCm : loadCm + s_.cellCm;
+        dirty_ = true;
+    }
 
 private:
     struct Item {

@@ -552,6 +552,10 @@ struct OcStreamSettings {
     f32 cellCm = 6400.0f;
     f32 loadCm = 25000.0f;
     f32 evictCm = 30000.0f;
+    // Fog hides the load edge: it reaches fogOpacity fogCells cells inside loadCm, so objects load in
+    // behind it. 0 leaves the level's fog as authored. (STREAM fogcells= fogopacity=)
+    f32 fogCells = 0.0f;
+    f32 fogOpacity = 0.95f;
     std::vector<std::string> lazyDirs;
     // The generated streaming data (bounds, foliage cells), relative to the project root
     // (`Binaries/Streaming/<level>.ocstream`); see OcStream.hpp. Empty = none generated yet.

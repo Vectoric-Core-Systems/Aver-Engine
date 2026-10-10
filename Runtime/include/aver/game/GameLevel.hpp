@@ -197,6 +197,7 @@ public:
     // OcWorldData precisely so `env_ = w` can slice off exactly these fields, so there is now no
     // sixth place to forget.
     const fmt::OcWorldEnv& env() const { return env_; }
+    const fmt::OcStreamSettings& streamSettings() const { return stream_; }
 
     // The level's placement bounds, and the bounding-sphere radius of them. False when the level has
     // no placements at all, which is the case a caller must not turn into a zero-sized GI volume.
@@ -236,6 +237,7 @@ private:
     std::string levelName_;
     // The sun, sky, fog and clouds this level declared, copied whole. See env() above.
     fmt::OcWorldEnv env_{};
+    fmt::OcStreamSettings stream_{};
     std::vector<PcgField> pcgFields_;
     std::vector<fmt::OcPcgVolume> pcgVolumes_;
     std::vector<fmt::OcScatterSpecies> scatterSpecies_;

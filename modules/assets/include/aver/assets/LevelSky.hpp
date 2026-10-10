@@ -32,6 +32,9 @@
 #include "aver/formats/OcWorld.hpp"
 #include "aver/rhi/RHI.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 namespace aver::assets {
 
 // Applies a level's SUN, SKY, FOG and CLOUDS records to `sky`.
@@ -39,6 +42,30 @@ namespace aver::assets {
 // Each record is applied only when the level actually carried it, so a level with no SKY line is
 // left with whatever atmosphere the host had -- which is what every level written before these
 // records existed depends on.
+// The fog density that makes a level view from height `viewZ` reach `opacity` at `distanceCm`, under
+// `sky`'s fog start, height falloff and max opacity (averFogFactor solved backwards). The falloff
+// boost is bounded (20x) so a camera high above the fog does not drown the ground. 0 when no density
+// can (the distance is inside the fog start).
+inline f32 fogDensityReaching(const rhi::SkyAtmosphere& sky, f32 distanceCm, f32 opacity, f32 viewZ) {
+    const f32 seg = distanceCm - sky.fogStart;
+    if (seg <= 1.0f) return 0.0f;
+    const f32 maxOpacity = sky.fogMaxOpacity > 0.01f ? sky.fogMaxOpacity : 0.01f;
+    const f32 t = std::clamp(opacity / maxOpacity, 0.01f, 0.999f);
+    const f32 atView = sky.fogFalloff > 0.0f
+        ? std::max(std::exp(-(viewZ - sky.fogHeight) * sky.fogFalloff), 0.05f) : 1.0f;
+    return -std::log(1.0f - t) / (seg * atView);
+}
+
+// A streamed level's fog over its load edge (OcStreamSettings::fogCells), or `authored` when it asks
+// for none. Never thinner than the authored fog.
+inline f32 fogForStreamEdge(const fmt::OcStreamSettings& st, const rhi::SkyAtmosphere& sky, f32 authored,
+                            f32 viewZ) {
+    if (!st.enabled || st.fogCells <= 0.0f) return authored;
+    const f32 edge = st.loadCm - st.fogCells * st.cellCm;
+    const f32 d = fogDensityReaching(sky, edge, st.fogOpacity, viewZ);
+    return d > authored ? d : authored;
+}
+
 inline void applyLevelEnv(const fmt::OcWorldEnv& w, rhi::SkyAtmosphere& sky) {
     if (w.hasSun) {
         for (int i = 0; i < 3; ++i) {

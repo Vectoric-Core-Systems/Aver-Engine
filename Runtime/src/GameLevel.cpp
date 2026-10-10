@@ -299,6 +299,7 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     // field easy to miss. Slicing the base copies every field including the flags, and a field
     // added to the format reaches the runtime with nothing else edited. See GameLevel::env().
     env_ = w;
+    stream_ = w.stream;
 
     // THE LEVEL'S PLAYER START / SPAWN RECORD -- hasSpawn/spawnX/Y/Z/spawnYaw live on OcWorldData
     // itself, not on the OcWorldEnv base env_ just sliced off above, so they need their own capture.
@@ -702,6 +703,7 @@ void GameLevel::unload() {
 #endif
     vehiclePlacements_.clear();
     env_ = fmt::OcWorldEnv{};
+    stream_ = fmt::OcStreamSettings{};
     hasBounds_ = false;
     spawn_ = SpawnPoint{};
     pcgFields_.clear();

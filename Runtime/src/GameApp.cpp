@@ -1606,7 +1606,7 @@ void GameApp::pushFrame(Engine& e) {
     }
 #endif
     sky_.skyLightIntensity = sunAmbient_;
-    sky_.fogDensity        = fog;
+    sky_.fogDensity        = assets::fogForStreamEdge(level_.streamSettings(), sky_, fog, camPos_.z);
     // Cloud clock: advanced by real time so wind moves. App owns it; a clock that never advances gives a painted backdrop.
     sky_.cloudTime         = cloudTime_;
 

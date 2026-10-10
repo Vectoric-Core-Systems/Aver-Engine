@@ -597,6 +597,8 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 if      (keyValue(t[i], "cell=", v))  out.stream.cellCm  = static_cast<f32>(parseF64(v, out.stream.cellCm));
                 else if (keyValue(t[i], "load=", v))  out.stream.loadCm  = static_cast<f32>(parseF64(v, out.stream.loadCm));
                 else if (keyValue(t[i], "evict=", v)) out.stream.evictCm = static_cast<f32>(parseF64(v, out.stream.evictCm));
+                else if (keyValue(t[i], "fogcells=", v)) out.stream.fogCells = static_cast<f32>(parseF64(v, out.stream.fogCells));
+                else if (keyValue(t[i], "fogopacity=", v)) out.stream.fogOpacity = static_cast<f32>(parseF64(v, out.stream.fogOpacity));
                 else if (keyValue(t[i], "data=", v))  out.stream.dataPath = std::string(v);
                 else if (keyValue(t[i], "lazy=", v)) {
                     for (std::string_view d : splitCommas(v))
@@ -858,6 +860,8 @@ std::string writeOcworld(const OcWorldData& w) {
     if (w.stream.enabled) {
         s += "STREAM cell=" + num(w.stream.cellCm) + " load=" + num(w.stream.loadCm) +
              " evict=" + num(w.stream.evictCm);
+        if (w.stream.fogCells > 0.0f)
+            s += " fogcells=" + num(w.stream.fogCells) + " fogopacity=" + num(w.stream.fogOpacity);
         if (!w.stream.lazyDirs.empty()) {
             s += " lazy=";
             for (usize i = 0; i < w.stream.lazyDirs.size(); ++i) {

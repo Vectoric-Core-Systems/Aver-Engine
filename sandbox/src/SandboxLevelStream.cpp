@@ -2,6 +2,7 @@
 // bookkeeping while resident, write their edits back into the placement record before they leave, and
 // a save writes every record plus the generated .ocstream under Binaries/Streaming.
 #include "SandboxApp.hpp"
+#include "aver/assets/LevelSky.hpp"
 
 #if AVER_MODULE_SCENE
 #  include "aver/game/LevelStreaming.hpp"
@@ -353,18 +354,52 @@ void SandboxApp::buildLevelStreamingSettings() {
             st.cellCm = cellM * 100.0f;
             markLevelUnsaved();
         }
+        bool distances = false;
         ImGui::SetNextItemWidth(200.0f * dpi_);
         if (ImGui::SliderFloat("Load distance (m)", &loadM, 50.0f, 2000.0f, "%.0f")) {
             st.loadCm = loadM * 100.0f;
             if (st.evictCm < st.loadCm + 1000.0f) st.evictCm = st.loadCm + 1000.0f;
-            markLevelUnsaved();
+            distances = true;
         }
         ImGui::SetNextItemWidth(200.0f * dpi_);
         if (ImGui::SliderFloat("Unload distance (m)", &evictM, loadM + 10.0f, 2500.0f, "%.0f")) {
             st.evictCm = evictM * 100.0f;
+            distances = true;
+        }
+        // Applied live: the streamer and foliage cells pick them up next tick (the cell size needs a reopen).
+        if (distances) {
             markLevelUnsaved();
+            if (level_.streaming().active()) level_.streaming().setDistances(st.loadCm, st.evictCm);
+#  if AVER_MODULE_VOXI
+            levelFoliage_.setDistances(st.loadCm, st.evictCm);
+#  endif
         }
         ImGui::TextDisabled("Objects load inside the load distance and unload past the unload distance.");
+
+        // Fog over the load edge, so objects appear behind it instead of popping in in plain view.
+        bool fogEdge = st.fogCells > 0.0f;
+        if (ImGui::Checkbox("Hide the load edge in fog", &fogEdge)) {
+            st.fogCells = fogEdge ? 1.5f : 0.0f;
+            markLevelUnsaved();
+        }
+        uiReg_.track("worldSettings.streamFogEdge");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Thickens the level's fog so it is nearly opaque a cell or two inside the load\n"
+                              "distance: objects then load behind the fog. A short load distance means a\n"
+                              "foggy level -- raise the load distance to push the fog back.");
+        if (st.fogCells > 0.0f) {
+            ImGui::SetNextItemWidth(200.0f * dpi_);
+            if (ImGui::SliderFloat("Fog cells inside the edge", &st.fogCells, 0.5f, 4.0f, "%.1f")) markLevelUnsaved();
+            ImGui::SetNextItemWidth(200.0f * dpi_);
+            if (ImGui::SliderFloat("Fog opacity there", &st.fogOpacity, 0.5f, 0.99f, "%.2f")) markLevelUnsaved();
+            const f32 wallCm = st.loadCm - st.fogCells * st.cellCm;
+            if (wallCm <= sky_.fogStart + 100.0f)
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "The fog edge is inside the fog start: raise the load distance.");
+            else
+                ImGui::TextDisabled("Fog %.0f%% at %.0f m, objects load to %.0f m (density %.2e)",
+                                    st.fogOpacity * 100.0f, wallCm / 100.0f, st.loadCm / 100.0f,
+                                    assets::fogForStreamEdge(st, sky_, sky_.fogDensity, eye_.z));
+        }
         ImGui::TextDisabled("Data: %s", st.dataPath.empty() ? "(not generated yet)" : st.dataPath.c_str());
         if (level_.streaming().active() && level_.streamDataStale())
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Streaming data is out of date.");

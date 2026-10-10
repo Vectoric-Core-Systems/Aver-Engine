@@ -92,6 +92,12 @@ public:
     void clear();   // clears the renderer's foliage and releases held meshes
 
     bool streamed() const { return streamed_; }
+    // Load / unload distances changed in place; the next check applies them.
+    void setDistances(f32 loadCm, f32 evictCm) {
+        loadCm_ = loadCm;
+        evictCm_ = evictCm > loadCm ? evictCm : loadCm;
+        accum_ = kCheckSeconds;
+    }
     u32 totalCells() const { return static_cast<u32>(cells_.size()); }
     u32 residentCells() const { return residentCount_; }
     u32 instances() const { return result_.instances; }       // in the last push

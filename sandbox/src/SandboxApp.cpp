@@ -4,6 +4,7 @@
 #include "stb_image_write.h"
 #undef STB_IMAGE_WRITE_IMPLEMENTATION
 #include "SandboxApp.hpp"
+#include "aver/assets/LevelSky.hpp"
 #include "TextureEditor.hpp"   // makeTextureEditor; SandboxApp.hpp does not pull this one in
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
@@ -2407,6 +2408,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         sky_.setSunAngles(sunElevationOverride_, azim);
     }
     sky_.skyLightIntensity = sunAmbient_;
+#if AVER_MODULE_SCENE
+    // A streamed level that hides its load edge in fog (World Settings > Level Streaming).
+    if (level_.streaming().active()) fog = assets::fogForStreamEdge(levelHeader_.stream, sky_, fog, eye_.z);
+#endif
     sky_.fogDensity = fog;
     sky_.cloudTime = cloudTime_;
     // Underwater fog applied to a copy; sky_ is the authored sky and must stay unchanged.

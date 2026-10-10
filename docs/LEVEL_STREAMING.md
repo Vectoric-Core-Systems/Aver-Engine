@@ -12,7 +12,7 @@ placements, never a second copy of them.
 ## 1. Format
 
 `.ocworld` keeps only what is authored:
-- Header record `STREAM cell=<cm> load=<cm> evict=<cm> [lazy=<dir>[,<dir>...]] [data=<path>]` turns
+- Header record `STREAM cell=<cm> load=<cm> evict=<cm> [fogcells=<n> fogopacity=<0..1>] [lazy=<dir>[,<dir>...]] [data=<path>]` turns
   streaming on (`OcWorldData::stream`: enabled, cellCm, loadCm, evictCm, lazyDirs, dataPath). `lazy=` names
   the content folders whose meshes upload on demand; `data=` the generated data, relative to the project root.
 - PLACE/PLACEG/CHILD/CHILDG `id=<16 hex>` -> `OcWorldPlacement::placementId`: stable per-placement identity.
@@ -90,6 +90,18 @@ on Caldera was 0.7-1.4 s of CPU and ~0.5 s of GPU, then 50-200 ms):
   build on the frame's own command list (both backends); the structure, scratch and descriptor
   buffers are reused when large enough. That upload used to wait for the queue to drain.
 - Measured: a cell change is 20-40 ms of CPU on Caldera.
+
+## 4b. Hiding the load edge in fog
+
+World Settings > Level Streaming: Load / Unload distance apply live (the cell size needs a reopen).
+"Hide the load edge in fog" (`fogcells=`, `fogopacity=`) thickens the level's fog, every frame, so it
+reaches `fogopacity` at `load - fogcells * cell` from the camera: objects and foliage load a cell or
+two behind a nearly opaque fog instead of in plain view. The density is solved from the level's fog
+start, height falloff and max opacity at the camera's height (`assets::fogForStreamEdge`, used by the
+editor and GameApp alike) and is never thinner than the authored fog; the level's own FOG record is
+saved unchanged. Exponential fog thickens near the camera too, so a short load distance means a foggy
+level: on Caldera, 250 m with 1.5 cells puts 95% at 154 m and ~30% at 20 m; 600 m gives ~10% at 20 m.
+A Fog Start (Height Fog panel) keeps the near field clear.
 
 ## 5. Bake -- `AverAssetC stream` / Regenerate
 

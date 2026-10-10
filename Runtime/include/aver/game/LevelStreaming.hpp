@@ -40,6 +40,7 @@ public:
     // Destroys everything this streamed in and releases its meshes.
     void end(scene::World& world);
     bool active() const { return active_; }
+    void setDistances(f32 loadCm, f32 evictCm) { streamer_.setDistances(loadCm, evictCm); }
 
     // One step: loads and evicts around `viewers` (world cm). Mesh reads, vertex/part preparation and
     // collision shapes are made on worker threads; what stays here (GPU buffers, entities, bodies) runs
