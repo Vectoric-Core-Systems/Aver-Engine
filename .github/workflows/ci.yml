@@ -104,3 +104,80 @@ jobs:
           name: ctest-${{ matrix.config }}
           path: build-ci/Testing/Temporary/
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # LINUX AND MACOS, the same build and the same suites as above, on the Vulkan backend (docs/PLATFORMS.md).
+  #
+  # Neither has a GPU. Linux gets Mesa's software Vulkan (lavapipe, from mesa-vulkan-drivers), so the
+  # `.vulkan` CTest variants run on a real if slow device; macOS gets MoltenVK from the LunarG SDK, on
+  # whatever Metal the runner exposes, and a suite that finds no device skips (77) exactly as the
+  # hardware-adapter ones do on the Windows runner. Like the Windows job, a green tick here says nothing
+  # about the pixels.
+  #
+  # SDL 3 and, on Linux, DXC are fetched by CMake at configure time (cmake/AvSdl.cmake, cmake/AvDxc.cmake)
+  # unless a package provides them: Homebrew's sdl3 on macOS, the Vulkan SDK's DXC there. Ubuntu 24.04
+  # packages neither.
+  build-and-test-unix:
+    name: ${{ matrix.os }} ${{ matrix.config }} build + suites
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        config: [Debug, Release]
+    env:
+      VULKAN_SDK_VERSION: 1.4.363.0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pin the .NET SDK global.json asks for
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Linux packages (SDL's build dependencies, Ninja, software Vulkan)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev \
+            libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols libegl-dev libdecor-0-dev \
+            libasound2-dev libpulse-dev libdbus-1-dev libudev-dev \
+            libvulkan1 mesa-vulkan-drivers
+
+      - name: macOS packages (Ninja, SDL 3, and the LunarG SDK for MoltenVK, the loader and DXC)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja sdl3
+          curl -sSL -o vulkansdk.zip \
+            "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/mac/vulkansdk-macos-${VULKAN_SDK_VERSION}.zip"
+          unzip -q vulkansdk.zip
+          app=$(ls -d *.app | head -1)
+          # `usr` copies the loader and MoltenVK into /usr/local, where a bare dlopen finds them.
+          sudo "./${app}/Contents/MacOS/$(basename "${app}" .app)" \
+            --root "$HOME/VulkanSDK/${VULKAN_SDK_VERSION}" --accept-licenses --default-answer \
+            --confirm-command install com.lunarg.vulkan.core com.lunarg.vulkan.usr
+          echo "VULKAN_SDK=$HOME/VulkanSDK/${VULKAN_SDK_VERSION}/macOS" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-ci -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
+            -DAVER_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build-ci --parallel
+
+      - name: Run the headless suites
+        shell: pwsh
+        run: ./scripts/test.ps1 -BuildDir build-ci
+
+      - name: Upload CTest output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-${{ matrix.os }}-${{ matrix.config }}
+          path: build-ci/Testing/Temporary/
+          if-no-files-found: ignore
