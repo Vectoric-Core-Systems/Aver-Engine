@@ -1,14 +1,20 @@
 #pragma once
 // The audio device: a render thread that asks the mixer for buffers and hands them to the sound card.
 // The only part of the audio stack that knows a sound card exists.
+//
+// DECLARED HERE, IMPLEMENTED ONE MODULE UP. This header lives in Aver.Audio, which stays device-free:
+// the class is implemented by Aver.Audio.Wasapi on Windows and by Aver.Audio.Sdl everywhere else, and
+// exactly one of the two is built on any platform. Nothing in this declaration names either.
 #include "aver/audio/Mixer.hpp"
 
 #include <atomic>
 #include <thread>
+#include <vector>
 
 namespace aver::audio {
 
-// WASAPI shared-mode output device, owning the render thread and the mixer.
+// The default output device, owning the render thread and the mixer: WASAPI shared mode on Windows,
+// an SDL 3 audio stream elsewhere (whose own thread is the render thread).
 class AudioDevice {
 public:
     AudioDevice() = default;
@@ -45,8 +51,13 @@ private:
     std::atomic<u32>  underruns_{0};
     u32 bufferFrames_ = 0;
 
+#if defined(_WIN32)
     // Signalled by the render thread once it has decided whether it started. Null after the handshake.
     void* readyEvent_ = nullptr;
+#else
+    void* stream_ = nullptr;      // SDL_AudioStream*, bound to the default playback device
+    std::vector<f32> scratch_;    // one callback's worth of mixed frames, sized on demand
+#endif
     u32   maxVoices_ = 64;
     u32   maxSounds_ = 1024;
 };

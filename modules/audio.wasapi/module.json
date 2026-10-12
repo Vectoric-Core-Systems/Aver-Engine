@@ -8,6 +8,7 @@
   "option": null,
   "required": true,
   "default": true,
+  "platforms": ["windows"],
   "dependsOn": ["Aver.Audio", "Aver.Core"],
   "consequence": ""
 }

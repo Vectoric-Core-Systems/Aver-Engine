@@ -8,6 +8,7 @@
   "option": null,
   "required": true,
   "default": true,
-  "dependsOn": ["Aver.Audio", "Aver.Audio.Wasapi", "Aver.Core", "Aver.Formats"],
+  "dependsOn": ["Aver.Audio", "Aver.Core", "Aver.Formats"],
+  "optionalDependsOn": ["Aver.Audio.Sdl", "Aver.Audio.Wasapi"],
   "consequence": ""
 }
