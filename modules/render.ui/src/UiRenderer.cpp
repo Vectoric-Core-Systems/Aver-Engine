@@ -103,7 +103,7 @@ bool UiRenderer::init(rhi::IDevice& device) {
         gd.cull = rhi::CullMode::None;
         gd.blend = rhi::BlendMode::PremultipliedAlpha;
         gd.renderTargetCount = 1;
-        gd.renderTargets[0] = rhi::Format::RGBA8Unorm; // the backbuffer, which this pass draws onto
+        gd.renderTargets[0] = device_ ? device_->displayFormat() : rhi::Format::RGBA8Unorm; // the backbuffer this pass draws onto
         gd.depthFormat = rhi::Format::Unknown;
         gd.sampleCount = 1;
 

@@ -1136,8 +1136,8 @@ private:
             pd.cull = rhi::CullMode::None;
             pd.depthClip = false;
             pd.renderTargetCount = 1;
-            // RGBA8Unorm (tonemapped composite), NOT device_->backbufferFormat().
-            pd.renderTargets[0] = rhi::Format::RGBA8Unorm;
+            // The display target (tonemapped composite), NOT device_->backbufferFormat() (the HDR scene).
+            pd.renderTargets[0] = device_ ? device_->displayFormat() : rhi::Format::RGBA8Unorm;
             pd.sampleCount = 1;   // Already-resolved composite.
             pipeline_ = res->createGraphicsPipeline(pd);
             ok = pipeline_ != 0;
@@ -1253,7 +1253,7 @@ private:
             pd.cull = rhi::CullMode::None;
             pd.depthClip = false;
             pd.renderTargetCount = 1;
-            pd.renderTargets[0] = rhi::Format::RGBA8Unorm;   // Tonemapped composite.
+            pd.renderTargets[0] = device_ ? device_->displayFormat() : rhi::Format::RGBA8Unorm;   // the display target
             pd.sampleCount = 1;
             pd.blend = rhi::BlendMode::AlphaBlend;
             pipeline_ = res->createGraphicsPipeline(pd);

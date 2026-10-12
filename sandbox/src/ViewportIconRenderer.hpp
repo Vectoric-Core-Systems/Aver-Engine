@@ -48,6 +48,7 @@ public:
 private:
     // Rebuilds pipeline if depth sample count changed.
     bool ensurePipeline(u32 depthSamples);
+    rhi::Format overlayTargetFormat() const;   // the device's display format (kOverlayTargetFormat without one)
     bool ensureCapacity(usize vertexCount, usize indexCount);
 
     struct Icon {

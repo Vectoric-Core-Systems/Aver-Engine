@@ -1389,6 +1389,7 @@ public:
     bool upscalerTargetsDirty_ = false;
     IUpscaler* upscaler() const override { return upscaler_; }
     Format backbufferFormat() const override { return fromVkFormat(kVkSceneColorFormat); }
+    Format displayFormat() const override { return fromVkFormat(swapchainFormat_); }
     Format depthFormat() const override { return fromVkFormat(kVkDepthFormat); }
     u32 sampleCount() const override { return sampleCount_; }
     bool setSampleCount(u32 samples) override;

@@ -3455,7 +3455,13 @@ void VulkanDevice::resize(u32 w, u32 h) {
     sc.clipped = VK_TRUE;
     sc.oldSwapchain = old;
     if (!vkOk(api_.CreateSwapchainKHR(device_, &sc, nullptr, &swapchain_), "resize CreateSwapchainKHR")) {
+        // Keep the old swapchain, and rebuild what was destroyed above for it at its unchanged size: the
+        // next frame indexes swapchainImages_/swapchainViews_/renderFinished_ by its acquired image.
         swapchain_ = old;
+        createRenderTargetViews();
+        createRenderFinishedSemaphores();
+        createDepthBuffer();
+        createMsaaColor();
         return;
     }
     if (old) api_.DestroySwapchainKHR(device_, old, nullptr);

@@ -407,6 +407,9 @@ public:
 
     // The SCENE colour target's format, which a backend running a post chain does not present directly.
     virtual Format backbufferFormat() const { return Format::Unknown; }
+    // The DISPLAY target's format (swapchain / viewport texture) that overlay passes draw into. RGBA8 on
+    // D3D12; Vulkan reports what it negotiated (BGRA8 on Mesa X11/Wayland surfaces).
+    virtual Format displayFormat() const { return Format::RGBA8Unorm; }
     virtual Format depthFormat() const { return Format::Unknown; }
 
     // Anti-aliasing sample count. Changing it rebuilds the scene targets and every PSO. setter returns false if unsupported.

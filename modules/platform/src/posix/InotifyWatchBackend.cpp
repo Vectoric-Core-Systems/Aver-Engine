@@ -98,10 +98,14 @@ private:
         }
         paths_[wd] = rel;
         if (!recursive_) return true;
+        // increment(ec), not a range-for: this runs on the worker thread, and a directory deleted mid-listing
+        // (a build's temp folder) would throw from operator++ with nothing to catch it.
         std::error_code ec;
-        for (const auto& e : std::filesystem::directory_iterator(abs, std::filesystem::directory_options::skip_permission_denied, ec)) {
-            const std::string child = (rel.empty() ? "" : rel + "/") + e.path().filename().string();
-            const bool isDir = e.is_directory(ec) && !e.is_symlink(ec);
+        std::filesystem::directory_iterator it(abs, std::filesystem::directory_options::skip_permission_denied, ec);
+        for (const std::filesystem::directory_iterator end; !ec && it != end; it.increment(ec)) {
+            const std::string child = (rel.empty() ? "" : rel + "/") + it->path().filename().string();
+            std::error_code tec;
+            const bool isDir = it->is_directory(tec) && !it->is_symlink(tec);
             if (reportContents) batch_.push_back(RawFileEvent{RawChange::Added, child, WatchClock::now()});
             if (isDir) addWatch(child, reportContents);
         }

@@ -55,16 +55,9 @@ u32 packStraight(const f32 rgba[4]) {
     return b(rgba[0]) | (b(rgba[1]) << 8) | (b(rgba[2]) << 16) | (b(rgba[3]) << 24);
 }
 
-// The overlay/display target's REAL colour format -- NOT IDevice::backbufferFormat(), which (despite
-// its name) returns the SCENE colour target's own HDR format (RGBA16F): see that method's own
-// comment in RHI.hpp, and D3D12Device.cpp's own overlayPass call site ("NOT IDevice::backbufferFormat
-// (): here that names the SCENE colour target's own format ... the real backbuffer and the viewport
-// texture are both created at kBackbufferFormat"). Both shipping backends' actual swapchain surface is
-// an 8-bit UNORM format (D3D12Device.cpp's kBackbufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-// VulkanDevice.cpp negotiates VK_FORMAT_R8G8B8A8_UNORM or VK_FORMAT_B8G8R8A8_UNORM, both
-// Format::RGBA8Unorm here) -- there is no generic IDevice accessor for it today (EditorLines is
-// handed it directly by the device instead of asking, since it isn't a generic IRenderFeature), so
-// this is hardcoded rather than queried.
+// The overlay/display target's colour format when there is no device to ask: 8-bit UNORM, as on D3D12.
+// NOT IDevice::backbufferFormat(), which names the SCENE colour target (RGBA16F). The real value comes
+// from IDevice::displayFormat() (overlayTargetFormat below): Vulkan on Mesa X11/Wayland negotiates BGRA8.
 constexpr rhi::Format kOverlayTargetFormat = rhi::Format::RGBA8Unorm;
 
 // sRGB render-target formats decode on read and encode on write; IconPS needs to know so it can
@@ -232,6 +225,10 @@ bool ViewportIconRenderer::ensureCapacity(usize vertexCount, usize indexCount) {
     return true;
 }
 
+rhi::Format ViewportIconRenderer::overlayTargetFormat() const {
+    return dev_ ? dev_->displayFormat() : kOverlayTargetFormat;
+}
+
 bool ViewportIconRenderer::ensurePipeline(u32 depthSamples) {
     if (pso_ && depthSamples == builtDepthSamples_) return true;
     if (!res_ || !vs_) return false;
@@ -284,7 +281,7 @@ bool ViewportIconRenderer::ensurePipeline(u32 depthSamples) {
     gd.blend = rhi::BlendMode::PremultipliedAlpha;
 
     gd.renderTargetCount = 1;
-    gd.renderTargets[0] = kOverlayTargetFormat;
+    gd.renderTargets[0] = overlayTargetFormat();
     gd.depthFormat = rhi::Format::Unknown;
     // The OVERLAY target itself is never multisampled (it is the display target); `depthSamples`
     // above is the SCENE depth's sample count, a completely different axis (what table 1 reads).
@@ -458,7 +455,7 @@ void ViewportIconRenderer::overlayPass(rhi::IRenderContext& ctx, u32 width, u32 
     ObjectConsts oc{};
     oc.baseColor[1] = sceneDepth ? 1.0f : 0.0f;                          // depth-tested
     oc.baseColor[2] = rect[2]; oc.baseColor[3] = rect[3];                // the 3D view's rect size
-    oc.material[0] = isSrgbTargetFormat(kOverlayTargetFormat) ? 1.0f : 0.0f;   // target stores sRGB itself
+    oc.material[0] = isSrgbTargetFormat(overlayTargetFormat()) ? 1.0f : 0.0f;   // target stores sRGB itself
     oc.material[2] = rect[0]; oc.material[3] = rect[1];                 // the 3D view's rect origin
     oc.emissive[0] = static_cast<f32>(width); oc.emissive[1] = static_cast<f32>(height);   // whole target size
     ctx.setConstants(rhi::kObjectConstantRegister, &oc, rhi::kObjectConstantDwords);
