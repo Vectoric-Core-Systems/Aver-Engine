@@ -98,12 +98,16 @@ int main() {
         f64 a = 7.0, w = 7.0;
         const auto ra = detail::fromCharsFallback(b, e, a);
         const auto rw = std::from_chars(b, e, w);
-        const bool same = ra.ec == rw.ec && ra.ptr == rw.ptr && (std::isnan(a) ? std::isnan(w) : a == w);
+        // On out of range the value is not compared: the standard leaves it untouched (the fallback,
+        // libstdc++, libc++), but MSVC's std::from_chars stores the infinity or zero.
+        const bool oor = rw.ec == std::errc::result_out_of_range;
+        const bool same = ra.ec == rw.ec && ra.ptr == rw.ptr && (oor || (std::isnan(a) ? std::isnan(w) : a == w));
         check(same, "double fallback agrees with std::from_chars on '" + s + "'");
         f32 af = 7.0f, wf = 7.0f;
         const auto rfa = detail::fromCharsFallback(b, e, af);
         const auto rfw = std::from_chars(b, e, wf);
-        const bool samef = rfa.ec == rfw.ec && rfa.ptr == rfw.ptr && (std::isnan(af) ? std::isnan(wf) : af == wf);
+        const bool oorf = rfw.ec == std::errc::result_out_of_range;
+        const bool samef = rfa.ec == rfw.ec && rfa.ptr == rfw.ptr && (oorf || (std::isnan(af) ? std::isnan(wf) : af == wf));
         check(samef, "float fallback agrees with std::from_chars on '" + s + "'");
         compared += 2;
     }

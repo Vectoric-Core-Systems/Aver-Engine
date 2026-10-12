@@ -8,6 +8,8 @@
 #include "aver/voxi/Scalability.hpp"
 #include "aver/formats/OcProject.hpp"
 
+#include <type_traits>
+
 // THE ONE PLACE A .ocproject's RENDER.* KEYS BECOME A voxi::Settings, SHARED BY BOTH HOSTS. Before
 // this header existed, the editor's applyProjectVoxiSettings (sandbox/src/SandboxApp.cpp) and the
 // game's applyProjectRenderSettings (Runtime/src/GameApp.cpp) each carried their own
@@ -323,15 +325,18 @@ inline CliOverrideNote floatNote(const char* flag, f32 asked, f32 found) {
 template <class Log>
 inline bool applyCliTiers(const RenderCliOverrides& cli, Settings& s, Log&& log) {
     bool overridden = false;
-    const auto take = [&](int ov, u32& dst, const char* name) {
-        if (ov < 0 || static_cast<u32>(ov) == dst) return;
-        log(detail::intNote(CliOverrideKind::Take, name, ov, dst));
-        dst = static_cast<u32>(ov);
+    // Generic over the field's own type: an enum written through reinterpret_cast<u32&> breaks strict
+    // aliasing, and GCC -O3 dropped those stores (--pt, --layered-bsdf, --msaa never reached Settings).
+    const auto take = [&](int ov, auto& dst, const char* name) {
+        using T = std::remove_reference_t<decltype(dst)>;
+        if (ov < 0 || static_cast<u32>(ov) == static_cast<u32>(dst)) return;
+        log(detail::intNote(CliOverrideKind::Take, name, ov, static_cast<u32>(dst)));
+        dst = static_cast<T>(ov);
         overridden = true;
     };
-    take(cli.globalIllumination, reinterpret_cast<u32&>(s.globalIllumination), "--gi");
-    take(cli.rayTracing,         reinterpret_cast<u32&>(s.rayTracing),         "--rt");
-    take(cli.pathTracing,        reinterpret_cast<u32&>(s.pathTracing),        "--pt");
+    take(cli.globalIllumination, s.globalIllumination, "--gi");
+    take(cli.rayTracing,         s.rayTracing,         "--rt");
+    take(cli.pathTracing,        s.pathTracing,        "--pt");
 
     // forceOff CHANGES A TIER exactly as take(cli.globalIllumination, ...) does, which is why it sits
     // in this phase rather than with the knobs: it has to be committed before any knob flag is
@@ -360,10 +365,13 @@ inline bool applyCliTiers(const RenderCliOverrides& cli, Settings& s, Log&& log)
 template <class Log>
 inline bool applyCliKnobs(const RenderCliOverrides& cli, Settings& s, Log&& log) {
     bool overridden = false;
-    const auto take = [&](int ov, u32& dst, const char* name) {
-        if (ov < 0 || static_cast<u32>(ov) == dst) return;
-        log(detail::intNote(CliOverrideKind::Take, name, ov, dst));
-        dst = static_cast<u32>(ov);
+    // Generic over the field's own type: an enum written through reinterpret_cast<u32&> breaks strict
+    // aliasing, and GCC -O3 dropped those stores (--pt, --layered-bsdf, --msaa never reached Settings).
+    const auto take = [&](int ov, auto& dst, const char* name) {
+        using T = std::remove_reference_t<decltype(dst)>;
+        if (ov < 0 || static_cast<u32>(ov) == static_cast<u32>(dst)) return;
+        log(detail::intNote(CliOverrideKind::Take, name, ov, static_cast<u32>(dst)));
+        dst = static_cast<T>(ov);
         overridden = true;
     };
     take(cli.rtRenderMode,    s.rtRenderMode,    "--rt-render-mode");
@@ -371,11 +379,11 @@ inline bool applyCliKnobs(const RenderCliOverrides& cli, Settings& s, Log&& log)
     take(cli.refractionMode,  s.refractionMode,  "--refraction");
     take(cli.rtShadowDenoise, s.rtShadowDenoise, "--rt-shadow-denoise");
     take(cli.ptBounces,       s.ptBounces,       "--pt-bounces");
-    take(cli.layeredBsdf,     reinterpret_cast<u32&>(s.layeredBsdf), "--layered-bsdf");
+    take(cli.layeredBsdf,     s.layeredBsdf, "--layered-bsdf");
     // THE FOUR 0-MEANS-ABSENT FLAGS keep their own `> 0` guard -- see RenderCliOverrides' sentinel
     // note. take() treats only a NEGATIVE as absent, so without these a default 0 would be applied as
     // an ask for zero samples, zero rays, a zero-pixel tile or a zero-frame GI interval.
-    if (cli.msaa > 0)               take(cli.msaa,         reinterpret_cast<u32&>(s.msaa), "--msaa");
+    if (cli.msaa > 0)               take(cli.msaa,         s.msaa, "--msaa");
     if (cli.rtShadowRays > 0)       take(cli.rtShadowRays, s.rtShadowRays,                 "--rt-rays");
     take(cli.giSkyOcclusionRays, s.giSkyOcclusionRays, "--gi-sky-occlusion-rays");
     take(cli.giSkyOcclusionTile, s.giSkyOcclusionTile, "--gi-sky-occlusion-tile");

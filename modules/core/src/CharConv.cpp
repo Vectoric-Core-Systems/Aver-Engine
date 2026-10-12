@@ -1,6 +1,5 @@
 #include "aver/core/CharConv.hpp"
 
-#include <cerrno>
 #include <cmath>
 #include <cstdlib>
 #include <string>
@@ -83,12 +82,17 @@ std::from_chars_result parse(const char* first, const char* last, T& value, Conv
     if (end == first) return {first, std::errc::invalid_argument};
     const std::string text(first, end);   // strtod needs a terminator; the range may not have one
     char* stop = nullptr;
-    errno = 0;
     const T v = convert(text.c_str(), &stop);
-    // ERANGE is overflow (inf) or underflow. A subnormal result is representable and is a value, as
-    // std::from_chars reports it; only an overflow, or an underflow all the way to zero from a non-zero
-    // mantissa, is out of range -- and then, like std::from_chars, the value is left as it was.
-    if (errno == ERANGE && (std::isinf(v) || v == T(0))) return {end, std::errc::result_out_of_range};
+    // OUT OF RANGE IS DECIDED FROM THE RESULT, std::from_chars' own rule, not from errno: MSVC's
+    // _strtod_l/_strtof_l do not set ERANGE for these inputs. An infinity the text did not spell, or a zero
+    // from a mantissa with a non-zero digit, is out of range; a subnormal is a value. As with
+    // std::from_chars, `value` is then left as it was.
+    const char* p = text.c_str();
+    if (*p == '-') ++p;
+    const bool spelledInf = *p == 'i' || *p == 'I';
+    bool nonZeroDigit = false;
+    for (const char* q = p; *q && *q != 'e' && *q != 'E'; ++q) nonZeroDigit |= (*q >= '1' && *q <= '9');
+    if ((std::isinf(v) && !spelledInf) || (v == T(0) && nonZeroDigit)) return {end, std::errc::result_out_of_range};
     value = v;
     return {end, std::errc()};
 }
