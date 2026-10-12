@@ -16,9 +16,14 @@
 // The POSIX half of aver::File. pread/pwrite rather than lseek+read, so the handle carries no
 // implicit position and two calls cannot race each other's seek.
 #include <cerrno>
+#include <cstdint>
 #include <fcntl.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>   // _NSGetExecutablePath
+#endif
 #endif
 
 namespace aver {
@@ -119,9 +124,62 @@ std::string executableDir() {
     if (p != std::wstring::npos) w = w.substr(0, p);
     return narrow(w);
 #else
-    return ".";
+    // The executable's own path, not argv[0] or the working directory: every caller wants the
+    // directory the binary and its bin/ siblings (shaders/, the DXC library, the staged content) are in.
+    std::string self;
+#if defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string raw(size, '\0');
+    if (_NSGetExecutablePath(raw.data(), &size) == 0) {
+        raw.resize(std::strlen(raw.c_str()));
+        std::error_code ec;
+        const auto canon = std::filesystem::canonical(raw, ec);
+        self = ec ? raw : canon.string();
+    }
+#else
+    std::error_code ec;
+    const auto link = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (!ec) self = link.string();
+#endif
+    const auto p = self.find_last_of('/');
+    return p == std::string::npos ? std::string(".") : self.substr(0, p);
 #endif
 }
+
+#if !defined(_WIN32)
+namespace {
+// $HOME, falling back to the password database for a process started without one (a service, a
+// stripped environment). Empty only if neither answers.
+std::string homeDir() {
+    if (const char* h = std::getenv("HOME"); h && *h) return h;
+    if (const passwd* pw = getpwuid(getuid()); pw && pw->pw_dir) return pw->pw_dir;
+    return {};
+}
+
+#if !defined(__APPLE__)
+// XDG_DOCUMENTS_DIR from ~/.config/user-dirs.dirs, the file xdg-user-dirs writes and every Linux
+// desktop reads: a line `XDG_DOCUMENTS_DIR="$HOME/Documents"`, localised on most installs (so it is
+// not safe to assume "Documents"). Empty when the file or the line is absent.
+std::string xdgDocumentsDir(const std::string& home) {
+    std::string config;
+    if (const char* c = std::getenv("XDG_CONFIG_HOME"); c && *c) config = c;
+    else if (!home.empty()) config = home + "/.config";
+    std::ifstream in(config + "/user-dirs.dirs");
+    std::string line;
+    while (std::getline(in, line)) {
+        const std::string key = "XDG_DOCUMENTS_DIR=";
+        if (line.rfind(key, 0) != 0) continue;
+        std::string v = line.substr(key.size());
+        if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
+        if (v.rfind("$HOME", 0) == 0) v = home + v.substr(5);
+        return v;
+    }
+    return {};
+}
+#endif
+}  // namespace
+#endif
 
 // The per-user, per-machine state directory. AVER_USER_DATA_DIR overrides it (created if missing): ctest gives every
 // suite its own, so tests never touch the developer's editor.ini, weights or caches, nor race each other on them.
@@ -134,6 +192,13 @@ std::string userDataDir() {
 #if defined(_WIN32)
     const std::string local = knownFolder(FOLDERID_LocalAppData);
     if (!local.empty()) return local + "\\AverEngine";
+#elif defined(__APPLE__)
+    // Where macOS keeps per-user application state, same leaf name as %LOCALAPPDATA%\AverEngine.
+    if (const std::string home = homeDir(); !home.empty()) return home + "/Library/Application Support/AverEngine";
+#else
+    // The XDG base-directory spec's per-user data directory.
+    if (const char* x = std::getenv("XDG_DATA_HOME"); x && *x && x[0] == '/') return std::string(x) + "/AverEngine";
+    if (const std::string home = homeDir(); !home.empty()) return home + "/.local/share/AverEngine";
 #endif
     return executableDir();
 }
@@ -143,6 +208,13 @@ std::string documentsDir() {
 #if defined(_WIN32)
     const std::string docs = knownFolder(FOLDERID_Documents);
     if (!docs.empty()) return docs;
+#else
+    const std::string home = homeDir();
+#if !defined(__APPLE__)
+    if (const std::string xdg = xdgDocumentsDir(home); !xdg.empty() && directoryExists(xdg)) return xdg;
+#endif
+    if (!home.empty() && directoryExists(home + "/Documents")) return home + "/Documents";
+    if (!home.empty()) return home;
 #endif
     return executableDir();
 }
@@ -499,9 +571,11 @@ bool File::sync() {
 }
 
 // Shows the shell's open-file dialog. False if cancelled or unavailable.
+// Windows only. Everywhere else the dialog is SDL's, in src/sdl/SdlFileDialog.cpp, because it needs
+// the window layer this file deliberately knows nothing about.
+#if defined(_WIN32)
 bool openFileDialog(const std::string& title, const std::string& filterLabel,
                     const std::string& spec, const std::string& initialDir, std::string& out) {
-#if defined(_WIN32)
     // COM is initialised per call and undone, so nothing else inherits an apartment.
     const HRESULT ci = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     const bool weInitialised = SUCCEEDED(ci);
@@ -539,10 +613,7 @@ bool openFileDialog(const std::string& title, const std::string& filterLabel,
     }
     if (weInitialised) CoUninitialize();
     return ok;
-#else
-    (void)title; (void)filterLabel; (void)spec; (void)initialDir; (void)out;
-    return false;
-#endif
 }
+#endif
 
 } // namespace aver

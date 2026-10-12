@@ -25,8 +25,14 @@ void MouseCapture::set(bool on, Window* window, const char* hostTag, const char*
     AVER_INFO("[{}] mouse {} the game{}", hostTag, on ? "captured by" : "released from",
               on ? captureHint : "");
 #else
-    (void)window; (void)hostTag; (void)captureHint;
+    // RELATIVE MODE IS THE CAPTURE everywhere SDL is the window layer: the window system hides the
+    // pointer, holds it, and reports motion as deltas. Wayland offers nothing else -- a client there
+    // cannot move the pointer, so the anchor-and-warp below is not available at all.
+    if (on == captured_) return;
     captured_ = on;
+    if (window) window->setRelativeMouse(on);
+    AVER_INFO("[{}] mouse {} the game{}", hostTag, on ? "captured by" : "released from",
+              on ? captureHint : "");
 #endif
 }
 
@@ -56,7 +62,7 @@ void MouseCapture::warpToAnchor(Window* window) {
     screen.left = tl.x; screen.top = tl.y; screen.right = br.x; screen.bottom = br.y;
     ClipCursor(&screen);
 #else
-    (void)window;
+    (void)window;   // relative mode needs no anchor: the window system already reports deltas
 #endif
 }
 
@@ -87,7 +93,14 @@ void MouseCapture::poll(Window* window) {
     dy_ = static_cast<f32>(p.y - anchorY_);
     warpToAnchor(window);
 #else
-    (void)window;
+    if (!captured_ || !window) return;
+    f32 dx = 0.0f, dy = 0.0f;
+    window->takeRelativeMotion(dx, dy);
+    // Motion that arrived while another window had the keyboard is discarded, not delivered late:
+    // the Win32 path's refocus rule (one frame of no look input instead of a camera snap).
+    if (!window->isForeground()) return;
+    dx_ = dx;
+    dy_ = dy;
 #endif
 }
 

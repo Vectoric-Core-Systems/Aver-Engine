@@ -64,8 +64,15 @@ struct LineVertex {
 
 // How to create a device: backend preference order and development switches.
 struct DeviceDesc {
+    // Off Windows Vulkan is the only GPU backend there is, so it leads: a default run there would
+    // otherwise "fall past" a D3D12 that was never compiled in and warn about it on every launch.
+#if defined(_WIN32)
     Backend preferred[4] = {Backend::D3D12, Backend::D3D11, Backend::Vulkan, Backend::Null};
     u32 preferredCount = 4;
+#else
+    Backend preferred[4] = {Backend::Vulkan, Backend::Null, Backend::Null, Backend::Null};
+    u32 preferredCount = 2;
+#endif
     bool enableDebug = false;
     bool useWarp = false;   // prefer the software rasteriser (D3D12: WARP) over any hardware adapter
 };
@@ -775,5 +782,13 @@ using UiWndProcFn = bool (*)(void* hwnd, u32 msg, u64 wparam, i64 lparam);
 void registerUiWndProc(UiWndProcFn fn);
 // Forwards one window message to the registered handler. False when there is none.
 bool uiWndProc(void* hwnd, u32 msg, u64 wparam, i64 lparam);
+
+// The same seam for a window layer that delivers events as structs instead of window messages --
+// SDL's, off Windows, where `nativeEvent` is a const SDL_Event*. Kept beside the Win32 one and not
+// folded into it: a message is four integers, an event is a pointer, and pretending otherwise would
+// mean one of the two decoding the other's arguments.
+using UiEventProcFn = bool (*)(const void* nativeEvent);
+void registerUiEventProc(UiEventProcFn fn);
+bool uiEventProc(const void* nativeEvent);
 
 } // namespace aver::rhi

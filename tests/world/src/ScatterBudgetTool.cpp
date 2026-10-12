@@ -23,6 +23,7 @@
 //
 //     ScatterBudgetTool.exe "<project>\Content\Maps\Default.ocmap" "<project>\Content" [radius]
 #include "aver/core/Hash.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcMesh.hpp"
 #include "aver/formats/OcWorld.hpp"
@@ -148,7 +149,7 @@ int main(int argc, char** argv) {
             fmt::OcMeshData mesh;
             std::string meshErr;
             f64 tris = 0.0;
-            const std::string full = contentDir.empty() ? sp.meshPath : (contentDir + "\\" + sp.meshPath);
+            const std::string full = contentDir.empty() ? sp.meshPath : (contentDir + AVER_PATH_SEP + sp.meshPath);
             if (fmt::loadOcMesh(full, mesh, &meshErr)) {
                 tris = static_cast<f64>(mesh.indices.size() / 3);
             } else {

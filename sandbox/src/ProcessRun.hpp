@@ -38,6 +38,14 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#else
+#include <cerrno>
+#include <cstdlib>
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+extern char** environ;
 #endif
 
 namespace aver::editor {
@@ -134,14 +142,134 @@ inline bool runCaptured(const std::wstring& cmdline, const std::wstring& cwd, st
 
 #else // !_WIN32
 
-// The editor is a Windows program today; these exist so a non-Windows configure still compiles the
-// call sites rather than needing its own #if around each one. A caller that wants to say something
-// useful about the platform says it at the call site -- see ToolsMenu.cpp's "implemented for
-// Windows only" messages -- because only the call site knows what the user was trying to do.
-inline std::wstring widen(const std::string&) { return {}; }
-inline std::string toUtf8(const std::string& raw) { return raw; }
-inline bool runCaptured(const std::wstring&, const std::wstring&, std::string&, int&) { return false; }
+// THE SAME THREE FUNCTIONS, for a POSIX editor. The callers build Windows-shaped command lines --
+// quoteArg()'d paths joined with spaces -- and those mean the same thing to /bin/sh for every path a
+// project can contain, so the line is handed to `sh -c` as it is. wchar_t is UTF-32 here, so widen()
+// and narrow() are a real UTF-8 <-> UTF-32 conversion, not the byte copy they would be on Windows.
 
+// UTF-8 to UTF-32. A malformed byte becomes U+FFFD and does not end the string.
+inline std::wstring widen(const std::string& s) {
+    std::wstring w;
+    w.reserve(s.size());
+    for (usize i = 0; i < s.size();) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        const int len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
+        if (len == 0 || i + static_cast<usize>(len) > s.size()) { w.push_back(0xFFFD); ++i; continue; }
+        u32 cp = len == 1 ? c : len == 2 ? (c & 0x1Fu) : len == 3 ? (c & 0x0Fu) : (c & 0x07u);
+        for (int k = 1; k < len; ++k) cp = (cp << 6) | (static_cast<unsigned char>(s[i + static_cast<usize>(k)]) & 0x3Fu);
+        w.push_back(static_cast<wchar_t>(cp));
+        i += static_cast<usize>(len);
+    }
+    return w;
+}
+
+// UTF-32 to UTF-8.
+inline std::string narrow(const std::wstring& w) {
+    std::string s;
+    s.reserve(w.size());
+    for (wchar_t wc : w) {
+        const u32 cp = static_cast<u32>(wc);
+        if (cp < 0x80) {
+            s.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800) {
+            s.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+            s.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else if (cp < 0x10000) {
+            s.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+            s.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            s.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+            s.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+            s.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+            s.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            s.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        }
+    }
+    return s;
+}
+
+// A child's output is already UTF-8 under any locale a desktop sets, which is the one case Windows'
+// OEM-code-page fallback exists for.
+inline std::string toUtf8(const std::string& raw) { return raw; }
+
+// Runs `cmdline` through /bin/sh to completion, stdout and stderr down one pipe into `out`, stdin
+// from /dev/null. The Windows contract: false means the process never started. The same pipe hazard
+// is handled -- the write end is closed here before the drain, so the loop sees EOF when the child
+// exits.
+inline bool runCaptured(const std::wstring& cmdline, const std::wstring& cwd, std::string& out, int& exitCode) {
+    int fds[2];
+    if (::pipe(fds) != 0) return false;
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, fds[1], 1);
+    posix_spawn_file_actions_adddup2(&fa, fds[1], 2);
+    posix_spawn_file_actions_addclose(&fa, fds[0]);
+    posix_spawn_file_actions_addclose(&fa, fds[1]);
+    const std::string dir = narrow(cwd);
+    if (!dir.empty()) posix_spawn_file_actions_addchdir_np(&fa, dir.c_str());
+    const std::string line = narrow(cmdline);
+    char sh[] = "/bin/sh", dashC[] = "-c";
+    char* argv[] = {sh, dashC, const_cast<char*>(line.c_str()), nullptr};
+    pid_t pid = 0;
+    const int rc = posix_spawn(&pid, "/bin/sh", &fa, nullptr, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    ::close(fds[1]);
+    if (rc != 0) { ::close(fds[0]); return false; }
+    std::string raw;
+    char buf[4096];
+    for (;;) {
+        const ssize_t got = ::read(fds[0], buf, sizeof buf);
+        if (got > 0) { raw.append(buf, static_cast<usize>(got)); continue; }
+        if (got < 0 && errno == EINTR) continue;
+        break;
+    }
+    ::close(fds[0]);
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    out = raw;
+    // A program sh could not find exits 127: kept as an exit code, since the shell itself did start.
+    exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    return true;
+}
+
+// Starts `cmdline` through /bin/sh and does not wait for it: a second program the editor starts and
+// is not responsible for (the standalone runtime, an IDE, the file manager). Double-forked so the
+// editor never has to reap it and never leaves a zombie, and in a session of its own so closing the
+// editor does not take it down. Only async-signal-safe calls happen between fork() and exec().
+inline bool launchDetached(const std::wstring& cmdline, const std::wstring& cwd) {
+    const std::string line = narrow(cmdline);
+    const std::string dir = narrow(cwd);
+    const pid_t first = ::fork();
+    if (first < 0) return false;
+    if (first == 0) {
+        ::setsid();
+        if (::fork() != 0) ::_exit(0);
+        if (!dir.empty() && ::chdir(dir.c_str()) != 0) ::_exit(127);
+        const int nul = ::open("/dev/null", O_RDWR);
+        if (nul >= 0) { ::dup2(nul, 0); ::dup2(nul, 1); ::dup2(nul, 2); if (nul > 2) ::close(nul); }
+        ::execl("/bin/sh", "sh", "-c", line.c_str(), static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    int status = 0;
+    while (::waitpid(first, &status, 0) < 0 && errno == EINTR) {}
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+// True if `exe` names an executable program on PATH.
+inline bool findOnPath(const std::string& exe) {
+    const char* path = std::getenv("PATH");
+    if (!path || exe.empty()) return false;
+    const std::string dirs(path);
+    for (usize b = 0; b <= dirs.size();) {
+        usize e = dirs.find(':', b);
+        if (e == std::string::npos) e = dirs.size();
+        const std::string candidate = (e > b ? dirs.substr(b, e - b) : std::string(".")) + "/" + exe;
+        if (::access(candidate.c_str(), X_OK) == 0) return true;
+        b = e + 1;
+    }
+    return false;
+}
 #endif
 
 } // namespace aver::editor

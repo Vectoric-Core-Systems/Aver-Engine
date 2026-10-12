@@ -20,6 +20,7 @@
 #include "aver/core/Math.hpp"
 
 #include <cmath>
+#include <functional>
 
 namespace aver::world {
 

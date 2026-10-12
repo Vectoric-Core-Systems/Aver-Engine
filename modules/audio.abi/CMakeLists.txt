@@ -8,15 +8,25 @@
 # different, the way Aver.UI.Abi and Aver.UI are. Aver.Scene and Aver.Framework share a name with
 # their managed halves and each needs a NativeResolver to stop DllImport loading the managed
 # assembly as a native library; naming these apart removes the problem instead of working around it.
-if(WIN32 AND TARGET Aver.Audio.Wasapi AND TARGET Aver.Formats.Audio)
+#
+# The device is whichever of Aver.Audio.Wasapi (Windows) and Aver.Audio.Sdl (everywhere else) this
+# build has; both implement the AudioDevice that Aver.Audio declares.
+if(TARGET Aver.Audio.Wasapi)
+  set(_aver_audio_device Aver.Audio.Wasapi)
+elseif(TARGET Aver.Audio.Sdl)
+  set(_aver_audio_device Aver.Audio.Sdl)
+endif()
+if(_aver_audio_device AND TARGET Aver.Formats.Audio)
   add_library(Aver.Audio.Abi SHARED src/AudioAbi.cpp src/StreamSources.cpp)
   target_include_directories(Aver.Audio.Abi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_compile_features(Aver.Audio.Abi PUBLIC cxx_std_20)
   # PRIVATE: nothing that includes this header needs the mixer on its own link line.
-  target_link_libraries(Aver.Audio.Abi PRIVATE Aver.Core Aver.Audio Aver.Audio.Wasapi Aver.Formats.Audio)
+  target_link_libraries(Aver.Audio.Abi PRIVATE Aver.Core Aver.Audio ${_aver_audio_device} Aver.Formats.Audio)
   target_compile_definitions(Aver.Audio.Abi PRIVATE AVER_AUDIO_ABI_BUILD)
   # Media Foundation, read incrementally for streamed music (the importer already links it for whole-file decode).
-  target_link_libraries(Aver.Audio.Abi PRIVATE mfplat mfreadwrite mfuuid ole32)
+  if(WIN32)
+    target_link_libraries(Aver.Audio.Abi PRIVATE mfplat mfreadwrite mfuuid ole32)
+  endif()
   set_target_properties(Aver.Audio.Abi PROPERTIES
     FOLDER "modules"
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)   # beside the exe, where DllImport looks

@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "LightLevelIo.hpp"
 
 namespace aver {
@@ -369,7 +370,7 @@ void SandboxApp::openLevelDirect(Engine& eng, const std::string& path) {
     if (anyPlayActive()) stopPlay();
 #endif
     projectLoading_ = std::make_unique<LoadingScreen>(
-        eng, eng.window() != nullptr && maxFrames_ == 0, executableDir() + "\\splash.png");
+        eng, eng.window() != nullptr && maxFrames_ == 0, executableDir() + AVER_PATH_SEP "splash.png");
 #if AVER_MODULE_SCENE
     // Restart the settle detector -- see applyProject's identical reset for why this must happen
     // whenever a NEW load starts, not just when a project changes.

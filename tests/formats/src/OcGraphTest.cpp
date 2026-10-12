@@ -5,6 +5,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 

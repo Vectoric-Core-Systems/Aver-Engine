@@ -3,6 +3,7 @@
 // the class is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/anim/AnimGraphAsset.hpp"
 #include "aver/formats/OcInstances.hpp"   // New Instance Set
 #if AVER_MODULE_PBR
@@ -74,7 +75,7 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
         for (char& c : base) if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
                                  c == '"' || c == '<' || c == '>' || c == '|') c = '_';
 
-        std::string outFile = destDir + "\\" + base + ".ocmesh";
+        std::string outFile = destDir + AVER_PATH_SEP + base + ".ocmesh";
         if (std::filesystem::exists(outFile, ec)) {
             // Overwrite-aware skip: the true output name is only known here, which is why `overwrite`
             // reaches this far rather than the caller deleting a guess at what import would write.
@@ -142,7 +143,7 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
                 for (int n = 2; !taken.insert(lower(clipStem = root + "_" + std::to_string(n))).second; ++n) {}
             }
 
-            const std::string outFile = destDir + "\\" + clipStem + ".ocanim";
+            const std::string outFile = destDir + AVER_PATH_SEP + clipStem + ".ocanim";
             const bool clipExists = std::filesystem::exists(outFile, ec);
             if (clipExists && !overwrite) {
                 // Not named by the level either, the way a skipped mesh is not placed.
@@ -204,7 +205,7 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
             if (!placementClip[pi].empty()) op.animClip = contentPrefix + placementClip[pi];
             w.placements.push_back(std::move(op));
         }
-        const std::string lvl = destDir + "\\" + stem + ".ocworld";
+        const std::string lvl = destDir + AVER_PATH_SEP + stem + ".ocworld";
         const bool lvlExists = std::filesystem::exists(lvl, ec);
         if (w.placements.empty()) {
             // Nothing to say; not worth a file.
@@ -233,7 +234,7 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
                          ? res.skeletonNames[i] : stem;
         if (res.skeletons.size() > 1) base += "_" + std::to_string(i);
         sanitiseAssetName(base);
-        const std::string outFile = destDir + "\\" + base + ".ocskel";
+        const std::string outFile = destDir + AVER_PATH_SEP + base + ".ocskel";
         const bool skelExists = std::filesystem::exists(outFile, ec);
         if (skelExists && !overwrite) {
             AVER_WARN("[Import] '{}.ocskel' already exists - not overwritten", base);
@@ -249,7 +250,7 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
     }
     for (usize i = 0; i < res.animations.size(); ++i) {
         const std::string& base = clipBases[i];
-        const std::string outFile = destDir + "\\" + base + ".ocanim";
+        const std::string outFile = destDir + AVER_PATH_SEP + base + ".ocanim";
         const bool animExists = std::filesystem::exists(outFile, ec);
         if (animExists && !overwrite) {
             AVER_WARN("[Import] '{}.ocanim' already exists - not overwritten", base);
@@ -1062,7 +1063,7 @@ SandboxApp::RefRewriteReport SandboxApp::cbRewriteReferences(const std::string& 
     // Scans for the old path -- the same set of files the warning listed, so what the dialog
     // promised is exactly what gets edited. The rename has already happened on disk by this point.
     for (const std::string& refRel : cbFindReferencesTo(oldAbs)) {
-        const std::string abs = project_.contentDir() + "\\" + refRel;
+        const std::string abs = project_.contentDir() + AVER_PATH_SEP + refRel;
         std::string text;
         if (!readFileText(abs, text)) { ++rep.filesFailed; continue; }
         const editor::RefRewrite r = editor::rewriteAssetRefs(text, oldRel, newRel);
@@ -1855,7 +1856,7 @@ void SandboxApp::drawBreadcrumb(const std::string& dir) {
         while (i < tail.size() && tail[i] != '\\' && tail[i] != '/') ++i;
         if (i == start) break;
         const std::string seg = tail.substr(start, i - start);
-        acc += "\\" + seg;
+        acc += AVER_PATH_SEP + seg;
         ImGui::SameLine(0.0f, 2.0f*dpi_); ImGui::TextDisabled(">"); ImGui::SameLine(0.0f, 2.0f*dpi_);
         ImGui::PushID(static_cast<int>(start));
         if (ImGui::SmallButton(seg.c_str())) cbNavigate(acc);
@@ -2735,16 +2736,16 @@ void SandboxApp::drawImportModal() {
         std::string ext = srcPath.extension().string();
         for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (ext == ".gltf" || ext == ".glb") {
-            wouldCollide = std::filesystem::exists(dest + "\\" + srcPath.stem().string() + ".ocmesh", cec);
+            wouldCollide = std::filesystem::exists(dest + AVER_PATH_SEP + srcPath.stem().string() + ".ocmesh", cec);
         }
 #if AVER_HAVE_AUDIO_IMPORT
         else if (fmt::isImportableAudio(importPath_)) {
             wouldCollide = std::filesystem::exists(
-                dest + "\\" + std::filesystem::path(fmt::ocAudioPathFor(importPath_)).filename().string(), cec);
+                dest + AVER_PATH_SEP + std::filesystem::path(fmt::ocAudioPathFor(importPath_)).filename().string(), cec);
         }
 #endif
         else {
-            wouldCollide = std::filesystem::exists(dest + "\\" + srcPath.filename().string(), cec);
+            wouldCollide = std::filesystem::exists(dest + AVER_PATH_SEP + srcPath.filename().string(), cec);
         }
     }
     if (wouldCollide) {
@@ -2815,7 +2816,7 @@ void SandboxApp::importAsset(const std::string& src, const std::string& destDir,
         return;
     }
     const std::string name = std::filesystem::path(src).filename().string();
-    const std::string dest = destDir + "\\" + name;
+    const std::string dest = destDir + AVER_PATH_SEP + name;
     if (std::filesystem::exists(dest, ec)) {
         // Overwrite, when the Import dialog offered it: this check matches the source's own name,
         // meaningful for a plain copy where `dest` IS the final output. A converted model/audio
@@ -2871,7 +2872,7 @@ void SandboxApp::importAudio(const std::string& src, const std::string& destDir,
     }
 
     const std::string outName = std::filesystem::path(fmt::ocAudioPathFor(src)).filename().string();
-    const std::string out = destDir + "\\" + outName;
+    const std::string out = destDir + AVER_PATH_SEP + outName;
     std::error_code ec;
     if (std::filesystem::exists(out, ec)) {
         // Overwrite: same choice importAsset's top check honours (see its comment) -- the checkpoint

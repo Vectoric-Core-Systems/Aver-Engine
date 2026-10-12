@@ -7,6 +7,7 @@
 // skinning was impossible ("the RHI...cannot"), a claim commit 9fbe761 disproved 17 minutes after
 // commit 1735709 landed this box-per-bone preview.
 #include "AnimEditor.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "AnimEdit.hpp"
 #include "EditorIcons.hpp"
 #include "EditorKeybinds.hpp"
@@ -48,6 +49,7 @@
 #include "aver/formats/OcMat.hpp"
 #include "aver/formats/OcGraph.hpp"
 #include "aver/pbr/MaterialGraphRegistry.hpp"
+#include "aver/platform/FileSystem.hpp"   // toNativeSeparators
 #endif
 
 #include <algorithm>
@@ -484,8 +486,8 @@ PreviewMaterialResolution resolvePreviewMaterial(const std::string& binariesDir,
     if (matPath.empty()) {
         r.status = "surface '" + name + "' has no .ocmat -- tried " +
                     (binariesDir.empty() ? std::string("<no Binaries dir; project not fully opened>")
-                                          : binariesDir + "\\Materials\\" + name + ".ocmat") +
-                    ", " + contentDir + "\\Materials\\" + name + ".ocmat, and " + contentDir + "\\" + name;
+                                          : binariesDir + AVER_PATH_SEP "Materials" AVER_PATH_SEP + name + ".ocmat") +
+                    ", " + contentDir + AVER_PATH_SEP "Materials" AVER_PATH_SEP + name + ".ocmat, and " + contentDir + AVER_PATH_SEP + name;
         r.failed = true;
         AVER_WARN("[AnimEditor] {}", r.status);
         return r;
@@ -522,8 +524,8 @@ PreviewMaterialResolution resolvePreviewMaterial(const std::string& binariesDir,
     }
 
     // Content-relative, as GameContent::resolveMaterialGraph reads it -- see OcMatExtras::graphRef.
-    std::string graphPath = contentDir + "\\" + extras.graphRef;
-    for (char& c : graphPath) if (c == '/') c = '\\';
+    std::string graphPath = contentDir + AVER_PATH_SEP + extras.graphRef;
+    toNativeSeparators(graphPath);
 
     // idOf() first, so an already-compiled graph is reused (ids are stable for the process -- see
     // MaterialGraphRegistry).
@@ -1131,7 +1133,7 @@ void AnimEditor::buildPreview(Engine& e) {
             // would just make the Binaries\Materials candidate never match -- resolveMaterialPath
             // already tolerates that by falling through, not a crash or a wrong material.
             const std::string binariesDir =
-                std::filesystem::path(g_contentRoot).parent_path().string() + "\\Binaries";
+                std::filesystem::path(g_contentRoot).parent_path().string() + AVER_PATH_SEP "Binaries";
             const PreviewMaterialResolution res = resolvePreviewMaterial(binariesDir, g_contentRoot, slot0);
             holdOwnedMaterial(res.handle);   // before releasing the old one: it may be the same handle
             releaseOwnedMaterial(materialHandle_);

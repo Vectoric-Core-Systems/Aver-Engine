@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Audio.Sdl",
+  "dir": "audio.sdl",
+  "displayName": "Audio Device (SDL)",
+  "description": "Linux and macOS audio output device that feeds the mixer.",
+  "category": "Audio",
+  "option": null,
+  "required": true,
+  "default": true,
+  "platforms": ["linux", "macos"],
+  "dependsOn": ["Aver.Audio", "Aver.Core"],
+  "consequence": ""
+}

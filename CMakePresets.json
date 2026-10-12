@@ -19,10 +19,46 @@
       "displayName": "MSVC x64 Release (Ninja)",
       "binaryDir": "${sourceDir}/build-release",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "linux-ninja",
+      "displayName": "Linux (Ninja)",
+      "description": "GCC or Clang on the Vulkan backend. See docs/PLATFORMS.md.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "linux-ninja-release",
+      "inherits": "linux-ninja",
+      "displayName": "Linux Release (Ninja)",
+      "binaryDir": "${sourceDir}/build-release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "macos-ninja",
+      "displayName": "macOS (Ninja)",
+      "description": "AppleClang on Vulkan over MoltenVK; needs the LunarG Vulkan SDK. See docs/PLATFORMS.md.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" },
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "macos-ninja-release",
+      "inherits": "macos-ninja",
+      "displayName": "macOS Release (Ninja)",
+      "binaryDir": "${sourceDir}/build-release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
     }
   ],
   "buildPresets": [
     { "name": "msvc-ninja", "configurePreset": "msvc-ninja" },
-    { "name": "msvc-ninja-release", "configurePreset": "msvc-ninja-release" }
+    { "name": "msvc-ninja-release", "configurePreset": "msvc-ninja-release" },
+    { "name": "linux-ninja", "configurePreset": "linux-ninja" },
+    { "name": "linux-ninja-release", "configurePreset": "linux-ninja-release" },
+    { "name": "macos-ninja", "configurePreset": "macos-ninja" },
+    { "name": "macos-ninja-release", "configurePreset": "macos-ninja-release" }
   ]
 }

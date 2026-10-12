@@ -51,6 +51,11 @@ enum class Format : u8 {
     R16Uint,
     R16F,         // single-channel half float
     R8Uint,       // single-channel 8-bit uint
+    // RGBA8Unorm with red and blue swapped in memory. Never asked for by content: it is the colour
+    // format of a SWAPCHAIN on a surface that offers no RGBA order (X11 and Wayland surfaces on Mesa),
+    // and of whatever must match one -- the editor's viewport texture is drawn by the same pipeline.
+    // Appended, so no value above moves.
+    BGRA8Unorm,
 };
 
 // True for block-compressed formats, whose extents are counted in 4x4 blocks.

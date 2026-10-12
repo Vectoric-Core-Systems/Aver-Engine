@@ -462,6 +462,7 @@ DXGI_FORMAT toDxgiFormat(Format f) {
     switch (f) {
         case Format::RGBA8Unorm:     return DXGI_FORMAT_R8G8B8A8_UNORM;
         case Format::RGBA8UnormSrgb: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        case Format::BGRA8Unorm:     return DXGI_FORMAT_B8G8R8A8_UNORM;
         case Format::RG8Unorm:       return DXGI_FORMAT_R8G8_UNORM;
         case Format::R8Unorm:        return DXGI_FORMAT_R8_UNORM;
         case Format::RGBA16F:        return DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -537,6 +538,7 @@ Format fromDxgiFormat(DXGI_FORMAT f) {
     switch (f) {
         case DXGI_FORMAT_R8G8B8A8_UNORM:      return Format::RGBA8Unorm;
         case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return Format::RGBA8UnormSrgb;
+        case DXGI_FORMAT_B8G8R8A8_UNORM:      return Format::BGRA8Unorm;
         case DXGI_FORMAT_R8G8_UNORM:          return Format::RG8Unorm;
         case DXGI_FORMAT_R8_UNORM:            return Format::R8Unorm;
         case DXGI_FORMAT_R16G16B16A16_FLOAT:  return Format::RGBA16F;
@@ -571,6 +573,7 @@ u32 texelBytes(Format f) {
         case Format::RGBA16F:        return 8;
         case Format::RGBA8Unorm:
         case Format::RGBA8UnormSrgb:
+        case Format::BGRA8Unorm:
         case Format::R32Float:
         case Format::R32Uint:
         case Format::D32Float:

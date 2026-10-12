@@ -6,6 +6,7 @@
 
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include <algorithm>
 #include <filesystem>
@@ -226,9 +227,9 @@ bool createCppModule(const std::string& name, const std::string& purpose,
     const std::string root = engineRoot();
     if (root.empty()) { if (err) *err = "The engine source tree could not be found from the editor's path."; return false; }
 
-    const std::string dir = root + "\\modules\\" + name;
+    const std::string dir = root + AVER_PATH_SEP "modules" AVER_PATH_SEP + name;
     if (directoryExists(dir) || fileExists(dir)) {
-        if (err) *err = "modules\\" + name + " already exists.";
+        if (err) *err = "modules" AVER_PATH_SEP + name + " already exists.";
         return false;
     }
 
@@ -236,18 +237,18 @@ bool createCppModule(const std::string& name, const std::string& purpose,
     const std::string cls = capitalise(leaf);
     const std::string target = moduleTargetName(name);
     const std::string ns = "aver::" + leaf;
-    const std::string includeDir = dir + "\\include\\aver\\" + leaf;
-    const std::string srcDir = dir + "\\src";
+    const std::string includeDir = dir + AVER_PATH_SEP "include" AVER_PATH_SEP "aver" AVER_PATH_SEP + leaf;
+    const std::string srcDir = dir + AVER_PATH_SEP "src";
 
     for (const std::string& d : {includeDir, srcDir}) {
         if (!createDirectories(d)) { if (err) *err = "Could not create " + d; return false; }
     }
 
     const struct { std::string path, text; } files[] = {
-        { dir + "\\CMakeLists.txt", cmakeText(target, cls) },
-        { dir + "\\README.md",      readmeText(name, target, purpose) },
-        { includeDir + "\\" + cls + ".hpp", headerText(cls, ns, target, "New C++ Module") },
-        { srcDir + "\\" + cls + ".cpp",     sourceText(cls, ns, leaf) },
+        { dir + AVER_PATH_SEP "CMakeLists.txt", cmakeText(target, cls) },
+        { dir + AVER_PATH_SEP "README.md",      readmeText(name, target, purpose) },
+        { includeDir + AVER_PATH_SEP + cls + ".hpp", headerText(cls, ns, target, "New C++ Module") },
+        { srcDir + AVER_PATH_SEP + cls + ".cpp",     sourceText(cls, ns, leaf) },
     };
     for (const auto& f : files) {
         if (!writeNewFile(f.path, f.text, err)) return false;
@@ -268,17 +269,17 @@ bool createCppClass(const ModuleInfo& mod, const std::string& name,
     const std::string root = engineRoot();
     if (root.empty()) { if (err) *err = "The engine source tree could not be found from the editor's path."; return false; }
 
-    const std::string moduleDir = root + "\\modules\\" + mod.dir;
-    if (!directoryExists(moduleDir)) { if (err) *err = "modules\\" + mod.dir + " is not there any more."; return false; }
+    const std::string moduleDir = root + AVER_PATH_SEP "modules" AVER_PATH_SEP + mod.dir;
+    if (!directoryExists(moduleDir)) { if (err) *err = "modules" AVER_PATH_SEP + mod.dir + " is not there any more."; return false; }
 
-    const std::string includeDir = moduleDir + "\\include\\aver\\" + mod.includeSub;
-    const std::string srcDir = moduleDir + "\\src";
+    const std::string includeDir = moduleDir + AVER_PATH_SEP "include" AVER_PATH_SEP "aver" AVER_PATH_SEP + mod.includeSub;
+    const std::string srcDir = moduleDir + AVER_PATH_SEP "src";
     for (const std::string& d : {includeDir, srcDir}) {
         if (!createDirectories(d)) { if (err) *err = "Could not create " + d; return false; }
     }
 
-    const std::string hpp = includeDir + "\\" + name + ".hpp";
-    const std::string cpp = srcDir + "\\" + name + ".cpp";
+    const std::string hpp = includeDir + AVER_PATH_SEP + name + ".hpp";
+    const std::string cpp = srcDir + AVER_PATH_SEP + name + ".cpp";
     if (fileExists(hpp)) { if (err) *err = name + ".hpp already exists in " + mod.dir + "."; return false; }
     if (fileExists(cpp)) { if (err) *err = name + ".cpp already exists in " + mod.dir + "."; return false; }
 

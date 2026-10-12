@@ -1,5 +1,6 @@
 // Level-sequence records and the .ocseq file. See OcSeq.hpp.
 #include "aver/formats/OcSeq.hpp"
+#include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 #include "aver/core/Log.hpp"
 #include "aver/formats/detail/TextEscape.hpp"
 #include "aver/formats/detail/TextScan.hpp"
@@ -18,7 +19,7 @@ namespace {
 // A token that is entirely one number (parseF64 would take "12abc" as 12; the run must stop at a word).
 bool asNumber(std::string_view s, f64& v) {
     if (s.empty()) return false;
-    const auto r = std::from_chars(s.data(), s.data() + s.size(), v);
+    const auto r = aver::fromChars(s.data(), s.data() + s.size(), v);
     return r.ec == std::errc{} && r.ptr == s.data() + s.size();
 }
 

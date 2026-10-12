@@ -17,7 +17,7 @@ using namespace aver;
 using namespace aver::scene;
 
 // Size of the DLL's string intern table. A test hook, deliberately kept out of scene_abi.h.
-extern "C" __declspec(dllimport) int64_t aver_scene_debug_string_pool_size(void);
+extern "C" AVER_SCENE_ABI int64_t aver_scene_debug_string_pool_size(void);
 
 static int g_checks   = 0;
 static int g_failures = 0;

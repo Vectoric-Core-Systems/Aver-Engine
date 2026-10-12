@@ -202,4 +202,10 @@ bool uiWndProc(void* hwnd, u32 msg, u64 wparam, i64 lparam) {
     return g_uiWndProc ? g_uiWndProc(hwnd, msg, wparam, lparam) : false;
 }
 
+namespace {
+UiEventProcFn g_uiEventProc = nullptr;
+}
+void registerUiEventProc(UiEventProcFn fn) { g_uiEventProc = fn; }
+bool uiEventProc(const void* nativeEvent) { return g_uiEventProc ? g_uiEventProc(nativeEvent) : false; }
+
 } // namespace aver::rhi

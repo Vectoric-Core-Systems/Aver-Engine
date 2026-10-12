@@ -1,5 +1,6 @@
 // Engine implementation: startup, the frame loop, and shutdown.
 #include "aver/runtime/Engine.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/runtime/Application.hpp"
 
 #include "aver/platform/Window.hpp"
@@ -34,7 +35,7 @@ int Engine::run(Application* app) {
 
     // --- Splash (shown during startup) ---
     Splash splash;
-    if (!cfg.headless && interactive) splash.show(executableDir() + "\\splash.png");
+    if (!cfg.headless && interactive) splash.show(executableDir() + AVER_PATH_SEP "splash.png");
     // The stages below are named as they START, not as they finish, because the point of the line is
     // to say what the process is busy with while it is unresponsive. Each call repaints
     // synchronously; a message that appears only after the work completes says nothing useful.
@@ -86,6 +87,7 @@ int Engine::run(Application* app) {
             dd.preferred[1] = rhi::Backend::D3D12;
             dd.preferred[2] = rhi::Backend::Vulkan;
             dd.preferred[3] = rhi::Backend::Null;
+            dd.preferredCount = 4;
             AVER_INFO("[Engine] backend '{}' requested", cfg.backend);
         } else {
             AVER_ERROR("[Engine] '{}' is not a backend name (d3d12, d3d11, vulkan, null); using the "
@@ -111,7 +113,8 @@ int Engine::run(Application* app) {
         // In-window UI, if the app installed a backend for one above. Route raw window messages to it.
         splash.setStatus("Initialising editor UI");
         if (device_->uiInit(window_->nativeHandle())) {
-            window_->setMessageHook(&rhi::uiWndProc);
+            window_->setMessageHook(&rhi::uiWndProc);        // Win32 windows
+            window_->setNativeEventHook(&rhi::uiEventProc);  // SDL windows, everywhere else
         }
     }
 

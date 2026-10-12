@@ -134,17 +134,24 @@ target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
 # that cannot compile SandboxApp.cpp's ImGui backend wiring; gating on the module being present
 # reproduces exactly the pre-split behaviour, where AVER_WITH_IMGUI only ever reached Sandbox by
 # riding along on Aver.RHI.D3D12 actually being built.
+#
+# THREE MACROS NOW, because one was doing two jobs. AVER_WITH_IMGUI used to mean both "the editor UI
+# is compiled in" and "the D3D12 backend's types are available", so a tree with Vulkan and no D3D12 --
+# every Linux and macOS build -- compiled the editor with every panel removed. It now means only the
+# first, and is defined when EITHER backend module exists. The D3D12-specific wiring (two includes,
+# one member, two calls) sits behind AVER_WITH_IMGUI_D3D12, and the Vulkan wiring behind
+# AVER_WITH_IMGUI_VULKAN as before. On Windows all three are defined, so the preprocessed editor is
+# exactly what it was. SandboxApp.cpp picks between the backends at runtime off IDevice::backend().
 if(TARGET Aver.RHI.D3D12.ImGui)
   target_link_libraries(Sandbox PRIVATE Aver.RHI.D3D12.ImGui imgui)
-  target_compile_definitions(Sandbox PRIVATE AVER_WITH_IMGUI=1)
+  target_compile_definitions(Sandbox PRIVATE AVER_WITH_IMGUI_D3D12=1)
 endif()
-# The Vulkan half, on the same terms and INDEPENDENTLY: a tree can have either backend, both, or
-# neither, and SandboxApp.cpp picks between them at runtime off IDevice::backend(). Its own macro
-# rather than AVER_WITH_IMGUI, because that one means "the D3D12 backend's types are available" --
-# guarding the Vulkan wiring on it would break a Vulkan-only tree.
 if(TARGET Aver.RHI.Vulkan.ImGui)
   target_link_libraries(Sandbox PRIVATE Aver.RHI.Vulkan.ImGui imgui)
   target_compile_definitions(Sandbox PRIVATE AVER_WITH_IMGUI_VULKAN=1)
+endif()
+if(TARGET Aver.RHI.D3D12.ImGui OR TARGET Aver.RHI.Vulkan.ImGui)
+  target_compile_definitions(Sandbox PRIVATE AVER_WITH_IMGUI=1)
 endif()
 # The level/world runtime. The editor and the game runtime BOTH link this, which is the whole reason
 # it is not inside Aver.Runtime.Game: turning a .ocworld placement into an entity used to be written

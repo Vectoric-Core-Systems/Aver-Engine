@@ -1,16 +1,10 @@
 #pragma once
 #include "aver/rhi/ShaderFiles.hpp"
 
-// <unknwn.h> BEFORE <dxcapi.h>, AND THE ORDER IS LOAD-BEARING -- the same trap
-// VulkanShaderCompiler.cpp already documents at its own include of these two. dxcapi.h declares COM
-// interfaces derived from IUnknown without pulling in a header that defines it. The D3D12 backend
-// never noticed, because d3d12.h drags the whole Windows COM surface in ahead of it -- so a header
-// like this one, included EARLY in that file, dies in ~40 errors inside dxcapi.h that read like a
-// broken SDK. Included here rather than left to the includer, so this header stands on its own
-// wherever it lands.
-#include <unknwn.h>
-
-#include <dxcapi.h>
+// dxcapi.h, with <unknwn.h> ahead of it on Windows (the order is load-bearing -- dxcapi.h declares
+// COM interfaces derived from IUnknown without pulling in a header that defines it) and DXC's own
+// COM shim everywhere else. See DxcApi.hpp.
+#include "aver/rhi/DxcApi.hpp"
 
 #include <string>
 

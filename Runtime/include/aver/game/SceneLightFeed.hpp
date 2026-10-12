@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 namespace aver::game {
 
@@ -92,7 +93,7 @@ private:
         }
         if (rel.empty()) return fail(id, ies, "no file with that id under the project's content folder");
 
-        const std::string abs = dir_ + "\\" + rel;
+        const std::string abs = dir_ + AVER_PATH_SEP + rel;
         Asset a;
         a.ies = ies;
         std::string err;

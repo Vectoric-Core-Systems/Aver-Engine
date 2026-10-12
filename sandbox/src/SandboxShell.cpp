@@ -1,6 +1,7 @@
 // Editor UI: menu bar/toolbar, prompts, log/console, drawer/notifications, reference/profiler/nav panels.
 
 #include <cstdlib>
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "SandboxApp.hpp"
 #include "aver/core/CpuTiming.hpp"
 
@@ -42,7 +43,7 @@ void SandboxApp::buildReferencesPanel() {
             // Double-click opens the file.
             if (ImGui::Selectable(rel.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick) &&
                 ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                const std::string abs = project_.contentDir() + "\\" + rel;
+                const std::string abs = project_.contentDir() + AVER_PATH_SEP + rel;
                 cbSelectedFile_ = abs;
                 assetEditors_.open(abs);
             }
@@ -1145,7 +1146,7 @@ void SandboxApp::drawSaveLevelAsPrompt() {
         ? std::filesystem::path(maps) / (stem + ".ocworld")
         : std::filesystem::path();
     if (!target.empty()) ImGui::TextDisabled("Saves to: %s", target.string().c_str());
-    else                 ImGui::TextDisabled("Saves to: <project>\\Content\\Maps\\<Name>.ocworld");
+    else                 ImGui::TextDisabled("Saves to: <project>" AVER_PATH_SEP "Content" AVER_PATH_SEP "Maps" AVER_PATH_SEP "<Name>.ocworld");
 
     std::error_code ec;
     const bool exists = !target.empty() && std::filesystem::exists(target, ec);
@@ -1335,7 +1336,7 @@ void SandboxApp::drawOpenLevelPrompt(Engine& e) {
 
     if (openLevelList_.empty()) {
         ImGui::TextDisabled("This project has no levels yet.");
-        ImGui::TextDisabled("File > New Level, then Save Level As, writes one to Content\\Maps.");
+        ImGui::TextDisabled("File > New Level, then Save Level As, writes one to Content" AVER_PATH_SEP "Maps.");
     } else {
         ImGui::TextUnformatted("Levels in this project");
         ImGui::BeginChild("##levels", ImVec2(0.0f, 240.0f * dpi_), true);
@@ -1929,7 +1930,7 @@ void SandboxApp::buildUI(Engine& e) {
             // Reload: reopens the start level to discard edits.
             ImGui::BeginDisabled(project_.startMap.empty());
             if (ImGui::MenuItem("Reload Start Level")) {
-                const std::string start = project_.contentDir() + "\\" + project_.startMap;
+                const std::string start = project_.contentDir() + AVER_PATH_SEP + project_.startMap;
                 if (!requestOpenLevel(start, "reloaded from the project's start level"))
                     AVER_WARN("[Level] reload: {}", openLevelError_);
             }
@@ -2008,7 +2009,7 @@ void SandboxApp::buildUI(Engine& e) {
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
                     if (!haveProj)              ImGui::SetTooltip("Open a project first.");
                     else if (tools_.compiling()) ImGui::SetTooltip("A script build is running; packaging would stage a half-written assembly.");
-                    else if (!haveScripts)       ImGui::SetTooltip("No compiled scripts yet - run Compile .NET first.\nThe packager refuses a project whose Binaries\\Scripts is empty.");
+                    else if (!haveScripts)       ImGui::SetTooltip("No compiled scripts yet - run Compile .NET first.\nThe packager refuses a project whose Binaries" AVER_PATH_SEP "Scripts is empty.");
                     else                         ImGui::SetTooltip("Stage this project into a standalone, runnable game directory.\nRuns scripts/stage-game.ps1, which you can also run from a shell.");
                 }
             }
@@ -2080,8 +2081,8 @@ void SandboxApp::buildUI(Engine& e) {
                     ImGui::SetTooltip("Open or create a project first - a streamed world belongs to one.");
                 else if (ImGui::IsItemHovered())
                     ImGui::SetTooltip(streamOn
-                        ? "Streams chunks generated + saved under <project>\\Chunks around the editor camera.\nTurning this off releases every streamed entity."
-                        : "Opt-in: streams chunks generated + saved under <project>\\Chunks around the editor camera.\nDoes nothing to your level until switched on.");
+                        ? "Streams chunks generated + saved under <project>" AVER_PATH_SEP "Chunks around the editor camera.\nTurning this off releases every streamed entity."
+                        : "Opt-in: streams chunks generated + saved under <project>" AVER_PATH_SEP "Chunks around the editor camera.\nDoes nothing to your level until switched on.");
             }
             {
                 const bool droneOn = droneEntity_ != scene::kInvalidEntity;
@@ -2090,11 +2091,11 @@ void SandboxApp::buildUI(Engine& e) {
                 ImGui::EndDisabled();
                 uiReg_.track("window.drone");
                 if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("Open or create a project first - the drone reads its graph from Content\\Scripts.");
+                    ImGui::SetTooltip("Open or create a project first - the drone reads its graph from Content" AVER_PATH_SEP "Scripts.");
                 else if (ImGui::IsItemHovered())
                     ImGui::SetTooltip(droneOn
-                        ? "A cube driven by Content\\Scripts\\Drone.ocgraph through GraphHost.\nTurning this off releases it."
-                        : "Opt-in: spawns a cube and drives it from Content\\Scripts\\Drone.ocgraph through GraphHost.");
+                        ? "A cube driven by Content" AVER_PATH_SEP "Scripts" AVER_PATH_SEP "Drone.ocgraph through GraphHost.\nTurning this off releases it."
+                        : "Opt-in: spawns a cube and drives it from Content" AVER_PATH_SEP "Scripts" AVER_PATH_SEP "Drone.ocgraph through GraphHost.");
             }
             ImGui::Separator();
 #endif

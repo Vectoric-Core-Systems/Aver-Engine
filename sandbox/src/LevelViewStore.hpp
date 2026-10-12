@@ -11,6 +11,7 @@
 // text in, text out -- so the key and the file grammar can be tested without an editor.
 #pragma once
 #include "aver/core/Types.hpp"
+#include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 
 #include <cctype>
 #include <charconv>
@@ -39,8 +40,10 @@ using LevelViewMap = std::map<std::string, LevelView, std::less<>>;
 inline std::string levelViewKey(const std::string& levelPath, const std::string& projectDir) {
     namespace fs = std::filesystem;
     if (levelPath.empty()) return {};
+    // Backslashes become slashes first: std::filesystem only treats '\\' as a separator on Windows, and a
+    // project saved there keeps its keys when it is opened on Linux or macOS.
     auto lowered = [](std::string s) {
-        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        for (char& c : s) c = c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         return s;
     };
     fs::path p = fs::path(lowered(levelPath)).lexically_normal();
@@ -75,7 +78,7 @@ inline LevelViewMap parseLevelViews(std::string_view text) {
             while (!nums.empty() && nums.front() == ' ') nums.remove_prefix(1);
             if (nums.empty()) break;
             // from_chars, not atof: locale-independent, so a comma-locale machine reads what it wrote.
-            const auto r = std::from_chars(nums.data(), nums.data() + nums.size(), v[got]);
+            const auto r = aver::fromChars(nums.data(), nums.data() + nums.size(), v[got]);
             if (r.ec != std::errc{}) break;
             nums.remove_prefix(static_cast<usize>(r.ptr - nums.data()));
             ++got;

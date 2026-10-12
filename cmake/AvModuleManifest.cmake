@@ -7,7 +7,7 @@
 #   aver_check_module_manifests()     after every add_subdirectory: manifests vs the real targets
 #
 # Manifest fields this file reads: name, dir, option, required, default, editions, dependsOn,
-# optionalDependsOn, derivedFrom, skeleton, description. The rest (displayName, category,
+# optionalDependsOn, derivedFrom, skeleton, platforms, description. The rest (displayName, category,
 # consequence) is for the launcher; scripts/module-catalog.py validates the whole schema.
 #
 # Three kinds of module:
@@ -15,6 +15,17 @@
 #   optional  has an option                  -- the user's choice, bounded by the dependency rule
 #   derived   option null, "derivedFrom": [M...] -- no switch of its own; built exactly when every M
 #             is enabled (a scene join, a private backend). It never blocks turning anything off.
+
+# The platform name a manifest's "platforms" list is matched against. A manifest with no "platforms"
+# builds everywhere; one that lists some is treated exactly like a skeleton on every other platform:
+# no option takes effect, nothing may need it, and its target must not exist.
+if(WIN32)
+  set(AVER_PLATFORM_NAME "windows")
+elseif(APPLE)
+  set(AVER_PLATFORM_NAME "macos")
+else()
+  set(AVER_PLATFORM_NAME "linux")
+endif()
 
 option(AVER_MODULE_AUTO_DEPS "When a module's dependency is off, turn the dependency on instead of failing to configure" OFF)
 
@@ -95,6 +106,13 @@ function(aver_load_module_manifests)
       _aver_json_list(_l "${_j}" ${_k})
       set_property(GLOBAL PROPERTY "AVER_MOD:${_name}:${_k}" "${_l}")
     endforeach()
+    # Not built on this platform: from here on the module is indistinguishable from a skeleton.
+    _aver_json_list(_plats "${_j}" platforms)
+    set(_here ON)
+    if(_plats AND NOT AVER_PLATFORM_NAME IN_LIST _plats)
+      set(_here OFF)
+    endif()
+    set_property(GLOBAL PROPERTY "AVER_MOD:${_name}:onThisPlatform" "${_here}")
     # "editions" present = the edition decides this module's default (and a re-derive resets it).
     set(_has_ed OFF)
     string(JSON _t ERROR_VARIABLE _err TYPE "${_j}" editions)
@@ -139,8 +157,9 @@ macro(_aver_compute_state)
     _aver_mod_get(_cs_skel "${_cs_m}" skeleton)
     _aver_mod_get(_cs_req "${_cs_m}" required)
     _aver_mod_get(_cs_opt "${_cs_m}" option)
+    _aver_mod_get(_cs_here "${_cs_m}" onThisPlatform)
     set(_on_${_cs_id} OFF)
-    if(_cs_skel)
+    if(_cs_skel OR NOT _cs_here)
       # not built
     elseif(_cs_req)
       set(_on_${_cs_id} ON)
@@ -157,7 +176,8 @@ macro(_aver_compute_state)
       _aver_mod_get(_cs_skel "${_cs_m}" skeleton)
       _aver_mod_get(_cs_req "${_cs_m}" required)
       _aver_mod_get(_cs_opt "${_cs_m}" option)
-      if(NOT _cs_skel AND NOT _cs_req AND _cs_opt STREQUAL "")
+      _aver_mod_get(_cs_here "${_cs_m}" onThisPlatform)
+      if(NOT _cs_skel AND _cs_here AND NOT _cs_req AND _cs_opt STREQUAL "")
         _aver_mod_get(_cs_from "${_cs_m}" derivedFrom)
         set(_cs_all ON)
         foreach(_cs_f IN LISTS _cs_from)
@@ -201,6 +221,12 @@ function(aver_declare_module_options)
       _aver_mod_get(_desc "${_m}" description)
       _aver_edition_value(_v "${_m}" "${AVER_EDITION}")
       option(${_opt} "${_desc}" ${_v})
+      # The cache keeps whatever the user or the edition chose, so a tree moved between machines does
+      # not lose it; the variable every if(${_opt}) below reads says the module is not here.
+      _aver_mod_get(_here "${_m}" onThisPlatform)
+      if(NOT _here)
+        set(${_opt} OFF PARENT_SCOPE)
+      endif()
     endif()
   endforeach()
 endfunction()
@@ -210,9 +236,12 @@ function(_aver_blockers out name)
   _aver_mod_get(_skel "${name}" skeleton)
   _aver_mod_get(_req "${name}" required)
   _aver_mod_get(_opt "${name}" option)
+  _aver_mod_get(_here "${name}" onThisPlatform)
   set(_r "")
   if(_skel)
     set(_r "(planned, not built)")
+  elseif(NOT _here)
+    set(_r "(not built on ${AVER_PLATFORM_NAME})")
   elseif(_req)
     # always built
   elseif(NOT _opt STREQUAL "")
@@ -277,7 +306,8 @@ function(aver_enforce_module_deps)
         if(_on_${_did})
           continue()
         endif()
-        if(AVER_MODULE_AUTO_DEPS)
+        _aver_mod_get(_dhere "${_d}" onThisPlatform)
+        if(AVER_MODULE_AUTO_DEPS AND _dhere)
           _aver_enable_module("${_d}" "${_m}")
         else()
           _aver_blockers(_b "${_d}")
@@ -371,7 +401,15 @@ function(aver_check_module_manifests)
   set(_errors "")
   foreach(_m IN LISTS _names)
     _aver_mod_get(_skel "${_m}" skeleton)
+    _aver_mod_get(_here "${_m}" onThisPlatform)
     if(_skel)
+      continue()
+    endif()
+    if(NOT _here)
+      if(TARGET ${_m})
+        _aver_mod_get(_mdir "${_m}" dir)
+        list(APPEND _errors "${_m} is not built on ${AVER_PLATFORM_NAME} (\"platforms\" in modules/${_mdir}/module.json) but its target exists")
+      endif()
       continue()
     endif()
     _aver_vid(_id "${_m}")

@@ -1,4 +1,5 @@
 #include "aver/game/GameFoliage.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #if AVER_MODULE_SCENE && AVER_MODULE_VOXI
 
@@ -11,6 +12,7 @@
 #include "aver/core/Hash.hpp"
 #include "aver/core/HitchMarks.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/platform/FileSystem.hpp"   // toNativeSeparators
 
 #include <algorithm>
 #include <chrono>
@@ -27,8 +29,8 @@ namespace {
 // GRAPHREF: a plain join, forward slashes normalised to the native separator so a level authored
 // on one convention still opens on the other.
 std::string resolveContentPath(const std::string& contentDir, const std::string& relPath) {
-    std::string path = contentDir + "\\" + relPath;
-    for (char& c : path) if (c == '/') c = '\\';
+    std::string path = contentDir + AVER_PATH_SEP + relPath;
+    toNativeSeparators(path);
     return path;
 }
 

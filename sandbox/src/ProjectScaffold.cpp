@@ -2,6 +2,7 @@
 // material and C# script templates, and upgrades an older project's layout and references.
 
 #include "ProjectScaffold.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #if AVER_MODULE_UPGRADE
 #include "aver/upgrade/Upgrade.hpp"
@@ -822,23 +823,23 @@ bool scaffoldProject(const std::string& location, const std::string& name,
     if (!validateProjectName(name, err)) return false;
     if (location.empty()) { if (err) *err = "Choose a location."; return false; }
 
-    const std::string root = location + "\\" + name;
+    const std::string root = location + AVER_PATH_SEP + name;
     if (fileExists(root)) {
         if (err) *err = "A folder already exists at " + root;
         return false;
     }
     ScaffoldRootGuard guard{&root};
 
-    const std::string content = root + "\\Content";
-    for (const std::string& d : {content + "\\Maps", content + "\\Meshes", content + "\\Materials",
-                                 content + "\\Textures", content + "\\Sounds", content + "\\Scripts"}) {
+    const std::string content = root + AVER_PATH_SEP "Content";
+    for (const std::string& d : {content + AVER_PATH_SEP "Maps", content + AVER_PATH_SEP "Meshes", content + AVER_PATH_SEP "Materials",
+                                 content + AVER_PATH_SEP "Textures", content + AVER_PATH_SEP "Sounds", content + AVER_PATH_SEP "Scripts"}) {
         if (!createDirectories(d)) {
             if (err) *err = "Could not create " + d;
             return false;
         }
     }
 
-    const std::string manifest = root + "\\" + name + ".ocproject";
+    const std::string manifest = root + AVER_PATH_SEP + name + ".ocproject";
     if (!writeFileText(manifest, manifestText(name))) {
         if (err) *err = "Could not write " + manifest;
         return false;
@@ -852,14 +853,14 @@ bool scaffoldProject(const std::string& location, const std::string& name,
     // level, and refusing to create it over a missing starter map would be losing the whole thing
     // over the least important part of it.
     {
-        const std::string startMap = content + "\\Maps\\Default.ocmap";
+        const std::string startMap = content + AVER_PATH_SEP "Maps" AVER_PATH_SEP "Default.ocmap";
         if (!writeFileText(startMap, startLevelText(name)))
             AVER_WARN("[Editor] project created, but could not write {} - it will open empty", startMap);
     }
 
     {
-        const std::string scriptsDir = content + "\\Scripts";
-        const std::string csproj = scriptsDir + "\\" + kCsprojName;
+        const std::string scriptsDir = content + AVER_PATH_SEP "Scripts";
+        const std::string csproj = scriptsDir + AVER_PATH_SEP + kCsprojName;
         if (!writeFileText(csproj, csprojText(engineRefs(scriptsDir))))
             AVER_WARN("[Editor] project created, but could not write {}", csproj);
     }
@@ -878,21 +879,21 @@ bool scaffoldProject(const std::string& location, const std::string& name,
     // not to write any. The allowlist entry is the real fix; this is what keeps the next gap in the
     // payload from reaching an author as a broken project.
     {
-        const std::string scriptsDir = content + "\\Scripts";
+        const std::string scriptsDir = content + AVER_PATH_SEP "Scripts";
         if (engineProjectReference(scriptsDir, "scripting/fsharp/Aver.Pcg/Aver.Pcg.fsproj").empty()) {
             AVER_WARN("[Editor] no Aver.Pcg to reference from this install, so '{}' gets no F# "
                       "starter -- the C# side is unaffected", name);
         } else {
-            const std::string fsproj = scriptsDir + "\\Scripts.FSharp.fsproj";
+            const std::string fsproj = scriptsDir + AVER_PATH_SEP "Scripts.FSharp.fsproj";
             if (!writeFileText(fsproj, fsprojText(scriptsDir)))
                 AVER_WARN("[Editor] project created, but could not write {}", fsproj);
-            const std::string sky = scriptsDir + "\\Sky.fs";
+            const std::string sky = scriptsDir + AVER_PATH_SEP "Sky.fs";
             if (!writeFileText(sky, skyScriptText(name)))
                 AVER_WARN("[Editor] project created, but could not write {}", sky);
         }
     }
     {
-        const std::string starter = content + "\\Materials\\Surfaces.cs";
+        const std::string starter = content + AVER_PATH_SEP "Materials" AVER_PATH_SEP "Surfaces.cs";
         if (!writeFileText(starter, starterMaterialText(name)))
             AVER_WARN("[Editor] project created, but could not write {}", starter);
     }
@@ -946,7 +947,7 @@ bool scaffoldProjectFromTemplate(const std::string& location, const std::string&
     if (!validateProjectName(name, err)) return false;
     if (location.empty()) { if (err) *err = "Choose a location."; return false; }
 
-    const std::string root = location + "\\" + name;
+    const std::string root = location + AVER_PATH_SEP + name;
     if (fileExists(root)) {
         if (err) *err = "A folder already exists at " + root;
         return false;
@@ -993,7 +994,7 @@ bool scaffoldProjectFromTemplate(const std::string& location, const std::string&
     desc.gameMode = tmpl.gameMode;
     applyNewProjectRenderDefaults(desc);
 
-    const std::string manifest = root + "\\" + name + ".ocproject";
+    const std::string manifest = root + AVER_PATH_SEP + name + ".ocproject";
     if (!writeFileText(manifest, fmt::writeOcproject(desc, ""))) {
         if (err) *err = "Could not write " + manifest;
         return false;
@@ -1008,12 +1009,12 @@ bool scaffoldProjectFromTemplate(const std::string& location, const std::string&
 // Path of a project's Scripts.csproj. Empty if the project has no scripts folder.
 std::string scriptsCsprojPath(const fmt::ProjectDesc& proj) {
     const std::string dir = proj.scriptsDir();
-    return dir.empty() ? std::string() : dir + "\\" + kCsprojName;
+    return dir.empty() ? std::string() : dir + AVER_PATH_SEP + kCsprojName;
 }
 
 // Where Compile C# puts the built script assembly.
 std::string scriptsBinaryDir(const fmt::ProjectDesc& proj) {
-    return proj.dir.empty() ? std::string() : proj.dir + "\\Binaries\\Scripts";
+    return proj.dir.empty() ? std::string() : proj.dir + AVER_PATH_SEP "Binaries" AVER_PATH_SEP "Scripts";
 }
 
 // Writes a new .cs file into the project's Scripts folder, creating Scripts.csproj if absent.
@@ -1029,15 +1030,15 @@ bool createScript(const fmt::ProjectDesc& proj, const std::string& name, CsKind 
         return false;
     }
 
-    const std::string path = dir + "\\" + name + ".cs";
+    const std::string path = dir + AVER_PATH_SEP + name + ".cs";
     if (fileExists(path)) {
-        if (err) *err = name + ".cs already exists in Content\\Scripts.";
+        if (err) *err = name + ".cs already exists in Content" AVER_PATH_SEP "Scripts.";
         return false;
     }
     if (!writeNewFile(path, scriptText(proj.name, name, kind), err)) return false;
     if (outPath) *outPath = path;
 
-    const std::string csproj = dir + "\\" + kCsprojName;
+    const std::string csproj = dir + AVER_PATH_SEP + kCsprojName;
     if (!fileExists(csproj)) {
         if (writeFileText(csproj, csprojText(engineRefs(dir)))) {
             if (outCsproj) *outCsproj = true;
@@ -1130,9 +1131,9 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
     const std::string scriptsDir = proj.scriptsDir();
 
     for (const char* d : {"Maps", "Meshes", "Materials", "Textures", "Sounds", "Scripts"}) {
-        const std::string path = content + "\\" + d;
+        const std::string path = content + AVER_PATH_SEP + d;
         if (!fileExists(path))
-            up.fixes.push_back({ProjectFix::Kind::CreateFolder, std::string("Create Content\\") + d, path});
+            up.fixes.push_back({ProjectFix::Kind::CreateFolder, std::string("Create Content" AVER_PATH_SEP) + d, path});
     }
 
     const std::string csproj = scriptsCsprojPath(proj);
@@ -1155,7 +1156,7 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
 
     if (!fileExists(csproj)) {
         up.fixes.push_back({ProjectFix::Kind::CreateCsproj,
-                            "Create Content\\Scripts\\Scripts.csproj", csproj});
+                            "Create Content" AVER_PATH_SEP "Scripts" AVER_PATH_SEP "Scripts.csproj", csproj});
         return up;
     }
 
@@ -1193,7 +1194,7 @@ ProjectUpgrade inspectProject(const fmt::ProjectDesc& proj) {
 
     if (xml.find("..\\Materials\\") == std::string::npos && xml.find("../Materials/") == std::string::npos)
         up.fixes.push_back({ProjectFix::Kind::AddMaterialsGlob,
-                            "Compile the C# materials under Content\\Materials",
+                            "Compile the C# materials under Content" AVER_PATH_SEP "Materials",
                             "<Compile Include=\"..\\Materials\\**\\*.cs\" />"});
     return up;
 }
@@ -1320,8 +1321,8 @@ bool migrateProject(const std::string& manifestPath, std::string* err) {
     upgrade::Context ctx;
     ctx.manifestPath = manifestPath;
     ctx.projectRoot  = std::filesystem::path(manifestPath).parent_path().string();
-    ctx.contentDir   = ctx.projectRoot + "\\Content";
-    ctx.scriptsDir   = ctx.contentDir + "\\Scripts";
+    ctx.contentDir   = ctx.projectRoot + AVER_PATH_SEP "Content";
+    ctx.scriptsDir   = ctx.contentDir + AVER_PATH_SEP "Scripts";
     ctx.name         = desc.name.empty()
                          ? std::filesystem::path(manifestPath).stem().string()
                          : desc.name;
@@ -1401,6 +1402,9 @@ u32 repathCopiedBinaries(const std::filesystem::path& oldRoot, const std::filesy
     std::string oldContentLower = oldContent;
     std::transform(oldContentLower.begin(), oldContentLower.end(), oldContentLower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    // And with one separator: a record may spell it either way, and the root is spelled the
+    // platform's way ('\\' on Windows, '/' elsewhere). The prefix test below compares both as '/'.
+    std::replace(oldContentLower.begin(), oldContentLower.end(), '\\', '/');
 
     u32 rewritten = 0;
     for (std::filesystem::recursive_directory_iterator it(binaries, ec), end; it != end && !ec; it.increment(ec)) {
@@ -1425,7 +1429,7 @@ u32 repathCopiedBinaries(const std::filesystem::path& oldRoot, const std::filesy
             std::string lower = value;
             std::transform(lower.begin(), lower.end(), lower.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            std::replace(lower.begin(), lower.end(), '/', '\\');
+            std::replace(lower.begin(), lower.end(), '\\', '/');
 
             out.append(text, i, valueAt - i);
             if (lower.rfind(oldContentLower, 0) == 0 && lower.size() > oldContentLower.size()) {

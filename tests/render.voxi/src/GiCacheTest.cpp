@@ -9,6 +9,7 @@
 
 #include "aver/core/Log.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -201,8 +202,13 @@ int main() {
 
     AVER_INFO("=== the cache directory is beside the project, not inside Content ===");
     {
+#if defined(_WIN32)
         const std::string d = fmt::giCacheDir("C:\\Projects\\Demo");
         check(d == "C:\\Projects\\Demo\\DerivedDataCache\\GI", "giCacheDir names DerivedDataCache\\GI");
+#else
+        const std::string d = fmt::giCacheDir("/home/me/Projects/Demo");
+        check(d == "/home/me/Projects/Demo/DerivedDataCache/GI", "giCacheDir names DerivedDataCache/GI");
+#endif
         check(fmt::giCacheDir("").empty(), "no project directory means no cache directory");
     }
 

@@ -47,15 +47,10 @@
 #include <cstdlib>
 #include <cstdio>
 
-// <unknwn.h> BEFORE <dxcapi.h>, and the order is load-bearing. dxcapi.h declares COM interfaces
-// derived from IUnknown but does not itself pull in a header that defines it; the D3D12 backend
-// never noticed because d3d12.h drags the whole Windows COM surface in ahead of it, and this
-// module deliberately includes no D3D headers at all. Without this the build dies in ~20
-// "'IUnknown': base class undefined" errors inside dxcapi.h that look like a broken SDK.
-#include <unknwn.h>
-
-#include <dxcapi.h>
-#include <wrl/client.h>
+// <unknwn.h> before <dxcapi.h> on Windows, DXC's own COM shim elsewhere, and a ComPtr for both --
+// see DxcApi.hpp, which is where the include-order trap this comment used to describe is handled now.
+#include "aver/rhi/DxcApi.hpp"
+#include "aver/core/DynamicLibrary.hpp"
 
 #include "aver/rhi/DxcShaderInclude.hpp"
 // W13: the SPIR-V blob cache. shaderCorpusHash() folds every shader file's text into the cache key
@@ -71,6 +66,7 @@
 #include <cstring>
 #include <cwchar>
 #include <filesystem>
+#include <iterator>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -78,7 +74,6 @@
 namespace aver::rhi::vkb {
 
 namespace {
-using Microsoft::WRL::ComPtr;
 
 // Splits a semicolon-separated define list, identical in shape to ShaderDesc::defines and to the
 // splitting D3D12Device.cpp's ShaderCompiler::compile does -- one behaviour, two backends.
@@ -150,16 +145,29 @@ void VulkanShaderCompiler::init() {
     if (tried_) return;
     tried_ = true;
 
-    dll_ = LoadLibraryW(L"dxcompiler.dll");
+    // Beside the executable first: bin/ is where the build copies the SPIR-V-capable one (see
+    // third_party/dxc-spirv/README.md), and a system copy might be a build without SPIR-V codegen.
+#if defined(_WIN32)
+    const char* names[] = {"dxcompiler.dll"};
+#else
+#if defined(__APPLE__)
+    const char* leaf = "libdxcompiler.dylib";
+#else
+    const char* leaf = "libdxcompiler.so";
+#endif
+    const std::string beside = aver::executableDir() + "/" + leaf;
+    const char* names[] = {beside.c_str(), leaf};
+#endif
+    const char* loaded = nullptr;
+    dll_ = aver::loadFirstLibrary(names, std::size(names), &loaded);
     if (!dll_) {
-        AVER_WARN("[RHI.Vulkan] dxcompiler.dll not found -- this backend has NO shader compiler "
-                  "(there is no FXC fallback: FXC emits DXBC, not SPIR-V)");
+        AVER_WARN("[RHI.Vulkan] no DXC found ({}) -- this backend has NO shader compiler "
+                  "(there is no FXC fallback: FXC emits DXBC, not SPIR-V)", aver::libraryError());
         return;
     }
-    auto create = reinterpret_cast<DxcCreateInstanceProc>(
-        reinterpret_cast<void*>(GetProcAddress(dll_, "DxcCreateInstance")));
+    auto create = reinterpret_cast<DxcCreateInstanceProc>(aver::librarySymbol(dll_, "DxcCreateInstance"));
     if (!create) {
-        AVER_WARN("[RHI.Vulkan] DxcCreateInstance missing from dxcompiler.dll -- no shader compiler");
+        AVER_WARN("[RHI.Vulkan] DxcCreateInstance missing from {} -- no shader compiler", loaded);
         return;
     }
 

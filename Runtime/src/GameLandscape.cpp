@@ -1,4 +1,5 @@
 #include "aver/game/GameLandscape.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #if AVER_MODULE_LANDSCAPE
 
@@ -228,7 +229,7 @@ void GameLandscape::loadForLevel(rhi::IDevice* device, const std::string& conten
         // wants it.
         landscapeMaterial_ = lp.material;
         if (!lp.section.empty()) {
-            path = contentDir.empty() ? lp.section : contentDir + "\\" + lp.section;
+            path = contentDir.empty() ? lp.section : contentDir + AVER_PATH_SEP + lp.section;
             std::error_code ec;
             if (!std::filesystem::exists(path, ec)) {
                 AVER_WARN("[Landscape] level's LANDSCAPE section '{}' does not exist at '{}' -- "

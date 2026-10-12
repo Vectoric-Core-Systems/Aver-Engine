@@ -1,4 +1,5 @@
 #include "aver/game/GameLocalization.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcStrings.hpp"
@@ -113,7 +114,7 @@ std::string initLocalization(const LocalizationInit& in) {
     if (!in.project) return "en";
     const std::string contentDir = in.project->contentDir();
     aver_fw_content_set_root(contentDir.c_str());
-    const std::string locDir = contentDir + "\\Localization";
+    const std::string locDir = contentDir + AVER_PATH_SEP "Localization";
     const int32_t found = aver_fw_loc_init(locDir.c_str(), in.project->localeDefault.c_str());
 
     std::vector<std::string> available;

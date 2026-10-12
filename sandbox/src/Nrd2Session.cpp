@@ -1,6 +1,7 @@
 // Tools > Train Neural Denoiser... and --nrd2-train (Nrd2Session.hpp).
 
 #include "Nrd2Session.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include "EditorNotifications.hpp"
 
@@ -39,12 +40,12 @@ struct TrainerHook final : rhi::IRenderFeature {
 
 std::string defaultDatasetDir() {
     const std::string d = userDataDir();
-    return d.empty() ? std::string() : d + "\\nrd2_dataset";
+    return d.empty() ? std::string() : d + AVER_PATH_SEP "nrd2_dataset";
 }
 
 std::string userWeightsPath() {
     const std::string d = userDataDir();
-    return d.empty() ? std::string() : d + "\\" + dn::kNrd2WeightsFileName;
+    return d.empty() ? std::string() : d + AVER_PATH_SEP + dn::kNrd2WeightsFileName;
 }
 
 const char* phaseName(dn::Nrd2TrainStatus::Phase p) {

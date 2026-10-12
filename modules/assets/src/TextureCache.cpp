@@ -2,6 +2,7 @@
 // setTextureCacheDir/textureCacheDir's storage. See TextureCache.hpp for the contract and
 // TextureUpload.cpp for the caller.
 #include "aver/assets/TextureCache.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
@@ -172,7 +173,7 @@ bool loadCachedTexture(const std::string& path, TextureUsage usage, CachedTextur
     if (!statTextureFile(path, size, mtime)) return false;
 
     const u64 key = cacheKey(normalizedAbsolutePathLower(path), size, mtime, usage);
-    const std::string file = dir + "\\" + cacheFileName(key);
+    const std::string file = dir + AVER_PATH_SEP + cacheFileName(key);
 
     std::vector<u8> bytes;
     if (!readFileBytes(file, bytes)) return false;   // no entry -- an ordinary miss
@@ -249,7 +250,7 @@ bool saveCachedTexture(const std::string& path, TextureUsage usage, const Cached
     putU32(bytes, in.coveragePreserved ? kFlagCoveragePreserved : 0u);
     for (const std::vector<u8>& mip : in.mipBlocks) bytes.insert(bytes.end(), mip.begin(), mip.end());
 
-    const std::string file = dir + "\\" + cacheFileName(key);
+    const std::string file = dir + AVER_PATH_SEP + cacheFileName(key);
     // See writeMutexFor's own comment for why this needs a lock at all: two threads baking the
     // SAME source concurrently would otherwise race the identical ".tmp" name.
     std::lock_guard<std::mutex> lock(writeMutexFor(key));

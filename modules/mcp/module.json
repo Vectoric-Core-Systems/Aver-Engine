@@ -8,6 +8,7 @@
   "option": "AVER_MODULE_MCP",
   "required": false,
   "default": true,
+  "platforms": ["windows"],
   "editions": {"standard": true, "slim": false, "full": true},
   "dependsOn": ["Aver.Core"],
   "consequence": "The editor cannot be driven over the loopback control channel and its status-bar widget is gone."

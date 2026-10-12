@@ -17,6 +17,7 @@
 // where a test can drive it with nothing but a temp directory, and SandboxApp.cpp calls it rather
 // than keeping a second copy of the same three-candidate order.
 #include <algorithm>
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include <array>
 #include <cctype>
 #include <filesystem>
@@ -44,9 +45,9 @@ inline std::array<std::string, 3> materialCandidatePaths(const std::string& bina
                                                           const std::string& contentDir,
                                                           const std::string& name) {
     return {
-        binariesDir.empty() ? std::string() : binariesDir + "\\Materials\\" + name + ".ocmat",
-        contentDir.empty()  ? std::string() : contentDir + "\\Materials\\" + name + ".ocmat",
-        contentDir.empty()  ? std::string() : contentDir + "\\" + name,
+        binariesDir.empty() ? std::string() : binariesDir + AVER_PATH_SEP "Materials" AVER_PATH_SEP + name + ".ocmat",
+        contentDir.empty()  ? std::string() : contentDir + AVER_PATH_SEP "Materials" AVER_PATH_SEP + name + ".ocmat",
+        contentDir.empty()  ? std::string() : contentDir + AVER_PATH_SEP + name,
     };
 }
 
@@ -74,8 +75,8 @@ inline std::vector<std::string> projectMaterialStems(const std::string& binaries
     std::unordered_set<std::string> stems;
     std::error_code ec;
     const std::string dirs[2] = {
-        binariesDir.empty() ? std::string() : binariesDir + "\\Materials",
-        contentDir.empty()  ? std::string() : contentDir + "\\Materials",
+        binariesDir.empty() ? std::string() : binariesDir + AVER_PATH_SEP "Materials",
+        contentDir.empty()  ? std::string() : contentDir + AVER_PATH_SEP "Materials",
     };
     for (const std::string& dir : dirs) {
         if (dir.empty() || !std::filesystem::exists(dir, ec)) continue;

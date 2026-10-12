@@ -27,6 +27,13 @@ aver_add_module(Aver.RHI.Vulkan
 target_include_directories(Aver.RHI.Vulkan PRIVATE
   ${CMAKE_SOURCE_DIR}/third_party/vulkan-headers/include
 )
+# libdxcompiler beside the executables. On Windows modules/rhi.d3d12 copies the vendored DLL; there
+# is no D3D12 module anywhere else, so this one does it (cmake/AvDxc.cmake). The library is loaded at
+# run time, so a machine without one still builds -- and reports "no shader compiler" when run.
+if(NOT WIN32)
+  include(AvDxc)
+  aver_stage_dxc(Aver.RHI.Vulkan)
+endif()
 
 # No `vulkan-1.lib` exists anywhere on this machine (confirmed: that import library ships only with
 # the SDK, which the README above deliberately keeps uninstalled -- there is no VULKAN_SDK
@@ -37,10 +44,12 @@ target_include_directories(Aver.RHI.Vulkan PRIVATE
 # table, loaded by VulkanDevice::init()). So "link it by name" means naming the DLL to
 # LoadLibraryW, not naming an import library to the linker -- there is nothing Vulkan-related to
 # add to target_link_libraries below; Aver.RHI (above) is this module's only link dependency.
-target_compile_definitions(Aver.RHI.Vulkan PRIVATE
-  VK_NO_PROTOTYPES=1
-  VK_USE_PLATFORM_WIN32_KHR=1
-)
+target_compile_definitions(Aver.RHI.Vulkan PRIVATE VK_NO_PROTOTYPES=1)
+# The Win32 surface types are the only platform ones this module names. Off Windows the surface comes
+# from Aver.Platform (createVulkanSurface in Window.hpp), so no X11, Wayland or Metal header is needed.
+if(WIN32)
+  target_compile_definitions(Aver.RHI.Vulkan PRIVATE VK_USE_PLATFORM_WIN32_KHR=1)
+endif()
 
 # In-window UI: DONE, and this comment said otherwise long after it stopped being true. It claimed
 # imgui_impl_vulkan was "a real, not-yet-vendored dependency" and that "VulkanDevice simply does not
@@ -84,3 +93,13 @@ target_compile_definitions(Aver.RHI.Vulkan PRIVATE
 # AVER_RHI_VULKAN (scripts/module-matrix.ps1's vulkan-on row layers Vulkan ON TOP of the default
 # set rather than replacing it), so that copy step is always present when this module is. Flagged
 # here so it is not a silent gap the day a Vulkan-only, D3D12-off configuration is asked for.
+
+# ARCHIVE ORDER, for the linkers that care about it. Aver.RHI's factory (RHI.cpp, tryBackend) calls
+# createVulkanDevice, which lives HERE, while this module links Aver.RHI -- so a single pass over the
+# archives meets this one first, keeps nothing from it, and leaves the factory's call unresolved.
+# MSVC's linker resolves across every library on the line in any order and never noticed. GNU ld and
+# lld do not, so the cycle is stated: CMake then repeats the pair on the link line. LINK_ONLY keeps it
+# out of every consumer's include paths and definitions.
+if(NOT MSVC)
+  target_link_libraries(Aver.RHI INTERFACE $<LINK_ONLY:Aver.RHI.Vulkan>)
+endif()

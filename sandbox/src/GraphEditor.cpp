@@ -10,6 +10,7 @@
 //      docs/VISUAL_SCRIPTING.md). Always go through save() below, which threads originalText_ through
 //      writeOcgraph so unrecognised lines survive untouched (testUnknownRecords, OcGraphTest.cpp:183).
 #include "EditorTransform.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "EditorKeybinds.hpp"
 #include "EditorPrefs.hpp"
 #include "GraphEditor.hpp"
@@ -1839,7 +1840,7 @@ void GraphEditor::refreshSchemeActionsIfNeeded() {
         schemeResolvedPath_.clear();
         return;
     }
-    const std::string schemePath = proj.contentDir() + "\\" + proj.inputScheme;
+    const std::string schemePath = proj.contentDir() + AVER_PATH_SEP + proj.inputScheme;
 
     std::error_code ec;
     const auto writeTime = std::filesystem::last_write_time(schemePath, ec);

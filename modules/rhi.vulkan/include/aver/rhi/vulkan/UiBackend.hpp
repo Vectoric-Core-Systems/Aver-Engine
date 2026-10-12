@@ -60,6 +60,11 @@ struct UiBackendInitDesc {
     // VulkanCommon.hpp section 1), so a toolkit built against a render-pass contract cannot be
     // plugged in here without one being invented for it.
     bool dynamicRendering = true;
+
+    // The device's own vkGetInstanceProcAddr (a PFN_vkGetInstanceProcAddr). A toolkit resolves its
+    // entry points through this one, so its calls go to the same loader library the instance came
+    // from -- off Windows that may be the window layer's, not a fresh dlopen of the same name.
+    u64 getInstanceProcAddr = 0;
 };
 
 // One Vulkan-native in-window UI toolkit. IDevice::uiInit/uiNewFrame/uiShutdown/uiActive/
@@ -92,6 +97,9 @@ public:
     // Forwards one raw Win32 message (see aver::rhi::registerUiWndProc). True if the toolkit
     // consumed it.
     virtual bool wndProc(void* hwnd, u32 msg, u64 wparam, i64 lparam) = 0;
+    // Forwards one window-layer event (aver::rhi::registerUiEventProc; a const SDL_Event* off
+    // Windows). Defaulted: a toolkit that only ever runs on Win32 has nothing to do here.
+    virtual bool eventProc(const void* nativeEvent) { (void)nativeEvent; return false; }
 
     // A descriptor the toolkit can draw one of THIS BACKEND'S textures through, as the u64
     // IDevice::uiTextureId hands out. Unlike D3D12 -- where every texture must live in the one

@@ -8,6 +8,7 @@
   "option": "AVER_RHI_D3D11",
   "required": false,
   "default": true,
+  "platforms": ["windows"],
   "dependsOn": ["Aver.RHI"],
   "consequence": "No DirectX 11 renderer."
 }

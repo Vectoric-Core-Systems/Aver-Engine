@@ -50,11 +50,18 @@ private:
     // Re-composites the pristine image plus the current status text and pushes it to the window.
     void repaint();
 
+#if defined(_WIN32)
     void* hwnd_ = nullptr;   // HWND
     void* memDc_ = nullptr;  // HDC
     void* bitmap_ = nullptr; // HBITMAP
     void* font_ = nullptr;   // HFONT, sized for the display's DPI
     void* bits_ = nullptr;   // the DIB's pixels, owned by the bitmap
+#else
+    void* window_ = nullptr;   // SDL_Window*
+    void* canvas_ = nullptr;   // SDL_Surface*, the composited frame repaint() builds
+    void* renderer_ = nullptr; // SDL_Renderer* over canvas_, for the status line's text
+    f32 scale_ = 1.0f;         // the display scale the art was sized for; the text is sized from it
+#endif
     u64 shownAtMs_ = 0;
     // setProgress's own pump() throttle -- see that method for why repaint() runs on every call
     // regardless (it reaches the screen with no message loop involved) while pump() itself is

@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameInput.hpp"
 #include "aver/game/GameSystemsWiring.hpp"
@@ -326,7 +327,7 @@ void SandboxApp::startPlay() {
     // file fresh every time. See that method's own header comment for the full return contract.
     {
         std::string schemePath = project_.inputScheme.empty()
-            ? std::string() : project_.contentDir() + "\\" + project_.inputScheme;
+            ? std::string() : project_.contentDir() + AVER_PATH_SEP + project_.inputScheme;
         if (!schemePath.empty() && !fileExists(schemePath)) {
             AVER_WARN("[Sandbox] Play: INPUT.SCHEME '{}' does not exist -- no input scheme will be loaded",
                       schemePath);
@@ -336,7 +337,7 @@ void SandboxApp::startPlay() {
         // own flush creates its target directory itself the first time it writes
         // (modules/settings/src/Settings.cpp's aver_settings_flush), the same way an .ocsave or a
         // .editorprefs write does.
-        const std::string settingsPath = project_.dir + "\\Saved\\Settings.ini";
+        const std::string settingsPath = project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "Settings.ini";
         const int32_t actions = scripts_.configureInput(schemePath, settingsPath);
         if (actions > 0)
             AVER_INFO("[Sandbox] Play: input scheme ready ({} action(s) from '{}')", actions, schemePath);
@@ -798,7 +799,7 @@ void SandboxApp::reloadAfterPlay(Engine& eng) {
     const Vec3 cam = camPos_; const f32 yaw = yaw_, pitch = pitch_, speed = flySpeed_;
     const bool wasUnsaved = pieWasUnsaved_;
     projectLoading_ = std::make_unique<LoadingScreen>(
-        eng, eng.window() != nullptr && maxFrames_ == 0, executableDir() + "\\splash.png");
+        eng, eng.window() != nullptr && maxFrames_ == 0, executableDir() + AVER_PATH_SEP "splash.png");
     startupSettleCount_ = -2;
     startupSettleFrames_ = 0;
     projectLoadingFrames_ = 0;

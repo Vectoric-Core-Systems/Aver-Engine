@@ -1,4 +1,5 @@
 #include "aver/synapse/TextRecords.hpp"
+#include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 
 #include <algorithm>
 #include <charconv>
@@ -164,7 +165,7 @@ bool parseF32(std::string_view s, f32& out) {
     if (s.empty()) return false;
     f32 v = 0;
     const char* const end = s.data() + s.size();
-    const auto r = std::from_chars(s.data(), end, v);
+    const auto r = aver::fromChars(s.data(), end, v);
     if (r.ec != std::errc{} || r.ptr != end || !std::isfinite(v)) return false;
     out = v;
     return true;

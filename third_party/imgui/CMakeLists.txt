@@ -10,9 +10,18 @@ add_library(imgui STATIC
   imgui_draw.cpp
   imgui_tables.cpp
   imgui_widgets.cpp
-  backends/imgui_impl_win32.cpp
-  backends/imgui_impl_dx12.cpp
 )
+# The Win32 platform backend and the D3D12 renderer backend only build against the Windows SDK.
+# Everywhere else the window is SDL's, so the platform backend is SDL 3's, from the same Dear ImGui
+# release (v1.92.9-docking; imgui_impl_win32.cpp here is byte-identical to that tag's).
+if(WIN32)
+  target_sources(imgui PRIVATE
+    backends/imgui_impl_win32.cpp
+    backends/imgui_impl_dx12.cpp)
+else()
+  target_sources(imgui PRIVATE backends/imgui_impl_sdl3.cpp)
+  target_link_libraries(imgui PUBLIC ${AVER_SDL3_TARGET})
+endif()
 if(AVER_RHI_VULKAN)
   target_sources(imgui PRIVATE backends/imgui_impl_vulkan.cpp)
   # The SAME vendored headers modules/rhi.vulkan builds against, and for the same reason it does:
@@ -31,6 +40,8 @@ target_include_directories(imgui PUBLIC
 )
 if(MSVC)
   target_compile_options(imgui PRIVATE /w)
+else()
+  target_compile_options(imgui PRIVATE -w)
 endif()
 if(WIN32)
   # d3d12/dxgi for the DX12 backend; dwmapi + imm32 for the Win32 backend.

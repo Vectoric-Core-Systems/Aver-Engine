@@ -1,5 +1,6 @@
 // IES (LM-63) parser, lookup and GPU table bake. See IesProfile.hpp.
 #include "aver/formats/IesProfile.hpp"
+#include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/platform/FileSystem.hpp"
 
@@ -92,7 +93,7 @@ bool parseIes(std::string_view text, IesProfile& out, std::string* err) {
         if (at >= tok.size()) return false;
         const std::string_view t = tok[at++];
         f64 x{};
-        const auto r = std::from_chars(t.data(), t.data() + t.size(), x);
+        const auto r = aver::fromChars(t.data(), t.data() + t.size(), x);
         if (r.ec != std::errc{} || !std::isfinite(x)) return false;
         v = x;
         return true;

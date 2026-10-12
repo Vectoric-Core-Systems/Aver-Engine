@@ -29,7 +29,9 @@ std::string lower(std::string_view s) {
 
 usize insertSorted(std::vector<OcSeqKey>& keys, OcSeqKey k) {
     const auto it = std::upper_bound(keys.begin(), keys.end(), k.t, [](f64 t, const OcSeqKey& a) { return t < a.t; });
-    return static_cast<usize>(keys.insert(it, std::move(k)) - keys.begin());
+    // Two statements -- see SequenceCurveOps.cpp's insertSorted for the evaluation-order bug one hides.
+    const auto at = keys.insert(it, std::move(k));
+    return static_cast<usize>(at - keys.begin());
 }
 
 i32 targetOf(scene::Entity e) { return static_cast<i32>(static_cast<u32>(e)); }

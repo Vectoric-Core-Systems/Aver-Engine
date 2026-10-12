@@ -1,4 +1,5 @@
 #include "aver/upgrade/Upgrade.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include "aver/core/Log.hpp"
 #include "aver/core/Version.hpp"
@@ -58,8 +59,8 @@ bool exists(const std::string& path) {
 // the pair, or one scaffolded by a fixed engine that declined to write F# it could not reference,
 // is already correct.
 bool step_0_1_to_0_2(const Context& ctx, std::string* err) {
-    const std::string fsproj = ctx.scriptsDir + "\\Scripts.FSharp.fsproj";
-    const std::string sky    = ctx.scriptsDir + "\\Sky.fs";
+    const std::string fsproj = ctx.scriptsDir + AVER_PATH_SEP "Scripts.FSharp.fsproj";
+    const std::string sky    = ctx.scriptsDir + AVER_PATH_SEP "Sky.fs";
     if (!exists(fsproj) && !exists(sky)) return true;
 
     std::string text;

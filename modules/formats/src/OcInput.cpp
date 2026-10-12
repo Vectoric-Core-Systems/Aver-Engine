@@ -70,6 +70,7 @@
 // declared later in the file -- the same tolerance OcGraph.hpp documents for LINK/ENTRY -- because
 // nothing about this grammar needs "declared before used" once names, not position, are the link.
 #include "aver/formats/OcInput.hpp"
+#include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/platform/FileSystem.hpp"
 
@@ -104,7 +105,7 @@ bool strictF32(std::string_view s, f32& out) {
     s = trim(s);
     if (s.empty()) return false;
     f64 v{};
-    const auto r = std::from_chars(s.data(), s.data() + s.size(), v);
+    const auto r = aver::fromChars(s.data(), s.data() + s.size(), v);
     if (r.ec != std::errc{} || r.ptr != s.data() + s.size()) return false;
     out = static_cast<f32>(v);
     return true;

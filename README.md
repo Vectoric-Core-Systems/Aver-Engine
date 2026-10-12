@@ -12,6 +12,8 @@ You can choose to download from multiple areas, the release of the [Aver Launche
 
 Alternatively you can download from the releases here but download the [.zip](https://github.com/Vectoric-Core-Systems/Aver-Engine/releases) folder from releases for compiled binary.
 
+To build from source on Windows, Linux or macOS, see [docs/PLATFORMS.md](docs/PLATFORMS.md).
+
 You can also choose to download the entire source folder which has Engine Documentation, this README, GNU Lesser General Public License as well as the [Source Code](https://github.com/Vectoric-Core-Systems/Aver-Engine)
 
 The branches of this engine available:

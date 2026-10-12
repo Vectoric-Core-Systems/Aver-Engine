@@ -40,7 +40,8 @@ struct WindowDesc {
     bool quitOnDestroy = true;
 };
 
-// Minimal OS window (Win32 backend). create() returns false rather than aborting.
+// Minimal OS window: Win32 on Windows (src/win32), SDL 3 everywhere else (src/sdl). create() returns
+// false rather than aborting.
 class Window {
 public:
     Window() = default;
@@ -57,6 +58,12 @@ public:
 
     // Retitles a live window.
     void setTitle(const std::string& title);
+    // The window's OUTER size, frame and title bar included where the platform draws them (Win32's
+    // GetWindowRect), in the same physical pixels as width()/height(). False without a window.
+    bool frameSize(i32& w, i32& h) const;
+    // Resizes the outer window to w x h, keeping its position and z-order and WITHOUT activating it:
+    // a capture run's --resize-cycle must not take focus from whatever the machine's owner is doing.
+    void setFrameSize(i32 w, i32 h);
     // Reveals a window created with WindowDesc::startHidden. Idempotent and harmless on a window
     // that is already visible, so a caller does not have to track which case it is in.
     void show(bool activate = true);
@@ -84,7 +91,7 @@ public:
     u32 height() const { return height_; }
     // Display scale factor for this window's monitor (1.0 = 96 DPI). width()/height() are physical.
     f32 dpiScale() const { return dpiScale_; }
-    void* nativeHandle() const { return nativeHandle_; } // HWND on Windows
+    void* nativeHandle() const { return nativeHandle_; } // HWND on Windows, SDL_Window* elsewhere
     bool valid() const { return nativeHandle_ != nullptr; }
     bool quitOnDestroy() const { return quitOnDestroy_; }
     // True while this window has the keyboard focus (is the foreground window).
@@ -96,6 +103,27 @@ public:
     using MessageHook = bool (*)(void* hwnd, u32 msg, u64 wparam, i64 lparam);
     void setMessageHook(MessageHook h) { messageHook_ = h; }
     MessageHook messageHook() const { return messageHook_; }
+
+    // The same hook for a window layer that hands out events as structs instead of messages -- SDL's,
+    // everywhere but Windows, where `nativeEvent` is a const SDL_Event*. Every event pumpEvents() sees
+    // is offered here, including the ones for windows this class did not create (Dear ImGui's own
+    // secondary viewports), and the return value does NOT stop it reaching this window's callback:
+    // the toolkit reports "I used this" for every input event it reads, and the editor decides who
+    // owns the keyboard from uiWantsKeyboard(), the same as on Win32. Never called on Windows.
+    using NativeEventHook = bool (*)(const void* nativeEvent);
+    void setNativeEventHook(NativeEventHook h) { nativeEventHook_ = h; }
+    NativeEventHook nativeEventHook() const { return nativeEventHook_; }
+
+    // RELATIVE MOUSE MODE, for a game that captures the pointer. Off Windows the cursor is hidden and
+    // held by the window system, and motion is reported as deltas -- the only form of capture Wayland
+    // allows at all, since a client there cannot move the pointer. Runtime/src/MouseCapture.cpp's
+    // Win32 path (ShowCursor/ClipCursor/SetCursorPos) is unchanged and does not use these: on
+    // Windows setRelativeMouse is a no-op and takeRelativeMotion reports nothing.
+    void setRelativeMouse(bool on);
+    // The motion accumulated since the last call, in the same physical pixels as width()/height(),
+    // and resets it.
+    void takeRelativeMotion(f32& dx, f32& dy) { dx = relDx_; dy = relDy_; relDx_ = relDy_ = 0.0f; }
+    void addRelativeMotion(f32 dx, f32 dy) { relDx_ += dx; relDy_ += dy; }
 
     // A file forwarded here by another instance's launch, delivered as WM_COPYDATA (see the Win32
     // single-instance IPC further down, and the sender/receiver gates in SandboxApp.cpp's
@@ -204,6 +232,8 @@ private:
     EventCallback callback_ = nullptr;
     void* callbackUser_ = nullptr;
     MessageHook messageHook_ = nullptr;
+    NativeEventHook nativeEventHook_ = nullptr;
+    f32 relDx_ = 0.0f, relDy_ = 0.0f;
     CloseGuard closeGuard_ = nullptr;
     void* closeGuardUser_ = nullptr;
     OpenRequestHook openRequestHook_ = nullptr;
@@ -219,5 +249,29 @@ private:
     bool resizeGrab_ = false;
     i32 mouseCapture_ = 0;
 };
+
+// Whether the key with Win32 virtual-key code `vk` is held RIGHT NOW, read from the OS and not from
+// any event stream (GetAsyncKeyState on Windows, SDL's keyboard state elsewhere). For a loop that has
+// no frame of events to look at, such as a sequence run's Escape check. False for an unknown code.
+bool keyDownNow(i32 vk);
+
+// ---- Vulkan, for a GPU backend with no window-system code of its own ------------------------------
+//
+// Off Windows the window is SDL's, and SDL is what knows whether it sits on X11, Wayland or Cocoa.
+// These two hooks let Aver.RHI.Vulkan present into it without naming any of those, and without
+// linking SDL: the RHI already depends on this module, and Vulkan types cross as void*/u64.
+//
+// On Windows both answer "not provided" and the backend keeps its own Win32 surface path.
+
+// The window layer's vkGetInstanceProcAddr (a PFN_vkGetInstanceProcAddr), or null when it has none:
+// on Windows, headless, or with no Vulkan loader installed. When non-null the GPU backend uses it
+// for EVERYTHING, so the instance and the surface come from one loader library and not two copies
+// of it that happen to share a name.
+void* vulkanGetInstanceProcAddr();
+
+// Creates a VkSurfaceKHR for `nativeHandle` (a Window::nativeHandle()) on `vkInstance`, writing it
+// to `outSurface`. The instance must have VK_KHR_surface and the window system's own surface
+// extension enabled. False, logged, on failure -- and always on Windows.
+bool createVulkanSurface(void* nativeHandle, void* vkInstance, u64* outSurface);
 
 } // namespace aver

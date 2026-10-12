@@ -3,6 +3,7 @@
 // project's content folder (the same id space and image listing as light cookies) and decodes it.
 // Plugs into aver::game::SceneDecalFeed. docs/rendering/DECALS.md.
 #include "LightDetails.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/platform/Image.hpp"
 #include "aver/game/SceneDecalFeed.hpp"
 
@@ -29,7 +30,7 @@ public:
         const std::string rel = pathFor(id);
         if (rel.empty()) return false;
         std::string err;
-        return decodeImage(dir_ + "\\" + rel, out, &err) && out.valid();
+        return decodeImage(dir_ + AVER_PATH_SEP + rel, out, &err) && out.valid();
     }
 
     // Forces a rescan on the next lookup (a file was added to the project).

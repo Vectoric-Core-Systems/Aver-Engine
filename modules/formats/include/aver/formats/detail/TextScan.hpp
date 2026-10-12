@@ -2,6 +2,7 @@
 // Small, locale-independent text-scanning helpers shared by the .oc* text parsers.
 // All views alias the caller's buffer; no allocation except the split vectors.
 #include "aver/core/Types.hpp"
+#include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 
 #include <charconv>
 #include <string>
@@ -81,7 +82,7 @@ inline bool equalsCI(std::string_view a, std::string_view b) {
 inline f64 parseF64(std::string_view s, f64 fallback = 0.0) {
     s = trim(s);
     f64 v{};
-    const auto r = std::from_chars(s.data(), s.data() + s.size(), v);
+    const auto r = aver::fromChars(s.data(), s.data() + s.size(), v);
     return r.ec == std::errc{} ? v : fallback;
 }
 

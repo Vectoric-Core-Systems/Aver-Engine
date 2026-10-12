@@ -1,5 +1,17 @@
 cmake_minimum_required(VERSION 3.24)
-project(AverEngine VERSION 0.7.0 LANGUAGES C CXX RC)
+# macOS 14 or later, set before project() because that is where CMake reads it. The C++20 library the
+# engine uses (std::format, floating std::to_chars underneath it) is only available in libc++ from a
+# 13.3 target on, and 14 is the oldest release docs/PLATFORMS.md supports.
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
+endif()
+project(AverEngine VERSION 0.7.0 LANGUAGES C CXX)
+# RC ONLY WHERE THERE IS A RESOURCE COMPILER. Naming it in project() above made configure fail on
+# line 2 everywhere but Windows ("No CMAKE_RC_COMPILER could be found"), before a single option was
+# read. The .rc files are icons and version blocks for Windows executables; nothing else has them.
+if(WIN32)
+  enable_language(RC)
+endif()
 
 # THE FULL ENGINE VERSION IS 0.7.0-1, and the "-1" cannot live in project() above: CMake accepts only
 # numeric components there. So the suffix is kept here and appended wherever the version reaches the
@@ -33,6 +45,24 @@ endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+# ONE bin/ ON EVERY PLATFORM. On Windows a SHARED module is a RUNTIME artifact, so its .dll already
+# lands in bin/ beside the executables, and everything that finds one at run time -- the managed
+# NativeResolver, the scripting bridge, a staged game -- assumes exactly that. A .so or .dylib is a
+# LIBRARY artifact instead and would land in lib/, so the same layout is forced here, and the RPATH
+# below makes bin/ load its own libraries without LD_LIBRARY_PATH or DYLD_LIBRARY_PATH.
+if(NOT WIN32)
+  # Every static module is linked into at least one of the SHARED ones (Aver.Core into all of them),
+  # and an ELF or Mach-O shared object cannot carry non-PIC code. MSVC has no such distinction.
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  if(APPLE)
+    set(CMAKE_BUILD_RPATH "@loader_path")
+    set(CMAKE_INSTALL_RPATH "@loader_path")
+  else()
+    set(CMAKE_BUILD_RPATH "$ORIGIN")
+    set(CMAKE_INSTALL_RPATH "$ORIGIN")
+  endif()
+endif()
 
 # --- RHI backend options ---
 #
@@ -114,11 +144,16 @@ if(MSVC)
     NOMINMAX WIN32_LEAN_AND_MEAN
     UNICODE _UNICODE
     _CRT_SECURE_NO_WARNINGS)
+else()
+  # GCC and Clang: -Wall -Wextra is the nearest thing they have to /W4.
+  add_compile_options(-Wall -Wextra)
 endif()
 
 message(STATUS "Aver Engine ${PROJECT_VERSION}${AVER_VERSION_SUFFIX} | D3D12=${AVER_RHI_D3D12} D3D11=${AVER_RHI_D3D11} Vulkan=${AVER_RHI_VULKAN}")
 
 # ---- Third-party (permissively-licensed) ----
+# SDL 3, the window/input/audio layer everywhere but Windows (defines AVER_SDL3_TARGET; see the file).
+include(AvSdl)
 if(AVER_ENABLE_UI)
   add_subdirectory(third_party/imgui)
 endif()
@@ -141,6 +176,8 @@ add_subdirectory(modules/audio)
 # than being unconditional like the mixer: a build with no backend still has a working mixer.
 if(WIN32)
   add_subdirectory(modules/audio.wasapi)
+else()
+  add_subdirectory(modules/audio.sdl)   # the same AudioDevice over SDL 3
 endif()
 # Durable key/value for a shipped game. Nothing above Core/Platform, so it sits here beside them
 # rather than behind a module switch: a game with no scene still has settings.
@@ -401,8 +438,13 @@ aver_check_module_manifests()
 # LINKS NOTHING FROM THE ENGINE. Not Aver.Core, not Aver.Platform, nothing. It has to still work when
 # the engine does not, and the only way to be certain of that is to share no code with it. Win32 and
 # the CRT only; see the file's own header comment.
+#
+# WINDOWS ONLY. The reporter is a Win32 dialog, and so is the report it shows: off Windows
+# modules/core/src/CrashReport.cpp is a stated no-op and a crash is the system's own.
+if(WIN32)
 add_executable(AverCrashReporter tools/AverCrashReporter.cpp)
 set_target_properties(AverCrashReporter PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
 if(MSVC)
   # A GUI subsystem app: it must not flash a console window when the engine spawns it, and it is
   # spawned DETACHED_PROCESS precisely so it outlives the crash. main() is still the entry point --

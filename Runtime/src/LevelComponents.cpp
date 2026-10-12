@@ -1,4 +1,5 @@
 #include "aver/game/LevelComponents.hpp"
+#include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 
 #if AVER_MODULE_SCENE
 
@@ -58,7 +59,7 @@ bool parseNum(std::string_view s, double& out) {
     const char* first = s.data();
     const char* last = s.data() + s.size();
     double v = 0.0;
-    const auto r = std::from_chars(first, last, v);
+    const auto r = aver::fromChars(first, last, v);
     if (r.ec != std::errc{} || r.ptr != last) return false;
     out = v;
     return true;

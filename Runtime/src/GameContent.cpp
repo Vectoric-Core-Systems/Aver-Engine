@@ -1,4 +1,5 @@
 #include "aver/game/GameContent.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
@@ -23,6 +24,7 @@
 // Always included: AssetType/assetTypeFromPath are used by both loadProjectMeshes (scene-guarded)
 // and loadProjectParticleEffects (particles-guarded); scoping to either guard breaks the other.
 #include "aver/assets/AssetId.hpp"
+#include "aver/platform/FileSystem.hpp"   // toNativeSeparators
 
 #if AVER_MODULE_PBR
 #  include "aver/assets/TextureAtlas.hpp"
@@ -919,7 +921,7 @@ constexpr u32 kCollisionCacheMagic   = 0x4C4F4341u;
 constexpr u32 kCollisionCacheVersion = 1;
 
 std::string collisionCacheDir(const std::string& projectDir) {
-    return projectDir.empty() ? std::string() : projectDir + "\\Saved\\DerivedDataCache\\Collision";
+    return projectDir.empty() ? std::string() : projectDir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "DerivedDataCache" AVER_PATH_SEP "Collision";
 }
 
 // "<hash>.occol", FNV-1a hash of the key (mesh path, size, mtime, version).
@@ -932,7 +934,7 @@ std::string collisionCachePathFor(const std::string& projectDir, const std::stri
     const u64 h = fnv1a64(std::string_view(key));
     char name[24];
     std::snprintf(name, sizeof(name), "%016llx.occol", static_cast<unsigned long long>(h));
-    return dir + "\\" + name;
+    return dir + AVER_PATH_SEP + name;
 }
 
 // Reads and validates cache entry against source mesh's current path/size/mtime.
@@ -1123,9 +1125,9 @@ std::unique_ptr<GameContent::CollisionMesh> buildCollisionMesh(const fmt::OcMesh
 bool slotCollidesFromFiles(const std::string& binariesDir, const std::string& contentDir, const std::string& name) {
     if (name.empty() || contentDir.empty()) return true;
     const std::string candidates[3] = {
-        binariesDir + "\\Materials\\" + name + ".ocmat",
-        contentDir + "\\Materials\\" + name + ".ocmat",
-        contentDir + "\\" + name,
+        binariesDir + AVER_PATH_SEP "Materials" AVER_PATH_SEP + name + ".ocmat",
+        contentDir + AVER_PATH_SEP "Materials" AVER_PATH_SEP + name + ".ocmat",
+        contentDir + AVER_PATH_SEP + name,
     };
     for (const std::string& path : candidates) {
         std::error_code ec;
@@ -1474,7 +1476,7 @@ std::string GameContent::resolveAssetPath(const pbr::TextureRef& ref) const {
         if (absolute) return p;
         const std::string content = project_.contentDir();
         if (!content.empty()) {
-            const std::string full = content + "\\" + p;
+            const std::string full = content + AVER_PATH_SEP + p;
             std::error_code ec;
             if (std::filesystem::exists(full, ec)) return full;
         }
@@ -1602,8 +1604,8 @@ u32 GameContent::resolveMaterialGraph(const std::string& graphRef) const {
     if (content.empty()) return 0;
 
     // Content-relative path (matches COMP mesh= and TEX conventions).
-    std::string path = content + "\\" + graphRef;
-    for (char& c : path) if (c == '/') c = '\\';
+    std::string path = content + AVER_PATH_SEP + graphRef;
+    toNativeSeparators(path);
 
     // Compile once: multiple materials can share a graph.
     if (const u32 known = pbr::materialGraphs().idOf(path)) return known;
@@ -1628,9 +1630,9 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
     if (!content.empty()) {
         // Built .ocmat (Binaries) wins over hand-authored (Content).
         const std::string candidates[3] = {
-            project_.binariesDir() + "\\Materials\\" + name + ".ocmat",
-            content + "\\Materials\\" + name + ".ocmat",
-            content + "\\" + name,
+            project_.binariesDir() + AVER_PATH_SEP "Materials" AVER_PATH_SEP + name + ".ocmat",
+            content + AVER_PATH_SEP "Materials" AVER_PATH_SEP + name + ".ocmat",
+            content + AVER_PATH_SEP + name,
         };
         for (const std::string& path : candidates) {
             std::error_code ec;

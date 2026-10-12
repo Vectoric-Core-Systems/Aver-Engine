@@ -10,16 +10,14 @@
 // The defines below mirror VoxiRenderer::createScenePipelines, PathTracer.cpp, WaterSurface.cpp, Nrd2.cpp
 // (AVER_NRD2_PASS, no prelude) and NeuRaC.cpp / NeuRaCGuide.cpp (SM 6.2, no defines).
 
-#define NOMINMAX
-#include <windows.h>
-
+#include "aver/core/DynamicLibrary.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/pbr/PbrShaders.hpp"
 #include "aver/rhi/DxcShaderInclude.hpp"
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
 
-#include <wrl/client.h>
+#include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -29,7 +27,7 @@
 #include <vector>
 
 using namespace aver;
-using Microsoft::WRL::ComPtr;
+using rhi::ComPtr;
 namespace fs = std::filesystem;
 
 #ifndef AVER_REPO_ROOT
@@ -143,17 +141,25 @@ std::string stageShaders() {
 int main() {
     AVER_INFO("=== VoxiSpirvCompileTest ===");
 
+    // The SPIR-V-capable DXC: vendored in the tree on Windows, staged into bin/ by cmake/AvDxc.cmake
+    // everywhere else (Microsoft's build, or the Vulkan SDK's).
+#if defined(_WIN32)
     const fs::path vendored = fs::path(AVER_REPO_ROOT) / "third_party" / "dxc-spirv" / "dxcompiler.dll";
-    HMODULE dll = fs::exists(vendored) ? LoadLibraryW(vendored.wstring().c_str()) : nullptr;
+#elif defined(__APPLE__)
+    const fs::path vendored = fs::path(executableDir()) / "libdxcompiler.dylib";
+#else
+    const fs::path vendored = fs::path(executableDir()) / "libdxcompiler.so";
+#endif
+    void* dll = fs::exists(vendored) ? loadLibrary(vendored.string().c_str()) : nullptr;
     if (!dll) {
-        AVER_WARN("  SKIP  third_party/dxc-spirv/dxcompiler.dll (the SPIR-V-capable DXC) is absent");
+        AVER_WARN("  SKIP  {} (the SPIR-V-capable DXC) is absent", vendored.string());
         return kSkip;
     }
-    auto create = reinterpret_cast<DxcCreateInstanceProc>(reinterpret_cast<void*>(GetProcAddress(dll, "DxcCreateInstance")));
+    auto create = reinterpret_cast<DxcCreateInstanceProc>(librarySymbol(dll, "DxcCreateInstance"));
     ComPtr<IDxcUtils> utils;
     ComPtr<IDxcCompiler3> compiler;
     if (!create || FAILED(create(CLSID_DxcUtils, IID_PPV_ARGS(&utils))) || FAILED(create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)))) {
-        AVER_WARN("  SKIP  dxcompiler.dll did not initialise");
+        AVER_WARN("  SKIP  {} did not initialise", vendored.string());
         return kSkip;
     }
 

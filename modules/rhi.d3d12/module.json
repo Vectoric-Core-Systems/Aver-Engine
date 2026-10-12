@@ -8,6 +8,7 @@
   "option": "AVER_RHI_D3D12",
   "required": false,
   "default": true,
+  "platforms": ["windows"],
   "dependsOn": ["Aver.RHI"],
   "consequence": "No DirectX 12 renderer; the engine falls back to another backend or the null device."
 }

@@ -1,6 +1,7 @@
 // Verification harnesses: the maybe*Test / run*Test / *Check drivers and the CLI knobs that set them.
 
 #include "SandboxApp.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 namespace aver {
 // --lod-select [px]: virtualized-geometry LOD selection; thresholdPx is pixel budget for screenSpaceErrorPx.
@@ -1252,7 +1253,7 @@ void SandboxApp::runValidateGraph() {
         return;
     }
     const std::string abs = project_.valid() && validateGraphPath_.find(':') == std::string::npos
-        ? (project_.contentDir() + "\\" + validateGraphPath_) : validateGraphPath_;
+        ? (project_.contentDir() + AVER_PATH_SEP + validateGraphPath_) : validateGraphPath_;
     std::string text;
     if (!readFileText(abs, text)) {
         AVER_ERROR("[validate-graph] could not read '{}'", abs);
@@ -1327,7 +1328,7 @@ void SandboxApp::runRenameRepointTest() {
 
 void SandboxApp::runFindRefs() {
     const std::string abs = project_.valid()
-        ? (project_.contentDir() + "\\" + findRefsPath_) : findRefsPath_;
+        ? (project_.contentDir() + AVER_PATH_SEP + findRefsPath_) : findRefsPath_;
     const std::vector<std::string> refs = cbFindReferencesTo(abs);
     AVER_INFO("[find-refs] '{}' is referenced by {} file(s)", findRefsPath_, refs.size());
     for (const std::string& r : refs) AVER_INFO("[find-refs]   {}", r);
@@ -2534,22 +2535,19 @@ void SandboxApp::gpuTimingCheck(Engine& e) {
 }
 
 // --resize-cycle N: resize the real window every N frames during a bounded run.
-// SetWindowPos on the HWND with SWP_NOACTIVATE so a capture run doesn't steal focus.
+// Window::setFrameSize resizes without activating, so a capture run doesn't steal focus.
 void SandboxApp::resizeCheck(Engine& e) {
     if (resizeCycle_ == 0 || !e.window()) return;
     const u64 f = e.time().frame;
     if (f == 0 || (f % resizeCycle_) != 0) return;
-    HWND hwnd = static_cast<HWND>(e.window()->nativeHandle());
-    if (!hwnd) return;
-    RECT r{};
-    if (!GetWindowRect(hwnd, &r)) return;
+    i32 w = 0, h = 0;
+    if (!e.window()->frameSize(w, h)) return;
     // Alternate between two sizes.
-    const int w = (r.right - r.left), h = (r.bottom - r.top);
     const bool big = (resizeStep_++ & 1) == 0;
     const int nw = big ? (w - 137) : (w + 137);   // odd numbers on purpose
     const int nh = big ? (h -  83) : (h +  83);
     if (nw < 320 || nh < 240) return;
-    SetWindowPos(hwnd, nullptr, 0, 0, nw, nh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    e.window()->setFrameSize(nw, nh);
     AVER_INFO("[Sandbox] --resize-cycle: frame {} resized the window to {}x{}", f, nw, nh);
 }
 

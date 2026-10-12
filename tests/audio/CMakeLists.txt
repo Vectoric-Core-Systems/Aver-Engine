@@ -20,9 +20,10 @@ endif()
 # AudioProbe — the other half, and deliberately NOT part of the headless suite: it needs a real
 # device and it makes a noise. AudioTest checks the mixer without hardware, which is the right way to
 # check a mixer and says nothing at all about a sound card.
-if(TARGET Aver.Audio.Wasapi)
+if(TARGET Aver.Audio.Wasapi OR TARGET Aver.Audio.Sdl)
   add_executable(AudioProbe src/AudioProbe.cpp)
-  target_link_libraries(AudioProbe PRIVATE Aver.Audio Aver.Audio.Wasapi Aver.Core Aver.Platform)
+  target_link_libraries(AudioProbe PRIVATE Aver.Audio $<IF:$<TARGET_EXISTS:Aver.Audio.Wasapi>,Aver.Audio.Wasapi,Aver.Audio.Sdl>
+                        Aver.Core Aver.Platform)
   set_target_properties(AudioProbe PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 

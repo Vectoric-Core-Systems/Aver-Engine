@@ -27,7 +27,10 @@ void materialise(OcSeqTrack& tr, usize key) {
 
 usize insertSorted(std::vector<OcSeqKey>& keys, OcSeqKey k) {
     const auto it = std::upper_bound(keys.begin(), keys.end(), k.t, [](f64 t, const OcSeqKey& a) { return t < a.t; });
-    return static_cast<usize>(keys.insert(it, std::move(k)) - keys.begin());
+    // Two statements, not one: in `keys.insert(...) - keys.begin()` the operands are unsequenced, and a
+    // compiler that reads begin() first subtracts a pre-reallocation iterator from a post-insert one.
+    const auto at = keys.insert(it, std::move(k));
+    return static_cast<usize>(at - keys.begin());
 }
 
 } // namespace
