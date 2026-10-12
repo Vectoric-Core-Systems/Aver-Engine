@@ -1,5 +1,6 @@
 // .oclanes text reader and writer. See OcLanes.hpp for what the format is and why it is text.
 #include "aver/formats/OcLanes.hpp"
+#include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/platform/FileSystem.hpp"
 
@@ -25,7 +26,7 @@ bool fail(std::string* err, const std::string& why) {
 template <class T>
 bool parseWhole(std::string_view s, T& out) {
     const char* const end = s.data() + s.size();
-    const auto r = std::from_chars(s.data(), end, out);
+    const auto r = aver::fromChars(s.data(), end, out);
     return r.ec == std::errc{} && r.ptr == end;
 }
 

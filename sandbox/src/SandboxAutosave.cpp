@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/game/GameLocalization.hpp"
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_loc_abi.h"
@@ -83,7 +84,7 @@ std::string SandboxApp::autosavePathFor(const std::string& levelPath) const {
     // another closes this one, which already prompts -- so a name is not needed and a growing
     // pile of Untitled-3.autosave files is avoided.
     const std::string dir = project_.dir;
-    return dir.empty() ? std::string() : dir + "\\Saved\\Untitled.ocworld.autosave";
+    return dir.empty() ? std::string() : dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "Untitled.ocworld.autosave";
 }
 
 void SandboxApp::maybeAutosave(f32 dt) {
@@ -375,17 +376,17 @@ void SandboxApp::drawRecoveryPrompt(Engine& e) {
 // from unguarded sites. The guard is narrowed to just the two functions that need it.
 void SandboxApp::locateAverDesign() const {
 #if AVER_HAVE_ROSLYN
-    fmt::setAverDesignPath(executableDir() + "/Tools/averdesign.exe");
+    fmt::setAverDesignPath(executableDir() + AVER_PATH_SEP "Tools" AVER_PATH_SEP "averdesign" + kExecutableSuffix);
 #endif
 }
 
 #if AVER_MODULE_SCRIPTING
 std::string SandboxApp::resolveScriptsDir() const {
     if (scriptsDir_.empty())
-        return project_.valid() ? editor::scriptsBinaryDir(project_) : executableDir() + "\\Scripts";
+        return project_.valid() ? editor::scriptsBinaryDir(project_) : executableDir() + AVER_PATH_SEP "Scripts";
     const std::string& sd = scriptsDir_;
     const bool absolute = sd.size() > 1 && (sd[1] == ':' || sd[0] == '\\' || sd[0] == '/');
-    return absolute ? sd : executableDir() + "\\" + sd;
+    return absolute ? sd : executableDir() + AVER_PATH_SEP + sd;
 }
 
 #endif

@@ -38,6 +38,7 @@
 #include "aver/trifactor/ClusterBuilder.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>

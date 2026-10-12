@@ -210,6 +210,11 @@ static bool hasAbsolutePath(const std::string& s) {
         const char c = s[i];
         const bool letter = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
         if (!letter || s[i + 1] != ':') continue;
+        // A drive letter is ONE letter. The "e:" of "file://" (or any URL scheme) is the end of a word.
+        if (i > 0) {
+            const char prev = s[i - 1];
+            if ((prev >= 'A' && prev <= 'Z') || (prev >= 'a' && prev <= 'z') || (prev >= '0' && prev <= '9')) continue;
+        }
         const char sep = s[i + 2];
         if (sep == '/') return true;
         if (sep != '\\') continue;
@@ -283,8 +288,8 @@ static bool isEngineSource(const std::string& rel) {
 }
 
 // THE ONE FILE that is allowed to know where projects live. ProjectBrowser is the screen that asks
-// the user to pick one, so it carries the convention -- documentsDir() + "\Aver Projects" as the
-// folder it opens in, and "C:\...\Name.ocproject" as the shape of the path it wants. Everything
+// the user to pick one, so it carries the convention -- documentsDir() + AVER_PATH_SEP "Aver Projects"
+// as the folder it opens in, and "C:\...\Name.ocproject" as the shape of the path it wants. Everything
 // downstream of it receives a path; nothing else derives one.
 static const char* kProjectPathOwner = "sandbox/src/ProjectBrowser.cpp";
 

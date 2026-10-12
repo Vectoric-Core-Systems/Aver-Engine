@@ -1,4 +1,5 @@
 #include "aver/game/GameApp.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
 #include "aver/game/GameSystemsWiring.hpp"
@@ -531,7 +532,7 @@ BootConfig GameApp::config() const {
     {
         std::string manifest = cfg_.projectPath;
         if (manifest.empty()) {
-            const std::string beside = executableDir() + "\\Game.ocproject";
+            const std::string beside = executableDir() + AVER_PATH_SEP "Game.ocproject";
             std::error_code ec;
             if (std::filesystem::exists(beside, ec)) manifest = beside;
         }
@@ -711,7 +712,7 @@ void GameApp::attachVoxi(Engine& e) {
     {
         std::string manifestPath = cfg_.projectPath;
         if (manifestPath.empty()) {
-            const std::string beside = executableDir() + "\\Game.ocproject";
+            const std::string beside = executableDir() + AVER_PATH_SEP "Game.ocproject";
             if (fileExists(beside)) manifestPath = beside;
         }
         if (!manifestPath.empty()) {
@@ -735,8 +736,8 @@ void GameApp::attachVoxi(Engine& e) {
     voxi::Renderer::get().setSettings(s);
     voxiRenderer_.setSettings(s);
     voxiRenderer_.setNrd2WeightsPaths(
-        aver::userDataDir().empty() ? std::string() : aver::userDataDir() + "\\" + render::denoise::kNrd2WeightsFileName,
-        aver::executableDir() + "\\data\\" + render::denoise::kNrd2WeightsFileName);
+        aver::userDataDir().empty() ? std::string() : aver::userDataDir() + AVER_PATH_SEP + render::denoise::kNrd2WeightsFileName,
+        aver::executableDir() + AVER_PATH_SEP "data" AVER_PATH_SEP + render::denoise::kNrd2WeightsFileName);
 
     if (voxiRenderer_.init(*dev)) {
         dev->addRenderFeature(&voxiRenderer_);
@@ -781,7 +782,7 @@ void GameApp::loadGameUiFont(Engine& e) {
     rhi::IResourceFactory* res = dev ? dev->resources() : nullptr;
     if (!res) return;   // headless, or a device that never came up -- nothing to upload into
 
-    const std::string fontPath = executableDir() + "\\Roboto-Regular.ocfont";
+    const std::string fontPath = executableDir() + AVER_PATH_SEP "Roboto-Regular.ocfont";
     std::string text;
     if (!readFileText(fontPath, text)) {
         // Legal to ship without HUD font
@@ -798,7 +799,7 @@ void GameApp::loadGameUiFont(Engine& e) {
     std::string atlas = uiFont_.atlasPath;
     const usize slash = atlas.find_last_of("/\\");
     if (slash != std::string::npos) atlas = atlas.substr(slash + 1);
-    const std::string atlasPath = executableDir() + "\\" + atlas;
+    const std::string atlasPath = executableDir() + AVER_PATH_SEP + atlas;
 
     ImageData img;
     if (!decodeImage(atlasPath, img, &why)) {
@@ -1125,7 +1126,7 @@ void GameApp::openProject(Engine& e) {
     // Look beside executable for Game.ocproject (not working directory)
     std::string path = cfg_.projectPath;
     if (path.empty()) {
-        const std::string beside = executableDir() + "\\Game.ocproject";
+        const std::string beside = executableDir() + AVER_PATH_SEP "Game.ocproject";
         if (fileExists(beside)) { path = beside; }
     }
     if (path.empty()) {
@@ -1147,7 +1148,7 @@ void GameApp::openProject(Engine& e) {
               project_.startMap.empty() ? "<none>" : project_.startMap);
 #if AVER_MODULE_PBR
     // Set texture cache dir before any load
-    assets::setTextureCacheDir(project_.dir + "\\Saved\\DerivedDataCache\\Textures");
+    assets::setTextureCacheDir(project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "DerivedDataCache" AVER_PATH_SEP "Textures");
 #endif
     if (project_.startMap.empty()) {
         AVER_WARN("[Game] the manifest names no STARTMAP, so there is no level to open");
@@ -1237,16 +1238,16 @@ static std::string filesystemSafeProjectName(const std::string& name) {
 
 // The player's Settings.ini: scripting opens it for input bindings, localization reads the saved culture from it.
 static std::string gameSettingsPath(const fmt::ProjectDesc& project) {
-    return userDataDir() + "\\" + filesystemSafeProjectName(project.name) + "\\Settings.ini";
+    return userDataDir() + AVER_PATH_SEP + filesystemSafeProjectName(project.name) + AVER_PATH_SEP "Settings.ini";
 }
 
 void GameApp::initScripting() {
 #if AVER_MODULE_SCRIPTING
     // Initialize CLR host and scripting system
     scripting::HostDesc hd;
-    hd.bridgeDir = executableDir() + "\\Scripting";
+    hd.bridgeDir = executableDir() + AVER_PATH_SEP "Scripting";
     // Scripts dir: <out>\Binaries\Scripts (see ProjectScaffold.cpp/stage-game.ps1)
-    hd.scriptsDir = project_.valid() ? (project_.binariesDir() + "\\Scripts") : std::string();
+    hd.scriptsDir = project_.valid() ? (project_.binariesDir() + AVER_PATH_SEP "Scripts") : std::string();
     scriptsReady_ = scripts_.init(hd);
     if (scriptsReady_) {
         AVER_INFO("[Game] scripting host ready: bridge='{}' scripts='{}' ({} legacy behaviour(s) live)",
@@ -1261,7 +1262,7 @@ void GameApp::initScripting() {
         {
             // INPUT.SCHEME is relative to content root, like DRONE.GRAPH
             std::string schemePath = project_.inputScheme.empty()
-                ? std::string() : project_.contentDir() + "\\" + project_.inputScheme;
+                ? std::string() : project_.contentDir() + AVER_PATH_SEP + project_.inputScheme;
             if (!schemePath.empty() && !fileExists(schemePath)) {
                 AVER_WARN("[Scripting] INPUT.SCHEME '{}' does not exist -- no input scheme will be loaded",
                           schemePath);
@@ -1733,8 +1734,8 @@ void GameApp::pushFrame(Engine& e) {
                 auto fg = std::make_unique<neurafi::NeuraFI>(*dev);
                 // --frame-interp-trajectory; neural reads per-machine file or shipped weights.
                 fg->setTrajectory(static_cast<neurafi::Trajectory>(cfg_.frameInterpTrajectory));
-                fg->setWeightsPath(userDataDir() + "\\" + neurafi::NeuraFI::kWeightsFileName);
-                fg->setShippedWeightsPath(executableDir() + "\\data\\" +
+                fg->setWeightsPath(userDataDir() + AVER_PATH_SEP + neurafi::NeuraFI::kWeightsFileName);
+                fg->setShippedWeightsPath(executableDir() + AVER_PATH_SEP "data" AVER_PATH_SEP +
                                           neurafi::NeuraFI::kWeightsFileName);
                 frameInterpolator_ = std::move(fg);
                 dev->setFrameInterpolator(frameInterpolator_.get());
@@ -1933,7 +1934,7 @@ void GameApp::onInit(Engine& e) {
 #if AVER_MODULE_SCRIPTING
     const bool haveGraphs = !content_.pathsWithExtension(".ocgraph").empty();
     // "\\" not "\": MSVC drops unescaped backslash (C4129), otherwise tests "...BinariesScripts" (no separator).
-    const bool haveScriptAssembly = std::filesystem::exists(project_.binariesDir() + "\\Scripts");
+    const bool haveScriptAssembly = std::filesystem::exists(project_.binariesDir() + AVER_PATH_SEP "Scripts");
     if (haveGraphs || haveScriptAssembly) {
         initScripting();
         discoverProjectGraphs();

@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "LightLevelIo.hpp"
 #include "SequenceTrackOps.hpp"   // [wave5/sequencer]
 // applyLevelSky below calls assets::applyLevelEnv, and the only thing that brings that declaration
@@ -210,7 +211,7 @@ void SandboxApp::setDroneEnabled(bool on) {
     // spawned with no graph from anywhere but --drone-graph, sitting perfectly still.
     const std::string& droneRel = !droneGraphRel_.empty() ? droneGraphRel_ : project_.droneGraph;
     const std::string graphPath =
-        droneRel.empty() ? std::string() : project_.contentDir() + "\\" + droneRel;
+        droneRel.empty() ? std::string() : project_.contentDir() + AVER_PATH_SEP + droneRel;
     if (graphPath.empty()) {
         AVER_WARN("[Drone] entity #{} spawned with NO graph, so it will sit still. Give the "
                   "project a DRONE.GRAPH line (e.g. `DRONE.GRAPH Scripts/Drone.ocgraph`), or "
@@ -1008,7 +1009,7 @@ void SandboxApp::applyLevelView(const editor::LevelView& v) {
 // <project>/Saved/LevelViews.ini, or empty with no project: editor.ini deliberately holds nothing
 // about a project, so a level outside one has nowhere to be remembered.
 std::string SandboxApp::levelViewsPath() const {
-    return project_.valid() ? project_.dir + "\\Saved\\LevelViews.ini" : std::string();
+    return project_.valid() ? project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "LevelViews.ini" : std::string();
 }
 
 bool SandboxApp::lookupLevelView(const std::string& levelPath, editor::LevelView& out) const {
@@ -1049,7 +1050,7 @@ void SandboxApp::storeLevelView() {
             return;
     }
     views[key] = v;
-    createDirectories(project_.dir + "\\Saved");
+    createDirectories(project_.dir + AVER_PATH_SEP "Saved");
     // DirectWrite fallback, editor.ini's trade: a remembered camera is cache-grade, and a locked
     // file falling back to a plain write beats the view silently never reaching disk.
     AtomicWriteError err;
@@ -1072,7 +1073,7 @@ void SandboxApp::loadStartMap(Engine& eng) {
         openMapPath_.clear();                  // fall back to the start map rather than nothing
     }
     if (!project_.valid() || project_.startMap.empty()) return;
-    const std::string path = project_.contentDir() + "\\" + project_.startMap;
+    const std::string path = project_.contentDir() + AVER_PATH_SEP + project_.startMap;
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) {
         AVER_INFO("[Level] start map '{}' does not exist yet - the world starts empty", project_.startMap);

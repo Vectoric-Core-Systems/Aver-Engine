@@ -2,6 +2,7 @@
 // tables (pick geometry, LOD ladder, depth proxies, cluster data).
 
 #include "SandboxApp.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/core/HitchMarks.hpp"
 
 namespace aver {
@@ -477,8 +478,8 @@ void SandboxApp::loadProjectMaterials() {
 #if AVER_MODULE_SCENE
     const std::string dir = project_.contentDir();
     if (dir.empty()) return;
-    const std::string contentMatDir = dir + "\\Materials";
-    const std::string binMatDir = project_.binariesDir() + "\\Materials";
+    const std::string contentMatDir = dir + AVER_PATH_SEP "Materials";
+    const std::string binMatDir = project_.binariesDir() + AVER_PATH_SEP "Materials";
 
     // Must agree with content_.materialForSurface()'s resolution (MaterialResolve.hpp).
     const std::vector<std::string> stems = editor::projectMaterialStems(project_.binariesDir(), dir);

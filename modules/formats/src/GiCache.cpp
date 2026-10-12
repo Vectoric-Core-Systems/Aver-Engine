@@ -1,4 +1,5 @@
 #include "aver/formats/GiCache.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include "aver/formats/Avr1.hpp"
 
@@ -99,7 +100,7 @@ std::string giCacheFileName(const GiCacheKey& k) {
 }
 
 std::string giCacheDir(const std::string& projectDir) {
-    return projectDir.empty() ? std::string() : projectDir + "\\DerivedDataCache\\GI";
+    return projectDir.empty() ? std::string() : projectDir + AVER_PATH_SEP "DerivedDataCache" AVER_PATH_SEP "GI";
 }
 
 bool loadGiCache(const std::string& path, GiCacheEntry& out, std::string* why) {

@@ -1,5 +1,6 @@
 // Data-table reader and writer (.csv, table-shaped .json). See OcTable.hpp and docs/DATA_TABLES.md.
 #include "aver/formats/OcTable.hpp"
+#include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 #include "aver/formats/Json.hpp"
 #include "aver/formats/detail/Csv.hpp"
 #include "aver/formats/detail/TextScan.hpp"
@@ -49,7 +50,7 @@ bool parseNumber(std::string_view s, f64& out) {
     const char c0 = s[0];
     if (!((c0 >= '0' && c0 <= '9') || c0 == '-' || c0 == '.')) return false;
     f64 v{};
-    const auto r = std::from_chars(s.data(), s.data() + s.size(), v);
+    const auto r = aver::fromChars(s.data(), s.data() + s.size(), v);
     if (r.ec != std::errc{} || r.ptr != s.data() + s.size()) return false;
     out = v;
     return true;

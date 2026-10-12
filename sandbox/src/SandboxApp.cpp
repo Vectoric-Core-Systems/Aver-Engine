@@ -1,6 +1,7 @@
 // The one translation unit that compiles stb_image_write's implementation.
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "aver/core/HitchMarks.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "stb_image_write.h"
 #undef STB_IMAGE_WRITE_IMPLEMENTATION
 #include "SandboxApp.hpp"
@@ -166,8 +167,8 @@ void SandboxApp::applyDpi(f32 dpi) {
     fontMedium_ = nullptr;
 
     const std::string dir = executableDir();
-    const std::string regular = dir + "\\Roboto-Regular.ttf";
-    const std::string medium  = dir + "\\Roboto-Medium.ttf";
+    const std::string regular = dir + AVER_PATH_SEP "Roboto-Regular.ttf";
+    const std::string medium  = dir + AVER_PATH_SEP "Roboto-Medium.ttf";
     const f32 px = 16.0f * dpi_;
 
     ImFont* body = fileExists(regular) ? io.Fonts->AddFontFromFileTTF(regular.c_str(), px) : nullptr;
@@ -189,7 +190,7 @@ void SandboxApp::applyDpi(f32 dpi) {
 // Merge icon font into the last added font for inline rendering. Missing file is non-fatal.
 void SandboxApp::mergeIconFont(f32 px) {
 #if AVER_WITH_IMGUI
-    const std::string icons = executableDir() + "\\MaterialIcons-Regular.ttf";
+    const std::string icons = executableDir() + AVER_PATH_SEP "MaterialIcons-Regular.ttf";
     if (!fileExists(icons)) {
         if (!iconWarned_) {
             iconWarned_ = true;
@@ -217,7 +218,7 @@ void SandboxApp::loadLogo(Engine& e) {
     rhi::IResourceFactory* res = e.device()->resources();
     if (!res) return;
 
-    const std::string path = executableDir() + "\\logo.png";
+    const std::string path = executableDir() + AVER_PATH_SEP "logo.png";
     ImageData img;
     std::string why;
     if (!decodeImage(path, img, &why)) {
@@ -252,7 +253,7 @@ void SandboxApp::loadCompileIcon(Engine& e) {
     rhi::IResourceFactory* res = e.device()->resources();
     if (!res) return;
 
-    const std::string path = executableDir() + "\\compile-status.png";
+    const std::string path = executableDir() + AVER_PATH_SEP "compile-status.png";
     ImageData img;
     std::string why;
     if (!decodeImage(path, img, &why)) {
@@ -285,7 +286,7 @@ void SandboxApp::loadGameUiFont(Engine& e) {
     rhi::IResourceFactory* res = e.device()->resources();
     if (!res) return;
 
-    const std::string fontPath = executableDir() + "\\Roboto-Regular.ocfont";
+    const std::string fontPath = executableDir() + AVER_PATH_SEP "Roboto-Regular.ocfont";
     std::string text;
     if (!readFileText(fontPath, text)) {
         AVER_INFO("[Sandbox] no game-UI font at {} -- the HUD draws without text", fontPath);
@@ -301,7 +302,7 @@ void SandboxApp::loadGameUiFont(Engine& e) {
     std::string atlas = uiFont_.atlasPath;
     const usize slash = atlas.find_last_of("/\\");
     if (slash != std::string::npos) atlas = atlas.substr(slash + 1);
-    const std::string atlasPath = executableDir() + "\\" + atlas;
+    const std::string atlasPath = executableDir() + AVER_PATH_SEP + atlas;
 
     ImageData img;
     if (!decodeImage(atlasPath, img, &why)) {
@@ -333,7 +334,7 @@ bool SandboxApp::loadIconSheet(Engine& e, const char* file, int tiles, const cha
                    rhi::TextureHandle& outTex, u64& outId, f32& outAspect) {
     rhi::IResourceFactory* res = e.device()->resources();
     if (!res) return false;
-    const std::string path = executableDir() + "\\" + file;
+    const std::string path = executableDir() + AVER_PATH_SEP + file;
     ImageData img;
     std::string why;
     if (!decodeImage(path, img, &why)) {
@@ -363,11 +364,11 @@ bool SandboxApp::loadIconSheet(Engine& e, const char* file, int tiles, const cha
 
 #endif
 
-#if AVER_WITH_IMGUI || AVER_WITH_IMGUI_VULKAN
+#if AVER_WITH_IMGUI
 // Install ImGui backend before uiInit() runs (onInit is too late).
 void SandboxApp::onDeviceCreated(Engine& e)  {
     const rhi::Backend which = e.device() ? e.device()->backend() : rhi::Backend::D3D12;
-#if AVER_WITH_IMGUI
+#if AVER_WITH_IMGUI_D3D12
     if (which == rhi::Backend::D3D12) {
         uiBackend_.reset(rhi::d3d12::imgui_backend::create());
         rhi::d3d12::installUiBackend(e.device(), uiBackend_.get());
@@ -873,7 +874,7 @@ void SandboxApp::onInit(Engine& e)  {
     viewportIconsReady_ = viewportIcons_.init(*e.device());
     if (viewportIconsReady_) {
         e.device()->addRenderFeature(&viewportIcons_);
-        playerStartIcon_ = viewportIcons_.loadIcon(executableDir() + "\\" + "player-start-icon.png",
+        playerStartIcon_ = viewportIcons_.loadIcon(executableDir() + AVER_PATH_SEP + "player-start-icon.png",
                                                    "PlayerStartIcon");
         if (playerStartIcon_ == editor::ViewportIconRenderer::kNoIcon) viewportIconsReady_ = false;
     }
@@ -1015,7 +1016,7 @@ void SandboxApp::onInit(Engine& e)  {
 #if AVER_MODULE_SCRIPTING
     {
         scripting::HostDesc hd;
-        hd.bridgeDir = executableDir() + "\\Scripting";
+        hd.bridgeDir = executableDir() + AVER_PATH_SEP "Scripting";
         hd.scriptsDir = resolveScriptsDir();
         scripts_.init(hd);
 
@@ -1129,8 +1130,8 @@ void SandboxApp::onInit(Engine& e)  {
         voxiRenderer_.setSettings(voxi::Renderer::get().settings());
         // NRD2's network: the user's trained weights over the shipped ones.
         voxiRenderer_.setNrd2WeightsPaths(
-            aver::userDataDir().empty() ? std::string() : aver::userDataDir() + "\\" + render::denoise::kNrd2WeightsFileName,
-            aver::executableDir() + "\\data\\" + render::denoise::kNrd2WeightsFileName);
+            aver::userDataDir().empty() ? std::string() : aver::userDataDir() + AVER_PATH_SEP + render::denoise::kNrd2WeightsFileName,
+            aver::executableDir() + AVER_PATH_SEP "data" AVER_PATH_SEP + render::denoise::kNrd2WeightsFileName);
         if (frameTimeReport_) voxiRenderer_.setFrameTimeReport(true);
         // Set measurement dials before init().
         if (rdAblate_) {
@@ -1594,7 +1595,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         for (char& ch : c.scene)
             if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-')) ch = '_';
         c.dir = (nrd2CaptureDir_.empty() || nrd2CaptureDir_ == "default" || nrd2CaptureDir_ == "-")
-              ? userDataDir() + "\\nrd2_dataset\\" + c.scene : nrd2CaptureDir_;
+              ? userDataDir() + AVER_PATH_SEP "nrd2_dataset" AVER_PATH_SEP + c.scene : nrd2CaptureDir_;
         c.poses = nrd2CapturePoses_;
         c.hold = nrd2CaptureHold_;
         c.heldOutFrom = nrd2CaptureHeldOut_;
@@ -2829,8 +2830,8 @@ bool SandboxApp::updateFrameInterpolation(rhi::IDevice* dev) {
             // Trained weights: user's in editor.ini (per machine), else shipped in bin/data.
             const std::string dir = aver::userDataDir();
             if (!dir.empty())
-                frameInterpolator_->setWeightsPath(dir + "\\" + neurafi::NeuraFI::kWeightsFileName);
-            frameInterpolator_->setShippedWeightsPath(aver::executableDir() + "\\data\\" +
+                frameInterpolator_->setWeightsPath(dir + AVER_PATH_SEP + neurafi::NeuraFI::kWeightsFileName);
+            frameInterpolator_->setShippedWeightsPath(aver::executableDir() + AVER_PATH_SEP "data" AVER_PATH_SEP +
                                                    neurafi::NeuraFI::kWeightsFileName);
             dev->setFrameInterpolator(frameInterpolator_.get());
         } else {

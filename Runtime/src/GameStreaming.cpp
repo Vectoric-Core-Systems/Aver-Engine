@@ -1,4 +1,5 @@
 #include "aver/game/GameStreaming.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #if AVER_MODULE_SCENE
 
@@ -176,8 +177,8 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
 
         // PER FIELD ONLY WHEN THERE IS MORE THAN ONE: region files are keyed by chunk coordinate, so
         // two worlds sharing a directory would write each other's chunks.
-        cwSettings.worldDir = projectDir + "\\Chunks";
-        if (multi) cwSettings.worldDir += "\\" + (v && !v->name.empty() ? v->name : std::to_string(fi));
+        cwSettings.worldDir = projectDir + AVER_PATH_SEP "Chunks";
+        if (multi) cwSettings.worldDir += AVER_PATH_SEP + (v && !v->name.empty() ? v->name : std::to_string(fi));
 
         {
             std::vector<std::string> scatterErrors;

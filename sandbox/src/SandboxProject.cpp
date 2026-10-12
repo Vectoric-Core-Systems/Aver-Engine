@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/game/GameTick.hpp"
 #include "aver/game/GameLocalization.hpp"
 #if AVER_MODULE_FRAMEWORK
@@ -28,7 +29,7 @@ void SandboxApp::applyProject(Engine& e) {
     // screen that had already gone. It is closed from the frame loop instead, on the same "the
     // draw count stopped changing" rule startupComplete uses for the startup splash.
     projectLoading_ = std::make_unique<LoadingScreen>(
-        e, e.window() != nullptr && maxFrames_ == 0, executableDir() + "\\splash.png");
+        e, e.window() != nullptr && maxFrames_ == 0, executableDir() + AVER_PATH_SEP "splash.png");
     // Restart the settle detector: this is a NEW load, and whatever the previous scene settled
     // at must not count as this one already being finished.
     //
@@ -159,7 +160,7 @@ void SandboxApp::applyProject(Engine& e) {
     // materials" stage missed the cache for its own load. Cleared (not left pointing at whatever
     // project is going away) when there is nothing valid to point it at, on the same "-1/empty
     // means unstated, do not silently keep the old value" rule the manifest keys above follow.
-    assets::setTextureCacheDir(project_.valid() ? project_.dir + "\\Saved\\DerivedDataCache\\Textures"
+    assets::setTextureCacheDir(project_.valid() ? project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "DerivedDataCache" AVER_PATH_SEP "Textures"
                                                 : std::string());
     releaseProjectMaterials();
     content_.adopt(project_);

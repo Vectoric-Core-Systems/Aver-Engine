@@ -1,6 +1,7 @@
 // Imports glTF 2.0 and GLB into engine meshes: accessors, node transforms and axis conversion.
 
 #include "aver/formats/GltfImport.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include "aver/formats/Json.hpp"
 
@@ -1525,7 +1526,7 @@ void Gltf::importImages() {
                 note("an external image URI with no directory to resolve it against ('" + rel + "')");
                 continue;
             }
-            const std::string full = baseDir_ + "\\" + rel;
+            const std::string full = baseDir_ + AVER_PATH_SEP + rel;
             std::ifstream f(full, std::ios::binary | std::ios::ate);
             if (!f) {
                 note("an image the file names but does not ship: '" + rel + "'");
@@ -1874,7 +1875,7 @@ bool loadBuffers(const JsonValue& d, const std::vector<u8>& glbBin, const std::s
             continue;
         }
         if (baseDir.empty()) return fail(why, "glTF: the file references '" + uri + "' but no directory context was given");
-        const std::string full = baseDir + "\\" + percentDecode(uri);
+        const std::string full = baseDir + AVER_PATH_SEP + percentDecode(uri);
         std::ifstream f(full, std::ios::binary | std::ios::ate);
         if (!f) return fail(why, "glTF: cannot open referenced buffer " + full);
         const std::streamoff n = f.tellg();

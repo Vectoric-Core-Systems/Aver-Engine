@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -53,10 +54,10 @@ struct ShaderWarmup::Impl {
     void loadTotal() {
         const std::filesystem::path p = totalPath();
         if (p.empty()) return;
-        if (FILE* f = _wfopen(p.c_str(), L"rb")) {
+        std::ifstream f(p, std::ios::binary);
+        if (f) {
             char buf[32] = {};
-            std::fread(buf, 1, sizeof buf - 1, f);
-            std::fclose(f);
+            f.read(buf, sizeof buf - 1);
             total = std::atoll(buf);
         }
     }
@@ -65,10 +66,8 @@ struct ShaderWarmup::Impl {
         if (p.empty() || n <= 0) return;
         std::error_code ec;
         std::filesystem::create_directories(p.parent_path(), ec);
-        if (FILE* f = _wfopen(p.c_str(), L"wb")) {
-            std::fprintf(f, "%lld", n);
-            std::fclose(f);
-        }
+        std::ofstream f(p, std::ios::binary | std::ios::trunc);
+        if (f) f << n;
     }
 
     void readLoop() {

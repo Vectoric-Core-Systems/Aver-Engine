@@ -16,6 +16,7 @@
 // bridge) cannot run this and is not failing it -- ScriptHost::init declines, and this reports
 // "unavailable" and exits 0, exactly as the engine itself boots without scripting.
 #include "aver/anim/AnimSystem.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/framework/framework_abi.h"
 #include "aver/framework/framework_abi.h"
 #include "aver/core/Log.hpp"
@@ -287,11 +288,11 @@ int main() {
     // ---- the scripting host, pointed at the bridge staged beside this executable
     scripting::ScriptHost host;
     scripting::HostDesc hd;
-    hd.bridgeDir = executableDir() + "\\Scripting";
+    hd.bridgeDir = executableDir() + AVER_PATH_SEP "Scripting";
     // The sample actor assembly, staged by the same build that staged the bridge. It is what
     // makes AN_TestActor a REGISTERED MANAGED CLASS in this process -- without it the C# half of
     // this test has no actor to spawn, and reports so rather than silently skipping.
-    hd.scriptsDir = executableDir() + "\\ActorScripts";
+    hd.scriptsDir = executableDir() + AVER_PATH_SEP "ActorScripts";
     if (!host.init(hd)) {
         AVER_WARN("AnimNotifyGraphTest: UNAVAILABLE -- {}", host.declineReason());
         AVER_WARN("  (no .NET runtime or no staged bridge; this is the same path the engine itself "

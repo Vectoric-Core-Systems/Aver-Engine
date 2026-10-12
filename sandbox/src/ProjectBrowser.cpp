@@ -2,6 +2,7 @@
 // actions and the New Project modal.
 
 #include "ProjectBrowser.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "ProjectScaffold.hpp"
 
 #include "aver/platform/FileSystem.hpp"
@@ -22,7 +23,7 @@
 namespace aver::editor {
 namespace {
 
-std::string recentsPath() { return userDataDir() + "\\recent.txt"; }
+std::string recentsPath() { return userDataDir() + AVER_PATH_SEP "recent.txt"; }
 
 // ADOPTS a project that records no CREATEDWITH: stamps it with this engine and writes the manifest
 // back. Never prompts, never migrates.
@@ -97,7 +98,7 @@ void ProjectBrowser::init() {
     // fileExists is the keep-predicate: a project that has gone from disk is dropped on read.
     list_.parse(text, [](const std::string& p) { return fileExists(p); });
 
-    setBuf(locBuf_, sizeof locBuf_, documentsDir() + "\\Aver Projects");
+    setBuf(locBuf_, sizeof locBuf_, documentsDir() + AVER_PATH_SEP "Aver Projects");
 
     // Once per session: the shipped templates directory cannot change while the editor is running,
     // unlike the projects folder (rescan() re-reads that one whenever the cards go stale). A
@@ -371,7 +372,12 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
     ImGui::Dummy(ImVec2(0, 10.0f * dpi));
     ImGui::TextDisabled("...or type a path");
     ImGui::PushItemWidth(-1);
-    const bool submitted = ImGui::InputTextWithHint("##path", "C:\\...\\Name.ocproject", pathBuf_,
+#if defined(_WIN32)
+    const char* pathHint = "C:\\...\\Name.ocproject";
+#else
+    const char* pathHint = "/.../Name.ocproject";
+#endif
+    const bool submitted = ImGui::InputTextWithHint("##path", pathHint, pathBuf_,
                                                     sizeof pathBuf_, ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::PopItemWidth();
     // Disabled on an empty field rather than accepting a click that silently does nothing.
@@ -488,9 +494,9 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
 
         ImGui::Spacing();
         if (nameBuf_[0])
-            ImGui::TextDisabled("Creates: %s\\%s\\%s.ocproject", locBuf_, nameBuf_, nameBuf_);
+            ImGui::TextDisabled("Creates: %s" AVER_PATH_SEP "%s" AVER_PATH_SEP "%s.ocproject", locBuf_, nameBuf_, nameBuf_);
         else
-            ImGui::TextDisabled("Creates: <location>\\<Name>\\<Name>.ocproject");
+            ImGui::TextDisabled("Creates: <location>" AVER_PATH_SEP "<Name>" AVER_PATH_SEP "<Name>.ocproject");
 
         if (!newError_.empty()) {
             ImGui::Spacing();

@@ -25,3 +25,24 @@ set_target_properties(InputStateTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE
 add_executable(FileRangeTest src/FileRangeTest.cpp)
 target_link_libraries(FileRangeTest PRIVATE Aver.Platform Aver.Core)
 set_target_properties(FileRangeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# aver/core/DynamicLibrary.hpp lives in Aver.Core, but what it is checked against is the operating
+# system's own loader, which is this directory's subject.
+add_executable(DynamicLibraryTest src/DynamicLibraryTest.cpp)
+target_link_libraries(DynamicLibraryTest PRIVATE Aver.Core)
+set_target_properties(DynamicLibraryTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# The SDL scancode -> Win32 virtual-key table, everywhere SDL is the window layer. A pure function, so
+# it is checked with no display and no SDL_Init; it only needs SDL's headers to name the scancodes.
+if(NOT WIN32)
+  add_executable(SdlKeyMapTest src/SdlKeyMapTest.cpp)
+  target_include_directories(SdlKeyMapTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/platform/src)
+  target_link_libraries(SdlKeyMapTest PRIVATE Aver.Platform Aver.Core ${AVER_SDL3_TARGET})
+  set_target_properties(SdlKeyMapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# aver/core/CharConv.hpp: the floating std::from_chars fallback the macOS build depends on, checked on
+# every platform -- including against std::from_chars wherever the standard library has it.
+add_executable(CharConvTest src/CharConvTest.cpp)
+target_link_libraries(CharConvTest PRIVATE Aver.Core)
+set_target_properties(CharConvTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

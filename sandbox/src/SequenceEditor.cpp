@@ -710,7 +710,9 @@ const char* SequenceEditor::bindBadge(const OcSeqTrack& tr, bool& red) const {
 static int insertKeySorted(OcSeqTrack& tr, const OcSeqKey& k) {
     const auto it = std::upper_bound(tr.keys.begin(), tr.keys.end(), k.t,
                                      [](f64 t, const OcSeqKey& a) { return t < a.t; });
-    return static_cast<int>(tr.keys.insert(it, k) - tr.keys.begin());
+    // Two statements -- see SequenceCurveOps.cpp's insertSorted for the evaluation-order bug one hides.
+    const auto at = tr.keys.insert(it, k);
+    return static_cast<int>(at - tr.keys.begin());
 }
 
 int SequenceEditor::addCameraTrack(scene::Entity actor) {

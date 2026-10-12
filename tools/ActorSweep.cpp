@@ -3,6 +3,7 @@
 #include "aver/formats/ActorScript.hpp"
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include <filesystem>
 #include <fstream>
@@ -22,7 +23,8 @@ int main(int argc, char** argv) {
         if (ec) break;
         if (!it->is_regular_file(ec) || it->path().extension() != ".cs") continue;
         const std::string p = it->path().string();
-        if (p.find("\\obj\\") != std::string::npos || p.find("\\bin\\") != std::string::npos) continue;
+        if (p.find(AVER_PATH_SEP "obj" AVER_PATH_SEP) != std::string::npos ||
+            p.find(AVER_PATH_SEP "bin" AVER_PATH_SEP) != std::string::npos) continue;
 
         std::ifstream in(p, std::ios::binary);
         std::ostringstream ss; ss << in.rdbuf();

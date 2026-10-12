@@ -1,5 +1,6 @@
 // Editor preference store: reads and writes the `key=value` editor.ini under the user data dir.
 #include "EditorPrefs.hpp"
+#include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -169,7 +170,7 @@ f32 prefFloat(std::string_view key, f32 fallback) {
     f32 v = fallback;
     const char* first = it->second.data();
     const char* last  = first + it->second.size();
-    const auto r = std::from_chars(first, last, v);
+    const auto r = aver::fromChars(first, last, v);
     if (r.ec != std::errc{}) return fallback;
     return v;
 }

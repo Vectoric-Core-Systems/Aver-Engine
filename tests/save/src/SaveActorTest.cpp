@@ -17,6 +17,7 @@
 // UNAVAILABLE IS NOT A FAILURE: a machine with no .NET runtime, or a build with no staged bridge,
 // reports so and exits 0 -- the same path the engine itself takes.
 #include "aver/framework/framework_abi.h"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/framework/framework_hooks.h"
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -80,8 +81,8 @@ int main() {
 
     scripting::ScriptHost host;
     scripting::HostDesc hd;
-    hd.bridgeDir  = executableDir() + "\\Scripting";
-    hd.scriptsDir = executableDir() + "\\ActorScripts";
+    hd.bridgeDir  = executableDir() + AVER_PATH_SEP "Scripting";
+    hd.scriptsDir = executableDir() + AVER_PATH_SEP "ActorScripts";
     if (!host.init(hd)) {
         AVER_WARN("SaveActorTest: UNAVAILABLE -- {}", host.declineReason());
         return 0;

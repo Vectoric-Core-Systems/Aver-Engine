@@ -37,11 +37,11 @@ std::mutex& stateMutex() {
 
 Config      g_cfg;
 bool        g_installed        = false;
+
+#if defined(_WIN32)
 bool        g_reporterAwake    = false;   // has the standby reporter been launched yet
 bool        g_reportInFlight   = false;   // re-entrancy guard: a fault INSIDE writeReport
 char        g_exeDir[MAX_PATH] = {};
-
-#if defined(_WIN32)
 LPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = nullptr;
 #endif
 
@@ -104,10 +104,12 @@ void noteLogLine(int level, std::string_view message) {
 
 // ------------------------------------------------------------------- non-Windows: honest no-op
 //
-// Stated rather than silently compiled away: this engine is Windows-only today (the RHI has a D3D12
-// and a Vulkan backend, but the window, the entry point and the packaging are all Win32). A crash
-// reporter is the most platform-specific thing in a codebase, and a half-ported one that writes an
-// empty report is worse than one that says it is not implemented.
+// Stated rather than silently compiled away. The engine builds and runs on Linux and macOS too (see
+// docs/PLATFORMS.md), but the report below is built from Win32 structured exceptions, dbghelp stack
+// walks and minidumps, and none of those has a drop-in POSIX twin. A crash reporter is the most
+// platform-specific thing in a codebase, and a half-ported one that writes an empty report is worse
+// than one that says it is not implemented. Off Windows a crash is the OS's default: a core dump
+// where the system keeps them, and fatal() still prints its message before aborting.
 void install(const Config& cfg) { std::lock_guard<std::mutex> l(stateMutex()); g_cfg = cfg; g_installed = false; }
 void shutdown() {}
 bool installed() { return false; }

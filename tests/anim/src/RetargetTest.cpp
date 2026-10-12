@@ -14,6 +14,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcAnim.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <string>

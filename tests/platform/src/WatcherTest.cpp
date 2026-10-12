@@ -3,6 +3,7 @@
 #include "aver/core/Log.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -49,6 +50,17 @@ static bool drain(DirectoryWatcher& w, std::vector<FileEvent>& out, int waitMs =
 }
 
 // How many events name this path.
+// Sets (or, with an empty value, removes) a process environment variable -- _putenv_s's contract,
+// which POSIX splits across setenv and unsetenv.
+static void setEnv(const char* name, const char* value) {
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    if (*value) setenv(name, value, 1);
+    else unsetenv(name);
+#endif
+}
+
 static int countFor(const std::vector<FileEvent>& evs, const std::string& rel) {
     int n = 0;
     for (const FileEvent& e : evs) if (e.path == rel) ++n;
@@ -215,7 +227,7 @@ int main() {
     // AVER_WATCHER_KILL_AFTER makes the worker leave through the same break a failed overlapped
     // read takes. Same idea as --crash-test and --device-lost-at elsewhere in this engine.
     {
-        _putenv_s("AVER_WATCHER_KILL_AFTER", "1");
+        setEnv("AVER_WATCHER_KILL_AFTER", "1");
         // OUTSIDE `root`, not a subdirectory of it. AVER_WATCHER_KILL_AFTER is read from the
         // environment, so it applies to every watcher in this process -- and `w` above is watching
         // `root` RECURSIVELY, so a write inside it would give `w` a batch too and kill that watcher
@@ -235,7 +247,7 @@ int main() {
         check(!dying.watching(),
               "a watcher whose worker died reports watching() == false, so the caller re-arms "
               "instead of believing a corpse");
-        _putenv_s("AVER_WATCHER_KILL_AFTER", "");
+        setEnv("AVER_WATCHER_KILL_AFTER", "");
         check(w.watching(), "and the OTHER watcher, on its own tree, is untouched by that death");
         dying.stop();
         std::filesystem::remove_all(dyingRoot, ec);

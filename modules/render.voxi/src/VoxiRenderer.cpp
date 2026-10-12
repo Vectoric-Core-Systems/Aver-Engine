@@ -2,6 +2,7 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 #include "aver/voxi/VoxiRenderer.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/core/HitchMarks.hpp"
 #include "aver/core/CpuTiming.hpp"   // CpuNest(CpuSpan::VoxiSubmit) below -- Types.hpp + stdlib only,
                                      // so no AVER_MODULE_VOXI guard needed, same as Log.hpp/Math.hpp.
@@ -2826,7 +2827,7 @@ bool VoxiRenderer::giCacheRestore(rhi::IRenderContext& ctx) {
         break;
     }
 
-    const std::string path = giCacheDir_ + "\\" + fmt::giCacheFileName(key);
+    const std::string path = giCacheDir_ + AVER_PATH_SEP + fmt::giCacheFileName(key);
     std::string why;
     if (!fromBuffer && !fmt::loadGiCache(path, entry, &why)) return false;
     // File name is hash: collision possible. Compare key entry actually carries.
@@ -3020,7 +3021,7 @@ u32 VoxiRenderer::giCacheFlush() {
     u32 wrote = 0;
     u64 wroteBytes = 0;
     for (const fmt::GiCacheEntry& entry : giCachePendingEntries_) {
-        const std::string path = giCacheDir_ + "\\" + fmt::giCacheFileName(entry.key);
+        const std::string path = giCacheDir_ + AVER_PATH_SEP + fmt::giCacheFileName(entry.key);
         std::string why;
         if (!fmt::saveGiCache(path, entry, &why)) {
             AVER_WARN("[Voxi] GI cache could not be written: {}", why);

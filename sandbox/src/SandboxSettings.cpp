@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/game/GameLocalization.hpp"
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_loc_abi.h"
@@ -480,7 +481,7 @@ void SandboxApp::buildEditorPrefs() {
     // --scroll-prefs-to-keybinds: one-shot verification aid; consumes its flag once.
     if (ImGui::CollapsingHeader("Derived Data Cache", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::TextDisabled("Baked global illumination, cached beside the project under");
-        ImGui::TextDisabled("DerivedDataCache\\GI. Derived data: deleting it costs one rebuild.");
+        ImGui::TextDisabled("DerivedDataCache" AVER_PATH_SEP "GI. Derived data: deleting it costs one rebuild.");
 #if AVER_MODULE_VOXI
         // Budget in MB; floor is one volume.
         if (ImGui::SliderFloat("Memory budget", &ddcRamBudgetMb_, 32.0f, 4096.0f, "%.0f MB",

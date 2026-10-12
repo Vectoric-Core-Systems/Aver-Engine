@@ -206,10 +206,10 @@ struct ProjectDesc {
 
     bool valid() const { return !name.empty() && !dir.empty(); }
     // Absolute content mount root. Empty when parsed from memory with no `dir`.
-    std::string contentDir() const { return dir.empty() ? std::string() : dir + "\\" + contentRoot; }
-    std::string scriptsDir() const { return dir.empty() ? std::string() : contentDir() + "\\Scripts"; }
+    std::string contentDir() const { return dir.empty() ? std::string() : dir + AVER_PATH_SEP + contentRoot; }
+    std::string scriptsDir() const { return dir.empty() ? std::string() : contentDir() + AVER_PATH_SEP "Scripts"; }
     // Absolute build output directory, beside Content rather than inside it.
-    std::string binariesDir() const { return dir.empty() ? std::string() : dir + "\\Binaries"; }
+    std::string binariesDir() const { return dir.empty() ? std::string() : dir + AVER_PATH_SEP "Binaries"; }
 };
 
 // Parses a manifest from memory. Unknown keys are ignored; `dir`/`manifestPath` are the caller's.

@@ -3,6 +3,7 @@
 // class declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 // game::drawWorld + hook set: the one entity walk both hosts run; onRender's depth prepass below
 // calls it too. Included here, not in SandboxApp.hpp, since no member declaration needs these
 // types (the decide/warn sinks are captureless lambdas local to onRender) -- so only this TU pays
@@ -15,6 +16,8 @@
 // modules/render.voxi/ and from sandbox/").
 #include "aver/core/CpuTiming.hpp"
 #include "aver/core/CpuTimingFormat.hpp"
+
+#include <ctime>
 
 namespace aver {
 
@@ -2184,16 +2187,22 @@ void SandboxApp::serviceViewportScreenshot(Engine& e) {
         // recoverable, non-authored state. No project open falls back to the executable's
         // directory (same fallback CrashReport.cpp uses for Saved/Crashes).
         const std::string base = !project_.dir.empty() ? project_.dir : executableDir();
-        const std::string dir = base + "\\Saved\\Screenshots";
+        const std::string dir = base + AVER_PATH_SEP "Saved" AVER_PATH_SEP "Screenshots";
         std::error_code mkec;
         std::filesystem::create_directories(dir, mkec);
 
-        SYSTEMTIME st{};
-        GetLocalTime(&st);
+        // Local time, YYYYMMDD_HHMMSS -- what GetLocalTime gave here before, from the C library so it
+        // means the same thing everywhere.
+        const std::time_t now = std::time(nullptr);
+        std::tm lt{};
+#if defined(_WIN32)
+        localtime_s(&lt, &now);
+#else
+        localtime_r(&now, &lt);
+#endif
         char ts[32];
-        std::snprintf(ts, sizeof ts, "%04u%02u%02u_%02u%02u%02u",
-                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-        const std::string path = dir + "\\Screenshot_" + ts + ".png";
+        std::strftime(ts, sizeof ts, "%Y%m%d_%H%M%S", &lt);
+        const std::string path = dir + AVER_PATH_SEP "Screenshot_" + ts + ".png";
 
         // The log line is the answer without ImGui, the toast is the answer with it: notifyOutcome
         // pushes onto editor::notifications(), drained only by the notification overlay, so it

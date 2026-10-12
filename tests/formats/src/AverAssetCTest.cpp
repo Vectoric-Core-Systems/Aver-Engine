@@ -21,6 +21,9 @@
 #include "aver/platform/Image.hpp"
 
 #include <cstdio>
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -61,12 +64,25 @@ static int runCapture(const std::string& cmd, std::string& out) {
     // reads the path up to the first space as the program name. With a path containing "Aver Engine"
     // that is a command not found, an empty pipe and exit 1, which is exactly what this test first
     // reported while the same command pasted into a shell worked perfectly.
+    //
+    // POSIX popen runs /bin/sh -c, which strips nothing, so there the extra pair would turn the whole
+    // line into one quoted word -- and pclose returns a wait status, not the exit code.
+#if defined(_WIN32)
     const std::string wrapped = "\"" + cmd + " 2>&1\"";
     FILE* pipe = _popen(wrapped.c_str(), "r");
+#else
+    const std::string wrapped = cmd + " 2>&1";
+    FILE* pipe = popen(wrapped.c_str(), "r");
+#endif
     if (!pipe) return -1;
     char buf[4096];
     while (std::fgets(buf, sizeof buf, pipe)) out += buf;
+#if defined(_WIN32)
     return _pclose(pipe);
+#else
+    const int status = pclose(pipe);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
 }
 
 int main() {

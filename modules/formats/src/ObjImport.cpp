@@ -1,4 +1,5 @@
 #include "aver/formats/ObjImport.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include <algorithm>
 #include <cmath>
@@ -575,7 +576,7 @@ i32 loadObjTexture(const std::string& baseDir, const std::string& rel,
     }
     img.suggestedName = stem;
 
-    const std::string full = baseDir.empty() ? rel : baseDir + "\\" + rel;
+    const std::string full = baseDir.empty() ? rel : baseDir + AVER_PATH_SEP + rel;
     std::ifstream f(full, std::ios::binary | std::ios::ate);
     if (!f) {
         if (warnings) warnings->push_back("a texture the .mtl names but which is not there: '" + rel + "'");

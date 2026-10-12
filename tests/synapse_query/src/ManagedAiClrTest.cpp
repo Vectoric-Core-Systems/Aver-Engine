@@ -7,6 +7,7 @@
 // UNAVAILABLE IS NOT A FAILURE: a machine with no .NET runtime, or a build without the staged bridge or
 // the sample assembly, reports so and exits 0 -- the same path the engine itself takes.
 #include "aver/core/Log.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/platform/FileSystem.hpp"
 #include "aver/scene/World.hpp"
 #include "aver/scripting/ScriptHost.hpp"
@@ -34,8 +35,8 @@ int main() {
 
     scripting::ScriptHost host;
     scripting::HostDesc hd;
-    hd.bridgeDir  = executableDir() + "\\Scripting";
-    hd.scriptsDir = executableDir() + "\\ActorScripts";
+    hd.bridgeDir  = executableDir() + AVER_PATH_SEP "Scripting";
+    hd.scriptsDir = executableDir() + AVER_PATH_SEP "ActorScripts";
     if (!host.init(hd)) {
         AVER_WARN("ManagedAiClrTest: UNAVAILABLE -- {}", host.declineReason());
         return 0;

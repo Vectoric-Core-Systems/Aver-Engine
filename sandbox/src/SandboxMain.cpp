@@ -2,6 +2,7 @@
 // Split from SandboxApp.cpp; some flags live in SandboxRender.cpp instead.
 
 #include "aver/runtime/EntryPoint.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "SandboxApp.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -57,9 +58,9 @@ Application* createApplication(int argc, char** argv) {
     // The editor's log, also on disk: <user data>\Logs\Sandbox.log, the previous session kept as -prev.
     if (const std::string dir = aver::userDataDir(); !dir.empty()) {
         std::error_code ec;
-        std::filesystem::create_directories(dir + "\\Logs", ec);
-        const std::string log = dir + "\\Logs\\Sandbox.log";
-        std::filesystem::rename(log, dir + "\\Logs\\Sandbox-prev.log", ec);
+        std::filesystem::create_directories(dir + AVER_PATH_SEP "Logs", ec);
+        const std::string log = dir + AVER_PATH_SEP "Logs" AVER_PATH_SEP "Sandbox.log";
+        std::filesystem::rename(log, dir + AVER_PATH_SEP "Logs" AVER_PATH_SEP "Sandbox-prev.log", ec);
         aver::setLogFile(log.c_str());
     }
     // --warm-shaders: the background shader-cache fill the editor starts (ShaderWarmup.cpp); no window.

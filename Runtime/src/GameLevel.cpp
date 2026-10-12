@@ -1,4 +1,5 @@
 #include "aver/game/GameLevel.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include "aver/game/GameContent.hpp"
 #include "aver/game/LevelComponents.hpp"
@@ -561,7 +562,7 @@ void GameLevel::loadStartMap(const fmt::ProjectDesc& project, GameContent& conte
         // Fall back to the start map rather than nothing, exactly like the editor's own fallback.
     }
     if (!project.valid() || project.startMap.empty()) return;
-    const std::string path = project.contentDir() + "\\" + project.startMap;
+    const std::string path = project.contentDir() + AVER_PATH_SEP + project.startMap;
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) {
         AVER_INFO("[Level] start map '{}' does not exist yet - the world starts empty", project.startMap);

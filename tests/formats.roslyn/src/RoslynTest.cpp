@@ -1,6 +1,7 @@
 // The Roslyn actor-script backend, checked against the built-in scanner.
 // Skips loudly when averdesign is not staged.
 #include "aver/formats/ActorScript.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/formats/AverDesign.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -64,7 +65,7 @@ partial class Rig
 int main() {
     AVER_INFO("=== the Roslyn actor-script backend ===");
 
-    fmt::setAverDesignPath(executableDir() + "\\Tools\\averdesign.exe");
+    fmt::setAverDesignPath(executableDir() + AVER_PATH_SEP "Tools" AVER_PATH_SEP "averdesign" + kExecutableSuffix);
 
     if (!fmt::averDesignAvailable()) {
         AVER_WARN("=== SKIPPED: averdesign is not staged at {} ===", fmt::averDesignPath());

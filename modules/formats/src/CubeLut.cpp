@@ -1,5 +1,6 @@
 // .cube 3D LUT reader. See CubeLut.hpp.
 #include "aver/formats/CubeLut.hpp"
+#include "aver/core/CharConv.hpp"   // floating from_chars where libc++ has none
 #include "aver/formats/IesProfile.hpp"   // floatToHalf
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -66,7 +67,7 @@ bool parseCubeLut(std::string_view text, CubeLut& out, std::string* err) {
             if (t.size() < 3) return fail(err, "a data line needs three numbers");
             for (int c = 0; c < 3; ++c) {
                 f32 v = 0;
-                const auto r = std::from_chars(t[c].data(), t[c].data() + t[c].size(), v);
+                const auto r = aver::fromChars(t[c].data(), t[c].data() + t[c].size(), v);
                 if (r.ec != std::errc{}) return fail(err, "non-numeric data in the table");
                 data.push_back(v);
             }

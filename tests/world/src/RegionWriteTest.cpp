@@ -16,6 +16,7 @@
 #include "aver/world/RegionFile.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <string>
