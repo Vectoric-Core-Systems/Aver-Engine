@@ -485,6 +485,19 @@ void Window::setTitle(const std::string& title) {
     if (nativeHandle_) SetWindowTextW(static_cast<HWND>(nativeHandle_), utf8ToWide(title).c_str());
 }
 
+bool Window::frameSize(i32& w, i32& h) const {
+    RECT r{};
+    if (!nativeHandle_ || !GetWindowRect(static_cast<HWND>(nativeHandle_), &r)) return false;
+    w = r.right - r.left;
+    h = r.bottom - r.top;
+    return true;
+}
+
+void Window::setFrameSize(i32 w, i32 h) {
+    if (nativeHandle_)
+        SetWindowPos(static_cast<HWND>(nativeHandle_), nullptr, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 // Drains every queued OS message without blocking.
 void Window::pumpEvents() {
     MSG msg;
@@ -504,5 +517,14 @@ void Window::destroy() {
 }
 
 Window::~Window() { destroy(); }
+
+// Win32 capture is done by Runtime/src/MouseCapture.cpp directly; see Window.hpp.
+void Window::setRelativeMouse(bool) {}
+
+bool keyDownNow(i32 vk) { return vk > 0 && vk < 256 && (GetAsyncKeyState(vk) & 0x8000) != 0; }
+
+// Not provided here: Aver.RHI.Vulkan creates a Win32 surface from the HWND itself. See Window.hpp.
+void* vulkanGetInstanceProcAddr() { return nullptr; }
+bool createVulkanSurface(void*, void*, u64*) { return false; }
 
 } // namespace aver

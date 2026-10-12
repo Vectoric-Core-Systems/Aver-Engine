@@ -9,6 +9,27 @@ namespace aver {
 // The directory containing the running executable.
 std::string executableDir();
 
+// What an executable's file name ends in on this platform: ".exe" on Windows, nothing elsewhere. For
+// the places that name a sibling program (the runtime, the .NET tools' app hosts) rather than find it.
+#if defined(_WIN32)
+inline constexpr const char* kExecutableSuffix = ".exe";
+#else
+inline constexpr const char* kExecutableSuffix = "";
+#endif
+
+// Rewrites every separator in `path` to the platform's own: '\\' on Windows, '/' elsewhere. For code
+// that canonicalises a path before using it as a key AND opening it -- one spelling per file, so two
+// references to it dedupe -- and must not turn a POSIX path into a file name full of backslashes.
+inline void toNativeSeparators(std::string& path) {
+    for (char& c : path) {
+#if defined(_WIN32)
+        if (c == '/') c = '\\';
+#else
+        if (c == '\\') c = '/';
+#endif
+    }
+}
+
 // Per-user, per-machine state that is neither project nor engine content.
 // `%LOCALAPPDATA%\AverEngine` on Windows; the executable directory if the OS will not name it.
 // AVER_USER_DATA_DIR, when set, replaces it (tests use this).

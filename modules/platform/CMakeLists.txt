@@ -1,14 +1,35 @@
+# The OS half of every class here is one directory per platform family: src/win32 on Windows,
+# src/posix (and src/sdl, for the window, splash and gamepads) everywhere else. The public headers
+# and the portable half are shared.
+if(WIN32)
+  set(_aver_platform_os_sources
+    src/win32/Win32Window.cpp
+    src/win32/Win32Splash.cpp
+    src/win32/Win32Console.cpp
+    src/win32/Win32DirectoryWatcher.cpp
+    src/win32/Gamepad.cpp)
+else()
+  set(_aver_platform_os_sources
+    src/posix/PosixConsole.cpp
+    src/sdl/SdlKeys.cpp
+    src/sdl/SdlWindow.cpp
+    src/sdl/SdlSplash.cpp
+    src/sdl/SdlGamepad.cpp
+    src/sdl/SdlFileDialog.cpp)
+  if(APPLE)
+    list(APPEND _aver_platform_os_sources src/posix/FsEventsWatchBackend.cpp)
+  else()
+    list(APPEND _aver_platform_os_sources src/posix/InotifyWatchBackend.cpp)
+  endif()
+endif()
+
 aver_add_module(Aver.Platform
   SOURCES
     src/DirectoryWatcher.cpp
     src/FileSystem.cpp
     src/Image.cpp
     src/InputState.cpp
-    src/win32/Win32Window.cpp
-    src/win32/Win32Splash.cpp
-    src/win32/Win32Console.cpp
-    src/win32/Win32DirectoryWatcher.cpp
-    src/win32/Gamepad.cpp
+    ${_aver_platform_os_sources}
   DEPS
     Aver.Core
 )
@@ -28,4 +49,14 @@ if(WIN32)
   # capable API (<xinput.h> assumes it by default unless XINPUT_USE_9_1_0 is defined) -- so a later
   # rumble/guide-button/battery feature is a call away instead of a relink.
   target_link_libraries(Aver.Platform PUBLIC user32 gdi32 shell32 ole32 xinput)
+endif()
+
+# SDL everywhere else: the window, the splash, gamepads, the file dialog. PRIVATE -- no public header
+# here names an SDL type, and nothing above this module links SDL because of it. The Vulkan surface
+# and loader cross to Aver.RHI.Vulkan as void* through Window.hpp for exactly that reason.
+if(NOT WIN32)
+  target_link_libraries(Aver.Platform PRIVATE ${AVER_SDL3_TARGET})
+endif()
+if(APPLE)
+  target_link_libraries(Aver.Platform PRIVATE "-framework CoreServices")   # FSEvents
 endif()
