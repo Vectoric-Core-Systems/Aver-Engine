@@ -59,26 +59,6 @@
 # property. That prediction held: the re-record wrote exactly the values those 25 runs produced, and
 # the verification sweep reproduced them again immediately. What changed was this file, not what the
 # renderer does.
-baseline | centre | 57,24,18
-baseline | ms | 57,24,18
-baseline | rt | 45,32,28
-baseline | ms-rt | 50,36,31
-baseline | gi | 54,18,14
-baseline | ms-gi | 54,18,14
-baseline | ms-rt-gi | 60,34,29
-baseline | gi-debug | 55,20,13
-baseline | ms-gi-debug | 55,20,13
-baseline | layered-off | 57,24,18
-baseline | layered-coat | 59,28,23
-baseline | shadow | 16,24,34
-baseline | shadow-rt | 26,39,55
-baseline | shadow-ms-rt | 27,40,56
-baseline | shadow-gi | 12,15,20
-baseline | penumbra | 47,49,54
-baseline | penumbra-rt | 82,87,97
-baseline | sunlit | 87,84,82
-baseline | sunlit-gi | 86,81,75
-baseline | rt-penumbra | 127,125,124
 no-rt | centre | 57,24,18
 no-rt | ms | 57,24,18
 no-rt | rt | 57,24,18
@@ -239,3 +219,23 @@ warp | penumbra-rt | 84,89,98
 warp | sunlit | 87,84,82
 warp | sunlit-gi | 86,81,75
 warp | rt-penumbra | 128,126,126
+baseline | centre | 57,25,20
+baseline | ms | 57,25,20
+baseline | rt | 40,20,18
+baseline | ms-rt | 40,20,18
+baseline | gi | 67,25,20
+baseline | ms-gi | 67,25,20
+baseline | ms-rt-gi | 52,21,18
+baseline | gi-debug | 58,23,15
+baseline | ms-gi-debug | 58,23,15
+baseline | layered-off | 57,25,20
+baseline | layered-coat | 59,30,26
+baseline | shadow | 15,25,40
+baseline | shadow-rt | 14,22,33
+baseline | shadow-ms-rt | 14,22,33
+baseline | shadow-gi | 19,26,40
+baseline | penumbra | 46,51,62
+baseline | penumbra-rt | 28,35,47
+baseline | sunlit | 87,89,95
+baseline | sunlit-gi | 90,91,96
+baseline | rt-penumbra | 69,72,79

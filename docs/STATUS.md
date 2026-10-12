@@ -84,7 +84,11 @@ cd "C:\Users\User\Documents\Aver Engine"
 Output: `build/bin/Sandbox.exe`, and `build-release/bin/Sandbox.exe` for `-Release`. **The two trees
 coexist and neither clobbers the other**, because `scripts/gates.baseline.txt` is a Debug measurement
 and `scripts/gates.baseline.release.txt` is the Release one, so both binaries have to exist at once
-for either baseline to mean anything. `scripts/build.bat` is the real build (PowerShell wraps it);
+for either baseline to mean anything. **Re-recorded 2026-10-13 for 0.7.0** (`-Config baseline`, both files,
+identical rows): all 20 gates moved since 0.6.0. Raster rows shifted a few codes bluer (the sky/ambient work);
+the RT shadow rows fell sharply (`penumbra-rt` 82 -> 28, `rt-penumbra` 127 -> 69), and a Path Tracing reference
+of the same probes (`--pt 3 --denoiser 1 --set voxi.ptMode 1`, 1500 frames) reads 17 / 15 / 64 where RT now reads
+28 / 14 / 69 -- the old numbers were the over-bright RT shadows the 10-11 sun work fixed. `scripts/build.bat` is the real build (PowerShell wraps it);
 run `.bat` via the PowerShell tool, not Git Bash (`cmd //c` mangling). Add `/Zc:__cplusplus`
 already set. Vulkan: `-DAVER_RHI_VULKAN=ON` — no SDK install needed; headers and a
 SPIR-V-capable DXC are vendored under `third_party/` (`8a3eaf5`), and the loader ships with the GPU
