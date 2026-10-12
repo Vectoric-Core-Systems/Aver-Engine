@@ -150,7 +150,7 @@ int main() {
 #else
     const fs::path vendored = fs::path(executableDir()) / "libdxcompiler.so";
 #endif
-    void* dll = fs::exists(vendored) ? loadLibrary(vendored.string().c_str()) : nullptr;
+    void* dll = fs::exists(vendored) ? loadLibrary(reinterpret_cast<const char*>(vendored.u8string().c_str())) : nullptr;
     if (!dll) {
         AVER_WARN("  SKIP  {} (the SPIR-V-capable DXC) is absent", vendored.string());
         return kSkip;

@@ -4,6 +4,6 @@
        FSharp.Core transitively and, with NuGet.config's <clear/>, could find it only in a warm package cache: a clean
        machine (CI) failed with NU1101. Same folder, offline, so nothing new is fetched. -->
   <PropertyGroup>
-    <RestoreAdditionalProjectSources Condition="Exists('$(MSBuildBinPath)\FSharp\library-packs')">$(RestoreAdditionalProjectSources);$(MSBuildBinPath)\FSharp\library-packs</RestoreAdditionalProjectSources>
+    <RestoreAdditionalProjectSources Condition="Exists('$(MSBuildBinPath)/FSharp/library-packs')">$(RestoreAdditionalProjectSources);$(MSBuildBinPath)/FSharp/library-packs</RestoreAdditionalProjectSources>
   </PropertyGroup>
 </Project>

@@ -761,9 +761,11 @@ void SandboxApp::writePlaySnapshot() {
     for (u32 i = 0, n = w.count(); i < n; ++i) piePreEntities_.push_back(w.at(i));
     std::sort(piePreEntities_.begin(), piePreEntities_.end());
     std::error_code ec;
-    const std::filesystem::path dir = std::filesystem::temp_directory_path(ec) / "AverEngine";
+    // Per user (userDataDir, not a shared /tmp) and per session (the clock), so two editors never share one.
+    const std::filesystem::path dir = std::filesystem::path(userDataDir()) / "PlaySnapshots";
     std::filesystem::create_directories(dir, ec);
-    const std::string path = (dir / (levelIsLegacyOcmap_ ? "play_snapshot.ocmap" : "play_snapshot.ocworld")).string();
+    const std::string stem = "play_snapshot_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const std::string path = (dir / (stem + (levelIsLegacyOcmap_ ? ".ocmap" : ".ocworld"))).string();
     pieWasUnsaved_ = levelHasUnsavedEdits();
     if (saveLevel(path, /*playSnapshot=*/true)) pieSnapshotPath_ = path;
     else AVER_WARN("[Sandbox] Play: could not snapshot the level; Stop will restore transforms only");

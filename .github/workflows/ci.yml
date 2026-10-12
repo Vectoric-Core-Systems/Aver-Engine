@@ -45,6 +45,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read-only token: nothing here writes to the repository.
+permissions:
+  contents: read
+
 concurrency:
   # One run per ref: a long build is not worth doing twice for a branch someone is pushing to.
   group: ci-${{ github.ref }}
