@@ -8,6 +8,8 @@
 #include "VulkanCommon.hpp"
 #include "aver/rhi/ShaderFiles.hpp"   // scene.hlsl is loaded, not compiled in
 #include "aver/rhi/vulkan/UiBackend.hpp"
+#include "aver/core/DynamicLibrary.hpp"
+#include "aver/platform/Window.hpp"   // vulkanGetInstanceProcAddr / createVulkanSurface off Windows
 
 #include <cstdlib>
 #include "aver/rhi/Atmosphere.hpp"
@@ -19,6 +21,7 @@
 #include <cstring>
 
 #include <filesystem>
+#include <iterator>
 
 
 namespace aver::rhi::vkb {
@@ -287,18 +290,35 @@ void writeShadingConstants(f32* block, bool unlit = false) {
 // 1. VulkanApi bootstrap.
 // ================================================================================================
 bool loadGlobalApi(VulkanApi& api) {
-    api.module = LoadLibraryW(L"vulkan-1.dll");
-    if (!api.module) {
-        AVER_WARN("[RHI.Vulkan] vulkan-1.dll not found (no Vulkan-capable driver installed)");
-        return false;
-    }
-    api.GetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
-        reinterpret_cast<void*>(GetProcAddress(api.module, "vkGetInstanceProcAddr")));
+    // The window layer's loader first, when it has one: it is the library its surfaces come from, and
+    // an instance from one loader handed to another's vkCreate*SurfaceKHR is undefined behaviour that
+    // merely happens to work while both resolve to the same file. Off Windows that is SDL's.
+    api.GetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(aver::vulkanGetInstanceProcAddr());
     if (!api.GetInstanceProcAddr) {
-        AVER_WARN("[RHI.Vulkan] vulkan-1.dll has no vkGetInstanceProcAddr - not a real Vulkan loader");
-        FreeLibrary(api.module);
-        api.module = nullptr;
-        return false;
+        // Our own, otherwise: always on Windows, and headless everywhere. The same names, in the same
+        // order, SDL tries, so a windowed run and a headless one load the same file.
+#if defined(_WIN32)
+        const char* names[] = {"vulkan-1.dll"};
+#elif defined(__APPLE__)
+        const char* names[] = {"libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib"};
+#else
+        const char* names[] = {"libvulkan.so.1", "libvulkan.so"};
+#endif
+        const char* loaded = nullptr;
+        api.module = aver::loadFirstLibrary(names, std::size(names), &loaded);
+        if (!api.module) {
+            AVER_WARN("[RHI.Vulkan] no Vulkan loader found ({}) - no Vulkan-capable driver installed?",
+                      aver::libraryError());
+            return false;
+        }
+        api.GetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+            aver::librarySymbol(api.module, "vkGetInstanceProcAddr"));
+        if (!api.GetInstanceProcAddr) {
+            AVER_WARN("[RHI.Vulkan] {} has no vkGetInstanceProcAddr - not a real Vulkan loader", loaded);
+            aver::freeLibrary(api.module);
+            api.module = nullptr;
+            return false;
+        }
     }
 #define AVER_VK_GLOBAL(name) \
     api.name = reinterpret_cast<PFN_vk##name>(reinterpret_cast<void*>(api.GetInstanceProcAddr(nullptr, "vk" #name)))
@@ -308,7 +328,7 @@ bool loadGlobalApi(VulkanApi& api) {
     AVER_VK_GLOBAL(EnumerateInstanceVersion);   // absent pre-1.1; nullptr is a valid "treat as 1.0"
 #undef AVER_VK_GLOBAL
     if (!api.CreateInstance) {
-        AVER_ERROR("[RHI.Vulkan] vkCreateInstance could not be resolved from vulkan-1.dll");
+        AVER_ERROR("[RHI.Vulkan] vkCreateInstance could not be resolved from the Vulkan loader");
         return false;
     }
     return true;
@@ -336,7 +356,9 @@ bool loadInstanceApi(VulkanApi& api, VkInstance instance, bool debugUtilsAvailab
     AVER_VK_INST(GetPhysicalDeviceSurfaceCapabilitiesKHR);
     AVER_VK_INST(GetPhysicalDeviceSurfaceFormatsKHR);
     AVER_VK_INST(GetPhysicalDeviceSurfacePresentModesKHR);
+#if defined(_WIN32)
     AVER_VK_INST(CreateWin32SurfaceKHR);
+#endif
 #undef AVER_VK_INST
     if (debugUtilsAvailable) {
         api.CreateDebugUtilsMessengerEXT = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
@@ -345,7 +367,10 @@ bool loadInstanceApi(VulkanApi& api, VkInstance instance, bool debugUtilsAvailab
             reinterpret_cast<void*>(api.GetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT")));
     }
     const bool ok = api.EnumeratePhysicalDevices && api.CreateDevice && api.GetDeviceProcAddr &&
-                    api.CreateWin32SurfaceKHR && api.GetPhysicalDeviceSurfaceCapabilitiesKHR;
+#if defined(_WIN32)
+                    api.CreateWin32SurfaceKHR &&
+#endif
+                    api.GetPhysicalDeviceSurfaceCapabilitiesKHR;
     if (!ok) AVER_ERROR("[RHI.Vulkan] a required instance-level entry point failed to resolve");
     return ok;
 }
@@ -476,7 +501,7 @@ bool loadDeviceApi(VulkanApi& api, VkDevice device, const std::vector<std::strin
 }
 
 void unloadApi(VulkanApi& api) {
-    if (api.module) FreeLibrary(api.module);
+    aver::freeLibrary(api.module);
     api = VulkanApi{};   // every PFN_ dangles from here on, by design; see the header's own note
 }
 
@@ -571,15 +596,19 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
         return false;
     }
 
+    u32 availExtCount = 0;
+    api_.EnumerateInstanceExtensionProperties(nullptr, &availExtCount, nullptr);
+    std::vector<VkExtensionProperties> availExts(availExtCount);
+    if (availExtCount) api_.EnumerateInstanceExtensionProperties(nullptr, &availExtCount, availExts.data());
+    auto instanceOffers = [&](const char* name) {
+        for (const auto& e : availExts) if (std::strcmp(e.extensionName, name) == 0) return true;
+        return false;
+    };
+
     bool debugUtilsRequested = desc.enableDebug;
     bool debugUtilsAvailable = false;
     if (debugUtilsRequested) {
-        u32 extCount = 0;
-        api_.EnumerateInstanceExtensionProperties(nullptr, &extCount, nullptr);
-        std::vector<VkExtensionProperties> exts(extCount);
-        api_.EnumerateInstanceExtensionProperties(nullptr, &extCount, exts.data());
-        for (const auto& e : exts)
-            if (std::strcmp(e.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0) { debugUtilsAvailable = true; break; }
+        debugUtilsAvailable = instanceOffers(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
         if (!debugUtilsAvailable)
             AVER_WARN("[RHI.Vulkan] debug requested but {} is not present (no SDK installed?) - "
                       "continuing without validation/debug labels", VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -587,6 +616,17 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
 
     std::vector<const char*> instExts(std::begin(kRequiredInstanceExtensions), std::end(kRequiredInstanceExtensions));
     if (debugUtilsAvailable) instExts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    for (const char* e : kPlatformSurfaceExtensions)
+        if (e && instanceOffers(e)) instExts.push_back(e);
+    // macOS only. The Khronos loader offers this on every platform, and enabling it elsewhere would also
+    // enumerate layered portability drivers (Mesa's dzn on Windows, Vulkan over D3D12) that could then
+    // win device selection over the native driver. MoltenVK is the one portability driver this needs.
+#if defined(__APPLE__)
+    const bool portabilityEnumeration = instanceOffers(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+#else
+    const bool portabilityEnumeration = false;
+#endif
+    if (portabilityEnumeration) instExts.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 
     VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     appInfo.pApplicationName = "Aver";
@@ -595,6 +635,7 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
 
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ici.pApplicationInfo = &appInfo;
+    if (portabilityEnumeration) ici.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
     ici.enabledExtensionCount = static_cast<u32>(instExts.size());
     ici.ppEnabledExtensionNames = instExts.data();
     // VK_LAYER_KHRONOS_validation: requested only when asked for AND present (enumerated, not
@@ -687,6 +728,12 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     std::vector<std::string> devExts(std::begin(kRequiredDeviceExtensions), std::end(kRequiredDeviceExtensions));
     for (const char* opt : kOptionalDeviceExtensions) {
         if (deviceHasExtension(api_, physicalDevice_, opt)) { devExtsC.push_back(opt); devExts.emplace_back(opt); }
+    }
+    // Not optional when offered: a portability implementation (MoltenVK) requires it be enabled.
+    if (deviceHasExtension(api_, physicalDevice_, kPortabilitySubsetExtension)) {
+        devExtsC.push_back(kPortabilitySubsetExtension);
+        devExts.emplace_back(kPortabilitySubsetExtension);
+        AVER_INFO("[RHI.Vulkan] {} enabled (a portability implementation, e.g. MoltenVK)", kPortabilitySubsetExtension);
     }
     const bool wantMeshShader = std::find(devExts.begin(), devExts.end(), std::string(VK_EXT_MESH_SHADER_EXTENSION_NAME)) != devExts.end();
     const bool wantAccelStruct = std::find(devExts.begin(), devExts.end(), std::string(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)) != devExts.end();
@@ -989,6 +1036,22 @@ TextureHandle VulkanDevice::sceneDepthTexture() {
 // default) when none was -- every game build. No Dear ImGui here; see UiBackend.hpp for the split
 // and why handles cross as opaque u64s.
 // ================================================================================================
+namespace {
+// The installed UI backend while it is up, for the two window-input thunks below. One at a time, as
+// in D3D12Device.cpp: registerUiWndProc/registerUiEventProc are process-wide.
+//
+// THIS REGISTRATION WAS MISSING, and on Windows it meant the editor's ImGui on Vulkan never received a
+// window message: Engine::run routes the HWND's messages to rhi::uiWndProc, and nothing on the Vulkan
+// side had ever told uiWndProc where to send them. D3D12 registers in its uiInit; this mirrors it.
+vkb::IUiBackend* g_activeUiBackend = nullptr;
+bool uiBackendWndProcThunk(void* hwnd, u32 msg, u64 w, i64 l) {
+    return g_activeUiBackend && g_activeUiBackend->wndProc(hwnd, msg, w, l);
+}
+bool uiBackendEventProcThunk(const void* nativeEvent) {
+    return g_activeUiBackend && g_activeUiBackend->eventProc(nativeEvent);
+}
+} // namespace
+
 bool VulkanDevice::uiInit(void* windowHandle) {
     if (!uiBackend_ || uiUp_) return uiUp_;
     if (!device_ || !instance_ || !queue_) {
@@ -1011,10 +1074,17 @@ bool VulkanDevice::uiInit(void* windowHandle) {
     d.colorFormat    = static_cast<u32>(swapchainFormat_);
     d.sampleCount    = 1;          // the overlay pass is never multisampled
     d.dynamicRendering = true;     // this backend has no VkRenderPass to give -- see the desc
+    d.getInstanceProcAddr = reinterpret_cast<u64>(api_.GetInstanceProcAddr);
 
     uiUp_ = uiBackend_->init(windowHandle, d);
-    if (!uiUp_) AVER_WARN("[RHI.Vulkan] the installed UI backend refused to initialise");
-    return uiUp_;
+    if (!uiUp_) {
+        AVER_WARN("[RHI.Vulkan] the installed UI backend refused to initialise");
+        return false;
+    }
+    g_activeUiBackend = uiBackend_;
+    registerUiWndProc(&uiBackendWndProcThunk);
+    registerUiEventProc(&uiBackendEventProcThunk);
+    return true;
 }
 
 void VulkanDevice::uiNewFrame() { if (uiBackend_ && uiUp_) uiBackend_->newFrame(); }
@@ -1026,6 +1096,9 @@ void VulkanDevice::uiShutdown() {
     // The toolkit owns every descriptor it made for us; its shutdown takes them all, so this map
     // must not outlive it holding ids that no longer mean anything.
     uiTexIds_.clear();
+    registerUiWndProc(nullptr);
+    registerUiEventProc(nullptr);
+    g_activeUiBackend = nullptr;
     uiBackend_->shutdown();
     uiUp_ = false;
 }
@@ -1512,10 +1585,19 @@ bool VulkanDevice::createSwapchainResources(const SwapchainDesc& d) {
     if (!d.windowHandle) { AVER_WARN("[RHI.Vulkan] createSwapchain without a window (headless)"); return false; }
     width_ = d.width; height_ = d.height;
 
+#if defined(_WIN32)
     VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
     sci.hinstance = GetModuleHandleW(nullptr);
     sci.hwnd = static_cast<HWND>(d.windowHandle);
     if (!vkOk(api_.CreateWin32SurfaceKHR(instance_, &sci, nullptr, &surface_), "CreateWin32SurfaceKHR")) return false;
+#else
+    u64 surface = 0;
+    if (!aver::createVulkanSurface(d.windowHandle, instance_, &surface)) {
+        AVER_ERROR("[RHI.Vulkan] the platform layer could not create a surface for this window");
+        return false;
+    }
+    surface_ = reinterpret_cast<VkSurfaceKHR>(surface);
+#endif
 
     VkBool32 canPresent = VK_FALSE;
     api_.GetPhysicalDeviceSurfaceSupportKHR(physicalDevice_, graphicsQueueFamily_, surface_, &canPresent);
@@ -1534,10 +1616,10 @@ bool VulkanDevice::createSwapchainResources(const SwapchainDesc& d) {
     // A plain UNORM surface, not sRGB: PSComposite already applies toGamma() (rhi::postShaderSource()),
     // matching D3D12's non-sRGB backbuffer -- sRGB would gamma-encode a SECOND time on top.
     swapchainFormat_ = VK_FORMAT_UNDEFINED;
-    // RGBA FIRST, ORDER LOAD-BEARING: rhi::Format has no case for B8G8R8A8_UNORM (fromVkFormat
-    // returns Unknown) -- ensureViewportTexture asked, got Unknown, and createTexture refused it 80
-    // times a run: the editor's 3D viewport was black on Vulkan while the UI drew fine. R8G8B8A8_UNORM
-    // also matches D3D12.
+    // RGBA FIRST, because R8G8B8A8_UNORM matches D3D12. BGRA is the fallback, and on Mesa's X11
+    // surfaces the only UNORM format there is. It needs rhi::Format::BGRA8Unorm: before that case
+    // existed fromVkFormat returned Unknown, ensureViewportTexture asked, got Unknown, and createTexture
+    // refused it 80 times a run -- the editor's 3D viewport was black on Vulkan while the UI drew fine.
     for (VkFormat want : {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM}) {
         for (const auto& f : fmts) if (f.format == want) { swapchainFormat_ = f.format; swapchainColorSpace_ = f.colorSpace; break; }
         if (swapchainFormat_ != VK_FORMAT_UNDEFINED) break;
@@ -1585,12 +1667,7 @@ bool VulkanDevice::createSwapchainResources(const SwapchainDesc& d) {
     if (!vkOk(api_.CreateSwapchainKHR(device_, &sc, nullptr, &swapchain_), "CreateSwapchainKHR")) return false;
 
     createRenderTargetViews();
-    for (u32 i = 0; i < static_cast<u32>(swapchainImages_.size()); ++i) {
-        VkSemaphore s = VK_NULL_HANDLE;
-        VkSemaphoreCreateInfo semInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-        api_.CreateSemaphore(device_, &semInfo, nullptr, &s);
-        renderFinished_.push_back(s);
-    }
+    createRenderFinishedSemaphores();
 
     if (!createDepthBuffer()) return false;
     if (!createMsaaColor()) return false;
@@ -3315,16 +3392,31 @@ void VulkanDevice::present() {
             const u8* base = static_cast<const u8*>(mapped);
             const usize rowPitch = static_cast<usize>(width_) * 4;
             const u8* px = base + static_cast<usize>(y) * rowPitch + static_cast<usize>(x) * 4;
-            captured_[0] = px[0] / 255.0f; captured_[1] = px[1] / 255.0f; captured_[2] = px[2] / 255.0f; captured_[3] = px[3] / 255.0f;
+            // Both readbacks promise RGBA. A BGRA swapchain (Mesa's X11 surfaces offer nothing else)
+            // stores blue first, so its red and blue are swapped back here -- the copy is of bytes.
+            const bool bgra = swapchainFormat_ == VK_FORMAT_B8G8R8A8_UNORM;
+            const usize r = bgra ? 2 : 0, b = bgra ? 0 : 2;
+            captured_[0] = px[r] / 255.0f; captured_[1] = px[1] / 255.0f; captured_[2] = px[b] / 255.0f; captured_[3] = px[3] / 255.0f;
             frameImageW_ = width_; frameImageH_ = height_;
             frameImage_.resize(static_cast<usize>(width_) * height_ * 4);
             std::memcpy(frameImage_.data(), base, frameImage_.size());
+            if (bgra)
+                for (usize i = 0; i < frameImage_.size(); i += 4) std::swap(frameImage_[i], frameImage_[i + 2]);
             api_.UnmapMemory(device_, captureMemory_);
             captureReady_ = true;
         } else {
             AVER_ERROR("[RHI.Vulkan] capture Map FAILED");
         }
         captureReq_ = false;
+    }
+}
+
+void VulkanDevice::createRenderFinishedSemaphores() {
+    for (u32 i = 0; i < static_cast<u32>(swapchainImages_.size()); ++i) {
+        VkSemaphore s = VK_NULL_HANDLE;
+        VkSemaphoreCreateInfo semInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        api_.CreateSemaphore(device_, &semInfo, nullptr, &s);
+        renderFinished_.push_back(s);
     }
 }
 
@@ -3375,6 +3467,12 @@ void VulkanDevice::resize(u32 w, u32 h) {
     for (u32 i = 0; i < kFrameCount; ++i) frameTimelineValues_[i] = nextTimelineValue_;   // already-retired: we just waited
 
     createRenderTargetViews();
+    // RECREATED HERE TOO. They were destroyed above with the old swapchain's images and, until this
+    // line, never made again: the next submit then signalled renderFinished_[imageIndex_] out of an
+    // empty vector -- a destroyed handle the old storage still held. RADV hands that to the kernel as an
+    // invalid syncobj, the kernel rejects the whole submission (-EINVAL), and the device is lost on the
+    // first resize. A driver that tolerates a dead semaphore only hid it.
+    createRenderFinishedSemaphores();
     createDepthBuffer();
     createMsaaColor();
     releasePostTargets();

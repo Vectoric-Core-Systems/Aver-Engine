@@ -24,14 +24,11 @@
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/core/Log.hpp"
 
-// NOT WIN32_LEAN_AND_MEAN: dxcapi.h is a COM header and needs IUnknown, IStream and BSTR, all of
-// which lean-and-mean excludes. NOMINMAX because std::min is used below and windows.h defines a
-// macro of that name.
-#define NOMINMAX
-#include <windows.h>
-#include <unknwn.h>
-#include <dxcapi.h>
-#include <wrl/client.h>
+// dxcapi.h and ComPtr on every platform: the Windows SDK's with WRL on Windows, DXC's own COM shim
+// elsewhere. See DxcApi.hpp.
+#include "aver/rhi/DxcApi.hpp"
+#include "aver/core/DynamicLibrary.hpp"
+#include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -39,7 +36,7 @@
 #include <vector>
 
 using namespace aver;
-using Microsoft::WRL::ComPtr;
+using rhi::ComPtr;
 
 static int g_failures = 0;
 
@@ -59,10 +56,15 @@ public:
     bool available() {
         if (tried_) return compiler_ != nullptr;
         tried_ = true;
-        dll_ = LoadLibraryW(L"dxcompiler.dll");
+#if defined(_WIN32)
+        dll_ = loadLibrary("dxcompiler.dll");
+#elif defined(__APPLE__)
+        dll_ = loadLibrary((executableDir() + "/libdxcompiler.dylib").c_str());
+#else
+        dll_ = loadLibrary((executableDir() + "/libdxcompiler.so").c_str());
+#endif
         if (!dll_) return false;
-        auto create = reinterpret_cast<DxcCreateInstanceProc>(
-            reinterpret_cast<void*>(GetProcAddress(dll_, "DxcCreateInstance")));
+        auto create = reinterpret_cast<DxcCreateInstanceProc>(librarySymbol(dll_, "DxcCreateInstance"));
         if (!create) return false;
         if (FAILED(create(CLSID_DxcUtils, IID_PPV_ARGS(&utils_))) ||
             FAILED(create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler_)))) {
@@ -122,7 +124,7 @@ public:
 
 private:
     bool tried_ = false;
-    HMODULE dll_ = nullptr;
+    void* dll_ = nullptr;
     ComPtr<IDxcUtils> utils_;
     ComPtr<IDxcCompiler3> compiler_;
 };

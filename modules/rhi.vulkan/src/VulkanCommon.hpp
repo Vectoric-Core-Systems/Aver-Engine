@@ -43,12 +43,17 @@
 // (the #ifndef guards just make this header self-sufficient). No vulkan-1.lib is installed (SDK
 // deliberately absent -- see third_party/vulkan-headers/README.md), so VK_NO_PROTOTYPES: nothing
 // here may call an unprefixed vkFoo() expecting the linker to resolve it. Every entry point is a
-// function pointer in VulkanApi below, resolved at runtime from the driver's vulkan-1.dll
-// (System32, not the SDK) via LoadLibraryW + GetProcAddress, starting from vkGetInstanceProcAddr.
+// function pointer in VulkanApi below, resolved at runtime from the system's Vulkan loader --
+// vulkan-1.dll (System32, not the SDK), libvulkan.so.1, or libvulkan.1.dylib / libMoltenVK.dylib --
+// via aver/core/DynamicLibrary.hpp, starting from vkGetInstanceProcAddr.
+//
+// THE WIN32 SURFACE IS THE ONLY PLATFORM TYPE THIS BACKEND NAMES. Everywhere else the surface comes
+// from Aver.Platform (createVulkanSurface, Window.hpp), which knows whether the window is X11,
+// Wayland or Cocoa; this module never includes an X11, Wayland or Metal header.
 #ifndef VK_NO_PROTOTYPES
 #define VK_NO_PROTOTYPES 1
 #endif
-#ifndef VK_USE_PLATFORM_WIN32_KHR
+#if defined(_WIN32) && !defined(VK_USE_PLATFORM_WIN32_KHR)
 #define VK_USE_PLATFORM_WIN32_KHR 1
 #endif
 #include <vulkan/vulkan.h>   // vendored at third_party/vulkan-headers/include, v1.3.296, Apache-2.0
@@ -103,8 +108,28 @@ constexpr u32 kRequiredApiVersion = VK_API_VERSION_1_3;
 // ---- required / optional extension name lists -------------------------------------------------
 inline constexpr const char* kRequiredInstanceExtensions[] = {
     VK_KHR_SURFACE_EXTENSION_NAME,
+#if defined(_WIN32)
     VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+#endif
 };
+// Off Windows, which window-system surface the platform layer will ask for is not known when the
+// instance is made -- one binary runs under X11 and Wayland alike -- so every one of these the loader
+// offers is enabled. Spelled as strings: their *_EXTENSION_NAME macros live in the per-platform
+// headers this module deliberately does not include.
+inline constexpr const char* kPlatformSurfaceExtensions[] = {
+#if !defined(_WIN32)
+    "VK_KHR_xlib_surface",
+    "VK_KHR_xcb_surface",
+    "VK_KHR_wayland_surface",
+    "VK_EXT_metal_surface",
+#endif
+    nullptr,
+};
+// MoltenVK is a "portability" implementation: since loader 1.3.216 it is not even enumerated unless
+// the instance opts in with VK_KHR_portability_enumeration and VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+// (done on macOS only, see VulkanDevice::init), and a device that advertises VK_KHR_portability_subset
+// MUST have it enabled. Nothing changes for a conformant driver.
+inline constexpr const char* kPortabilitySubsetExtension = "VK_KHR_portability_subset";
 // Requested only when DeviceDesc::enableDebug; absence is not fatal (no validation layers by
 // default; without VK_EXT_debug_utils, object naming/labels become silent no-ops, same shape as
 // pushMarker/popMarker's inert IRenderContext defaults).
@@ -143,7 +168,8 @@ inline constexpr const char* kOptionalDeviceExtensions[] = {
 //    loadInstanceApi/loadDeviceApi below (declared here, DEFINED IN VulkanDevice.cpp).
 // ================================================================================================
 struct VulkanApi {
-    HMODULE module = nullptr;   // the vulkan-1.dll module handle; FreeLibrary'd in unloadApi()
+    void* module = nullptr;   // the loader library (aver::loadLibrary); freed in unloadApi(). Null
+                              // when the entry point was borrowed from the platform layer instead.
 
     // ---- loader-level ----
     PFN_vkGetInstanceProcAddr GetInstanceProcAddr = nullptr;
@@ -180,7 +206,9 @@ struct VulkanApi {
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR GetPhysicalDeviceSurfaceCapabilitiesKHR = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceFormatsKHR GetPhysicalDeviceSurfaceFormatsKHR = nullptr;
     PFN_vkGetPhysicalDeviceSurfacePresentModesKHR GetPhysicalDeviceSurfacePresentModesKHR = nullptr;
+#if defined(_WIN32)
     PFN_vkCreateWin32SurfaceKHR CreateWin32SurfaceKHR = nullptr;
+#endif
     PFN_vkCreateDebugUtilsMessengerEXT CreateDebugUtilsMessengerEXT = nullptr;     // optional
     PFN_vkDestroyDebugUtilsMessengerEXT DestroyDebugUtilsMessengerEXT = nullptr;   // optional
 
@@ -279,7 +307,7 @@ struct VulkanApi {
     PFN_vkGetAccelerationStructureDeviceAddressKHR GetAccelerationStructureDeviceAddressKHR = nullptr;
 };
 
-bool loadGlobalApi(VulkanApi& api);   // loads vulkan-1.dll, resolves vkGetInstanceProcAddr + every global entry point; false (logged) if either is missing -- unrecoverable
+bool loadGlobalApi(VulkanApi& api);   // loads the Vulkan loader, resolves vkGetInstanceProcAddr + every global entry point; false (logged) if either is missing -- unrecoverable
 bool loadInstanceApi(VulkanApi& api, VkInstance instance, bool debugUtilsAvailable);   // resolves instance-level entries, incl. debug_utils when `debugUtilsAvailable`; never fails outright, an optional fn just stays null
 bool loadDeviceApi(VulkanApi& api, VkDevice device, const std::vector<std::string>& deviceExtensions);   // resolves device-level entries, gating mesh_shader/acceleration_structure on `deviceExtensions`
 void unloadApi(VulkanApi& api);   // frees the module; every PFN_ left dangling by design, only called from VulkanDevice's destructor tail
@@ -303,6 +331,7 @@ inline VkFormat toVkFormat(Format f) {
     switch (f) {
         case Format::RGBA8Unorm:     return VK_FORMAT_R8G8B8A8_UNORM;
         case Format::RGBA8UnormSrgb: return VK_FORMAT_R8G8B8A8_SRGB;
+        case Format::BGRA8Unorm:     return VK_FORMAT_B8G8R8A8_UNORM;
         case Format::RG8Unorm:       return VK_FORMAT_R8G8_UNORM;
         case Format::R8Unorm:        return VK_FORMAT_R8_UNORM;
         case Format::RGBA16F:        return VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -332,6 +361,7 @@ inline Format fromVkFormat(VkFormat f) {
     switch (f) {
         case VK_FORMAT_R8G8B8A8_UNORM:        return Format::RGBA8Unorm;
         case VK_FORMAT_R8G8B8A8_SRGB:         return Format::RGBA8UnormSrgb;
+        case VK_FORMAT_B8G8R8A8_UNORM:        return Format::BGRA8Unorm;
         case VK_FORMAT_R8G8_UNORM:            return Format::RG8Unorm;
         case VK_FORMAT_R8_UNORM:              return Format::R8Unorm;
         case VK_FORMAT_R16G16B16A16_SFLOAT:   return Format::RGBA16F;
@@ -365,6 +395,7 @@ inline u32 texelBytesVk(Format f) {
         case Format::RGBA16F:        return 8;
         case Format::RGBA8Unorm:
         case Format::RGBA8UnormSrgb:
+        case Format::BGRA8Unorm:
         case Format::R32Float:
         case Format::R32Uint:
         case Format::D32Float:
@@ -1220,7 +1251,7 @@ private:
     bool unknownStorageFormat_ = false;
     bool dxLayout_ = false;
     bool tried_ = false;
-    HMODULE dll_ = nullptr;
+    void* dll_ = nullptr;     // the DXC library (aver::loadLibrary); process lifetime, never freed
     void* utils_ = nullptr;   // IDxcUtils*/IDxcCompiler3* (compiler_ below), kept as void* so this header never includes <dxcapi.h>/<wrl/client.h> -- no more business leaking outside this module than a VkFoo has; cast back to the real types only inside VulkanShaderCompiler.cpp
     void* compiler_ = nullptr;
 };
@@ -1558,6 +1589,9 @@ private:
     void dispatchMesh(const GpuMesh& m);
     bool createPipeline();               // the FIXED scene/wire/sky/line PSOs (not the generic factory path)
     bool createSwapchainResources(const SwapchainDesc& d);
+    // One binary semaphore per swapchain image, signalled by the frame's submit and waited on by its
+    // present. Called wherever the swapchain's images are (re)created: creation AND resize.
+    void createRenderFinishedSemaphores();
     void createRenderTargetViews();
     bool createDepthBuffer();
     bool createMsaaColor();
