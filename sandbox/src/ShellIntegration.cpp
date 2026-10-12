@@ -211,10 +211,13 @@ bool moveToRecycleBin(const std::string& path) {
 #else
     const std::string abs = absoluteOf(path);
 #if defined(__APPLE__)
-    // /usr/bin/trash ships with macOS 15; before it, Finder does the same over AppleScript.
+    // /usr/bin/trash ships with macOS 15; before it, Finder does the same over AppleScript. The path goes in
+    // as an argument (argv), never spliced into the script text, so no file name can change the script.
     const bool ok = ::access("/usr/bin/trash", X_OK) == 0
                         ? runQuiet("/usr/bin/trash " + shQuote(abs))
-                        : runQuiet("osascript -e " + shQuote("tell application \"Finder\" to delete POSIX file \"" + abs + "\""));
+                        : runQuiet("osascript -e " + shQuote("on run argv") +
+                                   " -e " + shQuote("tell application \"Finder\" to delete POSIX file (item 1 of argv)") +
+                                   " -e " + shQuote("end run") + " " + shQuote(abs));
 #else
     const bool ok = trashXdg(abs);
 #endif

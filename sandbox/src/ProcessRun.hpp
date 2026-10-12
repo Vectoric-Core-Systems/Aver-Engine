@@ -142,10 +142,10 @@ inline bool runCaptured(const std::wstring& cmdline, const std::wstring& cwd, st
 
 #else // !_WIN32
 
-// THE SAME THREE FUNCTIONS, for a POSIX editor. The callers build Windows-shaped command lines --
-// quoteArg()'d paths joined with spaces -- and those mean the same thing to /bin/sh for every path a
-// project can contain, so the line is handed to `sh -c` as it is. wchar_t is UTF-32 here, so widen()
-// and narrow() are a real UTF-8 <-> UTF-32 conversion, not the byte copy they would be on Windows.
+// THE SAME THREE FUNCTIONS, for a POSIX editor. The line is handed to `sh -c`, so every path in it must be
+// quoted with cmdArg() below: a double-quoted path still expands $(...), backticks and $VAR in sh.
+// wchar_t is UTF-32 here, so widen() and narrow() are a real UTF-8 <-> UTF-32 conversion, not the byte
+// copy they would be on Windows.
 
 // UTF-8 to UTF-32. A malformed byte becomes U+FFFD and does not end the string.
 inline std::wstring widen(const std::string& s) {
@@ -271,5 +271,17 @@ inline bool findOnPath(const std::string& exe) {
     return false;
 }
 #endif
+
+// One argument quoted for this platform's command line: "..." for CreateProcessW, '...' for `sh -c` (no
+// expansion inside, a ' becomes '\''). Use it for every path a runCaptured/launchDetached line carries.
+inline std::wstring cmdArg(const std::string& arg) {
+#if defined(_WIN32)
+    return L"\"" + widen(arg) + L"\"";
+#else
+    std::string q = "'";
+    for (const char c : arg) { if (c == '\'') q += "'\\''"; else q += c; }
+    return widen(q + "'");
+#endif
+}
 
 } // namespace aver::editor

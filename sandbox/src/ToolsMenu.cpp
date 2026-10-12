@@ -57,7 +57,7 @@ bool shellOpen(const std::string& path) {
 #else
     const std::wstring opener = L"xdg-open ";
 #endif
-    return launchDetached(opener + L"\"" + widen(path) + L"\"", std::wstring());
+    return launchDetached(opener + cmdArg(path), std::wstring());
 }
 
 #endif
@@ -98,8 +98,8 @@ bool bakeMaterials(const std::string& scriptsOutDir, std::string& log, int& exit
     const fs::path outDir = binaries / "Materials";
     fs::create_directories(outDir, ec);
 
-    const std::wstring cmd = L"dotnet \"" + widen(tool.string()) + L"\" --assembly \"" +
-                             widen(assembly.string()) + L"\" --out \"" + widen(outDir.string()) + L"\"";
+    const std::wstring cmd = L"dotnet " + cmdArg(tool.string()) + L" --assembly " +
+                             cmdArg(assembly.string()) + L" --out " + cmdArg(outDir.string());
     if (!runCaptured(cmd, widen(exeDir.string()), log, exitCode)) {
         log = "could not start dotnet to bake materials";
         exitCode = -1;
@@ -746,9 +746,9 @@ void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDi
         // ones they WROTE (obj/**/*.dll), and both outlive the build. This is the invocation most
         // likely to strand either, because the editor can be closed a second after a compile and
         // neither pool goes with it.
-        const std::wstring cmd = L"dotnet build \"" + widen(csproj) +
-                                 L"\" -c Release -p:UseSharedCompilation=false -nodeReuse:false"
-                                 L" --nologo -o \"" + widen(outDir) + L"\"";
+        const std::wstring cmd = L"dotnet build " + cmdArg(csproj) +
+                                 L" -c Release -p:UseSharedCompilation=false -nodeReuse:false"
+                                 L" --nologo -o " + cmdArg(outDir);
         if (!runCaptured(cmd, widen(dir), out, code)) {
             out = "Could not start dotnet.";
             code = -1;
