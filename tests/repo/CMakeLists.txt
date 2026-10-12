@@ -10,3 +10,10 @@ add_executable(SeparationTest src/SeparationTest.cpp)
 target_link_libraries(SeparationTest PRIVATE Aver.Core)
 target_compile_definitions(SeparationTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(SeparationTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PathSeparatorTest -- no code that builds off Windows joins a path with a backslash. Same shape as
+# SeparationTest: Aver.Core for the log macros, the source tree through AVER_REPO_ROOT, a SKIP without it.
+add_executable(PathSeparatorTest src/PathSeparatorTest.cpp)
+target_link_libraries(PathSeparatorTest PRIVATE Aver.Core)
+target_compile_definitions(PathSeparatorTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(PathSeparatorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
