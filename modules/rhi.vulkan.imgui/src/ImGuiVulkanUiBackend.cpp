@@ -24,44 +24,66 @@
 //     types out of those, so UiBackendInitDesc carries everything pointer-sized as u64 and this
 //     file -- which is allowed to include vulkan.h -- casts them back. Casting is confined to
 //     init(); nothing below it re-derives a handle.
+//
+// AND ONE DIFFERENCE BY PLATFORM: the window side of ImGui. On Windows it is imgui_impl_win32, fed
+// raw messages through wndProc(); everywhere else the window is SDL's (Aver.Platform's src/sdl), so it
+// is imgui_impl_sdl3, fed SDL_Events through eventProc(). Only the five calls that differ are behind
+// `#if defined(_WIN32)` -- init, new frame, shutdown and the two input hooks -- and the Vulkan half is
+// one text for both.
 #include "aver/rhi/vulkan/ImGuiUiBackend.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"   // userDataDir, for where the layout ini lives
 
 #include <string>
 
 #define VK_NO_PROTOTYPES
+#if defined(_WIN32)
 // For vkCreateWin32SurfaceKHR, which Platform_CreateVkSurface below needs -- see its own comment
 // for why a single-viewport editor still has to supply that handler.
 #define VK_USE_PLATFORM_WIN32_KHR
+#endif
 #include <vulkan/vulkan.h>
 
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <SDL3/SDL.h>
+#endif
 
 #include "imgui.h"
+#if defined(_WIN32)
 #include "backends/imgui_impl_win32.h"
+#else
+#include "backends/imgui_impl_sdl3.h"
+#endif
 #include "backends/imgui_impl_vulkan.h"
 
+#if defined(_WIN32)
 // Declared by imgui_impl_win32.cpp; not in its header, exactly as the D3D12 backend declares it.
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+#endif
 
 namespace aver::rhi::vkb {
 
 namespace {
 
-// vkGetInstanceProcAddr, out of the driver's own loader DLL. The SAME arrangement VulkanCommon.hpp
-// documents for the RHI itself: vulkan-1.dll ships with the GPU driver, so there is nothing to
-// install and nothing to link.
+// THE DEVICE'S OWN vkGetInstanceProcAddr, handed over in UiBackendInitDesc, so ImGui's calls go to
+// the same loader the instance came from. Off Windows that matters: the device may be using the
+// window layer's loader (SDL's), and a second dlopen of "the same" library is not guaranteed to be
+// the same copy. A desc without one (an older device) falls back to loading vulkan-1.dll here, which
+// is what this file always did.
+PFN_vkGetInstanceProcAddr g_gipa = nullptr;
+
 PFN_vkGetInstanceProcAddr loadGetInstanceProcAddr() {
-    static PFN_vkGetInstanceProcAddr fn = nullptr;
-    static bool tried = false;
-    if (tried) return fn;
-    tried = true;
+    if (g_gipa) return g_gipa;
+#if defined(_WIN32)
     if (HMODULE dll = ::LoadLibraryW(L"vulkan-1.dll"))
-        fn = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        g_gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
             reinterpret_cast<void*>(::GetProcAddress(dll, "vkGetInstanceProcAddr")));
-    if (!fn) AVER_ERROR("[RHI.Vulkan.ImGui] vulkan-1.dll has no vkGetInstanceProcAddr");
-    return fn;
+#endif
+    if (!g_gipa) AVER_ERROR("[RHI.Vulkan.ImGui] no vkGetInstanceProcAddr to load ImGui's Vulkan entry points from");
+    return g_gipa;
 }
 
 // ImGui_ImplVulkan_LoadFunctions' callback shape. `user` is the VkInstance, which is what makes the
@@ -72,6 +94,7 @@ PFN_vkVoidFunction loaderThunk(const char* name, void* user) {
     return gipa(static_cast<VkInstance>(user), name);
 }
 
+#if defined(_WIN32)
 // SURFACE CREATION FOR A SECONDARY VIEWPORT, and it has to exist even though this editor never
 // opens one.
 //
@@ -102,6 +125,30 @@ int createVkSurface(ImGuiViewport* vp, ImU64 instance, const void* allocator, Im
                               static_cast<const VkAllocationCallbacks*>(allocator), &surface);
     *outSurface = reinterpret_cast<ImU64>(surface);
     return static_cast<int>(r);
+}
+#endif  // _WIN32 -- imgui_impl_sdl3 installs its own Platform_CreateVkSurface when it offers viewports
+
+// The window side of ImGui, which is the only part that differs by platform (see the file header).
+bool platformInit(void* window) {
+#if defined(_WIN32)
+    return ImGui_ImplWin32_Init(window);
+#else
+    return ImGui_ImplSDL3_InitForVulkan(static_cast<SDL_Window*>(window));
+#endif
+}
+void platformNewFrame() {
+#if defined(_WIN32)
+    ImGui_ImplWin32_NewFrame();
+#else
+    ImGui_ImplSDL3_NewFrame();
+#endif
+}
+void platformShutdown() {
+#if defined(_WIN32)
+    ImGui_ImplWin32_Shutdown();
+#else
+    ImGui_ImplSDL3_Shutdown();
+#endif
 }
 
 void checkVkResult(VkResult err) {
@@ -138,13 +185,13 @@ public:
         static std::string s_iniPath;
         if (s_iniPath.empty()) {
             const std::string dir = aver::userDataDir();
-            if (!dir.empty()) s_iniPath = dir + "\\editor-layout.ini";
+            if (!dir.empty()) s_iniPath = dir + AVER_PATH_SEP "editor-layout.ini";
         }
         io.IniFilename = s_iniPath.empty() ? nullptr : s_iniPath.c_str();
         ImGui::StyleColorsDark();
 
-        if (!ImGui_ImplWin32_Init(hwnd)) {
-            AVER_ERROR("[RHI.Vulkan.ImGui] ImGui_ImplWin32_Init failed");
+        if (!platformInit(hwnd)) {
+            AVER_ERROR("[RHI.Vulkan.ImGui] the ImGui platform backend failed to initialise");
             ImGui::DestroyContext();
             return false;
         }
@@ -152,9 +199,10 @@ public:
         // BEFORE Init, and it is not optional: this module is built VK_NO_PROTOTYPES, so every
         // Vulkan symbol imgui_impl_vulkan calls is null until this fills them in.
         instance_ = reinterpret_cast<VkInstance>(desc.instance);
+        if (desc.getInstanceProcAddr) g_gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(desc.getInstanceProcAddr);
         if (!ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_3, &loaderThunk, instance_)) {
             AVER_ERROR("[RHI.Vulkan.ImGui] ImGui_ImplVulkan_LoadFunctions failed -- no entry points");
-            ImGui_ImplWin32_Shutdown();
+            platformShutdown();
             ImGui::DestroyContext();
             return false;
         }
@@ -164,8 +212,10 @@ public:
         // in imgui_impl_vulkan.h about data needing to outlive the backend.
         colorFormat_ = static_cast<VkFormat>(desc.colorFormat);
 
+#if defined(_WIN32)
         // BEFORE Init: ImGui_ImplVulkan_InitMultiViewportSupport asserts on this from inside it.
         ImGui::GetPlatformIO().Platform_CreateVkSurface = &createVkSurface;
+#endif
 
         ImGui_ImplVulkan_InitInfo info{};
         info.ApiVersion     = VK_API_VERSION_1_3;
@@ -204,7 +254,7 @@ public:
 
         if (!ImGui_ImplVulkan_Init(&info)) {
             AVER_ERROR("[RHI.Vulkan.ImGui] ImGui_ImplVulkan_Init failed");
-            ImGui_ImplWin32_Shutdown();
+            platformShutdown();
             ImGui::DestroyContext();
             return false;
         }
@@ -216,14 +266,14 @@ public:
     void newFrame() override {
         if (!active_) return;
         ImGui_ImplVulkan_NewFrame();
-        ImGui_ImplWin32_NewFrame();
+        platformNewFrame();
         ImGui::NewFrame();
     }
 
     void shutdown() override {
         if (!active_) return;
         ImGui_ImplVulkan_Shutdown();
-        ImGui_ImplWin32_Shutdown();
+        platformShutdown();
         ImGui::DestroyContext();
         active_ = false;
     }
@@ -242,8 +292,22 @@ public:
     bool wantsKeyboard() const override { return active_ && ImGui::GetIO().WantCaptureKeyboard; }
 
     bool wndProc(void* hwnd, u32 msg, u64 w, i64 l) override {
+#if defined(_WIN32)
         return ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(hwnd), static_cast<UINT>(msg),
                                               static_cast<WPARAM>(w), static_cast<LPARAM>(l)) != 0;
+#else
+        (void)hwnd; (void)msg; (void)w; (void)l;
+        return false;
+#endif
+    }
+
+    bool eventProc(const void* nativeEvent) override {
+#if defined(_WIN32)
+        (void)nativeEvent;
+        return false;
+#else
+        return active_ && nativeEvent && ImGui_ImplSDL3_ProcessEvent(static_cast<const SDL_Event*>(nativeEvent));
+#endif
     }
 
     // One descriptor set per texture, which is the whole of a Vulkan ImTextureID -- and the reason

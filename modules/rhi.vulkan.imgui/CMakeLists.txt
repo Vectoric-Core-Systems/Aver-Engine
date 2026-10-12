@@ -18,3 +18,8 @@ target_link_libraries(Aver.RHI.Vulkan.ImGui PRIVATE imgui)
 # point is resolved at runtime through ImGui_ImplVulkan_LoadFunctions -- see this module's source.
 target_include_directories(Aver.RHI.Vulkan.ImGui PRIVATE ${CMAKE_SOURCE_DIR}/third_party/vulkan-headers/include)
 target_compile_definitions(Aver.RHI.Vulkan.ImGui PRIVATE VK_NO_PROTOTYPES)
+
+# imgui_impl_sdl3 off Windows: the window it attaches to is Aver.Platform's SDL window.
+if(NOT WIN32)
+  target_link_libraries(Aver.RHI.Vulkan.ImGui PRIVATE ${AVER_SDL3_TARGET})
+endif()

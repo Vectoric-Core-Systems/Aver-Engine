@@ -328,6 +328,8 @@ static_assert(static_cast<aver::u32>(aver::sr::Quality::Performance) == aver::vo
 #if AVER_WITH_IMGUI
 #include "imgui.h"
 #include "imgui_internal.h"
+#endif
+#if AVER_WITH_IMGUI_D3D12
 // ImGui D3D12 backend.
 #include "aver/rhi/d3d12/UiBackend.hpp"
 #include "aver/rhi/d3d12/ImGuiUiBackend.hpp"
@@ -1330,7 +1332,7 @@ public:
                        rhi::TextureHandle& outTex, u64& outId, f32& outAspect);
 #endif
 
-#if AVER_WITH_IMGUI || AVER_WITH_IMGUI_VULKAN
+#if AVER_WITH_IMGUI
     void onDeviceCreated(Engine& e) override;
 #endif
 
@@ -3467,6 +3469,8 @@ private:
     f32 dpi_=1.0f;
 #if AVER_WITH_IMGUI
     ImFont* fontMedium_=nullptr; // Roboto Medium, for the menu bar; null if only the fallback loaded
+#endif
+#if AVER_WITH_IMGUI_D3D12
     // Editor's Dear ImGui backend, installed into the device non-owning. Deleted late in onShutdown for device's uiShutdown().
     std::unique_ptr<rhi::d3d12::IUiBackend> uiBackend_;
 #endif
