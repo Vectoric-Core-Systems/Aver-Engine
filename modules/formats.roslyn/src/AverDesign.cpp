@@ -10,6 +10,14 @@
 #  define WIN32_LEAN_AND_MEAN
 #  define NOMINMAX
 #  include <windows.h>
+#else
+#  include <cerrno>
+#  include <fcntl.h>
+#  include <spawn.h>
+#  include <sys/wait.h>
+#  include <unistd.h>
+#  include <vector>
+extern char** environ;
 #endif
 
 namespace aver::fmt {
@@ -76,9 +84,49 @@ bool runCapture(const std::wstring& cmdline, std::string& out, int& exitCode) {
 
 // A quoted command-line argument, so a path with spaces stays one argument.
 std::wstring quoted(const std::string& s) { return L"\"" + widen(s) + L"\""; }
+#else
+// The same capture over posix_spawnp, stdout and stderr down one pipe, stdin from /dev/null. An argv
+// and not a command line: nothing here needs a shell, so nothing here has to be quoted for one.
+bool runCapture(const std::vector<std::string>& args, std::string& out, int& exitCode) {
+    int fds[2];
+    if (::pipe(fds) != 0) return false;
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, fds[1], 1);
+    posix_spawn_file_actions_adddup2(&fa, fds[1], 2);
+    posix_spawn_file_actions_addclose(&fa, fds[0]);
+    posix_spawn_file_actions_addclose(&fa, fds[1]);
+    std::vector<char*> argv;
+    for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+    pid_t pid = 0;
+    const int rc = posix_spawnp(&pid, argv[0], &fa, nullptr, argv.data(), environ);
+    posix_spawn_file_actions_destroy(&fa);
+    ::close(fds[1]);
+    if (rc != 0) { ::close(fds[0]); return false; }
+    out.clear();
+    char buf[8192];
+    for (;;) {
+        const ssize_t got = ::read(fds[0], buf, sizeof buf);
+        if (got > 0) { out.append(buf, static_cast<usize>(got)); continue; }
+        if (got < 0 && errno == EINTR) continue;
+        break;
+    }
+    ::close(fds[0]);
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    return true;
+}
 #endif
 
+// The .NET app host for Aver.Design: averdesign.exe on Windows, averdesign elsewhere.
+#ifdef _WIN32
 const char* kToolName = "averdesign.exe";
+#else
+const char* kToolName = "averdesign";
+#endif
 
 // The executable to launch: the configured path, or the bare name for a PATH search.
 std::string resolveExe() {
@@ -137,11 +185,13 @@ const std::string& averDesignPath() { return g_exePath; }
 // True when the tool can run at all. Cached; `recheck` forces a fresh probe.
 bool averDesignAvailable(bool recheck) {
     if (!recheck && g_available >= 0) return g_available == 1;
-#ifdef _WIN32
     std::string out;
     int code = -1;
-    const std::wstring cmd = quoted(resolveExe()) + L" --probe";
-    const bool ran = runCapture(cmd, out, code);
+#ifdef _WIN32
+    const bool ran = runCapture(quoted(resolveExe()) + L" --probe", out, code);
+#else
+    const bool ran = runCapture({resolveExe(), "--probe"}, out, code);
+#endif
     g_available = (ran && code == 0 && out.rfind("averdesign", 0) == 0) ? 1 : 0;
     if (g_available == 1)
         AVER_INFO("[averdesign] available: {}", resolveExe());
@@ -149,27 +199,22 @@ bool averDesignAvailable(bool recheck) {
         AVER_INFO("[averdesign] not available: '{}' {}; the built-in scanner is the only backend",
                   resolveExe(),
                   ran ? "did not answer as expected" : "could not be started");
-#else
-    // The spawn above is Win32 and there is no other platform in this tree to test a posix one
-    // against, so this backend reports itself absent.
-    g_available = 0;
-#endif
     return g_available == 1;
 }
 
 // Parses `csPath` through the tool. False with `err` set on any failure.
 bool parseActorFileRoslyn(const std::string& csPath, RoslynParse& out, std::string* err) {
     auto fail = [&](std::string why) { if (err) *err = std::move(why); return false; };
-#ifndef _WIN32
-    (void)csPath; (void)out;
-    return fail("averdesign is only wired up on Windows in this build");
-#else
     if (!averDesignAvailable()) return fail("averdesign is not available");
 
     std::string raw;
     int code = -1;
-    if (!runCapture(quoted(resolveExe()) + L" " + quoted(csPath), raw, code))
-        return fail("averdesign could not be started");
+#ifdef _WIN32
+    const bool ran = runCapture(quoted(resolveExe()) + L" " + quoted(csPath), raw, code);
+#else
+    const bool ran = runCapture({resolveExe(), csPath}, raw, code);
+#endif
+    if (!ran) return fail("averdesign could not be started");
     if (code != 0)
         return fail("averdesign exited " + std::to_string(code) + ": " + raw);
 
@@ -253,7 +298,6 @@ bool parseActorFileRoslyn(const std::string& csPath, RoslynParse& out, std::stri
         out.classes.push_back(std::move(k));
     }
     return true;
-#endif
 }
 
 } // namespace aver::fmt

@@ -28,8 +28,17 @@ extern "C" {
 #define AVER_SCRIPT_LOG_CRITICAL 4
 #define AVER_SCRIPT_LOG_FATAL 5
 
+/* The calling convention the managed side's function pointers are declared with. __cdecl is a
+ * Microsoft keyword (and a no-op on x64 Windows); every other compiler's default is already the
+ * platform C convention the CLR marshals to. */
+#if defined(_WIN32)
+#  define AVER_SCRIPT_CALL __cdecl
+#else
+#  define AVER_SCRIPT_CALL
+#endif
+
 /* Writes one managed log line into the engine's log. */
-typedef void(__cdecl* aver_script_log_fn)(int32_t level, const char* utf8Message);
+typedef void(AVER_SCRIPT_CALL* aver_script_log_fn)(int32_t level, const char* utf8Message);
 
 /* The table of host functions handed to the bridge at bootstrap. */
 typedef struct AverScriptHostApi {

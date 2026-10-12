@@ -1,9 +1,13 @@
 // In-process CoreCLR host: loads hostfxr, binds the managed bridge, drives it.
 #include "aver/scripting/ScriptHost.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/scripting/scripting_abi.h"
 
+#include "aver/core/DynamicLibrary.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/platform/FileSystem.hpp"
 
+#include <filesystem>
 #include <format>
 #include <string>
 
@@ -13,11 +17,23 @@
 
 namespace aver::scripting {
 
-#if defined(_WIN32)
 namespace {
 
 // Declared here instead of included: must match nethost.h / hostfxr.h / coreclr_delegates.h.
+//
+// hostfxr's char_t is the platform's native path character: UTF-16 wchar_t on Windows, UTF-8 char
+// everywhere else. AVER_HOST_STR spells a literal in it, and hstring is a string of it, so the code
+// below is one text for both.
+#if defined(_WIN32)
 using char_t = wchar_t;
+#define AVER_HOST_STR(s) L##s
+constexpr const char_t* kHostSep = L"\\";
+#else
+using char_t = char;
+#define AVER_HOST_STR(s) s
+constexpr const char_t* kHostSep = "/";
+#endif
+using hstring = std::basic_string<char_t>;
 using hostfxr_handle = void*;
 
 // Mirrors hostfxr.h's hostfxr_initialize_parameters field for field.
@@ -27,14 +43,14 @@ struct hostfxr_initialize_parameters {
     const char_t* dotnet_root;
 };
 
-using get_hostfxr_path_fn = int32_t(__cdecl*)(char_t* buffer, size_t* bufferSize, const void* parameters);
+using get_hostfxr_path_fn = int32_t(AVER_SCRIPT_CALL*)(char_t* buffer, size_t* bufferSize, const void* parameters);
 using hostfxr_initialize_for_runtime_config_fn =
-    int32_t(__cdecl*)(const char_t* runtimeConfigPath, const hostfxr_initialize_parameters* params,
+    int32_t(AVER_SCRIPT_CALL*)(const char_t* runtimeConfigPath, const hostfxr_initialize_parameters* params,
                       hostfxr_handle* hostContext);
-using hostfxr_get_runtime_delegate_fn = int32_t(__cdecl*)(hostfxr_handle ctx, int32_t type, void** del);
-using hostfxr_close_fn = int32_t(__cdecl*)(hostfxr_handle ctx);
+using hostfxr_get_runtime_delegate_fn = int32_t(AVER_SCRIPT_CALL*)(hostfxr_handle ctx, int32_t type, void** del);
+using hostfxr_close_fn = int32_t(AVER_SCRIPT_CALL*)(hostfxr_handle ctx);
 using load_assembly_and_get_function_pointer_fn =
-    int32_t(__cdecl*)(const char_t* assemblyPath, const char_t* typeName, const char_t* methodName,
+    int32_t(AVER_SCRIPT_CALL*)(const char_t* assemblyPath, const char_t* typeName, const char_t* methodName,
                       const char_t* delegateTypeName, void* reserved, void** del);
 
 // coreclr_delegates.h: hdt_load_assembly_and_get_function_pointer.
@@ -46,42 +62,72 @@ const char_t* const kUnmanagedCallersOnly = reinterpret_cast<const char_t*>(-1);
 constexpr bool hostfxrOk(int32_t rc) { return rc >= 0 && rc <= 2; }
 
 // The bridge's entry points, all [UnmanagedCallersOnly] on the managed side.
-using bootstrap_fn     = int32_t(__cdecl*)(const AverScriptHostApi* api);
-using loadScripts_fn   = int32_t(__cdecl*)(const char* utf8Dir);
-using unloadScripts_fn = int32_t(__cdecl*)(void);
-using update_fn        = void(__cdecl*)(float dt);
-using shutdown_fn      = void(__cdecl*)(void);
-using hud_count_fn     = int32_t(__cdecl*)(void);
-using hud_name_fn      = int32_t(__cdecl*)(int32_t, char*, int32_t);
-using hud_draw_fn      = int32_t(__cdecl*)(int32_t, float);
-using graph_load_fn    = int32_t(__cdecl*)(int32_t entity, const char* utf8Path);
-using graph_tick_fn    = void(__cdecl*)(int32_t entity, float timeSeconds);
-using graph_unload_fn  = void(__cdecl*)(int32_t entity);
-using graph_fire_fn    = int32_t(__cdecl*)(int32_t entity, const char* utf8EventName);
-using graph_validate_fn = int32_t(__cdecl*)(const char* utf8Text, char* outErr, int32_t cap);
-using graph_set_hits_fn = int32_t(__cdecl*)(int32_t on);
-using graph_get_hits_fn = int32_t(__cdecl*)(const char* utf8GraphName, char* out, int32_t cap, float maxAgeSeconds);
-using declare_graph_classes_fn = int32_t(__cdecl*)(const char* utf8ContentDir);
-using tick_graph_class_instances_fn = void(__cdecl*)(float dt);
-using configure_input_fn = int32_t(__cdecl*)(const char* utf8SchemePath, const char* utf8SettingsPath);
+using bootstrap_fn     = int32_t(AVER_SCRIPT_CALL*)(const AverScriptHostApi* api);
+using loadScripts_fn   = int32_t(AVER_SCRIPT_CALL*)(const char* utf8Dir);
+using unloadScripts_fn = int32_t(AVER_SCRIPT_CALL*)(void);
+using update_fn        = void(AVER_SCRIPT_CALL*)(float dt);
+using shutdown_fn      = void(AVER_SCRIPT_CALL*)(void);
+using hud_count_fn     = int32_t(AVER_SCRIPT_CALL*)(void);
+using hud_name_fn      = int32_t(AVER_SCRIPT_CALL*)(int32_t, char*, int32_t);
+using hud_draw_fn      = int32_t(AVER_SCRIPT_CALL*)(int32_t, float);
+using graph_load_fn    = int32_t(AVER_SCRIPT_CALL*)(int32_t entity, const char* utf8Path);
+using graph_tick_fn    = void(AVER_SCRIPT_CALL*)(int32_t entity, float timeSeconds);
+using graph_unload_fn  = void(AVER_SCRIPT_CALL*)(int32_t entity);
+using graph_fire_fn    = int32_t(AVER_SCRIPT_CALL*)(int32_t entity, const char* utf8EventName);
+using graph_validate_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8Text, char* outErr, int32_t cap);
+using graph_set_hits_fn = int32_t(AVER_SCRIPT_CALL*)(int32_t on);
+using graph_get_hits_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8GraphName, char* out, int32_t cap, float maxAgeSeconds);
+using declare_graph_classes_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8ContentDir);
+using tick_graph_class_instances_fn = void(AVER_SCRIPT_CALL*)(float dt);
+using configure_input_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8SchemePath, const char* utf8SettingsPath);
 
-// Converts UTF-8 to UTF-16.
-std::wstring widen(const std::string& s) {
+// UTF-8 to hostfxr's char_t, and back. The identity everywhere but Windows.
+hstring toHost(const std::string& s) {
+#if defined(_WIN32)
     if (s.empty()) return {};
     const int n = ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring out(static_cast<size_t>(n), L'\0');
+    hstring out(static_cast<size_t>(n), L'\0');
     ::MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), out.data(), n);
     return out;
+#else
+    return s;
+#endif
+}
+std::string fromHost(const char_t* s) {
+#if defined(_WIN32)
+    const int n = ::WideCharToMultiByte(CP_UTF8, 0, s, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1) return {};
+    std::string out(static_cast<size_t>(n - 1), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, s, -1, out.data(), n, nullptr, nullptr);
+    return out;
+#else
+    return s;
+#endif
 }
 
 // True when the path names an existing file rather than a directory.
-bool fileThere(const std::wstring& path) {
-    const DWORD a = ::GetFileAttributesW(path.c_str());
-    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+bool fileThere(const hstring& path) {
+    std::error_code ec;
+    return std::filesystem::is_regular_file(std::filesystem::path(path), ec);
+}
+
+// nethost, which only finds hostfxr: beside the executable first (the scripting module's CMake stages
+// it there from the SDK's app-host pack), then wherever the platform's loader looks for a bare name.
+void* loadNethost() {
+#if defined(_WIN32)
+    const char* leaf = "nethost.dll";
+#elif defined(__APPLE__)
+    const char* leaf = "libnethost.dylib";
+#else
+    const char* leaf = "libnethost.so";
+#endif
+    const std::string beside = aver::executableDir() + AVER_PATH_SEP + leaf;   // LoadLibraryW wants backslashes
+    const char* names[] = {beside.c_str(), leaf};
+    return aver::loadFirstLibrary(names, 2);
 }
 
 // Writes a managed log line into the engine log. Handed to the bridge at bootstrap.
-void __cdecl managedLog(int32_t level, const char* utf8Message) {
+void AVER_SCRIPT_CALL managedLog(int32_t level, const char* utf8Message) {
     const char* m = utf8Message ? utf8Message : "";
     // EVERY level spelled out, and the default kept as Info for genuinely unknown codes only. The
     // default is a real hazard here rather than a tidy fallback: it does not fail, it DOWNGRADES --
@@ -103,8 +149,8 @@ void __cdecl managedLog(int32_t level, const char* utf8Message) {
 
 // The loaded runtime modules, the host context and the bound bridge entry points.
 struct ScriptHost::Impl {
-    HMODULE nethost = nullptr;
-    HMODULE hostfxr = nullptr;
+    void* nethost = nullptr;
+    void* hostfxr = nullptr;
     hostfxr_handle ctx = nullptr;
     hostfxr_close_fn close = nullptr;
     loadScripts_fn load = nullptr;
@@ -146,39 +192,37 @@ bool ScriptHost::init(const HostDesc& desc) {
         return false;
     };
 
-    const std::wstring bridgeDirW = widen(desc.bridgeDir);
-    const std::wstring bridgeDll = bridgeDirW + L"\\Aver.Scripting.Bridge.dll";
-    const std::wstring bridgeCfg = bridgeDirW + L"\\Aver.Scripting.Bridge.runtimeconfig.json";
+    const hstring bridgeDir = toHost(desc.bridgeDir);
+    const hstring bridgeDll = bridgeDir + kHostSep + AVER_HOST_STR("Aver.Scripting.Bridge.dll");
+    const hstring bridgeCfg = bridgeDir + kHostSep + AVER_HOST_STR("Aver.Scripting.Bridge.runtimeconfig.json");
 
     if (!fileThere(bridgeDll) || !fileThere(bridgeCfg))
         return decline("the managed bridge was not staged next to the executable "
                        "(Aver.Scripting.Bridge.dll / .runtimeconfig.json) — build with the .NET SDK present");
 
     // Loaded dynamically, and by bare name: a machine with no .NET must still start the editor.
-    impl_->nethost = ::LoadLibraryW(L"nethost.dll");
+    impl_->nethost = loadNethost();
     if (!impl_->nethost)
-        return decline("nethost.dll could not be loaded — the .NET runtime is unavailable");
+        return decline("nethost could not be loaded (" + aver::libraryError() + ") — the .NET runtime is unavailable");
 
-    auto getHostfxrPath =
-        reinterpret_cast<get_hostfxr_path_fn>(reinterpret_cast<void*>(::GetProcAddress(impl_->nethost, "get_hostfxr_path")));
+    auto getHostfxrPath = reinterpret_cast<get_hostfxr_path_fn>(aver::librarySymbol(impl_->nethost, "get_hostfxr_path"));
     if (!getHostfxrPath)
-        return decline("nethost.dll exports no get_hostfxr_path");
+        return decline("nethost exports no get_hostfxr_path");
 
-    wchar_t fxrPath[MAX_PATH * 2] = {};
+    char_t fxrPath[4096] = {};
     size_t fxrLen = sizeof(fxrPath) / sizeof(fxrPath[0]);
     if (getHostfxrPath(fxrPath, &fxrLen, nullptr) != 0)
         return decline("get_hostfxr_path found no .NET runtime on this machine");
 
-    impl_->hostfxr = ::LoadLibraryW(fxrPath);
+    impl_->hostfxr = aver::loadLibrary(fromHost(fxrPath).c_str());
     if (!impl_->hostfxr)
-        return decline("hostfxr could not be loaded");
+        return decline("hostfxr could not be loaded (" + aver::libraryError() + ")");
 
     auto fxrInit = reinterpret_cast<hostfxr_initialize_for_runtime_config_fn>(
-        reinterpret_cast<void*>(::GetProcAddress(impl_->hostfxr, "hostfxr_initialize_for_runtime_config")));
+        aver::librarySymbol(impl_->hostfxr, "hostfxr_initialize_for_runtime_config"));
     auto fxrDelegate = reinterpret_cast<hostfxr_get_runtime_delegate_fn>(
-        reinterpret_cast<void*>(::GetProcAddress(impl_->hostfxr, "hostfxr_get_runtime_delegate")));
-    impl_->close = reinterpret_cast<hostfxr_close_fn>(
-        reinterpret_cast<void*>(::GetProcAddress(impl_->hostfxr, "hostfxr_close")));
+        aver::librarySymbol(impl_->hostfxr, "hostfxr_get_runtime_delegate"));
+    impl_->close = reinterpret_cast<hostfxr_close_fn>(aver::librarySymbol(impl_->hostfxr, "hostfxr_close"));
     if (!fxrInit || !fxrDelegate || !impl_->close)
         return decline("hostfxr is missing an expected export");
 
@@ -196,18 +240,18 @@ bool ScriptHost::init(const HostDesc& desc) {
         return decline(std::format("hostfxr_get_runtime_delegate failed (0x{:08X})", static_cast<uint32_t>(rc)));
 
     auto loadFn = reinterpret_cast<load_assembly_and_get_function_pointer_fn>(raw);
-    const wchar_t* kType = L"Aver.Scripting.Bridge.HostBridge, Aver.Scripting.Bridge";
+    const char_t* kType = AVER_HOST_STR("Aver.Scripting.Bridge.HostBridge, Aver.Scripting.Bridge");
 
-    const auto bind = [&](const wchar_t* method, void** out) {
+    const auto bind = [&](const char_t* method, void** out) {
         return loadFn(bridgeDll.c_str(), kType, method, kUnmanagedCallersOnly, nullptr, out) == 0 && *out;
     };
 
     bootstrap_fn bootstrap = nullptr;
-    if (!bind(L"Bootstrap", reinterpret_cast<void**>(&bootstrap)) ||
-        !bind(L"LoadScripts", reinterpret_cast<void**>(&impl_->load)) ||
-        !bind(L"UnloadScripts", reinterpret_cast<void**>(&impl_->unload)) ||
-        !bind(L"Update", reinterpret_cast<void**>(&impl_->update)) ||
-        !bind(L"Shutdown", reinterpret_cast<void**>(&impl_->shutdown))) {
+    if (!bind(AVER_HOST_STR("Bootstrap"), reinterpret_cast<void**>(&bootstrap)) ||
+        !bind(AVER_HOST_STR("LoadScripts"), reinterpret_cast<void**>(&impl_->load)) ||
+        !bind(AVER_HOST_STR("UnloadScripts"), reinterpret_cast<void**>(&impl_->unload)) ||
+        !bind(AVER_HOST_STR("Update"), reinterpret_cast<void**>(&impl_->update)) ||
+        !bind(AVER_HOST_STR("Shutdown"), reinterpret_cast<void**>(&impl_->shutdown))) {
         impl_->load = nullptr;
         impl_->unload = nullptr;
         impl_->update = nullptr;
@@ -217,9 +261,9 @@ bool ScriptHost::init(const HostDesc& desc) {
     }
 
     // The HUD three are optional: a missing one costs the preview, not the host.
-    if (!bind(L"HudCount", reinterpret_cast<void**>(&impl_->hudCount)) ||
-        !bind(L"HudName",  reinterpret_cast<void**>(&impl_->hudName))  ||
-        !bind(L"HudDraw",  reinterpret_cast<void**>(&impl_->hudDraw))) {
+    if (!bind(AVER_HOST_STR("HudCount"), reinterpret_cast<void**>(&impl_->hudCount)) ||
+        !bind(AVER_HOST_STR("HudName"),  reinterpret_cast<void**>(&impl_->hudName))  ||
+        !bind(AVER_HOST_STR("HudDraw"),  reinterpret_cast<void**>(&impl_->hudDraw))) {
         impl_->hudCount = nullptr;
         impl_->hudName  = nullptr;
         impl_->hudDraw  = nullptr;
@@ -228,9 +272,9 @@ bool ScriptHost::init(const HostDesc& desc) {
 
     // Graph hosting is optional too, same reasoning as the HUD three: a bridge built before
     // GraphLoad/GraphTick/GraphUnload existed still boots, and graphAvailable() just reports false.
-    if (!bind(L"GraphLoad", reinterpret_cast<void**>(&impl_->graphLoad)) ||
-        !bind(L"GraphTick", reinterpret_cast<void**>(&impl_->graphTick)) ||
-        !bind(L"GraphUnload", reinterpret_cast<void**>(&impl_->graphUnload))) {
+    if (!bind(AVER_HOST_STR("GraphLoad"), reinterpret_cast<void**>(&impl_->graphLoad)) ||
+        !bind(AVER_HOST_STR("GraphTick"), reinterpret_cast<void**>(&impl_->graphTick)) ||
+        !bind(AVER_HOST_STR("GraphUnload"), reinterpret_cast<void**>(&impl_->graphUnload))) {
         impl_->graphLoad = nullptr;
         impl_->graphTick = nullptr;
         impl_->graphUnload = nullptr;
@@ -241,7 +285,7 @@ bool ScriptHost::init(const HostDesc& desc) {
     // arrived later: a bridge that predates it hosts and ticks graphs correctly and is only unable
     // to be fired at. Folding it into the block above would turn a bridge missing one new export
     // into a bridge with no graph hosting at all.
-    if (!bind(L"GraphFire", reinterpret_cast<void**>(&impl_->graphFire))) {
+    if (!bind(AVER_HOST_STR("GraphFire"), reinterpret_cast<void**>(&impl_->graphFire))) {
         impl_->graphFire = nullptr;
         AVER_WARN("[Scripting] the bridge exports no GraphFire; animation notifies will not reach graphs");
     }
@@ -249,7 +293,7 @@ bool ScriptHost::init(const HostDesc& desc) {
     // GraphValidate is optional and SEPARATE again, for GraphFire's reason: a bridge that predates
     // it hosts, ticks and fires graphs correctly and is only unable to check one. The editor asks
     // graphValidateAvailable() and says so rather than refusing to save.
-    if (!bind(L"GraphValidate", reinterpret_cast<void**>(&impl_->graphValidate))) {
+    if (!bind(AVER_HOST_STR("GraphValidate"), reinterpret_cast<void**>(&impl_->graphValidate))) {
         impl_->graphValidate = nullptr;
         AVER_WARN("[Scripting] the bridge exports no GraphValidate; the graph editor cannot check a "
                   "graph before saving it");
@@ -258,8 +302,8 @@ bool ScriptHost::init(const HostDesc& desc) {
     // The node-hit pair, optional together and separate from GraphValidate -- same graceful-degradation
     // rule every group above follows. A bridge predating them hosts and validates graphs perfectly
     // well and is only unable to say which nodes are running.
-    if (!bind(L"GraphSetHitRecording", reinterpret_cast<void**>(&impl_->graphSetHits)) ||
-        !bind(L"GraphGetHits", reinterpret_cast<void**>(&impl_->graphGetHits))) {
+    if (!bind(AVER_HOST_STR("GraphSetHitRecording"), reinterpret_cast<void**>(&impl_->graphSetHits)) ||
+        !bind(AVER_HOST_STR("GraphGetHits"), reinterpret_cast<void**>(&impl_->graphGetHits))) {
         impl_->graphSetHits = nullptr;
         impl_->graphGetHits = nullptr;
         AVER_WARN("[Scripting] the bridge exports no node-hit entry points; the graph editor cannot "
@@ -268,8 +312,8 @@ bool ScriptHost::init(const HostDesc& desc) {
 
     // GRAPH-AS-CLASS is optional too, same reasoning: a bridge built before DeclareGraphClasses/
     // GraphTickBoundInstances existed still boots, and graphClassesAvailable() just reports false.
-    if (!bind(L"DeclareGraphClasses", reinterpret_cast<void**>(&impl_->declareGraphClasses)) ||
-        !bind(L"GraphTickBoundInstances", reinterpret_cast<void**>(&impl_->tickGraphClassInstances))) {
+    if (!bind(AVER_HOST_STR("DeclareGraphClasses"), reinterpret_cast<void**>(&impl_->declareGraphClasses)) ||
+        !bind(AVER_HOST_STR("GraphTickBoundInstances"), reinterpret_cast<void**>(&impl_->tickGraphClassInstances))) {
         impl_->declareGraphClasses = nullptr;
         impl_->tickGraphClassInstances = nullptr;
         AVER_WARN("[Scripting] the bridge exports no graph-class entry points; graph-as-class is unavailable");
@@ -277,7 +321,7 @@ bool ScriptHost::init(const HostDesc& desc) {
 
     // INPUT SCHEME is optional too, same reasoning: a bridge built before ConfigureInput existed
     // still boots, and configureInput() reports -2 (see the header) rather than pretending success.
-    if (!bind(L"ConfigureInput", reinterpret_cast<void**>(&impl_->configureInput))) {
+    if (!bind(AVER_HOST_STR("ConfigureInput"), reinterpret_cast<void**>(&impl_->configureInput))) {
         impl_->configureInput = nullptr;
         AVER_WARN("[Scripting] the bridge exports no ConfigureInput; rebindable input schemes are unavailable");
     }
@@ -487,43 +531,7 @@ void ScriptHost::shutdown() {
     if (impl_->ctx && impl_->close) impl_->close(impl_->ctx);
     impl_->ctx = nullptr;
     // hostfxr is never freed: CoreCLR stays loaded for the life of the process.
-    if (impl_->nethost) { ::FreeLibrary(impl_->nethost); impl_->nethost = nullptr; }
+    if (impl_->nethost) { aver::freeLibrary(impl_->nethost); impl_->nethost = nullptr; }
 }
-
-#else // !_WIN32
-
-// No CLR host off Win32; every entry point declines the way the missing-runtime path does.
-struct ScriptHost::Impl {};
-
-ScriptHost::ScriptHost() = default;
-ScriptHost::~ScriptHost() { delete impl_; }
-
-// Always declines: the CLR host is Win32-only.
-bool ScriptHost::init(const HostDesc&) {
-    declineReason_ = "the CLR host is implemented for Win32 only";
-    AVER_WARN("[Scripting] init declined: {}", declineReason_);
-    return false;
-}
-i32 ScriptHost::loadScripts(const std::string&) { return -1; }
-bool ScriptHost::unloadScripts() { return false; }
-void ScriptHost::update(f32) {}
-void ScriptHost::shutdown() {}
-bool ScriptHost::graphAvailable() const { return false; }
-bool ScriptHost::graphLoad(i32, const std::string&) { return false; }
-void ScriptHost::graphTick(i32, f32) {}
-void ScriptHost::graphUnload(i32) {}
-bool ScriptHost::graphFireAvailable() const { return false; }
-bool ScriptHost::graphFire(i32, const std::string&) { return false; }
-bool ScriptHost::graphValidateAvailable() const { return false; }
-bool ScriptHost::graphValidate(const std::string&, std::string& err) const { err.clear(); return true; }
-bool ScriptHost::graphHitsAvailable() const { return false; }
-void ScriptHost::graphSetHitRecording(bool) const {}
-void ScriptHost::graphNodeHits(const std::string&, f32, std::vector<std::pair<std::string, f32>>& out) const { out.clear(); }
-bool ScriptHost::graphClassesAvailable() const { return false; }
-i32  ScriptHost::declareGraphClasses(const std::string&) { return 0; }
-void ScriptHost::tickGraphClassInstances(f32) {}
-i32  ScriptHost::configureInput(const std::string&, const std::string&) { return 0; }
-
-#endif
 
 } // namespace aver::scripting

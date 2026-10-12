@@ -43,8 +43,17 @@ internal static class NativeResolver
         string? dir = ExecutableDirectory();
         if (dir is null) return IntPtr.Zero;
 
-        string candidate = Path.Combine(dir, libraryName + ".dll");
+        string candidate = Path.Combine(dir, NativeFileName(libraryName));
         return NativeLibrary.TryLoad(candidate, out IntPtr handle) ? handle : IntPtr.Zero;
+    }
+
+    /// <summary>The file a native module is built as on this platform: Aver.Scene.dll on Windows, libAver.Scene.so
+    /// on Linux, libAver.Scene.dylib on macOS (CMake's SHARED naming on each).</summary>
+    private static string NativeFileName(string libraryName)
+    {
+        if (OperatingSystem.IsWindows()) return libraryName + ".dll";
+        if (OperatingSystem.IsMacOS()) return "lib" + libraryName + ".dylib";
+        return "lib" + libraryName + ".so";
     }
 
     /// <summary>The directory of the process executable, where the native DLLs are staged. Null if unknown.</summary>
