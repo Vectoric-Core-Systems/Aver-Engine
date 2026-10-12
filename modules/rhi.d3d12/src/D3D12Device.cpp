@@ -1288,6 +1288,8 @@ private:
     bool startPresentThread();
     void stopPresentThread();
     void drainPresents();                          // waits until every queued image has been presented
+    ComPtr<ID3D12Fence> presentFlushFence_;       // drainPresents: the present queue's own tail
+    u64 presentFlushValue_ = 0;
     void presentThreadMain();
     bool queuePresent(u32 image, UINT sync, UINT flags);
     u32 realImage_ = 0;                            // the present image this frame's real image is drawn into
@@ -3270,6 +3272,21 @@ void D3D12Device::drainPresents() {
     if (doneFence_ && requestSerial_ && doneFence_->GetCompletedValue() < requestSerial_ && presentEvent_) {
         doneFence_->SetEventOnCompletion(requestSerial_, presentEvent_);
         WaitForSingleObject(presentEvent_, 2000);
+    }
+    // AND THE PRESENT QUEUE'S OWN TAIL: its last copy and Present can still be executing after the request is
+    // done, and the images they read must outlive them -- releasing one first is a debug-layer exception at
+    // shutdown (0x87D) and a use-after-free on the GPU without the layer.
+    if (presentQueue_ && device_) {
+        if (!presentFlushFence_ && FAILED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&presentFlushFence_)))) return;
+        const u64 v = ++presentFlushValue_;
+        if (SUCCEEDED(presentQueue_->Signal(presentFlushFence_.Get(), v)) && presentFlushFence_->GetCompletedValue() < v) {
+            // Its own event: presentEvent_ belongs to the present thread.
+            if (HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr)) {
+                presentFlushFence_->SetEventOnCompletion(v, ev);
+                WaitForSingleObject(ev, 2000);
+                CloseHandle(ev);
+            }
+        }
     }
 }
 
