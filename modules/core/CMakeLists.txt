@@ -6,6 +6,8 @@ aver_add_module(Aver.Core
     src/Time.cpp
     src/Hash.cpp
     src/ErrorCodes.cpp
+    src/DynamicLibrary.cpp
+    src/CharConv.cpp
     # CpuTiming: the scene walk's CPU-side twin to rhi::GpuTimingReport (see CpuTiming.hpp's own
     # comment). Only the cold path lives here -- the one-time TSC calibration and the report
     # builder -- the hot path (CpuLap/CpuNest) is header-only so it can be inlined at every one of
@@ -18,3 +20,9 @@ aver_add_module(Aver.Core
     # numbers; it expands to nothing if this module is ever configured without the root CMakeLists.
     AVER_ENGINE_VERSION="${AverEngine_VERSION}${AVER_VERSION_SUFFIX}"
 )
+
+# dlopen lives in libdl on glibc before 2.34 and in libc after; CMAKE_DL_LIBS is whichever this
+# toolchain needs (empty on macOS and on new glibc). Windows' LoadLibraryW is kernel32, linked always.
+if(NOT WIN32)
+  target_link_libraries(Aver.Core PUBLIC ${CMAKE_DL_LIBS})
+endif()

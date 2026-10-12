@@ -11,6 +11,14 @@ aver_add_module(Aver.RHI
     Aver.Platform
 )
 
+# dxcapi.h for aver/rhi/DxcApi.hpp and everything that includes it (DxcShaderInclude.hpp, the Vulkan
+# shader compiler, the shader tests). Windows takes it from the Windows SDK, as before; elsewhere it is
+# DXC's own copy, vendored in third_party/dxc-spirv/include/dxc. PUBLIC because the header that needs
+# it is a public one.
+if(NOT WIN32)
+  target_include_directories(Aver.RHI PUBLIC ${CMAKE_SOURCE_DIR}/third_party/dxc-spirv/include/dxc)
+endif()
+
 # HLSL beside the executable, redeployed whenever a shader actually changes.
 #
 # NOT a configure-time file(COPY), and not POST_BUILD either. The comment that stood here argued for
@@ -30,7 +38,7 @@ aver_add_module(Aver.RHI
 aver_deploy_shaders(Aver.RHI "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
 
 # Tell the factory which backend modules are compiled in (their symbols get linked
-# by Aver.Runtime). Vulkan stays off until the SDK is installed.
+# by Aver.Runtime).
 if(AVER_RHI_D3D12)
   target_compile_definitions(Aver.RHI PUBLIC AVER_HAS_D3D12=1)
 endif()

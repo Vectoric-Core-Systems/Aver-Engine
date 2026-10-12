@@ -86,9 +86,12 @@
       "default": true,
       "dependsOn": [
         "Aver.Audio",
-        "Aver.Audio.Wasapi",
         "Aver.Core",
         "Aver.Formats"
+      ],
+      "optionalDependsOn": [
+        "Aver.Audio.Sdl",
+        "Aver.Audio.Wasapi"
       ],
       "consequence": ""
     },
@@ -118,6 +121,26 @@
     },
     {
       "schema": 1,
+      "name": "Aver.Audio.Sdl",
+      "dir": "audio.sdl",
+      "displayName": "Audio Device (SDL)",
+      "description": "Linux and macOS audio output device that feeds the mixer.",
+      "category": "Audio",
+      "option": null,
+      "required": true,
+      "default": true,
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "dependsOn": [
+        "Aver.Audio",
+        "Aver.Core"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
       "name": "Aver.Audio.Wasapi",
       "dir": "audio.wasapi",
       "displayName": "Audio Device (WASAPI)",
@@ -126,6 +149,9 @@
       "option": null,
       "required": true,
       "default": true,
+      "platforms": [
+        "windows"
+      ],
       "dependsOn": [
         "Aver.Audio",
         "Aver.Core"
@@ -320,6 +346,9 @@
       "option": "AVER_MODULE_MCP",
       "required": false,
       "default": true,
+      "platforms": [
+        "windows"
+      ],
       "editions": {
         "standard": true,
         "slim": false,
@@ -475,6 +504,9 @@
       "option": "AVER_RHI_D3D11",
       "required": false,
       "default": true,
+      "platforms": [
+        "windows"
+      ],
       "dependsOn": [
         "Aver.RHI"
       ],
@@ -490,6 +522,9 @@
       "option": "AVER_RHI_D3D12",
       "required": false,
       "default": true,
+      "platforms": [
+        "windows"
+      ],
       "dependsOn": [
         "Aver.RHI"
       ],
@@ -505,6 +540,9 @@
       "option": null,
       "required": false,
       "default": true,
+      "platforms": [
+        "windows"
+      ],
       "dependsOn": [
         "Aver.RHI.D3D12"
       ],

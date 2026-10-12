@@ -22,6 +22,7 @@ import sys
 CATEGORIES = {"Core", "Rendering", "Gameplay", "Physics", "Animation", "Audio", "UI", "Tools",
               "Platform", "Networking", "Content"}
 EDITIONS = ("standard", "slim", "full")
+PLATFORMS = ("windows", "linux", "macos")
 OPTION_RE = re.compile(r"^AVER_(MODULE|RHI)_[A-Z0-9_]+$")
 STR_KEYS = ("name", "dir", "displayName", "description", "category", "consequence")
 LIST_KEYS = ("dependsOn", "optionalDependsOn", "derivedFrom")
@@ -94,6 +95,10 @@ def validate(mods, errors):
                 errors.append("%s: \"editions\" must map standard/slim/full to true or false" % w)
             elif opt is None:
                 errors.append("%s: \"editions\" only makes sense on a module with an option" % w)
+        plats = m.get("platforms")
+        if plats is not None and (not isinstance(plats, list) or not plats or len(set(plats)) != len(plats)
+                                  or not all(p in PLATFORMS for p in plats)):
+            errors.append("%s: \"platforms\" must be a non-empty list of unique names from %s" % (w, list(PLATFORMS)))
         skel = m.get("skeleton", False)
         if skel:
             if opt is not None or m.get("required"):
@@ -132,6 +137,24 @@ def validate(mods, errors):
                 if not dm["required"]:
                     errors.append("%s: required module depends on %s, which can be switched off -- make that module "
                                   "required, or move the edge to optionalDependsOn if the link is guarded by if(TARGET ...)" % (w, d))
+
+    # a hard edge must exist wherever the module does: dependsOn and derivedFrom may only name modules
+    # built on every platform the dependent is built on (no "platforms" means all three)
+    def plats_of(m):
+        p = m.get("platforms")
+        return set(p) if isinstance(p, list) else set(PLATFORMS)
+    for m in mods:
+        if m.get("skeleton"):
+            continue
+        w = "modules/%s/module.json" % m["_folder"]
+        mine = plats_of(m)
+        for k in ("dependsOn", "derivedFrom"):
+            for d in m.get(k, []):
+                missing = mine - plats_of(by_name[d])
+                if missing:
+                    errors.append("%s: %s names %s, which is not built on %s -- narrow this module's \"platforms\", "
+                                  "or move the edge to optionalDependsOn behind if(TARGET ...)"
+                                  % (w, k, d, ", ".join(sorted(missing))))
 
     # a derived module must not depend on anything that can be off while it is built: its deps must be
     # among the modules that are on whenever its derivedFrom are (those, their deps, required ones, and

@@ -8,6 +8,7 @@
   "option": null,
   "required": false,
   "default": true,
+  "platforms": ["windows"],
   "dependsOn": ["Aver.RHI.D3D12"],
   "derivedFrom": ["Aver.RHI.D3D12"],
   "consequence": "The editor UI cannot draw on DirectX 12."
