@@ -43,6 +43,7 @@ std::string trimmed(const std::string& s) {
 // double quote inside the argument is dropped rather than escaped: Windows forbids it in a filename,
 // so a path containing one did not come from a file, and refusing to pass it on is the safe reading.
 std::wstring quoteArg(const std::wstring& a) {
+#if defined(_WIN32)
     std::wstring q = L"\"";
     for (const wchar_t c : a) {
         if (c == L'"') continue;
@@ -53,6 +54,17 @@ std::wstring quoteArg(const std::wstring& a) {
     q.append(backslashes, L'\\');
     q.push_back(L'"');
     return q;
+#else
+    // runCaptured hands the line to /bin/sh, where double quotes still expand $, ` and \. Single
+    // quotes expand nothing; a single quote inside is closed, escaped and reopened.
+    std::wstring q = L"'";
+    for (const wchar_t c : a) {
+        if (c == L'\'') q += L"'\\''";
+        else q.push_back(c);
+    }
+    q.push_back(L'\'');
+    return q;
+#endif
 }
 
 // THE ONE PLACE THIS FEATURE STARTS A PROCESS.

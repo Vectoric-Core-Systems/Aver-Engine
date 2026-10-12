@@ -1,6 +1,7 @@
-// Starts AverEngineRuntime.exe on a level, detached from the editor. See RuntimeLaunch.hpp.
+// Starts AverEngineRuntime(.exe) on a level, detached from the editor. See RuntimeLaunch.hpp.
 
 #include "RuntimeLaunch.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include "aver/platform/FileSystem.hpp"
 
@@ -9,6 +10,8 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#else
+#include "ProcessRun.hpp"   // launchDetached, widen
 #endif
 
 namespace aver::editor {
@@ -34,12 +37,24 @@ std::wstring quoteArg(const std::wstring& s) {
     return L"\"" + s + std::wstring(trailing, L'\\') + L"\"";
 }
 
+#else
+
+// One argument for /bin/sh: single-quoted, which expands nothing.
+std::string shQuote(const std::string& s) {
+    std::string q = "'";
+    for (const char c : s) {
+        if (c == '\'') q += "'\\''";
+        else q.push_back(c);
+    }
+    return q + "'";
+}
+
 #endif // _WIN32
 
 } // namespace
 
 std::string runtimeExecutablePath() {
-    const std::string path = executableDir() + "\\AverEngineRuntime.exe";
+    const std::string path = executableDir() + AVER_PATH_SEP "AverEngineRuntime" + kExecutableSuffix;
     return fileExists(path) ? path : std::string();
 }
 
@@ -81,11 +96,23 @@ bool launchRuntime(const std::string& projectManifestPath, const std::string& le
     CloseHandle(pi.hThread);
     return true;
 #else
-    (void)projectManifestPath;
-    (void)levelPath;
-    (void)extraArgs;
-    if (why) *why = "launching the runtime is only implemented on Windows";
-    return false;
+    // The Windows branch's command line, for /bin/sh, started detached (ProcessRun.hpp).
+    const std::string exe = runtimeExecutablePath();
+    if (exe.empty()) {
+        if (why) *why = "AverEngineRuntime was not found beside the editor";
+        return false;
+    }
+    std::error_code ec;
+    const std::string absManifest = std::filesystem::absolute(projectManifestPath, ec).string();
+    const std::string absLevel    = std::filesystem::absolute(levelPath, ec).string();
+    std::string cmdline = shQuote(exe) + " --project " + shQuote(absManifest.empty() ? projectManifestPath : absManifest) +
+                          " " + shQuote(absLevel.empty() ? levelPath : absLevel);
+    if (!extraArgs.empty()) cmdline += " " + extraArgs;   // the user's own text, as on Windows
+    if (!launchDetached(widen(cmdline), widen(executableDir()))) {
+        if (why) *why = "could not start AverEngineRuntime";
+        return false;
+    }
+    return true;
 #endif
 }
 

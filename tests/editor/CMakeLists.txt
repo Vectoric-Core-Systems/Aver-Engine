@@ -769,3 +769,12 @@ add_executable(RigEditorTest
 target_include_directories(RigEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(RigEditorTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(RigEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ShellTrashTest -- moveToRecycleBin against the freedesktop.org Trash specification, in a trash of its
+# own (XDG_DATA_HOME). Linux only: Windows' recycle bin and macOS' Trash are the OS's to get right.
+if(NOT WIN32 AND NOT APPLE)
+  add_executable(ShellTrashTest src/ShellTrashTest.cpp ${CMAKE_SOURCE_DIR}/sandbox/src/ShellIntegration.cpp)
+  target_include_directories(ShellTrashTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(ShellTrashTest PRIVATE Aver.Core)
+  set_target_properties(ShellTrashTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

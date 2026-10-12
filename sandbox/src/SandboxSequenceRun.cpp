@@ -190,12 +190,7 @@ namespace {
 
 // Esc cancels, but only when this window has the keyboard (another app's Esc must not).
 bool escapeDown(Engine& e) {
-#if defined(_WIN32)
-    return e.window() && e.window()->isForeground() && (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-#else
-    (void)e;
-    return false;
-#endif
+    return e.window() && e.window()->isForeground() && keyDownNow(0x1B /* VK_ESCAPE */);
 }
 
 } // namespace

@@ -1,6 +1,7 @@
 #pragma once
 // Asking the operating system to do something with a path: show it, open it, or throw it away.
-// Windows-only today; every function returns false rather than throwing.
+// The Windows shell, Finder and the freedesktop file manager and trash; every function returns false
+// rather than throwing.
 #include <string>
 
 namespace aver::editor {

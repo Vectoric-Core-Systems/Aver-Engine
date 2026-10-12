@@ -2,6 +2,7 @@
 // bakes its materials, scaffolds new scripts/classes/modules, and reports build diagnostics.
 
 #include "ToolsMenu.hpp"
+#include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include "EditorNotifications.hpp"
 #include "EngineScaffold.hpp"
@@ -48,9 +49,16 @@ bool shellOpen(const std::string& path) {
 
 #else // !_WIN32
 
-// runCaptured's own non-Windows stub went with it to ProcessRun.hpp.
-bool findOnPath(const wchar_t*) { return false; }
-bool shellOpen(const std::string&) { return false; }
+// ProcessRun.hpp's PATH search, and the desktop's own opener: `open` on macOS, xdg-open elsewhere.
+bool findOnPath(const wchar_t* exe) { return editor::findOnPath(narrow(exe)); }
+bool shellOpen(const std::string& path) {
+#if defined(__APPLE__)
+    const std::wstring opener = L"open ";
+#else
+    const std::wstring opener = L"xdg-open ";
+#endif
+    return launchDetached(opener + L"\"" + widen(path) + L"\"", std::wstring());
+}
 
 #endif
 
@@ -82,9 +90,22 @@ bool bakeMaterials(const std::string& scriptsOutDir, std::string& log, int& exit
     }
     return true;
 #else
-    (void)binaries; (void)exitCode;
-    log = "material baking is implemented for Windows only";
-    return false;
+    // The Windows branch's steps, with the executable's directory from Aver.Platform.
+    const fs::path exeDir = executableDir();
+    const fs::path tool = exeDir / "Tools" / "avermatc.dll";
+    if (!fs::exists(tool, ec)) return false;
+
+    const fs::path outDir = binaries / "Materials";
+    fs::create_directories(outDir, ec);
+
+    const std::wstring cmd = L"dotnet \"" + widen(tool.string()) + L"\" --assembly \"" +
+                             widen(assembly.string()) + L"\" --out \"" + widen(outDir.string()) + L"\"";
+    if (!runCaptured(cmd, widen(exeDir.string()), log, exitCode)) {
+        log = "could not start dotnet to bake materials";
+        exitCode = -1;
+        return true;
+    }
+    return true;
 #endif
 }
 
@@ -100,7 +121,7 @@ void explainScriptReach(bool behaviour) {
     ImGui::PushTextWrapPos(0.0f);
     if (behaviour) {
         ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1),
-            "This WILL run. Tools > Reload Scripts builds it into <project>\\Binaries\\Scripts and "
+            "This WILL run. Tools > Reload Scripts builds it into <project>" AVER_PATH_SEP "Binaries" AVER_PATH_SEP "Scripts and "
             "loads it into the running editor - no restart. The hooks are called on the main "
             "thread from the frame loop.");
     } else {
@@ -343,7 +364,7 @@ void ToolsMenu::drawCppModuleModal(f32 dpi) {
     ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1),
         "This writes into the ENGINE, not into your project. `.ocproject` carries no build "
         "integration, so there is nowhere project-side for C++ to live - unlike Unreal, where game "
-        "C++ sits in the project. The module lands in the engine's modules\\ folder and the ENGINE "
+        "C++ sits in the project. The module lands in the engine's modules" AVER_PATH_SEP " folder and the ENGINE "
         "must be rebuilt before any of it exists.");
     ImGui::PopTextWrapPos();
     ImGui::Separator();
@@ -353,7 +374,7 @@ void ToolsMenu::drawCppModuleModal(f32 dpi) {
     ImGui::PushItemWidth(-1);
     ImGui::InputTextWithHint("##modname", "terrain, or render.terrain", name_, sizeof name_);
     ImGui::PopItemWidth();
-    ImGui::TextDisabled("Lowercase, dots for tiers - matching modules\\render.voxi, modules\\rhi.d3d12.");
+    ImGui::TextDisabled("Lowercase, dots for tiers - matching modules" AVER_PATH_SEP "render.voxi, modules" AVER_PATH_SEP "rhi.d3d12.");
 
     ImGui::Spacing();
     ImGui::TextUnformatted("Purpose (one line, for the README)");
@@ -363,10 +384,10 @@ void ToolsMenu::drawCppModuleModal(f32 dpi) {
 
     ImGui::Spacing();
     if (name_[0]) {
-        ImGui::TextDisabled("Creates modules\\%s\\  -> target %s, namespace aver::%s",
+        ImGui::TextDisabled("Creates modules" AVER_PATH_SEP "%s" AVER_PATH_SEP "  -> target %s, namespace aver::%s",
                             name_, moduleTargetName(name_).c_str(), moduleLeaf(name_).c_str());
     } else {
-        ImGui::TextDisabled("Creates modules\\<name>\\ with CMakeLists.txt, README.md, include\\ and src\\.");
+        ImGui::TextDisabled("Creates modules" AVER_PATH_SEP "<name>" AVER_PATH_SEP " with CMakeLists.txt, README.md, include" AVER_PATH_SEP " and src" AVER_PATH_SEP ".");
     }
 
     ImGui::Spacing();
@@ -374,7 +395,7 @@ void ToolsMenu::drawCppModuleModal(f32 dpi) {
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextDisabled(
         "The top-level CMakeLists.txt is NOT edited. Wiring a module into the build is a "
-        "deliberate act - every skeleton already under modules\\ is deliberately unwired - so the "
+        "deliberate act - every skeleton already under modules" AVER_PATH_SEP " is deliberately unwired - so the "
         "line to add is yours to add, and the README repeats it.");
     ImGui::PopTextWrapPos();
     ImGui::Separator();
@@ -441,9 +462,9 @@ void ToolsMenu::drawCppClassModal(f32 dpi) {
 
     ImGui::Spacing();
     if (mod) {
-        ImGui::TextDisabled("Writes modules\\%s\\include\\aver\\%s\\%s.hpp", mod->dir.c_str(),
+        ImGui::TextDisabled("Writes modules" AVER_PATH_SEP "%s" AVER_PATH_SEP "include" AVER_PATH_SEP "aver" AVER_PATH_SEP "%s" AVER_PATH_SEP "%s.hpp", mod->dir.c_str(),
                             mod->includeSub.c_str(), name_[0] ? name_ : "<Name>");
-        ImGui::TextDisabled("   and modules\\%s\\src\\%s.cpp", mod->dir.c_str(), name_[0] ? name_ : "<Name>");
+        ImGui::TextDisabled("   and modules" AVER_PATH_SEP "%s" AVER_PATH_SEP "src" AVER_PATH_SEP "%s.cpp", mod->dir.c_str(), name_[0] ? name_ : "<Name>");
         ImGui::TextDisabled("namespace %s   (read from the module, not guessed)", mod->nameSpace.c_str());
         if (!mod->built)
             ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1),
@@ -712,7 +733,6 @@ void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDi
     compileThread_ = std::thread([job, csproj, dir, outDir] {
         std::string out;
         int code = -1;
-#if defined(_WIN32)
         // -c Release AND -p:UseSharedCompilation=false, both of which this command used to omit.
         //
         // -c Release because omitting it means Debug, which is MSBuild's default and was nobody's
@@ -733,10 +753,6 @@ void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDi
             out = "Could not start dotnet.";
             code = -1;
         }
-#else
-        (void)csproj; (void)dir; (void)outDir;
-        out = "Compile Scripts is implemented for Windows only.";
-#endif
         // Parsed here, where `dir` is known: MSBuild's relative paths are relative to it.
         job->lines = parseBuildOutput(out, dir);
         for (const BuildLine& bl : job->lines) {
@@ -829,7 +845,7 @@ void ToolsMenu::refreshScriptStatus(const fmt::ProjectDesc& project) {
 void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
     const bool haveProject = project.valid();
 
-    const char* kNoProject = "Open or create a project first - C# lives in the\nproject's Content\\Scripts folder.";
+    const char* kNoProject = "Open or create a project first - C# lives in the\nproject's Content" AVER_PATH_SEP "Scripts folder.";
 
     ImGui::TextDisabled("New scripts & classes: Content Browser  >  + Add");
     ImGui::Separator();
@@ -842,9 +858,9 @@ void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
     }
     tip(!haveProject  ? kNoProject
         : !dotnetOk   ? "dotnet was not found on PATH, so there is nothing to build with.\nInstall the .NET SDK and restart the editor."
-        : !haveCsproj ? "This project has no Content\\Scripts\\Scripts.csproj yet.\nUse New C# Script or New C# Class to generate one."
+        : !haveCsproj ? "This project has no Content" AVER_PATH_SEP "Scripts" AVER_PATH_SEP "Scripts.csproj yet.\nUse New C# Script or New C# Class to generate one."
         : compileThread_.joinable() ? "A build is already running."
-        : "dotnet build into Binaries\\Scripts.\nThe editor keeps running whatever it loaded - use Reload Scripts to swap it in.");
+        : "dotnet build into Binaries" AVER_PATH_SEP "Scripts.\nThe editor keeps running whatever it loaded - use Reload Scripts to swap it in.");
 
     if (ImGui::MenuItem("Reload Scripts", nullptr, false, canCompile && reload_ != nullptr)) {
         requestReloadScripts(project);
@@ -852,7 +868,7 @@ void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
     tip(!haveProject  ? kNoProject
         : !reload_    ? "This build has no scripting host, so there is nothing to reload into.\n(-DAVER_MODULE_SCRIPTING=OFF, or the host declined at startup.)"
         : !dotnetOk   ? "dotnet was not found on PATH, so there is nothing to build with.\nInstall the .NET SDK and restart the editor."
-        : !haveCsproj ? "This project has no Content\\Scripts\\Scripts.csproj yet.\nUse New C# Script or New C# Class to generate one."
+        : !haveCsproj ? "This project has no Content" AVER_PATH_SEP "Scripts" AVER_PATH_SEP "Scripts.csproj yet.\nUse New C# Script or New C# Class to generate one."
         : compileThread_.joinable() ? "A build is already running."
         : "Rebuild, then unload and reload the project's scripts in place.\nRunning behaviours get OnShutdown, the new ones get OnStart.\nNo editor restart, and no state is carried across.");
 
@@ -863,10 +879,10 @@ void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
         ImGui::EndDisabled();
         tip(!haveProject  ? kNoProject
             : !dotnetOk   ? "dotnet was not found on PATH, so there is nothing to build with."
-            : !haveCsproj ? "This project has no Content\\Scripts\\Scripts.csproj yet."
+            : !haveCsproj ? "This project has no Content" AVER_PATH_SEP "Scripts" AVER_PATH_SEP "Scripts.csproj yet."
             : "Rebuild and reload whenever a .cs under Content changes on disk - saving in Visual\n"
               "Studio is enough. Edits are debounced, so a Save All is ONE build, not one per file.\n"
-              "bin\\ and obj\\ are ignored: the build writes .cs there itself, and reacting to\n"
+              "bin" AVER_PATH_SEP " and obj" AVER_PATH_SEP " are ignored: the build writes .cs there itself, and reacting to\n"
               "those would compile in a loop forever.");
     }
 
@@ -879,7 +895,7 @@ void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
 
     const std::vector<IdeInfo>& ides = detectedIdes();
     const char* kOpenBlocked = !haveProject ? kNoProject
-        : "There is no Content\\Scripts\\Scripts.csproj to open yet.\nUse New C# Script or New C# Class to generate one.";
+        : "There is no Content" AVER_PATH_SEP "Scripts" AVER_PATH_SEP "Scripts.csproj to open yet.\nUse New C# Script or New C# Class to generate one.";
 
     if (ides.size() > 1) {
         if (ImGui::BeginMenu("Open Scripts In", haveCsproj)) {
@@ -889,10 +905,10 @@ void ToolsMenu::drawScriptItems(const fmt::ProjectDesc& project) {
                         AVER_WARN("[Editor] could not open {} in {}", csproj, ide.name);
                 }
                 tip(ide.kind == IdeKind::VsCode
-                        ? "Opens the Content\\Scripts FOLDER - handing Code a .csproj\nwould just show you the XML."
+                        ? "Opens the Content" AVER_PATH_SEP "Scripts FOLDER - handing Code a .csproj\nwould just show you the XML."
                     : ide.kind == IdeKind::ShellDefault
                         ? "Hands Scripts.csproj to whatever is registered for .csproj."
-                        : "Opens Content\\Scripts\\Scripts.csproj.");
+                        : "Opens Content" AVER_PATH_SEP "Scripts" AVER_PATH_SEP "Scripts.csproj.");
             }
             ImGui::EndMenu();
         }
@@ -1108,7 +1124,7 @@ void ToolsMenu::drawPackageModal(const fmt::ProjectDesc& project, f32 dpi) {
     ImGui::Spacing();
 
     if (packageOut_.empty() && project.valid()) {
-        packageOut_ = project.dir + "\\Packaged\\" + project.name;
+        packageOut_ = project.dir + AVER_PATH_SEP "Packaged" AVER_PATH_SEP + project.name;
     }
     char buf[512];
     std::snprintf(buf, sizeof(buf), "%s", packageOut_.c_str());

@@ -17,6 +17,10 @@
 #if defined(_WIN32)
 #include <windows.h>
 #include <shellapi.h>
+#else
+#include "ProcessRun.hpp"   // launchDetached, findOnPath, widen
+#include <cstdlib>
+#include <unistd.h>
 #endif
 
 namespace aver::editor {
@@ -272,10 +276,75 @@ void findRider(std::vector<IdeInfo>& out) {
 
 #else // !_WIN32
 
-bool shellOpen(const std::string&) { return false; }
+// One argument for /bin/sh: single-quoted, which expands nothing.
+std::string shQuote(const std::string& s) {
+    std::string q = "'";
+    for (const char c : s) {
+        if (c == '\'') q += "'\\''";
+        else q.push_back(c);
+    }
+    return q + "'";
+}
+
+bool launchShell(const std::string& cmdline) { return launchDetached(widen(cmdline), std::wstring()); }
+
+// The first of `names` that is an executable on PATH or at one of `paths`, as a full path for a PATH
+// hit only when the name is all the shell needs: a bare name is what launchShell runs it by.
+std::string findProgram(std::initializer_list<const char*> names, std::initializer_list<std::string> paths) {
+    for (const std::string& p : paths)
+        if (!p.empty() && ::access(p.c_str(), X_OK) == 0) return p;
+    for (const char* n : names)
+        if (findOnPath(n)) return n;
+    return {};
+}
+
+std::string home() {
+    const char* h = std::getenv("HOME");
+    return h && *h ? std::string(h) : std::string();
+}
+
+bool shellOpen(const std::string& path) {
+#if defined(__APPLE__)
+    return launchShell("open " + shQuote(path));
+#else
+    return launchShell("xdg-open " + shQuote(path));
+#endif
+}
+
+// Visual Studio is Windows-only.
 void findVisualStudio(std::vector<IdeInfo>&) {}
-void findVsCode(std::vector<IdeInfo>&) {}
-void findRider(std::vector<IdeInfo>&) {}
+
+// VS Code on PATH (`code`, or the open-source build's `codium`), or inside its macOS app bundle.
+void findVsCode(std::vector<IdeInfo>& out) {
+    const std::string exe = findProgram(
+        {"code", "codium"},
+        {"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+         home().empty() ? std::string() : home() + "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"});
+    if (exe.empty()) return;
+    IdeInfo ide;
+    ide.kind = IdeKind::VsCode;
+    ide.name = "VS Code";
+    ide.exePath = exe;
+    ide.canGoto = true;
+    out.push_back(ide);
+}
+
+// Rider on PATH, where the JetBrains Toolbox puts its launch scripts, or inside its macOS app bundle.
+void findRider(std::vector<IdeInfo>& out) {
+    const std::string h = home();
+    const std::string exe = findProgram(
+        {"rider"},
+        {h.empty() ? std::string() : h + "/.local/share/JetBrains/Toolbox/scripts/rider",
+         "/Applications/Rider.app/Contents/MacOS/rider",
+         h.empty() ? std::string() : h + "/Applications/Rider.app/Contents/MacOS/rider"});
+    if (exe.empty()) return;
+    IdeInfo ide;
+    ide.kind = IdeKind::Rider;
+    ide.name = "Rider";
+    ide.exePath = exe;
+    ide.canGoto = true;
+    out.push_back(ide);
+}
 
 #endif
 
@@ -426,8 +495,21 @@ bool openInIde(const IdeInfo& ide, const std::string& file, int line, int col) {
         return shellOpen(file);
     }
 #else
-    (void)ide; (void)line; (void)col;
-    return false;
+    // The same command lines as the Windows branch, quoted for /bin/sh.
+    switch (ide.kind) {
+    case IdeKind::VsCode: {
+        std::string pos = file;
+        if (line > 0) pos += ":" + std::to_string(line) + ":" + std::to_string(col > 0 ? col : 1);
+        return launchShell(shQuote(ide.exePath) + (line > 0 ? " --goto " : " ") + shQuote(pos));
+    }
+    case IdeKind::Rider:
+        return launchShell(shQuote(ide.exePath) + (line > 0 ? " --line " + std::to_string(line) : std::string()) +
+                           " " + shQuote(file));
+    case IdeKind::VisualStudio:
+    case IdeKind::ShellDefault:
+    default:
+        return shellOpen(file);
+    }
 #endif
 }
 
@@ -439,6 +521,9 @@ bool openProjectInIde(const IdeInfo& ide, const std::string& csprojPath) {
         const std::string dir = std::filesystem::path(csprojPath).parent_path().string();
         return launchDetached(quoteArg(widen(ide.exePath)) + L" " + quoteArg(widen(dir)));
     }
+#else
+    if (ide.kind == IdeKind::VsCode)
+        return launchShell(shQuote(ide.exePath) + " " + shQuote(std::filesystem::path(csprojPath).parent_path().string()));
 #endif
     return openInIde(ide, csprojPath, 0, 0);
 }
