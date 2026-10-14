@@ -823,7 +823,7 @@ then mixed with the validity-weighted bilinear by `voxi.nrd2HistSharp` (default 
 core tap is invalid, or after a rebuild, the fetch is the validity-weighted bilinear. The weights are the
 `sr_taa.hlsl` ones: at `f = 0.5` they are -1/16, 9/16, 9/16, -1/16.
 
-### Colour reject (`voxi.nrd2FfxReject`, default 1; weight `voxi.nrd2FfxRejectWeight`, default 1.5)
+### Colour reject (`voxi.nrd2FfxReject`, default 1; weight `voxi.nrd2FfxRejectWeight`, default 8)
 
 Per signal, FidelityFX's test: the history is dropped when `dot(h - mean, h - mean) >= w * length(var)`.
 `h` is the raw 4-tap bilinear of the history at the reprojected position (no validity, as FidelityFX's
@@ -831,6 +831,14 @@ Per signal, FidelityFX's test: the history is dropped when `dot(h - mean, h - me
 (`exp(-3 i^2 / 25)`, `|i| <= 4`, surface pixels only, computed separably in groupshared in `CSNrd2Reproject`).
 A NaN rejects. It runs per signal, so D can lose its history while S keeps its own; FidelityFX rejects one
 signal only. It is a mean/variance test inside history rejection (NEURAA_NRD.md rule 13).
+
+**Default weight 8, not FidelityFX's 1.5 (2026-10-14).** FidelityFX runs the test on raw per-pixel radiance, whose
+9x9 mean is steady. NRD2 runs it on D'/S', the single-frame pyramid resolve, which is correlated over 8-16 px: its
+local mean wanders by about one sigma, so at 1.5 a converged history was dropped in blobs every frame and those
+pixels restarted from one frame. Measured at rest in Caldera (owner prefs, 0.5 render scale, NeuRAA), mean
+frame-to-frame change in display codes: weight 1.5 0.67, 4 0.25, 8 0.18, 16 0.15, reject off 0.13, FidelityFX
+0.24. Pose-matched motion (just stopped vs settled, fixed exposure): 1.5 4.73, 8 4.43, off 4.39, so the low
+weight bought nothing in motion either. 8 is about a 3-sigma test on the mean of a field that correlated.
 
 ### Clip and blend (`CSNrd2Temporal`, pass 7)
 
@@ -899,7 +907,7 @@ different one from NRD2's.
 | `voxi.nrd2FfxClip` | 1 | bool | mean +- sigma clip; 0 = 5x5 min/max box |
 | `voxi.nrd2FfxClipWeight` | 4 | 0.1-8 | sigma weight (`history_clip_weight`) |
 | `voxi.nrd2FfxReject` | 1 | bool | colour-distance reject, per signal |
-| `voxi.nrd2FfxRejectWeight` | 1.5 | 0.1-16 | its discard weight |
+| `voxi.nrd2FfxRejectWeight` | 8 | 0.1-16 | its discard weight (FidelityFX: 1.5) |
 | `voxi.nrd2FfxDepthWeight` | 1 | 0-64 | relative depth error's weight in the factor |
 | `voxi.nrd2HistSharp` | 1 | 0-1 | Catmull-Rom share of the fetch; 0 = bilinear |
 | `voxi.nrd2NeuracGuide` | 1 | bool | the guide, only while NeuRaC is live |

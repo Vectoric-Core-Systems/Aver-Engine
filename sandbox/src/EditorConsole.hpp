@@ -794,7 +794,7 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ return vBool(Renderer::get().settings().nrd2FfxReject); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2FfxReject = on; }); }});
     t.push_back({"voxi.nrd2FfxRejectWeight", VarType::F32, false,
-        "NRD2 colour reject distance, in standard deviations of this frame's neighbourhood (0.1-16, default 1.5): lower rejects more history",
+        "NRD2 colour reject: history kept while its squared distance from this frame's 9x9 mean is under this many times the variance (0.1-16, default 8; FidelityFX uses 1.5): lower rejects more history",
         []{ return vF32(Renderer::get().settings().nrd2FfxRejectWeight); },
         [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2FfxRejectWeight = n; }); },
         [](const VarValue& v, std::string& err) -> bool {

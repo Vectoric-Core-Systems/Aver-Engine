@@ -145,7 +145,7 @@ void Renderer::setSettings(const Settings& s) {
     // A non-finite value falls back to the default; std::clamp would pass a NaN through.
     auto fin = [](f32 v, f32 lo, f32 hi, f32 def) { return std::isfinite(v) ? std::clamp(v, lo, hi) : def; };
     n.nrd2FfxClipWeight       = fin(n.nrd2FfxClipWeight, 0.1f, 8.0f, 4.0f);
-    n.nrd2FfxRejectWeight     = fin(n.nrd2FfxRejectWeight, 0.1f, 16.0f, 1.5f);
+    n.nrd2FfxRejectWeight     = fin(n.nrd2FfxRejectWeight, 0.1f, 16.0f, 8.0f);
     n.nrd2FfxDepthWeight      = fin(n.nrd2FfxDepthWeight, 0.0f, 64.0f, 1.0f);
     n.nrd2HistSharp           = fin(n.nrd2HistSharp, 0.0f, 1.0f, 1.0f);
     n.nrd2NeuracGuideStrength = fin(n.nrd2NeuracGuideStrength, 0.0f, 1.0f, 1.0f);

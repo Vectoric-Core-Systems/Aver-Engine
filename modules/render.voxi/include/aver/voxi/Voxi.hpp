@@ -181,7 +181,7 @@ struct Settings {
     bool nrd2FfxClip = true;
     f32 nrd2FfxClipWeight = 4.0f;
     bool nrd2FfxReject = true;
-    f32 nrd2FfxRejectWeight = 1.5f;
+    f32 nrd2FfxRejectWeight = 8.0f;   // not FFX's 1.5: D'/S' is spatially correlated, see NRD2.md
     f32 nrd2FfxDepthWeight = 1.0f;
     f32 nrd2HistSharp = 1.0f;
     bool nrd2NeuracGuide = true;

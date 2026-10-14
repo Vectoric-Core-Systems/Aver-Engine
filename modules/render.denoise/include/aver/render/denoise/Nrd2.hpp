@@ -58,7 +58,7 @@ struct Nrd2Params {
     bool ffxClip = true;          // history clipped to mean +- sigma of the 9x9 (false: this frame's 5x5 min/max box)
     f32  ffxClipWeight = 4.0f;    // its sigma weight (FidelityFX history_clip_weight)
     bool ffxReject = true;        // per signal: history dropped when its colour is far from this frame's 9x9 mean
-    f32  ffxRejectWeight = 1.5f;  // its discard weight
+    f32  ffxRejectWeight = 8.0f;  // its discard weight (FFX uses 1.5; see NRD2.md)
     f32  ffxDepthWeight = 1.0f;   // relative depth error's weight in the disocclusion factor
     f32  histSharp = 1.0f;        // Catmull-Rom share of the history fetch (0 = bilinear)
     f32  guideStrength = 1.0f;    // scales the NeuRaC guide's deviation from its tile mean (Inputs::guide)

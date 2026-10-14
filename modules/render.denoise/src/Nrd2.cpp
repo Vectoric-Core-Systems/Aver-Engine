@@ -635,7 +635,7 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
         cb.ffx[0] = kFfxThreshold;
         cb.ffx[1] = kFfxNormalW;
         cb.ffx[2] = clampSetting(params_.ffxDepthWeight, 0.0f, 64.0f, 1.0f);
-        cb.ffx[3] = clampSetting(params_.ffxRejectWeight, 0.1f, 16.0f, 1.5f);
+        cb.ffx[3] = clampSetting(params_.ffxRejectWeight, 0.1f, 16.0f, 8.0f);
         cb.hist[0] = clampSetting(params_.histSharp, 0.0f, 1.0f, 1.0f);
         cb.hist[1] = clampSetting(params_.ffxClipWeight, 0.1f, 8.0f, 4.0f);
         cb.hist[2] = clampSetting(params_.guideStrength, 0.0f, 1.0f, 1.0f);
