@@ -17,6 +17,8 @@ target_include_directories(Aver.Render.Neural PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 target_compile_features(Aver.Render.Neural PUBLIC cxx_std_20)
 target_link_libraries(Aver.Render.Neural PUBLIC Aver.Core Aver.RHI)
 set_target_properties(Aver.Render.Neural PROPERTIES FOLDER "modules")
+# The CPU references are bit-exact specs: no fused multiply-add (Apple Clang fuses a*b+c by default).
+target_compile_options(Aver.Render.Neural PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang,GNU>:-ffp-contract=off>)
 
 # aver_neural_mlp.hlsl beside the executable, like every module's shaders.
 aver_deploy_shaders(Aver.Render.Neural "${CMAKE_CURRENT_SOURCE_DIR}/shaders")

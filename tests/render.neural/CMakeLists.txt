@@ -12,6 +12,8 @@ set_target_properties(NeuralMlpTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_
 # aver_neural_conv.hlsl), headless like NeuralMlpTest.
 add_executable(NeuralConvTest src/NeuralConvTest.cpp)
 target_link_libraries(NeuralConvTest PRIVATE Aver.Render.Neural Aver.Core)
+# The test spells the partial order out by hand: keep a*b+c unfused, as in the library.
+target_compile_options(NeuralConvTest PRIVATE $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang,GNU>:-ffp-contract=off>)
 set_target_properties(NeuralConvTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # NeuralGpuParityTest -- the GPU kernels against their CPU twins on a real device (WARP by default,

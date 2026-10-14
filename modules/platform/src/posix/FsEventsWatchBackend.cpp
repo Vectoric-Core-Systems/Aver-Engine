@@ -27,12 +27,14 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace aver::detail {
 namespace {
 
 constexpr usize kMaxQueued = 8192;   // Win32DirectoryWatcher.cpp's bound
+constexpr usize kMaxKnown = 65536;
 
 class FsEventsWatchBackend final : public IWatchBackend {
 public:
@@ -131,18 +133,29 @@ private:
                     if (!nextRel.empty() && !exists && nextExists) {
                         batch.push_back(RawFileEvent{RawChange::RenamedFrom, rel, now});
                         batch.push_back(RawFileEvent{RawChange::RenamedTo, nextRel, now});
+                        known_.erase(rel);
+                        remember(nextRel);
                         ++i;
                         continue;
                     }
                 }
                 batch.push_back(RawFileEvent{exists ? RawChange::Added : RawChange::Removed, rel, now});
+                if (exists) remember(rel); else known_.erase(rel);
                 continue;
             }
             if (!exists) {
+                known_.erase(rel);
                 if (f & kFSEventStreamEventFlagItemRemoved) batch.push_back(RawFileEvent{RawChange::Removed, rel, now});
             } else if (f & kFSEventStreamEventFlagItemCreated) {
-                batch.push_back(RawFileEvent{RawChange::Added, rel, now});
-                if (f & kFSEventStreamEventFlagItemModified) batch.push_back(RawFileEvent{RawChange::Modified, rel, now});
+                // ItemCreated stays set on later events for the same path, so only a path not seen before
+                // (or one removed and made again) is an Added; a known one was rewritten.
+                if (known_.count(rel) == 0 || (f & kFSEventStreamEventFlagItemRemoved)) {
+                    remember(rel);
+                    batch.push_back(RawFileEvent{RawChange::Added, rel, now});
+                    if (f & kFSEventStreamEventFlagItemModified) batch.push_back(RawFileEvent{RawChange::Modified, rel, now});
+                } else if (!(f & kFSEventStreamEventFlagItemIsDir)) {
+                    batch.push_back(RawFileEvent{RawChange::Modified, rel, now});
+                }
             } else if (f & (kFSEventStreamEventFlagItemModified | kFSEventStreamEventFlagItemInodeMetaMod)) {
                 if (!(f & kFSEventStreamEventFlagItemIsDir)) batch.push_back(RawFileEvent{RawChange::Modified, rel, now});
             }
@@ -165,7 +178,15 @@ private:
         }
     }
 
+    // Dispatch queue only. Bounded: past the cap it is dropped, and a rewrite then reads as Created,
+    // which the header allows.
+    void remember(const std::string& rel) {
+        if (known_.size() >= kMaxKnown) known_.clear();
+        known_.insert(rel);
+    }
+
     void flagOverflow(const char* why) {
+        known_.clear();
         std::lock_guard<std::mutex> lock(mutex_);
         queue_.clear();
         if (!overflow_) AVER_WARN("[Watcher] lost track of '{}' ({}); a rescan is required", root_, why);
@@ -203,6 +224,7 @@ private:
     FSEventStreamRef stream_ = nullptr;
     dispatch_queue_t queueDispatch_ = nullptr;
     int batches_ = 0;   // dispatch queue only
+    std::unordered_set<std::string> known_;   // paths already reported as Added; dispatch queue only
     std::mutex mutex_;
     std::vector<RawFileEvent> queue_;
     bool overflow_ = false;
