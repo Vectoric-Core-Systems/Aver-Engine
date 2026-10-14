@@ -164,7 +164,7 @@ struct Settings {
     // frames (camera moving, or TAA off) the filtered D and S are reprojected, prefiltered and blended with
     // last frame's inside a min/max box of this frame's values. nrd2StabFrames is its history length at rest.
     bool nrd2Stab = true;
-    u32 nrd2StabFrames = 32;
+    u32 nrd2StabFrames = 64;
     // ...and the length it ramps down to in motion (8 px/frame and faster). Was a fixed 8: too short to average
     // the patchy low-frequency noise in shadows and bounce light while moving; longer = more lag on change.
     u32 nrd2StabFramesMoving = 16;
@@ -180,7 +180,7 @@ struct Settings {
     // the temporal anchor (only while NeuRaC is live) with the strength of its deviation term.
     bool nrd2FfxClip = true;
     f32 nrd2FfxClipWeight = 4.0f;
-    bool nrd2FfxReject = true;
+    bool nrd2FfxReject = false;   // off: it restarted converged history at rest (NRD2.md, colour reject)
     f32 nrd2FfxRejectWeight = 8.0f;   // not FFX's 1.5: D'/S' is spatially correlated, see NRD2.md
     f32 nrd2FfxDepthWeight = 1.0f;
     f32 nrd2HistSharp = 1.0f;

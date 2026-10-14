@@ -43,7 +43,7 @@ struct Nrd2Params {
     bool bypass = false;   // own pixel only: the split recomposed undenoised (A/B check)
     bool network = true;   // phase 4: the trained network sets the tile parameters when it can
     bool stabilise = false;   // the temporal stage, on jitter-free frames with the Inputs below filled
-    f32 stabFrames = 32.0f;   // its history length at rest, in frames (from 8 px/frame: min(stabFramesMoving, this))
+    f32 stabFrames = 64.0f;   // its history length at rest, in frames (from 8 px/frame: min(stabFramesMoving, this))
     f32 stabFramesMoving = 16.0f;   // the history length it ramps down to in motion (8 px/frame and faster)
     u32 despeckle = 0;        // CSNrd2Despeckle before the pyramid: 1 D, 2 S (not while a capture runs)
     f32 despeckleCap = 2.0f;  // its cap, times the 5th brightest neighbour
@@ -57,7 +57,7 @@ struct Nrd2Params {
     // The temporal stage's history handling (nrd2_resolve.hlsli, FidelityFX's reflections denoiser).
     bool ffxClip = true;          // history clipped to mean +- sigma of the 9x9 (false: this frame's 5x5 min/max box)
     f32  ffxClipWeight = 4.0f;    // its sigma weight (FidelityFX history_clip_weight)
-    bool ffxReject = true;        // per signal: history dropped when its colour is far from this frame's 9x9 mean
+    bool ffxReject = false;       // per signal: history dropped when its colour is far from this frame's 9x9 mean
     f32  ffxRejectWeight = 8.0f;  // its discard weight (FFX uses 1.5; see NRD2.md)
     f32  ffxDepthWeight = 1.0f;   // relative depth error's weight in the disocclusion factor
     f32  histSharp = 1.0f;        // Catmull-Rom share of the history fetch (0 = bilinear)

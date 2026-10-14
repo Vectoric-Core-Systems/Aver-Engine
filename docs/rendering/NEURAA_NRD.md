@@ -578,8 +578,8 @@ legal advice). The design follows them unless counsel says otherwise:
      anchor|) box (`voxi.nrd2FfxClip` 1, weight `voxi.nrd2FfxClipWeight` 4, so +-5.6 sigma, loose).
      Exposure: US 10,116,916 (in force to 2037); US 12,482,168 / US 11,600,036 for moment-based ranges and
      rejection tests. The owner accepts it.
-   - **Colour reject:** FidelityFX's `dot2(history - mean) < 1.5 length(variance)` test (`voxi.nrd2FfxReject`
-     1, per signal, against the 9x9 Gaussian moments of this frame's D' or S') drops the history of a pixel. It
+   - **Colour reject:** FidelityFX's `dot2(history - mean) < 1.5 length(variance)` test (`voxi.nrd2FfxReject`,
+     off by default since 2026-10-14, per signal, against the 9x9 Gaussian moments of this frame's D' or S') drops the history of a pixel. It
      is a mean/variance history-rejection test, so it is in the same exposure as the clip, and it is its own
      setting.
    - **The min/max path stays selectable:** `voxi.nrd2FfxClip 0` restores the 5x5 min/max clip (rule 1 and 7

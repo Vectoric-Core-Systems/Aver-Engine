@@ -790,7 +790,7 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             return true;
         }});
     t.push_back({"voxi.nrd2FfxReject", VarType::Bool, false,
-        "NRD2 drops a reprojected history whose colour is far from this frame's neighbourhood mean (FidelityFX's colour-distance reject), per signal; 0 = keep it (A/B)",
+        "NRD2 drops a reprojected history whose colour is far from this frame's neighbourhood mean (FidelityFX's colour-distance reject), per signal; default 0: at rest it restarted converged history and flickered",
         []{ return vBool(Renderer::get().settings().nrd2FfxReject); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2FfxReject = on; }); }});
     t.push_back({"voxi.nrd2FfxRejectWeight", VarType::F32, false,
@@ -854,7 +854,7 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ return vBool(Renderer::get().settings().nrd2ObjectStop); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2ObjectStop = on; }); }});
     t.push_back({"voxi.nrd2StabFrames", VarType::U32, false,
-        "NRD2 temporal history length at rest, in frames (1-64, default 32); it shortens with screen speed to min(voxi.nrd2StabFramesMoving, this) from 8 px per frame and is off from 128 px per frame",
+        "NRD2 temporal history length at rest, in frames (1-64, default 64); it shortens with screen speed to min(voxi.nrd2StabFramesMoving, this) from 8 px per frame and is off from 128 px per frame",
         []{ return vU32(Renderer::get().settings().nrd2StabFrames); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2StabFrames = n; }); },
         [](const VarValue& v, std::string& err) -> bool {

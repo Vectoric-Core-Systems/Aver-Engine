@@ -591,7 +591,7 @@ Looked at and dropped with the owner after reading the code:
 ## History in motion (2026-10-10)
 
 The owner: patchiness in shadows and bounce lighting while moving. The stabiliser's history ramps from
-`nrd2StabFrames` (32) at rest down to a fixed 8 frames at 8 px/frame and faster, which is nearly always while
+`nrd2StabFrames` (64 since 2026-10-14, was 32) at rest down to a fixed 8 frames at 8 px/frame and faster, which is nearly always while
 flying; 8 frames do not average out the low-frequency blotches the coarse levels and one-ray lamp and bounce
 noise leave. The floor is now `Settings::nrd2StabFramesMoving` (default 16, `voxi.nrd2StabFramesMoving` 1-64;
 `Nrd2Params::stabFramesMoving`, sent as `gNrd2Stab.y`): a speed-dependent cap, not a per-pixel count, so the
@@ -691,7 +691,7 @@ S separately). Each is one 8x8 dispatch (`AVER_NRD2_PASS` 5, 6, 7; GPU spans `NR
      keeps the G-buffer's packed normal and the view Z). A rigid mover fails the camera-predicted depth test and
      gets none; each signal's history may also be dropped by the colour reject.
    - Sample count n (the history length): per signal `n = min(N, n_hist * factor + 1)`, `n_hist` the youngest of
-     the taps that carry weight (> 0.1), 1 with no (or rejected) history. `N` = `voxi.nrd2StabFrames` (**32**) at rest up to 0.25 px per frame, a
+     the taps that carry weight (> 0.1), 1 with no (or rejected) history. `N` = `voxi.nrd2StabFrames` (**64**) at rest up to 0.25 px per frame, a
      log-space ramp to min(8, that) at 8 px, flat to 128 px, none beyond (a whip), and 2 for two frames after
      the sun changes. Specular: `N_S = min(N, max(8, N (1 - exp(-100 roughness))))`, so a glossy lobe still keeps
      8 frames (FidelityFX does) but a rough one the full count. The history blend weight is `1 - 1/n`: 0, 1/2,
@@ -746,7 +746,7 @@ view Z + packed normal (RGBA16F) and the noise estimate (RG16F). About 181 MiB a
 first version was 84). Cost, also an estimate and not measured: about +0.6 ms (0.4-0.9) on jitter-free frames,
 none otherwise. The constants buffer grew to 384 bytes on 2026-10-12 (`gNrd2Ffx`, `gNrd2Hist`), plus a tile-sized `anchG_` for the guide.
 
-**Dials.** `voxi.nrd2Stab` (bool), `voxi.nrd2StabFrames` (1-64, default 32); the FidelityFX dials are in the table under "History handling
+**Dials.** `voxi.nrd2Stab` (bool), `voxi.nrd2StabFrames` (1-64, default 64); the FidelityFX dials are in the table under "History handling
 after FidelityFX". The speed cut-offs, depth
 tolerance, search score and every weight constant are at the top of `nrd2_resolve.hlsli`, FidelityFX's values
 where it has one, starting values to tune on the rig.
@@ -823,7 +823,7 @@ then mixed with the validity-weighted bilinear by `voxi.nrd2HistSharp` (default 
 core tap is invalid, or after a rebuild, the fetch is the validity-weighted bilinear. The weights are the
 `sr_taa.hlsl` ones: at `f = 0.5` they are -1/16, 9/16, 9/16, -1/16.
 
-### Colour reject (`voxi.nrd2FfxReject`, default 1; weight `voxi.nrd2FfxRejectWeight`, default 8)
+### Colour reject (`voxi.nrd2FfxReject`, default 0; weight `voxi.nrd2FfxRejectWeight`, default 8)
 
 Per signal, FidelityFX's test: the history is dropped when `dot(h - mean, h - mean) >= w * length(var)`.
 `h` is the raw 4-tap bilinear of the history at the reprojected position (no validity, as FidelityFX's
@@ -839,6 +839,13 @@ pixels restarted from one frame. Measured at rest in Caldera (owner prefs, 0.5 r
 frame-to-frame change in display codes: weight 1.5 0.67, 4 0.25, 8 0.18, 16 0.15, reject off 0.13, FidelityFX
 0.24. Pose-matched motion (just stopped vs settled, fixed exposure): 1.5 4.73, 8 4.43, off 4.39, so the low
 weight bought nothing in motion either. 8 is about a 3-sigma test on the mean of a field that correlated.
+
+**Off by default, history 64 at rest (2026-10-14, same rig).** At weight 8 the remaining pops were half brighter,
+half darker: isolated pixels restarting from one frame, still 3x as many as with the reject off. Flicker at rest:
+weight 8 0.18, off 0.13, off with `nrd2StabFrames` 64 0.08, weight 16 with 64 0.10; FidelityFX 0.24. Motion
+unchanged (just stopped vs settled 4.43 / 4.39 / 4.39). The FidelityFX clip still bounds a stale history. A
+FidelityFX-style brightness clamp in the pyramid reduce (each 2x2 child capped at 4x the median) changed neither
+(at rest 0.13 -> 0.13, motion 4.43 -> 4.46) and was not kept.
 
 ### Clip and blend (`CSNrd2Temporal`, pass 7)
 
@@ -906,7 +913,7 @@ different one from NRD2's.
 |---|---|---|---|
 | `voxi.nrd2FfxClip` | 1 | bool | mean +- sigma clip; 0 = 5x5 min/max box |
 | `voxi.nrd2FfxClipWeight` | 4 | 0.1-8 | sigma weight (`history_clip_weight`) |
-| `voxi.nrd2FfxReject` | 1 | bool | colour-distance reject, per signal |
+| `voxi.nrd2FfxReject` | 0 | bool | colour-distance reject, per signal |
 | `voxi.nrd2FfxRejectWeight` | 8 | 0.1-16 | its discard weight (FidelityFX: 1.5) |
 | `voxi.nrd2FfxDepthWeight` | 1 | 0-64 | relative depth error's weight in the factor |
 | `voxi.nrd2HistSharp` | 1 | 0-1 | Catmull-Rom share of the fetch; 0 = bilinear |
