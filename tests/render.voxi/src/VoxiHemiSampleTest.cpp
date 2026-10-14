@@ -277,7 +277,39 @@ int main() {
               "frame count only appends, it never renumbers a sample already drawn");
     }
 
-    // ---- 4. the mirror still describes the shader ----
+    // ---- 4. a pixel that traces every 2^p frames covers the hemisphere over ITS OWN turns ----
+    //
+    // Half-rate GI traces a pixel only on frames of one parity, the second bounce every 4th frame.
+    // Indexed by the frame, radInv2's argument keeps fixed low bits, so each pixel draws from a fixed
+    // band of cos(theta) forever: a static per-pixel bias (NRD2's still-camera spots). rtTurn fixes it.
+    {
+        constexpr u32 kTurns = 1024u;
+        for (u32 periodLog2 = 1u; periodLog2 <= 2u; ++periodLog2) {
+            const u32 period = 1u << periodLog2;
+            f32 worstTurn = 0.0f, bestFrame = 1.0f;
+            for (const auto& px : pixels) {
+                for (u32 phase = 0; phase < period; ++phase) {
+                    std::vector<f32> byTurn, byFrame;
+                    for (u32 t = 0; t < kTurns; ++t) {
+                        const u32 frame = t * period + phase;
+                        byTurn.push_back(cosThetaOf(rtHemiDiscSample(0u, 1u, frame >> periodLog2, px[0], px[1], 0.0f)));
+                        byFrame.push_back(cosThetaOf(rtHemiDiscSample(0u, 1u, frame, px[0], px[1], 0.0f)));
+                    }
+                    worstTurn = std::fmax(worstTurn, ksDistanceToCSquared(byTurn));
+                    bestFrame = std::fmin(bestFrame, ksDistanceToCSquared(byFrame));
+                }
+            }
+            const std::string per = "every " + std::to_string(period) + " frames";
+            check(bestFrame > 0.2f,
+                  "NEGATIVE CONTROL: a pixel tracing " + per + " indexed by the FRAME stays in a fixed band "
+                  "(best per-pixel KS " + std::to_string(bestFrame) + " > 0.2; a centred half band is 0.25)");
+            check(worstTurn < 0.03f,
+                  "a pixel tracing " + per + " indexed by its TURN is cosine-weighted on its own (worst "
+                  "per-pixel KS " + std::to_string(worstTurn) + " < 0.03)");
+        }
+    }
+
+    // ---- 5. the mirror still describes the shader ----
     //
     // EACH LINE SEPARATELY, not the whole body as one multi-line substring: this file's text is read
     // off disk verbatim (see hlslText() above), so a search spanning a line break would depend on
@@ -297,16 +329,17 @@ int main() {
               "...its a line matches this file's C++ mirror, verbatim");
         check(hlslHas("return float2(cos(a), sin(a)) * sqrt(u);"),
               "...and its return line matches this file's C++ mirror, verbatim");
+        check(hlslHas("uint rtTurn(uint frameIdx, uint periodLog2) { return frameIdx >> periodLog2; }"),
+              "rtTurn matches the frame >> periodLog2 checked in section 4");
         check(hlslHas(
-            "const float2 xi = (((uint)gAmbientParams.z & 1u) != 0u) ? rtDiscSample(0, rtHash(pixel) * 6.2831853 + frameJitter) : rtHemiDiscSample(0u, 1u, (uint)gRtHistParams.z, pixel, 0.0);"),
-            "the ReSTIR candidate's F1 call site (voxi_restir.hlsli) still switches on gAmbientParams.z bit 1");
+            "const float2 xi = (((uint)gAmbientParams.z & 1u) != 0u) ? rtDiscSample(0, rtHash(pixel) * 6.2831853 + frameJitter) : rtHemiDiscSample(0u, 1u, rtTurn((uint)gRtHistParams.z, giTurnLog2(false)), pixel, 0.0);"),
+            "the ReSTIR candidate's call site (voxi_restir.hlsli) indexes by the pixel's turn");
         check(hlslHas(
-            "const float2 d = (((uint)gAmbientParams.z & 1u) != 0u) ? rtDiscSample(k, ang0) : rtHemiDiscSample(k, n, (uint)gRtHistParams.z, aoTile, 0.37);"),
-            "the sky-occlusion ray's F1 call site (voxi_rt.hlsli) still switches on gAmbientParams.z bit 1");
-        check(hlslHas("rtHemiDiscSample(0u, 1u, (uint)gRtHistParams.z, pixel, 0.71)"),
-              "F2's second-bounce sample (voxi_restir.hlsli) still draws from the same sampler, "
-              "streamSalt 0.71 so it never collides with the candidate's own draw at the same "
-              "(pixel, frame)");
+            "const float2 d = (((uint)gAmbientParams.z & 1u) != 0u) ? rtDiscSample(k, ang0) : rtHemiDiscSample(k, n, aoTurn, aoTile, 0.37);"),
+            "the sky-occlusion ray's call site (voxi_rt.hlsli) indexes by the pixel's turn");
+        check(hlslHas("rtHemiDiscSample(0u, 1u, rtTurn((uint)gRtHistParams.z, giTurnLog2(true)), pixel, 0.71)"),
+              "F2's second-bounce sample (voxi_restir.hlsli) indexes by the pixel's turn, streamSalt "
+              "0.71 so it never collides with the candidate's own draw");
     }
 
     if (g_failures == 0) {

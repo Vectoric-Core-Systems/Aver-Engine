@@ -290,6 +290,14 @@ float giHitShadowMapVisibility(float3 wpos, float3 N, float3 L) {
     return s / 9.0;
 }
 
+// How often a pixel traces, as log2 frames (rtTurn): the half-rate checkerboard every 2nd frame; the
+// second bounce, under the half-visibility block rotation (giVisTracedPixel), every 4th.
+uint giTurnLog2(bool secondBounce) {
+    const uint visW = (uint)gAmbientParams.w;
+    if (secondBounce && (visW & 3u) == 2u && (visW & 4u) != 0u) return 2u;
+    return AVER_GI_CHECKERBOARD ? 1u : 0u;
+}
+
 // ---- the initial candidate: ONE cosine ray, traced and shaded ----
 // Traces off (wpos, N) along cosine-weighted hemisphere and shades the hit through RT machinery.
 // Returns false when no candidate was drawn (grazing-direction reject): caller starts from EMPTY reservoir.
@@ -306,8 +314,8 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // Cosine-weighted hemisphere sample (Malley's method); pdf cancels at the call site.
     // Per-pixel-rotated low-discrepancy sequence, jittered per frame (not frozen per pixel).
     // F1 (R0), gAmbientParams.z bit 1: legacy 45-degree ring vs. cosine hemisphere.
-    // rtHemiDiscSample drawn uniform over frames (corrected); streamSalt 0.0 keeps this stream apart.
-    const float2 xi = (((uint)gAmbientParams.z & 1u) != 0u) ? rtDiscSample(0, rtHash(pixel) * 6.2831853 + frameJitter) : rtHemiDiscSample(0u, 1u, (uint)gRtHistParams.z, pixel, 0.0);
+    // Indexed by the pixel's own turn (rtTurn); streamSalt 0.0 keeps this stream apart.
+    const float2 xi = (((uint)gAmbientParams.z & 1u) != 0u) ? rtDiscSample(0, rtHash(pixel) * 6.2831853 + frameJitter) : rtHemiDiscSample(0u, 1u, rtTurn((uint)gRtHistParams.z, giTurnLog2(false)), pixel, 0.0);
     const float  cosTheta = sqrt(saturate(1.0 - dot(xi, xi)));
     // Grazing floor: 0.05 bounds W at ~63 (500x worst-case). Rejects ~0.25% of directions.
     if (cosTheta <= AVER_GI_MIN_COS) return false;
@@ -434,7 +442,7 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
         indY = averSkyIrradiance(s.N) * gAmbient.r * clamp(rho2, 0.0, AVER_GI_VIS_RHO_MAX);
     } else {
         // Full traced: second cosine ray from the hit.
-        const float2 xi2 = rtHemiDiscSample(0u, 1u, (uint)gRtHistParams.z, pixel, 0.71);
+        const float2 xi2 = rtHemiDiscSample(0u, 1u, rtTurn((uint)gRtHistParams.z, giTurnLog2(true)), pixel, 0.71);
         const float  c2  = sqrt(saturate(1.0 - dot(xi2, xi2)));
         const float3 up2 = abs(s.N.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
         const float3 T2 = normalize(cross(up2, s.N)); const float3 B2 = cross(s.N, T2);

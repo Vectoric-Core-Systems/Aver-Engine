@@ -580,6 +580,11 @@ float2 rtHemiDiscSample(uint k, uint n, uint frameIdx, float2 pixelKey, float st
     return float2(cos(a), sin(a)) * sqrt(u);
 }
 
+// A pixel that traces every 2^periodLog2 frames must index its sequence by its own turn: with the frame
+// index its arguments share low bits, so radInv2 confines it to a fixed band of the hemisphere (a static
+// per-pixel bias no accumulation removes; same fix as the lamp pick in voxi.hlsl).
+uint rtTurn(uint frameIdx, uint periodLog2) { return frameIdx >> periodLog2; }
+
 // Decoder for gGiShadowParams.w bitfield (rtGiShadowBits usage in staging passes).
 #if AVER_RD_SINGLE_PASS
 uint rtGiShadowBits() { return 1u; }
@@ -970,7 +975,8 @@ struct AverAmbientTraced {
     float  hitDist;  // mean distance / TMax (external denoiser input)
 };
 
-AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays) {
+AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays, uint periodLog2) {
+    const uint aoTurn = rtTurn((uint)gRtHistParams.z, periodLog2);
     const uint n = clamp(rays, 1u, 32u);
     const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
     // Rotation shared across tile, not per-pixel (measured as the best lever for cache coherence).
@@ -988,7 +994,7 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
     const float aoTMax = max(gVoxelParams.z, 1.0);
     [loop] for (uint k = 0; k < n; ++k) {
         // F1 (R0): gAmbientParams.z bit 1 keeps legacy 45-degree ring; default uses cosine hemisphere.
-        const float2 d = (((uint)gAmbientParams.z & 1u) != 0u) ? rtDiscSample(k, ang0) : rtHemiDiscSample(k, n, (uint)gRtHistParams.z, aoTile, 0.37);
+        const float2 d = (((uint)gAmbientParams.z & 1u) != 0u) ? rtDiscSample(k, ang0) : rtHemiDiscSample(k, n, aoTurn, aoTile, 0.37);
         // Malley: lift disc onto hemisphere.
         const float3 dir = T * d.x + B * d.y + N * sqrt(saturate(1.0 - dot(d, d)));
 
@@ -1018,7 +1024,7 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
 
 // Sky occlusion fraction (wrapper, hit distance unused).
 float rtSkyOcclusion(float3 wpos, float3 N, float2 pixel, uint rays) {
-    return rtAmbientTraced(wpos, N, pixel, rays).open;
+    return rtAmbientTraced(wpos, N, pixel, rays, 0u).open;
 }
 
 // Reprojects wpos through last frame's camera to sample shadow history. False when unusable
@@ -1185,7 +1191,7 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
                              bool coneAoIsGather, bool denoisedAoUsable) {
     // AO history pair allocated only when sky occlusion ray wanted (VoxiRenderer::aoHistoryWanted).
     if (gRtDenoiseParams.w < 0.5) {
-        const AverAmbientTraced amb = rtAmbientTraced(wpos, N, pixel, rays);
+        const AverAmbientTraced amb = rtAmbientTraced(wpos, N, pixel, rays, 0u);
         return coneAoIsGather ? coneAo : amb.open;
     }
 
@@ -1209,7 +1215,9 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
         fresh = histV;
         tracedNow = false;
     } else {
-        const AverAmbientTraced amb = rtAmbientTraced(wpos, N, pixel, rays);
+        // Either half-rate skip (8x8 tiles here, CSRdAo's pixel checkerboard) traces every other frame.
+        const bool halfRate = (rtGiShadowBits() & 128u) != 0u || ((rtGiShadowBits() & 2u) != 0u && haveHist);
+        const AverAmbientTraced amb = rtAmbientTraced(wpos, N, pixel, rays, halfRate ? 1u : 0u);
         fresh = amb.open;
         hitDist = amb.hitDist;
         tracedNow = true;
