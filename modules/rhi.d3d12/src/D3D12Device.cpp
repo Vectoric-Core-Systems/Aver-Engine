@@ -2031,6 +2031,16 @@ private:
     // Fills a freshly created texture from TextureDesc::initialData.
     bool uploadInitialData(ID3D12Resource* res, const D3D12_RESOURCE_DESC& td, const TextureDesc& d,
                            u32 mips);
+    // Texture initial-data staging: one persistently mapped upload buffer used as a ring, a span reused once the
+    // fence it went out under has passed (a committed buffer per texture was ~1.5 ms of each upload). False when
+    // the span does not fit now; the caller then makes its own buffer and waits for the copy, so a burst (a level
+    // opening, hundreds of textures before a present) holds no more than the ring.
+    bool texStagingAlloc(u64 bytes, u64& offset);
+    struct TexStagingSpan { u64 begin, end, fence; };
+    ComPtr<ID3D12Resource> texStaging_;
+    u8* texStagingMapped_ = nullptr;
+    std::deque<TexStagingSpan> texStagingSpans_;
+    static constexpr u64 kTexStagingBytes = 256ull << 20;
 
     // Fills freshly created DEFAULT-heap buffers via one UPLOAD staging buffer.
     bool uploadBuffers(std::initializer_list<BufferUploadItem> items);
@@ -6945,6 +6955,7 @@ void D3D12ResourceFactory::resolvePendingRetires(u64 fence) {
     for (RetiredRange& r : stagePendingRanges_) if (r.fence == kPendingFrameFence) r.fence = fence;
     for (AsPoolFree& r : asPoolPending_)        if (r.fence == kPendingFrameFence) r.fence = fence;
     for (CompactPending& p : compactPending_)   if (p.fence == kPendingFrameFence) p.fence = fence;
+    for (TexStagingSpan& t : texStagingSpans_)  if (t.fence == kPendingFrameFence) t.fence = fence;
 }
 
 // Queues an object for release once the GPU has passed the current frame.
@@ -7119,7 +7130,7 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
 }
 
 // ---- creation
-// Fills a new texture from TextureDesc::initialData on a one-shot command list, and blocks until the copy retires.
+// Fills a new texture from TextureDesc::initialData on a one-shot command list, queued ahead of any later frame.
 bool D3D12ResourceFactory::uploadInitialData(ID3D12Resource* res, const D3D12_RESOURCE_DESC& td,
                                              const TextureDesc& d, u32 mips) {
     ID3D12Device* dev = dev_->device_.Get();
@@ -7135,17 +7146,23 @@ bool D3D12ResourceFactory::uploadInitialData(ID3D12Resource* res, const D3D12_RE
     UINT64 total = 0;
     dev->GetCopyableFootprints(&td, 0, count, 0, fp.data(), rows.data(), rowBytes.data(), &total);
 
-    auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
-    auto ud = bufferDesc(total);
+    // The ring first; a texture it cannot hold now gets its own buffer, freed after waiting below.
+    u64 base = 0;
     ComPtr<ID3D12Resource> staging;
-    if (!hrOk(dev->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &ud,
-              D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging)),
-              "rhi texture staging")) return false;
-    setDebugName(staging.Get(), "rhi texture staging");
-
     u8* mapped = nullptr;
-    D3D12_RANGE none{0, 0};
-    if (!hrOk(staging->Map(0, &none, reinterpret_cast<void**>(&mapped)), "rhi staging Map")) return false;
+    if (texStagingAlloc(total, base)) {
+        staging = texStaging_;
+        mapped = texStagingMapped_ + base;
+    } else {
+        auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+        auto ud = bufferDesc(total);
+        if (!hrOk(dev->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &ud,
+                  D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging)),
+                  "rhi texture staging")) return false;
+        setDebugName(staging.Get(), "rhi texture staging");
+        D3D12_RANGE none{0, 0};
+        if (!hrOk(staging->Map(0, &none, reinterpret_cast<void**>(&mapped)), "rhi staging Map")) return false;
+    }
 
     for (u32 s = 0; s < count; ++s) {
         const auto* src = static_cast<const u8*>(d.initialData[s]);
@@ -7162,7 +7179,7 @@ bool D3D12ResourceFactory::uploadInitialData(ID3D12Resource* res, const D3D12_RE
             }
         }
     }
-    staging->Unmap(0, nullptr);
+    if (staging != texStaging_) staging->Unmap(0, nullptr);
 
     ComPtr<ID3D12CommandAllocator> alloc;
     ComPtr<ID3D12GraphicsCommandList> list;
@@ -7177,6 +7194,7 @@ bool D3D12ResourceFactory::uploadInitialData(ID3D12Resource* res, const D3D12_RE
         src.pResource = staging.Get();
         src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         src.PlacedFootprint = fp[s];
+        src.PlacedFootprint.Offset += base;
         D3D12_TEXTURE_COPY_LOCATION dst{};
         dst.pResource = res;
         dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -7193,15 +7211,58 @@ bool D3D12ResourceFactory::uploadInitialData(ID3D12Resource* res, const D3D12_RE
     ID3D12CommandList* lists[] = {list.Get()};
     dev_->queue_->ExecuteCommandLists(1, lists);
 
-    ComPtr<ID3D12Fence> f;
-    if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi upload fence")) return false;
-    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    dev_->queue_->Signal(f.Get(), 1);
-    if (f->GetCompletedValue() < 1 && ev) { f->SetEventOnCompletion(1, ev); WaitForSingleObject(ev, INFINITE); }
-    if (ev) CloseHandle(ev);
-
-    retire(staging);
+    // From the ring, no wait: the copy runs on the one queue ahead of any frame that samples the texture
+    // (waiting drained the queue once per texture; a streamed cell's few hundred were seconds of stall).
+    if (staging != texStaging_) {
+        ComPtr<ID3D12Fence> f;
+        if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi upload fence")) return false;
+        HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        dev_->queue_->Signal(f.Get(), 1);
+        if (f->GetCompletedValue() < 1 && ev) { f->SetEventOnCompletion(1, ev); WaitForSingleObject(ev, INFINITE); }
+        if (ev) CloseHandle(ev);
+        retire(staging);
+    }
+    retire(list);
+    retire(alloc);
     collect();
+    return true;
+}
+
+bool D3D12ResourceFactory::texStagingAlloc(u64 bytes, u64& offset) {
+    if (bytes > kTexStagingBytes / 2) return false;
+    if (!texStaging_) {
+        auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+        auto ud = bufferDesc(kTexStagingBytes);
+        if (!hrOk(dev_->device_->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &ud,
+                  D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&texStaging_)),
+                  "rhi texture staging ring")) return false;
+        setDebugName(texStaging_.Get(), "rhi texture staging ring");
+        D3D12_RANGE none{0, 0};
+        if (!hrOk(texStaging_->Map(0, &none, reinterpret_cast<void**>(&texStagingMapped_)), "rhi staging ring Map")) {
+            texStaging_.Reset();
+            return false;
+        }
+    }
+    const u64 done = dev_->fence_ ? dev_->fence_->GetCompletedValue() : 0;
+    while (!texStagingSpans_.empty() && texStagingSpans_.front().fence <= done) texStagingSpans_.pop_front();
+    // Free space: past the newest span to the end and before the oldest, or (wrapped) between the two.
+    constexpr u64 kAlign = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+    u64 start = 0;
+    if (!texStagingSpans_.empty()) {
+        const TexStagingSpan& oldest = texStagingSpans_.front();
+        const TexStagingSpan& newest = texStagingSpans_.back();
+        start = (newest.end + kAlign - 1) & ~(kAlign - 1);
+        if (newest.begin >= oldest.begin) {
+            if (start + bytes > kTexStagingBytes) {
+                if (bytes > oldest.begin) return false;
+                start = 0;
+            }
+        } else if (start + bytes > oldest.begin) {
+            return false;
+        }
+    }
+    texStagingSpans_.push_back({start, start + bytes, retireFence()});
+    offset = start;
     return true;
 }
 

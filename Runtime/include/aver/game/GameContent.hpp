@@ -11,6 +11,7 @@
 #  include "aver/pbr/MaterialSystem.hpp"
 #endif
 
+#include <deque>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -53,6 +54,14 @@ public:
 #if AVER_MODULE_PBR
     // The factory textures are uploaded through. Set once the device exists.
     void setTextureFactory(rhi::IResourceFactory* f) { textureFactory_ = f; }
+    // The renderer's material system, so a queued binding builds its material's GPU side (binding set, textures).
+    void setMaterialSystem(pbr::MaterialSystem* ms) { materialSystem_ = ms; }
+    // Streaming: binding surface material `name` to scene token `token`, deferred. buildNextMaterial() does one --
+    // loads the material, builds it, binds it -- so a streamer spreads a mesh's materials over its budget (a
+    // material only made, not built, would be built with every other new one at the renderer's next update).
+    // False when none wait.
+    void queueSurfaceMaterial(i32 token, const std::string& name) { materialBinds_.push_back({token, name}); }
+    bool buildNextMaterial();
 
     // Uploads the texture a material reference names. 0 keeps the slot's fallback.
     // `user` is a GameContent*.
@@ -310,6 +319,9 @@ private:
 
 #if AVER_MODULE_PBR
     rhi::IResourceFactory* textureFactory_ = nullptr;
+    pbr::MaterialSystem* materialSystem_ = nullptr;
+    struct MaterialBind { i32 token; std::string name; };
+    std::deque<MaterialBind> materialBinds_;
     std::unordered_map<std::string, pbr::MaterialHandle> materialAssets_;
 
     // Turns an .ocmat's GRAPHREF path into the id materialForSurface() stores.

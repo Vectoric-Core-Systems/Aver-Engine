@@ -15,6 +15,7 @@
 #  include "aver/physics/physics_abi.h"
 #endif
 
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <map>
@@ -55,6 +56,9 @@ struct Fixture {
     std::vector<std::tuple<scene::Entity, bool, u32>> residency;
     bool meshReady = true;
     int prefetches = 0;
+    // port.buildMaterial: each acquire queues materialsPerMesh builds of materialMs each (a staged realise's work).
+    int materialsPerMesh = 0, materialsWaiting = 0, materialsBuilt = 0;
+    f64 materialMs = 0.0;
     std::string contentDir, projectDir;
 
     Fixture() {
@@ -71,7 +75,15 @@ struct Fixture {
 
     game::ContentPort port() {
         game::ContentPort p;
-        p.acquire = [this](u64 m) { ++acquired[m]; return true; };
+        p.acquire = [this](u64 m) { ++acquired[m]; materialsWaiting += materialsPerMesh; return true; };
+        p.buildMaterial = [this] {
+            if (materialsWaiting == 0) return false;
+            --materialsWaiting;
+            ++materialsBuilt;
+            const auto t0 = std::chrono::steady_clock::now();
+            while (std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - t0).count() < materialMs) {}
+            return true;
+        };
         p.release = [this](u64 m) { ++released[m]; };
         p.prefetch = [this](u64) { ++prefetches; };
         p.ready = [this](u64) { return meshReady; };

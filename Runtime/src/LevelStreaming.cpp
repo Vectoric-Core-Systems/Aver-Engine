@@ -163,19 +163,18 @@ void LevelStreaming::bindMeshMaterials(u64 meshId) {
 #if AVER_MODULE_PBR
     if (!materialsBound_.emplace(meshId, true).second) return;
     // A mesh's own slot materials, as GameLevel::load binds them for an eager level.
+    // Queued and drained by loadItems, so each is built as it is made.
     const i32 slot0Token = content_->meshDefaultMaterial(meshId);
     if (slot0Token) {
         const std::string& name = content_->meshSlot0Name(meshId);
-        if (!name.empty())
-            if (const pbr::MaterialHandle h = content_->materialForSurface(name)) content_->bindSurfaceMaterial(slot0Token, h);
+        if (!name.empty()) content_->queueSurfaceMaterial(slot0Token, name);
     }
     if (const std::vector<GameContent::MeshPart>* parts = content_->partsFor(meshId)) {
         for (const GameContent::MeshPart& part : *parts) {
             if (!part.material) continue;
             const char* partName = aver_scene_material_name(part.material);
             if (!partName || !*partName) continue;
-            if (const pbr::MaterialHandle h = content_->materialForSurface(partName))
-                content_->bindSurfaceMaterial(part.material, h);
+            content_->queueSurfaceMaterial(part.material, partName);
         }
     }
 #else
@@ -219,6 +218,9 @@ void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& item
     }
     hm.mark("meshes");
     for (const u64 mesh : toBind) bindMeshMaterials(mesh);
+#if AVER_MODULE_PBR
+    while (content_->buildNextMaterial()) {}   // inside this tick's budget, before the entities that show them
+#endif
     hm.mark("materials");
     opt_.meshShapes = &meshShapes_;
     const world::LevelInstance inst = world::instantiate(sub, opt_);

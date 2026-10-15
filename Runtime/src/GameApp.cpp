@@ -745,6 +745,7 @@ void GameApp::attachVoxi(Engine& e) {
 #if AVER_MODULE_PBR
         // Keep adjacent: factory and resolver installed together
         content_.setTextureFactory(dev->resources());
+        content_.setMaterialSystem(&voxiRenderer_.materials());
         voxiRenderer_.materials().setTextureResolver(&GameContent::resolveMaterialTexture, &content_);
         voxiRenderer_.materials().setTerrainResolver(&GameContent::resolveTerrainAtlas, &content_);   // wave3 terrain layers
 #endif
@@ -2370,6 +2371,7 @@ void GameApp::onShutdown(Engine& e) {
     // After Voxi teardown: material system lives inside VoxiRenderer. Dropping materials while registered would leave freed textures.
     content_.releaseProjectMaterials();
     content_.setTextureFactory(nullptr);
+    content_.setMaterialSystem(nullptr);
 #endif
 #if AVER_MODULE_SCENE
     skinnedScene_.reset();

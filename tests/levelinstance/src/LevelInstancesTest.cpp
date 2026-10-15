@@ -260,6 +260,63 @@ static void testStreaming() {
     check(f.li.extentBounds(lo, hi) && lo.x <= -100.0f && hi.x >= 1000100.0f, "extentBounds covers the instances with known bounds");
 }
 
+// A unit too big for one tick's budget realises over several, in whole subtrees; a viewer leaving cancels it and a pin
+// finishes it at once.
+static void testStagedRealise() {
+    AVER_INFO("staged realise");
+    std::string big = "OCWORLD 1\nEXTENT -100 -100 0 7000 100 100\n";
+    for (int i = 0; i < 60; ++i) {
+        big += "PLACE Meshes/m" + std::to_string(i) + ".ocmesh " + std::to_string(i * 100) + " 0 0 0 0 0 1 id=" +
+               std::to_string(1000 + i) + "\n";
+        if (i == 9) big += "BEGIN\nCHILD Meshes/kid.ocmesh 0 50 0 0 0 0 1 id=c\nEND\n";
+    }
+    Fixture f;
+    f.levels["Big"] = parse(big);
+    f.materialsPerMesh = 1;
+    f.materialMs = 2.0;
+    world::PlacementStreamSettings ss;
+    ss.cellCm = 6400; ss.loadCm = 25000; ss.evictCm = 30000;
+    f.begin(parse("OCWORLD 1\nLEVELINST Big pos 0 0 0 stream 1 id=1\nENDLEVELINST\n"), &ss);
+    const scene::Entity root = f.li.at(0);
+    scene::World& w = scene::World::instance();
+
+    // Ticks at the viewer until the unit is part-realised (entities wait for their slice's materials).
+    const auto tickUntilPartial = [&] {
+        for (int i = 0; i < 400 && descendants(root).empty() && !f.li.loaded(root); ++i) f.li.tick({Vec3{0, 0, 0}});
+        return !f.li.loaded(root) && !descendants(root).empty();
+    };
+    f.li.tick({Vec3{0, 0, 0}});
+    check(!f.li.loaded(root) && f.materialsBuilt > 0 && f.materialsBuilt < 61,
+          "the first tick builds some of the unit's materials (" + std::to_string(f.materialsBuilt) + " of 61), not all");
+    check(tickUntilPartial(), "entities appear before the unit is complete");
+    int ticks = 1;
+    while (!f.li.loaded(root) && ticks < 400) { f.li.tick({Vec3{0, 0, 0}}); ++ticks; }
+    check(f.li.loaded(root) && ticks > 2, "it finishes over " + std::to_string(ticks) + " more ticks");
+    check(descendants(root).size() == 61 && f.acquireTotal() == 61 && f.materialsBuilt == 61,
+          "every placement, mesh and material is there once");
+    const scene::Entity kid = f.li.find(root, "c");
+    const scene::Entity parent = f.li.find(root, "1009");
+    check(kid != scene::kInvalidEntity && parent != scene::kInvalidEntity && w.parent(kid) == parent,
+          "a child in a later slice hangs under its parent");
+
+    // Cancelled when the viewer leaves mid-load: what it made goes, its meshes are released.
+    f.li.tick({Vec3{1000000, 0, 0}});
+    flush();
+    check(!f.li.loaded(root) && descendants(root).empty(), "evicted past the evict distance");
+    check(tickUntilPartial(), "a second load is part-way");
+    f.li.tick({Vec3{1000000, 0, 0}});
+    flush();
+    check(!f.li.loaded(root) && descendants(root).empty() && f.releaseTotal() == f.acquireTotal(),
+          "the viewer leaving cancels it and releases its meshes");
+
+    // A pin mid-load finishes it in that tick.
+    check(tickUntilPartial(), "a third load is part-way");
+    f.li.pin(root, true);
+    f.li.tick({Vec3{0, 0, 0}});
+    check(f.li.loaded(root) && descendants(root).size() == 61, "pinned mid-load, it finishes at once");
+    f.li.pin(root, false);
+}
+
 static void testReloadAssetAndEdit() {
     AVER_INFO("reloadAsset, edit, commit, discard");
     const std::filesystem::path dir = std::filesystem::temp_directory_path() / "aver_levelinst_edit_test";
@@ -430,6 +487,7 @@ int main() {
     testOverrides();
     testRevertAndRecords();
     testStreaming();
+    testStagedRealise();
     testReloadAssetAndEdit();
     testBreak();
     testClassesLightsDecals();

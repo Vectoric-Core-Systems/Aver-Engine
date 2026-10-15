@@ -75,6 +75,17 @@ Meshes under a level's `lazy=` folders are indexed at project open but not uploa
   requested or checked in the last two ticks (`prefetchTick`); the stream tick requests everything
   before it checks readiness, so a check never sees its read trimmed.
 
+Textures and materials (2026-10-15; NeonDistrict's cells each brought ~300 textures, 0.4-3 s of main-thread
+work in one frame):
+- The prefetch workers also read the textures a mesh's slot materials name (`assets::prefetchTexture`: the BC7
+  chain from the derived-data cache, or on a first visit decoded, compressed and cached) and hold them, up to
+  2 GiB, for the upload, which then only copies.
+- Texture uploads no longer wait for the GPU queue (D3D12: a 256 MB staging ring; past it, and on Vulkan past
+  256 MB in flight, the old waited path).
+- A streamed mesh's slot materials are bound through `GameContent::queueSurfaceMaterial`; `buildNextMaterial`
+  loads, builds and binds one at a time inside the streamer's budget, so the renderer's update never builds a
+  burst of new materials at once.
+
 ## 4. Foliage
 
 `game::loadLevelFoliage` keeps the parsed tables on the CPU. With cells, only cells whose AABB is within

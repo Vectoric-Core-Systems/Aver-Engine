@@ -39,9 +39,9 @@ Placements (with their static bodies, object animation and kinematic bodies), cl
 
 ## Streaming
 
-The unit is the instance. Instances stream when `stream 1`, or when they have no explicit setting and the host level has `STREAM` enabled with a device; `stream 0` is always resident. Residency uses `world::PlacementStreamer` over the instances' world boxes: an instance with unknown bounds is never given to it, and stays loaded. A unit loads once every mesh it needs has been read (requested ahead within 1.3x the load distance), one unit within 12 ms near / 3 ms far per tick; evictions 2 ms. An instance that is selected, being edited, has a dirty override or was loaded by hand is pinned. Before a unit is evicted its overrides are stored on the record, so it reloads with them. Nested instances load and unload with their top-level unit.
+The unit is the instance. Instances stream when `stream 1`, or when they have no explicit setting and the host level has `STREAM` enabled with a device; `stream 0` is always resident. Residency uses `world::PlacementStreamer` over the instances' world boxes: an instance with unknown bounds is never given to it, and stays loaded. A unit loads once every mesh it needs has been read (requested ahead within 1.3x the load distance, with its materials' textures), within 12 ms near / 3 ms far per tick, over as many ticks as it needs: meshes one at a time, each mesh's materials built one at a time (`ContentPort::buildMaterial`), then entities a slice of whole subtrees at a time once their materials exist. A unit the viewer leaves past the unload distance mid-load is dropped, a pinned one finishes at once, and any change to its record (overrides, packed, edit) restarts it. Evictions 2 ms. An instance that is selected, being edited, has a dirty override or was loaded by hand is pinned. Before a unit is evicted its overrides are stored on the record, so it reloads with them. Nested instances load and unload with their top-level unit.
 
-A unit realises atomically, so a hitch is bounded by its size: keep a streamed child to a few thousand placements (the Details panel warns above 5000).
+A unit realises over ticks, so its size bounds how long it takes to appear, not a hitch; still keep a streamed child to a few thousand placements (the Details panel warns above 5000).
 
 ## Packed mode
 

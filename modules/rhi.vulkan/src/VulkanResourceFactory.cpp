@@ -316,6 +316,41 @@ bool runOneShotCommands(VulkanDevice& dev, const std::function<void(VkCommandBuf
     return ok;
 }
 
+// runOneShotCommands without the wait: the queue runs it ahead of any later frame. Returns the pool
+// (which frees the command buffer) for the caller to retire, or VK_NULL_HANDLE when nothing was submitted.
+VkCommandPool submitOneShotCommands(VulkanDevice& dev, const std::function<void(VkCommandBuffer)>& fn, const char* what) {
+    const VulkanApi& api = dev.api();
+    VkDevice device = dev.vkDevice();
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo pi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pi.queueFamilyIndex = dev.graphicsQueueFamily();
+    if (!vkOk(api.CreateCommandPool(device, &pi, nullptr, &pool), what)) return VK_NULL_HANDLE;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ai.commandPool = pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    bool ok = vkOk(api.AllocateCommandBuffers(device, &ai, &cmd), what);
+    if (ok) {
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        ok = vkOk(api.BeginCommandBuffer(cmd, &bi), what);
+    }
+    if (ok) {
+        fn(cmd);
+        ok = vkOk(api.EndCommandBuffer(cmd), what);
+    }
+    if (ok) {
+        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd;
+        ok = vkOk(api.QueueSubmit(dev.graphicsQueue(), 1, &si, VK_NULL_HANDLE), what);
+    }
+    if (!ok) { api.DestroyCommandPool(device, pool, nullptr); return VK_NULL_HANDLE; }
+    return pool;
+}
+
 // One-shot image layout transition, UNDEFINED -> `to`, every mip and the whole aspect. Used for a
 // freshly created, unseeded texture whose TextureDesc::initialState is not Common -- see this
 // namespace's runOneShotCommands comment for why Vulkan needs this where D3D12 needs nothing.
@@ -1871,7 +1906,11 @@ bool VulkanResourceFactory::uploadInitialData(VkImage image, const VkImageCreate
     dev_->api().UnmapMemory(dev_->vkDevice(), stagingMemory);
 
     const VkImageBarrierInfo finalInfo = toVkImageBarrierInfo(d.initialState);
-    const bool ok = runOneShotCommands(*dev_, [&](VkCommandBuffer cmd) {
+    // No wait (a streamed cell's few hundred textures drained the queue once each): the staging buffer and
+    // pool go once the next timeline value passes. Past kAsyncUploadBytes in flight (a burst before any
+    // present), the waited path, so staging cannot pile up.
+    const bool async = asyncUploadBytes_ + total <= kAsyncUploadBytes;
+    const auto record = [&](VkCommandBuffer cmd) {
         VkImageMemoryBarrier2 toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
         toDst.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
         toDst.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
@@ -1898,8 +1937,9 @@ bool VulkanResourceFactory::uploadInitialData(VkImage image, const VkImageCreate
         VkImageMemoryBarrier2 toFinal{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
         toFinal.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
         toFinal.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        toFinal.dstStageMask = finalInfo.stage;
-        toFinal.dstAccessMask = finalInfo.access;
+        // Not waited on, so every later stage that may sample it (compute, ray tracing) is ordered after the copy.
+        toFinal.dstStageMask = async ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT : finalInfo.stage;
+        toFinal.dstAccessMask = async ? (finalInfo.access | VK_ACCESS_2_SHADER_READ_BIT) : finalInfo.access;
         toFinal.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         toFinal.newLayout = (finalInfo.layout == VK_IMAGE_LAYOUT_UNDEFINED) ? VK_IMAGE_LAYOUT_GENERAL : finalInfo.layout;
         toFinal.srcQueueFamilyIndex = toFinal.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1909,10 +1949,26 @@ bool VulkanResourceFactory::uploadInitialData(VkImage image, const VkImageCreate
         dep1.imageMemoryBarrierCount = 1;
         dep1.pImageMemoryBarriers = &toFinal;
         dev_->api().CmdPipelineBarrier2(cmd, &dep1);
-    }, "rhi texture upload");
-
-    destroyBufferCommitted(*dev_, staging, stagingMemory);
-    return ok;
+    };
+    if (!async) {
+        const bool ok = runOneShotCommands(*dev_, record, "rhi texture upload");
+        destroyBufferCommitted(*dev_, staging, stagingMemory);
+        return ok;
+    }
+    const VkCommandPool pool = submitOneShotCommands(*dev_, record, "rhi texture upload");
+    if (pool == VK_NULL_HANDLE) {
+        destroyBufferCommitted(*dev_, staging, stagingMemory);
+        return false;
+    }
+    asyncUploadBytes_ += total;
+    VulkanDevice* dev = dev_;
+    u64* inFlight = &asyncUploadBytes_;
+    retire([dev, pool, staging, stagingMemory, inFlight, total]() mutable {
+        dev->api().DestroyCommandPool(dev->vkDevice(), pool, nullptr);
+        destroyBufferCommitted(*dev, staging, stagingMemory);
+        *inFlight -= total;
+    });
+    return true;
 }
 
 TextureHandle VulkanResourceFactory::createTexture(const TextureDesc& d) {

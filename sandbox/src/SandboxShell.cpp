@@ -4,6 +4,7 @@
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "SandboxApp.hpp"
 #include "aver/core/CpuTiming.hpp"
+#include "aver/core/HitchMarks.hpp"
 
 namespace aver {
 // Restarts profiler stats when Play starts/stops (called from startPlay/stopPlay in SandboxPlay.cpp).
@@ -2633,6 +2634,9 @@ void SandboxApp::buildUI(Engine& e) {
         if (vramPollS_ <= 0.0f) {
             vramPollS_ = 0.5f;
             vram_ = e.device()->videoMemory();
+            static u32 vramLogTick = 0;
+            if (hitchVerbose() && vram_.supported && (vramLogTick++ % 4) == 0)
+                AVER_INFO("[VRAM] {} of {} MB", vram_.localUsageBytes >> 20, vram_.localBudgetBytes >> 20);
         }
         if (vram_.supported && vram_.localBudgetBytes > 0) {
             const f64 usedGb = static_cast<f64>(vram_.localUsageBytes) / (1024.0 * 1024.0 * 1024.0);

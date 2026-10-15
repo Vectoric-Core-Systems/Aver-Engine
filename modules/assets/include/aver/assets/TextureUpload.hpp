@@ -42,6 +42,16 @@ struct TextureUploadInfo {
     f32   averageLinear[3] = {1.0f, 1.0f, 1.0f};
 };
 
+// Streaming: reads the texture's BC7 chain from the derived-data cache (on a first visit decodes,
+// compresses and caches it) on the calling worker thread, and holds it for the next uploadTexture of
+// the same file and usage, which then only copies it to the GPU. Thread-safe; a second request for a
+// texture being read waits for that read. False when there is nothing to hold: compression off, an
+// extent BC7 does not take, a file that does not decode. Holds at most 2 GiB, oldest dropped first.
+bool prefetchTexture(const std::string& path, TextureUsage usage);
+// Drops every held texture and forgets which were uploaded: a project or level change, after which textures
+// released by the material system may be needed again.
+void dropPrefetchedTextures();
+
 // Decodes `path` and uploads it. Returns 0 on failure, with the reason in `err`.
 rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& path,
                                  TextureUsage usage, std::string* err = nullptr,

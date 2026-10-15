@@ -1166,6 +1166,7 @@ void SandboxApp::onInit(Engine& e)  {
 #endif
 #if AVER_MODULE_PBR
             content_.setTextureFactory(e.device()->resources());
+            content_.setMaterialSystem(&voxiRenderer_.materials());
             voxiRenderer_.materials().setTextureResolver(&game::GameContent::resolveMaterialTexture, &content_);
             voxiRenderer_.materials().setTerrainResolver(&game::GameContent::resolveTerrainAtlas, &content_);   // wave3 terrain layers
             // Same resolver for asset tabs' preview (consistent look across tabs and level).
@@ -2725,6 +2726,7 @@ editor::shutdownAnimEditors();
 #if AVER_MODULE_PBR
     releaseProjectMaterials();
     content_.setTextureFactory(nullptr);
+    content_.setMaterialSystem(nullptr);
 #endif
 #if AVER_MODULE_SR
     // Detach from device first, then destroy: raw pointers must be cleared before unique_ptrs reset.

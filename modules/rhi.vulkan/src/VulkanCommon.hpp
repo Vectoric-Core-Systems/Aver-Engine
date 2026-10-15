@@ -2159,6 +2159,9 @@ private:
     // TRANSFER_DST_OPTIMAL; on success it has been transitioned to `d.initialState` and the GPU has
     // finished (a fence wait, not just a barrier -- the staging buffer is freed right after).
     bool uploadInitialData(VkImage image, const VkImageCreateInfo& ci, const TextureDesc& d, u32 mips);
+    // Staging bytes of unwaited texture uploads not yet retired (uploadInitialData).
+    u64 asyncUploadBytes_ = 0;
+    static constexpr u64 kAsyncUploadBytes = 256ull << 20;
     // Shared by createBlas/createBlasUpdatable and createTlas/createTlasUpdatable: identical except
     // for `allowUpdate`, which decides the build flags the prebuild size query is run against and
     // whether scratch is sized for an update as well as a build. Mirrors D3D12ResourceFactory's

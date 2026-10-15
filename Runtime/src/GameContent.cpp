@@ -56,6 +56,23 @@
 
 namespace aver::game {
 
+#if AVER_MODULE_PBR
+namespace {
+// Slot decides colour space: normal maps sRGB-decoded give subtle shading bugs. Layer1 slots too:
+// Layer1BaseColor is sRGB, Layer1Normal is NormalMap.
+assets::TextureUsage textureUsageFor(pbr::TextureSlot slot) {
+    switch (slot) {
+        case pbr::TextureSlot::BaseColor:
+        case pbr::TextureSlot::Layer1BaseColor:
+        case pbr::TextureSlot::Emissive:      return assets::TextureUsage::Colour;
+        case pbr::TextureSlot::Normal:
+        case pbr::TextureSlot::Layer1Normal:  return assets::TextureUsage::NormalMap;
+        default:                              return assets::TextureUsage::Data;
+    }
+}
+} // namespace
+#endif
+
 void GameContent::adopt(const fmt::ProjectDesc& project) {
     project_ = project;
     contentIndex_.clear();
@@ -1140,6 +1157,37 @@ bool slotCollidesFromFiles(const std::string& binariesDir, const std::string& co
     }
     return true;
 }
+
+// The texture files a surface material names, as resolveMaterialTexture would load them: paths under
+// the content dir (content-index ids and terrain layers are left to the main thread).
+std::vector<std::pair<std::string, assets::TextureUsage>> slotTexturesFromFiles(
+        const std::string& binariesDir, const std::string& contentDir, const std::string& name) {
+    std::vector<std::pair<std::string, assets::TextureUsage>> out;
+    if (name.empty() || contentDir.empty()) return out;
+    const std::string candidates[3] = {
+        binariesDir + AVER_PATH_SEP "Materials" AVER_PATH_SEP + name + ".ocmat",
+        contentDir + AVER_PATH_SEP "Materials" AVER_PATH_SEP + name + ".ocmat",
+        contentDir + AVER_PATH_SEP + name,
+    };
+    for (const std::string& path : candidates) {
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) continue;
+        pbr::MaterialDesc d;
+        fmt::OcMatExtras extras;
+        std::string err;
+        if (!fmt::loadOcmat(path, d, &extras, &err) || d.terrain.enabled()) return out;
+        for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {
+            const std::string& p = d.textures[i].path;
+            if (p.empty() || p.rfind("@rt:", 0) == 0) continue;
+            const bool absolute = p.size() > 1 && (p[1] == ':' || p[0] == '\\' || p[0] == '/');
+            std::string full = absolute ? p : contentDir + AVER_PATH_SEP + p;
+            if (!absolute && !std::filesystem::exists(full, ec)) continue;
+            out.emplace_back(std::move(full), textureUsageFor(static_cast<pbr::TextureSlot>(i)));
+        }
+        return out;
+    }
+    return out;
+}
 #  endif
 
 } // namespace
@@ -1176,6 +1224,20 @@ struct GameContent::MeshPrefetch {
     u64 tick = 0;
     std::mutex slotMutex;
     std::unordered_map<std::string, bool> slotCollidesMemo;   // material slot -> collides (workers)
+#  if AVER_MODULE_PBR
+    std::unordered_map<std::string, std::vector<std::pair<std::string, assets::TextureUsage>>> slotTexturesMemo;
+
+    std::vector<std::pair<std::string, assets::TextureUsage>> slotTextures(const Job& j, const std::string& slot) {
+        {
+            std::lock_guard<std::mutex> l(slotMutex);
+            if (const auto it = slotTexturesMemo.find(slot); it != slotTexturesMemo.end()) return it->second;
+        }
+        auto t = slotTexturesFromFiles(j.binariesDir, j.contentDir, slot);
+        if (t.empty()) return t;   // not remembered: the material may not be written yet
+        std::lock_guard<std::mutex> l(slotMutex);
+        return slotTexturesMemo.emplace(slot, std::move(t)).first->second;
+    }
+#  endif
 
     bool slotCollides(const Job& j, const std::string& slot) {
 #  if AVER_MODULE_PBR
@@ -1261,6 +1323,12 @@ struct GameContent::MeshPrefetch {
                 j->shape = aver_phys_create_mesh_shape(
                     j->collision->positions.data(), static_cast<i32>(j->collision->positions.size() / 3),
                     reinterpret_cast<const i32*>(j->collision->indices.data()), static_cast<i32>(j->collision->indices.size()));
+#  endif
+#  if AVER_MODULE_PBR
+            // Its materials' textures, so binding them on the main thread is a GPU copy, not a disk read.
+            if (j->meshOk)
+                for (const std::string& slot : j->md.materialSlots)
+                    for (const auto& [path, usage] : slotTextures(*j, slot)) assets::prefetchTexture(path, usage);
 #  endif
             j->done.store(true, std::memory_order_release);
         }
@@ -1498,17 +1566,7 @@ pbr::MaterialSystem::ResolvedTexture GameContent::resolveMaterialTexture(const p
         return {};
     }
 
-    // Slot decides colour space: normal maps sRGB-decoded give subtle shading bugs.
-    assets::TextureUsage usage = assets::TextureUsage::Data;
-    // Layer1 slots must be here too: Layer1BaseColor is sRGB, Layer1Normal is NormalMap.
-    switch (slot) {
-        case pbr::TextureSlot::BaseColor:
-        case pbr::TextureSlot::Layer1BaseColor:
-        case pbr::TextureSlot::Emissive:      usage = assets::TextureUsage::Colour;    break;
-        case pbr::TextureSlot::Normal:
-        case pbr::TextureSlot::Layer1Normal:  usage = assets::TextureUsage::NormalMap; break;
-        default:                              usage = assets::TextureUsage::Data;      break;
-    }
+    const assets::TextureUsage usage = textureUsageFor(slot);
 
     std::string err;
     assets::TextureUploadInfo info;
@@ -1654,7 +1712,20 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
     return h;
 }
 
+bool GameContent::buildNextMaterial() {
+    if (materialBinds_.empty()) return false;
+    const MaterialBind b = std::move(materialBinds_.front());
+    materialBinds_.pop_front();
+    if (const pbr::MaterialHandle h = materialForSurface(b.name)) {
+        if (materialSystem_) materialSystem_->bindingSet(h);   // builds it unless already built
+        bindSurfaceMaterial(b.token, h);
+    }
+    return true;
+}
+
 void GameContent::releaseProjectMaterials(bool clearGraphRegistry) {
+    materialBinds_.clear();
+    assets::dropPrefetchedTextures();
     // Destroy materials (library owns them, map only names).
     for (const auto& kv : materialAssets_) if (kv.second) pbr::MaterialLibrary::get().destroy(kv.second);
     materialAssets_.clear();
@@ -1667,6 +1738,7 @@ void GameContent::releaseProjectMaterials(bool clearGraphRegistry) {
 
 // Release all materials except those in keep set.
 usize GameContent::releaseMaterialsExcept(const std::unordered_set<std::string>& keep) {
+    assets::dropPrefetchedTextures();   // what it releases may be needed again
     usize released = 0;
     for (auto it = materialAssets_.begin(); it != materialAssets_.end();) {
         if (keep.count(it->first)) { ++it; continue; }

@@ -3,15 +3,20 @@
 
 #include "TextureUploadDetail.hpp"
 #include "aver/assets/TextureCache.hpp"
+#include "aver/core/HitchMarks.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/Bc7.hpp"
 #include "aver/formats/Texture.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <filesystem>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace aver::assets {
@@ -87,19 +92,15 @@ rhi::TextureHandle uploadCachedTexture(rhi::IResourceFactory& res, const std::st
     return h;
 }
 
-// The miss path: `tex` already holds a full decoded RGBA8 mip chain (coverage-preserved already,
-// if `cutout` asked for it). Encodes every level to BC7, writes the cache entry, then uploads.
-// 0 on failure -- the caller falls back to the RGBA8 chain it already decoded, so nothing here
-// needs to be undone.
-rhi::TextureHandle uploadCompressed(rhi::IResourceFactory& res, const std::string& path,
-                                    TextureUsage usage, const fmt::TextureData& tex, bool cutout,
-                                    TextureUploadInfo* info) {
+// `tex` already holds a full decoded RGBA8 mip chain (coverage-preserved already, if `cutout` asked
+// for it). Encodes every level to BC7 into `cached` and writes the cache entry.
+void compressToCache(const std::string& path, TextureUsage usage, const fmt::TextureData& tex, bool cutout,
+                     CachedTexture& cached) {
     const auto t0 = std::chrono::steady_clock::now();
 
     fmt::Bc7Options bc7opt;
     bc7opt.cutout = cutout;   // default cutoff (128) IS kCoverageReferenceAlpha in the u8 scale
 
-    CachedTexture cached;
     cached.format = tex.srgb ? rhi::Format::BC7UnormSrgb : rhi::Format::BC7Unorm;
     cached.width  = tex.width;
     cached.height = tex.height;
@@ -119,8 +120,65 @@ rhi::TextureHandle uploadCompressed(rhi::IResourceFactory& res, const std::strin
 
     if (!saveCachedTexture(path, usage, cached))
         AVER_WARN("[Texture] {} compressed but could not be written to the derived-data cache", path);
+}
 
+// The miss path: encodes, caches, then uploads. 0 on failure -- the caller falls back to the RGBA8
+// chain it already decoded, so nothing here needs to be undone.
+rhi::TextureHandle uploadCompressed(rhi::IResourceFactory& res, const std::string& path,
+                                    TextureUsage usage, const fmt::TextureData& tex, bool cutout,
+                                    TextureUploadInfo* info) {
+    CachedTexture cached;
+    compressToCache(path, usage, tex, cutout, cached);
     return uploadCachedTexture(res, path, cached, info);
+}
+
+// ---- streaming prefetch (prefetchTexture) ----
+std::mutex g_heldMutex;
+std::condition_variable g_heldCv;
+struct Held { CachedTexture tex; u64 order = 0, bytes = 0, size = 0; i64 mtime = 0; };
+std::unordered_map<std::string, Held> g_held;
+std::unordered_set<std::string> g_reading;
+// Nothing to prefetch: uploaded already, or not a BC7 texture. A texture released and needed again
+// later uploads from disk on the main thread, as before prefetching existed.
+std::unordered_set<std::string> g_skip;
+u64 g_heldBytes = 0, g_heldOrder = 0;
+constexpr u64 kMaxHeldBytes = 2048ull << 20;
+
+std::string heldKey(const std::string& path, TextureUsage usage) {
+    std::string k = path;
+#ifdef _WIN32
+    for (char& c : k) c = c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+#endif
+    k += '|';
+    k += static_cast<char>('0' + static_cast<u32>(usage));
+    return k;
+}
+
+// The file's identity, so a held chain read before a re-import is not used after it.
+bool fileStamp(const std::string& path, u64& size, i64& mtime) {
+    std::error_code ec;
+    size = static_cast<u64>(std::filesystem::file_size(path, ec));
+    if (ec) return false;
+    mtime = static_cast<i64>(std::filesystem::last_write_time(path, ec).time_since_epoch().count());
+    return !ec;
+}
+
+bool takeHeld(const std::string& path, TextureUsage usage, CachedTexture& out) {
+    std::lock_guard<std::mutex> l(g_heldMutex);
+    const auto it = g_held.find(heldKey(path, usage));
+    if (it == g_held.end()) return false;
+    u64 size = 0;
+    i64 mtime = 0;
+    const bool same = fileStamp(path, size, mtime) && size == it->second.size && mtime == it->second.mtime;
+    if (same) out = std::move(it->second.tex);
+    g_heldBytes -= it->second.bytes;
+    g_held.erase(it);
+    return same;
+}
+
+void noteUploaded(const std::string& path, TextureUsage usage) {
+    std::lock_guard<std::mutex> l(g_heldMutex);
+    g_skip.insert(heldKey(path, usage));
 }
 
 } // namespace
@@ -233,8 +291,16 @@ rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& 
     // ---- CACHE HIT: no image decode at all -- see TextureCache.hpp for the whole point of this. ----
     if (cacheReady) {
         CachedTexture cached;
-        if (loadCachedTexture(path, usage, cached)) {
-            if (const rhi::TextureHandle h = uploadCachedTexture(res, path, cached, info)) return h;
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool held = takeHeld(path, usage, cached);
+        if (held || loadCachedTexture(path, usage, cached)) {
+            if (const rhi::TextureHandle h = uploadCachedTexture(res, path, cached, info)) {
+                noteUploaded(path, usage);
+                if (hitchVerbose())
+                    AVER_INFO("[Texture] {} {} in {:.1f} ms", held ? "prefetched" : "read here", path,
+                              std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - t0).count());
+                return h;
+            }
             // A cached entry the RHI refuses (a stale format from an older build, say) is not
             // repaired here -- fall through and decode as if it had been a miss.
             logCompressionFailureOnce(path, "the cached BC7 chain was rejected by the GPU");
@@ -269,8 +335,10 @@ rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& 
     fmt::generateMipChain(tex, normalMap, cutout ? kCoverageReferenceAlpha : -1.0f);
 
     if (willCompress) {
-        if (const rhi::TextureHandle h = uploadCompressed(res, path, usage, tex, cutout, info))
+        if (const rhi::TextureHandle h = uploadCompressed(res, path, usage, tex, cutout, info)) {
+            noteUploaded(path, usage);
             return h;
+        }
         logCompressionFailureOnce(path, "the compressed GPU texture could not be created");
     }
 
@@ -306,6 +374,61 @@ rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& 
         averageLinearFromLastMip(tex, info->averageLinear);
     }
     return h;
+}
+
+bool prefetchTexture(const std::string& path, TextureUsage usage) {
+    if (path.empty() || !textureCompressionEnabled() || textureCacheDir().empty()) return false;
+    const std::string key = heldKey(path, usage);
+    {
+        std::unique_lock<std::mutex> l(g_heldMutex);
+        g_heldCv.wait(l, [&] { return !g_reading.count(key); });
+        if (g_held.count(key)) return true;
+        if (g_skip.count(key)) return false;
+        g_reading.insert(key);
+    }
+    u64 size = 0;
+    i64 mtime = 0;
+    CachedTexture cached;
+    bool ok = fileStamp(path, size, mtime) && loadCachedTexture(path, usage, cached);
+    bool skip = false;
+    if (!ok) {
+        // A first visit: the decode and BC7 encode the upload's miss path would do on the main thread.
+        fmt::TextureData tex;
+        if (detail::decodeTexture(path, usage, tex, nullptr) && tex.valid() &&
+            textureCompressionEligible(tex.width, tex.height)) {
+            const bool cutout = usage == TextureUsage::Colour && fmt::alphaLooksLikeCutout(tex.levels.front());
+            fmt::generateMipChain(tex, usage == TextureUsage::NormalMap, cutout ? kCoverageReferenceAlpha : -1.0f);
+            compressToCache(path, usage, tex, cutout, cached);
+            ok = true;
+        } else {
+            skip = tex.valid();   // decodes but is not BC7: the upload's RGBA8 path is cheap enough
+        }
+    }
+    std::lock_guard<std::mutex> l(g_heldMutex);
+    g_reading.erase(key);
+    g_heldCv.notify_all();
+    if (skip) g_skip.insert(key);
+    if (!ok) return false;
+    if (g_skip.count(key)) return true;   // uploaded on the main thread while this read ran
+    u64 bytes = 0;
+    for (const std::vector<u8>& m : cached.mipBlocks) bytes += m.size();
+    g_heldBytes += bytes;
+    g_held[key] = Held{std::move(cached), ++g_heldOrder, bytes, size, mtime};
+    while (g_heldBytes > kMaxHeldBytes && g_held.size() > 1) {
+        auto oldest = g_held.begin();
+        for (auto it = g_held.begin(); it != g_held.end(); ++it)
+            if (it->second.order < oldest->second.order) oldest = it;
+        g_heldBytes -= oldest->second.bytes;
+        g_held.erase(oldest);
+    }
+    return true;
+}
+
+void dropPrefetchedTextures() {
+    std::lock_guard<std::mutex> l(g_heldMutex);
+    g_held.clear();
+    g_skip.clear();
+    g_heldBytes = 0;
 }
 
 } // namespace aver::assets

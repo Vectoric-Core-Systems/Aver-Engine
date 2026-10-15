@@ -3,6 +3,7 @@
 #if AVER_MODULE_SCENE
 
 #include "aver/core/Hash.hpp"
+#include "aver/core/HitchMarks.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcLevelInst.hpp"
 #include "aver/formats/OcPack.hpp"
@@ -30,8 +31,8 @@ namespace aver::game {
 
 namespace {
 
-// Per-tick budgets, the LevelStreaming constants: one unit within kNearLoadMs when the nearest missing one is within
-// a quarter of the load distance, kFarLoadMs past three quarters; evictions kEvictMs.
+// Per-tick budgets, the LevelStreaming constants: kNearLoadMs when the nearest missing unit is within a quarter of the
+// load distance, kFarLoadMs past three quarters; evictions kEvictMs. A unit realises over as many ticks as it needs.
 constexpr f64 kNearLoadMs = 12.0, kFarLoadMs = 3.0, kEvictMs = 2.0;
 // Cells within loadCm * this have their meshes read ahead (LevelFoliage::kPrefetchFactor).
 constexpr f32 kPrefetchFactor = 1.3f;
@@ -154,6 +155,14 @@ struct LevelInstances::Impl {
         fmt::OcWorldPlacement p;
         Transform world;
     };
+    struct Pending {
+        world::ResolvedContents rc;
+        std::vector<std::string> stack;
+        std::vector<usize> subtreeEnd;      // per root placement: one past its last descendant
+        std::unordered_set<u64> seenMesh;
+        usize next = 0;                     // placements before this one are instantiated
+        usize acquired = 0;                 // and before this one have their meshes
+    };
     struct Inst {
         u32 id = 0;
         fmt::OcLevelInstance rec;
@@ -184,6 +193,7 @@ struct LevelInstances::Impl {
         u32 entityCount = 0;
         std::vector<u64> needMeshes;
         bool needKnown = false;
+        std::unique_ptr<Pending> pending;   // a realise spread over ticks (realiseBegin .. realiseFinish)
     };
     struct PackEntry {
         std::shared_ptr<const world::LoadedLevelPack> lp;
@@ -212,6 +222,7 @@ struct LevelInstances::Impl {
     std::vector<world::AnimatedBody> animated;
     bool packedOk = false;
     std::vector<u32> packedQueue;               // instances to re-realise after setPackedRenderOk flipped, one per tick
+    u32 loadingId = 0;                          // the streamed unit being realised over ticks
     std::unordered_map<std::string, PackEntry> packs;
     bool begun = false;
 
@@ -348,7 +359,17 @@ struct LevelInstances::Impl {
     }
 
     // ---- realise ----
+    // Whole, in one call: level open, edits, nested and pinned instances.
     bool realise(Inst& in, std::vector<std::string> stack) {
+        if (!realiseBegin(in, std::move(stack))) return false;
+        realiseStep(in, -1.0);
+        realiseFinish(in);
+        return true;
+    }
+
+    // Resolves the child and its pack. False (nothing made) for a cycle, too deep, or a child that does not load.
+    bool realiseBegin(Inst& in, std::vector<std::string> stack) {
+        in.pending.reset();
         const std::string key = world::LevelAssetLibrary::normalise(in.rec.asset);
         if (std::find(stack.begin(), stack.end(), key) != stack.end()) {
             std::string chain;
@@ -361,7 +382,8 @@ struct LevelInstances::Impl {
                        world::LevelAssetLibrary::kMaxDepth);
             return false;
         }
-        world::ResolvedContents rc;
+        auto pend = std::make_unique<Pending>();
+        world::ResolvedContents& rc = pend->rc;
         std::string why;
         if (!self.lib_ || !self.lib_->resolve(in.rec, rc, &why)) {
             AVER_WARN("[LevelInstance] '{}' did not load ({}): instance left empty", in.rec.asset, why);
@@ -385,40 +407,106 @@ struct LevelInstances::Impl {
             if (in.containerId == 0) in.packedActive = true;
         }
 
-        // MESHES before the entities that show them.
-        std::unordered_set<u64> seenMesh(in.meshes.begin(), in.meshes.end());
-        const auto acquire = [&](u64 mesh) {
-            if (!seenMesh.insert(mesh).second) return;
-            if (self.port_.acquire && self.port_.acquire(mesh)) in.meshes.push_back(mesh);
-        };
-        for (const fmt::OcWorldPlacement& p : rc.world.placements)
-            if (p.className.empty()) acquire(p.objectId);
+        // A placement's subtree follows it (parents precede children), so slices cut only between whole subtrees.
+        const std::vector<fmt::OcWorldPlacement>& ps = rc.world.placements;
+        std::vector<usize> rootOf(ps.size());
+        pend->subtreeEnd.assign(ps.size(), 0);
+        for (usize i = 0; i < ps.size(); ++i) {
+            const i32 par = ps[i].parent;
+            rootOf[i] = par >= 0 && static_cast<usize>(par) < i ? rootOf[static_cast<usize>(par)] : i;
+            pend->subtreeEnd[rootOf[i]] = i + 1;
+        }
+        pend->seenMesh.insert(in.meshes.begin(), in.meshes.end());
+        pend->stack = std::move(stack);
+        in.animated.clear();
+        in.pending = std::move(pend);
+        return true;
+    }
 
-        // ENTITIES: the child's placements, attached under the root.
-        world::InstantiateOptions o = opt;
-        o.progress = nullptr;
-        o.meshShapes = &meshShapes;
-        const world::InstantiateOptions::Attach attach{in.root, in.world};
-        o.attach = &attach;
-        const world::LevelInstance li = world::instantiate(rc.world, o);
+    // Meshes (with their materials and textures), then entities, a slice of whole subtrees at a time, until `budgetMs`
+    // (< 0: all) is spent; at least one mesh or slice per call. True when every placement is instantiated.
+    bool realiseStep(Inst& in, f64 budgetMs) {
+        Pending& pd = *in.pending;
+        const std::vector<fmt::OcWorldPlacement>& ps = pd.rc.world.placements;
+        using Clock = std::chrono::steady_clock;
+        const auto start = Clock::now();
         const u32 flags = in.editing ? scene::kLinkEditing : 0u;
         const u64 assetId = assetHashOf(in.rec.asset);
-        for (usize k = 0; k < li.entities.size(); ++k) {
-            const u32 pi = li.placementIndex[k];
-            const u64 pid = rc.placementIds[pi];
-            const i32 body = k < li.entityBody.size() ? li.entityBody[k] : -1;
-            addLink(li.entities[k], scene::CLevelInstanceLink{assetId, pid, in.root, in.id, in.depth, flags});
-            in.members.push_back(Member{li.entities[k], pid, body, rc.world.placements[pi].collide});
-            if (body > 0) in.bodies.push_back(body);
-            if (hooks.created) hooks.created(li.entities[k], body, &rc.world.placements[pi]);
+        constexpr usize kSlice = 16;
+        bool worked = false;
+        const auto spent = [&] {
+            return budgetMs >= 0.0 && worked &&
+                   std::chrono::duration<f64, std::milli>(Clock::now() - start).count() >= budgetMs;
+        };
+        // The materials acquires made, one at a time: false when the budget ran out with some waiting.
+        const auto buildMaterials = [&] {
+            while (self.port_.buildMaterial) {
+                if (spent()) return false;
+                if (!self.port_.buildMaterial()) return true;
+                worked = true;
+            }
+            return true;
+        };
+        while (pd.next < ps.size()) {
+            const usize a = pd.next;
+            usize b = std::min(ps.size(), a + kSlice);
+            for (usize i = a; i < b; ++i) b = std::max(b, pd.subtreeEnd[i]);   // 0 for a non-root: no effect
+
+            // MESHES before the entities that show them; the prefetched physics shape with each.
+            for (; pd.acquired < b; ++pd.acquired) {
+                const fmt::OcWorldPlacement& p = ps[pd.acquired];
+                if (!p.className.empty() || pd.seenMesh.count(p.objectId)) continue;
+                if (!buildMaterials() || spent()) return false;
+                pd.seenMesh.insert(p.objectId);
+                if (self.port_.acquire && self.port_.acquire(p.objectId)) in.meshes.push_back(p.objectId);
+                if (self.port_.takeShape && !meshShapes.count(p.objectId))
+                    if (const i32 shape = self.port_.takeShape(p.objectId)) meshShapes.emplace(p.objectId, shape);
+                worked = true;
+            }
+            if (!buildMaterials() || spent()) return false;
+
+            // ENTITIES: this slice of the child's placements, attached under the root.
+            fmt::OcWorldData slice;
+            slice.placements.assign(ps.begin() + static_cast<isize>(a), ps.begin() + static_cast<isize>(b));
+            for (fmt::OcWorldPlacement& p : slice.placements)
+                if (p.parent >= 0) p.parent -= static_cast<i32>(a);
+            world::InstantiateOptions o = opt;
+            o.progress = nullptr;
+            o.meshShapes = &meshShapes;
+            const world::InstantiateOptions::Attach attach{in.root, in.world};
+            o.attach = &attach;
+            const world::LevelInstance li = world::instantiate(slice, o);
+            for (usize k = 0; k < li.entities.size(); ++k) {
+                const usize pi = a + li.placementIndex[k];
+                const u64 pid = pd.rc.placementIds[pi];
+                const i32 body = k < li.entityBody.size() ? li.entityBody[k] : -1;
+                addLink(li.entities[k], scene::CLevelInstanceLink{assetId, pid, in.root, in.id, in.depth, flags});
+                in.members.push_back(Member{li.entities[k], pid, body, ps[pi].collide});
+                if (body > 0) in.bodies.push_back(body);
+                if (hooks.created) hooks.created(li.entities[k], body, &ps[pi]);
+            }
+            in.animated.insert(in.animated.end(), li.animatedBodies.begin(), li.animatedBodies.end());
+            // COMPONENT records on the members, after the host's created hook. Also what keeps them through an editor
+            // Commit, which captures the members' live components back into the child level.
+            for (usize k = 0; k < li.entities.size(); ++k) {
+                const usize pi = a + li.placementIndex[k];
+                if (!ps[pi].components.empty())
+                    applyPlacedComponents(scene::World::instance(), li.entities[k], ps[pi], static_cast<i64>(pi));
+            }
+            pd.next = b;
+            worked = true;
         }
-        in.animated = li.animatedBodies;
-        // COMPONENT records on the members, after the host's created hook. Also what keeps them through an editor Commit,
-        // which captures the members' live components back into the child level.
-        for (usize k = 0; k < li.entities.size(); ++k) {
-            const fmt::OcWorldPlacement& p = rc.world.placements[li.placementIndex[k]];
-            if (!p.components.empty()) applyPlacedComponents(scene::World::instance(), li.entities[k], p, li.placementIndex[k]);
-        }
+        return true;
+    }
+
+    // Classes, lights, decals, prefabs, foliage, pack and nested instances; the unit is loaded after this.
+    void realiseFinish(Inst& in) {
+        const std::unique_ptr<Pending> pend = std::move(in.pending);
+        world::ResolvedContents& rc = pend->rc;
+        const std::vector<std::string>& stack = pend->stack;
+        const std::string key = world::LevelAssetLibrary::normalise(in.rec.asset);
+        const u32 flags = in.editing ? scene::kLinkEditing : 0u;
+        const u64 assetId = assetHashOf(in.rec.asset);
 
         // CLASS placements wait for scripting (spawnPendingClasses); their world pose is composed here.
         {
@@ -502,13 +590,17 @@ struct LevelInstances::Impl {
             if (onResidencyFn()) onResidencyFn()(child.root, true, child.entityCount);
         }
 
+        // Bodies went in a slice at a time; one rebalance for a big unit, as a whole-level instantiate does.
+#if AVER_MODULE_PHYSICS
+        if (in.bodies.size() >= 256) aver_phys_optimize_broadphase();
+#endif
+        while (self.port_.buildMaterial && self.port_.buildMaterial()) {}   // any the pack's acquires queued
         in.entityCount = 1 + static_cast<u32>(in.members.size() + in.extras.size() + in.classEntities.size());
         in.loaded = true;
         if (!animated.empty() || !in.animated.empty()) rebuildAnimated();
         if (self.classesReady_) spawnClasses(in);
         applyPin(in);
         if (onResidencyFn() && in.containerId == 0) onResidencyFn()(in.root, true, in.entityCount);
-        return true;
     }
 
     const std::function<void(scene::Entity, bool, u32)>& onResidencyFn() const { return self.onResidency; }
@@ -580,16 +672,20 @@ struct LevelInstances::Impl {
     // Everything under the root goes; the root stays. Nested instances are destroyed outright (they come back
     // with their ids when the container realises again).
     void unrealise(Inst& in) {
+        in.pending.reset();
+        if (loadingId == in.id) loadingId = 0;
         const std::vector<u32> kids = in.childIds;
         for (const u32 cid : kids) destroyInstance(cid);
         in.childIds.clear();
         if (!in.loaded && in.members.empty() && in.meshes.empty() && in.extras.empty()) { in.pendingClasses.clear(); return; }
 
+        HitchMarks hm("instance unrealise", 0.25);
         std::vector<scene::Entity> all;
         collectDescendants(in.root, all);
         if (hooks.destroying)
             for (const scene::Entity e : all)
                 if (self.world_->valid(e) && !self.world_->destroyPending(e)) hooks.destroying(e);
+        hm.mark("hooks");
         for (const scene::Entity e : in.classEntities) {
             if (!self.world_->valid(e)) continue;
             if (hooks.destroyClass) hooks.destroyClass(e);
@@ -599,6 +695,7 @@ struct LevelInstances::Impl {
         for (const i32 b : in.bodies) if (b > 0) aver_phys_remove_body(b);
         for (const i32 b : in.packedBodies) if (b > 0) aver_phys_remove_body(b);
 #endif
+        hm.mark("bodies");
         if (sink.clear) {
             if (in.packedSet) sink.clear(ownerPacked(in.id));
             if (in.foliageSet) sink.clear(ownerFoliage(in.id));
@@ -608,7 +705,9 @@ struct LevelInstances::Impl {
             if (self.world_->valid(c) && !self.world_->destroyPending(c)) self.world_->destroy(c);
             c = next;
         }
+        hm.mark("destroy");
         if (self.port_.release) for (const u64 m : in.meshes) self.port_.release(m);
+        hm.mark("release");
         const u32 count = in.entityCount;
         in.members.clear();
         in.bodies.clear();
@@ -796,8 +895,18 @@ struct LevelInstances::Impl {
         return in.needMeshes;
     }
 
+    // A part-realised unit resolved its content (overrides, pack, editing) when it began: dropped before any of that
+    // changes, so the next tick starts it afresh.
+    void cancelPending(Inst& in) { if (in.pending) unrealise(in); }
+
     void loadUnit(Inst& in) {
-        realise(in, stackFor(in));
+        if (in.pending) {
+            realiseStep(in, -1.0);
+            realiseFinish(in);
+            if (loadingId == in.id) loadingId = 0;
+        } else {
+            realise(in, stackFor(in));
+        }
         in.loaded = true;
         if (in.streamItem >= 0) streamer.markLoaded(static_cast<u32>(in.streamItem));
         applyPin(in);
@@ -936,14 +1045,43 @@ void LevelInstances::tick(const std::vector<Vec3>& viewers) {
         Impl::Inst* in = d.get(d.itemInst[item]);
         if (in && !in->loaded) d.loadUnit(*in);
     }
-    if (ready.empty()) return;
+
+    // The unit being realised: dropped once the viewer has left it behind, else continued first.
+    Impl::Inst* cur = d.loadingId ? d.get(d.loadingId) : nullptr;
+    if (cur && (!cur->pending || cur->loaded)) { d.loadingId = 0; cur = nullptr; }
+    if (cur && cur->streamItem >= 0) {
+        const u32 item = static_cast<u32>(cur->streamItem);
+        const f32 dist = d.streamer.distance(item, viewers);
+        if (dist > d.streamer.settings().evictCm && !d.streamer.pinned(item)) {
+            d.unrealise(*cur);
+            cur = nullptr;
+        } else {
+            nearestMissing = std::min(nearestMissing, dist);
+        }
+    }
+    if (!cur && ready.empty()) return;
     const f64 t = std::clamp((static_cast<f64>(nearestMissing) / static_cast<f64>(loadCm) - 0.25) / 0.5, 0.0, 1.0);
     const f64 budgetMs = kNearLoadMs + (kFarLoadMs - kNearLoadMs) * t;
     const auto start = Clock::now();
-    for (usize i = 0; i < ready.size(); ++i) {
-        if (i > 0 && msSince(start) >= budgetMs) break;
-        Impl::Inst* in = d.get(d.itemInst[ready[i]]);
-        if (in && !in->loaded) d.loadUnit(*in);
+    usize nextReady = 0;
+    for (;;) {
+        const f64 left = budgetMs - msSince(start);
+        if (left <= 0.0) break;
+        if (!cur) {
+            while (nextReady < ready.size() && !cur) {
+                Impl::Inst* in = d.get(d.itemInst[ready[nextReady++]]);
+                if (!in || in->loaded || in->pending) continue;
+                if (d.realiseBegin(*in, d.stackFor(*in))) { cur = in; d.loadingId = in->id; }
+                else {   // nothing to realise (logged): loaded, empty, as a whole realise leaves it
+                    in->loaded = true;
+                    if (in->streamItem >= 0) d.streamer.markLoaded(static_cast<u32>(in->streamItem));
+                }
+            }
+            if (!cur) break;
+        }
+        if (!d.realiseStep(*cur, left)) break;
+        d.loadUnit(*cur);   // finishes it: classes, lights, nested, pins, the streamer told
+        cur = nullptr;
     }
 }
 
@@ -1087,6 +1225,7 @@ bool LevelInstances::setLoaded(scene::Entity root, bool load) {
         d.applyPin(*in);
     } else {
         if (in->loaded) d.evictUnit(*in);
+        else if (in->pending) d.unrealise(*in);   // part-realised: nothing to sync back
         d.applyPin(*in);
     }
     return true;
@@ -1137,6 +1276,7 @@ bool LevelInstances::setPacked(scene::Entity root, bool packed) {
     Impl& d = *d_;
     Impl::Inst* in = d.byRootEntity(root);
     if (!in || in->containerId != 0) return false;
+    d.cancelPending(*in);
     in->rec.packed = packed;
     if (in->loaded) {
         d.syncOverrides(*in);
@@ -1168,6 +1308,7 @@ bool LevelInstances::beginEdit(scene::Entity root) {
     Impl::Inst* in = d.byRootEntity(root);
     if (!in || in->containerId != 0 || in->editing) return false;
     for (const auto& [id, o] : d.insts) if (o.editing) return false;   // one at a time
+    d.cancelPending(*in);
     if (in->loaded && !in->packedActive) d.syncOverrides(*in);
     in->savedOverrides = in->rec.overrides;
     in->rec.overrides.clear();
@@ -1302,6 +1443,7 @@ bool LevelInstances::setOverrides(scene::Entity root, const std::vector<fmt::OcP
     Impl::Inst* in = d.byRootEntity(root);
     if (!in) return false;
     if (in->editing) { in->savedOverrides = ov; return true; }
+    d.cancelPending(*in);
     in->rec.overrides = ov;
     if (in->loaded) d.rebuild(*in);
     return true;
@@ -1403,6 +1545,7 @@ bool LevelInstances::restoreState(const LevelInstanceState& st) {
             continue;
         }
         if (in) {
+            d.cancelPending(*in);
             in->rec = item.rec;
             in->local = world::levelInstanceTransform(item.rec);
             world_->setLocalTransform(in->root, in->local);
@@ -1445,8 +1588,10 @@ void LevelInstances::setPackedRenderOk(bool ok) {
     d.packedOk = ok;
     d.packs.clear();
     d.packedQueue.clear();
-    for (const auto& [id, in] : d.insts)
+    for (auto& [id, in] : d.insts) {
+        if (in.containerId == 0 && in.rec.packed) d.cancelPending(in);
         if (in.containerId == 0 && in.rec.packed && in.loaded) d.packedQueue.push_back(id);
+    }
     std::reverse(d.packedQueue.begin(), d.packedQueue.end());   // popped from the back, so the oldest first
 }
 

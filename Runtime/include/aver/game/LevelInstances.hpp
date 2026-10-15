@@ -38,6 +38,8 @@ namespace aver::game {
 struct ContentPort {
     std::function<bool(u64 mesh)> acquire;  std::function<void(u64 mesh)> release;
     std::function<void(u64 mesh)> prefetch; std::function<bool(u64 mesh)> ready;
+    std::function<i32(u64 mesh)> takeShape;   // the mesh's prefetched physics shape, now the caller's; 0 when none
+    std::function<bool()> buildMaterial;      // builds one material the acquires made; false when none wait
     std::string contentDir;   // absolute; child FOLIAGE tables and commits resolve against it
     std::string projectDir;   // absolute; Binaries/LevelPacks lives under it
 };
