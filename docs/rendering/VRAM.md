@@ -93,3 +93,22 @@ uses 5.7 -> 0.7 GB; VRAM about 0.5-1 GB higher mid-flight and 1.5 GB lower at th
 the table is not), load peak 13.4 GB against a 12.35 GB budget that run. Slow frames unchanged.
 Vulkan on NeonDistrict fails before this change too (BLAS and descriptor pools out of memory; one device
 allocation per buffer).
+
+## Vulkan: acceleration structures and descriptor pools (2026-10-17)
+
+NeonDistrict on Vulkan logged ~40,000 errors in a 600-frame flight (before and after the changes above):
+acceleration-structure buffers refused for device memory, and the shared descriptor pool exhausted.
+
+- BLASes up to 4 MiB share 64 MiB buffers (`asPools_`, a free list per pool); bigger ones get their own.
+- A non-updatable build takes scratch from shared 64 MiB blocks (`buildScratch`), recycled once the frame is done;
+  every BLAS used to keep its own scratch forever. Updatable (skinned) BLASes keep theirs.
+- Compaction as on D3D12: a compactable build writes its compacted size to a query slot, and `compactBlases`
+  copies it (`VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR`) into memory that size once the frame is done;
+  `blasMoves()` counts the moves. A compacted BLAS that is rebuilt regrows first. NeonDistrict: 6.5 -> 2.6 GB.
+- Binding sets spill into another shared descriptor pool when one is full; per-draw instance sets come from the
+  per-frame pools that are reset each frame.
+- Past 85% of the OS budget, new static meshes go to host memory (Vulkan refuses allocations past the budget
+  where D3D12 pages). Allocation failures are logged a few times, not per retry.
+
+The 600-frame flight now logs no errors. With other programs holding ~5 GB of a 16 GB card (budget 10.9 GB),
+NeonDistrict still fills VRAM on Vulkan and some BLASes and textures are refused.

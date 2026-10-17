@@ -585,21 +585,16 @@ void VulkanRenderContext::drawMeshInstanced(MeshHandle mesh, const f32* worlds, 
     const ConstantAllocation alloc = instanceAlloc(worlds, instanceCount * 16 * static_cast<u32>(sizeof(f32)));
     if (!alloc.buffer) return;   // ring exhausted this frame; instanceAlloc already logged it
 
-    // A FRESH SET PER DRAW, retired after the frame. The alternative -- one set per frame plus a
-    // dynamic offset -- needs the descriptor's RANGE fixed at bind time, and a range that must cover
-    // the largest possible draw while still satisfying offset + range <= buffer size forces the ring
-    // to carry a permanent tail of that size. Allocating here instead keeps the range exact
-    // (offset..offset+bytes) whatever the instance count, and is the same shape setConstantBuffer
-    // already uses on this backend. Instanced draws are rare -- one per distinct mesh per cascade --
-    // so this is tens of sets a frame, not thousands.
+    // A FRESH SET PER DRAW. The alternative -- one set per frame plus a dynamic offset -- needs the
+    // descriptor's RANGE fixed at bind time, and a range that must cover the largest possible draw while
+    // still satisfying offset + range <= buffer size forces the ring to carry a permanent tail of that size.
+    // Allocating here instead keeps the range exact (offset..offset+bytes) whatever the instance count, and
+    // is the same shape setConstantBuffer already uses on this backend. From the per-frame pools (reset when
+    // this frame slot comes round), not the shared one: NeonDistrict's shadow cascades draw thousands of
+    // instanced batches a frame.
     const DescriptorLayoutEntry& le = *pipe_->layoutEntry;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    ai.descriptorPool = res_->descriptorPool_;
-    ai.descriptorSetCount = 1;
-    ai.pSetLayouts = &le.instancesSetLayout;
-    if (!vkOk(dev_->api().AllocateDescriptorSets(dev_->vkDevice(), &ai, &set), "rhi instance descriptor set"))
-        return;
+    const VkDescriptorSet set = res_->allocConstantsSet(le.instancesSetLayout);
+    if (set == VK_NULL_HANDLE) return;
 
     // The dynamic offset carries the ring offset, so the descriptor itself starts at 0 and spans
     // exactly this draw's block. bufferInfo.offset stays 0 for the same reason the constants set's
@@ -614,13 +609,6 @@ void VulkanRenderContext::drawMeshInstanced(MeshHandle mesh, const f32* worlds, 
     w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
     w.pBufferInfo = &bi;
     dev_->api().UpdateDescriptorSets(dev_->vkDevice(), 1, &w, 0, nullptr);
-
-    VulkanDevice* devPtr = dev_;
-    VulkanResourceFactory* resPtr = res_;
-    res_->retire([devPtr, resPtr, set]() {
-        VkDescriptorSet dead = set;
-        devPtr->api().FreeDescriptorSets(devPtr->vkDevice(), resPtr->descriptorPool_, 1, &dead);
-    });
 
     applyDrawBinding();
     const u32 dynamicOffset = static_cast<u32>(alloc.offset);
@@ -933,6 +921,10 @@ void VulkanRenderContext::recordBlasBuild(RhiBlas& b, const GpuMesh& m, VkBuildA
 
     VkBufferDeviceAddressInfo scratchInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
     scratchInfo.buffer = b.scratchBuffer;
+    // Its own scratch when updatable; otherwise a range of the factory's shared build scratch.
+    const VkDeviceAddress scratch = b.scratchBuffer ? dev_->api().GetBufferDeviceAddress(dev_->vkDevice(), &scratchInfo)
+                                                    : res_->buildScratch(b.scratchSize);
+    if (!scratch) { AVER_ERROR("[RHI.Vulkan] no scratch for a BLAS build"); return; }
 
     VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
@@ -941,7 +933,8 @@ void VulkanRenderContext::recordBlasBuild(RhiBlas& b, const GpuMesh& m, VkBuildA
     // ALLOW_UPDATE_BIT_KHR whenever it was created updatable, whether this call is itself a build
     // or an update.
     bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
-              (b.allowUpdate ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0);
+              (b.allowUpdate ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0) |
+              (b.compactable ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0);
     bi.mode = mode;
     // In-place update: source and destination are the SAME structure -- legal per the Vulkan spec
     // and the whole point of a refit, no second structure to age out of sync with this one.
@@ -949,7 +942,7 @@ void VulkanRenderContext::recordBlasBuild(RhiBlas& b, const GpuMesh& m, VkBuildA
     bi.dstAccelerationStructure = b.as;
     bi.geometryCount = 1;
     bi.pGeometries = &geom;
-    bi.scratchData.deviceAddress = dev_->api().GetBufferDeviceAddress(dev_->vkDevice(), &scratchInfo);
+    bi.scratchData.deviceAddress = scratch;
 
     VkAccelerationStructureBuildRangeInfoKHR range{};
     range.primitiveCount = m.indexCount / 3;
@@ -970,6 +963,7 @@ void VulkanRenderContext::recordBlasBuild(RhiBlas& b, const GpuMesh& m, VkBuildA
     dev_->api().CmdPipelineBarrier2(cb, &dep);
 
     b.built = true;
+    ++b.buildSerial;
     b.builtVertexCount = m.vertexCount;
     b.builtIndexCount = m.indexCount;
 }
@@ -984,12 +978,22 @@ void VulkanRenderContext::buildBlas(BlasHandle h) {
         return;
     }
     if (b->mesh == 0 || b->mesh > dev_->meshes_.size()) return;
+    // A compacted structure is too small for a fresh build: back to its full size first (a move).
+    if (b->compacted && !res_->regrowBlas(*b)) { AVER_ERROR("[RHI.Vulkan] buildBlas: BLAS {} could not regrow", h); return; }
     if (!b->geometries.empty()) {
         if (!recordBlasBuildMulti(*b))
             AVER_ERROR("[RHI.Vulkan] buildBlas: multi-geometry BLAS {} names a mesh that is gone", h);
+        else
+            res_->queryCompactedSize(cb, h, *b);
         return;
     }
     recordBlasBuild(*b, dev_->meshes_[b->mesh - 1], VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
+    if (b->built) res_->queryCompactedSize(cb, h, *b);
+}
+
+u32 VulkanRenderContext::compactBlases(u32 maxCount) {
+    VkCommandBuffer cb = cmd();
+    return cb ? res_->compactReadyBlases(cb, maxCount) : 0;
 }
 
 bool VulkanRenderContext::recordBlasBuildMulti(RhiBlas& b) {
@@ -1008,16 +1012,17 @@ bool VulkanRenderContext::recordBlasBuildMulti(RhiBlas& b) {
     }
     VkCommandBuffer cb = cmd();
     if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
-    VkBufferDeviceAddressInfo scratchInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
-    scratchInfo.buffer = b.scratchBuffer;
+    const VkDeviceAddress scratch = res_->buildScratch(b.scratchSize);
+    if (!scratch) return false;
     VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;   // createBlasMulti's size query's flags
+    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |   // createBlasMulti's size query's flags
+               (b.compactable ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0);
     bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     bi.dstAccelerationStructure = b.as;
     bi.geometryCount = static_cast<u32>(geoms.size());
     bi.pGeometries = geoms.data();
-    bi.scratchData.deviceAddress = dev_->api().GetBufferDeviceAddress(dev_->vkDevice(), &scratchInfo);
+    bi.scratchData.deviceAddress = scratch;
     const VkAccelerationStructureBuildRangeInfoKHR* pRanges = ranges.data();
     dev_->api().CmdBuildAccelerationStructuresKHR(cb, 1, &bi, &pRanges);
 
@@ -1033,6 +1038,7 @@ bool VulkanRenderContext::recordBlasBuildMulti(RhiBlas& b) {
     dep.pMemoryBarriers = &mb;
     dev_->api().CmdPipelineBarrier2(cb, &dep);
     b.built = true;
+    ++b.buildSerial;
     return true;
 }
 

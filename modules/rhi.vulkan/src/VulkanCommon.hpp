@@ -305,6 +305,13 @@ struct VulkanApi {
     PFN_vkDestroyAccelerationStructureKHR DestroyAccelerationStructureKHR = nullptr;
     PFN_vkCmdBuildAccelerationStructuresKHR CmdBuildAccelerationStructuresKHR = nullptr;
     PFN_vkGetAccelerationStructureDeviceAddressKHR GetAccelerationStructureDeviceAddressKHR = nullptr;
+    // BLAS compaction (compacted-size queries, compacting copies); null turns compaction off.
+    PFN_vkCmdWriteAccelerationStructuresPropertiesKHR CmdWriteAccelerationStructuresPropertiesKHR = nullptr;
+    PFN_vkCmdCopyAccelerationStructureKHR CmdCopyAccelerationStructureKHR = nullptr;
+    PFN_vkCreateQueryPool CreateQueryPool = nullptr;
+    PFN_vkDestroyQueryPool DestroyQueryPool = nullptr;
+    PFN_vkCmdResetQueryPool CmdResetQueryPool = nullptr;
+    PFN_vkGetQueryPoolResults GetQueryPoolResults = nullptr;
 };
 
 bool loadGlobalApi(VulkanApi& api);   // loads the Vulkan loader, resolves vkGetInstanceProcAddr + every global entry point; false (logged) if either is missing -- unrecoverable
@@ -1106,6 +1113,7 @@ struct BindingSlotState {
 // 12-frame run when this was built.
 struct RhiBindingSet {
     VkDescriptorSet sets[kFrameCount] = {};
+    VkDescriptorPool pool = VK_NULL_HANDLE;   // the shared pool the ring came from (freed back to it)
     // Bit f: ring slot f has not seen the writes below and must be replayed before it is bound.
     u32 staleMask = 0;
     BindingSlotState srvSlots[kMaxBindingSlots];
@@ -1147,6 +1155,13 @@ struct RhiBlas {
     // Non-empty for a createBlasMulti structure: every geometry, in GeometryIndex() order. `mesh` above
     // is then geometries[0].mesh. Mirrors D3D12ResourceFactory's RhiBlas::geometries.
     std::vector<BlasGeometry> geometries;
+    // Where the structure lives: a range of asPools_[asPool] (asBuffer is then the pool's, asMemory null) or,
+    // asPool ~0u, a buffer of its own. A non-updatable structure has no scratch of its own (buildScratch).
+    u32 asPool = ~0u;
+    VkDeviceSize asOffset = 0, asBytes = 0;
+    bool compactable = false;   // built with ALLOW_COMPACTION (compactBlases)
+    bool compacted = false;     // moved into its compacted size; a rebuild regrows it first
+    u32 buildSerial = 0;        // bumped per build, so a compacted size from an older build is not used
 };
 
 // One instance as it was packed into a TLAS's last build or refit -- BLAS identity plus the Vulkan
@@ -1370,6 +1385,10 @@ public:
     Backend backend() const override { return Backend::Vulkan; }
     const char* adapterName() const override { return adapterName_.c_str(); }
     DeviceCaps caps() const override { return caps_; }
+    // Device memory past 85% of the OS budget: new static meshes go to host memory instead, leaving the rest to
+    // acceleration structures and textures, which have no such fallback. Vulkan refuses an allocation past the
+    // budget where D3D12 would page.
+    bool deviceMemoryTight() const;
     VideoMemoryInfo videoMemory() const override;   // M6: current VRAM budget/usage, LOCAL/NON_LOCAL exactly as VideoMemoryInfo's own comment (RHI.hpp) specifies; NOT inline (queries the driver every call); supported == false, honestly, whenever VK_EXT_memory_budget or GetPhysicalDeviceMemoryProperties2 is absent
     IResourceFactory* resources() override;
     IRenderContext* renderContext() override;
@@ -2059,6 +2078,9 @@ public:
     BlasHandle       createBlasUpdatable(MeshHandle mesh) override;
     TlasHandle       createTlasUpdatable(u32 maxInstances) override;
     BlasHandle       createBlasMulti(const BlasGeometry* geometries, u32 count) override;
+    BlasHandle       createBlasCompactable(MeshHandle mesh) override;
+    BlasHandle       createBlasMultiCompactable(const BlasGeometry* geometries, u32 count) override;
+    u64              blasMoves() const override { return blasMoves_; }
     bool             setTlasStaticInstances(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
     BufferHandle     tlasStaticInstanceBuffer(TlasHandle tlas) const override;
     u64              blasMemoryBytes(BlasHandle h) const override;
@@ -2174,6 +2196,12 @@ public:
     // They come from per-frame-slot pool chains that grow on demand and are reset whole once the slot's
     // GPU work has retired, so one frame or standalone submission can record any number of dispatches.
     VkDescriptorSet allocConstantsSet(VkDescriptorSetLayout layout);
+    // Allocates `count` sets from descriptorPool_, or the next shared pool once it is full (a level with thousands
+    // of materials outgrows one); `outPool` names the pool they must be freed to.
+    bool allocSharedSets(const VkDescriptorSetLayout* layouts, u32 count, VkDescriptorSet* out, VkDescriptorPool& outPool,
+                         const char* what);
+    bool createSharedPool(VkDescriptorPool& out);
+    std::vector<VkDescriptorPool> extraDescriptorPools_;
     // Only after the GPU has finished everything recorded in `slot` (beginFrame's wait, standalone's idle).
     void resetConstantsPools(u32 slot);
 
@@ -2189,7 +2217,40 @@ private:
     // for `allowUpdate`, which decides the build flags the prebuild size query is run against and
     // whether scratch is sized for an update as well as a build. Mirrors D3D12ResourceFactory's
     // createBlasImpl/createTlasImpl.
-    BlasHandle createBlasImpl(MeshHandle mesh, bool allowUpdate);
+    BlasHandle createBlasImpl(MeshHandle mesh, bool allowUpdate, bool compactable = false);
+    BlasHandle createBlasMultiImpl(const BlasGeometry* geometries, u32 count, bool compactable);
+
+    // ---- BLAS memory, as D3D12 does it: structures up to kAsPoolMaxBlas share 64 MiB buffers (one device
+    // allocation each instead of one per BLAS -- NeonDistrict's thousands ran the device out); a non-updatable
+    // build takes scratch from shared blocks recycled once the GPU is past them, instead of holding its own. ----
+    struct AsPool { VkBuffer buffer = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE;
+                    std::vector<std::pair<VkDeviceSize, VkDeviceSize>> free; };   // offset, bytes; sorted
+    std::vector<AsPool> asPools_;
+    static constexpr VkDeviceSize kAsPoolBytes = 64ull << 20, kAsPoolMaxBlas = 4ull << 20;
+    bool allocBlasMemory(RhiBlas& b, VkDeviceSize bytes);   // memory and the VkAccelerationStructureKHR on it
+    void releaseBlasMemory(RhiBlas& b);                     // both, once the frame in flight is done with them
+    struct ScratchBlock { VkBuffer buffer = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE;
+                          VkDeviceAddress address = 0; VkDeviceSize size = 0, used = 0; };
+    ScratchBlock scratchCur_;
+    std::vector<ScratchBlock> scratchFree_;
+    static constexpr VkDeviceSize kScratchBlockBytes = 64ull << 20;
+    void retireScratch(const ScratchBlock& s);
+public:
+    VkDeviceAddress buildScratch(VkDeviceSize bytes);   // 0 when it cannot be had
+    // ---- BLAS compaction (VulkanRenderContext::compactBlases), D3D12's scheme: a compactable build writes its
+    // compacted size to a query slot; once that frame is done the structure is copied into a buffer that size. ----
+    void queryCompactedSize(VkCommandBuffer cb, BlasHandle h, RhiBlas& b);
+    u32 compactReadyBlases(VkCommandBuffer cb, u32 maxCount);
+    bool regrowBlas(RhiBlas& b);   // a compacted structure being rebuilt goes back to its full size first
+private:
+    static constexpr u32 kCompactSlots = 4096;
+    VkQueryPool compactQueries_ = VK_NULL_HANDLE;
+    bool compactFailed_ = false;
+    std::vector<u32> compactFreeSlots_;
+    struct CompactPending { BlasHandle blas; u32 slot, serial; bool ready; };
+    std::vector<CompactPending> compactPending_;
+    u64 blasMoves_ = 0, compactedCount_ = 0, compactedFrom_ = 0, compactedTo_ = 0;
+    bool compactBurst_ = false;
     TlasHandle createTlasImpl(u32 maxInstances, bool allowUpdate);
     // Writes a valid, dimension-matched descriptor into every slot a BindingSetDesc declared but
     // the caller never wrote.
@@ -2317,6 +2378,7 @@ public:
     // ---- in-place updates (refit) -- see IRenderContext's contract comment above refitBlas/
     // refitTlas for the eligibility rules both follow. ----
     bool refitBlas(BlasHandle blas) override;
+    u32 compactBlases(u32 maxCount) override;
     bool refitTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
     void textureBarrier(TextureHandle t, ResourceState from, ResourceState to, u32 subresource) override;
     void bufferBarrier(BufferHandle b, ResourceState from, ResourceState to) override;

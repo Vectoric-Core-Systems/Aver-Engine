@@ -976,7 +976,8 @@ bool createBufferCommitted(VulkanDevice& dev, VkDeviceSize bytes, VkBufferUsageF
     ai.pNext = &flagsInfo;
     ai.allocationSize = req.size;
     ai.memoryTypeIndex = typeIndex;
-    if (!vkOk(api.AllocateMemory(device, &ai, nullptr, &outMemory), debugName ? debugName : "rhi buffer memory")) {
+    if (api.AllocateMemory(device, &ai, nullptr, &outMemory) != VK_SUCCESS) {
+        // Refused, usually the OS budget: logged a few times, not per call (a level past it retries every frame).
         static std::atomic<int> told{0};
         if (told.fetch_add(1) < 8) {
             const VideoMemoryInfo vm = dev.videoMemory();
@@ -987,6 +988,7 @@ bool createBufferCommitted(VulkanDevice& dev, VkDeviceSize bytes, VkBufferUsageF
         }
         api.DestroyBuffer(device, outBuffer, nullptr);
         outBuffer = VK_NULL_HANDLE;
+        outMemory = VK_NULL_HANDLE;
         return false;
     }
     if (!vkOk(api.BindBufferMemory(device, outBuffer, outMemory, 0), debugName ? debugName : "rhi buffer bind")) {
@@ -1027,7 +1029,10 @@ bool createImageCommitted(VulkanDevice& dev, const VkImageCreateInfo& imageInfo,
     VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     ai.allocationSize = req.size;
     ai.memoryTypeIndex = typeIndex;
-    if (!vkOk(api.AllocateMemory(device, &ai, nullptr, &outMemory), debugName ? debugName : "rhi image memory")) {
+    if (api.AllocateMemory(device, &ai, nullptr, &outMemory) != VK_SUCCESS) {
+        static std::atomic<int> told{0};   // as for buffers: a few lines, not one per retry
+        if (told.fetch_add(1) < 8) AVER_ERROR("[RHI.Vulkan] {} refused (device memory)", debugName ? debugName : "rhi image memory");
+        outMemory = VK_NULL_HANDLE;
         api.DestroyImage(device, outImage, nullptr);
         outImage = VK_NULL_HANDLE;
         return false;
@@ -1199,10 +1204,18 @@ VulkanResourceFactory::~VulkanResourceFactory() {
 
     for (auto& b : blases_) {
         if (b.as) api.DestroyAccelerationStructureKHR(device, b.as, nullptr);
-        destroyBufferCommitted(*dev_, b.asBuffer, b.asMemory);
+        if (b.asPool == ~0u) destroyBufferCommitted(*dev_, b.asBuffer, b.asMemory);   // a pool's buffer goes below
         destroyBufferCommitted(*dev_, b.scratchBuffer, b.scratchMemory);
     }
     blases_.clear();
+    for (AsPool& p : asPools_) destroyBufferCommitted(*dev_, p.buffer, p.memory);
+    asPools_.clear();
+    destroyBufferCommitted(*dev_, scratchCur_.buffer, scratchCur_.memory);
+    scratchCur_ = {};
+    for (ScratchBlock& s : scratchFree_) destroyBufferCommitted(*dev_, s.buffer, s.memory);
+    scratchFree_.clear();
+    if (compactQueries_ && api.DestroyQueryPool) api.DestroyQueryPool(device, compactQueries_, nullptr);
+    compactQueries_ = VK_NULL_HANDLE;
 
     for (auto& t : tlases_) {
         if (t.as) api.DestroyAccelerationStructureKHR(device, t.as, nullptr);
@@ -1244,6 +1257,8 @@ VulkanResourceFactory::~VulkanResourceFactory() {
     // in one shot here, which is why nothing above calls vkFreeDescriptorSets individually.
     if (descriptorPool_) api.DestroyDescriptorPool(device, descriptorPool_, nullptr);
     descriptorPool_ = VK_NULL_HANDLE;
+    for (VkDescriptorPool p : extraDescriptorPools_) api.DestroyDescriptorPool(device, p, nullptr);
+    extraDescriptorPools_.clear();
     for (u32 f = 0; f < kFrameCount; ++f) {
         for (ConstantsPool& p : constantsPools_[f]) if (p.pool) api.DestroyDescriptorPool(device, p.pool, nullptr);
         constantsPools_[f].clear();
@@ -1257,29 +1272,8 @@ bool VulkanResourceFactory::init() {
 
     // Sizing is a policy call with no D3D12 number to derive it from: D3D12's kRhiHeapSize (65536)
     // counts descriptor SLOTS in one heap; Vulkan counts descriptor SETS plus a per-TYPE pool budget.
-    // Sized generously, unmeasured -- revisit if vkAllocateDescriptorSets/vkCreateDescriptorPool ever
-    // reports VK_ERROR_OUT_OF_POOL_MEMORY.
-    constexpr u32 kMaxSets = 4096;
-    VkDescriptorPoolSize sizes[] = {
-        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 16384},
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8192},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16384},
-        // No UNIFORM_BUFFER_DYNAMIC: constants sets have their own per-frame pools (allocConstantsSet).
-        // gInstanceWorlds, one per instanced draw (drawMeshInstanced allocates a fresh set each
-        // time and retires it a frame later, so this budget covers kFrameCount frames of them).
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 512},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, 256},
-        {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 256},
-    };
-    VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    // FREE_DESCRIPTOR_SET_BIT: destroyBindingSet must be able to return its one set individually --
-    // the Vulkan analog of D3D12's reusable descriptor RANGE (allocRange/freeRanges_) -- which a
-    // Vulkan pool cannot do unless created with this flag (otherwise it can only be reset as a whole).
-    pi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pi.maxSets = kMaxSets;
-    pi.poolSizeCount = static_cast<u32>(sizeof(sizes) / sizeof(sizes[0]));
-    pi.pPoolSizes = sizes;
-    if (!vkOk(api.CreateDescriptorPool(device, &pi, nullptr, &descriptorPool_), "rhi descriptor pool")) return false;
+    // A full pool gets a sibling (allocSharedSets): NeonDistrict's thousands of materials outgrew one.
+    if (!createSharedPool(descriptorPool_)) return false;
 
     // RhiPipeline::layoutEntry is a RAW POINTER into descriptorLayouts_ (VulkanCommon.hpp section 12:
     // "owned by VulkanResourceFactory's cache, not by this"). A vector that reallocates on growth
@@ -1837,6 +1831,52 @@ constexpr u32 kConstantsPoolSets = 1024;
 constexpr u32 kConstantsPoolsMax = 64;   // per slot: 65,536 sets, far past any real frame
 }  // namespace
 
+bool VulkanResourceFactory::createSharedPool(VkDescriptorPool& out) {
+    constexpr u32 kMaxSets = 4096;
+    VkDescriptorPoolSize sizes[] = {
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 16384},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8192},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16384},
+        // No dynamic buffers: constants sets and per-draw instance sets have their own per-frame pools
+        // (allocConstantsSet).
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 256},
+        {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 256},
+    };
+    VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    // FREE_DESCRIPTOR_SET_BIT: destroyBindingSet must be able to return its one set individually --
+    // the Vulkan analog of D3D12's reusable descriptor RANGE (allocRange/freeRanges_) -- which a
+    // Vulkan pool cannot do unless created with this flag (otherwise it can only be reset as a whole).
+    pi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    pi.maxSets = kMaxSets;
+    pi.poolSizeCount = static_cast<u32>(sizeof(sizes) / sizeof(sizes[0]));
+    pi.pPoolSizes = sizes;
+    return vkOk(dev_->api().CreateDescriptorPool(dev_->vkDevice(), &pi, nullptr, &out), "rhi descriptor pool");
+}
+
+bool VulkanResourceFactory::allocSharedSets(const VkDescriptorSetLayout* layouts, u32 count, VkDescriptorSet* out,
+                                            VkDescriptorPool& outPool, const char* what) {
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorSetCount = count;
+    ai.pSetLayouts = layouts;
+    const auto tryPool = [&](VkDescriptorPool pool) {
+        ai.descriptorPool = pool;
+        const VkResult r = dev_->api().AllocateDescriptorSets(dev_->vkDevice(), &ai, out);
+        if (r == VK_SUCCESS) { outPool = pool; return 1; }
+        return (r == VK_ERROR_OUT_OF_POOL_MEMORY || r == VK_ERROR_FRAGMENTED_POOL) ? 0 : -1;
+    };
+    int got = tryPool(descriptorPool_);
+    for (usize i = 0; got == 0 && i < extraDescriptorPools_.size(); ++i) got = tryPool(extraDescriptorPools_[i]);
+    if (got == 0) {
+        VkDescriptorPool np = VK_NULL_HANDLE;
+        if (!createSharedPool(np)) return false;
+        extraDescriptorPools_.push_back(np);
+        AVER_INFO("[RHI.Vulkan] shared descriptor pool {} added", extraDescriptorPools_.size() + 1);
+        got = tryPool(np);
+    }
+    if (got != 1) AVER_ERROR("[RHI.Vulkan] {} failed", what);
+    return got == 1;
+}
+
 VkDescriptorSet VulkanResourceFactory::allocConstantsSet(VkDescriptorSetLayout layout) {
     const u32 f = dev_->frameIndexInFlight() < kFrameCount ? dev_->frameIndexInFlight() : 0;
     std::vector<ConstantsPool>& chain = constantsPools_[f];
@@ -1850,11 +1890,13 @@ VkDescriptorSet VulkanResourceFactory::allocConstantsSet(VkDescriptorSetLayout l
         }
         // Every binding of a constants set is one dynamic UBO, at most kMaxConstantSlots - 1 of them (b1 is
         // push constants), so the set count is the only limit that can bind.
-        VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kConstantsPoolSets * (kMaxConstantSlots - 1)};
+        // Per-draw instance sets (one STORAGE_BUFFER_DYNAMIC each) come from these pools too.
+        VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kConstantsPoolSets * (kMaxConstantSlots - 1)},
+                                         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, kConstantsPoolSets}};
         VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         pci.maxSets = kConstantsPoolSets;
-        pci.poolSizeCount = 1;
-        pci.pPoolSizes = &size;
+        pci.poolSizeCount = 2;
+        pci.pPoolSizes = sizes;
         ConstantsPool p;
         if (!vkOk(dev_->api().CreateDescriptorPool(dev_->vkDevice(), &pci, nullptr, &p.pool), "constants descriptor pool"))
             return VK_NULL_HANDLE;
@@ -2916,15 +2958,10 @@ BindingSetHandle VulkanResourceFactory::createBindingSet(const BindingSetDesc& d
     s.uavBaseRegister = d.uavBaseRegister;
     for (u32 i = 0; i < kMaxBindingSlots; ++i) { s.srvKinds[i] = d.srvKinds[i]; s.uavKinds[i] = d.uavKinds[i]; }
 
-    // kFrameCount sets of the SAME layout -- the ring. The pool is sized at 4096 sets against a
-    // handful of binding sets per feature, so multiplying by kFrameCount is not close to a problem.
+    // kFrameCount sets of the SAME layout -- the ring; a material each, so a big level needs several pools.
     VkDescriptorSetLayout ringLayouts[kFrameCount];
     for (u32 f = 0; f < kFrameCount; ++f) ringLayouts[f] = layout;
-    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    ai.descriptorPool = descriptorPool_;
-    ai.descriptorSetCount = kFrameCount;
-    ai.pSetLayouts = ringLayouts;
-    if (!vkOk(dev_->api().AllocateDescriptorSets(dev_->vkDevice(), &ai, s.sets), "rhi binding set ring")) return 0;
+    if (!allocSharedSets(ringLayouts, kFrameCount, s.sets, s.pool, "rhi binding set ring")) return 0;
 
     s.alive = true;
     nullFill(s);
@@ -2937,9 +2974,10 @@ void VulkanResourceFactory::destroyBindingSet(BindingSetHandle h) {
     if (!s) return;
     std::array<VkDescriptorSet, kFrameCount> ring{};
     for (u32 f = 0; f < kFrameCount; ++f) ring[f] = s->sets[f];
-    retire([this, ring]() {
+    const VkDescriptorPool pool = s->pool;
+    retire([this, ring, pool]() {
         std::array<VkDescriptorSet, kFrameCount> local = ring;
-        dev_->api().FreeDescriptorSets(dev_->vkDevice(), descriptorPool_, kFrameCount, local.data());
+        dev_->api().FreeDescriptorSets(dev_->vkDevice(), pool, kFrameCount, local.data());
     });
     // Every one-off mip view a slot took ownership of dies with the set.
     for (u32 i = 0; i < kMaxBindingSlots; ++i) {
@@ -3042,7 +3080,7 @@ bool accelStructureSupported(VulkanDevice& dev) {
 }
 } // namespace
 
-BlasHandle VulkanResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpdate) {
+BlasHandle VulkanResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpdate, bool compactable) {
     collect();
     if (!accelStructureSupported(*dev_)) { AVER_WARN("[RHI.Vulkan] createBlas without ray-tracing support"); return 0; }
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.Vulkan] createBlas with an invalid mesh handle"); return 0; }
@@ -3069,8 +3107,10 @@ BlasHandle VulkanResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpda
     // ALLOW_UPDATE_BIT_KHR must be in the size query AND every later build/update for this
     // structure to stay updatable -- Vulkan sizes (and validates an update against) the flags the
     // structure was queried/built with, same as D3D12's ALLOW_UPDATE requirement.
+    compactable = compactable && !allowUpdate;
     const VkBuildAccelerationStructureFlagsKHR flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
-        (allowUpdate ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0);
+        (allowUpdate ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0) |
+        (compactable ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0);
     VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
     bi.flags = flags;
@@ -3090,32 +3130,21 @@ BlasHandle VulkanResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpda
     RhiBlas b{};
     b.mesh = mesh;
     b.allowUpdate = allowUpdate;
+    b.compactable = compactable;
     b.asSize = sizeInfo.accelerationStructureSize;
     b.scratchSize = scratchSize;
-    if (!createBufferCommitted(*dev_, sizeInfo.accelerationStructureSize,
-                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, b.asBuffer, b.asMemory, nullptr, "rhi BLAS buffer") ||
-        !createBufferCommitted(*dev_, scratchSize,
-                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, b.scratchBuffer, b.scratchMemory, nullptr, "rhi BLAS scratch")) {
-        AVER_ERROR("[RHI.Vulkan] createBlas allocation failed");
-        destroyBufferCommitted(*dev_, b.asBuffer, b.asMemory);
-        destroyBufferCommitted(*dev_, b.scratchBuffer, b.scratchMemory);
+    // Only an updatable structure keeps scratch (it refits every frame); a build takes buildScratch's.
+    if (!allocBlasMemory(b, sizeInfo.accelerationStructureSize) ||
+        (allowUpdate &&
+         !createBufferCommitted(*dev_, scratchSize,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, b.scratchBuffer, b.scratchMemory, nullptr, "rhi BLAS scratch"))) {
+        static std::atomic<int> told{0};
+        if (told.fetch_add(1) < 8) AVER_ERROR("[RHI.Vulkan] createBlas allocation failed");
+        releaseBlasMemory(b);
         return 0;
     }
-
-    VkAccelerationStructureCreateInfoKHR aci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
-    aci.buffer = b.asBuffer;
-    aci.size = sizeInfo.accelerationStructureSize;
-    aci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    if (!vkOk(api.CreateAccelerationStructureKHR(device, &aci, nullptr, &b.as), "rhi BLAS create")) {
-        destroyBufferCommitted(*dev_, b.asBuffer, b.asMemory);
-        destroyBufferCommitted(*dev_, b.scratchBuffer, b.scratchMemory);
-        return 0;
-    }
-    VkAccelerationStructureDeviceAddressInfoKHR dai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
-    dai.accelerationStructure = b.as;
-    b.asAddress = api.GetAccelerationStructureDeviceAddressKHR(device, &dai);
+    (void)api; (void)device;
 
     // NOT built here -- buildBlas() (VulkanRenderContext.cpp) records the actual
     // vkCmdBuildAccelerationStructuresKHR, matching D3D12's own split between allocation
@@ -3126,11 +3155,18 @@ BlasHandle VulkanResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpda
 }
 
 BlasHandle VulkanResourceFactory::createBlas(MeshHandle mesh) { return createBlasImpl(mesh, false); }
+BlasHandle VulkanResourceFactory::createBlasCompactable(MeshHandle mesh) { return createBlasImpl(mesh, false, true); }
+BlasHandle VulkanResourceFactory::createBlasMultiCompactable(const BlasGeometry* geometries, u32 count) {
+    return createBlasMultiImpl(geometries, count, true);
+}
+BlasHandle VulkanResourceFactory::createBlasMulti(const BlasGeometry* geometries, u32 count) {
+    return createBlasMultiImpl(geometries, count, false);
+}
 
 // One structure over several meshes -- see IResourceFactory::createBlasMulti. Sized by one size query
 // over every geometry (vkMultiBlasGeometry, the description recordBlasBuildMulti builds from); built
 // later by buildBlas like any other. Mirrors D3D12ResourceFactory::createBlasMulti.
-BlasHandle VulkanResourceFactory::createBlasMulti(const BlasGeometry* geometries, u32 count) {
+BlasHandle VulkanResourceFactory::createBlasMultiImpl(const BlasGeometry* geometries, u32 count, bool compactable) {
     collect();
     if (!accelStructureSupported(*dev_)) { AVER_WARN("[RHI.Vulkan] createBlasMulti without ray-tracing support"); return 0; }
     if (!geometries || count == 0) { AVER_ERROR("[RHI.Vulkan] createBlasMulti with no geometry"); return 0; }
@@ -3157,7 +3193,8 @@ BlasHandle VulkanResourceFactory::createBlasMulti(const BlasGeometry* geometries
     VkDevice device = dev_->vkDevice();
     VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     bi.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+               (compactable ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0);
     bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     bi.geometryCount = count;
     bi.pGeometries = geoms.data();
@@ -3167,31 +3204,14 @@ BlasHandle VulkanResourceFactory::createBlasMulti(const BlasGeometry* geometries
     RhiBlas b{};
     b.mesh = geometries[0].mesh;
     b.geometries.assign(geometries, geometries + count);
+    b.compactable = compactable;
     b.asSize = sizeInfo.accelerationStructureSize;
-    b.scratchSize = sizeInfo.buildScratchSize;
-    if (!createBufferCommitted(*dev_, sizeInfo.accelerationStructureSize,
-                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, b.asBuffer, b.asMemory, nullptr, "rhi BLAS buffer") ||
-        !createBufferCommitted(*dev_, sizeInfo.buildScratchSize,
-                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
-                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, b.scratchBuffer, b.scratchMemory, nullptr, "rhi BLAS scratch")) {
-        AVER_ERROR("[RHI.Vulkan] createBlasMulti allocation failed");
-        destroyBufferCommitted(*dev_, b.asBuffer, b.asMemory);
-        destroyBufferCommitted(*dev_, b.scratchBuffer, b.scratchMemory);
+    b.scratchSize = sizeInfo.buildScratchSize;   // from buildScratch at build time
+    if (!allocBlasMemory(b, sizeInfo.accelerationStructureSize)) {
+        static std::atomic<int> told{0};
+        if (told.fetch_add(1) < 8) AVER_ERROR("[RHI.Vulkan] createBlasMulti allocation failed");
         return 0;
     }
-    VkAccelerationStructureCreateInfoKHR aci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
-    aci.buffer = b.asBuffer;
-    aci.size = sizeInfo.accelerationStructureSize;
-    aci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    if (!vkOk(api.CreateAccelerationStructureKHR(device, &aci, nullptr, &b.as), "rhi multi-geometry BLAS create")) {
-        destroyBufferCommitted(*dev_, b.asBuffer, b.asMemory);
-        destroyBufferCommitted(*dev_, b.scratchBuffer, b.scratchMemory);
-        return 0;
-    }
-    VkAccelerationStructureDeviceAddressInfoKHR dai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
-    dai.accelerationStructure = b.as;
-    b.asAddress = api.GetAccelerationStructureDeviceAddressKHR(device, &dai);
     blases_.push_back(std::move(b));
     return static_cast<BlasHandle>(blases_.size());
 }
@@ -3470,7 +3490,251 @@ BufferHandle VulkanResourceFactory::tlasStaticInstanceBuffer(TlasHandle h) const
 u64 VulkanResourceFactory::blasMemoryBytes(BlasHandle h) const {
     if (h == 0 || h > blases_.size()) return 0;
     const RhiBlas& b = blases_[h - 1];
-    return b.as ? static_cast<u64>(b.asSize + b.scratchSize) : 0;
+    return b.as ? static_cast<u64>(b.asBytes + (b.scratchBuffer ? b.scratchSize : 0)) : 0;
+}
+
+// ---- BLAS memory, scratch and compaction (see the factory's declarations) ----
+bool VulkanResourceFactory::allocBlasMemory(RhiBlas& b, VkDeviceSize bytes) {
+    const VulkanApi& api = dev_->api();
+    constexpr VkDeviceSize kAlign = 256;   // VkAccelerationStructureCreateInfoKHR::offset
+    const VkDeviceSize need = (bytes + kAlign - 1) & ~(kAlign - 1);
+    constexpr VkBufferUsageFlags kUsage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    b.asPool = ~0u;
+    b.asOffset = 0;
+    b.asBytes = need;
+    b.asBuffer = VK_NULL_HANDLE;
+    b.asMemory = VK_NULL_HANDLE;
+    if (need <= kAsPoolMaxBlas) {
+        for (u32 p = 0; p <= asPools_.size() && b.asPool == ~0u; ++p) {
+            if (p == asPools_.size()) {
+                AsPool np;
+                if (!createBufferCommitted(*dev_, kAsPoolBytes, kUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, np.buffer,
+                                           np.memory, nullptr, "rhi BLAS pool")) break;
+                np.free.push_back({0, kAsPoolBytes});
+                asPools_.push_back(std::move(np));
+            }
+            auto& fl = asPools_[p].free;
+            for (usize i = 0; i < fl.size(); ++i) {
+                if (fl[i].second < need) continue;
+                b.asPool = p;
+                b.asOffset = fl[i].first;
+                b.asBuffer = asPools_[p].buffer;
+                fl[i].first += need;
+                fl[i].second -= need;
+                if (fl[i].second == 0) fl.erase(fl.begin() + static_cast<std::ptrdiff_t>(i));
+                break;
+            }
+        }
+    }
+    if (b.asPool == ~0u && !createBufferCommitted(*dev_, need, kUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, b.asBuffer,
+                                                  b.asMemory, nullptr, "rhi BLAS buffer"))
+        return false;
+    VkAccelerationStructureCreateInfoKHR aci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+    aci.buffer = b.asBuffer;
+    aci.offset = b.asOffset;
+    aci.size = bytes;
+    aci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    if (!vkOk(api.CreateAccelerationStructureKHR(dev_->vkDevice(), &aci, nullptr, &b.as), "rhi BLAS create")) {
+        b.as = VK_NULL_HANDLE;
+        releaseBlasMemory(b);
+        return false;
+    }
+    VkAccelerationStructureDeviceAddressInfoKHR dai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
+    dai.accelerationStructure = b.as;
+    b.asAddress = api.GetAccelerationStructureDeviceAddressKHR(dev_->vkDevice(), &dai);
+    return true;
+}
+
+void VulkanResourceFactory::releaseBlasMemory(RhiBlas& b) {
+    const VkAccelerationStructureKHR as = b.as;
+    const u32 pool = b.asPool;
+    const VkDeviceSize offset = b.asOffset, bytes = b.asBytes;
+    const VkBuffer buffer = pool == ~0u ? b.asBuffer : VK_NULL_HANDLE;
+    const VkDeviceMemory memory = pool == ~0u ? b.asMemory : VK_NULL_HANDLE;
+    if (as || buffer || pool != ~0u) {
+        retire([this, as, pool, offset, bytes, buffer, memory]() {
+            if (as) dev_->api().DestroyAccelerationStructureKHR(dev_->vkDevice(), as, nullptr);
+            if (buffer) destroyBufferCommitted(*dev_, buffer, memory);
+            if (pool == ~0u || pool >= asPools_.size()) return;
+            // Back into the pool's sorted free list, merged with its neighbours.
+            auto& fl = asPools_[pool].free;
+            auto it = std::lower_bound(fl.begin(), fl.end(), std::make_pair(offset, VkDeviceSize(0)));
+            it = fl.insert(it, {offset, bytes});
+            if (std::next(it) != fl.end() && it->first + it->second == std::next(it)->first) {
+                it->second += std::next(it)->second;
+                fl.erase(std::next(it));
+            }
+            if (it != fl.begin() && std::prev(it)->first + std::prev(it)->second == it->first) {
+                std::prev(it)->second += it->second;
+                fl.erase(it);
+            }
+        });
+    }
+    b.as = VK_NULL_HANDLE;
+    b.asBuffer = VK_NULL_HANDLE;
+    b.asMemory = VK_NULL_HANDLE;
+    b.asAddress = 0;
+    b.asPool = ~0u;
+    b.asOffset = b.asBytes = 0;
+}
+
+void VulkanResourceFactory::retireScratch(const ScratchBlock& s) {
+    retire([this, s]() {
+        if (s.size > kScratchBlockBytes || scratchFree_.size() >= 2) { destroyBufferCommitted(*dev_, s.buffer, s.memory); return; }
+        ScratchBlock back = s;
+        back.used = 0;
+        scratchFree_.push_back(back);
+    });
+}
+
+VkDeviceAddress VulkanResourceFactory::buildScratch(VkDeviceSize bytes) {
+    // 256: at least minAccelerationStructureScratchOffsetAlignment on the GPUs this engine targets (128 or 256).
+    constexpr VkDeviceSize kAlign = 256;
+    const VkDeviceSize need = (bytes + kAlign - 1) & ~(kAlign - 1);
+    if (scratchCur_.buffer && scratchCur_.used + need <= scratchCur_.size) {
+        const VkDeviceAddress a = scratchCur_.address + scratchCur_.used;
+        scratchCur_.used += need;
+        return a;
+    }
+    const auto make = [&](VkDeviceSize size, ScratchBlock& out) {
+        out = {};
+        out.size = size;
+        return createBufferCommitted(*dev_, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, out.buffer, out.memory, &out.address,
+                                     "rhi BLAS build scratch");
+    };
+    if (need > kScratchBlockBytes) {   // a big one: its own block, gone once this frame is done
+        ScratchBlock one;
+        if (!make(need, one)) return 0;
+        retireScratch(one);
+        return one.address;
+    }
+    if (scratchCur_.buffer) retireScratch(scratchCur_);   // reused once the builds in it are done
+    scratchCur_ = {};
+    if (!scratchFree_.empty()) {
+        scratchCur_ = scratchFree_.back();
+        scratchFree_.pop_back();
+    } else if (!make(kScratchBlockBytes, scratchCur_)) {
+        scratchCur_ = {};
+        return 0;
+    }
+    scratchCur_.used = need;
+    return scratchCur_.address;
+}
+
+void VulkanResourceFactory::queryCompactedSize(VkCommandBuffer cb, BlasHandle h, RhiBlas& b) {
+    const VulkanApi& api = dev_->api();
+    if (!b.compactable || compactFailed_ || !cb) return;
+    if (!compactQueries_) {
+        if (!api.CmdWriteAccelerationStructuresPropertiesKHR || !api.CmdCopyAccelerationStructureKHR || !api.CreateQueryPool ||
+            !api.CmdResetQueryPool || !api.GetQueryPoolResults) {
+            compactFailed_ = true;
+            return;
+        }
+        VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        qi.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
+        qi.queryCount = kCompactSlots;
+        if (!vkOk(api.CreateQueryPool(dev_->vkDevice(), &qi, nullptr, &compactQueries_), "rhi BLAS compaction queries")) {
+            compactQueries_ = VK_NULL_HANDLE;
+            compactFailed_ = true;
+            return;
+        }
+        for (u32 s = kCompactSlots; s-- > 0;) compactFreeSlots_.push_back(s);
+    }
+    if (compactFreeSlots_.empty()) return;   // this build stays full size
+    const u32 slot = compactFreeSlots_.back();
+    compactFreeSlots_.pop_back();
+    api.CmdResetQueryPool(cb, compactQueries_, slot, 1);
+    api.CmdWriteAccelerationStructuresPropertiesKHR(cb, 1, &b.as, VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
+                                                     compactQueries_, slot);
+    compactPending_.push_back({h, slot, b.buildSerial, false});
+    retire([this, slot]() {   // this frame is done: the size can be read
+        for (CompactPending& p : compactPending_) if (p.slot == slot) p.ready = true;
+    });
+}
+
+bool VulkanResourceFactory::regrowBlas(RhiBlas& b) {
+    RhiBlas nb;
+    if (!allocBlasMemory(nb, b.asSize)) return false;
+    releaseBlasMemory(b);
+    b.as = nb.as;
+    b.asBuffer = nb.asBuffer;
+    b.asMemory = nb.asMemory;
+    b.asAddress = nb.asAddress;
+    b.asPool = nb.asPool;
+    b.asOffset = nb.asOffset;
+    b.asBytes = nb.asBytes;
+    b.compacted = false;
+    ++blasMoves_;
+    return true;
+}
+
+u32 VulkanResourceFactory::compactReadyBlases(VkCommandBuffer cb, u32 maxCount) {
+    if ((compactPending_.empty() && !compactBurst_) || !cb || !compactQueries_) return 0;
+    const VulkanApi& api = dev_->api();
+    u32 moved = 0;
+    bool bigMoved = false;   // a structure past kAsPoolMaxBlas gets its own allocation, made here: one per call
+    std::vector<VkAccelerationStructureKHR> srcs, dsts;
+    for (usize i = 0; i < compactPending_.size();) {
+        const CompactPending p = compactPending_[i];
+        if (!p.ready || moved >= maxCount) { ++i; continue; }
+        u64 size = 0;
+        const VkResult r = api.GetQueryPoolResults(dev_->vkDevice(), compactQueries_, p.slot, 1, sizeof(size), &size,
+                                                   sizeof(size), VK_QUERY_RESULT_64_BIT);
+        if (r == VK_NOT_READY) { ++i; continue; }
+        if (size > kAsPoolMaxBlas && bigMoved) { ++i; continue; }   // the next call's
+        compactPending_[i] = compactPending_.back();
+        compactPending_.pop_back();
+        compactFreeSlots_.push_back(p.slot);
+        RhiBlas* b = blas(p.blas);
+        // Worth a move only if it saves at least an eighth.
+        if (r != VK_SUCCESS || !b || !b->as || !b->built || b->compacted || b->buildSerial != p.serial || size == 0 ||
+            size + size / 8 >= b->asBytes)
+            continue;
+        RhiBlas nb;
+        if (!allocBlasMemory(nb, size)) continue;
+        bigMoved = bigMoved || nb.asPool == ~0u;
+        if (moved == 0) dev_->suspendRenderScope(cb);
+        VkCopyAccelerationStructureInfoKHR ci{VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR};
+        ci.src = b->as;
+        ci.dst = nb.as;
+        ci.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
+        api.CmdCopyAccelerationStructureKHR(cb, &ci);
+        compactedFrom_ += b->asBytes;
+        compactedTo_ += nb.asBytes;
+        ++compactedCount_;
+        releaseBlasMemory(*b);
+        b->as = nb.as;
+        b->asBuffer = nb.asBuffer;
+        b->asMemory = nb.asMemory;
+        b->asAddress = nb.asAddress;
+        b->asPool = nb.asPool;
+        b->asOffset = nb.asOffset;
+        b->asBytes = nb.asBytes;
+        b->compacted = true;
+        ++blasMoves_;
+        ++moved;
+    }
+    if (moved) {
+        // The copies before the TLAS build (and any trace) that names the moved structures.
+        VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        mb.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                          VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        mb.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.memoryBarrierCount = 1;
+        dep.pMemoryBarriers = &mb;
+        api.CmdPipelineBarrier2(cb, &dep);
+        compactBurst_ = true;
+    } else if (compactBurst_) {
+        compactBurst_ = false;
+        AVER_INFO("[RHI.Vulkan] BLAS compaction: {} compacted so far, {:.0f} -> {:.0f} MiB", compactedCount_,
+                  static_cast<f64>(compactedFrom_) / (1024.0 * 1024.0), static_cast<f64>(compactedTo_) / (1024.0 * 1024.0));
+    }
+    return moved;
 }
 
 u64 VulkanResourceFactory::tlasMemoryBytes(TlasHandle h) const {
@@ -3532,14 +3796,10 @@ void VulkanResourceFactory::destroyBlas(BlasHandle h) {
     if (h == 0 || h > blases_.size()) return;
     RhiBlas& b = blases_[h - 1];
     if (!b.as && !b.asBuffer) return;
-    VkAccelerationStructureKHR as = b.as;
-    VkBuffer asBuf = b.asBuffer, scratchBuf = b.scratchBuffer;
-    VkDeviceMemory asMem = b.asMemory, scratchMem = b.scratchMemory;
-    retire([this, as, asBuf, scratchBuf, asMem, scratchMem]() {
-        if (as) dev_->api().DestroyAccelerationStructureKHR(dev_->vkDevice(), as, nullptr);
-        destroyBufferCommitted(*dev_, asBuf, asMem);
-        destroyBufferCommitted(*dev_, scratchBuf, scratchMem);
-    });
+    releaseBlasMemory(b);
+    VkBuffer scratchBuf = b.scratchBuffer;
+    VkDeviceMemory scratchMem = b.scratchMemory;
+    if (scratchBuf) retire([this, scratchBuf, scratchMem]() { destroyBufferCommitted(*dev_, scratchBuf, scratchMem); });
     // The memory handles too: the destructor frees what each record still names, and a stale
     // asMemory freed a second time there was the AMD driver's fail-fast on exit after streaming.
     b.as = VK_NULL_HANDLE;
@@ -3553,6 +3813,7 @@ void VulkanResourceFactory::destroyBlas(BlasHandle h) {
     b.builtVertexCount = 0;
     b.builtIndexCount = 0;
     b.geometries.clear();
+    b.compactable = b.compacted = false;
     collect();
 }
 

@@ -493,7 +493,19 @@ bool loadDeviceApi(VulkanApi& api, VkDevice device, const std::vector<std::strin
             reinterpret_cast<void*>(api.GetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR")));
         api.GetAccelerationStructureDeviceAddressKHR = reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
             reinterpret_cast<void*>(api.GetDeviceProcAddr(device, "vkGetAccelerationStructureDeviceAddressKHR")));
+        api.CmdWriteAccelerationStructuresPropertiesKHR = reinterpret_cast<PFN_vkCmdWriteAccelerationStructuresPropertiesKHR>(
+            reinterpret_cast<void*>(api.GetDeviceProcAddr(device, "vkCmdWriteAccelerationStructuresPropertiesKHR")));
+        api.CmdCopyAccelerationStructureKHR = reinterpret_cast<PFN_vkCmdCopyAccelerationStructureKHR>(
+            reinterpret_cast<void*>(api.GetDeviceProcAddr(device, "vkCmdCopyAccelerationStructureKHR")));
     }
+    api.CreateQueryPool = reinterpret_cast<PFN_vkCreateQueryPool>(
+        reinterpret_cast<void*>(api.GetDeviceProcAddr(device, "vkCreateQueryPool")));
+    api.DestroyQueryPool = reinterpret_cast<PFN_vkDestroyQueryPool>(
+        reinterpret_cast<void*>(api.GetDeviceProcAddr(device, "vkDestroyQueryPool")));
+    api.CmdResetQueryPool = reinterpret_cast<PFN_vkCmdResetQueryPool>(
+        reinterpret_cast<void*>(api.GetDeviceProcAddr(device, "vkCmdResetQueryPool")));
+    api.GetQueryPoolResults = reinterpret_cast<PFN_vkGetQueryPoolResults>(
+        reinterpret_cast<void*>(api.GetDeviceProcAddr(device, "vkGetQueryPoolResults")));
     const bool ok = api.DestroyDevice && api.CreateSwapchainKHR && api.QueueSubmit2 && api.CmdPipelineBarrier2 &&
                     api.CmdBeginRendering && api.CreateGraphicsPipelines;
     if (!ok) AVER_ERROR("[RHI.Vulkan] a required device-level entry point failed to resolve");
@@ -999,6 +1011,11 @@ IRenderContext* VulkanDevice::renderContext() { return rhiContext_; }
 // UNMEASURED: no editor UI session on this machine to run it through (house rule: no run/build).
 // Checked by eye against vulkan_core.h and D3D12Device's videoMemory() contract; not exercised on a
 // live VkDevice.
+bool VulkanDevice::deviceMemoryTight() const {
+    const VideoMemoryInfo m = videoMemory();
+    return m.supported && m.localBudgetBytes && m.localUsageBytes > m.localBudgetBytes / 20 * 17;
+}
+
 VideoMemoryInfo VulkanDevice::videoMemory() const {
     VideoMemoryInfo out;
     if (!memoryBudgetExt_ || !api_.GetPhysicalDeviceMemoryProperties2 || !physicalDevice_) return out;
@@ -1917,7 +1934,7 @@ public:
         std::lock_guard<std::mutex> l(state_->m);
         VulkanDevice* dev = state_->dev;
         if (!dev) return nullptr;
-        if (defaultHeap.load(std::memory_order_relaxed) && makeDefault(*dev, *s, verts, indices)) {
+        if (defaultHeap.load(std::memory_order_relaxed) && !dev->deviceMemoryTight() && makeDefault(*dev, *s, verts, indices)) {
             s->state = state_;
             return s;
         }
@@ -1938,7 +1955,7 @@ public:
         std::lock_guard<std::mutex> l(state_->m);
         VulkanDevice* dev = state_->dev;
         if (!dev) return nullptr;
-        if (defaultHeap.load(std::memory_order_relaxed) && makeDefault(*dev, *s, nullptr, indices)) {
+        if (defaultHeap.load(std::memory_order_relaxed) && !dev->deviceMemoryTight() && makeDefault(*dev, *s, nullptr, indices)) {
             s->state = state_;
             return s;
         }
@@ -2080,7 +2097,7 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
     // discrete card otherwise pays fetching Upload-heap buffers every draw/shadow/voxelisation/
     // BLAS-build (see IDevice's contract, RHI.hpp; VoxiRenderer's BLAS buffers made the same trade).
     // UNMEASURED here (house rule: no run/build).
-    bool useDefaultHeap = staticMeshDefaultHeap_;
+    bool useDefaultHeap = staticMeshDefaultHeap_ && !deviceMemoryTight();
     BufferKind kind = useDefaultHeap ? BufferKind::Default : BufferKind::Upload;
     BufferDesc vd; vd.bytes = vbytes; vd.kind = kind; vd.debugName = "mesh vertices";
     m.vbBuffer = rhiFactory_->createBuffer(vd);
@@ -2216,7 +2233,7 @@ MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u3
     if (!rootMesh.alive || !rootMesh.vb) return 0;
 
     const u64 ibytes = static_cast<u64>(indexCount) * sizeof(u32);
-    bool useDefaultHeap = staticMeshDefaultHeap_ && !st;
+    bool useDefaultHeap = staticMeshDefaultHeap_ && !st && !deviceMemoryTight();
     const BufferKind kind = useDefaultHeap ? BufferKind::Default : BufferKind::Upload;
     const char* ibName = posed ? "mesh indices (posed part)" : "mesh indices (LOD, shared vertices)";
     BufferDesc idd; idd.bytes = ibytes; idd.kind = kind; idd.debugName = ibName;
