@@ -120,7 +120,6 @@ private:
     std::unordered_map<u32, scene::Entity> entityOf_;   // placement -> entity
     std::unordered_map<u32, std::vector<world::AnimatedBody>> animatedByItem_;
     std::vector<world::AnimatedBody> animated_;
-    std::unordered_map<u64, bool> materialsBound_;
     // Physics shapes by mesh id, shared by every batch; released once the mesh is unloaded.
     std::unordered_map<u64, i32> meshShapes_;
 };

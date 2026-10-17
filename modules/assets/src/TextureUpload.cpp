@@ -135,14 +135,14 @@ rhi::TextureHandle uploadCompressed(rhi::IResourceFactory& res, const std::strin
 // ---- streaming prefetch (prefetchTexture) ----
 std::mutex g_heldMutex;
 std::condition_variable g_heldCv;
-struct Held { CachedTexture tex; u64 order = 0, bytes = 0, size = 0; i64 mtime = 0; };
+struct Held { CachedTexture tex; u64 order = 0, bytes = 0, size = 0; i64 mtime = 0; std::chrono::steady_clock::time_point at; };
 std::unordered_map<std::string, Held> g_held;
 std::unordered_set<std::string> g_reading;
 // Nothing to prefetch: uploaded already, or not a BC7 texture. A texture released and needed again
 // later uploads from disk on the main thread, as before prefetching existed.
 std::unordered_set<std::string> g_skip;
 u64 g_heldBytes = 0, g_heldOrder = 0;
-constexpr u64 kMaxHeldBytes = 2048ull << 20;
+constexpr u64 kMaxHeldBytes = 1024ull << 20;
 
 std::string heldKey(const std::string& path, TextureUsage usage) {
     std::string k = path;
@@ -382,7 +382,7 @@ bool prefetchTexture(const std::string& path, TextureUsage usage) {
     {
         std::unique_lock<std::mutex> l(g_heldMutex);
         g_heldCv.wait(l, [&] { return !g_reading.count(key); });
-        if (g_held.count(key)) return true;
+        if (const auto h = g_held.find(key); h != g_held.end()) { h->second.at = std::chrono::steady_clock::now(); return true; }
         if (g_skip.count(key)) return false;
         g_reading.insert(key);
     }
@@ -413,7 +413,7 @@ bool prefetchTexture(const std::string& path, TextureUsage usage) {
     u64 bytes = 0;
     for (const std::vector<u8>& m : cached.mipBlocks) bytes += m.size();
     g_heldBytes += bytes;
-    g_held[key] = Held{std::move(cached), ++g_heldOrder, bytes, size, mtime};
+    g_held[key] = Held{std::move(cached), ++g_heldOrder, bytes, size, mtime, std::chrono::steady_clock::now()};
     while (g_heldBytes > kMaxHeldBytes && g_held.size() > 1) {
         auto oldest = g_held.begin();
         for (auto it = g_held.begin(); it != g_held.end(); ++it)
@@ -429,6 +429,26 @@ void dropPrefetchedTextures() {
     g_held.clear();
     g_skip.clear();
     g_heldBytes = 0;
+}
+
+void trimPrefetchedTextures() {
+    const auto cutoff = std::chrono::steady_clock::now() - std::chrono::seconds(30);
+    std::lock_guard<std::mutex> l(g_heldMutex);
+    for (auto it = g_held.begin(); it != g_held.end();) {
+        if (it->second.at >= cutoff) { ++it; continue; }
+        g_heldBytes -= it->second.bytes;
+        it = g_held.erase(it);
+    }
+}
+
+void forgetUploadedTextures() {
+    std::lock_guard<std::mutex> l(g_heldMutex);
+    g_skip.clear();
+}
+
+u64 prefetchedTextureBytes() {
+    std::lock_guard<std::mutex> l(g_heldMutex);
+    return g_heldBytes;
 }
 
 } // namespace aver::assets

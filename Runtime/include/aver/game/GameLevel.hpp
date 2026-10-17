@@ -259,7 +259,6 @@ private:
     world::LevelAssetLibrary::Loader instanceLoader_;
     bool instancesInit_ = false;
     mutable std::vector<world::AnimatedBody> animatedMerged_;
-    std::unordered_set<u64> instanceMaterialsBound_;
     // [wave3/level-instances end]
     rhi::IDevice* device_ = nullptr;
     GameContent* content_ = nullptr;

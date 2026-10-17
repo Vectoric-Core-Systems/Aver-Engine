@@ -707,6 +707,15 @@ struct LevelInstances::Impl {
         }
         hm.mark("destroy");
         if (self.port_.release) for (const u64 m : in.meshes) self.port_.release(m);
+        // A mesh no unit holds any more takes its shape with it (its bodies are gone; a reload brings a new one).
+        if (self.port_.loaded)
+            for (const u64 m : in.meshes)
+                if (const auto s = meshShapes.find(m); s != meshShapes.end() && !self.port_.loaded(m)) {
+#if AVER_MODULE_PHYSICS
+                    if (s->second) aver_phys_release_mesh_shape(s->second);
+#endif
+                    meshShapes.erase(s);
+                }
         hm.mark("release");
         const u32 count = in.entityCount;
         in.members.clear();

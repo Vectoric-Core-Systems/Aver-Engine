@@ -2636,7 +2636,8 @@ void SandboxApp::buildUI(Engine& e) {
             vram_ = e.device()->videoMemory();
             static u32 vramLogTick = 0;
             if (hitchVerbose() && vram_.supported && (vramLogTick++ % 4) == 0)
-                AVER_INFO("[VRAM] {} of {} MB", vram_.localUsageBytes >> 20, vram_.localBudgetBytes >> 20);
+                AVER_INFO("[VRAM] {} of {} MB; system memory the GPU uses {} MB", vram_.localUsageBytes >> 20,
+                          vram_.localBudgetBytes >> 20, vram_.nonLocalUsageBytes >> 20);
         }
         if (vram_.supported && vram_.localBudgetBytes > 0) {
             const f64 usedGb = static_cast<f64>(vram_.localUsageBytes) / (1024.0 * 1024.0 * 1024.0);

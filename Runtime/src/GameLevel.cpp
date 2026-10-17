@@ -97,23 +97,11 @@ bool loadLaneSidecar(const std::string& levelPath, fmt::OcLanesData& out) {
 #endif
 
 // [wave3/level-instances begin]
-// A mesh's own slot materials, bound the way LevelStreaming::bindMeshMaterials binds them for a streamed placement.
-// Queued: LevelInstances builds them one at a time within its budget (port.buildMaterial).
+// A mesh's own slot materials, once per load. Queued: LevelInstances builds them one at a time within its budget
+// (port.buildMaterial).
 void bindInstanceMeshMaterials(GameContent& content, u64 meshId) {
 #if AVER_MODULE_PBR
-    const i32 slot0Token = content.meshDefaultMaterial(meshId);
-    if (slot0Token) {
-        const std::string& name = content.meshSlot0Name(meshId);
-        if (!name.empty()) content.queueSurfaceMaterial(slot0Token, name);
-    }
-    if (const std::vector<GameContent::MeshPart>* parts = content.partsFor(meshId)) {
-        for (const GameContent::MeshPart& part : *parts) {
-            if (!part.material) continue;
-            const char* partName = aver_scene_material_name(part.material);
-            if (!partName || !*partName) continue;
-            content.queueSurfaceMaterial(part.material, partName);
-        }
-    }
+    content.queueMeshMaterials(meshId);
 #else
     (void)content; (void)meshId;
 #endif
@@ -535,12 +523,13 @@ void GameLevel::load(const std::string& path, GameContent& content) {
             content_->acquireTag = "level instance";
             const bool got = content_->acquireMesh(*device_, mesh);
             content_->acquireTag = nullptr;
-            if (got && instanceMaterialsBound_.insert(mesh).second) bindInstanceMeshMaterials(*content_, mesh);
+            if (got) bindInstanceMeshMaterials(*content_, mesh);
             return got;
         };
         port.release = [this](u64 mesh) { if (content_ && device_) content_->releaseMesh(*device_, mesh); };
         port.prefetch = [this](u64 mesh) { if (content_ && device_) content_->prefetchMesh(mesh, 0.0f); };
         port.ready = [this](u64 mesh) { return !content_ || !device_ || content_->meshReady(mesh); };
+        port.loaded = [this](u64 mesh) { return content_ && content_->meshLoaded(mesh); };
 #if AVER_MODULE_PHYSICS
         port.takeShape = [this](u64 mesh) { return content_ ? content_->takeMeshShape(mesh) : 0; };
 #endif

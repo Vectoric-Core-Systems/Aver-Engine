@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <limits>
 #include <mutex>
 #include <system_error>
@@ -626,6 +627,14 @@ void GameContent::unloadToPending(u64 id) {
     meshSlot0Material_.erase(id);
     meshSlot0Name_.erase(id);
     collisionMeshCache_.erase(id);
+#  if AVER_MODULE_PBR
+    if (const auto mn = meshMaterialNames_.find(id); mn != meshMaterialNames_.end()) {
+        for (const std::string& name : mn->second)
+            if (const auto u = materialUse_.find(name); u != materialUse_.end() && u->second.meshes && !--u->second.meshes)
+                u->second.idleSince = streamTick_;
+        meshMaterialNames_.erase(mn);
+    }
+#  endif
     if (const auto rs = readyShapes_.find(id); rs != readyShapes_.end()) {
 #  if AVER_MODULE_PHYSICS
         aver_phys_release_mesh_shape(rs->second);
@@ -1220,6 +1229,17 @@ struct GameContent::MeshPrefetch {
     std::vector<std::thread> workers;
     bool stop = false;
     std::unordered_map<u64, std::shared_ptr<Job>> jobs;   // main thread only
+    // Dropped reads are freed off the main thread: their staged upload buffers were up to 240 ms of a tick.
+    std::vector<std::shared_ptr<Job>> dead;
+    std::future<void> reaper;
+    void drop(u64 id) {
+        if (const auto it = jobs.find(id); it != jobs.end()) { dead.push_back(std::move(it->second)); jobs.erase(it); }
+    }
+    void reap() {
+        if (dead.empty() || (reaper.valid() && reaper.wait_for(std::chrono::seconds(0)) != std::future_status::ready)) return;
+        reaper = std::async(std::launch::async, [d = std::move(dead)]() mutable { d.clear(); });
+        dead.clear();
+    }
     u64 nextOrder = 0;
     u64 tick = 0;
     std::mutex slotMutex;
@@ -1357,7 +1377,7 @@ void GameContent::prefetchMesh(u64 id, f32 priority) {
             if (j->done.load(std::memory_order_acquire) && j->touchedTick + 2 < pf.tick)
                 finished.emplace_back(j->order, jid);
         std::sort(finished.begin(), finished.end());
-        for (usize i = 0; i < finished.size() && pf.jobs.size() > kMaxJobs * 3 / 4; ++i) pf.jobs.erase(finished[i].second);
+        for (usize i = 0; i < finished.size() && pf.jobs.size() > kMaxJobs * 3 / 4; ++i) pf.drop(finished[i].second);
         if (pf.jobs.size() >= kMaxJobs) {
             // Still full: finished reads farther than this request give way, farthest first, down to 7/8 of the
             // pool. A streamer loads a root only once ALL its meshes are read, so a pool full of finished
@@ -1368,7 +1388,7 @@ void GameContent::prefetchMesh(u64 id, f32 priority) {
             for (const auto& [jid, j] : pf.jobs)
                 if (j->done.load(std::memory_order_acquire) && j->priority > priority) far.emplace_back(j->priority, jid);
             std::sort(far.begin(), far.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-            for (usize i = 0; i < far.size() && pf.jobs.size() > kMaxJobs * 7 / 8; ++i) pf.jobs.erase(far[i].second);
+            for (usize i = 0; i < far.size() && pf.jobs.size() > kMaxJobs * 7 / 8; ++i) pf.drop(far[i].second);
             if (pf.jobs.size() >= kMaxJobs) {
                 // Then queued reads: the farthest gives way to a nearer one.
                 auto q = pf.queue.end();
@@ -1376,7 +1396,7 @@ void GameContent::prefetchMesh(u64 id, f32 priority) {
                     if (q == pf.queue.end() || (*it)->priority > (*q)->priority) q = it;
                 if (q == pf.queue.end() || (*q)->priority <= priority) return;
                 for (auto it = pf.jobs.begin(); it != pf.jobs.end(); ++it)
-                    if (it->second == *q) { pf.jobs.erase(it); break; }
+                    if (it->second == *q) { pf.drop(it->first); break; }
                 pf.queue.erase(q);
             }
         }
@@ -1396,28 +1416,47 @@ void GameContent::prefetchMesh(u64 id, f32 priority) {
 }
 
 void GameContent::prefetchTick() {
+    HitchMarks hm("content tick", 0.25);
+    if (++streamTick_ % 60 == 0) {
+#  if AVER_MODULE_PBR
+        releaseIdleMaterials();
+        hm.mark("materials");
+        assets::trimPrefetchedTextures();
+        hm.mark("textures");
+        if (hitchVerbose() && streamTick_ % 120 == 0)
+            AVER_INFO("[Stream] held: {} mesh read(s), textures {} MB; {} material(s), {} mesh(es) loaded",
+                      prefetch_ ? prefetch_->jobs.size() : 0, assets::prefetchedTextureBytes() >> 20,
+                      materialAssets_.size(), sceneMeshes_.size());
+#  endif
+    }
     if (!prefetch_) return;
     MeshPrefetch& pf = *prefetch_;
     ++pf.tick;
+    pf.reap();
     // Distance-ranked requests (priority > 0) nobody asked for in ~2 s are dropped: a queued one would keep
     // its old, now wrong distance and be read before what the viewer needs after a jump, and a finished one
-    // would hold a pool slot forever. (Foliage re-asks on a timer, so not after two ticks.)
-    constexpr u64 kStaleTicks = 120;
+    // would hold a pool slot forever. (Foliage re-asks on a timer, so not after two ticks.) Unranked ones
+    // (streamers re-ask every tick while they want them) after ~10 s, so a cell flown past frees its reads.
+    constexpr u64 kStaleTicks = 120, kUnrankedStaleTicks = 600;
     std::unordered_set<const MeshPrefetch::Job*> stale;
     for (const auto& [id, j] : pf.jobs)
-        if (j->priority > 0.0f && j->touchedTick + kStaleTicks < pf.tick) stale.insert(j.get());
+        if (j->touchedTick + (j->priority > 0.0f ? kStaleTicks : kUnrankedStaleTicks) < pf.tick) stale.insert(j.get());
     if (stale.empty()) return;
     std::lock_guard<std::mutex> l(pf.m);
     std::unordered_set<const MeshPrefetch::Job*> queued;
     for (const auto& j : pf.queue) queued.insert(j.get());
     for (auto it = pf.jobs.begin(); it != pf.jobs.end();) {
         const MeshPrefetch::Job* j = it->second.get();   // one being read stays until it finishes
-        if (stale.count(j) && (queued.count(j) || j->done.load(std::memory_order_acquire))) it = pf.jobs.erase(it);
-        else ++it;
+        if (stale.count(j) && (queued.count(j) || j->done.load(std::memory_order_acquire))) {
+            pf.dead.push_back(std::move(it->second));
+            it = pf.jobs.erase(it);
+        } else ++it;
     }
     pf.queue.erase(std::remove_if(pf.queue.begin(), pf.queue.end(),
                                   [&](const std::shared_ptr<MeshPrefetch::Job>& j) { return stale.count(j.get()) != 0; }),
                    pf.queue.end());
+    pf.reap();
+    hm.mark("reads");
 }
 
 bool GameContent::meshReady(u64 id) const {
@@ -1464,10 +1503,11 @@ void GameContent::dropPrefetches() {
 // Material slot collision filter.
 bool GameContent::collisionSlotCollides(const std::string& slotName) {
     if (slotName.empty()) return true;
-    const pbr::MaterialHandle mh = materialForSurface(slotName);
-    if (!mh) return true;   // no authored .ocmat: cannot resolve
-    const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(mh);
-    if (!d) return true;
+    // A loaded material's desc, else its file: asking would load (and keep) a material nothing draws.
+    const auto it = materialAssets_.find(slotName);
+    if (it == materialAssets_.end()) return slotCollidesFromFiles(project_.binariesDir(), project_.contentDir(), slotName);
+    const pbr::MaterialDesc* d = it->second ? pbr::MaterialLibrary::get().desc(it->second) : nullptr;
+    if (!d) return true;   // no authored .ocmat: cannot resolve
     return d->alphaMode != pbr::AlphaMode::Mask && d->alphaMode != pbr::AlphaMode::Blend;
 }
 #else
@@ -1680,6 +1720,12 @@ u32 GameContent::resolveMaterialGraph(const std::string& graphRef) const {
 
 pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
     if (name.empty()) return 0;
+    materialUse_[name].kept = true;
+    return loadSurfaceMaterial(name);
+}
+
+pbr::MaterialHandle GameContent::loadSurfaceMaterial(const std::string& name) {
+    if (name.empty()) return 0;
     const auto cached = materialAssets_.find(name);
     if (cached != materialAssets_.end()) return cached->second;
 
@@ -1709,14 +1755,40 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
     }
     // Cache 0 (no retries) to avoid stat calls for missing surfaces.
     materialAssets_.emplace(name, h);
+    MaterialUse& u = materialUse_[name];
+    if (!u.meshes) u.idleSince = streamTick_;
     return h;
+}
+
+void GameContent::releaseIdleMaterials() {
+    constexpr u64 kIdleTicks = 600;   // ~10 s: a cell flickering at the evict edge does not reload them
+    usize released = 0;
+    for (auto it = materialUse_.begin(); it != materialUse_.end();) {
+        const MaterialUse& u = it->second;
+        if (u.kept || u.meshes || u.idleSince + kIdleTicks > streamTick_) { ++it; continue; }
+        if (const auto a = materialAssets_.find(it->first); a != materialAssets_.end()) {
+            if (const pbr::MaterialHandle h = a->second) {
+#  if AVER_MODULE_SCENE
+                for (auto s = surfaceMaterials_.begin(); s != surfaceMaterials_.end();)
+                    s = s->second == h ? surfaceMaterials_.erase(s) : std::next(s);
+#  endif
+                pbr::MaterialLibrary::get().destroy(h);   // MaterialSystem frees its textures at its next update
+                ++released;
+            }
+            materialAssets_.erase(a);
+        }
+        it = materialUse_.erase(it);
+    }
+    if (!released) return;
+    assets::forgetUploadedTextures();   // their textures may be read ahead again
+    AVER_INFO("[Material] {} streamed material(s) no loaded mesh uses released", released);
 }
 
 bool GameContent::buildNextMaterial() {
     if (materialBinds_.empty()) return false;
     const MaterialBind b = std::move(materialBinds_.front());
     materialBinds_.pop_front();
-    if (const pbr::MaterialHandle h = materialForSurface(b.name)) {
+    if (const pbr::MaterialHandle h = loadSurfaceMaterial(b.name)) {
         if (materialSystem_) materialSystem_->bindingSet(h);   // builds it unless already built
         bindSurfaceMaterial(b.token, h);
     }
@@ -1729,6 +1801,8 @@ void GameContent::releaseProjectMaterials(bool clearGraphRegistry) {
     // Destroy materials (library owns them, map only names).
     for (const auto& kv : materialAssets_) if (kv.second) pbr::MaterialLibrary::get().destroy(kv.second);
     materialAssets_.clear();
+    materialUse_.clear();
+    meshMaterialNames_.clear();
     // Material graphs cached process-wide by path; clear to prevent id collisions on project reload.
     if (clearGraphRegistry) pbr::materialGraphs().clear();
 #if AVER_MODULE_SCENE
@@ -1743,6 +1817,7 @@ usize GameContent::releaseMaterialsExcept(const std::unordered_set<std::string>&
     for (auto it = materialAssets_.begin(); it != materialAssets_.end();) {
         if (keep.count(it->first)) { ++it; continue; }
         if (it->second) { pbr::MaterialLibrary::get().destroy(it->second); ++released; }
+        materialUse_.erase(it->first);
         it = materialAssets_.erase(it);
     }
 #if AVER_MODULE_SCENE
@@ -1773,6 +1848,28 @@ const std::string& GameContent::meshSlot0Name(u64 meshId) const {
 #endif
 
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
+void GameContent::queueMeshMaterials(u64 meshId) {
+    if (meshMaterialNames_.count(meshId)) return;
+    std::vector<std::string>& names = meshMaterialNames_[meshId];
+    const auto queue = [&](i32 token, const std::string& name) {
+        queueSurfaceMaterial(token, name);
+        if (std::find(names.begin(), names.end(), name) != names.end()) return;
+        names.push_back(name);
+        ++materialUse_[name].meshes;
+    };
+    if (const i32 slot0Token = meshDefaultMaterial(meshId)) {
+        const std::string& name = meshSlot0Name(meshId);
+        if (!name.empty()) queue(slot0Token, name);
+    }
+    if (const std::vector<MeshPart>* parts = partsFor(meshId)) {
+        for (const MeshPart& part : *parts) {
+            if (!part.material) continue;
+            const char* partName = aver_scene_material_name(part.material);
+            if (partName && *partName) queue(part.material, partName);
+        }
+    }
+}
+
 pbr::MaterialHandle GameContent::authoredFor(i32 token) const {
     const auto it = surfaceMaterials_.find(token);
     return it == surfaceMaterials_.end() ? 0 : it->second;

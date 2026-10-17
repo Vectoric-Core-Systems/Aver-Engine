@@ -79,12 +79,24 @@ Textures and materials (2026-10-15; NeonDistrict's cells each brought ~300 textu
 work in one frame):
 - The prefetch workers also read the textures a mesh's slot materials name (`assets::prefetchTexture`: the BC7
   chain from the derived-data cache, or on a first visit decoded, compressed and cached) and hold them, up to
-  2 GiB, for the upload, which then only copies.
+  1 GiB and 30 s, for the upload, which then only copies.
 - Texture uploads no longer wait for the GPU queue (D3D12: a 256 MB staging ring; past it, and on Vulkan past
   256 MB in flight, the old waited path).
 - A streamed mesh's slot materials are bound through `GameContent::queueSurfaceMaterial`; `buildNextMaterial`
   loads, builds and binds one at a time inside the streamer's budget, so the renderer's update never builds a
   burst of new materials at once.
+
+Memory over a long flight (2026-10-17):
+- `GameContent::queueMeshMaterials` queues a mesh's slot materials once per load and counts the mesh as a user
+  of each. A material no loaded mesh has used for ~10 s (600 streaming ticks) is destroyed, and the material
+  system frees its textures (2.2 GB over a 4000-frame NeonDistrict flight). A material asked for through
+  `materialForSurface` (placement overrides, landscape, foliage, water) is kept until the level changes.
+- Unranked prefetches (level instances re-ask every tick while they want them) are dropped after ~10 s
+  unasked; dropped reads are freed on a background thread (their staged upload buffers were up to 240 ms).
+- `LevelInstances` releases a mesh's physics shape when the last unit holding the mesh unloads
+  (`ContentPort::loaded`).
+- Not changed: the ray-traced geometry table grows by half. A quarter left so little room that streaming forced
+  silent full repacks (every mesh copied again, ~100 ms of GPU) several times a minute.
 
 ## 4. Foliage
 

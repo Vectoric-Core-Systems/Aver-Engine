@@ -76,7 +76,9 @@ public:
     // Where an asset reference points on this machine, or empty.
     std::string resolveAssetPath(const pbr::TextureRef& ref) const;
 
-    // The material a surface token names, loading it on first use. 0 when the project has none.
+    // The material a surface token names, loading it on first use. 0 when the project has none. A material
+    // asked for here is kept until the level or project changes; one only queued by queueMeshMaterials is
+    // released once no loaded mesh has used it for a while (releaseIdleMaterials).
     pbr::MaterialHandle materialForSurface(const std::string& name);
 
     // Deliberately no loadProjectMaterials: materials load lazily per-surface instead.
@@ -93,6 +95,9 @@ public:
     pbr::MaterialHandle authoredFor(i32 token) const;
     // Every bound surface token, for a material picker.
     const std::unordered_map<i32, pbr::MaterialHandle>& surfaceMaterials() const { return surfaceMaterials_; }
+    // Queues a loaded mesh's slot materials (queueSurfaceMaterial), once per load. The mesh counts as a user of
+    // each until it unloads, so a streamed level's materials and textures go with the cells that used them.
+    void queueMeshMaterials(u64 meshId);
 #endif
 
 #if AVER_MODULE_SCENE
@@ -323,6 +328,13 @@ private:
     struct MaterialBind { i32 token; std::string name; };
     std::deque<MaterialBind> materialBinds_;
     std::unordered_map<std::string, pbr::MaterialHandle> materialAssets_;
+    pbr::MaterialHandle loadSurfaceMaterial(const std::string& name);   // materialForSurface, not kept
+    struct MaterialUse { u32 meshes = 0; bool kept = false; u64 idleSince = 0; };
+    std::unordered_map<std::string, MaterialUse> materialUse_;
+    std::unordered_map<u64, std::vector<std::string>> meshMaterialNames_;   // loaded mesh -> its queued materials
+    u64 streamTick_ = 0;   // prefetchTick() count
+    // Destroys materials no loaded mesh has used for ~10 s and nothing else asked for.
+    void releaseIdleMaterials();
 
     // Turns an .ocmat's GRAPHREF path into the id materialForSurface() stores.
     // Ported from SandboxApp::resolveMaterialGraph, same cache-by-compiled-path through pbr::materialGraphs().

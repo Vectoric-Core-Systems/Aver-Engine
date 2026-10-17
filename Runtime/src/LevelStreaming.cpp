@@ -49,7 +49,6 @@ void LevelStreaming::begin(const fmt::OcWorldData& w, GameContent& content, rhi:
     entityOf_.clear();
     animatedByItem_.clear();
     animated_.clear();
-    materialsBound_.clear();
 
     // Roots own their descendants (parents precede children in OcWorldData). A child of a class
     // placement loads as a root, as world::instantiate already treats it.
@@ -161,22 +160,8 @@ world::Aabb LevelStreaming::itemBounds(const Item& it) const {
 
 void LevelStreaming::bindMeshMaterials(u64 meshId) {
 #if AVER_MODULE_PBR
-    if (!materialsBound_.emplace(meshId, true).second) return;
-    // A mesh's own slot materials, as GameLevel::load binds them for an eager level.
-    // Queued and drained by loadItems, so each is built as it is made.
-    const i32 slot0Token = content_->meshDefaultMaterial(meshId);
-    if (slot0Token) {
-        const std::string& name = content_->meshSlot0Name(meshId);
-        if (!name.empty()) content_->queueSurfaceMaterial(slot0Token, name);
-    }
-    if (const std::vector<GameContent::MeshPart>* parts = content_->partsFor(meshId)) {
-        for (const GameContent::MeshPart& part : *parts) {
-            if (!part.material) continue;
-            const char* partName = aver_scene_material_name(part.material);
-            if (!partName || !*partName) continue;
-            content_->queueSurfaceMaterial(part.material, partName);
-        }
-    }
+    // A mesh's own slot materials, once per load. Queued and drained by loadItems, so each is built as it is made.
+    content_->queueMeshMaterials(meshId);
 #else
     (void)meshId;
 #endif
