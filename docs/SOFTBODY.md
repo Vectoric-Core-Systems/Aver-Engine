@@ -1,210 +1,221 @@
-# Aver Engine — Plastic soft bodies: dents that stay, and tearing
+# Aver Engine - Cloth and destruction on Jolt soft bodies
 
-`Aver.SoftBody` (`modules/softbody`) is the half of soft-body physics Jolt cannot do. Jolt's soft body
-(`aver_phys_softbody_*`, see `physics_abi.h`) is **elastic**: push it and it springs back, collide it
-with the world and it collides. This module is **plastic**: a bar bent past its yield **stays bent**, a
-cloth strip pulled past its limit **tears in two**, and a glass pane **cracks** instead of denting.
+Cloth and destructible objects are Jolt soft bodies. The engine owns what Jolt has no notion of: the
+topology (cage), the material yield model, tear resolution, the pieces a tear leaves, the `.ocsoft`
+asset, and the scene join. The earlier Verlet/Gauss-Seidel solver, its `Aver.SoftBody` async worker, the
+`aver_sb_*` C ABI, the Window > Soft Body (plastic) panel and the `modules/fracture` skeleton are retired
+(see `docs/STALE_CODE.md`). Plan and rationale: `docs/plans/wave9/SOFTBODY_CLOTH_DESTRUCTION.md`.
 
-| | Jolt soft body | `Aver.SoftBody` |
-|---|---|---|
-| Cloth, skinned characters, elastic blobs | yes | no |
-| World collision | yes | no (the host feeds it impacts) |
-| Permanent set past a yield force | no | yes |
-| Break / tear, with the render mesh following | no | yes |
-| Depends on | Jolt | `Aver.Core` only |
+Status: written against the frozen design, not yet compiled or run. Every number marked UNVERIFIED in
+this file is a starting value that the headed tuning pass (plan section 6) sets.
 
-They never share state. A host that wants both (a car whose panels dent and whose flags flutter) runs
-both and gives each its own handle. Nothing here includes or links `Aver.Physics`.
-
-The solver is the OpenConstructor cage solver, ported UE-free; `docs/recon/softbody-solver.md` is the
-spec and the "As built" section at its end lists every place this differs from it.
-
----
-
-## 1. The model
-
-A **cage** is particles joined by distance constraints (**beams**), optionally skinned by
-**triangles**:
-
-- `Particle` — position, Verlet previous position, rest position. `pinned` means *kinematic*: the
-  solver never moves it, the host may (a cage riding a moving chassis, a hand holding cloth).
-- `Beam` — two particles, a rest length that **creeps** when the beam yields, and the material it is
-  made of. Beams are what yield and break.
-- `Triangle` — three particles and the three beams on its edges. Only needed for tearing a *surface*
-  (it is how a tear knows which side of a cut a particle's triangles are on) and for the render
-  mapping. A bar or truss is just beams.
-- `Material` — the yield curve:
+## 1. Layers
 
 ```
-force = axialStiffness * stretch                      N, stretch in cm
-
-          force
-  breakForceN -|-------------------------- X  instant snap
-               |                      ...'
-  bendForceN --|-----------.-----'''           plastic: rest length creeps toward the
-               |        .'                      stretched length at plasticStiffness
-               |     .'   elastic: springs back
-               +---------------------------- stretch
+ .ocsoft + preset          Aver.SoftBody (pure; Core + Formats)
+ + CCloth/CDestructible -> SoftAsset, SimMesh (weld -> Cage + RenderBinding), Damage, Islands, Material
+                                   |  arrays only
+ Aver.SoftBody.Scene  SoftBodySystem  (scene + physics + anim.scene)
+   inbox -> tick: impacts -> readback -> damage/plastic -> tear/rebuild/split -> skin+wind+LOD -> publish
+                                   |  aver_phys_sb_*                |  PieceView
+ Aver.Physics (DLL)  physics_softbody_abi.h        Aver.Render.SoftBody  SoftBodyScene (draw only)
 ```
 
-Below `bendForceN` a beam is elastic and the cage returns to rest. Above it the rest length creeps by
-`(force − yield) / plasticStiffness` per second (rate-limited by `damageRate`): the shape the beam
-settles at is its new rest shape, so the dent stays. `hardening` raises the yield as the set grows
-(0 = perfectly plastic). A beam tears when any of these happens:
+| Module | Owns |
+|---|---|
+| `Aver.SoftBody` (`modules/softbody`) | `Material`/presets, `Cage`, `SimMesh`, `Damage`, `Islands`, `RenderBinding`, `SoftAsset` (.ocsoft). No scene, GPU or Jolt. |
+| `Aver.Physics` (`modules/physics`) | `aver_phys_sb_*`: builder, rebuild under the same handle, in-place rest edits, aero, skin push, impact events. |
+| `Aver.SoftBody.Scene` (`modules/softbody.scene`) | `CCloth`/`CDestructible`, `SoftBodySystem`, the tick, the inbox, events, the framework provider. |
+| `Aver.Render.SoftBody` (`modules/render.softbody`) | Draw only: epoch mesh rebuild, upload ring, bounds. |
+| `Aver.Framework` | `aver_fw_softbody_*` relay ABI for C# and graph nodes. |
 
-- the force passes `breakForceN`;
-- the accumulated set passes `maxBend` cm;
-- its stretch passes `breakStrain` of the **original** length (a strain limit, not creeping away
-  because the rest length moved); 0 turns it off;
-- it is `Fracture` or `Shatter` (brittle) and the force passes `bendForceN` — carbon and glass snap at
-  yield instead of bending.
+Units and axes are the engine's (cm, +X forward, +Y right, +Z up, left-handed) at every boundary;
+conversion to Jolt stays in `modules/physics/src/Convert.hpp`.
 
-A snap recoils the two ends (`breakAbsorb` of the energy is soaked, the rest kicks the neighbours),
-which is what makes a crack run.
+## 2. The model
 
-## 2. The step
+A cage is particles joined by edges (`Beam`), dihedral bends between triangle pairs, and the triangles.
+`SimMesh` welds a render mesh (vertices equal within `weldCm`) into particles and keeps a `RenderBinding`
+from render vertices to particles, so a seam in the render mesh does not become a tear in the sim.
 
-`step(cage, cfg)` is deterministic. Per substep (default 4 per step at 64 Hz, 8 relaxation sweeps):
+Jolt reads an edge's rest length and a bend's rest angle live. That is what makes damage cheap:
 
-1. **Verlet.** `pos += (pos − prev) × damping`, clamped to `maxNodeSpeed`. Pinned particles take no
-   velocity. Gravity applies to freed debris only, unless `gravityAll` (cloth, flags).
-2. **Damage / plasticity.** Reads the stretch the integration (or an impact) just caused, **before**
-   relaxation hides it: yield → creep, snap → break.
-3. **Gauss-Seidel PBD.** Distance projection, stiffness per material.
-4. **Tear resolution** if anything broke (§3).
+- A **dent** (plastic set) is an in-place write of new edge rests and bend angles
+  (`aver_phys_sb_set_edge_rest`, `aver_phys_sb_rest_bends_from_pose`). The body is not rebuilt.
+- A **tear** is a topology change: the system runs `resolveTears`, plans islands, and rebuilds the body
+  under the same handle (`aver_phys_sb_builder_finish` with `replaceBody`), carrying every surviving
+  particle's position and velocity across through a state map. Extra islands become new bodies and
+  debris entities.
 
-The float evaluation order is part of the contract: a queued impact on the worker thread and the same
-impact replayed by hand must end on the same bits (`PlasticSoftBodyAsyncTest` checks exactly that). Do not
-reorder the arithmetic without re-running both tests.
+Materials (`Material.hpp`) use Jolt's compliance (m/N; 0 is inextensible) plus yield and break values:
+`yieldStrain` (plastic creep starts), `hardening`, `maxSetCm`, `breakStrain`, `toughnessJ` per edge,
+`behavior` (`deform`, `fracture`, `shatter`: brittle behaviours snap at yield and do not dent).
 
-`StepResult.settled` is true when no particle moved more than `settleThresholdCm` in any substep; a
-host stops stepping then and idles until the next impact.
+| Preset key | Area density kg/m2 | Edge compliance | Bend compliance | Iterations | Behaviour | breakStrain |
+|---|---|---|---|---|---|---|
+| `cloth_light` | 0.25 | 0 | 0.05 | 6 | deform | 0.40 (tearable only) |
+| `cloth_heavy` | 0.8 | 0 | 0.01 | 6 | deform | 0.35 (tearable only) |
+| `metal` | 7.8 | 2e-7 | 1e-6 | 8 | deform, yield 0.010, set to 25% of rest | 0.30 |
+| `wood` | 6.0 | 1e-6 | 5e-6 | 8 | fracture | 0.020 |
+| `glass` | 10 | 2e-7 | 1e-6 | 8 | shatter | 0.006 |
 
-### Impacts
+All preset values are UNVERIFIED starting points.
 
-`applyImpact(cage, Impact, CrushParams)`:
+## 3. `.ocsoft`
 
-- The raw depth goes through the **soft-knee crush curve**: identity up to `knee` (50 cm), then
-  C1-continuous and asymptotic to `knee × ceilingMult` (90 cm). A 200 km/h crash is deep but bounded.
-- Particles within `radiusCm` are pushed along `direction` with linear falloff — by seeding Verlet
-  velocity (`prev −= dir × disp × falloff`), so a deep hit is spread over frames by the speed clamp
-  and never teleports.
-- Brittle particles (majority of their beams brittle) **do not dent**; instead brittle beams whose
-  midpoint is within the **tear radius** snap outright.
-- `depthFromImpulse` / `depthFromSpeedKmh` convert a rigid-body callback into a raw depth.
+JSON, UTF-8, `"format":"ocsoft"`, `"version":1`. Unknown keys are ignored; a newer version is refused.
+Read with `fmt::JsonValue`, written by the small emitter in `SoftAsset.cpp`. A minimal asset:
 
-## 3. Tearing, and what happens to the mesh
-
-A broken beam is just a constraint that stopped constraining. The interesting part is a **surface**: a
-tear that opens a slit has to *duplicate* the particles along it, or the two lips stay welded to one
-point.
-
-`resolveTears` (run by `step`, or by hand after `breakBeam`) works per particle that touches a broken
-edge:
-
-1. Take the particle's incident triangles. Two triangles are joined around it if they share an
-   **unbroken** edge that contains it.
-2. If those triangles fall into more than one group, the particle is torn open: the first group keeps
-   the particle, every other group gets a **duplicate** (same position and velocity, `origin` records
-   what it was torn from), and that group's triangles and unbroken beams are re-pointed at it.
-3. Each duplicate is logged as a `SplitEvent{old, new, triangles}`.
-
-A single broken edge in the middle of a sheet does **not** split anything — the fan around each
-endpoint is still connected the other way round. A *line* of broken edges does, which is exactly a
-tear. Triangles with **two or more** broken edges are marked dead (`triDead`): their corners are no
-longer held together and the triangle would be drawn stretched across the gap, so the renderer skips
-it. A particle with no unbroken beam left is `freed` and falls as debris. Pieces are counted by
-`countPieces` (connected components over unbroken beams).
-
-Beams that belong to no triangle ("free" beams: a truss, a rope) are never re-pointed. A tear through a
-truss is breaking its beams; there is no surface to open.
-
-### The render mesh
-
-`RenderBinding` maps render vertices to particles and render triangles to sim triangles
-(`RenderBinding::identity(cage)` is the one-to-one case; custom meshes fill the three arrays and call
-`finalize`). The host replays tears onto it:
-
-```cpp
-std::vector<u32> sources;
-binding.applySplits(cage.splitLog, &sources);   // or snapshot.splits from the async worker
-// for each k: new render vertex (oldCount + k) copies its UV/normal/etc. from vertex sources[k]
-binding.visibleIndices(cage.triDead, indexBuffer);   // dead triangles omitted
-binding.gatherPositions(particlePositions, vertexPositions);
+```json
+{"format":"ocsoft","version":1,"kind":"cloth","preset":"cloth_light"}
 ```
 
-`repair(cage)` undoes dents and tears; `binding.reset()` undoes the mapping.
+`kind` selects which of `cloth` and `destruct` is read; `preset` names a row of the table above and any
+key under `material` and `sim` overrides it. Full schema:
 
-## 4. The async worker
+```json
+{ "format":"ocsoft", "version":1, "kind":"cloth", "preset":"cloth_light",
+  "material": { "areaDensityKgM2":0.25, "compliance":0, "bendCompliance":0.05, "yieldStrain":0,
+                "hardening":0, "maxSetCm":0, "breakStrain":0.4, "toughnessJ":0,
+                "behavior":"deform", "friction":0.4, "restitution":0 },
+  "sim":      { "iterations":6, "damping":0.3, "vertexRadiusCm":0.4, "maxSpeedCmS":2500,
+                "gravityScale":1, "weldCm":0.01, "maxParticles":4096, "allowSleep":true },
+  "cloth":    { "dragCoeff":1.0, "liftCoeff":0.3, "tearable":false,
+                "skin": { "defaultReachCm":6, "backstopCm":-1 } },
+  "destruct": { "minImpactCmS":150, "impulseEfficiency":0.6, "maxKickCmS":1200,
+                "minPieceTriangles":4, "debrisLifetimeS":12, "maxPieces":16 },
+  "paint":    { "meshKey":"<hex fnv1a64 of vertex count + welded positions>",
+                "pin":"<hex RLE, one u8 per sim particle, 255 = pinned>",
+                "reach":"<hex RLE, u8 per particle, 0 = hard skin, 255 = free>",
+                "rules":[ {"type":"above","axis":"z","valueCm":170},
+                          {"type":"bone","bone":"spine_03","minWeight":0.5},
+                          {"type":"sphere","centreCm":[0,0,120],"radiusCm":8},
+                          {"type":"mask","texture":"Textures/cape_mask.png","pinBelow":0.5} ] } }
+```
 
-`AsyncSolver` runs the same `step()` on its own thread (below-normal priority on Windows) at a fixed
-`hz` (15–240, default 64), over a **private copy** of the cage. The game thread never touches that
-copy:
+Paint is stored per welded particle and keyed by `meshKey`. When the key no longer matches the mesh the
+editor warns ("mesh changed since painting") and the runtime applies `rules` instead. `reach` maps
+linearly to [0, 2 x defaultReachCm]. A pinned particle has inverse mass 0 and a hard skin (max distance
+0). The `mask` rule samples the R channel at the vertex UV (below `pinBelow` pins) and G scales reach.
 
-- Commands (`enqueueImpact`, `enqueueBreak`, `enqueueMove` for a kinematic particle, `enqueueRepair`)
-  go in under one mutex and run at the top of the next step, in order. Commands queued before
-  `start()` run first.
-- The worker publishes a `Snapshot` (all particle positions, dead triangles, the split events since
-  you last took one, step count, settled flag). `tryGetSnapshot` is an O(1) swap and never blocks.
-- A time accumulator with a four-step spiral-of-death clamp; when settled it sleeps until a command
-  arrives. `AsyncOptions::realTime = false` steps as fast as possible with identical results — tests
-  and bakes use it.
-- `waitSettled(ms)` blocks until every queued command has run and the worker is idle.
+## 4. Components
 
-## 5. The C ABI
+Both are registered at runtime (`SoftBodySystem::registerComponents`); zero-filled storage means the
+useful state (a `0` scale reads as 1, a `0` preset is the first preset).
 
-`softbody_abi.h` (`aver_sb_*`) is a handle API over the same solver: build a cage (`add_material`,
-`add_particle`, `add_beam`, `add_triangle`, `build`), drive it (`step`, `impact`, `move_particle`,
-`break_beam`, `repair`) or hand it to the worker (`async_start` / `async_poll`), and read positions
-back. It is **statically linked** and not exported from a DLL; see Wiring for exposing it to C#.
+- `CCloth` (40 bytes): `asset`, `preset`, `flags` (negative sense: `kClothNoWorld`,
+  `kClothNoCharacterProxy`, `kClothNoWind`; positive: `kClothTearable`, `kClothRelease` one-shot),
+  `windScale`, `stiffnessScale`, `reachScale`, `freezeDistanceCm`, OUT `outMaxStrain`, `outState`.
+- `CDestructible` (48 bytes): `asset`, `preset`, `flags` (`kDestructNoDebris`, `kDestructIndestructible`),
+  `toughnessScale`, `impactScale`, `debrisLifetimeS`, `maxPieces`, OUT `outDamage`, `outBroken`,
+  `outPieces`, `outState`.
 
-## 6. The test panel
+`attachCloth` / `attachDestructible` write defaults and add the `CSoftBody` marker (`kSoftBodyPiece = 0x2`
+marks runtime pieces: owned by the system, never saved). Cloth and Destructible on one entity are
+refused; a tearable cloth is a cloth with `kClothTearable`.
 
-`sandbox/src/SoftBodyPanel.{hpp,cpp}` — Window > Soft Body (plastic): a side-on truss bar with the
-material sliders, Hit tip / Hit middle / Repair, and a live readout of permanent set, broken beams and
-pieces. It is for tuning a material, not an asset editor.
+Level records (`.ocworld`):
 
-## 7. What is deliberately not here
+```
+COMPONENT Cloth asset=<path> preset=cloth_light wind=1 stiffness=1 reach=1 freeze=0 tearable=1 world=0 proxy=0 windon=0
+COMPONENT Destructible asset=<path> preset=metal toughness=1 impact=1 lifetime=0 maxpieces=0 indestructible=1 nodebris=1
+```
 
-- **No world collision, no self-collision.** The solver takes impacts from the host's collision layer.
-- **No `.ocbeam` parser, parts or whole-panel detach** (spec §2, §8). The data model carries what they
-  need (materials per beam, `origin`, `freed`); a loader and part registry go above this.
-- **No node-mass weighting presets, strain-rate dashpot or debris chunks** beyond the `useNodeMass`
-  hook (spec §11); the base solve is massless, as in the original.
-- **No automatic Jolt hand-off.** A host decides which bodies are elastic (Jolt) and which are plastic.
+Default keys are omitted when the editor saves. Runtime state (damage, pieces) is not saved: a loaded level
+starts intact.
 
-## Wiring (what the integration step adds)
+## 5. Tick
 
-1. Root `CMakeLists.txt`, with the other leaf modules (needs Core only):
-   ```cmake
-   add_subdirectory(modules/softbody)
-   ```
-   and in the tests section:
-   ```cmake
-   if(TARGET Aver.SoftBody)
-     add_subdirectory(tests/softbody)
-   endif()
-   ```
-   There is no `AVER_MODULE_SOFTBODY` option yet; add one beside `AVER_MODULE_DEFORM` (and the edition
-   defaults macro) if it should be switchable. The target carries `AVER_MODULE_SOFTBODY=1` publicly.
-2. Editor: add `src/SoftBodyPanel.cpp` to `sandbox/CMakeLists.txt`, `target_link_libraries(Sandbox
-   PRIVATE Aver.SoftBody)`, then the three lines in `SoftBodyPanel.hpp`'s header comment.
-3. C# / scripts (optional): the ABI is plain C. To expose it through the existing DLL, link
-   `Aver.SoftBody` into `Aver.Physics` and re-export with `AVER_PHYS_API` wrappers — this was left
-   undone so `Aver.Physics` does not gain a dependency edge nobody has asked for yet.
-4. `docs/ARCHITECTURE.md`: the `Aver.SoftBody` row still says "not built"; update it to name the
-   as-built contents (§1–5 above) and the `Core`-only dependency.
+`game::tickSoftBodies(dt, viewPos)` runs once per frame right after `animSystem().tick` and before the
+skinned scene update, in the editor (Play) and the packaged game. Order is the determinism contract
+(entities ascending by id, then piece id):
+
+1. Resolve new or changed entries (at most 2 builds per frame, the rest wait).
+2. Apply the inbox in arrival order: `damage`, `explode`, `damageNear`, `tearAt`, `repair`, `release`,
+   `setPreset`, `setWind`, `setBudget`.
+3. Poll physics impacts and turn closing speeds above `minImpactCmS` into energy deposits.
+4. Read back each awake destructible or tearable piece once, mirror into the cage.
+5. Apply deposits, evaluate strain, write plastic set in place.
+6. Tear pipeline for any newly broken beam, within the per-frame rebuild budget; leftovers carry over.
+7. Cloth: refresh the palette, push skin targets (hard skin after a teleport), aero and wind, character
+   proxies, LOD tiers and freezing.
+8. Debris lifecycle, OUT fields, publish `PieceView`s, fire events.
+
+Outside Play nothing steps and soft entities show their bind pose.
+
+### Cloth
+
+All cloth is Jolt `Skinned`. A cape uses the skeleton palette; cloth on a prop uses a single joint whose
+matrix is the entity world, so pinned vertices ride the entity. The palette math is
+`jointMatrices[j] = invBuildWorld * S[j]`, composed in the ABI with the entity world. Cloth lives on
+physics user layer 14 and collides with layer 0 and the proxy layer 15 only (`Options::clothLayer`,
+`proxyLayer`). For cloth under a skeleton the host starts a kinematic ragdoll on the proxy layer so the
+body is a set of capsules (`setCharacterProxyFn`). Wind is global (`setWind`) scaled per entity by
+`windScale` and the asset's drag and lift; it is independent of the sky's `cloudWind`
+(Environment has a "Copy to cloth wind" button). Release drops all pins and rebuilds without skin entries.
+No self-collision in v1.
+
+### Destruction
+
+Inputs: rigid-body impacts, `damage` (point, radius, energy, direction, kind), `explode` (sphere overlap
+with falloff and radial impulse), `tearAt`. After a tear, islands smaller than `minPieceTriangles`
+become dust (a `Dust` event, no body). Each other island becomes a debris piece (a `SoftPiece` entity with
+`CSoftBody{kSoftBodyPiece}`), itself destructible until `maxPieces`. Debris sleeps, shrinks and is
+destroyed after its lifetime; a global cap evicts oldest-farthest.
+
+Budgets (`SoftBodySystem::Options`): `maxLivePieces` 48, `maxActiveParticles` 20000, `maxRebuildsPerFrame`
+2, `maxDepositsPerFrame` 64, `debrisLifetimeS`/`debrisSleepS`/`despawnShrinkS` 12/2/0.6, freeze distance
+cloth/debris 6000/4000 cm, distance iteration tiers at 1500 and 3500 cm.
+
+### Events
+
+`SoftEventKind`: Impact, Torn, Detached, Dust, Repaired, Released. Each carries a per-system `seq`.
+The notify sink fires `SoftBodyImpact`, `SoftBodyTorn`, `SoftBodyDetached`, `SoftBodyDust`,
+`SoftBodyRepaired` at the owning entity (Detached also at the new piece). C# polls
+`SoftBodies.DrainEvents`.
+
+## 6. Render
+
+`SoftBodyScene` no longer creates bodies. It reads `SoftBodySystem::pieces()` and keeps one resident per
+(entity, piece). A topology epoch change builds a new source mesh and skin-target mesh and puts the old
+ones on a retire list destroyed `kSoftBodyFramesInFlight + 1` frames later. Between epochs it copies
+positions through the upload ring. Each frame it writes the piece's AABB into `CMeshRenderer` so a flung
+piece is not culled at its old place. The packaged game now has a `SoftBodyScene` too
+(`DrawWorldOptions::softBodies`). No shader or RHI call was added.
+
+## 7. Framework relay and scripting
+
+`framework_softbody_abi.h` (`aver_fw_softbody_*`, one provider function, deferred ops): damage, explode,
+tear, repair, release, wind, budget, preset, state, events. C# (`Aver.Framework/SoftBodies.cs`): `Entity`
+gains `AddCloth`, `AddDestructible`, `SetSoftPreset`, `ApplySoftDamage`, `TearSoftBody`, `RepairSoftBody`,
+`ReleaseCloth` and `TryGetSoftBodyState`; the static `SoftBodies` class has `SetWind`, `Explode`,
+`SetBudget` and `DrainEvents`. The raw `aver_phys_sb_*` calls are `Aver.Physics.SoftBody`
+(`scripting/csharp/Aver.Physics`).
+
+Aver Node nodes (`GraphSoftBodyNodeTable.cs`, matching `sandbox/src/GraphNodeDefsSoftBody.hpp`):
+`softbodydamage`, `softbodyexplode`, `softbodytear`, `softbodyrepair`, `releasesoftbody`,
+`setsoftbodywind`, `setsoftbodypreset` (exec) and `getsoftbodystate` (pure).
+
+## 8. Editor
+
+- Details panel sections for Cloth and Destructible (preset, asset, scales, flags, live OUT readout).
+- Add Component entries for both.
+- `SoftBodyPaintTool`: pin and reach painting, rule editing, undo through `SnapshotUndo`.
+- Show > Soft Bodies: strain, pins, pieces, wind and budget overlays.
+- `test-content/SoftBodyLab` is a level with a caped character, flag, curtain, glass pane, steel door and a
+  plank crate.
+
+## 9. Not here
+
+- No self-collision, no cloth-on-cloth.
+- No render LOD: one draw mesh per piece; sim meshes over `maxParticles` (4096) are refused, not decimated.
+- No runtime Voronoi or pre-diced shards; fracture is the tear pipeline over the authored triangle mesh.
+- Replication is not designed here; `seq` and the deterministic tick order are what a net layer would key on.
 
 ## Tests
 
-`tests/softbody` — `PlasticSoftBodyTest` (solver, tears, render mapping, ABI) and `PlasticSoftBodyAsyncTest` (worker
-against a synchronous replay). Links `Aver.SoftBody` + `Aver.Core` only.
-
-| Property | Check |
-|---|---|
-| A bar bent past yield keeps the bend | steel truss held 16 cm down keeps a permanent set of several cm; the elastic twin and the same steel at 4 cm return to rest |
-| Impacts dent | same cage, same hit: elastic recovers, steel keeps more than 5 cm |
-| A strip pulled past its limit tears in two | exactly two pieces, exactly the seam beams broken, none outside it |
-| A slit duplicates particles | five particles on a cut row duplicated, two pieces, render triangles each wholly on one side |
-| Energy does not explode | a swinging flag at 64 Hz over 8 s: finite, speed-limited, kinetic proxy bounded and decayed |
-| Determinism | two runs, and a worker run vs a replay, are bitwise identical |
+`tests/softbody` (`SoftBodyTest`, `SoftAssetTest`, `SimMeshTest`, `DamageTest`, `IslandsTest`), 
+`tests/physics` (`SoftBodyBuilderTest`), `tests/softbody.scene` (`SoftBodySystemTest`),
+`tests/render.softbody` (`SoftBodySceneTest`), `tests/editor` (`SoftBodyDetailsModelTest`),
+`scripting/csharp/Aver.Graph.Tests` (`SoftBodyNodeTests`). Physics-dependent thresholds are UNVERIFIED
+until the first run.

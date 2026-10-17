@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.SoftBody.Scene",
+  "dir": "softbody.scene",
+  "displayName": "Cloth and Destruction",
+  "description": "Cloth and destructibles on scene entities over Jolt soft bodies: dents, tearing, detached pieces, wind.",
+  "category": "Physics",
+  "option": "AVER_MODULE_SOFTBODY_SCENE",
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Anim", "Aver.Anim.Scene", "Aver.Core", "Aver.Formats", "Aver.Physics", "Aver.Scene", "Aver.SoftBody"],
+  "consequence": "Cloth and Destructible components do nothing: no wind-blown cloth, dents, tearing or breaking pieces."
+}

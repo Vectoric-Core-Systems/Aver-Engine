@@ -66,8 +66,9 @@ Sizes are **design pixels**: authored against a reference resolution and scaled 
 `SCALE <mode> <refWidth> <refHeight>` in the asset (default `height 1920 1080`). Modes: `constant` (the OS
 display scale only), `width`, `height`, `shortest`, `blend` (geometric mean of the width and height ratios, so
 ultrawide and portrait windows do not blow the UI up). Multiplied by the player's **user scale** (the
-`graphics.uiScale` setting drives it) and clamped to 0.25..8. Fonts scale the same way: a font is baked at one
-size and its glyphs are scaled. Offsets, sizes, margins, padding, spacing and borders all scale.
+`graphics.uiScale` setting drives it) and clamped to 0.25..8. Fonts scale the same way: text is rasterised at the
+scaled pixel size (see [GAME_UI_TEXT.md](GAME_UI_TEXT.md)); the baked bitmap font, used when no TrueType font can
+be opened, is scaled per glyph. Offsets, sizes, margins, padding, spacing and borders all scale.
 
 ### Themes and styles
 
@@ -153,11 +154,21 @@ anchor 2). Enum names are lower case.
   `cellHeight`, `justify` (`start center end spacebetween`).
 * **Appearance:** `visible`, `enabled`, `opacity`, `clip`, `hit` (`auto always never`), `style`, `bgColor`,
   `textColor`, `accentColor`.
-* **Content:** `text`, `textAlign`, `fontSize`, `wrap`, `image`, `uv`, `imageMode` (`stretch fit`), `tint`,
-  `placeholder`, `maxLength`, `masked`.
+* **Content:** `text`, `textAlign` (`left center right start end`), `fontSize`, `wrap`, `fontFamily`, `bold`,
+  `italic`, `textDir` (`auto ltr rtl`), `lineSpacing`, `letterSpacing`, `ellipsis`, `maxLines`, `rich`, `image`,
+  `uv`, `imageMode` (`stretch fit`), `tint`, `placeholder`, `maxLength`, `masked`. The text properties are
+  explained in [GAME_UI_TEXT.md](GAME_UI_TEXT.md); a style (`UiStyle`) can also set `fontFamily` and `bold`.
 * **Value:** `value`, `minValue`, `maxValue`, `step`, `showValue`, `checked`, `selected`, `items`, `rowHeight`.
 * **Navigation:** `focusable`, `tabIndex`, `navUp`, `navDown`, `navLeft`, `navRight`, `command`.
 * **Root only:** `inputMode`, `modal`, `zOrder`, `layer`, `defaultFocus`, `cancelCommand`.
+
+## Text
+
+Text is drawn by the text engine (runtime TrueType, fallback fonts, kerning, Arabic shaping, bidirectional text,
+line breaking, rich text); see [GAME_UI_TEXT.md](GAME_UI_TEXT.md) for the model, the `.ocfonts` font sets, the
+properties, the C and C# API, the nodes and the limits. A widget measures and draws from one cached layout, so
+the size a script reads back (`Widget.TextSize`, `AN_GetUiTextSize`) is the size that was drawn. With no usable
+TrueType font the tree behaves exactly as before and draws with the lent baked font.
 
 ## Ready-made screens
 
@@ -183,13 +194,15 @@ restore saved values. Keyboard and mouse bindings are rebindable; gamepad bindin
 
 ## Localized text
 
-Any text field (`text`, `items`, `placeholder`, menu and settings labels) may hold a reference `@Table:Key=Default` instead of literal text; `UiTree::shown(raw)` is what layout and drawing read. A host installs the resolver with `aver_ui_set_text_resolver(aver_fw_loc_resolve, aver_fw_loc_epoch)`; without one a reference shows its inline default. Typed text and event payloads stay raw. The built-in screens use `@UI:...` references with English defaults. The shipped font covers Latin with accents, Greek and Cyrillic. See [LOCALIZATION.md](LOCALIZATION.md).
+Any text field (`text`, `items`, `placeholder`, menu and settings labels) may hold a reference `@Table:Key=Default` instead of literal text; `UiTree::shown(raw)` is what layout and drawing read. A host installs the resolver with `aver_ui_set_text_resolver(aver_fw_loc_resolve, aver_fw_loc_epoch)`; without one a reference shows its inline default. Typed text and event payloads stay raw. The built-in screens use `@UI:...` references with English defaults. The shipped font (Roboto) covers Latin with accents, Greek and Cyrillic; CJK, Arabic and Hebrew come from the Windows fonts or a project font through a font set ([GAME_UI_TEXT.md](GAME_UI_TEXT.md)). See [LOCALIZATION.md](LOCALIZATION.md).
 
 ## C ABI
 
 `ui_widget_abi.h`. The host's per-frame protocol:
 
-1. `aver_ui_begin_frame`, `aver_ui_set_font`, `aver_ui_set_pointer` (existing).
+1. `aver_ui_begin_frame`, `aver_ui_set_font`, `aver_ui_set_pointer` (existing). The text engine's host calls
+   (`aver_ui_text_set_loader`, `aver_ui_text_load_fontset`, `aver_ui_text_atlas`, ...) are listed in
+   [GAME_UI_TEXT.md](GAME_UI_TEXT.md); `aver_ui_widget_text_size` reads a widget's laid-out text size.
 2. `aver_ui_input_host_frame(dt, keyPressed[256], keyHeld[256], vkToSlot[256], padConnected, padButtons[14],
    padAxes[6])`: raw keys and pad in, navigation, text editing, typed characters (US layout) and key repeat out.
    Also `aver_ui_input_wheel`, `aver_ui_input_char` (use it instead of the US table once the window forwards
@@ -216,12 +229,21 @@ if (UiSystem.PausesGame) { /* a menu is open */ }
 
 `UiSystem.ImageResolver` maps an `image` path to a texture id when a layout opens.
 
+Text: `Widget` has typed `FontFamily`, `FontSize`, `Bold`, `Italic`, `TextAlign`, `TextDir`, `Wrap`, `Ellipsis`,
+`MaxLines`, `LineSpacing`, `LetterSpacing`, `RichText`, `TextColour` and `TextSize`; `UiText` loads font sets,
+measures, prewarms and reads the atlas counters; `Hud.TextBlock` / `Hud.MeasureText(text, style)` draw and measure
+styled blocks. See [GAME_UI_TEXT.md](GAME_UI_TEXT.md).
+
 ## The layout editor tab
 
 Opens `.ocui` from the Content Browser. Palette (drag a kind onto the canvas or the hierarchy, or double-click to
 add under the selection), hierarchy (select, drag to reparent, right-click duplicate/delete), a canvas that
 previews the layout live at a chosen resolution and zoom, and a property inspector generated from the property
-table (so a new property appears in the inspector with no editor change).
+table (so a new property appears in the inspector with no editor change). When the project has a font set with a
+TrueType face, the canvas draws text with the game's own engine (same fallback fonts, kerning, shaping and
+wrapping as Play); otherwise it uses the editor's font. `fontFamily` is a combo of the family names in
+`Content/UI/Fonts.ocfonts`. `.ocfonts` files open in their own tab (a font set editor with a live preview, per-face
+coverage and the atlas pages); see [GAME_UI_TEXT.md](GAME_UI_TEXT.md).
 
 Canvas: click selects, drag moves (inside a stack or grid, dragging **reorders**), the eight handles resize (the
 opposite edge stays put whatever the pivot), arrow keys nudge (Shift = 10), Delete removes, Ctrl+D duplicates.
@@ -398,6 +420,10 @@ Add the 14 rows to `docs/AVER_NODE_NODES.md` (a "UI" section) from the table abo
 * `UiLayoutAssetTest`: tokenising and float round trip, the property table (every property's get/set agree for
   every kind), `.ocui` round trip, parse errors with line numbers, forward compatibility, the structural edits,
   instantiate and capture.
+* Text engine tests (`tests/ui/src`, all headless; fonts come from the synthetic builder in `TestFont.hpp`, so no
+  system font is needed): `UiUnicodeTest`, `UiBidiTest`, `UiShapingTest`, `UiLineBreakTest`, `UiFontTest`,
+  `UiGlyphAtlasTest`, `UiTextLayoutTest`, `UiTextTreeTest` and `UiTextAbiTest`; `tests/render.ui` checks the atlas
+  upload and the page tokens; `tests/editor` has `FontSetEditorTest`.
 * `UiLayoutEditorTest`: move/resize/anchor-preset maths, the tab's load/save/dirty/undo against a real file,
   placement by drop, drag move and reorder, edge drag, duplicate/delete/reparent, rename following references.
 
@@ -407,8 +433,9 @@ Add the 14 rows to `docs/AVER_NODE_NODES.md` (a "UI" section) from the table abo
   expectations; the integration step builds and reports.
 * **Typed text uses a US key table** (`uiVkToChar`) because the platform window does not forward `WM_CHAR`; add
   a `Char` event to `Window`/`InputState` and feed `aver_ui_input_char` for other layouts and IME.
-* **Fonts are one baked size** scaled per glyph; no kerning, bidirectional text or fallback fonts. A font atlas
-  is still lent by the host (`aver_ui_set_font`).
+* **Text limits** are listed in [GAME_UI_TEXT.md](GAME_UI_TEXT.md) (no Indic or Thai shaping, no vertical text, no
+  IME, OS fonts on Windows only). A baked bitmap font is still lent by the host (`aver_ui_set_font`); it is the
+  last fallback face and the whole path when no TrueType font can be opened.
 * **Images**: a layout's `image` path is only a name; `UiSystem.ImageResolver` (C#) or `aver_ui_widget_set_texture`
   (C) must supply the texture. The editor preview shows a placeholder.
 * **Graphics settings** are stored and raised as events (`GraphicsChanged`); no engine system applies them yet.

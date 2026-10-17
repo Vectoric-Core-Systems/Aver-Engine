@@ -21,9 +21,12 @@ add_executable(Sandbox WIN32
   src/SandboxViewport.cpp
   src/SandboxShell.cpp
   src/SandboxContentBrowser.cpp
+  src/ModelImportDialog.cpp
+  src/ModelImportProvider.cpp
   src/SandboxPanels.cpp
   src/SandboxComponentDetails.cpp
-  src/SoftBodyPanel.cpp
+  src/SoftBodyPaintTool.cpp
+  src/SoftBodyDebugOverlay.cpp
   src/SandboxSettings.cpp
   src/SandboxLevelEdit.cpp
   src/SandboxAutosave.cpp
@@ -81,6 +84,7 @@ add_executable(Sandbox WIN32
   src/EqsEditor.cpp
   src/AiDebugOverlay.cpp
   src/UiLayoutEditor.cpp
+  src/FontSetEditor.cpp
   src/BlendSpaceEditor.cpp
   src/AnimStateMachineEditor.cpp
   src/MontageEditor.cpp
@@ -158,8 +162,12 @@ endif()
 # out twice, and every future change to it -- chunk ownership first -- would have had to be made
 # twice and stay agreeing.
 target_link_libraries(Sandbox PRIVATE Aver.World)
-# The plastic soft-body bench (Window > Soft Body). Core-only module, no scene/physics coupling.
+# The soft-body topology/asset library (paint tool, details model). Pure module: Core + Formats.
 target_link_libraries(Sandbox PRIVATE Aver.SoftBody)
+# Cloth and destruction on scene entities (brings AVER_MODULE_SOFTBODY_SCENE=1 for the Details sections, overlay and menu).
+if(TARGET Aver.SoftBody.Scene)
+  target_link_libraries(Sandbox PRIVATE Aver.SoftBody.Scene)
+endif()
 # The Roslyn escalation for an actor script the built-in scanner declines. Linked here rather
 # than pulled in by Aver.Formats, which must stay dependency-free -- see its own CMakeLists.
 if(TARGET Aver.Formats.Roslyn)
@@ -168,6 +176,11 @@ if(TARGET Aver.Formats.Roslyn)
   # backend still opens every conforming actor, which is the point of the scanner being sufficient
   # on its own.
   target_compile_definitions(Sandbox PRIVATE AVER_HAVE_ROSLYN=1)
+endif()
+# The FBX importer (ufbx), behind the Import dialog, --import-fbx and the script ImportModel nodes. Always a target; without the
+# vendored source it reports "built without ufbx" instead of importing.
+if(TARGET Aver.Formats.Fbx)
+  target_link_libraries(Sandbox PRIVATE Aver.Formats.Fbx)
 endif()
 # The audio importer, behind the Content Browser's Import button: .wav/.mp3/.m4a/.flac -> .ocaudio.
 # A separate target like the mesh and material readers, and for the same reason: it pulls in Media

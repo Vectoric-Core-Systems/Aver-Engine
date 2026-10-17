@@ -3,8 +3,10 @@
 How third-party geometry and textures get into this engine, what each importer supports, and — the
 part most import documentation leaves out — what each one **cannot** do and how it tells you.
 
-Everything here is dependency-free except glTF, which was already. No importer in this tree links a
-third-party library, and none of the supported formats requires one.
+Everything here is dependency-free except FBX. The glTF, OBJ and USD readers are this tree's own code and
+link no third-party library. **FBX is read by [ufbx](https://github.com/ufbx/ufbx)** (MIT, vendored at
+`third_party/ufbx`), linked only by the editor, `AverAssetC` and the tests (`Aver.Formats.Fbx`), never by the
+shipped game runtime.
 
 ---
 
@@ -145,7 +147,20 @@ it with `pow(x, 2.2)`). The import cook encodes a linear factor on the way in
 at 0.5, not 0.22. Only the factor is affected — textures were always decoded correctly. OBJ's `Kd`
 is **treated as sRGB** and crosses unconverted: `.mtl` names no colour space, and that is an
 assumption (Blender's exporter is believed to write its linear base colour there). Materials
-imported before this change keep the old, darker encoding until they are re-imported.
+imported before this change keep the old, darker encoding until they are re-imported. FBX has the same
+ambiguity: it states no colour space, so its factor crosses unconverted unless the import option
+`fileColoursAreLinear` says otherwise.
+
+### Separate roughness and metalness maps (FBX)
+
+`.ocmat` has one packed slot (`metalRough`: G = roughness, B = metalness, the glTF layout). Formats that name
+the two as separate files fill `ImportedMaterial::metallicTex` (only FBX does today), and the import policy
+layer — `packSeparateMetalRough` in `ImportCook.cpp`, right after the opacity fold — decodes both, writes a
+new PNG (G from the roughness map, B from the metalness map, R and A 255; a missing roughness map is a
+constant plane from the factor; different sizes: the smaller is resampled to the larger by nearest texel),
+points `metalRoughTex` at it, resets both factors to 1 and clears `metallicTex`. A pair that already is the
+packed layout, and every material with no `metallicTex`, is untouched. The OBJ importer still takes
+roughness and drops the metal map; that is its documented behaviour, not the pack step's.
 
 ---
 
@@ -397,17 +412,34 @@ A stage that parses but composes no `UsdGeomMesh` **fails** with exactly that me
 
 ## FBX
 
-**Not implemented.** The Autodesk FBX SDK is proprietary and is therefore forbidden by this
-project's permissive-dependency rule.
+**Implemented** — `FbxImport.hpp`, in `Aver.Formats.Fbx`, at parity with glTF: meshes, skeletons and skin
+weights, skeletal and object animation, materials and textures, cameras. Options, what maps to what and
+what is dropped: [FBX_IMPORT.md](FBX_IMPORT.md). Design: `docs/plans/wave9/FBX_IMPORT.md`.
 
-The viable route is [ufbx](https://github.com/ufbx/ufbx) (MIT, a single `.c`/`.h` pair, no
-dependencies — it bundles its own inflate, which matters because FBX 7.x deflate-compresses its large
-arrays and this tree vendors no zlib or miniz). Vendoring it means downloading source, so it is a
-decision to take deliberately rather than a thing to slip in.
+The Autodesk FBX SDK is proprietary and forbidden by this project's permissive-dependency rule, so the reader
+is [ufbx](https://github.com/ufbx/ufbx) (MIT, one `.c`/`.h` pair, its own inflate — FBX 7.x deflates its large
+arrays and this tree vendors no zlib). It is vendored at `third_party/ufbx` (`README.aver.md` has the tag and
+hashes) and is the only third-party code the feature adds. `importFbx` refuses a file that is not an FBX
+before ufbx sees it, because ufbx also reads OBJ and `ObjImport` owns that.
 
-A from-scratch FBX reader is possible but would cover only ASCII FBX and *uncompressed* binary FBX —
-which excludes most real-world files, including anything exported from Maya or Max with default
-settings. That is why ufbx is the recommendation rather than another native parser.
+- **Frame.** ufbx is asked for right-handed, +Y up, metres, which is glTF's frame, so FBX goes through the
+  *same* map as glTF (`x = -z, y = x, z = y`, times `scale`, winding reversed once and once more per mirrored
+  node, `V` flipped because FBX's texture origin is bottom-left). A model exported to FBX and to glTF lands in
+  the same place. Any file axis or unit is converted; `unitMetersOverride` replaces the file's unit.
+- **Skeleton.** The rest pose is the **bind pose** (the skin clusters' matrices), not the scene's frame-0
+  pose; inverse binds are re-derived from it so a bind-pose skeleton skins to the identity. Skinned meshes are
+  baked into bind-world space, translation included; static meshes keep glTF's rule (rotation and scale baked,
+  translation becomes a placement). Influences: top 4 by weight, renormalised, **counted and reported**.
+- **Animation.** `ufbx_bake_anim` per animation stack, one track per bone channel; stacks become clips named
+  after the stack. A clip's root bone travelling more than `rootMotionMinTravelCm` flags it `RootMotion`
+  (option **Auto**, inert without a `CRootMotion` component; **Off** restores glTF behaviour).
+- **Materials.** FBX names roughness and metalness as two maps and `.ocmat` has one packed slot: the policy layer
+  packs the pair (see below) instead of dropping the metalness the way OBJ does.
+- **Records.** Every FBX import leaves `<stem>.ocimport` beside its outputs; the Content Browser's
+  **Reimport** re-runs it with the stored options.
+- **Not carried, and reported:** lights, vertex colours, a second UV set, bump/height maps, layered or
+  procedural textures, UV transforms, dual-quaternion skinning, blend shapes (until the morph-target feature
+  lands), in-between blend shapes, animated ancestors above a skeleton root, geometry caches, NURBS.
 
 ---
 
@@ -467,12 +499,14 @@ That rules out:
 - **Fab / Quixel / Megascans** under Epic's Content License. Usable in *your own* game under Epic's
   terms if you accept them; **not** committable to this repository, and not something the engine can
   ship as sample content.
-- Anything requiring the Autodesk FBX SDK to read.
+- Anything requiring the Autodesk FBX SDK to read (the FBX importer uses ufbx, which does not).
 - Asset-store content with "no redistribution" terms — which is most of it.
 
 To bring in a model you have the rights to:
 
-1. Export or convert to **glTF/GLB**, **OBJ**, or **USD** (text or binary). Blender exports all three.
+1. Export or convert to **glTF/GLB**, **FBX**, **OBJ**, or **USD** (text or binary). Blender exports all four.
+   A third-party library is part of that route for FBX only: **ufbx** (MIT, `third_party/ufbx`); a new
+   third-party dependency still needs its licence recorded in `README.md` and the payload's NOTICE.
 2. Import it — the editor's importer writes `Content/Meshes/<name>.ocmesh`.
 3. Put the source file under a `Source/` directory. `docs/PACKAGING.md` drops every `**/Source/`
    when staging a game, so editable source does not ship.
@@ -522,6 +556,13 @@ basis change in both directions, winding reversal, the V flip, hard-edge splitti
 `tests/formats/src/UsdStageImportTest.cpp` — `importUsdStage` over hand-written `.usda` stages: reset stack,
 `xformOpOrder` in the text reader, overlapping subsets, coplanar report/`DropLater`, `tracePrims`, and the
 exact-matrix flag (through `usd_detail::placementForMatrix`; a crate cannot be authored in a test).
+
+`tests/formats/src/FbxImportTest.cpp` (with `FbxFixture.hpp`, which writes ASCII FBX 7.4 from code) — frames
+and units, winding and mirrors, triangulation, hard edges, instancing, skin limits and bind pose, sockets,
+animation tracks and root motion, object clips, materials and textures, cameras, the blend-shape extractor,
+options text, determinism, and one run of `AverAssetC convert`. `FbxMaterialPackTest.cpp` covers the
+roughness/metalness pack, `ImportRecordTest.cpp` the `.ocimport` record, and
+`tests/editor/src/ModelImportDialogTest.cpp` the editor side (routing, the shared writer, Reimport).
 
 `tools/MakeFoliage.cpp` — round-trips three real meshes through `.obj` on every run.
 

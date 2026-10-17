@@ -4,7 +4,10 @@
 
 #include "aver/core/Log.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <string>
 #include "aver/rhi/ShaderFiles.hpp"   // this pass's HLSL is a deployed file, not a literal
 
 namespace aver::render::ui {
@@ -29,6 +32,7 @@ UiRenderer* UiRenderer::create(rhi::IDevice& device) {
 UiRenderer::~UiRenderer() {
     if (!res_) return;
     for (const TexBinding& b : bindings_) res_->destroyBindingSet(b.set);
+    for (const PageTexture& p : pages_) res_->destroyTexture(p.tex);
     for (u32 i = 0; i < kFramesInFlight; ++i) { res_->destroyBuffer(vb_[i]); res_->destroyBuffer(ib_[i]); }
     res_->destroyPipeline(pipeline_);
     res_->destroyShader(vs_);
@@ -166,6 +170,109 @@ rhi::BindingSetHandle UiRenderer::bindingFor(rhi::TextureHandle t) {
     return set;
 }
 
+// Forgets a texture's binding set (the texture is about to be destroyed).
+void UiRenderer::dropBinding(rhi::TextureHandle t) {
+    for (usize i = 0; i < bindings_.size(); ++i) {
+        if (bindings_[i].texture != t) continue;
+        res_->destroyBindingSet(bindings_[i].set);
+        bindings_.erase(bindings_.begin() + static_cast<std::ptrdiff_t>(i));
+        return;
+    }
+}
+
+void UiRenderer::setTextAtlas(aver::ui::UiGlyphAtlas* atlas) { atlas_ = atlas; }
+
+rhi::TextureHandle UiRenderer::pageTexture(u32 page) const { return page < pages_.size() ? pages_[page].tex : 0; }
+
+void UiRenderer::prePass(rhi::IRenderContext& ctx) {
+    if (!atlas_ || !res_) return;
+    const u32 count = atlas_->pageCount();
+    const u32 size = atlas_->pageSize();
+    if (pages_.size() < count) pages_.resize(count);
+
+    struct Job {
+        u32 page;
+        rhi::TextureHandle tex;
+        rhi::TextureCopyFootprint fp;
+        u64 offset;
+    };
+    std::vector<Job> jobs;
+    u64 total = 0;
+    for (u32 i = 0; i < count; ++i) {
+        if (!atlas_->pageDirty(i)) continue;
+        PageTexture& pt = pages_[i];
+        if (pt.tex && pt.size != size) {   // the page size changed: the old texture is the wrong shape
+            dropBinding(pt.tex);
+            res_->destroyTexture(pt.tex);
+            pt = PageTexture{};
+        }
+        if (!pt.tex) {
+            const std::string name = "Aver.UI glyph page " + std::to_string(i);
+            rhi::TextureDesc td;
+            td.width = td.height = size;
+            td.format = rhi::Format::RGBA8Unorm;
+            td.bind = rhi::ResourceBind::ShaderResource;
+            td.initialState = rhi::ResourceState::ShaderResource;
+            td.debugName = name.c_str();
+            pt.tex = res_->createTexture(td);
+            if (!pt.tex) { AVER_ERROR("[Render.UI] could not create glyph atlas page {}", i); continue; }
+            pt.size = size;
+        }
+        rhi::TextureCopyFootprint fp;
+        if (!res_->textureCopyFootprint(pt.tex, 0, fp) || fp.rowBytes != size * 4 || fp.rowPitch < fp.rowBytes ||
+            fp.rows != size)
+            continue;
+        total = (total + 511) & ~static_cast<u64>(511);   // D3D12 wants 512-byte placement offsets
+        jobs.push_back(Job{i, pt.tex, fp, total});
+        total += fp.totalBytes;
+    }
+    if (jobs.empty()) {
+        atlas_->setUploadBytes(0);
+        return;
+    }
+
+    rhi::BufferDesc bd;
+    bd.bytes = total;
+    bd.kind = rhi::BufferKind::Upload;
+    bd.debugName = "Aver.UI glyph upload";
+    const rhi::BufferHandle staging = res_->createBuffer(bd);
+    if (!staging) { AVER_ERROR("[Render.UI] glyph upload buffer allocation failed"); return; }
+
+    // coverage -> premultiplied white: (c, c, c, c), optionally through a gamma curve
+    u8 lut[256];
+    const f32 gamma = atlas_->coverageGamma() > 0.0f ? atlas_->coverageGamma() : 1.0f;
+    for (int v = 0; v < 256; ++v)
+        lut[v] = gamma == 1.0f ? static_cast<u8>(v)
+                               : static_cast<u8>(std::clamp(std::pow(static_cast<f32>(v) / 255.0f, gamma) * 255.0f + 0.5f, 0.0f, 255.0f));
+
+    u32 uploaded = 0;
+    std::vector<u8> block;
+    for (const Job& j : jobs) {
+        const u8* src = atlas_->pagePixels(j.page);
+        if (!src) continue;
+        // Rows at rowPitch, NOT tightly packed: the padding is real on D3D12 (256-byte row alignment).
+        block.assign(static_cast<usize>(j.fp.totalBytes), 0);
+        for (u32 y = 0; y < size; ++y) {
+            u8* dst = block.data() + static_cast<usize>(y) * j.fp.rowPitch;
+            const u8* row = src + static_cast<usize>(y) * size;
+            for (u32 x = 0; x < size; ++x) {
+                const u8 c = lut[row[x]];
+                dst[x * 4 + 0] = c; dst[x * 4 + 1] = c; dst[x * 4 + 2] = c; dst[x * 4 + 3] = c;
+            }
+        }
+        if (!res_->writeBuffer(staging, block.data(), j.fp.totalBytes, j.offset)) continue;
+        ctx.textureBarrier(j.tex, rhi::ResourceState::ShaderResource, rhi::ResourceState::CopyDest);
+        ctx.copyBufferToTexture(j.tex, 0, staging, j.offset);
+        ctx.textureBarrier(j.tex, rhi::ResourceState::CopyDest, rhi::ResourceState::ShaderResource);
+        atlas_->markUploaded(j.page);
+        uploaded += size * size * 4;
+    }
+    // The copies are recorded, not run: destroying the staging buffer here is fence-safe (the backends
+    // retire it behind the frame), the same as VoxiRenderer's GI-cache restore.
+    res_->destroyBuffer(staging);
+    atlas_->setUploadBytes(uploaded);
+}
+
 // Copies a draw list in, flattening its layers low band to high into draw order.
 void UiRenderer::submit(const aver::ui::UiDrawList& list) {
     verts_.clear();
@@ -179,8 +286,7 @@ void UiRenderer::submit(const aver::ui::UiDrawList& list) {
     for (u8 l = 0; l < static_cast<u8>(aver::ui::UiLayer::Count); ++l) {
         for (const aver::ui::UiDrawCmd& c : list.commands(static_cast<aver::ui::UiLayer>(l))) {
             if (c.indexCount == 0 || c.clip.empty()) continue;
-            draws_.push_back({c.indexOffset, c.indexCount,
-                              static_cast<rhi::TextureHandle>(c.texture), c.clip});
+            draws_.push_back({c.indexOffset, c.indexCount, c.texture, c.clip});
         }
     }
 }
@@ -213,7 +319,15 @@ void UiRenderer::overlayPass(rhi::IRenderContext& ctx, u32 width, u32 height) {
     rhi::TextureHandle boundTexture = 0;
     bool haveBound = false;
     for (const Draw& d : draws_) {
-        const rhi::TextureHandle tex = d.texture ? d.texture : white_;
+        rhi::TextureHandle tex = white_;
+        if (d.texture & aver::ui::kUiAtlasTokenBit) {
+            // A glyph atlas page; its texture exists once prePass has uploaded the page.
+            const u32 page = static_cast<u32>(d.texture & 0xFFFFu);
+            tex = page < pages_.size() ? pages_[page].tex : 0;
+            if (!tex) continue;
+        } else if (d.texture) {
+            tex = static_cast<rhi::TextureHandle>(d.texture);
+        }
         if (!haveBound || tex != boundTexture) {
             const rhi::BindingSetHandle set = bindingFor(tex);
             if (!set) continue;

@@ -26,6 +26,26 @@ aver_add_module(Aver.UI
     src/UiLayoutAsset.cpp
     src/UiScreens.cpp
     src/UiHostInput.cpp
+    # The text engine (docs/GAME_UI_TEXT.md): runtime TrueType, fallback chains, bidi, Arabic shaping,
+    # line breaking, rich text. Pure logic; the atlas pages are uploaded by Aver.Render.UI.
+    src/UiUnicode.cpp
+    src/UiUnicodeData.cpp
+    src/UiBidi.cpp
+    src/UiShaping.cpp
+    src/UiArabicData.cpp
+    src/UiLineBreak.cpp
+    src/UiRichText.cpp
+    src/UiTrueType.cpp
+    src/UiFontFace.cpp
+    src/UiFontSet.cpp
+    src/UiGlyphAtlas.cpp
+    src/UiTextLayout.cpp
+    src/UiTextEngine.cpp
   DEPS
     Aver.Core
 )
+
+# imstb_truetype.h (Dear ImGui's vendored stb_truetype 1.26) is the ONE allowed rasteriser. Only the
+# header path is added -- there is no link to ImGui -- and UiTrueType.cpp compiles it STBTT_STATIC, so
+# no stb symbol can collide with the Sandbox's own copy.
+target_include_directories(Aver.UI PRIVATE ${CMAKE_SOURCE_DIR}/third_party/imgui)

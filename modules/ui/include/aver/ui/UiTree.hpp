@@ -132,6 +132,9 @@ public:
     const UiInputState& inputState() const { return state_; }
     // A widget's rectangle inside its padding, as of the last layout: where its children are placed.
     UiRect contentRect(UiWidgetId id) const;
+    // The size and line count of a widget's text as laid out by the last layout(); false for a widget
+    // with no text or one not laid out. Feeds aver_ui_widget_text_size.
+    bool lastTextSize(UiWidgetId id, UiVec2& size, i32& lines) const;
 
     // ---- queries ----------------------------------------------------------------------------
     // The topmost widget under a point (Passive roots are ignored, a modal root blocks the rest).
@@ -173,6 +176,10 @@ private:
     // layout (UiTreeLayout.cpp)
     UiStyle styleOf(const UiWidget& w) const;
     f32 fontPx(const UiWidget& w, const UiStyle& st) const;
+    // What a widget asks the text engine for: the widget's text props over the style's, sized by fontPx.
+    // `family` borrows from `w` / `st`, so keep both alive while the style is used.
+    UiTextStyle textStyleOf(const UiWidget& w, const UiStyle& st) const;
+    UiTextBox textBoxOf(const UiWidget& w, f32 maxWidth) const;
     UiInsets paddingOf(const UiWidget& w, const UiStyle& st) const;
     UiVec2 measure(UiWidget& w);
     void arrange(UiWidget& w, const UiRect& rect);
@@ -205,7 +212,9 @@ private:
     UiWidgetId nearestScrollable(UiWidgetId id) const;
     void scrollBy(UiWidget& w, f32 dy);
     i32 caretFromX(const UiWidget& w, f32 x) const;
-    f32 textShift(const UiWidget& w, const UiTextMetrics& m) const;
+    f32 textShift(const UiWidget& w, const UiTextLayout& layout) const;
+    // The layout of a TextInput's displayed text, with caret stops.
+    std::shared_ptr<const UiTextLayout> inputLayout(const UiWidget& w, const UiTextMetrics& m) const;
     std::string displayText(const UiWidget& w) const;
     void ensureRowVisible(UiWidget& list);
     bool focusableNow(UiWidgetId id) const;
@@ -230,6 +239,7 @@ private:
     std::function<u32()> textEpoch_;
     u32 textEpochSeen_ = 0;
     mutable std::unordered_map<std::string, std::string> shownCache_;
+    std::unordered_map<UiWidgetId, std::shared_ptr<const UiTextLayout>> textLayouts_;   // by the last layout()
 
     UiWidgetId focus_ = 0;
     UiWidgetId scope_ = 0;

@@ -29,244 +29,9 @@ bool importGltfToDir(const std::string& src, const std::string& destDir, const s
         if (outWhy) *outWhy = why;
         return false;
     }
-    for (const std::string& u : res.unsupported)
-        AVER_WARN("[Import] '{}' contains {} - not imported", std::filesystem::path(src).filename().string(), u);
-
-    std::error_code ec;
-    const std::string stem = std::filesystem::path(src).stem().string();
-
-#if AVER_MODULE_PBR
-    // Must run BEFORE the meshes below are written: cookImportedMaterials rewrites each mesh's
-    // materialSlots to the cooked stems, and that has to land before saveOcMesh serialises a mesh
-    // or the .ocmesh would name a material never written under that name (same ordering as
-    // AverAssetC's cookAndRewriteSlots; see its own header comment). No-op when contentDir is empty
-    // (--import-gltf's launcher-less case, since importModel always passes one) -- the cook reports
-    // what it skips rather than losing it silently. maxTexture 0 = no cap, matching AverAssetC's default.
-    if (!contentDir.empty() && (!res.materials.empty() || !res.images.empty())) {
-        std::vector<std::string> matWarn;
-        std::string matErr;
-        u32 materialsWritten = 0, texturesWritten = 0;
-        if (!fmt::cookImportedMaterials(res.materials, res.images, contentDir, stem, res.meshes,
-                                        /*maxTexture=*/0, overwrite, &matWarn, &matErr,
-                                        &materialsWritten, &texturesWritten)) {
-            AVER_WARN("[Import] materials: {}", matErr);
-        } else {
-            out.materialsWritten = materialsWritten;
-            out.texturesWritten = texturesWritten;
-            for (const std::string& w : matWarn) AVER_WARN("[Import] materials: {}", w);
-            if (materialsWritten || texturesWritten)
-                AVER_INFO("[Import] {} -> {} material(s), {} texture(s) under {}",
-                          std::filesystem::path(src).filename().string(), materialsWritten,
-                          texturesWritten, contentDir);
-        }
-    }
-#endif
-
-    // Parallel to res.meshes: stem each mesh was written under, or empty if skipped (invalid, or name
-    // taken). The scene level below reuses these rather than re-deriving the naming rule, since two
-    // copies of it need only disagree once to write paths that resolve to nothing.
-    std::vector<std::string> stems(res.meshes.size());
-    for (usize i = 0; i < res.meshes.size(); ++i) {
-        fmt::OcMeshData& m = res.meshes[i];
-        if (!m.valid()) { AVER_WARN("[Import] mesh {} came out empty and was skipped", i); continue; }
-
-        std::string base = i < res.meshNames.size() && !res.meshNames[i].empty() ? res.meshNames[i] : stem;
-        if (res.meshes.size() > 1 && base == stem) base += "_" + std::to_string(i);
-        for (char& c : base) if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
-                                 c == '"' || c == '<' || c == '>' || c == '|') c = '_';
-
-        std::string outFile = destDir + AVER_PATH_SEP + base + ".ocmesh";
-        if (std::filesystem::exists(outFile, ec)) {
-            // Overwrite-aware skip: the true output name is only known here, which is why `overwrite`
-            // reaches this far rather than the caller deleting a guess at what import would write.
-            if (overwrite) {
-                editor::moveToRecycleBin(outFile);
-                AVER_INFO("[Import] '{}.ocmesh' already existed - replaced", base);
-            } else {
-                AVER_WARN("[Import] '{}.ocmesh' already exists - not overwritten", base);
-                continue;
-            }
-        }
-        if (!fmt::saveOcMesh(outFile, m, &why)) { AVER_WARN("[Import] {}", why); continue; }
-        AVER_INFO("[Import] {} -> {} ({} verts, {} tris)", std::filesystem::path(src).filename().string(),
-                  base + ".ocmesh", m.vertexCount(), m.indices.size() / 3);
-        stems[i] = base;
-        ++out.meshesWritten;
-    }
-
-    // Lower-cased, so names are judged as collisions the way the file system judges them: Windows
-    // holds 'Fan.ocanim' and 'fan.ocanim' to be one file.
-    const auto lower = [](std::string s) {
-        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return s;
-    };
-
-    // The skeletal clips' file stems, decided once: the object clips below must not take one of them
-    // and the clip loop at the bottom writes under exactly these names.
-    std::vector<std::string> clipBases(res.animations.size());
-    for (usize i = 0; i < res.animations.size(); ++i) {
-        clipBases[i] = i < res.animationNames.size() && !res.animationNames[i].empty()
-                     ? res.animationNames[i] : (stem + "_clip" + std::to_string(i));
-        sanitiseAssetName(clipBases[i]);
-    }
-
-    // destDir as a content-relative prefix ("Meshes/Cars/"; empty for the Content root itself). A PLACE
-    // path resolves against the Content root, not the level's own folder, so a bare stem only worked
-    // for a level sitting AT the root. No prefix (no contentDir, or destDir outside it) = no level can
-    // be written, the same rule as AverAssetC's writeSceneLevel.
-    std::string contentPrefix;
-    bool havePrefix = false;
-    if (!contentDir.empty()) {
-        std::error_code relEc;
-        const std::string rel = std::filesystem::relative(destDir, contentDir, relEc).generic_string();
-        if (!relEc && !rel.empty() && rel != ".." && rel.rfind("../", 0) != 0) {
-            havePrefix = true;
-            contentPrefix = rel == "." ? std::string() : rel + "/";
-        }
-    }
-
-    // OBJECT CLIPS: the motion of a plain glTF node (a car on a route, a fan), written BEFORE the level
-    // so a placement only names a clip that reached disk. <stem>_<node>.ocanim, so none reads as one
-    // of the armature's own clips. They count in clipsWritten: a file with only object motion is not
-    // "nothing". placementClip[i] = destDir-relative file of the clip placement i plays, "" for none.
-    std::vector<std::string> placementClip(res.placements.size());
-    {
-        std::unordered_set<std::string> taken;
-        for (const std::string& b : clipBases) taken.insert(lower(b));
-        for (usize i = 0; i < res.objectAnimations.size(); ++i) {
-            std::string name = i < res.objectAnimationNames.size() ? res.objectAnimationNames[i] : std::string();
-            if (name.empty()) name = "ObjectClip" + std::to_string(i);
-            sanitiseAssetName(name);
-            std::string clipStem = stem + "_" + name;
-            if (!taken.insert(lower(clipStem)).second) {
-                const std::string root = clipStem;
-                for (int n = 2; !taken.insert(lower(clipStem = root + "_" + std::to_string(n))).second; ++n) {}
-            }
-
-            const std::string outFile = destDir + AVER_PATH_SEP + clipStem + ".ocanim";
-            const bool clipExists = std::filesystem::exists(outFile, ec);
-            if (clipExists && !overwrite) {
-                // Not named by the level either, the way a skipped mesh is not placed.
-                AVER_WARN("[Import] '{}.ocanim' already exists - not overwritten", clipStem);
-                continue;
-            }
-            if (clipExists && !editor::moveToRecycleBin(outFile)) {
-                AVER_WARN("[Import] '{}.ocanim' could not be replaced", clipStem);
-                continue;
-            }
-            if (!fmt::saveOcAnim(outFile, res.objectAnimations[i], &why)) {
-                AVER_WARN("[Import] {}", why);
-                continue;
-            }
-            AVER_INFO("[Import] {} -> {}.ocanim (object clip, {:.2f}s)",
-                      std::filesystem::path(src).filename().string(), clipStem,
-                      res.objectAnimations[i].duration);
-            ++out.clipsWritten;
-
-            // First clip written for a placement wins; a node animated in several animations gets the
-            // others as files only.
-            const i32 pl = i < res.objectAnimationPlacement.size() ? res.objectAnimationPlacement[i] : -1;
-            if (pl < 0 || usize(pl) >= placementClip.size()) {
-                AVER_INFO("[Import] '{}.ocanim' animates a node with no mesh (a route): nothing plays it "
-                          "until a placement names it", clipStem);
-            } else if (placementClip[usize(pl)].empty()) {
-                placementClip[usize(pl)] = clipStem + ".ocanim";
-            } else {
-                AVER_INFO("[Import] '{}.ocanim' animates the same mesh as '{}': the level plays the first, "
-                          "assign this one by hand", clipStem, placementClip[usize(pl)]);
-            }
-        }
-    }
-    bool anyClipBound = false;
-    for (const std::string& c : placementClip) if (!c.empty()) { anyClipBound = true; break; }
-
-    // Writes placements as a scene (only when there's more than one, or one of them plays an object
-    // clip; a single static PLACE record isn't worth a file). Needed because the importer no longer
-    // welds node translations into vertices -- that used to put every imported mesh's pivot metres
-    // from itself -- so without this, a multi-part import would land as correctly-centred pieces with
-    // no record of how they fit together (AverAssetC learned this at the same time; same feature on
-    // the path the editor actually uses).
-    const bool wantLevel = res.placements.size() > 1 || anyClipBound;
-    bool levelWritten = false;
-    if (wantLevel && !havePrefix) {
-        AVER_WARN("[Import] no scene layout was written: mesh paths in a level are relative to the "
-                  "project's Content folder, and '{}' is {}", destDir,
-                  contentDir.empty() ? "not inside a project" : "outside it");
-    } else if (wantLevel) {
-        fmt::OcWorldData w;
-        w.name = stem;
-        for (usize pi = 0; pi < res.placements.size(); ++pi) {
-            const fmt::GltfPlacement& p = res.placements[pi];
-            if (p.meshIndex < 0 || usize(p.meshIndex) >= stems.size()) continue;
-            if (stems[usize(p.meshIndex)].empty()) continue;
-            fmt::OcWorldPlacement op;
-            op.asset = contentPrefix + stems[usize(p.meshIndex)] + ".ocmesh";
-            op.x = p.position.x; op.y = p.position.y; op.z = p.position.z;
-            if (!placementClip[pi].empty()) op.animClip = contentPrefix + placementClip[pi];
-            w.placements.push_back(std::move(op));
-        }
-        const std::string lvl = destDir + AVER_PATH_SEP + stem + ".ocworld";
-        const bool lvlExists = std::filesystem::exists(lvl, ec);
-        if (w.placements.empty()) {
-            // Nothing to say; not worth a file.
-        } else if (lvlExists && !overwrite) {
-            AVER_WARN("[Import] '{}.ocworld' already exists - not overwritten, so the scene layout "
-                      "was not written", stem);
-        } else if ((lvlExists && !editor::moveToRecycleBin(lvl)) || !fmt::saveOcworld(lvl, w, &why)) {
-            AVER_WARN("[Import] could not write the scene layout: {}", why);
-        } else {
-            AVER_INFO("[Import] {} -> {}.ocworld ({} placement(s), the source scene's own layout)",
-                      std::filesystem::path(src).filename().string(), stem, w.placements.size());
-            levelWritten = true;
-        }
-    }
-    // A clip no level names never plays. The importer notes an animation it drops, but nothing else
-    // would say that one it kept is going unused.
-    if (anyClipBound && !levelWritten)
-        AVER_WARN("[Import] the object clip(s) were written but no scene layout was, so nothing plays "
-                  "them until a placed mesh names one");
-
-    // Writes the rig: previously res.skeletons/animations were dropped on the floor -- nothing ever
-    // wrote them and no project could contain them -- so loadOcSkel/loadOcAnim had no caller in the
-    // engine's history.
-    for (usize i = 0; i < res.skeletons.size(); ++i) {
-        std::string base = i < res.skeletonNames.size() && !res.skeletonNames[i].empty()
-                         ? res.skeletonNames[i] : stem;
-        if (res.skeletons.size() > 1) base += "_" + std::to_string(i);
-        sanitiseAssetName(base);
-        const std::string outFile = destDir + AVER_PATH_SEP + base + ".ocskel";
-        const bool skelExists = std::filesystem::exists(outFile, ec);
-        if (skelExists && !overwrite) {
-            AVER_WARN("[Import] '{}.ocskel' already exists - not overwritten", base);
-        } else if (skelExists && !editor::moveToRecycleBin(outFile)) {
-            AVER_WARN("[Import] '{}.ocskel' could not be replaced", base);
-        } else if (!fmt::saveOcSkel(outFile, res.skeletons[i], &why)) {
-            AVER_WARN("[Import] {}", why);
-        } else {
-            AVER_INFO("[Import] {} -> {} ({} bone(s))", std::filesystem::path(src).filename().string(),
-                      base + ".ocskel", res.skeletons[i].bones.size());
-            ++out.rigsWritten;
-        }
-    }
-    for (usize i = 0; i < res.animations.size(); ++i) {
-        const std::string& base = clipBases[i];
-        const std::string outFile = destDir + AVER_PATH_SEP + base + ".ocanim";
-        const bool animExists = std::filesystem::exists(outFile, ec);
-        if (animExists && !overwrite) {
-            AVER_WARN("[Import] '{}.ocanim' already exists - not overwritten", base);
-        } else if (animExists && !editor::moveToRecycleBin(outFile)) {
-            AVER_WARN("[Import] '{}.ocanim' could not be replaced", base);
-        } else if (!fmt::saveOcAnim(outFile, res.animations[i], &why)) {
-            AVER_WARN("[Import] {}", why);
-        } else {
-            AVER_INFO("[Import] {} -> {} ({:.2f}s, {} track(s))",
-                      std::filesystem::path(src).filename().string(), base + ".ocanim",
-                      res.animations[i].duration, res.animations[i].tracks.size());
-            ++out.clipsWritten;
-        }
-    }
-    return true;
+    return writeImportedModel(res, src, destDir, contentDir, overwrite, out, outWhy);
 }
+
 
 #if AVER_WITH_IMGUI
 // Returns the mounted roots: the project's Content, and the engine's source tree where present.
@@ -716,6 +481,19 @@ void SandboxApp::cbCreateUiLayout() {
     cbAdoptNewAsset(target);
 }
 
+// Writes a starter .ocfonts (a font set) and opens it. The text is editor::fontSetStarterText, which the font set
+// editor itself loads, so the file that was just created is never one the editor refuses.
+void SandboxApp::cbCreateFontSet() {
+    const std::filesystem::path target = cbFreeAssetPath("Fonts", ".ocfonts");
+    if (target.empty()) return;
+    std::string why;
+    if (!editor::writeNewFile(target.string(), editor::fontSetStarterText(), &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new font set failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
 // Starter .ocblend (a blend space) and .ocasm (an animation state machine), each from its editor's own
 // starter so the tab that opens them accepts what was written.
 void SandboxApp::cbCreateBlendSpace() {
@@ -1304,6 +1082,8 @@ void SandboxApp::cbItemContextMenu(const std::string& full, const std::string& n
     }
     if (ImGui::MenuItem("Show in Explorer")) editor::revealInFileManager(full);
     if (ImGui::MenuItem("Copy Path")) { ImGui::SetClipboardText(full.c_str()); cbStatus_ = "Path copied"; }
+    // Reimport / Import options... on an FBX import record, or on any file the record names.
+    if (!isDir) modelReimportMenuItems(full, project_.valid() ? project_.dir : std::string(), project_.contentDir());
     // Find References on demand: the scan already existed but could only be reached from the
     // delete/rename confirms, so "what uses this?" was askable only after deciding to remove it.
     if (!isDir && ImGui::MenuItem("Find References")) {
@@ -1408,6 +1188,8 @@ void SandboxApp::drawContentBrowser() {
         uiReg_.track("cb.add.smartObject");
         if (ImGui::MenuItem("New UI Layout"))       cbCreateUiLayout();
         uiReg_.track("cb.add.uiLayout");
+        if (ImGui::MenuItem("New Font Set"))        cbCreateFontSet();
+        uiReg_.track("cb.add.fontSet");
         if (ImGui::MenuItem("New Blend Space"))     cbCreateBlendSpace();
         uiReg_.track("cb.add.blendSpace");
         if (ImGui::MenuItem("New State Machine"))   cbCreateStateMachine();
@@ -1473,6 +1255,17 @@ void SandboxApp::drawContentBrowser() {
             ImGui::SetTooltip("%s", reason.c_str());
     }
     drawImportModal();
+    // The Import options modal, and the outcome of a Reimport started from the context menu or that modal.
+    drawModelImportPopups(project_.valid() ? project_.dir : std::string(), project_.contentDir());
+    {
+        ModelReimportResult mr;
+        if (takeModelReimportResult(mr)) {
+            cbStatus_ = mr.ok ? mr.title : mr.title + " - see the Output Log";
+            notifyOutcome(mr.ok ? editor::NotifySeverity::Success : editor::NotifySeverity::Error, mr.title, mr.body, !mr.ok);
+            cbInvalidate(mr.destDir);
+            wantMeshReload_ = true;
+        }
+    }
 
     // View controls, right-aligned: Tiles/List, and the tile zoom when tiles are showing.
     {
@@ -2054,12 +1847,14 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         {".oceqs",      {ICON_TUNE,       IM_COL32(120, 215, 170, 255), "Environment Query"}},
         {".ocso",       {ICON_SETTINGS,   IM_COL32(225, 165,  90, 255), "Smart Object"}},
         {".ocui",       {ICON_TUNE,       IM_COL32(120, 200, 255, 255), "UI Layout"}},
+        {".ocfonts",    {ICON_TUNE,       IM_COL32(150, 215, 255, 255), "Font Set"}},
         {".ocblend",    {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Blend Space"}},
         {".ocasm",      {ICON_TREE,       IM_COL32(190, 140, 255, 255), "Animation State Machine"}},
         {".ocmontage",  {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Animation Montage"}},
         {".ocikrig",    {ICON_TREE,       IM_COL32(255, 170, 110, 255), "IK Rig"}},                 // [wave5/ik-retarget]
         {".ocretarget", {ICON_LINK,       IM_COL32(255, 170, 110, 255), "IK Retargeter"}},
         {".ocrig",      {ICON_TUNE,       IM_COL32(255, 170, 110, 255), "Control Rig"}},
+        {".ocsoft",     {ICON_TUNE,       IM_COL32(120, 210, 190, 255), "Soft Body (cloth / destructible)"}},
         {".ocmotion",   {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Motion Matching Database"}},
         {".ocmbake",    {ICON_FILE,       IM_COL32(150, 130, 190, 255), "Motion Matching Bake"}},
         {".ocseq",      {ICON_WAVE,       IM_COL32(150, 190, 255, 255), "Level Sequence Asset"}},   // [wave5/sequencer]
@@ -2687,9 +2482,9 @@ void SandboxApp::drawImportModal() {
     // The Overwrite checkbox's own state, local rather than a member (means nothing once closed);
     // IsWindowAppearing() resets it for the next open, like cbRenameRepoint_'s sibling checkboxes.
     static bool s_overwrite = false;
-    if (ImGui::IsWindowAppearing()) s_overwrite = false;
+    if (ImGui::IsWindowAppearing()) { s_overwrite = false; modelImportDialogReset(); }
     ImGui::TextUnformatted("Import an asset into the selected folder.");
-    ImGui::TextDisabled(".gltf/.glb become .ocmesh; .wav/.mp3/.m4a/.flac become .ocaudio.");
+    ImGui::TextDisabled(".gltf/.glb/.fbx become .ocmesh; .wav/.mp3/.m4a/.flac become .ocaudio.");
     ImGui::TextDisabled("Anything else is copied as-is.");
     ImGui::SetNextItemWidth(420.0f * dpi_);
     ImGui::InputText("Source file", importPath_, sizeof(importPath_));
@@ -2698,11 +2493,11 @@ void SandboxApp::drawImportModal() {
         const std::string start = importPath_[0] != '\0'
             ? std::filesystem::path(importPath_).parent_path().string() : std::string();
 #if AVER_HAVE_AUDIO_IMPORT
-        const char* kFilterLabel = "Importable assets (*.gltf, *.glb, *.wav, *.mp3, *.m4a, *.flac)";
-        const char* kFilterSpec  = "*.gltf;*.glb;*.wav;*.mp3;*.m4a;*.flac";
+        const char* kFilterLabel = "Importable assets (*.gltf, *.glb, *.fbx, *.wav, *.mp3, *.m4a, *.flac)";
+        const char* kFilterSpec  = "*.gltf;*.glb;*.fbx;*.wav;*.mp3;*.m4a;*.flac";
 #else
-        const char* kFilterLabel = "Importable assets (*.gltf, *.glb)";
-        const char* kFilterSpec  = "*.gltf;*.glb";
+        const char* kFilterLabel = "Importable assets (*.gltf, *.glb, *.fbx)";
+        const char* kFilterSpec  = "*.gltf;*.glb;*.fbx";
 #endif
         std::string picked;
         if (openFileDialog("Import asset", kFilterLabel, kFilterSpec,
@@ -2716,6 +2511,8 @@ void SandboxApp::drawImportModal() {
             }
         }
     }
+    // FBX options, shown once an .fbx path is typed or picked (nothing for other files).
+    drawFbxImportOptionsPanel(importPath_);
     const std::string dest = cbSelectedDir_.empty() ? project_.contentDir() : cbSelectedDir_;
     const std::string blocked = cbImportBlockedReason(dest);
     if (blocked.empty()) {
@@ -2735,8 +2532,9 @@ void SandboxApp::drawImportModal() {
         const std::filesystem::path srcPath(importPath_);
         std::string ext = srcPath.extension().string();
         for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (ext == ".gltf" || ext == ".glb") {
-            wouldCollide = std::filesystem::exists(dest + AVER_PATH_SEP + srcPath.stem().string() + ".ocmesh", cec);
+        if (ext == ".gltf" || ext == ".glb" || ext == ".fbx") {
+            wouldCollide = std::filesystem::exists(dest + AVER_PATH_SEP + srcPath.stem().string() + ".ocmesh", cec) ||
+                           (ext == ".fbx" && std::filesystem::exists(dest + AVER_PATH_SEP + srcPath.stem().string() + ".ocimport", cec));
         }
 #if AVER_HAVE_AUDIO_IMPORT
         else if (fmt::isImportableAudio(importPath_)) {
@@ -2758,7 +2556,9 @@ void SandboxApp::drawImportModal() {
 
     ImGui::BeginDisabled(importPath_[0] == '\0' || !blocked.empty());
     if (ImGui::Button("Import")) {
+        modelImportArmDialogOptions(importPath_);          // the panel's FBX options apply to exactly this import
         importAsset(importPath_, dest, wouldCollide && s_overwrite);
+        modelImportDisarm();
         importPath_[0] = '\0';
         s_overwrite = false;
         ImGui::CloseCurrentPopup();
@@ -2834,7 +2634,7 @@ void SandboxApp::importAsset(const std::string& src, const std::string& destDir,
     const std::string ext = std::filesystem::path(src).extension().string();
     std::string lower;
     for (const char c : ext) lower.push_back(c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c);
-    if (lower == ".gltf" || lower == ".glb") { importModel(src, destDir, overwrite); return; }
+    if (modelFormatOfPath(src) != ModelFormat::None) { importModel(src, destDir, overwrite); return; }
 #if AVER_HAVE_AUDIO_IMPORT
     if (fmt::isImportableAudio(src)) { importAudio(src, destDir, overwrite); return; }
 #endif
@@ -2921,7 +2721,7 @@ void SandboxApp::importModel(const std::string& src, const std::string& destDir,
     GltfImportSummary sum;
     std::string why;
     const std::string srcName = std::filesystem::path(src).filename().string();
-    if (!importGltfToDir(src, destDir, project_.contentDir(), overwrite, sum, &why)) {
+    if (!importModelFile(src, destDir, project_.contentDir(), overwrite, sum, &why)) {
         AVER_WARN("[Import] {}", why);
         cbStatus_ = "Import failed - see the Output Log";
         notifyOutcome(editor::NotifySeverity::Error, "Could not import " + srcName, why, true);

@@ -81,6 +81,12 @@ struct ImportedMaterial {
 
     ImportedTexture baseColorTex, metalRoughTex, normalTex, occlusionTex, emissiveTex;
 
+    // A SEPARATE metalness map, for formats that name roughness and metalness as two files (FBX).
+    // .ocmat has ONE packed slot (metalRoughTex: G = roughness, B = metalness), so the import policy
+    // layer packs the pair into a new image and clears this (packSeparateMetalRough, ImportCook.cpp).
+    // Never set by glTF, OBJ or USD; one still set when the cook runs is ignored.
+    ImportedTexture metallicTex;
+
     // A SEPARATE opacity map, which .ocmat has no slot for: cutout there is the base colour's alpha
     // channel, exactly as glTF defines it. USD and .mtl both name opacity as its own file
     // (`inputs:opacity.connect` to a UsdUVTexture, `map_d`), and Intel's Jungle Ruins trees are

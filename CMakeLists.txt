@@ -163,6 +163,11 @@ endif()
 if(AVER_MODULE_TRIFACTOR)
   add_subdirectory(third_party/meshoptimizer)
 endif()
+# ufbx (MIT), the FBX reader behind Aver.Formats.Fbx (docs/FBX_IMPORT.md). Must come before modules/formats; the guard keeps the
+# tree configuring when the vendored source is absent (Aver.Formats.Fbx then reports "built without ufbx").
+if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/ufbx/ufbx.c" AND NOT TARGET ufbx)
+  add_subdirectory(third_party/ufbx)
+endif()
 
 # ---- Tier 0-6 implemented modules ----
 add_subdirectory(modules/core)
@@ -296,6 +301,11 @@ if(AVER_MODULE_SCENE)
   # needs all of scene, anim.scene and physics; with any of them off it is simply not there.
   if(AVER_MODULE_RAGDOLL AND AVER_MODULE_PHYSICS)
     add_subdirectory(modules/ragdoll)
+  endif()
+  # Cloth and destruction on scene entities over Jolt soft bodies (docs/SOFTBODY.md). Needs scene, anim.scene and physics;
+  # the manifest enforces that, so with any of them off the module is simply not there.
+  if(AVER_MODULE_SOFTBODY_SCENE)
+    add_subdirectory(modules/softbody.scene)
   endif()
   # Save/load of a whole world. Guarded on SCENE for the same reason anim.scene is: it is the edge
   # between the world and the container format, and a build with no scene has no world to save.
@@ -549,6 +559,9 @@ if(AVER_BUILD_TESTS)
     if(TARGET Aver.Ragdoll)
       add_subdirectory(tests/ragdoll)
     endif()
+    if(TARGET Aver.SoftBody.Scene)
+      add_subdirectory(tests/softbody.scene)
+    endif()
     add_subdirectory(tests/save)
     add_subdirectory(tests/prefab)
     # [wave3/level-instances begin]
@@ -575,6 +588,7 @@ if(AVER_BUILD_TESTS)
     add_subdirectory(tests/framework)
     add_subdirectory(tests/framework_timers)
     add_subdirectory(tests/framework_anim)
+    add_subdirectory(tests/framework_import)   # wave9 FBX_IMPORT: the model import ABI relay
     add_subdirectory(tests/framework_ik)   # wave5 #24: the IK / rig-input ABI relay
     add_subdirectory(tests/framework_sequence)   # wave5 #27: the sequencer ABI relay
     add_subdirectory(tests/framework_content)

@@ -3,6 +3,9 @@
 // class is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#if AVER_MODULE_SOFTBODY_SCENE
+#  include "aver/softbody/SoftBodySystem.hpp"
+#endif
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "LightDetails.hpp"
 #include "DecalDetails.hpp"
@@ -936,7 +939,6 @@ void SandboxApp::buildPanels(Engine& e) {
     // Takes the Engine now (previously `(void)e`, since nothing here needed one): the Level
     // branch edits the WATER record, and applying it to the live surface needs a device.
     if (showDetails_)  buildDetailsPanel(e);
-    if (showSoftBody_) editor::softBodyPanelDraw(softBody_, &showSoftBody_);
 #if AVER_MODULE_SCENE
     if (showRenderQueue_) {
         editor::RenderQueueHost host = renderQueueHost();
@@ -2727,6 +2729,11 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             if (ImGui::DragFloat("Feature Size", &featureSize, 100.0f, 100.0f, 5e6f))
                 sky_.cloudScale = 1.0f / std::fmax(featureSize, 1.0f);
             ImGui::DragFloat2("Wind", sky_.cloudWind, 5.0f);
+#if AVER_MODULE_SOFTBODY_SCENE
+            if (ImGui::SmallButton("Copy to cloth wind"))
+                softbody::softBodySystem().setWind(Vec3{sky_.cloudWind[0], sky_.cloudWind[1], 0.0f}, 0.0f, 0.3f, 0.0f);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sets the soft-body (cloth) wind to this cloud drift. They are independent otherwise.");
+#endif
         }
         // CLOUDS is its own record, same reason as FOG. The Clouds checkbox sits above the `if`
         // deliberately: turning clouds OFF must reach the file, so marking only inside the

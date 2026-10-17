@@ -59,13 +59,15 @@ int main() {
 
     // ---- the table: canonical order, labels, registration ----
     {
-        static const char* const kOrder[] = {"SkeletalMesh", "Animator", "RootMotion", "MotionMatcher", "ControlRig", "IkRig", "Brain", "SmartObject"};
-        static const char* const kLabels[] = {"Skeletal Mesh", "Animator", "Root Motion", "Motion Matching", "Control Rig", "IK Rig", "AI Brain", "Smart Object"};
-        check(kPlacedKindCount == 8, "eight kinds in the Add Component menu (Soft Body keeps its own entry)");
-        for (usize i = 0; i < kPlacedKindCount && i < 8; ++i) {
+        static const char* const kOrder[] = {"SkeletalMesh", "Animator", "RootMotion", "MotionMatcher", "ControlRig", "IkRig", "Brain", "SmartObject", "Cloth", "Destructible"};
+        static const char* const kLabels[] = {"Skeletal Mesh", "Animator", "Root Motion", "Motion Matching", "Control Rig", "IK Rig", "AI Brain", "Smart Object", "Cloth", "Destructible"};
+        check(kPlacedKindCount == 10, "ten kinds in the Add Component menu (Soft Body keeps its own entry)");
+        for (usize i = 0; i < kPlacedKindCount && i < 10; ++i) {
             check(std::string_view(kPlacedKinds[i].type) == kOrder[i], std::string("kind ") + std::to_string(i) + " is " + kOrder[i] + " (canonical order)");
             check(std::string_view(kPlacedKinds[i].menuLabel) == kLabels[i], std::string("menu label of ") + kOrder[i]);
-            check(i < std::size(game::kPlacedComponentTypes) && game::kPlacedComponentTypes[i] == kOrder[i],
+            // kPlacedComponentTypes carries "SoftBody" at index 8 (it keeps its own menu entry), so Cloth/Destructible sit one place later.
+            const usize at = i < 8 ? i : i + 1;
+            check(at < std::size(game::kPlacedComponentTypes) && game::kPlacedComponentTypes[at] == kOrder[i],
                   std::string(kOrder[i]) + " sits where the applier's canonical order puts it");
             check(kPlacedKinds[i].tip && *kPlacedKinds[i].tip && kPlacedKinds[i].header && *kPlacedKinds[i].header,
                   std::string(kOrder[i]) + " has a tooltip and a section header");

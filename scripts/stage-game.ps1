@@ -369,7 +369,7 @@ Note "copied $copied engine file(s)"
 # Content, FILTERED. Dropping these changes the id of nothing, because ObjectIds hash paths and no
 # shipped asset references a .cs: sources, build intermediates and debug symbols only.
 $dropDirs  = @('\bin\', '\obj\', '\Source\')
-$dropExt   = @('.cs', '.fs', '.csproj', '.fsproj', '.pdb', '.user', '.sln')
+$dropExt   = @('.cs', '.fs', '.csproj', '.fsproj', '.pdb', '.user', '.sln', '.ocimport')
 $contentOut = Join-Path $outFull 'Content'
 $contentCopied = 0; $contentSkipped = 0
 foreach ($f in (Get-ChildItem -LiteralPath $contentSrc -Recurse -File)) {

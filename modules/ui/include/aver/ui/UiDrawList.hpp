@@ -61,8 +61,15 @@ public:
     void addRect(f32 x, f32 y, f32 w, f32 h, u32 rgba);
     // Appends a textured rectangle with explicit UVs.
     void addTexturedRect(f32 x, f32 y, f32 w, f32 h, u64 texture, f32 u0, f32 v0, f32 u1, f32 v1, u32 rgba);
+    // A glyph quad. `skew` (0 = none) shears the top edge right by skew * (shearBaselineY - y): the
+    // synthetic italic of a face that has no italic. Merges like any other textured rect.
+    void addGlyphQuad(f32 x, f32 y, f32 w, f32 h, u64 texture, f32 u0, f32 v0, f32 u1, f32 v1, u32 rgba,
+                      f32 skew = 0.0f, f32 shearBaselineY = 0.0f);
 
     // ---- TEXT, which this draw list could not produce at all -----------------------------------
+    //
+    // The text is UTF-8 and glyphs are looked up per code point (a multi-byte sequence used to draw one
+    // wrong glyph per byte).
     //
     // (x, y) is the pen: the LEFT END OF THE BASELINE, not the top-left of a box. That is the
     // convention every glyph's offY is expressed against, and picking the box corner instead would

@@ -239,6 +239,27 @@ private:
     bool writable_ = false;
 };
 
+// ---- read-only file mapping --------------------------------------------------------------------
+//
+// A whole file mapped into the address space, read only: a 20 to 30 MB CJK .ttc costs address space and
+// only the pages that are touched. DELIBERATELY NOT TRACED -- unlike readFileBytes, File::open and
+// traceFileOpen, this never reports the open to the file trace. It exists for OS fonts, which a packaged
+// game legitimately reads from outside its own folder, and scripts/verify-game.ps1 asserts that every
+// TRACED open is inside the package. Anything that belongs to the package must be opened through the
+// traced API instead (the game's font loader calls traceFileOpen for project fonts itself).
+struct MappedFile {
+    const u8* data = nullptr;
+    usize size = 0;
+    void* mapping = nullptr;     // the platform handle(s); owned by unmap()
+    void* view = nullptr;
+    bool valid() const { return data != nullptr; }
+};
+
+// Maps `path` read only. False if it cannot be opened or is empty.
+bool mapFileReadOnly(const std::string& path, MappedFile& out);
+// Releases a mapping. Safe on an empty one.
+void unmap(MappedFile& file);
+
 // Shows the native open-file dialog. `spec` is a semicolon-separated pattern list, e.g. "*.ocproject".
 // False if the user cancelled or the shell dialog is unavailable.
 bool openFileDialog(const std::string& title, const std::string& filterLabel,

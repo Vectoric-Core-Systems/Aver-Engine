@@ -37,6 +37,12 @@
     Its limits, stated rather than implied: the trace does NOT cover LoadLibraryW (dxcompiler, dxil,
     nethost, hostfxr), the CLR's own assembly probing, or stbi_load's internal fopen.
 
+    OS FONTS ARE OPENED UNTRACED ON PURPOSE (2026-10, GameUiText.hpp). The game UI's text engine maps
+    C:\Windows\Fonts files for glyphs the project's own fonts lack (CJK, Arabic). Those opens are
+    legitimately outside the package, so they go through aver::mapFileReadOnly, which never reports to
+    the trace, and the assertion above is not weakened to allow them. Project fonts (Content and the
+    @exe/ Roboto files) ARE traced, so a package missing one still fails here.
+
     TWO LIMITS MEASURED RATHER THAN GUESSED, both found by deliberately breaking a good package and
     watching this script pass anyway:
 

@@ -135,6 +135,11 @@ AVER_UI_API void        aver_ui_widget_set_text(uint32_t id, const char* utf8);
 AVER_UI_API const char* aver_ui_widget_get_text(uint32_t id);
 AVER_UI_API const char* aver_ui_widget_get_shown_text(uint32_t id);   /* text after localization (inspection, tests) */
 AVER_UI_API void        aver_ui_widget_set_value(uint32_t id, float value);      /* slider, progress */
+/* The widget's text as laid out by the last frame: width, height (pixels) and line count into outWHL (3 floats).
+ * 1 if it has one, 0 otherwise (outWHL is zeroed). Text styling needs no entry points of its own: the property
+ * table is the interface (aver_ui_widget_set_prop "fontFamily" / "bold" / "italic" / "textAlign" / "textDir" /
+ * "lineSpacing" / "letterSpacing" / "ellipsis" / "maxLines" / "rich"). */
+AVER_UI_API int32_t     aver_ui_widget_text_size(uint32_t id, float* outWHL);
 AVER_UI_API float       aver_ui_widget_get_value(uint32_t id);
 AVER_UI_API void        aver_ui_widget_set_checked(uint32_t id, int32_t checked);
 AVER_UI_API int32_t     aver_ui_widget_get_checked(uint32_t id);

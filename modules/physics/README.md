@@ -29,6 +29,9 @@ Two properties follow from that split, and both are enforced by a link line rath
 Jolt's sources are **vendored** — MIT, 5.6.0, not edited here. The provenance, the conventions table
 (all four of Jolt's differ from the engine's) and the update procedure live in that module's README.
 
+- **Soft bodies:** `physics_softbody_abi.h` (`aver_phys_sb_*`) is the builder-style surface for cloth and
+  destruction (in-place dents, rebuild under the same handle, aero, impact events), driven by
+  `Aver.SoftBody.Scene`. `aver_phys_softbody_*` is unchanged. See `docs/physics/SOFTBODY_DESTRUCTION.md`.
 - **Frame loop:** `SandboxApp` starts the simulation in `onInit`, steps it in `onUpdate` between the
   `PRE_PHYSICS` and `PHYSICS` tick groups, and shuts it down first in `onShutdown` (Jolt owns worker
   threads, which must be joined while what their jobs touch is still alive).

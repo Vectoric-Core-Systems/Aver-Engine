@@ -1,5 +1,6 @@
 // UiDrawList: clip stack, colour premultiplication, and quad emission with command merging.
 #include "aver/ui/UiDrawList.hpp"
+#include "aver/ui/UiUnicode.hpp"
 
 namespace aver::ui {
 
@@ -108,9 +109,10 @@ f32 UiDrawList::addTextScaled(f32 x, f32 y, std::string_view text, const UiFont&
     if (!font.valid() || text.empty() || scale <= 0.0f) return x;
     f32 penX = x;
     f32 penY = y;
-    for (const char ch : text) {
-        if (ch == '\n') { penX = x; penY += font.lineHeight * scale; continue; }
-        const UiGlyph* g = font.glyph(static_cast<u32>(static_cast<unsigned char>(ch)));
+    for (usize i = 0; i < text.size();) {
+        const u32 cp = uiDecodeOne(text, i);   // UTF-8: the glyph table is keyed by code point
+        if (cp == '\n') { penX = x; penY += font.lineHeight * scale; continue; }
+        const UiGlyph* g = font.glyph(cp);
         if (!g) continue;   // no tofu box: a missing glyph costs a gap, not a wall
         // A SPACE HAS AN ADVANCE AND NO BITMAP, and emitting a zero-area quad for it would add two
         // triangles per space to every string for nothing.
@@ -121,6 +123,28 @@ f32 UiDrawList::addTextScaled(f32 x, f32 y, std::string_view text, const UiFont&
         penX += g->advance * scale;
     }
     return penX;
+}
+
+// A textured quad whose top edge is sheared right by `skew` times its height above `shearBaselineY`
+// (synthetic italic). Same batching as addTexturedRect.
+void UiDrawList::addGlyphQuad(f32 x, f32 y, f32 w, f32 h, u64 texture, f32 u0, f32 v0, f32 u1, f32 v1, u32 rgba,
+                              f32 skew, f32 shearBaselineY) {
+    if (skew == 0.0f) { addTexturedRect(x, y, w, h, texture, u0, v0, u1, v1, rgba); return; }
+    if (w <= 0.0f || h <= 0.0f) return;
+    if (clip().empty()) return;
+
+    const f32 dxTop = skew * (shearBaselineY - y);
+    const f32 dxBot = skew * (shearBaselineY - (y + h));
+    const u32 c = uiPremultiply(rgba);
+    const u32 base = static_cast<u32>(verts_.size());
+    verts_.push_back(UiVertex{x + dxTop,     y,     u0, v0, c});
+    verts_.push_back(UiVertex{x + w + dxTop, y,     u1, v0, c});
+    verts_.push_back(UiVertex{x + w + dxBot, y + h, u1, v1, c});
+    verts_.push_back(UiVertex{x + dxBot,     y + h, u0, v1, c});
+
+    idx_.push_back(base + 0); idx_.push_back(base + 1); idx_.push_back(base + 2);
+    idx_.push_back(base + 0); idx_.push_back(base + 2); idx_.push_back(base + 3);
+    append(6, texture);
 }
 
 void UiDrawList::addHitRect(u64 id, f32 x, f32 y, f32 w, f32 h) {

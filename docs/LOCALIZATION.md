@@ -60,7 +60,9 @@ Plural categories: `ja zh ko vi th id ms` other only; `fr pt` one for 0 and 1; `
 
 ## Fonts
 
-The shipped UI font (`assets/fonts/Roboto-Regular.ocfont`) covers Latin with accents, Greek and Cyrillic (`scripts/bake-font.py --ranges "32-126,160-591,880-1023,1024-1327,8208-8231,8364"`). CJK, Arabic, Hebrew and Indic need another font, shaping and bidi and are not covered. The editor's own ImGui font has no Greek or Cyrillic, so the editor shows boxes where the game draws correctly.
+The game UI draws with a font set (`Content/UI/Fonts.ocfonts`, or the built-in default: Roboto, then the Windows fonts, then the baked bitmap font), so a glyph the first font lacks comes from the next one in the chain. Latin with accents, Greek and Cyrillic come from Roboto (`Roboto-Regular.ttf` and `Roboto-Medium.ttf` ship next to the executable); CJK, Arabic and Hebrew come from the Windows fonts on Windows, or from a project font you add to the set. Arabic is shaped (letters join, lam-alef ligatures), Arabic and Hebrew run right to left, mixed text is reordered, and Chinese and Japanese wrap between characters with the usual line-start and line-end rules. A language can name its own family (`OVERRIDE ja Body BodyJa`), and entries tagged `lang=` are tried first for that language, which is how Han characters pick the Japanese or the Chinese shapes. The font set follows the active culture. Not covered: Indic, Thai, Khmer and Myanmar shaping, vertical text, colour emoji and IME input. Details, the `.ocfonts` format and the limits are in [GAME_UI_TEXT.md](GAME_UI_TEXT.md).
+
+The baked bitmap font (`assets/fonts/Roboto-Regular.ocfont`, made by `scripts/bake-font.py`) is the fallback when no TrueType font can be opened; it covers Latin with accents, Greek and Cyrillic only. The editor's own ImGui font has no Greek or Cyrillic, so the editor chrome shows boxes where the game draws correctly; the UI layout editor's preview uses the game's text engine and is not affected.
 
 ## Packaging
 

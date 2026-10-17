@@ -270,6 +270,7 @@ static int Main()
         failures += GasNodeTests.RunAll();
         failures += DataLocNodeTests.RunAll();
         failures += MontageNodeTests.RunAll();
+        failures += ModelImportNodeTests.RunAll();   // wave9 FBX_IMPORT: Import Model / Is Model Import Available
         // Wave-3 node families (docs/plans/wave3): AI queries (EQS, smart objects, brains), level instances,
         // landscape and water reads.
         failures += AiQueryNodeTests.RunAll();
@@ -279,6 +280,8 @@ static int Main()
         failures += IkNodeTests.RunAll();
         failures += MotionMatchNodeTests.RunAll();
         failures += SequenceNodeTests.RunAll();
+        failures += UiTextNodeTests.RunAll();
+        failures += SoftBodyNodeTests.RunAll();
 
         // Self: the node that makes a canvas-authored graph able to name its own entity at all.
         // See SelfNodeTests.cs's header for why its absence, not polish, is what kept every

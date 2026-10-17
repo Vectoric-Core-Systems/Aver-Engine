@@ -113,7 +113,9 @@ inline GraphAttributeSpec attr(std::string key, std::string label) {
 #include "GraphNodeDefsTerrain.hpp"
 #include "GraphNodeDefsIk.hpp"
 #include "GraphNodeDefsMotionMatch.hpp"
+#include "GraphNodeDefsUiText.hpp"
 #include "GraphNodeDefsSequencer.hpp"
+#include "GraphNodeDefsSoftBody.hpp"
 
 // One line per node type. This is the "one entry" the build task and Slice 6 both call for.
 inline std::vector<GraphNodeDesc> buildCatalog() {
@@ -1106,7 +1108,9 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     appendTerrainNodeDefs(t);
     appendIkNodeDefs(t);
     appendMotionMatchNodeDefs(t);
+    appendUiTextNodeDefs(t);
     appendSequencerNodeDefs(t);
+    appendSoftBodyNodeDefs(t);
     return t;
 }
 

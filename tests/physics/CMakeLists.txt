@@ -124,3 +124,10 @@ foreach(_t WaterSamplerTest SurfaceFrictionTest)
   target_link_libraries(${_t} PRIVATE Aver.Physics Aver.Core)
   set_target_properties(${_t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endforeach()
+
+# SoftBodyBuilderTest -- the builder-style soft bodies (physics_softbody_abi.h): hanging, rebuilding under the
+# same handle with the same state, dents written in place, the bend rule, tears, the skin palette against an
+# entity matrix, wind and drag, impacts, layers, sleep and freeze. ABI only: Aver.Physics and Aver.Core.
+add_executable(SoftBodyBuilderTest src/SoftBodyBuilderTest.cpp)
+target_link_libraries(SoftBodyBuilderTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(SoftBodyBuilderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

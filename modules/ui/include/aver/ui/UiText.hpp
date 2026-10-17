@@ -3,13 +3,17 @@
 // UiDrawList directly: a test records calls, the editor preview paints with ImGui, and the game
 // paints into a UiDrawList, all from the same tree.
 #include "aver/ui/UiDrawList.hpp"
+#include "aver/ui/UiTextLayout.hpp"
 #include "aver/ui/UiTypes.hpp"
 
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace aver::ui {
+
+class UiTextEngine;
 
 // Measures text at a pixel size. Layout needs this before anything is drawn.
 class UiTextMetrics {
@@ -18,6 +22,12 @@ public:
     virtual f32 textWidth(std::string_view text, f32 px) const = 0;   // widest line
     virtual f32 lineHeight(f32 px) const = 0;
     virtual f32 ascent(f32 px) const = 0;                              // baseline below the line top
+
+    // The positioned text for a string: what the tree measures AND draws. The default builds a legacy
+    // layout from the three virtuals above (uiWrapText for wrapping), so every existing implementer keeps
+    // today's behaviour. UiEngineMetrics / UiDrawListPainter with an engine override it.
+    virtual std::shared_ptr<const UiTextLayout> layoutText(std::string_view text, const UiTextStyle& style,
+                                                           const UiTextBox& box) const;
 };
 
 // Font-less estimate: fixed advance per code point. For headless tools and tests.
@@ -57,6 +67,15 @@ void uiAppendUtf8(std::string& out, u32 cp);
 struct UiTextRef { std::string table, key, defaultText; bool hasDefault = false; };
 bool uiParseTextRef(std::string_view s, UiTextRef& out);
 
+// x of a line's left edge inside `area`. Start/End follow the paragraph direction.
+inline f32 uiAlignedX(UiTextAlign a, const UiRect& area, f32 lineWidth, bool rtl) {
+    if (a == UiTextAlign::Start) a = rtl ? UiTextAlign::Right : UiTextAlign::Left;
+    else if (a == UiTextAlign::End) a = rtl ? UiTextAlign::Left : UiTextAlign::Right;
+    if (a == UiTextAlign::Center) return area.x + (area.w - lineWidth) * 0.5f;
+    if (a == UiTextAlign::Right) return area.right() - lineWidth;
+    return area.x;
+}
+
 // What the tree draws with.
 class UiPainter : public UiTextMetrics {
 public:
@@ -67,15 +86,23 @@ public:
     virtual void image(const UiRect& r, u64 texture, const UiUvRect& uv, u32 tint) = 0;
     // (x, baselineY) is the left end of the baseline, UiDrawList::addText's convention.
     virtual void text(f32 x, f32 baselineY, std::string_view s, f32 px, u32 rgba) = 0;
+    // Draws a layout's lines inside `area`, aligned per line (Left/Center/Right physical, Start/End by
+    // the line's direction), optionally centring the block vertically. The default paints each line
+    // with text() using the old block maths, so a painter that only implements text() is unchanged.
+    virtual void drawText(const UiTextLayout& layout, const UiRect& area, UiTextAlign align, bool centreVertically,
+                          u32 rgba);
 
     // Four filled edges inside `r`.
     void strokeRect(const UiRect& r, f32 thickness, u32 rgba);
 };
 
 // Paints into a UiDrawList. `font` may be null: text is then skipped and measured with estimates.
+// With a UiTextEngine that has a TrueType face, all text goes through the engine and `font` is only
+// the fallback face inside the engine's chain.
 class UiDrawListPainter final : public UiPainter {
 public:
     UiDrawListPainter(UiDrawList& list, const UiFont* font);
+    UiDrawListPainter(UiDrawList& list, UiTextEngine* engine, const UiFont* bitmap);
 
     void setLayer(UiLayer l) override { list_.setLayer(l); }
     void pushClip(const UiRect& r) override;
@@ -84,13 +111,21 @@ public:
     void image(const UiRect& r, u64 texture, const UiUvRect& uv, u32 tint) override;
     void text(f32 x, f32 baselineY, std::string_view s, f32 px, u32 rgba) override;
 
+    void drawText(const UiTextLayout& layout, const UiRect& area, UiTextAlign align, bool centreVertically,
+                  u32 rgba) override;
+
     f32 textWidth(std::string_view t, f32 px) const override;
     f32 lineHeight(f32 px) const override;
     f32 ascent(f32 px) const override;
+    std::shared_ptr<const UiTextLayout> layoutText(std::string_view text, const UiTextStyle& style,
+                                                   const UiTextBox& box) const override;
 
 private:
+    bool engineOn() const;
+
     UiDrawList& list_;
     const UiFont* font_;
+    UiTextEngine* engine_ = nullptr;
     UiFontMetrics fontMetrics_;
     UiEstimatedMetrics estimate_;
 };

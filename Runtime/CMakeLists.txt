@@ -149,6 +149,15 @@ endif()
 if(TARGET Aver.Physics)
   target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Physics)
 endif()
+# Cloth and destruction (brings AVER_MODULE_SOFTBODY_SCENE=1) and the draw side that shows it (AVER_MODULE_RENDER_SOFTBODY=1).
+# PUBLIC like the ragdoll above: GameSystemsWiring.hpp registers and ticks the system in both hosts, and
+# GameRender.cpp substitutes the simulated mesh for a soft entity when DrawWorldOptions::softBodies is set.
+if(TARGET Aver.SoftBody.Scene)
+  target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.SoftBody.Scene)
+endif()
+if(TARGET Aver.Render.SoftBody)
+  target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Render.SoftBody)
+endif()
 if(TARGET Aver.Framework)
   target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Framework)
 endif()

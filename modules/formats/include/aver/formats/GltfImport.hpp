@@ -3,6 +3,7 @@
 // metres; this engine is left-handed, +Z up, +X forward, in centimetres, so positions, normals and
 // rotations are rebased, lengths scaled, and triangle winding reversed (the basis change has det -1;
 // a node that mirrors its mesh reverses it once more). Normals take the node basis' inverse-transpose.
+#include "aver/formats/ImportedCamera.hpp"
 #include "aver/formats/ImportedMaterial.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/formats/OcMesh.hpp"
@@ -106,6 +107,12 @@ struct GltfImportResult {
     // Aver.Formats for nothing but meshes.
     std::vector<GltfMaterial> materials;
     std::vector<GltfImage>    images;
+
+    // Parallel to `animations`: which `skeletons` entry a clip's bone indices address. EMPTY means
+    // all of them address skeleton 0, which is every glTF file. The FBX importer fills it.
+    std::vector<i32> animationSkeleton;
+    // Cameras the file carried, engine space. Empty for glTF.
+    std::vector<ImportedCamera> cameras;
 
     std::vector<std::string> unsupported;    // features the file used and this importer cannot carry
 };

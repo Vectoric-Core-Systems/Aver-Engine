@@ -236,4 +236,10 @@ inline void appendGameSystemNodeDefs(std::vector<GraphNodeDesc>& t) {
         pin("exec", "exec", false), pin("entity", "int", false), pin("mode", "int", false), pin("axes", "int", false, "11"), pin("scale", "float", false, "1"), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"ConsumeRootMotion", "Consume Root Motion", "Animation", {
         pin("exec", "exec", false), pin("entity", "int", false), pin("then", "exec", true), pin("success", "bool", true), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("yaw", "float", true), pin("seconds", "float", true)}});
+    // ---- model import (docs/plans/wave9/FBX_IMPORT.md 2.10): editor hosts only, a packaged game reports unavailable ----
+    t.push_back({"ImportModel", "Import Model", "Assets", {
+        pin("exec", "exec", false), pin("overwrite", "bool", false), pin("scale", "float", false, "100"), pin("then", "exec", true), pin("success", "bool", true), pin("meshes", "int", true), pin("skeletons", "int", true), pin("clips", "int", true)},
+        {attr("source", "Source file"), attr("dest", "Destination folder (Content-relative)")}});
+    t.push_back({"IsModelImportAvailable", "Is Model Import Available", "Assets", {
+        pin("available", "bool", true)}});
 }

@@ -1,0 +1,1 @@
+{"format":"ocsoft","version":1,"kind":"destructible","preset":"metal","destruct":{"minImpactCmS":200},"paint":{"rules":[{"type":"above","axis":"y","valueCm":-2.0}]}}

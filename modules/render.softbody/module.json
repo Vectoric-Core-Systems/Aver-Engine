@@ -3,11 +3,11 @@
   "name": "Aver.Render.SoftBody",
   "dir": "render.softbody",
   "displayName": "Soft-Body Drawing",
-  "description": "Draws meshes whose vertices come from a simulated soft body.",
+  "description": "Draws cloth and destructible pieces whose vertices come from simulated soft bodies.",
   "category": "Rendering",
   "option": "AVER_MODULE_RENDER_SOFTBODY",
   "required": false,
   "default": true,
-  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.Physics", "Aver.RHI", "Aver.Scene"],
-  "consequence": "Simulated soft bodies are not drawn."
+  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.RHI", "Aver.Scene", "Aver.SoftBody", "Aver.SoftBody.Scene"],
+  "consequence": "Simulated cloth and destructibles are not drawn."
 }

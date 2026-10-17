@@ -217,7 +217,7 @@ Every binary that must ship, with what actually pulls it in and whether it may b
 | *statically linked:* Jolt Physics | `modules/physics.jolt/LICENSE` | **MIT** | yes; **notice required** |
 | *statically linked:* stb | `third_party/stb/LICENSE.txt` | **MIT / public domain** | yes; **notice required** |
 | *statically linked:* Dear ImGui | `third_party/imgui/LICENSE.txt` | MIT | **must not be present** — `AVER_ENABLE_UI=OFF` |
-| Roboto `.ttf` | `third_party/fonts/LICENSE` | Apache-2.0 | **excluded** — only `SandboxApp.cpp:390-401` loads them |
+| Roboto `Regular` and `Medium` `.ttf`, `Roboto-Regular.ocfont/.png` | `third_party/fonts/LICENSE` | Apache-2.0 | **ships (default UI font)** — the game UI text engine's built-in font set and the baked bitmap fallback (`game.allowlist` `[bin]`; the notice row already exists). Other Roboto files stay excluded. |
 | `dxcompiler.dll` (14.3 MB), `dxil.dll` (1.5 MB) | Windows SDK, found by `find_file` from `${CMAKE_RC_COMPILER}`'s directory (`modules/rhi.d3d12/CMakeLists.txt:36-38`) | Windows SDK redistributable terms (DXC's source is NCSA) | yes; notice already written at `stage-payload.ps1:310-316` |
 | `nethost.dll` (122 KB) | `%ProgramFiles%\dotnet\packs\Microsoft.NETCore.App.Host.win-x64\*\runtimes\win-x64\native\` (`modules/scripting/CMakeLists.txt:286`) | MIT / .NET Library terms | yes; notice at `stage-payload.ps1:318-321` |
 | `Scripting\Aver.{Framework,Scene,Scripting,UI}.dll` + `Aver.Scripting.Bridge.*` | ours | ours | yes |

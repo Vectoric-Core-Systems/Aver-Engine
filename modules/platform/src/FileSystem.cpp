@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <fcntl.h>
 #include <pwd.h>
+#include <sys/mman.h>      // mapFileReadOnly
 #include <sys/stat.h>
 #include <unistd.h>
 #if defined(__APPLE__)
@@ -568,6 +569,55 @@ bool File::sync() {
 #else
     return fsync(fd_) == 0;
 #endif
+}
+
+// ---- read-only file mapping -----------------------------------------------------------------------
+
+// Deliberately does NOT call traceFileOpen: see the note on MappedFile in the header.
+bool mapFileReadOnly(const std::string& path, MappedFile& out) {
+    unmap(out);
+#if defined(_WIN32)
+    const HANDLE file = CreateFileW(widen(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || static_cast<u64>(size.QuadPart) > static_cast<u64>(SIZE_MAX / 2)) {
+        CloseHandle(file);
+        return false;
+    }
+    const HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    CloseHandle(file);   // the mapping keeps the file open
+    if (!mapping) return false;
+    void* view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    if (!view) { CloseHandle(mapping); return false; }
+    out.data = static_cast<const u8*>(view);
+    out.size = static_cast<usize>(size.QuadPart);
+    out.mapping = mapping;
+    out.view = view;
+    return true;
+#else
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) { ::close(fd); return false; }
+    void* view = mmap(nullptr, static_cast<usize>(st.st_size), PROT_READ, MAP_PRIVATE, fd, 0);
+    ::close(fd);
+    if (view == MAP_FAILED) return false;
+    out.data = static_cast<const u8*>(view);
+    out.size = static_cast<usize>(st.st_size);
+    out.view = view;
+    return true;
+#endif
+}
+
+void unmap(MappedFile& file) {
+#if defined(_WIN32)
+    if (file.view) UnmapViewOfFile(file.view);
+    if (file.mapping) CloseHandle(static_cast<HANDLE>(file.mapping));
+#else
+    if (file.view) munmap(file.view, file.size);
+#endif
+    file = MappedFile{};
 }
 
 // Shows the shell's open-file dialog. False if cancelled or unavailable.

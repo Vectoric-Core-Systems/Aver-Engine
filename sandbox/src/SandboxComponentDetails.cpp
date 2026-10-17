@@ -11,10 +11,15 @@
 
 #if AVER_MODULE_SCENE
 #include "PlacedComponentModel.hpp"
+#include "SoftBodyDetailsModel.hpp"
+#include "SoftBodyPaintTool.hpp"
 #include "aver/anim/AnimSystem.hpp"
 #include "aver/anim/ControlRig.hpp"
 #include "aver/anim/MotionMatchSystem.hpp"
 #include "aver/game/LevelComponents.hpp"
+#if AVER_MODULE_SOFTBODY_SCENE
+#  include "aver/softbody/SoftBodySystem.hpp"
+#endif
 #if AVER_MODULE_SYNAPSE_SCENE
 #  include "aver/synapse/SynapseBt.hpp"
 #  include "aver/synapse/SynapseSmartObject.hpp"
@@ -61,6 +66,9 @@ editor::AttachContext SandboxApp::placedAttachContext(scene::Entity e) const {
     c.legacyOcmap = levelIsLegacyOcmap_;
     c.prefabLinked = prefabSys_.isLinked(e);
     c.instanceMember = level_.instances().isMember(e);
+    const u32 clothId = w.componentId("CCloth"), destructId = w.componentId("CDestructible");
+    c.hasCloth = clothId != 0 && w.hasComponent(e, clothId);
+    c.hasDestructible = destructId != 0 && w.hasComponent(e, destructId);
     return c;
 }
 
@@ -350,6 +358,209 @@ void SandboxApp::drawPlacedComponentSections() {
         if (changed) changeAsset(k, key, path);
     };
 
+#if AVER_MODULE_SOFTBODY_SCENE
+    // Cloth and Destructible share one section body: preset, asset (create / paint), tuning, and the Play controls.
+    const auto softBodySection = [&](const editor::PlacedKind& k, bool destructible, u32 cid) {
+        namespace sm = editor::softmodel;
+        softbody::SoftBodySystem& sys = softbody::softBodySystem();
+        auto* cloth = destructible ? nullptr : w.component<softbody::CCloth>(e, cid);
+        auto* dest = destructible ? w.component<softbody::CDestructible>(e, cid) : nullptr;
+        if (!cloth && !dest) return;
+        u32& presetRef = destructible ? dest->preset : cloth->preset;
+        const u64 assetId = destructible ? dest->asset : cloth->asset;
+        u32& flagsRef = destructible ? dest->flags : cloth->flags;
+        const softbody::SoftPreset cur = presetRef < softbody::kSoftPresetCount
+            ? static_cast<softbody::SoftPreset>(presetRef)
+            : (destructible ? softbody::SoftPreset::Metal : softbody::SoftPreset::ClothLight);
+
+        ImGui::BeginDisabled(playing);
+        if (ImGui::BeginCombo("Preset", sm::presetRow(cur).label)) {
+            for (const sm::PresetRow& row : sm::kPresetRows)
+                if (ImGui::Selectable(row.label, row.preset == cur))
+                    instantEdit(k, row.preset != cur, [&] { presetRef = static_cast<u32>(row.preset); });
+            ImGui::EndCombo();
+        }
+        ImGui::EndDisabled();
+        assetRow(k, "asset", "Asset (.ocsoft)", assetId);
+
+        // The asset behind the row, re-read on a change of path and about twice a second when no widget is busy.
+        const std::string assetRel = pathOfContentId(assetId);
+        const std::string absAsset = assetRel.empty() ? std::string() : project_.contentDir() + "/" + assetRel;
+        static std::string s_loadedFor;
+        static softbody::SoftAsset s_asset;
+        static bool s_ok = false;
+        const int frame = ImGui::GetFrameCount();
+        static int s_lastLoad = 0;
+        if (s_loadedFor != absAsset || (!ImGui::IsAnyItemActive() && frame - s_lastLoad > 30)) {
+            s_loadedFor = absAsset;
+            s_lastLoad = frame;
+            s_ok = !absAsset.empty() && softbody::loadSoftAsset(absAsset, s_asset, nullptr);
+        }
+        const std::string problem = sm::assetProblem(assetId, assetRel, s_ok);
+        if (!problem.empty()) ImGui::TextColored(kRed, "%s", problem.c_str());
+
+        const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+        const std::string meshRel = mr ? pathOfContentId(mr->mesh) : std::string();
+        if (assetId == 0) {
+            ImGui::BeginDisabled(playing || meshRel.empty());
+            if (ImGui::SmallButton("Create .ocsoft")) {
+                const std::string rel = sm::assetPathForMesh(meshRel);
+                const std::filesystem::path target = std::filesystem::path(project_.contentDir()) / rel;
+                std::error_code ec;
+                if (std::filesystem::exists(target, ec)) {
+                    cbStatus_ = rel + " already exists; assign it instead.";
+                } else {
+                    std::string why;
+                    if (!softbody::saveSoftAsset(target.string(), sm::starterAsset(destructible, cur), &why)) {
+                        cbStatus_ = "Could not write " + rel + ": " + why;
+                    } else {
+                        cbAdoptNewAsset(target, false);
+                        changeAsset(k, "asset", rel);
+                    }
+                }
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("Writes %s beside the mesh. Without one the preset is used.", meshRel.empty() ? "an asset" : sm::assetPathForMesh(meshRel).c_str());
+        }
+
+        // The numbers: editable on the loaded .ocsoft, read-only for a preset alone.
+        const softbody::SoftAsset shown = s_ok && assetId != 0 ? s_asset : sm::starterAsset(destructible, cur);
+        const bool editable = s_ok && assetId != 0 && !playing;
+        if (ImGui::TreeNode("Material")) {
+            softbody::SoftAsset edit = shown;
+            bool changed = false, finished = false;
+            ImGui::BeginDisabled(!editable);
+            const auto slider = [&](const char* label, f32& v, f32 lo, f32 hi, const char* format, bool log) {
+                changed = ImGui::SliderFloat(label, &v, lo, hi, format, log ? ImGuiSliderFlags_Logarithmic : 0) || changed;
+                finished = ImGui::IsItemDeactivatedAfterEdit() || finished;
+            };
+            slider("Area density (kg/m2)", edit.material.areaDensityKgM2, 0.05f, 20.0f, "%.2f", true);
+            slider("Edge compliance", edit.material.compliance, 0.0f, 1e-3f, "%.2e", false);
+            slider("Bend compliance", edit.material.bendCompliance, 0.0f, 1.0f, "%.2e", false);
+            slider("Yield strain", edit.material.yieldStrain, 0.0f, 0.5f, "%.4f", false);
+            slider("Break strain", edit.material.breakStrain, 0.0f, 1.0f, "%.4f", false);
+            slider("Toughness (J / edge)", edit.material.toughnessJ, 0.0f, 200.0f, "%.2f", false);
+            slider("Damping", edit.sim.damping, 0.0f, 5.0f, "%.2f", false);
+            slider("Vertex radius (cm)", edit.sim.vertexRadiusCm, 0.0f, 5.0f, "%.2f", false);
+            int iterations = static_cast<int>(edit.sim.iterations);
+            if (ImGui::SliderInt("Iterations", &iterations, 1, 24)) { edit.sim.iterations = static_cast<u32>(iterations); changed = true; }
+            finished = ImGui::IsItemDeactivatedAfterEdit() || finished;
+            if (!destructible) {
+                slider("Drag", edit.cloth.dragCoeff, 0.0f, 2.0f, "%.2f", false);
+                slider("Lift", edit.cloth.liftCoeff, 0.0f, 2.0f, "%.2f", false);
+                slider("Default reach (cm)", edit.cloth.defaultReachCm, 0.0f, 50.0f, "%.1f", false);
+            } else {
+                slider("Min impact (cm/s)", edit.destruct.minImpactCmS, 0.0f, 2000.0f, "%.0f", false);
+                slider("Impulse efficiency", edit.destruct.impulseEfficiency, 0.01f, 1.0f, "%.2f", false);
+                slider("Max kick (cm/s)", edit.destruct.maxKickCmS, 0.0f, 5000.0f, "%.0f", false);
+            }
+            ImGui::EndDisabled();
+            if (changed && editable) s_asset = edit;
+            if (finished && editable) {
+                std::string why;
+                if (!softbody::saveSoftAsset(absAsset, s_asset, &why)) cbStatus_ = "Could not save the asset: " + why;
+            }
+            if (!editable) ImGui::TextDisabled("%s", assetId == 0 ? "Create an .ocsoft to override the preset." : "Stop Play to edit.");
+            ImGui::TreePop();
+        }
+
+        // Per-component tuning (scales: 0 reads as 1, and 1 is shown).
+        ImGui::BeginDisabled(playing);
+        if (!destructible) {
+            f32 wind = cloth->windScale > 0.0f ? cloth->windScale : 1.0f;
+            gestureEdit(k, ImGui::SliderFloat("Wind scale", &wind, 0.0f, 4.0f, "%.2f"), [&] { cloth->windScale = wind; });
+            f32 stiff = cloth->stiffnessScale > 0.0f ? cloth->stiffnessScale : 1.0f;
+            gestureEdit(k, ImGui::SliderFloat("Stiffness scale", &stiff, 0.1f, 10.0f, "%.2f", ImGuiSliderFlags_Logarithmic), [&] { cloth->stiffnessScale = stiff; });
+            f32 reach = cloth->reachScale > 0.0f ? cloth->reachScale : 1.0f;
+            gestureEdit(k, ImGui::SliderFloat("Reach scale", &reach, 0.0f, 4.0f, "%.2f"), [&] { cloth->reachScale = reach; });
+            f32 freeze = cloth->freezeDistanceCm;
+            gestureEdit(k, ImGui::DragFloat("Freeze distance (cm)", &freeze, 10.0f, 0.0f, 100000.0f, freeze > 0.0f ? "%.0f" : "system default"),
+                        [&] { cloth->freezeDistanceCm = freeze; });
+        } else {
+            f32 tough = dest->toughnessScale > 0.0f ? dest->toughnessScale : 1.0f;
+            gestureEdit(k, ImGui::SliderFloat("Toughness scale", &tough, 0.05f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic), [&] { dest->toughnessScale = tough; });
+            f32 impact = dest->impactScale > 0.0f ? dest->impactScale : 1.0f;
+            gestureEdit(k, ImGui::SliderFloat("Impact scale", &impact, 0.05f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic), [&] { dest->impactScale = impact; });
+            f32 life = dest->debrisLifetimeS;
+            gestureEdit(k, ImGui::DragFloat("Debris lifetime (s)", &life, 0.1f, 0.0f, 600.0f, life > 0.0f ? "%.1f" : "asset default"), [&] { dest->debrisLifetimeS = life; });
+            int maxPieces = static_cast<int>(dest->maxPieces);
+            gestureEdit(k, ImGui::DragInt("Max pieces", &maxPieces, 0.2f, 0, 256, maxPieces > 0 ? "%d" : "asset default"),
+                        [&] { dest->maxPieces = static_cast<u32>(std::max(0, maxPieces)); });
+        }
+        const auto flagBox = [&](const char* label, u32 bit, bool negative) {
+            bool on = negative ? (flagsRef & bit) == 0 : (flagsRef & bit) != 0;
+            instantEdit(k, ImGui::Checkbox(label, &on), [&] {
+                const bool set = negative ? !on : on;
+                if (set) flagsRef |= bit; else flagsRef &= ~bit;
+            });
+        };
+        if (!destructible) {
+            flagBox("Tearable", softbody::kClothTearable, false);
+            flagBox("Collide with the world", softbody::kClothNoWorld, true);
+            flagBox("Collide with the character", softbody::kClothNoCharacterProxy, true);
+            flagBox("Wind", softbody::kClothNoWind, true);
+        } else {
+            flagBox("Indestructible", softbody::kDestructIndestructible, false);
+            flagBox("Debris pieces", softbody::kDestructNoDebris, true);
+        }
+        ImGui::EndDisabled();
+        if (!destructible) {
+            if (ImGui::SmallButton("Copy sky wind")) sys.setWind(Vec3{sky_.cloudWind[0], sky_.cloudWind[1], 0.0f}, 0.0f, 0.3f, 0.0f);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sets the soft-body wind to the sky cloud drift. They are independent otherwise.");
+        }
+
+        // Paint: pins and reach on the sim particles.
+        editor::SoftBodyPaintTool& paint = editor::softBodyPaintTool();
+        const bool painting = paint.active() && paint.entity == static_cast<u32>(e);
+        ImGui::BeginDisabled(playing || meshRel.empty());
+        if (!painting) {
+            if (ImGui::SmallButton("Paint pins...")) {
+                fmt::OcMeshData md;
+                std::string why;
+                if (!fmt::loadOcMesh(project_.contentDir() + "/" + meshRel, md, &why)) cbStatus_ = "Could not read the mesh: " + why;
+                else if (!paint.load(md, shown, absAsset)) cbStatus_ = "The mesh could not be welded for painting";
+                else paint.entity = static_cast<u32>(e);
+            }
+        } else if (ImGui::SmallButton("Close paint")) {
+            paint.close();
+        }
+        ImGui::EndDisabled();
+        if (painting) {
+            paint.entityWorld = w.worldMatrix(e);
+            paint.drawPanel();
+            ImGui::TextDisabled("Shift + drag on the mesh in the viewport paints with the brush.");
+        }
+
+        // What it is doing.
+        const softbody::SoftBodyState st = sys.state(e);
+        if (!playing || !st.found) {
+            ImGui::TextDisabled("Hit, Explode, Tear, Repair and Release work during Play.");
+        } else {
+            if (destructible) ImGui::TextDisabled("Damage %.0f%%   broken %u   pieces %u   %s", static_cast<double>(st.damage01) * 100.0,
+                                                  st.brokenEdges, st.pieces, st.frozen ? "frozen" : (st.awake ? "awake" : "asleep"));
+            else              ImGui::TextDisabled("Max strain %.3f   pieces %u   %s", static_cast<double>(st.maxStrain), st.pieces,
+                                                  st.frozen ? "frozen" : (st.awake ? "awake" : "asleep"));
+            Vec3 centre{0, 0, 0};
+            if (const softbody::Cage* c = sys.cageOf(e); c && !c->particles.empty()) {
+                for (const softbody::Particle& p : c->particles) centre += p.pos;
+                centre = centre / static_cast<f32>(c->particles.size());
+            }
+            if (ImGui::SmallButton("Hit")) sys.damage(e, centre, 30.0f, 300.0f, Vec3{0, 0, 0}, 2);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Explode")) sys.explode(centre + Vec3{0, -60.0f, 0}, 300.0f, 600.0f, 500.0f);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Tear")) sys.tearAt(e, centre, 20.0f);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Repair")) sys.repair(e);
+            if (!destructible) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Release")) sys.release(e);
+            }
+        }
+    };
+#endif
+
     for (const editor::PlacedKind& k : editor::kPlacedKinds) {
         const u32 cid = kindComponentId(w, k);
         if (cid == 0 || !w.hasComponent(e, cid)) continue;
@@ -546,6 +757,12 @@ void SandboxApp::drawPlacedComponentSections() {
             if (!playing)
                 ImGui::TextDisabled("Foot placement casts through physics, which is fully live in Play.");
         }
+#if AVER_MODULE_SOFTBODY_SCENE
+        // ---- Cloth / Destructible ----
+        else if (t == "Cloth" || t == "Destructible") {
+            softBodySection(k, t == "Destructible", cid);
+        }
+#endif
 #if AVER_MODULE_SYNAPSE_SCENE
         // ---- AI Brain ----
         else if (t == "Brain") {

@@ -1,0 +1,1 @@
+{"format":"ocsoft","version":1,"kind":"destructible","preset":"glass","destruct":{"minImpactCmS":120,"minPieceTriangles":3,"maxPieces":24},"paint":{"rules":[{"type":"sphere","centreCm":[0,-60,0],"radiusCm":8},{"type":"sphere","centreCm":[0,60,0],"radiusCm":8},{"type":"sphere","centreCm":[0,-60,180],"radiusCm":8},{"type":"sphere","centreCm":[0,60,180],"radiusCm":8}]}}

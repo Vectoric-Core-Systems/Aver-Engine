@@ -671,90 +671,178 @@ covers the node's pin shape.
 
 ---
 
-## Game systems
-
-Timers and events, the behaviour-tree blackboard, streamed audio, animation state machines, game UI, prefabs, decals, crowds/hearing/cover, gameplay abilities, input actions, data tables, montages, AI queries, level instances and landscape/water. These are **table-driven**: one row each in `scripting/csharp/Aver.Graph/GraphGameSystemNodeTable.cs` names the `...ForGraph` method it calls and which pin feeds which parameter, so the parser's default pins and the compiler's emitter come from the row (`GameSystemNodes`, `GraphCompilerGameSystems.cs`). String arguments are NODE-line attributes (`key=`, `event=`, `sound=`, ...), required at compile time unless noted. The editor palette rows are `sandbox/src/GraphNodeDefsGameSystems.hpp`, `GraphNodeDefsSynapseAi.hpp`, `GraphNodeDefsGas.hpp`, `GraphNodeDefsAiQuery.hpp`, `GraphNodeDefsLevelInstances.hpp` and `GraphNodeDefsTerrain.hpp`. An attribute marked *(optional)* may be left out; every other one fails the compile by name when missing.
-
-### Events
-
-| Node | Pins | Attribute | Path | What it does |
-|---|---|---|---|---|
-| `AN_OnEvent` | `exec` (out, exec) | — | X | Entry node: runs when the bus event named by its `ENTRY` reaches this entity (`ENTRY e Damaged` + `NODE e AN_OnEvent`). |
-| `AN_SetTimer` | `exec` (in, exec), `target` (in, int), `delay` (in, float), `looping` (in, bool), `then` (out, exec), `handle` (out, int) | `event=` | P | Fires graph event `event=` on `target` after `delay` seconds, repeating when `looping`. `handle` is 0 if nothing was set. Owned by `target`. |
-| `AN_ClearTimer` | `exec` (in, exec), `handle` (in, int), `then` (out, exec), `cleared` (out, bool) | — | P | Cancels a timer by handle; `cleared` is true if it was still scheduled. |
-| `AN_DispatchEvent` | `exec` (in, exec), `sender` (in, int), `target` (in, int), `i` (in, int), `f` (in, float), `immediate` (in, bool), `then` (out, exec) | `event=` | P | Raises bus event `event=` with payload `[i, f]`; deferred to the frame's flush unless `immediate`. |
-| `AN_EventPayload` | `exec` (in, exec), `index` (in, int), `then` (out, exec), `sender` (out, int), `target` (out, int), `i` (out, int), `f` (out, float), `b` (out, bool) | — | P | Reads argument `index` of the event whose `AN_OnEvent` chain is running, coerced. Zero outside one. |
-
-### Blackboard
-
-| Node | Pins | Attribute | Path | What it does |
-|---|---|---|---|---|
-| `GetBlackboardFloat` | `entity` (in, int), `value` (out, float), `success` (out, bool) | `key=` | D | Reads the board key `key=` on the entity's behaviour-tree blackboard (agent board, then its team board). |
-| `SetBlackboardFloat` | `exec` (in, exec), `entity` (in, int), `value` (in, float), `then` (out, exec), `success` (out, bool) | `key=` | P | Writes the board key `key=`; observers fire only on a real change. |
-| `GetBlackboardInt` | `entity` (in, int), `value` (out, int), `success` (out, bool) | `key=` | D | Reads the board key `key=` on the entity's behaviour-tree blackboard (agent board, then its team board). |
-| `SetBlackboardInt` | `exec` (in, exec), `entity` (in, int), `value` (in, int), `then` (out, exec), `success` (out, bool) | `key=` | P | Writes the board key `key=`; observers fire only on a real change. |
-| `GetBlackboardBool` | `entity` (in, int), `value` (out, bool), `success` (out, bool) | `key=` | D | Reads the board key `key=` on the entity's behaviour-tree blackboard (agent board, then its team board). |
-| `SetBlackboardBool` | `exec` (in, exec), `entity` (in, int), `value` (in, bool), `then` (out, exec), `success` (out, bool) | `key=` | P | Writes the board key `key=`; observers fire only on a real change. |
-| `GetBlackboardEntity` | `entity` (in, int), `value` (out, int), `success` (out, bool) | `key=` | D | Reads the board key `key=` on the entity's behaviour-tree blackboard (agent board, then its team board). |
-| `SetBlackboardEntity` | `exec` (in, exec), `entity` (in, int), `value` (in, int), `then` (out, exec), `success` (out, bool) | `key=` | P | Writes the board key `key=`; observers fire only on a real change. |
-| `GetBlackboardVec3` | `entity` (in, int), `x` (out, float), `y` (out, float), `z` (out, float), `success` (out, bool) | `key=` | D | Reads the Vec3 key `key=` as x, y, z. |
-| `SetBlackboardVec3` | `exec` (in, exec), `entity` (in, int), `x` (in, float), `y` (in, float), `z` (in, float), `then` (out, exec), `success` (out, bool) | `key=` | P | Writes the Vec3 key `key=`. |
-
-### Audio
-
-| Node | Pins | Attribute | Path | What it does |
-|---|---|---|---|---|
-| `AN_PlayStream` | `exec` (in, exec), `volume` (in, float), `pitch` (in, float), `looping` (in, bool), `bus` (in, int), `fadeInSeconds` (in, float), `then` (out, exec), `voice` (out, int), `success` (out, bool) | `sound=` | P | Streams the `sound=` file from disk (no whole-file decode), optionally fading in. |
-| `AN_PlayStreamAt` | `exec` (in, exec), `x` (in, float), `y` (in, float), `z` (in, float), `volume` (in, float), `pitch` (in, float), `looping` (in, bool), `bus` (in, int), `innerCm` (in, float), `outerCm` (in, float), `fadeInSeconds` (in, float), `then` (out, exec), `voice` (out, int), `success` (out, bool) | `sound=` | P | The positioned counterpart of `AN_PlayStream`. |
-| `AN_PlayMusic` | `exec` (in, exec), `volume` (in, float), `fadeSeconds` (in, float), `looping` (in, bool), `curve` (in, int), `then` (out, exec), `voice` (out, int), `success` (out, bool) | `sound=` | P | Starts `sound=` as the current music track, crossfading from the previous one over `fadeSeconds` (`curve`: 0 linear, 1 equal power). |
-| `AN_StopMusic` | `exec` (in, exec), `fadeSeconds` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Fades the current music track out and ends it. |
-| `AN_IsMusicPlaying` | `playing` (out, bool) | — | D | True while a music track is current. |
-| `AN_FadeSound` | `exec` (in, exec), `voice` (in, int), `targetGain` (in, float), `seconds` (in, float), `curve` (in, int), `stopWhenDone` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Ramps a voice's fade gain to `targetGain` over `seconds`; `stopWhenDone` ends the voice at the end. |
-| `AN_SetVoiceOcclusion` | `exec` (in, exec), `voice` (in, int), `occlusion` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets a voice's occlusion (0 clear .. 1 solid): low-pass plus a volume floor. |
-| `AN_SetReverb` | `exec` (in, exec), `wet` (in, float), `decaySeconds` (in, float), `damping` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets the global send reverb. |
-| `AN_AttachAudioOcclusion` | `exec` (in, exec), `entity` (in, int), `voice` (in, int), `rayCount` (in, int), `probeRadiusCm` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Makes the entity drive `voice`'s occlusion from line-of-sight rays to the listener. |
-| `AN_SetReverbZone` | `exec` (in, exec), `entity` (in, int), `halfX` (in, float), `halfY` (in, float), `halfZ` (in, float), `blendDistanceCm` (in, float), `wet` (in, float), `decaySeconds` (in, float), `damping` (in, float), `priority` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Makes the entity a box reverb volume that fades out over `blendDistanceCm`; higher `priority` wins where zones overlap. |
-
-### Animation
-
-| Node | Pins | Attribute | Path | What it does |
-|---|---|---|---|---|
-| `SetAnimGraph` | `exec` (in, exec), `entity` (in, int), `playRate` (in, float), `then` (out, exec), `success` (out, bool) | `machine=` | P | Binds the `machine=` state machine (`.ocasm`) to the entity. |
-| `SetAnimParamFloat` | `exec` (in, exec), `entity` (in, int), `value` (in, float), `then` (out, exec), `success` (out, bool) | `param=` | P | Sets the state machine's `param=` float or int parameter. |
-| `SetAnimParamBool` | `exec` (in, exec), `entity` (in, int), `value` (in, bool), `then` (out, exec), `success` (out, bool) | `param=` | P | Sets the state machine's `param=` bool parameter. |
-| `TriggerAnim` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | `param=` | P | Raises the `param=` trigger; it is consumed by the transition that takes it. |
-| `IsInAnimState` | `entity` (in, int), `result` (out, bool) | `state=` | D | True while the entity's machine is in `state=` (or inside the sub-machine of that name). |
-| `GetAnimStateTime` | `entity` (in, int), `time` (out, float) | — | D | Normalised time of the active state. |
-
-### UI
-
-| Node | Pins | Attribute | Path | What it does |
-|---|---|---|---|---|
-| `AN_OpenUiLayout` | `exec` (in, exec), `then` (out, exec), `layout` (out, int), `success` (out, bool) | `path=` | P | Instantiates the `path=` `.ocui` layout; `layout` is its root widget. |
-| `AN_CloseUiLayout` | `exec` (in, exec), `layout` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Destroys a layout's widgets. |
-| `AN_FindUiWidget` | `exec` (in, exec), `layout` (in, int), `then` (out, exec), `widget` (out, int), `success` (out, bool) | `name=` | P | Finds the widget named `name=` (under `layout`, or anywhere when 0). |
-| `AN_CreateUiWidget` | `exec` (in, exec), `parent` (in, int), `kind` (in, int), `then` (out, exec), `widget` (out, int), `success` (out, bool) | `name=` | P | Creates a widget of `kind` (0 panel .. 11 keybind) under `parent` (0 = a new root), named `name=`. |
-| `AN_SetUiText` | `exec` (in, exec), `widget` (in, int), `then` (out, exec), `success` (out, bool) | `text=` | P | Sets a widget's text to `text=`. |
-| `AN_SetUiValue` | `exec` (in, exec), `widget` (in, int), `value` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets a slider, progress bar or choice value. |
-| `AN_SetUiChecked` | `exec` (in, exec), `widget` (in, int), `checked` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Sets a toggle. |
-| `AN_SetUiVisible` | `exec` (in, exec), `widget` (in, int), `visible` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Shows or hides a widget. |
-| `AN_SetUiEnabled` | `exec` (in, exec), `widget` (in, int), `enabled` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Enables or disables a widget. |
-| `AN_GetUiValue` | `exec` (in, exec), `widget` (in, int), `then` (out, exec), `value` (out, float), `checked` (out, bool), `selected` (out, int), `success` (out, bool) | — | P | Reads a widget's value, checked state and selected index. |
-| `AN_UiWasClicked` | `exec` (in, exec), `widget` (in, int), `then` (out, exec), `clicked` (out, bool) | — | P | True when the widget was clicked in the events the last frame delivered. |
-| `AN_UiCommandFired` | `exec` (in, exec), `then` (out, exec), `fired` (out, bool) | `name=` | P | True when command `name=` fired in the events the last frame delivered. |
-| `AN_SetUiFocus` | `exec` (in, exec), `widget` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Moves keyboard/gamepad focus to a widget. |
-| `AN_OpenUiSettings` | `exec` (in, exec), `then` (out, exec), `layout` (out, int), `success` (out, bool) | — | P | Opens the built-in settings screen (Graphics, Audio, Controls with key rebinding). |
-
-### Prefab
-
-| Node | Pins | Attribute | Path | What it does |
-|---|---|---|---|---|
-| `AN_SpawnPrefab` | `exec` (in, exec), `parent` (in, int), `x` (in, float), `y` (in, float), `z` (in, float), `yaw` (in, float), `scale` (in, float), `then` (out, exec), `entity` (out, int) | `prefab=` | P | Spawns an instance of `prefab=` at the position and yaw; `entity` is the instance root, 0 on failure. |
-| `AN_DestroyPrefab` | `exec` (in, exec), `root` (in, int), `then` (out, exec) | — | P | Destroys an instance and everything under it. |
-| `AN_GetPrefabRoot` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `root` (out, int) | — | P | The instance root `entity` belongs to; 0 if it is not part of one. |
-| `AN_FindPrefabNode` | `exec` (in, exec), `root` (in, int), `then` (out, exec), `entity` (out, int) | `node=` | P | The entity of node path `node=` (empty = the root) inside an instance. |
-| `AN_RevertPrefab` | `exec` (in, exec), `root` (in, int), `then` (out, exec) | — | P | Reverts every override of an instance back to its prefab. |
-
+## Game systems
+
+
+
+Timers and events, the behaviour-tree blackboard, streamed audio, animation state machines, game UI, prefabs, decals, crowds/hearing/cover, gameplay abilities, input actions, data tables, montages, AI queries, level instances and landscape/water. These are **table-driven**: one row each in `scripting/csharp/Aver.Graph/GraphGameSystemNodeTable.cs` names the `...ForGraph` method it calls and which pin feeds which parameter, so the parser's default pins and the compiler's emitter come from the row (`GameSystemNodes`, `GraphCompilerGameSystems.cs`). String arguments are NODE-line attributes (`key=`, `event=`, `sound=`, ...), required at compile time unless noted. The editor palette rows are `sandbox/src/GraphNodeDefsGameSystems.hpp`, `GraphNodeDefsSynapseAi.hpp`, `GraphNodeDefsGas.hpp`, `GraphNodeDefsAiQuery.hpp`, `GraphNodeDefsLevelInstances.hpp` and `GraphNodeDefsTerrain.hpp`. An attribute marked *(optional)* may be left out; every other one fails the compile by name when missing.
+
+
+
+### Events
+
+
+
+| Node | Pins | Attribute | Path | What it does |
+
+|---|---|---|---|---|
+
+| `AN_OnEvent` | `exec` (out, exec) | — | X | Entry node: runs when the bus event named by its `ENTRY` reaches this entity (`ENTRY e Damaged` + `NODE e AN_OnEvent`). |
+
+| `AN_SetTimer` | `exec` (in, exec), `target` (in, int), `delay` (in, float), `looping` (in, bool), `then` (out, exec), `handle` (out, int) | `event=` | P | Fires graph event `event=` on `target` after `delay` seconds, repeating when `looping`. `handle` is 0 if nothing was set. Owned by `target`. |
+
+| `AN_ClearTimer` | `exec` (in, exec), `handle` (in, int), `then` (out, exec), `cleared` (out, bool) | — | P | Cancels a timer by handle; `cleared` is true if it was still scheduled. |
+
+| `AN_DispatchEvent` | `exec` (in, exec), `sender` (in, int), `target` (in, int), `i` (in, int), `f` (in, float), `immediate` (in, bool), `then` (out, exec) | `event=` | P | Raises bus event `event=` with payload `[i, f]`; deferred to the frame's flush unless `immediate`. |
+
+| `AN_EventPayload` | `exec` (in, exec), `index` (in, int), `then` (out, exec), `sender` (out, int), `target` (out, int), `i` (out, int), `f` (out, float), `b` (out, bool) | — | P | Reads argument `index` of the event whose `AN_OnEvent` chain is running, coerced. Zero outside one. |
+
+
+
+### Blackboard
+
+
+
+| Node | Pins | Attribute | Path | What it does |
+
+|---|---|---|---|---|
+
+| `GetBlackboardFloat` | `entity` (in, int), `value` (out, float), `success` (out, bool) | `key=` | D | Reads the board key `key=` on the entity's behaviour-tree blackboard (agent board, then its team board). |
+
+| `SetBlackboardFloat` | `exec` (in, exec), `entity` (in, int), `value` (in, float), `then` (out, exec), `success` (out, bool) | `key=` | P | Writes the board key `key=`; observers fire only on a real change. |
+
+| `GetBlackboardInt` | `entity` (in, int), `value` (out, int), `success` (out, bool) | `key=` | D | Reads the board key `key=` on the entity's behaviour-tree blackboard (agent board, then its team board). |
+
+| `SetBlackboardInt` | `exec` (in, exec), `entity` (in, int), `value` (in, int), `then` (out, exec), `success` (out, bool) | `key=` | P | Writes the board key `key=`; observers fire only on a real change. |
+
+| `GetBlackboardBool` | `entity` (in, int), `value` (out, bool), `success` (out, bool) | `key=` | D | Reads the board key `key=` on the entity's behaviour-tree blackboard (agent board, then its team board). |
+
+| `SetBlackboardBool` | `exec` (in, exec), `entity` (in, int), `value` (in, bool), `then` (out, exec), `success` (out, bool) | `key=` | P | Writes the board key `key=`; observers fire only on a real change. |
+
+| `GetBlackboardEntity` | `entity` (in, int), `value` (out, int), `success` (out, bool) | `key=` | D | Reads the board key `key=` on the entity's behaviour-tree blackboard (agent board, then its team board). |
+
+| `SetBlackboardEntity` | `exec` (in, exec), `entity` (in, int), `value` (in, int), `then` (out, exec), `success` (out, bool) | `key=` | P | Writes the board key `key=`; observers fire only on a real change. |
+
+| `GetBlackboardVec3` | `entity` (in, int), `x` (out, float), `y` (out, float), `z` (out, float), `success` (out, bool) | `key=` | D | Reads the Vec3 key `key=` as x, y, z. |
+
+| `SetBlackboardVec3` | `exec` (in, exec), `entity` (in, int), `x` (in, float), `y` (in, float), `z` (in, float), `then` (out, exec), `success` (out, bool) | `key=` | P | Writes the Vec3 key `key=`. |
+
+
+
+### Audio
+
+
+
+| Node | Pins | Attribute | Path | What it does |
+
+|---|---|---|---|---|
+
+| `AN_PlayStream` | `exec` (in, exec), `volume` (in, float), `pitch` (in, float), `looping` (in, bool), `bus` (in, int), `fadeInSeconds` (in, float), `then` (out, exec), `voice` (out, int), `success` (out, bool) | `sound=` | P | Streams the `sound=` file from disk (no whole-file decode), optionally fading in. |
+
+| `AN_PlayStreamAt` | `exec` (in, exec), `x` (in, float), `y` (in, float), `z` (in, float), `volume` (in, float), `pitch` (in, float), `looping` (in, bool), `bus` (in, int), `innerCm` (in, float), `outerCm` (in, float), `fadeInSeconds` (in, float), `then` (out, exec), `voice` (out, int), `success` (out, bool) | `sound=` | P | The positioned counterpart of `AN_PlayStream`. |
+
+| `AN_PlayMusic` | `exec` (in, exec), `volume` (in, float), `fadeSeconds` (in, float), `looping` (in, bool), `curve` (in, int), `then` (out, exec), `voice` (out, int), `success` (out, bool) | `sound=` | P | Starts `sound=` as the current music track, crossfading from the previous one over `fadeSeconds` (`curve`: 0 linear, 1 equal power). |
+
+| `AN_StopMusic` | `exec` (in, exec), `fadeSeconds` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Fades the current music track out and ends it. |
+
+| `AN_IsMusicPlaying` | `playing` (out, bool) | — | D | True while a music track is current. |
+
+| `AN_FadeSound` | `exec` (in, exec), `voice` (in, int), `targetGain` (in, float), `seconds` (in, float), `curve` (in, int), `stopWhenDone` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Ramps a voice's fade gain to `targetGain` over `seconds`; `stopWhenDone` ends the voice at the end. |
+
+| `AN_SetVoiceOcclusion` | `exec` (in, exec), `voice` (in, int), `occlusion` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets a voice's occlusion (0 clear .. 1 solid): low-pass plus a volume floor. |
+
+| `AN_SetReverb` | `exec` (in, exec), `wet` (in, float), `decaySeconds` (in, float), `damping` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets the global send reverb. |
+
+| `AN_AttachAudioOcclusion` | `exec` (in, exec), `entity` (in, int), `voice` (in, int), `rayCount` (in, int), `probeRadiusCm` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Makes the entity drive `voice`'s occlusion from line-of-sight rays to the listener. |
+
+| `AN_SetReverbZone` | `exec` (in, exec), `entity` (in, int), `halfX` (in, float), `halfY` (in, float), `halfZ` (in, float), `blendDistanceCm` (in, float), `wet` (in, float), `decaySeconds` (in, float), `damping` (in, float), `priority` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Makes the entity a box reverb volume that fades out over `blendDistanceCm`; higher `priority` wins where zones overlap. |
+
+
+
+### Animation
+
+
+
+| Node | Pins | Attribute | Path | What it does |
+
+|---|---|---|---|---|
+
+| `SetAnimGraph` | `exec` (in, exec), `entity` (in, int), `playRate` (in, float), `then` (out, exec), `success` (out, bool) | `machine=` | P | Binds the `machine=` state machine (`.ocasm`) to the entity. |
+
+| `SetAnimParamFloat` | `exec` (in, exec), `entity` (in, int), `value` (in, float), `then` (out, exec), `success` (out, bool) | `param=` | P | Sets the state machine's `param=` float or int parameter. |
+
+| `SetAnimParamBool` | `exec` (in, exec), `entity` (in, int), `value` (in, bool), `then` (out, exec), `success` (out, bool) | `param=` | P | Sets the state machine's `param=` bool parameter. |
+
+| `TriggerAnim` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | `param=` | P | Raises the `param=` trigger; it is consumed by the transition that takes it. |
+
+| `IsInAnimState` | `entity` (in, int), `result` (out, bool) | `state=` | D | True while the entity's machine is in `state=` (or inside the sub-machine of that name). |
+
+| `GetAnimStateTime` | `entity` (in, int), `time` (out, float) | — | D | Normalised time of the active state. |
+
+
+
+### UI
+
+
+
+| Node | Pins | Attribute | Path | What it does |
+
+|---|---|---|---|---|
+
+| `AN_OpenUiLayout` | `exec` (in, exec), `then` (out, exec), `layout` (out, int), `success` (out, bool) | `path=` | P | Instantiates the `path=` `.ocui` layout; `layout` is its root widget. |
+
+| `AN_CloseUiLayout` | `exec` (in, exec), `layout` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Destroys a layout's widgets. |
+
+| `AN_FindUiWidget` | `exec` (in, exec), `layout` (in, int), `then` (out, exec), `widget` (out, int), `success` (out, bool) | `name=` | P | Finds the widget named `name=` (under `layout`, or anywhere when 0). |
+
+| `AN_CreateUiWidget` | `exec` (in, exec), `parent` (in, int), `kind` (in, int), `then` (out, exec), `widget` (out, int), `success` (out, bool) | `name=` | P | Creates a widget of `kind` (0 panel .. 11 keybind) under `parent` (0 = a new root), named `name=`. |
+
+| `AN_SetUiText` | `exec` (in, exec), `widget` (in, int), `then` (out, exec), `success` (out, bool) | `text=` | P | Sets a widget's text to `text=`. |
+
+| `AN_SetUiValue` | `exec` (in, exec), `widget` (in, int), `value` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets a slider, progress bar or choice value. |
+
+| `AN_SetUiChecked` | `exec` (in, exec), `widget` (in, int), `checked` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Sets a toggle. |
+
+| `AN_SetUiVisible` | `exec` (in, exec), `widget` (in, int), `visible` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Shows or hides a widget. |
+
+| `AN_SetUiEnabled` | `exec` (in, exec), `widget` (in, int), `enabled` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Enables or disables a widget. |
+
+| `AN_GetUiValue` | `exec` (in, exec), `widget` (in, int), `then` (out, exec), `value` (out, float), `checked` (out, bool), `selected` (out, int), `success` (out, bool) | — | P | Reads a widget's value, checked state and selected index. |
+
+| `AN_UiWasClicked` | `exec` (in, exec), `widget` (in, int), `then` (out, exec), `clicked` (out, bool) | — | P | True when the widget was clicked in the events the last frame delivered. |
+
+| `AN_UiCommandFired` | `exec` (in, exec), `then` (out, exec), `fired` (out, bool) | `name=` | P | True when command `name=` fired in the events the last frame delivered. |
+
+| `AN_SetUiFocus` | `exec` (in, exec), `widget` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Moves keyboard/gamepad focus to a widget. |
+
+| `AN_OpenUiSettings` | `exec` (in, exec), `then` (out, exec), `layout` (out, int), `success` (out, bool) | — | P | Opens the built-in settings screen (Graphics, Audio, Controls with key rebinding). |
+| `AN_SetUiFont` | `exec` (in, exec), `widget` (in, int), `size` (in, float), `bold` (in, bool), `italic` (in, bool), `then` (out, exec), `success` (out, bool) | `family=` (optional) | P | Sets a widget's font: size in design pixels (0 = the theme's), bold, italic, and the font family from the project's font set when `family=` is given (empty keeps the current one). See GAME_UI_TEXT.md. |
+| `AN_SetUiTextStyle` | `exec` (in, exec), `widget` (in, int), `align` (in, int), `dir` (in, int), `wrap` (in, bool), `ellipsis` (in, bool), `maxLines` (in, int), `lineSpacing` (in, float, default 1), `letterSpacing` (in, float), `rich` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Sets all nine text style properties at once. `align`: 0 left, 1 centre, 2 right, 3 start, 4 end (start/end follow the text direction); `dir`: 0 auto, 1 LTR, 2 RTL; `maxLines` 0 = unlimited. |
+| `AN_SetUiTextColor` | `exec` (in, exec), `widget` (in, int), `r` (in, float), `g` (in, float), `b` (in, float), `a` (in, float, default 1), `then` (out, exec), `success` (out, bool) | — | P | Sets a widget's text colour; each channel is 0..1. |
+| `AN_GetUiTextSize` | `widget` (in, int), `found` (out, bool), `width` (out, float), `height` (out, float), `lines` (out, int) | — | P | Pure read: the size of the widget's text as laid out by the last frame; `found` is false for a widget with no text or not yet laid out. |
+
+
+
+### Prefab
+
+
+
+| Node | Pins | Attribute | Path | What it does |
+
+|---|---|---|---|---|
+
+| `AN_SpawnPrefab` | `exec` (in, exec), `parent` (in, int), `x` (in, float), `y` (in, float), `z` (in, float), `yaw` (in, float), `scale` (in, float), `then` (out, exec), `entity` (out, int) | `prefab=` | P | Spawns an instance of `prefab=` at the position and yaw; `entity` is the instance root, 0 on failure. |
+
+| `AN_DestroyPrefab` | `exec` (in, exec), `root` (in, int), `then` (out, exec) | — | P | Destroys an instance and everything under it. |
+
+| `AN_GetPrefabRoot` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `root` (out, int) | — | P | The instance root `entity` belongs to; 0 if it is not part of one. |
+
+| `AN_FindPrefabNode` | `exec` (in, exec), `root` (in, int), `then` (out, exec), `entity` (out, int) | `node=` | P | The entity of node path `node=` (empty = the root) inside an instance. |
+
+| `AN_RevertPrefab` | `exec` (in, exec), `root` (in, int), `then` (out, exec) | — | P | Reverts every override of an instance back to its prefab. |
+
+
+
 ### Level instance
 
 <!-- [wave3/level-instances begin] -->
@@ -777,33 +865,60 @@ Place another level inside this one, load and unload it, find things inside it (
 Entries: `LevelInstance.Loaded` / `LevelInstance.Unloaded` through `AN_OnEvent` with the instance root as owner; `AN_EventPayload` index 0 is the entity count. C#-only: `LevelInstanceAbi.LastError`, `AbiVersion`, `AssetId`. Editor-only operations (edit, commit, create, break, bake) have no node.
 <!-- [wave3/level-instances end] -->
 
-### Decal
-
-| Node | Pins | Attribute | Path | What it does |
-|---|---|---|---|---|
-| `AN_SpawnDecal` | `exec` (in, exec), `x` (in, float), `y` (in, float), `z` (in, float), `nx` (in, float), `ny` (in, float), `nz` (in, float), `sx` (in, float), `sy` (in, float), `sz` (in, float), `roll` (in, float), `lifetime` (in, float), `fadeOut` (in, float), `then` (out, exec), `entity` (out, int) | `base=`, `normalmap=`, `orm=` | P | Spawns a pooled gameplay decal on a surface (`nx,ny,nz` is the surface normal); the pool recycles its oldest when full. |
-| `AN_ClearDecals` | `exec` (in, exec), `then` (out, exec), `success` (out, bool) | — | P | Releases every pooled decal. |
-| `AN_SetDecalCapacity` | `exec` (in, exec), `capacity` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Sets how many pooled decals may be alive at once; 0 disables spawning. |
-
-### AI
-
-| Node | Pins | Attribute | Path | What it does |
-|---|---|---|---|---|
-| `AN_CrowdSetAgent` | `exec` (in, exec), `entity` (in, int), `radiusCm` (in, float), `maxSpeedCm` (in, float), `maxAccelCm` (in, float), `priority` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Makes the entity a crowd agent with this radius, speed and acceleration. |
-| `AN_CrowdSetMode` | `exec` (in, exec), `entity` (in, int), `mode` (in, int), `x` (in, float), `y` (in, float), `z` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets how the agent moves: 0 follow path agent, 1 seek, 2 arrive, 3 flee, 4 wander, 5 hold. |
-| `AN_CrowdSetBackend` | `exec` (in, exec), `backend` (in, int), `maxAgents` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Chooses the CPU (deterministic) or GPU (thousands) solver and the max-agents cap (< 0 keeps it). |
-| `AN_GetCrowdVelocity` | `entity` (in, int), `vx` (out, float), `vy` (out, float), `speed` (out, float), `success` (out, bool) | — | D | The agent's avoidance-adjusted velocity. |
-| `AN_CrowdSteer` | `entity` (in, int), `dt` (in, float), `turnRate` (in, float), `maxSpeedCm` (in, float), `forward` (out, float), `right` (out, float), `yawDelta` (out, float), `success` (out, bool) | — | D | The crowd velocity as `CharacterMove` input (`forward`, `right`, `yawDelta`). |
-| `AN_EmitNoise` | `exec` (in, exec), `x` (in, float), `y` (in, float), `z` (in, float), `loudnessCm` (in, float), `tag` (in, int), `source` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Raises a noise at a position; listeners within its occluded range remember it. |
-| `AN_SetHearing` | `exec` (in, exec), `entity` (in, int), `sensitivity` (in, float), `maxRangeCm` (in, float), `memorySec` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Gives the entity an ear: sensitivity, range and memory time. |
-| `AN_GetHeard` | `entity` (in, int), `heard` (out, bool), `x` (out, float), `y` (out, float), `z` (out, float), `level` (out, float), `tag` (out, int), `confidence` (out, float), `timeSince` (out, float), `success` (out, bool) | — | D | The listener's strongest remembered noise. `heard` false is ordinary. |
-| `AN_FindCover` | `exec` (in, exec), `entity` (in, int), `threatX` (in, float), `threatY` (in, float), `threatZ` (in, float), `maxSeekCm` (in, float), `minThreatDistCm` (in, float), `then` (out, exec), `found` (out, bool), `x` (out, float), `y` (out, float), `coverId` (out, int), `success` (out, bool) | — | P | Finds AND reserves a cover point protecting from the threat; `found` false when nothing protects. |
-| `AN_ReleaseCover` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Gives up the entity's cover reservation. |
-| `AN_IsCovered` | `entity` (in, int), `threatX` (in, float), `threatY` (in, float), `threatZ` (in, float), `covered` (out, bool) | — | D | True when the entity stands where the threat cannot see it. |
-| `AN_SquadJoin` | `exec` (in, exec), `entity` (in, int), `squadId` (in, int), `spacingCm` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Adds the entity to a squad. |
-| `AN_SquadSetTarget` | `exec` (in, exec), `squadId` (in, int), `x` (in, float), `y` (in, float), `z` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets the squad's target position. |
-| `AN_GetSquadSlot` | `entity` (in, int), `role` (out, int), `x` (out, float), `y` (out, float), `z` (out, float), `success` (out, bool) | — | D | The entity's role (0 none, 1 anchor, 2 flank left, 3 flank right, 4 support) and slot position. |
-
+### Decal
+
+
+
+| Node | Pins | Attribute | Path | What it does |
+
+|---|---|---|---|---|
+
+| `AN_SpawnDecal` | `exec` (in, exec), `x` (in, float), `y` (in, float), `z` (in, float), `nx` (in, float), `ny` (in, float), `nz` (in, float), `sx` (in, float), `sy` (in, float), `sz` (in, float), `roll` (in, float), `lifetime` (in, float), `fadeOut` (in, float), `then` (out, exec), `entity` (out, int) | `base=`, `normalmap=`, `orm=` | P | Spawns a pooled gameplay decal on a surface (`nx,ny,nz` is the surface normal); the pool recycles its oldest when full. |
+
+| `AN_ClearDecals` | `exec` (in, exec), `then` (out, exec), `success` (out, bool) | — | P | Releases every pooled decal. |
+
+| `AN_SetDecalCapacity` | `exec` (in, exec), `capacity` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Sets how many pooled decals may be alive at once; 0 disables spawning. |
+
+
+
+### AI
+
+
+
+| Node | Pins | Attribute | Path | What it does |
+
+|---|---|---|---|---|
+
+| `AN_CrowdSetAgent` | `exec` (in, exec), `entity` (in, int), `radiusCm` (in, float), `maxSpeedCm` (in, float), `maxAccelCm` (in, float), `priority` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Makes the entity a crowd agent with this radius, speed and acceleration. |
+
+| `AN_CrowdSetMode` | `exec` (in, exec), `entity` (in, int), `mode` (in, int), `x` (in, float), `y` (in, float), `z` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets how the agent moves: 0 follow path agent, 1 seek, 2 arrive, 3 flee, 4 wander, 5 hold. |
+
+| `AN_CrowdSetBackend` | `exec` (in, exec), `backend` (in, int), `maxAgents` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Chooses the CPU (deterministic) or GPU (thousands) solver and the max-agents cap (< 0 keeps it). |
+
+| `AN_GetCrowdVelocity` | `entity` (in, int), `vx` (out, float), `vy` (out, float), `speed` (out, float), `success` (out, bool) | — | D | The agent's avoidance-adjusted velocity. |
+
+| `AN_CrowdSteer` | `entity` (in, int), `dt` (in, float), `turnRate` (in, float), `maxSpeedCm` (in, float), `forward` (out, float), `right` (out, float), `yawDelta` (out, float), `success` (out, bool) | — | D | The crowd velocity as `CharacterMove` input (`forward`, `right`, `yawDelta`). |
+
+| `AN_EmitNoise` | `exec` (in, exec), `x` (in, float), `y` (in, float), `z` (in, float), `loudnessCm` (in, float), `tag` (in, int), `source` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Raises a noise at a position; listeners within its occluded range remember it. |
+
+| `AN_SetHearing` | `exec` (in, exec), `entity` (in, int), `sensitivity` (in, float), `maxRangeCm` (in, float), `memorySec` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Gives the entity an ear: sensitivity, range and memory time. |
+
+| `AN_GetHeard` | `entity` (in, int), `heard` (out, bool), `x` (out, float), `y` (out, float), `z` (out, float), `level` (out, float), `tag` (out, int), `confidence` (out, float), `timeSince` (out, float), `success` (out, bool) | — | D | The listener's strongest remembered noise. `heard` false is ordinary. |
+
+| `AN_FindCover` | `exec` (in, exec), `entity` (in, int), `threatX` (in, float), `threatY` (in, float), `threatZ` (in, float), `maxSeekCm` (in, float), `minThreatDistCm` (in, float), `then` (out, exec), `found` (out, bool), `x` (out, float), `y` (out, float), `coverId` (out, int), `success` (out, bool) | — | P | Finds AND reserves a cover point protecting from the threat; `found` false when nothing protects. |
+
+| `AN_ReleaseCover` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Gives up the entity's cover reservation. |
+
+| `AN_IsCovered` | `entity` (in, int), `threatX` (in, float), `threatY` (in, float), `threatZ` (in, float), `covered` (out, bool) | — | D | True when the entity stands where the threat cannot see it. |
+
+| `AN_SquadJoin` | `exec` (in, exec), `entity` (in, int), `squadId` (in, int), `spacingCm` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Adds the entity to a squad. |
+
+| `AN_SquadSetTarget` | `exec` (in, exec), `squadId` (in, int), `x` (in, float), `y` (in, float), `z` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets the squad's target position. |
+
+| `AN_GetSquadSlot` | `entity` (in, int), `role` (out, int), `x` (out, float), `y` (out, float), `z` (out, float), `success` (out, bool) | — | D | The entity's role (0 none, 1 anchor, 2 flank left, 3 flank right, 4 support) and slot position. |
+
+
+
 
 ### AI queries
 
@@ -934,6 +1049,17 @@ Play authored montages in slots and sections, and use or read the root motion an
 | `SetRootMotion` | `exec` (in, exec), `entity` (in, int), `mode` (in, int), `axes` (in, int), `scale` (in, float), `then` (out, exec), `success` (out, bool) | — | P | How the entity uses the root motion its animations carry. `mode`: 0 none, 1 ignore (the pose stays in place), 2 apply (the entity moves), 3 accumulate (read it with Consume Root Motion). `axes` is a bit mask (1 X, 2 Y, 4 Z, 8 yaw; default 11 is X, Y and yaw). `scale` multiplies the travel. |
 | `ConsumeRootMotion` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool), `x` (out, float), `y` (out, float), `z` (out, float), `yaw` (out, float), `seconds` (out, float) | — | P | Reads the root motion accumulated since the last read (centimetres in the entity's own frame, `yaw` in degrees, over `seconds`) and clears it. It collects in mode 3. |
 
+### Assets
+
+Import a model file into the project's Content folder from a graph (`docs/FBX_IMPORT.md`). Editor hosts only: a packaged game has no importer, so `IsModelImportAvailable` reads false and `ImportModel` reports `success` false. Rows: `GraphGameSystemNodeTable.cs`, owner `ModelImportGraph`. Tests: `Aver.Graph.Tests/ModelImportNodeTests.cs`.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `ImportModel` | `exec` (in, exec), `overwrite` (in, bool), `scale` (in, float, default 100), `then` (out, exec), `success` (out, bool), `meshes` (out, int), `skeletons` (out, int), `clips` (out, int) | `source=`, `dest=` | X | Imports the `.fbx`/`.gltf`/`.glb` `source=` (absolute, or relative to the project folder) into the Content-relative folder `dest=`. `overwrite` sends the files it replaces to the recycle bin; `scale` is centimetres per metre (FBX). Runs synchronously. |
+| `IsModelImportAvailable` | `available` (out, bool) | — | D | True when the host can import (the editor). |
+
+After adding the rows: re-derive the node counts in this page's header with the counting method it states, and add `Assets` to the contents list.
+
 ### Landscape and water
 
 Read the painted landscape and the water over it (`docs/LANDSCAPE_LAYERS_WATER.md`). All are reads, so they run under either compiler. A layer or surface is named by an attribute; a layer id pin of 0 or more beats `layer=`. Off the landscape, over no water or with no provider, a node answers its defaults (found false, weight 0, surface 0) and never errors. Painting, carving and spline editing are editor commands with no node. Entering water is not an event: poll `AN_EntityWater` from a timer, or use a physics sensor. Rows: `GraphTerrainNodeTable.cs`, owner `TerrainGraph` (`Aver.Framework/TerrainGraph.cs`). Tests: `Aver.Graph.Tests/TerrainNodeTests.cs`. Positions are centimetres.
@@ -994,6 +1120,20 @@ Play, scrub and bind the level's sequences and `.ocseq` files (`docs/SEQUENCER.m
 | `IsSequencePlaying` | `result` (out, bool) | `sequence=` (optional) | D | True while `sequence=` (empty = any sequence) plays. |
 | `GetSequenceState` | `found` (out, bool), `time` (out, float), `length` (out, float), `rate` (out, float) | `sequence=` | D | The playhead and length in seconds and the playback rate of `sequence=`. `found` is false for a sequence the level lacks. |
 
+### Cloth and destruction
+
+Damage, cut, repair and release soft bodies and set the wind (`docs/SOFTBODY.md`). Every call is deferred to the system's next tick and applied in arrival order. Rows: `GraphSoftBodyNodeTable.cs`, owner `SoftBodyGraphInterop` (`Aver.Framework/SoftBodies.cs`); palette group Physics. Events (`SoftBodyTorn`, `SoftBodyDetached`, `SoftBodyDust`, `SoftBodyImpact`, `SoftBodyRepaired`) arrive through `OnEvent` and need no node.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `SoftBodyDamage` | `exec` (in), `entity` (in, int), `x`/`y`/`z` (in, float), `radius` (in, float, 30), `energy` (in, float, 100), `dirX`/`dirY`/`dirZ` (in, float), `then` (out), `success` (out, bool) | — | P | Deposits `energy` joules within `radius` cm of the point; entity 0 hits whichever destructible is near. |
+| `SoftBodyExplode` | `exec` (in), `x`/`y`/`z` (in, float), `radius` (in, float, 300), `impulse` (in, float, 600), `energy` (in, float, 500), `then` (out), `touched` (out, int), `success` (out, bool) | — | P | Damage and a radial impulse on every soft body in the sphere. |
+| `SoftBodyTear` | `exec` (in), `entity` (in, int), `x`/`y`/`z` (in, float), `radius` (in, float, 20), `then` (out), `success` (out, bool) | — | P | Cuts the beams within `radius` of the point. |
+| `SoftBodyRepair` | `exec` (in), `entity` (in, int), `then` (out), `success` (out, bool) | — | P | Undoes dents and tears. |
+| `ReleaseSoftBody` | `exec` (in), `entity` (in, int), `then` (out), `success` (out, bool) | — | P | Drops all pins of a cloth. |
+| `SetSoftBodyWind` | `exec` (in), `vx`/`vy`/`vz` (in, float), `gust` (in, float, 0), `gustHz` (in, float, 0.3), `turbulence` (in, float, 0), `then` (out), `success` (out, bool) | — | P | The global cloth wind in cm/s, independent of the sky's cloud drift. |
+| `SetSoftBodyPreset` | `exec` (in), `entity` (in, int), `preset` (in, int, 0), `then` (out), `success` (out, bool) | — | P | Changes the preset of the entity's Cloth or Destructible (0 cloth_light, 1 cloth_heavy, 2 metal, 3 wood, 4 glass). |
+| `GetSoftBodyState` | `entity` (in, int), `found` (out, bool), `damage` (out, float), `maxStrain` (out, float), `pieces` (out, int), `brokenEdges` (out, int) | — | D | Damage 0..1, worst strain, piece count and broken edges. `found` is false without a soft body. |
 ## Aliases invisible to the palette
 
 The parser accepts a second spelling for seven node types. The Add-Node palette only ever spawns the canonical name — these aliases exist for a hand-written or C#-authored `.ocgraph`, never appear in the GUI, and are otherwise identical in every respect to the type they alias:

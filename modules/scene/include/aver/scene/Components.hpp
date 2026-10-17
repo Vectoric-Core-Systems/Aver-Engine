@@ -259,6 +259,10 @@ inline f32 softBodyMaxDistanceCm(const CSoftBody& sb) {
 // the useful state. Clear = simulated and drawn from the simulation.
 inline constexpr u32 kSoftBodyDisabled = 0x1;
 
+// A runtime piece or debris of a destructible, owned by the soft-body system and never serialised (placement
+// capture skips it). The struct size and the component ids do not change.
+inline constexpr u32 kSoftBodyPiece = 0x2;
+
 // What CRigidBody::shapeKind names. Box is 0 so a zero-filled, unauthored body still describes a
 // real (if degenerate, all-zero half-extents) shape rather than an out-of-range one.
 //

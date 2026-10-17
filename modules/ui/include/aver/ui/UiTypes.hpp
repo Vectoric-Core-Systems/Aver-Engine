@@ -102,7 +102,10 @@ enum class UiAlign : u8 { Start, Center, End, Stretch };
 // Main-axis distribution of leftover space when no child fills.
 enum class UiJustify : u8 { Start, Center, End, SpaceBetween };
 
-enum class UiTextAlign : u8 { Left, Center, Right };
+// Left/Center/Right are physical. Start/End follow the paragraph direction (Start is the right edge of an RTL line).
+enum class UiTextAlign : u8 { Left, Center, Right, Start, End };
+// Paragraph direction of a text widget; Auto takes the first strong letter (UAX #9 P2/P3).
+enum class UiTextDir : u8 { Auto, LTR, RTL };
 enum class UiImageMode : u8 { Stretch, Fit };
 
 // What a ROOT widget does with input. Menu pauses game input and owns keyboard/gamepad navigation.

@@ -223,6 +223,17 @@ if(TARGET Aver.Runtime.Game.Core AND TARGET Aver.Anim.Scene AND TARGET Aver.Scen
   set_target_properties(PlacedComponentModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# SoftBodyDetailsModelTest -- sandbox/src/SoftBodyDetailsModel.hpp and SoftBodyPaintTool.cpp (compiled directly, no ImGui):
+# preset rows, the canonical Cloth/Destructible COMPONENT records, attach rules, slider numbers, Create .ocsoft
+# bookkeeping, brush selection, strokes and undo, rule counts, save/reload and the viewport ray.
+if(TARGET Aver.SoftBody AND TARGET Aver.Scene)
+  add_executable(SoftBodyDetailsModelTest
+    src/SoftBodyDetailsModelTest.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/SoftBodyPaintTool.cpp)
+  target_include_directories(SoftBodyDetailsModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(SoftBodyDetailsModelTest PRIVATE Aver.SoftBody Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(SoftBodyDetailsModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
 # BtEditorTest -- the .ocbt behaviour-tree editor tab's headless core: the four structural edits
 # (add/delete/reparent/reorder) and the tab's own load/save/dirty/undo bookkeeping.
 #
@@ -684,6 +695,18 @@ target_include_directories(StringTableEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/san
 target_link_libraries(StringTableEditorTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(StringTableEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ModelImportDialogTest -- model import's editor half (docs/plans/wave9/FBX_IMPORT.md 2.8-2.9): extension routing, the shared writer through
+# importFbxToDir, the .ocimport record, Reimport selection, overwrite through the recycler hook, a missing source. Same arrangement as
+# AnimGraphEditorTest: the editor source compiles directly with AVER_WITH_IMGUI undefined (and AVER_MODULE_PBR undefined, so the material
+# cook is skipped). Needs the vendored ufbx for the fixture import.
+if(TARGET Aver.Formats.Fbx AND TARGET ufbx)
+  add_executable(ModelImportDialogTest
+    src/ModelImportDialogTest.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/ModelImportDialog.cpp)
+  target_include_directories(ModelImportDialogTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src ${CMAKE_SOURCE_DIR}/tests/formats/src)
+  target_link_libraries(ModelImportDialogTest PRIVATE Aver.Formats.Fbx Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(ModelImportDialogTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
 # MontageEditorTest -- the .ocmontage editor tab's headless core: the structural edits (which repair
 # the links between sections), the timeline geometry, clip-path references, and the tab's load / save /
 # dirty / undo bookkeeping. Same arrangement as AnimGraphEditorTest above: compiles the editor source

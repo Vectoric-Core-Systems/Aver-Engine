@@ -2,6 +2,7 @@
 // The process-wide state UiAbi.cpp owns (draw list, viewport, font, pointer), for the widget ABI in
 // UiWidgetAbi.cpp to draw into and read. Not installed; the two files are one library.
 #include "aver/ui/UiDrawList.hpp"
+#include "aver/ui/UiTextEngine.hpp"
 
 #include <cstdint>
 #include <string>
@@ -11,6 +12,8 @@ namespace aver::ui::abi {
 UiDrawList& drawList();
 // The borrowed font, or null when none is set or it has no glyphs.
 const UiFont* font();
+// The process-wide text engine (docs/GAME_UI_TEXT.md); the widget frame paints through it.
+UiTextEngine& textEngine();
 // The rectangle aver_ui_begin_frame was given.
 void viewport(float out[4]);
 // The pointer and held buttons the host set this frame.

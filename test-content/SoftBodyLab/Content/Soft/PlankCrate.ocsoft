@@ -1,0 +1,1 @@
+{"format":"ocsoft","version":1,"kind":"destructible","preset":"wood","destruct":{"minImpactCmS":180,"maxPieces":16,"debrisLifetimeS":10}}

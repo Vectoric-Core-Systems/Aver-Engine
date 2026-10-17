@@ -63,6 +63,12 @@ inline constexpr PlacedKind kPlacedKinds[] = {
     {"SmartObject", "Smart Object",
      "Makes this entity something AI agents can claim and use (.ocso).",
      "Smart Object", 0, "CSmartObject", {".ocso"}},
+    {"Cloth", "Cloth",
+     "Simulates this mesh as cloth (pinned, painted or ruled). Skins to a Skeletal Mesh if there is one.",
+     "Cloth", 0, "CCloth", {".ocsoft"}},
+    {"Destructible", "Destructible",
+     "Makes this mesh breakable: it dents under hits and tears into pieces past its material's limits.",
+     "Destructible", 0, "CDestructible", {".ocsoft"}},
 };
 inline constexpr usize kPlacedKindCount = sizeof(kPlacedKinds) / sizeof(kPlacedKinds[0]);
 
@@ -90,6 +96,8 @@ struct AttachContext {
     bool instanceMember = false;      // saved inside a LEVELINST record
     bool streamedOnlyRecord = false;  // a streamed-out placement: no live entity to attach to
     bool alreadyPresent = false;      // the entity carries this component already
+    bool hasCloth = false;            // carries a CCloth (one body per entity root: not with a Destructible)
+    bool hasDestructible = false;     // carries a CDestructible
 };
 
 namespace detail {
@@ -121,7 +129,9 @@ inline bool canAttach(const AttachContext& c, const PlacedKind& kind, std::strin
         if (!c.hasSkeleton) return deny(why, "Needs a Skeletal Mesh with a skeleton chosen.");
         return true;
     }
-    return true;   // Brain and SmartObject need only a mesh placement
+    if (t == "Cloth" && c.hasDestructible) return deny(why, "This entity is already Destructible; one soft body per entity.");
+    if (t == "Destructible" && c.hasCloth) return deny(why, "This entity is already Cloth; one soft body per entity.");
+    return true;   // Brain, SmartObject, Cloth and Destructible need only a mesh placement
 }
 
 // True when `kind` may be removed. A Skeletal Mesh with dependents is refused (no cascade, so one undo entry
@@ -189,6 +199,8 @@ inline fmt::OcPlacedComponent makeNewRecord(const PlacedKind& kind) {
     const std::string_view t = kind.type;
     if (t == "RootMotion") r.kv.emplace_back("mode", "apply");
     else if (t == "MotionMatcher") r.kv.emplace_back("input", "velocity");
+    else if (t == "Cloth") r.kv.emplace_back("preset", "cloth_light");
+    else if (t == "Destructible") r.kv.emplace_back("preset", "metal");
     return r;
 }
 

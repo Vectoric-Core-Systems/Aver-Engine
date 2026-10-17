@@ -134,3 +134,15 @@ Do not treat these as clean. Seven are documentation claims; one is an orphan pr
 `content/legacy/README.md:3` · ~~`README.md:63`~~ · `modules/framework/README.md:55`
 
 Four of the eight are now struck, checked afterwards. Two were resolved by deleting their directories: both promised a "Phase 3" that had since been built elsewhere under other names, and `docs/ARCHITECTURE.md`'s rows for `Aver.Render` / `Aver.Render.GI` already described that more accurately. `content/legacy/README.md` was checked too and survives — it promises fixtures for `.ocaero` and `.scene`, which `modules/formats/README.md:44` confirms are still unimplemented. `README.md:63` is accurate — it correctly says `interop/`, `editor/` and `shaders/` are gone and `abi/` is a deliberate placeholder. `docs/SCENE_FRAMEWORK.md:888` sat inside the §5.1 ABI sketch; checking it found the real `scene_abi.h` is far leaner than that sketch (a fully generic field surface, no dedicated `get_position`/`set_rotation`/etc.), and §5 now says so — see the note on `:7` above. The remaining three (`Aver.Scripting.Sample.csproj:1`, `docs/ABI.md:88`, `modules/framework/README.md:55`) are still unchecked.
+
+## Retired: the Verlet soft-body solver (SOFTBODY_CLOTH_DESTRUCTION)
+
+Cloth and destructibles are Jolt soft bodies now (`docs/SOFTBODY.md`). The code below is retired: nothing
+builds or references it, and the files are still on disk until they are recycled.
+
+- `modules/softbody/src/Solver.cpp`, `AsyncSolver.cpp`, `softbody_abi.cpp` and their headers (the Verlet/Gauss-Seidel
+  `step`, `applyImpact`, `AsyncSolver` and the `aver_sb_*` C ABI).
+- `tests/softbody/src/SoftBodyAsyncTest.cpp` and `TestCages.hpp`.
+- `sandbox/src/SoftBodyPanel.*` (Window > Soft Body (plastic)); the Sandbox CMake list and `SandboxApp.hpp` still name it until the shared patch lands.
+- `modules/fracture` (a README-only skeleton). After recycling it run `python scripts/module-catalog.py --write`.
+- `docs/physics-net/PHYSICS_NET.md` sections on the solver describe the retired design, not the code.

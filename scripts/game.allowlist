@@ -33,6 +33,12 @@ AverCrashReporter.exe
 
 # Engine modules. Same set as the engine payload minus the editor-only ones.
 Aver.UI.Abi.dll
+# The game UI's default font (docs/GAME_UI_TEXT.md): the scalable pair the built-in font set names with @exe/, and the
+# baked bitmap pair loadGameUiFont reads. Apache-2.0; the notice row already exists in stage-payload.ps1.
+Roboto-Regular.ttf
+Roboto-Medium.ttf
+Roboto-Regular.ocfont
+Roboto-Regular.png
 Aver.Synapse.Abi.dll   ?AVER_MODULE_SCENE
 Aver.Prefab.Abi.dll     ?AVER_MODULE_SCENE
 Aver.LevelInstance.Abi.dll   ?AVER_MODULE_SCENE
@@ -121,7 +127,8 @@ shaders/**
 data/**
 
 # DELIBERATELY ABSENT from [bin]:
-#   Roboto-*.ttf        -- loaded only by SandboxApp's ImGui font setup. A game has no ImGui.
+#   Roboto-*.ttf        -- other than Regular and Medium (listed in [bin]: the game UI's default font), loaded only by
+#                          SandboxApp's ImGui font setup. A game has no ImGui.
 #   splash.png, logo.png, compile-status.png, file-icons.png, folder-icons.png, asset-icons.png
 #                       -- editor chrome. The compile-status sprite sheet is for a button that
 #                          only exists in the editor.

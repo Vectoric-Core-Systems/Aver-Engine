@@ -2047,8 +2047,6 @@ void SandboxApp::buildUI(Engine& e) {
             uiReg_.track("window.worldOutliner");
             ImGui::MenuItem("Details", nullptr, &showDetails_);
             uiReg_.track("window.details");
-            ImGui::MenuItem("Soft Body (plastic)", nullptr, &showSoftBody_);
-            uiReg_.track("window.softBody");
 #if AVER_MODULE_SCENE
             ImGui::MenuItem("Render Queue", nullptr, &showRenderQueue_);
             uiReg_.track("window.renderQueue");
@@ -2176,6 +2174,17 @@ void SandboxApp::buildUI(Engine& e) {
                 ImGui::EndMenu();
             }
             uiReg_.track("view.showMotionMatching");
+#endif
+#if AVER_MODULE_SOFTBODY_SCENE
+            if (ImGui::BeginMenu("Show Soft Bodies")) {
+                ImGui::MenuItem("Strain", nullptr, &softBodyDebug_.strain);
+                ImGui::MenuItem("Pins", nullptr, &softBodyDebug_.pins);
+                ImGui::MenuItem("Pieces", nullptr, &softBodyDebug_.pieces);
+                ImGui::MenuItem("Wind", nullptr, &softBodyDebug_.wind);
+                ImGui::MenuItem("Budget", nullptr, &softBodyDebug_.budget);
+                ImGui::EndMenu();
+            }
+            uiReg_.track("view.showSoftBodies");
 #endif
 #if AVER_MODULE_PHYSICS
             // Toggling forgets the overlay; rebuildColliderOverlay skips unchanged frames.

@@ -4,6 +4,7 @@
 #include "aver/game/GameTick.hpp"
 #include "aver/game/GameSystemsWiring.hpp"
 #include "aver/game/GameUiInput.hpp"
+#include "aver/game/GameUiText.hpp"
 #include "aver/game/LevelDecals.hpp"
 #include "aver/game/LevelLights.hpp"   // [wave3/level-instances]
 #include "aver/game/SequenceHost.hpp"   // [wave5/sequencer] hooks, level bindings, the ABI provider
@@ -685,6 +686,18 @@ void GameApp::attachSkinning(Engine& e) {
     dev->addRenderFeature(scene.get());
     skinnedScene_ = std::move(scene);
     AVER_INFO("[Game] skinning attached");
+#if AVER_MODULE_RENDER_SOFTBODY
+    // After skinning in the feature list; draw-only, reads softbody::softBodySystem().pieces().
+    {
+        auto sb = std::make_unique<render::SoftBodyScene>();
+        if (sb->init(*dev)) {
+            sb->setResolvers(&GameContent::resolveSceneMesh, &GameContent::resolveAnimAsset, &content_);
+            dev->addRenderFeature(sb.get());
+            softBodyScene_ = std::move(sb);
+            AVER_INFO("[Game] soft-body drawing attached");
+        }
+    }
+#endif
 #else
     (void)e;
 #endif
@@ -1171,6 +1184,10 @@ void GameApp::openProject(Engine& e) {
         li.settingsPath = gameSettingsPath(project_);
         li.cultureOverride = cfg_.culture;
         game::initLocalization(li);
+#if AVER_WITH_UI_ABI
+        game::uiTextInit(project_.contentDir());   // loads Content/UI/Fonts.ocfonts (or the built-in set); follows the culture just initialised
+        game::uiTextBindRenderer(gameUi_);         // lends the UI renderer the glyph atlas
+#endif
 #if AVER_WITH_UI_ABI && AVER_MODULE_FRAMEWORK
         aver_ui_set_text_resolver(&aver_fw_loc_resolve, &aver_fw_loc_epoch);
 #endif
@@ -1307,6 +1324,9 @@ void GameApp::initScripting() {
         if (scripts_.graphFireAvailable()) {
 #if AVER_MODULE_SCENE
             anim::animSystem().setNotifySink(&GameApp::animNotify, this);
+#if AVER_MODULE_SOFTBODY_SCENE
+            softbody::softBodySystem().setNotifySink(&GameApp::animNotify, this);
+#endif
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE
             // Same sink as animNotify (byte-for-byte identical signatures)
@@ -1873,6 +1893,9 @@ void GameApp::onInit(Engine& e) {
 #endif
     // Animation state machines, reverb zones, blackboard relay, crowd/hearing/cover behaviours.
     game::registerGameSystems();
+#if AVER_MODULE_SOFTBODY_SCENE
+    game::installSoftBodyHost(&GameContent::resolveAnimAsset, &content_, nullptr, nullptr);
+#endif
 #if AVER_MODULE_SCENE
     // Prefab assets come out of the project's content index (the same id space every other asset uses).
     prefabLib_.setLoader([this](const std::string& path, fmt::OcPrefabData& out, std::string* why) {
@@ -2125,6 +2148,9 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     ragdoll::ragdollSystem().tick(t.dt);   // after the physics step, before the pose it writes into
 #endif
     anim::animSystem().tick(scene::World::instance(), t.dt);
+#if AVER_MODULE_SOFTBODY_SCENE
+    game::tickSoftBodies(t.dt, camPos_);   // after the pose it reads, before softBodyScene_->update copies the result
+#endif
     // Level sequences: Post phase (transform, material, camera); advanced and Pre-evaluated before the animation tick.
     // [wave5/sequencer]
     if (!sequenceDirector_.empty()) sequenceDirector_.evaluate(scene::World::instance(), game::SeqPhase::Post);
@@ -2138,6 +2164,9 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // After animation tick, before draw pass: creates per-entity skin targets and copies matrices from AnimSystem.
     // Before World::flush per this code's history; SkinnedScene.hpp says "after" -- disagreement noted.
     if (skinnedScene_) skinnedScene_->update(scene::World::instance(), anim::animSystem(), *e.device());
+#if AVER_MODULE_RENDER_SOFTBODY
+    if (softBodyScene_) softBodyScene_->update(scene::World::instance(), *e.device());
+#endif
 
 #if AVER_MODULE_SCENE
     // Chunk streaming: switched on after level camera settles, stepped every frame, evictions retired by flush.
@@ -2279,6 +2308,9 @@ void GameApp::onRender(Engine& e) {
         // Culled and owner-hidden entities reach Voxi too, so off-screen casters keep shadow and GI.
         if (voxiAttached_) opts.voxiRenderer = &voxiRenderer_;
 #endif
+#if AVER_MODULE_RENDER_SOFTBODY
+        opts.softBodies = softBodyScene_.get();   // GameRender.cpp substitutes the simulated mesh for a soft entity
+#endif
         drawWorld(*dev, viewProj_, content_, drawStats_, ms, skinnedScene_.get(), opts);
     }
 #endif
@@ -2341,6 +2373,7 @@ void GameApp::onShutdown(Engine& e) {
 #if AVER_WITH_UI_ABI
     // Font out first: ui_abi.h comment on aver_ui_set_font: a font outliving its atlas textures draws glyphs sampling dead descriptor.
     aver_ui_set_font(nullptr);
+    game::uiTextShutdown();   // unbind the atlas from the renderer and close the fonts before the device goes
     if (dev && uiFontTexture_) {
         // waitIdle: destroying a texture a still-in-flight command list references is GPU use-after-free.
         if (rhi::IResourceFactory* res = dev->resources()) {
@@ -2358,6 +2391,9 @@ void GameApp::onShutdown(Engine& e) {
 #endif
 #if AVER_MODULE_SCENE
     // Reverse order: skinning first, last to come out. Removed before device.
+#if AVER_MODULE_RENDER_SOFTBODY
+    if (dev && softBodyScene_) dev->removeRenderFeature(softBodyScene_.get());   // registered after skinning, removed before it
+#endif
     if (dev && skinnedScene_) dev->removeRenderFeature(skinnedScene_.get());
 #endif
 #if AVER_MODULE_VOXI
@@ -2374,6 +2410,9 @@ void GameApp::onShutdown(Engine& e) {
     content_.setMaterialSystem(nullptr);
 #endif
 #if AVER_MODULE_SCENE
+#if AVER_MODULE_RENDER_SOFTBODY
+    softBodyScene_.reset();
+#endif
     skinnedScene_.reset();
     // Streamed chunks own entities and static bodies. Released here while physics exists (unlike editor, which waits for destructors).
     streaming_.disable();

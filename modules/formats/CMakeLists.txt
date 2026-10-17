@@ -1,6 +1,9 @@
 aver_add_module(Aver.Formats
   SOURCES
     src/Avr1.cpp
+    # .ocimport, the record an import leaves beside its outputs so the Content Browser can Reimport.
+    # Text and arithmetic: no ufbx, no device.
+    src/ImportRecord.cpp
     # .cube 3D colour LUTs for post-process volumes and grading: text and arithmetic, no device.
     src/CubeLut.cpp
     # The GI derived-data cache (.cache). Base target: it is the AVR1 container and arithmetic --
@@ -146,6 +149,35 @@ if(AVER_MODULE_PBR)
   # reaching the same final link would be LNK2005, so this rides on the one that executable already
   # has rather than adding a second.
   target_include_directories(Aver.Formats.Material PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
+endif()
+
+# Aver.Formats.Fbx -- the FBX importer (ufbx), deliberately a FIFTH target, for Material's reason: the base
+# target stays dependency-light, and the shipped game runtime (Aver.Runtime) never links this, so ufbx
+# never reaches a packaged game. Linked by Sandbox, AverAssetC and the tests.
+#
+# THE TREE STILL CONFIGURES WITHOUT THE VENDORED SOURCE. With third_party/ufbx/ufbx.c absent this builds
+# with AVER_HAVE_UFBX=0 and importFbx fails with "built without ufbx". The root CMakeLists adds
+# third_party/ufbx next to meshoptimizer; the fallback below adds it here when that line is not present
+# (it precedes this directory, so a target made there is seen first and nothing is added twice).
+if(NOT TARGET ufbx AND EXISTS "${CMAKE_SOURCE_DIR}/third_party/ufbx/ufbx.c")
+  add_subdirectory(${CMAKE_SOURCE_DIR}/third_party/ufbx ${CMAKE_BINARY_DIR}/third_party/ufbx)
+endif()
+aver_add_module(Aver.Formats.Fbx
+  SOURCES
+    src/FbxImport.cpp
+    src/FbxMaterials.cpp
+    src/FbxSkeleton.cpp
+    src/FbxAnimation.cpp
+  DEPS
+    Aver.Formats
+    Aver.Core
+)
+if(TARGET ufbx)
+  # PUBLIC: FbxInternal.hpp includes ufbx.h, and the tests read the scene through it.
+  target_link_libraries(Aver.Formats.Fbx PUBLIC ufbx)
+  target_compile_definitions(Aver.Formats.Fbx PUBLIC AVER_HAVE_UFBX=1)
+else()
+  target_compile_definitions(Aver.Formats.Fbx PUBLIC AVER_HAVE_UFBX=0)
 endif()
 
 # Aver.Formats.Audio — the WAV reader, deliberately a FOURTH target, for the reason Material is a

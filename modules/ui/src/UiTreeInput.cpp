@@ -317,27 +317,24 @@ std::string UiTree::displayText(const UiWidget& w) const {
     return w.masked ? std::string(uiUtf8Length(w.text), '*') : w.text;
 }
 
-f32 UiTree::textShift(const UiWidget& w, const UiTextMetrics& m) const {
+std::shared_ptr<const UiTextLayout> UiTree::inputLayout(const UiWidget& w, const UiTextMetrics& m) const {
     const UiStyle st = styleOf(w);
-    const std::string text = displayText(w);
-    const std::string_view prefix = std::string_view(text).substr(0, uiUtf8Offset(text, static_cast<usize>(std::max(0, w.caret))));
-    const f32 caretX = m.textWidth(prefix, fontPx(w, st));
+    UiTextBox box;
+    box.carets = true;
+    return m.layoutText(displayText(w), textStyleOf(w, st), box);
+}
+
+f32 UiTree::textShift(const UiWidget& w, const UiTextLayout& layout) const {
+    const f32 caretX = layout.caretX(static_cast<usize>(std::max(0, w.caret)));
     return std::max(0.0f, caretX - (textArea(w).w - 2.0f * scale_));
 }
 
 i32 UiTree::caretFromX(const UiWidget& w, f32 x) const {
     if (!metrics_) return w.caret;
-    const UiStyle st = styleOf(w);
-    const f32 px = fontPx(w, st);
-    const std::string text = displayText(w);
-    const f32 rel = x - textArea(w).x + textShift(w, *metrics_);
-    const usize n = uiUtf8Length(text);
-    for (usize i = 0; i < n; ++i) {
-        const f32 a = metrics_->textWidth(std::string_view(text).substr(0, uiUtf8Offset(text, i)), px);
-        const f32 b = metrics_->textWidth(std::string_view(text).substr(0, uiUtf8Offset(text, i + 1)), px);
-        if (rel < (a + b) * 0.5f) return static_cast<i32>(i);
-    }
-    return static_cast<i32>(n);
+    const std::shared_ptr<const UiTextLayout> l = inputLayout(w, *metrics_);
+    const f32 rel = x - textArea(w).x + textShift(w, *l);
+    const usize n = uiUtf8Length(displayText(w));
+    return static_cast<i32>(std::min(n, l->indexAt(rel, 0.0f)));
 }
 
 void UiTree::processText(const UiInputFrame& in) {

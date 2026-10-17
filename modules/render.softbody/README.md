@@ -1,21 +1,19 @@
 # Aver.Render.SoftBody  (`modules/render.softbody`)
 
 - **Language:** C++
-- **Depends on:** Core, RHI, Scene, Formats, Physics
-- **Option:** `AVER_MODULE_RENDER_SOFTBODY` (ON; force-disabled without both the scene and physics)
+- **Depends on:** Core, RHI, Scene, Formats, SoftBody, SoftBody.Scene
+- **Option:** `AVER_MODULE_RENDER_SOFTBODY` (ON; force-disabled without the scene)
 
-Draws a mesh whose vertices came from a simulated soft body rather than from its asset.
+Draws cloth and destructible pieces whose vertices came from a simulated soft body rather than from the
+asset. **Draw only**: it creates no bodies and runs no physics.
 
-## Where the soft body itself lives — not here
+## Where the soft body itself lives - not here
 
 | | |
 | --- | --- |
-| **The simulation** | Jolt, through `Aver.Physics`'s C ABI (`aver_phys_softbody_*`). Not a solver of our own: Jolt's `Skinned` constraint tethers a particle to where bone skinning would have put it, and it collides with the real world. |
-| **Which entities are soft** | `scene::CSoftBody`, component 13. |
-| **Drawing the result** | This module. |
-
-`modules/softbody` is a **different, unbuilt** thing — see its README. It is reserved for *plastic*
-deformation (permanent set, break/tear), which Jolt has no notion of.
+| **The simulation** | Jolt, through `Aver.Physics`' `aver_phys_sb_*` C ABI (`physics_softbody_abi.h`). |
+| **Which entities are soft, damage, tearing, pieces** | `Aver.SoftBody.Scene` (`SoftBodySystem`), see `docs/SOFTBODY.md`. |
+| **Drawing the result** | This module: `SoftBodyScene` reads `SoftBodySystem::pieces()`. |
 
 ## The one idea
 
@@ -40,7 +38,14 @@ module:
   conversion, the recomputed normals and the UV passthrough are checkable with no GPU —
   `tests/render.softbody` does exactly that.
 
-## Known limit
+## Epochs and retirement
 
-`aver_phys_softbody_create` takes a centre, not a matrix, so an entity's **rotation and scale do not
-reach the body's rest shape**. A rotated mesh simulates as though axis-aligned.
+A tear, a release or an island split changes a piece's topology, which bumps its epoch. `SoftBodyScene`
+then builds a new source mesh (rest vertices copied from the base mesh through the piece's
+`sourceVertex` map so UVs and normals are right), a new skin-target mesh and a fresh staging ring, and
+puts the old three on a retire list destroyed `kSoftBodyFramesInFlight + 1` frames later. Rebuilds count
+against the system's `maxRebuildsPerFrame`. Each frame the piece's vertex AABB is written into
+`CMeshRenderer` so a flung piece is not culled at its old place. Pieces shrink toward their centroid
+(`scale01`) while despawning.
+
+The packaged game builds a `SoftBodyScene` too and passes it as `DrawWorldOptions::softBodies`.

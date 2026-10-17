@@ -1,0 +1,1 @@
+{"format":"ocsoft","version":1,"kind":"cloth","preset":"cloth_heavy","cloth":{"tearable":true,"skin":{"backstopCm":2.0}},"paint":{"rules":[{"type":"above","axis":"z","valueCm":98.0}]}}

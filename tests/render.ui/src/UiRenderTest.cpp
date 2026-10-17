@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "aver/ui/UiGlyphAtlas.hpp"
+
 using namespace aver;
 
 static int g_failures = 0;
@@ -37,10 +39,13 @@ struct MockFactory final : public rhi::IResourceFactory {
     std::vector<rhi::GraphicsPipelineDesc> pipelines;
     std::vector<rhi::BindingSetDesc>       sets;
     std::vector<rhi::TextureHandle>        srvSlot0;    // parallel to `sets`: what slot 0 holds
+    std::vector<std::string>               textureNames;       // parallel to `textures` (the desc's name pointer does not outlive the call)
+    std::vector<rhi::TextureHandle>        destroyedTextures;
     u32 destroyedBuffers = 0;
 
     rhi::TextureHandle createTexture(const rhi::TextureDesc& d) override {
         textures.push_back(d);
+        textureNames.push_back(d.debugName ? d.debugName : "");
         return static_cast<rhi::TextureHandle>(textures.size());
     }
     rhi::BufferHandle createBuffer(const rhi::BufferDesc& d) override {
@@ -69,7 +74,7 @@ struct MockFactory final : public rhi::IResourceFactory {
     rhi::BlasHandle createBlas(rhi::MeshHandle) override { return 0; }
     rhi::TlasHandle createTlas(u32) override { return 0; }
 
-    void destroyTexture(rhi::TextureHandle) override {}
+    void destroyTexture(rhi::TextureHandle h) override { if (h) destroyedTextures.push_back(h); }
     void destroyBuffer(rhi::BufferHandle h) override { if (h) ++destroyedBuffers; }
     void destroyShader(rhi::ShaderHandle) override {}
     void destroyPipeline(rhi::PipelineHandle) override {}
@@ -95,12 +100,23 @@ struct MockFactory final : public rhi::IResourceFactory {
         return true;
     }
     bool textureInfo(rhi::TextureHandle, rhi::TextureDesc&) const override { return false; }
+    // The copy layout of a 4-byte-per-texel texture with D3D12's 256-byte row alignment.
+    bool textureCopyFootprint(rhi::TextureHandle t, u32, rhi::TextureCopyFootprint& out) const override {
+        if (t == 0 || t > textures.size()) return false;
+        const rhi::TextureDesc& d = textures[t - 1];
+        out.rowBytes = d.width * 4;
+        out.rowPitch = (out.rowBytes + 255u) & ~255u;
+        out.rows = d.height;
+        out.depth = 1;
+        out.totalBytes = static_cast<u64>(out.rowPitch) * out.rows;
+        return true;
+    }
     void waitIdle() override {}
 };
 
 // One recorded render-context call, with up to four of its arguments.
 struct Call {
-    enum class Kind { Pipeline, Viewport, Scissor, BindingSet, Constants, VertexBuffer, IndexBuffer, DrawIndexed };
+    enum class Kind { Pipeline, Viewport, Scissor, BindingSet, Constants, VertexBuffer, IndexBuffer, DrawIndexed, Barrier, CopyBufferToTexture };
     Kind kind;
     u32 a = 0, b = 0, c = 0, d = 0;
 };
@@ -134,7 +150,12 @@ struct MockContext final : public rhi::IRenderContext {
     }
     void buildBlas(rhi::BlasHandle) override {}
     void buildTlas(rhi::TlasHandle, const rhi::TlasInstance*, u32) override {}
-    void textureBarrier(rhi::TextureHandle, rhi::ResourceState, rhi::ResourceState, u32) override {}
+    void textureBarrier(rhi::TextureHandle t, rhi::ResourceState from, rhi::ResourceState to, u32) override {
+        calls.push_back({Call::Kind::Barrier, t, static_cast<u32>(from), static_cast<u32>(to)});
+    }
+    void copyBufferToTexture(rhi::TextureHandle dst, u32 mip, rhi::BufferHandle src, u64 offset) override {
+        calls.push_back({Call::Kind::CopyBufferToTexture, dst, mip, src, static_cast<u32>(offset)});
+    }
     void bufferBarrier(rhi::BufferHandle, rhi::ResourceState, rhi::ResourceState) override {}
     void uavBarrierTexture(rhi::TextureHandle) override {}
     void uavBarrierBuffer(rhi::BufferHandle) override {}
@@ -387,6 +408,131 @@ int main() {
         r->submit(empty);
         r->overlayPass(ctx, 1280, 720);
         check(ctx.count(Call::Kind::DrawIndexed) == 0, "the previous frame's draws are gone");
+    }
+
+    AVER_INFO("=== the glyph atlas: upload, tokens ===");
+    {
+        MockFactory& f = dev.factory;
+        // A 300 pixel page: 1200 bytes a row, so the mock's 256-byte alignment makes the pitch 1280 (80 bytes of padding).
+        aver::ui::UiGlyphAtlas atlas({300, 2});
+        // Not a real glyph: a 4 x 3 rectangle of coverage 200, wherever the packer puts it.
+        aver::ui::UiGlyphBitmap bmp;
+        bmp.w = 4;
+        bmp.h = 3;
+        bmp.pixels.assign(12, 200);
+        const aver::ui::UiAtlasGlyph* g = atlas.insert(aver::ui::UiGlyphKey{1, 16, 65}, bmp, 1);
+        check(g != nullptr && g->page == 0, "a glyph lands on page 0");
+
+        {   // no atlas lent: nothing happens
+            MockContext ctx;
+            r->prePass(ctx);
+            check(ctx.calls.empty() && f.textures.size() == 1, "prePass with no atlas does nothing");
+        }
+        r->setTextAtlas(&atlas);
+        const usize texturesBefore = f.textures.size();
+        const usize buffersBefore = f.buffers.size();
+        const u32 destroyedBefore = f.destroyedBuffers;
+        {
+            MockContext ctx;
+            r->prePass(ctx);
+            check(f.textures.size() == texturesBefore + 1, "the first dirty page creates exactly one texture");
+            const rhi::TextureDesc& td = f.textures.back();
+            check(td.width == 300 && td.height == 300 && td.format == rhi::Format::RGBA8Unorm, "RGBA8Unorm, one texel per atlas pixel");
+            check(td.initialState == rhi::ResourceState::ShaderResource && any(td.bind, rhi::ResourceBind::ShaderResource), "created in the ShaderResource state");
+            check(f.textureNames.back() == "Aver.UI glyph page 0", "and named after its page");
+            check(f.buffers.size() == buffersBefore + 1 && f.buffers.back().kind == rhi::BufferKind::Upload, "one upload buffer");
+            check(f.buffers.back().bytes == 1280ull * 300ull, "sized to the copy footprint totalBytes");
+            const std::vector<Call> barriers = ctx.ofKind(Call::Kind::Barrier);
+            const std::vector<Call> copies = ctx.ofKind(Call::Kind::CopyBufferToTexture);
+            check(barriers.size() == 2 && copies.size() == 1, "two barriers and one copy");
+            check(ctx.calls.size() == 3 && ctx.calls[0].kind == Call::Kind::Barrier && ctx.calls[1].kind == Call::Kind::CopyBufferToTexture &&
+                      ctx.calls[2].kind == Call::Kind::Barrier,
+                  "in the order barrier, copy, barrier");
+            check(barriers[0].b == static_cast<u32>(rhi::ResourceState::ShaderResource) && barriers[0].c == static_cast<u32>(rhi::ResourceState::CopyDest) &&
+                      barriers[1].b == static_cast<u32>(rhi::ResourceState::CopyDest) && barriers[1].c == static_cast<u32>(rhi::ResourceState::ShaderResource),
+                  "ShaderResource to CopyDest, then back");
+            check(copies[0].a == barriers[0].a && copies[0].b == 0 && copies[0].c == f.buffers.size() && copies[0].d == 0,
+                  "the copy targets mip 0 of the page from the staging buffer at offset 0");
+            check(f.destroyedBuffers == destroyedBefore + 1, "the staging buffer is destroyed as soon as the copy is recorded");
+
+            const std::vector<u8>& bytes = f.buffers.back().contents;
+            check(bytes.size() >= 1280ull * 300ull - 1, "the whole footprint was written");
+            const aver::ui::UiAtlasGlyph& a = *g;
+            const usize px = (static_cast<usize>(a.y) * 1280) + static_cast<usize>(a.x) * 4;
+            check(bytes[px] == 200 && bytes[px + 1] == 200 && bytes[px + 2] == 200 && bytes[px + 3] == 200, "coverage 200 became (200, 200, 200, 200): premultiplied white");
+            const usize second = (static_cast<usize>(a.y + 1) * 1280) + static_cast<usize>(a.x) * 4;
+            check(bytes[second] == 200, "the next row is a full pitch (1280 bytes) later, not 1200");
+            check(bytes[px + 4 * 4] == 0 && bytes[1200] == 0 && bytes[1279] == 0, "texels outside the glyph and the row padding are zero");
+            check(!atlas.pageDirty(0) && atlas.uploadBytes() == 300u * 300u * 4u, "the page is marked uploaded and the byte count is recorded");
+        }
+        {   // a clean frame uploads nothing
+            MockContext ctx;
+            const usize t = f.textures.size(), b = f.buffers.size();
+            r->prePass(ctx);
+            check(ctx.calls.empty() && f.textures.size() == t && f.buffers.size() == b, "a frame with no dirty page records nothing and allocates nothing");
+            check(atlas.uploadBytes() == 0, "and reports zero bytes uploaded");
+        }
+        {   // a recycled page re-uploads into the same texture
+            aver::ui::UiGlyphAtlas one({300, 1});
+            aver::ui::UiGlyphBitmap big;
+            big.w = 300;
+            big.h = 300;
+            big.pixels.assign(300u * 300u, 90);
+            one.insert(aver::ui::UiGlyphKey{1, 16, 1}, big, 1);
+            r->setTextAtlas(&one);
+            MockContext first;
+            r->prePass(first);
+            const usize t = f.textures.size();
+            one.insert(aver::ui::UiGlyphKey{1, 16, 2}, big, 2);   // recycles page 0
+            check(one.pageDirty(0) && one.pageGeneration(0) == 1, "recycling dirties the page");
+            MockContext ctx;
+            r->prePass(ctx);
+            check(ctx.count(Call::Kind::CopyBufferToTexture) == 1 && f.textures.size() == t, "it uploads again into the existing texture");
+            r->setTextAtlas(&atlas);
+        }
+        {   // the page size changes: the old texture is replaced
+            aver::ui::UiGlyphAtlas bigger({512, 2});
+            aver::ui::UiGlyphBitmap b2;
+            b2.w = 8;
+            b2.h = 8;
+            b2.pixels.assign(64, 255);
+            bigger.insert(aver::ui::UiGlyphKey{1, 16, 1}, b2, 1);
+            r->setTextAtlas(&bigger);
+            const usize before = f.destroyedTextures.size();
+            const usize t = f.textures.size();
+            MockContext ctx;
+            r->prePass(ctx);
+            check(f.textures.size() == t + 1 && f.textures.back().width == 512, "a page of a new size gets a new texture");
+            check(f.destroyedTextures.size() == before + 1, "and the old one is destroyed");
+            r->setTextAtlas(&atlas);
+        }
+
+        // tokens in the draw list
+        const rhi::TextureHandle pageTex = r->pageTexture(0);
+        check(pageTex != 0 && r->pageTexture(5) == 0, "pageTexture answers for pages that have one");
+        {
+            aver::ui::UiDrawList dl;
+            dl.addRect(0, 0, 10, 10, 0xFFFFFFFF);                                                                   // white
+            dl.addTexturedRect(0, 0, 10, 10, aver::render::ui::UiRenderer::atlasToken(0), 0, 0, 1, 1, 0xFFFFFFFF);   // the page
+            dl.addTexturedRect(0, 0, 10, 10, 7, 0, 0, 1, 1, 0xFFFFFFFF);                                            // a plain handle
+            dl.addTexturedRect(0, 0, 10, 10, aver::render::ui::UiRenderer::atlasToken(9), 0, 0, 1, 1, 0xFFFFFFFF);   // no such page
+            MockContext ctx;
+            const usize setsBefore = f.sets.size();
+            r->submit(dl);
+            r->overlayPass(ctx, 1280, 720);
+            check(ctx.count(Call::Kind::DrawIndexed) == 3, "the draw whose page has no texture is skipped; white, page and plain handle draw");
+            bool pageBound = false;
+            for (usize i = setsBefore; i < f.srvSlot0.size(); ++i) if (f.srvSlot0[i] == pageTex) pageBound = true;
+            check(pageBound, "the token is bound as the page GPU texture");
+            check(aver::render::ui::UiRenderer::atlasToken(3) == (aver::ui::kUiAtlasTokenBit | 3) && (aver::ui::kUiAtlasTokenBit & 0xFFFFFFFFull) == 0,
+                  "a token sets bit 63, which a 32-bit texture handle can never reach");
+        }
+        r->setTextAtlas(nullptr);
+        {
+            MockContext ctx;
+            r->prePass(ctx);
+            check(ctx.calls.empty(), "setTextAtlas(nullptr) is safe and prePass does nothing again");
+        }
     }
 
     delete r;

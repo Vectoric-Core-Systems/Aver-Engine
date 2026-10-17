@@ -38,6 +38,25 @@ internal static class Native
     [DllImport(Lib)] internal static extern float aver_ui_text_width(
                                                                [MarshalAs(UnmanagedType.LPUTF8Str)] string utf8);
 
+    // The text engine (docs/GAME_UI_TEXT.md). The font loader, the language callback and the atlas pointer are the
+    // HOST's and are not exposed here.
+    [DllImport(Lib)] internal static extern int   aver_ui_text_load_fontset([MarshalAs(UnmanagedType.LPUTF8Str)] string ocfonts);
+    [DllImport(Lib)] internal static extern IntPtr aver_ui_text_error();
+    [DllImport(Lib)] internal static extern void  aver_ui_text_set_language([MarshalAs(UnmanagedType.LPUTF8Str)] string bcp47);
+    [DllImport(Lib)] internal static extern void  aver_ui_text_configure(int pageSize, int maxPages, int glyphBudget);
+    [DllImport(Lib)] internal static extern void  aver_ui_text_stats(float[] out12);
+    [DllImport(Lib)] internal static extern int   aver_ui_text_has_glyph([MarshalAs(UnmanagedType.LPUTF8Str)] string? family, uint codepoint);
+    [DllImport(Lib)] internal static extern int   aver_ui_text_measure([MarshalAs(UnmanagedType.LPUTF8Str)] string utf8,
+                                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string? family,
+                                                                       float px, int flags, float maxWidth, float[] outWHL);
+    [DllImport(Lib)] internal static extern float aver_ui_text_block(float x, float y,
+                                                                     [MarshalAs(UnmanagedType.LPUTF8Str)] string utf8, uint rgba,
+                                                                     [MarshalAs(UnmanagedType.LPUTF8Str)] string? family,
+                                                                     float px, int flags, float maxWidth, int align, float[] outWHL);
+    [DllImport(Lib)] internal static extern void  aver_ui_text_prewarm([MarshalAs(UnmanagedType.LPUTF8Str)] string utf8,
+                                                                       [MarshalAs(UnmanagedType.LPUTF8Str)] string? family,
+                                                                       float px, int flags);
+
     // Hit testing.
     [DllImport(Lib)] internal static extern void  aver_ui_hit_rect(ulong id, float x, float y, float w, float h);
     [DllImport(Lib)] internal static extern ulong aver_ui_hit_test(float x, float y);
@@ -86,6 +105,7 @@ internal static class Native
     [DllImport(Lib)] internal static extern void aver_ui_widget_set_enabled(uint id, int enabled);
     [DllImport(Lib)] internal static extern void aver_ui_widget_set_texture(uint id, ulong texture);
     [DllImport(Lib)] internal static extern void aver_ui_widget_rect(uint id, float[] outXYWH);
+    [DllImport(Lib)] internal static extern int  aver_ui_widget_text_size(uint id, float[] outWHL);
     [DllImport(Lib)] internal static extern int  aver_ui_set_focus(uint id);
     [DllImport(Lib)] internal static extern uint aver_ui_focused();
     [DllImport(Lib)] internal static extern uint aver_ui_hit_widget(float x, float y);

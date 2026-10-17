@@ -32,10 +32,10 @@ GridTracks gridTracks(const UiWidget& w, const std::vector<UiWidget*>& kids, f32
     return t;
 }
 
-usize lineCount(std::string_view text) {
-    usize n = 1;
-    for (const char c : text) if (c == '\n') ++n;
-    return n;
+// The height of a layout's first line: what one-line widgets size to. A legacy layout reports the
+// metrics' own line height, so this is today's lineH for the baked font and the estimate.
+f32 firstLineH(const UiTextLayout& l, f32 fallback) {
+    return l.lines.empty() ? fallback : std::max(fallback, l.lines[0].height);
 }
 
 } // namespace
@@ -45,6 +45,38 @@ UiStyle UiTree::styleOf(const UiWidget& w) const { return theme_.resolve(w.kind,
 f32 UiTree::fontPx(const UiWidget& w, const UiStyle& st) const {
     const f32 dp = w.fontSize > 0.0f ? w.fontSize : (st.fontSize > 0.0f ? st.fontSize : theme_.baseFontSize);
     return dp * scale_;
+}
+
+UiTextStyle UiTree::textStyleOf(const UiWidget& w, const UiStyle& st) const {
+    UiTextStyle s;
+    s.family = !w.fontFamily.empty() ? std::string_view(w.fontFamily) : std::string_view(st.fontFamily);
+    s.px = fontPx(w, st);
+    s.scale = scale_;
+    s.bold = w.bold || st.bold > 0;
+    s.italic = w.italic;
+    s.dir = w.textDir;
+    s.lineSpacing = w.lineSpacing > 0.0f ? w.lineSpacing : 1.0f;
+    s.letterSpacing = w.letterSpacing * scale_;
+    return s;
+}
+
+UiTextBox UiTree::textBoxOf(const UiWidget& w, f32 maxWidth) const {
+    UiTextBox b;
+    b.maxWidth = maxWidth;
+    b.wrap = w.wrap && w.kind == UiWidgetKind::Text;
+    b.ellipsis = w.ellipsis;
+    b.maxLines = w.maxLines > 0 ? static_cast<u32>(w.maxLines) : 0u;
+    b.rich = w.rich && w.kind != UiWidgetKind::TextInput;
+    b.richColors = true;
+    return b;
+}
+
+bool UiTree::lastTextSize(UiWidgetId id, UiVec2& size, i32& lines) const {
+    const auto it = textLayouts_.find(id);
+    if (it == textLayouts_.end() || !it->second || !get(id)) return false;
+    size = {it->second->width, it->second->height};
+    lines = static_cast<i32>(it->second->lines.size());
+    return true;
 }
 
 UiInsets UiTree::paddingOf(const UiWidget& w, const UiStyle& st) const {
@@ -89,45 +121,48 @@ UiVec2 UiTree::measure(UiWidget& w) {
     std::vector<UiWidget*> kids = visibleChildren(w);
     for (UiWidget* k : kids) measure(*k);
 
+    // One layout per string, shared by what this measures and what draw paints. A fixed width is the wrap
+    // (Text) or ellipsis (any textual widget) width.
+    const f32 fixedW = w.width >= 0.0f ? std::max(0.0f, w.width * s - pad.horizontal()) : 0.0f;
+    const UiTextStyle tstyle = textStyleOf(w, st);
+    const auto lay = [&](const std::string& txt, f32 maxW) { return m.layoutText(txt, tstyle, textBoxOf(w, maxW)); };
+
     f32 cw = 0.0f, ch = 0.0f;
     switch (w.kind) {
-        case UiWidgetKind::Text: {
-            const std::string& txt = shown(w.text);
-            const f32 wrapW = (w.wrap && w.width >= 0.0f) ? std::max(0.0f, w.width * s - pad.horizontal()) : 0.0f;
-            if (wrapW > 0.0f) {
-                const std::vector<std::string> lines = uiWrapText(m, txt, px, wrapW);
-                for (const std::string& l : lines) cw = std::max(cw, m.textWidth(l, px));
-                ch = lineH * static_cast<f32>(lines.size());
-            } else {
-                cw = m.textWidth(txt, px);
-                ch = lineH * static_cast<f32>(lineCount(txt));
-            }
-            break;
-        }
+        case UiWidgetKind::Text:
         case UiWidgetKind::Button:
         case UiWidgetKind::KeyBind: {
-            const std::string& txt = shown(w.text);
-            cw = m.textWidth(txt, px);
-            ch = lineH * static_cast<f32>(lineCount(txt));
+            const std::shared_ptr<const UiTextLayout> l = lay(shown(w.text), fixedW);
+            cw = l->width;
+            ch = l->height;
+            textLayouts_[w.id] = l;
             break;
         }
         case UiWidgetKind::Toggle: {
             const f32 box = px * 1.1f;
             const std::string& txt = shown(w.text);
-            cw = box + (txt.empty() ? 0.0f : 8.0f * s + m.textWidth(txt, px));
-            ch = std::max(box, lineH);
+            const std::shared_ptr<const UiTextLayout> l = lay(txt, 0.0f);
+            cw = box + (txt.empty() ? 0.0f : 8.0f * s + l->width);
+            ch = std::max(box, firstLineH(*l, lineH));
+            textLayouts_[w.id] = l;
             break;
         }
         case UiWidgetKind::Slider:
             cw = 180.0f * s;
             ch = std::max(lineH, 22.0f * s);
             break;
-        case UiWidgetKind::Choice:
-            for (const std::string& it : w.items) cw = std::max(cw, m.textWidth(shown(it), px));
-            ch = lineH;
+        case UiWidgetKind::Choice: {
+            f32 line = lineH;
+            for (const std::string& it : w.items) {
+                const std::shared_ptr<const UiTextLayout> l = lay(shown(it), 0.0f);
+                cw = std::max(cw, l->width);
+                line = firstLineH(*l, line);
+            }
+            ch = line;
             break;
+        }
         case UiWidgetKind::List: {
-            for (const std::string& it : w.items) cw = std::max(cw, m.textWidth(shown(it), px));
+            for (const std::string& it : w.items) cw = std::max(cw, lay(shown(it), 0.0f)->width);
             cw = std::max(cw, 160.0f * s);
             const f32 rows = static_cast<f32>(std::clamp<usize>(w.items.size(), 1, 6));
             ch = rowHeightOf(w) * rows;
@@ -135,7 +170,7 @@ UiVec2 UiTree::measure(UiWidget& w) {
         }
         case UiWidgetKind::TextInput:
             cw = 200.0f * s;
-            ch = lineH;
+            ch = firstLineH(*lay(std::string(), 0.0f), lineH);
             break;
         case UiWidgetKind::ProgressBar:
             cw = 200.0f * s;
@@ -294,6 +329,7 @@ void UiTree::arrange(UiWidget& w, const UiRect& rect) {
 
 void UiTree::layout(const UiTextMetrics& m) {
     syncText();
+    textLayouts_.clear();
     const UiTextMetrics* previous = metrics_;
     metrics_ = &m;
     scale_ = uiComputeScale(dpi_, viewport_.w, viewport_.h);

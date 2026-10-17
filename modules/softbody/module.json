@@ -3,11 +3,11 @@
   "name": "Aver.SoftBody",
   "dir": "softbody",
   "displayName": "Soft Bodies",
-  "description": "Plastic soft bodies: dents that stay, and tearing.",
+  "description": "Cloth and destruction topology: cage, damage, tear islands and the .ocsoft asset that drives Jolt soft bodies.",
   "category": "Physics",
   "option": null,
   "required": true,
   "default": true,
-  "dependsOn": ["Aver.Core"],
+  "dependsOn": ["Aver.Core", "Aver.Formats"],
   "consequence": ""
 }

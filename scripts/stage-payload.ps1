@@ -381,6 +381,8 @@ $components = @(
     @{ Name = 'AMD FidelityFX Denoiser'; Licence = 'MIT';           File = 'third_party\fidelityfx-denoiser\LICENSE.txt' }
     @{ Name = 'Jolt Physics';          Licence = 'MIT';             File = 'modules\physics.jolt\LICENSE' }
     @{ Name = 'stb (stb_image, stb_image_write)'; Licence = 'MIT / public domain'; File = 'third_party\stb\LICENSE.txt' }
+    # ufbx reads .fbx in the editor and AverAssetC (Aver.Formats.Fbx); it is not in the game runtime.
+    @{ Name = 'ufbx';                  Licence = 'MIT';             File = 'third_party\ufbx\LICENSE' }
 )
 foreach ($c in $components) {
     $p = Join-Path $root $c.File

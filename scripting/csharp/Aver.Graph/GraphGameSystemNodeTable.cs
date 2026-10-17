@@ -117,6 +117,9 @@ internal static partial class GameSystemNodes
         Reg("isinmontagesection", GenericKind.Pure, typeof(MontageGraphInterop), "IsInMontageSectionForGraph", "entity:int", "result:bool", "p:entity,@montage?,@section", "result"),
         Reg("setrootmotion", GenericKind.Exec, typeof(RootMotionGraphInterop), "SetRootMotionForGraph", "entity:int,mode:int,axes:int=11,scale:float=1", "success:bool", "p:entity,p:mode,p:axes,p:scale", "success"),
         Reg("consumerootmotion", GenericKind.Exec, typeof(RootMotionGraphInterop), "ConsumeRootMotionForGraph", "entity:int", "success:bool,x:float,y:float,z:float,yaw:float,seconds:float", "p:entity,>x,>y,>z,>yaw,>seconds", "success"),
+        // ---- model import (docs/plans/wave9/FBX_IMPORT.md 2.10) ----
+        Reg("importmodel", GenericKind.Exec, typeof(ModelImportGraph), "ImportModelForGraph", "overwrite:bool,scale:float=100", "success:bool,meshes:int,skeletons:int,clips:int", "@source,@dest,p:overwrite,p:scale,>meshes,>skeletons,>clips", "success"),
+        Reg("ismodelimportavailable", GenericKind.Pure, typeof(ModelImportGraph), "IsModelImportAvailableForGraph", "", "available:bool", "", "available"),
     }.Concat(GasTable()).Concat(AiQueryTable()).Concat(LevelInstanceTable()).Concat(TerrainTable())
-      .Concat(IkTable()).Concat(MotionMatchTable()).Concat(SequenceTable()).ToArray();
+      .Concat(IkTable()).Concat(MotionMatchTable()).Concat(SequenceTable()).Concat(SoftBodyTable()).Concat(UiTextTable()).ToArray();
 }

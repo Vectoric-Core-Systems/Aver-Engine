@@ -75,7 +75,7 @@ void aver_ui_widgets_frame(float dt) {
     g_in.buttons = buttons;
     g_in.pointerValid = g_pointerValid;
 
-    UiDrawListPainter painter(abi::drawList(), abi::font());
+    UiDrawListPainter painter(abi::drawList(), &abi::textEngine(), abi::font());
     g_tree.update(dt, g_in, painter);
     g_tree.draw(painter);
 
@@ -198,6 +198,17 @@ const char* aver_ui_widget_get_shown_text(uint32_t id) {
     return keep(w ? g_tree.shown(w->text) : std::string());
 }
 void aver_ui_widget_set_value(uint32_t id, float value) { g_tree.setValue(id, value); }
+int32_t aver_ui_widget_text_size(uint32_t id, float* outWHL) {
+    UiVec2 size{};
+    i32 lines = 0;
+    const bool found = g_tree.lastTextSize(id, size, lines);
+    if (outWHL) {
+        outWHL[0] = found ? size.x : 0.0f;
+        outWHL[1] = found ? size.y : 0.0f;
+        outWHL[2] = found ? static_cast<float>(lines) : 0.0f;
+    }
+    return found ? 1 : 0;
+}
 float aver_ui_widget_get_value(uint32_t id) { const UiWidget* w = W(id); return w ? w->value : 0.0f; }
 void aver_ui_widget_set_checked(uint32_t id, int32_t checked) { g_tree.setChecked(id, checked != 0); }
 int32_t aver_ui_widget_get_checked(uint32_t id) { const UiWidget* w = W(id); return (w && w->checked) ? 1 : 0; }

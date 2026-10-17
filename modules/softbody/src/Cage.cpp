@@ -1,4 +1,4 @@
-// Cage building, repair, tear resolution and queries. The step itself is in Solver.cpp.
+// Cage building, repair, tear resolution and queries. Damage is in Damage.cpp, islands in Islands.cpp.
 #include "aver/softbody/Cage.hpp"
 
 #include <algorithm>
@@ -38,8 +38,9 @@ u32 addMaterial(Cage& c, const Material& m) {
 
 u32 addParticle(Cage& c, const Vec3& p, bool pinned) {
     Particle q;
-    q.pos = q.prev = q.rest = p;
+    q.pos = q.rest = p;
     q.pinned = pinned;
+    q.invMass = pinned ? 0.0f : 1.0f;
     q.origin = static_cast<u32>(c.particles.size());
     c.particles.push_back(q);
     return q.origin;
@@ -100,7 +101,7 @@ void build(Cage& c) {
     std::vector<i32> votes(c.particles.size(), 0);
     for (u32 i = 0; i < c.particles.size(); ++i) {
         Particle& p = c.particles[i];
-        p.prev = p.rest = p.pos;
+        p.rest = p.pos;
         p.origin = i;
         p.freed = false;
         p.intact = 0;
@@ -109,7 +110,7 @@ void build(Cage& c) {
     for (Beam& b : c.beams) {
         b.a = b.a0; b.b = b.b0;
         b.rest = b.rest0 = dist(c.particles[b.a].pos, c.particles[b.b].pos);
-        b.plastic = b.peak = 0.0f;
+        b.plastic = b.peak = b.damage = 0.0f;
         b.broken = false;
         const i32 vote = isBrittle(c.materials[b.material].behavior) ? 1 : -1;
         for (const u32 n : {b.a, b.b}) {
@@ -128,20 +129,21 @@ void build(Cage& c) {
     c.topologyDirty = false;
     c.built = true;
     std::unordered_map<u64, u32>().swap(c.edgeIndex);
+    rebuildBends(c);
 }
 
 void repair(Cage& c) {
     if (!c.built) return;
     c.particles.resize(c.baseParticleCount);
     for (Particle& p : c.particles) {
-        p.pos = p.prev = p.rest;
+        p.pos = p.rest;
         p.freed = false;
         p.intact = 0;
     }
     for (Beam& b : c.beams) {
         b.a = b.a0; b.b = b.b0;
         b.rest = b.rest0;
-        b.plastic = b.peak = 0.0f;
+        b.plastic = b.peak = b.damage = 0.0f;
         b.broken = false;
         ++c.particles[b.a].intact;
         ++c.particles[b.b].intact;
@@ -151,6 +153,65 @@ void repair(Cage& c) {
     std::fill(c.triDead.begin(), c.triDead.end(), static_cast<u8>(0));
     c.splitLog.clear();
     c.topologyDirty = false;
+    rebuildBends(c);
+}
+
+void recomputeMasses(Cage& c) {
+    std::vector<f32> mass(c.particles.size(), 0.0f);
+    for (u32 ti = 0; ti < c.triangles.size(); ++ti) {
+        if (ti < c.triDead.size() && c.triDead[ti]) continue;
+        const Triangle& t = c.triangles[ti];
+        const Vec3& a = c.particles[t.v[0]].rest;
+        const Vec3& b = c.particles[t.v[1]].rest;
+        const Vec3& d = c.particles[t.v[2]].rest;
+        const f32 areaM2 = 0.5f * cross(b - a, d - a).size() * 1e-4f;
+        const u32 e = t.edge[0] < c.beams.size() ? c.beams[t.edge[0]].material : 0u;
+        const f32 share = c.materials[e].areaDensityKgM2 * areaM2 / 3.0f;
+        for (u32 k = 0; k < 3; ++k) mass[t.v[k]] += share;
+    }
+    for (u32 i = 0; i < c.particles.size(); ++i) {
+        Particle& p = c.particles[i];
+        if (mass[i] > 0.0f) p.mass = std::max(mass[i], 1e-4f);
+        p.invMass = p.pinned ? 0.0f : 1.0f / p.mass;
+    }
+}
+
+u32 rebuildBends(Cage& c) {
+    c.bends.clear();
+    for (Beam& b : c.beams) b.bend = kNone;
+    const u32 beamCount = static_cast<u32>(c.beams.size());
+    // The (up to two) live triangles on each beam.
+    std::vector<u32> first(beamCount, kNone), second(beamCount, kNone);
+    std::vector<u8> extra(beamCount, 0);
+    for (u32 ti = 0; ti < c.triangles.size(); ++ti) {
+        if (ti < c.triDead.size() && c.triDead[ti]) continue;
+        for (u32 k = 0; k < 3; ++k) {
+            const u32 e = c.triangles[ti].edge[k];
+            if (e >= beamCount) continue;
+            if (first[e] == kNone) first[e] = ti;
+            else if (second[e] == kNone) second[e] = ti;
+            else extra[e] = 1;
+        }
+    }
+    for (u32 bi = 0; bi < beamCount; ++bi) {
+        Beam& bm = c.beams[bi];
+        if (bm.broken || first[bi] == kNone || second[bi] == kNone || extra[bi]) continue;
+        u32 opp[2] = {kNone, kNone};
+        const u32 tris[2] = {first[bi], second[bi]};
+        for (u32 s = 0; s < 2; ++s) {
+            const Triangle& t = c.triangles[tris[s]];
+            for (u32 k = 0; k < 3; ++k)
+                if (t.v[k] != bm.a && t.v[k] != bm.b) opp[s] = t.v[k];
+        }
+        if (opp[0] == kNone || opp[1] == kNone || opp[0] == opp[1]) continue;
+        Bend bd;
+        bd.v[0] = bm.a; bd.v[1] = bm.b; bd.v[2] = opp[0]; bd.v[3] = opp[1];
+        bd.beam = bi;
+        bd.compliance = c.materials[bm.material].bendCompliance;
+        bm.bend = static_cast<u32>(c.bends.size());
+        c.bends.push_back(bd);
+    }
+    return static_cast<u32>(c.bends.size());
 }
 
 void breakBeam(Cage& c, u32 beam) {
@@ -236,6 +297,7 @@ u32 resolveTears(Cage& c) {
             for (u32 g = 1; g < roots.size(); ++g) {
                 Particle copy = c.particles[p];
                 copy.pinned = false;
+                if (copy.reachCm == 0.0f) copy.reachCm = -1.0f;   // a pin stays with the group that kept it
                 copy.freed = false;
                 copy.intact = 0;
                 dup[g] = static_cast<u32>(c.particles.size());
@@ -280,6 +342,7 @@ u32 resolveTears(Cage& c) {
             if (c.beams[c.triangles[ti].edge[k]].broken) ++brokenEdges;
         if (brokenEdges >= 2) c.triDead[ti] = 1;
     }
+    if (created > 0) recomputeMasses(c);
     return created;
 }
 
@@ -313,13 +376,6 @@ f32 maxStrain(const Cage& c) {
         worst = std::max(worst, std::fabs(len - b.rest0) / b.rest0);
     }
     return worst;
-}
-
-f32 kineticProxy(const Cage& c) {
-    f32 sum = 0.0f;
-    for (const Particle& p : c.particles)
-        if (!p.pinned) sum += distSquared(p.pos, p.prev);
-    return sum;
 }
 
 } // namespace aver::softbody

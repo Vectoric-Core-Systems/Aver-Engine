@@ -18,6 +18,8 @@
 
 #if AVER_WITH_IMGUI
 #  include "imgui.h"
+#  include "FontSetEditor.hpp"
+#  include "aver/ui/UiTextEngine.hpp"
 #endif
 
 namespace aver::editor {
@@ -493,21 +495,35 @@ constexpr const char* kPrefInspectorSplit = "uiLayoutEditor.inspectorSplit";
 constexpr f32 kDefaultLeftFraction = 0.22f;
 constexpr f32 kDefaultCanvasFraction = 0.70f;
 
-// ImGui's font as the preview's metrics. Sizes here are PREVIEW pixels; the painter scales to screen.
+// The preview's text metrics. With a usable preview engine (the project's font set) they are the game's: the same
+// layouts the packaged game draws. Otherwise ImGui's font. Sizes here are PREVIEW pixels; the painter scales to screen.
 class PreviewMetrics : public UiTextMetrics {
 public:
+    explicit PreviewMetrics(UiTextEngine* engine = nullptr) : engine_(engine) {}
     f32 textWidth(std::string_view t, f32 px) const override {
         if (t.empty()) return 0.0f;
+        if (engine_) return engine_->textWidth(t, px);
         return ImGui::GetFont()->CalcTextSizeA(px, 1.0e9f, 0.0f, t.data(), t.data() + t.size()).x;
     }
-    f32 lineHeight(f32 px) const override { return px * 1.25f; }
-    f32 ascent(f32 px) const override { return px * 0.95f; }
+    f32 lineHeight(f32 px) const override { return engine_ ? engine_->lineHeight(px) : px * 1.25f; }
+    f32 ascent(f32 px) const override { return engine_ ? engine_->ascent(px) : px * 0.95f; }
+    std::shared_ptr<const UiTextLayout> layoutText(std::string_view text, const UiTextStyle& style,
+                                                   const UiTextBox& box) const override {
+        return engine_ ? engine_->layout(text, style, box) : UiTextMetrics::layoutText(text, style, box);
+    }
+
+private:
+    UiTextEngine* engine_;
 };
+
+// Set by draw(): the preview needs the device to upload glyph pages.
+Engine* g_drawEngine = nullptr;
 
 // Paints a tree into an ImDrawList at a zoom and origin. The draw list's colour packing is the UI's.
 class PreviewPainter final : public UiPainter {
 public:
-    PreviewPainter(ImDrawList* dl, ImVec2 origin, f32 zoom) : dl_(dl), origin_(origin), zoom_(zoom) {}
+    PreviewPainter(ImDrawList* dl, ImVec2 origin, f32 zoom, EditorTextPreview* preview = nullptr)
+        : dl_(dl), origin_(origin), zoom_(zoom), preview_(preview), metrics_(preview ? &preview->engine() : nullptr) {}
 
     void pushClip(const UiRect& r) override { dl_->PushClipRect(at(r.x, r.y), at(r.right(), r.bottom()), true); }
     void popClip() override { dl_->PopClipRect(); }
@@ -526,15 +542,32 @@ public:
         const f32 top = baselineY - ascent(px) + px * 0.12f;
         dl_->AddText(ImGui::GetFont(), px * zoom_, at(x, top), rgba, s.data(), s.data() + s.size());
     }
+    // A laid-out block: the engine's glyph quads, painted through the editor's text preview. A legacy layout (no
+    // engine) takes the base path through text().
+    void drawText(const UiTextLayout& layout, const UiRect& area, UiTextAlign align, bool centreVertically, u32 rgba) override {
+        if (!preview_ || layout.legacy) {
+            UiPainter::drawText(layout, area, align, centreVertically, rgba);
+            return;
+        }
+        UiDrawList list;
+        UiDrawListPainter inner(list, &preview_->engine(), nullptr);
+        inner.drawText(layout, area, align, centreVertically, rgba);
+        preview_->paint(dl_, list, origin_.x, origin_.y, zoom_);
+    }
     f32 textWidth(std::string_view t, f32 px) const override { return metrics_.textWidth(t, px); }
     f32 lineHeight(f32 px) const override { return metrics_.lineHeight(px); }
     f32 ascent(f32 px) const override { return metrics_.ascent(px); }
+    std::shared_ptr<const UiTextLayout> layoutText(std::string_view text, const UiTextStyle& style,
+                                                   const UiTextBox& box) const override {
+        return metrics_.layoutText(text, style, box);
+    }
 
 private:
     ImVec2 at(f32 x, f32 y) const { return ImVec2(origin_.x + x * zoom_, origin_.y + y * zoom_); }
     ImDrawList* dl_;
     ImVec2 origin_;
     f32 zoom_;
+    EditorTextPreview* preview_;
     PreviewMetrics metrics_;
 };
 
@@ -617,6 +650,21 @@ bool UiLayoutEditor::drawProperty(const UiPropDesc& d) {
             break;
         }
         case UiPropType::String: {
+            if (std::strcmp(d.key, "fontFamily") == 0) {
+                // A family of the project's font set (Content/UI/Fonts.ocfonts); empty keeps the theme's.
+                const std::vector<std::string> families = EditorTextPreview::shared().familyNames();
+                if (!families.empty()) {
+                    const std::string current = tokens.empty() ? std::string() : tokens[0];
+                    if (ImGui::BeginCombo("##v", current.empty() ? "(theme default)" : current.c_str())) {
+                        if (ImGui::Selectable("(theme default)", current.empty())) { changed = true; newText = uiQuote(""); }
+                        for (const std::string& f : families)
+                            if (ImGui::Selectable(f.c_str(), f == current)) { changed = true; newText = uiQuote(f); }
+                        ImGui::EndCombo();
+                    }
+                    immediate = true;
+                    break;
+                }
+            }
             char buf[512];
             std::snprintf(buf, sizeof buf, "%s", tokens.empty() ? "" : tokens[0].c_str());
             if (std::strcmp(d.key, "text") == 0)
@@ -990,7 +1038,14 @@ void UiLayoutEditor::drawCanvas() {
     dl->AddRectFilled(cursor, ImVec2(cursor.x + avail.x, cursor.y + avail.y), IM_COL32(28, 29, 33, 255));
     dl->AddRectFilled(toScreen(0, 0), toScreen(previewW_, previewH_), IM_COL32(54, 58, 66, 255));
 
-    PreviewMetrics metrics;
+    // The project's font set drives the preview's text when it has a TrueType face; else ImGui's font as before.
+    EditorTextPreview& textPreview = EditorTextPreview::shared();
+    textPreview.ensureLoaded(fontContentRootOf(path_));
+    if (g_loc.culture) textPreview.engine().setLanguage(g_loc.culture());
+    textPreview.beginFrame(static_cast<u64>(ImGui::GetFrameCount()));
+    if (g_drawEngine) textPreview.syncGpu(*g_drawEngine);
+    const bool engineText = textPreview.usable();
+    PreviewMetrics metrics(engineText ? &textPreview.engine() : nullptr);
     metrics_ = &metrics;
     const ImGuiIO& io = ImGui::GetIO();
     const ImVec2 mouse = toPreview(io.MousePos);
@@ -1026,7 +1081,7 @@ void UiLayoutEditor::drawCanvas() {
         preview_.layout(metrics);
     }
 
-    PreviewPainter painter(dl, origin, zoom);
+    PreviewPainter painter(dl, origin, zoom, engineText ? &textPreview : nullptr);
     preview_.draw(painter);
     dl->AddRect(toScreen(0, 0), toScreen(previewW_, previewH_), IM_COL32(120, 126, 140, 255));
 
@@ -1132,7 +1187,7 @@ void UiLayoutEditor::drawCanvas() {
 }
 
 void UiLayoutEditor::draw(Engine& e) {
-    (void)e;
+    g_drawEngine = &e;
     if (!loaded_) {
         ImGui::TextWrapped("This file could not be read: %s", loadError_.c_str());
         return;

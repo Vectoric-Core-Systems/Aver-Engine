@@ -1,5 +1,6 @@
 // The .ocfont parser. See UiFont.hpp for why the game UI bakes its fonts rather than rasterising.
 #include "aver/ui/UiFont.hpp"
+#include "aver/ui/UiUnicode.hpp"
 
 #include <cstdlib>
 #include <vector>
@@ -105,9 +106,11 @@ bool parseOcfont(std::string_view text, UiFont& out, std::string* err) {
 
 f32 uiTextWidth(const UiFont& f, std::string_view text) {
     f32 widest = 0.0f, line = 0.0f;
-    for (const char c : text) {
-        if (c == '\n') { widest = line > widest ? line : widest; line = 0.0f; continue; }
-        if (const UiGlyph* g = f.glyph(static_cast<u32>(static_cast<unsigned char>(c)))) line += g->advance;
+    // Glyphs are keyed by code point, so a multi-byte sequence is decoded rather than looked up per byte.
+    for (usize i = 0; i < text.size();) {
+        const u32 cp = uiDecodeOne(text, i);
+        if (cp == '\n') { widest = line > widest ? line : widest; line = 0.0f; continue; }
+        if (const UiGlyph* g = f.glyph(cp)) line += g->advance;
     }
     return line > widest ? line : widest;
 }

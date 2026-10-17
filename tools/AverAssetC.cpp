@@ -18,6 +18,9 @@
 // trustworthy result lines -- a caller that never saw the summary line treats the whole run as
 // incomplete, but nothing already reported as ok+verified is a lie.
 #include "aver/formats/GltfImport.hpp"
+#if AVER_HAVE_FBX
+#include "aver/formats/FbxImport.hpp"   // .fbx (ufbx), see docs/FBX_IMPORT.md
+#endif
 #include "aver/formats/MaterialMap.hpp"   // --material-map
 #include "aver/formats/ObjImport.hpp"
 #include "aver/formats/UsdImport.hpp"
@@ -1345,6 +1348,155 @@ int runRetarget(int argc, char** argv) {
     return exitCode(code ? ExitCode::Failed : ExitCode::Ok);
 }
 
+// ---- a model file's whole conversion, shared by glTF and FBX ----
+//
+// WHAT HAD BEEN THE glTF BRANCH OF main(), moved here verbatim so FBX takes exactly the same road: materials
+// cooked and the mesh slots rewritten, one .ocmesh per mesh (or merged), object clips, the scene level, the
+// skeletons, then the clips. Two additions, both inert for glTF: the level opens at the file's first camera,
+// and a clip names the skeleton it animates (FbxImportResult::animationSkeleton).
+struct ModelConvertArgs {
+    std::string input, outDir, base, contentDir;
+    bool merge = false;
+    f32 lodRatio = 0.0f;
+    u32 maxTexture = 0;
+};
+
+int convertImportedModel(const ModelConvertArgs& args, fmt::GltfImportResult& res, RunStats& stats) {
+    const std::string& input = args.input;
+    const std::string& outDir = args.outDir;
+    const std::string& base = args.base;
+    const std::string& contentDir = args.contentDir;
+    const bool merge = args.merge;
+    const f32 lodRatio = args.lodRatio;
+    const u32 maxTexture = args.maxTexture;
+    std::string why;
+    for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
+    if (res.meshes.empty() && res.skeletons.empty() && res.animations.empty() && res.objectAnimations.empty()) {
+        emitArtifact(input, {}, "mesh", false, false, "no meshes", stats);
+        emitSummary(input, stats, 1);
+        return exitCode(ExitCode::Failed);
+    }
+
+    // ---- materials and their textures, BEFORE the meshes are copied into `items` ----
+    //
+    // THIS TOOL, NOT JUST THE HARNESS. The cook shipped first in tests/formats ConvertTool,
+    // which is the dev harness; this is the compiler the launcher actually invokes, so until
+    // now a glTF imported by the product arrived with its materials thrown away while the same
+    // file imported by the harness did not.
+    cookAndRewriteSlots(res.materials, res.images, contentDir, base, res.meshes, maxTexture);
+
+    std::vector<MeshItem> items;
+    items.reserve(res.meshes.size());
+    for (usize i = 0; i < res.meshes.size(); ++i) {
+        items.push_back(MeshItem{
+            i < res.meshNames.size() ? res.meshNames[i] : std::string{},
+            res.meshes[i],
+            i < res.meshSkinIndex.size() ? res.meshSkinIndex[i] : -1});
+    }
+
+    std::vector<std::string> stems;
+    bool anyFailed = writeMeshItems(input, outDir, base, items, merge, lodRatio, stats, &stems);
+    std::vector<ScenePlacement> scene;
+    scene.reserve(res.placements.size());
+    for (const fmt::GltfPlacement& p : res.placements) scene.push_back(ScenePlacement{p.meshIndex, p.position});
+
+    // ---- object clips, BEFORE the level so a placement only names a clip that was written ----
+    //
+    // The motion of a plain glTF node (a car on a route, a fan) as <base>_<node>.ocanim beside the
+    // skeletal clips. Names are taken after the skeletal clips', so a node named like an armature
+    // action cannot overwrite it.
+    {
+        // Compared lower-cased: Windows treats "Car" and "car" as ONE file, so the second clip
+        // would overwrite the first.
+        const auto fileKey = [](std::string s) {
+            for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return s;
+        };
+        std::unordered_set<std::string> taken;
+        for (usize i = 0; i < res.animations.size(); ++i)
+            taken.insert(fileKey(safe(i < res.animationNames.size() ? res.animationNames[i] : "",
+                                      "Clip" + std::to_string(i))));
+        for (usize i = 0; i < res.objectAnimations.size(); ++i) {
+            std::string name = safe(i < res.objectAnimationNames.size() ? res.objectAnimationNames[i] : "",
+                                    "ObjectClip" + std::to_string(i));
+            if (!taken.insert(fileKey(name)).second) {
+                const std::string root = name;
+                for (int n = 2; !taken.insert(fileKey(name = root + "_" + std::to_string(n))).second; ++n) {}
+            }
+            const fmt::OcAnimation& clip = res.objectAnimations[i];
+            const std::string p = outDir + "/" + base + "_" + name + ".ocanim";
+            if (!fmt::saveOcAnim(p, clip, &why)) {
+                emitArtifact(input, p, "animation", false, false, why, stats);
+                anyFailed = true;
+                continue;
+            }
+            emitArtifact(input, p, "animation", true, true, {}, stats,
+                         "\"durationSeconds\":" + std::to_string(clip.duration));
+            const i32 pl = i < res.objectAnimationPlacement.size() ? res.objectAnimationPlacement[i] : -1;
+            if (pl >= 0 && usize(pl) < scene.size()) {
+                // A placement plays ONE clip, so the FIRST one the file lists keeps it; a later clip
+                // for the same node is still written (it can be picked by hand) but says so here.
+                if (scene[usize(pl)].animClip.empty()) {
+                    scene[usize(pl)].animClip = base + "_" + name;
+                } else {
+                    AVER_WARN("'{}' is animated by more than one glTF animation: its placement plays '{}'; "
+                              "'{}' was written but not attached", res.placements[usize(pl)].name,
+                              scene[usize(pl)].animClip, base + "_" + name);
+                }
+            }
+        }
+    }
+    // The first camera of the file is where the level opens (FBX carries them; glTF has none, so this is inert there).
+    SceneCamera startCamera;
+    if (!res.cameras.empty()) {
+        const fmt::ImportedCamera& c = res.cameras.front();
+        startCamera = SceneCamera{c.position, c.yawDeg, c.pitchDeg};
+        AVER_INFO("level camera: the file's {} at ({:.0f}, {:.0f}, {:.0f}) yaw {:.1f} pitch {:.1f}", c.name,
+                  c.position.x, c.position.y, c.position.z, c.yawDeg, c.pitchDeg);
+    }
+    if (!writeSceneLevel(outDir, contentDir, base, scene, stems, res.cameras.empty() ? nullptr : &startCamera)) anyFailed = true;
+
+    bool anySkinned = false;
+    for (const fmt::OcMeshData& mesh : res.meshes) if (mesh.hasSkin()) { anySkinned = true; break; }
+    if (anySkinned && res.skeletons.empty()) {
+        AVER_WARN("the file carries skin but no skin node, so its joint indices address a "
+                  "skeleton that was not written");
+    }
+
+    // ---- skeleton(s), named after `base` so a clip's skeletonRef resolves by stem ----
+    for (usize i = 0; i < res.skeletons.size(); ++i) {
+        const std::string p = outDir + "/" + base + (i == 0 ? "" : std::to_string(i)) + ".ocskel";
+        if (!fmt::saveOcSkel(p, res.skeletons[i], &why)) {
+            emitArtifact(input, p, "skeleton", false, false, why, stats);
+            anyFailed = true;
+        } else {
+            emitArtifact(input, p, "skeleton", true, true, {}, stats,
+                         "\"bones\":" + std::to_string(res.skeletons[i].bones.size()));
+        }
+    }
+
+    // ---- clips ----
+    for (usize i = 0; i < res.animations.size(); ++i) {
+        fmt::OcAnimation clip = res.animations[i];
+        // A clip names its skeleton by the file stem written above: skeleton i is <base><i>, skeleton 0 is <base>.
+        const usize skelIdx = i < res.animationSkeleton.size() && res.animationSkeleton[i] > 0 ? usize(res.animationSkeleton[i]) : 0;
+        clip.skeletonRef = base + (skelIdx == 0 ? std::string() : std::to_string(skelIdx));
+        const std::string name = safe(i < res.animationNames.size() ? res.animationNames[i] : "",
+                                      "Clip" + std::to_string(i));
+        const std::string p = outDir + "/" + base + "_" + name + ".ocanim";
+        if (!fmt::saveOcAnim(p, clip, &why)) {
+            emitArtifact(input, p, "animation", false, false, why, stats);
+            anyFailed = true;
+        } else {
+            emitArtifact(input, p, "animation", true, true, {}, stats,
+                         "\"durationSeconds\":" + std::to_string(clip.duration));
+        }
+    }
+
+    emitSummary(input, stats, anyFailed ? 1 : 0);
+    return exitCode(anyFailed ? ExitCode::Failed : ExitCode::Ok);
+}
+
 } // namespace
 
 // `convert` converts argv[2] (a glTF/GLB, OBJ, USD stage, or -- when this build has audio import -- a
@@ -1368,7 +1520,9 @@ int main(int argc, char** argv) {
         "\n                                                              no bound material; most specific rule wins (see docs/ASSET_IMPORT.md)"
         "\n                          [--material-map-legacy]   first substring match in file order, as before the wildcard syntax"
         "\n                          [--instances-dir <content-relative dir>]   where the level's .ocinst goes (Instances)"
-        "\n                          [--import-report <file>]   USD: write the importer's diagnostics as text"
+        "\n                          [--import-report <file>]   USD, FBX: write the importer's diagnostics as text"
+        "\n                          [--scale <f>] [--unit-meters <f>] [--root-motion off|auto|all] [--bake-fps <n>]"
+        "\n                          [--no-animations] [--no-blend-shapes]   FBX only: see docs/FBX_IMPORT.md"
         "\n                          [--resolve-coplanar report|drop-later]   USD: coplanar duplicate triangles (report)"
         "\n                          [--trace-prims <prim>[,<prim>...]]   USD: log how these prims were composed"
 #if AVER_HAVE_MATERIAL_COMPILE
@@ -1432,6 +1586,11 @@ int main(int argc, char** argv) {
     std::string importReportPath;             // --import-report
     bool resolveCoplanarDrop = false;         // --resolve-coplanar drop-later
     std::vector<std::string> tracePrims;      // --trace-prims
+    // FBX only (ignored for every other format): docs/FBX_IMPORT.md.
+    f32 fbxScale = 100.0f, fbxUnitMeters = 0.0f;
+    u32 fbxBakeFps = 30;
+    std::string fbxRootMotion = "auto";
+    bool fbxNoAnimations = false, fbxNoBlendShapes = false;
     bool merge = false;
     bool haveInput = false;
     f32 lodRatio = 0.0f;
@@ -1484,6 +1643,18 @@ int main(int argc, char** argv) {
         else if (a == "--material-map" && i + 1 < argc) materialMapPath = argv[++i];
         else if (a == "--material-map-legacy") materialMapLegacy = true;
         else if (a == "--import-report" && i + 1 < argc) importReportPath = argv[++i];
+        else if (a == "--scale" && i + 1 < argc)         fbxScale = static_cast<f32>(std::atof(argv[++i]));
+        else if (a == "--unit-meters" && i + 1 < argc)   fbxUnitMeters = static_cast<f32>(std::atof(argv[++i]));
+        else if (a == "--bake-fps" && i + 1 < argc)      fbxBakeFps = static_cast<u32>(std::max(1, std::atoi(argv[++i])));
+        else if (a == "--no-animations")                 fbxNoAnimations = true;
+        else if (a == "--no-blend-shapes")               fbxNoBlendShapes = true;
+        else if (a == "--root-motion" && i + 1 < argc) {
+            fbxRootMotion = argv[++i];
+            if (fbxRootMotion != "off" && fbxRootMotion != "auto" && fbxRootMotion != "all") {
+                AVER_ERROR("--root-motion must be 'off', 'auto' or 'all', not '{}'", fbxRootMotion);
+                return exitCode(ExitCode::Usage);
+            }
+        }
         else if (a == "--instances-dir" && i + 1 < argc) {
             instancesDir = cleanContentRelDir(argv[++i]);
             if (instancesDir.empty()) {
@@ -1544,122 +1715,46 @@ int main(int argc, char** argv) {
             emitSummary(input, stats, 1);
             return exitCode(ExitCode::Failed);
         }
-        for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
-        if (res.meshes.empty()) {
-            emitArtifact(input, {}, "mesh", false, false, "no meshes", stats);
+        ModelConvertArgs margs;
+        margs.input = input; margs.outDir = outDir; margs.base = base; margs.contentDir = contentDir;
+        margs.merge = merge; margs.lodRatio = lodRatio; margs.maxTexture = maxTexture;
+        return convertImportedModel(margs, res, stats);
+    }
+
+#if AVER_HAVE_FBX
+    // FBX (ufbx). The --scale / --unit-meters / --root-motion / --bake-fps / --no-* flags are FBX-only.
+    if (ext == ".fbx") {
+        fmt::FbxImportOptions fopt;
+        fopt.scale = fbxScale;
+        fopt.unitMetersOverride = fbxUnitMeters;
+        fopt.bakeFps = fbxBakeFps;
+        fopt.importAnimations = !fbxNoAnimations;
+        fopt.importBlendShapes = !fbxNoBlendShapes;
+        if (fbxRootMotion == "off") fopt.rootMotion = fmt::FbxImportOptions::RootMotion::Off;
+        else if (fbxRootMotion == "all") fopt.rootMotion = fmt::FbxImportOptions::RootMotion::All;
+        else fopt.rootMotion = fmt::FbxImportOptions::RootMotion::Auto;
+        fmt::FbxImportResult res;
+        std::string why;
+        const bool parsed = fmt::importFbx(input, res, fopt, &why);
+        if (!importReportPath.empty()) {
+            std::ofstream rf(importReportPath, std::ios::binary);
+            if (rf) {
+                if (!parsed) rf << "IMPORT FAILED: " << why << '\n';
+                rf << res.report;
+                for (const std::string& u : res.unsupported) rf << "unsupported: " << u << '\n';
+            }
+        }
+        if (!parsed) {
+            emitArtifact(input, {}, "mesh", false, false, why, stats);
             emitSummary(input, stats, 1);
             return exitCode(ExitCode::Failed);
         }
-
-        // ---- materials and their textures, BEFORE the meshes are copied into `items` ----
-        //
-        // THIS TOOL, NOT JUST THE HARNESS. The cook shipped first in tests/formats ConvertTool,
-        // which is the dev harness; this is the compiler the launcher actually invokes, so until
-        // now a glTF imported by the product arrived with its materials thrown away while the same
-        // file imported by the harness did not.
-        cookAndRewriteSlots(res.materials, res.images, contentDir, base, res.meshes, maxTexture);
-
-        std::vector<MeshItem> items;
-        items.reserve(res.meshes.size());
-        for (usize i = 0; i < res.meshes.size(); ++i) {
-            items.push_back(MeshItem{
-                i < res.meshNames.size() ? res.meshNames[i] : std::string{},
-                res.meshes[i],
-                i < res.meshSkinIndex.size() ? res.meshSkinIndex[i] : -1});
-        }
-
-        std::vector<std::string> stems;
-        bool anyFailed = writeMeshItems(input, outDir, base, items, merge, lodRatio, stats, &stems);
-        std::vector<ScenePlacement> scene;
-        scene.reserve(res.placements.size());
-        for (const fmt::GltfPlacement& p : res.placements) scene.push_back(ScenePlacement{p.meshIndex, p.position});
-
-        // ---- object clips, BEFORE the level so a placement only names a clip that was written ----
-        //
-        // The motion of a plain glTF node (a car on a route, a fan) as <base>_<node>.ocanim beside the
-        // skeletal clips. Names are taken after the skeletal clips', so a node named like an armature
-        // action cannot overwrite it.
-        {
-            // Compared lower-cased: Windows treats "Car" and "car" as ONE file, so the second clip
-            // would overwrite the first.
-            const auto fileKey = [](std::string s) {
-                for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                return s;
-            };
-            std::unordered_set<std::string> taken;
-            for (usize i = 0; i < res.animations.size(); ++i)
-                taken.insert(fileKey(safe(i < res.animationNames.size() ? res.animationNames[i] : "",
-                                          "Clip" + std::to_string(i))));
-            for (usize i = 0; i < res.objectAnimations.size(); ++i) {
-                std::string name = safe(i < res.objectAnimationNames.size() ? res.objectAnimationNames[i] : "",
-                                        "ObjectClip" + std::to_string(i));
-                if (!taken.insert(fileKey(name)).second) {
-                    const std::string root = name;
-                    for (int n = 2; !taken.insert(fileKey(name = root + "_" + std::to_string(n))).second; ++n) {}
-                }
-                const fmt::OcAnimation& clip = res.objectAnimations[i];
-                const std::string p = outDir + "/" + base + "_" + name + ".ocanim";
-                if (!fmt::saveOcAnim(p, clip, &why)) {
-                    emitArtifact(input, p, "animation", false, false, why, stats);
-                    anyFailed = true;
-                    continue;
-                }
-                emitArtifact(input, p, "animation", true, true, {}, stats,
-                             "\"durationSeconds\":" + std::to_string(clip.duration));
-                const i32 pl = i < res.objectAnimationPlacement.size() ? res.objectAnimationPlacement[i] : -1;
-                if (pl >= 0 && usize(pl) < scene.size()) {
-                    // A placement plays ONE clip, so the FIRST one the file lists keeps it; a later clip
-                    // for the same node is still written (it can be picked by hand) but says so here.
-                    if (scene[usize(pl)].animClip.empty()) {
-                        scene[usize(pl)].animClip = base + "_" + name;
-                    } else {
-                        AVER_WARN("'{}' is animated by more than one glTF animation: its placement plays '{}'; "
-                                  "'{}' was written but not attached", res.placements[usize(pl)].name,
-                                  scene[usize(pl)].animClip, base + "_" + name);
-                    }
-                }
-            }
-        }
-        if (!writeSceneLevel(outDir, contentDir, base, scene, stems)) anyFailed = true;
-
-        bool anySkinned = false;
-        for (const fmt::OcMeshData& mesh : res.meshes) if (mesh.hasSkin()) { anySkinned = true; break; }
-        if (anySkinned && res.skeletons.empty()) {
-            AVER_WARN("the file carries skin but no skin node, so its joint indices address a "
-                      "skeleton that was not written");
-        }
-
-        // ---- skeleton(s), named after `base` so a clip's skeletonRef resolves by stem ----
-        for (usize i = 0; i < res.skeletons.size(); ++i) {
-            const std::string p = outDir + "/" + base + (i == 0 ? "" : std::to_string(i)) + ".ocskel";
-            if (!fmt::saveOcSkel(p, res.skeletons[i], &why)) {
-                emitArtifact(input, p, "skeleton", false, false, why, stats);
-                anyFailed = true;
-            } else {
-                emitArtifact(input, p, "skeleton", true, true, {}, stats,
-                             "\"bones\":" + std::to_string(res.skeletons[i].bones.size()));
-            }
-        }
-
-        // ---- clips ----
-        for (usize i = 0; i < res.animations.size(); ++i) {
-            fmt::OcAnimation clip = res.animations[i];
-            clip.skeletonRef = base;
-            const std::string name = safe(i < res.animationNames.size() ? res.animationNames[i] : "",
-                                          "Clip" + std::to_string(i));
-            const std::string p = outDir + "/" + base + "_" + name + ".ocanim";
-            if (!fmt::saveOcAnim(p, clip, &why)) {
-                emitArtifact(input, p, "animation", false, false, why, stats);
-                anyFailed = true;
-            } else {
-                emitArtifact(input, p, "animation", true, true, {}, stats,
-                             "\"durationSeconds\":" + std::to_string(clip.duration));
-            }
-        }
-
-        emitSummary(input, stats, anyFailed ? 1 : 0);
-        return exitCode(anyFailed ? ExitCode::Failed : ExitCode::Ok);
+        ModelConvertArgs margs;
+        margs.input = input; margs.outDir = outDir; margs.base = base; margs.contentDir = contentDir;
+        margs.merge = merge; margs.lodRatio = lodRatio; margs.maxTexture = maxTexture;
+        return convertImportedModel(margs, res, stats);
     }
+#endif
 
     if (ext == ".obj") {
         fmt::ObjImportResult res;

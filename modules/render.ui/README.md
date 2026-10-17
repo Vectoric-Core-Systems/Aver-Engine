@@ -70,6 +70,26 @@ Both the vertex colour and any bound texture are required to be **premultiplied*
 rather than detected: a straight-alpha texture multiplied by a premultiplied colour produces a halo
 that looks like a filtering artefact and is not one.
 
+## Glyph atlas pages
+
+Text is drawn from a paged glyph atlas kept on the CPU by `Aver.UI` (`UiGlyphAtlas`, docs/GAME_UI_TEXT.md). A
+glyph quad's texture in the draw list is a **token**: `aver::ui::kUiAtlasTokenBit | page` (bit 63 set, so it can
+never collide with a 32-bit `TextureHandle`; `UiRenderer::atlasToken(page)`). `overlayPass` maps a token to that
+page's texture (`pageTexture`) and draws it like any other texture, skipping the quad if the page has no texture yet.
+
+The host lends the atlas with `setTextAtlas` (non-owning; pass `nullptr` before the device is torn down).
+`UiRenderer` also implements `IRenderFeature::prePass`, which runs before the scene targets are bound on both
+backends, and uploads every dirty page there: create the `RGBA8Unorm` texture on first use, query its copy
+footprint, expand the A8 coverage to `(c,c,c,c)` (premultiplied white, through the atlas's coverage gamma) **row by
+row at the footprint's row pitch** (D3D12 pads rows to 256 bytes), barrier shader-resource to copy-destination,
+`copyBufferToTexture`, barrier back, destroy the staging buffer (the backend retires it behind the fence), and
+mark the page uploaded. The RHI has no sub-region copy, so a dirty page uploads whole, which is why pages are small
+(512 by 512 by default). Steady state uploads nothing.
+
+The ordering rule: every glyph a frame's list references must be rasterised before that frame's `beginFrame`.
+Hosts build the UI in `onUpdate`, which satisfies it. No shader, pipeline or blend state changed for this, and
+only RHI calls Voxi already makes on both backends are used.
+
 ## Status
 
 The path compiles and all test suites pass. The sandbox carries a hand-written demo draw list

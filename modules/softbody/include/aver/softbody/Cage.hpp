@@ -1,8 +1,9 @@
-// The plastic cage: particles, distance constraints ("beams") and an optional triangle skin.
+// The soft-body cage: particles, distance constraints ("beams"), dihedral bends and a triangle skin.
 //
-// The data model and the deterministic step. Verlet -> damage/plasticity -> Gauss-Seidel PBD, in
-// that order and with that float evaluation order, per docs/recon/softbody-solver.md. Core only:
-// no scene, no GPU, no Jolt. See docs/SOFTBODY.md.
+// Topology and damage state only. Jolt integrates the particles (modules/physics, aver_phys_sb_*);
+// the host mirrors their positions into `Particle::pos`, the damage step (Damage.hpp) edits the
+// beams, and tears are resolved here into duplicate particles. Core only: no scene, no GPU, no
+// Jolt. See docs/SOFTBODY.md.
 #pragma once
 
 #include "aver/softbody/Material.hpp"
@@ -15,12 +16,14 @@ namespace aver::softbody {
 inline constexpr u32 kNone = 0xFFFFFFFFu;
 
 struct Particle {
-    Vec3 pos{0, 0, 0};
-    Vec3 prev{0, 0, 0};      // Verlet: velocity = pos - prev
+    Vec3 pos{0, 0, 0};       // current position, mirrored from the simulation
     Vec3 rest{0, 0, 0};      // un-dented position, for displacement readback
-    f32  invMass  = 1.0f;    // only read when StepConfig::useNodeMass
+    f32  mass     = 1.0f;    // kg
+    f32  invMass  = 1.0f;    // 0 when pinned
+    f32  reachCm  = -1.0f;   // skin reach: < 0 free, 0 hard skin
+    u32  simIndex = kNone;   // index in the current Jolt body, written by the builder
     u32  origin   = 0;       // the particle this one was torn from (itself when original)
-    bool pinned   = false;   // kinematic: the solver never moves it, the host may
+    bool pinned   = false;   // kinematic: skinned to its bind pose
     bool freed    = false;   // every constraint broken: falls as debris
     bool brittle  = false;   // majority brittle constraints: cracks instead of denting
     bool hadBeams = false;
@@ -34,8 +37,20 @@ struct Beam {
     f32 rest     = 0.0f;     // creeps as the beam yields
     f32 rest0    = 0.0f;     // as authored
     f32 plastic  = 0.0f;     // accumulated permanent set, cm
-    f32 peak     = 0.0f;     // highest force seen, N (debug)
+    f32 peak     = 0.0f;     // largest strain seen (debug)
+    f32 damage   = 0.0f;     // J accumulated by deposits
+    u32 bend     = kNone;    // index into Cage::bends, or kNone
+    u32 slot     = kNone;    // final Jolt edge index, written by the builder
     bool broken  = false;
+};
+
+// A dihedral bend across a shared edge: v[0..1] the edge, v[2] and v[3] the opposite corners (the
+// Jolt DihedralBend layout).
+struct Bend {
+    u32 v[4]{0, 0, 0, 0};
+    u32 beam = kNone;        // the shared edge's beam
+    f32 compliance = 0.0f;
+    u32 slot = kNone;        // final Jolt bend index, written by the builder
 };
 
 // One triangle of the skin. `edge[k]` is the beam on (v[k], v[k+1]); tears read the skin through
@@ -60,6 +75,7 @@ struct Cage {
     std::vector<Material> materials;     // [0] is the default material
     std::vector<Particle> particles;
     std::vector<Beam>     beams;
+    std::vector<Bend>     bends;
     std::vector<Triangle> triangles;
     std::vector<u8>       triDead;       // 1 when a triangle spans a gap (>= 2 broken edges)
     std::vector<SplitEvent> splitLog;    // appended by tears; the owner drains it
@@ -70,8 +86,6 @@ struct Cage {
 
     // Builder-only edge lookup, dropped by build().
     std::unordered_map<u64, u32> edgeIndex;
-    // Per-step scratch, kept here so a step allocates nothing in steady state.
-    std::vector<Vec3> scratchStart;
 };
 
 // ---- building ------------------------------------------------------------------------------------
@@ -97,69 +111,27 @@ struct GridSpec {
 };
 std::vector<u32> addGrid(Cage& c, const GridSpec& g);
 
-// Freezes the topology and captures the rest pose (the spec's InitSolver): prev = pos, rest lengths
-// from the current positions, brittle classification, skin edge indices. Call once, after building.
+// Freezes the topology and captures the rest pose: rest lengths from the current positions, brittle
+// classification, bends from the triangles. Call once, after building.
 void build(Cage& c);
-// Undo every plastic change and tear: rest lengths, broken flags, duplicated particles, positions.
+// Undo every plastic change, damage and tear: rest lengths, broken flags, duplicated particles,
+// positions, bends.
 void repair(Cage& c);
 
-// ---- stepping ------------------------------------------------------------------------------------
+// Rebuilds `bends` from the live triangles and unbroken beams (4 distinct particles, two live
+// triangles on the shared edge), keeping the compliance of the beam's material. Returns the count.
+u32 rebuildBends(Cage& c);
 
-struct StepConfig {
-    f32  dt              = 1.0f / 64.0f;
-    i32  substeps        = 4;
-    i32  iterations      = 8;
-    f32  velocityDamping = 0.99f;    // per substep
-    f32  maxNodeSpeed    = 1500.0f;  // cm/s
-    f32  damageRate      = 8.0f;     // 1/s: caps how fast a yielded beam creeps
-    f32  breakKick       = 2.0f;     // cm of recoil on a snap
-    bool enableDamage    = true;     // false: a pure elastic cage
-    Vec3 gravity{0, 0, -980.0f};     // cm/s^2
-    bool gravityAll      = false;    // false: only freed debris falls (a cage riding a chassis)
-    bool useNodeMass     = false;    // weight the relaxation by Particle::invMass
-    f32  settleThresholdCm = 0.05f;
-};
+// Particle mass from the live triangles: areaDensity x a third of each adjacent triangle's rest area
+// (cm^2 -> m^2). A particle with no live triangle keeps its mass. Pinned particles get invMass 0.
+void recomputeMasses(Cage& c);
 
-struct StepResult {
-    bool anyBreak   = false;
-    u32  broken     = 0;     // constraints broken this step
-    u32  newParticles = 0;   // particles created by tears this step
-    f32  maxMoveCm  = 0.0f;  // largest per-substep particle motion
-    bool settled    = false; // maxMoveCm <= StepConfig::settleThresholdCm
-};
-
-// One fixed step of `cfg.dt`. Deterministic: same cage + config + commands give the same bits.
-StepResult step(Cage& c, const StepConfig& cfg);
-
-// Marks a beam broken without recoil (scripted or editor cuts). Tears resolve on the next step, or
-// by calling resolveTears().
+// Marks a beam broken without recoil (scripted or editor cuts). Tears resolve with resolveTears().
 void breakBeam(Cage& c, u32 beam);
 
 // Splits particles whose triangle fans a broken beam has disconnected, duplicating them; updates
 // freed flags and dead triangles. Returns the number of particles created.
 u32 resolveTears(Cage& c);
-
-// ---- impacts -------------------------------------------------------------------------------------
-
-struct Impact {
-    Vec3 point{0, 0, 0};       // cage-local
-    Vec3 direction{0, 0, -1};  // the way the impactor moves into the cage
-    f32  depthCm   = 10.0f;    // raw depth, before the crush curve
-    f32  radiusCm  = 60.0f;
-    f32  tearRadiusFrac = 0.5f;
-    f32  tearMinDisp    = 2.0f;
-};
-
-struct ImpactResult {
-    f32 disp = 0.0f;
-    f32 tearRadius = 0.0f;
-    u32 touched = 0;
-    u32 broken = 0;
-};
-
-// Seeds a dent: pushes particles within the radius along `direction` through the crush curve
-// (brittle ones crack instead), and snaps brittle beams within the tear radius.
-ImpactResult applyImpact(Cage& c, const Impact& im, const CrushParams& crush = {});
 
 // ---- queries -------------------------------------------------------------------------------------
 
@@ -168,7 +140,5 @@ u32 countPieces(const Cage& c, std::vector<u32>* ids = nullptr);
 u32 brokenBeamCount(const Cage& c);
 // Largest |length - rest0| / rest0 over unbroken beams.
 f32 maxStrain(const Cage& c);
-// Sum of squared per-substep displacement of unpinned particles: a kinetic-energy proxy.
-f32 kineticProxy(const Cage& c);
 
 } // namespace aver::softbody

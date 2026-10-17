@@ -12,10 +12,18 @@ calls (`Aver.Render.UI`), and the whole thing is testable with no GPU and no win
 | `UiTree` (`UiTree.cpp`, `UiTreeLayout.cpp`, `UiTreeInput.cpp`, `UiTreeDraw.cpp`) | The tree: layout, pointer/keyboard/gamepad input, focus, events, drawing through a `UiPainter`. |
 | `UiStyle` | Themes (`dark`, `light`, `contrast`) and named styles. |
 | `UiFocus` | Tab order and directional navigation as pure functions. |
-| `UiText` | Text metrics, word wrap, and the painter interface (a draw-list painter is included). |
+| `UiText` | Text metrics, the painter interface (a draw-list painter is included) and `layoutText`/`drawText`, the seam the text engine plugs into. |
+| `UiTextEngine`, `UiTextLayout` | The text engine: layout of a string into positioned glyphs (cached, one object for measuring and drawing), glyph quads into a draw list. |
+| `UiFontFace`, `UiTrueType`, `UiFontSet` | One TrueType/OpenType face (via Dear ImGui's vendored `imstb_truetype.h`, compiled only here), and the `.ocfonts` font sets: families, fallback chains, per-language order and overrides. |
+| `UiGlyphAtlas` | Paged, shelf-packed glyph atlas on the CPU with page-level LRU; `Aver.Render.UI` uploads the dirty pages. |
+| `UiUnicode`, `UiBidi`, `UiShaping`, `UiLineBreak` | UTF-8, the Unicode range tables, bidirectional reordering, Arabic shaping and line breaking, each a pure function with its own test. |
+| `UiRichText` | The small `<b> <i> <color> <size> <font> <br>` markup. |
 | `UiLayoutAsset` | The `.ocui` layout asset: parse, write, instantiate, capture, the editor's structural edits. |
 | `UiScreens` | A settings screen (graphics, audio, controls with key rebinding) and a command menu. |
 | `UiHostInput` | Raw key/gamepad state to navigation, text editing and typed characters, with key repeat. |
 
-Deliberately not Dear ImGui, which stays the editor's. See [docs/GAME_UI.md](../../docs/GAME_UI.md) for the model,
-the asset format, the C ABI, the C# API, the editor tab and the graph nodes.
+Deliberately not Dear ImGui, which stays the editor's (the one exception is the vendored `imstb_truetype.h`,
+a private include of this module used by `UiTrueType.cpp` only). No file I/O either: fonts arrive as byte blobs
+from a host callback (`UiFontLoader`). See [docs/GAME_UI.md](../../docs/GAME_UI.md) for the model, the asset
+format, the C ABI, the C# API, the editor tab and the graph nodes, and [docs/GAME_UI_TEXT.md](../../docs/GAME_UI_TEXT.md)
+for text.

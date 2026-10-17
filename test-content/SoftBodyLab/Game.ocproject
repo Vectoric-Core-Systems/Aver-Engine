@@ -1,0 +1,9 @@
+OCPROJECT 1
+# Engine test content for CLOTH AND DESTRUCTION (docs/SOFTBODY.md). Not a demo game.
+# Open the project, import Content/Source/*.obj (see README.md), open Maps/SoftBodyLab.ocworld
+# and press Play.
+NAME SoftBodyLab
+ENGINE Aver 0.7.0-1
+CREATEDWITH 0.7.0-1
+CONTENT Content
+STARTMAP Maps/SoftBodyLab.ocworld

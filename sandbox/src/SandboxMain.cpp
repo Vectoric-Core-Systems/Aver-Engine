@@ -4,6 +4,7 @@
 #include "aver/runtime/EntryPoint.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "SandboxApp.hpp"
+#include "ModelImportDialog.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
 
@@ -467,6 +468,41 @@ Application* createApplication(int argc, char** argv) {
             GltfImportSummary sum;
             std::string why;
             if (!importGltfToDir(src, destDir, contentDir, /*overwrite=*/false, sum, &why)) {
+                AVER_ERROR("[Sandbox] could not import '{}': {}", src, why);
+                std::exit(1);
+            }
+            if (sum.meshesWritten == 0 && sum.rigsWritten == 0 && sum.clipsWritten == 0) {
+                AVER_ERROR("[Sandbox] '{}' produced nothing importable - see the Output Log above", src);
+                std::exit(1);
+            }
+            AVER_INFO("[Sandbox] imported '{}' -> {} ({} mesh(es), {} skeleton(s), {} clip(s))",
+                      src, destDir, sum.meshesWritten, sum.rigsWritten, sum.clipsWritten);
+            std::exit(0);
+        }
+        // --import-fbx <src> <destDir> [options-text]: import an FBX and exit. The options are
+        // fbxOptionsToText's format ("scale=100;rootMotion=auto"); omitted = the defaults. Used by MCP/CI.
+        else if (!std::strcmp(argv[i],"--import-fbx") && i+2<argc) {
+            const std::string src = argv[++i], destDir = argv[++i];
+            std::string optionsText;
+            if (i+1 < argc && argv[i+1][0] != '-') optionsText = argv[++i];
+            fmt::FbxImportOptions fbxOpt;
+            std::string why;
+            if (!optionsText.empty() && !fmt::fbxOptionsFromText(optionsText, fbxOpt, &why)) {
+                AVER_ERROR("[Sandbox] bad --import-fbx options '{}': {}", optionsText, why);
+                std::exit(1);
+            }
+            // Find the owning project for material/texture cooking, as --import-gltf does.
+            std::string contentDir;
+            const std::string ownerProject = ownerProjectOf(destDir);
+            if (!ownerProject.empty()) {
+                fmt::ProjectDesc proj;
+                std::string projWhy;
+                if (fmt::loadOcproject(ownerProject, proj, &projWhy)) contentDir = proj.contentDir();
+                else AVER_WARN("[Sandbox] found '{}' but could not load it: {} - importing geometry only",
+                              ownerProject, projWhy);
+            }
+            ModelImportSummary sum;
+            if (!importFbxToDir(src, destDir, contentDir, /*overwrite=*/false, fbxOpt, sum, &why)) {
                 AVER_ERROR("[Sandbox] could not import '{}': {}", src, why);
                 std::exit(1);
             }

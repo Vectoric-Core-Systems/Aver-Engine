@@ -14,6 +14,9 @@
 #  include "aver/synapse/SynapseBt.hpp"
 #  include "aver/synapse/SynapseSmartObject.hpp"
 #endif
+#if AVER_MODULE_SOFTBODY_SCENE
+#  include "aver/softbody/SoftBodySystem.hpp"
+#endif
 
 #include <algorithm>
 #include <charconv>
@@ -25,7 +28,7 @@ namespace aver::game {
 namespace {
 
 enum TypeIx : int {
-    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kTypeCount,
+    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kCloth, kDestructible, kTypeCount,
     kUnknownType = -1
 };
 static_assert(std::size(kPlacedComponentTypes) == kTypeCount, "kPlacedComponentTypes and TypeIx must stay in step");
@@ -153,6 +156,10 @@ u32 typeId(scene::World& w, int ix) {
         case kSmartObject: return w.componentId("CSmartObject");
 #endif
         case kSoftBody: return scene::kComponentSoftBody;
+#if AVER_MODULE_SOFTBODY_SCENE
+        case kCloth: return w.componentId("CCloth");
+        case kDestructible: return w.componentId("CDestructible");
+#endif
         default: return 0;
     }
 }
@@ -178,6 +185,12 @@ bool requirementsMet(scene::World& w, scene::Entity e, int ix, const fmt::OcWorl
         case kAnimator: case kRootMotion: case kMotionMatcher: case kControlRig: case kIkRig:
             if (!hasSkeleton(w, e)) { why = "needs a SkeletalMesh with a skeleton"; return false; }
             break;
+        case kCloth: case kDestructible: {
+            // One body per entity root: a cloth and a destructible cannot share an entity.
+            const u32 other = typeId(w, ix == kCloth ? kDestructible : kCloth);
+            if (other != 0 && w.hasComponent(e, other)) { why = ix == kCloth ? "the entity is already Destructible" : "the entity is already Cloth"; return false; }
+            break;
+        }
         default: break;
     }
     return true;
@@ -371,11 +384,72 @@ bool applySoftBody(scene::World& w, scene::Entity e, const fmt::OcPlacedComponen
     return true;   // `body` is the physics handle: process-local, never authored
 }
 
+#if AVER_MODULE_SOFTBODY_SCENE
+// COMPONENT Cloth / Destructible (docs/SOFTBODY.md). Runtime state (damage, pieces) is never authored: a loaded level starts intact.
+bool softPreset(const fmt::OcPlacedComponent& r, softbody::SoftPreset def, softbody::SoftPreset& out, std::string& why) {
+    out = def;
+    if (const std::string* v = r.find("preset"))
+        if (!softbody::presetFromKey(lowered(*v), out)) { why = "unknown preset '" + *v + "'"; return false; }
+    return true;
+}
+
+bool applyCloth(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    const u32 type = typeId(w, kCloth);
+    if (type == 0) { why = "CCloth is not registered"; return false; }
+    u64 asset = 0;
+    if (readAsset(r, "asset", asset) == AssetKey::Bad) { why = "malformed asset#"; return false; }
+    softbody::SoftPreset preset;
+    if (!softPreset(r, softbody::SoftPreset::ClothLight, preset, why)) return false;
+    auto* c = w.component<softbody::CCloth>(e, type);
+    if (!c) {
+        c = softbody::SoftBodySystem::attachCloth(w, e, preset, asset);
+        if (!c) { why = "the world refused the component"; return false; }
+    }
+    c->asset = asset;
+    c->preset = static_cast<u32>(preset);
+    c->windScale = numKey(r, "wind", 1.0f);
+    c->stiffnessScale = numKey(r, "stiffness", 1.0f);
+    c->reachScale = numKey(r, "reach", 1.0f);
+    c->freezeDistanceCm = numKey(r, "freeze", 0.0f);
+    // kClothRelease is a one-shot request from a script, not authored state: leave it alone.
+    c->flags = (c->flags & softbody::kClothRelease) | (boolKey(r, "tearable", false) ? softbody::kClothTearable : 0u) |
+               (boolKey(r, "world", true) ? 0u : softbody::kClothNoWorld) | (boolKey(r, "proxy", true) ? 0u : softbody::kClothNoCharacterProxy) |
+               (boolKey(r, "windon", true) ? 0u : softbody::kClothNoWind);
+    return true;
+}
+
+bool applyDestructible(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    const u32 type = typeId(w, kDestructible);
+    if (type == 0) { why = "CDestructible is not registered"; return false; }
+    u64 asset = 0;
+    if (readAsset(r, "asset", asset) == AssetKey::Bad) { why = "malformed asset#"; return false; }
+    softbody::SoftPreset preset;
+    if (!softPreset(r, softbody::SoftPreset::Metal, preset, why)) return false;
+    auto* c = w.component<softbody::CDestructible>(e, type);
+    if (!c) {
+        c = softbody::SoftBodySystem::attachDestructible(w, e, preset, asset);
+        if (!c) { why = "the world refused the component"; return false; }
+    }
+    c->asset = asset;
+    c->preset = static_cast<u32>(preset);
+    c->toughnessScale = numKey(r, "toughness", 1.0f);
+    c->impactScale = numKey(r, "impact", 1.0f);
+    c->debrisLifetimeS = numKey(r, "lifetime", 0.0f);
+    c->maxPieces = static_cast<u32>(std::max(0.0f, numKey(r, "maxpieces", 0.0f)));
+    c->flags = (boolKey(r, "indestructible", false) ? softbody::kDestructIndestructible : 0u) |
+               (boolKey(r, "nodebris", false) ? softbody::kDestructNoDebris : 0u);
+    return true;
+}
+#endif
+
 bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, const fmt::OcWorldPlacement* placement, std::string& why) {
     const int ix = typeIndex(r.type);
     if (ix == kUnknownType) { why = "unknown type"; return false; }
 #if !AVER_MODULE_SYNAPSE_SCENE
     if (ix == kBrain || ix == kSmartObject) { why = "unknown to this build"; return false; }
+#endif
+#if !AVER_MODULE_SOFTBODY_SCENE
+    if (ix == kCloth || ix == kDestructible) { why = "unknown to this build"; return false; }
 #endif
     if (!requirementsMet(w, e, ix, placement, why)) return false;
     switch (ix) {
@@ -390,6 +464,10 @@ bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r,
         case kSmartObject: return applySmartObject(w, e, r, why);
 #endif
         case kSoftBody: return applySoftBody(w, e, r, why);
+#if AVER_MODULE_SOFTBODY_SCENE
+        case kCloth: return applyCloth(w, e, r, why);
+        case kDestructible: return applyDestructible(w, e, r, why);
+#endif
         default: break;
     }
     why = "unknown type";
@@ -512,6 +590,34 @@ std::optional<fmt::OcPlacedComponent> captureOne(scene::World& w, scene::Entity 
             if (c->flags & scene::kSoftBodyDisabled) put(rec, "simulated", "0");
             break;
         }
+#if AVER_MODULE_SOFTBODY_SCENE
+        case kCloth: {
+            const auto* c = w.component<softbody::CCloth>(e, type);
+            putAsset(rec, "asset", c->asset, pathOf);
+            put(rec, "preset", softbody::presetKey(c->preset < softbody::kSoftPresetCount ? static_cast<softbody::SoftPreset>(c->preset) : softbody::SoftPreset::ClothLight));
+            if (c->windScale > 0.0f && c->windScale != 1.0f) putNum(rec, "wind", c->windScale);
+            if (c->stiffnessScale > 0.0f && c->stiffnessScale != 1.0f) putNum(rec, "stiffness", c->stiffnessScale);
+            if (c->reachScale > 0.0f && c->reachScale != 1.0f) putNum(rec, "reach", c->reachScale);
+            if (c->freezeDistanceCm > 0.0f) putNum(rec, "freeze", c->freezeDistanceCm);
+            if (c->flags & softbody::kClothTearable) put(rec, "tearable", "1");
+            if (c->flags & softbody::kClothNoWorld) put(rec, "world", "0");
+            if (c->flags & softbody::kClothNoCharacterProxy) put(rec, "proxy", "0");
+            if (c->flags & softbody::kClothNoWind) put(rec, "windon", "0");
+            break;
+        }
+        case kDestructible: {
+            const auto* c = w.component<softbody::CDestructible>(e, type);
+            putAsset(rec, "asset", c->asset, pathOf);
+            put(rec, "preset", softbody::presetKey(c->preset < softbody::kSoftPresetCount ? static_cast<softbody::SoftPreset>(c->preset) : softbody::SoftPreset::Metal));
+            if (c->toughnessScale > 0.0f && c->toughnessScale != 1.0f) putNum(rec, "toughness", c->toughnessScale);
+            if (c->impactScale > 0.0f && c->impactScale != 1.0f) putNum(rec, "impact", c->impactScale);
+            if (c->debrisLifetimeS > 0.0f) putNum(rec, "lifetime", c->debrisLifetimeS);
+            if (c->maxPieces > 0) putNum(rec, "maxpieces", static_cast<f32>(c->maxPieces));
+            if (c->flags & softbody::kDestructIndestructible) put(rec, "indestructible", "1");
+            if (c->flags & softbody::kDestructNoDebris) put(rec, "nodebris", "1");
+            break;
+        }
+#endif
         default: return std::nullopt;
     }
     return rec;

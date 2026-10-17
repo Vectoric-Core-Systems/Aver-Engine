@@ -38,6 +38,7 @@ std::vector<TexRole> imageRoles(const std::vector<ImportedMaterial>& materials, 
     };
     for (const ImportedMaterial& m : materials) {
         mark(m.metalRoughTex, TexRole::Data);
+        mark(m.metallicTex,   TexRole::Data);
         mark(m.occlusionTex,  TexRole::Data);
         mark(m.normalTex,     TexRole::Normal);
         // Colour LAST so that an image serving as both -- an ORM map also wired to base colour, which
@@ -257,7 +258,7 @@ void collapseIdenticalImages(const std::vector<ImportedImage>& images, std::vect
         if (t.imageIndex >= 0 && usize(t.imageIndex) < canon.size()) t.imageIndex = canon[usize(t.imageIndex)];
     };
     for (ImportedMaterial& m : materials) {
-        remap(m.baseColorTex); remap(m.metalRoughTex); remap(m.normalTex);
+        remap(m.baseColorTex); remap(m.metalRoughTex); remap(m.metallicTex); remap(m.normalTex);
         remap(m.occlusionTex); remap(m.emissiveTex); remap(m.opacityTex); remap(m.translucencyTex);
     }
     AVER_INFO("{} image(s) were byte-identical to another and share its file", collapsed);
@@ -346,6 +347,118 @@ void capImageSizes(std::vector<ImportedImage>& images, const std::vector<Importe
 
 } // namespace
 
+// ---- separate roughness and metalness maps -> the one packed slot --------------------------------------
+
+namespace {
+
+// The channel lane (0 = R .. 3 = A) a source named; unstated is the first, as for a grey map.
+usize laneOf(char channel) {
+    return channel == 'g' ? 1 : channel == 'b' ? 2 : channel == 'a' ? 3 : 0;
+}
+
+// Nearest-texel read of `src` at (x, y) of a w x h grid.
+u8 sampleLane(const ImageData& src, u32 x, u32 y, u32 w, u32 h, usize lane) {
+    const u32 sx = static_cast<u32>(u64(x) * src.width / w);
+    const u32 sy = static_cast<u32>(u64(y) * src.height / h);
+    return src.pixels[(usize(sy) * src.width + sx) * 4 + lane];
+}
+
+u8 constantPlane(f32 v) { return static_cast<u8>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); }
+
+std::string packedStem(const std::string& materialName) {
+    std::string s;
+    for (const char c : materialName) {
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+        s.push_back(ok ? c : '_');
+    }
+    while (!s.empty() && s.back() == '_') s.pop_back();
+    return (s.empty() ? std::string("material") : s) + "_mr";
+}
+
+} // namespace
+
+// FBX (and any format that names roughness and metalness as two files) fills ImportedMaterial::metallicTex.
+// .ocmat has ONE packed slot -- G = roughness, B = metalness, the glTF layout -- so the pair is decoded and
+// written as a new PNG (R = 255, A = 255), metalRoughTex is pointed at it, both factors become 1 (the texels
+// carry them), and metallicTex is cleared. A missing roughness map is a constant plane from the factor.
+// Different sizes: the smaller is resampled to the larger by nearest texel. A pair that already is the packed
+// layout (same image, G and B) is left alone, and a material with no metallicTex -- every glTF, OBJ and USD
+// one -- is untouched. Returns how many materials were packed.
+u32 packSeparateMetalRough(std::vector<ImportedImage>& images, std::vector<ImportedMaterial>& materials) {
+    u32 packed = 0, lost = 0;
+    for (ImportedMaterial& m : materials) {
+        if (m.metallicTex.empty()) continue;
+        const bool sameImage = !m.metalRoughTex.empty() && m.metalRoughTex.imageIndex == m.metallicTex.imageIndex;
+        if (sameImage && (m.metalRoughTex.channel == 0 || m.metalRoughTex.channel == 'g') && m.metallicTex.channel == 'b') {
+            m.metallicTex = {};
+            continue;
+        }
+
+        ImageData rough, metal;
+        std::string derr;
+        const usize mi = usize(m.metallicTex.imageIndex);
+        const bool haveM = mi < images.size() && images[mi].ok && !images[mi].bytes.empty() &&
+                           decodeImage(images[mi].bytes.data(), images[mi].bytes.size(), metal, &derr) &&
+                           metal.width > 0 && metal.height > 0;
+        if (!haveM) {
+            AVER_WARN("material '{}': its metalness map could not be read ({}) and is dropped",
+                      m.name, derr.empty() ? std::string("no image") : derr);
+            m.metallicTex = {};
+            ++lost;
+            continue;
+        }
+        const usize ri = m.metalRoughTex.empty() ? images.size() : usize(m.metalRoughTex.imageIndex);
+        const bool haveR = ri < images.size() && images[ri].ok && !images[ri].bytes.empty() &&
+                           decodeImage(images[ri].bytes.data(), images[ri].bytes.size(), rough, &derr) &&
+                           rough.width > 0 && rough.height > 0;
+        const u32 w = haveR ? std::max(rough.width, metal.width) : metal.width;
+        const u32 h = haveR ? std::max(rough.height, metal.height) : metal.height;
+        const usize rLane = laneOf(m.metalRoughTex.channel), mLane = laneOf(m.metallicTex.channel);
+        const u8 roughConst = constantPlane(m.roughnessFactor);
+
+        std::vector<u8> px(usize(w) * h * 4);
+        for (u32 y = 0; y < h; ++y)
+            for (u32 x = 0; x < w; ++x) {
+                u8* o = &px[(usize(y) * w + x) * 4];
+                o[0] = 255;
+                o[1] = haveR ? sampleLane(rough, x, y, w, h, rLane) : roughConst;
+                o[2] = sampleLane(metal, x, y, w, h, mLane);
+                o[3] = 255;
+            }
+        std::vector<u8> encoded;
+        const auto sink = [](void* ctx, void* data, int len) {
+            auto* v = static_cast<std::vector<u8>*>(ctx);
+            const u8* p = static_cast<const u8*>(data);
+            v->insert(v->end(), p, p + len);
+        };
+        if (!stbi_write_png_to_func(sink, &encoded, static_cast<int>(w), static_cast<int>(h), 4, px.data(),
+                                    static_cast<int>(w * 4)) || encoded.empty()) {
+            AVER_WARN("material '{}': its metalness could not be packed with its roughness; the map is dropped", m.name);
+            m.metallicTex = {};
+            ++lost;
+            continue;
+        }
+
+        ImportedImage img;
+        img.bytes = std::move(encoded);
+        img.ext = ".png";
+        img.suggestedName = packedStem(m.name);
+        img.sourcePath = (haveR ? images[ri].suggestedName : std::string("roughness factor")) + " + " +
+                         images[mi].suggestedName + " (packed)";
+        img.ok = true;
+        images.push_back(std::move(img));
+        m.metalRoughTex = ImportedTexture{};
+        m.metalRoughTex.imageIndex = static_cast<i32>(images.size() - 1);
+        m.metallicTex = {};
+        m.roughnessFactor = 1.0f;
+        m.metallicFactor = 1.0f;
+        ++packed;
+    }
+    if (packed) AVER_INFO("packed {} separate roughness/metalness map pair(s) into one metal-rough image", packed);
+    if (lost)   AVER_WARN("{} material(s) had a metalness map that could NOT be packed; they will render as dielectrics", lost);
+    return packed;
+}
+
 // ---- the shared cook entry point ---------------------------------------------------------------
 
 bool cookImportedMaterials(std::vector<ImportedMaterial>& materials, std::vector<ImportedImage>& images,
@@ -361,6 +474,7 @@ bool cookImportedMaterials(std::vector<ImportedMaterial>& materials, std::vector
     // writing the full-size file and then a second one beside it. The opacity fold goes first so the
     // cap shrinks the MERGED image rather than the original it replaced.
     mergeOpacityMaps(images, materials);
+    packSeparateMetalRough(images, materials);
     foldTranslucencyMaps(images, materials);
     capImageSizes(images, materials, maxTexture);
     collapseIdenticalImages(images, materials);

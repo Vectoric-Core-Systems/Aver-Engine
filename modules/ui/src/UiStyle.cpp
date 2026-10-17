@@ -125,6 +125,8 @@ UiStyle UiTheme::resolve(UiWidgetKind kind, std::string_view namedStyle) const {
         if (o.track) s.track = o.track;
         if (o.placeholder) s.placeholder = o.placeholder;
         if (o.fontSize > 0.0f) s.fontSize = o.fontSize;
+        if (!o.fontFamily.empty()) s.fontFamily = o.fontFamily;
+        if (o.bold >= 0) s.bold = o.bold;
         break;
     }
     return s;

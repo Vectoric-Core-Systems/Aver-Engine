@@ -3,6 +3,11 @@
 // class declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "SoftBodyDebugOverlay.hpp"   // Show > Soft Bodies
+#include "SoftBodyPaintTool.hpp"
+#if AVER_MODULE_SOFTBODY_SCENE
+#  include "aver/softbody/SoftBodySystem.hpp"
+#endif
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 // game::drawWorld + hook set: the one entity walk both hosts run; onRender's depth prepass below
 // calls it too. Included here, not in SandboxApp.hpp, since no member declaration needs these
@@ -1985,6 +1990,37 @@ void SandboxApp::onRender(Engine& e)  {
         if (motionDebugMesh_) e.device()->drawLines(motionDebugMesh_, &mmId.m[0][0]);
     }
 #endif
+#if AVER_MODULE_SOFTBODY_SCENE
+    // Soft-body overlay (Show > Soft Bodies) and the paint tool's pins and brush: the same line-mesh route, world space.
+    if (softBodyDebugMesh_) { e.device()->destroyLineMesh(softBodyDebugMesh_); softBodyDebugMesh_ = 0; }
+    editor::softBodyDebugCollect(softBodyDebug_, softbody::softBodySystem(), softBodyDebugFrame_);
+#  if AVER_WITH_IMGUI
+    {
+        editor::SoftBodyPaintTool& paintTool = editor::softBodyPaintTool();
+        if (paintTool.active() && !anyPlayActive() && !noEditorChrome_) {
+            const ImGuiIO& pio = ImGui::GetIO();
+            if (inViewport(pio.MousePos.x, pio.MousePos.y) && !pio.WantCaptureMouse) {
+                Vec3 ro, rd;
+                viewportRay(pio.MousePos.x, pio.MousePos.y, ro, rd);
+                paintTool.viewportPaint(ro, rd.getSafeNormal(), pio.KeyShift && pio.MouseDown[0]);
+            } else {
+                paintTool.viewportPaint(Vec3{0, 0, 0}, Vec3{0, 0, 0}, false);
+            }
+            std::vector<editor::PaintLine> paintLines;
+            paintTool.collectLines(paintTool.entityWorld, paintTool.hover(), paintLines);
+            for (const editor::PaintLine& l : paintLines) {
+                softBodyDebugFrame_.lines.push_back(rhi::LineVertex{l.a.x, l.a.y, l.a.z, l.r, l.g, l.bl});
+                softBodyDebugFrame_.lines.push_back(rhi::LineVertex{l.b.x, l.b.y, l.b.z, l.r, l.g, l.bl});
+            }
+        }
+    }
+#  endif
+    if (!noEditorChrome_ && !softBodyDebugFrame_.lines.empty()) {
+        softBodyDebugMesh_ = e.device()->createLineMesh(softBodyDebugFrame_.lines.data(), static_cast<u32>(softBodyDebugFrame_.lines.size()));
+        const Mat4 sbId = Mat4::identity();
+        if (softBodyDebugMesh_) e.device()->drawLines(softBodyDebugMesh_, &sbId.m[0][0]);
+    }
+#endif
 #if AVER_MODULE_FRAMEWORK
     // Class-root markers: a class actor can have no mesh at all, so each live root gets three axis lines to be
     // seen and clicked (pick() tests the same box). Edit mode only; world-space vertices, so identity.
@@ -2053,6 +2089,10 @@ void SandboxApp::onRender(Engine& e)  {
     if (motionDebug_.any() && !noEditorChrome_)
         editor::motionDebugDrawLabels(motionDebugFrame_, viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
                                       static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, motionDebug_.labelMaxDistanceCm);
+#endif
+#if AVER_MODULE_SOFTBODY_SCENE && AVER_WITH_IMGUI
+    if (softBodyDebug_.budget && !noEditorChrome_)
+        editor::softBodyDebugDrawBudget(softBodyDebugFrame_, static_cast<f32>(vpX_), static_cast<f32>(vpY_));
 #endif
 #if AVER_WITH_IMGUI
     uiReg_.endFrame();

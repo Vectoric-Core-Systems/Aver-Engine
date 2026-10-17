@@ -12,6 +12,7 @@
 #include "aver/core/Types.hpp"
 #include "aver/core/Log.hpp"
 
+#include <map>
 #include <string>
 #include <string_view>
 
@@ -22,8 +23,19 @@
 #  include "aver/anim/ControlRig.hpp"
 #  include "aver/anim/MotionMatchSystem.hpp"
 #endif
+#if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
+#  include "aver/softbody/SoftBodySystem.hpp"
+#  if AVER_MODULE_RAGDOLL
+#    include "aver/physics/physics_ragdoll_abi.h"
+#    include "aver/physics/physics_layers_abi.h"
+#    include "aver/ragdoll/RagdollSystem.hpp"
+#  endif
+#endif
 #if AVER_MODULE_AUDIO_SCENE
 #  include "aver/audio/AudioScene.hpp"
+#endif
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
+#  include "aver/framework/framework_softbody_abi.h"
 #endif
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_abi.h"            // AI: wave 3 #21 (aver_fw_class_of for the actors generator)
@@ -115,6 +127,57 @@ inline void installAiNotify(synapse::NotifyFn fn, void* user) {
 }
 #endif
 
+#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS && AVER_MODULE_SOFTBODY_SCENE && AVER_MODULE_RAGDOLL
+// A cloth on a character collides with it through the character's KINEMATIC ragdoll, on the proxy layer (the
+// character capsule never reaches a soft body's collision query). The ragdoll is started here and its part
+// bodies are moved to the proxy layer once they exist; a character that already has a ragdoll is left alone.
+namespace detail {
+inline std::map<scene::Entity, bool> g_softProxies;   // started by us -> layer applied
+inline void softBodyProxyFn(scene::Entity e, bool on, void*) {
+    ragdoll::RagdollSystem& rs = ragdoll::ragdollSystem();
+    if (on) {
+        if (rs.mode(e) >= 0 || g_softProxies.count(e)) return;
+        if (rs.start(e, ragdoll::RagdollMode::Kinematic, 0.0f)) g_softProxies[e] = false;
+    } else {
+        const auto it = g_softProxies.find(e);
+        if (it == g_softProxies.end()) return;
+        rs.stop(e, 0.0f);
+        g_softProxies.erase(it);
+    }
+}
+inline void applySoftProxyLayers() {
+    ragdoll::RagdollSystem& rs = ragdoll::ragdollSystem();
+    const i32 layer = softbody::softBodySystem().options().proxyLayer;
+    for (auto& [e, applied] : g_softProxies) {
+        if (applied) continue;
+        const i32 h = rs.physicsHandle(e);
+        if (h == 0) continue;
+        const i32 bones = aver_phys_ragdoll_bone_count(h);
+        for (i32 b = 0; b < bones; ++b)
+            if (const i32 body = aver_phys_ragdoll_body_of_bone(h, b)) aver_phys_body_set_layer(body, layer);
+        applied = true;
+    }
+}
+} // namespace detail
+#endif
+
+// Host wiring for the soft-body system that is not world state: the path resolver (the same function the host
+// hands AnimSystem) for the mesh/.ocsoft decode caches, the notify sink for graph events, and the character
+// proxy. Call once at startup after registerGameSystems(); any argument may be null.
+inline void installSoftBodyHost(std::string (*pathFn)(u64, void*), void* pathUser,
+                                void (*notifyFn)(u32, const char*, void*), void* notifyUser) {
+#if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
+    softbody::SoftBodySystem& sys = softbody::softBodySystem();
+    if (pathFn) sys.setPathResolver(pathFn, pathUser);
+    if (notifyFn) sys.setNotifySink(notifyFn, notifyUser);
+#  if AVER_MODULE_RAGDOLL
+    sys.setCharacterProxyFn(&detail::softBodyProxyFn, nullptr);
+#  endif
+#else
+    (void)pathFn; (void)pathUser; (void)notifyFn; (void)notifyUser;
+#endif
+}
+
 // Registers the components and installs the hooks the game systems need. Call once at startup, after
 // the Synapse and control-rig registration (it adds a pose source to the animation system and the
 // crowd/hearing behaviours to the behaviour-tree registry).
@@ -126,6 +189,13 @@ inline void registerGameSystems() {
     anim::animGraphSystem().install(anim::animSystem(), world);
     anim::MotionMatchSystem::registerComponents(world);                        // motion matching: wave 5 #25
     anim::motionMatchSystem().install(anim::animSystem(), world);              // after the graph: it chains behind it
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
+    softbody::SoftBodySystem::registerComponents(scene::World::instance());   // CCloth, CDestructible: cloth and destruction
+    softbody::softBodySystem().install(scene::World::instance());
+#  if AVER_MODULE_FRAMEWORK
+    aver_fw_set_softbody_provider(&softbody::softBodyProvider, &softbody::softBodySystem());
+#  endif
 #endif
 #if AVER_MODULE_AUDIO_SCENE
     audio::audioSceneSystem().registerComponents(scene::World::instance());
@@ -172,6 +242,22 @@ inline void tickAnimGraphs(f32 dt) {
 #endif
 }
 
+// Advances cloth and destruction: reads the Jolt soft bodies back, runs dents, tears and debris, pushes the skin
+// palettes. AFTER animSystem().tick (the palette it reads is this frame's) and before the soft-body draw scene
+// updates, in both hosts. `viewPos` is the camera, for the distance tiers.
+inline void tickSoftBodies(f32 dt, const Vec3& viewPos) {
+#if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
+    softbody::SoftBodySystem& sys = softbody::softBodySystem();
+    sys.setViewPos(viewPos);
+    sys.tick(scene::World::instance(), dt);
+#  if AVER_MODULE_RAGDOLL
+    detail::applySoftProxyLayers();
+#  endif
+#else
+    (void)dt; (void)viewPos;
+#endif
+}
+
 // Drops per-level state: state-machine instances, boards, crowd/hearing/cover/squad state, pending
 // timers and events. Call when a level is unloaded or Play stops.
 inline void resetGameSystems() {
@@ -181,6 +267,12 @@ inline void resetGameSystems() {
     anim::animSystem().montages().stopAll();
     anim::controlRigSystem().clearRuntime();   // [wave5/ik-retarget] rig inputs, IK goals, foot smoothing
     anim::controlRigSystem().clear();          // and the loaded rigs, so an edited .ocrig / .ocikrig is read afresh
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
+    softbody::softBodySystem().clear();        // bodies, debris entities, queued inbox and events
+#  if AVER_MODULE_RAGDOLL
+    detail::g_softProxies.clear();
+#  endif
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE
     synapse::btSystem().clearStateTrees();   // AI: wave 3 #21 -- instances only; before the boards their tasks may read

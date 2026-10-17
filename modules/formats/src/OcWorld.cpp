@@ -170,7 +170,8 @@ std::vector<EmitStep> placementEmitSteps(const std::vector<OcWorldPlacement>& pl
 // COMPONENT type names the editor and the applier know (ADD_COMPONENT.md 3.4). The format only uses the list to
 // fix the case of a hand-typed `SKELETALMESH`; any other type is kept exactly as written.
 constexpr std::string_view kKnownComponentTypes[] = {
-    "SkeletalMesh", "Animator", "RootMotion", "MotionMatcher", "ControlRig", "IkRig", "Brain", "SmartObject", "SoftBody"};
+    "SkeletalMesh", "Animator", "RootMotion", "MotionMatcher", "ControlRig", "IkRig", "Brain", "SmartObject", "SoftBody",
+    "Cloth", "Destructible"};
 
 std::string canonicalComponentType(std::string_view t) {
     for (const std::string_view k : kKnownComponentTypes)

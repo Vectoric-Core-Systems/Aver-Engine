@@ -6,6 +6,7 @@
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/game/GameTick.hpp"
 #include "aver/game/GameLocalization.hpp"
+#include "aver/game/GameUiText.hpp"
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_loc_abi.h"
 #endif
@@ -141,6 +142,8 @@ void SandboxApp::applyProject(Engine& e) {
         li.cultureOverride = cultureOverride_.empty() ? editor::prefString("loc.previewCulture", "") : cultureOverride_;
         li.readSavedCulture = false;
         game::initLocalization(li);
+        game::uiTextInit(project_.contentDir());   // the Play/preview font set: Content/UI/Fonts.ocfonts or the built-in one, following the preview culture
+        game::uiTextBindRenderer(gameUi_);
 #if AVER_WITH_UI_ABI && AVER_MODULE_FRAMEWORK
         aver_ui_set_text_resolver(&aver_fw_loc_resolve, &aver_fw_loc_epoch);
 #endif

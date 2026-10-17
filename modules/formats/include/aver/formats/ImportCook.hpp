@@ -45,4 +45,9 @@ bool cookImportedMaterials(std::vector<ImportedMaterial>& materials, std::vector
                            std::vector<std::string>* warnings, std::string* error,
                            u32* materialsWritten, u32* texturesWritten);
 
+// Packs a material's SEPARATE roughness and metalness maps (ImportedMaterial::metallicTex, FBX) into the one packed metalRough image
+// .ocmat has (G = roughness, B = metalness), clearing metallicTex. cookImportedMaterials runs it right after the opacity fold; exposed
+// for FbxMaterialPackTest (which declares it locally until this lands). Returns how many materials were packed.
+u32 packSeparateMetalRough(std::vector<ImportedImage>& images, std::vector<ImportedMaterial>& materials);
+
 } // namespace aver::fmt

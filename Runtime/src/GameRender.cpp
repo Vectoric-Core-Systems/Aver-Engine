@@ -42,6 +42,9 @@
 #  include "aver/pbr/MaterialSystem.hpp"
 #endif
 #include "aver/render/SkinnedScene.hpp"
+#if AVER_MODULE_RENDER_SOFTBODY
+#  include "aver/render/SoftBodyScene.hpp"
+#endif
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/VoxiRenderer.hpp"
 #endif
@@ -660,7 +663,11 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // sharing this one's index buffer, so substituting the handle reaches every pass at once.
         // Zero means "not skinned", never "not drawn". Asked once, here, not again for the bounds
         // guard: a host reading EntityDecision::posedMesh must see the same answer that guard used.
-        const rhi::MeshHandle posedMesh = skinning ? skinning->drawHandle(ent) : 0;
+        rhi::MeshHandle posedMesh = skinning ? skinning->drawHandle(ent) : 0;
+#if AVER_MODULE_RENDER_SOFTBODY
+        // Soft bodies after skinning, in the order the editor's posedHandle has always asked: CSoftBody may sit on a skinned mesh.
+        if (!posedMesh && options.softBodies) posedMesh = options.softBodies->drawHandle(ent);
+#endif
         const bool skinned = posedMesh != 0;
 
         // A static entity gets its bounds from the asset; a skinned one already has them written

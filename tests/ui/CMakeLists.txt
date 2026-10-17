@@ -39,3 +39,39 @@ set_target_properties(UiLocalizeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE
 add_executable(UiLocalizeAbiTest src/UiLocalizeAbiTest.cpp)
 target_link_libraries(UiLocalizeAbiTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
 set_target_properties(UiLocalizeAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ---- the text engine (docs/GAME_UI_TEXT.md) ---------------------------------------------------------------
+#
+# Everything but the pixels is a ctest: Unicode tables and UTF-8, bidi, Arabic shaping, line breaking, the font
+# layer over stb_truetype (fonts are built in memory by src/TestFont.hpp), the glyph atlas, the layout engine, the
+# widget tree on top of it, and the C ABI. None needs a GPU or a window. UiFontTest, UiTextLayoutTest also read
+# Roboto from the repo (AVER_REPO_ROOT) and skip that part when it is absent.
+foreach(_t UiUnicodeTest UiBidiTest UiShapingTest UiLineBreakTest UiGlyphAtlasTest UiTextTreeTest)
+  add_executable(${_t} src/${_t}.cpp)
+  target_link_libraries(${_t} PRIVATE Aver.UI Aver.Core Aver.Platform)
+  set_target_properties(${_t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()
+
+foreach(_t UiFontTest UiTextLayoutTest)
+  add_executable(${_t} src/${_t}.cpp)
+  target_link_libraries(${_t} PRIVATE Aver.UI Aver.Core Aver.Platform)
+  target_compile_definitions(${_t} PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+  set_target_properties(${_t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()
+
+# UiTextAbiTest links the DLL the C# side loads, like UiLocalizeAbiTest.
+add_executable(UiTextAbiTest src/UiTextAbiTest.cpp)
+target_link_libraries(UiTextAbiTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiTextAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FontSetEditorTest -- the .ocfonts font set editor tab's headless core (the document edits, load/save/dirty/undo,
+# coverage, the preview engine). Same arrangement as UiLayoutEditorTest above: Sandbox is add_executable-only, so
+# this compiles sandbox/src/FontSetEditor.cpp directly with AVER_WITH_IMGUI left undefined. The source lives in
+# tests/editor/src beside the other editor tests; it is registered here because this directory already links
+# Aver.UI (it also reads the synthetic font builder in src/TestFont.hpp).
+add_executable(FontSetEditorTest
+  ${CMAKE_SOURCE_DIR}/tests/editor/src/FontSetEditorTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/FontSetEditor.cpp)
+target_include_directories(FontSetEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(FontSetEditorTest PRIVATE Aver.UI Aver.Core Aver.Platform)
+set_target_properties(FontSetEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

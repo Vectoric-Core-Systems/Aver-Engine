@@ -46,6 +46,7 @@ enum class PlayPhase : u8 {
     Skinned,      // SkinnedScene::update
     GraphTicks,   // ScriptHost::tickGraphClassInstances: class-placed graphs' OnTick
     WorldFlush,   // World::flush: deferred destroys + world-matrix recomposition, O(entities)
+    SoftBody,     // game::tickSoftBodies: cloth and destructibles (readback, dents, tears, skin pushes)
     Count
 };
 
@@ -59,6 +60,7 @@ inline constexpr const char* kPlayPhaseLabel[kPlayPhaseCount] = {
     "Skinned meshes",
     "Graph ticks",
     "World flush",
+    "Soft bodies",
 };
 
 class PlayProfile {

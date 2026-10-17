@@ -31,6 +31,7 @@
 namespace aver::rhi { class IDevice; }
 namespace aver::pbr { class MaterialSystem; }
 namespace aver::render { class SkinnedScene; }
+namespace aver::render { class SoftBodyScene; }
 namespace aver::voxi { class VoxiRenderer; }
 
 namespace aver::game {
@@ -323,6 +324,12 @@ using DrawWorldSkippedFn = void (*)(scene::Entity entity, u64 meshId, DrawSkipRe
 // bit. That property is what the hook set is verified against: with every pointer null, the walk
 // below must emit the identical command stream it emitted before the hooks existed.
 struct DrawWorldOptions {
+    // The soft-body draw scene (Aver.Render.SoftBody), or null. Asked after skinning for a mesh to substitute,
+    // so a packaged game draws a cloth or a destructible piece SIMULATED instead of at its authored rest shape.
+    // The scene writes the posed bounds into CMeshRenderer every frame it packs (the SkinnedScene rule), which is
+    // why a claimed entity skips the asset-box bounds below. Null changes nothing.
+    const render::SoftBodyScene* softBodies = nullptr;
+
     // The possessed first-person pawn. Entities flagged kMeshRendererHiddenFromOwner under it (ancestor walk) are not drawn
     // in the raster pass. scene::kInvalidEntity = no owner-hide.
     scene::Entity ownerHideRoot = scene::kInvalidEntity;

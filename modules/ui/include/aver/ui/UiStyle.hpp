@@ -25,6 +25,8 @@ struct UiStyle {
     u32 track = 0;                      // slider / progress track
     u32 placeholder = 0;
     f32 fontSize = 0;                   // 0 = theme base
+    std::string fontFamily;             // empty = the default family
+    i8 bold = -1;                       // -1 inherit, 0 regular, 1 bold
     UiInsets padding{};                 // added to the widget's own padding
 };
 

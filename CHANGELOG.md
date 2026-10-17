@@ -8,6 +8,11 @@ parentheses are short refs into this repository — `git show <hash>` for the fu
 usually longer and more useful than the line here. `docs/BUGS.md` carries the full defect list with
 triggering inputs for anything summarised below.
 
+## [Unreleased]
+
+### Import
+
+- **FBX import (ufbx).** `.fbx` imports at parity with glTF: meshes (ear-clip triangulation, hard-edge welding, instancing), skeletons from the bind pose with re-derived inverse binds, top-4 skin weights (truncation counted and reported), sockets, skeletal and object animation (`ufbx_bake_anim`), root-motion flagging (Off/Auto/All), materials and textures (embedded or found next to the model, in `textures/` or `<name>.fbm/`), cameras (the first becomes the level's start camera). Separate roughness and metalness maps are packed into the one slot `.ocmat` has instead of dropping the metal. Every FBX import leaves `<stem>.ocimport`; the Content Browser's **Reimport** and **Import options...** re-run it with the stored options. Also `Sandbox --import-fbx`, `AverAssetC convert x.fbx` (`--scale --unit-meters --root-motion --bake-fps --no-animations --no-blend-shapes`), `ModelImport` in C#, and the Import Model / Is Model Import Available nodes. ufbx (MIT) is vendored at `third_party/ufbx` and linked only by the editor, `AverAssetC` and tests; a packaged game does not contain it. Blend shapes are reported, not carried, until the morph-target feature lands. The launcher (separate repository) must add `.fbx` to its Aver Exchange file filter.
 ## [0.5.0] — 2026-09-08
 
 The release where the default renderer started telling the truth. Aver's default path is ray-driven

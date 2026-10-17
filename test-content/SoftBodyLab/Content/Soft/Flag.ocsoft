@@ -1,0 +1,1 @@
+{"format":"ocsoft","version":1,"kind":"cloth","preset":"cloth_light","cloth":{"dragCoeff":1.2,"liftCoeff":0.4},"paint":{"rules":[{"type":"above","axis":"y","valueCm":-1.0}]}}

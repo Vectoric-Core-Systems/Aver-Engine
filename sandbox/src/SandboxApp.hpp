@@ -43,6 +43,7 @@
 // Behaviour-tree format (.ocbt).
 #include "aver/formats/OcBt.hpp"
 #include "aver/formats/GltfImport.hpp"
+#include "ModelImportDialog.hpp"   // ModelImportSummary, writeImportedModel, importFbxToDir (FBX import)
 #if AVER_MODULE_TRIFACTOR
 #include "aver/trifactor/ClusterAdapt.hpp"
 #endif
@@ -134,6 +135,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "StateTreeEditor.hpp"   // AI: wave 3 #21
 #include "EqsEditor.hpp"
 #include "UiLayoutEditor.hpp"
+#include "FontSetEditor.hpp"
 #include "BlendSpaceEditor.hpp"
 #include "AnimStateMachineEditor.hpp"
 #include "MontageEditor.hpp"
@@ -158,7 +160,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // Data tables (.csv/.json) and localization string tables: text formats in the base Aver.Formats target, so unconditional too.
 #include "DataTableEditor.hpp"
 #include "StringTableEditor.hpp"
-#include "SoftBodyPanel.hpp"
+#include "SoftBodyDebugOverlay.hpp"   // Show > Soft Bodies (also pulls the soft-body system header when the module is on)
 #include "RenderQueueOutput.hpp"
 #include "RenderQueuePanel.hpp"
 #include "PostVolumeTools.hpp"
@@ -1032,8 +1034,8 @@ static inline void sanitiseAssetName(std::string& s) {
 }
 
 // glTF import asset counts written to destDir.
-struct GltfImportSummary { u32 meshesWritten = 0, rigsWritten = 0, clipsWritten = 0,
-                                materialsWritten = 0, texturesWritten = 0; };
+// The shape moved to ModelImportDialog.hpp when FBX started sharing the writer; the old name stays for existing callers.
+using GltfImportSummary = ModelImportSummary;
 
 // Convert glTF/GLB to .ocmesh/.ocskel/.ocanim in destDir.
 bool importGltfToDir(const std::string& src, const std::string& destDir, const std::string& contentDir,
@@ -2741,6 +2743,7 @@ private:
     void cbCreateEqsQuery();
     void cbCreateSmartObject();
     void cbCreateUiLayout();
+    void cbCreateFontSet();
     void cbCreateBlendSpace();
     void cbCreateStateMachine();
     void cbCreateMontage();
@@ -3490,9 +3493,12 @@ private:
     // Window > World Outliner / Details. Default ON: these are the editor's two primary panels.
     bool showOutliner_=true;
     bool showDetails_=true;
-    // Window > Soft Body (plastic): the plastic-material test bar. Not persisted.
-    bool showSoftBody_=false;
-    editor::SoftBodyPanelState softBody_;
+#if AVER_MODULE_SOFTBODY_SCENE
+    // Show > Soft Bodies: strain / pins / pieces / wind / budget overlay. Not persisted. The line mesh is rebuilt each frame.
+    editor::SoftBodyDebugOptions softBodyDebug_;
+    editor::SoftBodyDebugFrame softBodyDebugFrame_;
+    rhi::LineHandle softBodyDebugMesh_ = 0;
+#endif
     // Viewport Show flags. Both default ON.
     bool showStaticMeshes_=true;
     bool showAtmosphere_=true;

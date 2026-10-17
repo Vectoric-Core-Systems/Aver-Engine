@@ -320,6 +320,65 @@ static void testOutOfRangeIndicesAreSkipped() {
           "and the valid triangle still produced its own normal (" + std::to_string(out[0].nz) + ")");
 }
 
+// ---- softBodyPackPieces: what a PieceView adds to the pure half -----------------------------------------------
+//
+// A UV seam makes two DRAW vertices share one world position (one sim particle); a tear duplicates a vertex; the
+// index list handed in holds only the visible triangles; a despawning piece shrinks toward its centroid.
+static void testPieceSeamKeepsUvs() {
+    AVER_INFO("-- seam vertices share a position but keep their UVs --");
+    // Two quads side by side in XZ; the seam vertices 1/4 and 2/7 are doubled with different UVs.
+    const Vec3 world[8] = {{0, 0, 0}, {10, 0, 0}, {10, 0, 10}, {0, 0, 10}, {10, 0, 0}, {20, 0, 0}, {20, 0, 10}, {10, 0, 10}};
+    const f32 uv[16] = {0, 0, 0.5f, 0, 0.5f, 1, 0, 1, 0.5f, 0, 1, 0, 1, 1, 0.5f, 1};
+    const u32 idx[12] = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7};
+    rhi::MeshVertex out[8];
+    softBodyPackPieces(world, 8, Mat4::identity(), idx, 12, uv, 1.0f, Vec3{0, 0, 0}, out);
+    check(nearf(out[1].px, out[4].px) && nearf(out[2].pz, out[7].pz), "the seam pair shares its position");
+    check(nearf(out[1].u, 0.5f) && nearf(out[4].u, 0.5f) && nearf(out[2].v, 1.0f) && nearf(out[5].u, 1.0f), "and each keeps its own UV");
+    bool flat = true;
+    for (const rhi::MeshVertex& v : out) flat = flat && nearf(std::abs(v.ny), 1.0f);
+    check(flat, "the normals come from the triangles on the sheet");
+}
+
+static void testPieceDeadTrianglesDoNotLightNormals() {
+    AVER_INFO("-- a hidden triangle contributes nothing to the normals --");
+    // Four vertices; the visible list holds one triangle, so vertex 3 touches none and ends with a zero normal.
+    const Vec3 world[4] = {{0, 0, 0}, {10, 0, 0}, {0, 10, 0}, {10, 10, 5}};
+    const u32 visible[3] = {0, 1, 2};
+    rhi::MeshVertex out[4];
+    softBodyPackPieces(world, 4, Mat4::identity(), visible, 3, nullptr, 1.0f, Vec3{0, 0, 0}, out);
+    check(nearf(std::abs(out[0].nz), 1.0f), "the visible triangle lights its corners");
+    check(nearf(out[3].nx, 0.0f) && nearf(out[3].ny, 0.0f) && nearf(out[3].nz, 0.0f), "a vertex only a hidden triangle used has a zero normal, not NaN");
+}
+
+static void testPieceShrinkTowardCentroid() {
+    AVER_INFO("-- the despawn shrink pulls toward the centroid --");
+    const Vec3 world[3] = {{100, 0, 0}, {120, 0, 0}, {100, 20, 0}};
+    const u32 idx[3] = {0, 1, 2};
+    const Vec3 centroid{110, 5, 0};
+    rhi::MeshVertex full[3], half[3], gone[3];
+    softBodyPackPieces(world, 3, Mat4::identity(), idx, 3, nullptr, 1.0f, centroid, full);
+    softBodyPackPieces(world, 3, Mat4::identity(), idx, 3, nullptr, 0.5f, centroid, half);
+    softBodyPackPieces(world, 3, Mat4::identity(), idx, 3, nullptr, 0.0f, centroid, gone);
+    check(nearf(full[0].px, 100.0f) && nearf(half[0].px, 105.0f) && nearf(half[1].px, 115.0f), "scale 0.5 halves the distance to the centroid");
+    check(nearf(gone[0].px, 110.0f) && nearf(gone[2].py, 5.0f), "scale 0 collapses onto it");
+    // Through a translation (a debris piece packs relative to its fixed origin).
+    rhi::MeshVertex local[3];
+    softBodyPackPieces(world, 3, Mat4::translation(Vec3{-100, 0, 0}), idx, 3, nullptr, 1.0f, centroid, local);
+    check(nearf(local[0].px, 0.0f) && nearf(local[1].px, 20.0f), "relative to an origin, positions stay small");
+}
+
+static void testPieceDuplicatedVertexIsIndependent() {
+    AVER_INFO("-- a vertex duplicated by a tear moves on its own --");
+    // Vertex 3 is a copy of 0 for the second triangle; after the tear they are apart.
+    const Vec3 world[6] = {{0, 0, 0}, {10, 0, 0}, {0, 10, 0}, {0, 0, 4}, {-10, 0, 4}, {0, -10, 4}};
+    const u32 idx[6] = {0, 1, 2, 3, 4, 5};
+    const f32 uv[12] = {0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1};
+    rhi::MeshVertex out[6];
+    softBodyPackPieces(world, 6, Mat4::identity(), idx, 6, uv, 1.0f, Vec3{0, 0, 0}, out);
+    check(nearf(out[0].pz, 0.0f) && nearf(out[3].pz, 4.0f), "the duplicate sits where the sim put it");
+    check(nearf(out[0].u, out[3].u) && nearf(out[0].v, out[3].v), "with the UV it was copied from");
+}
+
 int main() {
     AVER_INFO("SoftBodySceneTest");
     testWorldToLocalIsRowVector();
@@ -330,6 +389,10 @@ int main() {
     testUvPassthroughAndNullFallback();
     testNormalsAreComputedInLocalSpaceNotWorld();
     testOutOfRangeIndicesAreSkipped();
+    testPieceSeamKeepsUvs();
+    testPieceDeadTrianglesDoNotLightNormals();
+    testPieceShrinkTowardCentroid();
+    testPieceDuplicatedVertexIsIndependent();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

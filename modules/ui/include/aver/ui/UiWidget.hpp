@@ -52,6 +52,14 @@ struct UiWidgetProps {
     UiTextAlign textAlign = UiTextAlign::Left;
     f32  fontSize = 0;                       // design px; 0 = theme
     bool wrap = false;
+    // Text styling (docs/GAME_UI_TEXT.md). Empty family / false flags inherit the theme style.
+    std::string fontFamily;                  // a family of the loaded font set; empty = the style's, then the default
+    bool bold = false, italic = false;
+    UiTextDir textDir = UiTextDir::Auto;
+    f32  lineSpacing = 1.0f, letterSpacing = 0.0f;   // multiplier; design px
+    bool ellipsis = false;                   // end a clipped line with "..." (needs a width)
+    i32  maxLines = 0;                       // 0 = unlimited
+    bool rich = false;                       // <b> <i> <color=#RRGGBB> <size=N> <font=Name> <br> tags in text
     std::string image;                       // content path; the host resolves it to UiWidget::texture
     UiUvRect uv{};
     UiImageMode imageMode = UiImageMode::Stretch;

@@ -149,6 +149,98 @@ public readonly struct Widget : IEquatable<Widget>
     /// <see cref="Text"/> stays the raw authored string.</summary>
     public string ShownText => Native.Utf8(Native.aver_ui_widget_get_shown_text(Id));
 
+    // ---- text styling (typed wrappers over the property table; docs/GAME_UI_TEXT.md) ---------------
+
+    private static readonly string[] s_alignNames = { "left", "center", "right", "start", "end" };
+    private static readonly string[] s_dirNames = { "auto", "ltr", "rtl" };
+    private static readonly float[] s_textSize = new float[3];
+
+    private float GetFloat(string property, float fallback)
+        => float.TryParse(Get(property), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float v)
+            ? v : fallback;
+
+    private bool GetBool(string property) => string.Equals(Get(property), "true", StringComparison.OrdinalIgnoreCase);
+
+    private void SetBool(string property, bool value) => Set(property, value ? "true" : "false");
+
+    /// <summary>A family of the loaded font set; empty uses the theme's, then the default family.</summary>
+    public string FontFamily
+    {
+        get => Get("fontFamily") ?? string.Empty;
+        set => Set("fontFamily", value ?? string.Empty);
+    }
+
+    /// <summary>The text size in design pixels; 0 uses the theme's.</summary>
+    public float FontSize
+    {
+        get => GetFloat("fontSize", 0f);
+        set => Set("fontSize", value);
+    }
+
+    /// <summary>Use the family's bold face.</summary>
+    public bool Bold { get => GetBool("bold"); set => SetBool("bold", value); }
+
+    /// <summary>Use the family's italic face (or shear the regular one).</summary>
+    public bool Italic { get => GetBool("italic"); set => SetBool("italic", value); }
+
+    /// <summary>Where lines sit in the widget. <see cref="TextAlignment.Start"/> and <see cref="TextAlignment.End"/> follow the text direction.</summary>
+    public TextAlignment TextAlign
+    {
+        get { int i = Array.IndexOf(s_alignNames, Get("textAlign")); return i < 0 ? TextAlignment.Left : (TextAlignment)i; }
+        set => Set("textAlign", s_alignNames[Math.Clamp((int)value, 0, s_alignNames.Length - 1)]);
+    }
+
+    /// <summary>The paragraph direction; Auto follows the first strong letter.</summary>
+    public TextDirection TextDir
+    {
+        get { int i = Array.IndexOf(s_dirNames, Get("textDir")); return i < 0 ? TextDirection.Auto : (TextDirection)i; }
+        set => Set("textDir", s_dirNames[Math.Clamp((int)value, 0, s_dirNames.Length - 1)]);
+    }
+
+    /// <summary>Wrap a Text widget's lines at its width.</summary>
+    public bool Wrap { get => GetBool("wrap"); set => SetBool("wrap", value); }
+
+    /// <summary>End a line that is clipped by the widget's width with an ellipsis.</summary>
+    public bool Ellipsis { get => GetBool("ellipsis"); set => SetBool("ellipsis", value); }
+
+    /// <summary>The most lines to show; 0 is unlimited.</summary>
+    public int MaxLines
+    {
+        get => (int)GetFloat("maxLines", 0f);
+        set => Set("maxLines", (float)value);
+    }
+
+    /// <summary>Line height multiplier (1 = the font's own).</summary>
+    public float LineSpacing { get => GetFloat("lineSpacing", 1f); set => Set("lineSpacing", value); }
+
+    /// <summary>Extra space after every character, in design pixels.</summary>
+    public float LetterSpacing { get => GetFloat("letterSpacing", 0f); set => Set("letterSpacing", value); }
+
+    /// <summary>Read &lt;b&gt; &lt;i&gt; &lt;color=#RRGGBB&gt; &lt;size=N&gt; &lt;font=Name&gt; &lt;br&gt; tags in the text. Off by default, so
+    /// strings containing '&lt;' are unaffected.</summary>
+    public bool RichText { get => GetBool("rich"); set => SetBool("rich", value); }
+
+    /// <summary>The text colour (overrides the theme's).</summary>
+    public Colour TextColour
+    {
+        set
+        {
+            uint c = value.Packed;
+            Set("textColor", $"#{(c & 0xFF):X2}{((c >> 8) & 0xFF):X2}{((c >> 16) & 0xFF):X2}{(c >> 24):X2}");
+        }
+    }
+
+    /// <summary>The size of the widget's text as laid out by the last frame (zero before the first frame, and for
+    /// a widget with no text).</summary>
+    public TextMetrics TextSize
+    {
+        get
+        {
+            if (Native.aver_ui_widget_text_size(Id, s_textSize) == 0) return default;
+            return new TextMetrics(s_textSize[0], s_textSize[1], (int)s_textSize[2]);
+        }
+    }
+
     /// <summary>A slider's or progress bar's value, clamped to its range when set.</summary>
     public float Value
     {

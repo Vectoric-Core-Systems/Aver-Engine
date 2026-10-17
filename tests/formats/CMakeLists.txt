@@ -351,6 +351,12 @@ target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/modules/world/
 if(TARGET Aver.Trifactor)
   target_link_libraries(AverAssetC PRIVATE Aver.Trifactor)
 endif()
+# FBX import (ufbx, docs/FBX_IMPORT.md). Aver.Formats.Fbx exists even without the vendored source, in which case
+# `convert x.fbx` fails with "built without ufbx" instead of "unsupported input format".
+if(TARGET Aver.Formats.Fbx)
+  target_link_libraries(AverAssetC PRIVATE Aver.Formats.Fbx)
+  target_compile_definitions(AverAssetC PRIVATE AVER_HAVE_FBX=1)
+endif()
 # Audio import (.wav/.mp3/.m4a/.flac -> .ocaudio) is OPTIONAL for the same reason MaterialTest/
 # ActorSweep guard on Aver.Formats.Material above: an AVER_MODULE_SCRIPTING-independent, always-
 # available module in most trees, but a tree can still be configured without Aver.Audio (its own
@@ -494,3 +500,36 @@ set_target_properties(ExrWriteTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_B
 add_executable(CubeLutTest src/CubeLutTest.cpp)
 target_link_libraries(CubeLutTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(CubeLutTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ---- FBX import (docs/plans/wave9/FBX_IMPORT.md) --------------------------------------------------------------
+#
+# NO add_test for any of these: aver_register_ctest_in (root CMakeLists) picks up every *Test executable and
+# applies FAIL_REGULAR_EXPRESSION "FAIL  |FAILED ===" centrally.
+
+# ImportRecordTest -- the .ocimport record: round trip, unknown lines kept, CRLF, malformed refused with a reason.
+add_executable(ImportRecordTest src/ImportRecordTest.cpp)
+target_link_libraries(ImportRecordTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(ImportRecordTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FbxImportTest -- the importer over fixtures written in code as ASCII FBX 7.4 (FbxFixture.hpp). Needs the vendored
+# ufbx: without it Aver.Formats.Fbx still builds but has nothing to test. It also RUNS AverAssetC once, so it
+# depends on that target the way AverAssetCTest does. modules/formats/src is on the include path for FbxInternal.hpp
+# (extractFbxBlendShapes is exercised directly, the seam the morph-target feature plugs into).
+if(TARGET Aver.Formats.Fbx AND TARGET ufbx)
+  add_executable(FbxImportTest src/FbxImportTest.cpp)
+  target_link_libraries(FbxImportTest PRIVATE Aver.Formats.Fbx Aver.Formats Aver.Core Aver.Platform)
+  target_include_directories(FbxImportTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/formats/src)
+  add_dependencies(FbxImportTest AverAssetC)
+  target_compile_definitions(FbxImportTest PRIVATE AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>")
+  set_target_properties(FbxImportTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# FbxMaterialPackTest -- packSeparateMetalRough (ImportCook.cpp): a roughness map and a metalness map of different
+# sizes become one packed image. Material-gated like MaterialTest. ImportCook.cpp only DECLARES stb_image_write, so the
+# test carries the one STB_IMAGE_WRITE_IMPLEMENTATION this executable needs (see Aver.Formats.Material above).
+if(TARGET Aver.Formats.Material)
+  add_executable(FbxMaterialPackTest src/FbxMaterialPackTest.cpp)
+  target_link_libraries(FbxMaterialPackTest PRIVATE Aver.Formats.Material Aver.Formats Aver.Core Aver.Platform)
+  target_include_directories(FbxMaterialPackTest PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
+  set_target_properties(FbxMaterialPackTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

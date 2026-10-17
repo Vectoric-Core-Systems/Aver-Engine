@@ -755,7 +755,7 @@
       "name": "Aver.Render.SoftBody",
       "dir": "render.softbody",
       "displayName": "Soft-Body Drawing",
-      "description": "Draws meshes whose vertices come from a simulated soft body.",
+      "description": "Draws cloth and destructible pieces whose vertices come from simulated soft bodies.",
       "category": "Rendering",
       "option": "AVER_MODULE_RENDER_SOFTBODY",
       "required": false,
@@ -763,11 +763,12 @@
       "dependsOn": [
         "Aver.Core",
         "Aver.Formats",
-        "Aver.Physics",
         "Aver.RHI",
-        "Aver.Scene"
+        "Aver.Scene",
+        "Aver.SoftBody",
+        "Aver.SoftBody.Scene"
       ],
-      "consequence": "Simulated soft bodies are not drawn."
+      "consequence": "Simulated cloth and destructibles are not drawn."
     },
     {
       "schema": 1,
@@ -937,15 +938,37 @@
       "name": "Aver.SoftBody",
       "dir": "softbody",
       "displayName": "Soft Bodies",
-      "description": "Plastic soft bodies: dents that stay, and tearing.",
+      "description": "Cloth and destruction topology: cage, damage, tear islands and the .ocsoft asset that drives Jolt soft bodies.",
       "category": "Physics",
       "option": null,
       "required": true,
       "default": true,
       "dependsOn": [
-        "Aver.Core"
+        "Aver.Core",
+        "Aver.Formats"
       ],
       "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.SoftBody.Scene",
+      "dir": "softbody.scene",
+      "displayName": "Cloth and Destruction",
+      "description": "Cloth and destructibles on scene entities over Jolt soft bodies: dents, tearing, detached pieces, wind.",
+      "category": "Physics",
+      "option": "AVER_MODULE_SOFTBODY_SCENE",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Anim",
+        "Aver.Anim.Scene",
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Physics",
+        "Aver.Scene",
+        "Aver.SoftBody"
+      ],
+      "consequence": "Cloth and Destructible components do nothing: no wind-blown cloth, dents, tearing or breaking pieces."
     },
     {
       "schema": 1,
@@ -1149,16 +1172,6 @@
       "dir": "aero",
       "displayName": "Aerodynamics",
       "description": "Planned: baked aerodynamic sampling and force application.",
-      "category": "Physics",
-      "dependsOn": [
-        "Aver.Core"
-      ]
-    },
-    {
-      "name": "Aver.Fracture",
-      "dir": "fracture",
-      "displayName": "Fracture",
-      "description": "Planned: runtime debris splitting and launch.",
       "category": "Physics",
       "dependsOn": [
         "Aver.Core"

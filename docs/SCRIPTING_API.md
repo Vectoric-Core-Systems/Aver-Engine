@@ -635,10 +635,11 @@ Three rules carry most of the design:
 - **Anchor to `Hud.Viewport`, never to the window.** In the editor the game is drawn into a dockspace
   panel and the two rectangles differ; a HUD laid out against the window sits partly under the editor's
   own chrome. In a shipped build they are the same rectangle and nothing changes.
-- **There is no text.** Nothing in the engine can rasterise a glyph, so there is no `Hud.Text` to call.
-  A HUD today is rectangles, bars and tinted quads. There is no widget tree above the draw list either:
-  a HUD is laid out by the code that draws it.
+- **Text is drawn by the text engine.** `Hud.Text`, `Hud.TextBlock` and the widget text properties draw TrueType text
+  with fallback fonts, kerning, Arabic shaping, right-to-left text and line breaking (`docs/GAME_UI_TEXT.md`). A widget tree
+  (`UiSystem`, `Widget`, `docs/GAME_UI.md`) sits above the draw list; a HUD can still be laid out by the code that draws it.
 
+**Text.** `UiText` configures and queries the text engine (`LoadFontSet`, `Configure`, `Language`, `HasGlyph`, `Measure(text, TextStyle, maxWidth)`, `Prewarm`, `Stats`); a game normally does none of it because the host loads `Content/UI/Fonts.ocfonts` and follows `Loc`. `TextStyle(Family, Size, Bold, Italic, Rich, Ellipsis)` styles a run; `TextMetrics(Width, Height, Lines)` is a measurement. `Hud.TextBlock(rect, text, colour, style, TextAlignment)` draws a wrapped block and returns its height; `Hud.MeasureText(text, style, maxWidth)` measures one. `Widget` gains typed `FontFamily`, `FontSize`, `Bold`, `Italic`, `TextAlign`, `TextDir`, `Wrap`, `Ellipsis`, `MaxLines`, `LineSpacing`, `LetterSpacing`, `RichText`, `TextColour` and a read-only `TextSize`. Enums `TextAlignment` (Left Center Right Start End), `TextDirection` (Auto LeftToRight RightToLeft) and `TextFlags` mirror the C constants. Rich text tags (`<b> <i> <color=#RRGGBB> <size=N> <font=Name> <br>`) work when `RichText` is on. See `docs/GAME_UI_TEXT.md`.
 **`Hud`** — static, and the whole drawing surface:
 
 | Member | Description |
@@ -866,6 +867,9 @@ public sealed class Coin : AverActor
 
 ---
 
+## 18b. Cloth and destruction
+
+`Aver.Framework.SoftBodies` and the `Entity` extensions in `SoftBodies.cs` (`docs/SOFTBODY.md`): `entity.AddCloth(SoftPreset, asset)`, `entity.AddDestructible(SoftPreset, asset)`, `entity.SetSoftPreset`, `entity.ApplySoftDamage(point, radiusCm, energyJoules, direction, kind)`, `entity.TearSoftBody(point, radiusCm)`, `entity.RepairSoftBody()`, `entity.ReleaseCloth()`, `entity.TryGetSoftBodyState(out SoftBodyState)`; statics `SoftBodies.SetWind`, `Explode`, `SetBudget` and `DrainEvents(Span<SoftEvent>)`. Calls are deferred to the next tick and return false when no soft-body system is installed.
 ## 19. Not yet available
 
 The gameplay object model above is complete. What follows is what a script still **cannot** reach,
@@ -875,17 +879,26 @@ stated as absences rather than left to be discovered:
   `.ocaudio` container, and a C seam (`modules/audio`, `modules/audio.wasapi`, `modules/audio.abi`, and
   `modules/formats`; see `docs/AUDIO.md`). None of them are joined up: there is no managed binding, and
   neither the editor nor the runtime opens a device. A script cannot play a sound.
-- **Text, and widgets, in the UI.** `Aver.UI` (§16) draws rectangles and tinted quads. Nothing in the
-  engine rasterises a glyph, so there is no `Hud.Text`; and there is no widget tree above the draw list,
-  so layout is whatever the drawing code computes. There is also no input routing into the UI — a HUD is
-  drawn, not clicked.
+- **Typing, and some scripts, in the UI.** `Aver.UI` (§16) has a widget tree (`UiSystem`, `Widget`) over the draw list and
+  draws TrueType text (`Hud.Text`, `Hud.TextBlock`, `UiText`) with fallback fonts, kerning, Arabic shaping, bidi and line
+  breaking (`docs/GAME_UI.md`, `docs/GAME_UI_TEXT.md`). Still missing: typing other than the US key layout (no `WM_CHAR`
+  plumbing, no IME) and Indic and Thai shaping.
 - **Timers and coroutines.** No `SetTimer`, no `yield`. Count down in `OnTick`.
 - **Networking.** `modules/net` exists; nothing in it is reachable from C#.
 - **Hot-reload state migration** beyond `[Editable]` fields.
-- **Import beyond glTF.** The Content Browser's Import *converts* `.gltf`/`.glb` into one `.ocmesh` per
-  mesh and registers the result immediately (`SandboxApp::importModel`); every other file type is copied
-  in unchanged. That is right for a `.png` a material names — a texture is decoded and uploaded straight
-  from the source file, with its colour space taken from the slot that binds it — and wrong for an FBX,
-  which is not read at all. No texture is converted, compressed or packed at import.
+- **Import beyond glTF and FBX.** The Content Browser's Import *converts* `.gltf`/`.glb` and `.fbx` (ufbx, `docs/FBX_IMPORT.md`) into
+  `.ocmesh`/`.ocskel`/`.ocanim` and registers the result immediately (`SandboxApp::importModel`); every other file type is copied
+  in unchanged. That is right for a `.png` a material names — a texture is decoded and uploaded straight from the source file, with its
+  colour space taken from the slot that binds it. No texture is compressed at import (an FBX's separate roughness and metalness maps are
+  packed into the one slot `.ocmat` has).
+
+### Model import (editor hosts)
+
+`ModelImport.IsAvailable` / `ModelImport.Import(source, destFolder, options, overwrite)` (`Aver.Framework`, `ModelImport.cs`) import a
+model into a Content-relative folder through the editor's importers: `ModelImportOptions` (Scale, UnitMeters, Meshes, Skeletons,
+Animations, Materials, BlendShapes, RootMotion, BakeFps, ReduceKeys) applies to `.fbx`; the result is `ModelImportResult(Ok, Message,
+Meshes, Skeletons, Clips, Materials, Textures)`. Import is an editor-time act: only the editor installs a provider
+(`aver_fw_set_import_provider`, `framework_import_abi.h`), so in a packaged game `IsAvailable` is false and `Import` answers `Ok == false`
+with a message instead of throwing. Graph nodes: Import Model and Is Model Import Available (category Assets).
 
 These are the natural next layers; the object model is the foundation they plug into.

@@ -157,6 +157,21 @@ public static class Hud
         return Text(x, y, text ?? string.Empty, colour);
     }
 
+    private static readonly float[] s_blockSize = new float[3];
+
+    /// <summary>Draws a block of styled text with its top-left at the rectangle's corner, wrapped to the rectangle's
+    /// width and aligned within it. Returns the height of the block, so a caller can stack paragraphs. The style
+    /// picks a family of the loaded font set, a size, bold / italic, rich-text tags and an ellipsis. Needs the text
+    /// engine (a TrueType font set); without it the baked font draws the text unwrapped.</summary>
+    public static float TextBlock(Rect r, string text, Colour colour, TextStyle style, TextAlignment align = TextAlignment.Left)
+        => Native.aver_ui_text_block(r.X, r.Y, text ?? string.Empty, colour.Packed, style.Family, style.Size,
+                                     style.ToFlags() | (int)TextFlags.Wrap, r.Width, (int)align, s_blockSize);
+
+    /// <summary>The size <paramref name="text"/> would occupy in <paramref name="style"/>, wrapped to
+    /// <paramref name="maxWidth"/> when that is above 0.</summary>
+    public static TextMetrics MeasureText(string text, TextStyle style, float maxWidth = 0f)
+        => UiText.Measure(text, style, maxWidth);
+
     // ---- hit testing and the pointer ------------------------------------------------------------
 
     private static readonly float[] s_pointer = new float[2];

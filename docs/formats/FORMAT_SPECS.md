@@ -25,6 +25,7 @@ Status: authoritative design spec, v1. Target repo: `C:/Users/User/Documents/Ave
 | `.scene` | World authoring input | **text** | none | Human-authored placement list (→ `.ocmap`/`.ocworld`) | **PRESERVE (unchanged)** |
 | `.octrack` | Track variant of `.ocmap` | **text** | none | Same grammar as `.ocmap` (kept for content compat) | **PRESERVE (unchanged)** |
 | `.ocmesh` | Static mesh | **binary** | `AVR1`/`MESH` | Vertex streams, indices, submeshes, LODs, meshlets, bounds, optional collision + cage-bind | **NEW** |
+| `.ocsoft` | Soft-body asset (cloth or destructible) | JSON | — | `format`/`version`, `kind`, `preset`, `material`/`sim` overrides, `cloth`/`destruct` params, `paint` (per-particle pin/reach RLE keyed by `meshKey`, plus `rules`); schema in `docs/SOFTBODY.md` section 3 | **NEW** |
 | `.octex` | Texture | **binary** | `AVR1`/`TEX ` | Mip chain over BCn/ASTC/Basis/raw, color space, sampler | **NEW** |
 | `.ocmat` | Material | **text** (cooked → `MATL` chunk) | none / `AVR1` | PBR metallic-roughness params + texture bindings + optional node graph | **NEW** |
 | `.ocskel` | Skeletal mesh + skeleton | **binary** | `AVR1`/`SKEL` | Bones + skin binding + embedded `.ocmesh` geometry | **NEW** |
@@ -967,6 +968,8 @@ COMPONENT <Type> [key=value]...
 | `Brain` | `asset` (`.ocbt` or `.ocst`), `team` ("") | `CSynapseBehavior` |
 | `SmartObject` | `asset` (`.ocso`), `enabled` (1) | `CSmartObject` |
 | `SoftBody` | `maxdist` (0), `compliance` (0), `simulated` (1) | `CSoftBody` |
+| `Cloth` | `asset` (`.ocsoft`), `preset` (`cloth_light`; `cloth_heavy`), `wind` (1), `stiffness` (1), `reach` (1), `freeze` (0), `tearable` (0), `world` (1), `proxy` (1), `windon` (1) | `CCloth`; runtime state (damage, pieces) is never saved |
+| `Destructible` | `asset` (`.ocsoft`), `preset` (`metal`; `wood`, `glass`), `toughness` (1), `impact` (1), `lifetime` (0), `maxpieces` (0), `indestructible` (0), `nodebris` (0) | `CDestructible`; one soft body per entity, so not together with a Cloth |
 
 **Canonical writing** (what the editor's save produces and the golden strings of `OcWorldComponentsTest` pin): the asset key
 (omitted only when the id is 0), `RootMotion.mode` and `MotionMatcher.input` are always written; every other key only when it differs from the
@@ -1580,6 +1583,7 @@ All returns are error codes (`0`=ok); all geometry/pixels handed back are alread
 | Image decode | stb_image | public domain |
 | glTF/JSON parse | self-contained (OCCompiler-style) | own code |
 | Mesh optimize / meshlets | meshoptimizer | MIT |
+| FBX import (editor/tools only) | ufbx | MIT |
 | Tangents | MikkTSpace-equivalent | public domain |
 
 No GPL runtime, no Unreal-derived tech, no proprietary codecs. Every dependency is MIT/BSD/zlib/Apache-2.0/public-domain, satisfying the hard requirement.

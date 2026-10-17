@@ -24,6 +24,7 @@
 #include "aver/game/GameSystemsWiring.hpp"
 #include "aver/game/SequenceHost.hpp"   // [wave5/sequencer] the ABI provider
 #include "aver/game/GameUiInput.hpp"
+#include "aver/game/GameUiText.hpp"
 #include "aver/platform/FileSystem.hpp"   // userDataDir: where the trajectory network's weights live
 #if AVER_MODULE_VOXI
 #include "ModeSwitchNotice.hpp"
@@ -461,6 +462,7 @@ void SandboxApp::onInit(Engine& e)  {
     // Append BtEditor (claims .ocbt).
     assetEditors_.registerFactory(&editor::makeBtEditor);
     assetEditors_.registerFactory(&editor::makeUiLayoutEditor);            // .ocui
+    assetEditors_.registerFactory(&editor::makeFontSetEditor);             // .ocfonts
     assetEditors_.registerFactory(&editor::makeBlendSpaceEditor);          // .ocblend
     assetEditors_.registerFactory(&editor::makeAnimStateMachineEditor);    // .ocasm
     assetEditors_.registerFactory(&editor::makeMontageEditor);             // .ocmontage
@@ -635,6 +637,15 @@ void SandboxApp::onInit(Engine& e)  {
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
     // Montages: the framework relays PlayMontage and friends to AnimSystem's montage players.
     aver_fw_set_anim_provider(&anim::montageProvider, &anim::animSystem());
+    // Model import: ImportModel / ModelImport.Import reach the editor's importers (wave 9, docs/FBX_IMPORT.md). Editor only; a
+    // packaged game installs none and answers "unavailable".
+    {
+        ModelImportHost host;
+        host.contentDir = [this] { return project_.valid() ? project_.contentDir() : std::string(); };
+        host.projectDir = [this] { return project_.valid() ? project_.dir : std::string(); };
+        host.imported = [this](const std::string& destDir) { cbInvalidate(destDir); wantMeshReload_ = true; };
+        installModelImportProvider(host);
+    }
     // [wave5/ik-retarget] IK goals, foot-IK weights and rig inputs.
     aver_fw_set_ik_provider(&anim::ikProvider, &anim::controlRigSystem());
     // [wave5/sequencer] Level sequences: LevelSequences.Play and friends reach the director Play runs.
@@ -642,6 +653,10 @@ void SandboxApp::onInit(Engine& e)  {
 #endif
     // Animation state machines, reverb zones, blackboard relay, crowd/hearing/cover behaviours.
     game::registerGameSystems();
+#if AVER_MODULE_SOFTBODY_SCENE
+    // Path resolver for the soft-body mesh/.ocsoft decode caches (the content index, as for animation).
+    game::installSoftBodyHost(&game::GameContent::resolveAnimAsset, &content_, nullptr, nullptr);
+#endif
 #if AVER_MODULE_SCENE
     installPrefabHooks();
     installLevelInstanceHooks();   // [wave3/level-instances]
@@ -1024,6 +1039,9 @@ void SandboxApp::onInit(Engine& e)  {
 #if AVER_MODULE_SCENE
         if (scripts_.graphFireAvailable()) {
             anim::animSystem().setNotifySink(&SandboxApp::animNotify, this);
+#if AVER_MODULE_SOFTBODY_SCENE
+            softbody::softBodySystem().setNotifySink(&SandboxApp::animNotify, this);   // SoftBodyTorn / Detached / Dust / Impact / Repaired
+#endif
 #if AVER_MODULE_SYNAPSE_SCENE
             // Same sink for synapse (SynapsePerception.hpp).
             synapse::perceptionSystem().setNotifySink(&SandboxApp::animNotify, this);
@@ -1184,6 +1202,7 @@ void SandboxApp::onInit(Engine& e)  {
     // The game UI's render feature: overlay pass only, so ordering against scene features is free.
     gameUi_ = aver::render::ui::UiRenderer::create(*e.device());
     if (gameUi_) e.device()->addRenderFeature(gameUi_);
+    game::uiTextBindRenderer(gameUi_);   // the glyph atlas for Play/preview text (the font set itself loads when a project opens)
 
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
     // Occlusion culler (not IRenderFeature; calls renderSceneEntities() directly).
@@ -2265,6 +2284,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     anim::animSystem().tick(scene::World::instance(), t.dt);
     playProf_.end(editor::PlayPhase::ObjectAnim);
     hm.mark("objectAnim");
+#if AVER_MODULE_SOFTBODY_SCENE
+    // After the pose it reads (skin palette), before the draw scene copies the result (plan 2.5.2).
+    playProf_.begin(editor::PlayPhase::SoftBody);
+    game::tickSoftBodies(t.dt, viewPos());
+    playProf_.end(editor::PlayPhase::SoftBody);
+    hm.mark("softBodies");
+#endif
     // The level sequence's Post phase (Animate preview, Play), after the clips so a sequenced actor wins.
     tickSequencePost();
     hm.mark("sequence");
@@ -2735,6 +2761,7 @@ editor::shutdownAnimEditors();
     taaUpscaler_.reset();
     neuraa_.reset();   // holds the device's factory: must go while the device lives (it crashed in ~SandboxApp)
 #endif
+    game::uiTextShutdown();   // unbind the atlas from gameUi_ and close the fonts before the renderer and device go
     // Same order: clear device pointer before destroying the object.
     e.device()->setFrameInterpolation(false);
     e.device()->setFrameInterpolator(nullptr);

@@ -5,6 +5,7 @@
 #include "SandboxApp.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/game/GameLocalization.hpp"
+#include "aver/game/GameUiText.hpp"
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_loc_abi.h"
 #  include "aver/framework/framework_table_abi.h"
@@ -467,6 +468,8 @@ void SandboxApp::pumpContentWatch() {
     // String tables and data tables hot reload (a bad save keeps the old values and logs once).
     game::onContentFilesChanged(contentWatch_.root(), watchEvents_);
 #endif
+    game::uiTextReloadIfChanged(watchEvents_);   // .ocfonts / .ttf / .otf / .ttc under Content reload the game UI font set
+    editor::EditorTextPreview::shared().invalidate();   // and the layout editor preview re-reads it (cheap; reloads only on the next draw)
     for (const FileEvent& ev : watchEvents_) {
         if (ev.kind == FileChange::Deleted) continue;
         const std::string full = (std::filesystem::path(contentWatch_.root()) / ev.path).string();

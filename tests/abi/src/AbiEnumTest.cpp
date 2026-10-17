@@ -568,6 +568,7 @@ static const Abi kAbis[] = {
       "modules/physics/include/aver/physics/physics_ragdoll_abi.h",
       "modules/physics/include/aver/physics/physics_queries_abi.h",
       "modules/physics/include/aver/physics/physics_body_ext_abi.h",
+      "modules/physics/include/aver/physics/physics_softbody_abi.h",
       nullptr},
      "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.cs", "aver_phys_"},
     {"audio ABI",
@@ -644,6 +645,9 @@ static const MemberWaiver kMemberWaivers[] = {
     {"framework key codes", "lalt",   "leftalt"},
     // wave 3 #21: the C constant is the short BT, the C# member spells the name out.
     {"framework brain kinds", "bt", "behaviourtree"},
+    // The C constants say LTR/RTL, the C# members spell the direction out.
+    {"UI text direction", "ltr", "lefttoright"},
+    {"UI text direction", "rtl", "righttoleft"},
 };
 
 // SENTINELS ARE SKIPPED BY NAME, one per group at most. AVER_FW_TICK_COUNT and the two _COUNT
@@ -663,6 +667,12 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Framework/Enums.cs", "EndReason",   ""},
     {"UI layers",             "modules/ui.abi/include/aver/ui/ui_abi.h",                    "AVER_UI_LAYER_",
      "scripting/csharp/Aver.UI/Hud.cs",          "Layer",       ""},
+    {"UI text alignment",     "modules/ui.abi/include/aver/ui/ui_abi.h",                    "AVER_UI_TEXT_ALIGN_",
+     "scripting/csharp/Aver.UI/TextStyle.cs",    "TextAlignment", ""},
+    {"UI text direction",     "modules/ui.abi/include/aver/ui/ui_abi.h",                    "AVER_UI_TEXT_DIR_",
+     "scripting/csharp/Aver.UI/TextStyle.cs",    "TextDirection", ""},
+    {"UI text flags",         "modules/ui.abi/include/aver/ui/ui_abi.h",                    "AVER_UI_TEXT_FLAG_",
+     "scripting/csharp/Aver.UI/TextStyle.cs",    "TextFlags",   ""},
     // THE LOG LEVELS, which are mirrored THREE times and were checked zero. Log.hpp says the order
     // "is load-bearing", names both mirrors by path, and warns that a value inserted in the middle
     // "would silently renumber every one of those without a single compile error" -- and then

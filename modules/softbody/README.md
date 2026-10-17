@@ -1,29 +1,24 @@
 # Aver.SoftBody  (`modules/softbody`)
 
 - **Language:** C++
-- **Depends on:** Core (only)
-- **Status:** implemented, wired into the root build (optional editor and C# steps: docs/SOFTBODY.md "Wiring")
+- **Depends on:** Core, Formats (for `Json.hpp` and the file helpers)
+- **Status:** implemented; driven by `Aver.SoftBody.Scene` (modules/softbody.scene)
 
-The plastic half of soft bodies: a UE-free cage solver — Verlet, then damage/plasticity, then Gauss-Seidel
-PBD — with a material yield curve (elastic to yield, then permanent set), break and tear that duplicates
-particles along the cut, a render-mesh mapping that follows tears, crush-curve impacts, and an async
-fixed-Hz worker. Plus a C ABI (`softbody_abi.h`). Spec: docs/recon/softbody-solver.md. Design and usage:
-**docs/SOFTBODY.md**.
-
-**Soft body for skeletal meshes and cloth that springs back is still Jolt's**, through `Aver.Physics`'s
-plain-C ABI as `aver_phys_softbody_*`: it brings `Skinned` constraints and collision against the real
-world, which this module does not. What Jolt cannot do — dents that stay, yield curves, break/tear — is
-all this module is for. The two never share state and this module does not link `Aver.Physics`.
+The pure topology, damage and asset library behind cloth and destruction. **Jolt owns the physics**
+(soft bodies through `Aver.Physics`' `aver_phys_sb_*` ABI); this module owns what Jolt has no notion of:
+the cage, the material yield model, tear resolution into duplicate particles, island planning, the render
+binding that follows tears, and the `.ocsoft` asset. No scene, no GPU, no Jolt, so `tests/softbody`
+decides all of it with no device. The Verlet/PBD solver, its async worker and `aver_sb_*` are retired.
+Design: **docs/SOFTBODY.md**.
 
 | File | What |
 |---|---|
-| `Material.hpp` | `Material`, `Behavior`, the crush curve, tear radius |
-| `Cage.hpp` / `Cage.cpp` | particles, beams, triangles; build/repair; tear resolution; queries |
-| `Solver.cpp` | `step`, `applyImpact` |
-| `RenderBinding.hpp` | render vertices/triangles following tears |
-| `AsyncSolver.hpp` | the fixed-rate worker and its snapshots |
-| `softbody_abi.h` | the C ABI (`aver_sb_*`) |
+| `Material.hpp` | `Material` (yield, break, toughness, Jolt compliance), `SoftPreset` and the preset table, crush curve |
+| `Cage.hpp` / `Cage.cpp` | particles, beams, dihedral bends, triangles; build/repair; tear resolution; masses |
+| `SimMesh.hpp` | weld a render mesh into particles, build the cage and its `RenderBinding`, pins and reach from paint, rules or a mask |
+| `Damage.hpp` | `evaluateStrain` (creep, snap), `depositEnergy`, `tearWithin`, `repairAll` |
+| `Islands.hpp` | connected pieces after a tear, anchored first, dust below the minimum |
+| `RenderBinding.hpp` | render vertices and triangles following tears |
+| `SoftAsset.hpp` | `.ocsoft` read/write, validation, the paint run-length codec |
 
-Tests: `tests/softbody` (`PlasticSoftBodyTest`, `PlasticSoftBodyAsyncTest`).
-
-See [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the full module DAG.
+Tests: `tests/softbody` (`SoftBodyTest`, `SoftAssetTest`, `SimMeshTest`, `DamageTest`, `IslandsTest`).

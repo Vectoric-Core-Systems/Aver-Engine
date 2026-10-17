@@ -24,6 +24,28 @@ extern "C" {
 #define AVER_UI_LAYER_TOOLTIP    3
 #define AVER_UI_LAYER_DEBUG      4
 
+// Text alignment (aver::ui::UiTextAlign): Left / Center / Right are physical, Start / End follow the
+// paragraph direction. Mirror Aver.UI.TextAlignment.
+#define AVER_UI_TEXT_ALIGN_LEFT   0
+#define AVER_UI_TEXT_ALIGN_CENTER 1
+#define AVER_UI_TEXT_ALIGN_RIGHT  2
+#define AVER_UI_TEXT_ALIGN_START  3
+#define AVER_UI_TEXT_ALIGN_END    4
+// Paragraph direction (aver::ui::UiTextDir). Mirror Aver.UI.TextDirection.
+#define AVER_UI_TEXT_DIR_AUTO 0
+#define AVER_UI_TEXT_DIR_LTR  1
+#define AVER_UI_TEXT_DIR_RTL  2
+// Flags of aver_ui_text_measure / block / prewarm. Mirror Aver.UI.TextFlags.
+#define AVER_UI_TEXT_FLAG_BOLD     1
+#define AVER_UI_TEXT_FLAG_ITALIC   2
+#define AVER_UI_TEXT_FLAG_RICH     4
+#define AVER_UI_TEXT_FLAG_ELLIPSIS 8
+#define AVER_UI_TEXT_FLAG_WRAP     16
+// Where a font file is looked for (the `kind` the host's open callback gets).
+#define AVER_UI_FONT_CONTENT 0   /* a path under the project's Content */
+#define AVER_UI_FONT_SYSTEM  1   /* a file name in the OS fonts directory (Windows only in v1) */
+#define AVER_UI_FONT_ENGINE  2   /* a file name next to the executable (".ocfonts" paths written @exe/name) */
+
 // ---- the frame ------------------------------------------------------------------------------------
 
 // Clears the list and declares the rectangle this frame's UI is laid out against, in backbuffer
@@ -84,6 +106,52 @@ AVER_UI_API float aver_ui_text(float x, float y, const char* utf8, uint32_t rgba
 // The width `utf8` would occupy. Needed BEFORE drawing to centre or right-align, which is why it is
 // an export of its own and not something a caller derives from aver_ui_text's return.
 AVER_UI_API float aver_ui_text_width(const char* utf8);
+
+// ---- the text engine (docs/GAME_UI_TEXT.md) ---------------------------------------------------------
+//
+// Runtime TrueType with fallback chains, kerning, Arabic shaping, bidi, line breaking and styling. It
+// lives in this DLL (like the draw list); the host feeds it font bytes through a callback, lends the
+// atlas to the renderer by an opaque pointer, and everything below is additive. When the engine has a
+// usable TrueType face, aver_ui_text / aver_ui_text_width / aver_ui_font_metrics use the default family
+// at 16 px; otherwise they use the lent bitmap font exactly as before.
+
+// Opens a font file. Returns 1 and fills outData / outSize (read only, valid until the matching close) and
+// an opaque outToken passed back to the close callback; 0 when it cannot be opened. The host maps files
+// read only; OS fonts (kind SYSTEM) must NOT be reported to the package file trace, project fonts must.
+typedef int32_t (*AverUiFontOpenFn)(int32_t kind, const char* utf8Name, const uint8_t** outData, uint64_t* outSize,
+                                    void** outToken);
+typedef void (*AverUiFontCloseFn)(void* token);
+// The current UI language (BCP-47), e.g. aver_fw_loc_culture. Re-read every aver_ui_begin_frame.
+typedef const char* (*AverUiLanguageFn)(void);
+
+// Installs the font loader (host). NULLs clear it AND close every font opened through it.
+AVER_UI_API void aver_ui_text_set_loader(AverUiFontOpenFn open, AverUiFontCloseFn close);
+// Parses and loads an .ocfonts document, replacing the font set. 1 ok, 0 failed (aver_ui_text_error).
+AVER_UI_API int32_t aver_ui_text_load_fontset(const char* ocfontsUtf8);
+AVER_UI_API const char* aver_ui_text_error(void);
+// The UI language; "" = none. Chains reorder (lang=) and OVERRIDE rows apply.
+AVER_UI_API void aver_ui_text_set_language(const char* bcp47);
+AVER_UI_API void aver_ui_text_set_language_fn(AverUiLanguageFn fn);
+// Atlas page size, page cap and per-frame glyph budget. A value <= 0 keeps the current one.
+AVER_UI_API void aver_ui_text_configure(int32_t pageSize, int32_t maxPages, int32_t glyphBudget);
+// The glyph atlas as an opaque aver::ui::UiGlyphAtlas*, for the renderer (UiRenderer::setTextAtlas).
+AVER_UI_API const void* aver_ui_text_atlas(void);
+// pages, glyphsResident, rasterThisFrame, rasterTotal, evictedPages, overflow, layoutHits, layoutMisses,
+// cacheEntries, incompleteLayouts, faces, uploadBytesLastFrame.
+AVER_UI_API void aver_ui_text_stats(float* out12);
+// 1 when some face of the family carries the code point.
+AVER_UI_API int32_t aver_ui_text_has_glyph(const char* family, uint32_t codepoint);
+// Measures `utf8` (localization references resolve): width, height, line count into outWHL (3 floats).
+// `family` NULL or "" = the default; maxWidth > 0 wraps (with FLAG_WRAP) or ellipsizes (FLAG_ELLIPSIS).
+// 1 when the engine measured it, 0 when no font is available (outWHL is then zeroes).
+AVER_UI_API int32_t aver_ui_text_measure(const char* utf8, const char* family, float px, int32_t flags, float maxWidth,
+                                         float* outWHL);
+// Draws a block with its top-left at (x, y), wrapped in maxWidth (> 0), aligned within it by AVER_UI_TEXT_ALIGN_*.
+// Returns the block height; outWHL (may be NULL) receives width, height, line count.
+AVER_UI_API float aver_ui_text_block(float x, float y, const char* utf8, uint32_t rgba, const char* family, float px,
+                                     int32_t flags, float maxWidth, int32_t align, float* outWHL);
+// Rasterises the glyphs of a string ahead of use, ignoring the per-frame budget (loading screens).
+AVER_UI_API void aver_ui_text_prewarm(const char* utf8, const char* family, float px, int32_t flags);
 
 // ---- hit testing ------------------------------------------------------------------------------------
 //

@@ -5,6 +5,7 @@
 #include "Buoyancy.hpp"  // src-local for the same reason: WaterVolume holds JPH:: types
 #include "PhysicsInternal.hpp"  // the world and its handle tables, shared with the sibling ABI files
 #include "PhysicsCharacterInternal.hpp"  // character-vs-character, the character body filter, defaults
+#include "SoftBodyAero.hpp"  // builder soft bodies: aero, impact listener, registry hooks (PhysicsSoftBody.cpp)
 
 #include "aver/core/Log.hpp"
 // The shared error vocabulary. findBody records the reason a handle lookup failed; aver_phys_last_error
@@ -303,6 +304,7 @@ int32_t aver_phys_init(void) {
     g_world->system.Init(kMaxBodies, 0, kMaxBodyPairs, kMaxContactConstraints,
                          g_world->bpLayers, g_world->objVsBp, g_world->objPair);
     g_world->system.SetContactListener(&g_listener);
+    softbody::installListener();
     // One g downward on the engine's up axis.
     g_world->system.SetGravity(toJoltDir(Vec3(0.0f, 0.0f, -980.0f)));
     AVER_INFO("[Physics] Jolt {}.{}.{} started ({} worker threads, {:.4f}s fixed step)",
@@ -327,11 +329,14 @@ void aver_phys_shutdown(void) {
     if (!g_world) return;
     // Characters hold refs into the system; drop them before the system goes.
     g_world->characters.clear();
+    // Builder soft bodies keep registry records keyed by handle; they go before the body loop below.
+    softbody::destroyAll();
     for (auto& [h, id] : g_world->bodies) bi().RemoveBody(id), bi().DestroyBody(id);
     g_world->bodies.clear();
     g_world->byId.clear();
     g_world->sensors.clear();
     g_world->system.SetContactListener(nullptr);
+    softbody::removeListener();
     // THE WATER TABLE IS A PROCESS-WIDE SINGLETON AND THE WORLD IS NOT. Handles restart at 1 on the
     // next aver_phys_init, so anything left registered here is silently inherited by whatever body
     // happens to be issued that number in the NEXT world -- a body nobody put in water, floating.
@@ -386,6 +391,7 @@ int32_t aver_phys_step(float dt) {
         g_world->contacts.clear();
         g_world->overlaps.clear();
     }
+    softbody::beginCall();
 
     const float maxCatchUp = g_world->fixedStep * 8.0f;
     g_world->accumulator += dt < maxCatchUp ? dt : maxCatchUp;
@@ -475,6 +481,8 @@ int32_t aver_phys_step(float dt) {
             phys::water::waterVolumes().evaluate(g_world->system, find, each,
                                                  g_world->system.GetGravity(), g_world->fixedStep);
         }
+        // Wind and drag on builder soft bodies, and the velocity cache impacts read: before the solver, like buoyancy.
+        softbody::onStepBegin(g_world->fixedStep);
         g_world->system.Update(g_world->fixedStep, 1, g_world->temp.get(), g_world->jobs.get());
         afterStepJoints();
         ++steps;
@@ -528,6 +536,7 @@ int32_t aver_phys_remove_body(int32_t body) {
     releaseRagdollOfBody(body);
     const JPH::BodyID* id = findBody(body);
     if (!id) return 0;
+    softbody::onBodyRemoved(body);
     bi().RemoveBody(*id);
     bi().DestroyBody(*id);
     g_world->byId.erase(*id);

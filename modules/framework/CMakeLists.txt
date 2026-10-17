@@ -18,8 +18,12 @@ add_library(Aver.Framework SHARED
   src/TimersEventsAbi.cpp
   src/BlackboardAbi.cpp
   src/AnimAbi.cpp
+  # Model import (FBX, glTF) relayed to the editor's importers (wave 9, docs/plans/wave9/FBX_IMPORT.md).
+  src/ImportAbi.cpp
   # IK goals, foot-IK weights and control-rig inputs relayed to the rig system (wave 5, docs/ANIM_IK_RETARGET.md).
   src/IkAbi.cpp
+  # Cloth and destruction calls relayed to the soft-body system's provider (docs/SOFTBODY.md).
+  src/SoftBodyAbi.cpp
   src/SequenceAbi.cpp
   src/LocalizationAbi.cpp
   src/DataTableAbi.cpp

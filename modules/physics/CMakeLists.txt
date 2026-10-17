@@ -38,7 +38,12 @@ add_library(Aver.Physics SHARED
   # Shape casts, overlaps, multi-hit rays and point queries (physics_queries_abi.h).
   src/PhysicsQueries.cpp
   # Per-body extras: locked axes, continuous collision, breakable joints' events (physics_body_ext_abi.h).
-  src/PhysicsBodyExt.cpp)
+  src/PhysicsBodyExt.cpp
+  # Builder-style soft bodies for cloth and destruction (physics_softbody_abi.h): the registry that lets
+  # a dent be written in place and a tear rebuild the body under the same handle, the soft-body contact
+  # listener (impacts), and wind and drag evaluated in the fixed loop beside buoyancy.
+  src/PhysicsSoftBody.cpp
+  src/SoftBodyAero.cpp)
 
 target_include_directories(Aver.Physics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Physics PUBLIC cxx_std_20)

@@ -26,7 +26,10 @@ constexpr u32 bit(UiWidgetKind k) { return uiKindBit(k); }
 constexpr u32 kTextual = bit(UiWidgetKind::Text) | bit(UiWidgetKind::Button) | bit(UiWidgetKind::Toggle) |
                          bit(UiWidgetKind::Choice) | bit(UiWidgetKind::List) | bit(UiWidgetKind::TextInput) |
                          bit(UiWidgetKind::KeyBind) | bit(UiWidgetKind::ProgressBar) | bit(UiWidgetKind::Slider);
-constexpr u32 kLabelled = bit(UiWidgetKind::Text) | bit(UiWidgetKind::Button) | bit(UiWidgetKind::Toggle) |
+// Kinds whose text may carry rich tags: everything that draws its text through a plain layout (not TextInput).
+constexpr u32 kRichText = bit(UiWidgetKind::Text) | bit(UiWidgetKind::Button) | bit(UiWidgetKind::Toggle) |
+                          bit(UiWidgetKind::Choice) | bit(UiWidgetKind::List);
+constexpr u32 kLabelled =bit(UiWidgetKind::Text) | bit(UiWidgetKind::Button) | bit(UiWidgetKind::Toggle) |
                           bit(UiWidgetKind::ProgressBar) | bit(UiWidgetKind::KeyBind) | bit(UiWidgetKind::TextInput);
 constexpr u32 kValued = bit(UiWidgetKind::Slider) | bit(UiWidgetKind::ProgressBar);
 constexpr u32 kInteractive = bit(UiWidgetKind::Button) | bit(UiWidgetKind::Toggle) | bit(UiWidgetKind::Slider) |
@@ -260,9 +263,18 @@ std::vector<UiPropDesc> build() {
 
     // ---- content ----
     v.push_back(sprop("text", kCont, &P::text, kLabelled));
-    v.push_back(eprop("textAlign", kCont, &P::textAlign, {"left", "center", "right"}, kTextual));
+    v.push_back(eprop("textAlign", kCont, &P::textAlign, {"left", "center", "right", "start", "end"}, kTextual));
     v.push_back(fprop("fontSize", kCont, &P::fontSize, 0, 200, kTextual));
     v.push_back(bprop("wrap", kCont, &P::wrap, bit(UiWidgetKind::Text)));
+    v.push_back(sprop("fontFamily", kCont, &P::fontFamily, kTextual));
+    v.push_back(bprop("bold", kCont, &P::bold, kTextual));
+    v.push_back(bprop("italic", kCont, &P::italic, kTextual));
+    v.push_back(eprop("textDir", kCont, &P::textDir, {"auto", "ltr", "rtl"}, kTextual));
+    v.push_back(fprop("lineSpacing", kCont, &P::lineSpacing, 0.5f, 3.0f, kTextual));
+    v.push_back(fprop("letterSpacing", kCont, &P::letterSpacing, -10.0f, 50.0f, kTextual));
+    v.push_back(bprop("ellipsis", kCont, &P::ellipsis, kTextual));
+    v.push_back(iprop("maxLines", kCont, &P::maxLines, 0, 100, kTextual));
+    v.push_back(bprop("rich", kCont, &P::rich, kRichText));
     v.push_back(sprop("image", kCont, &P::image, bit(UiWidgetKind::Image)));
     {
         UiPropDesc d = head("uv", kCont, UiPropType::Uv, bit(UiWidgetKind::Image));

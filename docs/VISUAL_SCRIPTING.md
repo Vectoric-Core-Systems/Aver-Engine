@@ -435,6 +435,7 @@ instances never converge** — one settles orbiting `x≈5`, the other `x≈405`
 possible if each entity's `VAR homeX/Y/Z` seeded from *its own* `GetFieldVec3` read and never
 leaked into the other's store.
 
+> **Importing a model from a graph.** The Import Model and Is Model Import Available nodes (category Assets, [node reference](AVER_NODE_NODES.md)) call the editor's importers; see [FBX_IMPORT.md](FBX_IMPORT.md). They work in an editor session only.
 ## 8. Honest limits
 
 Aver Node is a real way to build gameplay without C# — the example above is the whole chain,
