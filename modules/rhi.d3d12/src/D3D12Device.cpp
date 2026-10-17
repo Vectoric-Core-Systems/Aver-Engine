@@ -624,9 +624,10 @@ D3D12_RESOURCE_STATES toResourceStates(ResourceState s) {
         case ResourceState::CopySource:             return D3D12_RESOURCE_STATE_COPY_SOURCE;
         case ResourceState::CopyDest:               return D3D12_RESOURCE_STATE_COPY_DEST;
         case ResourceState::VertexBuffer:           return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
-        // Geometry readers need both VERTEX_AND_CONSTANT_BUFFER and NON_PIXEL_SHADER_RESOURCE.
+        // Geometry readers: input assembler, AS build, and ray hits reading the buffer in any shader stage.
         case ResourceState::GeometryRead:           return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
-                                                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                                                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                                                           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         case ResourceState::AccelerationStructure:  return D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
         case ResourceState::Common:                 break;
     }
@@ -1889,7 +1890,8 @@ struct RhiTlas {
 // A root signature plus the parameter indices it was built with; shared by identical layouts.
 struct RhiBindlessTable {
     u32  heapBase = 0;
-    u32  capacity = 0;
+    u32  capacity = 0;           // textures, from heapBase
+    u32  geometryCapacity = 0;   // vertex buffers after them, then as many index buffers
     bool alive = false;
 };
 
@@ -1922,6 +1924,7 @@ bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
     if (a.srvCount1 != b.srvCount1 || a.uavCount1 != b.uavCount1) return false;
     // Part of the key. Without this bindless and non-bindless variants would collide.
     if (a.bindlessTextureCount != b.bindlessTextureCount) return false;
+    if (a.bindlessGeometryCount != b.bindlessGeometryCount) return false;
     // Part of the key: constant buffer space difference requires different root signatures.
     if (a.constantSpace != b.constantSpace || a.samplerSpace != b.samplerSpace) return false;
     for (u32 i = 0; i < kMaxConstantSlots; ++i) if (a.constantDwords[i] != b.constantDwords[i]) return false;
@@ -1967,6 +1970,9 @@ public:
     PipelineHandle   createGraphicsPipeline(const GraphicsPipelineDesc& d) override;
     PipelineHandle   createComputePipeline(const ComputePipelineDesc& d) override;
     BindlessTableHandle createBindlessTextureTable(u32 capacity) override;
+    BindlessTableHandle createBindlessTable(u32 textureCapacity, u32 geometryCapacity) override;
+    bool setBindlessBuffer(BindlessTableHandle h, bool indices, u32 index, BufferHandle b, u32 stride,
+                           u32 count) override;
     void destroyBindlessTextureTable(BindlessTableHandle h) override;
     bool setBindlessTexture(BindlessTableHandle h, u32 index, TextureHandle t) override;
     u32  bindlessTableCapacity(BindlessTableHandle h) const override;
@@ -2735,6 +2741,7 @@ void D3D12Device::queryCaps() {
 
     // Ray-traced bindless: tier 1.1 + tier 3 binding (checked here, else descriptor index out of bounds).
     caps_.rtBindlessTextures = caps_.rayTracingTier >= 11 && caps_.resourceBindingTier >= 3;
+    caps_.rtBindlessBuffers = caps_.rtBindlessTextures;   // the same tier-3 table holds buffer SRVs
     if (caps_.rayTracingTier >= 11 && caps_.resourceBindingTier < 3)
         AVER_WARN("[RHI.D3D12] DXR 1.1 with resource binding tier {} -- not the tier 3 this path "
                   "assumes, so ray-traced texturing stays off. Please report this device.",
@@ -4556,6 +4563,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
                                        std::memcmp(fovCb_.data(), cb, cbBytes) == 0));
         if (!same) {
             rhiContext_->setPipeline(fp);
+            rhiContext_->setBindlessTable(f->sceneBindlessTable());   // ray-traced scene variants read geometry there
             if (bs) rhiContext_->setBindingSet(bs, 0);
             if (haveCb) rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
             // Set AFTER the calls above: setPipeline/setBindingSet clear fovValid_ themselves.
@@ -7126,16 +7134,27 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
         params[n].Descriptor.ShaderRegister = declaredSrvCount(layout) + (mesh ? 2 : 0);
         e.instanceWorldParam = static_cast<i32>(n++);
     }
-    // Bindless table appended last in register space 1 (preserves byte-identity for raster pipelines).
-    D3D12_DESCRIPTOR_RANGE bindlessRange{};
+    // Bindless table appended last in register space 1 (preserves byte-identity for raster pipelines); geometry
+    // buffers, when declared, follow the textures in spaces 2 and 3 of the same table.
+    D3D12_DESCRIPTOR_RANGE bindlessRanges[3]{};
     if (layout.bindlessTextureCount) {
-        bindlessRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        bindlessRange.NumDescriptors = layout.bindlessTextureCount;
-        bindlessRange.BaseShaderRegister = 0;
-        bindlessRange.RegisterSpace = 1;
+        u32 ranges = 0;
+        const auto range = [&](u32 count, u32 space, u32 offset) {
+            D3D12_DESCRIPTOR_RANGE& r = bindlessRanges[ranges++];
+            r.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            r.NumDescriptors = count;
+            r.BaseShaderRegister = 0;
+            r.RegisterSpace = space;
+            r.OffsetInDescriptorsFromTableStart = offset;
+        };
+        range(layout.bindlessTextureCount, 1, 0);
+        if (layout.bindlessGeometryCount) {
+            range(layout.bindlessGeometryCount, 2, layout.bindlessTextureCount);
+            range(layout.bindlessGeometryCount, 3, layout.bindlessTextureCount + layout.bindlessGeometryCount);
+        }
         params[n].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        params[n].DescriptorTable.NumDescriptorRanges = 1;
-        params[n].DescriptorTable.pDescriptorRanges = &bindlessRange;
+        params[n].DescriptorTable.NumDescriptorRanges = ranges;
+        params[n].DescriptorTable.pDescriptorRanges = bindlessRanges;
         e.bindlessParam = static_cast<i32>(n++);
     }
 
@@ -7947,14 +7966,30 @@ PipelineHandle D3D12ResourceFactory::createComputePipeline(const ComputePipeline
 // ---- the ray path's bindless texture table ----
 
 BindlessTableHandle D3D12ResourceFactory::createBindlessTextureTable(u32 capacity) {
+    return createBindlessTable(capacity, 0);
+}
+
+BindlessTableHandle D3D12ResourceFactory::createBindlessTable(u32 capacity, u32 geometryCapacity) {
     collect();
     if (capacity == 0) { AVER_ERROR("[RHI.D3D12] createBindlessTextureTable with capacity 0"); return 0; }
     RhiBindlessTable t;
     t.capacity = capacity;
-    if (!allocRange(capacity, t.heapBase)) {
-        AVER_ERROR("[RHI.D3D12] bindless texture table of {} descriptors did not fit; ray-traced "
-                   "texturing will stay off and the flat-albedo path will be used instead", capacity);
+    t.geometryCapacity = geometryCapacity;
+    if (!allocRange(capacity + 2 * geometryCapacity, t.heapBase)) {
+        AVER_ERROR("[RHI.D3D12] bindless table of {} descriptors did not fit; ray-traced texturing will stay off "
+                   "and the flat-albedo path will be used instead", capacity + 2 * geometryCapacity);
         return 0;
+    }
+    // Buffer slots null-filled too, typed as each array reads them.
+    for (u32 a = 0; a < 2; ++a) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC bv{};
+        bv.Format = DXGI_FORMAT_UNKNOWN;
+        bv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        bv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        bv.Buffer.NumElements = 1;
+        bv.Buffer.StructureByteStride = a == 0 ? sizeof(MeshVertex) : sizeof(u32);
+        for (u32 i = 0; i < geometryCapacity; ++i)
+            dev_->device_->CreateShaderResourceView(nullptr, &bv, cpuSlot(t.heapBase + capacity + a * geometryCapacity + i));
     }
     // Every slot null-filled before binding (null descriptors prevent device-removal risk).
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
@@ -7966,8 +8001,47 @@ BindlessTableHandle D3D12ResourceFactory::createBindlessTextureTable(u32 capacit
         dev_->device_->CreateShaderResourceView(nullptr, &sv, cpuSlot(t.heapBase + i));
     t.alive = true;
     bindlessTables_.push_back(t);
-    AVER_INFO("[RHI.D3D12] bindless texture table: {} descriptors at heap slot {}", capacity, t.heapBase);
+    if (geometryCapacity)
+        AVER_INFO("[RHI.D3D12] bindless table: {} textures and {} vertex + {} index buffers at heap slot {}", capacity,
+                  geometryCapacity, geometryCapacity, t.heapBase);
+    else
+        AVER_INFO("[RHI.D3D12] bindless texture table: {} descriptors at heap slot {}", capacity, t.heapBase);
     return static_cast<BindlessTableHandle>(bindlessTables_.size());
+}
+
+bool D3D12ResourceFactory::setBindlessBuffer(BindlessTableHandle h, bool indices, u32 index, BufferHandle bh, u32 stride,
+                                             u32 count) {
+    if (h == 0 || h > bindlessTables_.size() || !bindlessTables_[h - 1].alive) {
+        AVER_ERROR("[RHI.D3D12] setBindlessBuffer with an invalid table handle");
+        return false;
+    }
+    const RhiBindlessTable& t = bindlessTables_[h - 1];
+    if (index >= t.geometryCapacity) {
+        AVER_ERROR("[RHI.D3D12] setBindlessBuffer index {} past the table's {} geometry slots -- refused", index,
+                   t.geometryCapacity);
+        return false;
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC bv{};
+    bv.Format = DXGI_FORMAT_UNKNOWN;
+    bv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    bv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    bv.Buffer.StructureByteStride = indices ? sizeof(u32) : sizeof(MeshVertex);
+    ID3D12Resource* res = nullptr;
+    if (bh) {
+        RhiBuffer* b = buffer(bh);
+        if (!b || !b->res || stride != bv.Buffer.StructureByteStride || count == 0 ||
+            u64(count) * stride > b->res->GetDesc().Width) {
+            AVER_ERROR("[RHI.D3D12] setBindlessBuffer: buffer {} cannot be read as {} x {} bytes", bh, count, stride);
+            return false;
+        }
+        res = b->res.Get();
+        bv.Buffer.NumElements = count;
+    } else {
+        bv.Buffer.NumElements = 1;
+    }
+    dev_->device_->CreateShaderResourceView(res, &bv,
+                                            cpuSlot(t.heapBase + t.capacity + (indices ? t.geometryCapacity : 0) + index));
+    return true;
 }
 
 void D3D12ResourceFactory::destroyBindlessTextureTable(BindlessTableHandle h) {
@@ -7976,7 +8050,7 @@ void D3D12ResourceFactory::destroyBindlessTextureTable(BindlessTableHandle h) {
     if (!t.alive) return;
     t.alive = false;
     // GPU may still be reading this range from a frame in flight.
-    pendingRanges_.push_back({t.heapBase, t.capacity, retireFence()});
+    pendingRanges_.push_back({t.heapBase, t.capacity + 2 * t.geometryCapacity, retireFence()});
 }
 
 u32 D3D12ResourceFactory::bindlessTableCapacity(BindlessTableHandle h) const {

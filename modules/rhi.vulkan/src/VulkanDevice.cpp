@@ -782,6 +782,10 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     bindlessCapable_ = v12.runtimeDescriptorArray &&
                        v12.shaderSampledImageArrayNonUniformIndexing &&
                        v12.descriptorBindingPartiallyBound;
+    bindlessBuffersCapable_ = bindlessCapable_ && v12.shaderStorageBufferArrayNonUniformIndexing;
+    v12.shaderStorageBufferArrayNonUniformIndexing = bindlessBuffersCapable_ ? VK_TRUE : VK_FALSE;
+    maxSetStorageBuffers_ = std::min(physicalDeviceProps_.limits.maxPerStageDescriptorStorageBuffers,
+                                     physicalDeviceProps_.limits.maxDescriptorSetStorageBuffers);
     if (bindlessCapable_) {
         v12.runtimeDescriptorArray                    = VK_TRUE;
         v12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
@@ -1215,6 +1219,7 @@ void VulkanDevice::queryCaps() {
     // Descriptor indexing enabled at device creation (bindlessCapable_) plus the inline-query ray
     // path: the table (VulkanResourceFactory::createBindlessTextureTable) is real on such a device.
     caps_.rtBindlessTextures = caps_.rayTracingTier >= 11 && bindlessCapable_;
+    caps_.rtBindlessBuffers = caps_.rtBindlessTextures && bindlessBuffersCapable_;
     AVER_INFO("[RHI.Vulkan] caps: MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
               caps_.maxMsaaSamples, caps_.rayTracingTier, caps_.shaderModel,
               caps_.meshShaderTier, caps_.dxcAvailable, caps_.conservativeRaster, caps_.resourceBindingTier);
@@ -2075,8 +2080,8 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
     // discrete card otherwise pays fetching Upload-heap buffers every draw/shadow/voxelisation/
     // BLAS-build (see IDevice's contract, RHI.hpp; VoxiRenderer's BLAS buffers made the same trade).
     // UNMEASURED here (house rule: no run/build).
-    const bool useDefaultHeap = staticMeshDefaultHeap_;
-    const BufferKind kind = useDefaultHeap ? BufferKind::Default : BufferKind::Upload;
+    bool useDefaultHeap = staticMeshDefaultHeap_;
+    BufferKind kind = useDefaultHeap ? BufferKind::Default : BufferKind::Upload;
     BufferDesc vd; vd.bytes = vbytes; vd.kind = kind; vd.debugName = "mesh vertices";
     m.vbBuffer = rhiFactory_->createBuffer(vd);
     BufferDesc idd; idd.bytes = ibytes; idd.kind = kind; idd.debugName = "mesh indices";
@@ -2084,6 +2089,17 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
 
     RhiBuffer* vrb = rhiFactory_->buffer(m.vbBuffer);
     RhiBuffer* irb = rhiFactory_->buffer(m.ibBuffer);
+    if (useDefaultHeap && (!vrb || !vrb->buffer || !irb || !irb->buffer)) {
+        // Device memory refused (full, or out of allocations): this mesh goes to host memory instead.
+        if (m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
+        if (m.ibBuffer) rhiFactory_->destroyBuffer(m.ibBuffer);
+        useDefaultHeap = false;
+        kind = vd.kind = idd.kind = BufferKind::Upload;
+        m.vbBuffer = rhiFactory_->createBuffer(vd);
+        m.ibBuffer = rhiFactory_->createBuffer(idd);
+        vrb = rhiFactory_->buffer(m.vbBuffer);
+        irb = rhiFactory_->buffer(m.ibBuffer);
+    }
     if (!vrb || !vrb->buffer || !irb || !irb->buffer) {
         AVER_ERROR("[RHI.Vulkan] createMesh could not allocate its buffers");
         if (m.vbBuffer) rhiFactory_->destroyBuffer(m.vbBuffer);
@@ -2200,7 +2216,7 @@ MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u3
     if (!rootMesh.alive || !rootMesh.vb) return 0;
 
     const u64 ibytes = static_cast<u64>(indexCount) * sizeof(u32);
-    const bool useDefaultHeap = staticMeshDefaultHeap_ && !st;
+    bool useDefaultHeap = staticMeshDefaultHeap_ && !st;
     const BufferKind kind = useDefaultHeap ? BufferKind::Default : BufferKind::Upload;
     const char* ibName = posed ? "mesh indices (posed part)" : "mesh indices (LOD, shared vertices)";
     BufferDesc idd; idd.bytes = ibytes; idd.kind = kind; idd.debugName = ibName;
@@ -2219,6 +2235,11 @@ MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u3
         st->ib = VK_NULL_HANDLE;   // owned by the factory from here
     } else {
         ibBuffer = rhiFactory_->createBuffer(idd);
+        if (!ibBuffer && useDefaultHeap) {   // device memory refused: host memory for this one
+            useDefaultHeap = false;
+            idd.kind = BufferKind::Upload;
+            ibBuffer = rhiFactory_->createBuffer(idd);
+        }
     }
     if (!ibBuffer) { AVER_ERROR("[RHI.Vulkan] {} could not allocate its index buffer", what); return 0; }
     RhiBuffer* irb = rhiFactory_->buffer(ibBuffer);
@@ -2857,6 +2878,7 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
         const PipelineHandle fp = f->scenePipeline(featureMs, prepassed, false);
         if (!fp) break;
         rhiContext_->setPipeline(fp);
+        rhiContext_->setBindlessTable(f->sceneBindlessTable());   // ray-traced scene variants read geometry there
         if (const BindingSetHandle bs = f->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
         rhiContext_->setDrawBinding(drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
         const void* cb = nullptr; u32 cbBytes = 0;

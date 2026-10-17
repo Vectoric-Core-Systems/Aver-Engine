@@ -92,6 +92,8 @@ struct DeviceCaps {
 
     // Whether a shader may index a large texture array by a computed value -- ray-traced path only.
     bool rtBindlessTextures = false;
+    // Whether the same table also holds buffer arrays (createBindlessTable, setBindlessBuffer).
+    bool rtBindlessBuffers = false;
 
     // Whether a shader may perform 64-bit atomics on a buffer -- needed by a lock-free hash map.
     bool shaderInt64Atomics = false;

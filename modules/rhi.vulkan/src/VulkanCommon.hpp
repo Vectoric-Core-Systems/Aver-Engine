@@ -524,10 +524,12 @@ inline VkBufferBarrierInfo toVkBufferBarrierInfo(ResourceState s) {
             return {VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT, VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT};
         // Every geometry reader at once -- input assembler, manual vertex fetch, AS build. Mirrors
         // D3D12's combined VERTEX_AND_CONSTANT_BUFFER | NON_PIXEL_SHADER_RESOURCE (RHIResources.hpp:80-87).
+        // Plus ray hits reading the buffer from fragment and compute shaders (bindless geometry).
         case ResourceState::GeometryRead:
             return {VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT |
                     VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
                     VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
                     VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR};
         case ResourceState::RenderTarget:
         case ResourceState::DepthWrite:
@@ -595,6 +597,7 @@ inline bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
     if (a.srvCount != b.srvCount || a.uavCount != b.uavCount || a.samplerCount != b.samplerCount) return false;
     if (a.srvCount1 != b.srvCount1 || a.uavCount1 != b.uavCount1) return false;
     if (a.constantSpace != b.constantSpace || a.samplerSpace != b.samplerSpace) return false;
+    if (a.bindlessGeometryCount != b.bindlessGeometryCount) return false;
     if (a.bindlessTextureCount != b.bindlessTextureCount) return false;   // in the key even though a non-zero space is REFUSED (descriptorLayout), so a later layout differing only there can't skip that refusal via a cached entry
     for (u32 i = 0; i < kMaxConstantSlots; ++i) if (a.constantDwords[i] != b.constantDwords[i]) return false;
     for (u32 i = 0; i < a.samplerCount && i < 4; ++i) if (!sameSampler(a.samplers[i], b.samplers[i])) return false;
@@ -1046,6 +1049,11 @@ struct DescriptorLayoutEntry {
 struct RhiBindlessTable {
     bool alive = false;
     u32 capacity = 0;
+    // Geometry: binding 1 vertex buffers, binding 2 index buffers, this many each; pendingBuffers holds
+    // (array << 31) | index, applied like `pending`.
+    u32 geometryCapacity = 0;
+    std::vector<VkDescriptorBufferInfo> buffers[2];
+    std::vector<u32> pendingBuffers[kFrameCount];
     VkDescriptorPool pool = VK_NULL_HANDLE;
     VkDescriptorSet sets[kFrameCount] = {};
     std::vector<VkImageView> views;     // per index; the null view when unset
@@ -1960,6 +1968,13 @@ private:
     // both SUPPORTED and ENABLED at device creation, the only place that knows. Read by queryCaps
     // to set DeviceCaps::rtBindlessTextures.
     bool bindlessCapable_ = false;
+    // ...and shaderStorageBufferArrayNonUniformIndexing, for the table's geometry buffer arrays.
+    bool bindlessBuffersCapable_ = false;
+    u32 maxSetStorageBuffers_ = 0;   // the smaller of the per-stage and per-set storage-buffer limits
+public:
+    bool bindlessBuffersCapable() const { return bindlessBuffersCapable_; }
+    u32 maxSetStorageBuffers() const { return maxSetStorageBuffers_; }
+private:
     // VK_EXT_robustness2's nullDescriptor: unbound slots are written VK_NULL_HANDLE, which reads zero
     // and reports zero size like D3D12's null descriptor. Without it the 1x1 dummy stands in, and a
     // shader's "GetDimensions > 0 means bound" test (Voxi's gDenoisedAo) reads it as bound.
@@ -2029,6 +2044,9 @@ public:
     // The ray path's bindless texture table. DeviceCaps::rtBindlessTextures gates every caller; this
     // backend sets that bit from real descriptor-indexing features.
     BindlessTableHandle createBindlessTextureTable(u32 capacity) override;
+    BindlessTableHandle createBindlessTable(u32 textureCapacity, u32 geometryCapacity) override;
+    bool setBindlessBuffer(BindlessTableHandle h, bool indices, u32 index, BufferHandle b, u32 stride,
+                           u32 count) override;
     void destroyBindlessTextureTable(BindlessTableHandle h) override;
     bool setBindlessTexture(BindlessTableHandle h, u32 index, TextureHandle t) override;
     u32  bindlessTableCapacity(BindlessTableHandle h) const override;
@@ -2128,7 +2146,7 @@ public:
     VkDescriptorSetLayout instanceSetLayout();
     // Set kVkSetBindless's layout for one capacity (cached), and the empty layout that fills an
     // interior set index a pipeline does not use (pSetLayouts has no holes).
-    VkDescriptorSetLayout bindlessSetLayout(u32 capacity);
+    VkDescriptorSetLayout bindlessSetLayout(u32 capacity, u32 geometryCapacity = 0);
     VkDescriptorSetLayout emptySetLayout();
     // This frame's set of a bindless table, its pending writes applied if not yet bound this frame.
     VkDescriptorSet bindlessSetForFrame(RhiBindlessTable& t);
@@ -2228,7 +2246,7 @@ private:
     std::vector<TableShapeEntry>       tableShapes_;
     std::vector<SamplerCacheEntry>     samplers_;
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;   // lazily built by instanceSetLayout(); owned here, destroyed in the shutdown sweep
-    std::vector<std::pair<u32, VkDescriptorSetLayout>> bindlessSetLayouts_;   // by capacity; owned
+    std::vector<std::pair<u64, VkDescriptorSetLayout>> bindlessSetLayouts_;   // by geometry << 32 | capacity; owned
     VkDescriptorSetLayout emptySetLayout_ = VK_NULL_HANDLE;                   // owned
     std::vector<RhiBindlessTable> bindlessTables_;
     std::vector<RetiredObject>         retired_;

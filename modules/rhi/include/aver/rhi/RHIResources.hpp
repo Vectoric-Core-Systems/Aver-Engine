@@ -89,7 +89,7 @@ enum class ResourceState : u8 {
     CopyDest,
     // Input-assembler read; lets compute that writes vertices hand them to a draw.
     VertexBuffer,
-    // Read by input assembler AND acceleration-structure build at once (skinned mesh).
+    // Read by input assembler, acceleration-structure build and shaders at once (skinned mesh; ray hits read it).
     GeometryRead,
     // TERMINAL: set at creation, never a valid barrier argument.
     AccelerationStructure,
@@ -240,6 +240,9 @@ struct PipelineLayout {
     // Kind of resource each declared slot holds; must agree with BindingSetDesc.
     // Declared because Vulkan types every binding in a descriptor set layout.
     u32 bindlessTextureCount = 0; // texture SRVs in REGISTER SPACE 1
+    // Buffer SRVs after them in the same table, this many of each: StructuredBuffer<MeshVertex> in space 2,
+    // StructuredBuffer<uint> in space 3 (ray hits reading each mesh's own buffers). Needs bindlessTextureCount.
+    u32 bindlessGeometryCount = 0;
 
     // ---- register spaces ----
     // Space for constant slots and static samplers; 0 for every pipeline this engine compiles.
@@ -462,6 +465,20 @@ public:
 
     // The capacity the table was created with, or 0 for invalid handle.
     virtual u32 bindlessTableCapacity(BindlessTableHandle h) const = 0;
+
+    // A table with `geometryCapacity` vertex-buffer and as many index-buffer slots after its textures (see
+    // PipelineLayout::bindlessGeometryCount). 0 where the backend has none (DeviceCaps::rtBindlessBuffers).
+    virtual BindlessTableHandle createBindlessTable(u32 textureCapacity, u32 geometryCapacity) {
+        return geometryCapacity ? 0 : createBindlessTextureTable(textureCapacity);
+    }
+    // Points one geometry slot at buffer `b` read as `count` elements of `stride` bytes; `indices` picks the index
+    // array (space 3) over the vertex array (space 2). b == 0 clears the slot. The caller keeps a slot a frame in
+    // flight may read unchanged (reuse it only after kFrameCount frames). A new write may not be visible to a
+    // frame already recording on every backend: use a slot from the frame after it was written.
+    virtual bool setBindlessBuffer(BindlessTableHandle h, bool indices, u32 index, BufferHandle b, u32 stride, u32 count) {
+        (void)h; (void)indices; (void)index; (void)b; (void)stride; (void)count;
+        return false;
+    }
 
     virtual BindingSetHandle createBindingSet(const BindingSetDesc& d) = 0;
     // Builds the acceleration structure for one uploaded mesh.

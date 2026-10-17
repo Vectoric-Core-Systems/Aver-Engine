@@ -9,15 +9,42 @@
 // DXR 1.1 inline ray tracing.
 RaytracingAccelerationStructure gScene : register(t2);
 
-// Flat geometry for ray hits: 4 descriptors for whole scene.
 struct RtVertex   { float3 pos; float3 nrm; float2 uv; };
 struct RtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo;
                     float metallic; float roughness; uint materialIndex;
                     float4x4 prevObjectToWorld; };
 // prevObjectToWorld: last frame's transform. Feeds ray-driven G-buffer velocity.
+StructuredBuffer<RtInstance> gRtInstances : register(t5);
+
+// Geometry for ray hits. rtTriangle gives a triangle's three vertex numbers, rtVertex a vertex by number;
+// every hit reads through these two.
+#if AVER_RT_GEOM_BINDLESS
+// Each mesh's own buffers through the bindless table (spaces 2 and 3): firstVertex packs the vertex-buffer slot
+// (low 16 bits) and the index-buffer slot (high 16); firstIndex is the chunk's first index in that buffer.
+#ifndef AVER_RT_GEOM_CAPACITY
+#error AVER_RT_GEOM_BINDLESS needs AVER_RT_GEOM_CAPACITY
+#endif
+StructuredBuffer<RtVertex> gRtMeshVerts[AVER_RT_GEOM_CAPACITY]   : register(t0, space2);
+StructuredBuffer<uint>     gRtMeshIndices[AVER_RT_GEOM_CAPACITY] : register(t0, space3);
+uint3 rtTriangle(RtInstance inst, uint prim) {
+    const uint tri = inst.firstIndex + prim * 3;
+    return uint3(gRtMeshIndices[NonUniformResourceIndex(inst.firstVertex >> 16)][tri + 0],
+                 gRtMeshIndices[NonUniformResourceIndex(inst.firstVertex >> 16)][tri + 1],
+                 gRtMeshIndices[NonUniformResourceIndex(inst.firstVertex >> 16)][tri + 2]);
+}
+RtVertex rtVertex(RtInstance inst, uint v) {
+    return gRtMeshVerts[NonUniformResourceIndex(inst.firstVertex & 0xFFFFu)][v];
+}
+#else
+// One table of every mesh (VoxiRenderer::buildGeometryTable): firstVertex/firstIndex are the mesh's offsets in it.
 StructuredBuffer<RtVertex>   gRtVerts     : register(t3);
 StructuredBuffer<uint>       gRtIndices   : register(t4);
-StructuredBuffer<RtInstance> gRtInstances : register(t5);
+uint3 rtTriangle(RtInstance inst, uint prim) {
+    const uint tri = inst.firstIndex + prim * 3;
+    return inst.firstVertex + uint3(gRtIndices[tri + 0], gRtIndices[tri + 1], gRtIndices[tri + 2]);
+}
+RtVertex rtVertex(RtInstance inst, uint v) { return gRtVerts[v]; }
+#endif
 
 // ---- INSTANCED FOLIAGE: TLAS static prefix instances ----
 // Not in gRtInstances; InstanceID is AVER_RT_FOLIAGE_ID_BIT | first row of prototype parts.
@@ -262,16 +289,16 @@ RtHit rtHitFrom(uint ref, uint prim, float2 bary, float3 origin, float3 dir, flo
     RtHit h;
     h.inst = rtLoadInstance(ref);
     h.mat  = gRtMaterials[h.inst.materialIndex];
-    const uint tri = h.inst.firstIndex + prim * 3;
-    h.i0 = h.inst.firstVertex + gRtIndices[tri + 0];
-    h.i1 = h.inst.firstVertex + gRtIndices[tri + 1];
-    h.i2 = h.inst.firstVertex + gRtIndices[tri + 2];
+    const uint3 vi = rtTriangle(h.inst, prim);
+    h.i0 = vi.x;
+    h.i1 = vi.y;
+    h.i2 = vi.z;
     h.w  = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
-    const float3 nObj = normalize(gRtVerts[h.i0].nrm * h.w.x + gRtVerts[h.i1].nrm * h.w.y + gRtVerts[h.i2].nrm * h.w.z);
+    const float3 nObj = normalize(rtVertex(h.inst, h.i0).nrm * h.w.x + rtVertex(h.inst, h.i1).nrm * h.w.y + rtVertex(h.inst, h.i2).nrm * h.w.z);
     h.N = normalize(mul(float4(nObj, 0.0), h.inst.objectToWorld).xyz);
     if (dot(h.N, dir) > 0.0) h.N = -h.N;
     h.pos    = origin + dir * t;
-    h.meshUV = gRtVerts[h.i0].uv * h.w.x + gRtVerts[h.i1].uv * h.w.y + gRtVerts[h.i2].uv * h.w.z;
+    h.meshUV = rtVertex(h.inst, h.i0).uv * h.w.x + rtVertex(h.inst, h.i1).uv * h.w.y + rtVertex(h.inst, h.i2).uv * h.w.z;
     h.t      = t;
     return h;
 }
@@ -314,8 +341,8 @@ AverDrawTerms rtDrawTerms(RtInstance inst) {
 void rtHitGrad(RtHit h, float3 dx, float3 dy, out float2 gx, out float2 gy) {
 #ifdef AVER_RT_BINDLESS
     averRtUvGrad(h.mat, h.inst, h.N,
-                 gRtVerts[h.i0].pos, gRtVerts[h.i1].pos, gRtVerts[h.i2].pos,
-                 gRtVerts[h.i0].uv,  gRtVerts[h.i1].uv,  gRtVerts[h.i2].uv,
+                 rtVertex(h.inst, h.i0).pos, rtVertex(h.inst, h.i1).pos, rtVertex(h.inst, h.i2).pos,
+                 rtVertex(h.inst, h.i0).uv,  rtVertex(h.inst, h.i1).uv,  rtVertex(h.inst, h.i2).uv,
                  dx, dy, gx, gy);
 #else
     gx = float2(0.0, 0.0);
@@ -417,8 +444,8 @@ AverSurface rtHitSurface(RtHit h, float3 V, float3 L, float2 gx, float2 gy, uint
 #if defined(AVER_RT_BINDLESS) && AVER_RT_NORMAL_MAPPING
     if (detail != AVER_RT_HIT_LITE && (m.flags & (AVER_MAT_NORMAL_MAP | AVER_MAT_L1_NORMAL))) {
         N = averRtPerturbNormal(m, h.inst, h.N, a.normalTS,
-                                gRtVerts[h.i0].pos, gRtVerts[h.i1].pos, gRtVerts[h.i2].pos,
-                                gRtVerts[h.i0].uv,  gRtVerts[h.i1].uv,  gRtVerts[h.i2].uv);
+                                rtVertex(h.inst, h.i0).pos, rtVertex(h.inst, h.i1).pos, rtVertex(h.inst, h.i2).pos,
+                                rtVertex(h.inst, h.i0).uv,  rtVertex(h.inst, h.i1).uv,  rtVertex(h.inst, h.i2).uv);
         if (dot(N, V) < 0.0) N = normalize(N - V * dot(N, V) * 1.01);   // keep it facing the viewer
     }
 #endif
@@ -458,18 +485,18 @@ bool averRtCandidateOpaque(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q
     // NOT ALPHA-MASKED MEANS OPAQUE.
     if ((mat.flags & AVER_MAT_ALPHA_MASK) == 0) return true;
 
-    const uint tri = inst.firstIndex + q.CandidatePrimitiveIndex() * 3;
-    const uint i0  = inst.firstVertex + gRtIndices[tri + 0];
-    const uint i1  = inst.firstVertex + gRtIndices[tri + 1];
-    const uint i2  = inst.firstVertex + gRtIndices[tri + 2];
+    const uint3 vi = rtTriangle(inst, q.CandidatePrimitiveIndex());
+    const uint i0  = vi.x;
+    const uint i1  = vi.y;
+    const uint i2  = vi.z;
 
     const float2 bary = q.CandidateTriangleBarycentrics();
     const float3 w    = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
-    float2 uv = gRtVerts[i0].uv * w.x + gRtVerts[i1].uv * w.y + gRtVerts[i2].uv * w.z;
+    float2 uv = rtVertex(inst, i0).uv * w.x + rtVertex(inst, i1).uv * w.y + rtVertex(inst, i2).uv * w.z;
 
     // World-aligned UV is resolved.
     if (mat.flags & AVER_MAT_WORLD_UV) {
-        const float3 p0 = gRtVerts[i0].pos, p1 = gRtVerts[i1].pos, p2 = gRtVerts[i2].pos;
+        const float3 p0 = rtVertex(inst, i0).pos, p1 = rtVertex(inst, i1).pos, p2 = rtVertex(inst, i2).pos;
         const float3 nObj = cross(p1 - p0, p2 - p0);
         const float3 N    = normalize(mul(float4(nObj, 0.0), inst.objectToWorld).xyz);
         const float3 wpos = q.WorldRayOrigin() + q.WorldRayDirection() * q.CandidateTriangleRayT();
@@ -489,7 +516,7 @@ bool averRtCandidateOpaque(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q
         map.occlusion  = 1.0;
         map.emissive   = float3(1.0, 1.0, 1.0);
         AverAuthored a = averAuthoredFrom(mat, map);
-        const float3 p0 = gRtVerts[i0].pos, p1 = gRtVerts[i1].pos, p2 = gRtVerts[i2].pos;
+        const float3 p0 = rtVertex(inst, i0).pos, p1 = rtVertex(inst, i1).pos, p2 = rtVertex(inst, i2).pos;
         AverVertex v;
         v.wpos     = q.WorldRayOrigin() + q.WorldRayDirection() * q.CandidateTriangleRayT();
         v.N        = normalize(mul(float4(cross(p1 - p0, p2 - p0), 0.0), inst.objectToWorld).xyz);

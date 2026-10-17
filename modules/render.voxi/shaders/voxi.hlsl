@@ -819,26 +819,26 @@ struct RdSurface {
 RdSurface rdSurfaceFromRecord(uint4 rec, float3 dir) {
     RdSurface o;
     o.inst = rtLoadInstance(rec.x);
-    const uint tri = o.inst.firstIndex + rec.y * 3;
-    o.i0 = o.inst.firstVertex + gRtIndices[tri + 0];
-    o.i1 = o.inst.firstVertex + gRtIndices[tri + 1];
-    o.i2 = o.inst.firstVertex + gRtIndices[tri + 2];
+    const uint3 vi = rtTriangle(o.inst, rec.y);
+    o.i0 = vi.x;
+    o.i1 = vi.y;
+    o.i2 = vi.z;
 
     const float2 bary = float2(asfloat(rec.z), asfloat(rec.w));
     o.w = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
-    const float3 nObj = normalize(gRtVerts[o.i0].nrm * o.w.x + gRtVerts[o.i1].nrm * o.w.y + gRtVerts[o.i2].nrm * o.w.z);
+    const float3 nObj = normalize(rtVertex(o.inst, o.i0).nrm * o.w.x + rtVertex(o.inst, o.i1).nrm * o.w.y + rtVertex(o.inst, o.i2).nrm * o.w.z);
     o.N = normalize(mul(float4(nObj, 0.0), o.inst.objectToWorld).xyz);
     if (dot(o.N, dir) > 0.0) o.N = -o.N;   // face the ray, same flip PSRayDriven's own copy applies
 
-    o.hitUV = gRtVerts[o.i0].uv * o.w.x + gRtVerts[o.i1].uv * o.w.y + gRtVerts[o.i2].uv * o.w.z;
+    o.hitUV = rtVertex(o.inst, o.i0).uv * o.w.x + rtVertex(o.inst, o.i1).uv * o.w.y + rtVertex(o.inst, o.i2).uv * o.w.z;
 
     o.mat = gRtMaterials[o.inst.materialIndex];
 
     // World hit point P: same three vertices, transformed the way VSMain transforms i.pos, blended by
     // the same barycentric weights `w` (see this function's header for why hitT/wpos derive from P).
-    const float3 p0 = mul(float4(gRtVerts[o.i0].pos, 1.0), o.inst.objectToWorld).xyz;
-    const float3 p1 = mul(float4(gRtVerts[o.i1].pos, 1.0), o.inst.objectToWorld).xyz;
-    const float3 p2 = mul(float4(gRtVerts[o.i2].pos, 1.0), o.inst.objectToWorld).xyz;
+    const float3 p0 = mul(float4(rtVertex(o.inst, o.i0).pos, 1.0), o.inst.objectToWorld).xyz;
+    const float3 p1 = mul(float4(rtVertex(o.inst, o.i1).pos, 1.0), o.inst.objectToWorld).xyz;
+    const float3 p2 = mul(float4(rtVertex(o.inst, o.i2).pos, 1.0), o.inst.objectToWorld).xyz;
     const float3 P  = p0 * o.w.x + p1 * o.w.y + p2 * o.w.z;
     o.hitT = dot(P - gCamPos.xyz, dir);
     o.wpos = gCamPos.xyz + dir * o.hitT;
@@ -847,7 +847,7 @@ RdSurface rdSurfaceFromRecord(uint4 rec, float3 dir) {
     o.Ng = dot(ng, ng) > 1e-12 ? normalize(ng) : o.N;
     if (dot(o.Ng, dir) > 0.0) o.Ng = -o.Ng;
     // Every caller reconstructs only its own pixel, so this pass's history reprojection follows it.
-    const float3 objPos = gRtVerts[o.i0].pos * o.w.x + gRtVerts[o.i1].pos * o.w.y + gRtVerts[o.i2].pos * o.w.z;
+    const float3 objPos = rtVertex(o.inst, o.i0).pos * o.w.x + rtVertex(o.inst, o.i1).pos * o.w.y + rtVertex(o.inst, o.i2).pos * o.w.z;
     o.reprojDelta = mul(float4(objPos, 1.0), o.inst.prevObjectToWorld).xyz -
                     mul(float4(objPos, 1.0), o.inst.objectToWorld).xyz;
     gAverReprojDelta = o.reprojDelta;
@@ -2024,19 +2024,19 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 
     // Surface reconstruction: barycentric interpolation and rotation-only normal transform.
     RtInstance inst = rtLoadInstance(rtPackCommitted(q));
-    uint tri = inst.firstIndex + q.CommittedPrimitiveIndex() * 3;
-    uint i0  = inst.firstVertex + gRtIndices[tri + 0];
-    uint i1  = inst.firstVertex + gRtIndices[tri + 1];
-    uint i2  = inst.firstVertex + gRtIndices[tri + 2];
+    const uint3 vi = rtTriangle(inst, q.CommittedPrimitiveIndex());
+    uint i0  = vi.x;
+    uint i1  = vi.y;
+    uint i2  = vi.z;
 
     float2 bary = q.CommittedTriangleBarycentrics();
     float3 w    = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
-    float3 nObj = normalize(gRtVerts[i0].nrm * w.x + gRtVerts[i1].nrm * w.y + gRtVerts[i2].nrm * w.z);
+    float3 nObj = normalize(rtVertex(inst, i0).nrm * w.x + rtVertex(inst, i1).nrm * w.y + rtVertex(inst, i2).nrm * w.z);
     float3 N    = normalize(mul(float4(nObj, 0.0), inst.objectToWorld).xyz);
     if (dot(N, dir) > 0.0) N = -N;
 
     // UV same barycentric pattern; not sampled here yet (no texture array).
-    float2 hitUV = gRtVerts[i0].uv * w.x + gRtVerts[i1].uv * w.y + gRtVerts[i2].uv * w.z;
+    float2 hitUV = rtVertex(inst, i0).uv * w.x + rtVertex(inst, i1).uv * w.y + rtVertex(inst, i2).uv * w.z;
 
     // Hit's material keyed by RtInstance::materialIndex.
     RtMaterial mat = gRtMaterials[inst.materialIndex];
@@ -2046,7 +2046,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     const uint rdInstanceIndex = rtPackCommitted(q);
     const uint rdPrimIndex     = q.CommittedPrimitiveIndex();
     {
-        const float3 objPos = gRtVerts[i0].pos * w.x + gRtVerts[i1].pos * w.y + gRtVerts[i2].pos * w.z;
+        const float3 objPos = rtVertex(inst, i0).pos * w.x + rtVertex(inst, i1).pos * w.y + rtVertex(inst, i2).pos * w.z;
         gAverReprojDelta = mul(float4(objPos, 1.0), inst.prevObjectToWorld).xyz -
                            mul(float4(objPos, 1.0), inst.objectToWorld).xyz;
     }
@@ -2460,7 +2460,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // Velocity carries object motion: hit's object-space point through this frame and last frame's objectToWorld.
     // Rigid motion only (skinned/soft-body deformation not in prev).
     // Normal is ray-hit N, not interpolated vertex normal.
-    const float3 objPos  = gRtVerts[i0].pos * w.x + gRtVerts[i1].pos * w.y + gRtVerts[i2].pos * w.z;
+    const float3 objPos  = rtVertex(inst, i0).pos * w.x + rtVertex(inst, i1).pos * w.y + rtVertex(inst, i2).pos * w.z;
     const float3 curObjW = mul(float4(objPos, 1.0), inst.objectToWorld).xyz;
     const float3 prvObjW = mul(float4(objPos, 1.0), inst.prevObjectToWorld).xyz;
     o.velocity        = averGBufferVelocityMoved(wpos, wpos + (prvObjW - curObjW));

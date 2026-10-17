@@ -532,6 +532,26 @@ private:
     std::unordered_map<rhi::MeshHandle, RtGeomSlot> rtGeomSlots_;
     u32 rtVertUsed_ = 0, rtIndexUsed_ = 0;
 
+    // ---- bindless geometry (rtGeomBindless_): ray hits read each mesh's own buffers, no table is built ----
+    // A slot per vertex buffer (LODs, parts and posed parts share their root's) and per index buffer in the bindless
+    // table; RtInstance.firstVertex = vertex slot | index slot << 16. A slot no instance used in a build is nulled and
+    // reused kRtGeomRetireFrames later (a frame in flight may still read it). An instance whose slot was written in
+    // this frame is masked for it: Vulkan applies the write at the next bind of each frame slot.
+    static constexpr u32 kRtGeomCapacity = 8192;
+    static constexpr u32 kRtGeomRetireFrames = 3;
+    bool rtGeomBindless_ = false;
+    struct RtGeomBinding { u32 slot = 0, written = 0, used = 0; };
+    std::unordered_map<rhi::BufferHandle, RtGeomBinding> rtGeomBound_[2];   // [0] vertex buffers, [1] index buffers
+    std::vector<u32> rtGeomFree_[2];
+    std::vector<std::pair<u32, u32>> rtGeomRetiring_[2];   // slot, rtFrameIndex_ it was let go
+    u32 rtGeomNext_[2] = {};
+    bool rtGeomWarming_ = false;   // an instance was masked for a fresh slot: build again next frame
+    bool rtGeomFullWarned_ = false;
+    u32 geometrySlot(u32 array, rhi::BufferHandle b, u32 stride, u32 count, bool& fresh);   // ~0u when full
+    void retireGeometrySlots();
+    rhi::PipelineLayout rtLayout() const;   // giLayout with the bindless table, and its geometry arrays when on
+    std::string rtGeomDefs() const;         // the shader defines for those arrays; empty when off
+
     // ---- per-frame vertex refresh for compute-skinned slices ----
     struct DynamicVertexSlice {
         rhi::BufferHandle vb = 0;

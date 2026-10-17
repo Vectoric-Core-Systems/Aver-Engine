@@ -98,7 +98,7 @@ struct PtVertex {
 
 // rtHitFrom flips h.N to face the ray; this recovers which side the ray came from.
 bool rtHitFromBehind(RtHit h, float3 dir) {
-    const float3 nObj = gRtVerts[h.i0].nrm * h.w.x + gRtVerts[h.i1].nrm * h.w.y + gRtVerts[h.i2].nrm * h.w.z;
+    const float3 nObj = rtVertex(h.inst, h.i0).nrm * h.w.x + rtVertex(h.inst, h.i1).nrm * h.w.y + rtVertex(h.inst, h.i2).nrm * h.w.z;
     return dot(mul(float4(nObj, 0.0), h.inst.objectToWorld).xyz, dir) > 0.0;
 }
 

@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cstddef>   // offsetof: submit() and buildLocalLights read MaterialConstants fields out of a draw's bytes
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_set>
@@ -210,7 +211,7 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
 // appends the ray path's texture array as one more root parameter in its own register space; every
 // existing caller passes 0 and gets the identical root signature as before -- the whole point of a
 // defaulted argument here rather than a second function.
-rhi::PipelineLayout giLayout(u32 bindlessTextures = 0) {
+rhi::PipelineLayout giLayout(u32 bindlessTextures = 0, u32 bindlessGeometry = 0) {
     rhi::PipelineLayout l{};
     // Full slot list is in giTableKinds() above. srvCount/uavCount are BASED on kVoxiSrvCount/
     // kVoxiUavCount, not fixed registers, so widening table 0 rebases everything automatically --
@@ -229,6 +230,7 @@ rhi::PipelineLayout giLayout(u32 bindlessTextures = 0) {
     l.slotKindsDeclared = true;
     giTableKinds(l.srvKinds, l.uavKinds);
     l.bindlessTextureCount = bindlessTextures;
+    l.bindlessGeometryCount = bindlessTextures ? bindlessGeometry : 0;
     return l;
 }
 
@@ -1934,7 +1936,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
                   static_cast<u32>(tlasInstScratch_.size()), static_cast<u32>(blas_.size()));
         rtLogged_ = true;
     }
-    blasBuildsDeferred_ = blasDeferred > 0 || !rtGeomPending_.empty();   // both finish over frames
+    blasBuildsDeferred_ = blasDeferred > 0 || !rtGeomPending_.empty() || rtGeomWarming_;   // all finish over frames
     if (blasDeferred && !blasDeferLogged_) {
         AVER_INFO("[Voxi] bottom-level builds spread over frames: {:.0f} MiB this frame, {} draw(s) wait "
                   "for the next (budget {} MiB/frame)", static_cast<f64>(blasBytesThisFrame) / (1024.0 * 1024.0),
@@ -3229,6 +3231,48 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
     std::vector<Geo> geo(rtGeomMeshes_.size());
     for (usize m = 0; m < rtGeomMeshes_.size(); ++m)
         if (!dev_->meshGeometry(rtGeomMeshes_[m], &geo[m].vb, &geo[m].ib, &geo[m].vc, &geo[m].ic)) return false;
+
+    // Bindless: no table. Each mesh's own buffers get slots (compute-written vertices are read where the skinning
+    // pass leaves them, so nothing is copied per frame either).
+    if (rtGeomBindless_) {
+        std::vector<u32> packed(rtGeomMeshes_.size(), ~0u);
+        std::vector<u8> fresh(rtGeomMeshes_.size(), 0);
+        for (usize m = 0; m < rtGeomMeshes_.size(); ++m) {
+            bool isFresh = false;
+            const u32 vs = geometrySlot(0, geo[m].vb, sizeof(rhi::MeshVertex), geo[m].vc, isFresh);
+            const u32 is = geometrySlot(1, geo[m].ib, sizeof(u32), geo[m].ic, isFresh);
+            if (vs == ~0u || is == ~0u) continue;
+            packed[m] = vs | (is << 16);
+            fresh[m] = isFresh;
+        }
+        retireGeometrySlots();
+        hm.mark("slots");
+        rtGeomWarming_ = false;
+        for (usize i = 0; i < rtInstanceMesh_.size(); ++i) {
+            const auto it = std::lower_bound(rtGeomMeshes_.begin(), rtGeomMeshes_.end(), rtInstanceMesh_[i]);
+            if (it == rtGeomMeshes_.end() || *it != rtInstanceMesh_[i]) return false;
+            const usize m = static_cast<usize>(it - rtGeomMeshes_.begin());
+            rtInstanceData_[i].firstVertex = packed[m] == ~0u ? 0u : packed[m];
+            rtInstanceData_[i].firstIndex  = i < rtInstanceIndexOffset_.size() ? rtInstanceIndexOffset_[i] : 0u;
+            if ((packed[m] == ~0u || fresh[m]) && i < tlasInstScratch_.size()) {
+                tlasInstScratch_[i].mask = 0;
+                rtGeomWarming_ = rtGeomWarming_ || packed[m] != ~0u;
+            }
+        }
+        // Foliage parts are the TLAS's static prefix and cannot be masked one by one; their meshes load with the level.
+        for (usize i = 0; i < foliageParts_.size(); ++i) {
+            const auto it = std::lower_bound(rtGeomMeshes_.begin(), rtGeomMeshes_.end(), foliageParts_[i].mesh);
+            if (it == rtGeomMeshes_.end() || *it != foliageParts_[i].mesh) return false;
+            const usize m = static_cast<usize>(it - rtGeomMeshes_.begin());
+            foliagePartData_[i].firstVertex = packed[m] == ~0u ? 0u : packed[m];
+            foliagePartData_[i].firstIndex  = 0;
+        }
+        rtDynamicVertexSlices_.clear();
+        if (!uploadRtInstanceTable()) return false;
+        hm.mark("instances");
+        rtGeometryReady_ = true;
+        return true;
+    }
     auto sliceKeyOf = [](const Geo& g) { return (static_cast<u64>(g.vb) << 32) | g.vc; };   // both u32: exact
     std::vector<u8> kept(rtGeomMeshes_.size(), 0);
     for (usize m = 0; m < rtGeomMeshes_.size(); ++m) {
@@ -3621,10 +3665,70 @@ void VoxiRenderer::ensureTextureTable() {
     if (rtTexTableTried_ || !res_) return;
     rtTexTableTried_ = true;
     if (!caps_.rtBindlessTextures) return;   // silent: the caps line already said so once
-    rtTexTable_ = res_->createBindlessTextureTable(kRtTextureCapacity);
+    // With buffer arrays, ray hits read each mesh's own buffers and the geometry table is not built.
+    // AVER_RT_GEOMETRY_TABLE=1 keeps the table (A/B).
+    const char* keepTable = std::getenv("AVER_RT_GEOMETRY_TABLE");
+    if (caps_.rtBindlessBuffers && !(keepTable && *keepTable == '1'))
+        rtTexTable_ = res_->createBindlessTable(kRtTextureCapacity, kRtGeomCapacity);
+    rtGeomBindless_ = rtTexTable_ != 0;
+    if (!rtTexTable_) rtTexTable_ = res_->createBindlessTextureTable(kRtTextureCapacity);
     if (!rtTexTable_)
         AVER_WARN("[Voxi] no bindless texture table; ray hits will shade from material factors "
                   "alone, as they did before textured ray hits existed");
+    AVER_INFO("[Voxi] ray hits read geometry {}", rtGeomBindless_
+              ? "from each mesh's own buffers (bindless; no geometry table)"
+              : "from the ray-traced geometry table (a copy of every mesh)");
+}
+
+rhi::PipelineLayout VoxiRenderer::rtLayout() const {
+    return giLayout(kRtTextureCapacity, rtGeomBindless_ ? kRtGeomCapacity : 0);
+}
+
+std::string VoxiRenderer::rtGeomDefs() const {
+    return rtGeomBindless_ ? ";AVER_RT_GEOM_BINDLESS=1;AVER_RT_GEOM_CAPACITY=" + std::to_string(kRtGeomCapacity)
+                           : std::string();
+}
+
+u32 VoxiRenderer::geometrySlot(u32 a, rhi::BufferHandle b, u32 stride, u32 count, bool& fresh) {
+    auto it = rtGeomBound_[a].find(b);
+    if (it == rtGeomBound_[a].end()) {
+        u32 slot = 0;
+        if (!rtGeomFree_[a].empty()) { slot = rtGeomFree_[a].back(); rtGeomFree_[a].pop_back(); }
+        else if (rtGeomNext_[a] < kRtGeomCapacity) slot = rtGeomNext_[a]++;
+        else {
+            if (!rtGeomFullWarned_)
+                AVER_WARN("[Voxi] more than {} mesh buffers on screen at once; rays skip the rest (raise "
+                          "kRtGeomCapacity)", kRtGeomCapacity);
+            rtGeomFullWarned_ = true;
+            return ~0u;
+        }
+        if (!res_->setBindlessBuffer(rtTexTable_, a == 1, slot, b, stride, count)) {
+            rtGeomFree_[a].push_back(slot);
+            return ~0u;
+        }
+        it = rtGeomBound_[a].emplace(b, RtGeomBinding{slot, rtFrameIndex_, 0}).first;
+    }
+    it->second.used = rtFrameIndex_;
+    fresh = fresh || it->second.written == rtFrameIndex_;
+    return it->second.slot;
+}
+
+void VoxiRenderer::retireGeometrySlots() {
+    for (u32 a = 0; a < 2; ++a) {
+        for (auto it = rtGeomBound_[a].begin(); it != rtGeomBound_[a].end();) {
+            if (it->second.used == rtFrameIndex_) { ++it; continue; }
+            rtGeomRetiring_[a].push_back({it->second.slot, rtFrameIndex_});
+            it = rtGeomBound_[a].erase(it);
+        }
+        auto& retiring = rtGeomRetiring_[a];
+        usize keep = 0;
+        for (const auto& [slot, frame] : retiring) {
+            if (rtFrameIndex_ - frame < kRtGeomRetireFrames) { retiring[keep++] = {slot, frame}; continue; }
+            res_->setBindlessBuffer(rtTexTable_, a == 1, slot, 0, a == 1 ? sizeof(u32) : sizeof(rhi::MeshVertex), 0);
+            rtGeomFree_[a].push_back(slot);
+        }
+        retiring.resize(keep);
+    }
 }
 
 // Builds dense material table from per-draw records. Re-uploads only when content changes.
@@ -6436,7 +6540,7 @@ bool VoxiRenderer::ensureNrd2() {
             const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
                                                                   layeredBsdf_);
             const std::string bindless = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
-                                         std::to_string(kRtTextureCapacity);
+                                         std::to_string(kRtTextureCapacity) + rtGeomDefs();
             const std::string ablate = rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string();
             const rhi::ShaderHandle vs = compile("VSky", rhi::ShaderStage::Vertex, kBaseSm,
                                                  (matDefs + ";" + bindless).c_str());
@@ -6446,7 +6550,7 @@ bool VoxiRenderer::ensureNrd2() {
             if (vs && ps) {
                 rhi::GraphicsPipelineDesc p;
                 p.vs = vs; p.ps = ps;
-                p.layout = giLayout(kRtTextureCapacity);
+                p.layout = rtLayout();
                 p.cull = rhi::CullMode::None;
                 p.depth = {true, true, rhi::CompareOp::Always};
                 p.renderTargetCount = 4;
@@ -6463,7 +6567,7 @@ bool VoxiRenderer::ensureNrd2() {
                                                      (matDefs + ";" + bindless + ablate).c_str())) {
                 rhi::ComputePipelineDesc p;
                 p.cs = cs;
-                p.layout = giLayout(kRtTextureCapacity);
+                p.layout = rtLayout();
                 rdHalfFillCsPso_ = res_->createComputePipeline(p);
             }
             if (!rdHalfFillCsPso_)
@@ -7341,11 +7445,11 @@ bool VoxiRenderer::createNeuRaCTwins() {
         return false;
     }
     ShaderScope compile(*res_);
-    const rhi::PipelineLayout giTex = giLayout(kRtTextureCapacity);
+    const rhi::PipelineLayout giTex = rtLayout();
     const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
                                                           layeredBsdf_);
     const std::string bindlessDefs = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
-                                     std::to_string(kRtTextureCapacity);
+                                     std::to_string(kRtTextureCapacity) + rtGeomDefs();
     const std::string csDefs = bindlessDefs + (rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_))
                                                           : std::string());
     const auto build = [&](const char* entry, const char* extra, rhi::PipelineHandle& out) {
@@ -7382,11 +7486,11 @@ bool VoxiRenderer::createPathTraceTwins() {
         return false;
     }
     ShaderScope compile(*res_);
-    const rhi::PipelineLayout giTex = giLayout(kRtTextureCapacity);
+    const rhi::PipelineLayout giTex = rtLayout();
     const std::string matDefs = pbr::materialShaderDefines(giLayout().srvCount, kMaterialSamplerSlot,
                                                           layeredBsdf_);
     const std::string csDefs = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
-                               std::to_string(kRtTextureCapacity) +
+                               std::to_string(kRtTextureCapacity) + rtGeomDefs() +
                                (rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string());
     const auto build = [&](const char* entry, const char* extra, rhi::PipelineHandle& out) {
         if (out) return;
@@ -8187,10 +8291,15 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // Single-pass ray-driven variants only; voxi.rt* toggles are compile-time constants there.
     static constexpr const char* kRdSinglePassDefs =
         kRdSinglePassLamps ? ";AVER_RD_SINGLE_PASS=1" : ";AVER_RD_SINGLE_PASS=1;AVER_RD_SINGLE_PASS_LAMPS=0";
-    const rhi::ShaderHandle psRt = rtOk ? compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65, rasterDefs("AVER_RT=1").c_str()) : 0;
+    // Flat (untextured) ray-traced variants too read geometry from the bindless table when it holds it.
+    ensureTextureTable();
+    const rhi::PipelineLayout giRt = rtGeomBindless_ ? rtLayout() : gi;
+    const std::string rtFlat = std::string("AVER_RT=1") + rtGeomDefs();
+    const rhi::ShaderHandle psRt = rtOk ? compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65, rasterDefs(rtFlat.c_str()).c_str()) : 0;
     if (vsMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psRt;
+        p.layout = giRt;
         sceneRtPso_ = res_->createGraphicsPipeline(p);
     }
     if (rtOk && !sceneRtPso_) AVER_WARN("[Voxi] ray-tracing scene variant unavailable");
@@ -8198,11 +8307,12 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // Same shader with AVER_RT and AVER_GBUFFER: PSMainVoxi nests both #if blocks.
     const rhi::ShaderHandle psRtGbuf =
         rtOk ? compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65,
-                       rasterDefs("AVER_RT=1;AVER_GBUFFER=1").c_str())
+                       rasterDefs((rtFlat + ";AVER_GBUFFER=1").c_str()).c_str())
              : 0;
     if (vsMain && psRtGbuf) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
         p.vs = vsMain; p.ps = psRtGbuf;
+        p.layout = giRt;
         sceneRtGbufPso_ = res_->createGraphicsPipeline(p);
     }
     if (rtOk && !sceneRtGbufPso_) AVER_WARN("[Voxi] ray-tracing G-buffer scene variant unavailable");
@@ -8210,11 +8320,11 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // Ray-driven primary visibility: traces camera ray instead of marching volume. Writes SV_DEPTH.
     const rhi::ShaderHandle psRayDriven =
         rtOk ? compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
-                       rasterDefs((std::string("AVER_RT=1") + kRdSinglePassDefs + rdAblateDefs()).c_str()).c_str()) : 0;
+                       rasterDefs((rtFlat + kRdSinglePassDefs + rdAblateDefs()).c_str()).c_str()) : 0;
     if (vsky && psRayDriven) {
         rhi::GraphicsPipelineDesc p;
         p.vs = vsky; p.ps = psRayDriven;
-        p.layout = gi;
+        p.layout = giRt;
         p.cull = rhi::CullMode::None;
         p.depth = {true, true, rhi::CompareOp::Always};
         p.renderTargetCount = 1;
@@ -8228,9 +8338,9 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // Textured variant: bindless table is a root-signature difference (can't be runtime toggle).
     ensureTextureTable();
     if (rtOk && rtTexTable_) {
-        const rhi::PipelineLayout giTex = giLayout(kRtTextureCapacity);
+        const rhi::PipelineLayout giTex = rtLayout();
         const std::string bindlessDefs = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
-                                         std::to_string(kRtTextureCapacity);
+                                         std::to_string(kRtTextureCapacity) + rtGeomDefs();
         const rhi::ShaderHandle vskyTex = compile("VSky", rhi::ShaderStage::Vertex, kBaseSm,
                                                   rasterDefs(bindlessDefs.c_str()).c_str());
         const rhi::ShaderHandle psTex = compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
@@ -8505,12 +8615,12 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // PSRayDriven's own G-buffer twin: RayDrivenGBufferOut (five targets); built with Always/write-on depth.
     const rhi::ShaderHandle psRayDrivenGbuf =
         rtOk ? compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
-                       rasterDefs((std::string("AVER_RT=1;AVER_GBUFFER=1") + kRdSinglePassDefs + rdAblateDefs()).c_str()).c_str())
+                       rasterDefs((rtFlat + ";AVER_GBUFFER=1" + kRdSinglePassDefs + rdAblateDefs()).c_str()).c_str())
              : 0;
     if (vsky && psRayDrivenGbuf) {
         rhi::GraphicsPipelineDesc p;
         p.vs = vsky; p.ps = psRayDrivenGbuf;
-        p.layout = gi;
+        p.layout = giRt;
         p.cull = rhi::CullMode::None;
         p.depth = {true, true, rhi::CompareOp::Always};
         p.renderTargetCount = 4;
@@ -8528,6 +8638,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     if (msMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
         p.ms = msMain; p.ps = psRt;
+        p.layout = giRt;
         sceneMsRtPso_ = res_->createGraphicsPipeline(p);
     }
     if (msOk && rtOk && !sceneMsRtPso_) AVER_WARN("[Voxi] mesh-shader + ray-tracing scene variant unavailable");
@@ -8535,6 +8646,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     if (msMain && psRtGbuf) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
         p.ms = msMain; p.ps = psRtGbuf;
+        p.layout = giRt;
         sceneMsRtGbufPso_ = res_->createGraphicsPipeline(p);
     }
     if (msOk && rtOk && !sceneMsRtGbufPso_)
@@ -8568,6 +8680,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     if (vsMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psRt;
+        p.layout = giRt;
         p.blend = rhi::BlendMode::PremultipliedAlpha;   // see sceneBlendedPso_ above for why
         p.depth.test = true;    // same test-on/write-off state as sceneBlendedPso_ above
         p.depth.write = false;
@@ -8580,6 +8693,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     if (msMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
         p.ms = msMain; p.ps = psRt;
+        p.layout = giRt;
         p.blend = rhi::BlendMode::PremultipliedAlpha;   // see sceneBlendedPso_ above for why
         p.depth.test = true;    // same test-on/write-off state as sceneBlendedPso_ above
         p.depth.write = false;
@@ -8630,6 +8744,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     if (rtOk && vsMain && psRt && depthPrepassPso_) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psRt;
+        p.layout = giRt;
         p.depth = {true, false, rhi::CompareOp::LessEqual};
         sceneRtPsoPrepassed_ = res_->createGraphicsPipeline(p);
     }
@@ -8640,6 +8755,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     if (rtOk && vsMain && psRtGbuf && depthPrepassPso_) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
         p.vs = vsMain; p.ps = psRtGbuf;
+        p.layout = giRt;
         p.depth = {true, false, rhi::CompareOp::LessEqual};
         sceneRtPsoPrepassedGbuf_ = res_->createGraphicsPipeline(p);
     }

@@ -71,3 +71,25 @@ All three went in together and the build crashed the driver on startup, so none 
 - Mesh vertex sharing for LODs, depth proxies and split parts (Upload heap, not local VRAM).
 
 Lowering the GI voxel resolution from 512³ to 256³ would free about 2.8 GB with no code change.
+
+## Meshes in VRAM, ray hits read them directly (2026-10-17)
+
+Static meshes were on the Upload heap (system memory, read over PCIe by every draw), and Voxi kept a second, VRAM
+copy of every mesh for ray hits (the ray-traced geometry table, 2.9-4.4 GB on NeonDistrict).
+
+- Static meshes are on the Default heap by default (D3D12 and Vulkan; `--mesh-heap upload` keeps system memory).
+  Uploads are not waited on: the staging ring on D3D12, an unwaited one-shot submit on Vulkan. The mesh stager
+  fills an upload buffer and makes the empty Default buffers on the worker; adopting the mesh submits the copy.
+  A Vulkan mesh whose device allocation fails goes to host memory.
+- Multi-material parts and depth proxies are index buffers over the whole mesh's vertices.
+- With `DeviceCaps::rtBindlessBuffers`, the bindless table also holds 8192 vertex-buffer and 8192 index-buffer
+  slots (`createBindlessTable`, `setBindlessBuffer`; spaces 2 and 3). Every ray-traced Voxi pipeline reads geometry
+  through `rtTriangle`/`rtVertex` (voxi_rt.hlsli): `RtInstance.firstVertex` packs the two slots, `firstIndex` is
+  the chunk offset. No geometry table is built and skinned vertices are read where skinning leaves them.
+  `AVER_RT_GEOMETRY_TABLE=1` keeps the table for A/B.
+
+NeonDistrict 4000-frame flight against 7492634d: committed RAM 19.5 -> 15.3 GB average, system memory the GPU
+uses 5.7 -> 0.7 GB; VRAM about 0.5-1 GB higher mid-flight and 1.5 GB lower at the end (the meshes are now in it,
+the table is not), load peak 13.4 GB against a 12.35 GB budget that run. Slow frames unchanged.
+Vulkan on NeonDistrict fails before this change too (BLAS and descriptor pools out of memory; one device
+allocation per buffer).
