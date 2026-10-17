@@ -371,6 +371,7 @@ bool PathTracer::prepare() {
     // Mesh handle -> row in this snapshot.
     std::unordered_map<rhi::MeshHandle, u32> rowOf;
     rowOf.reserve(surfaces_.size());
+    std::unordered_map<u64, u32> sliceOf;   // (vertex buffer, count) -> first vertex: shared vertices copy once
     for (usize i = 0; i < surfaces_.size(); ++i) {
         const rhi::MeshHandle mesh = surfaces_[i].mesh;
         auto found = rowOf.find(mesh);
@@ -383,11 +384,13 @@ bool PathTracer::prepare() {
             }
             MeshRow row;
             row.mesh        = mesh;
-            row.firstVertex = totalVerts_;
             row.firstIndex  = totalIndices_;
             row.vertexCount = vc;
             row.indexCount  = ic;
-            totalVerts_   += vc;
+            const auto [slice, isNew] = sliceOf.try_emplace((static_cast<u64>(vb) << 32) | vc, totalVerts_);
+            row.firstVertex = slice->second;
+            row.copiesVertices = isNew;
+            if (isNew) totalVerts_ += vc;
             totalIndices_ += ic;
             found = rowOf.emplace(mesh, static_cast<u32>(meshRows_.size())).first;
             meshRows_.push_back(row);
@@ -517,8 +520,9 @@ bool PathTracer::buildScenes(rhi::IRenderContext& ctx) {
             rhi::BufferHandle vb = 0, ib = 0;
             u32 vc = 0, ic = 0;
             if (!dev_->meshGeometry(row.mesh, &vb, &ib, &vc, &ic)) { ctx.popMarker(); return false; }
-            ctx.copyBuffer(verts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
-                           static_cast<u64>(row.firstVertex) * sizeof(rhi::MeshVertex), 0);
+            if (row.copiesVertices)
+                ctx.copyBuffer(verts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
+                               static_cast<u64>(row.firstVertex) * sizeof(rhi::MeshVertex), 0);
             ctx.copyBuffer(indices_, ib, static_cast<u64>(ic) * sizeof(u32),
                            static_cast<u64>(row.firstIndex) * sizeof(u32), 0);
         }

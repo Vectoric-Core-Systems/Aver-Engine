@@ -1874,18 +1874,24 @@ struct VulkanMeshStaging final : MeshStaging {
     u8* vbMapped = nullptr;
     u8* ibMapped = nullptr;
     u64 vbytes = 0, ibytes = 0;
+    // Default heap: vb/ib are empty device-local buffers and `staging` holds their bytes (vertices, then indices),
+    // copied when adopted on the main thread.
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
     ~VulkanMeshStaging() override {   // unadopted: never seen by the GPU
-        if (!state || (!vb && !ib)) return;
+        if (!state || (!vb && !ib && !staging)) return;
         std::lock_guard<std::mutex> l(state->m);
         if (!state->dev) return;
         destroyBufferCommitted(*state->dev, vb, vbMemory);
         destroyBufferCommitted(*state->dev, ib, ibMemory);
+        destroyBufferCommitted(*state->dev, staging, stagingMemory);
     }
 };
 
 class VulkanMeshStager final : public IMeshStager {
 public:
     explicit VulkanMeshStager(std::shared_ptr<VulkanDevice::StagerState> state) : state_(std::move(state)) {}
+    std::atomic<bool> defaultHeap{false};
     std::unique_ptr<MeshStaging> stage(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override {
         if (!verts || !indices || vcount == 0 || icount == 0) return nullptr;
         auto s = std::make_unique<VulkanMeshStaging>();
@@ -1906,6 +1912,10 @@ public:
         std::lock_guard<std::mutex> l(state_->m);
         VulkanDevice* dev = state_->dev;
         if (!dev) return nullptr;
+        if (defaultHeap.load(std::memory_order_relaxed) && makeDefault(*dev, *s, verts, indices)) {
+            s->state = state_;
+            return s;
+        }
         if (!make(*dev, s->vbytes, "mesh vertices", verts, s->vb, s->vbMemory, s->vbAddress, s->vbMapped) ||
             !make(*dev, s->ibytes, "mesh indices", indices, s->ib, s->ibMemory, s->ibAddress, s->ibMapped)) {
             destroyBufferCommitted(*dev, s->vb, s->vbMemory);
@@ -1923,6 +1933,10 @@ public:
         std::lock_guard<std::mutex> l(state_->m);
         VulkanDevice* dev = state_->dev;
         if (!dev) return nullptr;
+        if (defaultHeap.load(std::memory_order_relaxed) && makeDefault(*dev, *s, nullptr, indices)) {
+            s->state = state_;
+            return s;
+        }
         if (!make(*dev, s->ibytes, "mesh indices (LOD, shared vertices)", indices, s->ib, s->ibMemory, s->ibAddress,
                   s->ibMapped)) {
             destroyBufferCommitted(*dev, s->ib, s->ibMemory);
@@ -1933,6 +1947,44 @@ public:
     }
 
 private:
+    // Empty device-local buffers plus one filled staging buffer; false (nothing kept) to fall back to host memory.
+    static bool makeDefault(VulkanDevice& dev, VulkanMeshStaging& s, const void* verts, const void* indices) {
+        VkBuffer staging = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+        if (!createBufferCommitted(dev, s.vbytes + s.ibytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                   staging, stagingMemory, nullptr, "mesh staging")) return false;
+        u8* mapped = nullptr;
+        if (!vkOk(dev.api().MapMemory(dev.vkDevice(), stagingMemory, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&mapped)),
+                  "rhi mesh staging map")) {
+            destroyBufferCommitted(dev, staging, stagingMemory);
+            return false;
+        }
+        if (s.vbytes) std::memcpy(mapped, verts, s.vbytes);
+        std::memcpy(mapped + s.vbytes, indices, s.ibytes);
+        dev.api().UnmapMemory(dev.vkDevice(), stagingMemory);
+        BufferDesc d;
+        d.kind = BufferKind::Default;
+        const bool rtAvailable = dev.api().CreateAccelerationStructureKHR != nullptr;
+        const auto makeDst = [&](u64 bytes, const char* name, VkBuffer& b, VkDeviceMemory& m, VkDeviceAddress& a) {
+            d.bytes = bytes;
+            return createBufferCommitted(dev, bytes, toVkBufferUsage(d, rtAvailable), VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                         b, m, &a, name);
+        };
+        if ((s.vbytes && !makeDst(s.vbytes, "mesh vertices", s.vb, s.vbMemory, s.vbAddress)) ||
+            !makeDst(s.ibytes, s.vbytes ? "mesh indices" : "mesh indices (LOD, shared vertices)", s.ib, s.ibMemory,
+                     s.ibAddress)) {
+            destroyBufferCommitted(dev, s.vb, s.vbMemory);
+            destroyBufferCommitted(dev, s.ib, s.ibMemory);
+            destroyBufferCommitted(dev, staging, stagingMemory);
+            s.vb = s.ib = VK_NULL_HANDLE;
+            s.vbMemory = s.ibMemory = VK_NULL_HANDLE;
+            return false;
+        }
+        s.staging = staging;
+        s.stagingMemory = stagingMemory;
+        return true;
+    }
     static bool make(VulkanDevice& dev, u64 bytes, const char* name, const void* src, VkBuffer& buffer,
                      VkDeviceMemory& memory, VkDeviceAddress& address, u8*& mapped) {
         BufferDesc d;
@@ -1952,8 +2004,9 @@ private:
 } // namespace
 
 std::shared_ptr<IMeshStager> VulkanDevice::meshStager() {
-    if (!device_ || !rhiFactory_ || staticMeshDefaultHeap_) return nullptr;
+    if (!device_ || !rhiFactory_) return nullptr;
     if (!meshStager_) meshStager_ = std::make_shared<VulkanMeshStager>(stagerState());
+    static_cast<VulkanMeshStager&>(*meshStager_).defaultHeap = staticMeshDefaultHeap_;
     return meshStager_;
 }
 
@@ -1975,10 +2028,22 @@ MeshHandle VulkanDevice::adoptMesh(std::unique_ptr<MeshStaging> staged) {
     auto* s = dynamic_cast<VulkanMeshStaging*>(staged.get());
     if (!s || !rhiFactory_ || !s->vb || !s->ib || !s->state || s->state->dev != this) return 0;
     GpuMesh m = s->m;
-    BufferDesc vd; vd.bytes = s->vbytes; vd.kind = BufferKind::Upload; vd.debugName = "mesh vertices";
-    BufferDesc idd; idd.bytes = s->ibytes; idd.kind = BufferKind::Upload; idd.debugName = "mesh indices";
-    m.vbBuffer = rhiFactory_->adoptHostBuffer(s->vb, s->vbMemory, s->vbAddress, s->vbMapped, vd);
-    m.ibBuffer = rhiFactory_->adoptHostBuffer(s->ib, s->ibMemory, s->ibAddress, s->ibMapped, idd);
+    const bool onDefault = s->staging != VK_NULL_HANDLE;
+    BufferDesc vd; vd.bytes = s->vbytes; vd.kind = onDefault ? BufferKind::Default : BufferKind::Upload; vd.debugName = "mesh vertices";
+    BufferDesc idd; idd.bytes = s->ibytes; idd.kind = vd.kind; idd.debugName = "mesh indices";
+    if (onDefault) {
+        const VkBuffer dsts[2] = {s->vb, s->ib};
+        const VkDeviceSize offsets[2] = {0, s->vbytes}, sizes[2] = {s->vbytes, s->ibytes};
+        const VkBuffer staging = s->staging;
+        s->staging = VK_NULL_HANDLE;   // the copy owns it from here
+        if (!rhiFactory_->copyToDeviceBuffers(staging, s->stagingMemory, dsts, offsets, sizes, 2, "rhi mesh upload"))
+            return 0;
+        m.vbBuffer = rhiFactory_->adoptDeviceBuffer(s->vb, s->vbMemory, s->vbAddress, vd);
+        m.ibBuffer = rhiFactory_->adoptDeviceBuffer(s->ib, s->ibMemory, s->ibAddress, idd);
+    } else {
+        m.vbBuffer = rhiFactory_->adoptHostBuffer(s->vb, s->vbMemory, s->vbAddress, s->vbMapped, vd);
+        m.ibBuffer = rhiFactory_->adoptHostBuffer(s->ib, s->ibMemory, s->ibAddress, s->ibMapped, idd);
+    }
     m.vb = s->vb; m.vbMemory = s->vbMemory; m.vbAddress = s->vbAddress;
     m.ib = s->ib; m.ibMemory = s->ibMemory; m.ibAddress = s->ibAddress;
     s->vb = s->ib = VK_NULL_HANDLE;   // owned by the factory from here
@@ -2029,18 +2094,17 @@ MeshHandle VulkanDevice::createMesh(const MeshVertex* verts, u32 vcount, const u
     m.ib = irb->buffer; m.ibMemory = irb->memory; m.ibAddress = irb->address;
 
     if (useDefaultHeap) {
-        // ONE staging buffer, ONE one-shot submit for both buffers -- see uploadToDeviceBuffers for
-        // why this must be synchronous (createMesh runs mid-frame too, e.g. from SandboxRender.cpp's
-        // colourDecide or AssetEditor/AnimEditor panels) and why a SEPARATE command buffer makes that
-        // legal (vkCmdCopyBuffer inside beginFrame's dynamic-rendering scope is not).
+        // ONE staging buffer, ONE one-shot submit for both buffers, on a SEPARATE command buffer ahead of the
+        // frame's: createMesh runs mid-frame too (SandboxRender.cpp's colourDecide, AssetEditor/AnimEditor
+        // panels) and vkCmdCopyBuffer inside beginFrame's dynamic-rendering scope is illegal.
         const VkBuffer dsts[2] = {m.vb, m.ib};
         const void* srcs[2] = {verts, indices};
         const VkDeviceSize sizes[2] = {vbytes, ibytes};
         if (rhiFactory_->uploadToDeviceBuffers(dsts, srcs, sizes, 2, "rhi createMesh default-heap upload")) {
             if (!meshDefaultHeapLogged_) {
                 meshDefaultHeapLogged_ = true;
-                AVER_INFO("[RHI.Vulkan] static meshes on the Default heap (--mesh-heap default): "
-                          "vertex and index buffers uploaded through a one-shot staging copy");
+                AVER_INFO("[RHI.Vulkan] static meshes on the Default heap: vertex and index buffers copied by a "
+                          "one-shot submit that is not waited on (--mesh-heap upload keeps them in host memory)");
             }
         } else {
             // FALL BACK TO THE UPLOAD HEAP FOR THIS ONE MESH, not globally: staticMeshDefaultHeap_
@@ -2141,7 +2205,16 @@ MeshHandle VulkanDevice::shareVertices(MeshHandle source, const u32* indices, u3
     const char* ibName = posed ? "mesh indices (posed part)" : "mesh indices (LOD, shared vertices)";
     BufferDesc idd; idd.bytes = ibytes; idd.kind = kind; idd.debugName = ibName;
     BufferHandle ibBuffer = 0;
-    if (st) {
+    if (st && st->staging) {
+        const VkDeviceSize offset = 0;
+        const VkBuffer staging = st->staging;
+        st->staging = VK_NULL_HANDLE;   // the copy owns it from here
+        if (!rhiFactory_->copyToDeviceBuffers(staging, st->stagingMemory, &st->ib, &offset, &ibytes, 1, "rhi mesh upload"))
+            return 0;
+        idd.kind = BufferKind::Default;
+        ibBuffer = rhiFactory_->adoptDeviceBuffer(st->ib, st->ibMemory, st->ibAddress, idd);
+        st->ib = VK_NULL_HANDLE;   // owned by the factory from here
+    } else if (st) {
         ibBuffer = rhiFactory_->adoptHostBuffer(st->ib, st->ibMemory, st->ibAddress, st->ibMapped, idd);
         st->ib = VK_NULL_HANDLE;   // owned by the factory from here
     } else {

@@ -391,10 +391,9 @@ void GameContent::prepareMeshCpu(const fmt::OcMeshData& md, const std::string& r
         v.nx = md.normals[usize(i)*3+0];   v.ny = md.normals[usize(i)*3+1];   v.nz = md.normals[usize(i)*3+2];
         v.u  = md.uvs[usize(i)*2+0];       v.v  = md.uvs[usize(i)*2+1];
     }
-    // Per-material split, compacted per part (see buildMeshParts).
+    // Per-material split: each part an index slice over these vertices (see buildMeshParts).
     out.parts.clear();
     if (md.submeshes.size() <= 1) return;   // common case: nothing to split
-    std::unordered_map<u32, u32> remap;
     const bool keepBaseIndices = md.hasSkin();
     for (const fmt::OcMeshSubmesh& sm : md.submeshes) {
         if (sm.indexCount == 0) continue;
@@ -404,24 +403,17 @@ void GameContent::prepareMeshCpu(const fmt::OcMeshData& md, const std::string& r
             continue;
         }
         PartCpu part;
-        remap.clear();
-        part.indices.reserve(sm.indexCount);
         bool bad = false;
-        for (usize k = sm.indexStart; k < end; ++k) {
-            const u32 vi = md.indices[k];
-            if (vi >= verts.size()) { bad = true; break; }
-            const auto [it2, inserted] = remap.try_emplace(vi, static_cast<u32>(part.verts.size()));
-            if (inserted) part.verts.push_back(verts[vi]);
-            part.indices.push_back(it2->second);
-        }
-        if (bad || part.verts.empty()) {
+        for (usize k = sm.indexStart; k < end && !bad; ++k) bad = md.indices[k] >= verts.size();
+        if (bad) {
             AVER_WARN("[Mesh] '{}' submesh '{}' indexes a vertex it does not have; skipped", rel, sm.name);
             continue;
         }
+        part.indices.assign(md.indices.data() + sm.indexStart, md.indices.data() + end);
         part.slot = sm.materialSlot;
         part.name = sm.name;
         // baseIndices[i] is the slice parts[i] was cut from (lockstep).
-        if (keepBaseIndices) part.baseIndices.assign(md.indices.data() + sm.indexStart, md.indices.data() + end);
+        if (keepBaseIndices) part.baseIndices = part.indices;
         out.parts.push_back(std::move(part));
     }
 }
@@ -448,7 +440,7 @@ bool GameContent::uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData
         meshSlot0Name_[id] = md.materialSlots[0];
     }
     // The per-submesh split: a mesh naming several materials draws one part per material.
-    buildMeshParts(device, id, md, cpu->parts, rel);
+    buildMeshParts(device, id, md, h, verts, cpu->parts, rel);
     hm.mark("upload:parts");
     projectMeshIds_.push_back(id);
     if (meshLoaded_) meshLoaded_(LoadedMesh{id, rel, &md, verts, md.indices, h}, meshLoadedUser_);
@@ -470,8 +462,8 @@ bool GameContent::uploadMesh(rhi::IDevice& device, u64 id, const fmt::OcMeshData
             const fmt::OcMeshLod& lod = md.coarserLods[pick - 1];
             // LOD 0's OWN vertex array: a coarser level owns its index buffer but shares the one
             // VTXS block (see OcMeshData::coarserLods), which is why `verts` is correct here.
-            const rhi::MeshHandle ph = device.createMesh(verts.data(), (u32)verts.size(),
-                                                         lod.indices.data(), (u32)lod.indices.size());
+            rhi::MeshHandle ph = device.createMeshSharingVertices(h, lod.indices.data(), (u32)lod.indices.size());
+            if (!ph) ph = device.createMesh(verts.data(), (u32)verts.size(), lod.indices.data(), (u32)lod.indices.size());
             if (ph) {
                 depthProxyMap_[h] = ph;
                 AVER_INFO("[Mesh] '{}' depth proxy: LOD {} ({} tris, {:.1f}x less than LOD 0, {:.1f}cm error)",
@@ -690,12 +682,13 @@ void GameContent::flushMeshReleases(rhi::IDevice& device, u64 frameIndex) {
 // all (the ray path's BLAS carries one materialIndex per instance, so a range draw would still shade
 // flat in the renderer that is actually on screen).
 //
-// COMPACTED PER PART, not sharing the parent's vertex array. createMesh COPIES what it is given, so
-// handing every part of a multi-material mesh the WHOLE vertex buffer would upload that buffer once
-// per part. The remap also gives each part honest bounds, which a future per-part culler would want
-// anyway.
-void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md,
-                                  std::vector<PartCpu>& cpuParts, const std::string& rel) {
+// SHARING THE PARENT'S VERTICES: each part owns only its index slice (createMeshSharingVertices), so a
+// multi-material mesh holds its vertices once (compacted copies doubled them, in VRAM since meshes moved to
+// the Default heap). Parts take the parent's bounds. A device that refuses the share gets the whole vertex
+// array per part, which is correct, just larger.
+void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, rhi::MeshHandle whole,
+                                  const std::vector<rhi::MeshVertex>& verts, std::vector<PartCpu>& cpuParts,
+                                  const std::string& rel) {
     if (cpuParts.empty()) return;
     std::vector<MeshPart> parts;
     parts.reserve(cpuParts.size());
@@ -703,9 +696,11 @@ void GameContent::buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMesh
     std::vector<std::vector<u32>> baseIndices;
     for (PartCpu& pc : cpuParts) {
         MeshPart part;
-        part.mesh = pc.staged ? device.adoptMesh(std::move(pc.staged)) : 0;
+        part.mesh = pc.staged ? device.adoptMeshSharingVertices(whole, std::move(pc.staged)) : 0;
         if (!part.mesh)
-            part.mesh = device.createMesh(pc.verts.data(), static_cast<u32>(pc.verts.size()),
+            part.mesh = device.createMeshSharingVertices(whole, pc.indices.data(), static_cast<u32>(pc.indices.size()));
+        if (!part.mesh)
+            part.mesh = device.createMesh(verts.data(), static_cast<u32>(verts.size()),
                                           pc.indices.data(), static_cast<u32>(pc.indices.size()));
         if (!part.mesh) {
             AVER_WARN("[Mesh] the device refused submesh '{}' of '{}'", pc.name, rel);
@@ -1307,8 +1302,7 @@ struct GameContent::MeshPrefetch {
                 j->cpu.staged = j->stager->stage(j->cpu.verts.data(), static_cast<u32>(j->cpu.verts.size()),
                                                  j->md.indices.data(), static_cast<u32>(j->md.indices.size()));
                 for (PartCpu& p : j->cpu.parts)
-                    p.staged = j->stager->stage(p.verts.data(), static_cast<u32>(p.verts.size()),
-                                                p.indices.data(), static_cast<u32>(p.indices.size()));
+                    p.staged = j->stager->stageIndices(p.indices.data(), static_cast<u32>(p.indices.size()));
                 for (const fmt::OcMeshLod& lod : j->md.coarserLods)
                     j->cpu.lodStaged.push_back(j->stager->stageIndices(lod.indices.data(),
                                                                        static_cast<u32>(lod.indices.size())));

@@ -1591,7 +1591,7 @@ private:
                              MeshStaging* staged = nullptr);
 
     // Static mesh default heap (false = Upload heap, the default).
-    bool staticMeshDefaultHeap_ = false;
+    bool staticMeshDefaultHeap_ = true;   // VRAM; uploads through the staging ring, no wait
     // Default-heap first-mesh warning (once, on first actual build).
     bool staticMeshDefaultHeapLogged_ = false;
     // Fallback-to-Upload warning (once, on any failure).
@@ -1942,6 +1942,10 @@ struct BufferUploadItem {
     const void* src = nullptr;
     u64 bytes = 0;
 };
+struct BufferCopyItem {
+    ID3D12Resource* dst = nullptr;   // a freshly created Default-heap buffer in COMMON
+    u64 srcOffset = 0, bytes = 0;
+};
 
 // The generic RHI factory: handle tables, the shared descriptor heap, and deferred destruction.
 class D3D12ResourceFactory final : public IResourceFactory {
@@ -2042,8 +2046,13 @@ private:
     std::deque<TexStagingSpan> texStagingSpans_;
     static constexpr u64 kTexStagingBytes = 256ull << 20;
 
-    // Fills freshly created DEFAULT-heap buffers via one UPLOAD staging buffer.
+    // Fills freshly created DEFAULT-heap buffers via the staging ring (no wait), or past it one UPLOAD staging
+    // buffer and a wait, so a burst holds no more than the ring.
     bool uploadBuffers(std::initializer_list<BufferUploadItem> items);
+    // Copies a filled UPLOAD buffer into freshly created DEFAULT-heap buffers, no wait: on the one queue the copy runs
+    // ahead of any frame that reads them. The staging buffer, list and allocator retire behind the frame fence.
+    bool copyStagedBuffers(const ComPtr<ID3D12Resource>& staging, u64 base, const BufferCopyItem* items, usize count,
+                           bool wait);
     // Same as uploadBuffers but for ONE destination; fill writes the bytes directly.
     bool uploadBufferFilled(ID3D12Resource* dst, u64 bytes, const std::function<void(u8*)>& fill);
 
@@ -3609,11 +3618,15 @@ struct D3D12MeshStaging final : MeshStaging {
     u8* vbMapped = nullptr;
     u8* ibMapped = nullptr;
     u64 vbytes = 0, ibytes = 0;
+    // Default heap: vb/ib are empty Default buffers and `staging` holds their bytes (vertices, then indices), copied
+    // when adopted on the main thread.
+    ComPtr<ID3D12Resource> staging;
 };
 
 class D3D12MeshStager final : public IMeshStager {
 public:
     explicit D3D12MeshStager(ComPtr<ID3D12Device> device) : device_(std::move(device)) {}
+    std::atomic<bool> defaultHeap{false};
     std::unique_ptr<MeshStaging> stage(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override {
         if (!device_ || !verts || !indices || vcount == 0 || icount == 0) return nullptr;
         auto s = std::make_unique<D3D12MeshStaging>();
@@ -3623,6 +3636,7 @@ public:
         boundsOfVertices(verts, vcount, s->m);
         s->vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
         s->ibytes = static_cast<u64>(icount) * sizeof(u32);
+        if (defaultHeap.load(std::memory_order_relaxed) && makeDefault(*s, verts, indices)) return s;
         if (!make(s->vbytes, "mesh vertices", verts, s->vb, s->vbMapped) ||
             !make(s->ibytes, "mesh indices", indices, s->ib, s->ibMapped)) return nullptr;
         return s;
@@ -3633,11 +3647,35 @@ public:
         s->device = device_.Get();
         s->m.indexCount = icount;
         s->ibytes = static_cast<u64>(icount) * sizeof(u32);
+        if (defaultHeap.load(std::memory_order_relaxed) && makeDefault(*s, nullptr, indices)) return s;
         if (!make(s->ibytes, "mesh indices (shared vertices)", indices, s->ib, s->ibMapped)) return nullptr;
         return s;
     }
 
 private:
+    // Empty Default buffers plus one filled upload buffer; false (nothing kept) to fall back to the Upload heap.
+    bool makeDefault(D3D12MeshStaging& s, const void* verts, const void* indices) {
+        ComPtr<ID3D12Resource> staging, vb, ib;
+        u8* mapped = nullptr;
+        if (!make(s.vbytes + s.ibytes, "mesh staging", nullptr, staging, mapped)) return false;
+        if (s.vbytes) std::memcpy(mapped, verts, s.vbytes);
+        std::memcpy(mapped + s.vbytes, indices, s.ibytes);
+        staging->Unmap(0, nullptr);
+        auto hp = heapProps(D3D12_HEAP_TYPE_DEFAULT);
+        const auto makeDst = [&](u64 bytes, const char* name, ComPtr<ID3D12Resource>& res) {
+            const D3D12_RESOURCE_DESC rd = bufferDesc(bytes);
+            if (FAILED(device_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COMMON,
+                                                        nullptr, IID_PPV_ARGS(&res)))) return false;
+            setDebugName(res.Get(), name);
+            return true;
+        };
+        if (s.vbytes && !makeDst(s.vbytes, "mesh vertices", vb)) return false;
+        if (!makeDst(s.ibytes, s.vbytes ? "mesh indices" : "mesh indices (shared vertices)", ib)) return false;
+        s.staging = std::move(staging);
+        s.vb = std::move(vb);
+        s.ib = std::move(ib);
+        return true;
+    }
     bool make(u64 bytes, const char* name, const void* src, ComPtr<ID3D12Resource>& res, u8*& mapped) {
         auto hp = heapProps(D3D12_HEAP_TYPE_UPLOAD);
         const D3D12_RESOURCE_DESC rd = bufferDesc(bytes);
@@ -3646,7 +3684,7 @@ private:
         setDebugName(res.Get(), name);
         D3D12_RANGE none{0, 0};
         if (FAILED(res->Map(0, &none, reinterpret_cast<void**>(&mapped)))) return false;
-        std::memcpy(mapped, src, bytes);
+        if (src) std::memcpy(mapped, src, bytes);
         return true;
     }
     ComPtr<ID3D12Device> device_;
@@ -3654,8 +3692,9 @@ private:
 } // namespace
 
 std::shared_ptr<IMeshStager> D3D12Device::meshStager() {
-    if (!device_ || !rhiFactory_ || staticMeshDefaultHeap_) return nullptr;
+    if (!device_ || !rhiFactory_) return nullptr;
     if (!meshStager_) meshStager_ = std::make_shared<D3D12MeshStager>(device_);
+    static_cast<D3D12MeshStager&>(*meshStager_).defaultHeap = staticMeshDefaultHeap_;
     return meshStager_;
 }
 
@@ -3668,15 +3707,18 @@ MeshHandle D3D12Device::adoptMeshSharingVertices(MeshHandle source, std::unique_
 MeshHandle D3D12Device::adoptMesh(std::unique_ptr<MeshStaging> staged) {
     auto* s = dynamic_cast<D3D12MeshStaging*>(staged.get());
     if (!s || !rhiFactory_ || !s->vb || !s->ib || s->device != device_.Get()) return 0;
+    const bool onDefault = s->staging != nullptr;
+    const BufferCopyItem copies[2] = {{s->vb.Get(), 0, s->vbytes}, {s->ib.Get(), s->vbytes, s->ibytes}};
+    if (onDefault && !rhiFactory_->copyStagedBuffers(s->staging, 0, copies, 2, false)) return 0;
     GpuMesh m = s->m;
     BufferDesc vd;
     vd.bytes = s->vbytes;
-    vd.kind = BufferKind::Upload;
+    vd.kind = onDefault ? BufferKind::Default : BufferKind::Upload;
     vd.debugName = "mesh vertices";
     m.vbBuffer = rhiFactory_->registerBuffer(s->vb, s->vbMapped, vd);
     BufferDesc idd;
     idd.bytes = s->ibytes;
-    idd.kind = BufferKind::Upload;
+    idd.kind = onDefault ? BufferKind::Default : BufferKind::Upload;
     idd.debugName = "mesh indices";
     m.ibBuffer = rhiFactory_->registerBuffer(s->ib, s->ibMapped, idd);
     m.vb = s->vb;
@@ -3755,8 +3797,8 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
         if (!allocateAndUpload(useDefault)) return 0;
     } else if (useDefault && !staticMeshDefaultHeapLogged_) {
         staticMeshDefaultHeapLogged_ = true;
-        AVER_INFO("[RHI.D3D12] static meshes on the Default heap (--mesh-heap default): vertex and "
-                  "index buffers uploaded through a one-shot staging copy");
+        AVER_INFO("[RHI.D3D12] static meshes on the Default heap: vertex and index buffers copied through the "
+                  "staging ring (--mesh-heap upload keeps them in system memory)");
     }
 
     m.vbv.BufferLocation = m.vb->GetGPUVirtualAddress();
@@ -3858,9 +3900,12 @@ MeshHandle D3D12Device::shareVertices(MeshHandle source, const u32* indices, u32
     };
 
     if (st) {
+        const bool onDefault = st->staging != nullptr;
+        const BufferCopyItem copy{st->ib.Get(), 0, ibytes};
+        if (onDefault && !rhiFactory_->copyStagedBuffers(st->staging, 0, &copy, 1, false)) return 0;
         BufferDesc idd;
         idd.bytes = ibytes;
-        idd.kind = BufferKind::Upload;
+        idd.kind = onDefault ? BufferKind::Default : BufferKind::Upload;
         idd.debugName = "mesh indices (shared vertices)";
         m.ib = st->ib;
         m.ibBuffer = rhiFactory_->registerBuffer(st->ib, st->ibMapped, idd);
@@ -3870,8 +3915,8 @@ MeshHandle D3D12Device::shareVertices(MeshHandle source, const u32* indices, u32
         if (!allocateIndices(useDefault)) return 0;
     } else if (useDefault && !staticMeshDefaultHeapLogged_) {
         staticMeshDefaultHeapLogged_ = true;
-        AVER_INFO("[RHI.D3D12] static meshes on the Default heap (--mesh-heap default): vertex and "
-                  "index buffers uploaded through a one-shot staging copy");
+        AVER_INFO("[RHI.D3D12] static meshes on the Default heap: index buffers copied through the staging ring "
+                  "(--mesh-heap upload keeps them in system memory)");
     }
 
     m.indexCount = indexCount;
@@ -7266,73 +7311,76 @@ bool D3D12ResourceFactory::texStagingAlloc(u64 bytes, u64& offset) {
     return true;
 }
 
-// Blocks on GPU round trip per call; see declaration.
 bool D3D12ResourceFactory::uploadBuffers(std::initializer_list<BufferUploadItem> items) {
     ID3D12Device* dev = dev_->device_.Get();
     u64 total = 0;
     for (const auto& it : items) total += it.bytes;
     if (total == 0) return true;   // nothing to copy is not a failure
 
-    auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
-    auto ud = bufferDesc(total);
+    u64 base = 0;
     ComPtr<ID3D12Resource> staging;
-    if (!hrOk(dev->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &ud,
-              D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging)),
-              "rhi buffer staging")) return false;
-    setDebugName(staging.Get(), "rhi buffer staging");
-
     u8* mapped = nullptr;
-    D3D12_RANGE none{0, 0};
-    if (!hrOk(staging->Map(0, &none, reinterpret_cast<void**>(&mapped)), "rhi buffer staging Map"))
-        return false;
-    std::vector<u64> offsets;
-    offsets.reserve(items.size());
-    {
-        u64 offset = 0;
-        for (const auto& it : items) {
-            offsets.push_back(offset);
-            if (it.src && it.bytes) std::memcpy(mapped + offset, it.src, static_cast<size_t>(it.bytes));
-            offset += it.bytes;
-        }
+    const bool ring = texStagingAlloc(total, base);
+    if (ring) {
+        staging = texStaging_;
+        mapped = texStagingMapped_ + base;
+    } else {
+        auto up = heapProps(D3D12_HEAP_TYPE_UPLOAD);
+        auto ud = bufferDesc(total);
+        if (!hrOk(dev->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &ud,
+                  D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging)),
+                  "rhi buffer staging")) return false;
+        setDebugName(staging.Get(), "rhi buffer staging");
+        D3D12_RANGE none{0, 0};
+        if (!hrOk(staging->Map(0, &none, reinterpret_cast<void**>(&mapped)), "rhi buffer staging Map"))
+            return false;
     }
-    staging->Unmap(0, nullptr);
+    std::vector<BufferCopyItem> copies;
+    copies.reserve(items.size());
+    u64 offset = 0;
+    for (const auto& it : items) {
+        if (it.src && it.bytes) std::memcpy(mapped + offset, it.src, static_cast<size_t>(it.bytes));
+        copies.push_back({it.dst, offset, it.bytes});
+        offset += it.bytes;
+    }
+    if (!ring) staging->Unmap(0, nullptr);
+    return copyStagedBuffers(staging, base, copies.data(), copies.size(), !ring);
+}
 
+bool D3D12ResourceFactory::copyStagedBuffers(const ComPtr<ID3D12Resource>& staging, u64 base,
+                                             const BufferCopyItem* items, usize count, bool wait) {
+    ID3D12Device* dev = dev_->device_.Get();
     ComPtr<ID3D12CommandAllocator> alloc;
     ComPtr<ID3D12GraphicsCommandList> list;
     if (!hrOk(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc)),
               "rhi buffer upload alloc")) return false;
     if (!hrOk(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr,
               IID_PPV_ARGS(&list)), "rhi buffer upload list")) return false;
-
-    {
-        size_t idx = 0;
-        for (const auto& it : items) {
-            if (it.dst && it.bytes) list->CopyBufferRegion(it.dst, 0, staging.Get(), offsets[idx], it.bytes);
-            ++idx;
-        }
-    }
-
-    // Explicit transition to COMMON (not left to submit-time decay).
     std::vector<D3D12_RESOURCE_BARRIER> back;
-    back.reserve(items.size());
-    for (const auto& it : items)
-        if (it.dst && it.bytes)
-            back.push_back(transition(it.dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON));
+    back.reserve(count);
+    for (usize i = 0; i < count; ++i) {
+        const BufferCopyItem& it = items[i];
+        if (!it.dst || !it.bytes) continue;
+        list->CopyBufferRegion(it.dst, 0, staging.Get(), base + it.srcOffset, it.bytes);
+        // Explicit transition to COMMON (not left to submit-time decay).
+        back.push_back(transition(it.dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON));
+    }
     if (!back.empty()) list->ResourceBarrier(static_cast<UINT>(back.size()), back.data());
-
     list->Close();
     ID3D12CommandList* lists[] = {list.Get()};
     dev_->queue_->ExecuteCommandLists(1, lists);
-
-    ComPtr<ID3D12Fence> f;
-    if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi buffer upload fence"))
-        return false;
-    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    dev_->queue_->Signal(f.Get(), 1);
-    if (f->GetCompletedValue() < 1 && ev) { f->SetEventOnCompletion(1, ev); WaitForSingleObject(ev, INFINITE); }
-    if (ev) CloseHandle(ev);
-
-    retire(staging);
+    if (wait) {
+        ComPtr<ID3D12Fence> f;
+        if (!hrOk(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)), "rhi buffer upload fence"))
+            return false;
+        HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        dev_->queue_->Signal(f.Get(), 1);
+        if (f->GetCompletedValue() < 1 && ev) { f->SetEventOnCompletion(1, ev); WaitForSingleObject(ev, INFINITE); }
+        if (ev) CloseHandle(ev);
+    }
+    if (staging != texStaging_) retire(staging);
+    retire(list);
+    retire(alloc);
     collect();
     return true;
 }

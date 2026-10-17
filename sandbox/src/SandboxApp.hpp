@@ -3686,14 +3686,14 @@ private:
     bool nrd2CaptureGrid_=false, nrd2CaptureStarted_=false;
     Vec3 camWanderBasePos_{};
     f32  camWanderBaseYaw_=0.0f, camWanderBasePitch_=0.0f;
-    // --mesh-heap default|upload (W4): false (default) = static mesh vertex/index buffers on the Upload heap.
-    // true moves them to the Default heap (see rhi::IDevice::setStaticMeshHeapDefault).
-    bool meshHeapDefault_ = false;
-    // --lod-share-vertices 0|1 (W11): false (default) = every coarser LOD gets its own vertex buffer,
-    // duplicating LOD0's untouched data. true shares LOD0's buffer via createMeshSharingVertices,
-    // falling back to independent buffers on refusal (unsupported backend, compute-written vertices).
+    // --mesh-heap default|upload (W4): true (default) = static mesh vertex/index buffers on the Default heap (VRAM);
+    // false keeps them on the Upload heap (see rhi::IDevice::setStaticMeshHeapDefault).
+    bool meshHeapDefault_ = true;
+    // --lod-share-vertices 0|1 (W11): true (default) shares LOD0's vertex buffer with every coarser LOD via
+    // createMeshSharingVertices, falling back to independent buffers on refusal (unsupported backend,
+    // compute-written vertices); false gives each LOD its own copy of LOD0's untouched data (VRAM).
     // Read inside loadProjectMeshes' LOD-ladder loop, once per mesh at load time.
-    bool lodShareVertices_ = false;
+    bool lodShareVertices_ = true;
 
     Vec3 camPosOverride_{};
     f32  pitchOverride_=0.0f, yawOverride_=0.0f;   // radians, converted in setCamera

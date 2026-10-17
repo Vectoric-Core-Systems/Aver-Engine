@@ -268,8 +268,7 @@ private:
     // CPU half of an upload (vertices, per-material parts), made on a prefetch worker or inline.
     // staged: the GPU buffers a prefetch worker made (IMeshStager), adopted instead of createMesh.
     struct PartCpu {
-        std::vector<rhi::MeshVertex> verts;
-        std::vector<u32> indices, baseIndices;   // baseIndices: skinned meshes only
+        std::vector<u32> indices, baseIndices;   // into the whole mesh's vertices; baseIndices: skinned meshes only
         u32 slot = ~0u;
         std::string name;
         std::unique_ptr<rhi::MeshStaging> staged;
@@ -310,16 +309,15 @@ private:
     bool collisionSlotCollides(const std::string& slotName);
 
     // Splits `md` into one compacted MeshHandle + material token per submesh, when it names more than
-    // one -- a no-op otherwise. Ported from SandboxApp::buildMeshParts (sandbox/src/SandboxAssets.cpp):
-    // same compaction (each part gets its OWN remapped vertex/index arrays, not a view into `verts`,
-    // because IDevice::createMesh copies what it is given and a part sharing the parent's whole buffer
-    // would upload it once per part), same slot-name-to-material-token rule (a submesh's materialSlot
-    // names a string in md.materialSlots, resolved through aver_scene_material the same way
-    // meshSlot0Material_ already is above), same "one surviving part is not a split" fallback. Called
-    // unconditionally from loadProjectMeshes, not gated on AVER_MODULE_LANDSCAPE the way the editor's
-    // call site is -- see MeshPart's own comment for why that guard does not belong here.
-    void buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md,
-                         std::vector<PartCpu>& cpuParts, const std::string& rel);
+    // one -- a no-op otherwise. Each part is an index buffer over the whole mesh's vertices
+    // (createMeshSharingVertices), so a multi-material mesh holds its vertices once; same slot-name-to-
+    // material-token rule (a submesh's materialSlot names a string in md.materialSlots, resolved through
+    // aver_scene_material the same way meshSlot0Material_ already is above), same "one surviving part is
+    // not a split" fallback. Called unconditionally from loadProjectMeshes, not gated on
+    // AVER_MODULE_LANDSCAPE the way the editor's call site is -- see MeshPart's own comment for why.
+    void buildMeshParts(rhi::IDevice& device, u64 id, const fmt::OcMeshData& md, rhi::MeshHandle whole,
+                         const std::vector<rhi::MeshVertex>& verts, std::vector<PartCpu>& cpuParts,
+                         const std::string& rel);
 #endif
 
 #if AVER_MODULE_PBR

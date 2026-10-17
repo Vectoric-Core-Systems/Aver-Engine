@@ -1908,7 +1908,7 @@ private:
     std::vector<SkinSeed> skinSeeds_;
 
     // ---- W4: default-heap static meshes (--mesh-heap default) ----
-    bool staticMeshDefaultHeap_ = false;   // setStaticMeshHeapDefault's stored value; false = today's Upload-heap behaviour
+    bool staticMeshDefaultHeap_ = true;   // setStaticMeshHeapDefault's stored value; false = the Upload heap
     // The C-7 "static meshes on the Default heap" line, once for this device's life -- logged on the
     // first mesh actually built that way, not at flag-set time, so a run that sets the flag but never
     // builds a mesh (an empty scene) says nothing.
@@ -2090,17 +2090,22 @@ public:
                                              TextureHandle existing);
 
     // W4: fills every `dsts[i]` (`count` of them, `sizes[i]` bytes from `srcs[i]`) via ONE
-    // HOST_VISIBLE staging buffer and ONE one-shot submit -- see createMesh's own comment for why
-    // this exists (a Default-heap buffer refuses writeBuffer, needing Upload's persistent mapping)
-    // and why it is SYNCHRONOUS (createMesh runs mid-frame too; vkCmdCopyBuffer is illegal inside
-    // beginFrame's dynamic-rendering scope, so this uses a SEPARATE command buffer via
-    // runOneShotCommands whose wait has already retired the staging buffer by the time this
-    // returns -- nothing here is left for the caller to free). Every `dst` must be a buffer this
-    // factory made with TRANSFER_DST usage, which toVkBufferUsage grants every buffer
-    // unconditionally. `what` names the call in any failure log. False on any failure -- the
-    // staging buffer is destroyed either way.
+    // HOST_VISIBLE staging buffer and ONE one-shot submit (copyToDeviceBuffers) -- a Default-heap buffer
+    // refuses writeBuffer, needing Upload's persistent mapping. createMesh runs mid-frame too and
+    // vkCmdCopyBuffer is illegal inside beginFrame's dynamic-rendering scope, so the copy is a SEPARATE
+    // command buffer submitted ahead of the frame's. Every `dst` must be a buffer this factory made with
+    // TRANSFER_DST usage, which toVkBufferUsage grants every buffer unconditionally. `what` names the
+    // call in any failure log. False on any failure -- the staging buffer is freed either way.
     bool uploadToDeviceBuffers(const VkBuffer* dsts, const void* const* srcs, const VkDeviceSize* sizes,
                                u32 count, const char* what);
+    // Copies a filled host-visible TRANSFER_SRC buffer into fresh device-local buffers and takes ownership of it
+    // (freed either way). Not waited on while kAsyncUploadBytes allows (it and the command pool go once the
+    // timeline passes); past that, waited, so a burst cannot pile up staging. The copy is made visible to every
+    // later stage (draws, shaders, BLAS builds, copies).
+    bool copyToDeviceBuffers(VkBuffer staging, VkDeviceMemory stagingMemory, const VkBuffer* dsts,
+                             const VkDeviceSize* srcOffsets, const VkDeviceSize* sizes, u32 count, const char* what);
+    // A device-local buffer made elsewhere (the mesh stager), owned by the factory from here.
+    BufferHandle adoptDeviceBuffer(VkBuffer buffer, VkDeviceMemory memory, VkDeviceAddress address, const BufferDesc& d);
 
     // ---- table lookups, reachable from VulkanRenderContext (friend) for render-target binding,
     // barriers, and drawMesh's mesh-table resolution ----

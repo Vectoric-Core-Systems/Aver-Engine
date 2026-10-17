@@ -1088,20 +1088,51 @@ bool VulkanResourceFactory::uploadToDeviceBuffers(const VkBuffer* dsts, const vo
     // needed before the copy commands below read it -- same reasoning as writeBuffer's own coherent
     // fast path.
     dev_->api().UnmapMemory(dev_->vkDevice(), stagingMemory);
+    return copyToDeviceBuffers(staging, stagingMemory, dsts, offsets.data(), sizes, count, what);
+}
 
-    const bool ok = runOneShotCommands(*dev_, [&](VkCommandBuffer cmd) {
+bool VulkanResourceFactory::copyToDeviceBuffers(VkBuffer staging, VkDeviceMemory stagingMemory, const VkBuffer* dsts,
+                                                const VkDeviceSize* srcOffsets, const VkDeviceSize* sizes, u32 count,
+                                                const char* what) {
+    VkDeviceSize total = 0;
+    for (u32 i = 0; i < count; ++i) total += sizes[i];
+    const auto record = [&](VkCommandBuffer cmd) {
         for (u32 i = 0; i < count; ++i) {
             if (!sizes[i]) continue;
-            VkBufferCopy region{offsets[i], 0, sizes[i]};
+            VkBufferCopy region{srcOffsets[i], 0, sizes[i]};
             dev_->api().CmdCopyBuffer(cmd, staging, dsts[i], 1, &region);
         }
-    }, what ? what : "rhi uploadToDeviceBuffers copy");
-
-    // The wait inside runOneShotCommands has already retired this submit, so the staging buffer is
-    // safe to free immediately -- there is nothing left for the caller to clean up from this call
-    // either way, matching the contract's own "the staging buffer is destroyed either way" note.
-    destroyBufferCommitted(*dev_, staging, stagingMemory);
-    return ok;
+        VkMemoryBarrier2 done{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        done.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        done.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        done.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        done.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
+        VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.memoryBarrierCount = 1;
+        dep.pMemoryBarriers = &done;
+        dev_->api().CmdPipelineBarrier2(cmd, &dep);
+    };
+    const char* name = what ? what : "rhi device buffer upload";
+    if (asyncUploadBytes_ + total > kAsyncUploadBytes) {
+        const bool ok = runOneShotCommands(*dev_, record, name);
+        destroyBufferCommitted(*dev_, staging, stagingMemory);
+        return ok;
+    }
+    const VkCommandPool pool = submitOneShotCommands(*dev_, record, name);
+    if (pool == VK_NULL_HANDLE) {
+        destroyBufferCommitted(*dev_, staging, stagingMemory);
+        return false;
+    }
+    asyncUploadBytes_ += total;
+    VulkanDevice* dev = dev_;
+    u64* inFlight = &asyncUploadBytes_;
+    const u64 bytes = total;
+    retire([dev, pool, staging, stagingMemory, inFlight, bytes]() mutable {
+        dev->api().DestroyCommandPool(dev->vkDevice(), pool, nullptr);
+        destroyBufferCommitted(*dev, staging, stagingMemory);
+        *inFlight -= bytes;
+    });
+    return true;
 }
 
 // ================================================================================================
@@ -2216,6 +2247,23 @@ BufferHandle VulkanResourceFactory::adoptBuffer(std::unique_ptr<BufferStaging> s
     collect();
     buffers_.push_back(std::move(s->b));
     s->b.buffer = VK_NULL_HANDLE;   // owned by the factory from here
+    return static_cast<BufferHandle>(buffers_.size());
+}
+
+BufferHandle VulkanResourceFactory::adoptDeviceBuffer(VkBuffer buffer, VkDeviceMemory memory, VkDeviceAddress address,
+                                                      const BufferDesc& d) {
+    collect();
+    RhiBuffer b{};
+    b.buffer = buffer;
+    b.memory = memory;
+    b.address = address;
+    b.desc = d;
+    b.desc.debugName = nullptr;
+    if (d.debugName) b.debugName = d.debugName;
+#if AVER_RHI_TRACK_STATE
+    b.state = ResourceState::Common;
+#endif
+    buffers_.push_back(std::move(b));
     return static_cast<BufferHandle>(buffers_.size());
 }
 

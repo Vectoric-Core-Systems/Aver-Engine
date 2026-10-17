@@ -331,6 +331,7 @@ private:
     struct MeshRow {
         rhi::MeshHandle mesh = 0;
         u32 firstVertex = 0, firstIndex = 0, vertexCount = 0, indexCount = 0;
+        bool copiesVertices = true;   // false: an earlier row holds this vertex buffer (parts, LODs share one)
     };
     std::vector<MeshRow> meshRows_;          // one per DISTINCT mesh in the snapshot
     std::vector<u32>     surfaceRow_;        // surface -> index into meshRows_/blas_

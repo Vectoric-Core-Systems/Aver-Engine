@@ -503,10 +503,9 @@ public:
     // report so D3D11, Null, and every test mock compile and behave unchanged without implementing this.
     virtual VideoMemoryInfo videoMemory() const { return {}; }
 
-    // Chooses which GPU heap createMesh() uploads to for calls AFTER this one. Default false =
-    // BufferKind::Upload (CPU-visible; correct everywhere, but every draw/shadow/etc re-fetches it
-    // on discrete cards). True moves new meshes to the Default heap, trading a one-shot sync copy
-    // for that traffic. Permanent default on D3D11/Null/mocks.
+    // Chooses which GPU heap createMesh() and the mesh stager use for meshes made AFTER this call. True (D3D12 and
+    // Vulkan default) = the Default heap, filled by a copy that is not waited on; false = BufferKind::Upload
+    // (CPU-visible system memory every draw re-fetches over PCIe). Always Upload on D3D11/Null/mocks.
     virtual void setStaticMeshHeapDefault(bool onDefaultHeap) { (void)onDefaultHeap; }
     virtual bool staticMeshHeapDefault() const { return false; }
 

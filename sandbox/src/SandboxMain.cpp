@@ -1186,10 +1186,10 @@ Application* createApplication(int argc, char** argv) {
     if (!meshHeapArg.empty()) {
         if (meshHeapArg == "default") {
             app->setMeshHeapDefault(true);
-            AVER_INFO("[Sandbox] --mesh-heap default: new static meshes go on the Default heap");
+            AVER_INFO("[Sandbox] --mesh-heap default: new static meshes go on the Default heap (the default)");
         } else if (meshHeapArg == "upload") {
             app->setMeshHeapDefault(false);
-            AVER_INFO("[Sandbox] --mesh-heap upload: new static meshes stay on the Upload heap (today's behaviour)");
+            AVER_INFO("[Sandbox] --mesh-heap upload: new static meshes go on the Upload heap (system memory)");
         } else {
             AVER_ERROR("[Sandbox] --mesh-heap '{}' not recognised (default|upload)", meshHeapArg);
         }
