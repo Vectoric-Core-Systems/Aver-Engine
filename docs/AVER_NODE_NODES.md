@@ -1,6 +1,6 @@
 # Aver Node — Node Reference
 
-**Several node families have parser `case` labels and palette entries but no row below** (as of this check): `SaveGame`/`LoadGame` (`bc26110`), `SetSkeleton` (`d6208dc`), and the three Synapse AI nodes `GetSynapseTarget`/`SynapseSteer`/`GetSynapsePerception` (`e463dbc`, `c77374e`). The word "synapse" does not appear in this file. Do not assume "every node has a row below" without re-checking against `OcGraphParser.cs`. The parser's own history shows no `case` label for a node type ever removed — the vocabulary only grows — so any count here goes stale; the counts below were re-derived at this check, not carried forward.
+**Pins are authoritative in [`docs/nodes/`](nodes/README.md).** Every table-driven node and every hand-parsed one is listed there, one page per family, generated from the C# tables and the editor palette (`python scripts/node-catalog.py --write`), and `NodeCatalogCheck` fails when a pin list and its source disagree. [`nodes/Core.md`](nodes/Core.md) lists the hand-parsed nodes (including `SaveGame`/`LoadGame`, `SetSkeleton` and the Synapse AI nodes, which have no table row). This page keeps the long-form behaviour notes; where a pin table below and a generated page differ, the generated page is right. It carries no node counts: `python scripts/node-catalog.py --counts` prints them.
 
 This is the parser's vocabulary: each entry below is one `case` in `OcGraphParser.AddDefaultPins` (`scripting/csharp/Aver.Graph/OcGraphParser.cs`, method at line 810). It is the ground truth for a node's default pin shape — not the editor palette, not this document's prose. Where the editor's catalog (`sandbox/src/GraphNodeDefs.hpp`, `buildCatalog()`) and the parser might disagree, **the parser wins**; see [Parser vs. editor catalog](#parser-vs-editor-catalog).
 
@@ -8,9 +8,9 @@ Compile-path behaviour is read from `scripting/csharp/Aver.Graph/GraphCompiler.c
 
 This page is about node *shapes* — what pins a `NODE` of a given type gets and what it does. For the class model, `PARAM`/`VAR`, and entry points, see **[the guide](VISUAL_SCRIPTING.md)**; for the `.ocgraph` file grammar itself (every record's syntax, and where the C++ and C# readers disagree), see **[`formats/FORMAT_SPECS.md` §10a](formats/FORMAT_SPECS.md)**.
 
-**Counts, re-derived at this check.** `graphNodeCatalog()` (`buildCatalog()` in `sandbox/src/GraphNodeDefs.hpp`) has **252** `t.push_back(...)` rows. Count them with an anchored pattern, `grep -cP '^\s*t\.push_back\('` — a bare `grep -c 't.push_back'` over-counts because it also matches comments and `out.push_back`. Splitting by the `domain` bitmask each row carries (`GraphNodeDomain`): **58** are `kDomainMaterial`-only, **0 are `kDomainBoth`** (the enum value exists but no row uses it; the material `ConstFloat` entry's own comment says it gets its own entry rather than `kDomainBoth` on the existing one), and the remaining **194** carry no explicit domain, which defaults to `kDomainGameplay`. The parser's own vocabulary — distinct `case "..."` labels inside `AddDefaultPins` (lines 810-2518), aliases included — numbers **202**, of which 7 are the aliases listed in [Aliases invisible to the palette](#aliases-invisible-to-the-palette), leaving 195 canonical parser-recognised types, within a handful of the catalog's 194 gameplay rows. Expect all of these numbers to be stale again the next time this page is read; the counting method is what to trust.
+**Counts.** None are kept in prose any more, because every one went stale. `python scripts/node-catalog.py --counts` prints the table rows per family, the palette entries (gameplay and material-only, from a scanner that reads each `t.push_back({...})` whole) and the parser's vocabulary (distinct `case` labels inside `AddDefaultPins`, aliases included, of which the [aliases below](#aliases-invisible-to-the-palette) are a handful).
 
-**`graphNodeCatalog()` is not one single vocabulary** (since `c608621`). The `kDomainMaterial` rows are arithmetic on a surface, compiled to HLSL by an entirely different C++ compiler (`aver::pbr::compileMaterialGraph`, `modules/render.pbr/src/MaterialGraphHlsl.cpp`), never reachable through `OcGraphParser.AddDefaultPins`. This page and every table below describe the `kDomainGameplay` rows only; the 58 material rows are a different vocabulary with their own ground truth — see **[`MATERIALS.md`](MATERIALS.md)**.
+**`graphNodeCatalog()` is not one single vocabulary** (since `c608621`). The `kDomainMaterial` rows are arithmetic on a surface, compiled to HLSL by an entirely different C++ compiler (`aver::pbr::compileMaterialGraph`, `modules/render.pbr/src/MaterialGraphHlsl.cpp`), never reachable through `OcGraphParser.AddDefaultPins`. This page and every table below describe the `kDomainGameplay` rows only; the material rows are a different vocabulary with their own ground truth — see **[`MATERIALS.md`](MATERIALS.md)**.
 
 ## Contents
 
@@ -33,7 +33,7 @@ This page is about node *shapes* — what pins a `NODE` of a given type gets and
 17. [Physics — writes and creation](#physics--writes-and-creation)
 18. [Function](#function)
 19. [Var](#var)
-20. [Game systems](#game-systems)
+20. [Game systems](#game-systems), including [Math, game flow, scene queries and the rest](#math-game-flow-scene-queries-and-the-rest)
 21. [Aliases invisible to the palette](#aliases-invisible-to-the-palette)
 22. [Parser vs. editor catalog](#parser-vs-editor-catalog)
 23. [What a node cannot do](#what-a-node-cannot-do)
@@ -673,9 +673,9 @@ covers the node's pin shape.
 
 ## Game systems
 
+> **Pins are authoritative in [`docs/nodes/`](nodes/README.md).** The tables in this section are the prose companions of the generated pages: they explain behaviour and give a quick overview, but a pin name, type, default or attribute is whatever the generated page for the family says.
 
-
-Timers and events, the behaviour-tree blackboard, streamed audio, animation state machines, game UI, prefabs, decals, crowds/hearing/cover, gameplay abilities, input actions, data tables, montages, AI queries, level instances and landscape/water. These are **table-driven**: one row each in `scripting/csharp/Aver.Graph/GraphGameSystemNodeTable.cs` names the `...ForGraph` method it calls and which pin feeds which parameter, so the parser's default pins and the compiler's emitter come from the row (`GameSystemNodes`, `GraphCompilerGameSystems.cs`). String arguments are NODE-line attributes (`key=`, `event=`, `sound=`, ...), required at compile time unless noted. The editor palette rows are `sandbox/src/GraphNodeDefsGameSystems.hpp`, `GraphNodeDefsSynapseAi.hpp`, `GraphNodeDefsGas.hpp`, `GraphNodeDefsAiQuery.hpp`, `GraphNodeDefsLevelInstances.hpp` and `GraphNodeDefsTerrain.hpp`. An attribute marked *(optional)* may be left out; every other one fails the compile by name when missing.
+Timers and events, the behaviour-tree blackboard, streamed audio, animation state machines, game UI, prefabs, decals, crowds/hearing/cover, gameplay abilities, input actions, data tables, montages, AI queries, level instances, landscape/water, cloth and destruction, accessibility, blend shapes and the families under [Math, game flow and the rest](#math-game-flow-scene-queries-and-the-rest) below. These are **table-driven**: one row each in `scripting/csharp/Aver.Graph/GraphGameSystemNodeTable.cs` (or the family's own `Graph<Family>NodeTable.cs`) names the `...ForGraph` method it calls and which pin feeds which parameter, so the parser's default pins and the compiler's emitter come from the row (`GameSystemNodes`, `GraphCompilerGameSystems.cs`). String arguments are NODE-line attributes (`key=`, `event=`, `sound=`, ...), required at compile time unless noted. Each family has its own table file (`Graph<Family>NodeTable.cs`) and its own palette file (`sandbox/src/GraphNodeDefs<Family>.hpp`); the table is found by reflection and the palette by CMake, so a family adds files and edits no shared list (see [Adding a node family](VISUAL_SCRIPTING.md#adding-a-node-family)). An attribute marked *(optional)* may be left out; every other one fails the compile by name when missing.
 
 
 
@@ -1167,6 +1167,26 @@ Category Animation. Target, pose, rig, track and viseme names are attributes, ne
 | Get Lip Sync State | entity | playing, time, length, strength | - |
 
 See docs/ANIM_MORPH_FACE.md.
+### Math, game flow, scene queries and the rest
+
+The Aver Node and C# API sync (`docs/plans/wave9/VISUAL_SCRIPTING_CSHARP_SYNC.md`) closed the gaps between what the public C# surface can do and what a graph can reach. Every node below is a table row, and its owner method is a thin `...ForGraph` wrapper over a public C# member, so a graph and a script call the same code. Pins and attributes are in the generated page of each family; this section gives the rules a pin table cannot.
+
+Naming: a node whose name a user might also type as a plain verb or noun takes the `AN_` prefix (`AN_Tan`, `AN_GetTime`). The table key is the lower-case type id. The world-effects family keeps bare names because that is how it was specified. Failures return false or 0, log once per node id and never throw. Strings are attributes, entities and handles are `int` pins, vectors are loose `x`/`y`/`z` pins.
+
+| Family | Page | Owner | Categories | Rules worth knowing |
+|---|---|---|---|---|
+| Math | [`nodes/Math.md`](nodes/Math.md) | `AverMath`, `AverRandom` (public, `Aver.Framework`) | Math, Integer, Random, Vector, Rotator | `AN_Log` of a value `<= 0` is 0 (the `Divide` convention, not `Sqrt`'s NaN). Integer nodes wrap unchecked; `AN_IntDivide` by 0 is 0 and `AN_IntModulo` takes the dividend's sign. Shift counts are masked to 0..31. `AN_IntCompare` is exact where a float loses integers above 2^24. The random nodes are **Exec**, not pure, because a pure node is recomputed per reader and two readers would get two values; `AN_RandomInt` is inclusive at both ends and `AN_SetRandomSeed` makes a sequence repeat. Rotator nodes use `Rot`'s convention (yaw about +Z, pitch about +Y, degrees). |
+| Game flow | [`nodes/GameFlow.md`](nodes/GameFlow.md) | `GraphGameFlow` over `Game`, `Timers`, `Settings` | Game, Events, Settings | `AN_IsGamePaused` is the missing read (`Game.IsPlaying` is false while paused); `AN_SetGamePaused` freezes the session at the end of the frame. Timers can be queried, paused and reset by handle. The setting nodes read and write the project settings store by `key=`; a read returns its `fallback` when the key is unset or the store is closed. |
+| Scene queries | [`nodes/SceneQuery.md`](nodes/SceneQuery.md) | `GraphSceneQueries` | Scene | No array pins, so a set is walked by count and index: `AN_CountActorsWithTag` plus `AN_GetActorWithTagAt` inside a counted `ForEach`. An index out of range gives entity 0. `AN_GetRagdollState` returns -1 when there is no ragdoll (0 Kinematic, 1 Limp, 2 Powered). |
+| Render properties | [`nodes/RenderProps.md`](nodes/RenderProps.md) | `RenderPropsGraph` over the new partial `Entity` members (`EntityRenderProps.cs`) | Light, Camera, Particles | They write the scene's own component fields, so they work on any entity carrying the component. A light has no enable bit: switch it off with intensity 0. `AN_SetLightCone` takes degrees and keeps inner `<=` outer. `AN_SpawnEmitterAt` removes its entity after `lifetime` seconds (0 or negative: never). |
+| Audio control | [`nodes/AudioControl.md`](nodes/AudioControl.md) | `AudioControlGraph` over `Audio`, `Voice`, `Music` | Audio | Master and bus volume, per-voice volume, pitch, position and stop, the occlusion curve, and `AN_GetAudioStats`. Voice handles come from the existing `AN_PlayStream`, `AN_PlayStreamAt` and `AN_PlayMusic` `voice` pin. |
+| UI extensions | [`nodes/UiExt.md`](nodes/UiExt.md) | `UiExtGraph` over `Widget`, `UiSystem` | UI | A generic widget property (number or text), list items (`\|`-separated), selection, theme and the input state. UI scale is **not** here: it is the persisted accessibility option `graphics.uiScale`, set through `SetAccessibilityOption`. |
+| World | [`nodes/World.md`](nodes/World.md) | `WorldGraph` | World | Sky clouds (`AN_SetSkyClouds`, `AN_ClearSkyClouds`) and `AN_SpawnFluidVolume`, which is queued: `success` means a provider accepted it. |
+| Vehicles | [`nodes/Vehicle.md`](nodes/Vehicle.md) | `VehicleGraph` over the new public `Vehicles` and `CarSpec` | Vehicle | `AN_VehicleCreateCar` builds a car (chassis, four wheels, front steer, rear drive, engine) from `CarSpec.Default` and a scene entity that the physics step moves; `vehicle` is 0 on failure. Drive it with `AN_VehicleSetInput`. |
+| World effects | [`nodes/WorldFx.md`](nodes/WorldFx.md) | `WorldFxGraph` over `Sky` and `PostFx` | World | Script overrides of the sun, fog and sky light, and named post-process layers (`framework_worldfx_abi.h`). Releasing an override restores the level's authored value. An absent `layer=` means the layer named `script`. A post layer is an infinite volume applied after the authored volumes and before the player's accessibility override, which wins by design. Both renderers consume the same CPU settings. |
+
+Also reachable from this wave without a node of their own: `Game.SetPaused`/`Pause`/`Resume`, `Game.ActorsOfClass`, the new `Sky` setters, `PostFx` and the `Entity` light, camera and emitter members (C# only, listed in `docs/api/Aver.Framework.md`). Features that were not given nodes on purpose: level streaming residency, `OpenLevel`, save slots, procedural audio, runtime landscape editing, material parameters, and String, Vec3 and array pin types (each named with its reason in the design document).
+
 ## Aliases invisible to the palette
 
 The parser accepts a second spelling for seven node types. The Add-Node palette only ever spawns the canonical name — these aliases exist for a hand-written or C#-authored `.ocgraph`, never appear in the GUI, and are otherwise identical in every respect to the type they alias:
@@ -1183,16 +1203,14 @@ The parser accepts a second spelling for seven node types. The Add-Node palette 
 
 ## Parser vs. editor catalog
 
-`sandbox/src/GraphNodeDefs.hpp` is a **deliberate, separate copy** of the parser's vocabulary,
-maintained by hand so the C++ editor never depends on a C# file
-(`GraphNodeDefs.hpp:20-27`, its own header comment). Every node type's pin shape — name, type,
-direction, declared order — has been checked against `AddDefaultPins` for this document: **zero
-disagreements**, including the least obvious shapes (`Raycast`'s 14 pins, `SphereCast`'s 15,
-`CharacterMove`'s 9, `SetFieldVec3`'s 5-pin order). The most recent sweep covered the 42 nodes
-added since the previous one and re-derived each one's Path code from the compiler independently
-of the palette; it found no pin disagreement either.
+`sandbox/src/GraphNodeDefs.hpp` and the `GraphNodeDefs<Family>.hpp` files are a **deliberate, separate copy** of the parser's vocabulary, maintained by hand so the C++ editor never depends on a C# file (the header comment of `GraphNodeDefs.hpp` says why). The parser is the ground truth for a pin shape.
 
-That parity is not enforced by anything automated, though. The one existing coverage test (`tests/editor/src/GraphEditorGeometryTest.cpp`, `testNodeCatalogCoversTheCompiler`) checks that both files mention the same *set* of type names, by scraping `case "x":` labels as text — it does not compare pin shape. Nothing today would catch the next node addition landing with a mismatched pin order between the two files. Until such a test exists, cross-checking a change to either file against the other is a manual step, not a guaranteed one.
+**Parity is enforced**, in two layers:
+
+- **Table-driven nodes** (every `Graph<Family>NodeTable.cs` row): `python scripts/node-catalog.py --check`, registered as ctest `NodeCatalogCheck`, compares each row with its palette entry on pin name, type, direction, order and default value and on attribute keys, rejects a duplicate key across the tables, the palette and the parser's `case` labels, requires a test file for each newer family, and verifies the generated pages in [`docs/nodes/`](nodes/README.md). Its palette reader is a brace-matching scanner, because a single regular expression missed rows in `GraphNodeDefs.hpp`.
+- **Hand-parsed nodes** (the `AddDefaultPins` vocabulary): `tests/editor/src/GraphEditorGeometryTest.cpp`, `testNodeCatalogCoversTheCompiler`, checks that the palette offers every type name the parser has a `case` for (it scrapes the labels as text); `buildCatalog()` also drops a repeated `(typeId, domain)`, so a family appended both by discovery and by hand is not listed twice. Pin shape for these nodes is still checked by hand against `AddDefaultPins`; `nodes/Core.md` lists what the palette says so a reviewer can compare.
+
+The palette families are found by `cmake/GraphNodeFamilies.cmake`, which writes `sandbox/src/GraphNodeFamilies.gen.inc` (git-ignored); the C# tables are found by reflection (`GameSystemNodes`), and the managed test classes by an `[AutoRun]` attribute. A new family therefore edits no shared list.
 
 ## What a node cannot do
 
@@ -1202,7 +1220,7 @@ That parity is not enforced by anything automated, though. The one existing cove
   upstream node computes.
 - **No array/collection pin.** `ForEach` is a counted-repeat, not a per-element iterator — see
   [Flow](#flow).
-- **No HUD or 2D-drawing node.** Nothing here reaches `Aver.UI`.
+- **No immediate-mode 2D-drawing node.** The [UI nodes](#ui) drive widgets that already exist (`Aver.UI`); nothing draws.
 - **Cross-entity event dispatch has one route.** `FireEvent` (see [Actor](#actor)) fires an `ENTRY` on another entity's graph, via `GraphEvents.FireEventForGraph(targetEntity, eventName)`. `Fire()` itself is something only a *host* calls into a specific `GraphHost` from outside the graph system (e.g. an animation notify) — no node lets a graph call `Fire()` directly on an arbitrary, ungated `GraphHost` reference.
 
 

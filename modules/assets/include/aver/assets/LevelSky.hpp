@@ -28,12 +28,22 @@
 // just said. applyLevelEnv deliberately does not know which fields those are; it writes the
 // atmosphere and leaves the host's own bookkeeping to the host.
 
+#include "aver/core/Hash.hpp"
 #include "aver/core/Types.hpp"
 #include "aver/formats/OcWorld.hpp"
 #include "aver/rhi/RHI.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#if __has_include("aver/framework/framework_worldfx_abi.h")
+#  include "aver/framework/framework_worldfx_abi.h"
+#  define AVER_LEVELSKY_HAS_WORLDFX_ABI 1
+#endif
 
 namespace aver::assets {
 
@@ -190,6 +200,146 @@ inline void captureLevelEnv(const rhi::SkyAtmosphere& sky, fmt::OcWorldEnv& w) {
         w.cloudWind[0]     = static_cast<f64>(sky.cloudWind[0]);
         w.cloudWind[1]     = static_cast<f64>(sky.cloudWind[1]);
     }
+}
+
+// ---- SCRIPT OVERRIDES, shared by both hosts (framework_worldfx_abi.h) ---------------------------------------
+//
+// A script publishes sun, fog and sky-light overrides and named post layers; the host reads them every frame and
+// applies them to a COPY of the frame's atmosphere / volume list, never to the authored state, so releasing a key
+// is simply the copy no longer being taken and the level's own value is back with nothing to restore. The editor
+// calls these only during a Play session, so authoring is untouched.
+//
+// `Api` supplies the reads (FrameworkWorldFxApi below is the real one; a test can pass a fake). Keeping the ABI
+// behind a template means this header does not link the framework: only a TU that can see the framework header
+// gets FrameworkWorldFxApi.
+
+// The framework's AVER_FW_ENV_* numbers, restated so the mapping below reads without the header.
+inline constexpr int kScriptEnvSunDir = 1, kScriptEnvSunLux = 2, kScriptEnvSunColor = 3, kScriptEnvSunTemp = 4,
+                     kScriptEnvFogDensity = 5, kScriptEnvFogColor = 6, kScriptEnvFogFalloff = 7, kScriptEnvFogHeight = 8,
+                     kScriptEnvFogStart = 9, kScriptEnvFogMaxOpacity = 10, kScriptEnvSkyLight = 11;
+
+#ifdef AVER_LEVELSKY_HAS_WORLDFX_ABI
+static_assert(kScriptEnvSunDir == AVER_FW_ENV_SUN_DIR && kScriptEnvSunLux == AVER_FW_ENV_SUN_LUX &&
+                  kScriptEnvSunColor == AVER_FW_ENV_SUN_COLOR && kScriptEnvSunTemp == AVER_FW_ENV_SUN_TEMP &&
+                  kScriptEnvFogDensity == AVER_FW_ENV_FOG_DENSITY && kScriptEnvFogColor == AVER_FW_ENV_FOG_COLOR &&
+                  kScriptEnvFogFalloff == AVER_FW_ENV_FOG_FALLOFF && kScriptEnvFogHeight == AVER_FW_ENV_FOG_HEIGHT &&
+                  kScriptEnvFogStart == AVER_FW_ENV_FOG_START && kScriptEnvFogMaxOpacity == AVER_FW_ENV_FOG_MAXOPAC &&
+                  kScriptEnvSkyLight == AVER_FW_ENV_SKY_LIGHT,
+              "LevelSky.hpp's script environment keys drifted from framework_worldfx_abi.h");
+
+// The reads a host makes, straight over the C ABI.
+struct FrameworkWorldFxApi {
+    static bool envGet(int key, float* outV3) { return aver_fw_env_get(key, outV3) != 0; }
+    static int layerCount() { return aver_fw_post_layer_count(); }
+    static bool layerInfo(int index, std::int64_t* id, float* weight, int* valueCount) {
+        std::int32_t n = 0;
+        const bool ok = aver_fw_post_layer_info(index, id, weight, &n) != 0;
+        if (valueCount) *valueCount = static_cast<int>(n);
+        return ok;
+    }
+    static bool layerValue(int index, int valueIndex, std::int64_t* keyHash, float* outV3) {
+        return aver_fw_post_layer_value(index, valueIndex, keyHash, outV3) != 0;
+    }
+    static bool volumeScale(std::int64_t nameHash, float* outWeight) { return aver_fw_post_volume_scale(nameHash, outWeight) != 0; }
+};
+#endif
+
+// Writes every overridden sun / fog / sky-light setting into `sky`. True when any was. The sky-light key is a
+// multiplier on the value `sky` already carries; the rest replace it. A script that owns the fog density also
+// replaces a streamed level's load-edge fog.
+template <class Api>
+inline bool applyScriptEnv(rhi::SkyAtmosphere& sky) {
+    bool any = false;
+    float v[3] = {0, 0, 0};
+    const auto get = [&](int key) {
+        v[0] = v[1] = v[2] = 0.0f;
+        const bool on = Api::envGet(key, v);
+        any = any || on;
+        return on;
+    };
+    if (get(kScriptEnvSunDir))
+        for (int i = 0; i < 3; ++i) sky.sunDirection[i] = v[i];
+    if (get(kScriptEnvSunLux)) sky.sunIntensity = v[0] / (100000.0f / 3.0f);   // the divisor applyLevelEnv uses
+    if (get(kScriptEnvSunColor))
+        for (int i = 0; i < 3; ++i) sky.sunColor[i] = v[i];
+    if (get(kScriptEnvSunTemp)) sky.sunTemperatureK = v[0];
+    if (get(kScriptEnvFogDensity)) sky.fogDensity = v[0];
+    if (get(kScriptEnvFogColor))
+        for (int i = 0; i < 3; ++i) sky.fogColor[i] = v[i];
+    if (get(kScriptEnvFogFalloff)) sky.fogFalloff = v[0];
+    if (get(kScriptEnvFogHeight)) sky.fogHeight = v[0];
+    if (get(kScriptEnvFogStart)) sky.fogStart = v[0];
+    if (get(kScriptEnvFogMaxOpacity)) sky.fogMaxOpacity = v[0];
+    if (get(kScriptEnvSkyLight)) sky.skyLightIntensity *= v[0];
+    return any;
+}
+
+// `sky` itself when no script owns anything, else `scratch` holding a copy with the overrides applied. The host
+// keeps `sky` as the authored atmosphere and hands the result to the device.
+template <class Api>
+inline const rhi::SkyAtmosphere& withScriptEnv(const rhi::SkyAtmosphere& sky, rhi::SkyAtmosphere& scratch) {
+    float probe[3];
+    bool any = false;
+    for (int key = kScriptEnvSunDir; key <= kScriptEnvSkyLight && !any; ++key) any = Api::envGet(key, probe);
+    if (!any) return sky;
+    scratch = sky;
+    applyScriptEnv<Api>(scratch);
+    return scratch;
+}
+
+// The POSTVOLUME key a key hash names (fnv1a64 of the lower-case key), or null.
+inline const fmt::OcPostKeyInfo* postKeyByHash(std::int64_t hash) {
+    static const std::vector<std::pair<std::int64_t, const fmt::OcPostKeyInfo*>> table = [] {
+        std::vector<std::pair<std::int64_t, const fmt::OcPostKeyInfo*>> t;
+        for (const fmt::OcPostKeyInfo& k : fmt::kOcPostKeys)
+            t.emplace_back(static_cast<std::int64_t>(fnv1a64(std::string_view(k.key))), &k);
+        return t;
+    }();
+    for (const auto& e : table)
+        if (e.first == hash) return e.second;
+    return nullptr;
+}
+
+// The volume list for a frame: `authored` with each volume's weight scaled by the script's per-volume scale, then one
+// transient infinite volume per script post layer (priority 10000 + its index, weight its current blend), ready for
+// blendPostVolumes. The player's accessibility override is applied after that blend and wins. False, and `out`
+// untouched, when no script holds a scale or a layer: the caller then blends `authored` directly.
+template <class Api>
+inline bool buildScriptPostVolumes(const std::vector<fmt::OcPostVolume>& authored, std::vector<fmt::OcPostVolume>& out) {
+    const int layers = Api::layerCount();
+    bool scaled = false;
+    float w = 1.0f;
+    for (const fmt::OcPostVolume& v : authored)
+        if (Api::volumeScale(static_cast<std::int64_t>(fnv1a64(std::string_view(v.name))), &w)) { scaled = true; break; }
+    if (!scaled && layers <= 0) return false;
+
+    out = authored;
+    if (scaled)
+        for (fmt::OcPostVolume& v : out)
+            if (Api::volumeScale(static_cast<std::int64_t>(fnv1a64(std::string_view(v.name))), &w))
+                v.weight *= static_cast<f64>(std::clamp(w, 0.0f, 1.0f));
+    for (int i = 0; i < layers; ++i) {
+        std::int64_t id = 0;
+        float weight = 0.0f;
+        int count = 0;
+        if (!Api::layerInfo(i, &id, &weight, &count) || !(weight > 0.0f) || count <= 0) continue;
+        fmt::OcPostVolume lv;
+        lv.name = "script layer";
+        lv.infinite = true;
+        lv.priority = 10000 + i;
+        lv.weight = static_cast<f64>(std::min(weight, 1.0f));
+        for (int j = 0; j < count; ++j) {
+            std::int64_t key = 0;
+            float x[3] = {0, 0, 0};
+            if (!Api::layerValue(i, j, &key, x)) continue;
+            const fmt::OcPostKeyInfo* info = postKeyByHash(key);
+            if (!info) continue;
+            const f64 d[3] = {static_cast<f64>(x[0]), static_cast<f64>(x[1]), static_cast<f64>(x[2])};
+            lv.set(info->key, d, info->count);
+        }
+        if (!lv.values.empty()) out.push_back(std::move(lv));
+    }
+    return true;
 }
 
 }   // namespace aver::assets

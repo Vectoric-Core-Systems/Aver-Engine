@@ -31,6 +31,8 @@ add_library(Aver.Framework SHARED
   src/LocalizationAbi.cpp
   # Accessibility: the option table, captions, speech and camera feel (wave 9, docs/ACCESSIBILITY.md).
   src/AccessAbi.cpp
+  # Script overrides for sun, fog and sky light, and named post-process layers (wave 9, docs/plans/wave9/VISUAL_SCRIPTING_CSHARP_SYNC.md 2.4).
+  src/WorldFxAbi.cpp
   src/DataTableAbi.cpp
   src/EntityStateAbi.cpp
   # Terrain and water queries relayed from the host (wave 3, landscape layers and rivers).

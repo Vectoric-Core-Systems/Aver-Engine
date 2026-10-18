@@ -320,6 +320,10 @@ private:
     // The level's POSTVOLUME records, blended onto post_ at the camera each frame (GamePostVolumes.hpp).
     std::vector<fmt::OcPostVolume> postVolumes_;
     PostLutCache                   postLuts_;
+    // Per-frame scratch for script overrides (assets/LevelSky.hpp): the atmosphere copy with the script's sun / fog /
+    // sky light applied, and postVolumes_ with scaled weights plus the script's post layers. sky_ and postVolumes_ stay authored.
+    rhi::SkyAtmosphere             skyScript_;
+    std::vector<fmt::OcPostVolume> postScript_;
     // Top-of-atmosphere colour (white; sky tints it by elevation).
     f32 sunColor_[3]  = {1.0f, 1.0f, 1.0f};
     f32 sunAmbient_   = 1.0f;

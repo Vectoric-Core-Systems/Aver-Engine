@@ -305,6 +305,9 @@ static int Main()
         // InputBindingNodeTests.cs's own header for what the "real call" tests can and cannot prove.
         failures += InputBindingNodeTests.RunAll();
 
+        // Every test class marked [AutoRun] (AutoRun.cs): a new node family adds a file, not a line here.
+        failures += AutoRun.RunDiscovered();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

@@ -62,6 +62,18 @@ static void testNodeCatalog() {
     const auto& table = graphNodeCatalog();
     check(!table.empty(), "catalog is non-empty");
 
+    {
+        // Registration is discovery plus a de-duplicating catalog: no (typeId, domain) appears twice.
+        std::vector<std::pair<std::string, int>> keys;
+        for (const auto& d : table) {
+            std::string lower;
+            for (char c : d.typeId) lower += static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+            keys.emplace_back(std::move(lower), static_cast<int>(d.domain));
+        }
+        std::sort(keys.begin(), keys.end());
+        check(std::adjacent_find(keys.begin(), keys.end()) == keys.end(), "the catalog has no duplicate (typeId, domain)");
+    }
+
     // The eight node types named in the task brief.
     const char* baseline[] = {"Add", "Multiply", "Compare", "ConstBool", "ConstFloat", "ConstInt", "GetField", "SetField"};
     for (const char* t : baseline) {

@@ -779,6 +779,9 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Framework/Ai/Brain.cs", "BrainKind", "", "", "", "idle,running,succeeded,failed,abiversion"},
     {"framework brain status", "modules/framework/include/aver/framework/framework_brain_abi.h", "AVER_FW_BRAIN_",
      "scripting/csharp/Aver.Framework/Ai/Brain.cs", "BrainStatus", "", "", "", "none,bt,statetree,abiversion"},
+    // wave 9: the sun / fog / sky-light override keys a script sets (framework_worldfx_abi.h).
+    {"world effects keys",    "modules/framework/include/aver/framework/framework_worldfx_abi.h", "AVER_FW_ENV_",
+     "scripting/csharp/Aver.Framework/WorldFxNative.cs", "WorldEnvKey", ""},
 };
 
 int main() {

@@ -5,7 +5,7 @@
 // UiTextGraphInterop (Aver.Framework/UiTextGraph.cs); a widget crosses the graph as an int and the font family is a
 // NODE attribute (strings are not pins). Font-set loading, atlas settings, prewarming and glyph queries are C#
 // only (UiText); the UI language follows the culture nodes.
-// Palette mirror: sandbox/src/GraphNodeDefsUiText.hpp. Appended with .Concat(UiTextTable()) in GraphGameSystemNodeTable.cs.
+// Palette mirror: sandbox/src/GraphNodeDefsUiText.hpp. Found by reflection (GameSystemNodes.TableMethods); no list names it.
 
 using Aver.Framework;
 

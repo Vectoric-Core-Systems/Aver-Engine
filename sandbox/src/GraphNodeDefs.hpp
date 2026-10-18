@@ -13,7 +13,8 @@
 // including the flow/exec vocabulary (Branch, Sequence, While, ForEach, OnStart, OnTick) copied
 // field-for-field, pin-for-pin, same order, from AddDefaultPins' own "flow / exec nodes" section. A
 // hand-kept copy, NOT generated, so the C++ build has no C# dependency; if GraphCompiler.cs's node
-// set moves, update this table to match by hand.
+// set moves, update this table to match by hand. The families driven by a C# table
+// (Graph<Family>NodeTable.cs) are held to their rows pin for pin by scripts/node-catalog.py --check.
 // PARITY MATTERS MOST FOR FLOW TYPES: a spawned node's pins get written into the file as real PIN
 // records on save (GraphEditor.cpp's add-node popup copies them verbatim), and AddDefaultPins skips
 // any node with explicit pins already, so a mismatch here means an editor-authored graph and a
@@ -30,6 +31,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>  // graphPaletteSearch takes its query as one
+#include <unordered_set>  // buildCatalog drops a repeated (typeId, domain)
 #include <utility>
 #include <vector>
 
@@ -101,24 +103,14 @@ inline GraphAttributeSpec attr(std::string key, std::string label) {
     return GraphAttributeSpec{std::move(key), std::move(label)};
 }
 
-// The game-systems node families, each in its own file so this one stays the readable core table:
-// crowds/hearing/cover, then timers/blackboard/streamed audio/anim state machines/UI/prefabs/decals,
-// then gameplay abilities, then AI queries/smart objects/brains, level instances, landscape and water,
-// then IK/rig inputs, motion matching and the sequencer.
-#include "GraphNodeDefsSynapseAi.hpp"
-#include "GraphNodeDefsGameSystems.hpp"
-#include "GraphNodeDefsGas.hpp"
-#include "GraphNodeDefsAiQuery.hpp"
-#include "GraphNodeDefsLevelInstances.hpp"
-#include "GraphNodeDefsTerrain.hpp"
-#include "GraphNodeDefsIk.hpp"
-
-#include "GraphNodeDefsMorph.hpp"
-#include "GraphNodeDefsMotionMatch.hpp"
-#include "GraphNodeDefsUiText.hpp"
-#include "GraphNodeDefsSequencer.hpp"
-#include "GraphNodeDefsSoftBody.hpp"
-#include "GraphNodeDefsAccessibility.hpp"
+// The game-systems node families, each in its own file (GraphNodeDefs<Family>.hpp). cmake/GraphNodeFamilies.cmake
+// finds them and writes GraphNodeFamilies.gen.inc, their includes plus appendGeneratedFamilies(t), so a new family
+// adds a file and edits nothing here. scripts/node-catalog.py checks each against its C# table.
+#if __has_include("GraphNodeFamilies.gen.inc")
+#include "GraphNodeFamilies.gen.inc"
+#else
+#error "GraphNodeFamilies.gen.inc is missing: re-run cmake (cmake/GraphNodeFamilies.cmake writes it)"
+#endif
 
 // One line per node type. This is the "one entry" the build task and Slice 6 both call for.
 inline std::vector<GraphNodeDesc> buildCatalog() {
@@ -1103,21 +1095,21 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("CoatF0", "float", false)},
         {}, kDomainMaterial});
 
-    appendSynapseAiNodeDefs(t);
-    appendGameSystemNodeDefs(t);
-    appendGasNodeDefs(t);
-    appendAiQueryNodeDefs(t);
-    appendLevelInstanceNodeDefs(t);
-    appendTerrainNodeDefs(t);
-    appendIkNodeDefs(t);
+    appendGeneratedFamilies(t);
 
-    appendMorphNodeDefs(t);
-    appendMotionMatchNodeDefs(t);
-    appendUiTextNodeDefs(t);
-    appendSequencerNodeDefs(t);
-    appendSoftBodyNodeDefs(t);
-    appendAccessibilityNodeDefs(t);
-    return t;
+    // A family also appended by hand (the old include-and-call convention) would list every node twice: keep the
+    // first entry of each (typeId, domain), which is also the one findGraphNodeDesc already returned.
+    std::unordered_set<std::string> seen;
+    std::vector<GraphNodeDesc> unique;
+    unique.reserve(t.size());
+    for (GraphNodeDesc& d : t) {
+        std::string key;
+        for (char ch : d.typeId) key += static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch - 'A' + 'a' : ch);
+        key += '#';
+        key += std::to_string(static_cast<std::uint32_t>(d.domain));
+        if (seen.insert(std::move(key)).second) unique.push_back(std::move(d));
+    }
+    return unique;
 }
 
 inline bool ciEquals(std::string_view a, std::string_view b) {

@@ -128,6 +128,31 @@ public:
 
     bool graphHitsAvailable() const;
 
+    // ---- every problem in a graph, for the editor's Problems panel ------------------------------------
+    //
+    // Bound OPTIONALLY and apart from graphValidate, for the same reason every group here is: a bridge
+    // without it still validates, and the editor falls back to that one error.
+    bool graphDiagnoseAvailable() const;
+    // Diagnoses .ocgraph TEXT (the canvas, unsaved edits included), loading and running nothing.
+    // `wire` receives lines of `E|W <TAB> nodeId <TAB> pin <TAB> code <TAB> message`, at most 64 KB
+    // (a final `...N more` line when cut). False when unavailable or the call failed; true with an empty
+    // `wire` means nothing is wrong.
+    bool graphDiagnose(const std::string& text, std::string& wire) const;
+
+    // ---- the graph debugger ----------------------------------------------------------------------------
+    //
+    // Optional as one group (all four or none). A breakpoint does not stop the tick: the managed side
+    // latches it and the host pauses the session at the end of that frame (see GraphDebug.cs).
+    bool graphDebugAvailable() const;
+    // Arms the hooks. Read when a graph compiles, so it applies to graphs loaded afterwards.
+    void graphDebugSetEnabled(bool on) const;
+    // Replaces the breakpoint set; `lines` is `graph <US> node` per line (US = 0x1f).
+    void graphDebugSetBreakpoints(const std::string& lines) const;
+    // The breakpoint tripped since the last call, as `graph <US> node`, once. False when none.
+    bool graphDebugTakeBreak(std::string& graphAndNode) const;
+    // The last value on each data input of the graph NAMED `graphName`, as `node.pin=value;` repeated.
+    std::string graphDebugValues(const std::string& graphName) const;
+
     // GRAPH-AS-CLASS: bound OPTIONALLY, exactly like the graph three just above -- a bridge built
     // before these existed still boots; graphClassesAvailable() is false and both calls below are
     // documented no-ops.

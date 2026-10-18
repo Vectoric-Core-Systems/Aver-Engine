@@ -80,6 +80,7 @@
 #  include "aver/framework/framework_ik_abi.h"   // [wave5/ik-retarget] aver_fw_set_ik_provider
 
 #  include "aver/framework/framework_morph_abi.h"   // [wave9/morph] aver_fw_set_morph_provider
+#  include "aver/framework/framework_worldfx_abi.h"   // [wave9/worldfx] script sun / fog / post layers
 #endif
 // GamePawn.hpp (game::placePossessedPawn): placePawnAtSpawn's pawn lookup and placement.
 #include "aver/game/GamePawn.hpp"
@@ -1758,6 +1759,14 @@ void GameApp::pushFrame(Engine& e) {
     // Cloud clock: advanced by real time so wind moves. App owns it; a clock that never advances gives a painted backdrop.
     sky_.cloudTime         = cloudTime_;
 
+    // Script sun / fog / sky-light overrides ride a copy: sky_ stays the level's authored atmosphere, so a released key
+    // is the level's own value again with nothing to restore. The editor's Play path does the same (assets::withScriptEnv).
+#if AVER_MODULE_FRAMEWORK
+    const rhi::SkyAtmosphere& skyNow = assets::withScriptEnv<assets::FrameworkWorldFxApi>(sky_, skyScript_);
+#else
+    const rhi::SkyAtmosphere& skyNow = sky_;
+#endif
+
 #if AVER_MODULE_VOXI
     if (voxiAttached_) {
         voxi::Renderer& vx = voxi::Renderer::get();
@@ -1795,23 +1804,29 @@ void GameApp::pushFrame(Engine& e) {
         voxiRenderer_.setVolume(&giCenter_.x, giExtent_);
         // Reads editor's cache; never writes a miss back. A level without a baked volume voxelises as usual.
         voxiRenderer_.setGiCacheDir(project_.valid() ? fmt::giCacheDir(project_.dir) : std::string());
-        const Vec3 sd = Vec3{sky_.sunDirection[0], sky_.sunDirection[1],
-                             sky_.sunDirection[2]}.getSafeNormal();
+        const Vec3 sd = Vec3{skyNow.sunDirection[0], skyNow.sunDirection[1],
+                             skyNow.sunDirection[2]}.getSafeNormal();
         voxiRenderer_.setSunDirection(&sd.x);
     }
 #endif
 
 #if AVER_MODULE_FLUIDS
     // Apply underwater fog (sky stays authored).
-    dev->setSkyAtmosphere(water_.applyUnderwaterFog(sky_, camPos_.z));
+    dev->setSkyAtmosphere(water_.applyUnderwaterFog(skyNow, camPos_.z));
 #else
-    dev->setSkyAtmosphere(sky_);
+    dev->setSkyAtmosphere(skyNow);
 #endif
     // Black: a game has no outside; anything the sky doesn't cover should read as a bug, not a colour.
     dev->setClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    rhi::PostSettings postNow = postVolumes_.empty()
+    // Order of a frame: the level's volumes (each weight scaled by the script), then the script's post layers as infinite
+    // volumes, then blendPostVolumes, then the player's accessibility override below, which wins by design.
+    const std::vector<fmt::OcPostVolume>* postList = &postVolumes_;
+#if AVER_MODULE_FRAMEWORK
+    if (assets::buildScriptPostVolumes<assets::FrameworkWorldFxApi>(postVolumes_, postScript_)) postList = &postScript_;
+#endif
+    rhi::PostSettings postNow = postList->empty()
                                     ? post_
-                                    : blendPostVolumes(postVolumes_, post_, camPos_, postLuts_.resolver(*dev, project_.contentDir()));
+                                    : blendPostVolumes(*postList, post_, camPos_, postLuts_.resolver(*dev, project_.contentDir()));
     game::applyAccessibilityToPost(postNow, access_.snap);   // the player's colour filter and motion switches win over the level's volumes
     dev->setPostProcess(postNow);
 }
@@ -2017,6 +2032,9 @@ void GameApp::onInit(Engine& e) {
 void GameApp::onUpdate(Engine& e, const Timestep& t) {
     ++frames_;
     cloudTime_ += t.dt;
+#if AVER_MODULE_FRAMEWORK
+    aver_fw_worldfx_tick(t.dt);   // advances the script post layers' and volume scales' blends
+#endif
 
 #if AVER_WITH_AUDIO_ABI
     // Reclaim finished voice slots. aver_audio_collect had one caller (editor); needed here to avoid leaks in shipped game.

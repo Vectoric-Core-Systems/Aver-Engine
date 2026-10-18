@@ -1,7 +1,7 @@
 # C# Scripting
 
 Reference for writing C# against Aver Engine. Covers the behaviour lifecycle, the `Pbr` and `Voxi`
-APIs, how scripts are built and hot-reloaded, and — just as importantly — **what you cannot do yet**.
+APIs, how scripts are built and hot-reloaded, and where the rest of the scripting surface lives (**`Aver.Framework`**, section 5).
 
 The authoritative surface is `scripting/csharp/Aver.Scripting/` and it carries XML doc comments, so
 IntelliSense is accurate. This page is the orientation those comments cannot give.
@@ -153,31 +153,37 @@ Same honest-status contract as `Pbr`: `StatusOf` / `StatusTextOf` / `IsAvailable
 
 ---
 
-## 5. What you cannot do yet
+## 5. What `Aver.Scripting` does not do (and where the rest lives)
 
-Read this before planning anything. The gap is large and it is not hidden.
+`Aver.Scripting` is the small assembly this page documents: `AverBehaviour` plus `Pbr` and `Voxi`. By itself it
+has **no scene API**: an `AverBehaviour` cannot create, find, move, parent or destroy an object, and cannot
+*assign* a material to one either. `Pbr` lets you author materials, but nothing in this assembly binds one to
+something in the world, and the assembly references neither `Aver.Scene` nor `Aver.Framework`.
 
-**`Aver.Scripting`'s own surface — the one this page documents, `AverBehaviour` plus `Pbr`/`Voxi` —
-has no scene API.** An `AverBehaviour` cannot create, find, move, parent or destroy an object, and
-cannot *assign* a material to one either — `Pbr` lets you author materials, but nothing in this
-assembly binds one to something in the world.
+The gameplay layer is the sibling assembly **`Aver.Framework`**, and a project references it, `Aver.Scene`,
+`Aver.UI` and `Aver.Materials` from its first scaffold. It reaches the world through the native scene (`modules/scene`,
+`scene_abi.h`) and provides what this page's assembly does not:
 
-`modules/scene/` has a real implementation: a `CMakeLists.txt`, five source files, and a live C ABI
-(`scene_abi.h`) supporting entities, component pools, transform/hierarchy propagation and typed field
-get/set, exercised by `SceneTest.exe` (documented in `modules/scene/README.md`). A separate, newer C#
-surface — `Aver.Framework` (actor classes, `Actors.Spawn`/`Entity`/`SetParent`/`DestroyEntity`, and
-Aver Node graphs built on the same layer) — reaches that world today; see **[`VISUAL_SCRIPTING.md`](VISUAL_SCRIPTING.md)**
-and **[`AVER_NODE_NODES.md`](AVER_NODE_NODES.md)**. What remains true, and is this page's actual
-subject: `Aver.Scripting`'s `AverBehaviour` is not that surface, references neither `Aver.Scene` nor
-`Aver.Framework`, and gets no scene binding by simply existing alongside them — the gap this section
-describes is `AverBehaviour`'s, not the engine's.
+| Need | Where | Guide |
+|---|---|---|
+| Actors, pawns, characters, controllers, the game mode, spawning, possession | `Aver.Framework` | [`SCRIPTING_API.md`](SCRIPTING_API.md) |
+| Entities, components, transform and hierarchy | `Entity`, `Actors` (`Aver.Framework`), maths in `Aver.Scene` | [`SCRIPTING_API.md`](SCRIPTING_API.md) §6, §15 |
+| Input, including Enhanced Input | `Input`, `EnhancedInput` | [`SCRIPTING_API.md`](SCRIPTING_API.md) §8 |
+| Physics, bodies, joints, queries, vehicles, soft bodies | `Aver.Physics`, `Vehicles`, `SoftBodies` | [`SCRIPTING_API.md`](SCRIPTING_API.md) §14, §22 |
+| Audio, streamed audio, music, voices | `Audio`, `Voice`, `Music` | [`AUDIO.md`](AUDIO.md) |
+| Timers, events, project settings, pausing | `Timers`, `Events`, `Settings`, `Game.SetPaused` | [`SCRIPTING_API.md`](SCRIPTING_API.md) §20 |
+| The HUD and widgets | `Aver.UI` | [`SCRIPTING_API.md`](SCRIPTING_API.md) §16 |
+| Sun, fog, sky light, post-process layers | `Sky`, `PostFx` | [`SCRIPTING_API.md`](SCRIPTING_API.md) §22 |
+| Gameplay with no C# at all | Aver Node graphs | [`VISUAL_SCRIPTING.md`](VISUAL_SCRIPTING.md), [`AVER_NODE_NODES.md`](AVER_NODE_NODES.md), [`nodes/`](nodes/README.md) |
+| Every public type and member, as an index | generated from source | [`api/index.md`](api/index.md) |
 
-Also absent from `Aver.Scripting` itself: input, physics, audio, asset loading, and any form of
-coroutine or timer beyond counting `dt` yourself.
+What remains absent from the whole C# surface (coroutines and a latent `Delay`, networking, travel between
+levels, save slots, typing with an IME, and the rest) is listed in [`SCRIPTING_API.md`](SCRIPTING_API.md) §24.
 
-**What scripting genuinely does today:** it runs real managed code in the engine's process, on the
-frame loop, against the editor's own live material library and renderer settings — and it hot-reloads.
-That is a working foundation, not a demo. It is simply not yet a gameplay layer.
+**What scripting genuinely does today:** it runs real managed code in the engine's process, on the frame loop,
+against the editor's own live material library and renderer settings, and it hot-reloads. This section used to
+say that input, physics, audio and timers were all absent; they have been reachable through `Aver.Framework` for
+a long time, and the gap it described was `AverBehaviour`'s, not the engine's.
 
 ---
 
@@ -200,3 +206,5 @@ read-only curiosity into something that drives the running editor.
 - `modules/render.pbr/README.md` — the material model and the two-target split
 - `docs/PROJECTS.md` — engine ⟂ project, and where code goes
 - `docs/STATUS.md` — current state, open work, and the `Aver.Scene` design
+- `docs/SCRIPTING_API.md` — the gameplay API (`Aver.Framework`), and `docs/api/` — the generated index of every public type and member
+- `docs/nodes/` — the generated Aver Node reference, one page per family

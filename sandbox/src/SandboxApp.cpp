@@ -10,6 +10,7 @@
 #  include "aver/framework/framework_ik_abi.h"     // [wave5/ik-retarget] aver_fw_set_ik_provider
 
 #  include "aver/framework/framework_morph_abi.h"   // [wave9/morph] aver_fw_set_morph_provider
+#  include "aver/framework/framework_worldfx_abi.h"   // [wave9/worldfx] aver_fw_worldfx_tick
 #endif
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_loc_abi.h"    // the UI layout editor's culture preview
@@ -450,6 +451,8 @@ void SandboxApp::onInit(Engine& e)  {
     });
     scripts_.graphSetHitRecording(true);
 #endif  // AVER_MODULE_SCRIPTING
+    // How Find References across the project, and a breakpoint in a graph with no tab open, reach a file.
+    editor::setGraphOpener([this](const std::string& path) { return assetEditors_.open(path); });
     // The visual behaviour-tree editor claims .ocbt ahead of the plain list editor (registration order is
     // precedence); BtEditor stays registered as the fallback.
     assetEditors_.registerFactory(&editor::makeBtGraphEditor);
@@ -1065,6 +1068,21 @@ void SandboxApp::onInit(Engine& e)  {
         hd.scriptsDir = resolveScriptsDir();
         scripts_.init(hd);
 
+        // The Problems panel and the graph debugger, when the staged bridge has them: tabs opened from
+        // here on get the hooks. The armed flag is a user preference, pushed to the bridge by the first
+        // pumpGraphDebugger() (it applies to graphs compiled afterwards, i.e. the next Play).
+        if (scripts_.graphDiagnoseAvailable()) {
+            editor::setGraphDiagnoser([this](const std::string& text, std::string& wire) {
+                return scripts_.graphDiagnose(text, wire);
+            });
+        }
+        if (scripts_.graphDebugAvailable()) {
+            editor::setGraphDebugValueSource([this](const std::string& graphName) {
+                return scripts_.graphDebugValues(graphName);
+            });
+            editor::debugSession().setArmed(editor::prefBool("graphEditor.debugArmed", false));
+        }
+
         // Install animation notify sink (survives level reload; needs AVER_MODULE_SCENE).
 #if AVER_MODULE_SCENE
         if (scripts_.graphFireAvailable()) {
@@ -1555,6 +1573,61 @@ void SandboxApp::refreshWindowTitle(Engine& e) {
     }
 }
 
+#if AVER_MODULE_SCRIPTING
+// The graph debugger's per-frame work, and the Problems panel's pass when Play starts.
+//
+// A breakpoint does not stop the tick (single-threaded engine, the editor draws on the same thread): the
+// managed hooks latch it, and this reads the latch once a frame, pauses the session and brings the node
+// into view. Resume is the Pause chord and the step is Frame Skip, both unchanged; a node on an OnTick
+// chain breaks again every frame after resume until its breakpoint is disabled.
+void SandboxApp::pumpGraphDebugger() {
+    // Every open graph is checked the moment Play begins, so one that cannot run is flagged now and not
+    // only in the log. (Play launching is observed here, not hooked in launchPlay, to leave that alone.)
+    const bool playing = playSessionActive();
+    if (playing && !graphDiagPlayWas_ && scripts_.graphDiagnoseAvailable()) {
+        usize warnings = 0;
+        const usize errors = editor::runGraphDiagnosticsForOpenTabs(&warnings);
+        if (errors > 0)
+            notifyOutcome(editor::NotifySeverity::Warning, "Graph problems",
+                          std::to_string(errors) + " error(s) in the open graphs; see each graph's Problems list.");
+    }
+    graphDiagPlayWas_ = playing;
+
+    if (!scripts_.graphDebugAvailable()) return;
+    editor::DebugSession& dbg = editor::debugSession();
+    if (dbg.needsArmPush()) {
+        scripts_.graphDebugSetEnabled(dbg.armed);
+        dbg.markArmPushed();
+    }
+    if (dbg.needsBreakpointPush()) {
+        scripts_.graphDebugSetBreakpoints(dbg.breakpoints.wire());
+        dbg.markBreakpointsPushed();
+    }
+    if (!dbg.armed) return;
+
+#if AVER_MODULE_FRAMEWORK
+    // A session that is running again has resumed past whatever it last broke on.
+    if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING) dbg.lastBreak.reset();
+#endif
+
+    std::string latched;
+    editor::BreakEvent hit;
+    if (!scripts_.graphDebugTakeBreak(latched) || !editor::parseBreakEvent(latched, hit)) return;
+    // A breakpoint disabled or removed since it latched is not a stop.
+    if (!dbg.breakpoints.enabled(hit.graph, hit.node)) return;
+    dbg.lastBreak = hit;
+#if AVER_MODULE_FRAMEWORK
+    aver_fw_set_paused(1);
+#endif
+    std::string path = editor::graphPathForName(hit.graph);
+    if (path.empty() && project_.valid()) path = editor::findGraphFileByName(project_.contentDir(), hit.graph);
+    if (!path.empty()) editor::revealGraphNode(path, hit.node);
+    notifyOutcome(editor::NotifySeverity::Info, "Breakpoint hit",
+                  "'" + hit.node + "' in " + hit.graph + ". Play is paused at the end of this frame; "
+                  "Frame Skip steps and the Pause chord resumes.");
+}
+#endif  // AVER_MODULE_SCRIPTING
+
 // Advances one frame: MCP commands, camera, gameplay tick, physics, and the render state.
 void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     HitchMarks hm("update");
@@ -1880,6 +1953,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     if (mcp_.listening()) mcp_.pump([this](const mcp::Command& c) { applyMcpCommand(c); });
 #endif
     if (sky_.cloudsEnabled) cloudTime_ += t.dt;
+#if AVER_MODULE_FRAMEWORK
+    aver_fw_worldfx_tick(t.dt);   // every frame, Play or not: advances the script post blends, and the first tick after Stop drops the session's overrides, layers and scales
+#endif
     if (showUiDemo_) {
         uiDemoHealth_  = 0.5f + 0.5f * std::sin(uiDemoClock_ * 0.7f);
         uiDemoStamina_ = 0.5f + 0.5f * std::sin(uiDemoClock_ * 1.6f + 1.0f);
@@ -2184,7 +2260,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         if (keybinds_.pressed(editor::CommandId::PlayStop, ImGui::GetIO()) && (playSessionActive() || dronePlayActive() || spectatorPlayActive()))
             stopPlay();
         // F9 screenshots viewport (edit or Play). Checked here, not beside LevelSave: covers both modes with one check.
-        if (!ImGui::GetIO().WantTextInput && keybinds_.pressed(editor::CommandId::Screenshot, ImGui::GetIO()))
+        // (Not while a graph canvas has focus: F9 there is the debugger's breakpoint.)
+        if (!ImGui::GetIO().WantTextInput && !editor::graphCanvasHasFocus() &&
+            keybinds_.pressed(editor::CommandId::Screenshot, ImGui::GetIO()))
             requestViewportScreenshot();
         if (!playSessionActive()) releasedByUser_ = false;
         setMouseCaptured(wantCapture && !ImGui::GetIO().WantTextInput);
@@ -2266,6 +2344,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     maybeRecaptureTest();
     maybeViewmodelTest();
     hm.mark("ui+tests");
+#if AVER_MODULE_SCRIPTING
+    pumpGraphDebugger();
+#endif
     // Frame Skip: lift pause for exactly this frame's tick groups. frameStepGuard's destructor puts it back.
     if (playFrameStepPending_ && aver_fw_play_state() == AVER_FW_PLAY_PAUSED) {
         playFrameStepPending_ = false;
@@ -2593,8 +2674,15 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         updateAverSrAuto(e);
         applyUpscalerSlot(e.device());
 #endif
-        const Vec3 sd = Vec3{sky_.sunDirection[0], sky_.sunDirection[1],
-                             sky_.sunDirection[2]}.getSafeNormal();
+#if AVER_MODULE_FRAMEWORK
+        // Play only: a script's sun direction reaches the GI too (assets/LevelSky.hpp); authoring is untouched.
+        rhi::SkyAtmosphere skySunScratch;
+        const rhi::SkyAtmosphere& skySun = playSessionActive() ? assets::withScriptEnv<assets::FrameworkWorldFxApi>(sky_, skySunScratch) : sky_;
+#else
+        const rhi::SkyAtmosphere& skySun = sky_;
+#endif
+        const Vec3 sd = Vec3{skySun.sunDirection[0], skySun.sunDirection[1],
+                             skySun.sunDirection[2]}.getSafeNormal();
         if (sunAngle_ > 0.0f) sky_.sunAngularDiameterDeg = sunAngle_;
         // Direction only; color/ambient reach shaders through device frame constants.
         voxiRenderer_.setSunDirection(&sd.x);
@@ -2646,10 +2734,17 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     sky_.fogDensity = fog;
     sky_.cloudTime = cloudTime_;
     // Underwater fog applied to a copy; sky_ is the authored sky and must stay unchanged.
-#if AVER_MODULE_FLUIDS
-    e.device()->setSkyAtmosphere(water_.applyUnderwaterFog(sky_, viewPos().z));
+    // Script sun / fog / sky-light overrides ride a copy, in a Play session only: sky_ stays the authored sky.
+#if AVER_MODULE_FRAMEWORK
+    rhi::SkyAtmosphere skyScriptScratch;
+    const rhi::SkyAtmosphere& skyNow = playSessionActive() ? assets::withScriptEnv<assets::FrameworkWorldFxApi>(sky_, skyScriptScratch) : sky_;
 #else
-    e.device()->setSkyAtmosphere(sky_);
+    const rhi::SkyAtmosphere& skyNow = sky_;
+#endif
+#if AVER_MODULE_FLUIDS
+    e.device()->setSkyAtmosphere(water_.applyUnderwaterFog(skyNow, viewPos().z));
+#else
+    e.device()->setSkyAtmosphere(skyNow);
 #endif
     // Outside the viewport rect is editor chrome, not sky.
     e.device()->setClearColor(0.055f, 0.055f, 0.062f, 1);

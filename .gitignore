@@ -119,3 +119,6 @@ RC[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
 # The Aver Launcher's custom module selection (docs/MODULES.md): per machine, never shared.
 CMakeUserPresets.json
 build-custom/
+
+# Written by cmake/GraphNodeFamilies.cmake at configure time: the node palette families it found.
+/sandbox/src/GraphNodeFamilies.gen.inc

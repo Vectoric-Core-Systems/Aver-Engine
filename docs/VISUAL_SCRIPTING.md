@@ -4,7 +4,7 @@ A graph you build in the editor can, since `41d6566`, declare itself an actor cl
 real, level-placed entity — no C# involved at all. This page is the guide: what the system is, how
 its class model works, how it maps to Blueprints for readers who know them, and a worked example
 you can run verbatim. For the full per-node pin catalog, see
-**[the node reference](AVER_NODE_NODES.md)** — this page links to it rather than repeating it. For
+**[the node reference](AVER_NODE_NODES.md)** and the generated pages in **[`docs/nodes/`](nodes/README.md)** — this page links to them rather than repeating them. For
 the `.ocgraph` file grammar itself — every record's exact syntax, and where the C++ and C# readers
 disagree — see **[`formats/FORMAT_SPECS.md` §10a](formats/FORMAT_SPECS.md)**; this page is about
 what a graph *means*, that one is about what a graph *says*.
@@ -191,11 +191,11 @@ If you know Unreal's Blueprints, most of Aver Node reads directly:
 | SpawnActorFromClass | `Spawn` node, `class=` attribute | Resolved **by name** at invocation time, not baked to a handle at compile time. |
 | Get/Set on a component variable | `GetField`/`SetField` (scalar), `GetFieldVec3`/`SetFieldVec3` (vector) | Addressed by a `field=` string naming a scene field (e.g. `CLocal.position`), not a live pin reference to a component instance. |
 | A Blueprint **function** | `FUNC <name>` + `FUNCIN`/`FUNCOUT`, body tagged `func=`, called by a `CallFunc` node | Its own method, its own canvas, and it **can recurse** (bounded at depth 120). Float/int/bool signatures only. **A `pure` function cannot recurse** — `Select` evaluates both sides, so only an impure function's `Branch` can terminate one. |
-| A Blueprint **macro** | — | Not implemented. Functions are real calls, not inlined, so there is nothing macro-shaped to reach for. |
+| A Blueprint **macro** | Collapse to Function (editor) | Not implemented as a macro. Functions are real calls, not inlined; the editor's Collapse to Function turns a selection into one (see Editor tools below). Inlined macros are not in v1. |
 | Branch / Sequence / For Loop / While Loop | `Branch` / `Sequence` / `ForEach` / `While` | `ForEach` is counted-repeat only — there is no array pin type, so no per-element iterator (§8). |
 
 **Where it deliberately differs, structurally:** one file is one graph and one class at most, and there
-are no collapsed/macro sub-graphs. There IS now an event-graph-versus-function-graph split — this
+are no inlined macros (a selection collapses into a real function, see Editor tools). There IS now an event-graph-versus-function-graph split — this
 paragraph used to say there was not, and `FUNC` made that false. A file holds one event graph plus any
 number of named functions; the editor shows one subgraph at a time and a wire cannot cross between them,
 because they compile to separate methods. What is still true is that `ENTRY` records mark starting
@@ -446,14 +446,7 @@ running. It is also new, and smaller than what it resembles. Specifically:
   other name a caller fires) via `Fire()`, but there is no node anywhere in the catalog that lets
   one entity's graph raise an event *on a different entity's* graph. `Fire()` is something a host
   calls into one specific `GraphHost`; it is not something a node can invoke.
-- **No HUD or 2D drawing from a graph.** Nothing in the palette reaches `Aver.UI` — still true,
-  checked against the catalog rather than remembered: **254 node types across 24 categories**
-  (re-derived this pass: `grep -cP '^\s*t\.push_back\('` in `sandbox/src/GraphNodeDefs.hpp`, and 24
-  distinct category strings, an "Audio" one among them, which this page's own node reference does
-  not yet document at all), none of them a draw call. This bullet's number has gone stale multiple times,
-  but the claim itself ("no draw call in the catalog") has held every time. A stale number beside a true
-  statement teaches a reader to stop trusting the statement; see [the node reference](AVER_NODE_NODES.md)'s
-  own intro for the same lesson stated at length.
+- **No immediate-mode 2D drawing from a graph.** The UI nodes drive widgets that already exist (`Aver.UI`); there is no draw call in the palette. This bullet used to carry a node count and the claim that nothing reached `Aver.UI`; the count went stale repeatedly and the second half stopped being true, so it now carries neither. `python scripts/node-catalog.py --counts` prints the current numbers and [`docs/nodes/`](nodes/README.md) lists every node.
 - **No `String` pin.** `PinType` has exactly four members — `Float`, `Int`, `Bool`, `Exec`. Every
   string a node needs (`field=`, `class=`, `var=`, `name=`, `mesh=`, `material=`) arrives as a
   `NODE`-line attribute, never as data an upstream node computes or a pin carries.
@@ -500,6 +493,38 @@ A few smaller, related edges, already covered in more depth above: an undeclared
 fragile (§2), and `Fire("OnHit", …)` is a demonstrated mechanism with no engine-side collision
 system wired to call it yet (§5). None of these are fixed in this pass — this page documents them
 so the next person does not have to rediscover them by reading source.
+
+## Editor tools
+
+Five tools sit on top of the graph canvas. Their model code (parsing, ranking, sorting, serialising, the collapse transform, breakpoint keys) is header-only and ImGui-free under `sandbox/src/` (`GraphProblems.hpp`, `GraphFind.hpp`, `GraphClipboard.hpp`, `GraphDebugModel.hpp`, `GraphCollapse.hpp`) and is covered by `tests/graphtools`, so none of it needs a window to test. The design is `docs/plans/wave9/VISUAL_SCRIPTING_CSHARP_SYNC.md`, section 2.3.
+
+**Problems panel.** A tab under the canvas lists every error and warning in the open graph, not just the first one, with severity, node and message. Clicking a row selects and frames the node (`revealNode`). Badges sit on the offending nodes, and the toolbar shows a count (`2 errors, 1 warning`) beside the Validate button. The list refreshes about half a second after the last edit, on open and before Play. The checks are the existing validation (same messages, same order, now all of them), whatever the compiler would refuse per entry point and function body, and some that only warn: a table node missing a required attribute (`attr.missing`), an exec node no entry reaches (`exec.unreachable`), a variable never read (`var.unused`) or never written (`var.writeonly`). A file that does not parse is one `parse` error. The Validate button still works and shows the full list. Source: `GraphDiagnostics.cs` (`GraphDiagnostics.Run`), the optional `GraphDiagnose` bridge export, `GraphEditor::setDiagnoser`.
+
+**Find and Find References.** Ctrl+F opens a find bar on the canvas: type a query, Enter goes to the next hit, Shift+Enter to the previous, and the bar shows `3/12`. It matches node ids, types, palette display names, attribute values, comment text, and variable and function names, ranked exact id first, then name prefix, then substring. Right-click a variable row, a function row or a `GetVar`/`SetVar`/`CallFunc`/`CustomEvent` node and choose Find References (variables, functions, events by name, `Spawn` classes); the "whole project" toggle scans every `*.ocgraph` under Content and a click opens that graph's tab on the node.
+
+**Shared clipboard.** Copy, cut and paste work between graph tabs, after the source tab is closed and after a restart, because the selection lives in a process-wide store and in the OS clipboard as readable text (it starts with `AVER_NODE_CLIP 1` and then the same records a saved `.ocgraph` holds). Pasting into a text editor shows `.ocgraph`. On paste: a different domain (gameplay into material or back) is refused with the banner; a variable the nodes need and the target lacks is declared with its carried type and default inside the same undo step and reported; a `CallFunc` whose function is absent is dropped and listed.
+
+**Debugger.** F9 toggles a breakpoint on the selected node (a red dot); the set is saved per user in the editor preferences, keyed by graph, never in the `.ocgraph`. Arm the debugger in the toolbar, then press Play: the compiler emits the hooks **only when armed**, so a packaged game and an unarmed editor run byte-identical IL and pay nothing. Arming applies to graphs compiled afterwards, which means the next Play start. Honest semantics: a breakpoint pauses the Play session at the **end of the frame in which the node ran** (`aver_fw_set_paused`), because the engine loop is single-threaded and the editor draws on the same thread; it cannot stop mid-tick. While paused the node pulses red, the notification names it, and every data wire shows its last value as a small label (hover for all). Frame Skip steps one frame and breaks again if the node is reached; the node's context menu has Disable breakpoint (a node under `OnTick` breaks every frame after you resume), and the existing Pause chord resumes. Only values on data inputs are captured (floats, ints and bools widened to double); exec-node result pins are not. Source: `GraphDebug.cs`, the optional `GraphDebug*` bridge exports, `GraphDebugModel.hpp`.
+
+**Collapse to Function.** Select nodes, Collapse to Function, give it a name: the editor makes a function, moves the nodes into it, re-points the crossing links through its `FuncEntry`/`FuncReturn` and puts a `CallFunc` node where the selection was, in one undo step. Behaviour is unchanged (`CollapseFunctionTests` runs both graphs and compares). Data inputs and outputs become function pins named `<node>_<pin>`; at most one exec link may enter and one leave (more is refused with `selection has N exec exits; v1 supports one`); none of either makes the function `pure`. Refused with a named reason: `ENTRY` nodes, `OnStart`/`OnTick`/`OnHit`/`CustomEvent`/`AN_OnEvent`, `FuncEntry`/`FuncReturn`, `Param` nodes, and a selection that separates a `While`/`ForEach` from its loop body. Expanding a function back and true macros are not in v1.
+
+## Adding a node family
+
+A new node family is one table file, one palette file, one owner class and one test file, and edits nothing shared. The wave-9 features (accessibility, soft body, morph, UI text, math and the rest) all follow this.
+
+| Item | Rule |
+|---|---|
+| Table | `scripting/csharp/Aver.Graph/Graph<Family>NodeTable.cs` with `private static GenericNodeSpec[] <Family>Table() => new[] { Reg(...), ... };` inside `partial class GameSystemNodes`. Any static zero-argument method of that class returning `GenericNodeSpec[]` is found by reflection; the family is the method name without `Table`. A key defined twice by different rows is reported by `GameSystemNodes.Validate()` as `type: defined by A and B`; a row repeated unchanged is harmless. |
+| Palette | `sandbox/src/GraphNodeDefs<Family>.hpp` with `inline void append<Family>NodeDefs(std::vector<GraphNodeDesc>& t)` mirroring the rows pin for pin (names, types, directions, order, defaults, attribute keys). `python scripts/node-catalog.py --scaffold-palette <Family> --category <Cat>` prints a starting point. `cmake/GraphNodeFamilies.cmake` finds the file at configure time and writes `sandbox/src/GraphNodeFamilies.gen.inc`; re-run cmake once after adding one. |
+| Owner | `internal static class <Family>Graph` in `Aver.Framework` (visible to `Aver.Graph` through `InternalsVisibleTo`) or a public static class in an assembly `Aver.Graph.csproj` already references. Methods are `...ForGraph`, primitives only, a thin wrapper over a public C# member: a node never reaches an ABI the C# API cannot also reach. XML `<summary>` on the method becomes the line in the generated page. |
+| Tests | `Aver.Graph.Tests/<Family>NodeTests.cs`: `[AutoRun] static class <Family>NodeTests { public static int RunAll() }` built from `NodeRowKit` (`CheckRows`, `CheckDefaultPins`, `CheckIlValid`). A class is either marked `[AutoRun]` or listed in `Program.cs`, never both (if it is, it runs once and says so). |
+| Names | Key = lower-case palette type id. A word a user might type as a plain verb or noun takes the `AN_` prefix (`AN_Announce`, not `Announce`). A key never equals a parser `case` label or another key. |
+| Pins | `float`, `int`, `bool`, `exec`. Strings are node attributes; entities and handles are ints; vectors are loose `x`/`y`/`z`; enums are ints documented in the family page. |
+| Failure | Return false, 0 or a default and log once per node id; never throw. |
+| Events | Raise through `Events.Dispatch("Feature.Event", ...)` so a graph reacts with `AN_OnEvent`; no new entry node kind. |
+| Docs | `python scripts/node-catalog.py --write` produces `docs/nodes/<Family>.md`; never hand-edit it. Hand-written notes go in `docs/nodes/<Family>.notes.md`. |
+
+`python scripts/node-catalog.py --check` (ctest `NodeCatalogCheck`) holds all of this; see [`docs/nodes/README.md`](nodes/README.md) for what it checks.
 
 ---
 

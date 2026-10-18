@@ -4,7 +4,8 @@
 // The rows of the game-systems node table: type, kind, the class and method it calls, its pins, and
 // how the method's parameters are fed (see GenericNodeSpec.Args). Palette rows for the editor are the
 // hand-kept mirror in sandbox/src/GraphNodeDefsGameSystems.hpp (and GraphNodeDefsSynapseAi.hpp);
-// GameSystemNodes.Validate() checks every row against the real method it names.
+// GameSystemNodes.Validate() checks every row against the real method it names. This is the main table;
+// every Graph<Family>NodeTable.cs holds another, and GameSystemNodes finds them all by reflection (no list here).
 
 using Aver.Framework;
 using Aver.Prefab;
@@ -120,6 +121,5 @@ internal static partial class GameSystemNodes
         // ---- model import (docs/plans/wave9/FBX_IMPORT.md 2.10) ----
         Reg("importmodel", GenericKind.Exec, typeof(ModelImportGraph), "ImportModelForGraph", "overwrite:bool,scale:float=100", "success:bool,meshes:int,skeletons:int,clips:int", "@source,@dest,p:overwrite,p:scale,>meshes,>skeletons,>clips", "success"),
         Reg("ismodelimportavailable", GenericKind.Pure, typeof(ModelImportGraph), "IsModelImportAvailableForGraph", "", "available:bool", "", "available"),
-    }.Concat(GasTable()).Concat(AiQueryTable()).Concat(LevelInstanceTable()).Concat(TerrainTable())
-      .Concat(IkTable()).Concat(MotionMatchTable()).Concat(SequenceTable()).Concat(SoftBodyTable()).Concat(UiTextTable()).Concat(AccessibilityTable()).Concat(MorphTable()).ToArray();
+    };
 }

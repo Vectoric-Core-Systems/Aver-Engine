@@ -42,6 +42,10 @@ internal sealed class GenericNodeSpec
     /// <summary>The output pin that receives the method's return value; null discards it.</summary>
     public string? Ret { get; init; }
 
+    /// <summary>The table the row came from (the method name without its Table suffix; the main table is
+    /// GameSystem). Set when the tables are collected.</summary>
+    internal string Family { get; set; } = "";
+
     private MethodInfo? _method;
 
     /// <summary>The resolved method; looked up on first use so a missing one fails only the graph that uses it.</summary>
@@ -63,14 +67,69 @@ internal sealed class GenericNodeSpec
 internal static partial class GameSystemNodes
 {
     private static Dictionary<string, GenericNodeSpec>? s_byType;
+    private static List<string> s_duplicates = new();
 
     private static Dictionary<string, GenericNodeSpec> ByType()
     {
         if (s_byType != null) return s_byType;
-        var d = new Dictionary<string, GenericNodeSpec>(StringComparer.OrdinalIgnoreCase);
-        foreach (var s in Table()) d[s.Type] = s;
+        var dups = new List<string>();
+        var d = Build(TableMethods(), dups);
+        s_duplicates = dups;
         return s_byType = d;
     }
+
+    /// <summary>The family a table method belongs to: its name without the Table suffix, the main table being GameSystem.</summary>
+    internal static string FamilyOf(string methodName) =>
+        methodName == "Table" ? "GameSystem"
+        : methodName.Length > 5 && methodName.EndsWith("Table", StringComparison.Ordinal) ? methodName[..^5]
+        : methodName;
+
+    /// <summary>Every table, found by reflection: any static zero-argument method of this class returning
+    /// GenericNodeSpec[]. The main table first, the rest by name, so the order does not depend on the compiler.</summary>
+    internal static IEnumerable<(string Family, GenericNodeSpec[] Rows)> TableMethods()
+    {
+        var methods = typeof(GameSystemNodes)
+            .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
+            .Where(m => m.GetParameters().Length == 0 && m.ReturnType == typeof(GenericNodeSpec[]))
+            .OrderBy(m => m.Name == "Table" ? "" : m.Name, StringComparer.Ordinal);
+        foreach (var m in methods)
+        {
+            GenericNodeSpec[] rows;
+            try { rows = (GenericNodeSpec[])m.Invoke(null, null)!; }
+            catch (TargetInvocationException e) when (e.InnerException != null)
+            {
+                throw new InvalidOperationException($"node table {m.Name} failed to build: {e.InnerException.Message}", e.InnerException);
+            }
+            yield return (FamilyOf(m.Name), rows);
+        }
+    }
+
+    /// <summary>Folds tables into one dictionary by type. The first row of a type wins. A later row with the same
+    /// type is benign when it is the same row (an old hand-written Concat line that discovery also found), otherwise
+    /// it is recorded in <paramref name="duplicates"/> as "type: defined by A and B".</summary>
+    internal static Dictionary<string, GenericNodeSpec> Build(
+        IEnumerable<(string Family, GenericNodeSpec[] Rows)> tables, List<string> duplicates)
+    {
+        var d = new Dictionary<string, GenericNodeSpec>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (family, rows) in tables)
+            foreach (var s in rows)
+            {
+                s.Family = family;
+                if (d.TryAdd(s.Type, s)) continue;
+                var first = d[s.Type];
+                if (!SameRow(first, s)) duplicates.Add($"{s.Type}: defined by {first.Family} and {family}");
+            }
+        return d;
+    }
+
+    private static bool SameRow(GenericNodeSpec a, GenericNodeSpec b) =>
+        a.Owner == b.Owner && a.MethodName == b.MethodName && a.Kind == b.Kind && a.Ret == b.Ret &&
+        a.Args.SequenceEqual(b.Args) && a.Outputs.SequenceEqual(b.Outputs) &&
+        a.Inputs.Length == b.Inputs.Length &&
+        a.Inputs.Zip(b.Inputs).All(p => p.First.Name == p.Second.Name && p.First.Type == p.Second.Type && Equals(p.First.Default, p.Second.Default));
+
+    /// <summary>Types defined by two different rows (a row repeated unchanged is not listed); Validate() reports them too.</summary>
+    internal static IReadOnlyList<string> Duplicates { get { ByType(); return s_duplicates; } }
 
     /// <summary>Every registered node, for tests.</summary>
     internal static IEnumerable<GenericNodeSpec> All => ByType().Values;
@@ -146,10 +205,10 @@ internal static partial class GameSystemNodes
     }
 
     /// <summary>Checks every row against the real method it names: parameter count, parameter types
-    /// against the pins that feed them, the return value against its pin. Returns one line per problem.</summary>
+    /// against the pins that feed them, the return value against its pin, and that no type is defined twice. Returns one line per problem.</summary>
     internal static List<string> Validate()
     {
-        var problems = new List<string>();
+        var problems = new List<string>(Duplicates);
         foreach (var s in All)
         {
             if (s.Kind == GenericKind.Trigger) continue;

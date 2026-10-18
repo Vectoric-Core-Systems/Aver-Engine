@@ -19,7 +19,12 @@ public class OcGraphParser
 {
     /// Parses text into a Graph. Handles both C++ (string IDs, dot notation) and C# (int IDs as strings)
     /// format variants. Unknown records are skipped, not failed.
-    public static bool Parse(string text, out Graph graph, out string? err)
+    public static bool Parse(string text, out Graph graph, out string? err) => Parse(text, out graph, out err, validate: true);
+
+    /// Same, with the final Graph.Validate() pass optional. `validate: false` is for the diagnostics
+    /// run (GraphDiagnostics), which lists every problem itself and so needs the graph even when it
+    /// is not consistent; a hard parse failure still fails either way.
+    public static bool Parse(string text, out Graph graph, out string? err, bool validate)
     {
         graph = new Graph();
         err = null;
@@ -797,7 +802,7 @@ public class OcGraphParser
             AddDefaultPins(node, graph);
         }
 
-        if (!graph.Validate(out var validateErr))
+        if (validate && !graph.Validate(out var validateErr))
         {
             err = validateErr;
             return false;

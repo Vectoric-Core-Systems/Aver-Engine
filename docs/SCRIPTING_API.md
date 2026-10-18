@@ -36,7 +36,12 @@ heard of, in a file the editor generated.
 16. [`Aver.UI` — the game's HUD](#16-averui--the-games-hud)
 17. [`Aver.Materials` — surfaces authored in C#](#17-avermaterials--surfaces-authored-in-c)
 18. [Worked examples](#18-worked-examples)
-19. [Not yet available](#19-not-yet-available)
+19. [Maths helpers and random numbers](#19-maths-helpers-and-random-numbers--avermath-averrandom)
+20. [Pausing, time and settings](#20-pausing-time-and-settings)
+21. [Light, camera and particle emitter properties](#21-light-camera-and-particle-emitter-properties--entity)
+22. [Sky, fog, post-process layers and vehicles](#22-sky-fog-post-process-layers-and-vehicles)
+23. [The generated index of the public surface](#23-the-generated-index-of-the-public-surface)
+24. [Not yet available](#24-not-yet-available)
 
 ---
 
@@ -314,8 +319,8 @@ fields and any component field)
 
 ## 7. `Game` — the running session
 
-Static. In EDITOR every handle is `Entity.None` and `State` is `Editor`. **Read-only**: starting/stopping
-a session is the editor's job, not a script's.
+Static. In EDITOR every handle is `Entity.None` and `State` is `Editor`. Starting and stopping a session is the
+editor's job, not a script's; a script can **pause and resume** the one that is running (`SetPaused`, below).
 
 **State**
 
@@ -323,6 +328,7 @@ a session is the editor's job, not a script's.
 |---|---|
 | `PlayState State` | `Editor` / `Playing` / `Paused`. |
 | `bool IsPlaying` / `bool IsPaused` / `bool HasSession` | Playing / paused / a session exists (playing OR paused). |
+| `bool SetPaused(bool)` / `bool Pause()` / `bool Resume()` | Freeze or resume the session's tick without tearing it down; false when there is no session. |
 
 **Session singletons** (each `Entity`, with a typed `…As<T>()` counterpart)
 
@@ -340,6 +346,7 @@ a session is the editor's job, not a script's.
 | `Entity Find(string name)` / `T? FindActor<T>(string name)` | Resolve an actor by name. |
 | `IEnumerable<Entity> AllActors()` | Every live actor. |
 | `IEnumerable<T> ActorsOf<T>()` | Every live actor whose instance is a `T`. |
+| `IEnumerable<Entity> ActorsOfClass(string className)` | Every live actor whose declared class name is `className` or derives from it (graph classes included). |
 | `IEnumerable<Entity> WithTag(uint mask)` | Every entity carrying all of `mask`. |
 
 `Actors.Get(Entity)` / `Actors.Get<T>(Entity)` are the lower-level resolvers `Entity.As<T>` is built on.
@@ -875,22 +882,59 @@ public sealed class Coin : AverActor
 `Aver.Framework.Accessibility` (`Get/Set(key)`, typed `UiScale`, `TextScale`, `HighContrast`, `ColourVision`, `ColourStrength`, `ReduceMotion`, `ShakeScale`, `BobScale`, `MotionBlurAllowed`, `LensEffectsAllowed`, `Changed`, `Tick`, and `Accessibility.Input` for `SetToggle`, `SetToggleAllowed`, `HoldScale`, `WindowScale`), `Captions` (`Mode`, `SizePreset`, `BackgroundOpacity`, `TopOfScreen`, `MaxLines`, speaker/colour/direction switches, `Load`, `Show`, `ShowAt`, `ShowText`, `Stop`), `Speech` (`Available`, `Enabled`, `NarrateUi`, `NarrateCaptions`, `Rate`, `Volume`, `Announce`, `Stop`, `IsSpeaking`) and `CameraFx` (`AddShake`, `SetBob`). Options persist through `Settings` from the per-frame tick; every call is safe when the native library is absent. `AccessSettingsStore` is what `UiGameSettings.Create()` uses. See `docs/ACCESSIBILITY.md`.
 ## 18c. Blend shapes, face poses and lip-sync
 `Entity` methods (`Aver.Framework`): `SetMorphWeight(target, weight, blendSeconds = 0)`, `SetFacePose(pose, weight, blendSeconds = 0)`, `ClearMorphWeights(name = null, blendSeconds = 0)`, `TryGetMorphWeight(target, out weight)`, `SetFaceRig(rigAsset)`, `SetMorphMaster(weight)`, `PlayLipSync(track, rate = 1, startSeconds = 0, strength = 1)`, `StopLipSync(blendSeconds = 0.1)`, `SetLipSyncTime(seconds)`, `QueueViseme(symbol, startSeconds, durationSeconds, intensity = 1)`, `TryGetLipSyncState(out time, out length, out strength)`. Constants: `FaceShapes` (the 52 ARKit names) and `Visemes`. Weight calls attach Morph Targets when missing and return false when the mesh has no targets. The C ABI is `framework_morph_abi.h` (names cross as FNV-1a 64 hashes). See docs/ANIM_MORPH_FACE.md.
-## 19. Not yet available
+## 19. Maths helpers and random numbers — `AverMath`, `AverRandom`
 
-The gameplay object model above is complete. What follows is what a script still **cannot** reach,
-stated as absences rather than left to be discovered:
+`Aver.Framework.AverMath` is the maths beyond `MathF`, in this engine's basis (+X forward, +Y right, +Z up, centimetres, degrees); `AverRandom` is the one process-wide generator for gameplay. The Aver Node maths nodes (`docs/nodes/Math.md`) call these methods and nothing else, so a graph and a script agree to the last bit. Both are plain static classes with no native dependency, so they work in a bare process.
 
-- **Audio.** The pieces exist — a mixer with voices, 3D panning and attenuation, a WASAPI device, the
-  `.ocaudio` container, and a C seam (`modules/audio`, `modules/audio.wasapi`, `modules/audio.abi`, and
-  `modules/formats`; see `docs/AUDIO.md`). None of them are joined up: there is no managed binding, and
-  neither the editor nor the runtime opens a device. A script cannot play a sound.
+| Area | Members |
+|---|---|
+| Trigonometry and conversion | `Tan`, `Asin`, `Acos` (input clamped to -1..1), `Atan`, `Atan2(y, x)`, `DegToRad`, `RadToDeg`, `Deg2Rad`, `Rad2Deg` |
+| Float helpers | `Sign`, `Frac` (`a - floor(a)`), `Truncate`, `Exp`, `Log` (`a <= 0` gives 0, not NaN), `SmoothStep`, `InverseLerp` (not clamped), `MapRange(value, inMin, inMax, outMin, outMax, clamp = true)`, `Wrap`, `InterpTo(current, target, deltaTime, speed)` (never overshoots; `speed <= 0` returns the target), `NearlyEqual`, `IsFinite` |
+| Angles | `DeltaAngle(a, b)` (signed shortest turn, degrees), `LerpAngle` |
+| Integers and bits | `IntAdd/Subtract/Multiply` (wrapping), `IntDivide`/`IntModulo` (divisor 0 gives 0; modulo takes the dividend's sign), `IntClamp`, `IntAbs`, `IntSign`, `BitShiftLeft`/`BitShiftRight` (count masked to 0..31), `BitTest` |
+| Vectors | `Length2D`, `Distance2D`, `Reflect`, `Project`, `ClampLength`, `Angle`, `InterpTo(Vec3, ...)` |
+| Rotators | `ForwardOf(Rot)`, `RotatorOf(Vec3)`, `LookAt(from, to)`, `Rotate(v, Rot)` (yaw about +Z, pitch about +Y, as `Rot.ToQuat()`) |
+| Random | `AverRandom.Seed(int)` (the same seed repeats the sequence), `NextFloat()` in [0, 1), `NextFloat(min, max)`, `NextInt(min, max)` (**both ends reachable**), `NextBool(chance = 0.5f)`, `UnitVector()` (uniform on the sphere) |
+
+## 20. Pausing, time and settings
+
+`Game.SetPaused(bool)`, `Game.Pause()` and `Game.Resume()` freeze and unfreeze the play session's tick without tearing it down; they return whether the request was accepted, and `Game.IsPaused` reads it back (`IsPlaying` is false while paused). `Game.ActorsOfClass(string className)` yields every live actor whose declared class name is `className` or derives from it, for classes a graph declared and C# has no type for. The timer reads graphs use (`Timers.Remaining`, `FireCount`, `SetPaused`, `Reset`, `TimeDilation`) and the project settings store (`Settings.Get*`, `Set*`, `Has`, `Flush`) are public in `Aver.Framework`; the nodes in `docs/nodes/GameFlow.md` wrap them one for one. `Audio.MasterVolume`, `Audio.GetBusVolume`, `Audio.StopAll`, `Voice` and `Music` (`docs/AUDIO.md`) and `UiSystem.SetTheme`/`WantsPointer`/`WantsKeyboard` are the members behind the audio control and UI extension nodes.
+
+## 21. Light, camera and particle emitter properties — `Entity`
+
+A partial `Entity` (`EntityRenderProps.cs`) writes the scene's own component fields, so each works on any entity carrying the component and needs no native entry point; every setter returns false when the entity lacks the component.
+
+| Area | Members |
+|---|---|
+| Light | `HasLight`, `SetLightIntensity(lux)`, `TryGetLightIntensity(out lux)`, `SetLightColour(Vec3)`, `SetLightRange(cm)`, `SetLightCone(innerDeg, outerDeg)` (inner is kept `<=` outer; `LightConeCosines` is the conversion), `SetLightShadows(bool)`. A light has no enable bit: intensity 0 is off. |
+| Camera | `HasCamera`, `SetCameraFov(deg)` (clamped 1..170), `TryGetCameraFov`, `SetCameraClip(nearCm, farCm)`, `SetCameraPriority(int)` (the highest priority is the view) |
+| Particles | `HasEmitter`, `SetEmitterEnabled(bool)`, `SetEmitterEffect(path)`, `RestartEmitter()`, `Entity.SpawnEmitterAt(position, effectPath, lifetimeSeconds = 3)` (destroyed after the lifetime; 0 or less: never) |
+
+## 22. Sky, fog, post-process layers and vehicles
+
+**`Sky`** (`Aver.Framework`) keeps `SetClouds`/`Clear` and gains script overrides of the sun, the fog and the sky light: `SetSunDirection` (the world direction **toward** the light), `SetSunIntensity(lux)`, `SetSunColor(r, g, b, temperatureK = 0)`, `SetFogDensity(perCm)`, `SetFogColor`, `SetFogShape(falloff, heightZ, startCm, maxOpacity = 1)`, `SetSkyLight(multiplier)`, `ClearOverrides()`, `ClearOverride(WorldEnvKey | dotted name)` and `IsOverridden`. A script **publishes** and the host reads each frame (`aver_fw_set_sky_clouds` is the same shape), so the editor applies overrides only during a Play session and releasing one restores the level's authored value. Entry points: `framework_worldfx_abi.h` (`docs/ABI.md`).
+
+**`PostFx`** is a static class of named post-process layers: `SetValue(layer, key, v0, v1 = 0, v2 = 0)` (keys are the lower-case post keys, such as `saturation`; an unknown key is refused and logged once), `SetLayerWeight(layer, weight, blendSeconds = 0)`, `ClearLayer`, `ClearAll`, `SetVolumeWeight(volumeName, weight, blendSeconds = 0)` (scales one of the level's own post volumes) and `ClearVolumeWeight`. A call without a layer name uses the layer `PostFx.DefaultLayer` (`"script"`). In a frame the order is: authored volumes, then script layers, then the volume blend, then the player's accessibility override, which wins by design. Both renderers consume the same CPU settings.
+
+**`Vehicles`** wraps `Aver.Physics.Vehicle` for the common case: `Vehicles.CreateCar(position, yawDegrees, CarSpec)` builds a chassis, four wheels (front steered, rear driven, one axle each so the differential and anti-roll bar exist), an engine and the simulation, then a scene entity kept at the car's pose, and returns a `Car`; `CarSpec.Default` is the frozen default (a 460 x 190 x 90 cm box, 1500 kg, 280 cm wheelbase, 160 cm track, 36 cm tyres, 500 N*m engine). `Vehicles.TryGet(handle, out car)` finds one again and `SyncEntities()` copies poses to entities now. The vehicle nodes (`docs/nodes/Vehicle.md`) drive the same objects.
+
+## 23. The generated index of the public surface
+
+`docs/api/` is generated from source by `python scripts/csharp-api-index.py --write`: one page per assembly (`Aver.Framework`, `Aver.Scene`, `Aver.Physics`, `Aver.UI`, `Aver.Synapse`, `Aver.LevelInstance`, `Aver.Prefab`, `Aver.Scripting`, `Aver.Pcg.Apply`) listing every public type and member as a one-line signature with the first sentence of its XML summary, plus an index (`docs/api/index.md`). It reads the `.cs` files, so it needs no build and cannot drift (ctest `CsharpApiIndexCheck`). This guide explains how the pieces fit together; the index answers "does a member for this exist". Every Aver Node is a thin wrapper over a member listed there (`docs/nodes/`).
+
+## 24. Not yet available
+
+The gameplay object model above is complete. What follows is what a script, or a graph, still **cannot** reach, stated as absences rather than left to be discovered (audio, timers, widgets and settings are no longer on this list: see §20 and `docs/AUDIO.md`):
+
 - **Typing, and some scripts, in the UI.** `Aver.UI` (§16) has a widget tree (`UiSystem`, `Widget`) over the draw list and
   draws TrueType text (`Hud.Text`, `Hud.TextBlock`, `UiText`) with fallback fonts, kerning, Arabic shaping, bidi and line
   breaking (`docs/GAME_UI.md`, `docs/GAME_UI_TEXT.md`). Still missing: typing other than the US key layout (no `WM_CHAR`
   plumbing, no IME) and Indic and Thai shaping.
-- **Timers and coroutines.** No `SetTimer`, no `yield`. Count down in `OnTick`.
+- **Coroutines and a latent `Delay`.** No `yield`; use `Timers` (and the timer nodes) or count down in `OnTick`.
 - **Networking.** `modules/net` exists; nothing in it is reachable from C#.
 - **Hot-reload state migration** beyond `[Editable]` fields.
+- **Travel and streaming.** No `OpenLevel`/travel call (only the `AVER_FW_END_TRAVEL` hook), no level-streaming residency queries from script, no save slots (`SaveGame`/`LoadGame` take a path), no procedural audio (Aver Sound) binding, no runtime landscape sculpt, paint or carve, no PCG regenerate, and no material-parameter nodes (`docs/plans/wave4/MATERIAL_INSTANCES_FUNCTIONS.md` owns them).
+- **Graph pin types.** String, `Vec3` and array pins, event dispatchers with typed payloads and interfaces would change the `.ocgraph` grammar in both readers; strings stay node attributes.
 - **Import beyond glTF and FBX.** The Content Browser's Import *converts* `.gltf`/`.glb` and `.fbx` (ufbx, `docs/FBX_IMPORT.md`) into
   `.ocmesh`/`.ocskel`/`.ocanim` and registers the result immediately (`SandboxApp::importModel`); every other file type is copied
   in unchanged. That is right for a `.png` a material names — a texture is decoded and uploaded straight from the source file, with its

@@ -1,7 +1,11 @@
 // Editor-side post-process volumes. See PostVolumeTools.hpp.
 #include "PostVolumeTools.hpp"
 
+#include "aver/assets/LevelSky.hpp"
 #include "aver/core/Log.hpp"
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_abi.h"   // aver_fw_play_state
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -71,6 +75,15 @@ void PostVolumeTools::drawOverlay(rhi::IDevice& dev, const std::vector<fmt::OcPo
 rhi::PostSettings PostVolumeTools::blend(rhi::IDevice& dev, const std::string& contentDir,
                                          const std::vector<fmt::OcPostVolume>& vols, const rhi::PostSettings& base,
                                          const Vec3& eye) {
+#if AVER_MODULE_FRAMEWORK
+    // A Play session only (authoring shows the level as saved): the same volume list the game builds. The level's volumes
+    // with their script scales, then the script's post layers as infinite volumes; blended below, and the accessibility
+    // override the caller applies afterwards still wins.
+    static std::vector<fmt::OcPostVolume> scripted;
+    if (aver_fw_play_state() != AVER_FW_PLAY_EDITOR &&
+        assets::buildScriptPostVolumes<assets::FrameworkWorldFxApi>(vols, scripted))
+        return game::blendPostVolumes(scripted, base, eye, luts_.resolver(dev, contentDir));
+#endif
     if (vols.empty()) return base;
     return game::blendPostVolumes(vols, base, eye, luts_.resolver(dev, contentDir));
 }

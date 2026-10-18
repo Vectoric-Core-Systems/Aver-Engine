@@ -77,6 +77,11 @@ using graph_fire_fn    = int32_t(AVER_SCRIPT_CALL*)(int32_t entity, const char* 
 using graph_validate_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8Text, char* outErr, int32_t cap);
 using graph_set_hits_fn = int32_t(AVER_SCRIPT_CALL*)(int32_t on);
 using graph_get_hits_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8GraphName, char* out, int32_t cap, float maxAgeSeconds);
+using graph_diagnose_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8Text, char* out, int32_t cap);
+using graph_debug_set_enabled_fn = int32_t(AVER_SCRIPT_CALL*)(int32_t on);
+using graph_debug_set_breakpoints_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8Lines);
+using graph_debug_take_break_fn = int32_t(AVER_SCRIPT_CALL*)(char* out, int32_t cap);
+using graph_debug_get_values_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8Graph, char* out, int32_t cap);
 using declare_graph_classes_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8ContentDir);
 using tick_graph_class_instances_fn = void(AVER_SCRIPT_CALL*)(float dt);
 using configure_input_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8SchemePath, const char* utf8SettingsPath);
@@ -167,6 +172,11 @@ struct ScriptHost::Impl {
     graph_validate_fn graphValidate = nullptr;
     graph_set_hits_fn graphSetHits = nullptr;
     graph_get_hits_fn graphGetHits = nullptr;
+    graph_diagnose_fn graphDiagnose = nullptr;
+    graph_debug_set_enabled_fn graphDebugSetEnabled = nullptr;
+    graph_debug_set_breakpoints_fn graphDebugSetBreakpoints = nullptr;
+    graph_debug_take_break_fn graphDebugTakeBreak = nullptr;
+    graph_debug_get_values_fn graphDebugGetValues = nullptr;
     declare_graph_classes_fn      declareGraphClasses    = nullptr;
     tick_graph_class_instances_fn tickGraphClassInstances = nullptr;
     configure_input_fn configureInput = nullptr;
@@ -308,6 +318,24 @@ bool ScriptHost::init(const HostDesc& desc) {
         impl_->graphGetHits = nullptr;
         AVER_WARN("[Scripting] the bridge exports no node-hit entry points; the graph editor cannot "
                   "highlight which nodes are executing");
+    }
+
+    // GraphDiagnose (the Problems panel) is optional alone: without it the editor keeps validate's first error.
+    if (!bind(AVER_HOST_STR("GraphDiagnose"), reinterpret_cast<void**>(&impl_->graphDiagnose))) {
+        impl_->graphDiagnose = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no GraphDiagnose; the graph editor lists only the first error");
+    }
+
+    // The debugger's four, optional together: a bridge predating them hosts graphs and just cannot debug one.
+    if (!bind(AVER_HOST_STR("GraphDebugSetEnabled"), reinterpret_cast<void**>(&impl_->graphDebugSetEnabled)) ||
+        !bind(AVER_HOST_STR("GraphDebugSetBreakpoints"), reinterpret_cast<void**>(&impl_->graphDebugSetBreakpoints)) ||
+        !bind(AVER_HOST_STR("GraphDebugTakeBreak"), reinterpret_cast<void**>(&impl_->graphDebugTakeBreak)) ||
+        !bind(AVER_HOST_STR("GraphDebugGetValues"), reinterpret_cast<void**>(&impl_->graphDebugGetValues))) {
+        impl_->graphDebugSetEnabled = nullptr;
+        impl_->graphDebugSetBreakpoints = nullptr;
+        impl_->graphDebugTakeBreak = nullptr;
+        impl_->graphDebugGetValues = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no graph debugger entry points; breakpoints are unavailable");
     }
 
     // GRAPH-AS-CLASS is optional too, same reasoning: a bridge built before DeclareGraphClasses/
@@ -490,6 +518,56 @@ void ScriptHost::graphNodeHits(const std::string& graphName, f32 maxAgeSeconds,
         if (semi == std::string_view::npos) break;
         pos = semi + 1;
     }
+}
+
+bool ScriptHost::graphDiagnoseAvailable() const {
+    return ready_ && impl_ && impl_->graphDiagnose;
+}
+
+// Every problem in .ocgraph text. A 64 KB buffer on the heap: the wire is one line per problem and the
+// managed side cuts at a whole line, so a graph with hundreds of problems loses the tail, not a half line.
+bool ScriptHost::graphDiagnose(const std::string& text, std::string& wire) const {
+    wire.clear();
+    if (!graphDiagnoseAvailable()) return false;
+    std::vector<char> buf(64 * 1024, 0);
+    const int32_t n = impl_->graphDiagnose(text.c_str(), buf.data(), static_cast<int32_t>(buf.size()));
+    if (n < 0) return false;
+    wire.assign(buf.data(), static_cast<usize>(n));
+    return true;
+}
+
+bool ScriptHost::graphDebugAvailable() const {
+    return ready_ && impl_ && impl_->graphDebugSetEnabled && impl_->graphDebugSetBreakpoints &&
+           impl_->graphDebugTakeBreak && impl_->graphDebugGetValues;
+}
+
+void ScriptHost::graphDebugSetEnabled(bool on) const {
+    if (!graphDebugAvailable()) return;
+    impl_->graphDebugSetEnabled(on ? 1 : 0);
+}
+
+void ScriptHost::graphDebugSetBreakpoints(const std::string& lines) const {
+    if (!graphDebugAvailable()) return;
+    impl_->graphDebugSetBreakpoints(lines.c_str());
+}
+
+bool ScriptHost::graphDebugTakeBreak(std::string& graphAndNode) const {
+    graphAndNode.clear();
+    if (!graphDebugAvailable()) return false;
+    char buf[1024] = {};
+    const int32_t n = impl_->graphDebugTakeBreak(buf, static_cast<int32_t>(sizeof buf));
+    if (n <= 0) return false;
+    graphAndNode.assign(buf, static_cast<usize>(n));
+    return true;
+}
+
+std::string ScriptHost::graphDebugValues(const std::string& graphName) const {
+    if (!graphDebugAvailable() || graphName.empty()) return {};
+    // 32 KB: a node.pin=value; entry is a few dozen bytes, so this is several hundred wires; the managed
+    // side cuts at an entry boundary when a graph has more.
+    std::vector<char> buf(32 * 1024, 0);
+    const int32_t n = impl_->graphDebugGetValues(graphName.c_str(), buf.data(), static_cast<int32_t>(buf.size()));
+    return n > 0 ? std::string(buf.data(), static_cast<usize>(n)) : std::string();
 }
 
 // Whether the staged bridge exports the graph-class entry points -- see the optional-bind block in init().

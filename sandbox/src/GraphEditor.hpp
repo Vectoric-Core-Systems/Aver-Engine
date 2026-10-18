@@ -17,7 +17,12 @@
 // Browser or --open-asset) routes to makeGraphEditor once step 2 lands.
 #include "AssetEditor.hpp"
 #include "EditorWidgets.hpp"
+#include "GraphClipboard.hpp"
+#include "GraphCollapse.hpp"
+#include "GraphDebugModel.hpp"
 #include "GraphEditorGeometry.hpp"
+#include "GraphFind.hpp"
+#include "GraphProblems.hpp"
 #include "SnapshotUndo.hpp"
 #include "aver/formats/OcGraph.hpp"
 
@@ -55,6 +60,7 @@ enum class MaterialPreviewShape : u8 { Sphere = 0, Cube = 1, Plane = 2, Cylinder
 class GraphEditor final : public AssetEditor {
 public:
     explicit GraphEditor(std::string path);
+    ~GraphEditor() override;
 
     const std::string& path() const override { return path_; }
     std::string title() const override;
@@ -172,6 +178,62 @@ public:
     // Validates what's ON THE CANVAS (serialises the live graph, not the file) so the answer matches
     // what the author sees. False: `err` is the validator's message, `offendingNode` its named node if resolved.
     bool validateNow(std::string& err, std::string& offendingNode);
+
+    // ---- the Problems panel (every error and warning, live) ---------------------------------------
+    // validateNow() reports the FIRST problem; the managed diagnostics (GraphDiagnostics.cs) report them
+    // all, each with its node. Supplied as a hook for validate_'s reason: this file stays free of the
+    // .NET runtime. It returns false when it could not run (no bridge); `wire` is the managed text,
+    // parsed by GraphProblems.hpp. Re-run 0.5 s after the last edit, on open, and before Play.
+    using DiagnoseFn = std::function<bool(const std::string& ocgraphText, std::string& wire)>;
+    void setDiagnoser(DiagnoseFn fn) { diagnose_ = std::move(fn); diagRunSerial_ = kDiagnosticsNeverRan; }
+    bool diagnoserInstalled() const { return static_cast<bool>(diagnose_); }
+    // Diagnoses what is ON THE CANVAS now, ignoring the debounce. False when there is no diagnoser or
+    // it failed (the previous list stays).
+    bool runDiagnosticsNow();
+    const std::vector<GraphProblem>& diagnostics() const { return problems_; }
+    usize diagnosticsCut() const { return problemsCut_; }   // problems the managed side dropped ("...N more")
+    // Counts every edit, undo and redo -- what the debounce compares.
+    u64 editSerial() const { return editSerial_; }
+    // Selects the node a problem names (its subgraph, selection and framing). False for a graph-level
+    // problem or a node that is gone.
+    bool selectProblem(usize index);
+
+    // ---- Find and Find References -----------------------------------------------------------------
+    // Ctrl+F opens the find bar; Enter and Shift+Enter step through the hits. Model: GraphFind.hpp.
+    void openFind() { findOpen_ = true; findFocusRequest_ = true; }
+    // Runs `query` over the graph and selects the first hit. An empty query clears the results.
+    void setFindQuery(const std::string& query);
+    const FindCursor& findResults() const { return find_; }
+    bool findNext();
+    bool findPrevious();
+    // Selects and frames `nodeId` in whichever subgraph holds it. False when there is no such node.
+    // The framing happens on the next draw, which is the first moment the canvas has a size.
+    bool revealNode(const std::string& nodeId);
+    // Fills the References list under the canvas. `wholeProject` also scans every .ocgraph under the
+    // owning project's Content directory.
+    void showReferences(RefKind kind, const std::string& name, bool wholeProject);
+    const std::vector<RefHit>& referenceHits() const { return refHits_; }
+    const std::vector<ProjectRefHit>& projectReferenceHits() const { return refProjectHits_; }
+
+    // ---- the debugger -------------------------------------------------------------------------------
+    // Breakpoints live in debugSession() (GraphDebugModel.hpp), keyed by this graph's NAME, and persist per
+    // user in the editor prefs -- never in the .ocgraph. They only mean something to a graph compiled
+    // while the debugger is armed; SandboxApp pushes both to the bridge.
+    using DebugValuesFn = std::function<std::string(const std::string& graphName)>;
+    void setDebugValueSource(DebugValuesFn fn) { debugValuesSrc_ = std::move(fn); }
+    // The graph name the managed side keys this graph by (its NAME record; "untitled" when there is none).
+    std::string debugGraphName() const { return graph_.name.empty() ? std::string("untitled") : graph_.name; }
+    // F9 on the selected node. False when nothing single is selected.
+    bool toggleBreakpointOnSelection();
+    bool hasBreakpoint(const std::string& nodeId) const;
+    bool breakpointEnabled(const std::string& nodeId) const;
+    bool setBreakpointEnabled(const std::string& nodeId, bool on);
+
+    // ---- Collapse to Function -----------------------------------------------------------------------
+    // Moves the selected nodes into a new function and leaves a call to it, as ONE undo step. Refusals
+    // (GraphCollapse.hpp) change nothing and arrive as the rejection banner. Returns the result so a
+    // test can read the reason.
+    CollapseResult collapseSelectionToFunction(const std::string& name);
 
     // The node id a validator message names, or empty. Public/static because it's a heuristic over
     // prose worth testing alone: reads the first single-quoted token and returns it only if it names
@@ -312,10 +374,16 @@ public:
     // are already legal so paste creates no state the palette couldn't. Only links with BOTH ends in
     // the copied set come along -- re-pointing a dangling link at the original would wire the copy
     // into what it was copied from.
+    //
+    // The clipboard is SHARED: copy writes AVER_NODE_CLIP text to the OS clipboard and a process-wide
+    // store (GraphClipboard.hpp), so paste reaches another graph tab, outlives the source tab and an
+    // editor restart, and reads as .ocgraph in a text editor. A paste refuses across domains, declares the
+    // variables the nodes need in the same undo step, and skips (and names) calls to functions the
+    // target lacks.
     void copySelection();
     void pasteClipboard(Vec2 canvasPos);
     void duplicateSelection();
-    bool clipboardEmpty() const { return clipNodes_.empty(); }
+    bool clipboardEmpty() const;
 
     // ---- component tree edits ---------------------------------------------------------------------
     // Each pushes undo/sets dirty_ and is PUBLIC, like the variable edits below: each could produce
@@ -542,10 +610,6 @@ private:
     // filter from last time is never still applied.
     char addSearch_[128] = {};
 
-    // The copy buffer. Nodes verbatim (ids and all -- they are remapped at paste, not at copy, so the
-    // same buffer can be pasted repeatedly) and only the links whose two ends are both in it.
-    std::vector<fmt::OcGraphNode> clipNodes_;
-    std::vector<fmt::OcGraphLink> clipLinks_;
     char newFuncPinBuf_[64] = {};
     int newFuncPinType_ = 0;               // index into the same float/int/bool list the Variables panel uses
     fmt::OcGraphFunction* findFunction(const std::string& name);
@@ -577,6 +641,47 @@ private:
     // The last validation result, shown as a badge on the named node until the graph changes.
     std::string validateErr_;
     std::string validateNode_;
+
+    // ---- Problems panel state ----------------------------------------------------------------------------
+    DiagnoseFn diagnose_;
+    std::vector<GraphProblem> problems_;            // sorted: errors first
+    usize problemsCut_ = 0;
+    std::unordered_map<std::string, NodeBadge> badges_;
+    u64 editSerial_ = 0;                            // bumped by pushUndo / undo / redo
+    u64 diagRunSerial_ = kDiagnosticsNeverRan;      // editSerial_ when diagnostics last ran
+    double lastEditAtSec_ = 0.0;
+    int bottomTabRequest_ = -1;                     // one-shot: tab to bring forward next draw (0 Problems, 1 References)
+    bool bottomOpen_ = false;
+    void tickDiagnostics();
+    void drawBottomPanel(float width, float height, float dpi);
+    // Pastes a parsed clip: the model decides (planPaste / applyPaste), this adds what needs the palette
+    // and the canvas -- ENTRY records for event nodes, the positions overlay, the selection.
+    void pastePayload(const ClipPayload& clip, Vec2 canvasPos);
+    // Brings a find result into view: a node is revealed, a function opened, a comment selected, a
+    // variable's first use revealed.
+    void revealFindHit(const FindHit& hit);
+    // Collapse to Function's name prompt: queued by the node menu, drawn with the other popups.
+    char collapseNameBuf_[64] = "NewFunction";
+    bool collapsePopupQueued_ = false;
+
+    // ---- Find state ---------------------------------------------------------------------------------------
+    FindCursor find_;
+    bool findOpen_ = false;
+    bool findFocusRequest_ = false;
+    char findBuf_[128] = {};
+    std::string findLastQuery_;                     // the query the results were computed for
+    Vec2 findBarMin_{}, findBarMax_{};              // last frame's rect, so the canvas can ignore clicks on it
+    std::vector<RefHit> refHits_;
+    std::vector<ProjectRefHit> refProjectHits_;
+    std::string refTitle_;
+    // Set by revealNode, honoured by the next canvas draw (the first moment the canvas has a size).
+    bool revealPending_ = false;
+
+    // ---- debugger state ---------------------------------------------------------------------------------
+    DebugValuesFn debugValuesSrc_;
+    DebugValues debugValues_;
+    double lastValuesPollSec_ = -1000.0;
+    void persistBreakpoints();
 
     // Armed by beginLinkDrop, cleared by cancelLinkDrop/spawnAndConnectLinkDrop. The from-pin is kept
     // here rather than read from linkDragFromNode_ at use time, because drag state resets the instant
@@ -646,6 +751,31 @@ void setGraphValidator(GraphEditor::ValidateFn fn);
 // The node-hit source every GraphEditor opened from here on will poll -- same process-wide shape
 // and reason as setGraphValidator above.
 void setGraphNodeHitSource(GraphEditor::NodeHitsFn fn);
+
+// The diagnoser every GraphEditor opened from here on will use -- same process-wide shape as the two above.
+void setGraphDiagnoser(GraphEditor::DiagnoseFn fn);
+
+// Where the debugger's values for a graph come from (the bridge); same shape.
+void setGraphDebugValueSource(GraphEditor::DebugValuesFn fn);
+
+// How a graph in another file is opened (AssetEditorHost::open), for Find References across the project and
+// for a breakpoint that trips in a graph with no tab open. Without it those open nothing.
+void setGraphOpener(std::function<bool(const std::string& path)> fn);
+
+// Opens the graph at `path` if it is not open, then selects and frames `nodeId` in it. False when it could
+// not be opened or the node is gone.
+bool revealGraphNode(const std::string& path, const std::string& nodeId);
+
+// The path of the OPEN tab whose graph is named `graphName`, or empty.
+std::string graphPathForName(const std::string& graphName);
+
+// Runs diagnostics on every open graph tab now (before Play) and returns the total error count; the
+// warning count lands in *warnings when given. Tabs with no diagnoser count as zero.
+usize runGraphDiagnosticsForOpenTabs(usize* warnings = nullptr);
+
+// True while a graph canvas has keyboard focus (as of the last frame), so SandboxApp can leave F9 to the
+// breakpoint instead of taking a screenshot.
+bool graphCanvasHasFocus();
 
 // Creates the .ocgraph editor tab, or nullptr for any other extension. Registered via the EXACT HOOK above.
 std::unique_ptr<AssetEditor> makeGraphEditor(const std::string& path);

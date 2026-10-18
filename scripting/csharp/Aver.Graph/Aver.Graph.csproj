@@ -3,9 +3,10 @@
   <!-- Graph runtime: parses .ocgraph text files and compiles them to .NET IL using
        System.Reflection.Emit. THIS IS NO LONGER THE MINIMAL SLICE THIS COMMENT USED TO DESCRIBE.
        It said "five or six node types" and "no canvas, no editor panel" for long after both had
-       stopped being true. It now covers roughly 180 gameplay node types (math, vectors, scene,
+       stopped being true. It now covers hundreds of gameplay node types (math, vectors, scene,
        physics, input, audio, animation, save/load, custom events, graph variables and user-defined
-       functions with real recursion), authored on a canvas in sandbox/src/GraphEditor.cpp.
+       functions with real recursion), authored on a canvas in sandbox/src/GraphEditor.cpp. The
+       counts are not kept here: scripts/node-catalog.py prints them and writes docs/nodes/.
        docs/VISUAL_SCRIPTING.md is the reference; this file only builds the assembly.
        (No double hyphens anywhere in here: MSBuild parses this as XML, where a double hyphen
        inside a comment is MSB4025 and fails the whole build.) -->

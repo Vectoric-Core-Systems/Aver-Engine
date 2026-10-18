@@ -1,0 +1,31 @@
+OCGRAPH 1
+DOMAIN gameplay
+NAME CollapseTest
+DESCRIPTION Collapse to Function fixture: GraphCollapseTest collapses c2, c3, mul, addn and st into a function and writes collapse_test.output.ocgraph; CollapseFunctionTests runs both graphs and compares their variables.
+
+VAR total float 0
+VAR last float 0
+
+NODE tick OnTick 0 0
+NODE gv GetVar 200 400 var=last
+NODE c2 ConstFloat 0 100 value=2
+NODE c3 ConstFloat 0 200 value=3
+NODE mul Multiply 200 150
+NODE addn Add 400 250
+NODE st SetVar 600 0 var=total
+NODE c10 ConstFloat 600 300 value=10
+NODE add2 Add 800 250
+NODE sl SetVar 1000 0 var=last
+
+LINK c2.value mul.a
+LINK c3.value mul.b
+LINK mul.result addn.a
+LINK gv.value addn.b
+LINK addn.result st.value
+LINK tick.exec st.exec
+LINK st.then sl.exec
+LINK addn.result add2.a
+LINK c10.value add2.b
+LINK add2.result sl.value
+
+ENTRY tick OnTick

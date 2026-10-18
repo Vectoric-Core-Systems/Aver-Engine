@@ -2784,6 +2784,15 @@ public partial class GraphCompiler
         _il.Emit(OpCodes.Ldstr, node.Id);
         _il.Emit(OpCodes.Call, RecordNodeHitMethod);
 
+        // The debugger's breakpoint check, emitted ONLY when it was armed before this graph compiled --
+        // unarmed, the IL is exactly what it was without a debugger (see GraphDebug).
+        if (GraphDebug.Armed)
+        {
+            _il.Emit(OpCodes.Ldstr, _graph.Name);
+            _il.Emit(OpCodes.Ldstr, node.Id);
+            _il.Emit(OpCodes.Call, DebugNodeReachedMethod);
+        }
+
         try
         {
             switch (node.Type.ToLowerInvariant())
@@ -4069,6 +4078,26 @@ public partial class GraphCompiler
     /// fallback, re-emitted here since the exec compiler never populates `_pinLocals` for data nodes.
     private void EmitPullInput(Node node, string pinName)
     {
+        EmitPullInputCore(node, pinName);
+        if (_il == null || !GraphDebug.Armed) return;
+
+        // Armed: copy the value just pushed to the debugger on its way past (widened to double), so
+        // the editor can label the wire. Data inputs only; an exec pin carries no value.
+        var pin = node.Pins.FirstOrDefault(p => p.Name == pinName && !p.IsOutput);
+        if (pin == null || pin.Type == PinType.Exec) return;
+        var tmp = _il.DeclareLocal(PinTypeToCLRType(pin.Type));
+        _il.Emit(OpCodes.Stloc, tmp);
+        _il.Emit(OpCodes.Ldstr, _graph.Name);
+        _il.Emit(OpCodes.Ldstr, node.Id);
+        _il.Emit(OpCodes.Ldstr, pinName);
+        _il.Emit(OpCodes.Ldloc, tmp);
+        _il.Emit(OpCodes.Conv_R8);
+        _il.Emit(OpCodes.Call, DebugRecordPinMethod);
+        _il.Emit(OpCodes.Ldloc, tmp);
+    }
+
+    private void EmitPullInputCore(Node node, string pinName)
+    {
         if (_il == null) return;
 
         var link = _graph.Links.FirstOrDefault(l => l.TargetNodeId == node.Id && l.TargetPinName == pinName);
@@ -5271,6 +5300,13 @@ public partial class GraphCompiler
     private static readonly MethodInfo RecordNodeHitMethod =
         typeof(GraphInterop).GetMethod("RecordNodeHitForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RecordNodeHitForGraph was not found by reflection");
+    // The debugger's two hooks (GraphDebug.cs), emitted only when GraphDebug.Armed.
+    private static readonly MethodInfo DebugNodeReachedMethod =
+        typeof(GraphDebug).GetMethod(nameof(GraphDebug.NodeReached), BindingFlags.Public | BindingFlags.Static)
+        ?? throw new InvalidOperationException("GraphDebug.NodeReached was not found by reflection");
+    private static readonly MethodInfo DebugRecordPinMethod =
+        typeof(GraphDebug).GetMethod(nameof(GraphDebug.RecordPin), BindingFlags.Public | BindingFlags.Static)
+        ?? throw new InvalidOperationException("GraphDebug.RecordPin was not found by reflection");
     // PrintString: an authored message rather than a value, for a node that needs nothing wired.
     private static readonly MethodInfo PrintStringMethod =
         typeof(GraphInterop).GetMethod("PrintStringForGraph", BindingFlags.NonPublic | BindingFlags.Static)

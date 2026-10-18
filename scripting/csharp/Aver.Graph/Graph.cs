@@ -468,45 +468,67 @@ public class Graph
         return true;
     }
 
-    /// Validates the graph for consistency. Returns false if invalid; sets err to a message.
-    /// Node ID comparison is case-SENSITIVE -- the C# parser and C++ writer both use string IDs and must normalize them consistently.
+    /// Validates the graph for consistency. Returns false if invalid; sets err to the FIRST message
+    /// Diagnose() would list. Node ID comparison is case-SENSITIVE -- the C# parser and C++ writer both
+    /// use string IDs and must normalize them consistently.
     public bool Validate(out string? err)
     {
-        err = null;
+        var found = new List<GraphDiagnostic>(1);
+        DiagnoseCore(found, firstOnly: true);
+        err = found.Count > 0 ? found[0].Message : null;
+        return found.Count == 0;
+    }
+
+    /// Every consistency problem in the graph, not only the first: the same checks as Validate() in the
+    /// same order (so the first entry's message is exactly what Validate() returns), appended to
+    /// `into`. A node id and pin ride along where the problem has one, for the editor's Problems panel.
+    public void Diagnose(List<GraphDiagnostic> into) => DiagnoseCore(into, firstOnly: false);
+
+    private void DiagnoseCore(List<GraphDiagnostic> sink, bool firstOnly)
+    {
+        // True when the caller should stop: Validate() wants the first problem only. In list mode every
+        // check reports and carries on, so each loop below `continue`s where it used to `return false`.
+        bool Report(string code, string message, string? atNode = null, string? atPin = null)
+        {
+            sink.Add(new GraphDiagnostic(DiagnosticSeverity.Error, code, message, atNode, atPin));
+            return firstOnly;
+        }
 
         // Check all links reference valid nodes and pins.
         foreach (var link in Links)
         {
             if (!Nodes.TryGetValue(link.SourceNodeId, out var srcNode))
             {
-                err = $"Link references unknown source node {link.SourceNodeId}";
-                return false;
+                if (Report("link.node", $"Link references unknown source node {link.SourceNodeId}")) return;
+                continue;
             }
             if (!Nodes.TryGetValue(link.TargetNodeId, out var tgtNode))
             {
-                err = $"Link references unknown target node {link.TargetNodeId}";
-                return false;
+                if (Report("link.node", $"Link references unknown target node {link.TargetNodeId}")) return;
+                continue;
             }
 
             var srcPin = srcNode.Pins.FirstOrDefault(p => p.Name == link.SourcePinName && p.IsOutput);
             if (srcPin == null)
             {
-                err = $"Source node {link.SourceNodeId} has no output pin '{link.SourcePinName}'";
-                return false;
+                if (Report("link.pin", $"Source node {link.SourceNodeId} has no output pin '{link.SourcePinName}'",
+                           link.SourceNodeId, link.SourcePinName)) return;
+                continue;
             }
 
             var tgtPin = tgtNode.Pins.FirstOrDefault(p => p.Name == link.TargetPinName && !p.IsOutput);
             if (tgtPin == null)
             {
-                err = $"Target node {link.TargetNodeId} has no input pin '{link.TargetPinName}'";
-                return false;
+                if (Report("link.pin", $"Target node {link.TargetNodeId} has no input pin '{link.TargetPinName}'",
+                           link.TargetNodeId, link.TargetPinName)) return;
+                continue;
             }
 
             // Pin types must match.
             if (srcPin.Type != tgtPin.Type)
             {
-                err = $"Link {link.SourceNodeId}.{link.SourcePinName} ({srcPin.Type}) to {link.TargetNodeId}.{link.TargetPinName} ({tgtPin.Type}): type mismatch";
-                return false;
+                if (Report("link.type", $"Link {link.SourceNodeId}.{link.SourcePinName} ({srcPin.Type}) to {link.TargetNodeId}.{link.TargetPinName} ({tgtPin.Type}): type mismatch",
+                           link.TargetNodeId, link.TargetPinName)) return;
             }
         }
 
@@ -515,15 +537,14 @@ public class Graph
         {
             if (!Nodes.TryGetValue(pv.NodeId, out var node))
             {
-                err = $"Pinned value references unknown node {pv.NodeId}";
-                return false;
+                if (Report("pinval.node", $"Pinned value references unknown node {pv.NodeId}")) return;
+                continue;
             }
 
             var pin = node.Pins.FirstOrDefault(p => p.Name == pv.PinName && !p.IsOutput);
             if (pin == null)
             {
-                err = $"Node {pv.NodeId} has no input pin '{pv.PinName}'";
-                return false;
+                if (Report("pinval.pin", $"Node {pv.NodeId} has no input pin '{pv.PinName}'", pv.NodeId, pv.PinName)) return;
             }
         }
 
@@ -534,8 +555,7 @@ public class Graph
         {
             if (!paramNames.Add(p.Name))
             {
-                err = $"Duplicate PARAM declaration '{p.Name}'";
-                return false;
+                if (Report("param.duplicate", $"Duplicate PARAM declaration '{p.Name}'")) return;
             }
         }
 
@@ -546,8 +566,7 @@ public class Graph
         {
             if (!varNames.Add(v.Name))
             {
-                err = $"Duplicate VAR declaration '{v.Name}'";
-                return false;
+                if (Report("var.duplicate", $"Duplicate VAR declaration '{v.Name}'")) return;
             }
         }
 
@@ -560,13 +579,13 @@ public class Graph
         {
             if (!Nodes.ContainsKey(entryNodeId))
             {
-                err = $"ENTRY '{eventName}' names unknown node '{entryNodeId}'";
-                return false;
+                if (Report("entry.node", $"ENTRY '{eventName}' names unknown node '{entryNodeId}'")) return;
+                continue;
             }
             if (!seenEvents.Add(eventName))
             {
-                err = $"duplicate ENTRY for event '{eventName}' -- only one node may handle a given event";
-                return false;
+                if (Report("entry.duplicate", $"duplicate ENTRY for event '{eventName}' -- only one node may handle a given event",
+                           entryNodeId)) return;
             }
         }
 
@@ -583,26 +602,25 @@ public class Graph
             {
                 if (node.FuncOwner != null && !byName.ContainsKey(node.FuncOwner))
                 {
-                    err = $"Node '{node.Id}' has func={node.FuncOwner}, which no FUNC record declares";
-                    return false;
+                    if (Report("func.owner", $"Node '{node.Id}' has func={node.FuncOwner}, which no FUNC record declares", node.Id)) return;
+                    continue;
                 }
                 string t = node.Type.ToLowerInvariant();
                 if ((t == "funcentry" || t == "funcreturn") && node.FuncOwner == null)
                 {
-                    err = $"Node '{node.Id}' is a {node.Type} but has no func= attribute saying which function it belongs to";
-                    return false;
+                    if (Report("func.owner", $"Node '{node.Id}' is a {node.Type} but has no func= attribute saying which function it belongs to", node.Id)) return;
+                    continue;
                 }
                 if (t == "callfunc")
                 {
                     if (string.IsNullOrEmpty(node.CallTarget))
                     {
-                        err = $"Node '{node.Id}' is a CallFunc but has no call= attribute naming which function it calls";
-                        return false;
+                        if (Report("func.call", $"Node '{node.Id}' is a CallFunc but has no call= attribute naming which function it calls", node.Id)) return;
+                        continue;
                     }
                     if (!byName.ContainsKey(node.CallTarget))
                     {
-                        err = $"Node '{node.Id}' calls '{node.CallTarget}', which no FUNC record declares";
-                        return false;
+                        if (Report("func.call", $"Node '{node.Id}' calls '{node.CallTarget}', which no FUNC record declares", node.Id)) return;
                     }
                 }
             }
@@ -615,24 +633,24 @@ public class Graph
                                                        string.Equals(n.FuncOwner, f.Name, System.StringComparison.OrdinalIgnoreCase));
                 if (entries != 1)
                 {
-                    err = entries == 0
+                    string m = entries == 0
                         ? $"function '{f.Name}' has no FuncEntry node -- a function needs somewhere to begin"
                         : $"function '{f.Name}' has {entries} FuncEntry nodes; a function begins in exactly one place";
-                    return false;
+                    if (Report("func.entry", m)) return;
+                    continue;
                 }
                 if (returns > 1)
                 {
                     // ONE return, not one per branch: outputs are read from locals AFTER the exec
                     // chain finishes (like CompileEntryPoint reads OUT records), so the method has a
                     // single Ret. Two FuncReturn nodes would race to write the same locals.
-                    err = $"function '{f.Name}' has {returns} FuncReturn nodes; a function returns from exactly one place " +
-                          "(branch INTO the single FuncReturn instead)";
-                    return false;
+                    if (Report("func.return", $"function '{f.Name}' has {returns} FuncReturn nodes; a function returns from exactly one place " +
+                          "(branch INTO the single FuncReturn instead)")) return;
+                    continue;
                 }
                 if (f.Outputs.Count > 0 && returns == 0)
                 {
-                    err = $"function '{f.Name}' declares {f.Outputs.Count} output(s) but has no FuncReturn node to produce them";
-                    return false;
+                    if (Report("func.return", $"function '{f.Name}' declares {f.Outputs.Count} output(s) but has no FuncReturn node to produce them")) return;
                 }
             }
 
@@ -647,10 +665,10 @@ public class Graph
                 if (!Nodes.TryGetValue(link.TargetNodeId, out var tn)) continue;
                 if (string.Equals(sn.FuncOwner, tn.FuncOwner, System.StringComparison.OrdinalIgnoreCase)) continue;
                 string Where(Node n) => n.FuncOwner == null ? "the event graph" : $"function '{n.FuncOwner}'";
-                err = $"link '{link.SourceNodeId}.{link.SourcePinName}' -> '{link.TargetNodeId}.{link.TargetPinName}' " +
+                if (Report("func.crosslink", $"link '{link.SourceNodeId}.{link.SourcePinName}' -> '{link.TargetNodeId}.{link.TargetPinName}' " +
                       $"crosses from {Where(sn)} into {Where(tn)}. A wire cannot leave the subgraph it is in -- " +
-                      "pass the value in through the function's FuncEntry, or back out through its FuncReturn.";
-                return false;
+                      "pass the value in through the function's FuncEntry, or back out through its FuncReturn.",
+                      link.SourceNodeId, link.SourcePinName)) return;
             }
 
             // ENTRY and OUT describe the EVENT GRAPH. An ENTRY naming a node inside a function would
@@ -659,18 +677,17 @@ public class Graph
             {
                 if (Nodes.TryGetValue(entryNodeId, out var en) && en.FuncOwner != null)
                 {
-                    err = $"ENTRY '{eventName}' names node '{entryNodeId}', which lives inside function " +
-                          $"'{en.FuncOwner}'. An event begins in the event graph.";
-                    return false;
+                    if (Report("func.entryowner", $"ENTRY '{eventName}' names node '{entryNodeId}', which lives inside function " +
+                          $"'{en.FuncOwner}'. An event begins in the event graph.", entryNodeId)) return;
                 }
             }
             foreach (var (outNodeId, outPinName) in Outputs)
             {
                 if (Nodes.TryGetValue(outNodeId, out var on) && on.FuncOwner != null)
                 {
-                    err = $"OUT '{outNodeId} {outPinName}' names a node inside function '{on.FuncOwner}'. " +
-                          "OUT is what the GRAPH hands back; a function hands its own results back through FuncReturn.";
-                    return false;
+                    if (Report("func.outowner", $"OUT '{outNodeId} {outPinName}' names a node inside function '{on.FuncOwner}'. " +
+                          "OUT is what the GRAPH hands back; a function hands its own results back through FuncReturn.",
+                          outNodeId, outPinName)) return;
                 }
             }
 
@@ -701,9 +718,8 @@ public class Graph
             foreach (var f in Functions)
             {
                 if (!f.IsPure || !impure.Contains(f.Name)) continue;
-                err = $"function '{f.Name}' is declared pure, but its body has control flow or calls a function that does. " +
-                      "Remove the `pure` flag on its FUNC record, or move the side effect out of it.";
-                return false;
+                if (Report("func.pure", $"function '{f.Name}' is declared pure, but its body has control flow or calls a function that does. " +
+                      "Remove the `pure` flag on its FUNC record, or move the side effect out of it.")) return;
             }
         }
 
@@ -723,11 +739,10 @@ public class Graph
                 foreach (var l in Links)
                     if (l.SourceNodeId == node.Id && l.SourcePinName == pin.Name) ++driven;
                 if (driven <= 1) continue;
-                err = $"Node '{node.Id}' has exec output '{pin.Name}' wired to {driven} links -- an " +
+                if (Report("exec.fanout", $"Node '{node.Id}' has exec output '{pin.Name}' wired to {driven} links -- an " +
                       "exec output can only continue to ONE place, unlike a data output (which may " +
                       "fan out to many readers). Wire a Sequence node here if more than one thing " +
-                      "should run from this point.";
-                return false;
+                      "should run from this point.", node.Id, pin.Name)) return;
             }
         }
 
@@ -745,11 +760,10 @@ public class Graph
                                      node.Type.Equals("getparam", System.StringComparison.OrdinalIgnoreCase) ||
                                      node.Type.Equals("self", System.StringComparison.OrdinalIgnoreCase);
             if (!isParamNodeInFunc || node.FuncOwner == null) continue;
-            err = $"Node '{node.Id}' is a {node.Type} node inside function '{node.FuncOwner}'. " +
+            if (Report("param.infunc", $"Node '{node.Id}' is a {node.Type} node inside function '{node.FuncOwner}'. " +
                   "A function does not receive the event graph's parameters -- its arguments are its " +
                   "own declared inputs -- so this would have read whichever input sits at that index. " +
-                  $"Add an input to '{node.FuncOwner}' and pass the value in at the call site instead.";
-            return false;
+                  $"Add an input to '{node.FuncOwner}' and pass the value in at the call site instead.", node.Id)) return;
         }
 
         // Check every Param node names a declared parameter, and an explicit output pin (a
@@ -767,22 +781,21 @@ public class Graph
 
             if (string.IsNullOrEmpty(node.ParamName))
             {
-                err = $"Node '{node.Id}' is a Param node but has no param= attribute naming which parameter it reads";
-                return false;
+                if (Report("param.name", $"Node '{node.Id}' is a Param node but has no param= attribute naming which parameter it reads", node.Id)) return;
+                continue;
             }
 
             var declared = Parameters.FirstOrDefault(p => p.Name == node.ParamName);
             if (declared == null)
             {
-                err = $"Node '{node.Id}' references undeclared parameter '{node.ParamName}' -- add 'PARAM {node.ParamName} <type>'";
-                return false;
+                if (Report("param.undeclared", $"Node '{node.Id}' references undeclared parameter '{node.ParamName}' -- add 'PARAM {node.ParamName} <type>'", node.Id)) return;
+                continue;
             }
 
             var valuePin = node.Pins.FirstOrDefault(p => p.Name == "value" && p.IsOutput);
             if (valuePin != null && valuePin.Type != declared.Type)
             {
-                err = $"Node '{node.Id}' declares output pin 'value' as {valuePin.Type} but parameter '{node.ParamName}' is {declared.Type}";
-                return false;
+                if (Report("param.type", $"Node '{node.Id}' declares output pin 'value' as {valuePin.Type} but parameter '{node.ParamName}' is {declared.Type}", node.Id, "value")) return;
             }
         }
 
@@ -802,22 +815,21 @@ public class Graph
 
             if (string.IsNullOrEmpty(node.VarName))
             {
-                err = $"Node '{node.Id}' is a {kind} node but has no var= attribute naming which variable it addresses";
-                return false;
+                if (Report("var.name", $"Node '{node.Id}' is a {kind} node but has no var= attribute naming which variable it addresses", node.Id)) return;
+                continue;
             }
 
             var declaredVar = Variables.FirstOrDefault(v => v.Name == node.VarName);
             if (declaredVar == null)
             {
-                err = $"Node '{node.Id}' references undeclared variable '{node.VarName}' -- add 'VAR {node.VarName} <type>'";
-                return false;
+                if (Report("var.undeclared", $"Node '{node.Id}' references undeclared variable '{node.VarName}' -- add 'VAR {node.VarName} <type>'", node.Id)) return;
+                continue;
             }
 
             var valuePin2 = node.Pins.FirstOrDefault(p => p.Name == "value" && p.IsOutput == isGetVar);
             if (valuePin2 != null && valuePin2.Type != declaredVar.Type)
             {
-                err = $"Node '{node.Id}' declares {(isGetVar ? "output" : "input")} pin 'value' as {valuePin2.Type} but variable '{node.VarName}' is {declaredVar.Type}";
-                return false;
+                if (Report("var.type", $"Node '{node.Id}' declares {(isGetVar ? "output" : "input")} pin 'value' as {valuePin2.Type} but variable '{node.VarName}' is {declaredVar.Type}", node.Id, "value")) return;
             }
         }
 
@@ -826,18 +838,15 @@ public class Graph
         {
             if (!Nodes.TryGetValue(nodeId, out var node))
             {
-                err = $"Output pin references unknown node {nodeId}";
-                return false;
+                if (Report("out.node", $"Output pin references unknown node {nodeId}")) return;
+                continue;
             }
 
             var pin = node.Pins.FirstOrDefault(p => p.Name == pinName && p.IsOutput);
             if (pin == null)
             {
-                err = $"Node {nodeId} has no output pin '{pinName}'";
-                return false;
+                if (Report("out.pin", $"Node {nodeId} has no output pin '{pinName}'", nodeId, pinName)) return;
             }
         }
-
-        return true;
     }
 }

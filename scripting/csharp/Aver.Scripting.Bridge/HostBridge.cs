@@ -649,6 +649,130 @@ public static class HostBridge
         }
     }
 
+    // ------------------------------------------------------------------ problems and the debugger
+    // Optional export groups, bound separately on the host side (ScriptHost.cpp) so a bridge that
+    // predates them still boots: the editor then shows validate's first error and no debugger.
+
+    /// <summary>Every problem in .ocgraph TEXT (not only the first, which GraphValidate reports), as
+    /// lines of <c>E|W TAB nodeId TAB pin TAB code TAB message</c> in <paramref name="buffer"/>, UTF-8,
+    /// NUL-terminated. Returns the bytes written (0: nothing wrong), or -1 on a bad argument. Cut at a
+    /// whole line with a final <c>...N more</c> when the buffer is full. Loads and runs nothing; text,
+    /// not a path, for GraphValidate's reason (the canvas, unsaved edits included).</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static unsafe int GraphDiagnose(IntPtr utf8Text, byte* buffer, int capacity)
+    {
+        try
+        {
+            if (buffer is null || capacity <= 1) return -1;
+            buffer[0] = 0;
+            string? text = Marshal.PtrToStringUTF8(utf8Text);
+            if (text is null) return -1;
+            var found = GraphDiagnostics.Run(text);
+            return WriteUtf8(GraphDiagnostics.ToWire(found, capacity - 1), buffer, capacity);
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Graph] diagnostics threw: {Describe(ex)}");
+            return -1;
+        }
+    }
+
+    /// <summary>Arms (1) or disarms (0) the graph debugger. Read when a graph COMPILES, so it applies to
+    /// graphs loaded afterwards: the editor's toolbar says "takes effect on the next Play". Disarming
+    /// forgets recorded values. Returns 1.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int GraphDebugSetEnabled(int on)
+    {
+        try
+        {
+            GraphDebug.Armed = on != 0;
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Graph] the debugger could not be {(on != 0 ? "armed" : "disarmed")}: {Describe(ex)}");
+            return 0;
+        }
+    }
+
+    /// <summary>Replaces the breakpoint set with the given lines of <c>graph&lt;US&gt;node</c> (US = 0x1f).
+    /// Returns 1.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int GraphDebugSetBreakpoints(IntPtr utf8Lines)
+    {
+        try
+        {
+            GraphDebug.SetBreakpoints(Marshal.PtrToStringUTF8(utf8Lines));
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Graph] breakpoints could not be set: {Describe(ex)}");
+            return 0;
+        }
+    }
+
+    /// <summary>The breakpoint a running graph tripped since the last call, as <c>graph&lt;US&gt;node</c> in
+    /// <paramref name="buffer"/>, once; empty (returns 0) when none. Polled once a frame by the host.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static unsafe int GraphDebugTakeBreak(byte* buffer, int capacity)
+    {
+        try
+        {
+            if (buffer is null || capacity <= 1) return 0;
+            buffer[0] = 0;
+            string hit = GraphDebug.TakeBreak();
+            return hit.Length == 0 ? 0 : WriteUtf8(hit, buffer, capacity);
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Graph] taking a breakpoint threw: {Describe(ex)}");
+            return 0;
+        }
+    }
+
+    /// <summary>The last value seen on each data input of the graph NAMED <paramref name="utf8Graph"/>, as
+    /// <c>node.pin=value;</c> repeated, UTF-8 and NUL-terminated. Returns the byte count, or 0. Cut at a
+    /// <c>;</c> when it does not fit, never mid-entry.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static unsafe int GraphDebugGetValues(IntPtr utf8Graph, byte* buffer, int capacity)
+    {
+        try
+        {
+            if (buffer is null || capacity <= 1) return 0;
+            buffer[0] = 0;
+            string? name = Marshal.PtrToStringUTF8(utf8Graph);
+            if (string.IsNullOrEmpty(name)) return 0;
+            string values = GraphDebug.GetValues(name);
+            if (values.Length == 0) return 0;
+            byte[] utf8 = Encoding.UTF8.GetBytes(values);
+            int n = Math.Min(utf8.Length, capacity - 1);
+            if (n < utf8.Length)
+            {
+                while (n > 0 && utf8[n - 1] != (byte)';') --n;
+            }
+            for (int i = 0; i < n; ++i) buffer[i] = utf8[i];
+            buffer[n] = 0;
+            return n;
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Graph] reading debugger values threw: {Describe(ex)}");
+            return 0;
+        }
+    }
+
+    /// <summary>Writes <paramref name="s"/> as UTF-8 plus a NUL, truncated to fit (never mid-character,
+    /// since the callers cut at whole lines first). Returns the bytes written before the NUL.</summary>
+    private static unsafe int WriteUtf8(string s, byte* buffer, int capacity)
+    {
+        byte[] utf8 = Encoding.UTF8.GetBytes(s);
+        int n = Math.Min(utf8.Length, capacity - 1);
+        for (int i = 0; i < n; ++i) buffer[i] = utf8[i];
+        buffer[n] = 0;
+        return n;
+    }
+
     // ------------------------------------------------------------------ graph classes
     // GRAPH-AS-CLASS: a .ocgraph carrying a CLASS record becomes a real registered actor class, via
     // the same aver_fw_class_declare / set_flags(MANAGED) / seal sequence DeclareActorClass uses for a

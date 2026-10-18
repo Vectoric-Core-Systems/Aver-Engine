@@ -13,6 +13,10 @@ if(WIN32)
   enable_language(RC)
 endif()
 
+# The node palette families (sandbox/src/GraphNodeDefs<Family>.hpp), found here so a new family edits no shared
+# file: writes sandbox/src/GraphNodeFamilies.gen.inc, which GraphNodeDefs.hpp includes.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/GraphNodeFamilies.cmake")
+
 # THE FULL ENGINE VERSION IS 0.7.0-1, and the "-1" cannot live in project() above: CMake accepts only
 # numeric components there. So the suffix is kept here and appended wherever the version reaches the
 # binaries (modules/core/CMakeLists.txt). The split is deliberate: upgrade::parseVersion stops at '-' by
@@ -519,6 +523,11 @@ if(AVER_BUILD_TESTS)
   # The editor's preferences store. Unconditional: it depends only on Core and Platform, and its
   # failure mode -- a setting that silently does not persist -- is one nobody ever reports.
   add_subdirectory(tests/editor)
+  # The graph editor's model code (Problems, Find, clipboard, debugger model, Collapse to Function): header-only
+  # and ImGui-free in sandbox/src, so it runs headless like tests/editor.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/graphtools/CMakeLists.txt")
+    add_subdirectory(tests/graphtools)
+  endif()
   # The engine/project boundary. Unconditional, and links only Aver.Core, because what it checks is a
   # property of the SOURCE TREE rather than of any module: that no game content sits in the engine and
   # that one file knows where projects live. docs/PROJECTS.md asserts both in prose; this decides them.
@@ -590,6 +599,7 @@ if(AVER_BUILD_TESTS)
     add_subdirectory(tests/framework_anim)
     add_subdirectory(tests/framework_import)   # wave9 FBX_IMPORT: the model import ABI relay
     add_subdirectory(tests/framework_ik)   # wave5 #24: the IK / rig-input ABI relay
+    add_subdirectory(tests/framework_worldfx)   # wave9 VISUAL_SCRIPTING_CSHARP_SYNC: sun / fog / sky light and post layer overrides
 
     add_subdirectory(tests/framework_morph)   # wave9 MORPH_TARGETS: the blend-shape / lip-sync ABI relay
     add_subdirectory(tests/framework_sequence)   # wave5 #27: the sequencer ABI relay
@@ -747,5 +757,22 @@ if(AVER_BUILD_TESTS)
     set_tests_properties(ModuleCatalogCheck PROPERTIES TIMEOUT 60)
   else()
     message(STATUS "Aver: no Python 3 found - ModuleCatalogCheck is not registered")
+  endif()
+endif()
+
+# The node reference and the C# API index are generated, and the node palette is a C++ mirror of the C# tables.
+# NodeCatalogCheck fails on any disagreement between a table row and its palette entry, a duplicate node key, a
+# family with no test file, or a stale docs/nodes page; CsharpApiIndexCheck fails on a stale docs/api page.
+# Fix a failure with: python scripts/node-catalog.py --write   /   python scripts/csharp-api-index.py --write
+if(AVER_BUILD_TESTS)
+  find_package(Python3 QUIET COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME NodeCatalogCheck
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/scripts/node-catalog.py" --check)
+    add_test(NAME CsharpApiIndexCheck
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/scripts/csharp-api-index.py" --check)
+    set_tests_properties(NodeCatalogCheck CsharpApiIndexCheck PROPERTIES TIMEOUT 120)
+  else()
+    message(STATUS "Aver: no Python 3 found - NodeCatalogCheck and CsharpApiIndexCheck are not registered")
   endif()
 endif()

@@ -41,6 +41,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -77,6 +78,20 @@ bool isValidVarType(const std::string& type) {
 bool containsWhitespace(const std::string& s) {
     return s.find_first_of(" \t\r\n\v\f") != std::string::npos;
 }
+
+// Seconds on a clock every build has, for the Problems debounce: pushUndo runs headless too, where there
+// is no ImGui::GetTime to ask.
+double clockSec() {
+    static const auto t0 = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+// Every open tab, so SandboxApp can reach one by path or graph name (a breakpoint that trips in a graph
+// whose tab is open elsewhere, Find References across the project) and run diagnostics before Play.
+std::vector<GraphEditor*> g_openGraphEditors;
+std::function<bool(const std::string&)> g_graphOpener;
+// ImGui frame count of the last frame a graph canvas had focus; -1 until one has.
+int g_graphCanvasFocusFrame = -1000;
 
 // The .ocproject owning `graphPath`, found by walking up -- duplicates aver::ownerProjectOf
 // (sandbox/src/SandboxMain.cpp) in miniature rather than calling it directly: that lives in the
@@ -217,6 +232,12 @@ void setGraphEditorDpi(float dpi) { g_graphEditorDpi = dpi; }
 
 GraphEditor::GraphEditor(std::string path) : path_(std::move(path)) {
     loadFromDisk();
+    g_openGraphEditors.push_back(this);
+}
+
+GraphEditor::~GraphEditor() {
+    g_openGraphEditors.erase(std::remove(g_openGraphEditors.begin(), g_openGraphEditors.end(), this),
+                             g_openGraphEditors.end());
 }
 
 void GraphEditor::loadFromDisk() {
@@ -261,6 +282,26 @@ void GraphEditor::loadFromDisk() {
     history_.clear();
     dragMode_ = DragMode::None;
     view_ = CanvasTransform{};
+
+    // A fresh read is a fresh graph for the Problems panel: nothing it listed applies any more.
+    problems_.clear();
+    problemsCut_ = 0;
+    badges_.clear();
+    diagRunSerial_ = kDiagnosticsNeverRan;
+    find_ = FindCursor{};
+    refHits_.clear();
+    refProjectHits_.clear();
+
+#if AVER_WITH_IMGUI
+    bottomOpen_ = prefBool("graphEditor.problemsOpen", false);
+    // This user's breakpoints for this graph, read once per session: the session set is the live one
+    // after that (a second tab on the same graph must not clobber edits made since).
+    {
+        static std::set<std::string> loaded;
+        if (loaded.insert(debugGraphName()).second)
+            debugSession().breakpoints.loadGraph(debugGraphName(), prefString("graphEditor.breakpoints." + debugGraphName(), ""));
+    }
+#endif
 }
 
 // Gives every node the pins its TYPE implies but the file did not write down (see the
@@ -419,6 +460,9 @@ void GraphEditor::pushUndo() {
     validateErr_.clear();
     validateNode_.clear();
 
+    ++editSerial_;
+    lastEditAtSec_ = clockSec();
+
     UndoState s;
     s.graph = graph_;
     s.displayPos = displayPos_;
@@ -430,6 +474,8 @@ void GraphEditor::undo() {
     if (!history_.undo(s)) return;
     graph_ = std::move(s.graph);
     displayPos_ = std::move(s.displayPos);
+    ++editSerial_;
+    lastEditAtSec_ = clockSec();
     dirty_ = true;
     selectedNodes_.clear();
     selectedLink_ = -1;
@@ -440,6 +486,8 @@ void GraphEditor::redo() {
     if (!history_.redo(s)) return;
     graph_ = std::move(s.graph);
     displayPos_ = std::move(s.displayPos);
+    ++editSerial_;
+    lastEditAtSec_ = clockSec();
     dirty_ = true;
     selectedNodes_.clear();
     selectedLink_ = -1;
@@ -1062,6 +1110,11 @@ void GraphEditor::drawFunctionsPanel(float dpi) {
         ImGui::PushID(static_cast<int>(fi));
 
         const bool open = ImGui::TreeNodeEx("##fn", ImGuiTreeNodeFlags_DefaultOpen, "%s", fname.c_str());
+        if (ImGui::BeginPopupContextItem("##fnctx")) {
+            if (ImGui::MenuItem("Find References")) showReferences(RefKind::Function, fname, false);
+            if (ImGui::MenuItem("Find References (whole project)")) showReferences(RefKind::Function, fname, true);
+            ImGui::EndPopup();
+        }
         ImGui::SameLine();
         if (ImGui::SmallButton("Open")) setCurrentSubgraph(fname);
         ImGui::SameLine();
@@ -1245,81 +1298,86 @@ bool GraphEditor::applyAutoLayout(float dpi) {
 }
 
 void GraphEditor::copySelection() {
-    clipNodes_.clear();
-    clipLinks_.clear();
     if (selectedNodes_.empty()) return;
+    const ClipPayload clip = collectClip(graph_, selectedNodes_);
+    if (clip.empty()) return;
+    const std::string text = serializeClip(clip);
+    clipStore().text = text;
+#if AVER_WITH_IMGUI
+    ImGui::SetClipboardText(text.c_str());
+#endif
+}
 
-    const auto selected = [&](const std::string& id) {
-        return std::find(selectedNodes_.begin(), selectedNodes_.end(), id) != selectedNodes_.end();
-    };
+namespace {
+// Whether clipboard text is one of ours, without parsing the lot: asked every time the node menu draws.
+bool looksLikeClip(const char* text) {
+    if (!text) return false;
+    while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') ++text;
+    return std::strncmp(text, kClipMagic, std::strlen(kClipMagic)) == 0;
+}
+} // namespace
 
-    for (const fmt::OcGraphNode& n : graph_.nodes)
-        if (selected(n.id)) clipNodes_.push_back(n);
-
-    // Both ends, or not at all (see header) -- a half-copied link would dangle or point the copy back
-    // at the original.
-    for (const fmt::OcGraphLink& l : graph_.links)
-        if (selected(l.sourceNode) && selected(l.destNode)) clipLinks_.push_back(l);
+bool GraphEditor::clipboardEmpty() const {
+#if AVER_WITH_IMGUI
+    if (looksLikeClip(ImGui::GetClipboardText())) return false;
+#endif
+    return !looksLikeClip(clipStore().text.c_str());
 }
 
 void GraphEditor::pasteClipboard(Vec2 canvasPos) {
-    if (clipNodes_.empty()) return;
+    // The OS clipboard first -- another tab, another editor process or a previous run may have put a clip
+    // there -- then the process store, which is all a headless run has. Foreign text on the OS clipboard
+    // falls through to the store rather than pasting nothing: the last COPY here still means something.
+    std::optional<ClipPayload> clip;
+#if AVER_WITH_IMGUI
+    if (const char* os = ImGui::GetClipboardText()) clip = parseClip(os);
+#endif
+    if (!clip) clip = parseClip(clipStore().text);
+    if (!clip) return;
+    pastePayload(*clip, canvasPos);
+}
+
+void GraphEditor::pastePayload(const ClipPayload& clip, Vec2 canvasPos) {
+    // Decided before anything is touched, so a refusal costs no undo step.
+    const PastePlan plan = planPaste(clip, graph_);
+    if (!plan.ok) {
+        showRejectionBanner("Paste refused: " + plan.refusal);
+        return;
+    }
     pushUndo();
 
-    // Pasted where asked, keeping the copied nodes' RELATIVE layout: the top-left of the copied set
-    // lands on canvasPos and everything keeps its offset from it, rather than piling up.
-    Vec2 origin{static_cast<f32>(clipNodes_[0].x), static_cast<f32>(clipNodes_[0].y)};
-    for (const fmt::OcGraphNode& n : clipNodes_) {
-        origin.x = n.x < origin.x ? static_cast<f32>(n.x) : origin.x;
-        origin.y = n.y < origin.y ? static_cast<f32>(n.y) : origin.y;
-    }
-
-    std::unordered_map<std::string, std::string> remap;
-    std::vector<std::string> pasted;
-
-    for (const fmt::OcGraphNode& src : clipNodes_) {
-        fmt::OcGraphNode n = src;
-        n.id = makeUniqueNodeId(src.type);
-        remap[src.id] = n.id;
-        n.x = canvasPos.x + (src.x - origin.x);
-        n.y = canvasPos.y + (src.y - origin.y);
-        graph_.nodes.push_back(n);
-
-        // Same two fixups addNodeFromCatalog does after pushing, for the same reasons (ENTRY for
-        // events, func= for a node pasted onto a function's canvas).
-        const GraphNodeDesc* desc = findGraphNodeDescIn(n.type, openGraphDomain());
+    // A paste is exactly a palette drop of the same nodes plus their internal links -- deliberate, so it
+    // invents no new semantics: the model remaps ids and links and declares missing variables; what is
+    // left here is what addNodeFromCatalog also does after pushing (ENTRY for events, the positions
+    // overlay), for the same reasons.
+    PasteResult pasted = applyPaste(graph_, clip, canvasPos.x, canvasPos.y, currentSubgraph_,
+                                    [this](const std::string& type) { return makeUniqueNodeId(type); });
+    for (const std::string& id : pasted.newIds) {
+        fmt::OcGraphNode* n = nullptr;
+        for (auto& cand : graph_.nodes) if (cand.id == id) { n = &cand; break; }
+        if (!n) continue;
+        const GraphNodeDesc* desc = findGraphNodeDescIn(n->type, openGraphDomain());
         if (desc && desc->category == "Event") {
             std::string eventName = desc->typeId;
             if (desc->typeId == "CustomEvent") {
                 eventName = makeUniqueEventName("MyEvent");
-                setNodeAttribute(graph_.nodes.back(), "name", eventName);
+                setNodeAttribute(*n, "name", eventName);
             } else if (desc->typeId == "OnInputAction") {
-                eventName = inputActionEntryName(graph_.nodes.back());
+                eventName = inputActionEntryName(*n);
             }
-            syncEventEntry(n.id, eventName);
+            syncEventEntry(n->id, eventName);
         }
-        if (!currentSubgraph_.empty()) setNodeAttribute(graph_.nodes.back(), "func", currentSubgraph_);
-        else                           removeNodeAttribute(graph_.nodes.back(), "func");
-
-        displayPos_[n.id] = Vec2{static_cast<f32>(n.x), static_cast<f32>(n.y)};
-        pasted.push_back(n.id);
-    }
-
-    for (const fmt::OcGraphLink& src : clipLinks_) {
-        const auto a = remap.find(src.sourceNode);
-        const auto b = remap.find(src.destNode);
-        if (a == remap.end() || b == remap.end()) continue;   // unreachable: copy filtered these out
-        fmt::OcGraphLink l = src;
-        l.sourceNode = a->second;
-        l.destNode   = b->second;
-        graph_.links.push_back(l);
+        displayPos_[n->id] = Vec2{static_cast<f32>(n->x), static_cast<f32>(n->y)};
     }
 
     // The paste becomes the selection, so it can be dragged into place immediately, and a second
     // Ctrl+V doesn't silently stack a third copy on a selection the user thinks is the second.
-    selectedNodes_ = pasted;
+    selectedNodes_ = pasted.newIds;
     selectedLink_ = -1;
     dirty_ = true;
+
+    const std::string note = describePaste(pasted.plan);
+    if (!note.empty()) showRejectionBanner(note);
 }
 
 void GraphEditor::duplicateSelection() {
@@ -1327,24 +1385,16 @@ void GraphEditor::duplicateSelection() {
     // duplicated another, still has the first on the clipboard. The offset is a nudge rather than a
     // position, so the copy is visibly on top of but not exactly over its original.
     if (selectedNodes_.empty()) return;
-    std::vector<fmt::OcGraphNode> keepNodes = clipNodes_;
-    std::vector<fmt::OcGraphLink> keepLinks = clipLinks_;
-
-    copySelection();
-    Vec2 at{0.0f, 0.0f};
-    if (!clipNodes_.empty()) {
-        at = Vec2{static_cast<f32>(clipNodes_[0].x), static_cast<f32>(clipNodes_[0].y)};
-        for (const fmt::OcGraphNode& n : clipNodes_) {
-            at.x = n.x < at.x ? static_cast<f32>(n.x) : at.x;
-            at.y = n.y < at.y ? static_cast<f32>(n.y) : at.y;
-        }
-        at.x += 40.0f;
-        at.y += 40.0f;
+    const ClipPayload clip = collectClip(graph_, selectedNodes_);
+    if (clip.empty()) return;
+    Vec2 at{static_cast<f32>(clip.nodes[0].x), static_cast<f32>(clip.nodes[0].y)};
+    for (const fmt::OcGraphNode& n : clip.nodes) {
+        at.x = n.x < at.x ? static_cast<f32>(n.x) : at.x;
+        at.y = n.y < at.y ? static_cast<f32>(n.y) : at.y;
     }
-    pasteClipboard(at);
-
-    clipNodes_ = std::move(keepNodes);
-    clipLinks_ = std::move(keepLinks);
+    at.x += 40.0f;
+    at.y += 40.0f;
+    pastePayload(clip, at);
 }
 
 bool GraphEditor::selectionHasLinks() const {
@@ -1403,6 +1453,8 @@ void GraphEditor::deleteSelection() {
             keptNodes.push_back(std::move(n));
         }
         graph_.nodes = std::move(keptNodes);
+        for (const auto& id : selectedNodes_) debugSession().breakpoints.remove(debugGraphName(), id);
+        persistBreakpoints();
 
         // ENTRY AND OUT RECORDS NAMING A DELETED NODE GO TOO, for the same reason as links above --
         // this half was missing. Deleting the node an `ENTRY tick OnTick` pointed at used to save
@@ -1645,6 +1697,244 @@ bool GraphEditor::deleteVariable(const std::string& name, std::vector<std::strin
     return true;
 }
 
+// ---- Problems ---------------------------------------------------------------------------------------------------
+
+bool GraphEditor::runDiagnosticsNow() {
+    // A material graph is another language; the managed checks mean nothing to it.
+    if (!diagnose_ || openGraphDomain() == kDomainMaterial) return false;
+    // Marked as run even on failure: a bridge that cannot answer should be asked again after the NEXT
+    // edit, not every frame until it does.
+    diagRunSerial_ = editSerial_;
+    std::string wire;
+    if (!diagnose_(serializeForSave(), wire)) return false;
+    ProblemList list = parseProblemWire(wire);
+    sortProblems(list.items);
+    problemsCut_ = list.more;
+    problems_ = std::move(list.items);
+    badges_ = buildBadgeMap(problems_);
+    return true;
+}
+
+void GraphEditor::tickDiagnostics() {
+    if (!diagnose_ || !loaded_) return;
+    if (diagnosticsDue(editSerial_, diagRunSerial_, lastEditAtSec_, clockSec())) runDiagnosticsNow();
+}
+
+bool GraphEditor::selectProblem(usize index) {
+    if (index >= problems_.size() || problems_[index].nodeId.empty()) return false;
+    return revealNode(problems_[index].nodeId);
+}
+
+// ---- Find and reveal --------------------------------------------------------------------------------------------
+
+bool GraphEditor::revealNode(const std::string& nodeId) {
+    for (const auto& n : graph_.nodes) {
+        if (n.id != nodeId) continue;
+        setCurrentSubgraph(subgraphOf(n));   // clears the selection and re-frames; both overridden below
+        selectedNodes_ = {nodeId};
+        selectedLink_ = -1;
+        selectedComment_.clear();
+        revealPending_ = true;
+        return true;
+    }
+    return false;
+}
+
+void GraphEditor::revealFindHit(const FindHit& hit) {
+    switch (hit.target) {
+    case FindTarget::Node:
+        revealNode(hit.id);
+        break;
+    case FindTarget::Function:
+        setCurrentSubgraph(hit.id);
+        break;
+    case FindTarget::Comment:
+        for (const auto& c : graph_.comments) {
+            if (c.id != hit.id) continue;
+            setCurrentSubgraph({});
+            selectedNodes_.clear();
+            selectedComment_ = c.id;
+            revealPending_ = true;
+            break;
+        }
+        break;
+    case FindTarget::Variable: {
+        // A variable has no place on the canvas; its first use is the nearest thing to show.
+        const std::vector<RefHit> uses = findReferences(graph_, RefKind::Variable, hit.id);
+        if (!uses.empty()) revealNode(uses.front().nodeId);
+        break;
+    }
+    }
+}
+
+void GraphEditor::setFindQuery(const std::string& query) {
+    findLastQuery_ = query;
+    const GraphNodeDomain domain = openGraphDomain();
+    find_.reset(findInGraph(graph_, query, FindScope::All, [domain](const std::string& type) {
+        const GraphNodeDesc* d = findGraphNodeDescIn(type, domain);
+        return d ? d->displayName : std::string();
+    }));
+    if (const FindHit* h = find_.current()) revealFindHit(*h);
+}
+
+bool GraphEditor::findNext() {
+    const FindHit* h = find_.next();
+    if (!h) return false;
+    revealFindHit(*h);
+    return true;
+}
+
+bool GraphEditor::findPrevious() {
+    const FindHit* h = find_.previous();
+    if (!h) return false;
+    revealFindHit(*h);
+    return true;
+}
+
+void GraphEditor::showReferences(RefKind kind, const std::string& name, bool wholeProject) {
+    refHits_ = findReferences(graph_, kind, name);
+    refProjectHits_.clear();
+    if (wholeProject) {
+        const std::string owner = findOwnerProjectForGraph(path_);
+        fmt::ProjectDesc proj;
+        if (!owner.empty() && fmt::loadOcproject(owner, proj, nullptr)) {
+            for (ProjectRefHit& h : findInProject(proj.contentDir(), kind, name)) {
+                std::error_code ec;
+                if (std::filesystem::equivalent(h.file, path_, ec)) continue;   // already listed above
+                refProjectHits_.push_back(std::move(h));
+            }
+        }
+    }
+    static const char* const kKinds[] = {"variable", "function", "event", "class"};
+    refTitle_ = std::string("References to ") + kKinds[static_cast<int>(kind)] + " '" + name + "'" +
+                (wholeProject ? " (whole project)" : "");
+    bottomOpen_ = true;
+    bottomTabRequest_ = 1;
+}
+
+// ---- Debugger ---------------------------------------------------------------------------------------------------
+
+void GraphEditor::persistBreakpoints() {
+#if AVER_WITH_IMGUI
+    setPrefString("graphEditor.breakpoints." + debugGraphName(),
+                  debugSession().breakpoints.serializeGraph(debugGraphName()));
+    flushEditorPrefs();
+#endif
+}
+
+bool GraphEditor::toggleBreakpointOnSelection() {
+    if (selectedNodes_.size() != 1) return false;
+    debugSession().breakpoints.toggle(debugGraphName(), selectedNodes_.front());
+    persistBreakpoints();
+    return true;
+}
+
+bool GraphEditor::hasBreakpoint(const std::string& nodeId) const {
+    return debugSession().breakpoints.has(debugGraphName(), nodeId);
+}
+
+bool GraphEditor::breakpointEnabled(const std::string& nodeId) const {
+    return debugSession().breakpoints.enabled(debugGraphName(), nodeId);
+}
+
+bool GraphEditor::setBreakpointEnabled(const std::string& nodeId, bool on) {
+    if (!debugSession().breakpoints.setEnabled(debugGraphName(), nodeId, on)) return false;
+    persistBreakpoints();
+    return true;
+}
+
+// ---- Collapse to Function ---------------------------------------------------------------------------------------
+
+CollapseResult GraphEditor::collapseSelectionToFunction(const std::string& name) {
+    CollapseOptions options;
+    const GraphNodeDomain domain = openGraphDomain();
+    options.isEventType = [domain](const std::string& type) {
+        const GraphNodeDesc* d = findGraphNodeDescIn(type, domain);
+        return d && d->category == "Event";
+    };
+
+    // Done on a copy and committed after the undo snapshot: a refusal must leave no undo step behind.
+    fmt::OcGraphData next = graph_;
+    CollapseResult r = collapseToFunction(next, selectedNodes_, name, options);
+    if (!r.ok) {
+        showRejectionBanner("Cannot collapse: " + r.reason);
+        return r;
+    }
+
+    pushUndo();
+    graph_ = std::move(next);
+    displayPos_[r.entryNodeId] = Vec2{static_cast<f32>(r.entryX), static_cast<f32>(r.entryY)};
+    if (!r.returnNodeId.empty()) displayPos_[r.returnNodeId] = Vec2{static_cast<f32>(r.returnX), static_cast<f32>(r.returnY)};
+    displayPos_[r.callNodeId] = Vec2{static_cast<f32>(r.callX), static_cast<f32>(r.callY)};
+    // The three new nodes' pins restate the FUNC record, so they are marked synthesised (and stripped on
+    // save) like any function node's -- the same call every signature edit makes.
+    resyncFunctionNodePins(r.functionName);
+    selectedNodes_ = {r.callNodeId};
+    selectedLink_ = -1;
+    selectedComment_.clear();
+    dirty_ = true;
+    return r;
+}
+
+// ---- the bottom panel: Problems and References -----------------------------------------------------------
+
+void GraphEditor::drawBottomPanel(float width, float height, float dpi) {
+#if AVER_WITH_IMGUI
+    ImGui::BeginChild("##graphBottom", ImVec2(width, height), true);
+    if (ImGui::BeginTabBar("##graphBottomTabs")) {
+        const ProblemCounts counts = countProblems(problems_);
+        const std::string problemsLabel = "Problems (" + problemSummary(counts) + ")###problems";
+        if (ImGui::BeginTabItem(problemsLabel.c_str(), nullptr, bottomTabRequest_ == 0 ? ImGuiTabItemFlags_SetSelected : 0)) {
+            if (!diagnose_) {
+                ImGui::TextDisabled("The .NET bridge exports no GraphDiagnose, so only Validate can check this graph.");
+            } else if (problems_.empty()) {
+                ImGui::TextDisabled("Nothing wrong with this graph.");
+            }
+            for (usize i = 0; i < problems_.size(); ++i) {
+                const GraphProblem& p = problems_[i];
+                const bool isError = p.severity == ProblemSeverity::Error;
+                ImGui::PushID(static_cast<int>(i));
+                ImGui::TextColored(isError ? ImVec4(0.95f, 0.45f, 0.40f, 1.0f) : ImVec4(0.95f, 0.78f, 0.35f, 1.0f),
+                                   "%s", isError ? "error" : "warning");
+                ImGui::SameLine(72.0f * dpi);
+                const std::string row = (p.nodeId.empty() ? std::string("(graph)") : p.nodeId) + "   " + p.message;
+                if (ImGui::Selectable(row.c_str(), false) && !p.nodeId.empty()) selectProblem(i);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s%s", p.code.c_str(), p.nodeId.empty() ? "" : "  -  click to select the node");
+                ImGui::PopID();
+            }
+            if (problemsCut_ > 0) ImGui::TextDisabled("...and %zu more not shown", problemsCut_);
+            ImGui::EndTabItem();
+        }
+        if (!refTitle_.empty()) {
+            if (ImGui::BeginTabItem("References###refs", nullptr, bottomTabRequest_ == 1 ? ImGuiTabItemFlags_SetSelected : 0)) {
+                ImGui::TextDisabled("%s", refTitle_.c_str());
+                if (refHits_.empty() && refProjectHits_.empty()) ImGui::TextDisabled("No uses found.");
+                for (usize i = 0; i < refHits_.size(); ++i) {
+                    ImGui::PushID(static_cast<int>(i));
+                    const std::string row = refHits_[i].nodeId + "   " + refHits_[i].what;
+                    if (ImGui::Selectable(row.c_str(), false)) revealNode(refHits_[i].nodeId);
+                    ImGui::PopID();
+                }
+                for (usize i = 0; i < refProjectHits_.size(); ++i) {
+                    ImGui::PushID(static_cast<int>(1000000 + i));
+                    const ProjectRefHit& h = refProjectHits_[i];
+                    const std::string row = std::filesystem::path(h.file).filename().string() + "   " + h.nodeId + "   " + h.what;
+                    if (ImGui::Selectable(row.c_str(), false)) revealGraphNode(h.file, h.nodeId);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", h.file.c_str());
+                    ImGui::PopID();
+                }
+                ImGui::EndTabItem();
+            }
+        }
+        ImGui::EndTabBar();
+    }
+    bottomTabRequest_ = -1;
+    ImGui::EndChild();
+#else
+    (void)width; (void)height; (void)dpi;
+#endif
+}
+
 void GraphEditor::recomputeLayouts(float dpi) {
     layouts_.clear();
     layouts_.reserve(graph_.nodes.size());
@@ -1705,9 +1995,13 @@ void GraphEditor::draw(Engine& e) {
     }
     ImGui::SameLine();
     // Also its own button, not just on save: "is this finished" is a question asked mid-build too.
-    ImGui::BeginDisabled(!validate_);
+    ImGui::BeginDisabled(!validate_ && !diagnose_);
     if (ImGui::Button("Validate")) {
-        if (validateNow(validateErr_, validateNode_)) {
+        // The full list first (every error and warning, each with its node), then the one-line result.
+        if (runDiagnosticsNow()) { bottomOpen_ = true; bottomTabRequest_ = 0; }
+        if (!validate_) {
+            // Diagnostics alone: the Problems tab is the answer.
+        } else if (validateNow(validateErr_, validateNode_)) {
             validateErr_.clear();
             validateNode_.clear();
             showRejectionBanner("graph is valid");
@@ -1716,7 +2010,7 @@ void GraphEditor::draw(Engine& e) {
         }
     }
     ImGui::EndDisabled();
-    if (!validate_ && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    if (!validate_ && !diagnose_ && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("The .NET bridge exports no GraphValidate, so nothing can check this graph.");
     ImGui::SameLine();
     // Standing result, so re-pressing Validate isn't needed to remember what was wrong; cleared by the
@@ -1725,6 +2019,36 @@ void GraphEditor::draw(Engine& e) {
         ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f), "%s%s",
                            validateNode_.empty() ? "" : (validateNode_ + ": ").c_str(),
                            validateErr_.c_str());
+        ImGui::SameLine();
+    }
+    if (diagnose_) {
+        // The standing answer to "is this graph finished"; click it to open the list.
+        const ProblemCounts counts = countProblems(problems_);
+        ImGui::PushStyleColor(ImGuiCol_Text, counts.errors ? ImVec4(0.95f, 0.45f, 0.40f, 1.0f)
+                                           : counts.warnings ? ImVec4(0.95f, 0.78f, 0.35f, 1.0f)
+                                                             : ImVec4(0.60f, 0.80f, 0.60f, 1.0f));
+        const std::string summary = problemSummary(counts) + "##problemsSummary";
+        if (ImGui::SmallButton(summary.c_str())) {
+            bottomOpen_ = !bottomOpen_;
+            bottomTabRequest_ = 0;
+            setPrefBool("graphEditor.problemsOpen", bottomOpen_);
+            flushEditorPrefs();
+        }
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click to show or hide the Problems list");
+        ImGui::SameLine();
+    }
+    if (debugValuesSrc_) {
+        bool armed = debugSession().armed;
+        if (ImGui::Checkbox("Debug", &armed)) {
+            debugSession().setArmed(armed);
+            setPrefBool("graphEditor.debugArmed", armed);
+            flushEditorPrefs();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Arm the graph debugger: F9 puts a breakpoint on the selected node, and wires show their values.\n"
+                              "Graphs compile when Play starts, so this takes effect on the NEXT Play.\n"
+                              "A breakpoint pauses the session at the end of the frame its node ran in; Frame Skip steps.");
         ImGui::SameLine();
     }
     ImGui::BeginDisabled(!history_.canUndo());
@@ -1892,6 +2216,21 @@ void GraphEditor::drawEventGraph(float dpi) {
     }
 
 #if AVER_WITH_IMGUI
+    tickDiagnostics();
+
+    // The debugger's values for this graph, ten times a second at most (each poll is a call into the
+    // managed side). Dropped when the debugger is disarmed so a stale label cannot outlive its session.
+    if (debugSession().armed && debugValuesSrc_) {
+        const double now = ImGui::GetTime();
+        if (now - lastValuesPollSec_ > 0.1) {
+            lastValuesPollSec_ = now;
+            debugValues_.update(debugValuesSrc_(debugGraphName()), now);
+            debugValues_.expire(now, 10.0);
+        }
+    } else if (debugValues_.size() != 0) {
+        debugValues_.clear();
+    }
+
     recomputeLayouts(dpi);
 
     // The canvas gives up a right-hand strip for the details panel (Gap B), draggable and persisted via
@@ -1909,8 +2248,13 @@ void GraphEditor::drawEventGraph(float dpi) {
     detailsColW_ = clampSplitWidth(detailsColW_, avail.x, minDetails, minCanvas);
     const float detailsW = detailsColW_;
     const float canvasW = std::max(avail.x - detailsW - ImGui::GetStyle().ItemSpacing.x, minCanvas);
-    ImGui::BeginChild("##graphCanvas", ImVec2(canvasW, std::max(avail.y, 80.0f * dpi)), true,
-                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    // Problems / References live under the canvas, so canvas and panel are one group the splitter and
+    // the details column sit beside.
+    const float bottomH = bottomOpen_ ? std::min(170.0f * dpi, std::max(avail.y * 0.4f, 70.0f * dpi)) : 0.0f;
+    ImGui::BeginGroup();
+    ImGui::BeginChild("##graphCanvas",
+                       ImVec2(canvasW, std::max(avail.y - bottomH - (bottomH > 0.0f ? ImGui::GetStyle().ItemSpacing.y : 0.0f), 80.0f * dpi)),
+                       true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     const ImVec2 originIm = ImGui::GetCursorScreenPos();
     const Vec2 origin = fromIm(originIm);
@@ -1918,8 +2262,14 @@ void GraphEditor::drawEventGraph(float dpi) {
     ImGui::InvisibleButton("##graphCanvasHit", ImVec2(std::max(canvasSize.x, 1.0f), std::max(canvasSize.y, 1.0f)),
                             ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
                             ImGuiButtonFlags_MouseButtonMiddle);
-    const bool hovered = ImGui::IsItemHovered();
+    const bool hoveredRaw = ImGui::IsItemHovered();
+    // The find bar floats over the canvas; a click on it is not a click on the graph under it.
+    const ImVec2 mouseNow = ImGui::GetIO().MousePos;
+    const bool overFindBar = findOpen_ && mouseNow.x >= findBarMin_.x && mouseNow.x <= findBarMax_.x &&
+                             mouseNow.y >= findBarMin_.y && mouseNow.y <= findBarMax_.y;
+    const bool hovered = hoveredRaw && !overFindBar;
     const bool canvasFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) || hovered;
+    if (canvasFocused) g_graphCanvasFocusFrame = ImGui::GetFrameCount();
 
     ImGuiIO& io = ImGui::GetIO();
     const Vec2 mouseScreen = fromIm(io.MousePos) - origin; // canvas-local screen space
@@ -1942,6 +2292,13 @@ void GraphEditor::drawEventGraph(float dpi) {
         framePendingFromToolbar_ = false;
     }
     lastCanvasSizePx_ = Vec2{canvasSize.x, canvasSize.y};
+    // A revealed node (Problems click, Find, a breakpoint) is framed here, after the frame block above
+    // has had its say, and the view is then the author's until they move it.
+    if (revealPending_) {
+        frameSelection(Vec2{canvasSize.x, canvasSize.y}, dpi);
+        revealPending_ = false;
+        viewTouched_ = true;
+    }
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(originIm, ImVec2(originIm.x + canvasSize.x, originIm.y + canvasSize.y), IM_COL32(30, 30, 34, 255));
@@ -2230,7 +2587,13 @@ void GraphEditor::drawEventGraph(float dpi) {
         view_.panPx.x -= io.MouseWheelH * kWheelPanPxPerNotch * dpi;
     }
 
-    if (canvasFocused) {
+    // Not while a text field has the keyboard: Delete inside the find bar must edit the query, not the graph.
+    if (canvasFocused && !io.WantTextInput) {
+        // Ctrl+F and F9 are hardcoded like Ctrl+Shift+Z below: the registry has no command for either, and
+        // F9 is the debugger's breakpoint here while the level view keeps it for the screenshot.
+        if (io.KeyCtrl && !io.KeyShift && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_F, false)) openFind();
+        if (!io.KeyCtrl && !io.KeyShift && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_F9, false)) toggleBreakpointOnSelection();
+
         // Through the registry (was nine hardcoded keys duplicating existing commands, so rebinding
         // Copy changed it everywhere except this canvas), so a Preferences rebind applies here too.
         // Delete/Undo/Redo/Copy/Paste/Duplicate/Frame Selected are the SAME commands as the level
@@ -2335,6 +2698,21 @@ void GraphEditor::drawEventGraph(float dpi) {
         const f32 baseWidth = isExecPinType(sp->type) ? 3.0f : 2.0f;
         dl->AddBezierCubic(toScreenAbs(b.p1), toScreenAbs(b.p2), toScreenAbs(b.p3), toScreenAbs(b.p4),
                             col, (selected ? baseWidth + 1.0f : baseWidth) * dpi, 24);
+        // Debugger armed: the value this wire last carried, at its midpoint (dimmer once it stops changing).
+        if (debugSession().armed && showPinText) {
+            if (const DebugValue* dv = debugValues_.find(link.destNode, link.destPin)) {
+                const std::string txt = formatDebugValue(dv->value, dp->type);
+                const ImVec2 mid = toScreenAbs(Vec2{(b.p1.x + 3.0f * b.p2.x + 3.0f * b.p3.x + b.p4.x) * 0.125f,
+                                                    (b.p1.y + 3.0f * b.p2.y + 3.0f * b.p3.y + b.p4.y) * 0.125f});
+                const ImVec2 ts = font->CalcTextSizeA(scaledFontPx, FLT_MAX, 0.0f, txt.c_str());
+                const bool old = DebugValues::stale(*dv, ImGui::GetTime());
+                dl->AddRectFilled(ImVec2(mid.x - ts.x * 0.5f - 3.0f * dpi, mid.y - ts.y * 0.5f - 1.0f * dpi),
+                                  ImVec2(mid.x + ts.x * 0.5f + 3.0f * dpi, mid.y + ts.y * 0.5f + 1.0f * dpi),
+                                  IM_COL32(18, 22, 28, 230), 3.0f * dpi);
+                dl->AddText(font, scaledFontPx, ImVec2(mid.x - ts.x * 0.5f, mid.y - ts.y * 0.5f),
+                            old ? IM_COL32(150, 155, 160, 255) : IM_COL32(240, 240, 200, 255), txt.c_str());
+            }
+        }
     }
 
     dl->ChannelsSetCurrent(2); // nodes
@@ -2388,6 +2766,45 @@ void GraphEditor::drawEventGraph(float dpi) {
                 dl->AddRect(ImVec2(pMin.x - pad, pMin.y - pad), ImVec2(pMax.x + pad, pMax.y + pad),
                             IM_COL32(90, 230, 130, static_cast<int>(255.0f * (t < 1.0f ? t : 1.0f))),
                             9.0f * dpi, 0, 2.0f * dpi);
+            }
+        }
+        // A problem on this node: a dot on its top-right corner, red for an error, amber for a warning.
+        if (const auto badge = badges_.find(nl.nodeId); badge != badges_.end()) {
+            const f32 br = 6.5f * dpi * std::max(view_.zoom, 0.6f);
+            const ImVec2 at(pMax.x, pMin.y);
+            dl->AddCircleFilled(at, br, badge->second.errors ? IM_COL32(215, 62, 55, 255) : IM_COL32(230, 180, 60, 255));
+            dl->AddCircle(at, br, IM_COL32(20, 20, 24, 255), 0, 1.5f * dpi);
+        }
+        // A breakpoint: a red dot on the top-left corner, hollow when disabled. The node that just
+        // broke pulses red, from the session's own record of the hit rather than an animation.
+        if (hasBreakpoint(nl.nodeId)) {
+            const f32 br = 6.5f * dpi * std::max(view_.zoom, 0.6f);
+            const ImVec2 at(pMin.x, pMin.y);
+            if (breakpointEnabled(nl.nodeId)) dl->AddCircleFilled(at, br, IM_COL32(220, 40, 40, 255));
+            else                              dl->AddCircle(at, br, IM_COL32(220, 40, 40, 255), 0, 2.0f * dpi);
+        }
+        if (const auto& lb = debugSession().lastBreak; lb && lb->graph == debugGraphName() && lb->node == nl.nodeId) {
+            const f32 pulse = 0.5f + 0.5f * std::sin(static_cast<f32>(ImGui::GetTime()) * 6.0f);
+            const f32 pad = 8.0f * dpi;
+            dl->AddRect(ImVec2(pMin.x - pad, pMin.y - pad), ImVec2(pMax.x + pad, pMax.y + pad),
+                        IM_COL32(235, 60, 60, static_cast<int>(120 + 135 * pulse)), 9.0f * dpi, 0, 3.0f * dpi);
+        }
+        // Hover: what is wrong with this node, and (debugger armed) the value each input last held.
+        if (hovered && ImGui::IsMouseHoveringRect(pMin, pMax)) {
+            std::vector<std::string> lines;
+            for (const GraphProblem& pr : problems_)
+                if (pr.nodeId == nl.nodeId) lines.push_back((pr.severity == ProblemSeverity::Error ? "error: " : "warning: ") + pr.message);
+            if (debugSession().armed) {
+                for (const auto& pl : nl.pins) {
+                    if (pl.isOutput) continue;
+                    if (const DebugValue* dv = debugValues_.find(nl.nodeId, pl.name))
+                        lines.push_back(pl.name + " = " + formatDebugValue(dv->value, pl.type));
+                }
+            }
+            if (!lines.empty()) {
+                ImGui::BeginTooltip();
+                for (const std::string& ln : lines) ImGui::TextUnformatted(ln.c_str());
+                ImGui::EndTooltip();
             }
         }
         if (showTitles) {
@@ -2502,6 +2919,57 @@ void GraphEditor::drawEventGraph(float dpi) {
         ImGui::EndPopup();
     }
 
+    // ---- find bar (Ctrl+F): top-right, so it never covers the rejection banner on the left.
+    if (findOpen_) {
+        const float w = 340.0f * dpi, bh = 28.0f * dpi;
+        const ImVec2 pos(originIm.x + std::max(canvasSize.x - w - 10.0f * dpi, 0.0f), originIm.y + 6.0f * dpi);
+        findBarMin_ = fromIm(pos);
+        findBarMax_ = Vec2{pos.x + w, pos.y + bh};
+        dl->AddRectFilled(pos, ImVec2(pos.x + w, pos.y + bh), IM_COL32(28, 32, 40, 240), 5.0f * dpi);
+        dl->AddRect(pos, ImVec2(pos.x + w, pos.y + bh), IM_COL32(90, 100, 120, 255), 5.0f * dpi);
+        ImGui::PushID("##findbar");
+        ImGui::SetCursorScreenPos(ImVec2(pos.x + 4.0f * dpi, pos.y + 2.0f * dpi));
+        ImGui::SetNextItemWidth(w - 128.0f * dpi);
+        if (findFocusRequest_) { ImGui::SetKeyboardFocusHere(); findFocusRequest_ = false; }
+        const bool enter = ImGui::InputTextWithHint("##q", "Find in graph...", findBuf_, sizeof findBuf_,
+                                                    ImGuiInputTextFlags_EnterReturnsTrue);
+        const bool queryActive = ImGui::IsItemActive();
+        if (queryActive && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) findOpen_ = false;
+        // EnterReturnsTrue reports only Enter, so edits are noticed by comparing with the last query run.
+        if (findLastQuery_ != findBuf_) setFindQuery(findBuf_);
+        if (enter) {
+            if (io.KeyShift) findPrevious(); else findNext();
+            findFocusRequest_ = true;   // Enter drops focus; take it back so the next Enter steps again
+        }
+        ImGui::SameLine();
+        ImGui::TextUnformatted(find_.label().c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("<")) findPrevious();
+        ImGui::SameLine();
+        if (ImGui::SmallButton(">")) findNext();
+        ImGui::SameLine();
+        if (ImGui::SmallButton("x")) findOpen_ = false;
+        ImGui::PopID();
+    } else {
+        findBarMin_ = findBarMax_ = Vec2{};
+    }
+
+    // ---- Collapse to Function's name prompt, queued by the node menu.
+    if (collapsePopupQueued_) { ImGui::OpenPopup("##graphCollapse"); collapsePopupQueued_ = false; }
+    if (ImGui::BeginPopup("##graphCollapse")) {
+        ImGui::TextUnformatted("Collapse to Function");
+        ImGui::SetNextItemWidth(220.0f * dpi);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool go = ImGui::InputText("Name", collapseNameBuf_, sizeof collapseNameBuf_, ImGuiInputTextFlags_EnterReturnsTrue);
+        if (ImGui::Button("Collapse") || go) {
+            collapseSelectionToFunction(collapseNameBuf_);   // a refusal arrives as the banner
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
     // ---- right-click "add node" palette (graphNodeCatalog(); GraphNodeDefs.hpp's header comment says
     // why types register there) and the node context menu below -- every item already existed as a
     // keyboard shortcut with no other way to discover it; shortcut labels teach them. The menu acts on
@@ -2526,6 +2994,43 @@ void GraphEditor::drawEventGraph(float dpi) {
             // the only way to disconnect a node was to click each wire and press Delete.
             if (ImGui::MenuItem("Break Links", nullptr, false, selectionHasLinks()))
                 breakLinksOnSelection();
+            ImGui::Separator();
+            if (count == 1) {
+                const bool hasBp = hasBreakpoint(rightClickNode_);
+                if (ImGui::MenuItem(hasBp ? "Remove Breakpoint" : "Add Breakpoint", "F9")) {
+                    debugSession().breakpoints.toggle(debugGraphName(), rightClickNode_);
+                    persistBreakpoints();
+                }
+                if (hasBp && ImGui::MenuItem(breakpointEnabled(rightClickNode_) ? "Disable Breakpoint" : "Enable Breakpoint"))
+                    setBreakpointEnabled(rightClickNode_, !breakpointEnabled(rightClickNode_));
+
+                // Find References for whatever this node names: a variable, a function, an event, a class.
+                const fmt::OcGraphNode* rn = nullptr;
+                for (const auto& cand : graph_.nodes) if (cand.id == rightClickNode_) { rn = &cand; break; }
+                if (rn) {
+                    RefKind refKind = RefKind::Variable;
+                    std::string refName;
+                    const GraphNodeAttribute av = getNodeAttribute(*rn, "var");
+                    const GraphNodeAttribute ac = getNodeAttribute(*rn, "call");
+                    const GraphNodeAttribute an = getNodeAttribute(*rn, "name");
+                    const GraphNodeAttribute ae = getNodeAttribute(*rn, "event");
+                    const GraphNodeAttribute ak = getNodeAttribute(*rn, "class");
+                    if (av.found && !av.value.empty())                                { refKind = RefKind::Variable; refName = av.value; }
+                    else if (ac.found && !ac.value.empty())                           { refKind = RefKind::Function; refName = ac.value; }
+                    else if (rn->type == "CustomEvent" && an.found && !an.value.empty()) { refKind = RefKind::Event;    refName = an.value; }
+                    else if (ae.found && !ae.value.empty())                           { refKind = RefKind::Event;    refName = ae.value; }
+                    else if (ak.found && !ak.value.empty())                           { refKind = RefKind::Class;    refName = ak.value; }
+                    if (!refName.empty()) {
+                        if (ImGui::MenuItem("Find References")) showReferences(refKind, refName, false);
+                        if (ImGui::MenuItem("Find References (whole project)")) showReferences(refKind, refName, true);
+                    }
+                }
+                ImGui::Separator();
+            }
+            if (ImGui::MenuItem("Collapse to Function...")) {
+                collapsePopupQueued_ = true;
+                std::snprintf(collapseNameBuf_, sizeof collapseNameBuf_, "%s", "NewFunction");
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("Delete", "Del")) deleteSelection();
         } else {
@@ -2647,6 +3152,8 @@ void GraphEditor::drawEventGraph(float dpi) {
     }
 
     ImGui::EndChild();
+    if (bottomOpen_) drawBottomPanel(canvasW, bottomH, dpi);
+    ImGui::EndGroup();
 
     // Details panel: Variables (graph-level) above a selected node's attributes (Gap B). Thin ImGui glue
     // only -- the model lives in this file's addVariable/renameVariable/retypeVariable/
@@ -2715,6 +3222,11 @@ void GraphEditor::drawEventGraph(float dpi) {
                 varEditRowKey_.clear();
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Rename -- updates every GetVar/SetVar that uses this variable");
+            if (ImGui::BeginPopupContextItem("##varctx")) {
+                if (ImGui::MenuItem("Find References")) showReferences(RefKind::Variable, vname, false);
+                if (ImGui::MenuItem("Find References (whole project)")) showReferences(RefKind::Variable, vname, true);
+                ImGui::EndPopup();
+            }
             ImGui::SameLine();
 
             // ---- type (retype): a Combo, not free text -- VAR only ever declares float/int/bool
@@ -3888,10 +4400,61 @@ namespace {
 // could check the graph rather than claiming it is fine.
 GraphEditor::ValidateFn g_graphValidator;
 GraphEditor::NodeHitsFn g_graphNodeHits;
+GraphEditor::DiagnoseFn g_graphDiagnoser;
+GraphEditor::DebugValuesFn g_graphDebugValues;
 } // namespace
 
 void setGraphValidator(GraphEditor::ValidateFn fn) { g_graphValidator = std::move(fn); }
 void setGraphNodeHitSource(GraphEditor::NodeHitsFn fn) { g_graphNodeHits = std::move(fn); }
+void setGraphDiagnoser(GraphEditor::DiagnoseFn fn) { g_graphDiagnoser = std::move(fn); }
+void setGraphDebugValueSource(GraphEditor::DebugValuesFn fn) { g_graphDebugValues = std::move(fn); }
+void setGraphOpener(std::function<bool(const std::string& path)> fn) { g_graphOpener = std::move(fn); }
+
+namespace {
+GraphEditor* openGraphEditorAt(const std::string& path) {
+    for (GraphEditor* g : g_openGraphEditors) {
+        std::error_code ec;
+        if (g->path() == path || std::filesystem::equivalent(g->path(), path, ec)) return g;
+    }
+    return nullptr;
+}
+} // namespace
+
+bool revealGraphNode(const std::string& path, const std::string& nodeId) {
+    GraphEditor* g = openGraphEditorAt(path);
+    if (!g) {
+        if (!g_graphOpener || !g_graphOpener(path)) return false;
+        g = openGraphEditorAt(path);   // the opener builds the tab, which registers itself
+    }
+    return g && g->revealNode(nodeId);
+}
+
+std::string graphPathForName(const std::string& graphName) {
+    for (const GraphEditor* g : g_openGraphEditors)
+        if (g->debugGraphName() == graphName) return g->path();
+    return {};
+}
+
+usize runGraphDiagnosticsForOpenTabs(usize* warnings) {
+    usize errors = 0, warns = 0;
+    for (GraphEditor* g : g_openGraphEditors) {
+        if (!g->diagnoserInstalled() || g->openGraphDomain() == kDomainMaterial) continue;
+        if (!g->runDiagnosticsNow()) continue;
+        const ProblemCounts c = countProblems(g->diagnostics());
+        errors += c.errors;
+        warns += c.warnings;
+    }
+    if (warnings) *warnings = warns;
+    return errors;
+}
+
+bool graphCanvasHasFocus() {
+#if AVER_WITH_IMGUI
+    return ImGui::GetCurrentContext() != nullptr && ImGui::GetFrameCount() - g_graphCanvasFocusFrame <= 1;
+#else
+    return false;
+#endif
+}
 
 std::unique_ptr<AssetEditor> makeGraphEditor(const std::string& path) {
     std::string ext = std::filesystem::path(path).extension().string();
@@ -3900,6 +4463,8 @@ std::unique_ptr<AssetEditor> makeGraphEditor(const std::string& path) {
     auto ed = std::make_unique<GraphEditor>(path);
     if (g_graphValidator) ed->setValidator(g_graphValidator);
     if (g_graphNodeHits)  ed->setNodeHitSource(g_graphNodeHits);
+    if (g_graphDiagnoser) ed->setDiagnoser(g_graphDiagnoser);
+    if (g_graphDebugValues) ed->setDebugValueSource(g_graphDebugValues);
     return ed;
 }
 

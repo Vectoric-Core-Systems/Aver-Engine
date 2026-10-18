@@ -3849,6 +3849,9 @@ private:
 #endif
 
     scripting::ScriptHost scripts_;
+    // The graph debugger and the Problems panel's before-Play pass, once a frame (SandboxApp.cpp).
+    void pumpGraphDebugger();
+    bool graphDiagPlayWas_ = false;
 #endif
     // The retained game UI's renderer. Heap-owned because create() may decline.
     aver::render::ui::UiRenderer* gameUi_ = nullptr;

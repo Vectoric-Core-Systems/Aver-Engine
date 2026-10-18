@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Static access to the running play session: state, singletons, lookup and world queries.
 
+using System.Runtime.InteropServices;
 using Aver.Scene;
 
 namespace Aver.Framework;
@@ -21,6 +22,22 @@ public static class Game
 
     /// <summary>True while a session exists at all — Playing or Paused.</summary>
     public static bool HasSession => State != PlayState.Editor;
+
+    // Declared here, not in Native.cs: aver_fw_set_paused (framework_abi.h) had no managed caller until SetPaused.
+    private static class PauseNative
+    {
+        [DllImport("Aver.Framework")] internal static extern int aver_fw_set_paused(int paused);
+    }
+
+    /// <summary>Freezes (<c>true</c>) or resumes (<c>false</c>) the play session's tick without tearing it down.
+    /// False when no session is playing. The change shows in <see cref="State"/> and <see cref="IsPaused"/>.</summary>
+    public static bool SetPaused(bool paused) => PauseNative.aver_fw_set_paused(paused ? 1 : 0) != 0;
+
+    /// <summary>Freezes the play session. Shorthand for <c>SetPaused(true)</c>.</summary>
+    public static bool Pause() => SetPaused(true);
+
+    /// <summary>Resumes a paused play session. Shorthand for <c>SetPaused(false)</c>.</summary>
+    public static bool Resume() => SetPaused(false);
 
     /// <summary>Requests that the host exit. A REQUEST, NOT AN IMMEDIATE TERMINATION -- the host
     /// honours it at the next frame boundary, the same way SandboxApp::requestExitChecked already
@@ -175,6 +192,24 @@ public static class Game
         foreach (Entity e in AllActors())
             if (Actors.Get<T>(e) is { } actor)
                 yield return actor;
+    }
+
+    /// <summary>Every live actor whose class is <paramref name="className"/> or derives from it, matched by the
+    /// declared class name. Empty for an unknown or empty name. Do not spawn or destroy while enumerating.</summary>
+    public static IEnumerable<Entity> ActorsOfClass(string className)
+    {
+        if (string.IsNullOrEmpty(className)) yield break;
+        int target = Fw.aver_fw_class_find(className);
+        if (target == 0) yield break;
+        foreach (Entity e in AllActors())
+        {
+            for (int c = Fw.aver_fw_class_of(e.Handle); c != 0; c = Fw.aver_fw_class_parent(c))
+            {
+                if (c != target) continue;
+                yield return e;
+                break;
+            }
+        }
     }
 
     /// <summary>Requests a simulated fluid volume centred at <paramref name="centreCm"/> (world-space
