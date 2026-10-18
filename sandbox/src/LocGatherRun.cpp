@@ -78,7 +78,7 @@ std::vector<std::string> listLocSources(const std::string& contentRoot) {
         }
         if (!it->is_regular_file(ec)) continue;
         const std::string ext = extOf(it->path());
-        if (ext == ".ocui" || ext == ".ocgraph" || ext == ".cs") { out.push_back(pathStr(it->path())); continue; }
+        if (ext == ".ocui" || ext == ".ocgraph" || ext == ".occaptions" || ext == ".cs") { out.push_back(pathStr(it->path())); continue; }
         if (ext != ".csv" && ext != ".json") continue;
         // Under Localization/ a .csv is a string table, not a data table.
         const fs::path rel = fs::relative(it->path(), toPath(contentRoot), ec);
@@ -108,6 +108,7 @@ std::vector<fmt::LocUse> scanLocUses(const std::vector<std::string>& files, std:
         }
         if (ext == ".ocui") fmt::gatherOcui(text, file, uses);
         else if (ext == ".ocgraph") fmt::gatherOcgraph(text, file, uses);
+        else if (ext == ".occaptions") fmt::gatherOccaptions(text, file, uses);
         else if (ext == ".cs") fmt::gatherCsharp(text, file, uses);
     }
     return uses;

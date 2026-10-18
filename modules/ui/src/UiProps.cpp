@@ -318,6 +318,7 @@ std::vector<UiPropDesc> build() {
     v.push_back(sprop("navLeft", kNav, &P::navLeft));
     v.push_back(sprop("navRight", kNav, &P::navRight));
     v.push_back(sprop("command", kNav, &P::command, kInteractive));
+    v.push_back(sprop("accessName", "Accessibility", &P::accessName));
 
     // ---- root ----
     v.push_back(eprop("inputMode", kRoot, &P::inputMode, {"passive", "blocking", "menu"}, kAll, true));

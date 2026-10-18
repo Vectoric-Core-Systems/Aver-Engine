@@ -2,6 +2,7 @@
 #include "aver/ui/ui_widget_abi.h"
 
 #include "UiAbiState.hpp"
+#include "aver/ui/UiAccess.hpp"
 #include "aver/ui/UiHostInput.hpp"
 #include "aver/ui/UiLayoutAsset.hpp"
 #include "aver/ui/UiProps.hpp"
@@ -33,6 +34,11 @@ UiRebindModel g_rebind;
 std::unique_ptr<UiSettingsScreen> g_screen;   // after g_tree: destroyed first, it unhooks from the tree
 std::string g_str;
 std::string g_error;
+UiCaptionView g_captions;
+std::vector<UiCaptionLine> g_captionLines;
+UiCaptionStyle g_captionStyle;
+AverUiAnnounceFn g_announce = nullptr;
+usize g_announceListener = 0;
 
 const char* keep(std::string s) {
     g_str = std::move(s);
@@ -74,6 +80,8 @@ void aver_ui_widgets_frame(float dt) {
     g_in.pointerY = py;
     g_in.buttons = buttons;
     g_in.pointerValid = g_pointerValid;
+
+    g_captions.update(g_tree, g_captionLines, g_captionStyle);
 
     UiDrawListPainter painter(abi::drawList(), &abi::textEngine(), abi::font());
     g_tree.update(dt, g_in, painter);
@@ -366,6 +374,50 @@ uint32_t aver_ui_settings_build(const char* rootName) {
     }
     g_screen = std::make_unique<UiSettingsScreen>(g_tree, g_settings, g_rebind.rows.empty() ? nullptr : &g_rebind);
     return g_screen->build(rootName ? rootName : "SettingsScreen");
+}
+
+// ---- accessibility ---------------------------------------------------------------------------------------------
+
+void aver_ui_set_access(float textScale, int32_t highContrast) {
+    UiAccess a;
+    a.textScale = textScale > 0.0f ? std::clamp(textScale, 0.5f, 4.0f) : 1.0f;
+    a.highContrast = highContrast != 0;
+    g_tree.setAccess(a);
+}
+
+void aver_ui_captions_set(const AverUiCaptionLine* lines, int32_t count, float sizeScale, float bgOpacity, int32_t top) {
+    g_captionLines.clear();
+    for (int32_t i = 0; lines && i < count; ++i) {
+        const AverUiCaptionLine& l = lines[i];
+        UiCaptionLine c;
+        c.speaker = str(l.speaker);
+        c.text = str(l.text);
+        c.rgba = uiRgba((l.rgba >> 24) & 0xFF, (l.rgba >> 16) & 0xFF, (l.rgba >> 8) & 0xFF, l.rgba & 0xFF);   // 0xRRGGBBAA -> UI packing
+        c.dir = l.dir;
+        c.alpha = l.alpha;
+        g_captionLines.push_back(std::move(c));
+    }
+    g_captionStyle.sizeScale = sizeScale > 0.0f ? sizeScale : 1.0f;
+    g_captionStyle.bgOpacity = std::clamp(bgOpacity, 0.0f, 1.0f);
+    g_captionStyle.top = top != 0;
+    g_captionStyle.highContrast = g_tree.access().highContrast;
+}
+
+void aver_ui_set_announcer(AverUiAnnounceFn fn) {
+    g_announce = fn;
+    if (!fn || g_announceListener) return;
+    g_announceListener = g_tree.addListener([](const UiEvent& e) {
+        if (!g_announce) return;
+        // Focus moves speak the widget; slider, toggle and choice changes speak the new value. Typed text never does.
+        if (e.type != UiEventType::FocusGained && e.type != UiEventType::ValueChanged && e.type != UiEventType::Toggled) return;
+        const std::string text = uiAccessibleText(g_tree, e.widget);
+        if (!text.empty()) g_announce(text.c_str(), 1);
+    });
+}
+
+const char* aver_ui_widget_accessible_text(uint32_t id) {
+    if (!W(id)) return nullptr;
+    return keep(uiAccessibleText(g_tree, id));
 }
 
 } // extern "C"

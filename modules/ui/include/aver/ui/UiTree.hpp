@@ -2,6 +2,7 @@
 // The retained widget tree: owns widgets, lays them out, routes input to them, raises events and
 // draws through a UiPainter. Core-only like the rest of Aver.UI: testable with no GPU and no window.
 // See docs/GAME_UI.md for the model (anchors vs stacks, focus scopes, input routing).
+#include "aver/ui/UiAccess.hpp"
 #include "aver/ui/UiFocus.hpp"
 #include "aver/ui/UiLayout.hpp"
 #include "aver/ui/UiStyle.hpp"
@@ -109,8 +110,12 @@ public:
     void setDpi(const UiDpi& d) { dpi_ = d; }
     const UiDpi& dpi() const { return dpi_; }
     f32 scale() const { return scale_; }         // as of the last layout
-    void setTheme(UiTheme t) { theme_ = std::move(t); }
+    void setTheme(UiTheme t) { theme_ = std::move(t); hcValid_ = false; }
     const UiTheme& theme() const { return theme_; }
+    // Text scale and high contrast (docs/ACCESSIBILITY.md). The game's own theme is kept and comes back when
+    // high contrast turns off.
+    void setAccess(const UiAccess& a) { access_ = a; }
+    const UiAccess& access() const { return access_; }
 
     // ---- localized text ---------------------------------------------------------------------
     // A widget's text, items and placeholder may hold a reference "@Table:Key[=Default]" (docs/LOCALIZATION.md).
@@ -176,6 +181,8 @@ private:
     // layout (UiTreeLayout.cpp)
     UiStyle styleOf(const UiWidget& w) const;
     f32 fontPx(const UiWidget& w, const UiStyle& st) const;
+    // The theme in force: the game's, or the contrast theme (sized like the game's) under high contrast.
+    const UiTheme& activeTheme() const;
     // What a widget asks the text engine for: the widget's text props over the style's, sized by fontPx.
     // `family` borrows from `w` / `st`, so keep both alive while the style is used.
     UiTextStyle textStyleOf(const UiWidget& w, const UiStyle& st) const;
@@ -234,6 +241,9 @@ private:
     UiDpi dpi_{};
     f32 scale_ = 1.0f;
     UiTheme theme_;
+    UiAccess access_{};
+    mutable UiTheme hcTheme_;
+    mutable bool hcValid_ = false;
     const UiTextMetrics* metrics_ = nullptr;
     UiTextResolveFn textResolver_;
     std::function<u32()> textEpoch_;

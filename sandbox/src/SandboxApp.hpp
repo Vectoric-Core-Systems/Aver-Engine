@@ -140,6 +140,8 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "AnimStateMachineEditor.hpp"
 #include "MontageEditor.hpp"
 #include "IkRigEditor.hpp"      // [wave5/ik-retarget]
+
+#include "FaceRigEditor.hpp"    // [wave9/morph]
 #include "RetargetEditor.hpp"
 #include "RigEditor.hpp"
 #include "MotionDbEditor.hpp"
@@ -157,6 +159,10 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // Unconditional for the identical reason: OcInput.hpp's own comment states it needs no engine
 // dependency either.
 #include "InputSchemeEditor.hpp"
+// Accessibility (docs/ACCESSIBILITY.md): the .occaptions editor tab, the colour-vision preview and the per-frame option/caption state.
+#include "CaptionEditor.hpp"
+#include "AccessibilityPreview.hpp"
+#include "aver/game/GameAccessibility.hpp"
 // Data tables (.csv/.json) and localization string tables: text formats in the base Aver.Formats target, so unconditional too.
 #include "DataTableEditor.hpp"
 #include "StringTableEditor.hpp"
@@ -2751,6 +2757,8 @@ private:
     // starter .ocretarget from a source skeleton (target left for the tab), and a starter .ocrig. With a skeleton path
     // the asset is created beside it; without, in the selected folder.
     void cbCreateIkRig(const std::string& skeletonPath = {});
+
+    void cbCreateFaceRig();   // [wave9/morph] a starter .ocface
     void cbCreateRetarget(const std::string& sourceSkeletonPath = {});
     void cbCreateRig();
     bool cbOpenRetargetFor(const std::string& targetSkeletonPath);
@@ -2759,6 +2767,7 @@ private:
 
     // Writes a starter .ocinput (Input Scheme) and opens it.
     void cbCreateInputScheme();
+    void cbCreateCaptions();   // a starter .occaptions (Content Browser > New Captions), CaptionEditor.hpp's captionStarterData
 
     // Writes a starter .ocgas (Gameplay Definitions) and opens it.
     void cbCreateGameplayDefs();
@@ -3376,6 +3385,9 @@ private:
     f32  fogMatchTargetOpacity_ = 0.9f;   // opacity WANTED at the load boundary itself
 #endif
     rhi::PostSettings post_{};
+    // The editor's colour-vision preview (View menu, editor prefs only) and this frame's accessibility options and captions.
+    editor::AccessibilityPreview accessPreview_;
+    game::AccessFrame access_;
     editor::PostVolumeTools postVolumeTools_;   // POSTVOLUME records: Add menu, boxes, Details, viewport blend
     bool showPostVolumes_ = true;               // Show > Post Volumes: every volume's box, not just the selected one's
     // What this editor last handed the device, so per-frame push can tell when something ELSE (console post.* vars) changed it.

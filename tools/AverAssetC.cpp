@@ -25,6 +25,7 @@
 #include "aver/formats/ObjImport.hpp"
 #include "aver/formats/UsdImport.hpp"
 #include "aver/formats/OcMesh.hpp"
+#include "aver/formats/MorphTarget.hpp"   // appendMorphTargets (mergeAll)
 #include "aver/formats/OcWorld.hpp"   // the scene level a multi-node glTF now writes
 #include "aver/formats/OcInstances.hpp"   // .ocinst -- where a PointInstancer's instances go by default
 #include "aver/formats/OcStream.hpp"      // .ocstream -- `AverAssetC stream`
@@ -32,6 +33,7 @@
 #include "aver/platform/FileSystem.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/anim/Retarget.hpp"   // `retarget`
+#include "aver/anim/Viseme.hpp"     // `visbake`
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Hash.hpp"
@@ -744,7 +746,8 @@ bool writeAndVerifyMesh(const std::string& input, const std::string& path, const
     }
     std::string extra = "\"vertices\":" + std::to_string(back.vertexCount())
         + ",\"triangles\":" + std::to_string(back.indices.size() / 3)
-        + ",\"hasSkin\":" + (back.hasSkin() ? "true" : "false");
+        + ",\"hasSkin\":" + (back.hasSkin() ? "true" : "false")
+        + ",\"morphTargets\":" + std::to_string(back.morphTargets.size());
     emitArtifact(input, path, "mesh", true, true, {}, stats, extra);
     return true;
 }
@@ -797,6 +800,7 @@ fmt::OcMeshData mergeAll(const std::vector<MeshItem>& items, usize& mergedCount,
             m.weights.insert(m.weights.end(), src.weights.begin(), src.weights.end());
         }
         for (const u32 idx : src.indices) m.indices.push_back(idx + base);
+        fmt::appendMorphTargets(m, src, base);   // blend-shape entries index vertices
 
         const u32 slotBase = static_cast<u32>(m.materialSlots.size());
         m.materialSlots.insert(m.materialSlots.end(), src.materialSlots.begin(), src.materialSlots.end());
@@ -1348,6 +1352,73 @@ int runRetarget(int argc, char** argv) {
     return exitCode(code ? ExitCode::Failed : ExitCode::Ok);
 }
 
+// `visbake <track.ocvis> --rig <x.ocface> --out <clip.ocanim> [--fps N]`: a lip-sync track turned into an ordinary
+// curve-only clip (pose.viseme_* curves), so a montage, a state machine or a sequencer animation track can play speech
+// with no new playback code (docs/plans/wave9/MORPH_TARGETS.md 2.6). The rig supplies phoneme overrides and the envelope.
+int runVisBake(int argc, char** argv) {
+    std::string trackPath, rigPath, outPath;
+    f32 fps = 30.0f;
+    for (int i = 2; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--rig" && i + 1 < argc)      rigPath = argv[++i];
+        else if (a == "--out" && i + 1 < argc) outPath = argv[++i];
+        else if (a == "--fps" && i + 1 < argc) fps = static_cast<f32>(std::atof(argv[++i]));
+        else if (!a.empty() && a[0] != '-' && trackPath.empty()) trackPath = a;
+        else { AVER_ERROR("[visbake] unknown argument '{}'", a); return exitCode(ExitCode::Usage); }
+    }
+    if (trackPath.empty() || outPath.empty() || !(fps >= 1.0f)) {
+        AVER_ERROR("[visbake] usage: AverAssetC visbake <track.ocvis> --rig <x.ocface> --out <clip.ocanim> [--fps N]");
+        return exitCode(ExitCode::Usage);
+    }
+
+    RunStats stats;
+    anim::VisemeTrack track;
+    std::vector<std::string> diag;
+    std::string why;
+    if (!anim::loadVisemeTrack(trackPath, track, &diag, &why)) {
+        emitArtifact(trackPath, outPath, "visbake", false, false, why, stats);
+        emitSummary(trackPath, stats, 1);
+        return exitCode(ExitCode::Failed);
+    }
+    for (const std::string& d : diag) AVER_WARN("[visbake] {}: {}", trackPath, d);
+    anim::FaceRigAsset rig;
+    const anim::FaceRigAsset* rigPtr = nullptr;
+    if (!rigPath.empty()) {
+        if (!anim::loadFaceRig(rigPath, rig, &why)) {
+            emitArtifact(trackPath, outPath, "visbake", false, false, "cannot load the face rig: " + why, stats);
+            emitSummary(trackPath, stats, 1);
+            return exitCode(ExitCode::Failed);
+        }
+        rigPtr = &rig;
+    }
+    // Symbols neither a phoneme nor a viseme are skipped by the baker; say which, once.
+    {
+        std::vector<anim::VisemeEvent> probe = track.events;
+        std::vector<std::string> unknown;
+        anim::resolveVisemeEvents(probe, rigPtr, track.set == anim::VisemeSet::Viseme, &unknown);
+        for (const std::string& s : unknown) AVER_WARN("[visbake] '{}' is not a phoneme or a viseme; its events are skipped", s);
+    }
+    const fmt::OcAnimation clip = anim::bakeVisemeTrack(track, rigPtr, fps);
+    if (clip.curves.empty()) {
+        emitArtifact(trackPath, outPath, "visbake", false, false, "no event resolved to a viseme", stats);
+        emitSummary(trackPath, stats, 1);
+        return exitCode(ExitCode::Failed);
+    }
+    if (!fmt::saveOcAnim(outPath, clip, &why)) {
+        emitArtifact(trackPath, outPath, "visbake", false, false, why, stats);
+        emitSummary(trackPath, stats, 1);
+        return exitCode(ExitCode::Failed);
+    }
+    fmt::OcAnimation back;
+    std::string verr;
+    const bool verified = fmt::loadOcAnim(outPath, back, &verr) && back.valid() && back.curves.size() == clip.curves.size();
+    emitArtifact(trackPath, outPath, "visbake", true, verified, verified ? std::string() : "the baked clip did not reload: " + verr, stats,
+                 "\"curves\":" + std::to_string(clip.curves.size()) + ",\"durationSeconds\":" + std::to_string(clip.duration));
+    const int code = stats.failed > 0 ? 1 : 0;
+    emitSummary(trackPath, stats, code);
+    return exitCode(code ? ExitCode::Failed : ExitCode::Ok);
+}
+
 // ---- a model file's whole conversion, shared by glTF and FBX ----
 //
 // WHAT HAD BEEN THE glTF BRANCH OF main(), moved here verbatim so FBX takes exactly the same road: materials
@@ -1479,8 +1550,10 @@ int convertImportedModel(const ModelConvertArgs& args, fmt::GltfImportResult& re
     for (usize i = 0; i < res.animations.size(); ++i) {
         fmt::OcAnimation clip = res.animations[i];
         // A clip names its skeleton by the file stem written above: skeleton i is <base><i>, skeleton 0 is <base>.
+        // A curve-only clip (blend-shape weights on a file with no skeleton) names none.
         const usize skelIdx = i < res.animationSkeleton.size() && res.animationSkeleton[i] > 0 ? usize(res.animationSkeleton[i]) : 0;
-        clip.skeletonRef = base + (skelIdx == 0 ? std::string() : std::to_string(skelIdx));
+        if (!clip.tracks.empty() || !res.skeletons.empty())
+            clip.skeletonRef = base + (skelIdx == 0 ? std::string() : std::to_string(skelIdx));
         const std::string name = safe(i < res.animationNames.size() ? res.animationNames[i] : "",
                                       "Clip" + std::to_string(i));
         const std::string p = outDir + "/" + base + "_" + name + ".ocanim";
@@ -1489,7 +1562,7 @@ int convertImportedModel(const ModelConvertArgs& args, fmt::GltfImportResult& re
             anyFailed = true;
         } else {
             emitArtifact(input, p, "animation", true, true, {}, stats,
-                         "\"durationSeconds\":" + std::to_string(clip.duration));
+                         "\"durationSeconds\":" + std::to_string(clip.duration) + ",\"curves\":" + std::to_string(clip.curves.size()));
         }
     }
 
@@ -1536,6 +1609,7 @@ int main(int argc, char** argv) {
         "\n                          [--foliage-cell m]   bake placement bounds, ids, STREAM record, foliage cells"
         "\n       AverAssetC retarget <asset.ocretarget> --clips <file|dir>... --out <dir> [--suffix S] [--fps N]"
         "\n                          [--overwrite] [--content-dir <dir>]   carry clips onto the target skeleton"
+        "\n       AverAssetC visbake <track.ocvis> --rig <x.ocface> --out <clip.ocanim> [--fps N]   lip-sync track -> curve-only clip"
         ;
 
     if (argc < 2) {
@@ -1550,6 +1624,7 @@ int main(int argc, char** argv) {
 
     if (subcommand == "stream") return runStream(argc, argv);
     if (subcommand == "retarget") return runRetarget(argc, argv);
+    if (subcommand == "visbake") return runVisBake(argc, argv);
 
     if (subcommand != "convert") {
         AVER_ERROR("{}", kUsage);

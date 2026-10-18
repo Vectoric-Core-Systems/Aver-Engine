@@ -278,10 +278,13 @@ static int Main()
         failures += TerrainNodeTests.RunAll();
         // Wave-5 node families (docs/plans/wave5): IK and rig inputs, motion matching, the sequencer.
         failures += IkNodeTests.RunAll();
+
+        failures += MorphNodeTests.RunAll();
         failures += MotionMatchNodeTests.RunAll();
         failures += SequenceNodeTests.RunAll();
         failures += UiTextNodeTests.RunAll();
         failures += SoftBodyNodeTests.RunAll();
+        failures += AccessibilityNodeTests.RunAll();   // wave9 ACCESSIBILITY: the 11 Accessibility nodes
 
         // Self: the node that makes a canvas-authored graph able to name its own entity at all.
         // See SelfNodeTests.cs's header for why its absence, not polish, is what kept every

@@ -260,6 +260,25 @@ void gatherCsharp(std::string_view text, std::string_view path, std::vector<LocU
     }
 }
 
+void gatherOccaptions(std::string_view text, std::string_view path, std::vector<LocUse>& out) {
+    forEachLine(text, [&](std::string_view line, usize no) {
+        line = trim(line);
+        if (line.empty() || line[0] == '#') return;
+        std::vector<std::string> t;
+        if (!tokenizeQuoted(line, t) || t.size() < 3) return;
+        for (usize i = 0; i < t.size(); ++i) if (t[i] == "#") { t.resize(i); break; }   // trailing comment
+        const auto add = [&](const std::string& v) {
+            LocRef r;
+            if (parseLocRef(v, r)) addUse(r, where(path, no), out);
+        };
+        if (equalsCI(t[0], "LINE")) { if (t.size() >= 4) add(t[3]); }
+        else if (equalsCI(t[0], "SPEAKER") || equalsCI(t[0], "CUE")) {
+            const char* key = equalsCI(t[0], "SPEAKER") ? "name" : "tag";
+            for (usize i = 2; i + 1 < t.size(); ++i) if (equalsCI(t[i], key)) { add(t[i + 1]); break; }
+        }
+    });
+}
+
 void gatherTable(const OcTableData& d, std::string_view path, std::vector<LocUse>& out) {
     for (usize r = 0; r < d.rowCount(); ++r) {
         for (usize c = 0; c < d.columns.size(); ++c) {

@@ -22,10 +22,15 @@ add_library(Aver.Framework SHARED
   src/ImportAbi.cpp
   # IK goals, foot-IK weights and control-rig inputs relayed to the rig system (wave 5, docs/ANIM_IK_RETARGET.md).
   src/IkAbi.cpp
+
+  # Blend-shape weights, face poses, face rig and lip-sync relayed to the morph system's provider (docs/ANIM_MORPH_FACE.md).
+  src/MorphAbi.cpp
   # Cloth and destruction calls relayed to the soft-body system's provider (docs/SOFTBODY.md).
   src/SoftBodyAbi.cpp
   src/SequenceAbi.cpp
   src/LocalizationAbi.cpp
+  # Accessibility: the option table, captions, speech and camera feel (wave 9, docs/ACCESSIBILITY.md).
+  src/AccessAbi.cpp
   src/DataTableAbi.cpp
   src/EntityStateAbi.cpp
   # Terrain and water queries relayed from the host (wave 3, landscape layers and rivers).

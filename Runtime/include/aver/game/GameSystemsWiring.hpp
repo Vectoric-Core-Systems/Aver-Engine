@@ -267,6 +267,7 @@ inline void resetGameSystems() {
     anim::animSystem().montages().stopAll();
     anim::controlRigSystem().clearRuntime();   // [wave5/ik-retarget] rig inputs, IK goals, foot smoothing
     anim::controlRigSystem().clear();          // and the loaded rigs, so an edited .ocrig / .ocikrig is read afresh
+    anim::animSystem().morphs().clearRuntime();   // [wave9/morph] script and sequencer weight overrides, lip-sync
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
     softbody::softBodySystem().clear();        // bodies, debris entities, queued inbox and events

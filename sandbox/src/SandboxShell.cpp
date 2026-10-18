@@ -2203,6 +2203,11 @@ void SandboxApp::buildUI(Engine& e) {
             ImGui::EndMenu();
         }
         uiReg_.track("menu.build");
+        if (ImGui::BeginMenu("Accessibility")) {
+            editor::drawColourVisionPreviewMenu(accessPreview_);
+            ImGui::EndMenu();
+        }
+        uiReg_.track("menu.accessibility");
         if (ImGui::BeginMenu("Select")){
             // Select All now works; disabled only when nothing to select.
 #if AVER_MODULE_SCENE

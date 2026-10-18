@@ -121,5 +121,5 @@ internal static partial class GameSystemNodes
         Reg("importmodel", GenericKind.Exec, typeof(ModelImportGraph), "ImportModelForGraph", "overwrite:bool,scale:float=100", "success:bool,meshes:int,skeletons:int,clips:int", "@source,@dest,p:overwrite,p:scale,>meshes,>skeletons,>clips", "success"),
         Reg("ismodelimportavailable", GenericKind.Pure, typeof(ModelImportGraph), "IsModelImportAvailableForGraph", "", "available:bool", "", "available"),
     }.Concat(GasTable()).Concat(AiQueryTable()).Concat(LevelInstanceTable()).Concat(TerrainTable())
-      .Concat(IkTable()).Concat(MotionMatchTable()).Concat(SequenceTable()).Concat(SoftBodyTable()).Concat(UiTextTable()).ToArray();
+      .Concat(IkTable()).Concat(MotionMatchTable()).Concat(SequenceTable()).Concat(SoftBodyTable()).Concat(UiTextTable()).Concat(AccessibilityTable()).Concat(MorphTable()).ToArray();
 }

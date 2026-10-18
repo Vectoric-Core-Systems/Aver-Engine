@@ -43,6 +43,8 @@ Event takeEvent(const char* name, int32_t sender, int32_t target) {
 
 } // namespace
 
+// The process-wide bus, for native subscribers inside this DLL (AccessAbi.cpp subscribes Caption.Show / Caption.Stop).
+namespace aver::fw { EventBus& processEventBus() { return bus(); } }
 extern "C" {
 
 int32_t aver_fw_timers_abi_version(void) { return AVER_FW_TIMERS_ABI_VERSION; }

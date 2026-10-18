@@ -33,6 +33,11 @@ aver_add_module(Aver.Anim
     src/Retarget.cpp
     src/RetargetAsset.cpp
     src/RetargetAutoMap.cpp
+    # [wave9/morph begin] blend-shape CPU reference, the .ocface face rig and the .ocvis lip-sync tracks (docs/plans/wave9/MORPH_TARGETS.md).
+    src/Morph.cpp
+    src/FaceRig.cpp
+    src/Viseme.cpp
+    # [wave9/morph end]
   DEPS
     Aver.Core
     Aver.Formats

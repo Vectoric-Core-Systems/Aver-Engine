@@ -238,7 +238,7 @@ int main() {
             UiSettingsScreen screen(t, model, &rebind);
             const UiWidgetId root = screen.build();
             check(textOf(t, root, "Back") == "Back" && textOf(t, root, "Title") == "Settings", "no resolver: the screen reads in English");
-            check(textOf(t, root, "tab.0") == "Graphics" && textOf(t, root, "tab.2") == "Controls", "tab names show their inline defaults");
+            check(textOf(t, root, "tab.0") == "Graphics" && textOf(t, root, "tab.2") == "Accessibility" && textOf(t, root, "tab.5") == "Controls", "tab names show their inline defaults");
             check(t.shown(model.find("graphics.quality")->choices[0]) == "Low", "choices show their inline defaults");
         }
         {

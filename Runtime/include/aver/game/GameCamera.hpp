@@ -21,6 +21,10 @@
 #  include "aver/framework/framework_abi.h"
 #endif
 
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_access_abi.h"
+#endif
+
 #include <cmath>
 
 namespace aver::game {
@@ -69,6 +73,20 @@ inline CameraMatrices pushCamera(rhi::IDevice& device, const Vec3& pos, const Ve
     const Mat4 invVP = invViewProjRel * Mat4::translation(pos);
     return { viewProj, invVP };
 }
+
+#if AVER_MODULE_FRAMEWORK
+// Camera shake and head bob (framework CameraFx) over the FINAL camera, with the player's effective scales; call right
+// before pushCamera, after the pawn and sequencer cameras. Leaves pos/yaw/pitch alone when nothing is active, so a game
+// that never calls AddShake/SetBob is bit-identical. The editor's free-fly camera does not use it.
+inline void applyCameraFx(Vec3& pos, f32& yaw, f32& pitch, f32 dt) {
+    float p[3] = {pos.x, pos.y, pos.z};
+    float yp[2] = {yaw, pitch};
+    if (!aver_fw_camera_fx_apply(dt, p, yp)) return;
+    pos = Vec3{p[0], p[1], p[2]};
+    yaw = yp[0];
+    pitch = yp[1];
+}
+#endif
 
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
 // Drives the play camera from player controller 0's possessed pawn, writing `pos`/`yaw`/`pitch` in

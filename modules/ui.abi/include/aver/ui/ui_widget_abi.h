@@ -204,6 +204,27 @@ AVER_UI_API void aver_ui_rebind_set_binding(int32_t row, const char* bindingText
 // (index = raw key slot); the host applies them, then calls aver_ui_rebind_set_binding.
 AVER_UI_API uint32_t aver_ui_settings_build(const char* rootName);
 
+// ---- accessibility (docs/ACCESSIBILITY.md) -------------------------------------------------------------------------
+
+/* Tree-wide options: textScale multiplies font sizes only (0.5..4, default 1); highContrast 1 swaps to the contrast
+ * theme and ignores per-widget colour overrides. The UI scale stays aver_ui_set_dpi's userScale. */
+AVER_UI_API void aver_ui_set_access(float textScale, int32_t highContrast);
+
+/* The caption overlay ("Aver.Captions", a passive Overlay root). The host pushes the visible lines every frame BEFORE
+ * aver_ui_widgets_frame; an empty list hides it. speaker and text are raw strings (references are localized by the
+ * tree); rgba is 0xRRGGBBAA; dir is -1 left, 0 none, 1 right, 2 behind; alpha 0..1. sizeScale multiplies the 24 dp base
+ * (the size preset), bgOpacity 0..1, top 1 = top of the screen. */
+typedef struct AverUiCaptionLine { const char* speaker; const char* text; uint32_t rgba; int32_t dir; float alpha; } AverUiCaptionLine;
+AVER_UI_API void aver_ui_captions_set(const AverUiCaptionLine* lines, int32_t count, float sizeScale, float bgOpacity, int32_t top);
+
+/* The announcer narrates focus changes and value changes of widgets: it is called with the widget's accessible text
+ * (already localized) and interrupt 1. aver_fw_speech_announce_ui has exactly this signature. NULL clears. */
+typedef int32_t (*AverUiAnnounceFn)(const char* utf8, int32_t interrupt);
+AVER_UI_API void aver_ui_set_announcer(AverUiAnnounceFn fn);
+
+/* "name, role, state or value" for a widget, localized; NULL for an unknown id. */
+AVER_UI_API const char* aver_ui_widget_accessible_text(uint32_t id);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

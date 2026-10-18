@@ -801,3 +801,14 @@ if(NOT WIN32 AND NOT APPLE)
   target_link_libraries(ShellTrashTest PRIVATE Aver.Core)
   set_target_properties(ShellTrashTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# CaptionEditorTest -- the .occaptions editor tab's headless core: load / save with the file's comments kept, undo, the
+# speaker / cue / line setters and their refusals, add-cue-from-sound, the pattern tester, speaker colours and renames.
+# InputSchemeEditorTest's arrangement: compiles sandbox/src/CaptionEditor.cpp directly with AVER_WITH_IMGUI undefined.
+# .occaptions lives in the BASE Aver.Formats target, so this is never configured out.
+add_executable(CaptionEditorTest
+  src/CaptionEditorTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/CaptionEditor.cpp)
+target_include_directories(CaptionEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(CaptionEditorTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(CaptionEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

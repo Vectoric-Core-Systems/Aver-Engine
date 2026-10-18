@@ -19,6 +19,15 @@ bool g_started = false;
 std::unordered_map<std::string, aver::audio::SoundHandle> g_byPath;
 std::unordered_map<aver::audio::SoundHandle, std::string> g_paths;
 
+AverAudioPlayObserver g_playObserver = nullptr;
+void* g_playObserverUser = nullptr;
+
+// Tells the observer (captions) a voice started. Called only for a voice != 0.
+void notifyPlay(const char* path, int32_t voice, int32_t bus, bool positional, float x, float y, float z, bool looping) {
+    if (g_playObserver && voice != 0)
+        g_playObserver(g_playObserverUser, path, voice, bus, positional ? 1 : 0, x, y, z, looping ? 1 : 0);
+}
+
 // THE MACROS AND THE ENUM, PINNED. audio::Bus (Sound.hpp) and the AVER_AUDIO_BUS_* constants
 // (audio_abi.h) are the same four values written twice, and busOf below folds anything it does not
 // recognise into Sfx -- deliberately, because an ABI must not trust its caller, but it means a DRIFT
@@ -66,6 +75,9 @@ int32_t startStream(const char* utf8Path, const aver::audio::PlayDesc& desc) {
     sp.loopEnd = o.loopEnd;
     return static_cast<int32_t>(g_device.mixer().playStream(std::move(o.source), desc, sp));
 }
+
+// The mixer's bus back to the ABI constant, for the observer.
+int32_t busValue(aver::audio::Bus b) { return static_cast<int32_t>(b); }
 
 } // namespace
 
@@ -179,7 +191,12 @@ int32_t aver_audio_play(int32_t sound, float volume, float pitch, int32_t loopin
     d.pitch   = pitch;
     d.looping = looping != 0;
     d.bus     = busOf(bus);
-    return static_cast<int32_t>(g_device.mixer().play(d));
+    const int32_t voice = static_cast<int32_t>(g_device.mixer().play(d));
+    if (voice != 0) {
+        const auto it = g_paths.find(d.sound);
+        notifyPlay(it != g_paths.end() ? it->second.c_str() : nullptr, voice, busValue(d.bus), false, 0, 0, 0, d.looping);
+    }
+    return voice;
 }
 
 // Starts a positional voice at a world point. Returns the voice handle, or 0.
@@ -197,7 +214,12 @@ int32_t aver_audio_play_at(int32_t sound, float x, float y, float z,
     d.position[0] = x; d.position[1] = y; d.position[2] = z;
     if (innerCm > 0.0f) d.attenuation.innerRadius = innerCm;
     if (outerCm > innerCm) d.attenuation.outerRadius = outerCm;
-    return static_cast<int32_t>(g_device.mixer().play(d));
+    const int32_t voice = static_cast<int32_t>(g_device.mixer().play(d));
+    if (voice != 0) {
+        const auto it = g_paths.find(d.sound);
+        notifyPlay(it != g_paths.end() ? it->second.c_str() : nullptr, voice, busValue(d.bus), true, x, y, z, d.looping);
+    }
+    return voice;
 }
 
 void    aver_audio_stop(int32_t voice)     { if (g_started) g_device.mixer().stop(static_cast<aver::audio::VoiceHandle>(voice)); }
@@ -252,7 +274,9 @@ int32_t aver_audio_stream_play(const char* utf8Path, float volume, float pitch, 
     d.looping = looping != 0;
     d.bus = busOf(bus);
     d.fadeInSeconds = fadeInSeconds;
-    return startStream(utf8Path, d);
+    const int32_t voice = startStream(utf8Path, d);
+    notifyPlay(utf8Path, voice, busValue(d.bus), false, 0, 0, 0, d.looping);
+    return voice;
 }
 
 // Streams a file as a positioned voice.
@@ -269,7 +293,9 @@ int32_t aver_audio_stream_play_at(const char* utf8Path, float x, float y, float 
     if (innerCm > 0.0f) d.attenuation.innerRadius = innerCm;
     if (outerCm > innerCm) d.attenuation.outerRadius = outerCm;
     d.fadeInSeconds = fadeInSeconds;
-    return startStream(utf8Path, d);
+    const int32_t voice = startStream(utf8Path, d);
+    notifyPlay(utf8Path, voice, busValue(d.bus), true, x, y, z, d.looping);
+    return voice;
 }
 
 void aver_audio_fade_voice(int32_t voice, float targetGain, float seconds, int32_t curve, int32_t stopWhenDone) {
@@ -291,7 +317,14 @@ int32_t aver_audio_music_play(const char* utf8Path, float volume, float fadeSeco
     opt.curve = curveOf(curve);
     opt.stream.loopBegin = o.loopBegin;
     opt.stream.loopEnd = o.loopEnd;
-    return static_cast<int32_t>(g_music.play(std::move(o.source), opt));
+    const int32_t voice = static_cast<int32_t>(g_music.play(std::move(o.source), opt));
+    notifyPlay(utf8Path, voice, AVER_AUDIO_BUS_MUSIC, false, 0, 0, 0, opt.looping);
+    return voice;
+}
+
+void aver_audio_set_play_observer(AverAudioPlayObserver fn, void* user) {
+    g_playObserver = fn;
+    g_playObserverUser = user;
 }
 
 void    aver_audio_music_stop(float fadeSeconds) { if (g_started) g_music.stop(fadeSeconds); }

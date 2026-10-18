@@ -6,6 +6,7 @@
 
 #include "ActionEngine.hpp"
 
+#include "aver/framework/AccessAssist.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcInput.hpp"
 #include "aver/scene/scene_abi.h"
@@ -1453,7 +1454,10 @@ void aver_fw_action_bind(int32_t action, int32_t source, int32_t key, float scal
 }
 
 // Drops every binding. Registrations survive -- see framework_abi.h's own comment.
-void aver_fw_action_clear_bindings(void) { actionBindings().clear(); }
+void aver_fw_action_clear_bindings(void) {
+    actionBindings().clear();
+    aver::fw::access::accessAssist().resetLatches();   // a context change releases toggled actions
+}
 
 // True when the action's value goes through a `smooth` modifier (its own or a binding's).
 bool actionHasSmooth(int32_t action) {
@@ -1462,6 +1466,8 @@ bool actionHasSmooth(int32_t action) {
         return false;
     };
     if (has(actionDefs()[static_cast<usize>(action) - 1].modifiers)) return true;
+    // A toggled action's value is the latch, which only aver_fw_action_update advances: read the cache.
+    if (aver::fw::access::accessAssist().toggleOn(actionDefs()[static_cast<usize>(action) - 1].name)) return true;
     for (const ActionBinding& b : actionBindings())
         if (b.action == action && has(b.modifiers)) return true;
     return false;
@@ -1567,6 +1573,11 @@ void actionEval(int32_t handle) {
     for (const ActionBinding& b : bindings)
         if (b.action == handle && !b.triggers.empty()) { anyBindingTriggers = true; break; }
 
+    // Input assist: scaled hold times and tap/combo windows (null = the authored values).
+    const aver::fw::access::AccessAssist& assist = aver::fw::access::accessAssist();
+    const fwinput::Timing timing{assist.timing().hold, assist.timing().window};
+    const fwinput::Timing* tp = assist.timingActive() ? &timing : nullptr;
+
     fwinput::V3 sum;
     Rank bState = Rank::None;
     for (ActionBinding& b : bindings) {
@@ -1575,15 +1586,16 @@ void actionEval(int32_t handle) {
         const fwinput::V3 v = actionBindingVec(b, /*useCurrent=*/true, run.dt, &b.modRt);
         for (int k = 0; k < 3; ++k) sum.c[k] += v.c[k];
         Rank r = Rank::None;
-        if (!b.triggers.empty()) r = fwinput::combineTriggers(b.triggers, b.trigRt, v, run.dt, ctx);
+        if (!b.triggers.empty()) r = fwinput::combineTriggers(b.triggers, b.trigRt, v, run.dt, ctx, tp);
         else if (anyBindingTriggers && !ownTriggers) r = fwinput::actuated(v, 0.15f) ? Rank::Triggered : Rank::None;
         if (static_cast<int>(r) > static_cast<int>(bState)) bState = r;
     }
 
     if (a.modRt.size() != a.modifiers.size()) a.modRt.resize(a.modifiers.size());
-    const fwinput::V3 V = a.modifiers.empty() ? sum : fwinput::applyModifiers(a.modifiers, sum, run.dt, &a.modRt);
+    fwinput::V3 V = a.modifiers.empty() ? sum : fwinput::applyModifiers(a.modifiers, sum, run.dt, &a.modRt);
+    aver::fw::access::accessAssist().filter(a.name, a.valueType == AVER_FW_ACTION_DIGITAL, V.c);   // toggle instead of hold
     Rank aState = Rank::None;
-    if (ownTriggers) aState = fwinput::combineTriggers(a.triggers, a.trigRt, V, run.dt, ctx);
+    if (ownTriggers) aState = fwinput::combineTriggers(a.triggers, a.trigRt, V, run.dt, ctx, tp);
     else if (!anyBindingTriggers) aState = fwinput::actuated(V, 0.15f) ? Rank::Triggered : Rank::None;
     const Rank now = static_cast<int>(aState) > static_cast<int>(bState) ? aState : bState;
 
@@ -1685,6 +1697,7 @@ void aver_fw_action_reset_state(void) {
         for (fwinput::ModRuntime& r : b.modRt) r = fwinput::ModRuntime{};
     }
     actionEventList().clear();
+    aver::fw::access::accessAssist().resetLatches();
 }
 
 // Results of the last update; 0 for an invalid handle.

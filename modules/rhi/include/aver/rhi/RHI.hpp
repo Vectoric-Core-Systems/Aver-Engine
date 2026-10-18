@@ -213,12 +213,18 @@ struct PostSettings {
     // 3D LUT (Tex3D, RGBA8 or RGBA16F, N^3, x=R y=G z=B), applied AFTER the tonemap in display
     // space. Create it with initialState ShaderResource; 0 = none.
     TextureHandle gradingLut = 0; f32 gradingLutIntensity = 1;
+
+    // ---- Accessibility colour-vision filter (docs/ACCESSIBILITY.md; ColourVision.hpp), on the finished display image ----
+    // mode (0 off, 1 protanopia, 2 deuteranopia, 3 tritanopia) | (simulate ? 4 : 0). The hosts set it from the player's
+    // option after the post volumes blend, so a level cannot undo it. 0 records nothing and changes no pixel.
+    u32  colourVision = 0;
+    f32  colourVisionStrength = 1;   // 0..1, how far the filter moves the colour
 };
 
 // Field by field, not memcmp: the bool leaves padding whose bytes a copy need not preserve. The size
 // check is the reminder -- a new PostSettings field changes it, and must be added here too.
 inline bool postSettingsEqual(const PostSettings& a, const PostSettings& b) {
-    static_assert(sizeof(PostSettings) == 172, "a PostSettings field was added: compare it below too");
+    static_assert(sizeof(PostSettings) == 180, "a PostSettings field was added: compare it below too");
     return a.exposure == b.exposure && a.bloomIntensity == b.bloomIntensity &&
            a.bloomThreshold == b.bloomThreshold && a.bloomKnee == b.bloomKnee &&
            a.autoExposure == b.autoExposure && a.exposureMin == b.exposureMin &&
@@ -240,7 +246,8 @@ inline bool postSettingsEqual(const PostSettings& a, const PostSettings& b) {
            a.gamma[0] == b.gamma[0] && a.gamma[1] == b.gamma[1] && a.gamma[2] == b.gamma[2] &&
            a.gain[0] == b.gain[0] && a.gain[1] == b.gain[1] && a.gain[2] == b.gain[2] &&
            a.whiteBalanceK == b.whiteBalanceK && a.whiteBalanceTint == b.whiteBalanceTint &&
-           a.gradingLut == b.gradingLut && a.gradingLutIntensity == b.gradingLutIntensity;
+           a.gradingLut == b.gradingLut && a.gradingLutIntensity == b.gradingLutIntensity &&
+           a.colourVision == b.colourVision && a.colourVisionStrength == b.colourVisionStrength;
 }
 
 // Which sky the engine draws. Authored is a two-colour dome; Physical derives the dome, the direct

@@ -1,0 +1,15 @@
+{
+  "format": "ocface",
+  "version": 1,
+  "convention": "arkit52",
+  "mesh": "FaceRigged.ocmesh",
+  "skeleton": "FaceRigged.ocskel",
+  "poses": [
+    {"name": "smile", "targets": [{"name": "mouthSmileLeft", "weight": 0.9}, {"name": "mouthSmileRight", "weight": 0.9}, {"name": "cheekPuff", "weight": 0.2}], "joints": []},
+    {"name": "surprise", "targets": [{"name": "browInnerUp", "weight": 1}, {"name": "eyeWideLeft", "weight": 0.8}, {"name": "eyeWideRight", "weight": 0.8}, {"name": "jawOpen", "weight": 0.4}], "joints": []},
+    {"name": "blink", "targets": [{"name": "eyeBlinkLeft", "weight": 1}, {"name": "eyeBlinkRight", "weight": 1}], "joints": []},
+    {"name": "talkOpen", "targets": [{"name": "jawOpen", "weight": 0.5}], "joints": [{"bone": "jaw", "position": [0, 0, 0], "rotation": [0.104528463, 0, 0, 0.994521895], "scale": [1, 1, 1]}]}
+  ],
+  "phonemes": {"AA": "viseme_aa"},
+  "lipsync": {"lead": 0.04, "attack": 0.05, "release": 0.08, "minHold": 0.06, "maxTotal": 1}
+}

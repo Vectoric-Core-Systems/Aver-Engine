@@ -91,6 +91,11 @@ add_executable(Sandbox WIN32
   # [wave5/ik-retarget] IK Rig, IK Retargeter and Control Rig editors, and the skeleton view they share.
   src/RigPreview.cpp
   src/IkRigEditor.cpp
+
+  # [wave9/morph] blend-shape editing: the shared skinned preview, the weight-slider panel and the Face Rig editor tab.
+  src/SkinPreview.cpp
+  src/MorphPanel.cpp
+  src/FaceRigEditor.cpp
   src/RetargetEditor.cpp
   src/RigEditor.cpp
   src/MotionDbEditor.cpp
@@ -110,6 +115,8 @@ add_executable(Sandbox WIN32
   src/PostVolumeTools.cpp
   src/PreviewGizmo.cpp
   src/InputSchemeEditor.cpp
+  src/CaptionEditor.cpp
+  src/AccessibilityPreview.cpp
   src/DataTableEditor.cpp
   src/StringTableEditor.cpp
   src/LocGatherRun.cpp

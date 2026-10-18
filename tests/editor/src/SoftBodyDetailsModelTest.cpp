@@ -95,7 +95,7 @@ int main() {
         c.hasCloth = true;
         check(!canAttach(c, kind("Destructible"), &why) && why.find("Cloth") != std::string::npos, "and the other way round");
         check(placedAssetExts(kind("Cloth")).size() == 1 && std::string(placedAssetExts(kind("Cloth"))[0]) == ".ocsoft", "both pick .ocsoft assets");
-        check(kPlacedKindCount >= 10 && std::string(kPlacedKinds[kPlacedKindCount - 2].type) == "Cloth" && std::string(kPlacedKinds[kPlacedKindCount - 1].type) == "Destructible",
+        check(kPlacedKindCount >= 11 && std::string(kPlacedKinds[8].type) == "Cloth" && std::string(kPlacedKinds[9].type) == "Destructible",
               "the two kinds follow Smart Object");
     }
 

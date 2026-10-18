@@ -75,3 +75,14 @@ add_executable(FontSetEditorTest
 target_include_directories(FontSetEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(FontSetEditorTest PRIVATE Aver.UI Aver.Core Aver.Platform)
 set_target_properties(FontSetEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UiAccessTest / UiCaptionViewTest -- accessibility in the retained UI (docs/ACCESSIBILITY.md): text scale, high contrast,
+# the spoken form of every widget kind, the settings screen's new tabs, the announcer on the widget C ABI (so this one
+# links the DLL, like UiLocalizeAbiTest), and the passive caption overlay. No device, no window.
+add_executable(UiAccessTest src/UiAccessTest.cpp)
+target_link_libraries(UiAccessTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiAccessTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(UiCaptionViewTest src/UiCaptionViewTest.cpp)
+target_link_libraries(UiCaptionViewTest PRIVATE Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiCaptionViewTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

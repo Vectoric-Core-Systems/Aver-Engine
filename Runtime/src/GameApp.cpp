@@ -78,6 +78,8 @@
 #  include "aver/framework/framework_hooks.h"
 #  include "aver/framework/framework_anim_abi.h"
 #  include "aver/framework/framework_ik_abi.h"   // [wave5/ik-retarget] aver_fw_set_ik_provider
+
+#  include "aver/framework/framework_morph_abi.h"   // [wave9/morph] aver_fw_set_morph_provider
 #endif
 // GamePawn.hpp (game::placePossessedPawn): placePawnAtSpawn's pawn lookup and placement.
 #include "aver/game/GamePawn.hpp"
@@ -1184,6 +1186,18 @@ void GameApp::openProject(Engine& e) {
         li.settingsPath = gameSettingsPath(project_);
         li.cultureOverride = cfg_.culture;
         game::initLocalization(li);
+        // Accessibility (docs/ACCESSIBILITY.md): the options from Settings.ini before the first frame, the Captions folder,
+        // narration of the UI, and the audio play observer that raises caption cues.
+        game::AccessibilityInit ai;
+        ai.settingsPath = gameSettingsPath(project_);
+        ai.contentDir = project_.contentDir();
+        game::initAccessibility(ai);
+#if AVER_WITH_UI_ABI && AVER_MODULE_FRAMEWORK
+        game::installAccessibilityUi();
+#endif
+#if AVER_WITH_AUDIO_ABI && AVER_MODULE_FRAMEWORK
+        game::installAccessibilityAudio();
+#endif
 #if AVER_WITH_UI_ABI
         game::uiTextInit(project_.contentDir());   // loads Content/UI/Fonts.ocfonts (or the built-in set); follows the culture just initialised
         game::uiTextBindRenderer(gameUi_);         // lends the UI renderer the glyph atlas
@@ -1795,9 +1809,11 @@ void GameApp::pushFrame(Engine& e) {
 #endif
     // Black: a game has no outside; anything the sky doesn't cover should read as a bug, not a colour.
     dev->setClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    dev->setPostProcess(postVolumes_.empty()
-                            ? post_
-                            : blendPostVolumes(postVolumes_, post_, camPos_, postLuts_.resolver(*dev, project_.contentDir())));
+    rhi::PostSettings postNow = postVolumes_.empty()
+                                    ? post_
+                                    : blendPostVolumes(postVolumes_, post_, camPos_, postLuts_.resolver(*dev, project_.contentDir()));
+    game::applyAccessibilityToPost(postNow, access_.snap);   // the player's colour filter and motion switches win over the level's volumes
+    dev->setPostProcess(postNow);
 }
 
 void GameApp::onInit(Engine& e) {
@@ -1888,6 +1904,9 @@ void GameApp::onInit(Engine& e) {
     aver_fw_set_anim_provider(&anim::montageProvider, &anim::animSystem());
     // [wave5/ik-retarget] IK goals, foot-IK weights and rig inputs.
     aver_fw_set_ik_provider(&anim::ikProvider, &anim::controlRigSystem());
+
+    // [wave9/morph] Blend-shape weights, face poses and lip-sync.
+    aver_fw_set_morph_provider(&anim::morphProvider, &anim::animSystem().morphs());
     // [wave5/sequencer] Level sequences: the framework relays LevelSequences.Play and friends to the director.
     aver_fw_set_sequence_provider(&game::sequenceProvider, &sequenceDirector_);
 #endif
@@ -2104,6 +2123,12 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     if (scriptsReady_ && scripts_.hudCount() > 0) scripts_.hudDraw(0, t.dt);
 #endif
     // Retained widgets: this frame's keyboard/pad/wheel in, then lay out, update, raise events, draw.
+#if AVER_MODULE_FRAMEWORK
+    // Accessibility: this frame's options, captions (unscaled time: they follow audio) and narration, pushed to the UI before it lays out.
+    game::accessibilityFrame(t.dt, camPos_, yaw_, pitch_, access_);
+#endif
+    game::pushAccessibilityToUi(access_);
+    if (gameUi_) gameUi_->setColourVision(access_.snap.colourVisionPacked);
     game::uiFeedInput(input_, t.dt, !mouse_.captured());
     aver_ui_widgets_frame(t.dt);
 #endif
@@ -2212,6 +2237,10 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     }
 #endif
 
+#if AVER_MODULE_FRAMEWORK
+    // Camera shake and head bob with the player's scales over the final camera (pawn or sequencer). Identity unless a script uses CameraFx.
+    game::applyCameraFx(camPos_, yaw_, pitch_, t.dt);
+#endif
     // Polled after prePass. Build takes three frames by design.
     if (cfg_.pcgVolumeTest) checkPcgVolume();
 

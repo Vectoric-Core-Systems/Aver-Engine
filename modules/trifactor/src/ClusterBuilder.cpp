@@ -56,6 +56,7 @@
 
 #include "aver/trifactor/ClusterBuilder.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/formats/MorphTarget.hpp"
 
 #include <chrono>
 
@@ -1648,6 +1649,9 @@ bool simplifyMesh(fmt::OcMeshData& mesh, f32 ratio, std::string* why) {
     mesh.joints    = std::move(jnt);
     mesh.weights   = std::move(wgt);
     mesh.indices   = std::move(out);
+    // Blend-shape deltas index vertices too: renumber them with the same compaction (remap is ~0u for a
+    // vertex no triangle kept).
+    fmt::remapMorphTargets(mesh, remap, static_cast<u32>(newVerts));
     mesh.meshlets.clear();   // stale the moment the triangles change; rebuild after simplifying
     mesh.computeBounds();    // positions changed; writeOcMesh recomputes this too, but an in-memory
                               // caller that reads boundsMin/Max before saving deserves a live value

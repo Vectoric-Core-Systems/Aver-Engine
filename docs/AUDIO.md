@@ -187,6 +187,14 @@ Audio.SetBusVolume(Bus.Music, 0.3f);        // what a settings slider drives
 Audio.MasterVolume = 0.9f;                  // NOT a bus; applied after the four are summed
 ```
 
+**Play observer (accessibility captions).** `aver_audio_set_play_observer(fn, user)` registers one optional callback, null by
+default, called on the calling (game) thread right after every *successful* start (`voice != 0`) from `aver_audio_play`,
+`_play_at`, `_stream_play`, `_stream_play_at` and `_music_play`, with the file path (NULL for `aver_audio_load_pcm` sounds, which have
+none), the voice, bus, whether it is positional, its position and whether it loops. With no output device no voice starts, so the
+observer is never called. Sub-systems that play through these functions (scripts, graph nodes, sequencer audio tracks) are covered
+with no change of their own; `FrameworkAccessAbiTest` scans `AudioAbi.cpp` to check each play function still notifies. See
+[ACCESSIBILITY.md](ACCESSIBILITY.md).
+
 An unrecognised bus is folded to `Sfx` by the native side rather than rejected — an ABI must not
 trust its caller. The one place an out-of-range value can still arrive is a **Set Bus Volume graph
 node**, whose bus pin is an integer someone typed, and that path logs a warning naming the four.

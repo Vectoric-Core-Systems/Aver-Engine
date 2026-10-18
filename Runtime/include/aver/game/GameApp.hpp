@@ -31,6 +31,7 @@
 // UI font uploaded through this process's device, not the editor's (see GameApp.cpp).
 #  include "aver/ui/UiFont.hpp"
 #endif
+#include "aver/game/GameAccessibility.hpp"
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
 #include "aver/game/GameFoliage.hpp"
@@ -314,6 +315,8 @@ private:
     // ---- environment ----
     rhi::SkyAtmosphere sky_;
     rhi::PostSettings  post_;
+    // This frame's accessibility options and caption lines (GameAccessibility.hpp), refreshed once per frame.
+    game::AccessFrame  access_;
     // The level's POSTVOLUME records, blended onto post_ at the camera each frame (GamePostVolumes.hpp).
     std::vector<fmt::OcPostVolume> postVolumes_;
     PostLutCache                   postLuts_;

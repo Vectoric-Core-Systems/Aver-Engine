@@ -67,6 +67,15 @@ const SequenceHooks& noHooks() {
     return h;
 }
 
+// Virtual Property fields: CMorphTargets.morph.<target> and CMorphTargets.pose.<name> drive blend-shape weights
+// through MorphSystem's sequencer layer (MORPH_TARGETS.md 2.5). No registered field exists for them.
+constexpr const char* kMorphTargetPrefix = "CMorphTargets.morph.";
+constexpr const char* kMorphPosePrefix   = "CMorphTargets.pose.";
+bool isMorphTrack(const OcSeqTrack& tr) {
+    return tr.kind == OcSeqTrackKind::Property &&
+           (tr.property.rfind(kMorphTargetPrefix, 0) == 0 || tr.property.rfind(kMorphPosePrefix, 0) == 0);
+}
+
 bool movesEntity(const OcSeqTrack& tr) {
     if (tr.kind == OcSeqTrackKind::Transform || tr.kind == OcSeqTrackKind::Material) return true;
     return tr.kind == OcSeqTrackKind::Property && tr.property.rfind("CLocal.", 0) == 0;
@@ -391,6 +400,7 @@ void SequencePlayer::evalPre(scene::World& w) {
         if (tr.mute) {
             releaseAnim(i);
             stopVoice(i, kStopFade);
+            if (isMorphTrack(tr)) anim::animSystem().morphs().releaseOwner(ownerOf(i));
             continue;
         }
         if (animOnly_ && tr.kind != OcSeqTrackKind::Animation && tr.kind != OcSeqTrackKind::SubSequence) continue;
@@ -483,6 +493,26 @@ void SequencePlayer::evalPost(scene::World& w) {
 void SequencePlayer::applyProperty(scene::World& w, u32 index, const OcSeqTrack& tr, f64 t) {
     if (tr.property.empty() || tr.keys.empty()) return;
     PropState& st = prop_[index];
+    if (isMorphTrack(tr)) {
+        const bool target = tr.property.rfind(kMorphTargetPrefix, 0) == 0;
+        const std::string_view rest = std::string_view(tr.property).substr(std::strlen(target ? kMorphTargetPrefix : kMorphPosePrefix));
+        const scene::Entity e = resolve(tr);
+        if (rest.empty() || e == scene::kInvalidEntity || !w.valid(e)) return;
+        const u32 mt = anim::MorphSystem::typeId();
+        if (mt == 0 || !w.hasComponent(e, mt)) {   // a track never adds the component
+            if (!st.warned) AVER_WARN("[Sequencer] property track '{}': the actor has no CMorphTargets", tr.property);
+            st.warned = true;
+            return;
+        }
+        f64 v[4];
+        if (!sampleSeqProperty(tr, t, false, false, v)) return;
+        anim::MorphSystem& ms = anim::animSystem().morphs();
+        const u64 id = fnv1a64(rest);
+        const f32 x = static_cast<f32>(v[0]);
+        if (target) ms.setTarget(w, e, id, x, 0.0f, anim::MorphSystem::Layer::Sequencer, ownerOf(index));
+        else        ms.setPose(w, e, id, x, 0.0f, anim::MorphSystem::Layer::Sequencer, ownerOf(index));
+        return;
+    }
     const u32 fid = w.fieldId(tr.property);
     const scene::FieldDesc* d = fid ? w.field(fid) : nullptr;
     const auto refuse = [&](const char* why) {
@@ -757,6 +787,11 @@ void SequencePlayer::applySub(scene::World& w, SeqPhase phase, u32 index, const 
 void SequencePlayer::releaseTriggered() {
     stopAllVoices(kStopFade);
     for (u32 i = 0; i < anim_.size(); ++i) releaseAnim(i);
+    {
+        const fmt::OcSequence& seq = sequence();
+        for (u32 i = 0; i < seq.tracks.size(); ++i)
+            if (isMorphTrack(seq.tracks[i])) anim::animSystem().morphs().releaseOwner(ownerOf(i));
+    }
     for (auto& kv : subs_) {
         kv.second->releaseTriggered();
         kv.second->subActive_ = false;

@@ -1,5 +1,6 @@
 #pragma once
 #include "aver/core/Types.hpp"
+#include "aver/rhi/ColourVision.hpp"
 #include "aver/rhi/RHI.hpp"
 
 #include <algorithm>
@@ -177,8 +178,11 @@ struct PostCB {
     f32 gamma[4];   // rgb 1/gamma
     f32 gain[4];    // rgb gain
     f32 dof[4];     // x focus (cm), y CoC scale (px at the composite source's width), z max radius (half-res px), w unused
+    // ACCESSIBILITY: x the packed colour-vision filter (ColourVision.hpp packColourVision; 0 = off, the frame is then
+    // bit-identical), yzw unused. Mirrors `gPostAccess` in shaders/post.hlsl.
+    f32 access[4];
 };
-static_assert(sizeof(PostCB) == 272, "the HLSL cbuffer mirrors this byte for byte");
+static_assert(sizeof(PostCB) == 288, "the HLSL cbuffer mirrors this byte for byte");
 
 // The linear-sRGB multiplier that makes a source of colour temperature `kelvin` read as the 6500 K
 // reference, with `tint` (+ = magenta, - = green) on the green channel. Planckian xy from Kim et al.
@@ -261,6 +265,9 @@ inline void fillPostLens(PostCB& cb, const PostSettings& p, u32 srcW, u32 srcH, 
     cb.dof[1] = dof ? f * f / (std::max(p.dofFStop, 0.5f) * (s - f)) / 3.6f * static_cast<f32>(srcW) : 0.0f;
     cb.dof[2] = std::clamp(static_cast<f32>(srcH) * 0.01f, 4.0f, 12.0f);
     cb.dof[3] = 0.0f;
+
+    cb.access[0] = packColourVision(p);
+    cb.access[1] = cb.access[2] = cb.access[3] = 0.0f;
 }
 
 } // namespace aver::rhi

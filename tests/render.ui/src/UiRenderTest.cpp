@@ -377,7 +377,7 @@ int main() {
         check(vp.size() == 1 && vp[0].c == 800 && vp[0].d == 600, "the viewport is the whole backbuffer");
         const std::vector<Call> k = ctx.ofKind(Call::Kind::Constants);
         // b0/b1/b2/b4 are reserved by the RHI; b3 is the only slot a feature may claim.
-        check(k.size() == 1 && k[0].a == 3 && k[0].b == 4, "four constant dwords at slot b3");
+        check(k.size() == 1 && k[0].a == 3 && k[0].b == 5, "five constant dwords at slot b3 (projection + colour vision)");
     }
 
     AVER_INFO("=== growth keeps the draws ===");

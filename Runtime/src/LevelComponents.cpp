@@ -28,7 +28,7 @@ namespace aver::game {
 namespace {
 
 enum TypeIx : int {
-    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kCloth, kDestructible, kTypeCount,
+    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kCloth, kDestructible, kMorphTargets, kTypeCount,
     kUnknownType = -1
 };
 static_assert(std::size(kPlacedComponentTypes) == kTypeCount, "kPlacedComponentTypes and TypeIx must stay in step");
@@ -160,6 +160,7 @@ u32 typeId(scene::World& w, int ix) {
         case kCloth: return w.componentId("CCloth");
         case kDestructible: return w.componentId("CDestructible");
 #endif
+        case kMorphTargets: return w.componentId("CMorphTargets");
         default: return 0;
     }
 }
@@ -442,6 +443,25 @@ bool applyDestructible(scene::World& w, scene::Entity e, const fmt::OcPlacedComp
 }
 #endif
 
+// COMPONENT MorphTargets (docs/ANIM_MORPH_FACE.md): rig=<.ocface> weight=1 inherit=1 off=1 ignoreanim=1. Weights set from script,
+// the sequencer or lip-sync are runtime state and never authored.
+bool applyMorphTargets(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    const u32 type = typeId(w, kMorphTargets);
+    if (type == 0) { why = "CMorphTargets is not registered"; return false; }
+    u64 rig = 0;
+    if (readAsset(r, "rig", rig) == AssetKey::Bad) { why = "malformed rig#"; return false; }
+    auto* c = w.component<anim::CMorphTargets>(e, type);
+    if (!c) {
+        c = anim::MorphSystem::attach(w, e, 0, 0);
+        if (!c) { why = "the world refused the component"; return false; }
+    }
+    c->faceRig = rig;
+    c->weight = numKey(r, "weight", 1.0f);
+    c->flags = (boolKey(r, "inherit", false) ? anim::kMorphInheritParent : 0u) | (boolKey(r, "off", false) ? anim::kMorphOff : 0u) |
+               (boolKey(r, "ignoreanim", false) ? anim::kMorphIgnoreAnim : 0u);
+    return true;
+}
+
 bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, const fmt::OcWorldPlacement* placement, std::string& why) {
     const int ix = typeIndex(r.type);
     if (ix == kUnknownType) { why = "unknown type"; return false; }
@@ -468,6 +488,7 @@ bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r,
         case kCloth: return applyCloth(w, e, r, why);
         case kDestructible: return applyDestructible(w, e, r, why);
 #endif
+        case kMorphTargets: return applyMorphTargets(w, e, r, why);
         default: break;
     }
     why = "unknown type";
@@ -618,6 +639,16 @@ std::optional<fmt::OcPlacedComponent> captureOne(scene::World& w, scene::Entity 
             break;
         }
 #endif
+        case kMorphTargets: {
+            const auto* c = w.component<anim::CMorphTargets>(e, type);
+            putAsset(rec, "rig", c->faceRig, pathOf);
+            const f32 weight = c->weight == 0.0f ? 1.0f : c->weight;       // 0 reads as 1
+            if (weight != 1.0f) putNum(rec, "weight", weight);
+            if (c->flags & anim::kMorphInheritParent) put(rec, "inherit", "1");
+            if (c->flags & anim::kMorphOff) put(rec, "off", "1");
+            if (c->flags & anim::kMorphIgnoreAnim) put(rec, "ignoreanim", "1");
+            break;
+        }
         default: return std::nullopt;
     }
     return rec;

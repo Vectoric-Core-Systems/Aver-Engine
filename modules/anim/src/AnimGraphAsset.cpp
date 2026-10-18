@@ -63,7 +63,7 @@ const char* kindName(AsmStateKind k) {
 std::string str(const fmt::JsonValue& v, std::string_view key) { return std::string(v[key].asString()); }
 
 const char* pipeKindName(PipeNodeKind k) {
-    static const char* n[] = {"slot", "layered", "additive"};
+    static const char* n[] = {"slot", "layered", "additive", "curve"};
     return n[static_cast<int>(k)];
 }
 const char* srcKindName(PipeSourceKind k) {
@@ -100,6 +100,12 @@ std::string writePipeline(const std::vector<PipeNode>& nodes) {
         s += std::string("{\"type\": \"") + pipeKindName(n.kind) + "\"";
         if (n.kind == PipeNodeKind::Slot) {
             s += ", \"slot\": " + esc(n.slot) + "}";
+            continue;
+        }
+        if (n.kind == PipeNodeKind::Curve) {
+            s += ", \"curve\": " + esc(n.curve) + ", \"valueParam\": " + esc(n.valueParam) +
+                 ", \"value\": " + num(n.value) + ", \"mode\": \"" + (n.curveAdd ? "add" : "set") +
+                 "\", \"weight\": " + num(n.weight) + ", \"weightParam\": " + esc(n.weightParam) + "}";
             continue;
         }
         s += ", \"source\": " + writeSource(n.source);
@@ -367,6 +373,7 @@ bool parseStateMachine(std::string_view json, AnimStateMachineAsset& out, std::s
         if (type == "slot") n.kind = PipeNodeKind::Slot;
         else if (type == "layered") n.kind = PipeNodeKind::Layered;
         else if (type == "additive") n.kind = PipeNodeKind::Additive;
+        else if (type == "curve") n.kind = PipeNodeKind::Curve;
         else {
             if (why) *why = "unknown pipeline node type";
             return false;
@@ -388,6 +395,10 @@ bool parseStateMachine(std::string_view json, AnimStateMachineAsset& out, std::s
         n.ref.time = rf["time"].asFloat();
         n.weight = v["weight"].asFloat(1.0f);
         n.weightParam = str(v, "weightParam");
+        n.curve = str(v, "curve");
+        n.valueParam = str(v, "valueParam");
+        n.value = v["value"].asFloat(0.0f);
+        n.curveAdd = v["mode"].asString("set") == "add";
         a.pipeline.push_back(std::move(n));
     }
     out = std::move(a);

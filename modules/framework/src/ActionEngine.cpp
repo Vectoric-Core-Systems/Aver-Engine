@@ -89,8 +89,11 @@ V3 applyModifiers(const std::vector<fmt::OcModifierSpec>& mods, V3 v, float dt, 
     return v;
 }
 
-Rank stepTrigger(const fmt::OcTriggerSpec& spec, TriggerRuntime& rt, const V3& v, float dt, TriggerContext& ctx) {
+Rank stepTrigger(const fmt::OcTriggerSpec& spec, TriggerRuntime& rt, const V3& v, float dt, TriggerContext& ctx,
+                 const Timing* timing) {
     const bool A = actuated(v, spec.actuation);
+    const float holdTime = timing ? spec.time * timing->hold : spec.time;
+    const float windowTime = timing ? spec.time * timing->window : spec.time;
     Rank r = Rank::None;
     switch (spec.kind) {
         case fmt::OcTriggerKind::Down:
@@ -109,7 +112,7 @@ Rank stepTrigger(const fmt::OcTriggerSpec& spec, TriggerRuntime& rt, const V3& v
             } else {
                 rt.t += dt;
                 if (rt.latched) r = Rank::None;                       // `once` already fired
-                else if (rt.t >= spec.time) { r = Rank::Triggered; rt.latched = spec.once; }
+                else if (rt.t >= holdTime) { r = Rank::Triggered; rt.latched = spec.once; }
                 else r = Rank::Ongoing;
             }
             break;
@@ -118,14 +121,14 @@ Rank stepTrigger(const fmt::OcTriggerSpec& spec, TriggerRuntime& rt, const V3& v
                 rt.t += dt;
                 r = Rank::Ongoing;
             } else {
-                if (rt.was && rt.t >= spec.time) r = Rank::Triggered;
+                if (rt.was && rt.t >= holdTime) r = Rank::Triggered;
                 rt.t = 0.0f;
             }
             break;
         case fmt::OcTriggerKind::Tap:
             if (A) {
                 rt.t += dt;
-                if (!rt.latched && rt.t > spec.time) rt.latched = true;   // held too long: expired
+                if (!rt.latched && rt.t > windowTime) rt.latched = true;   // held too long: expired
                 r = rt.latched ? Rank::None : Rank::Ongoing;
             } else {
                 if (rt.was && !rt.latched) r = Rank::Triggered;
@@ -164,7 +167,7 @@ Rank stepTrigger(const fmt::OcTriggerSpec& spec, TriggerRuntime& rt, const V3& v
             const i32 n = static_cast<i32>(spec.refs.size());
             if (rt.step > 0) {
                 rt.t += dt;
-                if (rt.t > spec.time) { rt.step = 0; rt.t = 0.0f; }
+                if (rt.t > windowTime) { rt.step = 0; rt.t = 0.0f; }
             }
             bool riseNext = false, riseAny = false, rise0 = false;
             for (i32 j = 0; j < n; ++j) {
@@ -191,13 +194,13 @@ Rank stepTrigger(const fmt::OcTriggerSpec& spec, TriggerRuntime& rt, const V3& v
 }
 
 Rank combineTriggers(const std::vector<fmt::OcTriggerSpec>& specs, std::vector<TriggerRuntime>& rts,
-                     const V3& v, float dt, TriggerContext& ctx) {
+                     const V3& v, float dt, TriggerContext& ctx, const Timing* timing) {
     if (specs.empty()) return actuated(v, kDefaultActuation) ? Rank::Triggered : Rank::None;
     if (rts.size() != specs.size()) rts.resize(specs.size());
     bool anyExplicit = false;
     Rank explicitMax = Rank::None, implicitMin = Rank::Triggered;
     for (usize i = 0; i < specs.size(); ++i) {
-        const Rank r = stepTrigger(specs[i], rts[i], v, dt, ctx);   // every trigger advances, no short-circuit
+        const Rank r = stepTrigger(specs[i], rts[i], v, dt, ctx, timing);   // every trigger advances, no short-circuit
         if (specs[i].kind == fmt::OcTriggerKind::Chord) {
             implicitMin = minRank(implicitMin, r);
         } else {

@@ -52,3 +52,21 @@ foreach(t MotionAsset PoseDatabase PoseSearch Trajectory Inertializer MotionMatc
   target_link_libraries(${t}Test PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(${t}Test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endforeach()
+
+# [wave9/morph begin] Blend shapes and facial animation (docs/plans/wave9/MORPH_TARGETS.md): the pose curve channel and
+# its blend rules, the CPU morph reference, the .ocface rig and the .ocvis lip-sync tracks. Same link set and the same
+# reason: weights, envelopes and joint deltas are arithmetic on structs, so a device would only hide a wrong answer.
+foreach(t PoseCurve Morph)
+  add_executable(${t}Test src/${t}Test.cpp)
+  target_link_libraries(${t}Test PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(${t}Test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()
+# [wave9/morph end]
+
+# [wave9/morph begin] (continued) the face rig and lip-sync tests.
+foreach(t FaceRig Viseme)
+  add_executable(${t}Test src/${t}Test.cpp)
+  target_link_libraries(${t}Test PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(${t}Test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()
+# [wave9/morph end]

@@ -1,0 +1,9 @@
+OCVIS 1
+# "Hello" -- a lip-sync track for content/dev/FaceRigged.gltf (play with PlayLipSync, or bake with: AverAssetC visbake)
+SET phoneme
+EVENT 0.00 0.10 sil
+EVENT 0.10 0.22 HH
+EVENT 0.22 0.38 AH 0.9
+EVENT 0.38 0.50 L
+EVENT 0.50 0.78 OW
+EVENT 0.78 0.90 sil

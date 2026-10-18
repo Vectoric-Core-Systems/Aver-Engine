@@ -29,7 +29,7 @@ void UiTree::draw(UiPainter& p) {
         const UiWidget* r = get(id);
         if (!r || !r->visible) continue;
         p.setLayer(r->layer);
-        if (r->modal) p.fillRect(viewport_, theme_.dim);
+        if (r->modal) p.fillRect(viewport_, activeTheme().dim);
         drawWidget(p, *r, 1.0f, true);
     }
 }
@@ -41,9 +41,10 @@ void UiTree::drawScrollbar(UiPainter& p, const UiWidget& w, const UiStyle& st, f
     const f32 thumbH = std::max(24.0f * scale_, inner.h * inner.h / w.contentSize.y);
     const f32 t = span > 0.0f ? std::clamp(w.scrollY / span, 0.0f, 1.0f) : 0.0f;
     const f32 bw = theme_.scrollbarWidth * scale_;
-    const u32 base = st.text ? st.text : uiRgba(255, 255, 255);
+    const bool hc = access_.highContrast;
+    const u32 base = hc || !st.text ? uiRgba(255, 255, 255) : st.text;
     p.fillRect({w.rect.right() - bw - 2.0f * scale_, inner.y + t * (inner.h - thumbH), bw, thumbH},
-               uiWithOpacity(uiWithOpacity(base, 0.35f), opacity));
+               uiWithOpacity(hc ? base : uiWithOpacity(base, 0.35f), opacity));
 }
 
 void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool parentEnabled) {
@@ -51,6 +52,7 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
     const f32 op = parentOpacity * w.opacity;
     if (op <= 0.003f) return;
     const bool enabled = parentEnabled && w.enabled;
+    const bool hc = access_.highContrast;   // ignores per-widget colour overrides (images and tints are untouched)
 
     const UiStyle st = styleOf(w);
     const f32 s = scale_;
@@ -66,15 +68,16 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
 
     const auto C = [op](u32 c) { return uiWithOpacity(c, op); };
     u32 bg = st.background[static_cast<usize>(vs)];
-    if (w.bgColor) {
+    if (w.bgColor && !hc) {
         bg = w.bgColor;
         if (vs == UiVisualState::Hover) bg = uiShade(bg, 0.15f);
         else if (vs == UiVisualState::Pressed) bg = uiShade(bg, -0.2f);
         else if (vs == UiVisualState::Disabled) bg = uiWithOpacity(bg, 0.5f);
     }
-    u32 textCol = w.textColor ? w.textColor : st.text;
-    if (!enabled) textCol = w.textColor ? uiWithOpacity(w.textColor, 0.5f) : (st.textDisabled ? st.textDisabled : textCol);
-    const u32 accent = w.accentColor ? w.accentColor : st.accent;
+    const u32 ownText = hc ? 0u : w.textColor;
+    u32 textCol = ownText ? ownText : st.text;
+    if (!enabled) textCol = ownText ? uiWithOpacity(ownText, 0.5f) : (st.textDisabled ? st.textDisabled : textCol);
+    const u32 accent = (w.accentColor && !hc) ? w.accentColor : st.accent;
 
     // Lays `txt` out with this widget's text props and paints it inside `area`. The layout comes from the
     // painter, so a widget is drawn with the same metrics that measured it.
@@ -260,8 +263,9 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
     if (clipChildren) p.popClip();
 
     if (w.kind == UiWidgetKind::Scroll) drawScrollbar(p, w, st, op);
-    if (w.focused && focusVisible_ && enabled && w.focusable && theme_.focusWidth > 0.0f)
-        p.strokeRect(r, theme_.focusWidth * s, C(theme_.focusColor));
+    const UiTheme& th = activeTheme();
+    if (w.focused && focusVisible_ && enabled && w.focusable && th.focusWidth > 0.0f)
+        p.strokeRect(r, th.focusWidth * (hc ? 2.0f : 1.0f) * s, C(th.focusColor));
 }
 
 } // namespace aver::ui

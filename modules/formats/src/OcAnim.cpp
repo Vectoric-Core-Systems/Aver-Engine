@@ -294,7 +294,7 @@ bool OcTrack::valid() const {
 
 // True when the animation has tracks, a non-negative duration, and every track is valid.
 bool OcAnimation::valid() const {
-    if (tracks.empty()) return false;
+    if (tracks.empty() && curves.empty()) return false;
     if (!(duration >= 0.0f)) return false;                           // also rejects NaN
     for (const OcTrack& t : tracks) if (!t.valid()) return false;
     if (storage == OcAnimStorage::BakedUniform && sampleRate == 0) return false;
@@ -305,7 +305,7 @@ bool OcAnimation::valid() const {
 
 // Encodes an animation into an .ocanim container. Returns false with `why` set on invalid input.
 bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) {
-    if (in.tracks.empty()) return fail(why, ".ocanim: no tracks");
+    if (in.tracks.empty() && in.curves.empty()) return fail(why, ".ocanim: no tracks");
     if (in.tracks.size() > 0xFFFFFFFFull) return fail(why, ".ocanim: too many tracks");
     for (usize i = 0; i < in.tracks.size(); ++i) {
         const OcTrack& t = in.tracks[i];
@@ -609,7 +609,7 @@ bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why
             if (!(dur >= 0.0f)) return fail(why, ".ocanim: a notify duration is negative or NaN");
     }
     if (!r.ok) return fail(why, ".ocanim: truncated AHDR");
-    if (n == 0) return fail(why, ".ocanim: TrackCount is 0");
+    if (n == 0 && out.curves.empty()) return fail(why, ".ocanim: TrackCount is 0");
     if (out.storage != OcAnimStorage::Keyframed && out.storage != OcAnimStorage::BakedUniform)
         return fail(why, ".ocanim: unknown Storage value");
 
@@ -653,6 +653,14 @@ bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why
         for (usize k = 1; k < t.times.size(); ++k)
             if (t.times[k] < t.times[k - 1])
                 return fail(why, ".ocanim: track " + std::to_string(i) + " key times are not ascending");
+    }
+    // morph./pose. curves carry the hash of their bare name so the sampler never hashes a string.
+    for (const OcCurve& cur : out.curves) {
+        const std::string_view nm = cur.name;
+        for (const char* pre : {kOcCurvePrefixMorph, kOcCurvePrefixPose}) {
+            const usize pl = std::strlen(pre);
+            if (nm.size() > pl && nm.compare(0, pl, pre) == 0) { cur.poseId = fnv1a64(nm.substr(pl)); break; }
+        }
     }
     return true;
 }

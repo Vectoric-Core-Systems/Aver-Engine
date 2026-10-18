@@ -420,7 +420,7 @@ void MontagePlayer::evaluate(const fmt::OcSkeleton& skel, const Pose& base, Pose
         // `out` may alias `base`; addPose copies base into its output first, so go through a temp.
         Pose result;
         addPose(base, sampled_, ref_, 1.0f, result);
-        out.local.swap(result.local);
+        out.swap(result);
         return;
     }
     sampleAnimation(*seg->clip, c, out);

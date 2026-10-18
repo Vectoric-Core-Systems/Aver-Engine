@@ -821,6 +821,47 @@ int SequenceEditor::addPropertyTrack(scene::Entity e, const std::string& qualifi
     return idx;
 }
 
+int SequenceEditor::keyMorph(scene::Entity e, const std::string& name, bool isPose, f32 value) {
+    scene::World& w = scene::World::instance();
+    if (!w.valid(e)) { status_ = "Select an actor first"; return -1; }
+    const u32 mt = w.componentId("CMorphTargets");
+    if (name.empty() || mt == 0 || !w.hasComponent(e, mt)) { status_ = "Add Morph Targets to the actor first"; return -1; }
+    const std::string qualified = std::string(isPose ? "CMorphTargets.pose." : "CMorphTargets.morph.") + name;
+    int idx = -1;
+    for (usize i = 0; i < model_.tracks.size(); ++i)
+        if (model_.tracks[i].kind == OcSeqTrackKind::Property && model_.tracks[i].target == targetOf(e) && model_.tracks[i].property == qualified) {
+            idx = static_cast<int>(i);
+            break;
+        }
+    pushUndo();
+    if (idx < 0) {
+        OcSeqTrack tr = seqNewTrack(OcSeqTrackKind::Property);
+        tr.target = targetOf(e);
+        tr.property = qualified;
+        if (host_ && host_->bindName) tr.bind = host_->bindName(e);
+        idx = seqAddTrack(model_, std::move(tr));
+    }
+    selTrack_ = -1;
+    selectTrack(idx);
+    OcSeqTrack& tr = model_.tracks[static_cast<usize>(idx)];
+    const f64 t = std::clamp(player_.time(), 0.0, model_.length);
+    int k = -1;
+    for (usize i = 0; i < tr.keys.size(); ++i)
+        if (std::fabs(tr.keys[i].t - t) < kSameKeySec) { k = static_cast<int>(i); break; }
+    if (k >= 0) {
+        tr.keys[static_cast<usize>(k)].v[0] = value;
+    } else {
+        OcSeqKey key = seqNeutralKey(OcSeqTrackKind::Property, t);
+        key.v[0] = value;
+        k = insertKeySorted(tr, key);
+        keySel_.insert(keySel_.begin() + k, char(0));
+    }
+    selectOnly(k);
+    status_ = "Key " + qualified + " at " + std::to_string(t).substr(0, 5) + " s";
+    edited();
+    return idx;
+}
+
 // A section lane for a dropped or typed asset: audio (optionally positional on `e`), an animation on a
 // skeletal actor, or another sequence. The section starts at the playhead.
 int SequenceEditor::addAssetTrack(OcSeqTrackKind kind, scene::Entity e, const std::string& assetPath) {

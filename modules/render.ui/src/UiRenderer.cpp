@@ -100,7 +100,7 @@ bool UiRenderer::init(rhi::IDevice& device) {
         gd.layout.samplerCount = 1;
         gd.layout.samplers[0].filter  = rhi::Filter::Linear;
         gd.layout.samplers[0].address = rhi::AddressMode::Clamp;
-        gd.layout.constantDwords[kUiConstantSlot] = 4; // b3: gUiProj, as root constants
+        gd.layout.constantDwords[kUiConstantSlot] = 5; // b3: gUiProj + the colour-vision dword, as root constants
 
         gd.depth.test = false;
         gd.depth.write = false;
@@ -181,6 +181,8 @@ void UiRenderer::dropBinding(rhi::TextureHandle t) {
 }
 
 void UiRenderer::setTextAtlas(aver::ui::UiGlyphAtlas* atlas) { atlas_ = atlas; }
+
+void UiRenderer::setColourVision(f32 packed) { colourVision_ = packed > 0.5f ? packed : 0.0f; }
 
 rhi::TextureHandle UiRenderer::pageTexture(u32 page) const { return page < pages_.size() ? pages_[page].tex : 0; }
 
@@ -309,8 +311,8 @@ void UiRenderer::overlayPass(rhi::IRenderContext& ctx, u32 width, u32 height) {
     ctx.setPipeline(pipeline_);
 
     // Pixels to NDC with the origin TOP-LEFT: the y flip lives in these four floats and nowhere else.
-    const f32 proj[4] = {2.0f / static_cast<f32>(width), -2.0f / static_cast<f32>(height), -1.0f, 1.0f};
-    ctx.setConstants(kUiConstantSlot, proj, 4);
+    const f32 proj[5] = {2.0f / static_cast<f32>(width), -2.0f / static_cast<f32>(height), -1.0f, 1.0f, colourVision_};
+    ctx.setConstants(kUiConstantSlot, proj, 5);
     ctx.setViewport(0, 0, width, height);
 
     ctx.setVertexBuffer(vb, sizeof(aver::ui::UiVertex));

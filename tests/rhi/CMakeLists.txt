@@ -149,3 +149,24 @@ endif()
 add_executable(PostLensTest src/PostLensTest.cpp)
 target_link_libraries(PostLensTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
 set_target_properties(PostLensTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ColourVisionTest: the accessibility colour filter's CPU twin (matrices, packing, the post constants), no device.
+add_executable(ColourVisionTest src/ColourVisionTest.cpp)
+target_link_libraries(ColourVisionTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
+set_target_properties(ColourVisionTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ColourVisionShaderTest: aver_colour_vision.hlsli against the CPU twin on a real device (WARP; `vulkan` for the Vulkan
+# row, which AVER_CTEST_VULKAN_TARGETS in the root CMakeLists.txt adds). Its own composition root, exactly as LineMeshTest
+# above is and for the same reason. SKIPPED (77) when the backend is absent.
+add_executable(ColourVisionShaderTest src/ColourVisionShaderTest.cpp)
+target_link_libraries(ColourVisionShaderTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
+if(AVER_RHI_D3D12)
+  target_link_libraries(ColourVisionShaderTest PRIVATE Aver.RHI.D3D12)
+endif()
+if(AVER_RHI_D3D11)
+  target_link_libraries(ColourVisionShaderTest PRIVATE Aver.RHI.D3D11)
+endif()
+if(AVER_RHI_VULKAN)
+  target_link_libraries(ColourVisionShaderTest PRIVATE Aver.RHI.Vulkan)
+endif()
+set_target_properties(ColourVisionShaderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

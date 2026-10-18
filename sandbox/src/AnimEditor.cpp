@@ -15,11 +15,16 @@
 #include "PreviewChrome.hpp"
 #include "SnapshotUndo.hpp"
 #include "AnimCurveGeometry.hpp"
+#include "MorphPanel.hpp"
+#include "SkinPreview.hpp"
 
 #include "ActorEditor.hpp"
 
 #include "aver/anim/AnimSampler.hpp"
+#include "aver/anim/FaceRig.hpp"
+#include "aver/anim/Morph.hpp"
 #include "aver/anim/RootMotion.hpp"
+#include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/render/preview/ActorPreview.hpp"
@@ -55,6 +60,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <unordered_map>
 
 namespace aver::editor {
@@ -172,190 +178,13 @@ Mat4 boneBox(const Vec3& from, const Vec3& to, f32 thick) {
     return basis;
 }
 
-// The one render feature this editor owns: turns the UI-sampled pose into posed vertices once per
-// frame, before the preview draws them.
-//
-// A feature rather than a draw()-side call, because dispatch needs an IRenderContext the UI has none
-// of -- same shape as SkinnedScene's prePass/overlayPass pair: dispatch leaves the buffer in
-// GeometryRead for the draw, and every frame must hand it back to Common before submit (D3D12 decays
-// buffer state at end-of-command-list; next frame's barrier would otherwise claim a stale state).
-//
-// Registered BEFORE the preview so this frame's pose (not last frame's) is what's on screen: features
-// get prePass in registration order, and ActorPreview renders the preview image in its own prePass too.
-class AnimSkinFeature final : public rhi::IRenderFeature {
-public:
-    const char* name() const override { return "Aver.AnimEditor.Skin"; }
-
-    bool init(rhi::IDevice& dev) {
-        dev_ = &dev;
-        ready_ = pass_.init(dev);
-        if (!ready_) AVER_WARN("[AnimEditor] GPU skinning unavailable; the preview stays on bone boxes");
-        return ready_;
-    }
-
-    void shutdown() {
-        releaseMeshes();
-        pass_.shutdown();
-        ready_ = false;
-        dev_ = nullptr;
-        meshPath_.clear();
-        boneCount_ = 0;
-    }
-
-    // Frees the skinning buffers and both meshes. The draw mesh goes first: it shares the source's
-    // index buffer, so the device refuses the source while it lives. A caller still drawing drawMesh()
-    // must drop that draw first.
-    void releaseMeshes() {
-        if (gpu_.valid()) pass_.destroyMesh(gpu_);
-        gpu_ = {};
-        if (dev_) {
-            if (drawMesh_) dev_->destroyMesh(drawMesh_);
-            if (source_)   dev_->destroyMesh(source_);
-        }
-        drawMesh_ = 0;
-        source_ = 0;
-        vertexCount_ = 0;
-        triangleCount_ = 0;
-        meshPath_.clear();
-        slot0Material_.clear();
-    }
-
-    bool ready() const { return ready_; }
-    rhi::MeshHandle drawMesh() const { return drawMesh_; }
-    f32 boundsRadius() const { return radius_; }
-    // For the preview's stats overlay.
-    u32 vertexCount() const { return vertexCount_; }
-    u32 triangleCount() const { return triangleCount_; }
-    // Mesh's slot-0 surface name (OcMeshData::materialSlots[0]), or empty. The reason bind() keeps
-    // the decoded OcMeshData around -- see bind()'s own comment.
-    const std::string& slot0Material() const { return slot0Material_; }
-
-    // Binds a rig + mesh pair. Idempotent for the same pair, so the editor can call it every frame
-    // without rebuilding GPU resources -- the clip (and rig) can change when the asset browser is
-    // clicked.
-    bool bind(rhi::IDevice& dev, const std::string& meshPath, u32 boneCount) {
-        if (!ready_) return false;
-        if (meshPath == meshPath_ && gpu_.valid() && boneCount == boneCount_) return true;
-
-        // The preview may still list the old draw mesh; drop it before it dies.
-        if (drawMesh_)
-            if (render::preview::ActorPreview* p = sharedPreviewIfCreated()) p->dropDrawsUsing(drawMesh_);
-        releaseMeshes();
-        meshPath_ = meshPath;
-        boneCount_ = boneCount;
-        // Cleared here, not only on success: a partial rebind failure (no skin streams, a truncated
-        // file) must not leave a stale name from the previous mesh for buildPreview's cache to keep
-        // resolving.
-        slot0Material_.clear();
-        if (meshPath.empty() || boneCount == 0) return false;
-
-        fmt::OcMeshData md;
-        std::string why;
-        if (!fmt::loadOcMesh(meshPath, md, &why)) {
-            AVER_WARN("[AnimEditor] {}", why);
-            return false;
-        }
-        // Read regardless of hasSkin() below: harmless if unused (falls back to bone boxes), and
-        // simpler than re-opening the file later just for this field.
-        if (!md.materialSlots.empty()) slot0Material_ = md.materialSlots[0];
-        if (!md.hasSkin()) {
-            // Not an error and not silent: a mesh with no skin streams is ordinary; falls back to bone
-            // boxes rather than a static T-pose that would look like a broken clip.
-            AVER_INFO("[AnimEditor] {} has no skin streams; the preview stays on bone boxes", meshPath);
-            return false;
-        }
-
-        // OcMeshData keeps positions/normals/uvs as flat arrays; the RHI wants one interleaved
-        // MeshVertex stream. Built here (not via PreviewMeshCache, which resolves content-relative
-        // paths -- this mesh is found by walking the skeleton's own directory) since the skinning pass
-        // needs the decoded OcMeshData anyway, for its rest and bind streams.
-        const usize vcount = md.positions.size() / 3;
-        if (vcount == 0 || md.normals.size() < vcount * 3 || md.uvs.size() < vcount * 2) return false;
-        std::vector<rhi::MeshVertex> verts0(vcount);
-        for (usize i = 0; i < vcount; ++i) {
-            verts0[i].px = md.positions[i * 3 + 0];
-            verts0[i].py = md.positions[i * 3 + 1];
-            verts0[i].pz = md.positions[i * 3 + 2];
-            verts0[i].nx = md.normals[i * 3 + 0];
-            verts0[i].ny = md.normals[i * 3 + 1];
-            verts0[i].nz = md.normals[i * 3 + 2];
-            verts0[i].u  = md.uvs[i * 2 + 0];
-            verts0[i].v  = md.uvs[i * 2 + 1];
-        }
-        source_ = dev.createMesh(verts0.data(), static_cast<u32>(vcount),
-                                 md.indices.data(), static_cast<u32>(md.indices.size()));
-        if (!source_) return false;
-        rhi::BufferHandle verts = 0;
-        // Draw handle whose vertex buffer IS the skin target: the preview rasterises posed vertices
-        // directly, no second copy.
-        drawMesh_ = dev.createSkinTargetMesh(source_, &verts);
-        if (!drawMesh_ || !verts) { releaseMeshes(); return false; }
-        if (!pass_.createMesh(md, boneCount, gpu_, verts)) { releaseMeshes(); return false; }
-
-        // Bounds radius for frameAll, from the rest mesh -- posed mesh doesn't move enough to matter,
-        // and per-frame GPU readback isn't available anyway.
-        vertexCount_ = static_cast<u32>(vcount);
-        triangleCount_ = static_cast<u32>(md.indices.size() / 3);
-        radius_ = 1.0f;
-        for (usize i = 0; i < vcount; ++i) {
-            const f32 x = md.positions[i * 3 + 0], y = md.positions[i * 3 + 1], z = md.positions[i * 3 + 2];
-            radius_ = std::max(radius_, std::sqrt(x * x + y * y + z * z));
-        }
-        return true;
-    }
-
-    // This frame's skinning matrices, copied because prePass runs later than the UI that produced them.
-    void stage(const std::vector<Mat4>& skin) { staged_ = skin; }
-
-    void prePass(rhi::IRenderContext& ctx) override {
-        if (!ready_ || !gpu_.valid() || staged_.empty()) return;
-        pass_.dispatch(ctx, gpu_, staged_.data(), static_cast<u32>(staged_.size()));
-    }
-
-    void overlayPass(rhi::IRenderContext& ctx, u32 width, u32 height) override {
-        (void)width; (void)height;
-        if (!ready_ || !gpu_.valid()) return;
-        // Unconditional, not "only if dispatched" (see SkinnedScene::overlayPass): skinTransition is
-        // a no-op if already in state; a buffer left in GeometryRead at submit is a validation error
-        // next frame.
-        render::skinTransition(ctx, gpu_, rhi::ResourceState::Common);
-    }
-
-private:
-    rhi::IDevice*           dev_ = nullptr;
-    render::SkinningPass    pass_;
-    render::SkinnedMeshGpu  gpu_;
-    rhi::MeshHandle         drawMesh_ = 0;
-    rhi::MeshHandle         source_ = 0;   // drawMesh_'s rest mesh; shares indices, so freed after it
-    std::string             meshPath_;
-    u32                     boneCount_ = 0;
-    u32                     vertexCount_ = 0, triangleCount_ = 0;
-    f32                     radius_ = 1.0f;
-    bool                    ready_ = false;
-    std::vector<Mat4>       staged_;
-    std::string             slot0Material_;   // OcMeshData::materialSlots[0] of the bound mesh, or ""
-};
-
-AnimSkinFeature g_skin;
-bool g_skinTried = false;
+// The skinning preview feature lives in SkinPreview.hpp now (the Face Rig tab shares it); the names below keep this
+// file's call sites as they were.
+using AnimSkinFeature = SkinPreview;
+SkinPreview& g_skin = skinPreviewInstance();
 u32 g_animTabs = 0;   // open AnimEditor tabs; the last to close frees the skinned mesh
 
-// Created and registered once, before the shared preview (ordering reason in AnimSkinFeature's
-// comment). Shared rather than per-tab, matching sharedPreview(): two anim tabs already share one
-// preview, so a second skinning target would have nothing to draw into.
-// Keeps the device the feature was registered with, so teardown unregisters from the same one.
-rhi::IDevice* g_skinDevice = nullptr;
-
-AnimSkinFeature* sharedSkin(Engine& e) {
-    if (!g_skinTried && e.device()) {
-        g_skinTried = true;
-        if (g_skin.init(*e.device())) {
-            g_skinDevice = e.device();
-            g_skinDevice->addRenderFeature(&g_skin);
-        }
-    }
-    return g_skin.ready() ? &g_skin : nullptr;
-}
+AnimSkinFeature* sharedSkin(Engine& e) { return sharedSkinPreview(e); }
 
 // Bone palette, minus one hue. computeBonePalette's golden-angle spread could land a chain on the
 // same cyan buildPreview's socket markers use, which would misread as "an author placed this". So
@@ -686,6 +515,13 @@ private:
     // as the one part with real geometry (see own header comment for the ImGui-free math and test
     // coverage).
     void drawCurveWidget(fmt::OcCurve& c);
+    // Blend shapes (docs/plans/wave9/MORPH_TARGETS.md 2.10): the panel over the previewed mesh's targets, the live values
+    // the clip drives at the playhead, and the weights staged for the GPU.
+    void setupMorphPanel(const SkinPreview& skin);
+    void stageMorphWeights(SkinPreview& skin);
+    void drawMorph(Engine& e);
+    void addMorphKey(const MorphKeyRequest& r);
+    void addMorphCurve(const std::string& target);
     void buildPreview(Engine& e);
     void reloadIfNeeded();
     // Viewport's "F" gesture with a bone selected: frames that one bone rather than
@@ -789,6 +625,17 @@ private:
     render::preview::PreviewShowFlags showFlags_{};
     bool skinBound_ = false;
     std::string meshPath_;         // <rig>.ocmesh beside the skeleton, if there is one
+    // Blend shapes of the bound mesh. morphIds_ is fnv1a64 of each target name (what a morph.<name> curve carries);
+    // the built-in face poses (visemes) are expanded through faceRt_ to target weights.
+    MorphPanel morphPanel_;
+    std::vector<u64> morphIds_;
+    std::unordered_map<u64, u32> morphIndex_;
+    std::vector<std::string> poseNames_;
+    std::vector<u64> poseIds_;
+    anim::FaceRigRuntime faceRt_;
+    std::vector<f32> morphLive_, poseLive_;
+    std::vector<anim::FaceTargetOut> poseOut_;
+    char morphMeshBuf_[260] = {};
     bool framed_ = false;
     u32 pendingW_ = 0, pendingH_ = 0;
     f64 resizeDue_ = 0.0;
@@ -1047,9 +894,15 @@ void AnimEditor::buildPreview(Engine& e) {
         std::error_code ec;
         if (std::filesystem::exists(guess, ec)) meshPath_ = guess.string();
     }
+    // Another tab (the Face Rig editor) shares the feature and may have bound its own mesh since: bind again.
+    if (skin && skinBound_ && showMesh_ &&
+        (skin->boundPath() != meshPath_ || skin->boundBones() != static_cast<u32>(skel_.bones.size())))
+        skinBound_ = false;
     if (skin && !skinBound_) {
         skinBound_ = true;   // tried once; a failure falls back to bones and does not retry per frame
         showMesh_ = skin->bind(*e.device(), meshPath_, static_cast<u32>(skel_.bones.size()));
+        if (showMesh_ && skin->hasMorph()) setupMorphPanel(*skin);
+        else morphPanel_.setTargets({}, {});
         // Was `showBones_ = !showMesh_`; kept on now because the overlay is how an author tells which
         // bone a track belongs to, spots a broken chain, and -- now every chain has its own colour --
         // reads the rig's structure at a glance, none of which the skinned surface shows alone. A rig
@@ -1059,7 +912,8 @@ void AnimEditor::buildPreview(Engine& e) {
     }
 
     anim::restPose(skel_, pose_);
-    if (isClip_ && !clip_.tracks.empty()) {
+    // A clip with weight curves and no bone tracks (a face with no rig) is sampled too.
+    if (isClip_ && (!clip_.tracks.empty() || !clip_.curves.empty())) {
         f32 t = time_;
         if (clip_.duration > 0.0f) {
             if (loop_) { t = std::fmod(t, clip_.duration); if (t < 0.0f) t += clip_.duration; }
@@ -1078,6 +932,7 @@ void AnimEditor::buildPreview(Engine& e) {
         anim::poseToSkinning(skel_, pose_, skin_);
         skin->stage(skin_);
     }
+    if (skin && showMesh_ && skin->hasMorph()) stageMorphWeights(*skin);
 
     render::preview::PreviewMeshCache& meshes = sharedPreviewMeshes();
     setSharedMeshRoot(*e.device(), g_contentRoot);
@@ -1238,6 +1093,141 @@ void AnimEditor::buildPreview(Engine& e) {
 #endif
 }
 
+void AnimEditor::setupMorphPanel(const SkinPreview& skin) {
+    morphIds_.clear();
+    morphIndex_.clear();
+    for (const std::string& n : skin.targetNames()) {
+        const u64 id = fnv1a64(std::string_view(n));
+        morphIndex_[id] = static_cast<u32>(morphIds_.size());
+        morphIds_.push_back(id);
+    }
+    morphPanel_.setTargets(skin.targetNames(), skin.targetDefaults());
+    morphPanel_.allowKeying(isClip_);
+    // The poses on offer: the built-in visemes. (The ARKit names are the targets themselves.)
+    poseNames_.clear();
+    poseIds_.clear();
+    for (const anim::FacePose& p : anim::defaultFaceRig().poses) {
+        if (p.name.rfind("viseme_", 0) != 0) continue;
+        poseNames_.push_back(p.name);
+        poseIds_.push_back(fnv1a64(std::string_view(p.name)));
+    }
+    morphPanel_.setPoses(poseNames_);
+    faceRt_.bind(nullptr);
+    faceRt_.setDeclared(morphIds_, true);
+}
+
+// The weights on screen: an override where the author moved a slider, else what the clip drives at the playhead (its
+// morph.* curves, plus its pose.* curves expanded through the built-in rig), else the target's default.
+void AnimEditor::stageMorphWeights(SkinPreview& skin) {
+    const usize n = morphIds_.size();
+    const f32 none = MorphPanel::kNone;
+    morphLive_.assign(n, none);
+    poseLive_.assign(poseIds_.size(), none);
+    for (usize i = 0; i < n; ++i)
+        if (const anim::PoseCurve* c = anim::findPoseCurve(pose_, anim::kPoseCurveMorph, morphIds_[i])) morphLive_[i] = c->value;
+    for (usize k = 0; k < poseIds_.size(); ++k) {
+        if (const anim::PoseCurve* c = anim::findPoseCurve(pose_, anim::kPoseCurveFace, poseIds_[k])) poseLive_[k] = c->value;
+        const f32 ov = morphPanel_.poseOverride(static_cast<u32>(k));
+        const f32 w = MorphPanel::isNone(ov) ? (MorphPanel::isNone(poseLive_[k]) ? 0.0f : poseLive_[k]) : ov;
+        if (w == 0.0f) continue;
+        poseOut_.clear();
+        faceRt_.expand(poseIds_[k], w, poseOut_);
+        for (const anim::FaceTargetOut& t : poseOut_) {
+            const auto it = morphIndex_.find(t.target);
+            if (it == morphIndex_.end()) continue;
+            f32& v = morphLive_[it->second];
+            v = (MorphPanel::isNone(v) ? 0.0f : v) + t.weight;
+        }
+    }
+    morphPanel_.setLiveTargets(morphLive_);
+    morphPanel_.setLivePoses(poseLive_);
+
+    std::vector<render::MorphTargetWeight> out;
+    for (usize i = 0; i < n; ++i) {
+        const f32 ov = morphPanel_.targetOverride(static_cast<u32>(i));
+        const f32 w = !MorphPanel::isNone(ov) ? ov : (MorphPanel::isNone(morphLive_[i]) ? morphPanel_.defaultOf(static_cast<u32>(i)) : morphLive_[i]);
+        if (std::fabs(w) >= anim::kMorphActiveEps) out.push_back(render::MorphTargetWeight{static_cast<u32>(i), anim::clampMorphWeight(w)});
+    }
+    skin.stageMorph(std::move(out));
+    char line[160];
+    std::snprintf(line, sizeof line, "%zu shape(s)   %s entries   %u applied   %.1f KiB on the GPU", n,
+                  formatCount(skin.morphEntries()).c_str(), skin.morphActive(), double(skin.morphGpuBytes()) / 1024.0);
+    morphPanel_.setStats(line);
+}
+
+// The Morph Targets section of the right column: the sliders when the previewed mesh has blend shapes, otherwise a way to
+// name a mesh to preview (a face clip with no skeleton has no <skeleton>.ocmesh to find).
+void AnimEditor::drawMorph(Engine& e) {
+#if AVER_WITH_IMGUI
+    (void)e;
+    if (morphPanel_.hasTargets()) {
+        morphPanel_.draw("morphPanel");
+        MorphKeyRequest req;
+        if (isClip_ && morphPanel_.takeKeyRequest(req)) addMorphKey(req);
+        return;
+    }
+    ImGui::TextDisabled("Preview mesh with blend shapes (.ocmesh):");
+    ImGui::SetNextItemWidth(-80.0f * (ImGui::GetFontSize() / 16.0f));
+    ImGui::InputText("##morphMesh", morphMeshBuf_, sizeof morphMeshBuf_);
+    ImGui::SameLine();
+    if (ImGui::Button("Preview") && morphMeshBuf_[0] != '\0') {
+        std::filesystem::path p(morphMeshBuf_);
+        if (p.is_relative() && !g_contentRoot.empty()) p = std::filesystem::path(g_contentRoot) / p;
+        meshPath_ = p.string();
+        skinBound_ = false;   // buildPreview binds it on the next frame
+    }
+#else
+    (void)e;
+#endif
+}
+
+// A key at the playhead on the target's (or pose's) weight curve, created when the clip has none. Kept sorted and kept
+// parallel with the tangent arrays like drawCurves' own Add key.
+void AnimEditor::addMorphKey(const MorphKeyRequest& r) {
+    if (!isClip_) return;
+    pushUndo();
+    const std::string name = std::string(r.isPose ? fmt::kOcCurvePrefixPose : fmt::kOcCurvePrefixMorph) + r.name;
+    fmt::OcCurve* c = nullptr;
+    for (fmt::OcCurve& x : clip_.curves) if (x.name == name) { c = &x; break; }
+    if (!c) {
+        clip_.curves.emplace_back();
+        c = &clip_.curves.back();
+        c->name = name;
+    }
+    const f32 t = clip_.duration > 0.0f ? std::min(std::max(time_, 0.0f), clip_.duration) : 0.0f;
+    usize at = 0;
+    while (at < c->times.size() && c->times[at] < t - 1e-4f) ++at;
+    const bool hasTangents = c->inTangents.size() == c->times.size() && c->outTangents.size() == c->times.size() && !c->times.empty();
+    if (at < c->times.size() && std::fabs(c->times[at] - t) <= 1e-4f) {
+        c->values[at] = r.value;                       // a key already there: overwrite its value
+    } else {
+        c->times.insert(c->times.begin() + static_cast<isize>(at), t);
+        c->values.insert(c->values.begin() + static_cast<isize>(at), r.value);
+        if (hasTangents) {
+            c->inTangents.insert(c->inTangents.begin() + static_cast<isize>(at), 0.0f);
+            c->outTangents.insert(c->outTangents.begin() + static_cast<isize>(at), 0.0f);
+        }
+    }
+    c->poseId = 0;
+    dirty_ = true;
+}
+
+// A new, empty weight curve for one target: a key at the playhead holding the target's current value.
+void AnimEditor::addMorphCurve(const std::string& target) {
+    if (!isClip_) return;
+    const std::string name = std::string(fmt::kOcCurvePrefixMorph) + target;
+    if (clip_.curve(name) != nullptr) return;
+    pushUndo();
+    fmt::OcCurve c;
+    c.name = name;
+    c.times = {time_};
+    c.values = {0.0f};
+    clip_.curves.push_back(std::move(c));
+    selectedCurve_ = static_cast<int>(clip_.curves.size()) - 1;
+    std::snprintf(curveNameBuf_, sizeof curveNameBuf_, "%s", name.c_str());
+    dirty_ = true;
+}
+
 void AnimEditor::drawTransport() {
 #if AVER_WITH_IMGUI
     if (ImGui::Button(playing_ ? "Pause" : "Play")) playing_ = !playing_;
@@ -1291,6 +1281,20 @@ void AnimEditor::drawCurves() {
         selectedCurve_ = static_cast<int>(clip_.curves.size()) - 1;
         std::snprintf(curveNameBuf_, sizeof curveNameBuf_, "%s", c.name.c_str());
         dirty_ = true;
+    }
+    if (morphPanel_.hasTargets()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Add morph curve")) ImGui::OpenPopup("addMorphCurve");
+        if (ImGui::BeginPopup("addMorphCurve")) {
+            ImGui::TextDisabled("Blend shape");
+            for (u32 i = 0; i < morphPanel_.targetCount(); ++i) {
+                const std::string curveName = std::string(fmt::kOcCurvePrefixMorph) + morphPanel_.targetName(i);
+                ImGui::BeginDisabled(clip_.curve(curveName) != nullptr);
+                if (ImGui::Selectable(morphPanel_.targetName(i).c_str())) { addMorphCurve(morphPanel_.targetName(i)); ImGui::CloseCurrentPopup(); }
+                ImGui::EndDisabled();
+            }
+            ImGui::EndPopup();
+        }
     }
     ImGui::SameLine();
     ImGui::TextDisabled("%zu curve(s)", clip_.curves.size());
@@ -2792,14 +2796,24 @@ void AnimEditor::draw(Engine& e) {
                      6.0f * uiScale);
 
     if (ImGui::BeginChild("tracks", ImVec2(0, h), true)) {
+        // With blend shapes on the previewed mesh the right column gains a MORPH TARGETS section, taking its room from the
+        // notifies and curves above it. A clip with no mesh to preview still gets the one-line "preview mesh" field.
+        const bool morphSection = morphPanel_.hasTargets() || (isClip_ && (skel_.bones.empty() || !showMesh_));
+        const f32 notifiesH = morphSection ? 0.22f : 0.38f, curvesH = morphSection ? 0.24f : 0.30f;
         ImGui::TextDisabled("NOTIFIES");
-        if (ImGui::BeginChild("notifies", ImVec2(0, h * 0.38f), false)) drawNotifies();
+        if (ImGui::BeginChild("notifies", ImVec2(0, h * notifiesH), false)) drawNotifies();
         ImGui::EndChild();
         ImGui::Separator();
         ImGui::TextDisabled("CURVES");
-        if (ImGui::BeginChild("curves", ImVec2(0, h * 0.30f), false)) drawCurves();
+        if (ImGui::BeginChild("curves", ImVec2(0, h * curvesH), false)) drawCurves();
         ImGui::EndChild();
         ImGui::Separator();
+        if (morphSection) {
+            ImGui::TextDisabled("MORPH TARGETS");
+            if (ImGui::BeginChild("morph", ImVec2(0, h * (morphPanel_.hasTargets() ? 0.30f : 0.10f)), false)) drawMorph(e);
+            ImGui::EndChild();
+            ImGui::Separator();
+        }
         ImGui::TextDisabled("TRACKS");
         drawTracks();
     }
@@ -2882,12 +2896,7 @@ void setAnimEditorRigHooks(AnimEditorRigHooks hooks) { g_rigHooks = std::move(ho
 // Missing this crashed on exit (access violation after the last frame, screen correct but process
 // dead): addRenderFeature holds the feature non-owning, same as ActorEditor's shared preview, so
 // something must remove it -- sharedPreview always did; this feature simply hadn't.
-void releaseAnimEditorGpu() {
-    if (g_skinDevice) g_skinDevice->removeRenderFeature(&g_skin);
-    g_skinDevice = nullptr;
-    g_skin.shutdown();
-    g_skinTried = false;
-}
+void releaseAnimEditorGpu() { shutdownSharedSkinPreview(); }
 
 void shutdownAnimEditors() { releaseAnimEditorGpu(); }
 

@@ -38,7 +38,7 @@ A malformed `ENTRY` line is skipped with a warning naming the line; a typo never
 ## Editor
 
 - **String Table tab** (double-click a `.ocstrings`, or New String Table in the Content Browser): rows are the union of keys, columns are Key, Note and one per culture (default first). Missing cells are tinted; typing creates the entry. Add key, Delete key, Rename key (every culture), Add culture, Show missing only.
-- **Gather** adds every key the project uses (`.ocui`, `.ocgraph`, C# `Loc.Text("T","K","Default")` / `new LocText(...)`, data-table cells) to the default culture, text = the inline default. **Report** lists missing, unused, conflicting-default and untranslated keys, with Copy as text. When a Play session ends, a toast says how many keys it found missing.
+- **Gather** adds every key the project uses (`.ocui`, `.ocgraph`, `.occaptions` speaker names, cue tags and line texts, C# `Loc.Text("T","K","Default")` / `new LocText(...)`, data-table cells) to the default culture, text = the inline default. **Report** lists missing, unused, conflicting-default and untranslated keys, with Copy as text. When a Play session ends, a toast says how many keys it found missing.
 - **Project Settings > Description**: Default Culture (`LOCALE.DEFAULT`) and Preview Culture (editor only).
 - **UI Layout tab**: a culture box previews that culture; Localize rewrites a literal text/placeholder/items field to `@UI:<Layout>.<Widget>.<property>=<literal>`; a field holding a reference shows its resolved text.
 - External edits of string files apply within the watcher debounce; a file that no longer parses keeps the old text and logs once.

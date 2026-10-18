@@ -263,6 +263,10 @@ Reuses the cage-hull concept from `.ocbeam COLLISION{}`. Body: `u32 HullCount`, 
 ### 5.9 `CBND` — precomputed cage bind (optional, `HasCageBind`)
 Stores the result of `BindToCage` (recon `gpudeform §6`) so the vehicle body skins to its cage without runtime rebind: `u8 K` (1–8), `u32 CageNodeCount`, then per vertex `K`×`{i32 CageNodeId; f32 Weight}` (weights pre-normalized inverse-distance; `-1` node = unused slot). This directly feeds `BindNodeIdx`/`BindNodeWt` GPU buffers. Optional — runtime can still bind on the fly.
 
+
+### 5.10 `MRPH` — blend shapes (optional, `HasMorph` = MHDR flag bit 11)
+Chunk version 1; its presence raises the container `contentVersion` to 2 (meshes without it stay version 1, byte-identical). Layout: `u32 TargetCount` (1–512), `u32 VertexCount` (must equal the mesh's), `u32 reserved`; then `TargetCount` descriptors of 32 bytes each `{u32 NameStrt; u32 EntryCount; u64 EntryOffset (from chunk start, 8-aligned); f32 DefaultWeight; u32 Flags (bit0 = normal deltas); u32 0; u32 0}`; then each target's entries in ascending vertex order: `{u32 Vertex; f32 dx, dy, dz}` (16 B), or 24 B with `{f16 nx, ny, nz; u16 0}` appended when Flags bit0. Deltas are engine space, centimetres, vertex-local (applied before skinning). Target names are unique, non-empty, <= 128 bytes. A newer chunk version, or a vertex-count mismatch, makes the reader skip blend shapes with a warning rather than fail the mesh. Semantics: docs/ANIM_MORPH_FACE.md.
+
 ---
 
 ## 6. `.octex` — texture
@@ -566,6 +570,8 @@ falls back to LINEAR precisely when a curve's tangent arrays are absent or mis-s
 own `CUBICSPLINE` note above. Authored in the animation editor's curve canvas: draggable keys and
 draggable tangent handles, same shape as the graph editor's node canvas.
 
+### 9.4b Curve naming for facial animation
+By convention a curve named `morph.<target>` is the weight of that blend shape and `pose.<name>` the weight of a named face pose; the prefix-stripped name is hashed (fnv1a64) at runtime and not stored. A clip with curves and zero tracks is valid (a curve-only clip: blend-shape weights on a face with no rig); its `SkeletonRef` may be empty. No byte layout changes. docs/ANIM_MORPH_FACE.md.
 ### 9.5 `TRKS` key layout
 Per track, for each present channel, a sub-array. **Keyframed** (`Storage=0`): each key = `f32 Time` + value(s): T/S = 3×f32, R = 4×f32 quat; for `CUBICSPLINE`, each key = `Time` + `inTangent` + `value` + `outTangent` (glTF cubic spec preserved). **Baked-uniform** (`Storage=1`): no per-key time; `KeyCount = round(Duration*SampleRate)+1` samples at `frame/SampleRate`, values only (this is the runtime-fast form, equivalent to the current `.ocbeam` ANIM but with chosen rate). Quaternions renormalized on read; slerp for LINEAR, hold for STEP, Hermite for CUBICSPLINE. A cooker can emit both: keep the keyframed source, bake a uniform variant into `.ocpak` for shipping.
 
@@ -1114,6 +1120,7 @@ ENDSEQUENCE
   placement it was saved with. A track that needs an actor (transform, material, property, visibility, animation) whose target
   is out of range and that has no `bind` is dropped on write.
 
+**Property tracks on blend shapes (wave 9).** A Property track whose property is `CMorphTargets.morph.<target>` or `CMorphTargets.pose.<name>` is a virtual field: it keys one float, played through MorphSystem's sequencer layer (not a reflected component field). Muting the track or leaving its span releases the override. No format change.
 **`.ocseq`** (`modules/formats/{include,src}/aver/formats/OcSeq.{hpp,cpp}`: `OcSeqFile`, `parseOcseq`, `writeOcseq`) is a standalone
 level-sequence file: the header line `OCSEQ 1` (a newer version is refused) followed by the same `SEQUENCE ... ENDSEQUENCE` records. A
 placement index means nothing outside a level, so actors are bound by **name only**: `target` is ignored on read and never written, and a
@@ -1494,6 +1501,14 @@ END
 - Leaf names are not checked at parse (the registry is a runtime fact); `validateStateTree` returns warnings for unknown leaves, unreachable states and keys used but not declared.
 <!-- [wave3/ai-queries end] -->
 
+## 11b. `.occaptions` - subtitles and sound captions (text)
+
+OC dialect, `OCCAPTIONS 1` header, `#` comments, quoted strings with `\"` and `\\` (a `#` starts a comment only at the start of a token outside quotes, except a colour `#RRGGBB[AA]`). Records: `SPEAKER <id> [name <text>] [colour #RRGGBB[AA]]`; `CUE <id>` with `sound <pattern>` (repeatable; content-relative, `*` and `?` inside a segment, matched against the tail of the played path), `kind dialogue|sound|music`, `speaker <id>`, `priority <int>`, `radius <cm>`, `cooldown <s>`, `hold <s>`, `tag <text>` (shorthand for `LINE 0 0 <text>`); `LINE <start> <dur> <text> [speaker <id>]` (seconds from the cue start, dur 0 = until the voice ends). Names and texts may be localization references. A missing or newer header fails; any other malformed record is skipped with a diagnostic naming the line; a cue with no LINE and no tag is skipped; unknown records and comments survive a save. Files are `Content/Captions/*.occaptions`, merged in name order (a later duplicate cue id wins). See [../ACCESSIBILITY.md](../ACCESSIBILITY.md).
+## 11j. `.ocface` — face rig (JSON)
+`{"format":"ocface","version":1,"convention":"arkit52|custom","mesh":"","skeleton":"","poses":[{"name","targets":[{"name","weight"}],"joints":[{"bone","position":[x,y,z],"rotation":[x,y,z,w],"scale":[x,y,z]}]}],"phonemes":{"AA":"viseme_aa"},"lipsync":{"lead","attack","release","minHold","maxTotal"}}`. Limits: 256 poses, 32 targets and 16 joints per pose, names <= 128 bytes and unique, weights finite in [-4, 4]. `mesh` and `skeleton` are editor-preview hints. Pose resolution: explicit rig pose, then a mesh target of the same name, then the built-in pose (52 ARKit names + 15 visemes). A newer `version` is refused. Reader/writer: `aver/anim/FaceRig.hpp`.
+
+## 11k. `.ocvis` — lip-sync track (text)
+`OCVIS 1`, optional `SET phoneme|viseme`, then `EVENT <start> <end> <symbol> [intensity]` lines; `#` comments; unknown records ignored; events need not be sorted; end > start; at most 65536. Phonemes are ARPAbet (39) plus `sil`, `sp`, `pau`. `AverAssetC visbake` turns a track into a curve-only `.ocanim` of `pose.viseme_*` curves. Reader/writer: `aver/anim/Viseme.hpp`.
 ## 12. Versioning & compatibility
 
 - **Two version axes:** `ContainerVersion` (the `AVR1` framework) and `ContentVersion` (per-subtype schema). Text formats carry a single `OC<NAME> <n>` line.
@@ -1629,3 +1644,7 @@ The design intent covered:
 - Round-trip samples (Ferrari499P.ocbeam/.ocaero and demoworld.scene/.ocmap) to prove byte-fidelity load and lossless `.ocworld` upgrade.
 
 This design preserves the four legacy formats byte-for-byte, gives the seven missing asset types real versioned formats under one skippable-chunk container, keeps authoring data human-readable while making bulk data GPU-ready and GPU-driven-capable, and provides a concrete import/cook/DDC path that finally lifts geometry/material/texture/skeleton/animation data out of the opaque embedded-glb and into first-class, permissively-licensed native formats.
+
+### `.ocproject` key `RENDER.MANYLIGHTS`
+
+`RENDER.MANYLIGHTS <0|1|2>` (text manifest, `ProjectDesc::manyLights`, `-1` = unstated): stochastic many-light direct lighting from a light tree (`docs/rendering/MANY_LIGHTS.md`). `0` off (the light grid's capped tail), `1` auto (engages above `voxi.manyLightsMin` = 48 lights; a scene at or under it renders as with `0`), `2` on at any count. Absent leaves the engine default (auto). The console's exhaustive ground-truth mode (`voxi.manyLights 3`) is never stored. It takes effect only on NRD2 frames (`RENDER.DENOISER 2`) with ray tracing on D3D12. Owned by the writer (`isOwnedKey`), so a hand edit survives only as the stated value.

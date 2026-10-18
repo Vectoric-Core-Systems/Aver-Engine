@@ -307,6 +307,20 @@ void SandboxApp::cbCreateInputScheme() {
     cbAdoptNewAsset(target);
 }
 
+// Writes a starter .occaptions (one speaker, one dialogue cue) and opens it. Unconditional: OcCaptions.hpp needs no engine module.
+void SandboxApp::cbCreateCaptions() {
+    const std::filesystem::path target = cbFreeAssetPath("NewCaptions", ".occaptions");
+    if (target.empty()) return;
+    const std::string text = fmt::writeOcCaptions(editor::captionStarterData());
+
+    std::string why;
+    if (!editor::writeNewFile(target.string(), text, &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new captions file failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
 // Writes a starter data table (Name,Value:int / row1,1) into the selected folder and opens it. A plain .csv:
 // the Data Table editor claims it, Excel and any text editor read it.
 void SandboxApp::cbCreateDataTable() {
@@ -566,6 +580,20 @@ void SandboxApp::cbCreateIkRig(const std::string& skeletonPath) {
     cbAdoptNewAsset(target);
 }
 
+// [wave9/morph] A starter .ocface: no poses of its own, so every ARKit name and viseme resolves through the built-in rig until
+// the author adds some. Made in the selected folder.
+void SandboxApp::cbCreateFaceRig() {
+    anim::FaceRigAsset rig;
+    const std::filesystem::path target = cbFreeAssetPath("NewFaceRig", ".ocface");
+    if (target.empty()) return;
+    std::string why;
+    if (!anim::saveFaceRig(target.string(), rig, &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new face rig failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
 // [wave5/ik-retarget] A starter .ocretarget whose source is the given skeleton; pick the target in the tab.
 void SandboxApp::cbCreateRetarget(const std::string& sourceSkeletonPath) {
     std::string stem = "NewRetargeter";
@@ -1198,6 +1226,9 @@ void SandboxApp::drawContentBrowser() {
         uiReg_.track("cb.add.montage");
         if (ImGui::MenuItem("New IK Rig"))          cbCreateIkRig();   // [wave5/ik-retarget]
         uiReg_.track("cb.add.ikRig");
+
+        if (ImGui::MenuItem("New Face Rig"))        cbCreateFaceRig();   // [wave9/morph]
+        uiReg_.track("cb.add.faceRig");
         if (ImGui::MenuItem("New IK Retargeter"))   cbCreateRetarget();
         uiReg_.track("cb.add.retarget");
         if (ImGui::MenuItem("New Control Rig"))     cbCreateRig();
@@ -1230,6 +1261,8 @@ void SandboxApp::drawContentBrowser() {
         uiReg_.track("cb.add.instanceSet");
         if (ImGui::MenuItem("New Input Scheme"))    cbCreateInputScheme();
         uiReg_.track("cb.add.inputScheme");
+        if (ImGui::MenuItem("New Captions"))        cbCreateCaptions();
+        uiReg_.track("cb.add.captions");
         if (ImGui::MenuItem("New Data Table"))      cbCreateDataTable();
         uiReg_.track("cb.add.dataTable");
         if (ImGui::MenuItem("New String Table")) { cbWantNewStringTable_ = true; cbNewStringTableBuf_[0] = '\0'; }
@@ -1834,6 +1867,7 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         // ICON_SETTINGS since binding a key is a settings choice, same as .fsproj/.csproj below,
         // though coloured apart from them.
         {".ocinput",    {ICON_SETTINGS,   IM_COL32(230, 200,  60, 255), "Input Scheme"}},
+        {".occaptions", {ICON_EDIT,       IM_COL32(120, 210, 190, 255), "Captions"}},
         {".ocgas",      {ICON_SETTINGS,   IM_COL32(220, 120,  70, 255), "Gameplay Definitions"}},
         // Translated text per culture, and the spreadsheet-shaped data tables bound to C# records.
         {".ocstrings",  {ICON_EDIT,       IM_COL32(120, 210, 190, 255), "String Table"}},
@@ -1852,6 +1886,9 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         {".ocasm",      {ICON_TREE,       IM_COL32(190, 140, 255, 255), "Animation State Machine"}},
         {".ocmontage",  {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Animation Montage"}},
         {".ocikrig",    {ICON_TREE,       IM_COL32(255, 170, 110, 255), "IK Rig"}},                 // [wave5/ik-retarget]
+
+        {".ocface",     {ICON_TREE,       IM_COL32(255, 205, 160, 255), "Face Rig"}},               // [wave9/morph]
+        {".ocvis",      {ICON_WAVE,       IM_COL32(170, 220, 255, 255), "Lip-Sync Track"}},         // [wave9/morph]
         {".ocretarget", {ICON_LINK,       IM_COL32(255, 170, 110, 255), "IK Retargeter"}},
         {".ocrig",      {ICON_TUNE,       IM_COL32(255, 170, 110, 255), "Control Rig"}},
         {".ocsoft",     {ICON_TUNE,       IM_COL32(120, 210, 190, 255), "Soft Body (cloth / destructible)"}},

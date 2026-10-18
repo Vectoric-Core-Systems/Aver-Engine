@@ -3,6 +3,7 @@
 #include "aver/formats/OcMesh.hpp"
 
 #include "aver/formats/Avr1.hpp"
+#include "aver/core/Log.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -20,6 +21,14 @@ constexpr u32 kChunkVTXS = avrFourCC("VTXS");
 constexpr u32 kChunkIDXS = avrFourCC("IDXS");
 constexpr u32 kChunkMADR = avrFourCC("MADR");
 constexpr u32 kChunkMLET = avrFourCC("MLET");
+// Optional blend-shape chunk (MORPH_TARGETS.md 2.2). Never marked Required: a reader that has not
+// heard of it loads the base mesh.
+constexpr u32 kChunkMRPH = avrFourCC("MRPH");
+constexpr u16 kMrphChunkVersion = 1;
+constexpr u32 kMrphDescBytes = 32;
+constexpr u32 kMrphHeaderBytes = 12;
+constexpr u32 kMrphEntryBytes = 16, kMrphEntryBytesNrm = 24;
+constexpr usize kMorphNameMax = 128;
 
 // MLET limits (FORMAT_SPECS.md 5.7) now live in OcMesh.hpp, so Trifactor can ALIAS them rather
 // than declare a second pair. The reasoning that put them here was half right: Formats sits below
@@ -177,6 +186,35 @@ void OcMeshData::computeBounds() {
     boundsMin = lo; boundsMax = hi;
 }
 
+void OcMorphTarget::finalize() {
+    maxAbs[0] = maxAbs[1] = maxAbs[2] = 0.0f;
+    maxLen = 0.0f;
+    const usize n = positionDeltas.size() / 3;
+    for (usize i = 0; i < n; ++i) {
+        const f32 x = positionDeltas[i * 3], y = positionDeltas[i * 3 + 1], z = positionDeltas[i * 3 + 2];
+        maxAbs[0] = std::fmax(maxAbs[0], std::fabs(x));
+        maxAbs[1] = std::fmax(maxAbs[1], std::fabs(y));
+        maxAbs[2] = std::fmax(maxAbs[2], std::fabs(z));
+        maxLen = std::fmax(maxLen, std::sqrt(x * x + y * y + z * z));
+    }
+}
+
+bool OcMorphTarget::valid(u32 vertexCount, std::string* why) const {
+    if (name.empty()) return fail(why, "morph target has no name");
+    if (name.size() > kMorphNameMax) return fail(why, "morph target '" + name.substr(0, 32) + "...' has a name over 128 bytes");
+    if (!std::isfinite(defaultWeight)) return fail(why, "morph target '" + name + "' has a non-finite default weight");
+    const usize n = vertices.size();
+    if (positionDeltas.size() != n * 3) return fail(why, "morph target '" + name + "' has " + std::to_string(positionDeltas.size()) + " position delta floats for " + std::to_string(n) + " entries");
+    if (!normalDeltas.empty() && normalDeltas.size() != n * 3) return fail(why, "morph target '" + name + "' has a normal delta count that does not match its entries");
+    for (usize i = 0; i < n; ++i) {
+        if (vertices[i] >= vertexCount) return fail(why, "morph target '" + name + "' names vertex " + std::to_string(vertices[i]) + ", past the mesh's " + std::to_string(vertexCount));
+        if (i > 0 && vertices[i] <= vertices[i - 1]) return fail(why, "morph target '" + name + "' entries are not strictly ascending");
+    }
+    for (const f32 v : positionDeltas) if (!std::isfinite(v)) return fail(why, "morph target '" + name + "' has a non-finite position delta");
+    for (const f32 v : normalDeltas)   if (!std::isfinite(v)) return fail(why, "morph target '" + name + "' has a non-finite normal delta");
+    return true;
+}
+
 usize coalesceAdjacentSubmeshes(OcMeshData& m) {
     if (m.submeshes.size() < 2) return m.submeshes.size();
     std::vector<std::string> slots;
@@ -269,10 +307,25 @@ bool submeshesPartitionIndices(const OcMeshData& m, std::string* why) {
 
 // Encodes a mesh into an .ocmesh container. Returns false with `why` set on invalid input.
 bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
-    if (!in.valid()) return fail(why, ".ocmesh: mesh has no vertices, no indices, or mismatched attribute counts");
+    if (!in.valid()) {
+        // Name the blend shape when that is what failed: valid() only answers yes or no.
+        std::string tw;
+        if (in.morphTargets.size() > kOcMeshMaxMorphTargets)
+            return fail(why, ".ocmesh: more than " + std::to_string(kOcMeshMaxMorphTargets) + " morph targets");
+        for (const OcMorphTarget& t : in.morphTargets)
+            if (!t.valid(in.vertexCount(), &tw)) return fail(why, ".ocmesh: " + tw);
+        return fail(why, ".ocmesh: mesh has no vertices, no indices, or mismatched attribute counts");
+    }
     if (in.submeshes.empty()) return fail(why, ".ocmesh: at least one submesh is required");
     if (in.submeshes.size() > 255) return fail(why, ".ocmesh: more than 255 submeshes");
     if (in.lodCount() > 255) return fail(why, ".ocmesh: more than 255 LODs");
+    for (usize ti = 0; ti < in.morphTargets.size(); ++ti) {
+        std::string tw;
+        if (!in.morphTargets[ti].valid(in.vertexCount(), &tw)) return fail(why, ".ocmesh: " + tw);
+        for (usize tj = 0; tj < ti; ++tj)
+            if (in.morphTargets[tj].name == in.morphTargets[ti].name)
+                return fail(why, ".ocmesh: two morph targets are named '" + in.morphTargets[ti].name + "'");
+    }
 
     OcMeshData m = in;
     m.computeBounds();
@@ -642,11 +695,51 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
         for (usize L = 0; L < lods.size(); ++L) meshletOffsetPerLod[L] += groupTableBytes;
     }
 
+    // ---- MRPH: blend shapes, only when the mesh has them. Names are interned here, before STRT is
+    // emitted. Descriptors first, then each target's entries (8-aligned, ascending vertex). ----
+    std::vector<u8> mrph;
+    const bool morphed = !m.morphTargets.empty();
+    if (morphed) {
+        W w{mrph};
+        const u32 tcount = static_cast<u32>(m.morphTargets.size());
+        w.u32v(tcount);
+        w.u32v(vcount);
+        w.u32v(0);
+        u64 entryCursor = (u64(kMrphHeaderBytes) + u64(kMrphDescBytes) * tcount + 7) & ~u64(7);
+        std::vector<u64> entryOffsets(tcount);
+        for (u32 ti = 0; ti < tcount; ++ti) {
+            const OcMorphTarget& t = m.morphTargets[ti];
+            const bool nrm = !t.normalDeltas.empty();
+            entryOffsets[ti] = entryCursor;
+            entryCursor += u64(t.vertices.size()) * (nrm ? kMrphEntryBytesNrm : kMrphEntryBytes);
+            w.u32v(strt.add(t.name));
+            w.u32v(static_cast<u32>(t.vertices.size()));
+            w.u64v(entryOffsets[ti]);
+            w.f32v(t.defaultWeight);
+            w.u32v(nrm ? 1u : 0u);
+            w.u32v(0); w.u32v(0);
+        }
+        while (mrph.size() < ((u64(kMrphHeaderBytes) + u64(kMrphDescBytes) * tcount + 7) & ~u64(7))) mrph.push_back(0);
+        for (u32 ti = 0; ti < tcount; ++ti) {
+            const OcMorphTarget& t = m.morphTargets[ti];
+            const bool nrm = !t.normalDeltas.empty();
+            for (usize k = 0; k < t.vertices.size(); ++k) {
+                w.u32v(t.vertices[k]);
+                w.f32v(t.positionDeltas[k * 3]); w.f32v(t.positionDeltas[k * 3 + 1]); w.f32v(t.positionDeltas[k * 3 + 2]);
+                if (nrm) {
+                    w.u16v(floatToHalf(t.normalDeltas[k * 3])); w.u16v(floatToHalf(t.normalDeltas[k * 3 + 1]));
+                    w.u16v(floatToHalf(t.normalDeltas[k * 3 + 2])); w.u16v(0);
+                }
+            }
+        }
+    }
+
     // ---- MHDR ----
     std::vector<u8> mhdr;
     {
         W w{mhdr};
-        u32 flags = m.flags & ~(kOcMeshIndex32 | kOcMeshMeshlets | kOcMeshHasColor | kOcMeshHasUV1 | kOcMeshHasSkin);
+        u32 flags = m.flags & ~(kOcMeshIndex32 | kOcMeshMeshlets | kOcMeshHasColor | kOcMeshHasUV1 | kOcMeshHasSkin | kOcMeshHasMorph);
+        if (morphed) flags |= kOcMeshHasMorph;
         if (index32) flags |= kOcMeshIndex32;
         if (skinned) flags |= kOcMeshHasSkin;
         if (anyMeshlets) flags |= kOcMeshMeshlets;
@@ -735,7 +828,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
 
     Avr1File f;
     f.subtype = kAvrSubtypeMesh;
-    f.contentVersion = 1;
+    f.contentVersion = morphed ? 2 : 1;   // nothing branches on it; it only tells a tool morph data may be present
     f.flags = kAvrFlagCooked;
     f.add(kChunkMHDR, std::move(mhdr), kAvrChunkRequired);
     f.add(kChunkSTRT, strt.bytes());
@@ -748,6 +841,7 @@ bool writeOcMesh(const OcMeshData& in, std::vector<u8>& out, std::string* why) {
     // skipped" is built to support (never marked kAvrChunkRequired, so an old reader that doesn't
     // look for MLET is unaffected by its presence in a NEW file either).
     if (anyMeshlets) f.add(kChunkMLET, std::move(mlet), kAvrChunkGpuUploadable, kMlChunkVersionTopology);
+    if (morphed) f.add(kChunkMRPH, std::move(mrph), 0, kMrphChunkVersion);
     return writeAvr1(f, out, why);
 }
 
@@ -1276,6 +1370,91 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
         for (u32 i = 0; i < n && mr.ok; ++i) out.materialSlots.push_back(std::string(strt.get(mr.u32v())));
     }
     if (out.materialSlots.empty() && slotCount) out.materialSlots.resize(slotCount);
+
+    // ---- blend shapes (MRPH), when the file carries them. The chunk is trusted over the header flag,
+    // as MLET is. A chunk this reader does not understand, or one sized for a different vertex count,
+    // is dropped with a warning and the base mesh still loads. A malformed one fails the file. ----
+    out.morphTargets.clear();
+    out.flags &= ~kOcMeshHasMorph;
+    if (const AvrChunk* mr = f.find(kChunkMRPH)) {
+        if (mr->version > kMrphChunkVersion) {
+            AVER_WARN(".ocmesh: MRPH chunk version {} is newer than this reader ({}); blend shapes are skipped",
+                      u32(mr->version), u32(kMrphChunkVersion));
+        } else {
+            const u8* base = mr->data.data();
+            const u64 csize = mr->data.size();
+            R hr{base, base + csize};
+            const u32 tcount = hr.u32v();
+            const u32 mvcount = hr.u32v();
+            hr.u32v();
+            if (!hr.ok) return fail(why, ".ocmesh: truncated MRPH header");
+            if (mvcount != vcount) {
+                AVER_WARN(".ocmesh: MRPH was written for {} vertices but the mesh has {}; blend shapes are skipped",
+                          mvcount, vcount);
+            } else {
+                if (tcount == 0 || tcount > kOcMeshMaxMorphTargets)
+                    return fail(why, ".ocmesh: MRPH holds " + std::to_string(tcount) + " targets (the limit is " +
+                                         std::to_string(kOcMeshMaxMorphTargets) + ")");
+                if (u64(tcount) * kMrphDescBytes > csize - kMrphHeaderBytes)
+                    return fail(why, ".ocmesh: MRPH is smaller than its target table requires");
+                out.morphTargets.resize(tcount);
+                for (u32 ti = 0; ti < tcount; ++ti) {
+                    OcMorphTarget& t = out.morphTargets[ti];
+                    const u32 nameRef = hr.u32v();
+                    const u32 entries = hr.u32v();
+                    const u64 off = hr.u64v();
+                    t.defaultWeight = hr.f32v();
+                    const u32 tflags = hr.u32v();
+                    hr.u32v(); hr.u32v();
+                    if (!hr.ok) return fail(why, ".ocmesh: truncated MRPH target table");
+                    t.name = std::string(strt.get(nameRef));
+                    if (t.name.empty() || t.name.size() > kMorphNameMax)
+                        return fail(why, ".ocmesh: MRPH target " + std::to_string(ti) + " has an empty or over-long name");
+                    if (!std::isfinite(t.defaultWeight))
+                        return fail(why, ".ocmesh: morph target '" + t.name + "' has a non-finite default weight");
+                    if (entries > vcount)
+                        return fail(why, ".ocmesh: morph target '" + t.name + "' has more entries than the mesh has vertices");
+                    const bool nrm = (tflags & 1u) != 0;
+                    const u64 stride = nrm ? kMrphEntryBytesNrm : kMrphEntryBytes;
+                    const u64 need = u64(entries) * stride;
+                    if (off > csize || need > csize - off)
+                        return fail(why, ".ocmesh: morph target '" + t.name + "' entries run past the end of MRPH");
+                    R er{base + off, base + off + need};
+                    t.vertices.resize(entries);
+                    t.positionDeltas.resize(usize(entries) * 3);
+                    if (nrm) t.normalDeltas.resize(usize(entries) * 3);
+                    for (u32 k = 0; k < entries; ++k) {
+                        t.vertices[k] = er.u32v();
+                        for (int c = 0; c < 3; ++c) t.positionDeltas[usize(k) * 3 + c] = er.f32v();
+                        if (nrm) {
+                            for (int c = 0; c < 3; ++c) t.normalDeltas[usize(k) * 3 + c] = halfToFloat(er.u16v());
+                            er.u16v();
+                        }
+                    }
+                    if (!er.ok) return fail(why, ".ocmesh: truncated MRPH entries for '" + t.name + "'");
+                    std::string tw;
+                    if (!t.valid(vcount, &tw)) return fail(why, ".ocmesh: " + tw);
+                    t.finalize();
+                }
+                // A duplicate name is renamed name_2, name_3 ... and warned.
+                for (u32 ti = 1; ti < tcount; ++ti) {
+                    auto taken = [&](const std::string& n, u32 upto) {
+                        for (u32 tj = 0; tj < upto; ++tj) if (out.morphTargets[tj].name == n) return true;
+                        return false;
+                    };
+                    OcMorphTarget& t = out.morphTargets[ti];
+                    if (!taken(t.name, ti)) continue;
+                    const std::string orig = t.name;
+                    for (u32 n = 2; n < 100000; ++n) {
+                        std::string cand = orig + "_" + std::to_string(n);
+                        if (cand.size() <= kMorphNameMax && !taken(cand, ti)) { t.name = std::move(cand); break; }
+                    }
+                    AVER_WARN(".ocmesh: duplicate morph target name '{}' renamed '{}'", orig, t.name);
+                }
+                out.flags |= kOcMeshHasMorph;
+            }
+        }
+    }
     return true;
 }
 

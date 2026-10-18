@@ -71,3 +71,10 @@ set_target_properties(LevelComponentsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${
 add_executable(GameLandscapeLayersTest src/GameLandscapeLayersTest.cpp)
 target_link_libraries(GameLandscapeLayersTest PRIVATE Aver.Runtime.Game.Core Aver.Landscape Aver.Formats Aver.Platform Aver.Core)
 set_target_properties(GameLandscapeLayersTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# GameAccessibilityTest -- the host wiring for game accessibility (Runtime/src/GameAccessibility.cpp): the post override,
+# the camera wrapper, initAccessibility from a temp project, the per-frame caption list, and the pin that keeps
+# Aver.Framework's key table and Aver.UI's default settings model the same list. No window, no device.
+add_executable(GameAccessibilityTest src/GameAccessibilityTest.cpp)
+target_link_libraries(GameAccessibilityTest PRIVATE Aver.Runtime.Game.Core Aver.Framework Aver.UI Aver.Platform Aver.Core)
+set_target_properties(GameAccessibilityTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

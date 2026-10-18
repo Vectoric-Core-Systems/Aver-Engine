@@ -406,7 +406,7 @@ bool MontageSystem::evaluateSlot(scene::Entity e, u64 slotHash, const fmt::OcSke
         p.mp.evaluate(skel, base, scratchPose_);
         Pose mixed;
         blendPose(out, scratchPose_, w, mixed);
-        out.local.swap(mixed.local);
+        out.swap(mixed);
         coverage = 1.0f - (1.0f - coverage) * (1.0f - w);
     }
     coverage = clamp01(coverage);

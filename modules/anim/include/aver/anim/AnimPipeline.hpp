@@ -1,4 +1,4 @@
-// The post-state-machine pipeline of an .ocasm: slot, layered-blend-per-bone and additive nodes,
+// The post-state-machine pipeline of an .ocasm: slot, layered-blend-per-bone, additive and curve nodes,
 // applied in order on the machine's pose. The asset structs live here (AnimStateMachineAsset embeds
 // them) and so does the runtime that walks them. Pure over poses and clip pointers.
 // Design and schema: docs/ANIM_MONTAGES.md.
@@ -16,7 +16,9 @@ namespace aver::anim {
 using AsmClipFn = std::function<const fmt::OcAnimation*(const std::string&)>;
 using AsmBlendSpaceFn = std::function<const BlendSpaceAsset*(const std::string&)>;
 
-enum class PipeNodeKind : u8 { Slot = 0, Layered = 1, Additive = 2 };
+// Curve: drives one pose curve ("morph.<target>" or "pose.<name>") from a constant or a machine parameter, with
+// no source of its own (MORPH_TARGETS.md 2.4). An .ocasm using it is refused by older builds.
+enum class PipeNodeKind : u8 { Slot = 0, Layered = 1, Additive = 2, Curve = 3 };
 enum class PipeSourceKind : u8 { None = 0, Slot = 1, Clip = 2, BlendSpace = 3 };
 enum class PipeRefKind : u8 { FirstFrame = 0, Rest = 1, Clip = 2 };
 
@@ -39,6 +41,12 @@ struct PipeNode {
     PipeRef ref;                            // Additive
     f32 weight = 1.0f;
     std::string weightParam;                // float parameter of the machine, multiplies `weight`
+    // Curve nodes. value = valueParam's parameter when it names one (and the machine has it), else `value`.
+    // set: curve = lerp(existing or 0, v, w). add: curve += v * w.
+    std::string curve;                      // "morph.<target>" | "pose.<name>"
+    std::string valueParam;
+    f32 value = 0.0f;
+    bool curveAdd = false;
 };
 
 // Supplied per evaluation by the host: the slot's montage pose over `base`, and its coverage 0..1.
@@ -74,6 +82,8 @@ private:
         const BlendSpaceAsset* space = nullptr;         // BlendSpace source
         BlendSpacePlayer bs;
         u64 slotHash = 0;
+        u32 curveKind = 0;                              // Curve: pose-curve kind and id, resolved at bind
+        u64 curveId = 0;
         const fmt::OcAnimation* refClip = nullptr;      // Additive, ref.kind == Clip
         Pose ref;                                       // Additive reference pose
         bool refReady = false;

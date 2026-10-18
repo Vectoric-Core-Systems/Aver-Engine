@@ -79,6 +79,15 @@ bool AnimStateMachineAsset::valid(std::string* why) const {
             if (n.slot.empty()) return fail("a pipeline slot node has no slot name");
             continue;
         }
+        if (n.kind == PipeNodeKind::Curve) {
+            const std::string_view c = n.curve;
+            const std::string_view m = fmt::kOcCurvePrefixMorph, p = fmt::kOcCurvePrefixPose;
+            const bool ok = (c.size() > m.size() && c.substr(0, m.size()) == m) ||
+                            (c.size() > p.size() && c.substr(0, p.size()) == p);
+            if (!ok) return fail("a pipeline curve node must name a morph.<target> or pose.<name> curve");
+            if (!std::isfinite(n.value)) return fail("a pipeline curve node value is not finite");
+            continue;
+        }
         const PipeSource& src = n.source;
         if (src.kind == PipeSourceKind::None) return fail("a pipeline node has no source");
         if (src.kind == PipeSourceKind::Slot && src.slot.empty()) return fail("a pipeline slot source has no slot name");

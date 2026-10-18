@@ -3,7 +3,9 @@
 #include "aver/formats/GltfImport.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
+#include "aver/core/Hash.hpp"
 #include "aver/formats/Json.hpp"
+#include "aver/formats/MorphTarget.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -28,6 +30,19 @@ u32 componentBytes(i64 t) {
         case kShort: case kUShort: return 2;
         case kUInt: case kFloat:   return 4;
         default:                   return 0;
+    }
+}
+
+// One component of an accessor element widened to f32; normalized integers map to [0,1] / [-1,1].
+f32 decodeComponent(i64 ct, const u8* e, bool normalized) {
+    switch (ct) {
+        case kFloat:  { f32 f; std::memcpy(&f, e, 4); return f; }
+        case kUByte:  { f32 v = f32(*e); return normalized ? v / 255.0f : v; }
+        case kByte:   { i8 s; std::memcpy(&s, e, 1); f32 v = f32(s); return normalized ? std::fmax(v / 127.0f, -1.0f) : v; }
+        case kUShort: { u16 s; std::memcpy(&s, e, 2); f32 v = f32(s); return normalized ? v / 65535.0f : v; }
+        case kShort:  { i16 s; std::memcpy(&s, e, 2); f32 v = f32(s); return normalized ? std::fmax(v / 32767.0f, -1.0f) : v; }
+        case kUInt:   { u32 s; std::memcpy(&s, e, 4); return f32(s); }
+        default:      return 0.0f;
     }
 }
 
@@ -221,7 +236,6 @@ private:
         const JsonValue& accs = d_["accessors"];
         if (idx < 0 || usize(idx) >= accs.size()) return fail(why, "glTF: accessor index out of range");
         const JsonValue& a = accs[usize(idx)];
-        if (a.has("sparse")) return fail(why, "glTF: sparse accessors are not supported");
 
         const i64 ct = a["componentType"].asInt(0);
         const u32 cb = componentBytes(ct);
@@ -234,8 +248,8 @@ private:
         out.v.assign(usize(count) * nc, 0.0f);
         if (count == 0) return true;
 
-        // Per glTF, an accessor with no bufferView reads as zeros.
-        if (!a.has("bufferView")) return true;
+        // Per glTF, an accessor with no bufferView reads as zeros (a sparse block may still fill some in).
+        if (!a.has("bufferView")) return applySparse(a, out, why);
 
         const u8* base = nullptr; usize len = 0; u32 stride = 0;
         if (!viewBytes(a["bufferView"].asInt(-1), base, len, stride, why)) return false;
@@ -253,22 +267,54 @@ private:
         const bool normalized = a["normalized"].asBool(false);
         const u8* p = base + accOff;
         for (u32 i = 0; i < count; ++i, p += stride) {
-            for (u32 c = 0; c < nc; ++c) {
-                const u8* e = p + c * cb;
-                f32 val = 0.0f;
-                switch (ct) {
-                    case kFloat:  { f32 f; std::memcpy(&f, e, 4); val = f; break; }
-                    case kUByte:  { val = f32(*e); if (normalized) val /= 255.0f; break; }
-                    case kByte:   { i8 s; std::memcpy(&s, e, 1); val = f32(s);
-                                    if (normalized) val = std::fmax(val / 127.0f, -1.0f); break; }
-                    case kUShort: { u16 s; std::memcpy(&s, e, 2); val = f32(s); if (normalized) val /= 65535.0f; break; }
-                    case kShort:  { i16 s; std::memcpy(&s, e, 2); val = f32(s);
-                                    if (normalized) val = std::fmax(val / 32767.0f, -1.0f); break; }
-                    case kUInt:   { u32 s; std::memcpy(&s, e, 4); val = f32(s); break; }
-                    default: break;
-                }
-                out.v[usize(i) * nc + c] = val;
-            }
+            for (u32 c = 0; c < nc; ++c) out.v[usize(i) * nc + c] = decodeComponent(ct, p + c * cb, normalized);
+        }
+        return applySparse(a, out, why);
+    }
+
+    // glTF 2.0 sparse accessors: the dense values above (zeros without a bufferView) with `count` elements
+    // replaced. Morph exporters use them routinely. Every range is checked by subtraction, as viewBytes does.
+    bool applySparse(const JsonValue& a, AccessorF& out, std::string* why) const {
+        if (!a.has("sparse")) return true;
+        const JsonValue& sp = a["sparse"];
+        const i64 nRaw = sp["count"].asInt(0);
+        if (nRaw < 0 || nRaw > i64(out.count)) return fail(why, "glTF: sparse accessor count is out of range");
+        const u32 n = u32(nRaw);
+        if (n == 0) return true;
+        const JsonValue& si = sp["indices"];
+        const JsonValue& sv = sp["values"];
+        const i64 ict = si["componentType"].asInt(0);
+        if (ict != kUByte && ict != kUShort && ict != kUInt)
+            return fail(why, "glTF: sparse indices must be unsigned byte, short or int");
+        const u32 ib = componentBytes(ict);
+        const i64 ct = a["componentType"].asInt(0);
+        const u32 cb = componentBytes(ct), nc = out.components;
+
+        const u8* ibase = nullptr; usize ilen = 0; u32 istride = 0;
+        const u8* vbase = nullptr; usize vlen = 0; u32 vstride = 0;
+        if (!viewBytes(si["bufferView"].asInt(-1), ibase, ilen, istride, why)) return false;
+        if (!viewBytes(sv["bufferView"].asInt(-1), vbase, vlen, vstride, why)) return false;
+        const i64 ioRaw = si["byteOffset"].asInt(0), voRaw = sv["byteOffset"].asInt(0);
+        if (ioRaw < 0 || voRaw < 0) return fail(why, "glTF: sparse accessor has a negative byteOffset");
+        const u64 ioff = u64(ioRaw), voff = u64(voRaw);
+        const u64 ineed = u64(n) * ib, vneed = u64(n) * cb * nc;
+        if (ioff > u64(ilen) || ineed > u64(ilen) - ioff) return fail(why, "glTF: sparse indices run past the end of their bufferView");
+        if (voff > u64(vlen) || vneed > u64(vlen) - voff) return fail(why, "glTF: sparse values run past the end of their bufferView");
+
+        const bool normalized = a["normalized"].asBool(false);
+        i64 prev = -1;
+        for (u32 k = 0; k < n; ++k) {
+            const u8* e = ibase + ioff + usize(k) * ib;
+            u32 i32v = 0;
+            if (ict == kUByte) i32v = *e;
+            else if (ict == kUShort) { u16 s; std::memcpy(&s, e, 2); i32v = s; }
+            else std::memcpy(&i32v, e, 4);
+            const i64 idx = i64(i32v);
+            if (idx >= i64(out.count)) return fail(why, "glTF: a sparse index is past the end of its accessor");
+            if (idx <= prev) return fail(why, "glTF: sparse indices are not strictly increasing");
+            prev = idx;
+            const u8* vp = vbase + voff + usize(k) * cb * nc;
+            for (u32 c = 0; c < nc; ++c) out.v[usize(idx) * nc + c] = decodeComponent(ct, vp + c * cb, normalized);
         }
         return true;
     }
@@ -292,8 +338,19 @@ private:
         return o_.convertAxes ? Vec3{z, x, y} : Vec3{x, y, z};
     }
 
+    // One mesh's blend-shape deltas as the primitives are read, in engine space; the MorphTargetBuilder
+    // turns them into OcMorphTargets once the mesh's vertex count is final (importMesh).
+    struct MorphEntry { u32 vertex; Vec3 dp; Vec3 dn; bool hasN; };
+    struct MorphAcc { std::vector<std::vector<MorphEntry>> t; };
+    // The mesh's morph target count: the most any primitive declares, capped at kOcMeshMaxMorphTargets.
+    usize meshTargetCount(const JsonValue& mesh) const;
+    // Their names, unique: mesh.extras.targetNames, else the first primitive's, else Target_<i>. Animation
+    // curves are named with the same list, so the two always agree.
+    std::vector<std::string> meshTargetNames(const JsonValue& mesh) const;
     // Appends one primitive to `m` as a submesh. Returns false with `why` set.
-    bool importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData& m, std::string* why);
+    bool importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData& m, MorphAcc& morph, std::string* why);
+    // The weight curves of animation `a` ("morph.<target>"), over every node it animates.
+    void collectWeightCurves(const JsonValue& an, std::vector<OcCurve>& curves, f32& duration);
     // Appends every primitive of a mesh to `m`. Returns false with `why` set.
     bool importMesh(const JsonValue& mesh, const f32 node[16], OcMeshData& m, std::string* why);
     // Builds one OcSkeleton per glTF skin, in the skin's own joint order.
@@ -313,11 +370,10 @@ void xform(const f32 m[16], f32 x, f32 y, f32 z, bool point, f32 out[3]) {
     out[2] = x*m[2] + y*m[6] + z*m[10] + w*m[14];
 }
 
-bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData& m, std::string* why) {
+bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData& m, MorphAcc& morph, std::string* why) {
     // Only triangles; other modes are noted and skipped.
     const i64 mode = prim["mode"].asInt(4);
     if (mode != 4) { note("primitive mode " + std::to_string(mode) + " (only triangles are imported)"); return true; }
-    if (prim.has("targets")) note("morph targets");
     if (prim["extensions"].has("KHR_draco_mesh_compression")) return fail(why, "glTF: Draco-compressed meshes are not supported");
 
     const JsonValue& attrs = prim["attributes"];
@@ -416,6 +472,57 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
             }
     }
 
+    // Blend shapes. A target's POSITION delta takes the node basis like a position (no translation), then the
+    // axis change and unit scale. A NORMAL delta cannot use nrmXf as is: that matrix is rescaled to a largest
+    // entry of 1, harmless for a unit normal and wrong for a delta. With m = nrmXf * n and L = |m| the engine
+    // normal is m/L, so the delta must be nrmXf * dn / L for normalize(base + w * delta) to equal
+    // normalize(nrmXf * (n + w * dn)). A primitive with no NORMAL (flat normals are generated) has none.
+    if (prim.has("targets")) {
+        const JsonValue& tg = prim["targets"];
+        const usize nt = std::min<usize>(tg.size(), kOcMeshMaxMorphTargets);
+        if (tg.size() > nt) note("more than 512 morph targets on a primitive (the first 512 are kept)");
+        if (morph.t.size() < nt) morph.t.resize(nt);
+        for (usize ti = 0; ti < nt; ++ti) {
+            const JsonValue& tgt = tg[ti];
+            if (tgt.has("TANGENT")) note("morph tangents");
+            AccessorF dpa, dna;
+            const bool hasDp = tgt.has("POSITION");
+            if (hasDp) {
+                if (!readAccessor(tgt["POSITION"].asInt(-1), dpa, why)) return false;
+                if (dpa.components != 3 || dpa.count != pos.count)
+                    return fail(why, "glTF: a morph target's POSITION does not match the primitive's POSITION");
+            }
+            bool hasDn = false;
+            if (tgt.has("NORMAL") && hasNrm) {
+                if (!readAccessor(tgt["NORMAL"].asInt(-1), dna, why)) return false;
+                hasDn = dna.components == 3 && dna.count == pos.count;
+            }
+            if (!hasDp && !hasDn) continue;
+            std::vector<MorphEntry>& dst = morph.t[ti];
+            for (u32 i = 0; i < pos.count; ++i) {
+                MorphEntry e{baseVertex + i, Vec3{0, 0, 0}, Vec3{0, 0, 0}, false};
+                if (hasDp) {
+                    f32 t[3];
+                    xform(node, dpa.v[usize(i)*3+0], dpa.v[usize(i)*3+1], dpa.v[usize(i)*3+2], false, t);
+                    e.dp = toEngine(t[0], t[1], t[2], false);
+                }
+                if (hasDn && i < nrm.count) {
+                    f32 bm[3], dm[3];
+                    xform(nrmXf, nrm.v[usize(i)*3+0], nrm.v[usize(i)*3+1], nrm.v[usize(i)*3+2], false, bm);
+                    const f32 L = std::sqrt(bm[0]*bm[0] + bm[1]*bm[1] + bm[2]*bm[2]);
+                    if (L > 1e-12f) {
+                        xform(nrmXf, dna.v[usize(i)*3+0], dna.v[usize(i)*3+1], dna.v[usize(i)*3+2], false, dm);
+                        e.dn = toEngine(dm[0], dm[1], dm[2], true) / L;
+                        e.hasN = true;
+                    }
+                }
+                if (e.dp.x == 0.0f && e.dp.y == 0.0f && e.dp.z == 0.0f &&
+                    e.dn.x == 0.0f && e.dn.y == 0.0f && e.dn.z == 0.0f) continue;
+                dst.push_back(e);
+            }
+        }
+    }
+
     // Indices. glTF allows a primitive with none, meaning "draw the vertices in order".
     const u32 first = static_cast<u32>(m.indices.size());
     if (prim.has("indices")) {
@@ -499,11 +606,58 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
     return true;
 }
 
+usize Gltf::meshTargetCount(const JsonValue& mesh) const {
+    usize n = 0;
+    const JsonValue& prims = mesh["primitives"];
+    for (usize i = 0; i < prims.size(); ++i) n = std::max(n, prims[i]["targets"].size());
+    return std::min<usize>(n, kOcMeshMaxMorphTargets);
+}
+
+std::vector<std::string> Gltf::meshTargetNames(const JsonValue& mesh) const {
+    const usize n = meshTargetCount(mesh);
+    const JsonValue* src = &mesh["extras"]["targetNames"];
+    if (!src->isArray()) {
+        src = nullptr;
+        const JsonValue& prims = mesh["primitives"];
+        for (usize i = 0; i < prims.size(); ++i)
+            if (prims[i]["extras"]["targetNames"].isArray()) { src = &prims[i]["extras"]["targetNames"]; break; }
+    }
+    std::vector<std::string> names;
+    names.reserve(n);
+    for (usize i = 0; i < n; ++i) {
+        std::string nm = src && i < src->size() ? std::string((*src)[i].asString()) : std::string();
+        if (nm.empty()) nm = "Target_" + std::to_string(i);
+        if (nm.size() > 128) nm.resize(128);
+        // Unique, by the same rule the builder applies, so a curve and its target never disagree.
+        const std::string base = nm.size() > 116 ? nm.substr(0, 116) : nm;
+        for (u32 k = 2;; ++k) {
+            bool taken = false;
+            for (const std::string& o : names) if (o == nm) { taken = true; break; }
+            if (!taken) break;
+            nm = base + "_" + std::to_string(k);
+        }
+        names.push_back(std::move(nm));
+    }
+    return names;
+}
+
 bool Gltf::importMesh(const JsonValue& mesh, const f32 node[16], OcMeshData& m, std::string* why) {
     const JsonValue& prims = mesh["primitives"];
     if (prims.size() == 0) return fail(why, "glTF: a mesh has no primitives");
+    MorphAcc morph;
     for (usize i = 0; i < prims.size(); ++i)
-        if (!importPrimitive(prims[i], node, m, why)) return false;
+        if (!importPrimitive(prims[i], node, m, morph, why)) return false;
+    if (!morph.t.empty()) {
+        // The target count is the most any primitive declared; one with fewer contributes nothing to the rest.
+        const std::vector<std::string> names = meshTargetNames(mesh);
+        MorphTargetBuilder builder(m.vertexCount());
+        for (usize i = 0; i < morph.t.size() && i < names.size(); ++i) {
+            const u32 ti = builder.addTarget(names[i], mesh["weights"][i].asFloat(0.0f));
+            if (ti == ~0u) break;
+            for (const MorphEntry& e : morph.t[i]) builder.add(ti, e.vertex, e.dp, e.hasN ? &e.dn : nullptr);
+        }
+        builder.finish(m);
+    }
     return true;
 }
 
@@ -942,6 +1096,79 @@ bool Gltf::importSkins(std::string* why) {
     return true;
 }
 
+// Every `weights` channel of one glTF animation as "morph.<target>" curves. A channel targets a node; that
+// node's mesh names the targets (the same list the mesh import used). Sampler output is keys x T scalars,
+// and keys x 3 x T for CUBICSPLINE (in-tangent, value, out-tangent per key per target; the tangents are
+// slopes, the convention the bone tracks use). Needs no skeleton. Two nodes animating one target name (ARKit
+// exports repeat head/teeth/tongue) keep the first curve.
+void Gltf::collectWeightCurves(const JsonValue& an, std::vector<OcCurve>& curves, f32& duration) {
+    const JsonValue& channels = an["channels"];
+    const JsonValue& samplers = an["samplers"];
+    const JsonValue& nodes = d_["nodes"];
+    const JsonValue& meshes = d_["meshes"];
+    for (usize c = 0; c < channels.size(); ++c) {
+        const JsonValue& ch = channels[c];
+        if (ch["target"]["path"].asString() != "weights") continue;
+        const i64 nodeIdx = ch["target"]["node"].asInt(-1);
+        if (nodeIdx < 0 || usize(nodeIdx) >= nodes.size()) { note("an animation channel with no valid target node"); continue; }
+        const i64 si = ch["sampler"].asInt(-1);
+        if (si < 0 || usize(si) >= samplers.size()) { note("an animation channel with no sampler"); continue; }
+        const JsonValue& sm = samplers[usize(si)];
+        AccessorF in, outv;
+        std::string readWhy;
+        if (!readAccessor(sm["input"].asInt(-1), in, &readWhy) || !readAccessor(sm["output"].asInt(-1), outv, &readWhy)) {
+            note("a morph weight sampler that could not be read (" + readWhy + ")");
+            continue;
+        }
+        if (in.components != 1 || in.count == 0) { note("an animation sampler whose input is not scalar"); continue; }
+
+        const std::string interp(sm["interpolation"].asString("LINEAR"));
+        const OcInterp oi = interp == "STEP" ? OcInterp::Step
+                          : interp == "CUBICSPLINE" ? OcInterp::CubicSpline : OcInterp::Linear;
+        const u32 slots = oi == OcInterp::CubicSpline ? 3u : 1u;
+        const i64 meshIdx = nodes[usize(nodeIdx)]["mesh"].asInt(-1);
+        std::vector<std::string> names;
+        if (meshIdx >= 0 && usize(meshIdx) < meshes.size()) {
+            names = meshTargetNames(meshes[usize(meshIdx)]);
+        } else if (outv.components == 1 && outv.count % (in.count * slots) == 0) {
+            for (usize t = 0; t < outv.count / (in.count * slots); ++t) names.push_back("Target_" + std::to_string(t));
+        }
+        const usize T = names.size();
+        if (T == 0 || outv.components != 1 || usize(outv.count) != usize(in.count) * slots * T) {
+            note("a morph weight sampler whose output does not match its mesh's targets");
+            continue;
+        }
+        for (usize t = 0; t < T; ++t) {
+            OcCurve cur;
+            cur.name = morphCurveName(names[t]);
+            cur.interp = oi;
+            cur.poseId = fnv1a64(names[t]);
+            cur.times.assign(in.v.begin(), in.v.begin() + in.count);
+            cur.values.reserve(in.count);
+            for (u32 k = 0; k < in.count; ++k) {
+                if (slots == 3) {
+                    cur.inTangents.push_back(outv.v[(usize(k) * 3 + 0) * T + t]);
+                    cur.values.push_back(outv.v[(usize(k) * 3 + 1) * T + t]);
+                    cur.outTangents.push_back(outv.v[(usize(k) * 3 + 2) * T + t]);
+                } else {
+                    cur.values.push_back(outv.v[usize(k) * T + t]);
+                }
+            }
+            bool dup = false;
+            for (const OcCurve& o : curves) {
+                if (o.name != cur.name) continue;
+                dup = true;
+                if (o.times != cur.times || o.values != cur.values)
+                    note("two nodes animating morph target " + names[t] + " with different weights (the first was kept)");
+                break;
+            }
+            if (dup) continue;
+            duration = std::max(duration, cur.times.back());
+            curves.push_back(std::move(cur));
+        }
+    }
+}
+
 // One OcAnimation per glTF animation. One OcTrack PER CHANNEL rather than per bone: glTF gives each
 // channel its own time accessor, and merging two channels that do not share a timeline would mean
 // resampling one of them and losing exactly the fidelity .ocanim exists to keep. Only channels on
@@ -969,8 +1196,25 @@ bool Gltf::importAnimations(std::string* why) {
             if (n >= 0 && usize(n) < nodes.size()) jointOfAnySkin_[usize(n)] = 1;
         }
     }
-    // No skeleton, no skeletal clips: what the file animates is object motion (importObjectAnimations).
-    if (r_.skeletons.empty()) return true;
+    // Blend-shape weights need no skeleton, so they are read for every animation before the early return.
+    std::vector<std::vector<OcCurve>> weightCurves(anims.size());
+    std::vector<f32> weightLen(anims.size(), 0.0f);
+    for (usize a = 0; a < anims.size(); ++a) collectWeightCurves(anims[a], weightCurves[a], weightLen[a]);
+
+    // No skeleton, no skeletal clips: what the file animates is object motion (importObjectAnimations). A
+    // weights-only animation becomes a curve-only clip (no tracks, no skeleton).
+    if (r_.skeletons.empty()) {
+        for (usize a = 0; a < anims.size(); ++a) {
+            if (weightCurves[a].empty()) continue;
+            OcAnimation clip;
+            clip.storage = OcAnimStorage::Keyframed;
+            clip.duration = weightLen[a];
+            clip.curves = std::move(weightCurves[a]);
+            r_.animations.push_back(std::move(clip));
+            r_.animationNames.push_back(anims[a].has("name") ? std::string(anims[a]["name"].asString()) : std::string());
+        }
+        return true;
+    }
 
     const JsonValue& joints = skins[0]["joints"];
     std::vector<i32> boneOfNode(nodes.size(), -1);
@@ -997,7 +1241,7 @@ bool Gltf::importAnimations(std::string* why) {
             const JsonValue& target = ch["target"];
             const i64 nodeIdx = target["node"].asInt(-1);
             const std::string path(target["path"].asString());
-            if (path == "weights") { note("morph-target animation"); continue; }
+            if (path == "weights") continue;   // collected above (collectWeightCurves)
             if (nodeIdx < 0 || usize(nodeIdx) >= boneOfNode.size()) {
                 note("an animation channel with no valid target node");
                 continue;
@@ -1055,7 +1299,12 @@ bool Gltf::importAnimations(std::string* why) {
             clip.tracks.push_back(std::move(t));
         }
 
-        if (clip.tracks.empty()) {
+        // The weight curves ride in the same clip; an animation of weights alone is a curve-only clip.
+        if (!weightCurves[a].empty()) {
+            clip.curves = std::move(weightCurves[a]);
+            clip.duration = std::max(clip.duration, weightLen[a]);
+        }
+        if (clip.tracks.empty() && clip.curves.empty()) {
             if (objectChannels == 0) note("an animation with no usable channels");
             continue;
         }
@@ -1205,7 +1454,7 @@ bool Gltf::importObjectAnimations(std::string* why) {
             const JsonValue& ch = channels[c];
             const i64 nodeIdx = ch["target"]["node"].asInt(-1);
             const std::string path(ch["target"]["path"].asString());
-            if (path == "weights") { note("morph-target animation"); continue; }
+            if (path == "weights") continue;   // blend-shape curves: importAnimations
             if (nodeIdx < 0 || usize(nodeIdx) >= nodes.size()) {
                 note("an animation channel with no valid target node");
                 continue;
@@ -1772,6 +2021,7 @@ bool Gltf::run(std::string* why) {
 
         const i64 meshIdx = n["mesh"].asInt(-1);
         if (meshIdx >= 0 && usize(meshIdx) < meshes.size()) {
+            if (n.has("weights")) note("node-level morph weights (the mesh's own default weights are used)");
             // THE TRANSLATION COMES OUT OF THE GEOMETRY AND BECOMES A PLACEMENT. Rotation and scale
             // stay baked -- they are what the mesh IS -- but the node's position never was geometry,
             // and baking it put every mesh's pivot wherever the author's world origin happened to be.

@@ -59,7 +59,7 @@ set_target_properties(OcInputTest PROPERTIES
 # OcStringsTest / OcTableTest / LocGatherTest -- localization string tables, data tables and the key
 # gatherer (docs/plans/wave2/DATA_TABLES_LOCALIZATION.md). Text formats in the base target; no add_test
 # for the reason stated above (aver_register_ctest_in picks up every *Test).
-foreach(_t OcStringsTest OcTableTest LocGatherTest)
+foreach(_t OcStringsTest OcTableTest LocGatherTest OcCaptionsTest)
   add_executable(${_t} src/${_t}.cpp)
   target_link_libraries(${_t} PRIVATE Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(${_t} PROPERTIES
@@ -261,6 +261,27 @@ endif()
 add_executable(MakeRig ${CMAKE_SOURCE_DIR}/tools/MakeRig.cpp)
 target_link_libraries(MakeRig PRIVATE Aver.Formats Aver.Anim Aver.Core Aver.Platform)
 set_target_properties(MakeRig PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+
+# MakeFace -- writes content/dev/Face.gltf, FaceRigged.gltf and Face.ocface (the blend-shape test assets), then re-imports
+# and checks them. A generator like MakeRig, not a test. Links Aver.Anim for the .ocface writer.
+add_executable(MakeFace ${CMAKE_SOURCE_DIR}/tools/MakeFace.cpp)
+target_link_libraries(MakeFace PRIVATE Aver.Formats Aver.Anim Aver.Core Aver.Platform)
+set_target_properties(MakeFace PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# MorphFormatTest / MorphGltfTest -- the MRPH chunk, the .ocanim morph./pose. curves, MorphTargetBuilder, and the glTF
+# blend-shape importer (docs/ANIM_MORPH_FACE.md). NO add_test: aver_register_ctest_in picks up *Test targets.
+# The simplify case needs Aver.Trifactor, so it is compiled in only when that target exists.
+add_executable(MorphFormatTest src/MorphFormatTest.cpp)
+target_link_libraries(MorphFormatTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(MorphFormatTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+if(TARGET Aver.Trifactor)
+  target_link_libraries(MorphFormatTest PRIVATE Aver.Trifactor)
+  target_compile_definitions(MorphFormatTest PRIVATE AVER_MORPH_TEST_TRIFACTOR=1)
+endif()
+add_executable(MorphGltfTest src/MorphGltfTest.cpp)
+target_link_libraries(MorphGltfTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(MorphGltfTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ActorScriptTest — reading and rewriting the actor designer's generated region.
 #

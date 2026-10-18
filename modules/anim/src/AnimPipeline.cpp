@@ -29,6 +29,15 @@ f32 paramOr(const ParamFn& fn, const std::string& name, f32 fallback) {
     return std::isnan(v) ? fallback : v;
 }
 
+// "morph.x" / "pose.x" -> kind and the hash of the bare name. False for any other name.
+bool resolvePipeCurve(const std::string& name, u32& kind, u64& id) {
+    const std::string_view m = fmt::kOcCurvePrefixMorph, p = fmt::kOcCurvePrefixPose;
+    const std::string_view nm = name;
+    if (nm.size() > m.size() && nm.substr(0, m.size()) == m) { kind = kPoseCurveMorph; id = fnv1a64(nm.substr(m.size())); return true; }
+    if (nm.size() > p.size() && nm.substr(0, p.size()) == p) { kind = kPoseCurveFace;  id = fnv1a64(nm.substr(p.size())); return true; }
+    return false;
+}
+
 } // namespace
 
 void AnimPipeline::bind(const std::vector<PipeNode>* nodes, const fmt::OcSkeleton* skel, AsmClipFn clips,
@@ -52,6 +61,7 @@ void AnimPipeline::bind(const std::vector<PipeNode>* nodes, const fmt::OcSkeleto
         const PipeNode& n = (*nodes_)[i];
         Rt& rt = rt_[i];
         if (n.kind == PipeNodeKind::Slot) { rt.slotHash = fnv1a64(std::string_view(n.slot)); continue; }
+        if (n.kind == PipeNodeKind::Curve) { resolvePipeCurve(n.curve, rt.curveKind, rt.curveId); continue; }
 
         if (n.kind == PipeNodeKind::Layered) {
             const u32 matched = buildBranchMask(*skel_, n.branches, rt.mask);
@@ -108,7 +118,7 @@ void AnimPipeline::tick(f32 dt, const ParamFn& param) {
     for (usize i = 0; i < nodes_->size() && i < rt_.size(); ++i) {
         const PipeNode& n = (*nodes_)[i];
         Rt& rt = rt_[i];
-        if (n.kind == PipeNodeKind::Slot) continue;
+        if (n.kind == PipeNodeKind::Slot || n.kind == PipeNodeKind::Curve) continue;
         const f32 step = dt * n.source.speed;
         if (n.source.kind == PipeSourceKind::Clip) {
             rt.time += step;
@@ -161,9 +171,20 @@ void AnimPipeline::evaluate(const ParamFn& param, const SlotEvalFn& slot, Pose& 
             rootW_.push_back({rt.slotHash, 1.0f});
             f32 cov = 0.0f;
             if (slot && slot(rt.slotHash, inOut, src_, cov)) {
-                blendPose(inOut, src_, clamp01(cov * w), mix_);
-                inOut.local.swap(mix_.local);
+                // Overlay: the montage must not fade the base pose's face curves.
+                blendPose(inOut, src_, clamp01(cov * w), mix_, CurveBlend::Overlay);
+                inOut.swap(mix_);
             }
+            continue;
+        }
+
+        if (n.kind == PipeNodeKind::Curve) {
+            if (rt.curveId == 0) continue;
+            const f32 v = paramOr(param, n.valueParam, n.value);
+            const PoseCurve* cur = findPoseCurve(inOut, rt.curveKind, rt.curveId);
+            const f32 old = cur ? cur->value : 0.0f;
+            const f32 cw = clamp01(w);
+            setPoseCurve(inOut, rt.curveKind, rt.curveId, n.curveAdd ? old + v * cw : old + (v - old) * cw);
             continue;
         }
 
@@ -182,7 +203,7 @@ void AnimPipeline::evaluate(const ParamFn& param, const SlotEvalFn& slot, Pose& 
             perBone_.resize(rt.mask.size());
             for (usize b = 0; b < perBone_.size(); ++b) perBone_[b] = rt.mask[b] * w * cov;
             blendPoseMasked(inOut, src_, perBone_, mix_);
-            inOut.local.swap(mix_.local);
+            inOut.swap(mix_);
             continue;
         }
 
@@ -194,15 +215,15 @@ void AnimPipeline::evaluate(const ParamFn& param, const SlotEvalFn& slot, Pose& 
             rootW_.push_back({rt.slotHash, 1.0f});
             sourcePose(rt, n, slot, inOut, true, src_, cov, ok);
             if (!ok) continue;
-            blendPose(inOut, src_, clamp01(cov * w), mix_);
-            inOut.local.swap(mix_.local);
+            blendPose(inOut, src_, clamp01(cov * w), mix_, CurveBlend::Overlay);
+            inOut.swap(mix_);
             continue;
         }
         sourcePose(rt, n, slot, inOut, false, src_, cov, ok);
         if (!ok) continue;
         if (!rt.refReady) { rt.ref = src_; rt.refReady = true; }   // blend-space first frame
         addPose(inOut, src_, rt.ref, clamp01(w), mix_);
-        inOut.local.swap(mix_.local);
+        inOut.swap(mix_);
     }
 }
 

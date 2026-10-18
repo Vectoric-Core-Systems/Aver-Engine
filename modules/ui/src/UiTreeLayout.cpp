@@ -2,6 +2,7 @@
 #include "aver/ui/UiTree.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace aver::ui {
 
@@ -40,11 +41,24 @@ f32 firstLineH(const UiTextLayout& l, f32 fallback) {
 
 } // namespace
 
-UiStyle UiTree::styleOf(const UiWidget& w) const { return theme_.resolve(w.kind, w.style); }
+const UiTheme& UiTree::activeTheme() const {
+    if (!access_.highContrast) return theme_;
+    if (!hcValid_) {
+        hcTheme_ = uiBuiltinTheme("contrast");
+        hcTheme_.baseFontSize = theme_.baseFontSize;     // the same metrics as the game's theme, only the look changes
+        hcTheme_.rowHeight = theme_.rowHeight;
+        hcTheme_.scrollbarWidth = theme_.scrollbarWidth;
+        hcValid_ = true;
+    }
+    return hcTheme_;
+}
 
+UiStyle UiTree::styleOf(const UiWidget& w) const { return activeTheme().resolve(w.kind, w.style); }
+
+// Text scale is text only: row heights, padding and widths stay on the UI scale.
 f32 UiTree::fontPx(const UiWidget& w, const UiStyle& st) const {
     const f32 dp = w.fontSize > 0.0f ? w.fontSize : (st.fontSize > 0.0f ? st.fontSize : theme_.baseFontSize);
-    return dp * scale_;
+    return dp * scale_ * access_.textScale;
 }
 
 UiTextStyle UiTree::textStyleOf(const UiWidget& w, const UiStyle& st) const {
@@ -67,7 +81,7 @@ UiTextBox UiTree::textBoxOf(const UiWidget& w, f32 maxWidth) const {
     b.ellipsis = w.ellipsis;
     b.maxLines = w.maxLines > 0 ? static_cast<u32>(w.maxLines) : 0u;
     b.rich = w.rich && w.kind != UiWidgetKind::TextInput;
-    b.richColors = true;
+    b.richColors = !access_.highContrast;   // authored colours are ignored under high contrast
     return b;
 }
 
@@ -123,7 +137,9 @@ UiVec2 UiTree::measure(UiWidget& w) {
 
     // One layout per string, shared by what this measures and what draw paints. A fixed width is the wrap
     // (Text) or ellipsis (any textual widget) width.
-    const f32 fixedW = w.width >= 0.0f ? std::max(0.0f, w.width * s - pad.horizontal()) : 0.0f;
+    f32 fixedW = w.width >= 0.0f ? std::max(0.0f, w.width * s - pad.horizontal()) : 0.0f;
+    // A wrapped Text that takes its width from a fill slot wraps at the width its last arrangement gave it.
+    if (w.width < 0.0f && w.kind == UiWidgetKind::Text && w.wrap && w.fillW > 0.0f) fixedW = w.wrapHint;
     const UiTextStyle tstyle = textStyleOf(w, st);
     const auto lay = [&](const std::string& txt, f32 maxW) { return m.layoutText(txt, tstyle, textBoxOf(w, maxW)); };
 
@@ -333,11 +349,22 @@ void UiTree::layout(const UiTextMetrics& m) {
     const UiTextMetrics* previous = metrics_;
     metrics_ = &m;
     scale_ = uiComputeScale(dpi_, viewport_.w, viewport_.h);
-    for (const UiWidgetId id : roots_) {
-        UiWidget* r = get(id);
-        if (!r || !r->visible) continue;
-        measure(*r);
-        arrange(*r, placeAnchored(*r, viewport_));
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const UiWidgetId id : roots_) {
+            UiWidget* r = get(id);
+            if (!r || !r->visible) continue;
+            measure(*r);
+            arrange(*r, placeAnchored(*r, viewport_));
+        }
+        // Second pass only when a wrapped fill-width label learned a new width (first frame, resize, scale change).
+        bool moved = false;
+        for (auto& kv : widgets_) {
+            UiWidget& w = *kv.second;
+            if (w.kind != UiWidgetKind::Text || !w.wrap || w.width >= 0.0f || w.fillW <= 0.0f || !w.visible) continue;
+            const f32 inner = std::max(0.0f, w.rect.w - paddingOf(w, styleOf(w)).horizontal());
+            if (std::fabs(inner - w.wrapHint) > 0.5f) { w.wrapHint = inner; moved = true; }
+        }
+        if (!moved) break;
     }
     metrics_ = previous;
 }

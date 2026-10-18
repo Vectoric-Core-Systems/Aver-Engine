@@ -24,6 +24,9 @@ aver_add_module(Aver.Anim.Scene
     # IK Rig runtime (CIkRig: foot placement, goals, body) and the runtime retarget bake (docs/plans/wave5/IK_RETARGETING.md).
     src/IkRigSystem.cpp
     src/AnimRetarget.cpp
+    # [wave9/morph begin] CMorphTargets: blend-shape weights from animation, script, sequencer and lip-sync (docs/plans/wave9/MORPH_TARGETS.md).
+    src/MorphSystem.cpp
+    # [wave9/morph end]
   DEPS
     Aver.Anim
     Aver.Scene

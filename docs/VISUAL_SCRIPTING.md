@@ -436,6 +436,7 @@ possible if each entity's `VAR homeX/Y/Z` seeded from *its own* `GetFieldVec3` r
 leaked into the other's store.
 
 > **Importing a model from a graph.** The Import Model and Is Model Import Available nodes (category Assets, [node reference](AVER_NODE_NODES.md)) call the editor's importers; see [FBX_IMPORT.md](FBX_IMPORT.md). They work in an editor session only.
+> **Accessibility.** The Accessibility nodes (category Accessibility, [node reference](AVER_NODE_NODES.md)) set and read player options, show and stop captions, announce text through the OS voice and drive camera shake and bob; an `AN_OnEvent` entry named `Access.Changed` reacts to an option change. See [ACCESSIBILITY.md](ACCESSIBILITY.md).
 ## 8. Honest limits
 
 Aver Node is a real way to build gameplay without C# — the example above is the whole chain,

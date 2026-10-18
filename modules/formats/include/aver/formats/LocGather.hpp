@@ -24,6 +24,7 @@ void gatherOcgraph(std::string_view text, std::string_view path, std::vector<Loc
 // Loc.Text/Format/Plural("T","K"[,"D"]) and new LocText("T","K"[,"D"]); string literals only, comments skipped.
 // Plural uses carry the base key; the report treats K.one/K.few/K.many/K.other as covered by it.
 void gatherCsharp (std::string_view text, std::string_view path, std::vector<LocUse>& out);
+void gatherOccaptions(std::string_view text, std::string_view path, std::vector<LocUse>& out);  // SPEAKER name, CUE tag, LINE text
 void gatherTable  (const OcTableData&, std::string_view path, std::vector<LocUse>& out);     // every cell that is a reference
 
 using LocCorpus = std::map<std::string /*culture*/, std::map<std::string /*table*/, OcStringsData>>;

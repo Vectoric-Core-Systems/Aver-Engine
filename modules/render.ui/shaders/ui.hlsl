@@ -7,10 +7,16 @@
 // SELF-CONTAINED, and deliberately NOT compiled against rhi::sharedShaderPrelude() -- this pass
 // stands where the post chain stands.
 
+// The player's colour-vision filter (docs/ACCESSIBILITY.md): the HUD draws after the tonemap, so the scene composite
+// cannot reach it.
+#include "aver_colour_vision.hlsli"
+
 // b0/b1/b2/b4 are reserved by RHIResources.hpp; b3 is the only slot a feature may claim.
 cbuffer UiConstants : register(b3) {
     // xy = pixel-to-NDC scale, zw = the translate that puts the ORIGIN TOP-LEFT. y is negative.
     float4 gUiProj;
+    // The packed colour-vision filter (rhi::packColourVision; 0 = off). One more root-constant dword.
+    float gUiCv;
 };
 
 Texture2D    gUiTexture : register(t0);
@@ -42,5 +48,8 @@ UiVSOut UiVS(UiVSIn i) {
 // Modulates the texture by the vertex colour. BOTH are required to be PREMULTIPLIED.
 // No sRGB conversion anywhere: the backbuffer is R8G8B8A8_UNORM and this blend is in display space.
 float4 UiPS(UiVSOut i) : SV_Target {
-    return i.col * gUiTexture.Sample(gUiSampler, i.uv);
+    float4 s = i.col * gUiTexture.Sample(gUiSampler, i.uv);
+    // Premultiplied in, so un-premultiply for the filter and put the alpha back.
+    if (gUiCv > 0.5 && s.a > 0.0) s.rgb = averColourVision(s.rgb / s.a, gUiCv) * s.a;
+    return s;
 }

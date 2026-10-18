@@ -48,6 +48,11 @@ public:
     // (the ImGui layout-editor preview) appears one frame late.
     void prePass(rhi::IRenderContext& ctx) override;
 
+    // The player's colour-vision filter for the HUD (rhi::packColourVision; 0 = off, which changes no pixel). The scene
+    // composite filters the world; this pass draws after it, so it filters itself.
+    void setColourVision(f32 packed);
+    f32 colourVision() const { return colourVision_; }
+
     // Draws the submitted list into the bound backbuffer.
     void overlayPass(rhi::IRenderContext& ctx, u32 width, u32 height) override;
 
@@ -76,6 +81,7 @@ private:
     rhi::BufferHandle vb_[kFramesInFlight] = {};
     rhi::BufferHandle ib_[kFramesInFlight] = {};
     u32 frame_ = 0;
+    f32 colourVision_ = 0;
     u32 vbCapacity_ = 0;   // in vertices
     u32 ibCapacity_ = 0;   // in indices
 

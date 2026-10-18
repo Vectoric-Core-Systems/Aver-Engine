@@ -8,11 +8,13 @@
 // RENDERING.md 7.5 calls this "a separate skinning compute pass feeding the same output buffer" as
 // the cage deform. The output is written in the engine's own rhi::MeshVertex layout, which is what
 // lets it BE a mesh's vertex buffer rather than something a draw call has to be taught about.
+#include "aver/render/MorphLayout.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/formats/OcMesh.hpp"
 #include "aver/core/Math.hpp"
 
+#include <unordered_map>
 #include <vector>
 
 namespace aver::render {
@@ -66,7 +68,19 @@ struct SkinnedMeshGpu {
     rhi::BindingSetHandle sets[kRing] = {};
     u32                   frame = 0;
 
-    bool valid() const { return rest && bind && out && vertexCount > 0 && bones[0] && sets[0]; }
+    // BLEND SHAPES (MORPH_TARGETS.md 2.7). A non-zero morphKey means the pass holds this mesh's static rank and
+    // delta buffers (shared by every instance with the key, refcounted) and this instance carries an active-list
+    // ring. noSkin is a morph-only instance: bind and bones are never read (`bind` is 0, `bones` empty), so a
+    // face with no rig morphs through the same pass. The active ring lives HERE, inside the per-instance ring,
+    // for the reason the bone ring does: a pass-level ring is the bug described above.
+    u64 morphKey = 0;
+    bool noSkin = false;
+    rhi::BufferHandle active[kRing] = {};
+    u32 activeCount = 0;          // targets the last dispatch applied
+
+    bool valid() const {
+        return rest && out && vertexCount > 0 && sets[0] && (noSkin || (bind && bones[0]));
+    }
 };
 
 // Transitions a skinned instance's output buffer and keeps SkinnedMeshGpu::outState in step.
@@ -99,8 +113,13 @@ public:
     //
     // `existingOut` lets the caller supply the output buffer -- which is how a mesh whose VERTEX
     // BUFFER is the skin target gets skinned in place. Zero means allocate one and own it.
+    //
+    // `morphKey` (non-zero, e.g. the mesh id) makes the instance morph when the mesh has blend shapes: their
+    // rank and delta buffers are uploaded once per key and shared. With boneCount == 0 and blend shapes the
+    // instance is morph-only (no skin streams needed). A layout over the 128 MiB limit is logged and, for a
+    // skinned mesh, simply left out (it skins unmorphed); a morph-only mesh then fails.
     bool createMesh(const fmt::OcMeshData& mesh, u32 boneCount, SkinnedMeshGpu& out,
-                    rhi::BufferHandle existingOut = 0);
+                    rhi::BufferHandle existingOut = 0, u64 morphKey = 0);
     void destroyMesh(SkinnedMeshGpu& m);
 
     // Records one dispatch: `skin` is poseToSkinning's output, in the engine's row-vector
@@ -112,9 +131,34 @@ public:
     // assembler, by a shader fetching vertices by hand, and by an acceleration-structure build, all
     // three of which a skinned mesh really does meet in one frame. The CALLER is what must return
     // it to Common before the frame ends.
-    void dispatch(rhi::IRenderContext& ctx, SkinnedMeshGpu& m, const Mat4* skin, u32 boneCount);
+    //
+    // `w`/`n` are this dispatch's blend-shape weights (indices into the mesh's morphTargets); at most 64 by
+    // |w| * longest delta are applied. Callers without blend shapes pass nothing and nothing changes.
+    void dispatch(rhi::IRenderContext& ctx, SkinnedMeshGpu& m, const Mat4* skin, u32 boneCount,
+                  const MorphTargetWeight* w = nullptr, u32 n = 0);
+    // The morph-only form (m.noSkin). With n == 0 it writes the rest vertices.
+    void dispatchMorph(rhi::IRenderContext& ctx, SkinnedMeshGpu& m, const MorphTargetWeight* w, u32 n);
+
+    // The static layout of a morph key, null when none (editors read the target count and bytes from it).
+    const MorphLayout* morphLayout(u64 key) const;
+    // GPU bytes held by every live morph key.
+    u64 morphGpuBytes() const;
 
 private:
+    struct MorphGpu {
+        MorphLayout layout;
+        rhi::BufferHandle rank = 0, delta = 0;
+        u32 refs = 0;
+    };
+    bool acquireMorph(u64 key, const std::vector<fmt::OcMorphTarget>& targets, u32 vertexCount);
+    void releaseMorph(u64 key);
+    void record(rhi::IRenderContext& ctx, SkinnedMeshGpu& m, const Mat4* skin, u32 boneCount,
+                const MorphTargetWeight* w, u32 n);
+
+    std::unordered_map<u64, MorphGpu> morphs_;
+    rhi::BufferHandle dummy_ = 0;            // 64 zero bytes: every declared SRV must hold a descriptor
+    std::vector<MorphActiveRecord> active_;  // scratch for buildActiveList
+
     rhi::IDevice*          dev_ = nullptr;
     rhi::IResourceFactory* res_ = nullptr;
     rhi::ShaderHandle      cs_ = 0;

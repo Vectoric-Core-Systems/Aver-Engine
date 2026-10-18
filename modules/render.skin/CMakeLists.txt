@@ -10,7 +10,7 @@
 #
 # RENDERING.md 7.5: this is the "separate skinning compute pass" that composes with the cage deform
 # by feeding the same output buffer.
-set(AVER_SKIN_SOURCES src/SkinningPass.cpp src/SkinSelfTest.cpp)
+set(AVER_SKIN_SOURCES src/SkinningPass.cpp src/SkinSelfTest.cpp src/MorphLayout.cpp)
 set(AVER_SKIN_DEPS Aver.RHI Aver.Anim Aver.Formats Aver.Core)
 
 # The scene join is CONDITIONAL, guarded the way modules/anim.scene is and for the same reason: it

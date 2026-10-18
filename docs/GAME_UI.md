@@ -160,6 +160,7 @@ anchor 2). Enum names are lower case.
   explained in [GAME_UI_TEXT.md](GAME_UI_TEXT.md); a style (`UiStyle`) can also set `fontFamily` and `bold`.
 * **Value:** `value`, `minValue`, `maxValue`, `step`, `showValue`, `checked`, `selected`, `items`, `rowHeight`.
 * **Navigation:** `focusable`, `tabIndex`, `navUp`, `navDown`, `navLeft`, `navRight`, `command`.
+* **Accessibility:** `accessName` (the label a narrator speaks; empty = derived from the widget's text or its label sibling).
 * **Root only:** `inputMode`, `modal`, `zOrder`, `layer`, `defaultFocus`, `cancelCommand`.
 
 ## Text
@@ -175,7 +176,12 @@ TrueType font the tree behaves exactly as before and draws with the lent baked f
 `UiSettingsScreen` builds a tabbed settings screen from a `UiSettingsModel` (items of type toggle, slider,
 choice, on named tabs) and, optionally, a `UiRebindModel` (rows: action, slot, label, current binding text) for a
 **Controls** tab of key-bind buttons. `uiDefaultSettingsModel()` provides Graphics (quality, render scale, TAA,
-vsync, fullscreen, UI scale) and Audio (master, music, effects, voice). The screen edits the model and raises
+vsync, fullscreen), Audio (master, music, effects, voice), **Accessibility** (UI scale 0.75 to 2.0, text size, high
+contrast, colour vision filter and strength, reduce motion, shake, head bob, motion blur, lens effects), **Captions and
+Speech** (mode, size, background, position, lines, speaker names and colours, direction hints, text to speech and its
+sources, rate, volume) and **Input Assist** (hold time, tap and combo window; the C# side adds one toggle per action).
+The window fills 90 percent of the viewport up to 980 x 720 design pixels, centred, and row labels wrap, so a 2.0 UI
+scale on a small screen keeps Back reachable. See [ACCESSIBILITY.md](ACCESSIBILITY.md). The screen edits the model and raises
 Command events; it never touches the renderer, the mixer or the input system:
 
 * `setting:<key>` with `value` (and `index`) when a setting changes. `graphics.uiScale` is applied by the
@@ -191,6 +197,25 @@ In C#, `UiGameSettings.Create()` (Aver.Framework) wires the screen to the engine
 "quality" means is the game's call), and the Controls tab rebinds through `EnhancedInput.RebindAction`
 (`FrameworkRebindProvider.FromContext(context)` lists a context's bindings). Call `ApplyAll()` at startup to
 restore saved values. Keyboard and mouse bindings are rebindable; gamepad bindings are listed greyed out.
+
+## Accessibility
+
+`UiTree::setAccess({textScale, highContrast})` (C: `aver_ui_set_access`) is a property of the tree, not of widgets. `textScale`
+multiplies font sizes only; row heights, padding and widths stay on the UI scale. `highContrast` resolves styles against the
+built-in `contrast` theme (sized like the game's theme), ignores `bgColor`/`textColor`/`accentColor` and rich-text colours, doubles
+the focus ring and draws the scrollbar white; the game's theme returns when it is off. Both default to today's behaviour exactly.
+
+`uiAccessibleText(tree, id)` (C: `aver_ui_widget_accessible_text`) is what a narrator says: `name, role, state or value`, with the role
+and state words as `@Access:...` references that localize. `aver_ui_set_announcer(fn)` installs a callback (the framework's
+`aver_fw_speech_announce_ui`) that is called with that text, interrupting, on every focus change and every slider, toggle or choice
+change.
+
+`UiCaptionView` is the caption overlay: one passive Overlay root named `Aver.Captions` with a row per line, recycled between frames,
+hidden when the list is empty. The host pushes the lines before the frame with `aver_ui_captions_set(lines, count, sizeScale,
+bgOpacity, top)`. It never takes the pointer or focus, and its text stays a raw reference so the tree localizes it.
+
+A `Text` that wraps and takes its width from a fill weight (`fillW > 0`, no `width`) now wraps at the width its slot gave it: the
+tree runs a second layout pass when such a widget's width changes.
 
 ## Localized text
 
@@ -209,6 +234,8 @@ Any text field (`text`, `items`, `placeholder`, menu and settings labels) may ho
    `WM_CHAR`), `aver_ui_input_pointer_valid(0)` while the game owns the mouse.
 3. The game's HUD tick, then `aver_ui_widgets_frame(dt)`: layout, input, events, drawing into the draw list.
 4. Submit the draw list; read `aver_ui_wants_input()` for next frame's input policy.
+
+Accessibility calls (host): `aver_ui_set_access`, `aver_ui_captions_set`, `aver_ui_set_announcer`, `aver_ui_widget_accessible_text`.
 
 Widgets are 32-bit ids; create/find/destroy/reparent, typed shortcuts (`set_text`, `set_value`, `set_checked`,
 `set_selected`, `set_items`, `set_visible`, `set_enabled`, `set_texture`), any property by name

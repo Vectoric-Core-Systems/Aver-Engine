@@ -168,6 +168,11 @@ struct OcNotify {
 // none: sampleCurve (aver/anim/AnimSampler.hpp) reads it as LINEAR in that case, exactly as every
 // CubicSpline-tagged curve always has, rather than inventing a flat-tangent Hermite for data nobody
 // authored. That is what makes the format change purely additive -- see inTangents' own comment.
+// Curve name prefixes the animation runtime reads (MORPH_TARGETS.md 2.4): "morph.<target>" drives a mesh
+// blend-shape weight, "pose.<name>" drives a face-rig pose. Any other curve is an ordinary curve.
+inline constexpr const char* kOcCurvePrefixMorph = "morph.";
+inline constexpr const char* kOcCurvePrefixPose  = "pose.";
+
 struct OcCurve {
     std::string name;            // what a script asks for; opaque here
     OcInterp interp = OcInterp::Linear;   // Step holds; CubicSpline uses tangents below when present
@@ -194,6 +199,10 @@ struct OcCurve {
     // a non-finite value, the same three refusals NTFD applies to notifyDurations.
     std::vector<f32> inTangents;
     std::vector<f32> outTangents;
+
+    // fnv1a64 of the name without its morph./pose. prefix; NOT serialised. Filled lazily by the sampler
+    // (an idempotent write, so concurrent samplers are benign) or by parseOcAnim. 0 = not yet computed.
+    mutable u64 poseId = 0;
 };
 
 struct OcAnimation {
@@ -240,7 +249,8 @@ struct OcAnimation {
     const OcCurve* curveById(u64 id) const;
 
     // True when the duration, storage and every track are consistent, and an object clip is exactly
-    // one track on bone 0.
+    // one track on bone 0. A clip with no tracks is valid when it carries curves (a curve-only clip,
+    // e.g. blend-shape weights on a face with no rig).
     bool valid() const;
 };
 

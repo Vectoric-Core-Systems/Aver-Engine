@@ -321,6 +321,11 @@ i32 asmAddPipelineNode(AnimStateMachineAsset& a, anim::PipeNodeKind kind) {
         case anim::PipeNodeKind::Additive:
             n.source.kind = anim::PipeSourceKind::Clip;
             break;
+        case anim::PipeNodeKind::Curve:
+            // A face/blend-shape weight driven from the machine (docs/ANIM_MORPH_FACE.md): no source of its own.
+            n.curve = "morph.jawOpen";
+            n.value = 1.0f;
+            break;
     }
     a.pipeline.push_back(std::move(n));
     return static_cast<i32>(a.pipeline.size()) - 1;
@@ -435,7 +440,12 @@ std::vector<std::string> asmPipelineProblems(const AnimStateMachineAsset& a) {
                 seen.push_back(*slot);
             }
         }
-        if (n.kind != anim::PipeNodeKind::Slot) {
+        if (n.kind == anim::PipeNodeKind::Curve) {
+            const bool morph = n.curve.rfind("morph.", 0) == 0 && n.curve.size() > 6, pose = n.curve.rfind("pose.", 0) == 0 && n.curve.size() > 5;
+            if (!morph && !pose) out.push_back(who + " (curve) must name morph.<target> or pose.<name>");
+            if (!n.valueParam.empty() && a.paramIndex(n.valueParam) < 0) out.push_back(who + " names unknown parameter '" + n.valueParam + "'");
+        }
+        if (n.kind != anim::PipeNodeKind::Slot && n.kind != anim::PipeNodeKind::Curve) {
             if (n.source.kind == anim::PipeSourceKind::Clip && n.source.asset.empty()) out.push_back(who + " has no clip");
             if (n.source.kind == anim::PipeSourceKind::BlendSpace && n.source.asset.empty()) out.push_back(who + " has no blend space");
             if (n.source.kind == anim::PipeSourceKind::None) out.push_back(who + " has no source");
@@ -1077,7 +1087,7 @@ void AnimStateMachineEditor::drawDetails() {
 }
 
 void AnimStateMachineEditor::drawPipeline() {
-    if (!ImGui::CollapsingHeader("Pipeline (slots, layered and additive blends)")) return;
+    if (!ImGui::CollapsingHeader("Pipeline (slots, layered and additive blends, curves)")) return;
     const f32 dpi = ImGui::GetFontSize() / 16.0f;
     const AnimStateMachineAsset before = asset_;
     bool ended = false;
@@ -1108,7 +1118,7 @@ void AnimStateMachineEditor::drawPipeline() {
                        "layered blends a source over the running pose through a bone filter; additive adds a source's "
                        "difference from a reference frame. Weights are machine parameters, driven like any other.");
     int removeAt = -1, moveAt = -1, moveBy = 0;
-    static const char* kKinds[] = {"Slot", "Layered", "Additive"};
+    static const char* kKinds[] = {"Slot", "Layered", "Additive", "Curve"};
     for (usize i = 0; i < asset_.pipeline.size(); ++i) {
         anim::PipeNode& n = asset_.pipeline[i];
         ImGui::PushID(static_cast<int>(i) + 1);
@@ -1121,6 +1131,17 @@ void AnimStateMachineEditor::drawPipeline() {
 
         if (n.kind == anim::PipeNodeKind::Slot) {
             text("Slot", n.slot);
+        } else if (n.kind == anim::PipeNodeKind::Curve) {
+            // Drives one pose curve from a constant or a machine parameter: how a designer ties an expression to a
+            // parameter (anger, fear) with no script.
+            text("Curve (morph.<target> or pose.<name>)", n.curve);
+            int mode = n.curveAdd ? 1 : 0;
+            ImGui::SetNextItemWidth(120.0f * dpi);
+            if (ImGui::Combo("Mode", &mode, "set\0add\0")) { pushUndo(); n.curveAdd = mode == 1; markDirty(); }
+            touch(ImGui::DragFloat("Value", &n.value, 0.01f, -4.0f, 4.0f));
+            paramPick("Value parameter", n.valueParam);
+            touch(ImGui::DragFloat("Weight", &n.weight, 0.01f, 0.0f, 1.0f));
+            paramPick("Weight parameter", n.weightParam);
         } else {
             anim::PipeSource& src = n.source;
             int sk = src.kind == anim::PipeSourceKind::Clip ? 1 : src.kind == anim::PipeSourceKind::BlendSpace ? 2 : 0;
@@ -1216,6 +1237,8 @@ void AnimStateMachineEditor::drawPipeline() {
     if (ImGui::Button("Add layered")) { pushUndo(); asmAddPipelineNode(asset_, anim::PipeNodeKind::Layered); markDirty(); }
     ImGui::SameLine();
     if (ImGui::Button("Add additive")) { pushUndo(); asmAddPipelineNode(asset_, anim::PipeNodeKind::Additive); markDirty(); }
+    ImGui::SameLine();
+    if (ImGui::Button("Add curve")) { pushUndo(); asmAddPipelineNode(asset_, anim::PipeNodeKind::Curve); markDirty(); }
     for (const std::string& p : asmPipelineProblems(asset_)) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", p.c_str());
     if (ended) gesture_ = false;
 }

@@ -145,6 +145,16 @@ AVER_AUDIO_API void aver_audio_set_occlusion_curve(float minCutoffHz, float minV
 // The listener-side reverb. wet 0 turns it off; decay is the RT60 in seconds; damping 0..1.
 AVER_AUDIO_API void aver_audio_set_reverb(float wet, float decaySeconds, float damping);
 
+/* ---- play observer (accessibility captions, docs/ACCESSIBILITY.md) ----------------------------------------
+ * Called on the calling (game) thread right after every SUCCESSFUL start (voice != 0) from aver_audio_play,
+ * aver_audio_play_at, aver_audio_stream_play, aver_audio_stream_play_at and aver_audio_music_play. utf8Path is
+ * the file the sound was loaded or streamed from, NULL for generated PCM (aver_audio_load_pcm has no path).
+ * positional is 1 for the _at calls (x, y, z in centimetres). With no output device no voice starts, so the
+ * observer is never called. NULL clears. The observer must not call back into this ABI. */
+typedef void (*AverAudioPlayObserver)(void* user, const char* utf8Path, int32_t voice, int32_t bus,
+                                      int32_t positional, float x, float y, float z, int32_t looping);
+AVER_AUDIO_API void aver_audio_set_play_observer(AverAudioPlayObserver fn, void* user);
+
 // Blocks in which a stream ran out of decoded audio and went silent. Each is audible.
 AVER_AUDIO_API int32_t aver_audio_stream_underruns(void);
 // Streams currently held by a playing voice.

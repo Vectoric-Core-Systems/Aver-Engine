@@ -103,6 +103,7 @@ u32 AnimSystem::registerComponents(scene::World& world) {
         .field("reserved", scene::FieldKind::I32, static_cast<u16>(offsetof(CRootMotion, reserved)), 0, true);
     AVER_ASSERTM(b.verify(sizeof(CRootMotion)), "CRootMotion");
     g_rootType = b.typeId();
+    MorphSystem::registerComponent(world);
     return g_rootType;
 }
 
@@ -201,6 +202,7 @@ void AnimSystem::clear() {
 
     // Montages end the same way: open notify states close and Ended fires, before the clips go.
     montages_.clear(montageSink());
+    morph_.clear();
     rootClocks_.clear();
     pendingBase_.clear();
     warnedSlots_.clear();
@@ -295,7 +297,12 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         montages_.tick(*this, world, dt, sink);
     }
 
-    if (!animators) { objects_.clear(); pendingBase_.clear(); rootClocks_.clear(); return; }
+    if (!animators) {
+        objects_.clear(); pendingBase_.clear(); rootClocks_.clear();
+        morph_.tickLoose(world, dt);
+        morph_.resolveInherit(world);
+        return;
+    }
 
     ++objectStamp_;
     ++rootStamp_;
@@ -401,9 +408,12 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         }
 
         const auto* sm = world.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh);
-        if (!sm || sm->skeleton == 0) continue;
-        const fmt::OcSkeleton* skel = skeleton(sm->skeleton);
-        if (!skel || skel->bones.empty()) continue;
+        const fmt::OcSkeleton* skel = (sm && sm->skeleton != 0) ? skeleton(sm->skeleton) : nullptr;
+        if (!skel || skel->bones.empty()) {
+            // No rig: an entity with blend shapes still morphs, from the weight curves of its own clip.
+            if (morph_.needs(world, e, nullptr)) morph_.evaluate(world, e, nullptr, nullptr, dt);
+            continue;
+        }
 
         // boneCount is published back so a script can see the rig resolved without loading it.
         if (auto* w = world.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh)) {
@@ -473,8 +483,9 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
                 }
                 f32 cov = 0.0f;
                 if (!montages_.evaluateSlot(e, s, *skel, p.pose, slotPose_, cov)) continue;
-                blendPose(p.pose, slotPose_, cov, mixPose_);
-                p.pose.local.swap(mixPose_.local);
+                // Overlay: a full-body montage must not fade the base pose's face curves.
+                blendPose(p.pose, slotPose_, cov, mixPose_, CurveBlend::Overlay);
+                p.pose.swap(mixPose_);
             }
         }
 
@@ -530,6 +541,10 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         // AFTER the sample and blend so a rig LAYERS on animation rather than fighting it, and
         // BEFORE poseToSkinning so what the rig did is what gets skinned. Put it the other side of
         // that call and the modifier would be editing a pose nothing reads again.
+        // Blend-shape weights from the pose's curves, script, sequencer and lip-sync; face-rig joint poses land in
+        // p.pose here, so the modifier below (IK, ragdoll) sees them.
+        if (morph_.needs(world, e, &p.pose)) morph_.evaluate(world, e, skel, &p.pose, dt);
+
         if (poseMod_) poseMod_(e, *skel, p.pose, poseModUser_);
 
         poseToSkinning(*skel, p.pose, p.skin);
@@ -548,6 +563,10 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         if (it->second.seen == objectStamp_) ++it;
         else it = objects_.erase(it);
     }
+
+    // Entities with CMorphTargets that nothing above evaluated, then the inherit-from-parent pass.
+    morph_.tickLoose(world, dt);
+    morph_.resolveInherit(world);
 
     updateAttachments(world);
 }

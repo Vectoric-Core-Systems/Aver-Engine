@@ -36,10 +36,14 @@ aver_add_module(Aver.Formats
     # Data tables (.csv/.json) and string tables (.ocstrings/.csv) plus the localization key scanner: text only,
     # no device and no engine type. docs/DATA_TABLES.md, docs/LOCALIZATION.md.
     src/OcStrings.cpp
+    # .occaptions: subtitles and sound captions (docs/ACCESSIBILITY.md). Text only, no engine dependency.
+    src/OcCaptions.cpp
     src/OcTable.cpp
     src/LocGather.cpp
     src/OcMap.cpp
     src/OcMesh.cpp
+
+    src/MorphTarget.cpp
     src/OcWorld.cpp
     # [wave5/sequencer begin] the SEQUENCE records and the .ocseq file: text, no Aver.Scene.
     src/OcSeq.cpp

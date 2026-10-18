@@ -11,6 +11,7 @@
 #include "aver/anim/AnimMontages.hpp"
 #include "aver/anim/AnimRetarget.hpp"
 #include "aver/anim/AnimSampler.hpp"
+#include "aver/anim/MorphSystem.hpp"
 #include "aver/anim/RootMotion.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
@@ -137,6 +138,10 @@ public:
     // The installed modifier, so a second one can chain it (RagdollSystem runs after the control rig).
     PoseModifierFn poseModifier() const { return poseMod_; }
     void* poseModifierUser() const { return poseModUser_; }
+
+    // ---- blend shapes and facial animation (docs/plans/wave9/MORPH_TARGETS.md) ----
+    // CMorphTargets weights: tick() evaluates every animated entity through it and the renderer reads its frames.
+    MorphSystem& morphs() { return morph_; }
 
     // ---- montages and root motion (docs/ANIM_MONTAGES.md) ----
     MontageSystem& montages() { return montages_; }
@@ -422,6 +427,9 @@ private:
     bool clearing_ = false;
     // Reused across entities and ticks so a frame of notifies costs no allocation after the first.
     std::vector<u32> crossed_;
+
+    // Blend shapes. Constructed with this system: it resolves rig and track assets through assetPath().
+    MorphSystem morph_{*this};
 
     // Montages, and root motion per entity.
     MontageSystem montages_;

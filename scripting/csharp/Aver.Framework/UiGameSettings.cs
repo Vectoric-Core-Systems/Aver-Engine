@@ -99,12 +99,33 @@ public static class UiGameSettings
         // With more than one shipped culture the screen gets a Language choice. The culture is not a float setting, so the
         // store answers that key from Loc (and switches it on Set) rather than from a stored index.
         bool language = Loc.Cultures.Count > 1;
-        var screen = new SettingsScreen(language ? new LanguageSettingsStore() : new FrameworkSettingsStore(), rebind);
+        // AccessSettingsStore answers the accessibility keys and graphics.uiScale from Accessibility, the rest from Settings.
+        var screen = new SettingsScreen(language ? new LanguageSettingsStore() : new AccessSettingsStore(), rebind);
         if (language)
             screen.AddChoice(LanguageKey, "@UI:settings.language=Language", "@UI:settings.tab.game=Game",
                              Loc.Cultures.Select(LocGraph.NativeName), Math.Max(0, LocGraph.CurrentCultureIndexForGraph()));
+        AddInputAssistToggles(screen);
         screen.SettingChanged += Apply;
         return screen;
+    }
+
+    // Input Assist: one "toggle instead of hold" row per registered Digital action the game has not exempted.
+    private static void AddInputAssistToggles(SettingsScreen screen)
+    {
+        const string tab = "@UI:settings.tab.input=Input Assist";
+        try
+        {
+            int count = FwIn.aver_fw_action_count();
+            for (int h = 1; h <= count; h++)
+            {
+                if (FwIn.aver_fw_action_value_type(h) != 0) continue;   // Digital only: an axis has nothing to latch
+                string name = Fw.Str(FwIn.aver_fw_action_name(h));
+                if (name.Length == 0 || !Accessibility.Input.IsToggleAllowed(name)) continue;
+                string key = "access.input.toggle." + name;
+                screen.AddToggle(key, Loc.Format("UI", "settings.access.toggleAction", "Toggle {0}", name), tab, Accessibility.Get(key) > 0.5f);
+            }
+        }
+        catch (DllNotFoundException) { }
     }
 
     private const string LanguageKey = "game.language";
@@ -112,7 +133,7 @@ public static class UiGameSettings
     // FrameworkSettingsStore plus the language key.
     private sealed class LanguageSettingsStore : ISettingsStore
     {
-        private readonly FrameworkSettingsStore _base = new();
+        private readonly AccessSettingsStore _base = new();
 
         public float Get(string key, float fallback)
             => key == LanguageKey ? Math.Max(0, LocGraph.CurrentCultureIndexForGraph()) : _base.Get(key, fallback);

@@ -1,6 +1,9 @@
 
 // ================= the camera post chain =================
 
+// The colour-vision filter (docs/ACCESSIBILITY.md); the HUD pixel shader includes the same file.
+#include "aver_colour_vision.hlsli"
+
 // Constants for every pass in the chain.
 cbuffer AverPost : register(b0) {
     float4 gPostTone;    // x exposure (compensation on the adapted value under auto-exposure),
@@ -43,6 +46,7 @@ cbuffer AverPost : register(b0) {
     float4 gPostGain;    // rgb gain
     float4 gPostDof;     // x focus (cm), y CoC scale (px at the composite source's width), z max radius
                          // (half-res px), w unused
+    float4 gPostAccess;  // x packed colour-vision filter (mode + 4 simulate + 8 round(strength*100); 0 = off), yzw unused
 };
 
 Texture2D<float4>     gPostSceneTex : register(t0);
@@ -760,6 +764,8 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
         outc = lerp(outc, graded, gPostWb.w);
     }
 #endif
+    // The player's colour-vision filter, on the finished display image (before grain, so the noise is not recoloured).
+    if (gPostAccess.x > 0.5) outc = averColourVision(outc, gPostAccess.x);
     if (gPostLens.y > 0.0) {
         // Film grain: triangular noise re-rolled each frame, strongest in the midtones, added in display space.
         float2 seed = i.pos.xy + gPostLens2.z * float2(17.13, 29.71);

@@ -44,6 +44,17 @@ UiSettingItem toggle(const char* key, const char* label, const char* tab, bool o
     return i;
 }
 
+UiSettingItem choice(const char* key, const char* label, const char* tab, f32 v, std::vector<std::string> choices) {
+    UiSettingItem i;
+    i.type = UiSettingItem::Type::Choice;
+    i.key = key;
+    i.label = label;
+    i.tab = tab;
+    i.value = v;
+    i.choices = std::move(choices);
+    return i;
+}
+
 } // namespace
 
 // ---- model ----------------------------------------------------------------------------------------
@@ -80,11 +91,50 @@ UiSettingsModel uiDefaultSettingsModel() {
     m.items.push_back(toggle("graphics.taa", "@UI:settings.taa=Anti-aliasing (TAA)", "@UI:settings.tab.graphics=Graphics", true));
     m.items.push_back(toggle("graphics.vsync", "@UI:settings.vsync=VSync", "@UI:settings.tab.graphics=Graphics", true));
     m.items.push_back(toggle("graphics.fullscreen", "@UI:settings.fullscreen=Fullscreen", "@UI:settings.tab.graphics=Graphics", false));
-    m.items.push_back(slider("graphics.uiScale", "@UI:settings.uiScale=UI scale", "@UI:settings.tab.graphics=Graphics", 1.0f, 0.75f, 1.5f, 0.05f));
     m.items.push_back(slider("audio.master", "@UI:settings.master=Master volume", "@UI:settings.tab.audio=Audio", 1.0f, 0.0f, 1.0f, 0.05f));
     m.items.push_back(slider("audio.music", "@UI:settings.music=Music volume", "@UI:settings.tab.audio=Audio", 0.8f, 0.0f, 1.0f, 0.05f));
     m.items.push_back(slider("audio.sfx", "@UI:settings.sfx=Effects volume", "@UI:settings.tab.audio=Audio", 1.0f, 0.0f, 1.0f, 0.05f));
     m.items.push_back(slider("audio.voice", "@UI:settings.voice=Voice volume", "@UI:settings.tab.audio=Audio", 1.0f, 0.0f, 1.0f, 0.05f));
+
+    // Accessibility (docs/ACCESSIBILITY.md). Mirrors the key table in Aver.Framework's AccessKeys.hpp (this module cannot
+    // see it); GameAccessibilityTest pins the two together. Keys, ranges, defaults and labels must match.
+    const char* const A = "@UI:settings.tab.access=Accessibility";
+    const char* const C = "@UI:settings.tab.captions=Captions and Speech";
+    const char* const I = "@UI:settings.tab.input=Input Assist";
+    m.items.push_back(slider("graphics.uiScale", "@UI:settings.uiScale=UI scale", A, 1.0f, 0.75f, 2.0f, 0.05f));
+    m.items.push_back(slider("access.ui.textScale", "@UI:settings.access.textScale=Text size", A, 1.0f, 0.75f, 2.0f, 0.05f));
+    m.items.push_back(toggle("access.ui.highContrast", "@UI:settings.access.highContrast=High contrast UI", A, false));
+    m.items.push_back(choice("access.colour.mode", "@UI:settings.access.colourMode=Colour vision filter", A, 0.0f,
+                             {"@UI:settings.access.cv.off=Off", "@UI:settings.access.cv.prot=Protanopia",
+                              "@UI:settings.access.cv.deut=Deuteranopia", "@UI:settings.access.cv.trit=Tritanopia"}));
+    m.items.push_back(slider("access.colour.strength", "@UI:settings.access.colourStrength=Filter strength", A, 1.0f, 0.0f, 1.0f, 0.05f));
+    m.items.push_back(toggle("access.motion.reduce", "@UI:settings.access.reduceMotion=Reduce motion", A, false));
+    m.items.push_back(slider("access.motion.shake", "@UI:settings.access.shake=Camera shake", A, 1.0f, 0.0f, 1.0f, 0.05f));
+    m.items.push_back(slider("access.motion.bob", "@UI:settings.access.bob=Head bob", A, 1.0f, 0.0f, 1.0f, 0.05f));
+    m.items.push_back(toggle("access.motion.blur", "@UI:settings.access.blur=Motion blur", A, true));
+    m.items.push_back(toggle("access.motion.lens", "@UI:settings.access.lens=Chromatic aberration, grain and lens flare", A, true));
+
+    m.items.push_back(choice("access.captions.mode", "@UI:settings.access.captionMode=Captions", C, 1.0f,
+                             {"@UI:settings.access.cap.off=Off", "@UI:settings.access.cap.subtitles=Subtitles",
+                              "@UI:settings.access.cap.captions=Captions"}));
+    m.items.push_back(choice("access.captions.size", "@UI:settings.access.captionSize=Caption size", C, 1.0f,
+                             {"@UI:settings.access.size.small=Small", "@UI:settings.access.size.medium=Medium",
+                              "@UI:settings.access.size.large=Large", "@UI:settings.access.size.xl=Extra large"}));
+    m.items.push_back(slider("access.captions.bgOpacity", "@UI:settings.access.captionBg=Caption background", C, 0.6f, 0.0f, 1.0f, 0.05f));
+    m.items.push_back(choice("access.captions.position", "@UI:settings.access.captionPos=Caption position", C, 0.0f,
+                             {"@UI:settings.access.pos.bottom=Bottom", "@UI:settings.access.pos.top=Top"}));
+    m.items.push_back(slider("access.captions.lines", "@UI:settings.access.captionLines=Caption lines", C, 3.0f, 1.0f, 4.0f, 1.0f));
+    m.items.push_back(toggle("access.captions.speaker", "@UI:settings.access.captionSpeaker=Speaker names", C, true));
+    m.items.push_back(toggle("access.captions.colours", "@UI:settings.access.captionColours=Speaker colours", C, true));
+    m.items.push_back(toggle("access.captions.direction", "@UI:settings.access.captionDir=Direction hints", C, false));
+    m.items.push_back(toggle("access.speech.enabled", "@UI:settings.access.speech=Text to speech", C, false));
+    m.items.push_back(toggle("access.speech.ui", "@UI:settings.access.speechUi=Read menus aloud", C, true));
+    m.items.push_back(toggle("access.speech.captions", "@UI:settings.access.speechCaptions=Read captions aloud", C, false));
+    m.items.push_back(slider("access.speech.rate", "@UI:settings.access.speechRate=Speech rate", C, 0.0f, -10.0f, 10.0f, 1.0f));
+    m.items.push_back(slider("access.speech.volume", "@UI:settings.access.speechVolume=Speech volume", C, 1.0f, 0.0f, 1.0f, 0.05f));
+
+    m.items.push_back(slider("access.input.holdScale", "@UI:settings.access.holdScale=Hold time", I, 1.0f, 0.25f, 1.0f, 0.05f));
+    m.items.push_back(slider("access.input.windowScale", "@UI:settings.access.windowScale=Tap and combo window", I, 1.0f, 1.0f, 4.0f, 0.25f));
     return m;
 }
 
@@ -112,11 +162,27 @@ UiWidgetId UiSettingsScreen::build(std::string_view rootName) {
     root.zOrder = 10;
     root.cancelCommand = "ui.close";
 
-    UiWidget& win = make(tree_, root_, UiWidgetKind::Panel, "Window");
-    win.anchors = UiAnchors{0.5f, 0.5f, 0.5f, 0.5f};
-    win.pivot = {0.5f, 0.5f};
-    win.width = 780;
-    win.height = 640;
+    // The window fills 90 percent of the viewport up to 980 x 720 design px and stays centred, so a 2.0 UI scale on a
+    // small screen keeps the Back button reachable: Frame (5..95 percent) > WindowRow (centres vertically, max height)
+    // > Window (centres horizontally, max width).
+    UiWidget& frame = make(tree_, root_, UiWidgetKind::Panel, "Frame");
+    frame.style = "clear";
+    frame.hit = UiHitMode::Never;
+    frame.anchors = UiAnchors{0.05f, 0.05f, 0.95f, 0.95f};
+    frame.layout = UiLayoutMode::VStack;
+    frame.justify = UiJustify::Center;
+    const UiWidgetId frameId = frame.id;
+    UiWidget& wrow = make(tree_, frameId, UiWidgetKind::Panel, "WindowRow");
+    wrow.style = "clear";
+    wrow.hit = UiHitMode::Never;
+    wrow.layout = UiLayoutMode::HStack;
+    wrow.justify = UiJustify::Center;
+    wrow.fillH = 1.0f;
+    wrow.maxHeight = 720;
+    const UiWidgetId wrowId = wrow.id;
+    UiWidget& win = make(tree_, wrowId, UiWidgetKind::Panel, "Window");
+    win.fillW = 1.0f;
+    win.maxWidth = 980;
     win.layout = UiLayoutMode::VStack;
     win.spacing = 12;
     win.padding = UiInsets{20, 20, 20, 20};
@@ -156,6 +222,7 @@ UiWidgetId UiSettingsScreen::build(std::string_view rootName) {
                 UiWidget& label = make(tree_, rowId, UiWidgetKind::Text, "label." + item.key);
                 label.text = item.label;
                 label.fillW = 1.0f;
+                label.wrap = true;
                 label.alignV = UiAlign::Center;
 
                 const std::string name = "setting." + item.key;
@@ -189,6 +256,7 @@ UiWidgetId UiSettingsScreen::build(std::string_view rootName) {
                 UiWidget& label = make(tree_, rowId, UiWidgetKind::Text, "bindlabel." + std::to_string(i));
                 label.text = r.label.empty() ? r.action : r.label;
                 label.fillW = 1.0f;
+                label.wrap = true;
                 label.alignV = UiAlign::Center;
                 UiWidget& k = make(tree_, rowId, UiWidgetKind::KeyBind, "bind." + std::to_string(i));
                 k.width = 300;

@@ -62,6 +62,8 @@ aver_add_module(Aver.Runtime.Game.Core
     # [wave5/sequencer end]
     # Culture choice and string/data-table hot reload over the Aver.Framework stores (guarded on AVER_MODULE_FRAMEWORK).
     src/GameLocalization.cpp
+    # Accessibility options, captions, narration and the player's colour/motion overrides (guarded on AVER_MODULE_FRAMEWORK).
+    src/GameAccessibility.cpp
   DEPS
     Aver.RHI
     Aver.Platform

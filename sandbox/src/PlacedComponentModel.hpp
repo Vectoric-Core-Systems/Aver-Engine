@@ -69,6 +69,9 @@ inline constexpr PlacedKind kPlacedKinds[] = {
     {"Destructible", "Destructible",
      "Makes this mesh breakable: it dents under hits and tears into pieces past its material's limits.",
      "Destructible", 0, "CDestructible", {".ocsoft"}},
+    {"MorphTargets", "Morph Targets",
+     "Drives this mesh's blend shapes (facial expressions, lip-sync) from animation, script and the sequencer.",
+     "Morph Targets", 0, "CMorphTargets", {".ocface"}},
 };
 inline constexpr usize kPlacedKindCount = sizeof(kPlacedKinds) / sizeof(kPlacedKinds[0]);
 
@@ -131,7 +134,7 @@ inline bool canAttach(const AttachContext& c, const PlacedKind& kind, std::strin
     }
     if (t == "Cloth" && c.hasDestructible) return deny(why, "This entity is already Destructible; one soft body per entity.");
     if (t == "Destructible" && c.hasCloth) return deny(why, "This entity is already Cloth; one soft body per entity.");
-    return true;   // Brain, SmartObject, Cloth and Destructible need only a mesh placement
+    return true;   // Brain, SmartObject, Cloth, Destructible and MorphTargets need only a mesh placement
 }
 
 // True when `kind` may be removed. A Skeletal Mesh with dependents is refused (no cascade, so one undo entry

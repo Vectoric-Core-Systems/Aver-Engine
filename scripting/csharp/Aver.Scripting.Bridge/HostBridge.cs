@@ -1496,6 +1496,8 @@ public static class HostBridge
         if (group == 0) { try { GameplayAbilities.Update(); } catch (DllNotFoundException) { } }
         // Input triggers raised by this frame's aver_fw_action_update reach C# events and graph OnInputAction entries.
         if (group == 0) { try { EnhancedInput.PumpEvents(); } catch (DllNotFoundException) { } }
+        // Accessibility options changed this frame go into Settings (flushed after a quiet half second); speech queue advances.
+        if (group == 0) { try { Aver.Framework.Accessibility.Tick(dt); } catch (DllNotFoundException) { } }
 
         // EnhancedInput needs no per-frame snapshot here: that call is gone, not relocated -- it's now
         // a thin wrapper over aver_fw_action_held/pressed/released/value2 (framework_abi.h NAMED

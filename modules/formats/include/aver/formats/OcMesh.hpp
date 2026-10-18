@@ -17,6 +17,11 @@ inline constexpr u32 kOcMeshMeshlets  = 1u << 2;
 inline constexpr u32 kOcMeshIndex32   = 1u << 3;
 inline constexpr u32 kOcMeshHasSkin   = 1u << 5;
 inline constexpr u32 kOcMeshTwoSided  = 1u << 9;
+inline constexpr u32 kOcMeshHasMorph  = 1u << 11;   // an MRPH chunk is present (MORPH_TARGETS.md 2.2)
+
+inline constexpr u32 kOcMeshMaxMorphTargets = 512;
+// FBX_IMPORT.md 2.7 guards its blend-shape attach on this macro.
+#define AVER_OCMESH_HAS_MORPH 1
 
 // One material-slot group. The renderer draws a submesh with the material bound for its slot.
 struct OcMeshSubmesh {
@@ -201,6 +206,20 @@ struct OcMeshLod {
     std::vector<u32> groupChildren;
 };
 
+// One sparse blend shape: per-vertex deltas against LOD 0's vertices (every coarser LOD shares those ids).
+struct OcMorphTarget {
+    std::string name;                    // unique within the mesh, non-empty, <= 128 bytes
+    f32 defaultWeight = 0.0f;
+    std::vector<u32> vertices;           // strictly ascending, < vertexCount()
+    std::vector<f32> positionDeltas;     // 3 per entry, engine space, cm
+    std::vector<f32> normalDeltas;       // 3 per entry, or empty
+    // Derived by finalize(), never serialised.
+    f32 maxAbs[3] = {0, 0, 0};           // per-axis max |positionDelta| (bounds pad)
+    f32 maxLen = 0.0f;                   // max |positionDelta| (active-list importance)
+    void finalize();
+    bool valid(u32 vertexCount, std::string* why = nullptr) const;
+};
+
 struct OcMeshData {
     std::vector<f32> positions;      // 3 per vertex
     std::vector<f32> normals;        // 3 per vertex
@@ -241,6 +260,10 @@ struct OcMeshData {
     // vertex streams (writeOcMesh writes one VTXS block; every LodDesc points at it).
     std::vector<OcMeshLod> coarserLods;
 
+    // Blend shapes, optional (the MRPH chunk). Empty for every mesh without them, and such a mesh
+    // writes the same bytes it did before this field existed.
+    std::vector<OcMorphTarget> morphTargets;
+
     Vec3 boundsMin{0, 0, 0}, boundsMax{0, 0, 0};
     u32  flags = 0;
 
@@ -274,12 +297,15 @@ struct OcMeshData {
     // checked by writeOcMesh/parseOcMesh, not here -- this mirrors hasSkin()'s split of "is the
     // feature present" from "is the file well-formed".
     bool hasMeshlets() const { return !meshlets.empty(); }
+    bool hasMorph() const { return !morphTargets.empty(); }
     // True when the streams are non-empty and the same length.
     bool valid() const {
         const usize v = positions.size() / 3;
         if (!(v > 0 && !indices.empty() && normals.size() == v * 3 && uvs.size() == v * 2)) return false;
         // Half a skin is worse than none: it would write a stream the reader then mis-sizes.
-        if (!joints.empty() || !weights.empty()) return hasSkin();
+        if (!joints.empty() || !weights.empty()) { if (!hasSkin()) return false; }
+        if (morphTargets.size() > kOcMeshMaxMorphTargets) return false;
+        for (const OcMorphTarget& t : morphTargets) if (!t.valid(static_cast<u32>(v))) return false;
         return true;
     }
     // Recomputes boundsMin/boundsMax from positions.

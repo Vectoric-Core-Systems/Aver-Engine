@@ -26,7 +26,7 @@ namespace aver::game {
 // Canonical type order = apply order (dependencies first) = write order = the order of the table in 3.4 and of editor::kPlacedKinds (7.2).
 inline constexpr std::string_view kPlacedComponentTypes[] = {
     "SkeletalMesh","Animator","RootMotion","MotionMatcher","ControlRig","IkRig","Brain","SmartObject","SoftBody",
-    "Cloth","Destructible"};
+    "Cloth","Destructible","MorphTargets"};
 
 using PathOfIdFn = std::function<std::string(u64 id)>;   // content-relative path, "" when unknown
 

@@ -162,7 +162,8 @@ bool writeImportedModel(fmt::GltfImportResult& res, const std::string& src, cons
             }
         }
         if (!fmt::saveOcMesh(outFile, m, &werr)) { AVER_WARN("[Import] {}", werr); continue; }
-        AVER_INFO("[Import] {} -> {} ({} verts, {} tris)", srcName, base + ".ocmesh", m.vertexCount(), m.indices.size() / 3);
+        AVER_INFO("[Import] {} -> {} ({} verts, {} tris{})", srcName, base + ".ocmesh", m.vertexCount(), m.indices.size() / 3,
+                  m.hasMorph() ? ", " + std::to_string(m.morphTargets.size()) + " morph target(s)" : std::string());
         stems[i] = base;
         out.outputs.push_back({"mesh", base + ".ocmesh"});
         ++out.meshesWritten;
@@ -333,7 +334,8 @@ bool writeImportedModel(fmt::GltfImportResult& res, const std::string& src, cons
         } else if (!fmt::saveOcAnim(outFile, clip, &werr)) {
             AVER_WARN("[Import] {}", werr);
         } else {
-            AVER_INFO("[Import] {} -> {} ({:.2f}s, {} track(s))", srcName, base + ".ocanim", clip.duration, clip.tracks.size());
+            AVER_INFO("[Import] {} -> {} ({:.2f}s, {} track(s){})", srcName, base + ".ocanim", clip.duration, clip.tracks.size(),
+                      clip.curves.empty() ? std::string() : ", " + std::to_string(clip.curves.size()) + " curve(s)");
             out.outputs.push_back({"anim", base + ".ocanim"});
             ++out.clipsWritten;
         }

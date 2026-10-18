@@ -1,8 +1,11 @@
 // Clip sampling: key lookup, the three interpolations, and the player's clock.
 #include "aver/anim/AnimSampler.hpp"
 
+#include "aver/core/Hash.hpp"
+
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace aver::anim {
 
@@ -153,6 +156,23 @@ void sampleAnimation(const fmt::OcAnimation& clip, f32 seconds, Pose& inOut) {
         const usize bone = t.boneIndex;
         if (bone >= inOut.local.size()) continue;   // a track for a bone this skeleton does not have
         sampleTrack(t, seconds, inOut.local[bone]);
+    }
+    sampleClipCurves(clip, seconds, inOut);
+}
+
+void sampleClipCurves(const fmt::OcAnimation& clip, f32 seconds, Pose& inOut) {
+    static const usize kMorphLen = std::strlen(fmt::kOcCurvePrefixMorph);
+    static const usize kPoseLen  = std::strlen(fmt::kOcCurvePrefixPose);
+    for (const fmt::OcCurve& c : clip.curves) {
+        const std::string& nm = c.name;
+        u32 kind;
+        usize cut;
+        if (nm.size() > kMorphLen && nm.compare(0, kMorphLen, fmt::kOcCurvePrefixMorph) == 0) { kind = kPoseCurveMorph; cut = kMorphLen; }
+        else if (nm.size() > kPoseLen && nm.compare(0, kPoseLen, fmt::kOcCurvePrefixPose) == 0) { kind = kPoseCurveFace; cut = kPoseLen; }
+        else continue;
+        // Idempotent lazy fill (OcCurve::poseId is mutable), so concurrent samplers agree.
+        if (c.poseId == 0) c.poseId = fnv1a64(std::string_view(nm).substr(cut));
+        setPoseCurve(inOut, kind, c.poseId, sampleCurve(c, seconds, 0.0f));
     }
 }
 

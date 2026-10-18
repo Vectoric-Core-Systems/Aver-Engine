@@ -47,14 +47,22 @@ public interface ISettingsStore
 /// keys. The screen edits values and raises <see cref="SettingChanged"/>; the game applies them.</summary>
 /// <remarks>Needs <see cref="UiSystem.Pump"/> to run each frame. Setting keys: graphics.quality (index),
 /// graphics.renderScale, graphics.taa, graphics.vsync, graphics.fullscreen, graphics.uiScale,
-/// audio.master, audio.music, audio.sfx, audio.voice. Toggles are 0 or 1. The screen applies
-/// graphics.uiScale itself.</remarks>
+/// audio.master, audio.music, audio.sfx, audio.voice, and the accessibility keys (<c>access.*</c>, see
+/// docs/ACCESSIBILITY.md). Toggles are 0 or 1. The screen applies graphics.uiScale itself.</remarks>
 public sealed class SettingsScreen
 {
     private static readonly string[] s_defaultKeys =
     {
         "graphics.quality", "graphics.renderScale", "graphics.taa", "graphics.vsync", "graphics.fullscreen",
-        "graphics.uiScale", "audio.master", "audio.music", "audio.sfx", "audio.voice",
+        "audio.master", "audio.music", "audio.sfx", "audio.voice",
+        // Accessibility (docs/ACCESSIBILITY.md): mirrors the key table in Aver.Framework's AccessKeys.hpp and the C++ default
+        // model. graphics.uiScale lives on the Accessibility tab now (same key, so saved values keep working).
+        "graphics.uiScale", "access.ui.textScale", "access.ui.highContrast", "access.colour.mode", "access.colour.strength",
+        "access.motion.reduce", "access.motion.shake", "access.motion.bob", "access.motion.blur", "access.motion.lens",
+        "access.captions.mode", "access.captions.size", "access.captions.bgOpacity", "access.captions.position",
+        "access.captions.lines", "access.captions.speaker", "access.captions.colours", "access.captions.direction",
+        "access.speech.enabled", "access.speech.ui", "access.speech.captions", "access.speech.rate", "access.speech.volume",
+        "access.input.holdScale", "access.input.windowScale",
     };
 
     private readonly ISettingsStore? _store;

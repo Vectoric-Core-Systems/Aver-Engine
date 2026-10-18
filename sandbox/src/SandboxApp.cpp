@@ -8,6 +8,8 @@
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_anim_abi.h"   // aver_fw_set_anim_provider (montages)
 #  include "aver/framework/framework_ik_abi.h"     // [wave5/ik-retarget] aver_fw_set_ik_provider
+
+#  include "aver/framework/framework_morph_abi.h"   // [wave9/morph] aver_fw_set_morph_provider
 #endif
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_loc_abi.h"    // the UI layout editor's culture preview
@@ -467,6 +469,7 @@ void SandboxApp::onInit(Engine& e)  {
     assetEditors_.registerFactory(&editor::makeAnimStateMachineEditor);    // .ocasm
     assetEditors_.registerFactory(&editor::makeMontageEditor);             // .ocmontage
     // [wave5/ik-retarget] IK Rig, IK Retargeter, Control Rig; the skeleton tab offers to create the first two.
+    assetEditors_.registerFactory(&editor::makeFaceRigEditor);             // .ocface  [wave9/morph]
     assetEditors_.registerFactory(&editor::makeIkRigEditor);               // .ocikrig
     assetEditors_.registerFactory(&editor::makeRetargetEditor);            // .ocretarget
     assetEditors_.registerFactory(&editor::makeRigEditor);                 // .ocrig
@@ -488,6 +491,7 @@ void SandboxApp::onInit(Engine& e)  {
     assetEditors_.registerFactory(&editor::makeFoliageTypeEditor);  // .ocfoliage
     assetEditors_.registerFactory(&editor::makeInstanceSetEditor);  // .ocinst
     assetEditors_.registerFactory(&editor::makeInputSchemeEditor);  // .ocinput
+    assetEditors_.registerFactory(&editor::makeCaptionEditor);      // .occaptions
     // The string-table editor first: it claims the CSVs under Localization/<culture>/ that the data table editor declines.
     assetEditors_.registerFactory(&editor::makeStringTableEditor);  // .ocstrings, Localization/<culture>/*.csv
     assetEditors_.registerFactory(&editor::makeDataTableEditor);    // .csv, table-shaped .json
@@ -505,6 +509,29 @@ void SandboxApp::onInit(Engine& e)  {
             return true;
         };
         editor::setInputSchemeEditorHooks(std::move(hooks));
+        // Captions tab: the project's audio files (pattern tester, From Sound), Preview through the engine, resolved text under each field.
+        editor::CaptionEditorHooks ch;
+        ch.soundPaths = [this] {
+            std::vector<std::string> out;
+            std::string root = project_.contentDir();
+            for (char& c : root) if (c == '\\') c = '/';
+            for (std::string p : content_.pathsWithExtension(".ocaudio")) {
+                for (char& c : p) if (c == '\\') c = '/';
+                if (p.size() > root.size() && p.compare(0, root.size(), root) == 0) p.erase(0, root.size() + (p[root.size()] == '/' ? 1 : 0));
+                out.push_back(std::move(p));
+            }
+            return out;
+        };
+#if AVER_MODULE_FRAMEWORK
+        ch.previewCue = [](const std::string& cue) { return aver_fw_caption_show(cue.c_str(), 0, 0.0f, 0.0f, 0.0f) != 0; };
+        ch.resolveText = [](const std::string& raw) {
+            char buf[512];
+            const int32_t n = aver_fw_loc_resolve(raw.c_str(), buf, static_cast<int32_t>(sizeof buf));
+            return n < 0 ? raw : std::string(buf, static_cast<usize>(std::min<int32_t>(n, static_cast<int32_t>(sizeof buf) - 1)));
+        };
+#endif
+        editor::setCaptionEditorHooks(std::move(ch));
+        accessPreview_.load();   // the editor's colour-vision preview choice (editor prefs only)
     }
 #if AVER_MODULE_FRAMEWORK
     {
@@ -648,6 +675,9 @@ void SandboxApp::onInit(Engine& e)  {
     }
     // [wave5/ik-retarget] IK goals, foot-IK weights and rig inputs.
     aver_fw_set_ik_provider(&anim::ikProvider, &anim::controlRigSystem());
+
+    // [wave9/morph] Blend-shape weights, face poses and lip-sync.
+    aver_fw_set_morph_provider(&anim::morphProvider, &anim::animSystem().morphs());
     // [wave5/sequencer] Level sequences: LevelSequences.Play and friends reach the director Play runs.
     aver_fw_set_sequence_provider(&game::sequenceProvider, seqEditor_.director());
 #endif
@@ -2219,6 +2249,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     // Retained game-UI widgets: Play feeds them this frame's keyboard/pad/wheel; the tree itself lays out,
     // updates and draws every frame (it is empty unless a script or graph made a widget).
+#if AVER_MODULE_FRAMEWORK
+    // Accessibility: options, captions and narration for this frame (unscaled time), pushed to the UI before it lays out.
+    game::accessibilityFrame(t.dt, viewPos(), yaw_, pitch_, access_);
+#endif
+    game::pushAccessibilityToUi(access_);
+    if (gameUi_) gameUi_->setColourVision(access_.snap.colourVisionPacked);
     if (playSessionActive()) game::uiFeedInput(input_, t.dt, !mouse_.captured());
     aver_ui_widgets_frame(t.dt);
     maybeSpawnTestActor();
@@ -2421,7 +2457,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // Ejected: leave camPos_/yaw_/pitch_ where the user flew them (drivePlayCamera snaps view to pawn every frame) and clear owner-hide root.
     // Re-possessing calls drivePlayCamera() again next frame.
     if (playEjected()) firstPersonPawn_ = scene::kInvalidEntity;
-    else                drivePlayCamera();
+    else {
+        drivePlayCamera();
+#if AVER_MODULE_FRAMEWORK
+        if (playSessionActive()) game::applyCameraFx(camPos_, yaw_, pitch_, t.dt);   // the player's shake/bob scales, Play camera only (never the free-fly camera)
+#endif
+    }
 #endif
     // A sequence camera (Animate's pilot view, or Play's camera track) replaces the view for this
     // frame only: camPos_/yaw_/pitch_ are the persisted editor camera and stay untouched.
@@ -2628,8 +2669,12 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         postPushed_ = dbg;
     } else {
         // The level's post volumes blend onto a copy: post_ stays the base the panels edit (POST_VOLUMES.md).
-        const rhi::PostSettings shown = postVolumeTools_.blend(*e.device(), project_.contentDir(),
+        rhi::PostSettings shown = postVolumeTools_.blend(*e.device(), project_.contentDir(),
                                                               levelHeader_.postVolumes, post_, viewPos());
+        // The player's accessibility choices win over the level's volumes, in a Play session only (a saved option must not change the
+        // authoring view); the editor's colour-vision preview fills in when no filter is set. Scene only: the editor chrome draws after.
+        if (playSessionActive()) game::applyAccessibilityToPost(shown, access_.snap);
+        editor::applyPreviewToPost(accessPreview_, shown);
         e.device()->setPostProcess(shown);
         postPushed_ = shown;
     }

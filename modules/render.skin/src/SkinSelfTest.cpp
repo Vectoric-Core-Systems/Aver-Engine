@@ -1,5 +1,6 @@
-// The on-device skinning check: three synthetic rigs, skinned on both sides, compared number by number.
+// The on-device skinning check: five synthetic instances (three rigs, one morph-only, one skinned + morphed), computed on both sides and compared number by number.
 #include "aver/render/SkinSelfTest.hpp"
+#include "aver/anim/Morph.hpp"
 #include "aver/anim/Pose.hpp"
 #include "aver/core/Log.hpp"
 
@@ -45,10 +46,12 @@ SkinSelfTest::~SkinSelfTest() { shutdown(); }
 // crossed dispatch show up as a wrong answer rather than a coincidentally right one.
 bool SkinSelfTest::buildCase(u32 index, u32 bones, Case& c) {
     Lcg rng{0x5EED1234u + index * 0x9E3779B9u};
+    c.morphOnly = index == 3;
+    const bool morphed = index >= 3;
 
     // Every matrix carries translation, rotation AND non-uniform scale, because a shader that reads
     // the matrix transposed still gets a pure rotation right.
-    c.skin.resize(bones);
+    c.skin.resize(c.morphOnly ? 0 : bones);
     for (u32 b = 0; b < bones; ++b) {
         Mat4 m = rotX(rng.next() * 2.0f - 1.0f);
         m.m[0][0] *= 0.8f + rng.next();
@@ -64,10 +67,12 @@ bool SkinSelfTest::buildCase(u32 index, u32 bones, Case& c) {
     mesh.positions.resize(static_cast<usize>(kTestVerts) * 3);
     mesh.normals.resize(static_cast<usize>(kTestVerts) * 3);
     mesh.uvs.resize(static_cast<usize>(kTestVerts) * 2);
-    mesh.joints.resize(static_cast<usize>(kTestVerts) * 4);
-    mesh.weights.resize(static_cast<usize>(kTestVerts) * 4);
+    if (!c.morphOnly) {
+        mesh.joints.resize(static_cast<usize>(kTestVerts) * 4);
+        mesh.weights.resize(static_cast<usize>(kTestVerts) * 4);
+        mesh.flags = fmt::kOcMeshHasSkin;
+    }
     mesh.indices.assign(3, 0);
-    mesh.flags = fmt::kOcMeshHasSkin;
 
     for (u32 v = 0; v < kTestVerts; ++v) {
         mesh.positions[v * 3 + 0] = (rng.next() - 0.5f) * 100.0f;
@@ -86,6 +91,7 @@ bool SkinSelfTest::buildCase(u32 index, u32 bones, Case& c) {
         mesh.uvs[v * 2 + 0] = static_cast<f32>(v) / static_cast<f32>(kTestVerts) + static_cast<f32>(index);
         mesh.uvs[v * 2 + 1] = std::fmod(static_cast<f32>(v) * 0.6180339887f, 1.0f) + 1.0f;
 
+        if (c.morphOnly) continue;
         f32 w[4];
         f32 sum = 0.0f;
         for (u32 i = 0; i < 4; ++i) { w[i] = rng.next(); sum += w[i]; }
@@ -102,8 +108,43 @@ bool SkinSelfTest::buildCase(u32 index, u32 bones, Case& c) {
         if (v % 97 == 11) for (u32 i = 0; i < 4; ++i) mesh.weights[v * 4 + i] = 0.0f;
     }
 
-    anim::skinVertices(c.skin, mesh.positions, mesh.normals, mesh.joints, mesh.weights,
-                       c.cpuPositions, c.cpuNormals);
+    // Blend shapes for the last two cases: 12 sparse targets (about a fifth of the vertices each, so the
+    // rank bitmaps cross word boundaries and V = 501 is no multiple of 32 or 64), every third without normal
+    // deltas, and 8 of them active with weights well above the activity threshold.
+    if (morphed) {
+        for (u32 t = 0; t < 12; ++t) {
+            fmt::OcMorphTarget tg;
+            tg.name = "t" + std::to_string(t);
+            const bool withN = t % 3 != 2;
+            for (u32 v = 0; v < kTestVerts; ++v) {
+                if (rng.next() > 0.2f && v != 0 && v != kTestVerts - 1) continue;   // the first and last vertices always move
+                tg.vertices.push_back(v);
+                for (int k = 0; k < 3; ++k) tg.positionDeltas.push_back((rng.next() - 0.5f) * 40.0f);
+                if (withN) for (int k = 0; k < 3; ++k) tg.normalDeltas.push_back((rng.next() - 0.5f) * 0.8f);
+            }
+            tg.finalize();
+            mesh.morphTargets.push_back(std::move(tg));
+        }
+        mesh.flags |= fmt::kOcMeshHasMorph;
+        const u32 picks[8] = {0, 2, 3, 5, 6, 8, 10, 11};
+        for (u32 k = 0; k < 8; ++k) {
+            const f32 mag = 0.1f + rng.next() * 1.4f;
+            c.weights.push_back(MorphTargetWeight{picks[k], (k % 3 == 1 ? -1.0f : 1.0f) * mag});
+        }
+    }
+
+    // The CPU answer: morph the rest vertex, then skin it -- the order the shader applies them.
+    std::vector<f32> restP = mesh.positions, restN = mesh.normals;
+    if (morphed) {
+        anim::applyMorphTargets(mesh.morphTargets, c.weights.data(), static_cast<u32>(c.weights.size()),
+                                mesh.positions, mesh.normals, restP, restN);
+    }
+    if (c.morphOnly) {
+        c.cpuPositions = restP;
+        c.cpuNormals = restN;
+    } else {
+        anim::skinVertices(c.skin, restP, restN, mesh.joints, mesh.weights, c.cpuPositions, c.cpuNormals);
+    }
     if (c.cpuPositions.size() != static_cast<usize>(kTestVerts) * 3) {
         AVER_ERROR("[Skin] self-test: the CPU reference rejected its own inputs");
         return false;
@@ -111,7 +152,8 @@ bool SkinSelfTest::buildCase(u32 index, u32 bones, Case& c) {
     c.uvs = mesh.uvs;
     c.vertexCount = kTestVerts;
 
-    if (!pass_.createMesh(mesh, bones, c.gpu)) return false;
+    // Each morphing case has its own key, so a crossed layout is a wrong answer too.
+    if (!pass_.createMesh(mesh, c.morphOnly ? 0 : bones, c.gpu, 0, morphed ? 0xA11CE000ull + index : 0)) return false;
 
     rhi::BufferDesc rb;
     rb.bytes = static_cast<u64>(kTestVerts) * kSkinVertexStride;
@@ -130,7 +172,7 @@ bool SkinSelfTest::init(rhi::IDevice& dev) {
     // Different bone counts as well as different seeds: an instance that read another's bone buffer
     // would then also be reading the wrong NUMBER of bones, which the out-of-range fallback turns
     // into a visibly different answer.
-    const u32 boneCounts[kCases] = {5, 9, 7};
+    const u32 boneCounts[kCases] = {5, 9, 7, 0, 6};
     for (u32 i = 0; i < kCases; ++i) {
         if (!buildCase(i, boneCounts[i], cases_[i])) { shutdown(); return false; }
     }
@@ -151,11 +193,13 @@ void SkinSelfTest::shutdown() {
 
 void SkinSelfTest::prePass(rhi::IRenderContext& ctx) {
     if (stage_ == 0) {
-        // ALL THREE IN ONE FRAME, interleaved as a real scene would submit them. Dispatching them
+        // ALL OF THEM IN ONE FRAME, interleaved as a real scene would submit them. Dispatching them
         // across separate frames would restore exactly the blind spot this test exists to remove.
         for (Case& c : cases_) {
             if (!c.gpu.valid() || !c.readback) { stage_ = 2; return; }
-            pass_.dispatch(ctx, c.gpu, c.skin.data(), static_cast<u32>(c.skin.size()));
+            if (c.morphOnly) pass_.dispatchMorph(ctx, c.gpu, c.weights.data(), static_cast<u32>(c.weights.size()));
+            else pass_.dispatch(ctx, c.gpu, c.skin.data(), static_cast<u32>(c.skin.size()),
+                                c.weights.data(), static_cast<u32>(c.weights.size()));
 
             // dispatch left it in VertexBuffer, which is where a raster consumer wants it. The copy
             // needs CopySource, and the frame must END in Common because a buffer's state does not

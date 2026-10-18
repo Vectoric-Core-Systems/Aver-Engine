@@ -19,7 +19,14 @@ f32 clipTime(const fmt::OcAnimation& clip, f32 seconds);
 // -major, in the order translation(3), rotation(4), scale(3), skipping absent channels. Under
 // CubicSpline each present channel's block is its in-tangent, value and out-tangent back to back,
 // per FORMAT_SPECS.md 9.2 ("each key = Time + inTangent + value + outTangent").
+//
+// Also writes the clip's "morph.<target>" and "pose.<name>" curves into inOut.curves (any other curve is
+// ordinary and untouched); the skeleton-less path calls sampleClipCurves directly.
 void sampleAnimation(const fmt::OcAnimation& clip, f32 seconds, Pose& inOut);
+
+// Only the clip's prefixed curves, into inOut.curves (kind from the prefix, id = fnv1a64 of the bare name,
+// cached in OcCurve::poseId). For an entity with a clip and no skeleton.
+void sampleClipCurves(const fmt::OcAnimation& clip, f32 seconds, Pose& inOut);
 
 // One track sampled into `inOut` (the body of sampleAnimation's loop): channels the track lacks are
 // left alone. For a caller that wants a single bone, such as root motion.

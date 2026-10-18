@@ -13,16 +13,46 @@
 
 namespace aver::anim {
 
-// One local transform per bone, in the skeleton's own bone order.
+// A sparse scalar riding on a pose: a blend-shape weight ("morph.<target>" curve) or a face-rig pose weight
+// ("pose.<name>" curve). `id` is fnv1a64 of the bare name, so poses of different skeletons never mix them
+// wrongly. MORPH_TARGETS.md 2.4.
+inline constexpr u32 kPoseCurveMorph = 0;
+inline constexpr u32 kPoseCurveFace  = 1;
+inline constexpr u32 kMaxPoseCurves  = 256;
+struct PoseCurve {
+    u64 id = 0;
+    f32 value = 0.0f;
+    u32 kind = kPoseCurveMorph;
+};
+
+// One local transform per bone, in the skeleton's own bone order, plus the sparse curve channel. Every
+// blend (state machine, blend space, slots, layers, montage, motion matching) goes through blendPose /
+// blendPoseMasked / addPose, so weights ride along for free. Swap whole poses with swap(), never
+// `.local.swap(...)`: that leaves the curves behind.
 struct Pose {
     std::vector<Transform> local;
+    std::vector<PoseCurve> curves;       // sorted by (kind, id), at most kMaxPoseCurves
 
     u32  boneCount() const { return static_cast<u32>(local.size()); }
     bool matches(const fmt::OcSkeleton& s) const { return local.size() == s.bones.size(); }
+    void swap(Pose& o) noexcept { local.swap(o.local); curves.swap(o.curves); }
 };
 
-// Fills `out` with the skeleton's authored rest pose. Every sampler seeds from this, so a bone that
-// no clip animates keeps its rest transform rather than collapsing to the identity.
+// Sets (inserts or overwrites) a curve, keeping `curves` sorted. Beyond kMaxPoseCurves a new curve is
+// dropped with one warning.
+void setPoseCurve(Pose& p, u32 kind, u64 id, f32 value);
+const PoseCurve* findPoseCurve(const Pose& p, u32 kind, u64 id);
+
+// How blendPose treats a curve present on only one side.
+//   Crossfade: the union of both; a missing curve reads 0 on its side (a state without face curves fades
+//              the face out). The default, for every pose-to-pose blend.
+//   Overlay:   a curve only in `a` is kept, only in `b` becomes b * t, in both it lerps. For a layer over
+//              a running pose (a slot montage), which must not fade the base's face.
+enum class CurveBlend : u8 { Crossfade, Overlay };
+
+// Fills `out` with the skeleton's authored rest pose and CLEARS its curves. Every sampler seeds from this,
+// so a bone that no clip animates keeps its rest transform rather than collapsing to the identity, and a
+// weight cannot leak from one frame into the next.
 void restPose(const fmt::OcSkeleton& skel, Pose& out);
 
 // Local transforms to MODEL space, walking each bone through its parents. Requires the skeleton's
@@ -49,11 +79,14 @@ void poseToSkinning(const fmt::OcSkeleton& skel, const Pose& p, std::vector<Mat4
 bool socketModelMatrix(const std::vector<Mat4>& model, const fmt::OcSocket& sock, Mat4& out);
 
 // `a` toward `b` by `t`, per bone: lerp on translation and scale, shortest-arc slerp on rotation.
-// `t` is clamped. Mismatched bone counts leave `out` as a copy of `a`.
-void blendPose(const Pose& a, const Pose& b, f32 t, Pose& out);
+// `t` is clamped. Mismatched bone counts leave `out` as a copy of `a` (curves included). Curves blend per
+// `mode`.
+void blendPose(const Pose& a, const Pose& b, f32 t, Pose& out, CurveBlend mode = CurveBlend::Crossfade);
 
 // Per-bone blend: bone i moves from `a` toward `b` by w[i] (clamped). A w that does not have one
-// entry per bone, or mismatched poses, leaves `out` a copy of `a`.
+// entry per bone, or mismatched poses, leaves `out` a copy of `a`. Curves use Overlay semantics with the
+// weight max_i clamp01(w[i]): a head-only layer fully applies its face curves, a layer whose clip has no
+// curves leaves the base's face alone.
 void blendPoseMasked(const Pose& a, const Pose& b, const std::vector<f32>& w, Pose& out);
 
 // One branch-filter entry: a bone name, how many bones down from it the weight ramps in, a weight.
@@ -73,7 +106,8 @@ u32 buildBranchMask(const fmt::OcSkeleton& skel, const std::vector<BranchEntry>&
 // Layers an additive clip's pose onto a base. `additive` is the additive clip sampled at some time
 // and `additiveRest` is that same clip's own reference pose -- the difference between them is what
 // gets applied, scaled by `weight`. That is what makes an additive lean or breathe compose with
-// whatever the base is doing instead of replacing it.
+// whatever the base is doing instead of replacing it. Curves: for each curve in `additive`,
+// out = base_or_0 + (additive - rest_or_0) * weight.
 void addPose(const Pose& base, const Pose& additive, const Pose& additiveRest, f32 weight, Pose& out);
 
 // Linear-blend skinning on the CPU, and the PARITY CONTRACT the GPU compute pass in
@@ -126,8 +160,13 @@ void boneRestBounds(const std::vector<f32>& restPositions,
 // `restMin`/`restMax` are folded in as well, because a vertex whose weights do not sum to one is
 // NOT a convex combination -- the contract skips zero weights and out-of-range indices rather than
 // renormalising -- and a fully unweighted vertex stays at its rest position by the same rule.
+//
+// `pad` is the blend-shape allowance (sum over active targets of |w| * per-axis max delta). The deltas are
+// applied in REST space, before skinning, so expanding every rest box (and the rest extent) by it before the
+// boxes are transformed is exact-conservative, not a heuristic.
 void posedBounds(const std::vector<Vec3>& boneMin, const std::vector<Vec3>& boneMax,
                  const std::vector<u8>& used, const Mat4* skin, u32 boneCount,
-                 const Vec3& restMin, const Vec3& restMax, Vec3& outMin, Vec3& outMax);
+                 const Vec3& restMin, const Vec3& restMax, Vec3& outMin, Vec3& outMax,
+                 const Vec3& pad = Vec3{0, 0, 0});
 
 } // namespace aver::anim

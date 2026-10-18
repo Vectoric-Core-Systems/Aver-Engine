@@ -6,11 +6,13 @@ if(WIN32)
     src/win32/Win32Window.cpp
     src/win32/Win32Splash.cpp
     src/win32/Win32Console.cpp
+    src/win32/Win32Speech.cpp
     src/win32/Win32DirectoryWatcher.cpp
     src/win32/Gamepad.cpp)
 else()
   set(_aver_platform_os_sources
     src/posix/PosixConsole.cpp
+    src/posix/PosixSpeech.cpp
     src/sdl/SdlKeys.cpp
     src/sdl/SdlWindow.cpp
     src/sdl/SdlSplash.cpp
@@ -48,7 +50,9 @@ if(WIN32)
   # Windows 10, so that XP/Vista compatibility buys nothing, while xinput1_4 is the modern, more
   # capable API (<xinput.h> assumes it by default unless XINPUT_USE_9_1_0 is defined) -- so a later
   # rumble/guide-button/battery feature is a call away instead of a relink.
-  target_link_libraries(Aver.Platform PUBLIC user32 gdi32 shell32 ole32 xinput)
+  #
+  # sapi: SAPI 5 text to speech (Win32Speech.cpp), in the box with Windows and the SDK; no third-party code.
+  target_link_libraries(Aver.Platform PUBLIC user32 gdi32 shell32 ole32 xinput sapi)
 endif()
 
 # SDL everywhere else: the window, the splash, gamepads, the file dialog. PRIVATE -- no public header

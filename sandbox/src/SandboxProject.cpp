@@ -147,6 +147,18 @@ void SandboxApp::applyProject(Engine& e) {
 #if AVER_WITH_UI_ABI && AVER_MODULE_FRAMEWORK
         aver_ui_set_text_resolver(&aver_fw_loc_resolve, &aver_fw_loc_epoch);
 #endif
+        // Accessibility (docs/ACCESSIBILITY.md): the options and the Captions folder of this project. A Play session tests the
+        // player's own choices, so the options come from the same Saved/Settings.ini ConfigureInput opens (unlike the culture).
+        game::AccessibilityInit ai;
+        ai.settingsPath = project_.dir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "Settings.ini";
+        ai.contentDir = project_.contentDir();
+        game::initAccessibility(ai);
+#if AVER_WITH_UI_ABI && AVER_MODULE_FRAMEWORK
+        game::installAccessibilityUi();      // focus and value changes of widgets are spoken when narration is on
+#endif
+#if AVER_WITH_AUDIO_ABI && AVER_MODULE_FRAMEWORK
+        game::installAccessibilityAudio();   // every sound the audio ABI starts can raise its caption cue
+#endif
     }
     pendingUpgrade_ = editor::inspectProject(project_);
     upgradeAsked_ = false;

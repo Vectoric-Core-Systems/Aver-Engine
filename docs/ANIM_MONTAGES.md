@@ -115,7 +115,22 @@ version 2 file.
 - **`weightParam`** names a float parameter of the machine that multiplies `weight`; an unknown name reads 1.
   Drive it with `SetAnimParamFloat`.
 
-Not in v1: a second state machine as a layer source, mesh-space rotation blend, per-node curves.
+- **`curve`** (wave 9): sets or adds to ONE pose curve, with no source clip, so a machine parameter can drive a
+  facial expression or a blend-shape weight without a script. See `docs/ANIM_MORPH_FACE.md`.
+
+  ```json
+  {"type": "curve", "curve": "pose.smile", "valueParam": "joy", "value": 1.0,
+   "mode": "set", "weight": 1.0, "weightParam": "faceAlpha"}
+  ```
+
+  `curve` is `morph.<target>` or `pose.<name>`. The value is `value`, or the named float parameter when
+  `valueParam` is set (an unknown name reads `value`). `mode` `set` (default) moves the running curve toward
+  the value by `weight`; `add` adds `value * weight` to it. `weight` and `weightParam` behave as on the other
+  nodes. A curve node lives in the same list as the others, so it runs in order: put it before a `slot` node
+  and a montage's face curves overlay it; after, it overwrites them. Version 2 files with a curve node are
+  refused by builds without this feature, like any other pipeline file.
+
+Not in v1: a second state machine as a layer source, mesh-space rotation blend.
 
 ## 3. Clip flags (`.ocanim`, no byte change)
 

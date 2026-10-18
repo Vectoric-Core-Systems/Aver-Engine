@@ -757,6 +757,31 @@ void SandboxApp::drawPlacedComponentSections() {
             if (!playing)
                 ImGui::TextDisabled("Foot placement casts through physics, which is fully live in Play.");
         }
+        // ---- Morph Targets ----
+        else if (t == "MorphTargets") {
+            auto* mt = w.component<anim::CMorphTargets>(e, cid);
+            assetRow(k, "rig", "Face rig", mt->faceRig);
+            if (mt->faceRig == 0) ImGui::TextDisabled("No rig: the 52 ARKit shape names and the 15 visemes work on any mesh that has them.");
+            ImGui::BeginDisabled(playing);
+            f32 weight = mt->weight == 0.0f ? 1.0f : mt->weight;
+            gestureEdit(k, ImGui::SliderFloat("Weight", &weight, 0.01f, 2.0f, "%.2f"), [&] { mt->weight = weight; });
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scales every blend shape. Use Enabled to turn them off: a weight of 0 reads as 1.");
+            const struct { const char* label; u32 bit; bool inverted; } kFlags[] = {
+                {"Enabled", anim::kMorphOff, true}, {"Animation drives it", anim::kMorphIgnoreAnim, true},
+                {"Inherit from parent", anim::kMorphInheritParent, false}};
+            for (const auto& f : kFlags) {
+                bool on = f.inverted ? (mt->flags & f.bit) == 0 : (mt->flags & f.bit) != 0;
+                instantEdit(k, ImGui::Checkbox(f.label, &on), [&] {
+                    if (on == f.inverted) mt->flags &= ~f.bit; else mt->flags |= f.bit;
+                });
+            }
+            ImGui::EndDisabled();
+            anim::MorphSystem& ms = anim::animSystem().morphs();
+            if (const anim::MorphFrame* fr = ms.frame(e)) {
+                if (ms.declaredCount(e) == 0) ImGui::TextDisabled("This mesh has no blend shapes (or has not been drawn yet).");
+                else ImGui::TextDisabled("Blend shapes  %u   active  %u", ms.declaredCount(e), static_cast<u32>(fr->active.size()));
+            }
+        }
 #if AVER_MODULE_SOFTBODY_SCENE
         // ---- Cloth / Destructible ----
         else if (t == "Cloth" || t == "Destructible") {

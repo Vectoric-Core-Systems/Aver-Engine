@@ -41,6 +41,11 @@ if(NOT WIN32)
   set_target_properties(SdlKeyMapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# SpeechTest -- createSpeechSynth() never null and every call safe; on Windows a real SAPI voice at volume 0.
+add_executable(SpeechTest src/SpeechTest.cpp)
+target_link_libraries(SpeechTest PRIVATE Aver.Platform Aver.Core)
+set_target_properties(SpeechTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # aver/core/CharConv.hpp: the floating std::from_chars fallback the macOS build depends on, checked on
 # every platform -- including against std::from_chars wherever the standard library has it.
 add_executable(CharConvTest src/CharConvTest.cpp)

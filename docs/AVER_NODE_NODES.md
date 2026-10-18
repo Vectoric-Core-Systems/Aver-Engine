@@ -1134,6 +1134,39 @@ Damage, cut, repair and release soft bodies and set the wind (`docs/SOFTBODY.md`
 | `SetSoftBodyWind` | `exec` (in), `vx`/`vy`/`vz` (in, float), `gust` (in, float, 0), `gustHz` (in, float, 0.3), `turbulence` (in, float, 0), `then` (out), `success` (out, bool) | — | P | The global cloth wind in cm/s, independent of the sky's cloud drift. |
 | `SetSoftBodyPreset` | `exec` (in), `entity` (in, int), `preset` (in, int, 0), `then` (out), `success` (out, bool) | — | P | Changes the preset of the entity's Cloth or Destructible (0 cloth_light, 1 cloth_heavy, 2 metal, 3 wood, 4 glass). |
 | `GetSoftBodyState` | `entity` (in, int), `found` (out, bool), `damage` (out, float), `maxStrain` (out, float), `pieces` (out, int), `brokenEdges` (out, int) | — | D | Damage 0..1, worst strain, piece count and broken edges. `found` is false without a soft body. |
+### Accessibility
+
+Options, captions, narration and camera feel (`docs/ACCESSIBILITY.md`). Rows: `GraphAccessibilityNodeTable.cs`, owner `AccessibilityGraphInterop` (`Aver.Framework/Accessibility.cs`); palette group Accessibility (`GraphNodeDefsAccessibility.hpp`). Option keys, cues, speakers and texts are node attributes, never pins. `Access.Changed` (string key, float value) arrives through `OnEvent`.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `SetAccessibilityOption` | `exec` (in), `value` (in, float), `then` (out), `success` (out, bool) | `key` | P | Sets any accessibility option (clamped to its range); false for an unknown key. |
+| `GetAccessibilityOption` | `value` (out, float), `found` (out, bool) | `key` | D | Reads an option. |
+| `ShowCaption` | `exec` (in), `x`/`y`/`z` (in, float), `positional` (in, bool), `then` (out), `success` (out, bool) | `cue` | P | Shows a caption cue; positional applies its radius and direction hint. |
+| `ShowCaptionText` | `exec` (in), `seconds` (in, float, 3), `kind` (in, int), `then` (out), `success` (out, bool) | `speaker?`, `text` | P | An ad-hoc caption line (text or `@Table:Key`); kind 0 dialogue, 1 sound, 2 music. |
+| `StopCaption` | `exec` (in), `then` (out), `success` (out, bool) | `cue?` | P | Ends a cue's captions, or all when empty. |
+| `Announce` | `exec` (in), `interrupt` (in, bool), `then` (out), `success` (out, bool) | `text` | P | Speaks through the OS voice; false when narration is off or no voice exists. |
+| `StopSpeaking` | `exec` (in), `then` (out), `success` (out, bool) | - | P | Cuts off speech. |
+| `IsSpeaking` | `result` (out, bool) | - | D | Speech in progress or queued. |
+| `AddCameraShake` | `exec` (in), `trauma` (in, float, 0.5), `then` (out), `success` (out, bool) | - | P | Adds shake trauma (0..1, saturating). |
+| `SetCameraBob` | `exec` (in), `amount` (in, float), `speed` (in, float), `then` (out), `success` (out, bool) | - | P | Head bob for this frame (amount 0..1, ground speed in cm/s); call each frame while moving. |
+| `SetActionToggleAllowed` | `exec` (in), `allowed` (in, bool, true), `then` (out), `success` (out, bool) | `action` | P | False hides an action from the Input Assist page and ignores a saved toggle. |
+### Blend shapes and lip-sync
+Category Animation. Target, pose, rig, track and viseme names are attributes, never pins. Exec nodes take part in the push compiler only; the two reads work under either.
+
+| Node | Inputs | Outputs | Attribute |
+|---|---|---|---|
+| Set Morph Weight | entity, weight, blendSeconds | then, success | target |
+| Set Face Pose | entity, weight, blendSeconds | then, success | pose |
+| Clear Morph Weights | entity, blendSeconds | then, success | target (empty = all) |
+| Get Morph Weight | entity | found, weight | target |
+| Set Face Rig | entity | then, success | rig (.ocface; empty = built-in) |
+| Play Lip Sync | entity, rate, startSeconds, strength | then, success | track (.ocvis) |
+| Stop Lip Sync | entity, blendSeconds | then, success | - |
+| Queue Viseme | entity, startSeconds, durationSeconds, intensity | then, success | viseme or phoneme |
+| Get Lip Sync State | entity | playing, time, length, strength | - |
+
+See docs/ANIM_MORPH_FACE.md.
 ## Aliases invisible to the palette
 
 The parser accepts a second spelling for seven node types. The Add-Node palette only ever spawns the canonical name — these aliases exist for a hand-written or C#-authored `.ocgraph`, never appear in the GUI, and are otherwise identical in every respect to the type they alias:

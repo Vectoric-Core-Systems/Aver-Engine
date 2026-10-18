@@ -81,6 +81,7 @@ struct UiWidgetProps {
     i32  tabIndex = 0;                       // >0 first, ascending; then 0 in document order
     std::string navUp, navDown, navLeft, navRight;   // widget names overriding spatial navigation
     std::string command;                     // emitted as a Command event when activated
+    std::string accessName;                  // the spoken label (text or reference); empty = derived from the widget and its label
 
     // ---- root only ----------------------------------------------------------------------------
     UiInputMode inputMode = UiInputMode::Passive;
@@ -120,6 +121,7 @@ struct UiWidget : UiWidgetProps {
     bool listening = false;      // KeyBind waiting for a key
     i32  caret = 0;              // TextInput
     i32  hotItem = -1;           // List: row under the pointer
+    f32  wrapHint = 0;           // wrapped Text with a fill weight: the content width its last arrangement gave it (second layout pass)
 };
 
 } // namespace aver::ui

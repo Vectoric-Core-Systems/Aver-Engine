@@ -25,6 +25,9 @@ aver_add_module(Aver.UI
     src/UiTreeDraw.cpp
     src/UiLayoutAsset.cpp
     src/UiScreens.cpp
+    # Accessibility: the spoken form of a widget and the caption overlay (docs/ACCESSIBILITY.md).
+    src/UiAccess.cpp
+    src/UiCaptionView.cpp
     src/UiHostInput.cpp
     # The text engine (docs/GAME_UI_TEXT.md): runtime TrueType, fallback chains, bidi, Arabic shaping,
     # line breaking, rich text. Pure logic; the atlas pages are uploaded by Aver.Render.UI.

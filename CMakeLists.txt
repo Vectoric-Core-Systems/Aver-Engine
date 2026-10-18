@@ -590,7 +590,10 @@ if(AVER_BUILD_TESTS)
     add_subdirectory(tests/framework_anim)
     add_subdirectory(tests/framework_import)   # wave9 FBX_IMPORT: the model import ABI relay
     add_subdirectory(tests/framework_ik)   # wave5 #24: the IK / rig-input ABI relay
+
+    add_subdirectory(tests/framework_morph)   # wave9 MORPH_TARGETS: the blend-shape / lip-sync ABI relay
     add_subdirectory(tests/framework_sequence)   # wave5 #27: the sequencer ABI relay
+    add_subdirectory(tests/framework_access)   # wave9 accessibility: options, captions, speech, camera feel, input assist
     add_subdirectory(tests/framework_content)
     add_subdirectory(tests/gas)
     add_subdirectory(tests/managed)   # Aver.Graph.Tests and Aver.DataLoc.Tests, wired into nothing before
@@ -607,6 +610,10 @@ if(AVER_BUILD_TESTS)
   endif()
   if(AVER_MODULE_RENDER_SOFTBODY)
     add_subdirectory(tests/render.softbody)
+  endif()
+
+  if(TARGET Aver.Render.Skin)
+    add_subdirectory(tests/render.skin)   # wave9 MORPH_TARGETS: the GPU blend-shape layout
   endif()
 endif()
 
@@ -664,6 +671,7 @@ set(AVER_CTEST_VULKAN_TARGETS
   LineMeshTest
   ShaderIncludeResolveTest
   NeuralGpuParityTest
+  ColourVisionShaderTest
 )
 function(aver_register_ctest_in dir)
   get_property(_targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)

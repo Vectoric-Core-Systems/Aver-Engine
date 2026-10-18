@@ -17,6 +17,10 @@
 // descriptors the first's already-recorded dispatch would read. One instance can never see it.
 // Three is the smallest number that can, and each carries a DIFFERENT rig so a crossed instance
 // produces a wrong answer rather than a coincidentally identical one.
+//
+// FIVE WITH BLEND SHAPES (MORPH_TARGETS.md 5): case 3 is morph-only (no skin, 8 active targets, V = 501, random
+// sparse targets, one without normal deltas) and case 4 is skinned AND morphed. Each has its own seed, so a
+// crossed ring or active buffer is a wrong answer. The CPU side is anim::applyMorphTargets then skinVertices.
 #include "aver/render/SkinningPass.hpp"
 
 namespace aver::render {
@@ -55,14 +59,16 @@ private:
         std::vector<f32>  cpuPositions, cpuNormals;
         std::vector<f32>  uvs;                  // what the shader must carry through unchanged
         u32               vertexCount = 0;
+        bool              morphOnly = false;    // case 3: no bones
+        std::vector<MorphTargetWeight> weights; // this case's blend-shape weights; empty = none
     };
 
     bool buildCase(u32 index, u32 bones, Case& c);
     void compare();
 
-    // Three, for the reason in this class's comment. Raising it is free; lowering it below three
-    // removes the only thing that can see a cross-instance collision.
-    static constexpr u32 kCases = 3;
+    // Five: three skinned (for the reason in this class's comment: lowering it below three removes the only
+    // thing that can see a cross-instance collision), one morph-only and one skinned + morphed.
+    static constexpr u32 kCases = 5;
 
     SkinningPass       pass_;
     Case               cases_[kCases];

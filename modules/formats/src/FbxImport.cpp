@@ -3,6 +3,7 @@
 #include "aver/formats/FbxImport.hpp"
 
 #include "FbxInternal.hpp"
+#include "aver/formats/MorphTarget.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -337,18 +338,23 @@ bool buildMeshCopy(Ctx& c, const MeshIn& in, OcMeshData& m, std::vector<u32>& cp
 }
 
 #if defined(AVER_OCMESH_HAS_MORPH)
-// The one adapter into the morph-target feature (docs/plans/wave9/MORPH_TARGETS.md). The names follow
-// FBX_IMPORT.md 2.7; if that feature picks others, this is the only function to change.
+// The one adapter into the morph-target feature (docs/plans/wave9/MORPH_TARGETS.md). Every target goes
+// through MorphTargetBuilder, which sorts the entries (a control point splits into several output vertices,
+// so the shape's order is not ascending), drops empty targets and finalizes the mesh's extents.
 void attachBlendShapes(OcMeshData& m, const std::vector<FbxBlendShape>& shapes) {
+    MorphTargetBuilder builder(m.vertexCount());
     for (const FbxBlendShape& s : shapes) {
-        OcMorphTarget t;
-        t.name = s.name;
-        t.vertices = s.vertices;
-        t.positionDeltas = s.positionDeltas;
-        t.normalDeltas = s.normalDeltas;
-        t.defaultWeight = s.defaultWeight;
-        m.morphTargets.push_back(std::move(t));
+        const u32 t = builder.addTarget(s.name, s.defaultWeight);
+        if (t == ~0u) break;
+        // Normal deltas are used only when every entry has one.
+        const bool haveN = s.normalDeltas.size() == s.vertices.size() * 3;
+        for (usize i = 0; i < s.vertices.size() && i * 3 + 2 < s.positionDeltas.size(); ++i) {
+            const Vec3 dp{s.positionDeltas[i * 3], s.positionDeltas[i * 3 + 1], s.positionDeltas[i * 3 + 2]};
+            const Vec3 dn = haveN ? Vec3{s.normalDeltas[i * 3], s.normalDeltas[i * 3 + 1], s.normalDeltas[i * 3 + 2]} : Vec3{};
+            builder.add(t, s.vertices[i], dp, haveN ? &dn : nullptr);
+        }
     }
+    builder.finish(m);
 }
 #endif
 

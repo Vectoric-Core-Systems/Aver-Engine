@@ -146,6 +146,13 @@ public:
     std::vector<std::string> sequenceNames() const;
     void runAt(f64 seconds);
 
+    // ---- blend shapes ----
+    // Keys the weight of a blend shape (a face pose when `isPose`) on the actor at the playhead: the Property track
+    // CMorphTargets.morph.<name> (or .pose.<name>) is created when the actor has none, and holds one key with `value`
+    // (an existing key at the playhead is overwritten). The track plays through MorphSystem's sequencer layer. Returns the
+    // track index, -1 (status set) when the actor is not valid or already lacks Morph Targets.
+    int keyMorph(scene::Entity e, const std::string& name, bool isPose, f32 value);
+
     // ---- sequences ----
     usize sequenceCount() const { return others_.size() + 1; }
     // Creates / duplicates / renames / deletes; each returns false (status set) when refused. The new

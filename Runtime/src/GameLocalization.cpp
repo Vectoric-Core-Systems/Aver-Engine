@@ -11,6 +11,7 @@
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_loc_abi.h"
 #  include "aver/framework/framework_table_abi.h"
+#  include "aver/framework/framework_access_abi.h"
 #endif
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -152,7 +153,8 @@ usize onContentFilesChanged(const std::string& contentRoot, const std::vector<Fi
         const std::string abs = contentRoot + "/" + rel;
         const int32_t a = aver_fw_loc_reload_path(abs.c_str());
         const int32_t b = aver_fw_table_reload_path(abs.c_str());
-        if (a > 0 || b > 0) ++touched;
+        const int32_t c = aver_fw_caption_reload_path(abs.c_str());   // a changed .occaptions reloads the Captions folder
+        if (a > 0 || b > 0 || c > 0) ++touched;
     };
     for (const FileEvent& e : events) {
         one(e.path);

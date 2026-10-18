@@ -23,6 +23,11 @@ struct ModRuntime {
     float y[3] = {0.0f, 0.0f, 0.0f};
 };
 
+// Accessibility timing assist (access.input.*): hold times shrink, tap and combo windows grow. Null = unchanged.
+struct Timing {
+    float hold = 1.0f, window = 1.0f;
+};
+
 // Everything a trigger remembers between updates. `handles` caches the action handles a chord or combo
 // names (0 = not registered yet; retried every update).
 struct TriggerRuntime {
@@ -50,13 +55,14 @@ bool actuated(const V3& v, float act);
 V3 applyModifiers(const std::vector<fmt::OcModifierSpec>& mods, V3 v, float dt, std::vector<ModRuntime>* rt);
 
 // Advances one trigger by one update.
-Rank stepTrigger(const fmt::OcTriggerSpec& spec, TriggerRuntime& rt, const V3& v, float dt, TriggerContext& ctx);
+Rank stepTrigger(const fmt::OcTriggerSpec& spec, TriggerRuntime& rt, const V3& v, float dt, TriggerContext& ctx,
+                 const Timing* timing = nullptr);
 
 // Steps EVERY trigger (their memory must advance) and merges: explicit triggers OR together (max),
 // the implicit chord ANDs (min), and an owner with no triggers is a plain `down`. `rts` is parallel
 // to `specs` and is resized if it is not.
 Rank combineTriggers(const std::vector<fmt::OcTriggerSpec>& specs, std::vector<TriggerRuntime>& rts,
-                     const V3& v, float dt, TriggerContext& ctx);
+                     const V3& v, float dt, TriggerContext& ctx, const Timing* timing = nullptr);
 
 // AVER_FW_INPUT_EVENT_* mask for a state transition.
 int eventsFor(Rank prev, Rank now);

@@ -1,6 +1,9 @@
 // Pose arithmetic: rest, hierarchy resolve, skinning matrices, and the two blends.
 #include "aver/anim/Pose.hpp"
 
+#include "aver/core/Log.hpp"
+
+#include <algorithm>
 #include <cmath>
 
 namespace aver::anim {
@@ -10,9 +13,62 @@ namespace {
 f32 clamp01(f32 v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
 Vec3 lerp3(const Vec3& a, const Vec3& b, f32 t) { return a + (b - a) * t; }
 
+bool curveLess(const PoseCurve& a, const PoseCurve& b) { return a.kind != b.kind ? a.kind < b.kind : a.id < b.id; }
+
+// Inserts or overwrites in a sorted curve list; false when a new curve would exceed the cap.
+bool upsertCurve(std::vector<PoseCurve>& v, u32 kind, u64 id, f32 value) {
+    PoseCurve key;
+    key.kind = kind; key.id = id;
+    const auto it = std::lower_bound(v.begin(), v.end(), key, curveLess);
+    if (it != v.end() && it->kind == kind && it->id == id) { it->value = value; return true; }
+    if (v.size() >= kMaxPoseCurves) return false;
+    key.value = value;
+    v.insert(it, key);
+    return true;
+}
+
+// The curve blend behind blendPose and blendPoseMasked. Both inputs are sorted; the result is their union.
+// A curve only in `a`: Crossfade fades it by (1 - s), Overlay keeps it. A curve only in `b`: b * s either way
+// (a lerp from 0). In both: lerp.
+void blendCurves(const std::vector<PoseCurve>& a, const std::vector<PoseCurve>& b, f32 s, CurveBlend mode,
+                 std::vector<PoseCurve>& out) {
+    out.clear();
+    usize i = 0, j = 0;
+    while ((i < a.size() || j < b.size()) && out.size() < kMaxPoseCurves) {
+        PoseCurve r;
+        if (j >= b.size() || (i < a.size() && curveLess(a[i], b[j]))) {
+            r = a[i++];
+            if (mode == CurveBlend::Crossfade) r.value *= (1.0f - s);
+        } else if (i >= a.size() || curveLess(b[j], a[i])) {
+            r = b[j++];
+            r.value *= s;
+        } else {
+            r = a[i];
+            r.value = a[i].value + (b[j].value - a[i].value) * s;
+            ++i; ++j;
+        }
+        out.push_back(r);
+    }
+}
+
 } // namespace
 
+void setPoseCurve(Pose& p, u32 kind, u64 id, f32 value) {
+    if (!upsertCurve(p.curves, kind, id, value)) {
+        static bool warned = false;
+        if (!warned) { warned = true; AVER_WARN("[Anim] a pose carries more than {} curves; the extras are dropped", kMaxPoseCurves); }
+    }
+}
+
+const PoseCurve* findPoseCurve(const Pose& p, u32 kind, u64 id) {
+    PoseCurve key;
+    key.kind = kind; key.id = id;
+    const auto it = std::lower_bound(p.curves.begin(), p.curves.end(), key, curveLess);
+    return (it != p.curves.end() && it->kind == kind && it->id == id) ? &*it : nullptr;
+}
+
 void restPose(const fmt::OcSkeleton& skel, Pose& out) {
+    out.curves.clear();
     out.local.resize(skel.bones.size());
     for (usize i = 0; i < skel.bones.size(); ++i) {
         const fmt::OcBone& b = skel.bones[i];
@@ -61,10 +117,15 @@ void poseToSkinning(const fmt::OcSkeleton& skel, const Pose& p, std::vector<Mat4
     }
 }
 
-void blendPose(const Pose& a, const Pose& b, f32 t, Pose& out) {
-    out.local = a.local;
-    if (a.local.size() != b.local.size()) return;
+void blendPose(const Pose& a, const Pose& b, f32 t, Pose& out, CurveBlend mode) {
+    const bool same = a.local.size() == b.local.size();
     const f32 s = clamp01(t);
+    // Built before `out` is written: the curves of a mismatched pair are `a`'s, as the bones are.
+    std::vector<PoseCurve> curves;
+    if (same) blendCurves(a.curves, b.curves, s, mode, curves); else curves = a.curves;
+    out.local = a.local;
+    out.curves = std::move(curves);
+    if (!same) return;
     for (usize i = 0; i < out.local.size(); ++i) {
         out.local[i].position = lerp3(a.local[i].position, b.local[i].position, s);
         out.local[i].scale    = lerp3(a.local[i].scale,    b.local[i].scale,    s);
@@ -73,8 +134,18 @@ void blendPose(const Pose& a, const Pose& b, f32 t, Pose& out) {
 }
 
 void blendPoseMasked(const Pose& a, const Pose& b, const std::vector<f32>& w, Pose& out) {
+    const bool ok = a.local.size() == b.local.size() && w.size() == a.local.size();
+    std::vector<PoseCurve> curves;
+    if (ok) {
+        f32 s = 0.0f;
+        for (const f32 x : w) s = std::fmax(s, clamp01(x));
+        blendCurves(a.curves, b.curves, s, CurveBlend::Overlay, curves);
+    } else {
+        curves = a.curves;
+    }
     out.local = a.local;
-    if (a.local.size() != b.local.size() || w.size() != a.local.size()) return;
+    out.curves = std::move(curves);
+    if (!ok) return;
     for (usize i = 0; i < out.local.size(); ++i) {
         const f32 s = clamp01(w[i]);
         if (s <= 0.0f) continue;
@@ -116,9 +187,20 @@ u32 buildBranchMask(const fmt::OcSkeleton& skel, const std::vector<BranchEntry>&
 }
 
 void addPose(const Pose& base, const Pose& additive, const Pose& additiveRest, f32 weight, Pose& out) {
+    const bool ok = additive.local.size() == base.local.size() && additiveRest.local.size() == base.local.size();
+    std::vector<PoseCurve> curves = base.curves;
+    if (ok) {
+        const f32 cw = clamp01(weight);
+        for (const PoseCurve& c : additive.curves) {
+            const PoseCurve* rf = findPoseCurve(additiveRest, c.kind, c.id);
+            f32 cur = 0.0f;
+            for (const PoseCurve& e : curves) if (e.kind == c.kind && e.id == c.id) { cur = e.value; break; }
+            upsertCurve(curves, c.kind, c.id, cur + (c.value - (rf ? rf->value : 0.0f)) * cw);
+        }
+    }
     out.local = base.local;
-    if (additive.local.size() != base.local.size() || additiveRest.local.size() != base.local.size())
-        return;
+    out.curves = std::move(curves);
+    if (!ok) return;
     for (usize i = 0; i < out.local.size(); ++i) {
         const Transform& bs = base.local[i];
         const Transform& ad = additive.local[i];
@@ -229,12 +311,13 @@ void boneRestBounds(const std::vector<f32>& restPositions,
 
 void posedBounds(const std::vector<Vec3>& boneMin, const std::vector<Vec3>& boneMax,
                  const std::vector<u8>& used, const Mat4* skin, u32 boneCount,
-                 const Vec3& restMin, const Vec3& restMax, Vec3& outMin, Vec3& outMax) {
+                 const Vec3& restMin, const Vec3& restMax, Vec3& outMin, Vec3& outMax, const Vec3& pad) {
     // Seeded with the REST box rather than with infinities. A vertex whose weights do not sum to
     // one is not a convex combination of its influences, and a fully unweighted one stays exactly
-    // at its rest position -- both are covered by keeping the rest extent in the union.
-    outMin = restMin;
-    outMax = restMax;
+    // at its rest position -- both are covered by keeping the rest extent in the union. The blend-shape
+    // pad widens it (and every bone box below) because deltas apply in rest space, before skinning.
+    outMin = restMin - pad;
+    outMax = restMax + pad;
     if (!skin || boneCount == 0) return;
 
     const u32 bones = boneCount < static_cast<u32>(boneMin.size())
@@ -242,8 +325,8 @@ void posedBounds(const std::vector<Vec3>& boneMin, const std::vector<Vec3>& bone
     for (u32 b = 0; b < bones; ++b) {
         if (b >= used.size() || !used[b]) continue;
         const Mat4& m = skin[b];
-        const Vec3& lo = boneMin[b];
-        const Vec3& hi = boneMax[b];
+        const Vec3 lo = boneMin[b] - pad;
+        const Vec3 hi = boneMax[b] + pad;
 
         // All eight corners, because a rotation turns a box into something whose extent is not
         // recoverable from two transformed corners.

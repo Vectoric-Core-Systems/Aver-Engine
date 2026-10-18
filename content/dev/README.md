@@ -8,6 +8,7 @@ The tree's only skinned asset source. Written by `tools/MakeRig.cpp`:
 
 ```
 build/bin/MakeRig.exe content/dev
+build/bin/MakeFace.exe content/dev   # Face.gltf, FaceRigged.gltf, Face.ocface (blend shapes; Hello.ocvis is hand-written)
 ```
 
 which also imports back what it just wrote and asserts every property downstream code relies on —
