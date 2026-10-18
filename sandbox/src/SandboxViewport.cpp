@@ -2970,6 +2970,9 @@ void SandboxApp::buildViewportOverlay() {
             case voxi::VoxiRenderer::ViewDebug::RayHitDistance: viewModeLabel = "Ray Hit: Distance"; break;
             case voxi::VoxiRenderer::ViewDebug::Triangles:      viewModeLabel = "Triangles"; break;
             case voxi::VoxiRenderer::ViewDebug::AmbientOcclusion: viewModeLabel = "Ambient Occlusion"; break;
+
+            case voxi::VoxiRenderer::ViewDebug::LightCount:     viewModeLabel = "Lights Reaching (Many Lights)"; break;
+            case voxi::VoxiRenderer::ViewDebug::ManyLightsRaw:  viewModeLabel = "Many Lights: Raw Tail"; break;
             default: break;
         }
     } else
@@ -3091,6 +3094,9 @@ void SandboxApp::buildViewportOverlay() {
         debugItem("Ray Hit: Distance", VD::RayHitDistance, "viewMode.rayHitDistance");
         debugItem("Triangles", VD::Triangles, "viewMode.triangles");
         debugItem("Ambient Occlusion", VD::AmbientOcclusion, "viewMode.ambientOcclusion");
+
+        debugItem("Lights Reaching (Many Lights)", VD::LightCount, "viewMode.manyLightsCount");
+        debugItem("Many Lights: Raw Tail", VD::ManyLightsRaw, "viewMode.manyLightsRaw");
         // NeuRAA's edge detection (docs/rendering/NEURAA_NRD.md): drawn by the AverSR seam, not
         // PSRayDriven, so the scene keeps its normal shading underneath.
         ImGui::BeginDisabled(!rdAvailable);

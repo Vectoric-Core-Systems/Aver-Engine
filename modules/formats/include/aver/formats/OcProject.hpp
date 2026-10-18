@@ -97,6 +97,10 @@ struct ProjectDesc {
     // RENDER.NEURAA: NeuRAA edge anti-aliasing on ray-driven frames (docs/rendering/NEURAA_NRD.md).
     // -1 / absent = off; CLI --neuraa / --no-neuraa outranks it.
     int neuraa = -1;      // RENDER.NEURAA  0 off, 1 on
+    // RENDER.MANYLIGHTS: stochastic many-light direct lighting from a light tree (docs/rendering/MANY_LIGHTS.md).
+    // 0 = off (the grid's capped tail), 1 = auto (engages above voxi.manyLightsMin lights), 2 = on. -1 / absent = auto.
+    // The console's 3 (exhaustive ground truth) is never stored. Needs NRD2.
+    int manyLights = -1;  // RENDER.MANYLIGHTS  0/1/2
 
     // ---- UI SETTINGS THAT THE FILE COULD NOT HOLD (now fixed) ---------------------------------
     // These were live controls in Project Settings that applied immediately, then vanished on reopen
@@ -137,7 +141,7 @@ struct ProjectDesc {
                msaa >= 0 || meshShaders >= 0 || giUpdateInterval >= 0 || hasGiVolume ||
                postExposure >= 0.0f || postBloom >= 0.0f ||
                postAutoExposure >= 0 || postTonemap >= 0 ||
-               !backend.empty() || frameBudgetMs > 0.0f || averSr >= 0 || taa >= 0 || neuraa >= 0;
+               !backend.empty() || frameBudgetMs > 0.0f || averSr >= 0 || taa >= 0 || neuraa >= 0 || manyLights >= 0;
     }
 
     // ---- WINDOW.* -- shipped game window presentation (now persisted) -------------------------

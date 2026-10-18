@@ -16,6 +16,7 @@
 #include "aver/voxi/NeuRaCGuide.hpp"  // rcGuide_ -- the cache lookup NRD2 anchors on
 #include "aver/voxi/NeuRaCNet.hpp"    // rcNet_ -- the trust network that scales the cache lookup
 #include "aver/voxi/VoxiFroxelFog.hpp"   // froxel_ -- volumetric fog (light shafts)
+#include "aver/voxi/LightTree.hpp"       // rdLightTree_ -- many-light direct lighting (MANY_LIGHTS.md)
 
 #include <unordered_map>
 #include <unordered_set>
@@ -31,6 +32,12 @@ namespace aver::voxi {
 
 // Most foliage instances setFoliage places; limited by TLAS capacity and static prefix's 64 B/instance desc buffer.
 inline constexpr u32 kMaxFoliageInstances = 8'000'000;
+
+// MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.11): table-0 UAV slots of CSRdManyLights' two outputs. voxi.hlsl's
+// gRdManyDiff / gRdManySpec register(uN) must equal these (giTableKinds static_asserts the table). u24 is the froxel
+// volume's; the fog's table 1 starts at u27, so its scratch volume moved there from u25.
+inline constexpr u32 kManyLightDiffUavSlot = 25;
+inline constexpr u32 kManyLightSpecUavSlot = 26;
 
 // Voxi render feature: owns volume, shadow atlas, acceleration structures, lit pipelines.
 class VoxiRenderer final : public rhi::IRenderFeature {
@@ -71,6 +78,8 @@ public:
         RayHitDistance = 4,   // hit distance (cm), log heat ramp
         Triangles      = 5,   // hash(instance, primitive) -> colour
         AmbientOcclusion = 6, // final AO factor, greyscale
+        LightCount     = 7,   // MANY LIGHTS: lights reaching the pixel (tree leaves with importance), heat ramp to 255
+        ManyLightsRaw  = 8,   // MANY LIGHTS: CSRdManyLights' diffuse + specular before NRD2
     };
 
     void setViewDebug(ViewDebug m) { viewDebug_ = m; }
@@ -78,6 +87,9 @@ public:
     void setPaused(bool on) { paused_ = on; }
 
     bool rayDrivenAvailable() const { return rtActive_ && rayDrivenPso_ != 0; }
+    // MANY LIGHTS: CSRdManyLights built (VoxiShaderCompileTest asserts it), and whether the last staged frame ran it.
+    bool manyLightsCompiled() const { return rdManyLightsCsPso_ != 0; }
+    bool manyLightsRunning() const { return manyLightsLive_; }
     // Some draw's first bottom-level build waits for a later frame (they are budgeted per frame).
     bool accelBuildsPending() const { return blasBuildsDeferred_; }
     // Path Tracing ran last frame: multi-bounce ReSTIR GI and reflections in the staged frame.
@@ -589,6 +601,7 @@ private:
     rhi::PipelineHandle rdShadowTiledCsPso_ = 0;
     rhi::PipelineHandle rdTailVisCsPso_ = 0;      // CSRdTailVis: the tail lights' shadow fraction
     rhi::PipelineHandle rdTailFilterCsPso_ = 0;   // CSRdTailFilter: its 5x5, into gRdLocalOut.z
+    rhi::PipelineHandle rdManyLightsCsPso_ = 0;   // CSRdManyLights: the tail by the light tree (MANY_LIGHTS.md), SM 6.5
     rhi::PipelineHandle rdGiTraceCsPso_   = 0;
     rhi::PipelineHandle rdGiTraceCbCsPso_ = 0;
     rhi::PipelineHandle rdGiSplitCsPso_   = 0;
@@ -773,6 +786,31 @@ private:
     std::vector<RdLocalLightCand> rdLocalLightCand_;
     bool rdLocalLightsFailLogged_ = false;
     void buildLocalLights();
+
+    // ---- MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md, docs/rendering/MANY_LIGHTS.md) ----
+    // A BVH over the non-directional lights is appended to the light buffer after the grid (LightTree.hpp), and
+    // CSRdManyLights lights the visible surface's tail through it on NRD2 frames. Its two outputs are table-0 UAVs
+    // kManyLightDiffUavSlot / kManyLightSpecUavSlot (top of this header).
+    static constexpr u32 kManyLightsExhaustiveMax = 512;   // voxi.manyLights 3 walks every light, so only up to this many
+    LightTree rdLightTree_;
+    u64 rdTreeSetKey_ = 0;               // the lights of the tree last built (order-independent)
+    u32 rdTreeLights_ = 0;               // lights in this frame's tree (0 = no tree published)
+    u32 rdGridCacheTreeLights_ = 0;      // the same for the cached grid tail (the tree rides in it)
+    u32 rdTreeLoggedCount_ = 0;          // light count the last 'light tree' line was logged for
+    bool rdTreeExhaustiveOk_ = false;    // this frame's list is small enough for manyLights 3
+    bool manyLightsLive_ = false;        // this frame runs CSRdManyLights (set at the top of recordStagedRayDriven)
+    bool manyLightsExhaustive_ = false;  // this frame's hits walk every light (voxi.manyLights 3)
+    rhi::TextureHandle rdManyDiffTex_ = 0, rdManySpecTex_ = 0, rdManyPlaceholder_ = 0;
+    bool rdManyLightsRunLogged_ = false, rdManyLightsFallbackLogged_ = false, rdManyLightsApiLogged_ = false;
+    bool rdTreeRefusedLogged_ = false, rdManyLightsTexFailLogged_ = false, rdManyLightsExhaustLogged_ = false;
+    // The scene's lights above the threshold the settings engage the tree at, from last frame's list.
+    bool rdManyLightsWanted() const;
+    void ensureManyLightsResources();
+    void releaseManyLightsTextures();
+    // voxi.debugStressLights: synthetic point lights as ordinary scene lights, a pure function of (seed, count, eye
+    // snapped to 1 m); regenerated only when one of the three changes.
+    std::vector<SceneLight> stressLights_;
+    u64 stressKey_ = 0;
     bool localLightsReady() const {
         return rdLocalLampCount_ > 0 && settings_.localLights && rdLocalOutThisFrame_ != 0;
     }

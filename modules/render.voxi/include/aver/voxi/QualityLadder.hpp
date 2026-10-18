@@ -158,6 +158,40 @@ constexpr u32 giSkyOcclusionTile(Quality q) {
     }
 }
 
+// MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.6): the stochastic light tree's budget, keyed on the ray-tracing tier.
+// S shadow rays per point for the tail, M candidates drawn per point, M at GI/reflection/path hits.
+// See Settings::lightSamples / lightCandidates / lightHitCandidates (Voxi.hpp). Off and Low trace the same as each other.
+constexpr u32 lightSamples(Quality q) {
+    switch (q) {
+        case Quality::Off:    return 1;
+        case Quality::Low:    return 1;
+        case Quality::Medium: return 1;
+        case Quality::High:   return 2;
+        case Quality::Epic:   return 4;
+        default:              return 1;   // an unknown tier must not silently cost more
+    }
+}
+constexpr u32 lightCandidates(Quality q) {
+    switch (q) {
+        case Quality::Off:    return 4;
+        case Quality::Low:    return 4;
+        case Quality::Medium: return 8;
+        case Quality::High:   return 8;
+        case Quality::Epic:   return 16;
+        default:              return 4;
+    }
+}
+constexpr u32 lightHitCandidates(Quality q) {
+    switch (q) {
+        case Quality::Off:    return 2;
+        case Quality::Low:    return 2;
+        case Quality::Medium: return 4;
+        case Quality::High:   return 4;
+        case Quality::Epic:   return 8;
+        default:              return 2;
+    }
+}
+
 // ================================================================= Path Tracing ===================
 
 // PATH-TRACING BOUNCE BUDGET. Off = 1 (one hit, direct lighting); higher rungs buy bounces.
@@ -233,6 +267,12 @@ static_assert(Settings{}.giSkyOcclusionRays == ladder::giSkyOcclusionRays(Qualit
               "giSkyOcclusionRays' struct default no longer matches RT Medium's ladder rung");
 static_assert(Settings{}.giSkyOcclusionTile == ladder::giSkyOcclusionTile(Quality::Medium),
               "giSkyOcclusionTile's struct default no longer matches RT Medium's ladder rung");
+static_assert(Settings{}.lightSamples == ladder::lightSamples(Quality::Medium),
+              "lightSamples' struct default no longer matches RT Medium's ladder rung");
+static_assert(Settings{}.lightCandidates == ladder::lightCandidates(Quality::Medium),
+              "lightCandidates' struct default no longer matches RT Medium's ladder rung");
+static_assert(Settings{}.lightHitCandidates == ladder::lightHitCandidates(Quality::Medium),
+              "lightHitCandidates' struct default no longer matches RT Medium's ladder rung");
 
 static_assert(Settings{}.ptBounces == ladder::ptBounces(Quality::Off),
               "ptBounces' struct default no longer matches PT Off's ladder rung");

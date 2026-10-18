@@ -133,6 +133,18 @@ target_include_directories(SceneLightTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/re
 target_compile_definitions(SceneLightTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(SceneLightTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# LightTreeTest -- many-light direct lighting's CPU half (aver/voxi/LightTree.hpp, docs/plans/wave4/MANY_LIGHTS.md section 5A):
+# the BVH's structure and packing, canonical order and fill(), the importance bound against the light list's cheap
+# irradiance, the descent's pdf against the path walk, a CPU twin of the RIS estimator against the brute-force sum (with
+# the exact light excluded, the three-try redraw and roulette), and degenerate inputs. Compiles LightTree.cpp directly
+# (Aver.Core only, no renderer), so the structure is tested without a device. AVER_REPO_ROOT: the last section reads
+# voxi_lighttree.hlsli and checks its record offsets and flag bits against the header.
+add_executable(LightTreeTest src/LightTreeTest.cpp ${CMAKE_SOURCE_DIR}/modules/render.voxi/src/LightTree.cpp)
+target_link_libraries(LightTreeTest PRIVATE Aver.Core Aver.Platform)
+target_include_directories(LightTreeTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include)
+target_compile_definitions(LightTreeTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(LightTreeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # RenderSettingsResolverTest -- the quality ladder (QualityLadder.hpp), the prerequisite resolver that
 # decides what greys and why (RenderSettingsResolver.hpp), and the UE-style Overall Quality scalability
 # preset (Scalability.hpp).

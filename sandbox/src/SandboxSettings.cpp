@@ -1329,6 +1329,9 @@ void SandboxApp::buildRenderingSettings(int page) {
                         set.refractionMode     = ladder::refraction(t);
                         set.giSkyOcclusionRays = ladder::giSkyOcclusionRays(t);
                         set.giSkyOcclusionTile = ladder::giSkyOcclusionTile(t);
+                        set.lightSamples       = ladder::lightSamples(t);
+                        set.lightCandidates    = ladder::lightCandidates(t);
+                        set.lightHitCandidates = ladder::lightHitCandidates(t);
                         break;
                     default: break;
                 }
@@ -1807,6 +1810,40 @@ void SandboxApp::buildRenderingSettings(int page) {
             ImGui::SetTooltip("How many rays a pixel that traces THIS frame casts toward the\n"
                                "sun's disc. Linear in cost -- this is the knob to turn down\n"
                                "first if ray tracing starts costing frames.");
+
+
+        // MANY LIGHTS (docs/rendering/MANY_LIGHTS.md): the light tree's stochastic tail. Auto engages above
+        // voxi.manyLightsMin lights; a scene at or under it is unchanged.
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Lights");
+        ImGui::Separator();
+        {
+            const bool exhaustive = s.manyLights == 3u;   // the console's ground-truth mode: shown, not offered
+            int ml = s.manyLights == 0u ? 1 : (s.manyLights == 2u ? 2 : 0);
+            ImGui::BeginDisabled(exhaustive);
+            if (ImGui::Combo("Many lights", &ml, "Auto\0Off\0On\0")) {
+                s.manyLights = ml == 1 ? 0u : (ml == 2 ? 2u : 1u);
+                changed = true;
+            }
+            ImGui::EndDisabled();
+            uiReg_.track("project.rt.manyLights");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Lights thousands of shadowed lights with a bounded ray budget: each pixel draws\n"
+                                  "candidate lights from a light tree by importance and traces a few shadow rays.\n"
+                                  "Needs the NRD2 denoiser (Denoising page) and ray tracing; other denoisers keep\n"
+                                  "the light grid, which sees at most 24 lights per cell.\n\n"
+                                  "Auto turns it on above 48 lights; a scene with 48 or fewer lights renders\n"
+                                  "exactly as with it Off. On forces it at any count.\n\n"
+                                  "Round-trips as RENDER.MANYLIGHTS (0 off, 1 auto, 2 on).");
+            if (exhaustive) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(exhaustive, set from the console)");
+            }
+            if (s.manyLights != 0u && !exhaustive && denoiserMode(s) != 2u) {
+                ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                                   "   The Denoiser is not NRD2 -- the light grid is used instead.");
+            }
+        }
 
         ImGui::EndDisabled();   // the inner grey opened beside the Quality combo above
         ImGui::EndDisabled();

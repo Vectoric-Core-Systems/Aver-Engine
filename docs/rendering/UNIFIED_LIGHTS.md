@@ -164,3 +164,29 @@ Later findings (2026-10-07):
   CSRdGi's checkerboard variant now take a wave-coherent mapping (`gViewParams.w` bit 20, `rdHrThread`: group 2p+q =
   the q parity of 16x8 block p). Same traced pixels, 18.8 -> 17.7 ms; reflections 2.57 -> 1.82, sky 0.87 -> 0.62,
   GI 1.08 -> 0.98 (stage timing). FidelityFX frames keep the old mapping (unmeasured; their paths use derivatives).
+
+
+## Many lights (2026-10-17)
+
+Thousands of shadowed lights, within a bounded ray budget: a light tree (BVH) appended to the list after the grid, a
+per-pixel importance descent, RIS into `voxi.lightSamples` slots, one ray each, on NRD2 frames. Guide:
+`MANY_LIGHTS.md`; design and patent table: `docs/plans/wave4/MANY_LIGHTS.md`. What changes in this document's picture:
+
+- **The tail is no longer capped at 24 per cell** on a frame that runs it (`manyLightsLive`: NRD2, more than
+  `voxi.manyLightsMin` lamps or forced). `CSRdManyLights` replaces `CSRdTailVis`; Stage B adds its two textures
+  (u25, u26) to NRD2's D and S instead of `rdTailLightsSplit`; `CSRdTailFilter` and the glass replay still read the
+  tail fraction, now written by the new pass into `gRdLocalOut.a`. Hits (`averDirectLights`) take the same estimator.
+  Frames without it, and every scene at or under the threshold, are the path described above, unchanged.
+- **The grid stays** as the exhaustive path for few lights and the source of the exact light's candidates; the tree
+  rides in the grid's tail in t18 and is cached with it.
+- **S0, the exact light is a function of this frame only.** The note above ("last frame's exact light keeps the slot
+  while it delivers at least 80% of the strongest") is superseded: among the lights delivering at least 80% of the
+  strongest at this pixel, the one with the smallest stable key (`rdLightKey`, the position hash) is exact. The prior pick is
+  no longer read. Reason: NVIDIA US 11,948,246 claim 1 reads on selecting a light from this frame's candidates and the
+  light associated with the pixel in a prior frame. `gRdLocalOut.y` still carries the key for the exact light's own
+  shadow history. Near-equal candles now swap only where the geometry really moves them, and a swap along a contour is
+  static in the world instead of changing frame to frame. Accept: swaps per pixel per frame in the fly-by capture
+  (`--cam-wobble 30 16 --frames 200`) within 2x of the shipped value and the spots metric unchanged; if it fails, a
+  coarser band (0.6) on the same rule, not the prior pick. Not yet measured.
+- **Constraint added:** no light selection is carried between pixels or frames (`NEURAA_NRD.md` rule 18), so the
+  stochastic tail is single-frame and NRD2 and TAA carry all the noise reduction.

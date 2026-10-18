@@ -70,6 +70,8 @@ int main(int argc, char** argv) {
         else {
             voxi.onRenderTargetsChanged(1, rhi::Format::RGBA16F, rhi::Format::D32Float, 1280, 720);
             voxi.buildAllVariants();
+            // MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md): the tail pass is authored SM 6.5-clean and compiled at 6.5.
+            if (!voxi.manyLightsCompiled()) { AVER_ERROR("  FAIL  CSRdManyLights did not build (cs_6_5)"); ++failures; }
         }
         voxi.shutdown();
     }

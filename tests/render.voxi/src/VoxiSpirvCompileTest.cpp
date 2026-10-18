@@ -47,7 +47,7 @@ constexpr u32 kRtTextureCapacity = 4096;
 constexpr u32 kPtEnergyDim = 32;
 constexpr u32 kPtTexCapacity = 4096;
 constexpr u32 kMaxWaves = 4;
-constexpr u32 kVkUavBindingBase = 25;   // rhi.vulkan VulkanCommon.hpp: kMaxBindingSlots
+constexpr u32 kVkUavBindingBase = 28;   // rhi.vulkan VulkanCommon.hpp: kMaxBindingSlots (25 -> 28: many lights)
 
 struct Variant {
     std::string name;
@@ -195,6 +195,8 @@ int main() {
         {"Voxi CSRdVisibility",                 voxiSrc, "CSRdVisibility", 'c', 65, vx(bindless), true},
         {"Voxi CSRdShadow",                     voxiSrc, "CSRdShadow", 'c', 66, vx(bindless), true},
         {"Voxi CSRdGi",                         voxiSrc, "CSRdGi",     'c', 66, vx(bindless)},
+        // MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.9): authored SM 6.5-clean, so the same source is the Vulkan pass.
+        {"Voxi CSRdManyLights",                 voxiSrc, "CSRdManyLights", 'c', 65, vx(bindless), true},
         {"Water CSWaterDisplace",               waterSrc, "CSWaterDisplace", 'c', 60, "AVER_MAX_WAVES=" + std::to_string(kMaxWaves)},
         {"PT CSPathTrace",                      ptSrc, "CSPathTrace", 'c', 65, "AVER_PT_ENERGY_DIM=" + std::to_string(kPtEnergyDim), true},
         {"PT CSPathTrace bindless",             ptSrc, "CSPathTrace", 'c', 65,

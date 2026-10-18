@@ -67,7 +67,8 @@ static constexpr int kSetInstances = 4;
 //
 // Derived from rhi::kMaxBindingSlots rather than from kVkUavBindingBase itself, which keeps the
 // contract under test: if the Vulkan backend ever based its UAVs somewhere OTHER than
-// kMaxBindingSlots, these checks would still catch it.
+// kMaxBindingSlots, these checks would still catch it. (It has since grown 24 -> 25 -> 28: decals, then the
+// many-light direct lighting's two UAVs and texture streaming's one; nothing below names the number.)
 static constexpr int kUavBase = static_cast<int>(kMaxBindingSlots);
 static const std::string kUavBaseStr  = std::to_string(kUavBase);
 static const std::string kUavBase1Str = std::to_string(kUavBase + 1);

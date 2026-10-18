@@ -143,8 +143,8 @@ void giSamplers(rhi::PipelineLayout& l) {
 constexpr u32 kVoxiSrvCount = kGiSrvCount + 16;
 
 // Wider than kGiUavCount (same reasoning as kVoxiSrvCount).
-// Includes history, ray-driven, and radiance-cache outputs. u11+ always declared, bound to placeholders when absent.
-constexpr u32 kVoxiUavCount = kGiUavCount + 21;
+// Includes history, ray-driven, radiance-cache and many-light outputs. u11+ always declared, bound to placeholders when absent.
+constexpr u32 kVoxiUavCount = kGiUavCount + 23;
 
 // Declares slot kinds for all table 0 bindings (Vulkan requires type consistency).
 void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
@@ -198,8 +198,12 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     uav[22] = rhi::SlotKind::StructuredBuffer;      // u22 Path Tracing progressive accumulation
     uav[23] = rhi::SlotKind::Texture2D;             // u23 reflection denoiser input (write)
     uav[24] = rhi::SlotKind::Texture3D;             // u24 volumetric-fog froxel volume (VoxiFroxelFog; the shade passes only load it)
-    static_assert(kVoxiSrvCount == 25 && kVoxiUavCount == 25 && kGiSrvCount == 9 && kGiUavCount == 4 &&
-                      VoxiFroxelFog::kVolumeUavSlot == kVoxiUavCount - 1,
+    uav[25] = rhi::SlotKind::Texture2D;             // u25 many-light tail diffuse radiance (CSRdManyLights, Stage B reads it)
+    uav[26] = rhi::SlotKind::Texture2D;             // u26 many-light tail specular radiance
+    static_assert(kVoxiSrvCount == 25 && kVoxiUavCount == 27 && kGiSrvCount == 9 && kGiUavCount == 4 &&
+                      VoxiFroxelFog::kVolumeUavSlot == 24 && kManyLightDiffUavSlot == 25 &&
+                      kManyLightSpecUavSlot == kVoxiUavCount - 1 &&
+                      VoxiFroxelFog::kHistSrvRegister == kVoxiSrvCount && VoxiFroxelFog::kCurUavRegister == kVoxiUavCount,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -422,6 +426,7 @@ void VoxiRenderer::shutdown() {
                                         rdSkyOccCsPso_, rdReflCsPso_,
                                         rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_,
                                         rdShadowProbeCsPso_, rdShadowTiledCsPso_, rdTailVisCsPso_, rdTailFilterCsPso_,
+                                        rdManyLightsCsPso_,
                                         rdGiTraceCsPso_, rdGiTraceCbCsPso_,
                                         rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                         rdGiCacheCsPso_, rdGiCacheCbCsPso_,
@@ -444,7 +449,7 @@ void VoxiRenderer::shutdown() {
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
     rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdGiCbCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
-    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = rdTailVisCsPso_ = rdTailFilterCsPso_ = 0;
+    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = rdTailVisCsPso_ = rdTailFilterCsPso_ = rdManyLightsCsPso_ = 0;
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
     rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
@@ -518,6 +523,11 @@ void VoxiRenderer::shutdown() {
     if (rdReflPlaceholder_)   { res_->destroyTexture(rdReflPlaceholder_);   rdReflPlaceholder_ = 0; }
     if (rdReflDnIn_)          { res_->destroyTexture(rdReflDnIn_);          rdReflDnIn_ = 0; }
     if (rdReflDnPlaceholder_) { res_->destroyTexture(rdReflDnPlaceholder_); rdReflDnPlaceholder_ = 0; }
+    if (rdManyDiffTex_)       { res_->destroyTexture(rdManyDiffTex_);       rdManyDiffTex_ = 0; }
+    if (rdManySpecTex_)       { res_->destroyTexture(rdManySpecTex_);       rdManySpecTex_ = 0; }
+    if (rdManyPlaceholder_)   { res_->destroyTexture(rdManyPlaceholder_);   rdManyPlaceholder_ = 0; }
+    rdTreeLights_ = rdGridCacheTreeLights_ = rdTreeLoggedCount_ = 0;
+    manyLightsLive_ = manyLightsExhaustive_ = false;
     rdReflDnBound_ = false;
     denoiseReflOutput_ = 0;
     // Sub-stage splits' buffers and placeholders.
@@ -918,7 +928,9 @@ void VoxiRenderer::reportVramUsage() {
     // Readback + upload, sized identically by giCacheEnsureBuffers; 0 once giCacheFreeBuffers has run.
     const u64 giCacheBytes = giCacheReadback_ ? giCacheBufBytes_ * 2ull : 0;
     // Staged ray-driven: four RGBA16F targets + three StructuredBuffers.
-    const u64 rdTexBytes = rdSunVisTex_ ? static_cast<u64>(rdStagedW_) * rdStagedH_ * 8ull * 4ull : 0;
+    // MANY LIGHTS adds its two RGBA16F tail targets while they exist.
+    const u64 rdTexBytes = (rdSunVisTex_ ? static_cast<u64>(rdStagedW_) * rdStagedH_ * 8ull * 4ull : 0) +
+                           (rdManyDiffTex_ ? static_cast<u64>(rdStagedW_) * rdStagedH_ * 8ull * 2ull : 0);
     const u64 rdBufBytes = static_cast<u64>(rdVisBufElemCapacity_) * kRdVisElemBytes +
                             static_cast<u64>(rdGiCandBufElemCapacity_) * kRdGiCandElemBytes +
                             static_cast<u64>(rdShadowTileElemCapacity_) * kRdShadowTileElemBytes;
@@ -4391,8 +4403,8 @@ void VoxiRenderer::buildDecals() {
 
 // Packs this frame's scene lights into the candidate list the lamp list is cut from.
 void VoxiRenderer::appendSceneLightCandidates(const f32 eye[3]) {
-    for (const SceneLight& s : sceneLights_) {
-        if (!(s.intensityCd > 0.0f) || !std::isfinite(s.intensityCd)) continue;
+    auto add = [&](const SceneLight& s) {
+        if (!(s.intensityCd > 0.0f) || !std::isfinite(s.intensityCd)) return;
         SceneLightAssets a;
         if (s.iesId) {
             const u32 idx = lightAssetIndex(s.iesId);
@@ -4414,7 +4426,55 @@ void VoxiRenderer::appendSceneLightCandidates(const f32 eye[3]) {
         const f32 dz = (s.pos[2] - eye[2]) * 0.01f;
         c.importance = e1m / std::max(dx * dx + dy * dy + dz * dz, 1.0f);
         rdLocalLightCand_.push_back(c);
+    };
+    for (const SceneLight& s : sceneLights_) add(s);
+
+    // MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.6): voxi.debugStressLights, synthetic point lights as ordinary
+    // scene lights (shadowed, 5 cm radius, log-uniform 20 to 400 cd, a seeded hue) on a seeded jittered 3-D grid, +-30 m
+    // around the camera horizontally and -1 to +5 m vertically (+Z up, cm). A pure function of (seed, count, eye snapped
+    // to 1 m), so captures repeat; free at 0.
+    const u32 n = settings_.debugStressLights;
+    if (n == 0u) { stressLights_.clear(); stressKey_ = 0; return; }
+    const f32 sx = std::round(eye[0] * 0.01f) * 100.0f, sy = std::round(eye[1] * 0.01f) * 100.0f,
+              sz = std::round(eye[2] * 0.01f) * 100.0f;
+    u64 key = 1469598103934665603ull;
+    auto mixKey = [&key](u64 v) { key = (key ^ v) * 1099511628211ull; key ^= key >> 29; };
+    mixKey(n); mixKey(settings_.debugStressSeed);
+    mixKey(static_cast<u64>(static_cast<i64>(sx))); mixKey(static_cast<u64>(static_cast<i64>(sy)));
+    mixKey(static_cast<u64>(static_cast<i64>(sz)));
+    if (key != stressKey_ || stressLights_.size() != n) {
+        stressKey_ = key;
+        stressLights_.assign(n, SceneLight{});
+        // Cell size so the box (60 m x 60 m x 6 m) holds at least n cells; light j takes cell floor(j * cells / n).
+        const f32 cellM = std::cbrt(60.0f * 60.0f * 6.0f / static_cast<f32>(n));
+        const u32 gx = std::max(1u, static_cast<u32>(std::ceil(60.0f / cellM)));
+        const u32 gz = std::max(1u, static_cast<u32>(std::ceil(6.0f / cellM)));
+        const u64 cells = static_cast<u64>(gx) * gx * gz;
+        auto pcg = [](u32& st) {
+            st = st * 747796405u + 2891336453u;
+            const u32 w = ((st >> ((st >> 28u) + 4u)) ^ st) * 277803737u;
+            return (w >> 22u) ^ w;
+        };
+        for (u32 j = 0; j < n; ++j) {
+            u32 st = settings_.debugStressSeed * 2654435761u + j * 40503u + 1u;
+            auto u01 = [&] { return static_cast<f32>(pcg(st) >> 8) * (1.0f / 16777216.0f); };
+            const u64 cell = static_cast<u64>(j) * cells / n;
+            const u32 cx = static_cast<u32>(cell % gx), cy = static_cast<u32>((cell / gx) % gx), cz = static_cast<u32>(cell / (static_cast<u64>(gx) * gx));
+            SceneLight& l = stressLights_[j];
+            l.kind = 0;
+            l.pos[0] = sx + (-3000.0f + (static_cast<f32>(cx) + u01()) * (6000.0f / static_cast<f32>(gx)));
+            l.pos[1] = sy + (-3000.0f + (static_cast<f32>(cy) + u01()) * (6000.0f / static_cast<f32>(gx)));
+            l.pos[2] = sz + (-100.0f + (static_cast<f32>(cz) + u01()) * (600.0f / static_cast<f32>(gz)));
+            l.intensityCd = 20.0f * std::exp(u01() * std::log(20.0f));
+            const f32 hue = u01() * 6.2831853f;
+            l.colour[0] = 0.55f + 0.45f * std::cos(hue);
+            l.colour[1] = 0.55f + 0.45f * std::cos(hue - 2.0943951f);
+            l.colour[2] = 0.55f + 0.45f * std::cos(hue + 2.0943951f);
+            l.radiusCm = 5.0f;
+            l.castShadows = true;
+        }
     }
+    for (const SceneLight& s : stressLights_) add(s);
 }
 
 // ---- Light grid helpers (buildLocalLights) ----
@@ -4634,11 +4694,19 @@ void VoxiRenderer::buildLocalLights() {
     cb_.decalParams[2] = static_cast<f32>(std::clamp(settings_.lightRaysPerBlock, 1u, 8u));
     cb_.decalParams[3] = static_cast<f32>(std::clamp(settings_.lightRaysPerHit, 1u, 8u));
     rdGridKeyNow_ = 0;
+    rdTreeLights_ = 0;
+    rdTreeExhaustiveOk_ = false;
     if (!res_ || !bindings_) return;
 
     f32 vp[16], eye[3] = {};
     const bool wanted = settings_.localLights && rtActive_ && dev_ &&
                         dev_->caps().computeInScenePass && dev_->camera(vp, nullptr, eye);
+    // MANY LIGHTS runs in the staged passes, which need compute inside the scene pass (D3D12 today; MANY_LIGHTS.md 3.9).
+    if (settings_.manyLights != 0u && rtActive_ && dev_ && !dev_->caps().computeInScenePass && !rdManyLightsApiLogged_) {
+        rdManyLightsApiLogged_ = true;
+        AVER_INFO("[Voxi] voxi.manyLights has no effect on this backend yet: it has no staged ray-driven passes or light "
+                  "list (said once). The shaders compile for SPIR-V at 6.5, ready for when they land");
+    }
     // Every draw whose material asks to be a light.
     u32 flagged = 0;
     // Cutoff below display precision: kLocalLightRangeCutoff / pi ~ 3e-4 of lamp radiance.
@@ -4797,6 +4865,21 @@ void VoxiRenderer::buildLocalLights() {
         // clamp that does not bind) reuses last frame's records. The sun moving does not invalidate it.
         u64 key = 1469598103934665603ull;
         auto mix = [&key](u64 v) { key = (key ^ v) * 1099511628211ull; key ^= key >> 29; };
+        // MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.1): a BVH over the non-directional lights rides in the grid's
+        // tail, built only above voxi.manyLightsMin lights (or forced). The lamps are the list's first rdLocalLampCount_
+        // entries; the sun follows them.
+        static_assert(kMaxTreeLights == kMaxListLights, "the tree holds every light the list can");
+        const u32 lampCount = rdLocalLampCount_;
+        const u32 manyMode = settings_.manyLights;
+        const bool exhaustiveOk = manyMode == 3u && lampCount <= kManyLightsExhaustiveMax;
+        if (manyMode == 3u && !exhaustiveOk && lampCount > 0u && !rdManyLightsExhaustLogged_) {
+            rdManyLightsExhaustLogged_ = true;
+            AVER_INFO("[Voxi] voxi.manyLights 3 (exhaustive) walks at most {} lights; {} here, so it runs as mode 2 "
+                      "(said once)", kManyLightsExhaustiveMax, lampCount);
+        }
+        const bool wantTree = rtActive_ && manyMode != 0u && lampCount > 0u && lampCount <= kMaxTreeLights &&
+                              (manyMode >= 2u || lampCount > settings_.manyLightsMin);
+        rdTreeExhaustiveOk_ = wantTree && exhaustiveOk;
         u64 setKey = 0;   // the same lights in any order
         for (u32 i = 0; i < lightCount; ++i) {
             const RdLocalLight& l = rdLocalLightData_[i];
@@ -4814,6 +4897,12 @@ void VoxiRenderer::buildLocalLights() {
         mix(anyLocal ? 1u : 0u);
         mix(flat ? 1u : 0u);
         mix(lightCount);
+        mix(wantTree ? 1u : 0u);   // the tree's header carries the sampling settings
+        if (wantTree) {
+            u32 clampBits;
+            std::memcpy(&clampBits, &settings_.lightWeightClamp, 4);
+            mix(settings_.lightSamples); mix(settings_.lightCandidates); mix(settings_.lightHitCandidates); mix(clampBits);
+        }
         for (const u32 g : globals) mix(g);
         if (rdGridCacheValid_ && rdGridCacheKey_ == key) {
             gridTail = rdGridCache_.data();
@@ -4888,6 +4977,33 @@ void VoxiRenderer::buildLocalLights() {
         const u32 tableRecs = static_cast<u32>((tableF.size() + kF - 1) / kF);
         const u32 poolRec   = tableRec + tableRecs;
         const u32 poolRecs  = static_cast<u32>((poolF.size() + kF - 1) / kF);
+        // The tree tail after the pool: [tree header][nodes][light-index -> leaf float pool]. A reordered list only
+        // rewrites the leaves' indices (fill); a changed set rebuilds.
+        bool treeOk = false;
+        u32 treeHdrRec = poolRec + poolRecs, treeRecs = 0, nodesRec = 0, leafMapRec = 0;
+        std::vector<f32> leafMap;
+        if (wantTree) {
+            const auto t0 = std::chrono::steady_clock::now();
+            treeOk = rdLightTree_.fill(rdLocalLightData_.data(), lampCount) ||
+                     rdLightTree_.build(rdLocalLightData_.data(), lampCount);
+            if (treeOk) {
+                leafMap = rdLightTree_.leafMapFloats(lightCount);
+                nodesRec = treeHdrRec + 1;
+                leafMapRec = nodesRec + rdLightTree_.nodeCount();
+                treeRecs = 1 + rdLightTree_.nodeCount() + static_cast<u32>((leafMap.size() + kF - 1) / kF);
+                if (rdTreeLoggedCount_ != lampCount) {
+                    rdTreeLoggedCount_ = lampCount;
+                    AVER_INFO("[Voxi] light tree: {} light(s), {} node(s), depth {}, {:.0f} KiB uploaded with the list, built in "
+                              "{:.2f} ms", lampCount, rdLightTree_.nodeCount(), rdLightTree_.depth(),
+                              static_cast<f64>(treeRecs) * sizeof(RdLocalLight) / 1024.0,
+                              std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - t0).count());
+                }
+            } else if (!rdTreeRefusedLogged_) {
+                rdTreeRefusedLogged_ = true;
+                AVER_WARN("[Voxi] light tree refused: a light has a NaN, infinite or negative power or range; "
+                          "the frame keeps the light grid (said once)");
+            }
+        }
         RdLocalLight header{};
         for (int a = 0; a < 3; ++a) header.posRadius[a] = lo[a];
         header.posRadius[3] = cell;
@@ -4897,19 +5013,37 @@ void VoxiRenderer::buildLocalLights() {
         header.axisKind[3] = static_cast<f32>(globals.size());
         header.shape[0] = static_cast<f32>(poolRec);
         header.shape[1] = flat ? static_cast<f32>(lightCount) : 0.0f;   // > 0: walk lights [0, n) whole
+        header.right[0] = treeOk ? static_cast<f32>(treeHdrRec) : 0.0f;   // the tree header's record; 0 = no tree
         rdLocalLightData_.push_back(header);
         const usize base = rdLocalLightData_.size();
-        rdLocalLightData_.resize(base + tableRecs + poolRecs);
+        rdLocalLightData_.resize(base + tableRecs + poolRecs + treeRecs);
         f32* raw = reinterpret_cast<f32*>(rdLocalLightData_.data());
-        std::memset(raw + base * kF, 0, (tableRecs + poolRecs) * sizeof(RdLocalLight));
+        std::memset(raw + base * kF, 0, (tableRecs + poolRecs + treeRecs) * sizeof(RdLocalLight));
         std::memcpy(raw + static_cast<usize>(tableRec) * kF, tableF.data(), tableF.size() * sizeof(f32));
         std::memcpy(raw + static_cast<usize>(poolRec) * kF, poolF.data(), poolF.size() * sizeof(f32));
+        if (treeOk) {
+            TreeHeader th;
+            th.nodeCount = rdLightTree_.nodeCount();
+            th.nodeBaseRec = nodesRec;
+            th.leafMapRec = leafMapRec;
+            th.samples = std::clamp(settings_.lightSamples, 1u, 4u);
+            th.candidates = std::clamp(settings_.lightCandidates, 1u, 16u);
+            th.hitCandidates = std::clamp(settings_.lightHitCandidates, 1u, 8u);
+            th.weightClamp = settings_.lightWeightClamp;
+            const PackedLight hdr = packTreeHeader(th);
+            std::memcpy(raw + static_cast<usize>(treeHdrRec) * kF, &hdr, sizeof(hdr));
+            std::memcpy(raw + static_cast<usize>(nodesRec) * kF, rdLightTree_.nodes().data(),
+                        rdLightTree_.nodes().size() * sizeof(TreeNodeRec));
+            std::memcpy(raw + static_cast<usize>(leafMapRec) * kF, leafMap.data(), leafMap.size() * sizeof(f32));
+        }
+        rdGridCacheTreeLights_ = treeOk ? lampCount : 0u;
         cb_.decalParams[1] = static_cast<f32>(headerRec);
         rdGridCache_.assign(rdLocalLightData_.begin() + headerRec, rdLocalLightData_.end());
         rdGridCacheKey_ = key;
         rdGridCacheValid_ = true;
         }
         rdGridKeyNow_ = key;
+        rdTreeLights_ = rdGridCacheTreeLights_;
     }
 
     if (!rdLocalLightData_.empty()) {
@@ -5694,6 +5828,51 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     // Without its pass Stage B must not take the reference branch (bit 4 of ptBounceParams.x).
     else cb_.ptBounceParams[0] = static_cast<f32>(static_cast<u32>(cb_.ptBounceParams[0]) & ~16u);
 
+    // MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.5): does this frame light the tail through the light tree? Every
+    // condition holds, or the frame runs the legacy grid tail and nothing is half applied (bit 2048 stays clear). Mode 3
+    // (exhaustive) is for the hits (bit 4096): the visible surface keeps the grid tail, the reference path tracer's
+    // next-event estimation walks every light.
+    manyLightsLive_ = false;
+    manyLightsExhaustive_ = false;
+    {
+        const bool treeOn = rdTreeLights_ > 0u && localLights && cb_.decalParams[1] > 0.5f && settings_.manyLights != 0u;
+        if (treeOn && rdTreeExhaustiveOk_) {
+            manyLightsExhaustive_ = true;
+            if (!rdManyLightsRunLogged_) {
+                rdManyLightsRunLogged_ = true;
+                AVER_INFO("[Voxi] many lights, exhaustive (voxi.manyLights 3): every one of the {} light(s) gets one ray "
+                          "at GI, reflection and path hits; the visible surface keeps the grid tail", rdTreeLights_);
+            }
+        } else if (treeOn) {
+            const char* why = nullptr;
+            bool expected = true;   // an expected skip is INFO; a missing pipeline or texture is a WARN
+            if (!nrd2)                       why = "this frame does not run NRD2, whose filter the stochastic tail needs";
+            else if (ptRef)                  why = "Path Tracing Reference mode traces its own paths";
+            else if (!rdManyLightsCsPso_)  { why = "CSRdManyLights did not compile"; expected = false; }
+            else if (!rdManyDiffTex_ || !rdManySpecTex_) { why = "its two output textures are not allocated"; expected = false; }
+            else if (!rdTailFilterCsPso_ || !rdLocalOutThisFrame_ || !(gx && gy)) { why = "the light slots or the tail filter are unavailable"; expected = false; }
+            manyLightsLive_ = why == nullptr;
+            if (why && !rdManyLightsFallbackLogged_) {
+                rdManyLightsFallbackLogged_ = true;
+                if (expected) {
+                    AVER_INFO("[Voxi] many lights: {} light(s) but {}; the frame keeps the light grid's tail (said once)", rdTreeLights_, why);
+                } else {
+                    AVER_WARN("[Voxi] many lights: {} light(s) but {}; the frame keeps the light grid's tail (said once)", rdTreeLights_, why);
+                }
+            }
+            if (manyLightsLive_ && !rdManyLightsRunLogged_) {
+                rdManyLightsRunLogged_ = true;
+                AVER_INFO("[Voxi] many lights running: {} light(s) in the tree; {} candidate(s) and {} ray(s) a point, {} candidate(s) "
+                          "at hits (GPU span 'Voxi RD many lights')", rdTreeLights_, settings_.lightCandidates,
+                          settings_.lightSamples, settings_.lightHitCandidates);
+            }
+        }
+        u32 mlBits = static_cast<u32>(cb_.giShadowParams[3]) & ~(2048u | 4096u);
+        if (manyLightsLive_) mlBits |= 2048u;
+        if (manyLightsExhaustive_) mlBits |= 4096u;
+        cb_.giShadowParams[3] = static_cast<f32>(mlBits);
+    }
+
     // Reflection register/filter split: optional sub-stage C.
     const bool reflSplit = !ptRef && !nrd2Frame_ && (cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f) &&
                             settings_.rayDrivenReflSplit && rdReflSplitCsPso_ != 0 && rdReflFilterCsPso_ != 0;
@@ -5732,9 +5911,20 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     // PATH TRACING: the AVER_PT_PATHS twins take the GI-candidate and reflection dispatches.
     const bool pt = pathTracingWanted();
     bool skyOccRan = false, reflRan = false;   // CSRdHalfFill's inputs
-    const bool tailOn = localLights && rdTailVisCsPso_ && rdTailFilterCsPso_ && rdLocalOutThisFrame_ && gx && gy;
+    const bool tailOn = localLights && (rdTailVisCsPso_ || manyLightsLive_) && rdTailFilterCsPso_ && rdLocalOutThisFrame_ && gx && gy;
     const bool tailDeferred = tailOn && !perStage;
     auto recordTailVis = [&] {
+        if (manyLightsLive_) {
+            // MANY LIGHTS: the tail by the light tree, one thread a pixel; the same reads and barriers as CSRdTailVis.
+            rhi::ScopedGpuStat stat(ctx, "Voxi RD many lights");
+            ctx.setPipeline(rdManyLightsCsPso_);
+            ctx.setBindingSet(bindings_);
+            ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+            ctx.setBindlessTable(rtTexTable_);
+            ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
+            ctx.dispatch(gx, gy, 1);
+            return;
+        }
         ctx.setPipeline(rdTailVisCsPso_);
         ctx.setBindingSet(bindings_);
         ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
@@ -5872,7 +6062,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         // runs after it (with CSRdHalfFill).
         if (tailOn && !tailDeferred) {
             stageEnd(rdSunVisTex_);
-            stageBegin("Voxi RD tail lights");
+            stageBegin(manyLightsLive_ ? "Voxi RD many lights" : "Voxi RD tail lights");
             ctx.uavBarrierTexture(rdLocalOutThisFrame_);
             ctx.uavBarrierTexture(rdSunVisTex_);
             recordTailVis();
@@ -6016,6 +6206,10 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     ctx.uavBarrierTexture(rdReflTex_);
     // Local lights: Stage B reads gRdLocalOut through u19 the way it reads u12 above.
     if (rdLocalOutThisFrame_) ctx.uavBarrierTexture(rdLocalOutThisFrame_);   // CSRdShadow's light slots
+    if (manyLightsLive_) {   // CSRdManyLights' tail radiance, added to NRD2's D and S by Stage B
+        ctx.uavBarrierTexture(rdManyDiffTex_);
+        ctx.uavBarrierTexture(rdManySpecTex_);
+    }
     // The GI surface-normal history (u8) has two writers: CSRdGi and Stage B's own miss branch.
     const u32 giNrmWrite = 1u - rtHistWriteIdx_;
     if (cb_.voxelParams[3] > 0.5f && cb_.giRestirParams[0] > 0.5f && giSurfNrmHist_[giNrmWrite])
@@ -6609,6 +6803,76 @@ void VoxiRenderer::bindNrd2Targets() {
     nrd2Bound_ = true;
 }
 
+// MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.4): are CSRdManyLights' two output textures wanted? Only with the pass
+// compiled, NRD2 running, and enough lights (forced, or past manyLightsMin with a hysteresis so a count hovering at the
+// threshold does not create and free 15 MB). Mode 3 is hits-only and needs none.
+bool VoxiRenderer::rdManyLightsWanted() const {
+    if (!rdManyLightsCsPso_ || !rtActive_ || settings_.manyLights == 0u || !nrd2Wanted()) return false;
+    if (settings_.manyLights == 3u && rdLocalLampCount_ <= kManyLightsExhaustiveMax) return false;
+    if (settings_.manyLights >= 2u) return rdLocalLampCount_ > 0u;
+    return rdLocalLampCount_ > (rdManyDiffTex_ ? settings_.manyLightsMin / 2u : settings_.manyLightsMin);
+}
+
+// Points u25/u26 back at the stand-in, THEN destroys the pair -- never outlive (aver-view-outlives-its-buffer).
+void VoxiRenderer::releaseManyLightsTextures() {
+    if (!res_ || !bindings_ || (!rdManyDiffTex_ && !rdManySpecTex_)) return;
+    if (!rdManyPlaceholder_) {
+        rhi::TextureDesc pd;
+        pd.dim    = rhi::TextureDim::Tex2D;
+        pd.width  = 1; pd.height = 1; pd.mips = 1;
+        pd.format = rhi::Format::RGBA16F;
+        pd.bind   = rhi::ResourceBind::UnorderedAccess;
+        pd.initialState = rhi::ResourceState::UnorderedAccess;
+        pd.debugName    = "Voxi many-light tail placeholder";
+        rdManyPlaceholder_ = res_->createTexture(pd);
+    }
+    if (rdManyPlaceholder_) {
+        res_->setUav(bindings_, kManyLightDiffUavSlot, rdManyPlaceholder_, 0);
+        res_->setUav(bindings_, kManyLightSpecUavSlot, rdManyPlaceholder_, 0);
+    }
+    if (rdManyDiffTex_) { res_->destroyTexture(rdManyDiffTex_); rdManyDiffTex_ = 0; }
+    if (rdManySpecTex_) { res_->destroyTexture(rdManySpecTex_); rdManySpecTex_ = 0; }
+    manyLightsLive_ = false;
+}
+
+// Creates or frees the pair against rdManyLightsWanted() and the staged targets' size; idempotent.
+void VoxiRenderer::ensureManyLightsResources() {
+    if (!res_ || !bindings_) return;
+    if (!(rdManyLightsWanted() && rdStagedW_ && rdStagedH_)) { releaseManyLightsTextures(); return; }
+    rhi::TextureDesc have{};
+    if (rdManyDiffTex_ && rdManySpecTex_ && res_->textureInfo(rdManyDiffTex_, have) &&
+        have.width == rdStagedW_ && have.height == rdStagedH_)
+        return;
+    releaseManyLightsTextures();   // a resize: recreate outright
+    auto make = [&](const char* name) {
+        rhi::TextureDesc d;
+        d.dim    = rhi::TextureDim::Tex2D;
+        d.width  = rdStagedW_;
+        d.height = rdStagedH_;
+        d.mips   = 1;
+        d.format = rhi::Format::RGBA16F;
+        d.bind   = rhi::ResourceBind::UnorderedAccess;
+        d.initialState = rhi::ResourceState::UnorderedAccess;
+        d.debugName    = name;
+        return res_->createTexture(d);
+    };
+    rdManyDiffTex_ = make("Voxi many-light tail diffuse");
+    rdManySpecTex_ = make("Voxi many-light tail specular");
+    if (!rdManyDiffTex_ || !rdManySpecTex_) {
+        if (!rdManyLightsTexFailLogged_) {
+            rdManyLightsTexFailLogged_ = true;
+            AVER_WARN("[Voxi] many-light tail textures ({}x{}) could not be created; the frame keeps the light grid's tail "
+                      "(said once)", rdStagedW_, rdStagedH_);
+        }
+        releaseManyLightsTextures();
+        return;
+    }
+    res_->setUav(bindings_, kManyLightDiffUavSlot, rdManyDiffTex_, 0);
+    res_->setUav(bindings_, kManyLightSpecUavSlot, rdManySpecTex_, 0);
+    AVER_INFO("[Voxi] many-light tail targets: 2 x {}x{} RGBA16F = {:.1f} MiB", rdStagedW_, rdStagedH_,
+              static_cast<f64>(rdStagedW_) * rdStagedH_ * 16.0 / (1024.0 * 1024.0));
+}
+
 bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
     if (!res_ || !bindings_) return false;
 
@@ -6707,6 +6971,7 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
             rcGuide_.invalidateBindings();
             AVER_INFO("[Voxi] staged ray-driven resources released");
         }
+        releaseManyLightsTextures();
         return ensurePtAccum();
     }
 
@@ -6720,8 +6985,10 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
     if (rdStagedW_ == width && rdStagedH_ == height && rdSunVisTex_ && rdGiTex_ && rdAoTex_ &&
         rdReflTex_ && !perPixelBufferNeedsRealloc(rdVisBufElemCapacity_, elemCount) &&
         !perPixelBufferNeedsRealloc(rdGiCandBufElemCapacity_, elemCount) &&
-        !perPixelBufferNeedsRealloc(rdShadowTileElemCapacity_, tileElemCount))
+        !perPixelBufferNeedsRealloc(rdShadowTileElemCapacity_, tileElemCount)) {
+        ensureManyLightsResources();
         return ensurePtAccum();
+    }
 
     // Texture resizes recreate the texture outright (unlike buffers, which can grow).
     if (rdSunVisTex_ && (rdStagedW_ != width || rdStagedH_ != height)) {
@@ -6879,6 +7146,7 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
     rdStagedH_ = height;
     rdStagedRowPitch_ = pitch;
     rcGuide_.invalidateBindings();   // the G-buffer it reads was resized with the staged targets
+    ensureManyLightsResources();
     return ensurePtAccum();
 }
 
@@ -7934,7 +8202,7 @@ void VoxiRenderer::recordFroxelFog(rhi::IRenderContext& ctx) {
     // Typed UAV loads of RGBA16F: the shade passes and the sky read the volume through u24 (DeviceCaps::typedUavLoads).
     const bool shaderOk = caps_.shaderModel >= 60 && caps_.dxcAvailable && caps_.typedUavLoads;
     const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
-    // Voxi's main layout, with the volume's history (t25) and scratch (u25) as table 1 in place of the materials.
+    // Voxi's main layout, with the volume's history (t25) and scratch (u27) as table 1 in place of the materials.
     rhi::PipelineLayout layout = giLayout();
     layout.srvCount1 = 1;
     layout.uavCount1 = 1;
@@ -8173,6 +8441,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          rdSkyOccCsPso_, rdReflCsPso_,
                                          rayDrivenSplitTexPso_, rayDrivenSplitTexGbufPso_,
                                          rdShadowProbeCsPso_, rdShadowTiledCsPso_, rdTailVisCsPso_, rdTailFilterCsPso_,
+                                         rdManyLightsCsPso_,
                                          rdGiTraceCsPso_, rdGiTraceCbCsPso_,
                                          rdGiSplitCsPso_, rdGiSplitCbCsPso_,
                                          rdGiCacheCsPso_, rdGiCacheCbCsPso_,
@@ -8192,7 +8461,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
     rdVisCsPso_ = rdShadowCsPso_ = rdGiCsPso_ = rdGiCbCsPso_ = rdSkyOccCsPso_ = rdReflCsPso_ = 0;
     rayDrivenSplitTexPso_ = rayDrivenSplitTexGbufPso_ = 0;
-    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = rdTailVisCsPso_ = rdTailFilterCsPso_ = 0;
+    rdShadowProbeCsPso_ = rdShadowTiledCsPso_ = rdTailVisCsPso_ = rdTailFilterCsPso_ = rdManyLightsCsPso_ = 0;
     rdGiTraceCsPso_ = rdGiTraceCbCsPso_ = rdGiSplitCsPso_ = rdGiSplitCbCsPso_ = 0;
     rdGiCacheCsPso_ = rdGiCacheCbCsPso_ = rdGiTraceCacheCsPso_ = rdGiTraceCacheCbCsPso_ = 0;
     rdGiPtCsPso_ = rdGiPtCbCsPso_ = rdGiTracePtCsPso_ = rdGiTracePtCbCsPso_ = 0;
@@ -8442,6 +8711,18 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
             p.layout = giTex;
             rdTailFilterCsPso_ = res_->createComputePipeline(p);
         }
+        // MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.4): the tail by the light tree, authored SM 6.5-clean (no
+        // derivatives, no SM 6.6 features) so the same source is the Vulkan implementation when staged passes land there.
+        const rhi::ShaderHandle csManyLights = compile("CSRdManyLights", rhi::ShaderStage::Compute, 65,
+                                                       rasterDefs(csDefs.c_str()).c_str());
+        if (csManyLights) {
+            rhi::ComputePipelineDesc p;
+            p.cs = csManyLights;
+            p.layout = giTex;
+            rdManyLightsCsPso_ = res_->createComputePipeline(p);
+        }
+        if (!rdManyLightsCsPso_)
+            AVER_WARN("[Voxi] CSRdManyLights did not compile; voxi.manyLights keeps the light grid's tail");
         // CSRdGi and CSRdSkyOcc: same SM 6.6 requirement as csShadow.
         const rhi::ShaderHandle csGi = compile("CSRdGi", rhi::ShaderStage::Compute, 66,
                                                rasterDefs(csDefs.c_str()).c_str());

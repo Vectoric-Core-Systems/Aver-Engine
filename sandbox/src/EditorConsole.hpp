@@ -1065,6 +1065,53 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "ray, the rest share those rays' visibility.",
         []{ return vU32(Renderer::get().settings().lightRaysPerHit); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->lightRaysPerHit = n; }); }});
+    // MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md, docs/rendering/MANY_LIGHTS.md).
+    t.push_back({"voxi.manyLights", VarType::U32, false,
+        "Stochastic many-light direct lighting from a light tree: 0 = off (the light grid's capped tail), 1 = auto "
+        "(engages above voxi.manyLightsMin lights, a scene at or under it renders as with 0), 2 = on at any count, "
+        "3 = exhaustive (every light, one ray each, at most 512 lights: the ground truth the unbiasedness check "
+        "compares to). Needs NRD2 (voxi.denoiserMode 2) and ray tracing; other frames keep the grid tail.",
+        []{ return vU32(Renderer::get().settings().manyLights); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->manyLights = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u > 3) { err = "manyLights must be 0 (off), 1 (auto), 2 (on) or 3 (exhaustive)"; return false; }
+            return true;
+        }});
+    t.push_back({"voxi.manyLightsMin", VarType::U32, false,
+        "Auto mode (voxi.manyLights 1) engages above this many lights in the frame's light list (default 48, the "
+        "length the light grid walks whole). Fewer renders exactly as with many lights off.",
+        []{ return vU32(Renderer::get().settings().manyLightsMin); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->manyLightsMin = n; }); }});
+    t.push_back({"voxi.lightSamples", VarType::U32, false,
+        "Shadow rays per point for the many-light tail (1-4): each is one candidate resampled from the drawn "
+        "set. More is less noise, one ray each. Tier-derived from the ray-tracing tier (Medium 1, High 2, Epic 4).",
+        []{ return vU32(Renderer::get().settings().lightSamples); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->lightSamples = n; }); }});
+    t.push_back({"voxi.lightCandidates", VarType::U32, false,
+        "Candidate lights drawn per point from the light tree before resampling (2-16); they need no ray, only a "
+        "tree descent. More picks better lights for the same rays. Tier-derived (Medium 8, Epic 16).",
+        []{ return vU32(Renderer::get().settings().lightCandidates); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->lightCandidates = n; }); }});
+    t.push_back({"voxi.lightHitCandidates", VarType::U32, false,
+        "Candidate lights drawn per GI, reflection and path hit from the light tree (1-8); the hit traces "
+        "voxi.lightRaysPerHit rays (at most 4) of them. Tier-derived (Medium 4, Epic 8).",
+        []{ return vU32(Renderer::get().settings().lightHitCandidates); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->lightHitCandidates = n; }); }});
+    t.push_back({"voxi.lightWeightClamp", VarType::F32, false,
+        "Caps a candidate's resampling weight at this many times the running mean of the weights so far; 0 (the "
+        "default) is off. A bias knob for scenes that still sparkle: it trades a little energy for fewer fireflies.",
+        []{ return vF32(Renderer::get().settings().lightWeightClamp); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->lightWeightClamp = n; }); }});
+    t.push_back({"voxi.debugStressLights", VarType::U32, false,
+        "Debug: adds this many synthetic shadowed point lights (5 cm radius, 20-400 cd, seeded hue) on a jittered grid "
+        "around the camera, for many-light scale and unbiasedness tests. 0 (the default) adds nothing and costs nothing.",
+        []{ return vU32(Renderer::get().settings().debugStressLights); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->debugStressLights = n; }); }});
+    t.push_back({"voxi.debugStressSeed", VarType::U32, false,
+        "Debug: seed of the voxi.debugStressLights layout. The layout is a pure function of the seed, the count and "
+        "the camera snapped to 1 m, so captures repeat.",
+        []{ return vU32(Renderer::get().settings().debugStressSeed); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->debugStressSeed = n; }); }});
     t.push_back({"voxi.rtSkipUnchangedTlas", VarType::Bool, false,
         "Skips the TLAS rebuild and instance/material table rewrite when nothing "
         "buildAccelerationStructures() reads from the draw list has changed since the last build -- "

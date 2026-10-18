@@ -105,6 +105,13 @@ void Renderer::setSettings(const Settings& s) {
         n.giSkyOcclusionRays = giSkyOcclusionRaysForQuality(n.rayTracing);
     if (n.rayTracing != settings_.rayTracing && n.giSkyOcclusionTile == settings_.giSkyOcclusionTile)
         n.giSkyOcclusionTile = giSkyOcclusionTileForQuality(n.rayTracing);
+    // Many-light budget keyed on rayTracing too (the tree's shadow rays are ray-traced).
+    if (n.rayTracing != settings_.rayTracing && n.lightSamples == settings_.lightSamples)
+        n.lightSamples = lightSamplesForQuality(n.rayTracing);
+    if (n.rayTracing != settings_.rayTracing && n.lightCandidates == settings_.lightCandidates)
+        n.lightCandidates = lightCandidatesForQuality(n.rayTracing);
+    if (n.rayTracing != settings_.rayTracing && n.lightHitCandidates == settings_.lightHitCandidates)
+        n.lightHitCandidates = lightHitCandidatesForQuality(n.rayTracing);
     // ptBounces keyed on pathTracing, not rayTracing.
     if (n.pathTracing != settings_.pathTracing && n.ptBounces == settings_.ptBounces)
         n.ptBounces = ptBouncesForQuality(n.pathTracing);
@@ -114,6 +121,13 @@ void Renderer::setSettings(const Settings& s) {
     n.giCones         = std::clamp(n.giCones, 1u, 16u);
     // 1 is per-pixel (no-op); 16 is well past usable range.
     n.giSkyOcclusionTile = std::clamp(n.giSkyOcclusionTile, 1u, 16u);
+    // Many lights: 0..3 modes; S 1-4, M 2-16, hit M 1-8; a non-finite or negative clamp is off (the NaN pass-through below).
+    n.manyLights         = n.manyLights > 3u ? 1u : n.manyLights;
+    n.lightSamples       = std::clamp(n.lightSamples, 1u, 4u);
+    n.lightCandidates    = std::clamp(n.lightCandidates, 2u, 16u);
+    n.lightHitCandidates = std::clamp(n.lightHitCandidates, 1u, 8u);
+    n.lightWeightClamp   = std::isfinite(n.lightWeightClamp) ? std::clamp(n.lightWeightClamp, 0.0f, 64.0f) : 0.0f;
+    n.debugStressLights  = std::min(n.debugStressLights, 4000u);
     n.giIntensity     = std::clamp(n.giIntensity, 0.0f, 8.0f);
     n.giMaxDistance   = std::clamp(n.giMaxDistance, 1.0f, 100000.0f);
     // Lower bound must be > 0 (sentinel; shader falls back to 16.0 when exactly 0).
@@ -209,6 +223,9 @@ u32 Renderer::voxelResolutionForQuality(Quality q) { return ladder::voxelResolut
 u32 Renderer::giUpdateIntervalForQuality(Quality q) { return ladder::giUpdateInterval(q); }
 u32 Renderer::giSkyOcclusionRaysForQuality(Quality q) { return ladder::giSkyOcclusionRays(q); }
 u32 Renderer::giSkyOcclusionTileForQuality(Quality q) { return ladder::giSkyOcclusionTile(q); }
+u32 Renderer::lightSamplesForQuality(Quality q) { return ladder::lightSamples(q); }
+u32 Renderer::lightCandidatesForQuality(Quality q) { return ladder::lightCandidates(q); }
+u32 Renderer::lightHitCandidatesForQuality(Quality q) { return ladder::lightHitCandidates(q); }
 u32 Renderer::rtShadowRaysForQuality(Quality q) { return ladder::rtShadowRays(q); }
 u32 Renderer::rtRenderModeForQuality(Quality q) { return ladder::rtRenderMode(q); }
 u32 Renderer::ptBouncesForQuality(Quality q) { return ladder::ptBounces(q); }

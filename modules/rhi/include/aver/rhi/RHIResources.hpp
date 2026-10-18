@@ -217,10 +217,11 @@ struct DepthState {
 constexpr u32 kMaxConstantSlots = 5;
 
 // Slots per range; defined here because PipelineLayout also sizes its slot-kind arrays with it.
-// 25: Voxi's main set grew a 25th SRV (t24, the projected-decal records). Both backends size every
+// 28: Voxi's main set grew a 25th SRV (t24, the projected-decal records) and, for many-light direct
+// lighting, UAVs u25/u26 (MANY_LIGHTS.md 3.11). A second table's registers start where these end. Both backends size every
 // per-set array from this, the Vulkan UAV binding base follows it, and the pipeline-variant key packs
 // each count into 5 bits, so it may not pass 31.
-constexpr u32 kMaxBindingSlots = 25;
+constexpr u32 kMaxBindingSlots = 28;
 
 // Forward-declared; defined below beside BindingSetDesc.
 enum class SlotKind : u8;

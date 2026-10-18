@@ -486,12 +486,15 @@ void SandboxApp::setViewMode(const std::string& mode) {
         debugView_ = voxi::VoxiRenderer::ViewDebug::None;
 #endif
     } else if (m == "rayhit-instance" || m == "rayhit-material" || m == "rayhit-distance" || m == "triangles" ||
-               m == "ambient-occlusion") {
+               m == "ambient-occlusion" || m == "light-count" || m == "many-lights-raw") {
 #if AVER_MODULE_VOXI
         if (m == "rayhit-instance")      debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitInstance;
         else if (m == "rayhit-material") debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitMaterial;
         else if (m == "rayhit-distance") debugView_ = voxi::VoxiRenderer::ViewDebug::RayHitDistance;
         else if (m == "ambient-occlusion") debugView_ = voxi::VoxiRenderer::ViewDebug::AmbientOcclusion;
+
+        else if (m == "light-count")       debugView_ = voxi::VoxiRenderer::ViewDebug::LightCount;
+        else if (m == "many-lights-raw")   debugView_ = voxi::VoxiRenderer::ViewDebug::ManyLightsRaw;
         else                             debugView_ = voxi::VoxiRenderer::ViewDebug::Triangles;
         wireframe_ = false;
         gbufferDebugView_ = GBufferDebugFeature::Mode::Off;

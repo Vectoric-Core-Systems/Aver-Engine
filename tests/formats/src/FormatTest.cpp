@@ -238,6 +238,22 @@ static void checkOcproject() {
         check(writeOcproject(t, w) == w, "once -- isOwnedKey covers it");
     }
     {
+        // RENDER.MANYLIGHTS: many-light direct lighting (0 off, 1 auto, 2 on); absent leaves the engine default (auto).
+        ProjectDesc t;
+        check(parseOcproject("OCPROJECT 1\nNAME T\nRENDER.MANYLIGHTS 2\n", t, &err), "RENDER.MANYLIGHTS parses");
+        check(t.manyLights == 2 && t.hasRenderSettings(), "many lights on is a stated render setting");
+        const std::string w = writeOcproject(t, "");
+        check(w.find("RENDER.MANYLIGHTS 2") != std::string::npos, "and is written back");
+        check(writeOcproject(t, w) == w, "once -- isOwnedKey covers it");
+        ProjectDesc off;
+        check(parseOcproject("OCPROJECT 1\nNAME T\nRENDER.MANYLIGHTS 0\n", off, &err) && off.manyLights == 0 && off.hasRenderSettings(),
+              "many lights off is a stated setting too (0 is not unstated)");
+        ProjectDesc none;
+        check(parseOcproject("OCPROJECT 1\nNAME T\n", none, &err) && none.manyLights == -1 &&
+                  writeOcproject(none, "").find("RENDER.MANYLIGHTS") == std::string::npos,
+              "absent stays unstated and is not written");
+    }
+    {
         // RENDER.NEURALDENOISE (retired NRD v1): still loads, states nothing, is dropped on the next save.
         const char* legacy = "OCPROJECT 1\nNAME T\nRENDER.NEURALDENOISE 1\n";
         ProjectDesc t;

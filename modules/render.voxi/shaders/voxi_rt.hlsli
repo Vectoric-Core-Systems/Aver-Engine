@@ -624,6 +624,11 @@ bool rtNrd2Frame() { return (rtGiShadowBits() & 512u) != 0u; }
 // NRD2 frame with the sun outside the filter (bit 1024, Settings::nrd2SunClean): the sun's lighting is added
 // clean, its visibility averaged over a depth-weighted 5x5 (rdSunVisFiltered).
 bool rtNrd2SunClean() { return (rtGiShadowBits() & 1024u) != 0u; }
+// MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.4): bit 2048 = the stochastic many-light estimator runs this frame
+// (CSRdManyLights lights the visible surface's tail, and every hit samples the light tree); bit 4096 = voxi.manyLights 3,
+// the exhaustive ground truth at hits. Both stay clear in the single pass, so PSMainVoxi and its kernels are untouched.
+bool rtManyLights() { return (rtGiShadowBits() & 2048u) != 0u; }
+bool rtManyLightsExhaustive() { return (rtGiShadowBits() & 4096u) != 0u; }
 
 // False where the sun's radiance is exactly 0 (a night scene): every consumer multiplies visibility by it.
 bool rdSunLit() { return any(averSunRadiance() != 0.0); }
@@ -896,6 +901,8 @@ uint rdLightIndex(RdLightRange r, uint k) {
     if (k < r.globals) return k == 0u ? r.g0 : k == 1u ? r.g1 : r.g2;
     return (uint)(rdListFloat(r.cellStart + k - r.globals) + 0.5);
 }
+// MANY LIGHTS: the light tree appended after the grid (LightTree.hpp), its descent and its bound.
+#include "voxi_lighttree.hlsli"
 
 // THE RAY BUDGET (UNIFIED_LIGHTS.md): the n-th largest of up to 8 weights, kept sorted in registers (fully unrolled
 // compare-swaps, no indexed array). Lights at or above it get their own shadow ray.

@@ -63,7 +63,7 @@ RaytracingAccelerationStructure gScene : register(t2);
 Texture3D<float>        gAirVis     : register(t17);
 RWTexture3D<float4>     gFxFinal    : register(u24);   // the output volume
 Texture3D<float4>       gFxHist     : register(t25);   // last frame's scatter volume
-RWTexture3D<float4>     gFxCur      : register(u25);   // this frame's scatter volume
+RWTexture3D<float4>     gFxCur      : register(u27);   // this frame's scatter volume (table 1 starts past table 0's u0..u26)
 
 float fxJitter(uint3 id, uint frame) {
     uint h = id.x * 0x9E3779B1u ^ (id.y * 0x85EBCA77u) ^ (id.z * 0xC2B2AE3Du);

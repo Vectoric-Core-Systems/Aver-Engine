@@ -549,6 +549,22 @@ clean term, and its visibility takes `rtShadowSpatial`'s kernel instead of the 5
 stays in D with the 5x5 mean, as before. On Caldera_Capital's dock view (Epic, scale 0.5, 400 frames) the NRD2
 frame's mean absolute difference from FidelityFX halved (2.16 to 1.09 of 255) and the wire and pole shadows match.
 
+## Many-light tail (2026-10-17)
+
+With `voxi.manyLights` live (more than `voxi.manyLightsMin` lights, NRD2 frame; `MANY_LIGHTS.md`), Stage B's D and S
+gain one more input: `CSRdManyLights` writes the stochastic tail's radiance, diffuse and subsurface into
+`gRdManyDiff` (u25) and specular into `gRdManySpec` (u26), and Stage B adds them where it added `rdTailLightsSplit`'s
+output, before demodulating (`nrdD / kdAlbedo`, `nrdS / FssEss`), so the filter sees them like any lamp light. The
+exact light still goes the way it did (to D and S, or to the clean term for the sun). Nothing in the filter changes.
+
+What the filter now sees: a single-frame stochastic estimate per pixel with up to `S` rays and `M` candidates, noisier
+than the capped grid tail it replaces and unbiased where that was biased low. Its candidates come from the pixel's own
+tree descent and nothing is reused from other pixels or frames, so this input needs no history (the filter has none) and
+adds no new rule: `NEURAA_NRD.md` rule 18. **The network was trained on the grid tail's noise model**; default
+parameters apply to the new noise until it is retrained in-engine (Training, below). The despeckle (cap at 2x the 5th
+brightest of 5x5) is what bounds what a rare bright candidate leaves behind; `voxi.lightWeightClamp` is the knob if
+sparkle remains. Not measured yet.
+
 ## Object stop, shared with NeuRAA (2026-10-10)
 
 NRD2's stops were depth and normal only, so where two objects meet at a similar depth and facing (a post on a

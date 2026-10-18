@@ -12,6 +12,14 @@
 #define AVER_PT_PATHS 0
 #endif
 
+// MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md): the compiles that have the full direct-light evaluator and so the
+// light-tree estimator (the lite arm of averDirectLights, glass and the single pass never do).
+#if AVER_RD_LAMPS && defined(AVER_RT_BINDLESS) && !AVER_BLENDED_PASS && !AVER_RD_SINGLE_PASS
+#define AVER_MANY_LIGHTS 1
+#else
+#define AVER_MANY_LIGHTS 0
+#endif
+
 // gPtBounceParams.x: path vertices after the primary hit (Settings::ptBounces, [1,8]) in the low four
 // bits; bit 4 is Reference mode (Settings::ptMode 1).
 uint ptBounceCount() { return clamp((uint)gPtBounceParams.x & 15u, 1u, 8u); }
@@ -177,6 +185,150 @@ float3 averLightVisibility(RdLocalLight ll, float3 pos, float3 N, float2 pixel, 
 
 #endif
 
+// ---- MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.3): the stochastic tail estimator ----
+// The compile that has the full evaluator (the lite arm of averDirectLights below and the single pass never reach it).
+// Per shading point: M candidates drawn from the light tree by importance (voxi_lighttree.hlsli), resampled by a
+// BRDF-aware target into S slots (RIS), each slot traced with one shadow ray. Nothing is carried from another pixel or
+// another frame: every candidate comes from this point's own descent over this frame's light table (patent rule,
+// MANY_LIGHTS.md section 2). The caller's exact light e0 (or none) is excluded and shaded by its own path.
+#if AVER_MANY_LIGHTS
+
+// Cranley-Patterson rotation per 4x4 tile (interleaved gradient noise), so neighbouring tiles draw different candidates.
+float rdTreeRotation(float2 pixel) {
+    const float2 tile = floor(pixel * 0.25);
+    return frac(52.9829189 * frac(dot(tile, float2(0.06711056, 0.00583715))));
+}
+
+// The selection density: the light's cheap irradiance luminance times a cheap BRDF at its centre (diffuse plus a GGX
+// lobe widened by the emitter size as ptLampLight does). Only a density: any positive function is unbiased, so the
+// surface terms come from the factor-level inputs and need no texture fetch.
+float rdTreeTarget(RdLocalLight l, AverSurface s, float3 pos, float kdLum, float f0Lum) {
+    const float e = averShadowLum(rdLightIrradianceCheap(l, pos, s.N));
+    if (!(e > 0.0)) return 0.0;
+    float3 Lc;
+    float  widen = 0.0;
+    if (aversLightKind(l) == AVER_LIGHT_DIRECTIONAL) {
+        Lc = normalize(l.axisKind.xyz);
+    } else {
+        const float3 toC = l.posRadius.xyz - pos;
+        const float  invD = rsqrt(max(dot(toC, toC), 1e-8));
+        Lc = toC * invD;
+        widen = l.posRadius.w * 0.5 * invD;
+    }
+    const float3 Hv = s.V + Lc;
+    const float NoL = saturate(dot(s.N, Lc));
+    const float NoV = max(s.ndv, 0.05);
+    const float NoH = saturate(dot(s.N, Hv) * rsqrt(max(dot(Hv, Hv), 1e-8)));
+    const float rough = clamp(s.rough + widen, s.rough, 1.0);
+    return e * (kdLum * (1.0 / PI) + f0Lum * distGGX(NoH, rough * rough) / (4.0 * NoV * max(NoL, 0.05)));
+}
+
+// Lights `pos` with the tree. e0 is the exact light the caller shades itself (0xFFFFFFFF = none); M candidates, S slots
+// (1 to 4); `exhaustive` walks every tree light with one ray each instead (voxi.manyLights 3, the ground truth).
+// `rayN` is the normal the shadow rays are offset along (the visible surface passes its geometric one, hits their shading one).
+// Diffuse+subsurface and specular radiance accumulate apart (NRD2's D and S buckets); sumC / sumCV are the unshadowed
+// and shadowed luminance, whose ratio is the tail fraction the filter and the glass replay read. The directional
+// lights other than e0 are shaded exactly with one ray each. ONE shading call in the loop (compile time).
+void averManyLights(AverSurface s, float3 pos, float3 rayN, float2 pixel, inout uint rng, uint e0, uint M, uint S,
+                    bool exhaustive, bool allowMap, RdTreeHdr th,
+                    inout float3 diffuse, inout float3 specular, inout float sumC, inout float sumCV) {
+    if (!th.valid || s.model == AVER_MODEL_UNLIT) return;
+    uint g0, g1, g2;
+    const uint nG = rdTreeGlobals(g0, g1, g2);
+    uint ex0 = 0xFFFFFFFFu, ex1 = 0xFFFFFFFFu, ex2 = 0xFFFFFFFFu;
+    if (nG > 0u && g0 != e0) ex0 = g0;
+    if (nG > 1u && g1 != e0) ex1 = g1;
+    if (nG > 2u && g2 != e0) ex2 = g2;
+
+    const float kdLum = averShadowLum(s.kdAlbedo);
+    const float f0Lum = averShadowLum(s.F0);
+    uint  sel0 = 0xFFFFFFFFu, sel1 = 0xFFFFFFFFu, sel2 = 0xFFFFFFFFu, sel3 = 0xFFFFFFFFu;
+    float ph0 = 0.0, ph1 = 0.0, ph2 = 0.0, ph3 = 0.0;
+    float wsum = 0.0;
+    float tau = 1.0e-4;
+    if (!exhaustive) {
+        // A draw that lands on e0 is redrawn (three tries): the density of any other light is q * (1 + q0 + q0^2), the
+        // mass q0^3 a candidate of weight 0, so the estimate stays unbiased without the spike a dominant e0 would cause.
+        const bool e0Local = e0 != 0xFFFFFFFFu && aversLightKind(gRdLocalLights[e0]) != AVER_LIGHT_DIRECTIONAL;
+        float mult = 1.0;
+        if (e0Local) {
+            const float q0 = rdTreePdfOf(th, e0, pos, s.N);
+            mult = 1.0 + q0 + q0 * q0;
+        }
+        if (e0 != 0xFFFFFFFFu) tau = rdTreeTarget(gRdLocalLights[e0], s, pos, kdLum, f0Lum) * (1.0 / 256.0);
+        const uint  tries = e0Local ? 3u : 1u;
+        const float rot = rdTreeRotation(pixel);
+        [loop] for (uint j = 0u; j < M; ++j) {
+            uint  y = 0xFFFFFFFFu;
+            float q = 0.0;
+            [loop] for (uint t = 0u; t < tries; ++t) {
+                uint yy;
+                float qq;
+                if (!rdTreeSample(th, pos, s.N, frac(ptRand(rng) + rot), yy, qq)) break;
+                if (yy != e0) { y = yy; q = qq; break; }
+            }
+            if (y == 0xFFFFFFFFu) continue;
+            const float ph = rdTreeTarget(gRdLocalLights[y], s, pos, kdLum, f0Lum);
+            if (!(ph > 0.0)) continue;
+            float w = ph / (q * mult);
+            // voxi.lightWeightClamp: a candidate is capped at clamp times the running mean (0 = off), a bias knob.
+            if (th.weightClamp > 0.0 && j > 0u) w = min(w, th.weightClamp * wsum / (float)j);
+            wsum += w;
+            // Each slot streams its own pick: accepted with probability w / wsum, no runtime-indexed array.
+            if (ptRand(rng) * wsum < w) { sel0 = y; ph0 = ph; }
+            if (S > 1u && ptRand(rng) * wsum < w) { sel1 = y; ph1 = ph; }
+            if (S > 2u && ptRand(rng) * wsum < w) { sel2 = y; ph2 = ph; }
+            if (S > 3u && ptRand(rng) * wsum < w) { sel3 = y; ph3 = ph; }
+        }
+    }
+
+    const uint nMain = exhaustive ? rdTreeLightCount(th) : S;
+    [loop] for (uint it = 0u; it < nMain + 3u; ++it) {
+        uint  y = 0xFFFFFFFFu;
+        float W = 1.0;
+        if (it < nMain) {
+            if (exhaustive) {
+                y = it;
+                if (!(averShadowLum(rdLightIrradianceCheap(gRdLocalLights[y], pos, s.N)) > 0.0)) continue;
+            } else {
+                y = it == 0u ? sel0 : it == 1u ? sel1 : it == 2u ? sel2 : sel3;
+                const float ph = it == 0u ? ph0 : it == 1u ? ph1 : it == 2u ? ph2 : ph3;
+                if (y == 0xFFFFFFFFu) continue;
+                // Contribution weight of the slot: wsum / (M * ph). ph * W = wsum / M is the slot's unshadowed
+                // contribution estimate, which russian roulette tests against tau.
+                const float c = wsum / (float)M;
+                W = c / ph;
+                if (c < tau) {
+                    const float p = c / tau;
+                    if (ptRand(rng) >= p) continue;
+                    W /= p;
+                }
+                W /= (float)S;
+            }
+        } else {
+            const uint k = it - nMain;
+            y = k == 0u ? ex0 : k == 1u ? ex1 : ex2;
+            if (y == 0xFFFFFFFFu) continue;
+        }
+        const RdLocalLight ll = gRdLocalLights[y];
+        AverLight   l;
+        AverSurface sL;
+        if (!ptLampLight(ll, s, pos, l, sL)) continue;
+        if (dot(s.N, l.direction) <= 0.0 && s.sssWeight <= 0.0) continue;
+        const float3 vis = averLightVisibility(ll, pos, rayN, pixel, rng, allowMap);   // rays leave along the caller's offset normal
+        float3 dD, dS, dSss;
+        float  ndl;
+        averDirectTerms(sL, l, dD, dS, dSss, ndl);
+        const float3 lt = l.radiance * (ndl * W) * vis;
+        diffuse  += dD * lt + dSss * l.radiance * vis * W;
+        specular += dS * lt;
+        const float cu = averShadowLum(l.radiance) * ndl * W;
+        sumC  += cu;
+        sumCV += cu * saturate(averShadowLum(vis));
+    }
+}
+#endif
+
 float3 averDirectLights(AverSurface s, float3 pos, float2 pixel, inout uint rng, bool allowMap) {
 #if AVER_RD_LAMPS && !(defined(AVER_RT_BINDLESS) && !AVER_BLENDED_PASS && !AVER_RD_SINGLE_PASS)
     // LITE, for the ray-traced raster, glass and single-pass shaders: at their register limit, they hung the
@@ -209,6 +361,19 @@ float3 averDirectLights(AverSurface s, float3 pos, float2 pixel, inout uint rng,
     const float3 kd = s.model == AVER_MODEL_UNLIT ? float3(0.0, 0.0, 0.0) : s.kdAlbedo * (1.0 / PI);
     return lit + kd * max(eAll - rdLightIrradianceCheap(ll, pos, s.N), 0.0) * v;
 #elif AVER_RD_LAMPS
+    // MANY LIGHTS (MANY_LIGHTS.md 3.3, hits): the tree's estimator in place of the top-4 loop below, when the frame runs
+    // it (rtManyLights), or every light with one ray (voxi.manyLights 3). Still one shading call, inside the loop.
+    if (rtManyLights() || rtManyLightsExhaustive()) {
+        const RdTreeHdr th = rdTreeHeader();
+        if (th.valid) {
+            float3 dif = float3(0.0, 0.0, 0.0), spc = float3(0.0, 0.0, 0.0);
+            float  sc = 0.0, scv = 0.0;
+            averManyLights(s, pos, s.N, pixel, rng, 0xFFFFFFFFu, max(th.hitCandidates, 1u),
+                           clamp(min(rdLightRaysPerHit(), 4u), 1u, 4u), rtManyLightsExhaustive(), allowMap, th,
+                           dif, spc, sc, scv);
+            return dif + spc;
+        }
+    }
     // EVERY LIGHT THE SUN'S WAY, within a ray budget, nothing picked at random (UNIFIED_LIGHTS.md "Ray budget"):
     // the strongest lightRaysPerHit lights (at most 4) are shaded exactly with their own shadow ray; every other light
     // is summed as diffuse irradiance in ONE cheap loop and takes those rays' irradiance-weighted visibility. Hits are

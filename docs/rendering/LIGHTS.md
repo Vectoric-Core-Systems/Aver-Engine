@@ -141,6 +141,8 @@ visibility shared across lights.
 - Asset ids are immutable for a session: editing an `.ies` or cookie on disk needs a restart.
 - Vulkan is not ported (local lights are D3D12 only today).
 
+- **Many lights (2026-10-17).** The grid sees at most 24 lights per cell. With `voxi.manyLights` live (NRD2 frames, more than `voxi.manyLightsMin` = 48 lamps and scene lights, or forced) the visible surface's tail and every GI, reflection and path hit are lit from a light tree instead: M candidates by importance, resampled into S slots, one shadow ray each, so rays per pixel stay bounded however many lights there are (the list cut `kMaxListLights` = 4000 still applies). FidelityFX and None frames, scenes at or under the threshold, raster and Vulkan keep the grid path. See `docs/rendering/MANY_LIGHTS.md`.
+
 ## Path tracer agreement
 
 `PathTracer::setLights` takes the same 80-byte records. `ptDirectLights` picks one light by unshadowed

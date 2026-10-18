@@ -316,6 +316,11 @@ RWTexture2D<float4>       gRdReflTex   : register(u15);
 // ping-ponged with sun shadow history.
 Texture2D<float4>              gRdLocalHist   : register(t19);
 RWTexture2D<float4>            gRdLocalOut    : register(u19);
+// MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.4, 3.11): CSRdManyLights' tail radiance, split as NRD2's D and S are.
+// u25/u26 are VoxiRenderer.cpp's kManyLightDiffUavSlot / kManyLightSpecUavSlot (static_assert in giTableKinds); u27 is
+// texture streaming's.
+RWTexture2D<float4>            gRdManyDiff    : register(u25);
+RWTexture2D<float4>            gRdManySpec    : register(u26);
 
 // NRD2 frames' exact-light visibility (raw, no history), weighted by view-depth similarity (as rdLocalVisTap).
 // The sun (it goes outside NRD2's filter) takes rtShadowSpatial's kernel, the Gaussian of rtShadowDenoise's
@@ -2129,7 +2134,13 @@ RayDrivenOut PSRayDriven(SkyOut i) {
             rdListLightSplit(e0, s, wpos, rdSunVisFiltered(uint2(i.pos.xy), sunVis, true), nrdSunCleanD, nrdSunCleanS);
         else
             rdListLightSplit(e0, s, wpos, rdSunVisFiltered(uint2(i.pos.xy), sunVis, false), nrdD, nrdS);
-        rdTailLightsSplit(s, wpos, (uint)lightSlots.x, rdLocalVisFiltered(uint2(i.pos.xy)), nrdD, nrdS);
+        // MANY LIGHTS: the tree's stochastic tail (CSRdManyLights) stands in for the grid's capped tail.
+        if (rtManyLights()) {
+            nrdD += gRdManyDiff[uint2(i.pos.xy)].rgb;
+            nrdS += gRdManySpec[uint2(i.pos.xy)].rgb;
+        } else {
+            rdTailLightsSplit(s, wpos, (uint)lightSlots.x, rdLocalVisFiltered(uint2(i.pos.xy)), nrdD, nrdS);
+        }
     }
 #else
     float3 radiance = 0.0;
@@ -2377,6 +2388,14 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // vmode 2-5 (ViewDebug): replace colour last, after overrides above.
     if (vmode == 6u)
         o.col.rgb = aoView.xxx;
+#if AVER_RD_SPLIT && !AVER_RD_SINGLE_PASS
+    // MANY LIGHTS views: 7 = lights reaching the pixel (tree leaves with importance, CSRdManyLights counts them),
+    // 8 = the pass's diffuse + specular before NRD2. Black when the estimator did not run this frame.
+    else if (vmode == 7u)
+        o.col.rgb = rtManyLights() ? viewDebugHeatRamp(saturate(min(gRdManySpec[uint2(i.pos.xy)].a, 255.0) * (1.0 / 255.0))) : float3(0.0, 0.0, 0.0);
+    else if (vmode == 8u)
+        o.col.rgb = rtManyLights() ? gRdManyDiff[uint2(i.pos.xy)].rgb + gRdManySpec[uint2(i.pos.xy)].rgb : float3(0.0, 0.0, 0.0);
+#endif
     else if (vmode >= 2u)
         o.col.rgb = viewDebugColor(vmode, rdInstanceIndex, inst.materialIndex, rdPrimIndex, hitT, N, dir);
 #if AVER_RD_SPLIT
@@ -2645,23 +2664,26 @@ void CSRdShadow(uint3 tid : SV_DispatchThreadID) {
     // kernel (disc, history keyed by light, probe tiles). Every other light (the tail) is shaded exactly in Stage B
     // times one shadow fraction, which CSRdTailVis traces next at quarter resolution. By day the exact light is the
     // sun because it delivers the most.
-    // STABLE EXACT LIGHT: last frame's exact light at this pixel (by its key, gRdLocalOut.y, not its list index, which
-    // moves as the list reorders) stays exact while it delivers at least 80% of the strongest, so near-equal candles do
-    // not trade places (each swap restarts the exact light's shadow history).
-    const float prevKey = rdLocalHistValid() ? gRdLocalHist.Load(int3(pixel, 0)).y : -1.0;
-    uint  prevE0 = 0xFFFFFFFFu;
+    // MANY LIGHTS S0 (docs/plans/wave4/MANY_LIGHTS.md 3.10): STABLE EXACT LIGHT as a pure function of THIS frame. Among
+    // the lights delivering at least 80% of the strongest, the smallest stable key (rdLightKey, not the list index,
+    // which moves as the list reorders) is exact, so near-equal candles do not trade places on noise. Nothing the
+    // pixel chose in an earlier frame is read (US 11,948,246 claim 1 reads on a prior-frame pick).
     uint  e0 = 0xFFFFFFFFu;
-    float w0 = 0.0, wPrev = 0.0;
+    float w0 = 0.0;
     {
         const RdLightRange lr = rdLightsAt(s.wpos);
         [loop] for (uint k = 0u; k < lr.count; ++k) {
-            const uint  j = rdLightIndex(lr, k);
-            const float w = rdLightWeight(gRdLocalLights[j], s.wpos, s.N);
-            if (!(w > 0.0)) continue;
-            if (w > wPrev && prevKey >= 0.0 && rdLightKey(gRdLocalLights[j]) == prevKey) { prevE0 = j; wPrev = w; }
-            if (w > w0) { e0 = j; w0 = w; }
+            const float w = rdLightWeight(gRdLocalLights[rdLightIndex(lr, k)], s.wpos, s.N);
+            if (w > w0) w0 = w;
         }
-        if (prevE0 != 0xFFFFFFFFu && wPrev >= 0.8 * w0) { e0 = prevE0; w0 = wPrev; }
+        float bestKey = 1.0e30;
+        [loop] for (uint k2 = 0u; k2 < lr.count; ++k2) {
+            const uint  j = rdLightIndex(lr, k2);
+            const float w = rdLightWeight(gRdLocalLights[j], s.wpos, s.N);
+            if (!(w > 0.0) || w < 0.8 * w0) continue;
+            const float key = rdLightKey(gRdLocalLights[j]);
+            if (key < bestKey) { bestKey = key; e0 = j; }
+        }
     }
     const bool  haveE0 = e0 != 0xFFFFFFFFu;
     const float3 L = haveE0 ? rdSetShadowLight(gRdLocalLights[e0], s.wpos) : normalize(gLightDir.xyz);
@@ -2819,6 +2841,62 @@ void CSRdTailFilter(uint3 tid : SV_DispatchThreadID) {
     o.z = rdLocalVisFilter5x5(pixel);
     gRdLocalOut[pixel] = o;
 }
+
+#if AVER_MANY_LIGHTS
+// ---- MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md 3.4): CSRdManyLights -- the visible surface's tail by the light tree ----
+// Replaces CSRdTailVis on a frame that runs the stochastic estimator (NRD2, more than voxi.manyLightsMin lights):
+// per pixel, M candidates from the tree (voxi_lighttree.hlsli), RIS into S slots, one shadow ray each, the exact
+// light CSRdShadow chose excluded (Stage B shades it). Writes the tail's radiance for EVERY pixel into gRdManyDiff
+// (diffuse + subsurface) and gRdManySpec (specular), which Stage B adds to NRD2's D and S, and the tail's shadowed
+// fraction into gRdLocalOut.a for CSRdTailFilter and the glass replay. No candidate, light or visibility is read
+// from another pixel or another frame (patent rule, MANY_LIGHTS.md section 2). Compiled SM 6.5 (no derivatives:
+// the footprint comes from the neighbouring primary rays, as CSRdRefl's does), so the one source is Vulkan's too.
+// gRdManySpec.a carries the lights reaching the pixel (ViewDebug::LightCount) when that view is on.
+[numthreads(8, 8, 1)]
+void CSRdManyLights(uint3 tid : SV_DispatchThreadID) {
+    if (any(tid.xy >= (uint2)gSceneViewportCur.zw)) return;
+    const uint2 pixel = (uint2)gSceneViewportCur.xy + tid.xy;
+    const uint pitch = rdRowPitch();
+    if (pitch == 0u) return;
+
+    float3 dif = float3(0.0, 0.0, 0.0), spc = float3(0.0, 0.0, 0.0);
+    float  sc = 0.0, scv = 0.0, reach = 0.0;
+    bool   ran = false;
+    const uint4 rec = gRdVisBuf[pixel.y * pitch + pixel.x];
+    const float4 slots = gRdLocalOut[pixel];
+    const RdTreeHdr th = rdTreeHeader();
+    if (rec.x != 0xFFFFFFFFu && slots.x >= 0.0 && th.valid) {
+        float2 ndc;
+        const float3 dir = rdPrimaryRayDir(pixel, ndc);
+        const RdSurface s = rdSurfaceFromRecord(rec, dir);
+        averRtCutoutPolicy(AVER_RD_CUTOUTS_SHADOW, false);
+        // The footprint CSRdRefl reconstructs: neighbouring primary rays at the hit distance.
+        const float2 ndcPixelStep = float2(2.0 / max(gSceneViewport.z, 1.0), 2.0 / max(gSceneViewport.w, 1.0));
+        const float3 dirDx = averViewRayDir(ndc + float2(ndcPixelStep.x, 0.0));
+        const float3 dirDy = averViewRayDir(ndc + float2(0.0, ndcPixelStep.y));
+        // The surface Stage B shades (textured; no texture-streaming feedback is recorded here).
+        const AverSurface hs = rdHitSurface(s, dir, (dirDx - dir) * s.hitT, (dirDy - dir) * s.hitT, AVER_RT_HIT_FULL);
+        if (hs.model != AVER_MODEL_UNLIT) {
+            if ((uint)(gViewParams.x + 0.5) == 7u) reach = (float)rdTreeReach(th, s.wpos, hs.N, 4096u);
+            // Nothing in the tree reaches here: skip the descent.
+            if (rdTreeImportance(rdTreeNode(th.nodeBase), s.wpos, hs.N) > 1.0e-6) {
+                uint rng = ptSeed(float2(pixel) + 0.5, 19788u);
+                averManyLights(hs, s.wpos, s.N, float2(pixel) + 0.5, rng, (uint)slots.x, clamp(th.candidates, 1u, 16u),
+                               clamp(th.samples, 1u, 4u), false, false, th, dif, spc, sc, scv);
+                ran = true;
+            }
+        }
+    }
+    gRdManyDiff[pixel] = float4(dif, 0.0);
+    gRdManySpec[pixel] = float4(spc, reach);
+    // The tail's shadowed fraction (1 where no ray was cast); a pixel that did not run keeps CSRdShadow's -1.
+    if (ran) {
+        float4 o = gRdLocalOut[pixel];
+        o.a = sc > 0.0 ? saturate(scv / sc) : 1.0;
+        gRdLocalOut[pixel] = o;
+    }
+}
+#endif
 
 // ---- STAGE G0: CSRdGiTrace -- trace ReSTIR GI's fresh candidate for CSRdGi's resample --------
 //

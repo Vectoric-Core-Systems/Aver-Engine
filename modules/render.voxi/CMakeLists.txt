@@ -28,7 +28,8 @@ add_library(Aver.Render.Voxi.Renderer STATIC
   src/NeuRaCGuide.cpp
   src/NeuRaCNet.cpp
   src/VoxiFroxelFog.cpp
-  src/VoxiGiShaders.cpp)
+  src/VoxiGiShaders.cpp
+  src/LightTree.cpp)   # many-light direct lighting's BVH (Aver.Core only; tests compile it directly)
 
 target_include_directories(Aver.Render.Voxi.Renderer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Render.Voxi.Renderer PUBLIC cxx_std_20)

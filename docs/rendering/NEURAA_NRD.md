@@ -634,6 +634,20 @@ legal advice). The design follows them unless counsel says otherwise:
       no network, stage 2a is flagged there). Fallback: `voxi.nrd2NeuracGuide 0` gives the exact no-guide path
       (bit for bit).
 
+18. **No light selection is carried between pixels or frames (2026-10-17; MANY_LIGHTS.md, `docs/plans/wave4/MANY_LIGHTS.md`
+    section 2).** NVIDIA US 11,948,246 (in force to 2042; continuation 18/619,804 pending) claims, in effect, ReSTIR DI:
+    select lights from the scene's lights, select more from lights associated with pixels in this frame or a prior
+    frame, and use the result for the pixel. US 12,361,635 adds a prior image's light as an initial candidate;
+    US 12,299,801 samples a set of lights per spatial subdivision and stores them in a cell. The many-light estimator
+    therefore draws every candidate from the pixel's own descent over the current frame's light table and keeps nothing
+    a pixel chose for any other pixel or any later frame: no reservoir, no stored visibility, no per-cell or per-tile
+    stochastic selection (the light grid is a deterministic cull and cut, not a sample). All noise reduction on the
+    result is NRD2's (single frame, rules 1 to 17) and TAA's. The exact light's choice (CSRdShadow) is likewise a pure
+    function of the current frame since S0: the prior pick is not read. **Counsel should review this mapping and
+    `docs/plans/wave4/MANY_LIGHTS.md` section 2** (an engineering reading of claim elements, not a clearance; the light
+    BVH itself, from Lightcuts, Conty Estevez and Kulla 2018 and Moreau et al. 2019, had no patent found). If a licence
+    or counsel clears 11,948,246, reservoir reuse is the first thing to add on top.
+
 NRD's own sweep (multi-scale learned blending, hit-distance kernels, push-pull filling) is section 9 of
 the private patents document. **Counsel should review before either feature ships.** Nothing is vendored: the
 code is `Aver.Render.Neural` and the in-house filters, plus the MIT FidelityFX Denoiser (whose licence

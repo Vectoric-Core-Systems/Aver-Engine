@@ -119,6 +119,9 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
         s.voxelResolution = s.voxelResolution < 256u ? s.voxelResolution : 256u;
     if (project.denoiser  >= 0) setDenoiserMode(s, static_cast<u32>(project.denoiser));   // 0, 1, 2 = NRD2
     if (project.ptMode    >= 0) s.ptMode   = static_cast<u32>(project.ptMode);
+    // RENDER.MANYLIGHTS rides the plain-knob shape too: no ladder rung (its S/M rungs follow the RT tier on their own),
+    // so an absent key leaves the engine default (auto). 3, the exhaustive ground truth, is console-only.
+    if (project.manyLights >= 0) s.manyLights = static_cast<u32>(project.manyLights > 2 ? 2 : project.manyLights);
 
     // RENDER.RESTIRHISTORY rides the same plain-knob shape as giMode/denoiser just above, NOT the
     // tier-derived one below: giRestirMaxHistory has no ladder rung to fall back to (Voxi.hpp's own
@@ -163,6 +166,10 @@ inline void applyManifestKnobs(const fmt::ProjectDesc& project, Settings& s) {
     // NO MANIFEST KEY EXISTS FOR EITHER OF THESE -- unconditional, every apply.
     s.giSkyOcclusionRays = ladder::giSkyOcclusionRays(s.rayTracing);
     s.giSkyOcclusionTile = ladder::giSkyOcclusionTile(s.rayTracing);
+    // The many-light budget (MANY_LIGHTS.md) has no manifest key either: S, M and the hit M follow the RT tier.
+    s.lightSamples       = ladder::lightSamples(s.rayTracing);
+    s.lightCandidates    = ladder::lightCandidates(s.rayTracing);
+    s.lightHitCandidates = ladder::lightHitCandidates(s.rayTracing);
 }
 
 // THE TWO-PHASE APPLY, shared by both hosts (R2). `s` is the Settings a caller is building up --
@@ -560,6 +567,9 @@ inline void captureVoxiSettings(fmt::ProjectDesc& project, const Settings& reque
     project.denoiser           = static_cast<int>(denoiserMode(requested));
     project.ptMode             = static_cast<int>(requested.ptMode);
     project.restirHistory     = static_cast<int>(requested.giRestirMaxHistory);
+    // RENDER.MANYLIGHTS: unconditional capture, the denoiser's shape; the console's mode 3 is not written (it would
+    // read back as 'on' and change the next load), so the stored value stays as it was.
+    if (requested.manyLights <= 2u) project.manyLights = static_cast<int>(requested.manyLights);
     // RENDER.RDSTAGES: unconditional capture, same "EVERYTHING ELSE" rule as RESTIRHISTORY directly
     // above (giMode/denoiser's shape), never captureKnob's four-branch tier-aware rule -- there is no
     // ladder rung for a tier change to race against.

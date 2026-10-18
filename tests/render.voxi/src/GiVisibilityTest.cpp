@@ -490,14 +490,15 @@ int main() {
 
     // ---- 12. SOURCE ASSERTION: VoxiRenderer.cpp's binding-count static_assert (consumed from L4) ----
     {
-        check(has(rendererCppText(), "kVoxiSrvCount == 25 && kVoxiUavCount == 25"),
-              "VoxiRenderer.cpp asserts the widened binding counts (25 SRV slots, 25 UAV slots) this "
+        check(has(rendererCppText(), "kVoxiSrvCount == 25 && kVoxiUavCount == 27"),
+              "VoxiRenderer.cpp asserts the widened binding counts (25 SRV slots, 27 UAV slots) this "
               "lane's t16/u10 registers depend on (u11-u15 are the staged ray-driven buffers, t17/u16 "
               "are the occlusion-aware fog design's air sky-visibility volume, u17/u18 are the "
               "sub-stage splits' own GI-trace candidate and shadow-probe tile buffers, t18/t19/u19 are "
               "the local-light list and its visibility history, t22/u20/u21 are the radiance cache's "
               "cascade info, accumulator and cells, u22 is Path Tracing's accumulation, u23 the reflection "
-              "denoiser input, u24 the volumetric-fog froxel volume)");
+              "denoiser input, u24 the volumetric-fog froxel volume, u25/u26 the many-light tail's diffuse and "
+              "specular radiance)");
     }
 
     if (g_failures == 0) {

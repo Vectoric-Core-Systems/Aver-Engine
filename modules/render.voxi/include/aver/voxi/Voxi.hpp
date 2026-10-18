@@ -262,6 +262,21 @@ struct Settings {
     u32 lightRaysPerBlock = 6;   // visible surface: rays per 2x2 pixel block for the lights besides each pixel's exact one (1-8)
     u32 lightRaysPerHit   = 1;   // GI, reflection and path hits (clamped to [1, 8])
 
+    // ---- MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md, docs/rendering/MANY_LIGHTS.md) ------------------------------
+    // Stochastic direct lighting from a light tree: per point, M candidates by importance, RIS into S slots, one shadow
+    // ray each. Needs NRD2 and ray tracing; a scene with manyLightsMin lights or fewer renders as without it.
+    // 0 = legacy (the grid's capped tail), 1 = auto (engage above manyLightsMin lights), 2 = force (any count),
+    // 3 = exhaustive (every light, one ray each, at most 512 lights: the ground truth for the unbiasedness gate).
+    u32 manyLights = 1;
+    u32 manyLightsMin = 48;      // auto engages above this many lights
+    // Tier-derived (QualityLadder.hpp lightSamples/lightCandidates/lightHitCandidates); these defaults are Medium's rung.
+    u32 lightSamples = 1;        // S: shadow rays per point for the tail (1 to 4)
+    u32 lightCandidates = 8;     // M: candidates drawn per point (2 to 16)
+    u32 lightHitCandidates = 4;  // M at GI, reflection and path hits (1 to 8)
+    f32 lightWeightClamp = 0.0f; // caps a candidate's weight at this many times the running mean (0 = off; a bias knob)
+    u32 debugStressLights = 0;   // adds this many synthetic point lights around the camera (0 = none), for scale tests
+    u32 debugStressSeed = 1;
+
     // ---- staged ray-driven bit-field toggles (cb_.giShadowParams.w / gGiShadowParams.w) ---------
     // Four independent RUNTIME toggles VoxiRenderer::prePass packs into cb_.giShadowParams[3] every frame.
 
@@ -413,6 +428,10 @@ public:
     static u32 giSkyOcclusionRaysForQuality(Quality q);
     // Sky-occlusion ray coherence tile for a ray-tracing tier; see Settings::giSkyOcclusionTile.
     static u32 giSkyOcclusionTileForQuality(Quality q);
+    // Many-light direct lighting's budget for a ray-tracing tier. See Settings::lightSamples and the two after it.
+    static u32 lightSamplesForQuality(Quality q);
+    static u32 lightCandidatesForQuality(Quality q);
+    static u32 lightHitCandidatesForQuality(Quality q);
     static u32 rtPixelsPerRayTileForQuality(Quality q);
     static u32 rtShadowDenoiseForQuality(Quality q);
     // 1 for every RT-capable tier except Low, which rasterises by explicit product decision (D3).

@@ -36,6 +36,9 @@ class VoxiFroxelFog {
 public:
     // Voxi main table 0's UAV slot the output volume is bound at; MUST match `register(u24)` in voxi.hlsl.
     static constexpr u32 kVolumeUavSlot = 24;
+    // Table 1's registers follow table 0's: gFxHist register(t25), gFxCur register(u27) in voxi_froxel.hlsl.
+    static constexpr u32 kHistSrvRegister = 25;
+    static constexpr u32 kCurUavRegister  = 27;
     // Where the volume starts, cm. Nearer than this the air is taken as clear.
     static constexpr f32 kNearCm = 10.0f;
 
