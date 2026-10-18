@@ -609,6 +609,7 @@ private:
     // The add-node popup's search box. Cleared and focused every time the popup opens, so a stale
     // filter from last time is never still applied.
     char addSearch_[128] = {};
+    i32  addHighlight_ = 0;   // the search row Enter adds (Up/Down move it)
 
     char newFuncPinBuf_[64] = {};
     int newFuncPinType_ = 0;               // index into the same float/int/bool list the Variables panel uses

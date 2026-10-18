@@ -114,6 +114,7 @@ private:
     std::string loadError_;
     bool dirty_ = false;
     i32 selected_ = 0;
+    char addSearch_[64] = {};   // the Add child menu's filter
     SnapshotUndo<synapse::BtAsset> history_;
     SplitPane split_;
 

@@ -18,13 +18,13 @@ endfunction()
 aver_graphtool_test(GraphProblemsTest)
 aver_graphtool_test(GraphDebugModelTest)
 aver_graphtool_test(GraphFindTest)
-aver_graphtool_test(GraphClipboardTest ${AVER_GRAPHTOOLS_SRC}/GraphEditorGeometry.cpp)
+aver_graphtool_test(GraphClipboardTest ${AVER_GRAPHTOOLS_SRC}/GraphEditorGeometry.cpp ${AVER_GRAPHTOOLS_SRC}/GraphNodeDefs.cpp)
 
 # GraphCollapseTest drives the real GraphEditor (headless: AVER_WITH_IMGUI is not defined) so the command
 # is proved as one undo step and the saved file is what the C# suite compiles and runs. It reads
 # collapse_test.ocgraph and writes collapse_test.output.ocgraph beside it, as GraphEditorLoadSaveTest does
 # for attribute_edit_test.
-aver_graphtool_test(GraphCollapseTest ${AVER_GRAPHTOOLS_SRC}/GraphEditor.cpp ${AVER_GRAPHTOOLS_SRC}/GraphEditorGeometry.cpp)
+aver_graphtool_test(GraphCollapseTest ${AVER_GRAPHTOOLS_SRC}/GraphEditor.cpp ${AVER_GRAPHTOOLS_SRC}/GraphEditorComponents.cpp ${AVER_GRAPHTOOLS_SRC}/GraphEditorCanvas.cpp ${AVER_GRAPHTOOLS_SRC}/GraphEditorGeometry.cpp ${AVER_GRAPHTOOLS_SRC}/GraphNodeDefs.cpp)
 target_compile_definitions(GraphCollapseTest PRIVATE
   AVER_COLLAPSE_FIXTURE="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/collapse_test.ocgraph"
   AVER_COLLAPSE_FIXTURE_OUTPUT="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/collapse_test.output.ocgraph")

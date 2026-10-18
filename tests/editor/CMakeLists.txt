@@ -138,7 +138,8 @@ set_target_properties(MaterialResolveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${
 # GraphNodeDefs.hpp is header-only (see its own header comment) and needs no extra source file.
 add_executable(GraphEditorGeometryTest
   src/GraphEditorGeometryTest.cpp
-  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorGeometry.cpp)
+  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorGeometry.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphNodeDefs.cpp)
 target_include_directories(GraphEditorGeometryTest PRIVATE
   ${CMAKE_SOURCE_DIR}/sandbox/src)
 # The repo root, so testNodeCatalogCoversTheCompiler can READ OcGraphParser.cs and compare the two
@@ -166,7 +167,10 @@ set_target_properties(GraphEditorGeometryTest PROPERTIES RUNTIME_OUTPUT_DIRECTOR
 add_executable(GraphEditorLoadSaveTest
   src/GraphEditorLoadSaveTest.cpp
   ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditor.cpp
-  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorGeometry.cpp)
+  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorComponents.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorCanvas.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphEditorGeometry.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/GraphNodeDefs.cpp)
 target_include_directories(GraphEditorLoadSaveTest PRIVATE
   ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_compile_definitions(GraphEditorLoadSaveTest PRIVATE

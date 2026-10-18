@@ -1589,6 +1589,18 @@ static void testPaletteSearchRanksSensibly() {
           "an empty query matches nothing -- the caller shows its category menus instead");
     check(graphPaletteSearch("zzzznotanode", kDomainGameplay).empty(),
           "and a query nothing matches returns nothing rather than everything");
+    {
+        // Spaces, underscores and case are ignored, and the words may come in any order.
+        const auto has = [](const std::vector<const GraphNodeDesc*>& v, const char* typeId) {
+            for (const GraphNodeDesc* d : v) if (d->typeId == typeId) return true;
+            return false;
+        };
+        check(has(graphPaletteSearch("setlight", kDomainGameplay), "AN_SetLightIntensity"), "'setlight' finds Set Light Intensity");
+        check(has(graphPaletteSearch("light set", kDomainGameplay), "AN_SetLightIntensity"), "'light set' finds it too (any word order)");
+        check(has(graphPaletteSearch("SET_LIGHT_INT", kDomainGameplay), "AN_SetLightIntensity"), "and so does 'SET_LIGHT_INT'");
+        const auto set = graphPaletteSearch("set", kDomainGameplay, 1000);
+        check(!set.empty() && editor::detail::ciFind(set[0]->displayName, "set") == 0, "a name that starts with the query still ranks first");
+    }
 
     {
         const auto hits = graphPaletteSearch("add", kDomainGameplay);

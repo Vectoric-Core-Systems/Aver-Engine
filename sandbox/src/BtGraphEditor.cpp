@@ -612,13 +612,34 @@ void BtGraphEditor::drawCanvas(f32 width) {
 
     if (ImGui::BeginPopup("##btgctx")) {
         if (ImGui::BeginMenu("Add child")) {
+            // Typing filters the list (case-insensitive, any part of the label); Enter adds the first match.
+            if (ImGui::IsWindowAppearing()) {
+                addSearch_[0] = '\0';
+                ImGui::SetKeyboardFocusHere();
+            }
+            ImGui::SetNextItemWidth(220.0f);
+            const bool enter = ImGui::InputTextWithHint("##btaddsearch", "Search...", addSearch_, sizeof addSearch_,
+                                                        ImGuiInputTextFlags_EnterReturnsTrue);
+            const auto matches = [this](const std::string& label) {
+                std::string a = label, q = addSearch_;
+                for (char& c : a) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                for (char& c : q) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return a.find(q) != std::string::npos;
+            };
+            bool firstTaken = !enter;
+            const auto item = [&](const std::string& label, auto&& add) {
+                if (!matches(label)) return;
+                if (!firstTaken) { firstTaken = true; add(); ImGui::CloseCurrentPopup(); return; }
+                if (ImGui::MenuItem(label.c_str())) add();
+            };
+            ImGui::Separator();
             for (const fmt::OcBtNodeKind k : kStructural)
-                if (ImGui::MenuItem(synapse::btNodeKindName(k))) addChild(k);
+                item(synapse::btNodeKindName(k), [&] { addChild(k); });
             ImGui::Separator();
             for (const char* nm : kConditionNames)
-                if (ImGui::MenuItem((std::string("Condition  ") + nm).c_str())) addChild(fmt::OcBtNodeKind::Condition, nm);
+                item(std::string("Condition  ") + nm, [&] { addChild(fmt::OcBtNodeKind::Condition, nm); });
             for (const char* nm : kActionNames)
-                if (ImGui::MenuItem((std::string("Action  ") + nm).c_str())) addChild(fmt::OcBtNodeKind::Action, nm);
+                item(std::string("Action  ") + nm, [&] { addChild(fmt::OcBtNodeKind::Action, nm); });
             ImGui::EndMenu();
         }
         if (ImGui::MenuItem("Add decorator")) addDecorator();

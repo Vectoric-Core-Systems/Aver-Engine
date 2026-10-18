@@ -27,6 +27,8 @@
 // no property panel for ANY node, so extraTokens round-tripped opaquely but wasn't readable/editable
 // from the GUI. A type's `attributes` list is what the details panel shows as labelled rows; anything
 // else in extraTokens shows too, as a generic row (GraphEditorGeometry.hpp's computeAttributeRows).
+#include "aver/core/Types.hpp"
+
 #include <algorithm>    // stable_sort, for graphPaletteSearch's ranking
 #include <cstdint>
 #include <string>
@@ -1125,12 +1127,11 @@ inline bool ciEquals(std::string_view a, std::string_view b) {
 
 } // namespace detail
 
-// THE TABLE: inline + function-local static so this header can be included from multiple translation
-// units (palette, node-spawning code, headless test) without an ODR violation and no .cpp of its own.
-inline const std::vector<GraphNodeDesc>& graphNodeCatalog() {
-    static const std::vector<GraphNodeDesc> table = detail::buildCatalog();
-    return table;
-}
+// THE TABLE, built once on first use. Defined in GraphNodeDefs.cpp, not inline: buildCatalog's 600-odd
+// rows are tens of thousands of COFF sections of cleanup code in Debug, and every translation unit that
+// called an inline graphNodeCatalog() compiled them again (GraphEditor.cpp crossed the 65,536 cap). A
+// target that uses the catalog compiles sandbox/src/GraphNodeDefs.cpp.
+const std::vector<GraphNodeDesc>& graphNodeCatalog();
 
 // Case-insensitive lookup: the file format and GraphCompiler.cs both accept mixed case ("ConstFloat"
 // in the fixture, "constfloat" in the C# switch). Returns nullptr for an unknown type -- the node
@@ -1184,6 +1185,32 @@ inline usize ciFind(std::string_view hay, std::string_view needle) {
     return std::string_view::npos;
 }
 
+// Lower-case letters and digits only: "Set Light Intensity", "setlightintensity" and "set_light" compare alike.
+inline std::string squash(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c >= 'A' && c <= 'Z') out += char(c - 'A' + 'a');
+        else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) out += c;
+    }
+    return out;
+}
+
+// The query's words, squashed; empty words dropped.
+inline std::vector<std::string> queryWords(std::string_view q) {
+    std::vector<std::string> out;
+    usize i = 0;
+    while (i < q.size()) {
+        while (i < q.size() && (q[i] == ' ' || q[i] == '	')) ++i;
+        usize j = i;
+        while (j < q.size() && q[j] != ' ' && q[j] != '	') ++j;
+        std::string w = squash(q.substr(i, j - i));
+        if (!w.empty()) out.push_back(std::move(w));
+        i = j;
+    }
+    return out;
+}
+
 } // namespace detail
 
 // Palette rows in `domain` matching `query`, best first, at most `limit` of them.
@@ -1192,6 +1219,9 @@ inline usize ciFind(std::string_view hay, std::string_view needle) {
 //   0  the display name STARTS with the query        -- "add" -> Add, AddChild
 //   1  the display name contains it                  -- "add" -> VecAdd
 //   2  only the type id or the category contains it   -- "vector" -> every Vector row
+//   3  every word of the query, spaces and case ignored, is in the name, type id or category, in any order
+//      -- "light set" and "setlight" -> Set Light Intensity
+// Tiers 0 and 1 also match with spaces, underscores and case ignored ("setlight" starts "Set Light ...").
 // Ties keep catalog order, grouping a family rather than shuffling it.
 //
 // An empty query returns nothing rather than "everything": the caller shows category menus instead,
@@ -1202,6 +1232,8 @@ inline std::vector<const GraphNodeDesc*> graphPaletteSearch(std::string_view que
     std::vector<const GraphNodeDesc*> out;
     if (query.empty() || limit == 0) return out;
 
+    const std::string sq = detail::squash(query);
+    const std::vector<std::string> words = detail::queryWords(query);
     std::vector<std::pair<int, const GraphNodeDesc*>> hits;
     for (const GraphNodeDesc& d : graphNodeCatalog()) {
         if ((d.domain & domain) == 0u) continue;
@@ -1213,8 +1245,20 @@ inline std::vector<const GraphNodeDesc*> graphPaletteSearch(std::string_view que
         int rank = -1;
         if (inName == 0)                              rank = 0;
         else if (inName != std::string_view::npos)    rank = 1;
-        else if (detail::ciFind(d.typeId, query) != std::string_view::npos ||
-                 detail::ciFind(d.category, query) != std::string_view::npos) rank = 2;
+        if (rank < 0 && !sq.empty()) {
+            const usize at = detail::squash(d.displayName).find(sq);
+            if (at == 0)                       rank = 0;
+            else if (at != std::string::npos)  rank = 1;
+        }
+        if (rank < 0 && (detail::ciFind(d.typeId, query) != std::string_view::npos ||
+                         detail::ciFind(d.category, query) != std::string_view::npos)) rank = 2;
+        if (rank < 0 && !words.empty()) {
+            const std::string all = detail::squash(d.displayName) + " " + detail::squash(d.typeId) + " " +
+                                    detail::squash(d.category);
+            bool every = true;
+            for (const std::string& w : words) every = every && all.find(w) != std::string::npos;
+            if (every) rank = 3;
+        }
         if (rank >= 0) hits.push_back({rank, &d});
     }
 
