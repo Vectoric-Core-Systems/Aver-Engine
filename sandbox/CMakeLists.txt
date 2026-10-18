@@ -11,6 +11,8 @@ add_executable(Sandbox WIN32
   # level load, project, play) apart from editor-side ones so the runtime half can move into Runtime/.
   src/SandboxMain.cpp
   src/SandboxApp.cpp
+  src/SandboxInit.cpp
+  src/SandboxUpdate.cpp
   src/SandboxAssets.cpp
   src/SandboxRender.cpp
   src/SandboxLevelLoad.cpp
