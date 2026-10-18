@@ -43,11 +43,6 @@ static u32 logTextRows(std::string_view t) {
     return n ? n : 1u;
 }
 
-SandboxApp::SandboxApp(u64 maxFrames, bool headless, std::string beamPath, std::string shot, Tool initialTool)
-    : maxFrames_(maxFrames), headless_(headless), beamPath_(std::move(beamPath)), shot_(std::move(shot)), initialTool_(initialTool) {
-    setLogSink(&SandboxApp::logSink, this);
-}
-
 // Appends log to Output Log buffer; trims for splash (keeps subsystem tag, drops level/paths).
 // Must not log: core log mutex is held.
  std::string SandboxApp::splashTextFor(std::string_view msg) {

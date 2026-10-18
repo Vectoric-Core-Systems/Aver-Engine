@@ -13,6 +13,7 @@ add_executable(Sandbox WIN32
   src/SandboxApp.cpp
   src/SandboxInit.cpp
   src/SandboxUpdate.cpp
+  src/SandboxConstruct.cpp
   src/SandboxAssets.cpp
   src/SandboxRender.cpp
   src/SandboxLevelLoad.cpp
