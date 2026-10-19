@@ -3179,7 +3179,7 @@ void SandboxApp::buildViewportOverlay() {
     }
     ImGui::End();
 
-    const f32 icon = 26.0f*dpi_, caretW = 14.0f*dpi_, tiny = 2.0f*dpi_, gap = 6.0f*dpi_;
+    const f32 icon = 20.0f*dpi_, caretW = 11.0f*dpi_, tiny = 2.0f*dpi_, gap = 5.0f*dpi_;
     ImGui::SetNextWindowPos(ImVec2(vpX_+vpW_-pad, vpY_+pad), ImGuiCond_Always, ImVec2(1,0));
     ImGui::SetNextWindowBgAlpha(0.62f);
     ImGui::Begin("##vpbar_right", nullptr, f);
@@ -3192,7 +3192,7 @@ void SandboxApp::buildViewportOverlay() {
         ImGui::InvisibleButton(id, ImVec2(caretW, icon));
         const bool hov = ImGui::IsItemHovered(), clk = ImGui::IsItemClicked();
         if (hov) dl->AddRectFilled(p, ImVec2(p.x+caretW,p.y+icon), IM_COL32(74,76,82,255), 3.0f);
-        const ImVec2 c(p.x+caretW*0.5f, p.y+icon*0.5f); const f32 s=3.0f*dpi_;
+        const ImVec2 c(p.x+caretW*0.5f, p.y+icon*0.5f); const f32 s=2.5f*dpi_;
         const ImU32 col = on ? IM_COL32(232,150,60,255) : IM_COL32(190,191,195,255);
         dl->AddTriangleFilled(ImVec2(c.x-s,c.y-s*0.6f), ImVec2(c.x+s,c.y-s*0.6f), ImVec2(c.x,c.y+s*0.8f), col);
         return clk;
@@ -3326,64 +3326,6 @@ void SandboxApp::buildViewportOverlay() {
         const f32 opts[] = {0.05f,0.1f,0.25f,0.5f,1};
         for (f32 v : opts){ char b[24]; std::snprintf(b,sizeof b,"%g", v); if (ImGui::Selectable(b, scaleSnap_==v)){ scaleSnap_=v; snapScale_=true; } }
         ImGui::EndPopup();
-    }
-    ImGui::End();
-
-    // Raised by the open drawer's height, a fix not a nicety: this hint anchors to the viewport's
-    // bottom edge, but vpH_ isn't reduced when a drawer opens (an overlay, not a dock split), so it
-    // used to sit on top of the drawer's last ~70px. Cosmetic for Content Browser/Output Log; the
-    // Console's bottom row is its input line, invisible underneath but still clickable/typeable
-    // blind (overlay is NoInputs). drawerPixelH_ is the ANIMATED height, so the hint slides with
-    // it, zero when closed.
-    ImGui::SetNextWindowPos(ImVec2(vpX_+pad, vpY_+vpH_-pad-drawerPixelH_), ImGuiCond_Always, ImVec2(0,1));
-    ImGui::SetNextWindowBgAlpha(0.35f);
-    ImGui::Begin("##vphint", nullptr, f | ImGuiWindowFlags_NoInputs);
-    // Ejected reads ahead of the mode switch: the mode is still whatever it was when Play started
-    // (Simulate, usually), but the hint that matters now is "you have the editor back", not that one.
-    // playEjected() is unguarded (false with no framework), so this needs no module guard either.
-    if (playEjected()) {
-        // The Pawn to Camera clause only when that command has a chord ("none brings the pawn here"
-        // otherwise).
-        const editor::Chord& pawnChord = keybinds_.chordFor(editor::CommandId::PlayPawnToCamera);
-        const std::string pawnClause =
-            pawnChord.isBound() ? editor::chordToString(pawnChord) + " brings the pawn here, " : std::string();
-        ImGui::Text("Ejected  |  the game is running  |  %s possesses, %s%s stops",
-                    editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayEject)).c_str(),
-                    pawnClause.c_str(),
-                    editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayStop)).c_str());
-    } else
-    // One arm per mode: the two-arm version said "Tab to Landscape" while in Foliage, and called
-    // the mode "Select" while a foliage brush was armed -- worse than no hint at all.
-    switch (mode_) {
-#if AVER_MODULE_LANDSCAPE
-        case EditorMode::Landscape:
-            ImGui::Text("Landscape: %s  |  LMB paint  |  radius %.0f cm, strength %.0f cm  |  "
-                        "1-4 brushes, Ctrl+Z undoes a stroke, Tab to Select",
-                        kSculptToolNames[(int)sculptTool_], sculptRadiusCm_, sculptStrengthCm_);
-            break;
-        case EditorMode::Foliage:
-            ImGui::Text("Foliage  |  LMB paint, Shift+LMB erase  |  radius %.0f cm, density %.0f  |  "
-                        "Ctrl+Z undoes a whole stroke, Tab to Select", foliageRadiusCm_, foliageDensity_);
-            break;
-#else
-        case EditorMode::Landscape:
-        case EditorMode::Foliage:
-            break;
-#endif
-        case EditorMode::Simulate:
-            ImGui::Text("Simulate  |  the game is running in the viewport  |  "
-                        "%s releases the mouse, Tab to Select",
-                        editor::chordToString(keybinds_.chordFor(editor::CommandId::PlayReleaseMouse)).c_str());
-            break;
-        case EditorMode::Animate:
-            ImGui::Text("Animate  |  fly the camera and press K to key it  |  Shift+K keys the selected track  |  "
-                        "Space plays, Tab to Select");
-            break;
-        case EditorMode::Select:
-        default:
-            ImGui::Text("Select: %s  |  RMB fly (WASD/QE)  wheel speed  MMB pan  F focus  |  "
-                        "1-4 tools, Tab to the last mode", kToolNames[(int)tool_]);
-            break;
     }
     ImGui::End();
 

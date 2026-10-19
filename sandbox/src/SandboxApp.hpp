@@ -829,7 +829,7 @@ inline constexpr f32 kEditorCubeHalf  = 50.0f;     // cm
 inline constexpr f32 kPlayerStartCapsuleRadius = 40.0f;       // cm
 inline constexpr f32 kPlayerStartCapsuleHalfHeight = 92.0f;   // cm (184 cm tall, pole to pole)
 inline constexpr f32 kPlayerStartArrowLength = 80.0f;         // cm
-inline constexpr f32 kPlayerStartIconHalfSize = 24.0f;        // cm
+inline constexpr f32 kPlayerStartIconHalfSize = 16.0f;        // cm
 static const Vec3 kPlayerStartColor = {1.0f, 138.0f/255.0f, 5.0f/255.0f};                  // sRGB (255,138,5)
 static const Vec3 kPlayerStartArrowColor = {150.0f/255.0f, 200.0f/255.0f, 1.0f};           // sRGB (150,200,255)
 
