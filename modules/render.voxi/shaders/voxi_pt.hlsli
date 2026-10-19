@@ -14,7 +14,10 @@
 
 // MANY LIGHTS (docs/plans/wave4/MANY_LIGHTS.md): the compiles that have the full direct-light evaluator and so the
 // light-tree estimator (the lite arm of averDirectLights, glass and the single pass never do).
-#if AVER_RD_LAMPS && defined(AVER_RT_BINDLESS) && !AVER_BLENDED_PASS && !AVER_RD_SINGLE_PASS
+// COMPUTE STAGES ONLY: compiled into the ray-driven pixel shaders, the many-light code (gated off at runtime, but still
+// allocated) pushed PSRayDriven past the register limit and the GPU hung in the first frames on AMD, feature on or off.
+// The pixel shaders' hits keep the ordinary light loop; CSRdManyLights and the compute GI/reflection stages sample the tree.
+#if AVER_RD_LAMPS && defined(AVER_RT_BINDLESS) && !AVER_BLENDED_PASS && !AVER_RD_SINGLE_PASS &&     defined(__SHADER_TARGET_STAGE) && __SHADER_TARGET_STAGE == __SHADER_STAGE_COMPUTE
 #define AVER_MANY_LIGHTS 1
 #else
 #define AVER_MANY_LIGHTS 0
@@ -363,6 +366,7 @@ float3 averDirectLights(AverSurface s, float3 pos, float2 pixel, inout uint rng,
 #elif AVER_RD_LAMPS
     // MANY LIGHTS (MANY_LIGHTS.md 3.3, hits): the tree's estimator in place of the top-4 loop below, when the frame runs
     // it (rtManyLights), or every light with one ray (voxi.manyLights 3). Still one shading call, inside the loop.
+#if AVER_MANY_LIGHTS
     if (rtManyLights() || rtManyLightsExhaustive()) {
         const RdTreeHdr th = rdTreeHeader();
         if (th.valid) {
@@ -374,6 +378,7 @@ float3 averDirectLights(AverSurface s, float3 pos, float2 pixel, inout uint rng,
             return dif + spc;
         }
     }
+#endif
     // EVERY LIGHT THE SUN'S WAY, within a ray budget, nothing picked at random (UNIFIED_LIGHTS.md "Ray budget"):
     // the strongest lightRaysPerHit lights (at most 4) are shaded exactly with their own shadow ray; every other light
     // is summed as diffuse irradiance in ONE cheap loop and takes those rays' irradiance-weighted visibility. Hits are

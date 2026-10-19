@@ -226,7 +226,8 @@ PVSOut pLinkedRibbon(PQuadIn vin, uint inst) {
     PParticle q = gParticles[prev];
     if (!pLinkAlive(p) || !pLinkAlive(q) || p.id != q.id + 1u) return pDegenerate();
     bool head = vin.corner.x > 0.0;
-    PParticle e = head ? p : q;
+    PParticle e = q;   // DXC has no ?: on structs
+    if (head) e = p;
     float3 A = q.position, B = p.position;
     float3 tang = B - A;
     if (head) {
