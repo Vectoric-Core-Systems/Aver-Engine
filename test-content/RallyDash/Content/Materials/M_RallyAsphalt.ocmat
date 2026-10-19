@@ -1,0 +1,13 @@
+OCMAT 1
+# M_RallyAsphalt: authored by make_rally_dash.py (flat colour, no textures).
+SHADER standard
+BLEND opaque
+CULL back
+FLAGS twosided=0 castshadow=1
+
+PARAM baseColorFactor 0.1 0.1 0.11 1
+PARAM metallicFactor 0
+PARAM roughnessFactor 0.92
+PARAM emissiveFactor 0 0 0
+PARAM normalScale 1
+PARAM occlusionStrength 1

@@ -1,0 +1,1369 @@
+OCGRAPH 1
+DOMAIN gameplay
+# THE RACE. One actor, placed in the level (PLACE none ... class AN_RallyRace); everything the game does lives here as a small state machine
+# in float VARs, so nothing needs to be shared between graphs (a graph cannot pass a number to another: FireEvent carries no payload).
+#
+#     phase 0  waiting     until the play session exists, the pawn is possessed and the car is built; then everything below starts
+#     phase 1  countdown   3 - 2 - 1, the car is held (handbrake) and has NO driver, so the Drive.* actions cannot move it
+#     phase 2  racing      GO!: the pawn gets in (AN_VehicleEnter), the clock runs, gates are tested every tick by distance
+#     phase 3  finished    after LAPS laps; the car stays driveable, the HUD shows the total time
+#
+# Checkpoints are tested by POSITION: each tick the car's distance from the next gate's centre (a constant) is compared with the gate radius.
+# Gate 0 is the start/finish line; gates 1.. come in driving order; passing gate 0 with every other gate behind completes a lap.
+# Numbers on the HUD are looked up in Data/Numbers.csv (row N is the number N), because a graph has no number-to-text node.
+# The graph is ticked in the editor before Play too, so phase 0 waits for IsPlaying and a possessed pawn.
+NAME RallyRace
+DESCRIPTION The race: countdown, gates, laps, lap times, respawn, and the HUD (a placed actor).
+
+CLASS AN_RallyRace Actor
+
+PARAM entity int
+PARAM deltaTime float
+VAR phase float 0
+VAR t float 0
+VAR lap float 1
+VAR lapTime float 0
+VAR totalTime float 0
+VAR bestLap float 0
+VAR nextGate float 1
+VAR lastGate float 0
+VAR goTimer float 0
+VAR cpFlash float 99
+VAR lastCount float 4
+VAR camDone float 0
+VAR sedanE int 0
+
+ENTRY start OnStart
+ENTRY tick OnTick
+NODE dt Param param=deltaTime
+NODE start OnStart
+NODE finduiwi_1 AN_FindUiWidget name=Root
+NODE not_2 Not
+NODE br_3 Branch
+NODE openuila_4 AN_OpenUiLayout path=UI/RallyHud.ocui
+NODE tick OnTick
+NODE seq_5 Sequence
+NODE getvar_6 GetVar var=phase
+NODE equal_7 Equal
+NODE kf_0_0 ConstFloat value=0.0
+NODE br_8 Branch
+NODE isplayin_9 IsPlaying
+NODE ki_0 ConstInt value=0
+NODE getplaye_10 GetPlayerPawn
+NODE inttoflo_11 IntToFloat
+NODE greater_12 Greater
+NODE kf_0_5 ConstFloat value=0.5
+NODE findenti_13 FindEntity name=Sedan
+NODE vehiclef_14 AN_VehicleFromEntity
+NODE and_15 And
+NODE and_16 And
+NODE and_17 And
+NODE br_18 Branch
+NODE setvar_19 SetVar var=sedanE
+NODE setvar_20 SetVar var=phase
+NODE kf_1_0 ConstFloat value=1.0
+NODE setvar_21 SetVar var=t
+NODE setvar_22 SetVar var=lap
+NODE setvar_23 SetVar var=lapTime
+NODE setvar_24 SetVar var=totalTime
+NODE setvar_25 SetVar var=bestLap
+NODE setvar_26 SetVar var=nextGate
+NODE setvar_27 SetVar var=lastGate
+NODE setvar_28 SetVar var=goTimer
+NODE setvar_29 SetVar var=cpFlash
+NODE kf_99_0 ConstFloat value=99.0
+NODE setvar_30 SetVar var=lastCount
+NODE kf_4_0 ConstFloat value=4.0
+NODE setvar_31 SetVar var=camDone
+NODE getvar_32 GetVar var=sedanE
+NODE camerase_33 AN_CameraSetViewTarget
+NODE kf_0_6 ConstFloat value=0.6
+NODE getvar_34 GetVar var=sedanE
+NODE vehicled_35 AN_VehicleDrive
+NODE finduiwi_36 AN_FindUiWidget name=Root
+NODE kb_true ConstBool value=true
+NODE setuivis_37 AN_SetUiVisible
+NODE seq_38 Sequence
+NODE getvar_39 GetVar var=phase
+NODE equal_40 Equal
+NODE br_41 Branch
+NODE seq_42 Sequence
+NODE getvar_43 GetVar var=t
+NODE add_44 Add
+NODE setvar_45 SetVar var=t
+NODE getvar_46 GetVar var=sedanE
+NODE vehicled_47 AN_VehicleDrive
+NODE seq_48 Sequence
+NODE getvar_49 GetVar var=t
+NODE subtract_50 Subtract
+NODE kf_3_0 ConstFloat value=3.0
+NODE ceil_51 Ceil
+NODE getvar_52 GetVar var=lastCount
+NODE notequal_53 NotEqual
+NODE greater_54 Greater
+NODE and_55 And
+NODE br_56 Branch
+NODE kb_false ConstBool value=false
+NODE playsoun_57 PlaySound sound=Sounds/Beep.wav
+NODE getvar_58 GetVar var=t
+NODE subtract_59 Subtract
+NODE ceil_60 Ceil
+NODE setvar_61 SetVar var=lastCount
+NODE getvar_62 GetVar var=t
+NODE greatere_63 GreaterEqual
+NODE br_64 Branch
+NODE getvar_65 GetVar var=sedanE
+NODE vehicled_66 AN_VehicleDrive
+NODE getvar_67 GetVar var=sedanE
+NODE getplaye_68 GetPlayerPawn
+NODE vehiclee_69 AN_VehicleEnter
+NODE playsoun_70 PlaySound sound=Sounds/Go.wav
+NODE camerapu_71 AN_CameraPushFovKick
+NODE setvar_72 SetVar var=phase
+NODE kf_2_0 ConstFloat value=2.0
+NODE setvar_73 SetVar var=goTimer
+NODE setvar_74 SetVar var=lapTime
+NODE setvar_75 SetVar var=totalTime
+NODE setvar_76 SetVar var=camDone
+NODE seq_77 Sequence
+NODE getvar_78 GetVar var=phase
+NODE greatere_79 GreaterEqual
+NODE br_80 Branch
+NODE getvar_81 GetVar var=sedanE
+NODE vehicled_82 AN_VehicleDriver
+NODE inttoflo_83 IntToFloat
+NODE equal_84 Equal
+NODE br_85 Branch
+NODE getvar_86 GetVar var=sedanE
+NODE getplaye_87 GetPlayerPawn
+NODE vehiclee_88 AN_VehicleEnter
+NODE seq_89 Sequence
+NODE getvar_90 GetVar var=sedanE
+NODE getworld_91 GetWorldPosition
+NODE getvar_92 GetVar var=phase
+NODE equal_93 Equal
+NODE br_94 Branch
+NODE seq_95 Sequence
+NODE getvar_96 GetVar var=lapTime
+NODE add_97 Add
+NODE setvar_98 SetVar var=lapTime
+NODE getvar_99 GetVar var=totalTime
+NODE add_100 Add
+NODE setvar_101 SetVar var=totalTime
+NODE getvar_102 GetVar var=goTimer
+NODE add_103 Add
+NODE setvar_104 SetVar var=goTimer
+NODE getvar_105 GetVar var=cpFlash
+NODE add_106 Add
+NODE setvar_107 SetVar var=cpFlash
+NODE seq_108 Sequence
+NODE getvar_109 GetVar var=camDone
+NODE less_110 Less
+NODE getvar_111 GetVar var=goTimer
+NODE greater_112 Greater
+NODE kf_0_3 ConstFloat value=0.3
+NODE and_113 And
+NODE br_114 Branch
+NODE getvar_115 GetVar var=sedanE
+NODE camerase_116 AN_CameraSetViewTarget
+NODE setvar_117 SetVar var=camDone
+NODE seq_118 Sequence
+NODE vecdista_119 AN_VecDistance2D
+NODE kf_6875_61 ConstFloat value=6875.61
+NODE kf_5480_91 ConstFloat value=5480.91
+NODE getvar_120 GetVar var=nextGate
+NODE equal_121 Equal
+NODE less_122 Less
+NODE kf_1250_0 ConstFloat value=1250.0
+NODE and_123 And
+NODE br_124 Branch
+NODE seq_125 Sequence
+NODE getvar_126 GetVar var=bestLap
+NODE equal_127 Equal
+NODE getvar_128 GetVar var=lapTime
+NODE getvar_129 GetVar var=bestLap
+NODE less_130 Less
+NODE or_131 Or
+NODE br_132 Branch
+NODE getvar_133 GetVar var=lapTime
+NODE setvar_134 SetVar var=bestLap
+NODE getvar_135 GetVar var=lap
+NODE greatere_136 GreaterEqual
+NODE br_137 Branch
+NODE setvar_138 SetVar var=phase
+NODE playsoun_139 PlaySound sound=Sounds/Finish.wav
+NODE add_140 Add
+NODE kf_120_0 ConstFloat value=120.0
+NODE ki_90 ConstInt value=90
+NODE spawnpar_141 AN_SpawnParticlesAt effect=Particles/Celebrate.ocparticle
+NODE camerapu_142 AN_CameraPushFovKick
+NODE kf_12_0 ConstFloat value=12.0
+NODE getvar_143 GetVar var=lap
+NODE add_144 Add
+NODE setvar_145 SetVar var=lap
+NODE setvar_146 SetVar var=lapTime
+NODE setvar_147 SetVar var=nextGate
+NODE setvar_148 SetVar var=lastGate
+NODE setvar_149 SetVar var=cpFlash
+NODE playsoun_150 PlaySound sound=Sounds/Lap.wav
+NODE add_151 Add
+NODE spawnpar_152 AN_SpawnParticlesAt effect=Particles/Celebrate.ocparticle
+NODE seq_153 Sequence
+NODE vecdista_154 AN_VecDistance2D
+NODE kf_m806_229 ConstFloat value=-806.229
+NODE kf_7608_25 ConstFloat value=7608.25
+NODE getvar_155 GetVar var=nextGate
+NODE equal_156 Equal
+NODE less_157 Less
+NODE and_158 And
+NODE br_159 Branch
+NODE setvar_160 SetVar var=lastGate
+NODE setvar_161 SetVar var=nextGate
+NODE setvar_162 SetVar var=cpFlash
+NODE playsoun_163 PlaySound sound=Sounds/Checkpoint.wav
+NODE seq_164 Sequence
+NODE vecdista_165 AN_VecDistance2D
+NODE kf_m8457_43 ConstFloat value=-8457.43
+NODE kf_5508_8 ConstFloat value=5508.8
+NODE getvar_166 GetVar var=nextGate
+NODE equal_167 Equal
+NODE less_168 Less
+NODE and_169 And
+NODE br_170 Branch
+NODE setvar_171 SetVar var=lastGate
+NODE setvar_172 SetVar var=nextGate
+NODE setvar_173 SetVar var=cpFlash
+NODE playsoun_174 PlaySound sound=Sounds/Checkpoint.wav
+NODE seq_175 Sequence
+NODE vecdista_176 AN_VecDistance2D
+NODE kf_m11622_3 ConstFloat value=-11622.3
+NODE kf_m1893_01 ConstFloat value=-1893.01
+NODE getvar_177 GetVar var=nextGate
+NODE equal_178 Equal
+NODE less_179 Less
+NODE and_180 And
+NODE br_181 Branch
+NODE setvar_182 SetVar var=lastGate
+NODE setvar_183 SetVar var=nextGate
+NODE setvar_184 SetVar var=cpFlash
+NODE playsoun_185 PlaySound sound=Sounds/Checkpoint.wav
+NODE seq_186 Sequence
+NODE vecdista_187 AN_VecDistance2D
+NODE kf_m7058_2 ConstFloat value=-7058.2
+NODE kf_m7533_96 ConstFloat value=-7533.96
+NODE getvar_188 GetVar var=nextGate
+NODE equal_189 Equal
+NODE less_190 Less
+NODE and_191 And
+NODE br_192 Branch
+NODE setvar_193 SetVar var=lastGate
+NODE setvar_194 SetVar var=nextGate
+NODE kf_5_0 ConstFloat value=5.0
+NODE setvar_195 SetVar var=cpFlash
+NODE playsoun_196 PlaySound sound=Sounds/Checkpoint.wav
+NODE seq_197 Sequence
+NODE vecdista_198 AN_VecDistance2D
+NODE kf_912_096 ConstFloat value=912.096
+NODE kf_m6346_99 ConstFloat value=-6346.99
+NODE getvar_199 GetVar var=nextGate
+NODE equal_200 Equal
+NODE less_201 Less
+NODE and_202 And
+NODE br_203 Branch
+NODE setvar_204 SetVar var=lastGate
+NODE setvar_205 SetVar var=nextGate
+NODE kf_6_0 ConstFloat value=6.0
+NODE setvar_206 SetVar var=cpFlash
+NODE playsoun_207 PlaySound sound=Sounds/Checkpoint.wav
+NODE seq_208 Sequence
+NODE vecdista_209 AN_VecDistance2D
+NODE kf_8954_06 ConstFloat value=8954.06
+NODE kf_m6093_5 ConstFloat value=-6093.5
+NODE getvar_210 GetVar var=nextGate
+NODE equal_211 Equal
+NODE less_212 Less
+NODE and_213 And
+NODE br_214 Branch
+NODE setvar_215 SetVar var=lastGate
+NODE setvar_216 SetVar var=nextGate
+NODE kf_7_0 ConstFloat value=7.0
+NODE setvar_217 SetVar var=cpFlash
+NODE playsoun_218 PlaySound sound=Sounds/Checkpoint.wav
+NODE vecdista_219 AN_VecDistance2D
+NODE kf_12798_7 ConstFloat value=12798.7
+NODE kf_225_545 ConstFloat value=225.545
+NODE getvar_220 GetVar var=nextGate
+NODE equal_221 Equal
+NODE less_222 Less
+NODE and_223 And
+NODE br_224 Branch
+NODE setvar_225 SetVar var=lastGate
+NODE setvar_226 SetVar var=nextGate
+NODE setvar_227 SetVar var=cpFlash
+NODE playsoun_228 PlaySound sound=Sounds/Checkpoint.wav
+NODE seq_229 Sequence
+NODE inputact_230 InputActionPressed action=Respawn
+NODE getvar_231 GetVar var=phase
+NODE greatere_232 GreaterEqual
+NODE and_233 And
+NODE br_234 Branch
+NODE seq_235 Sequence
+NODE getvar_236 GetVar var=lastGate
+NODE equal_237 Equal
+NODE br_238 Branch
+NODE getvar_239 GetVar var=sedanE
+NODE vehiclef_240 AN_VehicleFromEntity
+NODE vehicles_241 AN_VehicleSetPose
+NODE kf_9337_37 ConstFloat value=9337.37
+NODE kf_4548_84 ConstFloat value=4548.84
+NODE kf_40_0 ConstFloat value=40.0
+NODE kf_149_701 ConstFloat value=149.701
+NODE seq_242 Sequence
+NODE getvar_243 GetVar var=lastGate
+NODE equal_244 Equal
+NODE br_245 Branch
+NODE getvar_246 GetVar var=sedanE
+NODE vehiclef_247 AN_VehicleFromEntity
+NODE vehicles_248 AN_VehicleSetPose
+NODE kf_m175_639 ConstFloat value=-175.639
+NODE seq_249 Sequence
+NODE getvar_250 GetVar var=lastGate
+NODE equal_251 Equal
+NODE br_252 Branch
+NODE getvar_253 GetVar var=sedanE
+NODE vehiclef_254 AN_VehicleFromEntity
+NODE vehicles_255 AN_VehicleSetPose
+NODE kf_m134_471 ConstFloat value=-134.471
+NODE seq_256 Sequence
+NODE getvar_257 GetVar var=lastGate
+NODE equal_258 Equal
+NODE br_259 Branch
+NODE getvar_260 GetVar var=sedanE
+NODE vehiclef_261 AN_VehicleFromEntity
+NODE vehicles_262 AN_VehicleSetPose
+NODE kf_m94_7997 ConstFloat value=-94.7997
+NODE seq_263 Sequence
+NODE getvar_264 GetVar var=lastGate
+NODE equal_265 Equal
+NODE br_266 Branch
+NODE getvar_267 GetVar var=sedanE
+NODE vehiclef_268 AN_VehicleFromEntity
+NODE vehicles_269 AN_VehicleSetPose
+NODE kf_m4_99623 ConstFloat value=-4.99623
+NODE seq_270 Sequence
+NODE getvar_271 GetVar var=lastGate
+NODE equal_272 Equal
+NODE br_273 Branch
+NODE getvar_274 GetVar var=sedanE
+NODE vehiclef_275 AN_VehicleFromEntity
+NODE vehicles_276 AN_VehicleSetPose
+NODE kf_m11_813 ConstFloat value=-11.813
+NODE seq_277 Sequence
+NODE getvar_278 GetVar var=lastGate
+NODE equal_279 Equal
+NODE br_280 Branch
+NODE getvar_281 GetVar var=sedanE
+NODE vehiclef_282 AN_VehicleFromEntity
+NODE vehicles_283 AN_VehicleSetPose
+NODE kf_21_2268 ConstFloat value=21.2268
+NODE seq_284 Sequence
+NODE getvar_285 GetVar var=lastGate
+NODE equal_286 Equal
+NODE br_287 Branch
+NODE getvar_288 GetVar var=sedanE
+NODE vehiclef_289 AN_VehicleFromEntity
+NODE vehicles_290 AN_VehicleSetPose
+NODE kf_106_514 ConstFloat value=106.514
+NODE getvar_291 GetVar var=sedanE
+NODE vehicler_292 AN_VehicleRepair
+NODE cameracu_293 AN_CameraCut
+NODE getvar_294 GetVar var=phase
+NODE greatere_295 GreaterEqual
+NODE br_296 Branch
+NODE getvar_297 GetVar var=sedanE
+NODE vehiclet_298 AN_VehicleTelemetry
+NODE abs_299 Abs
+NODE multiply_300 Multiply
+NODE kf_0_036 ConstFloat value=0.036
+NODE min_301 Min
+NODE kf_999_0 ConstFloat value=999.0
+NODE clamp_302 Clamp
+NODE floor_303 Floor
+NODE floattoi_304 FloatToInt
+NODE finduiwi_305 AN_FindUiWidget name=SpeedValue
+NODE setuitex_306 AN_SetUiTextFromTable table=Data/Numbers.csv column=Plain
+NODE finduiwi_307 AN_FindUiWidget name=Speed
+NODE setuival_308 AN_SetUiValue
+NODE inttoflo_309 IntToFloat
+NODE add_310 Add
+NODE clamp_311 Clamp
+NODE kf_8_0 ConstFloat value=8.0
+NODE floor_312 Floor
+NODE floattoi_313 FloatToInt
+NODE finduiwi_314 AN_FindUiWidget name=GearValue
+NODE setuitex_315 AN_SetUiTextFromTable table=Data/Numbers.csv column=Gear
+NODE select_316 Select
+NODE finduiwi_317 AN_FindUiWidget name=Health
+NODE setuival_318 AN_SetUiValue
+NODE getvar_319 GetVar var=lap
+NODE min_320 Min
+NODE clamp_321 Clamp
+NODE floor_322 Floor
+NODE floattoi_323 FloatToInt
+NODE finduiwi_324 AN_FindUiWidget name=LapText
+NODE setuitex_325 AN_SetUiTextFromTable table=Data/Numbers.csv column=Lap
+NODE getvar_326 GetVar var=lapTime
+NODE divide_327 Divide
+NODE kf_60_0 ConstFloat value=60.0
+NODE floor_328 Floor
+NODE getvar_329 GetVar var=lapTime
+NODE mod_330 Mod
+NODE floor_331 Floor
+NODE getvar_332 GetVar var=lapTime
+NODE mod_333 Mod
+NODE multiply_334 Multiply
+NODE kf_100_0 ConstFloat value=100.0
+NODE floor_335 Floor
+NODE clamp_336 Clamp
+NODE floor_337 Floor
+NODE floattoi_338 FloatToInt
+NODE finduiwi_339 AN_FindUiWidget name=TimeMin
+NODE setuitex_340 AN_SetUiTextFromTable table=Data/Numbers.csv column=Plain
+NODE clamp_341 Clamp
+NODE floor_342 Floor
+NODE floattoi_343 FloatToInt
+NODE finduiwi_344 AN_FindUiWidget name=TimeSec
+NODE setuitex_345 AN_SetUiTextFromTable table=Data/Numbers.csv column=Pad2
+NODE clamp_346 Clamp
+NODE floor_347 Floor
+NODE floattoi_348 FloatToInt
+NODE finduiwi_349 AN_FindUiWidget name=TimeCs
+NODE setuitex_350 AN_SetUiTextFromTable table=Data/Numbers.csv column=Pad2
+NODE getvar_351 GetVar var=bestLap
+NODE divide_352 Divide
+NODE floor_353 Floor
+NODE getvar_354 GetVar var=bestLap
+NODE mod_355 Mod
+NODE floor_356 Floor
+NODE getvar_357 GetVar var=bestLap
+NODE mod_358 Mod
+NODE multiply_359 Multiply
+NODE floor_360 Floor
+NODE clamp_361 Clamp
+NODE floor_362 Floor
+NODE floattoi_363 FloatToInt
+NODE finduiwi_364 AN_FindUiWidget name=BestMin
+NODE setuitex_365 AN_SetUiTextFromTable table=Data/Numbers.csv column=Plain
+NODE clamp_366 Clamp
+NODE floor_367 Floor
+NODE floattoi_368 FloatToInt
+NODE finduiwi_369 AN_FindUiWidget name=BestSec
+NODE setuitex_370 AN_SetUiTextFromTable table=Data/Numbers.csv column=Pad2
+NODE clamp_371 Clamp
+NODE floor_372 Floor
+NODE floattoi_373 FloatToInt
+NODE finduiwi_374 AN_FindUiWidget name=BestCs
+NODE setuitex_375 AN_SetUiTextFromTable table=Data/Numbers.csv column=Pad2
+NODE getvar_376 GetVar var=bestLap
+NODE greater_377 Greater
+NODE finduiwi_378 AN_FindUiWidget name=BestRow
+NODE setuivis_379 AN_SetUiVisible
+NODE getvar_380 GetVar var=phase
+NODE equal_381 Equal
+NODE getvar_382 GetVar var=phase
+NODE equal_383 Equal
+NODE getvar_384 GetVar var=goTimer
+NODE less_385 Less
+NODE and_386 And
+NODE or_387 Or
+NODE getvar_388 GetVar var=phase
+NODE equal_389 Equal
+NODE getvar_390 GetVar var=t
+NODE subtract_391 Subtract
+NODE ceil_392 Ceil
+NODE select_393 Select
+NODE clamp_394 Clamp
+NODE floor_395 Floor
+NODE floattoi_396 FloatToInt
+NODE finduiwi_397 AN_FindUiWidget name=CountdownText
+NODE setuitex_398 AN_SetUiTextFromTable table=Data/Numbers.csv column=Count
+NODE finduiwi_399 AN_FindUiWidget name=CountdownText
+NODE setuivis_400 AN_SetUiVisible
+NODE getvar_401 GetVar var=phase
+NODE equal_402 Equal
+NODE getvar_403 GetVar var=cpFlash
+NODE less_404 Less
+NODE kf_1_5 ConstFloat value=1.5
+NODE and_405 And
+NODE finduiwi_406 AN_FindUiWidget name=CheckpointText
+NODE setuivis_407 AN_SetUiVisible
+NODE getvar_408 GetVar var=phase
+NODE greatere_409 GreaterEqual
+NODE and_410 And
+NODE less_411 Less
+NODE kf_0_02 ConstFloat value=0.02
+NODE and_412 And
+NODE finduiwi_413 AN_FindUiWidget name=WreckedText
+NODE setuivis_414 AN_SetUiVisible
+NODE getvar_415 GetVar var=phase
+NODE equal_416 Equal
+NODE finduiwi_417 AN_FindUiWidget name=FinishPanel
+NODE setuivis_418 AN_SetUiVisible
+NODE getvar_419 GetVar var=phase
+NODE equal_420 Equal
+NODE br_421 Branch
+NODE getvar_422 GetVar var=totalTime
+NODE divide_423 Divide
+NODE floor_424 Floor
+NODE getvar_425 GetVar var=totalTime
+NODE mod_426 Mod
+NODE floor_427 Floor
+NODE getvar_428 GetVar var=totalTime
+NODE mod_429 Mod
+NODE multiply_430 Multiply
+NODE floor_431 Floor
+NODE clamp_432 Clamp
+NODE floor_433 Floor
+NODE floattoi_434 FloatToInt
+NODE finduiwi_435 AN_FindUiWidget name=FinMin
+NODE setuitex_436 AN_SetUiTextFromTable table=Data/Numbers.csv column=Plain
+NODE clamp_437 Clamp
+NODE floor_438 Floor
+NODE floattoi_439 FloatToInt
+NODE finduiwi_440 AN_FindUiWidget name=FinSec
+NODE setuitex_441 AN_SetUiTextFromTable table=Data/Numbers.csv column=Pad2
+NODE clamp_442 Clamp
+NODE floor_443 Floor
+NODE floattoi_444 FloatToInt
+NODE finduiwi_445 AN_FindUiWidget name=FinCs
+NODE setuitex_446 AN_SetUiTextFromTable table=Data/Numbers.csv column=Pad2
+NODE getvar_447 GetVar var=bestLap
+NODE divide_448 Divide
+NODE floor_449 Floor
+NODE getvar_450 GetVar var=bestLap
+NODE mod_451 Mod
+NODE floor_452 Floor
+NODE getvar_453 GetVar var=bestLap
+NODE mod_454 Mod
+NODE multiply_455 Multiply
+NODE floor_456 Floor
+NODE clamp_457 Clamp
+NODE floor_458 Floor
+NODE floattoi_459 FloatToInt
+NODE finduiwi_460 AN_FindUiWidget name=FinBestMin
+NODE setuitex_461 AN_SetUiTextFromTable table=Data/Numbers.csv column=Plain
+NODE clamp_462 Clamp
+NODE floor_463 Floor
+NODE floattoi_464 FloatToInt
+NODE finduiwi_465 AN_FindUiWidget name=FinBestSec
+NODE setuitex_466 AN_SetUiTextFromTable table=Data/Numbers.csv column=Pad2
+NODE clamp_467 Clamp
+NODE floor_468 Floor
+NODE floattoi_469 FloatToInt
+NODE finduiwi_470 AN_FindUiWidget name=FinBestCs
+NODE setuitex_471 AN_SetUiTextFromTable table=Data/Numbers.csv column=Pad2
+LINK start.exec finduiwi_1.exec
+LINK finduiwi_1.success not_2.a
+LINK finduiwi_1.then br_3.exec
+LINK not_2.result br_3.cond
+LINK br_3.true openuila_4.exec
+LINK tick.exec seq_5.exec
+LINK getvar_6.value equal_7.a
+LINK kf_0_0.value equal_7.b
+LINK seq_5.then0 br_8.exec
+LINK equal_7.result br_8.cond
+LINK ki_0.value getplaye_10.index
+LINK getplaye_10.entity inttoflo_11.a
+LINK inttoflo_11.result greater_12.a
+LINK kf_0_5.value greater_12.b
+LINK findenti_13.entity vehiclef_14.entity
+LINK isplayin_9.playing and_15.a
+LINK greater_12.result and_15.b
+LINK findenti_13.found and_16.a
+LINK vehiclef_14.found and_16.b
+LINK and_15.result and_17.a
+LINK and_16.result and_17.b
+LINK br_8.true br_18.exec
+LINK and_17.result br_18.cond
+LINK findenti_13.entity setvar_19.value
+LINK br_18.true setvar_19.exec
+LINK kf_1_0.value setvar_20.value
+LINK setvar_19.then setvar_20.exec
+LINK kf_0_0.value setvar_21.value
+LINK setvar_20.then setvar_21.exec
+LINK kf_1_0.value setvar_22.value
+LINK setvar_21.then setvar_22.exec
+LINK kf_0_0.value setvar_23.value
+LINK setvar_22.then setvar_23.exec
+LINK kf_0_0.value setvar_24.value
+LINK setvar_23.then setvar_24.exec
+LINK kf_0_0.value setvar_25.value
+LINK setvar_24.then setvar_25.exec
+LINK kf_1_0.value setvar_26.value
+LINK setvar_25.then setvar_26.exec
+LINK kf_0_0.value setvar_27.value
+LINK setvar_26.then setvar_27.exec
+LINK kf_0_0.value setvar_28.value
+LINK setvar_27.then setvar_28.exec
+LINK kf_99_0.value setvar_29.value
+LINK setvar_28.then setvar_29.exec
+LINK kf_4_0.value setvar_30.value
+LINK setvar_29.then setvar_30.exec
+LINK kf_0_0.value setvar_31.value
+LINK setvar_30.then setvar_31.exec
+LINK getvar_32.value camerase_33.entity
+LINK kf_0_6.value camerase_33.blendSeconds
+LINK setvar_31.then camerase_33.exec
+LINK getvar_34.value vehicled_35.entity
+LINK kf_0_0.value vehicled_35.throttle
+LINK kf_0_0.value vehicled_35.steer
+LINK kf_0_0.value vehicled_35.brake
+LINK kf_1_0.value vehicled_35.handbrake
+LINK camerase_33.then vehicled_35.exec
+LINK vehicled_35.then finduiwi_36.exec
+LINK finduiwi_36.widget setuivis_37.widget
+LINK kb_true.value setuivis_37.visible
+LINK finduiwi_36.then setuivis_37.exec
+LINK seq_5.then1 seq_38.exec
+LINK getvar_39.value equal_40.a
+LINK kf_1_0.value equal_40.b
+LINK seq_38.then0 br_41.exec
+LINK equal_40.result br_41.cond
+LINK br_41.true seq_42.exec
+LINK getvar_43.value add_44.a
+LINK dt.value add_44.b
+LINK add_44.result setvar_45.value
+LINK seq_42.then0 setvar_45.exec
+LINK getvar_46.value vehicled_47.entity
+LINK kf_0_0.value vehicled_47.throttle
+LINK kf_0_0.value vehicled_47.steer
+LINK kf_0_0.value vehicled_47.brake
+LINK kf_1_0.value vehicled_47.handbrake
+LINK setvar_45.then vehicled_47.exec
+LINK seq_42.then1 seq_48.exec
+LINK kf_3_0.value subtract_50.a
+LINK getvar_49.value subtract_50.b
+LINK subtract_50.result ceil_51.a
+LINK ceil_51.result notequal_53.a
+LINK getvar_52.value notequal_53.b
+LINK ceil_51.result greater_54.a
+LINK kf_0_5.value greater_54.b
+LINK notequal_53.result and_55.a
+LINK greater_54.result and_55.b
+LINK seq_48.then0 br_56.exec
+LINK and_55.result br_56.cond
+LINK kf_1_0.value playsoun_57.volume
+LINK kf_1_0.value playsoun_57.pitch
+LINK kb_false.value playsoun_57.looping
+LINK ki_0.value playsoun_57.bus
+LINK br_56.true playsoun_57.exec
+LINK kf_3_0.value subtract_59.a
+LINK getvar_58.value subtract_59.b
+LINK subtract_59.result ceil_60.a
+LINK ceil_60.result setvar_61.value
+LINK playsoun_57.then setvar_61.exec
+LINK getvar_62.value greatere_63.a
+LINK kf_3_0.value greatere_63.b
+LINK seq_48.then1 br_64.exec
+LINK greatere_63.result br_64.cond
+LINK getvar_65.value vehicled_66.entity
+LINK kf_0_0.value vehicled_66.throttle
+LINK kf_0_0.value vehicled_66.steer
+LINK kf_0_0.value vehicled_66.brake
+LINK kf_0_0.value vehicled_66.handbrake
+LINK br_64.true vehicled_66.exec
+LINK ki_0.value getplaye_68.index
+LINK getvar_67.value vehiclee_69.entity
+LINK getplaye_68.entity vehiclee_69.driver
+LINK vehicled_66.then vehiclee_69.exec
+LINK kf_1_0.value playsoun_70.volume
+LINK kf_1_0.value playsoun_70.pitch
+LINK kb_false.value playsoun_70.looping
+LINK ki_0.value playsoun_70.bus
+LINK vehiclee_69.then playsoun_70.exec
+LINK playsoun_70.then camerapu_71.exec
+LINK kf_2_0.value setvar_72.value
+LINK camerapu_71.then setvar_72.exec
+LINK kf_0_0.value setvar_73.value
+LINK setvar_72.then setvar_73.exec
+LINK kf_0_0.value setvar_74.value
+LINK setvar_73.then setvar_74.exec
+LINK kf_0_0.value setvar_75.value
+LINK setvar_74.then setvar_75.exec
+LINK kf_0_0.value setvar_76.value
+LINK setvar_75.then setvar_76.exec
+LINK seq_38.then1 seq_77.exec
+LINK getvar_78.value greatere_79.a
+LINK kf_2_0.value greatere_79.b
+LINK seq_77.then0 br_80.exec
+LINK greatere_79.result br_80.cond
+LINK getvar_81.value vehicled_82.entity
+LINK vehicled_82.driver inttoflo_83.a
+LINK inttoflo_83.result equal_84.a
+LINK kf_0_0.value equal_84.b
+LINK br_80.true br_85.exec
+LINK equal_84.result br_85.cond
+LINK ki_0.value getplaye_87.index
+LINK getvar_86.value vehiclee_88.entity
+LINK getplaye_87.entity vehiclee_88.driver
+LINK br_85.true vehiclee_88.exec
+LINK seq_77.then1 seq_89.exec
+LINK getvar_90.value getworld_91.entity
+LINK getvar_92.value equal_93.a
+LINK kf_2_0.value equal_93.b
+LINK seq_89.then0 br_94.exec
+LINK equal_93.result br_94.cond
+LINK br_94.true seq_95.exec
+LINK getvar_96.value add_97.a
+LINK dt.value add_97.b
+LINK add_97.result setvar_98.value
+LINK seq_95.then0 setvar_98.exec
+LINK getvar_99.value add_100.a
+LINK dt.value add_100.b
+LINK add_100.result setvar_101.value
+LINK setvar_98.then setvar_101.exec
+LINK getvar_102.value add_103.a
+LINK dt.value add_103.b
+LINK add_103.result setvar_104.value
+LINK setvar_101.then setvar_104.exec
+LINK getvar_105.value add_106.a
+LINK dt.value add_106.b
+LINK add_106.result setvar_107.value
+LINK setvar_104.then setvar_107.exec
+LINK seq_95.then1 seq_108.exec
+LINK getvar_109.value less_110.a
+LINK kf_0_5.value less_110.b
+LINK getvar_111.value greater_112.a
+LINK kf_0_3.value greater_112.b
+LINK less_110.result and_113.a
+LINK greater_112.result and_113.b
+LINK seq_108.then0 br_114.exec
+LINK and_113.result br_114.cond
+LINK getvar_115.value camerase_116.entity
+LINK kf_0_5.value camerase_116.blendSeconds
+LINK br_114.true camerase_116.exec
+LINK kf_1_0.value setvar_117.value
+LINK camerase_116.then setvar_117.exec
+LINK seq_108.then1 seq_118.exec
+LINK getworld_91.x vecdista_119.ax
+LINK getworld_91.y vecdista_119.ay
+LINK kf_6875_61.value vecdista_119.bx
+LINK kf_5480_91.value vecdista_119.by
+LINK getvar_120.value equal_121.a
+LINK kf_0_0.value equal_121.b
+LINK vecdista_119.result less_122.a
+LINK kf_1250_0.value less_122.b
+LINK equal_121.result and_123.a
+LINK less_122.result and_123.b
+LINK seq_118.then0 br_124.exec
+LINK and_123.result br_124.cond
+LINK br_124.true seq_125.exec
+LINK getvar_126.value equal_127.a
+LINK kf_0_0.value equal_127.b
+LINK getvar_128.value less_130.a
+LINK getvar_129.value less_130.b
+LINK equal_127.result or_131.a
+LINK less_130.result or_131.b
+LINK seq_125.then0 br_132.exec
+LINK or_131.result br_132.cond
+LINK getvar_133.value setvar_134.value
+LINK br_132.true setvar_134.exec
+LINK getvar_135.value greatere_136.a
+LINK kf_3_0.value greatere_136.b
+LINK seq_125.then1 br_137.exec
+LINK greatere_136.result br_137.cond
+LINK kf_3_0.value setvar_138.value
+LINK br_137.true setvar_138.exec
+LINK kf_1_0.value playsoun_139.volume
+LINK kf_1_0.value playsoun_139.pitch
+LINK kb_false.value playsoun_139.looping
+LINK ki_0.value playsoun_139.bus
+LINK setvar_138.then playsoun_139.exec
+LINK getworld_91.z add_140.a
+LINK kf_120_0.value add_140.b
+LINK getworld_91.x spawnpar_141.x
+LINK getworld_91.y spawnpar_141.y
+LINK add_140.result spawnpar_141.z
+LINK kf_0_0.value spawnpar_141.dirX
+LINK kf_0_0.value spawnpar_141.dirY
+LINK kf_1_0.value spawnpar_141.dirZ
+LINK ki_90.value spawnpar_141.count
+LINK playsoun_139.then spawnpar_141.exec
+LINK kf_12_0.value camerapu_142.deltaDeg
+LINK spawnpar_141.then camerapu_142.exec
+LINK getvar_143.value add_144.a
+LINK kf_1_0.value add_144.b
+LINK add_144.result setvar_145.value
+LINK br_137.false setvar_145.exec
+LINK kf_0_0.value setvar_146.value
+LINK setvar_145.then setvar_146.exec
+LINK kf_1_0.value setvar_147.value
+LINK setvar_146.then setvar_147.exec
+LINK kf_0_0.value setvar_148.value
+LINK setvar_147.then setvar_148.exec
+LINK kf_0_0.value setvar_149.value
+LINK setvar_148.then setvar_149.exec
+LINK kf_1_0.value playsoun_150.volume
+LINK kf_1_0.value playsoun_150.pitch
+LINK kb_false.value playsoun_150.looping
+LINK ki_0.value playsoun_150.bus
+LINK setvar_149.then playsoun_150.exec
+LINK getworld_91.z add_151.a
+LINK kf_120_0.value add_151.b
+LINK getworld_91.x spawnpar_152.x
+LINK getworld_91.y spawnpar_152.y
+LINK add_151.result spawnpar_152.z
+LINK kf_0_0.value spawnpar_152.dirX
+LINK kf_0_0.value spawnpar_152.dirY
+LINK kf_1_0.value spawnpar_152.dirZ
+LINK ki_90.value spawnpar_152.count
+LINK playsoun_150.then spawnpar_152.exec
+LINK seq_118.then1 seq_153.exec
+LINK getworld_91.x vecdista_154.ax
+LINK getworld_91.y vecdista_154.ay
+LINK kf_m806_229.value vecdista_154.bx
+LINK kf_7608_25.value vecdista_154.by
+LINK getvar_155.value equal_156.a
+LINK kf_1_0.value equal_156.b
+LINK vecdista_154.result less_157.a
+LINK kf_1250_0.value less_157.b
+LINK equal_156.result and_158.a
+LINK less_157.result and_158.b
+LINK seq_153.then0 br_159.exec
+LINK and_158.result br_159.cond
+LINK kf_1_0.value setvar_160.value
+LINK br_159.true setvar_160.exec
+LINK kf_2_0.value setvar_161.value
+LINK setvar_160.then setvar_161.exec
+LINK kf_0_0.value setvar_162.value
+LINK setvar_161.then setvar_162.exec
+LINK kf_1_0.value playsoun_163.volume
+LINK kf_1_0.value playsoun_163.pitch
+LINK kb_false.value playsoun_163.looping
+LINK ki_0.value playsoun_163.bus
+LINK setvar_162.then playsoun_163.exec
+LINK seq_153.then1 seq_164.exec
+LINK getworld_91.x vecdista_165.ax
+LINK getworld_91.y vecdista_165.ay
+LINK kf_m8457_43.value vecdista_165.bx
+LINK kf_5508_8.value vecdista_165.by
+LINK getvar_166.value equal_167.a
+LINK kf_2_0.value equal_167.b
+LINK vecdista_165.result less_168.a
+LINK kf_1250_0.value less_168.b
+LINK equal_167.result and_169.a
+LINK less_168.result and_169.b
+LINK seq_164.then0 br_170.exec
+LINK and_169.result br_170.cond
+LINK kf_2_0.value setvar_171.value
+LINK br_170.true setvar_171.exec
+LINK kf_3_0.value setvar_172.value
+LINK setvar_171.then setvar_172.exec
+LINK kf_0_0.value setvar_173.value
+LINK setvar_172.then setvar_173.exec
+LINK kf_1_0.value playsoun_174.volume
+LINK kf_1_0.value playsoun_174.pitch
+LINK kb_false.value playsoun_174.looping
+LINK ki_0.value playsoun_174.bus
+LINK setvar_173.then playsoun_174.exec
+LINK seq_164.then1 seq_175.exec
+LINK getworld_91.x vecdista_176.ax
+LINK getworld_91.y vecdista_176.ay
+LINK kf_m11622_3.value vecdista_176.bx
+LINK kf_m1893_01.value vecdista_176.by
+LINK getvar_177.value equal_178.a
+LINK kf_3_0.value equal_178.b
+LINK vecdista_176.result less_179.a
+LINK kf_1250_0.value less_179.b
+LINK equal_178.result and_180.a
+LINK less_179.result and_180.b
+LINK seq_175.then0 br_181.exec
+LINK and_180.result br_181.cond
+LINK kf_3_0.value setvar_182.value
+LINK br_181.true setvar_182.exec
+LINK kf_4_0.value setvar_183.value
+LINK setvar_182.then setvar_183.exec
+LINK kf_0_0.value setvar_184.value
+LINK setvar_183.then setvar_184.exec
+LINK kf_1_0.value playsoun_185.volume
+LINK kf_1_0.value playsoun_185.pitch
+LINK kb_false.value playsoun_185.looping
+LINK ki_0.value playsoun_185.bus
+LINK setvar_184.then playsoun_185.exec
+LINK seq_175.then1 seq_186.exec
+LINK getworld_91.x vecdista_187.ax
+LINK getworld_91.y vecdista_187.ay
+LINK kf_m7058_2.value vecdista_187.bx
+LINK kf_m7533_96.value vecdista_187.by
+LINK getvar_188.value equal_189.a
+LINK kf_4_0.value equal_189.b
+LINK vecdista_187.result less_190.a
+LINK kf_1250_0.value less_190.b
+LINK equal_189.result and_191.a
+LINK less_190.result and_191.b
+LINK seq_186.then0 br_192.exec
+LINK and_191.result br_192.cond
+LINK kf_4_0.value setvar_193.value
+LINK br_192.true setvar_193.exec
+LINK kf_5_0.value setvar_194.value
+LINK setvar_193.then setvar_194.exec
+LINK kf_0_0.value setvar_195.value
+LINK setvar_194.then setvar_195.exec
+LINK kf_1_0.value playsoun_196.volume
+LINK kf_1_0.value playsoun_196.pitch
+LINK kb_false.value playsoun_196.looping
+LINK ki_0.value playsoun_196.bus
+LINK setvar_195.then playsoun_196.exec
+LINK seq_186.then1 seq_197.exec
+LINK getworld_91.x vecdista_198.ax
+LINK getworld_91.y vecdista_198.ay
+LINK kf_912_096.value vecdista_198.bx
+LINK kf_m6346_99.value vecdista_198.by
+LINK getvar_199.value equal_200.a
+LINK kf_5_0.value equal_200.b
+LINK vecdista_198.result less_201.a
+LINK kf_1250_0.value less_201.b
+LINK equal_200.result and_202.a
+LINK less_201.result and_202.b
+LINK seq_197.then0 br_203.exec
+LINK and_202.result br_203.cond
+LINK kf_5_0.value setvar_204.value
+LINK br_203.true setvar_204.exec
+LINK kf_6_0.value setvar_205.value
+LINK setvar_204.then setvar_205.exec
+LINK kf_0_0.value setvar_206.value
+LINK setvar_205.then setvar_206.exec
+LINK kf_1_0.value playsoun_207.volume
+LINK kf_1_0.value playsoun_207.pitch
+LINK kb_false.value playsoun_207.looping
+LINK ki_0.value playsoun_207.bus
+LINK setvar_206.then playsoun_207.exec
+LINK seq_197.then1 seq_208.exec
+LINK getworld_91.x vecdista_209.ax
+LINK getworld_91.y vecdista_209.ay
+LINK kf_8954_06.value vecdista_209.bx
+LINK kf_m6093_5.value vecdista_209.by
+LINK getvar_210.value equal_211.a
+LINK kf_6_0.value equal_211.b
+LINK vecdista_209.result less_212.a
+LINK kf_1250_0.value less_212.b
+LINK equal_211.result and_213.a
+LINK less_212.result and_213.b
+LINK seq_208.then0 br_214.exec
+LINK and_213.result br_214.cond
+LINK kf_6_0.value setvar_215.value
+LINK br_214.true setvar_215.exec
+LINK kf_7_0.value setvar_216.value
+LINK setvar_215.then setvar_216.exec
+LINK kf_0_0.value setvar_217.value
+LINK setvar_216.then setvar_217.exec
+LINK kf_1_0.value playsoun_218.volume
+LINK kf_1_0.value playsoun_218.pitch
+LINK kb_false.value playsoun_218.looping
+LINK ki_0.value playsoun_218.bus
+LINK setvar_217.then playsoun_218.exec
+LINK getworld_91.x vecdista_219.ax
+LINK getworld_91.y vecdista_219.ay
+LINK kf_12798_7.value vecdista_219.bx
+LINK kf_225_545.value vecdista_219.by
+LINK getvar_220.value equal_221.a
+LINK kf_7_0.value equal_221.b
+LINK vecdista_219.result less_222.a
+LINK kf_1250_0.value less_222.b
+LINK equal_221.result and_223.a
+LINK less_222.result and_223.b
+LINK seq_208.then1 br_224.exec
+LINK and_223.result br_224.cond
+LINK kf_7_0.value setvar_225.value
+LINK br_224.true setvar_225.exec
+LINK kf_0_0.value setvar_226.value
+LINK setvar_225.then setvar_226.exec
+LINK kf_0_0.value setvar_227.value
+LINK setvar_226.then setvar_227.exec
+LINK kf_1_0.value playsoun_228.volume
+LINK kf_1_0.value playsoun_228.pitch
+LINK kb_false.value playsoun_228.looping
+LINK ki_0.value playsoun_228.bus
+LINK setvar_227.then playsoun_228.exec
+LINK seq_89.then1 seq_229.exec
+LINK getvar_231.value greatere_232.a
+LINK kf_2_0.value greatere_232.b
+LINK greatere_232.result and_233.a
+LINK inputact_230.triggered and_233.b
+LINK seq_229.then0 br_234.exec
+LINK and_233.result br_234.cond
+LINK br_234.true seq_235.exec
+LINK getvar_236.value equal_237.a
+LINK kf_0_0.value equal_237.b
+LINK seq_235.then0 br_238.exec
+LINK equal_237.result br_238.cond
+LINK getvar_239.value vehiclef_240.entity
+LINK vehiclef_240.vehicle vehicles_241.vehicle
+LINK kf_9337_37.value vehicles_241.x
+LINK kf_4548_84.value vehicles_241.y
+LINK kf_40_0.value vehicles_241.z
+LINK kf_149_701.value vehicles_241.yaw
+LINK br_238.true vehicles_241.exec
+LINK seq_235.then1 seq_242.exec
+LINK getvar_243.value equal_244.a
+LINK kf_1_0.value equal_244.b
+LINK seq_242.then0 br_245.exec
+LINK equal_244.result br_245.cond
+LINK getvar_246.value vehiclef_247.entity
+LINK vehiclef_247.vehicle vehicles_248.vehicle
+LINK kf_m806_229.value vehicles_248.x
+LINK kf_7608_25.value vehicles_248.y
+LINK kf_40_0.value vehicles_248.z
+LINK kf_m175_639.value vehicles_248.yaw
+LINK br_245.true vehicles_248.exec
+LINK seq_242.then1 seq_249.exec
+LINK getvar_250.value equal_251.a
+LINK kf_2_0.value equal_251.b
+LINK seq_249.then0 br_252.exec
+LINK equal_251.result br_252.cond
+LINK getvar_253.value vehiclef_254.entity
+LINK vehiclef_254.vehicle vehicles_255.vehicle
+LINK kf_m8457_43.value vehicles_255.x
+LINK kf_5508_8.value vehicles_255.y
+LINK kf_40_0.value vehicles_255.z
+LINK kf_m134_471.value vehicles_255.yaw
+LINK br_252.true vehicles_255.exec
+LINK seq_249.then1 seq_256.exec
+LINK getvar_257.value equal_258.a
+LINK kf_3_0.value equal_258.b
+LINK seq_256.then0 br_259.exec
+LINK equal_258.result br_259.cond
+LINK getvar_260.value vehiclef_261.entity
+LINK vehiclef_261.vehicle vehicles_262.vehicle
+LINK kf_m11622_3.value vehicles_262.x
+LINK kf_m1893_01.value vehicles_262.y
+LINK kf_40_0.value vehicles_262.z
+LINK kf_m94_7997.value vehicles_262.yaw
+LINK br_259.true vehicles_262.exec
+LINK seq_256.then1 seq_263.exec
+LINK getvar_264.value equal_265.a
+LINK kf_4_0.value equal_265.b
+LINK seq_263.then0 br_266.exec
+LINK equal_265.result br_266.cond
+LINK getvar_267.value vehiclef_268.entity
+LINK vehiclef_268.vehicle vehicles_269.vehicle
+LINK kf_m7058_2.value vehicles_269.x
+LINK kf_m7533_96.value vehicles_269.y
+LINK kf_40_0.value vehicles_269.z
+LINK kf_m4_99623.value vehicles_269.yaw
+LINK br_266.true vehicles_269.exec
+LINK seq_263.then1 seq_270.exec
+LINK getvar_271.value equal_272.a
+LINK kf_5_0.value equal_272.b
+LINK seq_270.then0 br_273.exec
+LINK equal_272.result br_273.cond
+LINK getvar_274.value vehiclef_275.entity
+LINK vehiclef_275.vehicle vehicles_276.vehicle
+LINK kf_912_096.value vehicles_276.x
+LINK kf_m6346_99.value vehicles_276.y
+LINK kf_40_0.value vehicles_276.z
+LINK kf_m11_813.value vehicles_276.yaw
+LINK br_273.true vehicles_276.exec
+LINK seq_270.then1 seq_277.exec
+LINK getvar_278.value equal_279.a
+LINK kf_6_0.value equal_279.b
+LINK seq_277.then0 br_280.exec
+LINK equal_279.result br_280.cond
+LINK getvar_281.value vehiclef_282.entity
+LINK vehiclef_282.vehicle vehicles_283.vehicle
+LINK kf_8954_06.value vehicles_283.x
+LINK kf_m6093_5.value vehicles_283.y
+LINK kf_40_0.value vehicles_283.z
+LINK kf_21_2268.value vehicles_283.yaw
+LINK br_280.true vehicles_283.exec
+LINK seq_277.then1 seq_284.exec
+LINK getvar_285.value equal_286.a
+LINK kf_7_0.value equal_286.b
+LINK seq_284.then0 br_287.exec
+LINK equal_286.result br_287.cond
+LINK getvar_288.value vehiclef_289.entity
+LINK vehiclef_289.vehicle vehicles_290.vehicle
+LINK kf_12798_7.value vehicles_290.x
+LINK kf_225_545.value vehicles_290.y
+LINK kf_40_0.value vehicles_290.z
+LINK kf_106_514.value vehicles_290.yaw
+LINK br_287.true vehicles_290.exec
+LINK getvar_291.value vehicler_292.entity
+LINK kf_1_0.value vehicler_292.amount
+LINK seq_284.then1 vehicler_292.exec
+LINK ki_0.value cameracu_293.entity
+LINK vehicler_292.then cameracu_293.exec
+LINK getvar_294.value greatere_295.a
+LINK kf_1_0.value greatere_295.b
+LINK seq_229.then1 br_296.exec
+LINK greatere_295.result br_296.cond
+LINK getvar_297.value vehiclet_298.entity
+LINK vehiclet_298.speedCmS abs_299.a
+LINK abs_299.result multiply_300.a
+LINK kf_0_036.value multiply_300.b
+LINK multiply_300.result min_301.a
+LINK kf_999_0.value min_301.b
+LINK min_301.result clamp_302.a
+LINK kf_0_0.value clamp_302.min
+LINK kf_999_0.value clamp_302.max
+LINK clamp_302.result floor_303.a
+LINK floor_303.result floattoi_304.a
+LINK br_296.true finduiwi_305.exec
+LINK finduiwi_305.widget setuitex_306.widget
+LINK floattoi_304.result setuitex_306.row
+LINK finduiwi_305.then setuitex_306.exec
+LINK setuitex_306.then finduiwi_307.exec
+LINK finduiwi_307.widget setuival_308.widget
+LINK min_301.result setuival_308.value
+LINK finduiwi_307.then setuival_308.exec
+LINK vehiclet_298.gear inttoflo_309.a
+LINK inttoflo_309.result add_310.a
+LINK kf_1_0.value add_310.b
+LINK add_310.result clamp_311.a
+LINK kf_0_0.value clamp_311.min
+LINK kf_8_0.value clamp_311.max
+LINK clamp_311.result floor_312.a
+LINK floor_312.result floattoi_313.a
+LINK setuival_308.then finduiwi_314.exec
+LINK finduiwi_314.widget setuitex_315.widget
+LINK floattoi_313.result setuitex_315.row
+LINK finduiwi_314.then setuitex_315.exec
+LINK vehiclet_298.found select_316.cond
+LINK vehiclet_298.health select_316.ifTrue
+LINK kf_0_0.value select_316.ifFalse
+LINK setuitex_315.then finduiwi_317.exec
+LINK finduiwi_317.widget setuival_318.widget
+LINK select_316.result setuival_318.value
+LINK finduiwi_317.then setuival_318.exec
+LINK getvar_319.value min_320.a
+LINK kf_3_0.value min_320.b
+LINK min_320.result clamp_321.a
+LINK kf_0_0.value clamp_321.min
+LINK kf_3_0.value clamp_321.max
+LINK clamp_321.result floor_322.a
+LINK floor_322.result floattoi_323.a
+LINK setuival_318.then finduiwi_324.exec
+LINK finduiwi_324.widget setuitex_325.widget
+LINK floattoi_323.result setuitex_325.row
+LINK finduiwi_324.then setuitex_325.exec
+LINK getvar_326.value divide_327.a
+LINK kf_60_0.value divide_327.b
+LINK divide_327.result floor_328.a
+LINK getvar_329.value mod_330.a
+LINK kf_60_0.value mod_330.b
+LINK mod_330.result floor_331.a
+LINK getvar_332.value mod_333.a
+LINK kf_1_0.value mod_333.b
+LINK mod_333.result multiply_334.a
+LINK kf_100_0.value multiply_334.b
+LINK multiply_334.result floor_335.a
+LINK floor_328.result clamp_336.a
+LINK kf_0_0.value clamp_336.min
+LINK kf_99_0.value clamp_336.max
+LINK clamp_336.result floor_337.a
+LINK floor_337.result floattoi_338.a
+LINK setuitex_325.then finduiwi_339.exec
+LINK finduiwi_339.widget setuitex_340.widget
+LINK floattoi_338.result setuitex_340.row
+LINK finduiwi_339.then setuitex_340.exec
+LINK floor_331.result clamp_341.a
+LINK kf_0_0.value clamp_341.min
+LINK kf_99_0.value clamp_341.max
+LINK clamp_341.result floor_342.a
+LINK floor_342.result floattoi_343.a
+LINK setuitex_340.then finduiwi_344.exec
+LINK finduiwi_344.widget setuitex_345.widget
+LINK floattoi_343.result setuitex_345.row
+LINK finduiwi_344.then setuitex_345.exec
+LINK floor_335.result clamp_346.a
+LINK kf_0_0.value clamp_346.min
+LINK kf_99_0.value clamp_346.max
+LINK clamp_346.result floor_347.a
+LINK floor_347.result floattoi_348.a
+LINK setuitex_345.then finduiwi_349.exec
+LINK finduiwi_349.widget setuitex_350.widget
+LINK floattoi_348.result setuitex_350.row
+LINK finduiwi_349.then setuitex_350.exec
+LINK getvar_351.value divide_352.a
+LINK kf_60_0.value divide_352.b
+LINK divide_352.result floor_353.a
+LINK getvar_354.value mod_355.a
+LINK kf_60_0.value mod_355.b
+LINK mod_355.result floor_356.a
+LINK getvar_357.value mod_358.a
+LINK kf_1_0.value mod_358.b
+LINK mod_358.result multiply_359.a
+LINK kf_100_0.value multiply_359.b
+LINK multiply_359.result floor_360.a
+LINK floor_353.result clamp_361.a
+LINK kf_0_0.value clamp_361.min
+LINK kf_99_0.value clamp_361.max
+LINK clamp_361.result floor_362.a
+LINK floor_362.result floattoi_363.a
+LINK setuitex_350.then finduiwi_364.exec
+LINK finduiwi_364.widget setuitex_365.widget
+LINK floattoi_363.result setuitex_365.row
+LINK finduiwi_364.then setuitex_365.exec
+LINK floor_356.result clamp_366.a
+LINK kf_0_0.value clamp_366.min
+LINK kf_99_0.value clamp_366.max
+LINK clamp_366.result floor_367.a
+LINK floor_367.result floattoi_368.a
+LINK setuitex_365.then finduiwi_369.exec
+LINK finduiwi_369.widget setuitex_370.widget
+LINK floattoi_368.result setuitex_370.row
+LINK finduiwi_369.then setuitex_370.exec
+LINK floor_360.result clamp_371.a
+LINK kf_0_0.value clamp_371.min
+LINK kf_99_0.value clamp_371.max
+LINK clamp_371.result floor_372.a
+LINK floor_372.result floattoi_373.a
+LINK setuitex_370.then finduiwi_374.exec
+LINK finduiwi_374.widget setuitex_375.widget
+LINK floattoi_373.result setuitex_375.row
+LINK finduiwi_374.then setuitex_375.exec
+LINK getvar_376.value greater_377.a
+LINK kf_0_0.value greater_377.b
+LINK setuitex_375.then finduiwi_378.exec
+LINK finduiwi_378.widget setuivis_379.widget
+LINK greater_377.result setuivis_379.visible
+LINK finduiwi_378.then setuivis_379.exec
+LINK getvar_380.value equal_381.a
+LINK kf_1_0.value equal_381.b
+LINK getvar_382.value equal_383.a
+LINK kf_2_0.value equal_383.b
+LINK getvar_384.value less_385.a
+LINK kf_1_0.value less_385.b
+LINK equal_383.result and_386.a
+LINK less_385.result and_386.b
+LINK equal_381.result or_387.a
+LINK and_386.result or_387.b
+LINK getvar_388.value equal_389.a
+LINK kf_1_0.value equal_389.b
+LINK kf_3_0.value subtract_391.a
+LINK getvar_390.value subtract_391.b
+LINK subtract_391.result ceil_392.a
+LINK equal_389.result select_393.cond
+LINK ceil_392.result select_393.ifTrue
+LINK kf_0_0.value select_393.ifFalse
+LINK select_393.result clamp_394.a
+LINK kf_0_0.value clamp_394.min
+LINK kf_3_0.value clamp_394.max
+LINK clamp_394.result floor_395.a
+LINK floor_395.result floattoi_396.a
+LINK setuivis_379.then finduiwi_397.exec
+LINK finduiwi_397.widget setuitex_398.widget
+LINK floattoi_396.result setuitex_398.row
+LINK finduiwi_397.then setuitex_398.exec
+LINK setuitex_398.then finduiwi_399.exec
+LINK finduiwi_399.widget setuivis_400.widget
+LINK or_387.result setuivis_400.visible
+LINK finduiwi_399.then setuivis_400.exec
+LINK getvar_401.value equal_402.a
+LINK kf_2_0.value equal_402.b
+LINK getvar_403.value less_404.a
+LINK kf_1_5.value less_404.b
+LINK equal_402.result and_405.a
+LINK less_404.result and_405.b
+LINK setuivis_400.then finduiwi_406.exec
+LINK finduiwi_406.widget setuivis_407.widget
+LINK and_405.result setuivis_407.visible
+LINK finduiwi_406.then setuivis_407.exec
+LINK getvar_408.value greatere_409.a
+LINK kf_2_0.value greatere_409.b
+LINK vehiclet_298.found and_410.a
+LINK greatere_409.result and_410.b
+LINK vehiclet_298.health less_411.a
+LINK kf_0_02.value less_411.b
+LINK and_410.result and_412.a
+LINK less_411.result and_412.b
+LINK setuivis_407.then finduiwi_413.exec
+LINK finduiwi_413.widget setuivis_414.widget
+LINK and_412.result setuivis_414.visible
+LINK finduiwi_413.then setuivis_414.exec
+LINK getvar_415.value equal_416.a
+LINK kf_3_0.value equal_416.b
+LINK setuivis_414.then finduiwi_417.exec
+LINK finduiwi_417.widget setuivis_418.widget
+LINK equal_416.result setuivis_418.visible
+LINK finduiwi_417.then setuivis_418.exec
+LINK getvar_419.value equal_420.a
+LINK kf_3_0.value equal_420.b
+LINK setuivis_418.then br_421.exec
+LINK equal_420.result br_421.cond
+LINK getvar_422.value divide_423.a
+LINK kf_60_0.value divide_423.b
+LINK divide_423.result floor_424.a
+LINK getvar_425.value mod_426.a
+LINK kf_60_0.value mod_426.b
+LINK mod_426.result floor_427.a
+LINK getvar_428.value mod_429.a
+LINK kf_1_0.value mod_429.b
+LINK mod_429.result multiply_430.a
+LINK kf_100_0.value multiply_430.b
+LINK multiply_430.result floor_431.a
+LINK floor_424.result clamp_432.a
+LINK kf_0_0.value clamp_432.min
+LINK kf_99_0.value clamp_432.max
+LINK clamp_432.result floor_433.a
+LINK floor_433.result floattoi_434.a
+LINK br_421.true finduiwi_435.exec
+LINK finduiwi_435.widget setuitex_436.widget
+LINK floattoi_434.result setuitex_436.row
+LINK finduiwi_435.then setuitex_436.exec
+LINK floor_427.result clamp_437.a
+LINK kf_0_0.value clamp_437.min
+LINK kf_99_0.value clamp_437.max
+LINK clamp_437.result floor_438.a
+LINK floor_438.result floattoi_439.a
+LINK setuitex_436.then finduiwi_440.exec
+LINK finduiwi_440.widget setuitex_441.widget
+LINK floattoi_439.result setuitex_441.row
+LINK finduiwi_440.then setuitex_441.exec
+LINK floor_431.result clamp_442.a
+LINK kf_0_0.value clamp_442.min
+LINK kf_99_0.value clamp_442.max
+LINK clamp_442.result floor_443.a
+LINK floor_443.result floattoi_444.a
+LINK setuitex_441.then finduiwi_445.exec
+LINK finduiwi_445.widget setuitex_446.widget
+LINK floattoi_444.result setuitex_446.row
+LINK finduiwi_445.then setuitex_446.exec
+LINK getvar_447.value divide_448.a
+LINK kf_60_0.value divide_448.b
+LINK divide_448.result floor_449.a
+LINK getvar_450.value mod_451.a
+LINK kf_60_0.value mod_451.b
+LINK mod_451.result floor_452.a
+LINK getvar_453.value mod_454.a
+LINK kf_1_0.value mod_454.b
+LINK mod_454.result multiply_455.a
+LINK kf_100_0.value multiply_455.b
+LINK multiply_455.result floor_456.a
+LINK floor_449.result clamp_457.a
+LINK kf_0_0.value clamp_457.min
+LINK kf_99_0.value clamp_457.max
+LINK clamp_457.result floor_458.a
+LINK floor_458.result floattoi_459.a
+LINK setuitex_446.then finduiwi_460.exec
+LINK finduiwi_460.widget setuitex_461.widget
+LINK floattoi_459.result setuitex_461.row
+LINK finduiwi_460.then setuitex_461.exec
+LINK floor_452.result clamp_462.a
+LINK kf_0_0.value clamp_462.min
+LINK kf_99_0.value clamp_462.max
+LINK clamp_462.result floor_463.a
+LINK floor_463.result floattoi_464.a
+LINK setuitex_461.then finduiwi_465.exec
+LINK finduiwi_465.widget setuitex_466.widget
+LINK floattoi_464.result setuitex_466.row
+LINK finduiwi_465.then setuitex_466.exec
+LINK floor_456.result clamp_467.a
+LINK kf_0_0.value clamp_467.min
+LINK kf_99_0.value clamp_467.max
+LINK clamp_467.result floor_468.a
+LINK floor_468.result floattoi_469.a
+LINK setuitex_466.then finduiwi_470.exec
+LINK finduiwi_470.widget setuitex_471.widget
+LINK floattoi_469.result setuitex_471.row
+LINK finduiwi_470.then setuitex_471.exec

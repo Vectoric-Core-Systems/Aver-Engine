@@ -1,0 +1,13 @@
+OCMAT 1
+# M_RallyOrange: authored by make_rally_dash.py (flat colour, no textures).
+SHADER standard
+BLEND opaque
+CULL back
+FLAGS twosided=0 castshadow=1
+
+PARAM baseColorFactor 0.95 0.45 0.08 1
+PARAM metallicFactor 0.1
+PARAM roughnessFactor 0.55
+PARAM emissiveFactor 0 0 0
+PARAM normalScale 1
+PARAM occlusionStrength 1

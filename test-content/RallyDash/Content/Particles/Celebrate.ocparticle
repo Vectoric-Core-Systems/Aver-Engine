@@ -1,0 +1,22 @@
+OCPARTICLE 2
+NAME Celebrate
+# A burst of golden sparkles for a finished lap and the finish line (AN_SpawnParticlesAt). Self-lit, additive, SPAWNAT on.
+EMITTER Sparkle
+SIM auto
+SHAPE sphere 40
+BLEND additive
+EMISSION 0 40 1024
+LIFETIME 0.9 1.8
+DIRECTION 0 0 1 70
+SPEED 300 900
+GRAVITY 0 0 -520
+DAMPING 0.1
+SIZE 7 1
+COLOR start 1 0.85 0.3 1
+COLOR end 1 0.3 0.1 0
+SPRITE camera
+SORT none
+LIGHTING unlit
+FOG on
+SPAWNAT on
+BOUNDS 1500

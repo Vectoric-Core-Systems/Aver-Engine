@@ -1,0 +1,13 @@
+OCMAT 1
+# M_RallyCarYellow: authored by make_rally_dash.py (flat colour, no textures).
+SHADER standard
+BLEND opaque
+CULL back
+FLAGS twosided=0 castshadow=1
+
+PARAM baseColorFactor 0.92 0.72 0.06 1
+PARAM metallicFactor 0.4
+PARAM roughnessFactor 0.35
+PARAM emissiveFactor 0 0 0
+PARAM normalScale 1
+PARAM occlusionStrength 1

@@ -1,0 +1,9 @@
+OCGRAPH 1
+DOMAIN gameplay
+# THE CONCRETE PLAYER CONTROLLER. The engine's built-in PlayerController is abstract and cannot be spawned, and begin_play
+# possesses a pawn only when it has both. Input is read by the vehicle system and by AN_RallyRace, so nothing else belongs here.
+NAME RallyController
+DESCRIPTION The player controller. Empty on purpose: it exists so the game mode has something concrete to possess with.
+
+CLASS AN_RallyController PlayerController
+

@@ -1,0 +1,40 @@
+OCINPUT 1
+NAME Rally
+# RallyDash's ONE input scheme. The Drive.* actions are what Aver.Vehicle.Scene reads while somebody is driving (the Vehicle template's
+# set, same names and bindings). Two differences on purpose: Drive.Exit and Drive.Reset are declared but UNBOUND -- the pawn stays in the
+# car for the whole race (F would let it out), and R is the graph's own `Respawn` action (the car goes back to the last checkpoint),
+# not the vehicle system's in-place flip. W / Up throttle, S / Down brake and reverse, A D / Left Right steer, Space handbrake.
+ACTION Drive.Throttle axis1
+ACTION Drive.Brake axis1
+ACTION Drive.Steer axis1
+ACTION Drive.Handbrake digital
+ACTION Drive.ShiftUp digital
+ACTION Drive.ShiftDown digital
+ACTION Drive.Reset digital
+ACTION Drive.Exit digital
+ACTION Drive.CameraNext digital
+ACTION Respawn digital
+
+BIND Drive.Throttle key W
+BIND Drive.Throttle key Up
+BIND Drive.Throttle gamepadaxis RightTrigger
+BIND Drive.Brake key S
+BIND Drive.Brake key Down
+BIND Drive.Brake gamepadaxis LeftTrigger
+BIND Drive.Steer key D
+BIND Drive.Steer key A scale -1
+BIND Drive.Steer key Right
+BIND Drive.Steer key Left scale -1
+BIND Drive.Steer gamepadaxis LeftX
+BIND Drive.Handbrake key Space
+BIND Drive.Handbrake gamepadbutton A
+BIND Drive.ShiftUp key E
+BIND Drive.ShiftUp gamepadbutton RightShoulder
+BIND Drive.ShiftDown key Q
+BIND Drive.ShiftDown gamepadbutton LeftShoulder
+BIND Drive.CameraNext key C
+BIND Drive.CameraNext gamepadbutton RightThumb
+BIND Respawn key R
+BIND Respawn gamepadbutton Y
+
+CONTEXT Rally priority 0

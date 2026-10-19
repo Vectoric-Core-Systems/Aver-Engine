@@ -1,0 +1,13 @@
+OCMAT 1
+# M_RallyGlass: authored by make_rally_dash.py (flat colour, no textures).
+SHADER standard
+BLEND translucent
+CULL back
+FLAGS twosided=0 castshadow=0
+
+PARAM baseColorFactor 0.62 0.86 0.95 0.3
+PARAM metallicFactor 0
+PARAM roughnessFactor 0.05
+PARAM emissiveFactor 0 0 0
+PARAM normalScale 1
+PARAM occlusionStrength 1

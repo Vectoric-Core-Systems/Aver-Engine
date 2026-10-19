@@ -1,0 +1,36 @@
+OCGRAPH 1
+DOMAIN gameplay
+# THE PAWN. It has no mesh and no logic of its own: AN_RallyRace puts it in the car (AN_VehicleEnter) when the countdown ends, and from
+# then on the vehicle system hides it and parks it in the seat. It exists as a graph so that it HEARS the car: the vehicle system raises
+# VehicleCrash, VehicleLanded ... at the vehicle AND at its driver (GameSystemsWiring.hpp, vehicleNotifyThunk), so these two entries run on
+# this pawn while it drives. A hard hit shakes the camera; a landing after a jump punches it down a little.
+NAME RallyDriver
+DESCRIPTION The player's pawn: it sits in the car; it hears the car's crash and landing events and shakes the camera.
+
+CLASS AN_RallyDriver Character
+
+ENTRY crash VehicleCrash
+ENTRY land VehicleLanded
+NODE crash AN_OnEvent
+NODE findenti_1 FindEntity name=Sedan
+NODE getworld_2 GetWorldPosition
+NODE camerash_3 AN_CameraShakeAt
+NODE kf_2500_0 ConstFloat value=2500.0
+NODE kf_0_7 ConstFloat value=0.7
+NODE land AN_OnEvent
+NODE camerapu_4 AN_CameraPunch
+NODE kf_2_5 ConstFloat value=2.5
+NODE kf_0_0 ConstFloat value=0.0
+NODE kf_0_45 ConstFloat value=0.45
+LINK findenti_1.entity getworld_2.entity
+LINK getworld_2.x camerash_3.x
+LINK getworld_2.y camerash_3.y
+LINK getworld_2.z camerash_3.z
+LINK kf_2500_0.value camerash_3.radiusCm
+LINK kf_0_7.value camerash_3.intensity
+LINK crash.exec camerash_3.exec
+LINK kf_2_5.value camerapu_4.pitchDeg
+LINK kf_0_0.value camerapu_4.yawDeg
+LINK kf_0_0.value camerapu_4.rollDeg
+LINK kf_0_45.value camerapu_4.recoverSeconds
+LINK land.exec camerapu_4.exec

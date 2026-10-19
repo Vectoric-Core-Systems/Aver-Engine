@@ -1,0 +1,275 @@
+OCUI 1
+NAME RallyHud
+# RallyDash's HUD. AN_RallyRace.ocgraph finds these widgets by name each tick and fills them: the digits come from
+# Data/Numbers.csv (AN_SetUiTextFromTable), the bars from AN_SetUiValue, the panels' visibility from AN_SetUiVisible.
+# Nothing here takes the pointer or the keyboard (passive root, hit never).
+WIDGET Root panel -
+SET Root anchors 0 0 1 1
+SET Root style clear
+SET Root inputMode passive
+SET Root hit never
+SET Root visible false
+WIDGET LapPanel panel Root
+SET LapPanel anchors 0 0
+SET LapPanel pivot 0 0
+SET LapPanel offsets 36 36 0 0
+SET LapPanel width 470
+SET LapPanel layout vstack
+SET LapPanel spacing 4
+SET LapPanel padding 14
+SET LapPanel hit never
+SET LapPanel bgColor #000000A0
+WIDGET LapText text LapPanel
+SET LapText text "LAP 1/3"
+SET LapText fontSize 60
+SET LapText bold true
+SET LapText textColor #FFFFFF
+WIDGET TimeRow panel LapPanel
+SET TimeRow layout hstack
+SET TimeRow spacing 2
+SET TimeRow style clear
+SET TimeRow hit never
+WIDGET TimeLabel text TimeRow
+SET TimeLabel text "TIME  "
+SET TimeLabel fontSize 30
+SET TimeLabel textColor #9FB0C8
+WIDGET TimeMin text TimeRow
+SET TimeMin text "0"
+SET TimeMin fontSize 52
+SET TimeMin bold true
+SET TimeMin textColor #FFFFFF
+WIDGET TimeC1 text TimeRow
+SET TimeC1 text ":"
+SET TimeC1 fontSize 52
+SET TimeC1 textColor #FFFFFF
+WIDGET TimeSec text TimeRow
+SET TimeSec text "00"
+SET TimeSec fontSize 52
+SET TimeSec bold true
+SET TimeSec textColor #FFFFFF
+WIDGET TimeDot text TimeRow
+SET TimeDot text "."
+SET TimeDot fontSize 52
+SET TimeDot textColor #FFFFFF
+WIDGET TimeCs text TimeRow
+SET TimeCs text "00"
+SET TimeCs fontSize 52
+SET TimeCs bold true
+SET TimeCs textColor #FFFFFF
+WIDGET BestRow panel LapPanel
+SET BestRow layout hstack
+SET BestRow spacing 2
+SET BestRow style clear
+SET BestRow hit never
+SET BestRow visible false
+WIDGET BestLabel text BestRow
+SET BestLabel text "BEST  "
+SET BestLabel fontSize 30
+SET BestLabel textColor #FFD84A
+WIDGET BestMin text BestRow
+SET BestMin text "0"
+SET BestMin fontSize 40
+SET BestMin bold true
+SET BestMin textColor #FFD84A
+WIDGET BestC1 text BestRow
+SET BestC1 text ":"
+SET BestC1 fontSize 40
+SET BestC1 textColor #FFD84A
+WIDGET BestSec text BestRow
+SET BestSec text "00"
+SET BestSec fontSize 40
+SET BestSec bold true
+SET BestSec textColor #FFD84A
+WIDGET BestDot text BestRow
+SET BestDot text "."
+SET BestDot fontSize 40
+SET BestDot textColor #FFD84A
+WIDGET BestCs text BestRow
+SET BestCs text "00"
+SET BestCs fontSize 40
+SET BestCs bold true
+SET BestCs textColor #FFD84A
+WIDGET SpeedPanel panel Root
+SET SpeedPanel anchors 1 1
+SET SpeedPanel pivot 1 1
+SET SpeedPanel offsets -36 -36 0 0
+SET SpeedPanel width 520
+SET SpeedPanel layout vstack
+SET SpeedPanel spacing 6
+SET SpeedPanel padding 14
+SET SpeedPanel hit never
+SET SpeedPanel bgColor #000000A0
+WIDGET SpeedRow panel SpeedPanel
+SET SpeedRow layout hstack
+SET SpeedRow spacing 10
+SET SpeedRow style clear
+SET SpeedRow hit never
+SET SpeedRow justify end
+WIDGET SpeedValue text SpeedRow
+SET SpeedValue text "0"
+SET SpeedValue fontSize 120
+SET SpeedValue bold true
+SET SpeedValue textAlign right
+SET SpeedValue minWidth 250
+SET SpeedValue textColor #FFFFFF
+WIDGET SpeedUnit text SpeedRow
+SET SpeedUnit text "km/h"
+SET SpeedUnit fontSize 36
+SET SpeedUnit textColor #9FB0C8
+SET SpeedUnit alignV end
+WIDGET Speed progress SpeedPanel
+SET Speed minValue 0
+SET Speed maxValue 200
+SET Speed height 16
+SET Speed accentColor #3AA0FF
+WIDGET GearRow panel SpeedPanel
+SET GearRow layout hstack
+SET GearRow spacing 12
+SET GearRow style clear
+SET GearRow hit never
+SET GearRow justify end
+WIDGET GearLabel text GearRow
+SET GearLabel text "GEAR"
+SET GearLabel fontSize 32
+SET GearLabel textColor #9FB0C8
+SET GearLabel alignV end
+WIDGET GearValue text GearRow
+SET GearValue text "N"
+SET GearValue fontSize 64
+SET GearValue bold true
+SET GearValue textAlign center
+SET GearValue minWidth 60
+SET GearValue textColor #FFD84A
+WIDGET HealthLabel text SpeedPanel
+SET HealthLabel text "CAR HEALTH"
+SET HealthLabel fontSize 24
+SET HealthLabel textColor #9FB0C8
+WIDGET Health progress SpeedPanel
+SET Health minValue 0
+SET Health maxValue 1
+SET Health height 14
+SET Health accentColor #5CE05C
+WIDGET CountdownText text Root
+SET CountdownText anchors 0.5 0.30
+SET CountdownText pivot 0.5 0.5
+SET CountdownText text "3"
+SET CountdownText fontSize 200
+SET CountdownText bold true
+SET CountdownText textAlign center
+SET CountdownText textColor #FFD84A
+SET CountdownText hit never
+WIDGET CheckpointText text Root
+SET CheckpointText anchors 0.5 0.13
+SET CheckpointText pivot 0.5 0.5
+SET CheckpointText text "CHECKPOINT"
+SET CheckpointText fontSize 56
+SET CheckpointText bold true
+SET CheckpointText textAlign center
+SET CheckpointText textColor #4DE8FF
+SET CheckpointText hit never
+SET CheckpointText visible false
+WIDGET WreckedText text Root
+SET WreckedText anchors 0.5 0.80
+SET WreckedText pivot 0.5 0.5
+SET WreckedText text "WRECKED  -  PRESS R"
+SET WreckedText fontSize 64
+SET WreckedText bold true
+SET WreckedText textAlign center
+SET WreckedText textColor #FF4B3A
+SET WreckedText hit never
+SET WreckedText visible false
+WIDGET FinishPanel panel Root
+SET FinishPanel anchors 0.5 0.45
+SET FinishPanel pivot 0.5 0.5
+SET FinishPanel width 900
+SET FinishPanel layout vstack
+SET FinishPanel spacing 10
+SET FinishPanel padding 30
+SET FinishPanel hit never
+SET FinishPanel bgColor #000000C0
+SET FinishPanel visible false
+WIDGET FinTitle text FinishPanel
+SET FinTitle text "FINISH!"
+SET FinTitle fontSize 140
+SET FinTitle bold true
+SET FinTitle textAlign center
+SET FinTitle textColor #FFD84A
+WIDGET FinTotalRow panel FinishPanel
+SET FinTotalRow layout hstack
+SET FinTotalRow spacing 2
+SET FinTotalRow style clear
+SET FinTotalRow hit never
+SET FinTotalRow justify center
+WIDGET FinTotalLabel text FinTotalRow
+SET FinTotalLabel text "TOTAL TIME   "
+SET FinTotalLabel fontSize 48
+SET FinTotalLabel textColor #9FB0C8
+WIDGET FinMin text FinTotalRow
+SET FinMin text "0"
+SET FinMin fontSize 72
+SET FinMin bold true
+SET FinMin textColor #FFFFFF
+WIDGET FinC1 text FinTotalRow
+SET FinC1 text ":"
+SET FinC1 fontSize 72
+SET FinC1 textColor #FFFFFF
+WIDGET FinSec text FinTotalRow
+SET FinSec text "00"
+SET FinSec fontSize 72
+SET FinSec bold true
+SET FinSec textColor #FFFFFF
+WIDGET FinDot text FinTotalRow
+SET FinDot text "."
+SET FinDot fontSize 72
+SET FinDot textColor #FFFFFF
+WIDGET FinCs text FinTotalRow
+SET FinCs text "00"
+SET FinCs fontSize 72
+SET FinCs bold true
+SET FinCs textColor #FFFFFF
+WIDGET FinBestRow panel FinishPanel
+SET FinBestRow layout hstack
+SET FinBestRow spacing 2
+SET FinBestRow style clear
+SET FinBestRow hit never
+SET FinBestRow justify center
+WIDGET FinBestLabel text FinBestRow
+SET FinBestLabel text "BEST LAP   "
+SET FinBestLabel fontSize 40
+SET FinBestLabel textColor #FFD84A
+WIDGET FinBestMin text FinBestRow
+SET FinBestMin text "0"
+SET FinBestMin fontSize 56
+SET FinBestMin bold true
+SET FinBestMin textColor #FFD84A
+WIDGET FinBestC1 text FinBestRow
+SET FinBestC1 text ":"
+SET FinBestC1 fontSize 56
+SET FinBestC1 textColor #FFD84A
+WIDGET FinBestSec text FinBestRow
+SET FinBestSec text "00"
+SET FinBestSec fontSize 56
+SET FinBestSec bold true
+SET FinBestSec textColor #FFD84A
+WIDGET FinBestDot text FinBestRow
+SET FinBestDot text "."
+SET FinBestDot fontSize 56
+SET FinBestDot textColor #FFD84A
+WIDGET FinBestCs text FinBestRow
+SET FinBestCs text "00"
+SET FinBestCs fontSize 56
+SET FinBestCs bold true
+SET FinBestCs textColor #FFD84A
+WIDGET FinHint text FinishPanel
+SET FinHint text "Stop and press Play to race again"
+SET FinHint fontSize 30
+SET FinHint textAlign center
+SET FinHint textColor #9FB0C8
+WIDGET Keys text Root
+SET Keys anchors 0 1
+SET Keys pivot 0 1
+SET Keys offsets 36 -30 0 0
+SET Keys text "W / S  gas, brake      A / D  steer      SPACE  handbrake      R  respawn at the last checkpoint      C  camera"
+SET Keys fontSize 24
+SET Keys textColor #C8D2E4
+SET Keys hit never

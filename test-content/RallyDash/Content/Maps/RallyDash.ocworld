@@ -1,0 +1,1185 @@
+OCWORLD 1
+NAME RallyDash
+GAMEMODE AN_RallyRules
+DEFAULTPAWN AN_RallyDriver
+SPAWN 9664.27 3396.24 150 149.7
+SUN elev 33.0 azim 215.0 color 1 0.96 0.88 lux 95000
+SKY model physical
+FOG exp density 0.000012 color 0.72 0.80 0.90
+POSTVOLUME infinite saturation 1.1 vignette 0.25
+# RallyDash: a lap game made only of content (make_rally_dash.py writes this file; edit the script, not the file). Centimetres, +X forward at yaw 0,
+# +Y right, +Z up. Every static shape is the built-in unit cube or sphere (half-extent 1 cm, so the last three numbers of a PLACEG are half extents).
+# The loop is 654 m round, 3 laps; 8 checkpoints (gate 0 is the start/finish line); traffic follows RallyDash.oclanes on the right.
+# Ground: top at z = 0. A ring of rocks hides where it ends.
+PLACEG Meshes/cube.ocmesh 0 0 -50 0 0 0 20000 20000 50 M_RallyGrass name Ground
+PLACEG Meshes/cube.ocmesh 19506.84 -509.67 0 4.13 -1.67 0 2105.08 1154.28 2868.3 M_Rock
+PLACEG Meshes/cube.ocmesh 18551 2093.78 0 30.64 0.57 0 2164.65 1684.38 1939.27 M_Rock
+PLACEG Meshes/cube.ocmesh 18365.11 6181.19 0 32.59 -1.65 0 1443.5 1621.52 2859.93 M_Rock
+PLACEG Meshes/cube.ocmesh 16670.31 8455.15 0 39.35 5.78 0 1984.46 1493.92 1311.35 M_Rock
+PLACEG Meshes/cube.ocmesh 15827.82 10609.65 0 31.65 3.27 0 1040.41 1225.43 2329.67 M_Rock
+PLACEG Meshes/cube.ocmesh 14132.71 13004.62 0 63.94 -2.25 0 1245.45 1749.56 1711.3 M_Rock
+PLACEG Meshes/cube.ocmesh 11331.64 15637.62 0 44.56 -1.45 0 1105.66 2061.55 2338.83 M_Rock
+PLACEG Meshes/cube.ocmesh 7809.86 17413.4 0 49.75 -0.09 0 1229.81 2112.73 2252.37 M_Rock
+PLACEG Meshes/cube.ocmesh 6467.14 17901.61 0 54.07 -4.26 0 902.66 1860.81 2648.09 M_Rock
+PLACEG Meshes/cube.ocmesh 2943.51 19116.6 0 100.39 3.94 0 1382.74 1547.32 2368.25 M_Rock
+PLACEG Meshes/cube.ocmesh -6.91 19081.81 0 104.31 -3.51 0 2144.35 1456.88 2935.11 M_Rock
+PLACEG Meshes/cube.ocmesh -2627.49 19372.31 0 108.47 3.91 0 1171.43 1157.35 1575.85 M_Rock
+PLACEG Meshes/cube.ocmesh -6275.94 17732.81 0 109.95 -1.77 0 1883.3 1559.07 1658.69 M_Rock
+PLACEG Meshes/cube.ocmesh -8324.93 17601.37 0 100.54 -2.78 0 1782.52 1869.68 1912.86 M_Rock
+PLACEG Meshes/cube.ocmesh -11167.32 15293.57 0 106.16 4.34 0 1401.74 1612.49 2626.33 M_Rock
+PLACEG Meshes/cube.ocmesh -13675.5 12946.42 0 145.85 3.87 0 1660.51 1183.76 2607.63 M_Rock
+PLACEG Meshes/cube.ocmesh -15808.61 11334.62 0 122.2 4.93 0 1871.05 1579.26 3188.7 M_Rock
+PLACEG Meshes/cube.ocmesh -16555.86 9079.03 0 168.65 -5.65 0 1955.46 2183.39 3090.05 M_Rock
+PLACEG Meshes/cube.ocmesh -18126.44 5129.84 0 188.23 1.77 0 1213.2 2116.84 2818.39 M_Rock
+PLACEG Meshes/cube.ocmesh -18756.48 2850.98 0 155.66 3.17 0 934.98 1110.75 1210.39 M_Rock
+PLACEG Meshes/cube.ocmesh -18950.27 782.01 0 177.2 0.08 0 2190.06 1307.94 2173.56 M_Rock
+PLACEG Meshes/cube.ocmesh -18929.33 -2819.83 0 166.39 -3.84 0 1780.04 1358.11 1916.56 M_Rock
+PLACEG Meshes/cube.ocmesh -18247.92 -6432.58 0 195.99 1.04 0 1051.84 2103.31 1095.08 M_Rock
+PLACEG Meshes/cube.ocmesh -17621.89 -8220.56 0 198.67 -1.89 0 1731.26 1608.65 1519.1 M_Rock
+PLACEG Meshes/cube.ocmesh -15087.97 -11387.44 0 192.72 3.16 0 1923.76 1718.3 2280.74 M_Rock
+PLACEG Meshes/cube.ocmesh -13312.75 -13399.17 0 210.43 -2.1 0 2140.72 1970.77 964.71 M_Rock
+PLACEG Meshes/cube.ocmesh -10939.8 -15115.42 0 235.32 -5.91 0 2082.85 1570.02 3016.64 M_Rock
+PLACEG Meshes/cube.ocmesh -7724.15 -17189.5 0 242.34 5.34 0 2117.21 1371.23 1212.63 M_Rock
+PLACEG Meshes/cube.ocmesh -6499.04 -17780.89 0 226.59 5.1 0 1604.05 1298.1 2467.91 M_Rock
+PLACEG Meshes/cube.ocmesh -3035.67 -18410.41 0 279.18 2.93 0 1489.62 1118.81 2083.29 M_Rock
+PLACEG Meshes/cube.ocmesh -400.15 -18991.79 0 272.25 -4.7 0 2019.95 2172.31 2331.5 M_Rock
+PLACEG Meshes/cube.ocmesh 2029.72 -18687.66 0 298.19 2.8 0 1657.2 1990.91 2491.99 M_Rock
+PLACEG Meshes/cube.ocmesh 5324.17 -18506.45 0 272.32 -1.58 0 970.48 2097.62 2176.83 M_Rock
+PLACEG Meshes/cube.ocmesh 9451.12 -16973.34 0 302.37 4.94 0 905.25 1550.02 2813.21 M_Rock
+PLACEG Meshes/cube.ocmesh 11532.64 -14956.61 0 331.37 0.34 0 900.99 2176.78 1440.38 M_Rock
+PLACEG Meshes/cube.ocmesh 13937.42 -12934.22 0 324.34 -2.85 0 1845.29 2032.8 2010.38 M_Rock
+PLACEG Meshes/cube.ocmesh 15086.49 -11521.29 0 317.15 -4.56 0 1829.16 2024.56 1839.72 M_Rock
+PLACEG Meshes/cube.ocmesh 17132.62 -8252.28 0 342.29 3.16 0 1946.57 1292.04 2930.77 M_Rock
+PLACEG Meshes/cube.ocmesh 18066.32 -5940.77 0 333.66 -3.25 0 1025.09 1441.04 1926.54 M_Rock
+PLACEG Meshes/cube.ocmesh 18492.1 -2561.02 0 369.01 1.3 0 2167.37 1877.77 975.42 M_Rock
+# Road surface: one slab per segment of the loop (top at z = 2), painted kerbs on both edges (top at z = 3), then concrete barriers.
+PLACEG Meshes/cube.ocmesh 12793.41 223.99 -13 106.31 0 0 275.36 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 12641.87 664.94 -13 111.62 0 0 273.5 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 12451.24 1090.52 -13 116.64 0 0 271.42 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 12225.23 1498.52 -13 121.33 0 0 269.21 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 11967.63 1887.41 -13 125.71 0 0 266.98 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 11682.09 2256.37 -13 129.77 0 0 264.76 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 11372.07 2605.07 -13 133.51 0 0 262.59 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 11040.75 2933.69 -13 136.96 0 0 260.49 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 10691.05 3242.74 -13 140.11 0 0 258.43 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 10325.6 3533.07 -13 142.96 0 0 256.4 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 9946.78 3805.79 -13 145.53 0 0 254.37 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 9556.78 4062.32 -13 147.8 0 0 252.28 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 9157.57 4304.33 -13 149.75 0 0 250.09 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 8750.99 4533.81 -13 151.37 0 0 247.74 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 8338.79 4753.07 -13 152.61 0 0 245.17 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 7922.64 4964.8 -13 153.46 0 0 242.34 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 7504.2 5171.99 -13 153.86 0 0 239.28 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 7085.11 5377.88 -13 153.81 0 0 239.71 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 6666.96 5585.64 -13 153.35 0 0 241.81 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 6251.06 5797.87 -13 152.58 0 0 242.36 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 5838.2 6015.93 -13 151.74 0 0 242.36 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 5428.14 6239.24 -13 151.12 0 0 240.77 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 5019.41 6464.99 -13 151.06 0 0 241.66 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 4609.35 6688.3 -13 151.8 0 0 248.13 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 4194.73 6902.89 -13 153.47 0 0 254.47 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 3772.51 7101.9 -13 156.05 0 0 259.86 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 3340.66 7278.76 -13 159.41 0 0 263.76 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 2898.56 7427.85 -13 163.32 0 0 265.81 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 2447.06 7545.25 -13 167.53 0 0 265.86 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 1988.16 7629.17 -13 171.75 0 0 265.87 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 1524.4 7680.23 -13 175.69 0 0 263.97 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 1058.23 7701.43 -13 179.1 0 0 260.28 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 591.48 7697.87 -13 -178.23 0 0 255.08 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 125.13 7676.22 -13 -176.46 0 0 248.83 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -340.67 7644.02 -13 -175.64 0 0 242.2 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -806.26 7608.66 -13 -175.68 0 0 241.01 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -1272.05 7576.13 -13 -176.33 0 0 242.56 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -1738.21 7549.8 -13 -177.2 0 0 242.56 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -2204.71 7529.83 -13 -177.89 0 0 241.28 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -2671.35 7513.47 -13 -178.09 0 0 239.65 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -3137.95 7496.06 -13 -177.63 0 0 244.48 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -3604.23 7472.12 -13 -176.49 0 0 249.07 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -4069.7 7436.17 -13 -174.68 0 0 253.21 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -4533.47 7383.18 -13 -172.28 0 0 256.84 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -4994.22 7308.73 -13 -169.36 0 0 259.97 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -5450.13 7209.13 -13 -165.99 0 0 262.61 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -5898.91 7081.42 -13 -162.24 0 0 264.73 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -6337.91 6923.5 -13 -158.19 0 0 266.3 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -6764.24 6734.12 -13 -153.91 0 0 267.25 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -7174.95 6512.98 -13 -149.49 0 0 267.55 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -7567.32 6260.73 -13 -145.03 0 0 267.55 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -7939.04 5978.91 -13 -140.63 0 0 267.17 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -8288.46 5669.83 -13 -136.38 0 0 266.11 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -8614.73 5336.34 -13 -132.37 0 0 264.44 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -8917.88 4981.63 -13 -128.67 0 0 262.26 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -9198.74 4608.94 -13 -125.33 0 0 259.72 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -9458.8 4221.39 -13 -122.39 0 0 256.99 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -9700.03 3821.77 -13 -119.84 0 0 254.25 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -9924.59 3412.52 -13 -117.66 0 0 251.67 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -10134.61 2995.58 -13 -115.81 0 0 249.42 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -10331.96 2572.47 -13 -114.2 0 0 247.65 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -10518.03 2144.27 -13 -112.77 0 0 246.47 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -10693.63 1711.66 -13 -111.42 0 0 245.99 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -10858.92 1275.02 -13 -110.05 0 0 246.64 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11013.4 834.44 -13 -108.59 0 0 247.8 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11155.97 389.87 -13 -106.97 0 0 249.36 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11285.01 -58.79 -13 -105.12 0 0 251.26 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11398.42 -511.63 -13 -103 0 0 253.42 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11493.75 -968.58 -13 -100.57 0 0 255.79 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11568.24 -1429.35 -13 -97.8 0 0 258.32 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11618.91 -1893.29 -13 -94.67 0 0 260.98 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11642.59 -2359.32 -13 -91.15 0 0 263.74 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11636.04 -2825.84 -13 -87.24 0 0 266.54 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11596.06 -3290.61 -13 -82.93 0 0 269.32 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11519.65 -3750.72 -13 -78.21 0 0 271.97 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11404.22 -4202.52 -13 -73.12 0 0 274.37 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11247.85 -4641.74 -13 -67.68 0 0 276.37 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -11049.53 -5063.61 -13 -61.96 0 0 277.83 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -10809.41 -5463.09 -13 -56.02 0 0 278.63 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -10528.93 -5835.31 -13 -49.98 0 0 278.72 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -10210.74 -6175.85 -13 -43.91 0 0 278.73 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -9858.58 -6481.16 -13 -37.93 0 0 278.14 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -9476.88 -6748.71 -13 -32.12 0 0 276.96 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -9070.48 -6977.13 -13 -26.55 0 0 275.32 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -8644.21 -7166.07 -13 -21.26 0 0 273.37 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -8202.66 -7316.08 -13 -16.27 0 0 271.25 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -7749.96 -7428.36 -13 -11.59 0 0 269.08 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -7289.76 -7504.61 -13 -7.22 0 0 266.92 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -6825.13 -7546.81 -13 -3.16 0 0 264.83 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -6358.65 -7557.13 -13 0.62 0 0 262.81 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -5892.41 -7537.83 -13 4.12 0 0 260.86 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -5428.06 -7491.22 -13 7.34 0 0 258.95 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -4966.85 -7419.68 -13 10.29 0 0 257.02 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -4509.66 -7325.67 -13 12.95 0 0 255 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -4056.96 -7211.81 -13 15.29 0 0 252.77 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -3608.8 -7081.05 -13 17.25 0 0 250.15 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -3164.75 -6936.85 -13 18.73 0 0 246.84 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -2723.7 -6783.61 -13 19.59 0 0 242.41 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -2283.72 -6627.28 -13 19.54 0 0 245.96 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -1841.9 -6476.39 -13 18.18 0 0 258.93 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -1394.6 -6343.32 -13 14.96 0 0 274.66 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -938.95 -6244.63 -13 9.48 0 0 286.44 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -475.69 -6196.76 -13 2.32 0 0 286.4 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh -9.98 -6206.03 -13 -4.59 0 0 284.66 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 452.93 -6262.8 -13 -9.39 0 0 269.91 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 911.85 -6348.2 -13 -11.7 0 0 252.57 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 1368.73 -6444.49 -13 -12.11 0 0 241.94 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 1825.92 -6539.29 -13 -11.32 0 0 246.63 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 2284.84 -6625.12 -13 -9.86 0 0 248.97 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 2745.99 -6697.9 -13 -8.07 0 0 249.91 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 3209.24 -6755.68 -13 -6.15 0 0 250.12 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 3674.18 -6797.73 -13 -4.19 0 0 250.12 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 4140.29 -6823.93 -13 -2.24 0 0 250.04 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 4607.01 -6834.35 -13 -0.31 0 0 249.93 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 5073.83 -6829.05 -13 1.62 0 0 250.11 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 5540.19 -6807.93 -13 3.57 0 0 250.47 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 6005.53 -6770.7 -13 5.58 0 0 251.01 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 6469.25 -6716.87 -13 7.66 0 0 251.69 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 6930.63 -6645.82 -13 9.85 0 0 252.5 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 7388.86 -6556.79 -13 12.15 0 0 253.43 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 7843.01 -6448.91 -13 14.58 0 0 254.46 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 8292 -6321.29 -13 17.16 0 0 255.6 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 8734.56 -6172.96 -13 19.9 0 0 256.84 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 9169.22 -6002.95 -13 22.82 0 0 258.19 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 9594.3 -5810.31 -13 25.94 0 0 259.66 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 10007.86 -5594.1 -13 29.26 0 0 261.26 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 10407.67 -5353.48 -13 32.82 0 0 262.98 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 10791.18 -5087.72 -13 36.62 0 0 264.83 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 11155.51 -4796.31 -13 40.69 0 0 266.79 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 11497.43 -4478.99 -13 45.04 0 0 268.82 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 11813.39 -4135.89 -13 49.68 0 0 270.89 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 12099.55 -3767.66 -13 54.62 0 0 272.91 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 12351.93 -3375.58 -13 59.84 0 0 274.78 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 12566.53 -2961.69 -13 65.34 0 0 276.39 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 12739.61 -2528.86 -13 71.07 0 0 277.59 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 12867.94 -2080.77 -13 76.97 0 0 278.29 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 12949.13 -1621.82 -13 82.97 0 0 278.4 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 12981.83 -1156.9 -13 88.99 0 0 278.4 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 12965.9 -691.08 -13 94.93 0 0 277.92 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 12902.39 -229.29 -13 100.73 0 0 276.87 810 15 M_RallyAsphalt
+PLACEG Meshes/cube.ocmesh 13503.07 430.73 -2 106.3 0 0 277.38 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 13329.46 936.44 -2 111.61 0 0 275.28 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 13112.57 1421.07 -2 116.63 0 0 272.99 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 12857.36 1882.13 -2 121.32 0 0 270.61 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 12568.7 2318.19 -2 125.7 0 0 268.22 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 12251.21 2728.66 -2 129.76 0 0 265.86 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 11909.14 3113.61 -2 133.51 0 0 263.57 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 11546.32 3473.64 -2 136.95 0 0 261.33 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 11166.22 3809.7 -2 140.1 0 0 259.13 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 10771.93 4123.05 -2 142.96 0 0 256.95 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 10366.3 4415.19 -2 145.53 0 0 254.74 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 9951.92 4687.85 -2 147.79 0 0 252.45 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 9531.24 4942.95 -2 149.75 0 0 250.02 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 9106.61 5182.69 -2 151.36 0 0 247.39 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 8680.32 5409.51 -2 152.61 0 0 244.51 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 8254.6 5626.15 -2 153.45 0 0 241.37 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 7831.53 5835.65 -2 153.86 0 0 238.04 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 7412.9 6041.32 -2 153.81 0 0 235.3 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6999.77 6246.56 -2 153.35 0 0 233.29 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 6592.04 6454.62 -2 152.58 0 0 232.15 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6187.95 6668.04 -2 151.74 0 0 232.63 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 5783.98 6888.07 -2 151.12 0 0 234.91 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 5375.25 7113.81 -2 151.06 0 0 239.44 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 4956.38 7341.84 -2 151.81 0 0 246.01 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 4522.56 7566.17 -2 153.48 0 0 252.88 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 4070.49 7778.99 -2 156.07 0 0 259.11 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 3599.12 7971.76 -2 159.42 0 0 263.99 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 3109.91 8136.55 -2 163.33 0 0 267.04 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 2606.73 8267.31 -2 167.53 0 0 268.03 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 2095.21 8360.91 -2 171.74 0 0 267.18 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 1581.7 8417.62 -2 175.68 0 0 264.31 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 1072.21 8441.03 -2 179.09 0 0 259.65 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 571.5 8437.46 -2 -178.24 0 0 253.58 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 82.46 8414.94 -2 -176.46 0 0 246.69 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -394.2 8382.08 -2 -175.64 0 0 239.84 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -860.06 8346.7 -2 -175.68 0 0 234.9 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -1318.69 8314.64 -2 -176.33 0 0 232.45 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -1774.9 8288.87 -2 -177.2 0 0 232.33 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -2233.49 8269.26 -2 -177.9 0 0 234.32 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -2698.11 8252.99 -2 -178.09 0 0 237.78 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -3170.72 8235.32 -2 -177.63 0 0 242.84 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -3651.69 8210.53 -2 -176.48 0 0 247.89 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -4140.19 8172.68 -2 -174.67 0 0 252.54 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -4634.5 8116.05 -2 -172.27 0 0 256.68 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -5132.22 8035.47 -2 -169.35 0 0 260.28 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -5630.37 7926.47 -2 -165.98 0 0 263.34 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -6125.42 7785.45 -2 -162.23 0 0 265.85 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -6613.36 7609.79 -2 -158.18 0 0 267.79 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -7089.85 7398.04 -2 -153.91 0 0 269.1 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -7550.45 7149.99 -2 -149.49 0 0 269.73 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -7990.95 6866.8 -2 -145.04 0 0 269.69 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -8407.72 6550.89 -2 -140.63 0 0 268.96 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -8798.08 6205.72 -2 -136.39 0 0 267.54 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -9160.48 5835.48 -2 -132.38 0 0 265.51 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -9494.64 5444.7 -2 -128.68 0 0 263.01 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -9801.47 5037.79 -2 -125.34 0 0 260.2 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -10082.8 4618.77 -2 -122.4 0 0 257.25 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -10341.17 4190.97 -2 -119.85 0 0 254.38 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -10579.41 3756.96 -2 -117.67 0 0 251.76 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -10800.37 3318.43 -2 -115.81 0 0 249.57 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -11006.62 2876.33 -2 -114.21 0 0 247.94 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -11200.21 2430.89 -2 -112.77 0 0 246.96 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -11382.5 1981.82 -2 -111.42 0 0 246.67 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -11554.12 1528.43 -2 -110.05 0 0 247.1 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -11714.89 1069.85 -2 -108.59 0 0 248.11 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -11863.89 605.13 -2 -106.97 0 0 249.6 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -11999.51 133.36 -2 -105.12 0 0 251.49 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -12119.53 -346.18 -2 -102.99 0 0 253.69 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -12221.2 -833.96 -2 -100.56 0 0 256.14 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -12301.31 -1330.12 -2 -97.79 0 0 258.78 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -12356.25 -1834.34 -2 -94.66 0 0 261.58 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -12382.07 -2345.74 -2 -91.14 0 0 264.49 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -12374.64 -2862.75 -2 -87.23 0 0 267.48 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -12329.7 -3382.94 -2 -82.92 0 0 270.48 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -12243.14 -3902.92 -2 -78.2 0 0 273.38 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -12111.27 -4418.21 -2 -73.11 0 0 276.07 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -11931.26 -4923.25 -2 -67.67 0 0 278.4 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -11701.5 -5411.63 -2 -61.95 0 0 280.21 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -11422.03 -5876.37 -2 -56.02 0 0 281.38 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -11094.78 -6310.59 -2 -49.97 0 0 281.8 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -10723.46 -6708.03 -2 -43.92 0 0 281.58 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -10313.32 -7063.7 -2 -37.94 0 0 280.67 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -9870.55 -7374.24 -2 -32.13 0 0 279.19 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -9401.7 -7637.94 -2 -26.56 0 0 277.29 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -8913.16 -7854.67 -2 -21.27 0 0 275.13 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -8410.74 -8025.53 -2 -16.28 0 0 272.83 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -7899.51 -8152.5 -2 -11.6 0 0 270.5 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -7383.7 -8238.12 -2 -7.23 0 0 268.22 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -6866.78 -8285.2 -2 -3.16 0 0 266.01 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -6351.53 -8296.72 -2 0.62 0 0 263.87 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -5840.16 -8275.66 -2 4.11 0 0 261.8 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -5334.4 -8225 -2 7.34 0 0 259.74 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -4835.62 -8147.73 -2 10.29 0 0 257.63 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -4344.89 -8046.91 -2 12.94 0 0 255.36 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -3863.07 -7925.83 -2 15.28 0 0 252.78 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -3390.89 -7788.15 -2 17.24 0 0 249.64 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -2929.04 -7638.27 -2 18.73 0 0 245.57 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -2478.39 -7481.77 -2 19.58 0 0 239.95 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -2040.26 -7326.07 -2 19.54 0 0 233.34 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -1616.81 -7181.17 -2 18.21 0 0 225.04 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -1210.77 -7059.57 -2 15.04 0 0 214.09 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -822.6 -6974.28 -2 9.57 0 0 203.05 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -445.02 -6934.73 -2 2.3 0 0 198.38 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -62.38 -6943.2 -2 -4.7 0 0 205.83 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 340.2 -6993.8 -2 -9.46 0 0 218.53 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 767.85 -7074 -2 -11.71 0 0 230.1 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 1217.31 -7168.83 -2 -12.11 0 0 238.49 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 1682.78 -7265.28 -2 -11.32 0 0 245.22 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 2159.14 -7354.29 -2 -9.86 0 0 248.82 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 2642.51 -7430.53 -2 -8.07 0 0 250.48 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 3130.12 -7491.33 -2 -6.15 0 0 251.04 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 3620.09 -7535.64 -2 -4.19 0 0 251.1 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 4111.27 -7563.25 -2 -2.24 0 0 251 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 4602.95 -7574.24 -2 -0.31 0 0 250.94 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 5094.76 -7568.65 -2 1.62 0 0 251.05 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 5586.44 -7546.38 -2 3.57 0 0 251.35 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6077.71 -7507.05 -2 5.58 0 0 251.85 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 6568.22 -7450.09 -2 7.66 0 0 252.52 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 7057.51 -7374.72 -2 9.85 0 0 253.33 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 7544.94 -7279.98 -2 12.15 0 0 254.27 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 8029.68 -7164.8 -2 14.58 0 0 255.33 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 8510.75 -7028.01 -2 17.16 0 0 256.5 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 8986.91 -6868.36 -2 19.9 0 0 257.79 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 9456.72 -6684.54 -2 22.83 0 0 259.19 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 9918.46 -6475.21 -2 25.94 0 0 260.71 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 10370.08 -6239.01 -2 29.27 0 0 262.37 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 10809.2 -5974.61 -2 32.82 0 0 264.16 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 11233.03 -5680.78 -2 36.63 0 0 266.09 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 11638.31 -5356.45 -2 40.7 0 0 268.14 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 12021.29 -5000.83 -2 45.05 0 0 270.29 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 12377.71 -4613.57 -2 49.69 0 0 272.49 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 12702.82 -4194.96 -2 54.63 0 0 274.68 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 12991.52 -3746.16 -2 59.85 0 0 276.76 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 13238.56 -3269.38 -2 65.35 0 0 278.6 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 13438.86 -2768.11 -2 71.07 0 0 280.07 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 13587.99 -2247.1 -2 76.97 0 0 281.06 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 13682.56 -1712.23 -2 82.97 0 0 281.45 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 13720.7 -1170.21 -2 88.98 0 0 281.28 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 13702.23 -628.02 -2 94.93 0 0 280.5 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 13628.69 -92.38 -2 100.72 0 0 279.16 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 12083.75 17.24 -2 106.32 0 0 207.07 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 11954.29 393.43 -2 111.63 0 0 208.62 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 11789.91 759.98 -2 116.65 0 0 210.3 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 11593.11 1114.9 -2 121.34 0 0 212.04 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 11366.56 1456.63 -2 125.72 0 0 213.77 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 11112.96 1784.07 -2 129.78 0 0 215.48 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 10834.99 2096.54 -2 133.52 0 0 217.14 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 10535.17 2393.75 -2 136.96 0 0 218.75 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 10215.87 2675.79 -2 140.11 0 0 220.34 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 9879.26 2943.09 -2 142.97 0 0 221.92 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 9527.27 3196.4 -2 145.54 0 0 223.53 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 9161.64 3436.8 -2 147.8 0 0 225.2 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 8783.9 3665.71 -2 149.76 0 0 226.98 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 8395.37 3884.93 -2 151.37 0 0 228.91 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 7997.25 4096.64 -2 152.62 0 0 231.02 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 7590.67 4303.44 -2 153.46 0 0 233.32 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 7176.86 4508.32 -2 153.86 0 0 235.74 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6757.33 4714.44 -2 153.81 0 0 238.6 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 6334.14 4924.72 -2 153.35 0 0 241.24 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 5910.09 5141.13 -2 152.58 0 0 242.55 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 5488.44 5363.82 -2 151.74 0 0 242.07 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 5072.3 5590.42 -2 151.12 0 0 239.31 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 4663.57 5816.16 -2 151.05 0 0 235.05 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 4262.33 6034.76 -2 151.79 0 0 230.41 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 3866.9 6239.6 -2 153.46 0 0 225.42 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 3474.53 6424.82 -2 156.04 0 0 220.79 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 3082.2 6585.76 -2 159.39 0 0 217.06 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 2687.21 6719.16 -2 163.31 0 0 214.61 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 2287.39 6823.2 -2 167.53 0 0 213.63 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 1881.11 6897.43 -2 171.75 0 0 214.49 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 1467.1 6942.83 -2 175.7 0 0 216.8 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 1044.24 6961.82 -2 179.12 0 0 220.38 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 611.46 6958.27 -2 -178.21 0 0 224.91 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 167.8 6937.5 -2 -176.45 0 0 229.94 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -287.14 6905.97 -2 -175.63 0 0 234.81 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -752.46 6870.63 -2 -175.68 0 0 239.39 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -1225.4 6837.62 -2 -176.33 0 0 242.3 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -1701.52 6810.73 -2 -177.2 0 0 242.43 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -2175.92 6790.4 -2 -177.89 0 0 240.05 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -2644.59 6773.96 -2 -178.09 0 0 236.11 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -3105.18 6756.8 -2 -177.64 0 0 232.49 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -3556.77 6733.71 -2 -176.49 0 0 228.81 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -3999.21 6699.66 -2 -174.69 0 0 225.39 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -4432.45 6650.31 -2 -172.29 0 0 222.33 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -4856.23 6582 -2 -169.37 0 0 219.65 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -5269.89 6491.78 -2 -166 0 0 217.37 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -5672.4 6377.39 -2 -162.25 0 0 215.48 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -6062.46 6237.2 -2 -158.2 0 0 214 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -6438.62 6070.2 -2 -153.91 0 0 212.97 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -6799.46 5875.97 -2 -149.49 0 0 212.43 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -7143.7 5654.65 -2 -145.03 0 0 212.47 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -7470.36 5406.93 -2 -140.63 0 0 213.08 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -7778.84 5133.94 -2 -136.37 0 0 214.19 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -8068.99 4837.2 -2 -132.36 0 0 215.73 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -8341.12 4518.56 -2 -128.66 0 0 217.6 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -8596.01 4180.09 -2 -125.33 0 0 219.66 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -8834.8 3824.01 -2 -122.38 0 0 221.8 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -9058.89 3452.58 -2 -119.84 0 0 223.85 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -9269.77 3068.08 -2 -117.66 0 0 225.71 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -9468.85 2672.72 -2 -115.8 0 0 227.23 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -9657.29 2268.61 -2 -114.2 0 0 228.33 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -9835.85 1857.65 -2 -112.77 0 0 228.96 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -10004.76 1441.51 -2 -111.42 0 0 229.11 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -10163.72 1021.6 -2 -110.05 0 0 228.87 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -10311.92 599.02 -2 -108.59 0 0 228.21 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -10448.06 174.61 -2 -106.97 0 0 227.18 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -10570.5 -250.94 -2 -105.12 0 0 225.86 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -10677.3 -677.08 -2 -103 0 0 224.3 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -10766.29 -1103.2 -2 -100.58 0 0 222.56 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -10835.17 -1528.57 -2 -97.81 0 0 220.66 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -10881.57 -1952.23 -2 -94.68 0 0 218.65 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -10903.1 -2372.9 -2 -91.16 0 0 216.55 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -10897.44 -2788.94 -2 -87.25 0 0 214.38 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -10862.42 -3198.29 -2 -82.94 0 0 212.21 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -10796.16 -3598.51 -2 -78.23 0 0 210.08 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -10697.17 -3986.83 -2 -73.14 0 0 208.09 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -10564.43 -4360.23 -2 -67.7 0 0 206.34 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -10397.56 -4715.59 -2 -61.97 0 0 204.95 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -10196.79 -5049.82 -2 -56.03 0 0 204.02 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -9963.08 -5360.03 -2 -49.98 0 0 203.62 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -9698.03 -5643.68 -2 -43.91 0 0 203.85 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -9403.83 -5898.61 -2 -37.93 0 0 204.59 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -9083.21 -6123.19 -2 -32.11 0 0 205.72 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -8739.26 -6316.33 -2 -26.54 0 0 207.14 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -8375.26 -6477.48 -2 -21.25 0 0 208.74 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -7994.57 -6606.63 -2 -16.26 0 0 210.42 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -7600.41 -6704.22 -2 -11.58 0 0 212.11 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -7195.81 -6771.1 -2 -7.21 0 0 213.76 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -6783.48 -6808.42 -2 -3.15 0 0 215.35 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -6365.78 -6817.54 -2 0.63 0 0 216.9 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -5944.67 -6799.99 -2 4.13 0 0 218.4 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -5521.73 -6757.44 -2 7.35 0 0 219.89 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -5098.09 -6691.64 -2 10.3 0 0 221.43 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -4674.43 -6604.43 -2 12.95 0 0 223.1 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -4250.84 -6497.8 -2 15.29 0 0 225.02 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -3826.72 -6373.95 -2 17.25 0 0 227.38 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -3400.46 -6235.44 -2 18.74 0 0 230.47 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -2969.01 -6085.46 -2 19.59 0 0 234.76 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -2527.19 -5928.5 -2 19.53 0 0 242.43 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -2066.99 -5771.61 -2 18.15 0 0 254.6 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -1578.42 -5627.06 -2 14.9 0 0 270.21 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -1055.3 -5514.97 -2 9.42 0 0 284.65 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh -506.36 -5458.79 -2 2.33 0 0 289.25 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 42.42 -5468.85 -2 -4.52 0 0 281.37 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 565.67 -5531.79 -2 -9.33 0 0 264.37 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 1055.84 -5622.4 -2 -11.68 0 0 247.65 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 1520.16 -5720.15 -2 -12.11 0 0 236.08 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 1969.06 -5813.3 -2 -11.33 0 0 230.75 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 2410.55 -5895.95 -2 -9.87 0 0 227.84 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 2849.47 -5965.27 -2 -8.07 0 0 226.47 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 3288.36 -6020.03 -2 -6.15 0 0 225.96 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 3728.27 -6059.82 -2 -4.19 0 0 225.9 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 4169.31 -6084.6 -2 -2.24 0 0 225.98 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 4611.08 -6094.47 -2 -0.31 0 0 226.01 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 5052.89 -6089.46 -2 1.61 0 0 225.96 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 5493.94 -6069.49 -2 3.57 0 0 225.76 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 5933.36 -6034.34 -2 5.58 0 0 225.42 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6370.27 -5983.65 -2 7.66 0 0 224.96 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 6803.74 -5916.93 -2 9.84 0 0 224.39 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 7232.78 -5833.59 -2 12.14 0 0 223.72 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 7656.35 -5733.03 -2 14.57 0 0 222.97 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 8073.25 -5614.57 -2 17.15 0 0 222.13 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 8482.2 -5477.56 -2 19.9 0 0 221.21 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 8881.71 -5321.37 -2 22.82 0 0 220.21 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 9270.15 -5145.41 -2 25.93 0 0 219.12 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 9645.65 -4949.19 -2 29.26 0 0 217.94 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 10006.14 -4732.34 -2 32.81 0 0 216.66 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 10349.32 -4494.67 -2 36.61 0 0 215.27 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 10672.7 -4236.17 -2 40.68 0 0 213.8 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 10973.56 -3957.14 -2 45.03 0 0 212.25 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 11249.06 -3658.2 -2 49.67 0 0 210.65 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 11496.28 -3340.35 -2 54.6 0 0 209.05 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 11712.34 -3005 -2 59.83 0 0 207.52 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 11894.51 -2654 -2 65.33 0 0 206.15 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 12040.36 -2289.61 -2 71.06 0 0 205.02 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 12147.9 -1914.45 -2 76.96 0 0 204.24 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 12215.7 -1531.41 -2 82.97 0 0 203.88 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 12242.96 -1143.58 -2 88.99 0 0 204.05 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 12229.57 -754.13 -2 94.94 0 0 204.69 60 5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 12176.09 -366.2 -2 100.74 0 0 205.72 60 5 M_RallyKerbRed nocollide
+PLACEG Meshes/cube.ocmesh 13598.97 458.67 45 106.3 0 0 280.19 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 13422.37 973.13 45 111.61 0 0 277.93 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 13201.94 1465.74 45 116.63 0 0 275.48 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 12942.78 1933.97 45 121.32 0 0 272.93 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 12649.93 2376.41 45 125.7 0 0 270.37 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 12328.12 2792.48 45 129.76 0 0 267.85 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 11981.72 3182.33 45 133.5 0 0 265.39 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 11614.64 3546.6 45 136.95 0 0 263 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 11230.43 3886.31 45 140.1 0 0 260.65 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 10832.25 4202.78 45 142.96 0 0 258.32 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 10422.99 4497.54 45 145.53 0 0 255.96 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 10005.32 4772.38 45 147.79 0 0 253.5 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 9581.74 5029.25 45 149.75 0 0 250.9 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 9154.67 5270.38 45 151.36 0 0 248.08 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 8726.48 5498.22 45 152.61 0 0 244.99 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 8299.46 5715.52 45 153.45 0 0 241.62 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 7875.77 5925.34 45 153.86 0 0 238.05 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 7457.19 6130.98 45 153.81 0 0 234.91 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 7044.75 6335.88 45 153.35 0 0 232.49 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 6638.12 6543.36 45 152.58 0 0 231.15 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 6235.21 6756.17 45 151.74 0 0 231.69 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 5832.07 6975.74 45 151.12 0 0 234.4 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 5423.33 7201.49 45 151.06 0 0 239.48 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 5003.27 7430.15 45 151.81 0 0 246.48 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 4566.86 7655.8 45 153.49 0 0 253.84 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 4110.76 7870.49 45 156.07 0 0 260.53 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 3634.05 8065.41 45 159.42 0 0 265.79 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 3138.47 8232.32 45 163.33 0 0 269.12 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 2628.3 8364.89 45 167.53 0 0 270.23 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 2109.67 8459.8 45 171.74 0 0 269.26 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 1589.44 8517.27 45 175.68 0 0 266.14 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 1074.1 8540.98 45 179.09 0 0 261.11 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 568.8 8537.4 45 -178.24 0 0 254.59 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 76.69 8514.77 45 -176.47 0 0 247.2 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -401.44 8481.82 45 -175.64 0 0 239.89 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -867.33 8446.44 45 -175.68 0 0 234.37 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -1325 8414.44 45 -176.33 0 0 231.48 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -1779.86 8388.75 45 -177.21 0 0 231.34 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -2237.38 8369.19 45 -177.9 0 0 233.69 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -2701.72 8352.92 45 -178.09 0 0 237.73 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -3175.14 8335.21 45 -177.63 0 0 243.14 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -3658.1 8310.32 45 -176.48 0 0 248.54 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -4149.72 8272.21 45 -174.67 0 0 253.54 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -4648.15 8215.09 45 -172.27 0 0 257.98 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -5150.87 8133.68 45 -169.35 0 0 261.85 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -5654.73 8023.41 45 -165.98 0 0 265.14 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -6156.03 7880.59 45 -162.23 0 0 267.84 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -6650.58 7702.54 45 -158.18 0 0 269.93 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -7133.85 7487.75 45 -153.9 0 0 271.35 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -7601.19 7236.07 45 -149.49 0 0 272.04 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -8048.19 6948.7 45 -145.04 0 0 271.99 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -8471.06 6628.18 45 -140.64 0 0 271.2 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -8866.94 6278.13 45 -136.39 0 0 269.66 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -9234.23 5902.93 45 -132.38 0 0 267.48 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -9572.58 5507.27 45 -128.68 0 0 264.79 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -9882.92 5095.74 45 -125.34 0 0 261.77 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -10167.13 4672.46 45 -122.4 0 0 258.62 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -10427.81 4240.86 45 -119.85 0 0 255.55 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -10667.9 3803.5 45 -117.67 0 0 252.76 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -10890.34 3362.06 45 -115.81 0 0 250.44 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -11097.79 2917.39 45 -114.21 0 0 248.71 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -11292.39 2469.62 45 -112.77 0 0 247.68 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -11475.59 2018.32 45 -111.42 0 0 247.38 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -11648.06 1562.68 45 -110.05 0 0 247.82 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -11809.68 1101.67 45 -108.59 0 0 248.89 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -11959.55 634.21 45 -106.97 0 0 250.47 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -12096.06 159.32 45 -105.12 0 0 252.48 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -12216.98 -323.82 45 -102.99 0 0 254.83 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -12319.51 -815.77 45 -100.56 0 0 257.44 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -12400.38 -1316.71 45 -97.79 0 0 260.26 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -12455.89 -1826.38 45 -94.66 0 0 263.25 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -12482.01 -2343.9 45 -91.14 0 0 266.37 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -12474.45 -2867.73 45 -87.23 0 0 269.56 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -12428.84 -3395.42 45 -82.91 0 0 272.77 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -12340.9 -3923.49 45 -78.2 0 0 275.88 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -12206.82 -4447.35 45 -73.11 0 0 278.76 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -12023.61 -4961.3 45 -67.67 0 0 281.27 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -11789.6 -5458.66 45 -61.95 0 0 283.23 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -11504.82 -5932.22 45 -56.02 0 0 284.49 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -11171.25 -6374.81 45 -49.97 0 0 284.97 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -10792.75 -6779.94 45 -43.92 0 0 284.71 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -10374.77 -7142.43 45 -37.94 0 0 283.72 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -9923.74 -7458.77 45 -32.13 0 0 282.13 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -9446.46 -7727.24 45 -26.56 0 0 280.08 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -8949.5 -7947.72 45 -21.27 0 0 277.76 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -8438.86 -8121.41 45 -16.28 0 0 275.3 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -7919.72 -8250.36 45 -11.6 0 0 272.82 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -7396.4 -8337.24 45 -7.23 0 0 270.37 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -6872.41 -8384.98 45 -3.16 0 0 268.01 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -6350.57 -8396.67 45 0.61 0 0 265.73 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -5833.1 -8375.37 45 4.11 0 0 263.51 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -5321.74 -8324.16 45 7.34 0 0 261.3 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -4817.88 -8246.11 45 10.28 0 0 259.04 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -4322.62 -8144.38 45 12.94 0 0 256.61 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -3836.87 -8022.32 45 15.28 0 0 253.84 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -3361.44 -7883.7 45 17.24 0 0 250.46 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -2897.19 -7733.06 45 18.73 0 0 246.07 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -2445.24 -7576.11 45 19.58 0 0 240 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -2007.36 -7420.5 45 19.54 0 0 232.25 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -1586.39 -7276.41 45 18.21 0 0 221.92 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -1185.93 -7156.36 45 15.05 0 0 208.38 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -806.87 -7072.89 45 9.59 0 0 195.03 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -440.88 -7034.45 45 2.3 0 0 189.74 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -69.46 -7042.82 45 -4.71 0 0 198.31 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 324.96 -7092.58 45 -9.47 0 0 213.76 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 748.39 -7172.08 45 -11.72 0 0 228.11 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 1196.84 -7266.72 45 -12.1 0 0 238.38 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 1663.44 -7363.38 45 -11.32 0 0 245.69 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 2142.16 -7452.83 45 -9.86 0 0 249.61 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 2628.53 -7529.54 45 -8.07 0 0 251.43 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 3119.43 -7590.75 45 -6.15 0 0 252.05 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 3612.79 -7635.36 45 -4.19 0 0 252.12 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 4107.34 -7663.16 45 -2.24 0 0 252.01 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 4602.4 -7674.22 45 -0.31 0 0 251.95 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 5097.59 -7668.6 45 1.62 0 0 252.06 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 5592.69 -7646.16 45 3.57 0 0 252.38 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 6087.46 -7606.56 45 5.58 0 0 252.91 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 6581.6 -7549.18 45 7.66 0 0 253.62 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 7074.66 -7473.22 45 9.85 0 0 254.48 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 7566.03 -7377.71 45 12.15 0 0 255.49 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 8054.91 -7261.54 45 14.58 0 0 256.62 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 8540.31 -7123.51 45 17.16 0 0 257.87 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 9021.01 -6962.33 45 19.9 0 0 259.24 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 9495.57 -6776.65 45 22.83 0 0 260.74 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 9962.26 -6565.06 45 25.94 0 0 262.36 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 10419.03 -6326.16 45 29.27 0 0 264.13 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 10863.46 -6058.55 45 32.83 0 0 266.04 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 11292.74 -5760.93 45 36.63 0 0 268.1 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 11703.56 -5432.15 45 40.7 0 0 270.29 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 12092.09 -5071.35 45 45.05 0 0 272.59 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 12453.97 -4678.12 45 49.69 0 0 274.95 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 12784.34 -4252.71 45 54.63 0 0 277.29 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 13077.95 -3796.24 45 59.85 0 0 279.51 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 13329.37 -3310.96 45 65.35 0 0 281.49 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 13533.36 -2800.44 45 71.07 0 0 283.08 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 13685.29 -2269.57 45 76.97 0 0 284.15 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 13781.67 -1724.45 45 82.97 0 0 284.59 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 13820.55 -1172.01 45 88.98 0 0 284.39 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 13801.74 -619.5 45 94.93 0 0 283.54 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 13726.84 -73.88 45 100.72 0 0 282.1 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 11987.85 -10.7 45 106.32 0 0 200.37 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 11861.37 356.74 45 111.64 0 0 202.26 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 11700.54 715.31 45 116.65 0 0 204.32 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 11507.69 1063.06 45 121.35 0 0 206.44 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 11285.33 1398.42 45 125.72 0 0 208.57 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 11036.06 1720.25 45 129.78 0 0 210.66 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 10762.41 2027.81 45 133.52 0 0 212.69 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 10466.85 2320.78 45 136.97 0 0 214.67 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 10151.66 2599.17 45 140.11 0 0 216.62 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 9818.94 2863.36 45 142.97 0 0 218.56 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 9470.58 3114.05 45 145.54 0 0 220.52 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 9108.25 3352.27 45 147.8 0 0 222.57 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 8733.4 3579.41 45 149.76 0 0 224.74 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 8347.31 3797.24 45 151.37 0 0 227.1 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 7951.09 4007.93 45 152.62 0 0 229.68 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 7545.81 4214.07 45 153.46 0 0 232.49 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 7132.63 4418.64 45 153.86 0 0 235.44 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 6713.03 4624.79 45 153.81 0 0 238.67 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 6289.17 4835.41 45 153.35 0 0 241.51 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 5864.01 5052.39 45 152.58 0 0 242.96 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 5441.18 5275.7 45 151.74 0 0 242.41 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 5024.21 5502.74 45 151.12 0 0 239.39 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 4615.48 5728.49 45 151.05 0 0 234.49 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 4215.43 5946.44 45 151.79 0 0 228.77 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 3822.6 6149.97 45 153.46 0 0 222.67 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 3434.27 6333.32 45 156.03 0 0 217.03 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 3047.28 6492.11 45 159.39 0 0 212.52 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 2658.65 6623.39 45 163.31 0 0 209.59 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 2265.81 6725.62 45 167.53 0 0 208.48 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 1866.65 6798.54 45 171.76 0 0 209.46 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 1459.36 6843.18 45 175.71 0 0 212.22 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 1042.35 6861.87 45 179.12 0 0 216.53 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 614.16 6858.33 45 -178.21 0 0 222.04 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 173.56 6837.67 45 -176.45 0 0 228.19 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -279.91 6806.23 45 -175.63 0 0 234.19 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -745.19 6770.89 45 -175.68 0 0 239.47 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -1219.1 6737.82 45 -176.33 0 0 242.66 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -1696.57 6710.85 45 -177.2 0 0 242.8 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -2172.03 6690.47 45 -177.89 0 0 240.2 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -2640.97 6674.02 45 -178.09 0 0 235.84 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -3100.75 6656.9 45 -177.64 0 0 231.39 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -3550.36 6633.92 45 -176.5 0 0 226.89 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -3989.68 6600.14 45 -174.69 0 0 222.71 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -4418.8 6551.28 45 -172.29 0 0 218.99 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -4837.58 6483.79 45 -169.37 0 0 215.73 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -5245.53 6394.84 45 -166 0 0 212.96 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -5641.79 6282.25 45 -162.25 0 0 210.66 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -6025.24 6144.46 45 -158.2 0 0 208.87 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -6394.62 5980.48 45 -153.91 0 0 207.63 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -6748.72 5789.88 45 -149.49 0 0 207 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -7086.46 5572.75 45 -145.03 0 0 207.05 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -7407.03 5329.64 45 -140.62 0 0 207.77 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -7709.97 5061.52 45 -136.37 0 0 209.11 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -7995.24 4769.75 45 -132.36 0 0 210.97 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -8263.18 4455.99 45 -128.66 0 0 213.24 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -8514.56 4122.14 45 -125.32 0 0 215.76 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -8750.48 3770.31 45 -122.38 0 0 218.37 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -8972.25 3402.68 45 -119.84 0 0 220.9 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -9181.28 3021.53 45 -117.66 0 0 223.18 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -9378.88 2629.09 45 -115.8 0 0 225.07 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -9566.12 2227.55 45 -114.2 0 0 226.45 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -9743.66 1818.92 45 -112.77 0 0 227.24 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -9911.67 1405.01 45 -111.42 0 0 227.45 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -10069.78 987.36 45 -110.05 0 0 227.13 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -10217.12 567.2 45 -108.6 0 0 226.3 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -10352.4 145.53 45 -106.97 0 0 225.02 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -10473.95 -276.91 45 -105.12 0 0 223.39 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -10579.85 -699.44 45 -103.01 0 0 221.47 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -10667.98 -1121.39 45 -100.58 0 0 219.32 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -10736.11 -1541.98 45 -97.81 0 0 216.99 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -10781.93 -1960.2 45 -94.68 0 0 214.52 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -10803.17 -2374.74 45 -91.16 0 0 211.94 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -10797.63 -2783.95 45 -87.26 0 0 209.29 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -10763.28 -3185.81 45 -82.94 0 0 206.62 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -10698.4 -3577.94 45 -78.23 0 0 204.02 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -10601.62 -3957.69 45 -73.14 0 0 201.6 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -10472.08 -4322.19 45 -67.7 0 0 199.48 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -10309.45 -4668.56 45 -61.97 0 0 197.8 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -10114.01 -4993.97 45 -56.03 0 0 196.68 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -9886.62 -5295.81 45 -49.98 0 0 196.22 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -9628.74 -5571.76 45 -43.91 0 0 196.48 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -9342.38 -5819.89 45 -37.92 0 0 197.36 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -9030.02 -6038.66 45 -32.11 0 0 198.73 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -8694.5 -6227.03 45 -26.54 0 0 200.46 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -8338.92 -6384.42 45 -21.24 0 0 202.41 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -7966.45 -6510.75 45 -16.25 0 0 204.46 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -7580.2 -6606.36 45 -11.58 0 0 206.53 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -7183.12 -6671.98 45 -7.21 0 0 208.55 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -6777.85 -6708.63 45 -3.15 0 0 210.51 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -6366.74 -6717.59 45 0.63 0 0 212.4 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -5951.73 -6700.29 45 4.13 0 0 214.24 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -5534.38 -6658.28 45 7.35 0 0 216.07 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -5115.83 -6593.25 45 10.3 0 0 217.96 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -4696.69 -6506.96 45 12.96 0 0 220 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -4277.04 -6401.31 45 15.29 0 0 222.33 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -3856.17 -6278.4 45 17.25 0 0 225.19 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -3432.32 -6140.65 45 18.74 0 0 228.93 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -3002.16 -5991.12 45 19.59 0 0 234.12 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -2560.09 -5834.06 45 19.53 0 0 242.57 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -2097.4 -5676.37 45 18.15 0 0 255.48 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh -1603.26 -5530.27 45 14.89 0 0 272.09 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -1071.03 -5416.37 45 9.41 0 0 287.66 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh -510.51 -5359.07 45 2.33 0 0 292.88 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 49.5 -5369.23 45 -4.51 0 0 284.06 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 580.9 -5433.01 45 -9.33 0 0 265.8 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 1075.3 -5524.32 45 -11.68 0 0 248.03 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 1540.62 -5622.27 45 -12.11 0 0 235.64 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 1988.4 -5715.2 45 -11.33 0 0 229.26 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 2427.53 -5797.41 45 -9.87 0 0 225.8 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 2863.45 -5866.27 45 -8.08 0 0 224.17 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 3299.06 -5920.62 45 -6.15 0 0 223.59 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 3735.58 -5960.1 45 -4.19 0 0 223.52 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 4173.23 -5984.69 45 -2.24 0 0 223.61 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 4611.63 -5994.48 45 -0.31 0 0 223.66 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 5050.06 -5989.51 45 1.61 0 0 223.58 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 5487.69 -5969.7 45 3.57 0 0 223.33 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 5923.61 -5934.84 45 5.58 0 0 222.91 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 6356.9 -5884.57 45 7.66 0 0 222.34 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 6786.59 -5818.43 45 9.84 0 0 221.63 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 7211.69 -5735.87 45 12.14 0 0 220.81 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 7631.12 -5636.29 45 14.57 0 0 219.88 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 8043.69 -5519.07 45 17.15 0 0 218.85 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 8448.1 -5383.59 45 19.9 0 0 217.72 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 8842.86 -5229.26 45 22.82 0 0 216.49 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 9226.35 -5055.56 45 25.93 0 0 215.15 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 9596.7 -4862.04 45 29.26 0 0 213.69 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 9951.88 -4648.41 45 32.81 0 0 212.12 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 10289.61 -4414.52 45 36.61 0 0 210.42 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 10607.46 -4160.47 45 40.68 0 0 208.61 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 10902.77 -3886.62 45 45.03 0 0 206.71 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 11172.8 -3593.65 45 49.67 0 0 204.75 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 11414.76 -3282.6 45 54.6 0 0 202.79 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 11625.91 -2954.92 45 59.83 0 0 200.93 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 11803.7 -2612.42 45 65.33 0 0 199.25 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 11945.87 -2257.28 45 71.06 0 0 197.89 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 12050.6 -1891.97 45 76.96 0 0 196.95 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 12116.59 -1519.19 45 82.97 0 0 196.54 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 12143.11 -1141.79 45 88.99 0 0 196.73 40 45 M_RallyKerbRed
+PLACEG Meshes/cube.ocmesh 12130.06 -762.66 45 94.94 0 0 197.49 40 45 M_RallyKerbWhite
+PLACEG Meshes/cube.ocmesh 12077.94 -384.7 45 100.74 0 0 198.74 40 45 M_RallyKerbWhite
+# Cone rows on both kerbs, every fifth segment.
+PLACE Meshes/Cone.ocmesh 13490.93 151.95 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 12226.95 -151.95 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 12345.43 2474.77 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 11317.36 1679.12 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 10519.03 4201.18 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 9759.46 3146.16 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 8426.23 5439.79 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 7836.74 4281.13 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 6347.39 6480.14 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 5740.26 5330.62 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 4263 7595.11 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 3708.71 6419.2 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 1828.29 8308.78 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 1686.03 7016.58 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -622.68 8274.39 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -524.24 6978.12 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -2928.92 8155.24 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -2880.44 6856.15 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -5362.39 7900.66 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -5084.91 6630.61 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -7727.55 6941.25 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -7024.55 5847.73 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -9582.84 5190.57 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -8544.63 4408.18 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -10825.32 3060.16 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -9647.17 2510.65 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -11706.79 811.66 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -10468.89 414.66 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -12246.08 -1590.06 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -10953.76 -1731.19 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -12101.75 -4140.09 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -10842.21 -3818.29 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -10853.8 -6457.77 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -9903.91 -5570.24 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -8635.79 -7866.15 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -8217.62 -6635.24 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -6098.36 -8204.04 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -6152.13 -6905.15 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -3649.7 -7774.25 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -4013.83 -6526.29 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -1434.75 -7026.58 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh -1805.44 -5780.55 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 564.31 -6939.9 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 802.16 -5661.85 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 2896.68 -7375.69 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 3057.58 -6085.68 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 5336.59 -7471.81 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 5277.78 -6173.14 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 7767.29 -7140.08 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 7466.87 -5875.26 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 10105.37 -6284.23 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 9503.08 -5132.18 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 12140.5 -4754.15 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 11184.22 -3873.52 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 13440.2 -2487.09 3 0 0 0 1 M_RallyCone
+PLACE Meshes/Cone.ocmesh 12190.45 -2129.16 3 0 0 0 1 M_RallyCone
+# Start/finish line: a chequered strip across the road and a gold arch. Checkpoints 1.. are cyan arches with a glowing line.
+PLACEG Meshes/cube.ocmesh 7252.84 6131.05 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 7208.52 6041.4 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 7164.2 5951.76 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 7119.88 5862.12 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 7075.55 5772.48 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 7031.23 5682.84 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6986.91 5593.2 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6942.59 5503.56 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6898.26 5413.92 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6853.94 5324.28 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6809.62 5234.63 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6765.3 5144.99 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6720.98 5055.35 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6676.65 4965.71 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6632.33 4876.07 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6588.01 4786.43 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 7164.43 6174.85 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 7119.95 6085.29 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 7075.47 5995.73 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 7030.99 5906.17 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6986.51 5816.6 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6942.02 5727.04 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6897.54 5637.48 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6853.06 5547.92 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6808.58 5458.35 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6764.1 5368.79 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6719.62 5279.23 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6675.14 5189.67 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6630.66 5100.1 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6586.18 5010.54 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6541.7 4920.98 2.5 153.66 0 0 50 50 0.5 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6497.22 4831.42 2.5 153.66 0 0 50 50 0.5 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 7210.62 6157.52 190 153.66 0 0 32 32 190 M_RallyGold
+PLACEG Meshes/cube.ocmesh 6540.6 4804.31 190 153.66 0 0 32 32 190 M_RallyGold
+PLACEG Meshes/cube.ocmesh 7208.4 6153.04 405 153.66 0 0 30 50 45 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 7164.03 6063.42 405 153.66 0 0 30 50 45 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 7119.66 5973.81 405 153.66 0 0 30 50 45 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 7075.29 5884.19 405 153.66 0 0 30 50 45 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 7030.91 5794.57 405 153.66 0 0 30 50 45 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6986.54 5704.96 405 153.66 0 0 30 50 45 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6942.17 5615.34 405 153.66 0 0 30 50 45 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6897.8 5525.72 405 153.66 0 0 30 50 45 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6853.43 5436.11 405 153.66 0 0 30 50 45 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6809.06 5346.49 405 153.66 0 0 30 50 45 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6764.68 5256.87 405 153.66 0 0 30 50 45 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6720.31 5167.26 405 153.66 0 0 30 50 45 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6675.94 5077.64 405 153.66 0 0 30 50 45 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6631.57 4988.02 405 153.66 0 0 30 50 45 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh 6587.2 4898.41 405 153.66 0 0 30 50 45 M_RallyBlack nocollide
+PLACEG Meshes/cube.ocmesh 6542.82 4808.79 405 153.66 0 0 30 50 45 M_RallyKerbWhite nocollide
+PLACEG Meshes/cube.ocmesh -863.63 8361.06 190 -175.64 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh -748.82 6855.43 190 -175.64 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh -806.23 7608.25 395 -175.64 0 0 28 770 26 M_RallyGate nocollide
+PLACEG Meshes/cube.ocmesh -806.23 7608.25 3 -175.64 0 0 22 780 0.6 M_RallyGate nocollide
+PLACEG Meshes/cube.ocmesh -8996.2 6037.72 190 -134.47 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh -7918.66 4979.88 190 -134.47 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh -8457.43 5508.8 395 -134.47 0 0 28 770 26 M_RallyGate nocollide
+PLACEG Meshes/cube.ocmesh -8457.43 5508.8 3 -134.47 0 0 22 780 0.6 M_RallyGate nocollide
+PLACEG Meshes/cube.ocmesh -12374.63 -1829.84 190 -94.8 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh -10869.93 -1956.18 190 -94.8 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh -11622.28 -1893.01 395 -94.8 0 0 28 770 26 M_RallyGate nocollide
+PLACEG Meshes/cube.ocmesh -11622.28 -1893.01 3 -94.8 0 0 22 780 0.6 M_RallyGate nocollide
+PLACEG Meshes/cube.ocmesh -7123.95 -8286.09 190 -5 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh -6992.44 -6781.83 190 -5 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh -7058.2 -7533.96 395 -5 0 0 28 770 26 M_RallyGate nocollide
+PLACEG Meshes/cube.ocmesh -7058.2 -7533.96 3 -5 0 0 22 780 0.6 M_RallyGate nocollide
+PLACEG Meshes/cube.ocmesh 757.53 -7086 190 -11.81 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh 1066.66 -5607.98 190 -11.81 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh 912.1 -6346.99 395 -11.81 0 0 28 770 26 M_RallyGate nocollide
+PLACEG Meshes/cube.ocmesh 912.1 -6346.99 3 -11.81 0 0 22 780 0.6 M_RallyGate nocollide
+PLACEG Meshes/cube.ocmesh 9227.41 -6797.27 190 21.23 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh 8680.7 -5389.72 190 21.23 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh 8954.06 -6093.5 395 21.23 0 0 28 770 26 M_RallyGate nocollide
+PLACEG Meshes/cube.ocmesh 8954.06 -6093.5 3 21.23 0 0 22 780 0.6 M_RallyGate nocollide
+PLACEG Meshes/cube.ocmesh 13522.59 440.16 190 106.51 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh 12074.88 10.93 190 106.51 0 0 32 32 190 M_RallyGate
+PLACEG Meshes/cube.ocmesh 12798.74 225.55 395 106.51 0 0 28 770 26 M_RallyGate nocollide
+PLACEG Meshes/cube.ocmesh 12798.74 225.55 3 106.51 0 0 22 780 0.6 M_RallyGate nocollide
+# The player's car: COMPONENT Vehicle (Vehicles/Sedan.ocvehicle) plus a chase COMPONENT CameraRig; its four wheels are CHILD placements the
+# vehicle system moves every frame (the spec's `node` names). nocollide: the physics vehicle is the chassis.
+PLACE Meshes/Sedan.ocmesh 9337.37 4548.84 12 149.7 0 0 1 M_RallyCarRed nocollide name Sedan
+  COMPONENT Vehicle asset=Vehicles/Sedan.ocvehicle
+  COMPONENT CameraRig preset=vehiclechase arm=700 collision=0
+  BEGIN
+    CHILD Meshes/Wheel.ocmesh 180 -77 33 0 0 0 1 M_RallyTyre nocollide name WheelFL
+    CHILD Meshes/Wheel.ocmesh 180 77 33 0 0 0 1 M_RallyTyre nocollide name WheelFR
+    CHILD Meshes/Wheel.ocmesh -180 -77 33 0 0 0 1 M_RallyTyre nocollide name WheelRL
+    CHILD Meshes/Wheel.ocmesh -180 77 33 0 0 0 1 M_RallyTyre nocollide name WheelRR
+  END
+# Two slow traffic cars: `vehicle <asset>` makes the placement a lane-following car on RallyDash.oclanes (the right-hand lane).
+PLACE Meshes/Sedan.ocmesh 2669.83 7123.48 12 164.65 0 0 1 M_RallyCarBlue nocollide vehicle Vehicles/Sedan.ocvehicle
+  BEGIN
+    CHILD Meshes/Wheel.ocmesh 180 -77 33 0 0 0 1 M_RallyTyre nocollide name WheelFL
+    CHILD Meshes/Wheel.ocmesh 180 77 33 0 0 0 1 M_RallyTyre nocollide name WheelFR
+    CHILD Meshes/Wheel.ocmesh -180 -77 33 0 0 0 1 M_RallyTyre nocollide name WheelRL
+    CHILD Meshes/Wheel.ocmesh -180 77 33 0 0 0 1 M_RallyTyre nocollide name WheelRR
+  END
+PLACE Meshes/Sedan.ocmesh -3933.44 -6804.92 12 16.4 0 0 1 M_RallyCarYellow nocollide vehicle Vehicles/Sedan.ocvehicle
+  BEGIN
+    CHILD Meshes/Wheel.ocmesh 180 -77 33 0 0 0 1 M_RallyTyre nocollide name WheelFL
+    CHILD Meshes/Wheel.ocmesh 180 77 33 0 0 0 1 M_RallyTyre nocollide name WheelFR
+    CHILD Meshes/Wheel.ocmesh -180 -77 33 0 0 0 1 M_RallyTyre nocollide name WheelRL
+    CHILD Meshes/Wheel.ocmesh -180 77 33 0 0 0 1 M_RallyTyre nocollide name WheelRR
+  END
+# Two kickers on the left half of the road (traffic keeps right): 10 degrees up over 8.9 m, then the ground falls away.
+PLACEG Meshes/cube.ocmesh -2104.34 7913.37 53.52 -177.06 -10 0 450 250 25 M_RallyOrange
+PLACEG Meshes/cube.ocmesh -2264.31 -7023.19 53.52 19.52 -10 0 450 250 25 M_RallyOrange
+# Destructibles (COMPONENT Destructible): two crate pyramids and a glass pane, all on the left half of the road.
+PLACE Meshes/Crate.ocmesh -11239.48 2235.27 50 -112.23 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -11137.66 2193.65 50 -112.23 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -11035.83 2152.03 50 -112.23 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -10934.01 2110.41 50 -112.23 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -11188.57 2214.46 150 -112.23 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -11086.75 2172.84 150 -112.23 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -10984.92 2131.22 150 -112.23 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -11137.66 2193.65 250 -112.23 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -11035.83 2152.03 250 -112.23 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -12079.56 -340.04 50 -103.09 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -11972.42 -364.96 50 -103.09 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -11865.28 -389.88 50 -103.09 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -11758.14 -414.8 50 -103.09 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -12025.99 -352.5 150 -103.09 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -11918.85 -377.42 150 -103.09 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -11811.71 -402.34 150 -103.09 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -11972.42 -364.96 250 -103.09 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/Crate.ocmesh -11865.28 -389.88 250 -103.09 0 0 1 M_Crate nocollide
+  COMPONENT Destructible preset=wood
+PLACE Meshes/GlassPane.ocmesh 8891.27 -6597.87 130 20 0 0 1 M_RallyGlass nocollide
+  COMPONENT Destructible preset=glass
+# Scenery: lamp posts, a pit building, buildings, billboards and trees, placed with a fixed seed and kept clear of the road.
+PLACEG Meshes/cube.ocmesh 11384.37 766.13 220 118.98 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh 11384.37 766.13 450 118.98 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh 10781.96 4566.38 220 144.25 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh 10781.96 4566.38 450 144.25 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh 6809.57 4287.56 220 153.84 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh 6809.57 4287.56 450 153.84 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh 4909.21 7775.53 220 152.64 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh 4909.21 7775.53 450 152.64 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh 1241.66 6598.91 220 177.4 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh 1241.66 6598.91 450 177.4 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh -2018.45 8637.4 220 -177.55 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh -2018.45 8637.4 450 -177.55 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh -4988.85 6190.99 220 -167.68 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh -4988.85 6190.99 450 -167.68 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh -8848.29 6654.77 220 -138.51 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh -8848.29 6654.77 450 -138.51 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh -9050.58 2710.89 220 -116.74 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh -9050.58 2710.89 450 -116.74 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh -12281.26 470.61 220 -106.04 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh -12281.26 470.61 450 -106.04 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh -10528.85 -2964.71 220 -85.08 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh -10528.85 -2964.71 450 -85.08 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh -11182.61 -6764.99 220 -46.94 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh -11182.61 -6764.99 450 -46.94 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh -7341.52 -6390.05 220 -9.41 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh -7341.52 -6390.05 450 -9.41 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh -4013.85 -8340.14 220 14.12 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh -4013.85 -8340.14 450 14.12 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh -1401.95 -5208 220 12.22 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh -1401.95 -5208 450 12.22 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh 1852.62 -7666.38 220 -10.59 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh 1852.62 -7666.38 450 -10.59 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh 5257.42 -5723.6 220 2.59 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh 5257.42 -5723.6 450 2.59 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh 8864.63 -7295.4 220 18.53 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh 8864.63 -7295.4 450 18.53 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh 10584.22 -3837.86 220 42.86 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh 10584.22 -3837.86 450 42.86 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh 14003.75 -2045.03 220 79.97 0 0 14 14 220 M_Trim
+PLACEG Meshes/cube.ocmesh 14003.75 -2045.03 450 79.97 0 0 40 40 14 M_RallyLamp nocollide
+PLACEG Meshes/cube.ocmesh 5526.15 4167.9 220 153.66 0 0 1100 380 220 M_Wall
+PLACEG Meshes/cube.ocmesh 5526.15 4167.9 470 153.66 0 0 1130 400 30 M_RallyBlue
+PLACEG Meshes/cube.ocmesh 5706.72 4519.21 330 153.66 0 0 1000 12 80 M_RallyGold nocollide
+PLACEG Meshes/cube.ocmesh -5640.46 -3343.88 2312.9 29.25 0 0 1191.32 571.72 2312.9 M_Concrete
+PLACEG Meshes/cube.ocmesh -12204.12 -11906.72 1196.33 83.16 0 0 1185.96 1121.45 1196.33 M_Wall
+PLACEG Meshes/cube.ocmesh 7066.11 -1279.72 1143.36 54.04 0 0 487.43 1014.5 1143.36 M_Trim
+PLACEG Meshes/cube.ocmesh 1582.27 14514.49 2707.67 77.72 0 0 559.34 594.14 2707.67 M_RallyBlue
+PLACEG Meshes/cube.ocmesh -14907.01 7989.03 2150.95 25.77 0 0 923.58 524.7 2150.95 M_RallyOrange
+PLACEG Meshes/cube.ocmesh 14387.5 6169.05 583.49 72.9 0 0 1046.54 644.56 583.49 M_Metal
+PLACEG Meshes/cube.ocmesh -10941.93 -14234.4 1391.58 14.05 0 0 968.24 594.99 1391.58 M_Concrete
+PLACEG Meshes/cube.ocmesh -13767.81 13154.2 2390.9 80.51 0 0 1113.74 743.57 2390.9 M_Wall
+PLACEG Meshes/cube.ocmesh -5091.25 -1977.05 1606.38 34.36 0 0 1255.11 630.14 1606.38 M_Trim
+PLACEG Meshes/cube.ocmesh 15869.16 -3497.92 2138.87 40.56 0 0 1075.88 505.28 2138.87 M_RallyBlue
+PLACEG Meshes/cube.ocmesh 1166.56 12256.87 847.98 58.16 0 0 563.17 723.34 847.98 M_RallyOrange
+PLACEG Meshes/cube.ocmesh -13396.87 8981.78 1040.76 21.76 0 0 958.41 714.63 1040.76 M_Metal
+PLACEG Meshes/cube.ocmesh -520.95 3543.23 2712.68 64.08 0 0 1249.32 1168.17 2712.68 M_Concrete
+PLACEG Meshes/cube.ocmesh 11065.42 -11485.72 1155.15 13.13 0 0 1129.67 718.91 1155.15 M_Wall
+PLACEG Meshes/cube.ocmesh -14591.62 -15985 1515.18 20.7 0 0 944.89 1235.96 1515.18 M_Trim
+PLACEG Meshes/cube.ocmesh -11844.45 -8979.3 918.53 16.68 0 0 1014.72 602.74 918.53 M_RallyBlue
+PLACEG Meshes/cube.ocmesh -15970.41 -8565.29 729.94 79.24 0 0 1224.83 903.77 729.94 M_RallyOrange
+PLACEG Meshes/cube.ocmesh 10365.6 11115.1 1284.95 26.3 0 0 865.64 1189.99 1284.95 M_Metal
+PLACEG Meshes/cube.ocmesh -14039.51 -14019.22 1448.88 17.36 0 0 836.13 688.33 1448.88 M_Concrete
+PLACEG Meshes/cube.ocmesh 8066.06 15985.07 502.1 59.02 0 0 798.38 896.74 502.1 M_Wall
+PLACEG Meshes/cube.ocmesh -13598.18 -12435.62 2268.95 26.25 0 0 625.74 434.21 2268.95 M_Trim
+PLACEG Meshes/cube.ocmesh -6740.89 15688.45 1616.13 44.09 0 0 814.73 424.34 1616.13 M_RallyBlue
+PLACEG Meshes/cube.ocmesh 7199.12 -12458.91 1939.06 48.05 0 0 1174.33 496.18 1939.06 M_RallyOrange
+PLACEG Meshes/cube.ocmesh -3902.97 -2576.63 1730.76 80.14 0 0 1006.92 503.29 1730.76 M_Metal
+PLACEG Meshes/cube.ocmesh -4876.61 -12028.46 887.22 26.68 0 0 1033.76 1015.05 887.22 M_Concrete
+PLACEG Meshes/cube.ocmesh 14398.33 13291.58 1000.4 50.36 0 0 1099.22 1115.02 1000.4 M_Wall
+PLACEG Meshes/cube.ocmesh 2068.95 5193.3 150 255.25 0 0 30 30 150 M_Trim
+PLACEG Meshes/cube.ocmesh 2068.95 5193.3 450 345.25 0 0 20 380 170 M_RallyOrange nocollide
+PLACEG Meshes/cube.ocmesh -7513.86 9014.9 150 -66.23 0 0 30 30 150 M_Trim
+PLACEG Meshes/cube.ocmesh -7513.86 9014.9 450 23.77 0 0 20 380 170 M_RallyBlue nocollide
+PLACEG Meshes/cube.ocmesh -9122.29 -1230.86 150 -11.92 0 0 30 30 150 M_Trim
+PLACEG Meshes/cube.ocmesh -9122.29 -1230.86 450 78.08 0 0 20 380 170 M_RallyCarRed nocollide
+PLACEG Meshes/cube.ocmesh -7265.47 -9904.92 150 85 0 0 30 30 150 M_Trim
+PLACEG Meshes/cube.ocmesh -7265.47 -9904.92 450 175 0 0 20 380 170 M_RallyOrange nocollide
+PLACEG Meshes/cube.ocmesh 2493.36 -4245.87 150 79.38 0 0 30 30 150 M_Trim
+PLACEG Meshes/cube.ocmesh 2493.36 -4245.87 450 169.38 0 0 20 380 170 M_RallyBlue nocollide
+PLACEG Meshes/cube.ocmesh 12468.4 -6804.47 150 128.76 0 0 30 30 150 M_Trim
+PLACEG Meshes/cube.ocmesh 12468.4 -6804.47 450 218.76 0 0 20 380 170 M_RallyCarRed nocollide
+PLACEG Meshes/cube.ocmesh 9299.08 1305.24 150 228.69 0 0 30 30 150 M_Trim
+PLACEG Meshes/cube.ocmesh 9299.08 1305.24 450 318.69 0 0 20 380 170 M_RallyOrange nocollide
+PLACEG Meshes/cube.ocmesh 7384.08 -10895.28 110 31 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 7384.08 -10895.28 505.45 0 0 0 285.45 285.45 285.45 M_Foliage
+PLACEG Meshes/cube.ocmesh 6193.41 -16251.39 110 45.71 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 6193.41 -16251.39 479.81 0 0 0 259.81 259.81 259.81 M_Foliage
+PLACEG Meshes/cube.ocmesh 6225.71 -9769.31 110 15.89 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 6225.71 -9769.31 468.56 0 0 0 248.56 248.56 248.56 M_Foliage
+PLACEG Meshes/cube.ocmesh -3195.65 -5101.88 110 33.44 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -3195.65 -5101.88 508.89 0 0 0 288.89 288.89 288.89 M_Foliage
+PLACEG Meshes/cube.ocmesh 11142.5 14069.69 110 14.66 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 11142.5 14069.69 402.28 0 0 0 182.28 182.28 182.28 M_Foliage
+PLACEG Meshes/cube.ocmesh 16328.02 -1255.82 110 46.98 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 16328.02 -1255.82 401.84 0 0 0 181.84 181.84 181.84 M_Foliage
+PLACEG Meshes/cube.ocmesh -3128.81 10977.72 110 9.27 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -3128.81 10977.72 504.29 0 0 0 284.29 284.29 284.29 M_Foliage
+PLACEG Meshes/cube.ocmesh -12456.59 -16842.71 110 79.25 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -12456.59 -16842.71 462.26 0 0 0 242.26 242.26 242.26 M_Foliage
+PLACEG Meshes/cube.ocmesh 12435.41 -13424.8 110 68.09 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 12435.41 -13424.8 422.79 0 0 0 202.79 202.79 202.79 M_Foliage
+PLACEG Meshes/cube.ocmesh 6436.97 -13671.32 110 22.01 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 6436.97 -13671.32 527.04 0 0 0 307.04 307.04 307.04 M_Foliage
+PLACEG Meshes/cube.ocmesh -12728.49 -13511.25 110 89.87 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -12728.49 -13511.25 506.2 0 0 0 286.2 286.2 286.2 M_Foliage
+PLACEG Meshes/cube.ocmesh -15588.83 -7714.85 110 54.29 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -15588.83 -7714.85 508.64 0 0 0 288.64 288.64 288.64 M_Foliage
+PLACEG Meshes/cube.ocmesh 15902.72 -5429.9 110 63.59 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 15902.72 -5429.9 536.97 0 0 0 316.97 316.97 316.97 M_Foliage
+PLACEG Meshes/cube.ocmesh 15074.55 12222.68 110 87.33 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 15074.55 12222.68 481.81 0 0 0 261.81 261.81 261.81 M_Foliage
+PLACEG Meshes/cube.ocmesh 912.23 5325.71 110 44.03 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 912.23 5325.71 436.7 0 0 0 216.7 216.7 216.7 M_Foliage
+PLACEG Meshes/cube.ocmesh -5580.39 3429.81 110 37.4 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -5580.39 3429.81 507.84 0 0 0 287.84 287.84 287.84 M_Foliage
+PLACEG Meshes/cube.ocmesh -10597.91 -16075.84 110 6.99 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -10597.91 -16075.84 424 0 0 0 204 204 204 M_Foliage
+PLACEG Meshes/cube.ocmesh -13232.4 15135.71 110 85.94 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -13232.4 15135.71 507.12 0 0 0 287.12 287.12 287.12 M_Foliage
+PLACEG Meshes/cube.ocmesh 16376.24 16563.18 110 52.85 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 16376.24 16563.18 418.47 0 0 0 198.47 198.47 198.47 M_Foliage
+PLACEG Meshes/cube.ocmesh 8400.22 -16785.29 110 28.57 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 8400.22 -16785.29 515.37 0 0 0 295.37 295.37 295.37 M_Foliage
+PLACEG Meshes/cube.ocmesh -1612.28 13382.05 110 17.93 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -1612.28 13382.05 496.84 0 0 0 276.84 276.84 276.84 M_Foliage
+PLACEG Meshes/cube.ocmesh 3038.91 4771.2 110 68.21 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 3038.91 4771.2 453.36 0 0 0 233.36 233.36 233.36 M_Foliage
+PLACEG Meshes/cube.ocmesh 9719.64 -45.14 110 27.74 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 9719.64 -45.14 494.44 0 0 0 274.44 274.44 274.44 M_Foliage
+PLACEG Meshes/cube.ocmesh -16167.63 -11613.85 110 36.98 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -16167.63 -11613.85 503.39 0 0 0 283.39 283.39 283.39 M_Foliage
+PLACEG Meshes/cube.ocmesh 1892.14 545.27 110 46.81 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 1892.14 545.27 463.81 0 0 0 243.81 243.81 243.81 M_Foliage
+PLACEG Meshes/cube.ocmesh 11444.87 10755.11 110 0.52 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 11444.87 10755.11 446.15 0 0 0 226.15 226.15 226.15 M_Foliage
+PLACEG Meshes/cube.ocmesh -3295.55 16929.96 110 62.4 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -3295.55 16929.96 433.28 0 0 0 213.28 213.28 213.28 M_Foliage
+PLACEG Meshes/cube.ocmesh 8213.36 -12985.91 110 20.97 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 8213.36 -12985.91 479.54 0 0 0 259.54 259.54 259.54 M_Foliage
+PLACEG Meshes/cube.ocmesh 931.14 -14823.57 110 1.77 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 931.14 -14823.57 537.22 0 0 0 317.22 317.22 317.22 M_Foliage
+PLACEG Meshes/cube.ocmesh 14953.19 -3643.74 110 37.54 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 14953.19 -3643.74 466.01 0 0 0 246.01 246.01 246.01 M_Foliage
+PLACEG Meshes/cube.ocmesh -12434.78 8181.39 110 47.15 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -12434.78 8181.39 416.87 0 0 0 196.87 196.87 196.87 M_Foliage
+PLACEG Meshes/cube.ocmesh -13318.69 10557.42 110 73.42 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -13318.69 10557.42 462.17 0 0 0 242.17 242.17 242.17 M_Foliage
+PLACEG Meshes/cube.ocmesh -2205.78 -16516.51 110 62.57 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -2205.78 -16516.51 410.82 0 0 0 190.82 190.82 190.82 M_Foliage
+PLACEG Meshes/cube.ocmesh -12752.6 1531.95 110 78.83 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -12752.6 1531.95 405.26 0 0 0 185.26 185.26 185.26 M_Foliage
+PLACEG Meshes/cube.ocmesh -2194.61 -10902.46 110 63.01 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -2194.61 -10902.46 400.94 0 0 0 180.94 180.94 180.94 M_Foliage
+PLACEG Meshes/cube.ocmesh 3641.43 3337.25 110 58.3 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 3641.43 3337.25 418.18 0 0 0 198.18 198.18 198.18 M_Foliage
+PLACEG Meshes/cube.ocmesh -11483.74 4182.74 110 31.44 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -11483.74 4182.74 476.64 0 0 0 256.64 256.64 256.64 M_Foliage
+PLACEG Meshes/cube.ocmesh -6822.28 -10778.23 110 19.22 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -6822.28 -10778.23 531.14 0 0 0 311.14 311.14 311.14 M_Foliage
+PLACEG Meshes/cube.ocmesh 9262.21 -13894.95 110 78.57 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 9262.21 -13894.95 410.77 0 0 0 190.77 190.77 190.77 M_Foliage
+PLACEG Meshes/cube.ocmesh 13479.35 15634.78 110 80.94 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 13479.35 15634.78 498.68 0 0 0 278.68 278.68 278.68 M_Foliage
+PLACEG Meshes/cube.ocmesh 2361.17 11191 110 44.35 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 2361.17 11191 424.67 0 0 0 204.67 204.67 204.67 M_Foliage
+PLACEG Meshes/cube.ocmesh -13661.95 6555.04 110 13.31 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -13661.95 6555.04 476.04 0 0 0 256.04 256.04 256.04 M_Foliage
+PLACEG Meshes/cube.ocmesh -11879.35 11812.78 110 67.14 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -11879.35 11812.78 486.58 0 0 0 266.58 266.58 266.58 M_Foliage
+PLACEG Meshes/cube.ocmesh -3242.81 12576.06 110 8.59 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -3242.81 12576.06 424.78 0 0 0 204.78 204.78 204.78 M_Foliage
+PLACEG Meshes/cube.ocmesh -4903.52 -14896.08 110 44.96 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -4903.52 -14896.08 432.28 0 0 0 212.28 212.28 212.28 M_Foliage
+PLACEG Meshes/cube.ocmesh 2264.04 198.35 110 68.64 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 2264.04 198.35 413.69 0 0 0 193.69 193.69 193.69 M_Foliage
+PLACEG Meshes/cube.ocmesh 16126.39 -16443.53 110 46.49 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 16126.39 -16443.53 439.37 0 0 0 219.37 219.37 219.37 M_Foliage
+PLACEG Meshes/cube.ocmesh -4825.7 4267.12 110 21.99 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -4825.7 4267.12 439.58 0 0 0 219.58 219.58 219.58 M_Foliage
+PLACEG Meshes/cube.ocmesh -13115.71 12218.64 110 40.01 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -13115.71 12218.64 522.43 0 0 0 302.43 302.43 302.43 M_Foliage
+PLACEG Meshes/cube.ocmesh 9874.36 9991.04 110 67.05 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 9874.36 9991.04 423.44 0 0 0 203.44 203.44 203.44 M_Foliage
+PLACEG Meshes/cube.ocmesh -14736.22 -15341.02 110 36.99 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -14736.22 -15341.02 413.83 0 0 0 193.83 193.83 193.83 M_Foliage
+PLACEG Meshes/cube.ocmesh 10159.9 -13369.97 110 55.33 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 10159.9 -13369.97 463.83 0 0 0 243.83 243.83 243.83 M_Foliage
+PLACEG Meshes/cube.ocmesh 8142.65 -692.59 110 30.56 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 8142.65 -692.59 514.96 0 0 0 294.96 294.96 294.96 M_Foliage
+PLACEG Meshes/cube.ocmesh -2644.26 9975.12 110 75.01 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -2644.26 9975.12 488.82 0 0 0 268.82 268.82 268.82 M_Foliage
+PLACEG Meshes/cube.ocmesh -15463.8 -4488.79 110 29.92 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -15463.8 -4488.79 475.57 0 0 0 255.57 255.57 255.57 M_Foliage
+PLACEG Meshes/cube.ocmesh -9391.22 -4488.55 110 67.52 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -9391.22 -4488.55 486.88 0 0 0 266.88 266.88 266.88 M_Foliage
+PLACEG Meshes/cube.ocmesh 15301.8 -8767.17 110 35.4 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 15301.8 -8767.17 498.95 0 0 0 278.95 278.95 278.95 M_Foliage
+PLACEG Meshes/cube.ocmesh -10955.88 9259.34 110 8.41 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -10955.88 9259.34 473.81 0 0 0 253.81 253.81 253.81 M_Foliage
+PLACEG Meshes/cube.ocmesh -8952.16 -11166.11 110 19.49 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -8952.16 -11166.11 490.66 0 0 0 270.66 270.66 270.66 M_Foliage
+PLACEG Meshes/cube.ocmesh -14932.37 4714.64 110 70.2 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -14932.37 4714.64 452.7 0 0 0 232.7 232.7 232.7 M_Foliage
+PLACEG Meshes/cube.ocmesh 2085.08 -12507.18 110 27.16 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 2085.08 -12507.18 498.33 0 0 0 278.33 278.33 278.33 M_Foliage
+PLACEG Meshes/cube.ocmesh -15624.82 1781.05 110 39.82 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -15624.82 1781.05 419.29 0 0 0 199.29 199.29 199.29 M_Foliage
+PLACEG Meshes/cube.ocmesh -2882.79 -16390.71 110 33.81 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -2882.79 -16390.71 411.12 0 0 0 191.12 191.12 191.12 M_Foliage
+PLACEG Meshes/cube.ocmesh 1348.19 -1839.39 110 55.21 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 1348.19 -1839.39 464.8 0 0 0 244.8 244.8 244.8 M_Foliage
+PLACEG Meshes/cube.ocmesh -14510.07 14943.72 110 87.71 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -14510.07 14943.72 516.76 0 0 0 296.76 296.76 296.76 M_Foliage
+PLACEG Meshes/cube.ocmesh 11667.54 -11706.36 110 85.13 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 11667.54 -11706.36 510.16 0 0 0 290.16 290.16 290.16 M_Foliage
+PLACEG Meshes/cube.ocmesh 14957.08 9029.02 110 40.08 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 14957.08 9029.02 511.1 0 0 0 291.1 291.1 291.1 M_Foliage
+PLACEG Meshes/cube.ocmesh -8856.98 15736.47 110 60.56 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh -8856.98 15736.47 422.01 0 0 0 202.01 202.01 202.01 M_Foliage
+PLACEG Meshes/cube.ocmesh 1891.71 5463.08 110 28.24 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 1891.71 5463.08 457.97 0 0 0 237.97 237.97 237.97 M_Foliage
+PLACEG Meshes/cube.ocmesh 12747.11 -7901.69 110 54.9 0 0 28 28 110 M_Bark
+PLACEG Meshes/sphere.ocmesh 12747.11 -7901.69 507.07 0 0 0 287.07 287.07 287.07 M_Foliage
+# The race: a graph class (Content/Scripts/AN_RallyRace.ocgraph). It counts down, tests the gates, keeps the laps and drives the HUD.
+PLACE none 0 0 0 0 0 0 1 class AN_RallyRace

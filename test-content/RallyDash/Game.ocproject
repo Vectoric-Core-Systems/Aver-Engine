@@ -1,0 +1,12 @@
+OCPROJECT 1
+# RallyDash: a small lap game made only from content -- a level, four Aver Node graphs, an input scheme, a HUD layout, a vehicle, particle
+# effects and procedural meshes and tones. No C#, no engine change. Open this file (File > Open Project), then press Play. README.md has the
+# controls. Everything is written by make_rally_dash.py.
+NAME RallyDash
+ENGINE Aver 0.7.0-1
+CREATEDWITH 0.7.0-1
+CONTENT Content
+STARTMAP Maps/RallyDash.ocworld
+INPUT.SCHEME Input/Rally.ocinput
+GAME.MODE AN_RallyRules
+WINDOW.TITLE Rally Dash

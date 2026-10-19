@@ -1,0 +1,13 @@
+OCMAT 1
+# M_RallyGate: authored by make_rally_dash.py (flat colour, no textures).
+SHADER standard
+BLEND opaque
+CULL back
+FLAGS twosided=0 castshadow=1
+
+PARAM baseColorFactor 0.02 0.25 0.3 1
+PARAM metallicFactor 0
+PARAM roughnessFactor 0.4
+PARAM emissiveFactor 0 1.1 1.4
+PARAM normalScale 1
+PARAM occlusionStrength 1

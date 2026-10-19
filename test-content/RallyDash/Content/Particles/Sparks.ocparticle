@@ -1,0 +1,22 @@
+OCPARTICLE 2
+NAME Sparks
+# Metal sparks for a hard impact. Self-lit and additive, with their own gravity; SPAWNAT on, like TyreSmoke.
+EMITTER Sparks
+SIM auto
+SHAPE sphere 6
+BLEND additive
+EMISSION 0 12 512
+LIFETIME 0.4 0.9
+DIRECTION 0 0 1 60
+SPEED 180 420
+GRAVITY 0 0 -700
+DAMPING 0.05
+SIZE 2 0.5
+COLOR start 1 0.8 0.35 1
+COLOR end 1 0.25 0.05 0
+SPRITE velocity stretch 0.5
+SORT none
+LIGHTING unlit
+FOG on
+SPAWNAT on
+BOUNDS 500
