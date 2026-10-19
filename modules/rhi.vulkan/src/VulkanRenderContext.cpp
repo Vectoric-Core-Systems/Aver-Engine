@@ -138,6 +138,7 @@ const char* stateName(ResourceState s) {
         case ResourceState::VertexBuffer:            return "VertexBuffer";
         case ResourceState::GeometryRead:            return "GeometryRead";
         case ResourceState::AccelerationStructure:   return "AccelerationStructure";
+        case ResourceState::IndirectArgument:        return "IndirectArgument";
     }
     return "?";
 }
@@ -728,6 +729,17 @@ void VulkanRenderContext::dispatch(u32 gx, u32 gy, u32 gz) {
     if (cb) dev_->api().CmdDispatch(cb, gx, gy, gz);
 }
 
+// dispatchIndirect -- the group counts come from a buffer a prior pass wrote (IndirectArgument state).
+void VulkanRenderContext::dispatchIndirect(BufferHandle args, u64 argsOffset) {
+    if (!pipe_ || !pipe_->compute) { AVER_ERROR("[RHI.Vulkan] dispatchIndirect without a compute pipeline"); return; }
+    VkCommandBuffer cb = cmd();
+    if (!cb) return;
+    RhiBuffer* a = res_->buffer(args);
+    if (!a) { AVER_ERROR("[RHI.Vulkan] dispatchIndirect with an invalid handle"); return; }
+    dev_->suspendRenderScope(cb);
+    dev_->api().CmdDispatchIndirect(cb, a->buffer, argsOffset);
+}
+
 // ====================================================================================================
 // copyBuffer
 // ====================================================================================================
@@ -894,6 +906,29 @@ void VulkanRenderContext::drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVe
     applyDrawBinding();
     const bool ownScope = beginRenderScope(*dev_, cb);
     dev_->api().CmdDrawIndexed(cb, indexCount, 1, firstIndex, baseVertex, 0);
+    endRenderScope(*dev_, cb, ownScope);
+}
+
+// drawIndexed with an instance count (SV_InstanceID counts from 0 when firstInstance is 0).
+void VulkanRenderContext::drawIndexedInstanced(u32 indexCount, u32 instanceCount, u32 firstIndex, i32 baseVertex,
+                                               u32 firstInstance) {
+    VkCommandBuffer cb = cmd();
+    if (!cb || indexCount == 0 || instanceCount == 0) return;
+    applyDrawBinding();
+    const bool ownScope = beginRenderScope(*dev_, cb);
+    dev_->api().CmdDrawIndexed(cb, indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+    endRenderScope(*dev_, cb, ownScope);
+}
+
+// drawIndexed whose arguments a compute pass wrote (DrawIndexedIndirectArgs, IndirectArgument state).
+void VulkanRenderContext::drawIndexedIndirect(BufferHandle args, u64 argsOffset) {
+    VkCommandBuffer cb = cmd();
+    if (!cb) return;
+    RhiBuffer* a = res_->buffer(args);
+    if (!a) { AVER_ERROR("[RHI.Vulkan] drawIndexedIndirect with an invalid handle"); return; }
+    applyDrawBinding();
+    const bool ownScope = beginRenderScope(*dev_, cb);
+    dev_->api().CmdDrawIndexedIndirect(cb, a->buffer, argsOffset, 1, sizeof(DrawIndexedIndirectArgs));
     endRenderScope(*dev_, cb, ownScope);
 }
 

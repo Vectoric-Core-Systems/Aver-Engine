@@ -1,0 +1,16 @@
+OCRIG 2
+# The wheel bones of RiggedCar.gltf. The vehicle system sets, for every WHEEL with a `bone`, the inputs wheel_<bone>_pos (the hub, vehicle
+# origin relative, with the suspension travel in it) and wheel_<bone>_rot (steer then spin); these setbone ops put the bones there.
+NAME RiggedCar
+INPUT wheel_FL_pos vec3 space=model default=120,-72,30
+INPUT wheel_FL_rot quat space=model default=0,0,0,1
+INPUT wheel_FR_pos vec3 space=model default=120,72,30
+INPUT wheel_FR_rot quat space=model default=0,0,0,1
+INPUT wheel_RL_pos vec3 space=model default=-120,-72,30
+INPUT wheel_RL_rot quat space=model default=0,0,0,1
+INPUT wheel_RR_pos vec3 space=model default=-120,72,30
+INPUT wheel_RR_rot quat space=model default=0,0,0,1
+OP setbone bone=FL pos=@wheel_FL_pos rot=@wheel_FL_rot space=model weight=1
+OP setbone bone=FR pos=@wheel_FR_pos rot=@wheel_FR_rot space=model weight=1
+OP setbone bone=RL pos=@wheel_RL_pos rot=@wheel_RL_rot space=model weight=1
+OP setbone bone=RR pos=@wheel_RR_pos rot=@wheel_RR_rot space=model weight=1

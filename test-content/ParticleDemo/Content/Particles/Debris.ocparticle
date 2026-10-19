@@ -1,0 +1,27 @@
+OCPARTICLE 2
+NAME Debris
+# Wave 10 demo: mesh particles -- every particle is a small cube (the built-in Meshes/cube.ocmesh), tumbling as it falls, lit by up
+# to four nearby scene lights, with a spawn-at flag so Particles.SpawnAt can use it for impacts. It bounces off the world plane z = 0.
+EMITTER Debris
+SIM auto
+SHAPE sphere 8
+BLEND opaque
+EMISSION 0 80 2048
+LIFETIME 2.5 4
+DIRECTION 0 0 1 60
+SPEED 250 600
+GRAVITY 0 0 -980
+DAMPING 0.05
+SIZE 7 7
+COLOR start 0.55 0.5 0.45 1
+COLOR end 0.55 0.5 0.45 1
+RENDER mesh Meshes/cube.ocmesh spin
+SORT none
+LIGHTING lit
+FOG on
+GI on
+SPAWNAT on
+BOUNDS 1500
+MODULE spawn.sizescale min=0.4 max=1.6
+MODULE spawn.rotation minDeg=0 maxDeg=360 spinMin=-540 spinMax=540
+MODULE update.collideplane nx=0 ny=0 nz=1 d=0 restitution=0.35 friction=0.5 kill=0

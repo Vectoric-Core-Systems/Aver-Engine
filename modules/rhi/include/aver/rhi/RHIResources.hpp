@@ -93,7 +93,14 @@ enum class ResourceState : u8 {
     GeometryRead,
     // TERMINAL: set at creation, never a valid barrier argument.
     AccelerationStructure,
+    // Arguments for drawIndexedIndirect / dispatchIndirect; a compute-written buffer goes UnorderedAccess -> here.
+    IndirectArgument,
 };
+
+// Argument layouts the indirect entry points read (D3D12_DRAW_INDEXED_ARGUMENTS / VkDrawIndexedIndirectCommand,
+// D3D12_DISPATCH_ARGUMENTS / VkDispatchIndirectCommand).
+struct DrawIndexedIndirectArgs { u32 indexCount, instanceCount, firstIndex; i32 baseVertex; u32 firstInstance; };
+struct DispatchIndirectArgs    { u32 x, y, z; };
 
 // How to create a texture, including its initial state and optional initial contents.
 struct TextureDesc {
@@ -643,6 +650,16 @@ public:
     virtual void setIndexBuffer(BufferHandle b, Format indexFormat) = 0;
     // Draws from the bound vertex and index buffers.
     virtual void drawIndexed(u32 indexCount, u32 firstIndex = 0, i32 baseVertex = 0) = 0;
+    // The same with an instance count (SV_InstanceID counts from 0 for firstInstance == 0). Default: unsupported, logs nothing.
+    // Callers gate on DeviceCaps::indirect.
+    virtual void drawIndexedInstanced(u32 indexCount, u32 instanceCount, u32 firstIndex = 0, i32 baseVertex = 0,
+                                      u32 firstInstance = 0) {
+        (void)indexCount; (void)instanceCount; (void)firstIndex; (void)baseVertex; (void)firstInstance;
+    }
+    // Draws with a DrawIndexedIndirectArgs read from `args` at `argsOffset` (buffer in IndirectArgument state).
+    virtual void drawIndexedIndirect(BufferHandle args, u64 argsOffset = 0) { (void)args; (void)argsOffset; }
+    // Dispatches with a DispatchIndirectArgs read from `args` at `argsOffset` (buffer in IndirectArgument state).
+    virtual void dispatchIndirect(BufferHandle args, u64 argsOffset = 0) { (void)args; (void)argsOffset; }
 
     // Draws a 3-vertex fullscreen triangle.
     virtual void drawFullscreen() = 0;

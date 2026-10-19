@@ -6,6 +6,7 @@
 // Test content is deliberately NOT a weapon effect (a smoke plume, a burst of embers, falling
 // snow) -- see the task brief's own expressiveness requirement.
 #include "aver/formats/OcParticle.hpp"
+#include "aver/particles/ParticleModules.hpp"
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -263,7 +264,8 @@ static void testMalformedInput() {
           "input without an OCPARTICLE header is rejected");
     check(err.find("OCPARTICLE") != std::string::npos, "error message mentions the missing header");
 
-    check(!fmt::parseOcparticle("OCPARTICLE 2\n", e, nullptr, &err), "an unknown OCPARTICLE version is rejected");
+    check(!fmt::parseOcparticle("OCPARTICLE 3\n", e, nullptr, &err), "an unknown OCPARTICLE version is rejected");
+    check(fmt::parseOcparticle("OCPARTICLE 2\n", e, nullptr, &err), "OCPARTICLE 2 is a known version (wave 10)");
     check(!fmt::parseOcparticle("OCPARTICLE\n", e, nullptr, &err), "a header with no version number is rejected");
     check(!fmt::parseOcparticle("", e, nullptr, &err), "a completely empty file is rejected");
     check(err.find("OCPARTICLE") != std::string::npos, "...and the empty-file error also names the header");
@@ -401,10 +403,206 @@ static void testRangesRefused() {
           "the legal boundaries (DAMPING 0, spread 180) still parse");
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------
+// Wave 10: OCPARTICLE 2 -- a system of emitters, user parameters, a module stack and events.
+static const char* kSystemV2 = R"(OCPARTICLE 2
+NAME Sparks
+PARAM Intensity float 1.5
+PARAM Wind vec3 10 0 -4
+
+EMITTER Sparks
+SIM gpu
+SHAPE cylinder 20 40 shell
+RENDER ribbon trail 12 4 fade 1
+BLEND additive
+
+EMISSION 200 0 20000
+LIFETIME 0.5 1.5
+DIRECTION 0 0 1 30
+SPEED 300 600
+GRAVITY 0 0 -981
+DAMPING 0.1
+SIZE 3 1
+SIZECURVE 0 1 0.3 2 1 0.5
+COLOR start 1 0.7 0.2 1
+COLOR end 0.4 0.1 0 0
+LIGHTING lit
+GI off
+SORT none
+FOG off
+BOUNDS 600
+CULL 8000
+MODULE spawn.sizescale min=0.6 max=1.4
+MODULE update.curlnoise freq=0.01 strength=@Intensity.x scroll=0.3 octaves=2
+MODULE update.force x=@Wind.x y=@Wind.y z=@Wind.z
+MODULE update.collideplane nz=1 d=0 restitution=0.5 off
+ONEVENT death SPAWN Smoke 3 inherit 0.5
+
+EMITTER Smoke
+SPAWNAT off
+EMISSION 0 0 512
+SPRITE velocity stretch 0.5
+SUBUV 4 4 16 fps 24 blend
+)";
+
+static void testV2Parse() {
+    AVER_INFO("=== .ocparticle v2: a two-emitter system parses ===");
+    particles::ParticleSystemDef def;
+    fmt::OcParticleExtras ex;
+    std::string err;
+    if (!fmt::parseOcparticleSystem(kSystemV2, def, &ex, &err)) {
+        AVER_ERROR("   parse failed: {}", err);
+        ++g_failures;
+        return;
+    }
+    check(def.name == "Sparks" && ex.name == "Sparks", "the system NAME");
+    check(def.params.size() == 2 && def.params[0].name == "Intensity" && def.params[1].kind == 1, "two PARAMs, float and vec3");
+    check(near(def.params[1].v[0], 10.0f) && near(def.params[1].v[2], -4.0f), "the vec3 default");
+    check(def.emitters.size() == 2 && def.emitters[0].name == "Sparks" && def.emitters[1].name == "Smoke", "two named emitters");
+    const particles::ParticleEffect& e = def.emitters[0];
+    check(e.simTier == particles::SimTier::Gpu, "SIM gpu");
+    check(e.shape == particles::EmitterShape::Cylinder && near(e.shapeSize.x, 20.0f) && near(e.shapeSize.y, 40.0f) && e.shapeShell,
+          "SHAPE cylinder r h shell");
+    check(e.render == particles::RenderKind::Ribbon && !e.linked && e.trailPoints == 12 && near(e.trailSegmentCm, 4.0f), "RENDER ribbon trail");
+    check(e.sizeCurve.n == 3 && near(e.sizeCurve.t[1], 0.3f) && near(e.sizeCurve.v[1][0], 2.0f), "SIZECURVE, three stops");
+    check(e.lighting == particles::Lighting::Lit && !e.receivesGI, "LIGHTING lit and GI off");
+    check(e.sort == particles::SortMode::None && !e.fog, "SORT none, FOG off");
+    check(near(e.boundsRadiusCm, 600.0f) && near(e.cullDistanceCm, 8000.0f), "BOUNDS and CULL");
+    check(e.modules.size() == 4, "four MODULE records, authored order");
+    if (e.modules.size() == 4) {
+        check(e.modules[0].kind == particles::ModuleKind::SpawnSizeScale && near(e.modules[0].p[0].value, 0.6f), "spawn.sizescale min");
+        check(e.modules[1].kind == particles::ModuleKind::UpdateCurlNoise && e.modules[1].p[1].userSlot == 0 && e.modules[1].p[1].comp == 0,
+              "curlnoise strength bound to @Intensity.x");
+        check(e.modules[2].p[2].userSlot == 1 && e.modules[2].p[2].comp == 2, "force z bound to @Wind.z");
+        check(!e.modules[3].enabled, "a module can be switched off");
+    }
+    check(e.events.size() == 1 && e.events[0].on == 0 && e.events[0].emitter == 1 && e.events[0].count == 3 && near(e.events[0].inheritVelocity, 0.5f),
+          "ONEVENT death SPAWN Smoke 3 inherit 0.5");
+    const particles::ParticleEffect& s = def.emitters[1];
+    check(!s.spawnAtTarget, "SPAWNAT off");
+    check(s.align == particles::SpriteAlign::Velocity && near(s.stretch, 0.5f), "SPRITE velocity stretch");
+    check(s.subuvCols == 4 && s.subuvFrames == 16 && near(s.subuvFps, 24.0f) && s.subuvBlend, "SUBUV 4 4 16 fps 24 blend");
+}
+
+static void testV2RoundTrip() {
+    AVER_INFO("=== .ocparticle v2: write -> parse -> write is byte-identical ===");
+    particles::ParticleSystemDef def;
+    std::string err;
+    check(fmt::parseOcparticleSystem(kSystemV2, def, nullptr, &err), "parse: " + err);
+    const std::string t1 = fmt::writeOcparticleSystem(def);
+    check(t1.rfind("OCPARTICLE 2", 0) == 0, "a system with modules is written as OCPARTICLE 2");
+    particles::ParticleSystemDef def2;
+    check(fmt::parseOcparticleSystem(t1, def2, nullptr, &err), "the written text parses: " + err);
+    const std::string t2 = fmt::writeOcparticleSystem(def2);
+    check(t1 == t2, "the second fresh write equals the first");
+    const std::string merged = fmt::writeOcparticleSystem(def2, t1);
+    check(merged == t1, "merging into its own output changes nothing");
+    check(def2.emitters.size() == 2 && def2.emitters[0].modules.size() == 4 && def2.params.size() == 2, "structure survives");
+    check(def2.emitters[0].modules[1].p[1].userSlot == 0, "a parameter binding survives");
+
+    // Unknown records and comments survive a v2 save.
+    const std::string withExtras = std::string(kSystemV2) + "MYSTERY from the future\n# a note\n";
+    particles::ParticleSystemDef def3;
+    check(fmt::parseOcparticleSystem(withExtras, def3, nullptr, &err), "a v2 file with an unknown record parses: " + err);
+    const std::string again = fmt::writeOcparticleSystem(def3, withExtras);
+    check(again.find("MYSTERY from the future") != std::string::npos && again.find("# a note") != std::string::npos,
+          "an unknown record and a comment survive a v2 save");
+    check(fmt::writeOcparticleSystem(def3, again) == again, "and the second merge is idempotent");
+}
+
+static void testV1StaysV1() {
+    AVER_INFO("=== .ocparticle: a v1 effect is written back as v1 until something v2-only is authored ===");
+    particles::ParticleEffect e;
+    std::string err;
+    fmt::OcParticleExtras ex;
+    check(fmt::parseOcparticle(kFull, e, &ex, &err), "kFull parses: " + err);
+    const std::string out = fmt::writeOcparticle(e, &ex, kFull);
+    check(out.rfind("OCPARTICLE 1", 0) == 0, "the header stays version 1");
+    check(out.find("MODULE") == std::string::npos && out.find("EMITTER") == std::string::npos, "no v2 records appear");
+    check(fmt::writeOcparticle(e, &ex, out) == out, "and a second v1 save is idempotent");
+
+    e.modules.push_back(particles::makeDefaultModule(particles::ModuleKind::UpdateForce));
+    const std::string up = fmt::writeOcparticle(e, &ex, kFull);
+    check(up.rfind("OCPARTICLE 2", 0) == 0 && up.find("MODULE update.force") != std::string::npos, "adding a module upgrades to version 2");
+    check(up.find("FUTURERECORD") != std::string::npos, "the upgrade keeps the unknown record");
+    particles::ParticleEffect back;
+    check(fmt::parseOcparticle(up, back, nullptr, &err) && back.modules.size() == 1, "the upgraded file parses with its module");
+
+    // Removing the module again returns the file to v1 and drops the MODULE line.
+    e.modules.clear();
+    const std::string down = fmt::writeOcparticle(e, &ex, up);
+    check(down.rfind("OCPARTICLE 1", 0) == 0 && down.find("MODULE") == std::string::npos, "removing the last v2-only feature writes version 1 again");
+}
+
+static void testV2Refusals() {
+    AVER_INFO("=== .ocparticle v2: every refusal reports a line ===");
+    struct Case { const char* what; const char* text; const char* wantIn; };
+    const Case cases[] = {
+        {"an unknown module key", "OCPARTICLE 2\nMODULE update.nothing x=1\n", "line 2"},
+        {"an unknown module parameter", "OCPARTICLE 2\nMODULE update.force q=1\n", "unknown parameter"},
+        {"an @ to an undeclared parameter", "OCPARTICLE 2\nMODULE update.force x=@Nope\n", "PARAM"},
+        {"a malformed module number", "OCPARTICLE 2\nMODULE update.force x=abc\n", "malformed"},
+        {"an event naming a missing emitter", "OCPARTICLE 2\nEMITTER A\nONEVENT death SPAWN Ghost 1\n", "does not exist"},
+        {"curve times that do not increase", "OCPARTICLE 2\nSIZECURVE 0 1 0 2\n", "SIZECURVE"},
+        {"a single-stop curve", "OCPARTICLE 2\nSIZECURVE 0 1\n", "SIZECURVE"},
+        {"a bad PARAM kind", "OCPARTICLE 2\nPARAM A matrix 1\n", "PARAM"},
+        {"a duplicate PARAM", "OCPARTICLE 2\nPARAM A float 1\nPARAM A float 2\n", "duplicate"},
+        {"an unknown SIM word", "OCPARTICLE 2\nSIM fpga\n", "SIM"},
+        {"a SUBUV with more frames than cells", "OCPARTICLE 2\nSUBUV 2 2 9 life 0\n", "SUBUV"},
+    };
+    for (const Case& c : cases) {
+        particles::ParticleSystemDef d;
+        std::string err;
+        check(!fmt::parseOcparticleSystem(c.text, d, nullptr, &err), std::string("refused: ") + c.what);
+        check(err.find(c.wantIn) != std::string::npos, std::string("...with a useful error for ") + c.what + ": " + err);
+        check(d.emitters.size() == 1, std::string("...and `out` is left at the defaults for ") + c.what);
+    }
+
+    // More than 16 modules / 8 emitters / 16 params.
+    {
+        std::string t = "OCPARTICLE 2\n";
+        for (int i = 0; i < 17; ++i) t += "MODULE update.force\n";
+        particles::ParticleSystemDef d; std::string err;
+        check(!fmt::parseOcparticleSystem(t, d, nullptr, &err), "17 modules on one emitter are refused");
+        std::string t2 = "OCPARTICLE 2\n";
+        for (int i = 0; i < 9; ++i) t2 += "EMITTER E" + std::to_string(i) + "\n";
+        check(!fmt::parseOcparticleSystem(t2, d, nullptr, &err), "9 emitters are refused");
+        std::string t3 = "OCPARTICLE 2\n";
+        for (int i = 0; i < 17; ++i) t3 += "PARAM P" + std::to_string(i) + " float 0\n";
+        check(!fmt::parseOcparticleSystem(t3, d, nullptr, &err), "17 user parameters are refused");
+    }
+    // A cycle in the event graph.
+    {
+        particles::ParticleSystemDef d; std::string err;
+        const char* cyc = "OCPARTICLE 2\nEMITTER A\nONEVENT death SPAWN B 1\nEMITTER B\nONEVENT death SPAWN A 1\n";
+        check(!fmt::parseOcparticleSystem(cyc, d, nullptr, &err), "an event cycle is refused");
+        check(err.find("cycle") != std::string::npos, "...and the error says cycle");
+    }
+    // Forward references are fine: the child may come after its parent, and a parameter may be declared after use.
+    {
+        particles::ParticleSystemDef d; std::string err;
+        const char* fwd = "OCPARTICLE 2\nEMITTER A\nONEVENT collide SPAWN B 2\nMODULE update.force x=@W\nEMITTER B\nPARAM W float 3\n";
+        check(fmt::parseOcparticleSystem(fwd, d, nullptr, &err), "forward references to an emitter and a PARAM resolve: " + err);
+    }
+}
+
+static void testDefaultsAreV1() {
+    AVER_INFO("=== .ocparticle: a default effect fits version 1 ===");
+    particles::ParticleSystemDef d;
+    d.emitters.emplace_back();
+    check(fmt::ocparticleFitsV1(d), "a default one-emitter system fits version 1");
+    d.emitters[0].render = particles::RenderKind::Mesh;
+    check(!fmt::ocparticleFitsV1(d), "a mesh emitter does not");
+    d.emitters[0].render = particles::RenderKind::Sprite;
+    d.params.push_back(particles::UserParam{});
+    check(!fmt::ocparticleFitsV1(d), "a user parameter does not");
+}
+
 static void testMeta() {
     AVER_INFO("=== .ocparticle test suite metadata ===");
     check(true, "a passing check works");
-    check(sizeof(particles::Particle) == 48, "the simulation POD this format feeds stays 48 bytes");
+    check(sizeof(particles::Particle) == 64, "the simulation POD this format feeds is the 64-byte wave-10 layout");
 }
 
 int main() {
@@ -418,6 +616,11 @@ int main() {
     testDeterministic();
     testMalformedInput();
     testFileErrors();
+    testV2Parse();
+    testV2RoundTrip();
+    testV1StaysV1();
+    testV2Refusals();
+    testDefaultsAreV1();
 
     AVER_INFO("==================================================");
     AVER_INFO("OcParticle tests done: {} failure(s)", g_failures);

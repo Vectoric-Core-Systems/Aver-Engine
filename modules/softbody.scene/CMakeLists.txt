@@ -11,6 +11,13 @@ aver_add_module(Aver.SoftBody.Scene
     src/SoftBodyDamage.cpp
     src/SoftBodyCloth.cpp
     src/SoftBodyProvider.cpp
+    # Wave 10 (docs/plans/wave10/SOFTBODY_DEPTH.md): each a new translation unit so the older ones do not grow.
+    src/SoftBodyTear.cpp
+    src/SoftBodyFields.cpp
+    src/SoftBodyCaps.cpp
+    src/SoftBodyFx.cpp
+    src/SoftBodySave.cpp
+    src/SoftBodyProxy.cpp
   DEPS
     Aver.SoftBody
     Aver.Physics

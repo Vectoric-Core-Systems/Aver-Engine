@@ -24,6 +24,7 @@
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/CompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/DecoratedShape.h>
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 
 #include <cmath>
@@ -189,6 +190,19 @@ int32_t aver_phys_capsule_cast(float cx, float cy, float cz, float radius, float
                                                               toJolt(Vec3(cx, cy, cz)));
     return castClosest(&capsule, com, Vec3(dx, dy, dz), layerMask,
                        makeFilter(JPH::BodyID(), ignoreBody, flags), outDistance, outPoint, outNormal);
+}
+
+int32_t aver_phys_sphere_cast_q(float cx, float cy, float cz, float dx, float dy, float dz, float radius,
+                                uint32_t layerMask, int32_t ignoreBodyA, int32_t ignoreBodyB, int32_t flags,
+                                float* outDistance, float* outPoint, float* outNormal) {
+    if (!g_world || radius <= kTinyCm) return 0;
+    JPH::SphereShape sphere(cmToM(radius));
+    sphere.SetEmbedded();
+    const JPH::RMat44 com = JPH::RMat44::sRotationTranslation(JPH::Quat::sIdentity(), toJolt(Vec3(cx, cy, cz)));
+    // Two skips: the camera passes the target's character and a vehicle chassis.
+    const QueryBodyFilter filter(ignoredIdOf(ignoreBodyA), ignoredIdOf(ignoreBodyB),
+                                 (flags & AVER_PHYS_QUERY_INCLUDE_SENSORS) != 0);
+    return castClosest(&sphere, com, Vec3(dx, dy, dz), layerMask, filter, outDistance, outPoint, outNormal);
 }
 
 int32_t aver_phys_body_cast(int32_t body, float dx, float dy, float dz,

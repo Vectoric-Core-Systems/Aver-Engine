@@ -1,9 +1,12 @@
 // Hand-run test for the CPU half of Aver.Particles: burst and continuous spawning, the emission
-// accumulator, lifetime death, and gravity/damping integration. No RHI, no device -- ParticleSystem
+// accumulator, lifetime death, gravity/damping integration, and (wave 10) systems of emitters, events, script
+// operations, the CPU budget and AutoDestroy. No RHI, no device -- ParticleSystem
 // has none, by design (see its own header comment). Exit code = failure count.
 #include "aver/core/ErrorCodes.hpp"
+#include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/particles/ParticleEffectLibrary.hpp"
+#include "aver/particles/ParticleModules.hpp"
 #include "aver/particles/ParticleSystem.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
@@ -195,6 +198,128 @@ int main() {
         if (c) c->flags &= ~scene::kParticleEmitterStopped;
         sys.tick(world, 0.1f);
         check(sys.liveParticles(e) == 6, "restarted: the burst re-fires on top of what was already alive");
+    }
+
+
+    // ---- wave 10: a system of emitters. A death event spawns into another emitter exactly one tick later, whatever
+    //      their order in the file. ----
+    for (int childFirst = 0; childFirst < 2; ++childFirst) {
+        ParticleEffectLibrary lib;
+        ParticleSystemDef def;
+        ParticleEffect parent, child;
+        parent.name = "Parent"; child.name = "Child";
+        parent.emissionRate = 0.0f; parent.burstCount = 3; parent.maxParticles = 50;
+        parent.lifetimeMin = parent.lifetimeMax = 0.25f;     // dies on the first 0.25 s tick
+        parent.speedMin = parent.speedMax = 0.0f;
+        child.emissionRate = 0.0f; child.burstCount = 0; child.maxParticles = 50;
+        child.lifetimeMin = child.lifetimeMax = 10.0f;
+        child.speedMin = child.speedMax = 0.0f;
+        EventSpawn ev; ev.on = 0; ev.emitter = childFirst ? 0u : 1u; ev.count = 2;
+        parent.events.push_back(ev);
+        if (childFirst) { def.emitters = {child, parent}; } else { def.emitters = {parent, child}; }
+        lib.setSystem(70 + static_cast<u64>(childFirst), def);
+
+        const scene::Entity e = spawnEmitterEntity(world, 70 + static_cast<u64>(childFirst));
+        ParticleSystem sys;
+        sys.setEffectLibrary(&lib);
+        sys.tick(world, 0.25f);
+        u32 alive = 0;
+        sys.forEachInstance([&](const InstanceView& v) {
+            if (v.entity == e && v.effect->name == "Child") alive += v.aliveHint;
+        });
+        check(alive == 0, std::string("events: the child is empty on the tick the parent dies (child ") + (childFirst ? "first)" : "second)"));
+        sys.tick(world, 0.25f);
+        alive = 0;
+        sys.forEachInstance([&](const InstanceView& v) {
+            if (v.entity == e && v.effect->name == "Child") alive += v.aliveHint;
+        });
+        check(alive == 6, std::string("events: three deaths x two = six children one tick later (child ") + (childFirst ? "first)" : "second)"));
+    }
+
+    // ---- wave 10: script operations: parameters, bursts, modifiers, stop ----
+    {
+        ParticleEffectLibrary lib;
+        ParticleSystemDef def;
+        ParticleEffect fx;
+        fx.emissionRate = 0.0f; fx.burstCount = 0; fx.maxParticles = 100;
+        fx.lifetimeMin = fx.lifetimeMax = 10.0f;
+        fx.speedMin = fx.speedMax = 0.0f;
+        Module f = makeDefaultModule(ModuleKind::UpdateForce);
+        f.p[0].userSlot = 0; f.p[0].comp = 0;
+        fx.modules.push_back(f);
+        def.emitters.push_back(fx);
+        UserParam up; up.name = "Push"; up.kind = 0; up.v[0] = 0.0f;
+        def.params.push_back(up);
+        lib.setSystem(80, def);
+
+        const scene::Entity e = spawnEmitterEntity(world, 80);
+        ParticleSystem sys;
+        sys.setEffectLibrary(&lib);
+        sys.tick(world, 0.1f);
+        check(sys.liveParticles(e) == 0, "ops: nothing spawns without a burst");
+        sys.burst(e, 4);
+        const f32 v[4] = {50.0f, 0, 0, 0};
+        sys.setParam(e, fnv1a64(std::string_view("Push")), 0, v);
+        sys.tick(world, 0.1f);
+        check(sys.liveParticles(e) == 4, "ops: a queued burst spawns on the next tick");
+        const auto* ps = sys.particles(e);
+        check(ps && !ps->empty(), "ops: particles exist");
+        if (ps && !ps->empty()) checkNear((*ps)[0].velocity.x, 5.0f, 1e-3f, "ops: the queued parameter reached the module this tick");
+        u32 alive = 0, tier = 9;
+        check(sys.emitterState(e, alive, tier) && alive == 4 && tier == 0, "ops: emitterState reports the CPU tier and the count");
+        sys.setModifiers(e, 1.0f, 2.0f, 1.0f);
+        sys.burst(e, 1);
+        sys.tick(world, 0.1f);
+        ps = sys.particles(e);
+        check(ps && ps->size() == 5 && ps->back().sizeScale == 2.0f, "ops: the size modifier scales new particles");
+        sys.stop(e, true);
+        sys.tick(world, 0.1f);
+        check(sys.liveParticles(e) == 0, "ops: stop with killParticles clears the emitter");
+        auto* c = world.component<scene::CParticleEmitter>(e, scene::kComponentParticleEmitter);
+        check(c && (c->flags & scene::kParticleEmitterStopped), "ops: stop sets the component's stopped flag");
+        const ParticleStats st = sys.stats();
+        check(st.cpuEmitters == 1 && st.gpuEmitters == 0, "stats: one CPU emitter");
+    }
+
+    // ---- wave 10: the CPU budget drops new spawns ----
+    {
+        ParticleEffectLibrary lib;
+        ParticleEffect fx;
+        fx.emissionRate = 0.0f; fx.burstCount = 100; fx.maxParticles = 1000;
+        fx.lifetimeMin = fx.lifetimeMax = 10.0f;
+        lib.set(90, fx);
+        const scene::Entity e = spawnEmitterEntity(world, 90);
+        ParticleSystem sys;
+        sys.setEffectLibrary(&lib);
+        ParticleBudget b;
+        b.maxCpuParticles = 30;
+        sys.setBudget(b);
+        sys.tick(world, 0.1f);
+        check(sys.liveParticles(e) == 30, "budget: the CPU cap clamps the burst");
+    }
+
+    // ---- wave 10: AutoDestroy ----
+    {
+        ParticleEffectLibrary lib;
+        ParticleEffect fx;
+        fx.emissionRate = 0.0f; fx.burstCount = 2; fx.maxParticles = 10;
+        fx.lifetimeMin = fx.lifetimeMax = 0.5f;
+        fx.speedMin = fx.speedMax = 0.0f;
+        lib.set(91, fx);
+        const scene::Entity e = spawnEmitterEntity(world, 91);
+        auto* c = world.component<scene::CParticleEmitter>(e, scene::kComponentParticleEmitter);
+        if (c) c->flags |= scene::kParticleEmitterAutoDestroy;
+        ParticleSystem sys;
+        sys.setEffectLibrary(&lib);
+        sys.tick(world, 0.125f);
+        check(sys.finished().empty(), "autodestroy: still playing, nothing finishes");
+        if (c) c->flags |= scene::kParticleEmitterStopped;
+        sys.tick(world, 0.125f);
+        check(sys.finished().empty(), "autodestroy: stopped but particles alive: not yet");
+        sys.tick(world, 0.25f);
+        check(sys.finished().size() == 1 && sys.finished()[0] == e, "autodestroy: stopped and drained: finished, destruction queued");
+        check(world.destroyPending(e), "autodestroy: the entity is queued for destruction");
+        sys.finished().clear();
     }
 
     AVER_INFO("ParticleSystemTest: {}/{} checks passed", g_checks - g_failures, g_checks);

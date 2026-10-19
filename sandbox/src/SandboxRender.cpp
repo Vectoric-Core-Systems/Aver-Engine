@@ -240,7 +240,7 @@ void SandboxApp::onRender(Engine& e)  {
         landscapeMaterials = &voxiRenderer_.materials();
 #endif
         landscape_.updateRingTiles(e.device(), eye_.x, eye_.y, &content_, landscapeMaterials);
-        landscape_.draw(*e.device(), eye_, viewProj_, vpH_, &content_, landscapeMaterials);
+        landscape_.draw(*e.device(), eye_, viewProj_, vpH_, &content_, landscapeMaterials, playView_.fovYRad);
     }
 #endif
 
@@ -393,7 +393,7 @@ void SandboxApp::onRender(Engine& e)  {
                             pview.eye = self.eye_;
                             pview.viewProj = self.viewProj_;
                             pview.viewportHeightPx = self.vpH_;
-                            pview.verticalFovRadians = radians(60.0f);
+                            pview.verticalFovRadians = self.playView_.fovYRad;
                             const u32 plevel = trifactor::chooseLevelCached(
                                 ladder.errorCm, sphereCenter, sphereRadius,
                                 self.lodErrorThresholdPx_, pview);
@@ -427,6 +427,8 @@ void SandboxApp::onRender(Engine& e)  {
                 // hole in the shape of the character you're playing. Both passes must agree on
                 // "is this entity drawn" or the prepass writes depth for something that never appears.
                 popt.ownerHideRoot = firstPersonPawn_;
+
+                popt.ownerHideAll = playView_.ownerHideAll;   // the collision fade, in the depth prepass too
                 popt.mobility = &playMobility_;
                 // --no-walk-cache, negated (g_noWalkCacheArg true = cache OFF). MUST MATCH the
                 // colour call site's copt.useMeshLookupCache below -- both passes resolve the same
@@ -1065,7 +1067,7 @@ void SandboxApp::onRender(Engine& e)  {
                         view.eye = self.eye_;
                         view.viewProj = self.viewProj_;
                         view.viewportHeightPx = self.vpH_;
-                        view.verticalFovRadians = radians(60.0f);
+                        view.verticalFovRadians = self.playView_.fovYRad;
                         const f32 worldScale = xformVec(wm, Vec3{1, 0, 0}).size();
 
                         // ClusterFrameCB (b4): budget clamped above zero here on the CPU before
@@ -1212,7 +1214,7 @@ void SandboxApp::onRender(Engine& e)  {
                     view.eye = self.eye_;
                     view.viewProj = self.viewProj_;
                     view.viewportHeightPx = self.vpH_;
-                    view.verticalFovRadians = radians(60.0f);
+                    view.verticalFovRadians = self.playView_.fovYRad;
                     const f32 worldScale = xformVec(wm, Vec3{1, 0, 0}).size();
 
                     // THE INSTANCE-LEVEL SHORTCUT (ClusterAdapt.hpp; TrifactorTest proves it against
@@ -1346,7 +1348,7 @@ void SandboxApp::onRender(Engine& e)  {
                     view.eye = self.eye_;
                     view.viewProj = self.viewProj_;
                     view.viewportHeightPx = self.vpH_;
-                    view.verticalFovRadians = radians(60.0f);   // matches this frame's proj build, above
+                    view.verticalFovRadians = self.playView_.fovYRad;   // matches this frame's proj build, above
                     const u32 level = trifactor::chooseLevelCached(
                         ladder.errorCm, sphereCenter, sphereRadius, self.lodErrorThresholdPx_, view);
                     mesh = ladder.handles[level];
@@ -1566,6 +1568,8 @@ void SandboxApp::onRender(Engine& e)  {
         // The possessed first-person pawn; a COMP tree can nest, so the pawn's body may be several
         // hops below it. World::setParent already refuses a cycle, so this walk terminates.
         copt.ownerHideRoot = firstPersonPawn_;
+
+        copt.ownerHideAll = playView_.ownerHideAll;   // the collision fade hides every mesh under the target, not only the flagged ones
         copt.mobility = &playMobility_;
         // Worded differently from the library's line on purpose: "spawned CMeshRenderer entities"
         // names a concept a packaged game has no vocabulary for, and "culled" deliberately covers
@@ -1989,10 +1993,23 @@ void SandboxApp::onRender(Engine& e)  {
         const Mat4 mmId = Mat4::identity();
         if (motionDebugMesh_) e.device()->drawLines(motionDebugMesh_, &mmId.m[0][0]);
     }
+
+#if AVER_MODULE_CAMERA
+    // Camera rig overlay (Show > Camera Rigs): the same line-mesh route, world-space vertices.
+    if (cameraDebugMesh_) { e.device()->destroyLineMesh(cameraDebugMesh_); cameraDebugMesh_ = 0; }
+    editor::cameraDebugCollect(cameraDebug_, cameraDebugFrame_);
+    if (cameraDebug_.any() && !noEditorChrome_ && !cameraDebugFrame_.lines.empty()) {
+        cameraDebugMesh_ = e.device()->createLineMesh(cameraDebugFrame_.lines.data(), static_cast<u32>(cameraDebugFrame_.lines.size()));
+        const Mat4 camId = Mat4::identity();
+        if (cameraDebugMesh_) e.device()->drawLines(cameraDebugMesh_, &camId.m[0][0]);
+    }
+#endif
 #endif
 #if AVER_MODULE_SOFTBODY_SCENE
     // Soft-body overlay (Show > Soft Bodies) and the paint tool's pins and brush: the same line-mesh route, world space.
     if (softBodyDebugMesh_) { e.device()->destroyLineMesh(softBodyDebugMesh_); softBodyDebugMesh_ = 0; }
+    softBodyDebug_.selected = static_cast<u32>(selEntity_);
+    softBodyDebug_.drawBuilds = softBodyScene_ ? softBodyScene_->drawBuildsLastFrame() : 0u;
     editor::softBodyDebugCollect(softBodyDebug_, softbody::softBodySystem(), softBodyDebugFrame_);
 #  if AVER_WITH_IMGUI
     {
@@ -2019,6 +2036,28 @@ void SandboxApp::onRender(Engine& e)  {
         softBodyDebugMesh_ = e.device()->createLineMesh(softBodyDebugFrame_.lines.data(), static_cast<u32>(softBodyDebugFrame_.lines.size()));
         const Mat4 sbId = Mat4::identity();
         if (softBodyDebugMesh_) e.device()->drawLines(softBodyDebugMesh_, &sbId.m[0][0]);
+    }
+#endif
+
+#if AVER_MODULE_VEHICLE_SCENE
+    // Vehicle overlay (Show > Vehicles) and the .ocvehicle editor's spec preview over the selected entity: the same line-mesh route, world space.
+    if (vehicleDebugMesh_) { e.device()->destroyLineMesh(vehicleDebugMesh_); vehicleDebugMesh_ = 0; }
+    {
+        editor::PreviewPose previewPose;
+        const editor::PreviewPose* previewAt = nullptr;
+        scene::World& vw = scene::World::instance();
+        if (selEntity_ != scene::kInvalidEntity && vw.valid(selEntity_)) {
+            const Transform xf = transformFromMatrix(vw.worldMatrix(selEntity_));
+            previewPose.position = xf.position;
+            previewPose.rotation = xf.rotation;
+            previewAt = &previewPose;
+        }
+        editor::vehicleDebugCollect(vehicleDebug_, vehicle::vehiclePhysicsSystem(), previewAt, vehicleDebugFrame_);
+    }
+    if (!noEditorChrome_ && !vehicleDebugFrame_.lines.empty()) {
+        vehicleDebugMesh_ = e.device()->createLineMesh(vehicleDebugFrame_.lines.data(), static_cast<u32>(vehicleDebugFrame_.lines.size()));
+        const Mat4 vehId = Mat4::identity();
+        if (vehicleDebugMesh_) e.device()->drawLines(vehicleDebugMesh_, &vehId.m[0][0]);
     }
 #endif
 #if AVER_MODULE_FRAMEWORK
@@ -2091,8 +2130,14 @@ void SandboxApp::onRender(Engine& e)  {
                                       static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, motionDebug_.labelMaxDistanceCm);
 #endif
 #if AVER_MODULE_SOFTBODY_SCENE && AVER_WITH_IMGUI
-    if (softBodyDebug_.budget && !noEditorChrome_)
+    if ((softBodyDebug_.budget || softBodyDebug_.tuning) && !noEditorChrome_)
         editor::softBodyDebugDrawBudget(softBodyDebugFrame_, static_cast<f32>(vpX_), static_cast<f32>(vpY_));
+#endif
+
+#if AVER_MODULE_VEHICLE_SCENE && AVER_WITH_IMGUI
+    if (vehicleDebug_.labels && !noEditorChrome_)
+        editor::vehicleDebugDrawLabels(vehicleDebugFrame_, viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
+                                       static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, vehicleDebug_.labelMaxDistanceCm);
 #endif
 #if AVER_WITH_IMGUI
     uiReg_.endFrame();

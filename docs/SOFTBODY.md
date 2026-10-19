@@ -6,8 +6,9 @@ asset, and the scene join. The earlier Verlet/Gauss-Seidel solver, its `Aver.Sof
 `aver_sb_*` C ABI, the Window > Soft Body (plastic) panel and the `modules/fracture` skeleton are retired
 (see `docs/STALE_CODE.md`). Plan and rationale: `docs/plans/wave9/SOFTBODY_CLOTH_DESTRUCTION.md`.
 
-Status: written against the frozen design, not yet compiled or run. Every number marked UNVERIFIED in
-this file is a starting value that the headed tuning pass (plan section 6) sets.
+Status: wave 9 is built and tested; the wave 10 depth work (section 10) is written against its frozen design
+(`docs/plans/wave10/SOFTBODY_DEPTH.md`) and awaits its first build and run. Every number marked UNVERIFIED in
+this file is a starting value that the headed tuning pass (`test-content/SoftBodyLab`, "Tuning") sets.
 
 ## 1. Layers
 
@@ -57,9 +58,9 @@ Materials (`Material.hpp`) use Jolt's compliance (m/N; 0 is inextensible) plus y
 | `cloth_heavy` | 0.8 | 0 | 0.01 | 6 | deform | 0.35 (tearable only) |
 | `metal` | 7.8 | 2e-7 | 1e-6 | 8 | deform, yield 0.010, set to 25% of rest | 0.30 |
 | `wood` | 6.0 | 1e-6 | 5e-6 | 8 | fracture | 0.020 |
-| `glass` | 10 | 2e-7 | 1e-6 | 8 | shatter | 0.006 |
+| `glass` | 10 | 2e-7 | 1e-6 | 16 | shatter | 0.006 |
 
-All preset values are UNVERIFIED starting points.
+All preset values are UNVERIFIED starting points. Glass runs 16 iterations: at 8 a 180 cm pane hung by its top edge settles at 0.0058 strain against the 0.006 yield, so waking it with any touch (0.001 J) shattered it (measured in `SoftBodyCalibrationTest`).
 
 ## 3. `.ocsoft`
 
@@ -121,8 +122,8 @@ COMPONENT Cloth asset=<path> preset=cloth_light wind=1 stiffness=1 reach=1 freez
 COMPONENT Destructible asset=<path> preset=metal toughness=1 impact=1 lifetime=0 maxpieces=0 indestructible=1 nodebris=1
 ```
 
-Default keys are omitted when the editor saves. Runtime state (damage, pieces) is not saved: a loaded level
-starts intact.
+Default keys are omitted when the editor saves. A level file never stores runtime state (damage, pieces): a loaded level
+starts intact. Damage rides the save game's `softbody` channel instead (section 10).
 
 ## 5. Tick
 
@@ -210,12 +211,72 @@ Aver Node nodes (`GraphSoftBodyNodeTable.cs`, matching `sandbox/src/GraphNodeDef
 - No self-collision, no cloth-on-cloth.
 - No render LOD: one draw mesh per piece; sim meshes over `maxParticles` (4096) are refused, not decimated.
 - No runtime Voronoi or pre-diced shards; fracture is the tear pipeline over the authored triangle mesh.
+- Saved damage covers soft bodies only (section 10); rigid bodies keep their own save rules.
 - Replication is not designed here; `seq` and the deterministic tick order are what a net layer would key on.
+
+## 10. Depth (wave 10)
+
+Design and the decisions behind each item: `docs/plans/wave10/SOFTBODY_DEPTH.md`.
+
+**Capped breaks.** A torn surface is no longer a paper edge. `Caps.hpp` builds, per piece, a back skin (the front offset
+inward along its smooth normal by the thickness) and side walls along every boundary edge. Draw arrays are laid out
+`[front | back skin | walls]`; cap vertices carry `sourceVertex = kGeneratedVertex` and generated UVs
+(`caps.uvCmPerTile`). With `caps.interiorMaterial` set, the walls are a child cap entity published as a second
+`PieceView` (layer 1); empty keeps one material. Thickness defaults per preset (`PresetInfo::capThicknessCm`: cloth 0,
+metal 0.5, wood 2, glass 0.6 cm); `caps.mode` is auto / off / on, `caps.backSkin` auto / off / debris / all, and
+`caps.lodCm` drops caps past a distance. Meshes without boundary edges (closed solids) get no walls.
+
+**Soft Fields.** One force-and-effect volume with six kinds (radial, directional, damage, release, kill, sleep), four
+shapes (sphere, box, capsule, all), a falloff, turbulence and a target mask (cloth, destructible, debris). It exists as the
+`CSoftField` component (64 bytes, placed through the `SoftField` COMPONENT row), as a transient field started from script
+(`SoftFields.Start`, with a lifetime), as a one-shot `Pulse`, as a spawned field entity, or as `SoftFields.Impact`.
+Order within a tick: pulses in arrival order, component fields by ascending entity id, transient fields by ascending handle,
+then hold/release and lifetimes. Component fields apply continuously (per second) unless `once` is set, which makes them a
+pulse. Velocity goes through `aver_phys_sb_add_velocity` (physics ABI v2), so a field never rebuilds a body.
+
+**Break effects.** `effects.tear`, `effects.detach` and `effects.dust` each take a particle path, a sound list, count,
+volume, pitch jitter and a cooldown; the particle half goes through `aver/core/EffectSpawn.hpp` (the GPU particle
+module owns the effects themselves) and the sound half through `setSoundSink`, which the host installs with
+`installSoftBodyEffects` (`Runtime/include/aver/game/SoftBodyEffects.hpp`). Both are cheap to skip: `setEffectsEnabled(false)`
+turns them off, and `restoring_` (loading a save) suppresses them.
+
+**Saved damage.** The `softbody` `$State` channel stores one record per damaged entity: `SB1 <meshKey> <assetKey> <base64>`.
+The body is a tear log (replayed through the same tear pipeline, so topology is bit-identical), beam deltas, a gone list
+and particle position and velocity, quantised to 16 bits above 512 KB and merged into fewer groups above 64. A record
+whose mesh or asset key no longer matches is stale and skipped. `softBodySaveSkip`, `softBodyStateCount/At/Set` and
+`softBodyResetForRestore` (`SoftBodySave.hpp`) are the host hooks.
+
+**Proxy cage.** A mesh over the 4096-particle cap, or one the author wants cheap, simulates a low-poly proxy and the full
+mesh follows it. `proxy.mesh` names the proxy; each render vertex binds to its closest proxy triangle by barycentric
+coordinates plus a smooth-normal offset (deliberately not mean-value, harmonic or Green coordinates). A tear on the proxy
+tears the render mesh along the same triangle edges. The sandbox's Proxy tool cooks a proxy (weld, then decimate through
+Trifactor when built in) and writes the path into the asset.
+
+**Cheaper debris.** Pieces are created invisible and shown only when the draw side reports the mesh ready
+(`revealOnReady`), so a tear never pops a frame of wrong geometry. `Options::maxDrawBuildsPerFrame` budgets the draw-side
+mesh builds; a settled debris piece is baked (`destruct.bake`, default on) to a static mesh and its soft body is removed;
+far pieces step on a cadence and sub-pixel pieces are culled.
+
+**ABIs.** `aver_phys_sb_*` version 2 (`aver_phys_sb_abi_version`, `aver_phys_sb_add_velocity`).
+`aver_fw_softbody_*` version 2 (provider ops 11 to 15: clear debris, set asleep, dents, effects enable, repair all).
+`aver_fw_softfield_*` version 1 (`framework_softfield_abi.h`: one 24-float spec, ops 1 to 5). All three refuse before their
+provider is installed. C#: `Aver.Framework/SoftFields.cs` (`SoftFields`, `SoftFieldSpec`, `Entity.AddSoftField`) and the
+SoftBody v2 members. Aver Node: seven new SoftBody rows and the Fields family (`GraphFieldsNodeTable.cs`, eight rows).
+
+**Editor.** Details sections for SoftField (kind, shape, extents, strength, energy, falloff, direction, targets, once, off,
+and a gizmo in the field's colour: radial orange, directional blue, damage red, release yellow, kill magenta, sleep grey),
+and for Destructible Caps, Effects, Proxy and Debris. Show > Soft Bodies gains Fields and Tuning; the Tuning HUD prints
+the last deposit, hit entity, dent depth and strain.
+
+**Tuning.** `test-content/SoftBodyLab/Content/Maps/SoftBodyTune.ocworld` has one target per preset; the Hit buttons of the
+Details section deposit 5, 25, 90, 400 and 3000 J. `SoftBodyCalibrationTest` prints the same ladder headless and asserts
+only coarse brackets. Every preset number stays UNVERIFIED until that pass is done headed.
 
 ## Tests
 
-`tests/softbody` (`SoftBodyTest`, `SoftAssetTest`, `SimMeshTest`, `DamageTest`, `IslandsTest`), 
-`tests/physics` (`SoftBodyBuilderTest`), `tests/softbody.scene` (`SoftBodySystemTest`),
-`tests/render.softbody` (`SoftBodySceneTest`), `tests/editor` (`SoftBodyDetailsModelTest`),
-`scripting/csharp/Aver.Graph.Tests` (`SoftBodyNodeTests`). Physics-dependent thresholds are UNVERIFIED
+`tests/softbody` (`SoftBodyTest`, `SoftAssetTest`, `SimMeshTest`, `DamageTest`, `IslandsTest`, `FieldsTest`, `CapsTest`,
+`SoftStateTest`, `ProxyBindTest`),
+`tests/physics` (`SoftBodyBuilderTest`), `tests/softbody.scene` (`SoftBodySystemTest`, `SoftBodyDepthTest`, `SoftBodyCalibrationTest`), `tests/framework_softfield`,
+`tests/render.softbody` (`SoftBodySceneTest`), `tests/editor` (`SoftBodyDetailsModelTest`, `SoftFieldDetailsModelTest`),
+`scripting/csharp/Aver.Graph.Tests` (`SoftBodyNodeTests`, `FieldsNodeTests`). Physics-dependent thresholds are UNVERIFIED
 until the first run.

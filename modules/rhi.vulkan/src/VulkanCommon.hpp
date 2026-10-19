@@ -277,6 +277,8 @@ struct VulkanApi {
     PFN_vkCmdDraw CmdDraw = nullptr;
     PFN_vkCmdDrawIndexed CmdDrawIndexed = nullptr;
     PFN_vkCmdDispatch CmdDispatch = nullptr;
+    PFN_vkCmdDrawIndexedIndirect CmdDrawIndexedIndirect = nullptr;
+    PFN_vkCmdDispatchIndirect CmdDispatchIndirect = nullptr;
     PFN_vkCmdDrawMeshTasksEXT CmdDrawMeshTasksEXT = nullptr;     // optional: mesh_shader
     PFN_vkCreateShaderModule CreateShaderModule = nullptr;
     PFN_vkDestroyShaderModule DestroyShaderModule = nullptr;
@@ -500,6 +502,9 @@ inline VkImageBarrierInfo toVkImageBarrierInfo(ResourceState s) {
         case ResourceState::VertexBuffer:
         case ResourceState::GeometryRead:
             return {VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_2_SHADER_READ_BIT, VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT};
+        // Buffer-only, like the two above.
+        case ResourceState::IndirectArgument:
+            return {VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT};
         // TERMINAL, per RHIResources.hpp:89 -- never a valid barrier argument either direction.
         // VulkanRenderContext::textureBarrier must reject this before reaching the barrier call,
         // exactly as the D3D12 debug-shadow's rejectAsState() does.
@@ -538,6 +543,9 @@ inline VkBufferBarrierInfo toVkBufferBarrierInfo(ResourceState s) {
                     VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
                     VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR};
+        // Draw and dispatch arguments (DRAW_INDIRECT covers vkCmdDispatchIndirect too).
+        case ResourceState::IndirectArgument:
+            return {VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT};
         case ResourceState::RenderTarget:
         case ResourceState::DepthWrite:
             break;   // not meaningful for a buffer; falls through to the Common/undefined default
@@ -1337,7 +1345,8 @@ inline VkBufferUsageFlags toVkBufferUsage(const BufferDesc& d, bool rtAvailable)
     VkBufferUsageFlags u = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                           VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                           VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                           VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     if (d.kind == BufferKind::AccelStructure)
         u |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
     // BUILD-INPUT USAGE BELONGS ON ORDINARY BUFFERS TOO: a BLAS builds from a plain vertex/index
@@ -2373,6 +2382,10 @@ public:
     // "R16Uint-equivalent" (the contract scout's finding), so both backends reject the same inputs.
     void setIndexBuffer(BufferHandle b, Format indexFormat) override;
     void drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVertex) override;
+    void drawIndexedInstanced(u32 indexCount, u32 instanceCount, u32 firstIndex, i32 baseVertex,
+                              u32 firstInstance) override;
+    void drawIndexedIndirect(BufferHandle args, u64 argsOffset) override;
+    void dispatchIndirect(BufferHandle args, u64 argsOffset) override;
     void buildBlas(BlasHandle blas) override;
     void buildTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
     // ---- in-place updates (refit) -- see IRenderContext's contract comment above refitBlas/

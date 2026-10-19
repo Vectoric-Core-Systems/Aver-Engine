@@ -85,6 +85,36 @@ public class AverCharacter : AverPawn
     /// <summary>The character's head: a child entity at eye height carrying the view pitch.</summary>
     public Entity View => _view;
 
+    private bool _rigOn;                              // AttachCameraRig ran
+    private CameraMode _rigThird = CameraMode.Chase;  // the mode CameraView.ThirdPerson means for this rig
+    private int _rigApplied = -1;                     // the mode last written for CameraViewMode, -1 before the first
+
+    /// <summary>Gives this character a gameplay camera rig on its own entity (docs/CAMERAS.md): spring-arm collision, lag, blends and
+    /// the modifier stack in place of the fixed boom. The arm starts at <see cref="BoomLength"/> and the pivot is the view node,
+    /// which already sits at <see cref="EyeHeight"/>. From then on <see cref="CameraViewMode"/> switches the rig between first person
+    /// and the preset's third-person mode, and <see cref="BoomLength"/> is ignored. False when the camera module is not built in.
+    /// A character with no rig behaves exactly as before.</summary>
+    public bool AttachCameraRig(CameraRigPreset preset = CameraRigPreset.Chase)
+    {
+        if (!Self.AddCameraRig(preset, Self)) return false;
+        Self.SetFloat("CCameraRig.armLengthCm", BoomLength);
+        CameraMode start = CameraRig.ModeOf(preset);
+        _rigThird = start == CameraMode.FirstPerson ? CameraMode.Chase : start;
+        _rigApplied = -1;
+        _rigOn = true;
+        return true;
+    }
+
+    // Keeps the rig's mode in step with CameraViewMode (a write of an unchanged mode starts no blend).
+    private void SyncCameraRigMode()
+    {
+        if (!_rigOn) return;
+        int want = (int)(CameraViewMode == CameraView.FirstPerson ? CameraMode.FirstPerson : _rigThird);
+        if (want == _rigApplied) return;
+        _rigApplied = want;
+        Self.SetCameraRigMode((CameraMode)want);
+    }
+
     /// <summary>The character's facing yaw, degrees, in (-180, 180].</summary>
     public float Yaw => _yaw;
 
@@ -223,6 +253,7 @@ public class AverCharacter : AverPawn
         }
 
         EnsureView();
+        SyncCameraRigMode();
         // The pitch lives on the view node (ApplyLookRotation), so that is where a given one is read.
         // After EnsureView: on the first drive it has only just written _pitch there itself.
         if (_view.IsAlive)

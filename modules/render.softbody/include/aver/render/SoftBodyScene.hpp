@@ -19,6 +19,10 @@
 //   THE TOPOLOGY CHANGES. A tear changes the vertex and index count, which a skin target cannot do, so a piece
 //   whose epoch changed gets a FRESH source mesh and skin target, and the old ones are retired
 //   kSoftBodyFramesInFlight + 1 frames later (the "retire during recording" rule).
+//   WAVE 10 (docs/plans/wave10/SOFTBODY_DEPTH.md): a view can carry generated vertices (caps; their UVs come with the
+//   view), a debris or cap entity starts invisible and is revealed by this class once a resident is packed for it, a
+//   BAKED piece (a settled one) gets one plain static mesh built once and never packs again, and resident builds have
+//   their own per-frame budget (Options::maxDrawBuildsPerFrame), separate from the tear budget.
 #include "aver/core/Math.hpp"
 #include "aver/formats/OcMesh.hpp"
 #include "aver/rhi/RHI.hpp"
@@ -58,6 +62,14 @@ void softBodyPackPieces(const Vec3* worldPositions, u32 vertexCount,
                         f32 scale01, const Vec3& centroidWorld,
                         rhi::MeshVertex* out);
 
+// The one-time static mesh of a baked piece: positions relative to `origin` (the entity sits there with an identity
+// rotation), normals recomputed from `indices`, UVs passed through. Deterministic; no GPU.
+void softBodyBakeVertices(const Vec3* worldPositions, u32 vertexCount,
+                          const Vec3& origin,
+                          const u32* indices, u32 indexCount,
+                          const f32* uvs,
+                          rhi::MeshVertex* out);
+
 // ---- the feature -----------------------------------------------------------------------------------
 
 // Kept for the hosts' existing wiring: the mesh resolver is no longer needed (the scene makes its own source
@@ -94,6 +106,13 @@ public:
     u32 residentCount() const { return static_cast<u32>(live_.size()); }
     u32 simulatedLastFrame() const { return simulatedLastFrame_; }
     u32 epochRebuildsLastFrame() const { return rebuildsLastFrame_; }
+    // New residents and epoch rebuilds this frame (the number the Tuning HUD shows as "draw builds").
+    u32 drawBuildsLastFrame() const { return rebuildsLastFrame_; }
+    u32 bakedCount() const {
+        u32 n = 0;
+        for (const auto& kv : live_) n += kv.second.baked ? 1u : 0u;
+        return n;
+    }
     u32 retiredCount() const { return static_cast<u32>(retired_.size()); }
 
 private:
@@ -112,6 +131,7 @@ private:
         std::vector<rhi::MeshVertex> scratch;
         bool              packedThisFrame = false;
         bool              packedOnce = false;
+        bool              baked = false;  // a plain static mesh: no source, no skin target, no staging ring
     };
     struct Retired {
         rhi::MeshHandle drawMesh = 0, source = 0;
@@ -121,6 +141,8 @@ private:
     using Key = std::pair<scene::Entity, u32>;
 
     bool buildResident(Resident& r, const softbody::PieceView& v, rhi::IDevice& dev);
+    bool buildBaked(Resident& r, const softbody::PieceView& v, rhi::IDevice& dev);
+    static void reveal(scene::World& world, scene::Entity e);
     void retire(Resident& r);
     void destroyNow(Retired& t);
     void ageRetired();

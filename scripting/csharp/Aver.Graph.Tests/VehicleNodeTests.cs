@@ -1,8 +1,9 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// Tests for the wheeled-vehicle nodes (docs/plans/wave9/VISUAL_SCRIPTING_CSHARP_SYNC.md section 2.2): the 6 rows in
-// GraphVehicleNodeTable.cs, every method on VehicleGraph, and the CarSpec / wheel plan that Vehicles.CreateCar builds. Bare-process
+// Tests for the vehicle nodes (docs/plans/wave9/VISUAL_SCRIPTING_CSHARP_SYNC.md section 2.2; family version 2 is
+// docs/plans/wave10/VEHICLES.md section 2.11): the 20 rows in GraphVehicleNodeTable.cs (the 6 original ones unchanged, 14 by entity), every
+// method on VehicleGraph, and the CarSpec / wheel plan that Vehicles.CreateCar builds. Bare-process
 // scope like MorphNodeTests: the wiring the table owns plus the pure description of the default car, not Jolt's driving (tests/physics
 // does that). Where the physics library is absent CreateCar answers Car.None, which the last test checks.
 using System;
@@ -22,6 +23,27 @@ static class VehicleNodeTests
         new("an_vehiclesetpose", GenericKind.Exec, new[] { "exec:exec:in", "vehicle:int:in", "x:float:in", "y:float:in", "z:float:in", "yaw:float:in", "then:exec:out", "success:bool:out" }),
         new("an_vehicledestroy", GenericKind.Exec, new[] { "exec:exec:in", "vehicle:int:in", "then:exec:out", "success:bool:out" }),
         new("an_vehiclewheelcontact", GenericKind.Pure, new[] { "vehicle:int:in", "index:int:in", "contact:bool:out" }),
+        // Version 2 (wave 10): by entity.
+        new("an_vehiclespawn", GenericKind.Exec, new[] { "exec:exec:in", "x:float:in", "y:float:in", "z:float:in", "yaw:float:in", "then:exec:out", "vehicle:int:out", "entity:int:out", "success:bool:out" }),
+        new("an_vehicledrive", GenericKind.Exec, new[] { "exec:exec:in", "entity:int:in", "throttle:float:in", "steer:float:in", "brake:float:in", "handbrake:float:in", "then:exec:out", "success:bool:out" }),
+        new("an_vehicleshift", GenericKind.Exec, new[] { "exec:exec:in", "entity:int:in", "delta:int:in", "then:exec:out", "success:bool:out" }),
+        new("an_vehiclesetgear", GenericKind.Exec, new[] { "exec:exec:in", "entity:int:in", "gear:int:in", "then:exec:out", "success:bool:out" }),
+        new("an_vehiclegearmode", GenericKind.Exec, new[] { "exec:exec:in", "entity:int:in", "manual:bool:in", "then:exec:out", "success:bool:out" }),
+        new("an_vehicleenter", GenericKind.Exec, new[] { "exec:exec:in", "entity:int:in", "driver:int:in", "then:exec:out", "success:bool:out" }),
+        new("an_vehicleexit", GenericKind.Exec, new[] { "exec:exec:in", "entity:int:in", "then:exec:out", "driver:int:out", "success:bool:out" }),
+        new("an_vehicleflip", GenericKind.Exec, new[] { "exec:exec:in", "entity:int:in", "liftCm:float:in", "then:exec:out", "success:bool:out" }, new[] { "liftCm=50" }),
+        new("an_vehicletune", GenericKind.Exec, new[] { "exec:exec:in", "entity:int:in", "value:float:in", "then:exec:out", "success:bool:out" }),
+        new("an_vehiclerepair", GenericKind.Exec, new[] { "exec:exec:in", "entity:int:in", "amount:float:in", "then:exec:out", "success:bool:out" }, new[] { "amount=1" }),
+        new("an_vehicletelemetry", GenericKind.Pure, new[] { "entity:int:in", "found:bool:out", "speedCmS:float:out", "rpm:float:out", "gear:int:out", "throttle:float:out", "steer:float:out", "brake:float:out", "wheelsOnGround:int:out", "health:float:out", "abs:bool:out", "tcs:bool:out" }),
+        new("an_vehiclewheelstate", GenericKind.Pure, new[] { "entity:int:in", "index:int:in", "found:bool:out", "contact:bool:out", "slipLong:float:out", "slipLatDeg:float:out", "loadN:float:out", "compressionCm:float:out", "angVelRadS:float:out", "surfaceFriction:float:out", "skidding:bool:out" }),
+        new("an_vehicledriver", GenericKind.Pure, new[] { "entity:int:in", "driver:int:out" }),
+        new("an_vehiclefromentity", GenericKind.Pure, new[] { "entity:int:in", "vehicle:int:out", "found:bool:out" }),
+    };
+
+    // The six rows of family version 1, which must keep their keys, pins and defaults for saved graphs.
+    private static readonly string[] OriginalSix =
+    {
+        "an_vehiclecreatecar", "an_vehiclesetinput", "an_vehiclegetstate", "an_vehiclesetpose", "an_vehicledestroy", "an_vehiclewheelcontact",
     };
 
     public static int RunAll()
@@ -33,6 +55,9 @@ static class VehicleNodeTests
         failures += NodeRowKit.CheckDefaultPins("vehicle", Rows);
         failures += NodeRowKit.CheckIlValid("vehicle", types);
         failures += NodeRowKit.CheckCompilerSplit("vehicle", types);
+        failures += TestVersionTwoLeavesTheSixAlone();
+        failures += TestSpawnDriveChain();
+        failures += TestEntityRowsDoNotThrowWithoutAProvider();
         failures += TestDriveChain();
         failures += TestReadsFeedLaterNodes();
         failures += TestDefaultCarSpecIsTheFrozenOne();
@@ -48,14 +73,67 @@ static class VehicleNodeTests
 
     private static int TestRowSetIsTheDesignSet()
     {
-        Console.WriteLine("Test: the vehicle rows are exactly the designed set of 6, 2 pure reads and 4 exec writes");
+        Console.WriteLine("Test: the vehicle rows are exactly the designed set of 20, 6 pure reads and 14 exec writes");
         var want = Rows.Select(r => r.Type).OrderBy(x => x).ToArray();
         var got = GameSystemNodes.All.Where(s => s.Owner.Name == "VehicleGraph").Select(s => s.Type).OrderBy(x => x).ToArray();
         if (!got.SequenceEqual(want))
             return Fail($"table has [{string.Join(", ", got.Except(want))}] extra and lacks [{string.Join(", ", want.Except(got))}]");
-        if (Rows.Length != 6) return Fail($"expected 6 rows, test lists {Rows.Length}");
+        if (Rows.Length != 20) return Fail($"expected 20 rows, test lists {Rows.Length}");
         var pure = Rows.Where(r => r.Kind == GenericKind.Pure).Select(r => r.Type).OrderBy(x => x).ToArray();
-        if (!pure.SequenceEqual(new[] { "an_vehiclegetstate", "an_vehiclewheelcontact" })) return Fail("only the two reads may be pure");
+        var wantPure = new[] { "an_vehicledriver", "an_vehiclefromentity", "an_vehiclegetstate", "an_vehicletelemetry", "an_vehiclewheelcontact", "an_vehiclewheelstate" };
+        if (!pure.SequenceEqual(wantPure)) return Fail("only the six reads may be pure");
+        Console.WriteLine("  PASS");
+        return 0;
+    }
+
+    // The original six rows are listed first, with the pins and defaults they shipped with, and the table lists them first too.
+    private static int TestVersionTwoLeavesTheSixAlone()
+    {
+        Console.WriteLine("Test: the six original rows are still the first six, in their original order, with their original pins");
+        var tableOrder = GameSystemNodes.All.Where(s => s.Owner.Name == "VehicleGraph").Select(s => s.Type).Take(6).ToArray();
+        if (!tableOrder.SequenceEqual(OriginalSix)) return Fail($"the table starts [{string.Join(", ", tableOrder)}]");
+        if (!Rows.Take(6).Select(r => r.Type).SequenceEqual(OriginalSix)) return Fail("the test's own first six rows drifted");
+        var create = Rows[0];
+        if (create.Pins.Length != 9 || create.Pins[5] != "massKg:float:in") return Fail("an_vehiclecreatecar keeps its nine pins");
+        Console.WriteLine("  PASS");
+        return 0;
+    }
+
+    // Spawn by asset attribute, drive by entity, read telemetry by entity, in one exec chain that compiles.
+    private static int TestSpawnDriveChain()
+    {
+        Console.WriteLine("Test: Spawn's entity feeds Drive, Shift, Tune and Telemetry in one exec chain, and compiles");
+        const string text = "OCGRAPH 1\nNODE tick OnTick\nNODE s AN_VehicleSpawn asset=car\nNODE d AN_VehicleDrive\nNODE sh AN_VehicleShift\nNODE tu AN_VehicleTune key=power\nNODE tl AN_VehicleTelemetry\nNODE br Branch\nNODE pa Print\n" +
+                            "LINK tick.exec s.exec\nLINK s.then d.exec\nLINK s.entity d.entity\nLINK d.then sh.exec\nLINK s.entity sh.entity\nLINK sh.then tu.exec\nLINK s.entity tu.entity\n" +
+                            "LINK tu.then br.exec\nLINK s.entity tl.entity\nLINK tl.found br.cond\nLINK br.true pa.exec\nLINK tl.speedCmS pa.value\nENTRY tick OnTick\n";
+        string? bad = NodeRowKit.CompileAndRun(text, "OnTick");
+        if (bad != null) return Fail(bad);
+        Console.WriteLine("  PASS");
+        return 0;
+    }
+
+    // With no vehicle system in the process every entity row answers false/0, logged once, and nothing throws.
+    private static int TestEntityRowsDoNotThrowWithoutAProvider()
+    {
+        Console.WriteLine("Test: the Entity vehicle members answer false rather than throw when the host has no vehicle system");
+        Entity none = default;
+        try
+        {
+            if (none.SetVehicleInput(1f, 0f)) return Fail("SetVehicleInput on no entity must be false");
+            if (none.TryGetVehicleTelemetry(out _) || none.TryGetWheelTelemetry(0, out _)) return Fail("telemetry on no vehicle must be false");
+            if (none.ShiftVehicle(1) || none.SetVehicleGear(1) || none.SetVehicleManualGearbox(true) || none.FlipVehicle() || none.RepairVehicle() ||
+                none.DamageVehicle(0.5f) || none.EnterVehicle(none) || none.ExitVehicle() || none.TuneVehicle("power", 2f))
+                return Fail("a vehicle call on no vehicle must be false");
+            if (none.TuneVehicle("", 1f)) return Fail("an empty key is false");
+            if (none.VehicleDriver.IsValid || none.VehicleWheelCount != 0) return Fail("no driver and no wheels");
+            if (Vehicles.Spawn("car", new Aver.Scene.Vec3(0, 0, 0)).IsValid) { Console.WriteLine("  SKIP: a vehicle system is live in this process"); return 0; }
+            if (Vehicles.DrainEvents(new VehicleEvent[4]) != 0) return Fail("no events without a provider");
+            if (Vehicles.DrainEvents(Span<VehicleEvent>.Empty) != 0) return Fail("an empty buffer drains nothing");
+        }
+        catch (Exception e)
+        {
+            return Fail($"a vehicle call must answer false, not throw, without a provider: {e.GetType().Name}: {e.Message}");
+        }
         Console.WriteLine("  PASS");
         return 0;
     }

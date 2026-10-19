@@ -80,7 +80,7 @@ The editor has **Colour Vision Preview** in the viewport menu (Off, Protanopia, 
 
 The engine had no camera shake or head bob, so there is a small one (`CameraFx`, deterministic, no allocation): `CameraFx.AddShake(trauma)` (0 to 1, saturating, decaying at 1.5 per second; at full trauma 1.5 degrees yaw, 1.2 degrees pitch and 1.5 cm of offset) and `CameraFx.SetBob(amount, speedCmPerSec)` (call each frame while moving; 0 stops it; 2.2 cm vertical and 1.1 cm sideways, one cycle per 320 cm). Nothing calls them automatically. Hosts apply the result right before the camera is built, with the effective scales, so with both at 0 the camera is untouched. The editor's free-fly camera is not affected.
 
-Reduce motion also zeroes motion blur, chromatic aberration, grain and lens flare in the post settings (blur and lens separately when only those toggles are off). Photosensitivity (flash limiting) is not in this version; bloom, flare and exposure adaptation stay as authored.
+Reduce motion also zeroes motion blur, chromatic aberration, grain and lens flare in the post settings (blur and lens separately when only those toggles are off). Photosensitivity (flash limiting) is not in this version; bloom, flare and exposure adaptation stay as authored. Gameplay camera rigs (`docs/CAMERAS.md`) add to the gated set: while Reduce motion is on, look-ahead, FOV kick, punch, roll lean and auto-recentre stop, and the rig's position and rotation lag are raised to a stiff speed (40) instead of swaying, while collision, following and view-target blends still work; zoom, arm scale and socket offset are the player's own actions and stay, and shake and bob keep going through `CameraFx`, whose own gate is unchanged.
 
 ## Input assist
 

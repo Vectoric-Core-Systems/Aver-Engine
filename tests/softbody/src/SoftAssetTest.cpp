@@ -151,6 +151,124 @@ int main() {
         check(!rulesOnly.stale(9), "rules alone are never stale");
     }
 
+    AVER_INFO("the depth sections: caps, effects, proxy and the destruct additions");
+    {
+        const char* text = R"({"format":"ocsoft","version":1,"kind":"destructible","preset":"glass",
+          "destruct":{"minImpactCmS":120,"minPieceTriangles":3,"maxPieces":24,"impactRadiusScale":1.5,"bake":false},
+          "caps":{"mode":"on","thicknessCm":0.6,"backSkin":"all","uvCmPerTile":30,"lodCm":2000,"interiorMaterial":"M_GlassEdge"},
+          "effects":{"impact":{"particle":"Particles/Sparkle.ocparticle","sounds":["Audio/Tick1.wav","Audio/Tick2.wav"],"minSpeedCmS":250,
+                               "count":4,"countPerMs":3,"volume":0.8,"pitchJitter":0.08,"cooldownS":0.2,"innerCm":250,"outerCm":3000},
+                     "tear":{"sounds":["Audio/Break.wav"],"count":24},
+                     "dust":{"particle":"Particles/Dust.ocparticle","countPerParticle":0.25,"surprise":7}},
+          "proxy":{"mesh":"Meshes/Door.proxy.ocmesh","maxParticles":2048},
+          "future":{"x":1}})";
+        sb::SoftAsset a;
+        std::string why;
+        check(sb::parseSoftAsset(text, a, &why), "an asset with every new section parses (" + why + ")");
+        check(a.destruct.impactRadiusScale == 1.5f && !a.destruct.bake, "destruct.impactRadiusScale and bake");
+        check(a.caps.mode == sb::CapMode::On && approx(a.caps.thicknessCm, 0.6f) && a.caps.backSkin == sb::BackSkin::All &&
+              approx(a.caps.uvCmPerTile, 30.0f) && approx(a.caps.lodCm, 2000.0f) && a.caps.interiorMaterial == "M_GlassEdge", "caps");
+        const sb::FxSlotParams& imp = a.effects.slot[static_cast<u32>(sb::FxSlot::Impact)];
+        check(imp.particle == "Particles/Sparkle.ocparticle" && imp.sounds.size() == 2 && approx(imp.minSpeedCmS, 250.0f) && approx(imp.count, 4.0f) &&
+              approx(imp.countPerMs, 3.0f) && approx(imp.volume, 0.8f) && approx(imp.pitchJitter, 0.08f) && approx(imp.cooldownS, 0.2f) &&
+              approx(imp.innerCm, 250.0f) && approx(imp.outerCm, 3000.0f), "the impact slot");
+        check(a.effects.slot[static_cast<u32>(sb::FxSlot::Tear)].sounds.size() == 1 && a.effects.slot[static_cast<u32>(sb::FxSlot::Dust)].particle == "Particles/Dust.ocparticle" &&
+              approx(a.effects.slot[static_cast<u32>(sb::FxSlot::Dust)].countPerParticle, 0.25f), "tear and dust slots");
+        check(!a.effects.slot[static_cast<u32>(sb::FxSlot::Detach)].bound() && !a.effects.slot[static_cast<u32>(sb::FxSlot::Release)].bound() && a.effects.any(), "unbound slots stay unbound");
+        check(a.proxy.mesh == "Meshes/Door.proxy.ocmesh" && a.proxy.maxParticles == 2048, "proxy");
+        check(sb::capsEnabled(a) && approx(sb::capThicknessCm(a), 0.6f), "resolved caps: on, 0.6 cm");
+
+        const std::string w1 = sb::writeSoftAsset(a);
+        sb::SoftAsset b;
+        check(sb::parseSoftAsset(w1, b, &why), "what it writes parses (" + why + ")");
+        check(sb::writeSoftAsset(b) == w1, "write -> parse -> write is byte identical with the new sections");
+        check(w1.find("\"surprise\"") == std::string::npos && w1.find("\"future\"") == std::string::npos, "unknown keys inside and beside the new sections are ignored, not kept");
+    }
+
+    AVER_INFO("defaults write nothing new and resolve per preset");
+    {
+        // The lab destructibles as they were checked in: compact text with none of the new sections.
+        const char* lab[] = {
+            R"({"format":"ocsoft","version":1,"kind":"destructible","preset":"glass","destruct":{"minImpactCmS":120,"minPieceTriangles":3,"maxPieces":24},"paint":{"rules":[{"type":"sphere","centreCm":[0,-60,0],"radiusCm":8},{"type":"sphere","centreCm":[0,60,0],"radiusCm":8}]}})",
+            R"({"format":"ocsoft","version":1,"kind":"destructible","preset":"metal","destruct":{"minImpactCmS":200},"paint":{"rules":[{"type":"above","axis":"y","valueCm":-2.0}]}})",
+            R"({"format":"ocsoft","version":1,"kind":"destructible","preset":"wood","destruct":{"minImpactCmS":180,"maxPieces":16,"debrisLifetimeS":10}})",
+            R"({"format":"ocsoft","version":1,"kind":"cloth","preset":"cloth_heavy"})",
+        };
+        bool stable = true, quiet = true;
+        for (const char* t : lab) {
+            sb::SoftAsset a, b;
+            std::string w1, w2;
+            const bool ok1 = sb::parseSoftAsset(t, a);
+            w1 = sb::writeSoftAsset(a);
+            const bool ok2 = sb::parseSoftAsset(w1, b);
+            w2 = sb::writeSoftAsset(b);
+            stable = stable && ok1 && ok2 && w1 == w2;
+            for (const char* key : {"\"caps\"", "\"effects\"", "\"proxy\"", "\"bake\"", "\"impactRadiusScale\""}) quiet = quiet && w1.find(key) == std::string::npos;
+        }
+        check(stable, "the lab assets write -> parse -> write byte identically");
+        check(quiet, "and none of them grows a caps, effects, proxy, bake or impactRadiusScale key");
+
+        const sb::SoftAsset glass = sb::makeSoftAsset(sb::SoftKind::Destructible, sb::SoftPreset::Glass);
+        const sb::SoftAsset metal = sb::makeSoftAsset(sb::SoftKind::Destructible, sb::SoftPreset::Metal);
+        const sb::SoftAsset wood = sb::makeSoftAsset(sb::SoftKind::Destructible, sb::SoftPreset::Wood);
+        const sb::SoftAsset cloth = sb::makeSoftAsset(sb::SoftKind::Cloth, sb::SoftPreset::ClothLight);
+        check(approx(sb::capThicknessCm(glass), 0.6f) && approx(sb::capThicknessCm(metal), 0.5f) && approx(sb::capThicknessCm(wood), 2.0f) && sb::capThicknessCm(cloth) == 0.0f,
+              "thickness follows the preset: glass 0.6, metal 0.5, wood 2.0, cloth 0");
+        check(sb::capsEnabled(glass) && !sb::capsEnabled(cloth), "auto is on for a destructible and off for cloth");
+        sb::SoftAsset off = glass;
+        off.caps.mode = sb::CapMode::Off;
+        sb::SoftAsset forcedCloth = cloth;
+        forcedCloth.caps.mode = sb::CapMode::On;
+        check(!sb::capsEnabled(off) && sb::capsEnabled(forcedCloth), "off and on override the kind");
+        sb::SoftAsset custom = glass;
+        custom.caps.thicknessCm = 1.25f;
+        check(approx(sb::capThicknessCm(custom), 1.25f), "an explicit thickness wins over the preset");
+    }
+
+    AVER_INFO("invalid depth values are refused with a reason");
+    {
+        sb::SoftAsset a;
+        std::string why;
+        const std::string head = R"({"format":"ocsoft","version":1,"kind":"destructible","preset":"glass",)";
+        const auto parses = [&](const std::string& tail) { return sb::parseSoftAsset(head + tail, a, &why); };
+        check(!parses(R"("caps":{"thicknessCm":-0.5}})") && !why.empty(), "a negative thickness: " + why);
+        check(!parses(R"("caps":{"mode":"sideways"}})") && !why.empty(), "an unknown caps mode: " + why);
+        check(!parses(R"("caps":{"backSkin":"front"}})") && !why.empty(), "an unknown back skin: " + why);
+        check(!parses(R"("caps":{"lodCm":-5}})") && !why.empty(), "a negative LOD distance: " + why);
+        check(!parses(R"("effects":{"impact":{"sounds":["a","b","c","d","e","f","g","h","i"]}}})") && why.find("8") != std::string::npos, "nine sounds: " + why);
+        check(parses(R"("effects":{"impact":{"sounds":["a","b","c","d","e","f","g","h"]}}})"), "eight sounds are fine");
+        check(!parses(R"("effects":{"tear":{"innerCm":500,"outerCm":100}}})") && !why.empty(), "outer before inner: " + why);
+        check(!parses(R"("effects":{"dust":{"countPerParticle":-1}}})") && !why.empty(), "a negative count: " + why);
+        check(!parses(R"("proxy":{"mesh":"Meshes/Door.obj"}})") && why.find(".ocmesh") != std::string::npos, "a proxy that is not an .ocmesh: " + why);
+        check(parses(R"("proxy":{"mesh":"Meshes/Door.proxy.OCMESH"}})"), "the extension check is case blind");
+        check(!parses(R"("destruct":{"impactRadiusScale":0}})") && !why.empty(), "a zero impact radius scale: " + why);
+        sb::SoftAsset v = sb::makeSoftAsset(sb::SoftKind::Destructible, sb::SoftPreset::Glass);
+        v.caps.thicknessCm = -3.0f;
+        check(!v.valid(&why), "valid() refuses a negative thickness other than the unset marker");
+        v.caps.thicknessCm = -1.0f;
+        check(v.valid(&why), "and accepts the unset marker");
+    }
+
+    AVER_INFO("the saved-damage key follows the cage, not the look");
+    {
+        sb::SoftAsset a = sb::makeSoftAsset(sb::SoftKind::Destructible, sb::SoftPreset::Glass);
+        const u64 k0 = sb::softAssetKey(a);
+        sb::SoftAsset b = a;
+        b.caps.thicknessCm = 3.0f;
+        b.effects.slot[0].particle = "x.ocparticle";
+        b.destruct.debrisLifetimeS = 3.0f;
+        b.destruct.bake = false;
+        check(sb::softAssetKey(b) == k0, "caps, effects, lifetime and bake leave the key alone");
+        b.material.yieldStrain *= 2.0f;
+        check(sb::softAssetKey(b) != k0, "a material change moves it");
+        sb::SoftAsset c = a;
+        c.proxy.mesh = "Meshes/P.ocmesh";
+        check(sb::softAssetKey(c) != k0, "so does a proxy mesh");
+        sb::SoftAsset d = a;
+        d.paint.pin = {255, 0};
+        check(sb::softAssetKey(d) != k0, "and paint");
+    }
+
     AVER_INFO("{} failure(s)", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

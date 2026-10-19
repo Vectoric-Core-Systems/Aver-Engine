@@ -3,12 +3,11 @@
   "name": "Aver.Vehicle",
   "dir": "vehicle",
   "displayName": "Vehicles",
-  "description": "Planned: authoritative vehicle simulation.",
+  "description": "The .ocvehicle asset, the vehicle spec, the built-in presets and the builder over the physics vehicle ABI: cars, trucks and tanks.",
   "category": "Physics",
-  "option": null,
+  "option": "AVER_MODULE_VEHICLE",
   "required": false,
-  "default": false,
-  "dependsOn": ["Aver.Core", "Aver.Physics"],
-  "skeleton": true,
-  "consequence": ""
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.Physics"],
+  "consequence": "No .ocvehicle assets, no Vehicle component and no AI traffic cars."
 }

@@ -446,6 +446,8 @@ bool loadDeviceApi(VulkanApi& api, VkDevice device, const std::vector<std::strin
     AVER_VK_DEV(CmdDraw);
     AVER_VK_DEV(CmdDrawIndexed);
     AVER_VK_DEV(CmdDispatch);
+    AVER_VK_DEV(CmdDrawIndexedIndirect);
+    AVER_VK_DEV(CmdDispatchIndirect);
     AVER_VK_DEV(CreateShaderModule);
     AVER_VK_DEV(DestroyShaderModule);
     AVER_VK_DEV(CreateGraphicsPipelines);
@@ -1175,6 +1177,7 @@ void VulkanDevice::removeRenderFeature(IRenderFeature* f) {
 void VulkanDevice::queryCaps() {
     caps_ = {};
     caps_.computeShaders = true;   // core 1.0 mandates a compute-capable queue existing
+    caps_.indirect = true;         // vkCmdDrawIndexedIndirect / vkCmdDispatchIndirect are core 1.0
     // computeInScenePass and gBuffer stay false: the scene scope now suspends around a dispatch
     // (suspendRenderScope), but the staged passes that would use it need SM 6.6 and are unverified
     // here, and the G-buffer getters are not overridden.

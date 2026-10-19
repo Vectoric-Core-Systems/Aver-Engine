@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Camera",
+  "dir": "camera",
+  "displayName": "Gameplay Cameras",
+  "description": "Spring-arm camera rigs on scene entities: collision, lag, look-ahead, blended view targets, FOV and the modifier stack.",
+  "category": "Gameplay",
+  "option": "AVER_MODULE_CAMERA",
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Physics", "Aver.Scene"],
+  "consequence": "Games keep the fixed third- or first-person boom: no camera collision, lag, blends, modes or camera modifiers."
+}

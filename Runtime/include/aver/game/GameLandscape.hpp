@@ -109,9 +109,10 @@ public:
     // Draws the resident section and every ring tile: LOD select, then draw with an identity
     // transform, each tile taking one share of the draw budget. Retries the surface binding first
     // until it holds, when `content` and `materials` are given. `viewportHeightPx` sets the LOD
-    // projection scale for the 60-degree vertical field of view both hosts render with.
+    // projection scale from `fovYRad`, the vertical field of view the host built the camera with (60 degrees unless a
+    // gameplay camera rig changed it: pass PlayView::fovYRad).
     void draw(rhi::IDevice& device, const Vec3& eye, const Mat4& viewProj, f32 viewportHeightPx,
-              GameContent* content = nullptr, pbr::MaterialSystem* materials = nullptr);
+              GameContent* content = nullptr, pbr::MaterialSystem* materials = nullptr, f32 fovYRad = radians(60.0f));
 
     // Called at the end of loadForLevel, where the host restarts live chunk streaming so scatter
     // regenerates against the new surface.

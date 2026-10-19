@@ -360,6 +360,14 @@ void SandboxApp::applyProjectRenderSettings() {
     // Mirrors too: an unstated RENDER.TAA is the engine default (on), not "keep the last project's".
     if (!taaFromCli_) temporalAaEnabled_ = project_.taa != 0;
     if (!neuraaFromCli_) neuraaEnabled_ = project_.neuraa > 0;
+
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+    if (particleGpuArg_ < 0) {   // an unstated RENDER.PARTICLEGPU is auto, not 'keep the last project's'
+        const int pm = project_.particleGpu >= 0 ? project_.particleGpu : 1;
+        particles::particleSystem().setGpuMode(pm);
+        particleRenderer_.setGpuEnabled(pm != 0);
+    }
+#endif
 #endif
 
     if (!project_.hasRenderSettings()) return;

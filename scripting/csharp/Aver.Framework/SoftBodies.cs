@@ -105,6 +105,22 @@ public static class SoftBodies
     public static bool SetBudget(int maxPieces = 48, int maxParticles = 20000, int maxRebuildsPerFrame = 2, float debrisLifetimeSeconds = 12f) =>
         FwSoftBody.aver_fw_softbody_set_budget(maxPieces, maxParticles, maxRebuildsPerFrame, debrisLifetimeSeconds) != 0;
 
+    /// <summary>Switches the break effects (the particles and sounds bound in .ocsoft) on or off for the whole world.</summary>
+    public static bool SetEffectsEnabled(bool enabled) => FwSoftBody.aver_fw_softbody_set_effects(enabled ? 1 : 0) != 0;
+
+    /// <summary>Repairs every soft body; returns how many.</summary>
+    public static int RepairAll() => FwSoftBody.aver_fw_softbody_repair_all();
+
+    /// <summary>Takes one pending event off the queue (the same queue as <see cref="DrainEvents"/>, so one consumer should own it).
+    /// False when the queue is empty.</summary>
+    public static bool TryPopEvent(out SoftEvent ev)
+    {
+        var one = new SoftEvent[1];
+        bool got = DrainEvents(one) == 1;
+        ev = got ? one[0] : default;
+        return got;
+    }
+
     /// <summary>Moves the pending events into <paramref name="buffer"/> and returns how many. The same events
     /// also reach graphs as the named events SoftBodyImpact, SoftBodyTorn, SoftBodyDetached, SoftBodyDust and
     /// SoftBodyRepaired.</summary>
@@ -147,6 +163,38 @@ internal static class SoftBodyGraphInterop
         SoftBodies.SetWind(new Vec3(vx, vy, vz), gust, gustHz, turbulence);
 
     internal static bool SetSoftBodyPresetForGraph(int entity, int preset) => new Entity(entity).SetSoftPreset((SoftPreset)preset);
+
+    internal static bool PopSoftBodyEventForGraph(out bool found, out int kind, out int entity, out int piece, out float x, out float y, out float z, out float value)
+    {
+        found = SoftBodies.TryPopEvent(out SoftEvent ev);
+        kind = found ? (int)ev.Kind : 0;
+        entity = found ? ev.Entity : 0;
+        piece = found ? ev.Piece : 0;
+        x = found ? ev.Point.X : 0f;
+        y = found ? ev.Point.Y : 0f;
+        z = found ? ev.Point.Z : 0f;
+        value = found ? ev.Value : 0f;
+        return true;
+    }
+
+    internal static bool SetSoftBodyBudgetForGraph(int maxPieces, int maxParticles, int maxRebuilds, float lifetime) =>
+        SoftBodies.SetBudget(maxPieces, maxParticles, maxRebuilds, lifetime);
+
+    internal static bool ClearSoftBodyDebrisForGraph(int entity) => new Entity(entity).ClearSoftDebris();
+
+    internal static bool SetSoftBodyAsleepForGraph(int entity, bool asleep) => new Entity(entity).SetSoftBodyAsleep(asleep);
+
+    internal static bool SetSoftBodyEffectsForGraph(bool enabled) => SoftBodies.SetEffectsEnabled(enabled);
+
+    /// <summary>Success means at least one soft body was repaired.</summary>
+    internal static bool RepairAllSoftBodiesForGraph(out int repaired)
+    {
+        repaired = SoftBodies.RepairAll();
+        return repaired > 0;
+    }
+
+    internal static bool GetSoftBodyDentsForGraph(int entity, out int dentedEdges, out float maxSetCm, out int debrisPieces) =>
+        new Entity(entity).TryGetSoftBodyDents(out dentedEdges, out maxSetCm, out debrisPieces);
 
     internal static bool GetSoftBodyStateForGraph(int entity, out float damage, out float maxStrain, out int pieces, out int brokenEdges)
     {

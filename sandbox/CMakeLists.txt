@@ -30,6 +30,11 @@ add_executable(Sandbox WIN32
   src/SandboxComponentDetails.cpp
   src/SoftBodyPaintTool.cpp
   src/SoftBodyDebugOverlay.cpp
+
+  src/VehicleDebugOverlay.cpp
+  src/VehicleDetailsSection.cpp
+    src/SoftFieldSection.cpp
+    src/SoftProxyTool.cpp
   src/SandboxSettings.cpp
   src/SandboxLevelEdit.cpp
   src/SandboxAutosave.cpp
@@ -106,6 +111,8 @@ add_executable(Sandbox WIN32
   src/RigEditor.cpp
   src/MotionDbEditor.cpp
   src/MotionDebugOverlay.cpp
+
+  src/CameraRigDebugOverlay.cpp
   src/PrefabEditorModel.cpp
   src/PrefabEditorUi.cpp
   # [wave3/level-instances begin] Level instances: the model and the ImGui half, and the SandboxApp members that wire them.
@@ -115,6 +122,8 @@ add_executable(Sandbox WIN32
   # [wave3/level-instances end]
   src/SoundEditor.cpp
   src/ParticleEditor.cpp
+
+  src/ParticleEditorUi.cpp
   src/FoliageTypeEditor.cpp
   src/InstanceSetModel.cpp
   src/InstanceSetEditor.cpp
@@ -180,6 +189,20 @@ target_link_libraries(Sandbox PRIVATE Aver.SoftBody)
 # Cloth and destruction on scene entities (brings AVER_MODULE_SOFTBODY_SCENE=1 for the Details sections, overlay and menu).
 if(TARGET Aver.SoftBody.Scene)
   target_link_libraries(Sandbox PRIVATE Aver.SoftBody.Scene)
+endif()
+
+# Vehicles: the .ocvehicle editor tab needs only the pure module (brings AVER_MODULE_VEHICLE=1); the Details section, overlay and menu need the scene half (AVER_MODULE_VEHICLE_SCENE=1).
+if(TARGET Aver.Vehicle)
+  target_sources(Sandbox PRIVATE src/VehicleEditor.cpp)
+  target_link_libraries(Sandbox PRIVATE Aver.Vehicle)
+endif()
+if(TARGET Aver.Vehicle.Scene)
+  target_link_libraries(Sandbox PRIVATE Aver.Vehicle.Scene)
+endif()
+
+# Gameplay cameras (brings AVER_MODULE_CAMERA=1 for the Details section, overlay and menu).
+if(TARGET Aver.Camera)
+  target_link_libraries(Sandbox PRIVATE Aver.Camera)
 endif()
 # The Roslyn escalation for an actor script the built-in scanner declines. Linked here rather
 # than pulled in by Aver.Formats, which must stay dependency-free -- see its own CMakeLists.

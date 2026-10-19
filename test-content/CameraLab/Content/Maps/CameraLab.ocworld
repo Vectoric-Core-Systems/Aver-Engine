@@ -1,0 +1,32 @@
+OCWORLD 1
+NAME CameraLab
+GROUND 0.0 0
+KILLZ -5000.0
+GAMEMODE AN_LabRules
+DEFAULTPAWN AN_LabPawn
+SPAWN -700 0 100 0
+SUN elev 48.0 azim 130.0 color 1 0.97 0.92 lux 90000
+SKY model physical
+# Nothing here is a third-party asset: every mesh is the built-in unit cube (half-extent 1 cm), so the last three numbers of a PLACEG
+# are the half extents in centimetres. +X is forward from the spawn; the spawn faces +X.
+PLACEG Meshes/cube.ocmesh 0 0 -50 0 0 0 4000 4000 50 name Floor
+# Start area: a wall behind the spawn (walk backwards: the Chase arm must slide in and out), and four pillars to orbit around.
+PLACEG Meshes/cube.ocmesh -900 0 200 0 0 0 20 400 200 name BackWall
+PLACEG Meshes/cube.ocmesh 300 300 200 0 0 0 40 40 200 name PillarNE
+PLACEG Meshes/cube.ocmesh 300 -300 200 0 0 0 40 40 200 name PillarSE
+PLACEG Meshes/cube.ocmesh -200 300 200 0 0 0 40 40 200 name PillarNW
+PLACEG Meshes/cube.ocmesh -200 -300 200 0 0 0 40 40 200 name PillarSW
+# A corridor 540 cm wide and 300 cm tall from x = 600 to 2200, with a doorway (120 wide, 220 tall) at x = 1000.
+PLACEG Meshes/cube.ocmesh 1400 270 150 0 0 0 800 20 150 name CorridorWallLeft
+PLACEG Meshes/cube.ocmesh 1400 -270 150 0 0 0 800 20 150 name CorridorWallRight
+PLACEG Meshes/cube.ocmesh 1000 -165 150 0 0 0 20 105 150 name DoorJambRight
+PLACEG Meshes/cube.ocmesh 1000 165 150 0 0 0 20 105 150 name DoorJambLeft
+PLACEG Meshes/cube.ocmesh 1000 0 260 0 0 0 20 60 40 name DoorLintel
+# A low ceiling from x = 1500 to 2100, underside at 230 cm: the arm swings up into it, the collision fade hides the body.
+PLACEG Meshes/cube.ocmesh 1800 0 250 0 0 0 300 270 20 name LowCeiling
+# A slope after the corridor: 15 degrees up, 8 m long.
+PLACEG Meshes/cube.ocmesh 2900 0 90 0 -15 0 400 200 20 name Slope
+# A step cube to drop from, and a pad to stand on, beyond the slope.
+PLACEG Meshes/cube.ocmesh 3500 0 100 0 0 0 150 150 100 name Landing
+# The kinematic cart (a graph class: it carries a Seat rig and drives back and forth along X).
+PLACE none 1000 -1500 0 0 0 0 1 class AN_LabCart

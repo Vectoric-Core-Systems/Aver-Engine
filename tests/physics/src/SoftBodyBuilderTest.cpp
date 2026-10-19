@@ -548,6 +548,9 @@ static void testImpacts() {
     AVER_INFO("  first closing {:.1f} cm/s, max {:.1f}, expected about {:.1f}", firstClosing, maxClosing, expected);
     check(firstClosing > 0.0f, "the sphere landing is reported");
     check(maxClosing > expected * 0.85f && maxClosing < expected * 1.15f, "the closing speed is within 15% of sqrt(2 g h)");
+    // The documented bias (docs/SOFTBODY.md): the sphere's velocity is read after the step's integration, the vertex's before it,
+    // so a falling body reads up to one step of gravity (g x dt) too fast.
+    check(maxClosing - expected <= 980.0f * fixed + 0.15f * expected, "the closing-speed bias stays within g x dt plus the 15% bracket");
     check(softH == m.body && otherH == sphere && verts > 0, "it names the sheet, the sphere and the contact vertices");
     check(approx(mass, 5.0f, 0.25f), "and the sphere's mass");
     check(std::fabs(normal[2]) > 0.8f && std::fabs(point[2]) < 15.0f, "the normal is vertical and the point is on the sheet");
@@ -582,6 +585,58 @@ static void testLayers() {
     aver_phys_reset_layer_collisions();
 }
 
+static void testAddVelocity() {
+    AVER_INFO("-- the indexed velocity add (ABI version 2) --");
+    check(AVER_PHYS_SB_ABI_VERSION == 2 && aver_phys_sb_abi_version() == 2, "the version macro and the function agree on 2");
+
+    freshWorld();
+    Sheet s = makeSheet(5, 5, 10.0f, 1, 0.0f, 0.0f, 300.0f);
+    for (int32_t c = 0; c < s.cols; ++c) s.invMass[static_cast<size_t>(s.at(c, 0))] = 0.0f;
+    BuildOpts o;
+    o.params = {{AVER_PHYS_SB_P_GRAVITY_SCALE, 0.0f}};
+    const Made m = build(s, o);
+    check(m.body != 0, "a pinned sheet with no gravity");
+    stepFor(0.1f);
+    const State before = readState(m.body);
+
+    const int32_t target = s.at(2, 2), pinned = s.at(1, 0);
+    const int32_t verts[2] = {target, pinned};
+    const float dv[6] = {100.0f, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f};
+    check(aver_phys_sb_add_velocity(m.body, verts, dv, 2) == 1, "the call succeeds");
+    const State after = readState(m.body);
+    check(approx(after.vel[static_cast<size_t>(target) * 3] - before.vel[static_cast<size_t>(target) * 3], 100.0f, 0.5f), "the listed vertex gains 100 cm/s along +X");
+    bool othersSame = true;
+    for (int32_t v = 0; v < s.count(); ++v) {
+        if (v == target) continue;
+        for (int k = 0; k < 3; ++k)
+            othersSame = othersSame && approx(after.vel[static_cast<size_t>(v) * 3 + static_cast<size_t>(k)], before.vel[static_cast<size_t>(v) * 3 + static_cast<size_t>(k)], 1e-3f);
+    }
+    check(othersSame, "no other vertex changes, and the kinematic one is skipped");
+
+    // Refusals write nothing.
+    const int32_t bad[2] = {target, 9999};
+    const float dv2[6] = {5.0f, 0, 0, 5.0f, 0, 0};
+    const State pre = readState(m.body);
+    check(aver_phys_sb_add_velocity(m.body, bad, dv2, 2) == 0, "an index out of range refuses the call");
+    check(aver_phys_sb_add_velocity(m.body, verts, nullptr, 2) == 0 && aver_phys_sb_add_velocity(m.body, nullptr, dv2, 1) == 0, "null arrays refuse it");
+    const float nan[3] = {std::nanf(""), 0, 0};
+    check(aver_phys_sb_add_velocity(m.body, verts, nan, 1) == 0, "a non-finite value refuses it");
+    check(aver_phys_sb_add_velocity(0, verts, dv, 1) == 0 && aver_phys_sb_add_velocity(m.body, verts, dv, -1) == 0, "so do a bad handle and a negative count");
+    const State post = readState(m.body);
+    check(std::memcmp(pre.vel.data(), post.vel.data(), pre.vel.size() * sizeof(float)) == 0, "and none of those wrote anything");
+    check(aver_phys_sb_add_velocity(m.body, verts, dv, 0) == 1, "n == 0 succeeds and does nothing");
+
+    // Waking.
+    aver_phys_sb_set_active(m.body, 0);
+    const float zero[3] = {0, 0, 0};
+    check(aver_phys_sb_add_velocity(m.body, verts, zero, 1) == 1 && aver_phys_sb_is_active(m.body) == 0, "an all-zero change leaves a sleeping body asleep");
+    const float kick[3] = {0, 0, 40.0f};
+    check(aver_phys_sb_add_velocity(m.body, verts, kick, 1) == 1 && aver_phys_sb_is_active(m.body) == 1, "a non-zero change wakes it");
+    const int32_t onlyPinned[1] = {pinned};
+    aver_phys_sb_set_active(m.body, 0);
+    check(aver_phys_sb_add_velocity(m.body, onlyPinned, kick, 1) == 1 && aver_phys_sb_is_active(m.body) == 0, "a change that only names a kinematic vertex does not wake it");
+}
+
 int main() {
     AVER_INFO("SoftBodyBuilderTest");
     testHangsAndRefusals();
@@ -593,6 +648,7 @@ int main() {
     testSleepAndFreeze();
     testImpacts();
     testLayers();
+    testAddVelocity();
     aver_phys_shutdown();
     AVER_INFO("{} failure(s)", g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -658,6 +658,7 @@ editor::shutdownAnimEditors();
                   particleTickFrames_, particleTickAccumSec_ * 1e3, liveEmitters, totalLive);
     }
     if (particlesAttached_) { e.device()->removeRenderFeature(&particleRenderer_); particlesAttached_ = false; }
+    content_.releaseParticleTextures();
     particleRenderer_.shutdown();
 #endif
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE

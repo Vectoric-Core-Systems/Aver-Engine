@@ -936,11 +936,27 @@ void SandboxApp::pushInput(bool uiActive) {
 
 // While playing, drives the view camera from the pawn's published view node, falling back to the
 // pawn's own matrix. Row 3 is the position, row 0 the forward (+X) axis.
-void SandboxApp::drivePlayCamera() {
+void SandboxApp::drivePlayCamera(f32 dt) {
     // THE DRONE STANDS IN AS THE PAWN WHEN THERE IS NO GameMode: the drone fallback never calls
     // aver_fw_begin_play, so without this the camera would sit still while the drone flies.
-    firstPersonPawn_ = game::drivePlayCamera(camPos_, yaw_, pitch_,
-                                              dronePlayActive() ? droneEntity_ : scene::kInvalidEntity);
+    const scene::Entity standIn = dronePlayActive() ? droneEntity_ : scene::kInvalidEntity;
+    // Camera rigs run during a Play session only; authoring and the free-fly camera keep the default projection.
+    if (!playSessionActive()) {
+        playView_ = game::PlayView{};
+        firstPersonPawn_ = game::drivePlayCamera(camPos_, yaw_, pitch_, standIn);
+        return;
+    }
+    // The sequencer's camera goes to the rig system as the external pose: when it lets go the rig blends back from it.
+    game::ExternalPose external;
+    game::SeqCameraPose sp;
+    if (seqEditor_.viewPose(playEjected(), sp)) {
+        external.active = true;
+        external.pos = sp.position;
+        external.yaw = sp.yaw;
+        external.pitch = sp.pitch;
+    }
+    firstPersonPawn_ = game::drivePlayCamera(camPos_, yaw_, pitch_, playView_, dt, standIn, &external);
+    if (playView_.cut) streaming_.resetVelocityTracking();   // a teleport, not a fast move
 }
 
 #endif

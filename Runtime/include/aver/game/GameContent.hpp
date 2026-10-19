@@ -22,6 +22,7 @@
 
 // Forward-declared to avoid widespread header inclusion.
 namespace aver::fmt { struct OcMeshData; }
+namespace aver::particles { struct ParticleMeshData; }
 
 namespace aver::game {
 
@@ -224,9 +225,18 @@ public:
 #endif
 
 #if AVER_MODULE_PARTICLES
-    // Loads every .ocparticle under the project's content root into particles::particleEffects().
+    // Loads every .ocparticle under the project's content root into particles::particleEffects() -- as a SYSTEM, so a v1 file
+    // is a one-emitter system and a v2 file keeps all its emitters, user parameters and events.
     // Keyed by fnv1a64(relative path), the SAME id space contentIndex_ uses for all project assets.
     void loadProjectParticleEffects();
+    // The hosts' resolvers for ParticleRenderer::setTextureResolver / setMeshResolver (docs/PARTICLES.md). `user` is a
+    // GameContent*. The texture is uploaded on first use and kept in a small table until releaseParticleTextures(); the id
+    // is a content-index id (an effect's TEXTURE, a sprite sheet) and an unknown id answers 0 (the procedural dot). The mesh
+    // arrives as plain arrays from the .ocmesh the id names; false when the id is unknown or the file does not load.
+    static rhi::TextureHandle resolveParticleTexture(u64 textureId, void* user);
+    static bool resolveParticleMesh(u64 meshId, particles::ParticleMeshData& out, void* user);
+    // Destroys the textures resolveParticleTexture uploaded. Call before the device goes, or on a project change.
+    void releaseParticleTextures();
 #endif
 
 private:
@@ -323,6 +333,9 @@ private:
 #if AVER_MODULE_PBR
     rhi::IResourceFactory* textureFactory_ = nullptr;
     pbr::MaterialSystem* materialSystem_ = nullptr;
+#  if AVER_MODULE_PARTICLES
+    std::unordered_map<u64, rhi::TextureHandle> particleTextures_;   // resolveParticleTexture's cache; 0 caches a failure
+#  endif
     struct MaterialBind { i32 token; std::string name; };
     std::deque<MaterialBind> materialBinds_;
     std::unordered_map<std::string, pbr::MaterialHandle> materialAssets_;

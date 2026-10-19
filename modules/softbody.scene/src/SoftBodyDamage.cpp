@@ -1,5 +1,5 @@
-// The inbox, impacts, plastic deformation (dents), the tear pipeline (rebuild + islands + debris), release and
-// repair, and the debris lifecycle. Everything here runs inside tick(), in a fixed order.
+// The inbox, impacts, plastic deformation (dents), release and repair, and the debris lifecycle. Everything here runs
+// inside tick(), in a fixed order. The tear pipeline (rebuild + islands + debris) is SoftBodyTear.cpp.
 #include "aver/softbody/SoftBodySystem.hpp"
 
 #include "aver/core/Log.hpp"
@@ -30,13 +30,14 @@ void SoftBodySystem::noteBroken(scene::World&, Entry& en, const std::vector<u32>
     for (const u32 b : sorted) {
         const u32 pa = c.beams[b].a;
         const u32 idx = pa < en.owner.size() ? en.owner[pa] : kNone;
-        if (idx < en.pieces.size() && en.pieces[idx].alive) {
+        if (idx < en.pieces.size() && en.pieces[idx].alive && !en.pieces[idx].baked) {
             en.pieces[idx].needsRebuild = true;
             en.pieces[idx].hotFor = std::max(en.pieces[idx].hotFor, opt_.hotSeconds);
         }
     }
     en.brokenBeams += static_cast<u32>(sorted.size());
     emit(en, en.pieces.empty() ? nullptr : &en.pieces.front(), SoftEventKind::Torn, sorted.front(), point, static_cast<f32>(sorted.size()));
+    emitFx(en, FxSlot::Tear, point, Vec3{0, 0, 1}, static_cast<f32>(sorted.size()));
 }
 
 void SoftBodySystem::depositOn(scene::World& world, Entry& en, Piece*, const DamageDeposit& d, f32 impactScale, bool kick, SoftEventKind) {
@@ -48,14 +49,24 @@ void SoftBodySystem::depositOn(scene::World& world, Entry& en, Piece*, const Dam
     }
     DamageDeposit dd = d;
     dd.energyJ *= impactScale;
-    const DepositResult r = depositEnergy(c, dd, en.asset.destruct.impulseEfficiency, en.asset.destruct.maxKickCmS);
+    const DepositResult r = depositEnergy(c, dd, en.asset.destruct.impulseEfficiency, en.asset.destruct.maxKickCmS,
+                                          en.bakedBeams.empty() ? nullptr : &en.bakedBeams);
     if (r.broken) noteBroken(world, en, r.brokenBeams, d.point);
+
+    en.hit = HitInfo{};
+    en.hit.valid = true;
+    en.hit.kind = d.kind;
+    en.hit.energyJ = dd.energyJ;
+    en.hit.radiusCm = d.radiusCm;
+    en.hit.beamsDamaged = r.beamsDamaged;
+    en.hit.broken = r.broken;
+    en.hit.tick = tickCount_;
 
     const Vec3 dirN = d.dir.getSafeNormal();
     const bool radial = dirN.sizeSquared() < 0.5f;
     const f32 reach = d.radiusCm;
     for (Piece& p : en.pieces) {
-        if (!p.alive || p.empty) continue;
+        if (!p.alive || p.empty || p.baked) continue;
         const Vec3 q{std::clamp(d.point.x, p.boundsMin.x, p.boundsMax.x), std::clamp(d.point.y, p.boundsMin.y, p.boundsMax.y),
                      std::clamp(d.point.z, p.boundsMin.z, p.boundsMax.z)};
         if (dist(q, d.point) > reach) continue;
@@ -106,7 +117,7 @@ void SoftBodySystem::applyInbox(scene::World& world) {
                     if (en.failed) continue;
                     f32 nearest = 1e30f;
                     for (const Piece& p : en.pieces) {
-                        if (!p.alive || p.empty) continue;
+                        if (!p.alive || p.empty || p.baked) continue;
                         const Vec3 q{std::clamp(it.point.x, p.boundsMin.x, p.boundsMax.x), std::clamp(it.point.y, p.boundsMin.y, p.boundsMax.y),
                                      std::clamp(it.point.z, p.boundsMin.z, p.boundsMax.z)};
                         nearest = std::min(nearest, dist(q, it.point));
@@ -136,7 +147,19 @@ void SoftBodySystem::applyInbox(scene::World& world) {
                 Entry* en = find(it.entity);
                 if (!en || en->failed) break;
                 std::vector<u32> broken;
-                tearWithin(en->sim.cage, it.point, it.radius, &broken);
+                if (en->bakedBeams.empty()) {
+                    tearWithin(en->sim.cage, it.point, it.radius, &broken);
+                } else {
+                    // A baked piece is no longer a body: its edges are not cut.
+                    Cage& c = en->sim.cage;
+                    for (u32 bi = 0; bi < c.beams.size(); ++bi) {
+                        const Beam& b = c.beams[bi];
+                        if (b.broken || (bi < en->bakedBeams.size() && en->bakedBeams[bi])) continue;
+                        if (distSquared((c.particles[b.a].pos + c.particles[b.b].pos) * 0.5f, it.point) > it.radius * it.radius) continue;
+                        breakBeam(c, bi);
+                        broken.push_back(bi);
+                    }
+                }
                 noteBroken(world, *en, broken, it.point);
                 break;
             }
@@ -145,6 +168,31 @@ void SoftBodySystem::applyInbox(scene::World& world) {
                 break;
             case InboxItem::Kind::Release:
                 if (Entry* en = find(it.entity)) releaseEntry(world, *en);
+                break;
+            case InboxItem::Kind::Pulse:
+                applyField(world, it.field, stepSeconds_, true);
+                ++stats_.fieldsApplied;
+                break;
+            case InboxItem::Kind::FieldStart: {
+                Transient t;
+                t.spec = it.field;
+                t.spec.perSecond = true;
+                t.remainingS = it.lifetime;
+                fields_[it.handle] = std::move(t);
+                break;
+            }
+            case InboxItem::Kind::FieldStop:
+                fields_.erase(it.handle);
+                break;
+            case InboxItem::Kind::Asleep:
+                if (Entry* en = find(it.entity)) en->forceAsleep = it.flag;
+                break;
+            case InboxItem::Kind::ClearDebris:
+                if (Entry* en = find(it.entity)) {
+                    for (Piece& p : en->pieces)
+                        if (p.alive && p.debris) destroyPiece(world, *en, p);
+                    needFlush_ = true;
+                }
                 break;
         }
     }
@@ -176,7 +224,7 @@ void SoftBodySystem::pollImpacts(scene::World& world) {
         if (depositsThisTick_ >= opt_.maxDepositsPerFrame) break;
         ++depositsThisTick_;
 
-        const f32 radius = std::clamp(12.0f + 6.0f * std::sqrt(static_cast<f32>(std::max(r.verts, 1))), 12.0f, 80.0f);
+        const f32 radius = std::clamp(12.0f + 6.0f * std::sqrt(static_cast<f32>(std::max(r.verts, 1))), 12.0f, 80.0f) * en->asset.destruct.impactRadiusScale;
         const Vec3 point{r.point[0], r.point[1], r.point[2]};
         f32 localMass = 0.0f;
         for (const Particle& q : en->sim.cage.particles)
@@ -191,7 +239,9 @@ void SoftBodySystem::pollImpacts(scene::World& world) {
         if (const auto* de = world.component<CDestructible>(en->entity, destructibleType())) scale = or1(de->impactScale);
         Piece* p = pieceById(*en, bit->second.second);
         depositOn(world, *en, p, d, scale, false, SoftEventKind::Impact);
+        if (en->hit.valid && en->hit.tick == tickCount_) en->hit.closingCmS = r.closing;
         emit(*en, p, SoftEventKind::Impact, 0, point, r.closing);
+        emitFx(*en, FxSlot::Impact, point, Vec3{r.normal[0], r.normal[1], r.normal[2]}, r.closing);
     }
 }
 
@@ -261,153 +311,16 @@ scene::Entity SoftBodySystem::makeDebrisEntity(scene::World& world, Entry& en, P
     if (const auto* src = world.component<scene::CMeshRenderer>(en.entity, scene::kComponentMeshRenderer)) {
         auto* mr = static_cast<scene::CMeshRenderer*>(world.addComponent(d, scene::kComponentMeshRenderer));
         *mr = *src;
-        mr->flags |= scene::kMeshRendererVisible;
+        // Invisible until the draw side has a resident mesh for it: with the bit set, a piece the draw side has not built
+        // yet draws the WHOLE authored mesh at its centroid (the scene walk draws the authored mesh for a zero handle).
+        mr->flags &= ~scene::kMeshRendererVisible;
         mr->dirty = 1;
     }
     auto* sb = static_cast<scene::CSoftBody*>(world.addComponent(d, scene::kComponentSoftBody));
     sb->flags = scene::kSoftBodyPiece;
     needFlush_ = true;
     ++liveDebris_;
-    (void)p;
     return d;
-}
-
-bool SoftBodySystem::tearPipeline(scene::World& world, Entry& en) {
-    Cage& c = en.sim.cage;
-    std::vector<u32> dirty;
-    for (u32 i = 0; i < en.pieces.size(); ++i)
-        if (en.pieces[i].alive && en.pieces[i].needsRebuild) dirty.push_back(i);
-    if (dirty.empty()) return false;
-    if (rebuildsThisTick_ >= opt_.maxRebuildsPerFrame) return false;   // carried: the pieces stay dirty
-    ++rebuildsThisTick_;
-
-    // 1. duplicate particles on the fans a break disconnected; 2. the draw side follows; 3. islands.
-    resolveTears(c);
-    en.owner.resize(c.particles.size(), kNone);
-    for (const SplitEvent& ev : c.splitLog) en.owner[ev.newParticle] = en.owner[ev.oldParticle];
-    std::vector<u32> sources;
-    en.sim.binding.applySplits(c.splitLog, &sources);
-    for (const u32 s : sources) en.renderSrc.push_back(s < en.renderSrc.size() ? en.renderSrc[s] : s);
-    c.splitLog.clear();
-    rebuildBends(c);
-    c.topologyDirty = false;
-
-    const u32 minTris = std::max(1u, en.asset.destruct.minPieceTriangles);
-    const IslandPlan plan = planIslands(c, minTris);
-    std::vector<u32> comp;
-    countPieces(c, &comp);
-
-    // Islands of each dirty piece, in plan order. State maps are taken before any body changes.
-    std::map<u32, std::vector<u32>> groups;
-    std::vector<std::vector<i32>> maps(plan.islands.size());
-    for (u32 k = 0; k < plan.islands.size(); ++k) {
-        const u32 idx = en.owner[plan.islands[k].particles.front()];
-        if (idx >= en.pieces.size() || !en.pieces[idx].alive || !en.pieces[idx].needsRebuild) continue;
-        if (plan.islands[k].triangles.empty()) {
-            // A pinned fragment with no cloth left on it has nothing to simulate: it is not a body.
-            for (const u32 pid : plan.islands[k].particles) en.owner[pid] = kNone;
-            continue;
-        }
-        groups[idx].push_back(k);
-        for (const u32 pid : plan.islands[k].particles) maps[k].push_back(static_cast<i32>(c.particles[pid].simIndex));
-    }
-
-    // Dust: one event per connected cluster, only for particles of the dirty pieces.
-    {
-        std::map<u32, std::vector<u32>> clusters;
-        for (const u32 pid : plan.dust) {
-            const u32 idx = pid < en.owner.size() ? en.owner[pid] : kNone;
-            if (idx < en.pieces.size() && en.pieces[idx].alive && en.pieces[idx].needsRebuild) clusters[comp[pid]].push_back(pid);
-        }
-        for (const auto& [cid, parts] : clusters) {
-            Vec3 sum{0, 0, 0};
-            for (const u32 pid : parts) { sum += c.particles[pid].pos; en.owner[pid] = kNone; }
-            emit(en, nullptr, SoftEventKind::Dust, 0, sum / static_cast<f32>(parts.size()), static_cast<f32>(parts.size()));
-        }
-    }
-
-    u32 maxPieces = std::max(1u, en.asset.destruct.maxPieces);
-    bool noDebris = false;
-    if (const auto* de = world.component<CDestructible>(en.entity, destructibleType())) {
-        if (de->maxPieces) maxPieces = de->maxPieces;
-        noDebris = (de->flags & kDestructNoDebris) != 0;
-    }
-    auto aliveCount = [&] {
-        u32 n = 0;
-        for (const Piece& p : en.pieces) n += p.alive ? 1u : 0u;
-        return n;
-    };
-
-    for (const u32 pidx : dirty) {
-        const std::vector<u32> ks = groups.count(pidx) ? groups[pidx] : std::vector<u32>{};
-        if (ks.empty()) {
-            // Everything that was left is dust.
-            Piece& d = en.pieces[pidx];
-            if (d.body) { aver_phys_remove_body(d.body); byBody_.erase(d.body); d.body = 0; }
-            if (d.debris) {
-                destroyPiece(world, en, d);
-            } else {
-                d.empty = true;
-                d.particles.clear(); d.beams.clear(); d.triangles.clear();
-                d.drawIndices.clear(); d.renderVerts.clear(); d.sourceVertex.clear(); d.drawWorld.clear();
-                d.needsRebuild = false;
-                if (auto* mr = world.component<scene::CMeshRenderer>(en.entity, scene::kComponentMeshRenderer)) {
-                    mr->flags &= ~scene::kMeshRendererVisible;
-                    en.hidden = true;
-                }
-                ++d.epoch;
-            }
-            continue;
-        }
-
-        // Detached islands first, reading the old body.
-        for (usize j = 1; j < ks.size(); ++j) {
-            const IslandPlan::Island& isl = plan.islands[ks[j]];
-            auto toDust = [&] {
-                Vec3 sum{0, 0, 0};
-                for (const u32 pid : isl.particles) { sum += c.particles[pid].pos; en.owner[pid] = kNone; }
-                emit(en, nullptr, SoftEventKind::Dust, 0, sum / static_cast<f32>(isl.particles.size()), static_cast<f32>(isl.particles.size()));
-            };
-            if (noDebris || aliveCount() >= maxPieces) { toDust(); continue; }
-            Piece np;
-            np.id = en.nextPieceId++;
-            np.debris = true;
-            np.particles = isl.particles; np.beams = isl.beams; np.triangles = isl.triangles;
-            np.anchored = isl.anchored;
-            np.plastic = en.pieces[pidx].plastic;
-            Vec3 sum{0, 0, 0};
-            for (const u32 pid : isl.particles) sum += c.particles[pid].pos;
-            np.origin = np.centroid = sum / static_cast<f32>(isl.particles.size());
-            np.entity = makeDebrisEntity(world, en, np);
-            en.pieces.push_back(std::move(np));
-            const u32 newIdx = static_cast<u32>(en.pieces.size() - 1);
-            Piece& ref = en.pieces[newIdx];
-            if (!buildPieceBody(en, ref, 0, en.pieces[pidx].body, &maps[ks[j]], ref.plastic)) {
-                AVER_WARN("[SoftBody] entity {}: a detached piece could not be built; it is dropped", en.entity);
-                destroyPiece(world, en, ref);
-                toDust();
-                continue;
-            }
-            for (const u32 pid : isl.particles) en.owner[pid] = newIdx;
-            if (auto* sb = world.component<scene::CSoftBody>(ref.entity, scene::kComponentSoftBody)) sb->body = ref.body;
-            fillPieceDraw(en, ref);
-            emit(en, &ref, SoftEventKind::Detached, 0, ref.centroid, isl.massKg);
-        }
-
-        // Then the piece keeps the first island and its body handle.
-        Piece& d = en.pieces[pidx];
-        const IslandPlan::Island& first = plan.islands[ks[0]];
-        d.particles = first.particles; d.beams = first.beams; d.triangles = first.triangles;
-        d.anchored = first.anchored;
-        for (const u32 pid : first.particles) en.owner[pid] = pidx;
-        if (!buildPieceBody(en, d, d.body, d.body, &maps[ks[0]], d.plastic))
-            AVER_WARN("[SoftBody] entity {}: the torn body could not be rebuilt; it keeps its previous shape", en.entity);
-        d.needsRebuild = false;
-        fillPieceDraw(en, d);
-        if (pidx == 0)
-            if (auto* sb = world.component<scene::CSoftBody>(en.entity, scene::kComponentSoftBody)) sb->body = d.body;
-    }
-    return true;
 }
 
 void SoftBodySystem::releaseEntry(scene::World& world, Entry& en) {
@@ -428,8 +341,9 @@ void SoftBodySystem::releaseEntry(scene::World& world, Entry& en) {
         p.anchored = false;
         buildPieceBody(en, p, p.body, p.body, &map, false);
     }
-    emit(en, en.pieces.empty() ? nullptr : &en.pieces.front(), SoftEventKind::Released, 0,
-         en.pieces.empty() ? Vec3{0, 0, 0} : en.pieces.front().centroid, 0.0f);
+    const Vec3 where = en.pieces.empty() ? Vec3{0, 0, 0} : en.pieces.front().centroid;
+    emit(en, en.pieces.empty() ? nullptr : &en.pieces.front(), SoftEventKind::Released, 0, where, 0.0f);
+    emitFx(en, FxSlot::Release, where, Vec3{0, 0, 1}, 0.0f);
     (void)world;
 }
 
@@ -446,8 +360,9 @@ void SoftBodySystem::repairEntry(scene::World& world, Entry& en) {
     }
     Entry& again = it->second;
     ++rebuildsThisTick_;
-    emit(again, again.pieces.empty() ? nullptr : &again.pieces.front(), SoftEventKind::Repaired, 0,
-         again.pieces.empty() ? Vec3{0, 0, 0} : again.pieces.front().centroid, 0.0f);
+    const Vec3 where = again.pieces.empty() ? Vec3{0, 0, 0} : again.pieces.front().centroid;
+    emit(again, again.pieces.empty() ? nullptr : &again.pieces.front(), SoftEventKind::Repaired, 0, where, 0.0f);
+    emitFx(again, FxSlot::Release, where, Vec3{0, 0, 1}, 0.0f);
 }
 
 void SoftBodySystem::debrisLifecycle(scene::World& world, f32 dt) {
@@ -459,11 +374,19 @@ void SoftBodySystem::debrisLifecycle(scene::World& world, f32 dt) {
         for (Piece& p : en.pieces) {
             if (!p.alive || !p.debris) continue;
             p.age += dt;
-            const bool asleep = p.body && !p.frozen && aver_phys_sb_is_active(p.body) == 0;
+            // A baked piece has no body and is asleep for good; a held one (a Sleep field) is not resting, it is paused.
+            const bool asleep = p.baked || (p.body && !p.frozen && !p.fieldHeld && aver_phys_sb_is_active(p.body) == 0);
             p.asleepFor = asleep ? p.asleepFor + dt : 0.0f;
+            if (!p.baked && p.body && asleep && opt_.bakeEnabled && en.asset.destruct.bake && p.asleepFor >= opt_.bakeAfterS) bakePiece(world, en, p);
             if (!p.shrinking && p.asleepFor >= opt_.debrisSleepS && p.age >= life) p.shrinking = true;
             if (p.shrinking) {
                 p.shrinkT += dt;
+                if (p.baked && p.entity != scene::kInvalidEntity && opt_.despawnShrinkS > 0.0f) {
+                    // A baked piece is a plain mesh: its despawn shrink is the entity's scale, no GPU work.
+                    const f32 s = std::max(0.0f, 1.0f - p.shrinkT / opt_.despawnShrinkS);
+                    world.setLocalScale(p.entity, Vec3{s, s, s});
+                    needFlush_ = true;
+                }
                 if (p.shrinkT >= opt_.despawnShrinkS) {
                     destroyPiece(world, en, p);
                     needFlush_ = true;

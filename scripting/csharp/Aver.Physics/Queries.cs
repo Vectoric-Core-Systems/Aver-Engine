@@ -80,6 +80,17 @@ public static partial class Physics
         return MakeShapeHit(body, dist, p, n);
     }
 
+    /// <summary>Sweeps a sphere by <paramref name="displacement"/> (centimetres). Two bodies can be skipped (a camera skips
+    /// the target's character and a vehicle chassis); sensors are skipped unless <see cref="QueryFlags.IncludeSensors"/>.</summary>
+    public static ShapeHit SphereCastQ(Float3 centre, float radius, Float3 displacement,
+                                       uint layerMask = LayerMaskAll, Body ignoreA = default, Body ignoreB = default, QueryFlags flags = QueryFlags.None)
+    {
+        var p = new float[3]; var n = new float[3];
+        int body = Native.aver_phys_sphere_cast_q(centre.X, centre.Y, centre.Z, displacement.X, displacement.Y, displacement.Z, radius,
+                                                   layerMask, ignoreA.Handle, ignoreB.Handle, (int)flags, out float dist, p, n);
+        return MakeShapeHit(body, dist, p, n);
+    }
+
     /// <summary>Sweeps an existing body's own shape from its current pose by <paramref name="displacement"/>,
     /// ignoring that body. <paramref name="ignoreBody"/> is a second body to skip. Misses for a dead
     /// handle, a character, a soft body or a mesh/heightfield body.</summary>

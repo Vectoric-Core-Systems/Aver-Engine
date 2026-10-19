@@ -1,5 +1,6 @@
-# Aver.Particles -- CPU-simulated billboard particles, drawn through the transparent pass
-# (modules/rhi/include/aver/rhi/RHIResources.hpp's IRenderFeature::transparentPass). See README.md.
+# Aver.Particles -- CPU and GPU simulated particles (sprites, ribbons, mesh particles) driven by a 13-module stack, drawn
+# through the transparent pass (modules/rhi/include/aver/rhi/RHIResources.hpp's IRenderFeature::transparentPass).
+# See README.md.
 #
 # ONE TARGET, not split into a scene-free half and an RHI half the way anim/anim.scene are: unlike
 # animation (a pure sampler with a real non-scene consumer -- render.skin's GPU deformation), nothing
@@ -10,7 +11,16 @@
 aver_add_module(Aver.Particles
   SOURCES
     src/ParticleEffectLibrary.cpp
+    src/ParticleModules.cpp
+    src/EmitterSim.cpp
     src/ParticleSystem.cpp
+    src/ParticleSpawn.cpp
+    src/ParticleProvider.cpp
+    src/ParticleLighting.cpp
+    src/ParticleSort.cpp
+    src/ParticleGpuPool.cpp
+    src/ParticleGpu.cpp
+    src/ParticleMeshCache.cpp
     src/ParticleRenderer.cpp
   DEPS
     Aver.Core

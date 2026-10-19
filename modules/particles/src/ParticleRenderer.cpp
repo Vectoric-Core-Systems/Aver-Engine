@@ -1,24 +1,44 @@
-// ParticleRenderer implementation: the pipelines, the per-frame vertex build, and the draw.
+// ParticleRenderer implementation: the shaders and pipelines, the CPU tier's uploads, the cross-emitter order, the per-draw
+// constants and the draws (instanced from the CPU, indirect from the GPU tier). See ParticleRenderer.hpp.
 #include "aver/particles/ParticleRenderer.hpp"
 #include "ParticleShaders.hpp"
 
 #include "aver/core/Log.hpp"
+#include "aver/rhi/ShaderFiles.hpp"
+#include "aver/scene/LightGather.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include "aver/rhi/ShaderFiles.hpp"   // this pass's HLSL is a deployed file, not a literal
 
 namespace aver::particles {
 namespace {
 
-constexpr u32 kInitialVertices = 4 * 256;   // 256 particles' worth, across every emitter this frame
-constexpr u32 kInitialIndices  = 6 * 256;
+// The per-draw block (b3). Mirrors cbuffer ParticleDraw in particles.hlsl field for field.
+struct ParticleDrawCB {
+    f32 viewProj[16];     // this pass's view-projection (row-major, as rhi::PerFrameCB uploads it)
+    f32 eye[4];
+    f32 camRight[4];      // xyz camera right, w alignment (0 camera, 1 velocity, 2 axis)
+    f32 camUp[4];         // xyz camera up, w velocity stretch
+    f32 axis[4];          // xyz alignment axis (unit), w 1 when the instance list is an order list
+    f32 size[4];          // x sizeStart, y sizeEnd, z size curve stops, w mesh scale
+    f32 sizeT[4];
+    f32 sizeV[4];
+    f32 colA[4];
+    f32 colB[4];
+    f32 colT[4];
+    f32 colV[4][4];
+    f32 subuv[4];         // cols, rows, frames, fps
+    f32 flags[4];         // has texture, SubUV blend, fog, lighting
+    f32 trail[4];         // ring points, fade, linked capacity
+    f32 misc[4];          // additive, mesh orientation, colour curve stops, kind
+    ParticleLight lights[kParticleLightCount];
+};
+static_assert(sizeof(ParticleDrawCB) == 22 * 16 + kParticleLightCount * sizeof(ParticleLight), "ParticleDrawCB drifted from particles.hlsl");
+static_assert(sizeof(ParticleDrawCB) % 16 == 0, "a constant block is whole float4 rows");
 
-// Applies the row-vector camera-relative inverse view-projection (rhi::PerFrameCB::invViewProjRel)
-// to an NDC point and dehomogenises it -- the same manual expansion ParticleSystem.cpp's
-// transformPoint uses, just against that matrix instead of a world matrix. The result is an offset
-// FROM THE EYE; an absolute point needs camPos added.
+// Applies the row-vector camera-relative inverse view-projection (rhi::PerFrameCB::invViewProjRel) to an NDC point and
+// dehomogenises it. The result is an offset FROM THE EYE.
 Vec3 unprojectPoint(const f32 ivpRel[16], f32 ndcX, f32 ndcY, f32 ndcZ) {
     const f32 v[4] = {ndcX, ndcY, ndcZ, 1.0f};
     f32 r[4] = {0, 0, 0, 0};
@@ -29,21 +49,10 @@ Vec3 unprojectPoint(const f32 ivpRel[16], f32 ndcX, f32 ndcY, f32 ndcZ) {
     return {r[0] * invW, r[1] * invW, r[2] * invW};
 }
 
-// Recovers the camera's world-space RIGHT and UP axes from invViewProjRel ALONE -- no separate view
-// matrix exists on IDevice::camera() to read them from directly.
-//
-// WHY THIS IS EXACT, NOT APPROXIMATE. Fix an NDC depth d and vary only ndc.x: for this engine's
-// perspective matrix (Math.hpp's Mat4::perspectiveLH), clip.w after ViewProj equals the view-space
-// Z, and ndc.z = f(view-space Z) alone -- so holding ndc.z fixed holds view-space Z fixed. With
-// view-space Z fixed, ndc.x = viewX * xScale / viewZ is LINEAR in viewX, so a finite step in ndc.x
-// maps to a finite step PURELY along the camera's view-space X axis, at ANY step size -- not just in
-// the limit. Unprojecting two such points back through invViewProjRel and differencing therefore
-// recovers a vector that is exactly parallel to the camera's world-space right axis (view space's
-// X, carried through the view matrix's own rotation), not a first-order approximation of it. The
-// same argument holds for ndc.y and the up axis. Two calls, not four: `center` is shared by both.
-//
-// CAMERA-RELATIVE, so the three points sit a few centimetres from the eye rather than at its world
-// magnitude, and their differences lose nothing however far the camera is from the origin.
+// The camera's world RIGHT and UP axes from invViewProjRel alone. Exact, not a first-order approximation: with the NDC depth
+// held fixed, view-space Z is fixed, so NDC x is linear in view-space X and a finite step recovers a vector exactly parallel to
+// the camera's right axis (see the 0.7 derivation, kept in git history). Camera-relative, so the points sit a few
+// centimetres from the eye however far the camera is from the origin.
 void cameraBasis(const f32 invViewProjRel[16], Vec3& outRight, Vec3& outUp) {
     const Vec3 center = unprojectPoint(invViewProjRel, 0.0f, 0.0f, 0.5f);
     const Vec3 rightP = unprojectPoint(invViewProjRel, 0.5f, 0.0f, 0.5f);
@@ -52,391 +61,598 @@ void cameraBasis(const f32 invViewProjRel[16], Vec3& outRight, Vec3& outUp) {
     outUp    = (upP - center).getSafeNormal();
 }
 
-f32 lerpf(f32 a, f32 b, f32 t) { return a + (b - a) * t; }
+void setVec4(f32 out[4], f32 x, f32 y, f32 z, f32 w) { out[0] = x; out[1] = y; out[2] = z; out[3] = w; }
 
-// Packs a straight rgba[4] (0..1) into premultiplied RGBA8Unorm -- byte order R,G,B,A from the low
-// byte up, the SAME convention modules/ui/src/UiDrawList.cpp's uiPremultiply uses (0xAABBGGRR), so
-// this and the UI renderer agree on what an RGBA8Unorm vertex colour means. Alpha itself is NOT
-// multiplied away -- BlendMode::PremultipliedAlpha's `dst.rgb * (1 - src.a)` still needs it.
-u32 packPremultiplied(const f32 rgba[4]) {
-    auto byteOf = [](f32 v) {
-        v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-        return static_cast<u32>(v * 255.0f + 0.5f);
-    };
-    const f32 a = rgba[3];
-    const u32 r = byteOf(rgba[0] * a), g = byteOf(rgba[1] * a), b = byteOf(rgba[2] * a), ac = byteOf(a);
-    return r | (g << 8) | (b << 16) | (ac << 24);
+constexpr u32 alignUp(u32 v, u32 a) { return (v + a - 1u) / a * a; }
+
+bool sortWanted(const ParticleEffect& fx) {
+    if (fx.render == RenderKind::Ribbon && fx.linked) return false;
+    return fx.sort == SortMode::Depth || (fx.sort == SortMode::Auto && fx.blend != rhi::BlendMode::Additive);
 }
 
 } // namespace
 
+// ------------------------------------------------------------------------------------------------ frustum
+bool ParticleRenderer::sphereInFrustum(const f32 vp[16], const Vec3& c, f32 radius) {
+    // Row-vector clip = p * M, so a plane is a combination of M's COLUMNS: column j is (M[0][j], M[1][j], M[2][j], M[3][j]).
+    const auto col = [&](int j, f32 out[4]) { for (int i = 0; i < 4; ++i) out[i] = vp[i * 4 + j]; };
+    f32 c0[4], c1[4], c2[4], c3[4];
+    col(0, c0); col(1, c1); col(2, c2); col(3, c3);
+    f32 planes[6][4];
+    for (int k = 0; k < 4; ++k) {
+        planes[0][k] = c3[k] + c0[k];   // left
+        planes[1][k] = c3[k] - c0[k];   // right
+        planes[2][k] = c3[k] + c1[k];   // bottom
+        planes[3][k] = c3[k] - c1[k];   // top
+        planes[4][k] = c2[k];           // near (depth 0..1)
+        planes[5][k] = c3[k] - c2[k];   // far
+    }
+    for (const auto& p : planes) {
+        const f32 len = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+        if (len < 1e-8f) continue;
+        if (p[0] * c.x + p[1] * c.y + p[2] * c.z + p[3] < -radius * len) return false;
+    }
+    return true;
+}
+
+// ------------------------------------------------------------------------------------------------ lifecycle
 bool ParticleRenderer::init(rhi::IDevice& device) {
+    shutdown();
     dev_ = &device;
     res_ = device.resources();
     if (!res_) {
         AVER_WARN("[Particles] init declined: backend exposes no resource factory");
+        dev_ = nullptr;
         return false;
     }
-
-    rhi::ShaderDesc sd;
-    sd.source = rhi::shaderFile("particles.hlsl").c_str();
-    sd.prelude = rhi::sharedShaderPrelude();   // gViewProj, and nothing else from it, is used
-    sd.entry = "ParticleVS";
-    sd.stage = rhi::ShaderStage::Vertex;
-    vs_ = res_->createShader(sd);
-    sd.entry = "ParticlePS";
-    sd.stage = rhi::ShaderStage::Pixel;
-    ps_ = res_->createShader(sd);
-    if (!vs_ || !ps_) {
-        AVER_ERROR("[Particles] the particle shaders failed to compile");
+    if (!device.caps().indirect) {
+        AVER_WARN("[Particles] init declined: the backend reports no instanced / indirect draw support");
+        res_ = nullptr;
+        dev_ = nullptr;
         return false;
     }
+    meshes_.init(res_);
 
-    if (!ensureCapacity(kInitialVertices, kInitialIndices)) return false;
-
-    // Best-effort initial build (see VoxiRenderer::init's identical two-step pattern): the real scene
-    // target's sample count and formats arrive through onRenderTargetsChanged, which the device calls
-    // before the first real frame; this just means the very first registration is never pipeline-less.
-    buildPipelines(device.sampleCount(), device.backbufferFormat(), device.depthFormat());
-
-    AVER_INFO("[Particles] ready");
+    // The unit quad every sprite and ribbon instance expands.
+    {
+        const f32 corners[8] = {-1, -1, 1, -1, 1, 1, -1, 1};
+        const u32 idx[6] = {0, 1, 2, 0, 2, 3};
+        rhi::BufferDesc vb;
+        vb.bytes = sizeof corners;
+        vb.kind = rhi::BufferKind::Upload;
+        vb.debugName = "Aver.Particles quad vb";
+        quadVb_ = res_->createBuffer(vb);
+        rhi::BufferDesc ib;
+        ib.bytes = sizeof idx;
+        ib.kind = rhi::BufferKind::Upload;
+        ib.debugName = "Aver.Particles quad ib";
+        quadIb_ = res_->createBuffer(ib);
+        rhi::BufferDesc db;
+        db.bytes = 4096;
+        db.kind = rhi::BufferKind::Upload;
+        db.debugName = "Aver.Particles dummy";
+        dummyBuf_ = res_->createBuffer(db);
+        if (!quadVb_ || !quadIb_ || !dummyBuf_ || !res_->writeBuffer(quadVb_, corners, sizeof corners) ||
+            !res_->writeBuffer(quadIb_, idx, sizeof idx)) {
+            AVER_ERROR("[Particles] the quad template could not be created");
+            shutdown();
+            return false;
+        }
+        std::vector<u8> zero(4096, 0);
+        res_->writeBuffer(dummyBuf_, zero.data(), zero.size());
+    }
+    // Valid descriptors for the slots a draw does not use (D3D12 tier 1 needs one in every declared slot).
+    {
+        const u8 white[4] = {255, 255, 255, 255};
+        const void* data[1] = {white};
+        rhi::TextureDesc td;
+        td.format = rhi::Format::RGBA8Unorm;
+        td.bind = rhi::ResourceBind::ShaderResource;
+        td.initialState = rhi::ResourceState::ShaderResource;
+        td.initialData = data;
+        td.initialDataCount = 1;
+        td.debugName = "Aver.Particles white";
+        whiteTex_ = res_->createTexture(td);
+        td.debugName = "Aver.Particles dummy 2d";
+        dummyTex2d_ = res_->createTexture(td);
+        td.dim = rhi::TextureDim::Tex3D;
+        td.depth = 1;
+        td.debugName = "Aver.Particles dummy 3d";
+        dummyTex3d_ = res_->createTexture(td);
+        if (!whiteTex_ || !dummyTex2d_ || !dummyTex3d_) {
+            AVER_ERROR("[Particles] the dummy textures could not be created");
+            shutdown();
+            return false;
+        }
+    }
+    if (!buildShaders()) {
+        shutdown();
+        return false;
+    }
+    if (gpuEnabled_) gpu_.init(device);
+    pipelineSampleCount_ = device.sampleCount();
+    pipelineColor_ = device.backbufferFormat();
+    pipelineDepth_ = device.depthFormat();
+    buildGiShader();
+    buildPipelines(pipelineSampleCount_, pipelineColor_, pipelineDepth_);
+    installGpuTier();
+    AVER_INFO("[Particles] ready ({} tier)", gpu_.usable() ? "CPU + GPU" : "CPU");
     return true;
 }
 
 void ParticleRenderer::shutdown() {
+    if (system_) system_->setGpuTier(nullptr);
+    gpu_.shutdown();
     if (res_) {
-        for (u32 i = 0; i < kFramesInFlight; ++i) { res_->destroyBuffer(vb_[i]); res_->destroyBuffer(ib_[i]); }
-        res_->destroyPipeline(premultPso_);
-        res_->destroyPipeline(additivePso_);
-        res_->destroyPipeline(giPremultPso_);
-        res_->destroyPipeline(giAdditivePso_);
-        res_->destroyBindingSet(giBindingSet_);
-        res_->destroyShader(vs_);
-        res_->destroyShader(ps_);
-        res_->destroyShader(giPs_);
+        destroyPipelines();
+        for (rhi::ShaderHandle& v : vs_) { if (v) res_->destroyShader(v); v = 0; }
+        if (ps_) res_->destroyShader(ps_);
+        if (giPs_) res_->destroyShader(giPs_);
+        ps_ = giPs_ = 0;
+        for (u32 f = 0; f < kFramesInFlight; ++f) {
+            for (rhi::BindingSetHandle s : sets_[f]) res_->destroyBindingSet(s);
+            sets_[f].clear();
+            for (rhi::BufferHandle* b : {&particleRing_[f], &orderRing_[f], &trailRing_[f]}) {
+                if (*b) res_->destroyBuffer(*b);
+                *b = 0;
+            }
+        }
+        for (rhi::BufferHandle* b : {&quadVb_, &quadIb_, &dummyBuf_}) {
+            if (*b) res_->destroyBuffer(*b);
+            *b = 0;
+        }
+        for (rhi::TextureHandle* t : {&whiteTex_, &dummyTex2d_, &dummyTex3d_}) {
+            if (*t) res_->destroyTexture(*t);
+            *t = 0;
+        }
     }
-    vb_[0] = vb_[1] = vb_[2] = 0;
-    ib_[0] = ib_[1] = ib_[2] = 0;
-    premultPso_ = additivePso_ = 0;
-    giPremultPso_ = giAdditivePso_ = 0;
-    giBindingSet_ = 0;
-    vs_ = ps_ = giPs_ = 0;
-    vbCapacity_ = ibCapacity_ = 0;
+    meshes_.shutdown();
+    particleCap_ = orderCap_ = trailCap_ = 0;
+    setCursor_ = 0;
     res_ = nullptr;
     dev_ = nullptr;
 }
 
-void ParticleRenderer::setGiSeam(const GiSeam& seam) {
-    giSeam_ = seam;
-    // Rebuild NOW, not on the next resize -- Voxi attaches before Particles in both composition
-    // roots (see GiSeam's own comment), so a seam installed right after init() must take effect on
-    // this same run's very first transparentPass, not wait for a window resize that may never come
-    // during a --frames capture.
-    if (dev_) buildPipelines(pipelineSampleCount_, pipelineColor_, pipelineDepth_);
+void ParticleRenderer::installGpuTier() {
+    if (system_) system_->setGpuTier(gpu_.usable() ? &gpu_ : nullptr);
 }
 
-bool ParticleRenderer::ensureCapacity(usize vertexCount, usize indexCount) {
-    const bool growV = vertexCount > vbCapacity_;
-    const bool growI = indexCount > ibCapacity_;
-    if (!growV && !growI) return true;
+void ParticleRenderer::setSystem(ParticleSystem* system) {
+    if (system_ && system_ != system) system_->setGpuTier(nullptr);
+    system_ = system;
+    installGpuTier();
+}
 
-    const usize newV = growV ? vertexCount : vbCapacity_;
-    const usize newI = growI ? indexCount : ibCapacity_;
-
-    for (u32 i = 0; i < kFramesInFlight; ++i) {
-        if (growV) {
-            res_->destroyBuffer(vb_[i]);
-            rhi::BufferDesc bd;
-            bd.bytes = static_cast<u64>(newV) * sizeof(ParticleVertex);
-            bd.kind = rhi::BufferKind::Upload;
-            bd.debugName = "Aver.Particles vertices";
-            vb_[i] = res_->createBuffer(bd);
-            if (!vb_[i]) { AVER_ERROR("[Particles] vertex buffer allocation failed"); return false; }
-        }
-        if (growI) {
-            res_->destroyBuffer(ib_[i]);
-            rhi::BufferDesc bd;
-            bd.bytes = static_cast<u64>(newI) * sizeof(u32);
-            bd.kind = rhi::BufferKind::Upload;
-            bd.debugName = "Aver.Particles indices";
-            ib_[i] = res_->createBuffer(bd);
-            if (!ib_[i]) { AVER_ERROR("[Particles] index buffer allocation failed"); return false; }
-        }
+void ParticleRenderer::setGpuEnabled(bool enabled) {
+    gpuEnabled_ = enabled;
+    if (!dev_) return;
+    if (!enabled && gpu_.usable()) {
+        if (system_) system_->setGpuTier(nullptr);
+        gpu_.shutdown();
+    } else if (enabled && !gpu_.usable()) {
+        gpu_.init(*dev_);
+        installGpuTier();
     }
-    vbCapacity_ = newV;
-    ibCapacity_ = newI;
+}
+
+// ------------------------------------------------------------------------------------------------ shaders and pipelines
+bool ParticleRenderer::buildShaders() {
+    const std::string src = rhi::shaderFile("particles.hlsl");
+    if (src.empty()) {
+        AVER_ERROR("[Particles] particles.hlsl was not found");
+        return false;
+    }
+    rhi::ShaderDesc sd;
+    sd.source = src.c_str();
+    sd.prelude = rhi::sharedShaderPrelude();   // gViewProj, gCamPos, the fog and sky helpers
+    sd.stage = rhi::ShaderStage::Vertex;
+    const char* entries[3] = {"ParticleSpriteVS", "ParticleRibbonVS", "ParticleMeshVS"};
+    for (int i = 0; i < 3; ++i) {
+        sd.entry = entries[i];
+        vs_[i] = res_->createShader(sd);
+    }
+    sd.entry = "ParticlePS";
+    sd.stage = rhi::ShaderStage::Pixel;
+    ps_ = res_->createShader(sd);
+    if (!vs_[0] || !vs_[1] || !vs_[2] || !ps_) {
+        AVER_ERROR("[Particles] the particle shaders failed to compile");
+        return false;
+    }
     return true;
 }
 
-bool ParticleRenderer::buildPipelines(u32 sampleCount, rhi::Format color, rhi::Format depth) {
-    if (!res_ || !vs_ || !ps_) return false;
+bool ParticleRenderer::buildGiShader() {
+    if (giPs_) { res_->destroyShader(giPs_); giPs_ = 0; }
+    if (!giSeam_.prepare || !res_) return false;
+    std::string giPrelude, giDefines;
+    if (!giSeam_.prepare(kGiSrvBase, kGiSamplerBase, rhi::kFeatureFrameConstantRegister, &giPrelude, &giDefines, giSeam_.user))
+        return false;   // "nothing available right now" is not an error: every particle draws without the GI term until a later rebuild
+    const std::string src = rhi::shaderFile("particles.hlsl");
+    const std::string prelude = std::string(rhi::sharedShaderPrelude()) + giPrelude;
+    const std::string defines = "AVER_PARTICLES_GI=1;" + giDefines;
+    rhi::ShaderDesc sd;
+    sd.source = src.c_str();
+    sd.prelude = prelude.c_str();
+    sd.defines = defines.c_str();
+    sd.entry = "ParticlePS";
+    sd.stage = rhi::ShaderStage::Pixel;
+    giPs_ = res_->createShader(sd);
+    if (!giPs_) AVER_WARN("[Particles] the GI pixel shader failed to build; lit emitters draw with the unshadowed sun and the sky");
+    else AVER_INFO("[Particles] GI sampling pixel shader ready");
+    return giPs_ != 0;
+}
 
-    res_->destroyPipeline(premultPso_);
-    res_->destroyPipeline(additivePso_);
-    premultPso_ = additivePso_ = 0;
-    // Torn down unconditionally too, even though only some callers end up rebuilding them below --
-    // stale handles from a PREVIOUS sample count/format must never survive into this frame's set,
-    // the same reasoning the two lines above already follow.
-    res_->destroyPipeline(giPremultPso_);
-    res_->destroyPipeline(giAdditivePso_);
-    res_->destroyBindingSet(giBindingSet_);
-    res_->destroyShader(giPs_);
-    giPremultPso_ = giAdditivePso_ = 0;
-    giBindingSet_ = 0;
-    giPs_ = 0;
+void ParticleRenderer::setGiSeam(const GiSeam& seam) {
+    giSeam_ = seam;
+    if (!dev_) return;
+    destroyPipelines();
+    buildGiShader();
+    buildPipelines(pipelineSampleCount_, pipelineColor_, pipelineDepth_);
+}
 
+void ParticleRenderer::destroyPipelines() {
+    if (res_)
+        for (auto& kv : pipelines_)
+            if (kv.second) res_->destroyPipeline(kv.second);
+    pipelines_.clear();
+}
+
+rhi::PipelineHandle ParticleRenderer::makePipeline(RenderKind kind, bool additive, bool gi) {
     rhi::GraphicsPipelineDesc gd;
-    gd.vs = vs_;
-    gd.ps = ps_;
+    gd.vs = vs_[static_cast<int>(kind)];
+    gd.ps = gi ? giPs_ : ps_;
+    if (kind == RenderKind::Mesh) {
+        // position(3) normal(3) uv(2), split across 2D + 1D formats: the RHI has no three-component float vertex format.
+        gd.vertexLayout.stride = 32;
+        gd.vertexLayout.attribCount = 5;
+        gd.vertexLayout.attribs[0] = {rhi::VertexSemantic::Position, 0, rhi::Format::RG32Float, 0};
+        gd.vertexLayout.attribs[1] = {rhi::VertexSemantic::Position, 1, rhi::Format::R32Float, 8};
+        gd.vertexLayout.attribs[2] = {rhi::VertexSemantic::Normal, 0, rhi::Format::RG32Float, 12};
+        gd.vertexLayout.attribs[3] = {rhi::VertexSemantic::Normal, 1, rhi::Format::R32Float, 20};
+        gd.vertexLayout.attribs[4] = {rhi::VertexSemantic::TexCoord, 0, rhi::Format::RG32Float, 24};
+    } else {
+        gd.vertexLayout.stride = 8;
+        gd.vertexLayout.attribCount = 1;
+        gd.vertexLayout.attribs[0] = {rhi::VertexSemantic::Position, 0, rhi::Format::RG32Float, 0};
+    }
+    // ONE table-0 shape for every pipeline: t0 particles, t1 order, t2 trail points, t3 texture, t4 / t5 the GI pair.
+    gd.layout.srvCount = kDrawSrvCount;
+    gd.layout.slotKindsDeclared = true;
+    gd.layout.srvKinds[0] = gd.layout.srvKinds[1] = gd.layout.srvKinds[2] = rhi::SlotKind::StructuredBuffer;
+    gd.layout.srvKinds[3] = rhi::SlotKind::Texture2D;
+    gd.layout.srvKinds[kGiSrvBase] = rhi::SlotKind::Texture3D;       // the GI volume
+    gd.layout.srvKinds[kGiSrvBase + 1] = rhi::SlotKind::Texture2D;   // the shadow map
+    gd.layout.samplerCount = kGiSamplerBase + 2;
+    gd.layout.samplers[0].filter = rhi::Filter::Linear;
+    gd.layout.samplers[0].address = rhi::AddressMode::Clamp;
+    gd.layout.samplers[kGiSamplerBase + 0].filter = rhi::Filter::Linear;
+    gd.layout.samplers[kGiSamplerBase + 0].address = rhi::AddressMode::Clamp;
+    gd.layout.samplers[kGiSamplerBase + 1].filter = rhi::Filter::ComparisonLinear;
+    gd.layout.samplers[kGiSamplerBase + 1].address = rhi::AddressMode::Clamp;
+    gd.layout.samplers[kGiSamplerBase + 1].compare = rhi::CompareOp::LessEqual;
+    gd.layout.constantDwords[kSimConstantRegister] = 0;                    // b3: the per-draw block, a root CBV
+    gd.layout.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;     // b4: the GI frame constants, a root CBV
 
-    // Split across POSITION0 (xy) + POSITION1 (z): see ParticleVertex's own comment and
-    // ParticleShaders.hpp's VSIn for why there is no single three-float attribute to declare here.
-    gd.vertexLayout.stride = sizeof(ParticleVertex);
-    gd.vertexLayout.attribCount = 4;
-    gd.vertexLayout.attribs[0] = {rhi::VertexSemantic::Position, 0, rhi::Format::RG32Float, 0};
-    gd.vertexLayout.attribs[1] = {rhi::VertexSemantic::Position, 1, rhi::Format::R32Float, 8};
-    gd.vertexLayout.attribs[2] = {rhi::VertexSemantic::TexCoord, 0, rhi::Format::RG32Float, 12};
-    gd.vertexLayout.attribs[3] = {rhi::VertexSemantic::Color, 0, rhi::Format::RGBA8Unorm, 20};
-    static_assert(offsetof(ParticleVertex, uv) == 12, "TEXCOORD0 is declared at byte 12 above");
-    static_assert(offsetof(ParticleVertex, color) == 20, "COLOR0 is declared at byte 20 above");
-
-    // DEPTH-TESTED, DEPTH-WRITE OFF: DECIDED 1's whole point, and the exact contract
-    // IRenderFeature::transparentPass documents -- see D3D12Device::endFrame's own comment on why
-    // write-off is load-bearing for back-to-front blended geometry.
+    // DEPTH-TESTED, DEPTH-WRITE OFF: DECIDED 1's whole point, and the exact contract IRenderFeature::transparentPass documents.
     gd.depth.test = true;
     gd.depth.write = false;
-    // A billboard always faces the camera; there is no back face to discard.
     gd.cull = rhi::CullMode::None;
-
     gd.renderTargetCount = 1;
-    gd.renderTargets[0] = color;
-    gd.depthFormat = depth;
-    // MSAA IS BAKED INTO THE PIPELINE AT CREATION (DECIDED 1): the scene target's sample count, not a
-    // hardcoded 1, and rebuilt here whenever onRenderTargetsChanged reports it changed.
-    gd.sampleCount = sampleCount;
+    gd.renderTargets[0] = pipelineColor_;
+    gd.depthFormat = pipelineDepth_;
+    // MSAA IS BAKED INTO THE PIPELINE AT CREATION: the scene target's sample count, rebuilt whenever it changes.
+    gd.sampleCount = pipelineSampleCount_;
+    gd.blend = additive ? rhi::BlendMode::Additive : rhi::BlendMode::PremultipliedAlpha;
+    return res_->createGraphicsPipeline(gd);
+}
 
-    gd.blend = rhi::BlendMode::PremultipliedAlpha;
-    premultPso_ = res_->createGraphicsPipeline(gd);
-    gd.blend = rhi::BlendMode::Additive;
-    additivePso_ = res_->createGraphicsPipeline(gd);
+rhi::PipelineHandle ParticleRenderer::pipelineFor(RenderKind kind, bool additive, bool wantGi) {
+    const bool gi = wantGi && giPs_ != 0;
+    const u32 key = (static_cast<u32>(kind) << 4) | (additive ? 2u : 0u) | (gi ? 1u : 0u);
+    auto it = pipelines_.find(key);
+    if (it != pipelines_.end()) return it->second;
+    const rhi::PipelineHandle p = makePipeline(kind, additive, gi);
+    if (!p) AVER_ERROR("[Particles] pipeline build failed (kind {}, {}, {})", static_cast<int>(kind), additive ? "additive" : "premultiplied", gi ? "GI" : "plain");
+    else if (kind != RenderKind::Sprite || gi) AVER_INFO("[Particles] pipeline built (kind {}, {}, {})", static_cast<int>(kind), additive ? "additive" : "premultiplied", gi ? "GI" : "plain");
+    pipelines_[key] = p;
+    return p;
+}
 
-    // ---- the GI-sampling twins (DECIDED 4) ----
-    // Only attempted while a seam is installed (see GiSeam's own comment) -- with none, giSeam_.prepare
-    // is null and every particle draws through premultPso_/additivePso_ exactly as it always has.
-    if (giSeam_.prepare) {
-        std::string giPrelude, giDefines;
-        if (giSeam_.prepare(kGiSrvBase, kGiSamplerBase, rhi::kFeatureFrameConstantRegister,
-                            &giPrelude, &giDefines, giSeam_.user)) {
-            rhi::ShaderDesc gsd;
-            gsd.source = rhi::shaderFile("particles.hlsl").c_str();
-            const std::string prelude = std::string(rhi::sharedShaderPrelude()) + giPrelude;
-            gsd.prelude = prelude.c_str();
-            gsd.entry = "ParticlePS";
-            gsd.stage = rhi::ShaderStage::Pixel;
-            // AVER_PARTICLES_GI=1 is what the #if in ParticlePS (ParticleShaders.hpp) branches on --
-            // everything past it is whatever giDefines asked for (the register placement giShaderDefines()
-            // itself computed against the SAME srvBase/samplerBase/cbRegister passed to prepare() above).
-            const std::string defines = "AVER_PARTICLES_GI=1;" + giDefines;
-            gsd.defines = defines.c_str();
-            giPs_ = res_->createShader(gsd);
-
-            if (giPs_) {
-                rhi::BindingSetDesc bsd;
-                bsd.srvCount = 2;
-                bsd.srvKinds[kGiSrvBase + 0] = rhi::SlotKind::Texture3D;   // the GI volume
-                bsd.srvKinds[kGiSrvBase + 1] = rhi::SlotKind::Texture2D;   // the shadow map (unread by
-                                                                            // coneTracedIndirect, reserved
-                                                                            // to match giShaderDefines()'s
-                                                                            // own 2-slot shape)
-                bsd.srvBaseRegister = kGiSrvBase;
-                giBindingSet_ = res_->createBindingSet(bsd);
-            }
-
-            if (giPs_ && giBindingSet_) {
-                rhi::GraphicsPipelineDesc gid = gd;   // same vertex layout, depth state, cull, targets
-                gid.vs = vs_;                          // the GI variant never recompiles the vertex shader
-                gid.ps = giPs_;
-                gid.layout.srvCount = 2;
-                gid.layout.samplerCount = kGiSamplerBase + 2;
-                // The SAME filter/address/compare values voxi::VoxiRenderer's own giSamplers() gives its
-                // s0/s1 -- see sandbox/src/SandboxApp.cpp's ensureLodMeshPipeline, the other caller of
-                // this exact shape, for where that precedent was checked.
-                gid.layout.samplers[kGiSamplerBase + 0].filter  = rhi::Filter::Linear;
-                gid.layout.samplers[kGiSamplerBase + 0].address = rhi::AddressMode::Clamp;
-                gid.layout.samplers[kGiSamplerBase + 1].filter  = rhi::Filter::ComparisonLinear;
-                gid.layout.samplers[kGiSamplerBase + 1].address = rhi::AddressMode::Clamp;
-                gid.layout.samplers[kGiSamplerBase + 1].compare = rhi::CompareOp::LessEqual;
-                // A root CBV (zero dwords), not root constants -- see PipelineLayout::constantDwords'
-                // own comment. Bound every GI draw via ctx.setConstantBuffer, never setConstants.
-                gid.layout.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
-
-                gid.blend = rhi::BlendMode::PremultipliedAlpha;
-                giPremultPso_ = res_->createGraphicsPipeline(gid);
-                gid.blend = rhi::BlendMode::Additive;
-                giAdditivePso_ = res_->createGraphicsPipeline(gid);
-            }
-
-            if (!giPs_ || !giBindingSet_ || !giPremultPso_ || !giAdditivePso_) {
-                AVER_WARN("[Particles] GI pipeline build failed; effects with receivesGI=true draw unlit this run");
-                res_->destroyPipeline(giPremultPso_); res_->destroyPipeline(giAdditivePso_);
-                res_->destroyBindingSet(giBindingSet_); res_->destroyShader(giPs_);
-                giPremultPso_ = giAdditivePso_ = 0; giBindingSet_ = 0; giPs_ = 0;
-            } else {
-                AVER_INFO("[Particles] GI sampling pipelines ready");
-            }
-        }
-        // prepare() returning false ("nothing available right now") is not an error: it is exactly
-        // what a Voxi that has not finished init() yet, or hasn't attached at all, reports. Every
-        // particle draws unlit until a later rebuild finds it ready.
-    }
-
+bool ParticleRenderer::buildPipelines(u32 sampleCount, rhi::Format color, rhi::Format depth) {
     pipelineSampleCount_ = sampleCount;
     pipelineColor_ = color;
     pipelineDepth_ = depth;
-
-    const bool ok = premultPso_ != 0 && additivePso_ != 0;
-    if (ok) {
-        AVER_INFO("[Particles] pipelines (re)built: {}x MSAA", sampleCount);
-    } else {
-        AVER_ERROR("[Particles] pipeline build failed at {}x MSAA", sampleCount);
+    if (!res_ || !vs_[0] || !ps_) return false;
+    // The common ones eagerly; ribbon, mesh and GI variants on first use.
+    bool ok = pipelineFor(RenderKind::Sprite, false, false) != 0;
+    ok = pipelineFor(RenderKind::Sprite, true, false) != 0 && ok;
+    if (giPs_) {
+        pipelineFor(RenderKind::Sprite, false, true);
+        pipelineFor(RenderKind::Sprite, true, true);
     }
+    if (ok) AVER_INFO("[Particles] pipelines (re)built: {}x MSAA", sampleCount);
     return ok;
 }
 
-void ParticleRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
-                                              u32 width, u32 height) {
+void ParticleRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth, u32 width, u32 height) {
     (void)width; (void)height;
-    if (sampleCount == pipelineSampleCount_ && color == pipelineColor_ && depth == pipelineDepth_) return;
+    if (sampleCount == pipelineSampleCount_ && color == pipelineColor_ && depth == pipelineDepth_ && !pipelines_.empty()) return;
+    destroyPipelines();
     buildPipelines(sampleCount, color, depth);
 }
 
-rhi::PipelineHandle ParticleRenderer::pipelineFor(rhi::BlendMode blend, bool wantsGi) const {
-    // Two pipelines per GI state: ParticlePS always premultiplies rgb by alpha (ParticleShaders.hpp),
-    // so of rhi::BlendMode's four values only PremultipliedAlpha and Additive compose correctly
-    // against that output. Opaque/AlphaBlend are still valid DATA on an effect -- rhi::BlendMode is
-    // reused wholesale, nothing here rejects them -- they simply draw through the premultiplied
-    // pipeline rather than double-applying alpha against an already-premultiplied source.
-    //
-    // wantsGi FALLS BACK TO THE ORDINARY PIPELINE, silently, whenever the GI variant does not exist
-    // -- no seam installed, prepare() said "not ready", or the build failed (buildPipelines already
-    // logged why). This is the enforcement GiSeam's own header comment promises: an effect asking for
-    // GI it cannot get still draws, unlit, rather than not drawing at all.
-    if (wantsGi) {
-        if (blend == rhi::BlendMode::Additive && giAdditivePso_) return giAdditivePso_;
-        if (blend != rhi::BlendMode::Additive && giPremultPso_)  return giPremultPso_;
-    }
-    return blend == rhi::BlendMode::Additive ? additivePso_ : premultPso_;
+// ------------------------------------------------------------------------------------------------ rings and sets
+bool ParticleRenderer::ensureRings(usize particles, usize orders, usize trails) {
+    const auto grow = [&](rhi::BufferHandle (&ring)[kFramesInFlight], usize& cap, usize need, usize stride, const char* name) {
+        if (need <= cap && ring[0]) return true;
+        const usize newCap = std::max<usize>({need, cap * 2, 4096});
+        for (u32 f = 0; f < kFramesInFlight; ++f) {
+            if (ring[f]) res_->destroyBuffer(ring[f]);
+            rhi::BufferDesc bd;
+            bd.bytes = static_cast<u64>(newCap) * stride;
+            bd.kind = rhi::BufferKind::Upload;
+            bd.debugName = name;
+            ring[f] = res_->createBuffer(bd);
+            if (!ring[f]) { AVER_ERROR("[Particles] {} allocation failed", name); return false; }
+        }
+        cap = newCap;
+        return true;
+    };
+    return grow(particleRing_, particleCap_, particles, sizeof(Particle), "Aver.Particles particle ring") &&
+           grow(orderRing_, orderCap_, orders, sizeof(u32), "Aver.Particles order ring") &&
+           grow(trailRing_, trailCap_, trails, 16, "Aver.Particles trail ring");
 }
 
+rhi::BindingSetHandle ParticleRenderer::acquireSet() {
+    std::vector<rhi::BindingSetHandle>& pool = sets_[frame_];
+    if (setCursor_ < pool.size()) return pool[setCursor_++];
+    rhi::BindingSetDesc bd;
+    bd.srvCount = kDrawSrvCount;
+    bd.srvKinds[0] = bd.srvKinds[1] = bd.srvKinds[2] = rhi::SlotKind::StructuredBuffer;
+    bd.srvKinds[3] = rhi::SlotKind::Texture2D;
+    bd.srvKinds[kGiSrvBase] = rhi::SlotKind::Texture3D;
+    bd.srvKinds[kGiSrvBase + 1] = rhi::SlotKind::Texture2D;
+    const rhi::BindingSetHandle s = res_->createBindingSet(bd);
+    if (!s) return 0;
+    res_->setSrv(s, 3, whiteTex_);
+    res_->setSrv(s, kGiSrvBase, dummyTex3d_);
+    res_->setSrv(s, kGiSrvBase + 1, dummyTex2d_);
+    pool.push_back(s);
+    ++setCursor_;
+    return s;
+}
+
+// ------------------------------------------------------------------------------------------------ prePass
+void ParticleRenderer::prePass(rhi::IRenderContext& ctx) {
+    if (!system_ || !dev_ || !gpu_.usable()) return;
+    std::vector<GpuJob>& jobs = system_->gpuJobs();
+    if (jobs.empty()) return;
+
+    ParticleGpu::View view;
+    f32 vp[16] = {}, ivp[16] = {}, cp[3] = {};
+    if (dev_->camera(vp, ivp, cp)) {
+        std::memcpy(view.viewProj, vp, sizeof vp);
+        view.camPos[0] = cp[0]; view.camPos[1] = cp[1]; view.camPos[2] = cp[2];
+        view.valid = true;
+    }
+    const Vec3 camPos{cp[0], cp[1], cp[2]};
+    for (GpuJob& j : jobs) {
+        j.visible = true;
+        if (!view.valid) continue;
+        const Vec3 c{j.center[0], j.center[1], j.center[2]};
+        if (j.cullDistance > 0.0f && dist(c, camPos) > j.cullDistance) j.visible = false;
+        else if (j.boundsRadius > 0.0f && !sphereInFrustum(vp, c, j.boundsRadius)) j.visible = false;
+    }
+    system_->forEachInstance([&](const InstanceView& v) {
+        if (v.gpuHandle == 0 || !v.effect || v.effect->render != RenderKind::Mesh) return;
+        if (const ParticleMeshCache::Entry* e = meshes_.get(v.effect->meshId, meshFn_, meshUser_)) gpu_.setIndexCount(v.gpuHandle, e->indexCount);
+    });
+    gpu_.record(ctx, jobs, view);
+    jobs.clear();
+}
+
+// ------------------------------------------------------------------------------------------------ transparentPass
 void ParticleRenderer::transparentPass(rhi::IRenderContext& ctx) {
     if (!system_ || !res_ || !dev_) return;
-    if (!premultPso_ && !additivePso_) return;
+    Camera cam;
+    if (!dev_->camera(cam.viewProj, cam.invViewProjRel, cam.pos)) return;
+    views_.clear();
+    bool anyLit = false;
+    system_->forEachInstance([&](const InstanceView& v) {
+        views_.push_back(v);
+        anyLit = anyLit || (v.effect && effectiveLighting(*v.effect) == Lighting::Lit);
+    });
+    if (views_.empty()) return;
+    const std::vector<scene::WorldLight>* lights = nullptr;
+    if (anyLit) {
+        lightScratch_.clear();
+        scene::gatherLights(scene::World::instance(), lightScratch_);
+        lights = &lightScratch_;
+    }
+    drawViews(ctx, views_, cam, lights);
+}
 
-    f32 viewProj[16], invViewProjRel[16], camPosArr[3];
-    if (!dev_->camera(viewProj, invViewProjRel, camPosArr)) return;
-    const Vec3 camPos{camPosArr[0], camPosArr[1], camPosArr[2]};
+// ------------------------------------------------------------------------------------------------ drawViews
+void ParticleRenderer::drawViews(rhi::IRenderContext& ctx, const std::vector<InstanceView>& views, const Camera& cam,
+                                 const std::vector<scene::WorldLight>* lights) {
+    drawStats_ = DrawStats{};
+    if (!res_ || views.empty()) return;
 
     Vec3 right, up;
-    cameraBasis(invViewProjRel, right, up);
+    cameraBasis(cam.invViewProjRel, right, up);
     if (right.sizeSquared() < 0.5f || up.sizeSquared() < 0.5f) return;   // a degenerate camera this frame
+    const Vec3 camPos{cam.pos[0], cam.pos[1], cam.pos[2]};
+    const f32 viewRow[4] = {cam.viewProj[3], cam.viewProj[7], cam.viewProj[11], cam.viewProj[15]};
 
-    verts_.clear();
-    idx_.clear();
-    draws_.clear();
-
-    system_->forEachEmitter([&](const EmitterView& ev) {
-        if (!ev.effect || !ev.particles || ev.particles->empty()) return;
-        const ParticleEffect& fx = *ev.effect;
-
-        // Back-to-front WITHIN this emitter (DECIDED). See ParticleSystem::forEachEmitter's own
-        // comment for what is NOT sorted: the order emitters themselves draw in.
-        sortScratch_.clear();
-        sortScratch_.reserve(ev.particles->size());
-        for (u32 i = 0; i < ev.particles->size(); ++i) sortScratch_.push_back(i);
-        std::sort(sortScratch_.begin(), sortScratch_.end(), [&](u32 a, u32 b) {
-            return distSquared((*ev.particles)[a].position, camPos) >
-                   distSquared((*ev.particles)[b].position, camPos);
-        });
-
-        const u32 indexOffset = static_cast<u32>(idx_.size());
-        for (u32 pi : sortScratch_) {
-            const Particle& p = (*ev.particles)[pi];
-            const f32 t = p.lifetime > 0.0f
-                ? std::clamp(p.age / p.lifetime, 0.0f, 1.0f) : 1.0f;
-            const f32 halfSize = lerpf(fx.sizeStart, fx.sizeEnd, t) * 0.5f;
-            f32 col[4];
-            for (int k = 0; k < 4; ++k) col[k] = lerpf(fx.colorStart[k], fx.colorEnd[k], t);
-            const u32 packed = packPremultiplied(col);
-
-            const Vec3 rW = right * halfSize, uW = up * halfSize;
-            const Vec3 corners[4] = {
-                p.position - rW - uW, p.position + rW - uW,
-                p.position + rW + uW, p.position - rW + uW,
-            };
-            const f32 uvs[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
-            const u32 base = static_cast<u32>(verts_.size());
-            for (int c = 0; c < 4; ++c) {
-                ParticleVertex v;
-                v.pos[0] = corners[c].x; v.pos[1] = corners[c].y; v.pos[2] = corners[c].z;
-                v.uv[0] = uvs[c][0]; v.uv[1] = uvs[c][1];
-                v.color = packed;
-                verts_.push_back(v);
-            }
-            const u32 quad[6] = {base, base + 1, base + 2, base, base + 2, base + 3};
-            idx_.insert(idx_.end(), quad, quad + 6);
+    struct Item {
+        const InstanceView* v;
+        f32 dist;
+        ParticleGpu::DrawBuffers gb;
+        bool gpu;
+        u32 n;            // CPU particles to upload
+        u32 ring;         // CPU trail points per particle
+        bool sorted;
+    };
+    std::vector<Item> items;
+    items.reserve(views.size());
+    usize needParticles = 0, needOrders = 0, needTrails = 0;
+    for (const InstanceView& v : views) {
+        const ParticleEffect* fx = v.effect;
+        if (!fx) continue;
+        Item it{};
+        it.v = &v;
+        if (v.gpuHandle != 0) {
+            if (!gpu_.drawBuffers(v.gpuHandle, it.gb)) continue;
+            it.gpu = true;
+        } else {
+            if (!v.particles || v.particles->empty()) continue;
+            if (v.linked && v.aliveHint == 0) continue;
+            it.n = static_cast<u32>(v.particles->size());
+            it.ring = (fx->render == RenderKind::Ribbon && !v.linked && v.trail) ? v.trailRing : 0u;
+            it.sorted = sortWanted(*fx) && it.n > 1;
+            needParticles += alignUp(it.n, 4u);
+            if (it.sorted) needOrders += alignUp(it.n, 64u);
+            if (it.ring) needTrails += alignUp(it.n * it.ring, 16u);
         }
+        const f32 d = dist(v.center, camPos);
+        if (fx->cullDistanceCm > 0.0f && d > fx->cullDistanceCm) { ++drawStats_.culled; continue; }
+        if (fx->boundsRadiusCm > 0.0f && !sphereInFrustum(cam.viewProj, v.center, fx->boundsRadiusCm)) { ++drawStats_.culled; continue; }
+        it.dist = d;
+        items.push_back(it);
+    }
+    if (items.empty()) return;
+    // Across emitters: back to front by the bounds centre, ties by authored order (stable). Particles of different emitters are
+    // never interleaved.
+    std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) { return a.dist > b.dist; });
 
-        draws_.push_back({indexOffset, static_cast<u32>(idx_.size()) - indexOffset,
-                          pipelineFor(fx.blend, fx.receivesGI)});
-    });
-
-    if (draws_.empty()) return;
-    if (!ensureCapacity(verts_.size(), idx_.size())) return;
-
-    // Whether ANY draw this frame actually landed on a GI pipeline -- gates the one seam call below.
-    // Checked against the pipeline handles themselves, not ParticleEffect::receivesGI again: an
-    // effect can ASK for GI and still end up on the ordinary pipeline (see pipelineFor's own
-    // fallback), and only the pipeline that was actually picked says whether the GI binding set and
-    // frame constants are about to be needed this frame.
-    bool anyGi = false;
-    for (const DrawCmd& d : draws_)
-        if (d.pipeline == giPremultPso_ || d.pipeline == giAdditivePso_) { anyGi = true; break; }
-    const void* giCbData = nullptr;
-    u32 giCbBytes = 0;
-    if (anyGi && giSeam_.bind)
-        giSeam_.bind(*res_, giBindingSet_, kGiSrvBase, &giCbData, &giCbBytes, giSeam_.user);
-
-    // Rotated here, not per-emitter, so several emitters in one frame share one ring slot -- ONE draw
-    // per emitter (DECIDED), not one buffer generation per emitter.
     frame_ = (frame_ + 1) % kFramesInFlight;
-    const rhi::BufferHandle vb = vb_[frame_], ib = ib_[frame_];
-    if (!vb || !ib) return;
-    if (!res_->writeBuffer(vb, verts_.data(), verts_.size() * sizeof(ParticleVertex))) return;
-    if (!res_->writeBuffer(ib, idx_.data(), idx_.size() * sizeof(u32))) return;
+    setCursor_ = 0;
+    if (!ensureRings(needParticles + 4, needOrders + 64, needTrails + 16)) return;
+    usize particleCursor = 0, orderCursor = 0, trailCursor = 0;
 
-    // Viewport, scissor and the scene colour+depth targets are ALL already set -- the transparentPass
-    // contract (RHIResources.hpp) -- so nothing here touches any of them; only the pipeline is ours.
     ctx.pushMarker("Aver.Particles");
-    ctx.setVertexBuffer(vb, sizeof(ParticleVertex));
-    ctx.setIndexBuffer(ib, rhi::Format::R32Uint);
     rhi::PipelineHandle bound = 0;
-    for (const DrawCmd& d : draws_) {
-        if (!d.pipeline) continue;
-        if (d.pipeline != bound) {
-            ctx.setPipeline(d.pipeline);
-            bound = d.pipeline;
-            // A GI pipeline's root signature declares table 0 and the b(kFeatureFrameConstantRegister)
-            // CBV that the ordinary pipelines do not -- D3D12 requires every root parameter a NEWLY
-            // bound root signature declares to be set again, so this fires every time `bound` becomes
-            // a GI pipeline, not once per frame. Cheap (a root CBV pointer set, per
-            // VoxiRenderer::bindGiResources' own precedent) and only reached at all when anyGi (above)
-            // already found at least one GI draw this frame.
-            if (d.pipeline == giPremultPso_ || d.pipeline == giAdditivePso_) {
-                ctx.setBindingSet(giBindingSet_, 0);
-                if (giCbData) ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, giCbData, giCbBytes);
-            }
+    for (Item& it : items) {
+        const InstanceView& v = *it.v;
+        const ParticleEffect& fx = *v.effect;
+        const bool linked = v.linked;
+
+        // ---- the mesh, the texture, the pipeline ----
+        const ParticleMeshCache::Entry* mesh = nullptr;
+        if (fx.render == RenderKind::Mesh) {
+            mesh = meshes_.get(fx.meshId, meshFn_, meshUser_);
+            if (!mesh) continue;
         }
-        ctx.drawIndexed(d.indexCount, d.indexOffset, 0);
+        const rhi::TextureHandle tex = (fx.textureId != 0 && textureFn_) ? textureFn_(fx.textureId, textureUser_) : 0;
+        const Lighting lighting = effectiveLighting(fx);
+        const bool additive = fx.blend == rhi::BlendMode::Additive;
+        const rhi::PipelineHandle pso = pipelineFor(fx.render, additive, lighting != Lighting::Unlit);
+        if (!pso) continue;
+        const bool giPipeline = lighting != Lighting::Unlit && giPs_ != 0;
+
+        // ---- buffers ----
+        rhi::BindingSetHandle set = acquireSet();
+        if (!set) continue;
+        u32 instanceCount = 0;
+        bool useOrder = false;
+        if (it.gpu) {
+            res_->setSrvBuffer(set, 0, it.gb.particles, sizeof(Particle), it.gb.particleCount, it.gb.particleFirst);
+            res_->setSrvBuffer(set, 1, it.gb.order, 4, it.gb.orderCount, it.gb.orderFirst);
+            res_->setSrvBuffer(set, 2, it.gb.trail, 16, it.gb.trailCount, it.gb.trailFirst);
+            useOrder = !it.gb.linked;
+        } else {
+            const std::vector<Particle>& ps = *v.particles;
+            particleCursor = alignUp(static_cast<u32>(particleCursor), 4u);
+            const u32 pFirst = static_cast<u32>(particleCursor);
+            if (!res_->writeBuffer(particleRing_[frame_], ps.data(), static_cast<u64>(it.n) * sizeof(Particle), static_cast<u64>(pFirst) * sizeof(Particle))) continue;
+            particleCursor += it.n;
+            res_->setSrvBuffer(set, 0, particleRing_[frame_], sizeof(Particle), it.n, pFirst);
+
+            if (it.sorted) {
+                orderScratch_.resize(it.n);
+                depthScratch_.resize(it.n);
+                for (u32 i = 0; i < it.n; ++i) {
+                    const Vec3& p = ps[i].position;
+                    depthScratch_[i] = p.x * viewRow[0] + p.y * viewRow[1] + p.z * viewRow[2] + viewRow[3];
+                    orderScratch_[i] = i;
+                }
+                std::sort(orderScratch_.begin(), orderScratch_.end(), [&](u32 a, u32 b) {
+                    return depthScratch_[a] > depthScratch_[b] || (depthScratch_[a] == depthScratch_[b] && a < b);
+                });
+                orderCursor = alignUp(static_cast<u32>(orderCursor), 64u);
+                const u32 oFirst = static_cast<u32>(orderCursor);
+                if (!res_->writeBuffer(orderRing_[frame_], orderScratch_.data(), static_cast<u64>(it.n) * 4u, static_cast<u64>(oFirst) * 4u)) continue;
+                orderCursor += it.n;
+                res_->setSrvBuffer(set, 1, orderRing_[frame_], 4, it.n, oFirst);
+                useOrder = true;
+            } else {
+                res_->setSrvBuffer(set, 1, dummyBuf_, 4, 1024, 0);
+            }
+            if (it.ring) {
+                trailCursor = alignUp(static_cast<u32>(trailCursor), 16u);
+                const u32 tFirst = static_cast<u32>(trailCursor);
+                const u32 tCount = it.n * it.ring;
+                if (v.trail->size() < tCount ||
+                    !res_->writeBuffer(trailRing_[frame_], v.trail->data(), static_cast<u64>(tCount) * 16u, static_cast<u64>(tFirst) * 16u)) continue;
+                trailCursor += tCount;
+                res_->setSrvBuffer(set, 2, trailRing_[frame_], 16, tCount, tFirst);
+            } else {
+                res_->setSrvBuffer(set, 2, dummyBuf_, 16, 256, 0);
+            }
+            instanceCount = fx.render == RenderKind::Ribbon ? (linked ? it.n : it.n * it.ring) : it.n;
+        }
+        res_->setSrv(set, 3, tex ? tex : whiteTex_);
+
+        // ---- the per-draw block ----
+        ParticleDrawCB cb{};
+        std::memcpy(cb.viewProj, cam.viewProj, sizeof cb.viewProj);
+        setVec4(cb.eye, camPos.x, camPos.y, camPos.z, 0.0f);
+        setVec4(cb.camRight, right.x, right.y, right.z, static_cast<f32>(fx.align));
+        setVec4(cb.camUp, up.x, up.y, up.z, fx.stretch);
+        const Vec3 ax = fx.alignAxis.getSafeNormal();
+        setVec4(cb.axis, ax.x, ax.y, ax.z, useOrder ? 1.0f : 0.0f);
+        setVec4(cb.size, fx.sizeStart, fx.sizeEnd, static_cast<f32>(fx.sizeCurve.n >= 2 ? fx.sizeCurve.n : 0),
+                mesh ? 1.0f / mesh->diameter : 1.0f);
+        for (int k = 0; k < 4; ++k) {
+            cb.sizeT[k] = fx.sizeCurve.t[k];
+            cb.sizeV[k] = fx.sizeCurve.v[k][0];
+            cb.colT[k] = fx.colorCurve.t[k];
+            for (int c = 0; c < 4; ++c) cb.colV[k][c] = fx.colorCurve.v[k][c];
+        }
+        for (int c = 0; c < 4; ++c) { cb.colA[c] = fx.colorStart[c]; cb.colB[c] = fx.colorEnd[c]; }
+        setVec4(cb.subuv, std::max<f32>(fx.subuvCols, 1), std::max<f32>(fx.subuvRows, 1), std::max<f32>(fx.subuvFrames, 1), fx.subuvFps);
+        setVec4(cb.flags, tex ? 1.0f : 0.0f, fx.subuvBlend ? 1.0f : 0.0f, fx.fog ? 1.0f : 0.0f, static_cast<f32>(static_cast<int>(lighting)));
+        const u32 ring = it.gpu ? it.gb.trailRing : it.ring;
+        setVec4(cb.trail, static_cast<f32>(ring), fx.trailFade, linked ? static_cast<f32>(it.gpu ? it.gb.capacity : it.n) : 0.0f, 0.0f);
+        setVec4(cb.misc, additive ? 1.0f : 0.0f, static_cast<f32>(fx.meshOrient), static_cast<f32>(fx.colorCurve.n >= 2 ? fx.colorCurve.n : 0),
+                static_cast<f32>(static_cast<int>(fx.render)));
+        if (lighting == Lighting::Lit && lights) selectParticleLights(*lights, v.center, fx.boundsRadiusCm, cb.lights);
+
+        // ---- the GI term ----
+        const void* giData = nullptr;
+        u32 giBytes = 0;
+        if (giPipeline && giSeam_.bind) giSeam_.bind(*res_, set, kGiSrvBase, &giData, &giBytes, giSeam_.user);
+
+        // ---- record ----
+        if (pso != bound) { ctx.setPipeline(pso); bound = pso; }
+        ctx.setBindingSet(set, 0);
+        ctx.setConstantBuffer(kSimConstantRegister, &cb, static_cast<u32>(sizeof cb));
+        if (giPipeline && giData) ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, giData, giBytes);
+        if (mesh) {
+            ctx.setVertexBuffer(mesh->vb, 32);
+            ctx.setIndexBuffer(mesh->ib, rhi::Format::R32Uint);
+        } else {
+            ctx.setVertexBuffer(quadVb_, 8);
+            ctx.setIndexBuffer(quadIb_, rhi::Format::R32Uint);
+        }
+        if (it.gpu) {
+            ctx.drawIndexedIndirect(it.gb.args, it.gb.argsOffset);
+            ++drawStats_.gpuDraws;
+        } else {
+            ctx.drawIndexedInstanced(mesh ? mesh->indexCount : 6u, instanceCount, 0, 0, 0);
+            drawStats_.cpuParticles += it.n;
+        }
+        ++drawStats_.draws;
     }
     ctx.popMarker();
 }

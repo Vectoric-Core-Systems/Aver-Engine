@@ -1,29 +1,37 @@
-// The HLSL for ParticleRenderer's one draw shape: a camera-facing quad, already positioned in world
-// space by the CPU (ParticleRenderer::transparentPass bakes each corner from the particle's centre
-// plus the camera's own right/up axes -- see that file's cameraBasis() for why that is exact). The
-// vertex shader therefore only has to project; no billboard math happens on the GPU at all.
+// The HLSL for the particle module is FILES, deployed beside the executable (cmake aver_deploy_shaders):
+//   particles.hlsl         the draw shaders: ParticleSpriteVS / ParticleRibbonVS / ParticleMeshVS and ParticlePS
+//   particles_common.hlsli the RNG, noise, shape / cone sampling and the 13 modules (shared by the two compute files)
+//   particles_sim.hlsl     the GPU simulation kernels (CSInit, CSBegin, CSSpawn, CSArgsUpdate, CSUpdate, CSFinish, CSProbe)
+//   particles_sort.hlsl    the bitonic sort kernels
 //
-// UNLIT BY DEFAULT. Every particle this pass draws is exactly its own authored colour,
-// srgb-to-linear-corrected nowhere and shaded by nothing -- honest about what it is rather than
-// pretending to a lighting model it does not have. DECIDED 4 (sampling the Voxi GI volume) adds
-// EXACTLY ONE optional multiplicative term on top of that, gated at compile time by
-// AVER_PARTICLES_GI: with it undefined (no GI seam installed -- see ParticleRenderer::GiSeam),
-// ParticleVS/ParticlePS below compile and behave bit-for-bit as they did before this slice.
+// This header only holds the constants the C++ side needs to agree with them on.
+//
+// The graphics shaders are compiled as rhi::sharedShaderPrelude() + (with a GI seam installed) Voxi's GI prelude + the file.
+// STRUCT NAMES ARE PREFIXED (PVSIn / PVSOut), NOT THE GENERIC VSIn / VSOut: sharedShaderPrelude() ITSELF already declares a
+// VSIn / VSOut pair (modules/rhi/shaders/shared_prelude.hlsl), and redeclaring those names silently shadowed them for DXC
+// rather than erroring (the 0.7 particle shader compiled against the wrong struct and failed only on a missing member).
+//
+// Table 0 of every particle draw: t0 particles, t1 order, t2 trail points, t3 texture, then the GI pair at t4 / t5. The compute
+// layout is 9 UAVs, root CBV b3 (GpuSimCB), no SRV.
 #pragma once
+#include "aver/core/Types.hpp"
+#include "aver/rhi/RHIResources.hpp"
 
 namespace aver::particles {
 
-// gViewProj/gCamPos come from rhi::sharedShaderPrelude(), prepended by ParticleRenderer::init -- see
-// its `cbuffer PerFrame` (modules/rhi/shaders/shared_prelude.hlsl:3). STRUCT NAMES ARE PREFIXED
-// (ParticleVSIn/ParticleVSOut), NOT THE GENERIC VSIn/VSOut, because rhi::sharedShaderPrelude() ITSELF
-// already declares a `struct VSIn`/`struct VSOut` pair (the base mesh-draw shader's own -- see
-// modules/rhi/shaders/shared_prelude.hlsl:874 and :876; they were in RHIShaders.cpp until the
-// shader bodies became files) as part of the text this file's shader is prepended with.
-// Redeclaring those two exact names silently shadowed them for DXC rather than erroring, and
-// ParticleVS ended up compiled against the WRONG struct (the base pipeline's three-float MeshVertex
-// position, with no posZ member at all) -- caught by createShader failing outright with "no member
-// named 'posZ' in 'VSIn'", not by anything at review time. Every other prelude consumer in this
-// engine (VoxOut in modules/render.voxi/shaders/voxi.hlsl, for one) already names its own IO
-// structs uniquely for exactly this reason.
+// Draw table 0 (graphics).
+inline constexpr u32 kParticleSrvCount = 4;                          // t0 particles, t1 order, t2 trail, t3 texture
+inline constexpr u32 kGiSrvBase = kParticleSrvCount;                 // Voxi's volume and shadow map follow at t4 / t5
+inline constexpr u32 kGiSamplerBase = 1;                             // s0 is the particle texture sampler; the GI pair follows
+inline constexpr u32 kDrawSrvCount = kGiSrvBase + 2;
+static_assert(kGiSrvBase == kParticleSrvCount, "the GI pair sits right after the particle slots");
+static_assert(kDrawSrvCount <= rhi::kMaxBindingSlots, "the draw table must fit the per-table slot cap");
+
+// Compute table 0: nine UAVs (particles, dead list, alive lists, counters, args, events, parent events, sort keys, trail).
+inline constexpr u32 kSimUavCount = 9;
+static_assert(kSimUavCount <= rhi::kMaxBindingSlots, "the compute layout must fit the per-table slot cap");
+inline constexpr u32 kSimConstantRegister = 3;                       // b3: GpuSimCB / GpuSortCB (root CBV)
+static_assert(kSimConstantRegister < rhi::kMaxConstantSlots && kSimConstantRegister != rhi::kFeatureFrameConstantRegister,
+              "b3 is a declarable slot and not the GI frame constants");
 
 } // namespace aver::particles

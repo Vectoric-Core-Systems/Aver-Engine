@@ -15,6 +15,7 @@
 #endif
 
 #include <algorithm>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -144,6 +145,17 @@ public:
     void setEnabled(bool on) { enabled_ = on; }
     bool enabled() const { return enabled_; }
 
+    // A hook for translucent content that belongs in the picture (the particle editor's preview). Called inside prePass after the
+    // opaque draws and the instanced batches and before the grid, with this preview's colour and depth targets bound and its
+    // viewport and scissor set; the pipeline and constants it leaves bound are not reused. Null clears it.
+    void setTransparentHook(std::function<void(rhi::IRenderContext&)> hook) { transparentHook_ = std::move(hook); }
+    // This frame's camera as a feature drawing its own world-space content wants it: the row-major view-projection, its
+    // camera-relative inverse (clip to a world OFFSET from the eye, rhi::PerFrameCB::invViewProjRel) and the eye, in cm.
+    void cameraMatrices(f32 viewProj[16], f32 invViewProjRel[16], f32 eye[3]) const;
+    // The formats the targets were created with, for a feature that bakes pipelines against them (sample count is 1).
+    rhi::Format colorFormat() const { return rhi::Format::RGBA8Unorm; }
+    rhi::Format depthFormat() const { return rhi::Format::D32Float; }
+
     void setCamera(const PreviewCamera& c) { camera_ = c; }
     PreviewCamera& camera() { return camera_; }
     // Points the camera at the whole draw list.
@@ -272,6 +284,7 @@ private:
     f32 extLo_[3] = {}, extHi_[3] = {};
     bool haveExternalBounds_ = false;
     bool enabled_ = true;
+    std::function<void(rhi::IRenderContext&)> transparentHook_;
 
 #if AVER_MODULE_PBR
     // The SECOND pipeline: shades through averEvalMaterial instead of the fixed key-light-plus-fill

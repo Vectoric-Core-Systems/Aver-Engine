@@ -2225,6 +2225,30 @@ void SandboxApp::buildRenderingSettings(int page) {
         if (ImGui::Checkbox("Use mesh shaders", &s.meshShaders)) changed = true;
         ImGui::EndDisabled();
 
+#if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
+        // Where particle emitters simulate (docs/PARTICLES.md). Applies at once to emitters created afterwards; the project key
+        // RENDER.PARTICLEGPU round-trips it, the CLI --particles-cpu / --particles-gpu outranks it.
+        ImGui::Separator();
+        ImGui::TextUnformatted("Particles");
+        {
+            int pg = project_.particleGpu < 0 ? 1 : project_.particleGpu;
+            if (ImGui::Combo("Particles on GPU", &pg, "Off (CPU only)\0Auto\0On\0")) {
+                project_.particleGpu = pg;
+                particles::particleSystem().setGpuMode(pg);
+                particleRenderer_.setGpuEnabled(pg != 0);
+                projectDirty_ = true;
+            }
+            uiReg_.track("project.particles.gpu");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Off keeps every emitter on the CPU. Auto puts an emitter on the GPU when its max particles\n"
+                                  "is 2048 or more and the device supports compute and indirect draw. On does so for every\n"
+                                  "emitter that can. A tier is chosen when an emitter starts and never changes mid-life.\n\n"
+                                  "Round-trips as RENDER.PARTICLEGPU (0 off, 1 auto, 2 on).");
+            const particles::ParticleStats ps = particles::particleSystem().stats();
+            ImGui::TextDisabled("%u GPU emitter(s) / %u particle(s), %u CPU emitter(s) / %u particle(s), %u KB pooled",
+                                ps.gpuEmitters, ps.gpuParticles, ps.cpuEmitters, ps.cpuParticles, ps.gpuAllocatedKB);
+        }
+#endif
     }
 
     if (page == kRenderPageDebug) {

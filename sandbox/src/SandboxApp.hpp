@@ -16,6 +16,7 @@
 #include "aver/core/Log.hpp"
 // Shared runtime content component.
 #include "aver/game/GameContent.hpp"
+#include "aver/game/SoftBodySave.hpp"   // soft-body damage on the $State channel
 #include "aver/game/GameLevel.hpp"
 #include "aver/game/GameWater.hpp"
 #include "aver/game/GameStreaming.hpp"
@@ -23,6 +24,8 @@
 #include "aver/game/GameLandscape.hpp"
 #include "aver/game/MouseCapture.hpp"
 #include "aver/game/PlayMobility.hpp"
+
+#include "aver/game/GameCamera.hpp"   // PlayView
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
 #include "aver/world/VehicleSystem.hpp"
 #endif
@@ -167,6 +170,12 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "DataTableEditor.hpp"
 #include "StringTableEditor.hpp"
 #include "SoftBodyDebugOverlay.hpp"   // Show > Soft Bodies (also pulls the soft-body system header when the module is on)
+
+#include "VehicleDebugOverlay.hpp"    // Show > Vehicles and the .ocvehicle editor's spec preview
+#include "VehicleDetailsModel.hpp"    // VehicleSectionEnv, drawVehicleSection
+#if AVER_MODULE_VEHICLE
+#  include "VehicleEditor.hpp"        // makeVehicleEditor, vehicleStarterText
+#endif
 #include "RenderQueueOutput.hpp"
 #include "RenderQueuePanel.hpp"
 #include "PostVolumeTools.hpp"
@@ -184,6 +193,8 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #endif
 #if AVER_MODULE_SCENE
 #include "MotionDebugOverlay.hpp"   // motion matching overlay (wave 5 #25)
+
+#include "CameraRigDebugOverlay.hpp"   // Show > Camera Rigs (wave 10, docs/CAMERAS.md)
 // [wave3/level-instances begin] Level instances in the editor (docs/LEVEL_INSTANCES.md).
 #include "LevelInstanceEditorUi.hpp"
 #include "aver/game/LevelInstancesAbiHost.hpp"
@@ -419,13 +430,19 @@ inline i32 saveGraphVarSet(aver::scene::Entity e, const char* name, u32 kind, f3
 }
 
 // Managed entity state (framework_state_abi.h) relay.
-inline i32 saveStateCount(aver::scene::Entity e, void*) { return aver_fw_state_count(static_cast<i32>(e)); }
+inline i32 saveStateCount(aver::scene::Entity e, void*) {
+    return std::max(0, static_cast<i32>(aver_fw_state_count(static_cast<i32>(e)))) + aver::game::softBodyStateCount(e);
+}
 inline i32 saveStateAt(aver::scene::Entity e, i32 index, char* nameBuf, i32 nameCap, char* dataBuf,
                        i32 dataCap, void*) {
-    return aver_fw_state_at(static_cast<i32>(e), index, nameBuf, nameCap, dataBuf, dataCap);
+    // The managed providers first, then the soft-body damage entry (docs/SOFTBODY.md, saved damage).
+    const i32 managed = std::max(0, static_cast<i32>(aver_fw_state_count(static_cast<i32>(e))));
+    if (index < managed) return aver_fw_state_at(static_cast<i32>(e), index, nameBuf, nameCap, dataBuf, dataCap);
+    return aver::game::softBodyStateAt(e, index - managed, nameBuf, nameCap, dataBuf, dataCap);
 }
 inline i32 saveStateSet(aver::scene::Entity e, const char* name, const char* data, i32 dataLen, void*) {
-    return aver_fw_state_set(static_cast<i32>(e), name, data, dataLen);
+    if (aver_fw_state_set(static_cast<i32>(e), name, data, dataLen)) return 1;
+    return aver::game::softBodyStateSet(e, name, data, dataLen);
 }
 
 inline aver::save::Host saveHost() {
@@ -446,6 +463,7 @@ inline aver::save::Host saveHost() {
 inline i32 saveWriteProvider(const char* path, void*) {
     aver::save::CaptureOptions co;
     co.host = saveHost();
+    co.skip = &aver::game::softBodySaveSkip;   // transient field entities are not saved
     aver::fmt::OcSaveData snap;
     std::string why;
     if (!aver::save::capture(aver::scene::World::instance(), snap, co, &why)) {
@@ -469,6 +487,7 @@ inline i32 saveLoadProvider(const char* path, void*) {
     }
     aver::save::RestoreOptions ro;
     ro.host = saveHost();
+    aver::game::softBodyResetForRestore();   // the restore pass replays saved damage onto rebuilt bodies
     if (!aver::save::restore(snap, aver::scene::World::instance(), ro, &why)) {
         AVER_ERROR("[Save] restore failed: {}", why);
         return 0;
@@ -1635,6 +1654,8 @@ public:
 
     void setEdgeAaOverride(bool on);   // --edge-aa
     void setTaaOverride(bool on) { temporalAaEnabled_ = on; taaFromCli_ = true; }   // --taa / --no-taa
+
+    void setParticleGpuOverride(int mode) { particleGpuArg_ = mode; }                // --particles-cpu (0) / --particles-gpu (2)
     void setNeuRaaOverride(bool on) { neuraaEnabled_ = on; neuraaFromCli_ = true; } // --neuraa / --no-neuraa
 
     void applyUpscalerSlot(rhi::IDevice* dev);
@@ -1967,7 +1988,7 @@ private:
 
     void pushInput(bool uiActive);
 
-    void drivePlayCamera();
+    void drivePlayCamera(f32 dt);
 #endif
 
     f32 viewAspect() const;
@@ -2742,6 +2763,10 @@ private:
 
     void cbCreateFoliageType();
 
+#if AVER_MODULE_VEHICLE
+    void cbCreateVehicleAsset();   // a starter .ocvehicle (the template's sedan), opened in the Vehicle editor
+#endif
+
     void cbCreateNodeGraph();
 
     void cbCreateBehaviourTree();
@@ -3193,6 +3218,13 @@ private:
     editor::MotionDebugOptions motionDebug_;   // Show > Motion Matching: trajectories, matched row, labels
     editor::MotionDebugFrame motionDebugFrame_;
     rhi::LineHandle motionDebugMesh_ = 0;     // this frame's motion-matching lines
+
+#if AVER_MODULE_CAMERA && AVER_MODULE_SCENE
+    editor::CameraDebugOptions cameraDebug_;    // Show > Camera Rigs
+    editor::CameraDebugFrame cameraDebugFrame_;
+    rhi::LineHandle cameraDebugMesh_ = 0;       // this frame's camera-rig lines
+    scene::Entity cameraLookRig_ = scene::kInvalidEntity;   // Details > Camera Rig > Look through: pilots the viewport with the rig's preview pose until Esc
+#endif
     rhi::LineHandle classMarkerMesh_ = 0;     // this frame's graph-class root markers
     // PREFABS: the library (loaded assets), the system (instances in the world), the editor's operations on
     // them and the Create Prefab dialog. The system's hooks keep levelEntities_, labels and bodies in step.
@@ -3355,6 +3387,8 @@ private:
     // pushed; camPos_/yaw_/pitch_ are persisted and stay the editor's own).
     bool viewOverride_ = false;
     Vec3 viewPosOv_{0.0f, 0.0f, 0.0f}, viewFwdOv_{1.0f, 0.0f, 0.0f};
+    // The projection and owner-hide mode of the Play camera (GameCamera.hpp): FOV, roll, clip planes, the collision fade. The default outside Play.
+    game::PlayView playView_;
     Vec3 viewPos() const { return viewOverride_ ? viewPosOv_ : camPos_; }
     // Moves the editor camera without turning it; streaming treats it as a jump, not a fast move.
     void teleportCamera(const Vec3& p);
@@ -3511,6 +3545,13 @@ private:
     editor::SoftBodyDebugFrame softBodyDebugFrame_;
     rhi::LineHandle softBodyDebugMesh_ = 0;
 #endif
+
+#if AVER_MODULE_VEHICLE_SCENE
+    // Show > Vehicles: suspension / forces / slip / chassis / velocity / labels, plus the .ocvehicle editor's spec preview. Not persisted. The line mesh is rebuilt each frame.
+    editor::VehicleDebugOptions vehicleDebug_;
+    editor::VehicleDebugFrame vehicleDebugFrame_;
+    rhi::LineHandle vehicleDebugMesh_ = 0;
+#endif
     // Viewport Show flags. Both default ON.
     bool showStaticMeshes_=true;
     bool showAtmosphere_=true;
@@ -3650,6 +3691,8 @@ private:
     bool neuraaCaptureStarted_ = false;
     bool temporalAaEnabled_ = true;   // the project's RENDER.TAA (unstated = on); --no-taa / --taa win over it
     bool taaFromCli_ = false;
+
+    int particleGpuArg_ = -1;   // --particles-cpu / --particles-gpu; -1 follows RENDER.PARTICLEGPU
     bool neuraaEnabled_ = false;      // the project's RENDER.NEURAA (unstated = off)
     bool neuraaFromCli_ = false;
     // Edge AA (FXAA-class) in FSR's first pass: --edge-aa or Display > Edge anti-aliasing.

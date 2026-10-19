@@ -100,6 +100,7 @@ public:
         // fromJoltUnit, not fromJoltDir: a unit normal must not be scaled.
         e.normal = fromJoltUnit(manifold.mWorldSpaceNormal);
         g_world->contacts.push_back(e);
+        vehicleOnContact(ha, hb, a, b, e.point, e.normal);   // a chassis hit, noted for vehicleStepEnd's IMPACT event
     }
 
     // wave3: a persisting contact keeps the sampled friction too (ContactSettings is rebuilt each step).
@@ -392,6 +393,7 @@ int32_t aver_phys_step(float dt) {
         g_world->overlaps.clear();
     }
     softbody::beginCall();
+    vehicleBeginCall();   // last call's vehicle events go; what the caller drains describes only the steps run here
 
     const float maxCatchUp = g_world->fixedStep * 8.0f;
     g_world->accumulator += dt < maxCatchUp ? dt : maxCatchUp;
@@ -483,7 +485,11 @@ int32_t aver_phys_step(float dt) {
         }
         // Wind and drag on builder soft bodies, and the velocity cache impacts read: before the solver, like buoyancy.
         softbody::onStepBegin(g_world->fixedStep);
+        // Vehicle driver aids, aero and the manual clutch, from last step's slip: before the solver, like buoyancy.
+        vehicleStepBegin(g_world->fixedStep);
         g_world->system.Update(g_world->fixedStep, 1, g_world->temp.get(), g_world->jobs.get());
+        // Vehicle telemetry and events, read back while Jolt's state is this step's.
+        vehicleStepEnd(g_world->fixedStep);
         afterStepJoints();
         ++steps;
     }

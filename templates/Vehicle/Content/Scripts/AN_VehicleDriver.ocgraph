@@ -1,0 +1,103 @@
+OCGRAPH 1
+DOMAIN gameplay
+# THE ON-FOOT PAWN. Walking and looking are the FirstPerson template's (MoveAxis, MouseDelta, CharacterMove); there is no mesh,
+# so the first-person view is the capsule's eye. While either vehicle has a driver this pawn does nothing: the vehicle system has hidden
+# it, parked it in the seat and taken the camera (its camera sink points the view at the vehicle's chase rig). F (Drive.Exit) puts it
+# back at the vehicle's exit point and the walking resumes the next tick, because `busy` goes false.
+#
+# IT TESTS "SOMEBODY IS DRIVING" WITH `driver != 0`, never with `driver == me`: an entity handle is an int that does not survive a float
+# (handles start at 2^24), so two handles cannot be compared through the float pins of Equal. Only the player ever drives here.
+NAME VehicleDriver
+DESCRIPTION On foot: walk, look, and press E within 4 m of the sedan or the tank to get in.
+
+CLASS AN_VehicleDriver Character view=firstperson
+
+PARAM entity int
+PARAM deltaTime float
+
+ENTRY tick OnTick
+NODE ent Param param=entity
+NODE dt Param param=deltaTime
+NODE sedan FindEntity name=Sedan
+NODE tank FindEntity name=Tank
+NODE sedanDrv AN_VehicleDriver
+NODE tankDrv AN_VehicleDriver
+NODE sedanDrvF IntToFloat
+NODE tankDrvF IntToFloat
+NODE half ConstFloat value=0.5
+NODE sedanBusy Greater
+NODE tankBusy Greater
+NODE busy Or
+NODE tick OnTick
+NODE gate Branch
+NODE move MoveAxis
+NODE mouse MouseDelta
+NODE lookScale ConstFloat value=0.15
+NODE lookScalePitch ConstFloat value=-0.15
+NODE yaw Multiply
+NODE pitch Multiply
+NODE drive CharacterMove
+NODE eKey ConstInt value=4
+NODE ePressed InputKeyPressed
+NODE useGate Branch
+NODE reach ConstFloat value=400.0
+NODE sedanDist AN_GetDistance
+NODE sedanNear Less
+NODE sedanClose And
+NODE tankDist AN_GetDistance
+NODE tankNear Less
+NODE tankClose And
+NODE pickSedan Branch
+NODE enterSedan AN_VehicleEnter
+NODE pickTank Branch
+NODE enterTank AN_VehicleEnter
+LINK sedan.entity sedanDrv.entity
+LINK tank.entity tankDrv.entity
+LINK sedanDrv.driver sedanDrvF.a
+LINK tankDrv.driver tankDrvF.a
+LINK sedanDrvF.result sedanBusy.a
+LINK half.value sedanBusy.b
+LINK tankDrvF.result tankBusy.a
+LINK half.value tankBusy.b
+LINK sedanBusy.result busy.a
+LINK tankBusy.result busy.b
+LINK tick.exec gate.exec
+LINK busy.result gate.cond
+LINK gate.false move.exec
+LINK move.then mouse.exec
+LINK mouse.deltaX yaw.a
+LINK lookScale.value yaw.b
+LINK mouse.deltaY pitch.a
+LINK lookScalePitch.value pitch.b
+LINK mouse.then drive.exec
+LINK ent.value drive.entity
+LINK dt.value drive.dt
+LINK move.forward drive.forward
+LINK move.right drive.right
+LINK yaw.result drive.yawDelta
+LINK pitch.result drive.pitchDelta
+LINK eKey.value ePressed.key
+LINK drive.then useGate.exec
+LINK ePressed.triggered useGate.cond
+LINK ent.value sedanDist.a
+LINK sedan.entity sedanDist.b
+LINK sedanDist.distance sedanNear.a
+LINK reach.value sedanNear.b
+LINK sedanNear.result sedanClose.a
+LINK sedanDist.success sedanClose.b
+LINK ent.value tankDist.a
+LINK tank.entity tankDist.b
+LINK tankDist.distance tankNear.a
+LINK reach.value tankNear.b
+LINK tankNear.result tankClose.a
+LINK tankDist.success tankClose.b
+LINK useGate.true pickSedan.exec
+LINK sedanClose.result pickSedan.cond
+LINK pickSedan.true enterSedan.exec
+LINK sedan.entity enterSedan.entity
+LINK ent.value enterSedan.driver
+LINK pickSedan.false pickTank.exec
+LINK tankClose.result pickTank.cond
+LINK pickTank.true enterTank.exec
+LINK tank.entity enterTank.entity
+LINK ent.value enterTank.driver

@@ -1,6 +1,7 @@
 // .ocsoft read/write, the preset resolution, validation and the paint run-length codec.
 #include "aver/softbody/SoftAsset.hpp"
 
+#include "aver/core/Hash.hpp"
 #include "aver/formats/Json.hpp"
 #include "aver/platform/FileSystem.hpp"
 
@@ -80,6 +81,119 @@ std::string hex64(u64 v) {
     return buf;
 }
 
+const char* capModeKey(CapMode m) { return m == CapMode::Off ? "off" : (m == CapMode::On ? "on" : "auto"); }
+bool capModeFromKey(std::string_view k, CapMode& out) {
+    if (k == "auto") { out = CapMode::Auto; return true; }
+    if (k == "off")  { out = CapMode::Off;  return true; }
+    if (k == "on")   { out = CapMode::On;   return true; }
+    return false;
+}
+const char* backSkinKey(BackSkin b) {
+    switch (b) {
+        case BackSkin::Off: return "off";
+        case BackSkin::Debris: return "debris";
+        case BackSkin::All: return "all";
+        default: return "auto";
+    }
+}
+bool backSkinFromKey(std::string_view k, BackSkin& out) {
+    if (k == "auto")   { out = BackSkin::Auto;   return true; }
+    if (k == "off")    { out = BackSkin::Off;    return true; }
+    if (k == "debris") { out = BackSkin::Debris; return true; }
+    if (k == "all")    { out = BackSkin::All;    return true; }
+    return false;
+}
+
+bool endsWithOcMesh(const std::string& path) {
+    static const char ext[] = ".ocmesh";
+    const usize n = sizeof ext - 1;
+    if (path.size() < n) return false;
+    for (usize i = 0; i < n; ++i) {
+        char c = path[path.size() - n + i];
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (c != ext[i]) return false;
+    }
+    return true;
+}
+
+bool slotAtDefault(const FxSlotParams& s) {
+    const FxSlotParams d;
+    return s.particle.empty() && s.sounds.empty() && s.minSpeedCmS == d.minSpeedCmS && s.count == d.count &&
+           s.countPerMs == d.countPerMs && s.countPerParticle == d.countPerParticle && s.volume == d.volume &&
+           s.pitchJitter == d.pitchJitter && s.cooldownS == d.cooldownS && s.innerCm == d.innerCm && s.outerCm == d.outerCm;
+}
+
+bool anySlotWritten(const EffectParams& e) {
+    for (const FxSlotParams& f : e.slot)
+        if (!slotAtDefault(f)) return true;
+    return false;
+}
+
+std::string joinKv(const std::vector<std::string>& kv) {
+    std::string out = "{";
+    for (usize i = 0; i < kv.size(); ++i) out += (i ? ", " : " ") + kv[i];
+    return out + (kv.empty() ? "}" : " }");
+}
+
+std::string slotJson(const FxSlotParams& s) {
+    const FxSlotParams d;
+    std::vector<std::string> kv;
+    if (!s.particle.empty()) kv.push_back("\"particle\": " + esc(s.particle));
+    if (!s.sounds.empty()) {
+        std::string a = "\"sounds\": [";
+        for (usize i = 0; i < s.sounds.size(); ++i) a += std::string(i ? ", " : "") + esc(s.sounds[i]);
+        kv.push_back(a + "]");
+    }
+    const auto f = [&](const char* key, f32 v, f32 def) {
+        if (v != def) kv.push_back(std::string("\"") + key + "\": " + num(v));
+    };
+    f("minSpeedCmS", s.minSpeedCmS, d.minSpeedCmS);
+    f("count", s.count, d.count);
+    f("countPerMs", s.countPerMs, d.countPerMs);
+    f("countPerParticle", s.countPerParticle, d.countPerParticle);
+    f("volume", s.volume, d.volume);
+    f("pitchJitter", s.pitchJitter, d.pitchJitter);
+    f("cooldownS", s.cooldownS, d.cooldownS);
+    f("innerCm", s.innerCm, d.innerCm);
+    f("outerCm", s.outerCm, d.outerCm);
+    return joinKv(kv);
+}
+
+bool capsAtDefault(const CapParams& c) {
+    const CapParams d;
+    return c.mode == d.mode && c.thicknessCm == d.thicknessCm && c.backSkin == d.backSkin && c.uvCmPerTile == d.uvCmPerTile &&
+           c.lodCm == d.lodCm && c.interiorMaterial.empty();
+}
+
+std::string capsJson(const CapParams& c) {
+    const CapParams d;
+    std::vector<std::string> kv;
+    if (c.mode != d.mode) kv.push_back(std::string("\"mode\": \"") + capModeKey(c.mode) + "\"");
+    if (c.thicknessCm != d.thicknessCm) kv.push_back("\"thicknessCm\": " + num(c.thicknessCm));
+    if (c.backSkin != d.backSkin) kv.push_back(std::string("\"backSkin\": \"") + backSkinKey(c.backSkin) + "\"");
+    if (c.uvCmPerTile != d.uvCmPerTile) kv.push_back("\"uvCmPerTile\": " + num(c.uvCmPerTile));
+    if (c.lodCm != d.lodCm) kv.push_back("\"lodCm\": " + num(c.lodCm));
+    if (!c.interiorMaterial.empty()) kv.push_back("\"interiorMaterial\": " + esc(c.interiorMaterial));
+    return joinKv(kv);
+}
+
+void readSlot(const JsonValue& o, FxSlotParams& s) {
+    if (o["particle"].isString()) s.particle = std::string(o["particle"].asString());
+    const JsonValue& snd = o["sounds"];
+    if (snd.isArray())
+        for (usize i = 0; i < snd.size() && i < 64; ++i)
+            if (snd[i].isString()) s.sounds.emplace_back(snd[i].asString());
+    readF(o, "minSpeedCmS", s.minSpeedCmS);
+    readF(o, "count", s.count);
+    readF(o, "countPerMs", s.countPerMs);
+    readF(o, "countPerParticle", s.countPerParticle);
+    readF(o, "volume", s.volume);
+    readF(o, "pitchJitter", s.pitchJitter);
+    readF(o, "cooldownS", s.cooldownS);
+    readF(o, "innerCm", s.innerCm);
+    readF(o, "outerCm", s.outerCm);
+}
+
 } // namespace
 
 // ---- paint codec -----------------------------------------------------------------------------------
@@ -139,6 +253,36 @@ SoftAsset makeSoftAsset(SoftKind kind, SoftPreset preset) {
     return a;
 }
 
+const char* fxSlotKey(FxSlot slot) {
+    switch (slot) {
+        case FxSlot::Impact:  return "impact";
+        case FxSlot::Tear:    return "tear";
+        case FxSlot::Detach:  return "detach";
+        case FxSlot::Dust:    return "dust";
+        default:              return "release";
+    }
+}
+
+bool capsEnabled(const SoftAsset& a) {
+    if (a.caps.mode == CapMode::On) return true;
+    if (a.caps.mode == CapMode::Off) return false;
+    return a.kind == SoftKind::Destructible;
+}
+
+f32 capThicknessCm(const SoftAsset& a) {
+    return a.caps.thicknessCm >= 0.0f ? a.caps.thicknessCm : presetInfo(a.preset).capThicknessCm;
+}
+
+u64 softAssetKey(const SoftAsset& a) {
+    SoftAsset k = a;
+    k.caps = CapParams{};
+    k.effects = EffectParams{};
+    k.destruct.debrisLifetimeS = DestructParams{}.debrisLifetimeS;
+    k.destruct.impactRadiusScale = 1.0f;
+    k.destruct.bake = true;
+    return fnv1a64(writeSoftAsset(k));
+}
+
 bool SoftAsset::valid(std::string* why) const {
     auto fail = [&](const char* msg) {
         if (why) *why = msg;
@@ -175,7 +319,22 @@ bool SoftAsset::valid(std::string* why) const {
         if (destruct.minPieceTriangles < 1) return fail("destruct.minPieceTriangles must be >= 1");
         if (!finite(destruct.debrisLifetimeS) || destruct.debrisLifetimeS < 0.0f) return fail("destruct.debrisLifetimeS must be >= 0");
         if (destruct.maxPieces < 1) return fail("destruct.maxPieces must be >= 1");
+        if (!finite(destruct.impactRadiusScale) || destruct.impactRadiusScale <= 0.0f) return fail("destruct.impactRadiusScale must be > 0");
     }
+    if (!finite(caps.thicknessCm) || (caps.thicknessCm < 0.0f && caps.thicknessCm != -1.0f)) return fail("caps.thicknessCm must be >= 0");
+    if (!finite(caps.uvCmPerTile) || caps.uvCmPerTile <= 0.0f) return fail("caps.uvCmPerTile must be > 0");
+    if (!finite(caps.lodCm) || caps.lodCm < 0.0f) return fail("caps.lodCm must be >= 0");
+    for (const FxSlotParams& f : effects.slot) {
+        if (f.sounds.size() > kMaxFxSounds) return fail("an effects slot takes at most 8 sounds");
+        if (!finite(f.minSpeedCmS) || f.minSpeedCmS < 0.0f) return fail("effects minSpeedCmS must be >= 0");
+        if (!finite(f.count) || f.count < 0.0f || !finite(f.countPerMs) || f.countPerMs < 0.0f ||
+            !finite(f.countPerParticle) || f.countPerParticle < 0.0f) return fail("effects counts must be >= 0");
+        if (!finite(f.volume) || f.volume < 0.0f) return fail("effects volume must be >= 0");
+        if (!finite(f.pitchJitter) || f.pitchJitter < 0.0f || f.pitchJitter > 1.0f) return fail("effects pitchJitter must be 0..1");
+        if (!finite(f.cooldownS) || f.cooldownS < 0.0f) return fail("effects cooldownS must be >= 0");
+        if (!finite(f.innerCm) || f.innerCm < 0.0f || !finite(f.outerCm) || f.outerCm < f.innerCm) return fail("effects innerCm and outerCm must satisfy 0 <= inner <= outer");
+    }
+    if (!proxy.mesh.empty() && !endsWithOcMesh(proxy.mesh)) return fail("proxy.mesh must be an .ocmesh");
     if (paint.hasPin() && paint.hasReach() && paint.pin.size() != paint.reach.size())
         return fail("paint.pin and paint.reach differ in length");
     for (const PaintRule& r : paint.rules) {
@@ -267,6 +426,31 @@ bool parseSoftAsset(std::string_view text, SoftAsset& out, std::string* why) {
         readU(de, "minPieceTriangles", a.destruct.minPieceTriangles);
         readF(de, "debrisLifetimeS", a.destruct.debrisLifetimeS);
         readU(de, "maxPieces", a.destruct.maxPieces);
+        readF(de, "impactRadiusScale", a.destruct.impactRadiusScale);
+        readB(de, "bake", a.destruct.bake);
+    }
+    const JsonValue& cp = root["caps"];
+    if (cp.isObject()) {
+        if (cp.has("mode") && !capModeFromKey(cp["mode"].asString(), a.caps.mode)) return fail("caps.mode must be auto, off or on");
+        if (cp.has("backSkin") && !backSkinFromKey(cp["backSkin"].asString(), a.caps.backSkin)) return fail("caps.backSkin must be auto, off, debris or all");
+        if (cp["thicknessCm"].isNumber()) {
+            if (cp["thicknessCm"].asFloat() < 0.0f) return fail("caps.thicknessCm must be >= 0");
+            a.caps.thicknessCm = cp["thicknessCm"].asFloat();
+        }
+        readF(cp, "uvCmPerTile", a.caps.uvCmPerTile);
+        readF(cp, "lodCm", a.caps.lodCm);
+        if (cp["interiorMaterial"].isString()) a.caps.interiorMaterial = std::string(cp["interiorMaterial"].asString());
+    }
+    const JsonValue& fx = root["effects"];
+    if (fx.isObject())
+        for (u32 i = 0; i < kFxSlotCount; ++i) {
+            const JsonValue& slot = fx[fxSlotKey(static_cast<FxSlot>(i))];
+            if (slot.isObject()) readSlot(slot, a.effects.slot[i]);
+        }
+    const JsonValue& px = root["proxy"];
+    if (px.isObject()) {
+        if (px["mesh"].isString()) a.proxy.mesh = std::string(px["mesh"].asString());
+        readU(px, "maxParticles", a.proxy.maxParticles);
     }
     const JsonValue& pt = root["paint"];
     if (pt.isObject()) {
@@ -372,8 +556,26 @@ std::string writeSoftAsset(const SoftAsset& a) {
     s += "    \"maxKickCmS\": " + num(a.destruct.maxKickCmS) + ",\n";
     s += "    \"minPieceTriangles\": " + unum(a.destruct.minPieceTriangles) + ",\n";
     s += "    \"debrisLifetimeS\": " + num(a.destruct.debrisLifetimeS) + ",\n";
-    s += "    \"maxPieces\": " + unum(a.destruct.maxPieces) + "\n";
-    s += "  },\n";
+    s += "    \"maxPieces\": " + unum(a.destruct.maxPieces);
+    if (a.destruct.impactRadiusScale != DestructParams{}.impactRadiusScale) s += ",\n    \"impactRadiusScale\": " + num(a.destruct.impactRadiusScale);
+    if (!a.destruct.bake) s += ",\n    \"bake\": false";
+    s += "\n  },\n";
+    if (!capsAtDefault(a.caps)) s += "  \"caps\": " + capsJson(a.caps) + ",\n";
+    if (anySlotWritten(a.effects)) {
+        s += "  \"effects\": {";
+        bool first = true;
+        for (u32 i = 0; i < kFxSlotCount; ++i) {
+            if (slotAtDefault(a.effects.slot[i])) continue;
+            s += std::string(first ? "\n    \"" : ",\n    \"") + fxSlotKey(static_cast<FxSlot>(i)) + "\": " + slotJson(a.effects.slot[i]);
+            first = false;
+        }
+        s += "\n  },\n";
+    }
+    if (!a.proxy.mesh.empty() || a.proxy.maxParticles != 0) {
+        s += "  \"proxy\": { \"mesh\": " + esc(a.proxy.mesh);
+        if (a.proxy.maxParticles != 0) s += ", \"maxParticles\": " + unum(a.proxy.maxParticles);
+        s += " },\n";
+    }
     s += "  \"paint\": {\n";
     s += "    \"meshKey\": \"" + hex64(a.paint.meshKey) + "\",\n";
     s += "    \"pin\": \"" + encodePaintRle(a.paint.pin) + "\",\n";

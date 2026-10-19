@@ -5,6 +5,9 @@
 #include "SandboxApp.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "LightLevelIo.hpp"
+#if AVER_MODULE_VEHICLE_SCENE
+#include "aver/vehicle/VehiclePhysicsSystem.hpp"   // entities(): the vehicles Play is driving
+#endif
 
 namespace aver {
 #if AVER_MODULE_LANDSCAPE
@@ -630,6 +633,11 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
         std::unordered_set<u32> cars;
 #if AVER_MODULE_PHYSICS
         for (const scene::Entity c : vehicles_.entities()) cars.insert(static_cast<u32>(c));
+#endif
+#if AVER_MODULE_VEHICLE_SCENE
+        // A COMPONENT Vehicle is the same story: its CLocal is where the physics has driven it, and its wheel children's are the
+        // wheel poses. The placement saved is where it stood before Play.
+        for (const scene::Entity c : vehicle::vehiclePhysicsSystem().entities()) cars.insert(static_cast<u32>(c));
 #endif
         const bool seqLive = seqEditor_.playRunning();
         if (clipsLive || !cars.empty() || seqLive)

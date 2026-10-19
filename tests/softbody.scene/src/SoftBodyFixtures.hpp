@@ -2,6 +2,8 @@
 // that owns a physics world plus a SoftBodySystem and steps them the way a host frame does. No GPU, no device.
 #pragma once
 
+#include "aver/core/EffectSpawn.hpp"
+#include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_layers_abi.h"
@@ -10,9 +12,12 @@
 #include "aver/scene/World.hpp"
 #include "aver/softbody/SoftBodySystem.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <map>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace sbfix {
@@ -158,5 +163,131 @@ struct Rig {
         return events.size();
     }
 };
+
+
+// ---- wave 10 helpers ----------------------------------------------------------------------------------------
+
+// A static floor with its top at z = 0.
+inline void addFloor() { aver_phys_add_static_box(0.0f, 0.0f, -10.0f, 5000.0f, 5000.0f, 10.0f); }
+
+inline u32 brokenCount(const sb::Cage* c) { return c ? sb::brokenBeamCount(*c) : 0u; }
+
+struct Views {
+    const sb::PieceView* v = nullptr;
+    u32 n = 0;
+};
+inline Views viewsOf(const Rig& r) {
+    Views out;
+    out.v = r.sys.pieces(out.n);
+    return out;
+}
+
+inline Vec3 meanOf(const sb::PieceView& v) {
+    Vec3 sum{0, 0, 0};
+    for (u32 i = 0; i < v.vertexCount; ++i) sum += v.world[i];
+    return v.vertexCount ? sum / static_cast<f32>(v.vertexCount) : Vec3{0, 0, 0};
+}
+
+// The debris views (every view whose entity is not `root` and is not a cap), and their mean position.
+inline std::vector<const sb::PieceView*> debrisOf(const Rig& r, scene::Entity root) {
+    std::vector<const sb::PieceView*> out;
+    const Views vs = viewsOf(r);
+    for (u32 i = 0; i < vs.n; ++i)
+        if (vs.v[i].entity != root && vs.v[i].layer == 0) out.push_back(&vs.v[i]);
+    return out;
+}
+
+inline Vec3 meanOfDebris(const Rig& r, scene::Entity root) {
+    Vec3 sum{0, 0, 0};
+    u32 n = 0;
+    for (const sb::PieceView* v : debrisOf(r, root)) { sum += meanOf(*v); ++n; }
+    return n ? sum / static_cast<f32>(n) : Vec3{0, 0, 0};
+}
+
+inline bool visible(const Rig& r, scene::Entity e) {
+    const auto* mr = r.w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+    return mr && (mr->flags & scene::kMeshRendererVisible) != 0;
+}
+
+// Stands in for Aver.Render.SoftBody's draw side: builds at most `budget` new residents a frame, in view order, and sets the
+// visible bit on the entity of a view that asks to be revealed once its resident exists.
+struct SceneMimic {
+    u32 budget = 8;
+    std::set<std::pair<scene::Entity, u32>> built;
+    u32 builtLastFrame = 0;
+    u32 maxBuiltInAFrame = 0;
+
+    void update(Rig& r) {
+        builtLastFrame = 0;
+        const Views vs = viewsOf(r);
+        for (u32 i = 0; i < vs.n; ++i) {
+            const sb::PieceView& v = vs.v[i];
+            const auto key = std::make_pair(v.entity, v.piece);
+            if (!built.count(key)) {
+                if (builtLastFrame >= budget) continue;
+                built.insert(key);
+                ++builtLastFrame;
+            }
+            if (v.revealOnReady) {
+                if (auto* mr = r.w.component<scene::CMeshRenderer>(v.entity, scene::kComponentMeshRenderer)) mr->flags |= scene::kMeshRendererVisible;
+            }
+        }
+        maxBuiltInAFrame = std::max(maxBuiltInAFrame, builtLastFrame);
+    }
+    bool hasResident(scene::Entity e) const {
+        for (const auto& k : built)
+            if (k.first == e) return true;
+        return false;
+    }
+};
+
+// Records what the effect seams are handed.
+struct SpawnRecord { u64 id; Vec3 pos, dir; u32 count; };
+struct FxRecorder {
+    std::vector<SpawnRecord> spawns;
+    std::vector<sb::FxRequest> sounds;
+    static u32 spawn(u64 id, const Vec3& pos, const Vec3& dir, u32 count, void* user) {
+        static_cast<FxRecorder*>(user)->spawns.push_back({id, pos, dir, count});
+        return count;
+    }
+    static void sound(const sb::FxRequest& r, void* user) { static_cast<FxRecorder*>(user)->sounds.push_back(r); }
+    void install(sb::SoftBodySystem& sys) {
+        setEffectSpawner(&FxRecorder::spawn, this);
+        sys.setSoundSink(&FxRecorder::sound, this);
+    }
+    void uninstall(sb::SoftBodySystem& sys) {
+        setEffectSpawner(nullptr, nullptr);
+        sys.setSoundSink(nullptr, nullptr);
+    }
+    void clear() { spawns.clear(); sounds.clear(); }
+};
+
+// A glass pane asset with effects bound on the tear, detach and dust slots (and impact when asked).
+inline sb::SoftAsset glassWithEffects(bool impact = false) {
+    sb::SoftAsset a = pinnedTopAsset(sb::SoftKind::Destructible, sb::SoftPreset::Glass);
+    sb::FxSlotParams& tear = a.effects.slot[static_cast<u32>(sb::FxSlot::Tear)];
+    tear.particle = "FX/Shards.ocparticle";
+    tear.sounds = {"Audio/Break1.wav", "Audio/Break2.wav"};
+    tear.count = 12.0f;
+    tear.cooldownS = 0.0f;
+    sb::FxSlotParams& detach = a.effects.slot[static_cast<u32>(sb::FxSlot::Detach)];
+    detach.particle = "FX/Chunk.ocparticle";
+    detach.sounds = {"Audio/Tick.wav"};
+    detach.count = 3.0f;
+    detach.cooldownS = 0.0f;
+    sb::FxSlotParams& dust = a.effects.slot[static_cast<u32>(sb::FxSlot::Dust)];
+    dust.particle = "FX/Dust.ocparticle";
+    dust.countPerParticle = 1.0f;
+    dust.cooldownS = 0.0f;
+    if (impact) {
+        sb::FxSlotParams& imp = a.effects.slot[static_cast<u32>(sb::FxSlot::Impact)];
+        imp.particle = "FX/Spark.ocparticle";
+        imp.sounds = {"Audio/Clang.wav"};
+        imp.minSpeedCmS = 100.0f;
+        imp.count = 2.0f;
+        imp.cooldownS = 0.0f;
+    }
+    return a;
+}
 
 }  // namespace sbfix

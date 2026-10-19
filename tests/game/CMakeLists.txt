@@ -78,3 +78,21 @@ set_target_properties(GameLandscapeLayersTest PROPERTIES RUNTIME_OUTPUT_DIRECTOR
 add_executable(GameAccessibilityTest src/GameAccessibilityTest.cpp)
 target_link_libraries(GameAccessibilityTest PRIVATE Aver.Runtime.Game.Core Aver.Framework Aver.UI Aver.Platform Aver.Core)
 set_target_properties(GameAccessibilityTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# GameCameraTest -- GameCamera.hpp (wave 10 gameplay cameras): pushCamera with a PlayView (the default is today's camera bit for
+# bit; FOV and roll are inputs now), the legacy boom, and drivePlayCamera with and without a camera rig. A recording stand-in device
+# and a real scene::World; no window, no GPU. The rig cases compile where Aver.Camera exists (it brings AVER_MODULE_CAMERA).
+add_executable(GameCameraTest src/GameCameraTest.cpp)
+target_link_libraries(GameCameraTest PRIVATE Aver.Runtime.Game.Core Aver.Framework Aver.Scene Aver.Core)
+if(TARGET Aver.Camera)
+  target_link_libraries(GameCameraTest PRIVATE Aver.Camera Aver.Physics)
+endif()
+set_target_properties(GameCameraTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# CameraRigRecordTest -- the COMPONENT CameraRig record (docs/CAMERAS.md): parse, apply, capture and the text round trip with golden
+# canonical strings. Needs the camera module; a real scene::World; no device.
+if(TARGET Aver.Camera)
+  add_executable(CameraRigRecordTest src/CameraRigRecordTest.cpp)
+  target_link_libraries(CameraRigRecordTest PRIVATE Aver.Runtime.Game.Core Aver.Camera Aver.Physics Aver.Scene Aver.Formats Aver.Core)
+  set_target_properties(CameraRigRecordTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

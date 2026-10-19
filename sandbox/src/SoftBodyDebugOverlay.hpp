@@ -4,12 +4,17 @@
 // beams magenta), pinned particles as yellow crosses, piece bounds, the wind arrow, and the budget line. The
 // strain shown is the same Beam data the damage step uses, so what you see is what will tear.
 //
+// Wave 10 adds two toggles: `fields` (the shape wireframe of every soft field in its kind's colour, directional arrows, and the
+// pieces in reach highlighted) and `tuning` (the Tuning HUD: the selected soft body's last deposit, the frame's counters).
+//
 // Pure feed -> rhi::LineVertex, drawn like the motion overlay (see MotionDebugOverlay.hpp): once per frame while
 // an option is on, softBodyDebugCollect(opts, frame), upload frame.lines as a line mesh and draw it with an
 // identity matrix, then softBodyDebugDrawLabels inside the viewport window.
 #include "aver/core/Math.hpp"
 #include "aver/core/Types.hpp"
 #include "aver/rhi/RHI.hpp"
+
+#include "SoftFieldDetailsModel.hpp"
 
 #if AVER_MODULE_SOFTBODY_SCENE
 #  include "aver/softbody/SoftBodySystem.hpp"
@@ -26,7 +31,11 @@ struct SoftBodyDebugOptions {
     bool pieces = false;    // piece bounds
     bool wind = false;      // the wind arrow
     bool budget = false;    // pieces / active particles / rebuilds line
-    bool any() const { return strain || pins || pieces || wind || budget; }
+    bool fields = false;    // soft field volumes and the pieces in their reach
+    bool tuning = false;    // the Tuning HUD for `selected`
+    u32 selected = 0;       // the entity the Tuning HUD reads (0 = none)
+    u32 drawBuilds = 0;     // the draw scene's builds last frame (SoftBodyScene::drawBuildsLastFrame), for the HUD line
+    bool any() const { return strain || pins || pieces || wind || budget || fields || tuning; }
 };
 
 struct SoftBodyDebugLabel {
@@ -39,7 +48,8 @@ struct SoftBodyDebugFrame {
     std::vector<rhi::LineVertex> lines;   // two vertices per line, colours 0..1, world space
     std::vector<SoftBodyDebugLabel> labels;
     std::string budgetText;               // drawn in the corner of the viewport
-    void clear() { lines.clear(); labels.clear(); budgetText.clear(); }
+    std::vector<std::string> tuningLines; // the Tuning HUD, under the budget line
+    void clear() { lines.clear(); labels.clear(); budgetText.clear(); tuningLines.clear(); }
 };
 
 // The colour of a beam: strain = (length - rest0) / rest0, breakStrain the material's limit (0 = 0.3), plastic01 the
@@ -47,6 +57,11 @@ struct SoftBodyDebugFrame {
 void softBodyStrainColour(f32 strain, f32 breakStrain, f32 plastic01, bool broken, f32& r, f32& g, f32& b);
 
 #if AVER_MODULE_SOFTBODY_SCENE
+// The wireframe of one field volume in the colour given: sphere as three great circles, box as its edges, capsule as two
+// end circles, four rails and its axis, everywhere as a cross; a directional (or directed damage) field gets an arrow along its
+// axis and a radial one six short arrows out of its centre. Pure; a test pins the line counts.
+void softFieldDebugFeed(const softbody::FieldSpec& spec, f32 r, f32 g, f32 b, SoftBodyDebugFrame& out);
+
 // Appends one cage: its beams by strain and its pins.
 void softBodyDebugFeedCage(const softbody::Cage& cage, const SoftBodyDebugOptions& opts, SoftBodyDebugFrame& out);
 
@@ -55,8 +70,9 @@ void softBodyDebugCollect(const SoftBodyDebugOptions& opts, softbody::SoftBodySy
 #endif
 
 #if AVER_WITH_IMGUI
-// The budget line in the viewport's top-left corner.
+// The budget line in the viewport's top-left corner, and under it the Tuning HUD lines.
 void softBodyDebugDrawBudget(const SoftBodyDebugFrame& frame, f32 vpX, f32 vpY);
+void softBodyDebugDrawTuning(const SoftBodyDebugFrame& frame, f32 vpX, f32 vpY);
 #endif
 
 }  // namespace aver::editor

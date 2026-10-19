@@ -112,6 +112,8 @@ bool parseTemplateManifest(const std::string& manifestPath, const std::string& d
             out.startMap = std::string(t[1]);
         } else if (equalsCI(t[0], "GAMEMODE") && t.size() >= 2) {
             out.gameMode = std::string(t[1]);
+        } else if (equalsCI(t[0], "INPUTSCHEME") && t.size() >= 2) {
+            out.inputScheme = std::string(t[1]);
         }
         if (last) break;
     }
@@ -992,6 +994,8 @@ bool scaffoldProjectFromTemplate(const std::string& location, const std::string&
     desc.contentRoot = "Content";
     desc.startMap = tmpl.startMap;
     desc.gameMode = tmpl.gameMode;
+
+    desc.inputScheme = tmpl.inputScheme;
     applyNewProjectRenderDefaults(desc);
 
     const std::string manifest = root + AVER_PATH_SEP + name + ".ocproject";

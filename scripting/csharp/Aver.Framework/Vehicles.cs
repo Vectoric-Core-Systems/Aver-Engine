@@ -2,13 +2,16 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // A drivable car in one call. Aver.Physics.Vehicle is the low-level binding (create the chassis, add each wheel, set the
-// engine, finish); this wraps it with the car most games want: CarSpec.Default describes it, Vehicles.CreateCar builds it,
-// pairs it with a scene entity, and keeps that entity at the vehicle's pose. Design:
-// docs/plans/wave9/VISUAL_SCRIPTING_CSHARP_SYNC.md section 2.2 (Vehicle).
+// engine, finish); this wraps it with the car most games want: CarSpec.Default describes it, Vehicles.CreateCar builds it
+// and pairs it with a scene entity. Since wave 10 the car is made by the vehicle SYSTEM from CarSpec.ToOcVehicle() (one parser,
+// one builder) and the system writes the entity's pose every frame in C++; no script timer copies it any more. Design:
+// docs/VEHICLES.md and docs/plans/wave9/VISUAL_SCRIPTING_CSHARP_SYNC.md section 2.2 (Vehicle).
 //
 // UNITS AND AXES ARE THE ENGINE'S: centimetres, kilograms, N*m, degrees, +X forward, +Y right, +Z up. A car's position is
 // its ORIGIN, the bottom centre of the car where a car mesh's own origin is, not its centre of mass.
 
+using System.Globalization;
+using System.Text;
 using Aver.Scene;
 using AP = Aver.Physics;
 
@@ -81,6 +84,38 @@ public readonly record struct CarSpec
         EngineMaxRpm = 6000f,
         MaxPitchRollDeg = 60f,
     };
+
+    /// <summary>This car as .ocvehicle text: the four-wheel plan <see cref="Vehicles.PlanWheels"/> computes (front pair steered, rear pair
+    /// driven with the handbrake), the engine and the chassis, with every other record at the physics layer's defaults, so the car drives
+    /// exactly as it did before .ocvehicle existed. The wheel hubs are the SETTLED wheel centres; the builder lowers the attachment points
+    /// by the spring sag.</summary>
+    public string ToOcVehicle()
+    {
+        static string N(float v) => v.ToString("R", CultureInfo.InvariantCulture);
+        float x = WheelbaseCm * 0.5f, y = TrackCm * 0.5f, r = WheelRadiusCm, steer = FrontSteerDeg;
+        var sb = new StringBuilder();
+        sb.Append("OCVEHICLE 1\n");
+        sb.Append("NAME CarSpec\n");
+        sb.Append("KIND wheeled\n");
+        sb.Append("BODY half ").Append(N(HalfExtentsCm.X)).Append(' ').Append(N(HalfExtentsCm.Y)).Append(' ').Append(N(HalfExtentsCm.Z))
+          .Append(" clearance ").Append(N(GroundClearanceCm))
+          .Append(" com ").Append(N(CentreOfMassCm.X)).Append(' ').Append(N(CentreOfMassCm.Y)).Append(' ').Append(N(CentreOfMassCm.Z))
+          .Append(" mass ").Append(N(MassKg)).Append(" pitchroll ").Append(N(MaxPitchRollDeg)).Append('\n');
+        sb.Append("ENGINE torque ").Append(N(EngineTorque)).Append(" minrpm ").Append(N(EngineMinRpm)).Append(" maxrpm ").Append(N(EngineMaxRpm)).Append('\n');
+        sb.Append("WHEELCLASS wheel radius ").Append(N(r)).Append(" width ").Append(N(WheelWidthCm))
+          .Append(" susp ").Append(N(SuspensionMinCm)).Append(' ').Append(N(SuspensionMaxCm))
+          .Append(" hz ").Append(N(SuspensionHz)).Append(" damping ").Append(N(SuspensionDamping))
+          .Append(" brake ").Append(N(BrakeTorque)).Append(" handbrake ").Append(N(HandBrakeTorque)).Append('\n');
+        void Wheel(string name, float wx, float wy, bool front) =>
+            sb.Append("WHEEL ").Append(name).Append(" class wheel hub ").Append(N(wx)).Append(' ').Append(N(wy)).Append(' ').Append(N(r))
+              .Append(" steer ").Append(N(front ? steer : 0f)).Append(" driven ").Append(front ? '0' : '1')
+              .Append(" handbrake ").Append(front ? '0' : '1').Append('\n');
+        Wheel("FL", x, -y, true);
+        Wheel("FR", x, y, true);
+        Wheel("RL", -x, -y, false);
+        Wheel("RR", -x, y, false);
+        return sb.ToString();
+    }
 }
 
 /// <summary>One wheel as <see cref="Vehicles.CreateCar"/> adds it: the Aver.Physics.Vehicle.AddWheel arguments, named.</summary>
@@ -126,9 +161,22 @@ public readonly struct Car : IEquatable<Car>
     public bool IsValid => Vehicle.IsValid;
 
     /// <summary>The driver's input, which holds until set again: throttle -1..1 (negative reverses), steer -1..1 (+1 toward the
-    /// car's right), brake and handbrake 0..1. False for a dead car.</summary>
+    /// car's right), brake and handbrake 0..1. It goes through the Vehicle component the system reads, so the aids and a driver's
+    /// actions see one source. False for a dead car.</summary>
     public bool SetInput(float throttle, float steer, float brake = 0f, float handbrake = 0f) =>
-        Vehicle.SetInput(throttle, steer, brake, handbrake);
+        Entity.IsValid ? Entity.SetVehicleInput(throttle, steer, brake, handbrake) : Vehicle.SetInput(throttle, steer, brake, handbrake);
+
+    /// <summary>The car's telemetry as of the last physics step. False for a dead car.</summary>
+    public bool TryGetTelemetry(out VehicleTelemetry telemetry) { telemetry = default; return Entity.IsValid && Entity.TryGetVehicleTelemetry(out telemetry); }
+
+    /// <summary>Manual gearbox: one gear up (+1) or down (-1).</summary>
+    public bool Shift(int delta) => Entity.IsValid && Entity.ShiftVehicle(delta);
+
+    /// <summary>Puts the car upright about its heading, stopped, <paramref name="liftCm"/> higher.</summary>
+    public bool Flip(float liftCm = 50f) => Entity.IsValid && Entity.FlipVehicle(liftCm);
+
+    /// <summary>Puts <paramref name="driver"/> in the seat (see <see cref="Entity.EnterVehicle"/>).</summary>
+    public bool Enter(Entity driver) => Entity.IsValid && Entity.EnterVehicle(driver);
 
     /// <summary>Speed, origin position and heading. False for a dead car.</summary>
     public bool TryGetState(out CarState state)
@@ -158,10 +206,9 @@ public readonly struct Car : IEquatable<Car>
     /// <summary>Removes the vehicle, its chassis and its entity.</summary>
     public bool Destroy()
     {
-        bool ok = Vehicle.Destroy();
         Vehicles.Forget(Handle);
-        if (Entity.IsValid && Entity.IsAlive) Entity.Destroy();
-        return ok;
+        if (Entity.IsValid && Entity.IsAlive) Entity.Destroy();   // the system destroys the vehicle with its entity at its next tick ...
+        return Vehicle.Destroy();                                  // ... and this does it now
     }
 
     /// <inheritdoc/>
@@ -174,18 +221,16 @@ public readonly struct Car : IEquatable<Car>
     public override string ToString() => IsValid ? $"Car#{Handle}" : "Car.None";
 }
 
-/// <summary>Builds cars. Needs the physics library; without it <see cref="CreateCar"/> answers <see cref="Car.None"/>.</summary>
-/// <remarks>Cars made here are tracked by their vehicle handle (<see cref="TryGet"/>), which is how Aver Node graphs hold one.
-/// A repeating 60 Hz timer copies each car's pose onto its entity, because a physics body stamped with an entity does not
-/// move that entity by itself; call <see cref="SyncEntities"/> to do it on demand. An entity destroyed during play takes its
-/// car with it.</remarks>
+/// <summary>Builds cars. Needs the physics library and the host's vehicle system; without them <see cref="CreateCar"/> answers
+/// <see cref="Car.None"/>.</summary>
+/// <remarks>Cars made here are tracked by their vehicle handle (<see cref="TryGet"/>), which is how Aver Node graphs hold one. The
+/// vehicle system writes each car's pose onto its entity every frame in C++ (a physics body stamped with an entity does not move that
+/// entity by itself, so something has to; it is no longer a script timer). An entity destroyed during play takes its car with it.</remarks>
 public static class Vehicles
 {
     private const float Gravity = 981f;                 // cm/s^2
-    private const float SyncInterval = 1f / 60f;
 
     private static readonly Dictionary<int, Car> s_cars = new();
-    private static TimerHandle s_sync;
 
     /// <summary>How far a spring of <paramref name="hz"/> hertz sags under a quarter of a car's weight, cm: g / (2 pi f)^2.
     /// The wheel attachment points are lowered by this so the tyres rest on the ground the origin touches.</summary>
@@ -242,49 +287,69 @@ public static class Vehicles
     /// <summary>Builds a default car at <paramref name="position"/> facing <paramref name="yawDegrees"/>.</summary>
     public static Car CreateCar(Vec3 position, float yawDegrees = 0f) => CreateCar(position, yawDegrees, CarSpec.Default);
 
-    /// <summary>Builds the chassis, four wheels, the engine and the simulation, then a scene entity kept at the car's pose.
-    /// <see cref="Car.None"/> when the physics layer refuses the numbers or is not loaded.</summary>
+    /// <summary>Makes the car as .ocvehicle text (<see cref="CarSpec.ToOcVehicle"/>) through the vehicle system, which builds the chassis, four
+    /// wheels, engine and simulation and keeps the entity at the car's pose. <see cref="Car.None"/> when the host has no vehicle system, the
+    /// physics layer refuses the numbers or it is not loaded.</summary>
     public static Car CreateCar(Vec3 position, float yawDegrees, CarSpec spec)
     {
-        try
-        {
-            Quat rot = new Rot(yawDegrees, 0f, 0f).ToQuat();
-            AP.Vehicle v = AP.Vehicle.Create(F3(spec.HalfExtentsCm), spec.GroundClearanceCm, F3(spec.CentreOfMassCm), spec.MassKg,
-                                             F3(position), new AP.Quaternion(rot.X, rot.Y, rot.Z, rot.W));
-            if (!v.IsValid) return Car.None;
-            foreach (WheelPlan w in PlanWheels(spec))
-            {
-                if (v.AddWheel(F3(w.AttachmentCm), w.RadiusCm, w.WidthCm, w.SuspensionMinCm, w.SuspensionMaxCm, w.SuspensionHz,
-                               w.SuspensionDamping, w.MaxSteerDeg, w.BrakeTorque, w.HandBrakeTorque, w.Driven) >= 0) continue;
-                v.Destroy();
-                return Car.None;
-            }
-            if (!v.SetEngine(spec.EngineTorque, spec.EngineMinRpm, spec.EngineMaxRpm) || !v.Finish(spec.MaxPitchRollDeg))
-            {
-                v.Destroy();
-                return Car.None;
-            }
-
-            Entity e = Entity.Create("Car");
-            if (e.IsValid)
-            {
-                e.SetLocalPosition(position);
-                e.SetLocalRotation(rot);
-                v.Body.SetEntity(e.Handle);      // raycasts and contacts on the chassis name the entity
-            }
-            var car = new Car(v, e);
-            s_cars[v.Handle] = car;
-            EnsureSync();
-            return car;
-        }
-        catch (DllNotFoundException) { return Car.None; }
-        catch (EntryPointNotFoundException) { return Car.None; }   // a physics DLL without the vehicle ABI
+        Entity e = SpawnFromText(spec.ToOcVehicle(), position, yawDegrees, out int vehicle);
+        return e.IsValid && s_cars.TryGetValue(vehicle, out Car car) ? car : Car.None;
     }
 
-    /// <summary>The car made by <see cref="CreateCar"/> with this vehicle handle, if it still exists.</summary>
+    /// <summary>Makes a vehicle entity from an .ocvehicle content path or a built-in preset name ("car", "van", "truck", "bus", "sports",
+    /// "tank") at a pose, built now. The entity has no mesh: give it children for its wheels and a mesh for its body, or use a level
+    /// placement with a Vehicle component. Needs the vehicle system in the host; <c>default</c> when it is missing or the spec is refused.</summary>
+    public static Entity Spawn(string assetOrPreset, Vec3 position, float yawDegrees = 0f) =>
+        SpawnCore(assetOrPreset, position, yawDegrees, out _);
+
+    /// <summary>The same from inline .ocvehicle text (it begins <c>OCVEHICLE 1</c>).</summary>
+    public static Entity SpawnFromText(string ocvehicleText, Vec3 position, float yawDegrees = 0f) =>
+        SpawnCore(ocvehicleText, position, yawDegrees, out _);
+
+    internal static Entity SpawnFromText(string ocvehicleText, Vec3 position, float yawDegrees, out int vehicle) =>
+        SpawnCore(ocvehicleText, position, yawDegrees, out vehicle);
+
+    private static Entity SpawnCore(string text, Vec3 position, float yawDegrees, out int vehicle)
+    {
+        vehicle = 0;
+        if (string.IsNullOrEmpty(text)) return default;
+        try
+        {
+            if (FwVehicle.aver_fw_vehicle_spawn(text, position.X, position.Y, position.Z, yawDegrees, out int entity, out vehicle) == 0) return default;
+            var e = new Entity(entity);
+            // So the older rows, which hold a vehicle by its physics handle, find it.
+            s_cars[vehicle] = new Car(new AP.Vehicle(vehicle), e);
+            return e;
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { return default; }
+    }
+
+    /// <summary>Takes up to <paramref name="buffer"/>.Length pending vehicle events (skids, landings, impacts, shifts, crashes, flips,
+    /// getting in and out) off the queue, oldest first, and returns how many. One consumer should own the queue.</summary>
+    public static int DrainEvents(Span<VehicleEvent> buffer)
+    {
+        if (buffer.Length == 0) return 0;
+        var ints = new int[buffer.Length * FwVehicle.EventInts];
+        var floats = new float[buffer.Length * FwVehicle.EventFloats];
+        int n;
+        try { n = FwVehicle.aver_fw_vehicle_drain_events(ints, floats, buffer.Length); }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { return 0; }
+        n = Math.Clamp(n, 0, buffer.Length);
+        for (int k = 0; k < n; k++)
+        {
+            int i = k * FwVehicle.EventInts, f = k * FwVehicle.EventFloats;
+            buffer[k] = new VehicleEvent((VehicleEventKind)ints[i], new Entity(ints[i + 1]), ints[i + 2], ints[i + 3],
+                new Vec3(floats[f], floats[f + 1], floats[f + 2]), new Vec3(floats[f + 3], floats[f + 4], floats[f + 5]),
+                floats[f + 6], floats[f + 7], ints[i + 4]);
+        }
+        return n;
+    }
+
+    /// <summary>The car made by <see cref="CreateCar"/> (or <see cref="Spawn"/>) with this vehicle handle, if it still exists.</summary>
     public static bool TryGet(int vehicleHandle, out Car car) => s_cars.TryGetValue(vehicleHandle, out car);
 
-    /// <summary>Copies each car's pose onto its entity now. Runs by itself every sixtieth of a second while a car exists.</summary>
+    /// <summary>Forgets cars whose entity died or whose physics world was reset. The system now keeps the entities at their vehicles'
+    /// poses, so this no longer writes anything; it is kept for scripts that called it.</summary>
     public static void SyncEntities()
     {
         if (s_cars.Count == 0) return;
@@ -297,27 +362,17 @@ public static class Vehicles
                 (gone ??= new()).Add(handle);
                 continue;
             }
-            if (!car.Vehicle.TryGetPose(out AP.Float3 p, out AP.Quaternion q))
-            {
-                (gone ??= new()).Add(handle);    // the physics world was reset under it
-                continue;
-            }
-            if (!car.Entity.IsValid) continue;
-            car.Entity.SetLocalPosition(new Vec3(p.X, p.Y, p.Z));
-            car.Entity.SetLocalRotation(new Quat(q.X, q.Y, q.Z, q.W));
+            if (!car.Vehicle.TryGetPose(out _, out _)) (gone ??= new()).Add(handle);   // the physics world was reset under it
         }
         if (gone != null)
             foreach (int h in gone) s_cars.Remove(h);
-        if (s_cars.Count == 0 && s_sync.IsValid) { Timers.Clear(s_sync); s_sync = default; }
     }
 
     internal static void Forget(int vehicleHandle) => s_cars.Remove(vehicleHandle);
 
-    private static void EnsureSync()
+    /// <summary>Makes a vehicle the system built for a level placement findable by its physics handle, which is how the older rows hold one.</summary>
+    internal static void Adopt(int vehicleHandle, Entity entity)
     {
-        if (s_sync.IsValid && Timers.IsActive(s_sync)) return;
-        s_sync = Timers.Set(SyncInterval, () => SyncEntities(), repeat: true, flags: TimerFlags.IgnoreDilation);
+        if (vehicleHandle != 0 && !s_cars.ContainsKey(vehicleHandle)) s_cars[vehicleHandle] = new Car(new AP.Vehicle(vehicleHandle), entity);
     }
-
-    private static AP.Float3 F3(Vec3 v) => new(v.X, v.Y, v.Z);
 }

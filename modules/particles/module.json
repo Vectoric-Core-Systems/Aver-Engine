@@ -3,7 +3,7 @@
   "name": "Aver.Particles",
   "dir": "particles",
   "displayName": "Particles",
-  "description": "CPU-simulated billboard particles, depth-tested against the scene.",
+  "description": "CPU and GPU simulated particles (sprites, ribbons, mesh particles) with a module stack and spawn-at-event, depth-tested against the scene.",
   "category": "Rendering",
   "option": "AVER_MODULE_PARTICLES",
   "required": false,

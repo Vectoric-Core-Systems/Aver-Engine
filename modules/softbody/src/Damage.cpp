@@ -56,30 +56,23 @@ DamageResult evaluateStrain(Cage& c, const DamageConfig& cfg) {
     return res;
 }
 
-DepositResult depositEnergy(Cage& c, const DamageDeposit& d, f32 impulseEfficiency, f32 maxKickCmS) {
+DepositResult depositWeighted(Cage& c, const std::vector<f32>& beamWeight, f32 energyJ, f32 impulseEfficiency, f32 maxKickCmS) {
     DepositResult res;
-    if (!c.built || d.radiusCm <= 0.0f || d.energyJ <= 0.0f) return res;
-    const f32 r = d.radiusCm;
-    const f32 rSq = r * r;
+    if (!c.built || !(energyJ > 0.0f)) return res;
+    const u32 n = static_cast<u32>(std::min(c.beams.size(), beamWeight.size()));
 
-    // Falloff weights first, so the energy is shared by what is actually in reach.
-    std::vector<f32> weight(c.beams.size(), 0.0f);
+    // Weights first, so the energy is shared by what is actually in reach.
     f32 total = 0.0f;
-    for (u32 bi = 0; bi < c.beams.size(); ++bi) {
-        const Beam& b = c.beams[bi];
-        if (b.broken) continue;
-        const f32 d2 = distSquared(midpoint(c, b), d.point);
-        if (d2 >= rSq) continue;
-        const f32 f = 1.0f - std::sqrt(d2) / r;
-        weight[bi] = f * f;
-        total += weight[bi];
-    }
+    for (u32 bi = 0; bi < n; ++bi)
+        if (!c.beams[bi].broken && beamWeight[bi] > 0.0f) total += beamWeight[bi];
+    std::vector<u8> touched(c.particles.size(), 0);
     if (total > 0.0f) {
-        for (u32 bi = 0; bi < c.beams.size(); ++bi) {
-            if (weight[bi] <= 0.0f) continue;
+        for (u32 bi = 0; bi < n; ++bi) {
+            if (c.beams[bi].broken || !(beamWeight[bi] > 0.0f)) continue;
             Beam& b = c.beams[bi];
-            b.damage += d.energyJ * weight[bi] / total;
+            b.damage += energyJ * beamWeight[bi] / total;
             ++res.beamsDamaged;
+            touched[b.a] = touched[b.b] = 1;
             const Material& m = c.materials[b.material];
             const bool breaks = (isBrittle(m.behavior) || m.toughnessJ > 0.0f) && b.damage >= m.toughnessJ;
             if (breaks) {
@@ -92,11 +85,41 @@ DepositResult depositEnergy(Cage& c, const DamageDeposit& d, f32 impulseEfficien
     }
 
     f32 mass = 0.0f, pinnedMass = 0.0f;
+    for (u32 i = 0; i < c.particles.size(); ++i) {
+        if (!touched[i]) continue;
+        (c.particles[i].pinned ? pinnedMass : mass) += c.particles[i].mass;
+    }
+    res.massKg = mass > 0.0f ? mass : pinnedMass;
+    if (res.massKg > 0.0f)
+        res.kickSpeedCmS = std::min(maxKickCmS, std::sqrt(2.0f * impulseEfficiency * energyJ / res.massKg) * 100.0f);
+    return res;
+}
+
+DepositResult depositEnergy(Cage& c, const DamageDeposit& d, f32 impulseEfficiency, f32 maxKickCmS, const std::vector<u8>* skipBeam) {
+    DepositResult res;
+    if (!c.built || d.radiusCm <= 0.0f || d.energyJ <= 0.0f) return res;
+    const f32 r = d.radiusCm;
+    const f32 rSq = r * r;
+
+    std::vector<f32> weight(c.beams.size(), 0.0f);
+    for (u32 bi = 0; bi < c.beams.size(); ++bi) {
+        const Beam& b = c.beams[bi];
+        if (b.broken || (skipBeam && bi < skipBeam->size() && (*skipBeam)[bi])) continue;
+        const f32 d2 = distSquared(midpoint(c, b), d.point);
+        if (d2 >= rSq) continue;
+        const f32 f = 1.0f - std::sqrt(d2) / r;
+        weight[bi] = f * f;
+    }
+    res = depositWeighted(c, weight, d.energyJ, impulseEfficiency, maxKickCmS);
+
+    // The kick of an impact or an explosion is the mass of everything in the sphere, not only of the weighted beams.
+    f32 mass = 0.0f, pinnedMass = 0.0f;
     for (const Particle& p : c.particles) {
         if (distSquared(p.pos, d.point) >= rSq) continue;
         (p.pinned ? pinnedMass : mass) += p.mass;
     }
     res.massKg = mass > 0.0f ? mass : pinnedMass;
+    res.kickSpeedCmS = 0.0f;
     if (res.massKg > 0.0f)
         res.kickSpeedCmS = std::min(maxKickCmS, std::sqrt(2.0f * impulseEfficiency * d.energyJ / res.massKg) * 100.0f);
     return res;

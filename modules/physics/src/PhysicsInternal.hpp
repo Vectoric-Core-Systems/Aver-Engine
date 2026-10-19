@@ -30,7 +30,12 @@
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Vehicle/VehicleConstraint.h>
+#include <Jolt/Physics/Vehicle/VehicleEngine.h>
+#include <Jolt/Physics/Vehicle/VehicleTransmission.h>
 
+#include "aver/physics/physics_vehicle_ext_abi.h"
+
+#include <map>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -172,6 +177,41 @@ struct VehicleWheelDesc {
     bool  driven = false;
 };
 
+// One axle as the geometry rule finds it (see vehicleAxles): indices into the builder's wheel list, -1 for a
+// missing side. "Left" is the -Y side.
+struct VehicleAxlePair {
+    int left = -1;
+    int right = -1;
+};
+
+// VEHICLES v2 builder data. Every default is Jolt's own (or the v1 builder's), so a vehicle that never calls a
+// physics_vehicle_ext_abi.h function builds the same Jolt objects v1 did.
+struct VehicleAxleDesc {
+    float finalDrive = 3.42f;
+    int32_t diffMode = 1;            // 1 at 1.4 is Jolt's default, not "open": see the header
+    float lsdRatio = 1.4f, split = 0.5f, share = 0.0f, antiRoll = 1000.0f;
+};
+struct VehicleWheelExt {
+    float inertia = 0.9f, angDamping = 0.2f, tvLong = 4.0f, tvLat = 2.0f, brakeBias = 1.0f;
+    std::vector<float> longSlip, longMu, latDeg, latMu;     // empty = Jolt's default curve
+};
+struct VehicleTrackDesc {
+    std::vector<int32_t> wheels;
+    int32_t driven = -1;
+    float inertia = 10.0f, damping = 0.5f, brakeNm = 15000.0f, finalDrive = 6.0f, steerGain = 1.6f, pivot = 0.6f;
+};
+
+// What the fixed step keeps between steps for one wheel.
+struct VehicleWheelLive {
+    float absFactor = 1.0f;          // ABS: 1 = full brake, falls to 0 while the wheel locks
+    float airborne = 0.0f;           // seconds without contact
+    bool  hadContact = false;
+    bool  skidding = false;
+    float skidPeak = 0.0f;
+    float f[AVER_PHYS_VWS_COUNT] = {};
+    int32_t i[AVER_PHYS_VWSI_COUNT] = {};
+};
+
 // A vehicle: its chassis body and, once finished, the Jolt constraint that drives it. The constraint is
 // also a step listener registered with the system, so it must be removed from both BEFORE the chassis
 // body goes -- PhysicsVehicle.cpp's releaseVehicleOfBody is the one place that does it.
@@ -182,6 +222,67 @@ struct VehicleEntry {
     float engineMaxTorque = 500.0f;                    // N*m, Jolt's own defaults until set_engine
     float engineMinRpm = 1000.0f;
     float engineMaxRpm = 6000.0f;
+
+    // ---- the chassis as create() was given it (set_chassis_boxes rebuilds the shape from these) ----
+    float halfCm[3] = {0, 0, 0};
+    float clearanceCm = 0.0f;
+    float comCm[3] = {0, 0, 0};
+    float massKg = 0.0f;
+    std::vector<float> boxes;                          // 6 floats a box, empty = create()'s box
+
+    // ---- v2 builder data ----
+    int32_t kind = AVER_PHYS_VEH_KIND_WHEELED;
+    float engineInertia = 0.0f;                        // 0 = Jolt's 0.5 scaled by torque / 500, as v1
+    float engineDamping = 0.2f;
+    std::vector<float> curveX, curveY;                 // empty = Jolt's torque curve
+    bool manual = false;
+    std::vector<float> gearFwd, gearRev;               // empty = Jolt's ratios; reverse stored as magnitudes
+    float gearbox[AVER_PHYS_VG_COUNT] = {0.5f, 0.3f, 0.5f, 0.6f, 0.2f, 0.0f};
+    std::vector<VehicleAxleDesc> axleDesc;             // indexed by axle (front first), grown on demand
+    bool centerSet = false;
+    float centerLsd = 1.4f;                            // Jolt's default; FLT_MAX is written for "open"
+    std::vector<VehicleWheelExt> wheelExt;             // grown on demand
+    std::vector<float> allLongSlip, allLongMu, allLatDeg, allLatMu;   // set_wheel_curves(-1)
+    VehicleTrackDesc track[2];
+    float assist[AVER_PHYS_VD_COUNT] = {0, 0, 0.25f, 8.0f, 0, 0.35f, 3.0f, 5.0f, 0, 6.0f, 8.0f, 8.0f, 1.0f, 50.0f, 0.3f, 30.0f, 0.45f, 12.0f};
+    float drag = 0.0f, downforce = 0.0f;
+    int32_t collisionPeriod = 1;
+    float tune[AVER_PHYS_VU_COUNT] = {1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+    float maxPitchRollDeg = 0.0f;
+
+    // ---- kept at _finish: the live wheel settings the step hook and _tune adjust ----
+    std::vector<JPH::Ref<JPH::WheelSettings>> wheelSettings;
+    std::vector<float> baseSpringHz;                   // the builder's spring frequencies, for SUSPENSION_STIFFNESS_SCALE
+    float baseTrackBrake[2] = {0, 0};
+
+    // ---- the fixed step's state (everything below is derived; none of it reads a clock) ----
+    float reqT = 0, reqS = 0, reqB = 0, reqH = 0;      // the pedals as set
+    float appT = 0, appS = 0, appB = 0, appH = 0;      // as applied after the aids
+    float tcsFactor = 1.0f;
+    bool  absActive = false, tcsActive = false;
+    int32_t gear = 0;                                  // manual: the requested gear
+    float shiftLeft = 0.0f, clutchRelease = 0.0f;      // manual: seconds of open clutch, then of release
+    int32_t lastGear = 0;
+    float lastRpm = 0.0f;
+    float lastVel[3] = {0, 0, 0};                      // Jolt m/s at the end of the last step
+    float longAccelG = 0.0f, latAccelG = 0.0f;
+    float airborneAll = 0.0f;
+    float sideSeconds = 0.0f;
+    bool  flippedSent = false;
+    std::vector<VehicleWheelLive> live;
+    float vs[AVER_PHYS_VS_COUNT] = {};
+    int32_t vsi[AVER_PHYS_VSI_COUNT] = {};
+};
+
+// One polled vehicle event (physics_vehicle_ext_abi.h), and an impact before it is merged into one.
+struct VehicleEventRec {
+    int32_t kind = 0, vehicle = 0, a = 0, b = 0;
+    float f[8] = {};
+};
+struct VehicleImpactRaw {
+    int32_t vehicle = 0, other = 0;
+    float closingCmS = 0.0f, otherMassKg = 0.0f;
+    Vec3 point, normal;
 };
 
 // ---- The world ------------------------------------------------------------------------------------
@@ -201,7 +302,9 @@ struct World {
     // Vehicles share the one handle counter below, and the chassis is an ordinary entry in `bodies`.
     // `vehicleOfBody` is the way back from that body, so aver_phys_remove_body can find the vehicle that
     // must go first without walking the table.
-    std::unordered_map<int32_t, VehicleEntry> vehicles;
+    // An ORDERED map: the vehicle step hooks walk it in handle order, which is their determinism contract.
+    // Node-based, so a pointer into an entry (the combine-friction lambda keeps one) survives other inserts.
+    std::map<int32_t, VehicleEntry> vehicles;
     std::unordered_map<int32_t, int32_t> vehicleOfBody;
     // What each character's GROUND added to its velocity on the last fixed step, in Jolt's units and
     // axes: the moving platform, lift or train it rides. aver_phys_step adds it for the update and takes
@@ -223,6 +326,10 @@ struct World {
     std::mutex                 eventMutex;
     std::vector<ContactEvent>  contacts;
     std::vector<OverlapEvent>  overlaps;
+    // Vehicle events, polled like contacts and cleared at the top of aver_phys_step; the raw impacts are what the
+    // contact listener noted (under the mutex) and vehicleStepEnd merges.
+    std::vector<VehicleEventRec>  vehicleEvents;
+    std::vector<VehicleImpactRaw> vehicleImpacts;
 
     float fixedStep = 1.0f / 60.0f;
     float accumulator = 0.0f;
@@ -296,5 +403,50 @@ void releaseVehicleOfBody(int32_t body);
 // repository keeps shipping and then finding unused.
 void applyCharacterStairSettings(int32_t handle, JPH::CharacterVirtual::ExtendedUpdateSettings& out);
 void clearCharacterStairSettings();
+
+// ---- VEHICLES v2 (PhysicsVehicle.cpp, PhysicsVehicleExt.cpp, PhysicsVehicleTracked.cpp) ------------------
+
+// The vehicle behind a handle (records why it failed on aver_phys_last_error), and the same once finished.
+VehicleEntry* findVehicle(int32_t h);
+VehicleEntry* findFinished(int32_t h);
+
+// The axles of a wheel list by the v1 geometry rule (same x within 5 cm, opposite sides of y = 0), front
+// (largest x) first. The index into this list is the axle number the ABI speaks of.
+std::vector<VehicleAxlePair> vehicleAxles(const std::vector<VehicleWheelDesc>& wheels);
+
+// The engine and gearbox settings a vehicle describes, shared by the wheeled and the tracked controller.
+void vehicleFillPowertrain(const VehicleEntry& e, JPH::VehicleEngineSettings& engine,
+                           JPH::VehicleTransmissionSettings& trans);
+
+// Tracked finish: builds the WheelSettingsTV wheels and the TrackedVehicleController into `settings`.
+// False (having logged why) refuses the finish.
+bool vehicleBuildTracked(VehicleEntry& e, JPH::VehicleConstraintSettings& settings, int32_t handle);
+// The pedals as a tracked controller takes them (forward, left and right track ratios, brake).
+void vehicleTrackedInput(VehicleEntry& e, float throttle, float steer, float brake, float handbrake);
+// Track speeds at the rim of the driven wheel, cm/s: left, right.
+void vehicleTrackSpeeds(const VehicleEntry& e, float& leftCmS, float& rightCmS);
+// Sets every track's brake torque to its builder value times `scale`.
+void vehicleTrackedBrakeScale(VehicleEntry& e, float scale);
+// The average track angular velocity times the final drive and the gearbox ratio, as engine rpm.
+float vehicleTrackedWheelRpm(const VehicleEntry& e);
+
+// Either controller's engine and gearbox.
+JPH::VehicleEngine& vehicleEngine(VehicleEntry& e);
+JPH::VehicleTransmission& vehicleTransmission(VehicleEntry& e);
+// Sends pedals to the controller of either kind, waking a sleeping chassis on throttle.
+void vehicleApplyInput(VehicleEntry& e, float throttle, float steer, float brake, float handbrake);
+// Called by _finish once the constraint exists: sizes the live state and applies the tune table.
+void vehicleOnFinished(VehicleEntry& e);
+// Stops everything that spins and puts the gearbox in neutral (the teleport reset of _set_pose and _flip).
+void vehicleResetDrivetrain(VehicleEntry& e);
+
+// The fixed-loop hooks (PhysicsWorld.cpp): top of aver_phys_step, before and after system.Update.
+void vehicleBeginCall();
+void vehicleStepBegin(float dt);
+void vehicleStepEnd(float dt);
+// A new contact the listener saw, with the body handles and the contact normal (body a to body b, engine axes).
+// Called under World::eventMutex on a worker thread; notes a chassis hit for vehicleStepEnd.
+void vehicleOnContact(int32_t ha, int32_t hb, const JPH::Body& a, const JPH::Body& b,
+                      const Vec3& pointCm, const Vec3& normal);
 
 } // namespace aver::physics::detail

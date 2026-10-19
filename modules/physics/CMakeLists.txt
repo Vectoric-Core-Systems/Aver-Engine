@@ -33,6 +33,11 @@ add_library(Aver.Physics SHARED
   # over the handle tables in src/PhysicsInternal.hpp, with the vehicle table and its teardown hooks
   # (destroyAllVehicles, releaseVehicleOfBody) defined here and called from PhysicsWorld.cpp.
   src/PhysicsVehicle.cpp
+  # VEHICLES v2 (physics_vehicle_ext_abi.h): the engine / gearbox / differential / tyre builder calls, the driver
+  # aids, aero, telemetry and events the fixed step runs around system.Update (vehicleStepBegin / End), and the
+  # tracked vehicle (Jolt's TrackedVehicleController behind the same builder).
+  src/PhysicsVehicleExt.cpp
+  src/PhysicsVehicleTracked.cpp
   # Ragdolls from a skeleton (physics_ragdoll_abi.h): Jolt's Ragdoll with kinematic, limp and powered modes.
   src/PhysicsRagdoll.cpp
   # Shape casts, overlaps, multi-hit rays and point queries (physics_queries_abi.h).

@@ -4,8 +4,9 @@
 cloth and destruction. The scene half is `Aver.SoftBody.Scene`; the design is `docs/SOFTBODY.md`.
 The older `aver_phys_softbody_*` surface (`physics_abi.h`) is untouched; Fluids still uses it.
 
-Nothing here was compiled or run when it was written. Jolt API details marked UNVERIFIED below are the
-first things to check in a build.
+The ABI is at version 2 (`AVER_PHYS_SB_ABI_VERSION`, `aver_phys_sb_abi_version`). Version 2 added
+`aver_phys_sb_add_velocity` and nothing else; wave 10's depth work is otherwise scene-side. Jolt API details marked
+UNVERIFIED below are the first things to check in a build.
 
 ## Why a second surface
 
@@ -28,7 +29,7 @@ need three things it cannot do:
 | Group | Calls |
 |---|---|
 | Builder | `builder_begin`, `_vertices`, `_faces`, `_edges`, `_bends`, `_skin`, `_params`, `_finish`, `_cancel` |
-| Live edits | `set_edge_rest`, `rest_bends_from_pose`, `set_params`, `set_active`, `is_active`, `impulse` |
+| Live edits | `set_edge_rest`, `rest_bends_from_pose`, `set_params`, `set_active`, `is_active`, `impulse`, `add_velocity` |
 | Skin | `skin_world` (palette of row-major 4x4 matrices composed as `T(com) * skin * entityWorld * T(-com)`) |
 | Aero | `set_aero`, `set_wind` |
 | Readback | `state` (positions and velocities in world cm), `vertex_count`, `count` |
@@ -36,6 +37,10 @@ need three things it cannot do:
 
 `AVER_PHYS_SB_P_*` indices (iterations, damping, friction, restitution, gravity scale, vertex radius,
 max speed, allow sleep, double sided, layer, entity, impacts). A NaN entry leaves the value alone.
+
+`aver_phys_sb_add_velocity(body, vertex, dvXyz, n)` adds a velocity delta (cm/s, world) to `n` listed vertices in one call;
+it is how Soft Fields push cloth and debris without a rebuild or an impulse per vertex. It wakes a sleeping body, ignores
+hard-pinned vertices (invMass 0) and refuses a bad handle or vertex index. Single threaded like the rest.
 
 ## Conventions
 

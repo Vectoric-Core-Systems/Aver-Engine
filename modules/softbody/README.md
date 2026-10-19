@@ -13,12 +13,16 @@ Design: **docs/SOFTBODY.md**.
 
 | File | What |
 |---|---|
-| `Material.hpp` | `Material` (yield, break, toughness, Jolt compliance), `SoftPreset` and the preset table, crush curve |
+| `Material.hpp` | `Material` (yield, break, toughness, Jolt compliance), `SoftPreset` and the preset table (with `capThicknessCm`), crush curve |
 | `Cage.hpp` / `Cage.cpp` | particles, beams, dihedral bends, triangles; build/repair; tear resolution; masses |
 | `SimMesh.hpp` | weld a render mesh into particles, build the cage and its `RenderBinding`, pins and reach from paint, rules or a mask |
-| `Damage.hpp` | `evaluateStrain` (creep, snap), `depositEnergy`, `tearWithin`, `repairAll` |
+| `Damage.hpp` | `evaluateStrain` (creep, snap), `depositEnergy` (the sphere case of `depositWeighted`), `tearWithin`, `repairAll` |
 | `Islands.hpp` | connected pieces after a tear, anchored first, dust below the minimum |
 | `RenderBinding.hpp` | render vertices and triangles following tears |
-| `SoftAsset.hpp` | `.ocsoft` read/write, validation, the paint run-length codec |
+| `SoftAsset.hpp` | `.ocsoft` read/write, validation, the paint run-length codec; `caps`, `effects` and `proxy` sections, `softAssetKey` |
+| `Caps.hpp` / `Caps.cpp` | back skin and wall geometry for a torn piece, smooth normals, generated UVs |
+| `Fields.hpp` / `Fields.cpp` | field kinds and shapes, frames, distance and weight, velocity delta, beam weights, key words |
+| `SoftState.hpp` / `SoftState.cpp` | the `softbody` save payload: encode, decode, staleness, tear-group merging |
+| `ProxyBind.hpp` / `ProxyBind.cpp` | bind a render mesh to a low-poly proxy cage and evaluate it each frame |
 
-Tests: `tests/softbody` (`SoftBodyTest`, `SoftAssetTest`, `SimMeshTest`, `DamageTest`, `IslandsTest`).
+Tests: `tests/softbody` (`SoftBodyTest`, `SoftAssetTest`, `SimMeshTest`, `DamageTest`, `IslandsTest`, `FieldsTest`, `CapsTest`, `SoftStateTest`, `ProxyBindTest`).

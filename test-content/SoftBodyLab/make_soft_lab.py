@@ -84,6 +84,9 @@ sheet("Cape", 0.7, 1.0, 12, 16, x0=-0.35, y0=0.0)
 # Destructibles. Glass and door are sheets; the crate is a closed box so it breaks into planks.
 sheet("GlassPane", 1.2, 1.8, 12, 18, x0=-0.6, y0=0.0)
 sheet("SteelDoor", 1.0, 2.1, 10, 21, x0=-1.0, y0=0.0)
+# The same door at 12000 triangles (51 x 121 = 6171 welded vertices), over the 4096-particle cap: it is simulated through a cooked
+# proxy cage ("Create proxy cage" in Details; docs/SOFTBODY.md "Proxy cage").
+sheet("HighPolyDoor", 1.0, 2.1, 50, 120, x0=-1.0, y0=0.0)
 box("PlankCrate", 0.8, 0.8, 0.8, 6, cy=0.4)
 # Static dressing (no soft body): a pole, a lintel and a mannequin torso.
 box("Pole", 0.06, 3.2, 0.06, 1, cy=1.6)

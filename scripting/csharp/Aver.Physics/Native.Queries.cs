@@ -12,6 +12,7 @@ internal static partial class Native
 {
     [DllImport(Lib)] internal static extern int aver_phys_box_cast(float cx, float cy, float cz, float hx, float hy, float hz, float qx, float qy, float qz, float qw, float dx, float dy, float dz, uint layerMask, int ignoreBody, int flags, out float outDistance, float[] outPoint, float[] outNormal);
     [DllImport(Lib)] internal static extern int aver_phys_capsule_cast(float cx, float cy, float cz, float radius, float height, float qx, float qy, float qz, float qw, float dx, float dy, float dz, uint layerMask, int ignoreBody, int flags, out float outDistance, float[] outPoint, float[] outNormal);
+    [DllImport(Lib)] internal static extern int aver_phys_sphere_cast_q(float cx, float cy, float cz, float dx, float dy, float dz, float radius, uint layerMask, int ignoreBodyA, int ignoreBodyB, int flags, out float outDistance, float[] outPoint, float[] outNormal);
     [DllImport(Lib)] internal static extern int aver_phys_body_cast(int body, float dx, float dy, float dz, uint layerMask, int ignoreBody, int flags, out float outDistance, float[] outPoint, float[] outNormal);
 
     [DllImport(Lib)] internal static extern int aver_phys_overlap_box(float cx, float cy, float cz, float hx, float hy, float hz, float qx, float qy, float qz, float qw, uint layerMask, int ignoreBody, int flags, int[] outBodies, int maxCount);

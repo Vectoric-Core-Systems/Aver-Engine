@@ -1,0 +1,26 @@
+OCPARTICLE 2
+NAME Rain 100k
+# Wave 10 demo: 100,000 live particles on the GPU. 50,000 drops a second, each living two seconds, stretched along their
+# velocity. Wind is a user parameter a script can set (Particles.SetVector). No sorting: thin alpha-blended streaks do not need it.
+PARAM Wind vec3 0 0 0
+EMITTER Rain
+SIM gpu
+SHAPE box 3000 3000 10
+BLEND alphablend
+EMISSION 50000 0 100000
+LIFETIME 2 2
+DIRECTION 0 0 -1 1.5
+SPEED 850 1000
+GRAVITY 0 0 0
+DAMPING 0
+SIZE 1.4 1.4
+COLOR start 0.75 0.82 0.95 0.35
+COLOR end 0.75 0.82 0.95 0.25
+SPRITE velocity stretch 0.9
+SORT none
+LIGHTING ambient
+FOG on
+GI on
+BOUNDS 4500
+CULL 12000
+MODULE update.force x=@Wind.x y=@Wind.y z=@Wind.z

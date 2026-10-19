@@ -237,6 +237,40 @@ if(TARGET Aver.SoftBody AND TARGET Aver.Scene)
   target_include_directories(SoftBodyDetailsModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
   target_link_libraries(SoftBodyDetailsModelTest PRIVATE Aver.SoftBody Aver.Scene Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(SoftBodyDetailsModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  # SoftFieldDetailsModelTest: field model, tuning HUD text, soft body depth helpers, proxy cook (headless).
+  add_executable(SoftFieldDetailsModelTest src/SoftFieldDetailsModelTest.cpp ${CMAKE_SOURCE_DIR}/sandbox/src/SoftProxyTool.cpp)
+  target_include_directories(SoftFieldDetailsModelTest PRIVATE src ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(SoftFieldDetailsModelTest PRIVATE Aver.SoftBody Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+  if(TARGET Aver.Trifactor)
+    target_link_libraries(SoftFieldDetailsModelTest PRIVATE Aver.Trifactor)
+    target_compile_definitions(SoftFieldDetailsModelTest PRIVATE AVER_MODULE_TRIFACTOR=1)
+  endif()
+  set_target_properties(SoftFieldDetailsModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+
+# VehicleDetailsModelTest -- sandbox/src/VehicleDetailsModel.hpp and the Vehicle row of PlacedComponentModel.hpp (no ImGui): preset rows, the canonical
+# COMPONENT Vehicle record, attach rules, the live-tune table, Create .ocvehicle paths, the Play-time formatting.
+if(TARGET Aver.Scene AND TARGET Aver.Formats)
+  add_executable(VehicleDetailsModelTest src/VehicleDetailsModelTest.cpp)
+  target_include_directories(VehicleDetailsModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(VehicleDetailsModelTest PRIVATE Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(VehicleDetailsModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+# VehicleEditorModelTest -- sandbox/src/VehicleEditorModel.hpp over VehicleSpec: curves, power and gear top speeds, axles and the drive layout, wheel add/remove, validation.
+if(TARGET Aver.Vehicle)
+  add_executable(VehicleEditorModelTest src/VehicleEditorModelTest.cpp)
+  target_include_directories(VehicleEditorModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(VehicleEditorModelTest PRIVATE Aver.Vehicle Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(VehicleEditorModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+# CameraRigDetailsModelTest -- sandbox/src/CameraRigDetailsModel.hpp (header-only, no ImGui): the preset/mode/curve rows, the canonical COMPONENT CameraRig
+# record and its round trip with CCameraRig, the Add Component kind and its attach rules, the layer-mask checklist and the near-plane warning.
+if(TARGET Aver.Camera AND TARGET Aver.Scene)
+  add_executable(CameraRigDetailsModelTest src/CameraRigDetailsModelTest.cpp)
+  target_include_directories(CameraRigDetailsModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(CameraRigDetailsModelTest PRIVATE Aver.Camera Aver.Scene Aver.Formats Aver.Core)
+  set_target_properties(CameraRigDetailsModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 # BtEditorTest -- the .ocbt behaviour-tree editor tab's headless core: the four structural edits
 # (add/delete/reparent/reorder) and the tab's own load/save/dirty/undo bookkeeping.
@@ -299,6 +333,18 @@ if(TARGET Aver.Formats.Particles)
   target_link_libraries(ParticleEditorLoadSaveTest PRIVATE
     Aver.Formats.Particles Aver.Particles Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(ParticleEditorLoadSaveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+
+# ParticleStackModelTest -- the particle editor's ImGui-free edit logic (sandbox/src/ParticleStackModel.hpp): every edit function,
+# its clamping, the cascades on emitter and parameter removal, and a write+parse round trip of each result. Header-only logic, so
+# no sandbox source is compiled; same guard as ParticleEditorLoadSaveTest above.
+if(TARGET Aver.Formats.Particles)
+  add_executable(ParticleStackModelTest src/ParticleStackModelTest.cpp)
+  target_include_directories(ParticleStackModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(ParticleStackModelTest PRIVATE
+    Aver.Formats.Particles Aver.Particles Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(ParticleStackModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
 # FoliageTypeEditorTest -- the .ocfoliage foliage-type editor tab's headless core: load / save /

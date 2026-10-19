@@ -83,7 +83,8 @@ constexpr GraphComponentKind kGraphComponentKinds[] = {
     {"Animator",     "A clip and the clock running it. Each COMP is its own entity, so this cannot "
                      "pose a SkeletalMesh beside it -- use the PlayAnimation node for that."},
     {"Particles",    "One emitter instance, playing a .ocparticle effect."},
-    {"Camera",       "Camera parameters. Stored correctly; no renderer reads CCamera yet."},
+    {"Camera",       "Camera parameters (FoV, clip, priority). Nothing reads a bare Camera; a CameraRig carries its own and drives the view."},
+    {"CameraRig",    "Spring-arm camera for the instance: chase, orbit, first person, seat, top-down or fixed, with collision, lag and blends."},
     {"Light",        "A light. Stored correctly; no renderer reads CLight yet."},
     {"Fluid",        "A simulated fluid volume. Size comes from scale=; 1,1,1 is a 2x2x1 m pool."},
 };
@@ -130,6 +131,12 @@ constexpr GraphComponentAttrRow kCameraRows[] = {
     {"far", "Far (cm)", "100000"},
     {"priority", "Priority", "0"},
 };
+constexpr GraphComponentAttrRow kCameraRigRows[] = {
+    {"preset", "Preset", "chase | vehiclechase | orbit | firstperson | seat | topdown | fixed"},
+    {"mode", "Mode", "chase | orbit | firstperson | seat | topdown | fixed"},
+    {"arm", "Arm length (cm)", "450"},
+    {"target", "Target", "parent | self"},
+};
 constexpr GraphComponentAttrRow kLightRows[] = {
     {"kind", "Kind", "point | spot | directional"},
     {"r", "Red", "1"}, {"g", "Green", "1"}, {"b", "Blue", "1"},
@@ -160,6 +167,7 @@ constexpr GraphComponentAttrSet kGraphComponentAttrs[] = {
     {"Animator", kAnimRows, 3},
     {"Particles", kParticleRows, 2},
     {"Camera", kCameraRows, 4},
+    {"CameraRig", kCameraRigRows, 4},
     {"Light", kLightRows, 8},
     {"Fluid", kFluidRows, 7},
 };

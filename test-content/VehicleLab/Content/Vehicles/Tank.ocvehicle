@@ -1,0 +1,24 @@
+OCVEHICLE 1
+# The template's tank with a MANUAL gearbox (Q and E shift): the manual-capable path of the tracked controller.
+NAME LabTank
+KIND tracked
+BODY half 350 170 45 clearance 35 com 0 0 70 mass 38000 pitchroll 70
+ENGINE torque 6000 minrpm 800 maxrpm 3500 inertia 0 damping 0.4
+GEARBOX manual forward 4 3 2 1 reverse 4 3 switch 0.6 clutchrelease 0.4 latency 0.5 up 0.6 down 0.2 clutch 0
+WHEELCLASS road radius 40 width 50 susp 5 35 hz 1.8 damping 0.6 brake 0 handbrake 0 inertia 5 spindamping 0.2
+WHEEL L0 class road hub -280 -130 40 steer 0 driven 0 handbrake 0 node WheelL0
+WHEEL L1 class road hub -140 -130 40 steer 0 driven 0 handbrake 0 node WheelL1
+WHEEL L2 class road hub 0 -130 40 steer 0 driven 0 handbrake 0 node WheelL2
+WHEEL L3 class road hub 140 -130 40 steer 0 driven 0 handbrake 0 node WheelL3
+WHEEL L4 class road hub 280 -130 40 steer 0 driven 1 handbrake 0 node WheelL4
+WHEEL R0 class road hub -280 130 40 steer 0 driven 0 handbrake 0 node WheelR0
+WHEEL R1 class road hub -140 130 40 steer 0 driven 0 handbrake 0 node WheelR1
+WHEEL R2 class road hub 0 130 40 steer 0 driven 0 handbrake 0 node WheelR2
+WHEEL R3 class road hub 140 130 40 steer 0 driven 0 handbrake 0 node WheelR3
+WHEEL R4 class road hub 280 130 40 steer 0 driven 1 handbrake 0 node WheelR4
+TRACK left wheels 0 1 2 3 4 driven 4 inertia 10 damping 0.5 brake 60000 final 6 steergain 1.6 pivot 0.6
+TRACK right wheels 5 6 7 8 9 driven 9 inertia 10 damping 0.5 brake 60000 final 6 steergain 1.6 pivot 0.6
+ASSIST abs 0 absslip 0.25 absrelease 8 tcs 0 tcsslip 0.35 steerin 2 steerout 4 throttlein 4 throttleout 8 brakein 8 reversebrake 1 reversespeed 50 holdbrake 0.5 holdspeed 30 skidslip 0.45 skidangle 12
+SEAT driver 60 0 120 exit -100 -260 0
+DAMAGE health 3000 crash 900 energy 0.3 radius 120
+CAMERA modes chase arm 900 eye 60 0 170 hood 250 0 130

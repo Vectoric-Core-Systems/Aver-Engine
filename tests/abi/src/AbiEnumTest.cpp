@@ -565,15 +565,21 @@ static const Abi kAbis[] = {
       "modules/physics/include/aver/physics/physics_layers_abi.h",
       "modules/physics/include/aver/physics/physics_character_abi.h",
       "modules/physics/include/aver/physics/physics_vehicle_abi.h",
+      "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h",
       "modules/physics/include/aver/physics/physics_ragdoll_abi.h",
       "modules/physics/include/aver/physics/physics_queries_abi.h",
       "modules/physics/include/aver/physics/physics_body_ext_abi.h",
       "modules/physics/include/aver/physics/physics_softbody_abi.h",
       nullptr},
      "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.cs", "aver_phys_"},
+
+    {"physics vehicle v2 ABI",
+     {"modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", nullptr},
+     "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.VehicleExt.cs", "aver_phys_vehicle_"},
     {"audio ABI",
      {"modules/audio.abi/include/aver/audio/audio_abi.h", nullptr},
      "AVER_AUDIO_API", "scripting/csharp/Aver.Framework/Audio.cs", "aver_audio_"},
+    {"soft field ABI", {"modules/framework/include/aver/framework/framework_softfield_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/SoftFieldNative.cs", "aver_fw_softfield_"},
 };
 
 // A DOCUMENTED, DELIBERATE DIVERGENCE. Parameter NAMES are compared because types alone cannot see
@@ -782,6 +788,45 @@ static const Group kGroups[] = {
     // wave 9: the sun / fog / sky-light override keys a script sets (framework_worldfx_abi.h).
     {"world effects keys",    "modules/framework/include/aver/framework/framework_worldfx_abi.h", "AVER_FW_ENV_",
      "scripting/csharp/Aver.Framework/WorldFxNative.cs", "WorldEnvKey", ""},
+
+    // wave 10 VEHICLES: the index blocks of physics_vehicle_ext_abi.h against Aver.Physics/VehicleExt.cs (each block has a _COUNT, mirrored by a Count member).
+    {"vehicle kinds", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VEH_KIND_",
+     "scripting/csharp/Aver.Physics/VehicleExt.cs", "VehicleKind", ""},
+    {"vehicle engine block", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VE_",
+     "scripting/csharp/Aver.Physics/VehicleExt.cs", "VeIndex", ""},
+    {"vehicle gearbox block", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VG_",
+     "scripting/csharp/Aver.Physics/VehicleExt.cs", "VgIndex", ""},
+    {"vehicle axle block", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VA_",
+     "scripting/csharp/Aver.Physics/VehicleExt.cs", "VaIndex", ""},
+    {"vehicle wheel block", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VW_",
+     "scripting/csharp/Aver.Physics/VehicleExt.cs", "VwIndex", ""},
+    {"vehicle track block", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VT_",
+     "scripting/csharp/Aver.Physics/VehicleExt.cs", "VtIndex", ""},
+    {"vehicle driver aids block", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VD_",
+     "scripting/csharp/Aver.Physics/VehicleExt.cs", "VdIndex", ""},
+    {"vehicle tune keys", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VU_",
+     "scripting/csharp/Aver.Physics/VehicleExt.cs", "VehicleTune", ""},
+    {"vehicle state floats", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VS_",
+     "scripting/csharp/Aver.Physics/VehicleExt.cs", "VsIndex", ""},
+    {"vehicle state ints", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VSI_",
+     "scripting/csharp/Aver.Physics/VehicleExt.cs", "VsiIndex", ""},
+    {"vehicle wheel state floats", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VWS_",
+     "scripting/csharp/Aver.Physics/VehicleExt.cs", "VwsIndex", ""},
+    {"vehicle wheel state ints", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VWSI_",
+     "scripting/csharp/Aver.Physics/VehicleExt.cs", "VwsiIndex", ""},
+    {"vehicle physics events", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VEV_",
+     "scripting/csharp/Aver.Physics/VehicleExt.cs", "VehiclePhysicsEventKind", ""},
+    // wave 10: gameplay cameras (framework_camera_abi.h). The one-shot rig bits (APPLYPRESET, CUT) belong to the system and have no C# member.
+    {"camera modes",          "modules/framework/include/aver/framework/framework_camera_abi.h", "AVER_FW_CAM_MODE_",
+     "scripting/csharp/Aver.Framework/CameraRig.cs", "CameraMode", ""},
+    {"camera presets",        "modules/framework/include/aver/framework/framework_camera_abi.h", "AVER_FW_CAM_PRESET_",
+     "scripting/csharp/Aver.Framework/CameraRig.cs", "CameraRigPreset", ""},
+    {"camera blend curves",   "modules/framework/include/aver/framework/framework_camera_abi.h", "AVER_FW_CAM_CURVE_",
+     "scripting/csharp/Aver.Framework/CameraRig.cs", "CameraBlendCurve", ""},
+    {"camera modifier kinds", "modules/framework/include/aver/framework/framework_camera_abi.h", "AVER_FW_CAM_MOD_",
+     "scripting/csharp/Aver.Framework/CameraRig.cs", "CameraModifierKind", ""},
+    {"camera rig flags",      "modules/framework/include/aver/framework/framework_camera_abi.h", "AVER_FW_CAM_RIG_",
+     "scripting/csharp/Aver.Framework/CameraRig.cs", "CameraRigFlags", "", "", "", "applypreset,cut"},
 };
 
 int main() {

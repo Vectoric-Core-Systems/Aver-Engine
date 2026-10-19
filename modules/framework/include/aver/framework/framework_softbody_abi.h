@@ -19,7 +19,8 @@
 extern "C" {
 #endif
 
-#define AVER_FW_SOFTBODY_ABI_VERSION 1
+/* 2 (wave 10) adds ops 11 to 15 and their calls; the relay and the first ten ops are untouched. */
+#define AVER_FW_SOFTBODY_ABI_VERSION 2
 AVER_FW_ABI int32_t aver_fw_softbody_abi_version(void);
 
 /* Provider operations; the argument usage of each is listed with it. */
@@ -33,6 +34,11 @@ AVER_FW_ABI int32_t aver_fw_softbody_abi_version(void);
 #define AVER_FW_SB_OP_PRESET   8   /* in: preset (changes the preset of the entity's component) */
 #define AVER_FW_SB_OP_STATE    9   /* out f: damage01 maxStrain; out i: pieces brokenEdges state (bit0 awake, bit1 frozen) */
 #define AVER_FW_SB_OP_EVENTS  10   /* drains up to cap events: i = kind entity piece beam seq (5 each); f = x y z value (4 each); returns the count */
+#define AVER_FW_SB_OP_ASLEEP        11   /* entity; in f[0] = 1 asleep / 0 awake: holds or releases every piece (the Sleep field's hold) */
+#define AVER_FW_SB_OP_CLEAR_DEBRIS  12   /* entity: destroys its debris pieces now (shrink skipped) */
+#define AVER_FW_SB_OP_EFFECTS       13   /* in f[0] = 1/0: the master switch for break effects (particles and sounds bound in .ocsoft) */
+#define AVER_FW_SB_OP_DENTS         14   /* entity; out f[0] = maxSetCm; out i[0..1] = dentedEdges debrisPieces */
+#define AVER_FW_SB_OP_REPAIR_ALL    15   /* out i[0] = entities repaired */
 
 typedef int32_t (AVER_FW_CALL* aver_fw_softbody_fn)(int32_t op, int32_t entity, const float* in, int32_t inCount,
                                                     float* outF, int32_t* outI, int32_t cap, void* user);
@@ -59,6 +65,18 @@ AVER_FW_ABI int32_t aver_fw_softbody_set_preset(int32_t entity, int32_t preset);
 AVER_FW_ABI int32_t aver_fw_softbody_state(int32_t entity, float* outDamageMaxStrain2, int32_t* outPiecesBrokenState3);
 /* Up to `max` events: outI gets 5 ints per event (kind entity piece beam seq), outF 4 floats (x y z value). Returns the count. */
 AVER_FW_ABI int32_t aver_fw_softbody_drain_events(int32_t* outI, float* outF, int32_t max);
+
+/* ---- version 2 ---- */
+/* Holds (asleep != 0) or releases every piece of the soft body asleep, as a Sleep field does. */
+AVER_FW_ABI int32_t aver_fw_softbody_set_asleep(int32_t entity, int32_t asleep);
+/* Destroys the soft body's debris pieces now. */
+AVER_FW_ABI int32_t aver_fw_softbody_clear_debris(int32_t entity);
+/* The master switch for break effects for the whole world. */
+AVER_FW_ABI int32_t aver_fw_softbody_set_effects(int32_t enabled);
+/* Permanent set: the largest set in cm, and (dented edges, live debris pieces). 0 when the entity has no soft body. */
+AVER_FW_ABI int32_t aver_fw_softbody_dents(int32_t entity, float* outMaxSetCm, int32_t* outDentedDebris2);
+/* Repairs every soft body; returns how many. */
+AVER_FW_ABI int32_t aver_fw_softbody_repair_all(void);
 
 #ifdef __cplusplus
 }

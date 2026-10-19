@@ -1,7 +1,7 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// Tests for the cloth and destruction nodes (docs/SOFTBODY.md): the 8 rows in GraphSoftBodyNodeTable.cs, every method
+// Tests for the cloth and destruction nodes (docs/SOFTBODY.md, docs/plans/wave10/SOFTBODY_DEPTH.md 2.13): the 15 rows in GraphSoftBodyNodeTable.cs, every method
 // on SoftBodyGraphInterop. Bare-process scope like MotionMatchNodeTests: the wiring the table owns (pins, defaults,
 // the method each row names, valid IL, the compiler split), not what the soft-body system does with a call
 // (tests/softbody.scene does that).
@@ -22,6 +22,14 @@ static class SoftBodyNodeTests
         new("setsoftbodywind", GenericKind.Exec, new[] { "exec:exec:in", "vx:float:in", "vy:float:in", "vz:float:in", "gust:float:in", "gustHz:float:in", "turbulence:float:in", "then:exec:out", "success:bool:out" }, new[] { "gust=0", "gustHz=0.3", "turbulence=0" }),
         new("setsoftbodypreset", GenericKind.Exec, new[] { "exec:exec:in", "entity:int:in", "preset:int:in", "then:exec:out", "success:bool:out" }, new[] { "preset=0" }),
         new("getsoftbodystate", GenericKind.Pure, new[] { "entity:int:in", "found:bool:out", "damage:float:out", "maxStrain:float:out", "pieces:int:out", "brokenEdges:int:out" }),
+        // version 2 (wave 10)
+        new("popsoftbodyevent", GenericKind.Exec, new[] { "exec:exec:in", "then:exec:out", "found:bool:out", "kind:int:out", "entity:int:out", "piece:int:out", "x:float:out", "y:float:out", "z:float:out", "value:float:out", "success:bool:out" }),
+        new("setsoftbodybudget", GenericKind.Exec, new[] { "exec:exec:in", "maxPieces:int:in", "maxParticles:int:in", "maxRebuilds:int:in", "lifetime:float:in", "then:exec:out", "success:bool:out" }, new[] { "maxPieces=48", "maxParticles=20000", "maxRebuilds=2", "lifetime=12" }),
+        new("clearsoftbodydebris", GenericKind.Exec, new[] { "exec:exec:in", "entity:int:in", "then:exec:out", "success:bool:out" }),
+        new("setsoftbodyasleep", GenericKind.Exec, new[] { "exec:exec:in", "entity:int:in", "asleep:bool:in", "then:exec:out", "success:bool:out" }),
+        new("setsoftbodyeffects", GenericKind.Exec, new[] { "exec:exec:in", "enabled:bool:in", "then:exec:out", "success:bool:out" }, new[] { "enabled=true" }),
+        new("repairallsoftbodies", GenericKind.Exec, new[] { "exec:exec:in", "then:exec:out", "repaired:int:out", "success:bool:out" }),
+        new("getsoftbodydents", GenericKind.Pure, new[] { "entity:int:in", "found:bool:out", "dentedEdges:int:out", "maxSetCm:float:out", "debrisPieces:int:out" }),
     };
 
     public static int RunAll()
@@ -35,6 +43,7 @@ static class SoftBodyNodeTests
         failures += NodeRowKit.CheckCompilerSplit("soft body", types);
         failures += TestDestructionChain();
         failures += TestStateFeedsLaterNodes();
+        failures += TestV2Chain();
         return failures;
     }
 
@@ -42,13 +51,13 @@ static class SoftBodyNodeTests
 
     private static int TestRowSetIsTheDesignSet()
     {
-        Console.WriteLine("Test: the soft-body rows are exactly the designed set of 8, 1 pure read and 7 exec writes");
+        Console.WriteLine("Test: the soft-body rows are exactly the designed set of 15, 2 pure reads and 13 exec writes");
         var want = Rows.Select(r => r.Type).OrderBy(x => x).ToArray();
         var got = GameSystemNodes.All.Where(s => s.Owner.Name == "SoftBodyGraphInterop").Select(s => s.Type).OrderBy(x => x).ToArray();
         if (!got.SequenceEqual(want))
             return Fail($"table has [{string.Join(", ", got.Except(want))}] extra and lacks [{string.Join(", ", want.Except(got))}]");
-        if (Rows.Length != 8) return Fail($"expected 8 rows, test lists {Rows.Length}");
-        if (Rows.Count(r => r.Kind == GenericKind.Pure) != 1) return Fail("only GetSoftBodyState is a read");
+        if (Rows.Length != 15) return Fail($"expected 15 rows, test lists {Rows.Length}");
+        if (Rows.Count(r => r.Kind == GenericKind.Pure) != 2) return Fail("only GetSoftBodyState and GetSoftBodyDents are reads");
         Console.WriteLine("  PASS");
         return 0;
     }
@@ -61,6 +70,20 @@ static class SoftBodyNodeTests
                             "NODE e SoftBodyExplode\nNODE rp SoftBodyRepair\nNODE pi PrintInt\n" +
                             "LINK tick.exec w.exec\nLINK w.then d.exec\nLINK d.then t.exec\nLINK t.then r.exec\nLINK r.then p.exec\nLINK p.then e.exec\nLINK e.then rp.exec\n" +
                             "LINK rp.then pi.exec\nLINK e.touched pi.value\nENTRY tick OnTick\n";
+        string? bad = NodeRowKit.CompileAndRun(text, "OnTick");
+        if (bad != null) return Fail(bad);
+        Console.WriteLine("  PASS");
+        return 0;
+    }
+
+    // The v2 rows in a chain: pop an event, hold and release, switch effects, repair all; Pop's value feeds a print and Dents feeds a branch.
+    private static int TestV2Chain()
+    {
+        Console.WriteLine("Test: Pop Event, Budget, Asleep, Effects, Clear Debris and Repair All chain; Get Dents feeds a Branch");
+        const string text = "OCGRAPH 1\nNODE tick OnTick\nNODE pe PopSoftBodyEvent\nNODE bu SetSoftBodyBudget\nNODE sa SetSoftBodyAsleep\nNODE ef SetSoftBodyEffects\n" +
+                            "NODE cd ClearSoftBodyDebris\nNODE ra RepairAllSoftBodies\nNODE gd GetSoftBodyDents\nNODE br Branch\nNODE pf Print\nNODE pi PrintInt\n" +
+                            "LINK tick.exec pe.exec\nLINK pe.then bu.exec\nLINK bu.then sa.exec\nLINK sa.then ef.exec\nLINK ef.then cd.exec\nLINK cd.then ra.exec\n" +
+                            "LINK ra.then br.exec\nLINK gd.found br.cond\nLINK br.true pf.exec\nLINK pe.value pf.value\nLINK pf.then pi.exec\nLINK ra.repaired pi.value\nENTRY tick OnTick\n";
         string? bad = NodeRowKit.CompileAndRun(text, "OnTick");
         if (bad != null) return Fail(bad);
         Console.WriteLine("  PASS");

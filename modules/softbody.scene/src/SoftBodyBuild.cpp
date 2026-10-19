@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
 
 namespace aver::softbody {
 namespace {
@@ -15,7 +16,8 @@ f32 lodFactor(u32 tier) { return tier == 1 ? 0.5f : (tier == 2 ? 0.25f : 1.0f); 
 
 } // namespace
 
-bool SoftBodySystem::buildPieceBody(Entry& en, Piece& p, i32 replaceBody, i32 stateSrcBody, const std::vector<i32>* stateMap, bool carryPose) {
+bool SoftBodySystem::buildPieceBody(Entry& en, Piece& p, i32 replaceBody, i32 stateSrcBody, const std::vector<i32>* stateMap, bool carryPose,
+                                    const f32* statePos, const f32* stateVel) {
     Cage& c = en.sim.cage;
     const u32 n = static_cast<u32>(p.particles.size());
     if (n == 0 || n > 65536u) return false;
@@ -119,7 +121,7 @@ bool SoftBodySystem::buildPieceBody(Entry& en, Piece& p, i32 replaceBody, i32 st
 
     const i32 b = aver_phys_sb_builder_begin(static_cast<i32>(n));
     if (!b) return false;
-    aver_phys_sb_builder_vertices(b, rest.data(), inv.data(), nullptr, nullptr);
+    aver_phys_sb_builder_vertices(b, rest.data(), inv.data(), statePos, stateVel);
     aver_phys_sb_builder_faces(b, faces.data(), static_cast<i32>(faces.size() / 3));
     if (!edgeRest.empty())
         aver_phys_sb_builder_edges(b, edges.data(), edgeRest.data(), edgeComp.data(), static_cast<i32>(edgeRest.size()));
@@ -160,6 +162,7 @@ bool SoftBodySystem::buildPieceBody(Entry& en, Piece& p, i32 replaceBody, i32 st
 
 void SoftBodySystem::fillPieceDraw(Entry& en, Piece& p) {
     const RenderBinding& rb = en.sim.binding;
+    const Cage& cage = en.sim.cage;
     std::vector<u32> tris;
     for (const u32 st : p.triangles) {
         if (st + 1 >= rb.simStart.size()) continue;
@@ -167,6 +170,7 @@ void SoftBodySystem::fillPieceDraw(Entry& en, Piece& p) {
     }
     std::sort(tris.begin(), tris.end());
     std::vector<u32> localOf(rb.vertexCount(), kNone);
+    std::vector<u32> firstTri;   // per front draw vertex: the first render triangle that uses it
     p.renderVerts.clear();
     p.sourceVertex.clear();
     p.drawIndices.clear();
@@ -178,16 +182,63 @@ void SoftBodySystem::fillPieceDraw(Entry& en, Piece& p) {
                 localOf[v] = static_cast<u32>(p.renderVerts.size());
                 p.renderVerts.push_back(v);
                 p.sourceVertex.push_back(v < en.renderSrc.size() ? en.renderSrc[v] : v);
+                firstTri.push_back(r);
             }
             p.drawIndices.push_back(localOf[v]);
         }
-    p.drawWorld.assign(p.renderVerts.size(), Vec3{0, 0, 0});
+    p.frontCount = static_cast<u32>(p.renderVerts.size());
+    p.frontIndexCount = static_cast<u32>(p.drawIndices.size());
+
+    // The authored UV of each front vertex (caps generate theirs from these), and the identity of the surface point
+    // it sits on: a cage particle, so a UV seam is not an edge. In proxy mode the particle alone would merge distinct
+    // surface points, so the welded authored position joins it.
+    p.drawUv.assign(static_cast<usize>(p.frontCount) * 2, 0.0f);
+    p.drawWeld.assign(p.frontCount, 0);
+    std::unordered_map<u64, u32> weldIds;
+    for (u32 d = 0; d < p.frontCount; ++d) {
+        const u32 src = p.sourceVertex[d];
+        if (en.mesh && en.mesh->uvs.size() >= static_cast<usize>(src) * 2 + 2) {
+            p.drawUv[d * 2] = en.mesh->uvs[static_cast<usize>(src) * 2];
+            p.drawUv[d * 2 + 1] = en.mesh->uvs[static_cast<usize>(src) * 2 + 1];
+        }
+        const u32 particle = rb.vertexParticle[p.renderVerts[d]];
+        if (en.renderWeld.empty() || src >= en.renderWeld.size()) {
+            p.drawWeld[d] = particle;
+        } else {
+            const u64 key = (static_cast<u64>(en.renderWeld[src]) << 32) | particle;
+            const auto it = weldIds.find(key);
+            if (it != weldIds.end()) p.drawWeld[d] = it->second;
+            else { const u32 id = static_cast<u32>(weldIds.size()); weldIds.emplace(key, id); p.drawWeld[d] = id; }
+        }
+    }
+
+    // Proxy: each front vertex is evaluated against its home proxy triangle while that triangle is still joined to the
+    // one its render triangle follows (they share an edge or are the same), else against the render triangle's own, so a
+    // render triangle never bridges a crack.
+    p.drawEvalTri.clear();
+    if (en.proxyMode) {
+        p.drawEvalTri.assign(p.frontCount, 0);
+        for (u32 d = 0; d < p.frontCount; ++d) {
+            const u32 src = p.sourceVertex[d];
+            const u32 home = src < en.proxyBind.homeTri.size() ? en.proxyBind.homeTri[src] : 0;
+            const u32 own = firstTri[d] < rb.triSim.size() && rb.triSim[firstTri[d]] != kNone ? rb.triSim[firstTri[d]] : home;
+            u32 shared = 0;
+            if (home < cage.triangles.size() && own < cage.triangles.size())
+                for (u32 i = 0; i < 3; ++i)
+                    for (u32 j = 0; j < 3; ++j) shared += cage.triangles[home].v[i] == cage.triangles[own].v[j] ? 1u : 0u;
+            p.drawEvalTri[d] = (home == own || shared >= 2) ? home : own;
+        }
+    }
+
     p.empty = tris.empty();
     ++p.epoch;
+    p.drawWorld.assign(p.frontCount, Vec3{0, 0, 0});
+    frontPositions(en, p);
+    buildPieceCaps(world_, en, p);   // may append the back skin and walls, and make or drop the cap entity
     refreshDraw(en, p);
 }
 
-bool SoftBodySystem::initialPiece(Entry& en) {
+bool SoftBodySystem::initialPiece(scene::World& world, Entry& en) {
     Cage& c = en.sim.cage;
     en.pieces.clear();
     Piece p;
@@ -201,6 +252,10 @@ bool SoftBodySystem::initialPiece(Entry& en) {
     en.renderSrc.resize(en.sim.binding.vertexCount());
     for (u32 i = 0; i < en.renderSrc.size(); ++i) en.renderSrc[i] = i;
     en.pieces.push_back(std::move(p));
+    if (en.restore) {
+        restoreBuild(world, en);
+        return !en.pieces.empty() && (en.pieces.front().body != 0 || en.pieces.front().empty);
+    }
     Piece& root = en.pieces.back();
     if (!buildPieceBody(en, root, 0, 0, nullptr, false)) {
         en.pieces.clear();

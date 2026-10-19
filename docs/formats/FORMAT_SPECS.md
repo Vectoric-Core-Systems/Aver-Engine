@@ -25,7 +25,7 @@ Status: authoritative design spec, v1. Target repo: `C:/Users/User/Documents/Ave
 | `.scene` | World authoring input | **text** | none | Human-authored placement list (→ `.ocmap`/`.ocworld`) | **PRESERVE (unchanged)** |
 | `.octrack` | Track variant of `.ocmap` | **text** | none | Same grammar as `.ocmap` (kept for content compat) | **PRESERVE (unchanged)** |
 | `.ocmesh` | Static mesh | **binary** | `AVR1`/`MESH` | Vertex streams, indices, submeshes, LODs, meshlets, bounds, optional collision + cage-bind | **NEW** |
-| `.ocsoft` | Soft-body asset (cloth or destructible) | JSON | — | `format`/`version`, `kind`, `preset`, `material`/`sim` overrides, `cloth`/`destruct` params, `paint` (per-particle pin/reach RLE keyed by `meshKey`, plus `rules`); schema in `docs/SOFTBODY.md` section 3 | **NEW** |
+| `.ocsoft` | Soft-body asset (cloth or destructible) | JSON | — | `format`/`version`, `kind`, `preset`, `material`/`sim` overrides, `cloth`/`destruct` params, `paint` (per-particle pin/reach RLE keyed by `meshKey`, plus `rules`), and since wave 10 `caps` (thickness shell, back skin, interior material), `effects` (tear/detach/dust particles and sounds) and `proxy` (cooked cage); schema in `docs/SOFTBODY.md` section 3 | **NEW** |
 | `.octex` | Texture | **binary** | `AVR1`/`TEX ` | Mip chain over BCn/ASTC/Basis/raw, color space, sampler | **NEW** |
 | `.ocmat` | Material | **text** (cooked → `MATL` chunk) | none / `AVR1` | PBR metallic-roughness params + texture bindings + optional node graph | **NEW** |
 | `.ocskel` | Skeletal mesh + skeleton | **binary** | `AVR1`/`SKEL` | Bones + skin binding + embedded `.ocmesh` geometry | **NEW** |
@@ -975,7 +975,12 @@ COMPONENT <Type> [key=value]...
 | `SmartObject` | `asset` (`.ocso`), `enabled` (1) | `CSmartObject` |
 | `SoftBody` | `maxdist` (0), `compliance` (0), `simulated` (1) | `CSoftBody` |
 | `Cloth` | `asset` (`.ocsoft`), `preset` (`cloth_light`; `cloth_heavy`), `wind` (1), `stiffness` (1), `reach` (1), `freeze` (0), `tearable` (0), `world` (1), `proxy` (1), `windon` (1) | `CCloth`; runtime state (damage, pieces) is never saved |
-| `Destructible` | `asset` (`.ocsoft`), `preset` (`metal`; `wood`, `glass`), `toughness` (1), `impact` (1), `lifetime` (0), `maxpieces` (0), `indestructible` (0), `nodebris` (0) | `CDestructible`; one soft body per entity, so not together with a Cloth |
+| `Destructible` | `asset` (`.ocsoft`), `preset` (`metal`; `wood`, `glass`), `toughness` (1), `impact` (1), `lifetime` (0), `maxpieces` (0), `indestructible` (0), `nodebris` (0) | `CDestructible`; one soft body per entity, so not together with a Cloth. Dents and tears are saved in a save game (the `softbody` `$State` entry), never in the level |
+| `SoftField` | `kind` (`radial`; `directional`, `damage`, `release`, `kill`, `sleep`), `shape` (`sphere`; `box`, `capsule`, `all`), `extent` (`x,y,z` cm, 100), `strength` (0), `energy` (J/s, 0), `falloff` (1), `dir` (`x,y,z`, +Z), `turbulence` (0), `targets` (comma list of `cloth`, `destructible`, `debris`; all, debris only for `kill`), `once` (0), `off` (0) | `CSoftField`; the placement's transform is the field's frame |
+
+| `Vehicle` | `asset` (`.ocvehicle`), `preset` (`car`; `van`, `truck`, `bus`, `sports`, `tank`: written without an asset, and with one only when it is not `car`), `power` (1), `grip` (1), `brake` (1), `damage` (1), `noactions` (0), `noaudio` (0), `noeffects` (0), `nowheels` (0), `indestructible` (0) | `CVehicle`; runtime state (driver, health, gear, damage taken) is never saved. Refused on an entity with a `vehicle` token, a `CRigidBody`, an object-clip `CAnimator` or a `CDestructible` |
+
+| `CameraRig` | `preset` (`chase`; `vehiclechase`, `orbit`, `firstperson`, `seat`, `topdown`, `fixed`), `mode`, `target` (`self`; `parent`), `arm`, `minarm`, `probe`, `recover`, `socket` and `pivot` (`x,y,z`), `lag`, `lagmax`, `rotlag`, `rotlagmax`, `lagstep`, `ahead`, `aheadmax`, `pitchmin`, `pitchmax`, `yaw`, `pitch`, `recenter`, `blend`, `curve` (`easeinout`; `linear`, `easein`, `easeout`), `fovkick`, `fovkickspeed`, `fadestart`, `fadeend`, `bob`, `seatyaw`, `seatpitch`, `mask` (hex), then the flags `collision`, `inheritpitch`, `inherityaw`, `inheritroll`, `fade` (all 1) and `lookat`, `disabled` (both 0) | `CCameraRig` (and `CCamera`); a key equal to the PRESET's value is omitted (so a `vehiclechase` record stays short), `preset` is always written; `ignoreBody` and the OUT fields are never saved (`docs/CAMERAS.md`) |
 
 **Canonical writing** (what the editor's save produces and the golden strings of `OcWorldComponentsTest` pin): the asset key
 (omitted only when the id is 0), `RootMotion.mode` and `MotionMatcher.input` are always written; every other key only when it differs from the
@@ -1259,6 +1264,13 @@ particle until the effect fills the screen.
 
 A parse failure leaves the caller's effect at this format's own defaults, never at the partial state
 of a file that failed halfway.
+
+
+### 11a.1 Version 2 (wave 10)
+
+`OCPARTICLE 2` holds a SYSTEM: `PARAM name float v | vec3 x y z | color r g b a` (up to 16 user parameters), then up to 8 `EMITTER <name>` blocks (records before the first `EMITTER` belong to emitter 0). Every v1 record keeps its meaning inside a block. New per-emitter records: `SIM auto|cpu|gpu`; `SHAPE sphere r | cylinder r h | disc r` with an optional trailing `shell` (the v1 `SHAPE kind x y z` spelling still parses); `SIZECURVE` (2 to 4 `t v` pairs) and `COLORCURVE` (2 to 4 `t r g b a` stops), times strictly increasing; `RENDER sprite | ribbon trail <points 2..32> <segmentCm> fade <f> | ribbon linked <capacity 2..4096> | mesh <path> velocity|spin|fixed`; `SPRITE camera | velocity stretch <k> | axis x y z`; `SUBUV <cols> <rows> <frames> life|fps <n> [blend]`; `LIGHTING unlit|ambient|lit`, `SORT auto|none|depth`, `FOG on|off`; `BOUNDS <cm>`, `CULL <cm>`, `SPAWNAT on|off`; `MODULE <key> [off] <param>=<number|@Name[.x|.y|.z|.w]> ...` (13 module keys, authored order, at most 16); `ONEVENT death|collide SPAWN <emitter> <count> [inherit <k>]` (the target may be defined later; cycles are refused).
+
+The writer emits the lowest version that can hold the data, so a file that fits v1 (one unnamed emitter, no parameters, no v2 record) is written as `OCPARTICLE 1`, byte for byte as before. A reader that predates v2 refuses the header by version. Errors carry `line N:`. Semantics: `docs/PARTICLES.md`.
 
 ---
 ## 11b. `.ocinst` — baked instanced foliage (binary, `AVR1`/`INST`)

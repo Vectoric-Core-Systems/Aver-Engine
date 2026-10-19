@@ -3,6 +3,8 @@
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
 #include "aver/game/GameSystemsWiring.hpp"
+#include "aver/game/SoftBodyEffects.hpp"
+#include "aver/game/SoftBodySave.hpp"   // soft-body damage on the $State channel
 #include "aver/game/GameUiInput.hpp"
 #include "aver/game/GameUiText.hpp"
 #include "aver/game/LevelDecals.hpp"
@@ -189,13 +191,19 @@ i32 saveGraphVarSet(aver::scene::Entity e, const char* name, u32 kind, f32 f, i3
 }
 
 // Managed entity state (framework_state_abi.h): relays, like the graph VARs above.
-i32 saveStateCount(aver::scene::Entity e, void*) { return aver_fw_state_count(static_cast<i32>(e)); }
+i32 saveStateCount(aver::scene::Entity e, void*) {
+    return std::max(0, static_cast<i32>(aver_fw_state_count(static_cast<i32>(e)))) + aver::game::softBodyStateCount(e);
+}
 i32 saveStateAt(aver::scene::Entity e, i32 index, char* nameBuf, i32 nameCap, char* dataBuf,
                 i32 dataCap, void*) {
-    return aver_fw_state_at(static_cast<i32>(e), index, nameBuf, nameCap, dataBuf, dataCap);
+    // The managed providers first, then the soft-body damage entry (docs/SOFTBODY.md, saved damage).
+    const i32 managed = std::max(0, static_cast<i32>(aver_fw_state_count(static_cast<i32>(e))));
+    if (index < managed) return aver_fw_state_at(static_cast<i32>(e), index, nameBuf, nameCap, dataBuf, dataCap);
+    return aver::game::softBodyStateAt(e, index - managed, nameBuf, nameCap, dataBuf, dataCap);
 }
 i32 saveStateSet(aver::scene::Entity e, const char* name, const char* data, i32 dataLen, void*) {
-    return aver_fw_state_set(static_cast<i32>(e), name, data, dataLen);
+    if (aver_fw_state_set(static_cast<i32>(e), name, data, dataLen)) return 1;
+    return aver::game::softBodyStateSet(e, name, data, dataLen);
 }
 
 aver::save::Host saveHost() {
@@ -216,6 +224,7 @@ aver::save::Host saveHost() {
 i32 saveWriteProvider(const char* path, void*) {
     aver::save::CaptureOptions co;
     co.host = saveHost();
+    co.skip = &aver::game::softBodySaveSkip;   // transient field entities are not saved
     aver::fmt::OcSaveData snap;
     std::string why;
     if (!aver::save::capture(aver::scene::World::instance(), snap, co, &why)) {
@@ -239,6 +248,7 @@ i32 saveLoadProvider(const char* path, void*) {
     }
     aver::save::RestoreOptions ro;
     ro.host = saveHost();
+    aver::game::softBodyResetForRestore();   // the restore pass replays saved damage onto rebuilt bodies
     if (!aver::save::restore(snap, aver::scene::World::instance(), ro, &why)) {
         AVER_ERROR("[Save] restore failed: {}", why);
         return 0;
@@ -462,6 +472,9 @@ GameConfig parseArgs(int argc, char** argv) {
         else if (std::strcmp(a, "--no-chunk-stream") == 0) { c.chunkStreamAutoFrames = 0; }
         else if (std::strcmp(a, "--no-particle-gi") == 0)  { c.noParticleGi = true; }
         else if (std::strcmp(a, "--particle-test") == 0)   { c.particleTest = true; }
+
+        else if (std::strcmp(a, "--particles-cpu") == 0)   { c.particleGpuArg = 0; }
+        else if (std::strcmp(a, "--particles-gpu") == 0)   { c.particleGpuArg = 2; }
         else if (std::strcmp(a, "--screenshot") == 0)      { c.screenshotPath = valueAfter(argc, argv, i, ""); ++i; }
         // Disable VSync for measurement parity
         else if (std::strcmp(a, "--no-vsync") == 0) { c.vsyncOff = true; }
@@ -577,11 +590,15 @@ void GameApp::tickGameplay(f32 dt) {
 #if AVER_MODULE_SCENE
     // Vehicle logic: input -> step -> output. LOD based on camera distance.
     vehicles_.prePhysics(dt, camPos_);
+
+    game::tickVehiclesPre(dt, camPos_);
 #endif
     // Sum step count; a frame can run 0-8 fixed steps
     physSteps_ += static_cast<u64>(game::tickGameplayGroups(dt));
 #if AVER_MODULE_SCENE
     vehicles_.postPhysics(scene::World::instance());
+
+    game::tickVehiclesPost(dt, playMobility_);
 #endif
 #else
     game::tickGameplayGroups(dt);
@@ -597,9 +614,21 @@ bool GameApp::sequenceEmissiveScale(scene::Entity e, f32 outRgb[3], void* user) 
 }
 #endif
 
-void GameApp::drivePlayCamera() {
+void GameApp::drivePlayCamera(f32 dt) {
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
-    firstPersonPawn_ = game::drivePlayCamera(camPos_, yaw_, pitch_);
+    // The sequencer's camera goes to the rig system as the external pose, so a rig blends back from it when the sequence lets go.
+    game::ExternalPose external;
+    game::SeqCameraPose seqCam;
+    if (sequenceDirector_.camera(seqCam)) {
+        external.active = true;
+        external.pos = seqCam.position;
+        external.yaw = seqCam.yaw;
+        external.pitch = seqCam.pitch;
+    }
+    firstPersonPawn_ = game::drivePlayCamera(camPos_, yaw_, pitch_, playView_, dt, scene::kInvalidEntity, &external);
+    if (playView_.cut) streaming_.resetVelocityTracking();   // a teleport, not a fast move
+#else
+    (void)dt;
 #endif
 }
 
@@ -850,6 +879,13 @@ void GameApp::attachParticles(Engine& e) {
     if (!dev) return;
 
     particles::particleSystem().setEffectLibrary(&particles::particleEffects());
+    {
+        const int pm = cfg_.particleGpuArg >= 0 ? cfg_.particleGpuArg : (project_.particleGpu >= 0 ? project_.particleGpu : 1);
+        particles::particleSystem().setGpuMode(pm);
+        particleRenderer_.setGpuEnabled(pm != 0);
+        particleRenderer_.setTextureResolver(&GameContent::resolveParticleTexture, &content_);
+        particleRenderer_.setMeshResolver(&GameContent::resolveParticleMesh, &content_);
+    }
     if (particleRenderer_.init(*dev)) {
         particleRenderer_.setSystem(&particles::particleSystem());
         dev->addRenderFeature(&particleRenderer_);
@@ -1342,6 +1378,12 @@ void GameApp::initScripting() {
 #if AVER_MODULE_SOFTBODY_SCENE
             softbody::softBodySystem().setNotifySink(&GameApp::animNotify, this);
 #endif
+
+            game::setVehicleNotify(&GameApp::animNotify, this);   // VehicleCrash / VehicleSkid / VehicleLanded / VehicleFlipped / VehicleShift / VehicleEntered / VehicleExited
+
+#if AVER_MODULE_CAMERA && AVER_MODULE_FRAMEWORK
+            camera::cameraRigSystem().setNotifySink(&GameApp::animNotify, this);   // CameraViewTargetChanged / CameraBlendFinished / CameraCut
+#endif
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE
             // Same sink as animNotify (byte-for-byte identical signatures)
@@ -1694,13 +1736,13 @@ void GameApp::pushFrame(Engine& e) {
     const Vec3 fwd = camForward();
     yaw_ = yawBeforeWobble;
     const f32  aspect = viewAspect(e);
-    const game::CameraMatrices cam = game::pushCamera(*dev, camPos_, fwd, aspect);
+    const game::CameraMatrices cam = game::pushCamera(*dev, camPos_, fwd, aspect, playView_);
     invVP_ = cam.invVP; viewProj_ = cam.viewProj; eye_ = camPos_;
 
     // Log once: verifies aspect ratio calculation.
     if (frames_ <= 1) {
-        AVER_INFO("[Game] camera: aspect={:.3f} fov=60deg near={} far={} (from the swapchain, not a viewport rect)",
-                  aspect, game::kCameraNearCm, game::kCameraFarCm);
+        AVER_INFO("[Game] camera: aspect={:.3f} fov={:.1f}deg near={} far={} (from the swapchain, not a viewport rect)",
+                  aspect, degrees(playView_.fovYRad), playView_.nearCm, playView_.farCm);
     }
 
     // One member for one value: applyLevelSky seeds fogDensity_.
@@ -1929,6 +1971,12 @@ void GameApp::onInit(Engine& e) {
     game::registerGameSystems();
 #if AVER_MODULE_SOFTBODY_SCENE
     game::installSoftBodyHost(&GameContent::resolveAnimAsset, &content_, nullptr, nullptr);
+    game::installSoftBodyEffects(&GameContent::resolveAnimAsset, &content_);   // break effects: particles and sounds per .ocsoft
+#endif
+    game::installVehicleHost(&GameContent::resolveAnimAsset, &content_);
+#if AVER_MODULE_VEHICLE_SCENE
+    // Traffic: `vehicle Vehicles/Bus.ocvehicle` names an asset (a preset name still means a preset).
+    vehicles_.setSpecSource([](const std::string& path) { return game::vehicleSpecByPath(path); });
 #endif
 #if AVER_MODULE_SCENE
     // Prefab assets come out of the project's content index (the same id space every other asset uses).
@@ -2203,6 +2251,11 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 #if AVER_MODULE_PARTICLES
     // Particle system: same unconditional reasoning.
     particles::particleSystem().tick(scene::World::instance(), t.dt);
+#if AVER_MODULE_FRAMEWORK
+    for (scene::Entity fe : particles::particleSystem().finished())
+        aver_fw_event_post("Particles.EffectFinished", static_cast<int32_t>(fe), static_cast<int32_t>(fe));   // needs framework_timers_abi.h
+#endif
+    particles::particleSystem().finished().clear();
 #endif
     // After animation tick, before draw pass: creates per-entity skin targets and copies matrices from AnimSystem.
     // Before World::flush per this code's history; SkinnedScene.hpp says "after" -- disagreement noted.
@@ -2241,7 +2294,7 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 #endif
 
     // AFTER flush, BEFORE view matrix build. Reading pawn transforms before flush gives last frame's.
-    drivePlayCamera();
+    drivePlayCamera(t.dt);
 #if AVER_MODULE_SCENE
     // A sequence's camera track takes the view while it plays (the pawn's body shows, as in a cutscene).
     {
@@ -2331,12 +2384,14 @@ void GameApp::onRender(Engine& e) {
         if (landscape_.loaded()) {
             landscape_.updateRingTiles(dev, eye_.x, eye_.y, &content_, ms);
             const u32 viewH = e.window() ? e.window()->height() : cfg_.height;
-            landscape_.draw(*dev, eye_, viewProj_, static_cast<f32>(viewH), &content_, ms);
+            landscape_.draw(*dev, eye_, viewProj_, static_cast<f32>(viewH), &content_, ms, playView_.fovYRad);
         }
 #endif
         // Owner-hide: hides possessed first-person pawn's body from raster pass. firstPersonPawn_ set every frame by drivePlayCamera().
         DrawWorldOptions opts;
         opts.ownerHideRoot = firstPersonPawn_;
+
+        opts.ownerHideAll = playView_.ownerHideAll;   // the collision fade hides every mesh under the target, not only the flagged ones
         // Possessed pawn's tree is movable from first frame; everything else by PlayMobility.
         {
             scene::Entity movableRoot = scene::kInvalidEntity;
@@ -2415,6 +2470,7 @@ void GameApp::onShutdown(Engine& e) {
         dev->removeRenderFeature(&particleRenderer_);
         particlesAttached_ = false;
     }
+    content_.releaseParticleTextures();
     particleRenderer_.shutdown();
 #endif
 #if AVER_WITH_UI_ABI
@@ -2467,6 +2523,7 @@ void GameApp::onShutdown(Engine& e) {
     anim::animSystem().setObjectAnimationLive(false);
     playMobility_.end();
 #if AVER_MODULE_PHYSICS
+    game::clearVehicles();   // CVehicle vehicles: bodies, constraints, voices (before the level, like the traffic cars)
     // Cars' bodies and constraints go before the level.
     vehicles_.end();
 #endif

@@ -4,7 +4,8 @@
 // appendSoftBodyNodeDefs(t) just before buildCatalog returns (after appendMotionMatchNodeDefs).
 //
 // MIRRORS scripting/csharp/Aver.Graph/GraphSoftBodyNodeTable.cs pin for pin (docs/SOFTBODY.md). A soft body's
-// events (SoftBodyTorn, SoftBodyDetached, SoftBodyDust, SoftBodyImpact, SoftBodyRepaired) reach a graph through OnEvent.
+// events (SoftBodyTorn, SoftBodyDetached, SoftBodyDust, SoftBodyImpact, SoftBodyRepaired) reach a graph through OnEvent; Pop Soft Body Event
+// gives their position and value.
 
 inline void appendSoftBodyNodeDefs(std::vector<GraphNodeDesc>& t) {
     t.push_back({"SoftBodyDamage", "Soft Body Damage", "Physics", {
@@ -33,4 +34,23 @@ inline void appendSoftBodyNodeDefs(std::vector<GraphNodeDesc>& t) {
     t.push_back({"GetSoftBodyState", "Get Soft Body State", "Physics", {
         pin("entity", "int", false), pin("found", "bool", true), pin("damage", "float", true), pin("maxStrain", "float", true),
         pin("pieces", "int", true), pin("brokenEdges", "int", true)}});
+    // Version 2 (wave 10): seven rows appended; the eight above and their pins do not change.
+    t.push_back({"PopSoftBodyEvent", "Pop Soft Body Event", "Physics", {
+        pin("exec", "exec", false), pin("then", "exec", true), pin("found", "bool", true), pin("kind", "int", true), pin("entity", "int", true),
+        pin("piece", "int", true), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("value", "float", true),
+        pin("success", "bool", true)}});
+    t.push_back({"SetSoftBodyBudget", "Set Soft Body Budget", "Physics", {
+        pin("exec", "exec", false), pin("maxPieces", "int", false, "48"), pin("maxParticles", "int", false, "20000"),
+        pin("maxRebuilds", "int", false, "2"), pin("lifetime", "float", false, "12"), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"ClearSoftBodyDebris", "Clear Soft Body Debris", "Physics", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"SetSoftBodyAsleep", "Set Soft Body Asleep", "Physics", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("asleep", "bool", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"SetSoftBodyEffects", "Set Soft Body Effects", "Physics", {
+        pin("exec", "exec", false), pin("enabled", "bool", false, "true"), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"RepairAllSoftBodies", "Repair All Soft Bodies", "Physics", {
+        pin("exec", "exec", false), pin("then", "exec", true), pin("repaired", "int", true), pin("success", "bool", true)}});
+    t.push_back({"GetSoftBodyDents", "Get Soft Body Dents", "Physics", {
+        pin("entity", "int", false), pin("found", "bool", true), pin("dentedEdges", "int", true), pin("maxSetCm", "float", true),
+        pin("debrisPieces", "int", true)}});
 }

@@ -13,10 +13,19 @@
 #include "PlacedComponentModel.hpp"
 #include "SoftBodyDetailsModel.hpp"
 #include "SoftBodyPaintTool.hpp"
+#include "SoftFieldDetailsModel.hpp"
 #include "aver/anim/AnimSystem.hpp"
 #include "aver/anim/ControlRig.hpp"
 #include "aver/anim/MotionMatchSystem.hpp"
 #include "aver/game/LevelComponents.hpp"
+
+#if AVER_MODULE_CAMERA
+#  include "CameraRigDetailsModel.hpp"
+#  include "aver/camera/CameraRigSystem.hpp"
+#  if AVER_MODULE_FRAMEWORK
+#    include "aver/framework/framework_access_abi.h"
+#  endif
+#endif
 #if AVER_MODULE_SOFTBODY_SCENE
 #  include "aver/softbody/SoftBodySystem.hpp"
 #endif
@@ -69,6 +78,11 @@ editor::AttachContext SandboxApp::placedAttachContext(scene::Entity e) const {
     const u32 clothId = w.componentId("CCloth"), destructId = w.componentId("CDestructible");
     c.hasCloth = clothId != 0 && w.hasComponent(e, clothId);
     c.hasDestructible = destructId != 0 && w.hasComponent(e, destructId);
+
+    const u32 vehicleId = w.componentId("CVehicle");
+    c.hasVehicle = vehicleId != 0 && w.hasComponent(e, vehicleId);
+    c.hasRigidBody = w.hasComponent(e, scene::kComponentRigidBody);
+    c.hasVehicleToken = level_.vehiclePresetOf(e) != nullptr;
     return c;
 }
 
@@ -359,6 +373,19 @@ void SandboxApp::drawPlacedComponentSections() {
     };
 
 #if AVER_MODULE_SOFTBODY_SCENE
+    const auto makeSoftEnv = [&](const editor::PlacedKind& k) {
+        editor::SoftSectionEnv env;
+        env.playing = playing;
+        env.contentDir = project_.contentDir();
+        env.instantEdit = [&, kp = &k](bool changed, const std::function<void()>& mutate) { instantEdit(*kp, changed, mutate); };
+        env.gestureEdit = [&, kp = &k](bool changed, const std::function<void()>& mutate) { gestureEdit(*kp, changed, mutate); };
+        env.pickAsset = [this](const char* label, std::string& path, const char* ext) {
+            const char* exts[] = {ext};
+            return drawAssetField(label, label, path, std::span<const char* const>(exts, 1), {});
+        };
+        env.setStatus = [this](const std::string& msg) { cbStatus_ = msg; };
+        return env;
+    };
     // Cloth and Destructible share one section body: preset, asset (create / paint), tuning, and the Play controls.
     const auto softBodySection = [&](const editor::PlacedKind& k, bool destructible, u32 cid) {
         namespace sm = editor::softmodel;
@@ -463,6 +490,12 @@ void SandboxApp::drawPlacedComponentSections() {
             }
             if (!editable) ImGui::TextDisabled("%s", assetId == 0 ? "Create an .ocsoft to override the preset." : "Stop Play to edit.");
             ImGui::TreePop();
+        }
+        // Caps, effects, proxy cage and debris (wave 10, SoftFieldSection.cpp): they edit the loaded .ocsoft.
+        if (s_ok && assetId != 0) {
+            const u32 st = destructible ? dest->outState : cloth->outState;
+            editor::drawSoftBodyDepthSections(makeSoftEnv(k), s_asset, absAsset, editable, destructible, meshRel,
+                                              (st & softbody::kStateOverCap) != 0, (st & softbody::kStateProxy) != 0);
         }
 
         // Per-component tuning (scales: 0 reads as 1, and 1 is shown).
@@ -782,10 +815,211 @@ void SandboxApp::drawPlacedComponentSections() {
                 else ImGui::TextDisabled("Blend shapes  %u   active  %u", ms.declaredCount(e), static_cast<u32>(fr->active.size()));
             }
         }
+#if AVER_MODULE_CAMERA
+        // ---- Camera Rig ----
+        else if (t == "CameraRig") {
+            namespace cm = editor::cammodel;
+            camera::CameraRigSystem& cams = camera::cameraRigSystem();
+            auto* rig = w.component<camera::CCameraRig>(e, cid);
+            const auto presetNow = static_cast<camera::CameraPreset>(rig->preset < camera::kCameraPresetCount ? rig->preset : 0u);
+            const auto modeNow = static_cast<camera::CameraMode>(rig->mode < camera::kCameraModeCount ? rig->mode : 0u);
+            using Rig = camera::CCameraRig;
+            const auto dragF = [&](const char* label, f32 Rig::* m, f32 speed, f32 lo, f32 hi, const char* fmtText, const char* tip) {
+                f32 v = rig->*m;
+                const bool ch = ImGui::DragFloat(label, &v, speed, lo, hi, fmtText);
+                if (tip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+                gestureEdit(k, ch, [&] { rig->*m = v; });
+            };
+            const auto dragV3 = [&](const char* label, f32 Rig::* mx, f32 Rig::* my, f32 Rig::* mz, const char* tip) {
+                f32 v[3] = {rig->*mx, rig->*my, rig->*mz};
+                const bool ch = ImGui::DragFloat3(label, v, 1.0f, -5000.0f, 5000.0f, "%.0f");
+                if (tip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+                gestureEdit(k, ch, [&] { rig->*mx = v[0]; rig->*my = v[1]; rig->*mz = v[2]; });
+            };
+            const auto flag = [&](const char* label, u32 bit, bool negative, const char* tip) {
+                bool on = negative ? (rig->flags & bit) == 0 : (rig->flags & bit) != 0;
+                const bool ch = ImGui::Checkbox(label, &on);
+                if (tip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+                const bool setBit = negative ? !on : on;
+                instantEdit(k, ch, [&] { rig->flags = setBit ? (rig->flags | bit) : (rig->flags & ~bit); });
+            };
+            ImGui::BeginDisabled(playing);
+            if (ImGui::BeginCombo("Preset", cm::presetRow(presetNow).label)) {
+                for (const cm::PresetRow& row : cm::kPresetRows) {
+                    if (!ImGui::Selectable(row.label, row.preset == presetNow)) continue;
+                    auto before = cap(k);   // one undo step: the preset replaces the whole tuning
+                    const fmt::OcPlacedComponent rec = cm::applyPreset(before ? *before : editor::makeNewRecord(k), row.preset);
+                    if (game::applyPlacedComponent(w, e, rec)) commitPlacedEdit(k, std::move(before));
+                }
+                ImGui::EndCombo();
+            }
+            if (ImGui::BeginCombo("Mode", cm::modeRow(modeNow).label)) {
+                for (const cm::ModeRow& row : cm::kModeRows)
+                    if (ImGui::Selectable(row.label, row.mode == modeNow)) instantEdit(k, true, [&] { rig->mode = static_cast<u32>(row.mode); });
+                ImGui::EndCombo();
+            }
+            const scene::Entity parent = w.parent(e);
+            const bool followsParent = parent != scene::kInvalidEntity && rig->target == parent && rig->target != e;
+            if (ImGui::BeginCombo("Follows", followsParent ? "Parent" : "This entity")) {
+                if (ImGui::Selectable("This entity", !followsParent)) instantEdit(k, true, [&] { rig->target = e; });
+                ImGui::BeginDisabled(parent == scene::kInvalidEntity);
+                if (ImGui::Selectable("Parent", followsParent)) instantEdit(k, true, [&] { rig->target = parent; });
+                ImGui::EndDisabled();
+                ImGui::EndCombo();
+            }
+            ImGui::TextDisabled("Arm");
+            dragF("Length (cm)", &Rig::armLengthCm, 2.0f, 0.0f, 5000.0f, "%.0f", "0 reads 450");
+            dragF("Closest (cm)", &Rig::minArmCm, 0.5f, 0.0f, 500.0f, "%.0f", "The closest the camera may come to the pivot. 0 reads 20");
+            dragF("Probe radius (cm)", &Rig::probeRadiusCm, 0.25f, 0.0f, 100.0f, "%.1f", "0 reads 12");
+            dragF("Recover half-life (s)", &Rig::recoverHalfLifeS, 0.01f, 0.0f, 5.0f, "%.2f", "How fast the arm returns outward after a hit. Inward is instant. 0 reads 0.25");
+            flag("Collide with the world", camera::kRigNoCollision, true, "A swept sphere keeps the camera out of walls. Triggers do not stop it.");
+            if (ImGui::TreeNode("Collision layers")) {
+                const u32 mask = cm::effectiveMask(rig->collisionMask, cams.options().defaultProbeMask);
+                for (u32 layer = 0; layer < 32; ++layer) {
+                    bool on = cm::layerOn(mask, layer);
+                    char lbl[24];
+                    std::snprintf(lbl, sizeof lbl, "%u##lyr%u", layer, layer);
+                    if (ImGui::Checkbox(lbl, &on)) instantEdit(k, true, [&] { rig->collisionMask = cm::toggleLayer(mask, layer); });
+                    if (layer % 8 != 7) ImGui::SameLine();
+                }
+                if (ImGui::SmallButton("Use the default (all but cloth and proxy)")) instantEdit(k, true, [&] { rig->collisionMask = 0; });
+                ImGui::TreePop();
+            }
+            ImGui::TextDisabled("Offsets");
+            dragV3("Pivot (world)", &Rig::pivotX, &Rig::pivotY, &Rig::pivotZ, "Offset of the arm origin in world axes: eye height");
+            dragV3("Socket (fwd, right, up)", &Rig::socketX, &Rig::socketY, &Rig::socketZ, "Offset at the arm's end in the camera frame");
+            ImGui::TextDisabled("Lag");
+            dragF("Position lag (1/s)", &Rig::posLagSpeed, 0.1f, 0.0f, 100.0f, "%.1f", "0 = none. Reduce motion raises it to 40");
+            dragF("Max lag (cm)", &Rig::lagMaxDistCm, 1.0f, 0.0f, 2000.0f, "%.0f", "0 = unlimited");
+            dragF("Rotation lag (1/s)", &Rig::rotLagSpeed, 0.1f, 0.0f, 100.0f, "%.1f", "0 = none");
+            dragF("Max rotation lag (deg)", &Rig::rotLagMaxDeg, 0.5f, 0.0f, 180.0f, "%.0f", "0 = unlimited");
+            dragF("Look-ahead (s)", &Rig::lookAheadS, 0.01f, 0.0f, 2.0f, "%.2f", "The pivot leads by planar velocity times this. 0 = off");
+            dragF("Look-ahead max (cm)", &Rig::lookAheadMaxCm, 1.0f, 0.0f, 1000.0f, "%.0f", "0 reads 150");
+            ImGui::TextDisabled("Rotation");
+            dragF("Pitch min (deg)", &Rig::pitchMinDeg, 0.5f, -89.0f, 0.0f, "%.0f", "Both limits 0 reads -80 / +80");
+            dragF("Pitch max (deg)", &Rig::pitchMaxDeg, 0.5f, 0.0f, 89.0f, "%.0f", nullptr);
+            dragF("Own yaw (deg)", &Rig::yawDeg, 0.5f, -360.0f, 360.0f, "%.0f", "Orbit, TopDown, a no-inherit axis, and the Seat head look");
+            dragF("Own pitch (deg)", &Rig::pitchDeg, 0.5f, -89.0f, 89.0f, "%.0f", nullptr);
+            dragF("Recentre after (s)", &Rig::recenterDelayS, 0.1f, 0.0f, 20.0f, "%.1f", "Orbit or own-yaw Chase eases behind the target after this long without look input. 0 = off");
+            flag("Inherit yaw", camera::kRigNoInheritYaw, true, nullptr);
+            flag("Inherit pitch", camera::kRigNoInheritPitch, true, nullptr);
+            flag("Inherit roll", camera::kRigNoInheritRoll, true, nullptr);
+            flag("Look at the target (Fixed)", camera::kRigLookAtTarget, false, nullptr);
+            ImGui::TextDisabled("Blend");
+            dragF("Blend time (s)", &Rig::blendTimeS, 0.02f, 0.0f, 10.0f, "%.2f", "Seconds to blend INTO this rig or mode. 0 = cut");
+            {
+                static const char* const kCurves[] = {"Ease in-out", "Linear", "Ease in", "Ease out"};
+                int curve = static_cast<int>(rig->blendCurve < 4u ? rig->blendCurve : 0u);
+                if (ImGui::Combo("Blend curve", &curve, kCurves, 4)) instantEdit(k, true, [&] { rig->blendCurve = static_cast<u32>(curve); });
+            }
+            ImGui::TextDisabled("Feel");
+            dragF("FOV kick (deg)", &Rig::fovKickDeg, 0.1f, 0.0f, 40.0f, "%.1f", "Added FOV at the speed below. 0 = off");
+            dragF("FOV kick speed (cm/s)", &Rig::fovKickSpeedCmS, 10.0f, 0.0f, 10000.0f, "%.0f", "0 reads 1500");
+            dragF("Fade below (cm)", &Rig::fadeEndCm, 1.0f, 0.0f, 500.0f, "%.0f", "The camera nearer than this to the pivot hides the target's meshes. Both fade values 0 read 140 / 70");
+            dragF("Fade start (cm)", &Rig::fadeStartCm, 1.0f, 0.0f, 500.0f, "%.0f", nullptr);
+            flag("Collision fade", camera::kRigNoFade, true, nullptr);
+            dragF("Head bob", &Rig::bobAmount, 0.01f, 0.0f, 1.0f, "%.2f", "First person and Seat only. 0 = off");
+            dragF("Seat yaw limit (deg)", &Rig::seatYawLimitDeg, 1.0f, 0.0f, 180.0f, "%.0f", "0 reads 110");
+            dragF("Seat pitch limit (deg)", &Rig::seatPitchLimitDeg, 1.0f, 0.0f, 89.0f, "%.0f", "0 reads 50");
+            flag("Disabled", camera::kRigDisabled, false, "Never selected as the view");
+            ImGui::EndDisabled();
+            if (const auto* cam = w.component<scene::CCamera>(e, scene::kComponentCamera);
+                cam && cm::probeTooSmall(*rig, cam->nearCm, cam->fovYRad, viewAspect()))
+                ImGui::TextColored(kRed, "The probe radius is below the near-plane corner (%.1f cm): the camera can see through the surface it stops on.",
+                                   static_cast<double>(cm::nearPlaneWarningRadius(*rig, cam->nearCm, cam->fovYRad, viewAspect())));
+            if (playing) ImGui::TextDisabled("%s", cm::outLine(*rig).c_str());
+            ImGui::BeginDisabled(!playing);
+            if (ImGui::SmallButton("Make live")) cams.setViewTarget(e, camera::ViewBlend{});
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Cut")) cams.cut(e);
+#  if AVER_MODULE_FRAMEWORK
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Test shake")) aver_fw_camera_shake_add(0.6f);
+#  endif
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Test FOV kick")) {
+                camera::CameraModifier kick;
+                kick.kind = camera::ModKind::FovKick; kick.a = 8.0f; kick.inS = 0.05f; kick.holdS = 0.1f; kick.outS = 0.4f;
+                cams.pushModifier(kick);
+            }
+            ImGui::EndDisabled();
+            if (cameraLookRig_ == e) {
+                if (ImGui::SmallButton("Stop looking through (Esc)") || ImGui::IsKeyPressed(ImGuiKey_Escape)) cameraLookRig_ = scene::kInvalidEntity;
+            } else if (ImGui::SmallButton("Look through")) {
+                cameraLookRig_ = e;
+            }
+        }
+#endif
+#if AVER_MODULE_PARTICLES
+        // ---- Particle Emitter ----
+        else if (t == "ParticleEmitter") {
+            auto* pe = w.component<scene::CParticleEmitter>(e, cid);
+            assetRow(k, "effect", "Effect", pe->effect);
+            ImGui::BeginDisabled(playing);
+            static const char* kSim[] = {"Auto", "CPU", "GPU"};
+            int sim = (pe->flags & scene::kParticleEmitterForceGpu) ? 2 : ((pe->flags & scene::kParticleEmitterForceCpu) ? 1 : 0);
+            instantEdit(k, ImGui::Combo("Simulate on", &sim, kSim, 3), [&] {
+                pe->flags &= ~(scene::kParticleEmitterForceCpu | scene::kParticleEmitterForceGpu);
+                if (sim == 1) pe->flags |= scene::kParticleEmitterForceCpu;
+                else if (sim == 2) pe->flags |= scene::kParticleEmitterForceGpu;
+            });
+            bool isPlaying = (pe->flags & scene::kParticleEmitterStopped) == 0;
+            instantEdit(k, ImGui::Checkbox("Playing", &isPlaying), [&] {
+                if (isPlaying) pe->flags &= ~scene::kParticleEmitterStopped; else pe->flags |= scene::kParticleEmitterStopped;
+            });
+            bool autoDestroy = (pe->flags & scene::kParticleEmitterAutoDestroy) != 0;
+            instantEdit(k, ImGui::Checkbox("Destroy when finished", &autoDestroy), [&] {
+                if (autoDestroy) pe->flags |= scene::kParticleEmitterAutoDestroy; else pe->flags &= ~scene::kParticleEmitterAutoDestroy;
+            });
+            ImGui::EndDisabled();
+            u32 aliveNow = 0, tierNow = 0;
+            if (particles::particleSystem().emitterState(e, aliveNow, tierNow))
+                ImGui::TextDisabled("Tier  %s   alive  %u%s", tierNow ? "GPU" : "CPU", aliveNow, tierNow ? "  (a few frames old)" : "");
+            else
+                ImGui::TextDisabled("Not simulated yet.");
+            if (playing) {
+                if (ImGui::Button("Burst 20")) particles::particleSystem().burst(e, 20);
+                ImGui::SameLine();
+                if (ImGui::Button("Stop")) particles::particleSystem().stop(e, false);
+            }
+        }
+#endif
 #if AVER_MODULE_SOFTBODY_SCENE
         // ---- Cloth / Destructible ----
         else if (t == "Cloth" || t == "Destructible") {
             softBodySection(k, t == "Destructible", cid);
+        }
+        // ---- Soft Field ----  (the body is SoftFieldSection.cpp)
+        else if (t == "SoftField") {
+            editor::drawSoftFieldSection(makeSoftEnv(k), &w, static_cast<u32>(e));
+        }
+#endif
+
+#if AVER_MODULE_VEHICLE_SCENE
+        // ---- Vehicle ----  (the body is VehicleDetailsSection.cpp; this block only hands it the undo helpers, the asset row and the Content Browser)
+        else if (t == "Vehicle") {
+            editor::VehicleSectionEnv env;
+            env.playing = playing;
+            env.instantEdit = [&](bool changed, const std::function<void()>& mutate) { instantEdit(k, changed, mutate); };
+            env.gestureEdit = [&](bool changed, const std::function<void()>& mutate) { gestureEdit(k, changed, mutate); };
+            env.assetRow = [&](const char* key, const char* label, u64 id) { assetRow(k, key, label, id); };
+            env.pathOfId = [this](u64 id) { return pathOfContentId(id); };
+            env.fileExists = [this](const std::string& rel) {
+                std::error_code ec;
+                return std::filesystem::exists(std::filesystem::path(project_.contentDir()) / rel, ec);
+            };
+            env.createAsset = [&](const std::string& rel, const std::string& text) {
+                const std::filesystem::path target = std::filesystem::path(project_.contentDir()) / rel;
+                std::string why;
+                if (!editor::writeNewFile(target.string(), text, &why)) { cbStatus_ = "Could not write " + rel + ": " + why; return false; }
+                cbAdoptNewAsset(target, false);
+                changeAsset(k, "asset", rel);
+                return true;
+            };
+            env.openEditor = [this](const std::string& rel) { assetEditors_.open((std::filesystem::path(project_.contentDir()) / rel).string()); };
+            env.setStatus = [this](const std::string& s) { cbStatus_ = s; };
+            if (const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer)) env.meshRel = pathOfContentId(mr->mesh);
+            editor::drawVehicleSection(env, &w, static_cast<u32>(e));
         }
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE

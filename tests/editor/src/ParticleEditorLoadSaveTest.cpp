@@ -16,6 +16,7 @@
 // ParticleEditor::save() makes, so a bug introduced in the tab's own save() wrapper -- not the
 // format underneath it -- would be caught here too.
 #include "ParticleEditor.hpp"
+#include "ParticleStackModel.hpp"
 
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcParticle.hpp"
@@ -317,6 +318,111 @@ int main() {
         // A second, independent handle sees the same file on disk.
         editor::ParticleEditor ed2(path);
         check(std::fabs(ed2.effect().damping - 0.42f) < 1e-6f, "the second handle sees the saved value");
+    }
+
+    // ---- wave 10: the system, versions and structural edits ----------------------------------------------
+    const std::string sysPath = dir + "/system.ocparticle";
+    AVER_INFO("a v1 file opens, edits and saves as v1; a structural edit saves as v2");
+    {
+        {
+            fmt::OcParticleExtras ex;
+            const particles::ParticleEffect fx = editor::pxStarterEffect(&ex);
+            std::string why;
+            check(fmt::saveOcparticle(sysPath, fx, &ex, &why), "the v1 fixture writes: " + why);
+        }
+        check(readAll(sysPath).rfind("OCPARTICLE 1", 0) == 0, "the fixture is OCPARTICLE 1");
+        editor::ParticleEditor ed(sysPath);
+        check(ed.loaded() && ed.system().emitters.size() == 1 && ed.system().params.empty(), "a v1 file is a one-emitter system");
+        ed.setDamping(0.31f);
+        std::string why;
+        check(ed.save(&why), "a plain field edit saves: " + why);
+        check(readAll(sysPath).rfind("OCPARTICLE 1", 0) == 0, "and the file stays version 1");
+
+        editor::ParticleEditor ed2(sysPath);
+        const bool added = ed2.editEffect([](particles::ParticleEffect& e) {
+            return editor::pxmodel::addModule(e, particles::ModuleKind::UpdateDrag) >= 0;
+        });
+        check(added && ed2.dirty() && ed2.canUndo(), "adding a module is one undoable edit");
+        check(ed2.save(&why), "and saves: " + why);
+        check(readAll(sysPath).rfind("OCPARTICLE 2", 0) == 0, "a file that now needs more than v1 is written as OCPARTICLE 2");
+        particles::ParticleSystemDef back;
+        std::string err;
+        check(fmt::loadOcparticleSystem(sysPath, back, nullptr, &err) && back.emitters[0].modules.size() == 1, "and the module reads back: " + err);
+
+        ed2.undo();
+        check(ed2.effect().modules.empty(), "undo takes the module away again");
+        ed2.redo();
+        check(ed2.effect().modules.size() == 1, "redo puts it back");
+    }
+
+    AVER_INFO("a drag is ONE undo entry (coalescing), two separate drags are two");
+    {
+        editor::ParticleEditor ed(sysPath);
+        const f32 start = ed.effect().speedMax;
+        for (u64 frame = 100; frame < 110; ++frame)
+            ed.editEffect([&](particles::ParticleEffect& e) { e.speedMax = start + static_cast<f32>(frame); return true; }, 77u, frame);
+        check(ed.canUndo(), "the drag recorded an entry");
+        ed.undo();
+        check(std::fabs(ed.effect().speedMax - start) < 1e-4f && !ed.canUndo(), "one undo undoes the whole drag");
+        ed.redo();
+        // A different widget on the next frame is a separate step.
+        ed.editEffect([&](particles::ParticleEffect& e) { e.speedMin = 5.0f; return true; }, 78u, 200u);
+        ed.undo();
+        check(ed.effect().speedMin != 5.0f, "a different widget's edit is its own entry");
+        check(ed.canUndo(), "and the first drag is still there below it");
+    }
+
+    AVER_INFO("a multi-emitter system with a death event spawns the child in the preview");
+    {
+        editor::ParticleEditor ed(sysPath);
+        check(ed.editSystem([](particles::ParticleSystemDef& d) {
+            namespace pm = editor::pxmodel;
+            const int child = pm::addEmitter(d, "Child");
+            if (child < 0) return false;
+            particles::ParticleEffect& parent = d.emitters[0];
+            parent.burstCount = 5;
+            parent.emissionRate = 0.0f;
+            parent.maxParticles = 100;
+            parent.lifetimeMin = parent.lifetimeMax = 0.2f;
+            particles::ParticleEffect& c = d.emitters[static_cast<usize>(child)];
+            c.burstCount = 0;
+            c.emissionRate = 0.0f;
+            c.maxParticles = 200;
+            c.lifetimeMin = c.lifetimeMax = 5.0f;
+            return pm::addEvent(d, 0, 0, child, 2, 0.0f);
+        }), "build parent -> child");
+        check(ed.system().emitters.size() == 2, "two emitters");
+        ed.tickPreview(0.016f);
+        check(ed.previewTotal() == 5, "the parent's burst is alive, the child has nothing yet");
+        ed.tickPreview(0.3f);    // the parent's five particles die; their death events are routed
+        ed.tickPreview(0.016f);  // one tick later the child spawns
+        ed.select(1);
+        check(ed.previewParticles().size() == 10, "5 deaths x 2 children = 10 child particles");
+        ed.setSolo(1);
+        ed.restartPreview();
+        ed.tickPreview(0.016f);
+        check(ed.previewTotal() == 0, "soloing the child silences the parent, so nothing spawns the child");
+        ed.setSolo(-1);
+        std::string why;
+        check(ed.save(&why), "the system saves: " + why);
+        particles::ParticleSystemDef back;
+        std::string err;
+        check(fmt::loadOcparticleSystem(sysPath, back, nullptr, &err) && back.emitters.size() == 2 && back.emitters[0].events.size() == 1,
+              "and the event rule is in the file: " + err);
+    }
+
+    AVER_INFO("Compute bounds writes the radius and is one edit");
+    {
+        editor::ParticleEditor ed(sysPath);
+        ed.select(0);
+        ed.editEffect([](particles::ParticleEffect& e) { e.boundsRadiusCm = 0.0f; return true; });
+        check(ed.computeBounds(), "bounds computed");
+        check(ed.effect().boundsRadiusCm > 0.0f && std::isfinite(ed.effect().boundsRadiusCm), "to a positive, finite radius");
+        std::string why;
+        check(ed.save(&why), "and it saves: " + why);
+        particles::ParticleSystemDef back;
+        std::string err;
+        check(fmt::loadOcparticleSystem(sysPath, back, nullptr, &err) && back.emitters[0].boundsRadiusCm > 0.0f, "BOUNDS reads back: " + err);
     }
 
     if (g_failures == 0) AVER_INFO("ParticleEditorLoadSaveTest: all checks passed");

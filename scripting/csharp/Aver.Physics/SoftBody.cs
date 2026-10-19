@@ -115,6 +115,25 @@ public readonly struct SoftBodyHandle
     public bool Impulse(Float3 centre, float radiusCm, Float3 direction, float speedCmPerS, float radialBlend = 0, float falloffPower = 1) =>
         Native.aver_phys_sb_impulse(Handle, centre.ToArray(), radiusCm, direction.ToArray(), speedCmPerS, radialBlend, falloffPower) != 0;
 
+    /// <summary>The version of the builder-style soft-body surface (2 adds <see cref="AddVelocity"/>).</summary>
+    public static int AbiVersion => Native.aver_phys_sb_abi_version();
+
+    /// <summary>Adds a velocity change (world cm/s) to each listed vertex. Kinematic vertices are skipped; the body wakes
+    /// only when something non-zero was applied. False for a bad index, a non-finite value or mismatched lengths.</summary>
+    public bool AddVelocity(ReadOnlySpan<int> vertices, ReadOnlySpan<Float3> velocityChange)
+    {
+        if (vertices.Length != velocityChange.Length) return false;
+        int n = vertices.Length;
+        var dv = new float[n * 3];
+        for (int i = 0; i < n; i++)
+        {
+            dv[i * 3] = velocityChange[i].X;
+            dv[i * 3 + 1] = velocityChange[i].Y;
+            dv[i * 3 + 2] = velocityChange[i].Z;
+        }
+        return Native.aver_phys_sb_add_velocity(Handle, vertices.ToArray(), dv, n) != 0;
+    }
+
     public bool SkinWorld(float[] jointMatrices, int jointCount, float[]? entityWorld16, bool hardSkin) =>
         Native.aver_phys_sb_skin_world(Handle, jointMatrices, jointCount, entityWorld16, hardSkin ? 1 : 0) != 0;
 

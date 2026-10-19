@@ -159,7 +159,12 @@ public static class GraphComponentTree
                 e.SetFloat("CCamera.nearCm", c.AttrFloat("near", 10f));
                 e.SetFloat("CCamera.farCm", c.AttrFloat("far", 100000f));
                 e.SetInt("CCamera.priority", (int)c.AttrFloat("priority", 0f));
+                // A CameraRig reads the CCamera on ITS OWN entity (use the CameraRig kind for that); a bare Camera is read by nothing.
                 WarnNothingReadsIt(classNameForLog, c, "CCamera");
+                break;
+
+            case "camerarig":
+                ApplyCameraRig(e, c, classNameForLog);
                 break;
 
             case "light":
@@ -186,9 +191,44 @@ public static class GraphComponentTree
                 // off it survives an unrecognised kind. What it does not do is happen quietly.
                 Log.Warn($"[Graph] {classNameForLog}: component '{c.Id}' has unrecognised kind '{c.Kind}' " +
                          "-- it will exist as a plain transform and draw nothing. Known kinds: Scene, " +
-                         "Mesh, SkeletalMesh, Animator, Particles, Camera, Light, Fluid");
+                         "Mesh, SkeletalMesh, Animator, Particles, Camera, CameraRig, Light, Fluid");
                 break;
         }
+    }
+
+    // A CAMERA RIG on the component's own entity (a child of the spawned instance), so a graph class assembles its pawn's camera:
+    // `preset=` seeds every tuning field (chase | vehiclechase | orbit | firstperson | seat | topdown | fixed), `mode=` and `arm=`
+    // override two of them, and `target=` is `parent` (the default: the instance) or `self`. Entities cannot be named in a
+    // record, so any other target is set at run time (Entity.SetCameraRigTarget). The camera system picks the rig by possession.
+    private static void ApplyCameraRig(Entity e, GraphComponent c, string classNameForLog)
+    {
+        CameraRigPreset preset = c.AttrString("preset").ToLowerInvariant() switch
+        {
+            "vehiclechase" => CameraRigPreset.VehicleChase,
+            "orbit" => CameraRigPreset.Orbit,
+            "firstperson" => CameraRigPreset.FirstPerson,
+            "seat" => CameraRigPreset.Seat,
+            "topdown" => CameraRigPreset.TopDown,
+            "fixed" => CameraRigPreset.Fixed,
+            _ => CameraRigPreset.Chase,
+        };
+        bool self = c.AttrString("target").Equals("self", StringComparison.OrdinalIgnoreCase);
+        if (!e.AddCameraRig(preset, self ? e : Entity.None))
+        {
+            Log.Warn($"[Graph] {classNameForLog}: component '{c.Id}' is a CameraRig, but this build has no camera module -- it exists as a plain transform");
+            return;
+        }
+        string mode = c.AttrString("mode").ToLowerInvariant();
+        if (mode.Length > 0)
+        {
+            CameraMode? m = mode switch
+            {
+                "chase" => CameraMode.Chase, "orbit" => CameraMode.Orbit, "firstperson" => CameraMode.FirstPerson,
+                "seat" => CameraMode.Seat, "topdown" => CameraMode.TopDown, "fixed" => CameraMode.Fixed, _ => null,
+            };
+            if (m.HasValue) e.SetCameraRigMode(m.Value);
+        }
+        if (c.Attributes.ContainsKey("arm")) e.SetFloat("CCameraRig.armLengthCm", c.AttrFloat("arm", 0f));
     }
 
     // A FLUID COMPONENT AUTHORS A SOLVER REQUEST, NOT AN ECS PRESENCE. fluids::FluidScene owns no

@@ -728,6 +728,42 @@ int32_t aver_phys_sb_impulse(int32_t body, const float* centreCm, float radiusCm
     return 1;
 }
 
+int32_t aver_phys_sb_abi_version(void) { return AVER_PHYS_SB_ABI_VERSION; }
+
+int32_t aver_phys_sb_add_velocity(int32_t body, const int32_t* vertex, const float* dvXyz, int32_t n) {
+    const JPH::BodyID* id = findBody(body);
+    if (!id) return 0;
+    SoftRecord* r = findRecord(body);
+    if (!r) return refuse(AbiError::BadHandle);
+    if (n < 0 || (n > 0 && (!vertex || !dvXyz))) return refuse(AbiError::NullPointer);
+    for (int32_t i = 0; i < n; ++i) {
+        if (vertex[i] < 0 || vertex[i] >= r->vertexCount) return refuse(AbiError::OutOfRange);
+        if (!std::isfinite(dvXyz[i * 3]) || !std::isfinite(dvXyz[i * 3 + 1]) || !std::isfinite(dvXyz[i * 3 + 2])) return refuse(AbiError::InvalidArgument);
+    }
+    if (n == 0) return 1;
+    JPH::BodyLockWrite lock(g_world->system.GetBodyLockInterface(), *id);
+    if (!lock.Succeeded() || !lock.GetBody().IsSoftBody()) return refuse(AbiError::BadHandle);
+    JPH::Body& b = lock.GetBody();
+    auto* mp = static_cast<JPH::SoftBodyMotionProperties*>(b.GetMotionProperties());
+    const JPH::RMat44 com = b.GetCenterOfMassTransform();
+    auto& verts = mp->GetVertices();
+    bool any = false;
+    for (int32_t i = 0; i < n; ++i) {
+        const Vec3 dv(dvXyz[i * 3], dvXyz[i * 3 + 1], dvXyz[i * 3 + 2]);
+        JPH::SoftBodyVertex& v = verts[static_cast<size_t>(vertex[i])];
+        if (v.mInvMass <= 0.0f) continue;   // kinematic
+        if (dv.x == 0.0f && dv.y == 0.0f && dv.z == 0.0f) continue;
+        // Velocity is a free vector: only the rotation of the COM transform applies, inverted.
+        v.mVelocity += com.GetRotation().Multiply3x3Transposed(toJoltDir(dv));
+        any = true;
+    }
+    if (any) {
+        r->frozen = false;
+        g_world->system.GetBodyInterfaceNoLock().ActivateBody(*id);   // see aver_phys_sb_impulse on why no-lock
+    }
+    return 1;
+}
+
 int32_t aver_phys_sb_skin_world(int32_t body, const float* jointMatrices, int32_t jointCount, const float* entityWorld16, int32_t hardSkin) {
     const JPH::BodyID* id = findBody(body);
     if (!id) return 0;

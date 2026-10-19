@@ -38,7 +38,7 @@ void SoftBodySystem::clothStep(scene::World& world, Entry& en, f32) {
             }
     }
     bool any = false;
-    for (const Piece& p : en.pieces) any = any || (p.alive && p.skinned && p.body && !p.frozen);
+    for (const Piece& p : en.pieces) any = any || (p.alive && p.skinned && p.body && !p.frozen && !p.fieldHeld);
     const Mat4 W = world.worldMatrix(en.entity);
     if (!any) {
         en.lastWorld = W;
@@ -74,7 +74,7 @@ void SoftBodySystem::clothStep(scene::World& world, Entry& en, f32) {
     const bool hard = en.hardSkinNext || dist(now, was) > opt_.teleportCm;
 
     for (Piece& p : en.pieces) {
-        if (!p.alive || !p.skinned || !p.body || p.frozen) continue;
+        if (!p.alive || !p.skinned || !p.body || p.frozen || p.fieldHeld) continue;
         aver_phys_sb_skin_world(p.body, jm.data(), static_cast<i32>(en.jointCount), w16, hard ? 1 : 0);
         // A moving driver (an animated skeleton, a cart) keeps the body awake; a still prop may sleep.
         if (moved || !en.propPalette || hard) {
@@ -96,7 +96,7 @@ void SoftBodySystem::applyLodAndFreeze(scene::World& world, f32) {
         if (const auto* cl = world.component<CCloth>(e, clothType()))
             if (cl->freezeDistanceCm > 0.0f) clothFreeze = cl->freezeDistanceCm;
         for (Piece& p : en.pieces) {
-            if (!p.alive || p.empty || !p.body) continue;
+            if (!p.alive || p.empty || !p.body || p.fieldHeld) continue;   // a held piece is paused by a field, not by distance
             const f32 d = dist(p.centroid, viewPos_);
             const f32 fz = (en.destructible || en.legacy || p.debris) ? opt_.freezeDistanceDebrisCm : clothFreeze;
             refs.push_back({&en, &p, d, fz});

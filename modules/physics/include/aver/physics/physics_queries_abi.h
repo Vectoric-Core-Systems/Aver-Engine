@@ -75,6 +75,15 @@ AVER_PHYS_API int32_t aver_phys_capsule_cast(float cx, float cy, float cz,
                                              uint32_t layerMask, int32_t ignoreBody, int32_t flags,
                                              float* outDistance, float* outPoint, float* outNormal);
 
+// Sweeps a sphere of `radius` cm from (cx, cy, cz) by the displacement (dx, dy, dz) cm. Returns the first
+// body hit, or 0. Sensors are skipped unless AVER_PHYS_QUERY_INCLUDE_SENSORS. TWO ignore bodies, the one
+// place this header departs from a single ignoreBody: a camera skips the target's character AND a vehicle
+// chassis. Each may be a body or a character handle. A zero-length displacement or radius <= 0 returns 0.
+AVER_PHYS_API int32_t aver_phys_sphere_cast_q(float cx, float cy, float cz,
+                                              float dx, float dy, float dz, float radius,
+                                              uint32_t layerMask, int32_t ignoreBodyA, int32_t ignoreBodyB, int32_t flags,
+                                              float* outDistance, float* outPoint, float* outNormal);
+
 // Sweeps an existing body's own shape from its CURRENT pose by (dx, dy, dz), ignoring that body.
 // `ignoreBody` is a second body to skip (a held object, say), or 0. Returns 0 for a dead handle, a
 // character handle, a soft body, or a mesh/heightfield body.

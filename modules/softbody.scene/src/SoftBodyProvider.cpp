@@ -1,15 +1,48 @@
-// The framework relay's provider (framework_softbody_abi.h): every op forwards to the system's inbox, so a
-// C# or graph call is deferred to the next tick and applies in arrival order.
+// The framework relays' providers (framework_softbody_abi.h, framework_softfield_abi.h): every op forwards to the system's
+// inbox, so a C# or graph call is deferred to the next tick and applies in arrival order.
 #include "aver/softbody/SoftBodySystem.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace aver::softbody {
 namespace {
 
 // Operation ids and argument layout (framework_softbody_abi.h, AVER_FW_SB_OP_*).
 constexpr i32 kOpDamage = 1, kOpExplode = 2, kOpTear = 3, kOpRepair = 4, kOpRelease = 5, kOpWind = 6, kOpBudget = 7,
-              kOpPreset = 8, kOpState = 9, kOpEvents = 10;
+              kOpPreset = 8, kOpState = 9, kOpEvents = 10, kOpAsleep = 11, kOpClearDebris = 12, kOpEffects = 13, kOpDents = 14, kOpRepairAll = 15;
+
+// AVER_FW_SF_OP_* (framework_softfield_abi.h) and the spec array layout.
+constexpr i32 kSfPulse = 1, kSfStart = 2, kSfStop = 3, kSfImpact = 4, kSfSpawn = 5;
+constexpr i32 kSfSpecCount = 24;
+
+// The 24-float spec of the soft-field ABI as a FieldSpec. False for a short array, a non-finite value, a kind or a shape out
+// of range, or a negative extent. `lifetime` receives spec[21].
+bool decodeSpec(const float* in, i32 inCount, FieldSpec& out, f32& lifetime) {
+    if (!in || inCount < kSfSpecCount) return false;
+    for (i32 i = 0; i < kSfSpecCount; ++i)
+        if (!std::isfinite(in[i])) return false;
+    const i32 kind = static_cast<i32>(std::lround(in[0])), shape = static_cast<i32>(std::lround(in[1]));
+    if (kind < 0 || kind >= static_cast<i32>(kFieldKindCount) || shape < 0 || shape >= static_cast<i32>(kFieldShapeCount)) return false;
+    if (in[7] < 0.0f || in[8] < 0.0f || in[9] < 0.0f) return false;
+    FieldSpec f;
+    f.kind = static_cast<FieldKind>(kind);
+    f.shape = static_cast<FieldShape>(shape);
+    const u32 targets = static_cast<u32>(std::max(0l, std::lround(in[2]))) & kFieldTargetAll;
+    f.targets = targets ? targets : (f.kind == FieldKind::Kill ? kFieldTargetDebris : kFieldTargetAll);
+    f.perSecond = in[3] > 0.5f;
+    f.world = fieldFrameFrom(Vec3{in[4], in[5], in[6]}, Vec3{in[10], in[11], in[12]});
+    f.extents = Vec3{in[7], in[8], in[9]};
+    f.dir = Vec3{in[13], in[14], in[15]};
+    f.strength = in[16];
+    f.energyJ = in[17];
+    f.falloff = in[18];
+    f.turbulence = in[19];
+    f.wakeCmS = in[20];
+    lifetime = in[21];
+    out = f;
+    return true;
+}
 
 }  // namespace
 
@@ -111,6 +144,66 @@ i32 softBodyProvider(i32 op, i32 entity, const float* in, i32 inCount, float* ou
                 outF[k * 4 + 3] = ev.value;
             }
             return static_cast<i32>(n);
+        }
+        case kOpAsleep:
+            return inCount >= 1 && sys.setAsleep(e, arg(0) > 0.5f) ? 1 : 0;
+        case kOpClearDebris:
+            return sys.clearDebris(e) ? 1 : 0;
+        case kOpEffects:
+            if (inCount < 1) return 0;
+            sys.setEffectsEnabled(arg(0) > 0.5f);
+            return 1;
+        case kOpDents: {
+            const DentInfo d = sys.dents(e);
+            if (!d.found) return 0;
+            if (outF && cap >= 1) outF[0] = d.maxSetCm;
+            if (outI && cap >= 2) { outI[0] = static_cast<i32>(d.dentedEdges); outI[1] = static_cast<i32>(d.debrisPieces); }
+            return 1;
+        }
+        case kOpRepairAll: {
+            const u32 n = sys.repairAll();
+            if (outI && cap > 0) outI[0] = static_cast<i32>(n);
+            return 1;
+        }
+        default: return 0;
+    }
+}
+
+i32 softFieldProvider(i32 op, i32, const float* in, i32 inCount, float*, i32* outI, i32 cap, void* user) {
+    if (!user) return 0;
+    SoftBodySystem& sys = *static_cast<SoftBodySystem*>(user);
+    FieldSpec spec;
+    f32 life = 0.0f;
+    switch (op) {
+        case kSfPulse: {
+            if (!decodeSpec(in, inCount, spec, life)) return 0;
+            const u32 reach = sys.pulseField(spec);
+            if (outI && cap > 0) outI[0] = static_cast<i32>(reach);
+            return 1;
+        }
+        case kSfStart: {
+            if (!decodeSpec(in, inCount, spec, life)) return 0;
+            const u32 handle = sys.startField(spec, life);
+            if (!handle) return 0;
+            if (outI && cap > 0) outI[0] = static_cast<i32>(handle);
+            return 1;
+        }
+        case kSfStop:
+            return inCount >= 1 && in[0] >= 1.0f && sys.stopField(static_cast<u32>(in[0])) ? 1 : 0;
+        case kSfImpact: {
+            if (!in || inCount < 9) return 0;
+            for (i32 i = 0; i < 9; ++i)
+                if (!std::isfinite(in[i])) return 0;
+            const u32 reach = sys.impact(Vec3{in[0], in[1], in[2]}, Vec3{in[3], in[4], in[5]}, in[6], in[7], in[8]);
+            if (outI && cap > 0) outI[0] = static_cast<i32>(reach);
+            return 1;
+        }
+        case kSfSpawn: {
+            if (!decodeSpec(in, inCount, spec, life)) return 0;
+            const scene::Entity e = sys.spawnFieldEntity(scene::World::instance(), spec, life);
+            if (e == scene::kInvalidEntity) return 0;
+            if (outI && cap > 0) outI[0] = static_cast<i32>(e);
+            return 1;
         }
         default: return 0;
     }

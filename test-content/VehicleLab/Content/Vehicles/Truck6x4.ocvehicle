@@ -1,0 +1,30 @@
+OCVEHICLE 1
+# A 6x4 lorry: three axles (the front one steered and undriven, the two rear ones driven through limited-slip differentials), a centre
+# differential between the front and the driven pair, BOX records for the cab, the bed and the chassis rails, and a six-speed automatic.
+# Check: it settles on six wheels, the two rear axles share the torque (Show > Vehicles > Forces), and the cab tilts less than a car's on a brake.
+NAME Truck6x4
+KIND wheeled
+BODY half 400 120 60 clearance 40 com 0 0 95 mass 9000 pitchroll 55
+BOX 250 0 135 110 110 55
+BOX -90 0 125 280 115 45
+BOX 0 0 70 400 90 12
+ENGINE torque 1500 minrpm 800 maxrpm 3200 inertia 1.5 damping 0.3
+CURVE 0 0.7 0.35 1 0.75 0.95 1 0.6
+GEARBOX auto forward 6.4 4.2 2.8 1.9 1.3 1 reverse 6 switch 0.7 clutchrelease 0.45 latency 0.6 up 0.65 down 0.25 clutch 40
+CENTER lsd 1.6
+AXLE 0 final 4.1 diff open split 0.5 lsd 1.4 share 0 antiroll 4000
+AXLE 1 final 4.1 diff lsd split 0.5 lsd 1.8 share 1 antiroll 3000
+AXLE 2 final 4.1 diff lsd split 0.5 lsd 1.8 share 1 antiroll 3000
+WHEELCLASS truck radius 50 width 30 susp 8 40 hz 1.4 damping 0.55 brake 4000 handbrake 6000 inertia 3 spindamping 0.3
+WHEEL FL class truck hub 300 -110 50 steer 32 driven 0 handbrake 0 node WheelFL
+WHEEL FR class truck hub 300 110 50 steer 32 driven 0 handbrake 0 node WheelFR
+WHEEL M1L class truck hub -100 -110 50 steer 0 driven 1 handbrake 1 node WheelM1L
+WHEEL M1R class truck hub -100 110 50 steer 0 driven 1 handbrake 1 node WheelM1R
+WHEEL R1L class truck hub -300 -110 50 steer 0 driven 1 handbrake 1 node WheelR1L
+WHEEL R1R class truck hub -300 110 50 steer 0 driven 1 handbrake 1 node WheelR1R
+ASSIST abs 1 absslip 0.22 absrelease 6 tcs 1 tcsslip 0.3 steerin 2.5 steerout 4 throttlein 4 throttleout 6 brakein 6 reversebrake 1 reversespeed 50 holdbrake 0.4 holdspeed 30 skidslip 0.45 skidangle 12
+STEERCURVE 0 1 1200 0.55 3000 0.3
+AERO drag 0.9 downforce 0
+SEAT driver 250 -40 140 exit 250 -190 0
+DAMAGE health 2500 crash 700 energy 0.5 radius 100
+CAMERA modes chase hood cockpit arm 1000 eye 270 -40 190 hood 400 0 150

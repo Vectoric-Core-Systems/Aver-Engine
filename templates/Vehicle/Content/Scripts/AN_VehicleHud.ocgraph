@@ -1,0 +1,155 @@
+OCGRAPH 1
+DOMAIN gameplay
+# THE HUD. Placed in the level (PLACE none ... class AN_VehicleHud). On start it opens the layout; every tick it looks at the sedan and the
+# tank, and for the first one that has a driver it shows the layout's Root and sets the bars from AN_VehicleTelemetry. With nobody
+# driving it hides Root. Widgets are found by name with no layout handle (a layout of 0 searches everywhere), so nothing has to be kept
+# between ticks. Speed is km/h (cm/s * 0.036) against a 250 km/h bar; the gear bar is gear + 1 of 9 (R is 0, N is 1).
+NAME VehicleHud
+DESCRIPTION Opens UI/VehicleHud.ocui and fills its bars from the telemetry of whichever vehicle has a driver.
+
+CLASS AN_VehicleHud Actor
+
+ENTRY start OnStart
+ENTRY tick OnTick
+NODE start OnStart
+NODE open AN_OpenUiLayout path=UI/VehicleHud.ocui
+NODE half ConstFloat value=0.5
+NODE one ConstFloat value=1.0
+NODE kmh ConstFloat value=0.036
+NODE no ConstBool value=false
+NODE sedan FindEntity name=Sedan
+NODE sedanDrv AN_VehicleDriver
+NODE sedanDrvF IntToFloat
+NODE sedanBusy Greater
+NODE tank FindEntity name=Tank
+NODE tankDrv AN_VehicleDriver
+NODE tankDrvF IntToFloat
+NODE tankBusy Greater
+NODE tick OnTick
+NODE ifSedan Branch
+NODE ifTank Branch
+NODE sedanTel AN_VehicleTelemetry
+NODE sedanSpeedAbs Abs
+NODE sedanSpeedKmh Multiply
+NODE sedanGearF IntToFloat
+NODE sedanGearBar Add
+NODE sedanFindRoot AN_FindUiWidget name=Root
+NODE sedanShowRoot AN_SetUiVisible
+NODE sedanFindSpeed AN_FindUiWidget name=Speed
+NODE sedanSetSpeed AN_SetUiValue
+NODE sedanFindRpm AN_FindUiWidget name=Rpm
+NODE sedanSetRpm AN_SetUiValue
+NODE sedanFindGear AN_FindUiWidget name=Gear
+NODE sedanSetGear AN_SetUiValue
+NODE sedanFindHealth AN_FindUiWidget name=Health
+NODE sedanSetHealth AN_SetUiValue
+NODE sedanFindAbsLamp AN_FindUiWidget name=AbsLamp
+NODE sedanSetAbsLamp AN_SetUiVisible
+NODE sedanFindTcsLamp AN_FindUiWidget name=TcsLamp
+NODE sedanSetTcsLamp AN_SetUiVisible
+NODE tankTel AN_VehicleTelemetry
+NODE tankSpeedAbs Abs
+NODE tankSpeedKmh Multiply
+NODE tankGearF IntToFloat
+NODE tankGearBar Add
+NODE tankFindRoot AN_FindUiWidget name=Root
+NODE tankShowRoot AN_SetUiVisible
+NODE tankFindSpeed AN_FindUiWidget name=Speed
+NODE tankSetSpeed AN_SetUiValue
+NODE tankFindRpm AN_FindUiWidget name=Rpm
+NODE tankSetRpm AN_SetUiValue
+NODE tankFindGear AN_FindUiWidget name=Gear
+NODE tankSetGear AN_SetUiValue
+NODE tankFindHealth AN_FindUiWidget name=Health
+NODE tankSetHealth AN_SetUiValue
+NODE tankFindAbsLamp AN_FindUiWidget name=AbsLamp
+NODE tankSetAbsLamp AN_SetUiVisible
+NODE tankFindTcsLamp AN_FindUiWidget name=TcsLamp
+NODE tankSetTcsLamp AN_SetUiVisible
+NODE hideRoot AN_FindUiWidget name=Root
+NODE hide AN_SetUiVisible
+LINK start.exec open.exec
+LINK sedan.entity sedanDrv.entity
+LINK sedanDrv.driver sedanDrvF.a
+LINK sedanDrvF.result sedanBusy.a
+LINK half.value sedanBusy.b
+LINK tank.entity tankDrv.entity
+LINK tankDrv.driver tankDrvF.a
+LINK tankDrvF.result tankBusy.a
+LINK half.value tankBusy.b
+LINK tick.exec ifSedan.exec
+LINK sedanBusy.result ifSedan.cond
+LINK ifSedan.false ifTank.exec
+LINK tankBusy.result ifTank.cond
+LINK sedan.entity sedanTel.entity
+LINK sedanTel.speedCmS sedanSpeedAbs.a
+LINK sedanSpeedAbs.result sedanSpeedKmh.a
+LINK kmh.value sedanSpeedKmh.b
+LINK sedanTel.gear sedanGearF.a
+LINK sedanGearF.result sedanGearBar.a
+LINK one.value sedanGearBar.b
+LINK ifSedan.true sedanFindRoot.exec
+LINK sedanFindRoot.then sedanShowRoot.exec
+LINK sedanFindRoot.widget sedanShowRoot.widget
+LINK sedanShowRoot.then sedanFindSpeed.exec
+LINK sedanFindSpeed.then sedanSetSpeed.exec
+LINK sedanFindSpeed.widget sedanSetSpeed.widget
+LINK sedanSpeedKmh.result sedanSetSpeed.value
+LINK sedanSetSpeed.then sedanFindRpm.exec
+LINK sedanFindRpm.then sedanSetRpm.exec
+LINK sedanFindRpm.widget sedanSetRpm.widget
+LINK sedanTel.rpm sedanSetRpm.value
+LINK sedanSetRpm.then sedanFindGear.exec
+LINK sedanFindGear.then sedanSetGear.exec
+LINK sedanFindGear.widget sedanSetGear.widget
+LINK sedanGearBar.result sedanSetGear.value
+LINK sedanSetGear.then sedanFindHealth.exec
+LINK sedanFindHealth.then sedanSetHealth.exec
+LINK sedanFindHealth.widget sedanSetHealth.widget
+LINK sedanTel.health sedanSetHealth.value
+LINK sedanSetHealth.then sedanFindAbsLamp.exec
+LINK sedanFindAbsLamp.then sedanSetAbsLamp.exec
+LINK sedanFindAbsLamp.widget sedanSetAbsLamp.widget
+LINK sedanTel.abs sedanSetAbsLamp.visible
+LINK sedanSetAbsLamp.then sedanFindTcsLamp.exec
+LINK sedanFindTcsLamp.then sedanSetTcsLamp.exec
+LINK sedanFindTcsLamp.widget sedanSetTcsLamp.widget
+LINK sedanTel.tcs sedanSetTcsLamp.visible
+LINK tank.entity tankTel.entity
+LINK tankTel.speedCmS tankSpeedAbs.a
+LINK tankSpeedAbs.result tankSpeedKmh.a
+LINK kmh.value tankSpeedKmh.b
+LINK tankTel.gear tankGearF.a
+LINK tankGearF.result tankGearBar.a
+LINK one.value tankGearBar.b
+LINK ifTank.true tankFindRoot.exec
+LINK tankFindRoot.then tankShowRoot.exec
+LINK tankFindRoot.widget tankShowRoot.widget
+LINK tankShowRoot.then tankFindSpeed.exec
+LINK tankFindSpeed.then tankSetSpeed.exec
+LINK tankFindSpeed.widget tankSetSpeed.widget
+LINK tankSpeedKmh.result tankSetSpeed.value
+LINK tankSetSpeed.then tankFindRpm.exec
+LINK tankFindRpm.then tankSetRpm.exec
+LINK tankFindRpm.widget tankSetRpm.widget
+LINK tankTel.rpm tankSetRpm.value
+LINK tankSetRpm.then tankFindGear.exec
+LINK tankFindGear.then tankSetGear.exec
+LINK tankFindGear.widget tankSetGear.widget
+LINK tankGearBar.result tankSetGear.value
+LINK tankSetGear.then tankFindHealth.exec
+LINK tankFindHealth.then tankSetHealth.exec
+LINK tankFindHealth.widget tankSetHealth.widget
+LINK tankTel.health tankSetHealth.value
+LINK tankSetHealth.then tankFindAbsLamp.exec
+LINK tankFindAbsLamp.then tankSetAbsLamp.exec
+LINK tankFindAbsLamp.widget tankSetAbsLamp.widget
+LINK tankTel.abs tankSetAbsLamp.visible
+LINK tankSetAbsLamp.then tankFindTcsLamp.exec
+LINK tankFindTcsLamp.then tankSetTcsLamp.exec
+LINK tankFindTcsLamp.widget tankSetTcsLamp.widget
+LINK tankTel.tcs tankSetTcsLamp.visible
+LINK ifTank.false hideRoot.exec
+LINK hideRoot.then hide.exec
+LINK hideRoot.widget hide.widget
+LINK no.value hide.visible

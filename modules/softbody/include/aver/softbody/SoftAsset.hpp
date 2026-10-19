@@ -4,6 +4,7 @@
 // scene, no GPU, no Jolt. See docs/SOFTBODY.md section ".ocsoft" for the schema.
 #pragma once
 
+#include "aver/softbody/Caps.hpp"
 #include "aver/softbody/Material.hpp"
 
 #include <string>
@@ -42,6 +43,52 @@ struct DestructParams {
     u32 minPieceTriangles = 4;
     f32 debrisLifetimeS = 12.0f;
     u32 maxPieces = 16;
+    f32 impactRadiusScale = 1.0f;    // multiplies the impact deposit radius
+    bool bake = true;                // a debris piece asleep long enough is redrawn as a plain static mesh
+};
+
+// ---- the optional depth sections (all written only when they differ from these defaults) -------------
+
+enum class CapMode : u8 { Auto = 0, Off = 1, On = 2 };   // Auto: on for a destructible, off for cloth
+
+struct CapParams {
+    CapMode mode = CapMode::Auto;
+    f32 thicknessCm = -1.0f;         // < 0: the preset's capThicknessCm
+    BackSkin backSkin = BackSkin::Auto;
+    f32 uvCmPerTile = 40.0f;
+    f32 lodCm = 2500.0f;             // beyond this distance from the camera a piece draws without caps
+    std::string interiorMaterial;    // a material NAME for the walls; empty merges them into the surface mesh
+};
+
+enum class FxSlot : u8 { Impact = 0, Tear = 1, Detach = 2, Dust = 3, Release = 4 };
+inline constexpr u32 kFxSlotCount = 5, kMaxFxSounds = 8;
+
+struct FxSlotParams {
+    std::string particle;                 // content-relative path of a GPU_PARTICLES effect; empty = none
+    std::vector<std::string> sounds;      // content-relative paths, up to kMaxFxSounds; the variant is hash(seq) % n
+    f32 minSpeedCmS = 0.0f;               // Impact only
+    f32 count = 1.0f;                     // base particle count
+    f32 countPerMs = 0.0f;                // plus this per m/s of the event's value (closing speed, or the broken-edge count)
+    f32 countPerParticle = 0.5f;          // Dust: particles = this x the cage particles that became dust
+    f32 volume = 1.0f;
+    f32 pitchJitter = 0.0f;
+    f32 cooldownS = 0.1f;                 // per entry and slot
+    f32 innerCm = 300.0f, outerCm = 4000.0f;
+    bool bound() const { return !particle.empty() || !sounds.empty(); }
+};
+
+struct EffectParams {
+    FxSlotParams slot[kFxSlotCount];
+    bool any() const {
+        for (const FxSlotParams& f : slot)
+            if (f.bound()) return true;
+        return false;
+    }
+};
+
+struct ProxyParams {
+    std::string mesh;                // content-relative .ocmesh; when set the simulation runs on it
+    u32 maxParticles = 0;            // 0 = sim.maxParticles
 };
 
 // One rule that pins or limits particles. Positions are MESH-LOCAL (the .ocmesh's own space).
@@ -80,6 +127,9 @@ struct SoftAsset {
     SimParams sim;
     ClothParams cloth;
     DestructParams destruct;
+    CapParams caps;
+    EffectParams effects;
+    ProxyParams proxy;
     PaintData paint;
 
     // False with `why` set for a value the runtime cannot honour.
@@ -88,6 +138,14 @@ struct SoftAsset {
 
 // The asset a preset alone describes: material, iterations and damping from the preset table.
 SoftAsset makeSoftAsset(SoftKind kind, SoftPreset preset);
+
+const char* fxSlotKey(FxSlot slot);
+// Whether this asset's breaks get caps (Auto: a destructible), and their thickness in cm (the preset's when unset).
+bool capsEnabled(const SoftAsset& a);
+f32 capThicknessCm(const SoftAsset& a);
+// Hash of every resolved value that shapes the cage (material, preset, sim, paint, proxy); the saved-damage key.
+// Changes to caps, effects, debris lifetime and the other cosmetic values leave it alone.
+u64 softAssetKey(const SoftAsset& a);
 
 // Parses .ocsoft text. Unknown keys are ignored, a newer version is refused, missing keys fall back
 // to the preset. False with `why` on malformed or invalid input.

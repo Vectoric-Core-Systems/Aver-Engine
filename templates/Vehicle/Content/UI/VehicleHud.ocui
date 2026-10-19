@@ -1,0 +1,62 @@
+OCUI 1
+NAME VehicleHud
+# Bars, not numbers: a graph has no number-to-text node, so the template shows speed, revs, gear and health as filled bars and the
+# ABS / TCS lamps as text that appears while the aid is working. (A C# project formats real numbers: VehicleHud.FormatSpeed, FormatGear.)
+# AN_VehicleHud.ocgraph opens this layout, shows Root while somebody drives the sedan or the tank and fills the bars from telemetry.
+WIDGET Root panel -
+SET Root anchors 0 0 1 1
+SET Root style clear
+SET Root inputMode passive
+SET Root hit never
+SET Root visible false
+
+WIDGET Hud panel Root
+SET Hud anchors 1 1
+SET Hud pivot 1 1
+SET Hud offsets -40 -40 0 0
+SET Hud width 380
+SET Hud layout vstack
+SET Hud spacing 6
+SET Hud padding 14
+SET Hud hit never
+
+WIDGET SpeedLabel text Hud
+SET SpeedLabel text "SPEED   (full bar = 250 km/h)"
+WIDGET Speed progress Hud
+SET Speed minValue 0
+SET Speed maxValue 250
+SET Speed height 18
+
+WIDGET RpmLabel text Hud
+SET RpmLabel text "ENGINE   (full bar = 7000 rpm)"
+WIDGET Rpm progress Hud
+SET Rpm minValue 0
+SET Rpm maxValue 7000
+SET Rpm height 18
+
+WIDGET GearLabel text Hud
+SET GearLabel text "GEAR   R  N  1  2  3  4  5  6  7"
+WIDGET Gear progress Hud
+SET Gear minValue 0
+SET Gear maxValue 9
+SET Gear height 18
+
+WIDGET HealthLabel text Hud
+SET HealthLabel text "HEALTH"
+WIDGET Health progress Hud
+SET Health minValue 0
+SET Health maxValue 1
+SET Health height 18
+
+WIDGET Lamps panel Hud
+SET Lamps layout hstack
+SET Lamps spacing 16
+SET Lamps hit never
+WIDGET AbsLamp text Lamps
+SET AbsLamp text "ABS"
+SET AbsLamp visible false
+SET AbsLamp textColor #FFD040
+WIDGET TcsLamp text Lamps
+SET TcsLamp text "TCS"
+SET TcsLamp visible false
+SET TcsLamp textColor #FFD040

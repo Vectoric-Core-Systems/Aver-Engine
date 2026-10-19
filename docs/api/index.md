@@ -6,9 +6,9 @@ Generated from source by `scripts/csharp-api-index.py`. Hand-written guides: `do
 
 | Assembly | Public types | Public members |
 |---|---|---|
-| [Aver.Framework](Aver.Framework.md) | 166 | 1485 |
+| [Aver.Framework](Aver.Framework.md) | 191 | 1670 |
 | [Aver.Scene](Aver.Scene.md) | 10 | 116 |
-| [Aver.Physics](Aver.Physics.md) | 28 | 382 |
+| [Aver.Physics](Aver.Physics.md) | 37 | 439 |
 | [Aver.UI](Aver.UI.md) | 23 | 193 |
 | [Aver.Synapse](Aver.Synapse.md) | 38 | 176 |
 | [Aver.LevelInstance](Aver.LevelInstance.md) | 4 | 46 |

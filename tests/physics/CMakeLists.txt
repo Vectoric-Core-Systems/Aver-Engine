@@ -54,6 +54,19 @@ target_link_libraries(VehicleTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(VehicleTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+
+# VehicleExtTest -- the v2 ABI (physics_vehicle_ext_abi.h): identity with v1 when nothing v2 is called, the torque curve and gearbox,
+# differentials, driver aids in the fixed step, telemetry and events. TrackedVehicleTest -- tracked vehicles and the compound chassis.
+# Both link Aver.Physics and Aver.Core only, like VehicleTest above.
+add_executable(VehicleExtTest src/VehicleExtTest.cpp)
+target_link_libraries(VehicleExtTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(VehicleExtTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_executable(TrackedVehicleTest src/TrackedVehicleTest.cpp)
+target_link_libraries(TrackedVehicleTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(TrackedVehicleTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # LayerTest -- collision layers. Its FIRST job is a negative claim: that a project which never
 # mentions a layer behaves exactly as it did before layers existed, since every body's object layer
 # is now an encoding rather than a constant.
@@ -106,6 +119,12 @@ set_target_properties(RagdollTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BI
 add_executable(QueryTest src/QueryTest.cpp)
 target_link_libraries(QueryTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(QueryTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+
+# SphereCastQTest -- aver_phys_sphere_cast_q (physics_queries_abi.h): distance, normal, the sensor skip, two ignore slots (a body and a character), layer masks, the refusals.
+add_executable(SphereCastQTest src/SphereCastQTest.cpp)
+target_link_libraries(SphereCastQTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(SphereCastQTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # JointBreakTest -- breakable joints, soft limits, locked axes, CCD (physics_body_ext_abi.h).
 add_executable(JointBreakTest src/JointBreakTest.cpp)

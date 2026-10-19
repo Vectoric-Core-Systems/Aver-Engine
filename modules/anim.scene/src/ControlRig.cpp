@@ -298,8 +298,8 @@ bool ControlRigSystem::setInput(scene::Entity e, u64 nameHash, const f32* v, u32
         for (u32 k = 0; k < 4; ++k) in.slots[i].v[k] = k < n ? v[k] : 0.0f;
         return true;
     }
-    if (in.count >= 8) {
-        AVER_WARN("[ControlRig] entity {} already has 8 distinct rig inputs; 0x{:016X} is refused", e, nameHash);
+    if (in.count >= kMaxInputsPerEntity) {
+        AVER_WARN("[ControlRig] entity {} already has {} distinct rig inputs; 0x{:016X} is refused", e, kMaxInputsPerEntity, nameHash);
         return false;
     }
     Inputs::Slot& s = in.slots[in.count++];

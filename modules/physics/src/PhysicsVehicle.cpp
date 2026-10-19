@@ -26,7 +26,11 @@
 //   * TEARDOWN ORDER, because the constraint is also a step listener holding a raw pointer to the chassis:
 //     step listener out, constraint out, THEN the body. destroyAllVehicles and releaseVehicleOfBody at the
 //     foot of this file are the only two places that do it.
+//   * v2 (physics_vehicle_ext_abi.h): everything a vehicle describes beyond v1 is stored in VehicleEntry and
+//     consumed HERE, by _finish. The per-step half (driver aids, aero, telemetry, events) is
+//     PhysicsVehicleExt.cpp; the tracked controller is PhysicsVehicleTracked.cpp.
 #include "aver/physics/physics_vehicle_abi.h"
+#include "aver/physics/physics_vehicle_ext_abi.h"
 #include "aver/physics/physics_abi.h"
 #include "Convert.hpp"
 #include "PhysicsInternal.hpp"
@@ -40,12 +44,14 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Vehicle/VehicleCollisionTester.h>
 #include <Jolt/Physics/Vehicle/VehicleConstraint.h>
 #include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <initializer_list>
 #include <utility>
@@ -76,15 +82,20 @@ constexpr float kDefaultSurfaceFriction = 0.2f;
 // a bigger engine slips its clutch by the same fraction of a rev range instead of by more of it.
 constexpr float kReferenceEngineTorque = 500.0f;
 
-// Where in the rev range the automatic gearbox shifts. Jolt's defaults (2000 and 4000 rpm) are these
-// fractions of its default 1000..6000 range; stating them as fractions keeps the same behaviour for any
-// engine and keeps shift-up below the rev limit, which Jolt asserts.
-constexpr float kShiftDownFraction = 0.2f;
-constexpr float kShiftUpFraction   = 0.6f;
+// A limited-slip ratio of 1.01 is as near a hard lock as Jolt can be asked for (its ratio must exceed 1).
+constexpr float kLockedSlipRatio = 1.01f;
+
+constexpr int kMaxChassisBoxes = 8;
 
 bool allFinite(std::initializer_list<float> values) {
     for (float f : values)
         if (!std::isfinite(f)) return false;
+    return true;
+}
+
+bool allFinite(const float* p, int32_t n) {
+    for (int32_t i = 0; i < n; ++i)
+        if (!std::isfinite(p[i])) return false;
     return true;
 }
 
@@ -93,6 +104,119 @@ float clampInput(float v, float lo, float hi) {
     if (!std::isfinite(v)) return 0.0f;
     return std::clamp(v, lo, hi);
 }
+
+// Takes a finished vehicle out of the simulation: step listener first, then the constraint. Leaves the
+// chassis body alone. The order matters because the listener holds a raw pointer into the constraint.
+void detachConstraint(VehicleEntry& e) {
+    if (e.constraint == nullptr) return;
+    g_world->system.RemoveStepListener(e.constraint.GetPtr());
+    g_world->system.RemoveConstraint(e.constraint.GetPtr());
+    e.constraint = nullptr;
+}
+
+// The wheel's extension record, grown on demand so a vehicle that never asks for one allocates none.
+VehicleWheelExt& wheelExtOf(VehicleEntry& e, usize i) {
+    if (e.wheelExt.size() <= i) e.wheelExt.resize(i + 1);
+    return e.wheelExt[i];
+}
+
+const VehicleAxleDesc& axleDescOf(const VehicleEntry& e, usize axle) {
+    static const VehicleAxleDesc kDefault;
+    return axle < e.axleDesc.size() ? e.axleDesc[axle] : kDefault;
+}
+
+// Jolt's limited-slip ratio for a differential mode: open is "never", locked is as close to a lock as it goes.
+float slipRatioFor(int32_t mode, float lsd) {
+    if (mode == 0) return FLT_MAX;
+    if (mode == 2) return kLockedSlipRatio;
+    return lsd;
+}
+
+void setCurve(JPH::LinearCurve& curve, const std::vector<float>& xs, const std::vector<float>& ys) {
+    curve.Clear();
+    curve.Reserve(static_cast<JPH::uint>(xs.size()));
+    for (usize i = 0; i < xs.size(); ++i) curve.AddPoint(xs[i], ys[i]);
+}
+
+// The wheeled build: wheel settings, differentials, anti-roll bars and the controller settings.
+void buildWheeled(VehicleEntry& e, JPH::VehicleConstraintSettings& settings, const std::vector<VehicleAxlePair>& axles,
+                  const JPH::Vec3& up, const JPH::Vec3& fwd, const JPH::Vec3& down) {
+    for (usize wi = 0; wi < e.wheels.size(); ++wi) {
+        const VehicleWheelDesc& d = e.wheels[wi];
+        const VehicleWheelExt& x = wheelExtOf(e, wi);
+        JPH::Ref<JPH::WheelSettingsWV> w = new JPH::WheelSettingsWV;
+        w->mPosition = toJolt(d.attachCm);
+        w->mSuspensionDirection = down;
+        w->mSteeringAxis = up;
+        w->mWheelUp = up;
+        w->mWheelForward = fwd;
+        w->mSuspensionMinLength = cmToM(d.suspMinCm);
+        w->mSuspensionMaxLength = cmToM(d.suspMaxCm);
+        w->mSuspensionSpring = JPH::SpringSettings(JPH::ESpringMode::FrequencyAndDamping, d.suspHz, d.suspDamping);
+        w->mRadius = cmToM(d.radiusCm);
+        w->mWidth = cmToM(d.widthCm);
+        w->mMaxSteerAngle = JPH::DegreesToRadians(d.maxSteerDeg);
+        w->mMaxBrakeTorque = d.maxBrakeNm * x.brakeBias;
+        w->mMaxHandBrakeTorque = d.maxHandBrakeNm;
+        w->mInertia = x.inertia;
+        w->mAngularDamping = x.angDamping;
+        if (!x.longSlip.empty()) {
+            setCurve(w->mLongitudinalFriction, x.longSlip, x.longMu);
+            setCurve(w->mLateralFriction, x.latDeg, x.latMu);
+        } else if (!e.allLongSlip.empty()) {
+            setCurve(w->mLongitudinalFriction, e.allLongSlip, e.allLongMu);
+            setCurve(w->mLateralFriction, e.allLatDeg, e.allLatMu);
+        }
+        e.wheelSettings.push_back(w.GetPtr());
+        e.baseSpringHz.push_back(d.suspHz);
+        settings.mWheels.push_back(w.GetPtr());
+    }
+
+    // THE DRIVELINE. Engine and gearbox from the builder's numbers; a differential on every axle that has
+    // a driven wheel, a side that is not driven left out of it; an anti-roll bar on every complete axle.
+    JPH::Ref<JPH::WheeledVehicleControllerSettings> ctl = new JPH::WheeledVehicleControllerSettings;
+    vehicleFillPowertrain(e, ctl->mEngine, ctl->mTransmission);
+
+    std::vector<usize> drivenAxle;   // axle index of each differential, in order
+    for (usize ai = 0; ai < axles.size(); ++ai) {
+        const VehicleAxlePair& a = axles[ai];
+        const VehicleAxleDesc& ad = axleDescOf(e, ai);
+        const bool leftDriven  = a.left  >= 0 && e.wheels[static_cast<usize>(a.left)].driven;
+        const bool rightDriven = a.right >= 0 && e.wheels[static_cast<usize>(a.right)].driven;
+        if (leftDriven || rightDriven) {
+            JPH::VehicleDifferentialSettings d;
+            d.mLeftWheel  = leftDriven  ? a.left  : -1;
+            d.mRightWheel = rightDriven ? a.right : -1;
+            d.mDifferentialRatio = ad.finalDrive;
+            d.mLeftRightSplit = ad.split;
+            d.mLimitedSlipRatio = slipRatioFor(ad.diffMode, ad.lsdRatio);
+            ctl->mDifferentials.push_back(d);
+            drivenAxle.push_back(ai);
+        }
+        if (a.left >= 0 && a.right >= 0 && ad.antiRoll > 0.0f) {
+            JPH::VehicleAntiRollBar bar;
+            bar.mLeftWheel = a.left;
+            bar.mRightWheel = a.right;
+            bar.mStiffness = ad.antiRoll;
+            settings.mAntiRollBars.push_back(bar);
+        }
+    }
+
+    // THE ENGINE'S TORQUE SPLIT between the driven axles: equal unless any axle asked for a share, in which
+    // case the shares are normalised and an axle that asked for none gets none.
+    float shareSum = 0.0f;
+    for (usize ai : drivenAxle) shareSum += std::max(0.0f, axleDescOf(e, ai).share);
+    for (usize k = 0; k < ctl->mDifferentials.size(); ++k)
+        ctl->mDifferentials[k].mEngineTorqueRatio =
+            shareSum > 0.0f ? std::max(0.0f, axleDescOf(e, drivenAxle[k]).share) / shareSum
+                            : 1.0f / static_cast<float>(ctl->mDifferentials.size());
+    if (e.centerSet) ctl->mDifferentialLimitedSlipRatio = e.centerLsd;
+    settings.mController = ctl.GetPtr();
+}
+
+} // namespace
+
+namespace aver::physics::detail {
 
 // The vehicle behind a handle, or nullptr. Records why it failed the way findBody does, so
 // aver_phys_last_error answers for these calls too.
@@ -110,27 +234,17 @@ VehicleEntry* findFinished(int32_t h) {
     return (e && e->constraint != nullptr) ? e : nullptr;
 }
 
-JPH::WheeledVehicleController* controllerOf(VehicleEntry& e) {
-    return static_cast<JPH::WheeledVehicleController*>(e.constraint->GetController());
-}
-
-// A wheel pair sharing an x position, or a lone wheel. Indices into the builder's wheel list, -1 for a
-// missing side. "Left" is the -Y side: Jolt's vehicle right is forward x up, which is engine +Y here.
-struct Axle {
-    int left = -1;
-    int right = -1;
-};
-
 // Groups the wheels into axles by position, which is what a differential and an anti-roll bar are
 // defined over. Positions rather than a flag because the ABI describes a wheel by where it is, and a car
-// built wheel by wheel in any order still has a front pair and a rear pair.
-std::vector<Axle> buildAxles(const std::vector<VehicleWheelDesc>& wheels) {
-    std::vector<Axle> axles;
+// built wheel by wheel in any order still has a front pair and a rear pair. FRONT (LARGEST X) FIRST, so the
+// axle number the v2 ABI speaks of does not depend on the order the wheels were added in.
+std::vector<VehicleAxlePair> vehicleAxles(const std::vector<VehicleWheelDesc>& wheels) {
+    std::vector<VehicleAxlePair> axles;
     std::vector<bool> taken(wheels.size(), false);
     for (usize i = 0; i < wheels.size(); ++i) {
         if (taken[i]) continue;
         taken[i] = true;
-        Axle a;
+        VehicleAxlePair a;
         (wheels[i].attachCm.y > 0.0f ? a.right : a.left) = static_cast<int>(i);
         for (usize j = i + 1; j < wheels.size(); ++j) {
             if (taken[j]) continue;
@@ -144,19 +258,46 @@ std::vector<Axle> buildAxles(const std::vector<VehicleWheelDesc>& wheels) {
         }
         axles.push_back(a);
     }
+    auto xOf = [&](const VehicleAxlePair& a) {
+        return wheels[static_cast<usize>(a.left >= 0 ? a.left : a.right)].attachCm.x;
+    };
+    std::stable_sort(axles.begin(), axles.end(),
+                     [&](const VehicleAxlePair& l, const VehicleAxlePair& r) { return xOf(l) > xOf(r); });
     return axles;
 }
 
-// Takes a finished vehicle out of the simulation: step listener first, then the constraint. Leaves the
-// chassis body alone. The order matters because the listener holds a raw pointer into the constraint.
-void detachConstraint(VehicleEntry& e) {
-    if (e.constraint == nullptr) return;
-    g_world->system.RemoveStepListener(e.constraint.GetPtr());
-    g_world->system.RemoveConstraint(e.constraint.GetPtr());
-    e.constraint = nullptr;
+// The engine and gearbox a vehicle describes. Anything never set is what v1 built: Jolt's curve and ratios,
+// inertia and clutch strength scaled by torque / 500, shift points at 20% and 60% of the rev range.
+void vehicleFillPowertrain(const VehicleEntry& e, JPH::VehicleEngineSettings& engine,
+                           JPH::VehicleTransmissionSettings& trans) {
+    const float range = e.engineMaxRpm - e.engineMinRpm;
+    const float torqueScale = e.engineMaxTorque / kReferenceEngineTorque;
+    engine.mMaxTorque = e.engineMaxTorque;
+    engine.mMinRPM = e.engineMinRpm;
+    engine.mMaxRPM = e.engineMaxRpm;
+    engine.mInertia = e.engineInertia > 0.0f ? e.engineInertia : engine.mInertia * torqueScale;
+    engine.mAngularDamping = e.engineDamping;
+    if (!e.curveX.empty()) setCurve(engine.mNormalizedTorque, e.curveX, e.curveY);
+
+    trans.mMode = e.manual ? JPH::ETransmissionMode::Manual : JPH::ETransmissionMode::Auto;
+    if (!e.gearFwd.empty()) {
+        trans.mGearRatios.clear();
+        for (float r : e.gearFwd) trans.mGearRatios.push_back(r);
+    }
+    if (!e.gearRev.empty()) {
+        trans.mReverseGearRatios.clear();
+        for (float r : e.gearRev) trans.mReverseGearRatios.push_back(-r);
+    }
+    trans.mSwitchTime = e.gearbox[AVER_PHYS_VG_SWITCH_TIME];
+    trans.mClutchReleaseTime = e.gearbox[AVER_PHYS_VG_CLUTCH_RELEASE_TIME];
+    trans.mSwitchLatency = e.gearbox[AVER_PHYS_VG_SWITCH_LATENCY];
+    trans.mClutchStrength = e.gearbox[AVER_PHYS_VG_CLUTCH_STRENGTH] > 0.0f
+        ? e.gearbox[AVER_PHYS_VG_CLUTCH_STRENGTH] : trans.mClutchStrength * torqueScale;
+    trans.mShiftDownRPM = e.engineMinRpm + e.gearbox[AVER_PHYS_VG_SHIFT_DOWN_FRACTION] * range;
+    trans.mShiftUpRPM = e.engineMinRpm + e.gearbox[AVER_PHYS_VG_SHIFT_UP_FRACTION] * range;
 }
 
-} // namespace
+} // namespace aver::physics::detail
 
 extern "C" {
 
@@ -198,6 +339,10 @@ int32_t aver_phys_vehicle_create(float hx, float hy, float hz, float groundClear
     const int32_t v = g_world->nextHandle++;
     VehicleEntry entry;
     entry.body = body;
+    entry.halfCm[0] = hx; entry.halfCm[1] = hy; entry.halfCm[2] = hz;
+    entry.clearanceCm = groundClearance;
+    entry.comCm[0] = comX; entry.comCm[1] = comY; entry.comCm[2] = comZ;
+    entry.massKg = massKg;
     g_world->vehicles.emplace(v, std::move(entry));
     g_world->vehicleOfBody.emplace(body, v);
     return v;
@@ -250,6 +395,59 @@ int32_t aver_phys_vehicle_set_engine(int32_t v, float maxTorque, float minRpm, f
     return 1;
 }
 
+// Replaces create()'s box with up to eight, mass and centre of mass unchanged. The body is REBUILT under the
+// same handle (the shape swap that keeps a body's mass properties is a trap of its own), so this is refused
+// after _finish, when a constraint holds the old one.
+int32_t aver_phys_vehicle_set_chassis_boxes(int32_t v, const float* boxes6, int32_t count) {
+    VehicleEntry* e = findVehicle(v);
+    if (!e || e->constraint != nullptr) return 0;
+    if (!boxes6 || count < 1 || count > kMaxChassisBoxes) { aver::setAbiError(aver::AbiError::InvalidArgument); return 0; }
+    if (!allFinite(boxes6, count * 6)) { aver::setAbiError(aver::AbiError::InvalidArgument); return 0; }
+    for (int32_t i = 0; i < count; ++i)
+        if (boxes6[i * 6 + 3] <= 0.0f || boxes6[i * 6 + 4] <= 0.0f || boxes6[i * 6 + 5] <= 0.0f) {
+            aver::setAbiError(aver::AbiError::InvalidArgument);
+            return 0;
+        }
+
+    // The sub-shape is built here and the compound handed the SHAPE (PhysicsShapes.cpp's buildBoxCompound
+    // says why: the settings overload keeps a pointer to a loop-local).
+    JPH::StaticCompoundShapeSettings compound;
+    for (int32_t i = 0; i < count; ++i) {
+        const float* b = boxes6 + i * 6;
+        JPH::BoxShapeSettings box(JPH::Vec3(cmToM(b[4]), cmToM(b[5]), cmToM(b[3])));
+        box.SetEmbedded();
+        JPH::ShapeSettings::ShapeResult sub = box.Create();
+        if (sub.HasError()) { AVER_WARN("[Physics] vehicle {} chassis box {}: {}", v, i, sub.GetError().c_str()); return 0; }
+        compound.AddShape(toJolt(Vec3(b[0], b[1], b[2])), JPH::Quat::sIdentity(), sub.Get());
+    }
+    auto res = compound.Create();
+    if (res.HasError()) { AVER_WARN("[Physics] vehicle {} chassis: {}", v, res.GetError().c_str()); return 0; }
+    const JPH::RefConst<JPH::Shape> inner = res.Get();
+    const JPH::Vec3 com = toJolt(Vec3(e->comCm[0], e->comCm[1], e->comCm[2]));
+    const JPH::RefConst<JPH::Shape> shape = new JPH::OffsetCenterOfMassShape(inner.GetPtr(), com - inner->GetCenterOfMass());
+
+    const auto old = g_world->bodies.find(e->body);
+    if (old == g_world->bodies.end()) { aver::setAbiError(aver::AbiError::BadHandle); return 0; }
+    const JPH::BodyID oldId = old->second;
+    JPH::BodyCreationSettings s(shape.GetPtr(), bi().GetPosition(oldId), bi().GetRotation(oldId),
+                                JPH::EMotionType::Dynamic, Layers::encode(0, true));
+    s.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+    s.mMassPropertiesOverride.mMass = e->massKg;
+    s.mUserData = bi().GetUserData(oldId);
+    JPH::Body* nb = bi().CreateBody(s);
+    if (!nb) { AVER_WARN("[Physics] vehicle {}: no body left for the new chassis", v); return 0; }
+    bi().AddBody(nb->GetID(), JPH::EActivation::Activate);
+
+    bi().RemoveBody(oldId);
+    bi().DestroyBody(oldId);
+    g_world->byId.erase(oldId);
+    old->second = nb->GetID();
+    g_world->byId[nb->GetID()] = e->body;
+
+    e->boxes.assign(boxes6, boxes6 + count * 6);
+    return 1;
+}
+
 int32_t aver_phys_vehicle_finish(int32_t v, float maxPitchRollDeg) {
     VehicleEntry* e = findVehicle(v);
     if (!e || e->constraint != nullptr) return 0;
@@ -257,11 +455,14 @@ int32_t aver_phys_vehicle_finish(int32_t v, float maxPitchRollDeg) {
         AVER_WARN("[Physics] vehicle {} has no wheels", v);
         return 0;
     }
-    const bool anyDriven = std::any_of(e->wheels.begin(), e->wheels.end(),
-                                       [](const VehicleWheelDesc& w) { return w.driven; });
-    if (!anyDriven) {
-        AVER_WARN("[Physics] vehicle {} has no driven wheel, so its engine would be connected to nothing", v);
-        return 0;
+    const bool tracked = e->kind == AVER_PHYS_VEH_KIND_TRACKED;
+    if (!tracked) {
+        const bool anyDriven = std::any_of(e->wheels.begin(), e->wheels.end(),
+                                           [](const VehicleWheelDesc& w) { return w.driven; });
+        if (!anyDriven) {
+            AVER_WARN("[Physics] vehicle {} has no driven wheel, so its engine would be connected to nothing", v);
+            return 0;
+        }
     }
     const JPH::BodyID* id = findBody(e->body);
     if (!id) return 0;
@@ -277,57 +478,14 @@ int32_t aver_phys_vehicle_finish(int32_t v, float maxPitchRollDeg) {
     settings.mMaxPitchRollAngle = (maxPitchRollDeg > 0.0f && maxPitchRollDeg < 180.0f)
         ? JPH::DegreesToRadians(maxPitchRollDeg) : JPH::JPH_PI;   // pi is Jolt's "off"
 
-    for (const VehicleWheelDesc& d : e->wheels) {
-        JPH::Ref<JPH::WheelSettingsWV> w = new JPH::WheelSettingsWV;
-        w->mPosition = toJolt(d.attachCm);
-        w->mSuspensionDirection = down;
-        w->mSteeringAxis = up;
-        w->mWheelUp = up;
-        w->mWheelForward = fwd;
-        w->mSuspensionMinLength = cmToM(d.suspMinCm);
-        w->mSuspensionMaxLength = cmToM(d.suspMaxCm);
-        w->mSuspensionSpring = JPH::SpringSettings(JPH::ESpringMode::FrequencyAndDamping, d.suspHz, d.suspDamping);
-        w->mRadius = cmToM(d.radiusCm);
-        w->mWidth = cmToM(d.widthCm);
-        w->mMaxSteerAngle = JPH::DegreesToRadians(d.maxSteerDeg);
-        w->mMaxBrakeTorque = d.maxBrakeNm;
-        w->mMaxHandBrakeTorque = d.maxHandBrakeNm;
-        settings.mWheels.push_back(w.GetPtr());
+    e->wheelSettings.clear();
+    e->baseSpringHz.clear();
+    e->maxPitchRollDeg = maxPitchRollDeg;
+    if (tracked) {
+        if (!vehicleBuildTracked(*e, settings, v)) return 0;
+    } else {
+        buildWheeled(*e, settings, vehicleAxles(e->wheels), up, fwd, down);
     }
-
-    // THE DRIVELINE. Engine and gearbox from the builder's numbers; a differential on every axle that has
-    // a driven wheel, a side that is not driven left out of it, the engine's torque split equally between
-    // them; an anti-roll bar on every axle that has both wheels.
-    JPH::Ref<JPH::WheeledVehicleControllerSettings> ctl = new JPH::WheeledVehicleControllerSettings;
-    const float range = e->engineMaxRpm - e->engineMinRpm;
-    const float torqueScale = e->engineMaxTorque / kReferenceEngineTorque;
-    ctl->mEngine.mMaxTorque = e->engineMaxTorque;
-    ctl->mEngine.mMinRPM = e->engineMinRpm;
-    ctl->mEngine.mMaxRPM = e->engineMaxRpm;
-    ctl->mEngine.mInertia *= torqueScale;
-    ctl->mTransmission.mClutchStrength *= torqueScale;
-    ctl->mTransmission.mShiftDownRPM = e->engineMinRpm + kShiftDownFraction * range;
-    ctl->mTransmission.mShiftUpRPM = e->engineMinRpm + kShiftUpFraction * range;
-
-    for (const Axle& a : buildAxles(e->wheels)) {
-        const bool leftDriven  = a.left  >= 0 && e->wheels[static_cast<usize>(a.left)].driven;
-        const bool rightDriven = a.right >= 0 && e->wheels[static_cast<usize>(a.right)].driven;
-        if (leftDriven || rightDriven) {
-            JPH::VehicleDifferentialSettings d;
-            d.mLeftWheel  = leftDriven  ? a.left  : -1;
-            d.mRightWheel = rightDriven ? a.right : -1;
-            ctl->mDifferentials.push_back(d);
-        }
-        if (a.left >= 0 && a.right >= 0) {
-            JPH::VehicleAntiRollBar bar;   // stiffness left at Jolt's own default
-            bar.mLeftWheel = a.left;
-            bar.mRightWheel = a.right;
-            settings.mAntiRollBars.push_back(bar);
-        }
-    }
-    const float share = 1.0f / static_cast<float>(ctl->mDifferentials.size());
-    for (JPH::VehicleDifferentialSettings& d : ctl->mDifferentials) d.mEngineTorqueRatio = share;
-    settings.mController = ctl.GetPtr();
 
     // THE CONSTRAINT keeps a pointer to the chassis, so it is built under a write lock for the body and
     // that lock is let go before the world is told about it (AddConstraint takes its own).
@@ -345,17 +503,26 @@ int32_t aver_phys_vehicle_finish(int32_t v, float maxPitchRollDeg) {
     // THE SURFACE'S GRIP, measured against the default rather than against 1 -- see the header. Jolt's
     // own combine is sqrt(tyre * surface), which on a stock collider (friction 0.2) leaves a tyre with 0.49
     // of the grip it was built for and makes every road in the engine a wet one. Here a surface at or
-    // above the default leaves the tyre alone, and one below it takes the proportion away.
-    vc->SetCombineFriction([](JPH::uint, float& longitudinal, float& lateral, const JPH::Body& surface,
-                              const JPH::SubShapeID&) {
-        const float grip = std::min(1.0f, surface.GetFriction() / kDefaultSurfaceFriction);
+    // above the default leaves the tyre alone, and one below it takes the proportion away. GRIP_SCALE
+    // (_tune) multiplies both curves here, so it needs no curve rebuild; the pointer is into a node of
+    // World::vehicles, which outlives the constraint (detachConstraint runs before the entry is erased).
+    const float* gripScale = &e->tune[AVER_PHYS_VU_GRIP_SCALE];
+    vc->SetCombineFriction([gripScale](JPH::uint, float& longitudinal, float& lateral, const JPH::Body& surface,
+                                       const JPH::SubShapeID&) {
+        const float grip = std::min(1.0f, surface.GetFriction() / kDefaultSurfaceFriction) * *gripScale;
         longitudinal *= grip;
         lateral *= grip;
     });
 
+    if (e->collisionPeriod > 1) {
+        vc->SetNumStepsBetweenCollisionTestActive(static_cast<JPH::uint>(e->collisionPeriod));
+        vc->SetNumStepsBetweenCollisionTestInactive(static_cast<JPH::uint>(e->collisionPeriod));
+    }
+
     g_world->system.AddConstraint(vc.GetPtr());
     g_world->system.AddStepListener(vc.GetPtr());
     e->constraint = vc;
+    vehicleOnFinished(*e);
     return 1;
 }
 
@@ -379,14 +546,20 @@ int32_t aver_phys_vehicle_set_input(int32_t v, float forward, float right, float
     VehicleEntry* e = findFinished(v);
     if (!e) return 0;
     const float f = clampInput(forward, -1.0f, 1.0f);
-    controllerOf(*e)->SetDriverInput(f, clampInput(right, -1.0f, 1.0f),
-                                     clampInput(brake, 0.0f, 1.0f), clampInput(handbrake, 0.0f, 1.0f));
-    // The controller lets the body sleep while `forward` is zero and nothing wakes it from the vehicle's
-    // side, so a throttle that arrives while it sleeps has to.
-    if (f != 0.0f) {
-        if (const JPH::BodyID* id = findBody(e->body))
-            if (!bi().IsActive(*id)) bi().ActivateBody(*id);
+    const float r = clampInput(right, -1.0f, 1.0f);
+    const float b = clampInput(brake, 0.0f, 1.0f);
+    const float h = clampInput(handbrake, 0.0f, 1.0f);
+    e->reqT = f; e->reqS = r; e->reqB = b; e->reqH = h;
+    if (e->assist[AVER_PHYS_VD_ENABLED] > 0.5f) {
+        // The aids turn these into what Jolt sees in the next fixed step; a sleeping chassis is woken now.
+        if (f != 0.0f || (e->kind == AVER_PHYS_VEH_KIND_TRACKED && r != 0.0f))
+            if (const JPH::BodyID* id = findBody(e->body))
+                if (!bi().IsActive(*id)) bi().ActivateBody(*id);
+        return 1;
     }
+    // Aids off: exactly v1. Jolt applies these on every fixed step until they are set again.
+    e->appT = f; e->appS = r; e->appB = b; e->appH = h;
+    vehicleApplyInput(*e, f, r, b, h);
     return 1;
 }
 
@@ -482,13 +655,7 @@ int32_t aver_phys_vehicle_set_pose(int32_t v, float x, float y, float z,
     // several metres a second -- until the automatic box had stepped down through every gear on its
     // shift timers. In neutral nothing is connected (the clutch strength is zero at ratio 0), and the box
     // engages first again on the next throttle, as it does for any standing start.
-    if (e->constraint != nullptr) {
-        for (JPH::Wheel* wheel : e->constraint->GetWheels()) wheel->SetAngularVelocity(0.0f);
-        JPH::WheeledVehicleController* ctl = controllerOf(*e);
-        JPH::VehicleEngine& engine = ctl->GetEngine();
-        engine.SetCurrentRPM(engine.mMinRPM);
-        ctl->GetTransmission().Set(0, 1.0f);
-    }
+    if (e->constraint != nullptr) vehicleResetDrivetrain(*e);
     return 1;
 }
 
@@ -517,6 +684,8 @@ void destroyAllVehicles() {
     for (auto& [handle, entry] : g_world->vehicles) detachConstraint(entry);
     g_world->vehicles.clear();
     g_world->vehicleOfBody.clear();
+    g_world->vehicleEvents.clear();
+    g_world->vehicleImpacts.clear();
 }
 
 } // namespace aver::physics::detail

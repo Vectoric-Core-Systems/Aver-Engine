@@ -52,6 +52,8 @@
     <InternalsVisibleTo Include="Aver.Graph" />
     <!-- The gameplay-ability test project builds Entity handles and reads the save payload directly, in a bare process. -->
     <InternalsVisibleTo Include="Aver.Framework.Tests" />
+    <!-- The node suites call the internal ...ForGraph owners directly (ParticlesNodeTests and friends). -->
+    <InternalsVisibleTo Include="Aver.Graph.Tests" />
   </ItemGroup>
 
 </Project>

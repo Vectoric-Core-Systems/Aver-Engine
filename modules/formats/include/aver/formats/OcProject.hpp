@@ -101,6 +101,10 @@ struct ProjectDesc {
     // 0 = off (the grid's capped tail), 1 = auto (engages above voxi.manyLightsMin lights), 2 = on. -1 / absent = auto.
     // The console's 3 (exhaustive ground truth) is never stored. Needs NRD2.
     int manyLights = -1;  // RENDER.MANYLIGHTS  0/1/2
+    // RENDER.PARTICLEGPU: where particle emitters may simulate (docs/PARTICLES.md). 0 = everything on the CPU, 1 = auto (emitters of
+    // 2048+ particles on the GPU when the device supports compute and indirect draw), 2 = on (every emitter that can). -1 / absent
+    // = auto. CLI --particles-cpu / --particles-gpu outrank it.
+    int particleGpu = -1; // RENDER.PARTICLEGPU  0/1/2
 
     // ---- UI SETTINGS THAT THE FILE COULD NOT HOLD (now fixed) ---------------------------------
     // These were live controls in Project Settings that applied immediately, then vanished on reopen
@@ -141,7 +145,7 @@ struct ProjectDesc {
                msaa >= 0 || meshShaders >= 0 || giUpdateInterval >= 0 || hasGiVolume ||
                postExposure >= 0.0f || postBloom >= 0.0f ||
                postAutoExposure >= 0 || postTonemap >= 0 ||
-               !backend.empty() || frameBudgetMs > 0.0f || averSr >= 0 || taa >= 0 || neuraa >= 0 || manyLights >= 0;
+               !backend.empty() || frameBudgetMs > 0.0f || averSr >= 0 || taa >= 0 || neuraa >= 0 || manyLights >= 0 || particleGpu >= 0;
     }
 
     // ---- WINDOW.* -- shipped game window presentation (now persisted) -------------------------

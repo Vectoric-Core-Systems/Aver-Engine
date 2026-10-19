@@ -18,8 +18,19 @@
 #  include "aver/softbody/SoftBodySystem.hpp"
 #endif
 
+#if AVER_MODULE_VEHICLE_SCENE
+#  include "aver/vehicle/VehiclePhysicsSystem.hpp"
+#  include "aver/vehicle/VehiclePresets.hpp"
+#endif
+
+#if AVER_MODULE_CAMERA
+#  include "aver/camera/CameraRigSystem.hpp"
+#endif
+
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
+#include <cstring>
 #include <cstdio>
 #include <iterator>
 
@@ -28,7 +39,7 @@ namespace aver::game {
 namespace {
 
 enum TypeIx : int {
-    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kCloth, kDestructible, kMorphTargets, kTypeCount,
+    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kCloth, kDestructible, kMorphTargets, kCameraRig, kVehicle, kParticleEmitter, kSoftField, kTypeCount,
     kUnknownType = -1
 };
 static_assert(std::size(kPlacedComponentTypes) == kTypeCount, "kPlacedComponentTypes and TypeIx must stay in step");
@@ -159,8 +170,17 @@ u32 typeId(scene::World& w, int ix) {
 #if AVER_MODULE_SOFTBODY_SCENE
         case kCloth: return w.componentId("CCloth");
         case kDestructible: return w.componentId("CDestructible");
+        case kSoftField: return w.componentId("CSoftField");
 #endif
         case kMorphTargets: return w.componentId("CMorphTargets");
+
+#if AVER_MODULE_VEHICLE_SCENE
+        case kVehicle: return w.componentId("CVehicle");
+#endif
+
+        case kParticleEmitter: return scene::kComponentParticleEmitter;
+
+        case kCameraRig: return w.componentId("CCameraRig");
         default: return 0;
     }
 }
@@ -190,6 +210,23 @@ bool requirementsMet(scene::World& w, scene::Entity e, int ix, const fmt::OcWorl
             // One body per entity root: a cloth and a destructible cannot share an entity.
             const u32 other = typeId(w, ix == kCloth ? kDestructible : kCloth);
             if (other != 0 && w.hasComponent(e, other)) { why = ix == kCloth ? "the entity is already Destructible" : "the entity is already Cloth"; return false; }
+            if (ix == kDestructible) {
+                // A vehicle's chassis is one body: a Destructible belongs on a child (the spec's DAMAGE shell).
+                const u32 veh = typeId(w, kVehicle);
+                if (veh != 0 && w.hasComponent(e, veh)) { why = "the entity is already a Vehicle"; return false; }
+            }
+            break;
+        }
+        case kVehicle: {
+            // The fights VehiclePhysicsSystem::buildEntry and GameLevel::beginVehicles refuse: a rigid body, an object clip, a traffic `vehicle` token.
+            if (w.hasComponent(e, scene::kComponentRigidBody)) { why = "the entity is a Rigid Body: a Vehicle is its own body"; return false; }
+            if (placement && !placement->vehiclePreset.empty()) { why = "the placement is a traffic car (vehicle token)"; return false; }
+            if ((placement && !placement->animClip.empty()) || (w.hasComponent(e, scene::kComponentAnimator) && !w.hasComponent(e, scene::kComponentSkeletalMesh))) {
+                why = "the placement plays an object animation";
+                return false;
+            }
+            const u32 dest = typeId(w, kDestructible);
+            if (dest != 0 && w.hasComponent(e, dest)) { why = "the entity is already Destructible"; return false; }
             break;
         }
         default: break;
@@ -441,6 +478,55 @@ bool applyDestructible(scene::World& w, scene::Entity e, const fmt::OcPlacedComp
                (boolKey(r, "nodebris", false) ? softbody::kDestructNoDebris : 0u);
     return true;
 }
+
+// "x,y,z" -> out; false (out untouched) when absent or malformed.
+bool vec3Key(const fmt::OcPlacedComponent& r, std::string_view key, f32 out[3]) {
+    const std::string* v = r.find(key);
+    if (!v) return false;
+    f32 t[3];
+    usize at = 0;
+    for (int i = 0; i < 3; ++i) {
+        const usize comma = i < 2 ? v->find(',', at) : v->size();
+        if (comma == std::string::npos) return false;
+        double d = 0.0;
+        if (!parseNum(v->substr(at, comma - at), d)) return false;
+        t[i] = static_cast<f32>(d);
+        at = comma + 1;
+    }
+    out[0] = t[0]; out[1] = t[1]; out[2] = t[2];
+    return true;
+}
+
+// COMPONENT SoftField (docs/SOFTBODY.md): kind shape extent=x,y,z strength energy falloff dir=x,y,z turbulence targets once off.
+bool applySoftField(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    const u32 type = typeId(w, kSoftField);
+    if (type == 0) { why = "CSoftField is not registered"; return false; }
+    softbody::FieldKind kind = softbody::FieldKind::RadialForce;
+    if (const std::string* k = r.find("kind"); k && !softbody::fieldKindFromKey(*k, kind)) { why = "unknown field kind"; return false; }
+    softbody::FieldShape shape = softbody::FieldShape::Sphere;
+    if (const std::string* k = r.find("shape"); k && !softbody::fieldShapeFromKey(*k, shape)) { why = "unknown field shape"; return false; }
+    u32 targets = 0;
+    if (const std::string* k = r.find("targets"); k && !softbody::fieldTargetsFromText(*k, targets)) { why = "unknown field targets"; return false; }
+    auto* c = w.component<softbody::CSoftField>(e, type);
+    if (!c) {
+        c = softbody::SoftBodySystem::attachSoftField(w, e);
+        if (!c) { why = "the world refused the component"; return false; }
+    }
+    c->kind = static_cast<u32>(kind);
+    c->shape = static_cast<u32>(shape);
+    c->targets = targets;
+    f32 ext[3] = {0, 0, 0}, dir[3] = {0, 0, 0};
+    vec3Key(r, "extent", ext);
+    vec3Key(r, "dir", dir);
+    c->extentX = ext[0]; c->extentY = ext[1]; c->extentZ = ext[2];
+    c->dirX = dir[0]; c->dirY = dir[1]; c->dirZ = dir[2];
+    c->strength = numKey(r, "strength", 0.0f);
+    c->energyJPerS = numKey(r, "energy", 0.0f);
+    c->falloff = numKey(r, "falloff", 0.0f);
+    c->turbulence = numKey(r, "turbulence", 0.0f);
+    c->flags = (boolKey(r, "once", false) ? softbody::kFieldOnce : 0u) | (boolKey(r, "off", false) ? softbody::kFieldDisabled : 0u);
+    return true;
+}
 #endif
 
 // COMPONENT MorphTargets (docs/ANIM_MORPH_FACE.md): rig=<.ocface> weight=1 inherit=1 off=1 ignoreanim=1. Weights set from script,
@@ -462,6 +548,209 @@ bool applyMorphTargets(scene::World& w, scene::Entity e, const fmt::OcPlacedComp
     return true;
 }
 
+#if AVER_MODULE_CAMERA
+// ---- CameraRig: apply and capture share one key table, in canonical order (docs/CAMERAS.md; sandbox/src/CameraRigDetailsModel.hpp restates it) ----
+
+enum class CamSlot : u8 { Float, Vec3, Curve, Mask };
+struct CamKey { const char* key; CamSlot kind; usize offset; };
+#define AVER_CAMKEY(k, kind, member) CamKey{k, CamSlot::kind, offsetof(camera::CCameraRig, member)}
+constexpr CamKey kCamKeys[] = {
+    AVER_CAMKEY("arm", Float, armLengthCm), AVER_CAMKEY("minarm", Float, minArmCm), AVER_CAMKEY("probe", Float, probeRadiusCm),
+    AVER_CAMKEY("recover", Float, recoverHalfLifeS), AVER_CAMKEY("socket", Vec3, socketX), AVER_CAMKEY("pivot", Vec3, pivotX),
+    AVER_CAMKEY("lag", Float, posLagSpeed), AVER_CAMKEY("lagmax", Float, lagMaxDistCm), AVER_CAMKEY("rotlag", Float, rotLagSpeed),
+    AVER_CAMKEY("rotlagmax", Float, rotLagMaxDeg), AVER_CAMKEY("lagstep", Float, lagMaxStepS), AVER_CAMKEY("ahead", Float, lookAheadS),
+    AVER_CAMKEY("aheadmax", Float, lookAheadMaxCm), AVER_CAMKEY("pitchmin", Float, pitchMinDeg), AVER_CAMKEY("pitchmax", Float, pitchMaxDeg),
+    AVER_CAMKEY("yaw", Float, yawDeg), AVER_CAMKEY("pitch", Float, pitchDeg), AVER_CAMKEY("recenter", Float, recenterDelayS),
+    AVER_CAMKEY("blend", Float, blendTimeS), AVER_CAMKEY("curve", Curve, blendCurve), AVER_CAMKEY("fovkick", Float, fovKickDeg),
+    AVER_CAMKEY("fovkickspeed", Float, fovKickSpeedCmS), AVER_CAMKEY("fadestart", Float, fadeStartCm), AVER_CAMKEY("fadeend", Float, fadeEndCm),
+    AVER_CAMKEY("bob", Float, bobAmount), AVER_CAMKEY("seatyaw", Float, seatYawLimitDeg), AVER_CAMKEY("seatpitch", Float, seatPitchLimitDeg),
+    AVER_CAMKEY("mask", Mask, collisionMask),
+};
+#undef AVER_CAMKEY
+// A flag key: `1` (the default) means the bit is CLEAR for the negative-sense flags, `0` for the positive ones.
+struct CamFlag { const char* key; u32 bit; bool negative; };
+constexpr CamFlag kCamFlags[] = {
+    {"collision", camera::kRigNoCollision, true}, {"inheritpitch", camera::kRigNoInheritPitch, true}, {"inherityaw", camera::kRigNoInheritYaw, true},
+    {"inheritroll", camera::kRigNoInheritRoll, true}, {"fade", camera::kRigNoFade, true}, {"lookat", camera::kRigLookAtTarget, false},
+    {"disabled", camera::kRigDisabled, false},
+};
+constexpr const char* kCamPresetKeys[] = {"chase", "vehiclechase", "orbit", "firstperson", "seat", "topdown", "fixed"};
+constexpr const char* kCamModeKeys[] = {"chase", "orbit", "firstperson", "seat", "topdown", "fixed"};
+constexpr const char* kCamCurveKeys[] = {"easeinout", "linear", "easein", "easeout"};
+
+template <usize N>
+int camWord(const char* const (&words)[N], std::string_view w) {
+    const std::string l = lowered(w);
+    for (usize i = 0; i < N; ++i)
+        if (l == words[i]) return static_cast<int>(i);
+    return -1;
+}
+f32 camFloatAt(const camera::CCameraRig& r, usize off) { f32 v; std::memcpy(&v, reinterpret_cast<const unsigned char*>(&r) + off, sizeof v); return v; }
+void camSetFloat(camera::CCameraRig& r, usize off, f32 v) { std::memcpy(reinterpret_cast<unsigned char*>(&r) + off, &v, sizeof v); }
+
+bool applyCameraRig(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    const u32 type = typeId(w, kCameraRig);
+    if (type == 0) { why = "CCameraRig is not registered"; return false; }
+    // Every word is checked before the component is touched, so a refusal leaves nothing half-written.
+    int preset = 0;
+    if (const std::string* v = r.find("preset")) {
+        preset = camWord(kCamPresetKeys, *v);
+        if (preset < 0) { why = "unknown preset '" + *v + "'"; return false; }
+    }
+    camera::CCameraRig rig = camera::presetRig(static_cast<camera::CameraPreset>(preset));
+    if (const std::string* v = r.find("mode")) {
+        const int m = camWord(kCamModeKeys, *v);
+        if (m < 0) { why = "unknown mode '" + *v + "'"; return false; }
+        rig.mode = static_cast<u32>(m);
+    }
+    for (const CamKey& k : kCamKeys) {
+        const std::string* v = r.find(k.key);
+        if (!v) continue;
+        switch (k.kind) {
+            case CamSlot::Float: camSetFloat(rig, k.offset, numKey(r, k.key, camFloatAt(rig, k.offset))); break;
+            case CamSlot::Vec3: {   // x,y,z; an axis that does not parse keeps the preset's value
+                usize at = 0;
+                for (int axis = 0; axis < 3 && at <= v->size(); ++axis) {
+                    const usize comma = v->find(',', at);
+                    double d = 0.0;
+                    if (parseNum(std::string_view(*v).substr(at, comma == std::string::npos ? std::string::npos : comma - at), d))
+                        camSetFloat(rig, k.offset + static_cast<usize>(axis) * sizeof(f32), static_cast<f32>(d));
+                    if (comma == std::string::npos) break;
+                    at = comma + 1;
+                }
+                break;
+            }
+            case CamSlot::Curve: {
+                const int c = camWord(kCamCurveKeys, *v);
+                if (c < 0) { why = "unknown curve '" + *v + "'"; return false; }
+                rig.blendCurve = static_cast<u32>(c);
+                break;
+            }
+            case CamSlot::Mask: {
+                u32 m = 0;
+                const auto res = std::from_chars(v->data(), v->data() + v->size(), m, 16);
+                if (res.ec == std::errc{} && res.ptr == v->data() + v->size()) rig.collisionMask = m;
+                break;
+            }
+        }
+    }
+    for (const CamFlag& f : kCamFlags) {
+        if (!r.find(f.key)) continue;
+        const bool on = boolKey(r, f.key, f.negative);
+        const bool setBit = f.negative ? !on : on;
+        rig.flags = setBit ? (rig.flags | f.bit) : (rig.flags & ~f.bit);
+    }
+    // `target=self` (the default) follows the rig's own entity; `parent` its parent. Anything else is runtime.
+    rig.target = e;
+    if (const std::string* v = r.find("target"); v && lowered(*v) == "parent") {
+        const scene::Entity p = w.parent(e);
+        if (p != scene::kInvalidEntity) rig.target = p;
+    }
+    const auto* prev = w.component<camera::CCameraRig>(e, type);
+    const i32 body = prev ? prev->ignoreBody : 0;   // process-local, not authored: an update keeps it
+    camera::CCameraRig* c = camera::CameraRigSystem::attach(w, e, static_cast<camera::CameraPreset>(preset), rig.target);
+    if (!c) { why = "the world refused the component"; return false; }
+    *c = rig;
+    c->ignoreBody = body;
+    return true;
+}
+
+void captureCameraRig(scene::World& w, scene::Entity e, const camera::CCameraRig& c, fmt::OcPlacedComponent& rec) {
+    const int preset = c.preset < camera::kCameraPresetCount ? static_cast<int>(c.preset) : 0;
+    const camera::CCameraRig base = camera::presetRig(static_cast<camera::CameraPreset>(preset));
+    put(rec, "preset", kCamPresetKeys[preset]);
+    if (c.mode != base.mode) put(rec, "mode", kCamModeKeys[c.mode < camera::kCameraModeCount ? c.mode : 0u]);
+    if (c.target != 0 && c.target != e && c.target == w.parent(e)) put(rec, "target", "parent");
+    for (const CamKey& k : kCamKeys) {
+        switch (k.kind) {
+            case CamSlot::Float:
+                if (camFloatAt(c, k.offset) != camFloatAt(base, k.offset)) putNum(rec, k.key, camFloatAt(c, k.offset));
+                break;
+            case CamSlot::Vec3: {
+                bool differs = false;
+                for (int axis = 0; axis < 3; ++axis) {
+                    const usize off = k.offset + static_cast<usize>(axis) * sizeof(f32);
+                    differs = differs || camFloatAt(c, off) != camFloatAt(base, off);
+                }
+                if (!differs) break;
+                std::string v;
+                for (int axis = 0; axis < 3; ++axis) {
+                    if (axis) v += ',';
+                    v += numStr(static_cast<double>(camFloatAt(c, k.offset + static_cast<usize>(axis) * sizeof(f32))));
+                }
+                put(rec, k.key, v);
+                break;
+            }
+            case CamSlot::Curve:
+                if (c.blendCurve != base.blendCurve) put(rec, k.key, kCamCurveKeys[c.blendCurve < 4u ? c.blendCurve : 0u]);
+                break;
+            case CamSlot::Mask:
+                if (c.collisionMask != base.collisionMask) { char b[16]; std::snprintf(b, sizeof b, "%x", c.collisionMask); put(rec, k.key, b); }
+                break;
+        }
+    }
+    for (const CamFlag& f : kCamFlags) {
+        const bool isSet = (c.flags & f.bit) != 0, baseSet = (base.flags & f.bit) != 0;
+        if (isSet != baseSet) put(rec, f.key, (f.negative ? !isSet : isSet) ? "1" : "0");
+    }
+}
+#endif
+// COMPONENT ParticleEmitter (docs/PARTICLES.md): effect=<.ocparticle path> sim=auto|cpu|gpu playing=1 autodestroy=0 seed=0. The clock,
+// the emit accumulator and a seed the system assigned itself are runtime state and are never authored. An absent effect is allowed
+// (the emitter is inert until one is picked), the way an Animator without a clip is.
+bool applyParticleEmitter(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    u64 effect = 0;
+    if (readAsset(r, "effect", effect) == AssetKey::Bad) { why = "malformed effect#"; return false; }
+    auto* c = w.component<scene::CParticleEmitter>(e, scene::kComponentParticleEmitter);
+    if (!c) {
+        c = static_cast<scene::CParticleEmitter*>(w.addComponent(e, scene::kComponentParticleEmitter));
+        if (!c) { why = "the world refused the component"; return false; }
+        *c = scene::CParticleEmitter{};
+    }
+    const std::string sim = lowered(textKey(r, "sim"));
+    double seed = 0.0;
+    if (const std::string* sv = r.find("seed")) parseNum(*sv, seed);
+    c->effect = effect;
+    c->age = 0.0f;
+    c->emitAccum = 0.0f;
+    c->seed = (seed >= 1.0 && seed <= 4294967295.0) ? static_cast<u32>(seed) : 0u;
+    c->flags = (boolKey(r, "playing", true) ? 0u : scene::kParticleEmitterStopped) |
+               (boolKey(r, "autodestroy", false) ? scene::kParticleEmitterAutoDestroy : 0u) |
+               (sim == "cpu" ? scene::kParticleEmitterForceCpu : 0u) | (sim == "gpu" ? scene::kParticleEmitterForceGpu : 0u);
+    return true;
+}
+#if AVER_MODULE_VEHICLE_SCENE
+// COMPONENT Vehicle (docs/VEHICLES.md): asset=<.ocvehicle> preset=car power= grip= brake= damage= noactions= noaudio= noeffects= nowheels= indestructible=.
+// Runtime state (driver, health, gear, damage taken) is never authored: a loaded level starts intact and unoccupied. A zero scale reads as 1.
+bool applyVehicle(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    const u32 type = typeId(w, kVehicle);
+    if (type == 0) { why = "CVehicle is not registered"; return false; }
+    u64 asset = 0;
+    if (readAsset(r, "asset", asset) == AssetKey::Bad) { why = "malformed asset#"; return false; }
+    int preset = 0;
+    if (const std::string* v = r.find("preset")) {
+        preset = vehicle::presetIndex(lowered(*v));
+        if (preset < 0) { why = "unknown preset '" + *v + "'"; return false; }
+    }
+    auto* c = w.component<vehicle::CVehicle>(e, type);
+    if (!c) {
+        c = vehicle::VehiclePhysicsSystem::attach(w, e, asset, static_cast<u32>(preset));
+        if (!c) { why = "the world refused the component"; return false; }
+    }
+    c->asset = asset;
+    c->preset = static_cast<u32>(preset);
+    c->powerScale = numKey(r, "power", 1.0f);
+    c->gripScale = numKey(r, "grip", 1.0f);
+    c->brakeScale = numKey(r, "brake", 1.0f);
+    c->damageScale = numKey(r, "damage", 1.0f);
+    // kVehicleFlipRequest / kVehicleRepairRequest are one-shot requests from a script, not authored state: leave them alone.
+    c->flags = (c->flags & (vehicle::kVehicleFlipRequest | vehicle::kVehicleRepairRequest)) |
+               (boolKey(r, "noactions", false) ? vehicle::kVehicleNoActions : 0u) | (boolKey(r, "noaudio", false) ? vehicle::kVehicleNoAudio : 0u) |
+               (boolKey(r, "noeffects", false) ? vehicle::kVehicleNoEffects : 0u) | (boolKey(r, "nowheels", false) ? vehicle::kVehicleNoWheelVisuals : 0u) |
+               (boolKey(r, "indestructible", false) ? vehicle::kVehicleIndestructible : 0u);
+    return true;
+}
+#endif
 bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, const fmt::OcWorldPlacement* placement, std::string& why) {
     const int ix = typeIndex(r.type);
     if (ix == kUnknownType) { why = "unknown type"; return false; }
@@ -469,7 +758,15 @@ bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r,
     if (ix == kBrain || ix == kSmartObject) { why = "unknown to this build"; return false; }
 #endif
 #if !AVER_MODULE_SOFTBODY_SCENE
-    if (ix == kCloth || ix == kDestructible) { why = "unknown to this build"; return false; }
+    if (ix == kCloth || ix == kDestructible || ix == kSoftField) { why = "unknown to this build"; return false; }
+#endif
+
+#if !AVER_MODULE_VEHICLE_SCENE
+    if (ix == kVehicle) { why = "unknown to this build"; return false; }
+#endif
+
+#if !AVER_MODULE_CAMERA
+    if (ix == kCameraRig) { why = "unknown to this build"; return false; }
 #endif
     if (!requirementsMet(w, e, ix, placement, why)) return false;
     switch (ix) {
@@ -487,8 +784,19 @@ bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r,
 #if AVER_MODULE_SOFTBODY_SCENE
         case kCloth: return applyCloth(w, e, r, why);
         case kDestructible: return applyDestructible(w, e, r, why);
+        case kSoftField: return applySoftField(w, e, r, why);
 #endif
         case kMorphTargets: return applyMorphTargets(w, e, r, why);
+
+#if AVER_MODULE_VEHICLE_SCENE
+        case kVehicle: return applyVehicle(w, e, r, why);
+#endif
+
+        case kParticleEmitter: return applyParticleEmitter(w, e, r, why);
+
+#if AVER_MODULE_CAMERA
+        case kCameraRig: return applyCameraRig(w, e, r, why);
+#endif
         default: break;
     }
     why = "unknown type";
@@ -638,6 +946,27 @@ std::optional<fmt::OcPlacedComponent> captureOne(scene::World& w, scene::Entity 
             if (c->flags & softbody::kDestructNoDebris) put(rec, "nodebris", "1");
             break;
         }
+        case kSoftField: {
+            const auto* c = w.component<softbody::CSoftField>(e, type);
+            const auto vec = [&](const char* key, f32 x, f32 y, f32 z) {
+                if (x != 0.0f || y != 0.0f || z != 0.0f)
+                    put(rec, key, numStr(x) + "," + numStr(y) + "," + numStr(z));
+            };
+            const auto kind = c->kind < softbody::kFieldKindCount ? static_cast<softbody::FieldKind>(c->kind) : softbody::FieldKind::RadialForce;
+            const auto shape = c->shape < softbody::kFieldShapeCount ? static_cast<softbody::FieldShape>(c->shape) : softbody::FieldShape::Sphere;
+            put(rec, "kind", softbody::fieldKindKey(kind));
+            put(rec, "shape", softbody::fieldShapeKey(shape));
+            vec("extent", c->extentX, c->extentY, c->extentZ);
+            if (c->strength != 0.0f) putNum(rec, "strength", c->strength);
+            if (c->energyJPerS != 0.0f) putNum(rec, "energy", c->energyJPerS);
+            if (c->falloff != 0.0f) putNum(rec, "falloff", c->falloff);
+            vec("dir", c->dirX, c->dirY, c->dirZ);
+            if (c->turbulence != 0.0f) putNum(rec, "turbulence", c->turbulence);
+            if (c->targets != 0) put(rec, "targets", softbody::fieldTargetsToText(c->targets));
+            if (c->flags & softbody::kFieldOnce) put(rec, "once", "1");
+            if (c->flags & softbody::kFieldDisabled) put(rec, "off", "1");
+            break;
+        }
 #endif
         case kMorphTargets: {
             const auto* c = w.component<anim::CMorphTargets>(e, type);
@@ -649,6 +978,40 @@ std::optional<fmt::OcPlacedComponent> captureOne(scene::World& w, scene::Entity 
             if (c->flags & anim::kMorphIgnoreAnim) put(rec, "ignoreanim", "1");
             break;
         }
+
+#if AVER_MODULE_VEHICLE_SCENE
+        case kVehicle: {
+            const auto* c = w.component<vehicle::CVehicle>(e, type);
+            putAsset(rec, "asset", c->asset, pathOf);
+            // `preset` is always written without an asset (it is what the vehicle is), and with one only when it is not the default car.
+            if (c->asset == 0 || c->preset != 0) put(rec, "preset", vehicle::presetName(c->preset < vehicle::kPresetCount ? c->preset : 0u));
+            if (c->powerScale > 0.0f && c->powerScale != 1.0f) putNum(rec, "power", c->powerScale);
+            if (c->gripScale > 0.0f && c->gripScale != 1.0f) putNum(rec, "grip", c->gripScale);
+            if (c->brakeScale > 0.0f && c->brakeScale != 1.0f) putNum(rec, "brake", c->brakeScale);
+            if (c->damageScale > 0.0f && c->damageScale != 1.0f) putNum(rec, "damage", c->damageScale);
+            if (c->flags & vehicle::kVehicleNoActions) put(rec, "noactions", "1");
+            if (c->flags & vehicle::kVehicleNoAudio) put(rec, "noaudio", "1");
+            if (c->flags & vehicle::kVehicleNoEffects) put(rec, "noeffects", "1");
+            if (c->flags & vehicle::kVehicleNoWheelVisuals) put(rec, "nowheels", "1");
+            if (c->flags & vehicle::kVehicleIndestructible) put(rec, "indestructible", "1");
+            break;
+        }
+#endif
+
+        case kParticleEmitter: {
+            const auto* c = w.component<scene::CParticleEmitter>(e, type);
+            putAsset(rec, "effect", c->effect, pathOf);
+            if (c->flags & scene::kParticleEmitterForceCpu) put(rec, "sim", "cpu");
+            else if (c->flags & scene::kParticleEmitterForceGpu) put(rec, "sim", "gpu");
+            if (c->flags & scene::kParticleEmitterStopped) put(rec, "playing", "0");
+            if (c->flags & scene::kParticleEmitterAutoDestroy) put(rec, "autodestroy", "1");
+            break;   // the seed is deliberately not captured: 0 means the system derives one per entity, so replays match
+        }
+#if AVER_MODULE_CAMERA
+        case kCameraRig:
+            captureCameraRig(w, e, *w.component<camera::CCameraRig>(e, type), rec);
+            break;
+#endif
         default: return std::nullopt;
     }
     return rec;

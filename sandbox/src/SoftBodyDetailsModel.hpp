@@ -14,6 +14,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <iterator>
@@ -160,6 +162,99 @@ inline std::string assetProblem(u64 assetId, const std::string& assetPath, bool 
     if (assetId != 0 && assetPath.empty()) return "The asset is not under Content.";
     if (assetId != 0 && !assetLoads) return "The asset would not load; the preset is used (see the log).";
     return {};
+}
+
+// ---- wave 10: Caps, Effects, Proxy and Debris subsections (docs/SOFTBODY.md) ------------------------------------
+
+struct CapModeRow { softbody::CapMode mode; const char* label; };
+inline constexpr std::array<CapModeRow, 3> kCapModeRows = {{
+    {softbody::CapMode::Auto, "Auto (on for a destructible)"},
+    {softbody::CapMode::Off,  "Off"},
+    {softbody::CapMode::On,   "On"},
+}};
+
+struct BackSkinRow { softbody::BackSkin mode; const char* label; const char* tip; };
+inline constexpr std::array<BackSkinRow, 4> kBackSkinRows = {{
+    {softbody::BackSkin::Auto,   "Auto",   "Every piece of an open sheet; only the debris of a closed mesh."},
+    {softbody::BackSkin::Off,    "Off",    "Walls only: a hollow shell."},
+    {softbody::BackSkin::Debris, "Debris", "Debris pieces only."},
+    {softbody::BackSkin::All,    "All",    "Every piece, the root included (doubles its vertices)."},
+}};
+
+inline const char* capModeLabel(softbody::CapMode m) {
+    for (const CapModeRow& r : kCapModeRows)
+        if (r.mode == m) return r.label;
+    return kCapModeRows[0].label;
+}
+
+inline const BackSkinRow& backSkinRow(softbody::BackSkin b) {
+    for (const BackSkinRow& r : kBackSkinRows)
+        if (r.mode == b) return r;
+    return kBackSkinRows[0];
+}
+
+// "0.60 cm (the glass preset)" or "1.25 cm": what the thickness field shows.
+inline std::string capThicknessText(const softbody::SoftAsset& a) {
+    char b[80];
+    if (a.caps.thicknessCm >= 0.0f) std::snprintf(b, sizeof b, "%.2f cm", static_cast<double>(a.caps.thicknessCm));
+    else std::snprintf(b, sizeof b, "%.2f cm (the %s preset)", static_cast<double>(softbody::capThicknessCm(a)), softbody::presetKey(a.preset));
+    return b;
+}
+
+struct FxSlotRow { softbody::FxSlot slot; const char* label; const char* tip; };
+inline constexpr std::array<FxSlotRow, softbody::kFxSlotCount> kFxSlotRows = {{
+    {softbody::FxSlot::Impact, "Impact",  "A rigid body hit it (closing speed above the slot's minimum)."},
+    {softbody::FxSlot::Tear,   "Tear",    "Edges broke."},
+    {softbody::FxSlot::Detach, "Detach",  "A piece came off."},
+    {softbody::FxSlot::Dust,   "Dust",    "Fragments too small to be pieces became particles (a mesh-particle effect makes chunks)."},
+    {softbody::FxSlot::Release,"Release", "Pins were released, or the body was repaired."},
+}};
+
+// Adds a sound to a slot: false when the path is empty, already there, or the slot already holds the most it can.
+inline bool addSound(softbody::FxSlotParams& s, const std::string& path) {
+    if (path.empty() || s.sounds.size() >= softbody::kMaxFxSounds) return false;
+    for (const std::string& x : s.sounds)
+        if (x == path) return false;
+    s.sounds.push_back(path);
+    return true;
+}
+
+inline bool removeSound(softbody::FxSlotParams& s, usize index) {
+    if (index >= s.sounds.size()) return false;
+    s.sounds.erase(s.sounds.begin() + static_cast<std::ptrdiff_t>(index));
+    return true;
+}
+
+// The Proxy subsection's advice line: "" when nothing needs saying.
+//   overCap: the mesh welds to more particles than sim.maxParticles allows and no proxy cage replaced it.
+inline std::string proxyAdvice(bool overCap, bool proxyRunning, const std::string& proxyPath, bool trifactorAvailable) {
+    if (proxyRunning) return "Simulating the proxy cage " + proxyPath + "; the render mesh follows it.";
+    if (overCap) {
+        std::string s = "This mesh is over the particle cap, so it is not simulated and keeps its authored shape.";
+        s += trifactorAvailable ? " Create a proxy cage to simulate a simplified copy of it." : " Creating a proxy cage needs the Trifactor module in this build.";
+        return s;
+    }
+    if (!proxyPath.empty()) return "The proxy " + proxyPath + " is named but not in use (it may still be loading, or it failed to bind: see the log).";
+    return {};
+}
+
+// The one-line readout under the Play controls: which of the OUT state bits are set (the numbers are softbody::kState*).
+inline std::string stateText(bool awake, bool frozen, bool released, bool assetStale, bool overCap, bool proxy) {
+    std::string s = frozen ? "frozen" : (awake ? "awake" : "asleep");
+    if (released) s += ", released";
+    if (assetStale) s += ", asset not found";
+    if (overCap) s += ", over the particle cap";
+    if (proxy) s += ", on a proxy cage";
+    return s;
+}
+
+// "proxy" suggested path: "Meshes/Door.ocmesh" -> "Meshes/Door.proxy.ocmesh", beside the mesh.
+inline std::string proxyPathForMesh(const std::string& meshRel) {
+    if (meshRel.empty()) return {};
+    std::filesystem::path p(meshRel);
+    const std::string stem = p.stem().string();
+    p.replace_filename(stem + ".proxy.ocmesh");
+    return p.generic_string();
 }
 
 }  // namespace aver::editor::softmodel

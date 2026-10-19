@@ -1,0 +1,9 @@
+OCPROJECT 1
+# Engine test content for VEHICLES (docs/VEHICLES.md). Not a demo game: cubes, ramps, posts and four vehicles, no third-party assets.
+# Open the project, open Maps/VehicleLab.ocworld and press Play (README.md says what to check and how to drive).
+NAME VehicleLab
+ENGINE Aver 0.7.0-1
+CREATEDWITH 0.7.0-1
+CONTENT Content
+STARTMAP Maps/VehicleLab.ocworld
+INPUT.SCHEME Input/Vehicle.ocinput

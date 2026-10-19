@@ -152,7 +152,9 @@ public:
     bool streamDataStale() const { return streamDataStale_; }
     // Absolute cell-table paths parallel to `foliageFiles` (empty entry = the Content original).
     std::vector<std::string> foliageTablePaths(const std::vector<std::string>& foliageFiles) const;
-    // THE LEVEL'S VEHICLE PLACEMENTS: every placement that carried a `vehicle <preset>` token, by entity,
+    // THE LEVEL'S VEHICLE PLACEMENTS: every placement that carried a `vehicle <preset>` token (a preset name, or the
+    // content path of an `.ocvehicle`: the string is carried through unchanged and world::VehicleSystem resolves it
+    // with the spec source the host installed), by entity,
     // WHETHER OR NOT it can become a car right now -- the record is what a save writes the token back
     // from, and a placement whose mesh has no bounds today (or a build with no physics module at all)
     // must not lose its token for it. Collected by load(), emptied by unload(); nothing here is
@@ -182,8 +184,9 @@ public:
     // name so the same level drives the same way every run. A placement is skipped (and counted in one
     // log line) when its entity is gone (the editor may have deleted it since the load), when its mesh
     // has no known bounds -- read from the entity's mesh NOW, so a Change Mesh is honoured -- when it is
-    // not at scale 1, or when it also carries an object animation, whose clip would overwrite the
-    // physics pose every frame. Returns how many cars exist afterwards (0 when there are none, or
+    // not at scale 1, when it also carries an object animation, whose clip would overwrite the
+    // physics pose every frame, or when it carries a Vehicle component (that builds its own vehicle).
+    // Returns how many cars exist afterwards (0 when there are none, or
     // physics is not up). The host ends them with vehicles.end() and seeds vehicles.entities() into
     // PlayMobility.
     usize beginVehicles(world::VehicleSystem& vehicles, const GameContent& content) const;

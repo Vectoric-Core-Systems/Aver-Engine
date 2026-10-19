@@ -18,7 +18,7 @@ using System;
 namespace Aver.Physics;
 
 /// <summary>A wheeled vehicle. A handle, not an object: 0 is invalid.</summary>
-public readonly struct Vehicle : IEquatable<Vehicle>
+public readonly partial struct Vehicle : IEquatable<Vehicle>
 {
     public int Handle { get; }
     public Vehicle(int handle) { Handle = handle; }

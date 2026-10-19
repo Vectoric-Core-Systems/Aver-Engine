@@ -224,6 +224,58 @@ int main() {
         check(walkedSawFirstPerson,
               "listTemplates()'s executableDir()-walk ALSO finds it -- the shipped-editor discovery path");
     }
+
+    // ---- the Vehicle template (docs/VEHICLES.md): a drivable sedan and a tank in a test arena ----
+    //
+    // The map is an .ocworld, not an .ocmap, because the legacy .ocmap cannot store a COMPONENT record (PlacedComponentModel.hpp's
+    // legacyOcmap reason), so the manifest's STARTMAP is the .ocworld and the scaffolded project must contain it with the two
+    // Vehicle records. No C# anywhere: the FirstPerson standard.
+    AVER_INFO("=== the Vehicle template ===");
+    {
+        const std::string realRoot = std::string(AVER_REPO_ROOT) + "/templates";
+        const auto found = editor::listTemplatesIn(realRoot);
+        const editor::TemplateInfo* veh = nullptr;
+        for (const auto& t : found) if (t.id == "Vehicle") veh = &t;
+        if (check(veh != nullptr, "templates/Vehicle/Vehicle.octemplate is found and parses") && veh) {
+            check(veh->name == "Vehicle", "its NAME is Vehicle");
+            check(veh->startMap == "Maps/Default.ocworld", "its STARTMAP is the .ocworld: " + veh->startMap);
+
+            const std::filesystem::path dstLoc = root / "VehicleProjects";
+            std::filesystem::create_directories(dstLoc, ec);
+            fmt::ProjectDesc out;
+            std::string err;
+            if (check(editor::scaffoldProjectFromTemplate(dstLoc.string(), "Garage", *veh, out, &err), "scaffolding it succeeds: " + err)) {
+                const std::filesystem::path content = dstLoc / "Garage" / "Content";
+                std::string map;
+                if (check(readFileText((content / "Maps" / "Default.ocworld").string(), map), "the start map was copied")) {
+                    usize vehicles = 0;
+                    for (usize at = map.find("COMPONENT Vehicle"); at != std::string::npos; at = map.find("COMPONENT Vehicle", at + 1)) ++vehicles;
+                    check(vehicles == 2, "...with two COMPONENT Vehicle records (the sedan and the tank), found " + std::to_string(vehicles));
+                    check(map.find("asset=Vehicles/Sedan.ocvehicle") != std::string::npos, "...one of them naming Vehicles/Sedan.ocvehicle");
+                    check(map.find("asset=Vehicles/Tank.ocvehicle") != std::string::npos, "...the other Vehicles/Tank.ocvehicle");
+                }
+                for (const char* rel : {"Vehicles/Sedan.ocvehicle", "Vehicles/Tank.ocvehicle", "Input/Vehicle.ocinput", "UI/VehicleHud.ocui",
+                                        "Scripts/AN_VehicleRules.ocgraph", "Scripts/AN_VehicleController.ocgraph", "Scripts/AN_VehicleDriver.ocgraph",
+                                        "Scripts/AN_VehicleHud.ocgraph", "Scripts/AN_TankTurret.ocgraph", "README.md"})
+                    check(std::filesystem::exists(content / rel, ec), std::string("Content/") + rel + " is in the project");
+
+                // No C# anywhere in the copied Content, and no generator script.
+                bool anyCs = false, anyPy = false;
+                for (const auto& entry : std::filesystem::recursive_directory_iterator(content, ec)) {
+                    const std::string ext = entry.path().extension().string();
+                    anyCs = anyCs || ext == ".cs" || ext == ".csproj" || ext == ".fs";
+                    anyPy = anyPy || ext == ".py";
+                }
+                check(!anyCs, "the template ships no C# or F# source");
+                check(!anyPy, "...and its generator script is not copied into projects");
+
+                // That the shipped specs parse, validate and equal the engine's built-ins is tests/vehicle's (OcVehicleTest); here only the header.
+                std::string sedan;
+                check(readFileText((content / "Vehicles" / "Sedan.ocvehicle").string(), sedan) && sedan.rfind("OCVEHICLE 1", 0) == 0,
+                      "Sedan.ocvehicle begins OCVEHICLE 1");
+            }
+        }
+    }
 #endif
 
     // ---- a project name is a FOLDER name, and the generators paste it after `namespace ` --------

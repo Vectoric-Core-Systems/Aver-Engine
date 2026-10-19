@@ -440,16 +440,16 @@ int main() {
               "weight 0 from the input turns the first op off (the aim op still reads the bone: ref)");
         rigs.clearInput(e, H("LookAt"));
         rigs.clearInput(e, H("Amount"));
-        // The ninth distinct name is refused.
-        bool ninthRefused = false;
+        // The 33rd distinct name is refused (the cap moved from 8 to 32 for six-wheel and tracked vehicles).
+        bool lastRefused = false;
         const f32 one[1] = {1.0f};
-        for (int i = 0; i < 9; ++i) {
+        for (int i = 0; i < 33; ++i) {
             const std::string n = "In" + std::to_string(i);
             const bool ok = rigs.setInput(e, H(n.c_str()), one, 1);
-            if (i < 8) { if (!ok) { ninthRefused = false; break; } }
-            else ninthRefused = !ok;
+            if (i < 32) { if (!ok) { lastRefused = false; break; } }
+            else lastRefused = !ok;
         }
-        check(ninthRefused, "eight distinct inputs fit, the ninth is refused");
+        check(lastRefused, "32 distinct inputs fit, the 33rd is refused");
         rigs.clearInput(e, 0);
         check(rigs.setInput(e, H("Fresh"), one, 1), "clearing every input frees the slots");
         w.destroy(e); w.flush();

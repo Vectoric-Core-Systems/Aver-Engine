@@ -23,6 +23,7 @@
 #include "aver/game/GameIkProbe.hpp"   // [wave5/ik-retarget] the foot-IK ground probe
 #include "aver/game/GameTick.hpp"
 #include "aver/game/GameSystemsWiring.hpp"
+#include "aver/game/SoftBodyEffects.hpp"
 #include "aver/game/SequenceHost.hpp"   // [wave5/sequencer] the ABI provider
 #include "aver/game/GameUiInput.hpp"
 #include "aver/game/GameUiText.hpp"
@@ -134,6 +135,10 @@ void SandboxApp::onInit(Engine& e)  {
     assetEditors_.registerFactory(&editor::makeParticleEditor);  // .ocparticle
 #endif
     assetEditors_.registerFactory(&editor::makeFoliageTypeEditor);  // .ocfoliage
+
+#if AVER_MODULE_VEHICLE
+    assetEditors_.registerFactory(&editor::makeVehicleEditor);      // .ocvehicle
+#endif
     assetEditors_.registerFactory(&editor::makeInstanceSetEditor);  // .ocinst
     assetEditors_.registerFactory(&editor::makeInputSchemeEditor);  // .ocinput
     assetEditors_.registerFactory(&editor::makeCaptionEditor);      // .occaptions
@@ -331,6 +336,11 @@ void SandboxApp::onInit(Engine& e)  {
 #if AVER_MODULE_SOFTBODY_SCENE
     // Path resolver for the soft-body mesh/.ocsoft decode caches (the content index, as for animation).
     game::installSoftBodyHost(&game::GameContent::resolveAnimAsset, &content_, nullptr, nullptr);
+    game::installSoftBodyEffects(&game::GameContent::resolveAnimAsset, &content_);   // break effects, as GameApp
+#endif
+    game::installVehicleHost(&game::GameContent::resolveAnimAsset, &content_);
+#if AVER_MODULE_VEHICLE_SCENE
+    vehicles_.setSpecSource([](const std::string& path) { return game::vehicleSpecByPath(path); });   // traffic: `vehicle Vehicles/Bus.ocvehicle`
 #endif
 #if AVER_MODULE_SCENE
     installPrefabHooks();
@@ -732,6 +742,12 @@ void SandboxApp::onInit(Engine& e)  {
 #if AVER_MODULE_SOFTBODY_SCENE
             softbody::softBodySystem().setNotifySink(&SandboxApp::animNotify, this);   // SoftBodyTorn / Detached / Dust / Impact / Repaired
 #endif
+
+            game::setVehicleNotify(&SandboxApp::animNotify, this);   // VehicleCrash / VehicleSkid / VehicleLanded / VehicleFlipped / VehicleShift / VehicleEntered / VehicleExited
+
+#if AVER_MODULE_CAMERA && AVER_MODULE_FRAMEWORK
+            camera::cameraRigSystem().setNotifySink(&SandboxApp::animNotify, this);   // CameraViewTargetChanged / CameraBlendFinished / CameraCut
+#endif
 #if AVER_MODULE_SYNAPSE_SCENE
             // Same sink for synapse (SynapsePerception.hpp).
             synapse::perceptionSystem().setNotifySink(&SandboxApp::animNotify, this);
@@ -913,6 +929,13 @@ void SandboxApp::onInit(Engine& e)  {
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
     // Particle renderer (registered unconditionally; system/effects are singletons).
     particles::particleSystem().setEffectLibrary(&particles::particleEffects());
+    {
+        const int pm = particleGpuArg_ >= 0 ? particleGpuArg_ : (project_.particleGpu >= 0 ? project_.particleGpu : 1);
+        particles::particleSystem().setGpuMode(pm);
+        particleRenderer_.setGpuEnabled(pm != 0);
+        particleRenderer_.setTextureResolver(&game::GameContent::resolveParticleTexture, &content_);
+        particleRenderer_.setMeshResolver(&game::GameContent::resolveParticleMesh, &content_);
+    }
     if (particleRenderer_.init(*e.device())) {
         particleRenderer_.setSystem(&particles::particleSystem());
         e.device()->addRenderFeature(&particleRenderer_);

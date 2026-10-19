@@ -26,4 +26,11 @@ internal static class FwSoftBody
     [DllImport(Lib)] internal static extern int aver_fw_softbody_set_preset(int entity, int preset);
     [DllImport(Lib)] internal static extern int aver_fw_softbody_state(int entity, float[] outDamageMaxStrain2, int[] outPiecesBrokenState3);
     [DllImport(Lib)] internal static extern int aver_fw_softbody_drain_events(int[] outI, float[] outF, int max);
+
+    // ABI version 2 (wave 10).
+    [DllImport(Lib)] internal static extern int aver_fw_softbody_set_asleep(int entity, int asleep);
+    [DllImport(Lib)] internal static extern int aver_fw_softbody_clear_debris(int entity);
+    [DllImport(Lib)] internal static extern int aver_fw_softbody_set_effects(int enabled);
+    [DllImport(Lib)] internal static extern int aver_fw_softbody_dents(int entity, float[] outMaxSetCm, int[] outDentedDebris2);
+    [DllImport(Lib)] internal static extern int aver_fw_softbody_repair_all();
 }

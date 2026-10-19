@@ -2,6 +2,7 @@
 #include "aver/render/preview/ActorPreview.hpp"
 #include "aver/render/preview/PreviewMeshCache.hpp"   // appendPreviewUnitBox, for the bounds box
 #include "aver/core/Log.hpp"
+#include "aver/core/Math.hpp"   // Mat4::inverse for cameraMatrices
 
 #if AVER_MODULE_PBR
 #include "aver/pbr/MaterialGpu.hpp"
@@ -601,6 +602,30 @@ void ActorPreview::buildViewProj(f32 out[16]) const {
     multiply(view, proj, out);
 }
 
+// The camera the pass will use, in the forms a feature with its own world-space content needs.
+void ActorPreview::cameraMatrices(f32 viewProj[16], f32 invViewProjRel[16], f32 eyeOut[3]) const {
+    const f32 cy = std::cos(rad(camera_.yawDeg)), sy = std::sin(rad(camera_.yawDeg));
+    const f32 cp = std::cos(rad(camera_.pitchDeg)), sp = std::sin(rad(camera_.pitchDeg));
+    const f32 eye[3] = {
+        camera_.pivot[0] - camera_.distance * cp * cy,
+        camera_.pivot[1] - camera_.distance * cp * sy,
+        camera_.pivot[2] + camera_.distance * sp,
+    };
+    f32 view[16], proj[16], rel[16];
+    lookAt(eye, camera_.pivot, view);
+    const f32 aspect = (width_ > 0 && height_ > 0) ? static_cast<f32>(width_) / static_cast<f32>(height_) : 1.0f;
+    perspective(camera_.fovDeg, aspect, std::fmax(camera_.distance * 0.01f, 0.5f), camera_.distance * 10.0f + 1000.0f, proj);
+    multiply(view, proj, viewProj);
+    // Rotation only (the translation row zeroed): clip space maps back to a world offset from the eye.
+    view[12] = view[13] = view[14] = 0.0f;
+    multiply(view, proj, rel);
+    Mat4 m;
+    std::memcpy(&m.m[0][0], rel, sizeof rel);
+    const Mat4 inv = m.inverse();
+    std::memcpy(invViewProjRel, &inv.m[0][0], sizeof rel);
+    for (int i = 0; i < 3; ++i) eyeOut[i] = eye[i];
+}
+
 // Draws batches_: per batch one b4 and b1 write, then one instanced call per chunk of at most
 // kMaxPreviewInstancesPerDraw. Same shader and lighting as a plain PreviewDraw.
 void ActorPreview::drawInstanceBatches(rhi::IRenderContext& ctx, const void* frame, u32 frameBytes,
@@ -859,6 +884,7 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     // lying on it (a plane, a slab) wins rather than z-fighting.
     frame.ambient[3] = 0.0f;
     drawInstanceBatches(ctx, &frame, sizeof(frame), wire, meshPipeline);
+    if (transparentHook_) transparentHook_(ctx);
     if (show_.grid && gridPipeline_ && gridQuad_) {
         ctx.setPipeline(gridPipeline_);
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frame, sizeof(frame));

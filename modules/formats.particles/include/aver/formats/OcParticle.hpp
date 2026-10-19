@@ -1,5 +1,8 @@
 #pragma once
-// .ocparticle — the PARTICLE EFFECT format (particles DECIDED 3). Text, OC dialect, sized and
+// .ocparticle — the PARTICLE EFFECT format (particles DECIDED 3). Version 2 (wave 10) holds a SYSTEM of emitters
+// (EMITTER blocks, PARAM user parameters, MODULE stack, ONEVENT rules); the writer emits the lowest version that can
+// express the data, so a v1-only effect stays `OCPARTICLE 1` byte for byte. The ParticleEffect functions below read and
+// write emitter 0; the ParticleSystemDef functions carry the whole file. Text, OC dialect, sized and
 // shaped like .ocmat: one dedicated record per axis of aver::particles::ParticleEffect
 // (modules/particles/include/aver/particles/ParticleTypes.hpp), no generic PARAM name=value bag --
 // unlike .ocmat, which has PBR's larger and still-growing parameter set to cover, every field
@@ -77,5 +80,18 @@ std::string writeOcparticle(const particles::ParticleEffect& e, const OcParticle
 // *err set on a write failure.
 bool saveOcparticle(const std::string& path, const particles::ParticleEffect& e,
                      const OcParticleExtras* extras = nullptr, std::string* err = nullptr);
+
+// ---- wave 10: the whole system (version 1 or 2) ----
+// Same contracts as above, for every emitter and user parameter in the file. Errors carry "line N: ". A failed parse
+// leaves `out` at the format's defaults (one default emitter). `extras->name` mirrors `out.name`.
+bool parseOcparticleSystem(std::string_view text, particles::ParticleSystemDef& out,
+                           OcParticleExtras* extras = nullptr, std::string* err = nullptr);
+bool loadOcparticleSystem(const std::string& path, particles::ParticleSystemDef& out,
+                          OcParticleExtras* extras = nullptr, std::string* err = nullptr);
+std::string writeOcparticleSystem(const particles::ParticleSystemDef& def, std::string_view existing = "");
+bool saveOcparticleSystem(const std::string& path, const particles::ParticleSystemDef& def, std::string* err = nullptr);
+
+// True when `def` can be written as `OCPARTICLE 1`: one emitter, no user parameters, and nothing beyond the v1 records.
+bool ocparticleFitsV1(const particles::ParticleSystemDef& def);
 
 } // namespace aver::fmt

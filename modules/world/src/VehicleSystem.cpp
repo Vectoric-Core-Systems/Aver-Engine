@@ -9,6 +9,11 @@
 #  include "aver/physics/physics_abi.h"
 #  include "aver/physics/physics_vehicle_abi.h"
 #endif
+#if AVER_MODULE_PHYSICS && AVER_MODULE_VEHICLE
+#  include "aver/vehicle/OcVehicle.hpp"
+#  include "aver/vehicle/VehiclePresets.hpp"
+#  include "aver/vehicle/VehicleBuild.hpp"
+#endif
 
 namespace aver::world {
 
@@ -291,65 +296,29 @@ Quat laneOrientation(const Vec3& tangent) {
 
 namespace aver::world {
 
-#  if AVER_MODULE_PHYSICS
+#  if AVER_MODULE_PHYSICS && AVER_MODULE_VEHICLE
 
 namespace {
 
-// ---- What a preset means physically ----------------------------------------------------------------
-// The mesh bounds fix a vehicle's SIZE; these fix everything else about it. Sizes come from the mesh so a
-// level's own cars need no authored dimensions, and the numbers here are the ones a car of that kind needs
-// to drive plausibly -- not measurements of any real model.
-struct Preset {
-    const char* name;
-    f32 massKg;
-    f32 radiusMinCm, radiusMaxCm;   // the wheel radius is 0.17 * height, clamped to this range
-    f32 engineNm;
-    f32 maxSteerDeg;
-    f32 suspensionHz;
-    bool frontDriven;               // false = the rear axle drives
-};
+// WHAT A PRESET MEANS PHYSICALLY (the kPresets table, the wheel layout formulas, buildVehicle) now lives in
+// Aver.Vehicle: vehicle::specFromBounds derives a spec from the mesh bounds and vehicle::buildVehicle turns it into
+// the physics calls, the same ones, in the same order, with the same numbers. An `.ocvehicle` named by the placement
+// goes through the same builder.
 
-constexpr Preset kPresets[] = {
-    {"car",    1300.0f, 28.0f, 38.0f,  500.0f, 35.0f, 2.0f, false},
-    {"van",    1900.0f, 33.0f, 40.0f,  600.0f, 35.0f, 2.0f, true},
-    {"truck",  6000.0f, 45.0f, 55.0f, 1500.0f, 30.0f, 1.5f, false},
-    {"bus",   11000.0f, 48.0f, 55.0f, 2000.0f, 30.0f, 1.5f, false},
-    {"sports", 1200.0f, 30.0f, 35.0f,  700.0f, 35.0f, 2.0f, false},
-};
-
-const Preset* findPreset(const std::string& name) {
-    for (const Preset& p : kPresets)
-        if (name == p.name) return &p;
-    return nullptr;
-}
-
-// ---- Chassis and wheel layout, as fractions of the mesh bounds -------------------------------------
-constexpr f32 kRadiusPerHeight = 0.17f;        // wheel radius = this * height, then clamped by the preset
-constexpr f32 kWheelWidthPerRadius = 0.7f;     // a tyre is about 0.7 radii wide (205 mm at a 330 mm radius)
-constexpr f32 kChassisHeight = 0.55f;          // the chassis box is this fraction of the mesh's height ...
-constexpr f32 kComHeight = 0.35f;              // ... with its centre of mass this fraction up from the origin
-constexpr f32 kClearancePerRadius = 0.6f;      // ground clearance under the chassis box
-constexpr f32 kAxleInsetRadii = 1.2f;          // each axle sits this many radii in from its end of the body
-constexpr f32 kTrackInsetWheelWidths = 0.6f;   // each wheel centre sits this many tyre widths in from the side
-constexpr f32 kSuspensionMinCm = 5.0f;         // fully compressed
-constexpr f32 kSuspensionMaxCm = 30.0f;        // fully extended; the wheels hang from this far above their rest
-constexpr f32 kSuspensionDamping = 0.5f;
-constexpr f32 kBrakeDecelMs2 = 9.0f;           // the stop the brakes could hold if the tyres could grip it
-constexpr f32 kHandbrakeFactor = 1.5f;         // rear-axle handbrake, as a multiple of the service brake
-constexpr f32 kEngineMinRpm = 1000.0f;         // the ABI's own defaults, stated so a change there is not silent
-constexpr f32 kEngineMaxRpm = 6000.0f;
-// The chassis' up axis is held within this many degrees of the world's, which is what stops an AI car
-// ending on its roof. Jolt's limit only resists: a car on its side comes to rest PRESSED AGAINST it, not
-// beyond it, so the flipped-car recovery below has to look for a car at the limit (kFlippedBelowUpZ).
+// The chassis' up axis is held within this many degrees of the world's, which is what stops an AI car ending on its
+// roof. Jolt's limit only resists: a car on its side comes to rest PRESSED AGAINST it, not beyond it, so the
+// flipped-car recovery below has to look for a car at the limit (kFlippedBelowUpZ).
 constexpr f32 kMaxPitchRollDeg = 60.0f;
-constexpr f32 kGravityCmS2 = 981.0f;
 
-// How far a spring of `hz` hertz compresses under the weight it was sized for, g / (2 pi f)^2: 6.2 cm at
-// 2 Hz, 11 cm at 1.5. Jolt sizes each spring from an effective mass a little SMALLER than the quarter of
-// the car its wheel carries, so the true sag is 15 to 20 percent more than this (see buildVehicle).
-f32 springSagCm(f32 hz) {
-    const f32 omega = 2.0f * kPi * hz;
-    return kGravityCmS2 / (omega * omega);
+bool endsWithCI(const std::string& s, const char* suffix) {
+    const usize n = std::char_traits<char>::length(suffix);
+    if (s.size() < n) return false;
+    for (usize i = 0; i < n; ++i) {
+        char c = s[s.size() - n + i];
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (c != suffix[i]) return false;
+    }
+    return true;
 }
 
 // ---- Driver behaviour the maths does not own --------------------------------------------------------
@@ -390,66 +359,6 @@ u32 nextRandom(u64& state) {
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
     z ^= z >> 31;
     return static_cast<u32>(z >> 32);
-}
-
-struct Built {
-    i32 handle = 0;
-    f32 wheelbase = 0.0f;
-    f32 maxSteerRad = 0.0f;
-};
-
-// Builds one vehicle through the physics ABI at `xf` (origin pose, scale ignored): the chassis box, four
-// wheels in the order front-left, front-right, rear-left, rear-right (left is -Y, the ABI's anti-roll bars
-// pair them that way), the engine, and the constraint. False if the physics module refused any step.
-bool buildVehicle(const Preset& pr, const Vec3& size, const Transform& xf, Built& out) {
-    const f32 length = size.x, width = size.y, height = size.z;
-    const f32 radius = std::clamp(kRadiusPerHeight * height, pr.radiusMinCm, pr.radiusMaxCm);
-    const f32 wheelWidth = kWheelWidthPerRadius * radius;
-
-    const i32 v = aver_phys_vehicle_create(
-        0.5f * length, 0.5f * width, 0.5f * kChassisHeight * height, kClearancePerRadius * radius,
-        0.0f, 0.0f, kComHeight * height, pr.massKg,
-        xf.position.x, xf.position.y, xf.position.z,
-        xf.rotation.x, xf.rotation.y, xf.rotation.z, xf.rotation.w);
-    if (!v) return false;
-
-    // The axle and track clamps only matter for a mesh too short or too narrow for the formula; they keep
-    // the four wheels a sane rectangle instead of crossed over.
-    const f32 axleX = std::max(0.5f * length - kAxleInsetRadii * radius, 0.1f * length);
-    const f32 trackY = std::max(0.5f * width - kTrackInsetWheelWidths * wheelWidth, 0.25f * width);
-    // THE WHEEL'S ATTACHMENT IS THE TOP OF ITS SUSPENSION TRAVEL, and a loaded car is never hanging from
-    // it fully extended. Jolt rests the spring at its MAX length (the spring's constraint value is
-    // length - maxLength, VehicleConstraint.cpp), so the car's weight compresses it by the static sag
-    // and the wheel centre settles one sag SHORT of full droop: with the attachment at radius + max the
-    // origin -- where the mesh's tyres end -- would come to rest that far INSIDE the road. Lowering the
-    // attachment by the sag puts the settled wheel centre one radius above the origin instead.
-    //
-    // THE FORMULA IS EXACT WHEN A WHEEL CARRIES THE MASS JOLT SIZES ITS SPRING FOR, and it does not quite:
-    // Jolt's effective mass for the spring (1 / (1/m + the lever terms)) is about 280 kg against the 325 kg
-    // a wheel of a 440 cm, 1300 kg saloon carries -- worked by hand, not measured -- so the true sag is
-    // about 15 percent more and a settled car sits a centimetre or so under the road. Measure a populated
-    // level before tuning it.
-    const f32 attachZ = radius + kSuspensionMaxCm - springSagCm(pr.suspensionHz);
-    // A full-friction stop shared by four wheels: torque = m a r / 4.
-    const f32 brake = pr.massKg * kBrakeDecelMs2 * (radius * 0.01f) * 0.25f;
-
-    struct Wheel { f32 x, y; bool front; };
-    const Wheel wheels[4] = {{axleX, -trackY, true}, {axleX, trackY, true},
-                             {-axleX, -trackY, false}, {-axleX, trackY, false}};
-    for (const Wheel& wh : wheels) {
-        const i32 added = aver_phys_vehicle_add_wheel(
-            v, wh.x, wh.y, attachZ, radius, wheelWidth, kSuspensionMinCm, kSuspensionMaxCm, pr.suspensionHz,
-            kSuspensionDamping, wh.front ? pr.maxSteerDeg : 0.0f, brake,
-            wh.front ? 0.0f : kHandbrakeFactor * brake, wh.front == pr.frontDriven ? 1 : 0);
-        if (added < 0) { aver_phys_vehicle_destroy(v); return false; }
-    }
-    aver_phys_vehicle_set_engine(v, pr.engineNm, kEngineMinRpm, kEngineMaxRpm);
-    if (!aver_phys_vehicle_finish(v, kMaxPitchRollDeg)) { aver_phys_vehicle_destroy(v); return false; }
-
-    out.handle = v;
-    out.wheelbase = 2.0f * axleX;
-    out.maxSteerRad = radians(pr.maxSteerDeg);
-    return true;
 }
 
 enum class Mode : u8 {
@@ -530,6 +439,7 @@ Transform localFor(scene::World& w, scene::Entity e, const Transform& worldXf) {
 
 struct VehicleSystem::Impl {
     lanes::Network net;
+    VehicleSystem::SpecSource specSource;
     std::vector<Vehicle> vehicles;
     std::vector<Occ> occ;       // every driving vehicle's (lane, s), sorted; rebuilt every frame
     u32 frame = 0;
@@ -729,6 +639,8 @@ void VehicleSystem::Impl::drive(usize i, f32 dt, const Vec3& focus) {
 VehicleSystem::VehicleSystem() : impl_(std::make_unique<Impl>()) {}
 VehicleSystem::~VehicleSystem() = default;
 
+void VehicleSystem::setSpecSource(SpecSource source) { impl_->specSource = std::move(source); }
+
 void VehicleSystem::begin(scene::World& w, const std::vector<VehicleSpawn>& spawns,
                           const fmt::OcLanesData* lanesData, u32 seed) {
     end();
@@ -749,15 +661,12 @@ void VehicleSystem::begin(scene::World& w, const std::vector<VehicleSpawn>& spaw
                   report.droppedLanes, report.droppedLinks);
 
     u32 driving = 0, parked = 0, offCentre = 0, offGround = 0, unknownPreset = 0;
-    u32 skippedEntity = 0, skippedBounds = 0, skippedPhysics = 0;
+    u32 skippedEntity = 0, skippedBounds = 0, skippedPhysics = 0, skippedKind = 0, missingAsset = 0;
     m.vehicles.reserve(spawns.size());
 
     for (usize index = 0; index < spawns.size(); ++index) {
         const VehicleSpawn& sp = spawns[index];
         if (!w.valid(sp.entity)) { ++skippedEntity; continue; }
-
-        const Preset* preset = findPreset(sp.preset);
-        if (!preset) { ++unknownPreset; preset = &kPresets[0]; }
 
         const Transform xf = transformFromMatrix(w.worldMatrix(sp.entity));
         if (!finitePose(xf.position, xf.rotation)) { ++skippedEntity; continue; }
@@ -777,16 +686,36 @@ void VehicleSystem::begin(scene::World& w, const std::vector<VehicleSpawn>& spaw
         // sideways case above, so it is counted the same way.
         if (std::fabs(sp.boundsMin.z) > kOriginHeightTolerance * extent.z) ++offGround;
 
-        Built built;
-        if (!buildVehicle(*preset, size, xf, built)) { ++skippedPhysics; continue; }
+        // THE SPEC: an `.ocvehicle` the placement names (resolved by the host), else the preset sized from the mesh.
+        vehicle::VehicleSpec spec;
+        bool haveSpec = false;
+        if (endsWithCI(sp.preset, ".ocvehicle")) {
+            const vehicle::VehicleSpec* found = m.specSource ? m.specSource(sp.preset) : nullptr;
+            if (found) { spec = *found; haveSpec = true; }
+            else ++missingAsset;
+        }
+        if (!haveSpec && !vehicle::specFromBounds(sp.preset, size, spec)) {
+            ++unknownPreset;
+            vehicle::specFromBounds("car", size, spec);
+        }
+        // A lane-following car steers a four-wheeler's way; a tank has no steering angle to pursue with.
+        if (spec.kind != vehicle::Kind::Wheeled) { ++skippedKind; continue; }
+
+        vehicle::BuiltVehicle built;
+        std::string why;
+        if (!vehicle::buildVehicle(spec, xf, built, why)) {
+            AVER_WARN("[Vehicles] placement {}: {}", index, why);
+            ++skippedPhysics;
+            continue;
+        }
         // So a ray or a contact that hits the chassis can name the entity, as every level body does.
-        aver_phys_set_entity(aver_phys_vehicle_body(built.handle), static_cast<i32>(sp.entity));
+        aver_phys_set_entity(built.body, static_cast<i32>(sp.entity));
 
         Vehicle v;
         v.entity = sp.entity;
-        v.handle = built.handle;
+        v.handle = built.vehicle;
         v.scale = Vec3{snapToOne(xf.scale.x), snapToOne(xf.scale.y), snapToOne(xf.scale.z)};
-        v.length = size.x;
+        v.length = haveSpec ? 2.0f * spec.body.half.x : size.x;
         v.wheelbase = built.wheelbase;
         v.maxSteerRad = built.maxSteerRad;
         v.pos = v.writtenPos = xf.position;
@@ -819,6 +748,11 @@ void VehicleSystem::begin(scene::World& w, const std::vector<VehicleSpawn>& spaw
     if (unknownPreset)
         AVER_WARN("[Vehicles] {} placements name a preset this build does not know; built as 'car'",
                   unknownPreset);
+    if (missingAsset)
+        AVER_WARN("[Vehicles] {} placements name an .ocvehicle the host could not load; built as 'car'", missingAsset);
+    if (skippedKind)
+        AVER_WARN("[Vehicles] {} placements name a vehicle that is not a four-wheeler (a tank, say): a lane-following "
+                  "car steers a wheeled vehicle, so they stay where they were placed", skippedKind);
     if (offCentre)
         AVER_WARN("[Vehicles] {} meshes have their bounds centred well off the origin; the chassis box is "
                   "centred on it, so their collision sits off to one side of the visible body", offCentre);
@@ -913,9 +847,10 @@ std::vector<scene::Entity> VehicleSystem::entities() const {
     return out;
 }
 
-#  else // !AVER_MODULE_PHYSICS
+#  else // !(AVER_MODULE_PHYSICS && AVER_MODULE_VEHICLE)
 
-// A tree built without physics still links and runs: there is nothing to drive, so every call is inert.
+// A tree built without physics, or without Aver.Vehicle (which now holds the presets and the builder), still links
+// and runs: there is nothing to drive, so every call is inert.
 struct VehicleSystem::Impl {};
 
 VehicleSystem::VehicleSystem() : impl_(std::make_unique<Impl>()) {}
@@ -923,16 +858,17 @@ VehicleSystem::~VehicleSystem() = default;
 
 void VehicleSystem::begin(scene::World&, const std::vector<VehicleSpawn>& spawns, const fmt::OcLanesData*, u32) {
     if (!spawns.empty())
-        AVER_WARN("[Vehicles] built without the physics module: {} vehicle placements stay where they were "
+        AVER_WARN("[Vehicles] built without the physics or vehicle module: {} vehicle placements stay where they were "
                   "placed", spawns.size());
 }
+void VehicleSystem::setSpecSource(SpecSource) {}
 void VehicleSystem::prePhysics(f32, const Vec3&) {}
 void VehicleSystem::postPhysics(scene::World&) {}
 void VehicleSystem::end() {}
 usize VehicleSystem::count() const { return 0; }
 std::vector<scene::Entity> VehicleSystem::entities() const { return {}; }
 
-#  endif // AVER_MODULE_PHYSICS
+#  endif // AVER_MODULE_PHYSICS && AVER_MODULE_VEHICLE
 
 } // namespace aver::world
 

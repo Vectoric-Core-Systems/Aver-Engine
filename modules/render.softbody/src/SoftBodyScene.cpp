@@ -87,6 +87,15 @@ void softBodyPackPieces(const Vec3* worldPositions, u32 vertexCount,
     softBodyPackVertices(shrunk.data(), vertexCount, worldToLocal, indices, indexCount, uvs, out);
 }
 
+void softBodyBakeVertices(const Vec3* worldPositions, u32 vertexCount,
+                          const Vec3& origin,
+                          const u32* indices, u32 indexCount,
+                          const f32* uvs,
+                          rhi::MeshVertex* out) {
+    softBodyPackPieces(worldPositions, vertexCount, Mat4::translation(Vec3{-origin.x, -origin.y, -origin.z}), indices, indexCount, uvs,
+                       1.0f, origin, out);
+}
+
 // ==== the feature ====
 
 SoftBodyScene::~SoftBodyScene() { shutdown(); }
@@ -151,23 +160,59 @@ void SoftBodyScene::shutdown() {
     rebuildsLastFrame_ = 0;
 }
 
-bool SoftBodyScene::buildResident(Resident& r, const softbody::PieceView& v, rhi::IDevice& dev) {
-    const fmt::OcMeshData* md = system().meshData(v.meshId);
-    if (!md || v.vertexCount == 0 || v.indexCount == 0) return false;
+// The UV of every draw vertex: the authored mesh's through sourceVertex, or the view's own for a generated (cap) vertex.
+static void fillUvs(const fmt::OcMeshData& md, const softbody::PieceView& v, std::vector<f32>& uvs) {
+    uvs.assign(static_cast<usize>(v.vertexCount) * 2, 0.0f);
+    const u32 authored = md.vertexCount();
+    for (u32 i = 0; i < v.vertexCount; ++i) {
+        const u32 s = v.sourceVertex[i];
+        if (s == softbody::kGeneratedVertex) {
+            if (v.uv) { uvs[i * 2] = v.uv[i * 2]; uvs[i * 2 + 1] = v.uv[i * 2 + 1]; }
+        } else if (s < authored && md.uvs.size() >= static_cast<usize>(s) * 2 + 2) {
+            uvs[i * 2] = md.uvs[s * 2]; uvs[i * 2 + 1] = md.uvs[s * 2 + 1];
+        }
+    }
+}
 
-    // The source mesh holds the authored vertices of this piece (UVs and rest normals through sourceVertex).
+bool SoftBodyScene::buildBaked(Resident& r, const softbody::PieceView& v, rhi::IDevice& dev) {
+    const fmt::OcMeshData* md = system().meshData(v.meshId);
+    if (!md) return false;
+    fillUvs(*md, v, r.uvs);
+    r.scratch.assign(v.vertexCount, rhi::MeshVertex{});
+    softBodyBakeVertices(v.world, v.vertexCount, v.origin, v.indices, v.indexCount, r.uvs.data(), r.scratch.data());
+    // A plain mesh: createMesh exists on both backends and the piece never packs again.
+    r.drawMesh = dev.createMesh(r.scratch.data(), v.vertexCount, v.indices, v.indexCount);
+    if (!r.drawMesh) return false;
+    r.source = 0;
+    r.vertices = 0;
+    r.baked = true;
+    r.epoch = v.epoch;
+    r.vertexCount = v.vertexCount;
+    r.entity = v.entity;
+    r.packedThisFrame = false;
+    r.packedOnce = true;
+    return true;
+}
+
+bool SoftBodyScene::buildResident(Resident& r, const softbody::PieceView& v, rhi::IDevice& dev) {
+    if (v.vertexCount == 0 || v.indexCount == 0) return false;
+    if (v.bake) return buildBaked(r, v, dev);
+    const fmt::OcMeshData* md = system().meshData(v.meshId);
+    if (!md) return false;
+
+    // The source mesh holds the authored vertices of this piece (UVs and rest normals through sourceVertex); generated
+    // vertices (caps) have no authored counterpart and take zeros, since the pack overwrites positions and normals.
     std::vector<rhi::MeshVertex> rest(v.vertexCount);
-    r.uvs.assign(static_cast<usize>(v.vertexCount) * 2, 0.0f);
+    fillUvs(*md, v, r.uvs);
     const u32 authored = md->vertexCount();
     for (u32 i = 0; i < v.vertexCount; ++i) {
-        const u32 s = v.sourceVertex[i] < authored ? v.sourceVertex[i] : 0u;
+        const u32 s = v.sourceVertex[i];
         rhi::MeshVertex& o = rest[i];
+        o.u = r.uvs[i * 2]; o.v = r.uvs[i * 2 + 1];
+        if (s == softbody::kGeneratedVertex || s >= authored) { o.nx = 0.0f; o.ny = 0.0f; o.nz = 1.0f; continue; }
         o.px = md->positions[s * 3 + 0]; o.py = md->positions[s * 3 + 1]; o.pz = md->positions[s * 3 + 2];
         if (md->normals.size() >= static_cast<usize>(s) * 3 + 3) { o.nx = md->normals[s * 3]; o.ny = md->normals[s * 3 + 1]; o.nz = md->normals[s * 3 + 2]; }
         else { o.nx = 0.0f; o.ny = 0.0f; o.nz = 1.0f; }
-        if (md->uvs.size() >= static_cast<usize>(s) * 2 + 2) { o.u = md->uvs[s * 2]; o.v = md->uvs[s * 2 + 1]; }
-        else { o.u = 0.0f; o.v = 0.0f; }
-        r.uvs[i * 2] = o.u; r.uvs[i * 2 + 1] = o.v;
     }
     r.source = dev.createMesh(rest.data(), v.vertexCount, v.indices, v.indexCount);
     if (!r.source) return false;
@@ -197,7 +242,27 @@ bool SoftBodyScene::buildResident(Resident& r, const softbody::PieceView& v, rhi
     r.scratch.assign(v.vertexCount, rhi::MeshVertex{});
     r.packedThisFrame = false;
     r.packedOnce = false;
+    r.baked = false;
     return true;
+}
+
+void SoftBodyScene::reveal(scene::World& world, scene::Entity e) {
+    if (auto* mr = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer))
+        if (!(mr->flags & scene::kMeshRendererVisible)) { mr->flags |= scene::kMeshRendererVisible; mr->dirty = 1; }
+}
+
+// The posed box of a piece, padded by 1 cm, into its entity's CMeshRenderer.
+static void writeBounds(scene::World& world, scene::Entity e, const std::vector<rhi::MeshVertex>& verts) {
+    auto* mr = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+    if (!mr || verts.empty()) return;
+    Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+    for (const rhi::MeshVertex& mv : verts) {
+        lo = {std::min(lo.x, mv.px), std::min(lo.y, mv.py), std::min(lo.z, mv.pz)};
+        hi = {std::max(hi.x, mv.px), std::max(hi.y, mv.py), std::max(hi.z, mv.pz)};
+    }
+    const f32 pad = 1.0f;
+    mr->aabbMin[0] = lo.x - pad; mr->aabbMin[1] = lo.y - pad; mr->aabbMin[2] = lo.z - pad;
+    mr->aabbMax[0] = hi.x + pad; mr->aabbMax[1] = hi.y + pad; mr->aabbMax[2] = hi.z + pad;
 }
 
 void SoftBodyScene::update(scene::World& world, rhi::IDevice& dev) {
@@ -208,7 +273,7 @@ void SoftBodyScene::update(scene::World& world, rhi::IDevice& dev) {
 
     u32 count = 0;
     const softbody::PieceView* views = system().pieces(count);
-    const u32 rebuildCap = std::max(1u, system().options().maxRebuildsPerFrame);
+    const u32 rebuildCap = std::max(1u, system().options().maxDrawBuildsPerFrame);
     std::set<Key> seen;
 
     for (u32 i = 0; i < count; ++i) {
@@ -240,7 +305,19 @@ void SoftBodyScene::update(scene::World& world, rhi::IDevice& dev) {
 
         Resident& r = it->second;
         if (r.vertexCount != v.vertexCount) continue;   // an epoch still waiting for its rebuild
-        if (v.frozen && r.packedOnce) continue;          // the last packed vertices are still current
+        if (r.baked) {
+            // A settled piece: its mesh was built once. Write the culling bounds the first time, then there is nothing to do.
+            if (!r.scratch.empty()) {
+                writeBounds(world, v.entity, r.scratch);
+                std::vector<rhi::MeshVertex>().swap(r.scratch);
+            }
+            if (v.revealOnReady) reveal(world, v.entity);
+            continue;
+        }
+        if (v.frozen && r.packedOnce) {                  // the last packed vertices are still current
+            if (v.revealOnReady) reveal(world, v.entity);
+            continue;
+        }
 
         Mat4 worldToLocal = Mat4::identity();
         if (v.useEntityWorld) {
@@ -256,16 +333,9 @@ void SoftBodyScene::update(scene::World& world, rhi::IDevice& dev) {
 
         // Culling bounds follow the simulation (the SkinnedScene rule): without them a flung piece is culled by
         // the asset box at its old place.
-        if (auto* mr = world.component<scene::CMeshRenderer>(v.entity, scene::kComponentMeshRenderer)) {
-            Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
-            for (const rhi::MeshVertex& mv : r.scratch) {
-                lo = {std::min(lo.x, mv.px), std::min(lo.y, mv.py), std::min(lo.z, mv.pz)};
-                hi = {std::max(hi.x, mv.px), std::max(hi.y, mv.py), std::max(hi.z, mv.pz)};
-            }
-            const f32 pad = 1.0f;
-            mr->aabbMin[0] = lo.x - pad; mr->aabbMin[1] = lo.y - pad; mr->aabbMin[2] = lo.z - pad;
-            mr->aabbMax[0] = hi.x + pad; mr->aabbMax[1] = hi.y + pad; mr->aabbMax[2] = hi.z + pad;
-        }
+        writeBounds(world, v.entity, r.scratch);
+        // A debris or cap entity starts invisible: now that a resident has packed for it, it may draw.
+        if (v.revealOnReady) reveal(world, v.entity);
     }
 
     // Residents whose piece is gone.

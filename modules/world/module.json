@@ -9,6 +9,6 @@
   "required": true,
   "default": true,
   "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.Platform", "Aver.Render.Pcg"],
-  "optionalDependsOn": ["Aver.Physics", "Aver.Scene"],
+  "optionalDependsOn": ["Aver.Physics", "Aver.Scene", "Aver.Vehicle"],
   "consequence": ""
 }

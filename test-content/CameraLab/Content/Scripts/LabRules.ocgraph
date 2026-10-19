@@ -1,0 +1,6 @@
+OCGRAPH 1
+DOMAIN gameplay
+NAME LabRules
+DESCRIPTION The game mode for CameraLab: nothing but the session. The pawn is the level's DEFAULTPAWN.
+
+CLASS AN_LabRules GameMode

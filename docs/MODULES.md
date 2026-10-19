@@ -6,7 +6,7 @@ it is off. CMake declares its options from the manifests, the launcher offers th
 nothing else lists them by hand.
 
 ```
-modules/<dir>/module.json   one per module (67 today)           <- edit these
+modules/<dir>/module.json   one per module (70 today)           <- edit these
 cmake/modules.catalog.json  all of them, generated              <- python scripts/module-catalog.py --write
 cmake/AvModuleManifest.cmake  option(), dependency rule, cross-check
 ```

@@ -379,6 +379,47 @@ static void testPieceDuplicatedVertexIsIndependent() {
     check(nearf(out[0].u, out[3].u) && nearf(out[0].v, out[3].v), "with the UV it was copied from");
 }
 
+static void testCapsKeepUvsAndLightBothSides() {
+    AVER_INFO("-- caps: generated vertices keep their UVs, the back skin faces the other way, walls get flat normals --");
+    // Front triangle on z = 0 facing +Z (vertices 0..2); its back skin at z = -2 with the winding reversed (3..5);
+    // one wall quad along the edge 0 -> 1 (6..9), facing -Y.
+    const Vec3 world[10] = {{0, 0, 0}, {10, 0, 0}, {0, 10, 0},
+                            {0, 0, -2}, {10, 0, -2}, {0, 10, -2},
+                            {0, 0, 0}, {10, 0, 0}, {0, 0, -2}, {10, 0, -2}};
+    const u32 idx[3 + 3 + 6] = {0, 1, 2,  3, 5, 4,  6, 9, 7,  6, 8, 9};
+    const f32 uv[20] = {0, 0, 1, 0, 0, 1,  0, 0, 1, 0, 0, 1,  0.25f, 0, 0.75f, 0, 0.25f, 0.1f, 0.75f, 0.1f};
+    rhi::MeshVertex out[10];
+    softBodyPackPieces(world, 10, Mat4::identity(), idx, 12, uv, 1.0f, Vec3{0, 0, 0}, out);
+    check(nearf(out[0].nz, 1.0f) && nearf(out[3].nz, -1.0f), "front normals face +Z and the back skin's face -Z");
+    check(nearf(out[6].nx, 0.0f) && nearf(out[6].ny, -1.0f) && nearf(out[6].nz, 0.0f), "a wall vertex has the flat wall normal (-Y), not a blend with the face");
+    check(nearf(out[6].u, 0.25f) && nearf(out[9].u, 0.75f) && nearf(out[8].v, 0.1f), "generated wall vertices keep the UVs they came with");
+    check(nearf(out[3].u, out[0].u) && nearf(out[5].v, out[2].v), "and the back skin keeps the front's");
+    bool finiteAll = true;
+    for (const rhi::MeshVertex& v : out) finiteAll = finiteAll && std::isfinite(v.nx) && std::isfinite(v.ny) && std::isfinite(v.nz);
+    check(finiteAll, "no NaN normal anywhere");
+}
+
+static void testBakeVerticesAreRelativeAndDeterministic() {
+    AVER_INFO("-- softBodyBakeVertices: positions relative to the new origin, deterministic --");
+    const Vec3 world[4] = {{500, 200, 30}, {520, 200, 30}, {500, 220, 30}, {520, 220, 35}};
+    const u32 idx[6] = {0, 1, 2, 1, 3, 2};
+    const f32 uv[8] = {0, 0, 1, 0, 0, 1, 1, 1};
+    const Vec3 origin{510, 210, 30};
+    rhi::MeshVertex a[4], b[4], reference[4];
+    softBodyBakeVertices(world, 4, origin, idx, 6, uv, a);
+    softBodyBakeVertices(world, 4, origin, idx, 6, uv, b);
+    softBodyPackPieces(world, 4, Mat4::translation(Vec3{-510, -210, -30}), idx, 6, uv, 1.0f, origin, reference);
+    bool same = true, relative = true, uvs = true;
+    for (int i = 0; i < 4; ++i) {
+        same = same && a[i].px == b[i].px && a[i].py == b[i].py && a[i].pz == b[i].pz && a[i].nx == b[i].nx && a[i].ny == b[i].ny && a[i].nz == b[i].nz;
+        relative = relative && nearf(a[i].px, reference[i].px) && nearf(a[i].py, reference[i].py) && nearf(a[i].pz, reference[i].pz) && std::abs(a[i].px) <= 10.001f;
+        uvs = uvs && nearf(a[i].u, uv[i * 2]) && nearf(a[i].v, uv[i * 2 + 1]);
+    }
+    check(same, "two bakes of the same piece are identical");
+    check(relative, "vertices are relative to the origin and match an ordinary pack against a translation");
+    check(uvs, "UVs pass through");
+}
+
 int main() {
     AVER_INFO("SoftBodySceneTest");
     testWorldToLocalIsRowVector();
@@ -393,6 +434,8 @@ int main() {
     testPieceDeadTrianglesDoNotLightNormals();
     testPieceShrinkTowardCentroid();
     testPieceDuplicatedVertexIsIndependent();
+    testCapsKeepUvsAndLightBothSides();
+    testBakeVerticesAreRelativeAndDeterministic();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

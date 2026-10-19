@@ -103,7 +103,9 @@ public:
     const fmt::OcRigData* rigFor(u64 asset, AnimSystem& anim);
 
     // ---- OCRIG 2 inputs: named values a script sets (docs/plans/wave5/IK_RETARGETING.md 4.1) ----
-    // `n` is 1 (float), 3 (vec3) or 4 (quat xyzw). Eight distinct names per entity; a ninth is refused with one warning.
+    // `n` is 1 (float), 3 (vec3) or 4 (quat xyzw). Thirty-two distinct names per entity (a six-wheel truck's wheels need 12,
+    // a tank's 12 plus its track scroll); a 33rd is refused with one warning.
+    static constexpr u32 kMaxInputsPerEntity = 32;
     bool setInput(scene::Entity e, u64 nameHash, const f32* v, u32 n);
     // hash 0 clears every input of the entity.
     void clearInput(scene::Entity e, u64 nameHash);
@@ -127,7 +129,7 @@ private:
 
     struct Inputs {
         struct Slot { u64 hash = 0; f32 v[4] = {0, 0, 0, 0}; };
-        Slot slots[8];
+        Slot slots[kMaxInputsPerEntity];
         u32 count = 0;
     };
     std::unordered_map<scene::Entity, Inputs> inputs_;

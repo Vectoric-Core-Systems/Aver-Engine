@@ -1,0 +1,22 @@
+OCPARTICLE 2
+NAME Spark Trails
+# Wave 10 demo: every spark drags a 12-point ribbon behind it (trail ribbons), bounces off the world plane z = 0
+# (restitution 0.45; collision planes are in WORLD space, so the level's floor wants to sit at z = 0) and cools from white-yellow to red.
+EMITTER Sparks
+SIM auto
+SHAPE sphere 10
+BLEND additive
+EMISSION 90 120 4096
+LIFETIME 1.2 2.4
+DIRECTION 0 0 1 70
+SPEED 350 750
+GRAVITY 0 0 -980
+DAMPING 0.02
+SIZE 3 1.2
+COLORCURVE 0 1 0.95 0.7 1 0.3 1 0.5 0.15 0.9 1 0.2 0.04 0.01 0
+RENDER ribbon trail 12 6 fade 1
+SORT none
+LIGHTING unlit
+FOG on
+BOUNDS 1800
+MODULE update.collideplane nx=0 ny=0 nz=1 d=0 restitution=0.45 friction=0.3 kill=0

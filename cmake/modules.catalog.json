@@ -160,6 +160,23 @@
     },
     {
       "schema": 1,
+      "name": "Aver.Camera",
+      "dir": "camera",
+      "displayName": "Gameplay Cameras",
+      "description": "Spring-arm camera rigs on scene entities: collision, lag, look-ahead, blended view targets, FOV and the modifier stack.",
+      "category": "Gameplay",
+      "option": "AVER_MODULE_CAMERA",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Physics",
+        "Aver.Scene"
+      ],
+      "consequence": "Games keep the fixed third- or first-person boom: no camera collision, lag, blends, modes or camera modifiers."
+    },
+    {
+      "schema": 1,
       "name": "Aver.Core",
       "dir": "core",
       "displayName": "Core",
@@ -395,7 +412,7 @@
       "name": "Aver.Particles",
       "dir": "particles",
       "displayName": "Particles",
-      "description": "CPU-simulated billboard particles, depth-tested against the scene.",
+      "description": "CPU and GPU simulated particles (sprites, ribbons, mesh particles) with a module stack and spawn-at-event, depth-tested against the scene.",
       "category": "Rendering",
       "option": "AVER_MODULE_PARTICLES",
       "required": false,
@@ -1137,6 +1154,42 @@
     },
     {
       "schema": 1,
+      "name": "Aver.Vehicle",
+      "dir": "vehicle",
+      "displayName": "Vehicles",
+      "description": "The .ocvehicle asset, the vehicle spec, the built-in presets and the builder over the physics vehicle ABI: cars, trucks and tanks.",
+      "category": "Physics",
+      "option": "AVER_MODULE_VEHICLE",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Physics"
+      ],
+      "consequence": "No .ocvehicle assets, no Vehicle component and no AI traffic cars."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Vehicle.Scene",
+      "dir": "vehicle.scene",
+      "displayName": "Drivable Vehicles",
+      "description": "Cars, trucks and tanks on scene entities over Jolt's vehicle constraint: engine, gearbox, differentials, driver aids, wheel visuals, telemetry, driving and crash damage.",
+      "category": "Physics",
+      "option": "AVER_MODULE_VEHICLE_SCENE",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Physics",
+        "Aver.Scene",
+        "Aver.Vehicle"
+      ],
+      "consequence": "The Vehicle component does nothing: no drivable cars, trucks or tanks, no telemetry and no driver seat."
+    },
+    {
+      "schema": 1,
       "name": "Aver.World",
       "dir": "world",
       "displayName": "World Runtime",
@@ -1153,7 +1206,8 @@
       ],
       "optionalDependsOn": [
         "Aver.Physics",
-        "Aver.Scene"
+        "Aver.Scene",
+        "Aver.Vehicle"
       ],
       "consequence": ""
     }
@@ -1220,17 +1274,6 @@
         "Aver.Net",
         "Aver.Vehicle",
         "Aver.SoftBody"
-      ]
-    },
-    {
-      "name": "Aver.Vehicle",
-      "dir": "vehicle",
-      "displayName": "Vehicles",
-      "description": "Planned: authoritative vehicle simulation.",
-      "category": "Physics",
-      "dependsOn": [
-        "Aver.Core",
-        "Aver.Physics"
       ]
     }
   ]

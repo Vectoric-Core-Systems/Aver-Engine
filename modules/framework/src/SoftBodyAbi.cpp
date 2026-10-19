@@ -75,3 +75,30 @@ int32_t aver_fw_softbody_drain_events(int32_t* outI, float* outF, int32_t max) {
     if (!outI || !outF || max <= 0) return 0;
     return call(AVER_FW_SB_OP_EVENTS, 0, nullptr, 0, outF, outI, max);
 }
+
+int32_t aver_fw_softbody_set_asleep(int32_t entity, int32_t asleep) {
+    const float in[1] = {asleep ? 1.0f : 0.0f};
+    return call(AVER_FW_SB_OP_ASLEEP, entity, in, 1);
+}
+
+int32_t aver_fw_softbody_clear_debris(int32_t entity) { return call(AVER_FW_SB_OP_CLEAR_DEBRIS, entity); }
+
+int32_t aver_fw_softbody_set_effects(int32_t enabled) {
+    const float in[1] = {enabled ? 1.0f : 0.0f};
+    return call(AVER_FW_SB_OP_EFFECTS, 0, in, 1);
+}
+
+int32_t aver_fw_softbody_dents(int32_t entity, float* outMaxSetCm, int32_t* outDentedDebris2) {
+    float f[1] = {0};
+    int32_t i[2] = {0, 0};
+    if (!call(AVER_FW_SB_OP_DENTS, entity, nullptr, 0, f, i, 2)) return 0;
+    if (outMaxSetCm) *outMaxSetCm = f[0];
+    if (outDentedDebris2) { outDentedDebris2[0] = i[0]; outDentedDebris2[1] = i[1]; }
+    return 1;
+}
+
+int32_t aver_fw_softbody_repair_all(void) {
+    int32_t n = 0;
+    if (!call(AVER_FW_SB_OP_REPAIR_ALL, 0, nullptr, 0, nullptr, &n, 1)) return 0;
+    return n;
+}

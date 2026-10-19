@@ -1,58 +1,40 @@
 # Aver.Particles
 
-CPU-simulated, camera-facing billboard particles: fire, smoke, steam, dust, rain, snow, sparks,
-embers, leaves, bubbles, spray, magic, debris, fog wisps -- general-purpose engine machinery in the
-same way the mesh renderer is, not a weapon-effects system. Nothing in this module names what an
-effect IS; every effect is DATA (`aver::particles::ParticleEffect`), never a code path.
+Data-driven particles on two tiers: fire, smoke, steam, dust, rain, snow, sparks, embers, leaves, bubbles, spray, magic, debris, fog wisps, ribbons and mesh debris -- general-purpose engine machinery in the same way the mesh renderer is, not a weapon-effects system. Nothing in this module names what an effect IS; every effect is DATA (`aver::particles::ParticleSystemDef`), never a code path. Usage, grammar and limits: `docs/PARTICLES.md`; the design: `docs/plans/wave10/GPU_PARTICLES.md`.
 
 ## Pieces
 
-- `scene::CParticleEmitter` (`modules/scene/include/aver/scene/Components.hpp`) -- the ECS-visible
-  half: an opaque effect id plus this emitter's own playback clock. Declared as a scene built-in, not
-  in this module, so the editor inspector and the C# scripting surface come for free, matching how
-  `CMeshRenderer`/`CAnimator` work.
-- `ParticleEffect` / `Particle` (`ParticleTypes.hpp`) -- what an effect IS (authored, shared) and what
-  a live particle IS (simulated, per-instance). `Particle`'s layout is written for a future GPU
-  compute tier; see its own comment for which of `modules/render.pcg`'s choices that tier would
-  follow.
-- `ParticleEffectLibrary` -- the way an effect id resolves to a `ParticleEffect` at simulate/render
-  time: `set()`/`find()`/`clear()`, nothing more. This module never opens a file and never learns
-  whether an effect behind an id came from disk or from a composition root's own test content -- see
-  DECIDED 3 below for who fills it and how.
-- `ParticleSystem` -- the CPU simulation. No RHI. Ticks every `CParticleEmitter`, exactly the split
-  `aver::anim::AnimSystem` (no RHI) and `render.skin`'s `SkinnedScene` (RHI) already use.
-- `ParticleRenderer` -- an `rhi::IRenderFeature` that draws what `ParticleSystem` produced: one
-  `drawIndexed` call per emitter, sorted back-to-front within that call, through
-  `IRenderFeature::transparentPass` (this engine's first depth-tested transparent pass). Unlit by
-  default; see the GI seam below.
+* `scene::CParticleEmitter` (`modules/scene/.../Components.hpp`) -- the ECS-visible half: an opaque effect id plus this emitter's own playback clock and flags (`kParticleEmitterStopped`, `AutoDestroy`, `ForceCpu`, `ForceGpu`). A scene built-in, so the inspector and the C# surface come for free.
+* `ParticleTypes.hpp` -- `ParticleEffect` (one emitter definition), `ParticleSystemDef` (emitters + user parameters), `Module`, `Curve4`, `EventSpawn`, and the 64-byte `Particle` that is identical in C++ and `particles_common.hlsli`.
+* `ParticleModules.hpp` / `.cpp` -- the closed table of 13 modules (key, stage, parameter names and defaults) and the CPU evaluation of each.
+* `ParticleRandom.hpp` -- counter-based RNG (`hash32`, `rand01`) and lattice gradient / curl noise, shared by both tiers.
+* `EmitterSim` -- the CPU executor: spawn, step, compaction in stable order, trail points, events. RHI-free; the editor preview owns its own.
+* `ParticleEffectLibrary` -- effect id (`fnv1a64` of the content-relative path) to system: `set`, `setSystem`, `find`, `findSystem`, `clear`, `revision`. This module never opens a file.
+* `ParticleSystem` -- ticks every `CParticleEmitter`, owns the per-instance sims and the event instances `spawnAt` uses, chooses the tier, and emits GPU jobs. No RHI: the GPU tier sits behind `IParticleGpuTier`.
+* `ParticleSpawn.hpp` -- `spawnAt`, `installEffectSpawner` (the `aver::spawnEffectAt` seam in `Aver.Core`).
+* `ParticleProvider.hpp` -- the one function the framework C ABI (`framework_particles_abi.h`) relays to.
+* `ParticleGpu` / `ParticleGpuPool` -- pooled buffers per capacity class, the kernels' recording, indirect arguments, sort, stats readback. `ParticleGpuTypes.hpp` mirrors the constant-buffer structs with `static_assert`s.
+* `ParticleRenderer` -- an `rhi::IRenderFeature`. `prePass` records the GPU jobs, `transparentPass` draws sprites, ribbons and mesh particles through one vertex shader. Resolvers for textures and meshes are installed by the host; the GI seam is below.
+* `ParticleLighting` -- `selectParticleLights`, the pure choice of the four lights an emitter uses.
+* `ParticleSortNetwork.hpp` -- the bitonic network's index math, run by the C++ test and read by the shader.
+* `shaders/` -- `particles_common.hlsli`, `particles_sim.hlsl`, `particles_sort.hlsl`, `particles.hlsl`.
 
 ## DECIDED 3 -- `.ocparticle`, and who loads it
 
-The reader/writer lives in `modules/formats.particles` (`Aver.Formats.Particles`), a separate target
-for `Aver.Formats.Material`'s exact reason: it parses straight into `particles::ParticleEffect`, a
-type outside `Aver.Formats`, so linking it there would put a particle-module dependency on every
-consumer of every OTHER format. This module never includes that header and never opens a file.
-
-Both composition roots walk their project's content root for `.ocparticle` files and call
-`particleEffects().set(id, effect)` themselves -- `sandbox/src/SandboxApp.cpp`'s
-`loadProjectParticleEffects()` and `Runtime/src/GameContent.cpp`'s
-`GameContent::loadProjectParticleEffects()`, both keyed on `fnv1a64(relative path)`, the SAME id
-space `CMeshRenderer::mesh`/`CAnimator::clip` already use. Neither composition root's UI or asset
-pipeline is visible from here; this module only ever asks `find(id)`.
+The reader/writer lives in `modules/formats.particles` (`Aver.Formats.Particles`), a separate target for `Aver.Formats.Material`'s exact reason: it parses into a type outside `Aver.Formats`. This module never includes that header and never opens a file. Both composition roots walk their project's content root and register each file with `particleEffects().setSystem(fnv1a64(relative path), def)`: `sandbox/src/SandboxApp.cpp`'s `loadProjectParticleEffects()` and `Runtime/src/GameContent.cpp`'s `GameContent::loadProjectParticleEffects()`. The renderer's texture and mesh resolvers (`GameContent::resolveParticleTexture`, `resolveParticleMesh`) are installed the same way.
 
 ## DECIDED 4 -- the GI seam
 
-`ParticleRenderer::GiSeam` (`ParticleRenderer.hpp`) -- a `prepare` function pointer (pipeline-build
-time) plus a `bind` function pointer (per-frame) plus an opaque `user` pointer, the same shape
-`VoxiRenderer::setDepthProxy`/`setTextureResolver` already use. Installed by whoever owns both sides
-(`SandboxApp.cpp`, `GameApp.cpp`); this module never includes a Voxi header and links no Voxi
-library. Without a seam installed, every particle draws exactly as it did before this decision
-existed. `ParticleEffect::receivesGI` (default true) opts an effect out -- an ember or a spark is its
-own light source, not a passive receiver of someone else's.
+`ParticleRenderer::GiSeam` -- a `prepare` function pointer (pipeline-build time), a `bind` function pointer (per frame) and an opaque `user` pointer, the same shape `VoxiRenderer::setDepthProxy` uses. Installed by whoever owns both sides; this module links no Voxi library. Without a seam an `ambient` or `lit` particle draws as if the GI term were 1. `receivesGI false` (or `LIGHTING unlit`) opts an effect out -- an ember is its own light source.
 
-## Not in this module yet (by design)
+## Two tiers
 
-- GPU simulation: `Particle`'s layout is ready for it (see its own comment on which of
-  `modules/render.pcg`'s choices a compute tier would follow); no compute dispatch exists yet.
-- A cross-emitter sort: each emitter sorts its own particles back-to-front; inter-emitter draw order
-  is emission order. A general depth sort across every emitter in the scene is a separate slice.
+`SIM auto` puts an emitter on the GPU when `maxParticles >= 2048` and the device has compute and indirect draw; `cpu` and `gpu` force it. The tier is fixed for an instance's life. `RENDER.PARTICLEGPU` and `--particles-cpu` / `--particles-gpu` restrict it per run. The CPU tier is the reference: `ParticleGpuParityTest` compares the kernels against `EmitterSim`, and anything the GPU cannot do falls back to it with one warning.
+
+## RHI additions this module relies on
+
+`drawIndexedInstanced`, `drawIndexedIndirect`, `dispatchIndirect`, `ResourceState::IndirectArgument`, `DeviceCaps::indirect` on both backends (`IndirectRhiTest`). A device without them runs every emitter on the CPU.
+
+## Not in this module (by design)
+
+Simulation stages with neighbour grids, local-space simulation, depth-buffer collision, soft particles, ray-traced shadows on particles, froxel light shafts, per-particle material graphs, scripted modules, GPU sort above 65,536 particles per emitter. See `docs/PARTICLES.md`.

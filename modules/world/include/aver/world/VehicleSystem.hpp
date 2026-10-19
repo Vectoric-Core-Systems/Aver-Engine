@@ -23,10 +23,13 @@
 #include "aver/core/Types.hpp"
 #include "aver/formats/OcLanes.hpp"
 
+#include <functional>
 #include <limits>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace aver::vehicle { struct VehicleSpec; }
 
 namespace aver::world::lanes {
 
@@ -194,9 +197,9 @@ namespace aver::world {
 inline constexpr f32 kVehicleFarCm = 30000.0f;
 inline constexpr u32 kVehicleFarInterval = 4;
 
-// One placement that asked to be a vehicle: its entity, the preset name from the `vehicle <preset>`
-// token (car | van | truck | bus | sports), and its mesh's LOCAL bounds in centimetres, which is where
-// the physical size comes from.
+// One placement that asked to be a vehicle: its entity, the `vehicle <preset>` token (a preset name, car | van |
+// truck | bus | sports, or the content path of an `.ocvehicle`), and its mesh's LOCAL bounds in centimetres, which is
+// where a preset's physical size comes from.
 struct VehicleSpawn {
     scene::Entity entity = scene::kInvalidEntity;
     std::string preset;
@@ -219,6 +222,12 @@ public:
     // holds it behind a pointer.
     VehicleSystem(const VehicleSystem&) = delete;
     VehicleSystem& operator=(const VehicleSystem&) = delete;
+
+    // How a host resolves the content path of an `.ocvehicle` (a `vehicle Vehicles/Bus.ocvehicle` token) to a parsed
+    // spec: a cache over its content resolver, the pointer valid until the next call. Null for a path it cannot load,
+    // and the placement is then built as 'car'. Without a source every .ocvehicle token reads as unloadable.
+    using SpecSource = std::function<const vehicle::VehicleSpec*(const std::string& contentPath)>;
+    void setSpecSource(SpecSource source);
 
     // Builds one physics vehicle per spawn at its entity's CURRENT world transform, sized from the mesh
     // bounds (scaled by the entity's world scale) and the preset, and assigns each to the nearest lane

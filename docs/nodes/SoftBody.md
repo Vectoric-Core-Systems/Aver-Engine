@@ -2,14 +2,21 @@
 
 # SoftBody nodes
 
-8 nodes. Rows: `scripting/csharp/Aver.Graph/GraphSoftBodyNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsSoftBody.hpp`.
+15 nodes. Rows: `scripting/csharp/Aver.Graph/GraphSoftBodyNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsSoftBody.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
+| `ClearSoftBodyDebris` | Clear Soft Body Debris | Physics | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.ClearSoftBodyDebrisForGraph` |
+| `GetSoftBodyDents` | Get Soft Body Dents | Physics | D | in: `entity` int<br>out: `found` bool, `dentedEdges` int, `maxSetCm` float, `debrisPieces` int | none | `SoftBodyGraphInterop.GetSoftBodyDentsForGraph` |
 | `GetSoftBodyState` | Get Soft Body State | Physics | D | in: `entity` int<br>out: `found` bool, `damage` float, `maxStrain` float, `pieces` int, `brokenEdges` int | none | `SoftBodyGraphInterop.GetSoftBodyStateForGraph` |
+| `PopSoftBodyEvent` | Pop Soft Body Event | Physics | P | in: `exec` exec<br>out: `then` exec, `found` bool, `kind` int, `entity` int, `piece` int, `x` float, `y` float, `z` float, `value` float, `success` bool | none | `SoftBodyGraphInterop.PopSoftBodyEventForGraph` |
 | `ReleaseSoftBody` | Release Soft Body | Physics | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SoftBodyReleaseForGraph` |
+| `RepairAllSoftBodies` | Repair All Soft Bodies | Physics | P | in: `exec` exec<br>out: `then` exec, `repaired` int, `success` bool | none | `SoftBodyGraphInterop.RepairAllSoftBodiesForGraph`<br>Success means at least one soft body was repaired. |
+| `SetSoftBodyAsleep` | Set Soft Body Asleep | Physics | P | in: `exec` exec, `entity` int, `asleep` bool<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftBodyAsleepForGraph` |
+| `SetSoftBodyBudget` | Set Soft Body Budget | Physics | P | in: `exec` exec, `maxPieces` int = 48, `maxParticles` int = 20000, `maxRebuilds` int = 2, `lifetime` float = 12<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftBodyBudgetForGraph` |
+| `SetSoftBodyEffects` | Set Soft Body Effects | Physics | P | in: `exec` exec, `enabled` bool = true<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftBodyEffectsForGraph` |
 | `SetSoftBodyPreset` | Set Soft Body Preset | Physics | P | in: `exec` exec, `entity` int, `preset` int = 0<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftBodyPresetForGraph` |
 | `SetSoftBodyWind` | Set Soft Body Wind | Physics | P | in: `exec` exec, `vx` float, `vy` float, `vz` float, `gust` float = 0, `gustHz` float = 0.3, `turbulence` float = 0<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftBodyWindForGraph` |
 | `SoftBodyDamage` | Soft Body Damage | Physics | P | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float, `radius` float = 30, `energy` float = 100, `dirX` float, `dirY` float, `dirZ` float<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SoftBodyDamageForGraph`<br>A zero direction (all three) is radial. |

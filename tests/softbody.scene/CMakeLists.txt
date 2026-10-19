@@ -3,7 +3,15 @@
 # flag hanging and blowing, a cape following a palette, a dent that stays, a pane that shatters (Torn, then
 # Detached, dust for the shards), explosions and cuts, debris caps, the rebuild budget, replay equality and the
 # legacy CSoftBody path. Physics is the real Jolt world, through Aver.Physics.
-add_executable(SoftBodySystemTest src/SoftBodySystemTest.cpp)
-target_include_directories(SoftBodySystemTest PRIVATE src)
-target_link_libraries(SoftBodySystemTest PRIVATE Aver.SoftBody.Scene Aver.Physics Aver.Scene Aver.SoftBody Aver.Formats Aver.Core)
-set_target_properties(SoftBodySystemTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+#
+# Wave 10 adds two more, linked the same way:
+#   SoftBodyDepthTest       fields, the reveal handshake, thick breaks, break effects, saved damage, baking, the proxy cage
+#                           and replay equality with all of it on.
+#   SoftBodyCalibrationTest the preset tuning scenarios (an energy ladder against a door, a pane, a crate, a flag): prints the
+#                           measured table and asserts only coarse brackets.
+foreach(_t SoftBodySystemTest SoftBodyDepthTest SoftBodyCalibrationTest)
+  add_executable(${_t} src/${_t}.cpp)
+  target_include_directories(${_t} PRIVATE src)
+  target_link_libraries(${_t} PRIVATE Aver.SoftBody.Scene Aver.Physics Aver.Scene Aver.SoftBody Aver.Formats Aver.Core)
+  set_target_properties(${_t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()

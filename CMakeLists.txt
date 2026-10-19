@@ -234,6 +234,11 @@ endif()
 if(AVER_MODULE_PHYSICS)
   add_subdirectory(modules/physics.jolt)   # vendored Jolt, built as Aver.Physics.Jolt
   add_subdirectory(modules/physics)        # the engine's plain-C ABI over it
+
+  # The vehicle as data (.ocvehicle, the spec, the builder): Core + Formats + the physics C ABI, so it sits right behind physics (docs/VEHICLES.md).
+  if(AVER_MODULE_VEHICLE)
+    add_subdirectory(modules/vehicle)
+  endif()
 endif()
 add_subdirectory(modules/rhi)
 # Landscape, AFTER the RHI rather than beside formats: the CPU half needs neither, but the renderer
@@ -310,6 +315,17 @@ if(AVER_MODULE_SCENE)
   # the manifest enforces that, so with any of them off the module is simply not there.
   if(AVER_MODULE_SOFTBODY_SCENE)
     add_subdirectory(modules/softbody.scene)
+  endif()
+
+  # Drivable vehicles on scene entities over Jolt's vehicle constraint (docs/VEHICLES.md). Needs vehicle, scene and physics; the manifest enforces that.
+  if(AVER_MODULE_VEHICLE_SCENE)
+    add_subdirectory(modules/vehicle.scene)
+  endif()
+
+  # Gameplay cameras (docs/CAMERAS.md): spring-arm rigs, view-target blends and the camera modifier stack on scene entities. Needs scene and
+  # physics; the manifest enforces that, so with either off the module is simply not there.
+  if(AVER_MODULE_CAMERA)
+    add_subdirectory(modules/camera)
   endif()
   # Save/load of a whole world. Guarded on SCENE for the same reason anim.scene is: it is the edge
   # between the world and the container format, and a build with no scene has no world to save.
@@ -562,6 +578,10 @@ if(AVER_BUILD_TESTS)
   if(AVER_MODULE_PHYSICS)
     add_subdirectory(tests/physics)
   endif()
+
+  if(TARGET Aver.Vehicle)
+    add_subdirectory(tests/vehicle)
+  endif()
   if(AVER_MODULE_SCENE)
     add_subdirectory(tests/scene)
     add_subdirectory(tests/anim.scene)
@@ -570,6 +590,14 @@ if(AVER_BUILD_TESTS)
     endif()
     if(TARGET Aver.SoftBody.Scene)
       add_subdirectory(tests/softbody.scene)
+    endif()
+
+    if(TARGET Aver.Vehicle.Scene)
+      add_subdirectory(tests/vehicle.scene)
+    endif()
+
+    if(TARGET Aver.Camera)
+      add_subdirectory(tests/camera)
     endif()
     add_subdirectory(tests/save)
     add_subdirectory(tests/prefab)
@@ -602,9 +630,16 @@ if(AVER_BUILD_TESTS)
     add_subdirectory(tests/framework_worldfx)   # wave9 VISUAL_SCRIPTING_CSHARP_SYNC: sun / fog / sky light and post layer overrides
 
     add_subdirectory(tests/framework_morph)   # wave9 MORPH_TARGETS: the blend-shape / lip-sync ABI relay
+add_subdirectory(tests/framework_softfield)
+
+    add_subdirectory(tests/framework_camera)   # wave10 GAMEPLAY_CAMERAS: the camera rig / view-target / modifier ABI relay
     add_subdirectory(tests/framework_sequence)   # wave5 #27: the sequencer ABI relay
     add_subdirectory(tests/framework_access)   # wave9 accessibility: options, captions, speech, camera feel, input assist
+
+    add_subdirectory(tests/framework_particles)   # wave10 GPU_PARTICLES: the particle ABI relay (fake provider, no particle module)
     add_subdirectory(tests/framework_content)
+
+    add_subdirectory(tests/framework_vehicle)   # wave10 VEHICLES: the vehicle ABI relay
     add_subdirectory(tests/gas)
     add_subdirectory(tests/managed)   # Aver.Graph.Tests and Aver.DataLoc.Tests, wired into nothing before
   endif()
@@ -682,6 +717,8 @@ set(AVER_CTEST_VULKAN_TARGETS
   ShaderIncludeResolveTest
   NeuralGpuParityTest
   ColourVisionShaderTest
+  IndirectRhiTest
+  ParticleGpuParityTest
 )
 function(aver_register_ctest_in dir)
   get_property(_targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)

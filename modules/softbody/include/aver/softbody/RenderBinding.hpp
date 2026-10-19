@@ -12,6 +12,8 @@
 
 namespace aver::softbody {
 
+struct ProxyBind;
+
 struct RenderBinding {
     std::vector<u32> vertexParticle;   // render vertex -> particle
     std::vector<u32> indices;          // 3 per render triangle
@@ -24,6 +26,11 @@ struct RenderBinding {
 
     // One render vertex per particle and one render triangle per sim triangle.
     static RenderBinding identity(const Cage& cage);
+
+    // A render mesh riding a proxy cage (ProxyBind.hpp): each render vertex follows the dominant-weight corner particle
+    // of its home proxy triangle, each render triangle the proxy triangle nearest its centroid (many to one), so
+    // tears, splits and dead triangles keep working through the same arrays. `indices` are the render mesh's.
+    static RenderBinding forProxy(const Cage& proxyCage, const ProxyBind& bind, const std::vector<u32>& indices);
 
     // Call once after filling the three arrays by hand. `simTriangles` = Cage::triangles.size().
     void finalize(u32 simTriangles);

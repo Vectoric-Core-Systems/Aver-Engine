@@ -1,0 +1,211 @@
+OCGRAPH 1
+DOMAIN gameplay
+NAME LabPawn
+DESCRIPTION A walking Character with a gameplay camera rig. 1-6 switch the rig mode (Chase, Orbit, First person, Seat, Top down, Fixed); C cuts the lag; F kicks the FOV; Z zooms; G punches; H shakes; X clears every modifier.
+
+# The rig is added to the pawn itself at start (AN_CameraAddRig, preset 0 = Chase, target 0 = the rig's own entity), so every camera node below
+# names the pawn entity. The Chase arm pivots on the pawn's view node, which the Character publishes at eye height.
+CLASS AN_LabPawn Character
+# The body, so the collision fade has something to hide; hidden=owner makes First person hide it too.
+COMP body Mesh mesh=Meshes/cube.ocmesh scale=28,28,85 pos=0,0,85 hidden=owner
+
+PARAM entity int
+PARAM deltaTime float
+NODE ent Param param=entity
+NODE dt Param param=deltaTime
+
+ENTRY start OnStart
+NODE start OnStart
+NODE addrig AN_CameraAddRig
+LINK start.exec addrig.exec
+LINK ent.value addrig.entity
+
+NODE look_scale ConstFloat
+PIN look_scale value out float 0.15
+ENTRY tick OnTick
+NODE tick OnTick
+NODE move MoveAxis
+NODE mouse MouseDelta
+LINK tick.exec move.exec
+LINK move.then mouse.exec
+NODE yaw Multiply
+LINK mouse.deltaX yaw.a
+LINK look_scale.value yaw.b
+NODE pitch Multiply
+LINK mouse.deltaY pitch.a
+LINK look_scale.value pitch.b
+NODE drive CharacterMove
+LINK mouse.then drive.exec
+LINK ent.value drive.entity
+LINK dt.value drive.dt
+LINK move.forward drive.forward
+LINK move.right drive.right
+LINK yaw.result drive.yawDelta
+LINK pitch.result drive.pitchDelta
+
+# Where the pawn is, for the shake.
+NODE here GetFieldVec3 field=CLocal.position
+LINK ent.value here.entity
+
+# ---- mode0 ----
+NODE k_mode0 ConstInt value=27
+NODE p_mode0 InputKeyPressed
+LINK k_mode0.value p_mode0.key
+NODE b_mode0 Branch
+LINK drive.then b_mode0.exec
+LINK p_mode0.triggered b_mode0.cond
+NODE a_mode0 AN_CameraSetMode
+LINK b_mode0.true a_mode0.exec
+LINK ent.value a_mode0.entity
+NODE c_mode0_mode ConstInt value=0
+LINK c_mode0_mode.value a_mode0.mode
+LINK a_mode0.then b_mode1.exec
+LINK b_mode0.false b_mode1.exec
+
+# ---- mode1 ----
+NODE k_mode1 ConstInt value=28
+NODE p_mode1 InputKeyPressed
+LINK k_mode1.value p_mode1.key
+NODE b_mode1 Branch
+LINK p_mode1.triggered b_mode1.cond
+NODE a_mode1 AN_CameraSetMode
+LINK b_mode1.true a_mode1.exec
+LINK ent.value a_mode1.entity
+NODE c_mode1_mode ConstInt value=1
+LINK c_mode1_mode.value a_mode1.mode
+LINK a_mode1.then b_mode2.exec
+LINK b_mode1.false b_mode2.exec
+
+# ---- mode2 ----
+NODE k_mode2 ConstInt value=29
+NODE p_mode2 InputKeyPressed
+LINK k_mode2.value p_mode2.key
+NODE b_mode2 Branch
+LINK p_mode2.triggered b_mode2.cond
+NODE a_mode2 AN_CameraSetMode
+LINK b_mode2.true a_mode2.exec
+LINK ent.value a_mode2.entity
+NODE c_mode2_mode ConstInt value=2
+LINK c_mode2_mode.value a_mode2.mode
+LINK a_mode2.then b_mode3.exec
+LINK b_mode2.false b_mode3.exec
+
+# ---- mode3 ----
+NODE k_mode3 ConstInt value=30
+NODE p_mode3 InputKeyPressed
+LINK k_mode3.value p_mode3.key
+NODE b_mode3 Branch
+LINK p_mode3.triggered b_mode3.cond
+NODE a_mode3 AN_CameraSetMode
+LINK b_mode3.true a_mode3.exec
+LINK ent.value a_mode3.entity
+NODE c_mode3_mode ConstInt value=3
+LINK c_mode3_mode.value a_mode3.mode
+LINK a_mode3.then b_mode4.exec
+LINK b_mode3.false b_mode4.exec
+
+# ---- mode4 ----
+NODE k_mode4 ConstInt value=31
+NODE p_mode4 InputKeyPressed
+LINK k_mode4.value p_mode4.key
+NODE b_mode4 Branch
+LINK p_mode4.triggered b_mode4.cond
+NODE a_mode4 AN_CameraSetMode
+LINK b_mode4.true a_mode4.exec
+LINK ent.value a_mode4.entity
+NODE c_mode4_mode ConstInt value=4
+LINK c_mode4_mode.value a_mode4.mode
+LINK a_mode4.then b_mode5.exec
+LINK b_mode4.false b_mode5.exec
+
+# ---- mode5 ----
+NODE k_mode5 ConstInt value=32
+NODE p_mode5 InputKeyPressed
+LINK k_mode5.value p_mode5.key
+NODE b_mode5 Branch
+LINK p_mode5.triggered b_mode5.cond
+NODE a_mode5 AN_CameraSetMode
+LINK b_mode5.true a_mode5.exec
+LINK ent.value a_mode5.entity
+NODE c_mode5_mode ConstInt value=5
+LINK c_mode5_mode.value a_mode5.mode
+LINK a_mode5.then b_cut.exec
+LINK b_mode5.false b_cut.exec
+
+# ---- cut ----
+NODE k_cut ConstInt value=2
+NODE p_cut InputKeyPressed
+LINK k_cut.value p_cut.key
+NODE b_cut Branch
+LINK p_cut.triggered b_cut.cond
+NODE a_cut AN_CameraCut
+LINK b_cut.true a_cut.exec
+LINK ent.value a_cut.entity
+LINK a_cut.then b_kick.exec
+LINK b_cut.false b_kick.exec
+
+# ---- kick ----
+NODE k_kick ConstInt value=5
+NODE p_kick InputKeyPressed
+LINK k_kick.value p_kick.key
+NODE b_kick Branch
+LINK p_kick.triggered b_kick.cond
+NODE a_kick AN_CameraPushFovKick
+LINK b_kick.true a_kick.exec
+LINK a_kick.then b_zoom.exec
+LINK b_kick.false b_zoom.exec
+
+# ---- zoom ----
+NODE k_zoom ConstInt value=25
+NODE p_zoom InputKeyPressed
+LINK k_zoom.value p_zoom.key
+NODE b_zoom Branch
+LINK p_zoom.triggered b_zoom.cond
+NODE a_zoom AN_CameraPushZoom
+LINK b_zoom.true a_zoom.exec
+LINK a_zoom.then b_punch.exec
+LINK b_zoom.false b_punch.exec
+
+# ---- punch ----
+NODE k_punch ConstInt value=6
+NODE p_punch InputKeyPressed
+LINK k_punch.value p_punch.key
+NODE b_punch Branch
+LINK p_punch.triggered b_punch.cond
+NODE a_punch AN_CameraPunch
+LINK b_punch.true a_punch.exec
+NODE c_punch_pitchDeg ConstFloat
+PIN c_punch_pitchDeg value out float 6.0
+LINK c_punch_pitchDeg.value a_punch.pitchDeg
+NODE c_punch_yawDeg ConstFloat
+PIN c_punch_yawDeg value out float 1.5
+LINK c_punch_yawDeg.value a_punch.yawDeg
+NODE c_punch_rollDeg ConstFloat
+PIN c_punch_rollDeg value out float 0.0
+LINK c_punch_rollDeg.value a_punch.rollDeg
+LINK a_punch.then b_shake.exec
+LINK b_punch.false b_shake.exec
+
+# ---- shake ----
+NODE k_shake ConstInt value=7
+NODE p_shake InputKeyPressed
+LINK k_shake.value p_shake.key
+NODE b_shake Branch
+LINK p_shake.triggered b_shake.cond
+NODE a_shake AN_CameraShakeAt
+LINK b_shake.true a_shake.exec
+LINK here.x a_shake.x
+LINK here.y a_shake.y
+LINK here.z a_shake.z
+LINK a_shake.then b_clear.exec
+LINK b_shake.false b_clear.exec
+
+# ---- clear ----
+NODE k_clear ConstInt value=23
+NODE p_clear InputKeyPressed
+LINK k_clear.value p_clear.key
+NODE b_clear Branch
+LINK p_clear.triggered b_clear.cond
+NODE a_clear AN_CameraClearModifiers
+LINK b_clear.true a_clear.exec
+

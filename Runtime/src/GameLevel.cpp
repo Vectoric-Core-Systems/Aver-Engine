@@ -661,10 +661,15 @@ usize GameLevel::beginVehicles(world::VehicleSystem& vehicles, const GameContent
     // apiece would bury the one that matters.
     std::vector<world::VehicleSpawn> live;
     live.reserve(vehiclePlacements_.size());
-    u32 noBounds = 0, scaled = 0, animated = 0;
+    u32 noBounds = 0, scaled = 0, animated = 0, drivable = 0;
+    // A DRIVABLE VEHICLE (a CVehicle component) belongs to VehiclePhysicsSystem, which builds it from its own
+    // asset; a traffic placement on the same entity would make two vehicles fight over one transform. The component
+    // is registered by Aver.Vehicle.Scene at runtime, so it is looked up by name (0 when no host registered it).
+    const u32 vehicleComp = w.componentId("CVehicle");
     std::string firstNoBounds;
     for (const VehiclePlacement& vp : vehiclePlacements_) {
         if (!w.valid(vp.entity)) continue;   // deleted since the load
+        if (vehicleComp != 0 && w.hasComponent(vp.entity, vehicleComp)) { ++drivable; continue; }
         // THE MESH THE ENTITY HAS NOW, which is also the table the placement's own collision box is
         // fitted from. A mesh the content set never loaded has no bounds to size a chassis from.
         const auto* mr = w.component<scene::CMeshRenderer>(vp.entity, scene::kComponentMeshRenderer);
@@ -700,6 +705,9 @@ usize GameLevel::beginVehicles(world::VehicleSystem& vehicles, const GameContent
     if (animated)
         AVER_WARN("[Level] {} vehicle placement(s) also carry an object animation, which would overwrite the "
                   "physics pose every frame -- they stay animated and are not driven", animated);
+    if (drivable)
+        AVER_WARN("[Level] {} vehicle placement(s) also carry a Vehicle component; the component builds the vehicle, so "
+                  "the traffic token is ignored", drivable);
     if (live.empty()) return 0;
     // FROM THE LEVEL'S NAME, so a level drives the same way every run (its cars choose the same turns)
     // and two levels do not drive in step.

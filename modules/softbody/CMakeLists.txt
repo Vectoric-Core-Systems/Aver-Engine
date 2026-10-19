@@ -2,7 +2,8 @@
 #
 # Pure by construction: no scene, no GPU, no Jolt. The cage (particles, beams, dihedral bends,
 # triangles), the material yield model, tear resolution into duplicate particles, island planning, the
-# render binding that follows tears and the .ocsoft asset are all arithmetic on arrays, so
+# render binding that follows tears, the .ocsoft asset, the thick-break caps, the fields, the saved-damage codec and the
+# proxy binding are all arithmetic on arrays, so
 # tests/softbody decides them on a machine with no device. The simulation itself is Jolt's, driven by
 # Aver.SoftBody.Scene through Aver.Physics' aver_phys_sb_* ABI.
 #
@@ -17,6 +18,10 @@ aver_add_module(Aver.SoftBody
     src/SimMesh.cpp
     src/Damage.cpp
     src/Islands.cpp
+    src/Caps.cpp
+    src/Fields.cpp
+    src/SoftState.cpp
+    src/ProxyBind.cpp
   DEPS
     Aver.Core
     Aver.Formats

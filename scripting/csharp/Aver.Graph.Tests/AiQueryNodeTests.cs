@@ -66,7 +66,7 @@ static class AiQueryNodeTests
     private static int Fail(string msg) => NodeRowKit.Fail(msg);
 
     private static bool IsAiType(string t) =>
-        t.StartsWith("an_eqs", StringComparison.OrdinalIgnoreCase) || t.StartsWith("an_so", StringComparison.OrdinalIgnoreCase) ||
+        t.StartsWith("an_eqs", StringComparison.OrdinalIgnoreCase) || (t.StartsWith("an_so", StringComparison.OrdinalIgnoreCase) && !t.StartsWith("an_soft", StringComparison.OrdinalIgnoreCase)) ||
         t.StartsWith("an_brain", StringComparison.OrdinalIgnoreCase);
 
     // No row may go missing or be added without this list (and the design) changing with it.

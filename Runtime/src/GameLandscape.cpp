@@ -362,7 +362,7 @@ void GameLandscape::updateRingTiles(rhi::IDevice* device, f32 cameraXCm, f32 cam
 }
 
 void GameLandscape::draw(rhi::IDevice& device, const Vec3& eye, const Mat4& viewProj, f32 viewportHeightPx,
-                          GameContent* content, pbr::MaterialSystem* materials) {
+                          GameContent* content, pbr::MaterialSystem* materials, f32 fovYRad) {
     if (!loaded_ || !landscapeRenderer_) return;
 #if AVER_MODULE_PBR
     // Bind the level's terrain material the first frame the material system is ready. Level load
@@ -383,7 +383,7 @@ void GameLandscape::draw(rhi::IDevice& device, const Vec3& eye, const Mat4& view
     lp.cameraCm[0] = eye.x; lp.cameraCm[1] = eye.y; lp.cameraCm[2] = eye.z;
     // The same projection scale trifactor::projScale uses, over this frame's real viewport height:
     // a mismatched scale refines terrain at the wrong distance without failing visibly.
-    lp.projScale = viewportHeightPx / (2.0f * std::tan(radians(60.0f) * 0.5f));
+    lp.projScale = viewportHeightPx / (2.0f * std::tan(fovYRad * 0.5f));
     lp.useFrustum = true;
     f32 vpm[16];
     for (int r = 0; r < 4; ++r)

@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-166 public types and 1485 public members, read from `scripting/csharp/Aver.Framework/` (100 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+191 public types and 1670 public members, read from `scripting/csharp/Aver.Framework/` (115 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -342,6 +342,7 @@ Values: `None = 0`, `Started = 1`, `Ongoing = 2`, `Triggered = 4`, `Completed = 
 - `public float JumpSpeed` - Upward speed a jump starts with, cm/s.
 - `public float PitchMin` - How far the view may look down / up, degrees.
 - `public Entity View { get; }` - The character's head: a child entity at eye height carrying the view pitch.
+- `public bool AttachCameraRig(CameraRigPreset preset = CameraRigPreset.Chase)` - Gives this character a gameplay camera rig on its own entity (docs/CAMERAS.md): spring-arm collision, lag, blends and the modifier stack in place of the fixed boom.
 - `public float Yaw { get; }` - The character's facing yaw, degrees, in (-180, 180].
 - `public float Pitch { get; }` - The view pitch, degrees, clamped to PitchMin..PitchMax.
 - `public Vec3 EyePosition { get; }` - Where the eyes are: the character's feet plus EyeHeight.
@@ -586,12 +587,76 @@ Values: `Idle = 0`, `Running = 1`, `Succeeded = 2`, `Failed = 3`
 
 Values: `Sfx = 0`, `Music = 1`, `Voice = 2`, `Ui = 3`
 
+### CameraBlendCurve
+
+`public enum CameraBlendCurve` - The curve of a view-target blend.
+
+Values: `EaseInOut = 0`, `Linear = 1`, `EaseIn = 2`, `EaseOut = 3`
+
 ### CameraFx
 
 `public static class CameraFx` - Camera shake and head bob.
 
 - `public static void AddShake(float trauma)` - Adds shake trauma, 0 to 1; it saturates at 1 and decays on its own.
 - `public static void SetBob(float amount01, float speedCmPerSec)` - Head bob for this frame: amount 0 to 1 and the ground speed in cm/s.
+
+### CameraMode
+
+`public enum CameraMode` - How a rig places the camera.
+
+Values: `Chase = 0`, `Orbit = 1`, `FirstPerson = 2`, `Seat = 3`, `TopDown = 4`, `Fixed = 5`
+
+### CameraModifierKind
+
+`public enum CameraModifierKind` - What a camera modifier changes.
+
+Values: `FovKick = 0`, `FovScale = 1`, `Punch = 2`, `RollLean = 3`, `ArmScale = 4`, `SocketOffset = 5`
+
+### CameraPose
+
+`public readonly record struct CameraPose(Vec3 Position, float YawDegrees, float PitchDegrees, float RollDegrees, float FovDegrees, float NearCm, float FarCm)` - The camera after the active rig and the modifier stack, before the player's shake and bob.
+
+### CameraRig
+
+`public static class CameraRig` - The camera system: which rig is the view, blends between rigs, the modifier stack, and shake with distance.
+
+- `public const string EventViewTargetChanged = "CameraViewTargetChanged"` - Raised (at the new view target, or the pawn when none) when the live rig changes.
+- `public const string EventBlendFinished = "CameraBlendFinished"` - Raised when a blend into the live rig completes.
+- `public const string EventCut = "CameraCut"` - Raised when the camera teleports (a cut, or a lag snap).
+- `public static bool SetViewTarget(Entity rig, float blendSeconds = 0.5f, CameraBlendCurve curve = CameraBlendCurve.EaseInOut, bool cut = false)` - Makes rig the view.
+- `public static bool ClearViewTarget(float blendSeconds = 0.5f, CameraBlendCurve curve = CameraBlendCurve.EaseInOut)` - Back to automatic selection: the best rig under the possessed pawn, else the legacy camera.
+- `public static bool Cut(Entity rig = default)` - Snaps the lag state of rig (none = the active rig): the camera jumps to where it would be at rest, with no blend and no trail.
+- `public static Entity ActiveRig { get; }` - The rig that is the view now, or None for the legacy pawn camera.
+- `public static bool IsBlending { get; }` - True while a blend between views is running.
+- `public static bool TryGetPose(out CameraPose pose)` - The camera pose after the rig and the modifier stack (before the player's shake and bob).
+- `public static int PushFovKick(float deltaDegrees, float inSeconds = 0.05f, float holdSeconds = 0.1f, float outSeconds = 0.4f, int tag = 0)` - A FOV kick: deltaDegrees added, ramping in, holding, ramping out.
+- `public static int PushFovScale(float multiplier, float blendSeconds = 0.2f, int tag = 0)` - Zoom: the FOV is multiplied by multiplier (0.6 zooms in), held until removed.
+- `public static int PushPunch(float pitchDegrees, float yawDegrees = 0f, float rollDegrees = 0f, float recoverSeconds = 0.3f, int tag = 0)` - A recoil: a quick rotation offset that eases back over recoverSeconds.
+- `public static int PushRoll(float degrees, float blendSeconds = 0.3f, int tag = 0)` - A roll lean in degrees, held until removed.
+- `public static int PushArmScale(float factor, float blendSeconds = 0.3f, int tag = 0)` - The spring arm's length is multiplied by factor (zoom out for speed), held until removed.
+- `public static int PushSocketOffset(Vec3 cameraFrameOffset, float blendSeconds = 0.2f, int tag = 0)` - An offset at the arm's end in the camera frame (forward, right, up), held until removed: over-the-shoulder aim.
+- `public static bool RemoveModifier(int id, float outSeconds = -1f)` - Starts a modifier's blend out from its current strength (outSeconds &lt; 0 uses its own).
+- `public static int ClearModifiers(int tag = 0)` - Blends out every modifier with tag (0 = all).
+- `public static void AddShake(float trauma)` - Camera shake, 0..1: the existing CameraFx trauma (the player's shake and Reduce motion options apply).
+- `public static bool ShakeAt(Vec3 worldPosition, float radiusCm, float intensity, float falloffPower = 2f)` - Shake that fades with distance from the current camera: intensity * (1 - d/radius)^falloffPower.
+- `public static void DriveOrbitFromMouse(Entity rig, float degreesPerPixel = 0.15f, float wheelCmPerNotch = 40f)` - One frame of orbit control from the mouse: look input scaled by degreesPerPixel and the wheel as an arm change.
+- `public static CameraMode ModeOf(CameraRigPreset preset)` - The mode a preset starts in (VehicleChase is a Chase rig).
+
+### CameraRigFlags
+
+`public enum CameraRigFlags` - Rig switches, negative sense (zero is a working Chase rig).
+
+Values: `NoCollision = 1`, `NoInheritYaw = 2`, `NoInheritPitch = 4`, `NoInheritRoll = 8`, `NoFade = 16`, `LookAtTarget = 32`, `Disabled = 64`
+
+### CameraRigPreset
+
+`public enum CameraRigPreset` - The starting values of a rig.
+
+Values: `Chase = 0`, `VehicleChase = 1`, `Orbit = 2`, `FirstPerson = 3`, `Seat = 4`, `TopDown = 5`, `Fixed = 6`
+
+### CameraRigState
+
+`public readonly record struct CameraRigState(float ArmCm, bool Active, bool Blending, bool Colliding, bool Faded)` - One rig's runtime state, as the system last wrote it.
 
 ### CameraView
 
@@ -639,6 +704,10 @@ Values: `Off = 0`, `Subtitles = 1`, `Captions = 2`
 - `public int Handle { get; }` - The raw vehicle handle, 0 for no car.
 - `public bool IsValid { get; }` - True when the physics layer accepted the car.
 - `public bool SetInput(float throttle, float steer, float brake = 0f, float handbrake = 0f)` - The driver's input, which holds until set again: throttle -1..1 (negative reverses), steer -1..1 (+1 toward the car's right), brake and handbrake 0..1.
+- `public bool TryGetTelemetry(out VehicleTelemetry telemetry)` - The car's telemetry as of the last physics step.
+- `public bool Shift(int delta)` - Manual gearbox: one gear up (+1) or down (-1).
+- `public bool Flip(float liftCm = 50f)` - Puts the car upright about its heading, stopped, liftCm higher.
+- `public bool Enter(Entity driver)` - Puts driver in the seat (see EnterVehicle).
 - `public bool TryGetState(out CarState state)` - Speed, origin position and heading.
 - `public bool SetPose(Vec3 position, float yawDegrees)` - Puts the car's origin at position facing yawDegrees, stops it dead and wakes it.
 - `public bool WheelContact(int index)` - True when wheel index touched ground on the last step.
@@ -672,6 +741,7 @@ Values: `Off = 0`, `Subtitles = 1`, `Captions = 2`
 - `public float EngineMaxRpm { get; init; }` - Engine rev limit per minute.
 - `public float MaxPitchRollDeg { get; init; }` - Keeps the chassis' up axis within this many degrees of the world's, so the car cannot land on its roof; 0 or less turns it off.
 - `public static CarSpec Default { get; }` - The frozen default car: a 460 x 190 x 90 cm box, 1500 kg, 280 cm wheelbase, 160 cm track, 36 cm tyres, a 500 N*m engine.
+- `public string ToOcVehicle()` - This car as .ocvehicle text: the four-wheel plan PlanWheels computes (front pair steered, rear pair driven with the handbrake), the engine and the chassis, with every other record at the physics layer's defaults, so the car drives exactly as it did before .ocvehicle existed.
 
 ### CarState
 
@@ -684,6 +754,7 @@ Values: `Off = 0`, `Subtitles = 1`, `Captions = 2`
 - `public void Mesh(string meshPath, string material = "")` - Gives the class's own entity a mesh, and a material if one is named.
 - `public void PointLight(float intensityLux, float rangeCm)` - Adds a point light.
 - `public void Camera(float fovDegrees, float nearCm, float farCm)` - Adds a camera.
+- `public void CameraRig(CameraRigPreset preset = CameraRigPreset.Chase)` - Gives the class's own entity a gameplay camera rig seeded from preset (and a camera).
 - `public void Ticks(TickGroup group, int order = 0)` - Declares that the class ticks, in group at order.
 
 ### ClassNames
@@ -798,6 +869,45 @@ Values: `String`, `Int`, `Float`, `Bool`, `Vec3`, `Text`, `Strings`
 `public enum DeadZoneType` - How a DeadZone measures the input.
 
 Values: `Radial`, `Axial`
+
+### DriveActionNames
+
+`public static class DriveActionNames` - The names of the input actions a vehicle with a driver reads.
+
+- `public const string Throttle = "Drive.Throttle"` - Axis, -1..1: forward throttle (negative asks for reverse or brake, see the driver aids).
+- `public const string Brake = "Drive.Brake"` - Axis, 0..1: the brake pedal.
+- `public const string Steer = "Drive.Steer"` - Axis, -1..1: steering, +1 to the right.
+- `public const string Handbrake = "Drive.Handbrake"` - Button: the handbrake, held.
+- `public const string ShiftUp = "Drive.ShiftUp"` - Button: one gear up (manual gearbox only).
+- `public const string ShiftDown = "Drive.ShiftDown"` - Button: one gear down (manual gearbox only).
+- `public const string Reset = "Drive.Reset"` - Button: put the vehicle upright.
+- `public const string Exit = "Drive.Exit"` - Button: get out.
+- `public const string CameraNext = "Drive.CameraNext"` - Button: the next camera.
+- `public static IReadOnlyList<string> All { get; }` - Every name, in the order the system reads them.
+
+### DriveBinding
+
+`public readonly record struct DriveBinding(string Action, InputSource Source, string KeyName, float Scale = 1f, int Component = 0)` - One default binding as data: the action, where it reads from, the key or axis name (a member of Key, GamepadButton or GamepadAxis) and the scale and component.
+
+### DrivingContext
+
+`public sealed class DrivingContext : InputMappingContext` - The default driving bindings: W, Up and the right trigger throttle; S, Down and the left trigger brake; A, D and the left stick steer; Space or the A button the handbrake; E and Q shift; R resets; F exits; C changes camera.
+
+- `public const int Priority = 100` - The priority Push adds the context at: above a project's on-foot context.
+- `public static IReadOnlyList<DriveBinding> DefaultBindings { get; }` - The bindings as plain data (no native calls), which is what the constructor replays and what a test can read in a bare process.
+- `public DrivingContext()` - Creates the context: declares the nine actions (idempotent by name) and binds DefaultBindings.
+- `public override string Name { get; }` - Inherited documentation.
+- `public static void Push()` - Adds the default driving context at Priority (once; a second push is a no-op).
+- `public static void Pop()` - Removes what Push added.
+- `public static InputAction Throttle { get; }` - The action for throttle ("Drive.Throttle").
+- `public static InputAction Brake { get; }` - The action for the brake pedal ("Drive.Brake").
+- `public static InputAction Steer { get; }` - The action for steering ("Drive.Steer").
+- `public static InputAction Handbrake { get; }` - The action for the handbrake ("Drive.Handbrake").
+- `public static InputAction ShiftUp { get; }` - The action for shifting up ("Drive.ShiftUp").
+- `public static InputAction ShiftDown { get; }` - The action for shifting down ("Drive.ShiftDown").
+- `public static InputAction Reset { get; }` - The action for putting the vehicle upright ("Drive.Reset").
+- `public static InputAction Exit { get; }` - The action for getting out ("Drive.Exit").
+- `public static InputAction CameraNext { get; }` - The action for the next camera ("Drive.CameraNext").
 
 ### EditableAttribute
 
@@ -962,6 +1072,30 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public override bool Equals(object? o)`
 - `public override int GetHashCode()`
 - `public override string ToString()`
+- `public bool AddCameraRig(CameraRigPreset preset = CameraRigPreset.Chase, Entity target = default)` - Adds a CCameraRig seeded from preset (and a CCamera).
+- `public bool HasCameraRig { get; }` - True when the entity carries a rig that is not disabled.
+- `public bool RemoveCameraRig()` - Takes the rig out of play: it is never selected again (the component stays, as there is no scene call that removes a dynamically registered one).
+- `public bool SetCameraRigMode(CameraMode mode)` - Changes the mode; the rig blends into it over its blend time.
+- `public bool SetCameraRigTarget(Entity target)` - The entity the arm follows (none = the rig's parent, else the rig's own entity).
+- `public bool SetCameraRigArm(float lengthCm, float probeRadiusCm = 12f, bool collide = true)` - Arm length, probe radius and whether the arm collides (centimetres).
+- `public bool SetCameraRigSocket(Vec3 cameraFrameOffset)` - Offset at the arm's end in the camera frame: forward, right, up.
+- `public bool SetCameraRigPivot(Vec3 worldOffset)` - Offset of the arm origin in world axes (eye height).
+- `public bool SetCameraRigLag(float positionSpeed, float rotationSpeed = 0f, float maxDistanceCm = 0f)` - Position lag speed (1/s, 0 = none), rotation lag speed (0 = none) and the farthest the camera may trail behind its pivot (0 = unlimited).
+- `public bool SetCameraRigLookAhead(float seconds, float maxCm = 150f)` - The pivot leads by the planar velocity times seconds (0 = off), at most maxCm.
+- `public bool SetCameraRigPitchLimits(float minDegrees, float maxDegrees)` - How far the view may look down and up, degrees (both 0 reads -80 / +80).
+- `public bool AddCameraRigLook(float yawDegrees, float pitchDegrees)` - Adds look input in degrees to the rig's own yaw and pitch (Orbit, TopDown, Seat head look).
+- `public bool SetCameraRigFade(float startCm, float endCm)` - The collision fade: the target's meshes stop drawing once the camera is nearer than endCm to the pivot (they return at 1.15 times that).
+- `public bool SetCameraRigBlend(float seconds, CameraBlendCurve curve = CameraBlendCurve.EaseInOut)` - Seconds to blend into this rig (0 = cut) and the curve.
+- `public bool SetCameraRigIgnoreBody(int bodyHandle)` - A physics body the camera probe skips (the chassis of a vehicle).
+- `public bool SetCameraRigFlags(CameraRigFlags flags)` - Replaces the rig's switches (collision, per-axis inherit, fade, look-at, disabled).
+- `public bool TryGetCameraRigState(out CameraRigState state)` - What the camera system last computed for this rig.
+- `public bool SetParticleFloat(string name, float value)` - Sets a float user parameter the entity's effect declares with PARAM name float.
+- `public bool SetParticleVector(string name, Vec3 value)` - Sets a vector user parameter (PARAM name vec3): a wind direction, an attractor position.
+- `public bool SetParticleColor(string name, float r, float g, float b, float a = 1f)` - Sets a colour user parameter (PARAM name color).
+- `public bool BurstEmitter(int count)` - Spawns count extra particles from every emitter of the entity's effect, once.
+- `public bool StopEmitter(bool killParticles = false)` - Stops emission (like SetEmitterEnabled(false)); with killParticles the live particles go too, otherwise they finish their lives.
+- `public bool SetEmitterModifiers(float rateScale = 1f, float sizeScale = 1f, float speedScale = 1f)` - Scales the emitter's rate, new particles' size and initial speed (1 = authored).
+- `public bool TryGetEmitterState(out int aliveParticles, out bool onGpu)` - Reads how many particles the entity's emitters hold and which tier simulates them.
 - `public bool HasLight { get; }` - True when this entity carries a light.
 - `public bool SetLightIntensity(float lux)` - Sets the light's intensity in lux (candela for a point or spot light).
 - `public bool TryGetLightIntensity(out float lux)` - Reads the light's intensity in lux.
@@ -1013,6 +1147,22 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public bool HasAnyTag(uint mask)` - True if any bit in mask is set.
 - `public bool AddTag(uint mask)` - Sets the bits in mask.
 - `public bool RemoveTag(uint mask)` - Clears the bits in mask.
+- `public bool AddVehicle(string asset = "", VehiclePreset preset = VehiclePreset.Car)` - Adds a Vehicle component: from an .ocvehicle asset path, or, with no asset, from the built-in preset sized by this entity's mesh (so it needs a mesh then).
+- `public bool IsVehicle { get; }` - True when the entity carries a Vehicle component.
+- `public bool SetVehicleInput(float throttle, float steer, float brake = 0f, float handbrake = 0f)` - The driver's pedals: throttle -1..1 (negative reverses or brakes, see the aids), steer -1..1 (+1 right), brake and handbrake 0..1.
+- `public bool TryGetVehicleTelemetry(out VehicleTelemetry telemetry)` - The vehicle's state as of the last fixed physics step.
+- `public bool TryGetWheelTelemetry(int wheel, out WheelTelemetry telemetry)` - One wheel's state as of the last fixed physics step.
+- `public int VehicleWheelCount { get; }` - How many wheels the vehicle has; 0 when it is not built.
+- `public bool SetVehicleManualGearbox(bool manual)` - Switches between an automatic and a manual gearbox.
+- `public bool SetVehicleGear(int gear)` - Manual gearbox: -1 reverse, 0 neutral, 1 and up.
+- `public bool ShiftVehicle(int delta)` - Manual gearbox: one gear up (+1) or down (-1), through a timed clutch.
+- `public bool EnterVehicle(Entity driver)` - Puts driver in the seat: the Drive.* actions drive the vehicle, the driver is hidden and parked, and the camera rigs are made and the view moves to the first.
+- `public bool ExitVehicle()` - Gets the driver out beside the vehicle and gives the view back.
+- `public Entity VehicleDriver { get; }` - Who is in the seat; default when nobody is.
+- `public bool FlipVehicle(float liftCm = 50f)` - Puts the vehicle upright about its heading, stops it dead and sets it down liftCm higher.
+- `public bool RepairVehicle()` - Restores full health and gives the engine back.
+- `public bool DamageVehicle(float amount01)` - Takes amount01 of the vehicle's health (1 destroys it, which cuts the engine); a negative amount gives health back.
+- `public bool TuneVehicle(string key, float value)` - Live tuning by key (case-insensitive): power, brake, grip, suspension, steer, drag, downforce (scales, 1 = as authored), abs, tcs, manual (0 or 1) and collisionperiod (1 to 8).
 - `public bool SetIkRig(string rigAsset, float weight = 1f)` - Attaches an IK Rig (.ocikrig) to this entity, ensuring it has an animator.
 - `public bool SetIkRigFlags(bool feet = true, bool goals = true, bool body = true)` - Turns parts of the attached IK Rig on or off: foot placement, script goals, the pelvis solve.
 - `public bool SetIkGoal(string goal, Vec3 position, IkSpace space = IkSpace.World)` - Places a goal the rig declares (by name) at position.
@@ -1079,6 +1229,12 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public bool RepairSoftBody()` - Back to intact: pieces gone, dents out, tears closed.
 - `public bool ReleaseCloth()` - Unpins a cloth: a cape falls off its shoulders.
 - `public bool TryGetSoftBodyState(out SoftBodyState state)` - The soft body's damage, strain and piece count as of the last tick.
+- `public bool AddSoftField(SoftFieldKind kind, SoftFieldShape shape, Vec3 extents, float strength = 0f, float energyJoulesPerSecond = 0f)` - Adds a CSoftField to this entity (its transform is the field's frame).
+- `public bool SetSoftFieldEnabled(bool enabled)` - Enables or disables this entity's soft field.
+- `public bool TryGetSoftFieldTouched(out int pieces)` - The pieces this entity's field reached on the last tick.
+- `public bool ClearSoftDebris()` - Destroys this soft body's debris pieces now.
+- `public bool SetSoftBodyAsleep(bool asleep)` - Holds (true) or releases (false) this soft body's pieces asleep.
+- `public bool TryGetSoftBodyDents(out int dentedEdges, out float maxSetCm, out int debrisPieces)` - Permanent set: dented edges, the largest set in cm, and live debris pieces.
 - `public Brain Brain { get; }` - This entity's AI brain (see Brain).
 - `public EqsRun RunQuery(string contentPath, Entity target = default, Vec3? point = null, bool sync = true, GameplayTagContainer? userTags = null)` - Runs an environment query with this entity as the querier.
 - `public int ClaimSmartObject(SlotRef slot, GameplayTagContainer? userTags = null)` - Claims a smart-object slot for this entity; the claim handle, or 0 when refused (see LastRefusal).
@@ -1732,6 +1888,27 @@ Values: `Velocity = 0`, `Yaw = 1`
 - `public Body Other { get; }` - What entered or left.
 - `public bool Entered { get; }` - True on entering, false on leaving.
 
+### ParticleParamKind
+
+`public enum ParticleParamKind` - The kind of a particle user parameter, as an effect declares it with PARAM.
+
+Values: `Float = 0`, `Vector = 1`, `Color = 2`
+
+### Particles
+
+`public static class Particles` - Fire-and-forget particle effects and the particle system's budgets.
+
+- `public static int SpawnAt(string effect, Vec3 position, Vec3 direction, int count = 1)` - Spawns count particles of the effect (a content path ending .ocparticle) at a world point, fired along direction (effect +Z maps onto it; zero keeps the effect's authored direction).
+- `public static int SpawnAt(string effect, Vec3 position, Vec3 direction, int count, float speedScale, float sizeScale = 1f, float lifetimeScale = 1f, Vec3 inheritedVelocity = default)` - As above with speed, size and lifetime scales and an inherited velocity (a vehicle's own velocity, for sparks and smoke: effects that carry the spawn.inheritvelocity module add it, scaled, to each particle).
+- `public static int SpawnAt(long effectId, Vec3 position, Vec3 direction, int count = 1)` - The same by effect id (Assets.ObjectIdOf(path)), for callers that hash once.
+- `public static bool SetBudget(int maxGpuParticles = 2_000_000, int maxCpuParticles = 200_000, int maxSpawnAtPerFrame = 2048)` - Sets the particle budgets: live GPU particles (allocated capacity), live CPU particles, and spawn-at particles per frame.
+- `public static bool SetGpuMode(int mode)` - Chooses where emitters may simulate: 0 everything on the CPU, 1 automatic (big emitters on the GPU), 2 every emitter that can on the GPU.
+- `public static bool TryGetStats(out ParticleStats stats)` - Reads the particle system's counters.
+
+### ParticleStats
+
+`public readonly record struct ParticleStats(int GpuEmitters, int CpuEmitters, int GpuParticles, int CpuParticles, int SpawnAtDropped, int GpuAllocatedKB)` - The particle system's counters, as TryGetStats returns them.
+
 ### Physics
 
 `public static class Physics` - The simulation as a script sees it: bodies, sensors, queries and gravity.
@@ -1868,6 +2045,9 @@ Values: `None = 0`, `Ignore = 1`, `Apply = 2`, `Accumulate = 3`
 - `public static bool SetWind(Vec3 velocityCmPerS, float gustCmPerS = 0f, float gustHz = 0.3f, float turbulence = 0f)` - The world wind in cm/s, independent of the sky's cloud drift.
 - `public static int Explode(Vec3 centre, float radiusCm, float impulseCmPerS, float energyJoules)` - A radial shove and damage to every soft body in reach.
 - `public static bool SetBudget(int maxPieces = 48, int maxParticles = 20000, int maxRebuildsPerFrame = 2, float debrisLifetimeSeconds = 12f)` - Caps: live debris pieces, simulated particles, rebuilds per frame and how long debris lives.
+- `public static bool SetEffectsEnabled(bool enabled)` - Switches the break effects (the particles and sounds bound in .ocsoft) on or off for the whole world.
+- `public static int RepairAll()` - Repairs every soft body; returns how many.
+- `public static bool TryPopEvent(out SoftEvent ev)` - Takes one pending event off the queue (the same queue as DrainEvents, so one consumer should own it).
 - `public static int DrainEvents(Span<SoftEvent> buffer)` - Moves the pending events into buffer and returns how many.
 
 ### SoftBodyState
@@ -1889,6 +2069,38 @@ Values: `Impact = 0`, `Explosion = 1`, `Gameplay = 2`
 `public enum SoftEventKind` - Pinned to softbody::SoftEventKind.
 
 Values: `Impact`, `Torn`, `Detached`, `Dust`, `Repaired`, `Released`
+
+### SoftFieldKind
+
+`public enum SoftFieldKind` - What a soft field does (pinned to softbody::FieldKind).
+
+Values: `RadialForce = 0`, `DirectionalForce = 1`, `Damage = 2`, `ReleaseAnchors = 3`, `Kill = 4`, `Sleep = 5`
+
+### SoftFields
+
+`public static class SoftFields` - Fields fired from code.
+
+- `public static int Pulse(in SoftFieldSpec spec)` - Applies the field once at the next tick.
+- `public static int Impact(Vec3 point, Vec3 direction, float radiusCm, float energyJoules, float kickCmPerS = 0f)` - The crash helper: damage energy in a sphere at point, shoved along direction (zero = radial) with an extra kick of kickCmPerS.
+- `public static int Start(in SoftFieldSpec spec, float lifetimeSeconds)` - Starts a continuous field (strength and energy become per second) that stops after lifetimeSeconds.
+- `public static bool Stop(int handle)` - Stops a field started with Start.
+- `public static Entity Spawn(in SoftFieldSpec spec, float lifetimeSeconds)` - Creates an entity with a CSoftField that removes itself after the lifetime; move it to move the field.
+
+### SoftFieldShape
+
+`public enum SoftFieldShape` - The volume of a soft field (pinned to softbody::FieldShape).
+
+Values: `Sphere = 0`, `Box = 1`, `Capsule = 2`, `Everywhere = 3`
+
+### SoftFieldSpec
+
+`public readonly record struct SoftFieldSpec( SoftFieldKind Kind, SoftFieldShape Shape, Vec3 Centre, Vec3 Extents, Vec3 RotationDegrees = default, Vec3 Direction = default, float Strength = 0f, float EnergyJoules = 0f, float Falloff = 1f, float Turbulence = 0f, SoftFieldTargets Targets = SoftFieldTargets.All, bool PerSecond = false)` - One field.
+
+### SoftFieldTargets
+
+`public enum SoftFieldTargets` - Which soft bodies a field touches (pinned to the kFieldTarget* masks).
+
+Values: `Cloth = 1`, `Destructible = 2`, `Debris = 4`, `All = 7`
 
 ### SoftPreset
 
@@ -2011,6 +2223,32 @@ Values: `None = 0`, `Ongoing = 1`, `Triggered = 2`
 - `public static event Action<string, float>? GraphicsChanged` - Raised for a graphics.* setting that changed (or was restored by ApplyAll): key and value.
 - `public static SettingsScreen Create(IRebindProvider? rebind = null)` - Creates the screen over Settings and Audio.
 
+### VehicleEvent
+
+`public readonly record struct VehicleEvent(VehicleEventKind Kind, Entity Vehicle, int A, int B, Vec3 Point, Vec3 Normal, float Value, float Value2, int Seq)` - Something that happened to a vehicle.
+
+### VehicleEventKind
+
+`public enum VehicleEventKind` - What a vehicle event is.
+
+Values: `SkidBegin = 1`, `SkidEnd = 2`, `Land = 3`, `Impact = 4`, `Shift = 5`, `Flipped = 6`, `Assist = 7`, `Entered = 8`, `Exited = 9`, `Crash = 10`, `Destroyed = 11`
+
+### VehicleHud
+
+`public sealed class VehicleHud` - Binds a layout to a vehicle.
+
+- `public float RpmMax { get; set; }` - The rev limit the bar is drawn against, rpm.
+- `public VehicleHud(Widget root, Entity vehicle, bool miles = false)` - Finds the widgets under root and remembers the vehicle.
+- `public void Update()` - Reads the vehicle's telemetry and writes the widgets.
+- `public static string FormatSpeed(float cmPerSecond, bool miles = false)` - A speed in cm/s as text: "100 km/h" (or "62 mph" with miles).
+- `public static string FormatGear(int gear)` - The gear as the dash shows it: R, N, then the number.
+
+### VehiclePreset
+
+`public enum VehiclePreset` - The built-in vehicles a preset-only Vehicle component (or Spawn) can be: the five traffic presets, sized from the mesh, and the tank.
+
+Values: `Car = 0`, `Van = 1`, `Truck = 2`, `Bus = 3`, `Sports = 4`, `Tank = 5`
+
 ### Vehicles
 
 `public static class Vehicles` - Builds cars.
@@ -2021,9 +2259,16 @@ Values: `None = 0`, `Ongoing = 1`, `Triggered = 2`
 - `public static int CountAxles(IReadOnlyList<WheelPlan> wheels)` - How many axles the wheels form (see AxleOf).
 - `public static int CountDifferentials(IReadOnlyList<WheelPlan> wheels)` - How many differentials the physics layer builds: one per axle that has a driven wheel.
 - `public static Car CreateCar(Vec3 position, float yawDegrees = 0f)` - Builds a default car at position facing yawDegrees.
-- `public static Car CreateCar(Vec3 position, float yawDegrees, CarSpec spec)` - Builds the chassis, four wheels, the engine and the simulation, then a scene entity kept at the car's pose.
-- `public static bool TryGet(int vehicleHandle, out Car car)` - The car made by CreateCar with this vehicle handle, if it still exists.
-- `public static void SyncEntities()` - Copies each car's pose onto its entity now.
+- `public static Car CreateCar(Vec3 position, float yawDegrees, CarSpec spec)` - Makes the car as .ocvehicle text (ToOcVehicle) through the vehicle system, which builds the chassis, four wheels, engine and simulation and keeps the entity at the car's pose.
+- `public static Entity Spawn(string assetOrPreset, Vec3 position, float yawDegrees = 0f)` - Makes a vehicle entity from an .ocvehicle content path or a built-in preset name ("car", "van", "truck", "bus", "sports", "tank") at a pose, built now.
+- `public static Entity SpawnFromText(string ocvehicleText, Vec3 position, float yawDegrees = 0f)` - The same from inline .ocvehicle text (it begins OCVEHICLE 1).
+- `public static int DrainEvents(Span<VehicleEvent> buffer)` - Takes up to buffer.Length pending vehicle events (skids, landings, impacts, shifts, crashes, flips, getting in and out) off the queue, oldest first, and returns how many.
+- `public static bool TryGet(int vehicleHandle, out Car car)` - The car made by CreateCar (or Spawn) with this vehicle handle, if it still exists.
+- `public static void SyncEntities()` - Forgets cars whose entity died or whose physics world was reset.
+
+### VehicleTelemetry
+
+`public readonly record struct VehicleTelemetry( float SpeedCmS, float ForwardSpeedCmS, float Rpm, int Gear, int GearCount, bool Manual, bool Shifting, float Throttle, float Brake, float Steer, float Handbrake, int WheelsOnGround, bool AbsActive, bool TcsActive, bool Flipped, bool Destroyed, float Health01, float AirborneSeconds, float LongAccelG, float LatAccelG, float TrackLeftCmS, float TrackRightCmS)` - A vehicle's state as of the last fixed physics step.
 
 ### Visemes
 
@@ -2090,6 +2335,10 @@ Values: `None = 0`, `Ocean = 1`, `Lake = 2`, `River = 3`
 ### WheelPlan
 
 `public readonly record struct WheelPlan(Vec3 AttachmentCm, float RadiusCm, float WidthCm, float SuspensionMinCm, float SuspensionMaxCm, float SuspensionHz, float SuspensionDamping, float MaxSteerDeg, float BrakeTorque, float HandBrakeTorque, bool Driven)` - One wheel as CreateCar adds it: the Aver.Physics.Vehicle.AddWheel arguments, named.
+
+### WheelTelemetry
+
+`public readonly record struct WheelTelemetry( bool Contact, float SlipLongitudinal, float SlipLateralDeg, float LoadN, float CompressionCm, float AngularVelocityRadS, float SteerDeg, float SpinRad, Vec3 ContactPoint, Vec3 ContactNormal, float ForceLongitudinalN, float ForceLateralN, float SurfaceFriction, Entity SurfaceEntity, bool Skidding)` - One wheel's state as of the last fixed physics step.
 
 ### WorldEnvKey
 

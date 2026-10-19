@@ -334,6 +334,11 @@ struct DrawWorldOptions {
     // in the raster pass. scene::kInvalidEntity = no owner-hide.
     scene::Entity ownerHideRoot = scene::kInvalidEntity;
 
+    // Hide EVERY mesh under ownerHideRoot from the raster pass, not only the flagged ones: the gameplay camera's collision
+    // fade, when the arm is squashed against the pivot and the camera would sit inside the target's body (shadows, GI and RT
+    // geometry still receive the meshes, as for the flagged ones). False changes nothing.
+    bool ownerHideAll = false;
+
     // Where a frustum-culled or owner-hidden entity's draw goes INSTEAD of the raster pass -- the
     // "unified direct route" of aver/game/SceneSubmission.hpp, which this walk now owns outright
     // (it was the editor's own emitEntityDraws else-branch calling voxiRenderer_.submit() until

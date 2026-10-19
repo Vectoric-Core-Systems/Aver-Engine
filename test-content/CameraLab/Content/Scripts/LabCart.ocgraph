@@ -1,0 +1,106 @@
+OCGRAPH 1
+DOMAIN gameplay
+NAME LabCart
+DESCRIPTION A cart that drives back and forth along X and carries a Seat camera rig. E makes the seat the view (0.6 s blend); Q gives the view back to the pawn.
+
+# The rig is added to the cart's own entity at start: a Seat rig rides the entity's transform, with a limited head look. The pivot raises the
+# eye 130 cm above the cart's origin. The cart is not a pawn, so the rig is picked only by SetViewTarget (E), never by possession.
+CLASS AN_LabCart Actor
+COMP body Mesh mesh=Meshes/cube.ocmesh scale=120,80,25 pos=0,0,40
+
+PARAM entity int
+PARAM time float
+
+VAR homeX float 0
+VAR homeY float 0
+VAR homeZ float 0
+
+NODE ent Param param=entity
+NODE t Param param=time
+
+ENTRY seed OnStart
+NODE seed OnStart
+NODE here GetFieldVec3 field=CLocal.position
+LINK ent.value here.entity
+NODE setHomeX SetVar var=homeX
+NODE setHomeY SetVar var=homeY
+NODE setHomeZ SetVar var=homeZ
+LINK seed.exec setHomeX.exec
+LINK here.x setHomeX.value
+LINK setHomeX.then setHomeY.exec
+LINK here.y setHomeY.value
+LINK setHomeY.then setHomeZ.exec
+LINK here.z setHomeZ.value
+
+# Attach the Seat rig (preset 4) to this entity, then lift its pivot to eye height.
+NODE seatPreset ConstInt value=4
+NODE addrig AN_CameraAddRig
+LINK setHomeZ.then addrig.exec
+LINK ent.value addrig.entity
+LINK seatPreset.value addrig.preset
+NODE pivotZ ConstFloat
+PIN pivotZ value out float 130.0
+NODE setpivot AN_CameraSetPivot
+LINK addrig.then setpivot.exec
+LINK ent.value setpivot.entity
+LINK pivotZ.value setpivot.z
+
+# ---- the drive: x = home + 900 sin(0.35 t) ----
+NODE amp ConstFloat
+PIN amp value out float 900.0
+NODE speed ConstFloat
+PIN speed value out float 0.35
+NODE phase Multiply
+LINK t.value phase.a
+LINK speed.value phase.b
+NODE wave Sin
+LINK phase.result wave.a
+NODE swing Multiply
+LINK amp.value swing.a
+LINK wave.result swing.b
+NODE homeXv GetVar var=homeX
+NODE homeYv GetVar var=homeY
+NODE homeZv GetVar var=homeZ
+NODE outX Add
+LINK homeXv.value outX.a
+LINK swing.result outX.b
+
+ENTRY tick OnTick
+NODE tick OnTick
+NODE place SetFieldVec3 field=CLocal.position
+PIN place exec in exec
+PIN place entity in int
+PIN place x in float
+PIN place y in float
+PIN place z in float
+PIN place then out exec
+PIN place success out bool
+LINK tick.exec place.exec
+LINK ent.value place.entity
+LINK outX.result place.x
+LINK homeYv.value place.y
+LINK homeZv.value place.z
+
+# ---- E: the seat becomes the view; Q: back to the pawn ----
+NODE eKey ConstInt value=4
+NODE ePressed InputKeyPressed
+LINK eKey.value ePressed.key
+NODE eBranch Branch
+LINK place.then eBranch.exec
+LINK ePressed.triggered eBranch.cond
+NODE enter AN_CameraSetViewTarget
+LINK eBranch.true enter.exec
+LINK ent.value enter.entity
+NODE enterBlend ConstFloat
+PIN enterBlend value out float 0.6
+LINK enterBlend.value enter.blendSeconds
+LINK enter.then qBranch.exec
+LINK eBranch.false qBranch.exec
+
+NODE qKey ConstInt value=16
+NODE qPressed InputKeyPressed
+LINK qKey.value qPressed.key
+NODE qBranch Branch
+LINK qPressed.triggered qBranch.cond
+NODE leave AN_CameraClearViewTarget
+LINK qBranch.true leave.exec

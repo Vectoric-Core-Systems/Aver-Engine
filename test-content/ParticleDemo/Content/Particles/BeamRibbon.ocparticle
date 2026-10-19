@@ -1,0 +1,24 @@
+OCPARTICLE 2
+NAME Beam Ribbon
+# Wave 10 demo: a linked ribbon -- consecutive particles are joined into ONE continuous strip (a beam, a whip, a banner of light).
+# 64 particles are emitted a second with a one second life, so the strip is always 64 links long, and curl noise makes it
+# writhe. Emitting along +X from the emitter: place the instance and watch the strip stream out of it.
+PARAM Wriggle float 25
+EMITTER Beam
+SIM auto
+SHAPE point 0 0 0
+BLEND additive
+EMISSION 64 0 64
+LIFETIME 1 1
+DIRECTION 1 0 0 0
+SPEED 300 300
+GRAVITY 0 0 0
+DAMPING 0
+SIZE 14 2
+COLORCURVE 0 0.4 0.8 1 0 0.2 0.5 0.9 1 1 1 0.15 0.3 0.8 0
+RENDER ribbon linked 64
+SORT none
+LIGHTING unlit
+FOG on
+BOUNDS 600
+MODULE update.curlnoise freq=0.015 strength=@Wriggle scroll=1 octaves=2 seed=21

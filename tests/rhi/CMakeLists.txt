@@ -170,3 +170,20 @@ if(AVER_RHI_VULKAN)
   target_link_libraries(ColourVisionShaderTest PRIVATE Aver.RHI.Vulkan)
 endif()
 set_target_properties(ColourVisionShaderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# IndirectRhiTest: drawIndexedInstanced / drawIndexedIndirect / dispatchIndirect and a vertex shader reading a table-0
+# StructuredBuffer by SV_InstanceID (GPU_PARTICLES phase 0). Its own composition root, as ColourVisionShaderTest is.
+# `vulkan` runs the Vulkan row (AVER_CTEST_VULKAN_TARGETS in the root CMakeLists.txt). SKIPPED (77) when the backend is
+# absent or reports no caps.indirect.
+add_executable(IndirectRhiTest src/IndirectRhiTest.cpp)
+target_link_libraries(IndirectRhiTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
+if(AVER_RHI_D3D12)
+  target_link_libraries(IndirectRhiTest PRIVATE Aver.RHI.D3D12)
+endif()
+if(AVER_RHI_D3D11)
+  target_link_libraries(IndirectRhiTest PRIVATE Aver.RHI.D3D11)
+endif()
+if(AVER_RHI_VULKAN)
+  target_link_libraries(IndirectRhiTest PRIVATE Aver.RHI.Vulkan)
+endif()
+set_target_properties(IndirectRhiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

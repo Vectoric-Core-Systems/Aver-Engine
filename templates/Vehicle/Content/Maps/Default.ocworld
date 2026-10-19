@@ -1,0 +1,53 @@
+OCWORLD 1
+NAME Vehicle Test Arena
+SPAWN -250 0 100 0
+SUN elev 48.0 azim 130.0 color 1 0.97 0.92 lux 90000
+SKY model physical
+# Nothing here is a third-party asset: the arena is the built-in unit cube (Meshes/cube.ocmesh, half-extent 1 cm, so the last three
+# numbers of a PLACEG are half extents in centimetres) and the vehicles are procedural (make_vehicle_template.py).
+# +X is forward from the spawn. Walk to a vehicle (within 4 m) and press E; F gets out; C changes the camera; see README.md.
+PLACEG Meshes/cube.ocmesh 0 0 -50 0 0 0 6000 6000 50 name Floor
+
+# The sedan and the tank. nocollide: the vehicle's own physics body is the chassis, not a static collider. Each wheel is a CHILD
+# the system moves every frame (the spec's `node` names); the tank's Turret is a child AN_TankTurret turns.
+PLACE Meshes/Sedan.ocmesh 0 -320 5 0 0 0 1 nocollide name Sedan
+  COMPONENT Vehicle asset=Vehicles/Sedan.ocvehicle
+  BEGIN
+    CHILD Meshes/Wheel.ocmesh 180 -77 33 0 0 0 1 nocollide name WheelFL
+    CHILD Meshes/Wheel.ocmesh 180 77 33 0 0 0 1 nocollide name WheelFR
+    CHILD Meshes/Wheel.ocmesh -180 -77 33 0 0 0 1 nocollide name WheelRL
+    CHILD Meshes/Wheel.ocmesh -180 77 33 0 0 0 1 nocollide name WheelRR
+  END
+PLACE Meshes/TankHull.ocmesh 0 520 5 0 0 0 1 nocollide name Tank
+  COMPONENT Vehicle asset=Vehicles/Tank.ocvehicle
+  BEGIN
+    CHILD Meshes/TankWheel.ocmesh -280 -130 40 0 0 0 1 nocollide name WheelL0
+    CHILD Meshes/TankWheel.ocmesh -140 -130 40 0 0 0 1 nocollide name WheelL1
+    CHILD Meshes/TankWheel.ocmesh 0 -130 40 0 0 0 1 nocollide name WheelL2
+    CHILD Meshes/TankWheel.ocmesh 140 -130 40 0 0 0 1 nocollide name WheelL3
+    CHILD Meshes/TankWheel.ocmesh 280 -130 40 0 0 0 1 nocollide name WheelL4
+    CHILD Meshes/TankWheel.ocmesh -280 130 40 0 0 0 1 nocollide name WheelR0
+    CHILD Meshes/TankWheel.ocmesh -140 130 40 0 0 0 1 nocollide name WheelR1
+    CHILD Meshes/TankWheel.ocmesh 0 130 40 0 0 0 1 nocollide name WheelR2
+    CHILD Meshes/TankWheel.ocmesh 140 130 40 0 0 0 1 nocollide name WheelR3
+    CHILD Meshes/TankWheel.ocmesh 280 130 40 0 0 0 1 nocollide name WheelR4
+    CHILD Meshes/TankTurret.ocmesh 30 0 130 0 0 0 1 nocollide name Turret
+  END
+
+# Graph classes placed in the level: the HUD (opens UI/VehicleHud.ocui, shows it while a vehicle has a driver) and the turret.
+PLACE none 0 0 0 0 0 0 1 class AN_VehicleHud
+PLACE none 0 0 0 0 0 0 1 class AN_TankTurret
+
+# A ramp 10 m ahead of the sedan (12 degrees up along +X, then the ground falls away: the landing event), a wall to brake against,
+# and a slalom of posts.
+PLACEG Meshes/cube.ocmesh 3600 -320 90 0 -12 0 500 250 20 name Ramp
+PLACEG Meshes/cube.ocmesh 2400 1000 100 0 0 0 20 500 100 name BrakeWall
+PLACEG Meshes/cube.ocmesh 900 -180 60 0 0 0 25 25 60 name Post1
+PLACEG Meshes/cube.ocmesh 1160 -460 60 0 0 0 25 25 60 name Post2
+PLACEG Meshes/cube.ocmesh 1420 -180 60 0 0 0 25 25 60 name Post3
+PLACEG Meshes/cube.ocmesh 1680 -460 60 0 0 0 25 25 60 name Post4
+PLACEG Meshes/cube.ocmesh 1940 -180 60 0 0 0 25 25 60 name Post5
+PLACEG Meshes/cube.ocmesh 2200 -460 60 0 0 0 25 25 60 name Post6
+PLACEG Meshes/cube.ocmesh 2460 -180 60 0 0 0 25 25 60 name Post7
+PLACEG Meshes/cube.ocmesh 2720 -460 60 0 0 0 25 25 60 name Post8
+

@@ -1,0 +1,57 @@
+OCINPUT 1
+NAME Vehicle
+# The project's ONE input scheme. Move, Look and Interact are the on-foot actions (the template's pawn graph reads the devices
+# directly, like the FirstPerson template, so they are here for rebinding and C# projects). The Drive.* actions are what
+# Aver.Vehicle.Scene reads while somebody is driving: nothing else needs to know about them, and they are ignored while nobody is.
+# E is both Interact (on foot) and Drive.ShiftUp (in a manual gearbox); F gets out.
+ACTION Move axis2
+ACTION Look axis2
+ACTION Interact digital
+ACTION Drive.Throttle axis1
+ACTION Drive.Brake axis1
+ACTION Drive.Steer axis1
+ACTION Drive.Handbrake digital
+ACTION Drive.ShiftUp digital
+ACTION Drive.ShiftDown digital
+ACTION Drive.Reset digital
+ACTION Drive.Exit digital
+ACTION Drive.CameraNext digital
+
+BIND Move key W component y
+BIND Move key S scale -1 component y
+BIND Move key D component x
+BIND Move key A scale -1 component x
+BIND Move gamepadaxis LeftX component x
+BIND Move gamepadaxis LeftY component y
+BIND Look mousex component x
+BIND Look mousey component y
+BIND Look gamepadaxis RightX component x
+BIND Look gamepadaxis RightY component y
+BIND Interact key E
+BIND Interact gamepadbutton X
+
+BIND Drive.Throttle key W
+BIND Drive.Throttle key Up
+BIND Drive.Throttle gamepadaxis RightTrigger
+BIND Drive.Brake key S
+BIND Drive.Brake key Down
+BIND Drive.Brake gamepadaxis LeftTrigger
+BIND Drive.Steer key D
+BIND Drive.Steer key A scale -1
+BIND Drive.Steer key Right
+BIND Drive.Steer key Left scale -1
+BIND Drive.Steer gamepadaxis LeftX
+BIND Drive.Handbrake key Space
+BIND Drive.Handbrake gamepadbutton A
+BIND Drive.ShiftUp key E
+BIND Drive.ShiftUp gamepadbutton RightShoulder
+BIND Drive.ShiftDown key Q
+BIND Drive.ShiftDown gamepadbutton LeftShoulder
+BIND Drive.Reset key R
+BIND Drive.Reset gamepadbutton Y
+BIND Drive.Exit key F
+BIND Drive.Exit gamepadbutton B
+BIND Drive.CameraNext key C
+BIND Drive.CameraNext gamepadbutton RightThumb
+
+CONTEXT Vehicle priority 0

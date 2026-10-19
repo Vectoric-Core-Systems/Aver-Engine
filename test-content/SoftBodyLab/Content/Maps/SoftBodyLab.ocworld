@@ -26,3 +26,7 @@ PLACE Meshes/SteelDoor.ocmesh 300 700 0 0 0 0 1 nocollide name SteelDoor
   COMPONENT Destructible asset=Soft/SteelDoor.ocsoft preset=metal
 PLACE Meshes/PlankCrate.ocmesh 300 1000 300 0 0 0 1 nocollide name PlankCrate
   COMPONENT Destructible asset=Soft/PlankCrate.ocsoft preset=wood
+# Wave 10 (docs/plans/wave10/SOFTBODY_DEPTH.md): a 12000-triangle door over the particle cap. It has no .ocsoft yet: select it,
+# Create .ocsoft, then Create proxy cage in Details (README.md step 5), and press Play.
+PLACE Meshes/HighPolyDoor.ocmesh 300 1300 0 0 0 0 1 nocollide name HighPolyDoor
+  COMPONENT Destructible preset=metal

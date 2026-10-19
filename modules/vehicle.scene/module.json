@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Vehicle.Scene",
+  "dir": "vehicle.scene",
+  "displayName": "Drivable Vehicles",
+  "description": "Cars, trucks and tanks on scene entities over Jolt's vehicle constraint: engine, gearbox, differentials, driver aids, wheel visuals, telemetry, driving and crash damage.",
+  "category": "Physics",
+  "option": "AVER_MODULE_VEHICLE_SCENE",
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.Physics", "Aver.Scene", "Aver.Vehicle"],
+  "consequence": "The Vehicle component does nothing: no drivable cars, trucks or tanks, no telemetry and no driver seat."
+}

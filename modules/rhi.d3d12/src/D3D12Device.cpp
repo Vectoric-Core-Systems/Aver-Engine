@@ -629,6 +629,7 @@ D3D12_RESOURCE_STATES toResourceStates(ResourceState s) {
                                                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
                                                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         case ResourceState::AccelerationStructure:  return D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
+        case ResourceState::IndirectArgument:       return D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
         case ResourceState::Common:                 break;
     }
     return D3D12_RESOURCE_STATE_COMMON;
@@ -679,6 +680,9 @@ const char* stateName(ResourceState s) {
         case ResourceState::CopySource:             return "CopySource";
         case ResourceState::CopyDest:               return "CopyDest";
         case ResourceState::AccelerationStructure:  return "AccelerationStructure";
+        case ResourceState::VertexBuffer:           return "VertexBuffer";
+        case ResourceState::GeometryRead:           return "GeometryRead";
+        case ResourceState::IndirectArgument:       return "IndirectArgument";
     }
     return "<unknown>";
 }
@@ -1461,6 +1465,9 @@ private:
     std::vector<u64> bindingBaseWarned_;
 
     ComPtr<ID3D12RootSignature> rootSig_;
+    // ExecuteIndirect signatures for drawIndexedIndirect / dispatchIndirect: no root arguments, so one of each
+    // serves every pipeline.
+    ComPtr<ID3D12CommandSignature> drawIndirectSig_, dispatchIndirectSig_;
     ComPtr<ID3D12PipelineState> pso_;
     ComPtr<ID3D12PipelineState> skyPso_;
     // Per-draw binding table 1 plus b2 constant.
@@ -2189,6 +2196,10 @@ public:
     void setVertexBuffer(BufferHandle b, u32 stride) override;
     void setIndexBuffer(BufferHandle b, Format indexFormat) override;
     void drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVertex) override;
+    void drawIndexedInstanced(u32 indexCount, u32 instanceCount, u32 firstIndex, i32 baseVertex,
+                              u32 firstInstance) override;
+    void drawIndexedIndirect(BufferHandle args, u64 argsOffset) override;
+    void dispatchIndirect(BufferHandle args, u64 argsOffset) override;
     void buildBlas(BlasHandle blas) override;
     void buildTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
     bool refitBlas(BlasHandle blas) override;
@@ -2690,6 +2701,7 @@ void D3D12Device::removeRenderFeature(IRenderFeature* f) {
 void D3D12Device::queryCaps() {
     caps_ = {};
     caps_.computeShaders = true;
+    caps_.indirect = true;
     caps_.computeInScenePass = true;
     caps_.gBuffer = true;
     caps_.blendedReplay = true;
@@ -2985,6 +2997,24 @@ bool D3D12Device::createPipeline() {
     sp.DSVFormat = kDepthFormat;
     sp.SampleDesc.Count = sampleCount_;
     if (!hrOk(device_->CreateGraphicsPipelineState(&sp, IID_PPV_ARGS(&skyPso_)), "CreateGraphicsPipelineState(sky)")) return false;
+
+    // Indirect draw and dispatch: argument-only signatures (stride = the RHI args structs).
+    {
+        D3D12_INDIRECT_ARGUMENT_DESC arg{};
+        D3D12_COMMAND_SIGNATURE_DESC csd{};
+        csd.NumArgumentDescs = 1;
+        csd.pArgumentDescs = &arg;
+        arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+        csd.ByteStride = sizeof(DrawIndexedIndirectArgs);
+        if (!hrOk(device_->CreateCommandSignature(&csd, nullptr, IID_PPV_ARGS(&drawIndirectSig_)), "CreateCommandSignature(draw)")) {
+            caps_.indirect = false;
+        }
+        arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        csd.ByteStride = sizeof(DispatchIndirectArgs);
+        if (!hrOk(device_->CreateCommandSignature(&csd, nullptr, IID_PPV_ARGS(&dispatchIndirectSig_)), "CreateCommandSignature(dispatch)")) {
+            caps_.indirect = false;
+        }
+    }
 
     // EditorLines owns its own PSOs, built lazily and replayed after the post chain.
 
@@ -9602,6 +9632,34 @@ void D3D12RenderContext::drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVer
     applyDrawBinding();
     dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     dev_->cmdList_->DrawIndexedInstanced(indexCount, 1, firstIndex, baseVertex, 0);
+}
+
+// The same with an instance count and first instance.
+void D3D12RenderContext::drawIndexedInstanced(u32 indexCount, u32 instanceCount, u32 firstIndex, i32 baseVertex,
+                                              u32 firstInstance) {
+    if (!dev_->cmdList_ || indexCount == 0 || instanceCount == 0) return;
+    applyDrawBinding();
+    dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    dev_->cmdList_->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+}
+
+// Draws with the arguments a compute pass wrote (DrawIndexedIndirectArgs, buffer in IndirectArgument state).
+void D3D12RenderContext::drawIndexedIndirect(BufferHandle args, u64 argsOffset) {
+    if (!dev_->cmdList_ || !dev_->drawIndirectSig_) return;
+    ID3D12Resource* a = res_->bufferResource(args);
+    if (!a) { AVER_ERROR("[RHI.D3D12] drawIndexedIndirect with an invalid handle"); return; }
+    applyDrawBinding();
+    dev_->cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    dev_->cmdList_->ExecuteIndirect(dev_->drawIndirectSig_.Get(), 1, a, argsOffset, nullptr, 0);
+}
+
+// Dispatches the bound compute pipeline with the arguments a prior pass wrote (DispatchIndirectArgs).
+void D3D12RenderContext::dispatchIndirect(BufferHandle args, u64 argsOffset) {
+    if (!pipe_ || !pipe_->compute) { AVER_ERROR("[RHI.D3D12] dispatchIndirect without a compute pipeline"); return; }
+    if (!dev_->cmdList_ || !dev_->dispatchIndirectSig_) return;
+    ID3D12Resource* a = res_->bufferResource(args);
+    if (!a) { AVER_ERROR("[RHI.D3D12] dispatchIndirect with an invalid handle"); return; }
+    dev_->cmdList_->ExecuteIndirect(dev_->dispatchIndirectSig_.Get(), 1, a, argsOffset, nullptr, 0);
 }
 
 // Records a bottom-level acceleration structure build for its mesh.

@@ -32,6 +32,11 @@
 extern "C" {
 #endif
 
+// The version of this surface: 1 = the wave-9 builder surface (which had no macro), 2 adds aver_phys_sb_add_velocity
+// and this function.
+#define AVER_PHYS_SB_ABI_VERSION 2
+AVER_PHYS_API int32_t aver_phys_sb_abi_version(void);
+
 // ---- Parameter indices (builder_params, set_params) --------------------------------------------------
 // A NaN entry means "leave as is". Defaults: iterations 5, damping 0.1, friction 0.2, restitution 0,
 // gravity scale 1, vertex radius 0, max speed 50000 cm/s, sleeping allowed, single sided, layer 0,
@@ -123,6 +128,12 @@ AVER_PHYS_API int32_t aver_phys_sb_rest_bends_from_pose(int32_t body, const int3
 // along dirUnit, blended toward radial (0 directional .. 1 radial). Kinematic vertices are skipped. Wakes.
 AVER_PHYS_API int32_t aver_phys_sb_impulse(int32_t body, const float* centreCm, float radiusCm, const float* dirUnit,
                                            float speedCmS, float radialBlend, float falloffPower);
+
+// Adds dvXyz[i] (world cm/s, 3 floats each) to vertex[i] of a body this ABI built: the indexed velocity add behind
+// soft-body force fields. Kinematic vertices (inverse mass 0) are skipped, an index out of range or a non-finite
+// value refuses the whole call (nothing is written), and the body is activated only when some component applied
+// is non-zero. Clears the record's frozen flag like impulse does. n == 0 succeeds and does nothing.
+AVER_PHYS_API int32_t aver_phys_sb_add_velocity(int32_t body, const int32_t* vertex, const float* dvXyz, int32_t n);
 
 // Pushes a skin palette (jointCount row-major 4x4 matrices, engine order) composed with the entity's world
 // matrix: M' = T(com) * skin[j] * entityWorld * T(-com), so the cloth simulates in a world-aligned frame and

@@ -3,6 +3,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/softbody/Damage.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -61,6 +62,58 @@ static sb::Cage grid(const sb::Material& m, u32 cols = 5, u32 rows = 5) {
 }
 
 static Vec3 mid(const sb::Cage& c, const sb::Beam& b) { return (c.particles[b.a].pos + c.particles[b.b].pos) * 0.5f; }
+
+
+// The pre-wave-10 depositEnergy, kept here verbatim as the reference the sphere case must reproduce bit for bit.
+static sb::DepositResult referenceDeposit(sb::Cage& c, const sb::DamageDeposit& d, f32 impulseEfficiency, f32 maxKickCmS) {
+    sb::DepositResult res;
+    if (!c.built || d.radiusCm <= 0.0f || d.energyJ <= 0.0f) return res;
+    const f32 r = d.radiusCm;
+    const f32 rSq = r * r;
+    std::vector<f32> weight(c.beams.size(), 0.0f);
+    f32 total = 0.0f;
+    for (u32 bi = 0; bi < c.beams.size(); ++bi) {
+        const sb::Beam& b = c.beams[bi];
+        if (b.broken) continue;
+        const f32 d2 = distSquared((c.particles[b.a].pos + c.particles[b.b].pos) * 0.5f, d.point);
+        if (d2 >= rSq) continue;
+        const f32 f = 1.0f - std::sqrt(d2) / r;
+        weight[bi] = f * f;
+        total += weight[bi];
+    }
+    if (total > 0.0f) {
+        for (u32 bi = 0; bi < c.beams.size(); ++bi) {
+            if (weight[bi] <= 0.0f) continue;
+            sb::Beam& b = c.beams[bi];
+            b.damage += d.energyJ * weight[bi] / total;
+            ++res.beamsDamaged;
+            const sb::Material& m = c.materials[b.material];
+            const bool breaks = (sb::isBrittle(m.behavior) || m.toughnessJ > 0.0f) && b.damage >= m.toughnessJ;
+            if (breaks) {
+                b.broken = true;
+                c.topologyDirty = true;
+                res.brokenBeams.push_back(bi);
+                ++res.broken;
+            }
+        }
+    }
+    f32 mass = 0.0f, pinnedMass = 0.0f;
+    for (const sb::Particle& p : c.particles) {
+        if (distSquared(p.pos, d.point) >= rSq) continue;
+        (p.pinned ? pinnedMass : mass) += p.mass;
+    }
+    res.massKg = mass > 0.0f ? mass : pinnedMass;
+    if (res.massKg > 0.0f)
+        res.kickSpeedCmS = std::min(maxKickCmS, std::sqrt(2.0f * impulseEfficiency * d.energyJ / res.massKg) * 100.0f);
+    return res;
+}
+
+static bool sameBits(const sb::Cage& a, const sb::Cage& b) {
+    if (a.beams.size() != b.beams.size()) return false;
+    for (usize i = 0; i < a.beams.size(); ++i)
+        if (std::memcmp(&a.beams[i].damage, &b.beams[i].damage, sizeof(f32)) != 0 || a.beams[i].broken != b.beams[i].broken) return false;
+    return true;
+}
 
 int main() {
     AVER_INFO("DamageTest");
@@ -257,6 +310,62 @@ int main() {
         for (const u8 dead : c.triDead) clean = clean && dead == 0;
         check(clean, "repairAll restores particles, beams, bends and dead triangles");
         check(approx(c.particles[3].pos.x, c.particles[3].rest.x), "and the positions");
+    }
+
+    AVER_INFO("depositEnergy is the sphere case of depositWeighted");
+    {
+        for (const f32 energy : {3.0f, 30.0f, 300.0f}) {
+            sb::Material m = baseMaterial();
+            m.toughnessJ = 2.0f;
+            sb::Cage a = grid(m, 7, 7), b = grid(m, 7, 7);
+            a.particles[0].pinned = b.particles[0].pinned = true;
+            sb::DamageDeposit d;
+            d.point = Vec3{25, 0, 30}; d.radiusCm = 28.0f; d.energyJ = energy;
+            const sb::DepositResult ra = sb::depositEnergy(a, d, 0.6f, 900.0f);
+            const sb::DepositResult rb = referenceDeposit(b, d, 0.6f, 900.0f);
+            check(sameBits(a, b), "damage and breaks are bit identical to the old function at " + std::to_string(static_cast<int>(energy)) + " J");
+            check(ra.brokenBeams == rb.brokenBeams && ra.beamsDamaged == rb.beamsDamaged && ra.broken == rb.broken, "the same beams broke");
+            check(std::memcmp(&ra.kickSpeedCmS, &rb.kickSpeedCmS, sizeof(f32)) == 0 && std::memcmp(&ra.massKg, &rb.massKg, sizeof(f32)) == 0, "and the same kick and mass");
+        }
+    }
+
+    AVER_INFO("weighted deposits");
+    {
+        sb::Material m = baseMaterial();
+        m.toughnessJ = 5.0f;
+        sb::Cage c = grid(m, 6, 6);
+        std::vector<f32> w(c.beams.size(), 0.0f);
+        w[3] = 1.0f; w[4] = 3.0f;
+        const sb::DepositResult r = sb::depositWeighted(c, w, 8.0f, 0.6f, 1000.0f);
+        check(r.beamsDamaged == 2 && std::fabs(c.beams[3].damage - 2.0f) < 1e-5f && std::fabs(c.beams[4].damage - 6.0f) < 1e-5f, "energy is shared in proportion to the weights");
+        check(r.broken == 1 && r.brokenBeams.size() == 1 && r.brokenBeams[0] == 4 && c.beams[4].broken && !c.beams[3].broken, "and the beam past its toughness breaks");
+        check(r.massKg > 0.0f && r.kickSpeedCmS > 0.0f && r.kickSpeedCmS <= 1000.0f, "the kick comes from the mass on the weighted beams");
+        const sb::DepositResult none = sb::depositWeighted(c, std::vector<f32>(c.beams.size(), 0.0f), 50.0f, 0.6f, 1000.0f);
+        check(none.beamsDamaged == 0 && none.broken == 0 && none.kickSpeedCmS == 0.0f, "no weight, no damage");
+        const sb::DepositResult zero = sb::depositWeighted(c, w, 0.0f, 0.6f, 1000.0f);
+        check(zero.beamsDamaged == 0, "no energy, no damage");
+        std::vector<f32> again(c.beams.size(), 1.0f);
+        const sb::DepositResult broken = sb::depositWeighted(c, again, 1.0f, 0.6f, 1000.0f);
+        check(!c.beams[4].broken || broken.beamsDamaged + 1 <= c.beams.size(), "a broken beam takes no further energy");
+        check(std::fabs(c.beams[4].damage - 6.0f) < 1e-5f, "its damage stays where it broke");
+    }
+
+    AVER_INFO("a baked piece's beams are left out");
+    {
+        sb::Material m = baseMaterial();
+        m.toughnessJ = 2.0f;
+        sb::Cage c = grid(m, 6, 6);
+        std::vector<u8> skip(c.beams.size(), 1);
+        sb::DamageDeposit d;
+        d.point = Vec3{25, 0, 25}; d.radiusCm = 40.0f; d.energyJ = 100.0f;
+        const sb::DepositResult r = sb::depositEnergy(c, d, 0.6f, 1000.0f, &skip);
+        bool clean = true;
+        for (const sb::Beam& b : c.beams) clean = clean && b.damage == 0.0f && !b.broken;
+        check(clean && r.beamsDamaged == 0, "every skipped beam keeps its damage at zero");
+        skip.assign(c.beams.size(), 0);
+        skip[0] = 1;
+        sb::depositEnergy(c, d, 0.6f, 1000.0f, &skip);
+        check(c.beams[0].damage == 0.0f && c.beams[5].damage > 0.0f, "and only those");
     }
 
     AVER_INFO("{} failure(s)", g_failures);

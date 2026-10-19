@@ -1,0 +1,16 @@
+TEMPLATE 1
+# A drivable sedan and a 38-tonne tank in a test arena: walk up, press E, drive. Engine, gearbox, differentials, ABS, tracks, camera,
+# sound, smoke and the HUD all come from two .ocvehicle files -- two Aver Node graphs for the pawn and the HUD, one map, procedural
+# meshes and tones, and no C# anywhere. Verify that last claim with `find . -name '*.cs'` in a project made from this and expect nothing back.
+#
+# See Content/README.md for the controls, what each file does and what this template deliberately does not do. That file is copied
+# into every project scaffolded from here, so its owner finds it too.
+NAME Vehicle
+DESCRIPTION A drivable sedan and a tank in a test arena -- engine, gearbox, ABS, tracks, camera, sound and HUD from data, no C# anywhere.
+# An .ocworld, not an .ocmap: the legacy .ocmap cannot store the COMPONENT Vehicle records this map is made of.
+STARTMAP Maps/Default.ocworld
+# The new project's default GameMode (GAME.MODE): the template's rules, pawn and controller.
+GAMEMODE AN_VehicleRules
+# The project's one input scheme (INPUT.SCHEME): Move, Look, Interact and the Drive.* actions the vehicle system reads.
+# An older editor that does not know this key ignores it; set Project Settings > Input Scheme to Input/Vehicle.ocinput by hand then.
+INPUTSCHEME Input/Vehicle.ocinput

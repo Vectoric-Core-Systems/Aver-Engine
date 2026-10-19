@@ -53,6 +53,7 @@ struct PresetInfo {
     Material material;
     u32 iterations;
     f32 damping;
+    f32 capThicknessCm = 0.0f;   // the default thickness of a break's walls and back skin; 0 = flat (cloth)
 };
 
 namespace detail {
@@ -79,11 +80,11 @@ inline Material makePresetMaterial(f32 density, f32 edgeCompliance, f32 bendComp
 // The preset table (docs/SOFTBODY.md). Starting values, tuned headed.
 inline const PresetInfo& presetInfo(SoftPreset p) {
     static const PresetInfo table[kSoftPresetCount] = {
-        {"cloth_light", detail::makePresetMaterial(0.25f, 0.0f, 0.05f, Behavior::Deform, 0.0f, 0.0f, 0.40f, 0.0f, 0.4f), 6, 0.30f},
-        {"cloth_heavy", detail::makePresetMaterial(0.8f, 0.0f, 0.01f, Behavior::Deform, 0.0f, 0.0f, 0.35f, 0.0f, 0.5f), 6, 0.50f},
-        {"metal", detail::makePresetMaterial(7.8f, 2e-7f, 1e-6f, Behavior::Deform, 0.010f, 0.25f, 0.30f, 40.0f, 0.3f), 8, 0.50f},
-        {"wood", detail::makePresetMaterial(6.0f, 1e-6f, 5e-6f, Behavior::Fracture, 0.020f, 0.0f, 0.020f, 3.0f, 0.5f), 8, 0.50f},
-        {"glass", detail::makePresetMaterial(10.0f, 2e-7f, 1e-6f, Behavior::Shatter, 0.006f, 0.0f, 0.006f, 0.4f, 0.3f), 8, 0.20f},
+        {"cloth_light", detail::makePresetMaterial(0.25f, 0.0f, 0.05f, Behavior::Deform, 0.0f, 0.0f, 0.40f, 0.0f, 0.4f), 6, 0.30f, 0.0f},
+        {"cloth_heavy", detail::makePresetMaterial(0.8f, 0.0f, 0.01f, Behavior::Deform, 0.0f, 0.0f, 0.35f, 0.0f, 0.5f), 6, 0.50f, 0.0f},
+        {"metal", detail::makePresetMaterial(7.8f, 2e-7f, 1e-6f, Behavior::Deform, 0.010f, 0.25f, 0.30f, 40.0f, 0.3f), 8, 0.50f, 0.5f},
+        {"wood", detail::makePresetMaterial(6.0f, 1e-6f, 5e-6f, Behavior::Fracture, 0.020f, 0.0f, 0.020f, 3.0f, 0.5f), 8, 0.50f, 2.0f},
+        {"glass", detail::makePresetMaterial(10.0f, 2e-7f, 1e-6f, Behavior::Shatter, 0.006f, 0.0f, 0.006f, 0.4f, 0.3f), 16, 0.20f, 0.6f},
     };
     const u32 i = static_cast<u32>(p);
     return table[i < kSoftPresetCount ? i : 0];

@@ -2174,6 +2174,17 @@ void SandboxApp::buildUI(Engine& e) {
                 ImGui::EndMenu();
             }
             uiReg_.track("view.showMotionMatching");
+
+#if AVER_MODULE_CAMERA
+            if (ImGui::BeginMenu("Show Camera Rigs")) {
+                ImGui::MenuItem("Pivot and Lag", nullptr, &cameraDebug_.pivot);
+                ImGui::MenuItem("Arm and Probe", nullptr, &cameraDebug_.arm);
+                ImGui::MenuItem("Fade Radius", nullptr, &cameraDebug_.fade);
+                ImGui::MenuItem("Pitch Limits", nullptr, &cameraDebug_.limits);
+                ImGui::EndMenu();
+            }
+            uiReg_.track("view.showCameraRigs");
+#endif
 #endif
 #if AVER_MODULE_SOFTBODY_SCENE
             if (ImGui::BeginMenu("Show Soft Bodies")) {
@@ -2182,9 +2193,25 @@ void SandboxApp::buildUI(Engine& e) {
                 ImGui::MenuItem("Pieces", nullptr, &softBodyDebug_.pieces);
                 ImGui::MenuItem("Wind", nullptr, &softBodyDebug_.wind);
                 ImGui::MenuItem("Budget", nullptr, &softBodyDebug_.budget);
+ImGui::MenuItem("Fields", nullptr, &softBodyDebug_.fields);
+ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
                 ImGui::EndMenu();
             }
             uiReg_.track("view.showSoftBodies");
+#endif
+
+#if AVER_MODULE_VEHICLE_SCENE
+            if (ImGui::BeginMenu("Show Vehicles")) {
+                ImGui::MenuItem("Suspension", nullptr, &vehicleDebug_.suspension);
+                ImGui::MenuItem("Forces", nullptr, &vehicleDebug_.forces);
+                ImGui::MenuItem("Slip", nullptr, &vehicleDebug_.slip);
+                ImGui::MenuItem("Chassis", nullptr, &vehicleDebug_.chassis);
+                ImGui::MenuItem("Velocity", nullptr, &vehicleDebug_.velocity);
+                ImGui::MenuItem("Labels", nullptr, &vehicleDebug_.labels);
+                ImGui::SliderFloat("Force scale (cm per 100 N)", &vehicleDebug_.forceScaleCmPer100N, 0.1f, 10.0f, "%.1f");
+                ImGui::EndMenu();
+            }
+            uiReg_.track("view.showVehicles");
 #endif
 #if AVER_MODULE_PHYSICS
             // Toggling forgets the overlay; rebuildColliderOverlay skips unchanged frames.

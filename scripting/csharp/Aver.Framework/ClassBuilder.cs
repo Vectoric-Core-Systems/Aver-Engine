@@ -43,6 +43,22 @@ public sealed class ClassBuilder
         Fw.aver_fw_class_set_default_f32(_c, SceneIds.Field("CCamera.farCm"), farCm);
     }
 
+    /// <summary>Gives the class's own entity a gameplay camera rig seeded from <paramref name="preset"/> (and a camera). The preset is
+    /// expanded over the rig's tuning fields on the first camera frame, so no preset values are duplicated here. A host built
+    /// without the camera module ignores the call.</summary>
+    public void CameraRig(CameraRigPreset preset = CameraRigPreset.Chase)
+    {
+        int type = SceneNative.aver_scene_component("CCameraRig");
+        if (type == 0) return;
+        Fw.aver_fw_class_add_component(_c, type);
+        Fw.aver_fw_class_add_component(_c, SceneIds.CCamera);
+        Fw.aver_fw_class_set_default_f32(_c, SceneIds.Field("CCamera.fovYRad"), 60f * (MathF.PI / 180f));
+        Fw.aver_fw_class_set_default_f32(_c, SceneIds.Field("CCamera.nearCm"), 2f);
+        Fw.aver_fw_class_set_default_f32(_c, SceneIds.Field("CCamera.farCm"), 200000f);
+        Fw.aver_fw_class_set_default_i32(_c, SceneIds.Field("CCameraRig.preset"), (int)preset);
+        Fw.aver_fw_class_set_default_i32(_c, SceneIds.Field("CCameraRig.flags"), 1 << 30);   // kRigApplyPreset
+    }
+
     /// <summary>Declares that the class ticks, in <paramref name="group"/> at <paramref name="order"/>.</summary>
     public void Ticks(TickGroup group, int order = 0)
     {

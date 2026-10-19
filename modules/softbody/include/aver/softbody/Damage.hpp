@@ -48,10 +48,16 @@ struct DepositResult {
     std::vector<u32> brokenBeams;
 };
 
-// Spreads energyJ over the live beams whose midpoint is in radius by (1 - d/r)^2 and breaks a beam
-// when its accumulated damage reaches the material's toughnessJ (brittle materials, or toughnessJ > 0).
-// The kick is min(maxKick, sqrt(2 * efficiency * E / M_radius) * 100) cm/s.
-DepositResult depositEnergy(Cage& c, const DamageDeposit& d, f32 impulseEfficiency, f32 maxKickCmS);
+// Spreads energyJ over the live beams by `beamWeight` (one per beam, 0 = untouched) in proportion to the weight and
+// breaks a beam when its accumulated damage reaches the material's toughnessJ (brittle materials, or toughnessJ > 0).
+// The one break rule behind impacts, explosions and fields. The kick is min(maxKick, sqrt(2 * efficiency * E / M) * 100)
+// cm/s with M the movable mass of the particles on the weighted beams (pinned mass when nothing moves).
+DepositResult depositWeighted(Cage& c, const std::vector<f32>& beamWeight, f32 energyJ, f32 impulseEfficiency, f32 maxKickCmS);
+
+// The sphere case of depositWeighted: weights (1 - d/r)^2 on the beam midpoint within radius. The kick uses the mass of
+// every particle in radius. `skipBeam` (optional, one byte per beam) leaves those beams out, for a baked piece.
+DepositResult depositEnergy(Cage& c, const DamageDeposit& d, f32 impulseEfficiency, f32 maxKickCmS,
+                            const std::vector<u8>* skipBeam = nullptr);
 
 // A scripted cut: breaks the live beams whose midpoint is in radius. Returns how many.
 u32 tearWithin(Cage& c, Vec3 point, f32 radiusCm, std::vector<u32>* brokenBeams = nullptr);

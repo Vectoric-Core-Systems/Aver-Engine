@@ -2,7 +2,7 @@
 
 # Aver.Physics public API
 
-28 public types and 382 public members, read from `scripting/csharp/Aver.Physics/` (21 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+37 public types and 439 public members, read from `scripting/csharp/Aver.Physics/` (23 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Physics
 
@@ -144,6 +144,18 @@
 - `public Float3 Normal { get; }` - The contact normal, unit length.
 - `public Body Other(Body one)` - The other body in this contact; None if one is neither.
 
+### DifferentialMode
+
+`public enum DifferentialMode` - How an axle (or the centre differential) shares torque between its sides.
+
+Values: `Open = 0`, `LimitedSlip = 1`, `Locked = 2`
+
+### DriverAids
+
+`public readonly record struct DriverAids( bool Enabled, bool Abs, float AbsSlip, float AbsRelease, bool Tcs, float TcsSlip, float SteerIn, float SteerOut, float ThrottleIn, float ThrottleOut, float BrakeIn, bool ReverseOnBrake, float ReverseSpeed, float HoldBrake, float HoldSpeed, float SkidSlip, float SkidAngleDeg)` - The driver aids of SetAssists (VD in the header).
+
+- `public static DriverAids Default { get; }` - The defaults of the header, aids on but ABS and traction control off.
+
 ### Float3
 
 `public readonly struct Float3` - A position, direction or axis in engine centimetres (or a unitless axis), engine axes: +X forward, +Y right, +Z up, left-handed.
@@ -158,6 +170,12 @@
 - `public static Float3 operator -(Float3 a, Float3 b)`
 - `public static Float3 operator *(Float3 a, float s)`
 - `public override string ToString()`
+
+### GearboxTiming
+
+`public readonly record struct GearboxTiming(float SwitchTime, float ClutchReleaseTime, float SwitchLatency, float ShiftUpFraction, float ShiftDownFraction, float ClutchStrength)` - The gearbox timings of SetGearbox.
+
+- `public static GearboxTiming Jolt { get; }` - Jolt's own timings (the clutch strength 0 means "scale with the engine's torque").
 
 ### GroundState
 
@@ -291,6 +309,7 @@ Values: `Off = 0`, `Velocity = 1`, `Position = 2`
 - `public static RaycastHit SphereCastEx(Float3 origin, Float3 direction, float maxDistanceCm, float radius, uint layerMask, Body ignoreBody)` - As SphereCast, filtered to a layer mask and skipping ignoreBody.
 - `public static ShapeHit BoxCast(Float3 centre, Float3 halfExtents, Quaternion rotation, Float3 displacement, uint layerMask = LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None)` - Sweeps a box by displacement (direction and distance in one vector, centimetres) and returns the first body it touches.
 - `public static ShapeHit CapsuleCast(Float3 centre, float radius, float height, Quaternion rotation, Float3 displacement, uint layerMask = LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None)` - Sweeps a capsule by displacement.
+- `public static ShapeHit SphereCastQ(Float3 centre, float radius, Float3 displacement, uint layerMask = LayerMaskAll, Body ignoreA = default, Body ignoreB = default, QueryFlags flags = QueryFlags.None)` - Sweeps a sphere by displacement (centimetres).
 - `public static ShapeHit BodyCast(Body body, Float3 displacement, uint layerMask = LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None)` - Sweeps an existing body's own shape from its current pose by displacement, ignoring that body.
 - `public static Body[] OverlapBox(Float3 centre, Float3 halfExtents, Quaternion rotation, uint layerMask = LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None, int maxResults = 64)` - Every body overlapping a box.
 - `public static Body[] OverlapCapsule(Float3 centre, float radius, float height, Quaternion rotation, uint layerMask = LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None, int maxResults = 64)` - Every body overlapping a capsule (height TOTAL, standing along +Z before rotation).
@@ -436,6 +455,8 @@ Values: `TranslationX = 0`, `TranslationY = 1`, `TranslationZ = 2`, `RotationX =
 - `public bool SetEdgeRest(int[] edgeSlot, float[] restCm)` - A dent: the rest length of each listed edge slot.
 - `public bool RestBendsFromPose(int[] bendSlot)` - Takes the current pose as the rest angle of the listed bend slots.
 - `public bool Impulse(Float3 centre, float radiusCm, Float3 direction, float speedCmPerS, float radialBlend = 0, float falloffPower = 1)`
+- `public static int AbiVersion { get; }` - The version of the builder-style soft-body surface (2 adds AddVelocity).
+- `public bool AddVelocity(ReadOnlySpan<int> vertices, ReadOnlySpan<Float3> velocityChange)` - Adds a velocity change (world cm/s) to each listed vertex.
 - `public bool SkinWorld(float[] jointMatrices, int jointCount, float[]? entityWorld16, bool hardSkin)`
 - `public bool SetActive(bool active)`
 - `public bool IsActive { get; }`
@@ -484,3 +505,57 @@ Values: `Iterations = 0`, `Damping = 1`, `Friction = 2`, `Restitution = 3`, `Gra
 - `public static bool operator ==(Vehicle a, Vehicle b)`
 - `public static bool operator !=(Vehicle a, Vehicle b)`
 - `public override string ToString()`
+- `public static int AbiVersion { get; }` - The ABI version the loaded physics library reports: 2 with the extended vehicle ABI, 1 without.
+- `public bool SetKind(VehicleKind kind)` - Wheeled (the default) or tracked.
+- `public bool SetChassisBoxes(ReadOnlySpan<float> boxes)` - Replaces the single chassis box with one to eight: cx cy cz hx hy hz per box, origin-relative cm.
+- `public bool SetEngine(float maxTorque, float minRpm, float maxRpm, float inertia = 0f, float damping = 0.2f)` - The engine: peak torque (N*m), idle and limit revs, rotational inertia (0 = scaled to the torque as the plain engine is) and damping (engine braking).
+- `public bool SetTorqueCurve(ReadOnlySpan<float> rpmFraction, ReadOnlySpan<float> torqueFraction)` - The torque curve: x is the fraction of the limit revs (ascending, 0..1), y the fraction of peak torque.
+- `public bool SetGearbox(bool manual, ReadOnlySpan<float> forward, ReadOnlySpan<float> reverse, GearboxTiming timing = default)` - Forward ratios (positive), reverse ratios (positive magnitudes), automatic or manual, and the timings.
+- `public int AxleCount { get; }` - How many axles the wheels form (two wheels at the same x on opposite sides), front first.
+- `public int AxleOf(int wheel)` - The axle (front is 0) wheel wheel sits on, or -1.
+- `public bool SetAxle(int axle, float finalDrive, DifferentialMode mode, float lsdRatio = 1.4f, float split = 0.5f, float torqueShare = 0f, float antiRollNmPerM = 1000f)` - An axle's final drive ratio, differential, torque share between driven axles (0 = equal) and anti-roll bar (N/m, 0 = none).
+- `public bool SetCenterDifferential(DifferentialMode mode, float lsdRatio = 1.4f)` - The differential between the driven axles of an all-wheel-drive vehicle.
+- `public bool SetWheel(int wheel, float inertia = 0.9f, float angularDamping = 0.2f, float brakeBias = 1f, float trackLongitudinalFriction = 4f, float trackLateralFriction = 2f)` - A wheel's rotational inertia and damping, its share of the brake (1 = the class's torque), and the friction of a tracked wheel.
+- `public bool SetWheelCurves(int wheel, ReadOnlySpan<float> longSlip, ReadOnlySpan<float> longMu, ReadOnlySpan<float> latDeg, ReadOnlySpan<float> latMu)` - The tyre's friction curves: longitudinal (slip ratio, mu) and lateral (slip degrees, mu), two to 16 points each.
+- `public bool SetTrack(int side, ReadOnlySpan<int> wheels, int drivenWheel, float inertia = 10f, float damping = 0.5f, float brakeNm = 15000f, float finalDrive = 6f, float steerGain = 1.6f, float pivotPower = 0.6f)` - A tracked vehicle's track: side 0 left, 1 right, the road wheels of that side, the driven (sprocket) wheel among them.
+- `public bool SetAssists(in DriverAids aids)` - The driver aids.
+- `public bool SetAero(float drag, float downforce)` - Aerodynamic drag and downforce, N per (m/s)^2, applied at the centre of mass.
+- `public bool SetCollisionPeriod(int everyNSteps)` - Runs the wheel shape casts every Nth fixed step (1 to 8): the lever that makes distant vehicles cheaper.
+- `public bool Tune(VehicleTune key, float value)` - Live tuning: engine torque, brake, grip, suspension stiffness, steering, drag and downforce scales.
+- `public bool SetManualGearbox(bool manual)` - Switches between an automatic and a manual gearbox.
+- `public bool SetGear(int gear)` - Manual box only: -1 reverse, 0 neutral, 1 and up.
+- `public bool Shift(int delta)` - Manual box only: one gear up (+1) or down (-1), clamped, through a timed clutch.
+- `public bool Flip(float liftCm = 50f)` - Puts the vehicle upright about its current heading, stops it dead and sets it down liftCm higher.
+- `public bool TryGetState(out VehicleState state)` - The vehicle's telemetry as of the last fixed step.
+- `public bool TryGetWheelState(int wheel, out WheelState state)` - One wheel's telemetry as of the last fixed step.
+- `public static int DrainEvents(Span<VehiclePhysicsEvent> buffer)` - Copies this step's vehicle events (for every vehicle in the world) into buffer and returns how many were written.
+
+### VehicleKind
+
+`public enum VehicleKind` - Wheeled (a car or truck) or tracked (a tank).
+
+Values: `Wheeled = 0`, `Tracked = 1`
+
+### VehiclePhysicsEvent
+
+`public readonly record struct VehiclePhysicsEvent(VehiclePhysicsEventKind Kind, int Vehicle, int A, int B, Float3 Point, Float3 Normal, float Value, float Value2)` - A polled vehicle event (see VEV in the header for what A, B, Value and Value2 mean per kind).
+
+### VehiclePhysicsEventKind
+
+`public enum VehiclePhysicsEventKind` - What a polled vehicle event is (VEV in the header).
+
+Values: `SkidBegin = 1`, `SkidEnd = 2`, `Land = 3`, `Impact = 4`, `Shift = 5`, `Flipped = 6`, `Assist = 7`
+
+### VehicleState
+
+`public readonly record struct VehicleState( float Rpm, float EngineTorqueNm, float SpeedCmS, float ForwardSpeedCmS, float LateralSpeedCmS, float Throttle, float Brake, float Steer, float Handbrake, float Clutch, float WheelRpmAtClutch, float YawRateDegS, float LongAccelG, float LatAccelG, float UpZ, float TrackLeftCmS, float TrackRightCmS, float AirborneSeconds, int Gear, int GearCount, bool Manual, bool Shifting, int WheelsOnGround, bool AbsActive, bool TcsActive, VehicleKind Kind, int AxleCount, int WheelCount, bool RevLimited)` - One vehicle's telemetry as of the last fixed step (VS and VSI in the header).
+
+### VehicleTune
+
+`public enum VehicleTune` - The live tuning keys of Tune.
+
+Values: `EngineTorqueScale = 0`, `BrakeScale = 1`, `GripScale = 2`, `SuspensionStiffnessScale = 3`, `SteerScale = 4`, `DragScale = 5`, `DownforceScale = 6`, `SteerCurve0 = 7`, `SteerCurve1 = 8`, `SteerCurve2 = 9`, `SteerCurve3 = 10`, `SteerCurve4 = 11`, `SteerCurve5 = 12`, `SteerCurve6 = 13`, `SteerCurve7 = 14`, `Count = 15`
+
+### WheelState
+
+`public readonly record struct WheelState( bool Contact, float SlipLongitudinal, float SlipLateralDeg, float LoadN, float CompressionCm, float SuspensionLengthCm, float AngularVelocityRadS, float SteerDeg, float SpinRad, Float3 ContactPoint, Float3 ContactNormal, float ForceLongitudinalN, float ForceLateralN, float SurfaceFriction, float BrakeTorqueNm, int ContactBody, int ContactEntity, bool Skidding)` - One wheel's telemetry as of the last fixed step (VWS and VWSI in the header).

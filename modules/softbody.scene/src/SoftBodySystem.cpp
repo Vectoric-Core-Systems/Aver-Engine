@@ -1,6 +1,8 @@
 // The system: components, entry lifecycle, readback, publishing. The tick order is the determinism contract:
-// everything loops ascending entity id, then piece id. Damage and tears are in SoftBodyDamage.cpp, cloth
-// skinning/LOD/freeze in SoftBodyCloth.cpp, body construction in SoftBodyBuild.cpp.
+// everything loops ascending entity id, then piece id. Damage in SoftBodyDamage.cpp, the tear pipeline in
+// SoftBodyTear.cpp, fields in SoftBodyFields.cpp, thick breaks / baking / cadence in SoftBodyCaps.cpp, break effects in
+// SoftBodyFx.cpp, saved damage in SoftBodySave.cpp, proxy cages in SoftBodyProxy.cpp, cloth skinning/LOD/freeze in
+// SoftBodyCloth.cpp, body construction in SoftBodyBuild.cpp.
 #include "aver/softbody/SoftBodySystem.hpp"
 
 #include "aver/anim/AnimSystem.hpp"
@@ -12,6 +14,7 @@
 #include "aver/physics/physics_softbody_abi.h"
 #include "aver/platform/Image.hpp"
 #include "aver/scene/Components.hpp"
+#include "aver/scene/scene_abi.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +25,7 @@ namespace {
 
 u32 g_clothType = 0;
 u32 g_destructType = 0;
+u32 g_fieldType = 0;
 
 f32 or1(f32 v) { return v > 0.0f ? v : 1.0f; }
 
@@ -80,11 +84,33 @@ u32 SoftBodySystem::registerComponents(scene::World& world) {
         AVER_ASSERTM(b.verify(sizeof(CDestructible)), "CDestructible");
         g_destructType = b.typeId();
     }
+    {
+        auto b = world.registerComponent<CSoftField>("CSoftField");
+        b.field("kind", FieldKind::I32, static_cast<u16>(offsetof(CSoftField, kind)))
+            .field("shape", FieldKind::I32, static_cast<u16>(offsetof(CSoftField, shape)))
+            .field("flags", FieldKind::I32, static_cast<u16>(offsetof(CSoftField, flags)))
+            .field("targets", FieldKind::I32, static_cast<u16>(offsetof(CSoftField, targets)))
+            .field("extentX", FieldKind::F32, static_cast<u16>(offsetof(CSoftField, extentX)))
+            .field("extentY", FieldKind::F32, static_cast<u16>(offsetof(CSoftField, extentY)))
+            .field("extentZ", FieldKind::F32, static_cast<u16>(offsetof(CSoftField, extentZ)))
+            .field("strength", FieldKind::F32, static_cast<u16>(offsetof(CSoftField, strength)))
+            .field("energyJPerS", FieldKind::F32, static_cast<u16>(offsetof(CSoftField, energyJPerS)))
+            .field("falloff", FieldKind::F32, static_cast<u16>(offsetof(CSoftField, falloff)))
+            .field("dirX", FieldKind::F32, static_cast<u16>(offsetof(CSoftField, dirX)))
+            .field("dirY", FieldKind::F32, static_cast<u16>(offsetof(CSoftField, dirY)))
+            .field("dirZ", FieldKind::F32, static_cast<u16>(offsetof(CSoftField, dirZ)))
+            .field("turbulence", FieldKind::F32, static_cast<u16>(offsetof(CSoftField, turbulence)))
+            .field("outTouched", FieldKind::I32, static_cast<u16>(offsetof(CSoftField, outTouched)), 0, true)
+            .field("outState", FieldKind::I32, static_cast<u16>(offsetof(CSoftField, outState)), 0, true);
+        AVER_ASSERTM(b.verify(sizeof(CSoftField)), "CSoftField");
+        g_fieldType = b.typeId();
+    }
     return g_clothType;
 }
 
 u32 SoftBodySystem::clothType() { return g_clothType; }
 u32 SoftBodySystem::destructibleType() { return g_destructType; }
+u32 SoftBodySystem::softFieldType() { return g_fieldType; }
 
 CCloth* SoftBodySystem::attachCloth(scene::World& world, scene::Entity e, SoftPreset preset, u64 asset) {
     if (!g_clothType || !world.valid(e) || !world.hasComponent(e, scene::kComponentMeshRenderer)) return nullptr;
@@ -110,6 +136,16 @@ CDestructible* SoftBodySystem::attachDestructible(scene::World& world, scene::En
     return c;
 }
 
+CSoftField* SoftBodySystem::attachSoftField(scene::World& world, scene::Entity e) {
+    if (!g_fieldType || !world.valid(e)) return nullptr;
+    auto* c = static_cast<CSoftField*>(world.addComponent(e, g_fieldType));
+    if (!c) return nullptr;
+    *c = CSoftField{};
+    c->extentX = c->extentY = c->extentZ = 100.0f;
+    c->falloff = 1.0f;
+    return c;
+}
+
 // ---- lifetime and sources --------------------------------------------------------------------------------
 
 SoftBodySystem::SoftBodySystem() = default;
@@ -122,7 +158,7 @@ SoftBodySystem& softBodySystem() {
 
 void SoftBodySystem::install(scene::World& world) {
     world_ = &world;
-    if (!g_clothType) registerComponents(world);
+    if (!g_clothType || !g_fieldType) registerComponents(world);
     installed_ = true;
 }
 
@@ -192,6 +228,8 @@ SoftBodySystem::Piece* SoftBodySystem::pieceById(Entry& en, u32 id) {
 void SoftBodySystem::clear() {
     if (world_) {
         for (auto& [e, en] : entries_) destroyEntry(*world_, en);
+        for (const auto& [e, life] : spawnedLife_)
+            if (world_->valid(e)) world_->destroy(e);
         if (world_->count() > 0) world_->flush();
     }
     entries_.clear();
@@ -200,8 +238,15 @@ void SoftBodySystem::clear() {
     views_.clear();
     byBody_.clear();
     proxyUsers_.clear();
+    fields_.clear();
+    liveHandles_.clear();
+    spawnedLife_.clear();
+    fxQueue_.clear();
+    pendingRestore_.clear();
+    proxyWait_.clear();
     liveDebris_ = 0;
     layersInstalled_ = false;
+    restoring_ = false;
     meshCache_.clear();
     assetCache_.clear();
     stats_ = Stats{};
@@ -226,6 +271,7 @@ void SoftBodySystem::installLayers() {
 // ---- events ----------------------------------------------------------------------------------------------
 
 void SoftBodySystem::emit(Entry& en, const Piece* p, SoftEventKind kind, u32 beam, const Vec3& point, f32 value) {
+    if (restoring_) return;   // a saved tear log is being replayed: it is state, not news
     SoftEvent ev;
     ev.kind = kind;
     ev.entity = en.entity;
@@ -301,11 +347,42 @@ bool SoftBodySystem::repair(scene::Entity e) {
     return true;
 }
 
+u32 SoftBodySystem::repairAll() {
+    u32 n = 0;
+    for (const auto& [e, en] : entries_) {
+        InboxItem it;
+        it.kind = InboxItem::Kind::Repair;
+        it.entity = e;
+        inbox_.push_back(it);
+        ++n;
+    }
+    return n;
+}
+
 bool SoftBodySystem::release(scene::Entity e) {
     const Entry* en = find(e);
     if (!en || en->destructible) return false;
     InboxItem it;
     it.kind = InboxItem::Kind::Release;
+    it.entity = e;
+    inbox_.push_back(it);
+    return true;
+}
+
+bool SoftBodySystem::setAsleep(scene::Entity e, bool asleep) {
+    if (!find(e)) return false;
+    InboxItem it;
+    it.kind = InboxItem::Kind::Asleep;
+    it.entity = e;
+    it.flag = asleep;
+    inbox_.push_back(it);
+    return true;
+}
+
+bool SoftBodySystem::clearDebris(scene::Entity e) {
+    if (!find(e)) return false;
+    InboxItem it;
+    it.kind = InboxItem::Kind::ClearDebris;
     it.entity = e;
     inbox_.push_back(it);
     return true;
@@ -461,6 +538,7 @@ bool SoftBodySystem::buildEntry(scene::World& world, Entry& en) {
 
     // The cage. The entity's world matrix is baked into the particles, which lifts the old rotation/scale limit.
     const Mat4 W0 = world.worldMatrix(e);
+    en.uniformScale = uniformScaleOf(W0);
     SimMeshInput in;
     in.positions = mesh->positions.data();
     in.uvs = mesh->uvs.empty() ? nullptr : mesh->uvs.data();
@@ -474,7 +552,7 @@ bool SoftBodySystem::buildEntry(scene::World& world, Entry& en) {
     spec.weldCm = a.sim.weldCm;
     spec.maxParticles = a.sim.maxParticles;
     spec.entityWorld = W0;
-    spec.uniformScale = uniformScaleOf(W0);
+    spec.uniformScale = en.uniformScale;
     spec.paint = a.paint;
     spec.destructible = en.destructible || en.legacy;
     spec.defaultReachCm = a.cloth.defaultReachCm;
@@ -514,10 +592,23 @@ bool SoftBodySystem::buildEntry(scene::World& world, Entry& en) {
             };
         }
     }
-    if (!buildSimMesh(in, spec, en.sim)) {
-        AVER_WARN("[SoftBody] entity {}: {}; it keeps its authored mesh", e, en.sim.error);
-        en.failed = true;
-        return true;
+
+    // A cooked proxy cage when the asset names one (SoftBodyProxy.cpp), else the authored mesh itself.
+    en.proxyMode = false;
+    bool built = false;
+    if (!a.proxy.mesh.empty()) {
+        bool notReady = false;
+        if (buildProxy(world, en, in, spec, notReady)) built = true;
+        else if (notReady) return false;
+    }
+    if (!built) {
+        if (!buildSimMesh(in, spec, en.sim)) {
+            AVER_WARN("[SoftBody] entity {}: {}; it keeps its authored mesh", e, en.sim.error);
+            en.overCap = en.sim.error.find("over the limit") != std::string::npos;
+            en.failed = true;
+            return true;
+        }
+        en.saveMeshKey = en.sim.meshKey;
     }
     if (en.legacy) {
         for (Particle& q : en.sim.cage.particles) {
@@ -532,6 +623,16 @@ bool SoftBodySystem::buildEntry(scene::World& world, Entry& en) {
     en.hardSkinNext = true;
     en.totalBeams = static_cast<u32>(en.sim.cage.beams.size());
 
+    // Which backing the thick-break rule uses: an open sheet gets a back skin on every piece (BackSkin::Auto).
+    {
+        std::vector<u32> vis, weld(en.sim.binding.vertexCount());
+        en.sim.binding.visibleIndices(en.sim.cage.triDead, vis);
+        for (u32 v = 0; v < weld.size(); ++v)
+            weld[v] = en.proxyMode && v < en.renderWeld.size() ? en.renderWeld[v] : en.sim.binding.vertexParticle[v];
+        en.openSheet = hasBoundaryEdges(vis.data(), static_cast<u32>(vis.size()), weld.data());
+    }
+    if (!a.caps.interiorMaterial.empty()) en.interiorToken = aver_scene_material(0, a.caps.interiorMaterial.c_str());
+
     // Which entity carries the skeleton (this one or an ancestor), and the joint count.
     for (scene::Entity x = e; x != scene::kInvalidEntity && world.valid(x); x = world.parent(x))
         if (world.hasComponent(x, scene::kComponentSkeletalMesh)) { en.skeletonEntity = x; break; }
@@ -544,8 +645,18 @@ bool SoftBodySystem::buildEntry(scene::World& world, Entry& en) {
         if (pal && count > 0) { en.propPalette = false; en.jointCount = count; }
     }
 
+    // Saved damage waiting for this entity: used when its keys still match the mesh and the asset.
+    if (const auto rit = pendingRestore_.find(e); rit != pendingRestore_.end()) {
+        std::unique_ptr<SoftState> st = std::move(rit->second);
+        pendingRestore_.erase(rit);
+        if (softStateStale(*st, en.saveMeshKey, softAssetKey(en.asset)))
+            AVER_WARN("[SoftBody] entity {}: saved damage is for a different mesh or asset; loading intact", e);
+        else
+            en.restore = std::move(st);
+    }
+
     installLayers();
-    if (!initialPiece(en)) {
+    if (!initialPiece(world, en)) {
         AVER_WARN("[SoftBody] entity {}: the physics body could not be made; it keeps its authored mesh", e);
         en.pieces.clear();
         en.failed = true;
@@ -562,20 +673,28 @@ void SoftBodySystem::destroyPiece(scene::World& world, Entry& en, Piece& p) {
         byBody_.erase(p.body);
         p.body = 0;
     }
-    if (p.debris && p.alive && p.entity != scene::kInvalidEntity && world.valid(p.entity)) {
+    if (p.capEntity != scene::kInvalidEntity) {
+        if (world.valid(p.capEntity)) world.destroy(p.capEntity);
+        p.capEntity = scene::kInvalidEntity;
+    }
+    if (p.debris && (p.alive || p.pendingKill) && p.entity != scene::kInvalidEntity && world.valid(p.entity)) {
         world.destroy(p.entity);
         if (liveDebris_ > 0) --liveDebris_;
     }
     p.alive = false;
+    p.pendingKill = false;
+    p.needsBody = false;
     p.particles.clear(); p.beams.clear(); p.triangles.clear(); p.renderVerts.clear();
-    p.drawIndices.clear(); p.sourceVertex.clear(); p.drawWorld.clear();
+    p.drawIndices.clear(); p.sourceVertex.clear(); p.drawUv.clear(); p.drawWeld.clear(); p.drawEvalTri.clear(); p.drawWorld.clear();
+    p.caps = CapGeometry{};
+    p.capWorld.clear(); p.capIndices.clear(); p.capSource.clear(); p.capUv.clear();
     (void)en;
 }
 
 void SoftBodySystem::destroyEntry(scene::World& world, Entry& en) {
     setCharacterProxy(world, en, false);
     for (Piece& p : en.pieces)
-        if (p.alive) destroyPiece(world, en, p);
+        if (p.alive || p.pendingKill) destroyPiece(world, en, p);
     en.pieces.clear();
     if (world.valid(en.entity)) {
         if (auto* sb = world.component<scene::CSoftBody>(en.entity, scene::kComponentSoftBody)) sb->body = 0;
@@ -587,14 +706,22 @@ void SoftBodySystem::destroyEntry(scene::World& world, Entry& en) {
 
 // ---- per-tick work ---------------------------------------------------------------------------------------
 
-void SoftBodySystem::refreshDraw(Entry& en, Piece& p) {
+// The front draw vertices (the authored triangles of the piece) at the particles' current positions, plus the
+// piece's bounds and centroid. Caps are refreshed separately from these (refreshCaps).
+void SoftBodySystem::frontPositions(Entry& en, Piece& p) {
     const RenderBinding& rb = en.sim.binding;
     const Cage& c = en.sim.cage;
     Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+    if (en.proxyMode) {
+        proxyPositions(en, p);
+    } else {
+        for (usize i = 0; i < p.renderVerts.size(); ++i) {
+            const u32 particle = rb.vertexParticle[p.renderVerts[i]];
+            p.drawWorld[i] = particle < c.particles.size() ? c.particles[particle].pos : Vec3{0, 0, 0};
+        }
+    }
     for (usize i = 0; i < p.renderVerts.size(); ++i) {
-        const u32 particle = rb.vertexParticle[p.renderVerts[i]];
-        const Vec3 pos = particle < c.particles.size() ? c.particles[particle].pos : Vec3{0, 0, 0};
-        p.drawWorld[i] = pos;
+        const Vec3& pos = p.drawWorld[i];
         lo = {std::min(lo.x, pos.x), std::min(lo.y, pos.y), std::min(lo.z, pos.z)};
         hi = {std::max(hi.x, pos.x), std::max(hi.y, pos.y), std::max(hi.z, pos.z)};
     }
@@ -604,6 +731,13 @@ void SoftBodySystem::refreshDraw(Entry& en, Piece& p) {
     Vec3 sum{0, 0, 0};
     for (const u32 pid : p.particles) sum += c.particles[pid].pos;
     p.centroid = p.particles.empty() ? Vec3{0, 0, 0} : sum / static_cast<f32>(p.particles.size());
+}
+
+void SoftBodySystem::refreshDraw(Entry& en, Piece& p) {
+    if (p.drawWorld.size() < p.renderVerts.size()) p.drawWorld.resize(p.renderVerts.size(), Vec3{0, 0, 0});
+    frontPositions(en, p);
+    refreshCaps(en, p);
+    p.needsPack = true;
 }
 
 void SoftBodySystem::readback(Entry& en) {
@@ -631,7 +765,8 @@ void SoftBodySystem::refreshOut(scene::World& world, Entry& en) {
         else if (p.body && aver_phys_sb_is_active(p.body)) ++awake;
     }
     u32 state = (awake ? kStateAwake : 0u) | (frozen && !awake ? kStateFrozen : 0u) | (en.released ? kStateReleased : 0u) |
-                (en.assetStale ? kStateAssetStale : 0u) | (alive << kStatePieceShift);
+                (en.assetStale ? kStateAssetStale : 0u) | (en.failed && en.overCap ? kStateOverCap : 0u) | (en.proxyMode ? kStateProxy : 0u) |
+                (alive << kStatePieceShift);
     if (auto* cl = g_clothType ? world.component<CCloth>(en.entity, g_clothType) : nullptr) {
         cl->outMaxStrain = en.maxStrain;
         cl->outState = state;
@@ -654,9 +789,25 @@ void SoftBodySystem::publish(scene::World& world) {
             if (!p.alive) continue;
             ++s.pieces;
             s.debris += p.debris ? 1u : 0u;
+            s.bakedPieces += p.baked ? 1u : 0u;
+            s.heldPieces += p.fieldHeld ? 1u : 0u;
             if (p.frozen) ++s.frozenPieces;
-            else { s.activeParticles += static_cast<u32>(p.particles.size()); if (p.body && aver_phys_sb_is_active(p.body)) ++s.awakePieces; }
+            else if (!p.baked) { s.activeParticles += static_cast<u32>(p.particles.size()); if (p.body && aver_phys_sb_is_active(p.body)) ++s.awakePieces; }
             if (p.empty) continue;
+
+            bool culled = false;
+            publishVisibility(world, en, p, culled);
+
+            // Draw cadence: a far piece repacks every 2nd or 4th tick, a settled one not at all (baked, asleep, frozen).
+            bool frozen = p.frozen || p.baked;
+            if (!frozen) {
+                const u32 period = p.lodTier == 1 ? 2u : (p.lodTier == 2 ? 4u : 1u);
+                if (p.shrinking) p.needsPack = true;
+                const bool due = period <= 1 || p.shrinking || ((tickCount_ + p.id) % period) == 0;
+                frozen = !p.needsPack || !due;
+                if (!frozen) p.needsPack = false;
+            }
+
             PieceView v;
             v.entity = p.entity;
             v.piece = p.id;
@@ -666,18 +817,39 @@ void SoftBodySystem::publish(scene::World& world) {
             v.indices = p.drawIndices.data();
             v.indexCount = static_cast<u32>(p.drawIndices.size());
             v.sourceVertex = p.sourceVertex.data();
+            v.uv = p.drawUv.empty() ? nullptr : p.drawUv.data();
             v.meshId = en.spec.meshId;
             v.origin = p.origin;
             v.centroid = p.centroid;
             v.useEntityWorld = !p.debris;
-            v.scale01 = p.shrinking && opt_.despawnShrinkS > 0.0f ? std::max(0.0f, 1.0f - p.shrinkT / opt_.despawnShrinkS) : 1.0f;
-            v.frozen = p.frozen;
+            v.scale01 = !p.baked && p.shrinking && opt_.despawnShrinkS > 0.0f ? std::max(0.0f, 1.0f - p.shrinkT / opt_.despawnShrinkS) : 1.0f;
+            v.frozen = frozen;
+            v.revealOnReady = p.debris && !culled;
+            v.bake = p.baked;
             views_.push_back(v);
+
+            if (p.capEntity != scene::kInvalidEntity && !p.capIndices.empty() && !p.capsHidden) {
+                PieceView cv = v;
+                cv.entity = p.capEntity;
+                cv.vertexCount = static_cast<u32>(p.capWorld.size());
+                cv.world = p.capWorld.data();
+                cv.indices = p.capIndices.data();
+                cv.indexCount = static_cast<u32>(p.capIndices.size());
+                cv.sourceVertex = p.capSource.data();
+                cv.uv = p.capUv.data();
+                cv.layer = 1;
+                cv.revealOnReady = !culled;
+                views_.push_back(cv);
+            }
         }
     }
     s.rebuildsLastTick = rebuildsThisTick_;
     s.depositsLastTick = depositsThisTick_;
     s.eventsPending = static_cast<u32>(events_.size());
+    s.fieldsApplied = stats_.fieldsApplied;
+    s.transientFields = static_cast<u32>(fields_.size());
+    s.fxSent = stats_.fxSent;
+    s.fxDropped = stats_.fxDropped;
     stats_ = s;
 }
 
@@ -704,6 +876,40 @@ SoftBodyState SoftBodySystem::state(scene::Entity e) const {
     return st;
 }
 
+HitInfo SoftBodySystem::lastHit(scene::Entity e) const {
+    const Entry* en = find(e);
+    if (!en) return HitInfo{};
+    HitInfo h = en->hit;
+    h.maxStrain = en->maxStrain;
+    for (const Beam& b : en->sim.cage.beams) h.maxSetCm = std::max(h.maxSetCm, b.plastic);
+    for (const Piece& p : en->pieces) {
+        if (!p.alive || p.empty) continue;
+        ++h.pieces;
+        h.baked += p.baked ? 1u : 0u;
+    }
+    return h;
+}
+
+DentInfo SoftBodySystem::dents(scene::Entity e) const {
+    DentInfo d;
+    const Entry* en = find(e);
+    if (!en || en->failed) return d;
+    d.found = true;
+    for (const Beam& b : en->sim.cage.beams) {
+        if (b.broken || !(b.plastic > 0.0f)) continue;
+        ++d.dentedEdges;
+        d.maxSetCm = std::max(d.maxSetCm, b.plastic);
+    }
+    for (const Piece& p : en->pieces) d.debrisPieces += p.alive && p.debris ? 1u : 0u;
+    return d;
+}
+
+std::vector<SoftBodySystem::FieldView> SoftBodySystem::transientFields() const {
+    std::vector<FieldView> out;
+    for (const auto& [h, t] : fields_) out.push_back(FieldView{h, t.spec, t.remainingS});
+    return out;
+}
+
 u32 SoftBodySystem::pieceCount(scene::Entity e) const {
     const Entry* en = find(e);
     u32 n = 0;
@@ -721,6 +927,11 @@ void SoftBodySystem::tick(scene::World& world, f32 dt) {
     rebuildsThisTick_ = 0;
     buildsThisTick_ = 0;
     depositsThisTick_ = 0;
+    fxDroppedThisTick_ = 0;
+    stats_.fieldsApplied = 0;
+    stats_.fxSent = 0;
+    stats_.fxDropped = 0;
+    ++tickCount_;
     if (!aver_phys_ready()) {
         // No physics: nothing simulates. Drop whatever was built against a world that is gone.
         if (!entries_.empty()) {
@@ -732,18 +943,27 @@ void SoftBodySystem::tick(scene::World& world, f32 dt) {
             byBody_.clear();
             layersInstalled_ = false;
         }
+        fxQueue_.clear();
         publish(world);
         return;
     }
     installLayers();
     const u32 stepsThisTick = std::max(1u, static_cast<u32>(std::lround(std::max(dt, 0.0f) / std::max(aver_phys_fixed_step(), 1e-4f))));
     stepClock_ += stepsThisTick;
+    const f32 stepSeconds = static_cast<f32>(stepsThisTick) * aver_phys_fixed_step();
+    stepSeconds_ = stepSeconds;
 
     syncEntries(world);
     for (auto& [e, en] : entries_)
-        if (!en.failed) { readback(en); en.stepAccum += stepsThisTick; }
+        if (!en.failed) {
+            readback(en);
+            en.stepAccum += stepsThisTick;
+            for (f32& cd : en.fxCooldown) cd = std::max(0.0f, cd - dt);
+        }
 
+    ++fieldTick_;
     applyInbox(world);
+    fieldStep(world, stepSeconds);
     pollImpacts(world);
 
     for (auto& [e, en] : entries_) {
@@ -756,10 +976,12 @@ void SoftBodySystem::tick(scene::World& world, f32 dt) {
     applyLodAndFreeze(world, dt);
     debrisLifecycle(world, dt);
     evictDebris(world);
+    capLod(world);
     for (auto& [e, en] : entries_)
         for (Piece& p : en.pieces)
             if (p.alive) p.hotFor = std::max(0.0f, p.hotFor - dt);
     if (needFlush_) { world.flush(); needFlush_ = false; }
+    flushFx();
     publish(world);
 }
 

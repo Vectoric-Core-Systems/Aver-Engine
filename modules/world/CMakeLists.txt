@@ -58,6 +58,12 @@ endif()
 if(TARGET Aver.Physics)
   target_link_libraries(Aver.World PUBLIC Aver.Physics)
 endif()
+# The traffic system builds its cars through Aver.Vehicle (the presets and the builder moved there), so the AI
+# half of VehicleSystem.cpp exists only where that module does. The root CMakeLists adds modules/vehicle before this
+# directory, which is what makes the test work.
+if(TARGET Aver.Vehicle)
+  target_link_libraries(Aver.World PUBLIC Aver.Vehicle)
+endif()
 
 # Aver.Render.PBR is deliberately ABSENT. Resolving a surface name to a material handle is the
 # HOST's job -- the game goes through GameContent, the editor through its own map -- and this module

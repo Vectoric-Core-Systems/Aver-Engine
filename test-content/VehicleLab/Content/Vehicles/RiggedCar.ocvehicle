@@ -1,0 +1,16 @@
+OCVEHICLE 1
+# A small car whose wheels are BONES of a skinned mesh instead of child entities: each WHEEL names a `bone`, and the vehicle system sets
+# the control-rig inputs wheel_<bone>_pos and wheel_<bone>_rot every frame (Rigs/RiggedCar.ocrig reads them with setbone ops).
+# Source/RiggedCar.gltf is written by make_vehicle_lab.py: a box body and four wheels, five joints (Root, FL, FR, RL, RR).
+NAME RiggedCar
+KIND wheeled
+BODY half 170 70 28 clearance 22 com 0 0 34 mass 1000 pitchroll 60
+ENGINE torque 400 minrpm 1000 maxrpm 6000 inertia 0.4 damping 0.2
+WHEELCLASS small radius 30 width 20 susp 5 26 hz 2 damping 0.5 brake 1300 handbrake 2200 inertia 0.8 spindamping 0.2
+WHEEL FL class small hub 120 -72 30 steer 34 driven 0 handbrake 0 bone FL
+WHEEL FR class small hub 120 72 30 steer 34 driven 0 handbrake 0 bone FR
+WHEEL RL class small hub -120 -72 30 steer 0 driven 1 handbrake 1 bone RL
+WHEEL RR class small hub -120 72 30 steer 0 driven 1 handbrake 1 bone RR
+ASSIST abs 1 absslip 0.25 absrelease 8 tcs 0 tcsslip 0.35 steerin 3 steerout 5 throttlein 6 throttleout 8 brakein 8 reversebrake 1 reversespeed 50 holdbrake 0.3 holdspeed 30 skidslip 0.45 skidangle 12
+SEAT driver 10 -30 50 exit -10 -120 0
+CAMERA modes chase hood arm 520 eye 20 -30 95 hood 120 0 80

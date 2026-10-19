@@ -1,0 +1,8 @@
+OCPROJECT 1
+# Engine test content for GAMEPLAY CAMERAS (docs/CAMERAS.md). Not a demo game: cubes and ramps only, no third-party assets.
+# Open the project and press Play (see README.md for what to check and the keys).
+NAME CameraLab
+ENGINE Aver 0.7.0-1
+CREATEDWITH 0.7.0-1
+CONTENT Content
+STARTMAP Maps/CameraLab.ocworld

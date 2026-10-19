@@ -32,6 +32,8 @@
 #  include "aver/ui/UiFont.hpp"
 #endif
 #include "aver/game/GameAccessibility.hpp"
+
+#include "aver/game/GameCamera.hpp"
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
 #include "aver/game/GameFoliage.hpp"
@@ -120,6 +122,9 @@ struct GameConfig {
     bool noParticleGi = false;
     // --particle-test: spawns the same dust cloud + ember burst as the editor (for parity verification).
     bool particleTest = false;
+
+    // --particles-cpu (0) / --particles-gpu (2): outranks RENDER.PARTICLEGPU; -1 follows the project (default auto).
+    int particleGpuArg = -1;
     // --screenshot [path]: captures to PNG. Empty = no screenshot.
     std::string screenshotPath;
     // --no-vsync: disables vsync once the device exists. False (DEFAULT) syncs to display.
@@ -243,7 +248,7 @@ private:
     bool placePawnAtSpawn();
 
     // Drives the camera from the possessed pawn. Must run after World::flush and before view matrix is built.
-    void drivePlayCamera();
+    void drivePlayCamera(f32 dt);
 
     // ---- OS mouse capture (game::MouseCapture).
 
@@ -295,6 +300,8 @@ private:
     Mat4 invVP_, viewProj_;
     Vec3 eye_{0, 0, 0};
 
+    // The projection and owner-hide mode that travel with camPos_/yaw_/pitch_ (GameCamera.hpp): FOV, roll, clip planes, the collision fade.
+    game::PlayView playView_;
 #if AVER_MODULE_SCENE
     // The possessed pawn (when first-person). Reset to kInvalidEntity unconditionally each call.
     // Read in onRender to build DrawWorldOptions::ownerHideRoot (first-person body culling).

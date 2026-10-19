@@ -28,6 +28,8 @@ internal static partial class Native
     [DllImport(Lib)] internal static extern int   aver_phys_sb_set_edge_rest(int body, int[] edgeSlot, float[] restCm, int n);
     [DllImport(Lib)] internal static extern int   aver_phys_sb_rest_bends_from_pose(int body, int[] bendSlot, int n);
     [DllImport(Lib)] internal static extern int   aver_phys_sb_impulse(int body, float[] centreCm, float radiusCm, float[] dirUnit, float speedCmS, float radialBlend, float falloffPower);
+    [DllImport(Lib)] internal static extern int   aver_phys_sb_abi_version();
+    [DllImport(Lib)] internal static extern int   aver_phys_sb_add_velocity(int body, int[] vertex, float[] dvXyz, int n);
     [DllImport(Lib)] internal static extern int   aver_phys_sb_skin_world(int body, float[] jointMatrices, int jointCount, float[]? entityWorld16, int hardSkin);
     [DllImport(Lib)] internal static extern int   aver_phys_sb_set_active(int body, int active);
     [DllImport(Lib)] internal static extern int   aver_phys_sb_is_active(int body);

@@ -34,8 +34,44 @@
 #if AVER_MODULE_AUDIO_SCENE
 #  include "aver/audio/AudioScene.hpp"
 #endif
+
+#if AVER_MODULE_SCENE && AVER_MODULE_VEHICLE_SCENE
+#  include <algorithm>
+#  include <functional>
+#  include <aver/core/Hash.hpp>
+#  include <aver/platform/FileSystem.hpp>
+#  include <aver/vehicle/OcVehicle.hpp>
+#  include <aver/vehicle/VehiclePhysicsSystem.hpp>
+#  if AVER_MODULE_FRAMEWORK
+#    include <aver/framework/framework_vehicle_abi.h>
+#  endif
+#  if AVER_MODULE_CAMERA
+#    include <aver/camera/CameraRigSystem.hpp>
+#  endif
+#  if AVER_WITH_AUDIO_ABI
+#    include <aver/audio/audio_abi.h>
+#  endif
+#endif
+
+#if AVER_MODULE_SCENE && AVER_MODULE_PARTICLES
+#  include "aver/particles/ParticleSpawn.hpp"
+#  include "aver/particles/ParticleSystem.hpp"
+#  if AVER_MODULE_FRAMEWORK
+#    include "aver/particles/ParticleProvider.hpp"
+#    include "aver/framework/framework_particles_abi.h"
+#  endif
+#endif
+
+#if AVER_MODULE_SCENE && AVER_MODULE_CAMERA
+#  include "aver/camera/CameraRigSystem.hpp"
+#  if AVER_MODULE_FRAMEWORK
+#    include "aver/framework/framework_camera_abi.h"
+#    include "aver/framework/framework_access_abi.h"
+#  endif
+#endif
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
 #  include "aver/framework/framework_softbody_abi.h"
+#  include "aver/framework/framework_softfield_abi.h"
 #endif
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_abi.h"            // AI: wave 3 #21 (aver_fw_class_of for the actors generator)
@@ -178,6 +214,170 @@ inline void installSoftBodyHost(std::string (*pathFn)(u64, void*), void* pathUse
 #endif
 }
 
+// ---- vehicles (docs/VEHICLES.md) -------------------------------------------------------------------------------
+// The vehicle module links none of audio, particles, soft bodies, cameras or animation: every one of those leaves through a sink installed here.
+#if AVER_MODULE_SCENE && AVER_MODULE_VEHICLE_SCENE
+namespace detail {
+inline vehicle::SpecCache g_vehicleSpecs;                       // absolute path -> parsed, validated spec (a failure is cached too)
+inline std::string (*g_vehiclePathFn)(u64, void*) = nullptr;   // content id -> absolute path: the resolver the soft bodies and animation use
+inline void* g_vehiclePathUser = nullptr;
+inline vehicle::NotifyFn g_vehicleNotify = nullptr;
+inline void* g_vehicleNotifyUser = nullptr;
+
+inline std::string vehicleAbsPath(const std::string& contentPath) {
+    if (!g_vehiclePathFn) return {};
+    std::string rel = contentPath;
+    for (char& c : rel) if (c == static_cast<char>(92)) c = '/';
+    return g_vehiclePathFn(fnv1a64(std::string_view(rel)), g_vehiclePathUser);
+}
+inline const vehicle::VehicleSpec* vehicleSpecAt(const std::string& absPath) {
+    if (absPath.empty()) return nullptr;
+    return g_vehicleSpecs.get(absPath, [](const std::string& p, std::string& text) { return readFileText(p, text); });
+}
+inline const vehicle::VehicleSpec* vehicleSpecById(u64 id) {
+    return g_vehiclePathFn ? vehicleSpecAt(g_vehiclePathFn(id, g_vehiclePathUser)) : nullptr;
+}
+
+// Graph events: raised at the vehicle, and also at its driver, so a pawn graph hears VehicleEntered / VehicleCrash / VehicleSkid ... without being attached to the car.
+inline void vehicleNotifyThunk(scene::Entity e, const char* name, void*) {
+    if (!g_vehicleNotify) return;
+    g_vehicleNotify(e, name, g_vehicleNotifyUser);
+    const scene::Entity driver = vehicle::vehiclePhysicsSystem().driverOf(e);
+    if (driver != scene::kInvalidEntity && driver != e) g_vehicleNotify(driver, name, g_vehicleNotifyUser);
+}
+
+#  if AVER_MODULE_FRAMEWORK
+// A driver's input: the Drive.* actions of the project's input scheme, looked up by name once and cached. A name the project does not define reads as absent.
+inline bool vehicleAction(const char* name, vehicle::ActionState& out) {
+    static std::map<std::string, i32> ids;
+    auto it = ids.find(name);
+    if (it == ids.end()) it = ids.emplace(name, aver_fw_action_find(name)).first;
+    if (it->second == 0) it->second = aver_fw_action_find(name);   // the scheme may load after the first look
+    out = vehicle::ActionState{};
+    if (it->second == 0) return false;
+    f32 v[2] = {0.0f, 0.0f};
+    aver_fw_action_value2(it->second, v);
+    out.found = true;
+    out.value = v[0];
+    out.held = aver_fw_action_held(it->second) != 0;
+    out.pressed = aver_fw_action_pressed(it->second) != 0;
+    return true;
+}
+#  endif
+
+#  if AVER_WITH_AUDIO_ABI
+// Engine, skid and impact sounds through the C audio ABI. Content paths resolve through the content index.
+class VehicleAudioPort final : public vehicle::AudioPort {
+public:
+    i32 loadSound(const std::string& contentPath) override {
+        const std::string abs = vehicleAbsPath(contentPath);
+        return abs.empty() ? 0 : aver_audio_load(abs.c_str());
+    }
+    i32 play(i32 sound, const Vec3& p, f32 volume, f32 pitch, bool looping) override {
+        return sound == 0 ? 0 : aver_audio_play_at(sound, p.x, p.y, p.z, volume, pitch, looping ? 1 : 0, 0, 300.0f, 6000.0f);
+    }
+    void set(i32 voice, const Vec3& p, f32 volume, f32 pitch) override {
+        if (voice == 0) return;
+        aver_audio_set_voice_position(voice, p.x, p.y, p.z);
+        aver_audio_set_voice_volume(voice, volume);
+        aver_audio_set_voice_pitch(voice, pitch);
+    }
+    void stop(i32 voice) override { if (voice != 0) aver_audio_stop(voice); }
+};
+inline VehicleAudioPort g_vehicleAudio;
+#  endif
+
+#  if AVER_MODULE_SOFTBODY_SCENE
+// A hard hit dents the soft bodies near it.
+inline void vehicleCrashSink(const vehicle::CrashInfo& i, void*) {
+    softbody::softBodySystem().impact(i.point, i.dir, i.radiusCm, i.energyJ, std::min(i.closingCmS * 0.25f, 600.0f));
+}
+#  endif
+
+#  if AVER_MODULE_CAMERA
+// Enter: attach the VehicleChase / FirstPerson / Seat presets to the rig entities the system made (once), point the view at rig 0 over 0.6 s.
+// Next: at rig `current` over 0.4 s. Exit: back to the automatic choice. Impact: a shake at the point.
+inline void vehicleCameraSink(scene::Entity vehicleEntity, scene::Entity, vehicle::CameraEvent ev, const vehicle::VehicleCameraInfo& info, void*) {
+    scene::World& w = scene::World::instance();
+    camera::CameraRigSystem& cams = camera::cameraRigSystem();
+    switch (ev) {
+        case vehicle::CameraEvent::Enter:
+        case vehicle::CameraEvent::Next: {
+            for (u32 i = 0; i < info.rigCount; ++i) {
+                const vehicle::CameraRigInfo& r = info.rigs[i];
+                if (!w.valid(r.rig) || w.component<camera::CCameraRig>(r.rig, camera::CameraRigSystem::typeId())) continue;
+                const bool chase = r.kind == vehicle::CameraRigKind::Chase;
+                const camera::CameraPreset p = chase ? camera::CameraPreset::VehicleChase
+                                             : r.kind == vehicle::CameraRigKind::Hood ? camera::CameraPreset::FirstPerson : camera::CameraPreset::Seat;
+                if (camera::CCameraRig* c = camera::CameraRigSystem::attach(w, r.rig, p, chase ? vehicleEntity : scene::kInvalidEntity)) {
+                    c->ignoreBody = info.chassisBody;
+                    if (chase && r.armCm > 0.0f) c->armLengthCm = r.armCm;
+                }
+            }
+            const u32 which = ev == vehicle::CameraEvent::Enter ? 0u : info.current;
+            if (which < info.rigCount && w.valid(info.rigs[which].rig))
+                cams.setViewTarget(info.rigs[which].rig, camera::ViewBlend{ev == vehicle::CameraEvent::Enter ? 0.6f : 0.4f, camera::BlendCurve::EaseInOut, false});
+            break;
+        }
+        case vehicle::CameraEvent::Exit:
+            cams.clearViewTarget(camera::ViewBlend{0.6f, camera::BlendCurve::EaseInOut, false});
+            break;
+        case vehicle::CameraEvent::Impact:
+            cams.shakeAt(info.impactPoint, 1500.0f, std::min(info.impactSpeedCmS / 2000.0f, 1.0f), 1.0f);
+            break;
+    }
+}
+#  endif
+
+// The skeletal wheel route: the vehicle's wheel_<bone>_pos / _rot inputs go to the control rig.
+inline void vehicleRigInput(scene::Entity e, u64 nameHash, const f32* values, u32 count, void*) {
+    anim::controlRigSystem().setInput(e, nameHash, values, count);
+}
+} // namespace detail
+
+// Content-relative `.ocvehicle` path -> spec, for the traffic system's `vehicle <path>` token. Null when the file is missing or invalid.
+inline const vehicle::VehicleSpec* vehicleSpecByPath(const std::string& contentPath) {
+    return detail::vehicleSpecAt(detail::vehicleAbsPath(contentPath));
+}
+#endif
+
+// Host wiring for the vehicle system that is not world state: the content resolver (the same function the host hands AnimSystem), the spec cache over
+// it, the action source, and the sinks for sound, soft-body damage, the camera and the skeletal wheel route. Call once at startup after registerGameSystems().
+inline void installVehicleHost(std::string (*pathFn)(u64, void*), void* pathUser) {
+#if AVER_MODULE_SCENE && AVER_MODULE_VEHICLE_SCENE
+    detail::g_vehiclePathFn = pathFn;
+    detail::g_vehiclePathUser = pathUser;
+    vehicle::VehiclePhysicsSystem& sys = vehicle::vehiclePhysicsSystem();
+    sys.setSpecSource([](u64 id) { return detail::vehicleSpecById(id); });
+#  if AVER_MODULE_FRAMEWORK
+    sys.setActionSource(&detail::vehicleAction);
+#  endif
+#  if AVER_WITH_AUDIO_ABI
+    sys.setAudioPort(&detail::g_vehicleAudio);
+#  endif
+#  if AVER_MODULE_SOFTBODY_SCENE
+    sys.setCrashSink(&detail::vehicleCrashSink, nullptr);
+#  endif
+#  if AVER_MODULE_CAMERA
+    sys.setCameraSink(&detail::vehicleCameraSink, nullptr);
+#  endif
+    sys.setRigInputSink(&detail::vehicleRigInput, nullptr);
+    sys.setNotifySink(&detail::vehicleNotifyThunk, nullptr);
+    // The effect sink stays null: the system's default is aver::spawnEffectAt, which Aver.Particles installs itself behind.
+#else
+    (void)pathFn; (void)pathUser;
+#endif
+}
+
+// The graph-event sink (the same function the host gives the animation system). Install it where that one is, once scripting is up.
+inline void setVehicleNotify(void (*fn)(u32, const char*, void*), void* user) {
+#if AVER_MODULE_SCENE && AVER_MODULE_VEHICLE_SCENE
+    detail::g_vehicleNotify = fn;
+    detail::g_vehicleNotifyUser = user;
+#else
+    (void)fn; (void)user;
+#endif
+}
 // Registers the components and installs the hooks the game systems need. Call once at startup, after
 // the Synapse and control-rig registration (it adds a pose source to the animation system and the
 // crowd/hearing behaviours to the behaviour-tree registry).
@@ -195,6 +395,40 @@ inline void registerGameSystems() {
     softbody::softBodySystem().install(scene::World::instance());
 #  if AVER_MODULE_FRAMEWORK
     aver_fw_set_softbody_provider(&softbody::softBodyProvider, &softbody::softBodySystem());
+    aver_fw_set_softfield_provider(&softbody::softFieldProvider, &softbody::softBodySystem());
+#  endif
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_VEHICLE_SCENE
+    vehicle::VehiclePhysicsSystem::registerComponents(scene::World::instance());   // CVehicle: drivable vehicles
+    vehicle::vehiclePhysicsSystem().install(scene::World::instance());
+#  if AVER_MODULE_FRAMEWORK
+    aver_fw_set_vehicle_provider(&vehicle::vehicleProvider, &vehicle::vehiclePhysicsSystem());
+#  endif
+#endif
+
+#if AVER_MODULE_SCENE && AVER_MODULE_CAMERA
+    camera::CameraRigSystem::registerComponents(scene::World::instance());   // CCameraRig: gameplay cameras (docs/CAMERAS.md)
+    camera::cameraRigSystem().install(scene::World::instance());
+#  if AVER_MODULE_SOFTBODY_SCENE
+    {   // the probe ignores the cloth and character-proxy layers unless a rig names them in its collisionMask
+        const softbody::Options& so = softbody::softBodySystem().options();
+        u32 skip = 0;
+        if (so.clothLayer >= 0 && so.clothLayer < 32) skip |= 1u << so.clothLayer;
+        if (so.proxyLayer >= 0 && so.proxyLayer < 32) skip |= 1u << so.proxyLayer;
+        camera::cameraRigSystem().options().defaultProbeMask = ~skip;
+    }
+#  endif
+#  if AVER_MODULE_FRAMEWORK
+    aver_fw_set_camera_provider(&camera::cameraRigProvider, &camera::cameraRigSystem());
+    camera::cameraRigSystem().setShakeSink(&aver_fw_camera_shake_add);   // shake_at and the shake modifier feed the existing CameraFx
+    camera::cameraRigSystem().setBobSink(&aver_fw_camera_bob_set);
+#  endif
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_PARTICLES
+    particles::particleSystem().setEffectLibrary(&particles::particleEffects());
+    particles::installEffectSpawner(&particles::particleSystem());   // aver::spawnEffectAt (soft-body dust, vehicle skid smoke)
+#  if AVER_MODULE_FRAMEWORK
+    aver_fw_set_particles_provider(&particles::particleProvider, &particles::particleSystem());
 #  endif
 #endif
 #if AVER_MODULE_AUDIO_SCENE
@@ -258,6 +492,37 @@ inline void tickSoftBodies(f32 dt, const Vec3& viewPos) {
 #endif
 }
 
+// Vehicles, around the physics step (docs/VEHICLES.md): the drivers' pedals, builds and tunes BEFORE aver_phys_step; poses, telemetry, events,
+// damage and sound AFTER it. Both are no-ops without the module. tickVehiclesPost declares vehicles built this frame movable to `mobility`
+// (a game::PlayMobility), so the GI bake treats them like the traffic cars. `viewPos` is the camera, for the audio and the distance tiers.
+inline void tickVehiclesPre(f32 dt, const Vec3& viewPos) {
+#if AVER_MODULE_SCENE && AVER_MODULE_VEHICLE_SCENE
+    vehicle::VehiclePhysicsSystem& sys = vehicle::vehiclePhysicsSystem();
+    sys.setViewPos(viewPos);
+    sys.prePhysics(scene::World::instance(), dt);
+#else
+    (void)dt; (void)viewPos;
+#endif
+}
+template <class Mobility>
+inline void tickVehiclesPost(f32 dt, Mobility& mobility) {
+#if AVER_MODULE_SCENE && AVER_MODULE_VEHICLE_SCENE
+    vehicle::VehiclePhysicsSystem& sys = vehicle::vehiclePhysicsSystem();
+    sys.postPhysics(scene::World::instance(), dt);
+    if (sys.stats().builtThisFrame > 0) mobility.seedMovable(sys.entities());
+#else
+    (void)dt; (void)mobility;
+#endif
+}
+
+// Destroys the vehicles' physics bodies and constraints, voices and queued events, and forgets the parsed specs (so an edited .ocvehicle is read afresh).
+// Before the level goes: the bodies must not outlive the physics world.
+inline void clearVehicles() {
+#if AVER_MODULE_SCENE && AVER_MODULE_VEHICLE_SCENE
+    vehicle::vehiclePhysicsSystem().clear();
+    detail::g_vehicleSpecs.clear();
+#endif
+}
 // Drops per-level state: state-machine instances, boards, crowd/hearing/cover/squad state, pending
 // timers and events. Call when a level is unloaded or Play stops.
 inline void resetGameSystems() {
@@ -269,11 +534,20 @@ inline void resetGameSystems() {
     anim::controlRigSystem().clear();          // and the loaded rigs, so an edited .ocrig / .ocikrig is read afresh
     anim::animSystem().morphs().clearRuntime();   // [wave9/morph] script and sequencer weight overrides, lip-sync
 #endif
+
+#if AVER_MODULE_SCENE && AVER_MODULE_PARTICLES
+    particles::particleSystem().reset();   // live instances, queued spawn-at requests and GPU ranges; recreated on the next tick
+#endif
+    clearVehicles();                           // the CVehicle vehicles, voices and queued events
 #if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
     softbody::softBodySystem().clear();        // bodies, debris entities, queued inbox and events
 #  if AVER_MODULE_RAGDOLL
     detail::g_softProxies.clear();
 #  endif
+#endif
+
+#if AVER_MODULE_SCENE && AVER_MODULE_CAMERA
+    camera::cameraRigSystem().clear();         // rig runtime state, modifiers, the view target and the inbox
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE
     synapse::btSystem().clearStateTrees();   // AI: wave 3 #21 -- instances only; before the boards their tasks may read

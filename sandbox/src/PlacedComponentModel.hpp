@@ -8,6 +8,8 @@
 #include "aver/formats/OcWorld.hpp"
 #include "aver/scene/Components.hpp"
 
+#include "VehicleDetailsModel.hpp"   // vehmodel::attachRefusal
+
 #include <array>
 #include <algorithm>
 #include <cctype>
@@ -72,6 +74,19 @@ inline constexpr PlacedKind kPlacedKinds[] = {
     {"MorphTargets", "Morph Targets",
      "Drives this mesh's blend shapes (facial expressions, lip-sync) from animation, script and the sequencer.",
      "Morph Targets", 0, "CMorphTargets", {".ocface"}},
+    {"CameraRig", "Camera Rig",
+     "Spring-arm camera for this entity: chase, orbit, first person, seat, top-down or fixed, with collision, lag and blends.",
+     "Camera Rig", 0, "CCameraRig", {}},
+    {"Vehicle", "Vehicle",
+     "Makes this mesh a drivable vehicle (.ocvehicle): engine, gearbox, differentials, wheels. Not for traffic cars (those use the vehicle placement token).",
+     "Vehicle", 0, "CVehicle", {".ocvehicle"}},
+
+    {"ParticleEmitter", "Particle Emitter",
+     "Plays a particle effect (.ocparticle) from this placement.",
+     "Particle Emitter", scene::kComponentParticleEmitter, "", {".ocparticle"}},
+    {"SoftField", "Soft Field",
+     "A force, damage, anchor-release, kill or sleep volume for soft bodies (cloth and destructibles) inside its shape.",
+     "Soft Field", 0, "CSoftField", {}},
 };
 inline constexpr usize kPlacedKindCount = sizeof(kPlacedKinds) / sizeof(kPlacedKinds[0]);
 
@@ -101,6 +116,9 @@ struct AttachContext {
     bool alreadyPresent = false;      // the entity carries this component already
     bool hasCloth = false;            // carries a CCloth (one body per entity root: not with a Destructible)
     bool hasDestructible = false;     // carries a CDestructible
+    bool hasVehicle = false;          // carries a CVehicle (a Destructible may not join it: one body per entity root)
+    bool hasRigidBody = false;        // carries a CRigidBody (a Vehicle is its own rigid body)
+    bool hasVehicleToken = false;     // the placement has a `vehicle` token (a traffic car)
 };
 
 namespace detail {
@@ -134,7 +152,18 @@ inline bool canAttach(const AttachContext& c, const PlacedKind& kind, std::strin
     }
     if (t == "Cloth" && c.hasDestructible) return deny(why, "This entity is already Destructible; one soft body per entity.");
     if (t == "Destructible" && c.hasCloth) return deny(why, "This entity is already Cloth; one soft body per entity.");
-    return true;   // Brain, SmartObject, Cloth, Destructible and MorphTargets need only a mesh placement
+    if (t == "Destructible" && c.hasVehicle)
+        return deny(why, "This entity is a Vehicle; its chassis is one body. Put the Destructible on a child (the spec's DAMAGE shell).");
+    if (t == "Vehicle") {
+        vehmodel::ConflictFacts f;
+        f.hasRigidBody = c.hasRigidBody;
+        f.hasVehicleToken = c.hasVehicleToken;
+        f.hasObjectClip = c.hasObjectAnim;
+        f.hasDestructible = c.hasDestructible;
+        if (const char* reason = vehmodel::attachRefusal(f)) return deny(why, reason);
+        return true;
+    }
+    return true;   // Brain, SmartObject, Cloth, Destructible, MorphTargets, CameraRig, ParticleEmitter and SoftField need only a mesh placement
 }
 
 // True when `kind` may be removed. A Skeletal Mesh with dependents is refused (no cascade, so one undo entry
@@ -204,6 +233,15 @@ inline fmt::OcPlacedComponent makeNewRecord(const PlacedKind& kind) {
     else if (t == "MotionMatcher") r.kv.emplace_back("input", "velocity");
     else if (t == "Cloth") r.kv.emplace_back("preset", "cloth_light");
     else if (t == "Destructible") r.kv.emplace_back("preset", "metal");
+
+    else if (t == "Vehicle") r.kv.emplace_back("preset", "car");
+    else if (t == "CameraRig") r.kv.emplace_back("preset", "chase");
+    else if (t == "SoftField") {
+        r.kv.emplace_back("kind", "radial");
+        r.kv.emplace_back("shape", "sphere");
+        r.kv.emplace_back("extent", "100,100,100");
+        r.kv.emplace_back("strength", "300");
+    }
     return r;
 }
 

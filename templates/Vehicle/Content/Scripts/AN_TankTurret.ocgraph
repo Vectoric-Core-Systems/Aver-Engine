@@ -1,0 +1,49 @@
+OCGRAPH 1
+DOMAIN gameplay
+# THE TURRET. The tank in Maps/Default.ocworld has a child named Turret (Meshes/TankTurret.ocmesh). This actor, placed in the level, adds
+# the mouse's horizontal movement to a yaw it remembers and writes that as the turret's local rotation, only while the tank has a driver.
+# The barrel's elevation is left out on purpose (the template shows the vehicle, not a weapon).
+NAME TankTurret
+DESCRIPTION While somebody drives the tank, the mouse turns the turret child about its ring.
+
+CLASS AN_TankTurret Actor
+
+PARAM deltaTime float
+VAR yaw float 0
+
+ENTRY tick OnTick
+NODE dt Param param=deltaTime
+NODE tank FindEntity name=Tank
+NODE tankDrv AN_VehicleDriver
+NODE tankDrvF IntToFloat
+NODE half ConstFloat value=0.5
+NODE busy Greater
+NODE tick OnTick
+NODE gate Branch
+NODE mouse MouseDelta
+NODE scale ConstFloat value=0.15
+NODE turn Multiply
+NODE prev GetVar var=yaw
+NODE next Add
+NODE store SetVar var=yaw
+NODE turret FindEntity name=Turret
+NODE zero ConstFloat value=0.0
+NODE rotate SetLocalRotation
+LINK tank.entity tankDrv.entity
+LINK tankDrv.driver tankDrvF.a
+LINK tankDrvF.result busy.a
+LINK half.value busy.b
+LINK tick.exec gate.exec
+LINK busy.result gate.cond
+LINK gate.true mouse.exec
+LINK mouse.deltaX turn.a
+LINK scale.value turn.b
+LINK prev.value next.a
+LINK turn.result next.b
+LINK mouse.then store.exec
+LINK next.result store.value
+LINK store.then rotate.exec
+LINK turret.entity rotate.entity
+LINK next.result rotate.yaw
+LINK zero.value rotate.pitch
+LINK zero.value rotate.roll

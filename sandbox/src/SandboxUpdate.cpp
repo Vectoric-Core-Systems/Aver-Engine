@@ -766,6 +766,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         // Focus is the view (pawn's eye while possessed, free camera while ejected): cars far from it think less often.
         playProf_.begin(editor::PlayPhase::Vehicles);
         vehicles_.prePhysics(t.dt, camPos_);
+
+        game::tickVehiclesPre(t.dt, camPos_);
         playProf_.end(editor::PlayPhase::Vehicles);
 #endif
         playProf_.begin(editor::PlayPhase::Gameplay);
@@ -774,6 +776,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
         playProf_.begin(editor::PlayPhase::Vehicles);
         vehicles_.postPhysics(scene::World::instance());
+
+        game::tickVehiclesPost(t.dt, playMobility_);
         playProf_.end(editor::PlayPhase::Vehicles);
 #endif
     }
@@ -827,7 +831,14 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // Unconditionally (like animation clock): previews outside Play should still show effects.
     {
         const auto tickStart = std::chrono::steady_clock::now();
+        playProf_.begin(editor::PlayPhase::Particles);
         particles::particleSystem().tick(scene::World::instance(), t.dt);
+        playProf_.end(editor::PlayPhase::Particles);
+#if AVER_MODULE_FRAMEWORK
+        for (scene::Entity fe : particles::particleSystem().finished())
+            aver_fw_event_post("Particles.EffectFinished", static_cast<int32_t>(fe), static_cast<int32_t>(fe));
+#endif
+        particles::particleSystem().finished().clear();
         particleTickAccumSec_ += std::chrono::duration<f64>(std::chrono::steady_clock::now() - tickStart).count();
         ++particleTickFrames_;
     }
@@ -942,9 +953,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
     // Ejected: leave camPos_/yaw_/pitch_ where the user flew them (drivePlayCamera snaps view to pawn every frame) and clear owner-hide root.
     // Re-possessing calls drivePlayCamera() again next frame.
-    if (playEjected()) firstPersonPawn_ = scene::kInvalidEntity;
+    if (playEjected()) { firstPersonPawn_ = scene::kInvalidEntity; playView_ = game::PlayView{}; }
     else {
-        drivePlayCamera();
+        drivePlayCamera(t.dt);
 #if AVER_MODULE_FRAMEWORK
         if (playSessionActive()) game::applyCameraFx(camPos_, yaw_, pitch_, t.dt);   // the player's shake/bob scales, Play camera only (never the free-fly camera)
 #endif
@@ -962,6 +973,23 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
             viewFwdOv_ = game::cameraForward(sp.yaw, sp.pitch);
             // The pawn is in view now, not behind the eye.
             if (seqEditor_.playRunning()) firstPersonPawn_ = scene::kInvalidEntity;
+        }
+    }
+#endif
+
+#if AVER_MODULE_CAMERA && AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
+    // Details > Camera Rig > Look through: the viewport shows the rig's stateless preview pose (no lag, no blend, no modifiers) until Esc.
+    if (cameraLookRig_ != scene::kInvalidEntity) {
+        scene::World& lookWorld = scene::World::instance();
+        if (!lookWorld.valid(cameraLookRig_)) {
+            cameraLookRig_ = scene::kInvalidEntity;
+        } else {
+            const camera::RigResult look = camera::cameraRigSystem().preview(lookWorld, cameraLookRig_, camera::RigFrame{});
+            if (look.active) {
+                viewOverride_ = true;
+                viewPosOv_ = look.pov.pos;
+                viewFwdOv_ = game::cameraForward(look.pov.yaw, look.pov.pitch);
+            }
         }
     }
 #endif
@@ -1098,7 +1126,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 
     const Vec3 fwd = viewForward();
     const f32 aspect = viewAspect();
-    const game::CameraMatrices cam = game::pushCamera(*e.device(), viewPos(), fwd, aspect);
+    const game::CameraMatrices cam = game::pushCamera(*e.device(), viewPos(), fwd, aspect, playView_);
     invVP_ = cam.invVP; viewProj_ = cam.viewProj; eye_ = viewPos();
 
     // One member for one value; fixes dead code in fog handling.

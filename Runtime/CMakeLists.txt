@@ -157,6 +157,17 @@ endif()
 if(TARGET Aver.SoftBody.Scene)
   target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.SoftBody.Scene)
 endif()
+
+# Drivable vehicles (brings AVER_MODULE_VEHICLE_SCENE=1 and AVER_MODULE_VEHICLE=1). PUBLIC like soft bodies: GameSystemsWiring.hpp registers and ticks the system in both hosts.
+if(TARGET Aver.Vehicle.Scene)
+  target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Vehicle.Scene)
+endif()
+
+# Gameplay cameras (brings AVER_MODULE_CAMERA=1): GameCamera.hpp drives the rig system from the shared play camera, LevelComponents.cpp applies the
+# COMPONENT CameraRig record, and GameSystemsWiring.hpp registers the component and installs the framework provider.
+if(TARGET Aver.Camera)
+  target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Camera)
+endif()
 if(TARGET Aver.Render.SoftBody)
   target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Render.SoftBody)
 endif()

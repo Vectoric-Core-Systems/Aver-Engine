@@ -47,6 +47,7 @@ enum class PlayPhase : u8 {
     GraphTicks,   // ScriptHost::tickGraphClassInstances: class-placed graphs' OnTick
     WorldFlush,   // World::flush: deferred destroys + world-matrix recomposition, O(entities)
     SoftBody,     // game::tickSoftBodies: cloth and destructibles (readback, dents, tears, skin pushes)
+    Particles,    // ParticleSystem::tick: CPU-tier simulation, GPU job emission, spawn-at drain (the GPU time is in the GPU timings)
     Count
 };
 
@@ -61,6 +62,7 @@ inline constexpr const char* kPlayPhaseLabel[kPlayPhaseCount] = {
     "Graph ticks",
     "World flush",
     "Soft bodies",
+    "Particles",
 };
 
 class PlayProfile {

@@ -178,6 +178,12 @@ struct CAnimator {
 // spawn path), so a POSITIVE "playing" bit would attach a component that silently does nothing --
 // exactly CMeshRenderer's visible-bit mistake, repeated. Zero now means "emitting".
 inline constexpr u32 kParticleEmitterStopped = 0x1;
+// Wave 10 (append-only, zero default == off). AutoDestroy: destroy the entity once the emitter is stopped and its
+// particles have drained (raises Particles.EffectFinished). ForceCpu / ForceGpu pin the simulation tier of this
+// instance regardless of the effect's SIM record; the project key RENDER.PARTICLEGPU 0 still wins over ForceGpu.
+inline constexpr u32 kParticleEmitterAutoDestroy = 0x2;
+inline constexpr u32 kParticleEmitterForceCpu    = 0x4;
+inline constexpr u32 kParticleEmitterForceGpu    = 0x8;
 
 // One emitter INSTANCE: an opaque effect id plus this entity's own playback clock. The effect's
 // actual parameters -- emission shape and rate, lifetime, velocity, gravity, damping, size and

@@ -1,5 +1,7 @@
 #include "aver/softbody/RenderBinding.hpp"
 
+#include "aver/softbody/ProxyBind.hpp"
+
 #include <unordered_map>
 
 namespace aver::softbody {
@@ -13,6 +15,25 @@ RenderBinding RenderBinding::identity(const Cage& cage) {
         for (u32 k = 0; k < 3; ++k) rb.indices.push_back(cage.triangles[t].v0[k]);
         rb.triSim.push_back(t);
     }
+    rb.finalize(static_cast<u32>(cage.triangles.size()));
+    return rb;
+}
+
+RenderBinding RenderBinding::forProxy(const Cage& cage, const ProxyBind& bind, const std::vector<u32>& indices) {
+    RenderBinding rb;
+    const u32 n = static_cast<u32>(bind.homeTri.size());
+    rb.vertexParticle.resize(n, 0);
+    for (u32 v = 0; v < n; ++v) {
+        const u32 home = bind.homeTri[v];
+        if (home >= cage.triangles.size()) continue;
+        u32 best = 0;
+        for (u32 k = 1; k < 3; ++k)
+            if (bind.bary[static_cast<usize>(v) * 3 + k] > bind.bary[static_cast<usize>(v) * 3 + best]) best = k;
+        rb.vertexParticle[v] = cage.triangles[home].v0[best];
+    }
+    rb.indices = indices;
+    rb.triSim.assign(indices.size() / 3, kNone);
+    for (u32 r = 0; r < rb.triSim.size() && r < bind.triTri.size(); ++r) rb.triSim[r] = bind.triTri[r];
     rb.finalize(static_cast<u32>(cage.triangles.size()));
     return rb;
 }

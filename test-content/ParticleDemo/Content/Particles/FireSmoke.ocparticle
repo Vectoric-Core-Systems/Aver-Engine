@@ -1,0 +1,65 @@
+OCPARTICLE 2
+NAME Fire and Smoke
+# Wave 10 demo: three emitters in one system. Flames (additive) die into Smoke (alpha-blended, ambient-lit, sorted back to
+# front) through an ONEVENT death rule, and a few sparks fly off with their own gravity. Flames and Sparks are their own light.
+# Intensity (a user parameter a script can set) is the flames' curl-noise strength: how violently they lick.
+PARAM Intensity float 40
+EMITTER Flames
+SIM auto
+SHAPE disc 25
+BLEND additive
+EMISSION 320 0 3000
+LIFETIME 0.7 1.2
+DIRECTION 0 0 1 12
+SPEED 60 140
+GRAVITY 0 0 80
+DAMPING 0.5
+SIZE 22 6
+COLORCURVE 0 1 0.75 0.3 0.8 0.35 1 0.4 0.08 0.6 1 0.35 0.05 0.02 0
+SPRITE camera
+SORT none
+LIGHTING unlit
+FOG on
+BOUNDS 600
+MODULE spawn.sizescale min=0.7 max=1.3
+MODULE update.curlnoise freq=0.02 strength=@Intensity scroll=0.8 octaves=2 seed=3
+ONEVENT death SPAWN Smoke 1
+EMITTER Smoke
+SIM auto
+SHAPE point 0 0 0
+BLEND alphablend
+EMISSION 0 0 2500
+LIFETIME 3 5
+DIRECTION 0 0 1 25
+SPEED 30 70
+GRAVITY 0 0 35
+DAMPING 0.35
+SIZE 30 110
+COLORCURVE 0 0.18 0.17 0.16 0 0.2 0.2 0.19 0.18 0.35 0.8 0.28 0.28 0.28 0.18 1 0.3 0.3 0.3 0
+SPRITE camera
+SORT depth
+LIGHTING ambient
+FOG on
+GI on
+BOUNDS 1500
+MODULE spawn.sizescale min=0.8 max=1.4
+MODULE spawn.rotation minDeg=0 maxDeg=360 spinMin=-25 spinMax=25
+MODULE update.curlnoise freq=0.008 strength=60 scroll=0.2 octaves=3 seed=11
+EMITTER Sparks
+SIM auto
+SHAPE sphere 12
+BLEND additive
+EMISSION 30 0 2048
+LIFETIME 0.8 1.6
+DIRECTION 0 0 1 55
+SPEED 220 420
+GRAVITY 0 0 -700
+DAMPING 0.05
+SIZE 2 0.5
+COLOR start 1 0.8 0.35 1
+COLOR end 1 0.25 0.05 0
+SPRITE velocity stretch 0.5
+SORT none
+LIGHTING unlit
+FOG on
+BOUNDS 700

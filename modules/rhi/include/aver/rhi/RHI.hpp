@@ -106,6 +106,8 @@ struct DeviceCaps {
     bool gBuffer = false;
     // blended draws are replayed after the opaque scene (Voxi's ray-traced glass composite).
     bool blendedReplay = false;
+    // drawIndexedInstanced + drawIndexedIndirect + dispatchIndirect (particles' GPU tier gates on it).
+    bool indirect = false;
 };
 
 // A development clamp on what a device REPORTS, so capability-gated fallback paths can be run on

@@ -9,6 +9,9 @@
 #if AVER_MODULE_PBR
 #include "aver/formats/ImportCook.hpp"
 #endif
+#if AVER_MODULE_VEHICLE
+#include "VehicleEditor.hpp"   // New Vehicle
+#endif
 
 namespace aver {
 
@@ -288,6 +291,26 @@ void SandboxApp::cbCreateFoliageType() {
     refreshFoliagePalette();
 #endif
 }
+
+#if AVER_MODULE_VEHICLE
+// Writes a starter .ocvehicle (the template's sedan, a complete vehicle that is valid as it stands) and opens it in the Vehicle editor.
+void SandboxApp::cbCreateVehicleAsset() {
+    const std::filesystem::path target = cbFreeAssetPath("NewVehicle", ".ocvehicle");
+    if (target.empty()) return;
+    const std::string text = editor::vehicleStarterText();
+    if (text.empty()) {
+        cbStatus_ = "No starter vehicle is available in this build";
+        return;
+    }
+    std::string why;
+    if (!editor::writeNewFile(target.string(), text, &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new vehicle asset failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+#endif
 
 // Writes a starter .ocinput (Input Scheme) and opens it. Unconditional, like cbCreateFoliageType
 // above (see OcInput.hpp's "NO ENGINE DEPENDENCY, DELIBERATELY"). Text via fmt::writeOcinput --
@@ -1245,6 +1268,10 @@ void SandboxApp::drawContentBrowser() {
 #endif
         if (ImGui::MenuItem("New Foliage Type"))    cbCreateFoliageType();
         uiReg_.track("cb.add.foliageType");
+#if AVER_MODULE_VEHICLE
+        if (ImGui::MenuItem("New Vehicle"))         cbCreateVehicleAsset();
+        uiReg_.track("cb.add.vehicle");
+#endif
         if (ImGui::MenuItem("New Instance Set")) {
             const std::filesystem::path target = project_.valid() ? freeInstanceSetPath(project_.contentDir()) : std::filesystem::path();
             std::string why;
@@ -1892,6 +1919,7 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         {".ocretarget", {ICON_LINK,       IM_COL32(255, 170, 110, 255), "IK Retargeter"}},
         {".ocrig",      {ICON_TUNE,       IM_COL32(255, 170, 110, 255), "Control Rig"}},
         {".ocsoft",     {ICON_TUNE,       IM_COL32(120, 210, 190, 255), "Soft Body (cloth / destructible)"}},
+        {".ocvehicle",  {ICON_TUNE,       IM_COL32(255, 190,  70, 255), "Vehicle Asset"}},
         {".ocmotion",   {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Motion Matching Database"}},
         {".ocmbake",    {ICON_FILE,       IM_COL32(150, 130, 190, 255), "Motion Matching Bake"}},
         {".ocseq",      {ICON_WAVE,       IM_COL32(150, 190, 255, 255), "Level Sequence Asset"}},   // [wave5/sequencer]

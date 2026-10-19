@@ -1,0 +1,25 @@
+OCVEHICLE 1
+# An all-wheel-drive hatchback. The centre differential is limited-slip; the REAR axle's differential is the one to switch: set
+# `diff open`, `diff lsd` or `diff locked` on AXLE 1 in the Vehicle editor, save, press Play again and drive the ice-split lane
+# (left wheels on ice, right on tarmac): open spins the iced wheel, limited slip sends torque to the gripping one, locked pulls straight.
+NAME Hatchback
+KIND wheeled
+BODY half 190 85 32 clearance 22 com 0 0 38 mass 1150 pitchroll 60
+ENGINE torque 320 minrpm 900 maxrpm 6800 inertia 0.35 damping 0.22
+CURVE 0 0.75 0.5 1 0.9 0.95 1 0.8
+GEARBOX auto forward 3.55 2.05 1.38 1 0.82 reverse 3.4 switch 0.45 clutchrelease 0.3 latency 0.5 up 0.62 down 0.22 clutch 8
+CENTER lsd 1.5
+AXLE 0 final 3.8 diff open split 0.5 lsd 1.4 share 0 antiroll 800
+AXLE 1 final 3.8 diff lsd split 0.5 lsd 2.2 share 0 antiroll 600
+TYRE street long 0 0 0.06 1.2 0.2 1 lat 0 0 3 1.2 20 1
+WHEELCLASS street radius 30 width 20 susp 5 28 hz 2.1 damping 0.5 brake 1400 handbrake 2200 inertia 0.8 spindamping 0.2 tyre street
+WHEEL FL class street hub 125 -72 30 steer 36 driven 1 handbrake 0 node WheelFL
+WHEEL FR class street hub 125 72 30 steer 36 driven 1 handbrake 0 node WheelFR
+WHEEL RL class street hub -115 -72 30 steer 0 driven 1 handbrake 1 node WheelRL
+WHEEL RR class street hub -115 72 30 steer 0 driven 1 handbrake 1 node WheelRR
+ASSIST abs 1 absslip 0.25 absrelease 8 tcs 1 tcsslip 0.3 steerin 3 steerout 5 throttlein 6 throttleout 8 brakein 8 reversebrake 1 reversespeed 50 holdbrake 0.3 holdspeed 30 skidslip 0.45 skidangle 12
+STEERCURVE 0 1 1500 0.6 3500 0.35
+AERO drag 0.3 downforce 0.4
+SEAT driver 15 -32 52 exit -10 -130 0
+DAMAGE health 900 crash 550 energy 0.5 radius 70
+CAMERA modes chase hood cockpit arm 520 eye 20 -32 100 hood 130 0 88

@@ -1,0 +1,25 @@
+OCGRAPH 1
+DOMAIN gameplay
+# THE GAME MODE. It names the pawn and the controller, which is what makes the play session spawn and possess them (the
+# FirstPerson template's AN_FPRules explains why both are required). Two copies of this tick in a headless log because the map-less game
+# mode is spawned once by begin_play; they do not interfere.
+NAME VehicleRules
+DESCRIPTION The game mode, as a graph: the play session's pawn, controller and a round clock.
+
+CLASS AN_VehicleRules GameMode pawn=AN_VehicleDriver controller=AN_VehicleController
+
+PARAM deltaTime float
+VAR elapsed float 0
+
+ENTRY tick OnTick
+NODE dt Param param=deltaTime
+NODE tick OnTick
+NODE prev GetVar var=elapsed
+NODE sum Add
+NODE store SetVar var=elapsed
+NODE report GetVar var=elapsed
+LINK prev.value sum.a
+LINK dt.value sum.b
+LINK tick.exec store.exec
+LINK sum.result store.value
+OUT report value

@@ -732,7 +732,7 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // pins a test against). Ancestor walk, not a direct-parent compare: a COMP tree can nest
         // several hops. Guaranteed to terminate -- World::setParent already refuses a cycle.
         bool ownerHiddenHere = false;
-        if ((mr->flags & scene::kMeshRendererHiddenFromOwner) &&
+        if (((mr->flags & scene::kMeshRendererHiddenFromOwner) || options.ownerHideAll) &&
             options.ownerHideRoot != scene::kInvalidEntity) {
             for (scene::Entity anc = ent; w.valid(anc); anc = w.parent(anc)) {
                 if (anc == options.ownerHideRoot) { ownerHiddenHere = true; break; }

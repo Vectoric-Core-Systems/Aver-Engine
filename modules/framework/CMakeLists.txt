@@ -18,6 +18,9 @@ add_library(Aver.Framework SHARED
   src/TimersEventsAbi.cpp
   src/BlackboardAbi.cpp
   src/AnimAbi.cpp
+
+  # Particle spawn-at, user parameters and emitter control relayed to the particle system (wave 10, docs/PARTICLES.md).
+  src/ParticlesAbi.cpp
   # Model import (FBX, glTF) relayed to the editor's importers (wave 9, docs/plans/wave9/FBX_IMPORT.md).
   src/ImportAbi.cpp
   # IK goals, foot-IK weights and control-rig inputs relayed to the rig system (wave 5, docs/ANIM_IK_RETARGET.md).
@@ -27,6 +30,13 @@ add_library(Aver.Framework SHARED
   src/MorphAbi.cpp
   # Cloth and destruction calls relayed to the soft-body system's provider (docs/SOFTBODY.md).
   src/SoftBodyAbi.cpp
+
+  # Vehicle calls relayed to the vehicle system's provider (wave 10, docs/VEHICLES.md).
+  src/VehicleAbi.cpp
+    src/SoftFieldAbi.cpp
+
+  # Gameplay camera calls (rigs, view targets, modifiers, pose) relayed to the camera system's provider (wave 10, docs/CAMERAS.md).
+  src/CameraAbi.cpp
   src/SequenceAbi.cpp
   src/LocalizationAbi.cpp
   # Accessibility: the option table, captions, speech and camera feel (wave 9, docs/ACCESSIBILITY.md).
