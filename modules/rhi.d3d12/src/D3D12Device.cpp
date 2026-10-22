@@ -5579,6 +5579,14 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
             const UpscalerNeeds srNeeds = upscaler_->needs();
             const bool gbufForSr = (any(srNeeds, UpscalerNeeds::MotionVectors) || any(srNeeds, UpscalerNeeds::Normal)) &&
                                    gBufferWritten() && gbufWrittenFrame_ && gbufVelocity_ && gbufViewZ_ && gbufNormalRough_;
+#if AVER_RHI_TRACK_STATE
+            // These native barriers bypass the generic tracker: keep the adopted handles in step, or the upscaler's own
+            // barriers (NeuRAA starts from ShaderResource) and NRD2's next frame (from RenderTarget) read as mismatches.
+            const auto noteGbufState = [&](ResourceState st) {
+                for (const TextureHandle h : {gbufVelocityTexHandle_, gbufViewZTexHandle_, gbufNormalRoughTexHandle_})
+                    if (RhiTexture* t = rhiFactory_->texture(h)) t->states.assign(t->states.size(), st);
+            };
+#endif
             if (gbufForSr) {
                 D3D12_RESOURCE_BARRIER b[3] = {
                     transition(gbufVelocity_.Get(),    D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
@@ -5586,6 +5594,9 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                     transition(gbufNormalRough_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
                 };
                 cmdList_->ResourceBarrier(3, b);
+#if AVER_RHI_TRACK_STATE
+                noteGbufState(ResourceState::ShaderResource);
+#endif
                 in.motionVectors   = gBufferVelocityTexture();
                 in.depth           = gBufferViewZTexture();
                 in.normalRoughness = gBufferNormalRoughnessTexture();
@@ -5601,6 +5612,9 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
                     transition(gbufNormalRough_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
                 };
                 cmdList_->ResourceBarrier(3, b);
+#if AVER_RHI_TRACK_STATE
+                noteGbufState(ResourceState::RenderTarget);
+#endif
             }
 
             // Looked up again: execute() may create textures (an upscaler's history on first use), and
