@@ -52,6 +52,13 @@ enum MaterialFlag : u32 {
     // 4 weightmap B (layers 5..7), 5 the parameter texture (8 x 9 R32Float, TerrainLayers.hpp).
     // Clears SlopeBlend (they do not combine). Nothing about a material without it changes.
     MaterialFlag_TerrainLayers       = 1u << 17,
+
+    // ---- wave11 strand hair ----
+    // MaterialDesc::shadingModel == Hair. The shader selects AVER_MODEL_HAIR from this bit (AVER_MAT_HAIR in material_prelude.hlsl), so neither
+    // backend's per-draw shading-model constant changes, and reads its parameters from nine slots of this block that the hair model has no other
+    // use for. packMaterial never sets MaterialFlag_Coat or MaterialFlag_Subsurface alongside it, so the standard model, run on a ray hit, sees
+    // those slots as zero weights and shades the fibre as a plain dielectric.
+    MaterialFlag_Hair                = 1u << 18,
 };
 
 // The packed per-material GPU constant block. MIRRORS the HLSL `cbuffer AverMaterial` in

@@ -73,6 +73,17 @@ void scaleMeshForBody(const f32* localPositions, u32 vertexCount, const u32* loc
                       u32 indexCount, const Vec3& scale,
                       std::vector<f32>& outPositions, std::vector<u32>& outIndices);
 
+// The physical surfaces of a collision mesh (SHAPES_MATERIALS): the palette of surface ids (0 = none, at most 32) and one
+// palette index per triangle, as GameContent::CollisionMesh holds them. Pointers into data the host keeps alive.
+struct MeshSurfaces {
+    const u8* triPalette = nullptr;
+    u32 triCount = 0;
+    const i32* palette = nullptr;
+    u32 paletteCount = 0;
+    // True when this describes a mesh of `indexCount` indices triangle for triangle.
+    bool usable(u32 indexCount) const { return triPalette && palette && paletteCount > 0 && triCount == indexCount / 3; }
+};
+
 #if AVER_MODULE_PHYSICS
 // Creates fitStaticBox(worldXf, localMin, localMax) as a static body: aver_phys_add_static_box, then
 // aver_phys_body_set_rotation unless the fit's rotation is EXACTLY identity (x==0 && y==0 && z==0 &&
@@ -93,8 +104,12 @@ i32 addStaticBoxBody(const Transform& worldXf, const Vec3& localMin, const Vec3&
 // Returns the ABI's handle, or 0 if it refused (fewer than 3 vertices/indices, or Jolt itself refused
 // the shape -- e.g. every triangle degenerate). Same contract as addStaticBoxBody otherwise: the
 // caller has already checked aver_phys_ready() and owns aver_phys_set_entity.
+//
+// `surfaces`, when it describes this mesh triangle for triangle (MeshSurfaces::usable), gives the body the mesh's physical
+// surfaces: it is built through aver_phys_shape_mesh and aver_phys_body_from_shape instead of aver_phys_add_mesh. Null, or a
+// description that does not fit, is exactly the call this function always made.
 i32 addStaticMeshBody(const Transform& worldXf, const f32* localPositions, u32 vertexCount,
-                      const u32* indices, u32 indexCount);
+                      const u32* indices, u32 indexCount, const MeshSurfaces* surfaces = nullptr);
 
 // The fitted box of addStaticBoxBody, but as a convex hull of its eight corners around the
 // PLACEMENT'S POSITION rather than around the box's own centre: the body's origin is the entity's
@@ -180,9 +195,22 @@ struct InstantiateOptions {
     // that names the mesh.
     std::function<bool(u64 meshId, const f32*& outPositions, u32& outVertexCount,
                        const u32*& outIndices, u32& outIndexCount)> localTrianglesFor;
+    // The physical surfaces of the triangles localTrianglesFor offers for the same mesh id: one palette index per triangle
+    // (outTriCount of them) into outSurfaces (surface ids, 0 = none, at most 32). True with a palette means the mesh's shape
+    // carries those surfaces, so a raycast on it reports the slot's surface. False, or no callback, is today's behaviour: a
+    // shape with no materials. Pointers into data the host keeps alive, as localTrianglesFor's are.
+    std::function<bool(u64 meshId, const u8*& outTriPalette, u32& outTriCount,
+                       const i32*& outSurfaces, u32& outSurfaceCount)> localTriangleSurfacesFor;
     // Physics mesh shapes by mesh id, kept by the caller across calls (a streamer's batches) and released
     // by it; null gives each call its own cache, released at its end.
     std::unordered_map<u64, i32>* meshShapes = nullptr;
+
+    // The physics shape binary cache (physics_state_abi.h; modules/world PhysicsShapeCache.hpp): the directory a mesh's built BVH is kept in
+    // (world::physicsShapeCacheDir(projectDir)) and the host's source key for a mesh id (everything its collision triangles derive from;
+    // 0 = not cacheable). Both empty, the default, builds every shape as before. The cache itself is off unless PHYSICS.SHAPECACHE
+    // (aver_phys_shape_cache_enabled) says otherwise.
+    std::string shapeCacheDir;
+    std::function<u64(u64 meshId)> shapeKeyFor;
 
     // How far through the placement loop instantiate() is: called with (done, w.placements.size())
     // at least every 256th placement, and once more at the very end with done == total -- even for a

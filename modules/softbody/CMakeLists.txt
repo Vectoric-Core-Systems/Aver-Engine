@@ -22,6 +22,10 @@ aver_add_module(Aver.SoftBody
     src/Fields.cpp
     src/SoftState.cpp
     src/ProxyBind.cpp
+
+    # Wave 11 (docs/plans/wave11/SOFTBODY_HAIR.md): the jelly lattice and the rope planner, pure arithmetic like the rest.
+    src/Lattice.cpp
+    src/Rope.cpp
   DEPS
     Aver.Core
     Aver.Formats

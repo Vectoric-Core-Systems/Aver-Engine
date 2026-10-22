@@ -185,3 +185,101 @@ jobs:
           name: ctest-${{ matrix.os }}-${{ matrix.config }}
           path: build-ci/Testing/Temporary/
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------------------
+  # PHYSICS DETERMINISM (docs/plans/wave11/WORLD_STATE_DEBUG.md, 2.9). The evidence for or against the sentence "the simulation is
+  # bit-identical across Windows and macOS", which this repository does NOT make until this job says so.
+  #
+  # Builds only the two physics suites that hash the simulation, with AVER_PHYSICS_CROSS_PLATFORM=ON (Jolt's cross-platform
+  # deterministic mode, and no FMA contraction in the engine's own fixed-step float code), on Windows and macOS, runs them, and keeps
+  # the golden checkpoints PhysicsDeterminismTest writes (AVER_PHYSICS_GOLDEN_OUT: a precision line, then "step hash" lines, nothing
+  # that names the platform). The compare job diffs the two files. A difference is a FINDING (continue-on-error), not a red build: the
+  # likeliest cause is the vehicle driver aids in PhysicsVehicleExt.cpp, plain float arithmetic that two compilers may round
+  # differently. The claim is made only when the files are equal AND the checkpoints are pasted into kGoldenSingle in the test.
+  physics-determinism:
+    name: physics determinism ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-15]
+    env:
+      VULKAN_SDK_VERSION: 1.4.363.0
+      AVER_PHYSICS_GOLDEN_OUT: golden-${{ matrix.os }}.txt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pin the .NET SDK global.json asks for
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+
+      # The whole tree is configured (only two targets are built), so the macOS leg needs what the Unix job above installs.
+      - name: macOS packages (Ninja, SDL 3, and the LunarG SDK for MoltenVK, the loader and DXC)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install ninja sdl3
+          curl -sSL -o vulkansdk.zip "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/mac/vulkansdk-macos-${VULKAN_SDK_VERSION}.zip"
+          unzip -q vulkansdk.zip
+          app=$(ls -d *.app | head -1)
+          sudo "./${app}/Contents/MacOS/$(basename "${app}" .app)" --root "$HOME/VulkanSDK/${VULKAN_SDK_VERSION}" --accept-licenses --default-answer --confirm-command install com.lunarg.vulkan.core com.lunarg.vulkan.usr
+          echo "VULKAN_SDK=$HOME/VulkanSDK/${VULKAN_SDK_VERSION}/macOS" >> "$GITHUB_ENV"
+
+      # pwsh on both OSes (it is on every hosted runner): Git Bash's /usr/bin/link would shadow MSVC's link.exe on Windows.
+      - name: Configure (cross-platform deterministic mode ON)
+        shell: pwsh
+        run: cmake -S . -B build-det -G Ninja -DCMAKE_BUILD_TYPE=Release -DAVER_BUILD_TESTS=ON -DAVER_PHYSICS_CROSS_PLATFORM=ON
+
+      - name: Build the two physics suites
+        shell: pwsh
+        run: cmake --build build-det --target PhysicsStateTest PhysicsDeterminismTest --parallel
+
+      - name: Run PhysicsStateTest
+        shell: pwsh
+        run: ./build-det/bin/PhysicsStateTest
+
+      - name: Run PhysicsDeterminismTest
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./build-det/bin/PhysicsDeterminismTest
+
+      - name: Keep the golden checkpoints
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: physics-golden-${{ matrix.os }}
+          path: golden-${{ matrix.os }}.txt
+          if-no-files-found: warn
+
+  physics-determinism-compare:
+    name: physics determinism, Windows against macOS
+    needs: physics-determinism
+    if: always()
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: physics-golden-*
+          merge-multiple: true
+
+      - name: Diff the checkpoints
+        shell: bash
+        run: |
+          ls -l
+          echo "--- windows-2022"; cat golden-windows-2022.txt
+          echo "--- macos-15";     cat golden-macos-15.txt
+          if diff golden-windows-2022.txt golden-macos-15.txt; then
+            echo "EQUAL: Windows and macOS hashed the golden scene identically. Paste these into kGoldenSingle in PhysicsDeterminismTest.cpp."
+          else
+            echo "DIFFERENT: a finding, not a claim. The cross-platform determinism claim stays unmade."
+            exit 1
+          fi

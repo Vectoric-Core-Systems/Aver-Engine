@@ -45,6 +45,9 @@
 #if AVER_MODULE_RENDER_SOFTBODY
 #  include "aver/render/SoftBodyScene.hpp"
 #endif
+#if AVER_MODULE_RENDER_HAIR
+#  include "aver/render/HairScene.hpp"
+#endif
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/VoxiRenderer.hpp"
 #endif
@@ -668,6 +671,22 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // Soft bodies after skinning, in the order the editor's posedHandle has always asked: CSoftBody may sit on a skinned mesh.
         if (!posedMesh && options.softBodies) posedMesh = options.softBodies->drawHandle(ent);
 #endif
+        // Strand hair is in the acceleration structure only when its CHair asks (kHairRayTraced); a ribbon mesh rewritten every frame is not worth a BLAS
+        // refit otherwise, and hair is not authored for reflections or RT shadows. True only for the draw child of a hair that is not ray traced.
+        bool hairNoRay = false;
+        bool hairNoShadow = false;   // CHair kHairNoShadow: the strands stay out of the shadow cascades too
+#if AVER_MODULE_RENDER_HAIR
+        // Strand hair last: the draw child of a CHair carries nothing else, so the order among the three cannot matter, and it is the cheapest to ask
+        // (an empty map for every level without hair). HairSystem writes the groom's bounds into the child's CMeshRenderer when it makes it, which is
+        // why a claimed entity skips the asset-box bounds (the placeholder cube's) below.
+        if (!posedMesh && options.hair) {
+            posedMesh = options.hair->drawHandle(ent);
+            hairNoRay = posedMesh != 0 && !options.hair->inRayTracing(ent);
+            hairNoShadow = posedMesh != 0 && !options.hair->castsShadow(ent);
+        }
+#endif
+        (void)hairNoRay;   // read only by the Voxi routes below, and only in a build that has the flags
+        (void)hairNoShadow;
         const bool skinned = posedMesh != 0;
 
         // A static entity gets its bounds from the asset; a skinned one already has them written
@@ -999,6 +1018,13 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             // drawMesh reaches Voxi through IRenderFeature::submitDraw, which has no movable
             // parameter; the flag rides on Voxi itself for these draws and is cleared after them.
             if (options.voxiRenderer) options.voxiRenderer->setSubmitMovable(movableHere);
+#  if defined(AVER_VOXI_SUBMIT_NO_RAY)
+            // Same ride as the movable flag: drawMesh reaches Voxi through submitDraw, which has no parameter for it. Defined by VoxiRenderer.hpp.
+            if (options.voxiRenderer) {
+                options.voxiRenderer->setSubmitNoRay(hairNoRay);
+                options.voxiRenderer->setSubmitNoShadow(hairNoShadow);
+            }
+#  endif
 #endif
             for (u32 pdi = 0; pdi < pdrawCount; ++pdi) {
                 const PlannedDraw& pd = pdraws[pdi];
@@ -1065,6 +1091,12 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             }
 #if AVER_MODULE_VOXI
             if (options.voxiRenderer) options.voxiRenderer->setSubmitMovable(false);
+#  if defined(AVER_VOXI_SUBMIT_NO_RAY)
+            if (options.voxiRenderer) {
+                options.voxiRenderer->setSubmitNoRay(false);
+                options.voxiRenderer->setSubmitNoShadow(false);
+            }
+#  endif
 #endif
         } else if (dec.emitDirectDraws &&
                    (options.voxiRenderer != nullptr || options.onDirectDraw != nullptr)) {
@@ -1111,10 +1143,18 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
                 if (route.tint) col[1] *= 0.15f;
 #if AVER_MODULE_VOXI
                 if (options.voxiRenderer) {
+#  if defined(AVER_VOXI_SUBMIT_NO_RAY)
+                    options.voxiRenderer->setSubmitNoRay(hairNoRay);
+                    options.voxiRenderer->setSubmitNoShadow(hairNoShadow);
+#  endif
                     options.voxiRenderer->submit(del.mesh, &wm.m[0][0], col, dl.look.metallic,
                                                  dl.look.roughness, dl.matSet, directConstants,
                                                  dl.matBytes, del.translucent, del.hiddenFromOwner,
                                                  movableHere);
+#  if defined(AVER_VOXI_SUBMIT_NO_RAY)
+                    options.voxiRenderer->setSubmitNoRay(false);
+                    options.voxiRenderer->setSubmitNoShadow(false);
+#  endif
                 }
 #endif
                 if (options.onDirectDraw) {

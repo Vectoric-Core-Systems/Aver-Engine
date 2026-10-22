@@ -5,6 +5,7 @@
 #include "SandboxApp.hpp"
 #include "SoftBodyDebugOverlay.hpp"   // Show > Soft Bodies
 #include "SoftBodyPaintTool.hpp"
+#include "CollisionShapeOverlay.hpp"   // Show > Collision Shapes, and the .ocshape tab's wire preview
 #if AVER_MODULE_SOFTBODY_SCENE
 #  include "aver/softbody/SoftBodySystem.hpp"
 #endif
@@ -2011,6 +2012,8 @@ void SandboxApp::onRender(Engine& e)  {
     softBodyDebug_.selected = static_cast<u32>(selEntity_);
     softBodyDebug_.drawBuilds = softBodyScene_ ? softBodyScene_->drawBuildsLastFrame() : 0u;
     editor::softBodyDebugCollect(softBodyDebug_, softbody::softBodySystem(), softBodyDebugFrame_);
+
+    editor::softShapeDebugCollect(softBodyDebug_, softbody::softShapeSystem(), softBodyDebugFrame_);   // wave 11: jelly lattices, rope nodes and rod frames, the selected rope's handles
 #  if AVER_WITH_IMGUI
     {
         editor::SoftBodyPaintTool& paintTool = editor::softBodyPaintTool();
@@ -2088,6 +2091,12 @@ void SandboxApp::onRender(Engine& e)  {
     }
 #endif
 #if AVER_MODULE_PHYSICS
+    // Show > Physics: collect, upload and draw Jolt's debug lines in one call (nothing drawn under noEditorChrome_).
+    editor::physicsDebugDraw(e.device(), physicsDebug_, eye_, physicsDebugFrame_, physicsDebugMesh_, noEditorChrome_);
+#if AVER_MODULE_HAIR_SCENE
+    // Hair overlay (Show > Hair): sampled guide strands and the collision proxies. HairDebugOverlay.hpp owns its line mesh and replaces it each frame.
+    editor::hairDebugDraw(*e.device(), noEditorChrome_, static_cast<u32>(selEntity_));
+#endif
     // ---- COLLIDERS, which could not be seen at all until now --------------------------------
     // No collider overlay, toggle or wireframe existed before; the drawLines infrastructure was
     // already here for the navmesh. TWO MESHES: the static bodies, rebuilt only when the bodies
@@ -2103,6 +2112,12 @@ void SandboxApp::onRender(Engine& e)  {
 #endif
 #if AVER_MODULE_LANDSCAPE && AVER_MODULE_FLUIDS
     drawWaterBodies(e);   // wave3: rebuilds edited rivers / lakes (any mode), draws the Water tab's handles
+#endif
+    // Show > Collision Shapes and the .ocshape tab's preview: shape-accurate wire for the selected entity's body and the moving ones (its mesh is freed and rebuilt each call).
+#if AVER_MODULE_SCENE
+    editor::collisionShapeOverlayRender(e, static_cast<u32>(sel_ == kSelScene ? selEntity_ : scene::kInvalidEntity), noEditorChrome_);
+#else
+    editor::collisionShapeOverlayRender(e, 0xFFFFFFFFu, noEditorChrome_);
 #endif
     // GIZMO AND SCULPT CURSOR are chrome too -- and the gizmo is the loudest of the lot, since
     // it draws on top of geometry by design.
@@ -2140,6 +2155,11 @@ void SandboxApp::onRender(Engine& e)  {
                                        static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, vehicleDebug_.labelMaxDistanceCm);
 #endif
 #if AVER_WITH_IMGUI
+#if AVER_MODULE_PHYSICS
+    if (physicsDebug_.labels && !noEditorChrome_)
+        editor::physicsDebugDrawLabels(physicsDebugFrame_, viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
+                                       static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, physicsDebug_.radiusCm);
+#endif
     uiReg_.endFrame();
 #endif
     submitGameUi(e);
@@ -2481,6 +2501,9 @@ rhi::MeshHandle SandboxApp::posedHandle(scene::Entity ent) {
     if (skinnedScene_) h = skinnedScene_->drawHandle(ent);
 #if AVER_MODULE_RENDER_SOFTBODY
     if (!h && softBodyScene_) h = softBodyScene_->drawHandle(ent);
+#if AVER_MODULE_RENDER_HAIR
+    if (!h && hairScene_) h = hairScene_->drawHandle(ent);
+#endif
 #endif
     return h;
 }

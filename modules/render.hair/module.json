@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Render.Hair",
+  "dir": "render.hair",
+  "displayName": "Strand Hair Drawing",
+  "description": "Draws strand hair: the compute host that runs Jolt's hair simulation on the GPU, and the camera-facing ribbon pass with its strand-count levels of detail.",
+  "category": "Rendering",
+  "option": "AVER_MODULE_RENDER_HAIR",
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.Hair", "Aver.Hair.Scene", "Aver.Physics", "Aver.RHI", "Aver.Render.PBR", "Aver.Scene"],
+  "consequence": "Strand hair is simulated but not drawn."
+}

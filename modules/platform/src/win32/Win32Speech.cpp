@@ -128,10 +128,12 @@ private:
             switch (c.type) {
                 case Cmd::Init: ensure(); break;
                 case Cmd::Speak: {
+                    // pending_ drops only after speaking_ is set, so speaking() has no false gap while Speak() runs.
+                    if (ensure()) {
+                        const DWORD flags = SPF_ASYNC | SPF_IS_NOT_XML | (c.interrupt ? SPF_PURGEBEFORESPEAK : 0);
+                        if (SUCCEEDED(voice->Speak(c.text.c_str(), flags, nullptr))) speaking_.store(true);
+                    }
                     pending_.fetch_sub(1);
-                    if (!ensure()) break;
-                    const DWORD flags = SPF_ASYNC | SPF_IS_NOT_XML | (c.interrupt ? SPF_PURGEBEFORESPEAK : 0);
-                    if (SUCCEEDED(voice->Speak(c.text.c_str(), flags, nullptr))) speaking_.store(true);
                     break;
                 }
                 case Cmd::Stop:

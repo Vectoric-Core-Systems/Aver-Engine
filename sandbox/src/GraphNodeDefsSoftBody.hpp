@@ -53,4 +53,34 @@ inline void appendSoftBodyNodeDefs(std::vector<GraphNodeDesc>& t) {
     t.push_back({"GetSoftBodyDents", "Get Soft Body Dents", "Physics", {
         pin("entity", "int", false), pin("found", "bool", true), pin("dentedEdges", "int", true), pin("maxSetCm", "float", true),
         pin("debrisPieces", "int", true)}});
+    // Version 3 (wave 11): ten rows appended; the fifteen above and their pins do not change. A grab id is the vertex index + 1 (0 = nothing in reach).
+    t.push_back({"SetSoftPressure", "Set Soft Pressure", "Physics", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("kPa", "float", false),
+        pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"GetSoftVolume", "Get Soft Volume", "Physics", {
+        pin("entity", "int", false), pin("found", "bool", true), pin("restCm3", "float", true), pin("nowCm3", "float", true),
+        pin("ratio", "float", true)}});
+    t.push_back({"GrabSoftBody", "Grab Soft Body", "Physics", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false),
+        pin("reach", "float", false, "30"), pin("targetX", "float", false), pin("targetY", "float", false), pin("targetZ", "float", false),
+        pin("then", "exec", true), pin("grab", "int", true), pin("success", "bool", true)}});
+    t.push_back({"MoveSoftGrab", "Move Soft Grab", "Physics", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("grab", "int", false), pin("x", "float", false), pin("y", "float", false),
+        pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"ReleaseSoftGrab", "Release Soft Grab", "Physics", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("grab", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"SetSoftBuoyancy", "Set Soft Buoyancy", "Physics", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("density", "float", false, "1000"), pin("drag", "float", false, "1"),
+        pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"GetSoftSubmerged", "Get Soft Submerged", "Physics", {
+        pin("entity", "int", false), pin("found", "bool", true), pin("fraction", "float", true), pin("volumeCm3", "float", true)}});
+    t.push_back({"SetSoftContact", "Set Soft Contact", "Physics", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("softScale", "float", false, "1"), pin("otherScale", "float", false, "1"),
+        pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"SetSoftPairMode", "Set Soft Pair Mode", "Physics", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("other", "int", false), pin("mode", "int", false),
+        pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"AddSoftJelly", "Add Soft Jelly", "Physics", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("preset", "int", false, "5"),
+        pin("then", "exec", true), pin("success", "bool", true)}});
 }

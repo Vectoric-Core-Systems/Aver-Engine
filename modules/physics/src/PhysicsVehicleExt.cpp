@@ -13,6 +13,7 @@
 #include "aver/physics/physics_abi.h"
 #include "Convert.hpp"
 #include "PhysicsInternal.hpp"
+#include "PhysicsSurface.hpp"   // SURFACE_FRICTION is the leaf material's when the tyre is on one
 
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -344,7 +345,7 @@ void stepEndOne(VehicleEntry& e, int32_t handle, const JPH::BodyID& id, float dt
                 iv[AVER_PHYS_VWSI_CONTACT_BODY] = it->second;
             JPH::BodyLockRead lock(g_world->system.GetBodyLockInterface(), w->GetContactBodyID());
             if (lock.Succeeded()) {
-                f[AVER_PHYS_VWS_SURFACE_FRICTION] = lock.GetBody().GetFriction();
+                f[AVER_PHYS_VWS_SURFACE_FRICTION] = surfaceFrictionOf(lock.GetBody(), w->GetContactSubShapeID(), lock.GetBody().GetFriction());
                 iv[AVER_PHYS_VWSI_CONTACT_ENTITY] = static_cast<int32_t>(lock.GetBody().GetUserData());
             }
         } else {

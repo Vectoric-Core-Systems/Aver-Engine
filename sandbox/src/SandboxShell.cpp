@@ -5,6 +5,8 @@
 #include "SandboxApp.hpp"
 #include "aver/core/CpuTiming.hpp"
 #include "aver/core/HitchMarks.hpp"
+#include "aver/rhi/PrimitiveMeshes.hpp"
+#include "CollisionShapeOverlay.hpp"   // Show > Collision Shapes
 
 namespace aver {
 // Restarts profiler stats when Play starts/stops (called from startPlay/stopPlay in SandboxPlay.cpp).
@@ -274,6 +276,9 @@ void SandboxApp::buildProfilerPanel(Engine& e) {
 #endif
     }
 
+#if AVER_MODULE_PHYSICS
+    editor::drawPhysicsProfileSection(dpi_);   // the "Physics (Jolt)" header: stats line and the scope tree
+#endif
     // ---- GPU passes ----
     if (!ImGui::CollapsingHeader("GPU passes", ImGuiTreeNodeFlags_DefaultOpen)) { ImGui::End(); return; }
     const rhi::GpuTimingReport r = e.device()->gpuTiming();
@@ -2195,6 +2200,8 @@ void SandboxApp::buildUI(Engine& e) {
                 ImGui::MenuItem("Budget", nullptr, &softBodyDebug_.budget);
 ImGui::MenuItem("Fields", nullptr, &softBodyDebug_.fields);
 ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
+
+                ImGui::MenuItem("Constraints", nullptr, &softBodyDebug_.constraints);
                 ImGui::EndMenu();
             }
             uiReg_.track("view.showSoftBodies");
@@ -2214,6 +2221,22 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
             uiReg_.track("view.showVehicles");
 #endif
 #if AVER_MODULE_PHYSICS
+            editor::drawPhysicsDebugMenu(physicsDebug_, physicsDebugFrame_);   // the whole "Show Physics" submenu
+            uiReg_.track("view.showPhysics");
+            ImGui::MenuItem("Show Collision Shapes", nullptr, &editor::collisionShapeOverlayOptions().enabled);
+            uiReg_.track("view.showCollisionShapes");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The collision triangles of the selected entity's body and of every moving body, tinted by physical surface.\n"
+                                  "A yellow cross is the centre of mass, a cyan one the shape's origin. Static bodies: Show Colliders.");
+#if AVER_MODULE_HAIR_SCENE
+            if (ImGui::BeginMenu("Show Hair")) {
+                ImGui::MenuItem("Guide strands", nullptr, &editor::hairDebugOptions().guides);
+                ImGui::MenuItem("Collision proxies", nullptr, &editor::hairDebugOptions().proxies);
+                ImGui::MenuItem("Selected character only", nullptr, &editor::hairDebugOptions().selectedOnly);
+                ImGui::EndMenu();
+            }
+            uiReg_.track("view.showHair");
+#endif
             // Toggling forgets the overlay; rebuildColliderOverlay skips unchanged frames.
             if (ImGui::MenuItem("Show Colliders", nullptr, &showColliders_))
                 colliderOverlayBuilt_ = false;
@@ -2304,9 +2327,12 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
         uiReg_.track("toolbar.add.playerStart");
         if (ImGui::Selectable("Sphere")) spawnPrimitive(e, "Meshes/sphere.ocmesh", "Sphere");
         uiReg_.track("toolbar.add.sphere");
-        ImGui::Selectable("Plane",   false, ImGuiSelectableFlags_Disabled);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("No plane primitive yet.\nA flattened cube is the convention: add a Cube and scale Z down.");
+        if (ImGui::BeginMenu("Shapes")) {   // the other built-in primitives (aver/rhi/PrimitiveMeshes.hpp)
+            for (const rhi::primitives::BuiltinPrimitive& p : rhi::primitives::kBuiltinPrimitives)
+                if (ImGui::Selectable(p.label)) spawnPrimitive(e, p.path, p.label);
+            ImGui::EndMenu();
+        }
+        uiReg_.track("toolbar.add.shapes");
 #if AVER_MODULE_SCENE
         if (ImGui::Selectable("Point Light")) spawnLightAtCamera(scene::kLightPoint);
         uiReg_.track("toolbar.add.pointLight");

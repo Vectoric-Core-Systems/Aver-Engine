@@ -20,7 +20,9 @@ extern "C" {
 
 // ---- World ---------------------------------------------------------------------------------------
 
-// Start the simulation. Idempotent: a second call while running is a no-op that returns 1.
+// Start the simulation. Idempotent: a second call while running is a no-op that returns 1. The world is built with the
+// PENDING config of physics_world_abi.h (aver_phys_config_set; the defaults are the literals it always used). The world is built with the
+// PENDING config of physics_world_abi.h (aver_phys_config_set; the defaults are the literals it always used).
 AVER_PHYS_API int32_t aver_phys_init(void);
 // Destroy every body and character, then the world.
 AVER_PHYS_API void    aver_phys_shutdown(void);
@@ -70,7 +72,7 @@ AVER_PHYS_API int32_t aver_phys_body_set_velocity(int32_t body, float x, float y
 
 // How many bodies are live.
 AVER_PHYS_API int32_t aver_phys_body_count(void);
-// The most bodies the world can hold (fixed when it was created); 0 with no world.
+// The most bodies the world can hold (fixed when it was created; PHYSICS.MAXBODIES / AVER_PHYS_CF_MAX_BODIES); 0 with no world.
 AVER_PHYS_API int32_t aver_phys_max_bodies(void);
 // Writes up to `cap` live body handles into `out` in ONE pass and returns how many -- the O(n) way to
 // enumerate (a loop over aver_phys_body_at is O(n^2)). Same order-is-unspecified caveat as body_at.
@@ -303,6 +305,9 @@ AVER_PHYS_API int32_t aver_phys_character_grounded(int32_t ch);
 // Stamps `handle` (a body OR a character) with `entity`, a scene entity id. 0 clears it back to
 // "unowned". Returns 0 for a dead handle. Backed by Jolt's own per-body user-data field, so it needs
 // no side table and nothing to invalidate when the body or character is destroyed.
+//
+// The entity owns the LOW 32 bits of that word; the upper 32 hold the body's physical-surface label
+// (physics_surface_abi.h), which this call preserves. Readers truncate to int32, so the two never meet.
 AVER_PHYS_API int32_t aver_phys_set_entity(int32_t handle, int32_t entity);
 
 // ---- Arbitrary collision geometry ------------------------------------------------------------------
@@ -329,6 +334,10 @@ AVER_PHYS_API int32_t aver_phys_add_mesh(const float* verticesXyz, int32_t verte
 // character handles. A shape is not a body -- it has no position, is not in any layer, and is not
 // something aver_phys_remove_body or aver_phys_raycast can see -- so handing one to a body-only entry
 // point (or vice versa) would silently resolve to the wrong kind of object if the two shared a space.
+//
+// SINCE WAVE 11 THE TABLE IS GENERIC (physics_shape_builder_abi.h): every shape built there -- boxes, hulls,
+// compounds, meshes with surfaces -- lives in it, and aver_phys_release_mesh_shape and
+// aver_phys_add_mesh_shape_body accept any of those handles. aver_phys_shape_release is the neutral name.
 
 // Builds a static triangle-mesh SHAPE with no body: the same LOCAL geometry, winding fix and
 // out-of-range-index handling as aver_phys_add_mesh, but handed back as a shape handle instead of
@@ -360,6 +369,8 @@ AVER_PHYS_API int32_t aver_phys_add_mesh_shape_body(int32_t shape, float px, flo
 // A static heightfield: `samples` is a row-major sampleCount x sampleCount grid of heights in
 // centimetres, spaced `spacingCm` apart.
 // Sample (column x, row y) lands at engine (cx - y*spacingCm, cy + x*spacingCm, cz + height).
+// A NaN or FLT_MAX sample is a hole. For a non-square field, a surface per cell, or edits at run time see
+// physics_terrain_abi.h: this call is built through the same code with an empty parameter block.
 AVER_PHYS_API int32_t aver_phys_add_heightfield(const float* samples, int32_t sampleCount,
                                                 float spacingCm,
                                                 float cx, float cy, float cz);

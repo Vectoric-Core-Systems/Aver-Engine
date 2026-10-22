@@ -272,6 +272,16 @@ if(TARGET Aver.Camera AND TARGET Aver.Scene)
   target_link_libraries(CameraRigDetailsModelTest PRIVATE Aver.Camera Aver.Scene Aver.Formats Aver.Core)
   set_target_properties(CameraRigDetailsModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+# PhysicsDebugOverlayTest -- sandbox/src/PhysicsDebugOverlay.cpp (compiled directly, no ImGui): options to AVER_PHYS_DBG_* flags, what physicsDebugCollect asks of
+# the module and hands back, against a fake feed. Aver.Physics supplies AVER_MODULE_PHYSICS=1 and the (unused here) aver_phys_debug_* imports.
+if(TARGET Aver.Physics AND TARGET Aver.RHI)
+  add_executable(PhysicsDebugOverlayTest
+    src/PhysicsDebugOverlayTest.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/PhysicsDebugOverlay.cpp)
+  target_include_directories(PhysicsDebugOverlayTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(PhysicsDebugOverlayTest PRIVATE Aver.Physics Aver.RHI Aver.Core)
+  set_target_properties(PhysicsDebugOverlayTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
 # BtEditorTest -- the .ocbt behaviour-tree editor tab's headless core: the four structural edits
 # (add/delete/reparent/reorder) and the tab's own load/save/dirty/undo bookkeeping.
 #
@@ -862,3 +872,33 @@ add_executable(CaptionEditorTest
 target_include_directories(CaptionEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(CaptionEditorTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(CaptionEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PhysicsSettingsModelTest -- the model behind Project Settings > Physics (sandbox/src/PhysicsSettingsModel.hpp), header-only and
+# ImGui-free: rows from the physics ABI, validation, canonical omission, limits, the restart badge and a project round trip.
+add_executable(PhysicsSettingsModelTest src/PhysicsSettingsModelTest.cpp)
+target_include_directories(PhysicsSettingsModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(PhysicsSettingsModelTest PRIVATE Aver.Physics Aver.Formats Aver.Core)
+set_target_properties(PhysicsSettingsModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# CollisionShapeDetailsModelTest -- sandbox/src/CollisionShapeDetailsModel.hpp (header-only, no ImGui): the attach rule, what Create .ocshape from the
+# Rigid Body writes for each body shape, the canonical COMPONENT CollisionShape record, the Play-time read-out lines and the surface probe text.
+if(TARGET Aver.Scene AND TARGET Aver.Formats)
+  add_executable(CollisionShapeDetailsModelTest src/CollisionShapeDetailsModelTest.cpp)
+  target_include_directories(CollisionShapeDetailsModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(CollisionShapeDetailsModelTest PRIVATE Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(CollisionShapeDetailsModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# OcShapeEditorModelTest -- sandbox/src/OcShapeEditorModel.hpp (header-only, no ImGui): the .ocshape tab's structural edits (add, wrap, add to a
+# compound, reorder, rename, delete with cascade), the outline, the issues list and the snapshot undo. Base Aver.Formats.
+add_executable(OcShapeEditorModelTest src/OcShapeEditorModelTest.cpp)
+target_include_directories(OcShapeEditorModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(OcShapeEditorModelTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcShapeEditorModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PhysicalSurfaceTableModelTest -- sandbox/src/PhysicalSurfaceTableModel.hpp (header-only, no ImGui): the .ocsurf table's row rules (duplicate names, hash
+# collisions, the cap), the row edits, the saved text, and the .ocmat PHYSSURFACE patch. Base Aver.Formats.
+add_executable(PhysicalSurfaceTableModelTest src/PhysicalSurfaceTableModelTest.cpp)
+target_include_directories(PhysicalSurfaceTableModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(PhysicalSurfaceTableModelTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(PhysicalSurfaceTableModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

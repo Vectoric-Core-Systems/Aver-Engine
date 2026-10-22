@@ -853,6 +853,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // After physics and World::flush, before draw (drawHandle() must exist).
     if (softBodyScene_) softBodyScene_->update(scene::World::instance(), *e.device());
 #endif
+#if AVER_MODULE_RENDER_HAIR
+    // Strand hair: HairSystem ticked inside game::tickSoftBodies (GameSystemsWiring.hpp); this reconciles the GPU side with what it published.
+    if (hairScene_) hairScene_->update(scene::World::instance(), *e.device());
+#endif
     // Once per frame, before render features run (ThumbnailCache.hpp): update() points preview at next pending request.
     if (thumbnails_.ready()) thumbnails_.update();
     // --drone: switches drone on N frames in (mirroring --chunk-stream so a capture can prove it without clicking Window > Drone).

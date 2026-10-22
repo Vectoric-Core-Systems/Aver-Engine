@@ -4,7 +4,9 @@
 #if AVER_MODULE_LANDSCAPE
 
 #include "aver/game/GameContent.hpp"
+#include "aver/game/PhysicalSurfaces.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/core/SurfaceId.hpp"
 #include "aver/landscape/HeightfieldRay.hpp"
 #include "aver/landscape/PhysicsBridge.hpp"
 
@@ -16,6 +18,8 @@
 
 #if AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"
+#  include "aver/physics/physics_shape_builder_abi.h"
+#  include "aver/physics/physics_terrain_abi.h"
 #  include "aver/physics/physics_water_abi.h"
 #endif
 #if AVER_MODULE_FRAMEWORK
@@ -74,21 +78,51 @@ void GameLandscape::rebuildCollision() {
 #if AVER_MODULE_PHYSICS
     if (landscapeBody_ >= 0) { aver_phys_remove_body(landscapeBody_); landscapeBody_ = -1; }
     if (!loaded_ || !aver_phys_ready()) return;
+    // Each layer's physical surface: registered (find-or-add, so an authored Surfaces.ocsurf keeps its numbers) and named for
+    // every section layer, so the heightfield can carry one surface per cell (the dominant paint layer).
+    registerLayerSurfaces();
+    std::vector<i32> layerSurfaces;
+    if (!layerTable_.empty()) {
+        constexpr usize kSectionLayerCap = 8;   // layersValid(): at most 8 section layers
+        const usize sectionLayers = std::min<usize>(std::max<usize>(landscapeData_.layerNames.size(), 1), kSectionLayerCap);
+        for (usize s = 0; s < sectionLayers; ++s) {
+            // The same remap sampleGround reads: a section layer the material does not know folds into its base layer.
+            const i32 c = s < landscapeData_.layerNames.size() ? sectionToMaterial_[s] : 0;
+            layerSurfaces.push_back(aver::surfaceIdFromName(layerTable_[c >= 0 ? static_cast<usize>(c) : 0].surfaceName()));
+        }
+    }
     landscape::PhysicsHeightfield hf;
-    if (!landscape::toPhysicsHeightfield(landscapeData_, hf)) {
+    if (!landscape::toPhysicsHeightfield(landscapeData_, hf, layerSurfaces.empty() ? nullptr : &layerSurfaces)) {
         AVER_WARN("[Landscape] section is not internally consistent; no collision built");
         return;
     }
-    landscapeBody_ = aver_phys_add_heightfield(hf.samples.data(), static_cast<i32>(hf.sampleCount),
-                                               hf.spacingCm, hf.cornerCm[0], hf.cornerCm[1],
-                                               hf.cornerCm[2]);
+    if (hf.cellPalette.empty()) {
+        landscapeBody_ = aver_phys_add_heightfield(hf.samples.data(), static_cast<i32>(hf.sampleCount),
+                                                   hf.spacingCm, hf.cornerCm[0], hf.cornerCm[1],
+                                                   hf.cornerCm[2]);
+    } else {
+        // The shape route, with a surface palette and one palette index per cell.
+        const i32 shape = aver_phys_heightfield_shape(hf.samples.data(), static_cast<i32>(hf.sampleCount), static_cast<i32>(hf.sampleCount),
+                                                      hf.spacingCm, hf.cellPalette.data(), hf.palette.data(),
+                                                      static_cast<i32>(hf.palette.size()), nullptr, 0);
+        landscapeBody_ = 0;
+        if (shape) {
+            landscapeBody_ = aver_phys_body_from_shape(shape, hf.cornerCm, nullptr, AVER_PHYS_MOTION_STATIC, 0.0f, nullptr, 0);
+            aver_phys_shape_release(shape);   // the body keeps the shape alive
+        }
+    }
     // Deliberately NOT stamped with aver_phys_set_entity: terrain has no owning scene entity in this
     // engine at all. A ray landing on it is a genuine "hit true, entity 0", not a bug.
-    if (landscapeBody_ >= 0)
-        AVER_INFO("[Landscape] collision body #{} built ({}x{} samples)", landscapeBody_,
-                  hf.sampleCount, hf.sampleCount);
-    else
+    //
+    // A REFUSED BUILD RETURNS 0, NOT A NEGATIVE: handles start at 1. This used to test >= 0, so a failed heightfield logged
+    // "built" with body #0 and every later `landscapeBody_ < 0` guard let it through.
+    if (landscapeBody_ > 0) {
+        AVER_INFO("[Landscape] collision body #{} built ({}x{} samples{})", landscapeBody_,
+                  hf.sampleCount, hf.sampleCount, hf.cellPalette.empty() ? "" : ", a surface per cell");
+    } else {
+        landscapeBody_ = -1;
         AVER_WARN("[Landscape] physics refused the heightfield; terrain has no collision");
+    }
     updateSurfaceSampler();   // wave3 layers: the new body takes the layers' friction
 #endif
     // CLEARED EVEN WITHOUT PHYSICS COMPILED IN, and even when the build above failed. The flag means
@@ -604,7 +638,14 @@ void GameLandscape::setLayerTable(std::vector<LayerInfo> layers) {
     if (layers.size() > kLayerCap) layers.resize(kLayerCap);
     layerTable_ = std::move(layers);
     rebuildRemap();
+    registerLayerSurfaces();
     updateSurfaceSampler();
+}
+
+void GameLandscape::registerLayerSurfaces() {
+    // Find-or-add: a surface the project's Surfaces.ocsurf already names keeps ITS numbers (loaded first, so authored wins).
+    for (const LayerInfo& l : layerTable_)
+        registerSurfaceIfAbsent(l.surfaceName(), l.friction, l.restitution);
 }
 
 const std::string& GameLandscape::materialLayerName(u32 i) const {

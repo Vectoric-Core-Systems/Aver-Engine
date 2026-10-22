@@ -87,6 +87,18 @@ inline constexpr PlacedKind kPlacedKinds[] = {
     {"SoftField", "Soft Field",
      "A force, damage, anchor-release, kill or sleep volume for soft bodies (cloth and destructibles) inside its shape.",
      "Soft Field", 0, "CSoftField", {}},
+    {"Jelly", "Jelly",
+     "Fills this closed mesh with a tetrahedral lattice that wobbles and keeps its volume (an .ocsoft of kind jelly).",
+     "Jelly", 0, "CSoftVolume", {".ocsoft"}},
+    {"Rope", "Rope",
+     "A rope or cable between two world points: a chain of rods drawn as a tube that replaces this placement's mesh. Drag its end handles in the viewport.",
+     "Rope", 0, "CSoftRope", {".ocsoft"}},
+    {"CollisionShape", "Collision Shape",
+     "Gives this placement's Rigid Body the shape of a collision shape asset (.ocshape): boxes, spheres, capsules, hulls and meshes in compounds. Built by Play; attaches a static Rigid Body if there is none.",
+     "Collision Shape", 0, "CCollisionShape", {".ocshape"}},
+    {"Hair", "Hair",
+     "Strand hair on this character: a groom (.ochair) simulated by Jolt, drawn as ribbons. Needs a skeletal mesh for the collision proxies.",
+     "Hair", 0, "CHair", {".ochair"}},
 };
 inline constexpr usize kPlacedKindCount = sizeof(kPlacedKinds) / sizeof(kPlacedKinds[0]);
 
@@ -119,6 +131,9 @@ struct AttachContext {
     bool hasVehicle = false;          // carries a CVehicle (a Destructible may not join it: one body per entity root)
     bool hasRigidBody = false;        // carries a CRigidBody (a Vehicle is its own rigid body)
     bool hasVehicleToken = false;     // the placement has a `vehicle` token (a traffic car)
+
+    bool hasJelly = false;            // carries a CSoftVolume (one body per entity root)
+    bool hasRope = false;             // carries a CSoftRope
 };
 
 namespace detail {
@@ -154,6 +169,10 @@ inline bool canAttach(const AttachContext& c, const PlacedKind& kind, std::strin
     if (t == "Destructible" && c.hasCloth) return deny(why, "This entity is already Cloth; one soft body per entity.");
     if (t == "Destructible" && c.hasVehicle)
         return deny(why, "This entity is a Vehicle; its chassis is one body. Put the Destructible on a child (the spec's DAMAGE shell).");
+    if ((t == "Jelly" || t == "Rope") && (c.hasCloth || c.hasDestructible)) return deny(why, "This entity is already a Cloth or Destructible; one soft body per entity.");
+    if ((t == "Cloth" || t == "Destructible") && (c.hasJelly || c.hasRope)) return deny(why, "This entity is already a Jelly or Rope; one soft body per entity.");
+    if (t == "Jelly" && c.hasRope) return deny(why, "This entity is already a Rope; one soft body per entity.");
+    if (t == "Rope" && c.hasJelly) return deny(why, "This entity is already a Jelly; one soft body per entity.");
     if (t == "Vehicle") {
         vehmodel::ConflictFacts f;
         f.hasRigidBody = c.hasRigidBody;
@@ -163,6 +182,7 @@ inline bool canAttach(const AttachContext& c, const PlacedKind& kind, std::strin
         if (const char* reason = vehmodel::attachRefusal(f)) return deny(why, reason);
         return true;
     }
+    if (t == "CollisionShape" && c.hasVehicle) return deny(why, "This entity is a Vehicle; its chassis is its own rigid body.");   // a mesh placement is enough otherwise: the applier attaches a static Rigid Body
     return true;   // Brain, SmartObject, Cloth, Destructible, MorphTargets, CameraRig, ParticleEmitter and SoftField need only a mesh placement
 }
 

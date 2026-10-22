@@ -1,0 +1,7 @@
+OCSHAPE 1
+# A barrel as a TAPERED CYLINDER: 30 cm radius at the top (+Z), 25 cm at the bottom, 90 cm tall. It stands on its small end when it settles.
+NAME Barrel
+MASS 40
+SURFACE Metal
+NODE barrel tcylinder 30 25 90
+ROOT barrel

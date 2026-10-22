@@ -314,6 +314,44 @@
     },
     {
       "schema": 1,
+      "name": "Aver.Hair",
+      "dir": "hair",
+      "displayName": "Strand Hair",
+      "description": "Strand hair authoring: the .ochair groom, the procedural generator, glTF curve import, collision proxies and the settings builder that drives Jolt's Hair.",
+      "category": "Physics",
+      "option": "AVER_MODULE_HAIR",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Physics"
+      ],
+      "consequence": "No strand hair: grooms cannot be generated, imported from curves or built into a simulation."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Hair.Scene",
+      "dir": "hair.scene",
+      "displayName": "Strand Hair (Scene)",
+      "description": "Strand hair on scene entities: the CHair component, groom builds shared between instances, palette and wind feeding, distance cadence and collision proxies.",
+      "category": "Physics",
+      "option": "AVER_MODULE_HAIR_SCENE",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Anim",
+        "Aver.Anim.Scene",
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Hair",
+        "Aver.Physics",
+        "Aver.Scene"
+      ],
+      "consequence": "Hair components do nothing: no simulated strand hair on characters."
+    },
+    {
+      "schema": 1,
       "name": "Aver.Landscape",
       "dir": "landscape",
       "displayName": "Landscape",
@@ -657,6 +695,28 @@
         "Aver.Render.Neural"
       ],
       "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Render.Hair",
+      "dir": "render.hair",
+      "displayName": "Strand Hair Drawing",
+      "description": "Draws strand hair: the compute host that runs Jolt's hair simulation on the GPU, and the camera-facing ribbon pass with its strand-count levels of detail.",
+      "category": "Rendering",
+      "option": "AVER_MODULE_RENDER_HAIR",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Hair",
+        "Aver.Hair.Scene",
+        "Aver.Physics",
+        "Aver.RHI",
+        "Aver.Render.PBR",
+        "Aver.Scene"
+      ],
+      "consequence": "Strand hair is simulated but not drawn."
     },
     {
       "schema": 1,

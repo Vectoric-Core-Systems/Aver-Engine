@@ -1062,9 +1062,18 @@ void SandboxApp::rebuildEntityBody(scene::Entity e) {
     i32 body = 0;
     if (const game::GameContent::CollisionMesh* cm = content_.collisionMeshFor(meshId);
         cm && cm->indices.size() >= 3) {
+        // The mesh's physical surfaces ride along (a material slot's PHYSSURFACE), when it has any.
+        world::MeshSurfaces surfaces;
+        if (!cm->palette.empty() && cm->triPalette.size() == cm->indices.size() / 3) {
+            surfaces.triPalette = cm->triPalette.data();
+            surfaces.triCount = static_cast<u32>(cm->triPalette.size());
+            surfaces.palette = cm->palette.data();
+            surfaces.paletteCount = static_cast<u32>(cm->palette.size());
+        }
         body = world::addStaticMeshBody(worldXf, cm->positions.data(),
                                         static_cast<u32>(cm->positions.size() / 3),
-                                        cm->indices.data(), static_cast<u32>(cm->indices.size()));
+                                        cm->indices.data(), static_cast<u32>(cm->indices.size()),
+                                        surfaces.usable(static_cast<u32>(cm->indices.size())) ? &surfaces : nullptr);
     }
     if (!body) {
         // UNKNOWN MESH GETS THE PLACEHOLDER'S OWN BOUNDS. fitStaticBox's own fallback to the unit

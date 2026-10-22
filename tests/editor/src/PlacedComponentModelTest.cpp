@@ -59,10 +59,10 @@ int main() {
 
     // ---- the table: canonical order, labels, registration ----
     {
-        static const char* const kOrder[] = {"SkeletalMesh", "Animator", "RootMotion", "MotionMatcher", "ControlRig", "IkRig", "Brain", "SmartObject", "Cloth", "Destructible", "MorphTargets", "CameraRig", "Vehicle", "ParticleEmitter", "SoftField"};
-        static const char* const kLabels[] = {"Skeletal Mesh", "Animator", "Root Motion", "Motion Matching", "Control Rig", "IK Rig", "AI Brain", "Smart Object", "Cloth", "Destructible", "Morph Targets", "Camera Rig", "Vehicle", "Particle Emitter", "Soft Field"};
-        check(kPlacedKindCount == 15, "fifteen kinds in the Add Component menu (Soft Body keeps its own entry)");
-        for (usize i = 0; i < kPlacedKindCount && i < 15; ++i) {
+        static const char* const kOrder[] = {"SkeletalMesh", "Animator", "RootMotion", "MotionMatcher", "ControlRig", "IkRig", "Brain", "SmartObject", "Cloth", "Destructible", "MorphTargets", "CameraRig", "Vehicle", "ParticleEmitter", "SoftField", "Jelly", "Rope", "CollisionShape", "Hair"};
+        static const char* const kLabels[] = {"Skeletal Mesh", "Animator", "Root Motion", "Motion Matching", "Control Rig", "IK Rig", "AI Brain", "Smart Object", "Cloth", "Destructible", "Morph Targets", "Camera Rig", "Vehicle", "Particle Emitter", "Soft Field", "Jelly", "Rope", "Collision Shape", "Hair"};
+        check(kPlacedKindCount == 19, "nineteen kinds in the Add Component menu (Soft Body keeps its own entry)");
+        for (usize i = 0; i < kPlacedKindCount && i < 19; ++i) {
             check(std::string_view(kPlacedKinds[i].type) == kOrder[i], std::string("kind ") + std::to_string(i) + " is " + kOrder[i] + " (canonical order)");
             check(std::string_view(kPlacedKinds[i].menuLabel) == kLabels[i], std::string("menu label of ") + kOrder[i]);
             // kPlacedComponentTypes carries "SoftBody" at index 8 (it keeps its own menu entry), so Cloth/Destructible sit one place later.

@@ -1,0 +1,9 @@
+OCSURF 1
+# The lab's physical surfaces. Friction and restitution left out defer to the body; a stated number replaces the body's on that surface.
+# Ice slides, Rubber grips and bounces, Metal sits between, Gravel and Grass are for the landscape layers, Wood labels the chair.
+SURFACE Grass  friction 0.6  restitution 0.05  tag 1
+SURFACE Ice    friction 0.03  tag 2
+SURFACE Rubber friction 1.2   restitution 0.8   tag 3
+SURFACE Metal  friction 0.25  restitution 0.2   tag 4
+SURFACE Gravel friction 0.8   tag 5
+SURFACE Wood   friction 0.5   restitution 0.1   tag 6

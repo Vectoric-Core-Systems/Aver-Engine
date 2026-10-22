@@ -3,6 +3,9 @@
 
 #include "SandboxApp.hpp"
 #include "ViewportMarquee.hpp"
+#include "aver/rhi/PrimitiveMeshes.hpp"
+
+#include "SoftShapeDetailsModel.hpp"   // wave 11: the rope end handle drag (SoftShapeGizmos.cpp)
 
 namespace aver {
 // Physics-only guard (matches the declaration): draws every body's world AABB. Previously nested
@@ -861,6 +864,9 @@ void SandboxApp::spawnDecalAtCamera() {
 void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const char* label) {
     (void)engine;
     const Vec3 at = camPos_ + camForward() * kAddDistance;
+    // The other built-ins carry their own Add scale (the banana is real size) and look.
+    const rhi::primitives::BuiltinPrimitive* prim = rhi::primitives::findBuiltinPrimitive(assetPath);
+    const f32 half = prim ? prim->spawnScale : kEditorCubeHalf;
 #if AVER_MODULE_SCENE
     if (hideEditorScene_ || !levelPath_.empty()) {
         scene::World& world = scene::World::instance();
@@ -869,7 +875,7 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
         if (snapMove_) for (int k=0;k<3;++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
         xf.rotation = Quat{0,0,0,1};
         // FROZEN: scale is the half-extent in cm, matching .ocworld PLACEG against the unit cube.
-        xf.scale = Vec3{kEditorCubeHalf, kEditorCubeHalf, kEditorCubeHalf};
+        xf.scale = Vec3{half, half, half};
 
         // FROZEN: the entity name is the asset path saveLevel writes and loadOcworld hashes back.
         const std::string kCubeAsset = assetPath;
@@ -881,9 +887,10 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
             mr->flags |= scene::kMeshRendererVisible;
             mr->aabbMin[0] = mr->aabbMin[1] = mr->aabbMin[2] = -1.0f;
             mr->aabbMax[0] = mr->aabbMax[1] = mr->aabbMax[2] =  1.0f;
+            if (prim && prim->look) mr->material = aver_scene_material(0, prim->look);
         }
         levelEntities_.push_back(e);
-        entityLabels_[static_cast<u32>(e)] = makeEntityLabel(std::string(), kCubeAsset);
+        entityLabels_[static_cast<u32>(e)] = makeEntityLabel(prim && prim->look ? std::string(prim->look) : std::string(), kCubeAsset);
 #if AVER_MODULE_PHYSICS
         // Collides like a loaded placement would: a fresh entity has no entityCollide_ entry, which
         // reads as the default (true) everywhere else consulted, so it gets the same body a level
@@ -927,7 +934,7 @@ void SandboxApp::spawnPrimitive(Engine& engine, const char* assetPath, const cha
         // reporting the CUBE's count for a sphere.
         tris = 0;
 #endif
-        scale = Vec3{kEditorCubeHalf, kEditorCubeHalf, kEditorCubeHalf};   // unit mesh -> cube's size
+        scale = Vec3{half, half, half};   // unit mesh -> cube's size, or the primitive's own
     }
     if (!mesh) return;
     MeshObj c; c.mesh = mesh; c.tris = tris; c.scale = scale;
@@ -1631,6 +1638,28 @@ void SandboxApp::handleManip(Engine& e) {
             const f32 pixelWorldCm = dist(ro0, dp) * dist(rd0, rd1);
             decalHandleGrabbed = decalGizmo_.beginDrag(scene::World::instance(), selEntity_, ro0, rd0, pixelWorldCm);
         }
+#if AVER_MODULE_SOFTBODY_SCENE
+        // A selected rope's two end handles (SoftShapeGizmos.cpp): grabbing one drags that end on the camera-facing plane, and the click is not also a pick.
+        // The drag edits the component, not an undo step (the Details rows are); a Rope host that is the selected decal never gets here.
+        if (!decalHandleGrabbed && ImGui::IsMouseClicked(0) && overScene && !noEditorChrome_ && sel_ == kSelScene &&
+            selEntity_ != scene::kInvalidEntity && !anyPlayActive()) {
+            Vec3 ro0, rd0, ro1, rd1;
+            viewportRay(mx, my, ro0, rd0);
+            viewportRay(mx + 1.0f, my, ro1, rd1);
+            const Mat4& rm = scene::World::instance().worldMatrix(selEntity_);
+            const Vec3 rp{rm.m[3][0], rm.m[3][1], rm.m[3][2]};
+            decalHandleGrabbed = editor::ropeHandleBegin(&scene::World::instance(), static_cast<u32>(selEntity_), ro0, rd0, dist(ro0, rp) * dist(rd0, rd1));
+        }
+        if (editor::ropeHandleActive()) {
+            if (io.MouseDown[0]) {
+                Vec3 ro, rd;
+                viewportRay(mx, my, ro, rd);
+                if (editor::ropeHandleUpdate(&scene::World::instance(), ro, rd)) markLevelUnsaved();
+            } else {
+                editor::ropeHandleEnd();
+            }
+        }
+#endif
         if (decalGizmo_.dragging()) {
             if (io.MouseDown[0]) {
                 Vec3 ro, rd;

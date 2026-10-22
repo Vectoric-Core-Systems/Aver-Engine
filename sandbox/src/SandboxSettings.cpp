@@ -8,6 +8,8 @@
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_loc_abi.h"
 #endif
+#include "PhysicsSettingsModel.hpp"   // drawPhysicsSettingsGroups (wave 11): the solver, sleeping, determinism and limits groups
+#include "PhysicalSurfaceTableModel.hpp"   // drawPhysicalSurfaceTable (wave 11 SHAPES_MATERIALS): Project Settings > Physics > Surfaces
 
 #include <algorithm>
 
@@ -1209,6 +1211,8 @@ void SandboxApp::buildPhysicsSettings() {
     ImGui::PopItemWidth();
 
     if (ready) ImGui::TextDisabled("%d body(ies) in the world.", aver_phys_body_count());
+    editor::drawPhysicsSettingsGroups(project_, projectDirty_, dpi_);
+    editor::drawPhysicalSurfaceTable(project_.contentDir(), dpi_);   // Content/Physics/Surfaces.ocsurf as an editable table; Save registers the rows with the physics module
 #else
     ImGui::TextDisabled("This build has no physics module.");
 #endif

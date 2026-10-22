@@ -30,6 +30,8 @@ aver_add_module(Aver.World
     src/ChunkGenerator.cpp
     src/ScatterPalette.cpp
     src/ChunkWorld.cpp
+    # The disk half of the physics shape binary cache (physics_state_abi.h): AVR1 "PSHP" files, off until PHYSICS.SHAPECACHE.
+    src/PhysicsShapeCache.cpp
   DEPS
     Aver.Core
     Aver.Formats

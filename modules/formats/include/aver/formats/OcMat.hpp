@@ -28,6 +28,13 @@ struct OcMatExtras {
     // wants (see that field's own comment for why the id is never round-tripped through a file).
     std::string graphRef;
 
+    // PHYSSURFACE <name>. The physical surface a collision mesh built from a slot of this material carries
+    // (Content/Physics/Surfaces.ocsurf names its friction and restitution; the name hashes to the id a raycast, a
+    // contact and a landscape sample report). Empty = none, and then nothing is written, so every file made before
+    // this record existed round-trips byte for byte. The name is [A-Za-z0-9_]{1,63}; a record with any other name is
+    // skipped with a warning.
+    std::string physSurface;
+
     bool hasGraph = false;
     u32 uvSet[pbr::kTextureSlotCount] = {};   // TEX ... uvN; only uv0 reaches a shader
 };

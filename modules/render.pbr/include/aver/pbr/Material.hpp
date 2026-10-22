@@ -101,6 +101,27 @@ struct TerrainDesc {
 };
 // ---- end wave3 terrain layers ----
 
+// How a surface is lit. Standard is the metallic-roughness model every material has always used. Hair is the strand model of the shared
+// evaluator (AVER_MODEL_HAIR in material_prelude.hlsl): Kajiya-Kay diffuse plus the R, TT and TRT lobes. It is a property of the MATERIAL, not of
+// the draw, so neither backend's per-draw constants change: packMaterial sets MaterialFlag_Hair and the shader picks the model from the flag.
+enum class ShadingModel : u32 { Standard = 0, Hair };
+
+// The named parameters of a Hair material (read only when shadingModel is Hair). packMaterial writes them into slots of the constant block the hair
+// model has no other use for (docs/plans/wave11/SOFTBODY_HAIR.md 2.17), so the 192-byte block and its mirrors do not change.
+// Colours are sRGB like baseColorFactor. The root colour is baseColorFactor.
+struct HairParams {
+    f32 tipColor[3] = {0.55f, 0.40f, 0.25f};   // the colour at the tip; the strand blends from the root colour to this
+    f32 colorVariation = 0.15f;                // [0,1] per-strand brightness variation
+    f32 roughness = 0.35f;                     // beta: the width of the longitudinal highlight (the R lobe; TT is half, TRT twice)
+    f32 shift = 0.07f;                         // alpha: the cuticle tilt in radians, which moves the R and TRT highlights along the strand
+    f32 specular = 1.0f;                       // the weight of the white R lobe
+    f32 tt = 1.0f;                             // the weight of the lobe through the fibre
+    f32 trt = 1.0f;                            // the weight of the coloured lobe that bounces off the far wall
+    f32 azimuthRough = 0.4f;                   // [0,1] how wide the azimuthal lobes are
+    f32 tint[3] = {0.9f, 0.6f, 0.4f};          // the colour the TT and TRT lobes take on top of the strand colour
+    f32 scatter = 0.5f;                        // [0,1] the multiple-scatter ambient: lifts the shadow floor of a thick head of hair
+};
+
 // The authored surface. Defaults are glTF's.
 struct MaterialDesc {
     std::string name;
@@ -273,6 +294,11 @@ struct MaterialDesc {
     // wave3 terrain layers: non-empty `terrain.layers` makes this a layered terrain material (the
     // texture slots are then reinterpreted, see MaterialFlag_TerrainLayers).
     TerrainDesc terrain;
+
+    // wave11 strand hair: Standard (the default, every material before this existed) or Hair, with the parameters above. packMaterial sets
+    // MaterialFlag_Hair for Hair, marks the material two sided and never sets the Coat or Subsurface flags for it.
+    ShadingModel shadingModel = ShadingModel::Standard;
+    HairParams hair;
 };
 
 // ------------------------------------------------------- the one translucency test, and its answer

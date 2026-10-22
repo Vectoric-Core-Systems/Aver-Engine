@@ -6,7 +6,8 @@
 # Jolt's and is checked through its ABI in tests/physics (SoftBodyBuilderTest) and tests/softbody.scene.
 # Wave 10 adds FieldsTest (volumes and their weights), CapsTest (thick breaks), SoftStateTest (the saved-damage codec and the
 # tear-log replay) and ProxyBindTest (render mesh to proxy cage).
-foreach(_t SoftBodyTest SoftAssetTest SimMeshTest DamageTest IslandsTest FieldsTest CapsTest SoftStateTest ProxyBindTest)
+# Wave 11 adds LatticeTest (the jelly lattice and its embedding) and RopeTest (the rope planner, the tube and the new .ocsoft kinds).
+foreach(_t SoftBodyTest SoftAssetTest SimMeshTest DamageTest IslandsTest FieldsTest CapsTest SoftStateTest ProxyBindTest LatticeTest RopeTest)
   # SoftBodyTest.cpp keeps its old target name: tests/physics already owns a target called SoftBodyTest.
   if(_t STREQUAL "SoftBodyTest")
     set(_target PlasticSoftBodyTest)

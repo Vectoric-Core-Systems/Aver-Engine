@@ -44,9 +44,11 @@ struct Material {
     f32 maxSetFrac       = 0.0f;      // accumulated set as a fraction of rest0 before the beam tears; 0 = off
 };
 
-// Values mirror the C# SoftPreset enum.
-enum class SoftPreset : u8 { ClothLight = 0, ClothHeavy = 1, Metal = 2, Wood = 3, Glass = 4 };
-inline constexpr u32 kSoftPresetCount = 5;
+// Values mirror the C# SoftPreset enum. Jelly and Rope (wave 11) are the presets of the volume and rope shapes; a cloth or
+// a destructible offers only the first kSoftSolidPresetCount.
+enum class SoftPreset : u8 { ClothLight = 0, ClothHeavy = 1, Metal = 2, Wood = 3, Glass = 4, Jelly = 5, Rope = 6 };
+inline constexpr u32 kSoftPresetCount = 7;
+inline constexpr u32 kSoftSolidPresetCount = 5;
 
 struct PresetInfo {
     const char* key;
@@ -85,6 +87,10 @@ inline const PresetInfo& presetInfo(SoftPreset p) {
         {"metal", detail::makePresetMaterial(7.8f, 2e-7f, 1e-6f, Behavior::Deform, 0.010f, 0.25f, 0.30f, 40.0f, 0.3f), 8, 0.50f, 0.5f},
         {"wood", detail::makePresetMaterial(6.0f, 1e-6f, 5e-6f, Behavior::Fracture, 0.020f, 0.0f, 0.020f, 3.0f, 0.5f), 8, 0.50f, 2.0f},
         {"glass", detail::makePresetMaterial(10.0f, 2e-7f, 1e-6f, Behavior::Shatter, 0.006f, 0.0f, 0.006f, 0.4f, 0.3f), 16, 0.20f, 0.6f},
+        // Wave 11 (docs/plans/wave11/SOFTBODY_HAIR.md 2.5): only friction, restitution, iterations and damping are read for these two;
+        // a jelly's stiffness is its jelly{} section and a rope's is its rope{} section. Starting values, tuned headed.
+        {"jelly", detail::makePresetMaterial(1.0f, 5e-5f, 0.0f, Behavior::Deform, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f), 8, 0.15f, 0.0f},
+        {"rope", detail::makePresetMaterial(0.5f, 1e-8f, 1e-6f, Behavior::Deform, 0.0f, 0.0f, 0.0f, 0.0f, 0.6f), 8, 0.20f, 0.0f},
     };
     const u32 i = static_cast<u32>(p);
     return table[i < kSoftPresetCount ? i : 0];

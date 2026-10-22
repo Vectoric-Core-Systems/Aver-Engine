@@ -11,6 +11,7 @@
 #include "aver/game/GamePawn.hpp"
 #include "aver/game/GameLocalization.hpp"
 #include "aver/game/SequenceHost.hpp"   // [wave5/sequencer] hooks for the preview and Play
+#include "aver/game/ColliderShapes.hpp"   // setColliderShapeHost / makeColliderShapeHost (wave 11 SHAPES_MATERIALS)
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_loc_abi.h"
 #endif
@@ -149,6 +150,8 @@ void SandboxApp::capturePlayWorld() {
     // AFTER the snapshot, deliberately: Stop restores from it, so it must record the level BEFORE
     // physics touched anything.
 #if AVER_MODULE_PHYSICS
+    // The .ocshape assets and mesh leaves a CollisionShape component builds its body from (editor Play only, as CRigidBody is).
+    game::setColliderShapeHost(game::makeColliderShapeHost(content_, project_.contentDir(), [this](u64 id) { return pathOfContentId(id); }));
     editor::syncPhysicsFromScene();
     // THE LEVEL'S CARS, same rule and same place: a `vehicle` placement is a fixed pose until PLAY builds
     // its Jolt vehicle, from where the entity stands NOW (a car the user nudged in the editor drives from

@@ -9,7 +9,8 @@
 #                           and replay equality with all of it on.
 #   SoftBodyCalibrationTest the preset tuning scenarios (an energy ladder against a door, a pane, a crate, a flag): prints the
 #                           measured table and asserts only coarse brackets.
-foreach(_t SoftBodySystemTest SoftBodyDepthTest SoftBodyCalibrationTest)
+# Wave 11 adds SoftShapeSystemTest (jelly, rope, grab, cut, sensors, fast cloth and inflatables; the real Jolt world, no GPU).
+foreach(_t SoftBodySystemTest SoftBodyDepthTest SoftBodyCalibrationTest SoftShapeSystemTest)
   add_executable(${_t} src/${_t}.cpp)
   target_include_directories(${_t} PRIVATE src)
   target_link_libraries(${_t} PRIVATE Aver.SoftBody.Scene Aver.Physics Aver.Scene Aver.SoftBody Aver.Formats Aver.Core)

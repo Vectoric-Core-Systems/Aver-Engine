@@ -4,11 +4,18 @@
 
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace aver::fmt {
 
 // Maximum OCPROJECT version this build can read; files claiming more are rejected.
 inline constexpr int kOcProjectVersion = 1;
+
+// The names of the live physics solver settings a manifest may state as PHYSICS.<NAME UPPER-CASED>, in the
+// physics ABI's table order (aver_phys_setting_name). Count is physicsSettingCount().
+int physicsSettingCount();
+const char* physicsSettingName(int index);   // nullptr when out of range
 
 struct ProjectDesc {
     int version = 1;                    // OCPROJECT <n>
@@ -196,11 +203,22 @@ struct ProjectDesc {
     int physMaxBodyPairs      = -1;  // PHYSICS.MAXBODYPAIRS
     int physMaxContacts       = -1;  // PHYSICS.MAXCONTACTS
     int physTempAllocatorMb   = -1;  // PHYSICS.TEMPALLOCMB   per-frame contact scratch, MiB
+    // PHYSICS.THREADS: physics worker threads. -1 = automatic (cores - 2), 0 = single-threaded, N = N workers;
+    // -2 = unstated (-1 is a legal value, so it cannot be the sentinel).
+    int physThreads           = -2;
+    // PHYSICS.SHAPECACHE: 1 = keep mesh and heightfield collision shapes' BVHs on disk (Saved/DerivedDataCache/Physics),
+    // 0 = do not; -1 = unstated (the default, which is off until the cache has been measured on the real levels).
+    int physShapeCache        = -1;
+    // PHYSICS.<NAME> for the live solver settings of physics_world_abi.h (PHYSICS.VELOCITYSTEPS,
+    // PHYSICS.SLEEPTIME ...): only the ones the file states, in file order, the name in the setting table's own
+    // camelCase spelling ("velocitySteps") and the value as written (the physics ABI clamps it). Formats may not
+    // depend on Physics, so the list of names is mirrored by physicsSettingName(); a test pins the mirror.
+    std::vector<std::pair<std::string, f32>> physicsSettings;
 
     bool hasPhysicsSettings() const {
         return hasGravity || fixedStep > 0.0f ||
                physMaxBodies > 0 || physMaxBodyPairs > 0 || physMaxContacts > 0 ||
-               physTempAllocatorMb > 0;
+               physTempAllocatorMb > 0 || physThreads > -2 || physShapeCache >= 0 || !physicsSettings.empty();
     }
 
     // ---- AUDIO.* -- the mix a project starts at. Bus order matches audio_abi.h. ---------------

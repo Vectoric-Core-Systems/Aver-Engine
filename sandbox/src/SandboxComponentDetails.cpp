@@ -14,10 +14,18 @@
 #include "SoftBodyDetailsModel.hpp"
 #include "SoftBodyPaintTool.hpp"
 #include "SoftFieldDetailsModel.hpp"
+
+#include "SoftShapeDetailsModel.hpp"
+#if AVER_MODULE_SOFTBODY_SCENE
+#  include "aver/softbody/Lattice.hpp"
+#endif
+
 #include "aver/anim/AnimSystem.hpp"
 #include "aver/anim/ControlRig.hpp"
 #include "aver/anim/MotionMatchSystem.hpp"
 #include "aver/game/LevelComponents.hpp"
+#include "CollisionShapeDetailsModel.hpp"   // CollisionShapeSectionEnv, drawCollisionShapeSection
+#include "HairGroomTab.hpp"                  // HairSectionEnv, drawHairSection
 
 #if AVER_MODULE_CAMERA
 #  include "CameraRigDetailsModel.hpp"
@@ -78,6 +86,10 @@ editor::AttachContext SandboxApp::placedAttachContext(scene::Entity e) const {
     const u32 clothId = w.componentId("CCloth"), destructId = w.componentId("CDestructible");
     c.hasCloth = clothId != 0 && w.hasComponent(e, clothId);
     c.hasDestructible = destructId != 0 && w.hasComponent(e, destructId);
+
+    const u32 jellyId = w.componentId("CSoftVolume"), ropeId = w.componentId("CSoftRope");
+    c.hasJelly = jellyId != 0 && w.hasComponent(e, jellyId);
+    c.hasRope = ropeId != 0 && w.hasComponent(e, ropeId);
 
     const u32 vehicleId = w.componentId("CVehicle");
     c.hasVehicle = vehicleId != 0 && w.hasComponent(e, vehicleId);
@@ -396,7 +408,7 @@ void SandboxApp::drawPlacedComponentSections() {
         u32& presetRef = destructible ? dest->preset : cloth->preset;
         const u64 assetId = destructible ? dest->asset : cloth->asset;
         u32& flagsRef = destructible ? dest->flags : cloth->flags;
-        const softbody::SoftPreset cur = presetRef < softbody::kSoftPresetCount
+        const softbody::SoftPreset cur = presetRef < softbody::kSoftSolidPresetCount
             ? static_cast<softbody::SoftPreset>(presetRef)
             : (destructible ? softbody::SoftPreset::Metal : softbody::SoftPreset::ClothLight);
 
@@ -498,6 +510,20 @@ void SandboxApp::drawPlacedComponentSections() {
                                               (st & softbody::kStateOverCap) != 0, (st & softbody::kStateProxy) != 0);
         }
 
+        // Wave 11 (SoftShapeGizmos.cpp): Solver / Inflate / Group on the loaded .ocsoft, and the live pressure slider in Play.
+        if (!destructible) {
+            if (s_ok && assetId != 0) {
+                static u64 s_closedFor = 0;
+                static bool s_closed = false;
+                const fmt::OcMeshData* md = mr ? sys.meshData(mr->mesh) : nullptr;
+                if (md && s_closedFor != mr->mesh) {   // cached per mesh: the closed test sorts every edge
+                    s_closedFor = mr->mesh;
+                    s_closed = softbody::meshIsClosed(md->positions.data(), md->vertexCount(), md->indices.data(), static_cast<u32>(md->indices.size()), 1e-4f);
+                }
+                editor::drawClothShapeSections(makeSoftEnv(k), s_asset, absAsset, editable, md != nullptr, s_closed);
+            }
+            editor::drawClothPressureLive(makeSoftEnv(k), &w, static_cast<u32>(e));
+        }
         // Per-component tuning (scales: 0 reads as 1, and 1 is shown).
         ImGui::BeginDisabled(playing);
         if (!destructible) {
@@ -603,7 +629,38 @@ void SandboxApp::drawPlacedComponentSections() {
         const std::string_view t = k.type;
 
         // ---- Skeletal Mesh ----
-        if (t == "SkeletalMesh") {
+        // ---- Collision Shape ----  (the body is CollisionShapeDetailsSection.cpp; this block only hands it the undo helpers, the asset row and the Content Browser)
+        if (t == "CollisionShape") {
+            editor::CollisionShapeSectionEnv env;
+            env.playing = playing;
+            env.instantEdit = [&](bool changed, const std::function<void()>& mutate) { instantEdit(k, changed, mutate); };
+            env.gestureEdit = [&](bool changed, const std::function<void()>& mutate) { gestureEdit(k, changed, mutate); };
+            env.assetRow = [&](const char* key, const char* label, u64 id) { assetRow(k, key, label, id); };
+            env.pathOfId = [this](u64 id) { return pathOfContentId(id); };
+            env.fileExists = [this](const std::string& rel) {
+                std::error_code ec;
+                return std::filesystem::exists(std::filesystem::path(project_.contentDir()) / rel, ec);
+            };
+            env.createAsset = [&](const std::string& rel, const std::string& text) {
+                const std::filesystem::path target = std::filesystem::path(project_.contentDir()) / rel;
+                std::string why;
+                if (!editor::writeNewFile(target.string(), text, &why)) { cbStatus_ = "Could not write " + rel + ": " + why; return false; }
+                cbAdoptNewAsset(target, false);
+                changeAsset(k, "asset", rel);
+                return true;
+            };
+            env.openEditor = [this](const std::string& rel) { assetEditors_.open((std::filesystem::path(project_.contentDir()) / rel).string()); };
+            env.setStatus = [this](const std::string& s) { cbStatus_ = s; };
+            env.contentDir = project_.contentDir();
+            env.entityName = std::string(w.name(e));
+            env.pickRay = [this](Vec3& origin, Vec3& direction) {
+                if (vpW_ == 0 || vpH_ == 0) return false;
+                viewportRay(static_cast<f32>(vpX_) + 0.5f * static_cast<f32>(vpW_), static_cast<f32>(vpY_) + 0.5f * static_cast<f32>(vpH_), origin, direction);
+                return true;
+            };
+            editor::drawCollisionShapeSection(env, &w, static_cast<u32>(e));
+        }
+        else if (t == "SkeletalMesh") {
             auto* sm = w.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh);
             assetRow(k, "skeleton", "Skeleton", sm->skeleton);
             if (sm->skeleton == 0) {
@@ -992,6 +1049,31 @@ void SandboxApp::drawPlacedComponentSections() {
         // ---- Soft Field ----  (the body is SoftFieldSection.cpp)
         else if (t == "SoftField") {
             editor::drawSoftFieldSection(makeSoftEnv(k), &w, static_cast<u32>(e));
+        }
+        // ---- Jelly / Rope ----  (the body is SoftShapeGizmos.cpp; this block hands it the undo helpers, the asset row and the Content Browser)
+        else if (t == "Jelly" || t == "Rope") {
+            editor::SoftShapeEnv env;
+            static_cast<editor::SoftSectionEnv&>(env) = makeSoftEnv(k);
+            env.pathOfId = [this](u64 id) { return pathOfContentId(id); };
+            env.drawAssetRow = [&, kp = &k](u64 id) { assetRow(*kp, "asset", "Asset (.ocsoft)", id); };
+            env.adoptNewAsset = [this](const std::string& abs) { cbAdoptNewAsset(std::filesystem::path(abs), false); };
+            env.assignAsset = [&, kp = &k](const std::string& rel) { changeAsset(*kp, "asset", rel); };
+            editor::drawSoftShapeSection(env, &w, static_cast<u32>(e), t == "Rope");
+        }
+#endif
+#if AVER_MODULE_HAIR_SCENE
+        // ---- Hair ----  (the body is HairGroomTab.cpp)
+        else if (t == "Hair") {
+            editor::HairSectionEnv env;
+            env.playing = playing;
+            env.instantEdit = [&](bool changed, const std::function<void()>& mutate) { instantEdit(k, changed, mutate); };
+            env.gestureEdit = [&](bool changed, const std::function<void()>& mutate) { gestureEdit(k, changed, mutate); };
+            env.assetRow = [&](const char* key, const char* label, u64 id) { assetRow(k, key, label, id); };
+            env.setStatus = [this](const std::string& msg) { cbStatus_ = msg; };
+#  if AVER_MODULE_RENDER_HAIR && AVER_MODULE_RENDER_SOFTBODY
+            env.computeHost = hairScene_ && hairScene_->ready();
+#  endif
+            editor::drawHairSection(env, &w, static_cast<u32>(e));
         }
 #endif
 

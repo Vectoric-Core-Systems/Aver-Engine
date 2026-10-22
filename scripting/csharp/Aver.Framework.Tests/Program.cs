@@ -26,6 +26,7 @@ static class Program
         failures += GasSaveTests.RunAll();
         failures += GasReplicationSeamTests.RunAll();
         failures += AiManagedTests.RunAll();   // AI: wave 3 #21 -- the managed AI seam (ManagedAi, QueryGraph guards)
+        failures += PhysicsStateApiTests.RunAll();   // wave 11: Aver.Physics enums vs the native name tables, snapshots, shape cache (SKIPs without the native DLL)
 
         Console.WriteLine(failures == 0 ? "\nAll tests passed." : $"\n{failures} test(s) failed.");
         return failures;

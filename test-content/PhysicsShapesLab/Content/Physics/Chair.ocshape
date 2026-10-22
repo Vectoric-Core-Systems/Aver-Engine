@@ -1,0 +1,17 @@
+OCSHAPE 1
+# A chair as a static compound of boxes and cylinders: the design's example. Play and watch Show > Collision Shapes: the seat, the back and
+# the four legs are drawn, the centre of mass (yellow) sits away from the origin (cyan), and every leaf is labelled Wood.
+NAME Chair
+MASS 12
+SURFACE Wood
+NODE seat  box 40 40 4
+NODE back  box 40 3 25
+NODE leg   cylinder 3 45 radius 0.5
+NODE top   compound static
+CHILD top seat at 0 0 45
+CHILD top back at -37 0 75
+CHILD top leg  at 32 32 22
+CHILD top leg  at 32 -32 22
+CHILD top leg  at -32 32 22
+CHILD top leg  at -32 -32 22
+ROOT top

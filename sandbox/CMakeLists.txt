@@ -32,10 +32,16 @@ add_executable(Sandbox WIN32
   src/SoftBodyDebugOverlay.cpp
 
   src/VehicleDebugOverlay.cpp
+  src/PhysicsDebugOverlay.cpp
+  src/PhysicsProfilePanel.cpp
   src/VehicleDetailsSection.cpp
     src/SoftFieldSection.cpp
+    src/HairGroomTab.cpp
     src/SoftProxyTool.cpp
+
+    src/SoftShapeGizmos.cpp
   src/SandboxSettings.cpp
+  src/PhysicsSettingsPage.cpp
   src/SandboxLevelEdit.cpp
   src/SandboxAutosave.cpp
   src/SandboxMcp.cpp
@@ -139,6 +145,10 @@ add_executable(Sandbox WIN32
   src/EditorKeybinds.cpp
   src/EditorEntitySnapshot.cpp
   src/PhysicsSceneSync.cpp
+  src/PhysicalSurfacePanel.cpp
+  src/CollisionShapeDetailsSection.cpp
+  src/CollisionShapeOverlay.cpp
+  src/OcShapeEditor.cpp
   src/ThumbnailCache.cpp
   Sandbox.rc)
 target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
@@ -186,6 +196,10 @@ endif()
 target_link_libraries(Sandbox PRIVATE Aver.World)
 # The soft-body topology/asset library (paint tool, details model). Pure module: Core + Formats.
 target_link_libraries(Sandbox PRIVATE Aver.SoftBody)
+# The Groom tab's generator preview and curve import (Aver.Hair brings AVER_MODULE_HAIR=1 for HairDetailsModel.hpp and HairGroomTab.cpp).
+if(TARGET Aver.Hair)
+  target_link_libraries(Sandbox PRIVATE Aver.Hair)
+endif()
 # Cloth and destruction on scene entities (brings AVER_MODULE_SOFTBODY_SCENE=1 for the Details sections, overlay and menu).
 if(TARGET Aver.SoftBody.Scene)
   target_link_libraries(Sandbox PRIVATE Aver.SoftBody.Scene)
@@ -240,6 +254,12 @@ add_dependencies(Sandbox Aver.Settings)
 # what the #if guards there key on -- the same transitive-define arrangement Scene/PBR/Physics use.
 if(TARGET Aver.Fluids)
   target_link_libraries(Sandbox PRIVATE Aver.Fluids)
+endif()
+if(TARGET Aver.Hair.Scene)
+  target_link_libraries(Sandbox PRIVATE Aver.Hair.Scene)
+endif()
+if(TARGET Aver.Render.Hair)
+  target_link_libraries(Sandbox PRIVATE Aver.Render.Hair)
 endif()
 # Soft-body drawing. Guarded for Water's reason above, and it brings AVER_MODULE_RENDER_SOFTBODY=1
 # through to SandboxApp.cpp the same transitive way.

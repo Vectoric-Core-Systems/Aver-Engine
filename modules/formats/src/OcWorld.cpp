@@ -171,7 +171,7 @@ std::vector<EmitStep> placementEmitSteps(const std::vector<OcWorldPlacement>& pl
 // fix the case of a hand-typed `SKELETALMESH`; any other type is kept exactly as written.
 constexpr std::string_view kKnownComponentTypes[] = {
     "SkeletalMesh", "Animator", "RootMotion", "MotionMatcher", "ControlRig", "IkRig", "Brain", "SmartObject", "SoftBody",
-    "Cloth", "Destructible", "MorphTargets", "CameraRig", "Vehicle", "ParticleEmitter", "SoftField"};
+    "Cloth", "Destructible", "MorphTargets", "CameraRig", "Vehicle", "ParticleEmitter", "SoftField", "Jelly", "Rope", "CollisionShape", "Hair"};
 
 std::string canonicalComponentType(std::string_view t) {
     for (const std::string_view k : kKnownComponentTypes)

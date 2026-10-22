@@ -19,6 +19,7 @@
 #include "aver/assets/LevelSky.hpp"
 #include "TextureEditor.hpp"   // makeTextureEditor; SandboxApp.hpp does not pull this one in
 #include "InstanceSetEditor.hpp"   // makeInstanceSetEditor (.ocinst); not pulled in by SandboxApp.hpp
+#include "OcShapeEditor.hpp"   // makeOcShapeEditor (.ocshape); not pulled in by SandboxApp.hpp
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameIkProbe.hpp"   // [wave5/ik-retarget] the foot-IK ground probe
 #include "aver/game/GameTick.hpp"
@@ -135,6 +136,8 @@ void SandboxApp::onInit(Engine& e)  {
     assetEditors_.registerFactory(&editor::makeParticleEditor);  // .ocparticle
 #endif
     assetEditors_.registerFactory(&editor::makeFoliageTypeEditor);  // .ocfoliage
+    assetEditors_.registerFactory(&editor::makeHairGroomEditor);    // .ochair
+    assetEditors_.registerFactory(&editor::makeOcShapeEditor);      // .ocshape  [wave11/shapes]
 
 #if AVER_MODULE_VEHICLE
     assetEditors_.registerFactory(&editor::makeVehicleEditor);      // .ocvehicle
@@ -527,6 +530,17 @@ void SandboxApp::onInit(Engine& e)  {
     } else {
         softBodyScene_.reset();   // soft entities draw their authored mesh
     }
+#if AVER_MODULE_RENDER_HAIR && AVER_MODULE_HAIR_SCENE
+    hairScene_ = std::make_unique<aver::render::HairScene>();
+    if (hairScene_->init(*e.device())) {
+        aver::hair::hairSystem().installComputeHost(&hairScene_->hostTable());   // BEFORE the first groom builds
+        aver::hair::hairSystem().setPathResolver(&game::GameContent::resolveAnimAsset, &content_);
+        hairScene_->setMaterialBinder([](i32 token, aver::pbr::MaterialHandle h, void* u) { static_cast<game::GameContent*>(u)->bindSurfaceMaterial(token, h); }, &content_);
+        e.device()->addRenderFeature(hairScene_.get());
+    } else {
+        hairScene_.reset();   // hair entities stay invisible and inert
+    }
+#endif
 #endif
 
     // Content browser thumbnails (inits own features; failed init -> textureId is 0).

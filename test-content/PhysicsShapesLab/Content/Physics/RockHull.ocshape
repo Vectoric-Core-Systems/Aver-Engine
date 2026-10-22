@@ -1,0 +1,7 @@
+OCSHAPE 1
+# `hull mesh`: the convex hull of the rock mesh's vertices, one piece. Needs Meshes/LabRock.ocmesh (cooked by make_shapes_lab.py).
+NAME RockHull
+MASS 30
+SURFACE Gravel
+NODE hull hull mesh Meshes/LabRock.ocmesh
+ROOT hull

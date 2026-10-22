@@ -6,3 +6,8 @@
 add_executable(ActorPreviewTest src/ActorPreviewTest.cpp)
 target_link_libraries(ActorPreviewTest PRIVATE Aver.Render.ActorPreview Aver.RHI Aver.Core Aver.Platform)
 set_target_properties(ActorPreviewTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PrimitiveMeshesTest: the built-in primitives' geometry (unit size, winding, volumes), no GPU.
+add_executable(PrimitiveMeshesTest src/PrimitiveMeshesTest.cpp)
+target_link_libraries(PrimitiveMeshesTest PRIVATE Aver.RHI Aver.Core)
+set_target_properties(PrimitiveMeshesTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

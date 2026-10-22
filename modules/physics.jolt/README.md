@@ -54,6 +54,18 @@ A consequence of not vendoring `Build/` worth recording: upstream sets warnings-
 disables C++ exceptions and RTTI *there*, not in `Jolt.cmake`. So none of that reaches this build,
 which is why the engine can keep using `try`/`catch` around `std::filesystem` with Jolt linked in.
 
+## Profiler hook and debug renderer (wave 11)
+
+Two Jolt features are compiled in by `CMakeLists.txt` here, as PUBLIC definitions on the `Jolt` target so the DLL and the one test that links Jolt directly agree on every class layout (Jolt checks this when it registers its types):
+
+- **`AVER_PHYSICS_DEBUG_RENDERER`** (default ON) defines `JPH_DEBUG_RENDERER` for Debug and Release. Binary size only; nothing runs until the physics ABI is asked to draw. See `physics_debug_abi.h`.
+- **`AVER_PHYSICS_PROFILER`** (default ON) defines `JPH_EXTERNAL_PROFILE` for Debug and Release and adds `AverProfileHook.cpp` to the `Jolt` target. A statically linked Jolt leaves `JPH::ExternalProfileMeasurement`'s constructor and destructor to the user; ours read one atomic sink pointer, which is null until `aver_phys_profile_enable(1)` installs the collector (a null sink is a relaxed load and a branch per scope). It is not Jolt's own HTML profiler (`JPH_PROFILE_ENABLED`), which is mutually exclusive with it and belongs to a diagnostics preset. The hook file is ours, not vendored: it lives next to `CMakeLists.txt`, outside `Jolt/`.
+
+Two more options are for determinism work and are OFF by default:
+
+- **`AVER_PHYSICS_CROSS_PLATFORM`** sets Jolt's `CROSS_PLATFORM_DETERMINISTIC` (no FMA, IEEE-compliant arithmetic, slower) and adds `-ffp-contract=off` (`/fp:precise` on MSVC) as a PUBLIC option so the engine's own float code in the fixed step is not fused either. It makes no promise by itself: the CI job `physics-determinism` runs the golden-hash scene of `tests/physics/PhysicsDeterminismTest` with it on Windows and macOS, and the claim is made only when both agree.
+- **`AVER_PHYSICS_DIAGNOSTICS`** is the developer preset, never CI: `JPH_ENABLE_DETERMINISM_LOG` (a compile definition, because `DeterminismLog.h` only carries it as a commented-out `#define`; Jolt writes `detlog.txt` in the working directory or the directory `aver_phys_diag_log_dir` names), `TRACK_BROADPHASE_STATS`, `TRACK_NARROWPHASE_STATS` and `JPH_TRACK_SIMULATION_STATS`, and Jolt's INTERNAL profiler (`JPH_PROFILE_ENABLED`), which takes the external hook's place because the two cannot coexist. The hook file is then not built and the engine's profiler panel answers "no hook". `modules/physics/src/PhysicsDeterminism.cpp` starts the internal profiler with the first world (never stops it: worker threads hold records into it), marks a frame at the end of every fixed step, and opens and closes the determinism log with the world.
+
 ## Conventions — Jolt does not share the engine's
 
 This is the thing to remember when touching the physics module. Jolt's own docs

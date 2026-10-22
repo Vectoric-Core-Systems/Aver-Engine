@@ -1,0 +1,5 @@
+OCSHAPE 1
+# A solid half-space tilted 30 degrees: the points with n.x = 0 form the plane, the side opposite n is solid. Static bodies only.
+NAME PlaneRamp
+NODE ramp plane -0.5 0 0.866 0 800
+ROOT ramp

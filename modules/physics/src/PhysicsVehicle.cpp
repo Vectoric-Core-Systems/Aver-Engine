@@ -34,6 +34,7 @@
 #include "aver/physics/physics_abi.h"
 #include "Convert.hpp"
 #include "PhysicsInternal.hpp"
+#include "PhysicsSurface.hpp"   // the grip reads the leaf material under the tyre
 
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -111,6 +112,7 @@ void detachConstraint(VehicleEntry& e) {
     if (e.constraint == nullptr) return;
     g_world->system.RemoveStepListener(e.constraint.GetPtr());
     g_world->system.RemoveConstraint(e.constraint.GetPtr());
+    noteConstraintTopology();   // a state restore refuses to cross this (physics_state_abi.h)
     e.constraint = nullptr;
 }
 
@@ -508,8 +510,8 @@ int32_t aver_phys_vehicle_finish(int32_t v, float maxPitchRollDeg) {
     // World::vehicles, which outlives the constraint (detachConstraint runs before the entry is erased).
     const float* gripScale = &e->tune[AVER_PHYS_VU_GRIP_SCALE];
     vc->SetCombineFriction([gripScale](JPH::uint, float& longitudinal, float& lateral, const JPH::Body& surface,
-                                       const JPH::SubShapeID&) {
-        const float grip = std::min(1.0f, surface.GetFriction() / kDefaultSurfaceFriction) * *gripScale;
+                                       const JPH::SubShapeID& subShape) {
+        const float grip = std::min(1.0f, surfaceFrictionOf(surface, subShape, surface.GetFriction()) / kDefaultSurfaceFriction) * *gripScale;
         longitudinal *= grip;
         lateral *= grip;
     });
@@ -521,6 +523,7 @@ int32_t aver_phys_vehicle_finish(int32_t v, float maxPitchRollDeg) {
 
     g_world->system.AddConstraint(vc.GetPtr());
     g_world->system.AddStepListener(vc.GetPtr());
+    noteConstraintTopology();   // the vehicle constraint was added just above: a state restore refuses to cross this (physics_state_abi.h)
     e->constraint = vc;
     vehicleOnFinished(*e);
     return 1;

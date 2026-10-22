@@ -31,5 +31,16 @@ internal static partial class GameSystemNodes
         Reg("setsoftbodyeffects", GenericKind.Exec, typeof(SoftBodyGraphInterop), "SetSoftBodyEffectsForGraph", "enabled:bool=true", "success:bool", "p:enabled", "success"),
         Reg("repairallsoftbodies", GenericKind.Exec, typeof(SoftBodyGraphInterop), "RepairAllSoftBodiesForGraph", "", "repaired:int,success:bool", ">repaired", "success"),
         Reg("getsoftbodydents", GenericKind.Pure, typeof(SoftBodyGraphInterop), "GetSoftBodyDentsForGraph", "entity:int", "found:bool,dentedEdges:int,maxSetCm:float,debrisPieces:int", "p:entity,>dentedEdges,>maxSetCm,>debrisPieces", "found"),
+        // Version 3 (wave 11, docs/plans/wave11/SOFTBODY_HAIR.md 2.7): ten rows appended; the fifteen above and their pins do not change, so saved graphs keep loading.
+        Reg("setsoftpressure", GenericKind.Exec, typeof(SoftBodyGraphInterop), "SetSoftPressureForGraph", "entity:int,kPa:float", "success:bool", "p:entity,p:kPa", "success"),
+        Reg("getsoftvolume", GenericKind.Pure, typeof(SoftBodyGraphInterop), "GetSoftVolumeForGraph", "entity:int", "found:bool,restCm3:float,nowCm3:float,ratio:float", "p:entity,>restCm3,>nowCm3,>ratio", "found"),
+        Reg("grabsoftbody", GenericKind.Exec, typeof(SoftBodyGraphInterop), "GrabSoftBodyForGraph", "entity:int,x:float,y:float,z:float,reach:float=30,targetX:float,targetY:float,targetZ:float", "grab:int,success:bool", "p:entity,p:x,p:y,p:z,p:reach,p:targetX,p:targetY,p:targetZ,>grab", "success"),
+        Reg("movesoftgrab", GenericKind.Exec, typeof(SoftBodyGraphInterop), "MoveSoftGrabForGraph", "entity:int,grab:int,x:float,y:float,z:float", "success:bool", "p:entity,p:grab,p:x,p:y,p:z", "success"),
+        Reg("releasesoftgrab", GenericKind.Exec, typeof(SoftBodyGraphInterop), "ReleaseSoftGrabForGraph", "entity:int,grab:int", "success:bool", "p:entity,p:grab", "success"),
+        Reg("setsoftbuoyancy", GenericKind.Exec, typeof(SoftBodyGraphInterop), "SetSoftBuoyancyForGraph", "entity:int,density:float=1000,drag:float=1", "success:bool", "p:entity,p:density,p:drag", "success"),
+        Reg("getsoftsubmerged", GenericKind.Pure, typeof(SoftBodyGraphInterop), "GetSoftSubmergedForGraph", "entity:int", "found:bool,fraction:float,volumeCm3:float", "p:entity,>fraction,>volumeCm3", "found"),
+        Reg("setsoftcontact", GenericKind.Exec, typeof(SoftBodyGraphInterop), "SetSoftContactForGraph", "entity:int,softScale:float=1,otherScale:float=1", "success:bool", "p:entity,p:softScale,p:otherScale", "success"),
+        Reg("setsoftpairmode", GenericKind.Exec, typeof(SoftBodyGraphInterop), "SetSoftPairModeForGraph", "entity:int,other:int,mode:int", "success:bool", "p:entity,p:other,p:mode", "success"),
+        Reg("addsoftjelly", GenericKind.Exec, typeof(SoftBodyGraphInterop), "AddSoftJellyForGraph", "entity:int,preset:int=5", "success:bool", "p:entity,p:preset", "success"),
     };
 }

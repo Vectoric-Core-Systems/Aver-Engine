@@ -177,6 +177,9 @@ private:
     std::vector<Basis3> nodeBasis_;
     // Nodes that are a joint of ANY skin: their channels are skeletal, never object motion.
     std::vector<u8>     jointOfAnySkin_;
+    // The whole world transform (translation included) of the node whose mesh importMesh is reading, for line primitives: a curve has no
+    // placement, so unlike a triangle mesh it keeps its node's translation. Identity for a mesh no node referenced.
+    f32 curveWorld_[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
 
     // Records an unsupported feature, once each.
     void note(const std::string& what) {
@@ -347,6 +350,8 @@ private:
     // Their names, unique: mesh.extras.targetNames, else the first primitive's, else Target_<i>. Animation
     // curves are named with the same list, so the two always agree.
     std::vector<std::string> meshTargetNames(const JsonValue& mesh) const;
+    // Appends the segments of one LINES (mode 1) or LINE_STRIP (mode 3) primitive to r_.hairCurves. Returns false with `why` set.
+    bool importLines(const JsonValue& prim, i64 mode, std::string* why);
     // Appends one primitive to `m` as a submesh. Returns false with `why` set.
     bool importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData& m, MorphAcc& morph, std::string* why);
     // The weight curves of animation `a` ("morph.<target>"), over every node it animates.
@@ -371,9 +376,10 @@ void xform(const f32 m[16], f32 x, f32 y, f32 z, bool point, f32 out[3]) {
 }
 
 bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData& m, MorphAcc& morph, std::string* why) {
-    // Only triangles; other modes are noted and skipped.
+    // Triangles become a submesh; LINES and LINE_STRIP become strand curves; other modes are noted and skipped.
     const i64 mode = prim["mode"].asInt(4);
-    if (mode != 4) { note("primitive mode " + std::to_string(mode) + " (only triangles are imported)"); return true; }
+    if (mode == 1 || mode == 3) return importLines(prim, mode, why);
+    if (mode != 4) { note("primitive mode " + std::to_string(mode) + " (only triangles and line strands are imported)"); return true; }
     if (prim["extensions"].has("KHR_draco_mesh_compression")) return fail(why, "glTF: Draco-compressed meshes are not supported");
 
     const JsonValue& attrs = prim["attributes"];
@@ -603,6 +609,77 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
     sm.baseVertex = 0;
     sm.vertexCount = m.vertexCount();
     m.submeshes.push_back(std::move(sm));
+    return true;
+}
+
+bool Gltf::importLines(const JsonValue& prim, i64 mode, std::string* why) {
+    if (prim["extensions"].has("KHR_draco_mesh_compression")) return fail(why, "glTF: Draco-compressed meshes are not supported");
+    const JsonValue& attrs = prim["attributes"];
+    if (!attrs.has("POSITION")) return fail(why, "glTF: a line primitive has no POSITION attribute");
+    AccessorF pos;
+    if (!readAccessor(attrs["POSITION"].asInt(-1), pos, why)) return false;
+    if (pos.components != 3) return fail(why, "glTF: POSITION is not VEC3");
+    AccessorF width;
+    const bool hasWidth = attrs.has("_WIDTH") && readAccessor(attrs["_WIDTH"].asInt(-1), width, why) && width.components == 1 && width.count == pos.count;
+
+    // The vertices in draw order. glTF allows a primitive with no indices, meaning "the vertices in order".
+    std::vector<u32> order;
+    if (prim.has("indices")) {
+        AccessorF idx;
+        if (!readAccessor(prim["indices"].asInt(-1), idx, why)) return false;
+        if (idx.components != 1) return fail(why, "glTF: indices accessor is not SCALAR");
+        order.reserve(idx.count);
+        for (u32 i = 0; i < idx.count; ++i) {
+            const u32 v = u32(idx.v[i]);
+            if (v >= pos.count) return fail(why, "glTF: a line index is past the end of its POSITION accessor");
+            order.push_back(v);
+        }
+    } else {
+        order.resize(pos.count);
+        for (u32 i = 0; i < pos.count; ++i) order[i] = i;
+    }
+
+    // Segments: a strip joins neighbours, LINES takes them in pairs.
+    ImportedHairCurves& hc = r_.hairCurves;
+    const u32 material = u32(std::max<i64>(prim["material"].asInt(-1), 0));
+    if (hasWidth && hc.pointWidthCm.size() < hc.pointCount()) hc.pointWidthCm.resize(hc.pointCount(), 0.0f);
+    const bool keepWidth = hasWidth || !hc.pointWidthCm.empty();
+
+    const auto point = [&](u32 v, Vec3& out) {
+        f32 t[3];
+        xform(curveWorld_, pos.v[usize(v)*3+0], pos.v[usize(v)*3+1], pos.v[usize(v)*3+2], true, t);
+        out = toEngine(t[0], t[1], t[2], false);
+    };
+    const auto append = [&](u32 v, const Vec3& p) {
+        hc.points.insert(hc.points.end(), {p.x, p.y, p.z});
+        if (keepWidth) hc.pointWidthCm.push_back(hasWidth ? width.v[usize(v)] * o_.scale : 0.0f);
+    };
+
+    bool open = false;
+    Vec3 last{0, 0, 0};
+    const auto closeStrand = [&]() {
+        if (!open) return;
+        hc.strandStart.push_back(u32(hc.pointCount()));
+        hc.material.push_back(material);
+        open = false;
+    };
+    if (hc.strandStart.empty()) hc.strandStart.push_back(0);
+    const usize step = mode == 3 ? 1 : 2;
+    const usize segs = mode == 3 ? (order.size() > 1 ? order.size() - 1 : 0) : order.size() / 2;
+    for (usize s = 0; s < segs; ++s) {
+        const u32 a = order[s * step], b = order[s * step + 1];
+        Vec3 pa, pb;
+        point(a, pa);
+        point(b, pb);
+        if (!(open && pa.x == last.x && pa.y == last.y && pa.z == last.z)) {
+            closeStrand();
+            append(a, pa);
+            open = true;
+        }
+        append(b, pb);
+        last = pb;
+    }
+    closeStrand();
     return true;
 }
 
@@ -2052,6 +2129,7 @@ bool Gltf::run(std::string* why) {
                     r_.meshSkinIndex.push_back(-1);
                     meshRawSkin_.push_back(-1);
                 }
+                std::memcpy(curveWorld_, world, sizeof(curveWorld_));
                 if (!importMesh(meshes[usize(meshIdx)], basis, r_.meshes[usize(target)], why)) return false;
                 meshRawSkin_[usize(target)] = skin;
                 Built b{};
@@ -2089,6 +2167,7 @@ bool Gltf::run(std::string* why) {
 
     for (usize i = 0; i < meshes.size(); ++i) {
         if (!visited[i]) {
+            std::memcpy(curveWorld_, kIdentity, sizeof(curveWorld_));
             if (!importMesh(meshes[i], kIdentity, r_.meshes[i], why)) return false;
             note("a mesh referenced by no node (imported at identity)");
         }
@@ -2143,7 +2222,7 @@ bool loadBuffers(const JsonValue& d, const std::vector<u8>& glbBin, const std::s
 bool importGltfFromMemory(const u8* bytes, usize size, const std::string& baseDir,
                           GltfImportResult& out, const GltfImportOptions& opt, std::string* why) {
     if (!bytes || size < 4) return fail(why, "glTF: file is too small");
-    out.meshes.clear(); out.meshNames.clear(); out.unsupported.clear();
+    out.meshes.clear(); out.meshNames.clear(); out.unsupported.clear(); out.hairCurves = ImportedHairCurves{};
     out.objectAnimations.clear(); out.objectAnimationNames.clear(); out.objectAnimationPlacement.clear();
 
     std::string_view json;

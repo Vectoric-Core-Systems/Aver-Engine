@@ -13,8 +13,9 @@ using Aver.Scene;
 
 namespace Aver.Framework;
 
-/// <summary>The material presets (pinned to softbody::SoftPreset in Material.hpp).</summary>
-public enum SoftPreset { ClothLight = 0, ClothHeavy = 1, Metal = 2, Wood = 3, Glass = 4 }
+/// <summary>The material presets (pinned to softbody::SoftPreset in Material.hpp). <c>Jelly</c> and <c>Rope</c> are the presets of
+/// <see cref="Entity.AddJelly"/> and <see cref="Entity.AddRope"/>; a cloth or a destructible refuses them.</summary>
+public enum SoftPreset { ClothLight = 0, ClothHeavy = 1, Metal = 2, Wood = 3, Glass = 4, Jelly = 5, Rope = 6 }
 
 /// <summary>What deposited the energy (pinned to softbody::DepositKind).</summary>
 public enum SoftDamageKind { Impact = 0, Explosion = 1, Gameplay = 2 }
@@ -140,7 +141,7 @@ public static class SoftBodies
 
 /// <summary>The graph-node surface for the soft-body nodes: the same calls with the int-entity / primitive-only
 /// signatures GraphCompiler's emitted IL needs. Forwarded from the node table (GraphSoftBodyNodeTable.cs).</summary>
-internal static class SoftBodyGraphInterop
+internal static partial class SoftBodyGraphInterop
 {
     /// <summary>A zero direction (all three) is radial.</summary>
     internal static bool SoftBodyDamageForGraph(int entity, float x, float y, float z, float radius, float energy, float dirX, float dirY, float dirZ) =>

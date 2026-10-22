@@ -1367,6 +1367,13 @@ inline void registerOcclusionVars(std::vector<ConsoleVar>& t) {
 }
 #endif
 
+#if AVER_MODULE_PHYSICS
+// phys.* -- NOT inline, defined in PhysicsConsoleVars.hpp which only PhysicsSettingsPage.cpp includes: this header reaches
+// every SandboxApp* translation unit, several of them at the Debug COFF section cap, and a header-only registration
+// would put its lambdas' sections in each one that references buildVarTable().
+void registerPhysicsVars(std::vector<ConsoleVar>& t);
+#endif
+
 inline std::vector<ConsoleVar> buildVarTable() {
     std::vector<ConsoleVar> t;
 #if AVER_MODULE_VOXI
@@ -1376,6 +1383,9 @@ inline std::vector<ConsoleVar> buildVarTable() {
     registerRhiVars(t);
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
     registerOcclusionVars(t);
+#endif
+#if AVER_MODULE_PHYSICS
+    registerPhysicsVars(t);
 #endif
     return t;
 }
@@ -1611,6 +1621,11 @@ inline bool handleVarSet(SandboxApp&, Engine& e, const std::vector<std::string>&
     return true;
 }
 
+#if AVER_MODULE_PHYSICS
+// phys.* commands -- defined with the variables above.
+void registerPhysicsCommands(std::vector<ConsoleCommandDesc>& t);
+#endif
+
 namespace detail {
 inline std::vector<ConsoleCommandDesc> buildConsoleCatalog() {
     std::vector<ConsoleCommandDesc> t;
@@ -1675,6 +1690,9 @@ inline std::vector<ConsoleCommandDesc> buildConsoleCatalog() {
             return true;
         }});
 #endif
+#if AVER_MODULE_PHYSICS
+    registerPhysicsCommands(t);
+#endif
     return t;
 }
 } // namespace detail
@@ -1699,3 +1717,4 @@ inline bool commandMatchesQuery(const ConsoleCommandDesc& c, std::string_view qu
 }
 
 } // namespace aver::editor
+

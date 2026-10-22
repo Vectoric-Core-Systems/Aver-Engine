@@ -132,6 +132,7 @@ int32_t createJoint(int32_t bodyA, int32_t bodyB, Build&& build) {
     if (!constraint) return 0;
 
     g_world->system.AddConstraint(constraint);
+    noteConstraintTopology();   // a state restore refuses to cross this (physics_state_abi.h)
     const int32_t h = g_nextJointHandle++;
     g_joints.emplace(h, Joint{constraint, bodyA, bodyB});
     return h;
@@ -250,6 +251,7 @@ int32_t aver_phys_joint_remove(int32_t joint) {
     if (!j) return 0;
     if (j->breakable()) --g_breakableCount;
     g_world->system.RemoveConstraint(j->constraint);   // findJoint proved g_world is alive
+    noteConstraintTopology();
     g_joints.erase(joint);
     return 1;
 }
@@ -936,8 +938,19 @@ void aver_phys_joint_break_clear(void) { g_breaks.clear(); }
 namespace aver::physics::detail {
 void clearBodyExtState();   // PhysicsBodyExt.cpp: per-body state keyed by handle dies with the world
 
+void jointHandles(std::vector<int32_t>& out) {
+    out.clear();
+    out.reserve(g_joints.size());
+    for (const auto& [h, j] : g_joints) out.push_back(h);
+    std::sort(out.begin(), out.end());
+}
+
+void clearJointBreakEvents() { g_breaks.clear(); }
+
 void destroyAllJoints() {
+    stateOnShutdown();   // the first teardown hook aver_phys_shutdown calls: snapshots die with their world
     g_joints.clear();
+    g_nextJointHandle = 1;   // handles restart with the world, like body handles: a rebuilt scene hashes the same
     g_breaks.clear();
     g_breakableCount = 0;
     clearBodyExtState();

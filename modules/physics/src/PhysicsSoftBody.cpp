@@ -9,10 +9,15 @@
 // non-const Ref per body (never shared between bodies) precisely so that write is legal. Removing edges or
 // duplicating vertices changes arrays Jolt sized at creation, so a tear is a rebuild: finish() with
 // replaceBody keeps the handle and carries the vertex state across.
+//
+// The record type itself lives in SoftBodyInternal.hpp now: the wave 11 calls (physics_softbody_ext_abi.h,
+// PhysicsSoftBodyExt.cpp and SoftBodyFluid.cpp) keep their state in its SoftExt member, and finish() and the
+// listener call their sbx* hooks. A body that never calls those behaves exactly as before.
 #include "aver/physics/physics_softbody_abi.h"
 #include "Convert.hpp"
 #include "PhysicsInternal.hpp"
 #include "SoftBodyAero.hpp"
+#include "SoftBodyInternal.hpp"
 
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -39,6 +44,7 @@
 using namespace aver;
 using namespace aver::physics;
 using namespace aver::physics::detail;
+using aver::physics::softbody::SoftRecord;
 
 namespace {
 
@@ -47,20 +53,7 @@ constexpr int kParamCount = AVER_PHYS_SB_P_COUNT;
 
 float nanf32() { return std::nanf(""); }
 
-void defaultParams(float* p) {
-    p[AVER_PHYS_SB_P_ITERATIONS] = 5.0f;
-    p[AVER_PHYS_SB_P_DAMPING] = 0.1f;
-    p[AVER_PHYS_SB_P_FRICTION] = 0.2f;
-    p[AVER_PHYS_SB_P_RESTITUTION] = 0.0f;
-    p[AVER_PHYS_SB_P_GRAVITY_SCALE] = 1.0f;
-    p[AVER_PHYS_SB_P_VERTEX_RADIUS_CM] = 0.0f;
-    p[AVER_PHYS_SB_P_MAX_SPEED_CMS] = 50000.0f;
-    p[AVER_PHYS_SB_P_ALLOW_SLEEP] = 1.0f;
-    p[AVER_PHYS_SB_P_DOUBLE_SIDED] = 0.0f;
-    p[AVER_PHYS_SB_P_LAYER] = 0.0f;
-    p[AVER_PHYS_SB_P_ENTITY] = 0.0f;
-    p[AVER_PHYS_SB_P_IMPACTS] = 0.0f;
-}
+void defaultParams(float* p) { softbody::defaultSoftParams(p); }
 
 void overlayParams(float* dst, const float* src, int32_t n) {
     for (int32_t i = 0; i < n && i < kParamCount; ++i)
@@ -83,24 +76,6 @@ struct Builder {
     int32_t jointCount = 0;
     float params[kParamCount];
     Builder() { for (float& p : params) p = nanf32(); }
-};
-
-struct SoftRecord {
-    JPH::Ref<JPH::SoftBodySharedSettings> settings;   // non-const: dents write into it between steps
-    int32_t vertexCount = 0;
-    int32_t jointCount = 0;
-    float params[kParamCount];
-    bool impacts = false;
-    bool frozen = false;                              // set_active(0): the aero loop leaves it alone
-    float drag = 0.0f, lift = 0.0f;
-    int32_t aeroFlags = 0;
-    bool sleepForcedOff = false;
-    std::vector<JPH::Vec3> velBefore;                 // vertex velocities at the start of the step, for impacts
-    std::vector<float> palette;                       // the last skin palette (engine matrices), kept for rebuilds
-    int32_t paletteJoints = 0;
-    float entityWorld[16];
-    bool hasEntityWorld = false;
-    SoftRecord() { defaultParams(params); for (float& f : entityWorld) f = 0.0f; }
 };
 
 std::unordered_map<int32_t, Builder> g_builders;
@@ -174,10 +149,19 @@ void pushPalette(JPH::Body& body, JPH::SoftBodyMotionProperties& mp, const float
 class ImpactListener final : public JPH::SoftBodyContactListener {
 public:
     JPH::SoftBodyValidateResult OnSoftBodyContactValidate(const JPH::Body& soft, const JPH::Body& other,
-                                                          JPH::SoftBodyContactSettings&) override {
-        const int32_t hs = trackedImpact(soft);
-        if (!hs) return JPH::SoftBodyValidateResult::AcceptContact;
+                                                          JPH::SoftBodyContactSettings& settings) override {
+        if (!g_world) return JPH::SoftBodyValidateResult::AcceptContact;
+        const auto sit = g_world->byId.find(soft.GetID());
+        if (sit == g_world->byId.end()) return JPH::SoftBodyValidateResult::AcceptContact;
+        const int32_t hs = sit->second;
+        const auto rit = g_records.find(hs);
+        if (rit == g_records.end()) return JPH::SoftBodyValidateResult::AcceptContact;
         const auto oit = g_world->byId.find(other.GetID());
+        // The contact policy of the wave 11 ABI (mass scales, per-pair ignore and sensor); a default policy changes nothing.
+        if (softbody::sbxValidate(rit->second, oit == g_world->byId.end() ? 0 : oit->second, other, settings) ==
+            JPH::SoftBodyValidateResult::RejectContact)
+            return JPH::SoftBodyValidateResult::RejectContact;
+        if (!rit->second.impacts) return JPH::SoftBodyValidateResult::AcceptContact;
         if (oit == g_world->byId.end()) return JPH::SoftBodyValidateResult::AcceptContact;
         PairSlot slot;
         // Read-only: the other body's velocity and inverse mass as the soft-body phase sees them.
@@ -191,9 +175,15 @@ public:
     }
 
     void OnSoftBodyContactAdded(const JPH::Body& soft, const JPH::SoftBodyManifold& manifold) override {
-        const int32_t hs = trackedImpact(soft);
-        if (!hs) return;
-        const SoftRecord& rec = g_records.find(hs)->second;
+        if (!g_world) return;
+        const auto sit = g_world->byId.find(soft.GetID());
+        if (sit == g_world->byId.end()) return;
+        const int32_t hs = sit->second;
+        const auto rit = g_records.find(hs);
+        if (rit == g_records.end()) return;
+        SoftRecord& rec = rit->second;
+        softbody::sbxContactAdded(rec, manifold);   // the sensor set (takes the event mutex itself)
+        if (!rec.impacts) return;
         const auto& verts = manifold.GetVertices();
         if (rec.velBefore.size() != verts.size()) return;
         const JPH::RMat44 com = soft.GetCenterOfMassTransform();
@@ -240,16 +230,6 @@ public:
             g_events.push_back(e);
         }
     }
-
-private:
-    // The soft body's handle when it is one of ours that reports impacts, else 0.
-    static int32_t trackedImpact(const JPH::Body& soft) {
-        if (!g_world) return 0;
-        const auto it = g_world->byId.find(soft.GetID());
-        if (it == g_world->byId.end()) return 0;
-        const auto rit = g_records.find(it->second);
-        return rit != g_records.end() && rit->second.impacts ? it->second : 0;
-    }
 };
 
 ImpactListener g_listener;
@@ -268,10 +248,22 @@ void removeListener() {
     if (g_world) g_world->system.SetSoftBodyContactListener(nullptr);
 }
 
+// The registry, for the wave 11 translation units (SoftBodyInternal.hpp).
+std::map<int32_t, SoftRecord>& records() { return g_records; }
+SoftRecord* recordOf(int32_t body) { return findRecord(body); }
+std::mutex& eventMutex() { return g_eventMutex; }
+int32_t builderVertexCount(int32_t b) {
+    const auto it = g_builders.find(b);
+    return it == g_builders.end() ? 0 : it->second.vertexCount;
+}
+
 void beginCall() {
-    std::lock_guard<std::mutex> lock(g_eventMutex);
-    g_events.clear();
-    g_pairs.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_eventMutex);
+        g_events.clear();
+        g_pairs.clear();
+    }
+    sbxBeginCall();
 }
 
 void onStepBegin(float dt) {
@@ -294,14 +286,21 @@ void onStepBegin(float dt) {
             }
             const bool aero = rec.drag > 0.0f;
             const bool aeroOn = aero && windOn;
-            const bool keep = aeroOn || (aero && (rec.aeroFlags & 1) != 0);
+            // Attachments and a submerged face (the wave 11 calls) keep a body awake the way aero does.
+            const bool keep = aeroOn || (aero && (rec.aeroFlags & 1) != 0) || sbxKeepAwake(rec);
             if (keep && !rec.sleepForcedOff) { body.SetAllowSleeping(false); rec.sleepForcedOff = true; }
             else if (!keep && rec.sleepForcedOff) { body.SetAllowSleeping(rec.params[AVER_PHYS_SB_P_ALLOW_SLEEP] >= 0.5f); rec.sleepForcedOff = false; }
             if (keep && !body.IsActive()) g_world->system.GetBodyInterfaceNoLock().ActivateBody(body.GetID());
             if (aeroOn) applyAero(*mp, body.GetCenterOfMassTransform(), rec.drag, rec.lift, g_wind, g_step, dt);
+            sbxStepBegin(h, rec, body, *mp, dt);   // attachments, then buoyancy
         }
     }
     ++g_step;
+}
+
+// After system.Update, beside vehicleStepEnd: sensor enter and exit events.
+void onStepEnd(float dt) {
+    sbxStepEnd(dt);
 }
 
 void onBodyRemoved(int32_t handle) {
@@ -314,9 +313,12 @@ void destroyAll() {
     g_nextBuilder = 1;
     g_wind = WindParams{};
     g_step = 0;
-    std::lock_guard<std::mutex> lock(g_eventMutex);
-    g_events.clear();
-    g_pairs.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_eventMutex);
+        g_events.clear();
+        g_pairs.clear();
+    }
+    sbxDestroyAll();
 }
 
 } // namespace aver::physics::softbody
@@ -407,6 +409,7 @@ int32_t aver_phys_sb_builder_params(int32_t b, const float* p, int32_t n) {
 }
 
 int32_t aver_phys_sb_builder_cancel(int32_t b) {
+    softbody::sbxBuilderDrop(b);
     return g_builders.erase(b) ? 1 : refuse(AbiError::BadHandle);
 }
 
@@ -453,7 +456,8 @@ int32_t aver_phys_sb_builder_finish(int32_t b, float cx, float cy, float cz, int
         if (a == bb || bb == c || a == c) continue;
         shared->AddFace(JPH::SoftBodySharedSettings::Face(static_cast<JPH::uint32>(a), static_cast<JPH::uint32>(bb), static_cast<JPH::uint32>(c)));
     }
-    if (shared->mFaces.empty()) return refuse(AbiError::InvalidArgument);
+    // A body of rods, volumes or auto constraints may have no faces: sbxPrepare gives it one.
+    if (shared->mFaces.empty() && !softbody::sbxFacelessOk(b)) return refuse(AbiError::InvalidArgument);
     for (size_t e = 0; e < edgeCount; ++e) {
         const int32_t a = B.edgeAb[e * 2], c = B.edgeAb[e * 2 + 1];
         if (a < 0 || c < 0 || a >= n || c >= n) return refuse(AbiError::OutOfRange);
@@ -502,6 +506,8 @@ int32_t aver_phys_sb_builder_finish(int32_t b, float cx, float cy, float cz, int
         }
         if (!shared->mSkinnedConstraints.empty()) shared->CalculateSkinnedConstraintNormals();
     }
+    // Volumes, long range attachments, rods and Jolt's own constraint generator (physics_softbody_ext_abi.h).
+    if (const AbiError why = softbody::sbxPrepare(b, *shared, edgeCount > 0 || bendCount > 0); why != AbiError::Ok) return refuse(why);
     JPH::SoftBodySharedSettings::OptimizationResults results;
     shared->Optimize(results);
 
@@ -583,7 +589,9 @@ int32_t aver_phys_sb_builder_finish(int32_t b, float cx, float cy, float cz, int
             std::memcpy(rec.entityWorld, oldRec->entityWorld, sizeof rec.entityWorld);
             rec.hasEntityWorld = oldRec->hasEntityWorld;
         }
+        softbody::sbxCarry(*oldRec, rec);   // policy, buoyancy, pairs, attachments and pressure survive a tear rebuild
     }
+    softbody::sbxApply(b, *nb, *mp, rec, results);   // the builder's wave 11 params, pressure, skin, group, slots
     if (!shared->mSkinnedConstraints.empty()) {
         // Skin state starts at zero; without a palette the pull would be toward the origin. An identity
         // palette is the bind pose (the rest positions) until the host pushes a real one.
@@ -593,6 +601,9 @@ int32_t aver_phys_sb_builder_finish(int32_t b, float cx, float cy, float cz, int
             for (int32_t j = 0; j < rec.jointCount; ++j)
                 for (int d = 0; d < 4; ++d) rec.palette[static_cast<size_t>(j) * 16 + static_cast<size_t>(d) * 5] = 1.0f;
         }
+        // Twice: a skin pass copies the previous skin position from the last one, and the first has none (Jolt starts it NaN).
+        // A body the host does not skin before its first step (a frozen piece rebuilt by a tear) would solve against NaN.
+        pushPalette(*nb, *mp, rec.palette.data(), rec.paletteJoints, rec.hasEntityWorld ? rec.entityWorld : nullptr, false);
         pushPalette(*nb, *mp, rec.palette.data(), rec.paletteJoints, rec.hasEntityWorld ? rec.entityWorld : nullptr, false);
     }
 
@@ -618,6 +629,7 @@ int32_t aver_phys_sb_builder_finish(int32_t b, float cx, float cy, float cz, int
     if (outBendSlot)
         for (size_t k = 0; k < bendCount; ++k) outBendSlot[k] = static_cast<int32_t>(results.mDihedralBendRemap[k]);
     g_builders.erase(bit);
+    softbody::sbxBuilderDrop(b);
     return handle;
 }
 

@@ -12,7 +12,9 @@
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_layers_abi.h"
 #include "aver/physics/physics_softbody_abi.h"
+#include "aver/physics/physics_softbody_ext_abi.h"
 #include "aver/platform/Image.hpp"
+#include "aver/softbody/Lattice.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/scene_abi.h"
 
@@ -173,8 +175,14 @@ void SoftBodySystem::setPathResolver(PathFn fn, void* user) {
     pathUser_ = user;
 }
 
+void SoftBodySystem::registerSyntheticMesh(u64 id, const fmt::OcMeshData& mesh) { synthMeshes_[id] = mesh; }
+
 const fmt::OcMeshData* SoftBodySystem::meshData(u64 id) {
     if (!id) return nullptr;
+    if (!synthMeshes_.empty()) {
+        const auto sit = synthMeshes_.find(id);
+        if (sit != synthMeshes_.end()) return &sit->second;
+    }
     if (meshFn_) return meshFn_(id, meshUser_);
     if (!pathFn_) return nullptr;
     const auto it = meshCache_.find(id);
@@ -236,6 +244,8 @@ void SoftBodySystem::clear() {
     inbox_.clear();
     events_.clear();
     views_.clear();
+    baseViewCount_ = 0;
+    pressureOps_.clear();
     byBody_.clear();
     proxyUsers_.clear();
     fields_.clear();
@@ -389,7 +399,7 @@ bool SoftBodySystem::clearDebris(scene::Entity e) {
 }
 
 bool SoftBodySystem::setPreset(scene::Entity e, u32 preset) {
-    if (preset >= kSoftPresetCount) return false;
+    if (preset >= kSoftSolidPresetCount) return false;   // Jelly and Rope are the presets of SoftShapeSystem's shapes
     InboxItem it;
     it.kind = InboxItem::Kind::Preset;
     it.entity = e; it.preset = preset;
@@ -498,6 +508,19 @@ bool SoftBodySystem::buildEntry(scene::World& world, Entry& en) {
         en.spec.preset = 0xFFFEu; en.spec.scaleA = sb->maxDistanceCm; en.spec.scaleB = sb->compliance;
     }
 
+    if (cl || de) {
+        // One body per entity root: a jelly or a rope (SoftShapeSystem) owns the mesh already.
+        for (const char* shape : {"CSoftVolume", "CSoftRope"}) {
+            const u32 st = world.componentId(shape);
+            if (st != 0 && world.hasComponent(e, st)) {
+                en.conflict = true;
+                en.failed = true;
+                AVER_WARN("[SoftBody] entity {} has a {} and a cloth or destructible; one body per entity root, so the cloth is not simulated", e, shape);
+                return true;
+            }
+        }
+    }
+
     const fmt::OcMeshData* mesh = meshData(mr->mesh);
     if (!mesh) return false;
     en.mesh = mesh;
@@ -510,7 +533,7 @@ bool SoftBodySystem::buildEntry(scene::World& world, Entry& en) {
     // The asset: .ocsoft + overrides, or the preset alone.
     const SoftKind kind = en.destructible ? SoftKind::Destructible : SoftKind::Cloth;
     SoftPreset preset = kind == SoftKind::Cloth ? SoftPreset::ClothLight : SoftPreset::Metal;
-    if (en.spec.preset < kSoftPresetCount) preset = static_cast<SoftPreset>(en.spec.preset);
+    if (en.spec.preset < kSoftSolidPresetCount) preset = static_cast<SoftPreset>(en.spec.preset);
     SoftAsset a = makeSoftAsset(kind, preset);
     en.assetStale = false;
     if (en.spec.assetId) {
@@ -528,6 +551,11 @@ bool SoftBodySystem::buildEntry(scene::World& world, Entry& en) {
         a.material.bendCompliance /= en.spec.scaleB;
         a.cloth.defaultReachCm *= en.spec.scaleC;
         a.cloth.tearable = a.cloth.tearable || (cl->flags & kClothTearable) != 0;
+        if (a.cloth.solver == ClothSolver::Fast && a.cloth.tearable) {
+            // The fast solver has no beams to dent or tear (Jolt makes its own constraints): it simulates as non-tearable cloth.
+            AVER_WARN("[SoftBody] entity {}: cloth.solver \"fast\" cannot tear; kClothTearable is ignored", e);
+            a.cloth.tearable = false;
+        }
     } else if (de) {
         a.material.toughnessJ *= en.spec.scaleA;
         a.material.yieldStrain *= en.spec.scaleA;
@@ -622,6 +650,25 @@ bool SoftBodySystem::buildEntry(scene::World& world, Entry& en) {
     en.hasLastWorld = true;
     en.hardSkinNext = true;
     en.totalBeams = static_cast<u32>(en.sim.cage.beams.size());
+
+    // An inflatable is a closed cloth with a pressure (docs/plans/wave11/SOFTBODY_HAIR.md 2.4). A mesh that is not closed simulates as plain cloth.
+    en.pressureKPa = 0.0f;
+    en.leakKPaPerS = 0.0f;
+    en.groupApplied = false;
+    en.groupHandle = 0;
+    if (cl && a.inflate.pressureKPa > 0.0f) {
+        std::vector<f32> pos;
+        std::vector<u32> idx;
+        pos.reserve(en.sim.cage.particles.size() * 3);
+        for (const Particle& q : en.sim.cage.particles) { pos.push_back(q.rest.x); pos.push_back(q.rest.y); pos.push_back(q.rest.z); }
+        for (const Triangle& t : en.sim.cage.triangles) { idx.push_back(t.v[0]); idx.push_back(t.v[1]); idx.push_back(t.v[2]); }
+        if (meshIsClosed(pos.data(), static_cast<u32>(en.sim.cage.particles.size()), idx.data(), static_cast<u32>(idx.size()), 1e-4f)) {
+            en.pressureKPa = a.inflate.pressureKPa;
+            en.leakKPaPerS = a.inflate.leakKPaPerS;
+        } else {
+            AVER_WARN("[SoftBody] entity {}: inflate needs a closed mesh; it simulates as plain cloth", e);
+        }
+    }
 
     // Which backing the thick-break rule uses: an open sheet gets a back skin on every piece (BackSkin::Auto).
     {
@@ -843,6 +890,9 @@ void SoftBodySystem::publish(scene::World& world) {
             }
         }
     }
+    baseViewCount_ = views_.size();
+    for (const ViewSource& src : viewSources_)
+        if (src.fn) src.fn(views_, src.user);
     s.rebuildsLastTick = rebuildsThisTick_;
     s.depositsLastTick = depositsThisTick_;
     s.eventsPending = static_cast<u32>(events_.size());
@@ -856,6 +906,55 @@ void SoftBodySystem::publish(scene::World& world) {
 const PieceView* SoftBodySystem::pieces(u32& count) const {
     count = static_cast<u32>(views_.size());
     return views_.data();
+}
+
+// ---- wave 11: view sources, inflatables ------------------------------------------------------------------
+
+void SoftBodySystem::addViewSource(ViewSourceFn fn, void* user) {
+    if (!fn) return;
+    for (const ViewSource& s : viewSources_)
+        if (s.fn == fn && s.user == user) return;
+    viewSources_.push_back(ViewSource{fn, user});
+}
+
+void SoftBodySystem::removeViewSource(ViewSourceFn fn, void* user) {
+    for (usize i = 0; i < viewSources_.size(); ++i)
+        if (viewSources_[i].fn == fn && viewSources_[i].user == user) {
+            viewSources_.erase(viewSources_.begin() + static_cast<std::ptrdiff_t>(i));
+            break;
+        }
+    refreshViewSources();
+}
+
+void SoftBodySystem::refreshViewSources() {
+    if (views_.size() > baseViewCount_) views_.resize(baseViewCount_);
+    for (const ViewSource& src : viewSources_)
+        if (src.fn) src.fn(views_, src.user);
+}
+
+i32 SoftBodySystem::bodyOf(scene::Entity e) const {
+    const Entry* en = find(e);
+    if (!en || en->failed) return 0;
+    for (const Piece& p : en->pieces)
+        if (p.alive && p.body) return p.body;
+    return 0;
+}
+
+scene::Entity SoftBodySystem::entityOfBody(i32 body) const {
+    const auto it = byBody_.find(body);
+    return it == byBody_.end() ? scene::kInvalidEntity : it->second.first;
+}
+
+bool SoftBodySystem::setPressure(scene::Entity e, f32 kPa) {
+    const Entry* en = find(e);
+    if (!en || en->failed || en->destructible || en->legacy || !(kPa >= 0.0f) || !std::isfinite(kPa)) return false;
+    pressureOps_.emplace_back(e, kPa);
+    return true;
+}
+
+f32 SoftBodySystem::pressureOf(scene::Entity e) const {
+    const Entry* en = find(e);
+    return en ? en->pressureKPa : 0.0f;
 }
 
 SoftBodyState SoftBodySystem::state(scene::Entity e) const {
@@ -963,6 +1062,7 @@ void SoftBodySystem::tick(scene::World& world, f32 dt) {
 
     ++fieldTick_;
     applyInbox(world);
+    applyPressureOps();
     fieldStep(world, stepSeconds);
     pollImpacts(world);
 
@@ -972,7 +1072,14 @@ void SoftBodySystem::tick(scene::World& world, f32 dt) {
         tearPipeline(world, en);
     }
     for (auto& [e, en] : entries_)
-        if (!en.failed) clothStep(world, en, dt);
+        if (!en.failed) {
+            if (!en.destructible && !en.legacy) {
+                if (en.leakKPaPerS > 0.0f && en.pressureKPa > 0.0f)   // a puncture: the pressure ramps down
+                    setEntryPressure(en, std::max(0.0f, en.pressureKPa - en.leakKPaPerS * dt));
+                applyGroup(en);
+            }
+            clothStep(world, en, dt);
+        }
     applyLodAndFreeze(world, dt);
     debrisLifecycle(world, dt);
     evictDebris(world);

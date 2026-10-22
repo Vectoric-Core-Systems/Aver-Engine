@@ -23,24 +23,42 @@
 #include "Convert.hpp"
 
 #include <Jolt/Jolt.h>
+#include <Jolt/Core/JobSystem.h>
 #include <Jolt/Core/JobSystemThreadPool.h>
+#include <Jolt/Core/Profiler.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
+#include <Jolt/Physics/EPhysicsUpdateError.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Vehicle/VehicleConstraint.h>
 #include <Jolt/Physics/Vehicle/VehicleEngine.h>
 #include <Jolt/Physics/Vehicle/VehicleTransmission.h>
 
 #include "aver/physics/physics_vehicle_ext_abi.h"
+#include "aver/physics/physics_world_abi.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+// A named scope in the profiler table (physics_world_abi.h, aver_phys_profile_*), nested under whatever scope is open on
+// this thread. Expands to a Jolt ExternalProfileMeasurement when the hook is built (AVER_PHYSICS_PROFILER) and to nothing
+// otherwise; with the hook built but profiling off it is a relaxed load and a branch. `name` must be a string literal.
+#ifdef JPH_EXTERNAL_PROFILE
+#  define AVER_PHYS_SCOPE_CAT2(a, b) a##b
+#  define AVER_PHYS_SCOPE_CAT(a, b) AVER_PHYS_SCOPE_CAT2(a, b)
+#  define AVER_PHYS_SCOPE(name) ::JPH::ExternalProfileMeasurement AVER_PHYS_SCOPE_CAT(aver_phys_scope_, __LINE__)(name)
+#else
+#  define AVER_PHYS_SCOPE(name) static_cast<void>(0)
+#endif
 
 namespace aver::physics::detail {
 
@@ -158,7 +176,14 @@ private:
 // ---- Events ---------------------------------------------------------------------------------------
 
 // Two solid bodies that began touching, and where.
-struct ContactEvent { int32_t a = 0, b = 0; Vec3 point, normal; };
+struct ContactEvent {
+    int32_t a = 0, b = 0; Vec3 point, normal;
+    // SHAPES_MATERIALS (physics_surface_abi.h): filled by fillContactDetail in OnContactAdded, read by aver_phys_contact_detail.
+    int32_t subA = 0, subB = 0;          // raw Jolt sub-shape ids of body a and b
+    int32_t surfA = 0, surfB = 0;        // resolved surface ids (leaf material, else body label, else 0)
+    float closing = 0.0f;                // relative speed along the normal when the contact began, cm/s, positive = approaching
+    float friction = 0.0f, restitution = 0.0f;   // as applied, after the leaf materials and any surface sampler
+};
 // A body entering or leaving a sensor volume.
 struct OverlapEvent { int32_t sensor = 0, body = 0; int32_t entered = 0; };
 
@@ -285,16 +310,59 @@ struct VehicleImpactRaw {
     Vec3 point, normal;
 };
 
+// ---- Config and stats (physics_world_abi.h; PhysicsConfig.cpp, PhysicsStats.cpp) -----------------------
+
+// JPH::TempAllocatorImpl is `final`, so the high-water mark the stats want comes from a wrapper that forwards to
+// one. Allocate and Free are called from several worker threads but always in stack order by job dependency
+// (TempAllocator.h), so there is one logical writer at a time and a relaxed atomic is enough.
+class TrackingTempAllocator final : public JPH::TempAllocator {
+public:
+    explicit TrackingTempAllocator(size_t bytes) : inner_(bytes), size_(bytes) {}
+    void* Allocate(JPH::uint inSize) override {
+        void* p = inner_.Allocate(inSize);
+        const size_t use = inner_.GetUsage();
+        if (use > peak_.load(std::memory_order_relaxed)) peak_.store(use, std::memory_order_relaxed);
+        return p;
+    }
+    void Free(void* inAddress, JPH::uint inSize) override { inner_.Free(inAddress, inSize); }
+    size_t size() const { return size_; }
+    size_t peak() const { return peak_.load(std::memory_order_relaxed); }
+    void resetPeak() { peak_.store(inner_.GetUsage(), std::memory_order_relaxed); }
+
+private:
+    JPH::TempAllocatorImpl inner_;
+    size_t size_;
+    std::atomic<size_t> peak_{0};
+};
+
+// What the stats read; written by statsAfterUpdate / the step-call scope below.
+struct StepStats {
+    int32_t stepsThisCall = 0;                 // fixed steps run so far in the current aver_phys_step call
+    int32_t stepsLastCall = 0;
+    int32_t contactsLastCall = 0;
+    double  stepMsLast = 0.0, stepMsAvg = 0.0, stepMsMax = 0.0, callMsLast = 0.0;
+    uint32_t updateErrors = 0;                 // OR of EPhysicsUpdateError since the window reset
+    int64_t updateErrorSteps = 0;
+    bool    updateErrorLogged = false;         // the one log line per world
+    int32_t workers = 0;                       // resolved worker threads (0 = single-threaded)
+};
+
+// A fresh number for every World constructed (PhysicsState.cpp). A snapshot remembers the one it was taken in, so a handle that
+// outlives its world answers BAD_HANDLE even if a new world has appeared since.
+uint64_t nextWorldId();
+
 // ---- The world ------------------------------------------------------------------------------------
 
 // The whole simulation: Jolt's system, the handle tables, and the event queues.
 struct World {
+    uint64_t id = nextWorldId();
     JPH::PhysicsSystem                       system;
     BPLayerInterface                         bpLayers;
     ObjectVsBroadPhaseFilter                 objVsBp;
     ObjectLayerPairFilter                    objPair;
-    std::unique_ptr<JPH::TempAllocatorImpl>  temp;
-    std::unique_ptr<JPH::JobSystemThreadPool> jobs;
+    std::unique_ptr<TrackingTempAllocator>   temp;
+    // A base pointer: a thread pool, or JobSystemSingleThreaded for PHYSICS.THREADS 0 (PhysicsConfig.cpp).
+    std::unique_ptr<JPH::JobSystem>          jobs;
 
     // Handles are dense int32 starting at 1, because 0 must stay invalid.
     std::unordered_map<int32_t, JPH::BodyID> bodies;
@@ -333,16 +401,37 @@ struct World {
 
     float fixedStep = 1.0f / 60.0f;
     float accumulator = 0.0f;
+
+    // ---- WORLD_STATE_DEBUG ----
+    // The config this world was built with, in the ABI's float form (AVER_PHYS_CF_*); config_active reads it.
+    float activeConfig[AVER_PHYS_CF_COUNT] = {};
+    int64_t stepsTotal = 0;                    // fixed steps since this world was created
+    // topologyEpoch counts every body removal and every constraint add / remove; constraintEpoch only the constraint ones
+    // (noteConstraintTopology below). A snapshot records both: Jolt restores constraints BY ARRAY INDEX, so a restore
+    // into a world whose constraint set changed is refused instead of silently restoring the wrong constraint.
+    uint32_t topologyEpoch = 0, constraintEpoch = 0;
+    StepStats stats;
 };
 
 // The live world, or null between aver_phys_shutdown and the next aver_phys_init. DEFINED in
 // PhysicsWorld.cpp, which owns its lifetime; every other file only reads it.
 extern std::unique_ptr<World> g_world;
 
+// Called at every place a Jolt constraint is added to or removed from the system (joint create / remove, vehicle finish /
+// destroy, ragdoll create / destroy) -- the ONE line each of those files carries for state recording (physics_state_abi.h).
+inline void noteConstraintTopology() {
+    if (!g_world) return;
+    ++g_world->constraintEpoch;
+    ++g_world->topologyEpoch;
+}
+
 // Jolt's body interface for the live world. UNDEFINED BEHAVIOUR WITH NO WORLD -- every caller in this
 // module checks g_world (or resolves a handle, which does) before reaching for it, exactly as the
 // original file-local version required.
 JPH::BodyInterface& bi();
+
+// The warn-once "body limit reached" message (re-armed by aver_phys_init). Defined in PhysicsWorld.cpp.
+void warnBodyLimit();
 
 // Creates a body from a shape, registers it in both handle tables, and returns its handle.
 //
@@ -448,5 +537,68 @@ void vehicleStepEnd(float dt);
 // Called under World::eventMutex on a worker thread; notes a chassis hit for vehicleStepEnd.
 void vehicleOnContact(int32_t ha, int32_t hb, const JPH::Body& a, const JPH::Body& b,
                       const Vec3& pointCm, const Vec3& normal);
+
+// ---- WORLD_STATE_DEBUG (PhysicsStats.cpp) ------------------------------------------------------------
+
+// One system.Update with the live settings: the collision-step count from the table, the temp allocator and
+// job system the world was built with, the returned EPhysicsUpdateError kept (OR-ed into the stats and logged
+// once per world with the cure named) and the wall time recorded. Replaces the bare Update call in the fixed
+// loop; counts the step in World::stepsTotal.
+void stepWorldOnce();
+
+// Brackets one aver_phys_step call for the stats: the constructor starts the clock and zeroes the per-call
+// counters, the destructor records steps, contacts and the call's wall time. Does nothing with no world.
+class StepCallScope {
+public:
+    StepCallScope();
+    ~StepCallScope();
+    StepCallScope(const StepCallScope&) = delete;
+    StepCallScope& operator=(const StepCallScope&) = delete;
+private:
+    std::chrono::steady_clock::time_point t0_;
+};
+
+// ---- WORLD_STATE_DEBUG: the debug renderer's step hooks (PhysicsDebug.cpp) ---------------------------------------------
+
+// Around every system.Update: while a step runs, the lines Jolt draws from inside it (contacts, supporting faces, linear
+// casts -- armed by aver_phys_debug_arm) go to a separate buffer that debugStepBegin clears, so after a frame's steps it holds
+// the LAST step's contacts and not a smear of every substep. Both are a single flag test when nothing is armed, and empty
+// in a build without JPH_DEBUG_RENDERER.
+void debugStepBegin();
+void debugStepEnd();
+
+// ---- WORLD_STATE_DEBUG: state recording (PhysicsState.cpp, PhysicsStateEngine.cpp; physics_state_abi.h) -------------------
+
+// The last statement of every fixed step in aver_phys_step's loop (a shared one-line edit): appends to the hash log when one is
+// open. A single boolean test otherwise.
+void stateAfterFixedStep();
+
+// ---- WORLD_STATE_DEBUG: the diagnostics preset (PhysicsDeterminism.cpp). Empty in every other build. ----------------------
+
+// World creation (makeJobSystem, before the workers start), the end of every fixed step, and the world teardown: Jolt's internal
+// profiler is started and given a frame mark, and the determinism log is opened and closed.
+void diagOnWorldInit();
+void diagOnStepEnd();
+void diagOnWorldShutdown();
+
+// Drops every snapshot and closes the hash log. Called with the world teardown (destroyAllJoints, which aver_phys_shutdown
+// calls first); a snapshot also remembers its World::id, so a stale handle is dead even if this were missed.
+void stateOnShutdown();
+
+// Engine-side state that lives outside this file set (a soft-body registry, a later area's tables) and wants to ride along in a
+// snapshot: `save` appends the bytes, `restore` is given exactly those bytes back and returns false if it cannot apply them.
+// `name` must be a string literal and unique; it is hashed into the blob so a participant that is missing at restore time is
+// skipped rather than misread. Registration is process-wide and may happen at static-init time. NOTHING REGISTERS TODAY.
+struct StateParticipant {
+    const char* name = nullptr;
+    void (*save)(std::vector<uint8_t>& out) = nullptr;
+    bool (*restore)(const uint8_t* data, size_t size) = nullptr;
+};
+void registerStateParticipant(const StateParticipant& p);
+
+// Tables that are file-static in their own .cpp, read by the manifest and cleared by a restore.
+void jointHandles(std::vector<int32_t>& out);        // PhysicsJoints.cpp: every live joint handle, ascending
+void clearJointBreakEvents();                        // PhysicsJoints.cpp: the undrained break events (a restore re-simulates them)
+void ragdollHandles(std::vector<int32_t>& out);      // PhysicsRagdoll.cpp: every live ragdoll id, ascending
 
 } // namespace aver::physics::detail

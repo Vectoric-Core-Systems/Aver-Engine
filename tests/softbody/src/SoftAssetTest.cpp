@@ -101,7 +101,7 @@ int main() {
         check(!sb::parseSoftAsset(R"({"format":"ocbeam","version":1})", a, &why), "wrong format");
         check(!sb::parseSoftAsset(R"({"format":"ocsoft"})", a, &why), "missing version");
         check(!sb::parseSoftAsset(R"({"format":"ocsoft","version":2})", a, &why), "a newer version is refused");
-        check(!sb::parseSoftAsset(R"({"format":"ocsoft","version":1,"kind":"rope"})", a, &why), "unknown kind");
+        check(!sb::parseSoftAsset(R"({"format":"ocsoft","version":1,"kind":"rubber"})", a, &why), "unknown kind");
         check(!sb::parseSoftAsset(R"({"format":"ocsoft","version":1,"preset":"rubber"})", a, &why), "unknown preset");
         check(!sb::parseSoftAsset(R"({"format":"ocsoft","version":1,"sim":{"iterations":0}})", a, &why), "zero iterations");
         check(!sb::parseSoftAsset(R"({"format":"ocsoft","version":1,"sim":{"maxParticles":2}})", a, &why), "maxParticles under 3");

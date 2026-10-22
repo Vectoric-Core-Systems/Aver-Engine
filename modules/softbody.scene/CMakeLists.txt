@@ -18,6 +18,12 @@ aver_add_module(Aver.SoftBody.Scene
     src/SoftBodyFx.cpp
     src/SoftBodySave.cpp
     src/SoftBodyProxy.cpp
+
+    # Wave 11: jelly and rope on scene entities (SoftShapeSystem, a companion of SoftBodySystem) and its framework relay provider.
+    src/SoftShapeSystem.cpp
+    src/SoftShapeVolume.cpp
+    src/SoftShapeRope.cpp
+    src/SoftShapeProvider.cpp
   DEPS
     Aver.SoftBody
     Aver.Physics

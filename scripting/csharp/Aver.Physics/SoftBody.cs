@@ -31,7 +31,7 @@ public readonly record struct SoftBodyImpact(int SoftBody, int OtherBody, Float3
                                              float ClosingCmPerS, float OtherMassKg, int ContactVertices);
 
 /// <summary>Stages the arrays of one soft body and makes it. Disposing without <see cref="Finish"/> cancels.</summary>
-public sealed class SoftBodyBuilder : IDisposable
+public sealed partial class SoftBodyBuilder : IDisposable
 {
     private const int ParamCount = 12;
     private int _id;
@@ -79,6 +79,7 @@ public sealed class SoftBodyBuilder : IDisposable
     {
         if (_id == 0) return 0;
         Native.aver_phys_sb_builder_params(_id, _params, _params.Length);
+        FlushExtension();   // SoftBodyExt.cs: the wave 11 params, when any were set
         EdgeSlot = new int[_edgeCount];
         BendSlot = new int[_bendCount];
         int handle = Native.aver_phys_sb_builder_finish(_id, centre.X, centre.Y, centre.Z, replaceBody, stateSrcBody, stateMap,
@@ -94,7 +95,7 @@ public sealed class SoftBodyBuilder : IDisposable
 }
 
 /// <summary>A body made by <see cref="SoftBodyBuilder"/>: state, in-place edits, skin, aero, activation.</summary>
-public readonly struct SoftBodyHandle
+public readonly partial struct SoftBodyHandle
 {
     public int Handle { get; }
     public SoftBodyHandle(int handle) { Handle = handle; }

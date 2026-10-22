@@ -28,6 +28,8 @@ inline constexpr u32 kAvrSubtypeMatl  = avrFourCC("MATL");
 inline constexpr u32 kAvrSubtypePref  = avrFourCC("PREF");
 inline constexpr u32 kAvrSubtypeWrld  = avrFourCC("WRLD");
 inline constexpr u32 kAvrSubtypePak   = avrFourCC("PAK ");
+// Derived data, never authored: the physics shape binary cache (one chunk, "DATA"; modules/world PhysicsShapeCache.hpp).
+inline constexpr u32 kAvrSubtypePshp  = avrFourCC("PSHP");
 
 inline constexpr u16 kAvrContainerVersion = 1;
 

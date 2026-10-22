@@ -49,6 +49,9 @@ add_library(Aver.Framework SHARED
   src/TerrainAbi.cpp)
 
 target_include_directories(Aver.Framework PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# Strand hair calls relayed to the hair system's provider (wave 11, docs/HAIR.md). The relay lives with the module that answers it, so it is named by path;
+# it can move to src/HairAbi.cpp unchanged.
+target_sources(Aver.Framework PRIVATE ${CMAKE_SOURCE_DIR}/modules/hair.scene/framework/FrameworkHairAbi.cpp)
 target_compile_features(Aver.Framework PUBLIC cxx_std_20)
 target_link_libraries(Aver.Framework PUBLIC Aver.Core Aver.Assets Aver.Scene Aver.Formats)
 

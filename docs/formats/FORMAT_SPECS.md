@@ -25,7 +25,7 @@ Status: authoritative design spec, v1. Target repo: `C:/Users/User/Documents/Ave
 | `.scene` | World authoring input | **text** | none | Human-authored placement list (→ `.ocmap`/`.ocworld`) | **PRESERVE (unchanged)** |
 | `.octrack` | Track variant of `.ocmap` | **text** | none | Same grammar as `.ocmap` (kept for content compat) | **PRESERVE (unchanged)** |
 | `.ocmesh` | Static mesh | **binary** | `AVR1`/`MESH` | Vertex streams, indices, submeshes, LODs, meshlets, bounds, optional collision + cage-bind | **NEW** |
-| `.ocsoft` | Soft-body asset (cloth or destructible) | JSON | — | `format`/`version`, `kind`, `preset`, `material`/`sim` overrides, `cloth`/`destruct` params, `paint` (per-particle pin/reach RLE keyed by `meshKey`, plus `rules`), and since wave 10 `caps` (thickness shell, back skin, interior material), `effects` (tear/detach/dust particles and sounds) and `proxy` (cooked cage); schema in `docs/SOFTBODY.md` section 3 | **NEW** |
+| `.ocsoft` | Soft-body asset (cloth or destructible) | JSON | — | `format`/`version`, `kind`, `preset`, `material`/`sim` overrides, `cloth`/`destruct` params, `paint` (per-particle pin/reach RLE keyed by `meshKey`, plus `rules`), and since wave 10 `caps` (thickness shell, back skin, interior material), `effects` (tear/detach/dust particles and sounds) and `proxy` (cooked cage); since wave 11 `kind` also `jelly` and `rope` (sections `jelly` and `rope`, presets 5 and 6), and on a cloth `cloth.solver` (`cage`, `fast`) with `bend`, `lra` and `lraSlack`, `inflate` (`pressureKPa`, `leakKPaPerS`) and `group` (`ragdollOf`: `owner`); every wave 11 key is written only when it differs from its default; schema in `docs/SOFTBODY.md` sections 3 and 12 | **NEW** |
 | `.octex` | Texture | **binary** | `AVR1`/`TEX ` | Mip chain over BCn/ASTC/Basis/raw, color space, sampler | **NEW** |
 | `.ocmat` | Material | **text** (cooked → `MATL` chunk) | none / `AVR1` | PBR metallic-roughness params + texture bindings + optional node graph | **NEW** |
 | `.ocskel` | Skeletal mesh + skeleton | **binary** | `AVR1`/`SKEL` | Bones + skin binding + embedded `.ocmesh` geometry | **NEW** |
@@ -34,9 +34,12 @@ Status: authoritative design spec, v1. Target repo: `C:/Users/User/Documents/Ave
 | `.ocgraph` | Visual scripting graph (Aver Node) | **text** | none | Nodes/pins/links for dataflow or event-driven behaviour; optionally declares itself a spawnable actor class | **NEW** |
 | `.ocworld` | Native scene/world | **text** (cooked → `WRLD` chunk) | none / `AVR1` | **Superset of `.ocmap`** — scene graph, streaming, lighting, terrain, prefab instances, class-instance placement | **NEW** |
 | `.ocpak` | Cooked package | **binary** | `AVR1`/`PAK ` | Bundle of cooked assets for shipping (DDC output) | **NEW** |
+| `.pshp` | Physics shape cache | **binary** | `AVR1`/`PSHP` | The BVH of one mesh collision shape, kept under `<project>/Saved/DerivedDataCache/Physics`. Derived data, never authored; a missing or stale file is a rebuild, never an error (section 3.4) | **NEW** |
 | `.ocparticle` | Particle effect | **text** | none | Emitter shape/rate, lifetime, direction+spread, speed, gravity, damping, size- and colour-over-life, blend mode, GI opt-in | **NEW** |
 | `.ocinst` | Baked instanced foliage | **binary** | `AVR1`/`INST` | Flat, grouped world-transform table a level's `FOLIAGE` record names; static, ray-traced only, no collision, not selectable | **NEW** |
 | `.oclanes` | Traffic lanes | **text** | none | A level's directed lane polylines and the lanes each flows into, read from `<level>.oclanes` beside the `.ocworld`; what the level's `vehicle` placements drive along | **NEW** |
+
+| `.ochair` | Strand hair groom | **binary** (text head) | `AVR1`/`HAIR` | `HEAD` text chunk (`SCALP`, `SCALPJOINTS`, `SIM`, `MATERIAL`, `LOOK`, `GENERATE`, `LOD`, `PROXY`, `MAXSTRANDS`; unknown records skipped, a newer `OCHAIR` number refused), optional `STRN` (strand points in cm in scalp-mesh space, start table, material per strand, optional width) and `SCLP` (an embedded skinned scalp); grammar in `OcHair.hpp`, guide in `docs/HAIR.md` | **NEW** |
 
 Rationale for text vs binary: **graphs and small authoring data stay text** (materials, prefabs, worlds, the legacy family) — diffable, hand-editable, mergeable in VCS, matching OC ergonomics. **Bulk geometry/pixel/track data is binary** (mesh, texture, skeletal, animation) — mmap-able, GPU-uploadable, compact. Text formats have a *cooked* binary projection (a chunk inside `.ocpak`) for shipping; the text form remains the source of truth.
 
@@ -89,7 +92,7 @@ Every native asset carries a stable 128-bit `GUID` in its container header. Cros
 | Off | Size | Type | Field | Notes |
 |---|---|---|---|---|
 | 0x00 | 4 | FourCC | `Magic0` = `'AVR1'` (`0x31525641`) | primary container magic |
-| 0x04 | 4 | FourCC | `Subtype` | `'MESH'`,`'TEX '`,`'SKEL'`,`'ANIM'`,`'MATL'`,`'PREF'`,`'WRLD'`,`'PAK '` |
+| 0x04 | 4 | FourCC | `Subtype` | `'MESH'`,`'TEX '`,`'SKEL'`,`'ANIM'`,`'MATL'`,`'PREF'`,`'WRLD'`,`'PAK '`,`'PSHP'` |
 | 0x08 | 2 | u16 | `ContainerVersion` | framework version = **1** |
 | 0x0A | 2 | u16 | `ContentVersion` | per-subtype schema version |
 | 0x0C | 2 | u16 | `MinReaderVersion` | reader must be ≥ this ContainerVersion or refuse |
@@ -137,6 +140,22 @@ A blob of `u16`-length-prefixed UTF-8 entries. `StringRef` = byte offset of an e
 
 ---
 
+### 3.4 `PSHP` — physics shape cache (derived data, wave 11)
+Subtype `'PSHP'`, one chunk `DATA` (file flag `Cooked`), written temp-then-swap as `<16 hex digits of the key>.pshp` under `<project>/Saved/DerivedDataCache/Physics`. The file key is FNV-1a 64 of the text `sourceKey|shapeCacheVersion|vertexCount|indexCount`, where `sourceKey` is the loader's hash of the mesh path, source size, source mtime, the collision cache version and each material slot's collides / surface answers. The `DATA` chunk is the blob `aver_phys_shape_save` writes:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | magic `'APSH'` |
+| 4 | 4 | `u32` shape cache version (`aver_phys_shape_cache_version`; bumped by any change to unit conversion, winding or this layout) |
+| 8 | 4 | `u32` `sizeof(JPH::Real)` (4 single, 8 double precision) |
+| 12 | 12 | `u32` Jolt major, minor, patch |
+| 24 | 8 | `u64` key (the caller's, compared on restore) |
+| 32 | 4 | `u32` kind (1 mesh, 2 heightfield) |
+| 36 | 4 | `u32` payload size |
+| 40 | 8 | `u64` FNV-1a 64 of the payload (a restored mesh reads its BVH as raw bytes and never validates it, so the checksum is what turns damage into a miss) |
+| 48 | n | payload: `JPH::Shape::SaveBinaryState` |
+
+Only a mesh with no surface palette and no per-triangle user data, and a heightfield with no palette, are saved. Every refusal (key, version, precision, Jolt version, size, checksum, Jolt's own error) is a MISS: the shape is built the slow way. Off by default (`PHYSICS.SHAPECACHE`).
 ## 4. Legacy preservation — the load-direct contract
 
 These four (plus `.octrack`) are **frozen text formats**. The engine ships faithful parsers that reproduce the exact semantics extracted in recon. No migration, no re-save required to load. Rules:
@@ -978,10 +997,18 @@ COMPONENT <Type> [key=value]...
 | `Destructible` | `asset` (`.ocsoft`), `preset` (`metal`; `wood`, `glass`), `toughness` (1), `impact` (1), `lifetime` (0), `maxpieces` (0), `indestructible` (0), `nodebris` (0) | `CDestructible`; one soft body per entity, so not together with a Cloth. Dents and tears are saved in a save game (the `softbody` `$State` entry), never in the level |
 | `SoftField` | `kind` (`radial`; `directional`, `damage`, `release`, `kill`, `sleep`), `shape` (`sphere`; `box`, `capsule`, `all`), `extent` (`x,y,z` cm, 100), `strength` (0), `energy` (J/s, 0), `falloff` (1), `dir` (`x,y,z`, +Z), `turbulence` (0), `targets` (comma list of `cloth`, `destructible`, `debris`; all, debris only for `kill`), `once` (0), `off` (0) | `CSoftField`; the placement's transform is the field's frame |
 
+| `Jelly` | `asset` (`.ocsoft` of kind `jelly`), `stiffness` (1), `cell` (cm, 0 = the asset's), `gravity` (1), `damping` (1), `world` (1), `gravityon` (1) | `CSoftVolume`; a tetrahedral lattice inside the placement's closed mesh. Not together with a Cloth, a Destructible or a Rope. The lattice and the OUT fields are never saved |
+| `Rope` | `asset` (`.ocsoft` of kind `rope`), `start` (`x,y,z` WORLD cm, the placement), `end` (`x,y,z` world cm, 250 cm ahead), `length` (cm, 0 = the distance x the asset's slack), `radius` (cm, 0 = the asset's), `world` (1), `startpin` (1), `endpin` (1) | `CSoftRope`; a chain of Cosserat rods drawn as a tube that replaces the placement's mesh. An end anchored to an entity by script is saved as its current world point |
+
 | `Vehicle` | `asset` (`.ocvehicle`), `preset` (`car`; `van`, `truck`, `bus`, `sports`, `tank`: written without an asset, and with one only when it is not `car`), `power` (1), `grip` (1), `brake` (1), `damage` (1), `noactions` (0), `noaudio` (0), `noeffects` (0), `nowheels` (0), `indestructible` (0) | `CVehicle`; runtime state (driver, health, gear, damage taken) is never saved. Refused on an entity with a `vehicle` token, a `CRigidBody`, an object-clip `CAnimator` or a `CDestructible` |
 
 | `CameraRig` | `preset` (`chase`; `vehiclechase`, `orbit`, `firstperson`, `seat`, `topdown`, `fixed`), `mode`, `target` (`self`; `parent`), `arm`, `minarm`, `probe`, `recover`, `socket` and `pivot` (`x,y,z`), `lag`, `lagmax`, `rotlag`, `rotlagmax`, `lagstep`, `ahead`, `aheadmax`, `pitchmin`, `pitchmax`, `yaw`, `pitch`, `recenter`, `blend`, `curve` (`easeinout`; `linear`, `easein`, `easeout`), `fovkick`, `fovkickspeed`, `fadestart`, `fadeend`, `bob`, `seatyaw`, `seatpitch`, `mask` (hex), then the flags `collision`, `inheritpitch`, `inherityaw`, `inheritroll`, `fade` (all 1) and `lookat`, `disabled` (both 0) | `CCameraRig` (and `CCamera`); a key equal to the PRESET's value is omitted (so a `vehiclechase` record stays short), `preset` is always written; `ignoreBody` and the OUT fields are never saved (`docs/CAMERAS.md`) |
 
+Wave 11 (SHAPES_MATERIALS) adds one more type, listed apart so the rows above stay as they were:
+
+| Type | Keys (default when omitted) | Component |
+|---|---|---|
+| `CollisionShape` | `asset` (`.ocshape`, or the id-only key `asset#`), `surface` (a surface name, or `#<hex id>` for an id the project table does not name), `motion` (`static`; `kinematic`, `dynamic`), `noscale` (0) | `CCollisionShape` beside a `CRigidBody` that the record attaches when the entity has none (no level file carries a Rigid Body). `motion` sets that body's motion type and an absent key means `static`; mass, friction, restitution and layer stay on the `CRigidBody`. The shape is scaled by the entity's world scale unless `noscale=1`. Runtime state (`outShape`, `outMassKg`, `outVolumeCm3`) is never saved. Refused on a `Vehicle`. Only the editor's Play builds the body (`docs/PHYSICS_SHAPES.md`) |
 **Canonical writing** (what the editor's save produces and the golden strings of `OcWorldComponentsTest` pin): the asset key
 (omitted only when the id is 0), `RootMotion.mode` and `MotionMatcher.input` are always written; every other key only when it differs from the
 default in the parentheses. Key order is the order of the table, and the components of one placement are written in the order of the
@@ -1332,6 +1359,28 @@ Units: engine cm, +X forward, +Y right, +Z up, left-handed, same space as `.ocwo
 
 ---
 
+## 11c2. `.ocsurf` — physical surface table (text) and `.ocmat` `PHYSSURFACE`
+
+`modules/formats/include/aver/formats/OcSurf.hpp`, `src/OcSurf.cpp`; the host walker is `game::loadPhysicalSurfaces` (`Runtime/src/PhysicalSurfaces.cpp`). One project table, `Content/Physics/Surfaces.ocsurf`, names the physical surfaces a project uses and the numbers each carries. A surface is a NAME hashed to a 32-bit id (FNV-1a over UTF-8, never 0; `aver::surfaceIdFromName`, `Aver.Framework.Surface.IdOf`, `aver_phys_surface_id` are one function), so the file stores the name and nothing else that identifies it. Hosts load it when a project opens, before any level builds a shape, and register every record with the physics module; the editor re-registers it when the Physical Surfaces panel saves.
+
+```
+OCSURF 1
+# everything after a # is a comment
+SURFACE Grass  friction 0.6  restitution 0.05  tag 1
+SURFACE Ice    friction 0.03
+SURFACE Metal  friction 0.35 restitution 0.2   tag 4
+```
+
+| Record | Fields | Notes |
+|---|---|---|
+| `OCSURF 1` | version | must be the first record; a newer version is refused |
+| `SURFACE` | `<name> [friction <f>] [restitution <r>] [tag <n>]` | one per line. `name` is `[A-Za-z0-9_]{1,63}`, case-sensitive, unique in the file. `friction` and `restitution` are unset unless stated (an unset surface defers to the body it is on: it names a surface for queries and effects without changing how anything slides); a stated value clamps to 0..10 and a negative one means unset. `tag` is an integer a game uses to pick a footstep group or an effect (default 0). At most 4096 surfaces |
+
+Parsing is tolerant of CRLF, blank lines and `#` comments, strict about content: a missing header, a version above 1, a bad or repeated name, a key with no value, a non-numeric or non-finite number and more than 4096 records are refused with the line number, and the output is left EMPTY (never the partial state of a file that failed halfway). An unknown key and a record other than `SURFACE` are skipped with ONE warning per file, so a table written by a newer engine still loads. `writeOcSurf` is canonical: only the keys that are set (friction and restitution when >= 0, tag when non-zero), numbers as the shortest text that reads back as the same `f32`, so parse-then-write-then-write is byte-identical. `saveOcSurf` writes atomically. A landscape layer registers its own `surface` name with its friction and restitution only when no surface of that name is registered yet (find-or-add), so an authored table is authoritative.
+
+**`.ocmat` `PHYSSURFACE <name>`** (an extras record beside `GRAPHREF`; `OcMatExtras::physSurface`). The physical surface a collision mesh built from a slot of this material carries; the name hashes to the id a raycast, a contact and a landscape sample report. One token, `[A-Za-z0-9_]{1,63}` (any other name is skipped with a warning). Written only when non-empty, so a material that never named a surface writes the bytes it always did. `GameContent::collisionMeshFor` reads it per slot: triangles are grouped by surface, each group welded and simplified on its own with its borders locked, and the mesh carries a palette of at most 32 surface ids plus one palette index per triangle (the disk cache is `.occol` version 2: the palette and a per-slot signature follow the version-1 fields, and an entry whose slot files changed is rebuilt).
+
+---
 ## 11d. `.ocgas` — gameplay definitions (text)
 
 `scripting/csharp/Aver.Framework/Gas/OcGasParser.cs` (parse), `GameplayDefs.cs` (link). Attribute sets, gameplay effects, abilities and per-class defaults for the gameplay ability system ([../GAMEPLAY_ABILITIES.md](../GAMEPLAY_ABILITIES.md)). Parsed by C#, since only managed code consumes them; no native reader. `*.ocgas` anywhere under the project content folder are discovered recursively, sorted ordinally by relative path, and loaded as one set at every Play start.
@@ -1521,6 +1570,28 @@ OC dialect, `OCCAPTIONS 1` header, `#` comments, quoted strings with `\"` and `\
 
 ## 11k. `.ocvis` — lip-sync track (text)
 `OCVIS 1`, optional `SET phoneme|viseme`, then `EVENT <start> <end> <symbol> [intensity]` lines; `#` comments; unknown records ignored; events need not be sorted; end > start; at most 65536. Phonemes are ARPAbet (39) plus `sil`, `sp`, `pau`. `AverAssetC visbake` turns a track into a curve-only `.ocanim` of `pose.viseme_*` curves. Reader/writer: `aver/anim/Viseme.hpp`.
+## 11m. `.ocshape` — collision shape tree (text, wave 11)
+
+A shape tree that a `CollisionShape` component builds its rigid body from. Reader/writer `modules/formats/include/aver/formats/OcShape.hpp` (grammar in its header); the walker is `game::buildColliderShape` (`Runtime/include/aver/game/ColliderShapes.hpp`). Units and axes are the engine's: centimetres, +X forward, +Y right, +Z up, quaternions `(x y z w)`. A capsule's height is TOTAL (both caps), a cylinder's is FULL end to end; both stand along +Z with the top radius at +Z.
+
+```
+OCSHAPE 1
+NAME Chair
+MASS 12                          # kg; 0 or absent = density times volume
+SURFACE Wood                     # default surface for leaves that name none
+NODE seat  box 40 40 4
+NODE leg   cylinder 3 45 radius 0.5
+NODE top   compound static
+CHILD top seat at 0 0 45
+CHILD top leg  at 32 32 22 rot 0 0 0 1 user 3
+ROOT top
+```
+
+- **Records** (one per line, `#` comments, case-insensitive words): `OCSHAPE <version>`, `NAME <rest of line>`, `MASS <kg>` (>= 0), `SURFACE <name>`, `NODE <id> <kind> ...`, `CHILD <compound> <node> [at x y z] [rot qx qy qz qw] [user <n>]` (file order is child order), `ROOT <id>` (required). An id is `[A-Za-z0-9_]{1,63}` and unique. A surface name follows the `.ocsurf` rule.
+- **Leaf kinds** (numbers in order): `box hx hy hz`, `sphere r`, `capsule r h`, `cylinder r h`, `tcapsule top bottom h`, `tcylinder top bottom h`, `triangle ax ay az bx by bz cx cy cz`, `plane nx ny nz offset half` (the side opposite the normal is solid; `half` 1 to 1e6 bounds its broadphase box), `empty x y z` (no volume, centre of mass there), `hullpoints x y z ...` (at least four points), `hull mesh <content path>` (the convex hull of a mesh's vertices), `mesh <content path>` (the collision mesh, with its material slots' surfaces). **Options** (trailing `key value` pairs): `radius <cm>`, `density <kg/m3>`, `tolerance <cm>`, `edge <deg>` (negative = every edge active), `quality runtime|build`, `surface <name>`.
+- **Decorators** (one child): `NODE <id> rt <child> [at x y z] [rot qx qy qz qw]`, `NODE <id> com <child> at x y z` (the centre of mass moves, the geometry does not), `NODE <id> scale <child> sx sy sz`. **Compounds**: `NODE <id> compound static|mutable`; a mutable compound belongs to one body, so it may be referenced once.
+- **Validation** (on parse and in the editor): numbers finite and in the physics ABI's ranges, every reference defined, no cycle, a compound has 1 to 65536 children, at most 4096 nodes. A leaf or decorator used by several parents is built once and shared.
+- **Forward compatibility**: an unknown record or option key is skipped with one warning per file; a newer `OCSHAPE` version is refused. Written canonically: only the options that are set, `at`/`rot`/`user` only when not at their defaults, so write-then-parse-then-write is byte-identical (`OcShapeTest`).
 ## 12. Versioning & compatibility
 
 - **Two version axes:** `ContainerVersion` (the `AVR1` framework) and `ContentVersion` (per-subtype schema). Text formats carry a single `OC<NAME> <n>` line.
@@ -1657,6 +1728,9 @@ The design intent covered:
 
 This design preserves the four legacy formats byte-for-byte, gives the seven missing asset types real versioned formats under one skippable-chunk container, keeps authoring data human-readable while making bulk data GPU-ready and GPU-driven-capable, and provides a concrete import/cook/DDC path that finally lifts geometry/material/texture/skeleton/animation data out of the opaque embedded-glb and into first-class, permissively-licensed native formats.
 
+### `.ocproject` keys `PHYSICS.*` (solver settings and limits)
+
+Beside the existing `PHYSICS.GRAVITY` and `PHYSICS.FIXEDSTEP`: one key per live solver setting, spelled `PHYSICS.` plus the setting name upper-cased (`PHYSICS.VELOCITYSTEPS 14`, `PHYSICS.SLEEPTIME 1`, `PHYSICS.SPECULATIVEDISTANCE 3` ...; 27 settings, names and units in `aver_phys_setting_*` and `docs/PROJECTS.md`), plus the init-time limits `PHYSICS.MAXBODIES`, `PHYSICS.MAXBODYPAIRS`, `PHYSICS.MAXCONTACTS`, `PHYSICS.TEMPALLOCMB` (these four were parsed and read by nothing before wave 11) and `PHYSICS.THREADS` (`-1` auto, `0` single-threaded, `N` workers; `-2` in `ProjectDesc` means unstated). Values are stored as given and clamped by the ABI. The canonical writer omits a key at its default; keys it does not own survive a re-save. The limits apply to the next world: both hosts call `configureProjectPhysics` after the manifest is parsed, and rebuild the world only when it is empty.
 ### `.ocproject` key `RENDER.MANYLIGHTS`
 
 `RENDER.MANYLIGHTS <0|1|2>` (text manifest, `ProjectDesc::manyLights`, `-1` = unstated): stochastic many-light direct lighting from a light tree (`docs/rendering/MANY_LIGHTS.md`). `0` off (the light grid's capped tail), `1` auto (engages above `voxi.manyLightsMin` = 48 lights; a scene at or under it renders as with `0`), `2` on at any count. Absent leaves the engine default (auto). The console's exhaustive ground-truth mode (`voxi.manyLights 3`) is never stored. It takes effect only on NRD2 frames (`RENDER.DENOISER 2`) with ray tracing on D3D12. Owned by the writer (`isOwnedKey`), so a hand edit survives only as the stated value.

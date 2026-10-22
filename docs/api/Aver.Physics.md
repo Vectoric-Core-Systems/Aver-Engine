@@ -2,9 +2,15 @@
 
 # Aver.Physics public API
 
-37 public types and 439 public members, read from `scripting/csharp/Aver.Physics/` (23 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+87 public types and 877 public members, read from `scripting/csharp/Aver.Physics/` (43 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Physics
+
+### BendType
+
+`public enum BendType` - The bend constraints Jolt's own generator makes.
+
+Values: `None = 0`, `Distance = 1`, `Dihedral = 2`
 
 ### Body
 
@@ -77,8 +83,27 @@
 - `public bool SetAllowSleeping(bool on)`
 - `public bool IsSensor { get; }` - True when the body is a sensor (trigger volume: detects overlap, pushes nothing).
 - `public bool SetSensor(bool on)` - Turns an existing body into a sensor, or back into a solid.
+- `public CollisionShape Shape()` - A new handle on this body's current shape (release it when done).
+- `public bool SetShape(CollisionShape shape, bool keepMass = true)` - Swaps the shape; the body's origin stays where it was.
+- `public bool SetScale(Float3 scale, bool keepMass = false)` - Scale relative to the unscaled shape (absolute, not cumulative).
+- `public Float3 Scale { get; }` - The scale SetScale or a scaled placement gave the body; (1, 1, 1) when unscaled.
+- `public Float3 Origin { get; }` - The shape's origin in the world.
+- `public bool SetEnhancedEdges(bool on)` - Jolt's enhanced internal edge removal: smoother motion over a mesh with convex edges, a little dearer.
+- `public int AddChild(CollisionShape child, Float3 position, Quaternion rotation, int userData = 0)` - Adds a child to a mutable compound this body owns; the new child's index, or -1.
+- `public bool RemoveChild(int index)` - Removes a child (never the last one); later children shift down by one.
+- `public bool SetChildTransform(int index, Float3 position, Quaternion rotation)` - Moves a child, in the compound's own frame.
+- `public int ChildCount { get; }` - The children of a compound shape; -1 when the body is not a compound.
+- `public int Triangles(Float3 min, Float3 max, Span<float> xyz, Span<int> surfaces)` - The collision triangles in a world box (nine floats each, engine cm) with a surface id per triangle.
 - `public ShapeHit Cast(Float3 displacement, uint layerMask = Physics.LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None)` - Sweeps this body's own shape by displacement and returns the first thing it would touch.
 - `public Body[] OverlapAt(Float3 position, Quaternion rotation, uint layerMask = Physics.LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None, int maxResults = 64)` - What this body's shape would overlap at another pose.
+- `public int Surface { get; }` - The body's surface label (0 = none): identity for queries, not contact friction.
+- `public bool SetSurface(int surface, bool copyPhysics = false)` - Labels the body with surface (0 clears it).
+
+### BuoyFlags
+
+`public enum BuoyFlags` - Where the water of a buoyant soft body comes from.
+
+Values: `WorldWater = 1`, `OwnPlane = 2`
 
 ### CharacterBody
 
@@ -134,6 +159,51 @@
 
 `public readonly record struct Contact(Body Body, Float3 Point, Float3 Normal)` - One thing the character touched on its last update.
 
+### CollisionShape
+
+`public readonly struct CollisionShape : IEquatable<CollisionShape>` - A handle to a collision shape.
+
+- `public int Handle { get; }`
+- `public CollisionShape(int handle)`
+- `public bool IsValid { get; }`
+- `public static CollisionShape None { get; }`
+- `public static CollisionShape Box(Float3 half, int surface = 0, ShapeParams? p = null)` - A box with these half extents.
+- `public static CollisionShape Sphere(float radius, int surface = 0)`
+- `public static CollisionShape Capsule(float radius, float height, int surface = 0)` - A capsule; height is TOTAL, both caps included.
+- `public static CollisionShape Cylinder(float radius, float height, int surface = 0, ShapeParams? p = null)` - A flat-ended cylinder; height is end to end.
+- `public static CollisionShape TaperedCapsule(float top, float bottom, float height, int surface = 0)`
+- `public static CollisionShape TaperedCylinder(float top, float bottom, float height, int surface = 0, ShapeParams? p = null)` - A cylinder whose two ends differ in radius (top at +Z); a barrel, a cone when one radius is 0.
+- `public static CollisionShape Triangle(Float3 a, Float3 b, Float3 c, int surface = 0, ShapeParams? p = null)` - A thin convex triangle (not a mesh): a one-off blade or ramp.
+- `public static CollisionShape Plane(Float3 normal, float offsetCm, float halfExtentCm, int surface = 0)` - The points with normal .
+- `public static CollisionShape Empty(Float3 centerOfMass)` - No volume, collides with nothing: a placeholder, or a kinematic anchor for a joint.
+- `public static CollisionShape ConvexHull(Float3[] points, int surface = 0, ShapeParams? p = null)` - The convex hull of at least four non-coplanar points.
+- `public static CollisionShape Mesh(Float3[] vertices, int[] indices, byte[]? triPalette = null, int[]? palette = null, int[]? triUserData = null, ShapeParams? p = null)` - A triangle mesh.
+- `public CollisionShape RotatedTranslated(Float3 position, Quaternion rotation)`
+- `public CollisionShape OffsetCenterOfMass(Float3 offset)` - The centre of mass moves by offset; the geometry does not.
+- `public CollisionShape Scaled(Float3 scale)` - Scales the shape (Jolt's ScaleShape: a scale it cannot wrap is baked where it can, refused where it cannot).
+- `public static CollisionShape Compound(ShapeChild[] children, bool mutable = false)` - One shape from several.
+- `public static int Count()` - Live shape handles (a diagnostic).
+- `public bool Release()` - Forgets this handle; bodies built from the shape keep it alive.
+- `public ShapeInfo Info { get; }` - What the shape is made of.
+- `public bool TryGetInfo(out ShapeInfo info)`
+- `public Body CreateBody(Float3 origin, Quaternion rotation, MotionType motion, float massKg = 0f, int layer = 0, bool sensor = false, bool enhancedEdges = false)` - A body made from this shape at origin (the shape's origin, which is not its centre of mass for a compound or an offset shape).
+- `public bool Equals(CollisionShape other)`
+- `public override bool Equals(object? obj)`
+- `public override int GetHashCode()`
+- `public static bool operator ==(CollisionShape a, CollisionShape b)`
+- `public static bool operator !=(CollisionShape a, CollisionShape b)`
+- `public override string ToString()`
+
+### CompoundKind
+
+`public enum CompoundKind` - Whether a compound's children can change after it is built (AVER_PHYS_COMPOUND_*).
+
+Values: `Static = 0`, `Mutable = 1`
+
+### ContactDetail
+
+`public readonly record struct ContactDetail(int SubShapeA, int SubShapeB, int SurfaceA, int SurfaceB, float ClosingSpeedCmS, float Friction, float Restitution)` - One contact of the last step, index-aligned with Contacts.
+
 ### ContactEvent
 
 `public readonly struct ContactEvent` - Two solid bodies that began touching during the last step.
@@ -143,6 +213,10 @@
 - `public Float3 Point { get; }` - Where they touched, centimetres.
 - `public Float3 Normal { get; }` - The contact normal, unit length.
 - `public Body Other(Body one)` - The other body in this contact; None if one is neither.
+
+### DebugLabel
+
+`public readonly record struct DebugLabel(Float3 Position, Float3 Color, string Text)` - One text label of a collect: where, what colour (0..1), what it says.
 
 ### DifferentialMode
 
@@ -182,6 +256,108 @@ Values: `Open = 0`, `LimitedSlip = 1`, `Locked = 2`
 `public enum GroundState` - Jolt's four-way answer for what a character is standing on, IN JOLT'S OWN DECLARED ORDER (CharacterBase::EGroundState, mirrored by AVER_PHYS_GROUND_* in physics_character_abi.h) so this enum and Jolt's cannot drift apart silently the way MotionType already guards against for bodies.
 
 Values: `OnGround = 0`, `OnSteepGround = 1`, `NotSupported = 2`, `InAir = 3`
+
+### HairBindRole
+
+`public enum HairBindRole` - How a compute host binds a buffer (AVER_PHYS_BIND_*).
+
+Values: `Constant = 0`, `Read = 1`, `Rw = 2`
+
+### HairBufferType
+
+`public enum HairBufferType` - The kinds of buffer a compute host creates (AVER_PHYS_CB_*).
+
+Values: `Upload = 0`, `Readback = 1`, `Constant = 2`, `Buffer = 3`, `Rw = 4`
+
+### HairHandle
+
+`public readonly struct HairHandle` - A hair instance.
+
+- `public int Handle { get; }`
+- `public HairHandle(int handle)`
+- `public bool IsValid { get; }`
+- `public bool Destroy()`
+- `public bool SetTransform(float[] world16)`
+- `public bool Teleport()` - The default pose and zero velocity at the next update.
+- `public bool SetPalette(float[] joints16)` - The engine skinning matrices (model x inverse bind) of the scalp joints, in scalp joint order, 16 floats each.
+- `public bool SetWind(float x, float y, float z, float dragPerS, float turbulenceCmS = 0)` - World wind in cm/s, a drag rate in 1/s and a turbulence amplitude in cm/s.
+- `public bool Update(float dt)` - Records one step; call Flush once after all hair has been updated.
+- `public ulong RenderBuffer { get; }` - The host handle of the render positions buffer, 0 with the CPU backend.
+- `public int[] UpdateInts()`
+- `public float[] UpdateFloats()`
+- `public bool ReadPositions(float[]? sim, float[]? render)` - Debug and tests: the simulated vertices and the render positions in cm, hair space, engine axes.
+
+### HairInfoFloat
+
+`public enum HairInfoFloat` - Float facts about a settings object (AVER_PHYS_HAIRF_*).
+
+Values: `RootToScalpCm = 0`, `BoundsMinX = 1`, `BoundsMinY = 2`, `BoundsMinZ = 3`, `BoundsMaxX = 4`, `BoundsMaxY = 5`, `BoundsMaxZ = 6`, `Count = 7`
+
+### HairInfoInt
+
+`public enum HairInfoInt` - Integer facts about a settings object (AVER_PHYS_HAIRI_*).
+
+Values: `SimStrands = 0`, `SimVertices = 1`, `RenderStrands = 2`, `RenderVertices = 3`, `MaxVerticesPerStrand = 4`, `Materials = 5`, `GridCells = 6`, `ScalpJoints = 7`, `Count = 8`
+
+### HairMaterialParam
+
+`public enum HairMaterialParam` - Indices of a material's parameter block (AVER_PHYS_HAIRM_*).
+
+Values: `EnableCollision = 0`, `EnableLra = 1`, `LinearDamping = 2`, `AngularDamping = 3`, `MaxLinearCms = 4`, `MaxAngularRads = 5`, `Gravity = 6`, `Friction = 10`, `BendCompliance = 11`, `BendMultiplier = 12`, `StretchCompliance = 16`, `InertiaMultiplier = 17`, `RadiusCm = 18`, `WorldInfluence = 22`, `GridVelocity = 26`, `GridDensityForce = 30`, `GlobalPose = 31`, `SkinGlobalPose = 35`, `SimFraction = 39`, `GravityPreload = 40`, `Count = 41`
+
+### HairParam
+
+`public enum HairParam` - Indices of the settings parameter array (AVER_PHYS_HAIRP_*).
+
+Values: `IterationsPerSecond = 0`, `MaxDeltaTime = 1`, `GridX = 2`, `GridY = 3`, `GridZ = 4`, `BoundsPaddingCm = 5`, `SimFraction = 6`, `InitialGravityX = 7`, `InitialGravityY = 8`, `InitialGravityZ = 9`, `Count = 10`
+
+### HairPhysics
+
+`public static class HairPhysics` - The engine side of hair that is not an instance: the ABI version and which compute backend runs the kernels.
+
+- `public static int AbiVersion { get; }`
+- `public static int HostKind { get; }` - 0 = Jolt's CPU backend, 1 = a host installed by the composition root.
+- `public static bool UseCpuHost()` - Back to Jolt's CPU backend.
+- `public static bool Flush()` - Executes and waits for everything this tick's updates recorded.
+
+### HairSettingsBuilder
+
+`public sealed class HairSettingsBuilder` - Stages a groom for Finish: strands, the scalp they grow from, materials and parameters.
+
+- `public HairSettingsBuilder()`
+- `public bool IsOpen { get; }`
+- `public bool SetStrands(float[] pointsXyz, int[] strandStart, int[]? strandMaterial = null, float[]? invMass = null)` - Render strands: points in cm (3 per vertex, scalp-mesh space), the first vertex of each strand in strandStart (and one past the last), a material per strand and an optional inverse mass per vertex.
+- `public bool SetScalp(float[] vertsXyz, int[] tri3, int[]? joints4 = null, float[]? weights4 = null, int jointCount = 1)` - The scalp mesh the roots attach to.
+- `public bool SetMaterial(int index, float[] p)` - One material's parameters, indexed by HairMaterialParam.
+- `public bool SetParams(float[] p)` - The settings' parameters, indexed by HairParam.
+- `public HairSettingsHandle Finish(int resampleVertices, out float rootToScalpCm)` - Splits render and simulated strands and creates the compute buffers.
+- `public void Cancel()`
+
+### HairSettingsHandle
+
+`public readonly struct HairSettingsHandle` - A finished groom, shared by any number of instances.
+
+- `public int Handle { get; }`
+- `public HairSettingsHandle(int handle)`
+- `public bool IsValid { get; }`
+- `public bool Destroy()` - Refused while an instance uses it.
+- `public bool SetMaterial(int index, float[] p)` - Live: the next update reads the new values.
+- `public int[] InfoInts()`
+- `public float[] InfoFloats()`
+- `public int[] RenderStrands()` - {first render vertex, vertex count} per render strand, in the order the render positions buffer holds them.
+- `public HairHandle Create(float[] world16, int layer = 0)` - A hair of this groom.
+
+### HairUpdateFloat
+
+`public enum HairUpdateFloat` - Float facts about the last update of a hair (AVER_PHYS_HAIRUF_*).
+
+Values: `DtUsed = 0`, `Count = 1`
+
+### HairUpdateInt
+
+`public enum HairUpdateInt` - Integer facts about the last update of a hair (AVER_PHYS_HAIRUI_*).
+
+Values: `Iterations = 0`, `Dispatches = 1`, `Updates = 2`, `Wind = 3`, `Count = 4`
 
 ### Joint
 
@@ -239,6 +415,12 @@ Values: `OnGround = 0`, `OnSteepGround = 1`, `NotSupported = 2`, `InAir = 3`
 `public enum LockAxes : uint` - Degrees of freedom of a body that can be frozen, in ENGINE axes (X forward, Y right, Z up).
 
 Values: `None = 0`, `TranslationX = 0x01`, `TranslationY = 0x02`, `TranslationZ = 0x04`, `RotationX = 0x08`, `RotationY = 0x10`, `RotationZ = 0x20`, `AllTranslation = TranslationX | TranslationY | TranslationZ`, `AllRotation = RotationX | RotationY | RotationZ`
+
+### LraMode
+
+`public enum LraMode` - Long range attachments made from the closest pinned vertex.
+
+Values: `Off = 0`, `Euclidean = 1`, `Geodesic = 2`
 
 ### MotionType
 
@@ -307,6 +489,43 @@ Values: `Off = 0`, `Velocity = 1`, `Position = 2`
 - `public static Body[] OverlapSphereEx(Float3 centre, float radius, uint layerMask, Body ignoreBody, int maxResults = 64)` - As OverlapSphere, filtered to a layer mask and skipping ignoreBody.
 - `public static RaycastHit SphereCast(Float3 origin, Float3 direction, float maxDistanceCm, float radius)` - Sweeps a sphere and returns the first thing it touches.
 - `public static RaycastHit SphereCastEx(Float3 origin, Float3 direction, float maxDistanceCm, float radius, uint layerMask, Body ignoreBody)` - As SphereCast, filtered to a layer mask and skipping ignoreBody.
+- `public static float GetSetting(PhysicsSetting key)` - The setting's current value.
+- `public static bool SetSetting(PhysicsSetting key, float value)` - Sets a setting (clamped into its range, whole numbers for counts and flags).
+- `public static bool ResetSetting(PhysicsSetting key)` - Puts a setting back to Jolt's default.
+- `public static void ResetAllSettings()` - Puts every setting back to its default.
+- `public static (float Min, float Max, float Default) SettingRange(PhysicsSetting key)` - The smallest and largest legal value and the default.
+- `public static string SettingName(PhysicsSetting key)` - The setting's name as the console and the project file spell it: velocitySteps, PHYSICS.VELOCITYSTEPS in the manifest.
+- `public static bool TryFindSetting(string name, out PhysicsSetting key)` - Finds a setting by its name, ignoring case.
+- `public static bool SetConfig(PhysicsConfigKey key, float value)` - Sets a limit the NEXT world is built with (works with or without a world).
+- `public static float GetConfig(PhysicsConfigKey key)` - The pending value of a limit: what the next world will use.
+- `public static float? GetActiveConfig(PhysicsConfigKey key)` - What the running world was built with; null with no world.
+- `public static (float Min, float Max, float Default) ConfigRange(PhysicsConfigKey key)` - The smallest and largest legal value of a limit and its default.
+- `public static bool ConfigNeedsRebuild { get; }` - True when a world exists and was built with other limits than the pending ones.
+- `public static bool WorldIsEmpty { get; }` - True when RebuildWorld would be accepted: no world, or a world with no bodies, characters, joints, ragdolls or vehicles.
+- `public static bool RebuildWorld()` - Creates the world again with the pending limits.
+- `public static PhysicsPrecision Precision { get; }` - Single or double precision positions in the native library.
+- `public static PhysicsBuildFlags BuildFlags { get; }` - The optional features the native library has.
+- `public static string BuildString { get; }` - Jolt's configuration string plus the state layout version.
+- `public static int StepExact(int steps)` - Runs exactly steps fixed steps (1 to 600), ignoring the accumulator and leaving it as it was.
+- `public static int ReleaseAllSnapshots()` - Releases every snapshot of the current world and returns how many there were (a level unload calls this).
+- `public static long StepTotal { get; }` - Fixed steps since the world was created (a restore sets it back to the capture's); 0 with no world.
+- `public static ulong StateHash(SnapshotParts parts = SnapshotParts.All)` - The hash a snapshot taken now would have, without keeping it.
+- `public static bool HashLog(string? path)` - Starts (a path) or stops (null) a log of one "step hash" line per fixed step, so two runs diff directly.
+- `public static float Accumulator { get; set; }` - Seconds of real time carried toward the next fixed step; set it to restore a mid-frame position in a replay.
+- `public static uint ShapeCacheVersion { get; }` - Bumped by any change to unit conversion, winding or the blob layout; part of every blob.
+- `public static bool ShapeCacheEnabled { get; set; }` - Whether the host should use the shape cache (PHYSICS.SHAPECACHE, or AVER_PHYS_SHAPE_CACHE=1 for tools).
+- `public static int CreateHeightfieldShape(float[] samples, int sampleCount, float spacingCm)` - A square heightfield shape (row-major samples, centimetres) in the shape-handle table; 0 on failure.
+- `public static byte[]? ShapeSave(int shape, ulong key)` - The cache blob for a mesh or heightfield shape under key; null when the shape cannot be saved (not a mesh or heightfield, or it carries surface materials).
+- `public static int ShapeRestore(byte[] blob, ulong key)` - A shape handle rebuilt from a blob, or 0 for a miss (wrong key, version, build or precision, or a damaged blob).
+- `public static bool ProfileEnable(bool on)` - Turns the profiler on or off.
+- `public static bool ProfileEnabled { get; }` - True while the profiler is collecting.
+- `public static void ProfileReset()` - Drops the profile table and restarts its window.
+- `public static IReadOnlyList<ProfileRow> ProfileRows()` - The last published profile table, depth first.
+- `public static string ProfileSummary()` - The three largest scopes of the last window as one line ("Name 1.20 ms | ..."), empty without a table.
+- `public static PhysicsStats GetStats()` - The world's statistics now.
+- `public static bool ResetStatsWindow()` - Clears the maximum step time, the temp-memory peak and the update-error fields.
+- `public static bool DiagReport(int kind)` - The diagnostics preset's reports (AVER_PHYSICS_DIAGNOSTICS builds only): 1 broad-phase, 2 per-body simulation, 3 narrow-phase (to the engine log), 4 Jolt's internal profiler as HTML in the working directory.
+- `public static bool DiagLogDir(string? directory)` - Where Jolt writes its determinism log, detlog.txt (diagnostics preset only; null for the working directory).
 - `public static ShapeHit BoxCast(Float3 centre, Float3 halfExtents, Quaternion rotation, Float3 displacement, uint layerMask = LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None)` - Sweeps a box by displacement (direction and distance in one vector, centimetres) and returns the first body it touches.
 - `public static ShapeHit CapsuleCast(Float3 centre, float radius, float height, Quaternion rotation, Float3 displacement, uint layerMask = LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None)` - Sweeps a capsule by displacement.
 - `public static ShapeHit SphereCastQ(Float3 centre, float radius, Float3 displacement, uint layerMask = LayerMaskAll, Body ignoreA = default, Body ignoreB = default, QueryFlags flags = QueryFlags.None)` - Sweeps a sphere by displacement (centimetres).
@@ -316,12 +535,141 @@ Values: `Off = 0`, `Velocity = 1`, `Position = 2`
 - `public static Body[] OverlapBody(Body body, Float3 position, Quaternion rotation, uint layerMask = LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None, int maxResults = 64)` - Every body an existing body's shape would overlap if it stood at position/rotation (its centre of mass, as Position reports it).
 - `public static ShapeHit[] RaycastAll(Float3 origin, Float3 direction, float maxDistanceCm, uint layerMask = LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None, int maxResults = 64)` - Every hit along a ray up to maxDistanceCm, nearest first.
 - `public static Body[] BodiesAtPoint(Float3 point, uint layerMask = LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None, int maxResults = 64)` - Bodies whose shape contains point.
+- `public static SurfaceHit RaycastDetail(Float3 origin, Float3 direction, float maxDistanceCm, uint layerMask = LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None)` - A ray that reports what it hit: the body, the surface and its numbers, the compound child, the mesh triangle's user data and the heightfield cell.
+- `public static SurfaceHit SubShapeInfo(Body body, int subShape)` - The same detail for a (body, sub-shape) pair taken from a hit, a contact or the ground; point, normal and distance are zero.
+- `public static IReadOnlyList<ContactDetail> ContactDetails { get; }` - The contacts that began in the last step with their sub-shapes, surfaces, closing speed and the friction applied.
+
+### PhysicsBuildFlags
+
+`public enum PhysicsBuildFlags : uint` - Optional features the native physics library was compiled with.
+
+Values: `DebugRenderer = 0x01`, `Profiler = 0x02`, `CrossPlatform = 0x04`, `DeterminismLog = 0x08`, `StatsTracking = 0x10`, `Asserts = 0x20`
+
+### PhysicsConfigKey
+
+`public enum PhysicsConfigKey` - The limits a world is built with (AVER_PHYS_CF_*).
+
+Values: `MaxBodies = 0`, `MaxBodyPairs = 1`, `MaxContacts = 2`, `TempMb = 3`, `Threads = 4`, `Count = 5`
+
+### PhysicsDebugDraw
+
+`public static class PhysicsDebugDraw` - Jolt's debug renderer as data.
+
+- `public static bool Available { get; }` - True when the native library was built with the debug renderer.
+- `public static bool SetColorScheme(PhysicsDebugScheme scheme)` - Chooses how bodies are coloured.
+- `public static int Collect(PhysicsDebugFlags flags, Float3 camera, float radiusCm = 4000f, int maxLines = 60000)` - Runs the draw calls for flags within radiusCm of camera and returns the line count (at most maxLines).
+- `public static ReadOnlySpan<float> Lines { get; }` - The last collect's lines: 12 floats each, (x y z r g b) of the start then of the end, engine cm, colours 0..1.
+- `public static IReadOnlyList<DebugLabel> Labels { get; }` - The last collect's text labels.
+- `public static bool Truncated { get; }` - True if the last collect stopped at its line budget.
+- `public static PhysicsDebugFlags Arm(PhysicsDebugFlags flags)` - Asks the fixed step to capture contacts, supporting faces and continuous-collision markers (the Contacts, SupportFaces and LinearCast bits; others ignored, none disarms).
+
+### PhysicsDebugFlags
+
+`public enum PhysicsDebugFlags : uint` - What a collect draws (AVER_PHYS_DBG_*).
+
+Values: `Bodies = 0x00000001`, `Bounds = 0x00000002`, `Com = 0x00000004`, `Velocity = 0x00000008`, `Sleep = 0x00000010`, `Mass = 0x00000020`, `Constraints = 0x00000040`, `Limits = 0x00000080`, `Contacts = 0x00000100`, `SupportFaces = 0x00000200`, `SoftVertices = 0x00000400`, `SoftEdges = 0x00000800`, `Characters = 0x00001000`, `StaticTriangles = 0x00002000`, `LinearCast = 0x00004000`, `Labels = 0x00008000`, `Islands = 0x00010000`
+
+### PhysicsDebugScheme
+
+`public enum PhysicsDebugScheme` - How bodies are coloured (AVER_PHYS_DBG_SCHEME_*).
+
+Values: `Motion = 0`, `Sleep = 1`, `Layer = 2`, `Shape = 3`, `Island = 4`, `Instance = 5`, `Count = 6`
 
 ### PhysicsError
 
 `public enum PhysicsError` - Why a physics call failed, mirroring aver::AbiError in modules/core/include/aver/core/ErrorCodes.hpp.
 
 Values: `Ok = 0`, `BadHandle = -1`, `NullPointer = -2`, `NotInitialised = -3`, `OutOfRange = -4`, `Unsupported = -5`, `InvalidArgument = -6`, `AllocationFailed = -7`
+
+### PhysicsPrecision
+
+`public enum PhysicsPrecision` - Whether the native physics library was built with single or double precision positions.
+
+Values: `Single = 1`, `Double = 2`
+
+### PhysicsSetting
+
+`public enum PhysicsSetting` - The live solver settings, in the native table's order (AVER_PHYS_WS_*).
+
+Values: `VelocitySteps = 0`, `PositionSteps = 1`, `CollisionSteps = 2`, `Baumgarte = 3`, `SpeculativeDistance = 4`, `PenetrationSlop = 5`, `MaxPenetration = 6`, `ManifoldTolerance = 7`, `LinearCastThreshold = 8`, `LinearCastMaxPenetration = 9`, `MinRestitutionSpeed = 10`, `SleepTime = 11`, `SleepSpeed = 12`, `AllowSleeping = 13`, `Deterministic = 14`, `WarmStart = 15`, `BodyPairCache = 16`, `ManifoldReduction = 17`, `LargeIslandSplitter = 18`, `CheckActiveEdges = 19`, `MaxPairsInFlight = 20`, `StepListenerBatch = 21`, `StepListenerBatchesPerJob = 22`, `PairCacheDeltaPos = 23`, `PairCacheDeltaRot = 24`, `ContactNormalDelta = 25`, `LambdaPreserveDist = 26`, `Count = 27`
+
+### PhysicsSnapshot
+
+`public sealed class PhysicsSnapshot : IDisposable` - A captured physics state.
+
+- `public static PhysicsSnapshot? Capture(SnapshotParts parts = SnapshotParts.All, PhysicsSnapshot? reuse = null)` - Takes a snapshot of the running world.
+- `public static PhysicsSnapshot? FromBytes(ReadOnlySpan<byte> data)` - Validates and adopts a blob from ToBytes (a peer, a test).
+- `public static RestoreResult LastResult { get; }` - Why the last capture, restore or import failed (Ok after a success).
+- `public static int LiveCount { get; }` - How many snapshots are alive in the current world.
+- `public bool IsValid { get; }` - True while the snapshot is alive in the current world.
+- `public bool Restore(RestoreOptions options = 0)` - Puts the world back as it was.
+- `public ulong Hash { get; }` - FNV-1a 64 of the state (not of the capture time): two worlds in the same state have the same hash.
+- `public int ByteCount { get; }` - The blob size in bytes; 0 when dead.
+- `public byte[] ToBytes()` - A copy of the blob for transport.
+- `public SnapshotInfo Info { get; }` - What it holds.
+- `public static int FirstDifference(PhysicsSnapshot a, PhysicsSnapshot b)` - The offset of the first state byte at which two snapshots differ, -1 when they are equal, -2 when either is dead.
+- `public void Dispose()` - Releases the native copy.
+
+### PhysicsStat
+
+`public enum PhysicsStat` - The slots of the native statistics array (AVER_PHYS_ST_*).
+
+Values: `Bodies = 0`, `MaxBodies = 1`, `Static = 2`, `Dynamic = 3`, `ActiveDynamic = 4`, `Kinematic = 5`, `ActiveKinematic = 6`, `Soft = 7`, `ActiveSoft = 8`, `Constraints = 9`, `Characters = 10`, `Vehicles = 11`, `StepsLastCall = 12`, `StepsTotal = 13`, `StepMsLast = 14`, `StepMsAvg = 15`, `StepMsMax = 16`, `CallMsLast = 17`, `ContactsLastCall = 18`, `UpdateErrors = 19`, `UpdateErrorSteps = 20`, `TempPeakBytes = 21`, `TempSizeBytes = 22`, `WorkerThreads = 23`, `AccumulatorS = 24`, `TopologyEpoch = 25`, `Count = 26`
+
+### PhysicsStateRing
+
+`public sealed class PhysicsStateRing` - A fixed-capacity ring of snapshots keyed by tick: the rollback helper.
+
+- `public PhysicsStateRing(int capacity, SnapshotParts parts = SnapshotParts.All)`
+- `public int Capacity { get; }` - How many ticks the ring can hold.
+- `public int Count { get; }` - How many ticks it holds now.
+- `public long OldestTick { get; }` - The oldest tick held; -1 when empty.
+- `public long NewestTick { get; }` - The newest tick held; -1 when empty.
+- `public void Push(long tick)` - Captures the world as tick tick.
+- `public bool Rewind(long tick, RestoreOptions options = 0)` - Restores the world to tick tick, which must still be in the ring.
+- `public void Clear()` - Releases every snapshot in the ring.
+
+### PhysicsStats
+
+`public readonly struct PhysicsStats` - A snapshot of the world's statistics.
+
+- `public double this[PhysicsStat stat] { get; }` - The raw value of one slot (0 for an unknown slot).
+- `public int Bodies { get; }`
+- `public int MaxBodies { get; }`
+- `public int StaticBodies { get; }`
+- `public int DynamicBodies { get; }`
+- `public int ActiveDynamicBodies { get; }`
+- `public int KinematicBodies { get; }`
+- `public int ActiveKinematicBodies { get; }`
+- `public int SoftBodies { get; }`
+- `public int ActiveSoftBodies { get; }`
+- `public int Constraints { get; }`
+- `public int Characters { get; }`
+- `public int Vehicles { get; }`
+- `public int StepsLastCall { get; }` - Fixed steps the last Physics.Step call ran.
+- `public long StepsTotal { get; }` - Fixed steps since the world was created.
+- `public double StepMsLast { get; }` - Wall-clock milliseconds of the last solver update.
+- `public double StepMsAvg { get; }` - Smoothed (half-second) average of the solver update.
+- `public double StepMsMax { get; }` - Slowest solver update since ResetStatsWindow.
+- `public double CallMsLast { get; }` - Wall-clock milliseconds of the whole last Physics.Step call.
+- `public int ContactsLastCall { get; }`
+- `public PhysicsUpdateErrors UpdateErrors { get; }` - Contacts Jolt dropped since the window reset; None is healthy.
+- `public long UpdateErrorSteps { get; }`
+- `public long TempPeakBytes { get; }`
+- `public long TempSizeBytes { get; }`
+- `public int WorkerThreads { get; }` - Solver worker threads; 0 when single-threaded.
+- `public double AccumulatorSeconds { get; }` - Seconds of real time carried toward the next fixed step.
+- `public uint TopologyEpoch { get; }`
+
+### PhysicsUpdateErrors
+
+`public enum PhysicsUpdateErrors` - What Jolt could not hold during a step: contacts were dropped.
+
+Values: `None = 0`, `ManifoldCacheFull = 1`, `BodyPairCacheFull = 2`, `ContactConstraintsFull = 4`
+
+### ProfileRow
+
+`public readonly record struct ProfileRow(string Name, double InclusiveMs, double ExclusiveMs, double MaxMs, double CallsPerStep, int Parent, int Depth)` - One scope of the profiler table: a Jolt stage or one of the engine's fixed-step stages.
 
 ### Quaternion
 
@@ -397,6 +745,22 @@ Values: `Kinematic = 0`, `Limp = 1`, `Powered = 2`
 - `public Float3 Normal { get; }` - The surface normal at that point, unit length.
 - `public bool Hit { get; }` - True when something was hit.
 
+### RestoreOptions
+
+`public enum RestoreOptions : uint` - How strictly a restore checks the world (AVER_PHYS_RESTORE_STRICT).
+
+Values: `Strict = 0x01`
+
+### RestoreResult
+
+`public enum RestoreResult` - The outcome of the last capture, restore or import (AVER_PHYS_RESTORE_*).
+
+Values: `Ok = 0`, `BadHandle = -1`, `BadHeader = -2`, `BuildMismatch = -3`, `Topology = -4`, `Corrupt = -5`
+
+### ShapeChild
+
+`public readonly record struct ShapeChild(CollisionShape Shape, Float3 Position, Quaternion Rotation, int UserData = 0)` - One child of a compound: a shape at a position and rotation in the compound's frame, with a user value a raycast detail reports back.
+
 ### ShapeHit
 
 `public readonly struct ShapeHit` - What a shape cast, or one hit of RaycastAll, found.
@@ -406,6 +770,14 @@ Values: `Kinematic = 0`, `Limp = 1`, `Powered = 2`
 - `public Float3 Point { get; }` - The contact point on the hit body's surface, centimetres.
 - `public Float3 Normal { get; }` - Unit surface normal at the contact, pointing back toward the cast shape.
 - `public bool Hit { get; }` - True when something was hit.
+
+### ShapeInfo
+
+`public readonly record struct ShapeInfo(ShapeType Type, float VolumeCm3, float MassKg, Float3 CenterOfMass, Float3 BoundsMin, Float3 BoundsMax, float InnerRadius, Float3 InertiaPrincipal, Quaternion InertiaFrame, int Children, int Leaves, int Triangles, long Bytes, bool MustBeStatic, bool HasMass)` - What a shape is made of (aver_phys_shape_info).
+
+### ShapeParams
+
+`public readonly record struct ShapeParams(float ConvexRadiusCm = -1f, float DensityKgM3 = 1000f, float HullToleranceCm = 0.1f, float EdgeAngleDeg = 5f, bool FavorBuildSpeed = false, int MaxTrianglesPerLeaf = 8)` - Optional build parameters of a shape.
 
 ### Shapes
 
@@ -420,11 +792,27 @@ Values: `Kinematic = 0`, `Limp = 1`, `Powered = 2`
 - `public static Body AddStaticCompoundBoxes(Float3 centre, Float3[] offsets, Float3[] halfExtents)`
 - `public static Body AddDynamicCompoundBoxes(Float3 centre, Float3[] offsets, Float3[] halfExtents, float massKg = 0f)`
 
+### ShapeType
+
+`public enum ShapeType` - What a shape is, as Type reports it (AVER_PHYS_SHAPE_TYPE_*).
+
+Values: `Unknown = 0`, `Box = 1`, `Sphere = 2`, `Capsule = 3`, `Cylinder = 4`, `TaperedCapsule = 5`, `TaperedCylinder = 6`, `ConvexHull = 7`, `Triangle = 8`, `Plane = 9`, `Empty = 10`, `Mesh = 11`, `Heightfield = 12`, `StaticCompound = 13`, `MutableCompound = 14`, `RotatedTranslated = 15`, `Scaled = 16`, `OffsetCom = 17`, `SoftBody = 18`
+
 ### SixDofAxis
 
 `public enum SixDofAxis` - The six independent axes a SixDof constrains, in the order AVER_PHYS_DOF_* declares them (physics_joints_abi.h): three translations then three rotations.
 
 Values: `TranslationX = 0`, `TranslationY = 1`, `TranslationZ = 2`, `RotationX = 3`, `RotationY = 4`, `RotationZ = 5`
+
+### SnapshotInfo
+
+`public readonly record struct SnapshotInfo(SnapshotParts Parts, int Bodies, int Characters, int Vehicles, int Joints, int Ragdolls, uint TopologyEpoch, uint ConstraintEpoch, PhysicsPrecision Precision, long Steps, int Bytes)` - What a snapshot holds, as counted when it was taken.
+
+### SnapshotParts
+
+`public enum SnapshotParts : uint` - What a snapshot holds (AVER_PHYS_SNAP_*).
+
+Values: `Bodies = 0x01`, `Contacts = 0x02`, `Constraints = 0x04`, `Characters = 0x08`, `Engine = 0x10`, `Statics = 0x20`, `All = 0x1F`
 
 ### SoftBodyBuilder
 
@@ -442,6 +830,19 @@ Values: `TranslationX = 0`, `TranslationY = 1`, `TranslationZ = 2`, `RotationX =
 - `public void Set(SoftBodyParam param, float value)`
 - `public int Finish(Float3 centre, int replaceBody = 0, int stateSrcBody = 0, int[]? stateMap = null)` - Makes the body and returns its handle, or 0 on refusal.
 - `public void Dispose()`
+- `public bool Volumes(int[] tet4, float[]? compliance = null)` - Tetrahedra (4 vertex indices each); the rest volume is measured at finish.
+- `public bool Lra(int[] pairs2, float[] maxDistCm)` - Explicit long range attachments: {pinned vertex, free vertex} pairs and the longest allowed distance of each (cm).
+- `public bool LraAuto(LraMode mode, float distanceMultiplier = 1.0f)` - A long range attachment from the closest pinned vertex to every free one.
+- `public bool Rods(int[] ab, float[]? stretch, int[] rodPairs2, float[]? bendTwist)` - Cosserat rods (2 vertices each) and the pairs of rods (indices within this call) joined by a bend-twist constraint.
+- `public bool RodChain(int firstVertex, int vertexCount, float stretch = 0, float bendTwist = 0)` - A chain of rods through vertices firstVertex ..
+- `public bool Auto(float[] attrs5, BendType bend, float angleToleranceDeg = 8)` - Jolt's CreateConstraints over the staged faces.
+- `public void Set(SoftBodyExtParam param, float value)`
+
+### SoftBodyExtParam
+
+`public enum SoftBodyExtParam` - Indices of the extra parameter array (AVER_PHYS_SBX_P_*, physics_softbody_ext_abi.h).
+
+Values: `PressureKPa = 0`, `SkinEnabled = 1`, `SkinDistanceScale = 2`, `CollisionGroup = 3`, `SoftInvMassScale = 4`, `OtherInvMassScale = 5`, `OtherInvInertiaScale = 6`, `FluidDensity = 7`, `FluidDrag = 8`, `BuoyFlags = 9`, `Count = 10`
 
 ### SoftBodyHandle
 
@@ -464,6 +865,28 @@ Values: `TranslationX = 0`, `TranslationY = 1`, `TranslationZ = 2`, `RotationX =
 - `public bool SetAero(float drag, float lift, bool keepAwake = false)`
 - `public static void SetWind(Float3 velocity, float gustSpeed = 0, float gustHz = 0.3f, float turbulence = 0)` - The world wind, cm/s.
 - `public static int DrainImpacts(Span<SoftBodyImpact> buffer)` - Impacts reported by the last Physics.Step (only bodies built with the Impacts parameter).
+- `public static int ExtAbiVersion { get; }` - The version of the wave 11 soft-body surface.
+- `public bool SetPressure(float kPa)` - Pressure in kPa at rest volume; 0 = off.
+- `public float Pressure { get; }`
+- `public (float AtRest, float Now) Volume()` - Rest and current volume (cm^3); the current one is negative when the shape is inside out.
+- `public bool SetSkin(bool enabled, float distanceScale = 1)` - Skin constraints on or off, and their max distance multiplier (0 = hard skin).
+- `public bool SetInvMass(ReadOnlySpan<int> vertices, ReadOnlySpan<float> invMass)` - Per-vertex inverse mass (0 = pinned).
+- `public bool Attach(int vertex, Float3 target, float maxSpeedCmS = 2000)` - Carries a vertex to a world point each fixed step (grab, anchor).
+- `public bool AttachToBody(int vertex, int otherBody, Float3 localOffset, float maxSpeedCmS = 2000)` - Carries a vertex to a point of another body (offset in that body's own frame).
+- `public bool MoveAttachment(int vertex, Float3 target)`
+- `public bool Detach(int vertex, float restoreInvMass = -1)` - Lets a vertex go.
+- `public int AttachmentCount { get; }`
+- `public bool SetContactPolicy(float softScale, float otherScale, float otherInertiaScale)` - Inverse mass scales for every contact with a rigid body (0 = infinite mass, 1 = unchanged).
+- `public bool SetPairPolicy(int otherBody, SoftPairMode mode, float soft = 1, float other = 1, float inertia = 1)`
+- `public bool ClearPairPolicy(int otherBody)`
+- `public bool SetCollisionGroup(int group)` - The soft body ignores every rigid body whose group id equals this (a ragdoll's handle).
+- `public bool SetBuoyancy(float fluidDensity, float drag = 1, BuoyFlags flags = BuoyFlags.WorldWater)` - Hydrostatic pressure on a closed mesh and quadratic drag on any mesh, against the world water or a plane of its own.
+- `public bool SetWaterPlane(Float3 point, Float3 normal, Float3 current)` - The body's own water plane; it is used when OwnPlane is set.
+- `public (float Fraction, float VolumeCm3) Submerged()` - The last step's submerged fraction (0..1) and displaced volume (cm^3, closed meshes).
+- `public int[] Slots(SoftSlotKind kind)` - The final index of each staged item of a kind (Optimize reorders them).
+- `public int RodCount { get; }`
+- `public int RodState(int firstRod, Span<Quaternion> rotation, Span<Float3> angularVelocity)` - World orientation of rods firstRod ..
+- `public static int DrainSensorEvents(Span<SoftBodySensorEvent> buffer)` - Sensor enters and exits reported by the last Physics.Step.
 
 ### SoftBodyImpact
 
@@ -475,10 +898,68 @@ Values: `TranslationX = 0`, `TranslationY = 1`, `TranslationZ = 2`, `RotationX =
 
 Values: `Iterations = 0`, `Damping = 1`, `Friction = 2`, `Restitution = 3`, `GravityScale = 4`, `VertexRadiusCm = 5`, `MaxSpeedCms = 6`, `AllowSleep = 7`, `DoubleSided = 8`, `Layer = 9`, `Entity = 10`, `Impacts = 11`
 
+### SoftBodySensorEvent
+
+`public readonly record struct SoftBodySensorEvent(int SoftBody, int Sensor, bool Entered)` - A soft body entering or leaving a sensor, as reported after a step.
+
+### SoftPairMode
+
+`public enum SoftPairMode` - What happens when a soft body meets one particular other body.
+
+Values: `Normal = 0`, `Sensor = 1`, `Ignore = 2`
+
+### SoftSlotKind
+
+`public enum SoftSlotKind` - Which staged items Slots maps to their final index.
+
+Values: `Volume = 0`, `Lra = 1`, `Rod = 2`, `RodPair = 3`
+
+### SurfaceHit
+
+`public readonly record struct SurfaceHit(bool Hit, Body Body, int Entity, Float3 Point, Float3 Normal, float DistanceCm, int SurfaceId, float Friction, float Restitution, int Tag, int SubShape, int Child, int ChildUserData, int Triangle, int CellX, int CellY)` - What a ray, a character's ground or a wheel touched.
+
+### SurfaceHitExtensions
+
+`public static class SurfaceHitExtensions` - Ground and wheel surface queries on the types that own them.
+
+- `public static SurfaceHit GroundDetail(this CharacterBody character)` - What the character stands on (or touches, when it is not supported).
+
+### SurfaceInfo
+
+`public readonly record struct SurfaceInfo(string Name, float Friction, float Restitution, int Tag)` - What the registry holds for one surface.
+
+### Surfaces
+
+`public static class Surfaces` - The process-wide surface registry.
+
+- `public static int IdOf(string? name)` - The 32-bit FNV-1a hash of the UTF-8 name, never 0 (a zero hash becomes 1); 0 for a null or empty name.
+- `public static int Register(string name, float friction = -1, float restitution = -1, int tag = 0)` - Adds or updates a named surface and returns its id (0 when refused: an empty name, a non-finite number or a hash collision with a different name).
+- `public static bool Tune(int surface, float friction, float restitution, int tag)` - Changes the numbers of a surface that is registered or used by a shape.
+- `public static bool TryGet(int surface, out SurfaceInfo info)` - The registry entry of surface.
+- `public static string NameOf(int surface)` - The registered name of an id; an empty string when it has none.
+- `public static int Count { get; }` - How many surfaces have a registered name.
+- `public static int At(int index)` - The id at a dense index in registration order; 0 out of range.
+- `public static void Reset()` - Forgets every name and returns every surface's numbers to unset.
+
+### Terrain
+
+`public static class Terrain`
+
+- `public static CollisionShape Heightfield(float[] samples, int cols, int rows, float spacingCm, byte[]? cellPalette = null, int[]? palette = null, int blockSize = 2, int bitsPerSample = 8, float edgeAngleDeg = 5f, float editHeadroomCm = 0f)` - A heightfield shape (static bodies only: shape.CreateBody(origin, rotation, MotionType.Static)).
+- `public static bool SetHeights(Body body, int x0, int y0, int w, int h, float[] heights, bool wakeBodies = true)` - Sets a w x h rectangle of samples at column x0, row y0 (row-major, cm, NaN = hole).
+- `public static bool GetHeights(Body body, int x0, int y0, int w, int h, float[] output)` - Reads a rectangle of samples back into output (row-major, cm).
+- `public static bool SetCellSurfaces(Body body, int x0, int y0, int w, int h, byte[] cellPalette, int[] palette)` - Rewrites the surface of a rectangle of cells: one palette index per cell, the palette merged into the field's own.
+- `public static TerrainInfo Info(Body body)` - The field's spacing, encodable height range, clamp counter and sizes; Valid is false for any other body.
+
+### TerrainInfo
+
+`public readonly record struct TerrainInfo(bool Valid, float SpacingCm, float MinHeightCm, float MaxHeightCm, long ClampedTotal, int Cols, int Rows, int Padded, int BlockSize, int Bits, int Materials)` - What a heightfield body holds (aver_phys_heightfield_info).
+
 ### Vehicle
 
 `public readonly struct Vehicle : IEquatable<Vehicle>` - A wheeled vehicle.
 
+- `public SurfaceHit WheelSurface(int wheel)` - What wheel wheel of a finished vehicle is touching.
 - `public int Handle { get; }`
 - `public Vehicle(int handle)`
 - `public static Vehicle None { get; }`
@@ -508,6 +989,7 @@ Values: `Iterations = 0`, `Damping = 1`, `Friction = 2`, `Restitution = 3`, `Gra
 - `public static int AbiVersion { get; }` - The ABI version the loaded physics library reports: 2 with the extended vehicle ABI, 1 without.
 - `public bool SetKind(VehicleKind kind)` - Wheeled (the default) or tracked.
 - `public bool SetChassisBoxes(ReadOnlySpan<float> boxes)` - Replaces the single chassis box with one to eight: cx cy cz hx hy hz per box, origin-relative cm.
+- `public bool SetChassisShape(CollisionShape shape)` - Replaces the chassis with any CollisionShape that has a mass, in the vehicle's origin frame (bottom centre of the car).
 - `public bool SetEngine(float maxTorque, float minRpm, float maxRpm, float inertia = 0f, float damping = 0.2f)` - The engine: peak torque (N*m), idle and limit revs, rotational inertia (0 = scaled to the torque as the plain engine is) and damping (engine braking).
 - `public bool SetTorqueCurve(ReadOnlySpan<float> rpmFraction, ReadOnlySpan<float> torqueFraction)` - The torque curve: x is the fraction of the limit revs (ascending, 0..1), y the fraction of peak torque.
 - `public bool SetGearbox(bool manual, ReadOnlySpan<float> forward, ReadOnlySpan<float> reverse, GearboxTiming timing = default)` - Forward ratios (positive), reverse ratios (positive magnitudes), automatic or manual, and the timings.

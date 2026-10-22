@@ -41,6 +41,10 @@ aver_add_module(Aver.Runtime.Game.Core
     # POSTVOLUME blending and the .cube LUT texture cache (rhi + formats only, no scene).
     src/GamePostVolumes.cpp
     src/GameLandscape.cpp
+    # Content/Physics/Surfaces.ocsurf -> the physics module's surface registry (both hosts load it when a project opens).
+    src/PhysicalSurfaces.cpp
+    # .ocshape trees -> physics shapes, and the CollisionShape component (apply / capture / registration).
+    src/ColliderShapes.cpp
     src/GameRender.cpp
     src/GameInput.cpp
     src/GameStreaming.cpp
@@ -170,6 +174,12 @@ if(TARGET Aver.Camera)
 endif()
 if(TARGET Aver.Render.SoftBody)
   target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Render.SoftBody)
+endif()
+if(TARGET Aver.Hair.Scene)
+  target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Hair.Scene)
+endif()
+if(TARGET Aver.Render.Hair)
+  target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Render.Hair)
 endif()
 if(TARGET Aver.Framework)
   target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Framework)

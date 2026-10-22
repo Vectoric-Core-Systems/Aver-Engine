@@ -202,11 +202,27 @@ public:
     // Collision-only triangle mesh for `id`, lazily built and cached. `positions` is LOCAL space.
     // Simplifies to roughly 2 cm error unless Trifactor's coarsest-LOD pick has fewer triangles.
     // Disk-cached under <project>/Saved/DerivedDataCache/Collision. nullptr for no .ocmesh.
+    //
+    // PHYSICAL SURFACES. A material slot whose .ocmat names a PHYSSURFACE gives the triangles built from it that surface.
+    // `palette` then holds the distinct surface ids (0 = a slot that names none; at most 32, Jolt's per-triangle limit) and
+    // `triPalette` one palette index per triangle (indices.size() / 3). Both are empty for a mesh none of whose kept slots
+    // names a surface, and then the mesh is exactly what it was before surfaces existed. A mesh with surfaces is simplified
+    // once per surface group with its borders locked, so no crack opens between two surfaces, and Trifactor's LOD is not used.
     struct CollisionMesh {
         std::vector<f32> positions;
         std::vector<u32> indices;
         u32 lod = 0;
         f32 errorCm = 0.0f;
+        std::vector<i32> palette;
+        std::vector<u8>  triPalette;
+        // What the build saw of each material slot (does it collide, which surface), so a copy read back from the disk cache
+        // is checked against the .ocmat files as they are NOW: editing a slot's PHYSSURFACE or alpha mode rebuilds it.
+        struct SlotSig { std::string slot; bool collides = true; i32 surface = 0; };
+        std::vector<SlotSig> slotSig;
+        // The physics shape cache's source key for this mesh (world::createMeshShapeFromSource): path, size, mtime, collision cache version and
+        // each slot's answers above. 0 = not cacheable (no project directory). Set by GameContent wherever a collision mesh is read or built;
+        // never written to the .occol file.
+        u64 shapeSource = 0;
     };
     const CollisionMesh* collisionMeshFor(u64 id);
 
@@ -317,6 +333,9 @@ private:
 
     // Whether a material-slot NAME should collide: false only for Mask or Blend alphaMode.
     bool collisionSlotCollides(const std::string& slotName);
+    // The physical surface id a material-slot NAME carries (its .ocmat PHYSSURFACE hashed), 0 for none. Read from the file:
+    // the loaded material desc has no such field. 0 without the PBR module.
+    i32 collisionSlotSurface(const std::string& slotName);
 
     // Splits `md` into one compacted MeshHandle + material token per submesh, when it names more than
     // one -- a no-op otherwise. Each part is an index buffer over the whole mesh's vertices

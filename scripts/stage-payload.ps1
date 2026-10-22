@@ -265,6 +265,20 @@ if ($excludedByOption -gt 0) {
     Note "$excludedByOption allowlist entr$(if ($excludedByOption -eq 1) {'y'} else {'ies'}) skipped: their module is OFF in this edition"
 }
 
+# Strand hair (Aver.Render.Hair) compiles Jolt's hair kernels and its own ribbon pass from <exe>\shaders at run time, and the wrappers #include the vendored
+# files by bare name, so a missing one is a compile error that reads like a shader bug on someone else's machine (rhi::shaderFile() is deliberately
+# non-fatal). `shaders/**` ships the directory whole; this checks the hair set is in it when the module is on. A tree without the option has none to check.
+if ($options.ContainsKey('AVER_MODULE_RENDER_HAIR') -and $options['AVER_MODULE_RENDER_HAIR']) {
+    $hairShaders = @('AverHairRibbons.hlsl', 'AverHairMacros.hlsli', 'AverHairWind.hlsl', 'AverHairWindCS.hlsl', 'AverJoltHairIntegrate.hlsl',
+                     'AverJoltHairGridAccumulate.hlsl', 'HairIntegrate.hlsl', 'HairGridAccumulate.hlsl', 'HairCommon.h', 'HairStructs.h', 'ShaderCore.h')
+    foreach ($h in $hairShaders) {
+        $key = Join-Path 'bin\shaders' $h
+        if (-not $plan.Contains($key)) {
+            Fail "AVER_MODULE_RENDER_HAIR=ON but $key is not in the payload plan -- the hair shaders were not deployed beside the executable (build Aver.Render.Hair first)"
+        }
+    }
+}
+
 if ($failures.Count -gt 0) {
     Write-Host "[stage] FAILED with $($failures.Count) error(s) before copying anything" -ForegroundColor Red
     exit 1  # ExitCode.Failed (core/ErrorCodes.hpp); count printed above
@@ -379,7 +393,9 @@ $components = @(
     @{ Name = 'Material Icons (font)'; Licence = 'Apache-2.0';      File = 'third_party\fonts\LICENSE' }
     @{ Name = 'Dear ImGui';            Licence = 'MIT';             File = 'third_party\imgui\LICENSE.txt' }
     @{ Name = 'AMD FidelityFX Denoiser'; Licence = 'MIT';           File = 'third_party\fidelityfx-denoiser\LICENSE.txt' }
-    @{ Name = 'Jolt Physics';          Licence = 'MIT';             File = 'modules\physics.jolt\LICENSE' }
+    # Jolt's hair kernels (Hair*.hlsl) are redistributed as source under shaders\ and compiled on the user's machine; AverHairMacros.hlsli is derived from
+    # its Shaders\ShaderCore.h. The one MIT notice covers all of it, and the name says so.
+    @{ Name = 'Jolt Physics (including its hair simulation shaders under shaders\)'; Licence = 'MIT'; File = 'modules\physics.jolt\LICENSE' }
     @{ Name = 'stb (stb_image, stb_image_write)'; Licence = 'MIT / public domain'; File = 'third_party\stb\LICENSE.txt' }
     # ufbx reads .fbx in the editor and AverAssetC (Aver.Formats.Fbx); it is not in the game runtime.
     @{ Name = 'ufbx';                  Licence = 'MIT';             File = 'third_party\ufbx\LICENSE' }

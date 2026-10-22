@@ -368,6 +368,14 @@ set_target_properties(AverAssetC PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BIN
 # PointInstancer produces. Header-only and Core-only, so an include directory and no link -- the
 # arrangement tests/editor already uses for it.
 target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/modules/world/include)
+# `AverAssetC hair` (glTF line strands -> .ochair, docs/HAIR.md). HairCurves.cpp is compiled straight into the tool rather than linking Aver.Hair: the library
+# also holds the settings builder, which names Aver.Physics, and a shipping asset compiler must not depend on the physics DLL. HairCurves.cpp is pure (Core and
+# Formats only).
+if(TARGET Aver.Hair)
+  target_sources(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/modules/hair/src/HairCurves.cpp)
+  target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/modules/hair/include)
+  target_compile_definitions(AverAssetC PRIVATE AVER_HAVE_HAIR=1)
+endif()
 # Clustering/LOD decimation is OPTIONAL, exactly like ConvertTool above.
 if(TARGET Aver.Trifactor)
   target_link_libraries(AverAssetC PRIVATE Aver.Trifactor)
@@ -451,6 +459,14 @@ set_target_properties(OcLanesTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BI
 add_executable(OcFoliageTest src/OcFoliageTest.cpp)
 target_link_libraries(OcFoliageTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(OcFoliageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+
+# OcHairTest -- the .ochair strand groom: the byte-identical round trip of the HEAD text and the STRN and SCLP chunks, the refusals valid() promises, forward
+# compatibility (a newer OCHAIR number refused, unknown records and keys skipped), hand-edited text, damaged chunks, and the glTF LINES / LINE_STRIP import. Base
+# Aver.Formats; no physics, no device.
+add_executable(OcHairTest src/OcHairTest.cpp)
+target_link_libraries(OcHairTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcHairTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # OcAnimTest -- the .ocanim NOTIFY DURATION chunk (NTFD), item 7.1's format half. Its own executable
 # rather than a block in MeshTest: MeshTest is about the AVR1 container generically, and this is
@@ -554,3 +570,20 @@ if(TARGET Aver.Formats.Material)
   target_include_directories(FbxMaterialPackTest PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
   set_target_properties(FbxMaterialPackTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# OcSurfTest -- the .ocsurf physical-surface table (SHAPES_MATERIALS phase D): parse, defaults, canonical write, refusals, load and
+# save. With the material library it also covers the .ocmat PHYSSURFACE record (OCSURF_WITH_OCMAT), as MaterialTest is gated.
+add_executable(OcSurfTest src/OcSurfTest.cpp)
+target_link_libraries(OcSurfTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+if(TARGET Aver.Formats.Material)
+  target_link_libraries(OcSurfTest PRIVATE Aver.Formats.Material Aver.Render.PBR.Materials)
+  target_compile_definitions(OcSurfTest PRIVATE OCSURF_WITH_OCMAT=1)
+endif()
+set_target_properties(OcSurfTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OcShapeTest -- the .ocshape collision shape tree (SHAPES_MATERIALS phase E): the design's chair, every leaf and decorator kind, the
+# canonical round trip, every refusal (undefined reference, cycle, non-finite number, mutable compound used twice, newer version),
+# unknown records and options warning once, load and save. Base Aver.Formats; no physics, no device.
+add_executable(OcShapeTest src/OcShapeTest.cpp)
+target_link_libraries(OcShapeTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcShapeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

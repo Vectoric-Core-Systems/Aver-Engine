@@ -91,6 +91,14 @@ std::string terrainRefText(const pbr::TextureRef& r) {
 }
 // ---- end wave3 terrain layers ----
 
+// A physical surface name: [A-Za-z0-9_]{1,63}, the same rule as a .ocsurf record.
+bool physSurfaceNameValid(std::string_view n) {
+    if (n.empty() || n.size() > 63) return false;
+    for (const char c : n)
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) return false;
+    return true;
+}
+
 } // namespace
 
 // The colour space a texture slot is always read in.
@@ -260,6 +268,10 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
             // DESCRIPTION makes in OcGraph.cpp, because a content path may contain spaces and a
             // single token would cut it at the first one and point at a file that does not exist.
             if (t.size() > 1) ex.graphRef = std::string(trim(after(key)));
+        } else if (equalsCI(key, "PHYSSURFACE")) {
+            // The name of a physical surface (see OcMatExtras::physSurface). One token: a name has no spaces.
+            if (t.size() > 1 && physSurfaceNameValid(t[1])) ex.physSurface = std::string(t[1]);
+            else AVER_WARN("[ocmat] PHYSSURFACE needs a name of letters, digits and underscore (1 to 63) -- ignored");
         } else if (equalsCI(key, "PARAM")) {
             if (t.size() < 3) continue;
             const std::string_view p = t[1];
@@ -370,6 +382,18 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 out.lightIntensity = v < 0.0f ? 0.0f : v;
             }
             else if (equalsCI(p, "alphaCutoff"))          out.alphaCutoff       = tokF(t, 2, out.alphaCutoff);
+            // Strand hair (docs/HAIR.md): `PARAM shadingModel hair` and hair* keys; sanitise clamps them.
+            else if (equalsCI(p, "shadingModel"))         out.shadingModel      = (t.size() > 2 && equalsCI(t[2], "hair")) ? pbr::ShadingModel::Hair : pbr::ShadingModel::Standard;
+            else if (equalsCI(p, "hairTipColor"))         { out.hair.tipColor[0] = tokF(t, 2, out.hair.tipColor[0]); out.hair.tipColor[1] = tokF(t, 3, out.hair.tipColor[1]); out.hair.tipColor[2] = tokF(t, 4, out.hair.tipColor[2]); }
+            else if (equalsCI(p, "hairTint"))             { out.hair.tint[0] = tokF(t, 2, out.hair.tint[0]); out.hair.tint[1] = tokF(t, 3, out.hair.tint[1]); out.hair.tint[2] = tokF(t, 4, out.hair.tint[2]); }
+            else if (equalsCI(p, "hairColorVariation"))   out.hair.colorVariation = tokF(t, 2, out.hair.colorVariation);
+            else if (equalsCI(p, "hairRoughness"))        out.hair.roughness      = tokF(t, 2, out.hair.roughness);
+            else if (equalsCI(p, "hairShift"))            out.hair.shift          = tokF(t, 2, out.hair.shift);
+            else if (equalsCI(p, "hairSpecular"))         out.hair.specular       = tokF(t, 2, out.hair.specular);
+            else if (equalsCI(p, "hairTT"))               out.hair.tt             = tokF(t, 2, out.hair.tt);
+            else if (equalsCI(p, "hairTRT"))              out.hair.trt            = tokF(t, 2, out.hair.trt);
+            else if (equalsCI(p, "hairAzimuthRough"))     out.hair.azimuthRough   = tokF(t, 2, out.hair.azimuthRough);
+            else if (equalsCI(p, "hairScatter"))          out.hair.scatter        = tokF(t, 2, out.hair.scatter);
             // World centimetres per tile; a non-positive value is dropped.
             // slopeBlend <lo> <hi> [layer1UvScale] -- turns the second layer on and says across
             // which slope band it fades in. lo/hi are world-normal Z: 1 flat, 0 vertical, so LO is
@@ -576,6 +600,15 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     if (d.lightIntensity > 0.0f)
         s += "PARAM lightIntensity " + num(d.lightIntensity) + "\n";
 
+    if (d.shadingModel == pbr::ShadingModel::Hair) {
+        const pbr::HairParams& h = d.hair;
+        s += "PARAM shadingModel hair\n";
+        s += "PARAM hairTipColor " + num(h.tipColor[0]) + " " + num(h.tipColor[1]) + " " + num(h.tipColor[2]) + "\n";
+        s += "PARAM hairTint " + num(h.tint[0]) + " " + num(h.tint[1]) + " " + num(h.tint[2]) + "\n";
+        s += "PARAM hairColorVariation " + num(h.colorVariation) + "\nPARAM hairRoughness " + num(h.roughness) + "\nPARAM hairShift " + num(h.shift) + "\n";
+        s += "PARAM hairSpecular " + num(h.specular) + "\nPARAM hairTT " + num(h.tt) + "\nPARAM hairTRT " + num(h.trt) + "\n";
+        s += "PARAM hairAzimuthRough " + num(h.azimuthRough) + "\nPARAM hairScatter " + num(h.scatter) + "\n";
+    }
     bool anyTex = false;
     for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {
         const pbr::TextureRef& r = d.textures[i];
@@ -643,6 +676,8 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
         // the compiled graph goes through pbr::MaterialGraphRegistry instead.
         s += "\nGRAPHREF " + ex.graphRef + "\n";
     }
+    // Only when set, so a material that never named a surface writes the bytes it always did.
+    if (!ex.physSurface.empty()) s += "\nPHYSSURFACE " + ex.physSurface + "\n";
     if (ex.hasGraph) {
         s += "\n# The GRAPH block of the source material was dropped: nothing compiles one yet, so\n"
              "# re-saving it would claim a fidelity this writer cannot deliver.\n";

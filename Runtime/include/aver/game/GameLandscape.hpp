@@ -340,6 +340,10 @@ private:
     // AVER_MODULE_PHYSICS.
     void rebuildCollision();
 
+    // Registers every material layer's surface with the physics module (find-or-add: an authored Surfaces.ocsurf entry of the
+    // same name keeps its numbers). Called when the layer table is set and before a collision rebuild.
+    void registerLayerSurfaces();
+
 
     std::function<void()> terrainChanged_;   // see setTerrainChangedHook
 

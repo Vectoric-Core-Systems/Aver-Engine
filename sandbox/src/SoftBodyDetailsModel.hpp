@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -256,5 +257,61 @@ inline std::string proxyPathForMesh(const std::string& meshRel) {
     p.replace_filename(stem + ".proxy.ocmesh");
     return p.generic_string();
 }
+
+// ---- wave 11: the Solver, Inflate and Group subsections of a Cloth (docs/SOFTBODY.md "Fast cloth and inflatables") ----------------
+
+struct SolverRow { softbody::ClothSolver solver; const char* label; const char* tip; };
+inline constexpr std::array<SolverRow, 2> kSolverRows = {{
+    {softbody::ClothSolver::Cage, "Cage", "The beams and bends of the mesh: it can dent and tear."},
+    {softbody::ClothSolver::Fast, "Fast", "Jolt makes its own edges, shear edges, bends and long range attachments: the cheap path for flags, curtains and capes. No dents, no tears."},
+}};
+
+struct BendRow { softbody::ClothBend bend; const char* label; };
+inline constexpr std::array<BendRow, 3> kBendRows = {{
+    {softbody::ClothBend::None, "None"},
+    {softbody::ClothBend::Distance, "Distance"},
+    {softbody::ClothBend::Dihedral, "Dihedral"},
+}};
+
+struct LraRow { softbody::ClothLra lra; const char* label; };
+inline constexpr std::array<LraRow, 3> kLraRows = {{
+    {softbody::ClothLra::Off, "Off"},
+    {softbody::ClothLra::Euclidean, "Euclidean"},
+    {softbody::ClothLra::Geodesic, "Geodesic"},
+}};
+
+inline const char* solverLabel(softbody::ClothSolver s) {
+    for (const SolverRow& r : kSolverRows)
+        if (r.solver == s) return r.label;
+    return kSolverRows[0].label;
+}
+inline const char* bendLabel(softbody::ClothBend b) {
+    for (const BendRow& r : kBendRows)
+        if (r.bend == b) return r.label;
+    return kBendRows[1].label;
+}
+inline const char* lraLabel(softbody::ClothLra l) {
+    for (const LraRow& r : kLraRows)
+        if (r.lra == l) return r.label;
+    return kLraRows[0].label;
+}
+
+// The line under the Solver combo: "" when nothing needs saying.
+inline std::string solverAdvice(softbody::ClothSolver solver, bool tearable) {
+    if (solver == softbody::ClothSolver::Fast && tearable) return "A fast cloth cannot tear: Tearable is ignored (the asset is refused until it is off).";
+    if (solver == softbody::ClothSolver::Fast) return "Jolt's constraints: no dents and no tears. Long range attachments keep the cloth from stretching away from its pins.";
+    return {};
+}
+
+// The line under the Inflate block: "" when fine. closedKnown is false before the system has looked at the mesh (not built yet).
+inline std::string inflateAdvice(f32 pressureKPa, bool closedKnown, bool closed, bool hasAsset) {
+    if (!hasAsset) return "Pressure is a property of the .ocsoft asset: create one first.";
+    if (pressureKPa > 0.0f && closedKnown && !closed) return "Inflate needs a closed mesh (every edge shared by two triangles): this one simulates as plain cloth.";
+    if (pressureKPa > 0.0f) return "Pressure in kPa at the rest volume: about 3 for a beach ball, 12 for a basketball. A cloth with inextensible edges only bulges toward a sphere.";
+    return {};
+}
+
+// A pressure the runtime accepts (what the relay op takes).
+inline bool pressureOk(f32 kPa) { return std::isfinite(kPa) && kPa >= 0.0f && kPa <= 100000.0f; }
 
 }  // namespace aver::editor::softmodel

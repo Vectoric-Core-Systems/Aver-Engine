@@ -2,6 +2,8 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 #pragma once
+// Present in builds that have VoxiRenderer::setSubmitNoRay / setSubmitNoShadow (Runtime/src/GameRender.cpp tests it, so it compiles either way).
+#define AVER_VOXI_SUBMIT_NO_RAY 1
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/pbr/MaterialSystem.hpp"
@@ -137,6 +139,9 @@ public:
                 const void* drawConstants, u32 drawConstantBytes, bool translucent = false,
                 bool hiddenFromOwner = false, bool movable = false);
     void setSubmitMovable(bool on) { submitMovable_ = on; }
+    // Draws submitted while these are on are left out of the acceleration structure / the shadow cascades (see Draw::noRay). Sticky like setSubmitMovable.
+    void setSubmitNoRay(bool on) { submitNoRay_ = on; }
+    void setSubmitNoShadow(bool on) { submitNoShadow_ = on; }
 
     // ---- scene lights (CLight): point, spot and rectangular area lights ----
     // World space (SceneLight.hpp), filled by the host from scene::gatherLights. They share the staged
@@ -874,10 +879,16 @@ private:
         // HIDDEN FROM OWNER: in everything except primary-visibility ray (ray begins inside mesh).
         bool hiddenFromOwner = false;
 
+        // NO RAY / NO SHADOW: left out of the acceleration structure / out of the shadow cascades. Strand hair uses them: a ribbon mesh rewritten every
+        // frame is a BLAS refit nobody asked for, and CHair kHairRayTraced / kHairNoShadow opt in or out. Set by setSubmitNoRay / setSubmitNoShadow.
+        bool noRay = false;
+        bool noShadow = false;
         // MOVABLE: moves during play (game::PlayMobility decides); out of voxelisation and GI rebuild gate.
         bool movable = false;
     };
     bool submitMovable_ = false;
+    bool submitNoRay_ = false;
+    bool submitNoShadow_ = false;
 
     // Material system answers (is authored, textures); remembered for ONE key computation. Not a member.
     struct DrawMaterialMemoSlot {

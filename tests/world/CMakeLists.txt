@@ -142,6 +142,13 @@ target_link_libraries(VehicleLaneTest PRIVATE Aver.World Aver.Formats Aver.Core)
 set_target_properties(VehicleLaneTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# PhysicsShapeCacheFileTest -- the disk half of the physics shape binary cache (wave 11 WORLD_STATE_DEBUG phase E): the PSHP container,
+# keys, every kind of miss and, with the physics module (through Aver.World's link interface), the build-then-hit path of
+# createMeshShapeCached / createMeshShapeFromSource. No GPU, no .NET.
+add_executable(PhysicsShapeCacheFileTest src/PhysicsShapeCacheFileTest.cpp)
+target_link_libraries(PhysicsShapeCacheFileTest PRIVATE Aver.World Aver.Formats Aver.Core)
+set_target_properties(PhysicsShapeCacheFileTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # PlacementStreamerTest -- distance residency of authored placements (pure logic).
 add_executable(PlacementStreamerTest src/PlacementStreamerTest.cpp)
 target_link_libraries(PlacementStreamerTest PRIVATE Aver.World Aver.Core)

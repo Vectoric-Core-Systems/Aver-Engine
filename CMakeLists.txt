@@ -240,6 +240,11 @@ if(AVER_MODULE_PHYSICS)
     add_subdirectory(modules/vehicle)
   endif()
 endif()
+# Strand hair: the .ochair groom's generator, glTF curve import, collision proxy hulls and the settings builder over the physics hair ABI (docs/HAIR.md). Core,
+# Formats and Aver.Physics's C ABI only; the scene and render halves are later phases. The option comes from modules/hair/module.json.
+if(AVER_MODULE_PHYSICS AND AVER_MODULE_HAIR)
+  add_subdirectory(modules/hair)
+endif()
 add_subdirectory(modules/rhi)
 # Landscape, AFTER the RHI rather than beside formats: the CPU half needs neither, but the renderer
 # half is a second target in the same directory and links Aver.RHI, and a target cannot link something
@@ -321,6 +326,10 @@ if(AVER_MODULE_SCENE)
   if(AVER_MODULE_VEHICLE_SCENE)
     add_subdirectory(modules/vehicle.scene)
   endif()
+  # Strand hair on scene entities (CHair, HairSystem; docs/HAIR.md). Needs hair, physics, scene and anim.scene; the manifest enforces that.
+  if(AVER_MODULE_HAIR_SCENE AND TARGET Aver.Hair)
+    add_subdirectory(modules/hair.scene)
+  endif()
 
   # Gameplay cameras (docs/CAMERAS.md): spring-arm rigs, view-target blends and the camera modifier stack on scene entities. Needs scene and
   # physics; the manifest enforces that, so with either off the module is simply not there.
@@ -344,6 +353,10 @@ if(AVER_MODULE_SCENE)
 endif()
 if(AVER_MODULE_FRAMEWORK)
   add_subdirectory(modules/framework)     # optional: gameplay vocabulary over the world
+endif()
+# Strand hair drawing (phase G/H): Jolt's hair kernels on the RHI, the ribbon renderer, AVER_MODEL_HAIR's host side.
+if(AVER_MODULE_RENDER_HAIR)
+  add_subdirectory(modules/render.hair)
 endif()
 # Soft-body drawing (needs the scene and physics -- enforced from its manifest).
 if(AVER_MODULE_RENDER_SOFTBODY)
@@ -577,6 +590,10 @@ if(AVER_BUILD_TESTS)
   endif()
   if(AVER_MODULE_PHYSICS)
     add_subdirectory(tests/physics)
+
+    if(TARGET Aver.Hair)
+      add_subdirectory(tests/hair)
+    endif()
   endif()
 
   if(TARGET Aver.Vehicle)
@@ -632,6 +649,8 @@ if(AVER_BUILD_TESTS)
     add_subdirectory(tests/framework_morph)   # wave9 MORPH_TARGETS: the blend-shape / lip-sync ABI relay
 add_subdirectory(tests/framework_softfield)
 
+    add_subdirectory(tests/framework_softshape)   # wave11 SOFTBODY_HAIR: the jelly / rope / grab / buoyancy ABI relay and the Jelly and Rope Details model
+
     add_subdirectory(tests/framework_camera)   # wave10 GAMEPLAY_CAMERAS: the camera rig / view-target / modifier ABI relay
     add_subdirectory(tests/framework_sequence)   # wave5 #27: the sequencer ABI relay
     add_subdirectory(tests/framework_access)   # wave9 accessibility: options, captions, speech, camera feel, input assist
@@ -640,6 +659,7 @@ add_subdirectory(tests/framework_softfield)
     add_subdirectory(tests/framework_content)
 
     add_subdirectory(tests/framework_vehicle)   # wave10 VEHICLES: the vehicle ABI relay
+    add_subdirectory(tests/framework_hair)   # wave11 SOFTBODY_HAIR: the hair ABI relay (fake provider) and hair::hairProvider on an empty HairSystem
     add_subdirectory(tests/gas)
     add_subdirectory(tests/managed)   # Aver.Graph.Tests and Aver.DataLoc.Tests, wired into nothing before
   endif()
@@ -657,6 +677,9 @@ add_subdirectory(tests/framework_softfield)
     add_subdirectory(tests/render.softbody)
   endif()
 
+  if(TARGET Aver.Render.Hair)
+    add_subdirectory(tests/render.hair)   # HairRegsTest, RibbonPackTest, HairMaterialTest, HairSelfTest (headed, exit 77 without a device)
+  endif()
   if(TARGET Aver.Render.Skin)
     add_subdirectory(tests/render.skin)   # wave9 MORPH_TARGETS: the GPU blend-shape layout
   endif()

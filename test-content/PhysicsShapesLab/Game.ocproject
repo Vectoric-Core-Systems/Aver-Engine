@@ -1,0 +1,8 @@
+OCPROJECT 1
+# Engine test content for SHAPES_MATERIALS (docs/PHYSICS_SHAPES.md). Not a demo game: cubes standing in for shapes, four small meshes, no third-party assets.
+# Open the project, open Maps/Lab.ocworld and press Play (README.md says what to check).
+NAME PhysicsShapesLab
+ENGINE Aver 0.7.0-1
+CREATEDWITH 0.7.0-1
+CONTENT Content
+STARTMAP Maps/Lab.ocworld

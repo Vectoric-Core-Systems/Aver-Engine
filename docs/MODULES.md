@@ -65,6 +65,16 @@ scene is, `formats.particles` exactly when particles are, `physics.jolt` with ph
 with their RHI backend. Making them required would lock the scene on. A derived module never blocks
 turning anything off: it simply goes with the modules it derives from.
 
+## Physics build options (`modules/physics.jolt`)
+
+Four CMake options on the Jolt target, each PUBLIC so `Aver.Physics` and the one test that links Jolt directly agree on the class layouts (Jolt checks its configuration string at start-up). `aver_phys_build_flags()` reports what a binary has.
+
+| Option | Default | Effect |
+|---|---|---|
+| `AVER_PHYSICS_DEBUG_RENDERER` | ON | `JPH_DEBUG_RENDERER` for Debug and Release: the editor's `Show Physics` overlay. Binary size only; OFF makes `aver_phys_debug_available()` answer 0. |
+| `AVER_PHYSICS_PROFILER` | ON | `JPH_EXTERNAL_PROFILE` plus `AverProfileHook.cpp` in the Jolt target: Jolt's scopes and the engine's fixed-step stages feed `aver_phys_profile_*`. Off at run time until enabled; a null sink is one relaxed load and a branch per scope. Flip the default to OFF for Release if the idle overhead exceeds 0.3 ms per frame on NeonDistrict (not yet measured). |
+| `AVER_PHYSICS_CROSS_PLATFORM` | OFF | Jolt's `CROSS_PLATFORM_DETERMINISTIC`. No cross-platform claim is made until the golden hash test is green on Windows and macOS. |
+| `AVER_PHYSICS_DIAGNOSTICS` | OFF | Developer preset, never CI: determinism log, stats tracking and Jolt's internal profiler in place of the external hook (the two are mutually exclusive). |
 ## The dependency rule
 
 Both CMake and the launcher implement it identically, over `dependsOn` (counting only modules that exist

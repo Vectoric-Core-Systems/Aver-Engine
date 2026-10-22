@@ -128,20 +128,20 @@ public static class Landscape
     }
 }
 
-/// <summary>Physical-surface ids: graphs and scripts compare integers instead of names.</summary>
-public static class Surface
+/// <summary>Physical-surface ids: graphs and scripts compare integers instead of names. The id is the one the physics
+/// registry, a raycast hit and a contact report (<c>Aver.Physics.Surfaces</c>).</summary>
+public static partial class Surface
 {
-    /// <summary>The 32-bit FNV-1a hash of the UTF-8 name, never 0 (a zero hash becomes 1); 0 for a null or empty name.</summary>
-    public static int IdOf(string? name)
+    /// <summary>The 32-bit FNV-1a hash of the UTF-8 name, never 0 (a zero hash becomes 1); 0 for a null or empty name.
+    /// One definition, shared with <c>Aver.Physics.Surfaces.IdOf</c>.</summary>
+    public static int IdOf(string? name) => global::Aver.Physics.Surfaces.IdOf(name);
+
+    /// <summary>The name registered for an id (a <c>.ocsurf</c> table entry, a landscape layer or <c>Surfaces.Register</c>);
+    /// an empty string when none is, or with no physics library loaded.</summary>
+    public static string NameOf(int surface)
     {
-        if (string.IsNullOrEmpty(name)) return 0;
-        uint h = 2166136261u;
-        foreach (byte b in Encoding.UTF8.GetBytes(name))
-        {
-            h ^= b;
-            h *= 16777619u;
-        }
-        if (h == 0) h = 1;
-        return unchecked((int)h);
+        if (surface == 0) return string.Empty;
+        try { return global::Aver.Physics.Surfaces.NameOf(surface); }
+        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return string.Empty; }
     }
 }

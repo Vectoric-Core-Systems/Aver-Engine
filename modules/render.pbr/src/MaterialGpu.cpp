@@ -125,6 +125,28 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     // means anything on its own.
     if (d.lightIntensity > 0.0f) flags |= MaterialFlag_Light;
 
+    // ---- wave11 strand hair ----
+    // The hair parameters live in slots the hair model has no other use for (the table is in material_prelude.hlsl, above averHairInit): beta in
+    // roughnessFactor, the tip colour (LINEAR: emissive is not decoded by the shader) in emissiveFactor, the lobe weights in coat and subsurface,
+    // the tint in subsurfaceColor (sRGB, decoded below like any other), the multiple-scatter weight in occlusionStrength and the colour variation
+    // in metallicFactor. The Coat and Subsurface FLAGS stay clear so those terms of the standard model are identically zero if a ray hit shades
+    // a hair material with it. A ribbon is a flat strip: always two sided.
+    if (d.shadingModel == ShadingModel::Hair) {
+        const HairParams& h = d.hair;
+        for (u32 i = 0; i < 3; ++i) c.emissiveFactor[i] = srgbToLinear(h.tipColor[i]);
+        c.metallicFactor    = h.colorVariation;
+        c.roughnessFactor   = h.roughness;
+        c.occlusionStrength = h.scatter;
+        c.coatWeight        = h.specular;
+        c.coatRoughness     = h.azimuthRough;
+        c.coatF0            = h.shift;
+        c.subsurfaceWeight  = h.tt;
+        c.subsurfaceRadius  = h.trt;
+        for (u32 i = 0; i < 3; ++i) c.subsurfaceColor[i] = srgbToLinear(h.tint[i]);
+        flags &= ~(MaterialFlag_Coat | MaterialFlag_Subsurface | MaterialFlag_Light);
+        flags |= MaterialFlag_Hair | MaterialFlag_TwoSided;
+    }
+
     // EVERY SLOT UNBOUND UNTIL SOMETHING RESIDENT-IFIES IT. packMaterial works from a MaterialDesc
     // alone and has no idea where (or whether) a texture landed in the ray path's bindless table --
     // that is the renderer's business, and it fills these in when it uploads the RT material table.

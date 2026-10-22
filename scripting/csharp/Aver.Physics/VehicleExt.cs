@@ -164,6 +164,10 @@ public readonly partial struct Vehicle
     public bool SetChassisBoxes(ReadOnlySpan<float> boxes) =>
         boxes.Length >= 6 && boxes.Length % 6 == 0 && Native.aver_phys_vehicle_set_chassis_boxes(Handle, boxes.ToArray(), boxes.Length / 6) != 0;
 
+    /// <summary>Replaces the chassis with any <see cref="CollisionShape"/> that has a mass, in the vehicle's origin frame
+    /// (bottom centre of the car). Mass and centre of mass are unchanged. Before <c>Finish</c>.</summary>
+    public bool SetChassisShape(CollisionShape shape) => Native.aver_phys_vehicle_set_chassis_shape(Handle, shape.Handle) != 0;
+
     /// <summary>The engine: peak torque (N*m), idle and limit revs, rotational inertia (0 = scaled to the torque as the
     /// plain engine is) and damping (engine braking).</summary>
     public bool SetEngine(float maxTorque, float minRpm, float maxRpm, float inertia = 0f, float damping = 0.2f) =>

@@ -8,6 +8,7 @@
 #include "aver/anim/MotionMatchSystem.hpp"
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/game/ColliderShapes.hpp"   // CollisionShape: registration, apply, capture, remove (wave 11 SHAPES_MATERIALS)
 #include "aver/scene/Components.hpp"
 #include "aver/scene/scene_abi.h"
 #if AVER_MODULE_SYNAPSE_SCENE
@@ -16,6 +17,8 @@
 #endif
 #if AVER_MODULE_SOFTBODY_SCENE
 #  include "aver/softbody/SoftBodySystem.hpp"
+
+#  include "aver/softbody/SoftShapeSystem.hpp"
 #endif
 
 #if AVER_MODULE_VEHICLE_SCENE
@@ -25,6 +28,10 @@
 
 #if AVER_MODULE_CAMERA
 #  include "aver/camera/CameraRigSystem.hpp"
+#endif
+
+#if AVER_MODULE_HAIR_SCENE
+#  include "aver/hair/HairSystem.hpp"
 #endif
 
 #include <algorithm>
@@ -39,7 +46,7 @@ namespace aver::game {
 namespace {
 
 enum TypeIx : int {
-    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kCloth, kDestructible, kMorphTargets, kCameraRig, kVehicle, kParticleEmitter, kSoftField, kTypeCount,
+    kSkeletalMesh, kAnimator, kRootMotion, kMotionMatcher, kControlRig, kIkRig, kBrain, kSmartObject, kSoftBody, kCloth, kDestructible, kMorphTargets, kCameraRig, kVehicle, kParticleEmitter, kSoftField, kJelly, kRope, kCollisionShape, kHair, kTypeCount,
     kUnknownType = -1
 };
 static_assert(std::size(kPlacedComponentTypes) == kTypeCount, "kPlacedComponentTypes and TypeIx must stay in step");
@@ -171,6 +178,9 @@ u32 typeId(scene::World& w, int ix) {
         case kCloth: return w.componentId("CCloth");
         case kDestructible: return w.componentId("CDestructible");
         case kSoftField: return w.componentId("CSoftField");
+
+        case kJelly: return w.componentId("CSoftVolume");
+        case kRope: return w.componentId("CSoftRope");
 #endif
         case kMorphTargets: return w.componentId("CMorphTargets");
 
@@ -179,8 +189,12 @@ u32 typeId(scene::World& w, int ix) {
 #endif
 
         case kParticleEmitter: return scene::kComponentParticleEmitter;
+#if AVER_MODULE_HAIR_SCENE
+        case kHair: return w.componentId("CHair");
+#endif
 
         case kCameraRig: return w.componentId("CCameraRig");
+        case kCollisionShape: return collisionShapeType(w);
         default: return 0;
     }
 }
@@ -206,10 +220,23 @@ bool requirementsMet(scene::World& w, scene::Entity e, int ix, const fmt::OcWorl
         case kAnimator: case kRootMotion: case kMotionMatcher: case kControlRig: case kIkRig:
             if (!hasSkeleton(w, e)) { why = "needs a SkeletalMesh with a skeleton"; return false; }
             break;
+        case kJelly: case kRope: {
+            // One body per entity root: a soft shape cannot share an entity with a Cloth, a Destructible or the other shape.
+            for (const int other : {kCloth, kDestructible, ix == kJelly ? kRope : kJelly}) {
+                const u32 oid = typeId(w, other);
+                if (oid != 0 && w.hasComponent(e, oid)) { why = std::string("the entity is already ") + std::string(kPlacedComponentTypes[other]); return false; }
+            }
+            break;
+        }
         case kCloth: case kDestructible: {
             // One body per entity root: a cloth and a destructible cannot share an entity.
             const u32 other = typeId(w, ix == kCloth ? kDestructible : kCloth);
             if (other != 0 && w.hasComponent(e, other)) { why = ix == kCloth ? "the entity is already Destructible" : "the entity is already Cloth"; return false; }
+
+            for (const int shape : {kJelly, kRope}) {
+                const u32 sid = typeId(w, shape);
+                if (sid != 0 && w.hasComponent(e, sid)) { why = std::string("the entity is already ") + std::string(kPlacedComponentTypes[shape]); return false; }
+            }
             if (ix == kDestructible) {
                 // A vehicle's chassis is one body: a Destructible belongs on a child (the spec's DAMAGE shell).
                 const u32 veh = typeId(w, kVehicle);
@@ -217,6 +244,11 @@ bool requirementsMet(scene::World& w, scene::Entity e, int ix, const fmt::OcWorl
             }
             break;
         }
+        case kHair:
+            // A rigid head works (the scalp then follows one bone); a skeleton is not required. One hair per entity root; it does not mix with a cloth or a destructible body.
+            if (typeId(w, kCloth) != 0 && w.hasComponent(e, typeId(w, kCloth))) { why = "the entity is already Cloth"; return false; }
+            if (typeId(w, kDestructible) != 0 && w.hasComponent(e, typeId(w, kDestructible))) { why = "the entity is already Destructible"; return false; }
+            break;
         case kVehicle: {
             // The fights VehiclePhysicsSystem::buildEntry and GameLevel::beginVehicles refuse: a rigid body, an object clip, a traffic `vehicle` token.
             if (w.hasComponent(e, scene::kComponentRigidBody)) { why = "the entity is a Rigid Body: a Vehicle is its own body"; return false; }
@@ -529,6 +561,57 @@ bool applySoftField(scene::World& w, scene::Entity e, const fmt::OcPlacedCompone
 }
 #endif
 
+#if AVER_MODULE_SOFTBODY_SCENE
+// COMPONENT Jelly (docs/SOFTBODY.md section 12): asset stiffness=1 cell=0 gravity=1 damping=1 world=1 gravityon=1. The lattice and the OUT fields are runtime state, never authored.
+bool applyJelly(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    const u32 type = typeId(w, kJelly);
+    if (type == 0) { why = "CSoftVolume is not registered"; return false; }
+    u64 asset = 0;
+    if (readAsset(r, "asset", asset) == AssetKey::Bad) { why = "malformed asset#"; return false; }
+    auto* c = w.component<softbody::CSoftVolume>(e, type);
+    if (!c) {
+        c = softbody::SoftShapeSystem::attachJelly(w, e, softbody::SoftPreset::Jelly, asset);
+        if (!c) { why = "the world refused the component"; return false; }
+    }
+    c->asset = asset;
+    c->stiffnessScale = numKey(r, "stiffness", 1.0f);
+    c->cellCm = std::max(0.0f, numKey(r, "cell", 0.0f));
+    c->gravityScale = numKey(r, "gravity", 1.0f);
+    c->dampingScale = numKey(r, "damping", 1.0f);
+    c->flags = (boolKey(r, "world", true) ? 0u : softbody::kVolNoWorld) | (boolKey(r, "gravityon", true) ? 0u : softbody::kVolNoGravity);
+    return true;
+}
+
+// COMPONENT Rope: asset start=x,y,z end=x,y,z (WORLD cm; absent: the placement's position and 250 cm ahead of it) length=0 radius=0 world=1 startpin=1 endpin=1.
+// An end anchored to an entity is script state a level cannot name: apply always writes world points, capture writes an anchored end's current world point.
+bool applyRope(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    const u32 type = typeId(w, kRope);
+    if (type == 0) { why = "CSoftRope is not registered"; return false; }
+    u64 asset = 0;
+    if (readAsset(r, "asset", asset) == AssetKey::Bad) { why = "malformed asset#"; return false; }
+    const Mat4& host = w.worldMatrix(e);
+    f32 start[3] = {host.m[3][0], host.m[3][1], host.m[3][2]};
+    f32 end[3] = {start[0] + 250.0f, start[1], start[2]};
+    vec3Key(r, "start", start);
+    vec3Key(r, "end", end);
+    const f32 length = std::max(0.0f, numKey(r, "length", 0.0f)), radius = std::max(0.0f, numKey(r, "radius", 0.0f));
+    auto* c = w.component<softbody::CSoftRope>(e, type);
+    if (!c) {
+        c = softbody::SoftShapeSystem::attachRope(w, e, Vec3{start[0], start[1], start[2]}, Vec3{end[0], end[1], end[2]}, asset, length, radius);
+        if (!c) { why = "the world refused the component"; return false; }
+    }
+    c->asset = asset;
+    c->startEntity = 0;
+    c->endEntity = 0;
+    for (int i = 0; i < 3; ++i) { c->startOffset[i] = start[i]; c->endOffset[i] = end[i]; }
+    c->lengthCm = length;
+    c->radiusCm = radius;
+    // kRopeTail is runtime state (a cut piece): leave it alone.
+    c->flags = (c->flags & softbody::kRopeTail) | (boolKey(r, "world", true) ? 0u : softbody::kRopeNoWorld) |
+               (boolKey(r, "startpin", true) ? 0u : softbody::kRopeNoStartPin) | (boolKey(r, "endpin", true) ? 0u : softbody::kRopeNoEndPin);
+    return true;
+}
+#endif
 // COMPONENT MorphTargets (docs/ANIM_MORPH_FACE.md): rig=<.ocface> weight=1 inherit=1 off=1 ignoreanim=1. Weights set from script,
 // the sequencer or lip-sync are runtime state and never authored.
 bool applyMorphTargets(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
@@ -751,6 +834,32 @@ bool applyVehicle(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent
     return true;
 }
 #endif
+#if AVER_MODULE_HAIR_SCENE
+// COMPONENT Hair (docs/HAIR.md): asset=<.ochair> width density lodbias wind stiffness teleport collision shadow windon hidden. The OUT fields are runtime state.
+bool applyHair(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, std::string& why) {
+    const u32 type = typeId(w, kHair);
+    if (type == 0) { why = "CHair is not registered"; return false; }
+    u64 asset = 0;
+    const AssetKey ak = readAsset(r, "asset", asset);
+    if (ak == AssetKey::Bad) { why = "malformed asset#"; return false; }
+    if (asset == 0) { why = "asset key is absent"; return false; }
+    auto* c = w.component<hair::CHair>(e, type);
+    if (!c) {
+        c = hair::HairSystem::attachHair(w, e, asset);
+        if (!c) { why = "the world refused the component"; return false; }
+    }
+    c->asset = asset;
+    c->widthScale = numKey(r, "width", 1.0f);
+    c->densityScale = numKey(r, "density", 1.0f);
+    c->lodBias = numKey(r, "lodbias", 0.0f);
+    c->windScale = numKey(r, "wind", 1.0f);
+    c->stiffnessScale = numKey(r, "stiffness", 1.0f);
+    c->teleportCm = std::max(0.0f, numKey(r, "teleport", 0.0f));
+    c->flags = (boolKey(r, "collision", true) ? 0u : hair::kHairNoCollision) | (boolKey(r, "shadow", true) ? 0u : hair::kHairNoShadow) |
+               (boolKey(r, "windon", true) ? 0u : hair::kHairNoWind) | (boolKey(r, "hidden", false) ? hair::kHairHidden : 0u);
+    return true;
+}
+#endif
 bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, const fmt::OcWorldPlacement* placement, std::string& why) {
     const int ix = typeIndex(r.type);
     if (ix == kUnknownType) { why = "unknown type"; return false; }
@@ -758,11 +867,14 @@ bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r,
     if (ix == kBrain || ix == kSmartObject) { why = "unknown to this build"; return false; }
 #endif
 #if !AVER_MODULE_SOFTBODY_SCENE
-    if (ix == kCloth || ix == kDestructible || ix == kSoftField) { why = "unknown to this build"; return false; }
+    if (ix == kCloth || ix == kDestructible || ix == kSoftField || ix == kJelly || ix == kRope) { why = "unknown to this build"; return false; }
 #endif
 
 #if !AVER_MODULE_VEHICLE_SCENE
     if (ix == kVehicle) { why = "unknown to this build"; return false; }
+#endif
+#if !AVER_MODULE_HAIR_SCENE
+    if (ix == kHair) { why = "unknown to this build"; return false; }
 #endif
 
 #if !AVER_MODULE_CAMERA
@@ -785,6 +897,9 @@ bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r,
         case kCloth: return applyCloth(w, e, r, why);
         case kDestructible: return applyDestructible(w, e, r, why);
         case kSoftField: return applySoftField(w, e, r, why);
+
+        case kJelly: return applyJelly(w, e, r, why);
+        case kRope: return applyRope(w, e, r, why);
 #endif
         case kMorphTargets: return applyMorphTargets(w, e, r, why);
 
@@ -793,6 +908,10 @@ bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r,
 #endif
 
         case kParticleEmitter: return applyParticleEmitter(w, e, r, why);
+        case kCollisionShape: return applyCollisionShape(w, e, r, why);
+#if AVER_MODULE_HAIR_SCENE
+        case kHair: return applyHair(w, e, r, why);
+#endif
 
 #if AVER_MODULE_CAMERA
         case kCameraRig: return applyCameraRig(w, e, r, why);
@@ -923,7 +1042,7 @@ std::optional<fmt::OcPlacedComponent> captureOne(scene::World& w, scene::Entity 
         case kCloth: {
             const auto* c = w.component<softbody::CCloth>(e, type);
             putAsset(rec, "asset", c->asset, pathOf);
-            put(rec, "preset", softbody::presetKey(c->preset < softbody::kSoftPresetCount ? static_cast<softbody::SoftPreset>(c->preset) : softbody::SoftPreset::ClothLight));
+            put(rec, "preset", softbody::presetKey(c->preset < softbody::kSoftSolidPresetCount ? static_cast<softbody::SoftPreset>(c->preset) : softbody::SoftPreset::ClothLight));
             if (c->windScale > 0.0f && c->windScale != 1.0f) putNum(rec, "wind", c->windScale);
             if (c->stiffnessScale > 0.0f && c->stiffnessScale != 1.0f) putNum(rec, "stiffness", c->stiffnessScale);
             if (c->reachScale > 0.0f && c->reachScale != 1.0f) putNum(rec, "reach", c->reachScale);
@@ -937,13 +1056,47 @@ std::optional<fmt::OcPlacedComponent> captureOne(scene::World& w, scene::Entity 
         case kDestructible: {
             const auto* c = w.component<softbody::CDestructible>(e, type);
             putAsset(rec, "asset", c->asset, pathOf);
-            put(rec, "preset", softbody::presetKey(c->preset < softbody::kSoftPresetCount ? static_cast<softbody::SoftPreset>(c->preset) : softbody::SoftPreset::Metal));
+            put(rec, "preset", softbody::presetKey(c->preset < softbody::kSoftSolidPresetCount ? static_cast<softbody::SoftPreset>(c->preset) : softbody::SoftPreset::Metal));
             if (c->toughnessScale > 0.0f && c->toughnessScale != 1.0f) putNum(rec, "toughness", c->toughnessScale);
             if (c->impactScale > 0.0f && c->impactScale != 1.0f) putNum(rec, "impact", c->impactScale);
             if (c->debrisLifetimeS > 0.0f) putNum(rec, "lifetime", c->debrisLifetimeS);
             if (c->maxPieces > 0) putNum(rec, "maxpieces", static_cast<f32>(c->maxPieces));
             if (c->flags & softbody::kDestructIndestructible) put(rec, "indestructible", "1");
             if (c->flags & softbody::kDestructNoDebris) put(rec, "nodebris", "1");
+            break;
+        }
+        case kJelly: {
+            const auto* c = w.component<softbody::CSoftVolume>(e, type);
+            putAsset(rec, "asset", c->asset, pathOf);
+            if (c->stiffnessScale > 0.0f && c->stiffnessScale != 1.0f) putNum(rec, "stiffness", c->stiffnessScale);
+            if (c->cellCm > 0.0f) putNum(rec, "cell", c->cellCm);
+            if (c->gravityScale > 0.0f && c->gravityScale != 1.0f) putNum(rec, "gravity", c->gravityScale);
+            if (c->dampingScale > 0.0f && c->dampingScale != 1.0f) putNum(rec, "damping", c->dampingScale);
+            if (c->flags & softbody::kVolNoWorld) put(rec, "world", "0");
+            if (c->flags & softbody::kVolNoGravity) put(rec, "gravityon", "0");
+            break;
+        }
+        case kRope: {
+            const auto* c = w.component<softbody::CSoftRope>(e, type);
+            putAsset(rec, "asset", c->asset, pathOf);
+            f32 ends[2][3];
+            for (int end = 0; end < 2; ++end) {
+                const scene::Entity anchor = end == 0 ? c->startEntity : c->endEntity;
+                const f32* o = end == 0 ? c->startOffset : c->endOffset;
+                if (anchor != 0 && w.valid(anchor)) {   // an entity-anchored end is written as the world point it is at
+                    const Mat4& am = w.worldMatrix(anchor);
+                    for (int k = 0; k < 3; ++k) ends[end][k] = o[0] * am.m[0][k] + o[1] * am.m[1][k] + o[2] * am.m[2][k] + am.m[3][k];
+                } else {
+                    for (int k = 0; k < 3; ++k) ends[end][k] = o[k];
+                }
+            }
+            put(rec, "start", numStr(ends[0][0]) + "," + numStr(ends[0][1]) + "," + numStr(ends[0][2]));
+            put(rec, "end", numStr(ends[1][0]) + "," + numStr(ends[1][1]) + "," + numStr(ends[1][2]));
+            if (c->lengthCm > 0.0f) putNum(rec, "length", c->lengthCm);
+            if (c->radiusCm > 0.0f) putNum(rec, "radius", c->radiusCm);
+            if (c->flags & softbody::kRopeNoWorld) put(rec, "world", "0");
+            if (c->flags & softbody::kRopeNoStartPin) put(rec, "startpin", "0");
+            if (c->flags & softbody::kRopeNoEndPin) put(rec, "endpin", "0");
             break;
         }
         case kSoftField: {
@@ -998,6 +1151,25 @@ std::optional<fmt::OcPlacedComponent> captureOne(scene::World& w, scene::Entity 
         }
 #endif
 
+#if AVER_MODULE_HAIR_SCENE
+        case kHair: {
+            const auto* c = w.component<hair::CHair>(e, type);
+            putAsset(rec, "asset", c->asset, pathOf);
+            if (c->widthScale > 0.0f && c->widthScale != 1.0f) putNum(rec, "width", c->widthScale);
+            if (c->densityScale > 0.0f && c->densityScale != 1.0f) putNum(rec, "density", c->densityScale);
+            if (c->lodBias != 0.0f) putNum(rec, "lodbias", c->lodBias);
+            if (c->windScale > 0.0f && c->windScale != 1.0f) putNum(rec, "wind", c->windScale);
+            if (c->stiffnessScale > 0.0f && c->stiffnessScale != 1.0f) putNum(rec, "stiffness", c->stiffnessScale);
+            if (c->teleportCm > 0.0f) putNum(rec, "teleport", c->teleportCm);
+            if (c->flags & hair::kHairNoCollision) put(rec, "collision", "0");
+            if (c->flags & hair::kHairNoShadow) put(rec, "shadow", "0");
+            if (c->flags & hair::kHairNoWind) put(rec, "windon", "0");
+            if (c->flags & hair::kHairHidden) put(rec, "hidden", "1");
+            break;
+        }
+#endif
+        case kCollisionShape:
+            return captureCollisionShape(w, e, pathOf);   // builds its own record: asset, surface, motion, noscale; the OUT fields are never read
         case kParticleEmitter: {
             const auto* c = w.component<scene::CParticleEmitter>(e, type);
             putAsset(rec, "effect", c->effect, pathOf);
@@ -1070,6 +1242,7 @@ bool removePlacedComponent(scene::World& w, scene::Entity e, std::string_view ty
     // Stops a running tree first so a removal in edit mode leaves no instance for the next Play to find.
     if (ix == kBrain) synapse::btSystem().brainStop(e);
 #endif
+    if (ix == kCollisionShape) return removeCollisionShape(w, e);   // also takes back the zero-size Rigid Body the record attached, so Add Component's undo is exact
     return w.removeComponent(e, id);
 }
 

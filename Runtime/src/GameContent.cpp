@@ -4,6 +4,7 @@
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/HitchMarks.hpp"
+#include "aver/core/SurfaceId.hpp"
 
 #include <algorithm>
 #include <unordered_set>
@@ -25,6 +26,7 @@
 // Always included: AssetType/assetTypeFromPath are used by both loadProjectMeshes (scene-guarded)
 // and loadProjectParticleEffects (particles-guarded); scoping to either guard breaks the other.
 #include "aver/assets/AssetId.hpp"
+#include "aver/rhi/PrimitiveMeshes.hpp"
 #include "aver/platform/FileSystem.hpp"   // toNativeSeparators
 
 #if AVER_MODULE_PBR
@@ -41,6 +43,8 @@
 #  include "aver/scene/scene_abi.h"
 #  if AVER_MODULE_PHYSICS
 #    include "aver/physics/physics_abi.h"
+#    include "aver/physics/physics_shape_builder_abi.h"   // aver_phys_shape_mesh: a collision shape with a surface palette
+#    include "aver/world/PhysicsShapeCache.hpp"
 #  endif
 #  include "GameMath.hpp"
 #  if AVER_MODULE_TRIFACTOR
@@ -299,6 +303,14 @@ void GameContent::registerBuiltins(rhi::IDevice& device) {
         // Not isotropic: exact per-axis reach differs. Bounds padded beyond exact numbers.
         add("Meshes/drone.ocmesh", v, i, {Vec3{-0.78f, -0.78f, -0.22f}, Vec3{0.78f, 0.78f, 0.16f}});
     }
+    // Plane, cylinder, cone, capsule, torus, tube, pyramid, wedge, banana (aver/rhi/PrimitiveMeshes.hpp, shared with the actor preview).
+    for (const rhi::primitives::BuiltinPrimitive& p : rhi::primitives::kBuiltinPrimitives) {
+        std::vector<rhi::MeshVertex> v; std::vector<u32> i;
+        p.build(v, i);
+        f32 mn[3], mx[3];
+        rhi::primitives::primitiveBounds(v, mn, mx);
+        add(p.path, v, i, {Vec3{mn[0], mn[1], mn[2]}, Vec3{mx[0], mx[1], mx[2]}});
+    }
 
     // Named surfaces gameplay can ask for. Must stay in step with SandboxApp.cpp's look()/surfaceLooks_.
     auto look = [this](const char* name, f32 r, f32 g, f32 b, f32 metal, f32 rough) {
@@ -319,6 +331,7 @@ void GameContent::registerBuiltins(rhi::IDevice& device) {
     look("M_Rock",    0.42f, 0.40f, 0.37f, 0.05f, 0.80f);
     // M_Glass: opaque fallback (SurfaceLook has no alphaMode; actual translucency needs authored .ocmat).
     look("M_Glass", 0.92f, 0.94f, 0.95f, 0.00f, 0.05f);
+    look("M_Banana", 0.90f, 0.68f, 0.10f, 0.00f, 0.55f);   // Meshes/banana.ocmesh's look in the editor's Add menu
 
     AVER_INFO("[Mesh] {} built-in primitive(s), {} named surface(s)", sceneMeshes_.size(), surfaceLooks_.size());
 }
@@ -939,8 +952,17 @@ std::vector<u32> simplifyCollisionMesh(const std::vector<f32>& positions, const 
 // ---- the disk cache: <project>/Saved/DerivedDataCache/Collision/<hash>.occol -------------------------
 // Derived data (not authored). Whole directory can be deleted for cost of one rebuild per mesh.
 // Bump kCollisionCacheVersion when filter rule, simplification target or layout changes.
+// 2: the physical-surface palette and the per-slot signature follow the original fields (a version-1 file is a miss).
 constexpr u32 kCollisionCacheMagic   = 0x4C4F4341u;
-constexpr u32 kCollisionCacheVersion = 1;
+constexpr u32 kCollisionCacheVersion = 2;
+
+// What a material slot says NOW: does it collide, and which physical surface does it carry (0 = none). An empty function is
+// "not asked" (collides, no surface). The build uses it to filter and group; a cache read uses it to decide whether the entry
+// still describes the mesh, since the answers live in .ocmat files the cache key does not cover.
+struct SlotQuery {
+    std::function<bool(const std::string&)> collides;
+    std::function<i32(const std::string&)> surface;
+};
 
 std::string collisionCacheDir(const std::string& projectDir) {
     return projectDir.empty() ? std::string() : projectDir + AVER_PATH_SEP "Saved" AVER_PATH_SEP "DerivedDataCache" AVER_PATH_SEP "Collision";
@@ -959,9 +981,19 @@ std::string collisionCachePathFor(const std::string& projectDir, const std::stri
     return dir + AVER_PATH_SEP + name;
 }
 
+// The physics shape cache's source key for a collision mesh: what the .occol key covers (path, size, mtime, version) plus what each
+// material slot said (collides, surface), because those answers live in .ocmat files the file key does not cover and a slot flip that
+// keeps the triangle count would otherwise reuse a stale BVH. world::createMeshShapeFromSource adds its own version and the counts.
+u64 shapeSourceKey(const std::string& meshPath, u64 fileSize, i64 mtimeTicks, const GameContent::CollisionMesh& m) {
+    std::string k = meshPath + "|" + std::to_string(fileSize) + "|" + std::to_string(mtimeTicks) + "|" +
+                    std::to_string(kCollisionCacheVersion);
+    for (const GameContent::CollisionMesh::SlotSig& s : m.slotSig)
+        k += "|" + s.slot + (s.collides ? "+" : "-") + std::to_string(s.surface);
+    return fnv1a64(std::string_view(k));
+}
 // Reads and validates cache entry against source mesh's current path/size/mtime.
 bool readCollisionCacheFile(const std::string& cachePath, const std::string& meshPath, u64 fileSize,
-                            i64 mtimeTicks, GameContent::CollisionMesh& out) {
+                            i64 mtimeTicks, GameContent::CollisionMesh& out, const SlotQuery& slots) {
     std::ifstream in(cachePath, std::ios::binary);
     if (!in) return false;
     const auto get = [&in](void* p, usize n) { in.read(static_cast<char*>(p), static_cast<std::streamsize>(n)); return static_cast<bool>(in); };
@@ -992,6 +1024,36 @@ bool readCollisionCacheFile(const std::string& cachePath, const std::string& mes
     out.indices.resize(indexCount);
     if (!get(out.indices.data(), out.indices.size() * sizeof(u32))) return false;
     if (!get(&out.lod, sizeof(out.lod)) || !get(&out.errorCm, sizeof(out.errorCm))) return false;
+
+    // The physical-surface palette (empty for a mesh that names none) and one palette index per triangle.
+    u32 paletteCount = 0, triCount = 0;
+    if (!get(&paletteCount, sizeof(paletteCount)) || paletteCount > 32) return false;
+    out.palette.resize(paletteCount);
+    if (paletteCount && !get(out.palette.data(), usize(paletteCount) * sizeof(i32))) return false;
+    if (!get(&triCount, sizeof(triCount))) return false;
+    if ((triCount == 0) != (paletteCount == 0) || (triCount != 0 && triCount != indexCount / 3)) return false;
+    out.triPalette.resize(triCount);
+    if (triCount && !get(out.triPalette.data(), triCount)) return false;
+    for (const u8 index : out.triPalette)
+        if (index >= paletteCount) return false;   // corrupt
+
+    // What the build saw of each material slot: the entry is stale if a slot's .ocmat says something else now.
+    u32 sigCount = 0;
+    if (!get(&sigCount, sizeof(sigCount)) || sigCount > 4096) return false;
+    out.slotSig.resize(sigCount);
+    for (GameContent::CollisionMesh::SlotSig& sig : out.slotSig) {
+        u32 len = 0;
+        u8 collides = 1;
+        if (!get(&len, sizeof(len)) || len > 4096) return false;
+        sig.slot.resize(len);
+        if (len && !get(sig.slot.data(), len)) return false;
+        if (!get(&collides, sizeof(collides)) || !get(&sig.surface, sizeof(sig.surface))) return false;
+        sig.collides = collides != 0;
+    }
+    for (const GameContent::CollisionMesh::SlotSig& sig : out.slotSig) {
+        if (slots.collides && slots.collides(sig.slot) != sig.collides) return false;
+        if (slots.surface && slots.surface(sig.slot) != sig.surface) return false;
+    }
     return true;
 }
 
@@ -1022,6 +1084,22 @@ bool writeCollisionCacheFile(const std::string& cachePath, const std::string& me
         put(mesh.indices.data(), mesh.indices.size() * sizeof(u32));
         put(&mesh.lod, sizeof(mesh.lod));
         put(&mesh.errorCm, sizeof(mesh.errorCm));
+        const u32 paletteCount = static_cast<u32>(mesh.palette.size());
+        const u32 triCount = static_cast<u32>(mesh.triPalette.size());
+        put(&paletteCount, sizeof(paletteCount));
+        put(mesh.palette.data(), usize(paletteCount) * sizeof(i32));
+        put(&triCount, sizeof(triCount));
+        put(mesh.triPalette.data(), triCount);
+        const u32 sigCount = static_cast<u32>(mesh.slotSig.size());
+        put(&sigCount, sizeof(sigCount));
+        for (const GameContent::CollisionMesh::SlotSig& sig : mesh.slotSig) {
+            const u32 len = static_cast<u32>(sig.slot.size());
+            const u8 collides = sig.collides ? 1 : 0;
+            put(&len, sizeof(len));
+            put(sig.slot.data(), len);
+            put(&collides, sizeof(collides));
+            put(&sig.surface, sizeof(sig.surface));
+        }
         if (!out) { if (why) *why = "write failed for " + tmpPath; return false; }
     }
     std::filesystem::rename(tmpPath, cachePath, ec);
@@ -1029,18 +1107,124 @@ bool writeCollisionCacheFile(const std::string& cachePath, const std::string& me
     return true;
 }
 
+// One kept run of a mesh's index buffer and the physical surface its material slot names (0 = none).
+struct SurfaceRun {
+    i32 surface = 0;
+    usize begin = 0, end = 0;   // [begin, end) into the mesh's LOD 0 indices
+};
+
+// The surface-carrying build (see buildCollisionMesh): triangles grouped by surface, each group welded and simplified on its
+// own with its borders locked, the groups joined and welded once more across their seams.
+std::unique_ptr<GameContent::CollisionMesh> buildSurfaceCollisionMesh(const fmt::OcMeshData& md, const std::string& path,
+                                                                     const std::vector<SurfaceRun>& runs) {
+    using CollisionMesh = GameContent::CollisionMesh;
+    constexpr usize kMaxPalette = 32;   // Jolt packs a mesh triangle's material index in 5 bits
+
+    // The distinct surfaces in first-appearance order. Past the 31st, a surface joins surface 0 so the palette stays at 32.
+    std::vector<i32> distinct;
+    for (const SurfaceRun& r : runs)
+        if (std::find(distinct.begin(), distinct.end(), r.surface) == distinct.end()) distinct.push_back(r.surface);
+    const bool overflow = distinct.size() > kMaxPalette;
+    if (overflow)
+        AVER_WARN("[Collision] {}: {} distinct physical surfaces, but a mesh holds {}; the rest are treated as no surface",
+                  path, distinct.size(), kMaxPalette);
+    const auto effective = [&](i32 surface) -> i32 {
+        if (!overflow) return surface;
+        const auto rank = std::find(distinct.begin(), distinct.end(), surface) - distinct.begin();
+        return rank < static_cast<std::ptrdiff_t>(kMaxPalette - 1) ? surface : 0;
+    };
+
+    struct Group { i32 surface = 0; std::vector<u32> indices; };
+    std::vector<Group> groups;
+    for (const SurfaceRun& r : runs) {
+        const i32 s = effective(r.surface);
+        auto it = std::find_if(groups.begin(), groups.end(), [s](const Group& g) { return g.surface == s; });
+        if (it == groups.end()) { groups.push_back(Group{s, {}}); it = groups.end() - 1; }
+        it->indices.insert(it->indices.end(), md.indices.begin() + static_cast<std::ptrdiff_t>(r.begin),
+                           md.indices.begin() + static_cast<std::ptrdiff_t>(r.end));
+    }
+
+    std::vector<f32> allPositions;
+    std::vector<u32> allIndices;
+    std::vector<u8> triPalette;
+    std::vector<i32> palette;
+    f32 worstErrorCm = 0.0f;
+    for (const Group& g : groups) {
+        std::vector<f32> compactPositions;
+        std::vector<u32> compactIndices;
+        if (!compactTriangles(md.positions.data(), md.vertexCount(), g.indices.data(), g.indices.size(),
+                              compactPositions, compactIndices))
+            continue;   // every triangle of this surface degenerate or out of range
+        std::vector<f32> weldedPositions;
+        std::vector<u32> weldedIndices;
+        weldByPosition(compactPositions, compactIndices, weldedPositions, weldedIndices);
+
+        f32 errorCm = 0.0f;
+        const std::vector<u32> simplified = simplifyCollisionMesh(weldedPositions, weldedIndices, path, errorCm);
+        std::vector<f32> groupPositions;
+        std::vector<u32> groupIndices;
+        if (!compactTriangles(weldedPositions.data(), static_cast<u32>(weldedPositions.size() / 3),
+                              simplified.data(), simplified.size(), groupPositions, groupIndices)) {
+            groupPositions = std::move(weldedPositions);   // simplification left nothing: keep the group as it was
+            groupIndices = std::move(weldedIndices);
+            errorCm = 0.0f;
+        }
+
+        const u8 paletteIndex = static_cast<u8>(palette.size());
+        palette.push_back(g.surface);
+        const u32 base = static_cast<u32>(allPositions.size() / 3);
+        allPositions.insert(allPositions.end(), groupPositions.begin(), groupPositions.end());
+        for (const u32 k : groupIndices) allIndices.push_back(base + k);
+        triPalette.insert(triPalette.end(), groupIndices.size() / 3, paletteIndex);
+        worstErrorCm = std::max(worstErrorCm, errorCm);
+    }
+    if (allIndices.size() < 3) return nullptr;
+
+    // The vertices along a seam are separate copies after the per-group passes, at identical positions: one weld joins them.
+    auto mesh = std::make_unique<CollisionMesh>();
+    weldByPosition(allPositions, allIndices, mesh->positions, mesh->indices);
+    mesh->lod = 0;
+    mesh->errorCm = worstErrorCm;
+    mesh->palette = std::move(palette);
+    mesh->triPalette = std::move(triPalette);
+
+    AVER_INFO("[Collision] {}: meshoptimizer, {} surface group(s) ({} tris from {} at LOD 0, {:.1f} cm error)", path,
+              mesh->palette.size(), mesh->indices.size() / 3, md.indices.size() / 3, mesh->errorCm);
+    return mesh;
+}
+
+// What the build saw of each (distinct, named) material slot, for the disk cache's check against the .ocmat files.
+void fillSlotSig(GameContent::CollisionMesh& mesh, const fmt::OcMeshData& md, const SlotQuery& slots) {
+    for (const std::string& name : md.materialSlots) {
+        if (name.empty()) continue;
+        const bool seen = std::any_of(mesh.slotSig.begin(), mesh.slotSig.end(),
+                                      [&](const GameContent::CollisionMesh::SlotSig& s) { return s.slot == name; });
+        if (seen) continue;
+        GameContent::CollisionMesh::SlotSig sig;
+        sig.slot = name;
+        sig.collides = !slots.collides || slots.collides(name);
+        sig.surface = slots.surface ? slots.surface(name) : 0;
+        mesh.slotSig.push_back(std::move(sig));
+    }
+}
+
 // Collision geometry for a parsed mesh: slots `collides` rejects are dropped, then the cheaper of a
 // meshoptimizer simplification and a Trifactor LOD is kept. Touches no GameContent state (prefetch
 // workers run it).
+//
+// A mesh whose kept slots NAME PHYSICAL SURFACES takes buildSurfaceCollisionMesh instead (groups per surface, Trifactor not
+// used: its coarser levels know nothing of material slots). A mesh that names none is built exactly as it was before
+// surfaces existed.
 std::unique_ptr<GameContent::CollisionMesh> buildCollisionMesh(const fmt::OcMeshData& md, const std::string& path,
-                                                              const std::function<bool(const std::string&)>& collides) {
+                                                              const SlotQuery& slots) {
     using CollisionMesh = GameContent::CollisionMesh;
     const u32 vertexCount = md.vertexCount();
     if (vertexCount == 0 || md.indices.size() < 3) return nullptr;
 
     // Drop cut-out/translucent material slots from LOD 0 submeshes.
-    bool anyDropped = false;
+    bool anyDropped = false, anySurface = false;
     std::vector<u32> keptIndices;
+    std::vector<SurfaceRun> runs;
     if (md.submeshes.empty()) {
         keptIndices = md.indices;   // no submesh table: keep all
     } else {
@@ -1052,7 +1236,10 @@ std::unique_ptr<GameContent::CollisionMesh> buildCollisionMesh(const fmt::OcMesh
             if (end > md.indices.size()) continue;   // malformed range
             const std::string slotName =
                 sm.materialSlot < md.materialSlots.size() ? md.materialSlots[sm.materialSlot] : std::string();
-            if (!collides(slotName)) { anyDropped = true; ++droppedSlots; continue; }
+            if (slots.collides && !slots.collides(slotName)) { anyDropped = true; ++droppedSlots; continue; }
+            const i32 surface = slots.surface ? slots.surface(slotName) : 0;
+            if (surface != 0) anySurface = true;
+            runs.push_back(SurfaceRun{surface, usize(sm.indexStart), end});
             keptIndices.insert(keptIndices.end(),
                                md.indices.begin() + static_cast<std::ptrdiff_t>(sm.indexStart),
                                md.indices.begin() + static_cast<std::ptrdiff_t>(end));
@@ -1066,6 +1253,12 @@ std::unique_ptr<GameContent::CollisionMesh> buildCollisionMesh(const fmt::OcMesh
         AVER_WARN("[Collision] {}: every material slot is alpha-masked or translucent; no collision "
                   "geometry", path);
         return nullptr;
+    }
+
+    if (anySurface) {
+        auto surfaced = buildSurfaceCollisionMesh(md, path, runs);
+        if (surfaced) fillSlotSig(*surfaced, md, slots);
+        return surfaced;
     }
 
     // Compact: keep only referenced vertices, remove degenerate triangles.
@@ -1136,6 +1329,7 @@ std::unique_ptr<GameContent::CollisionMesh> buildCollisionMesh(const fmt::OcMesh
     }
     if (mesh->indices.size() < 3) return nullptr;
 
+    fillSlotSig(*mesh, md, slots);
     AVER_INFO("[Collision] {}: {} ({} tris from {} at LOD 0, {:.1f} cm error)", path, wonBy,
               mesh->indices.size() / 3, md.indices.size() / 3, mesh->errorCm);
     return mesh;
@@ -1161,6 +1355,27 @@ bool slotCollidesFromFiles(const std::string& binariesDir, const std::string& co
         return d.alphaMode != pbr::AlphaMode::Mask && d.alphaMode != pbr::AlphaMode::Blend;
     }
     return true;
+}
+
+// The physical surface a material slot carries: its .ocmat PHYSSURFACE hashed to the id the physics registry and a raycast
+// use, or 0 for a slot with no material file or no such record. The same file lookup as slotCollidesFromFiles (thread-free).
+i32 slotSurfaceFromFiles(const std::string& binariesDir, const std::string& contentDir, const std::string& name) {
+    if (name.empty() || contentDir.empty()) return 0;
+    const std::string candidates[3] = {
+        binariesDir + AVER_PATH_SEP "Materials" AVER_PATH_SEP + name + ".ocmat",
+        contentDir + AVER_PATH_SEP "Materials" AVER_PATH_SEP + name + ".ocmat",
+        contentDir + AVER_PATH_SEP + name,
+    };
+    for (const std::string& path : candidates) {
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) continue;
+        pbr::MaterialDesc d;
+        fmt::OcMatExtras extras;
+        std::string err;
+        if (!fmt::loadOcmat(path, d, &extras, &err)) return 0;
+        return aver::surfaceIdFromName(extras.physSurface);
+    }
+    return 0;
 }
 
 // The texture files a surface material names, as resolveMaterialTexture would load them: paths under
@@ -1240,6 +1455,7 @@ struct GameContent::MeshPrefetch {
     u64 tick = 0;
     std::mutex slotMutex;
     std::unordered_map<std::string, bool> slotCollidesMemo;   // material slot -> collides (workers)
+    std::unordered_map<std::string, i32> slotSurfaceMemo;     // material slot -> physical surface id (workers)
 #  if AVER_MODULE_PBR
     std::unordered_map<std::string, std::vector<std::pair<std::string, assets::TextureUsage>>> slotTexturesMemo;
 
@@ -1268,6 +1484,22 @@ struct GameContent::MeshPrefetch {
 #  else
         (void)j; (void)slot;
         return true;
+#  endif
+    }
+
+    i32 slotSurface(const Job& j, const std::string& slot) {
+#  if AVER_MODULE_PBR
+        {
+            std::lock_guard<std::mutex> l(slotMutex);
+            if (const auto it = slotSurfaceMemo.find(slot); it != slotSurfaceMemo.end()) return it->second;
+        }
+        const i32 surface = slotSurfaceFromFiles(j.binariesDir, j.contentDir, slot);
+        std::lock_guard<std::mutex> l(slotMutex);
+        slotSurfaceMemo.emplace(slot, surface);
+        return surface;
+#  else
+        (void)j; (void)slot;
+        return 0;
 #  endif
     }
 
@@ -1316,28 +1548,41 @@ struct GameContent::MeshPrefetch {
                 if (!ec) {
                     const std::string cachePath = collisionCachePathFor(j->projectDir, j->path, size, mtime);
                     auto c = std::make_unique<CollisionMesh>();
-                    if (!cachePath.empty() && readCollisionCacheFile(cachePath, j->path, size, mtime, *c)) {
+                    // What each material slot says (collides, physical surface): the build's input, and the check a cached
+                    // entry must still pass.
+                    SlotQuery slots;
+                    slots.collides = [this, &j](const std::string& slot) { return slotCollides(*j, slot); };
+                    slots.surface = [this, &j](const std::string& slot) { return slotSurface(*j, slot); };
+                    if (!cachePath.empty() && readCollisionCacheFile(cachePath, j->path, size, mtime, *c, slots)) {
                         j->collision = std::move(c);
+                        j->collision->shapeSource = shapeSourceKey(j->path, size, mtime, *j->collision);
                     } else {
                         // First visit: build it here and fill the disk cache.
-                        j->collision = buildCollisionMesh(j->md, j->path, [this, &j](const std::string& slot) {
-                            return slotCollides(*j, slot);
-                        });
+                        j->collision = buildCollisionMesh(j->md, j->path, slots);
                         if (j->collision && !cachePath.empty()) {
                             std::string why;
                             if (!writeCollisionCacheFile(cachePath, j->path, size, mtime, *j->collision, &why))
                                 AVER_WARN("[Collision] {}: could not write the disk cache: {}", j->path, why);
                         }
                         j->collisionBuilt = true;
+                        if (j->collision) j->collision->shapeSource = shapeSourceKey(j->path, size, mtime, *j->collision);
                     }
                 }
             }
 #  if AVER_MODULE_PHYSICS
             // The mesh's shared collision shape (its BVH build is the costly part of a placement's body).
-            if (j->collision && j->collision->indices.size() >= 3 && aver_phys_ready())
-                j->shape = aver_phys_create_mesh_shape(
-                    j->collision->positions.data(), static_cast<i32>(j->collision->positions.size() / 3),
-                    reinterpret_cast<const i32*>(j->collision->indices.data()), static_cast<i32>(j->collision->indices.size()));
+            if (j->collision && j->collision->indices.size() >= 3 && aver_phys_ready()) {
+                const CollisionMesh& cm = *j->collision;
+                // A mesh with physical surfaces becomes a shape with a palette, so a ray on any placement reports the slot's.
+                j->shape = !cm.palette.empty() && cm.triPalette.size() == cm.indices.size() / 3
+                    ? aver_phys_shape_mesh(cm.positions.data(), static_cast<i32>(cm.positions.size() / 3),
+                                           reinterpret_cast<const i32*>(cm.indices.data()), static_cast<i32>(cm.indices.size()),
+                                           cm.triPalette.data(), cm.palette.data(), static_cast<i32>(cm.palette.size()),
+                                           nullptr, nullptr, 0)
+                    : aver::world::createMeshShapeFromSource(cm.positions.data(), static_cast<i32>(cm.positions.size() / 3),
+                                                             reinterpret_cast<const i32*>(cm.indices.data()), static_cast<i32>(cm.indices.size()),
+                                                             aver::world::physicsShapeCacheDir(j->projectDir), cm.shapeSource);
+            }
 #  endif
 #  if AVER_MODULE_PBR
             // Its materials' textures, so binding them on the main thread is a GPU copy, not a disk read.
@@ -1505,9 +1750,15 @@ bool GameContent::collisionSlotCollides(const std::string& slotName) {
     if (!d) return true;   // no authored .ocmat: cannot resolve
     return d->alphaMode != pbr::AlphaMode::Mask && d->alphaMode != pbr::AlphaMode::Blend;
 }
+
+i32 GameContent::collisionSlotSurface(const std::string& slotName) {
+    // The file, always: the loaded material desc carries no PHYSSURFACE (it is not a rendering property).
+    return slotSurfaceFromFiles(project_.binariesDir(), project_.contentDir(), slotName);
+}
 #else
-// Every slot collides (no PBR module).
+// Every slot collides (no PBR module), and none names a surface.
 bool GameContent::collisionSlotCollides(const std::string&) { return true; }
+i32 GameContent::collisionSlotSurface(const std::string&) { return 0; }
 #endif
 
 // Filters and simplifies collision geometry from meshes with multiple per-material submeshes.
@@ -1529,11 +1780,15 @@ const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
     const bool canCache = !statEc && !project_.dir.empty();
     const std::string cachePath = canCache ? collisionCachePathFor(project_.dir, path, srcSize, srcMtime)
                                            : std::string();
+    SlotQuery slots;
+    slots.collides = [this](const std::string& slotName) { return collisionSlotCollides(slotName); };
+    slots.surface = [this](const std::string& slotName) { return collisionSlotSurface(slotName); };
     if (!cachePath.empty()) {
         auto cached = std::make_unique<CollisionMesh>();
-        if (readCollisionCacheFile(cachePath, path, srcSize, srcMtime, *cached)) {
+        if (readCollisionCacheFile(cachePath, path, srcSize, srcMtime, *cached, slots)) {
             ++collisionCacheHits_;
             AVER_INFO("[Collision] {}: {} tris from the disk cache", path, cached->indices.size() / 3);
+            cached->shapeSource = shapeSourceKey(path, srcSize, srcMtime, *cached);
             slot = std::move(cached);
             return slot.get();
         }
@@ -1545,7 +1800,7 @@ const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
         AVER_WARN("[Collision] {}", why);
         return nullptr;
     }
-    auto mesh = buildCollisionMesh(md, path, [this](const std::string& slotName) { return collisionSlotCollides(slotName); });
+    auto mesh = buildCollisionMesh(md, path, slots);
     if (!mesh) return nullptr;
 
     if (!cachePath.empty()) {
@@ -1554,6 +1809,7 @@ const GameContent::CollisionMesh* GameContent::collisionMeshFor(u64 id) {
             AVER_WARN("[Collision] {}: could not write the disk cache: {}", path, saveWhy);
     }
 
+    if (canCache) mesh->shapeSource = shapeSourceKey(path, srcSize, srcMtime, *mesh);
     slot = std::move(mesh);
     return slot.get();
 }

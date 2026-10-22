@@ -551,7 +551,7 @@ static std::map<std::string, Signature> csSignatures(const std::string& text, co
 // names every header that together makes up the C side of one C# file.
 struct Abi {
     const char* label;
-    const char* headers[12];  // NULL-terminated; most rows name exactly one
+    const char* headers[24];  // NULL-terminated; most rows name exactly one (the physics row was full at 12)
     const char* apiMacro;
     const char* csFile;
     const char* prefix;
@@ -570,16 +570,42 @@ static const Abi kAbis[] = {
       "modules/physics/include/aver/physics/physics_queries_abi.h",
       "modules/physics/include/aver/physics/physics_body_ext_abi.h",
       "modules/physics/include/aver/physics/physics_softbody_abi.h",
+      "modules/physics/include/aver/physics/physics_surface_abi.h",
+      "modules/physics/include/aver/physics/physics_hair_abi.h",
+      "modules/physics/include/aver/physics/physics_terrain_abi.h",
+      "modules/physics/include/aver/physics/physics_state_abi.h",
+      "modules/physics/include/aver/physics/physics_debug_abi.h",
+      "modules/physics/include/aver/physics/physics_softbody_ext_abi.h",
+      "modules/physics/include/aver/physics/physics_shape_builder_abi.h",
+      "modules/physics/include/aver/physics/physics_world_abi.h",
       nullptr},
      "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.cs", "aver_phys_"},
 
     {"physics vehicle v2 ABI",
      {"modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", nullptr},
      "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.VehicleExt.cs", "aver_phys_vehicle_"},
+
+    {"physics surface ABI",
+     {"modules/physics/include/aver/physics/physics_surface_abi.h", nullptr},
+     "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.Surface.cs", "aver_phys_"},
+
+    {"physics hair ABI",
+     {"modules/physics/include/aver/physics/physics_hair_abi.h", nullptr},
+     "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.Hair.cs", "aver_phys_hair_"},
+    {"physics terrain ABI",
+     {"modules/physics/include/aver/physics/physics_terrain_abi.h", nullptr},
+     "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.Terrain.cs", "aver_phys_"},
+    {"physics shape builder ABI",
+     {"modules/physics/include/aver/physics/physics_shape_builder_abi.h", nullptr},
+     "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.ShapeBuilder.cs", "aver_phys_"},
     {"audio ABI",
      {"modules/audio.abi/include/aver/audio/audio_abi.h", nullptr},
      "AVER_AUDIO_API", "scripting/csharp/Aver.Framework/Audio.cs", "aver_audio_"},
     {"soft field ABI", {"modules/framework/include/aver/framework/framework_softfield_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/SoftFieldNative.cs", "aver_fw_softfield_"},
+
+    {"soft shape ABI", {"modules/framework/include/aver/framework/framework_softshape_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/FwSoftShape.cs", "aver_fw_softshape_"},
+    // wave 11 SOFTBODY_HAIR phase I: the hair relay (names, parameter names and types against FwHair.cs).
+    {"hair ABI", {"modules/framework/include/aver/framework/framework_hair_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/FwHair.cs", "aver_fw_hair_"},
 };
 
 // A DOCUMENTED, DELIBERATE DIVERGENCE. Parameter NAMES are compared because types alone cannot see
@@ -661,6 +687,14 @@ static const MemberWaiver kMemberWaivers[] = {
 // mirror for them. Naming the exception here rather than pattern-matching "*count" keeps it honest:
 // a group that grows a second unmirrored constant fails until someone decides that is intended.
 static const Group kGroups[] = {
+    {"physics heightfield params", "modules/physics/include/aver/physics/physics_terrain_abi.h", "AVER_PHYS_HP_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "HpIndex", ""},
+    {"physics heightfield flags", "modules/physics/include/aver/physics/physics_terrain_abi.h", "AVER_PHYS_HF_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "HeightfieldFlags", ""},
+    {"physics heightfield info floats", "modules/physics/include/aver/physics/physics_terrain_abi.h", "AVER_PHYS_HFI_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "TerrainFloat", ""},
+    {"physics heightfield info ints", "modules/physics/include/aver/physics/physics_terrain_abi.h", "AVER_PHYS_HII_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "TerrainInt", ""},
     {"framework class flags", "modules/framework/include/aver/framework/framework_abi.h",   "AVER_FW_CLASS_",
      "scripting/csharp/Aver.Framework/Enums.cs", "ClassFlags",  ""},
     {"framework tick groups", "modules/framework/include/aver/framework/framework_abi.h",   "AVER_FW_TICK_",
@@ -750,6 +784,12 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Physics/Enums.cs",   "GroundState", ""},
     {"physics ragdoll modes", "modules/physics/include/aver/physics/physics_ragdoll_abi.h", "AVER_PHYS_RAGDOLL_",
      "scripting/csharp/Aver.Physics/Ragdoll.cs", "RagdollMode", ""},
+    // wave 11 WORLD_STATE_DEBUG phase C: the debug renderer's overlay flags and colour schemes against Aver.Physics/PhysicsDebugDraw.cs.
+    // Both groups share AVER_PHYS_DBG_, so the flags row drops the SCHEME_ names; the scheme enum carries Count on both sides.
+    {"physics debug flags",   "modules/physics/include/aver/physics/physics_debug_abi.h",   "AVER_PHYS_DBG_",
+     "scripting/csharp/Aver.Physics/PhysicsDebugDraw.cs", "PhysicsDebugFlags", "", "", "", "scheme"},
+    {"physics debug schemes", "modules/physics/include/aver/physics/physics_debug_abi.h",   "AVER_PHYS_DBG_SCHEME_",
+     "scripting/csharp/Aver.Physics/PhysicsDebugDraw.cs", "PhysicsDebugScheme", ""},
     {"PBR texture slots",     "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_TEX_",
      "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrTextureSlot", "count"},
     {"PBR alpha modes",       "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_ALPHA_",
@@ -788,6 +828,9 @@ static const Group kGroups[] = {
     // wave 9: the sun / fog / sky-light override keys a script sets (framework_worldfx_abi.h).
     {"world effects keys",    "modules/framework/include/aver/framework/framework_worldfx_abi.h", "AVER_FW_ENV_",
      "scripting/csharp/Aver.Framework/WorldFxNative.cs", "WorldEnvKey", ""},
+    // wave 11 SOFTBODY_HAIR: the collider shapes a script passes (framework_hair_abi.h) against HairColliderShape in Hair.cs.
+    {"hair collider shapes",  "modules/framework/include/aver/framework/framework_hair_abi.h", "AVER_FW_HAIR_SHAPE_",
+     "scripting/csharp/Aver.Framework/Hair.cs", "HairColliderShape", ""},
 
     // wave 10 VEHICLES: the index blocks of physics_vehicle_ext_abi.h against Aver.Physics/VehicleExt.cs (each block has a _COUNT, mirrored by a Count member).
     {"vehicle kinds", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VEH_KIND_",
@@ -816,6 +859,50 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Physics/VehicleExt.cs", "VwsiIndex", ""},
     {"vehicle physics events", "modules/physics/include/aver/physics/physics_vehicle_ext_abi.h", "AVER_PHYS_VEV_",
      "scripting/csharp/Aver.Physics/VehicleExt.cs", "VehiclePhysicsEventKind", ""},
+
+    // wave 11 SOFTBODY_HAIR: the index blocks of physics_hair_abi.h against Aver.Physics/Hair.cs (each block has a _COUNT, mirrored by a Count member).
+    {"hair settings block",    "modules/physics/include/aver/physics/physics_hair_abi.h", "AVER_PHYS_HAIRP_",
+     "scripting/csharp/Aver.Physics/Hair.cs", "HairParam", ""},
+    {"hair material block",    "modules/physics/include/aver/physics/physics_hair_abi.h", "AVER_PHYS_HAIRM_",
+     "scripting/csharp/Aver.Physics/Hair.cs", "HairMaterialParam", ""},
+    {"hair settings info ints", "modules/physics/include/aver/physics/physics_hair_abi.h", "AVER_PHYS_HAIRI_",
+     "scripting/csharp/Aver.Physics/Hair.cs", "HairInfoInt", ""},
+    {"hair settings info floats", "modules/physics/include/aver/physics/physics_hair_abi.h", "AVER_PHYS_HAIRF_",
+     "scripting/csharp/Aver.Physics/Hair.cs", "HairInfoFloat", ""},
+    {"hair update info ints",  "modules/physics/include/aver/physics/physics_hair_abi.h", "AVER_PHYS_HAIRUI_",
+     "scripting/csharp/Aver.Physics/Hair.cs", "HairUpdateInt", ""},
+    {"hair update info floats", "modules/physics/include/aver/physics/physics_hair_abi.h", "AVER_PHYS_HAIRUF_",
+     "scripting/csharp/Aver.Physics/Hair.cs", "HairUpdateFloat", ""},
+    {"hair host buffer types", "modules/physics/include/aver/physics/physics_hair_abi.h", "AVER_PHYS_CB_",
+     "scripting/csharp/Aver.Physics/Hair.cs", "HairBufferType", ""},
+    {"hair host bind roles",   "modules/physics/include/aver/physics/physics_hair_abi.h", "AVER_PHYS_BIND_",
+     "scripting/csharp/Aver.Physics/Hair.cs", "HairBindRole", ""},
+    // wave 11 WORLD_STATE_DEBUG phase D: physics_state_abi.h against Aver.Physics/PhysicsSnapshot.cs. AVER_PHYS_RESTORE_ holds both the option bit and the six results: each row drops the other's names.
+    {"physics snapshot parts", "modules/physics/include/aver/physics/physics_state_abi.h", "AVER_PHYS_SNAP_",
+     "scripting/csharp/Aver.Physics/PhysicsSnapshot.cs", "SnapshotParts", ""},
+    {"physics restore options", "modules/physics/include/aver/physics/physics_state_abi.h", "AVER_PHYS_RESTORE_",
+     "scripting/csharp/Aver.Physics/PhysicsSnapshot.cs", "RestoreOptions", "", "", "", "ok,bad_handle,bad_header,build_mismatch,topology,corrupt"},
+    {"physics restore results", "modules/physics/include/aver/physics/physics_state_abi.h", "AVER_PHYS_RESTORE_",
+     "scripting/csharp/Aver.Physics/PhysicsSnapshot.cs", "RestoreResult", "strict"},
+    {"physics snapshot info slots", "modules/physics/include/aver/physics/physics_state_abi.h", "AVER_PHYS_SI_",
+     "scripting/csharp/Aver.Physics/PhysicsSnapshot.cs", "SnapshotInfoSlot", ""},
+
+    // wave 11 SHAPES_MATERIALS: the hit / contact detail blocks of physics_surface_abi.h against ShapeEnums.cs (each has a _COUNT, mirrored by Count).
+    {"surface hit floats", "modules/physics/include/aver/physics/physics_surface_abi.h", "AVER_PHYS_HITF_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "HitFloat", ""},
+    {"surface hit ints", "modules/physics/include/aver/physics/physics_surface_abi.h", "AVER_PHYS_HITI_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "HitInt", ""},
+    {"surface contact floats", "modules/physics/include/aver/physics/physics_surface_abi.h", "AVER_PHYS_CONF_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "ContactFloat", ""},
+    {"surface contact ints", "modules/physics/include/aver/physics/physics_surface_abi.h", "AVER_PHYS_CONI_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "ContactInt", ""},
+    // wave 11 SOFTBODY_HAIR: the extra-parameter block, the pair modes and the buoyancy flags of physics_softbody_ext_abi.h against Aver.Physics/SoftBodyExt.cs (the block's _COUNT is mirrored by SoftBodyExtParam.Count).
+    {"soft body ext params", "modules/physics/include/aver/physics/physics_softbody_ext_abi.h", "AVER_PHYS_SBX_P_",
+     "scripting/csharp/Aver.Physics/SoftBodyExt.cs", "SoftBodyExtParam", ""},
+    {"soft body pair modes", "modules/physics/include/aver/physics/physics_softbody_ext_abi.h", "AVER_PHYS_SBX_PAIR_",
+     "scripting/csharp/Aver.Physics/SoftBodyExt.cs", "SoftPairMode", ""},
+    {"soft body buoyancy flags", "modules/physics/include/aver/physics/physics_softbody_ext_abi.h", "AVER_PHYS_SBX_BUOY_",
+     "scripting/csharp/Aver.Physics/SoftBodyExt.cs", "BuoyFlags", ""},
     // wave 10: gameplay cameras (framework_camera_abi.h). The one-shot rig bits (APPLYPRESET, CUT) belong to the system and have no C# member.
     {"camera modes",          "modules/framework/include/aver/framework/framework_camera_abi.h", "AVER_FW_CAM_MODE_",
      "scripting/csharp/Aver.Framework/CameraRig.cs", "CameraMode", ""},
@@ -827,6 +914,31 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Framework/CameraRig.cs", "CameraModifierKind", ""},
     {"camera rig flags",      "modules/framework/include/aver/framework/framework_camera_abi.h", "AVER_FW_CAM_RIG_",
      "scripting/csharp/Aver.Framework/CameraRig.cs", "CameraRigFlags", "", "", "", "applypreset,cut"},
+
+    // wave 11 SHAPES_MATERIALS: the shape builder's constants and index blocks (physics_shape_builder_abi.h) against Aver.Physics/ShapeEnums.cs.
+    {"shape types", "modules/physics/include/aver/physics/physics_shape_builder_abi.h", "AVER_PHYS_SHAPE_TYPE_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "ShapeType", ""},
+    {"compound kinds", "modules/physics/include/aver/physics/physics_shape_builder_abi.h", "AVER_PHYS_COMPOUND_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "CompoundKind", ""},
+    {"shape parameter block", "modules/physics/include/aver/physics/physics_shape_builder_abi.h", "AVER_PHYS_SP_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "SpIndex", ""},
+    {"shape info floats", "modules/physics/include/aver/physics/physics_shape_builder_abi.h", "AVER_PHYS_SI_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "SiIndex", ""},
+    {"shape info ints", "modules/physics/include/aver/physics/physics_shape_builder_abi.h", "AVER_PHYS_SII_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "SiiIndex", ""},
+    {"body parameter block", "modules/physics/include/aver/physics/physics_shape_builder_abi.h", "AVER_PHYS_BP_",
+     "scripting/csharp/Aver.Physics/ShapeEnums.cs", "BpIndex", ""},
+    // wave 11 WORLD_STATE_DEBUG: the world configuration header (physics_world_abi.h) against Aver.Physics. Each block has a _COUNT, mirrored by a Count member.
+    {"physics world settings", "modules/physics/include/aver/physics/physics_world_abi.h", "AVER_PHYS_WS_",
+     "scripting/csharp/Aver.Physics/PhysicsSettings.cs", "PhysicsSetting", ""},
+    {"physics world limits", "modules/physics/include/aver/physics/physics_world_abi.h", "AVER_PHYS_CF_",
+     "scripting/csharp/Aver.Physics/PhysicsSettings.cs", "PhysicsConfigKey", ""},
+    {"physics precision", "modules/physics/include/aver/physics/physics_world_abi.h", "AVER_PHYS_PRECISION_",
+     "scripting/csharp/Aver.Physics/PhysicsSettings.cs", "PhysicsPrecision", ""},
+    {"physics build flags", "modules/physics/include/aver/physics/physics_world_abi.h", "AVER_PHYS_BUILD_",
+     "scripting/csharp/Aver.Physics/PhysicsSettings.cs", "PhysicsBuildFlags", ""},
+    {"physics world stats", "modules/physics/include/aver/physics/physics_world_abi.h", "AVER_PHYS_ST_",
+     "scripting/csharp/Aver.Physics/PhysicsStats.cs", "PhysicsStat", ""},
 };
 
 int main() {

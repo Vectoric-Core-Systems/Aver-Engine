@@ -3,13 +3,20 @@
 
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
+#include "aver/formats/OcShape.hpp"
+#include "aver/game/ColliderShapes.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
 
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_joints_abi.h"
 #include "aver/physics/physics_layers_abi.h"
+#include "aver/physics/physics_shape_builder_abi.h"
 #include "aver/physics/physics_shapes_abi.h"
+#include "aver/physics/physics_surface_abi.h"
+
+#include <cmath>
+#include <string>
 
 namespace aver::editor {
 namespace {
@@ -97,25 +104,94 @@ int32_t createSensorBody(const scene::CRigidBody& rb, const Vec3& p, scene::Enti
     }
 }
 
+// The body a CollisionShape component's .ocshape describes, at the entity's WORLD pose, scaled by its world scale unless the component
+// says not to. The motion type, mass, layer and sensor flag come from the CRigidBody; the shape (any shape, sensors included) from the
+// asset. 0 with a warning when the asset cannot be read, parsed or built -- the caller then falls back to the CRigidBody's own shape.
+// The shape handle is KEPT in cs.outShape (released by clearPhysicsFromScene) so Details can read it back while Play runs.
+int32_t createShapeAssetBody(const scene::CRigidBody& rb, const Transform& xf, scene::Entity e, game::CCollisionShape& cs) {
+    const game::ColliderShapeHost& host = game::colliderShapeHost();
+    std::string text, label, why;
+    if (!host.readShape || !host.readShape(cs.asset, text, label)) {
+        AVER_WARN("[PhysicsSceneSync] entity {}'s CollisionShape asset cannot be read; the Rigid Body's own shape is used", e);
+        return 0;
+    }
+    fmt::OcShapeData spec;
+    if (!fmt::parseOcShape(text, spec, &why)) {
+        AVER_WARN("[PhysicsSceneSync] entity {}: {} does not parse: {}", e, label, why);
+        return 0;
+    }
+    int32_t shape = 0;
+    if (!game::buildColliderShape(spec, host.meshes, shape, why)) {
+        AVER_WARN("[PhysicsSceneSync] entity {}: {} did not build: {}", e, label, why);
+        return 0;
+    }
+    if (!(cs.flags & game::kCollisionShapeIgnoreScale)) {
+        const Vec3& s = xf.scale;
+        if (std::fabs(s.x - 1.0f) > 1.0e-4f || std::fabs(s.y - 1.0f) > 1.0e-4f || std::fabs(s.z - 1.0f) > 1.0e-4f) {
+            const float scale[3] = {s.x, s.y, s.z};
+            const int32_t scaled = aver_phys_shape_scaled(shape, scale);
+            aver_phys_shape_release(shape);   // the scaled shape holds the inner one
+            if (!scaled) {
+                AVER_WARN("[PhysicsSceneSync] entity {}: {} cannot take the entity's scale ({}, {}, {})", e, label, s.x, s.y, s.z);
+                return 0;
+            }
+            shape = scaled;
+        }
+    }
+
+    const bool sensor = rb.isSensor != 0;
+    const float massKg = rb.massKg > 0.0f ? rb.massKg : spec.massKg;
+    const float p[AVER_PHYS_BP_COUNT] = {static_cast<float>(rb.collisionLayer), sensor ? 1.0f : 0.0f, 0.0f, 0.0f, 1.0f};
+    const float origin[3] = {xf.position.x, xf.position.y, xf.position.z};
+    const float rot[4] = {xf.rotation.x, xf.rotation.y, xf.rotation.z, xf.rotation.w};
+    // A sensor is a static body in the moving half of the broadphase (what aver_phys_add_sensor_* make).
+    const int32_t body = aver_phys_body_from_shape(shape, origin, rot, sensor ? AVER_PHYS_MOTION_STATIC : rb.motionType, massKg, p, AVER_PHYS_BP_COUNT);
+    if (!body) {
+        AVER_WARN("[PhysicsSceneSync] entity {}: {} built but the body was refused (physics error {})", e, label, aver_phys_last_error());
+        aver_phys_shape_release(shape);
+        return 0;
+    }
+    cs.outShape = shape;
+    float info[AVER_PHYS_SI_COUNT] = {};
+    if (aver_phys_shape_info(shape, info, AVER_PHYS_SI_COUNT, nullptr, 0)) {
+        cs.outVolumeCm3 = info[AVER_PHYS_SI_VOLUME_CM3];
+        cs.outMassKg = info[AVER_PHYS_SI_MASS_KG];
+    }
+    float bodyMass = 0.0f;
+    if (aver_phys_body_mass(body, &bodyMass) && bodyMass > 0.0f) cs.outMassKg = bodyMass;
+    return body;
+}
+
 // Creates the body a CRigidBody names, at the entity's WORLD position and rotation, and applies
 // every material/motion property the ABI exposes a live setter for. Returns 0 if nothing was
 // created (an unrecognised shape, or a sensor shape the ABI does not offer).
-int32_t createRigidBody(const scene::CRigidBody& rb, const Transform& xf, scene::Entity e) {
+// A CollisionShape component beside it (`cs`) supplies the shape from an .ocshape and the body's surface label.
+int32_t createRigidBody(const scene::CRigidBody& rb, const Transform& xf, scene::Entity e, game::CCollisionShape* cs) {
     const bool sensor = rb.isSensor != 0;
-    const int32_t body = sensor ? createSensorBody(rb, xf.position, e) : createShapeBody(rb, xf.position, e);
+    int32_t body = 0;
+    bool fromShape = false;
+    if (cs && cs->asset != 0) {
+        body = createShapeAssetBody(rb, xf, e, *cs);
+        fromShape = body != 0;
+    }
+    if (!body) body = sensor ? createSensorBody(rb, xf.position, e) : createShapeBody(rb, xf.position, e);
     if (!body) return 0;
 
     // No shape creator above takes a rotation -- every one places its shape axis-aligned at
     // (cx,cy,cz) -- so an authored rotation is always a second call, the same way this ABI treats
     // position and rotation as two separate setters everywhere else (aver_phys_body_set_position /
-    // aver_phys_body_set_rotation).
-    const Quat& q = xf.rotation;
-    aver_phys_body_set_rotation(body, q.x, q.y, q.z, q.w);
-    aver_phys_body_set_layer(body, rb.collisionLayer);
+    // aver_phys_body_set_rotation). A body made from a shape took its pose and layer at creation.
+    if (!fromShape) {
+        const Quat& q = xf.rotation;
+        aver_phys_body_set_rotation(body, q.x, q.y, q.z, q.w);
+        aver_phys_body_set_layer(body, rb.collisionLayer);
+    }
     // Stamps the body with the entity that owns it, so a raycast or an overlap can report not
     // just THAT something was hit but WHAT (physics_abi.h's own words on aver_phys_set_entity).
     // Harmless on a sensor too: overlap reporting benefits from it exactly as a solid hit does.
     aver_phys_set_entity(body, static_cast<int32_t>(e));
+    // The surface label (identity for queries; the leaf materials of a shape carry friction). set_entity preserves it either way.
+    if (cs && cs->surface != 0) aver_phys_body_set_surface(body, cs->surface, 0);
 
     if (sensor) return body;   // a sensor has no material or motion type to set
 
@@ -123,8 +199,8 @@ int32_t createRigidBody(const scene::CRigidBody& rb, const Transform& xf, scene:
     // (KINEMATIC, and a STATIC sphere): setting a body's own motion type to what it already is
     // costs nothing (physics_abi.h documents it as an ordinary setter, not a one-time choice) and
     // this way createShapeBody's own STATIC/DYNAMIC split never has to be re-derived here to know
-    // which cases still need correcting.
-    aver_phys_body_set_motion_type(body, rb.motionType);
+    // which cases still need correcting. A body made from a shape was created with its motion type.
+    if (!fromShape) aver_phys_body_set_motion_type(body, rb.motionType);
     aver_phys_body_set_friction(body, scene::rigidBodyFriction(rb));
     aver_phys_body_set_restitution(body, rb.restitution);
     aver_phys_body_set_gravity_factor(body, scene::rigidBodyGravityFactor(rb));
@@ -260,6 +336,7 @@ void syncPhysicsFromScene() {
     }
     scene::World& world = scene::World::instance();
     const u32 n = world.count();
+    const u32 shapeType = game::collisionShapeType(world);   // 0 when CollisionShape was never registered
 
     // ---- pass 1: bodies ----
     for (u32 i = 0; i < n; ++i) {
@@ -267,7 +344,8 @@ void syncPhysicsFromScene() {
         if (world.destroyPending(e)) continue;
         auto* rb = world.component<scene::CRigidBody>(e, scene::kComponentRigidBody);
         if (!rb || rb->body != 0) continue;   // no component, or already synced once
-        rb->body = createRigidBody(*rb, worldTransformOf(world, e), e);
+        auto* cs = shapeType ? world.component<game::CCollisionShape>(e, shapeType) : nullptr;
+        rb->body = createRigidBody(*rb, worldTransformOf(world, e), e, cs);
     }
 
     // ---- pass 2: joints ----
@@ -283,6 +361,7 @@ void syncPhysicsFromScene() {
 void clearPhysicsFromScene() {
     scene::World& world = scene::World::instance();
     const u32 n = world.count();
+    const u32 shapeType = game::collisionShapeType(world);
 
     // Joints before bodies, mirroring "bodies before joints" on the way up: a joint referencing a
     // body this loop is about to remove must be torn down while both its ends still exist, not
@@ -300,6 +379,14 @@ void clearPhysicsFromScene() {
         if (!rb || rb->body == 0) continue;
         aver_phys_remove_body(rb->body);
         rb->body = 0;
+        // The shape a CollisionShape kept for Details to read back lives as long as the body did.
+        auto* cs = shapeType ? world.component<game::CCollisionShape>(e, shapeType) : nullptr;
+        if (cs && cs->outShape != 0) {
+            aver_phys_shape_release(cs->outShape);
+            cs->outShape = 0;
+            cs->outMassKg = 0.0f;
+            cs->outVolumeCm3 = 0.0f;
+        }
     }
 }
 

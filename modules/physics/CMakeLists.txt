@@ -9,6 +9,13 @@
 # stops being a decision about this module and becomes a decision about the whole tree.
 add_library(Aver.Physics SHARED
   src/PhysicsWorld.cpp
+  # SHAPES_MATERIALS (physics_shape_builder_abi.h): the generic shape-handle table, every shape builder, bodies from shapes,
+  # the one mesh builder and the surface materials shapes carry. PhysicsShapes.cpp and PhysicsWorld.cpp build through them.
+  src/PhysicsShapeTable.cpp
+  src/PhysicsShapeBuilder.cpp
+  src/PhysicsShapeBody.cpp
+  src/PhysicsMeshBuild.cpp
+  src/PhysicsSurface.cpp
   # Buoyancy. Its own translation units rather than more of PhysicsWorld.cpp because it is the first
   # thing in this module that a caller can turn ON AND OFF -- everything else here is unconditional
   # machinery -- and because keeping the Jolt call in one small file makes it obvious that
@@ -42,14 +49,42 @@ add_library(Aver.Physics SHARED
   src/PhysicsRagdoll.cpp
   # Shape casts, overlaps, multi-hit rays and point queries (physics_queries_abi.h).
   src/PhysicsQueries.cpp
+
+  # Heightfields v2 (physics_terrain_abi.h): the one heightfield builder aver_phys_add_heightfield now goes through, holes, cell
+  # surfaces and in-place edits (SHAPES_MATERIALS phase C). PhysicsWorld.cpp calls makeHeightfield from here.
+  src/PhysicsTerrain.cpp
+  # World configuration (physics_world_abi.h): the settings table, pending/active config, rebuild, job-system choice,
+  # and the fixed step's timing, kept update errors and stats.
+  src/PhysicsConfig.cpp
+  src/PhysicsStats.cpp
   # Per-body extras: locked axes, continuous collision, breakable joints' events (physics_body_ext_abi.h).
   src/PhysicsBodyExt.cpp
   # Builder-style soft bodies for cloth and destruction (physics_softbody_abi.h): the registry that lets
   # a dent be written in place and a tear rebuild the body under the same handle, the soft-body contact
   # listener (impacts), and wind and drag evaluated in the fixed loop beside buoyancy.
   src/PhysicsSoftBody.cpp
-  src/SoftBodyAero.cpp)
+  # WORLD_STATE_DEBUG (wave 11): profiler bridge, debug renderer, state recording, shape cache, determinism hooks.
+  # (PhysicsConfig.cpp and PhysicsStats.cpp are the phase A entries.) PhysicsConfig/PhysicsStats call into the others, so all are needed.
+  src/PhysicsProfile.cpp
+  src/PhysicsDebug.cpp
+  src/PhysicsState.cpp
+  src/PhysicsStateEngine.cpp
+  src/PhysicsShapeCache.cpp
+  src/PhysicsDeterminism.cpp
+  src/SoftBodyAero.cpp
+  # The rest of Jolt's soft bodies (physics_softbody_ext_abi.h): volumes, long range attachments, Cosserat rods, Jolt's constraint
+  # generator, pressure, grab and release, contact policy, sensors, a collision group; and soft-body buoyancy (Jolt has none).
+  src/PhysicsSoftBodyExt.cpp
+  src/SoftBodyFluid.cpp)
 
+# Strand hair on Jolt 5.6's Hair (physics_hair_abi.h, wave 11): the settings builder, instances and update, the compute host adapter (Jolt's ComputeSystem over a
+# function table the host installs) and the wind kernel compiled as C++ for Jolt's CPU backend. Needs JPH_USE_CPU_COMPUTE, which modules/physics.jolt sets.
+# HairWindWrapper.cpp includes shaders/hair/AverHairWind.hlsl, so the one wind source runs as C++ here and as HLSL in the render module.
+target_sources(Aver.Physics PRIVATE
+  src/PhysicsHair.cpp
+  src/PhysicsHairSettings.cpp
+  src/HairComputeHost.cpp
+  src/HairWindWrapper.cpp)
 target_include_directories(Aver.Physics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Physics PUBLIC cxx_std_20)
 target_link_libraries(Aver.Physics PUBLIC Aver.Core PRIVATE Aver.Physics.Jolt)

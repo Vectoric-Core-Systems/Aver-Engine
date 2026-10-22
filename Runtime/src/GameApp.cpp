@@ -2,11 +2,13 @@
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
-#include "aver/game/GameSystemsWiring.hpp"
+#include "aver/game/GameSystemsWiring.hpp"   // [wave11/shapes] Content/Physics/Surfaces.ocsurf -> the physics surface registry
+#include "aver/game/PhysicalSurfaces.hpp"   // [wave11/shapes] Content/Physics/Surfaces.ocsurf -> the physics surface registry
 #include "aver/game/SoftBodyEffects.hpp"
 #include "aver/game/SoftBodySave.hpp"   // soft-body damage on the $State channel
 #include "aver/game/GameUiInput.hpp"
 #include "aver/game/GameUiText.hpp"
+#include "aver/game/PhysicalSurfaces.hpp"
 #include "aver/game/LevelDecals.hpp"
 #include "aver/game/LevelLights.hpp"   // [wave3/level-instances]
 #include "aver/game/SequenceHost.hpp"   // [wave5/sequencer] hooks, level bindings, the ABI provider
@@ -721,6 +723,19 @@ void GameApp::attachSkinning(Engine& e) {
 #if AVER_MODULE_RENDER_SOFTBODY
     // After skinning in the feature list; draw-only, reads softbody::softBodySystem().pieces().
     {
+#if AVER_MODULE_RENDER_HAIR && AVER_MODULE_HAIR_SCENE
+        {
+            // The compute host must be installed BEFORE any groom is built; the scene feature is registered after skinning like SoftBodyScene.
+            auto hs = std::make_unique<render::HairScene>();
+            if (hs->init(*e.device())) {
+                hair::hairSystem().installComputeHost(&hs->hostTable());
+                hair::hairSystem().setPathResolver(&GameContent::resolveAnimAsset, &content_);
+                hs->setMaterialBinder([](i32 token, pbr::MaterialHandle h, void* u) { static_cast<GameContent*>(u)->bindSurfaceMaterial(token, h); }, &content_);
+                e.device()->addRenderFeature(hs.get());
+                hairScene_ = std::move(hs);
+            }
+        }
+#endif
         auto sb = std::make_unique<render::SoftBodyScene>();
         if (sb->init(*dev)) {
             sb->setResolvers(&GameContent::resolveSceneMesh, &GameContent::resolveAnimAsset, &content_);
@@ -1196,6 +1211,11 @@ void GameApp::openProject(Engine& e) {
         AVER_ERROR("[Game] could not open '{}': {}", path, err);
         return;   // deliberately not fatal; see the header
     }
+#if AVER_MODULE_PHYSICS
+    // The project's solver settings and world limits, before any level builds a body (PhysicsProjectApply.hpp); an
+    // empty world is rebuilt for the limits.
+    game::configureProjectPhysics(project_, "Game");
+#endif
     AVER_INFO("[Game] project '{}'  content={}  startMap='{}'",
               project_.name, project_.contentDir(),
               project_.startMap.empty() ? "<none>" : project_.startMap);
@@ -1212,6 +1232,9 @@ void GameApp::openProject(Engine& e) {
 #endif
     // Load order is critical: index -> meshes -> levels
     content_.adopt(project_);
+    // The project's physical-surface table, before any level builds a shape: a material slot's PHYSSURFACE, a landscape layer or a
+    // script names a surface and the registry already holds the authored friction, restitution and tag (a missing file is silent).
+    game::loadPhysicalSurfaces(project_.contentDir());
 #if AVER_MODULE_SCENE
     // [wave5/ik-retarget] adopt cleared AnimSystem; the project's .ocretarget assets say which clips play on which rig.
     anim::animSystem().registerRetargets(content_.idsWithExtension(".ocretarget"));
@@ -2262,6 +2285,9 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     if (skinnedScene_) skinnedScene_->update(scene::World::instance(), anim::animSystem(), *e.device());
 #if AVER_MODULE_RENDER_SOFTBODY
     if (softBodyScene_) softBodyScene_->update(scene::World::instance(), *e.device());
+#if AVER_MODULE_RENDER_HAIR
+    if (hairScene_) hairScene_->update(scene::World::instance(), *e.device());   // after HairSystem::tick (tickSoftBodies) above
+#endif
 #endif
 
 #if AVER_MODULE_SCENE
@@ -2412,6 +2438,9 @@ void GameApp::onRender(Engine& e) {
 #endif
 #if AVER_MODULE_RENDER_SOFTBODY
         opts.softBodies = softBodyScene_.get();   // GameRender.cpp substitutes the simulated mesh for a soft entity
+#if AVER_MODULE_RENDER_HAIR
+        opts.hair = hairScene_.get();
+#endif
 #endif
         drawWorld(*dev, viewProj_, content_, drawStats_, ms, skinnedScene_.get(), opts);
     }
@@ -2495,6 +2524,9 @@ void GameApp::onShutdown(Engine& e) {
 #if AVER_MODULE_SCENE
     // Reverse order: skinning first, last to come out. Removed before device.
 #if AVER_MODULE_RENDER_SOFTBODY
+#if AVER_MODULE_RENDER_HAIR
+    if (dev && hairScene_) dev->removeRenderFeature(hairScene_.get());   // registered after the soft bodies, removed before them
+#endif
     if (dev && softBodyScene_) dev->removeRenderFeature(softBodyScene_.get());   // registered after skinning, removed before it
 #endif
     if (dev && skinnedScene_) dev->removeRenderFeature(skinnedScene_.get());
@@ -2514,6 +2546,9 @@ void GameApp::onShutdown(Engine& e) {
 #endif
 #if AVER_MODULE_SCENE
 #if AVER_MODULE_RENDER_SOFTBODY
+#if AVER_MODULE_RENDER_HAIR
+    hairScene_.reset();
+#endif
     softBodyScene_.reset();
 #endif
     skinnedScene_.reset();

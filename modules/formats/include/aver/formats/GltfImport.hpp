@@ -45,6 +45,19 @@ struct GltfPlacement {
     std::string name;                        // the node's name, or the mesh's when the node had none
 };
 
+// STRAND CURVES a glTF carried: its LINES and LINE_STRIP primitives, which the triangle path skips. Consecutive segments that share an endpoint
+// form one strand; the glTF material index of the primitive becomes the strand material (0 when the primitive named none). Positions are
+// already through toEngine and through the node's whole world transform (translation included: a curve has no placement of its own).
+// A custom per-vertex scalar attribute `_WIDTH` (metres in the file) becomes pointWidthCm. docs/HAIR.md; Aver.Hair turns this into an .ochair.
+struct ImportedHairCurves {
+    std::vector<f32> points;            // engine space, centimetres, 3 per point
+    std::vector<u32> strandStart;       // strandCount + 1 entries; empty when the file had no curves
+    std::vector<u32> material;          // per strand
+    std::vector<f32> pointWidthCm;      // per point; empty when no primitive carried _WIDTH
+    usize strandCount() const { return strandStart.empty() ? 0 : strandStart.size() - 1; }
+    usize pointCount() const { return points.size() / 3; }
+};
+
 struct GltfImportResult {
     // One per glTF mesh, submeshes per primitive -- the first `meshes[]` of the file at their own
     // indices -- followed by one extra copy per further basis a mesh was instanced with (see
@@ -113,6 +126,9 @@ struct GltfImportResult {
     std::vector<i32> animationSkeleton;
     // Cameras the file carried, engine space. Empty for glTF.
     std::vector<ImportedCamera> cameras;
+
+    // Strand curves (LINES / LINE_STRIP primitives), engine space. Empty when the file had none.
+    ImportedHairCurves hairCurves;
 
     std::vector<std::string> unsupported;    // features the file used and this importer cannot carry
 };

@@ -6,6 +6,10 @@
 #include "PhysicsInternal.hpp"  // the world and its handle tables, shared with the sibling ABI files
 #include "PhysicsCharacterInternal.hpp"  // character-vs-character, the character body filter, defaults
 #include "SoftBodyAero.hpp"  // builder soft bodies: aero, impact listener, registry hooks (PhysicsSoftBody.cpp)
+#include "PhysicsConfig.hpp"  // settings table, pending world config, job system choice (physics_world_abi.h)
+#include "PhysicsShapeTable.hpp"  // the generic shape-handle table and the shared shape builders
+#include "PhysicsMeshBuild.hpp"   // the one triangle-mesh builder
+#include "PhysicsSurface.hpp"     // leaf materials: the combine hook, the contact detail, the body label
 
 #include "aver/core/Log.hpp"
 // The shared error vocabulary. findBody records the reason a handle lookup failed; aver_phys_last_error
@@ -22,6 +26,7 @@
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/CollidePointResult.h>
+#include <Jolt/Physics/Collision/CollisionDispatch.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Collision/RayCast.h>
@@ -42,6 +47,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -71,6 +77,12 @@ void traceImpl(const char* fmt, ...) {
 #ifdef JPH_ENABLE_ASSERTS
 // Logs a Jolt assertion and asks it to break into the debugger.
 bool assertFailedImpl(const char* expr, const char* msg, const char* file, JPH::uint line) {
+    // An update error (contacts, bodies-pairs or constraints over the limit) is reported once through the stats and the log
+    // (PhysicsConfig.cpp); Jolt's assert on it would stop a Debug run on every such step.
+    if (expr && std::strstr(expr, "EPhysicsUpdateError::None")) return false;
+    // Jolt checks its own eigen decomposition to 1e-6 in float. A soft body whose vertices are all but collinear (a rope hanging
+    // straight, or a piece cut from one) has an inertia tensor too close to rank one to pass; the inertia of a soft body is not used.
+    if (file && std::strstr(file, "EigenValueSymmetric.h")) return false;
     AVER_ERROR("[Physics] assert: {}:{} ({}) {}", file, line, expr, msg ? msg : "");
     return true;   // break into the debugger
 }
@@ -99,6 +111,7 @@ public:
         e.point  = fromJolt(manifold.GetWorldSpaceContactPointOn1(0));
         // fromJoltUnit, not fromJoltDir: a unit normal must not be scaled.
         e.normal = fromJoltUnit(manifold.mWorldSpaceNormal);
+        fillContactDetail(a, b, manifold, ioSettings, e);   // sub-shapes, surfaces, closing speed, the friction applied
         g_world->contacts.push_back(e);
         vehicleOnContact(ha, hb, a, b, e.point, e.normal);   // a chassis hit, noted for vehicleStepEnd's IMPACT event
     }
@@ -158,28 +171,22 @@ EventListener g_listener;
 // Jolt's global registration is process-wide, not per-world, so it is done once and never undone.
 bool g_joltStarted = false;
 
-// ---- Shared mesh shapes -----------------------------------------------------------------------
-// aver_phys_create_mesh_shape's own table: a SEPARATE handle space from World::bodies/nextHandle
-// above, file-local because only the three functions next to aver_phys_add_mesh need to see it.
-// JPH::Ref keeps a shape alive for as long as either this table or a body's own ScaledShape (built
-// from it in aver_phys_add_mesh_shape_body) still points at it -- Jolt's ordinary refcounting, no
-// extra bookkeeping needed here for that half.
-//
-// NOT CLEARED ON aver_phys_shutdown, unlike the body/character tables: a JPH::Shape is bare geometry
-// with no reference to the JPH::PhysicsSystem it happens to get used in, so it does not go stale the
-// way a body handle or a water-volume override (see aver_phys_shutdown's own comment on that leak)
-// would if carried into a freshly created world. A shape handle a caller forgot to release simply
-// outlives the world that last used it, exactly as it would if nothing had been shut down at all.
-// Guarded: level streaming builds shapes on worker threads.
-std::mutex g_meshShapesMutex;
-std::unordered_map<int32_t, JPH::Ref<JPH::Shape>> g_meshShapes;
-int32_t g_nextMeshShape = 1;
+// Jolt has no collision function for a mesh, a heightfield or a plane against each other (a dynamic mesh body on a
+// mesh floor, a kinematic plane): its stand-in asserts in Debug, which this module's assert handler turns into a
+// breakpoint. Those pairs get a quiet no-op instead -- they simply do not collide, which is what Release always did.
+void quietCollide(const JPH::Shape*, const JPH::Shape*, JPH::Vec3Arg, JPH::Vec3Arg, JPH::Mat44Arg, JPH::Mat44Arg,
+                  const JPH::SubShapeIDCreator&, const JPH::SubShapeIDCreator&, const JPH::CollideShapeSettings&,
+                  JPH::CollideShapeCollector&, const JPH::ShapeFilter&) {}
+void quietCast(const JPH::ShapeCast&, const JPH::ShapeCastSettings&, const JPH::Shape*, JPH::Vec3Arg, const JPH::ShapeFilter&,
+               JPH::Mat44Arg, const JPH::SubShapeIDCreator&, const JPH::SubShapeIDCreator&, JPH::CastShapeCollector&) {}
 
-// The shape behind a handle, or null.
-JPH::Ref<JPH::Shape> meshShapeFor(int32_t h) {
-    std::lock_guard<std::mutex> lock(g_meshShapesMutex);
-    const auto it = g_meshShapes.find(h);
-    return it == g_meshShapes.end() ? JPH::Ref<JPH::Shape>() : it->second;
+void registerQuietPairs() {
+    const JPH::EShapeSubType flat[] = {JPH::EShapeSubType::Mesh, JPH::EShapeSubType::HeightField, JPH::EShapeSubType::Plane};
+    for (const JPH::EShapeSubType a : flat)
+        for (const JPH::EShapeSubType b : flat) {
+            JPH::CollisionDispatch::sRegisterCollideShape(a, b, quietCollide);
+            JPH::CollisionDispatch::sRegisterCastShape(a, b, quietCast);
+        }
 }
 
 } // namespace
@@ -282,35 +289,36 @@ int32_t aver_phys_init(void) {
         JPH_IF_ENABLE_ASSERTS(JPH::AssertFailed = assertFailedImpl;)
         JPH::Factory::sInstance = new JPH::Factory();
         JPH::RegisterTypes();
+        registerQuietPairs();
         g_joltStarted = true;
     }
 
     g_world = std::make_unique<World>();
     g_bodyLimitWarned = false;
     // 10 MB scratch for a frame's contacts, and one worker per core bar the main thread and one spare.
-    g_world->temp = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024);
-    const int workers = static_cast<int>(std::thread::hardware_concurrency()) - 2;
-    g_world->jobs = std::make_unique<JPH::JobSystemThreadPool>(
-        JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, workers > 1 ? workers : 1);
+    const WorldConfig cfg = pendingWorldConfig();   // PhysicsConfig.cpp: its defaults are the literals that stood here
+    int workers = 0;
+    g_world->temp = std::make_unique<TrackingTempAllocator>(cfg.tempBytes);
+    g_world->jobs = makeJobSystem(cfg.threads, workers);
 
     // THE CEILINGS, fixed for the world's lifetime: Jolt sizes its body arrays and broad phase here
     // and refuses bodies past them. 4,096 bodies was a room-sized budget; a city level (NeonDistrict:
     // thousands of colliding placements, 169 terrain chunks, a box per building) ran into it and lost
     // over half its collision. 65,536 costs a few MB of bookkeeping. Pairs and contact constraints are
     // only spent on MOVING bodies touching things, which a static-heavy level has few of.
-    // (PHYSICS.MAXBODIES in a project manifest is still not read -- see GameTick.hpp.)
-    constexpr JPH::uint kMaxBodies = 65536;
-    constexpr JPH::uint kMaxBodyPairs = 65536;
-    constexpr JPH::uint kMaxContactConstraints = 16384;
-    g_world->system.Init(kMaxBodies, 0, kMaxBodyPairs, kMaxContactConstraints,
+    // (PHYSICS.MAXBODIES / MAXBODYPAIRS / MAXCONTACTS / TEMPALLOCMB / THREADS: PhysicsConfig.cpp's pending config.)
+    g_world->system.Init(cfg.maxBodies, 0, cfg.maxBodyPairs, cfg.maxContacts,
                          g_world->bpLayers, g_world->objVsBp, g_world->objPair);
+    noteActiveConfig(cfg, workers);
+    applySettingsToWorld();   // the solver settings table: Jolt's own defaults until a caller sets one
     g_world->system.SetContactListener(&g_listener);
+    installSurfaceCombine(g_world->system);   // leaf materials first, Jolt's own rules after; the body values until a surface exists
     softbody::installListener();
     // One g downward on the engine's up axis.
     g_world->system.SetGravity(toJoltDir(Vec3(0.0f, 0.0f, -980.0f)));
     AVER_INFO("[Physics] Jolt {}.{}.{} started ({} worker threads, {:.4f}s fixed step)",
               JPH_VERSION_MAJOR, JPH_VERSION_MINOR, JPH_VERSION_PATCH,
-              workers > 1 ? workers : 1, g_world->fixedStep);
+              workers, g_world->fixedStep);
     return 1;
 }
 
@@ -326,6 +334,10 @@ void aver_phys_shutdown(void) {
     // system as a step listener and holds a raw pointer to its chassis, which the loop below is about to
     // destroy. The chassis bodies themselves are ordinary entries in `bodies` and go with the rest.
     destroyAllVehicles();
+
+    // Strand hair holds buffers on the installed compute host and Refs the PhysicsSystem is about to outlive: it goes with the vehicles, before the world, and
+    // forgets the installed host. Declared in SoftBodyAero.hpp, defined in PhysicsHair.cpp; safe with no world.
+    aver::physics::detail::hairDestroyAll();
     clearCharacterStairSettings();
     if (!g_world) return;
     // Characters hold refs into the system; drop them before the system goes.
@@ -351,6 +363,7 @@ void aver_phys_shutdown(void) {
     phys::water::waterSampler().fn.store(nullptr);
     phys::water::surfaceSampler().fn.store(nullptr);
     g_world->surfaceSampled.clear();
+    shapeTableOnShutdown();   // mutable-compound owners are body handles, which restart with the next world
     g_world.reset();
     AVER_INFO("[Physics] stopped");
 }
@@ -386,6 +399,7 @@ int32_t aver_phys_set_fixed_step(float seconds) {
 // Advances the simulation in fixed steps, clamping catch-up. Returns how many steps ran.
 int32_t aver_phys_step(float dt) {
     if (!g_world || dt <= 0.0f) return 0;
+    const StepCallScope callScope;   // stats: steps, contacts and wall time of this call (PhysicsStats.cpp)
     // Clear last call's events first, so what the caller drains describes only the steps run here.
     {
         std::lock_guard<std::mutex> lock(g_world->eventMutex);
@@ -401,6 +415,7 @@ int32_t aver_phys_step(float dt) {
     int32_t steps = 0;
     while (g_world->accumulator >= g_world->fixedStep) {
         g_world->accumulator -= g_world->fixedStep;
+        AVER_PHYS_SCOPE("FixedStep");   // the root of the profiler tree for this fixed step
         // Characters are integrated before the solver so their swept motion sees this step's world.
         // CharacterVirtual does not integrate gravity itself, so only the vertical component of its
         // velocity is managed here; the horizontal part belongs to whoever is driving it.
@@ -416,6 +431,7 @@ int32_t aver_phys_step(float dt) {
         // steps is still its own, relative to what it stands on. Doing it here rather than in each
         // driver is also what keeps it right when one frame runs several fixed steps.
         for (auto& [h, ch] : g_world->characters) {
+            AVER_PHYS_SCOPE("Characters");   // one per character, so the row's call count is the character count
             const auto gIt = g_world->characterGravity.find(h);
             const JPH::Vec3 gravity = g_world->system.GetGravity() *
                                       (gIt != g_world->characterGravity.end() ? gIt->second : 1.0f);
@@ -476,6 +492,7 @@ int32_t aver_phys_step(float dt) {
         // file-local to this translation unit on purpose, so the table is handed the two questions
         // it needs answered rather than the struct that answers them. See Buoyancy.hpp's own note.
         {
+            AVER_PHYS_SCOPE("Buoyancy");
             auto find = [](int32_t h) -> const JPH::BodyID* { return findBody(h); };
             auto each = [](const std::function<void(int32_t, const JPH::BodyID&)>& fn) {
                 for (const auto& [handle, id] : g_world->bodies) fn(handle, id);
@@ -484,13 +501,16 @@ int32_t aver_phys_step(float dt) {
                                                  g_world->system.GetGravity(), g_world->fixedStep);
         }
         // Wind and drag on builder soft bodies, and the velocity cache impacts read: before the solver, like buoyancy.
-        softbody::onStepBegin(g_world->fixedStep);
+        { AVER_PHYS_SCOPE("SoftBodyBegin"); softbody::onStepBegin(g_world->fixedStep); }
         // Vehicle driver aids, aero and the manual clutch, from last step's slip: before the solver, like buoyancy.
-        vehicleStepBegin(g_world->fixedStep);
-        g_world->system.Update(g_world->fixedStep, 1, g_world->temp.get(), g_world->jobs.get());
+        { AVER_PHYS_SCOPE("VehicleStepBegin"); vehicleStepBegin(g_world->fixedStep); }
+        stepWorldOnce();   // system.Update with the collisionSteps setting; keeps the update error and times the step (PhysicsStats.cpp)
         // Vehicle telemetry and events, read back while Jolt's state is this step's.
-        vehicleStepEnd(g_world->fixedStep);
-        afterStepJoints();
+        { AVER_PHYS_SCOPE("VehicleStepEnd"); vehicleStepEnd(g_world->fixedStep); }
+        // Soft-body sensor enter and exit events, from the sets the contact listener filled during Update.
+        softbody::onStepEnd(g_world->fixedStep);
+        { AVER_PHYS_SCOPE("JointBreakChecks"); afterStepJoints(); }
+        stateAfterFixedStep();   // the hash log: one "step hash" line per fixed step while it is open (physics_state_abi.h)
         ++steps;
     }
     return steps;
@@ -548,6 +568,7 @@ int32_t aver_phys_remove_body(int32_t body) {
     g_world->byId.erase(*id);
     g_world->sensors.erase(body);
     g_world->bodies.erase(body);
+    ++g_world->topologyEpoch;   // informational: aver_phys_snapshot_info, aver_phys_stats slot 25 (constraint changes bump it via noteConstraintTopology)
     return 1;
 }
 
@@ -771,16 +792,17 @@ int32_t aver_phys_character_grounded(int32_t ch) {
 // Stamps a body OR character handle with a scene entity id. Backed by Jolt's own per-body user-data
 // field (Body::SetUserData / CharacterVirtual::SetUserData -- the latter already propagates to the
 // character's inner body, so one call covers both halves of a character). Returns 0 for a dead handle.
+// The entity is the LOW 32 bits; the upper half is the body's surface label (aver_phys_body_set_surface) and survives.
 int32_t aver_phys_set_entity(int32_t handle, int32_t entity) {
     if (!g_world) return 0;
     if (const JPH::BodyID* id = findBody(handle)) {
         JPH::BodyLockWrite lock(g_world->system.GetBodyLockInterface(), *id);
         if (!lock.Succeeded()) return 0;
-        lock.GetBody().SetUserData(static_cast<JPH::uint64>(entity));
+        lock.GetBody().SetUserData(withEntityHalf(lock.GetBody().GetUserData(), entity));
         return 1;
     }
     if (JPH::CharacterVirtual* ch = findCharacter(handle)) {
-        ch->SetUserData(static_cast<JPH::uint64>(entity));
+        ch->SetUserData(withEntityHalf(ch->GetUserData(), entity));
         return 1;
     }
     return 0;
@@ -839,104 +861,39 @@ int32_t aver_phys_raycast(float ox, float oy, float oz, float dx, float dy, floa
 int32_t aver_phys_add_convex_hull(const float* pts, int32_t count, float cx, float cy, float cz,
                                   int32_t dynamic, float massKg) {
     if (!g_world || !pts || count < 4) return 0;   // fewer than four points has no volume
-    JPH::Array<JPH::Vec3> hull;
-    hull.reserve(static_cast<size_t>(count));
-    for (int32_t i = 0; i < count; ++i)
-        hull.push_back(toJolt(Vec3(pts[i*3+0], pts[i*3+1], pts[i*3+2])));
-
-    JPH::ConvexHullShapeSettings s(hull);
-    s.SetEmbedded();
-    auto res = s.Create();
-    if (res.HasError()) { AVER_WARN("[Physics] convex hull: {}", res.GetError().c_str()); return 0; }
-    return addBody(res.Get(), Vec3(cx, cy, cz), dynamic != 0, massKg);
+    const JPH::Ref<JPH::Shape> shape = makeHull(pts, count, 0, ShapeParams{});
+    if (!shape) return 0;
+    return addBody(shape.GetPtr(), Vec3(cx, cy, cz), dynamic != 0, massKg);
 }
 
 // Adds a static triangle mesh, skipping triangles with out-of-range indices. Returns its handle, or 0.
 int32_t aver_phys_add_mesh(const float* verts, int32_t vertexCount,
                            const int32_t* indices, int32_t indexCount,
                            float cx, float cy, float cz) {
-    if (!g_world || !verts || !indices || vertexCount < 3 || indexCount < 3) return 0;
-
-    JPH::VertexList vlist;
-    vlist.reserve(static_cast<size_t>(vertexCount));
-    for (int32_t i = 0; i < vertexCount; ++i) {
-        const JPH::Vec3 v = toJolt(Vec3(verts[i*3+0], verts[i*3+1], verts[i*3+2]));
-        vlist.push_back(JPH::Float3(v.GetX(), v.GetY(), v.GetZ()));
-    }
-
-    JPH::IndexedTriangleList tris;
-    tris.reserve(static_cast<size_t>(indexCount / 3));
-    for (int32_t i = 0; i + 2 < indexCount; i += 3) {
-        const JPH::uint32 a = static_cast<JPH::uint32>(indices[i]);
-        const JPH::uint32 b = static_cast<JPH::uint32>(indices[i+1]);
-        const JPH::uint32 c = static_cast<JPH::uint32>(indices[i+2]);
-        if (a >= static_cast<JPH::uint32>(vertexCount) ||
-            b >= static_cast<JPH::uint32>(vertexCount) ||
-            c >= static_cast<JPH::uint32>(vertexCount)) {
-            AVER_WARN("[Physics] mesh: index out of range, triangle skipped");
-            continue;
-        }
-        // Winding is reversed: the axis map has determinant -1, which mirrors the mesh.
-        tris.push_back(JPH::IndexedTriangle(a, c, b));
-    }
-    if (tris.empty()) { AVER_WARN("[Physics] mesh: no usable triangles"); return 0; }
-
-    JPH::MeshShapeSettings s(vlist, tris);
-    s.SetEmbedded();
-    auto res = s.Create();
-    if (res.HasError()) { AVER_WARN("[Physics] mesh: {}", res.GetError().c_str()); return 0; }
+    if (!g_world) return 0;
+    const JPH::Ref<JPH::Shape> shape = buildMeshShape(verts, vertexCount, indices, indexCount,
+                                                      nullptr, nullptr, 0, nullptr, ShapeParams{}, "mesh");
+    if (!shape) return 0;
     // Static only: a mesh has no interior, so nothing can resolve a penetration against it.
-    return addBody(res.Get(), Vec3(cx, cy, cz), /*dynamic*/false, 0.0f);
+    return addBody(shape.GetPtr(), Vec3(cx, cy, cz), /*dynamic*/false, 0.0f);
 }
 
 // ---- Shared mesh shapes -----------------------------------------------------------------------------
 
-// Builds the SAME triangle-mesh shape aver_phys_add_mesh builds internally -- identical vertex
-// conversion, identical winding fix, identical out-of-range-index skip -- but hands it back as a
-// handle from g_meshShapes' own counter instead of wrapping it in a body. See physics_abi.h's own
-// comment on why that counter is not World::nextHandle.
+// Builds the SAME triangle-mesh shape aver_phys_add_mesh builds (one builder, PhysicsMeshBuild.cpp) but hands
+// it back as a handle in the generic shape table (PhysicsShapeTable.cpp) instead of wrapping it in a body. See
+// physics_abi.h's own comment on why that counter is not World::nextHandle.
 int32_t aver_phys_create_mesh_shape(const float* verts, int32_t vertexCount,
                                     const int32_t* indices, int32_t indexCount) {
-    if (!g_world || !verts || !indices || vertexCount < 3 || indexCount < 3) return 0;
-
-    JPH::VertexList vlist;
-    vlist.reserve(static_cast<size_t>(vertexCount));
-    for (int32_t i = 0; i < vertexCount; ++i) {
-        const JPH::Vec3 v = toJolt(Vec3(verts[i*3+0], verts[i*3+1], verts[i*3+2]));
-        vlist.push_back(JPH::Float3(v.GetX(), v.GetY(), v.GetZ()));
-    }
-
-    JPH::IndexedTriangleList tris;
-    tris.reserve(static_cast<size_t>(indexCount / 3));
-    for (int32_t i = 0; i + 2 < indexCount; i += 3) {
-        const JPH::uint32 a = static_cast<JPH::uint32>(indices[i]);
-        const JPH::uint32 b = static_cast<JPH::uint32>(indices[i+1]);
-        const JPH::uint32 c = static_cast<JPH::uint32>(indices[i+2]);
-        if (a >= static_cast<JPH::uint32>(vertexCount) ||
-            b >= static_cast<JPH::uint32>(vertexCount) ||
-            c >= static_cast<JPH::uint32>(vertexCount)) {
-            AVER_WARN("[Physics] mesh shape: index out of range, triangle skipped");
-            continue;
-        }
-        // Same mirror as aver_phys_add_mesh: the axis map has determinant -1.
-        tris.push_back(JPH::IndexedTriangle(a, c, b));
-    }
-    if (tris.empty()) { AVER_WARN("[Physics] mesh shape: no usable triangles"); return 0; }
-
-    JPH::MeshShapeSettings s(vlist, tris);
-    s.SetEmbedded();
-    auto res = s.Create();
-    if (res.HasError()) { AVER_WARN("[Physics] mesh shape: {}", res.GetError().c_str()); return 0; }
-
-    std::lock_guard<std::mutex> lock(g_meshShapesMutex);
-    const int32_t h = g_nextMeshShape++;
-    g_meshShapes.emplace(h, res.Get());
-    return h;
+    if (!g_world) return 0;
+    const JPH::Ref<JPH::Shape> shape = buildMeshShape(verts, vertexCount, indices, indexCount,
+                                                      nullptr, nullptr, 0, nullptr, ShapeParams{}, "mesh shape");
+    if (!shape) return 0;
+    return shapeTableAdd(shape);
 }
 
 int32_t aver_phys_release_mesh_shape(int32_t shape) {
-    std::lock_guard<std::mutex> lock(g_meshShapesMutex);
-    return g_meshShapes.erase(shape) ? 1 : 0;
+    return shapeTableRelease(shape) ? 1 : 0;
 }
 
 // Adds a static body wrapping `shape`, scaled through Jolt's Shape::ScaleShape rather than rebaked
@@ -963,7 +920,8 @@ int32_t aver_phys_add_mesh_shape_body(int32_t shape, float px, float py, float p
                                       float qx, float qy, float qz, float qw,
                                       float sx, float sy, float sz) {
     if (!g_world) return 0;
-    const JPH::Ref<JPH::Shape> base = meshShapeFor(shape);
+    // Any handle of the shape table works, not only a mesh (physics_shape_builder_abi.h).
+    const JPH::RefConst<JPH::Shape> base = shapeTableGet(shape);
     if (!base) return 0;
 
     // Shape::ScaleShape also covers the near-unit case (hands back `base` itself, no wrapper) and the
@@ -989,24 +947,13 @@ int32_t aver_phys_add_mesh_shape_body(int32_t shape, float px, float py, float p
 int32_t aver_phys_add_heightfield(const float* samples, int32_t sampleCount, float spacingCm,
                                   float cx, float cy, float cz) {
     if (!g_world || !samples || sampleCount < 2 || spacingCm <= 0.0f) return 0;
-    // Every sample is passed through: Jolt rounds the count UP to a block multiple and pads the
-    // remainder itself with no-collision.
-    const int32_t n = sampleCount;
-
-    JPH::Array<float> heights;
-    heights.reserve(static_cast<size_t>(n) * static_cast<size_t>(n));
-    for (int32_t y = 0; y < n; ++y)
-        for (int32_t x = 0; x < n; ++x)
-            heights.push_back(cmToM(samples[static_cast<size_t>(y) * sampleCount + x]));
-
-    // Built directly in Jolt's Y-up axes rather than through the axis map.
-    JPH::HeightFieldShapeSettings s(heights.data(), JPH::Vec3::sZero(),
-                                    JPH::Vec3(cmToM(spacingCm), 1.0f, cmToM(spacingCm)),
-                                    static_cast<JPH::uint32>(n));
-    s.SetEmbedded();
-    auto res = s.Create();
-    if (res.HasError()) { AVER_WARN("[Physics] heightfield: {}", res.GetError().c_str()); return 0; }
-    return addBody(res.Get(), Vec3(cx, cy, cz), /*dynamic*/false, 0.0f);
+    // The one heightfield builder (PhysicsTerrain.cpp) with an empty parameter block: Jolt's block size, bits per sample and
+    // edge angle, no materials. Every finite sample is passed through (a NaN or FLT_MAX is a hole now); Jolt rounds the
+    // count UP to a block multiple and pads the remainder with no-collision.
+    const JPH::Ref<JPH::Shape> shape = makeHeightfield(samples, sampleCount, sampleCount, spacingCm,
+                                                       nullptr, nullptr, 0, HeightfieldParams{});
+    if (!shape) return 0;
+    return addBody(shape.GetPtr(), Vec3(cx, cy, cz), /*dynamic*/false, 0.0f);
 }
 
 // ---- Sensors --------------------------------------------------------------------------------------

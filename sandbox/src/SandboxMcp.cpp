@@ -757,6 +757,16 @@ bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::str
         outIndexCount = static_cast<u32>(cm->indices.size());
         return true;
     };
+    opt.localTriangleSurfacesFor = [this](u64 meshId, const u8*& outTriPalette, u32& outTriCount,
+                                          const i32*& outSurfaces, u32& outSurfaceCount) {
+        const game::GameContent::CollisionMesh* cm = content_.collisionMeshFor(meshId);
+        if (!cm || cm->palette.empty() || cm->triPalette.size() != cm->indices.size() / 3) return false;
+        outTriPalette = cm->triPalette.data();
+        outTriCount = static_cast<u32>(cm->triPalette.size());
+        outSurfaces = cm->palette.data();
+        outSurfaceCount = static_cast<u32>(cm->palette.size());
+        return true;
+    };
 #if AVER_MODULE_PBR
     opt.bindMaterial = [this](i32 token, const std::string& surface) {
         const pbr::MaterialHandle h = content_.materialForSurface(surface);

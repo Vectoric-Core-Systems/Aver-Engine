@@ -25,6 +25,7 @@
 
 #if AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"
+#  include "aver/game/PhysicsProjectApply.hpp"
 #endif
 #if AVER_WITH_AUDIO_ABI
 #  include "aver/audio/audio_abi.h"
@@ -69,34 +70,11 @@ inline bool startPhysics(const char* hostTag) {
     return false;
 }
 
-// Applies PHYSICS.GRAVITY / PHYSICS.FIXEDSTEP from the manifest.
-//
-// READINESS, CHECKED: both setters are no-ops before aver_phys_init() has succeeded, so this asks
-// aver_phys_ready() itself rather than trusting the caller to have gated on it already -- a project
-// that states physics settings before the world exists is told they will apply once it does, rather
-// than having them silently discarded.
-inline void applyProjectPhysics(const fmt::ProjectDesc& project) {
-    if (aver_phys_ready()) {
-        if (project.hasGravity)
-            aver_phys_set_gravity(project.gravity[0], project.gravity[1], project.gravity[2]);
-        // CHECKED, because the setter refuses a step outside (0, 0.5] and says so by returning 0. A
-        // manifest with a nonsense step must not read as applied.
-        if (project.fixedStep > 0.0f && !aver_phys_set_fixed_step(project.fixedStep))
-            AVER_WARN("[Project] PHYSICS.FIXEDSTEP {} refused -- must be within (0, 0.5] seconds",
-                      project.fixedStep);
-        // THE else BELOW ASKS FOR THE TWO KEYS THIS FUNCTION CAN ACTUALLY APPLY -- the two set
-        // above -- and deliberately not for hasPhysicsSettings(), which used to stand there.
-        // That predicate also answers true for PHYSICS.MAXBODIES / MAXBODYPAIRS / MAXCONTACTS /
-        // TEMPALLOCMB (OcProject.hpp's own list), and nothing in this engine reads those four: the
-        // Jolt ceilings are baked into PhysicsWorld.cpp's system.Init call, aver_phys_init takes no
-        // parameters, and there is no aver_phys_set_max_* to call once the world does exist. A
-        // manifest stating only a body ceiling used to be told its settings "will apply once the
-        // world exists" -- a promise with no code anywhere behind it, which misleads a reader far
-        // more than the silence it replaces.
-    } else if (project.hasGravity || project.fixedStep > 0.0f) {
-        AVER_INFO("[Project] physics settings will apply once the world exists");
-    }
-}
+// Applies the manifest's PHYSICS.* keys that need a live world (gravity, fixed step) and the solver settings.
+// The body is in PhysicsProjectApply.hpp, which also has configureProjectPhysics for the limits (MAXBODIES,
+// MAXBODYPAIRS, MAXCONTACTS, TEMPALLOCMB, THREADS): those are fixed for a world's lifetime, so the hosts call it
+// right after the manifest is parsed and before the first level loads. Call sites of this function are unchanged.
+inline void applyProjectPhysics(const fmt::ProjectDesc& project) { applyProjectPhysicsKeys(project); }
 #endif
 
 #if AVER_WITH_AUDIO_ABI

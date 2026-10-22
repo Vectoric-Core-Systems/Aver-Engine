@@ -11,6 +11,12 @@
 #pragma once
 #include "aver/core/Types.hpp"
 #include "aver/core/Log.hpp"
+#if AVER_MODULE_SCENE && AVER_MODULE_HAIR_SCENE
+#  include "aver/hair/HairSystem.hpp"
+#  if AVER_MODULE_FRAMEWORK
+#    include "aver/framework/framework_hair_abi.h"
+#  endif
+#endif
 
 #include <map>
 #include <string>
@@ -22,9 +28,12 @@
 #  include "aver/anim/AnimGraphSystem.hpp"
 #  include "aver/anim/ControlRig.hpp"
 #  include "aver/anim/MotionMatchSystem.hpp"
+#  include "aver/game/ColliderShapes.hpp"   // registerCollisionShapeComponent (wave 11 SHAPES_MATERIALS)
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
 #  include "aver/softbody/SoftBodySystem.hpp"
+
+#  include "aver/softbody/SoftShapeSystem.hpp"
 #  if AVER_MODULE_RAGDOLL
 #    include "aver/physics/physics_ragdoll_abi.h"
 #    include "aver/physics/physics_layers_abi.h"
@@ -72,6 +81,8 @@
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
 #  include "aver/framework/framework_softbody_abi.h"
 #  include "aver/framework/framework_softfield_abi.h"
+
+#  include "aver/framework/framework_softshape_abi.h"
 #endif
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_abi.h"            // AI: wave 3 #21 (aver_fw_class_of for the actors generator)
@@ -181,6 +192,8 @@ inline void softBodyProxyFn(scene::Entity e, bool on, void*) {
         g_softProxies.erase(it);
     }
 }
+// Wave 11: the group a cloth with "group": { "ragdollOf": "owner" } ignores is the physics handle of the owner's ragdoll (0 until it exists).
+inline i32 softBodyRagdollGroupFn(scene::Entity skeleton, void*) { return ragdoll::ragdollSystem().physicsHandle(skeleton); }
 inline void applySoftProxyLayers() {
     ragdoll::RagdollSystem& rs = ragdoll::ragdollSystem();
     const i32 layer = softbody::softBodySystem().options().proxyLayer;
@@ -208,6 +221,8 @@ inline void installSoftBodyHost(std::string (*pathFn)(u64, void*), void* pathUse
     if (notifyFn) sys.setNotifySink(notifyFn, notifyUser);
 #  if AVER_MODULE_RAGDOLL
     sys.setCharacterProxyFn(&detail::softBodyProxyFn, nullptr);
+
+    sys.setRagdollGroupFn(&detail::softBodyRagdollGroupFn, nullptr);
 #  endif
 #else
     (void)pathFn; (void)pathUser; (void)notifyFn; (void)notifyUser;
@@ -389,13 +404,19 @@ inline void registerGameSystems() {
     anim::animGraphSystem().install(anim::animSystem(), world);
     anim::MotionMatchSystem::registerComponents(world);                        // motion matching: wave 5 #25
     anim::motionMatchSystem().install(anim::animSystem(), world);              // after the graph: it chains behind it
+    registerCollisionShapeComponent(world);                                    // CCollisionShape: an .ocshape collision beside a CRigidBody (wave 11 SHAPES_MATERIALS)
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
     softbody::SoftBodySystem::registerComponents(scene::World::instance());   // CCloth, CDestructible: cloth and destruction
     softbody::softBodySystem().install(scene::World::instance());
+
+    softbody::SoftShapeSystem::registerComponents(scene::World::instance());   // CSoftVolume, CSoftRope: jelly, ropes and cables (wave 11)
+    softbody::softShapeSystem().install(scene::World::instance());
 #  if AVER_MODULE_FRAMEWORK
     aver_fw_set_softbody_provider(&softbody::softBodyProvider, &softbody::softBodySystem());
     aver_fw_set_softfield_provider(&softbody::softFieldProvider, &softbody::softBodySystem());
+
+    aver_fw_set_softshape_provider(&softbody::softShapeProvider, &softbody::softShapeSystem());
 #  endif
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_VEHICLE_SCENE
@@ -433,6 +454,13 @@ inline void registerGameSystems() {
 #endif
 #if AVER_MODULE_AUDIO_SCENE
     audio::audioSceneSystem().registerComponents(scene::World::instance());
+#endif
+#if AVER_MODULE_HAIR_SCENE
+    hair::HairSystem::registerComponents(scene::World::instance());   // CHair, CHairDraw: strand hair (docs/HAIR.md)
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_HAIR_SCENE && AVER_MODULE_FRAMEWORK
+    // The hair relay (framework_hair_abi.h): teleport, script colliders and the state read go to the HairSystem.
+    aver_fw_set_hair_provider(&hair::hairProvider, &hair::hairSystem());
 #endif
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SYNAPSE_SCENE
     aver_fw_set_blackboard_provider(&synapse::blackboardRelay, nullptr);
@@ -480,10 +508,17 @@ inline void tickAnimGraphs(f32 dt) {
 // palettes. AFTER animSystem().tick (the palette it reads is this frame's) and before the soft-body draw scene
 // updates, in both hosts. `viewPos` is the camera, for the distance tiers.
 inline void tickSoftBodies(f32 dt, const Vec3& viewPos) {
+#if AVER_MODULE_HAIR_SCENE
+    // Hair reads the skinned pose and the soft-body wind, and runs before HairScene::update copies the result.
+    hair::hairSystem().setWind(softbody::softBodySystem().windVelocity(), 0.0f);
+    hair::hairSystem().tick(scene::World::instance(), dt, viewPos);
+#endif
 #if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
     softbody::SoftBodySystem& sys = softbody::softBodySystem();
     sys.setViewPos(viewPos);
     sys.tick(scene::World::instance(), dt);
+
+    softbody::softShapeSystem().tick(scene::World::instance(), dt);   // after the cloth tick: it refreshes the tail of the same view list
 #  if AVER_MODULE_RAGDOLL
     detail::applySoftProxyLayers();
 #  endif
@@ -539,7 +574,11 @@ inline void resetGameSystems() {
     particles::particleSystem().reset();   // live instances, queued spawn-at requests and GPU ranges; recreated on the next tick
 #endif
     clearVehicles();                           // the CVehicle vehicles, voices and queued events
+#if AVER_MODULE_HAIR_SCENE
+    hair::hairSystem().clear();   // before the physics world is torn down: destroys the hair handles and proxy bodies
+#endif
 #if AVER_MODULE_SCENE && AVER_MODULE_SOFTBODY_SCENE
+    softbody::softShapeSystem().clear();       // jelly and rope bodies first: they publish into the cloth system's view list
     softbody::softBodySystem().clear();        // bodies, debris entities, queued inbox and events
 #  if AVER_MODULE_RAGDOLL
     detail::g_softProxies.clear();

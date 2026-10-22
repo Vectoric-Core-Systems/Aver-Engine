@@ -104,6 +104,37 @@ bool backSkinFromKey(std::string_view k, BackSkin& out) {
     return false;
 }
 
+const char* solverKey(ClothSolver s) { return s == ClothSolver::Fast ? "fast" : "cage"; }
+const char* clothBendKey(ClothBend b) { return b == ClothBend::None ? "none" : (b == ClothBend::Dihedral ? "dihedral" : "distance"); }
+const char* clothLraKey(ClothLra l) { return l == ClothLra::Euclidean ? "euclidean" : (l == ClothLra::Geodesic ? "geodesic" : "off"); }
+
+const char* kindKey(SoftKind k) {
+    switch (k) {
+        case SoftKind::Destructible: return "destructible";
+        case SoftKind::Jelly:        return "jelly";
+        case SoftKind::Rope:         return "rope";
+        default:                     return "cloth";
+    }
+}
+
+std::string jellyJson(const JellyParams& j) {
+    std::string s = "  \"jelly\": { \"cellCm\": " + num(j.cellCm) + ", \"snapCm\": " + num(j.snapCm) + ", \"volumeCompliance\": " +
+                    num(j.volumeCompliance) + ", \"edgeCompliance\": " + num(j.edgeCompliance);
+    if (j.vertexRadiusCm >= 0.0f) s += ", \"vertexRadiusCm\": " + num(j.vertexRadiusCm);
+    s += ", \"densityKgM3\": " + num(j.densityKgM3) + ", \"maxNodes\": " + unum(j.maxNodes) + " },\n";
+    return s;
+}
+
+std::string ropeJson(const RopeParams& r) {
+    std::string s = "  \"rope\": { \"radiusCm\": " + num(r.radiusCm) + ", \"segmentCm\": " + num(r.segmentCm) + ", \"massPerMeterKg\": " +
+                    num(r.massPerMeterKg) + ", \"slack\": " + num(r.slack) + ", \"sides\": " + unum(r.sides) + ", \"uvCmPerTile\": " +
+                    num(r.uvCmPerTile) + ", \"stretchCompliance\": " + num(r.stretchCompliance) + ", \"bendTwistCompliance\": " +
+                    num(r.bendTwistCompliance);
+    if (!r.material.empty()) s += ", \"material\": " + esc(r.material);
+    s += " },\n";
+    return s;
+}
+
 bool endsWithOcMesh(const std::string& path) {
     static const char ext[] = ".ocmesh";
     const usize n = sizeof ext - 1;
@@ -311,6 +342,27 @@ bool SoftAsset::valid(std::string* why) const {
         if (!finite(cloth.liftCoeff) || cloth.liftCoeff < 0.0f || cloth.liftCoeff > 2.0f) return fail("cloth.liftCoeff must be 0..2");
         if (!finite(cloth.defaultReachCm) || cloth.defaultReachCm < 0.0f) return fail("cloth.skin.defaultReachCm must be >= 0");
         if (!finite(cloth.backstopCm)) return fail("cloth.skin.backstopCm must be finite");
+        if (!finite(cloth.lraSlack) || cloth.lraSlack < 1.0f) return fail("cloth.lraSlack must be >= 1");
+        if (cloth.solver == ClothSolver::Fast && cloth.tearable) return fail("cloth.solver \"fast\" cannot be tearable");
+        if (!finite(inflate.pressureKPa) || inflate.pressureKPa < 0.0f) return fail("inflate.pressureKPa must be >= 0");
+        if (!finite(inflate.leakKPaPerS) || inflate.leakKPaPerS < 0.0f) return fail("inflate.leakKPaPerS must be >= 0");
+    } else if (kind == SoftKind::Jelly) {
+        if (!finite(jelly.cellCm) || jelly.cellCm <= 0.0f) return fail("jelly.cellCm must be > 0");
+        if (!finite(jelly.snapCm) || jelly.snapCm < 0.0f) return fail("jelly.snapCm must be >= 0");
+        if (!finite(jelly.volumeCompliance) || jelly.volumeCompliance < 0.0f) return fail("jelly.volumeCompliance must be >= 0");
+        if (!finite(jelly.edgeCompliance) || jelly.edgeCompliance < 0.0f) return fail("jelly.edgeCompliance must be >= 0");
+        if (!finite(jelly.vertexRadiusCm)) return fail("jelly.vertexRadiusCm must be finite");
+        if (!finite(jelly.densityKgM3) || jelly.densityKgM3 <= 0.0f) return fail("jelly.densityKgM3 must be > 0");
+        if (jelly.maxNodes < 4 || jelly.maxNodes > 65536) return fail("jelly.maxNodes must be 4..65536");
+    } else if (kind == SoftKind::Rope) {
+        if (!finite(rope.radiusCm) || rope.radiusCm <= 0.0f) return fail("rope.radiusCm must be > 0");
+        if (!finite(rope.segmentCm) || rope.segmentCm <= 0.0f) return fail("rope.segmentCm must be > 0");
+        if (!finite(rope.massPerMeterKg) || rope.massPerMeterKg <= 0.0f) return fail("rope.massPerMeterKg must be > 0");
+        if (!finite(rope.slack) || rope.slack < 1.0f) return fail("rope.slack must be >= 1");
+        if (rope.sides < 3 || rope.sides > 32) return fail("rope.sides must be 3..32");
+        if (!finite(rope.uvCmPerTile) || rope.uvCmPerTile <= 0.0f) return fail("rope.uvCmPerTile must be > 0");
+        if (!finite(rope.stretchCompliance) || rope.stretchCompliance < 0.0f) return fail("rope.stretchCompliance must be >= 0");
+        if (!finite(rope.bendTwistCompliance) || rope.bendTwistCompliance < 0.0f) return fail("rope.bendTwistCompliance must be >= 0");
     } else {
         if (!finite(destruct.minImpactCmS) || destruct.minImpactCmS < 0.0f) return fail("destruct.minImpactCmS must be >= 0");
         if (!finite(destruct.impulseEfficiency) || destruct.impulseEfficiency <= 0.0f || destruct.impulseEfficiency > 1.0f)
@@ -370,9 +422,13 @@ bool parseSoftAsset(std::string_view text, SoftAsset& out, std::string* why) {
     const std::string_view kindKey = root["kind"].asString("cloth");
     if (kindKey == "cloth") kind = SoftKind::Cloth;
     else if (kindKey == "destructible" || kindKey == "destruct") kind = SoftKind::Destructible;
-    else return fail("kind must be \"cloth\" or \"destructible\"");
+    else if (kindKey == "jelly") kind = SoftKind::Jelly;
+    else if (kindKey == "rope") kind = SoftKind::Rope;
+    else return fail("kind must be \"cloth\", \"destructible\", \"jelly\" or \"rope\"");
 
     SoftPreset preset = kind == SoftKind::Cloth ? SoftPreset::ClothLight : SoftPreset::Metal;
+    if (kind == SoftKind::Jelly) preset = SoftPreset::Jelly;
+    else if (kind == SoftKind::Rope) preset = SoftPreset::Rope;
     if (root.has("preset") && !presetFromKey(root["preset"].asString(), preset)) return fail("unknown preset");
 
     SoftAsset a = makeSoftAsset(kind, preset);
@@ -417,6 +473,59 @@ bool parseSoftAsset(std::string_view text, SoftAsset& out, std::string* why) {
             readF(skin, "defaultReachCm", a.cloth.defaultReachCm);
             readF(skin, "backstopCm", a.cloth.backstopCm);
         }
+        if (cl.has("solver")) {
+            const std::string_view v = cl["solver"].asString();
+            if (v == "cage") a.cloth.solver = ClothSolver::Cage;
+            else if (v == "fast") a.cloth.solver = ClothSolver::Fast;
+            else return fail("cloth.solver must be cage or fast");
+        }
+        if (cl.has("bend")) {
+            const std::string_view v = cl["bend"].asString();
+            if (v == "none") a.cloth.bend = ClothBend::None;
+            else if (v == "distance") a.cloth.bend = ClothBend::Distance;
+            else if (v == "dihedral") a.cloth.bend = ClothBend::Dihedral;
+            else return fail("cloth.bend must be none, distance or dihedral");
+        }
+        if (cl.has("lra")) {
+            const std::string_view v = cl["lra"].asString();
+            if (v == "off") a.cloth.lra = ClothLra::Off;
+            else if (v == "euclidean") a.cloth.lra = ClothLra::Euclidean;
+            else if (v == "geodesic") a.cloth.lra = ClothLra::Geodesic;
+            else return fail("cloth.lra must be off, euclidean or geodesic");
+        }
+        readF(cl, "lraSlack", a.cloth.lraSlack);
+    }
+    const JsonValue& inf = root["inflate"];
+    if (inf.isObject()) {
+        readF(inf, "pressureKPa", a.inflate.pressureKPa);
+        readF(inf, "leakKPaPerS", a.inflate.leakKPaPerS);
+    }
+    const JsonValue& grp = root["group"];
+    if (grp.isObject() && grp.has("ragdollOf")) {
+        if (grp["ragdollOf"].asString() != "owner") return fail("group.ragdollOf must be \"owner\"");
+        a.group.ragdollOwner = true;
+    }
+    const JsonValue& jl = root["jelly"];
+    if (jl.isObject()) {
+        readF(jl, "cellCm", a.jelly.cellCm);
+        readF(jl, "snapCm", a.jelly.snapCm);
+        readF(jl, "volumeCompliance", a.jelly.volumeCompliance);
+        readF(jl, "edgeCompliance", a.jelly.edgeCompliance);
+        readF(jl, "vertexRadiusCm", a.jelly.vertexRadiusCm);
+        readF(jl, "densityKgM3", a.jelly.densityKgM3);
+        readU(jl, "maxNodes", a.jelly.maxNodes);
+    }
+    const JsonValue& rp = root["rope"];
+    if (rp.isObject()) {
+        readF(rp, "radiusCm", a.rope.radiusCm);
+        readF(rp, "segmentCm", a.rope.segmentCm);
+        readF(rp, "massPerMeterKg", a.rope.massPerMeterKg);
+        readF(rp, "slack", a.rope.slack);
+        readU(rp, "sides", a.rope.sides);
+        readF(rp, "uvCmPerTile", a.rope.uvCmPerTile);
+        readF(rp, "stretchCompliance", a.rope.stretchCompliance);
+        readF(rp, "bendTwistCompliance", a.rope.bendTwistCompliance);
+        if (rp["material"].isString()) a.rope.material = std::string(rp["material"].asString());
     }
     const JsonValue& de = root["destruct"];
     if (de.isObject()) {
@@ -518,7 +627,7 @@ std::string writeSoftAsset(const SoftAsset& a) {
     s += "{\n";
     s += "  \"format\": \"ocsoft\",\n";
     s += "  \"version\": " + unum(kSoftAssetVersion) + ",\n";
-    s += std::string("  \"kind\": \"") + (a.kind == SoftKind::Cloth ? "cloth" : "destructible") + "\",\n";
+    s += std::string("  \"kind\": \"") + kindKey(a.kind) + "\",\n";
     s += std::string("  \"preset\": \"") + presetKey(a.preset) + "\",\n";
     s += "  \"material\": {\n";
     s += "    \"areaDensityKgM2\": " + num(m.areaDensityKgM2) + ",\n";
@@ -548,8 +657,15 @@ std::string writeSoftAsset(const SoftAsset& a) {
     s += "    \"dragCoeff\": " + num(a.cloth.dragCoeff) + ",\n";
     s += "    \"liftCoeff\": " + num(a.cloth.liftCoeff) + ",\n";
     s += std::string("    \"tearable\": ") + (a.cloth.tearable ? "true" : "false") + ",\n";
-    s += "    \"skin\": { \"defaultReachCm\": " + num(a.cloth.defaultReachCm) + ", \"backstopCm\": " + num(a.cloth.backstopCm) + " }\n";
-    s += "  },\n";
+    s += "    \"skin\": { \"defaultReachCm\": " + num(a.cloth.defaultReachCm) + ", \"backstopCm\": " + num(a.cloth.backstopCm) + " }";
+    {
+        const ClothParams d;   // wave 11 keys, written only when they differ so an older asset writes (and hashes) as it always did
+        if (a.cloth.solver != d.solver) s += std::string(",\n    \"solver\": \"") + solverKey(a.cloth.solver) + "\"";
+        if (a.cloth.bend != d.bend) s += std::string(",\n    \"bend\": \"") + clothBendKey(a.cloth.bend) + "\"";
+        if (a.cloth.lra != d.lra) s += std::string(",\n    \"lra\": \"") + clothLraKey(a.cloth.lra) + "\"";
+        if (a.cloth.lraSlack != d.lraSlack) s += ",\n    \"lraSlack\": " + num(a.cloth.lraSlack);
+    }
+    s += "\n  },\n";
     s += "  \"destruct\": {\n";
     s += "    \"minImpactCmS\": " + num(a.destruct.minImpactCmS) + ",\n";
     s += "    \"impulseEfficiency\": " + num(a.destruct.impulseEfficiency) + ",\n";
@@ -576,6 +692,11 @@ std::string writeSoftAsset(const SoftAsset& a) {
         if (a.proxy.maxParticles != 0) s += ", \"maxParticles\": " + unum(a.proxy.maxParticles);
         s += " },\n";
     }
+    if (a.inflate.pressureKPa != 0.0f || a.inflate.leakKPaPerS != 0.0f)
+        s += "  \"inflate\": { \"pressureKPa\": " + num(a.inflate.pressureKPa) + ", \"leakKPaPerS\": " + num(a.inflate.leakKPaPerS) + " },\n";
+    if (a.group.ragdollOwner) s += "  \"group\": { \"ragdollOf\": \"owner\" },\n";
+    if (a.kind == SoftKind::Jelly) s += jellyJson(a.jelly);
+    if (a.kind == SoftKind::Rope) s += ropeJson(a.rope);
     s += "  \"paint\": {\n";
     s += "    \"meshKey\": \"" + hex64(a.paint.meshKey) + "\",\n";
     s += "    \"pin\": \"" + encodePaintRle(a.paint.pin) + "\",\n";

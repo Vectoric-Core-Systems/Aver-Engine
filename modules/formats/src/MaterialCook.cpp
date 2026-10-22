@@ -11,18 +11,16 @@
 namespace aver::fmt {
 namespace {
 
-// THE BUILT-IN LOOKS, and this is the THIRD copy of this list in the tree. The other two are
-// Runtime/src/GameContent.cpp's `look(...)` table and sandbox/src/SandboxApp.cpp's,
-// which that file's own comment already says must be kept in step with each other. A fourth
-// dependency edge is not available: Aver.Formats.Material cannot depend on runtime.game, which
-// depends on it.
+// THE BUILT-IN LOOKS, and this is the SECOND copy of this list in the tree. The other is
+// Runtime/src/GameContent.cpp's `look(...)` table. They cannot share one: Aver.Formats.Material
+// cannot depend on runtime.game, which depends on it.
 //
 // WHY IT MATTERS HERE. An authored .ocmat WINS over a built-in look of the same name, so a
 // generated material that happened to be called M_Crate would silently repaint every crate in the
 // project -- a scene-wide change with no error and no obvious cause.
 constexpr const char* kReservedLookNames[] = {
-    "M_Accent", "M_Bark", "M_Concrete", "M_Crate", "M_Floor", "M_Foliage",
-    "M_Glass",  "M_Metal", "M_Rock",    "M_Target", "M_Trim",  "M_Wall",
+    "M_Accent", "M_Banana", "M_Bark", "M_Concrete", "M_Crate", "M_Floor", "M_Foliage",
+    "M_Glass",  "M_Metal",  "M_Rock", "M_Target",   "M_Trim",  "M_Wall",
 };
 
 void warn(std::vector<std::string>* out, std::string what) {

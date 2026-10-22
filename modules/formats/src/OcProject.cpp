@@ -9,6 +9,7 @@
 #include <cctype>
 #include <charconv>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -23,7 +24,36 @@ std::string_view restOfLine(std::string_view line, std::string_view key) {
     return trim(r);
 }
 
+// THE NAME MIRROR of the physics settings table (modules/physics/src/PhysicsConfig.cpp, aver_phys_setting_name):
+// Formats may not depend on Physics, so the names are restated here, one per setting, in the table's order.
+// tests/game/ProjectPhysicsApplyTest links both and fails if the two ever disagree. The project key is
+// "PHYSICS." + the name upper-cased.
+constexpr const char* kPhysicsSettingNames[] = {
+    "velocitySteps", "positionSteps", "collisionSteps", "baumgarte", "speculativeDistance", "penetrationSlop",
+    "maxPenetration", "manifoldTolerance", "linearCastThreshold", "linearCastMaxPenetration",
+    "minRestitutionSpeed", "sleepTime", "sleepSpeed", "allowSleeping", "deterministic", "warmStart",
+    "bodyPairCache", "manifoldReduction", "largeIslandSplitter", "checkActiveEdges", "maxPairsInFlight",
+    "stepListenerBatch", "stepListenerBatchesPerJob", "pairCacheDeltaPos", "pairCacheDeltaRot",
+    "contactNormalDelta", "lambdaPreserveDist",
+};
+constexpr int kPhysicsSettingCount = static_cast<int>(sizeof(kPhysicsSettingNames) / sizeof(kPhysicsSettingNames[0]));
+
+// The index of the setting a manifest key names ("PHYSICS.SLEEPTIME" -> 11), or -1.
+int physicsSettingIndex(std::string_view key) {
+    constexpr std::string_view kPrefix = "PHYSICS.";
+    if (!startsWithCI(key, kPrefix)) return -1;
+    const std::string_view rest = key.substr(kPrefix.size());
+    for (int i = 0; i < kPhysicsSettingCount; ++i)
+        if (equalsCI(rest, kPhysicsSettingNames[i])) return i;
+    return -1;
+}
+
 } // namespace
+
+int physicsSettingCount() { return kPhysicsSettingCount; }
+const char* physicsSettingName(int index) {
+    return index >= 0 && index < kPhysicsSettingCount ? kPhysicsSettingNames[index] : nullptr;
+}
 
 // Parses a manifest from memory, preserving `dir` and `manifestPath`. Unknown keys are ignored.
 bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
@@ -227,6 +257,22 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             }
         } else if (equalsCI(key, "PHYSICS.FIXEDSTEP")) {
             if (t.size() > 1) out.fixedStep = static_cast<f32>(parseF64(t[1]));
+        } else if (equalsCI(key, "PHYSICS.THREADS")) {
+            if (t.size() > 1) out.physThreads = parseI32(t[1], -2);
+        } else if (equalsCI(key, "PHYSICS.SHAPECACHE")) {
+            if (t.size() > 1) { const int v = parseI32(t[1], -1); out.physShapeCache = v < 0 ? -1 : (v != 0 ? 1 : 0); }
+        } else if (const int ps = physicsSettingIndex(key); ps >= 0) {
+            // A value that is not a number is dropped, not read as 0: a typo must not silently become a setting.
+            if (t.size() > 1) {
+                const f64 v = parseF64(t[1], std::numeric_limits<f64>::quiet_NaN());
+                if (v == v) {
+                    const std::string name = kPhysicsSettingNames[ps];
+                    bool replaced = false;
+                    for (auto& e : out.physicsSettings)
+                        if (e.first == name) { e.second = static_cast<f32>(v); replaced = true; break; }
+                    if (!replaced) out.physicsSettings.emplace_back(name, static_cast<f32>(v));
+                }
+            }
         } else if (equalsCI(key, "AUDIO.MASTER")) {
             if (t.size() > 1) { out.masterVolume = static_cast<f32>(parseF64(t[1])); out.hasAudioMix = true; }
         } else if (equalsCI(key, "AUDIO.BUS")) {
@@ -323,12 +369,14 @@ bool isOwnedKey(std::string_view line) {
         "STREAM.LOADRADIUS", "STREAM.EVICTRADIUS", "STREAM.LOADBUDGET", "STREAM.EVICTBUDGET",
         "STREAM.VERTICALRADIUS", "STREAM.LEADSECONDS",
         "PHYSICS.MAXBODIES", "PHYSICS.MAXBODYPAIRS", "PHYSICS.MAXCONTACTS", "PHYSICS.TEMPALLOCMB",
-        "PHYSICS.GRAVITY", "PHYSICS.FIXEDSTEP", "AUDIO.MASTER", "AUDIO.BUS",
+        "PHYSICS.GRAVITY", "PHYSICS.FIXEDSTEP", "PHYSICS.THREADS", "PHYSICS.SHAPECACHE", "AUDIO.MASTER", "AUDIO.BUS",
     };
     const std::vector<std::string_view> t = splitWhitespace(l);
     if (t.empty()) return false;
     for (const char* k : kOwned) if (equalsCI(t[0], k)) return true;
-    return false;
+    // PHYSICS.<setting>: owned too, so a re-save replaces the line instead of duplicating it. An unknown
+    // PHYSICS.* key is not in the mirror and passes through untouched.
+    return physicsSettingIndex(t[0]) >= 0;
 }
 
 } // namespace
@@ -433,6 +481,22 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "PHYSICS.MAXBODYPAIRS", d.physMaxBodyPairs);
     appendKey(owned, "PHYSICS.MAXCONTACTS", d.physMaxContacts);
     appendKey(owned, "PHYSICS.TEMPALLOCMB", d.physTempAllocatorMb);
+    if (d.physThreads > -2) { owned += "PHYSICS.THREADS "; owned += std::to_string(d.physThreads); owned += '\n'; }
+    if (d.physShapeCache >= 0) { owned += "PHYSICS.SHAPECACHE "; owned += std::to_string(d.physShapeCache); owned += '\n'; }
+    // The live solver settings, in the order the project stated them; a name the mirror does not know is dropped
+    // (the parser would not read it back).
+    for (const auto& [name, value] : d.physicsSettings) {
+        if (!(value == value)) continue;
+        std::string upper;
+        bool known = false;
+        for (int i = 0; i < kPhysicsSettingCount && !known; ++i) known = name == kPhysicsSettingNames[i];
+        if (!known) continue;
+        for (const char c : name) upper += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        char buf[48];
+        const auto r = std::to_chars(buf, buf + sizeof buf, value);
+        if (r.ec != std::errc{}) continue;
+        owned += "PHYSICS."; owned += upper; owned += ' '; owned.append(buf, static_cast<usize>(r.ptr - buf)); owned += '\n';
+    }
 
     // Has presence flag because negative values are legal.
     if (d.hasGravity) {

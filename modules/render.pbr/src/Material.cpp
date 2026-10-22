@@ -68,6 +68,21 @@ void sanitise(MaterialDesc& d) {
     for (f32& ch : d.scatterColor) ch = std::clamp(ch, 0.0f, 1.0f);
     d.scatterAnisotropy = std::clamp(d.scatterAnisotropy, -0.99f, 0.99f);
     if (static_cast<u32>(d.alphaMode) > static_cast<u32>(AlphaMode::Blend)) d.alphaMode = AlphaMode::Opaque;
+    // wave11 strand hair. Every field is a weight, an angle or a width the lobes divide by; nothing here can reach a NaN.
+    if (static_cast<u32>(d.shadingModel) > static_cast<u32>(ShadingModel::Hair)) d.shadingModel = ShadingModel::Standard;
+    {
+        HairParams& h = d.hair;
+        for (f32& c : h.tipColor) c = std::clamp(c, 0.0f, 1.0f);
+        for (f32& c : h.tint) c = std::clamp(c, 0.0f, 1.0f);
+        h.colorVariation = std::clamp(h.colorVariation, 0.0f, 1.0f);
+        h.roughness      = std::clamp(h.roughness, 0.02f, 1.0f);
+        h.shift          = std::clamp(h.shift, -0.35f, 0.35f);
+        h.specular       = std::clamp(h.specular, 0.0f, 4.0f);
+        h.tt             = std::clamp(h.tt, 0.0f, 4.0f);
+        h.trt            = std::clamp(h.trt, 0.0f, 4.0f);
+        h.azimuthRough   = std::clamp(h.azimuthRough, 0.02f, 1.0f);
+        h.scatter        = std::clamp(h.scatter, 0.0f, 1.0f);
+    }
     // ---- wave3 terrain layers ----
     {
         TerrainDesc& t = d.terrain;

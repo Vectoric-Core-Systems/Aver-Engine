@@ -16,6 +16,13 @@ add_executable(PlayMobilityTest src/PlayMobilityTest.cpp)
 target_link_libraries(PlayMobilityTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Core)
 set_target_properties(PlayMobilityTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ProjectPhysicsApplyTest -- the manifest's PHYSICS.* keys from file to running world: the name mirror in OcProject.cpp against the
+# physics table, parse / write / re-save, configureProjectPhysics (PhysicsProjectApply.hpp) and the rebuild of an empty world.
+# Links Formats, Physics and the Runtime headers; no device, no window.
+add_executable(ProjectPhysicsApplyTest src/ProjectPhysicsApplyTest.cpp)
+target_link_libraries(ProjectPhysicsApplyTest PRIVATE Aver.Runtime.Game.Core Aver.Formats Aver.Physics Aver.Core)
+set_target_properties(ProjectPhysicsApplyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # LevelSequenceTest -- the level sequence samplers (interpolation, wrap, key round trips) and the player clock.
 # Samplers are pure; the player case needs a real scene::World and nothing else.
 add_executable(LevelSequenceTest src/LevelSequenceTest.cpp)
@@ -95,4 +102,30 @@ if(TARGET Aver.Camera)
   add_executable(CameraRigRecordTest src/CameraRigRecordTest.cpp)
   target_link_libraries(CameraRigRecordTest PRIVATE Aver.Runtime.Game.Core Aver.Camera Aver.Physics Aver.Scene Aver.Formats Aver.Core)
   set_target_properties(CameraRigRecordTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# PhysicalSurfacesTest -- Content/Physics/Surfaces.ocsurf -> the physics registry, an authored number beating a landscape layer's
+# find-or-add, the landscape heightfield's per-cell surface palette against a brute-force argmax of the paint weights, and (with
+# physics) rays on a painted landscape reporting each layer's surface (SHAPES_MATERIALS phase D). A temp project; no device.
+add_executable(PhysicalSurfacesTest src/PhysicalSurfacesTest.cpp)
+target_link_libraries(PhysicalSurfacesTest PRIVATE Aver.Runtime.Game.Core Aver.Landscape Aver.Formats Aver.Platform Aver.Core)
+if(TARGET Aver.Physics)
+  target_link_libraries(PhysicalSurfacesTest PRIVATE Aver.Physics)
+endif()
+set_target_properties(PhysicalSurfacesTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# CollisionMeshSurfaceTest -- GameContent::collisionMeshFor with a material slot's PHYSSURFACE: the palette and per-triangle
+# indices, the seam between two surfaces staying welded, no palette when no slot names a surface, the 32-surface cap, and the disk
+# cache (round trip, a version-1 entry is a miss, an edited .ocmat makes an entry stale). A temp project; no device, no physics.
+add_executable(CollisionMeshSurfaceTest src/CollisionMeshSurfaceTest.cpp)
+target_link_libraries(CollisionMeshSurfaceTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(CollisionMeshSurfaceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ColliderShapesTest -- an .ocshape tree built into physics shapes (the chair, surfaces by leaf / default / mesh slot, hull mesh and mesh
+# leaves through the injected mesh seam, decorators, a mutable compound, a refusal that leaves nothing allocated) and the CollisionShape
+# component's apply / capture with golden keys (SHAPES_MATERIALS phase E). A real physics world and scene::World; no device.
+if(TARGET Aver.Physics AND TARGET Aver.Scene)
+  add_executable(ColliderShapesTest src/ColliderShapesTest.cpp)
+  target_link_libraries(ColliderShapesTest PRIVATE Aver.Runtime.Game.Core Aver.Physics Aver.Scene Aver.Formats Aver.Platform Aver.Core)
+  set_target_properties(ColliderShapesTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()

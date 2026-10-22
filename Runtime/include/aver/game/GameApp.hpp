@@ -17,6 +17,9 @@
 #if AVER_MODULE_SCENE && AVER_MODULE_RENDER_SOFTBODY
 #  include "aver/render/SoftBodyScene.hpp"
 #endif
+#if AVER_MODULE_SCENE && AVER_MODULE_RENDER_HAIR
+#  include "aver/render/HairScene.hpp"
+#endif
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 #  include "aver/particles/ParticleRenderer.hpp"
 #endif
@@ -379,6 +382,9 @@ private:
 #if AVER_MODULE_SCENE && AVER_MODULE_RENDER_SOFTBODY
     // Draw side of cloth and destruction. Null is a legal state: soft entities draw their authored mesh.
     std::unique_ptr<render::SoftBodyScene> softBodyScene_;
+#if AVER_MODULE_RENDER_HAIR
+    std::unique_ptr<render::HairScene> hairScene_;   // strand hair: Jolt's kernels on the RHI + the ribbon builder
+#endif
 #endif
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
     // Registered NON-OWNING. Must outlive the device.

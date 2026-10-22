@@ -71,3 +71,10 @@ the rebuild `aver_phys_body_set_motion_type` does for a static body made movable
 **Sensor.** `SetIsSensor` plus moving the body to the moving broad-phase half (a sensor sits there even
 when static, as `addBody` places `aver_phys_add_sensor_*`), and the `World::sensors` table the contact
 listener consults is updated under the event mutex.
+
+## Bodies made from shapes
+
+A body made by `aver_phys_body_from_shape` (`docs/PHYSICS_SHAPES.md`) is an ordinary body: every call on this page works on it. Two things differ from the older creators.
+`aver_phys_body_position` reports the centre of mass while `aver_phys_body_origin` reports the shape's origin (they differ for any compound or offset shape), and `aver_phys_body_set_shape` /
+`aver_phys_body_set_scale` re-apply the body's mass themselves, because Jolt's own shape swap would replace it by volume times density. A body label (`aver_phys_body_set_surface`)
+lives in the upper half of the same user-data word the entity stamp uses, which `aver_phys_set_entity` preserves.

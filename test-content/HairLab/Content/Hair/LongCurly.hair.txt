@@ -1,0 +1,10 @@
+# HairLab: long curly hair, dark red. Clumps of followers around guide strands.
+OCHAIR 1
+SCALP Meshes/HairScalp.ocmesh
+SIM iterationsPerSecond 360 maxDeltaTime 0.0333 simFraction 0.1
+MATERIAL 0 linearDamping 2 angularDamping 2 bendCompliance 1e-7 globalPose 0.01 0 0 0.3
+LOOK 0 baseColor 0.28 0.10 0.06 tipColor 0.45 0.18 0.09 colorVariation 0.2 widthRootCm 0.11 widthTipCm 0.04 roughness 0.30 shift 0.08
+       tt 1 trt 1.2 azimuthRough 0.45 tint 0.95 0.55 0.35 scatter 0.55
+GENERATE seed 2002 strands 9000 lengthCm 24 34 segments 12 curlCm 1.2 curlFrequency 3 clumps 150 clumpRadiusCm 1.5 clumpTightness 0.6
+         partDirection 0 1 0 partWidthCm 0.8 style 0 0 -1 styleWeight 0.8
+LOD distances 300 700 1500 strandFractions 1 0.5 0.25 0.12

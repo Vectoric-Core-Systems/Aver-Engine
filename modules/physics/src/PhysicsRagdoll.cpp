@@ -291,7 +291,7 @@ void destroyEntry(int32_t id) {
         }
         g_world->sensors.erase(h);
     }
-    if (g_world && e.ragdoll) e.ragdoll->RemoveFromPhysicsSystem();
+    if (g_world && e.ragdoll) { e.ragdoll->RemoveFromPhysicsSystem(); noteConstraintTopology(); }
     g_ragdolls.erase(it);   // the last reference: the Ragdoll destroys its bodies
     if (g_ragdolls.empty()) removeStepper();
 }
@@ -308,6 +308,14 @@ void destroyAllRagdolls() {
     for (const auto& [id, e] : g_ragdolls) ids.push_back(id);
     for (int32_t id : ids) destroyEntry(id);
     removeStepper();
+    g_nextRagdoll = 1;   // ids (and collision group ids) restart with the world, like body handles: a rebuilt scene hashes the same
+}
+
+void ragdollHandles(std::vector<int32_t>& out) {
+    out.clear();
+    out.reserve(g_ragdolls.size());
+    for (const auto& [id, e] : g_ragdolls) out.push_back(id);
+    std::sort(out.begin(), out.end());
 }
 
 void releaseRagdollOfBody(int32_t body) {
@@ -439,6 +447,7 @@ int32_t aver_phys_ragdoll_create(int32_t boneCount, const int32_t* parents,
     }
     for (int i = 0; i < static_cast<int>(rd->GetConstraintCount()); ++i) rd->GetConstraint(i)->SetEnabled(false);
     rd->AddToPhysicsSystem(JPH::EActivation::Activate);
+    noteConstraintTopology();   // the ragdoll's joints are system constraints: a state restore refuses to cross this
 
     Entry& e = g_ragdolls[id];
     e.id = id;

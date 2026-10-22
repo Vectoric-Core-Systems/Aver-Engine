@@ -5,7 +5,9 @@
 #include "SandboxApp.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "aver/game/GameTick.hpp"
-#include "aver/game/GameLocalization.hpp"
+#include "aver/game/GameLocalization.hpp"   // [wave11/shapes] Content/Physics/Surfaces.ocsurf -> the physics surface registry
+#include "aver/game/PhysicalSurfaces.hpp"   // [wave11/shapes] Content/Physics/Surfaces.ocsurf -> the physics surface registry
+#include "aver/game/PhysicalSurfaces.hpp"
 #include "aver/game/GameUiText.hpp"
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_loc_abi.h"
@@ -54,7 +56,15 @@ void SandboxApp::applyProject(Engine& e) {
     storeLevelView();
 #endif
     project_ = browser_.project();
+#if AVER_MODULE_PHYSICS
+    // This project's solver settings and world limits, before its level builds a single body: the limits are
+    // fixed for a world's lifetime, so an empty world is rebuilt here (PhysicsProjectApply.hpp).
+    game::configureProjectPhysics(project_, "Sandbox");
+#endif
     editor::setActorEditorContentRoot(project_.contentDir());
+    // The project's physical-surface table, before its level builds a shape (the editor re-registers it when the Physical Surfaces
+    // panel saves). Registration is independent of any physics world; a missing file is silent.
+    game::loadPhysicalSurfaces(project_.contentDir());
 
     editor::setAnimEditorContentRoot(project_.contentDir());
     loading.stage("Applying project settings");

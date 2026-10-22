@@ -9,6 +9,7 @@
 
 #if AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"
+#  include "aver/physics/physics_shape_builder_abi.h"
 #endif
 
 namespace aver::world {
@@ -108,12 +109,32 @@ i32 addStaticBoxBody(const Transform& worldXf, const Vec3& localMin, const Vec3&
 }
 
 i32 addStaticMeshBody(const Transform& worldXf, const f32* localPositions, u32 vertexCount,
-                      const u32* indices, u32 indexCount) {
+                      const u32* indices, u32 indexCount, const MeshSurfaces* surfaces) {
     if (!localPositions || !indices || vertexCount < 3 || indexCount < 3) return 0;
 
     std::vector<f32> positions;
     std::vector<u32> wound;
     scaleMeshForBody(localPositions, vertexCount, indices, indexCount, worldXf.scale, positions, wound);
+
+    // A mesh that carries physical surfaces is built as a shape with a palette. The triangle ORDER is unchanged by the
+    // mirror correction above (it swaps indices within a triangle), so the per-triangle palette still lines up.
+    if (surfaces && surfaces->usable(indexCount)) {
+        const i32 shape = aver_phys_shape_mesh(positions.data(), static_cast<i32>(vertexCount),
+                                               reinterpret_cast<const i32*>(wound.data()), static_cast<i32>(wound.size()),
+                                               surfaces->triPalette, surfaces->palette, static_cast<i32>(surfaces->paletteCount),
+                                               nullptr, nullptr, 0);
+        if (shape) {
+            const f32 origin[3] = {worldXf.position.x, worldXf.position.y, worldXf.position.z};
+            const Quat& r = worldXf.rotation;
+            // EXACTLY IDENTITY is a null rotation -- the same guard as below.
+            const f32 quat[4] = {r.x, r.y, r.z, r.w};
+            const bool identity = r.x == 0.0f && r.y == 0.0f && r.z == 0.0f && r.w == 1.0f;
+            const i32 body = aver_phys_body_from_shape(shape, origin, identity ? nullptr : quat, AVER_PHYS_MOTION_STATIC, 0.0f, nullptr, 0);
+            aver_phys_shape_release(shape);   // the body keeps the shape alive
+            if (body) return body;
+        }
+        // Refused (a degenerate mesh): fall through to the plain path, which reports it the way it always did.
+    }
 
     // aver_phys_add_mesh takes int32_t indices; a u32 index buffer reinterprets bit-for-bit, the same
     // cast modules/render.softbody/src/SoftBodyScene.cpp already makes for the identical ABI shape --
@@ -161,6 +182,7 @@ i32 addPivotBoxBody(const Transform& worldXf, const Vec3& localMin, const Vec3& 
 #  include "aver/core/Hash.hpp"
 #  include "aver/scene/Components.hpp"
 #  include "aver/scene/scene_abi.h"
+#  include "aver/world/PhysicsShapeCache.hpp"
 
 namespace aver::world {
 
@@ -190,13 +212,26 @@ i32 addStaticPlacementBody(const InstantiateOptions& opt, std::unordered_map<u64
             // many placements name it, each wrapping it at its own transform through Jolt's
             // ScaledShape (aver_phys_add_mesh_shape_body) -- no per-placement triangle scaling
             // and no second BVH build for a mesh this level already placed once.
+            // THE MESH'S PHYSICAL SURFACES, when the host knows them (a material slot that names one): the shape is then
+            // built with a palette, so a raycast on any placement of it reports the slot's surface. The same descriptor
+            // serves the baked fallback below.
+            MeshSurfaces surfaces;
+            if (!(opt.localTriangleSurfacesFor &&
+                  opt.localTriangleSurfacesFor(meshId, surfaces.triPalette, surfaces.triCount, surfaces.palette, surfaces.paletteCount) &&
+                  surfaces.usable(triIndexCount)))
+                surfaces = MeshSurfaces{};
             i32 shapeHandle = 0;
             if (const auto cached = meshShapeCache.find(meshId); cached != meshShapeCache.end()) {
                 shapeHandle = cached->second;
             } else {
-                shapeHandle = aver_phys_create_mesh_shape(
-                    triPositions, static_cast<i32>(triVertexCount),
-                    reinterpret_cast<const i32*>(triIndices), static_cast<i32>(triIndexCount));
+                shapeHandle = surfaces.usable(triIndexCount)
+                    ? aver_phys_shape_mesh(triPositions, static_cast<i32>(triVertexCount),
+                                           reinterpret_cast<const i32*>(triIndices), static_cast<i32>(triIndexCount),
+                                           surfaces.triPalette, surfaces.palette, static_cast<i32>(surfaces.paletteCount),
+                                           nullptr, nullptr, 0)
+                    : createMeshShapeFromSource(triPositions, static_cast<i32>(triVertexCount),
+                                                reinterpret_cast<const i32*>(triIndices), static_cast<i32>(triIndexCount),
+                                                opt.shapeCacheDir, opt.shapeKeyFor ? opt.shapeKeyFor(meshId) : 0);
                 meshShapeCache.emplace(meshId, shapeHandle);
                 if (shapeHandle) ++newShapes;
             }
@@ -212,7 +247,8 @@ i32 addStaticPlacementBody(const InstantiateOptions& opt, std::unordered_map<u64
             // in the first place. TRIANGLES WERE OFFERED, so this placement does not fall through
             // to the box even if every attempt to use them returns 0.
             if (!body)
-                body = addStaticMeshBody(wx, triPositions, triVertexCount, triIndices, triIndexCount);
+                body = addStaticMeshBody(wx, triPositions, triVertexCount, triIndices, triIndexCount,
+                                         surfaces.usable(triIndexCount) ? &surfaces : nullptr);
             usedMesh = true;
             meshTriCount = triIndexCount / 3;
         }

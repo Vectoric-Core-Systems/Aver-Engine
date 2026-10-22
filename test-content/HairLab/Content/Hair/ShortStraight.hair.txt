@@ -1,0 +1,10 @@
+# HairLab: short straight hair, brown. Edit and re-run AverAssetC hair-text.
+OCHAIR 1
+SCALP Meshes/HairScalp.ocmesh
+SIM iterationsPerSecond 360 maxDeltaTime 0.0333 simFraction 0.1
+MATERIAL 0 linearDamping 3 angularDamping 3 bendCompliance 5e-8 globalPose 0.02 0 0 0.4
+LOOK 0 baseColor 0.30 0.20 0.11 tipColor 0.42 0.29 0.16 colorVariation 0.15 widthRootCm 0.10 widthTipCm 0.04 roughness 0.35 shift 0.07
+       tt 1 trt 1 azimuthRough 0.4 tint 0.9 0.6 0.4 scatter 0.5
+GENERATE seed 1001 strands 6000 lengthCm 6 9 segments 8 curlCm 0 curlFrequency 3 clumps 0 partDirection 0 1 0 partWidthCm 0.6
+         style 0 0 -1 styleWeight 0.45
+LOD distances 300 700 1500 strandFractions 1 0.5 0.25 0.12

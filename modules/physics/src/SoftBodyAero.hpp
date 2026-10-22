@@ -36,7 +36,11 @@ void installListener();                 // after SetContactListener at init
 void removeListener();                  // at shutdown
 void beginCall();                       // top of aver_phys_step: clears last call's impact events
 void onStepBegin(float dt);             // inside the fixed loop, before system.Update
+void onStepEnd(float dt);               // inside the fixed loop, after system.Update (sensor enter / exit events)
 void onBodyRemoved(int32_t handle);     // aver_phys_remove_body
 void destroyAll();                      // shutdown, before the body loop
 
 } // namespace aver::physics::softbody
+
+// Strand hair (PhysicsHair.cpp) is torn down by the same shutdown path: aver_phys_shutdown calls this before the world goes, so no Jolt Hair outlives the PhysicsSystem it collides against.
+namespace aver::physics::detail { void hairDestroyAll(); }

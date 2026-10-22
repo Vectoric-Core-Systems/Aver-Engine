@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Hair",
+  "dir": "hair",
+  "displayName": "Strand Hair",
+  "description": "Strand hair authoring: the .ochair groom, the procedural generator, glTF curve import, collision proxies and the settings builder that drives Jolt's Hair.",
+  "category": "Physics",
+  "option": "AVER_MODULE_HAIR",
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.Physics"],
+  "consequence": "No strand hair: grooms cannot be generated, imported from curves or built into a simulation."
+}

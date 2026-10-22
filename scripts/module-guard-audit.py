@@ -83,6 +83,7 @@ NS_MACRO = {
     "fluids":    "AVER_MODULE_FLUIDS",
     "sr":        "AVER_MODULE_SR",
     "upgrade":   "AVER_MODULE_UPGRADE",
+    "hair":      "AVER_MODULE_HAIR",
 }
 
 # The plain-C ABI each module exports for the managed layer. A module's namespace is not the only
@@ -115,6 +116,12 @@ IMPLIES = {
     "AVER_MODULE_FRAMEWORK":       ["AVER_MODULE_SCENE"],
     "AVER_MODULE_PARTICLES":       ["AVER_MODULE_SCENE"],
     "AVER_MODULE_RENDER_SOFTBODY": ["AVER_MODULE_SCENE", "AVER_MODULE_PHYSICS"],
+    # Aver.Hair lists Aver.Physics among its DEPS (modules/hair/CMakeLists.txt) and drives its aver_phys_hair_* C ABI.
+    "AVER_MODULE_HAIR":            ["AVER_MODULE_PHYSICS"],
+    # Aver.Hair.Scene lists Aver.Hair, Aver.Physics and Aver.Scene among its DEPS (modules/hair.scene/CMakeLists.txt) and the macro arrives PUBLICly.
+    "AVER_MODULE_HAIR_SCENE":      ["AVER_MODULE_SCENE", "AVER_MODULE_PHYSICS", "AVER_MODULE_HAIR"],
+    # Aver.Render.Hair lists Hair.Scene, Render.PBR and Scene among its DEPS (modules/render.hair/CMakeLists.txt).
+    "AVER_MODULE_RENDER_HAIR":     ["AVER_MODULE_SCENE", "AVER_MODULE_PHYSICS", "AVER_MODULE_HAIR", "AVER_MODULE_HAIR_SCENE", "AVER_MODULE_PBR"],
     # Aver.Synapse.Scene lists Aver.Synapse among its DEPS (modules/synapse.scene/CMakeLists.txt),
     # and that macro arrives PUBLICly with the target, so the join proves both halves.
     "AVER_MODULE_SYNAPSE_SCENE":   ["AVER_MODULE_SCENE", "AVER_MODULE_SYNAPSE"],

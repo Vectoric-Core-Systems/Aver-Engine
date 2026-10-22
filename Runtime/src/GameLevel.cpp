@@ -19,9 +19,11 @@
 #  include "aver/formats/OcMap.hpp"
 #  include "aver/scene/scene_abi.h"
 #  include "aver/world/LevelInstance.hpp"
+#  include "aver/world/PhysicsShapeCache.hpp"
 #endif
 #if AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"
+#  include "aver/physics/physics_state_abi.h"
 #endif
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_abi.h"
@@ -198,6 +200,25 @@ void GameLevel::load(const std::string& path, GameContent& content) {
         outVertexCount = static_cast<u32>(cm->positions.size() / 3);
         outIndices = cm->indices.data();
         outIndexCount = static_cast<u32>(cm->indices.size());
+        return true;
+    };
+    // The physics shape binary cache (physics_state_abi.h; off unless PHYSICS.SHAPECACHE): a mesh's collision BVH is read back from
+    // <project>/Saved/DerivedDataCache/Physics instead of built, keyed by the collision mesh's source (path, size, mtime, slot answers).
+    opt.shapeCacheDir = world::physicsShapeCacheDir(content.project().dir);
+    opt.shapeKeyFor = [&content](u64 meshId) -> u64 {
+        const GameContent::CollisionMesh* cm = content.collisionMeshFor(meshId);
+        return cm ? cm->shapeSource : 0;
+    };
+    // The same collision mesh's physical surfaces (a material slot's .ocmat PHYSSURFACE): the shape carries a palette, so a
+    // raycast or a contact on any placement of the mesh reports the slot's surface. Meshes that name none answer false.
+    opt.localTriangleSurfacesFor = [&content](u64 meshId, const u8*& outTriPalette, u32& outTriCount,
+                                              const i32*& outSurfaces, u32& outSurfaceCount) {
+        const GameContent::CollisionMesh* cm = content.collisionMeshFor(meshId);
+        if (!cm || cm->palette.empty() || cm->triPalette.size() != cm->indices.size() / 3) return false;
+        outTriPalette = cm->triPalette.data();
+        outTriCount = static_cast<u32>(cm->triPalette.size());
+        outSurfaces = cm->palette.data();
+        outSurfaceCount = static_cast<u32>(cm->palette.size());
         return true;
     };
 #if AVER_MODULE_PBR
@@ -787,6 +808,7 @@ void GameLevel::unload() {
     levelEntities_.clear();
 #if AVER_MODULE_PHYSICS
     for (const int32_t b : levelBodies_) aver_phys_remove_body(b);
+    aver_phys_snapshot_release_all();   // a snapshot names this level's bodies, which are gone now (physics_state_abi.h)
     levelBodies_.clear();
     lanes_ = fmt::OcLanesData{};
     hasLanes_ = false;

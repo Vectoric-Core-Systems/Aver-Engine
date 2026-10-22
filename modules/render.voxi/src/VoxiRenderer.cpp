@@ -1169,6 +1169,8 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
     if (drawConstants && d.matBytes) std::memcpy(d.mat, drawConstants, d.matBytes);
     d.translucent = translucent;
     d.movable = movable;
+    d.noRay = submitNoRay_;
+    d.noShadow = submitNoShadow_;
 
     // World-space bounding sphere for per-cascade cull.
     // Only local-space bounds are cached; world-space transforms per entity (differs per instance).
@@ -1777,6 +1779,8 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     };
 
     for (const Draw& d : drawsPrev_) {
+        // Strand hair that is not ray traced: no instance, no BLAS, no mover record. rtAccelDrawsKey and latePatchMovers skip it too, so the three lists agree.
+        if (d.noRay) continue;
         // Mover patch lane: record this movable draw before BLAS check (must sync with current list).
         u32 moverSlot = kRtNoInstance;
         if (moverLane && d.movable) {
@@ -2138,6 +2142,7 @@ u64 VoxiRenderer::rtAccelDrawsKey(bool reuseListKey) const {
         rtMoversNow_.clear();
         u32 drawIndex = 0;
         for (const Draw& d : drawsPrev_) {
+            if (d.noRay) { ++drawIndex; continue; }   // not in the structure, so not in its key or its mover list (matches the build loop)
             const u64 h = rtDrawHash(d, matMemo, moverLane, drawLanes(drawIndex));
             // Also collects current movers for patchRtMovers() (avoids rescanning whole list).
             if (moverLane && d.movable) rtMoversNow_.push_back({h, drawIndex, kRtNoInstance});
@@ -2307,7 +2312,7 @@ void VoxiRenderer::latePatchMovers(rhi::IRenderContext& ctx) {
         rtMoversNow_.clear();
         u32 drawIndex = 0;
         for (const Draw& d : draws_) {
-            if (d.movable) rtMoversNow_.push_back({rtDrawHash(d, memo, true), drawIndex, kRtNoInstance});
+            if (d.movable && !d.noRay) rtMoversNow_.push_back({rtDrawHash(d, memo, true), drawIndex, kRtNoInstance});
             ++drawIndex;
         }
         patch = patchRtMovers(draws_, true, true);
@@ -5231,6 +5236,7 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
                 // depth map has no channel for a transmittance. They go to the TLAS instead, where a
                 // shadow ray can attenuate through them. See submitDraw.
                 if (d.translucent) continue;
+                if (d.noShadow) continue;   // CHair kHairNoShadow: hair that opts out of the cascades
                 // Sphere-sphere overlap against this cascade's own fitted bounds: a draw whose
                 // bounding sphere cannot reach the cascade's box cannot cast a shadow into it. A
                 // negative boundsRadius means the backend had no bounds for this mesh -- draw it

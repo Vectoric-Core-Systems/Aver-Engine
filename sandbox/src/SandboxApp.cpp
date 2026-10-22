@@ -637,6 +637,12 @@ editor::shutdownAnimEditors();
     }
 #if AVER_MODULE_RENDER_SOFTBODY
     // While the device lives: ~SoftBodyScene frees its draw meshes through dev_, which is gone after onShutdown.
+#if AVER_MODULE_RENDER_HAIR
+    if (hairScene_) {
+        e.device()->removeRenderFeature(hairScene_.get());
+        hairScene_.reset();
+    }
+#endif
     if (softBodyScene_) {
         e.device()->removeRenderFeature(softBodyScene_.get());
         softBodyScene_.reset();

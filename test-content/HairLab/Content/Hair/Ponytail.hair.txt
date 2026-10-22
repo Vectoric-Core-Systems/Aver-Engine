@@ -1,0 +1,10 @@
+# HairLab: a ponytail, blonde. Pulled back (engine -X) and low; the neck and shoulder proxies catch it.
+OCHAIR 1
+SCALP Meshes/HairScalp.ocmesh
+SIM iterationsPerSecond 360 maxDeltaTime 0.0333 simFraction 0.1
+MATERIAL 0 linearDamping 1.5 angularDamping 1.5 bendCompliance 2e-7 globalPose 0.005 0 0 0.2
+LOOK 0 baseColor 0.62 0.46 0.22 tipColor 0.78 0.62 0.34 colorVariation 0.12 widthRootCm 0.10 widthTipCm 0.04 roughness 0.28 shift 0.06
+       tt 1 trt 1 azimuthRough 0.35 tint 0.95 0.75 0.45 scatter 0.5
+GENERATE seed 3003 strands 8000 lengthCm 20 28 segments 12 curlCm 0.2 curlFrequency 2 clumps 12 clumpRadiusCm 8 clumpTightness 0.9
+         partDirection 0 1 0 partWidthCm 0.4 style -0.7 0 -0.7 styleWeight 0.9
+LOD distances 300 700 1500 strandFractions 1 0.5 0.25 0.12

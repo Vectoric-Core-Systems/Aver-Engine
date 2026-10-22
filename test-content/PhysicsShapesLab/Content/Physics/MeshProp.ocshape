@@ -1,0 +1,7 @@
+OCSHAPE 1
+# A DYNAMIC TRIANGLE MESH: the closed drum as a mesh leaf with a mass. It collides with convex shapes (the floor box, other props) and falls
+# THROUGH mesh floors and heightfields, because Jolt has no mesh-mesh collision. Drop one onto Meshes/LabFloorTwoSlot.ocmesh to see it.
+NAME MeshProp
+MASS 15
+NODE drum mesh Meshes/LabBarrelMesh.ocmesh
+ROOT drum

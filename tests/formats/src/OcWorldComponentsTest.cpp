@@ -266,6 +266,31 @@ int main() {
         }
     }
 
+    AVER_INFO("=== 10. COMPONENT CollisionShape (SHAPES_MATERIALS) ===");
+    {
+        fmt::OcWorldData w;
+        check(fmt::parseOcworld("OCWORLD 1\nNAME T\n"
+                                "PLACE a.ocmesh 0 0 0 0 0 0 1\n"
+                                "  component COLLISIONSHAPE asset=Physics/Chair.ocshape surface=%237e3a0f12 motion=dynamic noscale=1\n"
+                                "PLACE b.ocmesh 0 0 0 0 0 0 1\n"
+                                "  COMPONENT CollisionShape asset%23=0123456789abcdef\n", w, &err), "parses: " + err);
+        check(w.placements.size() == 2 && w.placements[0].components.size() == 1 && w.placements[1].components.size() == 1, "one record on each placement");
+        if (w.placements.size() == 2 && w.placements[0].components.size() == 1 && w.placements[1].components.size() == 1) {
+            const fmt::OcPlacedComponent& a = w.placements[0].components[0];
+            check(a.type == "CollisionShape", "the type reads in canonical case whatever case was written");
+            const std::string* sf = a.find("surface");
+            check(sf && *sf == "#7e3a0f12", "an escaped # in a value reads back as #");
+            check(a.find("motion") && *a.find("motion") == "dynamic" && a.find("noscale") && *a.find("noscale") == "1", "motion and noscale read");
+            check(w.placements[1].components[0].find("asset#") != nullptr, "the id-only asset key reads as asset#");
+            const std::string text = fmt::writeOcworld(w);
+            check(contains(text, "COMPONENT CollisionShape asset=Physics/Chair.ocshape surface=%237e3a0f12 motion=dynamic noscale=1") && contains(text, "asset%23=0123456789abcdef") && !contains(text, "COLLISIONSHAPE"),
+                  "written in canonical case with the # escaped");
+            fmt::OcWorldData b;
+            check(fmt::parseOcworld(text, b, &err) && b.placements.size() == 2 && b.placements[0].components == w.placements[0].components &&
+                      b.placements[1].components == w.placements[1].components,
+                  "and round trips");
+        }
+    }
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else                 AVER_ERROR("=== {} assertions, {} FAILED ===", g_checks, g_failures);

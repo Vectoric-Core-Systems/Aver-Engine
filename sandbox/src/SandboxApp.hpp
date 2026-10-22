@@ -159,6 +159,8 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // Unconditional, unlike ParticleEditor.hpp above: .ocfoliage is not gated behind any module -- see
 // OcFoliage.hpp's own comment on why the format needs neither Aver.Scene nor Aver.Landscape.
 #include "FoliageTypeEditor.hpp"
+#include "HairGroomTab.hpp"       // Groom tab (.ochair) and the Hair Details section
+#include "HairDebugOverlay.hpp"   // Show > Hair
 // Unconditional for the identical reason: OcInput.hpp's own comment states it needs no engine
 // dependency either.
 #include "InputSchemeEditor.hpp"
@@ -172,6 +174,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "SoftBodyDebugOverlay.hpp"   // Show > Soft Bodies (also pulls the soft-body system header when the module is on)
 
 #include "VehicleDebugOverlay.hpp"    // Show > Vehicles and the .ocvehicle editor's spec preview
+#include "PhysicsDebugOverlay.hpp"    // Show > Physics (Jolt's debug renderer as a line feed) and the profiler's Physics (Jolt) section
 #include "VehicleDetailsModel.hpp"    // VehicleSectionEnv, drawVehicleSection
 #if AVER_MODULE_VEHICLE
 #  include "VehicleEditor.hpp"        // makeVehicleEditor, vehicleStarterText
@@ -264,6 +267,9 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // Fluids and Soft-Body are independent of Particles.
 #if AVER_MODULE_RENDER_SOFTBODY && AVER_MODULE_SCENE
 #include "aver/render/SoftBodyScene.hpp"
+#endif
+#if AVER_MODULE_RENDER_HAIR && AVER_MODULE_SCENE
+#include "aver/render/HairScene.hpp"
 #endif
 
 #if AVER_MODULE_PBR
@@ -3552,6 +3558,12 @@ private:
     editor::VehicleDebugFrame vehicleDebugFrame_;
     rhi::LineHandle vehicleDebugMesh_ = 0;
 #endif
+#if AVER_MODULE_PHYSICS
+    // Show > Physics: Jolt's debug renderer (bodies, constraints, contacts, static triangles, labels ...). Not persisted. The line mesh is rebuilt each frame.
+    editor::PhysicsDebugOptions physicsDebug_;
+    editor::PhysicsDebugFrame physicsDebugFrame_;
+    rhi::LineHandle physicsDebugMesh_ = 0;
+#endif
     // Viewport Show flags. Both default ON.
     bool showStaticMeshes_=true;
     bool showAtmosphere_=true;
@@ -3914,6 +3926,9 @@ private:
 #if AVER_MODULE_RENDER_SOFTBODY
     // Beside skinnedScene_: a per-entity vertex source that the scene pass substitutes for the authored mesh.
     std::unique_ptr<aver::render::SoftBodyScene> softBodyScene_;
+#if AVER_MODULE_RENDER_HAIR
+    std::unique_ptr<aver::render::HairScene> hairScene_;
+#endif
 #endif
 #endif
     std::string skinSceneDir_;

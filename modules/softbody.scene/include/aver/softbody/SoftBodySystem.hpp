@@ -253,6 +253,10 @@ using NotifyFn = void (*)(scene::Entity e, const char* name, void* user);
 using BoneIndexFn = i32 (*)(scene::Entity e, const std::string& bone, void* user);
 // Turns an asset id into a path (the same function the hosts hand AnimSystem).
 using PathFn = std::string (*)(u64 objectId, void* user);
+// Wave 11. The physics handle of the ragdoll that belongs to a skeleton entity (the group id a soft body can ignore), or 0.
+using RagdollGroupFn = i32 (*)(scene::Entity skeleton, void* user);
+// Wave 11. Appends the extra PieceViews of another system (SoftShapeSystem: jelly and rope); see addViewSource.
+using ViewSourceFn = void (*)(std::vector<PieceView>& out, void* user);
 
 class SoftBodySystem {
 public:
@@ -284,7 +288,10 @@ public:
     void setCharacterProxyFn(ProxyFn fn, void* user) { proxyFn_ = fn; proxyUser_ = user; }
     void setNotifySink(NotifyFn fn, void* user) { notifyFn_ = fn; notifyUser_ = user; }
     void setBoneIndexFn(BoneIndexFn fn, void* user) { boneFn_ = fn; boneUser_ = user; }
+    // Wave 11: which ragdoll a cloth with "group": { "ragdollOf": "owner" } ignores. Null: the group is never applied.
+    void setRagdollGroupFn(RagdollGroupFn fn, void* user) { ragdollGroupFn_ = fn; ragdollGroupUser_ = user; }
     void setViewPos(const Vec3& p) { viewPos_ = p; }
+    Vec3 viewPos() const { return viewPos_; }
     // Where sound requests go (the host adapter in Runtime/include/aver/game/SoftBodyEffects.hpp). Null: silent.
     void setSoundSink(SoundFn fn, void* user) { soundFn_ = fn; soundUser_ = user; }
     // The master switch for break effects (particles and sounds). Immediate.
@@ -337,6 +344,29 @@ public:
     bool saveState(scene::Entity e, std::string& out) const;
     // Stores a payload under the (new) entity; the entry applies it when it is built. False for a malformed payload.
     bool restoreState(scene::Entity e, std::string_view payload);
+
+    // ---- wave 11 (docs/plans/wave11/SOFTBODY_HAIR.md): inflatables and the seams SoftShapeSystem uses ----
+    // Sets the pressure (kPa at rest volume) of a closed cloth; applied at the next tick with the other ops. False for an
+    // entity with no cloth body, a destructible, or a negative value. 0 deflates.
+    bool setPressure(scene::Entity e, f32 kPa);
+    f32 pressureOf(scene::Entity e) const;
+    // The physics handle of the entity's root piece, 0 when it has no live soft body.
+    i32 bodyOf(scene::Entity e) const;
+    // The cloth or destructible entity a physics body belongs to, kInvalidEntity when none.
+    scene::Entity entityOfBody(i32 body) const;
+    // Another system's PieceViews: `fn` is called at the end of every publish() and appends to the list pieces() returns, so
+    // the draw side reads one list. refreshViewSources() rebuilds that tail (call it after the other system ticked).
+    void addViewSource(ViewSourceFn fn, void* user);
+    void removeViewSource(ViewSourceFn fn, void* user);
+    void refreshViewSources();
+    // A mesh that has no file (the rope tube's placeholder cube): meshData(id) returns it, before any host source.
+    void registerSyntheticMesh(u64 id, const fmt::OcMeshData& mesh);
+    // The parsed .ocsoft behind an id through the same sources the cloth path uses, or null.
+    const SoftAsset* softAsset(u64 id) { return assetFor(id); }
+    // A graph event at an entity (the notify sink the host installed); no-op without one.
+    void notifyEntity(scene::Entity e, const char* name) {
+        if (notifyFn_) notifyFn_(e, name, notifyUser_);
+    }
 
     // ---- outputs ----
     const PieceView* pieces(u32& count) const;
@@ -477,6 +507,11 @@ private:
         u64 saveMeshKey = 0;
         std::unique_ptr<SoftState> restore;   // the blob being replayed by initialPiece
         std::vector<f32> restorePos, restoreVel;
+        // ---- wave 11 ----
+        f32 pressureKPa = 0.0f;            // the live inflation pressure (a closed cloth); a rebuild passes it on
+        f32 leakKPaPerS = 0.0f;
+        bool groupApplied = false;         // the ragdoll collision group was set
+        i32 groupHandle = 0;               // ... to this (a rebuild passes it on)
     };
 
     struct InboxItem {
@@ -572,6 +607,11 @@ private:
     bool buildProxy(scene::World& world, Entry& en, const SimMeshInput& authored, SimBuildSpec& spec, bool& notReady);
     void proxyPositions(Entry& en, Piece& p);
 
+    // ---- SoftBodyBuild.cpp (wave 11) ----
+    void setEntryPressure(Entry& en, f32 kPa);              // en.pressureKPa and every piece's body
+    void applyPressureOps();                                // the queue setPressure fills, in arrival order
+    void applyGroup(Entry& en);                             // "ragdollOf": "owner", once the ragdoll exists
+
     // ---- SoftBodyCloth.cpp ----
     void clothStep(scene::World& world, Entry& en, f32 dt);
     void applyLodAndFreeze(scene::World& world, f32 dt);
@@ -615,6 +655,14 @@ private:
     // saved damage waiting for its entity's entry
     std::unordered_map<scene::Entity, std::unique_ptr<SoftState>> pendingRestore_;
     std::unordered_map<scene::Entity, u32> proxyWait_;
+    // wave 11
+    struct ViewSource { ViewSourceFn fn = nullptr; void* user = nullptr; };
+    std::vector<ViewSource> viewSources_;
+    usize baseViewCount_ = 0;                          // views_ before the view sources appended theirs
+    std::vector<std::pair<scene::Entity, f32>> pressureOps_;
+    std::unordered_map<u64, fmt::OcMeshData> synthMeshes_;
+    RagdollGroupFn ragdollGroupFn_ = nullptr;
+    void* ragdollGroupUser_ = nullptr;
 
     MeshSourceFn meshFn_ = nullptr;
     void* meshUser_ = nullptr;

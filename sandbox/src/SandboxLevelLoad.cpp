@@ -3,6 +3,9 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#if AVER_MODULE_PHYSICS
+#include "aver/physics/physics_state_abi.h"   // aver_phys_snapshot_release_all in unloadLevel
+#endif
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "LightLevelIo.hpp"
 #include "SequenceTrackOps.hpp"   // [wave5/sequencer]
@@ -1172,6 +1175,7 @@ void SandboxApp::unloadLevel(Engine& eng) {
     if (sel_ == kSelScene) { sel_ = -1; selEntity_ = scene::kInvalidEntity; }
 #if AVER_MODULE_PHYSICS
     for (const int32_t b : levelBodies_) aver_phys_remove_body(b);
+    aver_phys_snapshot_release_all();   // the editor's unloadLevel: snapshots of this level's bodies could never be restored again
     levelBodies_.clear();
 #endif
 #if AVER_MODULE_FLUIDS

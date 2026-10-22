@@ -1,0 +1,15 @@
+OCMAT 1
+# M_LabRubber: a plain lab material naming the physical surface Rubber.
+SHADER standard
+BLEND opaque
+CULL back
+FLAGS twosided=0 castshadow=1
+
+PARAM baseColorFactor 0.120 0.120 0.140 1.0
+PARAM metallicFactor 0.0
+PARAM roughnessFactor 0.7
+PARAM emissiveFactor 0.0 0.0 0.0
+PARAM normalScale 1.0
+PARAM occlusionStrength 1.0
+
+PHYSSURFACE Rubber

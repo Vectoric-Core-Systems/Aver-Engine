@@ -272,11 +272,151 @@ the last deposit, hit entity, dent depth and strain.
 Details section deposit 5, 25, 90, 400 and 3000 J. `SoftBodyCalibrationTest` prints the same ladder headless and asserts
 only coarse brackets. Every preset number stays UNVERIFIED until that pass is done headed.
 
+## 11. The rest of Jolt (wave 11, physics ABI)
+
+Design: `docs/plans/wave11/SOFTBODY_HAIR.md` sections 2.2 and 2.3. `physics_softbody_ext_abi.h` (`aver_phys_sbx_*`,
+`AVER_PHYS_SBX_ABI_VERSION 1`) adds Jolt's unwrapped soft-body features to the builder; `physics_softbody_abi.h` is not
+edited and a body that calls nothing here is the body it was (`SoftBodyExtTest` pins it). C#: `Aver.Physics/Native.SoftBodyExt.cs`
+and `SoftBodyExt.cs` (members of `SoftBodyBuilder` and `SoftBodyHandle`). Everything below is UNVERIFIED until the first run.
+
+**Builder.** `volumes` (tetrahedra, rest volume measured at finish), `lra` and `lra_auto` (Euclidean or geodesic from the
+closest pinned vertex), `rods` and `rod_chain` (Cosserat rods; a rod no bend-twist pair names is refused), `auto` (Jolt's
+`CreateConstraints`; refused together with staged edges or bends) and `params`. A body that stages volumes, rods or `auto` may
+have no faces: finish gives it one face over its first three vertices (Jolt needs at least one). `slots` maps each staged item
+to its final index, because `Optimize` reorders them.
+
+**Pressure** is kPa at rest volume: the ABI converts to Jolt's n R T with the rest volume of the settings' rest positions. It
+needs a closed shell wound outward (every edge shared by two faces); an open or inside-out mesh refuses `set_pressure`
+(Unsupported) and ignores the builder param with a log line. `volume` reports rest and current cm^3.
+
+**Attachments** (grab, anchors): the vertex gets inverse mass 0 and, at the start of each fixed step, the velocity that carries
+it to its target (a plain point, or a point of another body in that body's own frame), capped by `maxSpeedCmS`. One way: the
+target feels nothing. `detach` gives back the mass it had; a vanished target body releases the vertex. Attached vertices
+survive a rebuild (`finish` with `replaceBody`) while their index is valid. A body with attachments is kept awake.
+
+**Contact policy** runs in the soft-body contact listener: mass scales per body or per pair, a pair can be ignored or set to
+SENSOR. **Sensors**: bodies that are Jolt sensors and SENSOR pairs are diffed once per step (`softbody::onStepEnd`) into
+enter and exit events, polled with `sensor_count` / `sensor_get` and cleared at the top of `aver_phys_step`. A sleeping body
+reports nothing and keeps its inside set. **Collision group**: a soft body ignores every rigid body whose group id equals
+its own (a ragdoll's handle); one shared `GroupFilterTable` does it, because Jolt asks the soft body's filter first.
+
+**Buoyancy** is ours (Jolt has none for soft bodies): per face, hydrostatic pressure on a closed mesh plus quadratic drag on any
+mesh, against the host water sampler (per face), the global plane, or a plane of the body's own (`OWN_PLANE`). The formulas are in
+`SoftBodyFluid.cpp`. A buoyant body is kept awake while any face is submerged; asleep, it costs a bounds test.
+
+**Rods**: `rod_state` returns, for rod i in final order, a world quaternion whose engine +X axis is the rod's direction and the
+angular velocity. Rod inverse mass follows `set_inv_mass` (a rod takes the smaller inverse mass of its two vertices).
+
+## 12. Inflatables, jelly, ropes and cables, fast cloth (wave 11, scene layer)
+
+Design: `docs/plans/wave11/SOFTBODY_HAIR.md` sections 2.4 to 2.8. Everything here is UNVERIFIED until the first headed pass: the
+numbers in the tables are starting values.
+
+**`.ocsoft` additions** (still `"version": 1`; every key optional and written only when it differs, so an older asset hashes and saves
+as it did). `kind` gains `jelly` and `rope`; presets `jelly` (5) and `rope` (6) join the five material presets (C# `SoftPreset`; a
+cloth or destructible still offers only the first five).
+
+```json
+{ "format":"ocsoft", "version":1, "kind":"cloth", "preset":"cloth_light",
+  "cloth":   { "solver":"fast", "bend":"distance", "lra":"geodesic", "lraSlack":1.02 },
+  "inflate": { "pressureKPa":3.0, "leakKPaPerS":0.0 },
+  "group":   { "ragdollOf":"owner" } }
+{ "format":"ocsoft", "version":1, "kind":"jelly", "preset":"jelly",
+  "jelly":   { "cellCm":10, "snapCm":3, "volumeCompliance":2e-4, "edgeCompliance":5e-5, "vertexRadiusCm":3.5, "densityKgM3":300, "maxNodes":2048 } }
+{ "format":"ocsoft", "version":1, "kind":"rope", "preset":"rope",
+  "rope":    { "radiusCm":1.2, "segmentCm":12, "massPerMeterKg":0.4, "slack":1.02, "sides":8, "uvCmPerTile":20,
+               "stretchCompliance":1e-8, "bendTwistCompliance":1e-3, "material":"M_Rope" } }
+```
+
+- **`cloth.solver`** `cage` (default, the wave 9 path) or `fast`: the body is built with `aver_phys_sbx_builder_auto` (Jolt's edges, shear
+  edges, `bend` of `none`, `distance` or `dihedral`, and `lra` from the pinned vertices with `lraSlack` as the distance multiplier). It
+  is the cheap path for flags, curtains and capes and cannot dent or tear (`tearable` with `fast` is refused by `valid()`; a component's
+  `kClothTearable` is ignored with a log line). The cage still exists for the draw and the pins.
+- **`inflate.pressureKPa`** makes a closed cloth an inflatable: kPa at the REST volume, passed to the builder as `AVER_PHYS_SBX_P_PRESSURE_KPA`
+  so a tear rebuild keeps it. The scene system flips the PHYSICS copy of the faces when the authored winding is inside out for Jolt (the
+  engine's render winding is cross(B - A, C - A) outward; the pressure wants (C - A) x (B - A)). A mesh that is not closed logs
+  `inflate needs a closed mesh` and simulates as plain cloth. `leakKPaPerS` ramps the pressure down each tick (a puncture). At run time:
+  `SoftBodySystem::setPressure(entity, kPa)` (the relay op `Set Soft Pressure`, `Entity.SetSoftPressure`), applied at the next tick.
+- **`group.ragdollOf: "owner"`** sets `aver_phys_sbx_set_collision_group` to the physics handle of the ragdoll of the entity that owns the
+  skeleton, once it exists (the host installs `SoftBodySystem::setRagdollGroupFn`): a cape never collides with the proxy ragdoll of its wearer.
+
+**Components** (registered at runtime like `CCloth`; `SoftShapeSystem::registerComponents`, `attachJelly`, `attachRope`; neither carries
+`CSoftBody`, the marker `SoftBodySystem` would adopt as a legacy soft body).
+
+| Component | Size | Fields (inputs) | OUT |
+|---|---|---|---|
+| `CSoftVolume` (jelly) | 48 | `asset`, `preset` (reserved), `flags` (`kVolNoWorld`, `kVolNoGravity`), `stiffnessScale`, `cellCm`, `gravityScale`, `dampingScale` (0 reads 1 / the asset) | `outVolumeRatio`, `outMaxStretch`, `outState`, `outNodes` |
+| `CSoftRope` | 64 | `asset`, `startEntity`, `endEntity`, `startOffset`, `endOffset`, `lengthCm`, `radiusCm`, `flags` (`kRopeNoWorld`, `kRopeNoStartPin`, `kRopeNoEndPin`, `kRopeTail`) | `outLengthCm`, `outStrain`, `outState` (segment count from bit 8) |
+
+`outState` bits: awake 1, frozen 2, over the cap 4, failed 8, cut 16 (rope), asset stale 32.
+
+**Jelly.** `buildLattice` (pure, `Lattice.hpp`) fills a closed mesh with the cells of a grid whose centre is inside (ray parity, with the
+mesh welded first), splits each kept cube into six Kuhn tetrahedra around the same diagonal (so neighbours conform), takes the boundary
+triangles as the Jolt faces (wound for the physics ABI) and snaps boundary nodes within `snapCm` onto the surface. The render mesh is
+embedded by tetrahedral barycentric coordinates (weights capped at 2 in magnitude; a vertex farther out is pulled onto its tetrahedron).
+The body is `builder_begin(nodes)`, the lattice edges with `edgeCompliance`, `builder_volumes` with `volumeCompliance` (0 =
+incompressible), node masses from the asset's density. An open mesh, more than `maxNodes` nodes, or no mesh yet: the entity keeps its
+authored mesh (failed / over-cap bit), or is retried until the mesh resolves. Collision is against the stair-stepped lattice; the mesh may
+poke up to half a cell beyond it, which `vertexRadiusCm` (default 0.35 of the cell) hides.
+
+**Rope.** `planRope` (pure, `Rope.hpp`) lays nodes along a parabola sagging toward -Z whose arc length is the rope's length (the chord
+times `slack` when the component names none), resampled to even arc length: at least 3 nodes, at most `maxRopeNodes`. The body is a
+face-less Jolt rod chain (`rod_chain`); each end is `aver_phys_sbx_attach`ed to its anchor (an entity's point in that entity's space, or a
+world point) every tick the target moved, and `detach`ed when the end is freed or its anchor entity dies. The tube has `sides + 1` vertices
+per ring (the last repeats the first so the texture wraps), rings perpendicular to the local tangent with their twist from the rods' Bishop
+frames (`aver_phys_sbx_rod_state`), UVs from the REST curve so a stretching rope does not swim its texture; every vertex is
+`kGeneratedVertex`, drawn through the entity's matrix. A rope with no renderer gets one with the engine cube as its placeholder; the
+draw side asks the host for the mesh behind the view's id, which `SoftBodySystem::registerSyntheticMesh` answers. **Cut**: `cutRope` picks
+the interior node nearest the point (within about a segment), creates the tail's entity at once, and the next tick rebuilds both pieces
+from the live node positions and velocities (the head keeps the start, the tail gets the original end's anchor, both cut ends free).
+
+**One view list.** `SoftBodySystem::addViewSource` lets another system append `PieceView`s at the end of `publish()`;
+`refreshViewSources()` rebuilds that tail (the shape system calls it after its own tick), so the draw side still reads
+`softBodySystem().pieces()` and `Aver.Render.SoftBody` is unchanged. Frame order: physics step, `World::flush`,
+`softBodySystem().tick`, `softShapeSystem().tick`, draw update.
+
+**Ops** (relay `framework_softshape_abi.h`, C# `Entity` members in `SoftShapes.cs`, graph rows): `Set Soft Pressure`, `Get Soft Volume`,
+`Grab Soft Body` (the nearest vertex within reach is attached and carried to the target each step; the grab id is the vertex index + 1),
+`Move Soft Grab`, `Release Soft Grab`, `Set Soft Buoyancy` / `Get Soft Submerged` (the world water), `Set Soft Contact` (inverse mass
+scales), `Set Soft Pair Mode` (normal, sensor or ignore against a rigid body or another soft body), `Add Soft Jelly`; and the `Rope`
+family: `Create Rope`, `Set Rope End`, `Free Rope End`, `Cut Rope`, `Get Rope`, `Destroy Rope`. Sensor enter and exit reach graphs as the
+named events `SoftBodySensorEntered` / `SoftBodySensorExited` at the soft body's entity and are polled with
+`SoftShapes.DrainSensorEvents` (soft entity, sensor entity, entered).
+
+**Level records.** Both shapes are placed components like `Cloth` (they need a mesh placement; a rope draws as its tube and replaces the
+placement's own mesh):
+
+```
+COMPONENT Jelly asset=<path> stiffness=1 cell=0 gravity=1 damping=1 world=0 gravityon=0
+COMPONENT Rope asset=<path> start=x,y,z end=x,y,z length=0 radius=0 world=0 startpin=0 endpin=0
+```
+
+Default keys are omitted when the editor saves. `start` and `end` are WORLD points in cm; absent, a rope starts at its placement and ends
+250 cm ahead of it. `world=0` makes the shape ignore the world, `gravityon=0` removes a jelly's gravity, `startpin=0` / `endpin=0` let that end
+go. An end anchored to an entity (`Set Rope End`) is script state: a level stores that end's current world position instead. A Jelly, a Rope,
+a Cloth and a Destructible refuse each other on one entity.
+
+**Editor.** Add Component rows `Jelly` and `Rope`; Details sections for both, and a Solver / Inflate / Group block and a live Pressure
+slider on `Cloth` (`SoftShapeGizmos.cpp`, model in `SoftShapeDetailsModel.hpp`). A selected rope always shows its two end handles (cyan
+crosses) and, until it is simulated, its planned curve; dragging a handle in the viewport moves that end on the camera-facing plane (a
+Details edit is an undo step, a viewport drag is not). Show > Soft Bodies > Constraints draws each jelly's lattice edges coloured by stretch
+(blue compressed, green at rest, red at 25 percent), each rope's polyline with every rod's three axes and pinned ends as yellow crosses.
+Not drawn: long range attachments of a fast cloth and the pair policies (the physics layer keeps them, the scene does not).
+
+**Not here.** Soft versus soft collision and self-collision (Jolt has neither); a rope colliding along its length between nodes (vertices
+only: keep `segmentCm` below the thinnest thing it must wrap); two-way rope-and-body coupling (an attachment's vertex follows, the body
+feels nothing; contacts are two way as for any soft-versus-rigid contact); a rope's tension impulse.
+
+## 13. Strand hair
+
+Strand hair shares this wave's plan (`docs/plans/wave11/SOFTBODY_HAIR.md` part B) but not its code: it is Jolt's Hair behind `physics_hair_abi.h`, an `.ochair` groom and `Aver.Hair`. See `docs/HAIR.md`.
+
 ## Tests
 
 `tests/softbody` (`SoftBodyTest`, `SoftAssetTest`, `SimMeshTest`, `DamageTest`, `IslandsTest`, `FieldsTest`, `CapsTest`,
-`SoftStateTest`, `ProxyBindTest`),
-`tests/physics` (`SoftBodyBuilderTest`), `tests/softbody.scene` (`SoftBodySystemTest`, `SoftBodyDepthTest`, `SoftBodyCalibrationTest`), `tests/framework_softfield`,
+`SoftStateTest`, `ProxyBindTest`, wave 11: `LatticeTest`, `RopeTest`),
+`tests/physics` (`SoftBodyBuilderTest`, `SoftBodyExtTest`), `tests/softbody.scene` (`SoftBodySystemTest`, `SoftBodyDepthTest`, `SoftBodyCalibrationTest`, `SoftShapeSystemTest`), `tests/framework_softfield`,
+`tests/framework_softshape` (`FrameworkSoftShapeAbiTest`, `SoftShapeDetailsModelTest`),
 `tests/render.softbody` (`SoftBodySceneTest`), `tests/editor` (`SoftBodyDetailsModelTest`, `SoftFieldDetailsModelTest`),
-`scripting/csharp/Aver.Graph.Tests` (`SoftBodyNodeTests`, `FieldsNodeTests`). Physics-dependent thresholds are UNVERIFIED
+`scripting/csharp/Aver.Graph.Tests` (`SoftBodyNodeTests`, `FieldsNodeTests`, `RopeNodeTests`). Physics-dependent thresholds are UNVERIFIED
 until the first run.

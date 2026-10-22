@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-191 public types and 1670 public members, read from `scripting/csharp/Aver.Framework/` (115 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+203 public types and 1723 public members, read from `scripting/csharp/Aver.Framework/` (123 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -1147,6 +1147,9 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public bool HasAnyTag(uint mask)` - True if any bit in mask is set.
 - `public bool AddTag(uint mask)` - Sets the bits in mask.
 - `public bool RemoveTag(uint mask)` - Clears the bits in mask.
+- `public int PhysicalSurface { get; }` - The surface label of this entity's rigid body (0 = none): identity for queries such as footsteps, not contact friction.
+- `public bool SetPhysicalSurface(int surfaceId, bool copyPhysics = false)` - Labels this entity's rigid body with a surface id (IdOf; 0 clears it).
+- `public bool SetBodyScale(Vec3 scale, bool keepMass = false)` - Sets the scale of this entity's rigid body collision shape, ABSOLUTE (relative to the unscaled shape, not to the current scale).
 - `public bool AddVehicle(string asset = "", VehiclePreset preset = VehiclePreset.Car)` - Adds a Vehicle component: from an .ocvehicle asset path, or, with no asset, from the built-in preset sized by this entity's mesh (so it needs a mesh then).
 - `public bool IsVehicle { get; }` - True when the entity carries a Vehicle component.
 - `public bool SetVehicleInput(float throttle, float steer, float brake = 0f, float handbrake = 0f)` - The driver's pedals: throttle -1..1 (negative reverses or brakes, see the aids), steer -1..1 (+1 right), brake and handbrake 0..1.
@@ -1163,6 +1166,20 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public bool RepairVehicle()` - Restores full health and gives the engine back.
 - `public bool DamageVehicle(float amount01)` - Takes amount01 of the vehicle's health (1 destroys it, which cuts the engine); a negative amount gives health back.
 - `public bool TuneVehicle(string key, float value)` - Live tuning by key (case-insensitive): power, brake, grip, suspension, steer, drag, downforce (scales, 1 = as authored), abs, tcs, manual (0 or 1) and collisionperiod (1 to 8).
+- `public bool AddHair(string asset)` - Gives this character strand hair from an .ochair groom.
+- `public bool SetHairLook(string materialAsset)` - Draws the hair with this .ocmat (a material whose shading model is hair) instead of the groom's own look.
+- `public bool SetHairWidthScale(float scale)` - Multiplies the width of every strand (the groom's look width times this).
+- `public bool SetHairDensityScale(float scale)` - The fraction of the render strands drawn on top of the distance levels, 0 to 1 (1 = all; the renderer clamps higher values).
+- `public bool SetHairStiffness(float scale)` - Divides the bend and stretch compliance of every material of the groom, so 2 is twice as stiff.
+- `public bool SetHairWindScale(float scale)` - Multiplies the world wind this hair feels.
+- `public bool SetHairWindEnabled(bool on)` - Whether the world wind moves this hair.
+- `public bool SetHairCollides(bool on)` - Whether the hair collides with the character's head, neck and shoulder proxies and with colliders added by AddHairCollider.
+- `public bool SetHairCastsShadow(bool on)` - Whether the strands cast shadow-map shadows.
+- `public bool SetHairEnabled(bool on)` - Shows or hides the hair.
+- `public bool TeleportHair()` - Puts the hair back in its default pose with no velocity at the next update, wherever the head now is (after a cut or a respawn).
+- `public bool AddHairCollider(HairColliderShape shape, Vec3 size, string bone, Vec3 offset = default)` - Adds a hull that follows bone of this character's skeleton and that hair collides with: a held prop, a hat, a shoulder pad.
+- `public bool ClearHairColliders()` - Removes every collider AddHairCollider added to this character.
+- `public bool TryGetHair(out HairState state)` - What this character's hair is doing as of the last tick.
 - `public bool SetIkRig(string rigAsset, float weight = 1f)` - Attaches an IK Rig (.ocikrig) to this entity, ensuring it has an animator.
 - `public bool SetIkRigFlags(bool feet = true, bool goals = true, bool body = true)` - Turns parts of the attached IK Rig on or off: foot placement, script goals, the pelvis solve.
 - `public bool SetIkGoal(string goal, Vec3 position, IkSpace space = IkSpace.World)` - Places a goal the rig declares (by name) at position.
@@ -1235,6 +1252,22 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public bool ClearSoftDebris()` - Destroys this soft body's debris pieces now.
 - `public bool SetSoftBodyAsleep(bool asleep)` - Holds (true) or releases (false) this soft body's pieces asleep.
 - `public bool TryGetSoftBodyDents(out int dentedEdges, out float maxSetCm, out int debrisPieces)` - Permanent set: dented edges, the largest set in cm, and live debris pieces.
+- `public bool AddJelly(string asset = "", SoftPreset preset = SoftPreset.Jelly)` - Simulates this entity's closed mesh as a jelly: a tetrahedral lattice inside it that wobbles and keeps its volume, the mesh following.
+- `public bool AddRope(Vec3 start, Vec3 end, string asset = "", float lengthCm = 0f, float radiusCm = 0f)` - Makes this entity a rope or cable between two world points, both ends pinned.
+- `public bool SetRopeEnd(RopeEnd end, Entity anchor, Vec3 offset)` - Pins a rope end to a point of an entity (offset is in that entity's space), so the rope follows a moving door, a vehicle or an animated hand.
+- `public bool SetRopeEndFree(RopeEnd end, Vec3 worldPoint, bool pinned)` - Puts a rope end at a world point: pinned there, or (pinned false) let go to hang or fall.
+- `public bool CutRope(Vec3 point, out Entity other)` - Cuts this rope at its node nearest point (an interior node within about a segment of it).
+- `public bool TryGetRope(out RopeState state)` - The rope's length, strain and segment count as of the last tick.
+- `public bool TryGetJelly(out JellyState state)` - The jelly's volume ratio, stretch and node count as of the last tick.
+- `public bool SetSoftPressure(float kPa)` - The inflation pressure of a closed cloth or a jelly, in kilopascal at its rest volume (0 deflates).
+- `public bool TryGetSoftVolume(out float restCm3, out float nowCm3)` - Rest and current volume of the soft body in cm^3 (the current one is negative when it is turned inside out).
+- `public int GrabSoftVertex(Vec3 point, float maxDistanceCm, Vec3 target)` - Grabs the vertex of this soft body (cloth, jelly or rope) nearest point within maxDistanceCm and carries it toward target every physics step.
+- `public bool MoveSoftGrab(int grab, Vec3 target)` - Moves a grab's target.
+- `public bool ReleaseSoftGrab(int grab)` - Lets the grabbed vertex go (it gets back the mass it had).
+- `public bool SetSoftBuoyancy(float fluidDensityKgM3, float drag = 1f)` - Makes the soft body float in the world's water: hydrostatic pressure on a closed body plus quadratic drag.
+- `public bool TryGetSoftSubmerged(out float fraction, out float volumeCm3)` - How much of the soft body was under water on the last step (0..1) and the displaced volume in cm^3.
+- `public bool SetSoftContact(float softScale, float otherScale)` - How the soft body trades momentum with rigid bodies: 0 = infinite mass, 1 = unchanged.
+- `public bool SetSoftPairMode(Entity other, SoftContactMode mode)` - What happens between this soft body and one other (a rigid body, or another soft body): normal, sensor events only, or ignored.
 - `public Brain Brain { get; }` - This entity's AI brain (see Brain).
 - `public EqsRun RunQuery(string contentPath, Entity target = default, Vec3? point = null, bool sync = true, GameplayTagContainer? userTags = null)` - Runs an environment query with this entity as the querier.
 - `public int ClaimSmartObject(SlotRef slot, GameplayTagContainer? userTags = null)` - Claims a smart-object slot for this entity; the claim handle, or 0 when refused (see LastRefusal).
@@ -1540,6 +1573,22 @@ Values: `DPadUp = 0`, `DPadDown`, `DPadLeft`, `DPadRight`, `Start`, `Back`, `Lef
 
 `public readonly record struct GroundSample(bool Found, float Z, Vec3 Normal, int DominantLayer, string Surface, int SurfaceId, float Friction, float Restitution)` - What the landscape is at one point: height, slope, the dominant paint layer and its physical surface.
 
+### Hair
+
+`public static class Hair` - Hair at world level.
+
+- `public static bool SetWind(Vec3 velocityCmPerS, float gustCmPerS = 0f, float gustHz = 0.3f, float turbulence = 0f)` - The world wind the hair feels: the soft bodies' wind (SetWind), which the hair system takes from the same place, so cloth, ropes and hair move together.
+
+### HairColliderShape
+
+`public enum HairColliderShape` - The shape of a hair collider (pinned to AVER_FW_HAIR_SHAPE_*, the .ochair PROXY shapes).
+
+Values: `Sphere = 0`, `Capsule = 1`, `Box = 2`
+
+### HairState
+
+`public readonly record struct HairState(bool Simulating, bool Frozen, bool Inert, bool Building, bool Built, int Lod, int RenderStrands, int SimStrands, int Colliders)` - What an entity's hair is doing: simulating, frozen by distance, inert (the groom did not build, or there is no compute device), still building, the strand level it is drawn at (0 every strand ..
+
 ### IGasClientRequests
 
 `public interface IGasClientRequests` - Receives activation requests made on a non-authoritative system, in place of failing them.
@@ -1702,6 +1751,10 @@ Values: `Digital`, `Axis1D`, `Axis2D`
 - `int RowCount { get; }` - The number of rows.
 - `string RowName(int r)` - The name of row r.
 - `string Cell(int r, int c)` - The cell text, empty when out of range.
+
+### JellyState
+
+`public readonly record struct JellyState(float VolumeRatio, float MaxStretch, int Nodes, bool Awake, bool Frozen, bool Failed)` - A jelly as of the last tick: current / rest volume, the largest lattice edge strain, the lattice node count.
 
 ### Key
 
@@ -1909,6 +1962,17 @@ Values: `Float = 0`, `Vector = 1`, `Color = 2`
 
 `public readonly record struct ParticleStats(int GpuEmitters, int CpuEmitters, int GpuParticles, int CpuParticles, int SpawnAtDropped, int GpuAllocatedKB)` - The particle system's counters, as TryGetStats returns them.
 
+### PhysicalSurfaces
+
+`public static class PhysicalSurfaces` - Physical surfaces for scripts.
+
+- `public static SurfaceHit Raycast(Vec3 origin, Vec3 direction, float maxDistanceCm, uint layerMask = uint.MaxValue)` - Casts a ray and reports what it hit: the surface at the exact triangle, cell or compound leaf, with its numbers.
+- `public static SurfaceHit Beneath(Entity entity, float probeCm = 150f)` - What an entity stands on: a ray straight down from just above its position, probeCm long, ignoring the entity's own rigid body.
+- `public static int Find(string name)` - The id of a REGISTERED surface called name (a Surfaces.ocsurf entry, a landscape layer or Register); 0 when no surface of that name is registered.
+- `public static int Register(string name, float friction = -1f, float restitution = -1f, int tag = 0)` - Adds or updates a named surface; returns its id (0 when refused).
+- `public static bool Tune(int surface, float friction, float restitution, int tag)` - Changes the numbers of a surface; live for every body on it.
+- `public static AP.SurfaceInfo? Info(int surface)` - The registry entry of surface (name, friction, restitution, tag), or null when the id is unknown.
+
 ### Physics
 
 `public static class Physics` - The simulation as a script sees it: bodies, sensors, queries and gravity.
@@ -1986,6 +2050,22 @@ Values: `Off = 0`, `Auto = 1`, `All = 2`
 
 Values: `None = 0`, `Ignore = 1`, `Apply = 2`, `Accumulate = 3`
 
+### RopeEnd
+
+`public enum RopeEnd` - Which end of a rope.
+
+Values: `Start = 0`, `End = 1`
+
+### Ropes
+
+`public static class Ropes` - Ropes and cables at world level.
+
+- `public static Entity Create(Vec3 start, Vec3 end, float lengthCm = 0f, float radiusCm = 0f, string asset = "")` - Creates a rope entity between two world points, both ends pinned.
+
+### RopeState
+
+`public readonly record struct RopeState(float LengthCm, float Strain, int Segments, bool Cut, bool Awake)` - A rope as of the last tick: the polyline length, its strain against the rest length, the segment count, whether it was cut.
+
 ### SceneQueries
 
 `public static class SceneQueries` - Counted access to sets of entities: by tag, by actor class, and a parent's children.
@@ -2054,6 +2134,12 @@ Values: `None = 0`, `Ignore = 1`, `Apply = 2`, `Accumulate = 3`
 
 `public readonly record struct SoftBodyState(float Damage01, float MaxStrain, int Pieces, int BrokenEdges, bool Awake, bool Frozen)` - What an entity's soft body is doing.
 
+### SoftContactMode
+
+`public enum SoftContactMode` - What happens when a soft body meets one particular other body (pinned to AVER_PHYS_SBX_PAIR_*).
+
+Values: `Normal = 0`, `Sensor = 1`, `Ignore = 2`
+
 ### SoftDamageKind
 
 `public enum SoftDamageKind` - What deposited the energy (pinned to softbody::DepositKind).
@@ -2106,7 +2192,17 @@ Values: `Cloth = 1`, `Destructible = 2`, `Debris = 4`, `All = 7`
 
 `public enum SoftPreset` - The material presets (pinned to softbody::SoftPreset in Material.hpp).
 
-Values: `ClothLight = 0`, `ClothHeavy = 1`, `Metal = 2`, `Wood = 3`, `Glass = 4`
+Values: `ClothLight = 0`, `ClothHeavy = 1`, `Metal = 2`, `Wood = 3`, `Glass = 4`, `Jelly = 5`, `Rope = 6`
+
+### SoftSensorEvent
+
+`public readonly record struct SoftSensorEvent(Entity Soft, Entity Sensor, bool Entered)` - A soft body entering or leaving a sensor.
+
+### SoftShapes
+
+`public static class SoftShapes` - World-level soft shape events.
+
+- `public static int DrainSensorEvents(Span<SoftSensorEvent> buffer)` - Moves the soft bodies' sensor enter / exit events of the last tick into buffer and returns how many.
 
 ### Sound
 
@@ -2153,6 +2249,11 @@ Values: `None`, `Target`, `Source`
 `public static class Surface` - Physical-surface ids: graphs and scripts compare integers instead of names.
 
 - `public static int IdOf(string? name)` - The 32-bit FNV-1a hash of the UTF-8 name, never 0 (a zero hash becomes 1); 0 for a null or empty name.
+- `public static string NameOf(int surface)` - The name registered for an id (a .ocsurf table entry, a landscape layer or Surfaces.Register); an empty string when none is, or with no physics library loaded.
+
+### SurfaceHit
+
+`public readonly record struct SurfaceHit(bool Hit, Entity Entity, Vec3 Point, Vec3 Normal, float DistanceCm, int SurfaceId, string SurfaceName, float Friction, float Restitution, int Tag)` - What a ray or a query under an entity touched.
 
 ### SwizzleOrder
 

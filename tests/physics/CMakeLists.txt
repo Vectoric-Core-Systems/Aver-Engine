@@ -62,6 +62,14 @@ add_executable(VehicleExtTest src/VehicleExtTest.cpp)
 target_link_libraries(VehicleExtTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(VehicleExtTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# HairTest -- strand hair (physics_hair_abi.h): a small groom simulated on Jolt's CPU compute backend and on a FAKE HOST that wraps the same backend behind the C
+# function table, which must agree (the adapter proved end to end), plus refusals, droop under gravity, teleport, head motion, a convex hull and wind. THE SECOND
+# TARGET HERE THAT LINKS JOLT DIRECTLY: the fake host is a Jolt consumer, and the target compiles HairWindWrapper.cpp itself so its compute system knows the
+# AverHairWind kernel. Everything else it checks goes through the ABI.
+add_executable(HairTest src/HairTest.cpp ${CMAKE_SOURCE_DIR}/modules/physics/src/HairWindWrapper.cpp)
+target_link_libraries(HairTest PRIVATE Aver.Physics Aver.Core Aver.Physics.Jolt)
+set_target_properties(HairTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 add_executable(TrackedVehicleTest src/TrackedVehicleTest.cpp)
 target_link_libraries(TrackedVehicleTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(TrackedVehicleTest PROPERTIES
@@ -150,3 +158,65 @@ endforeach()
 add_executable(SoftBodyBuilderTest src/SoftBodyBuilderTest.cpp)
 target_link_libraries(SoftBodyBuilderTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(SoftBodyBuilderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# SoftBodyExtTest -- the rest of Jolt's soft bodies (physics_softbody_ext_abi.h): pressure, tetrahedral volumes, long range attachments,
+# Cosserat rods, Jolt's constraint generator, per-vertex inverse mass, grab and release, contact policy, sensors, the collision group,
+# skin, buoyancy and determinism. ABI only: Aver.Physics and Aver.Core. (The root CMakeLists registers every *Test executable with ctest.)
+add_executable(SoftBodyExtTest src/SoftBodyExtTest.cpp)
+target_link_libraries(SoftBodyExtTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(SoftBodyExtTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PhysicsSettingsTest / PhysicsConfigTest -- the world's live solver settings (table, identity, storage, clamping, collision
+# steps, sleeping) and its init-time limits (update errors logged once, config/rebuild, threads, body limit, stats), through
+# physics_world_abi.h. ABI only: Aver.Physics and Aver.Core. No add_test: the root walk registers every *Test target.
+foreach(_t PhysicsSettingsTest PhysicsConfigTest)
+  add_executable(${_t} src/${_t}.cpp)
+  target_link_libraries(${_t} PRIVATE Aver.Physics Aver.Core)
+  set_target_properties(${_t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()
+
+# ShapeBuilderTest -- the generic shape handles of physics_shape_builder_abi.h (SHAPES_MATERIALS phase A): every leaf rests
+# at its half-height, compounds, decorators, set_shape / set_scale, shape info, mesh palettes, dynamic mesh bodies, the old
+# creators against the new builders. ABI only, like ShapeTest above: Aver.Physics and Aver.Core.
+add_executable(ShapeBuilderTest src/ShapeBuilderTest.cpp)
+target_link_libraries(ShapeBuilderTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(ShapeBuilderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# SurfaceTest -- physical surfaces (physics_surface_abi.h, SHAPES_MATERIALS phase B): the registry, leaf and per-triangle
+# materials changing how far a box slides, restitution, the body label, hit / contact / character-ground / wheel detail, and
+# that a project with no surface runs the same bits once one exists. ABI only: Aver.Physics and Aver.Core.
+add_executable(SurfaceTest src/SurfaceTest.cpp)
+target_link_libraries(SurfaceTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(SurfaceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PhysicsBenchTool -- NOT a test (no `Test` suffix, so the ctest walk skips it). The phase E gate of WORLD_STATE_DEBUG: times building a mesh or
+# heightfield shape against restoring it from its blob, on synthetic grids or on real .ocmesh files (--content <project>/Content). Hand-run:
+# PhysicsBenchTool shapes. Needs Aver.Formats for the .ocmesh loader.
+add_executable(PhysicsBenchTool src/PhysicsBenchTool.cpp)
+target_link_libraries(PhysicsBenchTool PRIVATE Aver.Physics Aver.Formats Aver.Core)
+set_target_properties(PhysicsBenchTool PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# TerrainTest -- heightfields v2 (physics_terrain_abi.h, SHAPES_MATERIALS phase C): the legacy creator and the shape route
+# agreeing bit for bit, a non-square field, holes, a surface per cell, bits per sample against error, edits (raise, clamp,
+# headroom, wake) and the refusals. ABI only: Aver.Physics and Aver.Core.
+add_executable(TerrainTest src/TerrainTest.cpp)
+target_link_libraries(TerrainTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(TerrainTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PhysicsStateTest / PhysicsDeterminismTest -- state recording (physics_state_abi.h, WORLD_STATE_DEBUG phase D): snapshots, the validate-first
+# restore, exact stepping, the state hash, the per-step hash log, thread-count independence. PhysicsShapeCacheTest is phase E's (the shape
+# binary cache, same header). ABI only: Aver.Physics and Aver.Core, like the suites above.
+foreach(_t PhysicsStateTest PhysicsDeterminismTest PhysicsShapeCacheTest)
+  add_executable(${_t} src/${_t}.cpp)
+  target_link_libraries(${_t} PRIVATE Aver.Physics Aver.Core)
+  set_target_properties(${_t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()
+
+# PhysicsProfileTest -- the profiler bridge (physics_world_abi.h, aver_phys_profile_*): the tree of a loaded scene, nesting under Jolt's Update,
+# merge by name across threads, frozen when disabled, reset. PhysicsDebugTest -- Jolt's debug renderer as a line feed (physics_debug_abi.h): shape
+# extents in engine axes, the radius, the line budget, static triangles near the camera, the last fixed step's contacts, constraints and labels.
+# Both skip loudly when the build lacks the hook / the renderer. ABI only: Aver.Physics and Aver.Core.
+foreach(_t PhysicsProfileTest PhysicsDebugTest)
+  add_executable(${_t} src/${_t}.cpp)
+  target_link_libraries(${_t} PRIVATE Aver.Physics Aver.Core)
+  set_target_properties(${_t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()

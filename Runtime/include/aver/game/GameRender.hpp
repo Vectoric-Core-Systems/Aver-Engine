@@ -32,6 +32,7 @@ namespace aver::rhi { class IDevice; }
 namespace aver::pbr { class MaterialSystem; }
 namespace aver::render { class SkinnedScene; }
 namespace aver::render { class SoftBodyScene; }
+namespace aver::render { class HairScene; }
 namespace aver::voxi { class VoxiRenderer; }
 
 namespace aver::game {
@@ -329,6 +330,7 @@ struct DrawWorldOptions {
     // The scene writes the posed bounds into CMeshRenderer every frame it packs (the SkinnedScene rule), which is
     // why a claimed entity skips the asset-box bounds below. Null changes nothing.
     const render::SoftBodyScene* softBodies = nullptr;
+    const render::HairScene* hair = nullptr;               // GameRender.cpp substitutes the ribbon mesh for a hair entity's draw child
 
     // The possessed first-person pawn. Entities flagged kMeshRendererHiddenFromOwner under it (ancestor walk) are not drawn
     // in the raster pass. scene::kInvalidEntity = no owner-hide.

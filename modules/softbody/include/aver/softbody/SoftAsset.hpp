@@ -15,7 +15,8 @@ namespace aver::softbody {
 
 inline constexpr u32 kSoftAssetVersion = 1;
 
-enum class SoftKind : u8 { Cloth = 0, Destructible = 1 };
+// Jelly and Rope (wave 11, docs/plans/wave11/SOFTBODY_HAIR.md) are simulated by SoftShapeSystem, not SoftBodySystem.
+enum class SoftKind : u8 { Cloth = 0, Destructible = 1, Jelly = 2, Rope = 3 };
 
 struct SimParams {
     u32 iterations = 6;
@@ -28,12 +29,61 @@ struct SimParams {
     bool allowSleep = true;
 };
 
+// Wave 11. Cage is the wave 9 path (beams and dihedral bends from the mesh: dents, tears). Fast lets Jolt make its own edges,
+// shear edges, bends and long range attachments (aver_phys_sbx_builder_auto): the cheap path for flags, curtains and capes,
+// with no dents, no tears and no RenderBinding splits. Values of bend and lra match AVER_PHYS_SBX's bendType and lraMode.
+enum class ClothSolver : u8 { Cage = 0, Fast = 1 };
+enum class ClothBend : u8 { None = 0, Distance = 1, Dihedral = 2 };
+enum class ClothLra : u8 { Off = 0, Euclidean = 1, Geodesic = 2 };
+
 struct ClothParams {
     f32 dragCoeff = 1.0f;
     f32 liftCoeff = 0.3f;
     bool tearable = false;
     f32 defaultReachCm = 6.0f;
     f32 backstopCm = -1.0f;    // < 0 off
+    // ---- wave 11 (written only when they differ) ----
+    ClothSolver solver = ClothSolver::Cage;
+    ClothBend bend = ClothBend::Distance;      // Fast only
+    ClothLra lra = ClothLra::Off;              // Fast only: long range attachments from the pinned vertices
+    f32 lraSlack = 1.02f;                      // Fast only: the LRA distance multiplier, >= 1
+};
+
+// A closed cloth with a pressure is an inflatable (a beach ball, a balloon). Pressure is kPa at REST volume.
+struct InflateParams {
+    f32 pressureKPa = 0.0f;      // 0 = off
+    f32 leakKPaPerS = 0.0f;      // the system ramps the pressure down by this much per second (a puncture)
+};
+
+// A cloth that never collides with the ragdoll of the entity that owns its skeleton (a cape on a ragdolled character).
+struct GroupParams {
+    bool ragdollOwner = false;   // "group": { "ragdollOf": "owner" }
+};
+
+// Jelly (kind "jelly"): a voxel tetrahedral lattice inside the mesh, the render mesh embedded by barycentric coordinates.
+struct JellyParams {
+    f32 cellCm = 10.0f;
+    f32 snapCm = 3.0f;                 // lattice nodes this close to the surface move onto it
+    f32 volumeCompliance = 2e-4f;      // per tetrahedron, 0 = incompressible
+    f32 edgeCompliance = 5e-5f;
+    f32 vertexRadiusCm = -1.0f;        // < 0: 0.35 x the cell
+    f32 densityKgM3 = 300.0f;
+    u32 maxNodes = 2048;
+};
+// The collision radius of a lattice vertex: the asset's, else 0.35 of the cell (hides the half-cell the render mesh may poke out).
+inline f32 jellyVertexRadiusCm(const JellyParams& j, f32 cellCm) { return j.vertexRadiusCm >= 0.0f ? j.vertexRadiusCm : 0.35f * cellCm; }
+
+// Rope and cable (kind "rope"): a chain of Cosserat rods drawn as a generated tube.
+struct RopeParams {
+    f32 radiusCm = 1.2f;
+    f32 segmentCm = 12.0f;
+    f32 massPerMeterKg = 0.4f;
+    f32 slack = 1.02f;                 // rest length = the distance between the ends x slack, unless the component names a length
+    u32 sides = 8;
+    f32 uvCmPerTile = 20.0f;
+    f32 stretchCompliance = 1e-8f;
+    f32 bendTwistCompliance = 1e-3f;
+    std::string material;              // a material NAME for the tube; empty keeps the entity's
 };
 
 struct DestructParams {
@@ -131,6 +181,11 @@ struct SoftAsset {
     EffectParams effects;
     ProxyParams proxy;
     PaintData paint;
+    // ---- wave 11 ----
+    InflateParams inflate;
+    GroupParams group;
+    JellyParams jelly;
+    RopeParams rope;
 
     // False with `why` set for a value the runtime cannot honour.
     bool valid(std::string* why = nullptr) const;

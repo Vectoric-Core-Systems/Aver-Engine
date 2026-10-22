@@ -12,6 +12,7 @@
 #if AVER_MODULE_VEHICLE
 #include "VehicleEditor.hpp"   // New Vehicle
 #endif
+#include "OcShapeEditor.hpp"   // New Collision Shape (the starter file)
 
 namespace aver {
 
@@ -1268,10 +1269,32 @@ void SandboxApp::drawContentBrowser() {
 #endif
         if (ImGui::MenuItem("New Foliage Type"))    cbCreateFoliageType();
         uiReg_.track("cb.add.foliageType");
+        if (ImGui::MenuItem("New Hair Groom")) {
+            const std::filesystem::path hairTarget = cbFreeAssetPath("NewHairGroom", ".ochair");
+            if (!hairTarget.empty()) {
+                std::string hairWhy;
+                if (editor::writeStarterHairGroom(hairTarget.string(), &hairWhy)) cbAdoptNewAsset(hairTarget);
+                else cbStatus_ = "Could not write " + hairTarget.filename().string() + ": " + hairWhy;
+            }
+        }
+        uiReg_.track("cb.add.hairGroom");
 #if AVER_MODULE_VEHICLE
         if (ImGui::MenuItem("New Vehicle"))         cbCreateVehicleAsset();
         uiReg_.track("cb.add.vehicle");
 #endif
+        if (ImGui::MenuItem("New Collision Shape")) {
+            const std::filesystem::path target = cbFreeAssetPath("NewShape", ".ocshape");
+            std::string why;
+            if (target.empty()) {
+                cbStatus_ = "Could not find a free name for a new collision shape";
+            } else if (!editor::writeNewShapeStarter(target.string(), &why)) {
+                cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+                AVER_ERROR("[Editor] new collision shape failed: {}", why);
+            } else {
+                cbAdoptNewAsset(target);
+            }
+        }
+        uiReg_.track("cb.add.collisionShape");
         if (ImGui::MenuItem("New Instance Set")) {
             const std::filesystem::path target = project_.valid() ? freeInstanceSetPath(project_.contentDir()) : std::filesystem::path();
             std::string why;
@@ -1919,7 +1942,10 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         {".ocretarget", {ICON_LINK,       IM_COL32(255, 170, 110, 255), "IK Retargeter"}},
         {".ocrig",      {ICON_TUNE,       IM_COL32(255, 170, 110, 255), "Control Rig"}},
         {".ocsoft",     {ICON_TUNE,       IM_COL32(120, 210, 190, 255), "Soft Body (cloth / destructible)"}},
+        {".ochair",     {ICON_TUNE,       IM_COL32(210, 160,  90, 255), "Hair Groom"}},
         {".ocvehicle",  {ICON_TUNE,       IM_COL32(255, 190,  70, 255), "Vehicle Asset"}},
+        {".ocshape",    {ICON_TUNE,       IM_COL32(120, 200, 170, 255), "Collision Shape"}},       // [wave11/shapes]
+        {".ocsurf",     {ICON_TUNE,       IM_COL32(170, 200, 120, 255), "Physical Surface Table"}}, // [wave11/shapes]
         {".ocmotion",   {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Motion Matching Database"}},
         {".ocmbake",    {ICON_FILE,       IM_COL32(150, 130, 190, 255), "Motion Matching Bake"}},
         {".ocseq",      {ICON_WAVE,       IM_COL32(150, 190, 255, 255), "Level Sequence Asset"}},   // [wave5/sequencer]

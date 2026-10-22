@@ -4,6 +4,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_softbody_abi.h"
+#include "aver/physics/physics_softbody_ext_abi.h"
 
 #include <algorithm>
 #include <cmath>
@@ -72,6 +73,25 @@ bool SoftBodySystem::buildPieceBody(Entry& en, Piece& p, i32 replaceBody, i32 st
     }
     if (faces.empty()) return false;
 
+    // Wave 11. The fast solver lets Jolt make the constraints (edges, shear, bends, long range attachments) from the faces;
+    // it is the root piece of a cloth only. Pressure belongs to the root piece of a cloth too.
+    const bool fast = !en.destructible && !en.legacy && !p.debris && a.cloth.solver == ClothSolver::Fast;
+    const bool inflated = !en.destructible && !en.legacy && !p.debris && en.pressureKPa > 0.0f;
+    if (inflated) {
+        // Jolt's pressure wants the faces wound so that (C - A) x (B - A) points out; an authored mesh is usually the other
+        // way round (cross(B - A, C - A) outward, what the draw uses), so the PHYSICS copy of the faces is flipped when the
+        // volume comes out negative. The cage triangles and the draw are untouched.
+        f32 six = 0.0f;
+        for (usize t = 0; t + 2 < faces.size(); t += 3) {
+            const Vec3 pa{rest[static_cast<usize>(faces[t]) * 3] - centre.x, rest[static_cast<usize>(faces[t]) * 3 + 1] - centre.y, rest[static_cast<usize>(faces[t]) * 3 + 2] - centre.z};
+            const Vec3 pb{rest[static_cast<usize>(faces[t + 1]) * 3] - centre.x, rest[static_cast<usize>(faces[t + 1]) * 3 + 1] - centre.y, rest[static_cast<usize>(faces[t + 1]) * 3 + 2] - centre.z};
+            const Vec3 pc{rest[static_cast<usize>(faces[t + 2]) * 3] - centre.x, rest[static_cast<usize>(faces[t + 2]) * 3 + 1] - centre.y, rest[static_cast<usize>(faces[t + 2]) * 3 + 2] - centre.z};
+            six += dot(pa, cross(pc, pb));
+        }
+        if (six < 0.0f)
+            for (usize t = 0; t + 2 < faces.size(); t += 3) std::swap(faces[t + 1], faces[t + 2]);
+    }
+
     // Skin: the root piece and any anchored piece stay tethered; free debris falls clear of the entity.
     const bool useSkin = (!p.debris || p.anchored) && !en.released;
     std::vector<i32> joints;
@@ -123,18 +143,39 @@ bool SoftBodySystem::buildPieceBody(Entry& en, Piece& p, i32 replaceBody, i32 st
     if (!b) return false;
     aver_phys_sb_builder_vertices(b, rest.data(), inv.data(), statePos, stateVel);
     aver_phys_sb_builder_faces(b, faces.data(), static_cast<i32>(faces.size() / 3));
-    if (!edgeRest.empty())
-        aver_phys_sb_builder_edges(b, edges.data(), edgeRest.data(), edgeComp.data(), static_cast<i32>(edgeRest.size()));
-    if (!bendComp.empty())
-        aver_phys_sb_builder_bends(b, bends.data(), bendComp.data(), static_cast<i32>(bendComp.size()));
+    if (fast) {
+        // Jolt's own edges, shear edges, bends and long range attachments; the beams of the cage stay (the draw and the
+        // topology use them) but own no Jolt slot, so a dent or a tear never reaches this body.
+        const f32 compliance = m.compliance;
+        const f32 attrs[5] = {compliance, compliance, a.cloth.bend == ClothBend::None ? -1.0f : m.bendCompliance,
+                              static_cast<f32>(static_cast<i32>(a.cloth.lra)), a.cloth.lraSlack};
+        if (!aver_phys_sbx_builder_auto(b, attrs, 1, static_cast<i32>(a.cloth.bend), 8.0f)) {
+            aver_phys_sb_builder_cancel(b);
+            return false;
+        }
+    } else {
+        if (!edgeRest.empty())
+            aver_phys_sb_builder_edges(b, edges.data(), edgeRest.data(), edgeComp.data(), static_cast<i32>(edgeRest.size()));
+        if (!bendComp.empty())
+            aver_phys_sb_builder_bends(b, bends.data(), bendComp.data(), static_cast<i32>(bendComp.size()));
+    }
     if (anySkin)
         aver_phys_sb_builder_skin(b, joints.data(), weights.data(), reach.data(), a.cloth.backstopCm, static_cast<i32>(en.jointCount));
     aver_phys_sb_builder_params(b, prm, AVER_PHYS_SB_P_COUNT);
+    {
+        f32 xp[AVER_PHYS_SBX_P_COUNT];
+        for (f32& f : xp) f = std::nanf("");
+        bool anyExtra = false;
+        if (inflated) { xp[AVER_PHYS_SBX_P_PRESSURE_KPA] = en.pressureKPa; anyExtra = true; }
+        if (!en.destructible && !en.legacy && en.groupHandle != 0) { xp[AVER_PHYS_SBX_P_COLLISION_GROUP] = static_cast<f32>(en.groupHandle); anyExtra = true; }
+        if (anyExtra) aver_phys_sbx_builder_params(b, xp, AVER_PHYS_SBX_P_COUNT);   // a body that asks for nothing extra is built exactly as before
+    }
 
     std::vector<i32> edgeSlot(edgeRest.size(), -1), bendSlot(bendComp.size(), -1);
     const i32 h = aver_phys_sb_builder_finish(b, centre.x, centre.y, centre.z, replaceBody, stateSrcBody,
                                               stateMap && !stateMap->empty() ? stateMap->data() : nullptr,
-                                              edgeSlot.empty() ? nullptr : edgeSlot.data(), bendSlot.empty() ? nullptr : bendSlot.data());
+                                              edgeSlot.empty() || fast ? nullptr : edgeSlot.data(),
+                                              bendSlot.empty() || fast ? nullptr : bendSlot.data());
     if (!h) {
         aver_phys_sb_builder_cancel(b);
         return false;
@@ -150,7 +191,7 @@ bool SoftBodySystem::buildPieceBody(Entry& en, Piece& p, i32 replaceBody, i32 st
     p.edgeSlot = edgeSlot;
     p.bendSlot = bendSlot;
 
-    if (carryPose && !bendSlot.empty()) aver_phys_sb_rest_bends_from_pose(h, bendSlot.data(), static_cast<i32>(bendSlot.size()));
+    if (carryPose && !fast && !bendSlot.empty()) aver_phys_sb_rest_bends_from_pose(h, bendSlot.data(), static_cast<i32>(bendSlot.size()));
     if (!en.destructible && !(en.spec.flags & kClothNoWind) && !en.legacy) {
         const f32 wind = en.windScale;
         aver_phys_sb_set_aero(h, std::clamp(a.cloth.dragCoeff * wind, 0.0f, 2.0f), std::clamp(a.cloth.liftCoeff * wind, 0.0f, 2.0f), 0);
@@ -263,6 +304,35 @@ bool SoftBodySystem::initialPiece(scene::World& world, Entry& en) {
     }
     fillPieceDraw(en, root);
     return true;
+}
+
+// ---- wave 11: inflatables and the ragdoll group ----------------------------------------------------------------
+
+void SoftBodySystem::setEntryPressure(Entry& en, f32 kPa) {
+    en.pressureKPa = kPa;
+    for (Piece& p : en.pieces)
+        if (p.alive && p.body && !p.debris) aver_phys_sbx_set_pressure(p.body, kPa);
+}
+
+void SoftBodySystem::applyPressureOps() {
+    if (pressureOps_.empty()) return;
+    std::vector<std::pair<scene::Entity, f32>> ops;
+    ops.swap(pressureOps_);
+    for (const auto& [e, kPa] : ops) {
+        Entry* en = find(e);
+        if (!en || en->failed || en->destructible) continue;
+        setEntryPressure(*en, kPa);
+    }
+}
+
+void SoftBodySystem::applyGroup(Entry& en) {
+    if (!en.asset.group.ragdollOwner || en.groupApplied || !ragdollGroupFn_ || en.skeletonEntity == scene::kInvalidEntity) return;
+    const i32 h = ragdollGroupFn_(en.skeletonEntity, ragdollGroupUser_);
+    if (h == 0) return;   // the proxy ragdoll does not exist yet: try again next tick
+    en.groupHandle = h;
+    en.groupApplied = true;
+    for (Piece& p : en.pieces)
+        if (p.alive && p.body) aver_phys_sbx_set_collision_group(p.body, h);
 }
 
 } // namespace aver::softbody

@@ -1,0 +1,11 @@
+OCSHAPE 1
+# A MUTABLE compound: two boxes the body can gain and lose children from at run time (Body.AddChild / RemoveChild). One body owns it.
+NAME GrowCrate
+MASS 20
+SURFACE Wood
+NODE core box 25 25 25
+NODE arm  box 12 12 12
+NODE crate compound mutable
+CHILD crate core
+CHILD crate arm at 45 0 0
+ROOT crate

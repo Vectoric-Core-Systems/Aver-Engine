@@ -93,6 +93,8 @@ aver_add_module(Aver.Formats
     # reason: a header record and a string table, nothing that needs Aver.Scene or Aver.Landscape --
     # see OcFoliage.hpp for why the format itself stays independent of both.
     src/OcFoliage.cpp
+    # .ochair -- a strand hair groom. An AVR1 container like .ocfoliage: a text HEAD and two optional binary chunks (strands, an embedded scalp); see OcHair.hpp.
+    src/OcHair.cpp
     # .ocinst -- a level's baked instanced-foliage transform table. Beside .ocfoliage for the
     # identical reason: a header, a string table and one bulk chunk, nothing that needs Aver.Scene,
     # Aver.Voxi or a GPU device -- see OcInstances.hpp for the transform convention and why a
@@ -104,6 +106,10 @@ aver_add_module(Aver.Formats
     # generator's Python pipeline, so it needs only the line scanner every other text reader here
     # shares; beside .ocinst because both are level-adjacent tables no entity represents.
     src/OcLanes.cpp
+    # .ocsurf -- a project's physical-surface table (Content/Physics/Surfaces.ocsurf), and .ocshape -- a collision shape tree. TEXT, base
+    # Aver.Formats only: no physics, no device (the Runtime walkers are game::loadPhysicalSurfaces and game::buildColliderShape).
+    src/OcSurf.cpp
+    src/OcShape.cpp
     src/Texture.cpp
     # BC7 (mode 6) block compression for the texture derived-data cache; see Bc7.hpp.
     src/Bc7.cpp

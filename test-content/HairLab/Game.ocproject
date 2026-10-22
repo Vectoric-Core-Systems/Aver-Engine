@@ -1,0 +1,8 @@
+OCPROJECT 1
+# Engine test content for STRAND HAIR (docs/HAIR.md). Not a demo game.
+# Open the project, import Content/Source/*.obj and write the grooms (see README.md), open Maps/HairLab.ocworld and press Play.
+NAME HairLab
+ENGINE Aver 0.7.0-1
+CREATEDWITH 0.7.0-1
+CONTENT Content
+STARTMAP Maps/HairLab.ocworld

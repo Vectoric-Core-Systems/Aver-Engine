@@ -18,6 +18,7 @@
 
 #if AVER_MODULE_SOFTBODY_SCENE
 #  include "aver/softbody/SoftBodySystem.hpp"
+#  include "aver/softbody/SoftShapeSystem.hpp"
 #endif
 
 #include <string>
@@ -33,9 +34,10 @@ struct SoftBodyDebugOptions {
     bool budget = false;    // pieces / active particles / rebuilds line
     bool fields = false;    // soft field volumes and the pieces in their reach
     bool tuning = false;    // the Tuning HUD for `selected`
+    bool constraints = false;   // wave 11 (Show > Soft Constraints): jelly lattices, rope nodes, rod frames and anchors (SoftShapeGizmos.cpp)
     u32 selected = 0;       // the entity the Tuning HUD reads (0 = none)
     u32 drawBuilds = 0;     // the draw scene's builds last frame (SoftBodyScene::drawBuildsLastFrame), for the HUD line
-    bool any() const { return strain || pins || pieces || wind || budget || fields || tuning; }
+    bool any() const { return strain || pins || pieces || wind || budget || fields || tuning || constraints; }
 };
 
 struct SoftBodyDebugLabel {
@@ -67,6 +69,12 @@ void softBodyDebugFeedCage(const softbody::Cage& cage, const SoftBodyDebugOption
 
 // Clears `out`, then feeds every entity with a soft-body entry in `sys` (the process-global world's CSoftBody pool).
 void softBodyDebugCollect(const SoftBodyDebugOptions& opts, softbody::SoftBodySystem& sys, SoftBodyDebugFrame& out);
+
+// Wave 11. APPENDS to `out` (call it after softBodyDebugCollect, which clears). With opts.constraints on: every jelly's lattice edges coloured by
+// stretch, every rope's nodes as a polyline with each rod's three axes and the pinned ends as crosses (pair policies are not drawn: the system
+// does not keep them). Always, whatever the option: the end handles of the selected rope, and its planned curve while it is not built (the
+// editor outside Play), because the viewport drag grabs those handles. Defined in SoftShapeGizmos.cpp.
+void softShapeDebugCollect(const SoftBodyDebugOptions& opts, softbody::SoftShapeSystem& shapes, SoftBodyDebugFrame& out);
 #endif
 
 #if AVER_WITH_IMGUI

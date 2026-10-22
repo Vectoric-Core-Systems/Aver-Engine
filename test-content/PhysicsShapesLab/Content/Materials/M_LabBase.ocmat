@@ -1,0 +1,13 @@
+OCMAT 1
+# M_LabBase: a plain lab material that names no physical surface.
+SHADER standard
+BLEND opaque
+CULL back
+FLAGS twosided=0 castshadow=1
+
+PARAM baseColorFactor 0.450 0.420 0.380 1.0
+PARAM metallicFactor 0.0
+PARAM roughnessFactor 0.7
+PARAM emissiveFactor 0.0 0.0 0.0
+PARAM normalScale 1.0
+PARAM occlusionStrength 1.0

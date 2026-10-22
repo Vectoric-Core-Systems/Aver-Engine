@@ -351,6 +351,54 @@ static void checkOcproject() {
         check(!part.hasGravity, "but is NOT taken as a gravity");
     }
     {
+        // WAVE 11: the live solver settings and PHYSICS.THREADS. The names are the physics table's own
+        // (tests/game/ProjectPhysicsApplyTest pins the mirror against it); here only the file format is checked.
+        ProjectDesc s;
+        check(parseOcproject("OCPROJECT 1\nNAME S\nPHYSICS.VELOCITYSTEPS 14\nphysics.sleeptime 1\n"
+                             "PHYSICS.MAXBODIES 200000\nPHYSICS.THREADS 0\nPHYSICS.UNKNOWNKEY 3\nPHYSICS.BAUMGARTE abc\n",
+                             s, &err), "a manifest with solver settings parses");
+        check(s.physicsSettings.size() == 2 && s.physicsSettings[0].first == "velocitySteps" &&
+              s.physicsSettings[0].second == 14.0f && s.physicsSettings[1].first == "sleepTime",
+              "the settings come back in file order under their table names");
+        check(s.physThreads == 0 && s.physMaxBodies == 200000, "THREADS 0 (single-threaded) and a limit parse");
+        check(s.hasPhysicsSettings(), "and the section reports itself present");
+        ProjectDesc unstated;
+        check(parseOcproject("OCPROJECT 1\nNAME U\n", unstated, &err) && unstated.physThreads == -2 &&
+              unstated.physicsSettings.empty() && !unstated.hasPhysicsSettings(), "an unstated section stays unstated");
+
+        const std::string w = writeOcproject(s, "");
+        check(w.find("PHYSICS.VELOCITYSTEPS 14") != std::string::npos && w.find("PHYSICS.SLEEPTIME 1") != std::string::npos &&
+              w.find("PHYSICS.THREADS 0") != std::string::npos, "the keys are written");
+        check(w.find("BAUMGARTE") == std::string::npos && w.find("UNKNOWNKEY") == std::string::npos,
+              "a malformed value and an unknown key are not");
+        ProjectDesc b;
+        check(parseOcproject(w, b, &err) && b.physicsSettings == s.physicsSettings && b.physThreads == 0, "and read back equal");
+        check(writeOcproject(b, w) == w, "byte-stable second write");
+
+        // Over an existing file: the owned lines are replaced once; an unknown PHYSICS.* line survives.
+        const std::string rw = writeOcproject(s, "OCPROJECT 1\nNAME S\nPHYSICS.VELOCITYSTEPS 99\nPHYSICS.FUTURETHING 7\n");
+        check(rw.find("PHYSICS.VELOCITYSTEPS 99") == std::string::npos && rw.find("PHYSICS.VELOCITYSTEPS 14") != std::string::npos,
+              "an owned key is replaced, not duplicated");
+        check(rw.find("PHYSICS.FUTURETHING 7") != std::string::npos, "an unknown PHYSICS.* key survives a re-save");
+    }
+    {
+        // WAVE 11 phase E: PHYSICS.SHAPECACHE, a tri-state (unstated / 0 / 1) because the default is "off until measured".
+        ProjectDesc on, off, none;
+        check(parseOcproject("OCPROJECT 1\nNAME C\nPHYSICS.SHAPECACHE 1\n", on, &err) && on.physShapeCache == 1 && on.hasPhysicsSettings(),
+              "PHYSICS.SHAPECACHE 1 parses and reports the section present");
+        check(parseOcproject("OCPROJECT 1\nNAME C\nphysics.shapecache 0\n", off, &err) && off.physShapeCache == 0 && off.hasPhysicsSettings(),
+              "0 is a stated value, not an absent one");
+        check(parseOcproject("OCPROJECT 1\nNAME C\n", none, &err) && none.physShapeCache == -1, "an unstated key stays -1");
+        const std::string w = writeOcproject(off, "");
+        check(w.find("PHYSICS.SHAPECACHE 0") != std::string::npos, "0 is written");
+        check(writeOcproject(none, "").find("SHAPECACHE") == std::string::npos, "unstated is not");
+        ProjectDesc back;
+        check(parseOcproject(w, back, &err) && back.physShapeCache == 0 && writeOcproject(back, w) == w, "round trip, byte-stable");
+        const std::string rw = writeOcproject(on, "OCPROJECT 1\nNAME C\nPHYSICS.SHAPECACHE 0\n");
+        check(rw.find("PHYSICS.SHAPECACHE 0") == std::string::npos && rw.find("PHYSICS.SHAPECACHE 1") != std::string::npos,
+              "an existing line is replaced, not duplicated");
+    }
+    {
         // ZERO IS THE POINT for a mix: a project shipping with music muted has to be able to say
         // so, and a `< 0 means unstated` rule would quietly turn that into 1.
         ProjectDesc a;

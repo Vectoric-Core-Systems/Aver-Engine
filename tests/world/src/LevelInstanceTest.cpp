@@ -29,6 +29,7 @@
 
 #if AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"   // [wave3/level-instances]
+#  include "aver/physics/physics_surface_abi.h"   // raycast_detail: the surfaces a placement's shape carries
 #endif
 
 using namespace aver;
@@ -174,6 +175,70 @@ static void testAttachAndBodies() {
         check(bc > 0 && !usedMesh && tris == 0, "addStaticPlacementBody: without triangles it falls back to a box");
         aver_phys_remove_body(ba); aver_phys_remove_body(bb); aver_phys_remove_body(bc);
         for (const auto& [id, h] : shapes) { (void)id; if (h) aver_phys_release_mesh_shape(h); }
+
+        // PHYSICAL SURFACES (SHAPES_MATERIALS): the same quad wound facing up, two triangles with two surfaces. Triangle 0 is the
+        // x >= y half, triangle 1 the y >= x half.
+        static const u32 kIdxUp[] = {0, 2, 1, 0, 3, 2};
+        static const u8 kTriPalette[] = {0, 1};
+        static const i32 kSurfaces[] = {111, 222};
+        const auto surfaceAt = [](f32 x, f32 y) {
+            f32 f[AVER_PHYS_HITF_COUNT] = {};
+            i32 iv[AVER_PHYS_HITI_COUNT] = {};
+            const i32 hit = aver_phys_raycast_detail(x, y, 100.0f, 0, 0, -1, 1000.0f, 0xFFFFFFFFu, 0, 0, f, AVER_PHYS_HITF_COUNT, iv, AVER_PHYS_HITI_COUNT);
+            return hit ? iv[AVER_PHYS_HITI_SURFACE] : -1;
+        };
+        world::InstantiateOptions withSurfaces;
+        withSurfaces.localTrianglesFor = [](u64, const f32*& pos, u32& vc, const u32*& idx, u32& ic) {
+            pos = kQuad; vc = 4; idx = kIdxUp; ic = 6;
+            return true;
+        };
+        withSurfaces.localTriangleSurfacesFor = [](u64, const u8*& tp, u32& tc, const i32*& pal, u32& pc) {
+            tp = kTriPalette; tc = 2; pal = kSurfaces; pc = 2;
+            return true;
+        };
+        std::unordered_map<u64, i32> shapesS;
+        Transform at;
+        at.position = Vec3{0.0f, 4000.0f, 0.0f};
+        const i32 bs = world::addStaticPlacementBody(withSurfaces, shapesS, 91, at, &tris, &usedMesh, false, nullptr, &fresh);
+        check(bs > 0 && usedMesh && fresh == 1, "surfaces: a placement with localTriangleSurfacesFor builds a mesh body");
+        check(surfaceAt(30.0f, 3970.0f) == 111, "surfaces: a ray on triangle 0 reports the first palette entry");
+        check(surfaceAt(-30.0f, 4030.0f) == 222, "surfaces: a ray on triangle 1 reports the second");
+
+        // A second placement of the same mesh id shares the shape and its surfaces.
+        Transform at2;
+        at2.position = Vec3{0.0f, 6000.0f, 0.0f};
+        const i32 bs2 = world::addStaticPlacementBody(withSurfaces, shapesS, 91, at2, &tris, &usedMesh, false, nullptr, &fresh);
+        check(bs2 > 0 && fresh == 0 && shapesS.size() == 1, "surfaces: the second placement shares the shape");
+        check(surfaceAt(30.0f, 5970.0f) == 111 && surfaceAt(-30.0f, 6030.0f) == 222, "surfaces: and reports the same surfaces");
+
+        // A palette that does not fit the mesh is ignored: today's shape, with no materials.
+        world::InstantiateOptions misfit = withSurfaces;
+        misfit.localTriangleSurfacesFor = [](u64, const u8*& tp, u32& tc, const i32*& pal, u32& pc) {
+            tp = kTriPalette; tc = 1; pal = kSurfaces; pc = 2;   // one triangle's worth for a two-triangle mesh
+            return true;
+        };
+        std::unordered_map<u64, i32> shapesM;
+        Transform am;
+        am.position = Vec3{0.0f, 8000.0f, 0.0f};
+        const i32 bm = world::addStaticPlacementBody(misfit, shapesM, 92, am);
+        check(bm > 0 && surfaceAt(30.0f, 7970.0f) == 0, "surfaces: a palette for the wrong triangle count is ignored");
+
+        // NO callback at all: the shape is cached once per mesh id and carries no surface, as before.
+        world::InstantiateOptions plain;
+        plain.localTrianglesFor = withSurfaces.localTrianglesFor;
+        std::unordered_map<u64, i32> shapesP;
+        Transform ap;
+        ap.position = Vec3{0.0f, 10000.0f, 0.0f};
+        const i32 bp1 = world::addStaticPlacementBody(plain, shapesP, 93, ap, &tris, &usedMesh, false, nullptr, &fresh);
+        Transform ap2;
+        ap2.position = Vec3{0.0f, 12000.0f, 0.0f};
+        const i32 bp2 = world::addStaticPlacementBody(plain, shapesP, 93, ap2, &tris, &usedMesh, false, nullptr, &fresh);
+        check(bp1 > 0 && bp2 > 0 && shapesP.size() == 1 && fresh == 0, "no callback: one shape per mesh id, shared by both placements");
+        check(surfaceAt(30.0f, 9970.0f) == 0 && surfaceAt(-30.0f, 12030.0f) == 0, "no callback: the shape carries no surface");
+
+        for (const i32 b : {bs, bs2, bm, bp1, bp2}) aver_phys_remove_body(b);
+        for (auto* m : {&shapesS, &shapesM, &shapesP})
+            for (const auto& [id, h] : *m) { (void)id; if (h) aver_phys_release_mesh_shape(h); }
     }
     if (phys) aver_phys_shutdown();
 #endif

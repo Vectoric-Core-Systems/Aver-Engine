@@ -55,7 +55,11 @@ Arrows point to dependencies (A ──▶ B means "A depends on B"). No edge poi
                 framework carry a version. (This used to read "seven"; Aver.Settings and its
                 seam are new since.) Physics also spreads across five more headers on the same
                 DLL — physics_character_abi.h, physics_joints_abi.h, physics_layers_abi.h,
-                physics_shapes_abi.h, physics_vehicle_abi.h — which is still one seam, not six.
+                physics_shapes_abi.h, physics_vehicle_abi.h (and since: physics_world_abi.h for settings,
+                limits, stats and the profiler table, physics_debug_abi.h for the line feed,
+                physics_state_abi.h for snapshots, exact stepping, the state hash and the shape
+                binary cache, whose disk half is modules/world PhysicsShapeCache) — which is
+                still one seam, not six.
    scripting_abi.h ── the odd one out: STATIC, exports nothing, hands the managed
                  ▲   bridge a function-pointer table instead. See docs/ABI.md
                  │   each seam is implemented by the module below it

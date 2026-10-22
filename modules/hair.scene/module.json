@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Hair.Scene",
+  "dir": "hair.scene",
+  "displayName": "Strand Hair (Scene)",
+  "description": "Strand hair on scene entities: the CHair component, groom builds shared between instances, palette and wind feeding, distance cadence and collision proxies.",
+  "category": "Physics",
+  "option": "AVER_MODULE_HAIR_SCENE",
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Anim", "Aver.Anim.Scene", "Aver.Core", "Aver.Formats", "Aver.Hair", "Aver.Physics", "Aver.Scene"],
+  "consequence": "Hair components do nothing: no simulated strand hair on characters."
+}

@@ -2,23 +2,33 @@
 
 # SoftBody nodes
 
-15 nodes. Rows: `scripting/csharp/Aver.Graph/GraphSoftBodyNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsSoftBody.hpp`.
+25 nodes. Rows: `scripting/csharp/Aver.Graph/GraphSoftBodyNodeTable.cs`. Palette: `sandbox/src/GraphNodeDefsSoftBody.hpp`.
 
 Path: D pure (a read, recomputed per reader), P exec, X trigger (an entry node).
 
 | Type | Display | Category | Path | Pins | Attributes | C# |
 |---|---|---|---|---|---|---|
+| `AddSoftJelly` | Add Soft Jelly | Physics | P | in: `exec` exec, `entity` int, `preset` int = 5<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.AddSoftJellyForGraph` |
 | `ClearSoftBodyDebris` | Clear Soft Body Debris | Physics | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.ClearSoftBodyDebrisForGraph` |
 | `GetSoftBodyDents` | Get Soft Body Dents | Physics | D | in: `entity` int<br>out: `found` bool, `dentedEdges` int, `maxSetCm` float, `debrisPieces` int | none | `SoftBodyGraphInterop.GetSoftBodyDentsForGraph` |
 | `GetSoftBodyState` | Get Soft Body State | Physics | D | in: `entity` int<br>out: `found` bool, `damage` float, `maxStrain` float, `pieces` int, `brokenEdges` int | none | `SoftBodyGraphInterop.GetSoftBodyStateForGraph` |
+| `GetSoftSubmerged` | Get Soft Submerged | Physics | D | in: `entity` int<br>out: `found` bool, `fraction` float, `volumeCm3` float | none | `SoftBodyGraphInterop.GetSoftSubmergedForGraph` |
+| `GetSoftVolume` | Get Soft Volume | Physics | D | in: `entity` int<br>out: `found` bool, `restCm3` float, `nowCm3` float, `ratio` float | none | `SoftBodyGraphInterop.GetSoftVolumeForGraph` |
+| `GrabSoftBody` | Grab Soft Body | Physics | P | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float, `reach` float = 30, `targetX` float, `targetY` float, `targetZ` float<br>out: `then` exec, `grab` int, `success` bool | none | `SoftBodyGraphInterop.GrabSoftBodyForGraph`<br>Success means a vertex was in reach; grab is its id. |
+| `MoveSoftGrab` | Move Soft Grab | Physics | P | in: `exec` exec, `entity` int, `grab` int, `x` float, `y` float, `z` float<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.MoveSoftGrabForGraph` |
 | `PopSoftBodyEvent` | Pop Soft Body Event | Physics | P | in: `exec` exec<br>out: `then` exec, `found` bool, `kind` int, `entity` int, `piece` int, `x` float, `y` float, `z` float, `value` float, `success` bool | none | `SoftBodyGraphInterop.PopSoftBodyEventForGraph` |
 | `ReleaseSoftBody` | Release Soft Body | Physics | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SoftBodyReleaseForGraph` |
+| `ReleaseSoftGrab` | Release Soft Grab | Physics | P | in: `exec` exec, `entity` int, `grab` int<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.ReleaseSoftGrabForGraph` |
 | `RepairAllSoftBodies` | Repair All Soft Bodies | Physics | P | in: `exec` exec<br>out: `then` exec, `repaired` int, `success` bool | none | `SoftBodyGraphInterop.RepairAllSoftBodiesForGraph`<br>Success means at least one soft body was repaired. |
 | `SetSoftBodyAsleep` | Set Soft Body Asleep | Physics | P | in: `exec` exec, `entity` int, `asleep` bool<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftBodyAsleepForGraph` |
 | `SetSoftBodyBudget` | Set Soft Body Budget | Physics | P | in: `exec` exec, `maxPieces` int = 48, `maxParticles` int = 20000, `maxRebuilds` int = 2, `lifetime` float = 12<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftBodyBudgetForGraph` |
 | `SetSoftBodyEffects` | Set Soft Body Effects | Physics | P | in: `exec` exec, `enabled` bool = true<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftBodyEffectsForGraph` |
 | `SetSoftBodyPreset` | Set Soft Body Preset | Physics | P | in: `exec` exec, `entity` int, `preset` int = 0<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftBodyPresetForGraph` |
 | `SetSoftBodyWind` | Set Soft Body Wind | Physics | P | in: `exec` exec, `vx` float, `vy` float, `vz` float, `gust` float = 0, `gustHz` float = 0.3, `turbulence` float = 0<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftBodyWindForGraph` |
+| `SetSoftBuoyancy` | Set Soft Buoyancy | Physics | P | in: `exec` exec, `entity` int, `density` float = 1000, `drag` float = 1<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftBuoyancyForGraph` |
+| `SetSoftContact` | Set Soft Contact | Physics | P | in: `exec` exec, `entity` int, `softScale` float = 1, `otherScale` float = 1<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftContactForGraph` |
+| `SetSoftPairMode` | Set Soft Pair Mode | Physics | P | in: `exec` exec, `entity` int, `other` int, `mode` int<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftPairModeForGraph` |
+| `SetSoftPressure` | Set Soft Pressure | Physics | P | in: `exec` exec, `entity` int, `kPa` float<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SetSoftPressureForGraph` |
 | `SoftBodyDamage` | Soft Body Damage | Physics | P | in: `exec` exec, `entity` int, `x` float, `y` float, `z` float, `radius` float = 30, `energy` float = 100, `dirX` float, `dirY` float, `dirZ` float<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SoftBodyDamageForGraph`<br>A zero direction (all three) is radial. |
 | `SoftBodyExplode` | Soft Body Explode | Physics | P | in: `exec` exec, `x` float, `y` float, `z` float, `radius` float = 300, `impulse` float = 600, `energy` float = 500<br>out: `then` exec, `touched` int, `success` bool | none | `SoftBodyGraphInterop.SoftBodyExplodeForGraph` |
 | `SoftBodyRepair` | Soft Body Repair | Physics | P | in: `exec` exec, `entity` int<br>out: `then` exec, `success` bool | none | `SoftBodyGraphInterop.SoftBodyRepairForGraph` |

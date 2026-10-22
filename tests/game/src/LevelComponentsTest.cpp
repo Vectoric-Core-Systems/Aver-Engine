@@ -11,6 +11,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcWorld.hpp"
 #include "aver/game/LevelComponents.hpp"
+#include "aver/game/ColliderShapes.hpp"
 #include "aver/scene/ComponentPool.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
@@ -375,6 +376,24 @@ int main() {
     }
 #endif
 
+    // ---- Collision Shape (SHAPES_MATERIALS phase E): the record -> CCollisionShape + a Rigid Body through the level applier, and back ----
+    {
+        AVER_INFO("apply: CollisionShape");
+        const u32 csType = game::registerCollisionShapeComponent(w);
+        known[idOf("Physics/Chair.ocshape")] = "Physics/Chair.ocshape";
+        const scene::Entity e = mesh(w, "Crate");
+        const auto input = rec("CollisionShape", {{"asset", "Physics/Chair.ocshape"}, {"motion", "dynamic"}, {"noscale", "1"}});
+        check(csType != 0 && game::applyPlacedComponent(w, e, input), "CollisionShape applies through the level applier");
+        const auto* c = w.component<game::CCollisionShape>(e, csType);
+        check(c && c->asset == idOf("Physics/Chair.ocshape") && c->flags == game::kCollisionShapeIgnoreScale, "...asset id and the no-scale flag");
+        const auto* rb = w.component<scene::CRigidBody>(e, scene::kComponentRigidBody);
+        check(rb && rb->motionType == 2, "...and a Rigid Body carrying the motion type");
+        const auto got = game::capturePlacedComponent(w, e, "CollisionShape", pathOf);
+        check(got && *got == input, "capture returns the same record");
+        check(game::removePlacedComponent(w, e, "CollisionShape") && !w.hasComponent(e, csType) && !w.hasComponent(e, scene::kComponentRigidBody),
+              "removing it also takes back the zero-size Rigid Body the record attached");
+        w.destroy(e); w.flush();
+    }
     if (g_failures) { AVER_ERROR("LevelComponentsTest: {} check(s) failed", g_failures); return 1; }
     AVER_INFO("LevelComponentsTest: all checks passed");
     return 0;
