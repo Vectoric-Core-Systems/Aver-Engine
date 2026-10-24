@@ -872,35 +872,44 @@ SkyOut VSky(uint id : SV_VertexID) {
 struct MeshVtx { float3 pos; float3 nrm; float2 uv; };
 StructuredBuffer<MeshVtx> gVerts   : register(AVER_REG_JOIN(t, AVER_MS_VTX_REG));
 ByteAddressBuffer         gIndices : register(AVER_REG_JOIN(t, AVER_MS_IDX_REG));
-cbuffer MeshCB : register(AVER_CB_JOIN(b, AVER_MESH_GEOM_CB)) { uint gTriCount; uint3 _msPad; };
+// gVtxCount bounds every index (0: unchecked). gGroupBase: a draw over 65535 groups is several DispatchMesh calls, each
+// starting at this group.
+cbuffer MeshCB : register(AVER_CB_JOIN(b, AVER_MESH_GEOM_CB)) { uint gTriCount; uint gVtxCount; uint gGroupBase; uint _msPad; };
 
 
 // Triangles this group owns.
-uint msTriCount(uint gid) { return min(AVER_MS_TRIS, gTriCount - gid * AVER_MS_TRIS); }
+uint msTriCount(uint group) { return min(AVER_MS_TRIS, gTriCount - group * AVER_MS_TRIS); }
 
-// Pulls this group's triangles from the vertex and index buffers and emits them transformed.
-[numthreads(AVER_MS_TRIS, 1, 1)]
+// Triangle `tri`'s indices, or vertex 0 three times (zero area, never rasterised) when one names a vertex past the
+// buffer. Root views have no bounds check: unlike the input assembler, a stray index here reads arbitrary GPU memory.
+uint3 msTriangle(uint tri) {
+    uint3 idx = gIndices.Load3(tri * 12);
+    if (gVtxCount != 0 && any(idx >= gVtxCount)) idx = uint3(0, 0, 0);
+    return idx;
+}
+
+// Pulls this group's triangles from the vertex and index buffers and emits them transformed, unindexed: ONE THREAD PER
+// OUTPUT VERTEX (thread t writes corner t % 3 of triangle t / 3), and the first `count` threads write the triangles.
+[numthreads(AVER_MS_TRIS * 3, 1, 1)]
 [outputtopology("triangle")]
 void MSMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
             out vertices VSOut verts[AVER_MS_TRIS * 3],
             out indices uint3 tris[AVER_MS_TRIS]) {
-    uint count = msTriCount(gid);
+    const uint group = gGroupBase + gid;
+    const uint count = msTriCount(group);
     SetMeshOutputCounts(count * 3, count);   // must run for the whole group, before any output
-    if (gtid >= count) return;
+    if (gtid < count) tris[gtid] = uint3(gtid * 3, gtid * 3 + 1, gtid * 3 + 2);
+    if (gtid >= count * 3) return;
 
-    uint3 idx = gIndices.Load3((gid * AVER_MS_TRIS + gtid) * 12);
-    uint o = gtid * 3;
-    [unroll] for (uint k = 0; k < 3; ++k) {
-        MeshVtx v = gVerts[idx[k]];
-        float4 wp = mul(float4(v.pos, 1.0), gWorld);
-        VSOut ov;
-        ov.wpos  = wp.xyz;
-        ov.pos   = mul(wp, gViewProj);
-        ov.nrmWS = averTransformNormal(v.nrm, gWorld);
-        ov.uv    = v.uv;
-        verts[o + k] = ov;
-    }
-    tris[gtid] = uint3(o, o + 1, o + 2);
+    const uint3 idx = msTriangle(group * AVER_MS_TRIS + gtid / 3);
+    const MeshVtx v = gVerts[idx[gtid % 3]];
+    const float4 wp = mul(float4(v.pos, 1.0), gWorld);
+    VSOut ov;
+    ov.wpos  = wp.xyz;
+    ov.pos   = mul(wp, gViewProj);
+    ov.nrmWS = averTransformNormal(v.nrm, gWorld);
+    ov.uv    = v.uv;
+    verts[gtid] = ov;
 }
 #endif // AVER_MS
 

@@ -8490,6 +8490,8 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot,
                                                           layeredBsdf_);
     auto rasterDefs = [&](const char* extra) { return extra ? matDefs + ";" + extra : matDefs; };
+    // The scene pixel shaders draw strand hair (material_prelude.hlsl's AVER_HAIR_SHADING); no other Voxi shader compiles the model.
+    auto sceneDefs = [&](const char* extra) { return rasterDefs(extra) + ";AVER_HAIR_SHADING=1"; };
 
     // --- 6. debug: raymarch the volume to screen ---
     const rhi::ShaderHandle vsky = compile("VSky", rhi::ShaderStage::Vertex, kBaseSm, rasterDefs(nullptr).c_str());
@@ -8523,7 +8525,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     sceneGbuf.renderTargets[3] = rhi::Format::RGB10A2Unorm;
 
     const rhi::ShaderHandle vsMain = compile("VSMain", rhi::ShaderStage::Vertex, kBaseSm, rasterDefs(nullptr).c_str());
-    const rhi::ShaderHandle psVoxi = compile("PSMainVoxi", rhi::ShaderStage::Pixel, kBaseSm, rasterDefs(nullptr).c_str());
+    const rhi::ShaderHandle psVoxi = compile("PSMainVoxi", rhi::ShaderStage::Pixel, kBaseSm, sceneDefs(nullptr).c_str());
     if (vsMain && psVoxi) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psVoxi;
@@ -8533,7 +8535,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
 
     // PSMainVoxi + AVER_GBUFFER changes return type (four SV_TARGETs); needs separate ShaderHandle.
     const rhi::ShaderHandle psVoxiGbuf =
-        compile("PSMainVoxi", rhi::ShaderStage::Pixel, kBaseSm, rasterDefs("AVER_GBUFFER=1").c_str());
+        compile("PSMainVoxi", rhi::ShaderStage::Pixel, kBaseSm, sceneDefs("AVER_GBUFFER=1").c_str());
     if (vsMain && psVoxiGbuf) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
         p.vs = vsMain; p.ps = psVoxiGbuf;
@@ -8570,7 +8572,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     ensureTextureTable();
     const rhi::PipelineLayout giRt = rtGeomBindless_ ? rtLayout() : gi;
     const std::string rtFlat = std::string("AVER_RT=1") + rtGeomDefs();
-    const rhi::ShaderHandle psRt = rtOk ? compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65, rasterDefs(rtFlat.c_str()).c_str()) : 0;
+    const rhi::ShaderHandle psRt = rtOk ? compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65, sceneDefs(rtFlat.c_str()).c_str()) : 0;
     if (vsMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
         p.vs = vsMain; p.ps = psRt;
@@ -8582,7 +8584,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // Same shader with AVER_RT and AVER_GBUFFER: PSMainVoxi nests both #if blocks.
     const rhi::ShaderHandle psRtGbuf =
         rtOk ? compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65,
-                       rasterDefs((rtFlat + ";AVER_GBUFFER=1").c_str()).c_str())
+                       sceneDefs((rtFlat + ";AVER_GBUFFER=1").c_str()).c_str())
              : 0;
     if (vsMain && psRtGbuf) {
         rhi::GraphicsPipelineDesc p = sceneGbuf;
@@ -8879,7 +8881,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
         // them compiled in it hung the RX 7800 XT at NewSponza Night's default view (docs/rendering/DECALS.md).
         const std::string blendedDefs = bindlessDefs + ";AVER_BLENDED_PASS=1";
         const rhi::ShaderHandle psMainTex = compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65,
-                                                    rasterDefs(blendedDefs.c_str()).c_str());
+                                                    rasterDefs(blendedDefs.c_str()).c_str());   // glass: hair is opaque
         if (vsMainTex && psMainTex) {
             rhi::GraphicsPipelineDesc p = scene;
             p.vs = vsMainTex; p.ps = psMainTex;

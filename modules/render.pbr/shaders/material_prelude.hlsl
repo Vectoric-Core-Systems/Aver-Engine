@@ -124,6 +124,12 @@ cbuffer AverMaterial : register(b2) {
 // Strand hair (pbr::MaterialFlag_Hair): selects AVER_MODEL_HAIR for the draw, whatever gShadingModel says, and reinterprets nine otherwise unused
 // or flag-gated slots under it (see averHairInit). Clear for every material that is not hair, so nothing else changes.
 #define AVER_MAT_HAIR           (1u << 18)
+// The hair MODEL compiles only into the pipelines that draw hair (AVER_HAIR_SHADING=1: Voxi's PSMainVoxi variants). Elsewhere a hair
+// material shades with the standard model. The model grows AverSurface by 22 floats and adds three code paths; extra registers in a
+// shader that never draws hair (PSVoxel's mesh-shader voxelisation) are the suspect in AMD driver timeouts on NeonDistrict loads.
+#ifndef AVER_HAIR_SHADING
+#define AVER_HAIR_SHADING 0
+#endif
 // The parameter texture's rows (slot 5, R32Float, 8 x 9); TerrainLayers.hpp's kTerrainRow* mirror them.
 #define AVER_TERRAIN_ROW_UVSCALE    0
 #define AVER_TERRAIN_ROW_HEIGHTBIAS 1
@@ -303,6 +309,7 @@ struct AverSurface {
     uint   model;        // AVER_MODEL_*
     bool   display;      // authored colour, bypassing lighting and camera post
     float4 displayColor;
+#if AVER_HAIR_SHADING
     // AVER_MODEL_HAIR only (set by averHairInit, defaults otherwise). A hand-built surface (PSRayDriven) never has the model, so never reads them.
     float3 hairT;        // unit strand tangent, root to tip, world space
     float  hairAcross;   // -1 .. 1 across the ribbon
@@ -312,6 +319,7 @@ struct AverSurface {
     float4 hairMix;      // x TT weight, y TRT weight, z multiple-scatter ambient, w colour variation
     float3 hairTip;      // linear tip colour
     float3 hairTint;     // linear TT / TRT tint
+#endif
 };
 
 // The five maps at one point. Every value is the identity for its slot where no map is bound.
@@ -657,7 +665,11 @@ AverDrawTerms averDrawTerms() {
     d.metallic  = gMaterial.x;
     d.roughness = gMaterial.y;
     d.emissive  = gEmissive.rgb;
+#if AVER_HAIR_SHADING
     d.model     = (gMaterialFlags & AVER_MAT_HAIR) ? AVER_MODEL_HAIR : gShadingModel;
+#else
+    d.model     = gShadingModel;
+#endif
     return d;
 }
 
@@ -941,6 +953,7 @@ AverAuthored averStockAuthoredAt(AverVertex v, float2 uv) {
 // ---- end wave3 terrain layers ----
 
 
+#if AVER_HAIR_SHADING
 // ================= STRAND HAIR: reading the ribbon and the material (AVER_MODEL_HAIR) =================
 // The ribbon pass (render.hair/AverHairRibbons.hlsl) writes, per vertex: the unit strand TANGENT (root to tip) in the normal slot and
 // uv = (-1 or +1 across the ribbon, hash8 + fraction * 0.999). The material keeps the hair parameters in slots the hair model has no other use for
@@ -974,6 +987,7 @@ float3 averHairInit(inout AverSurface s, AverVertex v, AverMaterialData m) {
     const float a = s.hairAcross;
     return normalize(Vp * sqrt(max(1.0 - a * a, 0.0)) + B * a);
 }
+#endif
 
 // THE SURFACE, from authored values, the material and the draw's terms, at shading normal N (already
 // perturbed by whichever path has the tangent frame). The one place every renderer derives F0, the
@@ -983,6 +997,7 @@ AverSurface averComposeSurface(AverVertex v, AverLight l, AverAuthored a, AverMa
     AverSurface s;
     s.N = N;
     s.V = v.V;
+#if AVER_HAIR_SHADING
     s.hairT = float3(0.0, 0.0, 1.0);
     s.hairAcross = 0.0;
     s.hairFrac = 0.0;
@@ -992,6 +1007,7 @@ AverSurface averComposeSurface(AverVertex v, AverLight l, AverAuthored a, AverMa
     s.hairTip = float3(0.0, 0.0, 0.0);
     s.hairTint = float3(1.0, 1.0, 1.0);
     if (d.model == AVER_MODEL_HAIR) s.N = averHairInit(s, v, m);
+#endif
     s.H = normalize(v.V + l.direction);
     s.metallic = saturate(d.metallic * a.metallic);
     s.rough = clamp(d.roughness * a.roughness, 0.045, 1.0);
@@ -1262,6 +1278,7 @@ float3 averSubsurfaceAmbient(AverSurface s, AverIndirect ind) {
     return s.kdAlbedo * s.sssColor * irradiance * (0.5 * averSubsurfaceTransmit(s));
 }
 
+#if AVER_HAIR_SHADING
 // The strand's colour at this point: root to tip, with a per-strand variation (hair is never one colour).
 float3 averHairColour(AverSurface s) {
     const float3 base = lerp(s.albedo, s.hairTip, saturate(s.hairFrac));
@@ -1331,14 +1348,17 @@ float3 averHairIndirect(AverSurface s, AverIndirect ind) {
     const float3 spec = ind.specular * (0.046 * dfg.x + dfg.y) * 0.5 * s.hairLobe.z;
     return diffuse + spec;
 }
+#endif
 
 // Adds one light's direct contribution: Cook-Torrance GGX, with NdotL and visibility applied.
 float3 averShadeDirect(float3 radiance, AverSurface s, AverLight l) {
     switch (s.model) {
     case AVER_MODEL_UNLIT:
         return radiance;
+#if AVER_HAIR_SHADING
     case AVER_MODEL_HAIR:
         return radiance + averHairDirect(s, l);
+#endif
     default: {
         float3 diffuseLobe, specularLobe, subsurfaceLobe;
         float  ndl;
@@ -1485,8 +1505,10 @@ float3 averShadeIndirect(float3 radiance, AverSurface s, AverIndirect ind) {
     switch (s.model) {
     case AVER_MODEL_UNLIT:
         return radiance + s.emissive;
+#if AVER_HAIR_SHADING
     case AVER_MODEL_HAIR:
         return radiance + averHairIndirect(s, ind) + s.emissive;
+#endif
     default: {
         float3 specEnv, diffAmbient, diffBounce;
         averIndirectTerms(s, ind, specEnv, diffAmbient, diffBounce);
@@ -1528,11 +1550,13 @@ void averShadeSplit(AverSurface s, AverLight l, AverIndirect ind, out float3 dif
         diffuse  = s.emissive;
         specular = 0.0;
         return;
+#if AVER_HAIR_SHADING
     case AVER_MODEL_HAIR:
         // Hair is opaque and never reaches the blended path; a caller that sends it here gets its lit colour as one diffuse term.
         diffuse  = averHairDirect(s, l) + averHairIndirect(s, ind) + s.emissive;
         specular = 0.0;
         return;
+#endif
     default: {
         float3 dDiffuse, dSpecular, dSubsurface;
         float  ndl;

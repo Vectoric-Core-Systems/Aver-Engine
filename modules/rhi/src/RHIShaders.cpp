@@ -92,7 +92,7 @@ const std::string& colorHlsl() {
 // the C++. The asserts are kept, but their job has changed: they no longer stand in for a coupling
 // (there is a real one now), they PIN VALUES OTHER CODE DEPENDS ON -- a root signature laid out
 // elsewhere, a backend that uploads 32 dwords. Change one and the assert asks whether you meant to.
-static_assert(kMeshShaderTrisPerGroup == 64, "AVER_MS_TRIS is emitted from this");
+static_assert(kMeshShaderTrisPerGroup * 3 <= 128, "AVER_MS_TRIS is emitted from this: one thread per output vertex, 128 threads at most");
 static_assert(kMeshGeometryConstantRegister == 5, "MeshCB in the prelude derives its register from this");
 static_assert(kObjectConstantRegister == 1, "PerObject in the prelude derives its register from this");
 static_assert(kObjectConstantDwords == 32,

@@ -1708,6 +1708,7 @@ private:
     f32 msaaClear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};   // Optimised clear value for scene colour.
     f32 sceneClear_[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     std::string adapterName_ = "D3D12 Device";
+    u32 adapterVendor_ = 0;   // PCI vendor id of the adapter the device was made on (0x1002 AMD, 0x10DE NVIDIA, 0x8086 Intel)
     bool softwareAdapter_ = false;   // True when running on WARP.
     bool warpConsRasterLogged_ = false;
     // IDXGIAdapter3 for QueryVideoMemoryInfo. Null on older DXGI or unavailable driver.
@@ -1939,8 +1940,10 @@ bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
     return true;
 }
 
-// Descriptors every binding set suballocates from: one shader-visible heap for the whole device.
-constexpr u32 kRhiHeapSize = 65536;
+// Descriptors every binding set suballocates from: one shader-visible heap for the whole device. 262144 (8 MiB a heap): the
+// bindless table takes ~20k and every material set is held once per frame in flight, so NeonDistrict's 3200 resident
+// materials overflowed 65536. Every binding tier allows 1,000,000.
+constexpr u32 kRhiHeapSize = 262144;
 // Transient constant bytes per frame in flight -- starting size; grows on demand.
 constexpr u64 kRhiRingBytes = 2u << 20;
 // Growth ceiling. 64MB is far past any interactive draw count.
@@ -2330,6 +2333,7 @@ bool D3D12Device::init(const DeviceDesc& desc) {
             std::wcstombs(name, ad.Description, sizeof(name) - 1);
             name[sizeof(name) - 1] = '\0';
             adapterName_ = name;
+            adapterVendor_ = ad.VendorId;
             adapter.As(&adapter3_);
             break;
         }
@@ -2742,6 +2746,18 @@ void D3D12Device::queryCaps() {
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 o7{};
     if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &o7, sizeof(o7))))
         caps_.meshShaderTier = (o7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1) ? 1u : 0u;
+    // Mesh shaders off: AVER_NO_MESH_SHADERS=1 anywhere, and by default on AMD, where opening NeonDistrict hung the driver
+    // (TDR, 10-23, RX 7800 XT on Windows 11 26H2) in a mesh-shader draw every time and never on the vertex/geometry-shader
+    // paths, which render the same. AVER_MESH_SHADERS=1 turns them back on there.
+    const char* noMs = std::getenv("AVER_NO_MESH_SHADERS");
+    const char* yesMs = std::getenv("AVER_MESH_SHADERS");
+    if (caps_.meshShaderTier != 0 && noMs && noMs[0] == '1') {
+        caps_.meshShaderTier = 0;
+        AVER_INFO("[RHI.D3D12] mesh shaders off (AVER_NO_MESH_SHADERS=1)");
+    } else if (caps_.meshShaderTier != 0 && adapterVendor_ == 0x1002 && !(yesMs && yesMs[0] == '1')) {
+        caps_.meshShaderTier = 0;
+        AVER_INFO("[RHI.D3D12] mesh shaders off on this AMD adapter (they hung the driver); AVER_MESH_SHADERS=1 turns them on");
+    }
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5{};
     if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5)))) {
@@ -3631,6 +3647,17 @@ void D3D12Device::reconcileClearValue() {
 // Uploads a mesh to the GPU and returns its handle.
 namespace {
 // AABB, not tight sphere; radius conservatively rounds up (false positives cost GPU, false negatives wrong pictures).
+// Says once per mesh when indices name vertices past the buffer: the input assembler reads those as zero, the mesh-shader
+// path draws those triangles as nothing (msTriangle), so either way the mesh is missing triangles.
+void warnIndicesPastVertices(const u32* indices, u32 icount, u32 vcount) {
+    u32 bad = 0, worst = 0;
+    for (u32 k = 0; k < icount; ++k)
+        if (indices[k] >= vcount) { ++bad; worst = std::max(worst, indices[k]); }
+    if (bad)
+        AVER_WARN("[RHI.D3D12] a mesh has {} of {} indices past its {} vertices (largest {}); those triangles are dropped",
+                  bad, icount, vcount, worst);
+}
+
 void boundsOfVertices(const MeshVertex* verts, u32 vcount, GpuMesh& m) {
     f32 lo[3] = {verts[0].px, verts[0].py, verts[0].pz};
     f32 hi[3] = {verts[0].px, verts[0].py, verts[0].pz};
@@ -3670,6 +3697,7 @@ public:
         s->device = device_.Get();
         s->m.indexCount = icount;
         s->m.vertexCount = vcount;
+        warnIndicesPastVertices(indices, icount, vcount);
         boundsOfVertices(verts, vcount, s->m);
         s->vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
         s->ibytes = static_cast<u64>(icount) * sizeof(u32);
@@ -3775,6 +3803,7 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
     GpuMesh m;
     m.indexCount = icount;
     m.vertexCount = vcount;
+    if (indices) warnIndicesPastVertices(indices, icount, vcount);
 
     boundsOfVertices(verts, vcount, m);
     const u64 vbytes = static_cast<u64>(vcount) * sizeof(MeshVertex);
@@ -3874,6 +3903,7 @@ MeshHandle D3D12Device::shareVertices(MeshHandle source, const u32* indices, u32
         if (posed) AVER_WARN("[RHI.D3D12] createPosedPartMesh refused: mesh {} is not compute-written", source);
         return 0;
     }
+    if (!posed && indices) warnIndicesPastVertices(indices, indexCount, src.vertexCount);
     // Validate index range (posed buffer is compute-written every frame).
     if (posed) {
         for (u32 k = 0; k < indexCount; ++k)
@@ -4641,15 +4671,26 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     cmdList_->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
 }
 
+// DispatchMesh over `tris` triangles (AVER_MS_TRIS per group) with the MeshCB block {tris, vertexCount, first group, 0}.
+// D3D12 caps a dispatch at 65535 groups a dimension, so a mesh over ~4.2M triangles is several dispatches.
+static void dispatchMeshTriangles(ID3D12GraphicsCommandList* cl, ID3D12GraphicsCommandList6* cl6, UINT countParam, u32 tris,
+                           u32 vertexCount) {
+    constexpr u32 kMaxGroups = 65535;
+    const u32 groups = (tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup;
+    for (u32 base = 0; base < groups; base += kMaxGroups) {
+        const u32 tc[4] = {tris, vertexCount, base, 0};
+        cl->SetGraphicsRoot32BitConstants(countParam, 4, tc, 0);
+        cl6->DispatchMesh(std::min(kMaxGroups, groups - base), 1, 1);
+    }
+}
+
 // Mesh-shader draw via DispatchMesh; group count from triangle count (must match AVER_MS_TRIS).
 void D3D12Device::dispatchMesh(const GpuMesh& m) {
     const u32 tris = m.indexCount / 3;
     if (!tris) return;
     cmdList_->SetGraphicsRootShaderResourceView(kMeshVertexParam, m.vb->GetGPUVirtualAddress());
     cmdList_->SetGraphicsRootShaderResourceView(kMeshIndexParam, m.ib->GetGPUVirtualAddress());
-    const u32 tc[4] = {tris, 0, 0, 0};
-    cmdList_->SetGraphicsRoot32BitConstants(kMeshCountParam, 4, tc, 0);
-    cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
+    dispatchMeshTriangles(cmdList_.Get(), cmdList6_.Get(), kMeshCountParam, tris, m.vertexCount);
 }
 
 // Uploads line list to GPU; EditorLines owns buffers and slot table.
@@ -9464,9 +9505,7 @@ void D3D12RenderContext::dispatchMeshFor(MeshHandle mesh) {
     applyDrawBinding();
     dev_->cmdList_->SetGraphicsRootShaderResourceView(static_cast<UINT>(pipe_->msVertexParam), m.vb->GetGPUVirtualAddress());
     dev_->cmdList_->SetGraphicsRootShaderResourceView(static_cast<UINT>(pipe_->msIndexParam), m.ib->GetGPUVirtualAddress());
-    const u32 tc[4] = {tris, 0, 0, 0};
-    dev_->cmdList_->SetGraphicsRoot32BitConstants(static_cast<UINT>(pipe_->msCountParam), 4, tc, 0);
-    dev_->cmdList6_->DispatchMesh((tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
+    dispatchMeshTriangles(dev_->cmdList_.Get(), dev_->cmdList6_.Get(), static_cast<UINT>(pipe_->msCountParam), tris, m.vertexCount);
 }
 
 // Dispatches an amplification+mesh-shader pipeline over one cluster cut.
@@ -10074,7 +10113,13 @@ void D3D12RenderContext::uavBarrierBuffer(BufferHandle h) {
 // Opens a debug marker region and nested GPU timing span (prefer ScopedGpuStat when possible).
 void D3D12RenderContext::pushMarker(const char* label) {
     if (!label || !dev_->cmdList_) return;
-    dev_->cmdList_->BeginEvent(1, label, static_cast<UINT>(std::strlen(label) + 1));
+    // The Unicode form (metadata 0, PIX's WINPIX_EVENT_UNICODE_VERSION) is the one DRED keeps as breadcrumb context, so a
+    // device-lost dump names the pass that was running.
+    wchar_t wide[128];
+    usize n = 0;
+    for (; label[n] && n + 1 < std::size(wide); ++n) wide[n] = static_cast<wchar_t>(static_cast<unsigned char>(label[n]));
+    wide[n] = 0;
+    dev_->cmdList_->BeginEvent(0, wide, static_cast<UINT>((n + 1) * sizeof(wchar_t)));
     // Label is always a string literal (safe to store pointer, allocation-free); parent tracks nesting.
     if (dev_->tsSlice_[dev_->frameIndex_].size() >= D3D12Device::kMaxGpuSpans) {
         ++dev_->tsDropped_;   // see tsDropped_: popMarker consumes this instead of popping

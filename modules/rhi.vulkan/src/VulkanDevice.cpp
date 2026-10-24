@@ -1598,9 +1598,13 @@ void VulkanDevice::dispatchMesh(const GpuMesh& m) {
 
     VkCommandBuffer cmd = commandBuffers_[frameIndex_];
     api_.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipelineLayout_, 0, 1, &set, 0, nullptr);
-    const u32 tc[4] = {tris, 0, 0, 0};
-    api_.CmdPushConstants(cmd, meshPipelineLayout_, VK_SHADER_STAGE_ALL, PushConstantLayout::kObjectBytes, sizeof(tc), tc);
-    api_.CmdDrawMeshTasksEXT(cmd, (tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
+    // {tris, vertexCount, first group, 0}: the shader bounds every index, and a mesh over 65535 groups is several draws.
+    const u32 groups = (tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup;
+    for (u32 base = 0; base < groups; base += 65535u) {
+        const u32 tc[4] = {tris, m.vertexCount, base, 0};
+        api_.CmdPushConstants(cmd, meshPipelineLayout_, VK_SHADER_STAGE_ALL, PushConstantLayout::kObjectBytes, sizeof(tc), tc);
+        api_.CmdDrawMeshTasksEXT(cmd, std::min(65535u, groups - base), 1, 1);
+    }
 }
 
 // ================================================================================================

@@ -668,11 +668,15 @@ void VulkanRenderContext::dispatchMeshFor(MeshHandle mesh) {
                                  le->pushConstants.meshVertexAddrOffset, sizeof(VkDeviceAddress), &m.vbAddress);
     dev_->api().CmdPushConstants(cb, le->pipelineLayout, VK_SHADER_STAGE_ALL,
                                  le->pushConstants.meshIndexAddrOffset, sizeof(VkDeviceAddress), &m.ibAddress);
-    const u32 tc[4] = {tris, 0, 0, 0};
-    dev_->api().CmdPushConstants(cb, le->pipelineLayout, VK_SHADER_STAGE_ALL,
-                                 le->pushConstants.meshCountOffset, sizeof(tc), tc);
+    // {tris, vertexCount, first group, 0}: the shader bounds every index, and a mesh over 65535 groups is several draws.
+    const u32 groups = (tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup;
     const bool ownScope = beginRenderScope(*dev_, cb);
-    dev_->api().CmdDrawMeshTasksEXT(cb, (tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
+    for (u32 base = 0; base < groups; base += 65535u) {
+        const u32 tc[4] = {tris, m.vertexCount, base, 0};
+        dev_->api().CmdPushConstants(cb, le->pipelineLayout, VK_SHADER_STAGE_ALL,
+                                     le->pushConstants.meshCountOffset, sizeof(tc), tc);
+        dev_->api().CmdDrawMeshTasksEXT(cb, std::min(65535u, groups - base), 1, 1);
+    }
     endRenderScope(*dev_, cb, ownScope);
 }
 
