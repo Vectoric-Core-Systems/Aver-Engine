@@ -9,7 +9,10 @@
 #include "aver/platform/FileSystem.hpp"
 
 #include <cctype>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 
 namespace aver {
 
@@ -52,6 +55,22 @@ std::string ownerProjectOf(const std::string& mapPath) {
     return {};
 }
 
+// A session that lost the GPU device keeps its log as Logs\Sandbox-devicelost-<time>.log: two more launches rotate
+// Sandbox.log away, and that log (with the DRED trail of a --dred run) is the only record of where the GPU hung.
+void keepDeviceLostLog(const std::string& log, const std::string& logsDir) {
+    std::ifstream in(log, std::ios::binary);
+    if (!in) return;
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    if (text.find("THE GPU DEVICE HAS BEEN LOST") == std::string::npos) return;
+    std::error_code ec;
+    const auto when = std::filesystem::last_write_time(log, ec);
+    const auto secs = ec ? 0ll : static_cast<long long>(
+        std::chrono::duration_cast<std::chrono::seconds>(when.time_since_epoch()).count());
+    std::filesystem::copy_file(log, logsDir + AVER_PATH_SEP "Sandbox-devicelost-" + std::to_string(secs) + ".log",
+                               std::filesystem::copy_options::skip_existing, ec);
+}
+
 // Parse command line and build the editor. Flags run in separate loops due to MSVC C1061 nesting limit.
 int runShaderWarm(const std::string& projectPath);   // ShaderWarmRun.cpp
 
@@ -61,6 +80,7 @@ Application* createApplication(int argc, char** argv) {
         std::error_code ec;
         std::filesystem::create_directories(dir + AVER_PATH_SEP "Logs", ec);
         const std::string log = dir + AVER_PATH_SEP "Logs" AVER_PATH_SEP "Sandbox.log";
+        keepDeviceLostLog(log, dir + AVER_PATH_SEP "Logs");
         std::filesystem::rename(log, dir + AVER_PATH_SEP "Logs" AVER_PATH_SEP "Sandbox-prev.log", ec);
         aver::setLogFile(log.c_str());
     }

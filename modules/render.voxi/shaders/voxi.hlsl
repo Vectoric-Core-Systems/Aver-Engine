@@ -3528,42 +3528,6 @@ void GSVoxel(triangle VoxOut inp[3], inout TriangleStream<VoxOut> os) {
     }
 }
 
-#if AVER_MS
-// Voxelisation without geometry shader: same dominant-axis projection, per primitive.
-// Use averTransformNormal (not plain mul): correct under rotation/uniform scale only.
-// ONE THREAD PER OUTPUT VERTEX, as MSMain: thread t is corner t % 3 of triangle t / 3. Each thread reads its triangle's three
-// positions for the dominant axis (all three corners must project along the same one).
-[numthreads(AVER_MS_TRIS * 3, 1, 1)]
-[outputtopology("triangle")]
-void MSVoxel(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
-             out vertices VoxOut verts[AVER_MS_TRIS * 3],
-             out indices uint3 tris[AVER_MS_TRIS]) {
-    const uint group = gGroupBase + gid;
-    const uint count = msTriCount(group);
-    SetMeshOutputCounts(count * 3, count);
-    if (gtid < count) tris[gtid] = uint3(gtid * 3, gtid * 3 + 1, gtid * 3 + 2);
-    if (gtid >= count * 3) return;
-
-    const uint3 idx = msTriangle(group * AVER_MS_TRIS + gtid / 3);
-    const uint corner = gtid % 3;
-    const float3 w0 = mul(float4(gVerts[idx.x].pos, 1.0), gWorld).xyz;
-    const float3 w1 = mul(float4(gVerts[idx.y].pos, 1.0), gWorld).xyz;
-    const float3 w2 = mul(float4(gVerts[idx.z].pos, 1.0), gWorld).xyz;
-    const float3 n = abs(cross(w1 - w0, w2 - w0));
-    const int axis = (n.x > n.y && n.x > n.z) ? 0 : ((n.y > n.z) ? 1 : 2);
-    const MeshVtx v = gVerts[idx[corner]];
-    const float3 wp = corner == 0 ? w0 : (corner == 1 ? w1 : w2);
-    const float3 uvw = voxelUVW(wp);
-    const float2 p = (axis == 0) ? uvw.yz : ((axis == 1) ? uvw.xz : uvw.xy);
-    VoxOut ov;
-    ov.wpos = wp;
-    ov.nrm  = averTransformNormal(v.nrm, gWorld);
-    ov.uv   = v.uv;
-    ov.pos  = float4(p * 2.0 - 1.0, 0.5, 1.0);
-    verts[gtid] = ov;
-}
-#endif // AVER_MS
-
 // Shades the fragment with shadowed sun plus sky, adds exitant radiance to the accumulator.
 void PSVoxel(VoxOut i) {
     float3 uvw = voxelUVW(i.wpos);

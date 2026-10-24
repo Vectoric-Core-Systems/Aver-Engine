@@ -348,11 +348,11 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
         if (!mipBindings_[m]) missing = "mip binding set";
 
     AVER_INFO("[Voxi] init: shadow tex={} volume={} accum={} ({}^3, {} mips) bindings={}/{}/{}/+{} "
-              "pipelines shadow={}/{} voxel={} voxelMs={} clear={} resolve={} mip={} debug={} "
+              "pipelines shadow={}/{} voxel={} clear={} resolve={} mip={} debug={} "
               "scene={}/{}/{}/{} blended={}/{}/{}/{} airVis={}/{} ({}^3)",
               shadowTex_, voxelTex_, voxelAccumTex_, voxelResBuilt_, voxelMips_,
               bindings_, clearBindings_, resolveBindings_, static_cast<u32>(mipBindings_.size()),
-              shadowPso_, shadowInstancedPso_, voxelPso_, voxelMsPso_, clearPso_, resolvePso_, mipPso_, debugPso_,
+              shadowPso_, shadowInstancedPso_, voxelPso_, clearPso_, resolvePso_, mipPso_, debugPso_,
               scenePso_, sceneMsPso_, sceneRtPso_, sceneMsRtPso_,
               sceneBlendedPso_, sceneMsBlendedPso_, sceneRtBlendedPso_, sceneMsRtBlendedPso_,
               airVisPso_, airVisTex_, kAirVisResolution);
@@ -385,7 +385,7 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
               "blended (glass) variant {}, G-buffer variant {} (off by default -- dev_->gBufferEnabled() "
               "is what turns it on per frame; see pickGbuf())",
               caps_.conservativeRaster ? "on" : "off",
-              (voxelMsPso_ && sceneMsPso_) ? "built" : "absent",
+              sceneMsPso_ ? "built" : "absent",
               rtSupported_ ? "built" : "absent",
               sceneBlendedPso_ ? "built" : "absent",
               sceneGbufPso_ ? "built" : "absent");
@@ -411,7 +411,7 @@ void VoxiRenderer::shutdown() {
     resolveBindings_ = clearBindings_ = bindings_ = 0;
 
     const rhi::PipelineHandle psos[] = {shadowPso_, shadowInstancedPso_, giShadowPso_,
-                                        giShadowInstancedPso_, voxelPso_, voxelMsPso_, mipPso_,
+                                        giShadowInstancedPso_, voxelPso_, mipPso_,
                                         clearPso_, resolvePso_, debugPso_, scenePso_, sceneMsPso_,
                                         sceneRtPso_, sceneMsRtPso_, sceneBlendedPso_,
                                         sceneMsBlendedPso_, sceneRtBlendedPso_, sceneMsRtBlendedPso_,
@@ -438,7 +438,7 @@ void VoxiRenderer::shutdown() {
                                         airVisPso_};
     for (rhi::PipelineHandle p : psos) if (p) res_->destroyPipeline(p);
     shadowPso_ = shadowInstancedPso_ = giShadowPso_ = giShadowInstancedPso_ = 0;
-    voxelPso_ = voxelMsPso_ = mipPso_ = clearPso_ = resolvePso_ = debugPso_ = airVisPso_ = 0;
+    voxelPso_ = mipPso_ = clearPso_ = resolvePso_ = debugPso_ = airVisPso_ = 0;
     scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
     sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
     depthPrepassPso_ = scenePsoPrepassed_ = sceneRtPsoPrepassed_ = 0;
@@ -5513,16 +5513,10 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx, usize begin, usize end
     }
     ctx.uavBarrierTexture(voxelAccumTex_);   // injection must see the cleared accumulator
 
-    // Prefers the mesh-shader voxelise pipeline whenever the device built one, independent of
-    // settings_.meshShaders (a wider switch that also moves the main scene's lit draws onto their
-    // own mesh-shader pipeline, off by default as a real behaviour change). Voxelisation has no such
-    // wrinkle: same `vox` desc, same PSVoxel pixel shader either way, MSVoxel running the identical
-    // dominant-axis projection VSVoxel+GSVoxel do (see MSVoxel's comment for the normal-transform bug
-    // this depended on fixing first). createPipelines() already validates voxelMsPso_ regardless of
-    // the setting, so `voxelMsPso_ != 0` alone means the device proved it can do this; GSVoxel is the
-    // fallback for no mesh-shader tier.
-    const bool useMs = voxelMsPso_ != 0;
-    ctx.setPipeline(useMs ? voxelMsPso_ : voxelPso_);
+    // VSVoxel + GSVoxel, never a mesh shader: the MSVoxel variant this pass had was 10x and more slower on an RX 7800 XT
+    // (voxelise 200-230 ms a frame against a GPU that otherwise waited 0.2 ms, NeonDistrict, conservative raster on), and a
+    // big rebuild crossed Windows' 2 s timeout -- the "device lost opening NeonDistrict" of 10-23.
+    ctx.setPipeline(voxelPso_);
     ctx.setBindingSet(bindings_);
     ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
     ctx.setRenderTargets(nullptr, 0, 0);   // no targets at all: the pixel shader writes only the UAV
@@ -5570,8 +5564,7 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx, usize begin, usize end
         if (d.matSet) ctx.setDrawBinding(d.matSet, d.mat, d.matBytes);
         else          ctx.setDrawBinding(materials_.fallbackBindingSet(),
                                          &materials_.fallbackConstants(), sizeof(pbr::MaterialConstants));
-        if (useMs) ctx.dispatchMeshFor(d.depthMesh);
-        else       ctx.drawMesh(d.depthMesh);
+        ctx.drawMesh(d.depthMesh);
     }
 
     // A staged rebuild's earlier slices end here: the accumulator keeps its sums for the next one.
@@ -8258,8 +8251,6 @@ void VoxiRenderer::bindGiResources(rhi::IResourceFactory& res, rhi::BindingSetHa
 
 // Creates every pipeline the feature runs.
 bool VoxiRenderer::createPipelines() {
-    const bool msOk = caps_.meshShaderTier > 0 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
-
     ShaderScope compile(*res_);
 
     const rhi::PipelineLayout gi = giLayout();
@@ -8361,15 +8352,6 @@ bool VoxiRenderer::createPipelines() {
     }
     if (!voxelPso_) AVER_ERROR("[Voxi] voxelise pipeline unavailable");
 
-    if (msOk && psVoxel) {
-        const std::string msDefs = rasterDefs("AVER_MS=1") + ";" + rhi::meshGeometryDefines(vox.layout);
-        if (const rhi::ShaderHandle ms = compile("MSVoxel", rhi::ShaderStage::Mesh, 65, msDefs.c_str())) {
-            rhi::GraphicsPipelineDesc p = vox;
-            p.ms = ms; p.ps = psVoxel;
-            voxelMsPso_ = res_->createGraphicsPipeline(p);
-        }
-        if (!voxelMsPso_) AVER_WARN("[Voxi] mesh-shader voxelise variant unavailable; the GS path stands in");
-    }
 
     // --- 4. clear the accumulator, and reduce it into mip 0 ---
     if (const rhi::ShaderHandle cs = compile("CSClear", rhi::ShaderStage::Compute, kBaseSm, nullptr)) {

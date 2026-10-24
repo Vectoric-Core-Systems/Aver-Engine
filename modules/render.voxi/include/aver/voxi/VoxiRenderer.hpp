@@ -300,7 +300,7 @@ private:
     rhi::TextureHandle  voxelTex_ = 0;
     // Injection accumulator: R32_UINT Tex3D, (res*4) x res x res, channels interleaved along x.
     rhi::TextureHandle  voxelAccumTex_ = 0;
-    rhi::PipelineHandle voxelPso_ = 0, voxelMsPso_ = 0, mipPso_ = 0, clearPso_ = 0, debugPso_ = 0;
+    rhi::PipelineHandle voxelPso_ = 0, mipPso_ = 0, clearPso_ = 0, debugPso_ = 0;
     rhi::PipelineHandle resolvePso_ = 0;
     // Fog occlusion: kAirVisResolution^3, R16F. At t17(SRV)/u16(UAV). Created with volume, released on off edge.
     rhi::TextureHandle  airVisTex_ = 0;

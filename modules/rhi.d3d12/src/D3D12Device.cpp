@@ -1708,7 +1708,6 @@ private:
     f32 msaaClear_[4] = {0.10f, 0.12f, 0.16f, 1.0f};   // Optimised clear value for scene colour.
     f32 sceneClear_[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     std::string adapterName_ = "D3D12 Device";
-    u32 adapterVendor_ = 0;   // PCI vendor id of the adapter the device was made on (0x1002 AMD, 0x10DE NVIDIA, 0x8086 Intel)
     bool softwareAdapter_ = false;   // True when running on WARP.
     bool warpConsRasterLogged_ = false;
     // IDXGIAdapter3 for QueryVideoMemoryInfo. Null on older DXGI or unavailable driver.
@@ -2333,7 +2332,6 @@ bool D3D12Device::init(const DeviceDesc& desc) {
             std::wcstombs(name, ad.Description, sizeof(name) - 1);
             name[sizeof(name) - 1] = '\0';
             adapterName_ = name;
-            adapterVendor_ = ad.VendorId;
             adapter.As(&adapter3_);
             break;
         }
@@ -2746,17 +2744,11 @@ void D3D12Device::queryCaps() {
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 o7{};
     if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &o7, sizeof(o7))))
         caps_.meshShaderTier = (o7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1) ? 1u : 0u;
-    // Mesh shaders off: AVER_NO_MESH_SHADERS=1 anywhere, and by default on AMD, where opening NeonDistrict hung the driver
-    // (TDR, 10-23, RX 7800 XT on Windows 11 26H2) in a mesh-shader draw every time and never on the vertex/geometry-shader
-    // paths, which render the same. AVER_MESH_SHADERS=1 turns them back on there.
-    const char* noMs = std::getenv("AVER_NO_MESH_SHADERS");
-    const char* yesMs = std::getenv("AVER_MESH_SHADERS");
-    if (caps_.meshShaderTier != 0 && noMs && noMs[0] == '1') {
+    // AVER_NO_MESH_SHADERS=1: run as a device without them (the vertex-shader paths), to tell a driver fault in a
+    // mesh-shader pipeline apart from the work it does.
+    if (const char* noMs = std::getenv("AVER_NO_MESH_SHADERS"); caps_.meshShaderTier != 0 && noMs && noMs[0] == '1') {
         caps_.meshShaderTier = 0;
         AVER_INFO("[RHI.D3D12] mesh shaders off (AVER_NO_MESH_SHADERS=1)");
-    } else if (caps_.meshShaderTier != 0 && adapterVendor_ == 0x1002 && !(yesMs && yesMs[0] == '1')) {
-        caps_.meshShaderTier = 0;
-        AVER_INFO("[RHI.D3D12] mesh shaders off on this AMD adapter (they hung the driver); AVER_MESH_SHADERS=1 turns them on");
     }
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5{};
