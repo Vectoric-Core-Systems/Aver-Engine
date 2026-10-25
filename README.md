@@ -35,7 +35,6 @@ LGPL:
 | `third_party/imgui` | Dear ImGui | MIT |
 | `third_party/stb` | stb single-file libraries | Public domain / MIT |
 | `third_party/meshoptimizer` | meshoptimizer | MIT |
-| `third_party/ufbx` | ufbx (FBX import) | MIT |
 | `third_party/fonts` | Roboto, Material Icons | Apache-2.0 |
 | `third_party/vulkan-headers` | Vulkan-Headers (Khronos) | Apache-2.0 |
 | `third_party/fidelityfx-fsr` | AMD FidelityFX FSR 1 | MIT |
