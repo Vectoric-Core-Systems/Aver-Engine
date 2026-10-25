@@ -1,4 +1,4 @@
-// PhysicsShapeCache.cpp -- the shape binary cache (physics_state_abi.h, wave 11 WORLD_STATE_DEBUG phase E): a mesh or heightfield
+// PhysicsShapeCache.cpp -- the shape binary cache (physics_state_abi.h): a mesh or heightfield
 // shape to a byte blob and back, so a host can keep the BVH on disk instead of building it every launch.
 //
 // THE BLOB. A 48-byte header, then Jolt's own Shape::SaveBinaryState:
@@ -19,7 +19,6 @@
 
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Hash.hpp"
-#include "aver/core/Log.hpp"
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_state_abi.h"
 

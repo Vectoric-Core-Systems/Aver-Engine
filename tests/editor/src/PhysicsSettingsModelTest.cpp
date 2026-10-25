@@ -7,7 +7,6 @@
 #include "aver/core/Log.hpp"
 #include "aver/physics/physics_abi.h"
 
-#include <cmath>
 #include <cstdio>
 #include <limits>
 #include <string>

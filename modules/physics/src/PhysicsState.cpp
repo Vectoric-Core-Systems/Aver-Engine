@@ -1,5 +1,5 @@
 // PhysicsState.cpp -- snapshots of the whole simulation, exact stepping, the state hash and the hash log
-// (physics_state_abi.h; wave 11 WORLD_STATE_DEBUG phase D). PhysicsStateEngine.cpp holds the manifest and the engine section;
+// (physics_state_abi.h). PhysicsStateEngine.cpp holds the manifest and the engine section;
 // PhysicsStateRecorder.hpp the byte buffers.
 //
 // THE BLOB. A 64-byte header, then the payload:
@@ -27,13 +27,11 @@
 
 #include <Jolt/Physics/StateRecorder.h>
 
-#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <mutex>
-#include <string>
 #include <unordered_map>
 
 using namespace aver;
@@ -108,7 +106,6 @@ struct Snap {
     uint64_t worldId = 0;
     uint32_t flags = 0, topologyEpoch = 0, constraintEpoch = 0;
     int64_t steps = 0;
-    uint32_t payloadSize = 0;
     uint64_t hash = 0;
     uint32_t bodies = 0, characters = 0, vehicles = 0, joints = 0, ragdolls = 0;
 };
@@ -347,7 +344,6 @@ int32_t aver_phys_snapshot_capture(int32_t reuse, uint32_t flags) {
     s->topologyEpoch = g_world->topologyEpoch;
     s->constraintEpoch = g_world->constraintEpoch;
     s->steps = g_world->stepsTotal;
-    s->payloadSize = static_cast<uint32_t>(s->blob.size() - kHeaderBytes);
     s->hash = readAt<uint64_t>(s->blob.data(), 56);
     fillCounts(*s, m);
     g_lastResult = AVER_PHYS_RESTORE_OK;
@@ -430,7 +426,6 @@ int32_t aver_phys_snapshot_import(const uint8_t* data, int32_t size) {
     s.topologyEpoch = h.topologyEpoch;
     s.constraintEpoch = h.constraintEpoch;
     s.steps = h.steps;
-    s.payloadSize = h.payloadSize;
     s.hash = h.hash;
     fillCounts(s, m);
     setAbiError(AbiError::Ok);

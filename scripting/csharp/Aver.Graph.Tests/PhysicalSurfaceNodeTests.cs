@@ -7,7 +7,6 @@
 // native libraries or the entity are absent. What a call does to a live physics world needs the native libraries and is the
 // C++ SurfaceTest's business.
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using Aver.Framework;
 using Aver.Graph;

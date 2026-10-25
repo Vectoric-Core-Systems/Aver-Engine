@@ -6,14 +6,12 @@
 // HairWindWrapper.cpp itself so its compute system knows the AverHairWind kernel. Everything else it checks goes through the ABI.
 //
 // Written against the header with thresholds that name what is being decided (a strand that droops against one that does not, a wind that moves
-// the tips by a monotone amount), NOT how close Jolt gets. NOTHING IN HERE HAS BEEN RUN: the numbers are starting values for the first headed pass,
-// and a failing threshold is a question about the number before it is a question about the code.
+// the tips by a monotone amount), NOT how close Jolt gets. A failing threshold is a question about the number before it is a question about the code.
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_hair_abi.h"
 
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
-#include "aver/core/Math.hpp"
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Compute/CPU/ComputeSystemCPU.h>
@@ -380,7 +378,7 @@ static void testFalls() {
 
     const int32_t simVerts = 64 * 8;
     stepHair(hair, 1);
-    const std::vector<float> first = readSim(hair, simVerts);
+    readSim(hair, simVerts);   // read back after one step; the values are not checked here
     stepHair(hair, 119);
     const std::vector<float> sim = readSim(hair, simVerts);
     check(allFinite(sim), "no non-finite value after 120 steps");
@@ -404,7 +402,6 @@ static void testFalls() {
     check(lengthBad == 0, "every strand length stays within 3% of rest");
     check(rootBad == 0, "roots stay on the scalp (within 1 mm)");
     check(tipsDown >= 60, "tips droop below the scalp plane (gravity acts)");
-    (void)first;
 
     int32_t ui[AVER_PHYS_HAIRUI_COUNT] = {};
     float uf[AVER_PHYS_HAIRUF_COUNT] = {};

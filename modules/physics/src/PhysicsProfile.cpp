@@ -4,7 +4,6 @@
 
 #include "aver/core/CpuTiming.hpp"
 #include "aver/core/ErrorCodes.hpp"
-#include "aver/core/Log.hpp"
 #include "aver/physics/physics_world_abi.h"
 
 #include <algorithm>

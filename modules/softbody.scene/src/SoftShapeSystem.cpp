@@ -4,7 +4,6 @@
 
 #include "aver/core/Assert.hpp"
 #include "aver/core/Hash.hpp"
-#include "aver/core/Log.hpp"
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_softbody_abi.h"
 #include "aver/physics/physics_softbody_ext_abi.h"
@@ -114,8 +113,8 @@ CSoftRope* SoftShapeSystem::attachRope(scene::World& world, scene::Entity e, con
 SoftShapeSystem::SoftShapeSystem(SoftBodySystem* host) : host_(host) {}
 
 SoftShapeSystem::~SoftShapeSystem() {
-    // A singleton outlives the host's statics in an unspecified order: touch the host only if this one installed itself and the
-    // host is a caller-owned instance (a test's), whose lifetime the caller manages through uninstall().
+    // Nothing to release here: a singleton outlives the host's statics in an unspecified order, and a caller-owned instance (a
+    // test's) leaves the host through uninstall().
 }
 
 SoftShapeSystem& softShapeSystem() {
@@ -140,10 +139,7 @@ void SoftShapeSystem::install(scene::World& world) {
 }
 
 void SoftShapeSystem::ensureInstalled(scene::World& world) {
-    if (!installed_ || world_ != &world) {
-        if (installed_ && world_ != &world) world_ = &world;
-        install(world);
-    }
+    if (!installed_ || world_ != &world) install(world);
 }
 
 void SoftShapeSystem::uninstall() {

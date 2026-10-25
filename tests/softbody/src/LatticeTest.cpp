@@ -1,9 +1,5 @@
 // The jelly lattice (Lattice.hpp): which cells are inside, the Kuhn tetrahedra, the conforming faces, the winding the physics
 // ABI expects, snapping, the node cap, and the barycentric embedding of a render mesh. Pure arithmetic; no GPU, no scene, no Jolt.
-//
-// NOTHING IN HERE HAS BEEN RUN. The numbers (the volume tolerances for the sphere and the torus, the embedding error) are the
-// design's starting values for the first headed pass; a failing threshold is a question about the number before it is a
-// question about the code.
 #include "aver/core/Log.hpp"
 #include "aver/softbody/Lattice.hpp"
 

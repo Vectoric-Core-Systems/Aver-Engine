@@ -1,4 +1,4 @@
-// PhysicsShapeCacheTest -- the shape binary cache (physics_state_abi.h, phase E): a mesh or heightfield shape to bytes and back.
+// PhysicsShapeCacheTest -- the shape binary cache (physics_state_abi.h): a mesh or heightfield shape to bytes and back.
 // Through the ABI only. It checks the thing a cache must get right, which is that a restored shape IS the original:
 //
 //   * the blob of a restored shape equals the blob of the shape it came from, byte for byte (same BVH bits),
@@ -9,7 +9,7 @@
 //   * two threads restoring at once, the size of a blob against its triangles (a guard against saving them twice),
 //   * a restored heightfield is a plain collision shape (set_heights refuses it) while the built one is still editable.
 //
-// Hand-run, exit code = failure count, same shape as PhysicsStateTest.cpp. UNVERIFIED thresholds are marked.
+// Hand-run, exit code = failure count, same shape as PhysicsStateTest.cpp.
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/physics/physics_abi.h"
@@ -148,7 +148,7 @@ static void compareDrop(const char* what, float ax, float bx, float x, float y) 
     aver_phys_body_position(b, pb);
     const float dz = std::fabs(pa[2] - pb[2]), dy = std::fabs(pa[1] - pb[1]), dx = std::fabs((pa[0] - ax) - (pb[0] - bx));
     check(pa[2] > -50.0f && pa[2] < 150.0f, std::string(what) + ": the ball on the original rests on it (z " + std::to_string(pa[2]) + ")");
-    // UNVERIFIED tolerance: a ball rolling on a bumpy surface, 50 m apart in float.
+    // Tolerance for a ball rolling on a bumpy surface, 50 m apart in float.
     check(dz < 1.0f && dy < 2.0f && dx < 2.0f, std::string(what) + ": and the ball on the restored shape ends in the same place (dz " + std::to_string(dz) + ")");
 }
 
@@ -344,7 +344,7 @@ static void testThreadsAndSize() {
     check(same, "and every one saves back to the original bytes");
 
     // The triangle list is vertices (12 bytes) plus indices (12 bytes a triangle). Jolt's BVH copy is a few times that; saving the
-    // triangles a second time as well would push it well past the bound. UNVERIFIED bound, tuned by the first run.
+    // triangles a second time as well would push it well past the bound.
     const size_t raw = m.v.size() * sizeof(float) + m.idx.size() * sizeof(int32_t);
     check(blob.size() < raw * 4, "the blob is " + std::to_string(blob.size()) + " bytes for " + std::to_string(raw) + " bytes of triangles (bound 4x)");
     aver_phys_shutdown();

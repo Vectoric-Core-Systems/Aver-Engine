@@ -219,7 +219,7 @@ namespace {
 
 const ImVec4 kWarn{1.0f, 0.55f, 0.35f, 1.0f};
 
-// A tuning slider/drag on a component value: one undo step per gesture through the host's helper.
+// The .ocsoft behind a Jelly or Rope section: the path it was read from, the asset, and whether that read worked.
 struct AssetCache {
     std::string loadedFor;
     softbody::SoftAsset asset;
@@ -236,6 +236,12 @@ bool refreshAsset(AssetCache& cache, const std::string& abs) {
         cache.ok = !abs.empty() && softbody::loadSoftAsset(abs, cache.asset, nullptr);
     }
     return cache.ok;
+}
+
+// A slider on an asset value. `changed` latches on any move and `finished` on the end of the gesture, so one save covers a drag.
+void assetSlider(bool& changed, bool& finished, const char* label, f32& v, f32 lo, f32 hi, const char* format, bool log) {
+    changed = ImGui::SliderFloat(label, &v, lo, hi, format, log ? ImGuiSliderFlags_Logarithmic : 0) || changed;
+    finished = ImGui::IsItemDeactivatedAfterEdit() || finished;
 }
 
 void drawJelly(const SoftShapeEnv& env, scene::World& w, scene::Entity e) {
@@ -300,16 +306,12 @@ void drawJelly(const SoftShapeEnv& env, scene::World& w, scene::Entity e) {
         softbody::SoftAsset edit = shown;
         bool changed = false, finished = false;
         ImGui::BeginDisabled(!editable);
-        const auto slider = [&](const char* label, f32& v, f32 lo, f32 hi, const char* format, bool log) {
-            changed = ImGui::SliderFloat(label, &v, lo, hi, format, log ? ImGuiSliderFlags_Logarithmic : 0) || changed;
-            finished = ImGui::IsItemDeactivatedAfterEdit() || finished;
-        };
-        slider("Cell (cm)", edit.jelly.cellCm, 2.0f, 60.0f, "%.1f", true);
-        slider("Snap to surface (cm)", edit.jelly.snapCm, 0.0f, 20.0f, "%.1f", false);
-        slider("Volume compliance", edit.jelly.volumeCompliance, 0.0f, 1e-2f, "%.2e", false);
-        slider("Edge compliance", edit.jelly.edgeCompliance, 0.0f, 1e-2f, "%.2e", false);
-        slider("Density (kg/m3)", edit.jelly.densityKgM3, 10.0f, 3000.0f, "%.0f", true);
-        slider("Damping", edit.sim.damping, 0.0f, 5.0f, "%.2f", false);
+        assetSlider(changed, finished, "Cell (cm)", edit.jelly.cellCm, 2.0f, 60.0f, "%.1f", true);
+        assetSlider(changed, finished, "Snap to surface (cm)", edit.jelly.snapCm, 0.0f, 20.0f, "%.1f", false);
+        assetSlider(changed, finished, "Volume compliance", edit.jelly.volumeCompliance, 0.0f, 1e-2f, "%.2e", false);
+        assetSlider(changed, finished, "Edge compliance", edit.jelly.edgeCompliance, 0.0f, 1e-2f, "%.2e", false);
+        assetSlider(changed, finished, "Density (kg/m3)", edit.jelly.densityKgM3, 10.0f, 3000.0f, "%.0f", true);
+        assetSlider(changed, finished, "Damping", edit.sim.damping, 0.0f, 5.0f, "%.2f", false);
         int iterations = static_cast<int>(edit.sim.iterations);
         if (ImGui::SliderInt("Iterations", &iterations, 1, 24)) { edit.sim.iterations = static_cast<u32>(iterations); changed = true; }
         finished = ImGui::IsItemDeactivatedAfterEdit() || finished;
@@ -321,7 +323,7 @@ void drawJelly(const SoftShapeEnv& env, scene::World& w, scene::Entity e) {
             edit.jelly.vertexRadiusCm = radiusOverride ? 0.35f * edit.jelly.cellCm : -1.0f;
             changed = finished = true;
         }
-        if (radiusOverride) slider("Vertex radius (cm)", edit.jelly.vertexRadiusCm, 0.0f, 20.0f, "%.2f", false);
+        if (radiusOverride) assetSlider(changed, finished, "Vertex radius (cm)", edit.jelly.vertexRadiusCm, 0.0f, 20.0f, "%.2f", false);
         ImGui::EndDisabled();
         if (changed && editable) cache.asset = edit;
         if (finished && editable) {
@@ -424,18 +426,14 @@ void drawRope(const SoftShapeEnv& env, scene::World& w, scene::Entity e) {
         softbody::SoftAsset edit = shown;
         bool changed = false, finished = false;
         ImGui::BeginDisabled(!editable);
-        const auto slider = [&](const char* label, f32& v, f32 lo, f32 hi, const char* format, bool log) {
-            changed = ImGui::SliderFloat(label, &v, lo, hi, format, log ? ImGuiSliderFlags_Logarithmic : 0) || changed;
-            finished = ImGui::IsItemDeactivatedAfterEdit() || finished;
-        };
-        slider("Radius (cm)", edit.rope.radiusCm, 0.1f, 20.0f, "%.2f", true);
-        slider("Segment (cm)", edit.rope.segmentCm, 2.0f, 100.0f, "%.1f", true);
-        slider("Mass per metre (kg)", edit.rope.massPerMeterKg, 0.01f, 20.0f, "%.2f", true);
-        slider("Slack", edit.rope.slack, 1.0f, 2.0f, "%.3f", false);
-        slider("Stretch compliance", edit.rope.stretchCompliance, 0.0f, 1e-4f, "%.2e", false);
-        slider("Bend-twist compliance", edit.rope.bendTwistCompliance, 0.0f, 1e-2f, "%.2e", false);
-        slider("Texture tile (cm)", edit.rope.uvCmPerTile, 1.0f, 200.0f, "%.0f", true);
-        slider("Damping", edit.sim.damping, 0.0f, 5.0f, "%.2f", false);
+        assetSlider(changed, finished, "Radius (cm)", edit.rope.radiusCm, 0.1f, 20.0f, "%.2f", true);
+        assetSlider(changed, finished, "Segment (cm)", edit.rope.segmentCm, 2.0f, 100.0f, "%.1f", true);
+        assetSlider(changed, finished, "Mass per metre (kg)", edit.rope.massPerMeterKg, 0.01f, 20.0f, "%.2f", true);
+        assetSlider(changed, finished, "Slack", edit.rope.slack, 1.0f, 2.0f, "%.3f", false);
+        assetSlider(changed, finished, "Stretch compliance", edit.rope.stretchCompliance, 0.0f, 1e-4f, "%.2e", false);
+        assetSlider(changed, finished, "Bend-twist compliance", edit.rope.bendTwistCompliance, 0.0f, 1e-2f, "%.2e", false);
+        assetSlider(changed, finished, "Texture tile (cm)", edit.rope.uvCmPerTile, 1.0f, 200.0f, "%.0f", true);
+        assetSlider(changed, finished, "Damping", edit.sim.damping, 0.0f, 5.0f, "%.2f", false);
         int sides = static_cast<int>(edit.rope.sides);
         if (ImGui::SliderInt("Tube sides", &sides, 3, 32)) { edit.rope.sides = static_cast<u32>(sides); changed = true; }
         finished = ImGui::IsItemDeactivatedAfterEdit() || finished;

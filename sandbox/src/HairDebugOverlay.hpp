@@ -4,7 +4,7 @@
 // the guides are the sample HairSystem keeps from the build (hair space, at rest, so they follow the character's transform but not the simulation
 // or the pose), which is what is wanted for judging where the roots and the proxies are.
 //
-// HEADER-ONLY AND SELF-CONTAINED so the editor needs only two lines (shared edits): the viewport pass calls hairDebugDraw(device, noEditorChrome)
+// HEADER-ONLY AND SELF-CONTAINED so the editor needs only two lines: the viewport pass calls hairDebugDraw(device, noEditorChrome)
 // once per frame beside the other overlays, and the Show menu has one checkbox row for hairDebugOptions().guides and .proxies. The options are a
 // function-local static (hairDebugOptions()), so no SandboxApp member is needed; the line mesh is owned here and replaced each frame, the way the
 // other overlays do it.

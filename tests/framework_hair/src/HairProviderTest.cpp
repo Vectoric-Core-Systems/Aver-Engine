@@ -1,13 +1,10 @@
 // hair::hairProvider (the framework relay's provider) on a HairSystem with no groom built and no physics world: the validation that happens
 // before anything reaches the system, the script collider bookkeeping (kept per entity, capped, cleared) and the state read. Building a groom and
 // moving the hulls need a physics world and a skeleton and are tests/hair and the headed pass's business.
-//
-// NOTHING IN HERE HAS BEEN RUN: written against HairSystem.hpp.
 #include "aver/core/Log.hpp"
 #include "aver/hair/HairSystem.hpp"
 #include "aver/scene/World.hpp"
 
-#include <cmath>
 #include <limits>
 #include <string>
 

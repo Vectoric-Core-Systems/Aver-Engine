@@ -1,4 +1,4 @@
-// PhysicalSurfacesTest -- the project's physical-surface table and the landscape's surfaces (SHAPES_MATERIALS phase D).
+// PhysicalSurfacesTest -- the project's physical-surface table and the landscape's surfaces (docs/plans/wave11/SHAPES_MATERIALS.md).
 //
 //   1. Content/Physics/Surfaces.ocsurf loads into the physics registry; a missing file is silence, a damaged one a reason,
 //   2. an authored number beats a landscape layer's find-or-add; a layer the table does not name is registered with its own numbers,

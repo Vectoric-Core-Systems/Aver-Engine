@@ -43,7 +43,7 @@ std::atomic<bool> g_interned{false};
 AverSurface* internLocked(int32_t surface) {
     auto it = g_surfaces.find(surface);
     if (it == g_surfaces.end()) {
-        if (!JPH::Allocate) JPH::RegisterDefaultAllocator();   // the registry works before aver_phys_init (a headless layer table)
+        if (!JPH::Allocate) JPH::RegisterDefaultAllocator();   // the registry works before aver_phys_init (the project's table loads first)
         it = g_surfaces.emplace(surface, JPH::Ref<AverSurface>(new AverSurface(surface))).first;
         g_interned.store(true, std::memory_order_relaxed);
     }

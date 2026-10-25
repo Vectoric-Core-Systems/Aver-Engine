@@ -1,4 +1,4 @@
-// OcShapeTest -- the .ocshape collision shape tree (SHAPES_MATERIALS phase E): the example of the design parses, every leaf and
+// OcShapeTest -- the .ocshape collision shape tree (docs/PHYSICS_SHAPES.md): the chair example parses, every leaf and
 // decorator kind round-trips, write-then-parse is byte-identical, and every refusal says why (undefined reference, cycle, a
 // non-finite number, an unknown kind, a mutable compound used twice, a newer version). Unknown records and options warn once.
 //
@@ -65,7 +65,7 @@ static void testParse() {
     AVER_INFO("=== parse ===");
     fmt::OcShapeData d;
     std::string err;
-    check(fmt::parseOcShape(kChair, d, &err), "the design's chair parses: " + err);
+    check(fmt::parseOcShape(kChair, d, &err), "the chair example parses: " + err);
     check(d.name == "Chair" && d.massKg == 12.0f && d.surface == "Wood" && d.root == "top", "header records");
     check(d.nodes.size() == 4 && d.children.size() == 6, "four nodes, six children");
     if (d.nodes.size() != 4 || d.children.size() != 6) return;

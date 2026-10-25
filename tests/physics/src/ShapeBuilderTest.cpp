@@ -1,20 +1,19 @@
-// ShapeBuilderTest -- the generic shape handles of physics_shape_builder_abi.h (SHAPES_MATERIALS, phase A).
+// ShapeBuilderTest -- the generic shape handles of physics_shape_builder_abi.h (docs/plans/wave11/SHAPES_MATERIALS.md).
 //
 // THE STANDARD IS OBSERVED MOTION and observed geometry, as in ShapeTest: a shape built to twice its size still
 // returns a handle and still falls. So almost every check drops something on a floor whose top is exactly z = 0
-// and reads where it rests, or reads an AABB, a mass or a ray. The margins are UNVERIFIED starting values -- this
-// file was written without being run -- and a failing relation is a prompt to look at the physics before loosening
-// the number.
+// and reads where it rests, or reads an AABB, a mass or a ray. The margins are tolerances: a failing relation is a
+// prompt to look at the physics before loosening the number.
 //
 //   1. each leaf rests at its half-height; the tapered cylinder pins which end is +Z,
 //   2. plane, triangle and empty shapes behave as the header says,
 //   3. decorators: rotated-translated, offset centre of mass, scaled; and the refusals,
 //   4. compounds: a rotated child, the identity-rotation equivalence with the old box compound, a mutable compound,
 //   5. set_shape and set_scale keep the mass the header says they keep,
-//   6. introspection, including the inertia frame (the conversion that is UNVERIFIED until this runs),
+//   6. introspection, including the inertia frame (the conversion from Jolt axes to engine axes),
 //   7. mesh options and palettes, hulls, the dynamic mesh body and its documented limit,
 //   8. handle lifetime, the old creators against the new builders, a chassis from a shape, and determinism,
-//   9. (phase B) what raycast_detail says about compound children, mesh triangles and palettes, and leaf-material friction.
+//   9. what raycast_detail says about compound children, mesh triangles and palettes, and leaf-material friction.
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"

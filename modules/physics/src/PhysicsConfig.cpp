@@ -100,13 +100,6 @@ constexpr float kDegToRad = 0.017453292519943295f;
 
 namespace aver::physics::detail {
 
-const SettingRow& settingRow(int32_t key) { return kSettings[keyOk(key) ? key : 0]; }
-
-float settingValue(int32_t key) {
-    ensureTables();
-    return keyOk(key) ? g_settings[key] : 0.0f;
-}
-
 JPH::PhysicsSettings makePhysicsSettings() {
     ensureTables();
     JPH::PhysicsSettings ps;   // Jolt's own defaults
@@ -179,7 +172,7 @@ std::unique_ptr<JPH::JobSystem> makeJobSystem(int threads, int& workersOut) {
         workersOut = 0;
         return std::make_unique<JPH::JobSystemSingleThreaded>(static_cast<JPH::uint>(JPH::cMaxPhysicsJobs));
     }
-    // -1 is today's formula: one worker per core bar the main thread and one spare, never fewer than one.
+    // -1: one worker per core, less the main thread and one spare; never fewer than one.
     int workers = threads < 0 ? static_cast<int>(std::thread::hardware_concurrency()) - 2 : threads;
     if (workers < 1) workers = 1;
     workersOut = workers;

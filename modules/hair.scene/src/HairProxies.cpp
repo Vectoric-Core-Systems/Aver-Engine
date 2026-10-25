@@ -6,7 +6,6 @@
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_layers_abi.h"
 
-#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstddef>

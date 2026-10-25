@@ -1,10 +1,9 @@
-// PhysicsDebug.cpp -- physics_debug_abi.h: Jolt's debug renderer as a line feed in the engine's frame (wave 11, WORLD_STATE_DEBUG
-// phase C). The sink (PhysicsDebugRenderer.hpp) collects; this file decides WHAT to ask Jolt to draw, in what order and within
-// what budget. Without JPH_DEBUG_RENDERER (cmake AVER_PHYSICS_DEBUG_RENDERER=OFF) only the "not available" answers are built.
+// PhysicsDebug.cpp -- physics_debug_abi.h: Jolt's debug renderer as a line feed in the engine's frame. The sink
+// (PhysicsDebugRenderer.hpp) collects; this file decides WHAT to ask Jolt to draw, in what order and within what budget.
+// Without JPH_DEBUG_RENDERER (cmake AVER_PHYSICS_DEBUG_RENDERER=OFF) only the "not available" answers are built.
 #include "PhysicsDebugRenderer.hpp"
 
 #include "aver/core/ErrorCodes.hpp"
-#include "aver/core/Log.hpp"
 #include "aver/physics/physics_debug_abi.h"
 
 #include <algorithm>
@@ -32,9 +31,12 @@ using namespace aver::physics::detail;
 namespace {
 
 std::atomic<int32_t> g_scheme{AVER_PHYS_DBG_SCHEME_MOTION};
+
+#ifdef JPH_DEBUG_RENDERER
 std::atomic<uint32_t> g_armedMirror{0};   // lets debugStepBegin skip without touching the sink
 
 constexpr uint32_t kArmBits = AVER_PHYS_DBG_CONTACTS | AVER_PHYS_DBG_SUPPORT_FACES | AVER_PHYS_DBG_LINEAR_CAST;
+#endif
 
 } // namespace
 

@@ -1,7 +1,5 @@
 // The pure authoring helpers of Aver.Hair besides the generator: glTF curves into strands (HairCurves.hpp) and the collision proxy shapes and default
 // humanoid set (HairProxy.hpp). No physics, no scene, no device. Exit code = failure count.
-//
-// NOTHING IN HERE HAS BEEN RUN: thresholds are starting values for the first pass.
 #include "aver/hair/HairCurves.hpp"
 #include "aver/hair/HairProxy.hpp"
 
@@ -144,14 +142,8 @@ int main() {
             if (x.name.rfind("shoulder", 0) == 0) ++shoulders;
         }
         check(headOk && spineOk && shoulders == 2, "the head sphere is on Head, the spine box on the highest spine bone, one capsule per shoulder");
-        for (const fmt::OcHairProxy& x : p) {
-            std::string why;
-            fmt::OcHairData d;
-            d.proxies = {x};
-            d.generate.present = true;
-            (void)why;
+        for (const fmt::OcHairProxy& x : p)
             check(!hair::proxyHullPoints(x.shape, x.sizeCm).empty(), "proxy '" + x.name + "' has a usable hull");
-        }
 
         missing.clear();
         const std::vector<fmt::OcHairProxy> bare = hair::defaultHumanoidProxies({"Root", "Pelvis"}, &missing);

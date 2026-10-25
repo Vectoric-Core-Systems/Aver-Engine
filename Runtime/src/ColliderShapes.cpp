@@ -2,7 +2,6 @@
 #include "aver/game/ColliderShapes.hpp"
 
 #include "aver/core/Hash.hpp"
-#include "aver/core/Log.hpp"
 #include "aver/core/SurfaceId.hpp"
 #include "aver/formats/OcSurf.hpp"
 #include "aver/formats/OcWorld.hpp"

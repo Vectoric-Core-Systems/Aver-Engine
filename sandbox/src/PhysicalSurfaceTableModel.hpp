@@ -1,5 +1,5 @@
 #pragma once
-// The pure half of Project Settings > Physics > Surfaces and the material inspector's "Physical Surface" combo (SHAPES_MATERIALS phase F):
+// The pure half of Project Settings > Physics > Surfaces and the material inspector's "Physical Surface" combo (SHAPES_MATERIALS):
 // the rules for the .ocsurf table the panel edits (duplicate names, hash collisions, the 4096 cap), the row edits, the text the
 // panel saves, and the PHYSSURFACE patch of an .ocmat file. Header-only and ImGui-free so tests/editor can drive every rule;
 // PhysicalSurfacePanel.cpp is the widget half.

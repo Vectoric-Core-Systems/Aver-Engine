@@ -170,7 +170,6 @@ struct HairSystem::Impl {
         const fmt::OcSkeleton* skel = nullptr;
         u64 renderBuffer = 0;
         bool simulatedThisTick = false;
-        u32 cadenceLevel = 0;
         usize groomProxies = 0;                    // the first this many entries of `proxies` came from the groom; the rest are a script's
         u32 colliderApplied = 0;                   // how many of Impl::colliders[entity] already have a body
     };
@@ -181,7 +180,6 @@ struct HairSystem::Impl {
     std::map<scene::Entity, std::vector<fmt::OcHairProxy>> colliders;   // what scripts asked for, kept across a rebuild
     std::unordered_map<u64, i32> lookTokens;       // .ocmat object id -> the interned surface name it draws with
     std::set<u64> lookWarned;
-    scene::World* world = nullptr;
     bool layersApplied = false;
     std::vector<Mat4> model;                       // scratch: the skeleton's model matrices
     anim::Pose restScratch;
@@ -488,6 +486,13 @@ bool HairSystem::Impl::build(HairSystem& sys, scene::World& w, scene::Entity e, 
     }
 
     // ---- this instance ----
+    // A groom this call built, which no instance uses yet, is dropped again when the instance cannot be made.
+    const auto dropUnusedGroom = [&] {
+        if (groom->refs != 0) return;
+        aver_phys_hair_settings_destroy(groom->settings);
+        grooms.erase(groom->key);
+        groom->settings = 0;
+    };
     Inst in;
     in.groom = groom;
     in.asset = ch.asset;
@@ -500,7 +505,7 @@ bool HairSystem::Impl::build(HairSystem& sys, scene::World& w, scene::Entity e, 
                 if (skel->bones[i].name == name) found = static_cast<i32>(i);
             if (found < 0) {
                 why = "scalp joint '" + name + "' is not in the skeleton";
-                if (groom->refs == 0) { aver_phys_hair_settings_destroy(groom->settings); grooms.erase(groom->key); groom->settings = 0; }
+                dropUnusedGroom();
                 return false;
             }
             in.jointBone.push_back(static_cast<u32>(found));
@@ -512,7 +517,7 @@ bool HairSystem::Impl::build(HairSystem& sys, scene::World& w, scene::Entity e, 
     }
     if (static_cast<i32>(in.jointBone.size()) != groom->scalpJoints) {
         why = "the groom's scalp skins to " + std::to_string(groom->scalpJoints) + " joints but lists " + std::to_string(in.jointBone.size());
-        if (groom->refs == 0) { aver_phys_hair_settings_destroy(groom->settings); grooms.erase(groom->key); groom->settings = 0; }
+        dropUnusedGroom();
         return false;
     }
     in.palette.assign(in.jointBone.size() * 16, 0.0f);
@@ -525,7 +530,7 @@ bool HairSystem::Impl::build(HairSystem& sys, scene::World& w, scene::Entity e, 
     if (in.hair == 0) {
         why = "the physics layer refused the instance";
         if (aver_phys_last_error() == -3) retry = true;
-        if (groom->refs == 0) { aver_phys_hair_settings_destroy(groom->settings); grooms.erase(groom->key); groom->settings = 0; }
+        dropUnusedGroom();
         return false;
     }
     in.renderBuffer = aver_phys_hair_render_buffer(in.hair);
@@ -552,7 +557,6 @@ bool HairSystem::Impl::build(HairSystem& sys, scene::World& w, scene::Entity e, 
 
 void HairSystem::tick(scene::World& world, f32 dt, const Vec3& view) {
     Impl& m = *impl_;
-    m.world = &world;
     stats_ = HairStats{};
     views_.clear();
     if (!g_hairType) registerComponents(world);
@@ -698,7 +702,6 @@ void HairSystem::tick(scene::World& world, f32 dt, const Vec3& view) {
                 ++stats_.updatesLastTick;
             }
         }
-        in.cadenceLevel = static_cast<u32>(cad.level);
 
         // ---- the draw level, the outputs, the view ----
         in.lodLevel = chooseHairLod(distance, g.lodDistances, 0.0f, in.lodLevel, 0.15f);

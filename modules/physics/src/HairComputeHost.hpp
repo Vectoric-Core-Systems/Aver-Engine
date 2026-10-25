@@ -1,9 +1,9 @@
 // HairComputeHost.hpp -- Jolt's ComputeSystem over the function table the host installs (physics_hair_abi.h, AverPhysComputeHostV1).
 //
-// SRC-LOCAL, like PhysicsInternal.hpp: it names JPH:: types. Section 2.10 of the design says why Jolt's own DX12 and Vulkan compute
-// backends stay off: the renderer's frame cannot order itself after a private Jolt queue, two trackers over one resource corrupt
+// SRC-LOCAL, like PhysicsInternal.hpp: it names JPH:: types. docs/plans/wave11/SOFTBODY_HAIR.md section 2.10 says why Jolt's own DX12 and
+// Vulkan compute backends stay off: the renderer's frame cannot order itself after a private Jolt queue, two trackers over one resource corrupt
 // state, and the RHI cannot hand out its native device. The adapter below gives D3D12 and Vulkan parity from one code path: it forwards
-// every Jolt call, one to one, to the table, and the RHI side (Aver.Render.Hair, phase G) implements the table.
+// every Jolt call, one to one, to the table, and the RHI side (Aver.Render.Hair) implements the table.
 //
 // The ComputeSystem class is in the GLOBAL namespace on purpose: Jolt's RTTI macros define a free GetRTTIOfType beside the class and
 // stringize its name, and a class in the global namespace is how Jolt's own samples use them.

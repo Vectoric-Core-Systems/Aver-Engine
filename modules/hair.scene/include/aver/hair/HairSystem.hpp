@@ -42,7 +42,7 @@ namespace aver::hair {
 
 inline constexpr u32 kHairNoCollision = 0x1;
 inline constexpr u32 kHairNoShadow = 0x2;
-inline constexpr u32 kHairRayTraced = 0x4;      // reserved: ray-traced hair is phase J
+inline constexpr u32 kHairRayTraced = 0x4;      // the strands are in the ray-tracing structure (default off; HairScene::inRayTracing)
 inline constexpr u32 kHairNoWind = 0x8;
 inline constexpr u32 kHairHidden = 0x10;
 
@@ -188,7 +188,7 @@ public:
         return views_.data();
     }
 
-    // ---- ops (the framework relay of phase I calls these) ----
+    // ---- ops (the framework relay calls these) ----
     bool teleport(scene::Entity e);                     // the default pose at the next update
     i32 hairOf(scene::Entity e) const;                  // the physics hair handle, 0 when none
     bool isBuilt(scene::Entity e) const;

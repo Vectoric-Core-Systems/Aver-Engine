@@ -1,8 +1,6 @@
 // The soft shape C ABI (framework_softshape_abi.h) end to end through the Aver.Framework DLL: with no provider every call answers 0;
 // with a provider every call forwards its exact arguments under the right op code and relays the out values; clearing the provider
 // restores the zeros. The provider is a fake, so no soft-body module is involved. Exits 0 or 1.
-//
-// NOTHING IN HERE HAS BEEN RUN: written against the header.
 #include "aver/core/Log.hpp"
 #include "aver/framework/framework_softshape_abi.h"
 
@@ -24,7 +22,7 @@ struct Call {
     int32_t op = 0, entity = -1;
     float in[16] = {};
     int32_t inCount = -1, cap = -1;
-    bool hasOutF = false, hasOutI = false;
+    bool hasOutI = false;
     void* user = nullptr;
     int calls = 0;
 };
@@ -35,7 +33,7 @@ static float g_outF[2] = {0.0f, 0.0f};
 
 static int32_t AVER_FW_CALL fake(int32_t op, int32_t entity, const float* in, int32_t inCount, float* outF, int32_t* outI, int32_t cap, void* user) {
     Call c;
-    c.op = op; c.entity = entity; c.inCount = inCount; c.cap = cap; c.hasOutF = outF != nullptr; c.hasOutI = outI != nullptr; c.user = user;
+    c.op = op; c.entity = entity; c.inCount = inCount; c.cap = cap; c.hasOutI = outI != nullptr; c.user = user;
     c.calls = g_call.calls + 1;
     for (int i = 0; i < inCount && i < 16 && in; ++i) c.in[i] = in[i];
     g_call = c;

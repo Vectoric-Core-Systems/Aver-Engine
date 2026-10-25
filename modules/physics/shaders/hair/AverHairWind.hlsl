@@ -8,7 +8,7 @@
 // (SoftBodyAero.cpp): no clock and no rand, so the same run twice is bit identical.
 //
 // ONE SOURCE, TWO COMPILERS. It is written with Jolt's JPH_SHADER_* macros (Shaders/ShaderCore.h), so the RHI host compiles it as HLSL
-// through DXC (the macros are overridden by AverHairMacros.hlsli, phase G) and HairWindWrapper.cpp compiles it as C++ for the CPU backend
+// through DXC (the macros are overridden by AverHairMacros.hlsli) and HairWindWrapper.cpp compiles it as C++ for the CPU backend
 // the way Jolt's own HairWrapper.cpp does. The includes name files flat, as the engine's shader namespace is; the C++ wrapper redirects
 // them with AVER_HAIR_STRUCTS_INCLUDE. Defining AVER_HAIR_WIND_BINDINGS_ONLY skips the kernel: the CPU wrapper includes this file a second
 // time to build its Bind() switch, exactly as it does Jolt's *Bindings.h files.

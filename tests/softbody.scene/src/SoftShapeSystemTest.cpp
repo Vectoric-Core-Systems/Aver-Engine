@@ -2,9 +2,6 @@
 // inflatables, pressure), the shared view list, grab and release, the cut, and the sensor events. Meshes and assets are
 // injected and nothing is drawn, so the whole system is decidable with no GPU and no device. Physics is the real Jolt world,
 // through Aver.Physics.
-//
-// NOTHING IN HERE HAS BEEN RUN. The numbers (settling times, volume tolerances, how far a jelly sinks) are starting values
-// for the first headed pass; a failing threshold is a question about the number before it is a question about the code.
 #include "SoftBodyFixtures.hpp"
 
 #include "aver/physics/physics_softbody_ext_abi.h"

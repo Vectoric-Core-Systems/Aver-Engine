@@ -12,7 +12,7 @@
 //
 // A key at its default is omitted: width, density, wind, stiffness 1; lodbias, teleport 0; collision, shadow, windon 1; hidden 0.
 //
-// THE GROOM TAB (an .ochair opened as an asset, phase I) adds a second half to this header, below "the Groom tab": the rules for editing the
+// THE GROOM TAB (an .ochair opened as an asset) adds a second half to this header, below "the Groom tab": the rules for editing the
 // records of a groom (clamps that keep OcHairData::valid() true, the draw budget, finding the scalp mesh), the 2D projection the root preview
 // uses and, behind AVER_MODULE_HAIR, the preview itself (Aver.Hair's generator over the scalp). The widgets are HairGroomTab.cpp's.
 #include "aver/core/Types.hpp"
@@ -33,7 +33,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <iterator>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -126,11 +125,6 @@ inline std::string stateText(const HairFacts& f) {
     std::snprintf(b, sizeof b, "%s; level %u: %s; %u strands drawn, %u simulated", what, lod, lodName(lod), f.renderStrands, f.simStrands);
     return b;
 }
-
-// ---- the Add Component row ---------------------------------------------------------------------------------------------
-
-inline constexpr const char* kMenuLabel = "Hair";
-inline constexpr const char* kMenuTip = "Strand hair on this character: a groom (.ochair) simulated by Jolt, drawn as ribbons. Needs a skeletal mesh for the collision proxies.";
 
 // ======================================================= the Groom tab: editing an .ochair =======================================================
 

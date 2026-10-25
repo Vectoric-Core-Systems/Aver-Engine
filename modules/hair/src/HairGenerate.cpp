@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
 #include <unordered_map>
 
 namespace aver::hair {
@@ -50,7 +49,6 @@ f32 maskAt(const ScalpMesh& s, u32 v) { return s.mask.empty() ? 1.0f : std::clam
 struct Root {
     Vec3 p;
     Vec3 n;
-    u32 tri = 0;
 };
 
 // A uniform grid over the roots found so far, cell = the spacing, so a neighbour test looks at 27 cells.
@@ -169,7 +167,6 @@ bool generateHair(const fmt::OcHairGenerate& g, const ScalpMesh& scalp, fmt::OcH
     roots.reserve(count);
     RootGrid grid;
     f32 spacing = 0.6f * std::sqrt(static_cast<f32>(table.total) / static_cast<f32>(count));
-    const f32 firstSpacing = spacing;
     u32 rounds = 0;
     const u64 attemptCap = static_cast<u64>(count) * 400u + 4000u;
     u64 attempts = 0;
@@ -195,7 +192,7 @@ bool generateHair(const fmt::OcHairGenerate& g, const ScalpMesh& scalp, fmt::OcH
             if (n.sizeSquared() == 0.0f) continue;                    // a degenerate triangle grows nothing
             const f32 side = dot(n, p - centre);
             if (std::fabs(side) > 1.0e-3f * std::max(extent, 1.0f) && side < 0.0f) n = -n;
-            roots.push_back({p, n, static_cast<u32>(t)});
+            roots.push_back({p, n});
             grid.add(p, static_cast<u32>(roots.size() - 1));
         }
         if (roots.size() < count) {
@@ -307,7 +304,6 @@ bool generateHair(const fmt::OcHairGenerate& g, const ScalpMesh& scalp, fmt::OcH
         stats->scalpAreaCm2 = static_cast<f32>(table.total);
         stats->spacingCm = spacing;
         stats->relaxRounds = rounds;
-        (void)firstSpacing;
     }
     return true;
 }

@@ -24,7 +24,7 @@ public enum HairColliderShape
 }
 
 /// <summary>What an entity's hair is doing: simulating, frozen by distance, inert (the groom did not build, or there is no compute device),
-/// still building, the strand level it is drawn at (0 every strand .. 3 an eighth, fat), how many strands are drawn and simulated.</summary>
+/// still building, the strand level it is drawn at (0 every strand .. 3 the fewest), how many strands are drawn and simulated.</summary>
 public readonly record struct HairState(bool Simulating, bool Frozen, bool Inert, bool Building, bool Built, int Lod, int RenderStrands, int SimStrands, int Colliders);
 
 public readonly partial struct Entity

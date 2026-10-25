@@ -1,4 +1,4 @@
-// Project Settings > Physics > Surfaces and the material inspector's Physical Surface combo (SHAPES_MATERIALS phase F). Every rule is in
+// Project Settings > Physics > Surfaces and the material inspector's Physical Surface combo (SHAPES_MATERIALS). Every rule is in
 // PhysicalSurfaceTableModel.hpp (header-only, tested); this file is the widgets. In its own translation unit because the files that
 // call it are at or near the Debug COFF section cap.
 #include "PhysicalSurfaceTableModel.hpp"

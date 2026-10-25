@@ -30,8 +30,7 @@ Vec3 anchorTarget(scene::World& w, const CSoftRope& cr, int end) {
 
 }  // namespace
 
-bool SoftShapeSystem::createRopeBody(scene::World& world, RopeEntry& r, const std::vector<Vec3>& rest, const std::vector<Vec3>* vel, bool seeded) {
-    (void)world;
+bool SoftShapeSystem::createRopeBody(RopeEntry& r, const std::vector<Vec3>& rest, const std::vector<Vec3>* vel, bool seeded) {
     const u32 n = static_cast<u32>(rest.size());
     if (n < 3 || n > 65536u) return false;
     const SoftAsset& a = r.asset;
@@ -177,9 +176,8 @@ SoftShapeSystem::Built SoftShapeSystem::buildRope(scene::World& world, RopeEntry
         rest = r.plan.rest;
     }
     r.restLengthCm = r.plan.restLengthCm;
-    r.freeInvMass = r.plan.invMass.empty() ? 1.0f : r.plan.invMass[0];
 
-    if (!createRopeBody(world, r, rest, seeded ? &vel : nullptr, seeded)) return fail("the physics body could not be made");
+    if (!createRopeBody(r, rest, seeded ? &vel : nullptr, seeded)) return fail("the physics body could not be made");
 
     // Draw arrays: static topology and UVs (from the rest curve, so a stretching rope does not swim its texture).
     const u32 n = r.nodes;

@@ -5,7 +5,6 @@
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/platform/FileSystem.hpp"
 
-#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <filesystem>

@@ -12,7 +12,6 @@
 #include <filesystem>
 #include <system_error>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace aver::fmt {
 using namespace aver::fmt::detail;
@@ -77,7 +76,8 @@ void warnOnce(ParseState& st, const std::string& what) {
     AVER_WARN("[ocshape] {} (a newer file?)", what);
 }
 
-// `at x y z`, `rot qx qy qz qw` and `user <n>` words, in any order, from t[i] on. `allowUser` is for CHILD.
+// `at x y z`, `rot qx qy qz qw` and `user <n>` words, in any order, from t[i] on. A null pointer makes that word an error
+// (a decorator takes `at` and `rot` only; CHILD takes all three).
 bool parsePoseWords(const std::vector<std::string_view>& t, usize i, f32* pos, f32* rot, i32* user, std::string& why) {
     while (i < t.size()) {
         const std::string_view w = t[i];

@@ -2,8 +2,7 @@
 //
 // COMPILED INTO Aver.Framework, NOT Aver.Hair.Scene: the exported aver_fw_hair_* functions must live in the framework DLL the C# layer imports from,
 // and that DLL links no hair code (it only relays). The file sits under modules/hair.scene/framework/ because the hair area does not own
-// modules/framework/src; the shared edit in modules/framework/CMakeLists.txt names it by path, and it can move to modules/framework/src/HairAbi.cpp
-// (a git mv and one CMake line) without changing a byte of it.
+// modules/framework/src. modules/framework/CMakeLists.txt names it by path, so a move there needs one CMake line and no edit to the file.
 
 #include "aver/framework/framework_hair_abi.h"
 

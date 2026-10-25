@@ -1,8 +1,6 @@
 // The ImGui-free half of the Jelly and Rope Details sections (sandbox/src/SoftShapeDetailsModel.hpp) and the wave 11 Solver / Inflate rows of
 // SoftBodyDetailsModel.hpp: the record keys and their defaults, the advice and state lines, the rope end handle arithmetic and the overlay
 // colours. Header-only models, so this needs no editor, no scene and no GPU. Exits 0 or 1.
-//
-// NOTHING IN HERE HAS BEEN RUN: written against the headers.
 #include "aver/core/Log.hpp"
 
 #include "SoftShapeDetailsModel.hpp"

@@ -1,8 +1,6 @@
 // Ropes (Rope.hpp): the planned rest curve, the tube drawn around the nodes (radius, rings, twist from the rods, winding,
 // closedness, UVs), and the wave 11 .ocsoft sections that describe ropes, jellies and inflatables (SoftAsset.hpp). Pure
 // arithmetic and text; no GPU, no scene, no Jolt.
-//
-// NOTHING IN HERE HAS BEEN RUN. The tolerances are starting values for the first headed pass.
 #include "aver/core/Log.hpp"
 #include "aver/softbody/Rope.hpp"
 #include "aver/softbody/SoftAsset.hpp"

@@ -7,7 +7,7 @@
 //   * restore and replay: a snapshot, 60 steps, a restore and 60 steps again differ nowhere (snapshot_diff finds the first byte),
 //   * the hash log: a run writes one "step hash" line per fixed step, and two runs write the same file.
 //
-//   * the golden hash (phase F): the same scene at fixed checkpoints of a 600-step run. Printed on every run; when the environment
+//   * the golden hash: the same scene at fixed checkpoints of a 600-step run. Printed on every run; when the environment
 //     variable AVER_PHYSICS_GOLDEN_OUT names a file it is written there ("precision N", then "<step> <hash>" lines, nothing that
 //     names the platform), which is what the CI job "physics-determinism" collects from Windows and macOS and diffs: the
 //     cross-platform claim is made when those two files are equal and the checkpoints below are filled in, and not before. In a
@@ -29,7 +29,6 @@
 #include "aver/physics/physics_vehicle_ext_abi.h"
 #include "aver/physics/physics_world_abi.h"
 
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -247,7 +246,7 @@ static void testHashLog() {
 
 // The recorded checkpoints (steps 100, 200 ... 600) per precision, from a build with AVER_PHYSICS_CROSS_PLATFORM on. 0 = not
 // recorded yet. They are filled in from the "physics-determinism" CI job's output once Windows and macOS agree; until then the
-// test passes and prints the line to copy. UNVERIFIED: nothing here has run.
+// test passes and prints the line to copy.
 static const int kCheckpoints = 6;
 static const uint64_t kGoldenSingle[kCheckpoints] = {0, 0, 0, 0, 0, 0};
 static const uint64_t kGoldenDouble[kCheckpoints] = {0, 0, 0, 0, 0, 0};

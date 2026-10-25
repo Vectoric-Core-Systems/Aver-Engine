@@ -6,8 +6,6 @@
 // cell, and be edited while the body runs. Samples are row-major in the v1 physics order of Physics.AddHeightfield:
 // sample (column x, row y) lands at (origin.X - y * spacing, origin.Y + x * spacing, origin.Z + height).
 
-using System;
-
 namespace Aver.Physics;
 
 /// <summary>What a heightfield body holds (aver_phys_heightfield_info). <see cref="Valid"/> is false when the body's shape

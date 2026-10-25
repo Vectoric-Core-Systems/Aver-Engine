@@ -18,10 +18,6 @@ struct SettingRow {
     const char* unit;
     float min, max, def;
 };
-const SettingRow& settingRow(int32_t key);   // key in [0, AVER_PHYS_WS_COUNT)
-
-// The stored value of a setting (clamped, process-wide, survives shutdown).
-float settingValue(int32_t key);
 
 // JPH::PhysicsSettings built from the table. A setting still at its default keeps Jolt's own default bit for
 // bit, so an untouched world steps exactly as it did before the table existed.
@@ -54,8 +50,7 @@ std::unique_ptr<JPH::JobSystem> makeJobSystem(int threads, int& workersOut);
 // Why the world is not empty, or nullptr when it is (no bodies, characters, joints, ragdolls, vehicles).
 const char* worldNotEmptyReason();
 
-// The layout version of a state blob, reported by aver_phys_build_string. Phase D (physics_state_abi.h) owns
-// it; it lives here so the build string and the snapshot header can never disagree.
+// The layout version of a state blob. aver_phys_build_string reports it and the snapshot header carries it, so the two cannot disagree.
 inline constexpr int kStateLayoutVersion = 2;   // 2: the vehicle section carries the last step's telemetry arrays
 
 } // namespace aver::physics::detail

@@ -8,7 +8,7 @@
 // show up here as positions that diverge or explode, which no headless test can see.
 //
 // ARGUMENTS: `vulkan` selects the Vulkan backend (default D3D12); `hw` uses the adapter instead of WARP (D3D12 only); `debug` the validation layer.
-// Exit code: 0 passed, 1 failed, 77 skipped. NOTHING IN HERE HAS BEEN RUN: kTolerance is the design's gate (2 mm), an UNVERIFIED starting value.
+// Exit code: 0 passed, 1 failed, 77 skipped. kTolerance is the design's gate (2 mm).
 #include "aver/core/Log.hpp"
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_hair_abi.h"

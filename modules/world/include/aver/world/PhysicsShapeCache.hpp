@@ -1,5 +1,5 @@
 #pragma once
-// PhysicsShapeCache -- the disk half of the physics shape binary cache (physics_state_abi.h, wave 11 WORLD_STATE_DEBUG phase E).
+// PhysicsShapeCache -- the disk half of the physics shape binary cache (physics_state_abi.h).
 //
 // A mesh collision shape is mostly its BVH, and building that is the costly part of a placement's body (the reason the
 // shapes are shared per mesh id at all). aver_phys_shape_save / _restore turn a built shape into a blob and back; this file
@@ -11,9 +11,8 @@
 // costs one rebuild per mesh. A MISS IS NEVER AN ERROR -- a missing, short, foreign, stale or damaged file all answer "not
 // cached" and the caller builds the shape the slow way.
 //
-// OFF BY DEFAULT (aver_phys_shape_cache_enabled(): PHYSICS.SHAPECACHE, or AVER_PHYS_SHAPE_CACHE=1 for tools). The design gates
-// the cache on a measurement of restore against build on the real levels (tests/physics PhysicsBenchTool shapes), which has
-// not been taken; the integrator flips the default once it has.
+// OFF BY DEFAULT (aver_phys_shape_cache_enabled(): PHYSICS.SHAPECACHE, or AVER_PHYS_SHAPE_CACHE=1 for tools). The default
+// waits for a measurement of restore against build on the real levels (the PhysicsBenchTool shapes in tests/physics).
 //
 // The file layer below needs only Core and Formats. createMeshShapeCached needs the physics module and exists only where it does.
 #include "aver/core/Types.hpp"

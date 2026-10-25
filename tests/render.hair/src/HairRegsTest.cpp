@@ -9,14 +9,11 @@
 //   - each wrapper against the kernel it must include
 //   - AverHairMacros.hlsli against the macros and type aliases of Jolt's ShaderCore.h
 //   - the small struct header of the wind kernel against Jolt's JPH_HairVelocity
-// Exit code = failure count. NOTHING IN HERE HAS BEEN RUN.
+// Exit code = failure count.
 #include "aver/core/Log.hpp"
 #include "aver/render/HairRegsTypes.hpp"
 
 #include <algorithm>
-#include <cctype>
-#include <cstdio>
-#include <cstring>
 #include <fstream>
 #include <map>
 #include <regex>

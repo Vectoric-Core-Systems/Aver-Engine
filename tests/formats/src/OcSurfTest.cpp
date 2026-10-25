@@ -1,4 +1,4 @@
-// OcSurfTest -- the .ocsurf physical-surface table (SHAPES_MATERIALS phase D): parse, defaults, the canonical write, and every way
+// OcSurfTest -- the .ocsurf physical-surface table (SHAPES_MATERIALS): parse, defaults, the canonical write, and every way
 // it should refuse. With the material library built in (OCSURF_WITH_OCMAT) it also covers the .ocmat PHYSSURFACE record that
 // names a slot's surface: it parses, it writes only when set, and a material that never named one writes the bytes it always did.
 //

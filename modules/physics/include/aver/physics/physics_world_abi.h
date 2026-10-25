@@ -1,9 +1,8 @@
 #pragma once
 // Aver.Physics -- THE WORLD'S OWN CONFIGURATION: the solver settings Jolt exposes, the limits a world is
-// built with, the build facts, and the numbers a profiler or a HUD wants (wave 11, WORLD_STATE_DEBUG).
-// Additive: nothing in physics_abi.h changed, and a caller that never touches this header gets the world it
-// always got (aver_phys_init() with no arguments reads the pending config below, whose defaults are the
-// literals PhysicsWorld.cpp used to carry).
+// built with, the build facts, and the numbers a profiler or a HUD wants.
+// A caller that never touches this header gets the world it always got (aver_phys_init() with no arguments
+// reads the pending config below, whose defaults are the values a world is built with).
 //
 // UNITS AND AXES ARE THE ENGINE'S, as everywhere in this module: centimetres, cm/s, seconds, degrees where
 // the name or the unit string says so. Jolt's metres never cross this boundary; the settings table converts.
@@ -92,8 +91,7 @@ AVER_PHYS_API int32_t     aver_phys_setting_reset(int32_t key);                 
 AVER_PHYS_API int32_t     aver_phys_setting_get_all(float* outValues, int32_t n);     /* min(n, COUNT) written; returns the count written */
 
 /* ---- init-time config: fixed for a world's lifetime ----
-   Stored as PENDING config, which the next aver_phys_init (and aver_phys_rebuild) reads. The defaults are the
-   literals PhysicsWorld.cpp used to carry. */
+   Stored as PENDING config, which the next aver_phys_init (and aver_phys_rebuild) reads. */
 #define AVER_PHYS_CF_MAX_BODIES      0     /* 65536   [1024, 8388607]   Jolt's BodyID limit is 0x7fffff */
 #define AVER_PHYS_CF_MAX_BODY_PAIRS  1     /* 65536   [1024, 4194304] */
 #define AVER_PHYS_CF_MAX_CONTACTS    2     /* 16384   [1024, 1048576] */
@@ -155,7 +153,7 @@ AVER_PHYS_API int32_t aver_phys_diag_report(int32_t kind);
    for the working directory. Takes effect when the next world is created (the log is opened then). 1 in the preset, 0 elsewhere. */
 AVER_PHYS_API int32_t aver_phys_diag_log_dir(const char* dirUtf8);
 
-/* ---- profiler table (phase B): Jolt's own JPH_PROFILE scopes plus the engine's fixed-step stages, as one tree ----
+/* ---- profiler table: Jolt's own JPH_PROFILE scopes plus the engine's fixed-step stages, as one tree ----
    Needs AVER_PHYS_BUILD_PROFILER; OFF at run time until enabled (a disabled hook costs one relaxed load and a branch
    per scope). Rows are published every 60 fixed steps (the first after 5), depth first so a reader indents by depth.
    Jolt's job scopes run on worker threads: they appear under one "Worker jobs" row whose milliseconds are CPU time

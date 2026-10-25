@@ -1,5 +1,5 @@
 #pragma once
-// Show > Collision Shapes (SHAPES_MATERIALS phase F): the SHAPE-ACCURATE wire of the selected entity's body and of every moving body,
+// Show > Collision Shapes (SHAPES_MATERIALS): the SHAPE-ACCURATE wire of the selected entity's body and of every moving body,
 // where Show > Colliders draws only boxes. Each body's collision triangles (aver_phys_body_triangles) are drawn as their edges, tinted by
 // the surface each triangle carries (a stable hue per surface id, grey for none), with a cross at the body's centre of mass (yellow) and at
 // its origin (cyan): for a compound or an offset shape the two differ, and a pose write-back must use the origin.

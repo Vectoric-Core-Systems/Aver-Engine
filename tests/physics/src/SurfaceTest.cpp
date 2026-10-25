@@ -1,9 +1,9 @@
-// SurfaceTest -- physical surfaces (physics_surface_abi.h, SHAPES_MATERIALS phase B).
+// SurfaceTest -- physical surfaces (physics_surface_abi.h, docs/plans/wave11/SHAPES_MATERIALS.md).
 //
 // THE STANDARD IS OBSERVED MOTION: a surface that is registered and never reaches a contact changes nothing, so the checks
 // slide boxes across floors made of different materials and read how far they got, or read what a ray, a contact, a
-// character's ground and a wheel say they touched. The margins are UNVERIFIED starting values -- this file was written
-// without being run -- and a failing relation is a prompt to look at the physics before loosening a number.
+// character's ground and a wheel say they touched. The margins are tolerances: a failing
+// relation is a prompt to look at the physics before loosening a number.
 //
 //   0. a project that has never interned a surface runs the same bits once one exists (the combine hook's two paths),
 //   1. ids: the golden values, the same function in Aver.Core,
@@ -172,7 +172,7 @@ static std::vector<float> identityScene() {
 
 static void testBitIdentity() {
     AVER_INFO("=== a project with no surface runs the same bits once one exists ===");
-    // THIS RUNS FIRST: until a surface is interned the combine functions evaluate Jolt's own expressions on the body
+    // Must run before any surface is interned: until one is, the combine functions evaluate Jolt's own expressions on the body
     // values; once one is, they go through the leaf lookup. The scene touches no surface either time.
     const std::vector<float> before = identityScene();
     aver_phys_init();
@@ -563,7 +563,7 @@ static float sidewaysSpeedLeft(const char* surfaceName, float friction) {
     return std::fabs(vel[1]);
 }
 
-// The design's "lower lateral grip on the ice side": a tyre on a low-friction leaf holds a sliding car far less.
+// The "lower lateral grip on the ice side" case: a tyre on a low-friction leaf holds a sliding car far less.
 static void testVehicleLateralGrip() {
     AVER_INFO("=== a car thrown sideways keeps more of it on ice than on tarmac ===");
     const float onIce = sidewaysSpeedLeft("LatIce", 0.05f);

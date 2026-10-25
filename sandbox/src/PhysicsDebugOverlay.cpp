@@ -11,7 +11,6 @@
 #endif
 
 #include <algorithm>
-#include <cstring>
 
 namespace aver::editor {
 

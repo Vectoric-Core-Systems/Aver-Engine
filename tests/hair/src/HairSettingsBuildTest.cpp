@@ -2,18 +2,15 @@
 // an authored record becomes, the scalp taken from an embedded SCLP or an .ocmesh, strands stored or generated, the root-to-scalp check that fails a groom
 // whose scalp does not match, a resampled groom, and a short simulation of what was built. Exit code = failure count.
 //
-// Phase F's exit gate lives here: a generated groom builds settings on the CPU host with root-to-scalp below 0.5 cm.
-// NOTHING IN HERE HAS BEEN RUN: thresholds are starting values for the first pass.
+// The generated-groom gate lives here: a generated groom builds settings on the CPU host with root-to-scalp below 0.5 cm.
 #include "aver/hair/HairSettingsBuild.hpp"
 
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_hair_abi.h"
 
 #include "aver/core/Log.hpp"
-#include "aver/core/Math.hpp"
 
 #include <cmath>
-#include <cstring>
 #include <string>
 #include <vector>
 
@@ -143,7 +140,7 @@ int main() {
         check(!hair::scalpFromGroom(none, emb, &why), "a groom with no embedded scalp says so");
     }
 
-    AVER_INFO("=== building settings from a generated groom (phase F exit gate) ===");
+    AVER_INFO("=== building settings from a generated groom (root-to-scalp gate) ===");
     {
         freshWorld();
         const fmt::OcHairData groom = flatGroom(120);

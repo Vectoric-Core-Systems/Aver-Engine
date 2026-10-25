@@ -1,5 +1,5 @@
 #pragma once
-// The pure half of the .ocshape editor tab (SHAPES_MATERIALS phase F): the structural edits of a shape tree (add a leaf, wrap in a
+// The pure half of the .ocshape editor tab (SHAPES_MATERIALS): the structural edits of a shape tree (add a leaf, wrap in a
 // decorator, add to a compound, reorder, rename, delete with cascade), the outline the tree view draws, and the labels of each leaf's
 // numbers. Header-only and ImGui-free over fmt::OcShapeData so tests/editor can drive every edit; OcShapeEditor.cpp is the widget half.
 //
@@ -255,7 +255,7 @@ inline bool renameNode(OcShapeData& d, const std::string& id, const std::string&
     return true;
 }
 
-// Hull points: add one at the centroid-ish origin offset, remove one (a hull keeps at least four).
+// Hull points: add one at (0, 0, 25) cm, or remove one (a hull keeps at least four).
 inline bool addHullPoint(ShapeNode& n) {
     if (n.kind != ShapeNodeKind::HullPoints) return false;
     n.nums.insert(n.nums.end(), {0.0f, 0.0f, 25.0f});

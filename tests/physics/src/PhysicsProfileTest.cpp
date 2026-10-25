@@ -18,9 +18,7 @@
 #include "aver/physics/physics_world_abi.h"
 
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
-#include <map>
 #include <set>
 #include <string>
 #include <utility>

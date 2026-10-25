@@ -1,5 +1,5 @@
 // ColliderShapes: an .ocshape tree -> a physics shape handle, and the CollisionShape component that gives a rigid body one.
-// SHAPES_MATERIALS phase E. docs/PHYSICS_SHAPES.md.
+// The file format and its rules: docs/PHYSICS_SHAPES.md.
 //
 // buildColliderShape walks a parsed tree (modules/formats OcShape.hpp) children first and issues the builder calls of
 // physics_shape_builder_abi.h: a leaf becomes aver_phys_shape_box / _capsule / ... / _mesh, a decorator _rotated_translated / _offset_com /

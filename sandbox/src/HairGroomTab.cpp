@@ -6,10 +6,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <set>
-#include <sstream>
 
 #if AVER_MODULE_HAIR
 #  include "aver/formats/GltfImport.hpp"
@@ -60,6 +58,13 @@ std::vector<std::string> splitJoints(const std::string& text) {
 void copyText(char* dst, usize cap, const std::string& s) { std::snprintf(dst, cap, "%s", s.c_str()); }
 
 } // namespace
+
+// Keeps the list selections inside the lists after an edit, an undo or a redo.
+void HairGroomEditor::clampSelection() {
+    selMaterial_ = std::clamp<int>(selMaterial_, 0, std::max<int>(static_cast<int>(state_.materials.size()) - 1, 0));
+    selLook_ = std::clamp<int>(selLook_, 0, std::max<int>(static_cast<int>(state_.looks.size()) - 1, 0));
+    selProxy_ = std::clamp<int>(selProxy_, 0, std::max<int>(static_cast<int>(state_.proxies.size()) - 1, 0));
+}
 
 // ================================================================================ the Groom tab: state
 
@@ -142,9 +147,7 @@ void HairGroomEditor::undo() {
     previewStale_ = true;
     adviceStale_ = true;
     previewScalpKey_.clear();
-    selMaterial_ = std::clamp<int>(selMaterial_, 0, std::max<int>(static_cast<int>(state_.materials.size()) - 1, 0));
-    selLook_ = std::clamp<int>(selLook_, 0, std::max<int>(static_cast<int>(state_.looks.size()) - 1, 0));
-    selProxy_ = std::clamp<int>(selProxy_, 0, std::max<int>(static_cast<int>(state_.proxies.size()) - 1, 0));
+    clampSelection();
     syncBuffers();
 }
 
@@ -154,9 +157,7 @@ void HairGroomEditor::redo() {
     previewStale_ = true;
     adviceStale_ = true;
     previewScalpKey_.clear();
-    selMaterial_ = std::clamp<int>(selMaterial_, 0, std::max<int>(static_cast<int>(state_.materials.size()) - 1, 0));
-    selLook_ = std::clamp<int>(selLook_, 0, std::max<int>(static_cast<int>(state_.looks.size()) - 1, 0));
-    selProxy_ = std::clamp<int>(selProxy_, 0, std::max<int>(static_cast<int>(state_.proxies.size()) - 1, 0));
+    clampSelection();
     syncBuffers();
 }
 
@@ -164,9 +165,7 @@ void HairGroomEditor::editInGesture(const std::function<void(fmt::OcHairData&)>&
     if (!loaded_) return;
     mutate(state_);
     hairmodel::sanitize(state_);
-    selMaterial_ = std::clamp<int>(selMaterial_, 0, std::max<int>(static_cast<int>(state_.materials.size()) - 1, 0));
-    selLook_ = std::clamp<int>(selLook_, 0, std::max<int>(static_cast<int>(state_.looks.size()) - 1, 0));
-    selProxy_ = std::clamp<int>(selProxy_, 0, std::max<int>(static_cast<int>(state_.proxies.size()) - 1, 0));
+    clampSelection();
     dirty_ = true;
     previewStale_ = true;
     adviceStale_ = true;

@@ -3,10 +3,8 @@
 // release, contact policy, sensors, the collision group, skin, buoyancy and determinism. Links Aver.Physics and
 // Aver.Core only, like SoftBodyBuilderTest.
 //
-// Written against the header, with thresholds that name what is being decided (a volume that grows against one that
-// does not, a rod that is not longer than it was built, a box that rests on a rope against one that falls through it)
-// rather than how close Jolt gets. NOTHING IN HERE HAS BEEN RUN: the numbers are starting values for the first
-// headed pass, and a failing threshold is a question about the number before it is a question about the code.
+// Thresholds name what is being decided (a volume that grows against one that does not, a rod that is not longer than it was
+// built, a box that rests on a rope against one that falls through it) rather than how close Jolt gets.
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_layers_abi.h"
 #include "aver/physics/physics_ragdoll_abi.h"
@@ -309,9 +307,7 @@ static void testVersionAndRefusals() {
     check(aver_phys_sbx_builder_params(b, auto5, 1) == 0, "cancel kills the staged Ext state with the builder");
 }
 
-// A body that never calls anything here is the body it was: same positions after 120 steps with and without the
-// no-op wave 11 calls. (The pre-change hash cannot be recorded without running the old binary; the first headed pass
-// should capture it and pin it here.)
+// A body that never calls anything here is the body it was: the same positions after 2 s with and without the no-op calls.
 static uint64_t clothHash(bool noOpCalls) {
     freshWorld();
     Mesh s = makeSheet(8, 8, 10.0f, 0, Vec3(0, 0, 300), 1.0f);
@@ -906,7 +902,7 @@ static int32_t sampleFlat(float, float, float, AverPhysWaterSample* out, void*) 
 }
 
 // A closed sphere of the given density (kg/m^3), edges stiff, starting with its centre at z0, settled for `seconds`.
-static float settledCentre(float density, float z0, float seconds, int source, State* outState = nullptr) {
+static float settledCentre(float density, float z0, float seconds, int source) {
     freshWorld();
     aver_phys_set_gravity(0, 0, -980.0f);
     const float zero[3] = {0, 0, 0}, up[3] = {0, 0, 1};
@@ -923,7 +919,6 @@ static float settledCentre(float density, float z0, float seconds, int source, S
     const int32_t body = make(ball, o);
     stepFor(seconds);
     const State st = readState(body);
-    if (outState) *outState = st;
     const float z = centroidOf(st).z;
     aver_phys_clear_water_plane();
     aver_phys_clear_water_sampler();

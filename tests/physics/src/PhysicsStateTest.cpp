@@ -10,8 +10,8 @@
 //     precision byte is BUILD_MISMATCH, a truncated blob BAD_HEADER, a flipped payload byte CORRUPT, statics stay out,
 //   * step_exact runs exactly n steps and leaves the accumulator alone; a broken joint un-breaks; cloth vertices come back.
 //
-// Hand-run, exit code = failure count, same shape as PhysicsConfigTest.cpp. Tolerances marked UNVERIFIED are tuned at the first
-// headed run (design section 6); every equality of state hashes is exact by design.
+// Hand-run, exit code = failure count, same shape as PhysicsConfigTest.cpp. Tolerances are tuned to these scenes (design
+// section 6); every equality of state hashes is exact by design.
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"

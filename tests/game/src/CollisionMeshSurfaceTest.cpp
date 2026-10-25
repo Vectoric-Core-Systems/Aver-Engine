@@ -1,4 +1,4 @@
-// CollisionMeshSurfaceTest -- GameContent::collisionMeshFor with physical surfaces (SHAPES_MATERIALS phase D).
+// CollisionMeshSurfaceTest -- GameContent::collisionMeshFor with physical surfaces (docs/plans/wave11/SHAPES_MATERIALS.md).
 //
 // A material slot whose .ocmat names a PHYSSURFACE gives the collision triangles built from it that surface: the mesh carries a
 // palette of surface ids and one palette index per triangle. The cases: the palette and each triangle's index match the slot

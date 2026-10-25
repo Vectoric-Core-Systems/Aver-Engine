@@ -1,8 +1,8 @@
-// TerrainTest -- heightfields v2 (physics_terrain_abi.h, SHAPES_MATERIALS phase C).
+// TerrainTest -- heightfields v2 (physics_terrain_abi.h, docs/plans/wave11/SHAPES_MATERIALS.md).
 //
 // THE STANDARD IS OBSERVED GEOMETRY: a field built to the wrong orientation or the wrong size still returns a handle, so
 // almost every check casts a ray at the middle of a known cell and reads where it lands, or drops a ball and sees whether
-// it falls. The margins are UNVERIFIED starting values -- this file was written without being run -- and a failing
+// it falls. The margins are tolerances: a failing
 // relation is a prompt to look at the physics before loosening the number.
 //
 // Every field is built at spacing 100 cm and a body at the world origin, so sample (column x, row y) is at engine

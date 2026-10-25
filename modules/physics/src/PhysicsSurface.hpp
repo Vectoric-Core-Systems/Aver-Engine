@@ -1,4 +1,4 @@
-// PhysicsSurface.hpp -- the physical-surface material a shape carries (SHAPES_MATERIALS, section 2.6).
+// PhysicsSurface.hpp -- the physical-surface material a shape carries (docs/plans/wave11/SHAPES_MATERIALS.md, section 2.6).
 //
 // SRC-LOCAL like PhysicsInternal.hpp: it names JPH:: types. A surface is a 32-bit id (FNV-1a of its name,
 // the id Aver.Framework.Surface.IdOf already hands scripts); one shared AverSurface per id holds the numbers,

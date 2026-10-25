@@ -36,7 +36,7 @@ internal static partial class Native
     [DllImport(Lib)] internal static extern int   aver_phys_accumulator_set(float seconds);
     [DllImport(Lib)] internal static extern float aver_phys_accumulator_get();
 
-    // ---- Shape binary cache (physics_state_abi.h, phase E) ---------------------------------------------------
+    // ---- Shape binary cache (physics_state_abi.h) ------------------------------------------------------------
 
     [DllImport(Lib)] internal static extern uint  aver_phys_shape_cache_version();
     [DllImport(Lib)] internal static extern int   aver_phys_shape_cache_enable(int on);

@@ -1,5 +1,5 @@
 #pragma once
-// Aver.Physics -- THE REST OF JOLT'S SOFT BODIES (wave 11): inflatables, tetrahedral volumes, long range
+// Aver.Physics -- THE REST OF JOLT'S SOFT BODIES: inflatables, tetrahedral volumes, long range
 // attachments, Cosserat rods, Jolt's own constraint generator, grab and release, contact policy, sensors,
 // a collision group, and buoyancy.
 //

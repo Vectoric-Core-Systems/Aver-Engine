@@ -865,7 +865,7 @@ Values: `PressureKPa = 0`, `SkinEnabled = 1`, `SkinDistanceScale = 2`, `Collisio
 - `public bool SetAero(float drag, float lift, bool keepAwake = false)`
 - `public static void SetWind(Float3 velocity, float gustSpeed = 0, float gustHz = 0.3f, float turbulence = 0)` - The world wind, cm/s.
 - `public static int DrainImpacts(Span<SoftBodyImpact> buffer)` - Impacts reported by the last Physics.Step (only bodies built with the Impacts parameter).
-- `public static int ExtAbiVersion { get; }` - The version of the wave 11 soft-body surface.
+- `public static int ExtAbiVersion { get; }` - The version of the soft-body extension surface.
 - `public bool SetPressure(float kPa)` - Pressure in kPa at rest volume; 0 = off.
 - `public float Pressure { get; }`
 - `public (float AtRest, float Now) Volume()` - Rest and current volume (cm^3); the current one is negative when the shape is inside out.

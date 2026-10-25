@@ -1,8 +1,6 @@
 // The Groom tab (sandbox/src/HairGroomTab.cpp, compiled here with no ImGui so only its model, load/save/undo/edit half exists), the pure groom
 // editing rules of HairDetailsModel.hpp and the Show > Hair overlay feeds of HairDebugOverlay.hpp. No window, no device, no physics world.
 // Exit code = failure count.
-//
-// NOTHING IN HERE HAS BEEN RUN: written against the headers.
 #include "HairDebugOverlay.hpp"
 #include "HairGroomTab.hpp"
 

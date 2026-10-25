@@ -1,6 +1,6 @@
 // RibbonPackTest -- the ribbon layout of a groom and the C++ twin of AverHairRibbons.hlsl (docs/plans/wave11/SOFTBODY_HAIR.md 2.16). HEADLESS: no device,
 // no GPU. The shader itself is decided on a device by HairSelfTest and the headed checks; what is decided here is the arithmetic both sides must share.
-// Exit code = failure count. NOTHING IN HERE HAS BEEN RUN: thresholds are starting values for the first pass.
+// Exit code = failure count.
 #include "aver/core/Log.hpp"
 #include "aver/render/RibbonPack.hpp"
 

@@ -6,7 +6,6 @@
 // the parameter arrays. A thin wrapper for tools and tests; game scripts use Entity.AddHair and the Hair node family in Aver.Framework.
 // Units are engine centimetres and engine axes throughout, hair space being the space of the scalp mesh.
 
-using System;
 using System.Runtime.CompilerServices;
 
 namespace Aver.Physics;

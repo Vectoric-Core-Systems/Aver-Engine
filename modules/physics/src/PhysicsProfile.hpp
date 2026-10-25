@@ -1,4 +1,4 @@
-// PhysicsProfile.hpp -- the profiler bridge (physics_world_abi.h, aver_phys_profile_*; wave 11 WORLD_STATE_DEBUG phase B).
+// PhysicsProfile.hpp -- the profiler bridge (physics_world_abi.h, aver_phys_profile_*).
 //
 // STD-ONLY ON PURPOSE: AverProfileHook.cpp lives in the Jolt target (modules/physics.jolt), which links neither Aver.Core nor
 // Aver.Physics, and includes this file by relative path for the Sink below. Everything Jolt-shaped stays in PhysicsProfile.cpp.
@@ -19,7 +19,6 @@ struct Sink {
     void (*begin)(const char* name, uint32_t color, uint8_t* userData);
     void (*end)(uint8_t* userData);
 };
-inline constexpr int kUserBytes = 56;
 
 #ifdef JPH_EXTERNAL_PROFILE
 // Defined in AverProfileHook.cpp (inside the Jolt target, because PhysicsTest links Jolt directly and the symbol must resolve there too).

@@ -44,7 +44,7 @@ bool jointMatches(std::string_view joint, std::string_view kind) {
     if (k == "spine") return contains(j, "spine");
     if (k == "shoulder") return contains(j, "shoulder");
     if (k == "clavicle") return contains(j, "clavicle");
-    return contains(j, lower(kind).c_str());
+    return contains(j, k.c_str());
 }
 
 std::vector<f32> proxyHullPoints(fmt::OcHairProxyShape shape, const f32 sizeCm[3]) {

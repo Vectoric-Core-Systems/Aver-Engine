@@ -2,7 +2,7 @@
 //
 //   PhysicsBenchTool shapes [--grid N]... [--heightfield N]... [--mesh file.ocmesh]... [--content dir [--top K]] [--repeat R]
 //
-// SHAPES is the gate of phase E (docs/plans/wave11/WORLD_STATE_DEBUG.md, 2.7): does restoring a mesh or heightfield shape from its
+// SHAPES is the gate of the shape cache (docs/plans/wave11/WORLD_STATE_DEBUG.md, 2.7): does restoring a mesh or heightfield shape from its
 // binary blob cost a fifth or less of building it, and is the blob under three times the triangles it came from? For each subject
 // it prints the BVH build time, the save time, the restore time (best of R, checksum included), the blob size, and the verdict.
 // Wire the cache into the loaders (PHYSICS.SHAPECACHE) only if the real levels say GO; the numbers go in section 8.4 of the design.

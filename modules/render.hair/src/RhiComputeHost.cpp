@@ -131,7 +131,6 @@ struct Staging {
 
 struct RhiComputeHost::Impl {
     std::shared_ptr<HostShared> shared = std::make_shared<HostShared>();
-    rhi::IDevice* dev = nullptr;
     rhi::IResourceFactory* res = nullptr;
 
     // ---- the CPU side, guarded by shared->mu ----
@@ -626,7 +625,6 @@ bool RhiComputeHost::init(rhi::IDevice& dev) {
             m.res = nullptr;
             return false;
         }
-    m.dev = &dev;
     m.shared = std::make_shared<HostShared>();
     m.nextHandle = 16;
     m.nextBlobId = 1;
@@ -707,7 +705,6 @@ void RhiComputeHost::shutdown() {
     m.dummy[1].reset();
     m.pipelineCount = 0;
     m.res = nullptr;
-    m.dev = nullptr;
     table_ = {};
 }
 

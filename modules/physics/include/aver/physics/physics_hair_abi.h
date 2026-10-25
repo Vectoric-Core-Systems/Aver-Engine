@@ -1,5 +1,5 @@
 #pragma once
-// Aver.Physics -- STRAND HAIR on Jolt 5.6's Hair (wave 11). docs/plans/wave11/SOFTBODY_HAIR.md section 2, docs/HAIR.md.
+// Aver.Physics -- STRAND HAIR on Jolt 5.6's Hair. docs/plans/wave11/SOFTBODY_HAIR.md section 2, docs/HAIR.md.
 //
 // ADDITIVE. Nothing here changes an existing header. Jolt's Hair, HairSettings and HairShaders live inside Aver.Physics (so the
 // module still links Jolt PRIVATE and depends on Core only); the compute work they record goes through a plain-C function table

@@ -28,7 +28,6 @@
 #include <cstring>
 #include <memory>
 #include <utility>
-#include <vector>
 
 using namespace aver;
 using namespace aver::physics;

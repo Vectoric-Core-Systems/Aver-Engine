@@ -1,5 +1,5 @@
 #pragma once
-// The pure half of the Collision Shape Details section and Add Component entry (SHAPES_MATERIALS phase F): when the component may be
+// The pure half of the Collision Shape Details section and Add Component entry (SHAPES_MATERIALS): when the component may be
 // attached, what "Create .ocshape from the Rigid Body" writes, the asset path it writes to, the canonical COMPONENT record the section
 // edits, the text of the Play-time read-outs and of the surface probe. Header-only and ImGui-free so tests/editor can drive every rule;
 // CollisionShapeDetailsSection.cpp is the widget half. docs/PHYSICS_SHAPES.md "Editor".

@@ -1,6 +1,6 @@
 #pragma once
-// Aver.Physics -- JOLT'S DEBUG RENDERER AS A LINE FEED (wave 11, WORLD_STATE_DEBUG phase C).
-// Additive: nothing in physics_abi.h changed. The module draws nothing itself. A host asks for a set of overlays, gets back a
+// Aver.Physics -- JOLT'S DEBUG RENDERER AS A LINE FEED.
+// The module draws nothing itself. A host asks for a set of overlays, gets back a
 // flat list of coloured lines (plus a few text labels) in the ENGINE's frame, and uploads them through whatever line path it
 // has -- the editor's is rhi::LineVertex pairs, which these lines are byte for byte, so D3D12 and Vulkan agree by
 // construction. The packaged game has no line-overlay path and none is added; the C# PhysicsDebugDraw exists for tools and tests.

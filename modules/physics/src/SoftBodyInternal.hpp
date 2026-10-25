@@ -1,9 +1,9 @@
-// SoftBodyInternal.hpp -- the soft-body registry record, shared by PhysicsSoftBody.cpp (the wave 9 builder),
+// SoftBodyInternal.hpp -- the soft-body registry record, shared by PhysicsSoftBody.cpp (the builder),
 // PhysicsSoftBodyExt.cpp (physics_softbody_ext_abi.h) and SoftBodyFluid.cpp (buoyancy), and the hooks that
 // connect them.
 //
-// SRC-LOCAL like PhysicsInternal.hpp: it names JPH:: types. SoftRecord used to be file-local to
-// PhysicsSoftBody.cpp; the Ext translation units need to see it, so it moved here with the new SoftExt member.
+// SRC-LOCAL like PhysicsInternal.hpp: it names JPH:: types. SoftRecord lives here, not in PhysicsSoftBody.cpp, so the
+// Ext translation units can see it.
 // A body that never calls an aver_phys_sbx_* function keeps a default SoftExt, which every hook treats as
 // "do nothing".
 #pragma once
@@ -55,7 +55,6 @@ struct SoftAttachment {
     float maxSpeedCmS = 1.0e6f;
     int32_t otherBody = 0;             // 0 = a fixed world target
     aver::Vec3 targetCm{0, 0, 0};      // plain: the world target; to a body: the offset in that body's frame
-    bool warned = false;
 };
 
 struct SoftPairPolicy {
@@ -63,7 +62,7 @@ struct SoftPairPolicy {
     float soft = 1.0f, other = 1.0f, inertia = 1.0f;
 };
 
-// Everything the wave 11 calls keep on a body. Defaults are "as before".
+// Everything the sbx calls keep on a body. Defaults are "as before".
 struct SoftExt {
     // pressure
     float pressureKPa = 0.0f;

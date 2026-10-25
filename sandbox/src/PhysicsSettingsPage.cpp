@@ -1,10 +1,10 @@
 // Project Settings > Physics: the solver, sleeping, continuous-collision, determinism and limits groups
-// (wave 11, WORLD_STATE_DEBUG). Everything with a decision in it lives in PhysicsSettingsModel.hpp; this file
+// (docs/plans/wave11/WORLD_STATE_DEBUG.md). Everything with a decision in it lives in PhysicsSettingsModel.hpp; this file
 // is the widgets. The caller (SandboxApp::buildPhysicsSettings) keeps gravity and tick rate and calls
 // drawPhysicsSettingsGroups below them.
 //
-// This TU also holds the phys.* console registration (PhysicsConsoleVars.hpp): it is a new, small file, and the
-// console header is included by translation units that must not grow.
+// This TU also holds the phys.* console registration (PhysicsConsoleVars.hpp), so the translation units that include
+// EditorConsole.hpp do not grow.
 #include "PhysicsSettingsModel.hpp"
 #include "PhysicsConsoleVars.hpp"
 
@@ -14,7 +14,6 @@
 #  include "imgui.h"
 
 #  include <cstring>
-#  include <string>
 #  include <vector>
 #endif
 

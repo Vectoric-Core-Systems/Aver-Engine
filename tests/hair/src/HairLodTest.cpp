@@ -1,7 +1,5 @@
 // The distance rules of strand hair (HairLod.hpp): how often a groom is simulated and which strand-count level is drawn. Pure arithmetic: no scene,
 // no physics, no device. Exit code = failure count.
-//
-// NOTHING IN HERE HAS BEEN RUN: thresholds are starting values for the first pass.
 #include "aver/hair/HairLod.hpp"
 
 #include "aver/core/Log.hpp"

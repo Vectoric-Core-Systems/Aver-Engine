@@ -4,7 +4,7 @@
 // parameters land in the slots the shader reads them from, that the Coat and Subsurface flags stay clear for it (so the standard model, run on a ray hit,
 // sees zero weights), that the library clamps what the lobes divide by, and that the HLSL's flag and model ids are the C++ ones. The shading arithmetic
 // itself is decided in the headed look checks (docs/HAIR.md).
-// Exit code = failure count. NOTHING IN HERE HAS BEEN RUN.
+// Exit code = failure count.
 #include "aver/core/Log.hpp"
 #include "aver/pbr/Material.hpp"
 #include "aver/pbr/MaterialGpu.hpp"

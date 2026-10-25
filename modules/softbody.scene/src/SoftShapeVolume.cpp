@@ -47,7 +47,6 @@ SoftShapeSystem::Built SoftShapeSystem::buildVolume(scene::World& world, VolumeE
     v.spec.cell = cv->cellCm;
     v.spec.gravity = or1(cv->gravityScale);
     v.spec.damping = or1(cv->dampingScale);
-    v.mesh = mesh;
 
     const auto fail = [&](const char* msg) {
         AVER_WARN("[SoftShape] entity {}: {}; it keeps its authored mesh", e, msg);

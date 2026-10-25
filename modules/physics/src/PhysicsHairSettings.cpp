@@ -16,14 +16,12 @@
 #include <Jolt/Jolt.h>
 #include <Jolt/Geometry/IndexedTriangle.h>
 #include <Jolt/Math/Float3.h>
-#include <Jolt/Math/Float4.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <utility>
-#include <vector>
 
 using namespace aver;
 using namespace aver::physics;

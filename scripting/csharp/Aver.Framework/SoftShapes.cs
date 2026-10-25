@@ -252,7 +252,7 @@ public static class SoftShapes
     }
 }
 
-/// <summary>The graph-node surface for the wave 11 soft-body rows (SoftBody family version 3): the same calls with the int-entity /
+/// <summary>The graph-node surface for the soft-body rows (SoftBody family version 3): the same calls with the int-entity /
 /// primitive-only signatures GraphCompiler's emitted IL needs. Forwarded from the node table (GraphSoftBodyNodeTable.cs).</summary>
 internal static partial class SoftBodyGraphInterop
 {

@@ -1,7 +1,7 @@
 #pragma once
-// Aver.Physics -- STATE RECORDING: snapshots of the whole simulation, exact stepping and the state hash (wave 11,
-// WORLD_STATE_DEBUG phase D). Additive: nothing in physics_abi.h changed, and a world that never calls anything here steps
-// exactly as before (the only cost is one boolean test per fixed step for the hash log).
+// Aver.Physics -- STATE RECORDING: snapshots of the whole simulation, exact stepping and the state hash.
+// A world that never calls anything here steps exactly as before (the only cost is one boolean
+// test per fixed step for the hash log).
 //
 // WHAT A SNAPSHOT IS. A byte blob holding everything the simulation DERIVES between inputs: Jolt's bodies, contact cache and
 // constraints (joints, ragdolls, vehicle wheels, engine and gearbox), every character's CharacterVirtual state, and the
@@ -124,10 +124,10 @@ AVER_PHYS_API int64_t  aver_phys_step_total(void);                              
 AVER_PHYS_API int32_t  aver_phys_accumulator_set(float seconds);                   /* for a replay that must restore a mid-frame position; clamped into [0, 8 fixed steps]; 1/0 */
 AVER_PHYS_API float    aver_phys_accumulator_get(void);
 
-/* ---- shape binary cache (phase E) ----
+/* ---- shape binary cache ----
    A mesh or heightfield shape is mostly its BVH, which costs far more to build than to read back. These calls turn a shape
    handle (physics_shape_builder_abi.h's table, the one aver_phys_create_mesh_shape fills) into a byte blob and back, so a host can
-   keep the blob on disk (modules/world/PhysicsShapeCache.hpp wraps it in an AVR1 "PSHP" file under
+   keep the blob on disk (modules/world/include/aver/world/PhysicsShapeCache.hpp wraps it in an AVR1 "PSHP" file under
    <project>/Saved/DerivedDataCache/Physics) and skip the build next time. A restore is always a MISS, never a failure: a wrong key,
    cache version, Jolt version, precision, a truncated or damaged blob all answer 0 and the caller builds the shape the slow way.
 

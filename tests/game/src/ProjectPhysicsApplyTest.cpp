@@ -1,6 +1,6 @@
-// ProjectPhysicsApplyTest -- the manifest's PHYSICS.* keys, from the file to a running world (wave 11,
-// WORLD_STATE_DEBUG): the parser and writer in Aver.Formats, PhysicsProjectApply.hpp in Runtime, and the physics
-// module's settings and limits.
+// ProjectPhysicsApplyTest -- the manifest's PHYSICS.* keys, from the file to a running world
+// (docs/plans/wave11/WORLD_STATE_DEBUG.md): the parser and writer in Aver.Formats, PhysicsProjectApply.hpp in Runtime,
+// and the physics module's settings and limits.
 //
 //   * the name list OcProject.cpp mirrors (Formats may not depend on Physics) equals the physics table,
 //   * a manifest with the keys parses; a bad value is dropped, a repeated key is replaced, an unknown PHYSICS.* key
@@ -8,7 +8,7 @@
 //   * configureProjectPhysics writes the settings and limits and rebuilds an EMPTY world; a world that holds a body
 //     keeps its limits and says they apply later; the next project that states nothing puts the defaults back.
 //
-// Hand-run, exit code = failure count, same shape as the physics tests.
+// Hand-run: the exit code is ExitCode::Failed when any check fails.
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcProject.hpp"

@@ -38,7 +38,6 @@ public:
     void u32(uint32_t v) { put(v); }
     void i32(int32_t v) { put(v); }
     void u64(uint64_t v) { put(v); }
-    void i64(int64_t v) { put(v); }
     void f32(float v) { put(v); }
     // Overwrites four bytes already written (a length written before its content is known).
     void patchU32(size_t at, uint32_t v) { std::memcpy(out_.data() + at, &v, sizeof v); }
@@ -51,9 +50,7 @@ class ByteReader {
 public:
     ByteReader(const uint8_t* data, size_t size) : p_(data), n_(size) {}
     bool ok() const { return ok_; }
-    size_t pos() const { return pos_; }
     size_t left() const { return n_ - pos_; }
-    const uint8_t* cursor() const { return p_ + pos_; }
     bool bytes(void* out, size_t n) {
         if (!ok_ || n > n_ - pos_) { ok_ = false; return false; }
         if (n) std::memcpy(out, p_ + pos_, n);
@@ -64,7 +61,6 @@ public:
     uint32_t u32() { return get<uint32_t>(); }
     int32_t i32() { return get<int32_t>(); }
     uint64_t u64() { return get<uint64_t>(); }
-    int64_t i64() { return get<int64_t>(); }
     float f32() { return get<float>(); }
     // A sub-range of `n` bytes (a length-prefixed section); false when it runs past the end.
     bool take(size_t n, const uint8_t*& at) {
@@ -115,7 +111,6 @@ public:
     bool IsEOF() const override { return eof_; }
     bool IsFailed() const override { return failed_; }
 
-    size_t readPos() const { return pos_; }
     // Validating mode: how many reads differed from the live bytes, and the stream offset of the first.
     size_t mismatches() const { return mismatches_; }
     size_t firstMismatch() const { return firstMismatch_; }

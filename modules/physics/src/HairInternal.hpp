@@ -12,7 +12,6 @@
 #pragma once
 #include "aver/physics/physics_hair_abi.h"
 
-#include "Convert.hpp"
 #include "HairComputeHost.hpp"
 
 #include <Jolt/Jolt.h>
@@ -133,7 +132,7 @@ bool hairEnsureCompute(HairGlobals& g);
 bool hairApplyMaterialBlock(JPH::HairSettings::Material& m, const float* p, int32_t n);
 
 // Destroys every builder, settings object and hair, then the queue, shaders and compute system, then forgets the installed host. Called by
-// aver_phys_shutdown before the world goes (a shared one-line edit in PhysicsWorld.cpp). Safe with no world.
+// aver_phys_shutdown (PhysicsWorld.cpp) before the world goes. Safe with no world.
 void hairDestroyAll();
 
 } // namespace aver::physics::detail

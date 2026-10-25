@@ -141,6 +141,11 @@ struct Parser {
         err = "'" + std::string(r.key) + "' takes " + std::to_string(lo) + " to " + std::to_string(hi) + " numbers, found " + std::to_string(r.v.size());
         return false;
     }
+    bool vec3(const KeyRun& r, f32* dst) {
+        if (!count(r, 3)) return false;
+        for (int k = 0; k < 3; ++k) dst[k] = r.v[static_cast<usize>(k)];
+        return true;
+    }
     bool gradient(const KeyRun& r, OcHairGradient& g) {
         if (!countRange(r, 2, 4)) return false;
         g.min = r.v[0];
@@ -198,11 +203,6 @@ struct Parser {
     }
 
     bool look(OcHairLook& l, const std::vector<KeyRun>& runs) {
-        auto vec3 = [&](const KeyRun& r, f32* dst) {
-            if (!count(r, 3)) return false;
-            for (int k = 0; k < 3; ++k) dst[k] = r.v[static_cast<usize>(k)];
-            return true;
-        };
         for (const KeyRun& r : runs) {
             if (equalsCI(r.key, "baseColor")) { if (!vec3(r, l.baseColor)) return false; }
             else if (equalsCI(r.key, "tipColor")) { if (!vec3(r, l.tipColor)) return false; }
@@ -224,11 +224,6 @@ struct Parser {
     bool generate(const std::vector<KeyRun>& runs) {
         OcHairGenerate& g = d.generate;
         g.present = true;
-        auto vec3 = [&](const KeyRun& r, f32* dst) {
-            if (!count(r, 3)) return false;
-            for (int k = 0; k < 3; ++k) dst[k] = r.v[static_cast<usize>(k)];
-            return true;
-        };
         for (const KeyRun& r : runs) {
             if (equalsCI(r.key, "seed")) { if (!count(r, 1) || !toU32(r.v[0], g.seed, r)) return false; }
             else if (equalsCI(r.key, "strands")) { if (!count(r, 1) || !toU32(r.v[0], g.strands, r)) return false; }

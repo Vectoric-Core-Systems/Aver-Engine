@@ -1,6 +1,6 @@
 #pragma once
 // .ocshape -- a collision SHAPE TREE: the simple collision an entity's CollisionShape component builds its rigid body from
-// (SHAPES_MATERIALS phase E). Leaves are the shapes the physics module can build (box, sphere, capsule, cylinder, tapered capsule
+// (docs/PHYSICS_SHAPES.md). Leaves are the shapes the physics module can build (box, sphere, capsule, cylinder, tapered capsule
 // and cylinder, triangle, plane, empty, convex hull from points or from a mesh, triangle mesh), decorators move, re-centre or scale
 // one child, and a compound holds many children with a pose each. The file names the tree; physics_shape_builder_abi.h builds it
 // (Runtime ColliderShapes.hpp is the walker), so this layer knows no Jolt and no physics.

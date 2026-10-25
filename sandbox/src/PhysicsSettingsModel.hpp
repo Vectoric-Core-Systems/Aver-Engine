@@ -1,5 +1,5 @@
 #pragma once
-// The model behind Project Settings > Physics (wave 11, WORLD_STATE_DEBUG): rows built from the physics ABI's
+// The model behind Project Settings > Physics (docs/plans/wave11/WORLD_STATE_DEBUG.md): rows built from the physics ABI's
 // settings table, validation, the "changed" test, canonical omission of defaults and the restart-badge logic.
 // ImGui-free on purpose, like the other *Model.hpp files, so PhysicsSettingsModelTest can drive it with a
 // ProjectDesc and the real physics module and no window.

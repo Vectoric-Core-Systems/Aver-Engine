@@ -1,5 +1,4 @@
-// PhysicsDeterminism.cpp -- the diagnostics preset's hooks and aver_phys_diag_report (physics_world_abi.h; wave 11
-// WORLD_STATE_DEBUG phase F).
+// PhysicsDeterminism.cpp -- the diagnostics preset's hooks and aver_phys_diag_report (physics_world_abi.h).
 //
 // The always-on determinism tools (the state hash, the per-step hash log, step_exact) live in PhysicsState.cpp and work in every
 // build. This file is only what needs the heavy build, AVER_PHYSICS_DIAGNOSTICS (modules/physics.jolt/CMakeLists.txt):

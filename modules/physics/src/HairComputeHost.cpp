@@ -2,8 +2,6 @@
 // is the references Jolt requires a queue to hold until the work is known to be finished.
 #include "HairComputeHost.hpp"
 
-#include <utility>
-
 using aver::physics::detail::HostBuffer;
 using aver::physics::detail::HostQueue;
 using aver::physics::detail::HostShader;

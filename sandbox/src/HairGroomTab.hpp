@@ -6,9 +6,9 @@
 //      guide strands on the scalp (a 2D projection drawn with the ImGui draw list, no device), "Import curves" for a glTF with LINES, and the budget
 //      and advice lines. Undo is a snapshot of the records only: the stored strands and the embedded scalp can be megabytes and sit beside the undo
 //      stack, so importing or clearing strands is not an undo step (the tooltips say so). The rules are HairDetailsModel.hpp's (ImGui-free, tested).
-//      THE HOOK INTO THE EDITOR IS TWO LINES (shared edits): #include "HairGroomTab.hpp" and, appended after the other factories in SandboxInit.cpp,
+//      THE HOOK INTO THE EDITOR IS TWO LINES: #include "HairGroomTab.hpp" and, appended after the other factories in SandboxInit.cpp,
 //        assetEditors_.registerFactory(&editor::makeHairGroomEditor);   // .ochair
-//      plus the Content Browser's icon row for ".ochair" and a "New Hair Groom" entry that writes hairStarterGroom().
+//      plus the Content Browser's icon row for ".ochair" and a "New Hair Groom" entry that calls writeStarterHairGroom().
 //   2. THE HAIR DETAILS SECTION of a placed CHair (drawHairSection), reached from SandboxComponentDetails.cpp through one call after filling a
 //      HairSectionEnv.
 //
@@ -46,9 +46,6 @@ struct HairSectionEnv {
 // The Hair section for entity `e` (nothing when it has no CHair). `worldPtr` is the live scene::World.
 void drawHairSection(const HairSectionEnv& env, void* worldPtr, u32 entity);
 #endif
-
-// What "New Hair Groom" writes (hairmodel::starterGroom): valid as it stands, so the tab opens it.
-inline fmt::OcHairData hairStarterGroom() { return hairmodel::starterGroom(); }
 
 // Writes the starter groom to `absPath` as an .ochair. Refuses an existing file (a new asset never overwrites). False with `why`.
 bool writeStarterHairGroom(const std::string& absPath, std::string* why);
@@ -109,6 +106,7 @@ public:
 private:
     void loadFromDisk();
     void syncBuffers();
+    void clampSelection();
     void rebuildPreview();
 
     std::string path_;

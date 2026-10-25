@@ -25,7 +25,6 @@
 #include "aver/softbody/SoftBodySystem.hpp"
 
 #include <map>
-#include <string>
 #include <vector>
 
 namespace aver::softbody {
@@ -188,7 +187,6 @@ private:
         VolumeSpec spec;
         SoftAsset asset;
         bool failed = false, overCap = false, assetStale = false;
-        const fmt::OcMeshData* mesh = nullptr;
         Lattice lattice;
         Embedding emb;
         i32 body = 0;
@@ -218,7 +216,6 @@ private:
         u32 nodes = 0;
         f32 radiusCm = 1.0f;
         u32 sides = 8;
-        f32 freeInvMass = 1.0f;
         f32 restLengthCm = 0.0f;
         std::vector<i32> rodSlots;
         bool slotsIdentity = true;
@@ -267,7 +264,7 @@ private:
     void writeRopeOut(scene::World& world, RopeEntry& r);
     void updateAnchors(scene::World& world, RopeEntry& r);
     void processCuts(scene::World& world);
-    bool createRopeBody(scene::World& world, RopeEntry& r, const std::vector<Vec3>& rest, const std::vector<Vec3>* vel, bool seeded);
+    bool createRopeBody(RopeEntry& r, const std::vector<Vec3>& rest, const std::vector<Vec3>* vel, bool seeded);
 
     SoftBodySystem* host_ = nullptr;
     scene::World* world_ = nullptr;

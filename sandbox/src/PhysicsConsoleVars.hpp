@@ -1,5 +1,5 @@
 #pragma once
-// phys.* console variables and commands (wave 11, WORLD_STATE_DEBUG): the live solver settings of
+// phys.* console variables and commands (docs/plans/wave11/WORLD_STATE_DEBUG.md): the live solver settings of
 // physics_world_abi.h as `phys.<name>`, the read-only `phys.stat.*` family from aver_phys_stats, and the
 // phys.stats / phys.config / phys.rebuild / phys.profile commands, and the state-recording commands phys.snapshot / phys.restore /
 // phys.hash / phys.hashlog (physics_state_abi.h), the determinism tools phys.build / phys.report, and phys.shapecache.

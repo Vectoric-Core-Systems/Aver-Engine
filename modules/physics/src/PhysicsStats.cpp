@@ -1,6 +1,6 @@
 // PhysicsStats.cpp -- the fixed step's timing and error bookkeeping, and aver_phys_stats (physics_world_abi.h).
-// The Update call itself moved here from PhysicsWorld.cpp's loop (stepWorldOnce) so that the collision-step
-// setting, the kept EPhysicsUpdateError and the wall-clock pair live in one place and the loop stays a one-line call.
+// The Update call runs here (stepWorldOnce), so the collision-step setting, the kept EPhysicsUpdateError and the
+// wall-clock pair live in one place.
 #include "PhysicsConfig.hpp"
 #include "PhysicsProfile.hpp"
 

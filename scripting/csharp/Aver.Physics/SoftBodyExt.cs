@@ -130,7 +130,7 @@ public sealed partial class SoftBodyBuilder
 
 public readonly partial struct SoftBodyHandle
 {
-    /// <summary>The version of the wave 11 soft-body surface.</summary>
+    /// <summary>The version of the soft-body extension surface.</summary>
     public static int ExtAbiVersion => Native.aver_phys_sbx_abi_version();
 
     /// <summary>Pressure in kPa at rest volume; 0 = off. False for an open or inside-out mesh.</summary>

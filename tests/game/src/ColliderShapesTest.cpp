@@ -1,6 +1,6 @@
-// ColliderShapesTest -- an .ocshape tree built into physics shapes, and the CollisionShape component (SHAPES_MATERIALS phase E).
+// ColliderShapesTest -- an .ocshape tree built into physics shapes, and the CollisionShape component (docs/PHYSICS_SHAPES.md).
 //
-//   1. the design's chair builds into a static compound of six leaves with the volume the leaves add up to, rests on a floor, and
+//   1. the chair example builds into a static compound of six leaves with the volume the leaves add up to, rests on a floor, and
 //      leaves exactly one live handle (every intermediate handle is released),
 //   2. surfaces: the file's default reaches every leaf, a leaf's own `surface` wins, a mesh leaf's slot surfaces win over both,
 //   3. `hull mesh` and `mesh` leaves read geometry through the injected MeshSource, and refuse an unknown path,
@@ -8,8 +8,7 @@
 //   5. the component: apply and capture round-trip with golden keys, defaults omitted, `#hex` for a surface the registry does not
 //      know, malformed keys refused before anything is attached, a re-apply keeping the runtime OUT fields, a CRigidBody attached.
 //
-// The margins are UNVERIFIED starting values -- this file was written without being run -- and a failing relation is a prompt to look at
-// the physics before loosening the number. A real scene::World and a real physics world; no device, no window.
+// The margins are tolerances: a failing relation is a prompt to look at the physics before loosening the number. A real scene::World and a real physics world; no device, no window.
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"

@@ -13,7 +13,7 @@
 #include "aver/core/Log.hpp"
 
 #include <Jolt/Jolt.h>
-#include <Jolt/Core/UnorderedSet.h>
+#include <Jolt/Core/UnorderedSet.h>   // Shape::VisitedShapes
 #include <Jolt/Geometry/Plane.h>
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
@@ -310,7 +310,7 @@ void fillShapeInfo(const JPH::Shape& s, float* f, int32_t* iv) {
     // axes B^T p_k. Those three form a LEFT-handed set, so the third is negated (an eigenvector's sign is free)
     // before the frame is read as a rotation. In Jolt axes the equivalent rotation is R' * B^T, with R' the
     // Jolt eigenvector matrix with its third column negated, and fromJolt turns that into an engine quaternion.
-    // UNVERIFIED until ShapeBuilderTest reconstructs a (2,3,4) box's engine-axis tensor from it.
+    // ShapeBuilderTest rebuilds a (2,3,4) box's engine-axis tensor from these numbers, which pins the conversion.
     f[AVER_PHYS_SI_INERTIA_PRINCIPAL_X] = f[AVER_PHYS_SI_INERTIA_PRINCIPAL_Y] = f[AVER_PHYS_SI_INERTIA_PRINCIPAL_Z] = 0.0f;
     f[AVER_PHYS_SI_INERTIA_FRAME_X] = f[AVER_PHYS_SI_INERTIA_FRAME_Y] = f[AVER_PHYS_SI_INERTIA_FRAME_Z] = 0.0f;
     f[AVER_PHYS_SI_INERTIA_FRAME_W] = 1.0f;

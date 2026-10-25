@@ -2,7 +2,7 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
-// The wave 11 strand hair P/Invokes (physics_hair_abi.h). A further part of Native, as Native.SoftBodyExt.cs is, so the parity test in
+// The strand hair P/Invokes (physics_hair_abi.h). A further part of Native, as Native.SoftBodyExt.cs is, so the parity test in
 // tests/abi checks every name and parameter name below against the header; they are copied from it character for character.
 using System.Runtime.InteropServices;
 

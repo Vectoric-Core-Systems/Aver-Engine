@@ -3,7 +3,6 @@
 // continuation lines), and the glTF LINES / LINE_STRIP import into strands. Exit code = failure count.
 //
 // The deterministic generator is checked where it lives, in tests/hair (HairGenerateTest), because tests/formats links Aver.Formats and nothing above it.
-// NOTHING IN HERE HAS BEEN RUN: thresholds and fixtures are starting values for the first pass.
 #include "aver/formats/Avr1.hpp"
 #include "aver/formats/GltfImport.hpp"
 #include "aver/formats/OcHair.hpp"
@@ -11,7 +10,6 @@
 #include "aver/core/Log.hpp"
 
 #include <cmath>
-#include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>

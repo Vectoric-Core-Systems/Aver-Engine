@@ -1,7 +1,7 @@
 #pragma once
 // Collision proxies for hair (design 2.15 item 5): Jolt's Hair collides with CONVEX HULLS only, so the head, neck and shoulders of a character are
 // stood in for by small kinematic hulls that follow their bones. This is the pure half: the hull points of a proxy shape and the default humanoid
-// set derived from joint names. HairSystem (phase H) creates the bodies from them with the existing physics ABI.
+// set derived from joint names. HairSystem creates the bodies from them with the existing physics ABI.
 #include "aver/core/Types.hpp"
 #include "aver/formats/OcHair.hpp"
 

@@ -6,7 +6,6 @@
 // (physics_surface_abi.h): the body, the surface and its numbers, the compound child, the mesh triangle's user data and the
 // heightfield cell.
 
-using System;
 using System.Collections.Generic;
 
 namespace Aver.Physics;

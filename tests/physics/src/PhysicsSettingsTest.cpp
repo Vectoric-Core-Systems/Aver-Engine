@@ -2,12 +2,11 @@
 //
 //   * the table is self-consistent (a name, a range holding its default, find() finds it back, any case),
 //   * IDENTITY: a world that sets every setting to its own default steps bit-for-bit like one that never
-//     touched the table. (The design also wants a golden hash from the pre-change binary; no state hash
-//     exists until phase D, so this is the strongest identity check available in phase A.)
+//     touched the table. (A golden hash from the pre-change binary would be stronger; it is not kept here.)
 //   * a setting is stored before aver_phys_init, survives aver_phys_shutdown, and reset(-1) restores defaults,
 //   * out-of-range values clamp, NaN and unknown keys are refused, counts and flags round to whole numbers,
 //   * the settings do something: collisionSteps stops a fast sphere tunnelling a thin wall (thresholds below
-//     are UNVERIFIED and tuned here), allowSleeping / sleepTime decide when a resting box sleeps.
+//     are tuned to this scene), allowSleeping / sleepTime decide when a resting box sleeps.
 //
 // Hand-run, exit code = failure count, same shape as JointBreakTest.cpp.
 #include "aver/core/ErrorCodes.hpp"

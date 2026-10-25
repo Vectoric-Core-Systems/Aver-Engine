@@ -1,7 +1,5 @@
 // The procedural groom (HairGenerate.hpp): roots on the scalp, minimum spacing, the length range, the direction of growth, the fall towards a style
 // direction, clump pull, the mask, the part, determinism and the refusals. No physics, no scene, no device. Exit code = failure count.
-//
-// NOTHING IN HERE HAS BEEN RUN: the thresholds are starting values for the first pass; a failing one is a question about the number first.
 #include "aver/hair/HairGenerate.hpp"
 
 #include "aver/core/Hash.hpp"
@@ -42,7 +40,7 @@ static hair::ScalpMesh makeGrid(int n, float size) {
     return s;
 }
 
-// A UV sphere of radius r, outward winding by construction irrelevant: the generator orients normals away from the centre.
+// A UV sphere of radius r. Winding does not matter: the generator orients normals away from the centre.
 static hair::ScalpMesh makeSphere(float r, int rings, int segs) {
     hair::ScalpMesh s;
     s.positions = {0, 0, r};

@@ -1,5 +1,5 @@
 #pragma once
-// The .ocshape editor tab (SHAPES_MATERIALS phase F, docs/PHYSICS_SHAPES.md "Editor"): a collision shape tree opened as an asset. A node
+// The .ocshape editor tab (SHAPES_MATERIALS, docs/PHYSICS_SHAPES.md "Editor"): a collision shape tree opened as an asset. A node
 // outline (leaves, decorators, compounds with their children in order), the selected node's numbers and options, the file's header (name,
 // mass, default surface), an issues list that is fmt::validateOcShape's output, and a preview: the shape built into a throw-away static
 // body, its triangles read back and drawn by Show > Collision Shapes' overlay over the selected entity (or the world origin).
@@ -21,7 +21,6 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <vector>
 
 namespace aver::editor {
 
@@ -46,7 +45,6 @@ public:
     const fmt::OcShapeData& shape() const { return shape_; }
     const std::string& selectedId() const { return selectedId_; }
     void select(const std::string& id) { selectedId_ = id; }
-    std::vector<std::string> issues() const { return fmt::validateOcShape(shape_); }
     void markDirty() { dirty_ = true; ++revision_; }
 
     // Whole-shape edit: snapshot for undo, run `change` on the shape, mark dirty. The widgets and the tests both go through it.

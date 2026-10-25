@@ -13,7 +13,6 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 
 #if AVER_MODULE_PHYSICS
