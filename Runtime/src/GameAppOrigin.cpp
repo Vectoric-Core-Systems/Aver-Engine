@@ -4,7 +4,6 @@
 
 #if AVER_MODULE_SCENE
 
-#include "aver/core/Log.hpp"
 #include "aver/runtime/Engine.hpp"
 
 #if AVER_WITH_AUDIO_ABI

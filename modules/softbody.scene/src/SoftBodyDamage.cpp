@@ -2,8 +2,6 @@
 // inside tick(), in a fixed order. The tear pipeline (rebuild + islands + debris) is SoftBodyTear.cpp.
 #include "aver/softbody/SoftBodySystem.hpp"
 
-#include "aver/core/Log.hpp"
-#include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_softbody_abi.h"
 #include "aver/scene/Components.hpp"
 
@@ -19,6 +17,17 @@ struct ImpactRec {
     i32 soft = 0, other = 0, index = 0, verts = 0;
     f32 point[3] = {0, 0, 0}, normal[3] = {0, 0, 0}, closing = 0.0f, mass = 0.0f;
 };
+
+// The point of an axis-aligned box nearest to p.
+Vec3 clampToBox(const Vec3& p, const Vec3& lo, const Vec3& hi) {
+    return Vec3{std::clamp(p.x, lo.x, hi.x), std::clamp(p.y, lo.y, hi.y), std::clamp(p.z, lo.z, hi.z)};
+}
+
+// The impact scale of a destructible entity, 1 when it has none.
+f32 impactScaleOf(scene::World& world, scene::Entity e) {
+    const auto* de = world.component<CDestructible>(e, SoftBodySystem::destructibleType());
+    return de ? or1(de->impactScale) : 1.0f;
+}
 
 }  // namespace
 
@@ -67,9 +76,7 @@ void SoftBodySystem::depositOn(scene::World& world, Entry& en, Piece*, const Dam
     const f32 reach = d.radiusCm;
     for (Piece& p : en.pieces) {
         if (!p.alive || p.empty || p.baked) continue;
-        const Vec3 q{std::clamp(d.point.x, p.boundsMin.x, p.boundsMax.x), std::clamp(d.point.y, p.boundsMin.y, p.boundsMax.y),
-                     std::clamp(d.point.z, p.boundsMin.z, p.boundsMax.z)};
-        if (dist(q, d.point) > reach) continue;
+        if (dist(clampToBox(d.point, p.boundsMin, p.boundsMax), d.point) > reach) continue;
         p.hotFor = std::max(p.hotFor, opt_.hotSeconds);
         if (kick && r.kickSpeedCmS > 0.0f && p.body && !p.frozen) {
             const f32 centre[3] = {d.point.x, d.point.y, d.point.z};
@@ -107,9 +114,7 @@ void SoftBodySystem::applyInbox(scene::World& world) {
                 ++depositsThisTick_;
                 DamageDeposit d;
                 d.point = it.point; d.dir = it.dir; d.radiusCm = it.radius; d.energyJ = it.energy; d.kind = it.depositKind;
-                f32 scale = 1.0f;
-                if (const auto* de = world.component<CDestructible>(en->entity, destructibleType())) scale = or1(de->impactScale);
-                depositOn(world, *en, nullptr, d, scale, d.kind != static_cast<u8>(DepositKind::Impact), SoftEventKind::Impact);
+                depositOn(world, *en, nullptr, d, impactScaleOf(world, en->entity), d.kind != static_cast<u8>(DepositKind::Impact), SoftEventKind::Impact);
                 break;
             }
             case InboxItem::Kind::Explode: {
@@ -118,9 +123,7 @@ void SoftBodySystem::applyInbox(scene::World& world) {
                     f32 nearest = 1e30f;
                     for (const Piece& p : en.pieces) {
                         if (!p.alive || p.empty || p.baked) continue;
-                        const Vec3 q{std::clamp(it.point.x, p.boundsMin.x, p.boundsMax.x), std::clamp(it.point.y, p.boundsMin.y, p.boundsMax.y),
-                                     std::clamp(it.point.z, p.boundsMin.z, p.boundsMax.z)};
-                        nearest = std::min(nearest, dist(q, it.point));
+                        nearest = std::min(nearest, dist(clampToBox(it.point, p.boundsMin, p.boundsMax), it.point));
                     }
                     if (nearest > it.radius) continue;
                     if (depositsThisTick_ >= opt_.maxDepositsPerFrame) break;
@@ -129,9 +132,7 @@ void SoftBodySystem::applyInbox(scene::World& world) {
                     DamageDeposit d;
                     d.point = it.point; d.radiusCm = it.radius; d.energyJ = it.energy * fall * fall;
                     d.kind = static_cast<u8>(DepositKind::Explosion);
-                    f32 scale = 1.0f;
-                    if (const auto* de = world.component<CDestructible>(e, destructibleType())) scale = or1(de->impactScale);
-                    depositOn(world, en, nullptr, d, scale, false, SoftEventKind::Impact);
+                    depositOn(world, en, nullptr, d, impactScaleOf(world, e), false, SoftEventKind::Impact);
                     // The radial shove goes to every piece in reach, cloth included.
                     for (Piece& p : en.pieces) {
                         if (!p.alive || p.empty || !p.body || p.frozen) continue;
@@ -235,10 +236,8 @@ void SoftBodySystem::pollImpacts(scene::World& world) {
         d.point = point; d.dir = Vec3{-r.normal[0], -r.normal[1], -r.normal[2]}; d.radiusCm = radius;
         d.energyJ = 0.5f * reduced * v * v;
         d.kind = static_cast<u8>(DepositKind::Impact);
-        f32 scale = 1.0f;
-        if (const auto* de = world.component<CDestructible>(en->entity, destructibleType())) scale = or1(de->impactScale);
         Piece* p = pieceById(*en, bit->second.second);
-        depositOn(world, *en, p, d, scale, false, SoftEventKind::Impact);
+        depositOn(world, *en, p, d, impactScaleOf(world, en->entity), false, SoftEventKind::Impact);
         if (en->hit.valid && en->hit.tick == tickCount_) en->hit.closingCmS = r.closing;
         emit(*en, p, SoftEventKind::Impact, 0, point, r.closing);
         emitFx(*en, FxSlot::Impact, point, Vec3{r.normal[0], r.normal[1], r.normal[2]}, r.closing);
@@ -297,10 +296,8 @@ void SoftBodySystem::plasticStep(scene::World& world, Entry& en, f32 dt) {
         }
     }
     if (!r.brokenBeams.empty()) {
-        Vec3 where{0, 0, 0};
         const Beam& b0 = c.beams[r.brokenBeams.front()];
-        where = (c.particles[b0.a].pos + c.particles[b0.b].pos) * 0.5f;
-        noteBroken(world, en, r.brokenBeams, where);
+        noteBroken(world, en, r.brokenBeams, (c.particles[b0.a].pos + c.particles[b0.b].pos) * 0.5f);
     }
 }
 
@@ -323,7 +320,7 @@ scene::Entity SoftBodySystem::makeDebrisEntity(scene::World& world, Entry& en, P
     return d;
 }
 
-void SoftBodySystem::releaseEntry(scene::World& world, Entry& en) {
+void SoftBodySystem::releaseEntry(scene::World&, Entry& en) {
     if (en.failed || en.released) return;
     Cage& c = en.sim.cage;
     for (Particle& q : c.particles) {
@@ -344,7 +341,6 @@ void SoftBodySystem::releaseEntry(scene::World& world, Entry& en) {
     const Vec3 where = en.pieces.empty() ? Vec3{0, 0, 0} : en.pieces.front().centroid;
     emit(en, en.pieces.empty() ? nullptr : &en.pieces.front(), SoftEventKind::Released, 0, where, 0.0f);
     emitFx(en, FxSlot::Release, where, Vec3{0, 0, 1}, 0.0f);
-    (void)world;
 }
 
 void SoftBodySystem::repairEntry(scene::World& world, Entry& en) {

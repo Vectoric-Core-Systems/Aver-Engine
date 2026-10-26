@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 
 namespace aver::particles {
 
@@ -24,29 +23,35 @@ const ParticleMeshCache::Entry* ParticleMeshCache::get(u64 meshId, ParticleMeshF
     if (meshId == 0 || !res_) return nullptr;
     auto it = entries_.find(meshId);
     if (it != entries_.end()) return it->second.failed ? nullptr : &it->second;
+
+    // A refused mesh is cached as failed, so it is not requested again every frame.
     Entry e;
-    e.failed = true;   // until proven otherwise; a refused mesh is not retried every frame
+    e.failed = true;
+    const auto refuse = [&]() -> const Entry* {
+        entries_[meshId] = e;
+        return nullptr;
+    };
+
     ParticleMeshData d;
     if (!fn || !fn(meshId, d, user)) {
         AVER_WARN("[Particles] mesh particles: no mesh for id {} (no resolver, or the host could not load it)", meshId);
-        entries_[meshId] = e;
-        return nullptr;
+        return refuse();
     }
     const usize vcount = d.positions.size() / 3;
     const usize tris = d.indices.size() / 3;
     if (vcount == 0 || tris == 0 || tris > kMaxTriangles || d.normals.size() < vcount * 3) {
         AVER_WARN("[Particles] mesh particles: mesh {} refused ({} vertices, {} triangles; the limit is {} triangles and normals are required)",
                   meshId, vcount, tris, kMaxTriangles);
-        entries_[meshId] = e;
-        return nullptr;
+        return refuse();
     }
     for (u32 idx : d.indices) {
         if (idx >= vcount) {
             AVER_WARN("[Particles] mesh particles: mesh {} has an index past its vertices", meshId);
-            entries_[meshId] = e;
-            return nullptr;
+            return refuse();
         }
     }
+
+    // Interleaved vertices: position(3) normal(3) uv(2). The bounds give the diameter that mesh particles scale by.
     std::vector<f32> verts(vcount * 8);
     f32 lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
     for (usize i = 0; i < vcount; ++i) {
@@ -77,8 +82,7 @@ const ParticleMeshCache::Entry* ParticleMeshCache::get(u64 meshId, ParticleMeshF
         if (e.vb) res_->destroyBuffer(e.vb);
         if (e.ib) res_->destroyBuffer(e.ib);
         e.vb = e.ib = 0;
-        entries_[meshId] = e;
-        return nullptr;
+        return refuse();
     }
     e.indexCount = static_cast<u32>(d.indices.size());
     e.failed = false;

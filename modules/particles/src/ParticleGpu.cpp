@@ -6,7 +6,6 @@
 #include "aver/rhi/ShaderFiles.hpp"
 
 #include <algorithm>
-#include <cstring>
 #include <string>
 
 namespace aver::particles {
@@ -409,7 +408,6 @@ u32 ParticleGpu::record(rhi::IRenderContext& ctx, std::vector<GpuJob>& jobs, con
 }
 
 void ParticleGpu::recordRound(rhi::IRenderContext& ctx, std::vector<Item>& items, const View& view) {
-    using rhi::ResourceState;
     // ---- finalise headers, bring every touched buffer into UnorderedAccess ----
     std::vector<u32> pageIds;
     for (Item& it : items) {
@@ -652,45 +650,32 @@ u64 ParticleGpu::dump(rhi::IRenderContext& ctx, u32 handle, Dump what, rhi::Buff
     return bytes;
 }
 
-namespace {
-bool runProbe(ParticleGpu& self, rhi::IRenderContext& ctx, rhi::PipelineHandle pipe, rhi::BindingSetHandle set, const GpuSimCB& cb) {
-    (void)self;
-    ctx.setPipeline(pipe);
-    ctx.setBindingSet(set, 0);
-    ctx.setConstantBuffer(kSimConstantRegister, &cb, static_cast<u32>(sizeof(GpuSimCB)));
-    ctx.dispatch(1, 1, 1);
-    return true;
-}
-} // namespace
-
-bool ParticleGpu::probe(rhi::IRenderContext& ctx, u32 handle, const GpuSimCB& cb, rhi::BufferHandle dst) {
+// Dispatches a probe kernel against the instance, then copies the first `words` uints of its dead-list region to dst.
+bool ParticleGpu::probeCopy(rhi::IRenderContext& ctx, u32 handle, rhi::PipelineHandle pipe, const GpuSimCB& cb,
+                            rhi::BufferHandle dst, u32 words) {
     Instance* in = find(handle);
-    if (!in || !dst || !csProbe_) return false;
+    if (!in || !dst || !pipe) return false;
     ParticleGpuPool::Page& pg = pool_.page(in->range.page);
     const ResourceState rest = pg.dead.st;
     to(ctx, dummy_, ResourceState::UnorderedAccess);
     to(ctx, pg.dead, ResourceState::UnorderedAccess);
-    runProbe(*this, ctx, csProbe_, in->set, cb);
+    ctx.setPipeline(pipe);
+    ctx.setBindingSet(in->set, 0);
+    ctx.setConstantBuffer(kSimConstantRegister, &cb, static_cast<u32>(sizeof(GpuSimCB)));
+    ctx.dispatch(1, 1, 1);
     ctx.uavBarrierBuffer(pg.dead.h);
     to(ctx, pg.dead, ResourceState::CopySource);
-    ctx.copyBuffer(dst, pg.dead.h, 64u * 4u, 0, static_cast<u64>(in->range.index) * in->poolCapacity * 4u);
+    ctx.copyBuffer(dst, pg.dead.h, static_cast<u64>(words) * 4u, 0, static_cast<u64>(in->range.index) * in->poolCapacity * 4u);
     to(ctx, pg.dead, rest == ResourceState::Common ? ResourceState::UnorderedAccess : rest);
     return true;
+}
+
+bool ParticleGpu::probe(rhi::IRenderContext& ctx, u32 handle, const GpuSimCB& cb, rhi::BufferHandle dst) {
+    return probeCopy(ctx, handle, csProbe_, cb, dst, 64u);
 }
 
 bool ParticleGpu::probeRng(rhi::IRenderContext& ctx, u32 handle, const GpuSimCB& cb, rhi::BufferHandle dst) {
-    Instance* in = find(handle);
-    if (!in || !dst || !csRngProbe_) return false;
-    ParticleGpuPool::Page& pg = pool_.page(in->range.page);
-    const ResourceState rest = pg.dead.st;
-    to(ctx, dummy_, ResourceState::UnorderedAccess);
-    to(ctx, pg.dead, ResourceState::UnorderedAccess);
-    runProbe(*this, ctx, csRngProbe_, in->set, cb);
-    ctx.uavBarrierBuffer(pg.dead.h);
-    to(ctx, pg.dead, ResourceState::CopySource);
-    ctx.copyBuffer(dst, pg.dead.h, 32u * 4u, 0, static_cast<u64>(in->range.index) * in->poolCapacity * 4u);
-    to(ctx, pg.dead, rest == ResourceState::Common ? ResourceState::UnorderedAccess : rest);
-    return true;
+    return probeCopy(ctx, handle, csRngProbe_, cb, dst, 32u);
 }
 
 } // namespace aver::particles

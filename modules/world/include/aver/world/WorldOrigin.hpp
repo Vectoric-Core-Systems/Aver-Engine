@@ -6,7 +6,7 @@
 // the shift is retried next frame), then the origin and generation change and every `commit` runs
 // (cannot fail). A shift is frame-thread only, at the top of onUpdate, before anything reads a position.
 //
-// FROZEN by phase 0 of LARGE_WORLD: the other areas code against this header.
+// Frozen: the other areas code against this header.
 #include "aver/world/WorldPos.hpp"
 
 #include <functional>
@@ -45,7 +45,7 @@ public:
     // I3: the sub-millimetre cliff holds while margin + radius <= kRebaseMarginMaxCm. Streaming areas call
     // this with their largest radius; false (and one warning per service) when it is broken.
     bool  checkStreamRadius(i32 radiusCm);
-    void  reset(OriginCm o);                              // level load: set the origin when nothing exists yet; generation++ ; no participants run
+    void  reset(OriginCm o);                              // level load: set the origin when nothing exists yet, bump the generation; no participants run
     OriginCm origin() const { return origin_; }
     u32   generation() const { return generation_; }
     bool  enabled() const { return settings_.enabled; }

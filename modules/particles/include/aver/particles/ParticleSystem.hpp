@@ -241,8 +241,10 @@ private:
     void buildInstance(SystemInstance& si, const ParticleSystemDef& def, u32 seed, u32 flags);
     void releaseInstance(SystemInstance& si);
     void releaseEmitter(EmitterInstance& ei);
+    // Releases every GPU range and empties the instance maps, the emit order and the queued GPU work.
+    void releaseAllInstances();
     void applyOps(scene::World& world);
-    void applyOp(const EntityOp& op, SystemInstance& si, const ParticleSystemDef& def, u32& flagsOut, bool& stopOut);
+    void applyOp(const EntityOp& op, SystemInstance& si, const ParticleSystemDef& def, bool& stopOut);
     void stepSystem(SystemInstance& si, const ParticleSystemDef& def, const StepCtx& cx);
     void emitGpuJob(SystemInstance& si, const ParticleSystemDef& def, usize emitter, const StepCtx& cx,
                     const std::vector<SpawnRequest>& reqs);

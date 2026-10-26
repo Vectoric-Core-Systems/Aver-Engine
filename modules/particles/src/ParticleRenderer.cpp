@@ -65,6 +65,16 @@ void setVec4(f32 out[4], f32 x, f32 y, f32 z, f32 w) { out[0] = x; out[1] = y; o
 
 constexpr u32 alignUp(u32 v, u32 a) { return (v + a - 1u) / a * a; }
 
+// The SRV kinds of the one table-0 shape every draw uses (see makePipeline): t0 particles, t1 order, t2 trail points,
+// t3 texture, t4 / t5 the GI pair. Works on both a PipelineLayout and a BindingSetDesc.
+template <class Kinds>
+void setDrawSrvKinds(Kinds& kinds) {
+    kinds[0] = kinds[1] = kinds[2] = rhi::SlotKind::StructuredBuffer;
+    kinds[3] = rhi::SlotKind::Texture2D;
+    kinds[kGiSrvBase] = rhi::SlotKind::Texture3D;       // the GI volume
+    kinds[kGiSrvBase + 1] = rhi::SlotKind::Texture2D;   // the shadow map
+}
+
 bool sortWanted(const ParticleEffect& fx) {
     if (fx.render == RenderKind::Ribbon && fx.linked) return false;
     return fx.sort == SortMode::Depth || (fx.sort == SortMode::Auto && fx.blend != rhi::BlendMode::Additive);
@@ -315,13 +325,10 @@ rhi::PipelineHandle ParticleRenderer::makePipeline(RenderKind kind, bool additiv
         gd.vertexLayout.attribCount = 1;
         gd.vertexLayout.attribs[0] = {rhi::VertexSemantic::Position, 0, rhi::Format::RG32Float, 0};
     }
-    // ONE table-0 shape for every pipeline: t0 particles, t1 order, t2 trail points, t3 texture, t4 / t5 the GI pair.
+    // ONE table-0 shape for every pipeline (setDrawSrvKinds).
     gd.layout.srvCount = kDrawSrvCount;
     gd.layout.slotKindsDeclared = true;
-    gd.layout.srvKinds[0] = gd.layout.srvKinds[1] = gd.layout.srvKinds[2] = rhi::SlotKind::StructuredBuffer;
-    gd.layout.srvKinds[3] = rhi::SlotKind::Texture2D;
-    gd.layout.srvKinds[kGiSrvBase] = rhi::SlotKind::Texture3D;       // the GI volume
-    gd.layout.srvKinds[kGiSrvBase + 1] = rhi::SlotKind::Texture2D;   // the shadow map
+    setDrawSrvKinds(gd.layout.srvKinds);
     gd.layout.samplerCount = kGiSamplerBase + 2;
     gd.layout.samplers[0].filter = rhi::Filter::Linear;
     gd.layout.samplers[0].address = rhi::AddressMode::Clamp;
@@ -333,14 +340,14 @@ rhi::PipelineHandle ParticleRenderer::makePipeline(RenderKind kind, bool additiv
     gd.layout.constantDwords[kSimConstantRegister] = 0;                    // b3: the per-draw block, a root CBV
     gd.layout.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;     // b4: the GI frame constants, a root CBV
 
-    // DEPTH-TESTED, DEPTH-WRITE OFF: DECIDED 1's whole point, and the exact contract IRenderFeature::transparentPass documents.
+    // Depth-tested with depth write off, the contract IRenderFeature::transparentPass documents.
     gd.depth.test = true;
     gd.depth.write = false;
     gd.cull = rhi::CullMode::None;
     gd.renderTargetCount = 1;
     gd.renderTargets[0] = pipelineColor_;
     gd.depthFormat = pipelineDepth_;
-    // MSAA IS BAKED INTO THE PIPELINE AT CREATION: the scene target's sample count, rebuilt whenever it changes.
+    // MSAA is baked into the pipeline at creation: the scene target's sample count, rebuilt whenever it changes.
     gd.sampleCount = pipelineSampleCount_;
     gd.blend = additive ? rhi::BlendMode::Additive : rhi::BlendMode::PremultipliedAlpha;
     return res_->createGraphicsPipeline(gd);
@@ -408,10 +415,7 @@ rhi::BindingSetHandle ParticleRenderer::acquireSet() {
     if (setCursor_ < pool.size()) return pool[setCursor_++];
     rhi::BindingSetDesc bd;
     bd.srvCount = kDrawSrvCount;
-    bd.srvKinds[0] = bd.srvKinds[1] = bd.srvKinds[2] = rhi::SlotKind::StructuredBuffer;
-    bd.srvKinds[3] = rhi::SlotKind::Texture2D;
-    bd.srvKinds[kGiSrvBase] = rhi::SlotKind::Texture3D;
-    bd.srvKinds[kGiSrvBase + 1] = rhi::SlotKind::Texture2D;
+    setDrawSrvKinds(bd.srvKinds);
     const rhi::BindingSetHandle s = res_->createBindingSet(bd);
     if (!s) return 0;
     res_->setSrv(s, 3, whiteTex_);

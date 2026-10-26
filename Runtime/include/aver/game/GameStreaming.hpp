@@ -16,7 +16,6 @@
 #include "aver/formats/OcWorld.hpp"
 
 #include <functional>
-#include <string>
 #include <vector>
 
 #if AVER_MODULE_SCENE

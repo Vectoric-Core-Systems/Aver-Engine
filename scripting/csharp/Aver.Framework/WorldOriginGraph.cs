@@ -6,7 +6,6 @@
 // 16.384 km) and a position relative to that region's centre, which a float holds to 0.06 cm everywhere. A failure returns 0 or false, is logged
 // once, and never throws. Rows: scripting/csharp/Aver.Graph/GraphWorldOriginNodeTable.cs.
 
-using Aver.Scene;
 using Aver.Scripting;
 
 namespace Aver.Framework;

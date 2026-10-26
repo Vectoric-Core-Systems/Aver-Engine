@@ -5,9 +5,7 @@
 #include "aver/vehicle/VehiclePhysicsSystem.hpp"
 
 #include "aver/core/EffectSpawn.hpp"
-#include "aver/core/Log.hpp"
 #include "aver/physics/physics_vehicle_abi.h"
-#include "aver/scene/Components.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -47,6 +45,14 @@ void VehiclePhysicsSystem::Impl::oneShot(const detail::Entry& e, const std::stri
 
 void VehiclePhysicsSystem::Impl::updateAudio(scene::World& w, f32) {
     if (!audio) return;
+    // A looping voice: started on the first frame it is needed, then kept at this volume and pitch.
+    auto keepLoop = [&](const detail::Entry& e, i32& voice, const std::string& path, bool start, f32 volume, f32 pitch) {
+        if (voice == 0 && start) {
+            const i32 s = soundFor(path);
+            if (s != 0) voice = audio->play(s, e.pos, 0.0f, pitch, true);
+        }
+        if (voice != 0) audio->set(voice, e.pos, volume, pitch);
+    };
     struct Cand { f32 d; detail::Entry* e; };
     std::vector<Cand> cands;
     for (auto& [ent, en] : entries) {
@@ -74,31 +80,15 @@ void VehiclePhysicsSystem::Impl::updateAudio(scene::World& w, f32) {
         const f32 pitch = a.pitchLow + (a.pitchHigh - a.pitchLow) * rpm01;
         const bool two = !a.high.empty();
 
-        if (!a.idle.empty()) {
-            if (e.voiceIdle == 0) {
-                const i32 s = soundFor(a.idle);
-                if (s != 0) e.voiceIdle = audio->play(s, e.pos, 0.0f, pitch, true);
-            }
-            if (e.voiceIdle != 0) audio->set(e.voiceIdle, e.pos, two ? volume * (1.0f - rpm01) : volume, pitch);
-        }
-        if (two) {
-            if (e.voiceHigh == 0) {
-                const i32 s = soundFor(a.high);
-                if (s != 0) e.voiceHigh = audio->play(s, e.pos, 0.0f, pitch, true);
-            }
-            if (e.voiceHigh != 0) audio->set(e.voiceHigh, e.pos, volume * rpm01, pitch);
-        }
+        if (!a.idle.empty()) keepLoop(e, e.voiceIdle, a.idle, true, two ? volume * (1.0f - rpm01) : volume, pitch);
+        if (two) keepLoop(e, e.voiceHigh, a.high, true, volume * rpm01, pitch);
 
         // Skid: one looping voice whose volume follows the worst skidding wheel.
         if (!a.skid.empty()) {
             f32 skid = 0.0f;
             for (const WheelTelemetry& wt : e.wheels)
                 if (wt.skidding) skid = std::max(skid, std::clamp(std::max(std::fabs(wt.slipLongitudinal), wt.slipLateralDeg / 30.0f), 0.0f, 1.0f));
-            if (skid > 0.0f && e.voiceSkid == 0) {
-                const i32 s = soundFor(a.skid);
-                if (s != 0) e.voiceSkid = audio->play(s, e.pos, 0.0f, 1.0f, true);
-            }
-            if (e.voiceSkid != 0) audio->set(e.voiceSkid, e.pos, skid * 0.8f, 1.0f);
+            keepLoop(e, e.voiceSkid, a.skid, skid > 0.0f, skid * 0.8f, 1.0f);
         }
     }
     stats.audible = audible;

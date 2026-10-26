@@ -1,7 +1,7 @@
-// Particles the render feature: draws what ParticleSystem simulates, through rhi::IRenderFeature::transparentPass (the seam
-// added for exactly this -- see RHIResources.hpp's own comment on that hook and D3D12Device::endFrame for where it sits
-// between the opaque draws and the deferred sky), and runs the GPU tier's compute in prePass. Expressed purely in generic
-// RHI, the same discipline VoxiRenderer documents: this file may never include a backend header.
+// The particle render feature: draws what ParticleSystem simulates through rhi::IRenderFeature::transparentPass (the seam
+// added for this; see RHIResources.hpp's comment on that hook and D3D12Device::endFrame for where it sits between the
+// opaque draws and the deferred sky), and runs the GPU tier's compute in prePass. Expressed purely in generic RHI, the
+// same discipline VoxiRenderer documents: this file may never include a backend header.
 //
 // ONE DRAW PATH. Sprites, ribbons and mesh particles are all drawn by one vertex shader family that reads
 // StructuredBuffer<Particle> and an order list by SV_INSTANCE_ID. The CPU tier uploads its array (and a depth-sorted index
@@ -70,15 +70,15 @@ public:
     // Maps ParticleEffect::meshId to plain mesh arrays (limit 2,048 triangles).
     void setMeshResolver(ParticleMeshFn fn, void* user) { meshFn_ = fn; meshUser_ = user; }
 
-    // ---- DECIDED 4: the GI sampling seam ----
+    // ---- GI sampling seam ----
     //
-    // A function pointer plus an opaque user pointer, THE SAME SHAPE as voxi::VoxiRenderer::setDepthProxy and
-    // pbr::MaterialSystem::setTextureResolver -- installed by whoever owns both this renderer and whatever GI system exists
-    // (today: Voxi; this header never spells the name). Held POSSIBLY-NULL: this module includes no voxi header and links no
+    // A function pointer plus an opaque user pointer, the same shape as voxi::VoxiRenderer::setDepthProxy and
+    // pbr::MaterialSystem::setTextureResolver. It is installed by whoever owns both this renderer and the GI system (today
+    // Voxi; this header never spells the name). It is held possibly null: this module includes no voxi header and links no
     // voxi library, and with nothing installed here every particle renders without the GI term (lit emitters then use an
     // unshadowed sun and the sky).
     //
-    // WHY TWO FUNCTIONS, NOT ONE. Sampling a GPU-resident volume from a pixel shader needs two different things at two
+    // Why two functions, not one: sampling a GPU-resident volume from a pixel shader needs two different things at two
     // different moments: HLSL source text and register placement, needed once when a pipeline is (re)built; and live GPU
     // resources plus this frame's constants, needed before any GI draw. voxi::giShaderPrelude()/giShaderDefines() already exist
     // for exactly the first and voxi::VoxiRenderer::bindGiResources()/giFrameConstants() for the second. The seam below is a
@@ -114,8 +114,8 @@ public:
     // Draws every tracked emitter into the scene colour target, depth-tested against it, without writing depth.
     void transparentPass(rhi::IRenderContext& ctx) override;
 
-    // Rebuilds the pipelines to bake the scene target's sample count and formats -- MSAA is baked into
-    // GraphicsPipelineDesc::sampleCount at creation, and the engine's default sample count is not 1 (DECIDED 1).
+    // Rebuilds the pipelines to bake the scene target's sample count and formats. MSAA is baked into
+    // GraphicsPipelineDesc::sampleCount at creation, and the engine's default sample count is not 1.
     void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth, u32 width, u32 height) override;
 
     // The camera a draw needs, for callers with their own pass (the editor preview): row-major view-projection, the

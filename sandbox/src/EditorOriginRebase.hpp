@@ -15,8 +15,6 @@
 //     level records (water bodies, LEVELINST) hold no origin-relative position and are left alone.
 #include "aver/core/Math.hpp"
 
-#include <vector>
-
 #if AVER_MODULE_SCENE
 
 namespace aver::editor::originRebase {

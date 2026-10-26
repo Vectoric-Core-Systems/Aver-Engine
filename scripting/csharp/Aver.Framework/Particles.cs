@@ -40,6 +40,9 @@ public static class Particles
 {
     private static long IdOf(string effect) => Assets.ObjectIdOf(effect.Replace('\\', '/'));
 
+    // No native library, or no entry point in it (an older build): the calls answer their empty result.
+    private static bool IsMissingNative(Exception e) => e is DllNotFoundException or EntryPointNotFoundException;
+
     /// <summary>Spawns <paramref name="count"/> particles of the effect (a content path ending .ocparticle) at a world
     /// point, fired along <paramref name="direction"/> (effect +Z maps onto it; zero keeps the effect's authored
     /// direction). No entity is created: a thousand skid puffs are one shared simulation that retires after five idle
@@ -49,8 +52,7 @@ public static class Particles
     public static int SpawnAt(string effect, Vec3 position, Vec3 direction, int count = 1)
     {
         if (string.IsNullOrEmpty(effect) || count <= 0) return 0;
-        try { return FwParticles.aver_fw_particles_spawn_at(IdOf(effect), position.X, position.Y, position.Z, direction.X, direction.Y, direction.Z, count); }
-        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return 0; }
+        return SpawnById(IdOf(effect), position, direction, count);
     }
 
     /// <summary>As above with speed, size and lifetime scales and an inherited velocity (a vehicle's own velocity, for
@@ -65,15 +67,20 @@ public static class Particles
             inheritedVelocity.X, inheritedVelocity.Y, inheritedVelocity.Z, speedScale, sizeScale, lifetimeScale, 1f, 1f, 1f, 1f,
         };
         try { return FwParticles.aver_fw_particles_spawn_at_ex(IdOf(effect), a, count); }
-        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return 0; }
+        catch (Exception e) when (IsMissingNative(e)) { return 0; }
     }
 
     /// <summary>The same by effect id (<c>Assets.ObjectIdOf(path)</c>), for callers that hash once.</summary>
     public static int SpawnAt(long effectId, Vec3 position, Vec3 direction, int count = 1)
     {
         if (effectId == 0 || count <= 0) return 0;
+        return SpawnById(effectId, position, direction, count);
+    }
+
+    private static int SpawnById(long effectId, Vec3 position, Vec3 direction, int count)
+    {
         try { return FwParticles.aver_fw_particles_spawn_at(effectId, position.X, position.Y, position.Z, direction.X, direction.Y, direction.Z, count); }
-        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return 0; }
+        catch (Exception e) when (IsMissingNative(e)) { return 0; }
     }
 
     /// <summary>Sets the particle budgets: live GPU particles (allocated capacity), live CPU particles, and spawn-at
@@ -81,7 +88,7 @@ public static class Particles
     public static bool SetBudget(int maxGpuParticles = 2_000_000, int maxCpuParticles = 200_000, int maxSpawnAtPerFrame = 2048)
     {
         try { return FwParticles.aver_fw_particles_set_budget(maxGpuParticles, maxCpuParticles, maxSpawnAtPerFrame) != 0; }
-        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return false; }
+        catch (Exception e) when (IsMissingNative(e)) { return false; }
     }
 
     /// <summary>Chooses where emitters may simulate: 0 everything on the CPU, 1 automatic (big emitters on the GPU),
@@ -89,7 +96,7 @@ public static class Particles
     public static bool SetGpuMode(int mode)
     {
         try { return FwParticles.aver_fw_particles_set_gpu_mode(mode) != 0; }
-        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return false; }
+        catch (Exception e) when (IsMissingNative(e)) { return false; }
     }
 
     /// <summary>Reads the particle system's counters. False (and zeros) when the host has no particles.</summary>
@@ -103,6 +110,6 @@ public static class Particles
             stats = new ParticleStats(s[0], s[1], s[2], s[3], s[4], s[5]);
             return true;
         }
-        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return false; }
+        catch (Exception e) when (IsMissingNative(e)) { return false; }
     }
 }

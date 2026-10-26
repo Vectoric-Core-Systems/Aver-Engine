@@ -7,13 +7,11 @@
 
 #include "aver/vehicle/OcVehicle.hpp"
 
-#include "aver/core/Log.hpp"
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_vehicle_abi.h"
 #include "aver/physics/physics_vehicle_ext_abi.h"
 
 #include <algorithm>
-#include <cmath>
 #include <vector>
 
 namespace aver::vehicle {
@@ -29,6 +27,11 @@ namespace {
 bool isJoltAxle(const AxleDef& a) {
     return a.finalDrive == 3.42f && a.diff == DiffMode::LimitedSlip && a.lsd == 1.4f && a.split == 0.5f &&
            a.share == 0.0f && a.antiroll == 1000.0f;
+}
+
+// The physics ABI's differential mode: 0 open, 1 limited slip, 2 locked.
+int diffCode(DiffMode m) {
+    return m == DiffMode::Open ? 0 : m == DiffMode::LimitedSlip ? 1 : 2;
 }
 
 std::vector<f32> flatten(const std::vector<Vec2>& v, bool second) {
@@ -58,7 +61,9 @@ bool buildVehicle(const VehicleSpec& s, const Transform& origin, BuiltVehicle& o
     if (s.kind == Kind::Tracked && !aver_phys_vehicle_set_kind(v, AVER_PHYS_VEH_KIND_TRACKED)) return bail("the physics module refused a tracked vehicle");
     if (!s.boxes.empty()) {
         std::vector<f32> flat;
-        for (const BoxDef& x : s.boxes) { flat.push_back(x.cx); flat.push_back(x.cy); flat.push_back(x.cz); flat.push_back(x.hx); flat.push_back(x.hy); flat.push_back(x.hz); }
+        for (const BoxDef& x : s.boxes) {
+            flat.insert(flat.end(), {x.cx, x.cy, x.cz, x.hx, x.hy, x.hz});
+        }
         if (!aver_phys_vehicle_set_chassis_boxes(v, flat.data(), static_cast<i32>(s.boxes.size()))) return bail("the physics module refused the chassis boxes");
     }
 
@@ -115,13 +120,11 @@ bool buildVehicle(const VehicleSpec& s, const Transform& origin, BuiltVehicle& o
         for (usize i = 0; i < s.axles.size() && static_cast<i32>(i) < axleCount; ++i) {
             const AxleDef& a = s.axles[i];
             if (isJoltAxle(a)) continue;
-            const f32 p[6] = {a.finalDrive, static_cast<f32>(static_cast<int>(a.diff == DiffMode::Open ? 0 : a.diff == DiffMode::LimitedSlip ? 1 : 2)),
-                              a.lsd, a.split, a.share, a.antiroll};
+            const f32 p[6] = {a.finalDrive, static_cast<f32>(diffCode(a.diff)), a.lsd, a.split, a.share, a.antiroll};
             if (!aver_phys_vehicle_set_axle(v, static_cast<i32>(i), p, 6)) return bail("the physics module refused axle " + std::to_string(i));
         }
         if (s.centerPresent && !(s.center == DiffMode::LimitedSlip && s.centerLsd == 1.4f)) {
-            const i32 mode = s.center == DiffMode::Open ? 0 : s.center == DiffMode::LimitedSlip ? 1 : 2;
-            if (!aver_phys_vehicle_set_center_diff(v, mode, s.centerLsd)) return bail("the physics module refused the centre differential");
+            if (!aver_phys_vehicle_set_center_diff(v, diffCode(s.center), s.centerLsd)) return bail("the physics module refused the centre differential");
         }
     } else {
         for (int side = 0; side < 2; ++side) {

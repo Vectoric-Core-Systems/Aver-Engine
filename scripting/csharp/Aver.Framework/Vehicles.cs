@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // A drivable car in one call. Aver.Physics.Vehicle is the low-level binding (create the chassis, add each wheel, set the
 // engine, finish); this wraps it with the car most games want: CarSpec.Default describes it, Vehicles.CreateCar builds it
-// and pairs it with a scene entity. Since wave 10 the car is made by the vehicle SYSTEM from CarSpec.ToOcVehicle() (one parser,
-// one builder) and the system writes the entity's pose every frame in C++; no script timer copies it any more. Design:
-// docs/VEHICLES.md and docs/plans/wave9/VISUAL_SCRIPTING_CSHARP_SYNC.md section 2.2 (Vehicle).
+// and pairs it with a scene entity. The car is made by the vehicle SYSTEM from CarSpec.ToOcVehicle() (one parser, one builder),
+// and the system writes the entity's pose every frame in C++. Design: docs/VEHICLES.md and
+// docs/plans/wave9/VISUAL_SCRIPTING_CSHARP_SYNC.md section 2.2 (Vehicle).
 //
 // UNITS AND AXES ARE THE ENGINE'S: centimetres, kilograms, N*m, degrees, +X forward, +Y right, +Z up. A car's position is
 // its ORIGIN, the bottom centre of the car where a car mesh's own origin is, not its centre of mass.
@@ -321,7 +321,7 @@ public static class Vehicles
             s_cars[vehicle] = new Car(new AP.Vehicle(vehicle), e);
             return e;
         }
-        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { return default; }
+        catch (Exception ex) when (IsMissingNative(ex)) { return default; }
     }
 
     /// <summary>Takes up to <paramref name="buffer"/>.Length pending vehicle events (skids, landings, impacts, shifts, crashes, flips,
@@ -333,7 +333,7 @@ public static class Vehicles
         var floats = new float[buffer.Length * FwVehicle.EventFloats];
         int n;
         try { n = FwVehicle.aver_fw_vehicle_drain_events(ints, floats, buffer.Length); }
-        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException) { return 0; }
+        catch (Exception ex) when (IsMissingNative(ex)) { return 0; }
         n = Math.Clamp(n, 0, buffer.Length);
         for (int k = 0; k < n; k++)
         {
@@ -375,4 +375,7 @@ public static class Vehicles
     {
         if (vehicleHandle != 0 && !s_cars.ContainsKey(vehicleHandle)) s_cars[vehicleHandle] = new Car(new AP.Vehicle(vehicleHandle), entity);
     }
+
+    // No native library, or no entry point in it (an older build): the calls answer their empty result.
+    private static bool IsMissingNative(Exception e) => e is DllNotFoundException or EntryPointNotFoundException;
 }

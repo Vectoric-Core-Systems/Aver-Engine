@@ -9,14 +9,12 @@
 #include "aver/formats/OcWorld.hpp"
 
 #include <functional>
-#include <string>
 #include <unordered_map>
 #include <vector>
 
 #if AVER_MODULE_SCENE
 #  include "aver/game/ItemLoader.hpp"
 #  include "aver/scene/World.hpp"
-#  include "aver/world/LevelInstance.hpp"
 #  include "aver/world/PlacementStreamer.hpp"
 #  include "aver/world/PlacementWriteBack.hpp"
 #  include "aver/world/WorldOrigin.hpp"
@@ -108,7 +106,7 @@ private:
     world::AabbD itemBounds(const Item& it) const;
     bool worldBounds(u32 placement, world::Vec3d& outMin, world::Vec3d& outMax) const;
     void noteBaseline(u32 placement, scene::Entity e);
-    void loadItems(scene::World& world, const std::vector<u32>& items);
+    void loadItems(const std::vector<u32>& items);
     void evictItem(scene::World& world, u32 item, bool writeBack = true);
 
     // Load time per tick: kNearLoadMs while the nearest missing root is within a quarter of the load

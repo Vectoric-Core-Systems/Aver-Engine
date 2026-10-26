@@ -9,7 +9,6 @@
 #include "aver/physics/physics_vehicle_abi.h"
 #include "aver/physics/physics_vehicle_ext_abi.h"
 #include "aver/scene/Components.hpp"
-#include "aver/vehicle/OcVehicle.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -34,6 +33,21 @@ constexpr f32 kShakeCmS = 300.0f;              // an impact this hard asks the c
 constexpr f32 kFlipLiftCm = 50.0f;
 
 f32 orOne(f32 v) { return v > 0.0f ? v : 1.0f; }
+
+// Sends a scale to the physics vehicle when it changed. `applied` keeps the last value the physics accepted.
+void sendScale(i32 vehicle, i32 key, f32 value, f32& applied) {
+    if (value != applied && aver_phys_vehicle_tune(vehicle, key, value)) applied = value;
+}
+
+// The camera sink's view of a vehicle's rigs, with `current` as the live one.
+VehicleCameraInfo cameraInfoOf(const detail::Entry& e, u32 current) {
+    VehicleCameraInfo info;
+    info.chassisBody = e.body;
+    info.rigCount = static_cast<u32>(e.rigs.size());
+    for (u32 i = 0; i < info.rigCount; ++i) info.rigs[i] = e.rigs[i];
+    info.current = current;
+    return info;
+}
 
 // The default effect sink: Aver.Core's seam, which does nothing until a particle system installs a spawner.
 void defaultEffect(u64 effectId, const Vec3& position, const Vec3& direction, u32 count, void*) {
@@ -121,18 +135,9 @@ void VehiclePhysicsSystem::Impl::applyInputs(scene::World& w, detail::Entry& e, 
     // readActions may have exited the vehicle: the rest is the same either way.
 
     // The scales. A destroyed vehicle has no engine; repair gives it back.
-    const f32 power = e.destroyed ? 0.0f : orOne(c.powerScale);
-    if (power != e.appliedPower) {
-        if (aver_phys_vehicle_tune(e.vehicle, AVER_PHYS_VU_ENGINE_TORQUE_SCALE, power)) e.appliedPower = power;
-    }
-    const f32 grip = orOne(c.gripScale);
-    if (grip != e.appliedGrip) {
-        if (aver_phys_vehicle_tune(e.vehicle, AVER_PHYS_VU_GRIP_SCALE, grip)) e.appliedGrip = grip;
-    }
-    const f32 brake = orOne(c.brakeScale);
-    if (brake != e.appliedBrake) {
-        if (aver_phys_vehicle_tune(e.vehicle, AVER_PHYS_VU_BRAKE_SCALE, brake)) e.appliedBrake = brake;
-    }
+    sendScale(e.vehicle, AVER_PHYS_VU_ENGINE_TORQUE_SCALE, e.destroyed ? 0.0f : orOne(c.powerScale), e.appliedPower);
+    sendScale(e.vehicle, AVER_PHYS_VU_GRIP_SCALE, orOne(c.gripScale), e.appliedGrip);
+    sendScale(e.vehicle, AVER_PHYS_VU_BRAKE_SCALE, orOne(c.brakeScale), e.appliedBrake);
 
     if (c.flags & kVehicleFlipRequest) {
         c.flags &= ~kVehicleFlipRequest;
@@ -211,12 +216,7 @@ void VehiclePhysicsSystem::Impl::buildRigs(scene::World& w, detail::Entry& e) {
 void VehiclePhysicsSystem::Impl::cameraNext(detail::Entry& e) {
     if (!cameraFn || e.rigs.size() < 2) return;
     e.rigCurrent = (e.rigCurrent + 1) % static_cast<u32>(e.rigs.size());
-    VehicleCameraInfo info;
-    info.chassisBody = e.body;
-    info.rigCount = static_cast<u32>(e.rigs.size());
-    for (u32 i = 0; i < info.rigCount; ++i) info.rigs[i] = e.rigs[i];
-    info.current = e.rigCurrent;
-    cameraFn(e.entity, e.driver, CameraEvent::Next, info, cameraUser);
+    cameraFn(e.entity, e.driver, CameraEvent::Next, cameraInfoOf(e, e.rigCurrent), cameraUser);
 }
 
 bool VehiclePhysicsSystem::Impl::enterImpl(scene::World& w, detail::Entry& e, scene::Entity driver) {
@@ -243,14 +243,7 @@ bool VehiclePhysicsSystem::Impl::enterImpl(scene::World& w, detail::Entry& e, sc
     buildRigs(w, e);
     if (CVehicle* c = w.component<CVehicle>(e.entity, VehiclePhysicsSystem::typeId())) c->driver = driver;
     snapDriver(w, e);
-    if (cameraFn) {
-        VehicleCameraInfo info;
-        info.chassisBody = e.body;
-        info.rigCount = static_cast<u32>(e.rigs.size());
-        for (u32 i = 0; i < info.rigCount; ++i) info.rigs[i] = e.rigs[i];
-        info.current = 0;
-        cameraFn(e.entity, driver, CameraEvent::Enter, info, cameraUser);
-    }
+    if (cameraFn) cameraFn(e.entity, driver, CameraEvent::Enter, cameraInfoOf(e, 0), cameraUser);
     emit(VehicleEventKind::Entered, e.entity, driver, 0, 0, e.pos, Vec3(), 0.0f, 0.0f, "VehicleEntered");
     return true;
 }
@@ -282,14 +275,7 @@ bool VehiclePhysicsSystem::Impl::exitImpl(scene::World& w, detail::Entry& e) {
         e.hiddenMeshes.clear();
     }
 
-    if (cameraFn) {
-        VehicleCameraInfo info;
-        info.chassisBody = e.body;
-        info.rigCount = static_cast<u32>(e.rigs.size());
-        for (u32 i = 0; i < info.rigCount; ++i) info.rigs[i] = e.rigs[i];
-        info.current = e.rigCurrent;
-        cameraFn(e.entity, driver, CameraEvent::Exit, info, cameraUser);
-    }
+    if (cameraFn) cameraFn(e.entity, driver, CameraEvent::Exit, cameraInfoOf(e, e.rigCurrent), cameraUser);
     for (const CameraRigInfo& r : e.rigs)
         if (w.valid(r.rig)) w.destroy(r.rig);
     e.rigs.clear();
@@ -362,11 +348,7 @@ void VehiclePhysicsSystem::Impl::onImpact(scene::World& w, detail::Entry& e, CVe
         oneShot(e, spec->audio.impact, std::clamp(closing / 1500.0f, 0.15f, 1.0f), 1.0f);
 
     if (cameraFn && e.driver != scene::kInvalidEntity && closing > kShakeCmS) {
-        VehicleCameraInfo info;
-        info.chassisBody = e.body;
-        info.rigCount = static_cast<u32>(e.rigs.size());
-        for (u32 i = 0; i < info.rigCount; ++i) info.rigs[i] = e.rigs[i];
-        info.current = e.rigCurrent;
+        VehicleCameraInfo info = cameraInfoOf(e, e.rigCurrent);
         info.impactSpeedCmS = closing;
         info.impactPoint = ev.point;
         cameraFn(e.entity, e.driver, CameraEvent::Impact, info, cameraUser);

@@ -9,7 +9,7 @@
 // axis is f64(O) + f64(local), quantised to 1e-4 cm (1 micrometre, below the f32 grid wherever it
 // matters) so the shortest-round-trip writer emits a short number.
 //
-// FROZEN by phase 0 of LARGE_WORLD. Header-only, Core-only.
+// Frozen: the other areas code against this header. Header-only, Core-only.
 #include "aver/world/WorldPos.hpp"
 
 #include <cmath>

@@ -6,7 +6,7 @@
 // So "Use cooked chunks" is the Standalone Game path: a separate Aver Engine Runtime reads the level and its `chunks=` set from disk
 // exactly as a packaged game does. GameLevel::useCookedChunks is off in the editor and on in the runtime.
 //
-// New file, not new members of a big translation unit: the Debug COFF section cap (the memory index) rules out growing SandboxApp*.cpp.
+// A new file rather than more members of a big translation unit: the Debug COFF section limit rules out growing SandboxApp*.cpp.
 #include "SandboxApp.hpp"
 
 #if AVER_MODULE_SCENE
@@ -37,12 +37,33 @@ CookTarget cookTarget(const std::string& projectDir, const std::string& levelPat
     return t;
 }
 
+// The cook's inputs for the level at `levelPath`: its content-relative asset path, the editor's parse cache and mesh bounds.
+world::CookInput cookInputFor(const fmt::ProjectDesc& project, const std::string& levelPath, world::LevelAssetLibrary& lib,
+                              game::GameContent& content) {
+    namespace fs = std::filesystem;
+    world::CookInput in;
+    std::error_code ec;
+    in.levelAsset = fs::relative(fs::path(levelPath), fs::path(project.contentDir()), ec).generic_string();
+    if (ec || in.levelAsset.empty()) in.levelAsset = fs::path(levelPath).filename().generic_string();
+    in.levelStem = fs::path(levelPath).stem().string();
+    in.contentDir = project.contentDir();
+    in.projectDir = project.dir;
+    in.library = &lib;   // the same parse cache the level's instances use
+    in.meshBounds = [&content](const std::string& asset, Vec3& lo, Vec3& hi) {
+        const std::pair<Vec3, Vec3>* b = content.boundsFor(fnv1a64(std::string_view(asset)));
+        if (!b) return false;
+        lo = b->first;
+        hi = b->second;
+        return true;
+    };
+    return in;
+}
+
 } // namespace
 
 // Saves the level (with `chunks=` set, so the source names its set), re-reads what it just wrote, and cooks THAT: the hash in the
 // index has to be of the text a runtime will parse.
 bool SandboxApp::cookLevelChunks(std::string& report) {
-    namespace fs = std::filesystem;
     if (!project_.valid() || levelPath_.empty()) { report = "no level is open"; return false; }
     const CookTarget target = cookTarget(project_.dir, levelPath_);
     if (levelHeader_.stream.chunksPath != target.relative) {
@@ -56,21 +77,7 @@ bool SandboxApp::cookLevelChunks(std::string& report) {
     std::string why;
     if (!fmt::loadOcworld(levelPath_, w, &why)) { report = why; return false; }
 
-    world::CookInput in;
-    std::error_code ec;
-    in.levelAsset = fs::relative(fs::path(levelPath_), fs::path(project_.contentDir()), ec).generic_string();
-    if (ec || in.levelAsset.empty()) in.levelAsset = fs::path(levelPath_).filename().generic_string();
-    in.levelStem = fs::path(levelPath_).stem().string();
-    in.contentDir = project_.contentDir();
-    in.projectDir = project_.dir;
-    in.library = &level_.assets();   // the same parse cache the level's instances use
-    in.meshBounds = [this](const std::string& asset, Vec3& lo, Vec3& hi) {
-        const std::pair<Vec3, Vec3>* b = content_.boundsFor(fnv1a64(std::string_view(asset)));
-        if (!b) return false;
-        lo = b->first;
-        hi = b->second;
-        return true;
-    };
+    const world::CookInput in = cookInputFor(project_, levelPath_, level_.assets(), content_);
     world::CookReport rep;
     if (!world::cookAuthoredLevel(w, in, world::CookOptions{}, rep, &why)) { report = why; return false; }
 
@@ -89,20 +96,13 @@ bool SandboxApp::cookLevelChunks(std::string& report) {
 // so a level that names one gets it re-cooked here when the saved level has moved on. False when the cook fails (no launch).
 bool SandboxApp::refreshCookedChunksForPlay() {
     if (levelHeader_.stream.chunksPath.empty() || !project_.valid() || levelPath_.empty()) return true;   // this level streams the old way
-    namespace fs = std::filesystem;
     fmt::OcWorldData w;
     std::string why;
     if (!fmt::loadOcworld(levelPath_, w, &why)) return true;   // the launch reports an unreadable level itself
 
     const CookTarget target = cookTarget(project_.dir, levelPath_);
     world::AuthoredChunkSource src;
-    world::CookInput in;
-    std::error_code ec;
-    in.levelAsset = fs::relative(fs::path(levelPath_), fs::path(project_.contentDir()), ec).generic_string();
-    in.levelStem = fs::path(levelPath_).stem().string();
-    in.contentDir = project_.contentDir();
-    in.projectDir = project_.dir;
-    in.library = &level_.assets();
+    const world::CookInput in = cookInputFor(project_, levelPath_, level_.assets(), content_);
     if (src.open(target.dir, nullptr) && world::cookSourceHash(w, in, world::CookOptions{}) == src.sourceHash()) return true;
     src.close();   // a set cannot be replaced under open files
 

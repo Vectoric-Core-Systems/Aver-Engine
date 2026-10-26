@@ -4,12 +4,20 @@
 
 #include "aver/anim/AnimSystem.hpp"
 #include "aver/physics/physics_softbody_abi.h"
-#include "aver/scene/Components.hpp"
 
 #include <algorithm>
 #include <cmath>
 
 namespace aver::softbody {
+namespace {
+
+// Writes a matrix as 16 row-major floats, the layout of the physics palette and world matrix.
+void putMat(f32* dst, const Mat4& m) {
+    for (u32 r = 0; r < 4; ++r)
+        for (u32 c = 0; c < 4; ++c) dst[r * 4 + c] = m.m[r][c];
+}
+
+} // namespace
 
 void SoftBodySystem::setCharacterProxy(scene::World& world, Entry& en, bool on) {
     if (!proxyFn_ || en.destructible || en.legacy) return;
@@ -48,27 +56,19 @@ void SoftBodySystem::clothStep(scene::World& world, Entry& en, f32) {
     // The palette in the build frame: bind (world at build) x W0^-1 x skin x W(t), see aver_phys_sb_skin_world.
     std::vector<f32> jm(static_cast<usize>(en.jointCount) * 16);
     if (en.propPalette) {
-        for (u32 j = 0; j < en.jointCount; ++j)
-            for (u32 r = 0; r < 4; ++r)
-                for (u32 c = 0; c < 4; ++c) jm[j * 16 + r * 4 + c] = en.invBuildWorld.m[r][c];
+        for (u32 j = 0; j < en.jointCount; ++j) putMat(jm.data() + j * 16, en.invBuildWorld);
     } else {
         u32 count = 0;
         const Mat4* pal = paletteSet_ ? (paletteFn_ ? paletteFn_(en.skeletonEntity, count, paletteUser_) : nullptr)
                                       : anim::animSystem().skinning(en.skeletonEntity, count);
         if (!pal || count < en.jointCount) return;   // keep last frame's pose
-        for (u32 j = 0; j < en.jointCount; ++j) {
-            const Mat4 m = en.invBuildWorld * pal[j];
-            for (u32 r = 0; r < 4; ++r)
-                for (u32 c = 0; c < 4; ++c) jm[j * 16 + r * 4 + c] = m.m[r][c];
-        }
+        for (u32 j = 0; j < en.jointCount; ++j) putMat(jm.data() + j * 16, en.invBuildWorld * pal[j]);
     }
     f32 w16[16];
+    putMat(w16, W);
     bool moved = !en.hasLastWorld;
     for (u32 r = 0; r < 4; ++r)
-        for (u32 c = 0; c < 4; ++c) {
-            w16[r * 4 + c] = W.m[r][c];
-            moved = moved || std::fabs(W.m[r][c] - en.lastWorld.m[r][c]) > 1e-4f;
-        }
+        for (u32 c = 0; c < 4; ++c) moved = moved || std::fabs(W.m[r][c] - en.lastWorld.m[r][c]) > 1e-4f;
     const Vec3 now{W.m[3][0], W.m[3][1], W.m[3][2]};
     const Vec3 was{en.lastWorld.m[3][0], en.lastWorld.m[3][1], en.lastWorld.m[3][2]};
     const bool hard = en.hardSkinNext || dist(now, was) > opt_.teleportCm;

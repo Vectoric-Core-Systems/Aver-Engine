@@ -1,7 +1,6 @@
 // Making the Jolt body for a piece of an entry's cage, and the draw mesh description that goes with it.
 #include "aver/softbody/SoftBodySystem.hpp"
 
-#include "aver/core/Log.hpp"
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_softbody_abi.h"
 #include "aver/physics/physics_softbody_ext_abi.h"
@@ -73,21 +72,20 @@ bool SoftBodySystem::buildPieceBody(Entry& en, Piece& p, i32 replaceBody, i32 st
     }
     if (faces.empty()) return false;
 
-    // Wave 11. The fast solver lets Jolt make the constraints (edges, shear, bends, long range attachments) from the faces;
-    // it is the root piece of a cloth only. Pressure belongs to the root piece of a cloth too.
+    // The fast solver lets Jolt make the constraints (edges, shear, bends, long range attachments) from the faces; it is
+    // the root piece of a cloth only. Pressure belongs to the root piece of a cloth too.
     const bool fast = !en.destructible && !en.legacy && !p.debris && a.cloth.solver == ClothSolver::Fast;
     const bool inflated = !en.destructible && !en.legacy && !p.debris && en.pressureKPa > 0.0f;
     if (inflated) {
         // Jolt's pressure wants the faces wound so that (C - A) x (B - A) points out; an authored mesh is usually the other
         // way round (cross(B - A, C - A) outward, what the draw uses), so the PHYSICS copy of the faces is flipped when the
         // volume comes out negative. The cage triangles and the draw are untouched.
+        const auto rel = [&](i32 v) {   // a rest position relative to the centre
+            const usize i = static_cast<usize>(v) * 3;
+            return Vec3{rest[i] - centre.x, rest[i + 1] - centre.y, rest[i + 2] - centre.z};
+        };
         f32 six = 0.0f;
-        for (usize t = 0; t + 2 < faces.size(); t += 3) {
-            const Vec3 pa{rest[static_cast<usize>(faces[t]) * 3] - centre.x, rest[static_cast<usize>(faces[t]) * 3 + 1] - centre.y, rest[static_cast<usize>(faces[t]) * 3 + 2] - centre.z};
-            const Vec3 pb{rest[static_cast<usize>(faces[t + 1]) * 3] - centre.x, rest[static_cast<usize>(faces[t + 1]) * 3 + 1] - centre.y, rest[static_cast<usize>(faces[t + 1]) * 3 + 2] - centre.z};
-            const Vec3 pc{rest[static_cast<usize>(faces[t + 2]) * 3] - centre.x, rest[static_cast<usize>(faces[t + 2]) * 3 + 1] - centre.y, rest[static_cast<usize>(faces[t + 2]) * 3 + 2] - centre.z};
-            six += dot(pa, cross(pc, pb));
-        }
+        for (usize t = 0; t + 2 < faces.size(); t += 3) six += dot(rel(faces[t]), cross(rel(faces[t + 2]), rel(faces[t + 1])));
         if (six < 0.0f)
             for (usize t = 0; t + 2 < faces.size(); t += 3) std::swap(faces[t + 1], faces[t + 2]);
     }
@@ -306,7 +304,7 @@ bool SoftBodySystem::initialPiece(scene::World& world, Entry& en) {
     return true;
 }
 
-// ---- wave 11: inflatables and the ragdoll group ----------------------------------------------------------------
+// ---- inflatables and the ragdoll group -------------------------------------------------------------------
 
 void SoftBodySystem::setEntryPressure(Entry& en, f32 kPa) {
     en.pressureKPa = kPa;

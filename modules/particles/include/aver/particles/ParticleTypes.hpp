@@ -94,8 +94,8 @@ struct EventSpawn {
     f32 inheritVelocity = 0;  // fraction of the dying particle's velocity the children start with
 };
 
-// One authored EMITTER: everything about how particles are born, move and fade. The members above
-// `// ---- wave 10` keep their 0.7 names, defaults and meaning, so every existing caller compiles.
+// One authored EMITTER: everything about how particles are born, move and fade. The members above the
+// "----" divider below keep their 0.7 names, defaults and meaning, so every existing caller compiles.
 struct ParticleEffect {
     EmitterShape shape = EmitterShape::Point;
     Vec3 shapeSize{0, 0, 0};   // Sphere: radius in .x. Box: half-extents. Cylinder: radius .x, height .y. Disc: radius .x.
@@ -129,7 +129,7 @@ struct ParticleEffect {
     // (an ember, a spark) writes false. See effectiveLighting.
     bool receivesGI = true;
 
-    // ---- wave 10 ----
+    // ---- added after 0.7 ----
     SimTier simTier = SimTier::Auto;
     RenderKind render = RenderKind::Sprite;
     SpriteAlign align = SpriteAlign::Camera;

@@ -1,9 +1,7 @@
 // The tick that turns a scene::CParticleEmitter's clock (and queued spawn-at requests) into live particles.
 //
-// EVERY EFFECT-SHAPED DECISION IN HERE IS DATA, NEVER A BRANCH ON WHAT KIND OF EFFECT THIS IS. There
-// is no "if this is smoke" anywhere below -- only ParticleEffect's own numbers. That is what keeps a
-// rising smoke column, falling snow, a burst of embers and a waterfall's mist four different VALUES
-// of the same loop rather than four code paths a fifth effect would need a fifth path for.
+// Effect-specific behaviour comes from ParticleEffect's own numbers, never from a branch on what kind of effect this is.
+// A rising smoke column, falling snow and a waterfall's mist are different values of the same loop.
 #include "aver/particles/ParticleSystem.hpp"
 
 #include "aver/core/Hash.hpp"
@@ -12,7 +10,6 @@
 #include "aver/scene/ComponentPool.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <cstring>
 
 namespace aver::particles {
@@ -30,6 +27,10 @@ u32 seedFor(scene::Entity e) {
 }
 
 u32 bitsOf(f32 f) { u32 u; std::memcpy(&u, &f, sizeof u); return u; }
+
+// Alive particles of one emitter instance: the GPU tier's value is a few frames old, the CPU count is exact.
+template <class EmitterInstanceT>
+u32 aliveOf(const EmitterInstanceT& ei) { return ei.gpu ? ei.aliveHint : ei.sim.aliveCount(); }
 
 // Event relationships inside one system: the first emitter whose rule names a child is that child's parent.
 struct Topology {
@@ -100,9 +101,7 @@ u32 packGpuModules(const ParticleEffect& fx, u32 (*outRows)[4]) {
 
 ParticleSystem::~ParticleSystem() { reset(); }
 
-void ParticleSystem::setGpuTier(IParticleGpuTier* tier) {
-    if (tier == gpuTier_) return;
-    // Existing GPU instances belong to the old tier: drop them (they restart on whichever tier is chosen next).
+void ParticleSystem::releaseAllInstances() {
     for (auto& kv : systems_) releaseInstance(kv.second);
     for (auto& kv : eventSystems_) releaseInstance(kv.second);
     systems_.clear();
@@ -110,6 +109,12 @@ void ParticleSystem::setGpuTier(IParticleGpuTier* tier) {
     order_.clear();
     gpuJobs_.clear();
     gpuShifts_.clear();
+}
+
+void ParticleSystem::setGpuTier(IParticleGpuTier* tier) {
+    if (tier == gpuTier_) return;
+    // Existing GPU instances belong to the old tier: drop them (they restart on whichever tier is chosen next).
+    releaseAllInstances();
     gpuTier_ = tier;
 }
 
@@ -239,15 +244,9 @@ void ParticleSystem::shiftWorld(const rhi::ShiftVec3d& deltaCm) {
 }
 
 void ParticleSystem::reset() {
-    for (auto& kv : systems_) releaseInstance(kv.second);
-    for (auto& kv : eventSystems_) releaseInstance(kv.second);
-    systems_.clear();
-    eventSystems_.clear();
-    order_.clear();
+    releaseAllInstances();
     ops_.clear();
     spawnAtQueue_.clear();
-    gpuJobs_.clear();
-    gpuShifts_.clear();
     finished_.clear();
     spawnAtThisFrame_ = 0;
     gpuCapacityUsed_ = 0;
@@ -278,8 +277,7 @@ void ParticleSystem::setModifiers(scene::Entity e, f32 rateScale, f32 sizeScale,
     ops_.push_back(op);
 }
 
-void ParticleSystem::applyOp(const EntityOp& op, SystemInstance& si, const ParticleSystemDef& def, u32& flagsOut,
-                             bool& stopOut) {
+void ParticleSystem::applyOp(const EntityOp& op, SystemInstance& si, const ParticleSystemDef& def, bool& stopOut) {
     switch (op.kind) {
     case EntityOp::SetParam:
         for (usize i = 0; i < def.params.size() && i < kMaxUserParams; ++i) {
@@ -302,7 +300,6 @@ void ParticleSystem::applyOp(const EntityOp& op, SystemInstance& si, const Parti
         si.speedScale = std::max(0.0f, op.v[2]);
         break;
     }
-    (void)flagsOut;
 }
 
 void ParticleSystem::applyOps(scene::World& world) {
@@ -316,9 +313,8 @@ void ParticleSystem::applyOps(scene::World& world) {
         }
         const ParticleSystemDef* def = effects_ ? effects_->findSystem(it->second.effectId) : nullptr;
         if (!def) continue;
-        u32 flags = 0;
         bool stopped = false;
-        applyOp(op, it->second, *def, flags, stopped);
+        applyOp(op, it->second, *def, stopped);
         if (stopped) {
             auto* c = world.component<scene::CParticleEmitter>(op.entity, scene::kComponentParticleEmitter);
             if (c) c->flags |= scene::kParticleEmitterStopped;
@@ -470,18 +466,16 @@ void ParticleSystem::stepSystem(SystemInstance& si, const ParticleSystemDef& def
         }
         if (si.burstExtra > 0) toSpawn += static_cast<u32>(si.burstExtra);
 
+        // OVER BUDGET DROPS NEW SPAWNS; IT DOES NOT EVICT OLD ONES. The CPU tier is bounded by the room left this tick.
+        if (!ei.gpu) toSpawn = std::min(toSpawn, cpuSpawnRoom_);
         if (toSpawn > 0) {
-            // OVER BUDGET DROPS NEW SPAWNS; IT DOES NOT EVICT OLD ONES.
-            if (!ei.gpu) toSpawn = std::min(toSpawn, cpuSpawnRoom_);
-            if (toSpawn > 0) {
-                SpawnRequest r;
-                r.xf = cx.xf;
-                r.velocity = si.velocity;
-                r.count = toSpawn;
-                r.speedScale = si.speedScale;
-                r.sizeScale = si.sizeScale;
-                reqs.push_back(r);
-            }
+            SpawnRequest r;
+            r.xf = cx.xf;
+            r.velocity = si.velocity;
+            r.count = toSpawn;
+            r.speedScale = si.speedScale;
+            r.sizeScale = si.sizeScale;
+            reqs.push_back(r);
         }
 
         if (ei.gpu) {
@@ -612,7 +606,7 @@ void ParticleSystem::tick(scene::World& world, f32 dt) {
 
         if ((c->flags & scene::kParticleEmitterAutoDestroy) && !playing) {
             u32 alive = 0;
-            for (const EmitterInstance& ei : si.emitters) alive += ei.gpu ? ei.aliveHint : ei.sim.aliveCount();
+            for (const EmitterInstance& ei : si.emitters) alive += aliveOf(ei);
             bool pendingSpawns = false;
             for (const EmitterInstance& ei : si.emitters) pendingSpawns = pendingSpawns || !ei.nextInbox.empty();
             if (alive == 0 && !pendingSpawns && !si.rebuild) finished_.push_back(e);
@@ -639,7 +633,7 @@ void ParticleSystem::tick(scene::World& world, f32 dt) {
         u32 alive = 0;
         bool queued = false;
         for (const EmitterInstance& ei : si.emitters) {
-            alive += ei.gpu ? ei.aliveHint : ei.sim.aliveCount();
+            alive += aliveOf(ei);
             queued = queued || !ei.nextInbox.empty();
         }
         si.idle = (alive == 0 && !queued) ? si.idle + dt : 0.0f;
@@ -662,8 +656,7 @@ void ParticleSystem::tick(scene::World& world, f32 dt) {
 u32 ParticleSystem::liveParticles(scene::Entity e) const {
     auto it = systems_.find(e);
     if (it == systems_.end() || it->second.emitters.empty()) return 0u;
-    const EmitterInstance& ei = it->second.emitters[0];
-    return ei.gpu ? ei.aliveHint : ei.sim.aliveCount();
+    return aliveOf(it->second.emitters[0]);
 }
 
 const std::vector<Particle>* ParticleSystem::particles(scene::Entity e) const {
@@ -678,7 +671,7 @@ bool ParticleSystem::emitterState(scene::Entity e, u32& alive, u32& tier) const 
     alive = 0;
     tier = 0;
     for (const EmitterInstance& ei : it->second.emitters) {
-        alive += ei.gpu ? ei.aliveHint : ei.sim.aliveCount();
+        alive += aliveOf(ei);
         if (ei.gpu) tier = 1;
     }
     return true;

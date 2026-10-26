@@ -82,9 +82,7 @@ void EmitterSim::init(const ParticleEffect& fx, const std::vector<UserParam>& pa
     capacity_ = linked_ ? std::clamp<u32>(fx.linkedCapacity, 2u, kMaxLinkedCapacity) : 0u;
     ring_ = (fx.render == RenderKind::Ribbon && !fx.linked)
                 ? std::clamp<u32>(fx.trailPoints, 2u, kMaxTrailPoints) - 1u : 0u;
-    particles_.clear();
-    trail_.clear();
-    if (linked_) particles_.assign(capacity_, Particle{});
+    clear();
     nextId_ = 0;
 }
 
@@ -199,32 +197,28 @@ void EmitterSim::step(f32 dt, f32 time, std::vector<EventRecord>* eventsOut) {
     env.dt = dt;
     const f32 damp = fx.damping > 0.0f ? std::max(0.0f, 1.0f - fx.damping * dt) : 1.0f;
 
+    // Velocity and position stages for a living particle. False when a position module kills it.
+    const auto advance = [&](Particle& p) {
+        p.velocity += fx.gravity * dt;
+        if (fx.damping > 0.0f) p.velocity *= damp;
+        for (const ResolvedModule& m : velMods_) runVelocityModule(m, env, p);
+        p.position += p.velocity * dt;
+        for (const ResolvedModule& m : posMods_) {
+            const u32 bits = runPositionModule(m, env, p);
+            if ((bits & kModuleCollided) && wantCollide) eventsOut->push_back({EventType::Collide, p.id, p.position, p.velocity});
+            if (bits & kModuleKilled) return false;
+        }
+        return true;
+    };
+
     usize w = 0;
     for (usize r = 0; r < particles_.size(); ++r) {
         Particle p = particles_[r];
         if (linked_ && !particleAlive(p)) continue;   // an empty ring slot
 
         p.age += dt;
-        if (p.age >= p.lifetime) {
-            if (wantDeath) eventsOut->push_back({EventType::Death, p.id, p.position, p.velocity});
-            if (linked_) { particles_[r].age = 0.0f; particles_[r].lifetime = 0.0f; }
-            continue;   // dies here; not written back, so the array compacts
-        }
-
-        p.velocity += fx.gravity * dt;
-        if (fx.damping > 0.0f) p.velocity *= damp;
-        for (const ResolvedModule& m : velMods_) runVelocityModule(m, env, p);
-        p.position += p.velocity * dt;
-
-        bool killed = false;
-        for (const ResolvedModule& m : posMods_) {
-            const u32 bits = runPositionModule(m, env, p);
-            if (bits & kModuleCollided) {
-                if (wantCollide) eventsOut->push_back({EventType::Collide, p.id, p.position, p.velocity});
-            }
-            if (bits & kModuleKilled) { killed = true; break; }
-        }
-        if (killed) {
+        if (p.age >= p.lifetime || !advance(p)) {
+            // Dies here. A compacting array does not write it back, so it drops out; a linked slot is emptied in place.
             if (wantDeath) eventsOut->push_back({EventType::Death, p.id, p.position, p.velocity});
             if (linked_) { particles_[r].age = 0.0f; particles_[r].lifetime = 0.0f; }
             continue;

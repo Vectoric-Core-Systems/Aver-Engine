@@ -11,10 +11,8 @@
 #include "aver/core/Log.hpp"
 #include "aver/formats/detail/TextScan.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <string_view>
 #include <vector>
 

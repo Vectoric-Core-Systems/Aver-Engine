@@ -10,7 +10,6 @@
 #include "aver/scene/Components.hpp"
 
 #include <algorithm>
-#include <cmath>
 
 namespace aver::softbody {
 
@@ -95,6 +94,13 @@ bool SoftBodySystem::planTear(scene::World& world, Entry& en) {
         for (const u32 pid : plan.islands[k].particles) maps[k].push_back(static_cast<i32>(c.particles[pid].simIndex));
     }
 
+    // A dust cluster: its particles are unowned, and its centre and size wait in pendingDust for commitTear.
+    const auto addDust = [&](const std::vector<u32>& parts) {
+        Vec3 sum{0, 0, 0};
+        for (const u32 pid : parts) { sum += c.particles[pid].pos; en.owner[pid] = kNone; }
+        en.pendingDust.emplace_back(sum / static_cast<f32>(parts.size()), static_cast<u32>(parts.size()));
+    };
+
     // Dust: one cluster per connected set of dust particles, only for particles of the dirty pieces.
     {
         std::map<u32, std::vector<u32>> clusters;
@@ -102,11 +108,7 @@ bool SoftBodySystem::planTear(scene::World& world, Entry& en) {
             const u32 idx = pid < en.owner.size() ? en.owner[pid] : kNone;
             if (idx < en.pieces.size() && en.pieces[idx].alive && en.pieces[idx].needsRebuild) clusters[comp[pid]].push_back(pid);
         }
-        for (const auto& [cid, parts] : clusters) {
-            Vec3 sum{0, 0, 0};
-            for (const u32 pid : parts) { sum += c.particles[pid].pos; en.owner[pid] = kNone; }
-            en.pendingDust.emplace_back(sum / static_cast<f32>(parts.size()), static_cast<u32>(parts.size()));
-        }
+        for (const auto& cluster : clusters) addDust(cluster.second);
     }
 
     u32 maxPieces = std::max(1u, en.asset.destruct.maxPieces);
@@ -135,9 +137,7 @@ bool SoftBodySystem::planTear(scene::World& world, Entry& en) {
         for (usize j = 1; j < ks.size(); ++j) {
             const IslandPlan::Island& isl = plan.islands[ks[j]];
             if (noDebris || (!restoring_ && aliveCount() >= maxPieces)) {
-                Vec3 sum{0, 0, 0};
-                for (const u32 pid : isl.particles) { sum += c.particles[pid].pos; en.owner[pid] = kNone; }
-                en.pendingDust.emplace_back(sum / static_cast<f32>(isl.particles.size()), static_cast<u32>(isl.particles.size()));
+                addDust(isl.particles);
                 continue;
             }
             Piece np;
@@ -179,11 +179,12 @@ void SoftBodySystem::commitTear(scene::World& world, Entry& en) {
     for (u32 i = 0; i < en.pieces.size(); ++i)
         if (en.pieces[i].pendingKill) killPiece(world, en, en.pieces[i]);
 
-    // Dust clusters.
-    for (const auto& [centre, count] : en.pendingDust) {
+    // A dust cluster's event and effect.
+    const auto emitDust = [&](const Vec3& centre, u32 count) {
         emit(en, nullptr, SoftEventKind::Dust, 0, centre, static_cast<f32>(count));
         emitFx(en, FxSlot::Dust, centre, Vec3{0, 0, 1}, static_cast<f32>(count), count);
-    }
+    };
+    for (const auto& [centre, count] : en.pendingDust) emitDust(centre, count);
     en.pendingDust.clear();
 
     // The saved state of a restored cage, per particle, handed to the builder in each piece's vertex order.
@@ -213,10 +214,7 @@ void SoftBodySystem::commitTear(scene::World& world, Entry& en) {
             const u32 n = static_cast<u32>(ref.particles.size());
             for (const u32 pid : ref.particles) { sum += c.particles[pid].pos; en.owner[pid] = kNone; }
             destroyPiece(world, en, ref);
-            if (n) {
-                emit(en, nullptr, SoftEventKind::Dust, 0, sum / static_cast<f32>(n), static_cast<f32>(n));
-                emitFx(en, FxSlot::Dust, sum / static_cast<f32>(n), Vec3{0, 0, 1}, static_cast<f32>(n), n);
-            }
+            if (n) emitDust(sum / static_cast<f32>(n), n);
             continue;
         }
         if (auto* sb = world.component<scene::CSoftBody>(ref.entity, scene::kComponentSoftBody)) sb->body = ref.body;

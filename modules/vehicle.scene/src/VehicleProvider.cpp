@@ -3,8 +3,6 @@
 // repeated with plain types; the host passes &vehicleProvider to aver_fw_set_vehicle_provider.
 #include "aver/vehicle/VehiclePhysicsSystem.hpp"
 
-#include "aver/core/Log.hpp"
-
 #include <algorithm>
 #include <cstring>
 
@@ -15,7 +13,11 @@ namespace {
 // The op numbers of framework_vehicle_abi.h (static-asserted in the framework test against the header).
 constexpr i32 kOpSpawn = 1, kOpEnter = 2, kOpExit = 3, kOpShift = 4, kOpSetGear = 5, kOpSetManual = 6, kOpFlip = 7, kOpRepair = 8,
               kOpDamage = 9, kOpTune = 10, kOpTelemetry = 11, kOpWheel = 12, kOpEvents = 13;
-constexpr i32 kTelemetryFloats = 19, kTelemetryInts = 13, kWheelFloats = 18, kWheelInts = 4, kEventInts = 6, kEventFloats = 8;
+// Block sizes. Telemetry is the physics blocks VS (18 floats) and VSI (11 ints) as read, then health01 (a float) and
+// outState and the driver (ints). A wheel is VWS (18 floats) and VWSI (4 ints); an event is 6 ints and 8 floats.
+constexpr i32 kRawVsFloats = 18, kRawVsiInts = 11;
+constexpr i32 kTelemetryFloats = kRawVsFloats + 1, kTelemetryInts = kRawVsiInts + 2;
+constexpr i32 kWheelFloats = 18, kWheelInts = 4, kEventInts = 6, kEventFloats = 8;
 
 }  // namespace
 
@@ -58,8 +60,11 @@ i32 VehiclePhysicsSystem::relay(i32 op, i32 entity, const float* in, i32 inCount
             const detail::Entry* en = m.find(e);
             if (!en || en->state != detail::Entry::State::Built || !outF || !outI) return 0;
             const i32 nf = std::min(cap, kTelemetryFloats), ni = std::min(cap, kTelemetryInts);
-            for (i32 k = 0; k < nf; ++k) outF[k] = k < 18 ? en->rawVs[k] : en->tel.health01;
-            for (i32 k = 0; k < ni; ++k) outI[k] = k < 11 ? en->rawVsi[k] : (k == 11 ? static_cast<i32>(en->outState) : static_cast<i32>(en->driver));
+            for (i32 k = 0; k < nf; ++k) outF[k] = k < kRawVsFloats ? en->rawVs[k] : en->tel.health01;
+            for (i32 k = 0; k < ni; ++k) {
+                if (k < kRawVsiInts) outI[k] = en->rawVsi[k];
+                else outI[k] = k == kRawVsiInts ? static_cast<i32>(en->outState) : static_cast<i32>(en->driver);
+            }
             return 1;
         }
         case kOpWheel: {

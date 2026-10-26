@@ -141,6 +141,12 @@ void moveCharacters(const std::vector<JPH::CharacterVirtual*>& characters, const
                            characterBodyFilter(), {}, *g_world->temp);
 }
 
+// Adds a character to a shift's list and its inner body to the set the body loop skips (Jolt owns the inner body).
+void addCharacter(JPH::CharacterVirtual* c, std::vector<JPH::CharacterVirtual*>& characters, std::unordered_set<JPH::BodyID>& inner) {
+    characters.push_back(c);
+    if (!c->GetInnerBodyID().IsInvalid()) inner.insert(c->GetInnerBodyID());
+}
+
 } // namespace
 
 namespace aver::physics::detail {
@@ -167,16 +173,13 @@ void originReshiftRestored(const std::vector<uint32_t>& bodyIds, const std::vect
     std::vector<JPH::CharacterVirtual*> characters;
     std::unordered_set<JPH::BodyID> inner;
     for (const int32_t h : characterHandles) {
-        JPH::CharacterVirtual* c = findCharacter(h);
-        if (!c) continue;
-        characters.push_back(c);
-        if (!c->GetInnerBodyID().IsInvalid()) inner.insert(c->GetInnerBodyID());
+        if (JPH::CharacterVirtual* c = findCharacter(h)) addCharacter(c, characters, inner);
     }
 
     int32_t statics = 0;
     for (const uint32_t raw : bodyIds) {
         const JPH::BodyID id(raw);
-        if (!inner.empty() && inner.count(id)) continue;
+        if (inner.count(id)) continue;
         bool isStatic = false;
         if (moveBody(id, dj, isStatic) && isStatic) ++statics;
     }
@@ -210,19 +213,17 @@ int32_t aver_phys_origin_shift(double dxCm, double dyCm, double dzCm) {
     OriginStats st;
     originJointsBegin();
 
-    // A character's inner body is moved by CharacterVirtual::SetPosition below; it is not in World::bodies, and this keeps it that way.
+    // A character's inner body moves with CharacterVirtual::SetPosition below. It is not in World::bodies, and the body loop skips it by id
+    // regardless, so it cannot move twice.
     std::vector<JPH::CharacterVirtual*> characters;
     std::unordered_set<JPH::BodyID> inner;
-    for (const auto& entry : g_world->characters) {
-        characters.push_back(entry.second.GetPtr());
-        if (!entry.second->GetInnerBodyID().IsInvalid()) inner.insert(entry.second->GetInnerBodyID());
-    }
+    for (const auto& entry : g_world->characters) addCharacter(entry.second.GetPtr(), characters, inner);
 
     // Bodies: dynamic, kinematic, static, sensors, heightfields, chassis, ragdoll parts, soft bodies (COM-local vertices ride along).
     // DontActivate: a sleeper stays asleep; an unadded body is moved without a broad-phase notify.
     for (const auto& entry : g_world->bodies) {
         const JPH::BodyID& id = entry.second;
-        if (!inner.empty() && inner.count(id)) continue;
+        if (inner.count(id)) continue;
         bool isStatic = false;
         if (!moveBody(id, d.dj, isStatic)) continue;
         ++st.bodies;

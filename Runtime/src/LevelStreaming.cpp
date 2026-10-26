@@ -3,9 +3,7 @@
 
 #if AVER_MODULE_SCENE
 #  include "aver/game/GameContent.hpp"
-#  include "aver/core/Hash.hpp"
 #  include "aver/core/Log.hpp"
-#  include "aver/scene/scene_abi.h"
 #  include "aver/world/LevelTransform.hpp"
 
 #  include <algorithm>
@@ -18,6 +16,9 @@ namespace {
 // A placement with no known bounds (no aabb= and its mesh not loaded) never leaves: residency cannot
 // be judged without them, and unloading what might be under the viewer is the worse failure.
 constexpr f32 kUnknownExtentCm = 1.0e9f;
+
+// itemOf_ value of a placement with no item: a class placement, which the host loads and the streamer never sees.
+constexpr u32 kNoItem = ~0u;
 
 // A placement pose with the POSITION in f64: the record is absolute f64 text, and an f32 position quantises it past ~10 km.
 struct PoseD {
@@ -46,7 +47,7 @@ void LevelStreaming::begin(const fmt::OcWorldData& w, GameContent& content, rhi:
     hooks_ = std::move(hooks);
     records_ = w.placements;
     removed_.assign(records_.size(), 0);
-    itemOf_.assign(records_.size(), ~0u);
+    itemOf_.assign(records_.size(), kNoItem);
     baseline_.assign(records_.size(), world::PlacementBaseline{});
     hasBaseline_.assign(records_.size(), 0);
     items_.clear();
@@ -59,7 +60,7 @@ void LevelStreaming::begin(const fmt::OcWorldData& w, GameContent& content, rhi:
     for (u32 i = 0; i < records_.size(); ++i) {
         const fmt::OcWorldPlacement& p = records_[i];
         if (!p.className.empty()) continue;
-        const bool child = p.parent >= 0 && static_cast<u32>(p.parent) < i && itemOf_[static_cast<u32>(p.parent)] != ~0u;
+        const bool child = p.parent >= 0 && static_cast<u32>(p.parent) < i && itemOf_[static_cast<u32>(p.parent)] != kNoItem;
         if (child) {
             const u32 it = itemOf_[static_cast<u32>(p.parent)];
             itemOf_[i] = it;
@@ -165,7 +166,7 @@ world::AabbD LevelStreaming::itemBounds(const Item& it) const {
 void LevelStreaming::noteBaseline(u32 placement, scene::Entity e) {
     // Item roots only: a child's record is parent-relative and origin-free. The baseline is what the entity actually has now (a ground-snapped
     // root differs from the narrowed record in Z), so an untouched entity compares equal bit for bit.
-    if (placement >= records_.size() || itemOf_[placement] == ~0u) return;
+    if (placement >= records_.size() || itemOf_[placement] == kNoItem) return;
     const Item& it = items_[itemOf_[placement]];
     if (it.placements.empty() || it.placements.front() != placement) return;
     const auto* loc = scene::World::instance().component<scene::CLocal>(e, scene::kComponentLocal);
@@ -190,8 +191,7 @@ bool LevelStreaming::recordPositionOf(scene::Entity e, const Vec3& currentLocal,
     return true;
 }
 
-void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& items) {
-    (void)world;   // instantiate() creates into the process-global World
+void LevelStreaming::loadItems(const std::vector<u32>& items) {   // instantiate() creates into the process-global World
     HitchMarks hm(items.size() == 1 && !items_[items[0]].placements.empty()
                       ? records_[items_[items[0]].placements.front()].asset.c_str() : "load batch", 0.25);
     // One instantiate for the batch: a sub-level of the items' placements, parents remapped.
@@ -302,7 +302,7 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewersL
     }
     hm.mark("prefetch");
     if (!now.empty()) {
-        loadItems(world, now);
+        loadItems(now);
         lastLoaded_ += static_cast<u32>(now.size());
     }
     hm.mark("pinned");
@@ -323,7 +323,7 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewersL
     for (usize i = 0; i < ready.size(); ++i) {
         if (i > 0 && msSince(start) >= budgetMs) break;
         one[0] = ready[i];
-        loadItems(world, one);
+        loadItems(one);
         ++lastLoaded_;
     }
     hm.mark("loads");
@@ -357,7 +357,7 @@ scene::Entity LevelStreaming::entityOf(u32 placement) const {
 }
 
 void LevelStreaming::pin(u32 placement, bool on) {
-    if (placement < itemOf_.size() && itemOf_[placement] != ~0u) streamer_.pin(itemOf_[placement], on);
+    if (placement < itemOf_.size() && itemOf_[placement] != kNoItem) streamer_.pin(itemOf_[placement], on);
 }
 
 void LevelStreaming::updateRecord(u32 placement, fmt::OcWorldPlacement p, bool keepParent) {
@@ -375,7 +375,7 @@ void LevelStreaming::updateRecord(u32 placement, fmt::OcWorldPlacement p, bool k
     } else if (p.hasBounds) {
         records_[placement].hasBounds = true;   // mesh not loaded: keep the bounds it had
     }
-    if (itemOf_[placement] != ~0u) streamer_.setBounds(itemOf_[placement], itemBounds(items_[itemOf_[placement]]));
+    if (itemOf_[placement] != kNoItem) streamer_.setBounds(itemOf_[placement], itemBounds(items_[itemOf_[placement]]));
 }
 
 u32 LevelStreaming::addRecord(const fmt::OcWorldPlacement& p, scene::Entity e) {
@@ -397,8 +397,7 @@ u32 LevelStreaming::addRecord(const fmt::OcWorldPlacement& p, scene::Entity e) {
     entityOf_[pi] = e;
     updateRecord(pi, records_[pi]);
     noteBaseline(pi, e);
-    const u32 sidx = streamer_.add(itemBounds(items_[idx]));
-    (void)sidx;   // the streamer numbers items in add order, as items_ does
+    streamer_.add(itemBounds(items_[idx]));   // the streamer numbers items in add order, as items_ does
     streamer_.markLoaded(idx);
     streamer_.pin(idx, true);
     return pi;
@@ -407,7 +406,7 @@ u32 LevelStreaming::addRecord(const fmt::OcWorldPlacement& p, scene::Entity e) {
 void LevelStreaming::removeRecord(u32 placement) {
     if (placement >= records_.size() || removed(placement)) return;
     const u32 item = itemOf_[placement];
-    if (item == ~0u) { removed_[placement] = 1; return; }
+    if (item == kNoItem) { removed_[placement] = 1; return; }
     Item& it = items_[item];
     const bool isRoot = !it.placements.empty() && it.placements.front() == placement;
     // The placement and every later one in the item whose parent chain reaches it.

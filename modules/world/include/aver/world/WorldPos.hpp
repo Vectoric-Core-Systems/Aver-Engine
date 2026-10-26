@@ -7,7 +7,7 @@
 // audio, ABI) carries origin-relative f32 centimetres. The floating origin O is the bridge: it is
 // always a whole number of regions (kOriginStepCm) on X and Y, and Z is never shifted.
 //
-// FROZEN by phase 0 of LARGE_WORLD: the other areas code against this header.
+// Frozen: the other areas code against this header.
 // Header-only, Core-only, no I/O, like Vec3.
 #include "aver/world/ChunkCoord.hpp"
 

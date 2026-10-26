@@ -6,7 +6,6 @@
 #include "aver/physics/physics_character_abi.h"
 #include "aver/physics/physics_queries_abi.h"
 
-#include <algorithm>
 #include <cmath>
 
 namespace aver::camera {
@@ -16,6 +15,11 @@ constexpr f32 kMaxPitchRad = 89.0f * (kPi / 180.0f);
 constexpr f32 kRecenterSpeed = 2.5f;   // 1/s, once the look input has been idle for recenterDelayS
 constexpr f32 kKickSmoothSpeed = 6.0f;
 constexpr f32 kSpeedSmoothSpeed = 10.0f;
+
+// Under Reduce motion a lag speed below the floor is raised to it: stiff, not swaying.
+f32 reduceMotionFloor(f32 speed, bool motionAllowed, f32 floorSpeed) {
+    return speed > 0.0f && !motionAllowed && speed < floorSpeed ? floorSpeed : speed;
+}
 
 Vec3 positionOf(scene::World& w, scene::Entity e) {
     const Mat4& m = w.worldMatrix(e);
@@ -56,19 +60,22 @@ bool CameraRigSystem::evaluate(scene::World& w, scene::Entity re, CCameraRig& ri
     const RigTuning t = resolveTuning(rig);
     const CameraMode mode = modeOf(rig);
     const f32 dt = fr.dt > 0.0f ? fr.dt : 0.0f;
-    out.first = !st.lagValid;
+
+    // Returns a held pose for this frame. The arm keeps its last length and the state bits are cleared.
+    auto hold = [&](const CameraPov& pose) {
+        out.pov = pose;
+        out.held = true;
+        out.arm = st.arm < 0.0f ? 0.0f : st.arm;
+        out.state = 0;
+        return true;
+    };
 
     // 1. Target. A dead explicit target holds the last pose for a moment, then yields to the fallback.
     scene::Entity target = sourceEntity(w, rig, re);
     if (rig.target != 0 && !w.valid(rig.target)) {
         if (write) st.deadFor += dt;
-        if (st.havePov) {   // rigUsable() retires the rig once deadFor passes holdDestroyedS; until then (and on that frame) the pose holds
-            out.pov = st.lastPov;
-            out.held = true;
-            out.arm = st.arm < 0.0f ? 0.0f : st.arm;
-            out.state = 0;
-            return true;
-        }
+        // rigUsable() retires the rig once deadFor passes holdDestroyedS; until then (and on that frame) the pose holds.
+        if (st.havePov) return hold(st.lastPov);
         target = re;
     } else if (write) {
         st.deadFor = 0.0f;
@@ -217,11 +224,7 @@ bool CameraRigSystem::evaluate(scene::World& w, scene::Entity re, CCameraRig& ri
             st.warnedNonFinite = true;
             AVER_WARN("[Camera] rig {} sees a non-finite transform; holding its last pose", re);
         }
-        out.pov = st.havePov ? st.lastPov : fr.fallback;
-        out.held = true;
-        out.arm = st.arm < 0.0f ? 0.0f : st.arm;
-        out.state = 0;
-        return true;
+        return hold(st.havePov ? st.lastPov : fr.fallback);
     }
 
     // 3. Look-ahead (planar, off under Reduce motion).
@@ -237,8 +240,7 @@ bool CameraRigSystem::evaluate(scene::World& w, scene::Entity re, CCameraRig& ri
     const bool farJump = st.lagValid && dist(pivotTarget, st.prevTarget) > options_.teleportCm;
     const bool snap = !st.lagValid || st.snapNext || teleported || farJump;
     const bool explicitSnap = st.lagValid && (st.snapNext || teleported || farJump);
-    f32 speed = lagAllowed ? rig.posLagSpeed : 0.0f;
-    if (speed > 0.0f && !fr.motionAllowed && speed < options_.reduceMotionLagFloor) speed = options_.reduceMotionLagFloor;
+    const f32 speed = reduceMotionFloor(lagAllowed ? rig.posLagSpeed : 0.0f, fr.motionAllowed, options_.reduceMotionLagFloor);
     Vec3 pivot;
     if (snap || speed <= 0.0f) pivot = pivotTarget;
     else pivot = lagFollow(st.lagPivot, st.prevTarget, pivotTarget, speed, t.lagStepS, rig.lagMaxDistCm, dt);
@@ -252,8 +254,7 @@ bool CameraRigSystem::evaluate(scene::World& w, scene::Entity re, CCameraRig& ri
     }
 
     // Rotation lag (and the first evaluation / a snap take the rotation as is).
-    f32 rs = rotLagAllowed ? rig.rotLagSpeed : 0.0f;
-    if (rs > 0.0f && !fr.motionAllowed && rs < options_.reduceMotionLagFloor) rs = options_.reduceMotionLagFloor;
+    const f32 rs = reduceMotionFloor(rotLagAllowed ? rig.rotLagSpeed : 0.0f, fr.motionAllowed, options_.reduceMotionLagFloor);
     if (!st.rotValid || snap || rs <= 0.0f) {
         if (write) { st.yaw = yaw; st.pitch = pitch; st.roll = roll; st.rotValid = true; }
     } else {

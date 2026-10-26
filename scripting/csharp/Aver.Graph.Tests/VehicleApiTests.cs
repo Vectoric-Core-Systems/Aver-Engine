@@ -8,7 +8,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Linq;
 using Aver.Framework;
 
 [AutoRun]
@@ -23,7 +22,7 @@ static class VehicleApiTests
         failures += TestTextFollowsTheSpecAndIgnoresTheCulture();
         failures += TestHudFormatting();
         failures += TestMirroredEnums();
-        failures += TestSpecsAreStable();
+        failures += TestTuneRefusesAnEmptyKey();
         return failures;
     }
 
@@ -154,9 +153,9 @@ static class VehicleApiTests
         return 0;
     }
 
-    private static int TestSpecsAreStable()
+    private static int TestTuneRefusesAnEmptyKey()
     {
-        Console.WriteLine("Test: the pedal and tune members refuse an empty key without touching the host");
+        Console.WriteLine("Test: the tune member refuses an empty key without touching the host");
         Entity none = default;
         if (none.TuneVehicle("", 1f) || none.TuneVehicle(null!, 1f)) return Fail("an empty key must be refused");
         Console.WriteLine("  PASS");

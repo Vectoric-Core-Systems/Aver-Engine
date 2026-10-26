@@ -16,9 +16,8 @@ void ParticleEffectLibrary::set(u64 id, const ParticleEffect& effect) {
 }
 
 const ParticleEffect* ParticleEffectLibrary::find(u64 id) const {
-    if (id == 0) return nullptr;
-    auto it = systems_.find(id);
-    return it == systems_.end() || it->second.emitters.empty() ? nullptr : &it->second.emitters[0];
+    const ParticleSystemDef* def = findSystem(id);
+    return def ? &def->emitters[0] : nullptr;
 }
 
 void ParticleEffectLibrary::setSystem(u64 id, const ParticleSystemDef& def) {

@@ -1,7 +1,5 @@
 #include "aver/world/AuthoredChunkSource.hpp"
 
-#include "aver/core/Log.hpp"
-
 namespace aver::world {
 
 bool AuthoredChunkSource::open(const std::string& cookDir, std::string* why) {

@@ -39,9 +39,9 @@ static class WorldPosApiTests
     {
         var rng = new Random(0x5eed);
         int bad = 0;
+        double Far() => Math.Round((rng.NextDouble() * 2.0 - 1.0) * 1.0e8 * 4.0) / 4.0;
         for (int i = 0; i < 20000; ++i)
         {
-            double Far() => Math.Round((rng.NextDouble() * 2.0 - 1.0) * 1.0e8 * 4.0) / 4.0;
             var abs = new Double3(Far(), Far(), Math.Round((rng.NextDouble() * 2.0 - 1.0) * 2.0e6 * 4.0) / 4.0);
             WorldPos p = WorldPos.FromAbsolute(abs);
             if (!(p.Local.X >= 0f && p.Local.X < 1600f && p.Local.Y >= 0f && p.Local.Y < 1600f && p.Local.Z >= 0f && p.Local.Z < 1600f)) ++bad;

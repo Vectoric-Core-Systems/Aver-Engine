@@ -116,7 +116,8 @@ public:
     };
     bool drawBuffers(u32 handle, DrawBuffers& out) const;
 
-    // Rest states the draw expects, applied by record(); exposed so the renderer never has to barrier in transparentPass.
+    // The frame counter, bumped by each record(). The draw reads buffers in the rest states record() leaves them in, so the
+    // renderer never has to barrier in transparentPass.
     u64 frame() const { return frame_; }
 
     // The stats snapshot: counters block of a handle (kGpuCounterCount uints) from the readback three frames ago.
@@ -153,6 +154,7 @@ private:
     void barrier(rhi::IRenderContext& ctx, TrackedBuffer& b);
     void recordRound(rhi::IRenderContext& ctx, std::vector<Item>& items, const View& view);
     void recordSort(rhi::IRenderContext& ctx, std::vector<Item>& items, const View& view);
+    bool probeCopy(rhi::IRenderContext& ctx, u32 handle, rhi::PipelineHandle pipe, const GpuSimCB& cb, rhi::BufferHandle dst, u32 words);
     void refreshStats();
     bool buildKernels();
     rhi::PipelineHandle kernel(const char* source, const char* entry, rhi::PipelineLayout layout, rhi::ShaderStage = rhi::ShaderStage::Compute);

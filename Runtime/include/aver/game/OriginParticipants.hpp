@@ -1,5 +1,5 @@
 #pragma once
-// OriginParticipants: the hosts' side of the floating origin (docs/plans/wave11/LARGE_WORLD.md 2.2.4, 2.2.5, 4 phase 2).
+// OriginParticipants: the hosts' side of the floating origin (docs/plans/wave11/LARGE_WORLD.md 2.2.4, 2.2.5).
 //
 // One object per host. It owns the world::WorldOrigin service and registers every participant of the order table in it, in
 // order: gate (0), physics (10), scene roots and PlayMobility (20), host members (30), scene systems (40), streaming (50),

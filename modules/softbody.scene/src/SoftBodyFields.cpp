@@ -4,10 +4,7 @@
 // fields (ascending entity id), transient fields (ascending handle); time is the fixed-step count. docs/SOFTBODY.md 2.4.
 #include "aver/softbody/SoftBodySystem.hpp"
 
-#include "aver/core/Log.hpp"
-#include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_softbody_abi.h"
-#include "aver/scene/Components.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -31,16 +28,26 @@ u32 SoftBodySystem::fieldTargetOf(const Entry& en, const Piece& p) const {
     return en.destructible ? kFieldTargetDestructible : kFieldTargetCloth;
 }
 
+bool SoftBodySystem::inReach(const Entry& en, const Piece& p, const FieldSpec& f) const {
+    if (!p.alive || p.empty || p.baked || p.pendingKill) return false;
+    if (!(fieldTargetOf(en, p) & f.targets)) return false;
+    return fieldOverlapsBounds(f, p.boundsMin, p.boundsMax);
+}
+
+void SoftBodySystem::holdAsleep(Piece& p) {
+    if (!p.fieldHeld) {
+        aver_phys_sb_set_active(p.body, 0);
+        p.fieldHeld = true;
+    }
+    p.heldTick = fieldTick_;
+}
+
 u32 SoftBodySystem::piecesInReach(const FieldSpec& f) const {
     u32 n = 0;
     for (const auto& [e, en] : entries_) {
         if (en.failed) continue;
-        for (const Piece& p : en.pieces) {
-            if (!p.alive || p.empty || p.baked || p.pendingKill) continue;
-            if (!(fieldTargetOf(en, p) & f.targets)) continue;
-            if (!fieldOverlapsBounds(f, p.boundsMin, p.boundsMax)) continue;
-            ++n;
-        }
+        for (const Piece& p : en.pieces)
+            if (inReach(en, p, f)) ++n;
     }
     return n;
 }
@@ -220,10 +227,7 @@ u32 SoftBodySystem::applyField(scene::World& world, const FieldSpec& fIn, f32 se
         std::vector<u8> reach(en.pieces.size(), 0);
         u32 reachCount = 0;
         for (u32 pi = 0; pi < en.pieces.size(); ++pi) {
-            const Piece& p = en.pieces[pi];
-            if (!p.alive || p.empty || p.baked || p.pendingKill) continue;
-            if (!(fieldTargetOf(en, p) & f.targets)) continue;
-            if (!fieldOverlapsBounds(f, p.boundsMin, p.boundsMax)) continue;
+            if (!inReach(en, en.pieces[pi], f)) continue;
             reach[pi] = 1;
             ++reachCount;
         }
@@ -295,7 +299,7 @@ u32 SoftBodySystem::applyField(scene::World& world, const FieldSpec& fIn, f32 se
                     Piece& p = en.pieces[pi];
                     if (!(fieldWeight(fr, p.centroid) > 0.0f) && f.shape != FieldShape::Everywhere) continue;
                     if (p.debris) {
-                        p.shrinking = true;   // the existing shrink-then-destroy
+                        p.shrinking = true;   // debris shrinks, then is destroyed
                     } else {
                         const u32 n = static_cast<u32>(p.particles.size());
                         const Vec3 centre = p.centroid;
@@ -312,11 +316,7 @@ u32 SoftBodySystem::applyField(scene::World& world, const FieldSpec& fIn, f32 se
                     Piece& p = en.pieces[pi];
                     if (!p.body || p.frozen) continue;
                     if (!(fieldWeight(fr, p.centroid) > 0.0f) && f.shape != FieldShape::Everywhere) continue;
-                    if (!p.fieldHeld) {
-                        aver_phys_sb_set_active(p.body, 0);
-                        p.fieldHeld = true;
-                    }
-                    p.heldTick = fieldTick_;
+                    holdAsleep(p);
                 }
                 break;
         }
@@ -373,13 +373,7 @@ void SoftBodySystem::fieldStep(scene::World& world, f32 stepSeconds) {
         if (en.failed) continue;
         for (Piece& p : en.pieces) {
             if (!p.alive || !p.body || p.baked) continue;
-            if (en.forceAsleep && !p.frozen) {
-                if (!p.fieldHeld) {
-                    aver_phys_sb_set_active(p.body, 0);
-                    p.fieldHeld = true;
-                }
-                p.heldTick = fieldTick_;
-            }
+            if (en.forceAsleep && !p.frozen) holdAsleep(p);
             if (p.fieldHeld && p.heldTick != fieldTick_) {
                 p.fieldHeld = false;
                 p.needsRead = true;

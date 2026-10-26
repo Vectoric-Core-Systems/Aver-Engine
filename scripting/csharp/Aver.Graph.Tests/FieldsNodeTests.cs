@@ -8,6 +8,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using Aver.Framework;
 using Aver.Graph;
@@ -140,7 +141,7 @@ static class FieldsNodeTests
                                      new Vec3(10, 20, 30), new Vec3(0, 1, 0), Strength: 7f, EnergyJoules: 8f, Falloff: 2f, Turbulence: 0.5f,
                                      Targets: SoftFieldTargets.Cloth | SoftFieldTargets.Debris, PerSecond: true);
         var wire = FrameworkType("SoftFieldWire");
-        var encode = wire?.GetMethod("Encode", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        var encode = wire?.GetMethod("Encode", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
         if (encode == null) return Fail("SoftFieldWire.Encode was not found");
         var f = (float[]?)encode.Invoke(null, new object[] { spec, 9f });
         if (f == null || f.Length != 24) return Fail("the spec is 24 floats");
@@ -160,7 +161,7 @@ static class FieldsNodeTests
         Console.WriteLine("Test: a bad kind or shape is refused by the graph wrappers without a native call");
         var graph = FrameworkType("SoftFieldGraph");
         if (graph == null) return Fail("SoftFieldGraph was not found");
-        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+        const BindingFlags flags = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
 
         var pulse = graph.GetMethod("SoftFieldPulseForGraph", flags);
         if (pulse == null) return Fail("SoftFieldPulseForGraph was not found");

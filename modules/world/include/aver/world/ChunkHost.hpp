@@ -8,8 +8,8 @@
 //   restore   makes the entities. Called only after Ready.
 //   evict     takes them away again, bodies and all.
 //
-// ScatterChunkHost is today's behaviour, unchanged: Ready always, restore() of ChunkPayload.hpp, and the eviction loop the
-// streamer always had. PCG scatter and every existing test run through it, which is what keeps them bit-identical.
+// ScatterChunkHost is the PCG scatter behaviour: Ready always, restore() of ChunkPayload.hpp, and the eviction loop the
+// streamer has always used. PCG scatter and its tests run through it, which keeps their output bit-identical.
 #pragma once
 
 #include "aver/core/Types.hpp"

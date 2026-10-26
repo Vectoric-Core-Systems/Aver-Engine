@@ -4,7 +4,7 @@
 // editorCommit. The editor still keeps its single frame unless a project asks for the origin (WORLD.FLOATINGORIGIN 1): it cannot yet
 // WRITE a level from a shifted scene frame, so saves are refused away from the first region (originBlocksSave).
 //
-// New file, not new members of a big translation unit: the Debug COFF section cap (the memory index) rules out growing SandboxApp*.cpp.
+// New file, not new members of a big translation unit: the Debug COFF section cap rules out growing SandboxApp*.cpp.
 #include "SandboxApp.hpp"
 
 #if AVER_MODULE_SCENE

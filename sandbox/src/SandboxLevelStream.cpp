@@ -8,10 +8,9 @@
 #if AVER_MODULE_SCENE
 #  include "aver/game/LevelStreaming.hpp"
 #  include "aver/formats/OcStream.hpp"
-#  include "aver/scene/scene_abi.h"
 #  include "aver/world/LevelTransform.hpp"
 #  if AVER_MODULE_VOXI
-#    include "aver/voxi/RenderSettingsResolver.hpp"   // [wave3/level-instances]
+#    include "aver/voxi/RenderSettingsResolver.hpp"
 #  endif
 #  if AVER_MODULE_PHYSICS
 #    include "aver/physics/physics_abi.h"
@@ -20,7 +19,6 @@
 #  include <algorithm>
 #  include <chrono>
 #  include <filesystem>
-#  include <set>
 #  include <unordered_set>
 
 namespace aver {
@@ -151,7 +149,7 @@ void SandboxApp::adoptNewLevelEntities() {
     const std::vector<scene::Entity> live = levelEntities_;
     for (const scene::Entity e : live) {
         if (!world.valid(e) || ls.owns(e)) continue;
-        if (level_.instances().isMember(e)) continue;   // [wave3/level-instances] the child level's, not a new placement
+        if (level_.instances().isMember(e)) continue;   // a child level's entity, not a new placement
         if (!streamAdopted_.insert(static_cast<u32>(e)).second) continue;
         fmt::OcWorldPlacement p;
         bool keepParent = false;
@@ -166,8 +164,8 @@ void SandboxApp::adoptNewLevelEntities() {
 
 void SandboxApp::tickLevelStreaming(f32 dt) {
     std::vector<Vec3> viewers{camPos_};
-    // [wave3/level-instances begin] The selected instance stays loaded while it is selected; packed rows show only under
-    // ray-driven primary visibility (otherwise those instances realise unpacked).
+    // The selected instance stays loaded while it is selected; packed rows show only under ray-driven primary visibility
+    // (otherwise those instances realise unpacked).
     {
         const scene::Entity want = (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity)
                                        ? level_.instances().topRootOf(selEntity_) : scene::kInvalidEntity;
@@ -183,7 +181,6 @@ void SandboxApp::tickLevelStreaming(f32 dt) {
         }
 #  endif
     }
-    // [wave3/level-instances end]
     game::LevelStreaming& ls = level_.streaming();
     if (ls.active()) {
         adoptNewLevelEntities();

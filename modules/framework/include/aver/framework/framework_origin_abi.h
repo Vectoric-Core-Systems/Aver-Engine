@@ -5,7 +5,7 @@
  * every other ABI speaks and absolute positions, and the WorldPos split (a global chunk index plus a small float offset:
  * 1.2 micrometres at any distance). Design: docs/plans/wave11/LARGE_WORLD.md 2.5.
  *
- * RULE: every position crossing any OTHER ABI stays origin-relative f32 centimetres, exactly as before. Absolute values appear
+ * RULE: every position crossing any OTHER ABI stays origin-relative f32 centimetres. Absolute values appear
  * only through the calls below, and an absolute is always f64 or a WorldPos, never a bare f32.
  *
  * O is the pair (x, y) in centimetres, always a whole number of regions (1,638,400 cm = 16.384 km); Z is never shifted. A

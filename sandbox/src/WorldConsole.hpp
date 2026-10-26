@@ -12,6 +12,7 @@
 #if AVER_MODULE_SCENE
 
 #include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <functional>
 #include <string>
@@ -58,6 +59,11 @@ inline bool parseReal(std::string_view tok, f64& out) {
     return true;
 }
 inline bool worldFail(std::vector<std::string>& lines, std::string msg) { lines.push_back(std::move(msg)); return false; }
+inline char lowerChar(char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; }
+// Why the last shift did not happen, for the console.
+inline const char* deferReasonOf(const world::WorldOrigin& svc) {
+    return svc.stats().lastDeferReason ? svc.stats().lastDeferReason : "the service would not shift";
+}
 
 } // namespace detail
 
@@ -67,12 +73,8 @@ inline bool runWorldCommand(WorldConsoleHost& h, std::string_view name, const st
     using detail::worldFail;
     auto eq = [&](std::string_view a) {
         if (a.size() != name.size()) return false;
-        for (usize i = 0; i < a.size(); ++i) {
-            char x = a[i], y = name[i];
-            if (x >= 'A' && x <= 'Z') x = static_cast<char>(x - 'A' + 'a');
-            if (y >= 'A' && y <= 'Z') y = static_cast<char>(y - 'A' + 'a');
-            if (x != y) return false;
-        }
+        for (usize i = 0; i < a.size(); ++i)
+            if (detail::lowerChar(a[i]) != detail::lowerChar(name[i])) return false;
         return true;
     };
     if (!h.origin) return worldFail(lines, "the floating origin is not available in this build");
@@ -81,8 +83,7 @@ inline bool runWorldCommand(WorldConsoleHost& h, std::string_view name, const st
 
     if (eq("world.origin")) {
         for (std::string& l : worldOriginReadoutLines(makeWorldOriginReadout(op, cam))) lines.push_back(std::move(l));
-        const WorldRequest& p = h.pending;
-        if (p.kind != WorldRequest::Kind::None) lines.push_back("a world move is queued for the next frame");
+        if (h.pending.kind != WorldRequest::Kind::None) lines.push_back("a world move is queued for the next frame");
         return true;
     }
 
@@ -132,7 +133,7 @@ inline bool runWorldCommand(WorldConsoleHost& h, std::string_view name, const st
         if (args.empty()) { lines.push_back(originPolicyName(s.policy)); return true; }
         if (args.size() != 1) return worldFail(lines, "usage: world.policy follow|fixed|manual");
         std::string a = args[0];
-        for (char& c : a) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        for (char& c : a) c = detail::lowerChar(c);
         if (a == "follow") s.policy = world::OriginPolicy::FollowCamera;
         else if (a == "fixed") s.policy = world::OriginPolicy::Fixed;
         else if (a == "manual") s.policy = world::OriginPolicy::Manual;
@@ -175,7 +176,7 @@ inline std::string applyWorldRequest(WorldConsoleHost& h, bool& ok) {
     if (req.kind == WorldRequest::Kind::Rebase) {
         if (!svc.shiftBy(req.deltaCm, /*urgent=*/false)) {
             ok = false;
-            return std::string("world.rebase refused: ") + (svc.stats().lastDeferReason ? svc.stats().lastDeferReason : "the service would not shift");
+            return std::string("world.rebase refused: ") + detail::deferReasonOf(svc);
         }
         return "world.rebase: origin now (" + std::to_string(svc.origin().x / world::kOriginStepCm) + ", " +
                std::to_string(svc.origin().y / world::kOriginStepCm) + ") regions";
@@ -191,7 +192,7 @@ inline std::string applyWorldRequest(WorldConsoleHost& h, bool& ok) {
         // Urgent: a teleport is a decision, and an open gesture is ended rather than waited for.
         if (!svc.shiftBy(delta, /*urgent=*/true)) {
             ok = false;
-            return std::string("world.tp refused: ") + (svc.stats().lastDeferReason ? svc.stats().lastDeferReason : "the service would not shift");
+            return std::string("world.tp refused: ") + detail::deferReasonOf(svc);
         }
     }
     const world::OriginCm now = svc.origin();

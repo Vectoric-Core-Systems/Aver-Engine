@@ -14,9 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <filesystem>
-#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -129,11 +127,6 @@ struct Box {
         if (!any) { for (int a = 0; a < 3; ++a) lo[a] = hi[a] = p[a]; any = true; return; }
         for (int a = 0; a < 3; ++a) { lo[a] = std::min(lo[a], p[a]); hi[a] = std::max(hi[a], p[a]); }
     }
-    void add(const Box& b) {
-        if (!b.any) return;
-        add(b.lo);
-        add(b.hi);
-    }
 };
 
 struct LocalBounds {
@@ -231,6 +224,168 @@ bool packable(const fmt::OcWorldPlacement& p) {
 
 SplitPos ownerSplit(const f64 pos[3], i32 chunkSizeCm) {
     return chunkSizeCm == kWorldChunkCm ? worldPosOfAbs(pos[0], pos[1], pos[2]) : splitCm(pos[0], pos[1], pos[2], chunkSizeCm);
+}
+
+// A chunk-owned root: the region and chunk that own it, and its flat index.
+struct OwnedRoot {
+    RegionCoord reg;
+    ChunkCoord c;
+    u32 root;
+};
+
+// Flags each root from what its subtree holds, and boxes the chunk-owned ones: box[r] is the union over the subtree.
+void flagRoots(const fmt::OcWorldData& level, const std::vector<FlatPlacement>& flat, const std::vector<u32>& rootOf,
+               const std::vector<Pose64>& wpose, BoundsCache& bounds, std::vector<u8>& flags, std::vector<Box>& box) {
+    const usize n = flat.size();
+    for (usize i = 0; i < n; ++i) {
+        const fmt::OcWorldPlacement& p = *flat[i].src;
+        const u32 r = rootOf[i];
+        if (!p.className.empty()) flags[r] |= kFlagClass;
+        if (!p.vehiclePreset.empty()) flags[r] |= kFlagVehicle;
+        if (!packable(p)) flags[r] |= kFlagUnpackable;
+        if (!p.className.empty() || p.asset.empty()) continue;   // a class has no mesh of its own; an empty asset adds nothing to bound
+        const LocalBounds& lb = bounds.get(p.asset);
+        if (!lb.ok) { flags[r] |= kFlagUnbounded; continue; }
+        boxOf(wpose[i], lb.lo, lb.hi, box[r]);
+    }
+    for (usize r = 0; r < n; ++r)
+        if (flat[r].parent < 0 && !box[r].any) flags[r] |= kFlagUnbounded;   // nothing bounded in the subtree
+    // Level-sequence tracks name placements by index into the level's own list, which is the head of the flat list.
+    for (const fmt::OcSequence& seq : level.sequences)
+        for (const fmt::OcSeqTrack& tr : seq.tracks)
+            if (tr.target >= 0 && static_cast<usize>(tr.target) < level.placements.size())
+                flags[rootOf[static_cast<usize>(tr.target)]] |= kFlagSequence;
+    // A track bound by NAME finds its actor through SeqBindings::byName (the placement `name`, first wins) or World::find, so the actor must
+    // be resident whenever the sequence runs: every subtree holding a placement of that name stays level-global too. (A sub-sequence
+    // that lives in another asset is not visible here; its bind names are the author's to keep level-global with a className.)
+    std::unordered_set<std::string> boundNames;
+    for (const fmt::OcSequence& seq : level.sequences)
+        for (const fmt::OcSeqTrack& tr : seq.tracks)
+            if (!tr.bind.empty()) boundNames.insert(tr.bind);
+    if (!boundNames.empty())
+        for (usize i = 0; i < n; ++i)
+            if (!flat[i].src->name.empty() && boundNames.count(flat[i].src->name)) flags[rootOf[i]] |= kFlagSequence;
+}
+
+// Splits the roots three ways: a level-global root is only counted; a chunk-owned root goes to `owned`, and one whose subtree
+// reaches past wideReachCm from its position is also listed in `wide` (sorted here).
+void classifyRoots(const std::vector<FlatPlacement>& flat, const std::vector<u8>& flags, const std::vector<Box>& box,
+                   const CookOptions& opt, CookReport& rep, std::vector<OwnedRoot>& owned, std::vector<WideItem>& wide) {
+    const f64 reach = wideReachCm(opt);
+    for (usize r = 0; r < flat.size(); ++r) {
+        if (flat[r].parent >= 0) continue;
+        const u8 f = flags[r];
+        if (f != 0) {
+            if (f & kFlagClass) ++rep.globalClass;
+            else if (f & kFlagVehicle) ++rep.globalVehicle;
+            else if (f & kFlagSequence) ++rep.globalSequence;
+            else if (f & kFlagUnpackable) ++rep.globalUnpackable;
+            else ++rep.globalUnbounded;
+            continue;
+        }
+        const SplitPos sp = ownerSplit(flat[r].pos, opt.chunkSizeCm);
+        owned.push_back(OwnedRoot{regionOf(sp.chunk), sp.chunk, static_cast<u32>(r)});
+
+        if (std::fabs(flat[r].pos[0]) > static_cast<f64>(kSubMmCliffCm) || std::fabs(flat[r].pos[1]) > static_cast<f64>(kSubMmCliffCm))
+            ++rep.beyondSidecarLimit;
+
+        const Box& b = box[r];
+        const f64 reachX = std::max(std::fabs(b.lo[0] - flat[r].pos[0]), std::fabs(b.hi[0] - flat[r].pos[0]));
+        const f64 reachY = std::max(std::fabs(b.lo[1] - flat[r].pos[1]), std::fabs(b.hi[1] - flat[r].pos[1]));
+        if (std::max(reachX, reachY) > reach) {
+            WideItem w;
+            w.owner = sp.chunk;
+            for (int a = 0; a < 3; ++a) {
+                w.minCm[a] = static_cast<i64>(std::floor(b.lo[a]));
+                w.maxCm[a] = static_cast<i64>(std::ceil(b.hi[a]));
+            }
+            wide.push_back(w);
+        }
+    }
+    rep.wide = static_cast<u32>(wide.size());
+    std::sort(wide.begin(), wide.end(), [](const WideItem& a, const WideItem& b) {
+        if (a.owner.x != b.owner.x) return a.owner.x < b.owner.x;
+        if (a.owner.y != b.owner.y) return a.owner.y < b.owner.y;
+        if (a.owner.z != b.owner.z) return a.owner.z < b.owner.z;
+        for (int k = 0; k < 3; ++k) if (a.minCm[k] != b.minCm[k]) return a.minCm[k] < b.minCm[k];
+        for (int k = 0; k < 3; ++k) if (a.maxCm[k] != b.maxCm[k]) return a.maxCm[k] < b.maxCm[k];
+        return false;
+    });
+}
+
+// Sorts the owned roots by (region, chunk, root) and writes the plan's chunk and region tables. Chunk i owns the roots
+// chunkRoots[chunkStart[i] .. chunkStart[i + 1]).
+void groupByChunk(std::vector<OwnedRoot>& owned, CookPlan& plan, std::vector<u32>& chunkStart, std::vector<u32>& chunkRoots) {
+    std::sort(owned.begin(), owned.end(), [](const OwnedRoot& a, const OwnedRoot& b) {
+        if (a.reg.x != b.reg.x) return a.reg.x < b.reg.x;
+        if (a.reg.y != b.reg.y) return a.reg.y < b.reg.y;
+        if (a.reg.z != b.reg.z) return a.reg.z < b.reg.z;
+        if (a.c.x != b.c.x) return a.c.x < b.c.x;
+        if (a.c.y != b.c.y) return a.c.y < b.c.y;
+        if (a.c.z != b.c.z) return a.c.z < b.c.z;
+        return a.root < b.root;
+    });
+    for (usize k = 0; k < owned.size(); ++k) {
+        if (k == 0 || !(owned[k].c == owned[k - 1].c)) {
+            if (k == 0 || !(owned[k].reg == owned[k - 1].reg)) {
+                if (!plan.regions.empty()) plan.regions.back().end = plan.chunks.size();
+                CookPlan::Region reg;
+                reg.coord = owned[k].reg;
+                reg.first = plan.chunks.size();
+                plan.regions.push_back(reg);
+            }
+            plan.chunks.push_back(owned[k].c);
+            chunkStart.push_back(static_cast<u32>(chunkRoots.size()));
+        }
+        chunkRoots.push_back(owned[k].root);
+    }
+    chunkStart.push_back(static_cast<u32>(chunkRoots.size()));
+    if (!plan.regions.empty()) plan.regions.back().end = plan.chunks.size();
+}
+
+// CSR over the flat list: the members of root r (the root first, then its descendants, ascending) are
+// memberIdx[memberStart[r] .. memberStart[r + 1]).
+void buildMembers(const std::vector<u32>& rootOf, std::vector<u32>& memberStart, std::vector<u32>& memberIdx) {
+    const usize n = rootOf.size();
+    memberStart.assign(n + 1, 0);
+    for (usize i = 0; i < n; ++i) ++memberStart[rootOf[i] + 1];
+    for (usize r = 0; r < n; ++r) memberStart[r + 1] += memberStart[r];
+    memberIdx.assign(n, 0);
+    std::vector<u32> cursor(memberStart.begin(), memberStart.end() - 1);
+    for (usize i = 0; i < n; ++i) memberIdx[cursor[rootOf[i]]++] = static_cast<u32>(i);
+}
+
+// Completes the slim level: the level-global placements (their sequence targets renumbered) and the flat level's lights, decals and
+// prefab instances. `slim` arrives as the level without its placements and LEVELINST records.
+void fillSlim(fmt::OcWorldData& slim, const fmt::OcWorldData& level, const FlatLevel& fl, const std::vector<FlatPlacement>& flat,
+              const std::vector<u32>& rootOf, const std::vector<u8>& flags, CookReport& rep) {
+    std::vector<i32> newIndex(flat.size(), -1);
+    for (usize i = 0; i < flat.size(); ++i) {
+        if (flags[rootOf[i]] == 0) continue;
+        const FlatPlacement& fp = flat[i];
+        fmt::OcWorldPlacement rec = *fp.src;
+        newIndex[i] = static_cast<i32>(slim.placements.size());
+        rec.parent = fp.parent >= 0 ? newIndex[static_cast<usize>(fp.parent)] : -1;
+        if (fp.topIndex < 0) {   // from an instance: the pose is the composed one for a root, and the id is the flat one
+            if (fp.composed) {
+                rec.x = fp.pos[0]; rec.y = fp.pos[1]; rec.z = fp.pos[2];
+                rec.roll = fp.roll; rec.pitch = fp.pitch; rec.yaw = fp.yaw;
+                rec.sx = fp.scale[0]; rec.sy = fp.scale[1]; rec.sz = fp.scale[2];
+            }
+            rec.placementId = fp.id;
+        }
+        slim.placements.push_back(std::move(rec));
+    }
+    for (fmt::OcSequence& seq : slim.sequences)
+        for (fmt::OcSeqTrack& tr : seq.tracks)
+            if (tr.target >= 0) {
+                const i32 t = static_cast<usize>(tr.target) < level.placements.size() ? newIndex[static_cast<usize>(tr.target)] : -1;
+                if (t < 0) rep.warnings.push_back("a sequence track targets a placement that is not level-global");
+                tr.target = t;
+            }
+    slim.lights.insert(slim.lights.end(), fl.lights.begin(), fl.lights.end());
+    slim.decals.insert(slim.decals.end(), fl.decals.begin(), fl.decals.end());
+    slim.prefabInstances.insert(slim.prefabInstances.end(), fl.prefabInstances.begin(), fl.prefabInstances.end());
 }
 
 } // namespace
@@ -362,7 +517,7 @@ bool planAuthoredCook(const fmt::OcWorldData& level, const CookInput& in, const 
     rep.sourceHash = plan.sourceHash;
     plan.chunkSizeCm = opt.chunkSizeCm;
 
-    // ---- world poses and boxes (f64) ----
+    // ---- world poses, boxes and flags (f64) ----
     std::vector<u32> rootOf(n);
     for (usize i = 0; i < n; ++i) rootOf[i] = flat[i].parent < 0 ? static_cast<u32>(i) : rootOf[static_cast<usize>(flat[i].parent)];
 
@@ -379,124 +534,22 @@ bool planAuthoredCook(const fmt::OcWorldData& level, const CookInput& in, const 
     BoundsCache bounds(in);
     std::vector<u8> flags(n, 0);
     std::vector<Box> box(n);   // meaningful at roots: the union over the subtree
-    for (usize i = 0; i < n; ++i) {
-        const fmt::OcWorldPlacement& p = *flat[i].src;
-        const u32 r = rootOf[i];
-        if (!p.className.empty()) flags[r] |= kFlagClass;
-        if (!p.vehiclePreset.empty()) flags[r] |= kFlagVehicle;
-        if (!packable(p)) flags[r] |= kFlagUnpackable;
-        if (!p.className.empty() || p.asset.empty()) continue;   // a class has no mesh of its own; an empty asset adds nothing to bound
-        const LocalBounds& lb = bounds.get(p.asset);
-        if (!lb.ok) { flags[r] |= kFlagUnbounded; continue; }
-        boxOf(wpose[i], lb.lo, lb.hi, box[r]);
-    }
-    for (usize r = 0; r < n; ++r)
-        if (flat[r].parent < 0 && !box[r].any) flags[r] |= kFlagUnbounded;   // nothing bounded in the subtree
-    // Level-sequence tracks name placements by index into the level's own list, which is the head of the flat list.
-    for (const fmt::OcSequence& seq : level.sequences)
-        for (const fmt::OcSeqTrack& tr : seq.tracks)
-            if (tr.target >= 0 && static_cast<usize>(tr.target) < level.placements.size())
-                flags[rootOf[static_cast<usize>(tr.target)]] |= kFlagSequence;
-    // A track bound by NAME finds its actor through SeqBindings::byName (the placement `name`, first wins) or World::find, so the actor must
-    // be resident whenever the sequence runs: every subtree holding a placement of that name stays level-global too. (A sub-sequence
-    // that lives in another asset is not visible here; its bind names are the author's to keep level-global with a className.)
-    std::unordered_set<std::string> boundNames;
-    for (const fmt::OcSequence& seq : level.sequences)
-        for (const fmt::OcSeqTrack& tr : seq.tracks)
-            if (!tr.bind.empty()) boundNames.insert(tr.bind);
-    if (!boundNames.empty())
-        for (usize i = 0; i < n; ++i)
-            if (!flat[i].src->name.empty() && boundNames.count(flat[i].src->name)) flags[rootOf[i]] |= kFlagSequence;
+    flagRoots(level, flat, rootOf, wpose, bounds, flags, box);
     wpose.clear();
     wpose.shrink_to_fit();
 
-    // ---- classify ----
-    const f64 reach = wideReachCm(opt);
-    struct Key { RegionCoord reg; ChunkCoord c; u32 root; };
-    std::vector<Key> keys;
-    keys.reserve(n);
-    for (usize r = 0; r < n; ++r) {
-        if (flat[r].parent >= 0) continue;
-        const u8 f = flags[r];
-        if (f != 0) {
-            if (f & kFlagClass) ++rep.globalClass;
-            else if (f & kFlagVehicle) ++rep.globalVehicle;
-            else if (f & kFlagSequence) ++rep.globalSequence;
-            else if (f & kFlagUnpackable) ++rep.globalUnpackable;
-            else ++rep.globalUnbounded;
-            continue;
-        }
-        const SplitPos sp = ownerSplit(flat[r].pos, opt.chunkSizeCm);
-        keys.push_back(Key{regionOf(sp.chunk), sp.chunk, static_cast<u32>(r)});
-
-        if (std::fabs(flat[r].pos[0]) > static_cast<f64>(kSubMmCliffCm) || std::fabs(flat[r].pos[1]) > static_cast<f64>(kSubMmCliffCm))
-            ++rep.beyondSidecarLimit;
-
-        const Box& b = box[r];
-        const f64 reachX = std::max(std::fabs(b.lo[0] - flat[r].pos[0]), std::fabs(b.hi[0] - flat[r].pos[0]));
-        const f64 reachY = std::max(std::fabs(b.lo[1] - flat[r].pos[1]), std::fabs(b.hi[1] - flat[r].pos[1]));
-        if (std::max(reachX, reachY) > reach) {
-            WideItem w;
-            w.owner = sp.chunk;
-            for (int a = 0; a < 3; ++a) {
-                w.minCm[a] = static_cast<i64>(std::floor(b.lo[a]));
-                w.maxCm[a] = static_cast<i64>(std::ceil(b.hi[a]));
-            }
-            plan.wide.push_back(w);
-        }
-    }
-    rep.wide = static_cast<u32>(plan.wide.size());
-    std::sort(plan.wide.begin(), plan.wide.end(), [](const WideItem& a, const WideItem& b) {
-        if (a.owner.x != b.owner.x) return a.owner.x < b.owner.x;
-        if (a.owner.y != b.owner.y) return a.owner.y < b.owner.y;
-        if (a.owner.z != b.owner.z) return a.owner.z < b.owner.z;
-        for (int k = 0; k < 3; ++k) if (a.minCm[k] != b.minCm[k]) return a.minCm[k] < b.minCm[k];
-        for (int k = 0; k < 3; ++k) if (a.maxCm[k] != b.maxCm[k]) return a.maxCm[k] < b.maxCm[k];
-        return false;
-    });
-
-    // ---- group by (region, chunk) ----
-    std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
-        if (a.reg.x != b.reg.x) return a.reg.x < b.reg.x;
-        if (a.reg.y != b.reg.y) return a.reg.y < b.reg.y;
-        if (a.reg.z != b.reg.z) return a.reg.z < b.reg.z;
-        if (a.c.x != b.c.x) return a.c.x < b.c.x;
-        if (a.c.y != b.c.y) return a.c.y < b.c.y;
-        if (a.c.z != b.c.z) return a.c.z < b.c.z;
-        return a.root < b.root;
-    });
-    for (usize k = 0; k < keys.size(); ++k) {
-        if (k == 0 || !(keys[k].c == keys[k - 1].c)) {
-            if (k == 0 || !(keys[k].reg == keys[k - 1].reg)) {
-                if (!plan.regions.empty()) plan.regions.back().end = plan.chunks.size();
-                CookPlan::Region reg;
-                reg.coord = keys[k].reg;
-                reg.first = plan.chunks.size();
-                plan.regions.push_back(reg);
-            }
-            plan.chunks.push_back(keys[k].c);
-            st->chunkStart.push_back(static_cast<u32>(st->chunkRoots.size()));
-        }
-        st->chunkRoots.push_back(keys[k].root);
-    }
-    st->chunkStart.push_back(static_cast<u32>(st->chunkRoots.size()));
-    if (!plan.regions.empty()) plan.regions.back().end = plan.chunks.size();
-
-    // ---- members of each owned root (CSR over the flat list) ----
-    st->memberStart.assign(n + 1, 0);
-    for (usize i = 0; i < n; ++i) ++st->memberStart[rootOf[i] + 1];
-    for (usize r = 0; r < n; ++r) st->memberStart[r + 1] += st->memberStart[r];
-    st->memberIdx.assign(n, 0);
-    {
-        std::vector<u32> cursor(st->memberStart.begin(), st->memberStart.end() - 1);
-        for (usize i = 0; i < n; ++i) st->memberIdx[cursor[rootOf[i]]++] = static_cast<u32>(i);
-    }
+    // ---- classify, then group the chunk-owned roots by chunk ----
+    std::vector<OwnedRoot> owned;
+    owned.reserve(n);
+    classifyRoots(flat, flags, box, opt, rep, owned, plan.wide);
+    groupByChunk(owned, plan, st->chunkStart, st->chunkRoots);
+    buildMembers(rootOf, st->memberStart, st->memberIdx);
 
     // ---- report: counts, the largest chunk ----
     for (usize i = 0; i < n; ++i) {
         if (flags[rootOf[i]] == 0) ++rep.chunkOwned; else ++rep.levelGlobal;
     }
-    rep.chunkOwnedRoots = static_cast<u32>(keys.size());
+    rep.chunkOwnedRoots = static_cast<u32>(owned.size());
     rep.chunks = static_cast<u32>(plan.chunks.size());
     rep.regions = static_cast<u32>(plan.regions.size());
     for (usize ci = 0; ci < plan.chunks.size(); ++ci) {
@@ -519,34 +572,7 @@ bool planAuthoredCook(const fmt::OcWorldData& level, const CookInput& in, const 
                                "fine for chunks, outside the f32 sidecars' valid range (landscape, lanes, navigation, foliage tables)");
 
     // ---- the slim level ----
-    std::vector<i32> newIndex(n, -1);
-    for (usize i = 0; i < n; ++i) {
-        if (flags[rootOf[i]] == 0) continue;
-        const FlatPlacement& fp = flat[i];
-        fmt::OcWorldPlacement rec = *fp.src;
-        newIndex[i] = static_cast<i32>(slim.placements.size());
-        rec.parent = fp.parent >= 0 ? newIndex[static_cast<usize>(fp.parent)] : -1;
-        if (fp.topIndex < 0) {   // from an instance: the pose is the composed one for a root, and the id is the flat one
-            if (fp.composed) {
-                rec.x = fp.pos[0]; rec.y = fp.pos[1]; rec.z = fp.pos[2];
-                rec.roll = fp.roll; rec.pitch = fp.pitch; rec.yaw = fp.yaw;
-                rec.sx = fp.scale[0]; rec.sy = fp.scale[1]; rec.sz = fp.scale[2];
-            }
-            rec.placementId = fp.id;
-        }
-        slim.placements.push_back(std::move(rec));
-    }
-    for (fmt::OcSequence& seq : slim.sequences)
-        for (fmt::OcSeqTrack& tr : seq.tracks)
-            if (tr.target >= 0) {
-                const i32 t = static_cast<usize>(tr.target) < level.placements.size() ? newIndex[static_cast<usize>(tr.target)] : -1;
-                if (t < 0) rep.warnings.push_back("a sequence track targets a placement that is not level-global");
-                tr.target = t;
-            }
-    const FlatLevel& fl = st->flat;
-    slim.lights.insert(slim.lights.end(), fl.lights.begin(), fl.lights.end());
-    slim.decals.insert(slim.decals.end(), fl.decals.begin(), fl.decals.end());
-    slim.prefabInstances.insert(slim.prefabInstances.end(), fl.prefabInstances.begin(), fl.prefabInstances.end());
+    fillSlim(slim, level, st->flat, flat, rootOf, flags, rep);
     plan.slim = std::move(slim);
 
     plan.state_ = std::move(st);

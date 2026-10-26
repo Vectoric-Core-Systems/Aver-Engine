@@ -12,7 +12,6 @@
 #include "aver/physics/physics_abi.h"
 #include "aver/physics/physics_layers_abi.h"
 #include "aver/physics/physics_softbody_abi.h"
-#include "aver/physics/physics_softbody_ext_abi.h"
 #include "aver/platform/Image.hpp"
 #include "aver/softbody/Lattice.hpp"
 #include "aver/scene/Components.hpp"
@@ -49,6 +48,40 @@ struct MaskCache {
     struct Tex { ImageData img; bool ok = false; };
     std::unordered_map<std::string, Tex> tex;
 };
+
+// The paint-rule callbacks of a build: a texture mask and a bone's weight on a render vertex. They copy their sources, so
+// they outlive the call.
+void installPaintCallbacks(SimBuildSpec& spec, scene::Entity e, const fmt::OcMeshData* mesh, PathFn pathFn, void* pathUser,
+                           BoneIndexFn boneFn, void* boneUser) {
+    static MaskCache cache;
+    spec.mask = [pathFn, pathUser](const std::string& texture, f32 u, f32 v, f32& r, f32& g) {
+        auto it = cache.tex.find(texture);
+        if (it == cache.tex.end()) {
+            MaskCache::Tex t;
+            const std::string path = pathFn ? pathFn(fnv1a64(texture), pathUser) : texture;
+            t.ok = !path.empty() && decodeImage(path, t.img) && t.img.valid();
+            it = cache.tex.emplace(texture, std::move(t)).first;
+        }
+        if (!it->second.ok) return false;
+        const ImageData& img = it->second.img;
+        const u32 x = std::min<u32>(img.width - 1, static_cast<u32>(std::clamp(u, 0.0f, 1.0f) * static_cast<f32>(img.width)));
+        const u32 y = std::min<u32>(img.height - 1, static_cast<u32>(std::clamp(v, 0.0f, 1.0f) * static_cast<f32>(img.height)));
+        const u8* px = &img.pixels[(static_cast<usize>(y) * img.width + x) * 4];
+        r = static_cast<f32>(px[0]) / 255.0f;
+        g = static_cast<f32>(px[1]) / 255.0f;
+        return true;
+    };
+    if (boneFn) {
+        spec.boneWeight = [boneFn, boneUser, e, mesh](const std::string& bone, u32 renderVertex) {
+            const i32 idx = boneFn(e, bone, boneUser);
+            if (idx < 0 || mesh->weights.empty() || renderVertex >= mesh->vertexCount()) return 0.0f;
+            f32 w = 0.0f;
+            for (u32 k = 0; k < 4; ++k)
+                if (static_cast<i32>(mesh->joints[renderVertex * 4 + k]) == idx) w += mesh->weights[renderVertex * 4 + k];
+            return w;
+        };
+    }
+}
 
 } // namespace
 
@@ -423,6 +456,22 @@ void SoftBodySystem::setBudget(const Budget& b) {
 
 // ---- entries ---------------------------------------------------------------------------------------------
 
+SoftBodySystem::Spec SoftBodySystem::specFromComponents(const scene::CSoftBody& sb, const CCloth* cl, const CDestructible* de) {
+    Spec s;
+    if (cl && de) {
+        s.preset = 0xFFFFu;   // both kinds on one entity: buildEntry refuses it
+    } else if (cl) {
+        s.assetId = cl->asset; s.preset = cl->preset; s.flags = cl->flags & (kClothNoWorld | kClothNoCharacterProxy | kClothNoWind | kClothTearable);
+        s.scaleA = or1(cl->windScale); s.scaleB = or1(cl->stiffnessScale); s.scaleC = or1(cl->reachScale);
+    } else if (de) {
+        s.assetId = de->asset; s.preset = de->preset;
+        s.scaleA = or1(de->toughnessScale); s.scaleB = or1(de->impactScale);
+    } else {
+        s.preset = 0xFFFEu; s.scaleA = sb.maxDistanceCm; s.scaleB = sb.compliance;
+    }
+    return s;
+}
+
 void SoftBodySystem::syncEntries(scene::World& world) {
     // Drop entries whose entity, component or build inputs are gone or changed.
     std::vector<scene::Entity> dead;
@@ -431,21 +480,10 @@ void SoftBodySystem::syncEntries(scene::World& world) {
         const auto* mr = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
         bool gone = !world.valid(e) || world.destroyPending(e) || !sb || (sb->flags & (scene::kSoftBodyDisabled | scene::kSoftBodyPiece)) || !mr;
         if (!gone) {
-            Spec cur;
-            cur.meshId = mr->mesh;
             const auto* cl = g_clothType ? world.component<CCloth>(e, g_clothType) : nullptr;
             const auto* de = g_destructType ? world.component<CDestructible>(e, g_destructType) : nullptr;
-            if (cl && !de) {
-                cur.assetId = cl->asset; cur.preset = cl->preset; cur.flags = cl->flags & (kClothNoWorld | kClothNoCharacterProxy | kClothNoWind | kClothTearable);
-                cur.scaleA = or1(cl->windScale); cur.scaleB = or1(cl->stiffnessScale); cur.scaleC = or1(cl->reachScale);
-            } else if (de && !cl) {
-                cur.assetId = de->asset; cur.preset = de->preset;
-                cur.scaleA = or1(de->toughnessScale); cur.scaleB = or1(de->impactScale);
-            } else if (cl && de) {
-                cur.preset = 0xFFFFu;
-            } else {
-                cur.preset = 0xFFFEu; cur.scaleA = sb->maxDistanceCm; cur.scaleB = sb->compliance;
-            }
+            Spec cur = specFromComponents(*sb, cl, de);
+            cur.meshId = mr->mesh;
             if (!(cur == en.spec)) gone = true;
         }
         if (gone) dead.push_back(e);
@@ -487,25 +525,15 @@ bool SoftBodySystem::buildEntry(scene::World& world, Entry& en) {
     const auto* cl = g_clothType ? world.component<CCloth>(e, g_clothType) : nullptr;
     const auto* de = g_destructType ? world.component<CDestructible>(e, g_destructType) : nullptr;
 
-    en.spec = Spec{};
+    en.spec = specFromComponents(*sb, cl, de);
     en.spec.meshId = mr->mesh;
     en.destructible = de && !cl;
     en.legacy = !cl && !de;
     if (cl && de) {
-        en.spec.preset = 0xFFFFu;
         en.conflict = true;
         en.failed = true;
         AVER_WARN("[SoftBody] entity {} has both CCloth and CDestructible; one body per entity root, so it is not simulated", e);
         return true;
-    }
-    if (cl) {
-        en.spec.assetId = cl->asset; en.spec.preset = cl->preset; en.spec.flags = cl->flags & (kClothNoWorld | kClothNoCharacterProxy | kClothNoWind | kClothTearable);
-        en.spec.scaleA = or1(cl->windScale); en.spec.scaleB = or1(cl->stiffnessScale); en.spec.scaleC = or1(cl->reachScale);
-    } else if (de) {
-        en.spec.assetId = de->asset; en.spec.preset = de->preset;
-        en.spec.scaleA = or1(de->toughnessScale); en.spec.scaleB = or1(de->impactScale);
-    } else {
-        en.spec.preset = 0xFFFEu; en.spec.scaleA = sb->maxDistanceCm; en.spec.scaleB = sb->compliance;
     }
 
     if (cl || de) {
@@ -584,42 +612,7 @@ bool SoftBodySystem::buildEntry(scene::World& world, Entry& en) {
     spec.paint = a.paint;
     spec.destructible = en.destructible || en.legacy;
     spec.defaultReachCm = a.cloth.defaultReachCm;
-    {
-        static MaskCache cache;
-        PathFn pf = pathFn_;
-        void* pu = pathUser_;
-        spec.mask = [pf, pu](const std::string& texture, f32 u, f32 v, f32& r, f32& g) {
-            auto it = cache.tex.find(texture);
-            if (it == cache.tex.end()) {
-                MaskCache::Tex t;
-                const std::string path = pf ? pf(fnv1a64(texture), pu) : texture;
-                t.ok = !path.empty() && decodeImage(path, t.img) && t.img.valid();
-                it = cache.tex.emplace(texture, std::move(t)).first;
-            }
-            if (!it->second.ok) return false;
-            const ImageData& img = it->second.img;
-            const u32 x = std::min<u32>(img.width - 1, static_cast<u32>(std::clamp(u, 0.0f, 1.0f) * static_cast<f32>(img.width)));
-            const u32 y = std::min<u32>(img.height - 1, static_cast<u32>(std::clamp(v, 0.0f, 1.0f) * static_cast<f32>(img.height)));
-            const u8* px = &img.pixels[(static_cast<usize>(y) * img.width + x) * 4];
-            r = static_cast<f32>(px[0]) / 255.0f;
-            g = static_cast<f32>(px[1]) / 255.0f;
-            return true;
-        };
-        if (boneFn_) {
-            BoneIndexFn bf = boneFn_;
-            void* bu = boneUser_;
-            const scene::Entity ent = e;
-            const fmt::OcMeshData* md = mesh;
-            spec.boneWeight = [bf, bu, ent, md](const std::string& bone, u32 renderVertex) {
-                const i32 idx = bf(ent, bone, bu);
-                if (idx < 0 || md->weights.empty() || renderVertex >= md->vertexCount()) return 0.0f;
-                f32 w = 0.0f;
-                for (u32 k = 0; k < 4; ++k)
-                    if (static_cast<i32>(md->joints[renderVertex * 4 + k]) == idx) w += md->weights[renderVertex * 4 + k];
-                return w;
-            };
-        }
-    }
+    installPaintCallbacks(spec, e, mesh, pathFn_, pathUser_, boneFn_, boneUser_);
 
     // A cooked proxy cage when the asset names one (SoftBodyProxy.cpp), else the authored mesh itself.
     en.proxyMode = false;
@@ -714,7 +707,7 @@ bool SoftBodySystem::buildEntry(scene::World& world, Entry& en) {
     return true;
 }
 
-void SoftBodySystem::destroyPiece(scene::World& world, Entry& en, Piece& p) {
+void SoftBodySystem::destroyPiece(scene::World& world, Entry&, Piece& p) {
     if (p.body) {
         aver_phys_remove_body(p.body);
         byBody_.erase(p.body);
@@ -735,7 +728,6 @@ void SoftBodySystem::destroyPiece(scene::World& world, Entry& en, Piece& p) {
     p.drawIndices.clear(); p.sourceVertex.clear(); p.drawUv.clear(); p.drawWeld.clear(); p.drawEvalTri.clear(); p.drawWorld.clear();
     p.caps = CapGeometry{};
     p.capWorld.clear(); p.capIndices.clear(); p.capSource.clear(); p.capUv.clear();
-    (void)en;
 }
 
 void SoftBodySystem::destroyEntry(scene::World& world, Entry& en) {
@@ -908,7 +900,7 @@ const PieceView* SoftBodySystem::pieces(u32& count) const {
     return views_.data();
 }
 
-// ---- wave 11: view sources, inflatables ------------------------------------------------------------------
+// ---- view sources and inflatables ------------------------------------------------------------------------
 
 void SoftBodySystem::addViewSource(ViewSourceFn fn, void* user) {
     if (!fn) return;

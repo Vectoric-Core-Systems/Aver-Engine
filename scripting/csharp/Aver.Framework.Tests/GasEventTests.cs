@@ -108,7 +108,7 @@ static class GasEventTests
     private static void Cues()
     {
         AbilitySystem s = Listening();
-        TagId("Cue.Test");
+        T.Tag("Cue.Test");
         ActiveEffectHandle h = s.Apply(EffectSpec.Of("Fx.Buff"));
         RaisedEvent? added = T.Host.Named("GAS.Cue.Cue.Test").FirstOrDefault();
         T.Check("phase 1 on add", added != null && (int)added.Arg(0) == T.Tag("Cue.Test").Id && (int)added.Arg(1) == 1);
@@ -121,8 +121,6 @@ static class GasEventTests
         RaisedEvent? ticked = T.Host.Named("GAS.Cue.Cue.Tick").LastOrDefault();
         T.Check("phase 2 on a periodic execution", ticked != null && (int)ticked.Arg(1) == 2);
     }
-
-    private static int TagId(string name) => T.Tag(name).Id;
 
     private static void AbilityEvents()
     {

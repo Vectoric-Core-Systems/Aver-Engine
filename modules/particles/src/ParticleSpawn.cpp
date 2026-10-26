@@ -21,27 +21,26 @@ Mat4 spawnAtTransform(const Vec3& position, const Vec3& direction) {
     return m;
 }
 
-u32 spawnAt(const SpawnAtParams& params) { return particleSystem().spawnAt(params); }
-u32 spawnAt(u64 effect, const Vec3& position, const Vec3& direction, u32 count) {
+namespace {
+// The parameters of the one-line form; every other field keeps its default.
+SpawnAtParams lineParams(u64 effect, const Vec3& position, const Vec3& direction, u32 count) {
     SpawnAtParams p;
     p.effect = effect;
     p.position = position;
     p.direction = direction;
     p.count = count;
-    return particleSystem().spawnAt(p);
+    return p;
 }
 
-namespace {
 u32 spawnThroughCore(u64 effectId, const Vec3& position, const Vec3& direction, u32 count, void* user) {
-    ParticleSystem* sys = static_cast<ParticleSystem*>(user);
-    SpawnAtParams p;
-    p.effect = effectId;
-    p.position = position;
-    p.direction = direction;
-    p.count = count;
-    return sys->spawnAt(p);
+    return static_cast<ParticleSystem*>(user)->spawnAt(lineParams(effectId, position, direction, count));
 }
 } // namespace
+
+u32 spawnAt(const SpawnAtParams& params) { return particleSystem().spawnAt(params); }
+u32 spawnAt(u64 effect, const Vec3& position, const Vec3& direction, u32 count) {
+    return particleSystem().spawnAt(lineParams(effect, position, direction, count));
+}
 
 void installEffectSpawner(ParticleSystem* system) {
     if (system) aver::setEffectSpawner(&spawnThroughCore, system);

@@ -8,7 +8,6 @@
 #include "aver/physics/physics_softbody_abi.h"
 
 #include <algorithm>
-#include <cmath>
 
 namespace aver::softbody {
 

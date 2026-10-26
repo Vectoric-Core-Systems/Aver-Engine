@@ -9,7 +9,6 @@
 #include "aver/scene/Components.hpp"
 
 #include <algorithm>
-#include <cmath>
 
 namespace aver::softbody {
 

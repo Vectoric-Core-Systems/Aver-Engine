@@ -26,6 +26,9 @@ public static class WorldOrigin
         if (s_logged.Add(key)) Log.Warn(message);
     }
 
+    // No native library, or no entry point in it (an older build): the origin reads as absent.
+    private static bool IsMissingNative(Exception e) => e is DllNotFoundException or EntryPointNotFoundException;
+
     /// <summary>The origin O in centimetres: always a whole number of regions, on X and Y (Z is never shifted). (0, 0) with no host.</summary>
     public static (long X, long Y) Origin
     {
@@ -36,7 +39,7 @@ public static class WorldOrigin
                 var v = new long[2];
                 return FwOrigin.aver_fw_origin_get(v) != 0 ? (v[0], v[1]) : (0, 0);
             }
-            catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException)
+            catch (Exception e) when (IsMissingNative(e))
             {
                 return (0, 0);
             }
@@ -59,7 +62,7 @@ public static class WorldOrigin
         get
         {
             try { return FwOrigin.aver_fw_origin_generation(); }
-            catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return 0; }
+            catch (Exception e) when (IsMissingNative(e)) { return 0; }
         }
     }
 
@@ -69,7 +72,7 @@ public static class WorldOrigin
         get
         {
             try { return FwOrigin.aver_fw_origin_enabled() != 0; }
-            catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return false; }
+            catch (Exception e) when (IsMissingNative(e)) { return false; }
         }
     }
 
@@ -93,7 +96,7 @@ public static class WorldOrigin
     public static bool RequestShift(int dxRegions, int dyRegions)
     {
         try { return FwOrigin.aver_fw_origin_request_shift(dxRegions, dyRegions) != 0; }
-        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return false; }
+        catch (Exception e) when (IsMissingNative(e)) { return false; }
     }
 
     // ---- the change event ---------------------------------------------------------------------------------------------
@@ -118,7 +121,7 @@ public static class WorldOrigin
                 if (s_subscription.IsValid) Events.Unsubscribe(s_subscription);
                 s_subscription = Events.Subscribe(EventName, OnOriginChanged);
             }
-            catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException)
+            catch (Exception e) when (IsMissingNative(e))
             {
                 s_subscription = default;
                 LogOnce("subscribe", "[WorldOrigin] the native event bus is not available; Changed will not be raised");
@@ -129,7 +132,7 @@ public static class WorldOrigin
             s_changed -= value;
             if (s_changed != null || !s_subscription.IsValid) return;
             try { Events.Unsubscribe(s_subscription); }
-            catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { }
+            catch (Exception e) when (IsMissingNative(e)) { }
             s_subscription = default;
         }
     }

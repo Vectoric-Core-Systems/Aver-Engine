@@ -84,6 +84,15 @@ rhi::ShiftWorldInfo renderInfo(const world::ShiftEvent& ev) {
 // bit-equal to its baseline.
 void shiftVec(Vec3& p, const Vec3& d) { p = Vec3{p.x - d.x, p.y - d.y, p.z - d.z}; }
 
+// The two renderers that take the shift info as it is, in this order: the device, then Voxi. Shared by the renderer participant and a
+// level reset.
+void shiftDeviceAndVoxi(const OriginBindings& b, const rhi::ShiftWorldInfo& info) {
+    if (b.device) b.device->shiftWorld(info);
+#if AVER_MODULE_VOXI
+    if (b.voxi) b.voxi->shiftWorld(info);
+#endif
+}
+
 } // namespace
 
 OriginParticipants::OriginParticipants() = default;
@@ -163,15 +172,15 @@ void OriginParticipants::install() {
     reg("gate", 0,
         [this](const world::ShiftEvent& ev) {
             if (busyReason_) return refuse(busyReason_);
-            if (b_.busy) if (const char* why = b_.busy(ev.urgent)) return refuse(why);
-            if (b_.level) {
-                if (b_.level->instances().count() > 0) return refuse("level instances are not origin-aware (cook the level)");
+            if (b_.busy) {
+                if (const char* why = b_.busy(ev.urgent)) return refuse(why);
             }
+            if (b_.level && b_.level->instances().count() > 0) return refuse("level instances are not origin-aware (cook the level)");
             return world::PrepareResult{};
         },
         nullptr);
 
-    // 10 PHYSICS: the only participant with a real refusal and the only expensive commit.
+    // 10 PHYSICS: the only expensive commit. Its prepare is aver_phys_origin_prepare, which refuses a bad delta or a call from inside a step.
     reg("physics", 10,
         [this](const world::ShiftEvent& ev) {
             physicsLive_ = false;
@@ -259,10 +268,7 @@ void OriginParticipants::install() {
     reg("render", 60, nullptr,
         [this](const world::ShiftEvent& ev) {
             const rhi::ShiftWorldInfo info = renderInfo(ev);
-            if (b_.device) b_.device->shiftWorld(info);
-#if AVER_MODULE_VOXI
-            if (b_.voxi) b_.voxi->shiftWorld(info);
-#endif
+            shiftDeviceAndVoxi(b_, info);
 #if AVER_MODULE_LANDSCAPE
             if (b_.landscape) b_.landscape->onOriginShift(info);
 #endif
@@ -324,10 +330,7 @@ void OriginParticipants::resetForLevel(world::OriginCm o) {
     info.deltaCm = {static_cast<f64>(now.x - old.x), static_cast<f64>(now.y - old.y), 0.0};
     info.newOrigin = {now.x, now.y};
     info.generation = origin_.generation();
-    if (b_.device) b_.device->shiftWorld(info);
-#if AVER_MODULE_VOXI
-    if (b_.voxi) b_.voxi->shiftWorld(info);
-#endif
+    shiftDeviceAndVoxi(b_, info);
 #if AVER_MODULE_LANDSCAPE
     if (b_.landscape) b_.landscape->setFrameOrigin(info.newOrigin);
 #endif

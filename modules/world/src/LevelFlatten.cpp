@@ -4,7 +4,6 @@
 #include "aver/formats/OcLevelInst.hpp"
 #include "aver/world/LevelTransform.hpp"
 
-#include <cmath>
 #include <unordered_set>
 
 namespace aver::world {

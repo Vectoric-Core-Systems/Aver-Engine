@@ -52,6 +52,7 @@ constexpr f32 kHandbrakeFactor = 1.5f;         // rear-axle handbrake, as a mult
 constexpr f32 kEngineMinRpm = 1000.0f;
 constexpr f32 kEngineMaxRpm = 6000.0f;
 constexpr f32 kMaxPitchRollDeg = 60.0f;
+constexpr u32 kTankPreset = 5;                 // not a kPresets row: the tank follows the five table presets
 
 std::string lower(std::string_view s) {
     std::string r(s);
@@ -129,14 +130,14 @@ void deriveTank(const Vec3& size, VehicleSpec& s) {
     s.body.massKg = 38000.0f;
     s.body.pitchRollDeg = 70.0f;
 
-    const f32 endX = std::max(0.5f * length - 1.2f * radius, 0.1f * length);
-    const f32 trackY = std::max(0.5f * width - 0.6f * wheelWidth, 0.25f * width);
+    const f32 endX = std::max(0.5f * length - kAxleInsetRadii * radius, 0.1f * length);
+    const f32 trackY = std::max(0.5f * width - kTrackInsetWheelWidths * wheelWidth, 0.25f * width);
 
     WheelClass c;
     c.name = "road";
     c.radius = radius;
     c.width = wheelWidth;
-    c.suspMin = 5.0f;
+    c.suspMin = kSuspensionMinCm;
     c.suspMax = 35.0f;
     c.suspHz = 1.8f;
     c.suspDamping = 0.6f;
@@ -234,8 +235,8 @@ std::optional<VehicleSpec> loadStatic(const char* text, const char* what) {
 }  // namespace
 
 const char* presetName(u32 preset) {
-    if (preset < 5) return kPresets[preset].name;
-    return preset == 5 ? "tank" : nullptr;
+    if (preset < kTankPreset) return kPresets[preset].name;
+    return preset == kTankPreset ? "tank" : nullptr;
 }
 
 int presetIndex(std::string_view name) {
@@ -259,7 +260,7 @@ bool specFromBounds(std::string_view preset, const Vec3& sizeCm, VehicleSpec& ou
     const int idx = presetIndex(preset);
     if (idx < 0 || !positive(sizeCm)) return false;
     out = VehicleSpec{};
-    if (idx == 5) deriveTank(sizeCm, out);
+    if (idx == static_cast<int>(kTankPreset)) deriveTank(sizeCm, out);
     else deriveCar(kPresets[idx], sizeCm, out);
     return true;
 }

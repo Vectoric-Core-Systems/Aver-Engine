@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // The entry points the vehicle Aver Node nodes call (GraphVehicleNodeTable.cs; palette mirror
 // sandbox/src/GraphNodeDefsVehicle.hpp), each a thin wrapper over Vehicles, Car and the Entity vehicle members. The six original
-// rows hold a vehicle by its integer physics handle (0 = none); the wave 10 rows hold it by its ENTITY, the way every other
+// rows hold a vehicle by its integer physics handle (0 = none); the rest hold it by its ENTITY, the way every other
 // family does, and an_vehiclefromentity maps one to the other. A dead or unknown handle, or a missing physics library, answers
 // false/0, logged once per node.
 
@@ -89,7 +89,7 @@ internal static class VehicleGraph
         catch (Exception e) { return FamiliesBLog.Failed("AN_VehicleWheelContact", e); }
     }
 
-    // ---- version 2 (wave 10): rows by ENTITY -----------------------------------------------------------------
+    // ---- version 2: rows by ENTITY ---------------------------------------------------------------------------
 
     private const string NoVehicle = "the entity is not a built vehicle (no Vehicle component, or it was not built, or the host has no vehicle system)";
 

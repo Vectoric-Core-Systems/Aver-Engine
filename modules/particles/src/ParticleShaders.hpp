@@ -7,9 +7,8 @@
 // This header only holds the constants the C++ side needs to agree with them on.
 //
 // The graphics shaders are compiled as rhi::sharedShaderPrelude() + (with a GI seam installed) Voxi's GI prelude + the file.
-// STRUCT NAMES ARE PREFIXED (PVSIn / PVSOut), NOT THE GENERIC VSIn / VSOut: sharedShaderPrelude() ITSELF already declares a
-// VSIn / VSOut pair (modules/rhi/shaders/shared_prelude.hlsl), and redeclaring those names silently shadowed them for DXC
-// rather than erroring (the 0.7 particle shader compiled against the wrong struct and failed only on a missing member).
+// Struct names are prefixed (PVSIn / PVSOut), not the generic VSIn / VSOut: sharedShaderPrelude() already declares that
+// pair (modules/rhi/shaders/shared_prelude.hlsl), and redeclaring it silently shadows it in DXC instead of erroring.
 //
 // Table 0 of every particle draw: t0 particles, t1 order, t2 trail points, t3 texture, then the GI pair at t4 / t5. The compute
 // layout is 9 UAVs, root CBV b3 (GpuSimCB), no SRV.

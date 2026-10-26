@@ -79,7 +79,7 @@ public sealed partial class SoftBodyBuilder : IDisposable
     {
         if (_id == 0) return 0;
         Native.aver_phys_sb_builder_params(_id, _params, _params.Length);
-        FlushExtension();   // SoftBodyExt.cs: the wave 11 params, when any were set
+        FlushExtension();   // SoftBodyExt.cs: the extension params, when any were set
         EdgeSlot = new int[_edgeCount];
         BendSlot = new int[_bendCount];
         int handle = Native.aver_phys_sb_builder_finish(_id, centre.X, centre.Y, centre.Z, replaceBody, stateSrcBody, stateMap,

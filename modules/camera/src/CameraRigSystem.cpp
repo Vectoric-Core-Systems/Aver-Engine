@@ -19,6 +19,26 @@ constexpr const char* kEvBlendFinished = "CameraBlendFinished";
 constexpr const char* kEvCut = "CameraCut";
 constexpr f32 kFallbackBlendS = 0.4f;
 
+// A rig without a CCamera gets one with the constants pushCamera used: CCamera's own defaults (5 / 500000) are not
+// today's camera.
+void ensureRigCamera(scene::World& world, scene::Entity e) {
+    if (world.hasComponent(e, scene::kComponentCamera)) return;
+    if (auto* cam = static_cast<scene::CCamera*>(world.addComponent(e, scene::kComponentCamera))) {
+        cam->fovYRad = radians(60.0f);
+        cam->nearCm = 2.0f;
+        cam->farCm = 200000.0f;
+        cam->priority = 0;
+    }
+}
+
+// Stops a running bob feed. The sink is called only while the feed is active.
+void stopBobFeed(void (*sink)(float, float), bool& active) {
+    if (active && sink) {
+        sink(0.0f, 0.0f);
+        active = false;
+    }
+}
+
 }  // namespace
 
 u32 CameraRigSystem::typeId() { return g_type; }
@@ -87,15 +107,7 @@ CCameraRig* CameraRigSystem::attach(scene::World& world, scene::Entity e, Camera
     if (!c) return nullptr;
     *c = presetRig(preset);
     c->target = target;
-    if (!world.hasComponent(e, scene::kComponentCamera)) {
-        // CCamera's own defaults (5 / 500000) are not today's camera; a rig starts from the constants pushCamera used.
-        if (auto* cam = static_cast<scene::CCamera*>(world.addComponent(e, scene::kComponentCamera))) {
-            cam->fovYRad = radians(60.0f);
-            cam->nearCm = 2.0f;
-            cam->farCm = 200000.0f;
-            cam->priority = 0;
-        }
-    }
+    ensureRigCamera(world, e);
     return c;
 }
 
@@ -148,7 +160,7 @@ void CameraRigSystem::clear() {
     possessed_ = scene::kInvalidEntity;
     haveDebug_ = false;
     warnedAttach_ = false;
-    if (bobActive_ && bobSink_) bobSink_(0.0f, 0.0f);
+    stopBobFeed(bobSink_, bobActive_);
     bobActive_ = false;
 }
 
@@ -261,7 +273,8 @@ void CameraRigSystem::raise(scene::Entity e, const char* name) { events_.push_ba
 void CameraRigSystem::flushEvents() {
     if (events_.empty()) return;
     if (notifyFn_) {
-        // A sink may call back into the system (a graph that sets a view target); iterate a copy of the count.
+        // A sink may call back into the system (a graph that sets a view target): index the vector and copy each event
+        // before the call.
         for (usize i = 0; i < events_.size(); ++i) {
             const Event ev = events_[i];
             notifyFn_(ev.e, ev.name, notifyUser_);
@@ -332,7 +345,7 @@ RigResult CameraRigSystem::drive(scene::World& world, const RigFrame& fr) {
         haveLast_ = true;
         haveFinite_ = false;
         if (current_ != scene::kInvalidEntity) { current_ = scene::kInvalidEntity; states_.clear(); }
-        if (bobActive_ && bobSink_) { bobSink_(0.0f, 0.0f); bobActive_ = false; }
+        stopBobFeed(bobSink_, bobActive_);
         flushEvents();
         return res;
     }
@@ -357,11 +370,7 @@ RigResult CameraRigSystem::drive(scene::World& world, const RigFrame& fr) {
             r->target = keepTarget;
             r->ignoreBody = keepBody;
             r->flags = p.flags | keepFlags;
-            if (!world.hasComponent(e, scene::kComponentCamera)) {
-                if (auto* cam = static_cast<scene::CCamera*>(world.addComponent(e, scene::kComponentCamera))) {
-                    cam->fovYRad = radians(60.0f); cam->nearCm = 2.0f; cam->farCm = 200000.0f; cam->priority = 0;
-                }
-            }
+            ensureRigCamera(world, e);
         }
         if (r->flags & kRigCut) {
             states_[e].snapNext = true;
@@ -517,7 +526,7 @@ RigResult CameraRigSystem::drive(scene::World& world, const RigFrame& fr) {
         debug_.rig = current_;
         haveDebug_ = true;
     } else {
-        if (bobActive_ && bobSink_) { bobSink_(0.0f, 0.0f); bobActive_ = false; }
+        stopBobFeed(bobSink_, bobActive_);
         haveDebug_ = false;
     }
 

@@ -34,6 +34,21 @@ i32 clampRadiusKey(const char* key, i32 asked) {
     AVER_WARN("[ChunkWorld] {} asks for radius {}; clamped to {}", key, asked, kMaxRadiusChunks);
     return kMaxRadiusChunks;
 }
+
+// Whether one of `fields` is named `name`.
+bool declaresField(const std::vector<const fmt::OcPcgVolume*>& fields, const std::string& name) {
+    for (const fmt::OcPcgVolume* pv : fields) if (pv->name == name) return true;
+    return false;
+}
+
+// Releases the physics bodies a streamer freed on eviction. Negative ids are not bodies.
+void removeFreedBodies(const std::vector<i32>& freed) {
+#if AVER_MODULE_PHYSICS
+    for (const i32 b : freed) if (b >= 0) aver_phys_remove_body(b);
+#else
+    (void)freed;
+#endif
+}
 } // namespace
 
 void GameStreaming::accumulateStreamStats(world::StreamStats& into, const world::StreamStats& add) {
@@ -64,9 +79,7 @@ void GameStreaming::disable() {
     }
     extra_.clear();
     scene::World::instance().flush();
-#if AVER_MODULE_PHYSICS
-    for (const i32 b : freed) if (b >= 0) aver_phys_remove_body(b);
-#endif
+    removeFreedBodies(freed);
     primary_.reset();
     haveLastPos_ = false;
     heightSource_ = nullptr;
@@ -103,27 +116,16 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
     // A species naming a volume the level does not declare would otherwise scatter nowhere, in
     // silence. Reported once per bad name and folded into the primary rather than dropped.
     for (const fmt::OcScatterSpecies& sp : scatterSpecies) {
-        if (sp.volume.empty()) continue;
-        bool found = false;
-        for (const fmt::OcPcgVolume* pv : fields) if (pv->name == sp.volume) { found = true; break; }
-        if (!found)
+        if (!sp.volume.empty() && !declaresField(fields, sp.volume))
             AVER_WARN("[ChunkWorld] SCATTER '{}' names volume '{}', which this level does not "
                       "declare; it will scatter in the first field instead",
                       sp.meshPath, sp.volume);
     }
 
-    // ---- STREAM.* FROM THE MANIFEST, WHICH USED TO REACH NOTHING --------------------------------
-    //
-    // All six keys parse, serialise and carry a Project Settings widget, and not one of them was
-    // read: ChunkWorldSettings reached open() on world::StreamSettings' compiled-in defaults, so a
-    // title that lowered its load budget for a slower platform shipped the built-in 2 anyway. A key
-    // that survives a save and changes nothing is worse than a missing key -- it reads as a dial
-    // somebody already tried, which is why this one is applied rather than deleted.
-    //
-    // UNSTATED IS NEGATIVE, this block's own rule in OcProject.hpp, so a key the project never
-    // writes leaves the StreamSettings default standing instead of writing a zero over it. A STATED
-    // zero budget IS honoured and means unbounded -- StreamSettings' own documented contract for it,
-    // and the reason the test here is `>= 0` rather than `> 0`.
+    // ---- STREAM.* FROM THE MANIFEST ----
+    // Every key is applied here; ChunkWorld would otherwise open on StreamSettings' compiled-in defaults. UNSTATED IS NEGATIVE
+    // (OcProject.hpp): a key the project never writes leaves the default standing. A STATED zero budget is honoured and means
+    // unbounded (StreamSettings' contract), hence `>= 0` rather than `> 0`.
     world::StreamSettings manifestStream;   // defaults until a key overrides one
     if (project.streamLoadRadius >= 0)
         manifestStream.loadRadius = clampRadiusKey("STREAM.LOADRADIUS", project.streamLoadRadius);
@@ -157,11 +159,9 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
         // never mentioning volumes still produces one world with the whole palette.
         std::vector<fmt::OcScatterSpecies> mine;
         for (const fmt::OcScatterSpecies& sp : scatterSpecies) {
-            bool named = false;
-            if (!sp.volume.empty())
-                for (const fmt::OcPcgVolume* pv : fields) if (pv->name == sp.volume) { named = true; break; }
+            const bool named = !sp.volume.empty() && declaresField(fields, sp.volume);
             if (named) { if (v && sp.volume == v->name) mine.push_back(sp); }
-            else if (fi == 0)                            mine.push_back(sp);
+            else if (fi == 0) mine.push_back(sp);
         }
         // A field with no species would generate the fallback cube everywhere. Skip it: a level may
         // declare a field for something other than scatter (a cave mask, a moisture map).
@@ -209,14 +209,9 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
                               v->name, v->samplesPerAxis, n);
                 cwSettings.generator.samplesPerAxis = static_cast<u32>(n);
             }
-            // evictRadius is raised with loadRadius: ChunkStreamer.hpp requires evictRadius >
-            // loadRadius or the boundary thrashes, and it enforces that rather than trusting the caller.
-            //
-            // AND THIS BEATS THE MANIFEST'S STREAM.LOADRADIUS, which was applied to cwSettings.stream
-            // above. That is the narrower statement winning, for the same reason this function builds
-            // one ChunkWorld per field at all: a single project-wide radius cannot serve a dense floor
-            // and a sparse canopy, so a field that states its own has said something the project-wide
-            // key cannot say. The remaining four STREAM.* keys are untouched here and still apply.
+            // evictRadius follows loadRadius: ChunkStreamer.hpp requires evictRadius > loadRadius or the boundary thrashes.
+            // A field's own radius beats the manifest's STREAM.LOADRADIUS (applied above), since one project-wide radius cannot
+            // serve a dense floor and a sparse canopy. The other STREAM.* keys still apply.
             if (v->radiusChunks > 0) {
                 const i32 r = v->radiusChunks > kMaxRadiusChunks ? kMaxRadiusChunks : v->radiusChunks;
                 if (r != v->radiusChunks)
@@ -333,9 +328,7 @@ world::StreamStats GameStreaming::tick(const Vec3& camPos, f32 dt, const world::
             accumulateStreamStats(stats_, extra->update(world, camPos, vel, dt, &freed, origin_));
         }
     }
-#if AVER_MODULE_PHYSICS
-    for (const i32 b : freed) if (b >= 0) aver_phys_remove_body(b);
-#endif
+    removeFreedBodies(freed);
 
     // The streamer reports a pending backlog in the hundreds for the first few seconds -- it is not
     // generating that much every frame forever, the backlog drains. Reported at a decreasing
@@ -351,20 +344,12 @@ world::StreamStats GameStreaming::tick(const Vec3& camPos, f32 dt, const world::
     // actually loaded or evicted something, then it quiets down.
     if (logsLeft_ > 0 && (stats_.loadedThisUpdate > 0 || stats_.evictedThisUpdate > 0)) {
         --logsLeft_;
-        if (trisLookup) {
-            AVER_INFO("[ChunkWorld] loaded={} evicted={} resident={}chunks/{}entities/{}tris "
-                      "pending={} failed={} totalLoads={} vel=({:.0f},{:.0f},{:.0f})cm/s",
-                      stats_.loadedThisUpdate, stats_.evictedThisUpdate, stats_.residentChunks,
-                      stats_.residentEntities, residentTriangleCount(trisLookup),
-                      stats_.pendingLoads, stats_.failedLoads, stats_.totalLoads,
-                      vel.x, vel.y, vel.z);
-        } else {
-            AVER_INFO("[ChunkWorld] loaded={} evicted={} resident={}chunks/{}entities pending={} "
-                      "failed={} totalLoads={} vel=({:.0f},{:.0f},{:.0f})cm/s",
-                      stats_.loadedThisUpdate, stats_.evictedThisUpdate, stats_.residentChunks,
-                      stats_.residentEntities, stats_.pendingLoads, stats_.failedLoads,
-                      stats_.totalLoads, vel.x, vel.y, vel.z);
-        }
+        const std::string tris = trisLookup ? "/" + std::to_string(residentTriangleCount(trisLookup)) + "tris" : std::string();
+        AVER_INFO("[ChunkWorld] loaded={} evicted={} resident={}chunks/{}entities{} pending={} failed={} totalLoads={} "
+                  "vel=({:.0f},{:.0f},{:.0f})cm/s",
+                  stats_.loadedThisUpdate, stats_.evictedThisUpdate, stats_.residentChunks,
+                  stats_.residentEntities, tris, stats_.pendingLoads, stats_.failedLoads,
+                  stats_.totalLoads, vel.x, vel.y, vel.z);
     }
     return stats_;
 }
@@ -412,16 +397,11 @@ void GameStreaming::warnIfCameraOutsideGeneratedBand(const Vec3& camPos, const c
     // actually contain something rather than the coordinate its floor sits at.
     const i64 lo = i64(surfaceZ - st.verticalRadius) * st.chunkSizeCm;
     const i64 hi = i64(surfaceZ + st.verticalRadius + 1) * st.chunkSizeCm;
-    if (actionHint && *actionHint) {
-        AVER_WARN("[ChunkWorld] the camera is at Z={:.0f}cm (chunk layer {}), outside the generated "
-                  "band {}..{}cm (layers {}..{}). Nothing will load until it is inside that band -- {}",
-                  camPos.z, camChunkZ, lo, hi, surfaceZ - st.verticalRadius, surfaceZ + st.verticalRadius,
-                  actionHint);
-    } else {
-        AVER_WARN("[ChunkWorld] the camera is at Z={:.0f}cm (chunk layer {}), outside the generated "
-                  "band {}..{}cm (layers {}..{}). Nothing will load until it is inside that band.",
-                  camPos.z, camChunkZ, lo, hi, surfaceZ - st.verticalRadius, surfaceZ + st.verticalRadius);
-    }
+    // A hint supplies its own final punctuation; without one the message ends with a full stop.
+    const std::string tail = actionHint && *actionHint ? std::string(" -- ") + actionHint : std::string(".");
+    AVER_WARN("[ChunkWorld] the camera is at Z={:.0f}cm (chunk layer {}), outside the generated "
+              "band {}..{}cm (layers {}..{}). Nothing will load until it is inside that band{}",
+              camPos.z, camChunkZ, lo, hi, surfaceZ - st.verticalRadius, surfaceZ + st.verticalRadius, tail);
 }
 
 // Sum of triangle counts over every entity every resident field currently owns. O(residentEntities),

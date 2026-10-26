@@ -475,28 +475,32 @@ void VehiclePhysicsSystem::Impl::processPhysicsEvents(scene::World& w, f32 dt) {
         CVehicle* c = w.component<CVehicle>(e->entity, g_type);
         if (!c) continue;
         const Vec3 point(f8[0], f8[1], f8[2]), normal(f8[3], f8[4], f8[5]);
+        // The physics events share one payload: the (a, b) integers, the point, the normal and two values.
+        const auto emitPhys = [&](VehicleEventKind kind, const char* notifyName) {
+            emit(kind, e->entity, scene::kInvalidEntity, i4[2], i4[3], point, normal, f8[6], f8[7], notifyName);
+        };
         switch (i4[0]) {
             case AVER_PHYS_VEV_SKID_BEGIN:
-                emit(VehicleEventKind::SkidBegin, e->entity, scene::kInvalidEntity, i4[2], i4[3], point, normal, f8[6], f8[7], "VehicleSkid");
+                emitPhys(VehicleEventKind::SkidBegin, "VehicleSkid");
                 break;
             case AVER_PHYS_VEV_SKID_END:
-                emit(VehicleEventKind::SkidEnd, e->entity, scene::kInvalidEntity, i4[2], i4[3], point, normal, f8[6], f8[7], nullptr);
+                emitPhys(VehicleEventKind::SkidEnd, nullptr);
                 break;
             case AVER_PHYS_VEV_LAND:
-                emit(VehicleEventKind::Land, e->entity, scene::kInvalidEntity, i4[2], i4[3], point, normal, f8[6], f8[7], "VehicleLanded");
+                emitPhys(VehicleEventKind::Land, "VehicleLanded");
                 if (e->spec && !e->spec->audio.impact.empty() && !(c->flags & kVehicleNoAudio) && f8[6] > 150.0f)
                     oneShot(*e, e->spec->audio.impact, std::clamp(f8[6] / 3000.0f, 0.1f, 0.6f), 1.0f);
                 break;
             case AVER_PHYS_VEV_SHIFT:
                 ++e->shifts;
-                emit(VehicleEventKind::Shift, e->entity, scene::kInvalidEntity, i4[2], i4[3], point, normal, f8[6], f8[7], "VehicleShift");
+                emitPhys(VehicleEventKind::Shift, "VehicleShift");
                 if (e->spec && !e->spec->audio.shift.empty() && !(c->flags & kVehicleNoAudio)) oneShot(*e, e->spec->audio.shift, 0.4f, 1.0f);
                 break;
             case AVER_PHYS_VEV_FLIPPED:
-                emit(VehicleEventKind::Flipped, e->entity, scene::kInvalidEntity, i4[2], i4[3], point, normal, f8[6], f8[7], "VehicleFlipped");
+                emitPhys(VehicleEventKind::Flipped, "VehicleFlipped");
                 break;
             case AVER_PHYS_VEV_ASSIST:
-                emit(VehicleEventKind::Assist, e->entity, scene::kInvalidEntity, i4[2], i4[3], point, normal, f8[6], f8[7], nullptr);
+                emitPhys(VehicleEventKind::Assist, nullptr);
                 break;
             case AVER_PHYS_VEV_IMPACT: {
                 VehicleEvent ev;
@@ -653,7 +657,7 @@ DebugView VehiclePhysicsSystem::debug(scene::Entity ent) const {
     f32 vel[3] = {};
     if (aver_phys_vehicle_velocity(en->vehicle, vel)) v.velocity = Vec3(vel[0], vel[1], vel[2]);
     v.comWorld = en->pos + en->rot.rotate(s.body.com);
-    v.wheelCount = std::min<u32>(en->wheelCount, 16u);
+    v.wheelCount = std::min<u32>(en->wheelCount, detail::kMaxWheelSlots);
     for (u32 i = 0; i < v.wheelCount; ++i) {
         const WheelDef& wd = s.wheels[i];
         const WheelClass* wc = findClass(s, wd.wheelClass);

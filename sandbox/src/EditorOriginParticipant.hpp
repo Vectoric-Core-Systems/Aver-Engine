@@ -58,9 +58,6 @@ public:
         return (sig ^ static_cast<u64>(originGeneration)) * 1099511628211ull;
     }
 
-    usize gestureCount() const { return gestures_.size(); }
-    usize rebaserCount() const { return rebasers_.size(); }
-    const char* rebaserName(usize i) const { return i < rebasers_.size() ? rebasers_[i].what : ""; }
     u32 commits() const { return commits_; }
     u32 refused() const { return refused_; }
     u32 cancelled() const { return cancelled_; }

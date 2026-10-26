@@ -11,10 +11,10 @@
 // through attachCloth / attachDestructible / attachSoftField, never world.addComponent directly: storage arrives
 // zero-filled and runs no constructor, and zero-filled storage means the useful state (scales of 0 read as 1).
 //
-// WAVE 10 (docs/plans/wave10/SOFTBODY_DEPTH.md): thick breaks (back skin and walls as derived draw geometry), fields
-// (volumes that push, hurt, release, kill or hold soft bodies), break effects (particles and sounds bound in .ocsoft),
-// saved damage (the `softbody` $State channel), proxy cages for meshes over the particle cap, and cheaper debris
-// (reveal handshake, baking of settled pieces, distance cadence). The pure parts live in Aver.SoftBody.
+// Thick breaks (back skin and walls as derived draw geometry), fields (volumes that push, hurt, release, kill or hold soft
+// bodies), break effects (particles and sounds bound in .ocsoft), saved damage (the `softbody` $State channel), proxy cages
+// for meshes over the particle cap, and cheaper debris (reveal handshake, baking of settled pieces, distance cadence) are
+// specified in docs/plans/wave10/SOFTBODY_DEPTH.md. The pure parts live in Aver.SoftBody.
 //
 // DETERMINISM. Inputs are the asset bytes + preset, the ordered inbox (damage, explode, tear, repair, release,
 // wind, budget, pulses), the entity transforms and palettes per tick and the fixed step count. Every loop runs in
@@ -132,7 +132,6 @@ struct Options {
     f32 teleportCm = 150.0f;            // a root moved farther than this in one frame hard-skins
     f32 hotSeconds = 2.0f;              // a piece is "hot" this long after an impact or a deposit
     f32 watchStrain = 0.005f;           // ... or while its largest strain exceeds this
-    // ---- wave 10 ----
     bool capsEnabled = true;            // master switch for thick breaks (an asset's caps.mode still applies)
     bool bakeEnabled = true;            // settled debris becomes a plain static mesh
     f32 bakeAfterS = 3.0f;              // asleep this long before it is baked
@@ -179,7 +178,6 @@ struct PieceView {
     f32 scale01 = 1.0f;               // despawn shrink toward the centroid
     bool frozen = false;              // last packed vertices are still current
     bool empty = false;               // nothing to draw (every triangle gone)
-    // ---- wave 10 ----
     const f32* uv = nullptr;          // 2 per draw vertex; null means every vertex is authored. Read for kGeneratedVertex entries
     u32 layer = 0;                    // 0 surface (with merged caps), 1 the interior-material cap entity
     bool revealOnReady = false;       // debris and cap entities start invisible: set the visible bit once this view has a resident
@@ -190,7 +188,6 @@ struct Stats {
     u32 entries = 0, pieces = 0, debris = 0;
     u32 activeParticles = 0, awakePieces = 0, frozenPieces = 0;
     u32 rebuildsLastTick = 0, depositsLastTick = 0, eventsPending = 0;
-    // ---- wave 10 ----
     u32 bakedPieces = 0, heldPieces = 0, fieldsApplied = 0, transientFields = 0;
     u32 fxSent = 0, fxDropped = 0;
 };
@@ -253,9 +250,9 @@ using NotifyFn = void (*)(scene::Entity e, const char* name, void* user);
 using BoneIndexFn = i32 (*)(scene::Entity e, const std::string& bone, void* user);
 // Turns an asset id into a path (the same function the hosts hand AnimSystem).
 using PathFn = std::string (*)(u64 objectId, void* user);
-// Wave 11. The physics handle of the ragdoll that belongs to a skeleton entity (the group id a soft body can ignore), or 0.
+// The physics handle of the ragdoll that belongs to a skeleton entity (the group id a soft body can ignore), or 0.
 using RagdollGroupFn = i32 (*)(scene::Entity skeleton, void* user);
-// Wave 11. Appends the extra PieceViews of another system (SoftShapeSystem: jelly and rope); see addViewSource.
+// Appends the extra PieceViews of another system (SoftShapeSystem: jelly and rope); see addViewSource.
 using ViewSourceFn = void (*)(std::vector<PieceView>& out, void* user);
 
 class SoftBodySystem {
@@ -288,7 +285,7 @@ public:
     void setCharacterProxyFn(ProxyFn fn, void* user) { proxyFn_ = fn; proxyUser_ = user; }
     void setNotifySink(NotifyFn fn, void* user) { notifyFn_ = fn; notifyUser_ = user; }
     void setBoneIndexFn(BoneIndexFn fn, void* user) { boneFn_ = fn; boneUser_ = user; }
-    // Wave 11: which ragdoll a cloth with "group": { "ragdollOf": "owner" } ignores. Null: the group is never applied.
+    // Which ragdoll a cloth with "group": { "ragdollOf": "owner" } ignores. Null: the group is never applied.
     void setRagdollGroupFn(RagdollGroupFn fn, void* user) { ragdollGroupFn_ = fn; ragdollGroupUser_ = user; }
     void setViewPos(const Vec3& p) { viewPos_ = p; }
     Vec3 viewPos() const { return viewPos_; }
@@ -345,7 +342,7 @@ public:
     // Stores a payload under the (new) entity; the entry applies it when it is built. False for a malformed payload.
     bool restoreState(scene::Entity e, std::string_view payload);
 
-    // ---- wave 11 (docs/plans/wave11/SOFTBODY_HAIR.md): inflatables and the seams SoftShapeSystem uses ----
+    // ---- inflatables and the seams SoftShapeSystem uses (docs/plans/wave11/SOFTBODY_HAIR.md) ----
     // Sets the pressure (kPa at rest volume) of a closed cloth; applied at the next tick with the other ops. False for an
     // entity with no cloth body, a destructible, or a negative value. 0 deflates.
     bool setPressure(scene::Entity e, f32 kPa);
@@ -409,7 +406,6 @@ private:
         bool needsRebuild = false;         // a beam broke since the body was built
         bool needsRead = true;             // positions must be read at least once (a fresh body)
         bool plastic = false;              // some beam has a set: a rebuild must re-take the bend rest angles
-        // ---- wave 10 ----
         bool needsBody = false;            // planTear made or changed it: commitTear builds the body and the draw arrays
         bool pendingKill = false;          // planTear found nothing left of it: commitTear removes it
         bool baked = false;                // settled: no body, drawn as a plain static mesh
@@ -489,7 +485,6 @@ private:
         bool conflict = false;             // both CCloth and CDestructible
         u32 totalBeams = 0;
         bool proxyOn = false;              // this entry holds a share of its skeleton entity's collision proxy
-        // ---- wave 10 ----
         f32 uniformScale = 1.0f;           // the scale inside the build matrix; cap thickness and proxy offsets scale by it
         bool openSheet = false;            // the intact visible mesh has boundary edges (BackSkin::Auto)
         bool overCap = false;              // failed because the mesh welds to more particles than allowed
@@ -512,7 +507,6 @@ private:
         u64 saveMeshKey = 0;
         std::unique_ptr<SoftState> restore;   // the blob being replayed by initialPiece
         std::vector<f32> restorePos, restoreVel;
-        // ---- wave 11 ----
         f32 pressureKPa = 0.0f;            // the live inflation pressure (a closed cloth); a rebuild passes it on
         f32 leakKPaPerS = 0.0f;
         bool groupApplied = false;         // the ragdoll collision group was set
@@ -539,6 +533,8 @@ private:
     };
 
     // ---- SoftBodySystem.cpp ----
+    // The build inputs an entry is keyed on, read from its components (meshId left to the caller). Equal specs mean no rebuild.
+    static Spec specFromComponents(const scene::CSoftBody& sb, const CCloth* cl, const CDestructible* de);
     void syncEntries(scene::World& world);
     bool buildEntry(scene::World& world, Entry& en);
     void destroyEntry(scene::World& world, Entry& en);
@@ -591,6 +587,10 @@ private:
     u32 applyField(scene::World& world, const FieldSpec& f, f32 seconds, bool once);
     void releaseAnchorsIn(scene::World& world, Entry& en, const std::vector<u32>& particles);
     u32 piecesInReach(const FieldSpec& f) const;
+    // A piece a field can touch: alive, not baked or pending a kill, targeted by the field, and inside its bounds.
+    bool inReach(const Entry& en, const Piece& p, const FieldSpec& f) const;
+    // Holds a piece asleep for a Sleep field (or setAsleep) this tick.
+    void holdAsleep(Piece& p);
 
     // ---- SoftBodyCaps.cpp (thick breaks, cap entities, baking, draw cadence) ----
     void buildPieceCaps(scene::World* world, Entry& en, Piece& p);
@@ -612,7 +612,7 @@ private:
     bool buildProxy(scene::World& world, Entry& en, const SimMeshInput& authored, SimBuildSpec& spec, bool& notReady);
     void proxyPositions(Entry& en, Piece& p);
 
-    // ---- SoftBodyBuild.cpp (wave 11) ----
+    // ---- SoftBodyBuild.cpp (inflatables, ragdoll group) ----
     void setEntryPressure(Entry& en, f32 kPa);              // en.pressureKPa and every piece's body
     void applyPressureOps();                                // the queue setPressure fills, in arrival order
     void applyGroup(Entry& en);                             // "ragdollOf": "owner", once the ragdoll exists
@@ -660,7 +660,7 @@ private:
     // saved damage waiting for its entity's entry
     std::unordered_map<scene::Entity, std::unique_ptr<SoftState>> pendingRestore_;
     std::unordered_map<scene::Entity, u32> proxyWait_;
-    // wave 11
+    // view sources
     struct ViewSource { ViewSourceFn fn = nullptr; void* user = nullptr; };
     std::vector<ViewSource> viewSources_;
     usize baseViewCount_ = 0;                          // views_ before the view sources appended theirs
