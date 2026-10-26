@@ -2,6 +2,7 @@
 // bookkeeping while resident, write their edits back into the placement record before they leave, and
 // a save writes every record plus the generated .ocstream under Binaries/Streaming.
 #include "SandboxApp.hpp"
+#include "EditorRecordOrigin.hpp"
 #include "aver/assets/LevelSky.hpp"
 
 #if AVER_MODULE_SCENE
@@ -95,7 +96,7 @@ bool SandboxApp::streamRecordFromEntity(scene::Entity e, const std::unordered_ma
     keepParent = livePar == recPar;
     if (!keepParent || (!old && livePar != scene::kInvalidEntity)) {
         const Transform wt = transformFromMatrix(world.worldMatrix(e));
-        p.x = wt.position.x; p.y = wt.position.y; p.z = wt.position.z;
+        editor::writeRecordPosition(p, wt.position, origin_.origin(), ls, e, true, false);   // a root's record is absolute: origin + the scene-frame pose
         const Vec3 eu = world::eulerDegFromQuat(wt.rotation);
         p.roll = eu.x; p.pitch = eu.y; p.yaw = eu.z;
         p.sx = wt.scale.x; p.sy = wt.scale.y; p.sz = wt.scale.z;

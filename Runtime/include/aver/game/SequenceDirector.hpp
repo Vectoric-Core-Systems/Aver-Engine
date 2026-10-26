@@ -65,6 +65,8 @@ public:
     void restore(scene::World& world);
     // Forgets the sequences (call restore first).
     void clear();
+    // Floating-origin shift (LARGE_WORLD 2.2.5): the shared base store follows the scene. Call after World::shiftRoots.
+    void rebase(const scene::World& world, const Vec3& deltaCm);
 
 private:
     struct Entry {

@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-203 public types and 1723 public members, read from `scripting/csharp/Aver.Framework/` (123 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+206 public types and 1777 public members, read from `scripting/csharp/Aver.Framework/` (128 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -870,6 +870,31 @@ Values: `String`, `Int`, `Float`, `Bool`, `Vec3`, `Text`, `Strings`
 
 Values: `Radial`, `Axial`
 
+### Double3
+
+`public readonly struct Double3 : IEquatable<Double3>` - A double-precision vector in centimetres: an absolute position (or a distance between two) where a Vec3 would lose precision.
+
+- `public readonly double X` - X, centimetres.
+- `public readonly double Y` - Y, centimetres.
+- `public readonly double Z` - Z, centimetres.
+- `public Double3(double x, double y, double z)` - Makes a vector from its three components.
+- `public static Double3 Zero { get; }` - The zero vector.
+- `public static Double3 operator +(Double3 a, Double3 b)` - Componentwise sum.
+- `public static Double3 operator -(Double3 a, Double3 b)` - Componentwise difference.
+- `public static Double3 operator *(Double3 a, double s)` - Scales by a number.
+- `public static Double3 operator *(double s, Double3 a)` - Scales by a number.
+- `public static Double3 operator /(Double3 a, double s)` - Divides by a number.
+- `public static Double3 operator -(Double3 a)` - Negation.
+- `public static bool operator ==(Double3 a, Double3 b)` - Exact equality.
+- `public static bool operator !=(Double3 a, Double3 b)` - Exact inequality.
+- `public double Length { get; }` - Length in centimetres.
+- `public Vec3 ToVec3()` - The nearest Vec3: one rounding to single precision, so only meaningful for a vector near the origin.
+- `public static Double3 From(Vec3 v)` - Widens a Vec3; exact.
+- `public bool Equals(Double3 o)` - Inherited documentation.
+- `public override bool Equals(object? obj)` - Inherited documentation.
+- `public override int GetHashCode()` - Inherited documentation.
+- `public override string ToString()` - Inherited documentation.
+
 ### DriveActionNames
 
 `public static class DriveActionNames` - The names of the input actions a vehicle with a driver reads.
@@ -1089,6 +1114,10 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public bool SetCameraRigIgnoreBody(int bodyHandle)` - A physics body the camera probe skips (the chassis of a vehicle).
 - `public bool SetCameraRigFlags(CameraRigFlags flags)` - Replaces the rig's switches (collision, per-axis inherit, fade, look-at, disabled).
 - `public bool TryGetCameraRigState(out CameraRigState state)` - What the camera system last computed for this rig.
+- `public WorldPos AbsolutePosition { get; }` - Where this entity is in the whole world, exact at any distance.
+- `public Double3 AbsolutePositionCm { get; }` - The same place as absolute centimetres in double precision (exact to 2^53 cm).
+- `public void SetAbsolutePosition(WorldPos position)` - Moves the entity so its world position is position: converted through the current origin in double, then written like SetLocalPosition (through the parent's transform for a child).
+- `public void SetAbsolutePositionCm(Double3 cm)` - Moves the entity so its world position is the absolute point cm (centimetres from the world's zero).
 - `public bool SetParticleFloat(string name, float value)` - Sets a float user parameter the entity's effect declares with PARAM name float.
 - `public bool SetParticleVector(string name, Vec3 value)` - Sets a vector user parameter (PARAM name vec3): a wind direction, an attractor position.
 - `public bool SetParticleColor(string name, float r, float g, float b, float a = 1f)` - Sets a colour user parameter (PARAM name color).
@@ -2446,3 +2475,43 @@ Values: `None = 0`, `Ocean = 1`, `Lake = 2`, `River = 3`
 `public enum WorldEnvKey` - Which sun, fog or sky-light setting a script has taken over.
 
 Values: `SunDir = 1`, `SunLux = 2`, `SunColor = 3`, `SunTemp = 4`, `FogDensity = 5`, `FogColor = 6`, `FogFalloff = 7`, `FogHeight = 8`, `FogStart = 9`, `FogMaxOpac = 10`, `SkyLight = 11`
+
+### WorldOrigin
+
+`public static class WorldOrigin` - The floating origin: where it is, how to convert to and from absolute positions, and a callback for when it moves.
+
+- `public const long StepCm = WorldPos.RegionSizeCm` - The distance the origin moves in, centimetres: one region (1024 chunks of 16 m = 16.384 km).
+- `public static (long X, long Y) Origin` - The origin O in centimetres: always a whole number of regions, on X and Y (Z is never shifted).
+- `public static (int X, int Y) Region` - The region the origin is in, as whole regions along X and Y: Origin divided by StepCm.
+- `public static uint Generation { get; }` - Shifts so far, counting level loads: 0 at start.
+- `public static bool Enabled { get; }` - True when the origin can shift (the project did not turn it off, and this host supports it).
+- `public static Double3 ToAbsolute(Vec3 local)` - The absolute point (centimetres) an origin-relative position names: the add is in double, so it is exact.
+- `public static Vec3 ToLocal(Double3 absoluteCm)` - The origin-relative position of an absolute point: the subtraction is in double and the one rounding is the narrowing.
+- `public static bool RequestShift(int dxRegions, int dyRegions)` - Asks the host to shift the origin by whole regions at the next frame's start, as a camera-driven shift would.
+- `public static event Action<Double3, uint>? Changed` - Raised after every committed shift (at the next event flush, once the world is consistent) with the shift in centimetres: every origin-relative position changed by the NEGATIVE of this vector, and the new Generation.
+
+### WorldPos
+
+`public readonly struct WorldPos : IEquatable<WorldPos>` - A position in the whole world: a global chunk index (16 m chunks, three integers) and a float offset inside that chunk, in [0, 1600) centimetres.
+
+- `public const int ChunkSizeCm = 1600` - Chunk edge in centimetres.
+- `public const int ChunksPerRegion = 1024` - Chunks along one region edge.
+- `public const long RegionSizeCm = (long)ChunksPerRegion * ChunkSizeCm` - Region edge in centimetres: the floating origin moves in whole steps of this.
+- `public readonly int ChunkX` - Global chunk index on X.
+- `public readonly int ChunkY` - Global chunk index on Y.
+- `public readonly int ChunkZ` - Global chunk index on Z.
+- `public readonly Vec3 Local` - Offset inside the chunk, centimetres, each component in [0, 1600).
+- `public WorldPos(int chunkX, int chunkY, int chunkZ, Vec3 local)` - Makes a position from a chunk and an offset.
+- `public static WorldPos FromAbsolute(Double3 cm)` - The position of an absolute point, in centimetres from the world's zero.
+- `public Double3 ToAbsolute()` - The absolute point this names, in centimetres from the world's zero.
+- `public Vec3 ToLocal()` - The origin-relative position the scene uses for this point, through the current floating origin.
+- `public static WorldPos FromLocal(Vec3 local)` - The position of an origin-relative point (a WorldPosition), through the current floating origin.
+- `public double DistanceTo(WorldPos other)` - The straight-line distance to another position in centimetres: the chunk difference is exact, the rest is in double.
+- `public WorldPos Offset(Double3 deltaCm)` - This position moved by a distance in centimetres; whole chunks go into the chunk index, so precision never degrades.
+- `public (int X, int Y, int Z) Region` - The region (1024 chunks, 16.384 km a side, region 0 centred on the world's zero) this point is in.
+- `public bool Equals(WorldPos o)` - Inherited documentation.
+- `public override bool Equals(object? obj)` - Inherited documentation.
+- `public override int GetHashCode()` - Inherited documentation.
+- `public static bool operator ==(WorldPos a, WorldPos b)` - Exact equality.
+- `public static bool operator !=(WorldPos a, WorldPos b)` - Exact inequality.
+- `public override string ToString()` - Inherited documentation.

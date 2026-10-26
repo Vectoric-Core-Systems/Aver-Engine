@@ -54,6 +54,8 @@ aver_add_module(Aver.Runtime.Game.Core
     # cooked-chunk streaming entry points. LevelStreaming.cpp calls ItemLoader, so they must be in this library.
     src/ItemLoader.cpp
     src/AuthoredStreaming.cpp
+    # LARGE_WORLD phase 2: the floating origin's participants, in the order table of 2.2.4. The only caller of the other areas' shift entry points.
+    src/OriginParticipants.cpp
     # COMPONENT records (Skeletal Mesh, Animator, ... Smart Object) -> live components, applied by both hosts after a level loads.
     src/LevelComponents.cpp
     # [wave3/level-instances begin] LEVELINST records at run time: realise, stream as units, overrides, packed rows.
@@ -225,6 +227,8 @@ if(AVER_BUILD_GAME)
   aver_add_module(Aver.Runtime.Game
     SOURCES
       src/GameApp.cpp
+      # LARGE_WORLD phase 2: slot S0 and the origin bindings for the shipped game (the participants themselves are in Core).
+      src/GameAppOrigin.cpp
     DEPS
       Aver.Runtime.Game.Core
       Aver.Runtime

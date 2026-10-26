@@ -18,6 +18,8 @@
 #  include "aver/scene/World.hpp"
 #  include "aver/world/LevelInstance.hpp"
 #  include "aver/world/PlacementStreamer.hpp"
+#  include "aver/world/PlacementWriteBack.hpp"
+#  include "aver/world/WorldOrigin.hpp"
 
 namespace aver::rhi { class IDevice; }
 
@@ -45,11 +47,25 @@ public:
     bool active() const { return active_; }
     void setDistances(f32 loadCm, f32 evictCm) { streamer_.setDistances(loadCm, evictCm); }
 
-    // One step: loads and evicts around `viewers` (world cm). Mesh reads, vertex/part preparation and
+    // One step: loads and evicts around `viewers` (origin-relative cm, the scene frame; the origin is added here, in f64). Mesh reads, vertex/part preparation and
     // collision shapes are made on worker threads; what stays here (GPU buffers, entities, bodies) runs
     // nearest first within a per-tick time budget, larger while something close is missing. Evictions
     // have their own budget.
     void tick(scene::World& world, const std::vector<Vec3>& viewers);
+
+    // ---- the floating origin (LARGE_WORLD 2.4.1, 2.6) ----
+    // Records and streaming bounds are ABSOLUTE f64 centimetres; viewers, entities and bodies are origin-relative. A shift loads and
+    // evicts nothing (the bounds do not move; the viewers are converted with the new origin on the next tick): this class only has to be
+    // told the new origin and to rebase the f32 baselines its write-back compares against. Called by the origin service's streaming
+    // participant (order 50), after the scene and the host members have shifted.
+    void onOriginShift(const world::ShiftEvent& ev);
+    // A level load or teleport without a shift (WorldOrigin::reset): the frame the next loads are narrowed against. Set before begin().
+    void setOrigin(world::OriginCm o) { origin_ = o; }
+    world::OriginCm origin() const { return origin_; }
+    // The untouched-record rule (PlacementWriteBack.hpp) for a resident ROOT entity: the absolute f64 position its record should hold now.
+    // An axis the entity has not moved since it loaded keeps the record's authored f64, bit for bit; a moved one is origin + local.
+    // False for a child (its record is parent-relative and origin-free), a non-resident entity or one the host made.
+    bool recordPositionOf(scene::Entity e, const Vec3& currentLocal, world::Vec3d& outCm) const;
 
     // ---- records (the editor's view) ----
     const std::vector<fmt::OcWorldPlacement>& placements() const { return records_; }
@@ -89,8 +105,9 @@ private:
         std::vector<u32> placements;   // root first, then descendants, parents before children
         bool loaded = false;           // its entities, bodies and meshes live in loader_ under this item's index
     };
-    world::Aabb itemBounds(const Item& it) const;
-    bool worldBounds(u32 placement, Vec3& outMin, Vec3& outMax) const;
+    world::AabbD itemBounds(const Item& it) const;
+    bool worldBounds(u32 placement, world::Vec3d& outMin, world::Vec3d& outMax) const;
+    void noteBaseline(u32 placement, scene::Entity e);
     void loadItems(scene::World& world, const std::vector<u32>& items);
     void evictItem(scene::World& world, u32 item, bool writeBack = true);
 
@@ -113,6 +130,9 @@ private:
     std::vector<u32> rootPlacements_;    // item -> root placement
     std::vector<Item> items_;
     world::PlacementStreamer streamer_;
+    world::OriginCm origin_{};
+    std::vector<world::PlacementBaseline> baseline_;   // per placement; valid where hasBaseline_ (resident item roots)
+    std::vector<u8> hasBaseline_;
     std::unordered_map<u32, u32> placementOf_;          // entity raw -> placement
     std::unordered_map<u32, scene::Entity> entityOf_;   // placement -> entity
 };

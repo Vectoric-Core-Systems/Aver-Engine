@@ -645,6 +645,7 @@ if(AVER_BUILD_TESTS)
     add_subdirectory(tests/framework_import)   # wave9 FBX_IMPORT: the model import ABI relay
     add_subdirectory(tests/framework_ik)   # wave5 #24: the IK / rig-input ABI relay
     add_subdirectory(tests/framework_worldfx)   # wave9 VISUAL_SCRIPTING_CSHARP_SYNC: sun / fog / sky light and post layer overrides
+    add_subdirectory(tests/framework_origin)   # wave11 LARGE_WORLD: the floating-origin ABI relay and the WorldPos conversions
 
     add_subdirectory(tests/framework_morph)   # wave9 MORPH_TARGETS: the blend-shape / lip-sync ABI relay
 add_subdirectory(tests/framework_softfield)

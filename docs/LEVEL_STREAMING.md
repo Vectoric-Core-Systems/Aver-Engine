@@ -235,3 +235,10 @@ millisecond budget (12 ms near, 3 ms far, 2 ms evicting, 128 entities a tick), a
 `LevelStreaming` uses) making the entities. A set whose source hash no longer matches the level is stale: one warning, and the level streams from its objects. Play > Standalone Game
 re-cooks a stale set first; `scripts/stage-game.ps1` cooks every level that declares `chunks=` and fails the package if the cook or its check fails. A cooked level can be far larger than
 one f32 frame because the streamer keys chunks by absolute integer coordinate and the scene runs in a floating origin.
+
+**The flat streamer under the floating origin.** `game::LevelStreaming` keeps the placement records as ABSOLUTE f64 centimetres with absolute f64 bounds (the `PlacementStreamer` f64 path:
+`build(std::vector<AabbD>)`, `update(std::vector<Vec3d>)`), converts the origin-relative viewers it is handed with the origin it holds on every `tick`, and narrows each load against that
+origin (`ItemLoader::load(entries, origin)`), so an origin shift loads and evicts nothing. The host tells it with `onOriginShift` (the origin service's streaming participant does) or
+`setOrigin` at a level load. `recordPositionOf(entity, local, out)` is the untouched-record rule for write-back: a resident root keeps its authored f64 on every axis nobody moved and
+gets `origin + local` on a moved one; a child's record is parent-relative and has no origin. Bounds stored in a record stay f32 boxes (a centimetre at 100 km). A level that holds
+`LEVELINST` records is not origin-aware yet (`LevelInstances` still holds f32 bounds), and the service refuses to shift under it.

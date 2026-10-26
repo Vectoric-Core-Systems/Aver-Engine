@@ -36,6 +36,9 @@ namespace aver {
 // Advances one frame: MCP commands, camera, gameplay tick, physics, and the render state.
 void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     HitchMarks hm("update");
+#if AVER_MODULE_SCENE
+    tickOrigin(e);   // S0: the only place the floating origin shifts (LARGE_WORLD 2.2.4); before input, gameplay, physics, streaming, flush
+#endif
     // Forced unpause on scope exit (holds through all exit paths).
     struct FrameStepGuard {
         bool active = false;

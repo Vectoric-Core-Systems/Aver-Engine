@@ -24,6 +24,7 @@
 #include "aver/game/GameLandscape.hpp"
 #include "aver/game/MouseCapture.hpp"
 #include "aver/game/PlayMobility.hpp"
+#include "aver/game/OriginParticipants.hpp"
 
 #include "aver/game/GameCamera.hpp"   // PlayView
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
@@ -223,6 +224,8 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "AverSrChoice.hpp"
 #include "EditorConsole.hpp"
 #include "EditorEntitySnapshot.hpp"
+#include "EditorOriginParticipant.hpp"   // LARGE_WORLD: the editor's part of a floating-origin shift
+#include "WorldConsole.hpp"              // world.* console commands (and the request they queue for slot S0)
 #include "aver/platform/DirectoryWatcher.hpp"
 #if AVER_HAVE_ROSLYN
 #  include "aver/formats/AverDesign.hpp"
@@ -466,10 +469,19 @@ inline aver::save::Host saveHost() {
     return h;
 }
 
-inline i32 saveWriteProvider(const char* path, void*) {
+// Not saved: transient soft-body field entities, and whatever a streamer made (PCG scatter, a cooked level's chunks), which has its
+// own persistence and would otherwise be restored as a second, permanent copy. `user` is the editor's OriginParticipants.
+inline bool saveSkip(aver::scene::Entity e, void* user) {
+    return aver::game::softBodySaveSkip(e, nullptr) || aver::game::OriginParticipants::skipStreamed(e, user);
+}
+
+inline i32 saveWriteProvider(const char* path, void* user) {
+    auto* origin = static_cast<aver::game::OriginParticipants*>(user);
     aver::save::CaptureOptions co;
     co.host = saveHost();
-    co.skip = &aver::game::softBodySaveSkip;   // transient field entities are not saved
+    co.host.user = user;
+    co.skip = &saveSkip;
+    if (origin) { co.originX = origin->originX(); co.originY = origin->originY(); }   // the ORIG chunk
     aver::fmt::OcSaveData snap;
     std::string why;
     if (!aver::save::capture(aver::scene::World::instance(), snap, co, &why)) {
@@ -484,7 +496,8 @@ inline i32 saveWriteProvider(const char* path, void*) {
     return 1;
 }
 
-inline i32 saveLoadProvider(const char* path, void*) {
+inline i32 saveLoadProvider(const char* path, void* user) {
+    auto* origin = static_cast<aver::game::OriginParticipants*>(user);
     aver::fmt::OcSaveData snap;
     std::string why;
     if (!aver::fmt::loadOcSave(path, snap, &why)) {
@@ -493,6 +506,9 @@ inline i32 saveLoadProvider(const char* path, void*) {
     }
     aver::save::RestoreOptions ro;
     ro.host = saveHost();
+    ro.host.user = user;
+    ro.skip = &aver::game::OriginParticipants::skipStreamed;   // the teardown leaves resident chunks alone, as capture left them out
+    if (origin) { ro.originX = origin->originX(); ro.originY = origin->originY(); }
     aver::game::softBodyResetForRestore();   // the restore pass replays saved damage onto rebuilt bodies
     if (!aver::save::restore(snap, aver::scene::World::instance(), ro, &why)) {
         AVER_ERROR("[Save] restore failed: {}", why);
@@ -2058,7 +2074,8 @@ private:
         EditXform before{}, after{};
 
         // Other entities moved with anchor as one command (avoids "undo partway" inconsistency). Stored as LOCAL transforms.
-        struct AlsoMoved { EditId id = 0; Transform beforeLocal, afterLocal; };
+        // root: the entity had no parent when recorded, so its local is in the scene frame and a floating-origin shift moves it.
+        struct AlsoMoved { EditId id = 0; Transform beforeLocal, afterLocal; bool root = true; };
         std::vector<AlsoMoved> alsoMoved;
 
         // VISIBILITY: before/after per entity, replayed through setAuthoredVisible().
@@ -4167,6 +4184,19 @@ private:
     bool entityWorldBounds(scene::Entity e, f32 outMin[3], f32 outMax[3]);
     void stampStreamFields(fmt::OcWorldData& w, const std::unordered_map<u32, i32>& slotOf);
     void buildLevelStreamingSettings();
+    // LARGE_WORLD phase 2 (SandboxOrigin.cpp): the floating origin. tickOrigin is slot S0, the first thing onUpdate does.
+    game::OriginParticipants origin_;
+    void initOrigin(Engine& e);
+    void configureOrigin();
+    void tickOrigin(Engine& e);
+    // The editor's part (SandboxEditorOrigin.cpp): the gesture gate and the rebasers of order 80, the world.* console host, the
+    // overlays a shift stales, and the Show > World Origin window.
+    editor::EditorOriginParticipant editorOrigin_;
+    editor::WorldConsoleHost worldHost_;
+    bool showWorldOrigin_ = false;
+    void initEditorOrigin();
+    void afterOriginShift(Engine& e);
+    bool originBlocksSave(const char* what);
     std::string streamRegenReport_;
     // LARGE_WORLD 2.4.5 (SandboxLevelCook.cpp): World Settings > Level Streaming > Cook Chunks, and the freshness check before a Standalone launch.
     bool cookLevelChunks(std::string& report);

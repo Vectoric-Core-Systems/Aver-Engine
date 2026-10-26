@@ -15,6 +15,10 @@
 //   WorldOrigin    the same pieces driven through the real service by fake participants in the plan's order: order of calls,
 //                  absolute positions kept, a refusal changes nothing, PlayMobility stays Static, no rebase loop
 //                  (control: a participant left out shows its own failure)
+//   Real           game::OriginParticipants itself (Runtime/src/OriginParticipants.cpp, the order table of 2.2.4) against the real
+//                  systems: the registration order, scene roots + PlayMobility + host members + a recording renderer stand-in +
+//                  Jolt in one slot, every deferral rule (a level loading, the host's busy hook, the editor's gesture gate and its
+//                  urgent override, the flat streamers the gate refuses), the project keys, resetForLevel, the save-skip predicate
 //
 // Exit code = failure count. Not run by the author: see section 9 of the plan.
 #include "aver/core/Log.hpp"
@@ -52,8 +56,23 @@
 #include "aver/audio/Mixer.hpp"
 #endif
 #if ORIGINTEST_WORLD
+#include "aver/formats/OcNav.hpp"
+#include "aver/formats/OcWorld.hpp"
+#include "aver/game/GameContent.hpp"
+#include "aver/game/GameLevel.hpp"
+#include "aver/game/GameStreaming.hpp"
+#include "aver/game/OriginParticipants.hpp"
+#include "aver/game/SequenceDirector.hpp"
+#include "aver/rhi/RHI.hpp"
 #include "aver/world/LevelInstance.hpp"
 #include "aver/world/WorldOrigin.hpp"
+#if ORIGINTEST_PHYSICS
+#include "aver/physics/physics_origin_abi.h"
+#endif
+#if AVER_MODULE_FRAMEWORK
+#include "aver/framework/framework_origin_abi.h"
+#include "aver/framework/framework_timers_abi.h"
+#endif
 #endif
 
 #include <algorithm>
@@ -912,6 +931,388 @@ static void testOriginService(scene::World& w) {
     }
     clearWorld(w);
 }
+
+// ---- The real participants ----------------------------------------------------------------------------------------
+
+namespace realtest {
+
+// A device with nothing behind it that records what the renderer participant tells it.
+struct RecDev final : public rhi::IDevice {
+    rhi::Backend backend() const override { return rhi::Backend::Null; }
+    const char* adapterName() const override { return "no gpu"; }
+    rhi::ISwapchain* createSwapchain(const rhi::SwapchainDesc&) override { return nullptr; }
+    void beginFrame() override {}
+    void endFrame() override {}
+    void shiftWorld(const rhi::ShiftWorldInfo& info) override { ++calls; last = info; org = info.newOrigin; }
+    rhi::ShiftOrigin worldOrigin() const override { return org; }
+    u32 calls = 0;
+    rhi::ShiftWorldInfo last{};
+    rhi::ShiftOrigin org{};
+};
+
+constexpr f32 kStep = 1638400.0f;
+
+f64 absXOf(const game::OriginParticipants& op, scene::World& w, scene::Entity e) {
+    return static_cast<f64>(w.localTransform(e).position.x) + static_cast<f64>(op.origin().x);
+}
+
+} // namespace realtest
+
+static void testRealParticipants(scene::World& w) {
+    using namespace realtest;
+    AVER_INFO("=== Real participants (OriginParticipants) ===");
+    clearWorld(w);
+    constexpr i64 step = world::kOriginStepCm;
+
+    {   // the order table of 2.2.4, once, and install() twice does not register twice
+        game::OriginParticipants op;
+        op.install();
+        op.install();
+        const std::vector<std::string> want = {"gate", "physics", "scene", "host", "systems", "streaming", "render", "audio+particles", "editor", "event"};
+        std::vector<std::string> got;
+        for (usize i = 0; i < op.participantCount(); ++i) got.emplace_back(op.participantName(i));
+        check(got == want, "ten participants in the plan's order: gate, physics, scene, host, systems, streaming, render, audio+particles, editor, event");
+        check(op.service().participantCount() == want.size(), "and the service holds exactly those (install is idempotent)");
+    }
+
+    {   // scene + PlayMobility + host members + renderer + audio + events in ONE slot, in order, absolute positions kept
+        std::vector<scene::Entity> es;
+        for (u32 i = 0; i < 2000; ++i) es.push_back(spawn(w, "s", Vec3{static_cast<f32>(i) * 10.0f - 5000.0f, static_cast<f32>(i % 50) * 20.0f, 0.0f}));
+        const scene::Entity far1 = spawn(w, "far", Vec3{1100000.0f, 400000.0f, 90.0f});
+        const scene::Entity kid = spawn(w, "kid", Vec3{25.0f, 0.0f, 0.0f}, far1);
+        w.flush();
+
+        game::PlayMobility pm;
+        pm.begin(w);
+        pm.beginFrame(scene::kInvalidEntity);
+        game::SequenceDirector seqs;
+        RecDev dev;
+        Vec3 cam{1000000.0f, 200.0f, 50.0f}, eye{999000.0f, 200.0f, 50.0f}, gi{900000.0f, 0.0f, 300.0f};
+
+        game::OriginParticipants op;
+        game::OriginBindings& b = op.bindings();
+        b.mobility = &pm;
+        b.sequences = &seqs;
+        b.device = &dev;
+        b.positions = {&cam, &eye, &gi};
+        std::vector<std::string> log;
+        bool sceneShiftedAtHost = false, deviceToldAtEditor = false, deviceToldAtEvent = false, hostSeenAtRender = false;
+        Vec3 audioDelta{};
+        b.onHostCommit = [&](const world::ShiftEvent&) { log.push_back("host"); sceneShiftedAtHost = w.originGeneration() > 0 && w.localTransform(far1).position.x < 400000.0f; };
+        b.onRenderCommit = [&](const world::ShiftEvent&) { log.push_back("render"); hostSeenAtRender = cam.x < 0.0f && dev.calls == 1; };
+        b.audioShift = [&](f32 dx, f32 dy, f32 dz) { log.push_back("audio"); audioDelta = Vec3{dx, dy, dz}; };
+        b.editorPrepare = [&](const world::ShiftEvent&) { log.push_back("editor-prepare"); return world::PrepareResult{}; };
+        b.editorCommit = [&](const world::ShiftEvent&) { log.push_back("editor"); deviceToldAtEditor = dev.calls == 1; };
+        u32 eventGen = 0;
+        b.postEvent = [&](const world::ShiftEvent& ev) { log.push_back("event"); eventGen = ev.generation; deviceToldAtEvent = dev.calls == 1; };
+        op.configure(1, -1, false);
+        op.install();
+
+        std::vector<f64> before;
+        for (const scene::Entity e : es) before.push_back(absXOf(op, w, e));
+        const f64 farBefore = absXOf(op, w, far1);
+        const Vec3 kidBefore = w.localTransform(kid).position;
+        const u32 sceneGen = w.originGeneration();
+
+        check(op.update(cam), "a camera 10 km out shifts one region through the real participants");
+        check(op.origin() == world::OriginCm{step, 0} && op.generation() == 1, "the origin is one region along +X, generation 1");
+        const std::vector<std::string> want = {"editor-prepare", "host", "render", "audio", "editor", "event"};
+        check(log == want, "the hooks run in the table's order: host, render, audio, editor (prepare first), event");
+        check(sceneShiftedAtHost && hostSeenAtRender, "the scene had shifted before the host members, and the host members before the renderer");
+        check(deviceToldAtEditor && deviceToldAtEvent, "the renderer had been told before the editor and the event");
+        check(eventGen == 1 && w.originGeneration() == sceneGen + 1, "the event carries the generation and the scene shifted its roots once");
+        check(dev.calls == 1 && dev.last.newOrigin.x == step && dev.last.newOrigin.y == 0 && dev.last.generation == 1 &&
+              dev.last.deltaCm.x == static_cast<f64>(step) && dev.last.deltaCm.y == 0.0 && dev.org.x == step,
+              "the device got the whole event (delta, new origin, generation) exactly once");
+        check(audioDelta.x == kStep && audioDelta.y == 0.0f, "audio moved by the f32 delta");
+
+        w.flush();
+        f64 worst = 0.0;
+        for (usize i = 0; i < es.size(); ++i) worst = std::max(worst, std::fabs(absXOf(op, w, es[i]) - before[i]));
+        check(worst < 0.01, "every root keeps its absolute position (worst " + std::to_string(worst) + " cm)");
+        check(std::fabs(absXOf(op, w, far1) - farBefore) < 0.01, "a root past the old window too");
+        check(nearV(w.localTransform(kid).position, kidBefore, 1e-4f), "a child is parent-relative and untouched");
+        check(cam.x == 1000000.0f - kStep && eye.x == 999000.0f - kStep && gi.x == 900000.0f - kStep && cam.y == 200.0f && cam.z == 50.0f,
+              "the camera, eye and GI centre moved by exactly -delta, Y and Z alone");
+        pm.beginFrame(scene::kInvalidEntity);
+        u32 movable = 0;
+        for (const scene::Entity e : es) if (pm.movable(w, e, w.worldMatrix(e))) ++movable;
+        check(movable == 0, "PlayMobility: the statics stay Static through the shift and the flush");
+        i64 sx = -1, sy = -1;
+        game::SequencePlayer::sceneOrigin(sx, sy);
+        check(sx == step && sy == 0, "the sequencer was told the origin its absolute keys convert into");
+        check(!op.update(cam), "the camera member moved with the scene, so the next frame decides nothing (no rebase loop)");
+        check(op.service().stats().shifts == 1 && op.service().stats().deferrals == 0, "one shift, no deferrals");
+        pm.end();
+
+        // resetForLevel: back to a clean frame, the renderer told, nothing else run
+        op.resetForLevel();
+        check(op.origin() == world::OriginCm{} && op.generation() == 2, "resetForLevel returns the service to (0, 0) and counts a generation");
+        check(dev.calls == 2 && dev.last.newOrigin.x == 0 && dev.last.deltaCm.x == -static_cast<f64>(step) && dev.org.x == 0,
+              "and tells the device the frame it now names (delta back, origin zero)");
+        game::SequencePlayer::sceneOrigin(sx, sy);
+        check(sx == 0 && sy == 0, "and the sequencer");
+        const usize hooksBefore = log.size();
+        op.resetForLevel();
+        check(dev.calls == 2 && log.size() == hooksBefore, "a reset to the origin it already has tells nobody");
+        clearWorld(w);
+    }
+
+    {   // the deferral rules (2.2.4): nothing runs, nothing moves, the reason is recorded, the retry goes through
+        std::vector<scene::Entity> es;
+        for (u32 i = 0; i < 50; ++i) es.push_back(spawn(w, "s", Vec3{static_cast<f32>(i) * 100.0f, 0.0f, 0.0f}));
+        w.flush();
+        RecDev dev;
+        Vec3 cam{950000.0f, 0.0f, 0.0f};
+        game::OriginParticipants op;
+        game::OriginBindings& b = op.bindings();
+        b.device = &dev;
+        b.positions = {&cam};
+        bool busyNow = false, sawUrgent = false, gestureActive = false, gestureCancelled = false;
+        b.busy = [&](bool urgent) -> const char* { sawUrgent = urgent; return busyNow ? "a play transition" : nullptr; };
+        b.editorPrepare = [&](const world::ShiftEvent& ev) {
+            world::PrepareResult r;
+            if (gestureActive && !ev.urgent) { r.ok = false; r.deferReason = "a drag is in progress"; }
+            else if (gestureActive) { gestureActive = false; gestureCancelled = true; }   // urgent: the editor cancels the gesture and accepts
+            return r;
+        };
+        op.configure(1, -1, false);
+        op.install();
+        const auto reason = [&] { return op.service().stats().lastDeferReason ? std::string(op.service().stats().lastDeferReason) : std::string(); };
+        const auto untouched = [&] { return op.generation() == 0 && dev.calls == 0 && cam.x == 950000.0f && w.localTransform(es[7]).position.x == 700.0f; };
+
+        {   // a level loading: the Quiesce guard, and it nests
+            game::OriginParticipants::Quiesce q(op, "a level is loading");
+            check(!op.update(cam) && reason() == "a level is loading" && untouched(), "a level loading defers the shift, and nothing moved");
+            {
+                game::OriginParticipants::Quiesce inner(op, "a level is unloading");
+                check(!op.update(cam) && reason() == "a level is unloading", "the innermost reason shows");
+            }
+            check(!op.update(cam) && reason() == "a level is loading", "and the outer one returns when the inner one ends");
+        }
+        busyNow = true;
+        check(!op.update(cam) && reason() == "a play transition" && untouched(), "the host's busy hook (a play transition) defers");
+        busyNow = false;
+        gestureActive = true;
+        check(!op.update(cam) && reason() == "a drag is in progress" && untouched() && !gestureCancelled, "the editor's gesture gate defers");
+        check(op.service().stats().deferrals == 5, "every refusal is counted (" + std::to_string(op.service().stats().deferrals) + ")");
+
+        // urgent (the camera beyond 10 km): the gate does not defer on a gesture, the editor cancels it and accepts
+        Vec3 farCam{1100000.0f, 0.0f, 0.0f};
+        check(op.update(farCam) && sawUrgent && gestureCancelled, "an urgent shift reaches the editor, which cancels its gesture and accepts");
+        check(op.generation() == 1 && dev.calls == 1, "and it committed once");
+
+        {   // the flat LevelStreaming follows a shift (absolute f64 bounds, viewers converted each tick); LevelInstances do not yet
+            game::GameContent content;
+            RecDev sdev;
+            fmt::OcWorldData lw;
+            std::string why;
+            check(fmt::parseOcworld("OCWORLD 1\nPLACE Meshes/cube.ocmesh 100 0 0 0 0 0 1\n", lw, &why), "the streaming fixture parses: " + why);
+            lw.stream.enabled = true;
+            lw.stream.cellCm = 5000.0f;
+            lw.stream.loadCm = 10000.0f;
+            lw.stream.evictCm = 15000.0f;
+            game::GameLevel level;
+            world::InstantiateOptions opt;
+            opt.createBodies = false;
+            level.streaming().begin(lw, content, sdev, opt, {});
+            check(level.streaming().active(), "LevelStreaming is active");
+            op.bindings().level = &level;
+            Vec3 c2{950000.0f, 0.0f, 0.0f};
+            const u32 gen = op.generation();
+            check(op.update(c2) && op.generation() == gen + 1, "the gate lets a shift through while LevelStreaming is active");
+            check(level.streaming().origin() == op.origin(), "and the streamer was told the new origin (" + std::to_string(level.streaming().origin().x) + ")");
+            op.resetForLevel();
+            check(level.streaming().origin() == world::OriginCm{}, "a level reset names the origin to it too");
+            level.streaming().end(w);
+            op.bindings().level = nullptr;
+        }
+        clearWorld(w);
+    }
+
+    {   // the project keys, and a disabled service
+        game::OriginParticipants op;
+        op.configure(-1, -1, true);
+        check(op.service().enabled(), "unstated WORLD.FLOATINGORIGIN is the host's default (game: on)");
+        op.configure(-1, -1, false);
+        check(!op.service().enabled(), "and off in the editor");
+        op.configure(1, 204800, false);
+        check(op.service().enabled() && op.service().settings().marginCm == 204800, "an explicit 1 beats the editor default, and the margin is taken");
+        op.configure(0, -1, true);
+        check(!op.service().enabled(), "an explicit 0 beats the game default");
+        op.configure(1, 999999, true);
+        check(op.service().settings().marginCm == world::kRebaseMarginMaxCm, "a margin past the cliff is clamped by the service");
+        Vec3 cam{5000000.0f, 0.0f, 0.0f};
+        op.configure(0, -1, true);
+        op.install();
+        check(!op.update(cam) && op.generation() == 0, "a disabled service never shifts");
+    }
+
+    {   // streaming, nav and the Synapse AI instance follow the shift; the save-skip predicate
+        std::vector<scene::Entity> es;
+        for (u32 i = 0; i < 10; ++i) es.push_back(spawn(w, "s", Vec3{static_cast<f32>(i) * 100.0f, 0.0f, 0.0f}));
+        w.flush();
+        game::GameStreaming streaming;
+        game::GameLevel level;
+        fmt::OcNavData nav;
+        nav.cellSizeCm = 50.0f; nav.originXCm = 1000000.0f; nav.originYCm = 20000.0f; nav.widthCells = 2; nav.heightCells = 2;
+        game::OriginParticipants op;
+        game::OriginBindings& b = op.bindings();
+        b.streaming = &streaming;
+        b.level = &level;
+        b.nav = &nav;
+#if ORIGINTEST_SYNAPSE
+        synapse::SynapseAi ai;
+        b.synapseAi = &ai;
+#endif
+        op.configure(1, -1, true);
+        op.install();
+        Vec3 cam{1000000.0f, 0.0f, 0.0f};
+        check(op.update(cam), "a shift with streaming, a level and a nav grid bound");
+        check(streaming.origin() == world::OriginCm{step, 0} && level.authored().origin() == world::OriginCm{step, 0},
+              "GameStreaming and the cooked-chunk streamer name the new origin");
+        check(nav.originXCm == 1000000.0f - kStep && nav.originYCm == 20000.0f, "the nav grid origin moved by -delta on X and Y only");
+        check(!game::OriginParticipants::skipStreamed(es[0], &op) && !op.ownsStreamed(es[0]), "an ordinary entity is saved");
+        check(!game::OriginParticipants::skipStreamed(es[0], nullptr), "and a null context skips nothing");
+        op.resetForLevel();
+        check(streaming.origin() == world::OriginCm{} && level.authored().origin() == world::OriginCm{}, "resetForLevel names the origin to the streamers too");
+        clearWorld(w);
+    }
+
+#if ORIGINTEST_PHYSICS
+    {   // Jolt in the same slot: no world is not a refusal; a world shifts by -delta; the position the ABI reports follows
+        aver_phys_shutdown();
+        game::OriginParticipants op;
+        op.configure(1, -1, true);
+        op.install();
+        Vec3 cam{1000000.0f, 0.0f, 0.0f};
+        check(op.update(cam) && op.generation() == 1, "with no physics world the shift goes through (nothing to move is not a refusal)");
+        op.resetForLevel();
+
+        aver_phys_reset_layer_collisions();
+        aver_phys_init();
+        const i32 box = aver_phys_add_static_box(1700000.0f, 900000.0f, 120.0f, 50.0f, 50.0f, 50.0f);
+        const scene::Entity ent = spawn(w, "ent", Vec3{1700000.0f, 900000.0f, 120.0f});
+        w.flush();
+        Vec3 cam2{1000000.0f, 0.0f, 0.0f};
+        check(op.update(cam2) && op.origin() == world::OriginCm{step, 0}, "with a world the shift goes through");
+        f32 pos[3] = {0, 0, 0};
+        aver_phys_body_position(box, pos);
+        check(near(pos[0], 1700000.0f - kStep, 0.5f) && near(pos[1], 900000.0f, 0.5f) && near(pos[2], 120.0f, 0.5f),
+              "the body moved by -delta on X (Y and Z alone): x = " + std::to_string(pos[0]));
+        check(std::fabs(w.localTransform(ent).position.x - pos[0]) < 0.5f, "and agrees with the entity the scene participant shifted");
+        check(aver_phys_origin_generation() == 1, "physics counted one shift");
+        double tot[3] = {0, 0, 0};
+        aver_phys_origin_total(tot);
+        check(tot[0] == static_cast<double>(step) && tot[1] == 0.0, "and its total is one region");
+        aver_phys_remove_body(box);
+        clearWorld(w);
+        aver_phys_shutdown();
+        op.resetForLevel();   // the sequencer's origin is process-wide: leave it at zero
+    }
+#endif
+}
+
+#if AVER_MODULE_FRAMEWORK
+// The script seam (framework_origin_abi.h): the provider the host installs, the shift a script requests, and the event with its payload.
+namespace seamtest {
+struct Heard {
+    int count = 0;
+    int64_t dx = 0, dy = 0, gen = 0, ox = 0, oy = 0;
+    int32_t sender = -1, target = -1, args = 0;
+};
+Heard g_heard;
+int32_t AVER_FW_CALL onEvent(int32_t, int64_t, void*) {
+    ++g_heard.count;
+    g_heard.dx = aver_fw_event_current_arg_int(0);
+    g_heard.dy = aver_fw_event_current_arg_int(1);
+    g_heard.gen = aver_fw_event_current_arg_int(2);
+    g_heard.ox = aver_fw_event_current_arg_int(3);
+    g_heard.oy = aver_fw_event_current_arg_int(4);
+    g_heard.sender = aver_fw_event_current_sender();
+    g_heard.target = aver_fw_event_current_target();
+    g_heard.args = aver_fw_event_current_arg_count();
+    return 0;
+}
+} // namespace seamtest
+
+static void testScriptSeam(scene::World& w) {
+    using namespace seamtest;
+    AVER_INFO("=== Script seam (origin ABI, request_shift, world.origin_changed) ===");
+    clearWorld(w);
+    constexpr i64 step = world::kOriginStepCm;
+    aver_fw_events_clear();
+    aver_fw_set_event_dispatch(&onEvent, nullptr);
+    aver_fw_event_subscribe("world.origin_changed", 0, 0, 0, 1);
+
+    {   // not allowed by default: the provider answers, the request is refused and nothing moves
+        game::OriginParticipants op;
+        op.configure(1, -1, true);
+        op.install();
+        int64_t xy[2] = {-1, -1};
+        check(aver_fw_origin_get(xy) == 1 && xy[0] == 0 && xy[1] == 0 && aver_fw_origin_generation() == 0 && aver_fw_origin_enabled() == 1,
+              "install() makes the object the ABI's provider: origin (0,0), generation 0, enabled");
+        check(aver_fw_origin_request_shift(1, 0) == 0 && !op.requestShift(1, 0), "without WORLD.ALLOWSHIFTREQUEST a script's request is refused");
+        Vec3 cam{0.0f, 0.0f, 0.0f};
+        check(!op.update(cam) && op.generation() == 0, "and nothing moved");
+    }
+    check(aver_fw_origin_enabled() == 0, "the provider is gone with the object that installed it");
+
+    {   // allowed: queued, run at the next slot S0, the event carries the shift
+        std::vector<scene::Entity> es;
+        for (u32 i = 0; i < 20; ++i) es.push_back(spawn(w, "s", Vec3{static_cast<f32>(i) * 500.0f, 3000.0f, 0.0f}));
+        w.flush();
+        Vec3 cam{100.0f, 200.0f, 50.0f};
+        game::OriginParticipants op;
+        op.bindings().positions = {&cam};
+        op.configure(1, -1, true, 1);
+        world::WorldOrigin::Settings manual = op.service().settings();
+        manual.policy = world::OriginPolicy::Manual;   // under FollowCamera the camera pulls a requested shift straight back
+        op.service().configure(manual);
+        op.install();
+        check(aver_fw_origin_request_shift(0, 0) == 0, "a zero request is refused");
+        check(aver_fw_origin_request_shift(2, -1) == 1, "an allowed request is queued");
+        check(op.origin() == world::OriginCm{} && op.generation() == 0, "queued means not done: the origin is where it was");
+        double absBefore[3];
+        aver_fw_origin_to_abs(w.localTransform(es[3]).position.x, w.localTransform(es[3]).position.y, 0.0f, absBefore);
+        g_heard = Heard{};
+        check(op.update(cam), "the next update (slot S0) runs the requested shift");
+        check(op.origin() == world::OriginCm{2 * step, -step} && op.generation() == 1, "two regions along +X and one along -Y: generation 1");
+        int64_t xy[2] = {};
+        check(aver_fw_origin_get(xy) == 1 && xy[0] == 2 * step && xy[1] == -step && aver_fw_origin_generation() == 1, "the origin ABI reports the new origin");
+        w.flush();
+        double absAfter[3];
+        aver_fw_origin_to_abs(w.localTransform(es[3]).position.x, w.localTransform(es[3]).position.y, 0.0f, absAfter);
+        check(std::fabs(absAfter[0] - absBefore[0]) < 0.01 && std::fabs(absAfter[1] - absBefore[1]) < 0.01,
+              "an entity's local position moved by -delta and O by +delta, so its absolute (to_abs) is the same place");
+        check(g_heard.count == 0, "the event is posted, not dispatched inside the commit");
+        check(aver_fw_events_pending() == 1, "one world.origin_changed is waiting");
+        aver_fw_events_flush();
+        check(g_heard.count == 1 && g_heard.args == 5, "a flush delivers it once with five payload values");
+        check(g_heard.dx == 2 * step && g_heard.dy == -step && g_heard.gen == 1 && g_heard.ox == 2 * step && g_heard.oy == -step,
+              "the payload is dxCm, dyCm, generation, originX, originY");
+        check(g_heard.sender == 0 && g_heard.target == 0, "sender and target are 0");
+
+        // a request that cannot run is dropped, not retried
+        {
+            game::OriginParticipants::Quiesce quiet(op, "a level is loading");
+            check(aver_fw_origin_request_shift(1, 0) == 1, "a request is accepted while busy");
+            check(!op.update(cam) && op.generation() == 1, "but the busy frame refuses it");
+        }
+        check(!op.update(cam) && op.generation() == 1 && aver_fw_events_pending() == 0, "and it is not retried: the next frame shifts nothing and posts nothing");
+
+        // the origin off: no request is queued
+        world::WorldOrigin::Settings off = op.service().settings();
+        off.enabled = false;
+        op.service().configure(off);
+        check(aver_fw_origin_enabled() == 0 && aver_fw_origin_request_shift(1, 0) == 0, "with the origin off the ABI says so and refuses requests");
+        clearWorld(w);
+    }
+
+    aver_fw_events_clear();
+    aver_fw_set_event_dispatch(nullptr, nullptr);
+}
+#endif // AVER_MODULE_FRAMEWORK
 #endif // ORIGINTEST_WORLD
 
 int main() {
@@ -943,6 +1344,10 @@ int main() {
 #endif
 #if ORIGINTEST_WORLD
     testOriginService(w);
+    testRealParticipants(w);
+#if AVER_MODULE_FRAMEWORK
+    testScriptSeam(w);
+#endif
 #endif
 
     AVER_INFO("=== {} checks, {} failed ===", g_checks, g_failures);

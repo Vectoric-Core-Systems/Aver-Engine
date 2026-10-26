@@ -277,6 +277,10 @@ void SequenceDirector::restore(scene::World& world) {
     store_->restore(world);
 }
 
+void SequenceDirector::rebase(const scene::World& world, const Vec3& deltaCm) {
+    store_->rebase(world, deltaCm);   // every player writes into this one store
+}
+
 void SequenceDirector::clear() {
     entries_.clear();
     seqs_.clear();

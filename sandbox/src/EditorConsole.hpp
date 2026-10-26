@@ -1625,6 +1625,10 @@ inline bool handleVarSet(SandboxApp&, Engine& e, const std::vector<std::string>&
 // phys.* commands -- defined with the variables above.
 void registerPhysicsCommands(std::vector<ConsoleCommandDesc>& t);
 #endif
+#if AVER_MODULE_SCENE
+// world.* commands (the floating origin) -- defined in WorldConsole.cpp.
+void registerWorldCommands(std::vector<ConsoleCommandDesc>& t);
+#endif
 
 namespace detail {
 inline std::vector<ConsoleCommandDesc> buildConsoleCatalog() {
@@ -1692,6 +1696,9 @@ inline std::vector<ConsoleCommandDesc> buildConsoleCatalog() {
 #endif
 #if AVER_MODULE_PHYSICS
     registerPhysicsCommands(t);
+#endif
+#if AVER_MODULE_SCENE
+    registerWorldCommands(t);
 #endif
     return t;
 }

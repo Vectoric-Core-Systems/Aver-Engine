@@ -19,6 +19,10 @@ add_executable(Sandbox WIN32
   src/SandboxLevelLoad.cpp
   src/SandboxLevelStream.cpp
   src/SandboxLevelCook.cpp
+  src/SandboxOrigin.cpp
+  src/SandboxEditorOrigin.cpp
+  src/WorldConsole.cpp
+  src/WorldOriginPanel.cpp
   src/SandboxProject.cpp
   src/SandboxPlay.cpp
   src/SandboxSelection.cpp

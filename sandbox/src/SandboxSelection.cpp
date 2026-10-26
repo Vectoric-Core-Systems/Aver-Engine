@@ -608,7 +608,7 @@ void SandboxApp::endTransformEdit() {
             const auto* loc = w.component<scene::CLocal>(e, scene::kComponentLocal);
             if (!loc) continue;
             if (nearlySameTransform(beforeLocal, loc->xf)) continue;
-            also.push_back({id, beforeLocal, loc->xf});
+            also.push_back({id, beforeLocal, loc->xf, w.parent(e) == scene::kInvalidEntity});   // root: a floating-origin shift moves its local
         }
         multiMoveBefore_.clear();
     }

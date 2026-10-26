@@ -902,3 +902,20 @@ add_executable(PhysicalSurfaceTableModelTest src/PhysicalSurfaceTableModelTest.c
 target_include_directories(PhysicalSurfaceTableModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(PhysicalSurfaceTableModelTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(PhysicalSurfaceTableModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# EditorOriginTest -- the editor's side of a floating-origin shift (LARGE_WORLD 2.7): the rebase of the undo and redo stacks, clipboard and Play
+# snapshot (EditorOriginRebase.hpp, against stand-ins with EditCmd's member names), the gesture gate and its urgent override
+# (EditorOriginParticipant.hpp) through the REAL game::OriginParticipants, an undo across a shift keeping its absolute position, the world.* console
+# (WorldConsole.hpp: rebase, margin, enable, policy, the 50 km and 100 km teleports) and the Show > World Origin readout model. Header-only on the
+# editor side; the participants and the scene are the real libraries. No device, no window, no ImGui.
+if(TARGET Aver.Runtime.Game.Core AND TARGET Aver.World AND TARGET Aver.Scene)
+  add_executable(EditorOriginTest src/EditorOriginTest.cpp)
+  target_include_directories(EditorOriginTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(EditorOriginTest PRIVATE Aver.Runtime.Game.Core Aver.World Aver.Scene Aver.Formats Aver.Core)
+  foreach(_t Aver.Anim.Scene Aver.Camera Aver.SoftBody.Scene Aver.Hair.Scene Aver.Synapse.Scene Aver.Audio Aver.Physics)
+    if(TARGET ${_t})
+      target_link_libraries(EditorOriginTest PRIVATE ${_t})
+    endif()
+  endforeach()
+  set_target_properties(EditorOriginTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

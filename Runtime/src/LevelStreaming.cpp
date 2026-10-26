@@ -19,14 +19,23 @@ namespace {
 // be judged without them, and unloading what might be under the viewer is the worse failure.
 constexpr f32 kUnknownExtentCm = 1.0e9f;
 
-Transform localOf(const fmt::OcWorldPlacement& p) {
-    Transform xf;
-    xf.position = Vec3{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z)};
+// A placement pose with the POSITION in f64: the record is absolute f64 text, and an f32 position quantises it past ~10 km.
+struct PoseD {
+    world::Vec3d position;
+    Quat rotation;
+    Vec3 scale;
+};
+
+PoseD localOf(const fmt::OcWorldPlacement& p) {
+    PoseD xf;
+    xf.position = world::Vec3d{p.x, p.y, p.z};
     xf.rotation = world::quatFromEulerDeg(Vec3{static_cast<f32>(p.roll), static_cast<f32>(p.pitch),
                                                static_cast<f32>(p.yaw)});
     xf.scale = Vec3{static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz)};
     return xf;
 }
+
+world::Vec3d add(const world::Vec3d& a, const Vec3& b) { return world::Vec3d{a.x + b.x, a.y + b.y, a.z + b.z}; }
 } // namespace
 
 void LevelStreaming::begin(const fmt::OcWorldData& w, GameContent& content, rhi::IDevice& device,
@@ -38,6 +47,8 @@ void LevelStreaming::begin(const fmt::OcWorldData& w, GameContent& content, rhi:
     records_ = w.placements;
     removed_.assign(records_.size(), 0);
     itemOf_.assign(records_.size(), ~0u);
+    baseline_.assign(records_.size(), world::PlacementBaseline{});
+    hasBaseline_.assign(records_.size(), 0);
     items_.clear();
     rootPlacements_.clear();
     placementOf_.clear();
@@ -66,12 +77,12 @@ void LevelStreaming::begin(const fmt::OcWorldData& w, GameContent& content, rhi:
     s.cellCm = w.stream.cellCm;
     s.loadCm = w.stream.loadCm;
     s.evictCm = std::max(w.stream.evictCm, w.stream.loadCm + 100.0f);
-    std::vector<world::Aabb> bounds;
+    std::vector<world::AabbD> bounds;
     bounds.reserve(items_.size());
     usize unknown = 0;
     for (const Item& it : items_) {
         bounds.push_back(itemBounds(it));
-        if (bounds.back().max.x - bounds.back().min.x >= kUnknownExtentCm) ++unknown;
+        if (bounds.back().max.x - bounds.back().min.x >= static_cast<f64>(kUnknownExtentCm)) ++unknown;
     }
     streamer_.build(bounds, s);
     active_ = true;
@@ -88,63 +99,95 @@ void LevelStreaming::end(scene::World& world) {
     loader_.end();
     active_ = false;
     records_.clear();
+    baseline_.clear();
+    hasBaseline_.clear();
     items_.clear();
     placementOf_.clear();
     entityOf_.clear();
 }
 
-bool LevelStreaming::worldBounds(u32 placement, Vec3& outMin, Vec3& outMax) const {
+bool LevelStreaming::worldBounds(u32 placement, world::Vec3d& outMin, world::Vec3d& outMax) const {
     const fmt::OcWorldPlacement& p = records_[placement];
     if (p.hasBounds) {
-        outMin = Vec3{p.boundsMin[0], p.boundsMin[1], p.boundsMin[2]};
-        outMax = Vec3{p.boundsMax[0], p.boundsMax[1], p.boundsMax[2]};
+        outMin = world::Vec3d{p.boundsMin[0], p.boundsMin[1], p.boundsMin[2]};
+        outMax = world::Vec3d{p.boundsMax[0], p.boundsMax[1], p.boundsMax[2]};
         return true;
     }
     const std::pair<Vec3, Vec3>* lb = content_ ? content_->boundsFor(p.objectId) : nullptr;
     if (!lb) return false;
-    // World transform through the parent chain, composed as world::instantiate composes it.
-    Transform xf = localOf(p);
+    // World transform through the parent chain, composed as world::instantiate composes it, with the position in f64.
+    PoseD xf = localOf(p);
     for (i32 q = p.parent; q >= 0 && static_cast<usize>(q) < records_.size(); q = records_[static_cast<usize>(q)].parent) {
-        const Transform pw = localOf(records_[static_cast<usize>(q)]);
-        Transform out;
+        const PoseD pw = localOf(records_[static_cast<usize>(q)]);
+        PoseD out;
         out.scale = Vec3{pw.scale.x * xf.scale.x, pw.scale.y * xf.scale.y, pw.scale.z * xf.scale.z};
         out.rotation = pw.rotation * xf.rotation;
-        const Vec3 scaled{xf.position.x * pw.scale.x, xf.position.y * pw.scale.y, xf.position.z * pw.scale.z};
-        out.position = pw.position + pw.rotation.rotate(scaled);
+        const Vec3 scaled{static_cast<f32>(xf.position.x) * pw.scale.x, static_cast<f32>(xf.position.y) * pw.scale.y,
+                          static_cast<f32>(xf.position.z) * pw.scale.z};
+        out.position = add(pw.position, pw.rotation.rotate(scaled));
         xf = out;
     }
-    outMin = Vec3{FLT_MAX, FLT_MAX, FLT_MAX};
-    outMax = Vec3{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+    outMin = world::Vec3d{DBL_MAX, DBL_MAX, DBL_MAX};
+    outMax = world::Vec3d{-DBL_MAX, -DBL_MAX, -DBL_MAX};
     for (int c = 0; c < 8; ++c) {
         const Vec3 l{(c & 1) ? lb->second.x : lb->first.x, (c & 2) ? lb->second.y : lb->first.y,
                      (c & 4) ? lb->second.z : lb->first.z};
         const Vec3 s{l.x * xf.scale.x, l.y * xf.scale.y, l.z * xf.scale.z};
-        const Vec3 v = xf.position + xf.rotation.rotate(s);
-        outMin = Vec3{std::min(outMin.x, v.x), std::min(outMin.y, v.y), std::min(outMin.z, v.z)};
-        outMax = Vec3{std::max(outMax.x, v.x), std::max(outMax.y, v.y), std::max(outMax.z, v.z)};
+        const world::Vec3d v = add(xf.position, xf.rotation.rotate(s));
+        outMin = world::Vec3d{std::min(outMin.x, v.x), std::min(outMin.y, v.y), std::min(outMin.z, v.z)};
+        outMax = world::Vec3d{std::max(outMax.x, v.x), std::max(outMax.y, v.y), std::max(outMax.z, v.z)};
     }
     return true;
 }
 
-world::Aabb LevelStreaming::itemBounds(const Item& it) const {
-    world::Aabb b;
-    b.min = Vec3{FLT_MAX, FLT_MAX, FLT_MAX};
-    b.max = Vec3{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+world::AabbD LevelStreaming::itemBounds(const Item& it) const {
+    world::AabbD b;
+    b.min = world::Vec3d{DBL_MAX, DBL_MAX, DBL_MAX};
+    b.max = world::Vec3d{-DBL_MAX, -DBL_MAX, -DBL_MAX};
     bool any = false;
     for (const u32 pi : it.placements) {
         if (removed(pi)) continue;
-        Vec3 lo, hi;
+        world::Vec3d lo, hi;
         if (!worldBounds(pi, lo, hi)) {
-            b.min = Vec3{-kUnknownExtentCm, -kUnknownExtentCm, -kUnknownExtentCm};
-            b.max = Vec3{kUnknownExtentCm, kUnknownExtentCm, kUnknownExtentCm};
+            const f64 u = static_cast<f64>(kUnknownExtentCm);
+            b.min = world::Vec3d{-u, -u, -u};
+            b.max = world::Vec3d{u, u, u};
             return b;
         }
-        b.min = Vec3{std::min(b.min.x, lo.x), std::min(b.min.y, lo.y), std::min(b.min.z, lo.z)};
-        b.max = Vec3{std::max(b.max.x, hi.x), std::max(b.max.y, hi.y), std::max(b.max.z, hi.z)};
+        b.min = world::Vec3d{std::min(b.min.x, lo.x), std::min(b.min.y, lo.y), std::min(b.min.z, lo.z)};
+        b.max = world::Vec3d{std::max(b.max.x, hi.x), std::max(b.max.y, hi.y), std::max(b.max.z, hi.z)};
         any = true;
     }
-    if (!any) b.min = b.max = Vec3{0, 0, 0};
+    if (!any) b.min = b.max = world::Vec3d{0, 0, 0};
     return b;
+}
+
+void LevelStreaming::noteBaseline(u32 placement, scene::Entity e) {
+    // Item roots only: a child's record is parent-relative and origin-free. The baseline is what the entity actually has now (a ground-snapped
+    // root differs from the narrowed record in Z), so an untouched entity compares equal bit for bit.
+    if (placement >= records_.size() || itemOf_[placement] == ~0u) return;
+    const Item& it = items_[itemOf_[placement]];
+    if (it.placements.empty() || it.placements.front() != placement) return;
+    const auto* loc = scene::World::instance().component<scene::CLocal>(e, scene::kComponentLocal);
+    if (!loc) return;
+    const fmt::OcWorldPlacement& p = records_[placement];
+    baseline_[placement] = world::PlacementBaseline{world::Vec3d{p.x, p.y, p.z}, loc->xf.position};
+    hasBaseline_[placement] = 1;
+}
+
+void LevelStreaming::onOriginShift(const world::ShiftEvent& ev) {
+    origin_ = ev.newOrigin;
+    // Records and bounds are absolute, so nothing loads or evicts. The baselines follow the entities: the very f32 subtraction
+    // World::shiftRoots applied to them, so an entity nobody moved still compares equal to its baseline.
+    for (u32 i = 0; i < baseline_.size(); ++i)
+        if (hasBaseline_[i]) world::rebaseBaseline(baseline_[i], ev.deltaF);
+}
+
+bool LevelStreaming::recordPositionOf(scene::Entity e, const Vec3& currentLocal, world::Vec3d& outCm) const {
+    const auto it = placementOf_.find(e);
+    if (it == placementOf_.end() || it->second >= hasBaseline_.size() || !hasBaseline_[it->second]) return false;
+    outCm = world::writeBackCm(baseline_[it->second], currentLocal, origin_);
+    return true;
 }
 
 void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& items) {
@@ -168,7 +211,7 @@ void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& item
             entries.push_back(en);
         }
     }
-    const std::vector<ItemLoader::Loaded> loadedBatch = loader_.load(entries, {}, &hm);
+    const std::vector<ItemLoader::Loaded> loadedBatch = loader_.load(entries, origin_, &hm);
     std::vector<scene::Entity> loaded;
     std::vector<u32> loadedPlacement;
     std::vector<i32> loadedBody;
@@ -176,6 +219,7 @@ void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& item
         loadedBody.push_back(l.body);
         placementOf_[l.entity] = l.tag;
         entityOf_[l.tag] = l.entity;
+        noteBaseline(l.tag, l.entity);
         loaded.push_back(l.entity);
         loadedPlacement.push_back(l.tag);
     }
@@ -210,9 +254,15 @@ void LevelStreaming::evictItem(scene::World& world, u32 item, bool writeBack) {
     streamer_.markEvicted(item);
 }
 
-void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewers) {
+void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewersLocal) {
     if (!active_) return;
     HitchMarks hm("level stream tick", 0.25);
+    // The bounds are absolute f64; the viewers arrive in the scene frame. At a zero origin `x + 0.0` is x.
+    std::vector<world::Vec3d> viewers;
+    viewers.reserve(viewersLocal.size());
+    for (const Vec3& v : viewersLocal)
+        viewers.push_back(world::Vec3d{static_cast<f64>(v.x) + static_cast<f64>(origin_.x), static_cast<f64>(v.y) + static_cast<f64>(origin_.y),
+                                       static_cast<f64>(v.z)});
     std::vector<u32> toLoad, toEvict;
     streamer_.update(viewers, toLoad, toEvict);
     hm.mark("streamer");
@@ -237,7 +287,7 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewers)
     loader_.prefetchTick();
     for (const u32 item : toLoad) {
         if (item >= items_.size() || items_[item].loaded || streamer_.pinned(item)) continue;
-        const f32 dist = streamer_.distance(item, viewers);
+        const f32 dist = static_cast<f32>(streamer_.distance(item, viewers));
         for (const u32 pi : items_[item].placements)
             if (!removed(pi)) loader_.prefetch(records_[pi].objectId, dist);
     }
@@ -247,7 +297,7 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewers)
         bool read = true;
         for (const u32 pi : items_[item].placements)
             if (!removed(pi)) read = read && loader_.ready(records_[pi].objectId);
-        nearestMissing = std::min(nearestMissing, streamer_.distance(item, viewers));
+        nearestMissing = std::min(nearestMissing, static_cast<f32>(streamer_.distance(item, viewers)));
         if (read) ready.push_back(item);
     }
     hm.mark("prefetch");
@@ -316,12 +366,12 @@ void LevelStreaming::updateRecord(u32 placement, fmt::OcWorldPlacement p, bool k
     records_[placement] = p;
     // Fresh bounds from the loaded mesh when there is one, so the saved .ocstream follows the edit.
     records_[placement].hasBounds = false;
-    Vec3 lo, hi;
+    world::Vec3d lo, hi;
     if (worldBounds(placement, lo, hi)) {
         fmt::OcWorldPlacement& r = records_[placement];
-        r.hasBounds = true;
-        r.boundsMin[0] = lo.x; r.boundsMin[1] = lo.y; r.boundsMin[2] = lo.z;
-        r.boundsMax[0] = hi.x; r.boundsMax[1] = hi.y; r.boundsMax[2] = hi.z;
+        r.hasBounds = true;   // the file stores f32 boxes: a streaming bound is good to a centimetre at 100 km, which is all it needs
+        r.boundsMin[0] = static_cast<f32>(lo.x); r.boundsMin[1] = static_cast<f32>(lo.y); r.boundsMin[2] = static_cast<f32>(lo.z);
+        r.boundsMax[0] = static_cast<f32>(hi.x); r.boundsMax[1] = static_cast<f32>(hi.y); r.boundsMax[2] = static_cast<f32>(hi.z);
     } else if (p.hasBounds) {
         records_[placement].hasBounds = true;   // mesh not loaded: keep the bounds it had
     }
@@ -333,6 +383,8 @@ u32 LevelStreaming::addRecord(const fmt::OcWorldPlacement& p, scene::Entity e) {
     records_.push_back(p);
     records_.back().parent = -1;
     removed_.push_back(0);
+    baseline_.push_back(world::PlacementBaseline{});
+    hasBaseline_.push_back(0);
     Item item;
     item.placements.push_back(pi);
     item.loaded = true;
@@ -344,6 +396,7 @@ u32 LevelStreaming::addRecord(const fmt::OcWorldPlacement& p, scene::Entity e) {
     placementOf_[e] = pi;
     entityOf_[pi] = e;
     updateRecord(pi, records_[pi]);
+    noteBaseline(pi, e);
     const u32 sidx = streamer_.add(itemBounds(items_[idx]));
     (void)sidx;   // the streamer numbers items in add order, as items_ does
     streamer_.markLoaded(idx);

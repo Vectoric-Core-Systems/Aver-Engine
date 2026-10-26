@@ -790,7 +790,7 @@ void SandboxApp::onInit(Engine& e)  {
 
         // Install save/load providers (guarded on both SCENE and FRAMEWORK).
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
-        aver_fw_set_save_provider(&saveWriteProvider, &saveLoadProvider, this);
+        aver_fw_set_save_provider(&saveWriteProvider, &saveLoadProvider, &origin_);
 #endif
 
         // Declare graph classes (retry after scripting host bootstraps).
@@ -1199,6 +1199,9 @@ void SandboxApp::onInit(Engine& e)  {
             return reloadScripts(binDir, status);
         });
     }
+#endif
+#if AVER_MODULE_SCENE
+    initOrigin(e);   // LARGE_WORLD: the floating origin's bindings and participants (SandboxOrigin.cpp)
 #endif
     tool_ = initialTool_;
     sel_ = 1;

@@ -67,6 +67,7 @@
 #include "aver/game/GameInput.hpp"
 #include "aver/game/MouseCapture.hpp"
 #include "aver/game/PlayMobility.hpp"
+#include "aver/game/OriginParticipants.hpp"
 #include "aver/game/LevelSequence.hpp"
 #include "aver/game/SequenceDirector.hpp"   // [wave5/sequencer]
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
@@ -200,6 +201,14 @@ private:
     void installLevelHooks(Engine&);
     // Switches chunk streaming on for the loaded level.
     void enableChunkStreaming();
+#if AVER_MODULE_SCENE
+    // The floating origin (LARGE_WORLD 2.2; GameAppOrigin.cpp). initOrigin reads the WORLD.* keys, fills the bindings and
+    // registers the participants, once, before the first level loads. tickOrigin is slot S0, the first thing onUpdate does.
+    // loadStartMapAtOrigin is level_.loadStartMap with shifts refused while it runs and the service reset first.
+    void initOrigin(Engine&);
+    void tickOrigin(Engine&);
+    void loadStartMapAtOrigin(const std::string& overridePath);
+#endif
 
     // Initialises and registers the Voxi renderer (also creates pbr::MaterialSystem).
     void attachVoxi(Engine&);
@@ -311,6 +320,9 @@ private:
     scene::Entity firstPersonPawn_ = scene::kInvalidEntity;
     // What moves during the session, so Voxi keeps it out of the GI bake (PlayMobility.hpp).
     game::PlayMobility playMobility_;
+    // The origin service and its participants (OriginParticipants.hpp). The camera, eye and GI centre below are
+    // origin-relative; a shift moves them with the scene.
+    game::OriginParticipants origin_;
     // The level's sequences (.ocworld SEQ records): move actors, the view and emissive while they play. [wave5/sequencer]
     game::SequenceDirector sequenceDirector_;
     // DrawWorldOptions::emissiveScale sink; user is the GameApp.

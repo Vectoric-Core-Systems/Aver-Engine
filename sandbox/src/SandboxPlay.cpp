@@ -802,6 +802,7 @@ void SandboxApp::reloadAfterPlay(Engine& eng) {
     const std::string path = levelPath_.empty() ? snapshot : levelPath_;
     const std::string keepPath = levelPath_;
     const Vec3 cam = camPos_; const f32 yaw = yaw_, pitch = pitch_, speed = flySpeed_;
+    const world::OriginCm camOrigin = origin_.origin();   // the camera is origin-relative; the reload resets the origin
     const bool wasUnsaved = pieWasUnsaved_;
     projectLoading_ = std::make_unique<LoadingScreen>(
         eng, eng.window() != nullptr && maxFrames_ == 0, executableDir() + AVER_PATH_SEP "splash.png");
@@ -818,6 +819,11 @@ void SandboxApp::reloadAfterPlay(Engine& eng) {
         spawnClassPlacements();
     levelPath_ = keepPath;
     camPos_ = cam; yaw_ = yaw; pitch_ = pitch; flySpeed_ = speed;
+    {
+        const world::OriginCm now = origin_.origin();
+        camPos_.x += static_cast<f32>(static_cast<f64>(camOrigin.x) - static_cast<f64>(now.x));
+        camPos_.y += static_cast<f32>(static_cast<f64>(camOrigin.y) - static_cast<f64>(now.y));
+    }
     if (wasUnsaved) markLevelUnsaved();
     std::error_code ec;
     std::filesystem::remove(snapshot, ec);

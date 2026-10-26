@@ -126,6 +126,7 @@ public:
     ChunkStreamer& streamer() { return streamer_; }
     const ChunkStreamer& streamer() const { return streamer_; }
     BodyRegistry& bodies() { return bodies_; }
+    const BodyRegistry& bodies() const { return bodies_; }
     const StreamStats& stats() const { return streamer_.stats(); }
     const ChunkWorldSettings& settings() const { return settings_; }
 

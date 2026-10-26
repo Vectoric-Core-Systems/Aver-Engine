@@ -33,6 +33,18 @@ foreach(_pair ANIM:Aver.Anim.Scene CAMERA:Aver.Camera SOFTBODY:Aver.SoftBody.Sce
 endforeach()
 set_target_properties(OriginParticipantsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# WorldFlightTest -- the integration test of the floating origin (LARGE_WORLD 5.2): a camera flies +X 100 km at 200 m/s through the REAL
+# participants with a real scene, a real Jolt world and a real PCG chunk world; six rebases, and at each one the tracked entities, the statics, the
+# chunk set, a sleeping pile, a pile in flight, a world-anchored door and pulley, a character on a deck and a car are checked. Headless. Needs physics.
+add_executable(WorldFlightTest src/WorldFlightTest.cpp)
+target_link_libraries(WorldFlightTest PRIVATE Aver.Runtime.Game.Core Aver.World Aver.Scene Aver.Formats Aver.Core)
+foreach(_t Aver.Physics Aver.Framework)
+  if(TARGET ${_t})
+    target_link_libraries(WorldFlightTest PRIVATE ${_t})
+  endif()
+endforeach()
+set_target_properties(WorldFlightTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # AuthoredStreamingTest -- game::AuthoredStreaming: the choice (fresh / stale / missing), the cooked set streamed through ItemLoader, a rebase between ticks loads
 # and evicts nothing, a teleport, end(). A real scene::World and an empty GameContent; no device, no window.
 add_executable(AuthoredStreamingTest src/AuthoredStreamingTest.cpp)
@@ -115,6 +127,11 @@ set_target_properties(GameAccessibilityTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY 
 add_executable(ItemLoaderTest src/ItemLoaderTest.cpp)
 target_link_libraries(ItemLoaderTest PRIVATE Aver.Runtime.Game.Core Aver.World Aver.Scene Aver.Formats Aver.Core)
 set_target_properties(ItemLoaderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# LevelStreamingOriginTest -- game::LevelStreaming under the floating origin (LARGE_WORLD 2.4.1, 2.6): absolute f64 records and bounds, viewers converted with the
+# origin each tick, a shift that loads and evicts nothing, the untouched-record write-back. A real scene::World and an empty GameContent; no GPU, no window.
+add_executable(LevelStreamingOriginTest src/LevelStreamingOriginTest.cpp)
+target_link_libraries(LevelStreamingOriginTest PRIVATE Aver.Runtime.Game.Core Aver.World Aver.Scene Aver.Formats Aver.Core)
+set_target_properties(LevelStreamingOriginTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # GameCameraTest -- GameCamera.hpp (wave 10 gameplay cameras): pushCamera with a PlayView (the default is today's camera bit for
 # bit; FOV and roll are inputs now), the legacy boom, and drivePlayCamera with and without a camera rig. A recording stand-in device
 # and a real scene::World; no window, no GPU. The rig cases compile where Aver.Camera exists (it brings AVER_MODULE_CAMERA).

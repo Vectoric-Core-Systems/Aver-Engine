@@ -138,6 +138,8 @@ public:
     u64 residentTriangleCount(const TriangleLookupFn& lookup) const;
 
     const world::StreamStats& stats() const { return stats_; }
+    // The primary field itself (null when not enabled): tests and tools read its resident set and body registry. Not a way to drive it.
+    const world::ChunkWorld* primaryField() const { return primary_.get(); }
     // The primary field's settings. Only meaningful while enabled(); returns a static
     // default-constructed ChunkWorldSettings when not.
     const world::ChunkWorldSettings& settings() const;

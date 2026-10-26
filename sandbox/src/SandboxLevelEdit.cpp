@@ -3,6 +3,7 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "EditorRecordOrigin.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "LightLevelIo.hpp"
 #if AVER_MODULE_VEHICLE_SCENE
@@ -429,7 +430,8 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     // Play found.
     const auto placedIt = animPlaced.find(static_cast<u32>(e));
     const Transform& xf = placedIt == animPlaced.end() ? loc->xf : *placedIt->second;
-    p.x = xf.position.x; p.y = xf.position.y; p.z = xf.position.z;
+    // LARGE_WORLD: a root's record is absolute (origin + local, a streamed root keeping the axes nobody moved); a child's is parent-relative.
+    editor::writeRecordPosition(p, xf.position, origin_.origin(), level_.streaming(), e, world.parent(e) == scene::kInvalidEntity);
     const Vec3 euler = eulerDegFromQuat(xf.rotation);
     p.roll = euler.x; p.pitch = euler.y; p.yaw = euler.z;
     p.sx = xf.scale.x; p.sy = xf.scale.y; p.sz = xf.scale.z;
@@ -486,6 +488,7 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
 }
 
 bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
+    if (originBlocksSave(playSnapshot ? "The Play snapshot" : "Saving the level")) return false;   // LARGE_WORLD: records are written from the scene frame
     if (levelIsLegacyOcmap_) return saveLevelAsOcmap(path, playSnapshot);
 
     scene::World& world = scene::World::instance();

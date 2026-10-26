@@ -266,6 +266,11 @@ u64 SandboxApp::residentTriangleCount() const {
 // level_ logs why.
 void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
     unloadLevel(eng);
+#if AVER_MODULE_SCENE
+    game::OriginParticipants::Quiesce originQuiet(origin_, "a level is loading");
+    configureOrigin();   // the project's WORLD.* keys, which a project switch changes
+    origin_.resetForLevel();
+#endif
 
     game::GameLevel::LoadHooks hooks;
     hooks.beforePlacements = [this, &eng](const std::string& levelPath, const fmt::OcWorldData& w) {
@@ -378,6 +383,9 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
     installLevelStreamHooks(eng);
 #endif
     level_.load(path, content_);
+#if AVER_MODULE_SCENE
+    origin_.levelLoaded();
+#endif
 }
 
 // What the editor keeps for an OCWORLD level once level_ has instantiated it: its label table, its

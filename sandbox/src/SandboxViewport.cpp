@@ -2,6 +2,7 @@
 // Split out of the 29,952-line SandboxApp.cpp (2026-09-16), method bodies moved verbatim; class declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "WorldOriginPanel.hpp"   // Show > World Origin
 #include "ViewportMarquee.hpp"
 #include "aver/rhi/PrimitiveMeshes.hpp"
 
@@ -92,6 +93,7 @@ void SandboxApp::rebuildColliderOverlay(Engine& e) {
     mix(levelBodies_.empty() ? 0u : static_cast<u64>(static_cast<u32>(levelBodies_.front())));
     mix(levelBodies_.empty() ? 0u : static_cast<u64>(static_cast<u32>(levelBodies_.back())));
     mix(static_cast<u64>(entityBodies_.size()));
+    sig = editor::EditorOriginParticipant::overlaySignature(sig, origin_.generation());   // a floating-origin shift moves every box
 #endif
     bool staticStale =
         !(colliderOverlayBuilt_ && colliderOverlayAllKnown_ && sig == colliderOverlaySig_);
@@ -3173,6 +3175,11 @@ void SandboxApp::buildViewportOverlay() {
         ImGui::Checkbox("Camera Coordinates", &showCamCoords_);
         uiReg_.track("show.camCoords");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("The camera's position (cm) and heading under this toolbar.");
+#if AVER_MODULE_SCENE
+        ImGui::Checkbox("World Origin", &showWorldOrigin_);
+        uiReg_.track("show.worldOrigin");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("The floating origin: region, origin and camera in km, shifts and the last shift's cost.");
+#endif
         ImGui::Separator();
         ImGui::TextDisabled("Go To");
         if (ImGui::MenuItem("World Origin (0, 0, 0)")) teleportCamera(Vec3{0.0f, 0.0f, 0.0f});
@@ -3207,6 +3214,9 @@ void SandboxApp::buildViewportOverlay() {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies \"x y z\" (cm), the form --cam and Go To take.");
     }
     ImGui::End();
+#if AVER_MODULE_SCENE
+    editor::drawWorldOriginPanel(showWorldOrigin_, origin_, camPos_, dpi_);
+#endif
 
     const f32 icon = 20.0f*dpi_, caretW = 11.0f*dpi_, tiny = 2.0f*dpi_, gap = 5.0f*dpi_;
     ImGui::SetNextWindowPos(ImVec2(vpX_+vpW_-pad, vpY_+pad), ImGuiCond_Always, ImVec2(1,0));

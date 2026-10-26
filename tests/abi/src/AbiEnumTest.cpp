@@ -607,6 +607,12 @@ static const Abi kAbis[] = {
     {"soft shape ABI", {"modules/framework/include/aver/framework/framework_softshape_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/FwSoftShape.cs", "aver_fw_softshape_"},
     // wave 11 SOFTBODY_HAIR phase I: the hair relay (names, parameter names and types against FwHair.cs).
     {"hair ABI", {"modules/framework/include/aver/framework/framework_hair_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/FwHair.cs", "aver_fw_hair_"},
+    // wave 11 LARGE_WORLD: the floating origin. The physics half is also inside the base row above (Native.cs reads its Native.<feature>.cs siblings);
+    // this row checks it on its own, against the narrower prefix, so a rename in physics_origin_abi.h names this file.
+    {"physics origin ABI",
+     {"modules/physics/include/aver/physics/physics_origin_abi.h", nullptr},
+     "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.Origin.cs", "aver_phys_origin_"},
+    {"framework origin ABI", {"modules/framework/include/aver/framework/framework_origin_abi.h", nullptr}, "AVER_FW_ABI", "scripting/csharp/Aver.Framework/Native.Origin.cs", "aver_fw_"},
 };
 
 // A DOCUMENTED, DELIBERATE DIVERGENCE. Parameter NAMES are compared because types alone cannot see

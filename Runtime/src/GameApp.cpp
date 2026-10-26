@@ -223,10 +223,19 @@ aver::save::Host saveHost() {
     return h;
 }
 
-i32 saveWriteProvider(const char* path, void*) {
+// Not saved: transient soft-body field entities, and whatever a streamer made (PCG scatter, a cooked level's chunks), which
+// has its own persistence and would otherwise be restored as a second, permanent copy. `user` is the host's OriginParticipants.
+bool gameSaveSkip(aver::scene::Entity e, void* user) {
+    return aver::game::softBodySaveSkip(e, nullptr) || aver::game::OriginParticipants::skipStreamed(e, user);
+}
+
+i32 saveWriteProvider(const char* path, void* user) {
+    auto* origin = static_cast<aver::game::OriginParticipants*>(user);
     aver::save::CaptureOptions co;
     co.host = saveHost();
-    co.skip = &aver::game::softBodySaveSkip;   // transient field entities are not saved
+    co.host.user = user;
+    co.skip = &gameSaveSkip;
+    if (origin) { co.originX = origin->originX(); co.originY = origin->originY(); }   // the ORIG chunk: a restore under another origin re-expresses every root
     aver::fmt::OcSaveData snap;
     std::string why;
     if (!aver::save::capture(aver::scene::World::instance(), snap, co, &why)) {
@@ -241,7 +250,8 @@ i32 saveWriteProvider(const char* path, void*) {
     return 1;
 }
 
-i32 saveLoadProvider(const char* path, void*) {
+i32 saveLoadProvider(const char* path, void* user) {
+    auto* origin = static_cast<aver::game::OriginParticipants*>(user);
     aver::fmt::OcSaveData snap;
     std::string why;
     if (!aver::fmt::loadOcSave(path, snap, &why)) {
@@ -250,6 +260,9 @@ i32 saveLoadProvider(const char* path, void*) {
     }
     aver::save::RestoreOptions ro;
     ro.host = saveHost();
+    ro.host.user = user;
+    ro.skip = &aver::game::OriginParticipants::skipStreamed;   // the teardown leaves resident chunks alone, as capture left them out
+    if (origin) { ro.originX = origin->originX(); ro.originY = origin->originY(); }
     aver::game::softBodyResetForRestore();   // the restore pass replays saved damage onto rebuilt bodies
     if (!aver::save::restore(snap, aver::scene::World::instance(), ro, &why)) {
         AVER_ERROR("[Save] restore failed: {}", why);
@@ -1202,7 +1215,8 @@ void GameApp::openProject(Engine& e) {
         AVER_INFO("[Game] no project: pass one on the command line, or ship a Game.ocproject beside the executable");
 #if AVER_MODULE_SCENE
         // Load level without project if named on command line
-        if (!cfg_.levelPath.empty()) level_.loadStartMap(project_, content_, cfg_.levelPath);
+        initOrigin(e);
+        if (!cfg_.levelPath.empty()) loadStartMapAtOrigin(cfg_.levelPath);
 #endif
         return;
     }
@@ -1276,7 +1290,8 @@ void GameApp::openProject(Engine& e) {
     // Load particle effects before levels (CPU-only)
     content_.loadProjectParticleEffects();
 #endif
-    level_.loadStartMap(project_, content_, cfg_.levelPath);
+    initOrigin(e);
+    loadStartMapAtOrigin(cfg_.levelPath);
 #if AVER_MODULE_SYNAPSE_SCENE
     // Load navigation (optional; most levels have none)
     {
@@ -1382,7 +1397,7 @@ void GameApp::initScripting() {
         // Animation notifies wired to the scripting host
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
         aver_fw_set_anim_curve_provider(&GameApp::animCurve, this);
-        aver_fw_set_save_provider(&saveWriteProvider, &saveLoadProvider, this);
+        aver_fw_set_save_provider(&saveWriteProvider, &saveLoadProvider, &origin_);
 #endif
 
 #if AVER_MODULE_SYNAPSE_SCENE
@@ -2102,6 +2117,9 @@ void GameApp::onInit(Engine& e) {
 }
 
 void GameApp::onUpdate(Engine& e, const Timestep& t) {
+#if AVER_MODULE_SCENE
+    tickOrigin(e);   // S0: the only place the floating origin shifts (LARGE_WORLD 2.2.4); before input, gameplay, physics, streaming, flush
+#endif
     ++frames_;
     cloudTime_ += t.dt;
 #if AVER_MODULE_FRAMEWORK

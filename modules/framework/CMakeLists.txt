@@ -45,10 +45,14 @@ add_library(Aver.Framework SHARED
   src/WorldFxAbi.cpp
   src/DataTableAbi.cpp
   src/EntityStateAbi.cpp
+  # The floating origin (wave 11, docs/plans/wave11/LARGE_WORLD.md 2.5): a host-installed provider and the exact WorldPos conversions.
+  src/FrameworkOriginAbi.cpp
   # Terrain and water queries relayed from the host (wave 3, landscape layers and rivers).
   src/TerrainAbi.cpp)
 
 target_include_directories(Aver.Framework PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# FrameworkOriginAbi.cpp includes aver/world/WorldPos.hpp only: header-only and Core-only, so there is no link to Aver.World (which sits above Scene).
+target_include_directories(Aver.Framework PRIVATE ${CMAKE_SOURCE_DIR}/modules/world/include)
 # Strand hair calls relayed to the hair system's provider (wave 11, docs/HAIR.md). The relay lives with the module that answers it, so it is named by path;
 # it can move to src/HairAbi.cpp unchanged.
 target_sources(Aver.Framework PRIVATE ${CMAKE_SOURCE_DIR}/modules/hair.scene/framework/FrameworkHairAbi.cpp)
