@@ -579,6 +579,15 @@ void AnimSystem::setObjectAnimationLive(bool live) {
     objectLive_ = live;
 }
 
+void AnimSystem::rebase(const scene::World& world, const Vec3& deltaCm) {
+    for (auto& [e, ob] : objects_) {
+        if (world.parent(e) != scene::kInvalidEntity) continue;
+        ob.base.position.x -= deltaCm.x;
+        ob.base.position.y -= deltaCm.y;
+        ob.base.position.z -= deltaCm.z;
+    }
+}
+
 Transform AnimSystem::sampleObject(const fmt::OcAnimation& c, f32 t) {
     // Reset every call: sampleAnimation leaves a channel the track lacks alone, and an object clip
     // with no scale keys must read as scale 1, not as the previous sample's.

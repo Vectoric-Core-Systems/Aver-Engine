@@ -21,6 +21,14 @@ scene::Entity rootOf(const scene::World& w, scene::Entity e) {
     return cur;
 }
 
+// A root's origin-relative f32 position plus the floating origin, summed in f64 and split once. A zero origin adds nothing, so
+// this is exactly splitCm(position, size).
+SplitPos splitRoot(const Vec3& local, OriginCm origin, i32 chunkSizeCm) {
+    return splitCm(static_cast<f64>(local.x) + static_cast<f64>(origin.x),
+                   static_cast<f64>(local.y) + static_cast<f64>(origin.y),
+                   static_cast<f64>(local.z), chunkSizeCm);
+}
+
 // Half the diagonal of a mesh renderer's local AABB, or -1 when there is nothing to measure.
 f32 boundsRadiusCm(const scene::World& w, scene::Entity e) {
     const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
@@ -34,16 +42,16 @@ f32 boundsRadiusCm(const scene::World& w, scene::Entity e) {
 
 } // namespace
 
-ChunkCoord ownerChunkOf(const scene::World& w, scene::Entity e, i32 chunkSizeCm) {
+ChunkCoord ownerChunkOf(const scene::World& w, scene::Entity e, i32 chunkSizeCm, OriginCm origin) {
     const scene::Entity r = rootOf(w, e);
     const auto* loc = w.component<scene::CLocal>(r, scene::kComponentLocal);
     if (!loc) return ChunkCoord{};
     // A root has no parent, so its CLocal position IS its world position -- no compose pass needed,
     // which is what lets this run outside a frame.
-    return splitCm(loc->xf.position, chunkSizeCm).chunk;
+    return splitRoot(loc->xf.position, origin, chunkSizeCm).chunk;
 }
 
-Partition partitionWorld(const scene::World& w, const PartitionOptions& opt) {
+Partition partitionWorld(const scene::World& w, const PartitionOptions& opt, OriginCm origin) {
     Partition out;
     const i32 size = opt.chunkSizeCm > 0 ? opt.chunkSizeCm : kDefaultChunkSizeCm;
     const f32 oversizeCm = opt.oversizeChunks * static_cast<f32>(size);
@@ -64,7 +72,7 @@ Partition partitionWorld(const scene::World& w, const PartitionOptions& opt) {
         if (!loc) continue;
 
         ++out.rootCount;
-        out.chunks[splitCm(loc->xf.position, size).chunk].push_back(e);
+        out.chunks[splitRoot(loc->xf.position, origin, size).chunk].push_back(e);
 
         const f32 r = boundsRadiusCm(w, e);
         if (r < 0.0f) ++out.unknownBounds;
@@ -74,10 +82,10 @@ Partition partitionWorld(const scene::World& w, const PartitionOptions& opt) {
 }
 
 std::unordered_map<ChunkCoord, ChunkPayload> captureAll(const scene::World& w, const Partition& part,
-                                                        i32 chunkSizeCm) {
+                                                        i32 chunkSizeCm, OriginCm origin) {
     std::unordered_map<ChunkCoord, ChunkPayload> out;
     out.reserve(part.chunks.size());
-    for (const auto& kv : part.chunks) out.emplace(kv.first, capture(w, kv.second, kv.first, chunkSizeCm));
+    for (const auto& kv : part.chunks) out.emplace(kv.first, capture(w, kv.second, kv.first, chunkSizeCm, origin));
     return out;
 }
 

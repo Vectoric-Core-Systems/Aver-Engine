@@ -7,6 +7,12 @@ add_executable(AtmosphereTest src/AtmosphereTest.cpp)
 target_link_libraries(AtmosphereTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
 set_target_properties(AtmosphereTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# WorldShiftTest -- the floating origin's renderer math (composePrevViewProj, wave phase, cloud fold, PerFrameCB rows) with no device.
+# Links Aver.RHI, Aver.Core and Aver.Platform only, like AtmosphereTest above.
+add_executable(WorldShiftTest src/WorldShiftTest.cpp)
+target_link_libraries(WorldShiftTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
+set_target_properties(WorldShiftTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # LineMeshTest -- destroyLineMesh's contract, against a real backend.
 #
 # The only RHI test here that creates a device. It has to: the rules under test (a slot is kept and

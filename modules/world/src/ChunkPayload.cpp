@@ -3,6 +3,7 @@
 #if AVER_MODULE_SCENE
 
 #  include "aver/core/Log.hpp"
+#  include "aver/world/BodyRegistry.hpp"
 #  include "aver/scene/Components.hpp"
 #  include "aver/scene/scene_abi.h"
 
@@ -12,7 +13,7 @@ namespace {
 // Appends `e` and then its children, depth first, so a parent is always at a lower index than any of
 // its descendants. restore() relies on exactly that and does no fix-up pass.
 void appendSubtree(const scene::World& w, scene::Entity e, i32 parentIndex,
-                   const ChunkCoord& coord, i32 chunkSizeCm, std::vector<PayloadEntity>& out) {
+                   const ChunkCoord& coord, i32 chunkSizeCm, OriginCm origin, std::vector<PayloadEntity>& out) {
     if (!w.valid(e)) return;
     const auto* loc = w.component<scene::CLocal>(e, scene::kComponentLocal);
     if (!loc) return;
@@ -26,7 +27,10 @@ void appendSubtree(const scene::World& w, scene::Entity e, i32 parentIndex,
     // A ROOT's transform is world-space, so it is rebased onto the chunk here. A child's is already
     // parent-relative and is carried through untouched -- rebasing it would move the child.
     if (parentIndex < 0) {
-        const SplitPos sp = splitCm(loc->xf.position, chunkSizeCm);
+        // Origin-relative f32 plus the origin, summed in f64 and split once: exact at any distance. Zero adds nothing.
+        const SplitPos sp = splitCm(static_cast<f64>(loc->xf.position.x) + static_cast<f64>(origin.x),
+                                    static_cast<f64>(loc->xf.position.y) + static_cast<f64>(origin.y),
+                                    static_cast<f64>(loc->xf.position.z), chunkSizeCm);
         // The caller decided ownership; this only re-expresses the position against that decision.
         // A root whose split lands in another chunk means partition and capture disagree, and the
         // offset below would then be outside [0, chunkSize) -- which the round-trip test checks.
@@ -54,7 +58,7 @@ void appendSubtree(const scene::World& w, scene::Entity e, i32 parentIndex,
         for (scene::Entity c = h->firstChild; c != scene::kInvalidEntity;) {
             const auto* ch = w.component<scene::CHierarchy>(c, scene::kComponentHierarchy);
             const scene::Entity next = ch ? ch->nextSibling : scene::kInvalidEntity;
-            appendSubtree(w, c, selfIndex, coord, chunkSizeCm, out);
+            appendSubtree(w, c, selfIndex, coord, chunkSizeCm, origin, out);
             c = next;
         }
     }
@@ -63,12 +67,12 @@ void appendSubtree(const scene::World& w, scene::Entity e, i32 parentIndex,
 } // namespace
 
 ChunkPayload capture(const scene::World& w, const std::vector<scene::Entity>& roots,
-                     const ChunkCoord& coord, i32 chunkSizeCm) {
+                     const ChunkCoord& coord, i32 chunkSizeCm, OriginCm origin) {
     ChunkPayload p;
     p.coord = coord;
     p.chunkSizeCm = chunkSizeCm;
     p.entities.reserve(roots.size());
-    for (const scene::Entity e : roots) appendSubtree(w, e, -1, coord, chunkSizeCm, p.entities);
+    for (const scene::Entity e : roots) appendSubtree(w, e, -1, coord, chunkSizeCm, origin, p.entities);
     return p;
 }
 
@@ -110,10 +114,14 @@ std::vector<scene::Entity> restore(const ChunkPayload& p, scene::World& w, const
             // A root: put the chunk's origin back on. This is the exact inverse of capture, and it
             // is exact -- the origin is integer centimetres and the offset is under one chunk, so
             // the only rounding is the final narrowing to the f32 the runtime uses.
+            //
+            // WITH A FLOATING ORIGIN the origin comes off in i64 BEFORE the narrowing, so the integer part stays
+            // exact and the single f32 rounding happens on the sum with the small chunk-local offset. Z is never
+            // shifted. A zero origin subtracts nothing: the same f32 as before.
             xf.position = Vec3{
-                pe.local.position.x + static_cast<f32>(chunkOriginCmAxis(p.coord.x, p.chunkSizeCm)),
-                pe.local.position.y + static_cast<f32>(chunkOriginCmAxis(p.coord.y, p.chunkSizeCm)),
-                pe.local.position.z + static_cast<f32>(chunkOriginCmAxis(p.coord.z, p.chunkSizeCm))};
+                static_cast<f32>(chunkOriginCmAxis(p.coord.x, p.chunkSizeCm) - opt.origin.x) + pe.local.position.x,
+                static_cast<f32>(chunkOriginCmAxis(p.coord.y, p.chunkSizeCm) - opt.origin.y) + pe.local.position.y,
+                static_cast<f32>(chunkOriginCmAxis(p.coord.z, p.chunkSizeCm)) + pe.local.position.z};
         }
 
         const scene::Entity e = w.create(pe.name, parent, xf);
@@ -145,7 +153,10 @@ std::vector<scene::Entity> restore(const ChunkPayload& p, scene::World& w, const
         if (pe.hasBody && opt.createBody) {
             // World position, which is what the physics ABI takes -- it knows nothing of chunks.
             const Vec3 half{pe.bodyHalfExtentCm[0], pe.bodyHalfExtentCm[1], pe.bodyHalfExtentCm[2]};
-            opt.createBody(e, xf.position, half);
+            const i32 body = opt.createBody(e, xf.position, half);
+            // Kept now, so an eviction can free it. 0 is the physics ABI's "no body" as well as -1; a host that attached
+            // for itself just replaces its own id with the same one.
+            if (body > 0 && opt.bodies) opt.bodies->attach(e, body);
         }
     }
 

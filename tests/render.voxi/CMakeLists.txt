@@ -109,6 +109,16 @@ target_include_directories(NeuRaCTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render
 target_compile_definitions(NeuRaCTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(NeuRaCTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# VoxiShiftTest -- the renderer's half of the floating origin that needs no device (LARGE_WORLD 2.2.6, section 5.4): the three previous-camera
+# matrices against an independent f64 projection, NRD2's camera delta, NeuRaC's tag arithmetic for the three cell sizes, and source assertions that
+# VoxiRenderer::shiftWorld, both backends and the water shaders touch every kept position. Links Aver.Core; the headers are reached by include path
+# (NeuRaCLayout.hpp, rhi/WorldShift.hpp are Core-only); AVER_REPO_ROOT for the source assertions.
+add_executable(VoxiShiftTest src/VoxiShiftTest.cpp)
+target_link_libraries(VoxiShiftTest PRIVATE Aver.Core)
+target_include_directories(VoxiShiftTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include ${CMAKE_SOURCE_DIR}/modules/rhi/include)
+target_compile_definitions(VoxiShiftTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(VoxiShiftTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # NeuRaCNetTest -- the stage-2a trust network's CPU half (aver/voxi/NeuRaCNetReference.hpp, the spec for
 # voxi_neurac_net.hlsl): the feature builder on hand-built cells, label, eligibility, hash thinning, the trust
 # mapping, the identity init (trust exactly 1), the batch against the Mlp's safeBatchLimit, and a

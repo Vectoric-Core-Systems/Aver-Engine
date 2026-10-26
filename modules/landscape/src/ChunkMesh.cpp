@@ -18,13 +18,21 @@ ChunkCounts chunkCounts(u32 q) {
 
 // Builds one node's mesh. Returns false on a bad node index, a bad tiling, or a count mismatch.
 bool buildChunkMesh(const fmt::OcLandData& d, const LandscapeTree& tree, u32 nodeIndex,
-                    ChunkMesh& out, f32 uvTilingCm) {
+                    ChunkMesh& out, f32 uvTilingCm, i64 originXCm, i64 originYCm) {
     if (nodeIndex >= tree.nodes().size()) return false;
     if (!(uvTilingCm > 0.0f)) return false;
     const LandscapeNode& n = tree.nodes()[nodeIndex];
     const u32 q = tree.nodeQuads();
     const u32 side = q + 1;
     const u32 stride = n.stride;
+
+    // The floating origin's share of the texture coordinate: the fraction of a tile the origin sits at, in f64.
+    f32 uPhase = 0.0f, vPhase = 0.0f;
+    if (originXCm != 0 || originYCm != 0) {
+        const f64 tile = static_cast<f64>(uvTilingCm);
+        uPhase = static_cast<f32>(std::fmod(static_cast<f64>(originXCm) / tile, 1.0));
+        vPhase = static_cast<f32>(std::fmod(static_cast<f64>(originYCm) / tile, 1.0));
+    }
 
     const ChunkCounts counts = chunkCounts(q);
     out.vertices.clear();
@@ -71,6 +79,8 @@ bool buildChunkMesh(const fmt::OcLandData& d, const LandscapeTree& tree, u32 nod
             // World-aligned uv, continuous across a level change.
             v.u = w[0] / uvTilingCm;
             v.v = w[1] / uvTilingCm;
+            if (uPhase != 0.0f) v.u += uPhase;
+            if (vPhase != 0.0f) v.v += vPhase;
             out.vertices.push_back(v);
         }
     }

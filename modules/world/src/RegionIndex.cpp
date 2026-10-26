@@ -20,6 +20,8 @@ bool before(const RegionCoord& a, const RegionCoord& b) {
 // A ceiling on the region count, so a corrupt length cannot make the decoder reserve wildly before
 // discovering the buffer is short.
 constexpr u32 kMaxRegions = 4'000'000;
+// The same guard for the wide list (a cooked level has a handful to a few thousand).
+constexpr u32 kMaxWide = 16'000'000;
 
 } // namespace
 
@@ -70,6 +72,14 @@ std::vector<u8> encodeIndex(const RegionIndex& ix) {
         w.u32v(r.chunkCount);
         w.str(r.relativePath);
     }
+    w.u32v(ix.kind);
+    w.u64v(ix.sourceHash);
+    w.u32v(static_cast<u32>(ix.wide.size()));
+    for (const WideItem& it : ix.wide) {
+        w.i32v(it.owner.x); w.i32v(it.owner.y); w.i32v(it.owner.z);
+        for (int a = 0; a < 3; ++a) w.u64v(static_cast<u64>(it.minCm[a]));
+        for (int a = 0; a < 3; ++a) w.u64v(static_cast<u64>(it.maxCm[a]));
+    }
     // Over everything above, appended last -- so decode can check it before trusting a single field.
     w.u32v(fmt::avrCrc32c(w.bytes.data(), w.bytes.size()));
     return std::move(w.bytes);
@@ -87,7 +97,8 @@ bool decodeIndex(const u8* data, usize size, RegionIndex& out, std::string* why)
 
     ByteReader r(data, covered);
     if (r.u32v() != kIndexMagic) return fail("index magic is wrong -- not an .ocindex");
-    if (r.u32v() != kIndexVersion) return fail("index version is not understood");
+    const u32 version = r.u32v();
+    if (version < kIndexVersionMin || version > kIndexVersion) return fail("index version is not understood");
     out.levelId = r.u64v();
     out.chunkSizeCm = r.i32v();
     out.worldSeed = r.u64v();
@@ -115,6 +126,26 @@ bool decodeIndex(const u8* data, usize size, RegionIndex& out, std::string* why)
         if (i > 0 && !before(out.regions.back().coord, e.coord))
             return fail("index regions are not sorted or contain duplicates");
         out.regions.push_back(std::move(e));
+    }
+    out.kind = kIndexKindOverrides;
+    out.sourceHash = 0;
+    out.wide.clear();
+    if (version >= 2) {
+        out.kind = r.u32v();
+        out.sourceHash = r.u64v();
+        const u32 wideCount = r.u32v();
+        if (r.bad) return fail("index is truncated in its cook fields");
+        if (out.kind > kIndexKindCooked) return fail("index declares a kind this reader does not know");
+        if (wideCount > kMaxWide || static_cast<usize>(wideCount) * 60 > r.left) return fail("index declares an implausible wide count");
+        out.wide.reserve(wideCount);
+        for (u32 i = 0; i < wideCount; ++i) {
+            WideItem it;
+            it.owner = ChunkCoord{r.i32v(), r.i32v(), r.i32v()};
+            for (int a = 0; a < 3; ++a) it.minCm[a] = static_cast<i64>(r.u64v());
+            for (int a = 0; a < 3; ++a) it.maxCm[a] = static_cast<i64>(r.u64v());
+            out.wide.push_back(it);
+        }
+        if (r.bad) return fail("index is truncated in its wide list");
     }
     if (r.left != 0) return fail("index has unread trailing bytes");
     return true;

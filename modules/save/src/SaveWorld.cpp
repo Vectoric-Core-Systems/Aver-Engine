@@ -284,6 +284,9 @@ void appendSubtree(const scene::World& w, scene::Entity e, i32 parentIndex,
 
 bool capture(const scene::World& w, fmt::OcSaveData& out, const CaptureOptions& opt, std::string* why) {
     out.entities.clear();
+    // The positions below are origin-relative f32; the origin travels with them (LARGE_WORLD 2.6.4).
+    out.originX = opt.originX;
+    out.originY = opt.originY;
     std::vector<scene::Entity> handles;
     std::vector<PendingRef> pending;
     Walk g{out, handles, pending};
@@ -411,6 +414,14 @@ bool restore(const fmt::OcSaveData& in, scene::World& w, const RestoreOptions& o
     std::vector<scene::Entity> made(in.entities.size(), scene::kInvalidEntity);
     u32 droppedFields = 0;
 
+    // THE FLOATING ORIGIN MOVED SINCE THE SAVE WAS TAKEN (or the save is from another region): a root's saved position was
+    // measured from `in.origin`, the world now measures from `opt.origin`. The difference is a whole number of regions, so the
+    // i64 subtraction is exact; the add is in f64 and rounds once to f32. Equal origins (every save made before the origin
+    // existed, restored at origin zero) add 0.0 and write the saved bits back. Children are parent-relative and untouched.
+    const f64 originDx = static_cast<f64>(in.originX - opt.originX);
+    const f64 originDy = static_cast<f64>(in.originY - opt.originY);
+    const bool originMoved = originDx != 0.0 || originDy != 0.0;
+
     for (usize i = 0; i < in.entities.size(); ++i) {
         const fmt::OcSaveEntity& en = in.entities[i];
         scene::Entity parent = scene::kInvalidEntity;
@@ -524,6 +535,13 @@ bool restore(const fmt::OcSaveData& in, scene::World& w, const RestoreOptions& o
                 // when it mattered. Skipped rather than deducted, because the second pass is the pass
                 // that can actually resolve a forward reference.
                 if (f.kind == AVER_SCENE_KIND_ENTITY) continue;
+                if (originMoved && en.parent < 0 && f.f.size() == 3 && f.name == "position" && sc.type == "CLocal") {
+                    fmt::OcSaveField moved = f;
+                    moved.f[0] = static_cast<f32>(static_cast<f64>(f.f[0]) + originDx);
+                    moved.f[1] = static_cast<f32>(static_cast<f64>(f.f[1]) + originDy);
+                    if (!applyField(w, e, type, sc, moved, made)) ++droppedFields;
+                    continue;
+                }
                 if (!applyField(w, e, type, sc, f, made)) ++droppedFields;
             }
         }

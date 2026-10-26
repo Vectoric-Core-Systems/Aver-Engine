@@ -67,6 +67,10 @@ public:
 
     void clear();
 
+    // The floating origin moved (LARGE_WORLD 2.2.6): the emitter origin, every particle slot and every trail point are
+    // `delta` smaller (plain f32 subtraction, the same one the scene's roots take). A trail point's w, an age, is kept.
+    void shiftWorld(const Vec3& delta);
+
 private:
     Particle make(const SpawnRequest& req, u32 id, const std::vector<ResolvedModule>& spawnMods) const;
     void pushTrail(usize slot, Particle& p);

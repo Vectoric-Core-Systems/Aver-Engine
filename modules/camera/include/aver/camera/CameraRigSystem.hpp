@@ -105,6 +105,11 @@ public:
     // Play stop / level unload: state, modifiers, inbox.
     void clear();
 
+    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts `deltaCm` from every world position the system holds
+    // across frames (follow lag, look-ahead, last poses, the blend source, queued shakes, the debug view). Left
+    // alone the boom lags 16 km behind its target for a frame and snaps. Call after World::shiftRoots.
+    void rebase(const Vec3& deltaCm);
+
     // Debug view for the editor overlay: what the live rig computed last frame. False when none is live.
     struct DebugView {
         scene::Entity rig = scene::kInvalidEntity;

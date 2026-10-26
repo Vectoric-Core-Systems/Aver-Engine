@@ -18,6 +18,19 @@ Vec3 worldPositionOf(aver::scene::World& world, aver::scene::Entity e) {
 
 } // namespace
 
+void AgentSystem::rebase(aver::scene::World& world, const aver::Vec3& deltaCm) {
+    for (auto& [e, path] : paths_)
+        for (Vec3& p : path.points) p -= deltaCm;
+    aver::scene::ComponentPool* pool = type_ ? world.pool(type_) : nullptr;
+    if (!pool) return;
+    for (usize i = 0; i < pool->size(); ++i) {
+        auto* c = static_cast<CSynapseAgent*>(pool->dataAt(i));
+        if (!c || c->status == static_cast<i32>(AgentStatus::None)) continue;
+        c->goalXCm -= deltaCm.x;   c->goalYCm -= deltaCm.y;   c->goalZCm -= deltaCm.z;
+        c->targetXCm -= deltaCm.x; c->targetYCm -= deltaCm.y; c->targetZCm -= deltaCm.z;
+    }
+}
+
 u32 AgentSystem::registerComponents(aver::scene::World& world) {
     auto b = world.registerComponent<CSynapseAgent>("CSynapseAgent");
     b.field("radiusCm", scene::FieldKind::F32, static_cast<u16>(offsetof(CSynapseAgent, radiusCm)))

@@ -58,6 +58,9 @@ inline constexpr u32 kResolveGroups      = kCells / kResolveGroupSize;       // 
 inline constexpr u32 kInfoRing           = 3;     // Upload buffers; matches kRtInstanceRing
 
 inline constexpr u32 kFlagClearAll = 1u;           // RcInfo.hdr0.x bit 0: resolve clears all
+// RcInfo.flags bit 1: the floating origin moved; the resolve re-labels cascade 2's live cells by the tag units in bits 8..15
+// (x) and 16..23 (y). Cascades 0 and 1 need nothing: see the static_asserts below shiftTagUnits.
+inline constexpr u32 kFlagRetagCoarse = 2u;
 
 // ---------------------------------------------------------------- shared structs
 // RcInfo: what the trace twins and the resolve both read, once per frame (80 B, StructuredBuffer).
@@ -115,6 +118,33 @@ constexpr u32 cellIndex(u32 cascade, i32 x, i32 y, i32 z) {
               tz = static_cast<u32>(z) & kResMask;
     return cascade * kCellsPerCascade + ((tz * kRes) + ty) * kRes + tx;
 }
+// ---------------------------------------------------------------- the floating origin (LARGE_WORLD 2.2.6)
+// A rebase moves every local position by -(k * 1,638,400) cm. A world cell (local) therefore moves by -(k * 1,638,400 / size),
+// its toroidal texel (cell & 63) by a multiple of 64 (none), and its tag byte ((cell >> 6) & 255) by 1,638,400 / size / 64 per step.
+// That is 1024 for the 25 cm cascade and 256 for the 100 cm one (both 0 mod 256: those caches are untouched) and 64 for the
+// 400 cm one, which the resolve re-labels once (kFlagRetagCoarse). Everything below is that arithmetic, pinned at compile time.
+inline constexpr i64 kOriginStepCm = 1'638'400;
+inline constexpr i64 tagStepPerRegion(u32 cascade) {
+    constexpr i64 cell[kCascades] = {25, 100, 400};
+    return kOriginStepCm / cell[cascade] / 64;
+}
+static_assert(kOriginStepCm % 25 == 0 && kOriginStepCm % 100 == 0 && kOriginStepCm % 400 == 0, "a step is a whole number of cells");
+static_assert((kOriginStepCm / 25) % 64 == 0 && (kOriginStepCm / 100) % 64 == 0 && (kOriginStepCm / 400) % 64 == 0,
+              "a step is a whole number of 64-cell tori, so the toroidal texel of a cell never changes");
+static_assert(tagStepPerRegion(0) % 256 == 0 && tagStepPerRegion(1) % 256 == 0, "cascades 0 and 1 keep their tags");
+static_assert(tagStepPerRegion(2) == 64, "cascade 2's tag byte moves by 64 per region step");
+// Tag units to subtract from cascade 2's tag byte after `steps` region steps along one axis (steps may be negative).
+constexpr u32 shiftTagUnits(i64 steps) { return static_cast<u32>(((steps % 4) + 4) % 4) * 64u; }
+// A meta word re-labelled by the resolve: dx / dy are shiftTagUnits of the x / y steps; tag z and the rest are untouched.
+constexpr u32 retagMeta(u32 meta, u32 dx, u32 dy) {
+    return (meta & 0xFF000000u) | (meta & 0x00FF0000u) | ((((meta >> 8) & 255u) - dy) & 255u) << 8 | (((meta & 255u) - dx) & 255u);
+}
+// The RcInfo flags word a frame carries after the origin moved by (dxSteps, dySteps) region steps; 0 when nothing to relabel.
+constexpr u32 originShiftFlags(i64 dxSteps, i64 dySteps) {
+    const u32 dx = shiftTagUnits(dxSteps), dy = shiftTagUnits(dySteps);
+    return (dx | dy) ? (kFlagRetagCoarse | (dx << 8) | (dy << 16)) : 0u;
+}
+
 // Window min-corner world cell from camera position and cell size, in world units.
 inline i32 snapOrigin(f32 camCm, f32 cellSizeCm) {
     return static_cast<i32>(std::floor(camCm / cellSizeCm)) - kHalfRes;

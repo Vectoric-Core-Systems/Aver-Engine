@@ -50,6 +50,20 @@ target_link_libraries(ChunkStreamTest PRIVATE Aver.World Aver.Scene Aver.Formats
 set_target_properties(ChunkStreamTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ChunkPayloadV2Test -- chunk codec v2 (tagged extras behind a flag bit) and the typed placement extras: a v1 stream still reads, an
+# entity without extras encodes to the v1 bytes, unknown and repeated tags survive, every truncation is refused, malformed known tags
+# are named. No scene, no files.
+add_executable(ChunkPayloadV2Test src/ChunkPayloadV2Test.cpp)
+target_link_libraries(ChunkPayloadV2Test PRIVATE Aver.World Aver.Formats Aver.Core)
+set_target_properties(ChunkPayloadV2Test PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# RegionPackedTest -- packed (version 3) regions, the group-directory LRU, index version 2 and a RegionChunkSource over a packed set, against
+# real files. Baseline-free like RegionFileTest: determinism by memcmp, damage refused by name, the LRU by counted reads.
+add_executable(RegionPackedTest src/RegionPackedTest.cpp)
+target_link_libraries(RegionPackedTest PRIVATE Aver.World Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(RegionPackedTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # RegionWriteTest -- runtime mutation: the sector allocator, the free list, crash safety, compaction.
 #
 # The crash case is checked at EVERY sector boundary rather than a sampled few, because a crash does
@@ -153,4 +167,40 @@ set_target_properties(PhysicsShapeCacheFileTest PROPERTIES
 add_executable(PlacementStreamerTest src/PlacementStreamerTest.cpp)
 target_link_libraries(PlacementStreamerTest PRIVATE Aver.World Aver.Core)
 set_target_properties(PlacementStreamerTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ChunkOriginTest -- the chunk path with a floating origin (LARGE_WORLD 2.4.2): restore/capture/partition against an origin, zero churn
+# across a rebase (with a negative control), the one-f32-frame source limit, the f64 generator lattice, the open-time version/seed
+# warnings and the body kept by restore. No GPU, no window.
+add_executable(ChunkOriginTest src/ChunkOriginTest.cpp)
+target_link_libraries(ChunkOriginTest PRIVATE
+  Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Render.Pcg Aver.Core)
+set_target_properties(ChunkOriginTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# WorldPosTest -- the one world position type (LARGE_WORLD 2.1) and the floating-origin arithmetic:
+# round trips, the i64-first subtraction, the decide/hysteresis table, the 100 km flight's six shifts,
+# the Sterbenz exactness of a 16.384 km step, the untouched-record write-back rule. Core + the service.
+add_executable(WorldPosTest src/WorldPosTest.cpp)
+target_link_libraries(WorldPosTest PRIVATE Aver.World Aver.Core)
+set_target_properties(WorldPosTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AuthoredCookTest -- the chunk cook (LARGE_WORLD 2.4.5): LEVELINST flattened in f64, classification, exact owner chunks, payload extras, packed regions
+# through AuthoredChunkSource, determinism, the slim level, staleness, a 20,000-placement slice. No GPU.
+add_executable(AuthoredCookTest src/AuthoredCookTest.cpp)
+target_link_libraries(AuthoredCookTest PRIVATE Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(AuthoredCookTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AuthoredStreamTest -- the streamer upgrades a cooked level needs (columns, pad, wide set, prepare gate, ms budgets, pin, occupancy) each with a control,
+# ScatterChunkHost identical to no host, and ChunkedEqualsFlat against world::instantiate. No GPU.
+add_executable(AuthoredStreamTest src/AuthoredStreamTest.cpp)
+target_link_libraries(AuthoredStreamTest PRIVATE Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(AuthoredStreamTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# WorldOriginTest -- the shift protocol: participant order, prepare refusal changes nothing, commit sees the
+# new origin, the policies, reset, urgency, off-step deltas, per-participant timing.
+add_executable(WorldOriginTest src/WorldOriginTest.cpp)
+target_link_libraries(WorldOriginTest PRIVATE Aver.World Aver.Core)
+set_target_properties(WorldOriginTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

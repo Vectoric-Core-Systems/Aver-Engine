@@ -71,6 +71,9 @@ public:
     // Replaces the occlusion ray. Default: a Jolt raycast when physics is built in, else none.
     void setRayFn(RayBlockFn fn, void* user) { rayFn_ = fn; rayUser_ = user; }
     void setListenerPosition(f32 x, f32 y, f32 z) { listener_[0] = x; listener_[1] = y; listener_[2] = z; }
+    // Floating-origin shift (LARGE_WORLD 2.2.5): the cached listener position moves by -deltaCm. Voices follow their
+    // entities (or the mixer's own rebase), zones are read from their entities each tick.
+    void rebase(f32 dxCm, f32 dyCm, f32 dzCm) { listener_[0] -= dxCm; listener_[1] -= dyCm; listener_[2] -= dzCm; }
     // What the reverb is outside every zone.
     void setAmbientReverb(const ReverbParams& p) { ambient_ = p; }
 

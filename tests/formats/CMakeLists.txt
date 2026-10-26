@@ -368,6 +368,21 @@ set_target_properties(AverAssetC PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BIN
 # PointInstancer produces. Header-only and Core-only, so an include directory and no link -- the
 # arrangement tests/editor already uses for it.
 target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/modules/world/include)
+# `AverAssetC cook-chunks` (LARGE_WORLD 2.4.5). The cook is the pure half of Aver.World (Core + Formats + Platform). It is compiled straight into the tool, like
+# HairCurves.cpp below, rather than by linking Aver.World: that library's PUBLIC link interface carries Aver.Scene, Aver.Physics (Jolt) and Aver.Vehicle, and a shipping
+# asset compiler must not depend on them. None of these files may see AVER_MODULE_SCENE (the tool must not link anything that defines it); none does.
+set(AVER_WORLD_COOK_SRC ${CMAKE_SOURCE_DIR}/modules/world/src)
+target_sources(AverAssetC PRIVATE
+  ${AVER_WORLD_COOK_SRC}/ChunkCook.cpp
+  ${AVER_WORLD_COOK_SRC}/LevelFlatten.cpp
+  ${AVER_WORLD_COOK_SRC}/LevelAssetLibrary.cpp
+  ${AVER_WORLD_COOK_SRC}/ChunkCodec.cpp
+  ${AVER_WORLD_COOK_SRC}/ChunkPayloadExtras.cpp
+  ${AVER_WORLD_COOK_SRC}/RegionFile.cpp
+  ${AVER_WORLD_COOK_SRC}/RegionIndex.cpp
+  ${AVER_WORLD_COOK_SRC}/ChunkSource.cpp
+  ${AVER_WORLD_COOK_SRC}/AuthoredChunkSource.cpp)
+target_compile_definitions(AverAssetC PRIVATE AVER_HAVE_COOK=1)
 # `AverAssetC hair` (glTF line strands -> .ochair, docs/HAIR.md). HairCurves.cpp is compiled straight into the tool rather than linking Aver.Hair: the library
 # also holds the settings builder, which names Aver.Physics, and a shipping asset compiler must not depend on the physics DLL. HairCurves.cpp is pure (Core and
 # Formats only).

@@ -113,6 +113,8 @@ struct World::Impl {
     u64                 writeEpoch = 1;
     u64                 cleanEpoch = 0;
 
+    u32                 originGeneration = 0;   // shiftRoots calls
+
     // The entity's CHierarchy, or nullptr.
     CHierarchy* hier(Entity e) {
         return static_cast<CHierarchy*>(pools[kComponentHierarchy]->get(e));
@@ -823,6 +825,28 @@ bool World::touchLocal(Entity e) {
     ++impl_->writeEpoch;
     return true;
 }
+
+// Subtracts a floating-origin shift from every root's local position.
+u32 World::shiftRoots(const Vec3& deltaCm) {
+    Impl& d = *impl_;
+    u32 moved = 0;
+    for (const Entity e : d.live) {
+        const CHierarchy* h = d.hier(e);
+        if (h && h->parent != kInvalidEntity) continue;
+        CLocal* l = d.loc(e);
+        if (!l) continue;
+        l->xf.position.x -= deltaCm.x;
+        l->xf.position.y -= deltaCm.y;
+        l->xf.position.z -= deltaCm.z;
+        bumpRevision(l->rev);
+        ++moved;
+    }
+    if (moved) ++d.writeEpoch;
+    ++d.originGeneration;
+    return moved;
+}
+
+u32 World::originGeneration() const { return impl_->originGeneration; }
 
 // The entity's world matrix, composing its ancestor chain on demand. Identity for a stale handle.
 const Mat4& World::worldMatrix(Entity e) {

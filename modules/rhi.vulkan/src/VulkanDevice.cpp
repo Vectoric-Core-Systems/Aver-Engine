@@ -2581,15 +2581,22 @@ void VulkanDevice::setSkyAtmosphere(const SkyAtmosphere& s) {
     frameCB_.cloudParams[2] = s.cloudBottom;
     frameCB_.cloudParams[3] = s.cloudTop > s.cloudBottom ? s.cloudTop : s.cloudBottom + 1.0f;
     if (s.cloudSeed == 0) {
-        frameCB_.cloudMotion[0] = s.cloudWind[0] * s.cloudTime;
-        frameCB_.cloudMotion[1] = s.cloudWind[1] * s.cloudTime;
+        cloudWindOffset_[0] = s.cloudWind[0] * s.cloudTime;
+        cloudWindOffset_[1] = s.cloudWind[1] * s.cloudTime;
     } else {
         u32 h = static_cast<u32>(s.cloudSeed) + 0x9E3779B9u;
         h = (h ^ (h >> 16)) * 0x21F0AAADu;
         h = (h ^ (h >> 15)) * 0x735A2D97u;
         h ^= h >> 15;
-        frameCB_.cloudMotion[0] = s.cloudWind[0] * s.cloudTime + static_cast<f32>(h & 0xFFFFu) * 977.0f;
-        frameCB_.cloudMotion[1] = s.cloudWind[1] * s.cloudTime + static_cast<f32>(h >> 16) * 1361.0f;
+        cloudWindOffset_[0] = s.cloudWind[0] * s.cloudTime + static_cast<f32>(h & 0xFFFFu) * 977.0f;
+        cloudWindOffset_[1] = s.cloudWind[1] * s.cloudTime + static_cast<f32>(h >> 16) * 1361.0f;
+    }
+    // Mirrors D3D12Device::setSkyAtmosphere: the origin is folded into the wind offset, in f64.
+    {
+        const CloudMotionFold fold = cloudMotionFold(ShiftVec3d{static_cast<f64>(cloudWindOffset_[0]),
+                                                                static_cast<f64>(cloudWindOffset_[1]), 0.0}, worldOrigin_);
+        frameCB_.cloudMotion[0] = fold.x;
+        frameCB_.cloudMotion[1] = fold.y;
     }
     frameCB_.cloudMotion[2] = s.cloudScale;
     frameCB_.cloudMotion[3] = s.cloudsEnabled ? 1.0f : 0.0f;

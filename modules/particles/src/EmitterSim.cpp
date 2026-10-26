@@ -99,6 +99,12 @@ void EmitterSim::clear() {
     if (linked_) particles_.assign(capacity_, Particle{});
 }
 
+void EmitterSim::shiftWorld(const Vec3& delta) {
+    origin_ -= delta;
+    for (Particle& p : particles_) p.position -= delta;
+    for (Vec4& t : trail_) { t.x -= delta.x; t.y -= delta.y; t.z -= delta.z; }
+}
+
 u32 EmitterSim::aliveCount() const {
     if (!linked_) return static_cast<u32>(particles_.size());
     u32 n = 0;

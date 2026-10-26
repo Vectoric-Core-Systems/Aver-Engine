@@ -21,6 +21,7 @@
 
 #if AVER_MODULE_SCENE
 #  include "aver/world/ChunkWorld.hpp"
+#  include "aver/world/WorldOrigin.hpp"
 
 #  include <memory>
 
@@ -33,7 +34,9 @@ class GameContent;
 // enable() for construction and tick() for the per-frame step.
 class GameStreaming {
 public:
-    // Height at a world (x, y), in centimetres, for scatter placement to follow terrain. Returns
+    // Height at a world (x, y), in centimetres, for scatter placement to follow terrain. The (x, y) are SCENE-frame
+    // (origin-relative) centimetres, exactly what a host's landscape answers in: the generator works in absolute
+    // coordinates and enable() wraps this to subtract the floating origin, which is zero until the first shift. Returns
     // false for "no surface known here" -- passed straight into
     // aver::world::GeneratorSettings::heightSource, whose contract this mirrors exactly. Left empty
     // (the default) when the level has no landscape, or the caller has none wired up: an empty
@@ -100,6 +103,20 @@ public:
     // wherever the camera used to be.
     void resetVelocityTracking() { haveLastPos_ = false; }
 
+    // ---- the floating origin (LARGE_WORLD) ----
+    // The camera and every source passed to tick() are origin-relative; chunk keys are absolute, so a shift loads and evicts
+    // nothing. A shift only has to tell this class the new origin and move the one position it remembers.
+    //
+    // Called by the origin service's participant for streaming (order 50), after the scene and the host members have shifted.
+    void onOriginShift(const world::ShiftEvent& ev);
+    // Level load / teleport without a shift (WorldOrigin::reset): the origin changes and the velocity history is dropped.
+    void setOrigin(world::OriginCm o) { origin_ = o; haveLastPos_ = false; }
+    world::OriginCm origin() const { return origin_; }
+    // Whether sources more than kSubMmCliffCm from the origin stop streaming (the resident window is one f32 frame). Off by
+    // default, which is the pre-origin behaviour; the host switches it on when the origin service is enabled. Applies to the
+    // fields already built and to those enable() builds later.
+    void setOriginGuard(bool on);
+
     // True when any resident field owns `e`. A shipped game has no World Outliner to filter with
     // this, but any future save/serialise path needs the same "streamed, not authored" distinction
     // the editor's own anyChunkWorldOwns answers.
@@ -129,6 +146,9 @@ private:
     static void accumulateStreamStats(world::StreamStats& into, const world::StreamStats& add);
 
     std::unique_ptr<world::ChunkWorld> primary_;
+    world::OriginCm origin_{};
+    bool originGuard_ = false;
+    HeightQueryFn heightSource_;   // the host's, scene-frame; the generator is handed a wrapper that subtracts origin_
     // The level's SECOND and further density fields, one ChunkWorld each -- see enable()'s .cpp
     // comment for why one radius cannot serve every field. Empty for a level declaring at most one.
     std::vector<std::unique_ptr<world::ChunkWorld>> extra_;

@@ -27,6 +27,7 @@ struct LandscapeRenderStats {
     u32 residentNodes = 0;
     u32 skipped = 0;        // selected, not resident, and no resident ancestor either
     u32 evicted = 0;        // least-recently-used residents freed to make room this frame
+    u32 translated = 0;     // drawn with a floating-origin translation (built in an older frame than the current one)
 };
 
 // Caches node meshes and submits the selected nodes each frame.
@@ -61,6 +62,15 @@ public:
               const SelectResult& selection, const f32 world[16], f32 uvTilingCm = 1000.0f);
 
     const LandscapeRenderStats& stats() const { return stats_; }
+
+    // THE FLOATING ORIGIN (LARGE_WORLD 2.2.6): the frame `data` and `tree` are expressed in, as the scene origin in cm (a
+    // whole number of regions; zero by default). A resident mesh keeps the frame it was BUILT in, and draw() translates it
+    // by (that frame - the current one) through the `world` matrix it already takes, so a rebase rebuilds no node: nodes
+    // re-mesh in the new frame as LOD turns them over. Idempotent, so a host may call it with the current origin at any
+    // time, and a renderer made after a rebase starts in the right frame.
+    void setOrigin(i64 xCm, i64 yCm) { originX_ = xCm; originY_ = yCm; }
+    i64 originX() const { return originX_; }
+    i64 originY() const { return originY_; }
 
     // Releases every resident mesh.
     //
@@ -119,6 +129,7 @@ private:
     struct Resident {
         rhi::MeshHandle handle = 0;
         u64 lastUsed = 0;
+        i64 builtX = 0, builtY = 0;   // the floating-origin frame the vertices were built in
     };
     // Evicts the least-recently-used resident to make room, and returns true if it managed to.
     // Refuses to evict anything wanted THIS frame, and refuses to evict the root -- which is the
@@ -128,6 +139,7 @@ private:
     std::unordered_map<u32, Resident> meshes_;
     std::unordered_set<u32> drawnThisFrame_;
     u64 frame_ = 0;
+    i64 originX_ = 0, originY_ = 0;   // see setOrigin
     f32 baseColor_[4] = {0.42f, 0.45f, 0.36f, 1.0f};
     f32 metallic_ = 0.0f;
     f32 roughness_ = 0.85f;

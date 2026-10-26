@@ -20,7 +20,8 @@ void tileCornerCm(TileCoord t, f32 centreXCm, f32 centreYCm, f32 tileSizeCm, f32
 }
 
 bool synthesizeTerrainTile(TileCoord t, f32 centreXCm, f32 centreYCm, f32 tileSizeCm,
-                           u32 samplesPerTile, const TerrainNoiseParams& noise, fmt::OcLandData& out) {
+                           u32 samplesPerTile, const TerrainNoiseParams& noise, fmt::OcLandData& out,
+                           i64 originXCm, i64 originYCm) {
     if (samplesPerTile < fmt::kOcLandMinSamples || !(tileSizeCm > 0.0f)) return false;
     const f32 spacing = tileSizeCm / static_cast<f32>(samplesPerTile - 1);
     if (!(spacing > 0.0f)) return false;
@@ -40,7 +41,7 @@ bool synthesizeTerrainTile(TileCoord t, f32 centreXCm, f32 centreYCm, f32 tileSi
         for (u32 ix = 0; ix < samplesPerTile; ++ix) {
             const f32 wx = corner[0] + static_cast<f32>(ix) * spacing;
             const f32 wy = corner[1] + static_cast<f32>(iy) * spacing;
-            const f32 h = terrainHeightAt(wx, wy, noise);
+            const f32 h = terrainHeightAtFrom(wx, wy, originXCm, originYCm, noise);
             out.heights[static_cast<usize>(iy) * samplesPerTile + ix] = h;
             lo = std::fmin(lo, h);
             hi = std::fmax(hi, h);

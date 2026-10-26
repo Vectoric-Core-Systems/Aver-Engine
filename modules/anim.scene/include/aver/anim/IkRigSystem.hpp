@@ -85,6 +85,9 @@ public:
     void clear();
     // Goals, foot state and smoothing of every entity.
     void clearRuntime();
+    // Floating-origin shift (LARGE_WORLD 2.2.5): every goal held in WORLD space (space 0, set by a script or resolved from a
+    // bound socket) -= delta. Model-space goals, goal rotations and the model-space foot state are invariant.
+    void rebase(const Vec3& delta);
 
     // The rig asset for `asset`, loaded on first use; nullptr when it fails (reported once).
     const IkRigAsset* assetFor(u64 asset);

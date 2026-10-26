@@ -686,6 +686,9 @@ struct OcStreamSettings {
     // The generated streaming data (bounds, foliage cells), relative to the project root
     // (`Binaries/Streaming/<level>.ocstream`); see OcStream.hpp. Empty = none generated yet.
     std::string dataPath;
+    // LARGE_WORLD 2.4.4: the cooked chunk set this level streams from, relative to the project root (`Binaries/Chunks/<level>`); empty = none.
+    // Written as `chunks=` on the STREAM record (`STREAM off chunks=...` when streaming from records is off).
+    std::string chunksPath;
 };
 
 struct OcWorldData : OcWorldEnv {

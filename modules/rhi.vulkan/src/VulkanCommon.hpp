@@ -1498,6 +1498,32 @@ public:
         frameCB_.waveParams[0] = amplitude;
         frameCB_.waveParams[1] = static_cast<f32>(n);
         frameCB_.waveParams[2] = frameCB_.waveParams[3] = 0.0f;
+        refreshWorldOriginRows();   // the phase offsets follow the wave set (zero at origin zero)
+    }
+    // THE FLOATING ORIGIN (LARGE_WORLD 2.2.6), the twin of D3D12Device's: the PerFrameCB origin rows and the cloud fold.
+    // Vulkan keeps no previous matrix (no TAA jitter or G-buffer velocity yet), so there is nothing to compose here
+    // beyond the camera the CB holds; the rows are zero and the fold is the plain wind offset until the first shiftWorld.
+    ShiftOrigin worldOrigin_{};
+    u32  worldGeneration_ = 0;
+    f32  cloudWindOffset_[2] = {0.0f, 0.0f};   // setSkyAtmosphere's wind offset BEFORE the origin is folded in
+    void refreshWorldOriginRows() {
+        worldOriginRow(worldOrigin_, worldGeneration_, frameCB_.worldOrigin);
+        wavePhaseRow(frameCB_.wave, worldOrigin_, frameCB_.wavePhase);
+        const CloudMotionFold fold = cloudMotionFold(ShiftVec3d{static_cast<f64>(cloudWindOffset_[0]),
+                                                                static_cast<f64>(cloudWindOffset_[1]), 0.0}, worldOrigin_);
+        frameCB_.cloudMotion[0] = fold.x;
+        frameCB_.cloudMotion[1] = fold.y;
+    }
+    ShiftOrigin worldOrigin() const override { return worldOrigin_; }
+    void shiftWorld(const ShiftWorldInfo& info) override {
+        composePrevViewProjInPlace(frameCB_.viewProj, info.deltaCm);          // the old camera in the new frame, for camera() readers
+        composePrevViewProjInPlace(frameCB_.viewProjNoJitter, info.deltaCm);
+        f32 cam[3] = {frameCB_.camPos[0], frameCB_.camPos[1], frameCB_.camPos[2]};
+        shiftPoint(cam, info.deltaCm);
+        frameCB_.camPos[0] = cam[0]; frameCB_.camPos[1] = cam[1]; frameCB_.camPos[2] = cam[2];
+        worldOrigin_ = info.newOrigin;
+        worldGeneration_ = info.generation;
+        refreshWorldOriginRows();
     }
     void setFrameTime(f32 seconds, f32 deltaSeconds) override {
         frameCB_.time[0] = std::fmod(seconds, 3600.0f);   // see the D3D12 twin for why it wraps

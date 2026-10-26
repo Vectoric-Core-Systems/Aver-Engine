@@ -156,6 +156,78 @@ f32 sampleInfiniteHeightCm(const InfiniteSpec& spec, f32 amplitudeCm, f32 baseZC
     return baseZCm + (sampleInfiniteHeight(spec, wx, wy) * 2.0f - 1.0f) * amplitudeCm;
 }
 
+namespace {
+// A lattice index from an f64 coordinate: floor, then through i64 so an index past i32 wraps (defined) instead of being UB.
+i32 cellIndexD(f64 v) { return static_cast<i32>(static_cast<i64>(std::floor(v))); }
+} // namespace
+
+f32 sampleInfiniteAbs(const InfiniteSpec& spec, f64 wx, f64 wy, f64 wz) {
+    const f64 cell = spec.cellSizeCm > 0.0f ? static_cast<f64>(spec.cellSizeCm) : 1.0;
+    f32 total = 0.0f, norm = 0.0f;
+    const u32 layers = spec.layerCount < kMaxLayers ? spec.layerCount : kMaxLayers;
+    for (u32 l = 0; l < layers; ++l) {
+        const NoiseLayer& ly = spec.layers[l];
+        f32 amp = ly.amplitude;
+        f32 freq = ly.frequency;
+        const i32 octaves = ly.octaves > 1 ? ly.octaves : 1;
+        for (i32 o = 0; o < octaves; ++o) {
+            const f64 f = static_cast<f64>(freq);
+            const i32 cx = cellIndexD(wx * f / cell);
+            const i32 cy = cellIndexD(wy * f / cell);
+            const i32 cz = cellIndexD(wz * f / cell);
+            const f32 v = float01(hash3(spec.seed + ly.seedOffset, cx, cy, cz));
+            total += v * amp;
+            norm  += amp;
+            amp  *= ly.gain;
+            freq *= ly.lacunarity;
+        }
+    }
+    if (norm <= 0.0f) return 0.0f;
+    const f32 d = total / norm;
+    if (d < spec.coverageFloor) return 0.0f;
+    const f32 remapped = (d - spec.coverageFloor) / std::fmax(1e-6f, 1.0f - spec.coverageFloor);
+    return std::pow(remapped, spec.coverageBias);
+}
+
+f32 sampleInfiniteHeightAbs(const InfiniteSpec& spec, f64 wx, f64 wy) {
+    const f64 cell = spec.cellSizeCm > 0.0f ? static_cast<f64>(spec.cellSizeCm) : 1.0;
+    f32 total = 0.0f, norm = 0.0f;
+    const u32 layers = spec.layerCount < kMaxLayers ? spec.layerCount : kMaxLayers;
+    for (u32 l = 0; l < layers; ++l) {
+        const NoiseLayer& ly = spec.layers[l];
+        f32 amp = ly.amplitude;
+        f32 freq = ly.frequency;
+        const i32 octaves = ly.octaves > 1 ? ly.octaves : 1;
+        const i32 seed = spec.seed + ly.seedOffset;
+        for (i32 o = 0; o < octaves; ++o) {
+            const f64 f = static_cast<f64>(freq);
+            const f64 px = wx * f / cell, py = wy * f / cell;
+            const f64 fx = std::floor(px), fy = std::floor(py);
+            const i32 cx = cellIndexD(px), cy = cellIndexD(py);
+            // The fractional part is taken in f64 and narrowed once: this is where the f32 form loses its precision at distance.
+            f32 tx = static_cast<f32>(px - fx), ty = static_cast<f32>(py - fy);
+            tx = tx * tx * (3.0f - 2.0f * tx);
+            ty = ty * ty * (3.0f - 2.0f * ty);
+            const f32 h00 = float01(hash3(seed, cx,     cy,     0));
+            const f32 h10 = float01(hash3(seed, cx + 1, cy,     0));
+            const f32 h01 = float01(hash3(seed, cx,     cy + 1, 0));
+            const f32 h11 = float01(hash3(seed, cx + 1, cy + 1, 0));
+            const f32 top = h00 + (h10 - h00) * tx;
+            const f32 bot = h01 + (h11 - h01) * tx;
+            const f32 v = top + (bot - top) * ty;
+            total += v * amp;
+            norm  += amp;
+            amp  *= ly.gain;
+            freq *= ly.lacunarity;
+        }
+    }
+    if (norm <= 0.0f) return 0.5f;   // the neutral midpoint, as sampleInfiniteHeight
+    return total / norm;
+}
+
+f32 sampleInfiniteHeightCmAbs(const InfiniteSpec& spec, f32 amplitudeCm, f32 baseZCm, f64 wx, f64 wy) {
+    return baseZCm + (sampleInfiniteHeightAbs(spec, wx, wy) * 2.0f - 1.0f) * amplitudeCm;
+}
 bool VolumeBuilder::init(rhi::IDevice& dev) {
     res_ = dev.resources();
     if (!res_) return false;   // a GPU-less backend declines here, as designed

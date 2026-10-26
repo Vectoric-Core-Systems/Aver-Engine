@@ -76,6 +76,11 @@ struct Host {
 using SkipFn = bool (*)(scene::Entity e, void* user);
 
 struct CaptureOptions {
+    // The floating origin (centimetres, a whole number of regions) the world's positions are measured from. It is stored in the
+    // snapshot (the additive ORIG chunk) so a restore under another origin can re-express every root (LARGE_WORLD 2.6.4).
+    // Zero, the default, writes no chunk and the file is byte-identical to before.
+    i64 originX = 0;
+    i64 originY = 0;
     Host host;
     // SKIPPED WITH ITS WHOLE SUBTREE. A host that streams chunks passes its own
     // "does any ChunkWorld own this" predicate here: streamed content already has its own
@@ -85,6 +90,10 @@ struct CaptureOptions {
 };
 
 struct RestoreOptions {
+    // The origin the world measures from NOW. restore() adds (the snapshot's origin - this) to X and Y of every root entity's
+    // CLocal.position, so each root lands at the same absolute place. Equal origins change nothing.
+    i64 originX = 0;
+    i64 originY = 0;
     Host host;
     // Entities this returns true for are LEFT ALONE by the teardown -- they are not destroyed and
     // not replaced. Pass the same predicate capture used, or restore will delete the streamed

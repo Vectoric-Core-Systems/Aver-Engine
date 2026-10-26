@@ -63,6 +63,11 @@ public:
     void tick(scene::World& world, f32 dt);
     void reset();
 
+    // Floating-origin shift (LARGE_WORLD 2.2.5): slot transforms are derived from the owners' world matrices and
+    // re-resolve when a revision moves; this makes the next sync() re-resolve every object regardless. Call after
+    // World::shiftRoots.
+    void rebase();
+
     // ---- leaf support ----
     u32& leafClaim(i32 subject, const void* node) { return leafClaims_[{subject, node}]; }
     void dropLeafClaim(i32 subject, const void* node) { leafClaims_.erase({subject, node}); }

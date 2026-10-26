@@ -101,6 +101,14 @@ const HearingMemory* HearingSystem::memoryOf(scene::Entity e) const {
     return it == memories_.end() ? nullptr : &it->second;
 }
 
+void HearingSystem::rebase(const Vec3& deltaCm) {
+    for (NoiseEvent& n : queue_) n.pos -= deltaCm;
+    // HearingMemory offers a const view only; the entries live in memories_, which is not const.
+    for (auto& [e, mem] : memories_)
+        for (const HeardMemory& m : mem.entries()) const_cast<HeardMemory&>(m).pos -= deltaCm;
+    for (HeardMemory& m : forgotten_) m.pos -= deltaCm;
+}
+
 void HearingSystem::forget(scene::Entity e) {
     const auto it = memories_.find(e);
     if (it == memories_.end()) return;

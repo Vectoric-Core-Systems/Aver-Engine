@@ -1,14 +1,17 @@
 // Golden test for the .oc* format loaders. Pass one or more .ocbeam / .ocmap paths;
 // it parses each, prints a summary, and checks invariants. Exit code = failure count.
+#include "aver/formats/Avr1.hpp"
 #include "aver/formats/OcBeam.hpp"
 #include "aver/formats/OcMap.hpp"
 #include "aver/formats/OcProject.hpp"
+#include "aver/formats/OcSave.hpp"
 #include "aver/formats/OcWorld.hpp"
 #include "aver/assets/AssetId.hpp"
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Hash.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -1921,6 +1924,228 @@ static void checkOcworldPlacementVehicle() {
 }
 
 // Runs the self-checks, then every file named on the command line. Returns the failure count.
+// ---- LARGE_WORLD: level text and saves stop losing precision (docs/plans/wave11/LARGE_WORLD.md 2.6, CHUNKS.md B8) -------------
+
+// Every position-bearing record of a level carries the numbers the f64 holds, not six digits of them.
+static void checkOcworldPrecision() {
+    AVER_INFO("=== .ocworld positions round-trip exactly (B8) ===");
+    using namespace fmt;
+    std::string err;
+    // Past 10 km, past 1,000 km, and a negative with a binary fraction: each lost centimetres under "%.6g".
+    const f64 v[3] = {123456789.123, 1.0e9 + 0.001, -987654321.0625};
+
+    OcWorldData w;
+    w.name = "Precise";
+    w.hasSpawn = true;  w.spawnX = v[0]; w.spawnY = v[1]; w.spawnZ = v[2]; w.spawnYaw = 33.25;
+    w.hasCamera = true; w.camX = v[1]; w.camY = v[2]; w.camZ = v[0]; w.camYaw = 12.5; w.camPitch = -7.5; w.camSpeed = 800;
+
+    OcWorldPlacement p;
+    p.asset = "Content/Meshes/a.ocmesh";
+    p.x = v[0]; p.y = v[1]; p.z = v[2];
+    w.placements.push_back(p);
+    OcWorldPlacement p2 = p;      // exact in six digits: its bytes must not change
+    p2.x = 100.5; p2.y = -2048; p2.z = 12.25;
+    w.placements.push_back(p2);
+
+    OcLight l;
+    l.name = "lamp"; l.x = v[2]; l.y = v[0]; l.z = v[1];
+    w.lights.push_back(l);
+
+    OcDecal d;
+    d.name = "mark"; d.x = v[1]; d.y = v[0]; d.z = v[2];
+    w.decals.push_back(d);
+
+    OcLandscapePlacement ls;
+    ls.name = "ground"; ls.section = "Content/Land/a.ocland";
+    ls.x = v[0]; ls.y = v[2]; ls.z = v[1];
+    w.landscapes.push_back(ls);
+
+    OcPcgVolume pv;
+    pv.name = "field"; pv.infinite = false;
+    pv.boundsMin[0] = v[0]; pv.boundsMin[1] = v[1]; pv.boundsMin[2] = v[2];
+    pv.boundsMax[0] = v[0] + 160000.123; pv.boundsMax[1] = v[1] + 160000.123; pv.boundsMax[2] = v[2] + 5000.5;
+    w.pcgVolumes.push_back(pv);
+
+    OcWaterPlacement wt;
+    wt.name = "sea"; wt.levelCm = v[2]; wt.infinite = false;
+    wt.boundsMin[0] = v[0]; wt.boundsMin[1] = v[1]; wt.boundsMax[0] = v[0] + 100000.5; wt.boundsMax[1] = v[1] + 100000.5;
+    w.waters.push_back(wt);
+
+    OcRiver rv;
+    rv.name = "river";
+    for (int i = 0; i < 3; ++i) { OcRiverPoint rp; rp.x = v[0] + i * 1000.123; rp.y = v[1] - i * 500.321; rp.z = v[2]; rv.points.push_back(rp); }
+    w.rivers.push_back(rv);
+
+    OcLake lk;
+    lk.name = "lake";
+    lk.points = {{v[0], v[1]}, {v[0] + 5000.123, v[1]}, {v[0], v[1] + 5000.123}};
+    w.lakes.push_back(lk);
+
+    OcPostVolume pvol;
+    pvol.name = "grade"; pvol.infinite = false;
+    pvol.bounds[0] = v[0]; pvol.bounds[1] = v[1]; pvol.bounds[2] = v[2];
+    pvol.bounds[3] = v[0] + 1000.123; pvol.bounds[4] = v[1] + 1000.123; pvol.bounds[5] = v[2] + 1000.123;
+    w.postVolumes.push_back(pvol);
+
+    const std::string text = writeOcworld(w);
+    OcWorldData b;
+    check(parseOcworld(text, b, &err), "a level of far positions parses again: " + err);
+
+    check(b.placements.size() == 2 && b.placements[0].x == v[0] && b.placements[0].y == v[1] && b.placements[0].z == v[2],
+          "PLACE keeps every digit of an f64 position at 1e8 and 1e9 cm");
+    check(b.hasSpawn && b.spawnX == v[0] && b.spawnY == v[1] && b.spawnZ == v[2], "SPAWN does");
+    check(b.hasCamera && b.camX == v[1] && b.camY == v[2] && b.camZ == v[0], "CAMERA does");
+    check(b.lights.size() == 1 && b.lights[0].x == v[2] && b.lights[0].y == v[0] && b.lights[0].z == v[1], "LIGHT does");
+    check(b.decals.size() == 1 && b.decals[0].x == v[1] && b.decals[0].y == v[0] && b.decals[0].z == v[2], "DECAL does");
+    check(b.landscapes.size() == 1 && b.landscapes[0].x == v[0] && b.landscapes[0].y == v[2] && b.landscapes[0].z == v[1], "LANDSCAPE at does");
+    check(b.pcgVolumes.size() == 1 && b.pcgVolumes[0].boundsMin[0] == v[0] && b.pcgVolumes[0].boundsMin[2] == v[2] &&
+              b.pcgVolumes[0].boundsMax[1] == pv.boundsMax[1],
+          "PCGVOLUME bounds do");
+    check(b.waters.size() == 1 && b.waters[0].levelCm == v[2] && b.waters[0].boundsMin[1] == v[1] && b.waters[0].boundsMax[0] == wt.boundsMax[0],
+          "WATER does");
+    check(b.rivers.size() == 1 && b.rivers[0].points.size() == 3 && b.rivers[0].points[2].x == rv.points[2].x &&
+              b.rivers[0].points[2].y == rv.points[2].y && b.rivers[0].points[0].z == v[2],
+          "RIVERPT does");
+    check(b.lakes.size() == 1 && b.lakes[0].points.size() == 3 && b.lakes[0].points[1].x == lk.points[1].x && b.lakes[0].points[2].y == lk.points[2].y,
+          "LAKEPT does");
+    check(b.postVolumes.size() == 1 && b.postVolumes[0].bounds[0] == v[0] && b.postVolumes[0].bounds[5] == pvol.bounds[5], "POSTVOLUME does");
+    check(writeOcworld(b) == text, "and a second write reproduces the first byte for byte");
+
+    // A value that was exact in six digits writes the bytes it always wrote (no diff churn on an old level).
+    check(text.find("100.5 -2048 12.25") != std::string::npos, "an exact-in-six-digits position is written as before");
+    // An f32 widened to f64 still reads back as the same f32 and does not grow seventeen digits.
+    {
+        OcWorldData f;
+        f.name = "F32";
+        OcWorldPlacement q;
+        q.asset = "Content/Meshes/a.ocmesh";
+        q.sx = q.sy = q.sz = static_cast<f64>(0.1f);
+        q.yaw = static_cast<f64>(37.3f);
+        f.placements.push_back(q);
+        const std::string ft = writeOcworld(f);
+        OcWorldData fb;
+        check(parseOcworld(ft, fb, &err) && fb.placements.size() == 1, "a level of widened f32 values parses: " + err);
+        check(static_cast<f32>(fb.placements[0].yaw) == 37.3f &&
+                  static_cast<f32>(fb.placements[0].sx) == 0.1f,
+              "a widened f32 reads back as the same f32");
+        check(ft.find("0.1000000014") == std::string::npos && ft.find("37.29999") == std::string::npos, "and is not written with its binary tail");
+    }
+    // Large integers that happen to be exact in f32 are not shortened to nine digits.
+    {
+        OcWorldData f;
+        f.name = "Big";
+        OcWorldPlacement q;
+        q.asset = "Content/Meshes/a.ocmesh";
+        q.x = 123456792.0; q.y = 16777218.0; q.z = -100000008.0;
+        f.placements.push_back(q);
+        OcWorldData fb;
+        check(parseOcworld(writeOcworld(f), fb, &err) && fb.placements.size() == 1 && fb.placements[0].x == q.x &&
+                  fb.placements[0].y == q.y && fb.placements[0].z == q.z,
+              "an integer position that is exactly an f32 above 2^24 keeps all its digits");
+    }
+}
+
+// The floating-origin project keys: parsed, written back, and the unstated default is -1 (LARGE_WORLD 2.7).
+static void checkOcprojectWorldKeys() {
+    AVER_INFO("=== .ocproject WORLD.* keys ===");
+    using namespace fmt;
+    std::string err;
+    {
+        ProjectDesc d;
+        check(parseOcproject("OCPROJECT 1\nNAME T\nENGINE Aver 0.1.0\n", d, &err), "a project with no WORLD keys parses");
+        check(d.worldFloatingOrigin == -1 && d.worldRebaseMarginCm == -1 && d.worldAllowShiftRequest == -1 && !d.hasWorldSettings(),
+              "and states nothing about the floating origin");
+    }
+    {
+        ProjectDesc d;
+        check(parseOcproject("OCPROJECT 1\nNAME T\nENGINE Aver 0.1.0\nWORLD.FLOATINGORIGIN 0\nWORLD.REBASEMARGIN 150000\n"
+                             "WORLD.ALLOWSHIFTREQUEST 1\n", d, &err),
+              "a project with all three WORLD keys parses");
+        check(d.worldFloatingOrigin == 0 && d.worldRebaseMarginCm == 150000 && d.worldAllowShiftRequest == 1 && d.hasWorldSettings(),
+              "and they read as written (0 is a stated value, not unstated)");
+        const std::string text = writeOcproject(d, "OCPROJECT 1\nNAME T\nENGINE Aver 0.1.0\nWORLD.REBASEMARGIN 5\n");
+        ProjectDesc b;
+        check(parseOcproject(text, b, &err), "what the writer produced parses again");
+        check(b.worldFloatingOrigin == 0 && b.worldRebaseMarginCm == 150000 && b.worldAllowShiftRequest == 1, "with the three keys intact");
+        usize margins = 0;
+        for (usize at = text.find("WORLD.REBASEMARGIN"); at != std::string::npos; at = text.find("WORLD.REBASEMARGIN", at + 1)) ++margins;
+        check(margins == 1, "and a re-save replaces the old line rather than duplicating it");
+    }
+    {
+        ProjectDesc d;
+        check(parseOcproject("OCPROJECT 1\nNAME T\nENGINE Aver 0.1.0\nWORLD.FLOATINGORIGIN 7\nWORLD.REBASEMARGIN -3\n", d, &err), "odd values parse");
+        check(d.worldFloatingOrigin == 1 && d.worldRebaseMarginCm == -1, "any non-zero flag reads as 1 and a negative margin as unstated");
+    }
+}
+
+// The ORIG chunk: the floating origin a save was taken at. Additive: absent at origin zero, skipped by a reader that does not know it.
+static void checkOcSaveOrigin() {
+    AVER_INFO("=== .ocsave ORIG chunk ===");
+    using namespace fmt;
+    std::string why;
+
+    OcSaveData s;
+    s.levelPath = "Content/Maps/a.ocworld";
+    s.engineVersion = "test";
+    OcSaveEntity e;
+    e.name = "box";
+    e.objectId = fnv1a64(std::string_view("box"));
+    OcSaveComponent c;
+    c.type = "CLocal";
+    OcSaveField pos;
+    pos.name = "position";
+    pos.kind = 1;   // Vec3
+    pos.f = {1.0f, 2.0f, 3.0f};
+    c.fields.push_back(pos);
+    e.components.push_back(c);
+    s.entities.push_back(e);
+
+    // Origin zero: no chunk, and the bytes are what the format always wrote.
+    std::vector<u8> zero;
+    check(writeOcSave(s, zero, &why), "a save at origin zero writes: " + why);
+    Avr1File zf;
+    check(parseAvr1(zero.data(), zero.size(), zf, &why), "as a container: " + why);
+    check(zf.find(avrFourCC("ORIG")) == nullptr, "with no ORIG chunk");
+    OcSaveData zr;
+    check(parseOcSave(zero.data(), zero.size(), zr, &why) && zr.originX == 0 && zr.originY == 0, "which reads back as origin zero");
+
+    // A far origin: one i64 pair, read back exactly.
+    s.originX = 3 * 1638400;
+    s.originY = -2 * 1638400;
+    std::vector<u8> far;
+    check(writeOcSave(s, far, &why), "a save at a far origin writes: " + why);
+    Avr1File ff;
+    check(parseAvr1(far.data(), far.size(), ff, &why), "as a container again: " + why);
+    const AvrChunk* orig = ff.find(avrFourCC("ORIG"));
+    check(orig != nullptr && orig->data.size() == 16, "with one 16-byte ORIG chunk");
+    check((orig->flags & kAvrChunkRequired) == 0, "that is not Required (a reader that does not know it skips it)");
+    OcSaveData fr;
+    check(parseOcSave(far.data(), far.size(), fr, &why), "and it parses: " + why);
+    check(fr.originX == 3 * 1638400 && fr.originY == -2 * 1638400, "the origin round-trips exactly");
+    check(fr.entities.size() == 1 && fr.entities[0].components.size() == 1 && fr.entities[0].components[0].fields[0].f[2] == 3.0f,
+          "and the entities are unchanged by it");
+
+    // An older reader: the same container with the chunk removed parses to the same entities, at origin zero.
+    Avr1File stripped = ff;
+    stripped.chunks.erase(std::remove_if(stripped.chunks.begin(), stripped.chunks.end(),
+                                         [](const AvrChunk& ch) { return ch.id == avrFourCC("ORIG"); }),
+                          stripped.chunks.end());
+    std::vector<u8> old;
+    check(writeAvr1(stripped, old, &why), "the container without ORIG writes: " + why);
+    OcSaveData oldRead;
+    check(parseOcSave(old.data(), old.size(), oldRead, &why) && oldRead.originX == 0 && oldRead.originY == 0 &&
+              oldRead.entities.size() == fr.entities.size(),
+          "and reads as the same save at origin zero");
+
+    // A truncated ORIG is refused rather than read past.
+    Avr1File bad = ff;
+    for (AvrChunk& ch : bad.chunks) if (ch.id == avrFourCC("ORIG")) ch.data.resize(8);
+    std::vector<u8> badBytes;
+    check(writeAvr1(bad, badBytes, &why), "a damaged container writes");
+    OcSaveData badRead;
+    check(!parseOcSave(badBytes.data(), badBytes.size(), badRead, &why), "but an 8-byte ORIG is refused");
+}
+
 int main(int argc, char** argv) {
     checkFnv();
     checkOcproject();
@@ -1933,6 +2158,9 @@ int main(int argc, char** argv) {
     checkOcworldScatter();
     checkOcworldLandscape();
     checkOcworldWater();
+    checkOcworldPrecision();
+    checkOcprojectWorldKeys();
+    checkOcSaveOrigin();
     checkOldDispatchDroppedLegacyRecords();
     checkOcmapRoundtrip();
     checkLevelFileIsLegacyOcmap();

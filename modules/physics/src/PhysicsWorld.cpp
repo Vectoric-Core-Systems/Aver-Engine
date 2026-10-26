@@ -399,6 +399,9 @@ int32_t aver_phys_set_fixed_step(float seconds) {
 // Advances the simulation in fixed steps, clamping catch-up. Returns how many steps ran.
 int32_t aver_phys_step(float dt) {
     if (!g_world || dt <= 0.0f) return 0;
+    // LARGE_WORLD: a shift that moved over 4,096 statics leaves the static tree loose; the optimise it scheduled runs before this call's steps.
+    if (g_world->originOptimizePending) { g_world->originOptimizePending = false; g_world->system.OptimizeBroadPhase(); }
+    struct InStep { InStep() { g_world->inStep = true; } ~InStep() { if (g_world) g_world->inStep = false; } } const inStep;   // aver_phys_origin_shift refuses while set
     const StepCallScope callScope;   // stats: steps, contacts and wall time of this call (PhysicsStats.cpp)
     // Clear last call's events first, so what the caller drains describes only the steps run here.
     {

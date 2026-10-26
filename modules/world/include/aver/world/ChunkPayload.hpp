@@ -26,15 +26,21 @@
 #include "aver/core/Types.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/world/ChunkCoord.hpp"
+#include "aver/world/WorldPos.hpp"
 
-#if AVER_MODULE_SCENE
-#  include "aver/scene/World.hpp"
+#include <string>
+#include <vector>
 
-#  include <functional>
-#  include <string>
-#  include <vector>
-
+// THE DATA HALF IS NOT SCENE-GATED. PayloadEntity and ChunkPayload use Core types only, so a Scene-free tool
+// (the chunk cook, AverAssetC) can build, encode and write them; only capture/restore need scene::World.
 namespace aver::world {
+
+// One tagged extra on an entity (codec v2): what a placement carries beyond the scatter fields. The tag is a four-character code
+// (ChunkPayloadExtras.hpp names them); the bytes are opaque here, so a tag nobody knows yet survives a decode and an encode.
+struct PayloadExtra {
+    u32 tag = 0;
+    std::vector<u8> bytes;
+};
 
 // One entity, portable.
 struct PayloadEntity {
@@ -69,6 +75,9 @@ struct PayloadEntity {
     // fact is recorded here and rebuilt on restore rather than looked up.
     bool hasBody = false;
     f32  bodyHalfExtentCm[3] = {0, 0, 0};
+
+    // Codec v2. Empty for scatter and for every v1 payload. Order is kept; a tag may repeat (one CMPN per component).
+    std::vector<PayloadExtra> extras;
 };
 
 // One chunk's worth of entities.
@@ -79,6 +88,17 @@ struct ChunkPayload {
     std::vector<PayloadEntity> entities;
 };
 
+} // namespace aver::world
+
+#if AVER_MODULE_SCENE
+#  include "aver/scene/World.hpp"
+
+#  include <functional>
+
+namespace aver::world {
+
+class BodyRegistry;
+
 // What a host lends the restore pass. The same shape as InstantiateOptions, and for the same reason:
 // resolving a surface name to a material and building a collision box are the HOST's business -- the
 // game goes through GameContent, the editor through its own map -- so this says when, never how.
@@ -88,6 +108,12 @@ struct RestoreOptions {
     // Called to build the static box. Returns the body id, or -1. Absent means bodies are skipped,
     // which is what a headless partition/reassemble test wants.
     std::function<i32(scene::Entity e, const Vec3& worldPos, const Vec3& halfExtentCm)> createBody;
+    // The floating origin the scene is in. A root's position is the chunk origin MINUS this, taken in i64 before the one
+    // narrowing, so it is exact at any distance. Zero (the default) is today's absolute placement.
+    OriginCm origin{};
+    // When set, the body `createBody` returns is attached to its entity here, so eviction frees it. Absent, the id is dropped
+    // as it always was.
+    BodyRegistry* bodies = nullptr;
 };
 
 // Captures `roots` and their whole subtrees into a payload.
@@ -96,8 +122,11 @@ struct RestoreOptions {
 // intrusive (parent/child/sibling links straight into the components), so a child that loads without
 // its parent is a dangling link -- a crash, not a glitch. That is why ownership is decided per ROOT
 // and never per entity.
+//
+// `origin` is the floating origin the scene is in: a root's CLocal position is origin-relative, so its absolute chunk is
+// split from `position + origin` in f64. Zero is the pre-origin behaviour, bit for bit.
 ChunkPayload capture(const scene::World& w, const std::vector<scene::Entity>& roots,
-                     const ChunkCoord& coord, i32 chunkSizeCm);
+                     const ChunkCoord& coord, i32 chunkSizeCm, OriginCm origin = {});
 
 // Recreates a payload's entities in `w`, in order. Returns them parallel to payload.entities.
 std::vector<scene::Entity> restore(const ChunkPayload& p, scene::World& w,

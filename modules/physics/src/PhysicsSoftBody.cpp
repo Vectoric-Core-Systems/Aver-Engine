@@ -18,6 +18,7 @@
 #include "PhysicsInternal.hpp"
 #include "SoftBodyAero.hpp"
 #include "SoftBodyInternal.hpp"
+#include "PhysicsOrigin.hpp"   // LARGE_WORLD: physicsOriginHook
 
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -252,6 +253,21 @@ void removeListener() {
 std::map<int32_t, SoftRecord>& records() { return g_records; }
 SoftRecord* recordOf(int32_t body) { return findRecord(body); }
 std::mutex& eventMutex() { return g_eventMutex; }
+
+// LARGE_WORLD: the soft-body impact queue holds world points until the host drains it; a floating-origin shift moves them (PhysicsOrigin.hpp).
+namespace {
+void shiftImpactEvents(const aver::physics::detail::Vec3d& d) {
+    std::lock_guard<std::mutex> lock(g_eventMutex);
+    for (ImpactEvent& e : g_events) {
+        e.point[0] = static_cast<float>(static_cast<double>(e.point[0]) - d.x);
+        e.point[1] = static_cast<float>(static_cast<double>(e.point[1]) - d.y);
+        e.point[2] = static_cast<float>(static_cast<double>(e.point[2]) - d.z);
+    }
+}
+const struct OriginHookRegistrar {
+    OriginHookRegistrar() { aver::physics::detail::physicsOriginHook("softbody.impacts", &shiftImpactEvents); }
+} g_originHookRegistrar;
+} // namespace
 int32_t builderVertexCount(int32_t b) {
     const auto it = g_builders.find(b);
     return it == g_builders.end() ? 0 : it->second.vertexCount;

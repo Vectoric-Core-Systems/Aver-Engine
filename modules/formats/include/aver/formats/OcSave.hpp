@@ -77,6 +77,12 @@ struct OcSaveData {
     std::string levelPath;
     // The engine version that wrote it, for a message rather than for a decision.
     std::string engineVersion;
+    // The floating origin the positions were captured against, in centimetres (LARGE_WORLD 2.6.4): every root CLocal.position is
+    // origin-relative f32, so the origin is what makes a save portable across rebases. Written as the additive `ORIG` chunk
+    // only when non-zero, so a save at origin zero is byte-identical to what this format always wrote; no chunk reads as zero.
+    // An older reader skips the chunk (and would place the roots at the wrong absolute position, which is why the chunk exists).
+    i64 originX = 0;
+    i64 originY = 0;
     std::vector<OcSaveEntity> entities;
 
     // True when every parent index refers to a LOWER index (or -1) and every ENTITY field refers to

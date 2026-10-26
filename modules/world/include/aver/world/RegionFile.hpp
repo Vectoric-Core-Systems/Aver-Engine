@@ -24,6 +24,21 @@
 // demand) is Anvil's trick applied one level down, and the 6+4 bit split it needs is exactly the one
 // ChunkCoord.hpp already proves is lossless.
 //
+// PACKED REGIONS (version 3, LARGE_WORLD 2.4.4). A COOKED AUTHORED LEVEL is hundreds of thousands of ~300-byte payloads, and 4 KiB
+// sectors plus dense 48 KiB group directories turn 75 MB into over a gigabyte. A packed region is therefore a second layout under
+// the same two headers (flag kRegionFlagPacked, header.sectorBytes = 16 is its UNIT):
+//
+//   byte 0, 4096        header copies A and B (unchanged: fixed byte offsets, whatever the unit)
+//   byte 8192           group table      {u32 group, u32 dirUnit} sorted, padded to 16 bytes
+//   then                group directories, one per occupied group: 16-byte header {u32 entryCount, 0, 0, 0} and entryCount
+//                       sorted entries {u16 slot, u16 0, u32 firstUnit, u32 byteLength, u32 crc32c} (16 bytes: 281k chunks
+//                       are 4.5 MB, not 104 MB)
+//   then                payloads, 16-byte aligned back to back, each with its own CRC32C
+//
+// A packed region is IMMUTABLE: RegionWriter refuses to open one, there is no free list, and writeRegion is the only producer
+// (byte-deterministic, so two cooks memcmp equal). contentHash covers the payload area including its alignment padding.
+// Version 2 files are unchanged byte for byte and still read and written exactly as before.
+//
 // WHY TWO HEADERS. Anvil has one and is famous for corrupting on power loss. Writing the payload
 // first, then the directory entry, then a header with `serial + 1` means a crash at any point leaves
 // the previous serial intact and loses at most the one chunk in flight. Slice 5 only cooks, so
@@ -36,10 +51,12 @@
 #include "aver/world/ChunkCoord.hpp"
 #include "aver/world/ChunkPayload.hpp"
 
-#if AVER_MODULE_SCENE
-#  include <string>
-#  include <vector>
+#include <list>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
+// Not scene-gated: a region file holds the POD half of ChunkPayload.hpp, so the cook links it without Aver.Scene.
 namespace aver::world {
 
 inline constexpr u32 kRegionMagic       = 0x4E475241u;   // 'ARGN' little-endian
@@ -55,7 +72,16 @@ inline constexpr u32 kRegionMagic       = 0x4E475241u;   // 'ARGN' little-endian
 // No v1 file exists outside a test's temp directory, so the bump simply refuses them rather than
 // carrying a compatibility path for content nobody has.
 inline constexpr u32 kRegionVersion     = 2;
+inline constexpr u32 kRegionVersionPacked = 3;   // the packed layout above; version 2 stays the mutable one
 inline constexpr u32 kRegionSectorBytes = 4096;
+inline constexpr u32 kRegionUnitBytesPacked = 16;
+inline constexpr u32 kRegionFlagPacked  = 1u << 0;
+inline constexpr u32 kPackedBodyStartBytes = 8192;   // after the two header pages
+inline constexpr u32 kPackedDirHeaderBytes = 16;
+inline constexpr u32 kPackedDirEntryBytes  = 16;
+// Group directories kept in memory per open region (least recently used out first). A v2 directory is 48 KiB, so this is at most
+// 6 MiB per region; a camera touches a handful of groups.
+inline constexpr usize kGroupCacheGroups = 128;
 inline constexpr u32 kGroupDirEntryBytes = 12;
 inline constexpr u32 kGroupDirBytes     = kChunksPerGroup * kGroupDirEntryBytes;   // 48 KiB
 inline constexpr u32 kGroupDirSectors   = kGroupDirBytes / kRegionSectorBytes;     // 12, exactly
@@ -63,6 +89,7 @@ inline constexpr u32 kGroupDirSectors   = kGroupDirBytes / kRegionSectorBytes;  
 struct RegionHeader {
     u32 version = kRegionVersion;
     u32 chunkSizeCm = kDefaultChunkSizeCm;
+    // The allocation UNIT every `*Sector` field below counts in: 4096 for version 2, 16 for a packed version 3 region.
     u32 sectorBytes = kRegionSectorBytes;
     RegionCoord coord;
     u64 levelId = 0;
@@ -78,6 +105,9 @@ struct RegionHeader {
     // The persisted free list: {u32 firstSector, u32 sectorCount} pairs. Zero count means none.
     u32 freeListSector = 0;
     u32 freeListCount = 0;
+    // kRegionFlagPacked or 0. Lives in the four bytes the covered range always reserved, so a version 2 file reads as 0.
+    u32 flags = 0;
+    bool packed() const { return (flags & kRegionFlagPacked) != 0; }
 };
 
 // What the cooker needs beyond the chunks themselves.
@@ -88,9 +118,14 @@ struct RegionWriteDesc {
     u64 worldSeed = 0;
     u32 generatorVersion = 0;
     u64 serial = 1;
+    // Cook as a packed (version 3, immutable) region. Only writeRegion honours it; RegionWriter refuses.
+    bool packed = false;
 };
 
-// Writes a whole region. `chunks` may be in any order -- it is SORTED here, by (group, slot), which
+// The file name a region has in a level's cook directory: r.<x>.<y>.<z>.avrgn with signed decimals.
+std::string regionFileName(const RegionCoord& c);
+
+// Writes a whole region (packed when `desc.packed`). `chunks` may be in any order -- it is SORTED here, by (group, slot), which
 // is what makes two cooks of the same content byte-identical however the caller's map iterated.
 bool writeRegion(const std::string& path, const RegionWriteDesc& desc,
                  std::vector<std::pair<ChunkLocal, ChunkPayload>> chunks, std::string* why = nullptr);
@@ -105,8 +140,12 @@ public:
     bool isOpen() const { return file_.isOpen(); }
 
     const RegionHeader& header() const { return header_; }
+    bool packed() const { return header_.packed(); }
     // Which of the two header copies was accepted, for a caller that wants to report a torn write.
     u32 acceptedHeaderCopy() const { return acceptedCopy_; }
+    // Group directories currently cached, and how many disk reads it took to fill them (an LRU hit costs none).
+    usize cachedGroups() const { return lru_.size(); }
+    u64 groupDirReads() const { return groupReads_; }
 
     // True if this region stores that chunk. Costs one cached lookup plus one ranged read of the
     // group's directory the first time that group is touched.
@@ -120,21 +159,29 @@ public:
     std::vector<ChunkLocal> chunks(std::string* why = nullptr);
 
 private:
-    // The 4096-entry directory of one group, as read from disk.
+    // One group's directory, as read from disk.
     struct GroupDir {
         u32 groupIndex = 0;
-        std::vector<u8> raw;   // kGroupDirBytes
+        u32 entries = 0;       // packed only: how many entries `raw` holds
+        std::vector<u8> raw;   // version 2: kGroupDirBytes (4096 slots); packed: entries x kPackedDirEntryBytes, sorted by slot
     };
+    struct DirEntry { u32 first = 0, length = 0, crc = 0; };
+    using DirList = std::list<GroupDir>;
+    // The directory of `groupIndex`, read on first use and then served from the LRU. The pointer is valid until the next
+    // groupDir call. Null when the group is absent (no `why`) or unreadable (`why` set).
     const GroupDir* groupDir(u32 groupIndex, std::string* why);
+    // The entry for `slot`; false when the chunk is not stored.
+    bool entryOf(const GroupDir& g, u32 slot, DirEntry& out) const;
 
     mutable aver::File file_;
     RegionHeader header_;
     u32 acceptedCopy_ = 0;
     // groupIndex -> the sector its directory starts at. Sorted, so a lookup is a binary search.
     std::vector<std::pair<u32, u32>> groupTable_;
-    // Directories read so far. A region a camera is standing in touches a handful of groups, so a
-    // plain vector searched linearly beats a map here.
-    std::vector<GroupDir> cache_;
+    // Directories read so far, most recently used first and capped at kGroupCacheGroups. A hash index finds one without a scan.
+    DirList lru_;
+    std::unordered_map<u32, DirList::iterator> lruIndex_;
+    u64 groupReads_ = 0;
 };
 
 // A region open for MUTATION: add, replace and remove chunks without rewriting the file.
@@ -206,5 +253,3 @@ private:
 };
 
 } // namespace aver::world
-
-#endif // AVER_MODULE_SCENE

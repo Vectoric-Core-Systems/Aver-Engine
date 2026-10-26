@@ -109,6 +109,7 @@ void ParticleSystem::setGpuTier(IParticleGpuTier* tier) {
     eventSystems_.clear();
     order_.clear();
     gpuJobs_.clear();
+    gpuShifts_.clear();
     gpuTier_ = tier;
 }
 
@@ -199,6 +200,44 @@ void ParticleSystem::buildInstance(SystemInstance& si, const ParticleSystemDef& 
     }
 }
 
+void ParticleSystem::shiftWorld(const rhi::ShiftVec3d& deltaCm) {
+    if (deltaCm.x == 0.0 && deltaCm.y == 0.0 && deltaCm.z == 0.0) return;
+    const Vec3 d{static_cast<f32>(deltaCm.x), static_cast<f32>(deltaCm.y), static_cast<f32>(deltaCm.z)};
+    const auto shiftRequest = [&](SpawnRequest& r) { r.xf.m[3][0] -= d.x; r.xf.m[3][1] -= d.y; r.xf.m[3][2] -= d.z; };
+    const auto shiftInstance = [&](SystemInstance& si) {
+        si.origin -= d;
+        si.prevOrigin -= d;   // else the next tick reads a 16 km "velocity" and every spawn inherits it
+        for (EmitterInstance& ei : si.emitters) {
+            if (ei.gpu) {
+                if (gpuTier_ && ei.gpuHandle != 0) {
+                    GpuShift s;
+                    s.handle = ei.gpuHandle;
+                    s.delta[0] = d.x; s.delta[1] = d.y; s.delta[2] = d.z;
+                    gpuShifts_.push_back(s);
+                }
+            } else {
+                ei.sim.shiftWorld(d);
+            }
+            for (SpawnRequest& r : ei.inbox) shiftRequest(r);
+            for (SpawnRequest& r : ei.nextInbox) shiftRequest(r);
+            for (EventRecord& ev : ei.events) ev.position -= d;   // scratch, rebuilt by the next step; kept consistent anyway
+        }
+    };
+    for (auto& kv : systems_) shiftInstance(kv.second);
+    for (auto& kv : eventSystems_) shiftInstance(kv.second);
+    for (SpawnAtRequest& q : spawnAtQueue_) shiftRequest(q.req);
+    // A job this tick built and the renderer has not recorded yet is in the old frame too (normally none: the shift runs
+    // at the top of the update, after the last frame's prePass drained them).
+    for (GpuJob& j : gpuJobs_) {
+        j.center[0] -= d.x; j.center[1] -= d.y; j.center[2] -= d.z;
+        j.cb.h.origin[0] -= d.x; j.cb.h.origin[1] -= d.y; j.cb.h.origin[2] -= d.z;
+        for (u32 i = 0; i < j.cb.h.requestCount && i < kGpuMaxRequests; ++i) {
+            j.cb.req[i].xf[12] -= d.x; j.cb.req[i].xf[13] -= d.y; j.cb.req[i].xf[14] -= d.z;
+        }
+        for (GpuSpawnRequest& r : j.extra) { r.xf[12] -= d.x; r.xf[13] -= d.y; r.xf[14] -= d.z; }
+    }
+}
+
 void ParticleSystem::reset() {
     for (auto& kv : systems_) releaseInstance(kv.second);
     for (auto& kv : eventSystems_) releaseInstance(kv.second);
@@ -208,6 +247,7 @@ void ParticleSystem::reset() {
     ops_.clear();
     spawnAtQueue_.clear();
     gpuJobs_.clear();
+    gpuShifts_.clear();
     finished_.clear();
     spawnAtThisFrame_ = 0;
     gpuCapacityUsed_ = 0;

@@ -387,6 +387,7 @@ void WaterRenderer::transparentPass(rhi::IRenderContext& ctx) {
     }
 
     WaterFrameCB cb{};
+    const rhi::ShiftOrigin floatingOrigin = dev_->worldOrigin();   // zero until the first rebase
     for (size_t i = 0; i < kMaxGerstnerWaves; ++i) {
         cb.waveDirSteep[i][0] = waves_[i].dirX;
         cb.waveDirSteep[i][1] = waves_[i].dirZ;
@@ -394,7 +395,8 @@ void WaterRenderer::transparentPass(rhi::IRenderContext& ctx) {
         cb.waveDirSteep[i][3] = 0.0f;
         cb.waveLenAmp[i][0] = waves_[i].wavelengthCm;
         cb.waveLenAmp[i][1] = waves_[i].amplitudeCm;
-        cb.waveLenAmp[i][2] = 0.0f;
+        // The floating origin's share of the wave phase (water.hlsl adds it): positions here are origin-relative.
+        cb.waveLenAmp[i][2] = rhi::gerstnerPhaseOffset(waves_[i].dirX, waves_[i].dirZ, waves_[i].wavelengthCm, floatingOrigin);
         cb.waveLenAmp[i][3] = 0.0f;
     }
     cb.gridOriginCount[0] = gridOriginX;

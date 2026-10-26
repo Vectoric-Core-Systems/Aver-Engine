@@ -159,11 +159,16 @@ ChunkPayload GeneratedChunkSource::generate(const ChunkCoord& c) const {
             // World position built from an INTEGER origin plus a small local offset, in f64 and
             // narrowed once -- the same trick the coordinate hierarchy exists for. Accumulating in
             // f32 would make a chunk's contents depend on how far from the origin it is.
-            const f32 wx = static_cast<f32>(static_cast<f64>(ox) + lx);
-            const f32 wy = static_cast<f32>(static_cast<f64>(oy) + ly);
-            const f32 wz = static_cast<f32>(oz);
+            //
+            // THE LATTICE IS FORMED FROM THE f64 SUM, not from the narrowed f32: past ~10 km an f32 absolute
+            // quantises the floor() input, so the same chunk could generate differently at different distances.
+            const f64 wxd = static_cast<f64>(ox) + static_cast<f64>(lx);
+            const f64 wyd = static_cast<f64>(oy) + static_cast<f64>(ly);
+            const f64 wzd = static_cast<f64>(oz);
+            const f32 wx = static_cast<f32>(wxd);
+            const f32 wy = static_cast<f32>(wyd);
 
-            const f32 d = pcg::sampleInfinite(spec_, wx, wy, wz);
+            const f32 d = pcg::sampleInfiniteAbs(spec_, wxd, wyd, wzd);
             if (d <= settings_.threshold) continue;
 
             const u32 salt = j * n + i;
@@ -210,9 +215,11 @@ ChunkPayload GeneratedChunkSource::generate(const ChunkCoord& c) const {
             // already passed threshold and gotten a species, so a height source can never change
             // WHICH candidates exist, only where an accepted one sits.
             f32 localZ = 0.0f;
-            if (settings_.heightSource) {
+            if (settings_.heightSourceAbs || settings_.heightSource) {
                 f32 surfaceZ = 0.0f;
-                if (settings_.heightSource(wx, wy, surfaceZ)) {
+                const bool haveSurface = settings_.heightSourceAbs ? settings_.heightSourceAbs(wxd, wyd, surfaceZ)
+                                                                   : settings_.heightSource(wx, wy, surfaceZ);
+                if (haveSurface) {
                     // f64 subtract, narrowed once -- the same trick wx/wy themselves use just above
                     // (oz is exact as an i64; mixing it with an f32 surfaceZ before subtracting would
                     // round the CHUNK ORIGIN itself before the usually-much-smaller difference is
@@ -264,6 +271,26 @@ std::function<bool(f32, f32, f32&)> makeInfiniteHeightSource(const InfiniteHeigh
     return [spec, amplitude, baseZ](f32 wx, f32 wy, f32& outZ) -> bool {
         outZ = pcg::sampleInfiniteHeightCm(spec, amplitude, baseZ, wx, wy);
         return true;   // a total field: every world position has an answer
+    };
+}
+
+std::function<bool(f64, f64, f32&)> makeInfiniteHeightSourceAbs(const InfiniteHeightFieldSettings& hf) {
+    // The same spec as makeInfiniteHeightSource builds, so the two agree wherever the f32 form is exact.
+    pcg::InfiniteSpec spec{};
+    spec.seed = hf.seed;
+    spec.layerCount = 1;
+    spec.layers[0].frequency = 1.0f;
+    spec.layers[0].amplitude = 1.0f;
+    spec.layers[0].octaves = hf.octaves > 0 ? static_cast<i32>(hf.octaves) : 1;
+    spec.layers[0].lacunarity = 2.0f;
+    spec.layers[0].gain = 0.5f;
+    spec.layers[0].seedOffset = 0;
+    spec.cellSizeCm = hf.featureSizeCm > 0.0f ? hf.featureSizeCm : 1600.0f;
+    const f32 amplitude = hf.amplitudeCm;
+    const f32 baseZ = hf.baseZCm;
+    return [spec, amplitude, baseZ](f64 wx, f64 wy, f32& outZ) -> bool {
+        outZ = pcg::sampleInfiniteHeightCmAbs(spec, amplitude, baseZ, wx, wy);
+        return true;
     };
 }
 

@@ -193,6 +193,10 @@ public:
     // Entities whose base is currently captured. A test can assert on it, and a host can see whether
     // object animation is actually driving anything.
     u32 objectAnimatedEntities() const { return static_cast<u32>(objects_.size()); }
+    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts `deltaCm` from every captured base that belongs to
+    // a root entity (a child's base is parent-relative). writeObject overwrites CLocal from the base every tick,
+    // so a base left behind would snap the root back by 16 km. Call after World::shiftRoots.
+    void rebase(const scene::World& world, const Vec3& deltaCm);
 
     // Advances every playing CAnimator by `dt` and reposes the entity's skeleton. While object
     // animation is live it also writes CLocal for every object-clip entity (see above).

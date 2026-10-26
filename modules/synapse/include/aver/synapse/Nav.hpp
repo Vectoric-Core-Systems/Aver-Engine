@@ -19,6 +19,10 @@ bool worldToCell(const fmt::OcNavData& nav, f32 xCm, f32 yCm, u32& outX, u32& ou
 // The CENTRE of a cell, in world space, at the floor height the bake recorded.
 Vec3 cellToWorld(const fmt::OcNavData& nav, u32 x, u32 y);
 
+// Floating-origin shift (LARGE_WORLD 2.2.5): moves the grid's origin by -deltaCm on X and Y (floor heights are Z and
+// stay). O(1); every cell keeps its place in the scene's frame.
+void rebaseNav(fmt::OcNavData& nav, const Vec3& deltaCm);
+
 // The nearest walkable cell to a world position, searched outwards in rings up to `maxRingCells`.
 // False when nothing walkable is within that radius.
 //

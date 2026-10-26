@@ -324,6 +324,39 @@ foreach ($raw in Get-Content -LiteralPath $allowPath) {
 }
 
 # ---------------------------------------------------------------------------------------------
+# 3b. Cooked chunks (LARGE_WORLD 2.4.4, open question 16).
+#
+# A level whose STREAM record declares `chunks=<dir>` streams from a cooked set under <project>\Binaries\Chunks\<level>, which section
+# 4 copies with the rest of Binaries -- so the set has to be current BEFORE it is copied. Cooking is deterministic (two cooks of one
+# level are byte-identical), so re-cooking is idempotent, and a cook that fails fails the package: a game shipped with a stale or
+# missing set would silently fall back to streaming the level from its objects, which at the sizes `chunks=` exists for is not a
+# game anyone can play. The level's own text is never touched (--no-header).
+# The STREAM record is in the first lines of a level, so only the head is read: a level can be tens of megabytes.
+# ---------------------------------------------------------------------------------------------
+$cookedLevels = New-Object System.Collections.Generic.List[string]
+if (Test-Path -LiteralPath $contentSrc) {
+    foreach ($lf in (Get-ChildItem -LiteralPath $contentSrc -Recurse -File -Include *.ocworld, *.ocmap -ErrorAction SilentlyContinue)) {
+        $headText = (Get-Content -LiteralPath $lf.FullName -TotalCount 400) -join "`n"
+        if ($headText -match '(?m)^\s*STREAM\b[^\r\n]*\bchunks=\S+') { $cookedLevels.Add($lf.FullName) }
+    }
+}
+if ($cookedLevels.Count -gt 0) {
+    $assetC = Join-Path $bin 'AverAssetC.exe'
+    if (-not (Test-Path -LiteralPath $assetC)) {
+        Fail "$($cookedLevels.Count) level(s) declare STREAM chunks= but $assetC does not exist, so their cooked sets cannot be made current -- build AverAssetC (tests/formats)"
+    } else {
+        foreach ($lv in $cookedLevels) {
+            $lvName = $lv.Substring($contentSrc.Length + 1)
+            Note "cooking chunks for $lvName"
+            & $assetC cook-chunks $lv --content-dir $contentSrc --project-dir $projectDir --no-header
+            if ($LASTEXITCODE -ne 0) { Fail "AverAssetC cook-chunks failed for $lvName (exit $LASTEXITCODE)"; continue }
+            & $assetC cook-chunks $lv --content-dir $contentSrc --project-dir $projectDir --check
+            if ($LASTEXITCODE -ne 0) { Fail "the cooked set for $lvName is not current after cooking (exit $LASTEXITCODE)" }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------------------------
 # 4. Copy.
 # ---------------------------------------------------------------------------------------------
 if (Test-Path -LiteralPath $Out) {

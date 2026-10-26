@@ -17,6 +17,7 @@ placements, never a second copy of them.
   the content folders whose meshes upload on demand; `data=` the generated data, relative to the project root.
 - PLACE/PLACEG/CHILD/CHILDG `id=<16 hex>` -> `OcWorldPlacement::placementId`: stable per-placement identity.
   Written only when set, so other levels round-trip unchanged.
+- `STREAM ... chunks=<project-relative dir>` (`OcStreamSettings::chunksPath`; `STREAM off chunks=...` when streaming from records is off) names the level's COOKED chunk set (section 8). `AverAssetC cook-chunks` and World Settings > Level Streaming > Cook Chunks add it.
 
 GENERATED data lives under the project's `Binaries/Streaming` and is never authored (`OcStream.hpp`):
 - `<level>.ocstream` (text): `SOURCE` (hashPlacements of the level it was made from -- a mismatch marks
@@ -220,3 +221,17 @@ instance with unknown bounds is never given to the streamer and stays loaded. Lo
 to a few thousand placements. Selected, edited, hand-loaded and override-dirty instances are pinned; overrides are stored on the record
 before an eviction. Nested instances load and unload with their top-level unit and ignore the child's own `STREAM` record.
 <!-- [wave3/level-instances end] -->
+
+## 8. The cooked path (`chunks=`; docs/plans/wave11/LARGE_WORLD.md 2.4)
+
+A level can also be COOKED: `AverAssetC cook-chunks <level> --content-dir <dir>` (or World Settings > Level Streaming > Cook Chunks) reads the `.ocworld` as f64 text, expands its
+LEVELINST records in f64 and cuts the placements into 16 m chunks, written as packed region files plus `world.ocindex` and a slim `level.ocworld` under `<project>/Binaries/Chunks/<level>/`,
+and adds `chunks=` to the STREAM record. The set is DERIVED data: the `.ocworld` stays the source of truth, the editor keeps editing and streaming its own records, and the set is
+rebuilt, not edited. Placements the cook cannot own stay in the slim level and load whole: class and vehicle placements, level-sequence targets, anything with no mesh bounds.
+A root whose box reaches more than 3,200 cm from its position is WIDE: it is listed in the index so the streamer keeps its owner chunk resident while the box is near.
+
+The runtime (`GameApp` turns it on; the editor never does) streams the set through `game::AuthoredStreaming` when it is current: `ChunkStreamer` with every layer of a column, a
+millisecond budget (12 ms near, 3 ms far, 2 ms evicting, 128 entities a tick), a prepare gate that holds a chunk until its meshes are read, and `game::ItemLoader` (the same mechanism
+`LevelStreaming` uses) making the entities. A set whose source hash no longer matches the level is stale: one warning, and the level streams from its objects. Play > Standalone Game
+re-cooks a stale set first; `scripts/stage-game.ps1` cooks every level that declares `chunks=` and fails the package if the cook or its check fails. A cooked level can be far larger than
+one f32 frame because the streamer keys chunks by absolute integer coordinate and the scene runs in a floating origin.

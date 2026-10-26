@@ -20,6 +20,7 @@
 
 #if AVER_MODULE_LANDSCAPE
 #include "aver/formats/OcLand.hpp"
+#include "aver/rhi/WorldShift.hpp"
 #include "aver/landscape/LandscapeTree.hpp"
 #include "aver/landscape/LandscapeRenderer.hpp"
 #include "aver/landscape/TerrainTile.hpp"
@@ -113,6 +114,25 @@ public:
     // gameplay camera rig changed it: pass PlayView::fovYRad).
     void draw(rhi::IDevice& device, const Vec3& eye, const Mat4& viewProj, f32 viewportHeightPx,
               GameContent* content = nullptr, pbr::MaterialSystem* materials = nullptr, f32 fovYRad = radians(60.0f));
+
+    // ---- the floating origin (LARGE_WORLD 2.2.6) ----
+    // Everything this class holds and answers in the scene frame is origin-relative, like the scene: the section's and
+    // every ring tile's originCm, the quadtree, the physics heightfield (a static body the physics shift moves), the
+    // picking/sculpt/paint and surface queries. The sidecar on disk, a LANDSCAPE record's `at`, the noise past the rim
+    // and groundHeightAt's arguments are ABSOLUTE; the class converts at exactly those seams.
+    //
+    // The origin moved: the data and the tree follow by the delta (a plain f32 subtraction), and the renderers are told the
+    // new frame, so a resident node is drawn translated by (its build frame - the new one) instead of being rebuilt. Needs
+    // the terrain parameter texture re-uploaded when the section is painted (it carries the section's origin). Idempotent:
+    // it moves to info.newOrigin, so applying one event twice, or after setFrameOrigin, changes nothing.
+    void onOriginShift(const rhi::ShiftWorldInfo& info) { moveFrameTo(info.newOrigin); }
+    // Names the frame without an event: a host that resets its origin at level load (WorldOrigin::reset runs no
+    // participant) calls it BEFORE loadForLevel, so the section is loaded into that frame. Same as an event otherwise.
+    void setFrameOrigin(const rhi::ShiftOrigin& o) { moveFrameTo(o); }
+    const rhi::ShiftOrigin& frameOrigin() const { return frame_; }
+    // The section's sample (0,0) in ABSOLUTE cm, exact (data().originCm is the scene-frame f32). What a LANDSCAPE record's
+    // `at` and anything else that is written to a level or a save must carry; equals data().originCm at origin zero.
+    void homeOriginAbsCm(f64 out[3]) const { out[0] = homeAbs_[0]; out[1] = homeAbs_[1]; out[2] = landscapeData_.originCm[2]; }
 
     // Called at the end of loadForLevel, where the host restarts live chunk streaming so scatter
     // regenerates against the new surface.
@@ -327,6 +347,11 @@ public:
     // ---- end wave3 layers ----
 
 private:
+    // Floating origin: moves the frame the section, ring tiles and renderers live in. See onOriginShift.
+    void moveFrameTo(const rhi::ShiftOrigin& o);
+    // Puts a section just read from disk (absolute f32 originCm, == homeAbs_) into the current frame.
+    void placeInFrame(fmt::OcLandData& d) const;
+
     // Loads one .ocland section and builds its quadtree over it. Pure CPU. Calls unload() first, so
     // `device` frees whatever section is currently resident before this one replaces it (null is only
     // safe when nothing is resident yet). Clears dirty_ -- a freshly loaded section has nothing
@@ -401,6 +426,12 @@ private:
     std::vector<f32> strokeBefore_;
 
     fmt::OcLandData landscapeData_;
+    // The scene origin the section, the ring tiles and their renderers are expressed in (zero until a host names one).
+    rhi::ShiftOrigin frame_{};
+    // The resident section's sample (0,0) in ABSOLUTE cm (x, y), exact: the file's f32 or the LANDSCAPE record's f64 `at`.
+    // originCm in landscapeData_ is f32(homeAbs_ - frame_), one rounding however many rebases have happened, and save()
+    // writes homeAbs_ back so a flight never drifts the sidecar.
+    f64 homeAbs_[2] = {0.0, 0.0};
     landscape::LandscapeTree landscapeTree_;
     // Heap-owned so unload() can destroy and recreate it independently of the section data, mirroring
     // LandscapeRenderer's own forget-then-discard lifecycle.

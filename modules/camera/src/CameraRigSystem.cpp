@@ -106,6 +106,27 @@ void CameraRigSystem::uninstall() {
     world_ = nullptr;
 }
 
+void CameraRigSystem::rebase(const Vec3& d) {
+    for (auto& [e, st] : states_) {
+        st.lagPivot -= d;
+        st.prevTarget -= d;
+        st.lead.lastPivot -= d;           // vel and lead are a rate and an offset: frame-independent
+        st.lastTargetPos -= d;
+        st.lastPov.pos -= d;
+    }
+    for (Inbox& op : inbox_)
+        if (op.kind == Inbox::Kind::Shake) op.pos -= d;
+    lastOut_.pos -= d;
+    lastFinite_.pos -= d;
+    from_.pos -= d;
+    lastExternal_.pos -= d;
+    debug_.pivot -= d;
+    debug_.laggedPivot -= d;
+    debug_.desiredEnd -= d;
+    debug_.camera -= d;
+    debug_.hit -= d;
+}
+
 void CameraRigSystem::clear() {
     inbox_.clear();
     mods_.reset();

@@ -1,0 +1,7 @@
+OCGRAPH 1
+DOMAIN gameplay
+NAME BigBeacon
+DESCRIPTION A level-global class placement for BigWorldLab: a tall pillar beside the spawn. Class placements are never chunk-owned (CHUNKS.md 8.3), so the cook leaves this one in the slim level.
+
+CLASS AN_BigBeacon Actor
+COMP body Mesh mesh=Meshes/cube.ocmesh scale=60,60,400 pos=0,0,400

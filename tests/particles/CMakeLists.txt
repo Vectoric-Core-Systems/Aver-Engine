@@ -8,6 +8,13 @@ add_executable(ParticleSystemTest src/ParticleSystemTest.cpp)
 target_link_libraries(ParticleSystemTest PRIVATE Aver.Particles Aver.Scene Aver.Core Aver.Platform)
 set_target_properties(ParticleSystemTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ParticleShiftTest -- the floating origin and particles (LARGE_WORLD 2.2.5, R-4): CPU particles, origins, queued spawns and trail points shift by exactly -delta;
+# the GPU kernel (CSShift in particles_sim.hlsl) is held to its CPU mirrors in ParticleGpuTypes.hpp and to the HLSL text. No device. AVER_REPO_ROOT: it reads the shader.
+add_executable(ParticleShiftTest src/ParticleShiftTest.cpp)
+target_link_libraries(ParticleShiftTest PRIVATE Aver.Particles Aver.Scene Aver.Core Aver.Platform)
+target_compile_definitions(ParticleShiftTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(ParticleShiftTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # The wave-10 CPU tests. None creates a device; each is the reference a GPU row is checked against, or the pure half of one.
 #   ParticleModulesTest      the RNG's golden values, every module kind, user-parameter binding, curves
 #   EmitterSimTest           determinism, budget, ids, shapes, linked ribbons, trails, events

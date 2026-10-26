@@ -295,6 +295,12 @@ public:
     // no mitigation is calibrated for, and every caller must answer by not culling.
     virtual bool readbackLagIsExactlyOneCall() const { return true; }
 
+    // The floating origin moved (LARGE_WORLD 2.2.6): the boxes, viewProj and pyramid of the previous testBatch() were
+    // in the old frame, so its answer cannot be trusted for the next call. After this, the next testBatch() reports
+    // readbackLagIsExactlyOneCall() == false (the always-safe "do not cull" answer) and then recovers by itself: one
+    // frame of unculled objects. Not pure; the default does nothing, like the other staleness hooks.
+    virtual void invalidateBasis() {}
+
     // Boxes testBatch() said "hidden" for, and the total it was asked about, across the MOST RECENT
     // testBatch() call only (not accumulated) — a caller wanting a running total (SandboxApp.cpp's
     // periodic log line) accumulates these itself, once per frame, the same way every other counter

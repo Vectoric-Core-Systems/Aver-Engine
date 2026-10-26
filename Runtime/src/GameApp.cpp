@@ -1121,6 +1121,7 @@ void GameApp::installLevelHooks(Engine& e) {
     };
     level_.setLoadHooks(std::move(hooks));
     level_.setDevice(e.device());
+    level_.setUseCookedChunks(true);   // the shipped path streams a level's cooked chunk set (LARGE_WORLD 2.4.6); the editor leaves it off
     // [wave3/level-instances begin] LEVELINST records (docs/LEVEL_INSTANCES.md): the prefab system, the framework and
     // the foliage path are the host's; LevelInstances itself depends on none of them.
     {

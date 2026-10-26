@@ -96,6 +96,10 @@ public:
     // Returns the instances that ran.
     u32 record(rhi::IRenderContext& ctx, std::vector<GpuJob>& jobs, const View& view);
 
+    // prePass, BEFORE record(): applies the floating-origin shifts ParticleSystem queued (CSShift, one dispatch per instance:
+    // particle slots, trail points, pending event records). Buffers go back to the state they were in. Consumes `shifts`.
+    void recordShifts(rhi::IRenderContext& ctx, std::vector<GpuShift>& shifts);
+
     // For mesh particles: the index count the draw arguments carry (default 6, the quad template).
     void setIndexCount(u32 handle, u32 indexCount);
 
@@ -163,6 +167,8 @@ private:
     TrackedBuffer dummy_;
     rhi::PipelineHandle csInit_ = 0, csBegin_ = 0, csSpawn_ = 0, csArgsUpdate_ = 0, csUpdate_ = 0, csFinish_ = 0, csProbe_ = 0, csRngProbe_ = 0;
     rhi::PipelineHandle csSortKeys_ = 0, csSortLocal_ = 0, csSortGlobal_ = 0, csSortLocalMerge_ = 0, csSortFinal_ = 0;
+    rhi::PipelineHandle csShift_ = 0;   // optional: a stale deploy without CSShift only loses the origin shift, not the tier
+    bool shiftWarned_ = false;
 
     std::vector<Instance> instances_;
     std::vector<u32> freeHandles_;

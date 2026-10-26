@@ -43,8 +43,13 @@ void tileCornerCm(TileCoord t, f32 centreXCm, f32 centreYCm, f32 tileSizeCm, f32
 // it does, since that section already validated), spaced so the tile spans exactly `tileSizeCm`,
 // heights from terrainHeightAt. Returns false (and leaves `out` unspecified) on a degenerate request --
 // same failure shape as fmt::loadOcLand, checked with OcLandData::valid() besides.
+//
+// FLOATING ORIGIN (LARGE_WORLD 2.2.6): every position above is in the caller's scene frame, which sits at (originXCm,
+// originYCm) -- a whole number of regions, zero by default. The heights are a function of the ABSOLUTE position, so they
+// come from terrainHeightAtFrom (f64 sum); with the default zero origin that is terrainHeightAt, bit for bit.
 bool synthesizeTerrainTile(TileCoord t, f32 centreXCm, f32 centreYCm, f32 tileSizeCm,
-                           u32 samplesPerTile, const TerrainNoiseParams& noise, fmt::OcLandData& out);
+                           u32 samplesPerTile, const TerrainNoiseParams& noise, fmt::OcLandData& out,
+                           i64 originXCm = 0, i64 originYCm = 0);
 
 } // namespace aver::landscape
 

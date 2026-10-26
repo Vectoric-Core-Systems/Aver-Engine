@@ -310,6 +310,7 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
     // parent's answer is final when the child asks.
     std::vector<char> movesWithClip(w.placements.size(), 0);
     bool warnedAttachSnap = false;   // [wave3/level-instances]
+    bool warnedFarPlacement = false;
 
 #if AVER_MODULE_PHYSICS
     // MESH ID -> the shared physics shape for it (this call's own, or the caller's opt.meshShapes), or 0 for "already asked and
@@ -379,8 +380,22 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
                       "is measured from its parent, not from the terrain", p.asset);
         }
 
+        // THE FLOATING ORIGIN: the subtraction is in f64, before the one narrowing (LARGE_WORLD 2.6.3). At origin zero
+        // `p.x - 0.0` is `p.x`, so this is today's value bit for bit. Z is never shifted. A child's numbers are
+        // parent-relative and attached roots sit under a parent, so only a free root is measured against the origin.
+        const bool freeRoot = !isChild && !opt.attach;
+        const f64 relX = freeRoot ? p.x - static_cast<f64>(opt.origin.x) : p.x;
+        const f64 relY = freeRoot ? p.y - static_cast<f64>(opt.origin.y) : p.y;
+        if (freeRoot && !warnedFarPlacement &&
+            (std::fabs(relX) > static_cast<f64>(kSubMmCliffCm) || std::fabs(relY) > static_cast<f64>(kSubMmCliffCm))) {
+            warnedFarPlacement = true;
+            AVER_WARN("[Level] placement '{}' is {:.0f} m from the floating origin; positions that far are quantised to "
+                      "1.25 mm or worse -- stream the level (docs/CHUNKS.md 9)", p.asset,
+                      std::max(std::fabs(relX), std::fabs(relY)) * 0.01);
+        }
+
         Transform xf;
-        xf.position = Vec3{static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(pz)};
+        xf.position = Vec3{static_cast<f32>(relX), static_cast<f32>(relY), static_cast<f32>(pz)};
         xf.rotation = quatFromEulerDeg(Vec3{static_cast<f32>(p.roll), static_cast<f32>(p.pitch),
                                             static_cast<f32>(p.yaw)});
         xf.scale = Vec3{static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz)};
@@ -658,6 +673,14 @@ u32 driveKinematicBodies(scene::World& world, const std::vector<AnimatedBody>& b
     (void)world; (void)bodies; (void)dt;
 #  endif
     return undriven;
+}
+
+void rebaseKinematicDrivers(const Vec3& deltaCm) {
+#  if AVER_MODULE_PHYSICS
+    for (auto& [body, mem] : g_driven) mem.pose.position -= deltaCm;
+#  else
+    (void)deltaCm;
+#  endif
 }
 
 } // namespace aver::world

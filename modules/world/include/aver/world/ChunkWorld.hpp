@@ -34,6 +34,7 @@
 
 #include "aver/core/Types.hpp"
 #include "aver/core/Math.hpp"
+#include "aver/world/AuthoredChunkSource.hpp"
 #include "aver/world/BodyRegistry.hpp"
 #include "aver/world/ChunkCoord.hpp"
 #include "aver/world/ChunkGenerator.hpp"
@@ -58,6 +59,8 @@ struct ChunkWorldSettings {
     std::string worldDir;
     GeneratorSettings generator;
     StreamSettings stream;
+    // The level this world belongs to, compared with a persisted index's levelId on open(). 0 = not checked.
+    u64 levelId = 0;
 };
 
 // Binds a ChunkStreamer to a generated-baseline-plus-saved-overrides source stack and a scene. A
@@ -72,6 +75,16 @@ public:
     // is NOT a failure: see the header comment on why the override source tolerates that silently.
     bool open(const ChunkWorldSettings& settings, std::string* why = nullptr);
 
+    // A world made of a COOKED authored level and nothing else (LARGE_WORLD 2.4.6): no generator, no override layer. `cookDir` is
+    // <project>/Binaries/Chunks/<level>/ (world.ocindex + regions). False with `why` when the index is missing, damaged or not a
+    // cooked set. `stream` is the caller's policy; whatever it says, the world streams whole columns (kAllLayers) with at least
+    // the fixed pad (kAuthoredPadChunks) and the cook's chunk size, because those are properties of the set and not choices. The
+    // index's wide items are handed to the streamer. `host` (not owned, may be null for the scatter host) is what turns a decoded
+    // chunk into entities; the authored game host (game::AuthoredStreaming) is the one that matters.
+    bool openAuthored(const std::string& cookDir, const StreamSettings& stream, IChunkHost* host, std::string* why = nullptr);
+    bool authored() const { return authoredMode_; }
+    const AuthoredChunkSource& authoredSource() const { return authoredSrc_; }
+
     // One step. Reports the viewer's position and velocity, drives the streamer, and returns its
     // stats. `dt` is accepted for symmetry with a host's own per-frame Timestep and is not otherwise
     // used here: the streamer's own look-ahead runs on `StreamSettings::leadSeconds * velocity`, not
@@ -82,8 +95,12 @@ public:
     // Bodies freed by this step's evictions are appended to `freedBodies`, exactly as
     // ChunkStreamer::update documents -- this class links Aver.Scene and not Aver.Physics, and stays
     // that way, so the caller (who may or may not have physics) removes them.
+    //
+    // `origin` is the floating origin the scene is in (WorldPos.hpp); the viewer positions are origin-relative. Zero, the
+    // default, is the pre-origin behaviour bit for bit. A rebase between two updates loads and evicts nothing (see
+    // ChunkStreamer::update).
     StreamStats update(scene::World& w, const Vec3& viewerPosCm, const Vec3& viewerVelCmPerSec,
-                       f32 dt, std::vector<i32>* freedBodies = nullptr);
+                       f32 dt, std::vector<i32>* freedBodies = nullptr, OriginCm origin = {});
 
     // Same step, for more than one thing the world stays loaded around at once -- e.g. the editor
     // camera AND a graph-driven actor flying independently of it. `sources` replaces whatever was
@@ -91,7 +108,7 @@ public:
     // to keep counting must include it in `sources` itself. See StreamSource (ChunkStreamer.hpp) for
     // why this is a list rather than a single position in the first place.
     StreamStats update(scene::World& w, const std::vector<StreamSource>& sources,
-                       f32 dt, std::vector<i32>* freedBodies = nullptr);
+                       f32 dt, std::vector<i32>* freedBodies = nullptr, OriginCm origin = {});
 
     // Every entity this world currently owns, chunk by chunk flattened into one list. This is the
     // answer an outliner or a save path needs to tell a streamed entity from an authored one --
@@ -117,7 +134,9 @@ private:
 
     ChunkWorldSettings settings_;
     bool opened_ = false;
+    bool authoredMode_ = false;
     std::string indexPath_;
+    AuthoredChunkSource authoredSrc_;
 
     // Declaration order matters: `source_`'s in-class initializer takes the addresses of the two
     // members before it, which are guaranteed constructed by the time `source_` is -- C++ runs

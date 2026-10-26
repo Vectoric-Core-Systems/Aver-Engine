@@ -3,14 +3,10 @@
 
 #if AVER_MODULE_SCENE
 #  include "aver/game/GameContent.hpp"
-#  include "aver/game/LevelComponents.hpp"
 #  include "aver/core/Hash.hpp"
 #  include "aver/core/Log.hpp"
 #  include "aver/scene/scene_abi.h"
 #  include "aver/world/LevelTransform.hpp"
-#  if AVER_MODULE_PHYSICS
-#    include "aver/physics/physics_abi.h"
-#  endif
 
 #  include <algorithm>
 #  include <chrono>
@@ -37,8 +33,7 @@ void LevelStreaming::begin(const fmt::OcWorldData& w, GameContent& content, rhi:
                            const world::InstantiateOptions& opt, Hooks hooks) {
     content_ = &content;
     device_ = &device;
-    opt_ = opt;
-    opt_.progress = nullptr;
+    loader_.begin(content, device, opt);
     hooks_ = std::move(hooks);
     records_ = w.placements;
     removed_.assign(records_.size(), 0);
@@ -47,8 +42,6 @@ void LevelStreaming::begin(const fmt::OcWorldData& w, GameContent& content, rhi:
     rootPlacements_.clear();
     placementOf_.clear();
     entityOf_.clear();
-    animatedByItem_.clear();
-    animated_.clear();
 
     // Roots own their descendants (parents precede children in OcWorldData). A child of a class
     // placement loads as a root, as world::instantiate already treats it.
@@ -91,17 +84,13 @@ void LevelStreaming::end(scene::World& world) {
     if (!active_) return;
     for (u32 i = 0; i < items_.size(); ++i)
         if (items_[i].loaded) evictItem(world, i);
-    releaseUnusedShapes();
-#  if AVER_MODULE_PHYSICS
-    for (const auto& [mesh, shape] : meshShapes_) if (shape) aver_phys_release_mesh_shape(shape);
-#  endif
-    meshShapes_.clear();
+    loader_.releaseUnusedShapes();
+    loader_.end();
     active_ = false;
     records_.clear();
     items_.clear();
     placementOf_.clear();
     entityOf_.clear();
-    animated_.clear();
 }
 
 bool LevelStreaming::worldBounds(u32 placement, Vec3& outMin, Vec3& outMax) const {
@@ -158,88 +147,45 @@ world::Aabb LevelStreaming::itemBounds(const Item& it) const {
     return b;
 }
 
-void LevelStreaming::bindMeshMaterials(u64 meshId) {
-#if AVER_MODULE_PBR
-    // A mesh's own slot materials, once per load. Queued and drained by loadItems, so each is built as it is made.
-    content_->queueMeshMaterials(meshId);
-#else
-    (void)meshId;
-#endif
-}
-
 void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& items) {
     (void)world;   // instantiate() creates into the process-global World
     HitchMarks hm(items.size() == 1 && !items_[items[0]].placements.empty()
                       ? records_[items_[items[0]].placements.front()].asset.c_str() : "load batch", 0.25);
     // One instantiate for the batch: a sub-level of the items' placements, parents remapped.
-    fmt::OcWorldData sub;
-    std::vector<u32> globalOf;
-    std::unordered_map<u32, i32> localOf;
-    std::vector<u64> toBind;
+    std::vector<ItemLoader::Entry> entries;
+    std::unordered_map<u32, i32> slotOf;
     for (const u32 item : items) {
-        Item& it = items_[item];
-        for (const u32 pi : it.placements) {
+        for (const u32 pi : items_[item].placements) {
             if (removed(pi)) continue;
-            fmt::OcWorldPlacement p = records_[pi];
-            const auto par = p.parent >= 0 ? localOf.find(static_cast<u32>(p.parent)) : localOf.end();
-            p.parent = par != localOf.end() ? par->second : -1;
-            localOf[pi] = static_cast<i32>(sub.placements.size());
-            sub.placements.push_back(std::move(p));
-            globalOf.push_back(pi);
-            const u64 mesh = records_[pi].objectId;
-            if (std::find(it.meshes.begin(), it.meshes.end(), mesh) == it.meshes.end()) {
-                content_->acquireTag = "level";
-                const bool got = content_->acquireMesh(*device_, mesh);
-                content_->acquireTag = nullptr;
-                if (got) {
-                    it.meshes.push_back(mesh);
-                    toBind.push_back(mesh);
-                    // Built on the prefetch worker; instantiate reuses it instead of building one here.
-                    if (!meshShapes_.count(mesh))
-                        if (const i32 shape = content_->takeMeshShape(mesh)) meshShapes_.emplace(mesh, shape);
-                }
-            }
+            const fmt::OcWorldPlacement& p = records_[pi];
+            const auto par = p.parent >= 0 ? slotOf.find(static_cast<u32>(p.parent)) : slotOf.end();
+            ItemLoader::Entry en;
+            en.rec = &p;
+            en.tag = pi;
+            en.item = item;
+            en.parent = par != slotOf.end() ? par->second : -1;
+            slotOf[pi] = static_cast<i32>(entries.size());
+            entries.push_back(en);
         }
     }
-    hm.mark("meshes");
-    for (const u64 mesh : toBind) bindMeshMaterials(mesh);
-#if AVER_MODULE_PBR
-    while (content_->buildNextMaterial()) {}   // inside this tick's budget, before the entities that show them
-#endif
-    hm.mark("materials");
-    opt_.meshShapes = &meshShapes_;
-    const world::LevelInstance inst = world::instantiate(sub, opt_);
-    hm.mark("instantiate");
+    const std::vector<ItemLoader::Loaded> loadedBatch = loader_.load(entries, {}, &hm);
     std::vector<scene::Entity> loaded;
     std::vector<u32> loadedPlacement;
     std::vector<i32> loadedBody;
-    for (usize k = 0; k < inst.entities.size(); ++k) {
-        const u32 pi = globalOf[inst.placementIndex[k]];
-        Item& it = items_[itemOf_[pi]];
-        it.entities.push_back(inst.entities[k]);
-        const i32 body = k < inst.entityBody.size() ? inst.entityBody[k] : -1;
-        if (body >= 0) it.bodies.emplace_back(inst.entities[k], body);
-        loadedBody.push_back(body);
-        placementOf_[inst.entities[k]] = pi;
-        entityOf_[pi] = inst.entities[k];
-        loaded.push_back(inst.entities[k]);
-        loadedPlacement.push_back(pi);
-    }
-    for (const world::AnimatedBody& ab : inst.animatedBodies) {
-        const auto pl = placementOf_.find(ab.entity);
-        if (pl != placementOf_.end()) animatedByItem_[itemOf_[pl->second]].push_back(ab);
+    for (const ItemLoader::Loaded& l : loadedBatch) {
+        loadedBody.push_back(l.body);
+        placementOf_[l.entity] = l.tag;
+        entityOf_[l.tag] = l.entity;
+        loaded.push_back(l.entity);
+        loadedPlacement.push_back(l.tag);
     }
     for (const u32 item : items) {
         items_[item].loaded = true;
         streamer_.markLoaded(item);
     }
-    if (!inst.animatedBodies.empty()) rebuildAnimated();
     hm.mark("bookkeeping");
-    // COMPONENT records of the batch, before the host sees it. Warnings only: an INFO line per streamed item would be noise here.
-    for (usize k = 0; k < loaded.size(); ++k) {
-        const fmt::OcWorldPlacement& rec = records_[loadedPlacement[k]];
-        if (!rec.components.empty()) applyPlacedComponents(scene::World::instance(), loaded[k], rec, loadedPlacement[k]);
-    }
+    // COMPONENT records of the batch, before the host sees it.
+    loader_.applyComponents(loadedBatch);
     hm.mark("components");
     if (hooks_.afterLoad && !loaded.empty()) hooks_.afterLoad(loaded, loadedPlacement, loadedBody);
     hm.mark("hook");
@@ -248,44 +194,20 @@ void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& item
 void LevelStreaming::evictItem(scene::World& world, u32 item, bool writeBack) {
     Item& it = items_[item];
     HitchMarks hm(it.placements.empty() ? "evict" : records_[it.placements.front()].asset.c_str(), 0.25);
-    for (const scene::Entity e : it.entities) {
+    // A copy: the loader empties its list in evict(), after the maps below are cleaned.
+    const std::vector<scene::Entity> entities = loader_.entitiesOf(item);
+    for (const scene::Entity e : entities) {
         const auto pl = placementOf_.find(e);
         if (pl != placementOf_.end() && hooks_.beforeEvict && world.valid(e)) hooks_.beforeEvict(e, pl->second, writeBack);
     }
     hm.mark("evict:hook");
-#if AVER_MODULE_PHYSICS
-    for (const auto& eb : it.bodies) if (eb.second >= 0) aver_phys_remove_body(eb.second);
-#endif
-    // Children first, so no destroy sees a parent already gone.
-    for (auto e = it.entities.rbegin(); e != it.entities.rend(); ++e) {
+    for (auto e = entities.rbegin(); e != entities.rend(); ++e) {
         const auto pl = placementOf_.find(*e);
         if (pl != placementOf_.end()) { entityOf_.erase(pl->second); placementOf_.erase(pl); }
-        if (world.valid(*e)) world.destroy(*e);
     }
-    hm.mark("evict:destroy");
-    for (const u64 mesh : it.meshes) content_->releaseMesh(*device_, mesh);
-    hm.mark("evict:releaseMesh");
-    it.entities.clear();
-    it.bodies.clear();
-    it.meshes.clear();
+    loader_.evict(world, item, &hm);   // bodies, entities (children first), meshes, kinematic bodies
     it.loaded = false;
-    if (animatedByItem_.erase(item)) rebuildAnimated();
     streamer_.markEvicted(item);
-}
-
-void LevelStreaming::rebuildAnimated() {
-    animated_.clear();
-    for (const auto& [item, list] : animatedByItem_) animated_.insert(animated_.end(), list.begin(), list.end());
-}
-
-void LevelStreaming::releaseUnusedShapes() {
-#  if AVER_MODULE_PHYSICS
-    for (auto it = meshShapes_.begin(); it != meshShapes_.end();) {
-        if (content_->meshLoaded(it->first)) { ++it; continue; }
-        if (it->second) aver_phys_release_mesh_shape(it->second);   // live bodies keep their own reference
-        it = meshShapes_.erase(it);
-    }
-#  endif
 }
 
 void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewers) {
@@ -305,26 +227,26 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewers)
         if (lastEvicted_ > 0 && msSince(evictStart) >= kEvictMs) break;
         if (item < items_.size() && items_[item].loaded) { evictItem(world, item); ++lastEvicted_; }
     }
-    if (lastEvicted_) releaseUnusedShapes();
+    if (lastEvicted_) loader_.releaseUnusedShapes();
     hm.mark("evict");
 
     // Pinned roots load now; the rest once their meshes are read.
     std::vector<u32> now, ready;
     f32 nearestMissing = FLT_MAX;
     // Every request first, then readiness: a request may trim finished reads, never one just checked.
-    content_->prefetchTick();
+    loader_.prefetchTick();
     for (const u32 item : toLoad) {
         if (item >= items_.size() || items_[item].loaded || streamer_.pinned(item)) continue;
         const f32 dist = streamer_.distance(item, viewers);
         for (const u32 pi : items_[item].placements)
-            if (!removed(pi)) content_->prefetchMesh(records_[pi].objectId, dist);
+            if (!removed(pi)) loader_.prefetch(records_[pi].objectId, dist);
     }
     for (const u32 item : toLoad) {
         if (item >= items_.size() || items_[item].loaded) continue;
         if (streamer_.pinned(item)) { now.push_back(item); continue; }
         bool read = true;
         for (const u32 pi : items_[item].placements)
-            if (!removed(pi)) read = read && content_->meshReady(records_[pi].objectId);
+            if (!removed(pi)) read = read && loader_.ready(records_[pi].objectId);
         nearestMissing = std::min(nearestMissing, streamer_.distance(item, viewers));
         if (read) ready.push_back(item);
     }
@@ -413,10 +335,9 @@ u32 LevelStreaming::addRecord(const fmt::OcWorldPlacement& p, scene::Entity e) {
     removed_.push_back(0);
     Item item;
     item.placements.push_back(pi);
-    item.entities.push_back(e);
     item.loaded = true;
-    if (content_->acquireMesh(*device_, p.objectId)) item.meshes.push_back(p.objectId);
     const u32 idx = static_cast<u32>(items_.size());
+    loader_.adopt(idx, e, p.objectId);   // the entity, and a reference on its mesh when the cache gives one
     itemOf_.push_back(idx);
     rootPlacements_.push_back(pi);
     items_.push_back(std::move(item));
@@ -448,21 +369,12 @@ void LevelStreaming::removeRecord(u32 placement) {
             // The host destroyed the entity and its body; nothing here may remove that body again.
             const scene::Entity gone = e->second;
             placementOf_.erase(gone);
-            it.entities.erase(std::remove(it.entities.begin(), it.entities.end(), gone), it.entities.end());
-            it.bodies.erase(std::remove_if(it.bodies.begin(), it.bodies.end(),
-                                           [gone](const auto& eb) { return eb.first == gone; }), it.bodies.end());
-            if (auto an = animatedByItem_.find(item); an != animatedByItem_.end()) {
-                an->second.erase(std::remove_if(an->second.begin(), an->second.end(),
-                                                [gone](const world::AnimatedBody& ab) { return ab.entity == gone; }),
-                                 an->second.end());
-            }
+            loader_.forget(item, gone);   // its entity, body and kinematic body
             entityOf_.erase(e);
         }
     }
-    rebuildAnimated();
     if (isRoot) {
-        for (const u64 mesh : it.meshes) content_->releaseMesh(*device_, mesh);
-        it.meshes.clear();
+        loader_.releaseMeshes(item);
         it.loaded = false;
         streamer_.remove(item);
     } else {

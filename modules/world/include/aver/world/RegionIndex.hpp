@@ -32,13 +32,32 @@
 namespace aver::world {
 
 inline constexpr u32 kIndexMagic   = 0x58444943u;   // 'CIDX' little-endian
-inline constexpr u32 kIndexVersion = 1;
+// 2 appends the kind, the source hash and the wide list (a cooked authored level, LARGE_WORLD 2.4.4) behind the region list. The
+// writer always emits 2; the reader takes 1 and 2, a version 1 index reading as kind 0 with no source hash and no wide items.
+inline constexpr u32 kIndexVersion = 2;
+inline constexpr u32 kIndexVersionMin = 1;
+
+inline constexpr u32 kIndexKindOverrides = 0;   // persisted PCG / player chunks (world.ocindex under <project>\Chunks)
+inline constexpr u32 kIndexKindCooked    = 1;   // a cooked authored level (under <project>\Binaries\Chunks\<level>)
 
 struct RegionEntry {
     RegionCoord coord;
     u64 contentHash = 0;      // must equal the region header's own
     u32 chunkCount = 0;
     std::string relativePath;
+};
+
+// A placement too large for the chunk it is owned by (a terrain tile, a bridge): the streamer wants its OWNER chunk resident
+// whenever the box is near a viewer, however far the owner's own cell is. Absolute i64 cm, so it is exact at any distance.
+struct WideItem {
+    ChunkCoord owner;
+    i64 minCm[3] = {0, 0, 0};
+    i64 maxCm[3] = {0, 0, 0};
+
+    friend bool operator==(const WideItem& a, const WideItem& b) {
+        return a.owner == b.owner && a.minCm[0] == b.minCm[0] && a.minCm[1] == b.minCm[1] && a.minCm[2] == b.minCm[2] &&
+               a.maxCm[0] == b.maxCm[0] && a.maxCm[1] == b.maxCm[1] && a.maxCm[2] == b.maxCm[2];
+    }
 };
 
 struct RegionIndex {
@@ -49,6 +68,14 @@ struct RegionIndex {
     // Sorted by (x, y, z). Kept sorted by add()/sort(), which is what lets find() binary-search.
     std::vector<RegionEntry> regions;
     RegionCoord minRegion, maxRegion;        // meaningless when regions is empty
+
+    // Version 2.
+    u32 kind = kIndexKindOverrides;
+    // Cooked sets only: a hash of the flattened placement set, the codec version and the cook version. A source level whose hash
+    // differs from this has changed since the cook, so the set is stale.
+    u64 sourceHash = 0;
+    // Cooked sets only, in the cook's order (the encoder keeps it, so a cook is byte-deterministic).
+    std::vector<WideItem> wide;
 
     // Adds or replaces the entry for `e.coord`, keeping the order. Returns true if it replaced one.
     bool add(const RegionEntry& e);

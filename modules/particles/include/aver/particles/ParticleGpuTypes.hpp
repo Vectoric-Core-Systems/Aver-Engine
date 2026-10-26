@@ -6,6 +6,7 @@
 #include "aver/particles/ParticleTypes.hpp"
 
 #include <cstddef>
+#include <cstring>
 #include <vector>
 
 namespace aver::particles {
@@ -112,6 +113,42 @@ struct GpuJob {
     GpuSimCB cb;                         // header, user values, modules and the first <= 64 requests
     std::vector<GpuSpawnRequest> extra;  // requests past the first 64 (more spawn dispatches)
 };
+
+// A floating-origin shift of one GPU instance's RESIDENT state (LARGE_WORLD 2.2.6): its particle slots, trail points and
+// pending event records are all `delta` smaller. ParticleSystem::shiftWorld queues one per live GPU instance; ParticleGpu
+// runs them (CSShift) before any job of the frame. Plain data, like GpuJob.
+struct GpuShift {
+    u32 handle = 0;
+    f32 delta[3] = {0, 0, 0};
+};
+
+// The CPU mirrors of CSShift's arithmetic (particles_sim.hlsl): plain f32 `p - delta` per axis on exactly the fields the
+// kernel writes, so ParticleShiftTest can hold the HLSL to a definition with no device. Dead slots shift too (harmless);
+// a trail point keeps its w (the particle's age at the point); an event record shifts its position and not its velocity.
+inline void gpuShiftParticles(Particle* p, usize n, const f32 delta[3]) {
+    for (usize i = 0; i < n; ++i) { p[i].position.x -= delta[0]; p[i].position.y -= delta[1]; p[i].position.z -= delta[2]; }
+}
+inline void gpuShiftTrail(Vec4* t, usize n, const f32 delta[3]) {
+    for (usize i = 0; i < n; ++i) { t[i].x -= delta[0]; t[i].y -= delta[1]; t[i].z -= delta[2]; }
+}
+// `events` is the instance's whole events buffer: two regions of kGpuEventRegionUints uints. Only the first
+// min(count, kGpuEventCapacity) records of each type are live; the rest is stale and left alone.
+inline void gpuShiftEvents(u32* events, const f32 delta[3]) {
+    for (u32 region = 0; region < 2; ++region) {
+        u32* base = events + region * kGpuEventRegionUints;
+        for (u32 type = 0; type < 2; ++type) {
+            const u32 n = base[type] < kGpuEventCapacity ? base[type] : kGpuEventCapacity;
+            u32* rec = base + kGpuEventHeaderUints + (type == 0 ? 0u : kGpuEventCapacity * kGpuEventRecordUints);
+            for (u32 i = 0; i < n; ++i, rec += kGpuEventRecordUints)
+                for (u32 a = 0; a < 3; ++a) {
+                    f32 v;
+                    std::memcpy(&v, &rec[a], sizeof v);
+                    v -= delta[a];
+                    std::memcpy(&rec[a], &v, sizeof v);
+                }
+        }
+    }
+}
 
 // Packs `fx`'s enabled modules into the uint4 table (kGpuModuleRows rows each); returns the module count.
 u32 packGpuModules(const ParticleEffect& fx, u32 (*outRows)[4]);

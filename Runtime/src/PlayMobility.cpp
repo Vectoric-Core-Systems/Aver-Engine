@@ -33,6 +33,7 @@ void PlayMobility::begin(const scene::World& w) {
     pawnTreeFrame_ = 0;
     frame_ = 1;
     movableCount_ = 0;
+    rebasePending_ = false;
     active_ = true;
     // Seeded, not Static: the rest transform is taken from the walk's own matrix on first sight.
     // Hashing World::worldMatrix here instead would compare two different sources, and a walk that
@@ -76,6 +77,7 @@ void PlayMobility::end() {
     pawnMark_.shrink_to_fit();
     pawnTreeFrame_ = 0;
     movableCount_ = 0;
+    rebasePending_ = false;
     active_ = false;
 }
 
@@ -83,6 +85,18 @@ void PlayMobility::beginFrame(scene::Entity movableRoot) {
     if (!active_) return;
     ++frame_;
     root_ = movableRoot;
+    if (rebasePending_) {
+        // lastSeenFrame 0 is "first sight": movable() takes a fresh hash and revision and counts no move.
+        // A Provisional entity restarts its settle count, which is what a move would have done to it.
+        for (Slot& s : slots_) s.lastSeenFrame = 0;
+        rebasePending_ = false;
+    }
+}
+
+void PlayMobility::noteOriginShift(u32 generation) {
+    if (!active_ || generation == noteGen_) return;
+    noteGen_ = generation;
+    rebasePending_ = true;
 }
 
 PlayMobility::Slot& PlayMobility::slotFor(scene::Entity e) {

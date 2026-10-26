@@ -147,6 +147,13 @@ public:
     // write or a raw rev bump is never seen.
     bool             touchLocal(Entity e);
 
+    // Floating-origin shift (LARGE_WORLD 2.2.5): every root (no parent) gets position -= deltaCm, plain f32 per
+    // axis, through the same revision bump as setLocalPosition. Children are parent-relative and untouched; the
+    // next flush() recomposes. Bumps originGeneration. Returns the number of roots moved.
+    u32 shiftRoots(const Vec3& deltaCm);
+    // Number of shiftRoots calls so far (a cache key for world-space state held outside the scene).
+    u32 originGeneration() const;
+
     // The entity's world matrix, composing its ancestor chain on demand if it is stale.
     const Mat4& worldMatrix(Entity e);
     // The revision of the entity's composed world matrix.

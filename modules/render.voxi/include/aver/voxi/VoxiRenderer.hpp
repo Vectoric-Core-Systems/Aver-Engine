@@ -50,6 +50,11 @@ public:
     void setSettings(const Settings& s);
     // GI volume: centre in world units, half-edge extent.
     void setVolume(const f32 center[3], f32 extent);
+    // The floating origin moved (LARGE_WORLD 2.2.6): every scene-frame position is `info.deltaCm` smaller. Composes the
+    // previous-frame matrices and camera positions with the shift, moves the GI volume, the draw lists and the RT carry
+    // rows, re-keys the GI draw list, and tells NeuRaC. Call it between frames, after the host moved the scene and
+    // before the next beginScene; a zero delta does nothing.
+    void shiftWorld(const rhi::ShiftWorldInfo& info);
     void setSunDirection(const f32 dirToLight[3]);
     // Cache dir: "<project>\\DerivedDataCache\\GI". Empty (default) disables cache.
     void setGiCacheDir(const std::string& dir);

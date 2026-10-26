@@ -5,6 +5,12 @@
 #include <queue>
 
 namespace aver::synapse {
+
+void rebaseNav(fmt::OcNavData& nav, const Vec3& deltaCm) {
+    nav.originXCm -= deltaCm.x;
+    nav.originYCm -= deltaCm.y;
+}
+
 namespace {
 
 bool walkable(const fmt::OcNavData& nav, u32 x, u32 y) {

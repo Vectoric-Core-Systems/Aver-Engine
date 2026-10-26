@@ -62,6 +62,13 @@ public:
     // rather than count another frame of stillness.
     void beginFrame(scene::Entity movableRoot);
 
+    // A floating-origin shift moved every root, so every world matrix changed without anything moving.
+    // The next beginFrame re-baselines each slot's revision and hash instead of counting a move: without
+    // it every Static entity turns Movable for the session and leaves the GI bake and the static TLAS key
+    // (LARGE_WORLD 2.2.5). `generation` is ShiftEvent::generation; a repeat of the last one is ignored.
+    // Call after the scene's roots were shifted, any time before the next beginFrame. No-op while inactive.
+    void noteOriginShift(u32 generation);
+
     // True when `e`'s draws must stay out of the GI bake this frame. `world` is the matrix the walk
     // draws the entity with, and must be `w.worldMatrix(e)` itself: the matrix is only hashed and
     // compared when World::worldRevision(e) has moved since the last look, so an unchanged revision
@@ -111,6 +118,8 @@ private:
     u64 pawnTreeFrame_ = 0;                  // the frame_ the mark was built for; 0 = not yet
     u64 frame_ = 0;
     u32 movableCount_ = 0;
+    u32 noteGen_ = 0;               // the last generation noteOriginShift took
+    bool rebasePending_ = false;    // a shift is waiting for the next beginFrame to re-baseline the slots
     bool active_ = false;
 };
 

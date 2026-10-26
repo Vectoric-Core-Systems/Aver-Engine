@@ -2,12 +2,16 @@
 
 #if AVER_MODULE_SCENE
 
+#  include "aver/core/Log.hpp"
 #  include "aver/platform/FileSystem.hpp"
 
 namespace aver::world {
 
 bool ChunkWorld::open(const ChunkWorldSettings& settings, std::string* why) {
     settings_ = settings;
+    authoredMode_ = false;
+    streamer_.setHost(nullptr);
+    streamer_.setWide({});
 
     if (!aver::createDirectories(settings_.worldDir)) {
         if (why) *why = "could not create world directory: " + settings_.worldDir;
@@ -25,11 +29,56 @@ bool ChunkWorld::open(const ChunkWorldSettings& settings, std::string* why) {
     // that queries `overrides_` afterwards. Both answer has()/load() false for every chunk.
     indexPath_ = settings_.worldDir + "/world.ocindex";
     std::string indexWhy;
-    overrides_.open(indexPath_, settings_.worldDir, &indexWhy);
+    if (overrides_.open(indexPath_, settings_.worldDir, &indexWhy) && !overrides_.index().regions.empty()) {
+        // THE THREE FIELDS THE INDEX HAS ALWAYS WRITTEN AND NOTHING EVER READ. A stored override still wins its chunk
+        // (that is the layering), but a mismatch means the unmodified neighbours around it are not what the player saw.
+        const RegionIndex& ix = overrides_.index();
+        if (ix.kind != kIndexKindOverrides)
+            AVER_WARN("[ChunkWorld] '{}': this index is a cooked authored level, not persisted overrides; its chunks will be served "
+                      "as overrides on top of generation", settings_.worldDir);
+        if (ix.generatorVersion != settings_.generator.generatorVersion)
+            AVER_WARN("[ChunkWorld] '{}': saved chunks were made by generator version {}, this build generates version {}; "
+                      "saved chunks still win their chunk, but untouched chunks around them may differ",
+                      settings_.worldDir, ix.generatorVersion, settings_.generator.generatorVersion);
+        if (ix.worldSeed != settings_.generator.worldSeed)
+            AVER_WARN("[ChunkWorld] '{}': saved chunks were made with world seed {}, this world uses seed {}",
+                      settings_.worldDir, ix.worldSeed, settings_.generator.worldSeed);
+        if (settings_.levelId != 0 && ix.levelId != 0 && ix.levelId != settings_.levelId)
+            AVER_WARN("[ChunkWorld] '{}': saved chunks belong to level id {:#x}, this world is level id {:#x}",
+                      settings_.worldDir, ix.levelId, settings_.levelId);
+    }
 
     owned_.clear();
     ownedSet_.clear();
     opened_ = true;
+    return true;
+}
+
+bool ChunkWorld::openAuthored(const std::string& cookDir, const StreamSettings& stream, IChunkHost* host, std::string* why) {
+    authoredMode_ = false;
+    if (!authoredSrc_.open(cookDir, why)) return false;
+
+    settings_ = ChunkWorldSettings{};
+    settings_.worldDir = cookDir;
+    settings_.levelId = authoredSrc_.levelId();
+    // Properties of the set, not choices: the chunk size is the cook's, every layer is streamed (a tower spans many), and the
+    // pad is what the cook's wide threshold was clamped to.
+    StreamSettings s = stream;
+    s.chunkSizeCm = authoredSrc_.chunkSizeCm();
+    s.verticalRadius = kAllLayers;
+    if (s.padChunks < kAuthoredPadChunks) s.padChunks = kAuthoredPadChunks;
+    settings_.stream = s;
+
+    streamer_.setSettings(s);
+    streamer_.setSource(&authoredSrc_);
+    streamer_.setHost(host);
+    streamer_.setWide(authoredSrc_.wide());
+
+    indexPath_ = cookDir + "/" + kCookIndexName;
+    owned_.clear();
+    ownedSet_.clear();
+    opened_ = true;
+    authoredMode_ = true;
     return true;
 }
 
@@ -47,15 +96,15 @@ void ChunkWorld::rebuildOwned() {
 }
 
 StreamStats ChunkWorld::update(scene::World& w, const Vec3& viewerPosCm, const Vec3& viewerVelCmPerSec,
-                               f32 dt, std::vector<i32>* freedBodies) {
-    return update(w, std::vector<StreamSource>{StreamSource{viewerPosCm, viewerVelCmPerSec}}, dt, freedBodies);
+                               f32 dt, std::vector<i32>* freedBodies, OriginCm origin) {
+    return update(w, std::vector<StreamSource>{StreamSource{viewerPosCm, viewerVelCmPerSec}}, dt, freedBodies, origin);
 }
 
 StreamStats ChunkWorld::update(scene::World& w, const std::vector<StreamSource>& sources,
-                               f32 dt, std::vector<i32>* freedBodies) {
+                               f32 dt, std::vector<i32>* freedBodies, OriginCm origin) {
     (void)dt;   // see the header comment: the streamer's own prediction runs on leadSeconds, not dt.
     streamer_.setSources(sources);
-    const StreamStats stats = streamer_.update(w, bodies_, freedBodies);
+    const StreamStats stats = streamer_.update(w, bodies_, freedBodies, origin);
     // ChunkStreamer::update only QUEUES destroys (scene::World::destroy defers to the next flush --
     // World.hpp:27-28); every test and caller of the streamer itself flushes immediately after update
     // for exactly that reason. ChunkWorld's whole point is that a host does not have to know that --

@@ -93,6 +93,14 @@ f32 sampleInfiniteHeight(const InfiniteSpec& spec, f32 wx, f32 wy);
 // transcription slip in the remap arithmetic.
 f32 sampleInfiniteHeightCm(const InfiniteSpec& spec, f32 amplitudeCm, f32 baseZCm, f32 wx, f32 wy);
 
+// The f64 ABSOLUTE-position forms (LARGE_WORLD 2.4.2). The lattice cell is floor(p * frequency / cellSizeCm) in f64, so a cell edge
+// sits exactly on a multiple of cellSizeCm / frequency at any distance and the same chunk generates the same bytes 100 km out; the
+// f32 forms above quantise that input past ~10 km. Same spec, same hash, same remap as the f32 forms; near the origin they agree
+// except for a sample within an f32 ulp of a cell edge. Not for the GPU or the F# mirror (those fill bounded volumes).
+f32 sampleInfiniteAbs(const InfiniteSpec& spec, f64 wx, f64 wy, f64 wz);
+f32 sampleInfiniteHeightAbs(const InfiniteSpec& spec, f64 wx, f64 wy);
+f32 sampleInfiniteHeightCmAbs(const InfiniteSpec& spec, f32 amplitudeCm, f32 baseZCm, f64 wx, f64 wy);
+
 // THE CPU REFERENCE, and the reason this header exists at all.
 //
 // Mirrors the HLSL in PcgShaders.hpp function for function, exactly as the atmosphere model is

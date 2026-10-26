@@ -87,6 +87,36 @@ void SoftBodySystem::clothStep(scene::World& world, Entry& en, f32) {
     en.hasLastWorld = true;
 }
 
+void SoftBodySystem::rebase(const Vec3& d) {
+    const auto shiftAll = [&d](std::vector<Vec3>& v) { for (Vec3& p : v) p -= d; };
+    const auto shiftMat = [&d](Mat4& m) { m.m[3][0] -= d.x; m.m[3][1] -= d.y; m.m[3][2] -= d.z; };
+    for (auto& [e, en] : entries_) {
+        shiftMat(en.lastWorld);
+        for (auto& dust : en.pendingDust) dust.first -= d;
+        for (Particle& q : en.sim.cage.particles) q.pos -= d;
+        for (Piece& p : en.pieces) {
+            if (p.debris || p.baked) p.origin -= d;
+            p.centroid -= d;
+            p.boundsMin -= d;
+            p.boundsMax -= d;
+            shiftAll(p.drawWorld);
+            shiftAll(p.capWorld);
+        }
+    }
+    for (InboxItem& it : inbox_) {
+        switch (it.kind) {
+            case InboxItem::Kind::Damage: case InboxItem::Kind::Explode: case InboxItem::Kind::Tear: case InboxItem::Kind::Repair:
+                it.point -= d;
+                break;
+            case InboxItem::Kind::FieldStart: case InboxItem::Kind::Pulse:
+                shiftMat(it.field.world);
+                break;
+            default: break;
+        }
+    }
+    for (auto& [h, t] : fields_) shiftMat(t.spec.world);
+}
+
 void SoftBodySystem::applyLodAndFreeze(scene::World& world, f32) {
     struct Ref { Entry* en; Piece* p; f32 d; f32 freezeAt; };
     std::vector<Ref> refs;

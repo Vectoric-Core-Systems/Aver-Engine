@@ -15,6 +15,10 @@ RWStructuredBuffer<RcCell>    gRcCells : register(u1);
 #define RCR_SQ_BASE  13369344u   // 17 * RCR_CELLS: the sum-of-squares block
 
 #define RCR_FLAG_CLEAR_ALL 1u
+// The floating origin moved by whole regions (1,638,400 cm): cascade 2's world cells (400 cm) moved by 4096 per step, so
+// its tag (worldCell >> 6) & 255 moved by 64 per step; cascades 0 and 1 move by 1024 / 256 per step, which is 0 mod 256.
+// Bits 8..15 / 16..23 are what to SUBTRACT from the stored tag's x / y byte (NeuRaCLayout.hpp shiftTagUnits).
+#define RCR_FLAG_RETAG_COARSE 2u
 
 // n_eff and age live in the meta word beside the tag (RcCell.b.w): tag bits 0-23, n_eff 24-27, age 28-31.
 uint rcrMeta(uint tag, uint nEff, uint age) { return (tag & 0xFFFFFFu) | ((nEff & 15u) << 24) | ((age & 15u) << 28); }
@@ -40,6 +44,20 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
         [unroll] for (uint k = 0; k < RCR_PAYLOAD; ++k) gRcAccum[payloadBase + k] = 0;
         gRcAccum[RCR_SQ_BASE + cell] = 0;
         return;
+    }
+
+    // RETAG_COARSE: re-label cascade 2's live cells under the shifted frame so the cache survives the rebase.
+    if ((info.hdr0.x & RCR_FLAG_RETAG_COARSE) != 0u && cell >= 2u * RCR_PER_CASC)
+    {
+        const uint m = gRcCells[cell].b.w;
+        if (((m >> 24) & 15u) != 0u)
+        {
+            const uint dx = (info.hdr0.x >> 8) & 255u;
+            const uint dy = (info.hdr0.x >> 16) & 255u;
+            const uint tx = ((m & 255u) - dx) & 255u;
+            const uint ty = (((m >> 8) & 255u) - dy) & 255u;
+            gRcCells[cell].b.w = (m & 0xFF000000u) | (m & 0x00FF0000u) | (ty << 8) | tx;
+        }
     }
 
     // Limit samples by this cascade's cap.

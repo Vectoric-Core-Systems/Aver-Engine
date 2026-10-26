@@ -4,13 +4,20 @@
 
 #include "aver/core/Math.hpp"
 #include "aver/core/Types.hpp"
+#include "aver/world/WorldPos.hpp"
 
+#include <initializer_list>
 #include <unordered_map>
 #include <vector>
 
 namespace aver::world {
 
 using Aabb = aver::AABB;
+
+// The f64 ABSOLUTE-centimetre box the large-world path (LARGE_WORLD 2.4.1) keeps for a placement: an authored record is f64
+// text, and an f32 box quantises it past ~10 km (1 cm at 100 km). Viewers on that path are f64 absolute too (the scene
+// position + the floating origin, summed by the caller).
+struct AabbD { Vec3d min, max; };
 
 struct PlacementStreamSettings {
     f32 cellCm = 6400.0f;
@@ -23,8 +30,23 @@ struct PlacementStreamSettings {
 class PlacementStreamer {
 public:
     void build(const std::vector<Aabb>& bounds, const PlacementStreamSettings& s);
+    // `build({}, s)` (LevelInstances.cpp) would be ambiguous between the f32 and f64 vectors; an empty list is an identity
+    // conversion to this one, so it wins and the call stays what it was.
+    void build(std::initializer_list<Aabb> bounds, const PlacementStreamSettings& s) { build(std::vector<Aabb>(bounds), s); }
     u32 add(const Aabb& b);
     void setBounds(u32 item, const Aabb& b);
+
+    // ---- the f64 path (additive; the f32 API above computes exactly what it always did) ----
+    // Building from f64 boxes puts the streamer in f64 mode: the grid, the distance tests and the idle early-out all run in
+    // f64 against the exact box. In f32 mode (the default, and after an f32 build) these overloads narrow what they are given,
+    // which is the old precision. add/setBounds keep both forms of the box, so either API can follow either build.
+    void build(const std::vector<AabbD>& bounds, const PlacementStreamSettings& s);
+    u32 add(const AabbD& b);
+    void setBounds(u32 item, const AabbD& b);
+    void update(const std::vector<Vec3d>& viewers, std::vector<u32>& toLoad, std::vector<u32>& toEvict);
+    f64 distance(u32 item, const std::vector<Vec3d>& viewers) const { return nearestD(items_[item].bd, viewers); }
+    bool f64Mode() const { return f64_; }
+
     void remove(u32 item);
     void pin(u32 item, bool on);
 
@@ -48,6 +70,7 @@ public:
 private:
     struct Item {
         Aabb b;
+        AabbD bd;   // the same box in f64; equal to b widened unless the box came from the f64 API
         bool alive = false, resident = false, pinned = false;
         bool wide = false;   // spans more than kMaxCells cells (or unknown): checked directly, not gridded
         u32 resPos = 0;   // index in residents_ while resident
@@ -60,6 +83,11 @@ private:
     void eraseCells(u32 item);
     static f32 distXY(const Aabb& b, const Vec3& p);
     f32 nearest(const Aabb& b, const std::vector<Vec3>& v) const;
+    std::int64_t cellOfD(f64 v) const;
+    static f64 distXYD(const AabbD& b, const Vec3d& p);
+    f64 nearestD(const AabbD& b, const std::vector<Vec3d>& v) const;
+    void insertCellsD(u32 item);
+    void eraseCellsD(u32 item);
 
     PlacementStreamSettings s_;
     std::vector<Item> items_;
@@ -69,8 +97,11 @@ private:
     std::vector<u32> wide_;
     u32 stampCounter_ = 0;
 
+    bool f64_ = false;
+
     // Idle early-out state.
     std::vector<Vec3> lastViewers_;
+    std::vector<Vec3d> lastViewersD_;
     bool dirty_ = true;
     bool emitted_ = false;
 };

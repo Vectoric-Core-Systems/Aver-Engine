@@ -99,9 +99,11 @@ void SandboxApp::recordLandscapeInLevel() {
 #else
     if (lp.name.empty()) lp.name = "Landscape";
 #endif
-    lp.x = landscape_.data().originCm[0];
-    lp.y = landscape_.data().originCm[1];
-    lp.z = landscape_.data().originCm[2];
+    f64 homeAbs[3];
+    landscape_.homeOriginAbsCm(homeAbs);   // the LANDSCAPE record is absolute; data().originCm is the scene frame
+    lp.x = homeAbs[0];
+    lp.y = homeAbs[1];
+    lp.z = homeAbs[2];
     levelHeader_.landscapes.assign(1, std::move(lp));
 }
 

@@ -103,6 +103,10 @@ public:
     // "nothing floats" and "nothing is in the water" look identical from outside without this.
     int32_t lastAppliedCount() const;
 
+    // LARGE_WORLD: the floating origin moved by -dj (Jolt metres, the shift's own delta): every registered surface point and the plane's follow, so a
+    // tilted per-body plane keeps its place. A horizontal plane is unchanged by an X/Z move, which is why the global plane never needed this before.
+    void shiftSurfaces(JPH::Vec3Arg dj);
+
     // Applies buoyancy for one fixed substep and returns how many bodies got an impulse. See
     // Buoyancy.cpp for what it actually does and why.
     int32_t evaluate(JPH::PhysicsSystem& system,

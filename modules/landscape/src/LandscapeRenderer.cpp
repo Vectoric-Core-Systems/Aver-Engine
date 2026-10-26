@@ -3,6 +3,8 @@
 
 #include "aver/core/Log.hpp"
 
+#include <cstring>
+
 namespace aver::landscape {
 
 // Sets the one material the whole landscape is shaded with.
@@ -80,12 +82,12 @@ void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
     const u32 rootIndex = tree.root();
     if (rootIndex != kInvalidNode && meshes_.find(rootIndex) == meshes_.end()) {
         ChunkMesh rootMesh;
-        if (buildChunkMesh(data, tree, rootIndex, rootMesh, uvTilingCm)) {
+        if (buildChunkMesh(data, tree, rootIndex, rootMesh, uvTilingCm, originX_, originY_)) {
             const rhi::MeshHandle h = device.createMesh(
                 reinterpret_cast<const rhi::MeshVertex*>(rootMesh.vertices.data()),
                 static_cast<u32>(rootMesh.vertices.size()),
                 rootMesh.indices.data(), static_cast<u32>(rootMesh.indices.size()));
-            if (h) { meshes_.emplace(rootIndex, Resident{h, frame_}); ++stats_.created; }
+            if (h) { meshes_.emplace(rootIndex, Resident{h, frame_, originX_, originY_}); ++stats_.created; }
         }
     }
 
@@ -103,7 +105,7 @@ void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
             if (meshes_.size() >= maxResident_) evictOne(device, rootIndex);
             if (meshes_.size() < maxResident_) {
                 ChunkMesh mesh;
-                if (buildChunkMesh(data, tree, nodeIndex, mesh, uvTilingCm)) {
+                if (buildChunkMesh(data, tree, nodeIndex, mesh, uvTilingCm, originX_, originY_)) {
                     // Reinterpreted, not copied; the header's static_asserts are what make this legal.
                     const rhi::MeshHandle h = device.createMesh(
                         reinterpret_cast<const rhi::MeshVertex*>(mesh.vertices.data()),
@@ -111,7 +113,7 @@ void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
                         mesh.indices.data(),
                         static_cast<u32>(mesh.indices.size()));
                     if (h) {
-                        meshes_.emplace(nodeIndex, Resident{h, frame_});
+                        meshes_.emplace(nodeIndex, Resident{h, frame_, originX_, originY_});
                         ++stats_.created;
                         it = meshes_.find(nodeIndex);
                     }
@@ -136,7 +138,18 @@ void LandscapeRenderer::draw(rhi::IDevice& device, const fmt::OcLandData& data,
         // standing in for four children is the most wanted node in the cache, and evicting it
         // because it is not itself selected is exactly backwards.
         mesh->second.lastUsed = frame_;
-        device.drawMesh(mesh->second.handle, world, baseColor_, metallic_, roughness_);
+        // A mesh built before a rebase is in the old frame: move it by (its frame - this one), a whole number of regions
+        // and so exact in f32. The translation rides after the caller's matrix (row-vector: the last row is the offset).
+        const f32* drawWorld = world;
+        f32 moved[16];
+        if (mesh->second.builtX != originX_ || mesh->second.builtY != originY_) {
+            std::memcpy(moved, world, sizeof(moved));
+            moved[12] += static_cast<f32>(mesh->second.builtX - originX_);
+            moved[13] += static_cast<f32>(mesh->second.builtY - originY_);
+            drawWorld = moved;
+            ++stats_.translated;
+        }
+        device.drawMesh(mesh->second.handle, drawWorld, baseColor_, metallic_, roughness_);
         ++stats_.submitted;
     }
 

@@ -22,6 +22,8 @@ aver_add_module(Aver.World
     src/ChunkPayload.cpp
     src/ChunkPartition.cpp
     src/ChunkCodec.cpp
+    # Codec v2's tagged extras (PLID/ANIM/COLL/CMPN/LABL/SNAP): what a cooked placement carries beyond the scatter fields.
+    src/ChunkPayloadExtras.cpp
     src/RegionFile.cpp
     src/RegionIndex.cpp
     src/ChunkSource.cpp
@@ -30,6 +32,12 @@ aver_add_module(Aver.World
     src/ChunkGenerator.cpp
     src/ScatterPalette.cpp
     src/ChunkWorld.cpp
+    # The authored-level cook (LARGE_WORLD 2.4.5): pure Core + Formats + Platform; the same nine pure sources are also compiled straight into AverAssetC (tests/formats).
+    src/LevelFlatten.cpp
+    src/ChunkCook.cpp
+    src/AuthoredChunkSource.cpp
+    # The floating-origin service (LARGE_WORLD): Core only, no Scene; hosts register the participants.
+    src/WorldOrigin.cpp
     # The disk half of the physics shape binary cache (physics_state_abi.h): AVR1 "PSHP" files, off until PHYSICS.SHAPECACHE.
     src/PhysicsShapeCache.cpp
   DEPS

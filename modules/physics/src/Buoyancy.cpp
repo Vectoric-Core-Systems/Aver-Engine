@@ -2,6 +2,7 @@
 // of this file is bookkeeping. See Buoyancy.hpp for the reasoning behind the shape of this class.
 #include "Buoyancy.hpp"
 #include "Convert.hpp"
+#include "PhysicsOrigin.hpp"   // LARGE_WORLD: physicsOriginHook
 
 #include <Jolt/Physics/Body/BodyType.h>
 #include <Jolt/Physics/Body/MotionType.h>
@@ -121,6 +122,10 @@ const WaterVolume& WaterVolumeTable::plane() const {
     return plane_;
 }
 
+void WaterVolumeTable::shiftSurfaces(JPH::Vec3Arg dj) {
+    for (auto& kv : volumes_) kv.second.surfacePosition -= dj;
+    plane_.surfacePosition -= dj;
+}
 int32_t WaterVolumeTable::lastAppliedCount() const {
     return lastApplied_;
 }
@@ -193,6 +198,15 @@ int32_t WaterVolumeTable::evaluate(
     return applied;
 }
 
+namespace {
+// LARGE_WORLD: registered with the physics origin shift at load (PhysicsOrigin.hpp). The hook gets the origin's delta in engine cm; Jolt's is toJolt(delta).
+void shiftWaterSurfaces(const aver::physics::detail::Vec3d& d) {
+    waterVolumes().shiftSurfaces(JPH::Vec3(static_cast<float>(d.y / 100.0), 0.0f, static_cast<float>(-d.x / 100.0)));
+}
+const struct OriginHookRegistrar {
+    OriginHookRegistrar() { aver::physics::detail::physicsOriginHook("water.surfaces", &shiftWaterSurfaces); }
+} g_originHookRegistrar;
+} // namespace
 WaterVolumeTable& waterVolumes() {
     static WaterVolumeTable table;
     return table;

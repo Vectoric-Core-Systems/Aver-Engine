@@ -31,7 +31,8 @@ cbuffer WaterFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // GerstnerWave.hpp's own struct comment) -- normalised below, in HLSL, exactly where
     // GerstnerWave.hpp normalises them in C++.
     float4 gWaveDirSteep[AVER_MAX_WAVES];
-    // waveLenAmp[i] = {wavelengthCm, amplitudeCm, unused, unused}.
+    // waveLenAmp[i] = {wavelengthCm, amplitudeCm, phaseOffset, unused}. phaseOffset is the floating origin's contribution
+    // to the wave phase (radians, reduced mod 2*pi in f64 on the CPU); positions here are origin-relative.
     float4 gWaveLenAmp[AVER_MAX_WAVES];
     // {originX, originY, waveCount (as a float, cast to uint below), unused}. originX/originY are
     // WaterRenderer.cpp's snapWorldToGridCm(camPos, cellSizeCm) result for engine X and engine Y --
@@ -108,7 +109,8 @@ float3 averGerstnerDisplace(float2 posXZ, float t, out float3 outNormal) {
         // centimetres per second squared, NOT Jolt's 9.81 m/s^2 -- this file never crosses the Jolt
         // boundary at all, so there is no metres value to be tempted to reach for here either.
         float phaseSpeed = sqrt(981.0 * omega);
-        float phase = omega * dot(dir, posXZ) + phaseSpeed * t;
+        // gWaveLenAmp[i].z: the f64-reduced omega * dot(dir, O.xy) of the floating origin (WaterRenderer.cpp), 0 at origin zero.
+        float phase = omega * dot(dir, posXZ) + phaseSpeed * t + gWaveLenAmp[i].z;
         float s = sin(phase), c = cos(phase);
 
         float qiMax = waveCount > 0 ? 1.0 / float(waveCount) : 0.0;

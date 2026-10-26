@@ -41,6 +41,7 @@ internal static class Ax
     [DllImport(Lib)] internal static extern void aver_audio_set_voice_volume(int voice, float volume);
     [DllImport(Lib)] internal static extern void aver_audio_set_voice_pitch(int voice, float pitch);
     [DllImport(Lib)] internal static extern void aver_audio_set_voice_position(int voice, float x, float y, float z);
+    [DllImport(Lib)] internal static extern void aver_audio_origin_shift(float dx, float dy, float dz);
 
     [DllImport(Lib)] internal static extern void aver_audio_set_listener(float px, float py, float pz,
                                                                         float fx, float fy, float fz,

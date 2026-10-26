@@ -11,6 +11,7 @@
 
 #include "aver/core/Types.hpp"
 #include "aver/rhi/RHIResources.hpp"
+#include "aver/rhi/WorldShift.hpp"
 #include "aver/voxi/Voxi.hpp"
 
 namespace aver::voxi {
@@ -69,6 +70,10 @@ public:
         bool historyOk       = true;            // false after a camera cut
         u32  frameIndex      = 0;
     };
+
+    // The floating origin moved (LARGE_WORLD 2.2.6): the history matrix is a SEPARATE copy of the camera, so it is composed
+    // with the shift too, or the next frame reprojects the volume 16 km away and the fog flashes. f64, rounded once.
+    void shiftWorld(const rhi::ShiftVec3d& delta) { rhi::composePrevViewProjInPlace(prevViewProj_, delta); }
 
     VoxiFroxelFog() = default;
     ~VoxiFroxelFog() { destroy(0); }

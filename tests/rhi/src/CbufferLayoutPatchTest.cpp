@@ -9,9 +9,14 @@
 // It is declared rather than included because modules/rhi.vulkan's include directories are PRIVATE
 // and VulkanCommon.hpp would drag in the vendored Vulkan headers for no benefit -- PipelineLayout
 // itself is public Aver.RHI.
+#include "aver/rhi/FrameConstants.hpp"
 #include "aver/rhi/RHIResources.hpp"
+#include "aver/rhi/ShaderFiles.hpp"
 #include "aver/core/Log.hpp"
 
+#include <cctype>
+#include <cstddef>
+#include <cstdlib>
 #include <string>
 
 namespace aver::rhi::vkb {
@@ -270,8 +275,85 @@ static void testCommentedCbufferIsNotMatched() {
     check(src == before, "the source is byte-identical -- neither comment was touched");
 }
 
+// ---- PerFrame at 784 bytes: the floating origin's two rows (LARGE_WORLD 2.2.6) ------------------------
+//
+// PerFrameCB is one C++ struct and one HLSL cbuffer, and until now only a size assert tied them. This
+// counts the cbuffer's rows from the shipped prelude text, so a row added on one side only fails here.
+// The Vulkan lowering is generic (it annotates the block and never reads its fields), so the second
+// half feeds it the block with the new rows to show they pass through untouched.
+static std::string stripComments(const std::string& s) {
+    std::string o;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s.compare(i, 2, "//") == 0) { while (i < s.size() && s[i] != '\n') ++i; o += '\n'; continue; }
+        if (s.compare(i, 2, "/*") == 0) { const size_t e = s.find("*/", i + 2); i = e == std::string::npos ? s.size() : e + 1; continue; }
+        o += s[i];
+    }
+    return o;
+}
+
+static void testPerFrameIsSevenEightyFour() {
+    AVER_INFO("-- PerFrameCB and cbuffer PerFrame agree at 784 bytes, origin rows last --");
+    check(sizeof(PerFrameCB) == 784, "sizeof(PerFrameCB) == 784");
+    check(offsetof(PerFrameCB, worldOrigin) == 752, "worldOrigin at 752");
+    check(offsetof(PerFrameCB, wavePhase) == 768, "wavePhase at 768");
+    check(offsetof(PerFrameCB, jitter) + sizeof(PerFrameCB::jitter) == offsetof(PerFrameCB, worldOrigin),
+          "the origin rows are appended: nothing before them moved");
+
+    const std::string text = stripComments(shaderFile("shared_prelude.hlsl"));
+    const size_t head = text.find("cbuffer PerFrame");
+    check(head != std::string::npos, "the prelude declares cbuffer PerFrame");
+    if (head == std::string::npos) return;
+    const size_t open = text.find('{', head);
+    const size_t close = text.find('}', open);
+    check(open != std::string::npos && close != std::string::npos, "the block has a body");
+    if (open == std::string::npos || close == std::string::npos) return;
+
+    size_t rows = 0;
+    std::string lastNames[2];
+    size_t pos = open + 1;
+    while (pos < close) {
+        const size_t semi = text.find(';', pos);
+        if (semi == std::string::npos || semi > close) break;
+        std::string decl = text.substr(pos, semi - pos);
+        pos = semi + 1;
+        size_t b = 0;
+        while (b < decl.size() && std::isspace(static_cast<unsigned char>(decl[b]))) ++b;
+        size_t t = b;
+        while (t < decl.size() && !std::isspace(static_cast<unsigned char>(decl[t]))) ++t;
+        const std::string type = decl.substr(b, t - b);
+        size_t n = t;
+        while (n < decl.size() && std::isspace(static_cast<unsigned char>(decl[n]))) ++n;
+        size_t e = n;
+        while (e < decl.size() && (std::isalnum(static_cast<unsigned char>(decl[e])) || decl[e] == '_')) ++e;
+        const std::string name = decl.substr(n, e - n);
+        size_t count = 1;
+        if (e < decl.size() && decl[e] == '[') count = static_cast<size_t>(std::atoi(decl.c_str() + e + 1));
+        const size_t per = type == "float4x4" ? 4 : (type == "float4" ? 1 : 0);
+        check(per != 0, "every PerFrame field is a float4 or float4x4 (" + name + ")");
+        rows += per * count;
+        lastNames[0] = lastNames[1];
+        lastNames[1] = name;
+    }
+    check(rows * 16 == sizeof(PerFrameCB), "the HLSL cbuffer is exactly sizeof(PerFrameCB) bytes of rows");
+    check(lastNames[0] == "gWorldOrigin" && lastNames[1] == "gWavePhase", "the last two rows are gWorldOrigin, gWavePhase");
+
+    // The lowering never reads fields, so the grown block passes through byte for byte.
+    std::string src =
+        "[[vk::binding(0, 2)]] cbuffer PerFrame : register(b0) {\n"
+        "    float4 gTaaJitter;\n"
+        "    float4 gWorldOrigin;\n"
+        "    float4 gWavePhase;\n"
+        "};\n"
+        "float4 PSMain() : SV_Target { return gWorldOrigin + gWavePhase; }\n";
+    PipelineLayout layout;
+    const std::string before = src;
+    check(vkb::patchCbuffersForLayout(src, layout, false, /*annotateDescriptors=*/true), "the patch succeeds");
+    check(src == before, "an annotated PerFrame with the origin rows is left byte-identical");
+}
+
 int main() {
     AVER_INFO("CbufferLayoutPatchTest -- lowering cbuffers to what the PipelineLayout says they are");
+    testPerFrameIsSevenEightyFour();
     testSlotThreePadsToOneTwentyEight();
     testObjectBlockNeedsNoPadding();
     testZeroDwordSlotBecomesADescriptor();

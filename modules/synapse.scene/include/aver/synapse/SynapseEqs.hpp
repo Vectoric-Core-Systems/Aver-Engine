@@ -63,6 +63,9 @@ public:
 
     void tick(scene::World& world, const fmt::OcNavData* nav, f32 dt, SynapseAi& ai);
     void reset();   // drops runs and results, keeps the query cache
+    // Floating-origin shift (LARGE_WORLD 2.2.5): finished results and the debug runs move with the scene (positions -= delta). A
+    // queued or running run is cancelled instead: its remaining generation and tests would mix two frames.
+    void rebase(const Vec3& delta);
     usize pending() const;
     const std::vector<EqsDebugRun>& debugRuns() const { return debug_; }
     // Keeps the newest finished run on screen (the editor's "Run on selection"); unpins every other.

@@ -193,6 +193,15 @@ struct ProjectDesc {
                streamEvictBudget >= 0 || streamVerticalRadius >= 0 || streamLeadSeconds >= 0.0f;
     }
 
+    // ---- WORLD.* -- the floating origin (docs/plans/wave11/LARGE_WORLD.md 2.2, 2.7) ----------------
+    // -1 = unstated; the host then uses the engine default (on, 102400 cm, no script shift requests).
+    int worldFloatingOrigin    = -1;  // WORLD.FLOATINGORIGIN     0/1; 0 keeps the origin at (0,0): the old +-10 km single frame
+    int worldRebaseMarginCm    = -1;  // WORLD.REBASEMARGIN       cm past the region half-width before a shift; the service clamps to [0, 229376]
+    int worldAllowShiftRequest = -1;  // WORLD.ALLOWSHIFTREQUEST  0/1; lets aver_fw_origin_request_shift (console, tests) move the origin
+    bool hasWorldSettings() const {
+        return worldFloatingOrigin >= 0 || worldRebaseMarginCm >= 0 || worldAllowShiftRequest >= 0;
+    }
+
     // ---- PHYSICS.* -- world-wide simulation defaults ------------------------------------------
     // hasGravity is a presence flag: gravity points down, so components are legitimately negative.
     bool hasGravity = false;

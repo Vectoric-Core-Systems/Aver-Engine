@@ -1,12 +1,10 @@
 #include "aver/world/RegionFile.hpp"
 
-#if AVER_MODULE_SCENE
+#include "aver/formats/Avr1.hpp"
+#include "aver/world/ChunkCodec.hpp"
+#include "ByteIo.hpp"
 
-#  include "aver/formats/Avr1.hpp"
-#  include "aver/world/ChunkCodec.hpp"
-#  include "ByteIo.hpp"
-
-#  include <algorithm>
+#include <algorithm>
 
 namespace aver::world {
 namespace {
@@ -16,6 +14,8 @@ constexpr usize kHeaderCoveredBytes = 92;
 constexpr usize kHeaderTotalBytes   = 96;
 
 usize sectorsFor(usize bytes) { return (bytes + kRegionSectorBytes - 1) / kRegionSectorBytes; }
+
+u64 roundUp16(u64 v) { return (v + 15) & ~u64(15); }
 
 void writeHeaderInto(ByteWriter& w, const RegionHeader& h) {
     w.u32v(kRegionMagic);
@@ -34,6 +34,7 @@ void writeHeaderInto(ByteWriter& w, const RegionHeader& h) {
     w.u32v(h.groupTableSector);
     w.u32v(h.freeListSector);
     w.u32v(h.freeListCount);
+    w.u32v(h.flags);
     // Padded out to the covered length so the CRC always spans the same range whatever fields a
     // later version adds below.
     while (w.bytes.size() < kHeaderCoveredBytes) w.u8v(0);
@@ -60,22 +61,123 @@ bool parseHeader(const u8* p, usize n, RegionHeader& out) {
     out.groupTableSector = r.u32v();
     out.freeListSector = r.u32v();
     out.freeListCount = r.u32v();
+    out.flags = r.u32v();
     if (r.bad) return false;
     // The CRC is checked BEFORE any field above is trusted for anything -- the same order AVR1 uses
     // and for the same reason: a corrupt sectorCount used to size an allocation is worse than a
     // corrupt sectorCount that is rejected.
     const u32 stored = ByteReader(p + kHeaderCoveredBytes, 4).u32v();
     if (fmt::avrCrc32c(p, kHeaderCoveredBytes) != stored) return false;
-    if (out.version != kRegionVersion) return false;
-    if (out.sectorBytes != kRegionSectorBytes) return false;
-    return true;
+    // Two layouts under one header: 2 is the mutable 4 KiB-sector one, 3 the packed 16-byte-unit one (flag and unit must agree).
+    if ((out.flags & ~kRegionFlagPacked) != 0) return false;
+    if (out.version == kRegionVersion) return out.sectorBytes == kRegionSectorBytes && !out.packed();
+    if (out.version == kRegionVersionPacked) return out.sectorBytes == kRegionUnitBytesPacked && out.packed();
+    return false;
 }
 
 std::string chunkName(const ChunkLocal& l) {
     return "chunk (" + std::to_string(l.x) + "," + std::to_string(l.y) + "," + std::to_string(l.z) + ")";
 }
 
+// The packed layout of writeRegion (see the header). `chunks` arrive sorted by (group, slot) with no duplicates.
+bool writePackedRegion(const std::string& path, const RegionWriteDesc& desc,
+                       const std::vector<std::pair<ChunkLocal, ChunkPayload>>& chunks, std::string* why) {
+    const auto fail = [why](const std::string& m) { if (why) *why = m; return false; };
+
+    std::vector<u32> groups, perGroup;
+    for (const auto& c : chunks) {
+        const u32 g = groupIndexOf(c.first);
+        if (groups.empty() || groups.back() != g) { groups.push_back(g); perGroup.push_back(0); }
+        ++perGroup.back();
+    }
+
+    const u64 tableBytes = roundUp16(groups.size() * 8ull);
+    std::vector<u64> dirOff(groups.size());
+    u64 cursor = kPackedBodyStartBytes + tableBytes;
+    for (usize i = 0; i < groups.size(); ++i) {
+        dirOff[i] = cursor;
+        cursor += kPackedDirHeaderBytes + u64(perGroup[i]) * kPackedDirEntryBytes;
+    }
+    const u64 payloadStart = cursor;   // a multiple of 16: every term above is
+
+    // Payloads back to back, each padded to the unit. The padding is zero, so the bytes are a function of the content alone.
+    struct Ent { u32 slot; u64 off; u32 length; u32 crc; };
+    std::vector<Ent> ents;
+    ents.reserve(chunks.size());
+    std::vector<u8> body;
+    for (const auto& c : chunks) {
+        const std::vector<u8> enc = encodeChunk(c.second);
+        ents.push_back(Ent{slotIndexOf(c.first), body.size(), static_cast<u32>(enc.size()),
+                           fmt::avrCrc32c(enc.data(), enc.size())});
+        body.insert(body.end(), enc.begin(), enc.end());
+        body.resize(static_cast<usize>(roundUp16(body.size())), 0);
+    }
+    const u64 totalBytes = payloadStart + body.size();
+    if (totalBytes / kRegionUnitBytesPacked > 0xFFFFFFFFull)
+        return fail("a packed region cannot address more than 64 GiB; the level needs a smaller chunk set per region");
+
+    ByteWriter gt;
+    for (usize i = 0; i < groups.size(); ++i) {
+        gt.u32v(groups[i]);
+        gt.u32v(static_cast<u32>(dirOff[i] / kRegionUnitBytesPacked));
+    }
+    gt.pad(16);
+
+    ByteWriter dirs;
+    usize at = 0;
+    for (usize i = 0; i < groups.size(); ++i) {
+        dirs.u32v(perGroup[i]); dirs.u32v(0); dirs.u32v(0); dirs.u32v(0);
+        for (u32 k = 0; k < perGroup[i]; ++k, ++at) {
+            const Ent& e = ents[at];
+            dirs.u16v(static_cast<u16>(e.slot));
+            dirs.u16v(0);
+            dirs.u32v(static_cast<u32>((payloadStart + e.off) / kRegionUnitBytesPacked));
+            dirs.u32v(e.length);
+            dirs.u32v(e.crc);
+        }
+    }
+
+    RegionHeader h;
+    h.version = kRegionVersionPacked;
+    h.sectorBytes = kRegionUnitBytesPacked;
+    h.flags = kRegionFlagPacked;
+    h.chunkSizeCm = static_cast<u32>(desc.chunkSizeCm);
+    h.coord = desc.coord;
+    h.levelId = desc.levelId;
+    h.worldSeed = desc.worldSeed;
+    h.generatorVersion = desc.generatorVersion;
+    h.groupCount = static_cast<u32>(groups.size());
+    h.chunkCount = static_cast<u32>(chunks.size());
+    h.sectorCount = static_cast<u32>(totalBytes / kRegionUnitBytesPacked);
+    h.groupTableSector = groups.empty() ? 0 : kPackedBodyStartBytes / kRegionUnitBytesPacked;
+    h.contentHash = body.empty() ? 0 : fmt::avrHash64(body.data(), body.size());
+    h.serial = desc.serial;
+
+    aver::File f;
+    if (!f.open(path, aver::File::Mode::Create)) return fail("could not open " + path + " for writing");
+    if (!f.setSize(0)) return fail("could not truncate " + path);
+
+    ByteWriter hw;
+    writeHeaderInto(hw, h);
+    hw.pad(kRegionSectorBytes);
+    if (!f.writeAt(0, hw.bytes.data(), hw.bytes.size())) return fail("could not write header A");
+    if (!f.writeAt(kRegionSectorBytes, hw.bytes.data(), hw.bytes.size())) return fail("could not write header B");
+    if (!gt.bytes.empty() && !f.writeAt(kPackedBodyStartBytes, gt.bytes.data(), gt.bytes.size()))
+        return fail("could not write the group table");
+    if (!dirs.bytes.empty() && !f.writeAt(dirOff[0], dirs.bytes.data(), dirs.bytes.size()))
+        return fail("could not write the group directories");
+    if (!body.empty() && !f.writeAt(payloadStart, body.data(), body.size()))
+        return fail("could not write the payloads");
+    if (!f.setSize(totalBytes)) return fail("could not size " + path);
+    if (!f.sync()) return fail("could not flush " + path + " to the device");
+    return true;
+}
+
 } // namespace
+
+std::string regionFileName(const RegionCoord& c) {
+    return "r." + std::to_string(c.x) + "." + std::to_string(c.y) + "." + std::to_string(c.z) + ".avrgn";
+}
 
 bool writeRegion(const std::string& path, const RegionWriteDesc& desc,
                  std::vector<std::pair<ChunkLocal, ChunkPayload>> chunks, std::string* why) {
@@ -94,6 +196,8 @@ bool writeRegion(const std::string& path, const RegionWriteDesc& desc,
     for (usize i = 1; i < chunks.size(); ++i)
         if (chunks[i].first == chunks[i - 1].first)
             return fail("region was given two payloads for " + chunkName(chunks[i].first));
+
+    if (desc.packed) return writePackedRegion(path, desc, chunks, why);
 
     // Which groups are occupied, in ascending order (the sort above already guarantees it).
     std::vector<u32> groups;
@@ -227,7 +331,7 @@ bool RegionFile::open(const std::string& path, std::string* why) {
     if (header_.groupCount) {
         std::vector<u8> gt(static_cast<usize>(header_.groupCount) * 8);
         if (header_.groupTableSector == 0 ||
-            !file_.readAt(u64(header_.groupTableSector) * kRegionSectorBytes, gt.data(), gt.size())) {
+            !file_.readAt(u64(header_.groupTableSector) * header_.sectorBytes, gt.data(), gt.size())) {
             close();
             return fail(path + ": the group table is truncated");
         }
@@ -244,6 +348,11 @@ bool RegionFile::open(const std::string& path, std::string* why) {
                 return fail(path + ": the group table is not sorted or contains duplicates");
             }
     }
+    // A packed file is immutable and its header is the whole truth about its size, so a short file is damage, not a crash artefact.
+    if (header_.packed() && file_.size() < i64(u64(header_.sectorCount) * header_.sectorBytes)) {
+        close();
+        return fail(path + ": the packed region is shorter than its header says");
+    }
     return true;
 }
 
@@ -251,12 +360,17 @@ void RegionFile::close() {
     file_.close();
     header_ = RegionHeader{};
     groupTable_.clear();
-    cache_.clear();
+    lru_.clear();
+    lruIndex_.clear();
+    groupReads_ = 0;
     acceptedCopy_ = 0;
 }
 
 const RegionFile::GroupDir* RegionFile::groupDir(u32 groupIndex, std::string* why) {
-    for (const GroupDir& g : cache_) if (g.groupIndex == groupIndex) return &g;
+    if (const auto hit = lruIndex_.find(groupIndex); hit != lruIndex_.end()) {
+        lru_.splice(lru_.begin(), lru_, hit->second);   // iterators stay valid across a splice
+        return &lru_.front();
+    }
 
     const auto it = std::lower_bound(groupTable_.begin(), groupTable_.end(), groupIndex,
                                      [](const std::pair<u32, u32>& e, u32 v) { return e.first < v; });
@@ -264,39 +378,107 @@ const RegionFile::GroupDir* RegionFile::groupDir(u32 groupIndex, std::string* wh
 
     GroupDir g;
     g.groupIndex = groupIndex;
-    g.raw.resize(kGroupDirBytes);
-    if (!file_.readAt(u64(it->second) * kRegionSectorBytes, g.raw.data(), g.raw.size())) {
-        if (why) *why = "a group directory is truncated";
-        return nullptr;
+    const u64 at = u64(it->second) * header_.sectorBytes;
+    if (!header_.packed()) {
+        g.raw.resize(kGroupDirBytes);
+        if (!file_.readAt(at, g.raw.data(), g.raw.size())) {
+            if (why) *why = "a group directory is truncated";
+            return nullptr;
+        }
+    } else {
+        u8 head[kPackedDirHeaderBytes] = {};
+        if (!file_.readAt(at, head, sizeof head)) {
+            if (why) *why = "a packed group directory is truncated";
+            return nullptr;
+        }
+        g.entries = ByteReader(head, 4).u32v();
+        if (g.entries == 0 || g.entries > kChunksPerGroup) {
+            if (why) *why = "a packed group directory declares an impossible entry count";
+            return nullptr;
+        }
+        g.raw.resize(static_cast<usize>(g.entries) * kPackedDirEntryBytes);
+        if (!file_.readAt(at + kPackedDirHeaderBytes, g.raw.data(), g.raw.size())) {
+            if (why) *why = "a packed group directory is truncated";
+            return nullptr;
+        }
+        // Sorted slots are what make the lookup a binary search, and an entry that points outside the file is refused here once
+        // instead of on every read. A malformed directory is damage, so it is named rather than searched anyway.
+        const u64 limit = u64(header_.sectorCount) * header_.sectorBytes;
+        u32 prev = 0;
+        for (u32 i = 0; i < g.entries; ++i) {
+            ByteReader e(g.raw.data() + static_cast<usize>(i) * kPackedDirEntryBytes, kPackedDirEntryBytes);
+            const u32 slot = e.u16v();
+            e.u16v();
+            const u32 first = e.u32v(), length = e.u32v();
+            const bool outOfOrder = i > 0 && slot <= prev;
+            if (slot >= kChunksPerGroup || outOfOrder || first == 0 ||
+                u64(first) * header_.sectorBytes + length > limit) {
+                if (why) *why = "a packed group directory is malformed";
+                return nullptr;
+            }
+            prev = slot;
+        }
     }
-    cache_.push_back(std::move(g));
-    return &cache_.back();
+
+    ++groupReads_;
+    lru_.push_front(std::move(g));
+    lruIndex_[groupIndex] = lru_.begin();
+    while (lru_.size() > kGroupCacheGroups) {
+        lruIndex_.erase(lru_.back().groupIndex);
+        lru_.pop_back();
+    }
+    return &lru_.front();
+}
+
+bool RegionFile::entryOf(const GroupDir& g, u32 slot, DirEntry& out) const {
+    if (!header_.packed()) {
+        ByteReader r(g.raw.data() + static_cast<usize>(slot) * kGroupDirEntryBytes, kGroupDirEntryBytes);
+        out.first = r.u32v();
+        out.length = r.u32v();
+        out.crc = r.u32v();
+        return out.first != 0;   // firstSector 0 is the header sector, so it is a safe "empty"
+    }
+    u32 lo = 0, hi = g.entries;
+    while (lo < hi) {
+        const u32 mid = lo + (hi - lo) / 2;
+        const u8* p = g.raw.data() + static_cast<usize>(mid) * kPackedDirEntryBytes;
+        const u32 s = static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8);
+        if (s < slot) lo = mid + 1;
+        else if (s > slot) hi = mid;
+        else {
+            ByteReader r(p + 4, kPackedDirEntryBytes - 4);
+            out.first = r.u32v();
+            out.length = r.u32v();
+            out.crc = r.u32v();
+            return true;
+        }
+    }
+    return false;
 }
 
 bool RegionFile::hasChunk(const ChunkLocal& l, std::string* why) {
     const GroupDir* g = groupDir(groupIndexOf(l), why);
     if (!g) return false;
-    ByteReader r(g->raw.data() + static_cast<usize>(slotIndexOf(l)) * kGroupDirEntryBytes,
-                 kGroupDirEntryBytes);
-    return r.u32v() != 0;   // firstSector 0 is the header sector, so it is a safe "empty"
+    DirEntry e;
+    return entryOf(*g, slotIndexOf(l), e);
 }
 
 bool RegionFile::readChunk(const ChunkLocal& l, ChunkPayload& out, std::string* why) {
     const auto fail = [why, &l](const std::string& m) { if (why) *why = chunkName(l) + ": " + m; return false; };
 
-    const GroupDir* g = groupDir(groupIndexOf(l), why);
-    if (!g) return fail("its group is not in this region");
+    std::string dirWhy;   // an unreadable directory says so; an absent group leaves it empty
+    const GroupDir* g = groupDir(groupIndexOf(l), &dirWhy);
+    if (!g) return fail(dirWhy.empty() ? std::string("its group is not in this region") : dirWhy);
 
-    ByteReader e(g->raw.data() + static_cast<usize>(slotIndexOf(l)) * kGroupDirEntryBytes,
-                 kGroupDirEntryBytes);
-    const u32 firstSector = e.u32v();
-    const u32 byteLength = e.u32v();
-    const u32 crc = e.u32v();
-    if (firstSector == 0) return fail("is not stored in this region");
+    DirEntry e;
+    if (!entryOf(*g, slotIndexOf(l), e)) return fail("is not stored in this region");
+    const u32 firstSector = e.first;
+    const u32 byteLength = e.length;
+    const u32 crc = e.crc;
     if (firstSector >= header_.sectorCount) return fail("its directory entry points past the end of the file");
 
     std::vector<u8> raw(byteLength);
-    if (byteLength && !file_.readAt(u64(firstSector) * kRegionSectorBytes, raw.data(), raw.size()))
+    if (byteLength && !file_.readAt(u64(firstSector) * header_.sectorBytes, raw.data(), raw.size()))
         return fail("its payload is truncated");
 
     // NAMED, not just "corrupt". A region is up to 16 km across; "this file is damaged" is not
@@ -316,6 +498,13 @@ std::vector<ChunkLocal> RegionFile::chunks(std::string* why) {
     for (const auto& gt : groupTable_) {
         const GroupDir* g = groupDir(gt.first, why);
         if (!g) continue;
+        if (g->entries) {   // packed: only the occupied slots are stored, already in slot order
+            for (u32 i = 0; i < g->entries; ++i) {
+                const u8* p = g->raw.data() + static_cast<usize>(i) * kPackedDirEntryBytes;
+                out.push_back(localOfGroupSlot(gt.first, static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8)));
+            }
+            continue;
+        }
         for (u32 slot = 0; slot < kChunksPerGroup; ++slot) {
             ByteReader r(g->raw.data() + static_cast<usize>(slot) * kGroupDirEntryBytes, kGroupDirEntryBytes);
             if (r.u32v() != 0) out.push_back(localOfGroupSlot(gt.first, slot));
@@ -331,6 +520,7 @@ bool RegionWriter::open(const std::string& path, const RegionWriteDesc& desc, st
     close();
     path_ = path;
     desc_ = desc;
+    if (desc.packed) return fail("a RegionWriter edits regions in place; a packed region is cooked whole with writeRegion");
     if (!chunkSizeValid(desc.chunkSizeCm)) return fail("region chunk size is outside the precision budget");
 
     // A region that does not exist yet is cooked empty first, so open() has exactly one shape to
@@ -351,6 +541,7 @@ bool RegionWriter::open(const std::string& path, const RegionWriteDesc& desc, st
     else if (okB)   header_ = hb;
     else { close(); return fail(path + ": neither header copy is valid"); }
 
+    if (header_.packed()) { close(); return fail(path + ": a packed region is cooked and immutable"); }
     if (header_.groupCount > kGroupsPerRegion) { close(); return fail(path + ": group count exceeds a region"); }
 
     // The group table, then every directory. A writer holds them all: it has to know which sectors
@@ -666,5 +857,3 @@ bool RegionWriter::compact(std::string* why) {
 }
 
 } // namespace aver::world
-
-#endif // AVER_MODULE_SCENE

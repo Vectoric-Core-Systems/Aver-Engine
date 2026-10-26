@@ -273,12 +273,15 @@ void WaterSurface::prePass(rhi::IRenderContext& ctx) {
     if (!pipeline_ || !drawMesh_ || !vertices_ || !set_) return;
 
     WaterDisplaceCB cb{};
+    const rhi::ShiftOrigin floatingOrigin = dev_ ? dev_->worldOrigin() : rhi::ShiftOrigin{};   // zero until the first rebase
     for (size_t i = 0; i < kMaxGerstnerWaves; ++i) {
         cb.waveDirSteep[i][0] = waves_[i].dirX;
         cb.waveDirSteep[i][1] = waves_[i].dirZ;   // GerstnerWave's second axis is engine Y
         cb.waveDirSteep[i][2] = waves_[i].steepness;
         cb.waveLenAmp[i][0] = waves_[i].wavelengthCm;
         cb.waveLenAmp[i][1] = waves_[i].amplitudeCm;
+        // The floating origin's share of the wave phase (water_displace.hlsl adds it): the grid is origin-relative.
+        cb.waveLenAmp[i][2] = rhi::gerstnerPhaseOffset(waves_[i].dirX, waves_[i].dirZ, waves_[i].wavelengthCm, floatingOrigin);
     }
     cb.originTime[0] = originXY_[0];
     cb.originTime[1] = originXY_[1];

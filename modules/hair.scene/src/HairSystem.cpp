@@ -248,6 +248,10 @@ void HairSystem::clear() {
     stats_ = HairStats{};
 }
 
+void HairSystem::rebase(const Vec3& deltaCm) {
+    for (auto& [e, in] : impl_->insts) in.lastPos -= deltaCm;
+}
+
 bool HairSystem::teleport(scene::Entity e) {
     const auto it = impl_->insts.find(e);
     if (it == impl_->insts.end()) return false;

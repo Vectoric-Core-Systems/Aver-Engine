@@ -22,11 +22,21 @@
 #include "aver/core/Types.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/world/LevelTransform.hpp"
+#include "aver/world/WorldPos.hpp"
 
 #include <unordered_map>
 #include <vector>
 
 namespace aver::world {
+
+// The floating origin a level loads at: the centre of the region (kOriginStepCm square, region 0 centred on the world
+// origin) that holds the authored point, normally the SPAWN (game) or CAMERA (editor) record. A level that sits in
+// region 0 gets (0, 0): its placements narrow exactly as they always did (LARGE_WORLD 2.6.3).
+inline OriginCm originRegionOf(f64 xCm, f64 yCm) {
+    const f64 step = static_cast<f64>(kOriginStepCm);
+    return OriginCm{static_cast<i64>(std::llround(xCm / step)) * kOriginStepCm,
+                    static_cast<i64>(std::llround(yCm / step)) * kOriginStepCm};
+}
 
 // A static collision box fitted to a mesh's LOCAL bounds under a world TRS: world-space centre,
 // half-extents along the box's own axes, and its orientation.
@@ -235,6 +245,10 @@ struct InstantiateOptions {
     struct Attach { scene::Entity parent = scene::kInvalidEntity; Transform parentWorld; };
     const Attach* attach = nullptr;
     // [wave3/level-instances end]
+
+    // The floating origin the placements are narrowed against: positions become f32(authored - origin) on X and Y,
+    // the subtraction in f64 (LARGE_WORLD 2.6). Zero, the default, is today's behaviour bit for bit.
+    OriginCm origin;
 };
 
 #  if AVER_MODULE_PHYSICS
@@ -326,6 +340,11 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
 // every frame can ignore it. An entry whose entity is gone is skipped and not counted: rebuilding the
 // list from the host's own tables would find it again.
 u32 driveKinematicBodies(scene::World& world, const std::vector<AnimatedBody>& bodies, f32 dt);
+
+// Floating-origin shift (LARGE_WORLD 2.2.5): subtracts `deltaCm` from the pose each body was last driven to. Left
+// alone, the next drive sees a 16 km "jump" and teleports every animated kinematic body, zeroing its velocity so it
+// stops carrying riders. Call with the scene and the physics shifted. A no-op without the physics module.
+void rebaseKinematicDrivers(const Vec3& deltaCm);
 
 } // namespace aver::world
 

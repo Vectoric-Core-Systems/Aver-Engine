@@ -177,7 +177,10 @@ NeuRaC::Bindings NeuRaC::beginFrame(rhi::IRenderContext& ctx, const f32 camPosCm
     std::memcpy(eyeCm_, camPosCm, sizeof(eyeCm_));
     const f32 relax = relaxFrames_ > 0 ? relaxAlpha_ : 0.0f;
     if (relaxFrames_ > 0) --relaxFrames_;
-    const rc::RcInfo info = makeInfo(camPosCm, frameIndex, 0u, p, relax);
+    // A rebase since the last frame: the resolve below re-labels cascade 2 (noteOriginShift). 0 when none.
+    const u32 flags = rc::originShiftFlags(retagStepsX_, retagStepsY_);
+    retagStepsX_ = retagStepsY_ = 0;
+    const rc::RcInfo info = makeInfo(camPosCm, frameIndex, flags, p, relax);
     res_->writeBuffer(info_[slot_], &info, sizeof(info), 0);
 
     if (clearPending_) {

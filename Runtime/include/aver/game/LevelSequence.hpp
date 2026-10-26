@@ -158,6 +158,10 @@ public:
     bool empty() const { return props_.empty() && xforms_.empty() && added_.empty(); }
     usize size() const { return props_.size() + xforms_.size() + added_.size(); }
     bool hasTransform(scene::Entity e) const;
+    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts deltaCm from the saved position of every ROOT
+    // entity (a child's is parent-relative) - the captured transform and a captured CLocal position field -
+    // so a later restore() puts it back in the shifted frame. Call after World::shiftRoots.
+    void rebase(const scene::World& w, const Vec3& deltaCm);
 private:
     struct Entry { scene::Entity e = scene::kInvalidEntity; u32 comp = 0; u16 off = 0, size = 0; u8 bytes[16] = {}; };
     struct XfEntry { scene::Entity e = scene::kInvalidEntity; Transform xf; };
@@ -197,6 +201,12 @@ public:
     void setAudition(bool on) { audition_ = on; }
     void setRate(f64 r) { rate_ = r < 0 ? 0 : r; }
     f64  rate() const { return rate_; }
+    // The scene's floating origin O in cm (LARGE_WORLD 2.2.5), shared by every player because the scene has one
+    // frame. Transform and camera keys are authored level-absolute f64; a ROOT entity's key is written as
+    // key - O in f64, then narrowed. Zero (the default) writes exactly what the sampler returned.
+    static void setSceneOrigin(i64 xCm, i64 yCm);
+    static void sceneOrigin(i64& xCm, i64& yCm);
+
     // Where writes are recorded; null = the player's own store (restore() then restores it).
     void setBaseStore(SeqBaseStore* s) { store_ = s; }
     SeqBaseStore& baseStore() { return store_ ? *store_ : ownStore_; }

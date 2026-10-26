@@ -49,6 +49,11 @@ aver_add_module(Aver.Runtime.Game.Core
     src/GameInput.cpp
     src/GameStreaming.cpp
     src/LevelStreaming.cpp
+
+    # LARGE_WORLD: the mechanism half of LevelStreaming (mesh acquire, shape cache, instantiate, bodies, COMPONENT apply) and the
+    # cooked-chunk streaming entry points. LevelStreaming.cpp calls ItemLoader, so they must be in this library.
+    src/ItemLoader.cpp
+    src/AuthoredStreaming.cpp
     # COMPONENT records (Skeletal Mesh, Animator, ... Smart Object) -> live components, applied by both hosts after a level loads.
     src/LevelComponents.cpp
     # [wave3/level-instances begin] LEVELINST records at run time: realise, stream as units, overrides, packed rows.

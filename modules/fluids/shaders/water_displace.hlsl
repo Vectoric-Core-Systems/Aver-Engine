@@ -28,7 +28,7 @@ RWStructuredBuffer<WaterVertex> gOut : register(u0);
 // Root CBV at b3. MIRRORS WaterDisplaceCB in WaterSurface.cpp field for field.
 cbuffer WaterDisplace : register(b3) {
     float4 gWaveDirSteep[AVER_MAX_WAVES];   // {dirX, dirY, steepness, unused}; dir not pre-normalised
-    float4 gWaveLenAmp[AVER_MAX_WAVES];     // {wavelengthCm, amplitudeCm, unused, unused}
+    float4 gWaveLenAmp[AVER_MAX_WAVES];     // {wavelengthCm, amplitudeCm, phaseOffset (radians, floating origin), unused}
     float4 gOriginTime;                     // {originX, originY (world cm), seconds, waveCount}
     float4 gGrid;                           // {cellX cm, cellY cm, uv per cm, skirt scale}
     uint4  gDims;                           // {vertsX, vertsY, skirt vertex count, skirt rings}
@@ -90,7 +90,8 @@ void CSWaterDisplace(uint3 tid : SV_DispatchThreadID) {
         const float omega = 2.0 * kPi / wavelengthCm;
         // Deep-water dispersion, g = 981 cm/s^2 (kGravityCmPerS2).
         const float phaseSpeed = sqrt(981.0 * omega);
-        const float phase = omega * dot(dir, world) + phaseSpeed * t;
+        // gWaveLenAmp[i].z: the floating origin's f64-reduced phase offset (WaterSurface.cpp), 0 at origin zero.
+        const float phase = omega * dot(dir, world) + phaseSpeed * t + gWaveLenAmp[i].z;
         const float s = sin(phase), c = cos(phase);
         const float qi = clamp(gWaveDirSteep[i].z, 0.0, qiMax);
 

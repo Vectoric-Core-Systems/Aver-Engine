@@ -23,6 +23,21 @@ V2 worldXY(scene::World& w, scene::Entity e, f32* z = nullptr) {
 
 CrowdSystem::CrowdSystem() = default;
 
+void CrowdSystem::rebase(scene::World& world, const Vec3& deltaCm) {
+    for (CrowdAgent& a : sim_.agentsMutable()) a.pos -= V2{deltaCm.x, deltaCm.y};
+    scene::ComponentPool* pool = type_ ? world.pool(type_) : nullptr;
+    if (!pool) return;
+    for (usize i = 0; i < pool->size(); ++i) {
+        auto* c = static_cast<CSynapseCrowd*>(pool->dataAt(i));
+        if (!c) continue;
+        const CrowdMode mode = static_cast<CrowdMode>(c->mode);
+        if (mode != CrowdMode::Seek && mode != CrowdMode::Arrive && mode != CrowdMode::Flee) continue;
+        c->steerXCm -= deltaCm.x;
+        c->steerYCm -= deltaCm.y;
+        c->steerZCm -= deltaCm.z;
+    }
+}
+
 u32 CrowdSystem::registerComponents(scene::World& world) {
     auto b = world.registerComponent<CSynapseCrowd>("CSynapseCrowd");
     CROWD_FIELD(b, F32, radiusCm, false);

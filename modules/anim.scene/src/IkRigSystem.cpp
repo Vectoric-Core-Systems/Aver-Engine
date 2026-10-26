@@ -271,6 +271,11 @@ void IkRigRuntime::clear() {
     for (auto& kv : ents_) kv.second.bound = nullptr;   // rebinds (and snaps) next tick
 }
 
+void IkRigRuntime::rebase(const Vec3& delta) {
+    for (auto& kv : ents_)
+        for (auto& g : kv.second.goals)
+            if (g.second.space == 0) g.second.pos -= delta;
+}
 void IkRigRuntime::clearRuntime() {
     ents_.clear();
     probesThis_ = probesLast_ = 0;

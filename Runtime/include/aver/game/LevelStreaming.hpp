@@ -1,6 +1,8 @@
 // Streams an authored level's placements by distance from the viewer (docs/LEVEL_STREAMING.md).
 // Shared by the runtime and the editor: owns the placement records (the level's source of truth while
-// it streams), the residency policy, mesh acquire/release and the filtered instantiate.
+// it streams) and the residency POLICY. The mechanism -- mesh acquire/release, the shared physics
+// mesh shapes, the filtered instantiate, bodies, animated placements, COMPONENT records -- is
+// game::ItemLoader, which the cooked-chunk path (AuthoredStreaming) uses too.
 #pragma once
 #include "aver/core/Types.hpp"
 #include "aver/core/Math.hpp"
@@ -12,6 +14,7 @@
 #include <vector>
 
 #if AVER_MODULE_SCENE
+#  include "aver/game/ItemLoader.hpp"
 #  include "aver/scene/World.hpp"
 #  include "aver/world/LevelInstance.hpp"
 #  include "aver/world/PlacementStreamer.hpp"
@@ -72,7 +75,7 @@ public:
     void pin(u32 placement, bool on);
 
     // Kinematic bodies of resident animated placements, for world::driveKinematicBodies.
-    const std::vector<world::AnimatedBody>& animatedBodies() const { return animated_; }
+    const std::vector<world::AnimatedBody>& animatedBodies() const { return loader_.animatedBodies(); }
 
     usize residentRoots() const { return streamer_.residentCount(); }
     usize rootCount() const { return rootPlacements_.size(); }
@@ -84,18 +87,12 @@ public:
 private:
     struct Item {
         std::vector<u32> placements;   // root first, then descendants, parents before children
-        std::vector<scene::Entity> entities;
-        std::vector<std::pair<scene::Entity, i32>> bodies;
-        std::vector<u64> meshes;       // acquired while resident
-        bool loaded = false;
+        bool loaded = false;           // its entities, bodies and meshes live in loader_ under this item's index
     };
     world::Aabb itemBounds(const Item& it) const;
     bool worldBounds(u32 placement, Vec3& outMin, Vec3& outMax) const;
     void loadItems(scene::World& world, const std::vector<u32>& items);
     void evictItem(scene::World& world, u32 item, bool writeBack = true);
-    void bindMeshMaterials(u64 meshId);
-    void rebuildAnimated();
-    void releaseUnusedShapes();
 
     // Load time per tick: kNearLoadMs while the nearest missing root is within a quarter of the load
     // distance, falling to kFarLoadMs at three quarters.
@@ -108,7 +105,7 @@ private:
     u32 stalledTicks_ = 0;   // ticks with roots waiting and none read (see tick)
     GameContent* content_ = nullptr;
     rhi::IDevice* device_ = nullptr;
-    world::InstantiateOptions opt_;
+    ItemLoader loader_;
     Hooks hooks_;
     std::vector<fmt::OcWorldPlacement> records_;
     std::vector<u8> removed_;
@@ -118,10 +115,6 @@ private:
     world::PlacementStreamer streamer_;
     std::unordered_map<u32, u32> placementOf_;          // entity raw -> placement
     std::unordered_map<u32, scene::Entity> entityOf_;   // placement -> entity
-    std::unordered_map<u32, std::vector<world::AnimatedBody>> animatedByItem_;
-    std::vector<world::AnimatedBody> animated_;
-    // Physics shapes by mesh id, shared by every batch; released once the mesh is unloaded.
-    std::unordered_map<u64, i32> meshShapes_;
 };
 
 } // namespace aver::game

@@ -156,6 +156,9 @@ void TrajectoryPredictor::predictedWorld(const SpringParams& sp, const std::vect
     }
 }
 
+void TrajectoryPredictor::rebase(const Vec3& delta) {
+    for (Sample& s : ring_) s.pos -= delta;
+}
 void TrajectoryPredictor::historyWorld(std::vector<Vec3>& pts) const {
     pts.clear();
     for (const Sample& s : ring_) pts.push_back(s.pos);

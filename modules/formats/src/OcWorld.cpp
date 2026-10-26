@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 
 namespace aver::fmt {
@@ -21,10 +22,27 @@ f64 tokF(const std::vector<std::string_view>& t, usize i, f64 dflt = 0.0) {
     return i < t.size() ? parseF64(t[i]) : dflt;
 }
 
-// Formats a number for the text form: enough digits to round-trip, no trailing noise.
+// Formats a number for the text form: the SHORTEST %g text that reads back as exactly `v` (docs/CHUNKS.md B8: "%.6g" cost
+// a centimetre at 1 km and three per save at 12 km). Six digits is tried first, so every value that was exact in six
+// digits keeps the bytes it always had (no diff churn). A value that is exactly an f32 (a widened slider or angle) is
+// written as the shortest text that reads back as that f32 ("0.1", not "0.10000000149011612"): it IS an f32 to the engine.
+// Only below 2^24: past it an f32-exact value is an integer a nine-digit f32 text would round (123456792 -> 123456790),
+// which is exactly the loss an f64 position at 1000 km must not take.
 std::string num(f64 v) {
-    char buf[40];
+    char buf[48];
     std::snprintf(buf, sizeof buf, "%.6g", v);
+    if (!std::isfinite(v) || std::strtod(buf, nullptr) == v) return buf;
+    if (std::fabs(v) < 16777216.0 && v == static_cast<f64>(static_cast<f32>(v))) {
+        const f32 want = static_cast<f32>(v);
+        for (int p = 6; p <= 9; ++p) {
+            std::snprintf(buf, sizeof buf, "%.*g", p, v);
+            if (std::strtof(buf, nullptr) == want) return buf;
+        }
+    }
+    for (int p = 7; p <= 17; ++p) {
+        std::snprintf(buf, sizeof buf, "%.*g", p, v);
+        if (std::strtod(buf, nullptr) == v) return buf;
+    }
     return buf;
 }
 
@@ -725,6 +743,8 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (keyValue(t[i], "fogcells=", v)) out.stream.fogCells = static_cast<f32>(parseF64(v, out.stream.fogCells));
                 else if (keyValue(t[i], "fogopacity=", v)) out.stream.fogOpacity = static_cast<f32>(parseF64(v, out.stream.fogOpacity));
                 else if (keyValue(t[i], "data=", v))  out.stream.dataPath = std::string(v);
+                else if (keyValue(t[i], "chunks=", v)) out.stream.chunksPath = percentDecode(v);
+                else if (equalsCI(t[i], "off")) out.stream.enabled = false;   // `STREAM off chunks=...`: a cooked set named, streaming from records off
                 else if (keyValue(t[i], "lazy=", v)) {
                     for (std::string_view d : splitCommas(v))
                         if (!d.empty()) out.stream.lazyDirs.emplace_back(d);
@@ -970,8 +990,10 @@ std::string writeOcworld(const OcWorldData& w) {
             }
         }
         if (!w.stream.dataPath.empty()) s += " data=" + w.stream.dataPath;
+        if (!w.stream.chunksPath.empty()) s += " chunks=" + percentEncode(w.stream.chunksPath);
         s += "\n";
     }
+    else if (!w.stream.chunksPath.empty()) s += "STREAM off chunks=" + percentEncode(w.stream.chunksPath) + "\n";   // a cooked set named while streaming from records is off
     if (w.hasSun) {
         // The VECTOR is written, because it round-trips exactly where degrees do not. The elevation
         // rides along as a trailing comment so the line is still readable by a person -- the parser

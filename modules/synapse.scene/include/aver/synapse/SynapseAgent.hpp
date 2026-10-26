@@ -113,6 +113,10 @@ public:
     // not leak once an agent Arrives, Fails, or is destroyed, without reaching into private state.
     u32 activePathCount() const { return static_cast<u32>(paths_.size()); }
 
+    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts `deltaCm` from every path point and from the goal and
+    // current target of each agent that has a goal. Call after World::shiftRoots.
+    void rebase(aver::scene::World& world, const aver::Vec3& deltaCm);
+
 private:
     struct AgentPath {
         std::vector<Vec3> points;

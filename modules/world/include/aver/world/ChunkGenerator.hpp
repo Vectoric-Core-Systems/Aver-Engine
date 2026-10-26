@@ -79,8 +79,12 @@ struct GeneratorSettings {
 
     // Bumped whenever the RULES change. Recorded in the region index, so a save made by an older
     // generator is detectable instead of being silently mixed with content from a newer one --
-    // docs/CHUNKS.md section 6, job 4.
-    u32 generatorVersion = 1;
+    // docs/CHUNKS.md section 6, job 4. ChunkWorld::open compares it with the index and warns.
+    //
+    // 2: the density lattice is formed from an f64 ABSOLUTE position (pcg::sampleInfiniteAbs), not from an f32 one that
+    // quantises past ~10 km, so a chunk is the same bytes at any distance from the origin. A stored override still wins
+    // its chunk; an untouched chunk can differ from version 1 only where a candidate sat within an f32 ulp of a cell edge.
+    u32 generatorVersion = 2;
 
     // Candidate positions per horizontal axis inside one chunk.
     u32 samplesPerAxis = 4;
@@ -143,6 +147,11 @@ struct GeneratorSettings {
     // as RestoreOptions::bindMaterial closes over a host's own material system rather than this module
     // depending on Aver.Render.PBR.
     std::function<bool(f32 worldXCm, f32 worldYCm, f32& outWorldZCm)> heightSource;
+
+    // The same seam with the candidate's position as f64 ABSOLUTE centimetres, for a source whose own lattice must not
+    // quantise at distance (makeInfiniteHeightSourceAbs). When set it is called INSTEAD of heightSource; everything
+    // heightSource documents (a pure function of the position, set before ChunkWorld::open, false = no surface here) holds.
+    std::function<bool(f64 worldXCm, f64 worldYCm, f32& outWorldZCm)> heightSourceAbs;
 };
 
 // A source that invents its chunks. Never fails and never touches a file.
@@ -204,6 +213,11 @@ struct InfiniteHeightFieldSettings {
 // worldYCm) contract GeneratorSettings::heightSource already documents.
 std::function<bool(f32 worldXCm, f32 worldYCm, f32& outWorldZCm)>
 makeInfiniteHeightSource(const InfiniteHeightFieldSettings& hf);
+
+// The same field for GeneratorSettings::heightSourceAbs: pcg::sampleInfiniteHeightCmAbs on an f64 absolute position, so the
+// height is a function of where the point IS and not of how far from the origin the f32 happens to be.
+std::function<bool(f64 worldXCm, f64 worldYCm, f32& outWorldZCm)>
+makeInfiniteHeightSourceAbs(const InfiniteHeightFieldSettings& hf);
 
 // Generated content underneath, persisted overrides on top.
 //

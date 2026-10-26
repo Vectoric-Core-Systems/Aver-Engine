@@ -96,6 +96,9 @@ public:
     };
     // World-space points for MotionDebugOverlay. False when the entity has no runtime.
     bool debug(scene::Entity, Debug& out) const;
+    // Floating-origin shift (LARGE_WORLD 2.2.5): the trajectory history of every ROOT matcher entity -= delta. The history holds
+    // the entity's LOCAL position, so a child's is parent-relative and unchanged.
+    void rebase(const scene::World& world, const Vec3& delta);
 
     // Joins any worker first, then drops every runtime and database.
     void clear();

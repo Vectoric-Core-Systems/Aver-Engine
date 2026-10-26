@@ -1,0 +1,6 @@
+OCSHAPE 1
+# A 40 cm crate, 20 kg (the PhysicsShapesLab crate): the one COMPONENT-carrying placement of BigWorldLab.
+NAME Crate
+MASS 20
+NODE box box 20 20 20 radius 0.5
+ROOT box

@@ -88,6 +88,11 @@ public:
     void setSquadTarget(i32 squadId, const Vec3& target);
     void clearSquadTarget(i32 squadId);
 
+    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts `deltaCm` from every cover point and squad target (marker
+    // points are re-read from their entities each tick; grid-derived ones would otherwise stay in the old frame).
+    // Pair it with rebaseNav on the grid. Call after World::shiftRoots.
+    void rebase(const Vec3& deltaCm);
+
     void tick(scene::World& world, const fmt::OcNavData* nav, f32 dt);
 
     // Displacement that restores a member's spacing from its squad-mates, ground plane.

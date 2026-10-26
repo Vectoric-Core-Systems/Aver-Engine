@@ -272,6 +272,10 @@ u32 MotionMatchSystem::loadedCount() const {
     return n;
 }
 
+void MotionMatchSystem::rebase(const scene::World& world, const Vec3& delta) {
+    for (auto& [e, rt] : runtimes_)
+        if (world.valid(e) && world.parent(e) == scene::kInvalidEntity) rt.traj.rebase(delta);
+}
 void MotionMatchSystem::clear() {
     for (auto& kv : dbs_)
         if (kv.second.fut.valid()) kv.second.fut.wait();   // a worker owns copies, but never leave one running

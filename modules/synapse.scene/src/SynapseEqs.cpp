@@ -366,6 +366,22 @@ const EqsSystem::LastResult* EqsSystem::lastResult(i32 subject, u32 queryId) con
     return it == last_.end() ? nullptr : &it->second;
 }
 
+void EqsSystem::rebase(const Vec3& delta) {
+    for (auto& [h, r] : runs_) {
+        if (!r.run) continue;
+        if (r.status == Status::Queued || r.status == Status::Running) {
+            r.run->cancel();
+            r.status = Status::Cancelled;
+            r.finishedAt = time_;
+        } else if (r.status == Status::Finished) {
+            for (EqsItem& it : const_cast<EqsResult&>(r.run->result()).items) it.pos -= delta;
+        }
+    }
+    for (EqsDebugRun& d : debug_) {
+        d.origin -= delta;
+        for (EqsItem& it : d.items) it.pos -= delta;
+    }
+}
 void EqsSystem::reset() {
     runs_.clear();
     debug_.clear();

@@ -83,6 +83,10 @@ public:
     // Drops every simulated agent (settings stay).
     void reset() { sim_.clear(); wander_.clear(); overflow_ = 0; }
 
+    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts `deltaCm` from every simulated agent and from the world
+    // target of each Seek / Arrive / Flee crowd. Call after World::shiftRoots.
+    void rebase(scene::World& world, const Vec3& deltaCm);
+
     u32 simulatedCount() const { return static_cast<u32>(sim_.agents().size()); }
     u32 overflowCount() const { return overflow_; }
 

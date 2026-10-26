@@ -16,6 +16,7 @@
 #include "Convert.hpp"
 #include "PhysicsInternal.hpp"
 #include "SoftBodyInternal.hpp"
+#include "PhysicsOrigin.hpp"   // LARGE_WORLD: physicsOriginHook
 
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -524,6 +525,26 @@ void sbxStepEnd(float) {
     }
 }
 
+// LARGE_WORLD: the soft bodies themselves move with their rigid body, but the world-space numbers the sbx calls keep do not: a world attachment target and an own buoyancy
+// plane point. A floating-origin shift moves them after the bodies (PhysicsOrigin.hpp), so a vertex pinned to a world point is not dragged 16 km back.
+namespace {
+void shiftSoftWorldState(const aver::physics::detail::Vec3d& d) {
+    auto sub = [&d](aver::Vec3& p) {
+        p.x = static_cast<float>(static_cast<double>(p.x) - d.x);
+        p.y = static_cast<float>(static_cast<double>(p.y) - d.y);
+        p.z = static_cast<float>(static_cast<double>(p.z) - d.z);
+    };
+    for (auto& entry : records()) {
+        SoftExt& e = entry.second.ext;
+        for (SoftAttachment& a : e.attachments)
+            if (a.otherBody == 0) sub(a.targetCm);   // a fixed world target; a body-relative one is an offset in that body's frame
+        if (e.hasOwnPlane) sub(e.planePointCm);
+    }
+}
+const struct OriginHookRegistrar {
+    OriginHookRegistrar() { aver::physics::detail::physicsOriginHook("softbody.world_state", &shiftSoftWorldState); }
+} g_originHookRegistrar;
+} // namespace
 } // namespace aver::physics::softbody
 
 // ---- the ABI -----------------------------------------------------------------------------------------------

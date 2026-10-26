@@ -100,6 +100,13 @@ public:
     // picked, rather than trying to predict it.
     void widenRimSkirts(f32 minSkirtCm);
 
+    // The section moved by (dx, dy, dz) in the caller's frame (the floating origin: LARGE_WORLD 2.2.6): every node's
+    // bounding-sphere centre follows. Radii, errors and skirts are sizes and stay. A plain f32 addition per node, so it is
+    // within an ULP of a rebuild over the moved data (which sums the origin and the sample offset in the other order).
+    void translate(f32 dx, f32 dy, f32 dz = 0.0f) {
+        for (LandscapeNode& n : nodes_) { n.centre[0] += dx; n.centre[1] += dy; n.centre[2] += dz; }
+    }
+
     // The largest error of any node at `level`, or 0 past the top.
     f32 levelErrorCm(u32 level) const {
         return level < levelError_.size() ? levelError_[level] : 0.0f;

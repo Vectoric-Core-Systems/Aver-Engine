@@ -7,6 +7,7 @@
 #include "aver/core/Types.hpp"
 #include "aver/rhi/Atmosphere.hpp"
 #include "aver/rhi/RHIResources.hpp"
+#include "aver/rhi/WorldShift.hpp"
 
 #include <cstddef>
 #include <functional>
@@ -579,6 +580,14 @@ public:
     virtual bool camera(f32 viewProj[16], f32 invViewProjRel[16], f32 cameraPos[3]) const {
         (void)viewProj; (void)invViewProjRel; (void)cameraPos; return false;
     }
+    // The floating origin moved (LARGE_WORLD 2.2.6): every scene-frame position is now `info.deltaCm` smaller.
+    // A backend composes its previous-frame matrices with the shift and refolds the origin-dependent constants
+    // (PerFrameCB::worldOrigin/wavePhase, the cloud offset). Called between frames, before the next setCamera.
+    // Non-pure like destroyBlas was, so mocks that implement IDevice keep compiling; the default does nothing.
+    virtual void shiftWorld(const ShiftWorldInfo& info) { (void)info; }
+    // The origin the last shiftWorld installed (zero until the first). Features whose shaders sample an ABSOLUTE
+    // pattern with an origin-relative position (water's Gerstner phase) add their f64-reduced offset from it.
+    virtual ShiftOrigin worldOrigin() const { return ShiftOrigin{}; }
     // Holds the temporal-AA jitter at zero from the next uploaded frame (NRD2's training capture holds a
     // still pose on one sample position). Backends without jitter ignore it.
     virtual void setJitterSuppressed(bool on) { (void)on; }

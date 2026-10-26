@@ -165,6 +165,10 @@ Asset references are safe: FNV-1a-64 over a forward-slash `Content/`-relative pa
 
 ---
 
+### 4.2 Packed regions and payload v2 (LARGE_WORLD, wave 11)
+
+A region file may be PACKED (header version 3, flag bit 0, `sectorBytes` = 16 as the allocation unit): header pages at bytes 0 and 4096, group table at 8192, a sparse directory per occupied group (16-byte header, then sorted 16-byte entries `{u16 slot, u16 0, u32 firstUnit, u32 length, u32 crc32c}`), then 16-byte-aligned payloads. Packed regions are cooked and immutable (`RegionWriter` refuses them); version 2 is unchanged. Group directories are cached per open region in an LRU of 128. The chunk payload codec is version 2: each entity may carry tagged extras (`u32 tag, u16 length, bytes`; PLID, ANIM, COLL, CMPN, LABL, SNAP for a cooked placement; unknown tags are skipped and preserved). See docs/plans/wave11/LARGE_WORLD.md sections 2.4.3, 2.4.4 and 9.6.
+(Index version 2 adds `kind` (0 persisted overrides, 1 cooked authored level), `sourceHash` and a `wide` list of `{owner chunk, i64 min/max cm}`; the reader still takes version 1.)
 ## 5. The index
 
 `<level>.ocindex`, sorted lexicographically by (x, y, z) (the original design said Morton code; see slice 5 for why not).

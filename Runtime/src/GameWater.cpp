@@ -291,6 +291,8 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
     ocean_.waveCount = n;
     for (size_t i = 0; i < n; ++i) ocean_.waves[i] = waves[i];
 
+    fluids::gerstnerSetOriginPhase(ocean_.waves, ocean_.waveCount, originX_, originY_);   // a level loaded at a non-zero origin
+
     // A record with a material and no `simulate` is the displaced mesh surface, which goes through
     // the ordinary material path and so is seen by rays; a record without one keeps the analytic
     // ocean. Never both: attachDisplaced takes the ocean off the device.
@@ -385,6 +387,11 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
               wp.infinite ? "" : " (bounded)", displaced ? " (displaced mesh)" : "");
 }
 
+void GameWater::onOriginShift(const rhi::ShiftWorldInfo& info) {
+    originX_ = info.newOrigin.x;
+    originY_ = info.newOrigin.y;
+    fluids::gerstnerSetOriginPhase(ocean_.waves, ocean_.waveCount, originX_, originY_);
+}
 bool GameWater::attachSurface(rhi::IDevice& device, f32 levelCm, const fluids::GerstnerWave* waves,
                               size_t n) {
     if (!waterInited_) {

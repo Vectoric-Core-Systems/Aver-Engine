@@ -7,12 +7,15 @@
 #include "aver/physics/physics_joints_abi.h"
 #include "Convert.hpp"
 #include "PhysicsInternal.hpp"
+#include "PhysicsOrigin.hpp"
 
 #include "aver/core/Log.hpp"
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Physics/Body/Body.h>
+#include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyLockMulti.h>
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Constraints/Constraint.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
@@ -55,11 +58,18 @@ struct Joint {
     // aver_phys_joint_set_break; 0 means that component is never checked.
     float breakForceN = 0.0f;
     float breakTorqueNm = 0.0f;
+    // A joint to the world (handle 0) is built against this unadded static body instead of Body::sFixedToWorld, so the floating
+    // origin can move the world side of the constraint with everything else (LARGE_WORLD 2.3.4). Invalid for a joint between two bodies.
+    JPH::BodyID anchorBody;
     bool breakable() const { return breakForceN > 0.0f || breakTorqueNm > 0.0f; }
 };
 
 std::unordered_map<int32_t, Joint> g_joints;
 int32_t g_nextJointHandle = 1;
+
+// The floating origin's pulley rebuild (originJointsBegin captures, originJointsShift consumes): handle order, so the rebuilt
+// constraints are added in a reproducible order.
+std::vector<std::pair<int32_t, JPH::Ref<JPH::ConstraintSettings>>> g_pulleyCapture;
 
 // Breakable joints: how many are armed (so afterStepJoints costs nothing when none are), and the events
 // they produced. Events persist until aver_phys_joint_break_clear, because one aver_phys_step can run
@@ -88,18 +98,44 @@ struct ResolvedBody {
     bool ok = false;
 };
 
-// Handle 0 means the world -- JPH::Body::sFixedToWorld, a static dummy body that was never added to
-// any BodyManager and so has no BodyID and needs no lock. Anything else must resolve through the
-// shared body table the way every other ABI file's handles do.
+// Handle 0 means the world. It used to be JPH::Body::sFixedToWorld, a static dummy at the origin that Jolt stores nothing about; a
+// world joint now gets an ANCHOR body (makeAnchor) in its place so the floating origin can move it. Anything else must resolve
+// through the shared body table the way every other ABI file's handles do.
 ResolvedBody resolveBody(int32_t handle) {
     if (handle == AVER_PHYS_WORLD_BODY) return ResolvedBody{JPH::BodyID(), true, true};
     if (const JPH::BodyID* id = findBody(handle)) return ResolvedBody{*id, false, true};
     return ResolvedBody{};
 }
 
-// Resolves both bodies, locks whichever are real, hands their JPH::Body& to `build` (which returns
-// the new constraint, or null to refuse), registers the result with the physics system, and returns
-// its handle.
+// THE WORLD SIDE OF A JOINT (LARGE_WORLD 2.3.4). Jolt keeps a world joint's anchor in the world body's frame, i.e. as an absolute
+// point, and has no setter, so after a floating-origin shift a constraint against sFixedToWorld would drag its body back by the
+// whole shift. The fix is a real static body that is created and NEVER added to the broad phase (exactly what sFixedToWorld is:
+// nothing queries it, nothing collides with it, and BodyInterface::SetPosition notifies no broad phase for it), sitting at the
+// frame origin with identity rotation, where sFixedToWorld sits. Every constraint therefore stores bit for bit what it stored
+// against sFixedToWorld until the first shift; from then on the anchor sits at minus the sum of the shifts, moves with
+// PhysicsOrigin's loop (originJointsShift) and the stored local anchors never change. Placing it at the other body's centre of mass
+// instead (the plan's wording) would change the rounding of every world joint at origin zero, which the identity rule forbids.
+// The sphere is the smallest shape Jolt will build a body from; it is never simulated.
+constexpr float kAnchorRadiusM = 0.01f;
+
+JPH::BodyID makeAnchor() {
+    JPH::Ref<JPH::Shape> shape = new JPH::SphereShape(kAnchorRadiusM);
+    const JPH::BodyCreationSettings s(shape.GetPtr(), JPH::RVec3::sZero(), JPH::Quat::sIdentity(), JPH::EMotionType::Static,
+                                      Layers::NON_MOVING);
+    JPH::Body* body = bi().CreateBody(s);
+    if (!body) { warnBodyLimit(); return JPH::BodyID(); }
+    return body->GetID();
+}
+
+// Destroys the anchor of a joint that did not get built (it was never added to anything).
+struct AnchorGuard {
+    JPH::BodyID id;
+    bool keep = false;
+    ~AnchorGuard() { if (!keep && !id.IsInvalid() && g_world) bi().DestroyBody(id); }
+};
+
+// Resolves both bodies, locks them, hands their JPH::Body& to `build` (which returns the new constraint, or null to refuse),
+// registers the result with the physics system, and returns its handle. A world side is the anchor body above.
 //
 // ONE JPH::BodyLockMultiWrite, NOT TWO SEPARATE JPH::BodyLockWrite CALLS: locking bodyA then bodyB here
 // while another thread creates a joint on the same pair and locks bodyB then bodyA is a textbook
@@ -118,14 +154,17 @@ int32_t createJoint(int32_t bodyA, int32_t bodyB, Build&& build) {
     const ResolvedBody b = resolveBody(bodyB);
     if (!a.ok || !b.ok) return 0;
 
-    JPH::BodyID realIds[2];
-    int numReal = 0, idxA = -1, idxB = -1;
-    if (!a.isWorld) { idxA = numReal; realIds[numReal++] = a.id; }
-    if (!b.isWorld) { idxB = numReal; realIds[numReal++] = b.id; }
+    // Declared before the lock: the guard destroys an unused anchor after the lock is released.
+    AnchorGuard anchor;
+    if (a.isWorld || b.isWorld) {
+        anchor.id = makeAnchor();
+        if (anchor.id.IsInvalid()) return 0;
+    }
 
-    JPH::BodyLockMultiWrite lock(g_world->system.GetBodyLockInterface(), realIds, numReal);
-    JPH::Body* jphA = a.isWorld ? &JPH::Body::sFixedToWorld : lock.GetBody(idxA);
-    JPH::Body* jphB = b.isWorld ? &JPH::Body::sFixedToWorld : lock.GetBody(idxB);
+    const JPH::BodyID ids[2] = {a.isWorld ? anchor.id : a.id, b.isWorld ? anchor.id : b.id};
+    JPH::BodyLockMultiWrite lock(g_world->system.GetBodyLockInterface(), ids, 2);
+    JPH::Body* jphA = lock.GetBody(0);
+    JPH::Body* jphB = lock.GetBody(1);
     if (!jphA || !jphB) return 0;   // a body died between the handle lookup and the lock
 
     JPH::Ref<JPH::Constraint> constraint = build(*jphA, *jphB);
@@ -134,7 +173,10 @@ int32_t createJoint(int32_t bodyA, int32_t bodyB, Build&& build) {
     g_world->system.AddConstraint(constraint);
     noteConstraintTopology();   // a state restore refuses to cross this (physics_state_abi.h)
     const int32_t h = g_nextJointHandle++;
-    g_joints.emplace(h, Joint{constraint, bodyA, bodyB});
+    Joint joint{constraint, bodyA, bodyB};
+    joint.anchorBody = anchor.id;
+    anchor.keep = true;
+    g_joints.emplace(h, std::move(joint));
     return h;
 }
 
@@ -251,6 +293,7 @@ int32_t aver_phys_joint_remove(int32_t joint) {
     if (!j) return 0;
     if (j->breakable()) --g_breakableCount;
     g_world->system.RemoveConstraint(j->constraint);   // findJoint proved g_world is alive
+    if (!j->anchorBody.IsInvalid()) bi().DestroyBody(j->anchorBody);   // after the constraint that pointed at it
     noteConstraintTopology();
     g_joints.erase(joint);
     return 1;
@@ -947,8 +990,66 @@ void jointHandles(std::vector<int32_t>& out) {
 
 void clearJointBreakEvents() { g_breaks.clear(); }
 
+// ---- The floating origin's seam (PhysicsOrigin.hpp) -----------------------------------------------------------------------------
+
+void originJointsBegin() {
+    g_pulleyCapture.clear();
+    if (!g_world) return;
+    for (const auto& [h, j] : g_joints)
+        if (j.constraint->GetSubType() == JPH::EConstraintSubType::Pulley)
+            g_pulleyCapture.emplace_back(h, j.constraint->GetConstraintSettings());
+    std::sort(g_pulleyCapture.begin(), g_pulleyCapture.end(), [](const auto& l, const auto& r) { return l.first < r.first; });
+}
+
+int32_t originJointsCount() {
+    int32_t n = 0;
+    for (const auto& [h, j] : g_joints)
+        if (!j.anchorBody.IsInvalid()) ++n;
+    return n;
+}
+
+void originJointsShift(const JPH::Vec3& dj, OriginStats& stats) {
+    if (!g_world) { g_pulleyCapture.clear(); return; }
+
+    // Anchors: unadded, so SetPosition moves them without a broad-phase notify and DontActivate keeps them inert.
+    for (const auto& [h, j] : g_joints) {
+        if (j.anchorBody.IsInvalid()) continue;
+        bi().SetPosition(j.anchorBody, bi().GetPosition(j.anchorBody) - JPH::RVec3(dj), JPH::EActivation::DontActivate);
+        ++stats.anchors;
+    }
+
+    // Pulleys: the two fixed points are absolute world positions Jolt cannot be told to move, so the constraint is rebuilt from its own
+    // settings (body points are local to the bodies, which just moved) with the fixed points reduced by dj. The handle, the break
+    // thresholds and the bodies are the same; the lambdas are lost (a pulley is a rope: its length limits are in the settings).
+    for (auto& [h, captured] : g_pulleyCapture) {
+        const auto it = g_joints.find(h);
+        if (it == g_joints.end() || !captured) continue;
+        Joint& j = it->second;
+        auto& settings = static_cast<JPH::PulleyConstraintSettings&>(*captured);
+        settings.mFixedPoint1 -= JPH::RVec3(dj);
+        settings.mFixedPoint2 -= JPH::RVec3(dj);
+        auto* old = static_cast<JPH::TwoBodyConstraint*>(j.constraint.GetPtr());
+        JPH::Ref<JPH::Constraint> fresh = settings.Create(*old->GetBody1(), *old->GetBody2());
+        if (!fresh) { AVER_WARN("[Physics] origin shift: pulley {} could not be rebuilt", h); continue; }
+        g_world->system.RemoveConstraint(j.constraint);
+        g_world->system.AddConstraint(fresh);
+        j.constraint = fresh;
+        ++stats.pulleysRebuilt;
+    }
+    g_pulleyCapture.clear();
+    if (stats.pulleysRebuilt > 0) noteConstraintTopology();   // Jolt restores constraints by array index: a snapshot may not cross this
+}
+
 void destroyAllJoints() {
     stateOnShutdown();   // the first teardown hook aver_phys_shutdown calls: snapshots die with their world
+    // A world joint's anchor body goes with its constraint. Only these are removed one by one; the rest die with the system.
+    if (g_world)
+        for (auto& [h, j] : g_joints)
+            if (!j.anchorBody.IsInvalid()) {
+                g_world->system.RemoveConstraint(j.constraint);
+                bi().DestroyBody(j.anchorBody);
+            }
+    g_pulleyCapture.clear();
     g_joints.clear();
     g_nextJointHandle = 1;   // handles restart with the world, like body handles: a rebuilt scene hashes the same
     g_breaks.clear();

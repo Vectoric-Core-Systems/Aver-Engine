@@ -4168,6 +4168,11 @@ private:
     void stampStreamFields(fmt::OcWorldData& w, const std::unordered_map<u32, i32>& slotOf);
     void buildLevelStreamingSettings();
     std::string streamRegenReport_;
+    // LARGE_WORLD 2.4.5 (SandboxLevelCook.cpp): World Settings > Level Streaming > Cook Chunks, and the freshness check before a Standalone launch.
+    bool cookLevelChunks(std::string& report);
+    bool refreshCookedChunksForPlay();
+    void buildCookChunksSettings();
+    std::string cookChunksReport_;
     usize streamSeenCount_ = 0;                  // levelEntities_ size at the last adoption pass
     std::unordered_set<u32> streamAdopted_;      // checked by adoptNewLevelEntities (adopted or not a placement)
     std::unordered_set<u32> streamSelPinned_;    // pinned because selected

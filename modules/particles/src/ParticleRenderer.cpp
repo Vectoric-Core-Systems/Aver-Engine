@@ -425,6 +425,8 @@ rhi::BindingSetHandle ParticleRenderer::acquireSet() {
 // ------------------------------------------------------------------------------------------------ prePass
 void ParticleRenderer::prePass(rhi::IRenderContext& ctx) {
     if (!system_ || !dev_ || !gpu_.usable()) return;
+    // A floating-origin shift since the last frame moves the resident GPU state before anything simulates (LARGE_WORLD 2.2.6).
+    gpu_.recordShifts(ctx, system_->gpuShifts());
     std::vector<GpuJob>& jobs = system_->gpuJobs();
     if (jobs.empty()) return;
 

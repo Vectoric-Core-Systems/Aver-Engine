@@ -73,6 +73,10 @@ public:
     // nothing, if WaterRenderer::init fails -- the caller logs.
     bool attachSurface(rhi::IDevice& device, f32 levelCm, const fluids::GerstnerWave* waves, size_t n);
 
+    // The floating origin moved (LARGE_WORLD 2.2.6): the CPU wave phase gets the origin's f64-reduced share, so the surface a body floats on is the
+    // one the shaders draw (they add the same number from IDevice::worldOrigin()). Idempotent; moves to info.newOrigin. Also applied at level load.
+    void onOriginShift(const rhi::ShiftWorldInfo& info);
+
     // Despawns the level-authored simulated volume (fluidHandle_) and re-latches its spawn so
     // update() spawns it again fresh -- for a host that resets a play session (the editor's Stop).
     // Graph-authored volumes are untouched. Returns false when no level volume is live.
@@ -181,6 +185,8 @@ private:
         fluids::GerstnerWave waves[fluids::kMaxGerstnerWaves];
         size_t waveCount = 0;
     } ocean_;
+
+    i64 originX_ = 0, originY_ = 0;   // the scene origin the CPU wave phase (GerstnerWave::originPhaseRad) was last set for
     // ---- end wave3 water bodies ----
 
     // ---- the analytic Gerstner surface, its buoyancy plane, and the underwater fog tuning it drives ----

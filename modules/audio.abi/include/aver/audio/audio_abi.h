@@ -84,6 +84,9 @@ AVER_AUDIO_API void aver_audio_set_voice_volume(int32_t voice, float volume);
 AVER_AUDIO_API void aver_audio_set_voice_pitch(int32_t voice, float pitch);
 // Moves a live positional voice.
 AVER_AUDIO_API void aver_audio_set_voice_position(int32_t voice, float x, float y, float z);
+// Floating-origin shift (LARGE_WORLD 2.2.5): moves every live voice and the listener by -(dx, dy, dz) cm so sounds keep their distance and pan.
+// Game thread, once per committed shift.
+AVER_AUDIO_API void aver_audio_origin_shift(float dx, float dy, float dz);
 
 // Where the ears are and which way they face. Pushed once a frame by whatever owns the camera.
 AVER_AUDIO_API void aver_audio_set_listener(float px, float py, float pz,

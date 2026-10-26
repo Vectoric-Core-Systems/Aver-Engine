@@ -36,6 +36,10 @@ bool GameLandscape::loadLandscape(rhi::IDevice* device, const std::string& path)
         AVER_WARN("[Landscape] could not load '{}': {}", path, why);
         return false;
     }
+    // Floating origin: the file's origin is absolute; the section lives in the current frame (a no-op at origin zero).
+    homeAbs_[0] = static_cast<f64>(data.originCm[0]);
+    homeAbs_[1] = static_cast<f64>(data.originCm[1]);
+    placeInFrame(data);
     landscape::LandscapeTree tree;
     if (!tree.build(data, landscape::kDefaultNodeQuads, &why)) {
         AVER_WARN("[Landscape] '{}' loaded but its quadtree would not build: {}", path, why);
@@ -52,6 +56,7 @@ bool GameLandscape::loadLandscape(rhi::IDevice* device, const std::string& path)
     landscapeTree_.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
     landscapeTree_.resetHysteresis();
     landscapeRenderer_ = std::make_unique<landscape::LandscapeRenderer>(kMaxResidentNodesPerTile);
+    landscapeRenderer_->setOrigin(frame_.x, frame_.y);
     loaded_ = true;
     landscapePath_ = path;
     dirty_ = false;
@@ -181,8 +186,9 @@ void GameLandscape::unload(rhi::IDevice* device) {
 bool GameLandscape::groundHeightAt(f64 worldXCm, f64 worldYCm, f64& outWorldZCm) const {
     if (!loaded_) return false;
     f32 z = 0.0f;
-    if (!landscape::surfaceHeightAt(landscapeData_, static_cast<f32>(worldXCm),
-                                    static_cast<f32>(worldYCm), z))
+    // The arguments are ABSOLUTE (level records); the section is in the scene frame. Z is never rebased.
+    if (!landscape::surfaceHeightAt(landscapeData_, static_cast<f32>(worldXCm - static_cast<f64>(frame_.x)),
+                                    static_cast<f32>(worldYCm - static_cast<f64>(frame_.y)), z))
         return false;
     outWorldZCm = static_cast<f64>(z);
     return true;
@@ -190,7 +196,8 @@ bool GameLandscape::groundHeightAt(f64 worldXCm, f64 worldYCm, f64& outWorldZCm)
 
 bool GameLandscape::scatterHeightAt(f32 worldXCm, f32 worldYCm, f32& outWorldZCm) const {
     if (landscape::surfaceHeightAt(landscapeData_, worldXCm, worldYCm, outWorldZCm)) return true;
-    outWorldZCm = landscape::terrainHeightAt(worldXCm, worldYCm, landscapeNoiseParams_);
+    // Past the rim the field is a function of the ABSOLUTE position (f64 sum): the same hill at any origin.
+    outWorldZCm = landscape::terrainHeightAtFrom(worldXCm, worldYCm, frame_.x, frame_.y, landscapeNoiseParams_);
     return true;
 }
 
@@ -287,8 +294,10 @@ void GameLandscape::loadForLevel(rhi::IDevice* device, const std::string& conten
     if (!loadLandscape(device, path)) return;
 
     if (haveAt) {
-        landscapeData_.originCm[0] = static_cast<f32>(at[0]);
-        landscapeData_.originCm[1] = static_cast<f32>(at[1]);
+        homeAbs_[0] = at[0];
+        homeAbs_[1] = at[1];
+        landscapeData_.originCm[0] = static_cast<f32>(at[0] - static_cast<f64>(frame_.x));   // absolute record, current frame
+        landscapeData_.originCm[1] = static_cast<f32>(at[1] - static_cast<f64>(frame_.y));
         landscapeData_.originCm[2] = static_cast<f32>(at[2]);
         // The tree caches node centres and bounds derived from originCm, so it has to be rebuilt
         // rather than nudged -- otherwise LOD selection and frustum culling would run against where
@@ -367,7 +376,7 @@ void GameLandscape::updateRingTiles(rhi::IDevice* device, f32 cameraXCm, f32 cam
         RingTile tile;
         if (!landscape::synthesizeTerrainTile(t, centreX, centreY, tileSizeCm,
                                               landscapeData_.sampleCount, landscapeNoiseParams_,
-                                              tile.data)) {
+                                              tile.data, frame_.x, frame_.y)) {
             AVER_WARN("[Landscape] could not synthesize ring tile ({}, {})", t.tx, t.ty);
             continue;
         }
@@ -382,6 +391,7 @@ void GameLandscape::updateRingTiles(rhi::IDevice* device, f32 cameraXCm, f32 cam
         tile.tree.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
         tile.tree.resetHysteresis();
         tile.renderer = std::make_unique<landscape::LandscapeRenderer>(kMaxResidentNodesPerTile);
+        tile.renderer->setOrigin(frame_.x, frame_.y);
         // A tile born mid-session has to be told the surface too, or the ring renders untextured
         // around a textured home section -- a seam that moves with the camera.
 #if AVER_MODULE_PBR
@@ -443,7 +453,56 @@ void GameLandscape::draw(rhi::IDevice& device, const Vec3& eye, const Mat4& view
     }
 }
 
+// Puts a section just read from disk into the current frame. originCm is the file's f32, equal to homeAbs_.
+void GameLandscape::placeInFrame(fmt::OcLandData& d) const {
+    if (frame_.x == 0 && frame_.y == 0) return;
+    const f32 nx = static_cast<f32>(homeAbs_[0] - static_cast<f64>(frame_.x));
+    const f32 ny = static_cast<f32>(homeAbs_[1] - static_cast<f64>(frame_.y));
+    const f32 dx = nx - d.originCm[0], dy = ny - d.originCm[1];
+    d.originCm[0] = nx;
+    d.originCm[1] = ny;
+    d.boundsMin[0] += dx; d.boundsMax[0] += dx;
+    d.boundsMin[1] += dy; d.boundsMax[1] += dy;
+}
+
+// The floating origin moved to `o` (LARGE_WORLD 2.2.6). Everything resident is translated, nothing is rebuilt: the data and
+// the tree follow by the delta, the renderers take the new frame and draw their old meshes translated.
+void GameLandscape::moveFrameTo(const rhi::ShiftOrigin& o) {
+    if (o.x == frame_.x && o.y == frame_.y) return;
+    const rhi::ShiftOrigin was = frame_;
+    frame_ = o;
+    // What every position moved by: minus the origin's step, a whole number of regions and so exact in f32.
+    const f32 moveX = -static_cast<f32>(frame_.x - was.x), moveY = -static_cast<f32>(frame_.y - was.y);
+    if (landscapeRenderer_) landscapeRenderer_->setOrigin(frame_.x, frame_.y);
+    if (loaded_) {
+        // The home section: its origin from the exact absolute one (one rounding), the tree and bounds by what moved.
+        landscapeData_.originCm[0] = static_cast<f32>(homeAbs_[0] - static_cast<f64>(frame_.x));
+        landscapeData_.originCm[1] = static_cast<f32>(homeAbs_[1] - static_cast<f64>(frame_.y));
+        landscapeData_.boundsMin[0] += moveX; landscapeData_.boundsMax[0] += moveX;
+        landscapeData_.boundsMin[1] += moveY; landscapeData_.boundsMax[1] += moveY;
+        landscapeTree_.translate(moveX, moveY);
+        // A painted section's parameter texture carries the section's origin (the weightmap lookup): upload it again.
+        if (landscapeData_.hasLayers()) {
+            weightsDirty_ = true;
+#if AVER_MODULE_PBR
+            paramsDirty_ = true;
+#endif
+        }
+    }
+    // Ring tiles were synthesised in the old frame; each follows by the same delta.
+    for (auto& kv : landscapeRingTiles_) {
+        RingTile& tile = kv.second;
+        tile.data.originCm[0] += moveX; tile.data.originCm[1] += moveY;
+        tile.data.boundsMin[0] += moveX; tile.data.boundsMax[0] += moveX;
+        tile.data.boundsMin[1] += moveY; tile.data.boundsMax[1] += moveY;
+        tile.tree.translate(moveX, moveY);
+        if (tile.renderer) tile.renderer->setOrigin(frame_.x, frame_.y);
+    }
+}
+
 void GameLandscape::setOriginCm(f32 x, f32 y, f32 z) {
+    homeAbs_[0] = static_cast<f64>(x) + static_cast<f64>(frame_.x);   // x, y are scene-frame; the sidecar is absolute
+    homeAbs_[1] = static_cast<f64>(y) + static_cast<f64>(frame_.y);
     landscapeData_.originCm[0] = x;
     landscapeData_.originCm[1] = y;
     landscapeData_.originCm[2] = z;
@@ -602,7 +661,14 @@ landscape::BrushRect GameLandscape::sculpt(rhi::IDevice* device, const landscape
 // it's the one place edits actually reach disk.
 bool GameLandscape::save(std::string* why) {
     if (!loaded_ || landscapePath_.empty()) return false;
-    if (!fmt::saveOcLand(landscapePath_, landscapeData_, why)) return false;
+    // The sidecar is ABSOLUTE: write the exact origin, then put the scene-frame one back. At origin zero both are the same f32.
+    const f32 localOx = landscapeData_.originCm[0], localOy = landscapeData_.originCm[1];
+    landscapeData_.originCm[0] = static_cast<f32>(homeAbs_[0]);
+    landscapeData_.originCm[1] = static_cast<f32>(homeAbs_[1]);
+    const bool wrote = fmt::saveOcLand(landscapePath_, landscapeData_, why);
+    landscapeData_.originCm[0] = localOx;
+    landscapeData_.originCm[1] = localOy;
+    if (!wrote) return false;
     dirty_ = false;
     // Saving is the natural commit point for a sculpt, so it is where the collision snapshot
     // catches up with the heights -- see rebuildCollision's own comment on why this is not done

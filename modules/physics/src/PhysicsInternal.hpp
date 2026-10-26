@@ -411,6 +411,12 @@ struct World {
     // into a world whose constraint set changed is refused instead of silently restoring the wrong constraint.
     uint32_t topologyEpoch = 0, constraintEpoch = 0;
     StepStats stats;
+
+    // ---- LARGE_WORLD (PhysicsOrigin.cpp, physics_origin_abi.h) ----
+    bool     inStep = false;                 // true inside aver_phys_step: the origin shift refuses while it is
+    uint32_t originGeneration = 0;           // +1 per shift; zero in every new World (init, aver_phys_rebuild)
+    double   originTotalCm[3] = {0, 0, 0};   // the sum of every shift: this world's origin in the engine's absolute frame
+    bool     originOptimizePending = false;  // a shift moved more than 4,096 statics: OptimizeBroadPhase at the top of the next step
 };
 
 // The live world, or null between aver_phys_shutdown and the next aver_phys_init. DEFINED in

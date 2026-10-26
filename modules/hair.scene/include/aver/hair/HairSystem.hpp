@@ -190,6 +190,9 @@ public:
 
     // ---- ops (the framework relay calls these) ----
     bool teleport(scene::Entity e);                     // the default pose at the next update
+    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts `deltaCm` from each instance's previous root position, else
+    // the teleportCm rule sees one 16 km move and restarts the groom from its default pose. Call after World::shiftRoots.
+    void rebase(const Vec3& deltaCm);
     i32 hairOf(scene::Entity e) const;                  // the physics hair handle, 0 when none
     bool isBuilt(scene::Entity e) const;
 

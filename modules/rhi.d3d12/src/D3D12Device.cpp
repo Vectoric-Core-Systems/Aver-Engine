@@ -1024,6 +1024,38 @@ public:
         frameCB_.waveParams[0] = amplitude;
         frameCB_.waveParams[1] = static_cast<f32>(n);
         frameCB_.waveParams[2] = frameCB_.waveParams[3] = 0.0f;
+        refreshWorldOriginRows();   // the phase offsets follow the wave set (zero at origin zero)
+    }
+    // THE FLOATING ORIGIN (LARGE_WORLD 2.2.6). Every position the host hands this device is relative to O; these
+    // rows and the cloud fold let a shader recover what depended on the ABSOLUTE position. All of it is zero / the
+    // plain wind offset until the first shiftWorld, so a level that never rebases uploads what it always did.
+    ShiftOrigin worldOrigin_{};
+    u32  worldGeneration_ = 0;
+    f32  cloudWindOffset_[2] = {0.0f, 0.0f};   // setSkyAtmosphere's wind offset BEFORE the origin is folded in
+    void refreshWorldOriginRows() {
+        worldOriginRow(worldOrigin_, worldGeneration_, frameCB_.worldOrigin);
+        wavePhaseRow(frameCB_.wave, worldOrigin_, frameCB_.wavePhase);
+        const CloudMotionFold fold = cloudMotionFold(ShiftVec3d{static_cast<f64>(cloudWindOffset_[0]),
+                                                                static_cast<f64>(cloudWindOffset_[1]), 0.0}, worldOrigin_);
+        frameCB_.cloudMotion[0] = fold.x;
+        frameCB_.cloudMotion[1] = fold.y;
+    }
+    ShiftOrigin worldOrigin() const override { return worldOrigin_; }
+    // Between frames, before the next setCamera. Local positions are `delta` smaller: every matrix and position this
+    // device kept from the old frame is composed with the shift, so velocity, TAA and the frame generator's cut test
+    // see the camera where it was, not 16 km away. The matrices are composed in f64 and rounded once (WorldShift.hpp).
+    void shiftWorld(const ShiftWorldInfo& info) override {
+        composePrevViewProjInPlace(frameCB_.viewProj, info.deltaCm);          // the old camera, in the new frame:
+        composePrevViewProjInPlace(frameCB_.viewProjNoJitter, info.deltaCm);  // setCamera snapshots it as prevViewProj_
+        composePrevViewProjInPlace(prevViewProj_, info.deltaCm);
+        composePrevViewProjInPlace(taaLastViewProj_, info.deltaCm);           // equal inputs stay equal: no false "camera moved"
+        f32 cam[3] = {frameCB_.camPos[0], frameCB_.camPos[1], frameCB_.camPos[2]};
+        shiftPoint(cam, info.deltaCm);
+        frameCB_.camPos[0] = cam[0]; frameCB_.camPos[1] = cam[1]; frameCB_.camPos[2] = cam[2];
+        shiftPoint(fgPrevCamPos_, info.deltaCm);                              // else frameInterpCameraJumped cuts NeuraFI
+        worldOrigin_ = info.newOrigin;
+        worldGeneration_ = info.generation;
+        refreshWorldOriginRows();
     }
     void setFrameTime(f32 seconds, f32 deltaSeconds) override {
         // Time wrapped to 3600s for seamless ripple effects.
@@ -4774,15 +4806,22 @@ void D3D12Device::setSkyAtmosphere(const SkyAtmosphere& s) {
     frameCB_.cloudParams[3] = s.cloudTop > s.cloudBottom ? s.cloudTop : s.cloudBottom + 1.0f;
     // Cloud seed is noise-domain offset; seed=0 keeps unseeded path bit-identical.
     if (s.cloudSeed == 0) {
-        frameCB_.cloudMotion[0] = s.cloudWind[0] * s.cloudTime;
-        frameCB_.cloudMotion[1] = s.cloudWind[1] * s.cloudTime;
+        cloudWindOffset_[0] = s.cloudWind[0] * s.cloudTime;
+        cloudWindOffset_[1] = s.cloudWind[1] * s.cloudTime;
     } else {
         u32 h = static_cast<u32>(s.cloudSeed) + 0x9E3779B9u;
         h = (h ^ (h >> 16)) * 0x21F0AAADu;
         h = (h ^ (h >> 15)) * 0x735A2D97u;
         h ^= h >> 15;
-        frameCB_.cloudMotion[0] = s.cloudWind[0] * s.cloudTime + static_cast<f32>(h & 0xFFFFu) * 977.0f;
-        frameCB_.cloudMotion[1] = s.cloudWind[1] * s.cloudTime + static_cast<f32>(h >> 16)     * 1361.0f;
+        cloudWindOffset_[0] = s.cloudWind[0] * s.cloudTime + static_cast<f32>(h & 0xFFFFu) * 977.0f;
+        cloudWindOffset_[1] = s.cloudWind[1] * s.cloudTime + static_cast<f32>(h >> 16)     * 1361.0f;
+    }
+    // The shader samples (wpos + cloudMotion.xy) * scale with wpos origin-relative, so the origin is folded in here, in f64.
+    {
+        const CloudMotionFold fold = cloudMotionFold(ShiftVec3d{static_cast<f64>(cloudWindOffset_[0]),
+                                                                static_cast<f64>(cloudWindOffset_[1]), 0.0}, worldOrigin_);
+        frameCB_.cloudMotion[0] = fold.x;
+        frameCB_.cloudMotion[1] = fold.y;
     }
     frameCB_.cloudMotion[2] = s.cloudScale;
     frameCB_.cloudMotion[3] = s.cloudsEnabled ? 1.0f : 0.0f;

@@ -239,6 +239,12 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.streamVerticalRadius = parseI32(t[1], -1);
         } else if (equalsCI(key, "STREAM.LEADSECONDS")) {
             if (t.size() > 1) out.streamLeadSeconds = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "WORLD.FLOATINGORIGIN")) {
+            if (t.size() > 1) { const int v = parseI32(t[1], -1); out.worldFloatingOrigin = v < 0 ? -1 : (v != 0 ? 1 : 0); }
+        } else if (equalsCI(key, "WORLD.REBASEMARGIN")) {
+            if (t.size() > 1) { const int v = parseI32(t[1], -1); out.worldRebaseMarginCm = v < 0 ? -1 : v; }
+        } else if (equalsCI(key, "WORLD.ALLOWSHIFTREQUEST")) {
+            if (t.size() > 1) { const int v = parseI32(t[1], -1); out.worldAllowShiftRequest = v < 0 ? -1 : (v != 0 ? 1 : 0); }
         } else if (equalsCI(key, "PHYSICS.MAXBODIES")) {
             if (t.size() > 1) out.physMaxBodies = parseI32(t[1], -1);
         } else if (equalsCI(key, "PHYSICS.MAXBODYPAIRS")) {
@@ -368,6 +374,7 @@ bool isOwnedKey(std::string_view line) {
         "IMPORT.MAXTEXTURE",
         "STREAM.LOADRADIUS", "STREAM.EVICTRADIUS", "STREAM.LOADBUDGET", "STREAM.EVICTBUDGET",
         "STREAM.VERTICALRADIUS", "STREAM.LEADSECONDS",
+        "WORLD.FLOATINGORIGIN", "WORLD.REBASEMARGIN", "WORLD.ALLOWSHIFTREQUEST",
         "PHYSICS.MAXBODIES", "PHYSICS.MAXBODYPAIRS", "PHYSICS.MAXCONTACTS", "PHYSICS.TEMPALLOCMB",
         "PHYSICS.GRAVITY", "PHYSICS.FIXEDSTEP", "PHYSICS.THREADS", "PHYSICS.SHAPECACHE", "AUDIO.MASTER", "AUDIO.BUS",
     };
@@ -476,6 +483,10 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "STREAM.EVICTBUDGET", d.streamEvictBudget);
     appendKey(owned, "STREAM.VERTICALRADIUS", d.streamVerticalRadius);
     appendKey(owned, "STREAM.LEADSECONDS", d.streamLeadSeconds);
+
+    appendKey(owned, "WORLD.FLOATINGORIGIN", d.worldFloatingOrigin);
+    appendKey(owned, "WORLD.REBASEMARGIN", d.worldRebaseMarginCm);
+    appendKey(owned, "WORLD.ALLOWSHIFTREQUEST", d.worldAllowShiftRequest);
 
     appendKey(owned, "PHYSICS.MAXBODIES", d.physMaxBodies);
     appendKey(owned, "PHYSICS.MAXBODYPAIRS", d.physMaxBodyPairs);

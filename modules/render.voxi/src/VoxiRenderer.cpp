@@ -720,6 +720,86 @@ void VoxiRenderer::setSettings(const Settings& in) {
             AVER_ERROR("[Voxi] air sky-visibility volume could not follow a voxi.fogOcclusion change");
 }
 
+// A kept scene-frame position after a shift: the same plain f32 `p - delta` the scene's roots and the host's copies take.
+static inline void shiftCentre(f32 c[3], const f32 d[3]) { c[0] -= d[0]; c[1] -= d[1]; c[2] -= d[2]; }
+
+// Floating-origin shift (LARGE_WORLD 2.2.6), between frames, after the host moved the scene: every position this renderer
+// kept from the old frame moves by -delta, and every previous-frame matrix is composed with +delta, so no history is lost
+// to a 16 km "motion". Voxi runs a frame behind: the draw lists the next frame's passes read were submitted BEFORE the
+// shift, so they move too. A zero delta does nothing at all (identity at origin zero).
+void VoxiRenderer::shiftWorld(const rhi::ShiftWorldInfo& info) {
+    const rhi::ShiftVec3d& delta = info.deltaCm;
+    if (delta.x == 0.0 && delta.y == 0.0 && delta.z == 0.0) return;
+    const f32 d[3] = {static_cast<f32>(delta.x), static_cast<f32>(delta.y), static_cast<f32>(delta.z)};
+    const auto moveDraw = [&](Draw& dr) {
+        rhi::shiftWorldMatrix(dr.world, delta);
+        rhi::shiftPoint(dr.boundsCentre, delta);
+    };
+
+    // The GI draw-list key. It holds across the rebase only if it held for the list about to be read; a real change that
+    // was already pending must still be seen by the gate, so it is NOT adopted. Evaluated before anything moves.
+    bool giKeyHeld = giSnapValid_ && !giBuild_.active;
+    if (giKeyHeld) {
+        drawsPrev_.swap(draws_); ++drawLanesToken_;   // the list the next beginScene swaps in
+        giKeyHeld = giDrawsKey() == giDrawsKey_;
+        drawsPrev_.swap(draws_); ++drawLanesToken_;
+    }
+    // A staged rebuild mid-flight mixes old-frame slices into a volume that now lives in the new frame: start over.
+    if (giBuild_.active) { giBuild_ = GiBuild{}; giSnapValid_ = false; }
+
+    // Cameras and history matrices (composed in f64, one rounding). prevCamPos_ shifts with them, else NRD2 is fed a
+    // 16 km camera delta; its own previous-view fold is camera-relative and so invariant.
+    rhi::composePrevViewProjInPlace(curViewProj_, delta);
+    rhi::composePrevViewProjInPlace(prevViewProj_, delta);
+    rhi::composePrevViewProjInPlace(prev2ViewProj_, delta);
+    rhi::shiftPoint(curCamPos_, delta);
+    rhi::shiftPoint(prevCamPos_, delta);
+    froxel_.shiftWorld(delta);
+
+    // The GI volume. authoredCenter_ FIRST: the host's setVolume() already receives the shifted centre next frame, and a
+    // >1 cm move from the authored centre counts as a level load and resets the radiance cache.
+    shiftCentre(authoredCenter_, d);
+    bool airVisHeld[3];   // the air-visibility inputs were the volume origin: they move with it
+    for (int i = 0; i < 3; ++i) airVisHeld[i] = airVisInputs_[i] == cb_.voxelOrigin[i];
+    shiftCentre(center_, d);
+    shiftCentre(followLastEye_, d);
+    shiftCentre(giSnapCenter_, d);
+    shiftCentre(giBoxCentre_, d);
+    shiftCentre(giShadowCentre_, d);
+    for (int c = 0; c < 4; ++c) shiftCentre(cascadeCentre_[c], d);
+    for (int i = 0; i < 3; ++i) cb_.voxelOrigin[i] -= d[i];
+    for (int i = 0; i < 3; ++i)   // the air-visibility volume re-runs only when its inputs change, and these moved with the scene
+        if (airVisHeld[i]) airVisInputs_[i] = cb_.voxelOrigin[i];
+
+    // Draw lists: both, because the passes of the next frame read the list submitted before the shift.
+    for (Draw& dr : draws_) moveDraw(dr);
+    for (Draw& dr : drawsPrev_) moveDraw(dr);
+    ++drawLanesToken_;   // every cached world-hash lane is stale
+    // RT: the carry-forward source (last build's rows) and the instance array follow, so movers keep their motion vectors
+    // and a still instance still matches exactly. The TLAS itself rebuilds once: its key hashes every static world matrix.
+    for (RtInstance& ri : rtInstanceData_) {
+        rhi::shiftWorldMatrix(ri.objectToWorld, delta);
+        rhi::shiftWorldMatrix(ri.prevObjectToWorld, delta);
+    }
+    for (rhi::TlasInstance& ti : tlasInstScratch_) rhi::shiftWorldMatrix(ti.world, delta);
+
+    // Re-key the GI draw list over the shifted draws and adopt it as the snapshot, so the gate accepts and the 25-frame
+    // staged rebuild never starts. giSnapMeshes_ holds handles, not positions, and stays.
+    if (giKeyHeld) {
+        drawsPrev_.swap(draws_); ++drawLanesToken_;
+        giDrawsKey_ = giDrawsKey();
+        giDrawsSubKeys(giDrawsCount_, giDrawsMeshKey_, giDrawsWorldKey_, giDrawsMatKey_);
+        drawsPrev_.swap(draws_); ++drawLanesToken_;
+    }
+
+    // ReSTIR reservoirs and giSurfPosHist_/giSurfNrmHist_ hold old-frame world positions that the composed matrices cannot
+    // fix: one frame without that history (a shift pass over the buffers is the follow-up, LARGE_WORLD open question 8).
+    giHistValid_ = false;
+    giVisHistValid_ = false;
+    // NeuRaC: cascade 2's tags are re-labelled by the next resolve; cascades 0 and 1 are invariant (NeuRaCLayout.hpp).
+    rc_.noteOriginShift(rhi::shiftSteps(delta.x), rhi::shiftSteps(delta.y));
+}
+
 // Places the GI volume: centre in world units, half-edge extent.
 void VoxiRenderer::setVolume(const f32 center[3], f32 extent) {
     // A level load refits the authored volume: the radiance cache holds the old level's light. Called every

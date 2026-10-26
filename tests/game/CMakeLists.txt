@@ -16,6 +16,29 @@ add_executable(PlayMobilityTest src/PlayMobilityTest.cpp)
 target_link_libraries(PlayMobilityTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Core)
 set_target_properties(PlayMobilityTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# OriginParticipantsTest -- the per-system halves of a floating-origin shift (docs/plans/wave11/LARGE_WORLD.md 2.2.5, 5.2): PlayMobility, the anim
+# object base, the sequencer base store and origin-relative keys, the camera rig, soft body, the kinematic driver, Synapse and the mixer, each against
+# its real system with the scene shifted by hand (World::shiftRoots stands in for the scene participant). A section compiles in only when its module's
+# target exists (ORIGINTEST_* below). Real Jolt world for the camera, soft body and kinematic sections; no GPU, no window.
+add_executable(OriginParticipantsTest src/OriginParticipantsTest.cpp)
+target_link_libraries(OriginParticipantsTest PRIVATE Aver.Runtime.Game.Core Aver.World Aver.Scene Aver.Formats Aver.Core)
+foreach(_pair ANIM:Aver.Anim.Scene CAMERA:Aver.Camera SOFTBODY:Aver.SoftBody.Scene HAIR:Aver.Hair.Scene SYNAPSE:Aver.Synapse.Scene AUDIO:Aver.Audio PHYSICS:Aver.Physics)
+  string(REPLACE ":" ";" _parts "${_pair}")
+  list(GET _parts 0 _flag)
+  list(GET _parts 1 _target)
+  if(TARGET ${_target})
+    target_link_libraries(OriginParticipantsTest PRIVATE ${_target})
+    target_compile_definitions(OriginParticipantsTest PRIVATE ORIGINTEST_${_flag}=1)
+  endif()
+endforeach()
+set_target_properties(OriginParticipantsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AuthoredStreamingTest -- game::AuthoredStreaming: the choice (fresh / stale / missing), the cooked set streamed through ItemLoader, a rebase between ticks loads
+# and evicts nothing, a teleport, end(). A real scene::World and an empty GameContent; no device, no window.
+add_executable(AuthoredStreamingTest src/AuthoredStreamingTest.cpp)
+target_link_libraries(AuthoredStreamingTest PRIVATE Aver.Runtime.Game.Core Aver.World Aver.Scene Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(AuthoredStreamingTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ProjectPhysicsApplyTest -- the manifest's PHYSICS.* keys from file to running world: the name mirror in OcProject.cpp against the
 # physics table, parse / write / re-save, configureProjectPhysics (PhysicsProjectApply.hpp) and the rebuild of an empty world.
 # Links Formats, Physics and the Runtime headers; no device, no window.
@@ -86,6 +109,12 @@ add_executable(GameAccessibilityTest src/GameAccessibilityTest.cpp)
 target_link_libraries(GameAccessibilityTest PRIVATE Aver.Runtime.Game.Core Aver.Framework Aver.UI Aver.Platform Aver.Core)
 set_target_properties(GameAccessibilityTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ItemLoaderTest -- game::ItemLoader, the mechanism half of LevelStreaming (LARGE_WORLD 2.4.1): a batch makes its entities under the right
+# parents and units, a unit evicts alone, an entity the host made can be adopted and forgotten. A real scene::World and an empty
+# GameContent with a stand-in device; no window, no GPU, no project.
+add_executable(ItemLoaderTest src/ItemLoaderTest.cpp)
+target_link_libraries(ItemLoaderTest PRIVATE Aver.Runtime.Game.Core Aver.World Aver.Scene Aver.Formats Aver.Core)
+set_target_properties(ItemLoaderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # GameCameraTest -- GameCamera.hpp (wave 10 gameplay cameras): pushCamera with a PlayView (the default is today's camera bit for
 # bit; FOV and roll are inputs now), the legacy boom, and drivePlayCamera with and without a camera rig. A recording stand-in device
 # and a real scene::World; no window, no GPU. The rig cases compile where Aver.Camera exists (it brings AVER_MODULE_CAMERA).
@@ -107,6 +136,15 @@ endif()
 # PhysicalSurfacesTest -- Content/Physics/Surfaces.ocsurf -> the physics registry, an authored number beating a landscape layer's
 # find-or-add, the landscape heightfield's per-cell surface palette against a brute-force argmax of the paint weights, and (with
 # physics) rays on a painted landscape reporting each layer's surface (SHAPES_MATERIALS phase D). A temp project; no device.
+# OriginParticipantsTest's WorldOrigin-with-fake-participants section (ORIGINTEST_WORLD) needs Aver.World. Deferred to the end of
+# this directory so it works whichever order the OriginParticipantsTest target and this block land in.
+function(_aver_originparticipants_world)
+  if(TARGET OriginParticipantsTest AND TARGET Aver.World)
+    target_compile_definitions(OriginParticipantsTest PRIVATE ORIGINTEST_WORLD=1)
+    target_link_libraries(OriginParticipantsTest PRIVATE Aver.World)
+  endif()
+endfunction()
+cmake_language(DEFER CALL _aver_originparticipants_world)
 add_executable(PhysicalSurfacesTest src/PhysicalSurfacesTest.cpp)
 target_link_libraries(PhysicalSurfacesTest PRIVATE Aver.Runtime.Game.Core Aver.Landscape Aver.Formats Aver.Platform Aver.Core)
 if(TARGET Aver.Physics)

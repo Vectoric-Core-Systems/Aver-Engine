@@ -117,6 +117,21 @@ SoftShapeSystem::~SoftShapeSystem() {
     // test's) leaves the host through uninstall().
 }
 
+void SoftShapeSystem::rebase(const Vec3& d) {
+    const auto shiftAll = [&d](std::vector<Vec3>& v) { for (Vec3& p : v) p -= d; };
+    for (auto& [e, v] : volumes_) {
+        shiftAll(v.nodeWorld);
+        shiftAll(v.renderWorld);
+        v.centroid -= d;
+    }
+    for (auto& [e, r] : ropes_) {
+        shiftAll(r.nodeWorld);
+        shiftAll(r.tubePos);
+        r.centroid -= d;
+        for (Anchor& a : r.anchor) a.target -= d;
+    }
+    for (auto& [e, s] : seeds_) shiftAll(s.pos);
+}
 SoftShapeSystem& softShapeSystem() {
     static SoftShapeSystem s;
     return s;

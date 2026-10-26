@@ -67,6 +67,12 @@ public:
     // Zero every cell and accumulator at next beginFrame.
     void requestReset() { clearPending_ = true; }
 
+    // The floating origin moved by (dxSteps, dySteps) region steps of 1,638,400 cm (LARGE_WORLD 2.2.6). Every cell's world
+    // coordinate moved by a whole number of 64-cell tori, so the toroidal texels still hold the same light; only cascade 2's
+    // tag byte moved (NeuRaCLayout.hpp). The next beginFrame carries kFlagRetagCoarse and the resolve re-labels those cells,
+    // so the cache survives instead of relearning (the fallback was requestReset). Steps accumulate until a frame consumes them.
+    void noteOriginShift(i64 dxSteps, i64 dySteps) { retagStepsX_ += dxSteps; retagStepsY_ += dySteps; }
+
     // Raise the resolve's blend floor to alphaFloor for the next `frames` frames: old light decays
     // instead of clearing. Overlapping requests keep the longer span and the higher floor.
     void requestRelax(u32 frames, f32 alphaFloor) {
@@ -92,6 +98,8 @@ private:
     u32  relaxFrames_  = 0;       // frames left at relaxAlpha_
     f32  relaxAlpha_   = 0.0f;
     f32  eyeCm_[3]     = {};
+    i64  retagStepsX_  = 0;       // origin steps since the last frame wrote RcInfo; see noteOriginShift
+    i64  retagStepsY_  = 0;
 
     rhi::BufferHandle accum_ = 0;
     rhi::BufferHandle cells_ = 0;

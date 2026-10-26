@@ -72,6 +72,8 @@ add_library(Aver.Physics SHARED
   src/PhysicsShapeCache.cpp
   src/PhysicsDeterminism.cpp
   src/SoftBodyAero.cpp
+  # LARGE_WORLD (physics_origin_abi.h): the floating origin's shift driver, the engine-side hook registry, world anchors and pulleys (P-2).
+  src/PhysicsOrigin.cpp
   # The rest of Jolt's soft bodies (physics_softbody_ext_abi.h): volumes, long range attachments, Cosserat rods, Jolt's constraint
   # generator, pressure, grab and release, contact policy, sensors, a collision group; and soft-body buoyancy (Jolt has none).
   src/PhysicsSoftBodyExt.cpp

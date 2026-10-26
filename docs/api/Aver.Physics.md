@@ -2,7 +2,7 @@
 
 # Aver.Physics public API
 
-87 public types and 877 public members, read from `scripting/csharp/Aver.Physics/` (43 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+89 public types and 887 public members, read from `scripting/csharp/Aver.Physics/` (45 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Physics
 
@@ -580,6 +580,26 @@ Values: `Motion = 0`, `Sleep = 1`, `Layer = 2`, `Shape = 3`, `Island = 4`, `Inst
 `public enum PhysicsError` - Why a physics call failed, mirroring aver::AbiError in modules/core/include/aver/core/ErrorCodes.hpp.
 
 Values: `Ok = 0`, `BadHandle = -1`, `NullPointer = -2`, `NotInitialised = -3`, `OutOfRange = -4`, `Unsupported = -5`, `InvalidArgument = -6`, `AllocationFailed = -7`
+
+### PhysicsOrigin
+
+`public static class PhysicsOrigin` - The physics world's floating origin: how often it has shifted and how far.
+
+- `public static uint Generation { get; }` - Shifts so far in this world: 0 when it never shifted, and after a rebuild.
+- `public static (double X, double Y, double Z) Total` - The sum of every shift since the world was created, in centimetres: this world's origin in the engine's absolute frame (X, Y, Z; Z is never shifted).
+- `public static float LastShiftMs { get; }` - Wall time of the last shift in milliseconds; 0 when none has run.
+- `public static PhysicsOriginShift LastShift { get; }` - The last shift's counts and time; all zero when none has run in this world.
+
+### PhysicsOriginShift
+
+`public readonly struct PhysicsOriginShift` - What the last origin shift did (aver_phys_origin_stats).
+
+- `public readonly float Milliseconds` - Wall time of the shift in milliseconds.
+- `public readonly int Bodies` - Bodies moved (static ones included).
+- `public readonly int Characters`
+- `public readonly int Anchors` - Anchor bodies of joints to the world that were moved.
+- `public readonly int PulleysRebuilt` - Pulleys that were rebuilt around their moved fixed points.
+- `public readonly int StaticsMoved` - How many of Bodies were static.
 
 ### PhysicsPrecision
 

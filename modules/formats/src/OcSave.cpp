@@ -16,6 +16,8 @@ namespace {
 constexpr u32 kChunkSHDR = avrFourCC("SHDR");
 constexpr u32 kChunkSENT = avrFourCC("SENT");
 constexpr u32 kChunkSTRT = avrFourCC("STRT");
+// The floating origin: i64 x, i64 y. Optional, written only when non-zero (see OcSaveData::originX).
+constexpr u32 kChunkORIG = avrFourCC("ORIG");
 // Four characters exactly -- avrFourCC takes const char(&)[5], so "SAVE " would not compile and
 // "SAVE" is what every other four-letter subtype in Avr1.hpp does.
 constexpr u32 kSubtypeSave = avrFourCC("SAVE");
@@ -157,6 +159,13 @@ bool writeOcSave(const OcSaveData& in, std::vector<u8>& out, std::string* why) {
     f.flags = kAvrFlagCooked;
     f.add(kChunkSHDR, std::move(shdr), kAvrChunkRequired);
     f.add(kChunkSENT, std::move(sent), kAvrChunkRequired);
+    if (in.originX != 0 || in.originY != 0) {
+        std::vector<u8> orig;
+        W w{orig};
+        w.i64v(in.originX);
+        w.i64v(in.originY);
+        f.add(kChunkORIG, std::move(orig));
+    }
     // LAST, because everything above interns into it.
     f.add(kChunkSTRT, strt.bytes());
     return writeAvr1(f, out, why);
@@ -181,6 +190,16 @@ bool parseOcSave(const u8* bytes, usize size, OcSaveData& out, std::string* why)
     out.engineVersion = std::string(strt.get(h.u32v()));
     const u32 count   = h.u32v();
     if (!h.ok) return fail(why, ".ocsave: truncated SHDR");
+
+    // No ORIG chunk is origin zero, which is what a save written before the floating origin meant.
+    out.originX = 0;
+    out.originY = 0;
+    if (const AvrChunk* o = f.find(kChunkORIG)) {
+        R orr{o->data.data(), o->data.data() + o->data.size()};
+        out.originX = orr.i64v();
+        out.originY = orr.i64v();
+        if (!orr.ok) return fail(why, ".ocsave: truncated ORIG");
+    }
 
     // BOUNDED BEFORE RESERVING. The smallest an entity can be on disk is 24 bytes (name, objectId,
     // parent, className, componentCount), so a corrupt count cannot ask for an enormous allocation

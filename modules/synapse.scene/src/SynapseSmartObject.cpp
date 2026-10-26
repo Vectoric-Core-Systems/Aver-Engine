@@ -400,6 +400,10 @@ u32 SmartObjectSystem::findSlots(scene::World& world, const EqsGenerator& g, con
     return n;
 }
 
+void SmartObjectSystem::rebase() {
+    for (auto& [e, rec] : objs_) rec.rev = ~0u;
+}
+
 void SmartObjectSystem::reset() {
     reg_ = SmartObjectRegistry{};
     objs_.clear();

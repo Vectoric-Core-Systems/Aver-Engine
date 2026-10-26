@@ -21,6 +21,7 @@
 #include "aver/formats/OcWorld.hpp"
 
 #include "aver/formats/OcInstances.hpp"
+#include "aver/rhi/WorldShift.hpp"
 
 namespace aver::voxi { class VoxiRenderer; }
 namespace aver::rhi { class IDevice; }
@@ -91,6 +92,19 @@ public:
     void update(const Vec3& viewerCm, f32 dt);
     void clear();   // clears the renderer's foliage and releases held meshes (and drops extra tables)
 
+    // ---- the floating origin (LARGE_WORLD 2.2.6) ----
+    // The instance tables are AUTHORED data (absolute f32, valid within +-1,048,576 cm of world (0,0): the v1 limit of
+    // section 2.9) and stay untouched; what the renderer gets is `row - (scene origin - the table's frame)`. A level's
+    // FOLIAGE tables are absolute (frame 0); an extra table's rows are in the scene frame that was current when it was set.
+    // The origin moved: the resident rows are pushed again from the CPU copy (one setFoliage, which re-sets the TLAS static
+    // prefix: the one rebuild a rebase already costs). Cell residency measures the viewer against cell bounds in the same
+    // frame, so a rebase loads and evicts nothing. Idempotent (it moves to info.newOrigin).
+    void onOriginShift(const rhi::ShiftWorldInfo& info) { setFrameOrigin(info.newOrigin); }
+    // Names the scene frame without an event; call it BEFORE load() when the level starts at a non-zero origin. If rows
+    // were already pushed it pushes them again in the new frame.
+    void setFrameOrigin(const rhi::ShiftOrigin& o);
+    const rhi::ShiftOrigin& frameOrigin() const { return frame_; }
+
     // [wave3/level-instances begin] EXTRA TABLES: instance tables that belong to something other than the level's
     // FOLIAGE records (a packed level instance's rows, a child level's foliage through the instance matrix).
     // `rows` are already in world space; `owner` keys the table. They are cell-less (resident while set), emitted
@@ -123,9 +137,11 @@ private:
         std::vector<char> held;         // per group: mesh acquired
         std::vector<char> warned;       // per group: missing-mesh warning issued
         bool extra = false;             // [wave3/level-instances] an extra table (always after the level's files)
+        i64  frameX = 0, frameY = 0;    // floating origin: the scene frame the stored rows and cell bounds are in (0 = absolute)
         std::vector<std::string> groupMaterial;   // extra tables: per-group material override ("" = the prototype's own)
     };
     struct Extra {                      // [wave3/level-instances]
+        i64 frameX = 0, frameY = 0;     // the scene frame the rows were given in
         u64 owner = 0;
         fmt::OcInstanceData data;
         std::vector<std::string> groupMaterial;
@@ -142,6 +158,7 @@ private:
     void releaseDroppedExtras();
     // [wave3/level-instances end]
 
+    rhi::ShiftOrigin frame_{};          // the scene origin the renderer's rows are expressed in
     GameContent* content_ = nullptr;
     rhi::IDevice* device_ = nullptr;
     voxi::VoxiRenderer* voxi_ = nullptr;

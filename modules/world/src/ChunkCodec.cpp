@@ -1,14 +1,15 @@
 #include "aver/world/ChunkCodec.hpp"
 
-#if AVER_MODULE_SCENE
-
-#  include "ByteIo.hpp"
+#include "aver/core/Log.hpp"
+#include "ByteIo.hpp"
 
 namespace aver::world {
 namespace {
 
 constexpr u8 kFlagMesh = 1u << 0;
 constexpr u8 kFlagBody = 1u << 1;
+constexpr u8 kFlagExtras = 1u << 2;   // v2: an extras list follows the body box
+constexpr u8 kKnownFlagsV2 = kFlagMesh | kFlagBody | kFlagExtras;
 
 // A sanity ceiling on the entity count, so a corrupt length cannot make the decoder reserve
 // gigabytes before it discovers the buffer is short. 1M entities is far past any real chunk and far
@@ -31,9 +32,18 @@ std::vector<u8> encodeChunk(const ChunkPayload& p) {
         w.f32v(e.local.scale.x); w.f32v(e.local.scale.y); w.f32v(e.local.scale.z);
         w.u32v(e.tags);
 
+        // An extra the u16 fields cannot hold is dropped, loudly: the encoder has no error path and a truncated TLV would
+        // decode as garbage. The typed packer (ChunkPayloadExtras) never produces one.
+        usize extraCount = 0;
+        for (const PayloadExtra& x : e.extras)
+            if (x.bytes.size() <= kMaxExtraBytes && extraCount < kMaxExtrasPerEntity) ++extraCount;
+            else AVER_WARN("[ChunkCodec] dropping a {}-byte extra (tag {:#x}) that does not fit a chunk payload record",
+                           x.bytes.size(), x.tag);
+
         u8 flags = 0;
         if (e.hasMesh) flags |= kFlagMesh;
         if (e.hasBody) flags |= kFlagBody;
+        if (extraCount) flags |= kFlagExtras;
         w.u8v(flags);
 
         if (e.hasMesh) {
@@ -44,6 +54,17 @@ std::vector<u8> encodeChunk(const ChunkPayload& p) {
             for (int a = 0; a < 3; ++a) w.f32v(e.aabbMax[a]);
         }
         if (e.hasBody) for (int a = 0; a < 3; ++a) w.f32v(e.bodyHalfExtentCm[a]);
+        if (extraCount) {
+            w.u16v(static_cast<u16>(extraCount));
+            usize written = 0;
+            for (const PayloadExtra& x : e.extras) {
+                if (x.bytes.size() > kMaxExtraBytes || written == extraCount) continue;
+                w.u32v(x.tag);
+                w.u16v(static_cast<u16>(x.bytes.size()));
+                w.bytes.insert(w.bytes.end(), x.bytes.begin(), x.bytes.end());
+                ++written;
+            }
+        }
     }
     return std::move(w.bytes);
 }
@@ -55,7 +76,7 @@ bool decodeChunk(const u8* data, usize size, ChunkPayload& out, std::string* why
     ByteReader r(data, size);
     const u32 version = r.u32v();
     if (r.bad) return fail("chunk payload is too short for its header");
-    if (version != kChunkCodecVersion) return fail("chunk payload version is not understood");
+    if (version < kChunkCodecVersionMin || version > kChunkCodecVersion) return fail("chunk payload version is not understood");
 
     const u32 count = r.u32v();
     if (r.bad) return fail("chunk payload is too short for its entity count");
@@ -75,6 +96,9 @@ bool decodeChunk(const u8* data, usize size, ChunkPayload& out, std::string* why
         e.tags = r.u32v();
 
         const u8 flags = r.u8v();
+        // v1 never checked its flags; v2 refuses a bit it cannot interpret, since an unread field desynchronises the stream.
+        if (version >= 2 && !r.bad && (flags & ~kKnownFlagsV2) != 0)
+            return fail("chunk payload entity has flag bits this reader does not know");
         e.hasMesh = (flags & kFlagMesh) != 0;
         e.hasBody = (flags & kFlagBody) != 0;
 
@@ -86,6 +110,21 @@ bool decodeChunk(const u8* data, usize size, ChunkPayload& out, std::string* why
             for (int a = 0; a < 3; ++a) e.aabbMax[a] = r.f32v();
         }
         if (e.hasBody) for (int a = 0; a < 3; ++a) e.bodyHalfExtentCm[a] = r.f32v();
+        if (version >= 2 && (flags & kFlagExtras)) {
+            const u16 n = r.u16v();
+            // Each extra is at least 6 bytes, so a count the remaining buffer cannot hold is corrupt before anything is reserved.
+            if (!r.bad && static_cast<usize>(n) * 6 > r.left) return fail("chunk payload extras count exceeds the buffer");
+            e.extras.reserve(n);
+            for (u16 k = 0; k < n && !r.bad; ++k) {
+                PayloadExtra x;
+                x.tag = r.u32v();
+                const u16 len = r.u16v();
+                if (!r.need(len)) break;
+                x.bytes.assign(r.p, r.p + len);
+                r.p += len; r.left -= len;
+                e.extras.push_back(std::move(x));
+            }
+        }
 
         if (r.bad) return fail("chunk payload ends in the middle of an entity");
 
@@ -104,5 +143,3 @@ bool decodeChunk(const u8* data, usize size, ChunkPayload& out, std::string* why
 }
 
 } // namespace aver::world
-
-#endif // AVER_MODULE_SCENE

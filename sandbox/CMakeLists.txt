@@ -18,6 +18,7 @@ add_executable(Sandbox WIN32
   src/SandboxRender.cpp
   src/SandboxLevelLoad.cpp
   src/SandboxLevelStream.cpp
+  src/SandboxLevelCook.cpp
   src/SandboxProject.cpp
   src/SandboxPlay.cpp
   src/SandboxSelection.cpp

@@ -53,6 +53,11 @@ cbuffer PerFrame : register(AVER_CB_JOIN(b, AVER_FRAME_CB)) {
     // (PerFrameCB::viewProjNoJitter). gTaaJitter.xy: the jitter in scene pixels (+y down).
     float4x4 gViewProjNoJitter;
     float4   gTaaJitter;
+    // The floating origin (PerFrameCB::worldOrigin/wavePhase). Positions are origin-relative; xyz of
+    // gWorldOrigin is O in cm, w the shift generation. gWavePhase.xyz is added to the phase of waves 0..2.
+    // Both are zero until the origin first shifts.
+    float4   gWorldOrigin;
+    float4   gWavePhase;
 };
 
 // The unit world-space view ray through one viewport-relative NDC point (y up). gInvViewProjRel
@@ -72,13 +77,17 @@ float3 averViewRayDir(float2 ndc) {
 // argument (wave 3: a river advects the field at a frozen time); the plain forms below are gTime.x.
 float averWavePhaseT(float4 w, float2 p, float t) { return dot(w.xy, p) * w.z + t * w.w; }
 float averWavePhase(float4 w, float2 p) { return averWavePhaseT(w, p, gTime.x); }
+// Wave i of the gWave set at an ORIGIN-RELATIVE position: the phase plus gWavePhase[i], the CPU's f64-reduced
+// k * dot(dir, O.xy) (floating origin, PerFrameCB::wavePhase), so the pattern is a function of the absolute position.
+// gWavePhase is zero until the origin first shifts, and x + 0.0 is exact, so a level that never rebases is unchanged.
+float averWaveSetPhaseT(uint i, float2 p, float t) { return averWavePhaseT(gWave[i], p, t) + gWavePhase[i]; }
 
 // Surface height in centimetres, relative to the flat surface.
 float averWaveHeightT(float2 p, float t) {
     const uint n = (uint)(gWaveParams.y + 0.5);
     float h = 0.0;
     [unroll] for (uint i = 0; i < 3; ++i)
-        if (i < n) h += sin(averWavePhaseT(gWave[i], p, t));
+        if (i < n) h += sin(averWaveSetPhaseT(i, p, t));
     return h * gWaveParams.x;
 }
 float averWaveHeight(float2 p) { return averWaveHeightT(p, gTime.x); }
@@ -93,7 +102,7 @@ float3 averWaveNormalT(float2 p, float t) {
     float2 d = float2(0.0, 0.0);
     [unroll] for (uint i = 0; i < 3; ++i)
         if (i < n) d += gWave[i].xy * (gWave[i].z * saturate(2.0 - 2.0 * foot * gWave[i].z) *
-                                       cos(averWavePhaseT(gWave[i], p, t)));
+                                       cos(averWaveSetPhaseT(i, p, t)));
     return normalize(float3(-d * gWaveParams.x, 1.0));
 }
 float3 averWaveNormal(float2 p) { return averWaveNormalT(p, gTime.x); }
@@ -107,7 +116,7 @@ float averWaveFocusT(float2 p, float t) {
     [unroll] for (uint i = 0; i < 3; ++i) {
         if (i >= n) continue;
         const float k2 = gWave[i].z * gWave[i].z;
-        lap  -= k2 * sin(averWavePhaseT(gWave[i], p, t));
+        lap  -= k2 * sin(averWaveSetPhaseT(i, p, t));
         norm += k2;
     }
     return saturate(lap / max(norm, 1e-6));

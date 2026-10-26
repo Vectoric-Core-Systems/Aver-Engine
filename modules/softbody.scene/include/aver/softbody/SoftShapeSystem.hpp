@@ -162,6 +162,9 @@ public:
     bool ropeAnchors(scene::Entity e, bool& startAttached, bool& endAttached) const;
     // The world orientation of each rod (nodes - 1 of them, the +X axis along the rod) as of the last tick; false before the first read.
     bool ropeRods(scene::Entity e, const Quat*& rotations, u32& count) const;
+    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts `deltaCm` from every cached world position (lattice and rope nodes, render and
+    // tube vertices, centroids, anchor targets, cut seeds). Call after World::shiftRoots and the physics shift.
+    void rebase(const Vec3& deltaCm);
 
 private:
     struct VolumeSpec {

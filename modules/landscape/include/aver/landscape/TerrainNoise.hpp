@@ -25,6 +25,7 @@ namespace aver::landscape {
 
 using aver::f32;
 using aver::i32;
+using aver::i64;
 using aver::u32;
 
 // The knobs TerrainGenTool.cpp exposed on its command line, minus sampleCount/spacingCm (those
@@ -43,5 +44,12 @@ struct TerrainNoiseParams {
 // samples a window of it). Deterministic across runs, platforms and build types: integer hashing and
 // no floating-point accumulation whose rounding could differ.
 f32 terrainHeightAt(f32 worldXCm, f32 worldYCm, const TerrainNoiseParams& params = {});
+
+// The same field read at an ORIGIN-RELATIVE position (LARGE_WORLD 2.2.6): the scene frame sits at (originXCm,
+// originYCm) -- a whole number of regions -- so the absolute position is the f32 local one plus that origin. The sum
+// and the lattice split are done in f64, so the field is a function of the absolute position at any distance (the f32
+// path quantises it past ~10 km) and reads the same value whatever the current origin is. With a zero origin this IS
+// terrainHeightAt(local), bit for bit.
+f32 terrainHeightAtFrom(f32 localXCm, f32 localYCm, i64 originXCm, i64 originYCm, const TerrainNoiseParams& params = {});
 
 } // namespace aver::landscape

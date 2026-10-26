@@ -232,6 +232,10 @@ void aver_audio_set_voice_position(int32_t v, float x, float y, float z) {
     if (g_started) g_device.mixer().setVoicePosition(static_cast<aver::audio::VoiceHandle>(v), x, y, z);
 }
 
+// Floating-origin shift (LARGE_WORLD 2.2.5): every voice position and the listener move by -(dx, dy, dz) cm.
+void aver_audio_origin_shift(float dx, float dy, float dz) {
+    if (g_started) g_device.mixer().rebase(dx, dy, dz);
+}
 // Places the listener: position, forward and right, in engine units.
 void aver_audio_set_listener(float px, float py, float pz,
                              float fx, float fy, float fz,

@@ -7,6 +7,12 @@ add_executable(SaveWorldTest src/SaveWorldTest.cpp)
 target_link_libraries(SaveWorldTest PRIVATE Aver.Save Aver.Scene Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(SaveWorldTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# SaveOriginTest -- a save taken at one floating origin restores at another with every root in the same absolute place; the ORIG
+# chunk; a save with no ORIG is origin zero; the skip predicate leaves chunk-streamed scenery out (LARGE_WORLD 2.6.4). No GPU.
+add_executable(SaveOriginTest src/SaveOriginTest.cpp)
+target_link_libraries(SaveOriginTest PRIVATE Aver.Save Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(SaveOriginTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # SaveActorTest — the ACTOR half, with a real .NET runtime in the process.
 #
 # Separate from SaveWorldTest deliberately: that one must keep proving the module works with NO

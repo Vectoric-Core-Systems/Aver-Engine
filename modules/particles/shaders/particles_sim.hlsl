@@ -294,6 +294,38 @@ void CSUpdate(uint3 dtid : SV_DispatchThreadID) {
     }
 }
 
+// ------------------------------------------------------------------------------------------------ CSShift
+// The floating origin moved (LARGE_WORLD 2.2.6): every resident world position of this instance is gS.origin.xyz smaller
+// (the header's origin field carries the DELTA for this kernel; nothing else reads a header here). One thread per slot:
+// the particle, its trail point, and event record i of each type in both event regions. Mirrors gpuShiftParticles /
+// gpuShiftTrail / gpuShiftEvents in ParticleGpuTypes.hpp. Dispatched with max(capacity, trail points, PEV_CAP) threads.
+[numthreads(64, 1, 1)]
+void CSShift(uint3 dtid : SV_DispatchThreadID) {
+    const uint i = dtid.x;
+    const float3 d = gS.origin;
+    if (i < gS.capacity) {
+        const float3 pos = gParticles[i].position;
+        gParticles[i].position = pos - d;
+    }
+    if ((gS.flags & PGPU_FLAG_TRAIL) != 0u && i < gS.capacity * gS.trailRing) {
+        const float4 t = gTrail[i];
+        gTrail[i] = float4(t.xyz - d, t.w);
+    }
+    if ((gS.flags & PGPU_FLAG_HAS_EVENTS) != 0u && i < PEV_CAP) {
+        [unroll] for (uint r = 0u; r < 2u; ++r) {
+            const uint region = r * (PEV_HEADER + 2u * PEV_CAP * PEV_REC);
+            [unroll] for (uint type = 0u; type < 2u; ++type) {
+                if (i < min(gEvents[region + type], PEV_CAP)) {
+                    const uint b = pEventBase(region, type) + i * PEV_REC;
+                    gEvents[b + 0u] = asuint(asfloat(gEvents[b + 0u]) - d.x);
+                    gEvents[b + 1u] = asuint(asfloat(gEvents[b + 1u]) - d.y);
+                    gEvents[b + 2u] = asuint(asfloat(gEvents[b + 2u]) - d.z);
+                }
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------------------------------------ CSFinish
 [numthreads(1, 1, 1)]
 void CSFinish(uint3 dtid : SV_DispatchThreadID) {

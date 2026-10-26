@@ -382,6 +382,11 @@ public:
     const Cage* cageOf(scene::Entity e) const;
     // The world wind as last applied (cm/s), for the debug overlay.
     Vec3 windVelocity() const { return wind_; }
+    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts `deltaCm` from every world position the system caches
+    // across ticks: each entry's lastWorld (else one hard re-skin through teleportCm), the cage particles, piece
+    // origin / centroid / bounds / draw arrays, queued hit points and field frames. The skin palette needs nothing:
+    // invBuildWorld is entity-local. Call after World::shiftRoots and the physics shift.
+    void rebase(const Vec3& deltaCm);
     // For the field gizmos: the live transient fields, and a component field's spec as the step would apply it.
     struct FieldView { u32 handle = 0; FieldSpec spec; f32 remainingS = 0.0f; };
     std::vector<FieldView> transientFields() const;

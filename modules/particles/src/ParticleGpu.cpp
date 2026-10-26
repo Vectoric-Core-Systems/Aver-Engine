@@ -76,6 +76,7 @@ bool ParticleGpu::buildKernels() {
     csSortGlobal_ = kernel(sort.c_str(), "CSSortGlobal", layout);
     csSortLocalMerge_ = kernel(sort.c_str(), "CSSortLocalMerge", layout);
     csSortFinal_ = kernel(sort.c_str(), "CSSortFinal", layout);
+    csShift_ = kernel(sim.c_str(), "CSShift", layout);   // optional (see the member); not part of the readiness test below
     return csInit_ && csBegin_ && csSpawn_ && csArgsUpdate_ && csUpdate_ && csFinish_ && csProbe_ && csRngProbe_ && csSortKeys_ &&
            csSortLocal_ && csSortGlobal_ && csSortLocalMerge_ && csSortFinal_;
 }
@@ -119,7 +120,7 @@ void ParticleGpu::shutdown() {
             if (in.trailBuf.h) res_->destroyBuffer(in.trailBuf.h);
         }
         for (rhi::PipelineHandle p : {csInit_, csBegin_, csSpawn_, csArgsUpdate_, csUpdate_, csFinish_, csProbe_, csRngProbe_, csSortKeys_,
-                                      csSortLocal_, csSortGlobal_, csSortLocalMerge_, csSortFinal_})
+                                      csSortLocal_, csSortGlobal_, csSortLocalMerge_, csSortFinal_, csShift_})
             if (p) res_->destroyPipeline(p);
         if (dummy_.h) res_->destroyBuffer(dummy_.h);
     }
@@ -128,7 +129,7 @@ void ParticleGpu::shutdown() {
     freeHandles_.clear();
     counterCache_.clear();
     csInit_ = csBegin_ = csSpawn_ = csArgsUpdate_ = csUpdate_ = csFinish_ = csProbe_ = csRngProbe_ = 0;
-    csSortKeys_ = csSortLocal_ = csSortGlobal_ = csSortLocalMerge_ = csSortFinal_ = 0;
+    csSortKeys_ = csSortLocal_ = csSortGlobal_ = csSortLocalMerge_ = csSortFinal_ = csShift_ = 0;
     dummy_ = TrackedBuffer{};
     dedicatedBytes_ = 0;
     ready_ = false;
@@ -304,6 +305,56 @@ void uniquePages(const std::vector<u32>& pages, std::vector<u32>& out) {
 }
 
 } // namespace
+
+// The floating origin moved: shift every resident position of each queued instance (CSShift). The kernel reads the delta
+// from the header's origin field. Particles and trail points sit in GeometryRead after record(), so they are brought to
+// UnorderedAccess for the dispatch and put back; the events buffer lives in UnorderedAccess always.
+void ParticleGpu::recordShifts(rhi::IRenderContext& ctx, std::vector<GpuShift>& shifts) {
+    if (shifts.empty()) return;
+    if (!ready_ || !csShift_) {
+        if (!shiftWarned_) {
+            shiftWarned_ = true;
+            AVER_WARN("[Particles] floating origin: the GPU shift kernel is unavailable (stale shader deploy?); live GPU particles keep their old-frame positions");
+        }
+        shifts.clear();
+        return;
+    }
+    ctx.pushMarker("Aver.Particles.Shift");
+    to(ctx, dummy_, ResourceState::UnorderedAccess);
+    GpuSimCB cb{};
+    for (const GpuShift& s : shifts) {
+        Instance* in = find(s.handle);
+        if (!in) continue;
+        ParticleGpuPool::Page& pg = pool_.page(in->range.page);
+        const ResourceState restParticles = pg.particles.st, restTrail = in->trailBuf.st;
+        to(ctx, pg.particles, ResourceState::UnorderedAccess);
+        if (in->trail) to(ctx, in->trailBuf, ResourceState::UnorderedAccess);
+        to(ctx, in->eventsBuf, ResourceState::UnorderedAccess);
+
+        GpuSimHeader& h = cb.h;
+        h = GpuSimHeader{};
+        h.capacity = in->capacity;
+        h.trailRing = in->trail ? in->trailRing : 0u;
+        h.origin[0] = s.delta[0]; h.origin[1] = s.delta[1]; h.origin[2] = s.delta[2];
+        h.flags = (in->trail ? kGpuFlagTrail : 0u) | (in->hasEvents ? kGpuFlagHasEvents : 0u);
+        u32 threads = in->capacity;
+        if (in->trail) threads = std::max(threads, in->capacity * in->trailRing);
+        if (in->hasEvents) threads = std::max(threads, kGpuEventCapacity);
+
+        ctx.setPipeline(csShift_);
+        ctx.setBindingSet(in->set, 0);
+        ctx.setConstantBuffer(kSimConstantRegister, &cb, kHeaderBytes);
+        ctx.dispatch(groupsFor(threads, 64), 1, 1);
+        barrier(ctx, pg.particles);
+        if (in->trail) barrier(ctx, in->trailBuf);
+        barrier(ctx, in->eventsBuf);
+        // record() leaves these in a rest state for the draw; a frame that does not run the instance must still find them there.
+        if (restParticles != ResourceState::Common) to(ctx, pg.particles, restParticles);
+        if (in->trail && restTrail != ResourceState::Common) to(ctx, in->trailBuf, restTrail);
+    }
+    ctx.popMarker();
+    shifts.clear();
+}
 
 u32 ParticleGpu::record(rhi::IRenderContext& ctx, std::vector<GpuJob>& jobs, const View& view) {
     if (!ready_) return 0;

@@ -83,6 +83,10 @@ public:
     void setVoiceVolume(VoiceHandle v, f32 volume);
     void setVoicePitch(VoiceHandle v, f32 pitch);
     void setVoicePosition(VoiceHandle v, f32 x, f32 y, f32 z);
+    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts (dx, dy, dz) cm from every voice position and from the
+    // listener, so a sound keeps its distance and pan. Game thread; relaxed stores like setVoicePosition, so the
+    // audio thread may mix one block with the voices moved and the listener not yet.
+    void rebase(f32 dx, f32 dy, f32 dz);
 
     // ---- game thread: streaming, fades, occlusion, reverb ----
     //

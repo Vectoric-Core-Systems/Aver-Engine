@@ -221,9 +221,12 @@ void LevelFoliage::update(const Vec3& viewerCm, f32 dt) {
     std::vector<char> next(cells_.size(), 0), soon(cells_.size(), 0);
     bool changed = false;
     for (usize i = 0; i < cells_.size(); ++i) {
-        const fmt::OcInstanceCell& c = files_[cells_[i].file].data.cells[cells_[i].cell];
-        const f32 dx = std::max({c.min[0] - viewerCm.x, 0.0f, viewerCm.x - c.max[0]});
-        const f32 dy = std::max({c.min[1] - viewerCm.y, 0.0f, viewerCm.y - c.max[1]});
+        const File& cf = files_[cells_[i].file];
+        const fmt::OcInstanceCell& c = cf.data.cells[cells_[i].cell];
+        // Cell bounds are in the table's frame, the viewer in the scene's (zero apart at origin zero).
+        const f32 sx = static_cast<f32>(frame_.x - cf.frameX), sy = static_cast<f32>(frame_.y - cf.frameY);
+        const f32 dx = std::max({c.min[0] - sx - viewerCm.x, 0.0f, viewerCm.x - (c.max[0] - sx)});
+        const f32 dy = std::max({c.min[1] - sy - viewerCm.y, 0.0f, viewerCm.y - (c.max[1] - sy)});
         const f32 d = std::sqrt(dx * dx + dy * dy);
         next[i] = d <= (resident_[i] ? evictCm_ : loadCm_) ? 1 : 0;   // hysteresis
         soon[i] = d <= loadCm_ * kPrefetchFactor ? 1 : 0;
@@ -361,6 +364,7 @@ void LevelFoliage::rebuild() {
         if (group >= f.data.groups.size()) return;
         i32& slot = protoOf[fi][group];
         const std::string& asset = f.data.groups[group].asset;
+        const f32 shiftX = static_cast<f32>(frame_.x - f.frameX), shiftY = static_cast<f32>(frame_.y - f.frameY);
         if (slot == -1) {
             const rhi::MeshHandle wholeMesh = content_->meshFor(f.objectIds[group]);
             if (!wholeMesh) {
@@ -390,6 +394,9 @@ void LevelFoliage::rebuild() {
             voxi::VoxiRenderer::FoliageInstance inst;
             // Straight copy: same 12-float row-vector convention as FoliageInstance::world.
             for (int c = 0; c < 12; ++c) inst.world[c] = f.data.transforms[base + static_cast<usize>(c)];
+            // Floating origin: the translation row (9..11) into the scene frame, a plain f32 subtraction like the scene's roots.
+            if (shiftX != 0.0f) inst.world[9] -= shiftX;
+            if (shiftY != 0.0f) inst.world[10] -= shiftY;
             inst.prototype = static_cast<u32>(slot);
             instances.push_back(inst);
         }
@@ -428,6 +435,17 @@ void LevelFoliage::rebuild() {
 
 void LevelFoliage::clear() { clearAll(true); }
 
+// The scene origin moved (or was named). Level tables are absolute and extras keep the frame they were set in, so only the
+// shift each table is read with changes: push the resident rows again.
+void LevelFoliage::setFrameOrigin(const rhi::ShiftOrigin& o) {
+    if (o.x == frame_.x && o.y == frame_.y) return;
+    frame_ = o;
+    if (!loaded_ || !voxi_ || !content_ || rebuilds_ == 0) return;   // nothing pushed yet: the next push is already in the new frame
+    HitchMarks hm("foliage origin shift", 0.25);
+    rebuild();
+    hm.mark("rebuild");
+}
+
 void LevelFoliage::clearAll(bool dropExtras) {
     if (device_ && content_)
         for (File& f : files_)
@@ -453,12 +471,14 @@ void LevelFoliage::clearAll(bool dropExtras) {
 void LevelFoliage::setExtraTable(u64 owner, fmt::OcInstanceData rows, std::vector<std::string> groupMaterial) {
     for (Extra& e : extras_)
         if (e.owner == owner) {
+            e.frameX = frame_.x; e.frameY = frame_.y;
             e.data = std::move(rows);
             e.groupMaterial = std::move(groupMaterial);
             extrasDirty_ = true;
             return;
         }
     Extra e;
+    e.frameX = frame_.x; e.frameY = frame_.y;
     e.owner = owner;
     e.data = std::move(rows);
     e.groupMaterial = std::move(groupMaterial);
@@ -484,6 +504,7 @@ void LevelFoliage::syncExtraFiles() {
     for (const Extra& e : extras_) {
         File f;
         f.extra = true;
+        f.frameX = e.frameX; f.frameY = e.frameY;
         f.data = e.data;
         f.groupMaterial = e.groupMaterial;
         f.path = "(level instance table)";

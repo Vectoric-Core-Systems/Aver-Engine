@@ -69,6 +69,7 @@ void GameStreaming::disable() {
 #endif
     primary_.reset();
     haveLastPos_ = false;
+    heightSource_ = nullptr;
     stats_ = world::StreamStats{};
     AVER_INFO("[ChunkWorld] streaming disabled -- {} chunk(s) / {} entities released",
               last.residentChunks, last.residentEntities);
@@ -229,7 +230,15 @@ void GameStreaming::enable(const fmt::ProjectDesc& project,
         // An empty heightSource is falsy (GeneratorSettings::heightSource's own contract), so this
         // costs a caller with no landscape nothing -- applied to every field, terrain or not, same as
         // the editor's own `#if AVER_MODULE_LANDSCAPE` block.
-        cwSettings.generator.heightSource = heightSource;
+        // The generator asks in ABSOLUTE centimetres; the host's landscape answers in the scene frame, so the origin comes off
+        // here. At a zero origin that subtracts nothing.
+        heightSource_ = heightSource;
+        if (heightSource_)
+            cwSettings.generator.heightSource = [this](f32 x, f32 y, f32& z) {
+                return heightSource_(x - static_cast<f32>(origin_.x), y - static_cast<f32>(origin_.y), z);
+            };
+        if (originGuard_ && cwSettings.stream.chunkSizeCm == world::kWorldChunkCm)
+            cwSettings.stream.sourceLimitCm = world::kSubMmCliffCm;
 
         world::RestoreOptions& restore = cw->streamer().restoreOptions();
 #if AVER_MODULE_PBR
@@ -312,16 +321,16 @@ world::StreamStats GameStreaming::tick(const Vec3& camPos, f32 dt, const world::
             world::StreamSource{camPos, vel},
             *second,
         };
-        stats_ = primary_->update(world, sources, dt, &freed);
+        stats_ = primary_->update(world, sources, dt, &freed, origin_);
         for (auto& extra : extra_) {
             if (!extra) continue;
-            accumulateStreamStats(stats_, extra->update(world, sources, dt, &freed));
+            accumulateStreamStats(stats_, extra->update(world, sources, dt, &freed, origin_));
         }
     } else {
-        stats_ = primary_->update(world, camPos, vel, dt, &freed);
+        stats_ = primary_->update(world, camPos, vel, dt, &freed, origin_);
         for (auto& extra : extra_) {
             if (!extra) continue;
-            accumulateStreamStats(stats_, extra->update(world, camPos, vel, dt, &freed));
+            accumulateStreamStats(stats_, extra->update(world, camPos, vel, dt, &freed, origin_));
         }
     }
 #if AVER_MODULE_PHYSICS
@@ -358,6 +367,26 @@ world::StreamStats GameStreaming::tick(const Vec3& camPos, f32 dt, const world::
         }
     }
     return stats_;
+}
+
+void GameStreaming::onOriginShift(const world::ShiftEvent& ev) {
+    origin_ = ev.newOrigin;
+    // The camera moved by -delta in the scene frame; the position this class differences for velocity must follow, or the next
+    // tick sees a 16 km jump, a huge velocity and a 64-step prefetch corridor. Nothing else is remembered in the scene frame:
+    // the streamers key chunks by absolute coordinate, so no chunk loads or evicts because of a shift.
+    lastPos_ = Vec3{lastPos_.x - ev.deltaF.x, lastPos_.y - ev.deltaF.y, lastPos_.z - ev.deltaF.z};
+}
+
+void GameStreaming::setOriginGuard(bool on) {
+    originGuard_ = on;
+    const auto apply = [on](world::ChunkWorld* cw) {
+        if (!cw) return;
+        world::StreamSettings s = cw->streamer().settings();
+        s.sourceLimitCm = on && s.chunkSizeCm == world::kWorldChunkCm ? world::kSubMmCliffCm : 0;
+        cw->streamer().setSettings(s);
+    };
+    apply(primary_.get());
+    for (auto& extra : extra_) apply(extra.get());
 }
 
 bool GameStreaming::owns(scene::Entity e) const {

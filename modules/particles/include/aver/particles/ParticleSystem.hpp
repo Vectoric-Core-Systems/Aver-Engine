@@ -13,6 +13,7 @@
 #include "aver/particles/ParticleGpuTypes.hpp"
 #include "aver/particles/ParticleSpawn.hpp"
 #include "aver/particles/ParticleTypes.hpp"
+#include "aver/rhi/WorldShift.hpp"
 #include "aver/scene/World.hpp"
 
 #include <unordered_map>
@@ -82,6 +83,12 @@ public:
     // reasoning: an artist scrubbing a preview outside Play mode should still see an effect play.
     void tick(scene::World& world, f32 dt);
 
+    // The floating origin moved (LARGE_WORLD 2.2.6): every live particle, instance origin, previous origin (the emitter
+    // velocity is a difference of the two) and queued spawn transform is `deltaCm` smaller, on both tiers. The CPU tier is
+    // done here; the GPU tier is queued as one GpuShift per live instance, which the renderer records before it simulates
+    // (gpuShifts()). Call it between ticks, after the scene's roots moved. A zero delta does nothing.
+    void shiftWorld(const rhi::ShiftVec3d& deltaCm);
+
     // The library tick() resolves CParticleEmitter::effect through. Not owned.
     void setEffectLibrary(ParticleEffectLibrary* lib) { effects_ = lib; }
     ParticleEffectLibrary* effectLibrary() const { return effects_; }
@@ -99,6 +106,8 @@ public:
 
     // This tick's GPU work, in the order it must be recorded; the renderer clears it after recording.
     std::vector<GpuJob>& gpuJobs() { return gpuJobs_; }
+    // Origin shifts of resident GPU state not yet recorded; the renderer runs them before the jobs and clears the list.
+    std::vector<GpuShift>& gpuShifts() { return gpuShifts_; }
 
     // ---- reads ----
     // Calls `fn(const EmitterView&)` once per CPU-tier emitter that has at least one live particle, in the order each
@@ -249,6 +258,7 @@ private:
     };
     std::vector<SpawnAtRequest> spawnAtQueue_;
     std::vector<GpuJob> gpuJobs_;
+    std::vector<GpuShift> gpuShifts_;
     std::vector<scene::Entity> finished_;
     std::unordered_map<u64, bool> warnedEffects_;
     ParticleEffectLibrary* effects_ = nullptr;

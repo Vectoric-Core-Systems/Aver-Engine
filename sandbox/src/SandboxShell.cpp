@@ -1504,6 +1504,7 @@ void SandboxApp::launchInRuntime(Engine& e, bool skipDirtyCheck) {
 #endif
     if (!skipDirtyCheck && anythingUnsaved) { launchRuntimePrompt_ = true; return; }
 
+    if (!refreshCookedChunksForPlay()) return;   // a level that names a cooked chunk set gets it re-cooked first when the saved level moved on (SandboxLevelCook.cpp)
     const std::string levelFile = std::filesystem::path(levelPath_).filename().string();
     std::string why;
     if (editor::launchRuntime(project_.manifestPath, levelPath_, playStandaloneArgs_, &why)) {

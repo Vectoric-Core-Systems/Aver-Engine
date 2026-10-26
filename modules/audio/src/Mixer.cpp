@@ -368,6 +368,17 @@ void Mixer::setVoicePosition(VoiceHandle v, f32 x, f32 y, f32 z) {
     }
 }
 
+void Mixer::rebase(f32 dx, f32 dy, f32 dz) {
+    for (Voice& vo : voices_) {
+        if (vo.state.load(std::memory_order_relaxed) == static_cast<u32>(State::Free)) continue;
+        vo.posX.store(vo.posX.load(std::memory_order_relaxed) - dx, std::memory_order_relaxed);
+        vo.posY.store(vo.posY.load(std::memory_order_relaxed) - dy, std::memory_order_relaxed);
+        vo.posZ.store(vo.posZ.load(std::memory_order_relaxed) - dz, std::memory_order_relaxed);
+    }
+    const f32 d[3] = {dx, dy, dz};
+    for (int i = 0; i < 3; ++i) lisPos_[i].store(lisPos_[i].load(std::memory_order_relaxed) - d[i], std::memory_order_relaxed);
+}
+
 // Publishes a fade request; the audio thread latches it at its next block.
 void Mixer::requestFade(Voice& vo, f32 target, u32 frames, FadeCurve curve, bool stopAtEnd) {
     vo.fadeTarget.store(target < 0.0f ? 0.0f : target, std::memory_order_relaxed);

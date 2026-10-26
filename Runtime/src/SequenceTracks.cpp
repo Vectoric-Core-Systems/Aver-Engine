@@ -32,6 +32,16 @@ u64 nextUid() {
     return ++n;
 }
 
+i64 g_originX = 0, g_originY = 0;   // SequencePlayer::setSceneOrigin
+bool originZero() { return g_originX == 0 && g_originY == 0; }
+
+// A track's position channels (f64, level-absolute) minus the scene origin, narrowed once.
+Vec3 originRelative(const OcSeqTrack& tr, f64 t) {
+    return Vec3{static_cast<f32>(sampleSeqChannel(tr, 0, t) - static_cast<f64>(g_originX)),
+                static_cast<f32>(sampleSeqChannel(tr, 1, t) - static_cast<f64>(g_originY)),
+                static_cast<f32>(sampleSeqChannel(tr, 2, t))};
+}
+
 bool endsWithCI(const std::string& s, const char* suffix) {
     const usize n = std::strlen(suffix);
     if (s.size() < n) return false;
@@ -249,7 +259,33 @@ void SeqBaseStore::releaseUndriven(scene::World& w, const std::unordered_set<sce
     for (const scene::Entity e : gone) release(w, e);
 }
 
+void SeqBaseStore::rebase(const scene::World& w, const Vec3& deltaCm) {
+    const auto root = [&w](scene::Entity e) { return w.parent(e) == scene::kInvalidEntity; };
+    for (XfEntry& x : xforms_) {
+        if (!root(x.e)) continue;
+        x.xf.position.x -= deltaCm.x;
+        x.xf.position.y -= deltaCm.y;
+        x.xf.position.z -= deltaCm.z;
+    }
+    const f32 d[3] = {deltaCm.x, deltaCm.y, deltaCm.z};
+    constexpr u16 kPos = static_cast<u16>(offsetof(scene::CLocal, xf));   // Transform::position is its first member
+    for (Entry& en : props_) {
+        if (en.comp != scene::kComponentLocal || !root(en.e)) continue;
+        for (u16 k = 0; k < 3; ++k) {
+            const u16 at = static_cast<u16>(kPos + 4 * k);
+            if (at < en.off || at + 4 > en.off + en.size) continue;
+            f32 v;
+            std::memcpy(&v, en.bytes + (at - en.off), sizeof v);
+            v -= d[k];
+            std::memcpy(en.bytes + (at - en.off), &v, sizeof v);
+        }
+    }
+}
+
 // ---- SequencePlayer: lifetime -------------------------------------------------------------------
+
+void SequencePlayer::setSceneOrigin(i64 xCm, i64 yCm) { g_originX = xCm; g_originY = yCm; }
+void SequencePlayer::sceneOrigin(i64& xCm, i64& yCm) { xCm = g_originX; yCm = g_originY; }
 
 SequencePlayer::SequencePlayer() : uid_(nextUid()) {}
 SequencePlayer::~SequencePlayer() = default;
@@ -436,6 +472,7 @@ void SequencePlayer::evalPost(scene::World& w) {
                 const scene::Entity e = resolve(tr);
                 Transform xf;
                 if (e != scene::kInvalidEntity && w.valid(e) && sampleSeqTransform(tr, t, xf)) {
+                    if (!originZero() && w.parent(e) == scene::kInvalidEntity) xf.position = originRelative(tr, t);
                     baseStore().captureTransform(w, e);
                     w.setLocalTransform(e, xf);
                 }
@@ -467,6 +504,8 @@ void SequencePlayer::evalPost(scene::World& w) {
             pose = cameraFromActor(w, e);
         } else if (!sampleSeqCamera(tr, t, pose)) {
             continue;
+        } else if (!originZero()) {
+            pose.position = originRelative(tr, t);
         }
         cams.push_back({&seqCameraName(tr), pose});
     }
@@ -539,7 +578,18 @@ void SequencePlayer::applyProperty(scene::World& w, u32 index, const OcSeqTrack&
     u8* dst = static_cast<u8*>(comp) + d->offset;
     switch (d->kind) {
         case FieldKind::F32:  { const f32 x = static_cast<f32>(v[0]); std::memcpy(dst, &x, sizeof x); break; }
-        case FieldKind::Vec3: { const f32 x[3] = {static_cast<f32>(v[0]), static_cast<f32>(v[1]), static_cast<f32>(v[2])}; std::memcpy(dst, x, sizeof x); break; }
+        case FieldKind::Vec3: {
+            f64 p[3] = {v[0], v[1], v[2]};
+            // A ROOT's Local.position key is level-absolute: subtract the scene origin in f64 before narrowing.
+            if (d->component == scene::kComponentLocal && d->offset == offsetof(scene::CLocal, xf) && !originZero() &&
+                w.parent(e) == scene::kInvalidEntity) {
+                p[0] -= static_cast<f64>(g_originX);
+                p[1] -= static_cast<f64>(g_originY);
+            }
+            const f32 x[3] = {static_cast<f32>(p[0]), static_cast<f32>(p[1]), static_cast<f32>(p[2])};
+            std::memcpy(dst, x, sizeof x);
+            break;
+        }
         case FieldKind::Quat: { const f32 x[4] = {static_cast<f32>(v[0]), static_cast<f32>(v[1]), static_cast<f32>(v[2]), static_cast<f32>(v[3])}; std::memcpy(dst, x, sizeof x); break; }
         case FieldKind::I32:  { const i32 x = static_cast<i32>(std::lround(v[0])); std::memcpy(dst, &x, sizeof x); break; }
         case FieldKind::Bool: { const i32 x = std::lround(v[0]) != 0 ? 1 : 0; std::memcpy(dst, &x, sizeof x); break; }

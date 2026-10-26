@@ -33,6 +33,11 @@ struct GerstnerWave {
     f32 wavelengthCm = 800.0f;
     f32 amplitudeCm  = 25.0f;
     f32 steepness    = 0.6f;
+    // FLOATING ORIGIN (LARGE_WORLD 2.2.6): added to the phase, in radians. The shaders add the origin's share of the phase
+    // (the f64-reduced omega * dot(dir, origin)) to positions that are origin-relative; a CPU query at a scene-frame position
+    // adds the same number from here, so a body floats on the surface that is drawn. Zero until gerstnerSetOriginPhase sets
+    // it, and `x + 0.0f` is exact, so a level that never rebases computes what it always did.
+    f32 originPhaseRad = 0.0f;
 };
 
 // Four waves is enough for the sum to read as chop rather than a single ripple, without a
@@ -98,6 +103,30 @@ inline f32 clampedSteepness(f32 steepness, size_t count) {
 
 } // namespace detail
 
+// Sets every wave's originPhaseRad for a scene frame at (originXCm, originYCm) -- a whole number of regions, 0 for none --
+// to k * dot(dir, origin) reduced mod 2*pi in f64 (never -0). This is exactly rhi::gerstnerPhaseOffset (WorldShift.hpp), written
+// out here because this header takes no RHI dependency; tests hold the two together. Call it when the origin changes.
+inline void gerstnerSetOriginPhase(GerstnerWave* waves, size_t count, i64 originXCm, i64 originYCm) {
+    constexpr f64 kTwoPi = 6.283185307179586476925286766559;
+    for (size_t i = 0; i < count; ++i) {
+        GerstnerWave& w = waves[i];
+        const f64 dx = static_cast<f64>(w.dirX), dz = static_cast<f64>(w.dirZ);
+        const f64 lenSq = dx * dx + dz * dz;
+        f32 offset = 0.0f;
+        if (lenSq > 1e-12) {
+            const f64 inv = 1.0 / std::sqrt(lenSq);
+            const f64 wl = static_cast<f64>(w.wavelengthCm) > 1e-3 ? static_cast<f64>(w.wavelengthCm) : 1e-3;
+            const f64 k = kTwoPi / wl;
+            f64 ph = std::fmod(k * (dx * inv * static_cast<f64>(originXCm) + dz * inv * static_cast<f64>(originYCm)), kTwoPi);
+            if (ph != 0.0) {
+                if (ph < 0.0) ph += kTwoPi;
+                offset = static_cast<f32>(ph);
+            }
+        }
+        w.originPhaseRad = offset;
+    }
+}
+
 // Summed Gerstner wave height at (xCm, zCm) at time tSeconds.
 //
 // Zero waves, or every wave at amplitudeCm == 0, returns EXACTLY 0 -- the sum below has no term
@@ -113,7 +142,7 @@ inline f32 gerstnerHeightCm(const GerstnerWave* waves, size_t count, f32 xCm, f3
         // phase constant Phi_i = Si * omega reduces to sqrt(g * omega) -- see kGravityCmPerS2's own
         // comment for why g is 981, not 9.81, here.
         const f32 phaseSpeed = std::sqrt(kGravityCmPerS2 * omega);
-        const f32 phase = omega * (dx * xCm + dz * zCm) + phaseSpeed * tSeconds;
+        const f32 phase = omega * (dx * xCm + dz * zCm) + phaseSpeed * tSeconds + w.originPhaseRad;
         height += w.amplitudeCm * std::sin(phase);
     }
     return height;
@@ -146,7 +175,7 @@ inline void gerstnerDisplaceCm(const GerstnerWave* waves, size_t count, f32 xCm,
         f32 omega, dx, dz;
         detail::gerstnerWaveTerms(w, omega, dx, dz);
         const f32 phaseSpeed = std::sqrt(kGravityCmPerS2 * omega);
-        const f32 phase = omega * (dx * xCm + dz * zCm) + phaseSpeed * tSeconds;
+        const f32 phase = omega * (dx * xCm + dz * zCm) + phaseSpeed * tSeconds + w.originPhaseRad;
         const f32 s = std::sin(phase), c = std::cos(phase);
         const f32 qi = detail::clampedSteepness(w.steepness, count);
 

@@ -578,6 +578,7 @@ static const Abi kAbis[] = {
       "modules/physics/include/aver/physics/physics_softbody_ext_abi.h",
       "modules/physics/include/aver/physics/physics_shape_builder_abi.h",
       "modules/physics/include/aver/physics/physics_world_abi.h",
+      "modules/physics/include/aver/physics/physics_origin_abi.h",
       nullptr},
      "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.cs", "aver_phys_"},
 

@@ -1,3 +1,19 @@
+# LandscapeShiftTest -- the landscape under the floating origin (LARGE_WORLD 2.2.6 item 6, R-4): the procedural height as a function of the absolute
+# position, world-aligned UVs, the quadtree and a renderer that draws old meshes translated instead of rebuilding them. Headless. The renderer section
+# needs Aver.Landscape.Renderer; the GameLandscape section (absolute sidecar and records, origin-relative data) needs the game library, which is
+# configured before tests/, so TARGET works here. rhi/WorldShift.hpp is Core-only and reached by include path.
+add_executable(LandscapeShiftTest src/LandscapeShiftTest.cpp)
+target_link_libraries(LandscapeShiftTest PRIVATE Aver.Landscape Aver.Formats Aver.Core Aver.Platform)
+target_include_directories(LandscapeShiftTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/rhi/include)
+if(TARGET Aver.Landscape.Renderer)
+  target_link_libraries(LandscapeShiftTest PRIVATE Aver.Landscape.Renderer)
+  target_compile_definitions(LandscapeShiftTest PRIVATE AVER_LANDSCAPE_TEST_RENDERER=1)
+endif()
+if(TARGET Aver.Runtime.Game.Core)
+  target_link_libraries(LandscapeShiftTest PRIVATE Aver.Runtime.Game.Core)
+  target_compile_definitions(LandscapeShiftTest PRIVATE AVER_LANDSCAPESHIFT_GAME=1)
+endif()
+set_target_properties(LandscapeShiftTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # The landscape CPU model. Links no device and no backend, which is the property landscape stages 1
 # and 2 exist to establish: the quadtree, the LOD metric, the culling and the chunk geometry are all
 # settled before anything tries to draw them.

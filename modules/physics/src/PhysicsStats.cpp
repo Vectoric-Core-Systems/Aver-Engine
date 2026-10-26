@@ -3,6 +3,7 @@
 // wall-clock pair live in one place.
 #include "PhysicsConfig.hpp"
 #include "PhysicsProfile.hpp"
+#include "PhysicsOrigin.hpp"
 
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/HitchMarks.hpp"
@@ -106,9 +107,12 @@ int32_t aver_phys_stats(double* outValues, int32_t n) {
     if (g_world) {
         World& world = *g_world;
         const JPH::BodyManager::BodyStats b = world.system.GetBodyStats();
-        v[AVER_PHYS_ST_BODIES] = b.mNumBodies;
+        // World-joint anchors (PhysicsJoints.cpp makeAnchor) are bodies to Jolt's manager but not to this module: leave them out so the
+        // counts are what they were before the floating origin.
+        const double anchors = static_cast<double>(originJointsCount());
+        v[AVER_PHYS_ST_BODIES] = b.mNumBodies - anchors;
         v[AVER_PHYS_ST_MAX_BODIES] = b.mMaxBodies;
-        v[AVER_PHYS_ST_STATIC] = b.mNumBodiesStatic;
+        v[AVER_PHYS_ST_STATIC] = b.mNumBodiesStatic - anchors;
         v[AVER_PHYS_ST_DYNAMIC] = b.mNumBodiesDynamic;
         v[AVER_PHYS_ST_ACTIVE_DYNAMIC] = b.mNumActiveBodiesDynamic;
         v[AVER_PHYS_ST_KINEMATIC] = b.mNumBodiesKinematic;

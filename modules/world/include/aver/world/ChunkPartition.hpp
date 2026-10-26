@@ -60,15 +60,18 @@ struct Partition {
 };
 
 // The chunk that owns `e`, following it up to its root first.
-ChunkCoord ownerChunkOf(const scene::World& w, scene::Entity e, i32 chunkSizeCm);
+//
+// `origin` is the floating origin the scene is in (WorldPos.hpp): roots hold origin-relative f32, so the owner is split from
+// position + origin in f64. Zero, the default, is the pre-origin behaviour bit for bit -- as it is for the two below.
+ChunkCoord ownerChunkOf(const scene::World& w, scene::Entity e, i32 chunkSizeCm, OriginCm origin = {});
 
 // Partitions every live entity in `w`.
-Partition partitionWorld(const scene::World& w, const PartitionOptions& opt = {});
+Partition partitionWorld(const scene::World& w, const PartitionOptions& opt = {}, OriginCm origin = {});
 
 // Captures every chunk of a partition. The map is keyed the same way, so a caller can hand one
 // chunk's payload to a writer without re-deriving anything.
 std::unordered_map<ChunkCoord, ChunkPayload> captureAll(const scene::World& w, const Partition& part,
-                                                        i32 chunkSizeCm);
+                                                        i32 chunkSizeCm, OriginCm origin = {});
 
 } // namespace aver::world
 

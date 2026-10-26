@@ -54,6 +54,9 @@ public:
     void predictedWorld(const SpringParams&, const std::vector<f32>& times, std::vector<Vec3>& pts,
                         std::vector<f32>& yaws) const;
     void historyWorld(std::vector<Vec3>& pts) const;
+    // Floating-origin shift (LARGE_WORLD 2.2.5): every stored sample position -= delta. Velocity, yaw rate and the intent are
+    // invariant. Without it the first observe() after a shift reads a 16 km jump as a velocity.
+    void rebase(const Vec3& delta);
 
     bool observed() const { return !ring_.empty(); }
     Vec3 velocity() const { return {vel_[0], vel_[1], 0.0f}; }

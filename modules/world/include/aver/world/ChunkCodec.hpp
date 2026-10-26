@@ -13,15 +13,23 @@
 #include "aver/core/Types.hpp"
 #include "aver/world/ChunkPayload.hpp"
 
-#if AVER_MODULE_SCENE
-#  include <string>
-#  include <vector>
+#include <string>
+#include <vector>
 
+// Not scene-gated: the codec reads and writes the POD half of ChunkPayload.hpp only, so a Scene-free cook can use it.
 namespace aver::world {
 
 // Version of the chunk encoding itself, independent of the container's. A region file records this
 // so a reader can refuse a payload it does not understand instead of misreading it.
-inline constexpr u32 kChunkCodecVersion = 1;
+//
+// 2 adds a tagged extras list per entity (PayloadEntity::extras), behind a flag bit so an entity without any costs nothing
+// over v1. The encoder always writes 2; the decoder reads 1 and 2.
+inline constexpr u32 kChunkCodecVersion = 2;
+inline constexpr u32 kChunkCodecVersionMin = 1;
+
+// What one entity's extras can hold: a count and each length are u16.
+inline constexpr usize kMaxExtrasPerEntity = 0xFFFF;
+inline constexpr usize kMaxExtraBytes      = 0xFFFF;
 
 // Encodes one chunk's entities. The coord and chunk size are NOT encoded -- the container already
 // knows both, and storing them twice is two things that can disagree.
@@ -32,5 +40,3 @@ std::vector<u8> encodeChunk(const ChunkPayload& p);
 bool decodeChunk(const u8* data, usize size, ChunkPayload& out, std::string* why = nullptr);
 
 } // namespace aver::world
-
-#endif // AVER_MODULE_SCENE

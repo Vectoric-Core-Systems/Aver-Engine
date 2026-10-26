@@ -23,8 +23,13 @@ struct ChunkMesh {
 };
 
 // Builds one node's mesh. `uvTilingCm` is the world size one UV unit spans; UVs are world-aligned.
+//
+// FLOATING ORIGIN (LARGE_WORLD 2.2.6): the data's positions are in the scene frame, which sits at (originXCm, originYCm)
+// -- a whole number of regions, zero by default. UVs stay world-aligned across a rebase: u = local / tile + frac(origin /
+// tile), the fraction taken in f64, so a node built in one frame tiles seamlessly against a neighbour built in another
+// (to one tile of `uvTilingCm`, which is the period of a material with whole-number layer scales). Zero origin: unchanged.
 bool buildChunkMesh(const fmt::OcLandData& data, const LandscapeTree& tree, u32 nodeIndex,
-                    ChunkMesh& out, f32 uvTilingCm = 1000.0f);
+                    ChunkMesh& out, f32 uvTilingCm = 1000.0f, i64 originXCm = 0, i64 originYCm = 0);
 
 // The counts a node produces, without building it.
 struct ChunkCounts {

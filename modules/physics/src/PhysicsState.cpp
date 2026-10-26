@@ -7,7 +7,9 @@
 //   header   "APST", state layout version, sizeof(JPH::Real), Jolt version triple, the determinism-build flags, the parts held,
 //            topology epoch, constraint epoch, fixed steps at the capture, payload size, FNV-1a 64 of the payload
 //   payload  manifest (what must still exist), then three length-prefixed sections: (1) Jolt's PhysicsSystem::SaveState,
-//            (2) one CharacterVirtual::SaveState per manifest character, (3) the engine section
+//            (2) one CharacterVirtual::SaveState per manifest character, (3) the engine section, and, only once the floating
+//            origin has shifted this world (LARGE_WORLD 2.3.6), (4) the origin section: generation and the shifts' sum. Header
+//            word 52 holds the generation too. A blob that never saw a shift has neither, so it is byte for byte what it always was.
 //
 // The hash is over the PAYLOAD only, so it does not move with the capture time or the step counter: two runs, two machines
 // and two thread counts compare by it. A single-precision blob has a different Real size and a different Jolt body layout and
@@ -17,6 +19,7 @@
 // Jolt is asked to restore anything, because Jolt's own restore stops halfway at a missing body and restores constraints by
 // array index. An imported blob is also checked against its checksum, so a flipped byte is CORRUPT before it reaches Jolt.
 #include "PhysicsConfig.hpp"
+#include "PhysicsOrigin.hpp"
 #include "PhysicsStateRecorder.hpp"
 #include "SoftBodyAero.hpp"
 
@@ -28,6 +31,7 @@
 #include <Jolt/Physics/StateRecorder.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -43,6 +47,10 @@ namespace {
 constexpr size_t kHeaderBytes = 64;
 constexpr char kMagic[4] = {'A', 'P', 'S', 'T'};
 constexpr uint32_t kKnownParts = AVER_PHYS_SNAP_ALL | AVER_PHYS_SNAP_STATICS;
+
+// Section (4): the physics frame the blob was taken in. Positions in a blob are origin-relative, so the sum of every shift up to the
+// capture is what lets a restore bring them into the frame the world is in now.
+constexpr uint32_t kOriginSectionBytes = 4 + 4 + 8 + 8;   // generation, reserved, total x, total y (cm)
 
 // The hash of the payload alone (the bytes after the header).
 uint64_t payloadHash(const uint8_t* blob, size_t size) { return fnv1a64(blob + kHeaderBytes, size - kHeaderBytes); }
@@ -198,6 +206,15 @@ bool capturePayload(std::vector<uint8_t>& blob, uint32_t flags, StateManifest& m
         bw.patchU32(lenAt, static_cast<uint32_t>(bw.size() - start));
     }
 
+    // (4) the origin the positions above are relative to; absent in a world that never shifted (identity).
+    if (w.originGeneration > 0) {
+        bw.u32(kOriginSectionBytes);
+        bw.u32(w.originGeneration);
+        bw.u32(0);
+        bw.put(w.originTotalCm[0]);
+        bw.put(w.originTotalCm[1]);
+    }
+
     uint8_t* p = blob.data();
     std::memcpy(p, kMagic, sizeof kMagic);
     writeAt<uint32_t>(p, 4, static_cast<uint32_t>(kStateLayoutVersion));
@@ -211,7 +228,7 @@ bool capturePayload(std::vector<uint8_t>& blob, uint32_t flags, StateManifest& m
     writeAt<uint32_t>(p, 36, w.constraintEpoch);
     writeAt<int64_t>(p, 40, w.stepsTotal);
     writeAt<uint32_t>(p, 48, static_cast<uint32_t>(blob.size() - kHeaderBytes));
-    writeAt<uint32_t>(p, 52, 0);
+    writeAt<uint32_t>(p, 52, w.originGeneration);   // informational (zero in a world that never shifted); the origin section is what a restore reads
     writeAt<uint64_t>(p, 56, payloadHash(blob.data(), blob.size()));
     return true;
 }
@@ -255,6 +272,19 @@ int32_t doRestore(const Snap& s, uint32_t options) {
     const uint8_t* engData = nullptr;
     const uint32_t engSize = r.u32();
     if (!r.take(engSize, engData)) return AVER_PHYS_RESTORE_CORRUPT;
+    // The origin section, when the blob has one; its absence means the world had never shifted, so its frame is the origin's start.
+    double blobTotal[2] = {0.0, 0.0};
+    if (r.left() > 0) {
+        const uint32_t n = r.u32();
+        const uint8_t* at = nullptr;
+        if (n != kOriginSectionBytes || !r.take(n, at)) return AVER_PHYS_RESTORE_CORRUPT;
+        ByteReader o(at, n);
+        o.u32();
+        o.u32();
+        blobTotal[0] = o.get<double>();
+        blobTotal[1] = o.get<double>();
+        if (!o.ok() || !std::isfinite(blobTotal[0]) || !std::isfinite(blobTotal[1])) return AVER_PHYS_RESTORE_CORRUPT;
+    }
 
     // 1. The live world must still be the captured one.
     if (const int32_t rc = stateCheckManifest(m, flags, options, s.constraintEpoch); rc != AVER_PHYS_RESTORE_OK) return rc;
@@ -282,6 +312,20 @@ int32_t doRestore(const Snap& s, uint32_t options) {
     }
     if (flags & AVER_PHYS_SNAP_ENGINE) stateApplyEngine(stage);
 
+    // The blob came back in the frame it was taken in. If the origin has shifted since (or the blob is from before a shift the world
+    // has seen), move exactly what it restored by the difference: bodies of the manifest (statics only when it held them), characters
+    // only when it held them. Anchors and anything the blob did not hold are already in the live frame.
+    {
+        const Vec3d delta{w.originTotalCm[0] - blobTotal[0], w.originTotalCm[1] - blobTotal[1], 0.0};
+        if (delta.x != 0.0 || delta.y != 0.0) {
+            std::vector<int32_t> chars;
+            if (flags & AVER_PHYS_SNAP_CHARACTERS)
+                for (const StateManifest::Char& c : m.characters) chars.push_back(c.handle);
+            static const std::vector<uint32_t> none;
+            originReshiftRestored((flags & AVER_PHYS_SNAP_BODIES) ? m.bodyIds : none, chars, delta);
+        }
+    }
+
     w.stepsTotal = s.steps;
     clearEventQueues();
     return AVER_PHYS_RESTORE_OK;
@@ -301,9 +345,15 @@ void stateAfterFixedStep() {
     static std::vector<uint8_t> scratch;
     static StateManifest manifest;
     if (!capturePayload(scratch, AVER_PHYS_SNAP_ALL, manifest)) return;
-    char line[48];
-    std::snprintf(line, sizeof line, "%lld %016llx\n", static_cast<long long>(g_world->stepsTotal),
-                  static_cast<unsigned long long>(payloadHash(scratch.data(), scratch.size())));
+    char line[64];
+    // A hash is frame-relative once the origin has shifted, so a log from a shifted world says which generation each line was taken in;
+    // two logs compare only at an equal generation. An unshifted world's lines are what they always were.
+    if (g_world->originGeneration > 0)
+        std::snprintf(line, sizeof line, "%lld %016llx g%u\n", static_cast<long long>(g_world->stepsTotal),
+                      static_cast<unsigned long long>(payloadHash(scratch.data(), scratch.size())), g_world->originGeneration);
+    else
+        std::snprintf(line, sizeof line, "%lld %016llx\n", static_cast<long long>(g_world->stepsTotal),
+                      static_cast<unsigned long long>(payloadHash(scratch.data(), scratch.size())));
     g_hashLog << line;
     g_hashLog.flush();
 }

@@ -29,6 +29,12 @@ V2 worldForwardXY(scene::World& w, scene::Entity e) {
 
 TacticsSystem::TacticsSystem() = default;
 
+void TacticsSystem::rebase(const Vec3& deltaCm) {
+    for (auto& [id, target] : squadTargets_) target -= deltaCm;
+    // CoverMap offers a const view only; the points live in covers_, which is not const.
+    for (const CoverPoint& c : covers_.points()) const_cast<CoverPoint&>(c).pos -= V2{deltaCm.x, deltaCm.y};
+}
+
 u32 TacticsSystem::registerComponents(scene::World& world) {
     {
         auto b = world.registerComponent<CSynapseCoverMarker>("CSynapseCoverMarker");

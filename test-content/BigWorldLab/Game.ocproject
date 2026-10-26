@@ -1,0 +1,8 @@
+OCPROJECT 1
+# Engine test content for the LARGE-WORLD work (docs/plans/wave11/LARGE_WORLD.md): a level 200 km long, cooked into chunks.
+# Not a demo game: the built-in cube only, no third-party assets. Generate the level first: python scripts/gen-bigworld.py (see README.md).
+NAME BigWorldLab
+ENGINE Aver 0.7.0-1
+CREATEDWITH 0.7.0-1
+CONTENT Content
+STARTMAP Maps/BigWorldLab.ocworld

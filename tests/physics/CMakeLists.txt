@@ -211,6 +211,15 @@ foreach(_t PhysicsStateTest PhysicsDeterminismTest PhysicsShapeCacheTest)
   set_target_properties(${_t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endforeach()
 
+# PhysicsOriginTest -- the floating origin's physics half (physics_origin_abi.h, LARGE_WORLD): exactness, sleepers staying asleep, characters, a car, events, refusals, counters.
+# ABI only: Aver.Physics and Aver.Core. PhysicsOriginBenchTool is P-0 of the same plan and NOT a test (no `Test` suffix, so the ctest walk skips it): hand-run, it times the shift on
+# 10k and 100k statics and 500 sleeping stacks and prints the decision rule of LARGE_WORLD 2.3.7.
+add_executable(PhysicsOriginTest src/PhysicsOriginTest.cpp)
+target_link_libraries(PhysicsOriginTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(PhysicsOriginTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_executable(PhysicsOriginBenchTool src/PhysicsOriginBenchTool.cpp)
+target_link_libraries(PhysicsOriginBenchTool PRIVATE Aver.Physics Aver.Core)
+set_target_properties(PhysicsOriginBenchTool PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # PhysicsProfileTest -- the profiler bridge (physics_world_abi.h, aver_phys_profile_*): the tree of a loaded scene, nesting under Jolt's Update,
 # merge by name across threads, frozen when disabled, reset. PhysicsDebugTest -- Jolt's debug renderer as a line feed (physics_debug_abi.h): shape
 # extents in engine axes, the radius, the line budget, static triangles near the camera, the last fixed step's contacts, constraints and labels.

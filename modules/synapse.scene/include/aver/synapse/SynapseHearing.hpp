@@ -65,6 +65,10 @@ public:
     // Drops one listener's memories (used when a graph wants "forget everything").
     void forget(scene::Entity e);
 
+    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts `deltaCm` from every queued noise and every remembered
+    // position. Call after World::shiftRoots.
+    void rebase(const Vec3& deltaCm);
+
 private:
     u32 type_ = 0;
     std::vector<NoiseEvent> queue_;

@@ -131,6 +131,26 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     if (legacy) {
         if (!loadLegacyOcmap(src, legacyMap, w, &why)) { AVER_WARN("[Level] {}", why); return; }
     } else if (!fmt::loadOcworld(src, w, &why)) { AVER_WARN("[Level] {}", why); return; }
+    // COOKED CHUNKS (LARGE_WORLD 2.4.6). Only a host that asked (the runtime; the editor edits records and must never load the slim level): a level whose STREAM
+    // record names `chunks=` streams from that cooked set while it is current, and what is loaded flat below is the slim level the cook wrote beside it. A missing,
+    // damaged or stale set is one warning and the level streams from its objects as before.
+    AuthoredStreaming::Choice cooked;
+    fmt::OcStreamSettings cookedStream;
+    if (useCookedChunks_ && !legacy && device_ && !w.stream.chunksPath.empty()) {
+        std::error_code relEc;
+        std::string asset = std::filesystem::relative(src, content.project().contentDir(), relEc).generic_string();
+        if (relEc || asset.empty()) asset = src;
+        cooked = AuthoredStreaming::resolve(content.project().dir, content.project().contentDir(), w.stream.chunksPath, asset, w);
+        if (cooked.use) {
+            cookedStream = w.stream;                // the distances and the rest of the STREAM record are the source's
+            w = std::move(cooked.slim);             // what the chunks do not carry, loaded whole by the flat path below
+            w.stream = cookedStream;
+            w.stream.enabled = false;               // its remaining placements are level-global, never streamed by records
+            AVER_INFO("[Level] {} streams from its cooked chunk set {}", path, cooked.dir);
+        } else if (!cooked.why.empty()) {
+            AVER_WARN("[Level] {}: {}; streaming it from its objects instead", path, cooked.why);
+        }
+    }
     // STAGE 1 OF 3 (see LoadHooks::progress): the file is parsed.
     if (hooks_.progress) hooks_.progress("Parsing level", 0.05f);
 
@@ -288,6 +308,11 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     world::LevelInstance inst;
     if (streamed) streaming_.begin(w, content, *device_, opt, streamHooks_);
     else inst = world::instantiate(w, opt);
+    if (cooked.use) {   // the chunk-owned placements stream from the set; w (the slim level) was loaded flat above
+        std::string authoredWhy;
+        if (!authored_.begin(cooked.dir, content, *device_, opt, cookedStream, {}, &authoredWhy))
+            AVER_ERROR("[Level] {}: the cooked chunk set did not start ({}); the level is missing its streamed objects", path, authoredWhy);
+    }
     // load()'s OWN span ends here regardless of what opt.progress reported -- a level with zero
     // placements never calls it at all, and this is what still lands the fraction on 75% for one.
     if (hooks_.progress) hooks_.progress("Placing objects", 0.75f);
@@ -775,10 +800,11 @@ std::vector<std::string> GameLevel::foliageTablePaths(const std::vector<std::str
 void GameLevel::tickStreaming(const std::vector<Vec3>& viewers) {
     HitchMarks hm("level stream", 0.25);
     if (streaming_.active()) streaming_.tick(scene::World::instance(), viewers);
+    if (authored_.active()) authored_.tick(scene::World::instance(), viewers);   // LARGE_WORLD 2.4.6: the cooked set around the viewers
     hm.mark("tick");
     // [wave3/level-instances begin] instance units; the mesh-read queue ages once a frame, by whichever streamer ticks first
     if (instances_.count() > 0) {
-        if (!streaming_.active() && content_) content_->prefetchTick();
+        if (!streaming_.active() && !authored_.active() && content_) content_->prefetchTick();
         instances_.tick(viewers);
         hm.mark("instances");
     }
@@ -799,6 +825,7 @@ void GameLevel::unload() {
     classPlacements_.clear();   // in case unload() runs before spawnClassPlacements() ever did
 #endif
     scene::World& world = scene::World::instance();
+    authored_.end(world);   // LARGE_WORLD 2.4.6: a cooked set's chunks (a no-op when none is streaming)
     streaming_.end(world);
     if (content_ && device_) for (const u64 id : heldMeshes_) content_->releaseMesh(*device_, id);
     heldMeshes_.clear();

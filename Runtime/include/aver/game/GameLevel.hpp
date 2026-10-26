@@ -16,6 +16,7 @@
 #  include "aver/formats/OcMap.hpp"
 #  include "aver/world/LevelInstance.hpp"
 #  include "aver/game/LevelStreaming.hpp"
+#  include "aver/game/AuthoredStreaming.hpp"
 #  include "aver/game/LevelInstances.hpp"   // [wave3/level-instances]
 #  include "aver/world/LevelAssetLibrary.hpp"   // [wave3/level-instances]
 #  include "aver/formats/OcStream.hpp"
@@ -112,16 +113,18 @@ public:
     void spawnClassPlacements();
 #endif
 
-    usize entityCount() const { return levelEntities_.size() + streaming_.residentEntities() + instances_.stats().entities; }   // [wave3/level-instances]
+    usize entityCount() const { return levelEntities_.size() + streaming_.residentEntities() + instances_.stats().entities + authored_.residentEntities(); }   // [wave3/level-instances] + cooked chunks
     // The animated placements load() made kinematic bodies for: what the host hands to
     // world::driveKinematicBodies each frame after the animation tick. Empty without physics.
     const std::vector<world::AnimatedBody>& animatedBodies() const {
         const std::vector<world::AnimatedBody>& base = streaming_.active() ? streaming_.animatedBodies() : animatedBodies_;
         // [wave3/level-instances begin] plus the kinematic bodies of animated placements inside level instances
         const std::vector<world::AnimatedBody>& inst = instances_.animatedBodies();
-        if (inst.empty()) return base;
+        const std::vector<world::AnimatedBody>& cooked = authored_.animatedBodies();   // a cooked set's animated placements (LARGE_WORLD 2.4.6)
+        if (inst.empty() && cooked.empty()) return base;
         animatedMerged_ = base;
         animatedMerged_.insert(animatedMerged_.end(), inst.begin(), inst.end());
+        animatedMerged_.insert(animatedMerged_.end(), cooked.begin(), cooked.end());
         return animatedMerged_;
         // [wave3/level-instances end]
     }
@@ -131,6 +134,13 @@ public:
     void setDevice(rhi::IDevice* device) { device_ = device; }
     void setStreamHooks(LevelStreaming::Hooks hooks) { streamHooks_ = std::move(hooks); }
     LevelStreaming& streaming() { return streaming_; }
+    // COOKED CHUNKS (LARGE_WORLD 2.4.6). When on, a level whose STREAM record names `chunks=` streams from that cooked set while it is current, and the level
+    // loads flat from the slim level the cook wrote. OFF by default and off in the editor: the editor edits records, and a slim level saved over the source would
+    // lose every chunk-owned placement. The runtime switches it on (GameApp).
+    void setUseCookedChunks(bool on) { useCookedChunks_ = on; }
+    bool useCookedChunks() const { return useCookedChunks_; }
+    AuthoredStreaming& authored() { return authored_; }
+    const AuthoredStreaming& authored() const { return authored_; }
     // [wave3/level-instances begin] LEVEL INSTANCES (docs/LEVEL_INSTANCES.md): the LEVELINST records of the loaded level,
     // realised by instances() after the level's own placements. Hooks and the packed-rows sink are the host's,
     // installed before load() like setStreamHooks. The library is what instances parse their child levels through;
@@ -253,6 +263,8 @@ public:
 private:
 #if AVER_MODULE_SCENE
     LevelStreaming streaming_;
+    AuthoredStreaming authored_;     // LARGE_WORLD 2.4.6: the cooked-chunk path (a cooked level streams through this instead of streaming_)
+    bool useCookedChunks_ = false;
     LevelStreaming::Hooks streamHooks_;
     // [wave3/level-instances begin]
     LevelInstances instances_;

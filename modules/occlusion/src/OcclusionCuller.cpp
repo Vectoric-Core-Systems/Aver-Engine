@@ -324,11 +324,17 @@ public:
             // for weren't (see boxSetChurnedAcrossLag_ above); the one-call-lag assumption didn't hold,
             // for one reason or another.
         }
+
+        // A floating-origin shift since the call this one reads back: its boxes were in the old frame (LARGE_WORLD 2.2.6).
+        // Distrust this one answer only; the next call reads a post-shift dispatch.
+        if (basisInvalid_) { readbackLagExpected_ = false; basisInvalid_ = false; }
     }
 
     void lastTestCounts(u32& culled, u32& tested) const override { culled = lastCulled_; tested = lastTested_; }
 
     bool readbackLagIsExactlyOneCall() const override { return readbackLagExpected_; }
+
+    void invalidateBasis() override { basisInvalid_ = true; }
 
     u64 boxIdentityChurnCount() const override { return boxSetChurnedAcrossLag_; }
 
@@ -590,6 +596,7 @@ private:
     BufferHandle genUpload_[kInFlight] = {}, genReadback_[kInFlight] = {};
     u64 submitGeneration_ = 0;      // incremented once per testBatch() call that reaches the dispatch
     bool readbackLagExpected_ = false;   // see readbackLagIsExactlyOneCall()
+    bool basisInvalid_ = false;          // see invalidateBasis(); consumed by the next testBatch() that reaches the readback
     bool debugForceWaitIdle_ = true;     // see setDebugForceWaitIdle(); defaults true -- see the OPEN
                                           // paragraph above this class's kInFlight member
 
