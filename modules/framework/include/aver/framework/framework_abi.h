@@ -59,8 +59,9 @@ extern "C" {
  * 11: INPUT TRIGGERS AND MODIFIERS (aver_fw_action_bind_ex/add_trigger/add_modifier/config_error/
  *    clear_config/update/reset_state/state/events/elapsed/triggered_time/value3/count/name/value_type/
  *    event_count/event_at; aver_fw_input_scheme_trigger_count/trigger_spec/modifier_count/
- *    modifier_spec) -- see NAMED ACTIONS and INPUT SCHEME below. */
-#define AVER_FW_ABI_VERSION_MINOR 11
+ *    modifier_spec) -- see NAMED ACTIONS and INPUT SCHEME below.
+ * 12: AVER_FW_PUMP_FRAME, the tick_all value for the per-frame pumps that also run while paused. */
+#define AVER_FW_ABI_VERSION_MINOR 12
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -98,6 +99,9 @@ typedef int32_t aver_field;    /* a dense scene field id; carries its component 
 #define AVER_FW_TICK_PHYSICS      1
 #define AVER_FW_TICK_POST_PHYSICS 2
 #define AVER_FW_TICK_COUNT        3
+/* Not a tick group: the tick_all value for the per-frame pumps (game UI events, content reloads,
+ * accessibility). Sent every frame of a play session, paused or not, before PRE_PHYSICS. */
+#define AVER_FW_PUMP_FRAME        3
 
 /* Declares a class. Idempotent by name: the same name returns the same handle for the life of the
  * process, and a redeclare rewrites the row's components and defaults in place. */

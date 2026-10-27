@@ -16,6 +16,7 @@ public sealed class ClassBuilder
     // Read back by the bridge after Configure runs, to bucket instances by tick group.
     internal bool WantsTick { get; private set; }
     internal int TickGroupId { get; private set; }
+    internal int TickOrder { get; private set; }
 
     /// <summary>Gives the class's own entity a mesh, and a material if one is named.</summary>
     public void Mesh(string meshPath, string material = "")
@@ -59,12 +60,13 @@ public sealed class ClassBuilder
         Fw.aver_fw_class_set_default_i32(_c, SceneIds.Field("CCameraRig.flags"), 1 << 30);   // kRigApplyPreset
     }
 
-    /// <summary>Declares that the class ticks, in <paramref name="group"/> at <paramref name="order"/>.</summary>
+    /// <summary>Declares that the class ticks, in <paramref name="group"/> at <paramref name="order"/>. Lower orders tick first; equal orders tick in spawn order.</summary>
     public void Ticks(TickGroup group, int order = 0)
     {
         Fw.aver_fw_class_set_flags(_c, Fw.aver_fw_class_get_flags(_c) | ClassFlags.Ticks);
         Fw.aver_fw_class_set_tick(_c, (int)group, order);
         WantsTick = true;
         TickGroupId = (int)group;
+        TickOrder = order;
     }
 }

@@ -598,7 +598,8 @@ void GameApp::initPhysics() {
 
 void GameApp::tickGameplay(f32 dt) {
 #if AVER_MODULE_FRAMEWORK
-    // Only tick when PLAYING, not PAUSED
+    // PAUSED runs only the pumps; anything else but PLAYING runs nothing.
+    if (aver_fw_play_state() == AVER_FW_PLAY_PAUSED) { game::tickPausedFrame(dt); return; }
     if (aver_fw_play_state() != AVER_FW_PLAY_PLAYING) return;
 
 #if AVER_MODULE_PHYSICS

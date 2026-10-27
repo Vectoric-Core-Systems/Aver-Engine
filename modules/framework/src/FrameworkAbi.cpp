@@ -589,15 +589,32 @@ static int32_t spawnActor(int32_t c, const char* name,
     return static_cast<int32_t>(e);
 }
 
-// The teardown body: runs the managed END edge, drops possession and the class, then destroys the
-// entity. `endReason` distinguishes a destroy from a play-stop; `dispatchEndPlay` false skips the hook.
-static int32_t destroyActor(int32_t e, int32_t endReason, bool dispatchEndPlay = true) {
+static int32_t destroyActor(int32_t e, int32_t endReason, bool dispatchEndPlay = true);
+
+// Ends every actor below `ent`, deepest first and last sibling first. The flush retires the subtree
+// with its root, but only this path runs a child's END edge.
+static void destroyChildActors(Entity ent, int32_t endReason, bool dispatchEndPlay) {
+    std::vector<Entity> kids;
+    for (Entity c = world().firstChild(ent); c != kInvalidEntity; c = world().nextSibling(c))
+        kids.push_back(c);
+    for (auto it = kids.rbegin(); it != kids.rend(); ++it) {
+        if (classOfEntity(*it) != 0) destroyActor(static_cast<int32_t>(*it), endReason, dispatchEndPlay);
+        else                         destroyChildActors(*it, endReason, dispatchEndPlay);
+    }
+}
+
+// The teardown body: ends the child actors, runs the managed END edge, drops possession and the
+// class, then destroys the entity. `endReason` distinguishes a destroy from a play-stop;
+// `dispatchEndPlay` false skips the hook.
+static int32_t destroyActor(int32_t e, int32_t endReason, bool dispatchEndPlay) {
     const Entity ent = toEntity(e);
     if (!world().valid(ent)) return 0;
 
     auto& inFlight = destroyInFlight();
     if (inFlight.count(ent)) return 0;
     inFlight.insert(ent);
+
+    destroyChildActors(ent, endReason, dispatchEndPlay);
 
     // The END edge: endPlay while the entity is still live, then unbind. unbind fires even for a
     // preview, which bound an instance it never received a hook for.
@@ -923,7 +940,7 @@ int32_t aver_fw_install_managed_dispatch(const AvManagedDispatch* d) {
                    "second install (clear the first before installing another)");
         return 0;
     }
-    managedDispatch() = *d;        // BY VALUE — no pointer into CLR-owned memory is retained
+    managedDispatch() = *d;        // BY VALUE â€” no pointer into CLR-owned memory is retained
     managedInstalled() = true;
     return 1;
 }

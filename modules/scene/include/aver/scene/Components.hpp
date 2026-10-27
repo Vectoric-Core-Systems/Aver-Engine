@@ -271,13 +271,7 @@ inline constexpr u32 kSoftBodyPiece = 0x2;
 
 // What CRigidBody::shapeKind names. Box is 0 so a zero-filled, unauthored body still describes a
 // real (if degenerate, all-zero half-extents) shape rather than an out-of-range one.
-//
-// CAPSULE AND CYLINDER ARE AUTHORING-ONLY TODAY: physics_abi.h has no aver_phys_add_dynamic_*
-// entry point for either -- only box, sphere, convex hull, mesh and heightfield exist for a rigid
-// body (a capsule elsewhere in that header is aver_phys_character_create's swept, non-rigid
-// character). Whoever wires this component to body creation has to add those two entry points
-// first; the schema is authored ahead of the ABI on purpose so a level can already say "this is a
-// capsule" before the code that spawns one exists.
+// All four build solid bodies (sandbox PhysicsSceneSync createShapeBody); a sensor is box or sphere only.
 inline constexpr i32 kRigidBodyShapeBox      = 0;
 inline constexpr i32 kRigidBodyShapeSphere   = 1;
 inline constexpr i32 kRigidBodyShapeCapsule  = 2;

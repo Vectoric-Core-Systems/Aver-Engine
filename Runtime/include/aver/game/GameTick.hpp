@@ -121,6 +121,14 @@ inline void applyProjectAudioMix(const fmt::ProjectDesc& project) {
 // and PHYSICS below, so PHYSICS-group ticks observe the results of this frame's simulation rather
 // than last frame's. Reordering to match "bracket" literally would make every PHYSICS-group actor
 // read stale transforms.
+// A paused play frame: IGNORE_PAUSE timers, posted events and the per-frame pumps, so a pause
+// menu's handlers still run. No tick group, no physics step, no action update.
+inline void tickPausedFrame(f32 dt) {
+    aver_fw_timers_update(dt);
+    aver_fw_events_flush();
+    aver_fw_tick(AVER_FW_PUMP_FRAME, dt);
+}
+
 inline i32 tickGameplayGroups(f32 dt) {
     // Input triggers and smoothing advance once a frame, after the host published this frame's input.
     aver_fw_action_update(dt);
@@ -128,6 +136,7 @@ inline i32 tickGameplayGroups(f32 dt) {
     // either sees this frame's PrePhysics as the first thing after its callback.
     aver_fw_timers_update(dt);
     aver_fw_events_flush();
+    aver_fw_tick(AVER_FW_PUMP_FRAME, dt);
     aver_fw_tick(AVER_FW_TICK_PRE_PHYSICS, dt);
     i32 steps = 0;
 #if AVER_MODULE_PHYSICS

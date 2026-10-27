@@ -17,6 +17,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <string>
+#include <vector>
 
 using namespace aver;
 using namespace aver::scene;
@@ -585,6 +586,56 @@ static void testDestroyReentrancy() {
     World::instance().flush();
 
     check(aver_fw_clear_managed_dispatch() == 1, "the re-entrant stand-in clears");
+}
+
+static std::vector<int32_t> g_subtreeEnded;
+static int                  g_subtreeUnbound = 0;
+static bool                 g_subtreeAllLive = true;
+// Records the end order of a subtree destroy and whether each entity was still live.
+static void AVER_FW_CALL standInSubtreeEndPlay(aver_entity e, int32_t /*reason*/) {
+    g_subtreeEnded.push_back(static_cast<int32_t>(e));
+    g_subtreeAllLive = g_subtreeAllLive && World::instance().valid(static_cast<Entity>(static_cast<uint32_t>(e)));
+}
+static int32_t AVER_FW_CALL standInSubtreeBind(int64_t, aver_entity) { return 1; }
+static void AVER_FW_CALL standInSubtreeUnbind(aver_entity) { ++g_subtreeUnbound; }
+
+// Checks that destroying an actor ends and unbinds every actor in its subtree, through plain
+// entities too, before the parent's own END edge.
+static void testSubtreeDestroyEndsChildren() {
+    AVER_INFO("=== destroying an actor ends and unbinds the actors in its subtree ===");
+
+    const int32_t managedC = aver_fw_class_declare("SubtreeActor", "");
+    aver_fw_class_set_flags(managedC, AVER_FW_CLASS_MANAGED);
+    check(aver_fw_class_seal(managedC) == 1, "the subtree managed class seals");
+
+    AvManagedDispatch table{};
+    table.structBytes     = static_cast<int32_t>(sizeof(AvManagedDispatch));
+    table.contractVersion = AVER_FW_DISPATCH_VERSION;
+    table.bind            = &standInSubtreeBind;
+    table.unbind          = &standInSubtreeUnbind;
+    table.endPlay         = &standInSubtreeEndPlay;
+    check(aver_fw_install_managed_dispatch(&table) == 1, "the subtree stand-in installs");
+
+    const int32_t p  = aver_fw_spawn(managedC, "st-parent", nullptr, nullptr, nullptr);
+    const int32_t c1 = aver_fw_spawn(managedC, "st-child-1", nullptr, nullptr, nullptr);
+    const int32_t x  = aver_scene_create();
+    const int32_t g  = aver_fw_spawn(managedC, "st-grandchild", nullptr, nullptr, nullptr);
+    check(p && c1 && x && g, "the parent, child, plain entity and grandchild exist");
+    check(aver_scene_set_parent(c1, p) == 1 && aver_scene_set_parent(x, p) == 1 &&
+          aver_scene_set_parent(g, x) == 1, "the subtree is linked: p > {c1, x > g}");
+
+    g_subtreeEnded.clear();
+    g_subtreeUnbound = 0;
+    g_subtreeAllLive = true;
+    check(aver_fw_destroy(p) == 1, "destroy accepts the parent");
+    check(g_subtreeEnded.size() == 3, "endPlay fired for the parent, the child and the grandchild under a plain entity");
+    check(g_subtreeUnbound == 3, "unbind fired for all three");
+    check(!g_subtreeEnded.empty() && g_subtreeEnded.back() == p, "the parent ends last");
+    check(g_subtreeAllLive, "every END edge saw a live entity");
+    World::instance().flush();
+    check(aver_fw_class_of(c1) == 0 && aver_fw_class_of(g) == 0, "the children read class 0 after the flush");
+
+    check(aver_fw_clear_managed_dispatch() == 1, "the subtree stand-in clears");
 }
 
 // Checks that a possession hook re-entering possess is refused rather than recursed to a crash.
@@ -1730,6 +1781,7 @@ int main() {
     testPossession();
     testManagedDispatch();
     testDestroyReentrancy();
+    testSubtreeDestroyEndsChildren();
     testPossessReentrancy();
     testPlayLifecycle();
     testInput();

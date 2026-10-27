@@ -783,6 +783,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         game::tickVehiclesPost(t.dt, playMobility_);
         playProf_.end(editor::PlayPhase::Vehicles);
 #endif
+    } else if (aver_fw_play_state() == AVER_FW_PLAY_PAUSED) {
+        game::tickPausedFrame(t.dt);
     }
 #endif
 #if AVER_MODULE_FLUIDS

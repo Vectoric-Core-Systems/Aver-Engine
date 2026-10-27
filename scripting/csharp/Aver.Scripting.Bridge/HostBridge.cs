@@ -56,6 +56,7 @@ public static class HostBridge
     // ------------------------------------------------------------------ actor state
 
     private const int TickGroupCount = 3;   // PrePhysics, Physics, PostPhysics (framework_abi.h)
+    private const int PumpFrame = 3;        // AVER_FW_PUMP_FRAME (framework_abi.h)
 
     // A declared managed class: the C# type bind() constructs, plus the tick wiring Configure asked for.
     private sealed class ClassInfo
@@ -63,6 +64,7 @@ public static class HostBridge
         public required Type Type;
         public required bool Ticks;
         public required int TickGroup;
+        public int TickOrder;
         public required string RegistryName;
         public required int Handle;   // the native class handle
     }
@@ -73,6 +75,7 @@ public static class HostBridge
         public required AverActor Instance;
         public required int Entity;
         public required int TickGroup;
+        public int TickOrder;
         public required bool Ticks;
         public required string Name;
         public bool Disabled;
@@ -1431,7 +1434,7 @@ public static class HostBridge
                  $"[Scripting] class '{name}' did not seal - check its parent '{parent}' is a declared class");
 
         s_classes[Assets.ObjectIdOf(name)] =
-            new ClassInfo { Type = type, Ticks = builder.WantsTick, TickGroup = builder.TickGroupId, RegistryName = name, Handle = c };
+            new ClassInfo { Type = type, Ticks = builder.WantsTick, TickGroup = builder.TickGroupId, TickOrder = builder.TickOrder, RegistryName = name, Handle = c };
     }
 
     // The registry name, parent and base-type flags for a discovered actor type.
@@ -1501,12 +1504,13 @@ public static class HostBridge
                     Instance = instance,
                     Entity = entity,
                     TickGroup = info.TickGroup,
+                    TickOrder = info.TickOrder,
                     Ticks = info.Ticks,
                     Name = info.RegistryName,
                 };
                 s_actorsByEntity[entity] = live;
                 if (live.Ticks && live.TickGroup >= 0 && live.TickGroup < TickGroupCount)
-                    s_tickBuckets[live.TickGroup].Add(live);
+                    InsertByTickOrder(s_tickBuckets[live.TickGroup], live);
                 return 1;
             }
 
@@ -1605,23 +1609,36 @@ public static class HostBridge
         catch (Exception ex) { DisableActor(live, "OnBeginPlay", ex); }
     }
 
+    // Inserts after the last actor of an equal or lower order, so lower orders tick first and equal
+    // orders keep spawn order.
+    private static void InsertByTickOrder(List<ActorLive> bucket, ActorLive live)
+    {
+        int i = bucket.Count;
+        while (i > 0 && bucket[i - 1].TickOrder > live.TickOrder) --i;
+        bucket.Insert(i, live);
+    }
+
     // Ticks every actor in one group.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispTickAll(int group, float dt)
     {
+        // The per-frame pumps, sent every frame of a session, paused or not, before PrePhysics.
+        if (group == PumpFrame)
+        {
+            // Game-UI events (a click, a changed slider, a command) reach their handlers; a pause menu's too.
+            try { Aver.UI.UiSystem.Pump(); } catch (DllNotFoundException) { }
+            // Culture-change events and data-table hot reloads, on the game thread (docs/LOCALIZATION.md, docs/DATA_TABLES.md).
+            try { Aver.Framework.ContentPump.Tick(); } catch (DllNotFoundException) { }
+            // Accessibility options changed this frame go into Settings (flushed after a quiet half second); speech queue advances.
+            try { Aver.Framework.Accessibility.Tick(dt); } catch (DllNotFoundException) { }
+            return;
+        }
         if (group < 0 || group >= TickGroupCount) return;
 
-        // Game-UI events (a click, a changed slider, a command) reach their handlers once a frame, before
-        // anything ticks: the first group's tick is the earliest point every graph and actor can see them.
-        if (group == 0) { try { Aver.UI.UiSystem.Pump(); } catch (DllNotFoundException) { } }
-        // Culture-change events and data-table hot reloads, on the game thread (docs/LOCALIZATION.md, docs/DATA_TABLES.md).
-        if (group == 0) { try { Aver.Framework.ContentPump.Tick(); } catch (DllNotFoundException) { } }
         // Gameplay effects expire, periodic effects execute and abilities auto-end on the game clock, once a frame.
         if (group == 0) { try { GameplayAbilities.Update(); } catch (DllNotFoundException) { } }
         // Input triggers raised by this frame's aver_fw_action_update reach C# events and graph OnInputAction entries.
         if (group == 0) { try { EnhancedInput.PumpEvents(); } catch (DllNotFoundException) { } }
-        // Accessibility options changed this frame go into Settings (flushed after a quiet half second); speech queue advances.
-        if (group == 0) { try { Aver.Framework.Accessibility.Tick(dt); } catch (DllNotFoundException) { } }
 
         // EnhancedInput needs no per-frame snapshot here: that call is gone, not relocated -- it's now
         // a thin wrapper over aver_fw_action_held/pressed/released/value2 (framework_abi.h NAMED
