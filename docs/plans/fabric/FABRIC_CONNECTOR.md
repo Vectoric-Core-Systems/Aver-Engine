@@ -61,6 +61,7 @@ Owner decisions so far:
 | Named groups | DONE: `aver_fw_group_*` (ABI 2.4), `Groups` / `AverActor.AddToGroup`, level `COMPONENT Groups names=...` on any placement. FrameworkTest `testGroups`, PlacementPropsTest. |
 | Variant | moves to the Aver.Fabric runtime (F2): it is a converted-script type, not an engine one |
 | Files and platform services | DONE: `aver_fw_set_project` (ABI 2.5) published by both hosts; `Paths` (res://, user://), `ConfigFile`, `ProjectSettings`, `OS`, `Engine` frame counters, `DebugDraw` (ABI 2.6, drawn by both hosts), `Display.SetVSync` (game). Runtime fullscreen is not offered: the window has no runtime mode switch. PlatformTests, FrameworkTest `testDebugLines`. |
+| Localization | DONE: `.po` messages per culture (`fmt::parsePo`, loc ABI 2 `aver_fw_loc_tr/tr_n`), `Loc.Tr` / `Loc.TrN`. Godot's `%`/`{}` format strings belong to the converted-script runtime (F2). Not yet: Plural-Forms formulas, `.po` hot reload. FrameworkContentTest `testPo`. |
 | Resource objects / async load handles | open |
 | Level travel + autoloads | DONE: `Game.ChangeLevel`, `AverActor.Persistent`, `aver_fw_travel_begin/end` (ABI 2.7), the shipped game's `travelTo`. The editor's Play refuses it (it would replace the level being edited). FrameworkTest `testTravel`; the game-side sequence is unrun (engine-run ban). |
 | Input chain | DONE (v1): event objects from the polled state, `OnInput` -> game UI (pointer/keyboard wants) -> `OnUnhandledInput`, `SetInputAsHandled`, `ParseInputEvent`. InputRouterTests. Not yet: touch, absolute mouse position, several gamepads, SDL mapping database, input while paused. |
@@ -85,7 +86,7 @@ Owner decisions so far:
 | Named groups (string groups, `call_group`) instead of a 32-bit tag mask | E | S |
 | Input event objects and the propagation chain (`_input` → GUI → shortcut → unhandled, `set_input_as_handled`); per-event UI/game consumption; touch; simulated input; absolute mouse position; mouse modes; multiple pads; SDL mapping database | E (input) + F | L |
 | Runtime window and vsync API; `ProjectSettings.get_setting`; OS feature tags; FPS and frame count; general debug draw from scripts | E | S–M |
-| Localization: PO import, a single message-ID `tr()`, Godot format strings | C + F | S |
+| Localization: PO import, a single message-ID `tr()`, Godot format strings | C + F | S (PO + `tr` DONE in G1) |
 | **Networking:** MultiplayerAPI, `@rpc`, Spawner/Synchronizer, ENet. `modules/net` is only a skeleton. | E (planned in wave 10) | L |
 
 ### Physics (target: Godot's Jolt module)

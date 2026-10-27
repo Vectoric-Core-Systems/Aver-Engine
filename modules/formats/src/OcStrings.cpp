@@ -418,6 +418,89 @@ std::string writeStringsCsv(const OcStringsData& d) {
     return s;
 }
 
+// ---- gettext .po ----------------------------------------------------------------------------------
+
+namespace {
+// A PO string literal's contents, with C escapes undone. False when it is not one quoted string.
+bool poUnquote(std::string_view s, std::string& out) {
+    s = trim(s);
+    if (s.size() < 2 || s.front() != '"' || s.back() != '"') return false;
+    out.clear();
+    for (usize i = 1; i + 1 < s.size(); ++i) {
+        char c = s[i];
+        if (c == '\\' && i + 2 < s.size()) {
+            const char n = s[++i];
+            c = n == 'n' ? '\n' : n == 't' ? '\t' : n == 'r' ? '\r' : n;
+        }
+        out.push_back(c);
+    }
+    return true;
+}
+}  // namespace
+
+bool parsePo(std::string_view text, PoData& out, std::vector<std::string>* diag, std::string* err) {
+    text = csvStripBom(text);
+    PoData d;
+    PoEntry cur;
+    std::string* target = nullptr;   // the string the next continuation line appends to
+    bool any = false;
+    const auto flush = [&]() {
+        if (any) {
+            if (cur.id.empty() && cur.context.empty()) {   // the header: pick out Language
+                const usize at = cur.text.find("Language:");
+                if (at != std::string::npos) {
+                    const usize end = cur.text.find('\n', at);
+                    d.language = std::string(trim(std::string_view(cur.text).substr(at + 9, end == std::string::npos ? std::string::npos : end - at - 9)));
+                }
+            } else {
+                d.entries.push_back(std::move(cur));
+            }
+        }
+        cur = PoEntry{};
+        target = nullptr;
+        any = false;
+    };
+    usize lineNo = 0, start = 0;
+    while (start <= text.size()) {
+        usize end = text.find('\n', start);
+        if (end == std::string_view::npos) end = text.size();
+        std::string_view line = trim(text.substr(start, end - start));
+        start = end + 1;
+        ++lineNo;
+        if (line.empty()) { if (start > text.size()) break; continue; }
+        if (line.front() == '#') continue;
+        std::string s;
+        if (line.front() == '"') {
+            if (!target || !poUnquote(line, s)) { if (diag) diag->push_back("line " + std::to_string(lineNo) + ": stray string"); continue; }
+            *target += s;
+            continue;
+        }
+        const usize sp = line.find_first_of(" \t");
+        const std::string_view kw = line.substr(0, sp);
+        const std::string_view rest = sp == std::string_view::npos ? std::string_view() : line.substr(sp + 1);
+        if (!poUnquote(rest, s)) { if (diag) diag->push_back("line " + std::to_string(lineNo) + ": expected a quoted string"); continue; }
+        if (kw == "msgctxt") { flush(); cur.context = s; target = &cur.context; any = true; }
+        else if (kw == "msgid") {
+            if (any && (!cur.id.empty() || !cur.text.empty() || !cur.plurals.empty())) flush();
+            cur.id = s; target = &cur.id; any = true;
+        }
+        else if (kw == "msgid_plural") { cur.idPlural = s; target = &cur.idPlural; }
+        else if (kw == "msgstr") { cur.text = s; target = &cur.text; }
+        else if (kw.rfind("msgstr[", 0) == 0 && kw.back() == ']') {
+            const usize n = static_cast<usize>(std::atoi(std::string(kw.substr(7, kw.size() - 8)).c_str()));
+            if (cur.plurals.size() <= n) cur.plurals.resize(n + 1);
+            cur.plurals[n] = s;
+            target = &cur.plurals[n];
+        }
+        else if (diag) diag->push_back("line " + std::to_string(lineNo) + ": unknown keyword '" + std::string(kw) + "'");
+        if (start > text.size()) break;
+    }
+    flush();
+    if (d.entries.empty() && d.language.empty()) { if (err) *err = "no messages"; return false; }
+    out = std::move(d);
+    return true;
+}
+
 bool loadStrings(const std::string& path, OcStringsData& out, std::vector<std::string>* diag, std::string* err) {
     std::string ext;
     const usize dot = path.rfind('.');

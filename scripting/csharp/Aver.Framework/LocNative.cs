@@ -23,6 +23,8 @@ internal static class FwLoc
     [DllImport(Lib)] internal static extern int aver_fw_loc_epoch();
     [DllImport(Lib)] internal static extern int aver_fw_loc_resolve([MarshalAs(UnmanagedType.LPUTF8Str)] string reference, byte[]? output, int cap);
     [DllImport(Lib)] internal static extern int aver_fw_loc_get([MarshalAs(UnmanagedType.LPUTF8Str)] string table, [MarshalAs(UnmanagedType.LPUTF8Str)] string key, byte[]? output, int cap);
+    [DllImport(Lib)] internal static extern int aver_fw_loc_tr([MarshalAs(UnmanagedType.LPUTF8Str)] string message, [MarshalAs(UnmanagedType.LPUTF8Str)] string context, byte[]? output, int cap);
+    [DllImport(Lib)] internal static extern int aver_fw_loc_tr_n([MarshalAs(UnmanagedType.LPUTF8Str)] string message, [MarshalAs(UnmanagedType.LPUTF8Str)] string plural, int n, [MarshalAs(UnmanagedType.LPUTF8Str)] string context, byte[]? output, int cap);
     [DllImport(Lib)] internal static extern int aver_fw_loc_has([MarshalAs(UnmanagedType.LPUTF8Str)] string table, [MarshalAs(UnmanagedType.LPUTF8Str)] string key);
     [DllImport(Lib)] internal static extern int aver_fw_loc_missing_count();
     [DllImport(Lib)] internal static extern IntPtr aver_fw_loc_missing_at(int index);

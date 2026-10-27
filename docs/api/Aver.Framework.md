@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-225 public types and 1892 public members, read from `scripting/csharp/Aver.Framework/` (136 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+225 public types and 1894 public members, read from `scripting/csharp/Aver.Framework/` (136 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -1987,6 +1987,8 @@ Values: `A = 0`, `B`, `C`, `D`, `E`, `F`, `G`, `H`, `I`, `J`, `K`, `L`, `M`, `N`
 - `public static CultureInfo CultureInfo { get; }` - For number and date formatting in the active culture; invariant when the OS does not know the tag.
 - `public static bool SetCulture(string tag, bool persist = true)` - Switches the active culture.
 - `public static string Text(string table, string key, string? defaultText = null)` - The text for table/key: the chain, then defaultText, then "[Table:Key]".
+- `public static string Tr(string message, string context = "")` - A message by its source text (Godot's tr), from the culture chain's .po files; the source text itself when no culture translates it.
+- `public static string TrN(string message, string plural, int n, string context = "")` - The singular or plural form of a message for n (Godot's tr_n): msgstr[0] for 1, msgstr[1] otherwise; the source forms when untranslated.
 - `public static bool TryGet(string table, string key, out string text)` - The text for the key in the chain only: false when no culture in it has the key (no default, no brackets).
 - `public static string Resolve(string textOrReference)` - "@T:K=D" resolved, "@@x" to "@x", anything else unchanged.
 - `public static string Format(string table, string key, string? defaultText, params object?[] args)` - Text formatted with args in the active culture's number and date style.

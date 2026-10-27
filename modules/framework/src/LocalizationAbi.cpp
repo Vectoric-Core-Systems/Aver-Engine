@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -28,7 +30,13 @@ struct Culture {
     std::string dir;                       // the folder, forward slashes
     bool loaded = false;
     std::map<std::string, Table> tables;   // table name -> keys
+    // .po messages: context + '\x04' + source text (gettext's own separator) -> msgstr, then msgstr[1...].
+    std::unordered_map<std::string, std::vector<std::string>> messages;
 };
+
+std::string messageKey(const std::string& context, const std::string& id) {
+    return context.empty() ? id : context + '\x04' + id;
+}
 
 struct Store {
     std::string root;                      // the Localization directory, forward slashes, no trailing '/'
@@ -94,6 +102,20 @@ void ensureLoaded(Culture& c) {
     for (fs::directory_iterator it(toPath(c.dir), ec), end; !ec && it != end; it.increment(ec)) {
         if (!it->is_regular_file(ec)) continue;
         const std::string ext = lowerAscii(fromPath(it->path().extension()));
+        if (ext == ".po") {   // gettext messages, merged across the culture's .po files
+            fmt::PoData po;
+            std::vector<std::string> diag;
+            std::string err, text;
+            if (std::ifstream f(it->path(), std::ios::binary); f) text.assign(std::istreambuf_iterator<char>(f), {});
+            if (!fmt::parsePo(text, po, &diag, &err)) { AVER_WARN("[Loc] {}: {}", fromPath(it->path()), err); continue; }
+            for (const std::string& m : diag) AVER_WARN("[Loc] {}: {}", fromPath(it->path()), m);
+            for (fmt::PoEntry& e : po.entries) {
+                std::vector<std::string> forms;
+                if (!e.plurals.empty()) forms = std::move(e.plurals); else forms.push_back(std::move(e.text));
+                if (!forms.empty() && !forms[0].empty()) c.messages[messageKey(e.context, e.id)] = std::move(forms);
+            }
+            continue;
+        }
         if (ext != ".ocstrings" && ext != ".csv") continue;
         const std::string stem = fromPath(it->path().stem());
         if (!fmt::validLocTable(stem)) {
@@ -134,6 +156,17 @@ bool lookup(const std::string& table, const std::string& key, const std::string*
         return true;
     }
     return false;
+}
+
+// The translation of a message through the chain: its forms (msgstr, or msgstr[0..n]), or null.
+const std::vector<std::string>* lookupMessage(const std::string& key) {
+    for (const std::string& tag : g.chain) {
+        const auto c = g.cultures.find(tag);
+        if (c == g.cultures.end()) continue;
+        const auto m = c->second.messages.find(key);
+        if (m != c->second.messages.end()) return &m->second;
+    }
+    return nullptr;
 }
 
 int32_t copyOut(const std::string& s, char* out, int32_t cap) {
@@ -245,6 +278,21 @@ int32_t aver_fw_loc_get(const char* utf8Table, const char* utf8Key, char* out, i
     const std::string* hit = nullptr;
     if (!lookup(utf8Table, utf8Key, hit)) return -1;
     return copyOut(*hit, out, cap);
+}
+
+int32_t aver_fw_loc_tr(const char* utf8Message, const char* utf8Context, char* out, int32_t cap) {
+    const std::string id = safe(utf8Message);
+    const std::vector<std::string>* forms = lookupMessage(messageKey(safe(utf8Context), id));
+    return copyOut(forms && !forms->empty() && !(*forms)[0].empty() ? (*forms)[0] : id, out, cap);
+}
+
+int32_t aver_fw_loc_tr_n(const char* utf8Message, const char* utf8Plural, int32_t n, const char* utf8Context,
+                         char* out, int32_t cap) {
+    const std::string id = safe(utf8Message);
+    const size_t form = n == 1 ? 0 : 1;
+    const std::vector<std::string>* forms = lookupMessage(messageKey(safe(utf8Context), id));
+    if (forms && form < forms->size() && !(*forms)[form].empty()) return copyOut((*forms)[form], out, cap);
+    return copyOut(n == 1 ? id : safe(utf8Plural), out, cap);
 }
 
 int32_t aver_fw_loc_has(const char* utf8Table, const char* utf8Key) {

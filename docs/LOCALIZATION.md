@@ -35,6 +35,15 @@ ENTRY Menu.Quit "Beenden" NOTE "Shown on the quit button; keep short"
 
 A malformed `ENTRY` line is skipped with a warning naming the line; a typo never blanks a table. Saving from the editor keeps comments, blank lines and unknown records. An empty text in a non-default culture means "not translated" and is not written, so the runtime falls through to the default culture.
 
+### Gettext messages (.po)
+
+A culture folder may also hold gettext `.po` files (Godot's PO translations). Their messages are looked up by
+**source text**, not by table and key: `Loc.Tr("Hello, world!")` (Godot's `tr`) returns the translation from the
+culture chain, or the source text itself when no culture has one; `Loc.Tr(text, context)` uses `msgctxt`;
+`Loc.TrN(singular, plural, n)` (Godot's `tr_n`) picks `msgstr[0]` for one and `msgstr[1]` otherwise (no
+`Plural-Forms` formula yet). All `.po` files of a culture merge; an empty `msgstr` counts as untranslated. A `.po`
+file is read when its culture loads; editing one needs a reload of the localization (no hot reload yet).
+
 ## Editor
 
 - **String Table tab** (double-click a `.ocstrings`, or New String Table in the Content Browser): rows are the union of keys, columns are Key, Note and one per culture (default first). Missing cells are tinted; typing creates the entry. Add key, Delete key, Rename key (every culture), Add culture, Show missing only.

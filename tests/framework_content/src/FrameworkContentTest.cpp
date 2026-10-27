@@ -54,7 +54,7 @@ static int32_t AVER_FW_CALL onCultureEvent(int32_t, int64_t token, void*) {
 
 static void testLoc() {
     AVER_INFO("=== localization ===");
-    check(aver_fw_loc_abi_version() == 1 && aver_fw_table_abi_version() == 1, "ABI versions");
+    check(aver_fw_loc_abi_version() == 2 && aver_fw_table_abi_version() == 1, "ABI versions");
 
     writeFile("Localization/en/UI.ocstrings", "OCSTRINGS 1\nENTRY Play \"Play\"\nENTRY Quit \"Quit\"\nENTRY OnlyEn \"Only English\"\n");
     writeFile("Localization/de/UI.ocstrings", "OCSTRINGS 1\nENTRY Play \"Spielen\"\nENTRY Quit \"Beenden\"\n");
@@ -153,6 +153,52 @@ static void testLoc() {
 
 // ---- data tables --------------------------------------------------------------------------------
 
+// Gettext .po messages (Godot's tr): by source text, through the culture chain, the source when untranslated.
+static void testPo() {
+    std::printf("-- gettext .po messages\n");
+    writeFile("LocPo/de/game.po",
+              "# a comment\n"
+              "msgid \"\"\n"
+              "msgstr \"Language: de\\n\"\n"
+              "\n"
+              "msgid \"Hello, world!\"\n"
+              "msgstr \"Hallo, Welt!\"\n"
+              "\n"
+              "msgctxt \"menu\"\n"
+              "msgid \"Open\"\n"
+              "msgstr \"\\u00d6ffnen\"\n"
+              "\n"
+              "msgid \"Long\"\n"
+              "msgstr \"\"\n"
+              "\"two \"\n"
+              "\"lines\"\n"
+              "\n"
+              "msgid \"%d apple\"\n"
+              "msgid_plural \"%d apples\"\n"
+              "msgstr[0] \"%d Apfel\"\n"
+              "msgstr[1] \"%d \\u00c4pfel\"\n"
+              "\n"
+              "msgid \"Untranslated\"\n"
+              "msgstr \"\"\n");
+    check(aver_fw_loc_init(path("LocPo").c_str(), "en") >= 1, "init finds the culture with a .po file");
+    aver_fw_loc_set_culture("de");
+    char buf[128];
+    const auto tr = [&](const char* m, const char* ctx) { aver_fw_loc_tr(m, ctx, buf, sizeof buf); return std::string(buf); };
+    check(tr("Hello, world!", "") == "Hallo, Welt!", "a message with punctuation and spaces translates");
+    check(tr("Open", "menu") != "Open" && tr("Open", "") == "Open", "msgctxt separates the same text in two contexts");
+    check(tr("Long", "") == "two lines", "continuation lines join");
+    check(tr("Untranslated", "") == "Untranslated", "an empty msgstr falls back to the source");
+    check(tr("Never seen", nullptr) == "Never seen", "an unknown message is its own source text");
+    aver_fw_loc_tr_n("%d apple", "%d apples", 1, "", buf, sizeof buf);
+    check(std::string(buf) == "%d Apfel", "tr_n picks msgstr[0] for one");
+    aver_fw_loc_tr_n("%d apple", "%d apples", 3, "", buf, sizeof buf);
+    check(std::string(buf).find("pfel") != std::string::npos && std::string(buf) != "%d Apfel", "and msgstr[1] for more");
+    aver_fw_loc_tr_n("%d pear", "%d pears", 2, "", buf, sizeof buf);
+    check(std::string(buf) == "%d pears", "an untranslated plural falls back to the source plural");
+    aver_fw_loc_set_culture("en");
+    check(tr("Hello, world!", "") == "Hello, world!", "in a culture without it, the source text");
+}
+
 static void testTables() {
     AVER_INFO("=== data tables ===");
     writeFile("Data/items.csv", "Name,Damage:int\nsword,25\nbow,12\n");
@@ -214,6 +260,7 @@ int main() {
     fs::create_directories(g_root, ec);
 
     testLoc();
+    testPo();
     testTables();
 
     fs::remove_all(g_root, ec);

@@ -41,6 +41,13 @@ bool parseStringsCsv(std::string_view text, OcStringsData& out, std::vector<std:
 std::string writeOcstrings(const OcStringsData& d, std::string_view existing = "");
 std::string writeStringsCsv(const OcStringsData& d);
 
+// A gettext .po catalogue (Godot's PO translations): messages by their source text, not by key. `context` is
+// msgctxt; `plurals` holds msgstr[0..n] when there is a msgid_plural, else `text` is the msgstr. The header entry
+// (empty msgid) is not an entry; its Language goes to `language`. An empty translation is kept as missing.
+struct PoEntry { std::string context, id, idPlural, text; std::vector<std::string> plurals; };
+struct PoData { std::string language; std::vector<PoEntry> entries; };
+bool parsePo(std::string_view text, PoData& out, std::vector<std::string>* diag = nullptr, std::string* err = nullptr);
+
 // By extension: .ocstrings or .csv.
 bool loadStrings(const std::string& path, OcStringsData& out, std::vector<std::string>* diag, std::string* err);
 

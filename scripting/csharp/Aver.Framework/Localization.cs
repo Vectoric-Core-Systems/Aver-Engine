@@ -79,6 +79,17 @@ public static class Loc
         return Resolve("@" + table + ":" + key + (defaultText != null ? "=" + defaultText : string.Empty));
     }
 
+    /// <summary>A message by its source text (Godot's <c>tr</c>), from the culture chain's .po files; the source text itself
+    /// when no culture translates it. <paramref name="context"/> is the msgctxt.</summary>
+    public static string Tr(string message, string context = "") =>
+        Native(() => FwLoc.Fetch((b, c) => FwLoc.aver_fw_loc_tr(message, context, b, c)), message) ?? message;
+
+    /// <summary>The singular or plural form of a message for <paramref name="n"/> (Godot's <c>tr_n</c>): msgstr[0] for 1,
+    /// msgstr[1] otherwise; the source forms when untranslated.</summary>
+    public static string TrN(string message, string plural, int n, string context = "") =>
+        Native(() => FwLoc.Fetch((b, c) => FwLoc.aver_fw_loc_tr_n(message, plural, n, context, b, c)), n == 1 ? message : plural)
+        ?? (n == 1 ? message : plural);
+
     /// <summary>The text for the key in the chain only: false when no culture in it has the key (no default, no brackets).</summary>
     public static bool TryGet(string table, string key, out string text)
     {
