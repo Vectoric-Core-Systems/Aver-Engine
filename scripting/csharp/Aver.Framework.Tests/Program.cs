@@ -31,6 +31,7 @@ static class Program
         failures += GameThreadTests.RunAll();   // Fabric G1: deferred calls and await on the game thread
         failures += EditablesTests.RunAll();    // Fabric G1: [Editable] fields as per-instance text values
         failures += RandomTests.RunAll();       // Fabric G1: PCG32 against its reference output
+        failures += PlatformTests.RunAll();     // Fabric G1: res:// and user://, project settings, ConfigFile
         failures += WorldPosApiTests.RunAll();   // wave 11 LARGE_WORLD: WorldPos, Double3, WorldOrigin in a bare process
 
         Console.WriteLine(failures == 0 ? "\nAll tests passed." : $"\n{failures} test(s) failed.");

@@ -6,6 +6,9 @@
 #include "SoftBodyDebugOverlay.hpp"   // Show > Soft Bodies
 #include "SoftBodyPaintTool.hpp"
 #include "CollisionShapeOverlay.hpp"   // Show > Collision Shapes, and the .ocshape tab's wire preview
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/game/ScriptDebugLines.hpp"
+#endif
 #if AVER_MODULE_SOFTBODY_SCENE
 #  include "aver/softbody/SoftBodySystem.hpp"
 #endif
@@ -2089,6 +2092,10 @@ void SandboxApp::onRender(Engine& e)  {
             if (classMarkerMesh_) e.device()->drawLines(classMarkerMesh_, &cmId.m[0][0]);
         }
     }
+#endif
+#if AVER_MODULE_FRAMEWORK
+    // Scripts' DebugDraw lines, then aged by this frame (drawn under noEditorChrome_ too: they are the game's).
+    game::drawScriptDebugLines(e.device(), scriptDebugMesh_, e.time().dt);
 #endif
 #if AVER_MODULE_PHYSICS
     // Show > Physics: collect, upload and draw Jolt's debug lines in one call (nothing drawn under noEditorChrome_).

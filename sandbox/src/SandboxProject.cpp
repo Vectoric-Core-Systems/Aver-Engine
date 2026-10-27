@@ -56,6 +56,9 @@ void SandboxApp::applyProject(Engine& e) {
     storeLevelView();
 #endif
     project_ = browser_.project();
+#if AVER_MODULE_FRAMEWORK
+    game::publishProjectPaths(project_, /*editor=*/true);   // res:// and user:// for scripts
+#endif
 #if AVER_MODULE_PHYSICS
     // This project's solver settings and world limits, before its level builds a single body: the limits are
     // fixed for a world's lifetime, so an empty world is rebuilt here (PhysicsProjectApply.hpp).

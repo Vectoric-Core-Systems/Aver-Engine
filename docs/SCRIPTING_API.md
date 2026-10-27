@@ -179,6 +179,13 @@ Named groups (Godot's groups): `AddToGroup`, `RemoveFromGroup` and `IsInGroup` o
 entity. Names are case-sensitive; a destroyed entity leaves every group. A level keeps a placement's groups as
 `COMPONENT Groups names=a,b`.
 
+Files and platform (Godot's ProjectSettings, OS, Engine, DisplayServer): `Paths.Globalize("res://...")` and
+`user://...` resolve under `Paths.Content` and `Paths.User` (the player's writable folder for the project, the same in
+the editor and the shipped game); `ConfigFile` reads and writes Godot's ConfigFile text; `ProjectSettings.Get(key)`
+reads the manifest; `OS.Name` and `OS.HasFeature("windows"|"debug"|"editor"|...)`; `Engine.FramesPerSecond`,
+`ProcessFrames` and `PhysicsFrames`; `DebugDraw.Line/Box/Sphere` draw on top of the frame for one frame or a time;
+`Display.SetVSync` (the shipped game only). File I/O itself is .NET's `System.IO` on the resolved paths.
+
 Random numbers: `AverRandom` is the shared generator (Godot's global `randf`/`randi_range`/`seed`/`randomize`),
 and `new RandomNumberGenerator(seed)` makes an independent one with `Randi`, `Randf`, `RandiRange`, `RandfRange`,
 `Randfn`, `Seed` and `State`. Both are PCG32; a seed or a saved state replays the same sequence.

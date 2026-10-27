@@ -67,8 +67,10 @@ extern "C" {
 /* 2.1: aver_fw_spawn_batch_begin / aver_fw_spawn_batch_end (Godot's _ready order for a batch of spawns).
  * 2.2: aver_fw_adopt (an existing entity -- a prefab node -- becomes an actor).
  * 2.3: aver_fw_props_* (per-instance [Editable] values, a level's COMPONENT Props record).
- * 2.4: aver_fw_group_* (named groups, Godot's add_to_group; a level's COMPONENT Groups record). */
-#define AVER_FW_ABI_VERSION_MINOR 4
+ * 2.4: aver_fw_group_* (named groups, Godot's add_to_group; a level's COMPONENT Groups record).
+ * 2.5: aver_fw_set_project / aver_fw_project_dir / content_dir / user_dir / is_editor (res:// and user://).
+ * 2.6: aver_fw_debug_line* (script debug drawing) and aver_fw_request_vsync / aver_fw_take_vsync_request. */
+#define AVER_FW_ABI_VERSION_MINOR 6
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -160,6 +162,28 @@ AVER_FW_ABI int32_t     aver_fw_group_member(const char* group, int32_t index); 
 AVER_FW_ABI int32_t     aver_fw_groups_of_count(int32_t entity);
 AVER_FW_ABI const char* aver_fw_groups_of(int32_t entity, int32_t index);          /* "" when out of range */
 AVER_FW_ABI int32_t     aver_fw_groups_leave_all(int32_t entity);
+
+/* Where the open project lives, published by the host when it opens one: the directory holding its manifest,
+ * its content directory (res://), the player's writable directory for it (user://, the same for the editor
+ * and the shipped game) and whether the host is the editor. Getters return "" before a project opens. (2.5) */
+AVER_FW_ABI void        aver_fw_set_project(const char* projectDir, const char* contentDir, const char* userDir, int32_t isEditor);
+AVER_FW_ABI const char* aver_fw_project_dir(void);
+AVER_FW_ABI const char* aver_fw_content_dir(void);
+AVER_FW_ABI const char* aver_fw_user_dir(void);
+AVER_FW_ABI int32_t     aver_fw_is_editor(void);
+
+/* Script debug drawing: world-space lines a host draws on top of the frame. A line lasts `seconds` of real time,
+ * or exactly one drawn frame when 0. data() is count lines of 12 floats -- from xyz rgb, to xyz rgb, the
+ * LineVertex pair layout -- valid until the next add or advance. The host draws them, then advances. (2.6) */
+AVER_FW_ABI void         aver_fw_debug_line(const float* from3, const float* to3, const float* rgb3, float seconds);
+AVER_FW_ABI int32_t      aver_fw_debug_line_count(void);
+AVER_FW_ABI const float* aver_fw_debug_line_data(void);
+AVER_FW_ABI void         aver_fw_debug_lines_advance(float realDt);
+
+/* A script's runtime vsync choice (1 on, 0 off); the host takes it once a frame and applies it. -1 when none
+ * is pending. (2.6) */
+AVER_FW_ABI void    aver_fw_request_vsync(int32_t on);
+AVER_FW_ABI int32_t aver_fw_take_vsync_request(void);
 
 /* Declares a class. Idempotent by name: the same name returns the same handle for the life of the
  * process, and a redeclare rewrites the row's components and defaults in place. */

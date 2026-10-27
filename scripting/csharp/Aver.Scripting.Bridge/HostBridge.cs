@@ -1702,6 +1702,7 @@ public static class HostBridge
         RefreshTickOrder();
         bool physics = group == TickPhysics;
         bool paused = Game.IsPaused;
+        if (physics) Aver.Framework.Engine.NotePhysicsFrame(); else Aver.Framework.Engine.NoteProcessFrame();
         GameThread.BeginPass(physics);
         // The order array is replaced, never mutated, so a bind or unbind inside a callback leaves this
         // walk alone: a destroyed actor is skipped below, a spawned one ticks from the next pass.

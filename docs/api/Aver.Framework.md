@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-211 public types and 1817 public members, read from `scripting/csharp/Aver.Framework/` (133 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+218 public types and 1846 public members, read from `scripting/csharp/Aver.Framework/` (135 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -787,6 +787,25 @@ Values: `Off = 0`, `Protanopia = 1`, `Deuteranopia = 2`, `Tritanopia = 3`
 
 Values: `Local = 1`, `World = 2`, `Hierarchy = 3`, `Name = 4`, `Tags = 5`, `MeshRenderer = 6`, `Light = 7`, `Camera = 8`, `SkeletalMesh = 9`, `Animator = 10`, `ParticleEmitter = 11`, `Attachment = 12`
 
+### ConfigFile
+
+`public sealed class ConfigFile` - Sections of key/value pairs saved as text in Godot's ConfigFile format: [section] lines, then key=value with strings quoted, numbers and true/false bare, and Vector3(x, y, z).
+
+- `public void SetValue(string section, string key, object? value)` - Sets a value, adding the section and key if needed.
+- `public object? GetValue(string section, string key, object? fallback = null)` - The value, or fallback when the section or key is absent.
+- `public T GetValue<T>(string section, string key, T fallback)` - The value converted to T, or fallback when absent or of another kind.
+- `public bool HasSection(string section)`
+- `public bool HasSectionKey(string section, string key)`
+- `public string[] GetSections()`
+- `public string[] GetSectionKeys(string section)`
+- `public void EraseSection(string section)`
+- `public void EraseSectionKey(string section, string key)`
+- `public void Clear()`
+- `public bool Save(string path)` - Writes the file; res:// and user:// paths are resolved.
+- `public bool Load(string path)` - Replaces the contents with the file's; false (contents unchanged) when it is missing or unreadable.
+- `public string ToText()` - The text Save writes.
+- `public bool Parse(string text)` - Replaces the contents with parsed text.
+
 ### ContactEvent
 
 `public readonly struct ContactEvent` - Two solid bodies that began touching during the last step.
@@ -882,11 +901,25 @@ Values: `String`, `Int`, `Float`, `Bool`, `Vec3`, `Text`, `Strings`
 
 Values: `Radial`, `Axial`
 
+### DebugDraw
+
+`public static class DebugDraw` - World-space debug lines drawn on top of the frame (Godot's debug drawing).
+
+- `public static void Line(Vec3 from, Vec3 to, Vec3? rgb = null, float seconds = 0f)` - A line from from to to.
+- `public static void Box(Vec3 center, Vec3 halfExtents, Vec3? rgb = null, float seconds = 0f)` - An axis-aligned box: its twelve edges.
+- `public static void Sphere(Vec3 center, float radius, Vec3? rgb = null, float seconds = 0f, int segments = 24)` - A sphere as three great circles of segments lines each.
+
 ### Deferred
 
 `public static class Deferred` - Work for the game thread at the end of the current tick pass (Godot's call_deferred).
 
 - `public static void Call(Action action)` - Runs action on the game thread when the current tick pass ends.
+
+### Display
+
+`public static class Display` - The display, for what a script may change at runtime (Godot's DisplayServer).
+
+- `public static void SetVSync(bool on)` - Asks the shipped game to turn vsync on or off; it applies it next frame where the device allows turning it off.
 
 ### Double3
 
@@ -1034,6 +1067,14 @@ Values: `Instant`, `Duration`, `Infinite`
 `public enum EndReason` - Why OnEndPlay is running.
 
 Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
+
+### Engine
+
+`public static class Engine` - The engine's frame counters (Godot's Engine.get_frames_per_second, get_process_frames and get_physics_frames).
+
+- `public static float FramesPerSecond { get; }` - Frames per second, measured over the last whole second of real time.
+- `public static long ProcessFrames { get; }` - How many OnTick passes have run.
+- `public static long PhysicsFrames { get; }` - How many OnPhysicsTick passes have run.
 
 ### EnhancedInput
 
@@ -2000,6 +2041,13 @@ Values: `Velocity = 0`, `Yaw = 1`
 - `public static void Stop(float fadeSeconds = 1f)` - Fades the current track out and ends it.
 - `public static Voice Current { get; }` - The current track's voice, or None once it has ended.
 
+### OS
+
+`public static class OS` - The operating system and build (Godot's OS.get_name and OS.has_feature).
+
+- `public static string Name { get; }` - "Windows", "Linux" or "macOS".
+- `public static bool HasFeature(string tag)` - Whether a feature tag applies: the OS ("windows", "linux", "macos"), "pc", "64", the build ("debug" or "release") and the host ("editor" or "standalone").
+
 ### OverlapEvent
 
 `public readonly struct OverlapEvent` - Something entering or leaving a sensor volume during the last step.
@@ -2028,6 +2076,15 @@ Values: `Float = 0`, `Vector = 1`, `Color = 2`
 ### ParticleStats
 
 `public readonly record struct ParticleStats(int GpuEmitters, int CpuEmitters, int GpuParticles, int CpuParticles, int SpawnAtDropped, int GpuAllocatedKB)` - The particle system's counters, as TryGetStats returns them.
+
+### Paths
+
+`public static class Paths` - The project's directories and Godot's res:// and user:// paths.
+
+- `public static string Project { get; }` - The directory holding the project's manifest; "" before a project opens.
+- `public static string Content { get; }` - The project's content directory, what res:// names; "" before a project opens.
+- `public static string User { get; }` - The player's writable directory for this project, what user:// names (created on first use).
+- `public static string Globalize(string path)` - An OS path for path: res://a/b under Content, user://a/b under User, anything else unchanged (Godot's ProjectSettings.globalize_path).
 
 ### PauseMode
 
@@ -2088,6 +2145,13 @@ Values: `Editor = 0`, `Playing = 1`, `Paused = 2`
 ### PreAttributeChange
 
 `public delegate void PreAttributeChange(AbilitySystem system, AttributeRef attribute, ref float newValue)` - Lets a game adjust an attribute's new Current value before it is stored (a custom clamp).
+
+### ProjectSettings
+
+`public static class ProjectSettings` - The project manifest's settings by key (Godot's ProjectSettings.get_setting), as the text the manifest holds.
+
+- `public static string Get(string key, string fallback = "")` - The value of a manifest key (any case), or fallback when it is absent.
+- `public static bool Has(string key)` - Whether the manifest states the key.
 
 ### RagdollMode
 

@@ -3580,6 +3580,7 @@ private:
     editor::PhysicsDebugOptions physicsDebug_;
     editor::PhysicsDebugFrame physicsDebugFrame_;
     rhi::LineHandle physicsDebugMesh_ = 0;
+    rhi::LineHandle scriptDebugMesh_ = 0;   // DebugDraw's lines, replaced each frame (ScriptDebugLines.hpp)
 #endif
     // Viewport Show flags. Both default ON.
     bool showStaticMeshes_=true;

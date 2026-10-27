@@ -22,6 +22,7 @@
 #include "aver/core/Types.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcProject.hpp"
+#include "aver/platform/FileSystem.hpp"   // userDataDir, for user://
 
 #if AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"
@@ -100,6 +101,32 @@ inline void applyProjectAudioMix(const fmt::ProjectDesc& project) {
 #endif
 
 #if AVER_MODULE_FRAMEWORK
+// A project name as a directory name: reserved characters become '_', edge spaces and dots go.
+inline std::string filesystemSafeProjectName(const std::string& name) {
+    std::string out;
+    out.reserve(name.size());
+    for (char c : name) {
+        const bool reserved = c == '<' || c == '>' || c == ':' || c == '"' || c == '/' ||
+                               c == '\\' || c == '|' || c == '?' || c == '*' ||
+                               static_cast<unsigned char>(c) < 0x20;
+        out += reserved ? '_' : c;
+    }
+    const std::size_t b = out.find_first_not_of(" \t.");
+    const std::size_t e = out.find_last_not_of(" \t.");
+    out = (b == std::string::npos) ? std::string() : out.substr(b, e - b + 1);
+    return out.empty() ? "Project" : out;
+}
+
+// The player's writable directory for a project (user://): the same for the editor and the shipped game.
+inline std::string projectUserDir(const fmt::ProjectDesc& project) {
+    return userDataDir() + AVER_PATH_SEP + filesystemSafeProjectName(project.name);
+}
+
+// Tells the framework where the open project lives (res://, user://), and which host this is.
+inline void publishProjectPaths(const fmt::ProjectDesc& project, bool editor) {
+    aver_fw_set_project(project.dir.c_str(), project.contentDir().c_str(), projectUserDir(project).c_str(), editor ? 1 : 0);
+}
+
 // Game time per real time (Godot's Engine.time_scale): the timer service's dilation, the one setting.
 inline f32 gameTimeScale() { return aver_fw_timers_dilation(); }
 

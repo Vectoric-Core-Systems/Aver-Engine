@@ -35,6 +35,12 @@ internal static class Fw
     [DllImport(Lib)] internal static extern int aver_fw_group_member([MarshalAs(UnmanagedType.LPUTF8Str)] string group, int index);
     [DllImport(Lib)] internal static extern int aver_fw_groups_of_count(int entity);
     [DllImport(Lib)] internal static extern IntPtr aver_fw_groups_of(int entity, int index);
+    [DllImport(Lib)] internal static extern IntPtr aver_fw_project_dir();
+    [DllImport(Lib)] internal static extern IntPtr aver_fw_content_dir();
+    [DllImport(Lib)] internal static extern IntPtr aver_fw_user_dir();
+    [DllImport(Lib)] internal static extern int aver_fw_is_editor();
+    [DllImport(Lib)] internal static extern void aver_fw_debug_line(float[] from3, float[] to3, float[] rgb3, float seconds);
+    [DllImport(Lib)] internal static extern void aver_fw_request_vsync(int on);
     [DllImport(Lib)] internal static extern int aver_fw_class_seal(int c);
 
     // Class defaults, addressed by the same dense field id the scene resolves. One setter per storable kind.

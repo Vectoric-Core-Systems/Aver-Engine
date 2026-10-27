@@ -60,7 +60,9 @@ Owner decisions so far:
 | PCG32 RNG | DONE: `RandomNumberGenerator` (own implementation from the published algorithm; matches pcg32's reference output), `AverRandom` on it. Exact match with Godot's own seeding is unverified (needs Godot's source, owner decision). RandomTests. |
 | Named groups | DONE: `aver_fw_group_*` (ABI 2.4), `Groups` / `AverActor.AddToGroup`, level `COMPONENT Groups names=...` on any placement. FrameworkTest `testGroups`, PlacementPropsTest. |
 | Variant | moves to the Aver.Fabric runtime (F2): it is a converted-script type, not an engine one |
-| Level travel, files/resources, input chain, platform services | open |
+| Files and platform services | DONE: `aver_fw_set_project` (ABI 2.5) published by both hosts; `Paths` (res://, user://), `ConfigFile`, `ProjectSettings`, `OS`, `Engine` frame counters, `DebugDraw` (ABI 2.6, drawn by both hosts), `Display.SetVSync` (game). Runtime fullscreen is not offered: the window has no runtime mode switch. PlatformTests, FrameworkTest `testDebugLines`. |
+| Resource objects / async load handles | open |
+| Level travel, input chain | open |
 
 ## Gap list, sized S/M/L, and where each fix goes
 **E** = Aver engine change (benefits every Aver game). **F** = `Aver.Fabric` runtime only. **C** = converter only.

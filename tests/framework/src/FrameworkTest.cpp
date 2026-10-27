@@ -820,6 +820,26 @@ static void testGroups() {
     World::instance().flush();
 }
 
+// Checks the script debug-line buffer: a one-frame line goes at the first advance, a timed one when its time runs out.
+static void testDebugLines() {
+    AVER_INFO("=== debug lines: one frame, or for a time ===");
+    aver_fw_debug_lines_advance(1000.0f);   // whatever an earlier test left
+    const float a[3] = {0, 0, 0}, b[3] = {100, 0, 0}, red[3] = {1, 0, 0};
+    aver_fw_debug_line(a, b, red, 0.0f);
+    aver_fw_debug_line(a, b, nullptr, 0.5f);
+    check(aver_fw_debug_line_count() == 2, "two lines queued");
+    const float* d = aver_fw_debug_line_data();
+    check(d && d[3] == 1.0f && d[6] == 100.0f && d[12 + 3] == 1.0f && d[12 + 4] == 1.0f,
+          "12 floats a line: from xyz rgb, to xyz rgb; no colour is white");
+    aver_fw_debug_lines_advance(0.016f);
+    check(aver_fw_debug_line_count() == 1, "the one-frame line is gone after one advance, the timed one stays");
+    aver_fw_debug_lines_advance(0.5f);
+    check(aver_fw_debug_line_count() == 0, "the timed line goes when its time runs out");
+    check(aver_fw_take_vsync_request() == -1, "no vsync request pending");
+    aver_fw_request_vsync(0);
+    check(aver_fw_take_vsync_request() == 0 && aver_fw_take_vsync_request() == -1, "a request is taken once");
+}
+
 // Checks that a possession hook re-entering possess is refused rather than recursed to a crash.
 static void testPossessReentrancy() {
     AVER_INFO("=== a possession hook re-entering possession is refused, not recursed to a crash ===");
@@ -1970,6 +1990,7 @@ int main() {
     testSpawnBatchReadyOrder();
     testAdopt();
     testGroups();
+    testDebugLines();
     testPossessReentrancy();
     testPlayLifecycle();
     testInput();

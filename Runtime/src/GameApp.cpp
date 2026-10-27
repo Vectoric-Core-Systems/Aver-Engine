@@ -19,6 +19,9 @@
 #include "aver/runtime/Engine.hpp"
 #include "aver/platform/Window.hpp"
 #include "aver/platform/FileSystem.hpp"
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/game/ScriptDebugLines.hpp"
+#endif
 #include "aver/core/Log.hpp"
 // GPU-timing tree formatter
 #include "aver/rhi/GpuTimingFormat.hpp"
@@ -1228,6 +1231,9 @@ void GameApp::openProject(Engine& e) {
         AVER_ERROR("[Game] could not open '{}': {}", path, err);
         return;   // deliberately not fatal; see the header
     }
+#if AVER_MODULE_FRAMEWORK
+    game::publishProjectPaths(project_, /*editor=*/false);   // res:// and user:// for scripts
+#endif
 #if AVER_MODULE_PHYSICS
     // The project's solver settings and world limits, before any level builds a body (PhysicsProjectApply.hpp); an
     // empty world is rebuilt for the limits.
@@ -1330,25 +1336,13 @@ void GameApp::openProject(Engine& e) {
 #endif
 }
 
-// Convert project name to filesystem-safe directory name
-static std::string filesystemSafeProjectName(const std::string& name) {
-    std::string out;
-    out.reserve(name.size());
-    for (char c : name) {
-        const bool reserved = c == '<' || c == '>' || c == ':' || c == '"' || c == '/' ||
-                               c == '\\' || c == '|' || c == '?' || c == '*' ||
-                               static_cast<unsigned char>(c) < 0x20;
-        out += reserved ? '_' : c;
-    }
-    const std::size_t b = out.find_first_not_of(" \t.");
-    const std::size_t e = out.find_last_not_of(" \t.");
-    out = (b == std::string::npos) ? std::string() : out.substr(b, e - b + 1);
-    return out.empty() ? "Project" : out;
-}
-
 // The player's Settings.ini: scripting opens it for input bindings, localization reads the saved culture from it.
 static std::string gameSettingsPath(const fmt::ProjectDesc& project) {
-    return userDataDir() + AVER_PATH_SEP + filesystemSafeProjectName(project.name) + AVER_PATH_SEP "Settings.ini";
+#if AVER_MODULE_FRAMEWORK
+    return game::projectUserDir(project) + AVER_PATH_SEP "Settings.ini";
+#else
+    return userDataDir() + AVER_PATH_SEP + project.name + AVER_PATH_SEP "Settings.ini";
+#endif
 }
 
 void GameApp::initScripting() {
@@ -2181,6 +2175,9 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 #if AVER_MODULE_FRAMEWORK
     // Quit is a REQUEST, not immediate exit: allows device/audio/physics to stay live. requestExit() sets flag Engine::run checks.
     if (aver_fw_quit_requested()) e.requestExit();
+    // A script's vsync choice (Display.VSync), applied where the device allows it.
+    if (const int32_t vs = aver_fw_take_vsync_request(); vs >= 0)
+        if (rhi::IDevice* dev = e.device(); dev && (vs == 1 || dev->vsyncCanDisable())) dev->setVSync(vs == 1);
     // Foreground: asked once for cursor confinement and player drive input. Falls back to "a window exists" (no portable Win32 query).
     bool foreground = e.window() != nullptr;
 #if defined(_WIN32)
@@ -2485,6 +2482,9 @@ void GameApp::onRender(Engine& e) {
 #endif
 #endif
         drawWorld(*dev, viewProj_, content_, drawStats_, ms, skinnedScene_.get(), opts);
+#if AVER_MODULE_FRAMEWORK
+        game::drawScriptDebugLines(dev, scriptDebugMesh_, e.time().dt);   // scripts' DebugDraw lines
+#endif
     }
 #endif
 #if AVER_WITH_UI_ABI

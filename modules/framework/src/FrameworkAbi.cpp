@@ -762,6 +762,57 @@ int32_t aver_fw_groups_leave_all(int32_t entity) {
     return 1;
 }
 
+// Script debug lines: 12 floats each (the LineVertex pair), and the real time each has left (<= 0: one frame).
+static std::vector<float>& debugLineData() { static std::vector<float> v; return v; }
+static std::vector<float>& debugLineLife() { static std::vector<float> v; return v; }
+static constexpr usize kMaxDebugLines = 65536;
+
+void aver_fw_debug_line(const float* from3, const float* to3, const float* rgb3, float seconds) {
+    if (!from3 || !to3 || debugLineLife().size() >= kMaxDebugLines) return;
+    const float white[3] = {1.0f, 1.0f, 1.0f};
+    const float* c = rgb3 ? rgb3 : white;
+    auto& d = debugLineData();
+    d.insert(d.end(), {from3[0], from3[1], from3[2], c[0], c[1], c[2], to3[0], to3[1], to3[2], c[0], c[1], c[2]});
+    debugLineLife().push_back(seconds > 0.0f ? seconds : 0.0f);
+}
+int32_t aver_fw_debug_line_count(void) { return static_cast<int32_t>(debugLineLife().size()); }
+const float* aver_fw_debug_line_data(void) { return debugLineData().empty() ? nullptr : debugLineData().data(); }
+
+// Drops the lines whose time ran out; a one-frame line has been drawn once by now.
+void aver_fw_debug_lines_advance(float realDt) {
+    auto& d = debugLineData();
+    auto& life = debugLineLife();
+    usize keep = 0;
+    for (usize i = 0; i < life.size(); ++i) {
+        const float left = life[i] - realDt;
+        if (left <= 0.0f) continue;
+        if (keep != i) std::copy(d.begin() + static_cast<std::ptrdiff_t>(i * 12), d.begin() + static_cast<std::ptrdiff_t>(i * 12 + 12),
+                                 d.begin() + static_cast<std::ptrdiff_t>(keep * 12));
+        life[keep++] = left;
+    }
+    life.resize(keep);
+    d.resize(keep * 12);
+}
+
+static int32_t g_vsyncRequest = -1;
+void aver_fw_request_vsync(int32_t on) { g_vsyncRequest = on != 0 ? 1 : 0; }
+int32_t aver_fw_take_vsync_request(void) { const int32_t r = g_vsyncRequest; g_vsyncRequest = -1; return r; }
+
+// The open project's directories, as the host published them.
+static std::string g_projectDir, g_contentDir, g_userDir;
+static int32_t g_isEditor = 0;
+
+void aver_fw_set_project(const char* projectDir, const char* contentDir, const char* userDir, int32_t isEditor) {
+    g_projectDir = projectDir ? projectDir : "";
+    g_contentDir = contentDir ? contentDir : "";
+    g_userDir = userDir ? userDir : "";
+    g_isEditor = isEditor != 0;
+}
+const char* aver_fw_project_dir(void) { return g_projectDir.c_str(); }
+const char* aver_fw_content_dir(void) { return g_contentDir.c_str(); }
+const char* aver_fw_user_dir(void) { return g_userDir.c_str(); }
+int32_t aver_fw_is_editor(void) { return g_isEditor; }
+
 // Prefab nodes whose class was not declared yet when they were made: adopted when it seals.
 static std::vector<std::pair<Entity, std::string>>& pendingAdopts() {
     static std::vector<std::pair<Entity, std::string>> v;
