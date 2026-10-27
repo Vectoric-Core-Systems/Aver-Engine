@@ -33,6 +33,8 @@ add_library(Aver.Physics SHARED
   src/PhysicsShapes.cpp
   # Collision layers, and the _ex forms of the three spatial queries that can filter by them.
   src/PhysicsLayers.cpp
+  # Godot-style 32-bit layer/mask, collision exceptions and the mask queries (G2): a Jolt group filter, see docs/physics/GODOT_FILTERING.md.
+  src/PhysicsGodotFilter.cpp
   # The character's own settings: slope, stairs, ground info, and the shape swap that is crouching.
   src/PhysicsCharacter.cpp
   # Wheeled vehicles: Jolt's VehicleConstraint as a builder-style ABI (create the chassis, add wheels,
@@ -49,6 +51,16 @@ add_library(Aver.Physics SHARED
   src/PhysicsRagdoll.cpp
   # Shape casts, overlaps, multi-hit rays and point queries (physics_queries_abi.h).
   src/PhysicsQueries.cpp
+  # Godot's PhysicsDirectSpaceState3D and body_test_motion (G2): ray options, intersect/collide/rest_info/cast_motion, test motion.
+  src/PhysicsSpaceState.cpp
+  # Godot's contact_monitor and Area3D (G2): per-body BEGIN/END, area enter/exit, gravity/damping/wind overrides (physics_areas_abi.h).
+  src/PhysicsAreas.cpp
+  # Godot rigid-body extras (G2): _integrate_forces direct state, custom integrator, constant velocity on static bodies (physics_body_ext_abi.h).
+  src/PhysicsBodyGodot.cpp
+  # Godot's CharacterBody3D.move_and_slide on a kinematic rigid body (G2): floor / wall / ceiling, snap, platforms (physics_kinematic_abi.h).
+  src/PhysicsKinematicCharacter.cpp
+  # Godot's VehicleBody3D as a raycast vehicle next to Jolt's wheeled one (G2): a ray per wheel, spring and friction impulses (physics_raycast_vehicle_abi.h).
+  src/PhysicsRaycastVehicle.cpp
 
   # Heightfields v2 (physics_terrain_abi.h): the one heightfield builder aver_phys_add_heightfield now goes through, holes, cell
   # surfaces and in-place edits (SHAPES_MATERIALS phase C). PhysicsWorld.cpp calls makeHeightfield from here.

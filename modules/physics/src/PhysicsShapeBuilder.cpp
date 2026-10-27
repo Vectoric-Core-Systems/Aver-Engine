@@ -187,6 +187,29 @@ JPH::Ref<JPH::Shape> makeEmpty(const float* com) {
     return finish(s.Create(), "empty");
 }
 
+// A thin capsule whose axis runs from the shape origin along `dir`; the far cap's tip is at lengthCm. See the header for what this approximates.
+JPH::Ref<JPH::Shape> makeSeparationRay(float lengthCm, const float* dir, float radiusCm, int32_t surface) {
+    if (!dir) { aver::setAbiError(AbiError::NullPointer); return nullptr; }
+    const float len = std::sqrt(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]);
+    const float r = radiusCm > 0.0f ? radiusCm : 0.1f;
+    if (!std::isfinite(len) || len < 1.0e-6f || !positive(lengthCm) || !positive(r) || !(lengthCm > 2.0f * r)) {
+        AVER_WARN("[Physics] separation ray needs a direction and a length over twice its radius ({}cm long, {}cm radius)", lengthCm, r);
+        aver::setAbiError(AbiError::InvalidArgument);
+        return nullptr;
+    }
+    const float rM = cmToM(r);
+    JPH::CapsuleShapeSettings s((cmToM(lengthCm) - 2.0f * rM) * 0.5f, rM);
+    s.SetEmbedded();
+    if (surface != 0) s.mMaterial = surfaceMaterial(surface);
+    s.SetDensity(0.001f);   // no weight worth the name: Godot's ray has none
+    const JPH::Ref<JPH::Shape> capsule = finish(s.Create(), "separation ray");
+    if (!capsule) return nullptr;
+    const JPH::Vec3 d = toJoltUnit(Vec3(dir[0] / len, dir[1] / len, dir[2] / len)).Normalized();
+    // The capsule stands along Jolt's Y; turn it onto d.
+    const JPH::Quat rot = d.GetY() < -0.9999f ? JPH::Quat::sRotation(JPH::Vec3::sAxisX(), JPH::JPH_PI) : JPH::Quat::sFromTo(JPH::Vec3::sAxisY(), d);
+    return new JPH::RotatedTranslatedShape(d * (cmToM(lengthCm) * 0.5f), rot, capsule.GetPtr());
+}
+
 JPH::Ref<JPH::Shape> makeHull(const float* pts, int32_t count, int32_t surface, const ShapeParams& sp) {
     if (!pts || count < 4) { aver::setAbiError(AbiError::InvalidArgument); return nullptr; }   // fewer than four points has no volume
     JPH::Array<JPH::Vec3> hull;
@@ -410,6 +433,11 @@ int32_t aver_phys_shape_plane(const float* normalXyz, float offsetCm, float half
 int32_t aver_phys_shape_empty(const float* comXyz) {
     if (!needWorld()) return 0;
     return publish(makeEmpty(comXyz));
+}
+
+int32_t aver_phys_shape_separation_ray(float lengthCm, const float* dirXyz, float radiusCm, int32_t surface) {
+    if (!needWorld()) return 0;
+    return publish(makeSeparationRay(lengthCm, dirXyz, radiusCm, surface));
 }
 
 int32_t aver_phys_shape_convex_hull(const float* pointsXyz, int32_t count, int32_t surface, const float* p, int32_t n) {

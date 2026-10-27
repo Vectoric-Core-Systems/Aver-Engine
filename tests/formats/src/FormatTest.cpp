@@ -402,6 +402,20 @@ static void checkOcproject() {
               "an existing line is replaced, not duplicated");
     }
     {
+        // G2: PHYSICS.COMBINE, a word (jolt|godot) kept as a tri-state; a value that is neither is dropped.
+        ProjectDesc g, j, none, bad;
+        check(parseOcproject("OCPROJECT 1\nNAME C\nPHYSICS.COMBINE godot\n", g, &err) && g.physCombine == 1 && g.hasPhysicsSettings(), "PHYSICS.COMBINE godot parses");
+        check(parseOcproject("OCPROJECT 1\nNAME C\nphysics.combine JOLT\n", j, &err) && j.physCombine == 0, "jolt is a stated value, case-insensitively");
+        check(parseOcproject("OCPROJECT 1\nNAME C\n", none, &err) && none.physCombine == -1, "unstated stays -1");
+        check(parseOcproject("OCPROJECT 1\nNAME C\nPHYSICS.COMBINE unreal\n", bad, &err) && bad.physCombine == -1, "an unknown word is dropped, not read as jolt");
+        const std::string w = writeOcproject(g, "");
+        check(w.find("PHYSICS.COMBINE godot") != std::string::npos && writeOcproject(none, "").find("COMBINE") == std::string::npos, "godot is written, unstated is not");
+        ProjectDesc reread;
+        check(parseOcproject(w, reread, &err) && reread.physCombine == 1 && writeOcproject(reread, w) == w, "round trip, byte-stable");
+        const std::string rw = writeOcproject(g, "OCPROJECT 1\nNAME C\nPHYSICS.COMBINE jolt\n");
+        check(rw.find("PHYSICS.COMBINE jolt") == std::string::npos && rw.find("PHYSICS.COMBINE godot") != std::string::npos, "an existing line is replaced, not duplicated");
+    }
+    {
         // ZERO IS THE POINT for a mix: a project shipping with music muted has to be able to say
         // so, and a `< 0 means unstated` rule would quietly turn that into 1.
         ProjectDesc a;

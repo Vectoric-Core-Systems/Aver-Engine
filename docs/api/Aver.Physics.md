@@ -2,9 +2,51 @@
 
 # Aver.Physics public API
 
-89 public types and 887 public members, read from `scripting/csharp/Aver.Physics/` (45 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+126 public types and 1233 public members, read from `scripting/csharp/Aver.Physics/` (54 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Physics
+
+### Area
+
+`public readonly struct Area : System.IEquatable<Area>` - A sensor body registered as a Godot-style area.
+
+- `public int Handle { get; }`
+- `public Area(int handle)`
+- `public Body Body { get; }`
+- `public bool IsValid { get; }`
+- `public static Area Create(Body sensor)` - Registers a sensor body as an area; invalid if the body is not a sensor.
+- `public bool Destroy()` - Back to a plain sensor.
+- `public static int Count { get; }`
+- `public bool SetFlags(bool monitoring, bool monitorable)` - Monitoring: the area reports who is inside.
+- `public (bool Monitoring, bool Monitorable) Flags`
+- `public bool SetCollision(uint layerBits, uint maskBits)` - The area's layer bits (as a target) and the mask it scans with.
+- `public (uint Layer, uint Mask) Collision`
+- `public bool SetPriority(int priority)`
+- `public bool SetGravity(AreaOverrideMode mode, float magnitudeCmS2, Float3 direction)` - Gravity override: magnitudeCmS2 along direction (world space, normalised natively).
+- `public bool SetGravityPoint(bool on, Float3 centreLocal, float unitDistanceCm)` - Point gravity toward centreLocal (area local, cm); with a unit distance the strength is inverse-square.
+- `public bool SetDamping(AreaOverrideMode linearMode, float linear, AreaOverrideMode angularMode, float angular)`
+- `public bool SetWind(float forceMagnitude, Float3 direction, float attenuation = 0f, float unitDistanceCm = 0f)` - A wind-like force (kg*cm/s^2) on dynamic bodies inside, weakening beyond the unit distance by the attenuation exponent.
+- `public IReadOnlyList<(int Handle, bool IsArea)> Overlaps` - Handles of the bodies and areas inside as of the last fixed step (ascending); empty while monitoring is off.
+- `public bool Equals(Area other)`
+- `public override bool Equals(object? obj)`
+- `public override int GetHashCode()`
+- `public static bool operator ==(Area a, Area b)`
+- `public static bool operator !=(Area a, Area b)`
+
+### AreaEvent
+
+`public readonly struct AreaEvent` - A body or another area entered or left a monitoring area (Godot body_entered / area_entered and the exits).
+
+- `public Area Area { get; }`
+- `public int Other { get; }` - The body or area handle; check OtherIsArea.
+- `public bool Entered { get; }`
+- `public bool OtherIsArea { get; }`
+
+### AreaOverrideMode
+
+`public enum AreaOverrideMode` - How an area treats gravity or damping, in priority order.
+
+Values: `Disabled = 0`, `Combine = 1`, `CombineReplace = 2`, `Replace = 3`, `ReplaceCombine = 4`
 
 ### BendType
 
@@ -16,6 +58,12 @@ Values: `None = 0`, `Distance = 1`, `Dihedral = 2`
 
 `public readonly struct Body : System.IEquatable<Body>` - A body or character in the simulation.
 
+- `public bool SetContactMonitor(bool on, int maxContacts = 0)` - Starts or stops monitoring this body's contacts (Godot contact_monitor with max_contacts_reported).
+- `public bool ContactMonitored { get; }` - True while the body is contact-monitored.
+- `public IReadOnlyList<Body> Contacts { get; }` - The bodies this monitored body touches now (ascending handle, at most max_contacts); empty if unmonitored.
+- `public bool TryGetContact(Body other, out Float3 point, out Float3 normal)` - Where a tracked touch began and its normal (from this body to other); false if not a tracked partner.
+- `public Float3 AreaGravity { get; }` - What the areas and the world would give this body now: gravity in cm/s^2 before its gravity factor (Godot total_gravity).
+- `public (float Linear, float Angular) AreaDamping` - The linear and angular damping the areas and the body's own would give it now.
 - `public int Handle { get; }` - The raw ABI handle.
 - `public Body(int handle)`
 - `public static Body None { get; }`
@@ -58,6 +106,13 @@ Values: `None = 0`, `Distance = 1`, `Dihedral = 2`
 - `public bool Deactivate()`
 - `public int Layer { get; }` - Which collision layer the body is on (0..15), or -1 for a dead handle -- 0 is a real layer.
 - `public bool SetLayer(int layer)`
+- `public bool SetCollisionFilter(uint layerBits, uint maskBits)` - Gives the body a Godot layer and mask (bitmasks).
+- `public (uint Layer, uint Mask)? CollisionFilter` - The body's Godot layer and mask, or null when it follows the matrix only.
+- `public bool ClearCollisionFilter()` - Back to the 16-layer matrix alone; exceptions stay.
+- `public bool AddCollisionException(Body other)` - Makes this body and other never collide (Godot add_collision_exception_with).
+- `public bool RemoveCollisionException(Body other)` - True if an exception was removed.
+- `public bool HasCollisionException(Body other)`
+- `public bool ClearCollisionExceptions()`
 - `public bool SetEntity(int entity)` - Stamps this body (or character) with the scene entity that owns it, so a later raycast against it reports that entity.
 - `public bool SetWaterVolume(Float3 surfacePos, Float3 surfaceNormal, float buoyancy, float linearDrag, float angularDrag, Float3 fluidVelocity)`
 - `public bool ClearWaterVolume()` - Removes this body's override, returning it to the global plane if one is set.
@@ -83,6 +138,13 @@ Values: `None = 0`, `Distance = 1`, `Dihedral = 2`
 - `public bool SetAllowSleeping(bool on)`
 - `public bool IsSensor { get; }` - True when the body is a sensor (trigger volume: detects overlap, pushes nothing).
 - `public bool SetSensor(bool on)` - Turns an existing body into a sensor, or back into a solid.
+- `public bool SetIntegrateForces(IntegrateForcesHandler? handler)` - Calls handler each fixed step while this body is awake (Godot RigidBody3D._integrate_forces); null clears it.
+- `public bool CustomIntegrator { get; }` - Godot custom_integrator: the engine stops applying gravity and damping to this body, so it moves only by what the SetIntegrateForces handler and collisions do.
+- `public bool SetCustomIntegrator(bool on)`
+- `public bool SetConstantVelocity(Float3 linear, Float3 angular)` - Godot StaticBody3D constant_linear_velocity / constant_angular_velocity: bodies touching this static or kinematic body are driven as if its surface moved at linear (cm/s, world) and spun at angular (rad/s, world axes, about the body's origin).
+- `public (Float3 Linear, Float3 Angular) ConstantVelocity`
+- `public bool SetShapeDisabled(int index, bool disabled = true)` - Godot CollisionShape3D.disabled: the shape stops colliding without leaving the body (its index and user data stay; the body's mass is kept).
+- `public bool IsShapeDisabled(int index = -1)`
 - `public CollisionShape Shape()` - A new handle on this body's current shape (release it when done).
 - `public bool SetShape(CollisionShape shape, bool keepMass = true)` - Swaps the shape; the body's origin stays where it was.
 - `public bool SetScale(Float3 scale, bool keepMass = false)` - Scale relative to the unscaled shape (absolute, not cumulative).
@@ -94,10 +156,23 @@ Values: `None = 0`, `Distance = 1`, `Dihedral = 2`
 - `public bool SetChildTransform(int index, Float3 position, Quaternion rotation)` - Moves a child, in the compound's own frame.
 - `public int ChildCount { get; }` - The children of a compound shape; -1 when the body is not a compound.
 - `public int Triangles(Float3 min, Float3 max, Span<float> xyz, Span<int> surfaces)` - The collision triangles in a world box (nine floats each, engine cm) with a surface id per triangle.
+- `public CombineFlags CombineFlags { get; }` - The body's Godot material flags (rough, absorbent); none (0) for a dead handle.
+- `public bool SetCombineFlags(CombineFlags flags)` - Sets the body's rough / absorbent flags.
 - `public ShapeHit Cast(Float3 displacement, uint layerMask = Physics.LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None)` - Sweeps this body's own shape by displacement and returns the first thing it would touch.
 - `public Body[] OverlapAt(Float3 position, Quaternion rotation, uint layerMask = Physics.LayerMaskAll, Body ignoreBody = default, QueryFlags flags = QueryFlags.None, int maxResults = 64)` - What this body's shape would overlap at another pose.
+- `public MotionTestResult? TestMotion(Float3 motion, float marginCm, SpaceQueryFlags flags, IReadOnlyList<Body>? exclude = null, int maxContacts = 4, (Float3 Position, Quaternion Rotation)? originPose = null)` - Godot body_test_motion for this body: where would it get to if it moved by motion (centimetres)?
 - `public int Surface { get; }` - The body's surface label (0 = none): identity for queries, not contact friction.
 - `public bool SetSurface(int surface, bool copyPhysics = false)` - Labels the body with surface (0 clears it).
+
+### BodyContactEvent
+
+`public readonly struct BodyContactEvent` - A monitored body started or stopped touching another body (Godot body_entered / body_exited).
+
+- `public Body Body { get; }` - The monitored body.
+- `public Body Other { get; }` - Its partner.
+- `public bool Began { get; }` - True for BEGIN, false for END.
+- `public Float3 Point { get; }` - Where the pair first touched, centimetres, world space.
+- `public Float3 Normal { get; }` - Unit normal from Body to Other at the first touch.
 
 ### BuoyFlags
 
@@ -176,6 +251,7 @@ Values: `WorldWater = 1`, `OwnPlane = 2`
 - `public static CollisionShape Triangle(Float3 a, Float3 b, Float3 c, int surface = 0, ShapeParams? p = null)` - A thin convex triangle (not a mesh): a one-off blade or ramp.
 - `public static CollisionShape Plane(Float3 normal, float offsetCm, float halfExtentCm, int surface = 0)` - The points with normal .
 - `public static CollisionShape Empty(Float3 centerOfMass)` - No volume, collides with nothing: a placeholder, or a kinematic anchor for a joint.
+- `public static CollisionShape SeparationRay(float length, Float3 direction, float radius = 0f, int surface = 0)` - Godot SeparationRayShape3D, approximated by a thin solid capsule from the origin along direction for length cm: a body holding it comes to rest with the tip on the surface (separation along the contact normal, i.e.
 - `public static CollisionShape ConvexHull(Float3[] points, int surface = 0, ShapeParams? p = null)` - The convex hull of at least four non-coplanar points.
 - `public static CollisionShape Mesh(Float3[] vertices, int[] indices, byte[]? triPalette = null, int[]? palette = null, int[]? triUserData = null, ShapeParams? p = null)` - A triangle mesh.
 - `public CollisionShape RotatedTranslated(Float3 position, Quaternion rotation)`
@@ -193,6 +269,18 @@ Values: `WorldWater = 1`, `OwnPlane = 2`
 - `public static bool operator ==(CollisionShape a, CollisionShape b)`
 - `public static bool operator !=(CollisionShape a, CollisionShape b)`
 - `public override string ToString()`
+
+### CombineFlags
+
+`public enum CombineFlags` - Per-body flags used by Godot only.
+
+Values: `Rough = 1`, `Absorbent = 2`
+
+### CombineMode
+
+`public enum CombineMode` - How two materials combine in a contact.
+
+Values: `Jolt = 0`, `Godot = 1`
 
 ### CompoundKind
 
@@ -224,6 +312,23 @@ Values: `Static = 0`, `Mutable = 1`
 
 Values: `Open = 0`, `LimitedSlip = 1`, `Locked = 2`
 
+### DirectBodyState
+
+`public struct DirectBodyState` - What SetIntegrateForces hands the callback each fixed step: a copy of the body's state (Godot's PhysicsDirectBodyState3D).
+
+- `public int BodyHandle`
+- `public int ContactCount` - Tracked contacts if the body is contact-monitored (SetContactMonitor), else 0.
+- `public float Dt` - The game time this step simulates, seconds.
+- `public float InverseMass` - 1/kg; 0 for a kinematic body or one whose translation is frozen.
+- `public float GravityFactor` - The body's gravity scale (its value from before the custom integrator was switched on).
+- `public Float3 Position` - Centre of mass, centimetres.
+- `public Quaternion Rotation`
+- `public Float3 LinearVelocity` - cm/s.
+- `public Float3 AngularVelocity` - Radians per second.
+- `public Float3 TotalGravity` - World gravity plus the areas the body is in, cm/s^2, NOT scaled by GravityFactor (Godot total_gravity).
+- `public Float3 InverseInertiaRow0, InverseInertiaRow1, InverseInertiaRow2` - The world-space inverse inertia tensor, row by row, engine axes, 1/(kg cm^2).
+- `public readonly Body Body { get; }`
+
 ### DriverAids
 
 `public readonly record struct DriverAids( bool Enabled, bool Abs, float AbsSlip, float AbsRelease, bool Tcs, float TcsSlip, float SteerIn, float SteerOut, float ThrottleIn, float ThrottleOut, float BrakeIn, bool ReverseOnBrake, float ReverseSpeed, float HoldBrake, float HoldSpeed, float SkidSlip, float SkidAngleDeg)` - The driver aids of SetAssists (VD in the header).
@@ -250,6 +355,121 @@ Values: `Open = 0`, `LimitedSlip = 1`, `Locked = 2`
 `public readonly record struct GearboxTiming(float SwitchTime, float ClutchReleaseTime, float SwitchLatency, float ShiftUpFraction, float ShiftDownFraction, float ClutchStrength)` - The gearbox timings of SetGearbox.
 
 - `public static GearboxTiming Jolt { get; }` - Jolt's own timings (the clutch strength 0 means "scale with the engine's torque").
+
+### GodotAngularAxis
+
+`public sealed record GodotAngularAxis` - One angular axis of a Generic6DOFJoint3D (radians, newton-metres).
+
+- `public bool LimitEnabled { get; init; }`
+- `public float LimitUpper { get; init; }`
+- `public float LimitLower { get; init; }`
+- `public bool SpringEnabled { get; init; }`
+- `public float SpringStiffness { get; init; }` - N*m/rad.
+- `public float SpringDamping { get; init; }` - N*m*s/rad.
+- `public float SpringEquilibriumPoint { get; init; }`
+- `public bool MotorEnabled { get; init; }`
+- `public float MotorTargetVelocity { get; init; }` - rad/s.
+- `public float MotorForceLimit { get; init; }` - N*m; 0 leaves the motor unlimited.
+- `public float? LimitSoftness { get; init; }`
+- `public float? LimitRestitution { get; init; }`
+- `public float? LimitForceLimit { get; init; }`
+- `public float? LimitErp { get; init; }`
+
+### GodotConeTwistParams
+
+`public sealed record GodotConeTwistParams` - ConeTwistJoint3D.
+
+- `public float SwingSpan { get; init; }`
+- `public float TwistSpan { get; init; }`
+- `public bool SpansAreFullAngles { get; init; }`
+- `public float? Bias { get; init; }`
+- `public float? Softness { get; init; }`
+- `public float? Relaxation { get; init; }`
+
+### GodotGeneric6DofParams
+
+`public sealed record GodotGeneric6DofParams` - Generic6DOFJoint3D: the frame's X, Y and Z are the three axes.
+
+- `public GodotLinearAxis LinearX { get; init; }`
+- `public GodotLinearAxis LinearY { get; init; }`
+- `public GodotLinearAxis LinearZ { get; init; }`
+- `public GodotAngularAxis AngularX { get; init; }`
+- `public GodotAngularAxis AngularY { get; init; }`
+- `public GodotAngularAxis AngularZ { get; init; }`
+- `public float? EffectiveInertiaKgM2 { get; init; }` - kg*m^2 about the joint axes, for the angular springs (the body's inertia, or the pair's reduced inertia).
+
+### GodotHingeParams
+
+`public sealed record GodotHingeParams` - HingeJoint3D.
+
+- `public bool UseLimit { get; init; }`
+- `public float LimitUpper { get; init; }`
+- `public float LimitLower { get; init; }`
+- `public bool EnableMotor { get; init; }`
+- `public float MotorTargetVelocity { get; init; }`
+- `public float MotorMaxImpulse { get; init; }`
+- `public float? LimitBias { get; init; }`
+- `public float? LimitSoftness { get; init; }`
+- `public float? LimitRelaxation { get; init; }`
+- `public float? Bias { get; init; }`
+
+### GodotJointResult
+
+`public sealed class GodotJointResult` - A joint and what could not be carried over.
+
+- `public Joint Joint { get; }`
+- `public IReadOnlyList<string> Notes { get; }`
+- `public bool Created { get; }`
+
+### GodotJoints
+
+`public static class GodotJoints`
+
+- `public static (float FrequencyHz, float DampingRatio) SpringToHz(float stiffness, float damping, float effectiveMass)` - A spring in Godot's terms (stiffness k, damping c, acting on an effective mass or inertia m) as Jolt's frequency (Hz) and damping ratio.
+- `public static float ReducedMass(Body a, Body b)` - The reduced mass of a pair: both bodies' mass if both move, the moving body's if the other is static or the world.
+- `public static GodotJointResult Pin(Body a, Body b, Float3 anchorCm, GodotPinParams? p = null)` - PinJoint3D -&gt; a point (ball) joint at the anchor.
+- `public static GodotJointResult Hinge(Body a, Body b, Float3 anchorCm, Float3 axis, GodotHingeParams p, float physicsTicksPerSecond)` - HingeJoint3D -&gt; a hinge about axis.
+- `public static GodotJointResult Slider(Body a, Body b, Float3 anchorCm, Float3 axis, GodotSliderParams p)` - SliderJoint3D -&gt; a slider along axis.
+- `public static GodotJointResult ConeTwist(Body a, Body b, Float3 anchorCm, Float3 twistAxis, GodotConeTwistParams p)` - ConeTwistJoint3D -&gt; a swing-twist joint about twistAxis: a round swing cone of swing_span and a twist range of +-twist_span.
+- `public static GodotJointResult Generic6Dof(Body a, Body b, Float3 anchorCm, Float3 axisX, Float3 axisY, GodotGeneric6DofParams p)` - Generic6DOFJoint3D -&gt; a six-DOF joint.
+
+### GodotLinearAxis
+
+`public sealed record GodotLinearAxis` - One linear axis of a Generic6DOFJoint3D (metres, newtons).
+
+- `public bool LimitEnabled { get; init; }`
+- `public float LimitUpper { get; init; }`
+- `public float LimitLower { get; init; }`
+- `public bool SpringEnabled { get; init; }`
+- `public float SpringStiffness { get; init; }` - N/m.
+- `public float SpringDamping { get; init; }` - N*s/m.
+- `public float SpringEquilibriumPoint { get; init; }` - Metres from the joint frame.
+- `public bool MotorEnabled { get; init; }`
+- `public float MotorTargetVelocity { get; init; }` - m/s.
+- `public float MotorForceLimit { get; init; }` - N; 0 leaves the motor unlimited.
+- `public float? LimitSoftness { get; init; }`
+- `public float? LimitRestitution { get; init; }`
+- `public float? LimitDamping { get; init; }`
+
+### GodotPinParams
+
+`public sealed record GodotPinParams` - PinJoint3D.
+
+- `public float? Bias { get; init; }`
+- `public float? Damping { get; init; }`
+- `public float? ImpulseClamp { get; init; }`
+
+### GodotSliderParams
+
+`public sealed record GodotSliderParams` - SliderJoint3D.
+
+- `public float LinearLimitUpper { get; init; }`
+- `public float LinearLimitLower { get; init; }`
+- `public float? LinearLimitSoftness { get; init; }`
+- `public float? LinearLimitRestitution { get; init; }`
+- `public float? LinearLimitDamping { get; init; }`
+- `public float? AngularLimitUpper { get; init; }`
+- `public float? AngularLimitLower { get; init; }`
 
 ### GroundState
 
@@ -359,6 +579,10 @@ Values: `DtUsed = 0`, `Count = 1`
 
 Values: `Iterations = 0`, `Dispatches = 1`, `Updates = 2`, `Wind = 3`, `Count = 4`
 
+### IntegrateForcesHandler
+
+`public delegate void IntegrateForcesHandler(ref DirectBodyState state)` - Godot's _integrate_forces: called once per fixed step for an awake body, before the solver.
+
 ### Joint
 
 `public readonly struct Joint : IEquatable<Joint>` - A constraint between two bodies.
@@ -384,6 +608,7 @@ Values: `Iterations = 0`, `Dispatches = 1`, `Updates = 2`, `Wind = 3`, `Count = 
 - `public bool Remove()` - Removes the joint and destroys it.
 - `public (Body A, Body B) Bodies()` - Which bodies this joint holds.
 - `public bool Enabled { get; set; }` - A disabled joint stops constraining immediately -- the bodies fall apart and can be re-joined by enabling it again, which is what a breakable-but-repairable link is.
+- `public bool ExcludeCollision { get; set; }` - Godot's exclude_nodes_from_collision: while true the two jointed bodies do not collide with each other.
 - `public bool SetMotor(MotorState state, float target)` - Sets the motor state and target for a hinge or slider (radians/centimetres, or their per-second rate for Velocity).
 - `public bool SetMotor(SixDofAxis axis, MotorState state, float target)` - As SetMotor(MotorState, float), for the named axis of a six-DOF joint.
 - `public bool SetMotorStrength(float maxForceOrTorque)` - The most force (slider) or torque (hinge/rotation axis) the motor may exert.
@@ -410,6 +635,92 @@ Values: `Iterations = 0`, `Dispatches = 1`, `Updates = 2`, `Wind = 3`, `Count = 
 - `public float ForceN { get; }` - The linear load that broke it, newtons.
 - `public float TorqueNm { get; }` - The angular load that broke it, newton-metres.
 
+### KinematicCharacter
+
+`public readonly struct KinematicCharacter : IEquatable<KinematicCharacter>` - A kinematic rigid body driven like Godot's CharacterBody3D.
+
+- `public int Handle { get; }`
+- `public KinematicCharacter(int handle)`
+- `public bool IsValid { get; }`
+- `public Body Body { get; }`
+- `public static int Count { get; }`
+- `public static KinematicCharacter Create(Body body, KinematicCharacterOptions? options = null)` - Puts a controller on a kinematic body and applies options (Godot's defaults when null).
+- `public bool Destroy()` - Removes the controller; the body stays.
+- `public void Apply(KinematicCharacterOptions o)` - Sets every option.
+- `public KinematicMotionMode MotionMode { get; set; }`
+- `public int MaxSlides { get; set; }`
+- `public float FloorMaxAngle { get; set; }`
+- `public float WallMinSlideAngle { get; set; }`
+- `public float FloorSnapLengthCm { get; set; }`
+- `public float SafeMarginCm { get; set; }`
+- `public bool FloorStopOnSlope { get; set; }`
+- `public bool FloorConstantSpeed { get; set; }`
+- `public bool FloorBlockOnWall { get; set; }`
+- `public bool SlideOnCeiling { get; set; }`
+- `public PlatformOnLeave PlatformOnLeave { get; set; }`
+- `public Float3 UpDirection { get; set; }`
+- `public Float3 Velocity { get; set; }` - The velocity the script drives (cm/s, world).
+- `public (uint Floor, uint Wall) PlatformLayers`
+- `public bool SetPlatformLayers(uint floorLayers, uint wallLayers)`
+- `public bool MoveAndSlide(float dt)` - Godot's move_and_slide for a step of dt seconds.
+- `public bool Clear()` - Forgets the results and the platform (after a teleport).
+- `public KinematicState State { get; }`
+- `public bool IsOnFloor { get; }`
+- `public bool IsOnWall { get; }`
+- `public bool IsOnCeiling { get; }`
+- `public bool IsOnFloorOnly { get; }`
+- `public bool IsOnWallOnly { get; }`
+- `public bool IsOnCeilingOnly { get; }`
+- `public Float3 GetFloorNormal()`
+- `public Float3 GetWallNormal()`
+- `public Float3 GetPlatformVelocity()`
+- `public Float3 GetRealVelocity()`
+- `public Float3 GetLastMotion()`
+- `public Float3 GetPositionDelta()`
+- `public Body GetPlatform()` - The body carrying this one (get_platform_rid); invalid when none.
+- `public float GetFloorAngle()` - The angle between the floor normal and up, radians; 0 when not on the floor.
+- `public int GetSlideCollisionCount()`
+- `public SlideCollision? GetSlideCollision(int index)`
+- `public SlideCollision? GetLastSlideCollision()` - The last collision of the call, or null when there was none.
+- `public IReadOnlyList<SlideCollision> SlideCollisions { get; }` - Every collision of the last call, in the order they happened.
+- `public bool Equals(KinematicCharacter other)`
+- `public override bool Equals(object? obj)`
+- `public override int GetHashCode()`
+- `public static bool operator ==(KinematicCharacter a, KinematicCharacter b)`
+- `public static bool operator !=(KinematicCharacter a, KinematicCharacter b)`
+
+### KinematicCharacterOptions
+
+`public sealed record KinematicCharacterOptions` - Every option of a KinematicCharacter.
+
+- `public KinematicMotionMode MotionMode { get; init; }`
+- `public int MaxSlides { get; init; }`
+- `public float FloorMaxAngle { get; init; }` - Radians: a surface within this angle of up is floor.
+- `public float WallMinSlideAngle { get; init; }` - Radians; floating mode only.
+- `public float FloorSnapLengthCm { get; init; }`
+- `public float SafeMarginCm { get; init; }`
+- `public bool FloorStopOnSlope { get; init; }`
+- `public bool FloorConstantSpeed { get; init; }`
+- `public bool FloorBlockOnWall { get; init; }`
+- `public bool SlideOnCeiling { get; init; }`
+- `public PlatformOnLeave PlatformOnLeave { get; init; }`
+- `public uint PlatformFloorLayers { get; init; }`
+- `public uint PlatformWallLayers { get; init; }`
+- `public Float3 UpDirection { get; init; }`
+- `public static KinematicCharacterOptions Godot { get; }` - Godot's CharacterBody3D defaults (safe_margin 0.001 m = 0.1 cm, floor_snap_length 0.1 m = 10 cm).
+
+### KinematicMotionMode
+
+`public enum KinematicMotionMode` - CharacterBody3D.motion_mode.
+
+Values: `Grounded = 0`, `Floating = 1`
+
+### KinematicState
+
+`public enum KinematicState` - What the last MoveAndSlide touched.
+
+Values: `Floor = 1`, `Wall = 2`, `Ceiling = 4`
+
 ### LockAxes
 
 `public enum LockAxes : uint` - Degrees of freedom of a body that can be frozen, in ENGINE axes (X forward, Y right, Z up).
@@ -421,6 +732,22 @@ Values: `None = 0`, `TranslationX = 0x01`, `TranslationY = 0x02`, `TranslationZ 
 `public enum LraMode` - Long range attachments made from the closest pinned vertex.
 
 Values: `Off = 0`, `Euclidean = 1`, `Geodesic = 2`
+
+### MotionCast
+
+`public readonly record struct MotionCast(float Safe, float Unsafe, Body Collider, Float3 Point, Float3 Normal)` - cast_motion: the fractions (0..1) of the motion that are safe and where the shape first touches.
+
+- `public bool Hit { get; }`
+
+### MotionContact
+
+`public readonly record struct MotionContact(Body Collider, int Entity, int SubShape, Float3 Point, Float3 Normal, Float3 ColliderVelocity, Float3 ColliderAngularVelocity, float Depth)` - A contact found by TestMotion.
+
+### MotionTestResult
+
+`public readonly record struct MotionTestResult(bool Collided, Float3 Travel, Float3 Remainder, Float3 Recovery, float SafeFraction, float UnsafeFraction, MotionContact[] Contacts)` - The outcome of TestMotion.
+
+- `public MotionContact Collision { get; }` - The contact that stopped the body (or the deepest recovery contact); default when there is none.
 
 ### MotionType
 
@@ -446,6 +773,10 @@ Values: `Off = 0`, `Velocity = 1`, `Position = 2`
 
 `public static class Physics` - The simulation itself: starting it, gravity, stepping, creation, queries and the event queues.
 
+- `public static IReadOnlyList<BodyContactEvent> BodyContactEvents { get; }` - Contact-monitor BEGIN and END records of the last Step call (one per monitored side).
+- `public static IReadOnlyList<AreaEvent> AreaEvents { get; }` - Area enter and exit records of the last Step call.
+- `public static CombineMode CombineRule { get; }` - The world's combine rule.
+- `public static bool SetCombineRule(CombineMode mode)` - Selects the combine rule; false for no world, an unknown mode, or while the world is stepping.
 - `public static IReadOnlyList<JointBreak> JointBreaks()` - Joints that broke since the queue was last cleared, oldest first.
 - `public static void ClearJointBreaks()` - Empties the break queue.
 - `public static IReadOnlyList<JointBreak> DrainJointBreaks()` - Reads the break queue and clears it, so each break is seen exactly once.
@@ -489,6 +820,10 @@ Values: `Off = 0`, `Velocity = 1`, `Position = 2`
 - `public static Body[] OverlapSphereEx(Float3 centre, float radius, uint layerMask, Body ignoreBody, int maxResults = 64)` - As OverlapSphere, filtered to a layer mask and skipping ignoreBody.
 - `public static RaycastHit SphereCast(Float3 origin, Float3 direction, float maxDistanceCm, float radius)` - Sweeps a sphere and returns the first thing it touches.
 - `public static RaycastHit SphereCastEx(Float3 origin, Float3 direction, float maxDistanceCm, float radius, uint layerMask, Body ignoreBody)` - As SphereCast, filtered to a layer mask and skipping ignoreBody.
+- `public static RaycastHit RaycastMask(Float3 origin, Float3 direction, float maxDistanceCm, uint collisionMask, Body ignoreBody = default)` - As RaycastEx, but with a 32-bit Godot collision mask.
+- `public static Body[] OverlapSphereMask(Float3 centre, float radius, uint collisionMask, Body ignoreBody = default, int maxResults = 64)` - As OverlapSphereEx, but with a 32-bit Godot collision mask.
+- `public static RaycastHit SphereCastMask(Float3 origin, Float3 direction, float maxDistanceCm, float radius, uint collisionMask, Body ignoreBody = default)` - As SphereCastEx, but with a 32-bit Godot collision mask.
+- `public static bool BodiesCanCollide(Body a, Body b)` - Whether the simulation would let these two bodies collide, from filtering alone (static-vs-static, the 16-layer matrix, the Godot layer/mask rule, exceptions and joint exclusion).
 - `public static float GetSetting(PhysicsSetting key)` - The setting's current value.
 - `public static bool SetSetting(PhysicsSetting key, float value)` - Sets a setting (clamped into its range, whole numbers for counts and flags).
 - `public static bool ResetSetting(PhysicsSetting key)` - Puts a setting back to Jolt's default.
@@ -687,6 +1022,12 @@ Values: `Bodies = 0`, `MaxBodies = 1`, `Static = 2`, `Dynamic = 3`, `ActiveDynam
 
 Values: `None = 0`, `ManifoldCacheFull = 1`, `BodyPairCacheFull = 2`, `ContactConstraintsFull = 4`
 
+### PlatformOnLeave
+
+`public enum PlatformOnLeave` - CharacterBody3D.platform_on_leave.
+
+Values: `AddVelocity = 0`, `AddUpwardVelocity = 1`, `DoNothing = 2`
+
 ### ProfileRow
 
 `public readonly record struct ProfileRow(string Name, double InclusiveMs, double ExclusiveMs, double MaxMs, double CallsPerStep, int Parent, int Depth)` - One scope of the profiler table: a Jolt stage or one of the engine's fixed-step stages.
@@ -755,6 +1096,29 @@ Values: `None = 0`, `IncludeSensors = 1`
 
 Values: `Kinematic = 0`, `Limp = 1`, `Powered = 2`
 
+### RayCast3D
+
+`public sealed class RayCast3D` - Godot's RayCast3D as a plain object: set it up, call Update once per physics tick, read the result.
+
+- `public Float3 Origin { get; set; }`
+- `public Float3 Target { get; set; }` - The far end of the ray in world space (Godot's target_position, already transformed).
+- `public bool Enabled { get; set; }`
+- `public uint CollisionMask { get; set; }`
+- `public bool CollideWithBodies { get; set; }`
+- `public bool CollideWithAreas { get; set; }`
+- `public bool HitFromInside { get; set; }`
+- `public bool HitBackFaces { get; set; }`
+- `public List<Body> Exceptions { get; }`
+- `public SpaceRayHit Result { get; }`
+- `public bool IsColliding { get; }`
+- `public Body Collider { get; }`
+- `public Float3 CollisionPoint { get; }`
+- `public Float3 CollisionNormal { get; }`
+- `public void AddException(Body b)`
+- `public void RemoveException(Body b)`
+- `public void ClearExceptions()`
+- `public SpaceRayHit Update()` - Re-casts the ray now (Godot force_raycast_update).
+
 ### RaycastHit
 
 `public readonly struct RaycastHit` - What a raycast or sphere cast found.
@@ -764,6 +1128,86 @@ Values: `Kinematic = 0`, `Limp = 1`, `Powered = 2`
 - `public Float3 Point { get; }` - Where the ray met the surface, centimetres.
 - `public Float3 Normal { get; }` - The surface normal at that point, unit length.
 - `public bool Hit { get; }` - True when something was hit.
+
+### RaycastVehicle
+
+`public readonly struct RaycastVehicle : IEquatable<RaycastVehicle>` - A raycast vehicle on a dynamic body (Godot VehicleBody3D).
+
+- `public const int AllWheels = -1` - Pass as a wheel index to set every wheel.
+- `public int Handle { get; }`
+- `public RaycastVehicle(int handle)`
+- `public static RaycastVehicle None { get; }`
+- `public bool IsValid { get; }`
+- `public static int Count { get; }`
+- `public Body Chassis { get; }`
+- `public int WheelCount { get; }`
+- `public static RaycastVehicle Create(Body chassis)` - Makes chassis (a dynamic, non-sensor body that is not a Jolt vehicle's chassis) a raycast vehicle; None if refused.
+- `public bool Destroy()`
+- `public int AddWheel(RaycastWheelSettings settings)` - Adds a wheel; its index (add order), or -1 if the numbers are refused.
+- `public bool SetFrictionSlip(int wheel, float value)`
+- `public bool SetRollInfluence(int wheel, float value)`
+- `public bool SetSuspension(int wheel, float stiffness, float dampingCompression, float dampingRelaxation)`
+- `public bool SetWheelMask(int wheel, uint mask)`
+- `public uint? WheelMask(int wheel)`
+- `public bool SetEngineForce(int wheel, float force)` - Engine force (kg*cm/s^2) along the wheel's forward; only a wheel with UseAsTraction, only on the ground.
+- `public bool SetBrake(int wheel, float brake)` - The most braking force (kg*cm/s^2, not per step) the wheel may apply.
+- `public bool SetSteering(int wheel, float radians)` - Steering in radians, positive toward the axle side; only a wheel with UseAsSteering.
+- `public RaycastWheelState? GetWheelState(int wheel)`
+- `public bool TryGetWheelPose(int wheel, out Float3 position, out Quaternion rotation)` - The wheel's centre (world, cm) and rotation for a mesh: at rest its forward is +X, its axle +Y, its up +Z.
+- `public bool Equals(RaycastVehicle other)`
+- `public override bool Equals(object? obj)`
+- `public override int GetHashCode()`
+- `public static bool operator ==(RaycastVehicle a, RaycastVehicle b)`
+- `public static bool operator !=(RaycastVehicle a, RaycastVehicle b)`
+- `public override string ToString()`
+
+### RaycastWheelSettings
+
+`public sealed record RaycastWheelSettings` - Everything a wheel is built from.
+
+- `public Float3 ConnectionPoint { get; init; }` - Where the suspension ray starts, in the chassis body's local space (cm).
+- `public Float3 SuspensionDirection { get; init; }` - The suspension direction, from the chassis toward the ground (normalised natively).
+- `public Float3 Axle { get; init; }` - The wheel's axle: the direction its side friction acts along.
+- `public float RestLength { get; init; }` - Suspension length with no load (cm); the ray reaches this plus the radius.
+- `public float MaxTravel { get; init; }` - How far the suspension can compress below the rest length (cm).
+- `public float Stiffness { get; init; }` - Mass-normalised spring (1/s^2): the force is this times the compression times the chassis mass, for every wheel.
+- `public float DampingCompression { get; init; }` - Mass-normalised damping while the suspension compresses (1/s).
+- `public float DampingRelaxation { get; init; }` - Mass-normalised damping while it extends (1/s).
+- `public float MaxForce { get; init; }` - The most the suspension pushes (kg*cm/s^2); 0 = no limit.
+- `public float Radius { get; init; }` - Wheel radius (cm).
+- `public float FrictionSlip { get; init; }` - Friction coefficient: the wheel's grip is this times its suspension load.
+- `public float RollInfluence { get; init; }` - Scales the height at which side friction acts: 1 at the contact, 0 at the centre of mass (no roll from tyres).
+- `public bool UseAsTraction { get; init; }` - Engine force counts for this wheel.
+- `public bool UseAsSteering { get; init; }` - Steering counts for this wheel.
+- `public uint CollisionMask { get; init; }` - Godot layer bits the wheel's ray hits (default every layer).
+- `public static Float3 FromGodotAxes(Float3 g)` - Godot's axes (+X right, +Y up, -Z forward) to Aver's (+Y right, +Z up, +X forward) for a direction or a position.
+- `public static RaycastWheelSettings FromGodot(Float3 connectionPoint, Float3 suspensionDirection, Float3 axle, float restLength, float suspensionTravel, float stiffness, float dampingCompression, float dampingRelaxation, float maxForceN, float radius, float frictionSlip, float rollInfluence, bool useAsTraction, bool useAsSteering, uint collisionMask = 0xFFFFFFFFu)` - The settings of a Godot VehicleWheel3D.
+- `public static float DampingFromRatio(float ratio, float stiffness)` - A damping ratio (1 = critical for one wheel's share of the spring) to the mass-normalised damping (1/s): ratio x 2 x sqrt(stiffness).
+- `public static float EngineForceFromGodot(float newtons)` - Godot's engine_force (newtons) to the ABI's kg*cm/s^2.
+- `public static float BrakeFromGodot(float brakeImpulsePerStep, float physicsTicksPerSecond)` - Godot's brake is an IMPULSE applied every physics step; the ABI takes a force: impulse x ticks per second x 100 (cm).
+- `public static float SteeringFromGodot(float radians)` - Godot's steering is positive to the LEFT; the ABI's is positive toward the axle side (right).
+
+### RaycastWheelState
+
+`public readonly struct RaycastWheelState` - What a wheel did in the last step's pre-solver phase.
+
+- `public bool InContact { get; init; }`
+- `public Float3 ContactPoint { get; init; }` - World space; the ray's end when not in contact.
+- `public Float3 ContactNormal { get; init; }`
+- `public float SuspensionLength { get; init; }`
+- `public float SuspensionForce { get; init; }`
+- `public float SkidInfo { get; init; }` - 1 = gripping; below 1 the friction limit scaled the wheel's impulses to this fraction.
+- `public float Spin { get; init; }` - rad/s, positive rolling forward.
+- `public float Rotation { get; init; }`
+- `public float Rpm { get; init; }`
+- `public float ForwardSpeed { get; init; }`
+- `public float SideSpeed { get; init; }`
+- `public Body Ground { get; init; }` - The ground body, or None.
+- `public float SteerApplied { get; init; }`
+
+### RestInfo
+
+`public readonly record struct RestInfo(Body Collider, int Entity, int SubShape, Float3 Point, Float3 Normal, Float3 LinearVelocity, float Depth)` - get_rest_info: the deepest contact, with the collider's velocity at that point.
 
 ### RestoreOptions
 
@@ -777,9 +1221,38 @@ Values: `Strict = 0x01`
 
 Values: `Ok = 0`, `BadHandle = -1`, `BadHeader = -2`, `BuildMismatch = -3`, `Topology = -4`, `Corrupt = -5`
 
+### ShapeCast3D
+
+`public sealed class ShapeCast3D` - Godot's ShapeCast3D as a plain object: sweeps Shape along Motion and lists what it touches.
+
+- `public CollisionShape Shape { get; set; }`
+- `public Float3 Position { get; set; }`
+- `public Quaternion Rotation { get; set; }`
+- `public Float3 Motion { get; set; }` - The displacement to sweep, centimetres (Godot's target_position).
+- `public float MarginCm { get; set; }`
+- `public int MaxResults { get; set; }`
+- `public bool Enabled { get; set; }`
+- `public uint CollisionMask { get; set; }`
+- `public bool CollideWithBodies { get; set; }`
+- `public bool CollideWithAreas { get; set; }`
+- `public List<Body> Exceptions { get; }`
+- `public MotionCast Cast { get; }`
+- `public ShapeContact[] Contacts { get; }` - What the shape overlaps where it starts, then its contacts where it first touches (Godot get_collision_count and friends).
+- `public bool IsColliding { get; }`
+- `public float ClosestSafeFraction { get; }`
+- `public float ClosestUnsafeFraction { get; }`
+- `public void AddException(Body b)`
+- `public void RemoveException(Body b)`
+- `public void ClearExceptions()`
+- `public void Update()` - Re-casts now (Godot force_shapecast_update).
+
 ### ShapeChild
 
 `public readonly record struct ShapeChild(CollisionShape Shape, Float3 Position, Quaternion Rotation, int UserData = 0)` - One child of a compound: a shape at a position and rotation in the compound's frame, with a user value a raycast detail reports back.
+
+### ShapeContact
+
+`public readonly record struct ShapeContact(Body Collider, Float3 PointOnShape, Float3 PointOnCollider, Float3 Normal, float Depth)` - One contact of a shape against a collider (collide_shape).
 
 ### ShapeHit
 
@@ -794,6 +1267,10 @@ Values: `Ok = 0`, `BadHandle = -1`, `BadHeader = -2`, `BuildMismatch = -3`, `Top
 ### ShapeInfo
 
 `public readonly record struct ShapeInfo(ShapeType Type, float VolumeCm3, float MassKg, Float3 CenterOfMass, Float3 BoundsMin, Float3 BoundsMax, float InnerRadius, Float3 InertiaPrincipal, Quaternion InertiaFrame, int Children, int Leaves, int Triangles, long Bytes, bool MustBeStatic, bool HasMass)` - What a shape is made of (aver_phys_shape_info).
+
+### ShapeOverlap
+
+`public readonly record struct ShapeOverlap(Body Collider, int SubShape)` - One (body, sub-shape) a shape overlaps.
 
 ### ShapeParams
 
@@ -823,6 +1300,10 @@ Values: `Unknown = 0`, `Box = 1`, `Sphere = 2`, `Capsule = 3`, `Cylinder = 4`, `
 `public enum SixDofAxis` - The six independent axes a SixDof constrains, in the order AVER_PHYS_DOF_* declares them (physics_joints_abi.h): three translations then three rotations.
 
 Values: `TranslationX = 0`, `TranslationY = 1`, `TranslationZ = 2`, `RotationX = 3`, `RotationY = 4`, `RotationZ = 5`
+
+### SlideCollision
+
+`public readonly record struct SlideCollision(Float3 Position, Float3 Normal, Body Collider, int Entity, int SubShape, Float3 ColliderVelocity, Float3 Remainder, Float3 Travel, float Depth, float Angle)` - One collision of the last MoveAndSlide (Godot KinematicCollision3D).
 
 ### SnapshotInfo
 
@@ -933,6 +1414,34 @@ Values: `Normal = 0`, `Sensor = 1`, `Ignore = 2`
 `public enum SoftSlotKind` - Which staged items Slots maps to their final index.
 
 Values: `Volume = 0`, `Lra = 1`, `Rod = 2`, `RodPair = 3`
+
+### SpaceQueryFlags
+
+`public enum SpaceQueryFlags` - Options of the Godot-style queries.
+
+Values: `None = 0`, `Bodies = 1`, `Areas = 2`, `BackFaces = 4`, `FromInside = 8`, `RecoveryAsCollision = 16`
+
+### SpaceRayHit
+
+`public readonly struct SpaceRayHit` - What a Godot-style ray found.
+
+- `public Body Collider { get; }`
+- `public int Entity { get; }` - The collider's entity stamp (0 when none).
+- `public int SubShape { get; }`
+- `public float Distance { get; }` - Centimetres along the ray.
+- `public Float3 Position { get; }`
+- `public Float3 Normal { get; }` - Outward surface normal; zero for a hit from inside.
+- `public bool Hit { get; }`
+
+### SpaceState
+
+`public static class SpaceState` - Godot's PhysicsDirectSpaceState3D.
+
+- `public static SpaceRayHit Raycast(Float3 from, Float3 to, uint collisionMask, SpaceQueryFlags flags, IReadOnlyList<Body>? exclude = null)` - Godot intersect_ray: the nearest hit along from to to.
+- `public static ShapeOverlap[] IntersectShape(CollisionShape shape, Float3 position, Quaternion rotation, float marginCm, uint collisionMask, SpaceQueryFlags flags, IReadOnlyList<Body>? exclude = null, int maxResults = 32)` - Godot intersect_shape: what the shape overlaps (within marginCm), deepest first.
+- `public static ShapeContact[] CollideShape(CollisionShape shape, Float3 position, Quaternion rotation, float marginCm, uint collisionMask, SpaceQueryFlags flags, IReadOnlyList<Body>? exclude = null, int maxContacts = 32)` - Godot collide_shape: the contacts of the shape, deepest first.
+- `public static RestInfo? GetRestInfo(CollisionShape shape, Float3 position, Quaternion rotation, float marginCm, uint collisionMask, SpaceQueryFlags flags, IReadOnlyList<Body>? exclude = null)` - Godot get_rest_info: the single deepest contact, or null when there is none.
+- `public static MotionCast CastMotion(CollisionShape shape, Float3 position, Quaternion rotation, Float3 motion, float marginCm, uint collisionMask, SpaceQueryFlags flags, IReadOnlyList<Body>? exclude = null)` - Godot cast_motion: how far the shape can move along motion (centimetres).
 
 ### SurfaceHit
 

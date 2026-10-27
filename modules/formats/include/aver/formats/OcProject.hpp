@@ -221,6 +221,9 @@ struct ProjectDesc {
     // PHYSICS.INTERPOLATION: 1 = draw simulated bodies between the last two fixed steps (Godot's physics
     // interpolation), 0 = at the last step; -1 = unstated (off).
     int physInterpolation     = -1;
+    // PHYSICS.COMBINE: how two materials combine in a contact. 0 = jolt (friction sqrt(f1 f2), restitution max), 1 = godot (friction
+    // min or max when rough, restitution a clamped sum); -1 = unstated (jolt).
+    int physCombine           = -1;
     // PHYSICS.<NAME> for the live solver settings of physics_world_abi.h (PHYSICS.VELOCITYSTEPS,
     // PHYSICS.SLEEPTIME ...): only the ones the file states, in file order, the name in the setting table's own
     // camelCase spelling ("velocitySteps") and the value as written (the physics ABI clamps it). Formats may not
@@ -230,7 +233,7 @@ struct ProjectDesc {
     bool hasPhysicsSettings() const {
         return hasGravity || fixedStep > 0.0f ||
                physMaxBodies > 0 || physMaxBodyPairs > 0 || physMaxContacts > 0 ||
-               physTempAllocatorMb > 0 || physThreads > -2 || physShapeCache >= 0 || !physicsSettings.empty();
+               physTempAllocatorMb > 0 || physThreads > -2 || physShapeCache >= 0 || physCombine >= 0 || !physicsSettings.empty();
     }
 
     // ---- AUDIO.* -- the mix a project starts at. Bus order matches audio_abi.h. ---------------

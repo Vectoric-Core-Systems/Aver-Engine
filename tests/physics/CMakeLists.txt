@@ -83,6 +83,46 @@ target_link_libraries(LayerTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(LayerTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# GodotFilterTest -- Godot-style 32-bit layer/mask, collision exceptions, joint exclusion and mask queries (G2). Through the ABI only.
+add_executable(GodotFilterTest src/GodotFilterTest.cpp)
+target_link_libraries(GodotFilterTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(GodotFilterTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# CombineRulesTest -- Jolt's and Godot's material combine rules (ROUGH / ABSORBENT) measured through real contacts (G2). Through the ABI only.
+add_executable(CombineRulesTest src/CombineRulesTest.cpp)
+target_link_libraries(CombineRulesTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(CombineRulesTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ContactMonitorTest and AreaTest -- Godot's contact_monitor and Area3D (physics_areas_abi.h, G2). Through the ABI only.
+add_executable(ContactMonitorTest src/ContactMonitorTest.cpp)
+target_link_libraries(ContactMonitorTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(ContactMonitorTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_executable(AreaTest src/AreaTest.cpp)
+target_link_libraries(AreaTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(AreaTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# BodyGodotTest -- Godot's rigid-body extras (G2): _integrate_forces, custom integrator, constant velocity on static bodies, SeparationRay, per-shape disable. Through the ABI only.
+add_executable(BodyGodotTest src/BodyGodotTest.cpp)
+target_link_libraries(BodyGodotTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(BodyGodotTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# KinematicCharacterTest -- Godot's CharacterBody3D.move_and_slide on a kinematic rigid body (physics_kinematic_abi.h, G2). Through the ABI only.
+add_executable(KinematicCharacterTest src/KinematicCharacterTest.cpp)
+target_link_libraries(KinematicCharacterTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(KinematicCharacterTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# RaycastVehicleTest -- Godot's VehicleBody3D as a raycast vehicle (physics_raycast_vehicle_abi.h, G2). Through the ABI only.
+add_executable(RaycastVehicleTest src/RaycastVehicleTest.cpp)
+target_link_libraries(RaycastVehicleTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(RaycastVehicleTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ShapeTest -- the rigid shapes, checked by DROPPING them and measuring where their centres rest.
 # That number is a shape's half-height, measured rather than declared, which is the only check that
 # tells a capsule built to the right size from one built to twice or half of it.
@@ -127,6 +167,11 @@ set_target_properties(RagdollTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BI
 add_executable(QueryTest src/QueryTest.cpp)
 target_link_libraries(QueryTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(QueryTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# SpaceQueryTest -- Godot's PhysicsDirectSpaceState3D and body_test_motion (G2): ray options, intersect/collide/rest_info/cast_motion, test motion. Through the ABI only.
+add_executable(SpaceQueryTest src/SpaceQueryTest.cpp)
+target_link_libraries(SpaceQueryTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(SpaceQueryTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 
 # SphereCastQTest -- aver_phys_sphere_cast_q (physics_queries_abi.h): distance, normal, the sensor skip, two ignore slots (a body and a character), layer masks, the refusals.

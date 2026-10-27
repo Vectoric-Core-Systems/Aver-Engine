@@ -101,6 +101,66 @@ AVER_PHYS_API int32_t aver_phys_sphere_cast_ex(float ox, float oy, float oz,
                                                uint32_t layerMask, int32_t ignoreBody,
                                                float* outPoint, float* outNormal);
 
+// ---- Godot-style 32-bit layer and mask (G2, additive) -------------------------------------------------
+//
+// AN OPT-IN ALTERNATIVE TO THE 16-LAYER MATRIX ABOVE, for content that arrives with Godot's rule. A body
+// that never calls anything in this group keeps today's filtering exactly.
+//
+// The rule: A and B collide when (A.mask & B.layer) != 0 OR (B.mask & A.layer) != 0 -- one side wanting
+// the other is enough, which is NOT the matrix's symmetric yes/no. Bit N is layer N+1 in Godot's naming.
+//
+// HOW THE TWO COEXIST. The object-layer matrix is still consulted first, so both must allow a pair. The
+// mask rule applies only when BOTH bodies carry a Godot filter; a pair with an unfiltered body is decided
+// by the matrix alone. (Default matrix = everything collides, so for a filtered pair the mask decides.)
+// Static-vs-static never collides, whatever the masks say. Filtering lives in the body's Jolt collision
+// group, so it is applied in the broad phase and survives a body being rebuilt (static -> movable).
+// A body that already has another collision group (a ragdoll part, a soft body) cannot take a filter and
+// the setters return 0. Characters (CharacterVirtual) are not filtered by it: they keep the matrix.
+// Changing a filter wakes the body, so something resting on a body that stops colliding falls.
+//
+// Not captured by physics snapshots (physics_state_abi.h), like the layer matrix: configuration, not state.
+// Setters are refused (return 0) while aver_phys_step is running.
+
+// Gives a body a Godot layer and mask. Both are bitmasks; 0 layer = nobody's mask hits it, 0 mask = it wants
+// nobody (others' masks can still hit it). Returns 0 for a dead handle or a body that cannot take a filter.
+AVER_PHYS_API int32_t aver_phys_body_set_collision_filter(int32_t body, uint32_t layerBits, uint32_t maskBits);
+// 1 and the bits when the body carries a Godot filter; 0 (outputs untouched) when it follows the matrix only.
+AVER_PHYS_API int32_t aver_phys_body_collision_filter(int32_t body, uint32_t* outLayerBits, uint32_t* outMaskBits);
+// Back to the matrix alone. Exceptions on the body stay.
+AVER_PHYS_API int32_t aver_phys_body_clear_collision_filter(int32_t body);
+
+// Two bodies that never collide (Godot add_collision_exception_with). Symmetric, works with or without a
+// layer/mask on either body, and stays until removed or one body is. Adding twice is one exception.
+// Applies to rigid-body simulation, not to queries or CharacterVirtual movement.
+AVER_PHYS_API int32_t aver_phys_body_add_collision_exception(int32_t bodyA, int32_t bodyB);
+// 1 if an exception was removed, 0 if there was none (or a dead handle). A joint's own exclusion is separate.
+AVER_PHYS_API int32_t aver_phys_body_remove_collision_exception(int32_t bodyA, int32_t bodyB);
+AVER_PHYS_API int32_t aver_phys_body_has_collision_exception(int32_t bodyA, int32_t bodyB);
+// Removes every exception this body has.
+AVER_PHYS_API int32_t aver_phys_body_clear_collision_exceptions(int32_t body);
+
+// Whether the simulation would let these two collide, from filtering alone: static-vs-static, the
+// matrix, then the Godot rule, exceptions and joint exclusion. 0 for a dead handle or the same body
+// twice. Says nothing about geometry or motion type (a static and a kinematic body still never collide).
+AVER_PHYS_API int32_t aver_phys_bodies_can_collide(int32_t bodyA, int32_t bodyB);
+
+// Queries with a 32-bit Godot mask: as aver_phys_raycast_ex / _overlap_sphere_ex / _sphere_cast_ex, but a
+// body is hit when (collisionMask & its layer bits) != 0. A body without a Godot filter has the single
+// layer bit of its 16-layer user layer (layer 0 = bit 0), so a mask can still address it. Exceptions do not
+// apply to queries. Sensors are not skipped, as in the _ex forms.
+AVER_PHYS_API int32_t aver_phys_raycast_mask(float ox, float oy, float oz,
+                                             float dx, float dy, float dz,
+                                             float maxDistCm, uint32_t collisionMask, int32_t ignoreBody,
+                                             float* outPoint, float* outNormal, int32_t* outEntity);
+AVER_PHYS_API int32_t aver_phys_overlap_sphere_mask(float x, float y, float z, float radius,
+                                                    uint32_t collisionMask, int32_t ignoreBody,
+                                                    int32_t* outBodies, int32_t maxBodies);
+AVER_PHYS_API int32_t aver_phys_sphere_cast_mask(float ox, float oy, float oz,
+                                                 float dx, float dy, float dz,
+                                                 float maxDistCm, float radius,
+                                                 uint32_t collisionMask, int32_t ignoreBody,
+                                                 float* outPoint, float* outNormal);
+
 #ifdef __cplusplus
 }
 #endif

@@ -551,7 +551,7 @@ static std::map<std::string, Signature> csSignatures(const std::string& text, co
 // names every header that together makes up the C side of one C# file.
 struct Abi {
     const char* label;
-    const char* headers[24];  // NULL-terminated; most rows name exactly one (the physics row was full at 12)
+    const char* headers[32];  // NULL-terminated; most rows name exactly one (the physics row was full at 12)
     const char* apiMacro;
     const char* csFile;
     const char* prefix;
@@ -579,6 +579,9 @@ static const Abi kAbis[] = {
       "modules/physics/include/aver/physics/physics_shape_builder_abi.h",
       "modules/physics/include/aver/physics/physics_world_abi.h",
       "modules/physics/include/aver/physics/physics_origin_abi.h",
+      "modules/physics/include/aver/physics/physics_areas_abi.h",
+      "modules/physics/include/aver/physics/physics_kinematic_abi.h",
+      "modules/physics/include/aver/physics/physics_raycast_vehicle_abi.h",
       nullptr},
      "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.cs", "aver_phys_"},
 
@@ -903,6 +906,47 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Physics/ShapeEnums.cs", "ContactFloat", ""},
     {"surface contact ints", "modules/physics/include/aver/physics/physics_surface_abi.h", "AVER_PHYS_CONI_",
      "scripting/csharp/Aver.Physics/ShapeEnums.cs", "ContactInt", ""},
+    // G2: the material combine mode and the per-body rough / absorbent bits of physics_surface_abi.h against CombineRules.cs.
+    {"physics combine modes", "modules/physics/include/aver/physics/physics_surface_abi.h", "AVER_PHYS_COMBINE_",
+     "scripting/csharp/Aver.Physics/CombineRules.cs", "CombineMode", ""},
+    {"physics combine body flags", "modules/physics/include/aver/physics/physics_surface_abi.h", "AVER_PHYS_BODY_COMBINE_",
+     "scripting/csharp/Aver.Physics/CombineRules.cs", "CombineFlags", ""},
+    // G2: the area space-override modes of physics_areas_abi.h against Areas.cs.
+    {"physics area override modes", "modules/physics/include/aver/physics/physics_areas_abi.h", "AVER_PHYS_AREA_OVERRIDE_",
+     "scripting/csharp/Aver.Physics/Areas.cs", "AreaOverrideMode", ""},
+    // G2: the kinematic character's modes, state bits, parameter block and result blocks (physics_kinematic_abi.h) against KinematicCharacter.cs.
+    {"kinematic motion modes", "modules/physics/include/aver/physics/physics_kinematic_abi.h", "AVER_PHYS_KCM_",
+     "scripting/csharp/Aver.Physics/KinematicCharacter.cs", "KinematicMotionMode", ""},
+    {"kinematic platform on leave", "modules/physics/include/aver/physics/physics_kinematic_abi.h", "AVER_PHYS_KCL_",
+     "scripting/csharp/Aver.Physics/KinematicCharacter.cs", "PlatformOnLeave", ""},
+    {"kinematic state bits", "modules/physics/include/aver/physics/physics_kinematic_abi.h", "AVER_PHYS_KCS_",
+     "scripting/csharp/Aver.Physics/KinematicCharacter.cs", "KinematicState", ""},
+    {"kinematic parameters", "modules/physics/include/aver/physics/physics_kinematic_abi.h", "AVER_PHYS_KCP_",
+     "scripting/csharp/Aver.Physics/KinematicCharacter.cs", "KinematicParam", ""},
+    {"kinematic info floats", "modules/physics/include/aver/physics/physics_kinematic_abi.h", "AVER_PHYS_KCI_F_",
+     "scripting/csharp/Aver.Physics/KinematicCharacter.cs", "KinematicInfoFloat", ""},
+    {"kinematic info ints", "modules/physics/include/aver/physics/physics_kinematic_abi.h", "AVER_PHYS_KCI_I_",
+     "scripting/csharp/Aver.Physics/KinematicCharacter.cs", "KinematicInfoInt", ""},
+    {"kinematic collision floats", "modules/physics/include/aver/physics/physics_kinematic_abi.h", "AVER_PHYS_KCC_F_",
+     "scripting/csharp/Aver.Physics/KinematicCharacter.cs", "KinematicCollisionFloat", ""},
+    {"kinematic collision ints", "modules/physics/include/aver/physics/physics_kinematic_abi.h", "AVER_PHYS_KCC_I_",
+     "scripting/csharp/Aver.Physics/KinematicCharacter.cs", "KinematicCollisionInt", ""},
+    // G2: the raycast vehicle's wheel parameter block and wheel state block (physics_raycast_vehicle_abi.h) against RaycastVehicle.cs.
+    {"raycast vehicle wheel params", "modules/physics/include/aver/physics/physics_raycast_vehicle_abi.h", "AVER_PHYS_RAYW_",
+     "scripting/csharp/Aver.Physics/RaycastVehicle.cs", "RaycastWheelParam", ""},
+    {"raycast vehicle wheel state", "modules/physics/include/aver/physics/physics_raycast_vehicle_abi.h", "AVER_PHYS_RAYS_",
+     "scripting/csharp/Aver.Physics/RaycastVehicle.cs", "RaycastWheelStateIndex", ""},
+    // G2: the Godot-style query flags and the body_test_motion result blocks (physics_queries_abi.h) against SpaceState.cs.
+    {"physics space query flags", "modules/physics/include/aver/physics/physics_queries_abi.h", "AVER_PHYS_SQ_",
+     "scripting/csharp/Aver.Physics/SpaceState.cs", "SpaceQueryFlags", ""},
+    {"physics test motion floats", "modules/physics/include/aver/physics/physics_queries_abi.h", "AVER_PHYS_TM_F_",
+     "scripting/csharp/Aver.Physics/SpaceState.cs", "MotionFloat", ""},
+    {"physics test motion ints", "modules/physics/include/aver/physics/physics_queries_abi.h", "AVER_PHYS_TM_I_",
+     "scripting/csharp/Aver.Physics/SpaceState.cs", "MotionInt", ""},
+    {"physics test motion contact floats", "modules/physics/include/aver/physics/physics_queries_abi.h", "AVER_PHYS_TC_F_",
+     "scripting/csharp/Aver.Physics/SpaceState.cs", "MotionContactFloat", ""},
+    {"physics test motion contact ints", "modules/physics/include/aver/physics/physics_queries_abi.h", "AVER_PHYS_TC_I_",
+     "scripting/csharp/Aver.Physics/SpaceState.cs", "MotionContactInt", ""},
     // wave 11 SOFTBODY_HAIR: the extra-parameter block, the pair modes and the buoyancy flags of physics_softbody_ext_abi.h against Aver.Physics/SoftBodyExt.cs (the block's _COUNT is mirrored by SoftBodyExtParam.Count).
     {"soft body ext params", "modules/physics/include/aver/physics/physics_softbody_ext_abi.h", "AVER_PHYS_SBX_P_",
      "scripting/csharp/Aver.Physics/SoftBodyExt.cs", "SoftBodyExtParam", ""},

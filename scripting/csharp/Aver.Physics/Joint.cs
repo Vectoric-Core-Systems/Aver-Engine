@@ -142,6 +142,15 @@ public readonly struct Joint : IEquatable<Joint>
         set => Native.aver_phys_joint_set_enabled(Handle, value ? 1 : 0);
     }
 
+    /// <summary>Godot's exclude_nodes_from_collision: while true the two jointed bodies do not collide with each other.
+    /// Off for every new joint (as before); set it per joint. Owned by the joint, so it ends when the joint does.
+    /// Setting it fails (value unchanged) for a body that cannot take a collision filter, e.g. a ragdoll part.</summary>
+    public bool ExcludeCollision
+    {
+        get => Native.aver_phys_joint_exclude_collision(Handle) != 0;
+        set => Native.aver_phys_joint_set_exclude_collision(Handle, value ? 1 : 0);
+    }
+
     // ---- Motors and limits -------------------------------------------------------------------------------
     // Hinge, slider and six-DOF only. Every other constraint type has no motor in Jolt and these calls
     // return false on them rather than pretending.

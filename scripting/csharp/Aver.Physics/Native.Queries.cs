@@ -21,4 +21,12 @@ internal static partial class Native
 
     [DllImport(Lib)] internal static extern int aver_phys_raycast_all(float ox, float oy, float oz, float dx, float dy, float dz, float maxDistCm, uint layerMask, int ignoreBody, int flags, int maxCount, int[] outBodies, float[] outDistances, float[] outPoints, float[] outNormals);
     [DllImport(Lib)] internal static extern int aver_phys_point_query(float x, float y, float z, uint layerMask, int ignoreBody, int flags, int[] outBodies, int maxCount);
+
+    // Godot-style space-state queries (G2).
+    [DllImport(Lib)] internal static extern int aver_phys_space_raycast(float[] origin3, float[] direction3, float maxDistCm, uint collisionMask, int flags, int[]? excludeBodies, int excludeCount, out float outDistance, float[] outPoint, float[] outNormal, out int outEntity, out int outSubShape);
+    [DllImport(Lib)] internal static extern int aver_phys_space_intersect_shape(int shape, float[] pose7, float marginCm, uint collisionMask, int flags, int[]? excludeBodies, int excludeCount, int maxResults, int[] outBodies, int[] outSubShapes);
+    [DllImport(Lib)] internal static extern int aver_phys_space_collide_shape(int shape, float[] pose7, float marginCm, uint collisionMask, int flags, int[]? excludeBodies, int excludeCount, int maxContacts, int[] outBodies, float[] outPointsOnShape, float[] outPointsOnOther, float[] outNormals, float[] outDepths);
+    [DllImport(Lib)] internal static extern int aver_phys_space_rest_info(int shape, float[] pose7, float marginCm, uint collisionMask, int flags, int[]? excludeBodies, int excludeCount, float[] outPoint, float[] outNormal, float[] outVelocity, out float outDepth, out int outEntity, out int outSubShape);
+    [DllImport(Lib)] internal static extern int aver_phys_space_cast_motion(int shape, float[] pose7, float[] motion3, float marginCm, uint collisionMask, int flags, int[]? excludeBodies, int excludeCount, out float outSafe, out float outUnsafe, out int outBody, float[] outPoint, float[] outNormal);
+    [DllImport(Lib)] internal static extern int aver_phys_body_test_motion(int body, float[]? originPose7, float[] motion3, float marginCm, int flags, int[]? excludeBodies, int excludeCount, int maxContacts, float[] outF, int[] outI, float[]? outContactF, int[]? outContactI);
 }

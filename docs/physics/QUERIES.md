@@ -124,3 +124,7 @@ Defaults: `layerMask = Physics.LayerMaskAll`, `ignoreBody = Body.None`, `flags =
 arithmetic on the scene. The walls sit on +X, +Y and +Z in different tests and box half extents are unequal,
 because a swapped axis in the engine-to-Jolt basis change only shows itself when the wall is somewhere the
 wrong axis does not look.
+
+## Godot-style queries (G2)
+
+Ray options (back faces, from inside, bodies/areas, 32-bit mask, exclude array), `intersect_shape`, `collide_shape`, `get_rest_info`, `cast_motion` on shape handles and `body_test_motion` are in `docs/physics/GODOT_QUERIES.md`. The queries on this page are unchanged.

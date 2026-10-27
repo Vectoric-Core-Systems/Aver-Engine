@@ -4,6 +4,8 @@ What `physics_joints_abi.h` gained (breakable joints, soft limits, motor springs
 `physics_body_ext_abi.h` (locked axes, continuous collision, velocity caps, sleep permission, sensor).
 C# mirrors: `Joint.SetBreak / SetLimitSpring / SetMotorSpring`, `Physics.JointBreaks()`, and the
 `Body` members in `BodyExt.cs`. Test: `tests/physics/src/JointBreakTest.cpp`.
+The same header also carries Godot's `_integrate_forces`, custom integrator and static-body constant velocity (Fabric G2; angular values in radians there):
+`docs/PHYSICS_SHAPES.md` section 11, `BodyGodot.cs`, `tests/physics/src/BodyGodotTest.cpp`.
 
 Units are the engine's (cm, +X forward / +Y right / +Z up, left-handed) with three deliberate exceptions,
 each called out in the header: break thresholds are SI (N, N*m), the max angular velocity is degrees per
@@ -78,3 +80,7 @@ A body made by `aver_phys_body_from_shape` (`docs/PHYSICS_SHAPES.md`) is an ordi
 `aver_phys_body_position` reports the centre of mass while `aver_phys_body_origin` reports the shape's origin (they differ for any compound or offset shape), and `aver_phys_body_set_shape` /
 `aver_phys_body_set_scale` re-apply the body's mass themselves, because Jolt's own shape swap would replace it by volume times density. A body label (`aver_phys_body_set_surface`)
 lives in the upper half of the same user-data word the entity stamp uses, which `aver_phys_set_entity` preserves.
+
+## Collision exclusion (G2)
+
+`aver_phys_joint_set_exclude_collision(joint, 1)` stops the joint's two bodies colliding with each other (Godot's `exclude_nodes_from_collision`). Off for every joint by default. See `GODOT_FILTERING.md`.

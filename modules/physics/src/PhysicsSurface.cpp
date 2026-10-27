@@ -74,11 +74,26 @@ const AverSurface* leafSurface(const JPH::Body& body, const JPH::SubShapeID& sub
 
 // Jolt's own combine expressions, with the leaf numbers in place of the body's where a surface carries one. While no
 // surface has ever been interned they ARE Jolt's expressions on the body values.
+// With the combine mode on Godot's rules (physics_surface_abi.h) the same per-side numbers meet in Godot's expressions instead.
+bool godotCombine() { return g_world && g_world->combineMode == AVER_PHYS_COMBINE_GODOT; }
+
+uint8_t combineFlagsOf(const JPH::Body& body) {
+    if (g_world->combineFlags.empty()) return 0;
+    const auto h = g_world->byId.find(body.GetID());
+    if (h == g_world->byId.end()) return 0;
+    const auto f = g_world->combineFlags.find(h->second);
+    return f == g_world->combineFlags.end() ? uint8_t{0} : f->second;
+}
+
 float combineFriction(const JPH::Body& b1, const JPH::SubShapeID& s1, const JPH::Body& b2, const JPH::SubShapeID& s2) {
+    if (godotCombine())
+        return combineFrictionValues(surfaceFrictionOf(b1, s1, b1.GetFriction()), b1, surfaceFrictionOf(b2, s2, b2.GetFriction()), b2);
     if (!g_interned.load(std::memory_order_relaxed)) return JPH::Sqrt(b1.GetFriction() * b2.GetFriction());
     return JPH::Sqrt(surfaceFrictionOf(b1, s1, b1.GetFriction()) * surfaceFrictionOf(b2, s2, b2.GetFriction()));
 }
 float combineRestitution(const JPH::Body& b1, const JPH::SubShapeID& s1, const JPH::Body& b2, const JPH::SubShapeID& s2) {
+    if (godotCombine())
+        return combineRestitutionValues(surfaceRestitutionOf(b1, s1, b1.GetRestitution()), b1, surfaceRestitutionOf(b2, s2, b2.GetRestitution()), b2);
     if (!g_interned.load(std::memory_order_relaxed)) return std::max(b1.GetRestitution(), b2.GetRestitution());
     return std::max(surfaceRestitutionOf(b1, s1, b1.GetRestitution()), surfaceRestitutionOf(b2, s2, b2.GetRestitution()));
 }
@@ -259,6 +274,19 @@ float surfaceRestitutionOf(const JPH::Body& body, const JPH::SubShapeID& sub, fl
     return fallback;
 }
 
+float combineFrictionValues(float fa, const JPH::Body& a, float fb, const JPH::Body& b) {
+    if (!godotCombine()) return std::sqrt(fa * fb);
+    const bool rough = ((combineFlagsOf(a) | combineFlagsOf(b)) & AVER_PHYS_BODY_COMBINE_ROUGH) != 0;
+    return rough ? std::max(fa, fb) : std::min(fa, fb);
+}
+
+float combineRestitutionValues(float ra, const JPH::Body& a, float rb, const JPH::Body& b) {
+    if (!godotCombine()) return std::max(ra, rb);
+    const float sa = (combineFlagsOf(a) & AVER_PHYS_BODY_COMBINE_ABSORBENT) ? -ra : ra;
+    const float sb = (combineFlagsOf(b) & AVER_PHYS_BODY_COMBINE_ABSORBENT) ? -rb : rb;
+    return std::clamp(sa + sb, 0.0f, 1.0f);
+}
+
 void installSurfaceCombine(JPH::PhysicsSystem& system) {
     system.SetCombineFriction(&combineFriction);
     system.SetCombineRestitution(&combineRestitution);
@@ -400,6 +428,40 @@ int32_t aver_phys_body_surface(int32_t body) {
     if (const JPH::BodyID* id = findBody(body)) return bodyLabelOf(bi().GetUserData(*id));
     if (const JPH::CharacterVirtual* ch = findCharacter(body)) { aver::setAbiError(AbiError::Ok); return bodyLabelOf(ch->GetUserData()); }
     return -1;
+}
+
+// ---- the combine rule ----------------------------------------------------------------------------------------------
+
+int32_t aver_phys_set_combine_mode(int32_t mode) {
+    if (!g_world) return surfFail(AbiError::NotInitialised);
+    if (mode != AVER_PHYS_COMBINE_JOLT && mode != AVER_PHYS_COMBINE_GODOT) return surfFail(AbiError::InvalidArgument);
+    if (g_world->inStep) return surfFail(AbiError::Unsupported);   // workers read it
+    g_world->combineMode = mode;
+    return surfOk(1);
+}
+
+int32_t aver_phys_combine_mode(void) {
+    if (!g_world) { aver::setAbiError(AbiError::NotInitialised); return -1; }
+    aver::setAbiError(AbiError::Ok);
+    return g_world->combineMode;
+}
+
+int32_t aver_phys_body_set_combine_flags(int32_t body, int32_t flags) {
+    if (!g_world) return surfFail(AbiError::NotInitialised);
+    if (flags & ~(AVER_PHYS_BODY_COMBINE_ROUGH | AVER_PHYS_BODY_COMBINE_ABSORBENT)) return surfFail(AbiError::InvalidArgument);
+    if (g_world->inStep) return surfFail(AbiError::Unsupported);
+    if (!findBody(body)) return 0;   // BadHandle recorded
+    if (flags == 0) g_world->combineFlags.erase(body);
+    else g_world->combineFlags[body] = static_cast<uint8_t>(flags);
+    return surfOk(1);
+}
+
+int32_t aver_phys_body_combine_flags(int32_t body) {
+    if (!g_world) { aver::setAbiError(AbiError::NotInitialised); return -1; }
+    if (!findBody(body)) return -1;
+    aver::setAbiError(AbiError::Ok);
+    const auto it = g_world->combineFlags.find(body);
+    return it == g_world->combineFlags.end() ? 0 : it->second;
 }
 
 // ---- what was hit ------------------------------------------------------------------------------------------------

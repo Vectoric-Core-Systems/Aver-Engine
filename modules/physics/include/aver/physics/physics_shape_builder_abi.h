@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define AVER_PHYS_SHAPE_ABI_VERSION 1
+#define AVER_PHYS_SHAPE_ABI_VERSION 2   /* 2: shape_separation_ray, body_set_shape_disabled, body_shape_disabled (all additive) */
 AVER_PHYS_API int32_t aver_phys_shape_abi_version(void);
 
 /* shape parameter block (SP): convex radius cm (5), density kg/m^3 (1000), hull tolerance cm (0.1), mesh active-edge angle deg (5;
@@ -44,6 +44,13 @@ AVER_PHYS_API int32_t aver_phys_shape_triangle(const float* abcXyz, int32_t surf
 AVER_PHYS_API int32_t aver_phys_shape_plane(const float* normalXyz, float offsetCm, float halfExtentCm, int32_t surface);
 /* No volume, collides with nothing: a placeholder, or a kinematic anchor for a joint. */
 AVER_PHYS_API int32_t aver_phys_shape_empty(const float* comXyz);
+/* Godot SeparationRayShape3D, added in ABI version 2: an APPROXIMATION. Jolt has no ray shape that pushes bodies apart, so this is a thin
+   capsule from the shape origin along dirXyz (any length, normalised here; NULL is refused) for lengthCm, the far cap's tip exactly at lengthCm.
+   radiusCm <= 0 takes 0.1. It is solid, so a body whose compound holds it is stopped with the ray's tip on the surface (the end point
+   "moves to the collision point"), along the CONTACT normal: Godot's slide_on_slope = true behaviour; slide_on_slope = false (push along
+   the ray whatever the slope) is not provided. Its density is 0.001 kg/m^3, so it adds no mass or centre-of-mass shift worth the name.
+   `surface` is a physical-surface id. Put it in a compound (or a body) like any shape, and toggle it with aver_phys_body_set_shape_disabled. */
+AVER_PHYS_API int32_t aver_phys_shape_separation_ray(float lengthCm, const float* dirXyz, float radiusCm, int32_t surface);
 AVER_PHYS_API int32_t aver_phys_shape_convex_hull(const float* pointsXyz, int32_t count, int32_t surface, const float* p, int32_t n);
 /* palette: up to 32 surface ids; triPaletteIndex one byte per triangle (NULL = 0). Bad-index triangles are dropped from all arrays.
    triUserData (NULL = none) costs about 25% more memory. */
@@ -150,6 +157,14 @@ AVER_PHYS_API int32_t aver_phys_body_compound_add(int32_t body, int32_t child, c
 AVER_PHYS_API int32_t aver_phys_body_compound_remove(int32_t body, int32_t index);
 AVER_PHYS_API int32_t aver_phys_body_compound_set_child(int32_t body, int32_t index, const float* posCm, const float* quatXyzw);
 AVER_PHYS_API int32_t aver_phys_body_compound_count(int32_t body);
+/* Per-shape disable (Godot CollisionShape3D.disabled), added in ABI version 2. The shape stays where it is and keeps its index and user data;
+   it just stops colliding, being hit by queries and weighing on the inertia (the body's MASS is kept). index >= 0 is a child of a MUTABLE
+   compound this body owns (a static compound cannot be edited: build the body from a mutable one); index < 0, or 0 on a body whose shape is
+   not a compound, disables the body's whole shape (it is swapped for an empty one with the same centre of mass, and aver_phys_shape_of_body
+   then reports that empty shape; set_shape and set_scale are refused until it is enabled again). Idempotent. A disabled child moves with
+   compound_set_child; compound_remove shifts the disabled set with the indices; set_shape forgets it. Not captured by snapshots. */
+AVER_PHYS_API int32_t aver_phys_body_set_shape_disabled(int32_t body, int32_t index, int32_t disabled);
+AVER_PHYS_API int32_t aver_phys_body_shape_disabled(int32_t body, int32_t index, int32_t* outDisabled);
 /* Triangles in the world box (NULL region = the body's AABB): 9 floats each in engine cm, one surface id each. */
 AVER_PHYS_API int32_t aver_phys_body_triangles(int32_t body, const float* regionMin, const float* regionMax,
                                                float* outXyz, int32_t* outSurface, int32_t maxTriangles);

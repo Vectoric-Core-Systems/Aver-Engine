@@ -187,6 +187,21 @@ internal static partial class Native
     [DllImport(Lib)] internal static extern int  aver_phys_overlap_sphere_ex(float x, float y, float z, float radius, uint layerMask, int ignoreBody, int[] outBodies, int maxBodies);
     [DllImport(Lib)] internal static extern int  aver_phys_sphere_cast_ex(float ox, float oy, float oz, float dx, float dy, float dz, float maxDistCm, float radius, uint layerMask, int ignoreBody, float[] outPoint, float[] outNormal);
 
+    // Godot-style 32-bit layer/mask, collision exceptions and mask queries (physics_layers_abi.h, G2).
+    [DllImport(Lib)] internal static extern int  aver_phys_body_set_collision_filter(int body, uint layerBits, uint maskBits);
+    [DllImport(Lib)] internal static extern int  aver_phys_body_collision_filter(int body, out uint outLayerBits, out uint outMaskBits);
+    [DllImport(Lib)] internal static extern int  aver_phys_body_clear_collision_filter(int body);
+    [DllImport(Lib)] internal static extern int  aver_phys_body_add_collision_exception(int bodyA, int bodyB);
+    [DllImport(Lib)] internal static extern int  aver_phys_body_remove_collision_exception(int bodyA, int bodyB);
+    [DllImport(Lib)] internal static extern int  aver_phys_body_has_collision_exception(int bodyA, int bodyB);
+    [DllImport(Lib)] internal static extern int  aver_phys_body_clear_collision_exceptions(int body);
+    [DllImport(Lib)] internal static extern int  aver_phys_bodies_can_collide(int bodyA, int bodyB);
+    [DllImport(Lib)] internal static extern int  aver_phys_raycast_mask(float ox, float oy, float oz, float dx, float dy, float dz, float maxDistCm, uint collisionMask, int ignoreBody, float[] outPoint, float[] outNormal, out int outEntity);
+    [DllImport(Lib)] internal static extern int  aver_phys_overlap_sphere_mask(float x, float y, float z, float radius, uint collisionMask, int ignoreBody, int[] outBodies, int maxBodies);
+    [DllImport(Lib)] internal static extern int  aver_phys_sphere_cast_mask(float ox, float oy, float oz, float dx, float dy, float dz, float maxDistCm, float radius, uint collisionMask, int ignoreBody, float[] outPoint, float[] outNormal);
+    [DllImport(Lib)] internal static extern int  aver_phys_joint_set_exclude_collision(int joint, int exclude);
+    [DllImport(Lib)] internal static extern int  aver_phys_joint_exclude_collision(int joint);
+
     // ---- Character, the rest of it (physics_character_abi.h) --------------------------------------------
 
     [DllImport(Lib)] internal static extern int aver_phys_character_set_max_slope_angle(int ch, float radians);

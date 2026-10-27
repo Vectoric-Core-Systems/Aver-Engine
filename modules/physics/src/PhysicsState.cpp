@@ -18,6 +18,7 @@
 // RESTORE IS ALL-OR-NOTHING: the manifest is checked against the live world and the engine section is parsed in full BEFORE
 // Jolt is asked to restore anything, because Jolt's own restore stops halfway at a missing body and restores constraints by
 // array index. An imported blob is also checked against its checksum, so a flipped byte is CORRUPT before it reaches Jolt.
+#include "PhysicsAreas.hpp"
 #include "PhysicsConfig.hpp"
 #include "PhysicsOrigin.hpp"
 #include "PhysicsStateRecorder.hpp"
@@ -245,6 +246,7 @@ void clearEventQueues() {
     vehicleBeginCall();         // vehicle events and raw impacts
     softbody::beginCall();      // soft-body impact events
     clearJointBreakEvents();    // the resimulated steps will produce them again
+    areasOnRestore();           // contact monitors re-seed silently; area events go (PhysicsAreas.cpp)
 }
 
 // Returns an AVER_PHYS_RESTORE_* result. Nothing is applied unless it validates; once Jolt has been asked, only CORRUPT can follow.

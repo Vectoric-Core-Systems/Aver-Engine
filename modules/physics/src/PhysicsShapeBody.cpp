@@ -9,6 +9,7 @@
 #include "aver/physics/physics_ragdoll_abi.h"
 #include "PhysicsShapeTable.hpp"
 #include "PhysicsSurface.hpp"
+#include "PhysicsBodyGodot.hpp"   // the disabled-shape records
 
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -19,6 +20,7 @@
 #include <Jolt/Physics/Body/MassProperties.h>
 #include <Jolt/Physics/Body/MotionProperties.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
+#include <Jolt/Physics/Collision/Shape/EmptyShape.h>
 #include <Jolt/Physics/Collision/Shape/MutableCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
 #include <Jolt/Physics/Collision/Shape/ScaledShape.h>
@@ -183,6 +185,17 @@ bool editable(int32_t body, Editable& e) {
     return true;
 }
 
+// Disabled-shape records (aver_phys_body_set_shape_disabled). A disabled mutable-compound child is a weightless, collision-less stand-in: an empty shape
+// scaled to a thousandth, because Jolt's EmptyShape reports a mass of 1 kg to the compound's centre-of-mass and inertia sums.
+bool wholeDisabled(int32_t body) { return g_world->bodyGodot && g_world->bodyGodot->disabledWhole.count(body) != 0; }
+void forgetDisabledChildren(int32_t body) { if (g_world->bodyGodot) g_world->bodyGodot->disabledChildren.erase(body); }
+
+JPH::RefConst<JPH::Shape> childPlaceholder() {
+    const JPH::RefConst<JPH::Shape> empty = new JPH::EmptyShape();
+    const JPH::Shape::ShapeResult r = empty->ScaleShape(JPH::Vec3::sReplicate(0.001f));
+    return r.HasError() ? empty : JPH::RefConst<JPH::Shape>(r.Get());
+}
+
 } // namespace
 
 extern "C" {
@@ -263,6 +276,7 @@ int32_t aver_phys_body_set_shape(int32_t body, int32_t shape, int32_t keepMass) 
     const JPH::BodyID id = *idp;
     JPH::RefConst<JPH::Shape> next = shapeTableGet(shape);
     if (!next) return fail(AbiError::BadHandle);
+    if (wholeDisabled(body)) { AVER_WARN("[Physics] body {}: its shape is disabled; enable it first", body); return fail(AbiError::Unsupported); }
     if (!reshapable(body, id)) return 0;
 
     const JPH::EMotionType mt = bi().GetMotionType(id);
@@ -282,6 +296,7 @@ int32_t aver_phys_body_set_shape(int32_t body, int32_t shape, int32_t keepMass) 
     const float target = (keepMass != 0 || shapeMassKg(next.GetPtr()) <= 0.0f) ? oldMass : 0.0f;
     commitShape(id, next, target);
     shapeTableBindOwner(next.GetPtr(), body);
+    forgetDisabledChildren(body);   // the old compound's disabled set means nothing to the new shape
     aver::setAbiError(AbiError::Ok);
     return 1;
 }
@@ -295,6 +310,7 @@ int32_t aver_phys_body_set_scale(int32_t body, const float* scaleXyz, int32_t ke
         AVER_WARN("[Physics] a body scale needs three non-zero finite components");
         return fail(AbiError::InvalidArgument);
     }
+    if (wholeDisabled(body)) { AVER_WARN("[Physics] body {}: its shape is disabled; enable it first", body); return fail(AbiError::Unsupported); }
     if (!reshapable(body, id)) return 0;
 
     // ABSOLUTE: a body made by aver_phys_add_mesh_shape_body (or an earlier call here) wears a ScaledShape, and
@@ -325,6 +341,7 @@ int32_t aver_phys_body_set_scale(int32_t body, const float* scaleXyz, int32_t ke
         : std::abs(newScale.GetX() * newScale.GetY() * newScale.GetZ()) / std::abs(oldScale.GetX() * oldScale.GetY() * oldScale.GetZ());
     const float target = oldMass > 0.0f ? (keepMass != 0 ? oldMass : oldMass * ratio) : 0.0f;
     commitShape(id, next, target);
+    forgetDisabledChildren(body);
     aver::setAbiError(AbiError::Ok);
     return 1;
 }
@@ -413,6 +430,17 @@ int32_t aver_phys_body_compound_remove(int32_t body, int32_t index) {
         e.mc->AdjustCenterOfMass();
     }
     commitEdit(e.id, *e.mc, prevCom, mass);
+    if (g_world->bodyGodot) {   // the disabled set follows the shifted indices
+        auto& all = g_world->bodyGodot->disabledChildren;
+        if (const auto rec = all.find(body); rec != all.end()) {
+            std::map<uint32_t, JPH::RefConst<JPH::Shape>> shifted;
+            for (const auto& [k, s] : rec->second) {
+                if (k == static_cast<uint32_t>(index)) continue;
+                shifted.emplace(k > static_cast<uint32_t>(index) ? k - 1 : k, s);
+            }
+            rec->second = std::move(shifted);
+        }
+    }
     aver::setAbiError(AbiError::Ok);
     return 1;
 }
@@ -453,6 +481,86 @@ int32_t aver_phys_body_compound_count(int32_t body) {
     if (!s || s->GetType() != JPH::EShapeType::Compound) { aver::setAbiError(AbiError::Unsupported); return -1; }
     aver::setAbiError(AbiError::Ok);
     return static_cast<int32_t>(static_cast<const JPH::CompoundShape*>(s.GetPtr())->GetNumSubShapes());
+}
+
+// ---- per-shape disable (Godot CollisionShape3D.disabled) ------------------------------------------------------
+
+int32_t aver_phys_body_set_shape_disabled(int32_t body, int32_t index, int32_t disabled) {
+    const JPH::BodyID* idp = findBody(body);
+    if (!idp) return 0;
+    const JPH::BodyID id = *idp;
+    const JPH::RefConst<JPH::Shape> cur = bi().GetShape(id);
+    if (!cur) return fail(AbiError::BadHandle);
+    const bool whole = wholeDisabled(body);
+    const bool compound = !whole && cur->GetType() == JPH::EShapeType::Compound;
+
+    if (index < 0 || !compound) {   // the body's whole shape
+        if (index > 0) return fail(AbiError::OutOfRange);
+        if (!reshapable(body, id)) return 0;
+        if ((disabled != 0) == whole) { aver::setAbiError(AbiError::Ok); return 1; }
+        const float mass = bodyMassKg(id);
+        BodyGodotState& st = bodyGodotOrCreate();
+        if (disabled) {
+            // Same centre of mass, so the body does not move; its mass stays, its inertia is the stand-in's.
+            commitShape(id, JPH::RefConst<JPH::Shape>(new JPH::EmptyShape(cur->GetCenterOfMass())), mass);
+            st.disabledWhole[body] = cur;
+        } else {
+            const JPH::RefConst<JPH::Shape> back = st.disabledWhole[body];
+            st.disabledWhole.erase(body);
+            commitShape(id, back, mass);
+        }
+        aver::setAbiError(AbiError::Ok);
+        return 1;
+    }
+
+    Editable e;
+    if (!editable(body, e)) return 0;   // a static compound cannot be edited
+    const uint32_t child = static_cast<uint32_t>(index);
+    if (child >= e.mc->GetNumSubShapes()) return fail(AbiError::OutOfRange);
+    auto& kids = bodyGodotOrCreate().disabledChildren[body];
+    const auto it = kids.find(child);
+    if ((it != kids.end()) == (disabled != 0)) { aver::setAbiError(AbiError::Ok); return 1; }
+
+    // The child's origin in the compound frame, read back through whatever shape is there now (set_child does the same), so the swap keeps it in place.
+    const JPH::CompoundShape::SubShape& sub = e.mc->GetSubShape(child);
+    const JPH::Quat rot = sub.GetRotation();
+    const JPH::Vec3 pos = sub.GetPositionCOM() + e.mc->GetCenterOfMass() - rot * sub.mShape->GetCenterOfMass();
+    const JPH::RefConst<JPH::Shape> was = sub.mShape;
+    const JPH::RefConst<JPH::Shape> now = disabled ? childPlaceholder() : it->second;
+
+    const JPH::Vec3 prevCom = e.mc->GetCenterOfMass();
+    const float mass = bodyMassKg(e.id);
+    {
+        JPH::BodyLockWrite lock(g_world->system.GetBodyLockInterface(), e.id);
+        if (!lock.Succeeded()) return fail(AbiError::BadHandle);
+        e.mc->ModifyShape(child, pos, rot, now.GetPtr());
+        e.mc->AdjustCenterOfMass();
+    }
+    commitEdit(e.id, *e.mc, prevCom, mass);
+    if (disabled) kids[child] = was;
+    else kids.erase(it);
+    aver::setAbiError(AbiError::Ok);
+    return 1;
+}
+
+int32_t aver_phys_body_shape_disabled(int32_t body, int32_t index, int32_t* outDisabled) {
+    const JPH::BodyID* idp = findBody(body);
+    if (!idp) return 0;
+    if (!outDisabled) return fail(AbiError::NullPointer);
+    const JPH::RefConst<JPH::Shape> cur = bi().GetShape(*idp);
+    if (!cur) return fail(AbiError::BadHandle);
+    const bool whole = wholeDisabled(body);
+    if (index < 0 || cur->GetType() != JPH::EShapeType::Compound) {
+        if (index > 0) return fail(AbiError::OutOfRange);
+        *outDisabled = whole ? 1 : 0;
+    } else {
+        if (static_cast<uint32_t>(index) >= static_cast<const JPH::CompoundShape*>(cur.GetPtr())->GetNumSubShapes()) return fail(AbiError::OutOfRange);
+        const bool off = g_world->bodyGodot && g_world->bodyGodot->disabledChildren.count(body) &&
+                         g_world->bodyGodot->disabledChildren[body].count(static_cast<uint32_t>(index));
+        *outDisabled = off ? 1 : 0;
+    }
+    aver::setAbiError(AbiError::Ok);
+    return 1;
 }
 
 // ---- collision triangles ------------------------------------------------------------------------------------

@@ -95,6 +95,60 @@ AVER_PHYS_API int32_t aver_phys_body_allow_sleeping(int32_t body, int32_t* outOn
 AVER_PHYS_API int32_t aver_phys_body_set_sensor(int32_t body, int32_t on);
 AVER_PHYS_API int32_t aver_phys_body_sensor(int32_t body, int32_t* outOn);
 
+// ==== Godot rigid-body extras (Fabric G2) ====================================================================
+//
+// OPT-IN, ADDITIVE: a body that never uses anything below steps exactly as before. UNITS in this section: angular
+// velocities are RADIANS per second (the unit of aver_phys_body_angular_velocity and of Godot), not the degrees of the
+// velocity caps above. Configuration, not simulation state: physics snapshots do not capture it. Rules and the Godot
+// mapping: docs/PHYSICS_SHAPES.md, section "Godot rigid-body extras".
+
+// ---- _integrate_forces and the custom integrator (RigidBody3D) -------------------------------------------------
+//
+// The callback runs on the stepping thread once per fixed step, for every registered body that is awake and has motion
+// properties (dynamic or kinematic), in ascending handle order, after the area overrides and before the solver. It gets a
+// direct state: read what it needs and write linearVelocity / angularVelocity (the engine applies them after the callback
+// returns, only if they changed). It may call any other aver_phys_* function, including forces and impulses on any body.
+// A sleeping body is not called (as in Godot); a body that is asleep stays so until something wakes it.
+// contactCount is the number of tracked contacts when the body is contact-monitored (aver_phys_body_set_contact_monitor),
+// else 0; read them with aver_phys_body_contact_get. totalGravity is the world's gravity combined with the areas the body
+// is in (aver_phys_body_area_gravity), NOT scaled by gravityFactor. invInertia is the world-space inverse inertia tensor,
+// row-major, engine axes, 1/(kg cm^2); all zero for a kinematic body.
+typedef struct aver_phys_direct_state {
+    int32_t body;
+    int32_t contactCount;
+    float   dt;                  // the game time this step simulates, seconds
+    float   invMass;             // 1/kg; 0 for a kinematic body or one whose translation is frozen
+    float   gravityFactor;       // the body's gravity scale (its value from before aver_phys_body_set_custom_integrator, if on)
+    float   position[3];         // centre of mass, cm
+    float   rotation[4];         // x y z w
+    float   linearVelocity[3];   // cm/s, in/out
+    float   angularVelocity[3];  // rad/s, in/out
+    float   totalGravity[3];     // cm/s^2
+    float   invInertia[9];
+} aver_phys_direct_state;
+typedef void (*aver_phys_integrate_forces_fn)(aver_phys_direct_state* state, int64_t user);
+
+// Registers (fn non-NULL) or clears (fn NULL) the body's callback; `user` is handed back untouched (a pointer-sized token).
+// Needs a body with motion properties (not static). Returns 0 for a dead handle or a static body.
+AVER_PHYS_API int32_t aver_phys_body_set_integrate_forces(int32_t body, aver_phys_integrate_forces_fn fn, int64_t user);
+
+// Godot custom_integrator: the engine stops applying gravity and damping to the body, so it moves only by what the
+// callback (and collisions) do. Implemented by holding the body's gravity factor and both dampings at 0 each step; the
+// values it had are put back when turned off, and setters called meanwhile are discarded. Dynamic or kinematic bodies.
+AVER_PHYS_API int32_t aver_phys_body_set_custom_integrator(int32_t body, int32_t on);
+AVER_PHYS_API int32_t aver_phys_body_custom_integrator(int32_t body, int32_t* outOn);
+
+// ---- Constant velocity on a static body (StaticBody3D constant_linear_velocity / constant_angular_velocity) ----------
+//
+// A conveyor: every solid body that touches this one is driven as if its surface moved at linearCmS (world space, cm/s)
+// and spun at angularRadS about the body's own origin (world axes, rad/s), through Jolt's contact surface velocity. The
+// body itself does not move. NULL is zero; both zero removes it. Works on static and kinematic bodies (a kinematic one adds
+// it to the motion it is given); refused for a dynamic one. Sleeping bodies resting on it are woken when the value changes.
+// A CharacterVirtual is not a rigid body and is not carried.
+AVER_PHYS_API int32_t aver_phys_body_set_constant_velocity(int32_t body, const float* linearCmS, const float* angularRadS);
+// Writes float[3] each (zeros when none is set). Either pointer may be NULL.
+AVER_PHYS_API int32_t aver_phys_body_constant_velocity(int32_t body, float* outLinearCmS, float* outAngularRadS);
+
 #ifdef __cplusplus
 }
 #endif

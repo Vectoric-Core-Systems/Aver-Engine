@@ -71,6 +71,12 @@ public readonly struct CollisionShape : IEquatable<CollisionShape>
     /// <summary>No volume, collides with nothing: a placeholder, or a kinematic anchor for a joint.</summary>
     public static CollisionShape Empty(Float3 centerOfMass) => new(Native.aver_phys_shape_empty(centerOfMass.ToArray()));
 
+    /// <summary>Godot SeparationRayShape3D, approximated by a thin solid capsule from the origin along <paramref name="direction"/> for
+    /// <paramref name="length"/> cm: a body holding it comes to rest with the tip on the surface (separation along the contact normal, i.e.
+    /// slide_on_slope = true). <paramref name="radius"/> 0 takes 0.1 cm. It weighs nothing worth the name.</summary>
+    public static CollisionShape SeparationRay(float length, Float3 direction, float radius = 0f, int surface = 0) =>
+        new(Native.aver_phys_shape_separation_ray(length, direction.ToArray(), radius, surface));
+
     /// <summary>The convex hull of at least four non-coplanar points.</summary>
     public static CollisionShape ConvexHull(Float3[] points, int surface = 0, ShapeParams? p = null) =>
         points is null || points.Length < 4 ? None

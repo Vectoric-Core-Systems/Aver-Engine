@@ -10,6 +10,7 @@
 #if AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"
 #  include "aver/physics/physics_state_abi.h"
+#  include "aver/physics/physics_surface_abi.h"
 #  include "aver/physics/physics_world_abi.h"
 
 #  include <cctype>
@@ -23,6 +24,7 @@ struct PhysicsAppliedKeys {
     std::uint64_t settings = 0;   // bit per AVER_PHYS_WS_* key
     std::uint32_t config = 0;     // bit per AVER_PHYS_CF_* key
     bool shapeCache = false;      // the previous project stated PHYSICS.SHAPECACHE
+    bool combine = false;         // the previous project stated PHYSICS.COMBINE
 };
 inline PhysicsAppliedKeys& physicsAppliedKeys() {
     static PhysicsAppliedKeys keys;
@@ -144,11 +146,20 @@ inline void applyProjectPhysicsKeys(const fmt::ProjectDesc& project) {
         if (project.fixedStep > 0.0f && !aver_phys_set_fixed_step(project.fixedStep))
             AVER_WARN("[Project] PHYSICS.FIXEDSTEP {} refused -- must be within (0, 0.5] seconds",
                       project.fixedStep);
+        // The material combine rule is world state: stated -> that rule; a project that does not state it puts Jolt's back if the last one changed it.
+        PhysicsAppliedKeys& applied = physicsAppliedKeys();
+        if (project.physCombine >= 0) {
+            if (aver_phys_set_combine_mode(project.physCombine == 1 ? AVER_PHYS_COMBINE_GODOT : AVER_PHYS_COMBINE_JOLT)) applied.combine = true;
+            else AVER_WARN("[Project] PHYSICS.COMBINE refused");
+        } else if (applied.combine) {
+            aver_phys_set_combine_mode(AVER_PHYS_COMBINE_JOLT);
+            applied.combine = false;
+        }
         // Limits are fixed for a world's lifetime.
         if (aver_phys_config_differs())
             AVER_INFO("[Project] PHYSICS.MAXBODIES / MAXBODYPAIRS / MAXCONTACTS / TEMPALLOCMB / THREADS "
                       "change when the world is next created");
-    } else if (project.hasGravity || project.fixedStep > 0.0f) {
+    } else if (project.hasGravity || project.fixedStep > 0.0f || project.physCombine >= 0) {
         AVER_INFO("[Project] physics settings will apply once the world exists");
     }
 }

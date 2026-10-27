@@ -10,6 +10,10 @@
 #include "PhysicsShapeTable.hpp"  // the generic shape-handle table and the shared shape builders
 #include "PhysicsMeshBuild.hpp"   // the one triangle-mesh builder
 #include "PhysicsSurface.hpp"     // leaf materials: the combine hook, the contact detail, the body label
+#include "PhysicsGodotFilter.hpp" // Godot layer/mask and exceptions: godotOnBodyRemoved
+#include "PhysicsAreas.hpp"       // contact monitors and Godot-style areas: the listener and step hooks
+#include "PhysicsBodyGodot.hpp"   // _integrate_forces, custom integrator, conveyor velocity: the step and listener hooks
+#include "PhysicsRaycastVehicle.hpp"   // raycast vehicles: the step hook and the body-removed hook
 
 #include "aver/core/Log.hpp"
 // The shared error vocabulary. findBody records the reason a handle lookup failed; aver_phys_last_error
@@ -99,6 +103,7 @@ public:
         const int32_t ha = handleOf(a.GetID()), hb = handleOf(b.GetID());
         if (!ha || !hb) return;
 
+        if (g_world->monitors && !a.IsSensor() && !b.IsSensor()) monitorOnAdded(ha, hb, manifold);   // per-body contact monitors (own lock)
         std::lock_guard<std::mutex> lock(g_world->eventMutex);
         if (a.IsSensor() || b.IsSensor()) {
             const bool aIsSensor = a.IsSensor();
@@ -106,6 +111,7 @@ public:
             return;
         }
         applySurfaceFriction(a, b, manifold, ioSettings);
+        if (g_world->bodyGodot) conveyorOnContact(a, b, ioSettings);   // constant velocity on a static body (opt-in)
         ContactEvent e;
         e.a = ha; e.b = hb;
         e.point  = fromJolt(manifold.GetWorldSpaceContactPointOn1(0));
@@ -121,6 +127,7 @@ public:
                             const JPH::ContactManifold& manifold, JPH::ContactSettings& ioSettings) override {
         if (!g_world || a.IsSensor() || b.IsSensor()) return;
         applySurfaceFriction(a, b, manifold, ioSettings);
+        if (g_world->bodyGodot) conveyorOnContact(a, b, ioSettings);
     }
 
     // Appends a sensor-exit overlap. Two solid bodies ceasing to touch is not reported.
@@ -128,6 +135,7 @@ public:
         if (!g_world) return;
         const int32_t ha = handleOf(pair.GetBody1ID()), hb = handleOf(pair.GetBody2ID());
         if (!ha || !hb) return;
+        if (g_world->monitors) monitorOnRemoved(ha, hb);
         std::lock_guard<std::mutex> lock(g_world->eventMutex);
         const auto sa = g_world->sensors.find(ha), sb = g_world->sensors.find(hb);
         const bool aIsSensor = sa != g_world->sensors.end() && sa->second;
@@ -139,8 +147,8 @@ public:
 private:
     // ---- wave3 surface friction (physics_water_abi.h) ----
     // When exactly one of the pair is a surface-sampled body (the terrain), the other body's friction
-    // is combined with the host's value at the contact point -- sqrt of the product, Jolt's default
-    // rule -- and its restitution with the larger of the two. Runs on worker threads and reads only
+    // is combined with the host's value at the contact point by the world's combine rule (Jolt's sqrt of
+    // the product and larger restitution by default; Godot's, aver_phys_set_combine_mode). Runs on worker threads and reads only
     // the flagged set and the host's pure sampler.
     static void applySurfaceFriction(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold,
                                      JPH::ContactSettings& io) {
@@ -155,8 +163,9 @@ private:
         const Vec3 p = fromJolt(manifold.GetWorldSpaceContactPointOn1(0));
         float friction = 0.0f, restitution = 0.0f;
         if (fn(p.x, p.y, &friction, &restitution, slot.user.load()) != 1) return;
-        io.mCombinedFriction = std::sqrt(other.GetFriction() * friction);
-        io.mCombinedRestitution = std::max(other.GetRestitution(), restitution);
+        const JPH::Body& terrain = aS ? a : b;   // the sampled value belongs to the flagged body (its ROUGH / ABSORBENT flags apply)
+        io.mCombinedFriction = combineFrictionValues(other.GetFriction(), other, friction, terrain);
+        io.mCombinedRestitution = combineRestitutionValues(other.GetRestitution(), other, restitution, terrain);
     }
 
     // Our handle for a Jolt body id, or 0.
@@ -434,6 +443,7 @@ int32_t aver_phys_step(float dt) {
     }
     softbody::beginCall();
     vehicleBeginCall();   // last call's vehicle events go; what the caller drains describes only the steps run here
+    areasBeginCall();     // likewise the contact-monitor and area events
 
     const float maxCatchUp = g_world->fixedStep * 8.0f;
     g_world->accumulator += dt < maxCatchUp ? dt : maxCatchUp;
@@ -534,9 +544,14 @@ int32_t aver_phys_step(float dt) {
         { AVER_PHYS_SCOPE("SoftBodyBegin"); softbody::onStepBegin(stepDt); }
         // Vehicle driver aids, aero and the manual clutch, from last step's slip: before the solver, like buoyancy.
         { AVER_PHYS_SCOPE("VehicleStepBegin"); vehicleStepBegin(stepDt); }
+        rayVehicleStepBegin(stepDt);   // raycast vehicles: suspension, friction and drive impulses (opt-in; no profiler row)
+        areasStepBegin(stepDt);   // area gravity, damping and wind on the bodies inside (opt-in; no profiler row, so the table is unchanged)
+        bodyGodotStepBegin(stepDt);   // custom integrators and _integrate_forces callbacks (opt-in)
+        if (!g_world) break;          // a callback shut physics down
         stepWorldOnce();   // system.Update with the collisionSteps setting; keeps the update error and times the step (PhysicsStats.cpp)
         // Vehicle telemetry and events, read back while Jolt's state is this step's.
         { AVER_PHYS_SCOPE("VehicleStepEnd"); vehicleStepEnd(stepDt); }
+        areasStepEnd();   // contact-monitor BEGIN/END and area enter/exit (opt-in)
         // Soft-body sensor enter and exit events, from the sets the contact listener filled during Update.
         softbody::onStepEnd(stepDt);
         { AVER_PHYS_SCOPE("JointBreakChecks"); afterStepJoints(); }
@@ -593,6 +608,11 @@ int32_t aver_phys_remove_body(int32_t body) {
     const JPH::BodyID* id = findBody(body);
     if (!id) return 0;
     softbody::onBodyRemoved(body);
+    godotOnBodyRemoved(body, *id);   // its exceptions and filter slot, while the body still exists
+    areasOnBodyRemoved(body);        // its monitored pairs end, its area is dropped
+    rayVehicleOnBodyRemoved(body);   // a raycast vehicle on this chassis goes with it
+    bodyGodotOnBodyRemoved(body);    // its callback, custom integrator, conveyor and disabled-shape records
+    g_world->combineFlags.erase(body);
     bi().RemoveBody(*id);
     bi().DestroyBody(*id);
     g_world->byId.erase(*id);

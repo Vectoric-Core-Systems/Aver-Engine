@@ -25,6 +25,11 @@ internal static partial class Native
     [DllImport(Lib)] internal static extern int aver_phys_body_set_surface(int body, int surface, int copyPhysics);
     [DllImport(Lib)] internal static extern int aver_phys_body_surface(int body);
 
+    [DllImport(Lib)] internal static extern int aver_phys_set_combine_mode(int mode);
+    [DllImport(Lib)] internal static extern int aver_phys_combine_mode();
+    [DllImport(Lib)] internal static extern int aver_phys_body_set_combine_flags(int body, int flags);
+    [DllImport(Lib)] internal static extern int aver_phys_body_combine_flags(int body);
+
     [DllImport(Lib)] internal static extern int aver_phys_raycast_detail(float ox, float oy, float oz, float dx, float dy, float dz, float maxDistCm, uint layerMask, int ignoreBody, int flags, float[]? outF, int nF, int[]? outI, int nI);
     [DllImport(Lib)] internal static extern int aver_phys_subshape_info(int body, int subShape, float[]? outF, int nF, int[]? outI, int nI);
     [DllImport(Lib)] internal static extern int aver_phys_contact_detail(int index, float[]? outF, int nF, int[]? outI, int nI);

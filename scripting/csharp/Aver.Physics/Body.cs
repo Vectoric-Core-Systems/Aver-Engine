@@ -199,6 +199,27 @@ public readonly partial struct Body : System.IEquatable<Body>
     public int Layer => Native.aver_phys_body_layer(Handle);
     public bool SetLayer(int layer) => Native.aver_phys_body_set_layer(Handle, layer) != 0;
 
+    // ---- Godot-style 32-bit layer and mask, and collision exceptions -------------------------------------
+    // Opt-in; a body that never calls these keeps the 16-layer matrix. Two filtered bodies collide when
+    // (a.mask & b.layer) != 0 || (b.mask & a.layer) != 0; a pair with an unfiltered body follows the matrix.
+    // See physics_layers_abi.h.
+
+    /// <summary>Gives the body a Godot layer and mask (bitmasks). False for a dead handle, a body in a group of its own
+    /// (ragdoll part, soft body), or while the world is stepping.</summary>
+    public bool SetCollisionFilter(uint layerBits, uint maskBits) => Native.aver_phys_body_set_collision_filter(Handle, layerBits, maskBits) != 0;
+    /// <summary>The body's Godot layer and mask, or null when it follows the matrix only.</summary>
+    public (uint Layer, uint Mask)? CollisionFilter =>
+        Native.aver_phys_body_collision_filter(Handle, out uint layer, out uint mask) != 0 ? (layer, mask) : null;
+    /// <summary>Back to the 16-layer matrix alone; exceptions stay.</summary>
+    public bool ClearCollisionFilter() => Native.aver_phys_body_clear_collision_filter(Handle) != 0;
+
+    /// <summary>Makes this body and <paramref name="other"/> never collide (Godot add_collision_exception_with).</summary>
+    public bool AddCollisionException(Body other) => Native.aver_phys_body_add_collision_exception(Handle, other.Handle) != 0;
+    /// <summary>True if an exception was removed.</summary>
+    public bool RemoveCollisionException(Body other) => Native.aver_phys_body_remove_collision_exception(Handle, other.Handle) != 0;
+    public bool HasCollisionException(Body other) => Native.aver_phys_body_has_collision_exception(Handle, other.Handle) != 0;
+    public bool ClearCollisionExceptions() => Native.aver_phys_body_clear_collision_exceptions(Handle) != 0;
+
     // ---- Entity association ---------------------------------------------------------------------------
 
     /// <summary>Stamps this body (or character) with the scene entity that owns it, so a later raycast

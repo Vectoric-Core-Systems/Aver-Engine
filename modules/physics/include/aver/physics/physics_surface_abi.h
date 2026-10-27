@@ -24,8 +24,8 @@
 extern "C" {
 #endif
 
-#define AVER_PHYS_SURFACE_ABI_VERSION 1
-AVER_PHYS_API int32_t aver_phys_surface_abi_version(void);                                   /* 1 */
+#define AVER_PHYS_SURFACE_ABI_VERSION 2   /* 2: the combine mode and the per-body ROUGH / ABSORBENT flags (G2) */
+AVER_PHYS_API int32_t aver_phys_surface_abi_version(void);                                   /* 2 */
 
 /* ---- hit detail blocks (aver_phys_raycast_detail, aver_phys_subshape_info, character ground, wheel surface) ----
    FRICTION and RESTITUTION are the numbers the resolved surface carries (-1 = defers to the body or no surface); not necessarily
@@ -101,6 +101,31 @@ AVER_PHYS_API void    aver_phys_surface_reset(void);
 AVER_PHYS_API int32_t aver_phys_body_set_surface(int32_t body, int32_t surface, int32_t copyPhysics);
 /* The label; 0 = none, -1 for a dead handle. */
 AVER_PHYS_API int32_t aver_phys_body_surface(int32_t body);
+
+/* ---- the combine rule (ABI version 2): Jolt's, or Godot's ----
+   What a contact applies when two materials meet. JOLT (the default, and what every call above describes): friction sqrt(f1 f2),
+   restitution max(r1, r2). GODOT (Godot's PhysicsMaterial): friction min(f1, f2), or max when either side is ROUGH; restitution
+   clamp(r1 + r2, 0, 1), where an ABSORBENT side subtracts its restitution instead of adding it. The numbers per side are the leaf
+   surface's when it carries one, else the body's (aver_phys_body_set_friction / _restitution). The terrain surface sampler
+   (physics_water_abi.h) uses the same rule for the flagged body's pair. Wheels of a vehicle keep their own rule. Units are not involved:
+   friction and restitution are dimensionless, so Godot's numbers are passed through unchanged.
+   The mode is a property of the world (it resets with a new world, like gravity) and is not part of a snapshot: set it once after
+   aver_phys_init, as the project key PHYSICS.COMBINE (jolt|godot) does. In JOLT mode a world is bit-identical to one without these calls. */
+#define AVER_PHYS_COMBINE_JOLT    0
+#define AVER_PHYS_COMBINE_GODOT   1
+/* 1 = set. 0 for an unknown mode (InvalidArgument), no world (NotInitialised) or while a step runs (Unsupported). Between steps. */
+AVER_PHYS_API int32_t aver_phys_set_combine_mode(int32_t mode);
+/* AVER_PHYS_COMBINE_*, or -1 without a world. */
+AVER_PHYS_API int32_t aver_phys_combine_mode(void);
+
+#define AVER_PHYS_BODY_COMBINE_ROUGH       1   /* friction of any pair with this body is max(f1, f2) (GODOT mode only) */
+#define AVER_PHYS_BODY_COMBINE_ABSORBENT   2   /* this body subtracts its restitution instead of adding it (GODOT mode only) */
+/* Sets the body's flags (a mask of the two above; 0 clears both). Stored in both modes, used only in GODOT mode. 0 for a dead handle,
+   an unknown bit (InvalidArgument) or while a step runs (Unsupported). Characters are not bodies here and answer BadHandle.
+   The flags follow the body through a rebuild under the same handle. */
+AVER_PHYS_API int32_t aver_phys_body_set_combine_flags(int32_t body, int32_t flags);
+/* The flags (0 = none), or -1 for a dead handle. */
+AVER_PHYS_API int32_t aver_phys_body_combine_flags(int32_t body);
 
 /* ---- what was hit ---- */
 

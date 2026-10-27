@@ -295,6 +295,18 @@ AVER_PHYS_API int32_t aver_phys_joint_break_get(int32_t index, int32_t* outJoint
                                                 float* outForceN, float* outTorqueNm);
 AVER_PHYS_API void aver_phys_joint_break_clear(void);
 
+// ---- Jointed bodies do not collide with each other (G2, additive) -----------------------------------------
+//
+// Godot's exclude_nodes_from_collision (on by default THERE). Here every joint starts as it always did,
+// colliding; the Godot import turns this on per joint. While on, the two bodies are excluded from colliding
+// with each other, exactly like a collision exception (physics_layers_abi.h) but owned by the joint: it
+// ends with the joint, and counts per joint, so two joints on one pair need both removed. Unaffected by
+// aver_phys_joint_set_enabled (a disabled joint still excludes). A joint to the world has nothing to exclude
+// and just records the flag. Returns 0 for a dead handle, a body that cannot take a collision filter (a
+// ragdoll part), or while the world is stepping; the joint itself is unchanged then.
+AVER_PHYS_API int32_t aver_phys_joint_set_exclude_collision(int32_t joint, int32_t exclude);
+AVER_PHYS_API int32_t aver_phys_joint_exclude_collision(int32_t joint);
+
 #ifdef __cplusplus
 }
 #endif

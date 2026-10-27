@@ -63,6 +63,11 @@ inline constexpr uint64_t kMeshTriangleUserData = 1;
 float surfaceFrictionOf(const JPH::Body& body, const JPH::SubShapeID& sub, float fallback);
 float surfaceRestitutionOf(const JPH::Body& body, const JPH::SubShapeID& sub, float fallback);
 
+// What a contact between `a` (value fa) and `b` (value fb) applies under the world's combine mode (Jolt's rules, or Godot's with the
+// bodies' ROUGH / ABSORBENT flags). The values are already resolved per side by the caller. Safe on workers.
+float combineFrictionValues(float fa, const JPH::Body& a, float fb, const JPH::Body& b);
+float combineRestitutionValues(float ra, const JPH::Body& a, float rb, const JPH::Body& b);
+
 // Installs the two combine functions (Jolt's own rules, leaf materials first). Called by aver_phys_init after Init.
 void installSurfaceCombine(JPH::PhysicsSystem& system);
 

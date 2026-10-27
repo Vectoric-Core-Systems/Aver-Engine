@@ -198,6 +198,21 @@ static void testShapeCacheKey() {
     resetAll();
 }
 
+// PHYSICS.COMBINE sets the world's material combine rule once the world exists, and the next project that does not state it puts Jolt's back.
+static void testCombineKey() {
+    AVER_INFO("=== PHYSICS.COMBINE ===");
+    resetAll();
+    aver_phys_init();
+    check(aver_phys_combine_mode() == AVER_PHYS_COMBINE_JOLT, "Jolt's rules by default");
+    game::applyProjectPhysicsKeys(parse("OCPROJECT 1\nNAME M\nPHYSICS.COMBINE godot\n"));
+    check(aver_phys_combine_mode() == AVER_PHYS_COMBINE_GODOT, "PHYSICS.COMBINE godot selects Godot's rules");
+    game::applyProjectPhysicsKeys(parse("OCPROJECT 1\nNAME M\n"));
+    check(aver_phys_combine_mode() == AVER_PHYS_COMBINE_JOLT, "a later project that does not state it puts Jolt's back");
+    game::applyProjectPhysicsKeys(parse("OCPROJECT 1\nNAME M\nPHYSICS.COMBINE jolt\n"));
+    check(aver_phys_combine_mode() == AVER_PHYS_COMBINE_JOLT, "jolt is accepted");
+    resetAll();
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     AVER_INFO("==================================================");
@@ -207,6 +222,7 @@ int main() {
     testParseAndWrite();
     testConfigureRebuilds();
     testShapeCacheKey();
+    testCombineKey();
 
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
