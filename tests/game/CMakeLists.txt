@@ -132,8 +132,8 @@ set_target_properties(ItemLoaderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE
 add_executable(LevelStreamingOriginTest src/LevelStreamingOriginTest.cpp)
 target_link_libraries(LevelStreamingOriginTest PRIVATE Aver.Runtime.Game.Core Aver.World Aver.Scene Aver.Formats Aver.Core)
 set_target_properties(LevelStreamingOriginTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-# GameCameraTest -- GameCamera.hpp (wave 10 gameplay cameras): pushCamera with a PlayView (the default is today's camera bit for
-# bit; FOV and roll are inputs now), the legacy boom, and drivePlayCamera with and without a camera rig. A recording stand-in device
+# GameCameraTest -- GameCamera.hpp (wave 10 gameplay cameras): pushCamera with a PlayView (the default is today's camera to float
+# rounding; FOV and roll are inputs now), the legacy boom, and drivePlayCamera with and without a camera rig. A recording stand-in device
 # and a real scene::World; no window, no GPU. The rig cases compile where Aver.Camera exists (it brings AVER_MODULE_CAMERA).
 add_executable(GameCameraTest src/GameCameraTest.cpp)
 target_link_libraries(GameCameraTest PRIVATE Aver.Runtime.Game.Core Aver.Framework Aver.Scene Aver.Core)

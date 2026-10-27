@@ -1,5 +1,5 @@
 // GameCameraTest -- Runtime/include/aver/game/GameCamera.hpp, headless: pushCamera with a PlayView (the default is today's
-// camera bit for bit; FOV and roll are inputs now), the legacy boom, and drivePlayCamera with and without a camera rig.
+// camera to float rounding; FOV and roll are inputs now), the legacy boom, and drivePlayCamera with and without a camera rig.
 // A recording stand-in device captures what pushCamera hands IDevice::setCamera; the framework's view request and a real
 // scene::World stand in for a game. No window, no GPU.
 #include "aver/core/ErrorCodes.hpp"
@@ -30,6 +30,14 @@ static void check(bool cond, const std::string& what) {
 
 static std::string f2s(float v) { char b[64]; std::snprintf(b, sizeof b, "%.4f", v); return b; }
 static bool near(float a, float b, float tol) { return std::fabs(a - b) <= tol; }
+
+// Equal to float rounding: perspectiveLH's std::tan may be folded at compile time at one call site and run through libm at
+// another (GCC Release), which can differ by an ulp, so memcmp is too strict across call sites.
+static bool sameFloats(const f32* a, const f32* b, int n) {
+    for (int i = 0; i < n; ++i)
+        if (std::fabs(a[i] - b[i]) > 1e-6f * std::fmax(1.0f, std::fmax(std::fabs(a[i]), std::fabs(b[i])))) return false;
+    return true;
+}
 
 // Records the camera pushCamera hands the device.
 struct RecDevice final : rhi::IDevice {
@@ -75,12 +83,12 @@ static void testPushCamera() {
                 const Vec3 fwd = game::cameraForward(yaw, pitch);
                 const Mat4 want = oldViewProj(pos, fwd, 16.0f / 9.0f);
                 const game::CameraMatrices a = game::pushCamera(dev, pos, fwd, 16.0f / 9.0f);
-                const bool a4 = std::memcmp(dev.viewProj, want.m, sizeof dev.viewProj) == 0 && std::memcmp(&a.viewProj, &want, sizeof want) == 0;
+                const bool a4 = sameFloats(dev.viewProj, &want.m[0][0], 16) && sameFloats(&a.viewProj.m[0][0], &want.m[0][0], 16);
                 const game::CameraMatrices b = game::pushCamera(dev, pos, fwd, 16.0f / 9.0f, game::PlayView{});
-                const bool a5 = std::memcmp(dev.viewProj, want.m, sizeof dev.viewProj) == 0 && std::memcmp(&a.invVP, &b.invVP, sizeof a.invVP) == 0;
+                const bool a5 = sameFloats(dev.viewProj, &want.m[0][0], 16) && sameFloats(&a.invVP.m[0][0], &b.invVP.m[0][0], 16);
                 same = same && a4 && a5;
             }
-    check(same, "the four-argument overload and a default PlayView are today's camera, bit for bit, over a grid of poses");
+    check(same, "the four-argument overload and a default PlayView are today's camera, to float rounding, over a grid of poses");
 
     const game::PlayView def;
     check(def.fovYRad == radians(60.0f) && def.rollRad == 0.0f && def.nearCm == game::kCameraNearCm && def.farCm == game::kCameraFarCm &&
