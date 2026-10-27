@@ -207,6 +207,7 @@ jobs:
     env:
       VULKAN_SDK_VERSION: 1.4.363.0
       AVER_PHYSICS_GOLDEN_OUT: golden-${{ matrix.os }}.txt
+      AVER_PHYSICS_GOLDEN_PARTS_OUT: golden-parts-${{ matrix.os }}.txt
 
     steps:
       - uses: actions/checkout@v4
@@ -256,7 +257,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: physics-golden-${{ matrix.os }}
-          path: golden-${{ matrix.os }}.txt
+          path: |
+            golden-${{ matrix.os }}.txt
+            golden-parts-${{ matrix.os }}.txt
           if-no-files-found: warn
 
   physics-determinism-compare:
@@ -281,4 +284,6 @@ jobs:
             echo "EQUAL: Windows and macOS hashed the golden scene identically. Paste these into kGoldenSingle in PhysicsDeterminismTest.cpp."
           else
             echo "::warning title=Physics determinism::Windows and macOS golden checkpoints differ. A finding, not a claim: the cross-platform determinism claim stays unmade."
+            echo "--- per-part checkpoints that differ (< windows-2022, > macos-15)"
+            diff golden-parts-windows-2022.txt golden-parts-macos-15.txt || true
           fi

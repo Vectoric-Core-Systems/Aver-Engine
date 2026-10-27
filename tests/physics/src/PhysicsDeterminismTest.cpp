@@ -13,7 +13,8 @@
 //     cross-platform claim is made when those two files are equal and the checkpoints below are filled in, and not before. In a
 //     build with AVER_PHYSICS_CROSS_PLATFORM the checkpoints are compared against kGolden; without it the comparison is skipped,
 //     loudly, because a build that does not try for bit-identical results has nothing to promise. An unrecorded kGolden entry
-//     (0) passes and says so: the first CI run prints what to put there.
+//     (0) passes and says so: the first CI run prints what to put there. AVER_PHYSICS_GOLDEN_PARTS_OUT, when set, gets the
+//     same checkpoints hashed per snapshot part ("<step> <part> <hash>"), so a difference names the part it is in.
 //
 // Nothing in this file claims more than the build it runs on.
 //
@@ -259,10 +260,21 @@ static void testGolden() {
     // the golden is the one place worth removing the question from).
     freshWorld(0);
     buildScene();
+    // Per-part hashes at each checkpoint, so a cross-platform difference names the part it is in.
+    static const struct { uint32_t flag; const char* name; } kParts[] = {
+        {AVER_PHYS_SNAP_BODIES, "bodies"}, {AVER_PHYS_SNAP_CONTACTS, "contacts"}, {AVER_PHYS_SNAP_CONSTRAINTS, "constraints"},
+        {AVER_PHYS_SNAP_CHARACTERS, "characters"}, {AVER_PHYS_SNAP_ENGINE, "engine"}};
     uint64_t got[kCheckpoints] = {};
+    std::string parts;
     for (int i = 1; i <= 600; ++i) {
         aver_phys_step_exact(1);
-        if (i % 100 == 0) got[i / 100 - 1] = H();
+        if (i % 100 != 0) continue;
+        got[i / 100 - 1] = H();
+        for (const auto& p : kParts) {
+            char line[80];
+            std::snprintf(line, sizeof line, "%d %s %016llx\n", i, p.name, static_cast<unsigned long long>(aver_phys_state_hash(p.flag)));
+            parts += line;
+        }
     }
     std::string text = std::string("precision ") + (dbl ? "2" : "1") + "\n";
     for (int k = 0; k < kCheckpoints; ++k) {
@@ -277,6 +289,12 @@ static void testGolden() {
         std::ofstream f(out, std::ios::binary | std::ios::trunc);
         f << text;
         check(f.good(), std::string("the checkpoints were written to ") + out);
+    }
+    AVER_INFO("   per-part checkpoints:\n{}", parts);
+    if (const char* out = std::getenv("AVER_PHYSICS_GOLDEN_PARTS_OUT"); out && out[0]) {
+        std::ofstream f(out, std::ios::binary | std::ios::trunc);
+        f << parts;
+        check(f.good(), std::string("the per-part checkpoints were written to ") + out);
     }
 
     if (!cross) {
