@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-207 public types and 1789 public members, read from `scripting/csharp/Aver.Framework/` (129 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+209 public types and 1794 public members, read from `scripting/csharp/Aver.Framework/` (130 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -329,6 +329,7 @@ Values: `None = 0`, `Started = 1`, `Ongoing = 2`, `Triggered = 4`, `Completed = 
 - `public int TickPriority { get; set; }` - Order among actors in the OnTick pass: lower runs first, equal priorities in scene-tree order (a parent before its children, siblings in the order they were added).
 - `public int PhysicsTickPriority { get; set; }` - Order among actors in the OnPhysicsTick pass, as TickPriority.
 - `public PauseMode PauseMode { get; set; }` - Whether this actor ticks while the game is paused; Inherit by default, which takes the nearest actor above it in the scene tree.
+- `public void QueueDestroy()` - Destroys this actor at the end of the frame, after every tick and deferred call (Godot's queue_free).
 - `public virtual void OnEndPlay(EndReason reason)` - Runs once when this actor stops playing.
 - `public virtual void OnRebound()` - Runs after a hot reload has rebound this instance and restored its native state.
 - `public virtual bool OnEvent(string name)` - Runs when a named event is raised at this actor's entity.
@@ -875,6 +876,12 @@ Values: `String`, `Int`, `Float`, `Bool`, `Vec3`, `Text`, `Strings`
 `public enum DeadZoneType` - How a DeadZone measures the input.
 
 Values: `Radial`, `Axial`
+
+### Deferred
+
+`public static class Deferred` - Work for the game thread at the end of the current tick pass (Godot's call_deferred).
+
+- `public static void Call(Action action)` - Runs action on the game thread when the current tick pass ends.
 
 ### Double3
 
@@ -1437,6 +1444,14 @@ Values: `None = 0`, `Int = 1`, `Float = 2`, `Bool = 3`, `String = 4`, `Vec3 = 5`
 `public enum FadeCurve` - The shape of a fade, mirroring AVER_AUDIO_FADE_* in audio_abi.h.
 
 Values: `Linear = 0`, `EqualPower = 1`
+
+### Frame
+
+`public static class Frame` - Awaitable points in the frame.
+
+- `public static Task Next()` - Completes at the start of the next OnTick pass (Godot's process_frame).
+- `public static Task NextPhysics()` - Completes at the start of the next OnPhysicsTick pass (Godot's physics_frame).
+- `public static Task Delay(float seconds)` - Completes after seconds of game time: scaled by the time scale and held while paused (Godot's create_timer(seconds).timeout).
 
 ### FrameworkRebindProvider
 

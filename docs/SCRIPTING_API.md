@@ -173,6 +173,14 @@ the error is logged and the actor keeps ticking.
 while running), `WhenPaused` (only while paused, for a pause menu's logic), `Always`, or `Disabled`. A
 paused game runs both passes for the actors allowed to tick, on the same fixed cadence, but does not
 step physics.
+
+Godot's `call_deferred`, `queue_free` and `await`: `Deferred.Call(action)` runs at the end of the current
+tick pass (safe from any thread); `QueueDestroy()` destroys the actor at the end of the frame, after
+every tick and deferred call. The game thread has a `SynchronizationContext`, so an `await` started
+there resumes there: `await Frame.Next()` resumes at the start of the next `OnTick` pass,
+`await Frame.NextPhysics()` at the start of the next `OnPhysicsTick` pass, and `await
+Frame.Delay(seconds)` after that much game time (scaled, held while paused). Work awaited on a thread
+pool (`HttpClient`, `Task.Run`) resumes on the game thread too.
 | `void OnEndPlay(EndReason reason)` | Once when the actor stops playing. `Stop` = the world stopped; `Destroy` = it was destroyed; `Reload` = the entity stays, only the managed half is rebuilt. |
 | `void OnRebound()` | **DECLARED BUT NEVER CALLED.** The hook exists in `framework_hooks.h` and nothing in the engine invokes it; the bridge's own comment records the rebind path as out of scope. Do not put logic here expecting it to run. |
 | `bool OnEvent(string name)` | A named event was raised **at this entity**. Two things raise one: an **animation notify** (a marker crossed on a playing clip) and a graph's `FireEvent` node aimed here. Return `true` if you handled it -- the value is what the caller reads as its own success. |
@@ -975,7 +983,7 @@ The gameplay object model above is complete. What follows is what a script, or a
   draws TrueType text (`Hud.Text`, `Hud.TextBlock`, `UiText`) with fallback fonts, kerning, Arabic shaping, bidi and line
   breaking (`docs/GAME_UI.md`, `docs/GAME_UI_TEXT.md`). Still missing: typing other than the US key layout (no `WM_CHAR`
   plumbing, no IME) and Indic and Thai shaping.
-- **Coroutines and a latent `Delay`.** No `yield`; use `Timers` (and the timer nodes) or count down in `OnTick`.
+- **Coroutines.** Use `async`/`await` with `Frame.Next()`, `Frame.NextPhysics()` and `Frame.Delay(seconds)` (§4); there is no `yield`-based coroutine.
 - **Networking.** `modules/net` exists; nothing in it is reachable from C#.
 - **Hot-reload state migration** beyond `[Editable]` fields.
 - **Travel and streaming.** No `OpenLevel`/travel call (only the `AVER_FW_END_TRAVEL` hook), no level-streaming residency queries from script, no save slots (`SaveGame`/`LoadGame` take a path), no procedural audio (Aver Sound) binding, no runtime landscape sculpt, paint or carve, no PCG regenerate, and no material-parameter nodes (`docs/plans/wave4/MATERIAL_INSTANCES_FUNCTIONS.md` owns them).

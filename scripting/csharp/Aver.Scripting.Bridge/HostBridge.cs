@@ -309,6 +309,7 @@ public static class HostBridge
         s_graphInstances.Clear();
         // Timers and event subscribers are callbacks into the context being unloaded: drop them first.
         try { Timers.Shutdown(); Events.Shutdown(); } catch { }
+        GameThread.Reset();   // deferred calls and await continuations hold script-context delegates too
         try { GameplayAbilities.Shutdown(); } catch { }   // its callbacks and behaviours are script-context objects too
         try { Aver.Synapse.ManagedAi.Shutdown(); } catch { }   // AI: wave 3 #21 -- managed leaves and EQS tests are script-context delegates
 
@@ -1137,6 +1138,7 @@ public static class HostBridge
     private static void SetupManagedActors()
     {
         AverActor.TickOrderChanged = () => s_tickOrderDirty = true;
+        GameThread.Install();   // the host calls in on its game thread: awaits resume here
         try
         {
             if (!InstallManagedDispatch())
@@ -1643,6 +1645,7 @@ public static class HostBridge
         RefreshTickOrder();
         bool physics = group == TickPhysics;
         bool paused = Game.IsPaused;
+        GameThread.BeginPass(physics);
         // The order array is replaced, never mutated, so a bind or unbind inside a callback leaves this
         // walk alone: a destroyed actor is skipped below, a spawned one ticks from the next pass.
         ActorLive[] order = physics ? s_physicsOrder : s_processOrder;
@@ -1661,6 +1664,8 @@ public static class HostBridge
             }
             catch (Exception ex) { ReportTickError(live, physics, ex); }
         }
+        if (physics) GameThread.Flush();
+        else GameThread.EndFrame();   // deferred calls, then QueueDestroy's destroys
     }
 
     // A tick that throws aborts only that call, as in Godot; the actor keeps ticking. Errors are logged

@@ -51,7 +51,8 @@ Owner decisions so far:
 | Physics interpolation | open |
 | Per-actor pause modes | DONE: `AverActor.PauseMode` (Inherit/Pausable/WhenPaused/Always/Disabled, Inherit resolved up the actor tree); a paused frame runs both passes on the fixed clock for the actors allowed, without stepping physics. GameTickOrderTest, PauseRulesTests. |
 | Lifecycle order (enter/ready/exit), notifications | open |
-| Deferred queue, signal flags, await context | open |
+| Deferred queue, await context | DONE: `Deferred.Call`, `AverActor.QueueDestroy`, a game-thread `SynchronizationContext`, `Frame.Next/NextPhysics/Delay`; flushed at each pass's start and end. GameThreadTests. |
+| Signal flags (ONE_SHOT/DEFERRED, auto-disconnect on free) | open (with the signal layer) |
 | Prefab actor bind; `[Editable]` per-instance values (moved from G0) | open |
 | Variant, PCG32 RNG, groups, level travel, files/resources, input chain, platform services | open |
 

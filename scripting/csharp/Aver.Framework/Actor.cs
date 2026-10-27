@@ -77,6 +77,10 @@ public abstract class AverActor
     private static bool Overrides(Type t, string method) =>
         t.GetMethod(method, new[] { typeof(float) })?.DeclaringType != typeof(AverActor);
 
+    /// <summary>Destroys this actor at the end of the frame, after every tick and deferred call (Godot's <c>queue_free</c>).
+    /// It keeps ticking for the rest of this frame.</summary>
+    public void QueueDestroy() => GameThread.QueueDestroy(this);
+
     /// <summary>Runs once when this actor stops playing.</summary>
     public virtual void OnEndPlay(EndReason reason) { }
 
