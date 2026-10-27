@@ -192,3 +192,11 @@ if(TARGET Aver.Physics AND TARGET Aver.Scene)
   target_link_libraries(GameTickOrderTest PRIVATE Aver.Runtime.Game.Core Aver.Framework Aver.Physics Aver.Scene Aver.Core)
   set_target_properties(GameTickOrderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# PlacementTreeTest -- placed actors keep their level file's hierarchy across the two passes that create a level (ordinary
+# placements, then placed actors): an actor under a placement, an actor under an actor, a placement under an actor. A bare World.
+if(TARGET Aver.Scene AND TARGET Aver.World)
+  add_executable(PlacementTreeTest src/PlacementTreeTest.cpp)
+  target_link_libraries(PlacementTreeTest PRIVATE Aver.Runtime.Game.Core Aver.World Aver.Scene Aver.Formats Aver.Core)
+  set_target_properties(PlacementTreeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

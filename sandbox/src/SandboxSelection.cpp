@@ -872,11 +872,9 @@ void SandboxApp::spawnSubtreeUnder(scene::Entity root, const std::vector<EditCmd
     return false;
 }
 
-// Whether the level's own save would carry this entity -- levelEntities_ ONLY, deliberately not
-// levelClassInstances_. editor::appendClassPlacements copies the authored placement and
-// overwrites position/rotation/scale alone; it never touches `parent`, so a class instance's
-// parent is not round-tripped by a save whatever the live world says. Calling one "level owned"
-// here would let a reparent through as legal that is provably lost on the next reload.
+// Whether the level's own save would carry this entity's components -- levelEntities_ ONLY, not
+// levelClassInstances_: a placed actor saves its class, transform and parent (appendClassPlacements),
+// but not component edits, so calling one "level owned" would let edits through that a reload loses.
 bool SandboxApp::isLevelOwned(scene::Entity e) const {
     return std::find(levelEntities_.begin(), levelEntities_.end(), e) != levelEntities_.end();
 }

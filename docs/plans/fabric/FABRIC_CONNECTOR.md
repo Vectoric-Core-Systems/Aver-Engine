@@ -51,7 +51,7 @@ Owner decisions so far:
 | Physics interpolation | open |
 | Per-actor pause modes | DONE: `AverActor.PauseMode` (Inherit/Pausable/WhenPaused/Always/Disabled, Inherit resolved up the actor tree); a paused frame runs both passes on the fixed clock for the actors allowed, without stepping physics. GameTickOrderTest, PauseRulesTests. |
 | Ready order | DONE: spawn batches (`aver_fw_spawn_batch_begin/end`, framework ABI 2.1) begin a level's placed actors children first, siblings in order; both hosts' level loads use one. FrameworkTest `testSpawnBatchReadyOrder`. |
-| Placed actors keep their placement parent (both hosts flatten class placements today) | open: needed by the converter |
+| Placed actors keep their placement parent | DONE: `PlacementTree` (both hosts): an actor spawns under its file parent (a placement or an earlier actor), an ordinary placement under an actor joins it; the editor save writes real parent slots for actors and placements under them. PlacementTreeTest, GraphClassPlacementTest. |
 | enter_tree / exit_tree hooks; transform, visibility and parented notifications | open |
 | Deferred queue, await context | DONE: `Deferred.Call`, `AverActor.QueueDestroy`, a game-thread `SynchronizationContext`, `Frame.Next/NextPhysics/Delay`; flushed at each pass's start and end. GameThreadTests. |
 | Signal flags (ONE_SHOT/DEFERRED, auto-disconnect on free) | open (with the signal layer) |

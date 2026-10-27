@@ -4359,6 +4359,8 @@ private:
     using ClassInstance = editor::LevelClassInstance;
     std::vector<ClassInstance> levelClassInstances_;
     std::vector<fmt::OcWorldPlacement> classAuthored_;      // every class placement of the open level (loaded first, session-added appended)
+    std::vector<i64> classAuthoredIndex_;                   // parallel: its placement index in the loaded file, -1 if added this session
+    game::PlacementTree placementTree_;                     // the loaded file's hierarchy: placed actors spawn under their parents
     struct PlayClassSaved { usize slot; EditId id; Transform xf; };
     std::vector<PlayClassSaved> playClassSnapshot_;        // class roots at Play start, for the Stop respawn
     std::vector<editor::GraphClassDecl> classPickList_;

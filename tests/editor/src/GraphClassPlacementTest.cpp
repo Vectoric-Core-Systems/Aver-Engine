@@ -216,6 +216,19 @@ int main() {
               "a session-added placement is written at its live pose");
     }
 
+    AVER_INFO("=== appendClassPlacements writes the parent slot it is given ===");
+    {
+        std::vector<fmt::OcWorldPlacement> authored(3);
+        for (auto& p : authored) { p.className = "AN_A"; p.parent = 99; }
+        std::vector<editor::LevelClassInstance> live = {{0, 10}, {1, 11}};
+        live[1].removed = true;
+        std::vector<fmt::OcWorldPlacement> out;
+        editor::appendClassPlacements(authored, live, [](int32_t, Transform&) { return false; },
+                                      [](std::size_t k, int32_t e) { return e == 10 ? 4 : static_cast<int32_t>(k) - 3; }, out);
+        check(out.size() == 2 && out[0].parent == 4, "a live actor gets the slot its entity's parent maps to");
+        check(out.size() == 2 && out[1].parent == -1, "one without an entity gets what the callback says, not the stale file index");
+    }
+
     AVER_INFO("=== classMarkerSegments ===");
     {
         std::vector<editor::MarkerSeg> a, b;

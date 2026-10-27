@@ -610,6 +610,7 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // placement's transform onto another's line").
     const bool streamedSave = level_.streaming().active();
     std::unordered_map<u32, i32> slotOf;
+    std::vector<i32> classSlotOf;   // by authored index: the slot that placed actor is written at, -1 if deleted
     if (!streamedSave) {
         i32 slot = static_cast<i32>(w.placements.size());
         for (const scene::Entity e : levelEntities_) {
@@ -623,6 +624,24 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
             if (level_.instances().isMember(e)) continue;                  // [wave3/level-instances] the child level's
             slotOf.emplace(static_cast<u32>(e), slot++);
         }
+#if AVER_MODULE_FRAMEWORK
+        // Placed actors are written after every ordinary placement, in authored order (appendClassPlacements),
+        // one line each unless deleted; their slots are decided now so a placement under one writes its index.
+        std::vector<char> classRemoved(classAuthored_.size(), 0);
+        std::vector<int32_t> classLive(classAuthored_.size(), 0);
+        for (const ClassInstance& ci : levelClassInstances_)
+            if (ci.placement < classAuthored_.size()) {
+                classRemoved[ci.placement] = ci.removed ? 1 : 0;
+                classLive[ci.placement] = ci.entity;
+            }
+        classSlotOf.assign(classAuthored_.size(), -1);
+        for (usize k = 0; k < classAuthored_.size(); ++k) {
+            if (classRemoved[k]) continue;
+            classSlotOf[k] = slot;
+            if (classLive[k] != 0) slotOf.emplace(static_cast<u32>(classLive[k]), slot);
+            ++slot;
+        }
+#endif
     }
 
 
@@ -751,6 +770,11 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // whole function already sits behind -- a tree with the scene but not the framework spawns no
     // graph-as-class actors at all, so there is no live instance list for this call to read.
 #if AVER_MODULE_FRAMEWORK
+    // A live actor's parent is the editor's hierarchy now; one with no entity keeps its file parent, re-indexed.
+    const auto slotOfEntity = [&](scene::Entity e) -> i32 {
+        const auto it = e == scene::kInvalidEntity ? slotOf.end() : slotOf.find(static_cast<u32>(e));
+        return it == slotOf.end() ? -1 : it->second;
+    };
     editor::appendClassPlacements(
         classAuthored_, levelClassInstances_,
         [&world](int32_t e, Transform& xf) {
@@ -760,6 +784,19 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
             if (!loc) return false;
             xf = loc->xf;
             return true;
+        },
+        [&](usize k, int32_t liveEntity) -> i32 {
+            if (streamedSave) return -1;
+            const scene::Entity live = static_cast<scene::Entity>(liveEntity);
+            if (liveEntity != 0 && world.valid(live)) return slotOfEntity(world.parent(live));
+            const i64 fileIndex = k < classAuthoredIndex_.size() ? classAuthoredIndex_[k] : -1;
+            if (fileIndex < 0 || static_cast<usize>(fileIndex) >= placementTree_.parent.size()) return -1;
+            const i32 fileParent = placementTree_.parent[static_cast<usize>(fileIndex)];
+            if (fileParent < 0) return -1;
+            if (placementTree_.isClass[static_cast<usize>(fileParent)])   // another placed actor: its authored slot
+                for (usize j = 0; j < classAuthoredIndex_.size() && j < classSlotOf.size(); ++j)
+                    if (classAuthoredIndex_[j] == fileParent) return classSlotOf[j];
+            return slotOfEntity(placementTree_.entity[static_cast<usize>(fileParent)]);
         },
         w.placements);
 #endif

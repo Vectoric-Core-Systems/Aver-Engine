@@ -15,6 +15,7 @@
 #  include "aver/formats/OcWorld.hpp"
 #  include "aver/formats/OcMap.hpp"
 #  include "aver/world/LevelInstance.hpp"
+#  include "aver/game/PlacementTree.hpp"
 #  include "aver/game/LevelStreaming.hpp"
 #  include "aver/game/AuthoredStreaming.hpp"
 #  include "aver/game/LevelInstances.hpp"   // [wave3/level-instances]
@@ -328,6 +329,10 @@ private:
     // orphaned.
 #  if AVER_MODULE_FRAMEWORK
     std::vector<int32_t> levelClassInstances_;
+    // The level's placement hierarchy, so placed actors spawn under their parents and their own children
+    // join them; and the placement index of each classPlacements_ entry.
+    PlacementTree placementTree_;
+    std::vector<u32> classPlacementIndex_;
 
     // The placements load() found with a non-empty className, held here rather than spawned
     // immediately FROM load() -- ORDERING, not style: BOTH composition roots load their start level

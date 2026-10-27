@@ -42,10 +42,14 @@ struct LevelClassInstance {
 //
 // Appends to `out` rather than replacing it: the caller has already put every ordinary mesh placement
 // there, and these join the same list.
-template <typename TransformOf>
+//
+// `parentSlotOf(authoredIndex, liveEntityOr0)` gives each written placement its parent's index in `out`
+// (-1 for a root); a placement's line is written at the index its slot was given, so the caller decides
+// slots up front. Without it the authored parent index is kept as read.
+template <typename TransformOf, typename ParentSlotOf>
 void appendClassPlacements(const std::vector<fmt::OcWorldPlacement>& authored,
                            const std::vector<LevelClassInstance>& live,
-                           TransformOf&& transformOf,
+                           TransformOf&& transformOf, ParentSlotOf&& parentSlotOf,
                            std::vector<fmt::OcWorldPlacement>& out) {
     std::vector<const LevelClassInstance*> byPlacement(authored.size(), nullptr);
     for (const LevelClassInstance& li : live)
@@ -54,6 +58,7 @@ void appendClassPlacements(const std::vector<fmt::OcWorldPlacement>& authored,
     for (std::size_t i = 0; i < authored.size(); ++i) {
         if (byPlacement[i] && byPlacement[i]->removed) continue;
         fmt::OcWorldPlacement p = authored[i];
+        p.parent = parentSlotOf(i, byPlacement[i] ? byPlacement[i]->entity : 0);
         Transform xf;
         if (byPlacement[i] && transformOf(byPlacement[i]->entity, xf)) {
             p.x = xf.position.x;
@@ -66,6 +71,15 @@ void appendClassPlacements(const std::vector<fmt::OcWorldPlacement>& authored,
         }
         out.push_back(std::move(p));
     }
+}
+
+template <typename TransformOf>
+void appendClassPlacements(const std::vector<fmt::OcWorldPlacement>& authored,
+                           const std::vector<LevelClassInstance>& live,
+                           TransformOf&& transformOf,
+                           std::vector<fmt::OcWorldPlacement>& out) {
+    appendClassPlacements(authored, live, transformOf,
+                          [&authored](std::size_t i, int32_t) { return authored[i].parent; }, out);
 }
 
 // The live class root `hit` belongs to: itself, or its nearest ancestor that a non-removed instance owns; 0 if none.

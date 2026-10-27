@@ -504,8 +504,13 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
     // ClassInstance::placement index into it, and placeClassInstance appends to it. Filled here, not in
     // spawnClassPlacements, so a level opened before scripting is ready still saves its class lines.
     classAuthored_.clear();
-    for (const fmt::OcWorldPlacement& cp : w.placements)
-        if (!cp.className.empty()) classAuthored_.push_back(cp);
+    classAuthoredIndex_.clear();
+    for (usize i = 0; i < w.placements.size(); ++i)
+        if (!w.placements[i].className.empty()) {
+            classAuthored_.push_back(w.placements[i]);
+            classAuthoredIndex_.push_back(static_cast<i64>(i));
+        }
+    placementTree_.build(w, inst);
 #endif
 
     // A level that states where the player starts gets a visible, movable marker for it. Without
@@ -685,6 +690,7 @@ void SandboxApp::spawnClassPlacements() {
     // One spawn batch: every placed actor begins play after all of them exist, children first (Godot's _ready).
     aver_fw_spawn_batch_begin();
     for (usize slot = 0; slot < classAuthored_.size(); ++slot) spawnClassSlot(slot, nullptr);
+    placementTree_.attachUnderClassPlacements(scene::World::instance());
     aver_fw_spawn_batch_end();
     usize live = 0;
     for (const ClassInstance& ci : levelClassInstances_) if (!ci.removed) ++live;
@@ -720,6 +726,11 @@ scene::Entity SandboxApp::spawnClassSlot(usize slot, const Transform* worldXf) {
         return scene::kInvalidEntity;
     }
 
+    // The file's parent, if it has one and it is live: the pose is then parent-relative and snaps to nothing.
+    const i64 fileIndex = slot < classAuthoredIndex_.size() ? classAuthoredIndex_[slot] : -1;
+    const usize treeIndex = fileIndex >= 0 ? static_cast<usize>(fileIndex) : static_cast<usize>(-1);
+    const scene::Entity parent = placementTree_.parentEntity(treeIndex, world);
+
     f32 pos3[3], quat4[4], scale3[3];
     if (worldXf) {
         pos3[0] = worldXf->position.x; pos3[1] = worldXf->position.y; pos3[2] = worldXf->position.z;
@@ -731,7 +742,7 @@ scene::Entity SandboxApp::spawnClassSlot(usize slot, const Transform* worldXf) {
 #if AVER_MODULE_LANDSCAPE
         // Same ground query loadLevel hands level_ as hooks.groundHeightAt -- re-expressed here
         // because level_ keeps its hooks private and this is their only other caller.
-        if (p.snapToGround) {
+        if (p.snapToGround && parent == scene::kInvalidEntity) {
             f64 gz = 0.0;
             if (landscape_.groundHeightAt(p.x, p.y, gz)) pz = gz + p.z;
         }
@@ -750,6 +761,9 @@ scene::Entity SandboxApp::spawnClassSlot(usize slot, const Transform* worldXf) {
                   p.className, pos3[0], pos3[1], pos3[2]);
         return scene::kInvalidEntity;
     }
+    // The pose is local either way (authored, or a CLocal snapshot), so the parent takes it as is.
+    if (parent != scene::kInvalidEntity) world.setParent(static_cast<scene::Entity>(e), parent, false);
+    placementTree_.setEntity(treeIndex, static_cast<scene::Entity>(e));
     if (prior) { prior->entity = e; prior->removed = false; }
     else levelClassInstances_.push_back(ClassInstance{slot, e});
     return static_cast<scene::Entity>(e);
@@ -790,6 +804,7 @@ scene::Entity SandboxApp::placeClassInstance(fmt::OcWorldPlacement p, std::strin
 
     const usize slot = classAuthored_.size();
     classAuthored_.push_back(p);
+    classAuthoredIndex_.push_back(-1);
     const scene::Entity e = spawnClassSlot(slot, nullptr);
     if (e == scene::kInvalidEntity) {
         classAuthored_.pop_back();

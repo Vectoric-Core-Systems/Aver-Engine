@@ -351,8 +351,13 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     // why load() itself must not call aver_fw_spawn: scripting (and with it, any graph-declared
     // class) is not ready yet at this point in EITHER composition root's boot sequence.
     classPlacements_.clear();
-    for (const fmt::OcWorldPlacement& p : w.placements)
-        if (!p.className.empty()) classPlacements_.push_back(p);
+    classPlacementIndex_.clear();
+    for (usize i = 0; i < w.placements.size(); ++i)
+        if (!w.placements[i].className.empty()) {
+            classPlacements_.push_back(w.placements[i]);
+            classPlacementIndex_.push_back(static_cast<u32>(i));
+        }
+    placementTree_.build(w, inst);
 #endif
 
     // THE WHOLE ENVIRONMENT IN ONE LINE. This was twenty assignments across three `if`s, and the
@@ -627,7 +632,12 @@ void GameLevel::spawnClassPlacements() {
     // One spawn batch: every placed actor begins play after all of them exist, children first (Godot's _ready).
     aver_fw_spawn_batch_begin();
     instances_.spawnPendingClasses();   // [wave3/level-instances] classes inside level instances, now that scripting is up
-    for (const fmt::OcWorldPlacement& p : classPlacements_) {
+    scene::World& world = scene::World::instance();
+    for (usize k = 0; k < classPlacements_.size(); ++k) {
+        const fmt::OcWorldPlacement& p = classPlacements_[k];
+        const usize index = k < classPlacementIndex_.size() ? classPlacementIndex_[k] : static_cast<usize>(-1);
+        // A child's transform is parent-relative, so it is spawned as the local transform and snaps to nothing.
+        const scene::Entity parent = placementTree_.parentEntity(index, world);
         const int32_t c = aver_fw_class_find(p.className.c_str());
         if (c == 0) {
             AVER_WARN("[Level] placement names class '{}', which is not declared -- skipped", p.className);
@@ -636,7 +646,9 @@ void GameLevel::spawnClassPlacements() {
 
         f64 pz = p.z;
         f64 gz = 0.0;
-        if (p.snapToGround && hooks_.groundHeightAt && hooks_.groundHeightAt(p.x, p.y, gz)) pz = gz + p.z;
+        if (parent == scene::kInvalidEntity && p.snapToGround && hooks_.groundHeightAt &&
+            hooks_.groundHeightAt(p.x, p.y, gz))
+            pz = gz + p.z;
         const f32 pos3[3]  = {static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(pz)};
         const Quat rot     = world::quatFromEulerDeg(Vec3{static_cast<f32>(p.roll),
                                                            static_cast<f32>(p.pitch),
@@ -650,8 +662,11 @@ void GameLevel::spawnClassPlacements() {
                       p.className, pos3[0], pos3[1], pos3[2]);
             continue;
         }
+        if (parent != scene::kInvalidEntity) world.setParent(static_cast<scene::Entity>(e), parent, false);
+        placementTree_.setEntity(index, static_cast<scene::Entity>(e));
         levelClassInstances_.push_back(e);
     }
+    placementTree_.attachUnderClassPlacements(world);
     aver_fw_spawn_batch_end();
     if (!levelClassInstances_.empty())
         AVER_INFO("[Level] {} class instance(s) placed -- an entity exists for each; whether its graph "
@@ -826,6 +841,8 @@ void GameLevel::unload() {
     for (const int32_t e : levelClassInstances_) aver_fw_destroy(e);
     levelClassInstances_.clear();
     classPlacements_.clear();   // in case unload() runs before spawnClassPlacements() ever did
+    classPlacementIndex_.clear();
+    placementTree_.clear();
 #endif
     scene::World& world = scene::World::instance();
     authored_.end(world);   // LARGE_WORLD 2.4.6: a cooked set's chunks (a no-op when none is streaming)
