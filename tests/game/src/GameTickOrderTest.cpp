@@ -10,6 +10,9 @@
 #include "aver/framework/framework_hooks.h"
 #include "aver/framework/framework_timers_abi.h"
 #include "aver/physics/physics_abi.h"
+#include "aver/physics/physics_shape_builder_abi.h"
+#include "aver/scene/Components.hpp"
+#include "aver/scene/World.hpp"
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
@@ -103,6 +106,35 @@ int main() {
     aver_phys_body_position(g_body, after);
     check(after[2] == held[2] && held[2] < before[2], "but the world holds still");
     aver_fw_timers_set_dilation(1.0f);
+
+    AVER_INFO("=== a dynamic rigid body moves its entity; interpolation draws it between steps ===");
+    {
+        scene::World& w = scene::World::instance();
+        const scene::Entity ent = w.create("falling");
+        auto* rb = static_cast<scene::CRigidBody*>(w.addComponent(ent, scene::kComponentRigidBody));
+        check(rb != nullptr, "the entity gets a CRigidBody");
+        if (rb) { rb->body = g_body; rb->motionType = AVER_PHYS_MOTION_DYNAMIC; }
+        game::bodyPoseSync().interpolate = false;
+        game::bodyPoseSync().clear();
+        game::tickGameplayGroups(step * 2.0f);
+        float o[3] = {0, 0, 0};
+        aver_phys_body_origin(g_body, o);
+        check(w.localTransform(ent).position.z == o[2], "after the frame the entity stands where its body is");
+        game::bodyPoseSync().interpolate = true;
+        game::tickGameplayGroups(step * 1.5f);   // one step, half a step of time left over
+        float now[3] = {0, 0, 0};
+        aver_phys_body_origin(g_body, now);
+        const float alpha = aver_phys_step_alpha();
+        const float z = w.localTransform(ent).position.z;
+        check(alpha > 0.0f && alpha < 1.0f, "some time is left over in the step");
+        check(z > now[2] && z < o[2] + 1e-3f, "with interpolation the entity is drawn between the last two steps");
+        game::bodyPoseSync().restore(w);   // what the next frame does before its gameplay
+        check(w.localTransform(ent).position.z == now[2], "and stands on the real pose again before the next frame's gameplay");
+        game::bodyPoseSync().interpolate = false;
+        game::bodyPoseSync().clear();
+        w.destroy(ent);
+        w.flush();
+    }
 
     AVER_INFO("=== a paused frame: the pumps and both passes on the fixed clock, no step ===");
     float pausedAt[3] = {0, 0, 0};

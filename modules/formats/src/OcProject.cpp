@@ -267,6 +267,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.physThreads = parseI32(t[1], -2);
         } else if (equalsCI(key, "PHYSICS.SHAPECACHE")) {
             if (t.size() > 1) { const int v = parseI32(t[1], -1); out.physShapeCache = v < 0 ? -1 : (v != 0 ? 1 : 0); }
+        } else if (equalsCI(key, "PHYSICS.INTERPOLATION")) {
+            if (t.size() > 1) { const int v = parseI32(t[1], -1); out.physInterpolation = v < 0 ? -1 : (v != 0 ? 1 : 0); }
         } else if (const int ps = physicsSettingIndex(key); ps >= 0) {
             // A value that is not a number is dropped, not read as 0: a typo must not silently become a setting.
             if (t.size() > 1) {
@@ -376,7 +378,8 @@ bool isOwnedKey(std::string_view line) {
         "STREAM.VERTICALRADIUS", "STREAM.LEADSECONDS",
         "WORLD.FLOATINGORIGIN", "WORLD.REBASEMARGIN", "WORLD.ALLOWSHIFTREQUEST",
         "PHYSICS.MAXBODIES", "PHYSICS.MAXBODYPAIRS", "PHYSICS.MAXCONTACTS", "PHYSICS.TEMPALLOCMB",
-        "PHYSICS.GRAVITY", "PHYSICS.FIXEDSTEP", "PHYSICS.THREADS", "PHYSICS.SHAPECACHE", "AUDIO.MASTER", "AUDIO.BUS",
+        "PHYSICS.GRAVITY", "PHYSICS.FIXEDSTEP", "PHYSICS.THREADS", "PHYSICS.SHAPECACHE", "PHYSICS.INTERPOLATION",
+        "AUDIO.MASTER", "AUDIO.BUS",
     };
     const std::vector<std::string_view> t = splitWhitespace(l);
     if (t.empty()) return false;
@@ -494,6 +497,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "PHYSICS.TEMPALLOCMB", d.physTempAllocatorMb);
     if (d.physThreads > -2) { owned += "PHYSICS.THREADS "; owned += std::to_string(d.physThreads); owned += '\n'; }
     if (d.physShapeCache >= 0) { owned += "PHYSICS.SHAPECACHE "; owned += std::to_string(d.physShapeCache); owned += '\n'; }
+    if (d.physInterpolation >= 0) { owned += "PHYSICS.INTERPOLATION "; owned += std::to_string(d.physInterpolation); owned += '\n'; }
     // The live solver settings, in the order the project stated them; a name the mirror does not know is dropped
     // (the parser would not read it back).
     for (const auto& [name, value] : d.physicsSettings) {

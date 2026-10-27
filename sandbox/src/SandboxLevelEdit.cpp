@@ -661,6 +661,15 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
 #if AVER_MODULE_PHYSICS
         for (const scene::Entity c : vehicles_.entities()) cars.insert(static_cast<u32>(c));
 #endif
+#if AVER_MODULE_PHYSICS
+        // A simulated rigid body's CLocal is where physics has moved it (BodyPoseSync.hpp): the placement saved is
+        // where it stood before Play.
+        for (u32 i = 0; i < world.count(); ++i) {
+            const scene::Entity be = world.at(i);
+            const auto* rb = world.component<scene::CRigidBody>(be, scene::kComponentRigidBody);
+            if (rb && rb->body != 0 && rb->motionType == AVER_PHYS_MOTION_DYNAMIC) cars.insert(static_cast<u32>(be));
+        }
+#endif
 #if AVER_MODULE_VEHICLE_SCENE
         // A COMPONENT Vehicle is the same story: its CLocal is where the physics has driven it, and its wheel children's are the
         // wheel poses. The placement saved is where it stood before Play.

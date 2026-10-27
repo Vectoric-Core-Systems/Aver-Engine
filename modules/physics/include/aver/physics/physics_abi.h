@@ -48,6 +48,10 @@ AVER_PHYS_API void    aver_phys_set_step_hook(aver_phys_step_hook_fn fn, void* u
 AVER_PHYS_API void    aver_phys_set_time_scale(float scale);
 AVER_PHYS_API float   aver_phys_time_scale(void);
 
+// How far the leftover time is into the next fixed step, 0..1: the blend between the last two steps' poses
+// for drawing in between (physics interpolation). 0 without a world.
+AVER_PHYS_API float   aver_phys_step_alpha(void);
+
 // The fixed step, in seconds (1/60 unless set).
 AVER_PHYS_API float   aver_phys_fixed_step(void);
 // Change the fixed step. Set it before any bodies exist.

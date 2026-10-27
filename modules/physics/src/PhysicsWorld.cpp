@@ -393,6 +393,12 @@ void aver_phys_set_time_scale(float scale) {
 
 float aver_phys_time_scale(void) { return g_world ? g_world->timeScale : 1.0f; }
 
+float aver_phys_step_alpha(void) {
+    if (!g_world || g_world->fixedStep <= 0.0f) return 0.0f;
+    const float a = g_world->accumulator / g_world->fixedStep;
+    return a < 0.0f ? 0.0f : (a > 1.0f ? 1.0f : a);
+}
+
 // The fixed step in seconds.
 float aver_phys_fixed_step(void) { return g_world ? g_world->fixedStep : 1.0f / 60.0f; }
 

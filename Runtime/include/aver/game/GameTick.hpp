@@ -28,6 +28,9 @@
 #  include "aver/physics/physics_abi.h"
 #  include "aver/game/PhysicsProjectApply.hpp"
 #endif
+#if AVER_MODULE_PHYSICS && AVER_MODULE_SCENE
+#  include "aver/game/BodyPoseSync.hpp"
+#endif
 #if AVER_WITH_AUDIO_ABI
 #  include "aver/audio/audio_abi.h"
 #endif
@@ -75,7 +78,13 @@ inline bool startPhysics(const char* hostTag) {
 // The body is in PhysicsProjectApply.hpp, which also has configureProjectPhysics for the limits (MAXBODIES,
 // MAXBODYPAIRS, MAXCONTACTS, TEMPALLOCMB, THREADS): those are fixed for a world's lifetime, so the hosts call it
 // right after the manifest is parsed and before the first level loads. Call sites of this function are unchanged.
-inline void applyProjectPhysics(const fmt::ProjectDesc& project) { applyProjectPhysicsKeys(project); }
+inline void applyProjectPhysics(const fmt::ProjectDesc& project) {
+    applyProjectPhysicsKeys(project);
+#if AVER_MODULE_SCENE
+    bodyPoseSync().interpolate = project.physInterpolation == 1;
+    bodyPoseSync().clear();
+#endif
+}
 #endif
 
 #if AVER_WITH_AUDIO_ABI
@@ -130,8 +139,17 @@ inline void publishProjectPaths(const fmt::ProjectDesc& project, bool editor) {
 // Game time per real time (Godot's Engine.time_scale): the timer service's dilation, the one setting.
 inline f32 gameTimeScale() { return aver_fw_timers_dilation(); }
 
-// The physics tick pass, run by aver_phys_step at the start of each fixed step.
-inline void physicsTickHook(float fixedStep, void*) { aver_fw_tick(AVER_FW_TICK_PHYSICS, fixedStep); }
+// Steps the hook has seen this frame: from the second on, the step before has just finished.
+inline int& physicsStepsThisFrame() { static int n = 0; return n; }
+
+// The physics tick pass, run by aver_phys_step at the start of each fixed step, after the previous step's
+// body poses reach their entities.
+inline void physicsTickHook(float fixedStep, void*) {
+#if AVER_MODULE_PHYSICS && AVER_MODULE_SCENE
+    if (physicsStepsThisFrame()++ > 0) bodyPoseSync().capture(scene::World::instance());
+#endif
+    aver_fw_tick(AVER_FW_TICK_PHYSICS, fixedStep);
+}
 
 // Physics-pass time carried between frames when no physics world steps (no world, or a paused game).
 inline f32& physicsTickCarry() { static f32 carry = 0.0f; return carry; }
@@ -176,10 +194,17 @@ inline i32 tickGameplayGroups(f32 dt) {
     i32 steps = 0;
 #if AVER_MODULE_PHYSICS
     if (aver_phys_ready()) {
+#if AVER_MODULE_SCENE
+        bodyPoseSync().restore(scene::World::instance());   // gameplay reads real poses, not last frame's blend
+#endif
         aver_phys_set_time_scale(scale);
+        physicsStepsThisFrame() = 0;
         aver_phys_set_step_hook(&physicsTickHook, nullptr);
         steps = aver_phys_step(dt);
         aver_phys_set_step_hook(nullptr, nullptr);
+#if AVER_MODULE_SCENE
+        if (steps > 0) bodyPoseSync().capture(scene::World::instance());   // the last step's poses
+#endif
         physicsTickCarry() = 0.0f;
     } else
 #endif
@@ -187,6 +212,10 @@ inline i32 tickGameplayGroups(f32 dt) {
         physicsTicksOnClock(dt, scale);
     }
     aver_fw_tick(AVER_FW_TICK_PROCESS, dt * scale);
+#if AVER_MODULE_PHYSICS && AVER_MODULE_SCENE
+    // For drawing: simulated bodies between their last two steps, when the project asks for interpolation.
+    if (aver_phys_ready()) bodyPoseSync().present(scene::World::instance(), aver_phys_step_alpha());
+#endif
 #if AVER_MODULE_SCENE
     aver_decal_tick(dt * scale);   // lifetimes of pooled decals, in game time
 #endif

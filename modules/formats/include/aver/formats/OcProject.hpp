@@ -218,6 +218,9 @@ struct ProjectDesc {
     // PHYSICS.SHAPECACHE: 1 = keep mesh and heightfield collision shapes' BVHs on disk (Saved/DerivedDataCache/Physics),
     // 0 = do not; -1 = unstated (the default, which is off until the cache has been measured on the real levels).
     int physShapeCache        = -1;
+    // PHYSICS.INTERPOLATION: 1 = draw simulated bodies between the last two fixed steps (Godot's physics
+    // interpolation), 0 = at the last step; -1 = unstated (off).
+    int physInterpolation     = -1;
     // PHYSICS.<NAME> for the live solver settings of physics_world_abi.h (PHYSICS.VELOCITYSTEPS,
     // PHYSICS.SLEEPTIME ...): only the ones the file states, in file order, the name in the setting table's own
     // camelCase spelling ("velocitySteps") and the value as written (the physics ABI clamps it). Formats may not
