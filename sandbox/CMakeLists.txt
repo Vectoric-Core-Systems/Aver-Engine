@@ -442,6 +442,14 @@ target_include_directories(Sandbox PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
 set_target_properties(Sandbox PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# Most editor files compiled at once (Ninja job pool); empty = no cap. Each pulls in SandboxApp.hpp, and three at a
+# time overran the 7 GB macOS CI runner, which set it to 1.
+set(AVER_SANDBOX_COMPILE_JOBS "" CACHE STRING "Most editor source files compiled at once under Ninja; empty for no cap")
+if(AVER_SANDBOX_COMPILE_JOBS)
+  set_property(GLOBAL APPEND PROPERTY JOB_POOLS sandbox_compile=${AVER_SANDBOX_COMPILE_JOBS})
+  set_property(TARGET Sandbox PROPERTY JOB_POOL_COMPILE sandbox_compile)
+endif()
+
 # Ship the splash next to the executable so the engine can show it at startup.
 #
 # Driven by an OUTPUT rule rather than POST_BUILD: a POST_BUILD command only runs when the target

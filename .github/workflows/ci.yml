@@ -124,7 +124,8 @@ jobs:
   build-and-test-unix:
     name: ${{ matrix.os }} ${{ matrix.config }} build + suites
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    # macOS compiles the editor one file at a time (see Configure), which takes longer.
+    timeout-minutes: ${{ matrix.os == 'macos-15' && 180 || 120 }}
     strategy:
       fail-fast: false
       matrix:
@@ -169,10 +170,22 @@ jobs:
         run: |
           cmake -S . -B build-ci -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
-            -DAVER_BUILD_TESTS=ON
+            -DAVER_BUILD_TESTS=ON \
+            ${{ runner.os == 'macOS' && '-DAVER_SANDBOX_COMPILE_JOBS=1' || '' }}
 
+      # macOS: the editor files took 3-29 min each, three at once on the 7 GB runner (Linux: seconds), and
+      # the job timed out. The cap above is the fix; the memory line every minute is the evidence.
       - name: Build
-        run: cmake --build build-ci --parallel
+        run: |
+          mon=""
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            ( while sleep 60; do echo "[mem] $(date +%H:%M) swap: $(sysctl -n vm.swapusage) | $(memory_pressure -Q | tail -1)"; done ) &
+            mon=$!
+          fi
+          rc=0
+          cmake --build build-ci --parallel || rc=$?
+          if [ -n "${mon}" ]; then kill "${mon}" || true; fi
+          exit "${rc}"
 
       - name: Run the headless suites
         shell: pwsh
