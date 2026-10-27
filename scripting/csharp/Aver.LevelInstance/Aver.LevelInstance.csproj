@@ -4,8 +4,7 @@
        LevelInstances API on top of them, and the seam the AN_SpawnLevelInstance family of Aver Node nodes call.
 
        A LEAF, like Aver.Prefab: it references nothing, because placing a level is a string and some numbers in,
-       an entity handle out. The native library is Aver.LevelInstance.Abi, a different file name from this
-       assembly, so no NativeResolver is needed. -->
+       an entity handle out. -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
@@ -19,5 +18,10 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Loads the Aver.* native libraries from the executable folder: one shared file, a resolver per assembly. -->
+    <Compile Include="../Shared/NativeResolver.cs" Link="NativeResolver.cs" />
+  </ItemGroup>
 
 </Project>

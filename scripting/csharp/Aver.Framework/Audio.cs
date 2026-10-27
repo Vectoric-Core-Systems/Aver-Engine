@@ -10,12 +10,7 @@ using Aver.Scene;
 namespace Aver.Framework;
 
 /// <summary>P/Invoke into Aver.Audio.Abi. Internal: scripts use <see cref="Audio"/>.</summary>
-/// <remarks>NO NativeResolver ENTRY, and that is deliberate rather than an omission. The resolver in
-/// NativeResolver.cs special-cases exactly two names, "Aver.Framework" and "Aver.Scene", because
-/// those two collide with MANAGED assemblies of the same name staged in bin/Scripting — default
-/// probing would find the IL one and every symbol would come back missing. "Aver.Audio.Abi" has no
-/// managed namesake anywhere, so ordinary probing finds bin/Aver.Audio.Abi.dll on the first try.
-/// That is the same path Aver.Physics already takes; see Phys in Physics.cs.</remarks>
+/// <remarks>Resolved from the executable folder by NativeResolver.cs, like every Aver.* library.</remarks>
 internal static class Ax
 {
     private const string Lib = "Aver.Audio.Abi";

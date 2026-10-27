@@ -24,4 +24,9 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Loads the Aver.* native libraries from the executable folder: one shared file, a resolver per assembly. -->
+    <Compile Include="../Shared/NativeResolver.cs" Link="NativeResolver.cs" />
+  </ItemGroup>
+
 </Project>

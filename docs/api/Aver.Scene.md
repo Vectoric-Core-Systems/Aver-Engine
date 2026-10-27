@@ -2,7 +2,7 @@
 
 # Aver.Scene public API
 
-10 public types and 116 public members, read from `scripting/csharp/Aver.Scene/` (5 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+10 public types and 116 public members, read from `scripting/csharp/Aver.Scene/` (4 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Scene
 

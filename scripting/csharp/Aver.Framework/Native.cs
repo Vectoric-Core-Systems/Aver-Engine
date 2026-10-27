@@ -76,7 +76,7 @@ internal static class Fw
     [DllImport(Lib)] internal static extern int aver_fw_save_load([MarshalAs(UnmanagedType.LPUTF8Str)] string path);
     // GRAPH-LOCAL VARIABLES, relayed -- same shape as anim_curve/save_write just above. Declared HERE,
     // not in Aver.Scripting.Bridge, for a reason that cost a real EntryPointNotFoundException to find:
-    // ONLY this assembly has a DllImportResolver registered (NativeResolver.cs) routing "Aver.Framework"
+    // the Bridge has no DllImportResolver; this assembly does (NativeResolver.cs), routing "Aver.Framework"
     // to the native DLL one directory up. A raw [DllImport("Aver.Framework")] declared directly in the
     // Bridge assembly instead resolves through default probing, which finds bin/Scripting/Aver.Framework.dll
     // first -- the MANAGED assembly of the same name sitting right next to the bridge -- and GetProcAddress
@@ -289,14 +289,8 @@ internal static class SceneNative
 /// the same move for the identical reason, one native surface per DLL, all living in this one file
 /// because that is where the CRITICAL CONSTRAINT this repo enforces says a new native call belongs.
 ///
-/// UNLIKE Fw and SceneNative, this class needs NO entry in NativeResolver.cs. That resolver exists
-/// only because "Aver.Framework" and "Aver.Scene" each name BOTH a managed contract assembly and a
-/// native DLL sitting in the same output directory, so the default P/Invoke probe would find the
-/// managed one first and GetProcAddress every symbol into failure (NativeResolver.cs's own comment).
-/// There is no managed "Aver.Settings" assembly anywhere in scripting/csharp for "Aver.Settings" to
-/// collide with, and modules/settings/CMakeLists.txt:16-18 stages the native Aver.Settings.dll into
-/// the identical CMAKE_BINARY_DIR/bin the framework DLL already resolves into (framework/CMakeLists.txt
-/// :26's own "DLL next to the exe") -- so the CLR's ordinary default probing finds it unassisted.</summary>
+/// Resolved from the executable folder by NativeResolver.cs: on Linux and macOS the default probe never
+/// looks there, and Aver.Settings is the one library neither host links (issue #3).</summary>
 internal static class SettingsNative
 {
     private const string Lib = "Aver.Settings";

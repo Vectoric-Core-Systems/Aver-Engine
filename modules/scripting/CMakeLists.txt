@@ -123,6 +123,8 @@ file(GLOB AVER_BRIDGE_SOURCES CONFIGURE_DEPENDS
   # framework / graph projects, so the same stale-staging rule applies.
   ${AVER_CSHARP_DIR}/Aver.Synapse/*.cs
   ${AVER_CSHARP_DIR}/Aver.Synapse/*.csproj
+  # The native-library resolver every binding links in (Shared/NativeResolver.cs).
+  ${AVER_CSHARP_DIR}/Shared/*.cs
   ${AVER_CSHARP_DIR}/Aver.Prefab/*.cs
   ${AVER_CSHARP_DIR}/Aver.Prefab/*.csproj
   # [wave3/level-instances] the level-instance binding, referenced the same way

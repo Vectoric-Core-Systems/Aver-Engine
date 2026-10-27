@@ -7,7 +7,6 @@ using System.Runtime.InteropServices;
 namespace Aver.UI;
 
 /// <summary>The P/Invoke surface for the <c>Aver.UI.Abi</c> C ABI. See <c>modules/ui.abi/include/aver/ui/ui_abi.h</c>.</summary>
-/// <remarks>The native library and this assembly are named apart, so no <c>NativeResolver</c> is needed.</remarks>
 internal static class Native
 {
     private const string Lib = "Aver.UI.Abi";
