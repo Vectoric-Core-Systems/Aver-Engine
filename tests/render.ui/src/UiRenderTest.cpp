@@ -4,6 +4,7 @@
 #include "aver/render/ui/UiRenderer.hpp"
 #include "aver/core/Log.hpp"
 
+#include <cstring>
 #include <string>
 #include <vector>
 

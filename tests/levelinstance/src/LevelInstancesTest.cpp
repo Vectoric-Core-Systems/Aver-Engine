@@ -1,6 +1,7 @@
 // game::LevelInstances against a fake host: realise, nest, cycle, overrides, unrealise, stream, edit, break, classes,
 // lights and decals, records, rescan, runtime spawn, residency events. No GPU, no framework.
 #include "LevelInstanceFixture.hpp"
+#include <string_view>
 
 // ---------------------------------------------------------------------------------------------------------------
 

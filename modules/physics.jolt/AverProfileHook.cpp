@@ -16,6 +16,7 @@
 
 #include "../physics/src/PhysicsProfile.hpp"
 
+#include <atomic>
 #include <cstring>
 
 namespace aver::physics::profile {

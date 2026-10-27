@@ -193,7 +193,7 @@ jobs:
   # Builds only the two physics suites that hash the simulation, with AVER_PHYSICS_CROSS_PLATFORM=ON (Jolt's cross-platform
   # deterministic mode, and no FMA contraction in the engine's own fixed-step float code), on Windows and macOS, runs them, and keeps
   # the golden checkpoints PhysicsDeterminismTest writes (AVER_PHYSICS_GOLDEN_OUT: a precision line, then "step hash" lines, nothing
-  # that names the platform). The compare job diffs the two files. A difference is a FINDING (continue-on-error), not a red build: the
+  # that names the platform). The compare job diffs the two files. A difference is a FINDING (a warning annotation), not a red build: the
   # likeliest cause is the vehicle driver aids in PhysicsVehicleExt.cpp, plain float arithmetic that two compilers may round
   # differently. The claim is made only when the files are equal AND the checkpoints are pasted into kGoldenSingle in the test.
   physics-determinism:
@@ -280,6 +280,5 @@ jobs:
           if diff golden-windows-2022.txt golden-macos-15.txt; then
             echo "EQUAL: Windows and macOS hashed the golden scene identically. Paste these into kGoldenSingle in PhysicsDeterminismTest.cpp."
           else
-            echo "DIFFERENT: a finding, not a claim. The cross-platform determinism claim stays unmade."
-            exit 1
+            echo "::warning title=Physics determinism::Windows and macOS golden checkpoints differ. A finding, not a claim: the cross-platform determinism claim stays unmade."
           fi

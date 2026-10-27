@@ -7,6 +7,8 @@
 #include "aver/scene/World.hpp"
 
 #include <algorithm>
+#include <memory>
+#include <unordered_set>
 
 namespace aver::game {
 

@@ -322,7 +322,7 @@ static void testAudioObserverSites() {
     std::stringstream ss;
     ss << f.rdbuf();
     std::string text = ss.str();
-    text.erase(std::remove(text.begin(), text.end(), ''), text.end());   // the working copy may be CRLF
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());   // the working copy may be CRLF
     const char* sigs[] = {"int32_t aver_audio_play(", "int32_t aver_audio_play_at(", "int32_t aver_audio_stream_play(",
                           "int32_t aver_audio_stream_play_at(", "int32_t aver_audio_music_play("};
     for (const char* s : sigs)

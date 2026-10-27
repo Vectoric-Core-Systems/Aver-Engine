@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 
 namespace aver::ui {
 

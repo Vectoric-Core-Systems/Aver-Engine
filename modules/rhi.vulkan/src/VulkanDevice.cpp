@@ -15,6 +15,7 @@
 #include "aver/rhi/Atmosphere.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
