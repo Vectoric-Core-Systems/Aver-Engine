@@ -61,12 +61,9 @@ namespace MyGame;
 [AverClass("AN_Rotator")]
 public sealed class Rotator : AverActor
 {
-    // The class RECIPE — run once per class at load, never per instance. Declares components + tick.
-    public static void Configure(ClassBuilder b)
-    {
-        b.Mesh("Meshes/cube.ocmesh");   // this actor's own entity gets a mesh
-        b.Ticks(TickGroup.PrePhysics);  // ask to tick
-    }
+    // The class RECIPE — run once per class at load, never per instance. Declares components.
+    // Overriding OnTick below is what makes it tick.
+    public static void Configure(ClassBuilder b) => b.Mesh("Meshes/cube.ocmesh");
 
     private float _angle;
 
@@ -147,8 +144,13 @@ actor a GameMode spawned in a hook is not a root, and would otherwise get `OnBeg
 `OnEndPlay`. Everything ends with `EndReason.Stop`, and the world returns to `EDITOR`. Read the current state and
 singletons through [`Game`](#7-game--the-running-session).
 
-The hook order within a frame: begin-play queue drains → `OnTick` in tick-group order → destroy queue
-drains. Gameplay ticks only while `Playing` (a `Paused` session freezes it without tearing down).
+The frame runs in Godot's order: input actions, timers and posted events, the frame pumps, then for
+each fixed physics step (0–8 a frame) every actor's `OnPhysicsTick` followed by that step, then every
+actor's `OnTick` once, then the destroy queue drains. Within a pass actors run by priority
+(`TickPriority` / `PhysicsTickPriority`, lower first), then in scene-tree order: a parent before its
+children, siblings and roots in the order they were added. An actor spawned during a pass ticks from the
+next one. Gameplay ticks only while `Playing` (a `Paused` session freezes it without tearing down; the
+game-UI, content and accessibility pumps keep running).
 
 ---
 
@@ -159,7 +161,12 @@ Override these on your `AverActor` subclass. All are optional; the defaults do n
 | Hook | When |
 |---|---|
 | `void OnBeginPlay(BeginReason reason)` | Once when the actor begins playing. `reason` is `Spawn` (fresh), `Play` (an already-placed actor entering Play), or `Reload` (after a hot reload). |
-| `void OnTick(float dt)` | Every frame the class is scheduled to tick, in its tick group. `dt` is clamped seconds. Requires `b.Ticks(...)` in `Configure`. |
+| `void OnTick(float dt)` | Once a frame, after the frame's physics steps (Godot's `_process`). `dt` is the frame time in seconds. On when the class overrides it. |
+| `void OnPhysicsTick(float dt)` | Once per fixed physics step, before that step (Godot's `_physics_process`), so 0–8 times a frame. `dt` is the fixed step. On when the class overrides it. |
+
+`TickEnabled` and `PhysicsTickEnabled` turn either tick off or back on at runtime; `TickPriority` and
+`PhysicsTickPriority` order actors within a pass (lower first). A tick that throws aborts only that call:
+the error is logged and the actor keeps ticking.
 | `void OnEndPlay(EndReason reason)` | Once when the actor stops playing. `Stop` = the world stopped; `Destroy` = it was destroyed; `Reload` = the entity stays, only the managed half is rebuilt. |
 | `void OnRebound()` | **DECLARED BUT NEVER CALLED.** The hook exists in `framework_hooks.h` and nothing in the engine invokes it; the bridge's own comment records the rebind path as out of scope. Do not put logic here expecting it to run. |
 | `bool OnEvent(string name)` | A named event was raised **at this entity**. Two things raise one: an **animation notify** (a marker crossed on a playing clip) and a graph's `FireEvent` node aimed here. Return `true` if you handled it -- the value is what the caller reads as its own success. |
@@ -538,7 +545,6 @@ they resolved came from a C# type or a graph with no C# behind it at all. See
 |---|---|
 | `BeginReason` | `Spawn` (0), `Play` (1), `Reload` (2) |
 | `EndReason` | `Destroy` (0), `Stop` (1), `Reload` (2), `Travel` (3) |
-| `TickGroup` | `PrePhysics` (0), `Physics` (1), `PostPhysics` (2) |
 | `PlayState` | `Editor` (0), `Playing` (1), `Paused` (2) |
 | `CameraView` | `FirstPerson`, `ThirdPerson` |
 | `Component` | `Local` (1), `World` (2), `Hierarchy` (3), `Name` (4), `Tags` (5), `MeshRenderer` (6), `Light` (7), `Camera` (8) |
@@ -555,7 +561,7 @@ Configure(ClassBuilder b)`:
 | `void Mesh(string meshPath, string material = "")` | Give the class's own entity a mesh (and optional material). |
 | `void PointLight(float intensityLux, float rangeCm)` | Add a point light. |
 | `void Camera(float fovDegrees, float nearCm, float farCm)` | Add a camera. |
-| `void Ticks(TickGroup group, int order = 0)` | Ask the class to tick, in `group`. |
+| `void Ticks(TickGroup group, int order = 0)` | **Obsolete**, kept so older scripts compile. Ticking follows the `OnTick` / `OnPhysicsTick` overrides; `order` becomes each instance's starting priority and `group` is ignored. |
 
 `ActorBuilder` writes the editor-owned **model tree** inside `BuildModels`; hand code rarely touches it.
 `ModelHandle` is the handle a placed model returns.
@@ -579,9 +585,9 @@ Static, in `Aver.Framework`. Everything is in the engine's contract — centimet
 +Y right, +Z up, left-handed. The backend (Jolt, MIT) is right-handed, +Y up and metric; that
 translation happens once behind the native ABI, so no Jolt convention ever reaches a script.
 
-The world is stepped by the frame loop **between the PrePhysics and PostPhysics tick groups**, at a
-**fixed step** regardless of frame rate. So set what you want in a `PrePhysics` tick and read what
-happened in a `PostPhysics` one.
+The world advances in **fixed steps** regardless of frame rate, and each step is preceded by every
+actor's `OnPhysicsTick`. So set forces and velocities in `OnPhysicsTick` (it sees the previous step's
+result) and read what the frame settled on in `OnTick`, which runs after the last step.
 
 | Member | Description |
 |---|---|
@@ -715,9 +721,7 @@ using Aver.UI;
 [AverClass("AN_PlayerHud")]
 public sealed class PlayerHud : AverActor
 {
-    // PostPhysics: draw what the frame settled on, not what it was asked for.
-    public static void Configure(ClassBuilder b) => b.Ticks(TickGroup.PostPhysics);
-
+    // OnTick runs after the frame's physics steps: draw what the frame settled on.
     static readonly Colour Ink   = Colour.Argb(0xFFE8E4DC);
     static readonly Colour Panel = Colour.Argb(0xB0141820);   // 69% alpha — proves the blend
     static readonly Colour Hurt  = Colour.Rgb(232, 76, 46);
@@ -841,11 +845,7 @@ the slot's space into the `TEX` line and the reader validates it, so the two can
 [AverClass("AN_Hero")]
 public sealed class Hero : AverCharacter
 {
-    public static void Configure(ClassBuilder b)
-    {
-        b.Mesh("Meshes/hero.ocmesh");
-        b.Ticks(TickGroup.PrePhysics);
-    }
+    public static void Configure(ClassBuilder b) => b.Mesh("Meshes/hero.ocmesh");
 
     public override void OnTick(float dt)
     {

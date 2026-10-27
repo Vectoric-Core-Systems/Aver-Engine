@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-206 public types and 1777 public members, read from `scripting/csharp/Aver.Framework/` (128 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+206 public types and 1782 public members, read from `scripting/csharp/Aver.Framework/` (128 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -322,7 +322,12 @@ Values: `None = 0`, `Started = 1`, `Ongoing = 2`, `Triggered = 4`, `Completed = 
 
 - `public Entity Self { get; }` - This actor's entity.
 - `public virtual void OnBeginPlay(BeginReason reason)` - Runs once when this actor begins playing, for a spawn, a world start or a hot reload.
-- `public virtual void OnTick(float dt)` - Runs every frame the actor's class ticks.
+- `public virtual void OnTick(float dt)` - Runs once a frame, after the frame's physics steps (Godot's _process).
+- `public virtual void OnPhysicsTick(float dt)` - Runs once per fixed physics step, before that step (Godot's _physics_process): 0 to 8 times a frame.
+- `public bool TickEnabled { get; set; }` - Whether OnTick runs.
+- `public bool PhysicsTickEnabled { get; set; }` - Whether OnPhysicsTick runs.
+- `public int TickPriority { get; set; }` - Order among actors in the OnTick pass: lower runs first, equal priorities in scene-tree order (a parent before its children, siblings in the order they were added).
+- `public int PhysicsTickPriority { get; set; }` - Order among actors in the OnPhysicsTick pass, as TickPriority.
 - `public virtual void OnEndPlay(EndReason reason)` - Runs once when this actor stops playing.
 - `public virtual void OnRebound()` - Runs after a hot reload has rebound this instance and restored its native state.
 - `public virtual bool OnEvent(string name)` - Runs when a named event is raised at this actor's entity.
@@ -755,7 +760,7 @@ Values: `Off = 0`, `Subtitles = 1`, `Captions = 2`
 - `public void PointLight(float intensityLux, float rangeCm)` - Adds a point light.
 - `public void Camera(float fovDegrees, float nearCm, float farCm)` - Adds a camera.
 - `public void CameraRig(CameraRigPreset preset = CameraRigPreset.Chase)` - Gives the class's own entity a gameplay camera rig seeded from preset (and a camera).
-- `public void Ticks(TickGroup group, int order = 0)` - Declares that the class ticks, in group at order.
+- `public void Ticks(TickGroup group, int order = 0)` - Kept so older scripts compile.
 
 ### ClassNames
 
@@ -2292,7 +2297,7 @@ Values: `XYZ`, `YXZ`, `ZYX`, `XZY`, `YZX`, `ZXY`
 
 ### TickGroup
 
-`public enum TickGroup` - When in the frame an actor ticks, relative to physics.
+`public enum TickGroup` - Kept so older scripts compile; see Ticks.
 
 Values: `PrePhysics = 0`, `Physics = 1`, `PostPhysics = 2`
 

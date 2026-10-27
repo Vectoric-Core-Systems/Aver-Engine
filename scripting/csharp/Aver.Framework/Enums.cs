@@ -22,12 +22,21 @@ public enum EndReason
     Travel = 3,
 }
 
-/// <summary>When in the frame an actor ticks, relative to physics. Pinned to the AVER_FW_TICK_* group ids.</summary>
+/// <summary>Kept so older scripts compile; see <see cref="ClassBuilder.Ticks"/>. Ticking now follows the
+/// OnTick / OnPhysicsTick overrides.</summary>
+[Obsolete("Override OnTick or OnPhysicsTick instead.")]
 public enum TickGroup
 {
     PrePhysics = 0,
     Physics = 1,
     PostPhysics = 2,
+}
+
+// The two tick passes. Pinned to the AVER_FW_TICK_* ids in framework_abi.h.
+internal enum TickPass
+{
+    Physics = 0,
+    Process = 1,
 }
 
 /// <summary>The world's play state, as read from <c>aver_fw_play_state</c>.</summary>

@@ -121,6 +121,11 @@ public:
     Entity firstChild(Entity e) const;
     // The next sibling under the same parent, or kInvalidEntity.
     Entity nextSibling(Entity e) const;
+    // Creation or reparent order: siblings, and roots, sort by it ascending (the child list itself is
+    // newest-first). 0 for a stale handle.
+    u64    orderStamp(Entity e) const;
+    // Changes on every create, reparent and retire.
+    u64    hierarchyRevision() const;
     // Number of immediate children.
     u32    childCount(Entity e) const;
     // Distance from the root; 0 for a root.

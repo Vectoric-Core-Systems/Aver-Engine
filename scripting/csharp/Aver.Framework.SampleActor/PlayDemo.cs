@@ -69,12 +69,8 @@ public sealed class DemoPawn : AverCharacter
 {
     private int _ticks;
 
-    /// <summary>The class recipe: the built-in sphere mesh, and a tick in PrePhysics.</summary>
-    public static void Configure(ClassBuilder b)
-    {
-        b.Mesh("Meshes/sphere.ocmesh");
-        b.Ticks(TickGroup.PrePhysics);
-    }
+    /// <summary>The class recipe: the built-in sphere mesh. It ticks because it overrides OnTick.</summary>
+    public static void Configure(ClassBuilder b) => b.Mesh("Meshes/sphere.ocmesh");
 
     /// <summary>Drops the pawn from z=300 and logs the physics state.</summary>
     public override void OnBeginPlay(BeginReason reason)

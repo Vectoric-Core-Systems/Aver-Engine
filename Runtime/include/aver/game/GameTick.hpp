@@ -1,5 +1,5 @@
 // GameTick: the ONE copy of physics start, audio start, the manifest's PHYSICS.*/AUDIO.* apply, the
-// framework tick groups around the physics step, and the Synapse AI tick -- Sandbox.exe (the
+// framework tick passes around the physics steps, and the Synapse AI tick -- Sandbox.exe (the
 // editor) and AverEngineRuntime.exe (the shipped game) each carried an identical copy of all five
 // before this file existed (docs/RUNTIME-DEDUP.md, Phase C).
 //
@@ -31,7 +31,7 @@
 #  include "aver/audio/audio_abi.h"
 #endif
 #if AVER_MODULE_FRAMEWORK
-// framework_abi.h declares the AVER_FW_TICK_* group numbers; aver_fw_tick itself is declared in
+// framework_abi.h declares the AVER_FW_TICK_* pass numbers; aver_fw_tick itself is declared in
 // framework_hooks.h -- both hosts already include this same pair together for the identical reason.
 #  include "aver/framework/framework_abi.h"
 #  include "aver/framework/framework_hooks.h"
@@ -100,50 +100,48 @@ inline void applyProjectAudioMix(const fmt::ProjectDesc& project) {
 #endif
 
 #if AVER_MODULE_FRAMEWORK
-// Runs the three gameplay tick groups for one frame, with the physics step between the first two.
-// Returns HOW MANY FIXED STEPS the physics world actually ran this frame: 0 when the accumulator
-// did not reach a full step, when there is no world yet, when dt is not positive, and in a build
-// without physics at all.
-//
-// THE COUNT, NOT A FLAG, and that is a correction rather than a refinement. This used to write
-// `stepped = true` beside the call and throw aver_phys_step's return value away, so a caller that
-// counted what came back was counting GAMEPLAY-TICK FRAMES and then reporting them as physics
-// steps. The two genuinely differ in both directions: aver_phys_step accumulates real time and
-// drains it in fixed steps (physics_abi.h:35, "Returns how many fixed steps actually ran"), so one
-// long frame runs several -- up to the eight-step catch-up clamp in PhysicsWorld.cpp's while loop
-// -- while a frame shorter than the fixed step runs none and the old code still said true.
-//
-// THE CALLER DECIDES whether the world advances THIS FRAME AT ALL (a live Play session, or the
-// editor's own --spawn-test harness) -- once called, this runs unconditionally.
-//
-// ORDER COPIED FROM THE CODE, NOT FROM A COMMENT ABOUT IT: the tick groups are meant to bracket the
-// physics step, PrePhysics -> Physics -> PostPhysics, but the step itself sits BETWEEN PRE_PHYSICS
-// and PHYSICS below, so PHYSICS-group ticks observe the results of this frame's simulation rather
-// than last frame's. Reordering to match "bracket" literally would make every PHYSICS-group actor
-// read stale transforms.
 // A paused play frame: IGNORE_PAUSE timers, posted events and the per-frame pumps, so a pause
-// menu's handlers still run. No tick group, no physics step, no action update.
+// menu's handlers still run. No tick pass, no physics step, no action update.
 inline void tickPausedFrame(f32 dt) {
     aver_fw_timers_update(dt);
     aver_fw_events_flush();
     aver_fw_tick(AVER_FW_PUMP_FRAME, dt);
 }
 
+// The physics tick pass, run by aver_phys_step at the start of each fixed step.
+inline void physicsTickHook(float fixedStep, void*) { aver_fw_tick(AVER_FW_TICK_PHYSICS, fixedStep); }
+
+// Physics-pass time carried between frames when no physics world steps (a build or a level without one).
+inline f32& physicsTickCarry() { static f32 carry = 0.0f; return carry; }
+
+// One gameplay frame in Godot's order: input, timers and events, the frame pumps, then for each fixed
+// physics step the PHYSICS pass (OnPhysicsTick, fixed dt) followed by the step, then the PROCESS pass
+// (OnTick, frame dt). Returns how many fixed steps ran: 0-8, the catch-up clamp. The caller decides
+// whether the world advances this frame at all.
 inline i32 tickGameplayGroups(f32 dt) {
     // Input triggers and smoothing advance once a frame, after the host published this frame's input.
     aver_fw_action_update(dt);
-    // Timers fire and posted events are delivered before any group runs, so a graph or actor reached by
-    // either sees this frame's PrePhysics as the first thing after its callback.
     aver_fw_timers_update(dt);
     aver_fw_events_flush();
     aver_fw_tick(AVER_FW_PUMP_FRAME, dt);
-    aver_fw_tick(AVER_FW_TICK_PRE_PHYSICS, dt);
+    aver_fw_tick(AVER_FW_PUMP_PLAY, dt);
     i32 steps = 0;
 #if AVER_MODULE_PHYSICS
-    steps = aver_phys_step(dt);
+    if (aver_phys_ready()) {
+        aver_phys_set_step_hook(&physicsTickHook, nullptr);
+        steps = aver_phys_step(dt);
+        aver_phys_set_step_hook(nullptr, nullptr);
+        physicsTickCarry() = 0.0f;
+    } else
 #endif
-    aver_fw_tick(AVER_FW_TICK_PHYSICS, dt);
-    aver_fw_tick(AVER_FW_TICK_POST_PHYSICS, dt);
+    {
+        // The same fixed cadence and catch-up clamp as the physics world, with nothing to step.
+        constexpr f32 kStep = 1.0f / 60.0f;
+        f32& carry = physicsTickCarry();
+        carry += dt > 0.0f ? (dt < kStep * 8.0f ? dt : kStep * 8.0f) : 0.0f;
+        while (carry >= kStep) { carry -= kStep; aver_fw_tick(AVER_FW_TICK_PHYSICS, kStep); }
+    }
+    aver_fw_tick(AVER_FW_TICK_PROCESS, dt);
 #if AVER_MODULE_SCENE
     aver_decal_tick(dt);   // lifetimes of pooled decals
 #endif

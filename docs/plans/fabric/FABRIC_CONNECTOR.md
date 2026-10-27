@@ -43,6 +43,17 @@ Owner decisions so far:
 | `[Editable]` unread | MOVED to G1. It needs a level `PROP` record, apply-on-bind, and an editor row. |
 | Solid contacts never report an exit | MOVED to G2. Jolt reports a removed contact whenever a body falls asleep, so this needs the per-body contact tracking G2 designs, and must not disturb the snapshot/restore and determinism hashes. |
 
+### G1 status
+| Item | Status |
+|---|---|
+| Tick model → Godot's order (owner decision 2026-10-28: Aver's only order, no compat switch) | DONE: `OnPhysicsTick` once per fixed step before the step (physics step hook), `OnTick` once a frame after, by priority then tree order (`aver_fw_tree_order`, World order stamps). Runtime `TickEnabled`/`PhysicsTickEnabled` and priorities; a throwing tick no longer disables its actor. Framework ABI 2.0. Tests: GameTickOrderTest, FrameworkTest `testTreeOrder`. Graph-class instances still tick in their own pass, once a frame. |
+| Time scale on every delta; physics interpolation | open |
+| Per-actor pause modes | open |
+| Lifecycle order (enter/ready/exit), notifications | open |
+| Deferred queue, signal flags, await context | open |
+| Prefab actor bind; `[Editable]` per-instance values (moved from G0) | open |
+| Variant, PCG32 RNG, groups, level travel, files/resources, input chain, platform services | open |
+
 ## Gap list, sized S/M/L, and where each fix goes
 **E** = Aver engine change (benefits every Aver game). **F** = `Aver.Fabric` runtime only. **C** = converter only.
 

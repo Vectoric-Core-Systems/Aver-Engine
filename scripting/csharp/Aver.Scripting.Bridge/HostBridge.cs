@@ -55,16 +55,16 @@ public static class HostBridge
 
     // ------------------------------------------------------------------ actor state
 
-    private const int TickGroupCount = 3;   // PrePhysics, Physics, PostPhysics (framework_abi.h)
+    private const int TickPhysics = 0;      // AVER_FW_TICK_PHYSICS: OnPhysicsTick, once per fixed step
+    private const int TickProcess = 1;      // AVER_FW_TICK_PROCESS: OnTick, once per frame
     private const int PumpFrame = 3;        // AVER_FW_PUMP_FRAME (framework_abi.h)
+    private const int PumpPlay = 4;         // AVER_FW_PUMP_PLAY (framework_abi.h)
 
-    // A declared managed class: the C# type bind() constructs, plus the tick wiring Configure asked for.
+    // A declared managed class: the C# type bind() constructs, plus the tick priority Configure asked for.
     private sealed class ClassInfo
     {
         public required Type Type;
-        public required bool Ticks;
-        public required int TickGroup;
-        public int TickOrder;
+        public int DefaultTickPriority;
         public required string RegistryName;
         public required int Handle;   // the native class handle
     }
@@ -74,10 +74,9 @@ public static class HostBridge
     {
         public required AverActor Instance;
         public required int Entity;
-        public required int TickGroup;
-        public int TickOrder;
-        public required bool Ticks;
+        public required bool Ticks;   // false for a graph class's C# ancestor: its graph ticks instead
         public required string Name;
+        public int TickErrors, PhysicsTickErrors;
         public bool Disabled;
     }
 
@@ -173,9 +172,13 @@ public static class HostBridge
 
     private static readonly List<LiveHud> s_huds = new();
     private static readonly Dictionary<int, ActorLive> s_actorsByEntity = new();
-    // Dense per-group lists tick_all walks; only ticking actors are added.
-    private static readonly List<ActorLive>[] s_tickBuckets =
-        { new List<ActorLive>(), new List<ActorLive>(), new List<ActorLive>() };
+    // Every ticking actor in bind order, and each pass's walk order: priority, then tree order
+    // (aver_fw_tree_order). Rebuilt when an actor binds or unbinds, a priority changes, or the tree moves.
+    private static readonly List<ActorLive> s_tickActors = new();
+    private static ActorLive[] s_processOrder = Array.Empty<ActorLive>();
+    private static ActorLive[] s_physicsOrder = Array.Empty<ActorLive>();
+    private static bool s_tickOrderDirty = true;
+    private static long s_tickTreeRevision = -1;
 
     // ------------------------------------------------------------------ entry points
 
@@ -298,7 +301,8 @@ public static class HostBridge
         s_huds.Clear();
 
         s_actorsByEntity.Clear();
-        foreach (List<ActorLive> bucket in s_tickBuckets) bucket.Clear();
+        s_tickActors.Clear();
+        s_tickOrderDirty = true;
         s_classes.Clear();
         s_graphClasses.Clear();
         s_graphInstances.Clear();
@@ -1131,6 +1135,7 @@ public static class HostBridge
     /// disables actors only; behaviour scripting is unaffected.</summary>
     private static void SetupManagedActors()
     {
+        AverActor.TickOrderChanged = () => s_tickOrderDirty = true;
         try
         {
             if (!InstallManagedDispatch())
@@ -1434,7 +1439,7 @@ public static class HostBridge
                  $"[Scripting] class '{name}' did not seal - check its parent '{parent}' is a declared class");
 
         s_classes[Assets.ObjectIdOf(name)] =
-            new ClassInfo { Type = type, Ticks = builder.WantsTick, TickGroup = builder.TickGroupId, TickOrder = builder.TickOrder, RegistryName = name, Handle = c };
+            new ClassInfo { Type = type, DefaultTickPriority = builder.DefaultTickPriority, RegistryName = name, Handle = c };
     }
 
     // The registry name, parent and base-type flags for a discovered actor type.
@@ -1498,19 +1503,19 @@ public static class HostBridge
             {
                 var instance = (AverActor)Activator.CreateInstance(info.Type)!;
                 instance.Self = new Entity(entity);
+                if (info.DefaultTickPriority != 0)
+                    instance.TickPriority = instance.PhysicsTickPriority = info.DefaultTickPriority;
 
                 var live = new ActorLive
                 {
                     Instance = instance,
                     Entity = entity,
-                    TickGroup = info.TickGroup,
-                    TickOrder = info.TickOrder,
-                    Ticks = info.Ticks,
+                    Ticks = true,
                     Name = info.RegistryName,
                 };
                 s_actorsByEntity[entity] = live;
-                if (live.Ticks && live.TickGroup >= 0 && live.TickGroup < TickGroupCount)
-                    InsertByTickOrder(s_tickBuckets[live.TickGroup], live);
+                s_tickActors.Add(live);
+                s_tickOrderDirty = true;
                 return 1;
             }
 
@@ -1569,7 +1574,6 @@ public static class HostBridge
                     {
                         Instance = ancestor,
                         Entity = entity,
-                        TickGroup = 0,
                         Ticks = false,
                         Name = ginfo.Name,
                     };
@@ -1609,20 +1613,11 @@ public static class HostBridge
         catch (Exception ex) { DisableActor(live, "OnBeginPlay", ex); }
     }
 
-    // Inserts after the last actor of an equal or lower order, so lower orders tick first and equal
-    // orders keep spawn order.
-    private static void InsertByTickOrder(List<ActorLive> bucket, ActorLive live)
-    {
-        int i = bucket.Count;
-        while (i > 0 && bucket[i - 1].TickOrder > live.TickOrder) --i;
-        bucket.Insert(i, live);
-    }
-
-    // Ticks every actor in one group.
+    // Runs one tick pass (OnPhysicsTick or OnTick, in priority-then-tree order) or a frame pump.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispTickAll(int group, float dt)
     {
-        // The per-frame pumps, sent every frame of a session, paused or not, before PrePhysics.
+        // Every frame of a session, paused or not, before the physics steps.
         if (group == PumpFrame)
         {
             // Game-UI events (a click, a changed slider, a command) reach their handlers; a pause menu's too.
@@ -1633,33 +1628,80 @@ public static class HostBridge
             try { Aver.Framework.Accessibility.Tick(dt); } catch (DllNotFoundException) { }
             return;
         }
-        if (group < 0 || group >= TickGroupCount) return;
+        // Every unpaused frame, after PumpFrame and before the physics steps.
+        if (group == PumpPlay)
+        {
+            // Gameplay effects expire, periodic effects execute and abilities auto-end on the game clock.
+            try { GameplayAbilities.Update(); } catch (DllNotFoundException) { }
+            // Input triggers raised by this frame's aver_fw_action_update reach C# events and graph OnInputAction entries.
+            try { EnhancedInput.PumpEvents(); } catch (DllNotFoundException) { }
+            return;
+        }
+        if (group != TickPhysics && group != TickProcess) return;
 
-        // Gameplay effects expire, periodic effects execute and abilities auto-end on the game clock, once a frame.
-        if (group == 0) { try { GameplayAbilities.Update(); } catch (DllNotFoundException) { } }
-        // Input triggers raised by this frame's aver_fw_action_update reach C# events and graph OnInputAction entries.
-        if (group == 0) { try { EnhancedInput.PumpEvents(); } catch (DllNotFoundException) { } }
-
-        // EnhancedInput needs no per-frame snapshot here: that call is gone, not relocated -- it's now
-        // a thin wrapper over aver_fw_action_held/pressed/released/value2 (framework_abi.h NAMED
-        // ACTIONS, minor 5), reading InputState's cur/prev/mouse/prevMouse ON DEMAND (EnhancedInput.cs),
-        // the same bytes aver_fw_input_key reads, so every actor agrees on input state regardless of
-        // tick order. A SNAPSHOT, not the live list: DispUnbind removes from s_tickBuckets[group]
-        // mid-walk, so destroying an actor during OnTick would otherwise shift later elements down and
-        // skip whoever slid in -- a silent lost frame (a bounds check alone wouldn't have caught it);
-        // a spawned actor ticks next frame instead.
-        ActorLive[] snapshot = s_tickBuckets[group].ToArray();
-        foreach (ActorLive live in snapshot)
+        RefreshTickOrder();
+        bool physics = group == TickPhysics;
+        // The order array is replaced, never mutated, so a bind or unbind inside a callback leaves this
+        // walk alone: a destroyed actor is skipped below, a spawned one ticks from the next pass.
+        ActorLive[] order = physics ? s_physicsOrder : s_processOrder;
+        foreach (ActorLive live in order)
         {
             if (live.Disabled) continue;
-            // Destroyed earlier in THIS walk: DispUnbind drops it from s_actorsByEntity, so absence
-            // is the liveness test. Reference equality, not mere presence -- a reused entity id may
-            // now hold a different actor.
             if (!s_actorsByEntity.TryGetValue(live.Entity, out ActorLive? cur) || !ReferenceEquals(cur, live))
                 continue;
-            try { live.Instance.OnTick(dt); }
-            catch (Exception ex) { DisableActor(live, "OnTick", ex); }
+            AverActor a = live.Instance;
+            if (physics ? !a.PhysicsTickEnabled : !a.TickEnabled) continue;
+            try
+            {
+                if (physics) a.OnPhysicsTick(dt);
+                else a.OnTick(dt);
+            }
+            catch (Exception ex) { ReportTickError(live, physics, ex); }
         }
+    }
+
+    // A tick that throws aborts only that call, as in Godot; the actor keeps ticking. Errors are logged
+    // at the 1st, 2nd, 4th, 8th... occurrence per actor and pass, so a broken tick cannot flood the log.
+    private static void ReportTickError(ActorLive live, bool physics, Exception ex)
+    {
+        int n = physics ? ++live.PhysicsTickErrors : ++live.TickErrors;
+        if ((n & (n - 1)) == 0)
+            Emit((int)Log.Level.Error,
+                 $"[Scripting] {live.Name}.{(physics ? "OnPhysicsTick" : "OnTick")} threw ({n} so far): {Describe(ex)}");
+    }
+
+    // Rebuilds both walk orders when the actor set, a priority or the scene tree has changed.
+    private static void RefreshTickOrder()
+    {
+        long rev = Fw.aver_fw_tree_revision();
+        if (!s_tickOrderDirty && rev == s_tickTreeRevision) return;
+        s_tickOrderDirty = false;
+        s_tickTreeRevision = rev;
+
+        int n = s_tickActors.Count;
+        var entities = new int[n];
+        var process = new int[n];
+        var phys = new int[n];
+        for (int i = 0; i < n; ++i)
+        {
+            ActorLive a = s_tickActors[i];
+            entities[i] = a.Entity;
+            process[i] = a.Instance.TickPriority;
+            phys[i] = a.Instance.PhysicsTickPriority;
+        }
+        s_processOrder = SortedByTree(entities, process);
+        s_physicsOrder = SortedByTree(entities, phys);
+    }
+
+    private static ActorLive[] SortedByTree(int[] entities, int[] priorities)
+    {
+        int n = entities.Length;
+        var order = new int[n];
+        if (n > 0 && Fw.aver_fw_tree_order(entities, priorities, n, order) == 0)
+            for (int i = 0; i < n; ++i) order[i] = i;
+        var result = new ActorLive[n];
+        for (int i = 0; i < n; ++i) result[i] = s_tickActors[order[i]];
+        return result;
     }
 
     // Calls the actor's OnEndPlay.
@@ -1720,8 +1762,7 @@ public static class HostBridge
     {
         if (s_actorsByEntity.Remove(entity, out ActorLive? live))
         {
-            if (live.Ticks && live.TickGroup >= 0 && live.TickGroup < TickGroupCount)
-                s_tickBuckets[live.TickGroup].Remove(live);
+            if (live.Ticks && s_tickActors.Remove(live)) s_tickOrderDirty = true;
 
             try { live.Instance.OnUnbound(); }
             catch (Exception ex) { Emit(3, $"[bridge] OnUnbound threw for entity {entity}: {ex.Message}"); }

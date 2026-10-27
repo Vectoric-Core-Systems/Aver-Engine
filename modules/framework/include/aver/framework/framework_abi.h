@@ -35,8 +35,11 @@ extern "C" {
 /* ABI version, as (major << 16) | minor. Versioned independently of AVER_SCENE_ABI_VERSION.
  * Every minor bump below is additive only: a host built against an older minor still links and
  * runs unchanged against a newer header. */
-#define AVER_FW_ABI_VERSION_MAJOR 1
-/* 1: aver_fw_set_view_entity / aver_fw_view_entity.
+#define AVER_FW_ABI_VERSION_MAJOR 2
+/* Major 2: Godot tick order. The three tick groups became two passes (AVER_FW_TICK_PHYSICS once per
+ * fixed physics step, AVER_FW_TICK_PROCESS once per frame) and aver_fw_class_set_tick is gone;
+ * aver_fw_tree_order / aver_fw_tree_revision were added. Major 1's minors, for the record:
+ * 1: aver_fw_set_view_entity / aver_fw_view_entity.
  * 2: aver_fw_set_sky_clouds / aver_fw_sky_clouds / aver_fw_clear_sky_clouds.
  * 3: aver_fw_set_fluid_spawn_provider / aver_fw_fluid_spawn.
  * 4: aver_fw_set_fluid_spawn_material_provider / aver_fw_fluid_spawn_material -- density/
@@ -61,7 +64,7 @@ extern "C" {
  *    event_count/event_at; aver_fw_input_scheme_trigger_count/trigger_spec/modifier_count/
  *    modifier_spec) -- see NAMED ACTIONS and INPUT SCHEME below.
  * 12: AVER_FW_PUMP_FRAME, the tick_all value for the per-frame pumps that also run while paused. */
-#define AVER_FW_ABI_VERSION_MINOR 12
+#define AVER_FW_ABI_VERSION_MINOR 0
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -94,14 +97,26 @@ typedef int32_t aver_field;    /* a dense scene field id; carries its component 
 #define AVER_FW_CLASS_ABSTRACT      0x0040
 #define AVER_FW_CLASS_TICK_IN_EDITOR 0x0080
 
-/* Tick groups — pinned to Aver.Framework's TickGroup (Enums.cs). */
-#define AVER_FW_TICK_PRE_PHYSICS  0
-#define AVER_FW_TICK_PHYSICS      1
-#define AVER_FW_TICK_POST_PHYSICS 2
-#define AVER_FW_TICK_COUNT        3
-/* Not a tick group: the tick_all value for the per-frame pumps (game UI events, content reloads,
- * accessibility). Sent every frame of a play session, paused or not, before PRE_PHYSICS. */
+/* Tick passes, Godot's order — pinned to Aver.Framework's TickPass (Enums.cs). PHYSICS runs
+ * OnPhysicsTick once per fixed physics step, before that step; PROCESS runs OnTick once per frame,
+ * after the frame's steps. Each walks its actors by priority, then tree order (aver_fw_tree_order). */
+#define AVER_FW_TICK_PHYSICS      0
+#define AVER_FW_TICK_PROCESS      1
+#define AVER_FW_TICK_COUNT        2
+/* Not a tick pass: the tick_all value for the per-frame pumps (game UI events, content reloads,
+ * accessibility). Sent every frame of a play session, paused or not, before the physics steps. */
 #define AVER_FW_PUMP_FRAME        3
+/* Not a tick pass: the tick_all value for the per-frame gameplay pumps (abilities, input-action
+ * events). Sent every unpaused frame, after AVER_FW_PUMP_FRAME and before the physics steps. */
+#define AVER_FW_PUMP_PLAY         4
+
+/* Sorts `count` entities into tick order: ascending priority, then depth-first tree order with
+ * siblings and roots in creation/reparent order (a parent before its children). Writes the sorted
+ * positions into outOrder (a permutation of 0..count-1). 1 on success. */
+AVER_FW_ABI int32_t aver_fw_tree_order(const int32_t* entities, const int32_t* priorities, int32_t count,
+                                       int32_t* outOrder);
+/* Changes whenever an entity is created, reparented or retired; a cached tree order is stale then. */
+AVER_FW_ABI int64_t aver_fw_tree_revision(void);
 
 /* Declares a class. Idempotent by name: the same name returns the same handle for the life of the
  * process, and a redeclare rewrites the row's components and defaults in place. */
@@ -122,8 +137,6 @@ AVER_FW_ABI int32_t aver_fw_class_add_component(int32_t c, int32_t component);
 AVER_FW_ABI int32_t aver_fw_class_set_flags(int32_t c, int32_t flags);
 /* The class's AVER_FW_CLASS_* flags. */
 AVER_FW_ABI int32_t aver_fw_class_get_flags(int32_t c);
-/* Sets the class's tick group and order within it. */
-AVER_FW_ABI int32_t aver_fw_class_set_tick(int32_t c, int32_t tickGroup, int32_t tickOrder);
 /* Flattens the parent chain into the resolved archetype (0 on a cycle/undeclared parent); spawning auto-seals. */
 AVER_FW_ABI int32_t aver_fw_class_seal(int32_t c);
 

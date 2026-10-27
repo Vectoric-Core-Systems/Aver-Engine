@@ -184,3 +184,11 @@ if(TARGET Aver.Physics AND TARGET Aver.Scene)
   target_link_libraries(ColliderShapesTest PRIVATE Aver.Runtime.Game.Core Aver.Physics Aver.Scene Aver.Formats Aver.Platform Aver.Core)
   set_target_properties(ColliderShapesTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# GameTickOrderTest -- one gameplay frame in Godot's order: the frame pumps, a PHYSICS pass before each fixed step, then the PROCESS
+# pass once; with a physics world and without one (the frame's own clock). A recording dispatch; a real physics world; no device.
+if(TARGET Aver.Physics AND TARGET Aver.Scene)
+  add_executable(GameTickOrderTest src/GameTickOrderTest.cpp)
+  target_link_libraries(GameTickOrderTest PRIVATE Aver.Runtime.Game.Core Aver.Framework Aver.Physics Aver.Scene Aver.Core)
+  set_target_properties(GameTickOrderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

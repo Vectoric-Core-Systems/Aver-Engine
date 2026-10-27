@@ -396,6 +396,16 @@ int32_t aver_phys_set_fixed_step(float seconds) {
     return 1;
 }
 
+namespace {
+aver_phys_step_hook_fn g_stepHook = nullptr;
+void*                  g_stepHookUser = nullptr;
+}
+
+void aver_phys_set_step_hook(aver_phys_step_hook_fn fn, void* user) {
+    g_stepHook = fn;
+    g_stepHookUser = fn ? user : nullptr;
+}
+
 // Advances the simulation in fixed steps, clamping catch-up. Returns how many steps ran.
 int32_t aver_phys_step(float dt) {
     if (!g_world || dt <= 0.0f) return 0;
@@ -418,6 +428,8 @@ int32_t aver_phys_step(float dt) {
     int32_t steps = 0;
     while (g_world->accumulator >= g_world->fixedStep) {
         g_world->accumulator -= g_world->fixedStep;
+        if (g_stepHook) g_stepHook(g_world->fixedStep, g_stepHookUser);
+        if (!g_world) break;   // the hook shut physics down
         AVER_PHYS_SCOPE("FixedStep");   // the root of the profiler tree for this fixed step
         // Characters are integrated before the solver so their swept motion sees this step's world.
         // CharacterVirtual does not integrate gravity itself, so only the vertical component of its

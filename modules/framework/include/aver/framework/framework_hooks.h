@@ -68,7 +68,7 @@ typedef struct AvManagedDispatch {
     aver_fw_bind_fn          bind;             /* construct+bind the class named by hash to an entity      */
     aver_fw_unbind_fn        unbind;           /* drop the managed instance bound to an entity             */
     aver_fw_begin_play_fn    beginPlay;        /* OnBeginPlay(reason) for one actor                        */
-    aver_fw_tick_all_fn      tick_all;         /* OnTick for a WHOLE tick group in one managed transition  */
+    aver_fw_tick_all_fn      tick_all;         /* one whole tick pass (or the frame pumps) per transition */
     aver_fw_end_play_fn      endPlay;          /* OnEndPlay(reason) for one actor, before its teardown     */
     aver_fw_rebound_fn       rebound;          /* OnRebound after a hot-reload rebind (in place of Begin)  */
     aver_fw_build_models_fn  build_models;     /* BuildModels once, after bind and before beginPlay        */
@@ -85,8 +85,8 @@ AVER_FW_ABI int32_t aver_fw_clear_managed_dispatch(void);
 /* 1 while a table is live, else 0. */
 AVER_FW_ABI int32_t aver_fw_managed_dispatch_installed(void);
 
-/* Ticks one group. Makes exactly ONE tick_all(group, dt) call; the bridge walks its own list.
- * Returns 1 if a managed tick_all fired, else 0. */
+/* Runs one tick pass (AVER_FW_TICK_*) or the frame pumps (AVER_FW_PUMP_FRAME). Makes exactly ONE
+ * tick_all(group, dt) call; the bridge walks its own list. 1 if a managed tick_all fired, else 0. */
 AVER_FW_ABI int32_t aver_fw_tick(int32_t tickGroup, float dt);
 
 #ifdef __cplusplus

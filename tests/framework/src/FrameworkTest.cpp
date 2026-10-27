@@ -415,7 +415,6 @@ static void testManagedDispatch() {
 
     const int32_t managedC = aver_fw_class_declare("ManagedActor", "");
     aver_fw_class_set_flags(managedC, AVER_FW_CLASS_MANAGED | AVER_FW_CLASS_TICKS);
-    aver_fw_class_set_tick(managedC, AVER_FW_TICK_PHYSICS, 0);
     check(aver_fw_class_seal(managedC) == 1, "the managed class seals");
 
     AvManagedDispatch table{};
@@ -483,8 +482,8 @@ static void testManagedDispatch() {
     check(g_disp.tickCount == 1, "tick_all fired exactly once");
     check(g_disp.tickGroup == AVER_FW_TICK_PHYSICS, "tick_all got the group it was called with");
     check(g_disp.tickDt == 0.25f, "tick_all got the dt it was called with");
-    aver_fw_tick(AVER_FW_TICK_POST_PHYSICS, 0.5f);
-    check(g_disp.tickCount == 2 && g_disp.tickGroup == AVER_FW_TICK_POST_PHYSICS,
+    aver_fw_tick(AVER_FW_TICK_PROCESS, 0.5f);
+    check(g_disp.tickCount == 2 && g_disp.tickGroup == AVER_FW_TICK_PROCESS,
           "each aver_fw_tick is exactly one tick_all for its group");
 
     g_disp.reset();
@@ -636,6 +635,54 @@ static void testSubtreeDestroyEndsChildren() {
     check(aver_fw_class_of(c1) == 0 && aver_fw_class_of(g) == 0, "the children read class 0 after the flush");
 
     check(aver_fw_clear_managed_dispatch() == 1, "the subtree stand-in clears");
+}
+
+// The positions aver_fw_tree_order sorted `es` into, as the entities themselves.
+static std::vector<int32_t> treeOrdered(const std::vector<int32_t>& es, const std::vector<int32_t>& prio) {
+    std::vector<int32_t> order(es.size());
+    aver_fw_tree_order(es.data(), prio.data(), static_cast<int32_t>(es.size()), order.data());
+    std::vector<int32_t> out;
+    for (const int32_t i : order) out.push_back(es[static_cast<size_t>(i)]);
+    return out;
+}
+
+// Checks Godot's tick order: priority first, then depth-first tree order with siblings and roots in
+// the order they were created or reparented, whatever order the entities are handed over in.
+static void testTreeOrder() {
+    AVER_INFO("=== tree order: priority, then parent before child, siblings in the order added ===");
+
+    const int32_t r1 = aver_scene_create();
+    const int32_t a  = aver_scene_create();
+    const int32_t b  = aver_scene_create();
+    const int32_t a1 = aver_scene_create();
+    const int32_t r2 = aver_scene_create();
+    const int32_t c  = aver_scene_create();
+    check(aver_scene_set_parent(a, r1) == 1 && aver_scene_set_parent(b, r1) == 1 &&
+          aver_scene_set_parent(a1, a) == 1 && aver_scene_set_parent(c, r2) == 1,
+          "r1 > {a > a1, b}; r2 > c");
+
+    const std::vector<int32_t> zero(6, 0);
+    check(treeOrdered({c, a1, r2, b, a, r1}, zero) == std::vector<int32_t>{r1, a, a1, b, r2, c},
+          "depth-first: r1, a, a1, b, r2, c, from a shuffled input");
+    check(treeOrdered({b, a}, {0, 0}) == std::vector<int32_t>{a, b},
+          "siblings run in the order they were added, though the child list is newest-first");
+
+    std::vector<int32_t> prio(6, 0);
+    prio[3] = -1;   // b
+    check(treeOrdered({c, a1, r2, b, a, r1}, prio) == std::vector<int32_t>{b, r1, a, a1, r2, c},
+          "a lower priority runs first, ahead of its own parent");
+    prio[3] = 0;
+    prio[0] = 5;    // c
+    check(treeOrdered({c, a1, r2, b, a, r1}, prio).back() == c, "a higher priority runs last");
+
+    const int64_t before = aver_fw_tree_revision();
+    check(aver_scene_set_parent(a, r2) == 1, "a (with a1) moves under r2");
+    check(aver_fw_tree_revision() != before, "reparenting changes the tree revision");
+    check(treeOrdered({c, a1, r2, b, a, r1}, zero) == std::vector<int32_t>{r1, b, r2, c, a, a1},
+          "a reparented entity joins the end of its new siblings, its subtree with it");
+
+    for (const int32_t e : {r1, r2}) aver_scene_destroy(e);
+    World::instance().flush();
 }
 
 // Checks that a possession hook re-entering possess is refused rather than recursed to a crash.
@@ -1782,6 +1829,7 @@ int main() {
     testManagedDispatch();
     testDestroyReentrancy();
     testSubtreeDestroyEndsChildren();
+    testTreeOrder();
     testPossessReentrancy();
     testPlayLifecycle();
     testInput();

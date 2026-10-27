@@ -17,6 +17,7 @@
 #include "aver/scene/Fields.hpp"
 #include "aver/scene/World.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -115,8 +116,6 @@ struct ClassRecord {
     u64         nameHash = 0;
     std::string parentName;                    // "" for a root; resolved by name
     int32_t     flags     = 0;
-    int32_t     tickGroup = AVER_FW_TICK_PRE_PHYSICS;
-    int32_t     tickOrder = 0;
     bool        sealed    = false;
 
     std::string defaultPawnName;
@@ -130,8 +129,6 @@ struct ClassRecord {
     // Resets the authorable state for a fresh (re)declare, keeping name, hash and lineage identity.
     void resetForDeclare() {
         flags = 0;
-        tickGroup = AVER_FW_TICK_PRE_PHYSICS;
-        tickOrder = 0;
         sealed = false;
         defaultPawnName.clear();
         playerControllerName.clear();
@@ -450,16 +447,6 @@ int32_t aver_fw_class_get_flags(int32_t c) {
 // Declared classes; handle 0 is the reserved slot, so handles run 1..count.
 int32_t aver_fw_class_count(void) {
     return classes().empty() ? 0 : static_cast<int32_t>(classes().size() - 1);
-}
-
-// Sets the class's tick group and order. Rejects an out-of-range group.
-int32_t aver_fw_class_set_tick(int32_t c, int32_t tickGroup, int32_t tickOrder) {
-    ClassRecord* r = rec(c);
-    if (!r) return 0;
-    if (tickGroup < 0 || tickGroup >= AVER_FW_TICK_COUNT) return 0;
-    r->tickGroup = tickGroup;
-    r->tickOrder = tickOrder;
-    return 1;
 }
 
 // Flattens the parent chain into the resolved archetype. 0 on a cycle or an undeclared parent.
@@ -957,7 +944,28 @@ int32_t aver_fw_managed_dispatch_installed(void) {
     return managedInstalled() ? 1 : 0;
 }
 
-// Ticks one group: exactly one tick_all call into managed code. 1 if it fired.
+// Sorts entities into tick order: priority, then the depth-first path of order stamps from the root.
+int32_t aver_fw_tree_order(const int32_t* entities, const int32_t* priorities, int32_t count, int32_t* outOrder) {
+    if (count < 0 || (count > 0 && (!entities || !priorities || !outOrder))) return 0;
+    World& w = world();
+    std::vector<std::vector<u64>> paths(static_cast<usize>(count));
+    for (int32_t i = 0; i < count; ++i) {
+        auto& path = paths[static_cast<usize>(i)];
+        for (Entity e = toEntity(entities[i]); e != kInvalidEntity && w.valid(e); e = w.parent(e))
+            path.push_back(w.orderStamp(e));
+        std::reverse(path.begin(), path.end());
+        outOrder[i] = i;
+    }
+    std::stable_sort(outOrder, outOrder + count, [&](int32_t a, int32_t b) {
+        if (priorities[a] != priorities[b]) return priorities[a] < priorities[b];
+        return paths[static_cast<usize>(a)] < paths[static_cast<usize>(b)];
+    });
+    return 1;
+}
+
+int64_t aver_fw_tree_revision(void) { return static_cast<int64_t>(world().hierarchyRevision()); }
+
+// Runs one tick pass or the frame pumps: exactly one tick_all call into managed code. 1 if it fired.
 int32_t aver_fw_tick(int32_t tickGroup, float dt) {
     if (managedInstalled() && managedDispatch().tick_all) {
         managedDispatch().tick_all(tickGroup, dt);

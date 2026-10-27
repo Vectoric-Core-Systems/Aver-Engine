@@ -15,9 +15,6 @@ public sealed class TestActor : AverActor
 {
     private int _ticks;
 
-    /// <summary>The class recipe: tick in PrePhysics. Run once at load, per class.</summary>
-    public static void Configure(ClassBuilder b) => b.Ticks(TickGroup.PrePhysics);
-
     /// <summary>Logs that the instance spawned and bound, and RECORDS WHAT IT SAW.
     ///
     /// Copying its own X into its own Z-scale looks arbitrary and is the point: it makes

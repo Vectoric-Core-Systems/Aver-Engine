@@ -288,7 +288,6 @@ AVER_FW_ABI int32_t aver_fw_class_reset(int32_t c);
 AVER_FW_ABI int32_t aver_fw_class_add_component(int32_t c, int32_t component);
 AVER_FW_ABI int32_t aver_fw_class_set_flags(int32_t c, int32_t flags);
 AVER_FW_ABI int32_t aver_fw_class_get_flags(int32_t c);
-AVER_FW_ABI int32_t aver_fw_class_set_tick(int32_t c, int32_t tickGroup, int32_t tickOrder);
 AVER_FW_ABI int32_t aver_fw_class_seal(int32_t c);
 ```
 
@@ -676,7 +675,7 @@ AVER_PHYS_API int32_t aver_phys_add_sensor_sphere(float cx, float cy, float cz, 
 A sensor is a real body in the broad phase, so it costs what a body costs (`physics_abi.h:128-131`).
 
 ### Contact and overlap events — polled, never called back
-*You are reacting to a collision or a trigger from gameplay, in a PostPhysics tick, on the main thread.*
+*You are reacting to a collision or a trigger from gameplay, in `OnTick` (after the frame's steps), on the main thread.*
 
 ```c
 AVER_PHYS_API int32_t aver_phys_contact_count(void);
@@ -1187,7 +1186,7 @@ from `kGroups` in `tests/abi/src/AbiEnumTest.cpp`, which is the thing that actua
 | 2 | `AVER_FW_DISPATCH_VERSION` (`framework_hooks.h:49`) | `ManagedDispatch.cs:14` | **run-time check** — boundary 3 |
 | 3 | `AvManagedDispatch` field order (`framework_hooks.h:65-78`) | `ManagedDispatch.cs:18-32` | only indirectly, by the `structBytes` check |
 | 4 | `AVER_FW_CLASS_*` (`framework_abi.h`) | `Enums.cs` `ClassFlags` | `AbiEnumTest` |
-| 5 | `AVER_FW_TICK_*` (`framework_abi.h`) | `Enums.cs` `TickGroup` | `AbiEnumTest` |
+| 5 | `AVER_FW_TICK_*` (`framework_abi.h`) | `Enums.cs` `TickPass` | `AbiEnumTest` |
 | 6 | `AVER_FW_PLAY_*` (`framework_abi.h`) | `Enums.cs` `PlayState` | `AbiEnumTest` |
 | 7 | `AVER_FW_BEGIN_*` / `AVER_FW_END_*` (`framework_hooks.h`) | `Enums.cs` `BeginReason` / `EndReason` | `AbiEnumTest` |
 | 8 | `AVER_FW_KEY_*` (`framework_abi.h`) | `Input.cs` `Key` | `AbiEnumTest` — all 50, by position |

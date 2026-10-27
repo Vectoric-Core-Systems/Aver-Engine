@@ -17,12 +17,6 @@ public sealed partial class Car : AverPawn
 
     private float _steer;
 
-    /// <summary>The class recipe: run once at load, per class, never per instance.</summary>
-    public static void Configure(ClassBuilder b)
-    {
-        b.Ticks(TickGroup.PrePhysics);
-    }
-
     /// <summary>Set the steer input in [-1, 1]. Called by whatever drives this pawn.</summary>
     public void SetSteer(float normalised) => _steer = Math.Clamp(normalised, -1.0f, 1.0f);
 

@@ -16,8 +16,57 @@ public abstract class AverActor
     /// <summary>Runs once when this actor begins playing, for a spawn, a world start or a hot reload.</summary>
     public virtual void OnBeginPlay(BeginReason reason) { }
 
-    /// <summary>Runs every frame the actor's class ticks. <paramref name="dt"/> is clamped seconds.</summary>
+    /// <summary>Runs once a frame, after the frame's physics steps (Godot's <c>_process</c>). <paramref name="dt"/> is
+    /// the frame time in seconds. On when the class overrides it; see <see cref="TickEnabled"/>.</summary>
     public virtual void OnTick(float dt) { }
+
+    /// <summary>Runs once per fixed physics step, before that step (Godot's <c>_physics_process</c>): 0 to 8 times a
+    /// frame. <paramref name="dt"/> is the fixed step. On when the class overrides it; see <see cref="PhysicsTickEnabled"/>.</summary>
+    public virtual void OnPhysicsTick(float dt) { }
+
+    /// <summary>Whether <see cref="OnTick"/> runs. Defaults to true when the class overrides it.</summary>
+    public bool TickEnabled { get; set; }
+
+    /// <summary>Whether <see cref="OnPhysicsTick"/> runs. Defaults to true when the class overrides it.</summary>
+    public bool PhysicsTickEnabled { get; set; }
+
+    /// <summary>Order among actors in the <see cref="OnTick"/> pass: lower runs first, equal priorities in scene-tree
+    /// order (a parent before its children, siblings in the order they were added).</summary>
+    public int TickPriority
+    {
+        get => _tickPriority;
+        set { if (_tickPriority != value) { _tickPriority = value; TickOrderChanged?.Invoke(); } }
+    }
+
+    /// <summary>Order among actors in the <see cref="OnPhysicsTick"/> pass, as <see cref="TickPriority"/>.</summary>
+    public int PhysicsTickPriority
+    {
+        get => _physicsTickPriority;
+        set { if (_physicsTickPriority != value) { _physicsTickPriority = value; TickOrderChanged?.Invoke(); } }
+    }
+
+    private int _tickPriority, _physicsTickPriority;
+
+    // Set by the scripting bridge: a priority changed, so its walk order is stale.
+    internal static Action? TickOrderChanged;
+
+    private static readonly Dictionary<Type, (bool Tick, bool Physics)> s_overrides = new();
+
+    /// <summary>Turns each tick on when the concrete class overrides it.</summary>
+    protected AverActor()
+    {
+        Type t = GetType();
+        if (!s_overrides.TryGetValue(t, out var o))
+        {
+            o = (Overrides(t, nameof(OnTick)), Overrides(t, nameof(OnPhysicsTick)));
+            s_overrides[t] = o;
+        }
+        TickEnabled = o.Tick;
+        PhysicsTickEnabled = o.Physics;
+    }
+
+    private static bool Overrides(Type t, string method) =>
+        t.GetMethod(method, new[] { typeof(float) })?.DeclaringType != typeof(AverActor);
 
     /// <summary>Runs once when this actor stops playing.</summary>
     public virtual void OnEndPlay(EndReason reason) { }

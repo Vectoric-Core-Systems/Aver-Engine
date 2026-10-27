@@ -629,6 +629,11 @@ private:
 
 ### 4.4 The tick, which is the performance argument written out
 
+> **Superseded 2026-10-28 (Fabric G1):** the three tick groups below became Godot's two passes:
+> `OnPhysicsTick` once per fixed physics step before that step, then `OnTick` once a frame, each in
+> priority-then-tree order. `aver_fw_class_set_tick` is gone. Current contract: `framework_abi.h`
+> (AVER_FW_TICK_*, `aver_fw_tree_order`) and docs/SCRIPTING_API.md §3–4.
+
 ```cpp
 void Framework::tick(f32 dt) {
     if (play_ != kPlayPlaying) return;

@@ -22,7 +22,8 @@ internal static class Fw
     [DllImport(Lib)] internal static extern int aver_fw_class_add_component(int c, int component);
     [DllImport(Lib)] internal static extern int aver_fw_class_set_flags(int c, int flags);
     [DllImport(Lib)] internal static extern int aver_fw_class_get_flags(int c);
-    [DllImport(Lib)] internal static extern int aver_fw_class_set_tick(int c, int tickGroup, int tickOrder);
+    [DllImport(Lib)] internal static extern int aver_fw_tree_order(int[] entities, int[] priorities, int count, int[] outOrder);
+    [DllImport(Lib)] internal static extern long aver_fw_tree_revision();
     [DllImport(Lib)] internal static extern int aver_fw_class_seal(int c);
 
     // Class defaults, addressed by the same dense field id the scene resolves. One setter per storable kind.

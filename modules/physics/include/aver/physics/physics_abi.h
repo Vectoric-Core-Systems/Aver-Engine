@@ -36,6 +36,12 @@ AVER_PHYS_API void aver_phys_set_gravity(float x, float y, float z);
 // clamped. Returns how many fixed steps actually ran.
 AVER_PHYS_API int32_t aver_phys_step(float dt);
 
+// Called at the start of every fixed step aver_phys_step runs, on the calling thread, before the
+// step integrates -- the slot for gameplay's physics tick. Bodies may be read and written; the
+// origin may not shift. Null clears it.
+typedef void (*aver_phys_step_hook_fn)(float fixedStep, void* user);
+AVER_PHYS_API void    aver_phys_set_step_hook(aver_phys_step_hook_fn fn, void* user);
+
 // The fixed step, in seconds (1/60 unless set).
 AVER_PHYS_API float   aver_phys_fixed_step(void);
 // Change the fixed step. Set it before any bodies exist.

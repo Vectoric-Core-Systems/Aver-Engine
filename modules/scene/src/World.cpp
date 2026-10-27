@@ -91,6 +91,7 @@ struct World::Impl {
     std::vector<u8>  generation{0};
     std::vector<u32> liveSlot{0};   // entity index -> position in `live` + 1
     std::vector<u8>  pending{0};    // 0 none, 1 queued by destroy(), 2 collected by this flush
+    std::vector<u64> orderStamp{0}; // tree position among siblings (and roots): stamped at create and reparent
     std::deque<u32>  freeIndices;   // FIFO: an index gets maximum distance before it is reused
     std::vector<u32> retired;
 
@@ -105,6 +106,8 @@ struct World::Impl {
     std::vector<Entity> chain;
     std::vector<Entity> depthStack;   // scratch for refreshSubtreeDepth, kept off `stack`
     bool                topoDirty = false;
+    u64                 nextStamp = 1;
+    u64                 hierarchyRev = 1;   // create, reparent and retire bump it
 
     // Bumped by every writer a world matrix depends on: transform writes, reparenting, adding or
     // removing CLocal/CWorld/CHierarchy, retiring entities. cleanEpoch is writeEpoch as of the last
@@ -366,7 +369,10 @@ Entity World::create(std::string_view nm) {
         d.generation.push_back(1);
         d.liveSlot.push_back(0);
         d.pending.push_back(0);
+        d.orderStamp.push_back(0);
     }
+    d.orderStamp[idx] = d.nextStamp++;
+    ++d.hierarchyRev;
 
     const Entity e  = makeEntity(idx, d.generation[idx]);
     d.liveSlot[idx] = static_cast<u32>(d.live.size() + 1);
@@ -716,6 +722,8 @@ bool World::setParent(Entity e, Entity newParent, bool keepWorld) {
     if (keepWorld) keep = worldMatrix(e);
 
     ++d.writeEpoch;
+    ++d.hierarchyRev;
+    d.orderStamp[entityIndex(e)] = d.nextStamp++;   // a reparented entity joins the end of its new siblings
     d.unlinkFromParent(e);
     if (newParent != kInvalidEntity) {
         d.linkToParent(e, newParent);
@@ -752,6 +760,14 @@ Entity World::nextSibling(Entity e) const {
     const CHierarchy* h = component<CHierarchy>(e, kComponentHierarchy);
     return h ? h->nextSibling : kInvalidEntity;
 }
+
+// Creation or reparent order: siblings, and roots, sort by it ascending. 0 for a stale handle.
+u64 World::orderStamp(Entity e) const {
+    return valid(e) ? impl_->orderStamp[entityIndex(e)] : 0;
+}
+
+// Changes on every create, reparent and retire.
+u64 World::hierarchyRevision() const { return impl_->hierarchyRev; }
 
 // Number of immediate children.
 u32 World::childCount(Entity e) const {
@@ -886,6 +902,7 @@ u32 World::flush() {
     if (!d.destroyQueue.empty()) {
         d.collectAndRetire();
         d.topoDirty = true;
+        ++d.hierarchyRev;
     }
     if (d.topoDirty) d.rebuildOrder();
 
