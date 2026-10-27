@@ -139,6 +139,14 @@ public:
     // `wire` means nothing is wrong.
     bool graphDiagnose(const std::string& text, std::string& wire) const;
 
+    // ---- a placed actor's [Editable] fields, for the details panel -------------------------------------
+    bool editablesAvailable() const;
+    // Lines of `name TAB type TAB value TAB min TAB max`; empty when the entity has no actor or no fields.
+    std::string editableList(i32 entity) const;
+    // Sets one field from text and stores it as the instance's value (saved with the level). False on a bad
+    // field or value.
+    bool editableSet(i32 entity, const std::string& name, const std::string& value) const;
+
     // ---- the graph debugger ----------------------------------------------------------------------------
     //
     // Optional as one group (all four or none). A breakpoint does not stop the tick: the managed side

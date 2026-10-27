@@ -19,6 +19,7 @@
 #include "aver/scene/World.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -617,6 +618,63 @@ int32_t aver_fw_adopt(int32_t entity, int32_t c) {
     return entity;
 }
 
+// Per-instance property values by entity, in the order first set; a stale handle's are dropped on access.
+struct EntityProps { Entity owner = kInvalidEntity; std::vector<std::pair<std::string, std::string>> kv; };
+static std::unordered_map<u32, EntityProps>& propsByIndex() { static std::unordered_map<u32, EntityProps> m; return m; }
+
+static EntityProps* propsOf(Entity e, bool create) {
+    if (!world().valid(e)) return nullptr;
+    auto& m = propsByIndex();
+    auto it = m.find(entityIndex(e));
+    if (it != m.end() && it->second.owner != e) { m.erase(it); it = m.end(); }   // a reused index
+    if (it == m.end()) {
+        if (!create) return nullptr;
+        it = m.emplace(entityIndex(e), EntityProps{e, {}}).first;
+    }
+    return &it->second;
+}
+
+static bool sameName(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (usize i = 0; i < a.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) return false;
+    return true;
+}
+
+int32_t aver_fw_props_set(int32_t entity, const char* name, const char* value) {
+    if (!name || !*name) return 0;
+    EntityProps* p = propsOf(toEntity(entity), true);
+    if (!p) return 0;
+    for (auto& kv : p->kv)
+        if (sameName(kv.first, name)) { kv.second = value ? value : ""; return 1; }
+    p->kv.emplace_back(name, value ? value : "");
+    return 1;
+}
+
+int32_t aver_fw_props_count(int32_t entity) {
+    const EntityProps* p = propsOf(toEntity(entity), false);
+    return p ? static_cast<int32_t>(p->kv.size()) : 0;
+}
+
+const char* aver_fw_props_name(int32_t entity, int32_t index) {
+    const EntityProps* p = propsOf(toEntity(entity), false);
+    return (p && index >= 0 && static_cast<usize>(index) < p->kv.size()) ? p->kv[static_cast<usize>(index)].first.c_str() : "";
+}
+
+const char* aver_fw_props_value(int32_t entity, int32_t index) {
+    const EntityProps* p = propsOf(toEntity(entity), false);
+    return (p && index >= 0 && static_cast<usize>(index) < p->kv.size()) ? p->kv[static_cast<usize>(index)].second.c_str() : "";
+}
+
+int32_t aver_fw_props_clear(int32_t entity) {
+    const Entity e = toEntity(entity);
+    auto& m = propsByIndex();
+    const auto it = m.find(entityIndex(e));
+    if (it == m.end() || it->second.owner != e) return 0;
+    m.erase(it);
+    return 1;
+}
+
 // Prefab nodes whose class was not declared yet when they were made: adopted when it seals.
 static std::vector<std::pair<Entity, std::string>>& pendingAdopts() {
     static std::vector<std::pair<Entity, std::string>> v;
@@ -691,6 +749,7 @@ static int32_t destroyActor(int32_t e, int32_t endReason, bool dispatchEndPlay) 
     pawnByController().erase(ent);
     controllerByPawn().erase(ent);
     forgetClass(ent);
+    aver_fw_props_clear(e);
     const int32_t destroyed = world().destroy(ent) ? 1 : 0;
     inFlight.erase(ent);
     return destroyed;

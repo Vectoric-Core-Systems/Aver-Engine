@@ -200,3 +200,11 @@ if(TARGET Aver.Scene AND TARGET Aver.World)
   target_link_libraries(PlacementTreeTest PRIVATE Aver.Runtime.Game.Core Aver.World Aver.Scene Aver.Formats Aver.Core)
   set_target_properties(PlacementTreeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# PlacementPropsTest -- a placed actor's per-instance [Editable] values: a level's COMPONENT Props record into the framework's
+# per-entity store and back out through the real .ocworld parser and writer. No device.
+if(TARGET Aver.Framework AND TARGET Aver.Scene)
+  add_executable(PlacementPropsTest src/PlacementPropsTest.cpp)
+  target_link_libraries(PlacementPropsTest PRIVATE Aver.Runtime.Game.Core Aver.Framework Aver.Scene Aver.Formats Aver.Core)
+  set_target_properties(PlacementPropsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

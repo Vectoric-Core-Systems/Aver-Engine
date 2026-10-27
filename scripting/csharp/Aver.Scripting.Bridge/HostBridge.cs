@@ -773,6 +773,61 @@ public static class HostBridge
 
     /// <summary>Writes <paramref name="s"/> as UTF-8 plus a NUL, truncated to fit (never mid-character,
     /// since the callers cut at whole lines first). Returns the bytes written before the NUL.</summary>
+    /// <summary>The [Editable] fields of the actor bound to <paramref name="entity"/>, one line each:
+    /// <c>name TAB type TAB value TAB min TAB max</c>, UTF-8, NUL-terminated. Returns the bytes written (0: no
+    /// actor or no fields), or -1 on a bad argument.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static unsafe int EditableList(int entity, byte* buffer, int capacity)
+    {
+        try
+        {
+            if (buffer is null || capacity <= 1) return -1;
+            buffer[0] = 0;
+            if (!s_actorsByEntity.TryGetValue(entity, out ActorLive? live)) return 0;
+            var sb = new StringBuilder();
+            foreach (FieldInfo f in Editables.Of(live.Instance.GetType()))
+            {
+                EditableAttribute a = f.GetCustomAttribute<EditableAttribute>()!;
+                sb.Append(f.Name).Append('\t').Append(f.FieldType.Name).Append('\t')
+                  .Append(Editables.Format(f.GetValue(live.Instance))).Append('\t')
+                  .Append(Editables.Format(a.Min)).Append('\t').Append(Editables.Format(a.Max)).Append('\n');
+            }
+            return WriteUtf8(sb.ToString(), buffer, capacity);
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Editable] listing entity {entity} threw: {Describe(ex)}");
+            return -1;
+        }
+    }
+
+    /// <summary>Sets one [Editable] field of the actor bound to <paramref name="entity"/> from text, and stores
+    /// the text as that instance's value (aver_fw_props_set) so the level saves it. 1 on success, 0 when the
+    /// actor, the field or the text is wrong.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int EditableSet(int entity, IntPtr utf8Name, IntPtr utf8Value)
+    {
+        try
+        {
+            string? name = Marshal.PtrToStringUTF8(utf8Name), value = Marshal.PtrToStringUTF8(utf8Value);
+            if (name is null || value is null || !s_actorsByEntity.TryGetValue(entity, out ActorLive? live)) return 0;
+            FieldInfo? f = Editables.Find(live.Instance.GetType(), name);
+            string why = "no such [Editable] field";
+            if (f is null || !Editables.TrySet(live.Instance, f, value, out why))
+            {
+                Emit((int)Log.Level.Warn, $"[Editable] {live.Name}.{name}: {why}");
+                return 0;
+            }
+            Fw.aver_fw_props_set(entity, f.Name, Editables.Format(f.GetValue(live.Instance)));
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Editable] setting a field on entity {entity} threw: {Describe(ex)}");
+            return 0;
+        }
+    }
+
     private static unsafe int WriteUtf8(string s, byte* buffer, int capacity)
     {
         byte[] utf8 = Encoding.UTF8.GetBytes(s);
@@ -1612,6 +1667,8 @@ public static class HostBridge
         // Before the early return so a graph-only class gets its ability-system defaults too.
         try { GameplayAbilities.ActorBeginPlay(entity); } catch (Exception ex) { Emit(3, $"[bridge] ability defaults threw for entity {entity}: {ex.Message}"); }
         if (!s_actorsByEntity.TryGetValue(entity, out ActorLive? live) || live.Disabled) return;
+        try { Editables.ApplyProps(live.Instance); }   // the level's per-instance [Editable] values, before it begins
+        catch (Exception ex) { Emit(3, $"[bridge] applying {live.Name}'s [Editable] values threw: {ex.Message}"); }
         try { live.Instance.OnBeginPlay((BeginReason)reason); }
         catch (Exception ex) { DisableActor(live, "OnBeginPlay", ex); }
     }

@@ -3,6 +3,9 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/game/PlacementProps.hpp"
+#endif
 #if AVER_MODULE_PHYSICS
 #include "aver/physics/physics_state_abi.h"   // aver_phys_snapshot_release_all in unloadLevel
 #endif
@@ -764,6 +767,9 @@ scene::Entity SandboxApp::spawnClassSlot(usize slot, const Transform* worldXf) {
     // The pose is local either way (authored, or a CLocal snapshot), so the parent takes it as is.
     if (parent != scene::kInvalidEntity) world.setParent(static_cast<scene::Entity>(e), parent, false);
     placementTree_.setEntity(treeIndex, static_cast<scene::Entity>(e));
+    // Its [Editable] values. classAuthored_ holds the authored ones (the details panel edits it too), so a
+    // respawn after undo or Stop gets them back.
+    game::applyPlacementProps(e, p);
     if (prior) { prior->entity = e; prior->removed = false; }
     else levelClassInstances_.push_back(ClassInstance{slot, e});
     return static_cast<scene::Entity>(e);

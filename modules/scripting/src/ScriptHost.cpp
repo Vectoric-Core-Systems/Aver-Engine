@@ -85,6 +85,8 @@ using graph_debug_get_values_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8Gra
 using declare_graph_classes_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8ContentDir);
 using tick_graph_class_instances_fn = void(AVER_SCRIPT_CALL*)(float dt);
 using configure_input_fn = int32_t(AVER_SCRIPT_CALL*)(const char* utf8SchemePath, const char* utf8SettingsPath);
+using editable_list_fn = int32_t(AVER_SCRIPT_CALL*)(int32_t entity, char* out, int32_t cap);
+using editable_set_fn = int32_t(AVER_SCRIPT_CALL*)(int32_t entity, const char* utf8Name, const char* utf8Value);
 
 // UTF-8 to hostfxr's char_t, and back. The identity everywhere but Windows.
 hstring toHost(const std::string& s) {
@@ -173,6 +175,8 @@ struct ScriptHost::Impl {
     graph_set_hits_fn graphSetHits = nullptr;
     graph_get_hits_fn graphGetHits = nullptr;
     graph_diagnose_fn graphDiagnose = nullptr;
+    editable_list_fn editableList = nullptr;
+    editable_set_fn editableSet = nullptr;
     graph_debug_set_enabled_fn graphDebugSetEnabled = nullptr;
     graph_debug_set_breakpoints_fn graphDebugSetBreakpoints = nullptr;
     graph_debug_take_break_fn graphDebugTakeBreak = nullptr;
@@ -320,6 +324,12 @@ bool ScriptHost::init(const HostDesc& desc) {
                   "highlight which nodes are executing");
     }
 
+    // EditableList/EditableSet (the details panel's per-instance [Editable] values) are optional together.
+    if (!bind(AVER_HOST_STR("EditableList"), reinterpret_cast<void**>(&impl_->editableList)) ||
+        !bind(AVER_HOST_STR("EditableSet"), reinterpret_cast<void**>(&impl_->editableSet))) {
+        impl_->editableList = nullptr;
+        impl_->editableSet = nullptr;
+    }
     // GraphDiagnose (the Problems panel) is optional alone: without it the editor keeps validate's first error.
     if (!bind(AVER_HOST_STR("GraphDiagnose"), reinterpret_cast<void**>(&impl_->graphDiagnose))) {
         impl_->graphDiagnose = nullptr;
@@ -534,6 +544,21 @@ bool ScriptHost::graphDiagnose(const std::string& text, std::string& wire) const
     if (n < 0) return false;
     wire.assign(buf.data(), static_cast<usize>(n));
     return true;
+}
+
+bool ScriptHost::editablesAvailable() const {
+    return ready_ && impl_ && impl_->editableList && impl_->editableSet;
+}
+
+std::string ScriptHost::editableList(i32 entity) const {
+    if (!editablesAvailable()) return {};
+    std::vector<char> buf(16 * 1024, 0);
+    const int32_t n = impl_->editableList(entity, buf.data(), static_cast<int32_t>(buf.size()));
+    return n > 0 ? std::string(buf.data(), static_cast<usize>(n)) : std::string();
+}
+
+bool ScriptHost::editableSet(i32 entity, const std::string& name, const std::string& value) const {
+    return editablesAvailable() && impl_->editableSet(entity, name.c_str(), value.c_str()) == 1;
 }
 
 bool ScriptHost::graphDebugAvailable() const {

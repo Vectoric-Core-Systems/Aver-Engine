@@ -3,6 +3,9 @@
 // class is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/game/PlacementProps.hpp"
+#endif
 #if AVER_MODULE_SOFTBODY_SCENE
 #  include "aver/softbody/SoftBodySystem.hpp"
 #endif
@@ -1761,6 +1764,40 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                     if (d.className == cls) { assetEditors_.open(d.path); break; }
             }
             uiReg_.track("details.graphClass.open");
+#if AVER_MODULE_SCRIPTING
+            // Its per-instance [Editable] values (a C# actor's fields): set on the live actor, saved with the level.
+            if (scripts_.editablesAvailable()) {
+                const std::string wire = scripts_.editableList(static_cast<i32>(selEntity_));
+                if (!wire.empty() && ImGui::CollapsingHeader("Editable", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    usize at = 0;
+                    while (at < wire.size()) {
+                        usize end = wire.find('\n', at);
+                        if (end == std::string::npos) end = wire.size();
+                        const std::string line = wire.substr(at, end - at);
+                        at = end + 1;
+                        std::vector<std::string> col;
+                        for (usize b = 0, t; b <= line.size(); b = t + 1) {
+                            t = line.find('\t', b);
+                            if (t == std::string::npos) t = line.size();
+                            col.push_back(line.substr(b, t - b));
+                        }
+                        if (col.size() < 3) continue;
+                        char buf[256];
+                        std::snprintf(buf, sizeof buf, "%s", col[2].c_str());
+                        ImGui::SetNextItemWidth(-140.0f);
+                        const std::string id = col[0] + "##editable";
+                        if (ImGui::InputText(id.c_str(), buf, sizeof buf, ImGuiInputTextFlags_EnterReturnsTrue) ||
+                            ImGui::IsItemDeactivatedAfterEdit()) {
+                            if (scripts_.editableSet(static_cast<i32>(selEntity_), col[0], buf) && slot < classAuthored_.size())
+                                game::capturePlacementProps(static_cast<i32>(selEntity_), classAuthored_[slot]);
+                        }
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("%s", col[1].c_str());
+                    }
+                    uiReg_.track("details.editable");
+                }
+            }
+#endif
         }
 #endif
         // Multi-selection, computed once and reused by Transform/Mesh/Material below (which apply

@@ -541,7 +541,7 @@ from the world (never cached).
 |---|---|
 | `[AverClass("Name")]` | Names a gameplay class. Optional `Parent = "…"` (inferred from the base type otherwise). |
 | `[AverGameMode("Name")]` | Names a GameMode. `DefaultPawnClass = "…"`, `PlayerControllerClass = "…"` name (by string) the pawn and controller it spawns. |
-| `[Editable]` | A field editable in the Details panel and stored in native storage (survives Play/Stop and hot reload). Optional `Min` / `Max`. |
+| `[Editable]` | A field with a per-instance value (Godot's `@export`): set in the editor's details panel (the **Editable** section of a placed actor), saved with the level as a `COMPONENT Props name=value` record on the placement, and written into the field before `OnBeginPlay`. Names match in any case; `float`, `double`, `int`, `long`, `bool`, `string`, enums (by name) and `Vec3` (`x y z`) are supported. Optional `Min` / `Max` clamp numbers. |
 | `[Model]` | Marks a model-tree field the editor manages. |
 
 **`[AverClass]` is not the only door into this registry.** A `.ocgraph` file can declare itself a

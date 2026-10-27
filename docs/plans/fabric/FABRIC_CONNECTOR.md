@@ -56,7 +56,7 @@ Owner decisions so far:
 | Deferred queue, await context | DONE: `Deferred.Call`, `AverActor.QueueDestroy`, a game-thread `SynchronizationContext`, `Frame.Next/NextPhysics/Delay`; flushed at each pass's start and end. GameThreadTests. |
 | Signal flags (ONE_SHOT/DEFERRED, auto-disconnect on free) | open (with the signal layer) |
 | Prefab actor bind (moved from G0) | DONE: `aver_fw_adopt` / `aver_fw_adopt_by_name` (framework ABI 2.2), both hosts' prefab hooks; a pending class adopts on seal; `aver_fw_destroy` (and `Entity.Destroy`) ends every actor below a plain entity. FrameworkTest `testAdopt`. |
-| `[Editable]` per-instance values (moved from G0) | open |
+| `[Editable]` per-instance values (moved from G0) | DONE: framework per-entity props store (`aver_fw_props_*`, ABI 2.3) filled from a placement's `COMPONENT Props` record (both hosts), written into fields before OnBeginPlay (`Editables.cs`), edited in the details panel (bridge `EditableList/EditableSet`), saved back by the editor. PlacementPropsTest, EditablesTests. |
 | Variant, PCG32 RNG, groups, level travel, files/resources, input chain, platform services | open |
 
 ## Gap list, sized S/M/L, and where each fix goes

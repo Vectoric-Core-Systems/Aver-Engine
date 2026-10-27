@@ -65,8 +65,9 @@ extern "C" {
  *    modifier_spec) -- see NAMED ACTIONS and INPUT SCHEME below.
  * 12: AVER_FW_PUMP_FRAME, the tick_all value for the per-frame pumps that also run while paused. */
 /* 2.1: aver_fw_spawn_batch_begin / aver_fw_spawn_batch_end (Godot's _ready order for a batch of spawns).
- * 2.2: aver_fw_adopt (an existing entity -- a prefab node -- becomes an actor). */
-#define AVER_FW_ABI_VERSION_MINOR 2
+ * 2.2: aver_fw_adopt (an existing entity -- a prefab node -- becomes an actor).
+ * 2.3: aver_fw_props_* (per-instance [Editable] values, a level's COMPONENT Props record). */
+#define AVER_FW_ABI_VERSION_MINOR 3
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -136,6 +137,16 @@ AVER_FW_ABI int32_t aver_fw_adopt(int32_t entity, int32_t c);
 /* aver_fw_adopt by class name. A class not declared yet is remembered, and the entity is adopted when
  * that class seals (a level's prefabs load before its scripts). 0 until then. (2.2) */
 AVER_FW_ABI int32_t aver_fw_adopt_by_name(int32_t entity, const char* className);
+
+/* Per-instance property values (Godot's exported values): text by field name, set by a host from a level's
+ * COMPONENT Props record or by the editor, read by the scripting bridge, which writes them into the actor's
+ * [Editable] fields before OnBeginPlay. Names compare case-insensitively; set replaces, an empty value is kept.
+ * Dropped when the entity is destroyed. Strings returned stay valid until that entity's props change. (2.3) */
+AVER_FW_ABI int32_t     aver_fw_props_set(int32_t entity, const char* name, const char* value);
+AVER_FW_ABI int32_t     aver_fw_props_count(int32_t entity);
+AVER_FW_ABI const char* aver_fw_props_name(int32_t entity, int32_t index);    /* "" when out of range */
+AVER_FW_ABI const char* aver_fw_props_value(int32_t entity, int32_t index);   /* "" when out of range */
+AVER_FW_ABI int32_t     aver_fw_props_clear(int32_t entity);
 
 /* Declares a class. Idempotent by name: the same name returns the same handle for the life of the
  * process, and a redeclare rewrites the row's components and defaults in place. */

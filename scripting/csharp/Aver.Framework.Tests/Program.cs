@@ -27,8 +27,9 @@ static class Program
         failures += GasReplicationSeamTests.RunAll();
         failures += AiManagedTests.RunAll();   // AI: wave 3 #21 -- the managed AI seam (ManagedAi, QueryGraph guards)
         failures += PhysicsStateApiTests.RunAll();   // wave 11: Aver.Physics enums vs the native name tables, snapshots, shape cache (SKIPs without the native DLL)
-        failures += PauseRulesTests.RunAll();
-        failures += GameThreadTests.RunAll();   // Fabric G1: deferred calls and await on the game thread   // Fabric G1: PauseMode resolution and who ticks while paused
+        failures += PauseRulesTests.RunAll();   // Fabric G1: PauseMode resolution and who ticks while paused
+        failures += GameThreadTests.RunAll();   // Fabric G1: deferred calls and await on the game thread
+        failures += EditablesTests.RunAll();    // Fabric G1: [Editable] fields as per-instance text values
         failures += WorldPosApiTests.RunAll();   // wave 11 LARGE_WORLD: WorldPos, Double3, WorldOrigin in a bare process
 
         Console.WriteLine(failures == 0 ? "\nAll tests passed." : $"\n{failures} test(s) failed.");

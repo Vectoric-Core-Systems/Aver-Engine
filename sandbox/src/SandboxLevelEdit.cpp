@@ -3,6 +3,9 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/game/PlacementProps.hpp"
+#endif
 #include "EditorRecordOrigin.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 #include "LightLevelIo.hpp"
@@ -770,6 +773,11 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     // whole function already sits behind -- a tree with the scene but not the framework spawns no
     // graph-as-class actors at all, so there is no live instance list for this call to read.
 #if AVER_MODULE_FRAMEWORK
+    // Each live actor's [Editable] values go back onto its authored record (a placement with no live actor keeps the file's).
+    for (const ClassInstance& ci : levelClassInstances_)
+        if (!ci.removed && ci.entity != 0 && ci.placement < classAuthored_.size() &&
+            world.valid(static_cast<scene::Entity>(ci.entity)))
+            game::capturePlacementProps(ci.entity, classAuthored_[ci.placement]);
     // A live actor's parent is the editor's hierarchy now; one with no entity keeps its file parent, re-indexed.
     const auto slotOfEntity = [&](scene::Entity e) -> i32 {
         const auto it = e == scene::kInvalidEntity ? slotOf.end() : slotOf.find(static_cast<u32>(e));

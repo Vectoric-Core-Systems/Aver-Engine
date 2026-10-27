@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-209 public types and 1794 public members, read from `scripting/csharp/Aver.Framework/` (130 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+209 public types and 1794 public members, read from `scripting/csharp/Aver.Framework/` (131 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 

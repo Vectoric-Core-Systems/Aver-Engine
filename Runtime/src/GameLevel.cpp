@@ -1,4 +1,7 @@
 #include "aver/game/GameLevel.hpp"
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/game/PlacementProps.hpp"
+#endif
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include "aver/game/GameContent.hpp"
@@ -664,6 +667,7 @@ void GameLevel::spawnClassPlacements() {
         }
         if (parent != scene::kInvalidEntity) world.setParent(static_cast<scene::Entity>(e), parent, false);
         placementTree_.setEntity(index, static_cast<scene::Entity>(e));
+        applyPlacementProps(e, p);   // before the batch ends, so OnBeginPlay sees them
         levelClassInstances_.push_back(e);
     }
     placementTree_.attachUnderClassPlacements(world);
