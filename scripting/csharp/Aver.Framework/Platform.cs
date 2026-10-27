@@ -205,3 +205,24 @@ public static class Display
     /// it off. The editor keeps its own vsync preference and ignores the request.</summary>
     public static void SetVSync(bool on) => Fw.aver_fw_request_vsync(on ? 1 : 0);
 }
+
+public static partial class Game
+{
+    /// <summary>Replaces the level at the end of this frame (Godot's <c>change_scene_to_file</c>): every actor ends with
+    /// <see cref="EndReason.Travel"/> except the GameInstance and <see cref="AverActor.Persistent"/> ones, the new level loads
+    /// and its actors begin, then a GameMode, controller and pawn begin as at the start of play. <paramref name="levelPath"/>
+    /// is content-relative (or <c>res://</c>). In the editor's Play it is refused with a warning: it would replace the level
+    /// being edited.</summary>
+    public static void ChangeLevel(string levelPath) => Fw.aver_fw_request_travel(levelPath);
+}
+
+public abstract partial class AverActor
+{
+    /// <summary>Survives level travel, with everything under it (Godot's autoload). It is lifted to the top of the scene
+    /// tree when the level changes, and ends with the play session.</summary>
+    public bool Persistent
+    {
+        get => Fw.aver_fw_is_persistent(Self.Handle) != 0;
+        set => Fw.aver_fw_set_persistent(Self.Handle, value ? 1 : 0);
+    }
+}

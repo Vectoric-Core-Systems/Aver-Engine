@@ -793,6 +793,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     } else if (aver_fw_play_state() == AVER_FW_PLAY_PAUSED) {
         game::tickPausedFrame(t.dt);
     }
+    // Level travel replaces the level, and in the editor that is the level being edited: refused here.
+    {
+        char travel[1024];
+        if (aver_fw_take_travel_request(travel, static_cast<int32_t>(sizeof travel)) > 0)
+            AVER_WARN("[Play] a script asked to change level to '{}': level travel runs in the packaged game; the editor "
+                      "keeps the level it is editing", travel);
+    }
 #endif
 #if AVER_MODULE_FLUIDS
     // After physics step, before any prePass (not gated on Play).

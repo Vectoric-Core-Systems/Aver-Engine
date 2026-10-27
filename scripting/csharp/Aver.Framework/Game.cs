@@ -9,7 +9,7 @@ using Aver.Scene;
 namespace Aver.Framework;
 
 /// <summary>The running play session, reached statically from any script. Read-only: the host starts and stops it.</summary>
-public static class Game
+public static partial class Game
 {
     /// <summary>The world's play state — Editor, Playing or Paused.</summary>
     public static PlayState State => (PlayState)Fw.aver_fw_play_state();

@@ -179,6 +179,12 @@ Named groups (Godot's groups): `AddToGroup`, `RemoveFromGroup` and `IsInGroup` o
 entity. Names are case-sensitive; a destroyed entity leaves every group. A level keeps a placement's groups as
 `COMPONENT Groups names=a,b`.
 
+Level travel (Godot's `change_scene_to_file`): `Game.ChangeLevel("Maps/Next.ocworld")` replaces the level at the end
+of the frame. Every actor ends with `EndReason.Travel` except the GameInstance and actors with `Persistent = true`
+(Godot's autoloads, lifted to the top of the tree and kept until Play stops); the new level's actors begin, then a
+GameMode, controller and pawn as at the start of play. The shipped game does it; the editor's Play refuses with a
+warning, since it would replace the level being edited.
+
 Files and platform (Godot's ProjectSettings, OS, Engine, DisplayServer): `Paths.Globalize("res://...")` and
 `user://...` resolve under `Paths.Content` and `Paths.User` (the player's writable folder for the project, the same in
 the editor and the shipped game); `ConfigFile` reads and writes Godot's ConfigFile text; `ProjectSettings.Get(key)`

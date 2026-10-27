@@ -1300,19 +1300,7 @@ void GameApp::openProject(Engine& e) {
 #endif
     initOrigin(e);
     loadStartMapAtOrigin(cfg_.levelPath);
-#if AVER_MODULE_SYNAPSE_SCENE
-    // Load navigation (optional; most levels have none)
-    {
-        std::string navErr;
-        const std::string navPath = navPathForLevel(level_.path());
-        if (!navPath.empty() && fmt::loadOcNav(navPath, gameNav_, &navErr)) {
-            AVER_INFO("[Game] navigation: '{}' ({}x{} cells)", navPath, gameNav_.widthCells, gameNav_.heightCells);
-        } else if (!navPath.empty()) {
-            AVER_INFO("[Game] navigation: no baked '{}' ({}) -- Synapse agents will wait for a goal grid",
-                      navPath, navErr);
-        }
-    }
-#endif
+    loadLevelNav();
     applyLevelSky();
     // Manifest GI volume wins over auto-fit (mirrors editor precedence)
     if (project_.hasGiVolume) {
@@ -1594,6 +1582,57 @@ void GameApp::beginPlayIfGameModeDeclared() {
         AVER_WARN("[Game] aver_fw_begin_play declined for GameMode class {} -- the framework stays in "
                   "EDITOR state; the world still renders, nothing in it plays", modeClass);
     }
+#endif
+}
+
+// The level's baked navigation, if it has one (most have none).
+void GameApp::loadLevelNav() {
+#if AVER_MODULE_SYNAPSE_SCENE
+    gameNav_ = fmt::OcNavData{};
+    std::string navErr;
+    const std::string navPath = navPathForLevel(level_.path());
+    if (!navPath.empty() && fmt::loadOcNav(navPath, gameNav_, &navErr)) {
+        AVER_INFO("[Game] navigation: '{}' ({}x{} cells)", navPath, gameNav_.widthCells, gameNav_.heightCells);
+    } else if (!navPath.empty()) {
+        AVER_INFO("[Game] navigation: no baked '{}' ({}) -- Synapse agents will wait for a goal grid",
+                  navPath, navErr);
+    }
+#endif
+}
+
+// Level travel (Game.ChangeLevel, Godot's change_scene_to_file), between frames: the session's actors end
+// (the GameInstance and persistent actors stay), the level is replaced, its placed actors spawn, and the
+// GameMode, controller and pawn begin again at the new level's spawn.
+void GameApp::travelTo(const std::string& requested) {
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    std::string path = requested;
+    if (path.rfind("res://", 0) == 0) path = path.substr(6);
+    std::error_code ec;
+    if (!std::filesystem::path(path).is_absolute() && project_.valid()) path = project_.contentDir() + AVER_PATH_SEP + path;
+    if (!std::filesystem::exists(path, ec)) {
+        AVER_ERROR("[Game] level travel to '{}': no such level; staying", requested);
+        return;
+    }
+    AVER_INFO("[Game] level travel to '{}'", path);
+    aver_fw_travel_begin();
+    scene::World::instance().flush();
+    level_.unload();
+    scene::World::instance().flush();
+    loadStartMapAtOrigin(path);
+    loadLevelNav();
+    applyLevelSky();
+    if (project_.giExtent <= 0.0f) fitGiVolumeToLevel();
+    level_.spawnClassPlacements();
+    auto named = [](const std::string& n, i32 flag) -> i32 {
+        const i32 c = n.empty() ? 0 : aver_fw_class_find(n.c_str());
+        return (c && (aver_fw_class_get_flags(c) & flag)) ? c : 0;
+    };
+    i32 modeClass = named(levelGameMode_, AVER_FW_CLASS_GAME_MODE);
+    if (!modeClass) modeClass = named(project_.gameMode, AVER_FW_CLASS_GAME_MODE);
+    if (aver_fw_travel_end(modeClass, named(levelDefaultPawn_, AVER_FW_CLASS_PAWN))) placePawnAtSpawn();
+    else AVER_WARN("[Game] level travel: no GameMode could begin in '{}'", path);
+#else
+    (void)requested;
 #endif
 }
 
@@ -2175,6 +2214,11 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 #if AVER_MODULE_FRAMEWORK
     // Quit is a REQUEST, not immediate exit: allows device/audio/physics to stay live. requestExit() sets flag Engine::run checks.
     if (aver_fw_quit_requested()) e.requestExit();
+    // A script's level change, between frames: before this frame's gameplay sees the old level.
+    {
+        char travel[1024];
+        if (aver_fw_take_travel_request(travel, static_cast<int32_t>(sizeof travel)) > 0) travelTo(travel);
+    }
     // A script's vsync choice (Display.VSync), applied where the device allows it.
     if (const int32_t vs = aver_fw_take_vsync_request(); vs >= 0)
         if (rhi::IDevice* dev = e.device(); dev && (vs == 1 || dev->vsyncCanDisable())) dev->setVSync(vs == 1);

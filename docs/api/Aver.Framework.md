@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-218 public types and 1851 public members, read from `scripting/csharp/Aver.Framework/` (135 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+218 public types and 1853 public members, read from `scripting/csharp/Aver.Framework/` (135 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -341,6 +341,7 @@ Values: `None = 0`, `Started = 1`, `Ongoing = 2`, `Triggered = 4`, `Completed = 
 - `public bool AddToGroup(string group)` - Puts this actor in a named group (Godot's add_to_group).
 - `public bool RemoveFromGroup(string group)` - Takes this actor out of a named group.
 - `public bool IsInGroup(string group)` - Whether this actor is in a named group.
+- `public bool Persistent { get; set; }` - Survives level travel, with everything under it (Godot's autoload).
 
 ### AverCharacter
 
@@ -1560,6 +1561,7 @@ Values: `Linear = 0`, `EqualPower = 1`
 - `public static bool SpawnFluidVolume(Vec3 centreCm, Vec3 halfExtentCm, string name = "unnamed", float compliance = 1.0e-4f, float damping = 0.1f, int iterations = 5, float pressure = -1f)` - Requests a simulated fluid volume centred at centreCm (world-space centimetres) with the given half-extent, using the solver's OWN RAW knobs -- see FluidVolume.hpp's own FluidVolumeDesc comment for what each means and its unit.
 - `public static bool SpawnFluidVolumeMaterial(Vec3 centreCm, Vec3 halfExtentCm, string name = "unnamed", float compliance = 1.0e-4f, float damping = 0.1f, int iterations = 5, float pressure = -1f, float densityKgM3 = -1f, float viscosityPaS = -1f, string materialPreset = "")` - Same request as SpawnFluidVolume, plus the MATERIAL layer: real density (kg/m^3) and viscosity (Pa*s) instead of typing compliance/damping directly -- see fluids::FluidMaterial's own comment (FluidVolume.hpp) for the honest split between the two (density real, viscosity a calibrated fit onto `damping`, some things refused outright).
 - `public static IEnumerable<Entity> WithTag(uint mask)` - Every live entity carrying all of the tag bits in mask.
+- `public static void ChangeLevel(string levelPath)` - Replaces the level at the end of this frame (Godot's change_scene_to_file): every actor ends with Travel except the GameInstance and Persistent ones, the new level loads and its actors begin, then a GameMode, controller and pawn begin as at the start of play.
 
 ### Game.CursorScope
 

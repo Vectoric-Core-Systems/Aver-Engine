@@ -1346,6 +1346,85 @@ int32_t aver_fw_begin_play_with_pawn(int32_t gameInstanceClass, int32_t gameMode
     return 1;
 }
 
+// ---- level travel ------------------------------------------------------------------------------------
+
+static std::string g_travelRequest;
+static int32_t g_lastGameModeClass = 0;
+static std::unordered_set<Entity>& persistentActors() { static std::unordered_set<Entity> s; return s; }
+
+void aver_fw_request_travel(const char* levelPath) { g_travelRequest = levelPath ? levelPath : ""; }
+
+int32_t aver_fw_take_travel_request(char* out, int32_t cap) {
+    if (g_travelRequest.empty() || !out || cap <= 0) return 0;
+    const usize n = std::min(g_travelRequest.size(), static_cast<usize>(cap - 1));
+    std::memcpy(out, g_travelRequest.data(), n);
+    out[n] = '\0';
+    g_travelRequest.clear();
+    return static_cast<int32_t>(n);
+}
+
+int32_t aver_fw_set_persistent(int32_t entity, int32_t on) {
+    const Entity e = toEntity(entity);
+    if (!world().valid(e)) return 0;
+    if (on) persistentActors().insert(e); else persistentActors().erase(e);
+    return 1;
+}
+
+int32_t aver_fw_is_persistent(int32_t entity) {
+    const Entity e = toEntity(entity);
+    return world().valid(e) && persistentActors().count(e) ? 1 : 0;
+}
+
+// True when `e` or an ancestor is the GameInstance or a persistent actor.
+static bool survivesTravel(Entity e) {
+    for (Entity a = e; a != kInvalidEntity && world().valid(a); a = world().parent(a))
+        if (a == toEntity(gameInstanceRef()) || persistentActors().count(a)) return true;
+    return false;
+}
+
+int32_t aver_fw_travel_begin(void) {
+    if (playStateRef() == AVER_FW_PLAY_EDITOR) return 0;
+    World& w = world();
+    // Persistent actors become roots, so the old level's entities can go without taking one along.
+    for (auto it = persistentActors().begin(); it != persistentActors().end();) {
+        if (!w.valid(*it)) { it = persistentActors().erase(it); continue; }
+        if (w.parent(*it) != kInvalidEntity) w.setParent(*it, kInvalidEntity, true);
+        ++it;
+    }
+    if (gameModeRef()) g_lastGameModeClass = classOfEntity(toEntity(gameModeRef()));
+    if (playerCtrlRef()) aver_fw_unpossess(playerCtrlRef());
+    if (playPawnRef())   destroyActor(playPawnRef(),   AVER_FW_END_TRAVEL);
+    if (playerCtrlRef()) destroyActor(playerCtrlRef(), AVER_FW_END_TRAVEL);
+    if (gameModeRef())   destroyActor(gameModeRef(),   AVER_FW_END_TRAVEL);
+    playPawnRef() = playerCtrlRef() = gameModeRef() = 0;
+    const u32 count = w.count();
+    for (u32 i = 0; i < count; ++i) {
+        const Entity e = w.at(i);
+        if (classOfEntity(e) != 0 && !w.destroyPending(e) && !survivesTravel(e))
+            destroyActor(static_cast<int32_t>(e), AVER_FW_END_TRAVEL);
+    }
+    return 1;
+}
+
+int32_t aver_fw_travel_end(int32_t gameModeClass, int32_t pawnClass) {
+    if (playStateRef() == AVER_FW_PLAY_EDITOR) return 0;
+    const int32_t modeClass = validClass(gameModeClass) ? gameModeClass : g_lastGameModeClass;
+    if (!validClass(modeClass)) return 0;
+    const int32_t gm = aver_fw_spawn(modeClass, "GameMode", nullptr, nullptr, nullptr);
+    if (gm == 0) return 0;
+    gameModeRef() = gm;
+    ClassRecord* r = rec(modeClass);
+    const int32_t ctrl = (r && validClass(r->playerController))
+                       ? aver_fw_spawn(r->playerController, "PlayerController", nullptr, nullptr, nullptr) : 0;
+    const int32_t pawnToSpawn = validClass(pawnClass) ? pawnClass : (r ? r->defaultPawn : 0);
+    const int32_t pawn = validClass(pawnToSpawn) ? aver_fw_spawn(pawnToSpawn, "Pawn", nullptr, nullptr, nullptr) : 0;
+    playerCtrlRef() = ctrl;
+    playPawnRef()   = pawn;
+    if (ctrl && pawn) aver_fw_possess(ctrl, pawn);
+    if (ctrl) dispatchPostLogin(toEntity(gm), toEntity(ctrl));
+    return 1;
+}
+
 // Ends the running session: OnEndPlay(STOP) and destroys the four roots plus every actor the session
 // spawned, then returns to EDITOR. 0 if nothing was running.
 int32_t aver_fw_end_play(void) {
@@ -1370,6 +1449,9 @@ int32_t aver_fw_end_play(void) {
     }
 
     aver_fw_timers_set_dilation(1.0f);   // the time scale: a session's slow motion does not outlive it
+    persistentActors().clear();
+    g_travelRequest.clear();
+    g_lastGameModeClass = 0;
     playStateRef() = AVER_FW_PLAY_EDITOR;
     return 1;
 }

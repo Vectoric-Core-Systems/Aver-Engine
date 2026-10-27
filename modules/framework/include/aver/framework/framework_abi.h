@@ -69,8 +69,10 @@ extern "C" {
  * 2.3: aver_fw_props_* (per-instance [Editable] values, a level's COMPONENT Props record).
  * 2.4: aver_fw_group_* (named groups, Godot's add_to_group; a level's COMPONENT Groups record).
  * 2.5: aver_fw_set_project / aver_fw_project_dir / content_dir / user_dir / is_editor (res:// and user://).
- * 2.6: aver_fw_debug_line* (script debug drawing) and aver_fw_request_vsync / aver_fw_take_vsync_request. */
-#define AVER_FW_ABI_VERSION_MINOR 6
+ * 2.6: aver_fw_debug_line* (script debug drawing) and aver_fw_request_vsync / aver_fw_take_vsync_request.
+ * 2.7: level travel (aver_fw_request_travel / take_travel_request / travel_begin / travel_end) and persistent
+ *      actors (aver_fw_set_persistent / aver_fw_is_persistent). */
+#define AVER_FW_ABI_VERSION_MINOR 7
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -184,6 +186,19 @@ AVER_FW_ABI void         aver_fw_debug_lines_advance(float realDt);
  * is pending. (2.6) */
 AVER_FW_ABI void    aver_fw_request_vsync(int32_t on);
 AVER_FW_ABI int32_t aver_fw_take_vsync_request(void);
+
+/* Level travel (Godot's change_scene_to_file). A script requests it; the host takes the request between frames,
+ * calls travel_begin (every actor but the GameInstance and the persistent ones ends with AVER_FW_END_TRAVEL; a
+ * persistent actor is lifted to a root first so the level's teardown cannot take it), unloads the level, loads
+ * the new one, spawns its placed actors, then calls travel_end, which spawns the GameMode, controller and pawn
+ * as begin_play does. A persistent actor (Godot's autoload) lives until the session ends. take returns the
+ * path's length (0: none) and writes it NUL-terminated into out. (2.7) */
+AVER_FW_ABI void    aver_fw_request_travel(const char* levelPath);
+AVER_FW_ABI int32_t aver_fw_take_travel_request(char* out, int32_t cap);
+AVER_FW_ABI int32_t aver_fw_travel_begin(void);
+AVER_FW_ABI int32_t aver_fw_travel_end(int32_t gameModeClass, int32_t pawnClass);
+AVER_FW_ABI int32_t aver_fw_set_persistent(int32_t entity, int32_t on);
+AVER_FW_ABI int32_t aver_fw_is_persistent(int32_t entity);
 
 /* Declares a class. Idempotent by name: the same name returns the same handle for the life of the
  * process, and a redeclare rewrites the row's components and defaults in place. */

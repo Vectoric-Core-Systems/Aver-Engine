@@ -847,6 +847,65 @@ static void testDebugLines() {
     check(aver_fw_take_vsync_request() == 0 && aver_fw_take_vsync_request() == -1, "a request is taken once");
 }
 
+static std::vector<std::pair<int32_t, int32_t>> g_travelEnds;
+static void AVER_FW_CALL standInTravelEnd(aver_entity e, int32_t reason) { g_travelEnds.emplace_back(static_cast<int32_t>(e), reason); }
+
+// Checks level travel: everything but the GameInstance and persistent actors ends with TRAVEL, a persistent actor
+// is lifted to a root, and travel_end begins a GameMode again (the previous one's class when none is named).
+static void testTravel() {
+    AVER_INFO("=== travel: the level's actors end, the GameInstance and persistent ones stay ===");
+    const int32_t gi = aver_fw_class_declare("TravelInstance", "");
+    aver_fw_class_set_flags(gi, AVER_FW_CLASS_MANAGED | AVER_FW_CLASS_GAME_INSTANCE);
+    const int32_t gm = aver_fw_class_declare("TravelMode", "");
+    aver_fw_class_set_flags(gm, AVER_FW_CLASS_MANAGED | AVER_FW_CLASS_GAME_MODE);
+    const int32_t a = aver_fw_class_declare("TravelActor", "");
+    aver_fw_class_set_flags(a, AVER_FW_CLASS_MANAGED);
+    check(aver_fw_class_seal(gi) == 1 && aver_fw_class_seal(gm) == 1 && aver_fw_class_seal(a) == 1, "the classes seal");
+
+    AvManagedDispatch table{};
+    table.structBytes     = static_cast<int32_t>(sizeof(AvManagedDispatch));
+    table.contractVersion = AVER_FW_DISPATCH_VERSION;
+    table.bind            = &standInBindAll;
+    table.endPlay         = &standInTravelEnd;
+    check(aver_fw_install_managed_dispatch(&table) == 1, "the stand-in installs");
+
+    check(aver_fw_travel_begin() == 0, "travel needs a play session");
+    check(aver_fw_begin_play(gi, gm) == 1, "a session begins");
+    const int32_t inst = aver_fw_game_instance(), mode = aver_fw_game_mode();
+    const int32_t level = aver_scene_create();
+    const int32_t plain = aver_fw_spawn(a, "plain", nullptr, nullptr, nullptr);
+    const int32_t keep = aver_fw_spawn(a, "keep", nullptr, nullptr, nullptr);
+    aver_scene_set_parent(keep, level);
+    check(aver_fw_set_persistent(keep, 1) == 1 && aver_fw_is_persistent(keep) == 1, "one actor is persistent");
+
+    char path[64] = {};
+    check(aver_fw_take_travel_request(path, sizeof path) == 0, "no travel pending");
+    aver_fw_request_travel("Maps/Next.ocworld");
+    check(aver_fw_take_travel_request(path, sizeof path) == 17 && std::string(path) == "Maps/Next.ocworld" &&
+          aver_fw_take_travel_request(path, sizeof path) == 0, "a request is taken once");
+
+    g_travelEnds.clear();
+    check(aver_fw_travel_begin() == 1, "travel begins");
+    bool plainEnded = false, modeEnded = false, kept = true;
+    for (const auto& [e, reason] : g_travelEnds) {
+        if (e == plain && reason == AVER_FW_END_TRAVEL) plainEnded = true;
+        if (e == mode && reason == AVER_FW_END_TRAVEL) modeEnded = true;
+        if (e == keep || e == inst) kept = false;
+    }
+    check(plainEnded && modeEnded, "the level's actor and the GameMode end with TRAVEL");
+    check(kept, "the GameInstance and the persistent actor do not end");
+    check(aver_scene_parent(keep) == 0, "the persistent actor was lifted to a root");
+    check(aver_fw_game_mode() == 0 && aver_fw_game_instance() == inst, "no GameMode until the new level begins; the same GameInstance");
+    check(aver_fw_travel_end(0, 0) == 1 && aver_fw_game_mode() != 0 && aver_fw_class_of(aver_fw_game_mode()) == gm,
+          "travel_end begins the previous GameMode's class again");
+
+    aver_fw_end_play();
+    check(aver_fw_is_persistent(keep) == 0, "persistence ends with the session");
+    aver_scene_destroy(level);
+    World::instance().flush();
+    check(aver_fw_clear_managed_dispatch() == 1, "the stand-in clears");
+}
+
 // Checks that a possession hook re-entering possess is refused rather than recursed to a crash.
 static void testPossessReentrancy() {
     AVER_INFO("=== a possession hook re-entering possession is refused, not recursed to a crash ===");
@@ -2000,6 +2059,7 @@ int main() {
     testDebugLines();
     testPossessReentrancy();
     testPlayLifecycle();
+    testTravel();   // after the lifecycle test: it declares a GameMode and a GameInstance of its own
     testInput();
     testRawVk();
     testGamepad();
