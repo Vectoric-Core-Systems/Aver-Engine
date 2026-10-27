@@ -624,6 +624,8 @@ void GameLevel::spawnClassPlacements() {
     //
     // A `snap` class placement asks the same ground query load() hands world::instantiate, as the
     // editor's spawnClassPlacements does.
+    // One spawn batch: every placed actor begins play after all of them exist, children first (Godot's _ready).
+    aver_fw_spawn_batch_begin();
     instances_.spawnPendingClasses();   // [wave3/level-instances] classes inside level instances, now that scripting is up
     for (const fmt::OcWorldPlacement& p : classPlacements_) {
         const int32_t c = aver_fw_class_find(p.className.c_str());
@@ -650,6 +652,7 @@ void GameLevel::spawnClassPlacements() {
         }
         levelClassInstances_.push_back(e);
     }
+    aver_fw_spawn_batch_end();
     if (!levelClassInstances_.empty())
         AVER_INFO("[Level] {} class instance(s) placed -- an entity exists for each; whether its graph "
                   "COMPILED is reported per instance above, because aver_fw_spawn returns a live entity "

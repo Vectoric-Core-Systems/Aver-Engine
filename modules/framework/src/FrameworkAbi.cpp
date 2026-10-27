@@ -528,8 +528,13 @@ int32_t aver_fw_class_set_player_controller(int32_t gameMode, const char* contro
     return 1;
 }
 
+// A spawn batch's depth and the actors whose OnBeginPlay waits for its end.
+static int32_t g_spawnBatchDepth = 0;
+static std::vector<Entity>& batchedBegins() { static std::vector<Entity> v; return v; }
+
 // The spawn body: attaches the sealed archetype, lays down defaults, applies transform overrides and
 // runs the managed BEGIN edge. `dispatchBeginPlay` false gives a preview bind + build_models only.
+// Inside a spawn batch the beginPlay waits for the batch's end.
 static int32_t spawnActor(int32_t c, const char* name,
                           const float* pos3, const float* quat4, const float* scale3,
                           bool dispatchBeginPlay) {
@@ -570,7 +575,8 @@ static int32_t spawnActor(int32_t c, const char* name,
         const bool bound = d.bind && d.bind(static_cast<int64_t>(r->nameHash), ae) == 1;
         if (bound) {
             if (d.build_models) d.build_models(ae);
-            if (dispatchBeginPlay && d.beginPlay) d.beginPlay(ae, AVER_FW_BEGIN_SPAWN);
+            if (dispatchBeginPlay && g_spawnBatchDepth > 0) batchedBegins().push_back(e);
+            else if (dispatchBeginPlay && d.beginPlay) d.beginPlay(ae, AVER_FW_BEGIN_SPAWN);
         }
     }
 
@@ -965,6 +971,41 @@ int32_t aver_fw_tree_order(const int32_t* entities, const int32_t* priorities, i
 }
 
 int64_t aver_fw_tree_revision(void) { return static_cast<int64_t>(world().hierarchyRevision()); }
+
+void aver_fw_spawn_batch_begin(void) { ++g_spawnBatchDepth; }
+
+// Godot's _ready order: post-order depth-first, so a descendant precedes its ancestor and siblings keep
+// their order. Paths are order stamps from the root, as aver_fw_tree_order builds them.
+int32_t aver_fw_spawn_batch_end(void) {
+    if (g_spawnBatchDepth == 0 || --g_spawnBatchDepth > 0) return 0;
+    std::vector<Entity> pending;
+    pending.swap(batchedBegins());
+    World& w = world();
+    std::vector<std::pair<std::vector<u64>, Entity>> ready;
+    for (const Entity e : pending) {
+        if (!w.valid(e) || w.destroyPending(e) || classOfEntity(e) == 0) continue;
+        std::vector<u64> path;
+        for (Entity a = e; a != kInvalidEntity && w.valid(a); a = w.parent(a)) path.push_back(w.orderStamp(a));
+        std::reverse(path.begin(), path.end());
+        ready.emplace_back(std::move(path), e);
+    }
+    std::stable_sort(ready.begin(), ready.end(), [](const auto& a, const auto& b) {
+        const usize n = std::min(a.first.size(), b.first.size());
+        for (usize i = 0; i < n; ++i)
+            if (a.first[i] != b.first[i]) return a.first[i] < b.first[i];
+        return a.first.size() > b.first.size();   // one is the other's ancestor: the descendant first
+    });
+    int32_t begun = 0;
+    for (const auto& [path, e] : ready) {
+        // An earlier OnBeginPlay may have destroyed this one.
+        if (!w.valid(e) || w.destroyPending(e) || classOfEntity(e) == 0) continue;
+        if (managedInstalled() && managedDispatch().beginPlay) {
+            managedDispatch().beginPlay(static_cast<aver_entity>(e), AVER_FW_BEGIN_SPAWN);
+            ++begun;
+        }
+    }
+    return begun;
+}
 
 // Runs one tick pass or the frame pumps: exactly one tick_all call into managed code. 1 if it fired.
 int32_t aver_fw_tick(int32_t tickGroup, float dt) {

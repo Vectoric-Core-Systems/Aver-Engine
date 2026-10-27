@@ -686,6 +686,53 @@ static void testTreeOrder() {
     World::instance().flush();
 }
 
+static std::vector<int32_t> g_begun;
+static void AVER_FW_CALL standInRecordBegin(aver_entity e, int32_t) { g_begun.push_back(static_cast<int32_t>(e)); }
+static int32_t AVER_FW_CALL standInBindAll(int64_t, aver_entity) { return 1; }
+
+// Checks a spawn batch: nothing begins until the outermost end, then children before their parent and
+// siblings in the order added (Godot's _ready), skipping an actor destroyed inside the batch.
+static void testSpawnBatchReadyOrder() {
+    AVER_INFO("=== spawn batch: OnBeginPlay waits for the batch, then runs in Godot's _ready order ===");
+
+    const int32_t managedC = aver_fw_class_declare("BatchActor", "");
+    aver_fw_class_set_flags(managedC, AVER_FW_CLASS_MANAGED);
+    check(aver_fw_class_seal(managedC) == 1, "the batch class seals");
+
+    AvManagedDispatch table{};
+    table.structBytes     = static_cast<int32_t>(sizeof(AvManagedDispatch));
+    table.contractVersion = AVER_FW_DISPATCH_VERSION;
+    table.bind            = &standInBindAll;
+    table.beginPlay       = &standInRecordBegin;
+    check(aver_fw_install_managed_dispatch(&table) == 1, "the recording stand-in installs");
+
+    g_begun.clear();
+    aver_fw_spawn_batch_begin();
+    const int32_t p  = aver_fw_spawn(managedC, "p", nullptr, nullptr, nullptr);
+    const int32_t c  = aver_fw_spawn(managedC, "c", nullptr, nullptr, nullptr);
+    const int32_t g  = aver_fw_spawn(managedC, "g", nullptr, nullptr, nullptr);
+    aver_fw_spawn_batch_begin();   // a nested batch, as a level instance inside a level
+    const int32_t c2 = aver_fw_spawn(managedC, "c2", nullptr, nullptr, nullptr);
+    const int32_t gone = aver_fw_spawn(managedC, "gone", nullptr, nullptr, nullptr);
+    check(aver_fw_spawn_batch_end() == 0 && g_begun.empty(), "an inner end begins nothing");
+    check(aver_scene_set_parent(c, p) == 1 && aver_scene_set_parent(g, c) == 1 &&
+          aver_scene_set_parent(c2, p) == 1, "the batch is linked: p > {c > g, c2}");
+    check(aver_fw_destroy(gone) == 1, "one actor is destroyed inside the batch");
+    check(g_begun.empty(), "nothing has begun before the outermost end");
+    check(aver_fw_spawn_batch_end() == 4, "the outermost end begins four actors");
+    check(g_begun == std::vector<int32_t>{g, c, c2, p},
+          "children first, siblings in order, the parent last: g, c, c2, p");
+    check(aver_fw_spawn_batch_end() == 0, "an unmatched end is a no-op");
+
+    g_begun.clear();
+    const int32_t solo = aver_fw_spawn(managedC, "solo", nullptr, nullptr, nullptr);
+    check(g_begun == std::vector<int32_t>{solo}, "outside a batch, a spawn begins at once");
+
+    for (const int32_t e : {p, solo}) aver_fw_destroy(e);
+    World::instance().flush();
+    check(aver_fw_clear_managed_dispatch() == 1, "the recording stand-in clears");
+}
+
 // Checks that a possession hook re-entering possess is refused rather than recursed to a crash.
 static void testPossessReentrancy() {
     AVER_INFO("=== a possession hook re-entering possession is refused, not recursed to a crash ===");
@@ -1833,6 +1880,7 @@ int main() {
     testDestroyReentrancy();
     testSubtreeDestroyEndsChildren();
     testTreeOrder();
+    testSpawnBatchReadyOrder();
     testPossessReentrancy();
     testPlayLifecycle();
     testInput();

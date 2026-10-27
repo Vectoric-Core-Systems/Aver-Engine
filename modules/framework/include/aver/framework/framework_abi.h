@@ -64,7 +64,8 @@ extern "C" {
  *    event_count/event_at; aver_fw_input_scheme_trigger_count/trigger_spec/modifier_count/
  *    modifier_spec) -- see NAMED ACTIONS and INPUT SCHEME below.
  * 12: AVER_FW_PUMP_FRAME, the tick_all value for the per-frame pumps that also run while paused. */
-#define AVER_FW_ABI_VERSION_MINOR 0
+/* 2.1: aver_fw_spawn_batch_begin / aver_fw_spawn_batch_end (Godot's _ready order for a batch of spawns). */
+#define AVER_FW_ABI_VERSION_MINOR 1
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -117,6 +118,14 @@ AVER_FW_ABI int32_t aver_fw_tree_order(const int32_t* entities, const int32_t* p
                                        int32_t* outOrder);
 /* Changes whenever an entity is created, reparented or retired; a cached tree order is stale then. */
 AVER_FW_ABI int64_t aver_fw_tree_revision(void);
+
+/* A spawn batch (a level or a scene being instanced): every actor aver_fw_spawn creates inside it binds
+ * at once but begins play when the outermost batch ends, children before their parent and siblings in
+ * the order they were added (Godot's _ready order), so a parent's OnBeginPlay sees its children ready.
+ * Parent the batch's entities before ending it. An actor destroyed inside the batch never begins.
+ * Batches nest; end returns how many actors began (0 for an inner end). (2.1) */
+AVER_FW_ABI void    aver_fw_spawn_batch_begin(void);
+AVER_FW_ABI int32_t aver_fw_spawn_batch_end(void);
 
 /* Declares a class. Idempotent by name: the same name returns the same handle for the life of the
  * process, and a redeclare rewrites the row's components and defaults in place. */

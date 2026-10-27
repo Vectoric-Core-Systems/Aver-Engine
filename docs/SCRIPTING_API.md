@@ -160,7 +160,7 @@ Override these on your `AverActor` subclass. All are optional; the defaults do n
 
 | Hook | When |
 |---|---|
-| `void OnBeginPlay(BeginReason reason)` | Once when the actor begins playing. `reason` is `Spawn` (fresh), `Play` (an already-placed actor entering Play), or `Reload` (after a hot reload). |
+| `void OnBeginPlay(BeginReason reason)` | Once when the actor begins playing. `reason` is `Spawn` (fresh), `Play` (an already-placed actor entering Play), or `Reload` (after a hot reload). A level's placed actors all exist before any of them begins, and begin children first, siblings in order (Godot's `_ready`), so a parent's `OnBeginPlay` finds its children ready. |
 | `void OnTick(float dt)` | Once a frame, after the frame's physics steps (Godot's `_process`). `dt` is the frame time in seconds. On when the class overrides it. |
 | `void OnPhysicsTick(float dt)` | Once per fixed physics step, before that step (Godot's `_physics_process`), so 0–8 times a frame. `dt` is the fixed step. On when the class overrides it. |
 
