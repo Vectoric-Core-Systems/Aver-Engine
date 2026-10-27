@@ -675,6 +675,93 @@ int32_t aver_fw_props_clear(int32_t entity) {
     return 1;
 }
 
+// Named groups: members by group in join order, and each entity's groups (for groups_of and leave_all).
+static std::unordered_map<std::string, std::vector<Entity>>& groupMembers() { static std::unordered_map<std::string, std::vector<Entity>> m; return m; }
+static std::unordered_map<u32, std::pair<Entity, std::vector<std::string>>>& groupsByIndex() {
+    static std::unordered_map<u32, std::pair<Entity, std::vector<std::string>>> m;
+    return m;
+}
+
+// The group's members with the dead ones dropped.
+static std::vector<Entity>* liveMembers(const char* group) {
+    if (!group) return nullptr;
+    auto it = groupMembers().find(group);
+    if (it == groupMembers().end()) return nullptr;
+    auto& v = it->second;
+    v.erase(std::remove_if(v.begin(), v.end(), [](Entity e) { return !world().valid(e) || world().destroyPending(e); }), v.end());
+    return &v;
+}
+
+static std::vector<std::string>* groupsOf(Entity e, bool create) {
+    if (!world().valid(e)) return nullptr;
+    auto& m = groupsByIndex();
+    auto it = m.find(entityIndex(e));
+    if (it != m.end() && it->second.first != e) { m.erase(it); it = m.end(); }   // a reused index
+    if (it == m.end()) {
+        if (!create) return nullptr;
+        it = m.emplace(entityIndex(e), std::make_pair(e, std::vector<std::string>{})).first;
+    }
+    return &it->second.second;
+}
+
+int32_t aver_fw_group_add(int32_t entity, const char* group) {
+    if (!group || !*group) return 0;
+    const Entity e = toEntity(entity);
+    std::vector<std::string>* mine = groupsOf(e, true);
+    if (!mine || std::find(mine->begin(), mine->end(), group) != mine->end()) return 0;
+    mine->emplace_back(group);
+    groupMembers()[group].push_back(e);
+    return 1;
+}
+
+int32_t aver_fw_group_remove(int32_t entity, const char* group) {
+    if (!group) return 0;
+    const Entity e = toEntity(entity);
+    std::vector<std::string>* mine = groupsOf(e, false);
+    if (!mine) return 0;
+    const auto it = std::find(mine->begin(), mine->end(), group);
+    if (it == mine->end()) return 0;
+    mine->erase(it);
+    if (auto* v = liveMembers(group)) v->erase(std::remove(v->begin(), v->end(), e), v->end());
+    return 1;
+}
+
+int32_t aver_fw_group_has(int32_t entity, const char* group) {
+    const std::vector<std::string>* mine = groupsOf(toEntity(entity), false);
+    return (group && mine && std::find(mine->begin(), mine->end(), group) != mine->end()) ? 1 : 0;
+}
+
+int32_t aver_fw_group_count(const char* group) {
+    const auto* v = liveMembers(group);
+    return v ? static_cast<int32_t>(v->size()) : 0;
+}
+
+int32_t aver_fw_group_member(const char* group, int32_t index) {
+    const auto* v = liveMembers(group);
+    return (v && index >= 0 && static_cast<usize>(index) < v->size()) ? static_cast<int32_t>((*v)[static_cast<usize>(index)]) : 0;
+}
+
+int32_t aver_fw_groups_of_count(int32_t entity) {
+    const auto* mine = groupsOf(toEntity(entity), false);
+    return mine ? static_cast<int32_t>(mine->size()) : 0;
+}
+
+const char* aver_fw_groups_of(int32_t entity, int32_t index) {
+    const auto* mine = groupsOf(toEntity(entity), false);
+    return (mine && index >= 0 && static_cast<usize>(index) < mine->size()) ? (*mine)[static_cast<usize>(index)].c_str() : "";
+}
+
+int32_t aver_fw_groups_leave_all(int32_t entity) {
+    const Entity e = toEntity(entity);
+    auto& m = groupsByIndex();
+    const auto it = m.find(entityIndex(e));
+    if (it == m.end() || it->second.first != e) return 0;
+    for (const std::string& g : it->second.second)
+        if (auto* v = liveMembers(g.c_str())) v->erase(std::remove(v->begin(), v->end(), e), v->end());
+    m.erase(it);
+    return 1;
+}
+
 // Prefab nodes whose class was not declared yet when they were made: adopted when it seals.
 static std::vector<std::pair<Entity, std::string>>& pendingAdopts() {
     static std::vector<std::pair<Entity, std::string>> v;
@@ -750,6 +837,7 @@ static int32_t destroyActor(int32_t e, int32_t endReason, bool dispatchEndPlay) 
     controllerByPawn().erase(ent);
     forgetClass(ent);
     aver_fw_props_clear(e);
+    aver_fw_groups_leave_all(e);
     const int32_t destroyed = world().destroy(ent) ? 1 : 0;
     inFlight.erase(ent);
     return destroyed;

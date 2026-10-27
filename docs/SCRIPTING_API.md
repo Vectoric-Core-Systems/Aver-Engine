@@ -174,6 +174,15 @@ while running), `WhenPaused` (only while paused, for a pause menu's logic), `Alw
 paused game runs both passes for the actors allowed to tick, on the same fixed cadence, but does not
 step physics.
 
+Named groups (Godot's groups): `AddToGroup`, `RemoveFromGroup` and `IsInGroup` on an actor, or `Groups.Add`,
+`Remove`, `Has`, `Members(name)` (in scene-tree order), `Of(entity)` and `Groups.Call<T>(name, action)` for any
+entity. Names are case-sensitive; a destroyed entity leaves every group. A level keeps a placement's groups as
+`COMPONENT Groups names=a,b`.
+
+Random numbers: `AverRandom` is the shared generator (Godot's global `randf`/`randi_range`/`seed`/`randomize`),
+and `new RandomNumberGenerator(seed)` makes an independent one with `Randi`, `Randf`, `RandiRange`, `RandfRange`,
+`Randfn`, `Seed` and `State`. Both are PCG32; a seed or a saved state replays the same sequence.
+
 Godot's `call_deferred`, `queue_free` and `await`: `Deferred.Call(action)` runs at the end of the current
 tick pass (safe from any thread); `QueueDestroy()` destroys the actor at the end of the frame, after
 every tick and deferred call. The game thread has a `SynchronizationContext`, so an `await` started

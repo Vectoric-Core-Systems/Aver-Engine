@@ -770,6 +770,7 @@ scene::Entity SandboxApp::spawnClassSlot(usize slot, const Transform* worldXf) {
     // Its [Editable] values. classAuthored_ holds the authored ones (the details panel edits it too), so a
     // respawn after undo or Stop gets them back.
     game::applyPlacementProps(e, p);
+    game::applyPlacementGroups(e, p);
     if (prior) { prior->entity = e; prior->removed = false; }
     else levelClassInstances_.push_back(ClassInstance{slot, e});
     return static_cast<scene::Entity>(e);

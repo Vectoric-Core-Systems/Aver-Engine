@@ -777,7 +777,10 @@ bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
     for (const ClassInstance& ci : levelClassInstances_)
         if (!ci.removed && ci.entity != 0 && ci.placement < classAuthored_.size() &&
             world.valid(static_cast<scene::Entity>(ci.entity)))
+        {
             game::capturePlacementProps(ci.entity, classAuthored_[ci.placement]);
+            game::capturePlacementGroups(ci.entity, classAuthored_[ci.placement]);
+        }
     // A live actor's parent is the editor's hierarchy now; one with no entity keeps its file parent, re-indexed.
     const auto slotOfEntity = [&](scene::Entity e) -> i32 {
         const auto it = e == scene::kInvalidEntity ? slotOf.end() : slotOf.find(static_cast<u32>(e));

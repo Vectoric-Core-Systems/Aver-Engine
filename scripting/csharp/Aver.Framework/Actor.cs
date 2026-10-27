@@ -8,7 +8,7 @@ using Aver.Scene;
 namespace Aver.Framework;
 
 /// <summary>The root gameplay type: something in the world with a transform and a lifecycle.</summary>
-public abstract class AverActor
+public abstract partial class AverActor
 {
     /// <summary>This actor's entity. Set by the host at bind; a script reads it, never assigns it.</summary>
     public Entity Self { get; internal set; }

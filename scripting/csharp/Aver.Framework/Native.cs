@@ -28,6 +28,13 @@ internal static class Fw
     [DllImport(Lib)] internal static extern int aver_fw_props_count(int entity);
     [DllImport(Lib)] internal static extern IntPtr aver_fw_props_name(int entity, int index);
     [DllImport(Lib)] internal static extern IntPtr aver_fw_props_value(int entity, int index);
+    [DllImport(Lib)] internal static extern int aver_fw_group_add(int entity, [MarshalAs(UnmanagedType.LPUTF8Str)] string group);
+    [DllImport(Lib)] internal static extern int aver_fw_group_remove(int entity, [MarshalAs(UnmanagedType.LPUTF8Str)] string group);
+    [DllImport(Lib)] internal static extern int aver_fw_group_has(int entity, [MarshalAs(UnmanagedType.LPUTF8Str)] string group);
+    [DllImport(Lib)] internal static extern int aver_fw_group_count([MarshalAs(UnmanagedType.LPUTF8Str)] string group);
+    [DllImport(Lib)] internal static extern int aver_fw_group_member([MarshalAs(UnmanagedType.LPUTF8Str)] string group, int index);
+    [DllImport(Lib)] internal static extern int aver_fw_groups_of_count(int entity);
+    [DllImport(Lib)] internal static extern IntPtr aver_fw_groups_of(int entity, int index);
     [DllImport(Lib)] internal static extern int aver_fw_class_seal(int c);
 
     // Class defaults, addressed by the same dense field id the scene resolves. One setter per storable kind.

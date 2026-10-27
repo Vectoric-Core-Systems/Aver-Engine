@@ -668,6 +668,7 @@ void GameLevel::spawnClassPlacements() {
         if (parent != scene::kInvalidEntity) world.setParent(static_cast<scene::Entity>(e), parent, false);
         placementTree_.setEntity(index, static_cast<scene::Entity>(e));
         applyPlacementProps(e, p);   // before the batch ends, so OnBeginPlay sees them
+        applyPlacementGroups(e, p);
         levelClassInstances_.push_back(e);
     }
     placementTree_.attachUnderClassPlacements(world);

@@ -34,6 +34,10 @@
 #  include "aver/hair/HairSystem.hpp"
 #endif
 
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/game/PlacementProps.hpp"   // Groups and Props: records the framework keeps, not scene components
+#endif
+
 #include <algorithm>
 #include <charconv>
 #include <cstddef>
@@ -861,6 +865,13 @@ bool applyHair(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r
 }
 #endif
 bool applyOne(scene::World& w, scene::Entity e, const fmt::OcPlacedComponent& r, const fmt::OcWorldPlacement* placement, std::string& why) {
+#if AVER_MODULE_FRAMEWORK
+    if (isGroupsComponent(r.type)) {
+        if (!w.valid(e)) { why = "no entity"; return false; }
+        applyGroupsRecord(static_cast<int32_t>(e), r);
+        return true;
+    }
+#endif
     const int ix = typeIndex(r.type);
     if (ix == kUnknownType) { why = "unknown type"; return false; }
 #if !AVER_MODULE_SYNAPSE_SCENE
@@ -1254,6 +1265,10 @@ std::vector<fmt::OcPlacedComponent> capturePlacedComponents(scene::World& w, sce
     std::vector<fmt::OcPlacedComponent> out;
     for (int ix = 0; ix < kTypeCount; ++ix)
         if (auto rec = captureOne(w, e, ix, pathOf)) out.push_back(std::move(*rec));
+#if AVER_MODULE_FRAMEWORK
+    fmt::OcPlacedComponent groups;
+    if (w.valid(e) && captureGroupsRecord(static_cast<int32_t>(e), groups)) out.push_back(std::move(groups));
+#endif
     return out;
 }
 
@@ -1280,8 +1295,16 @@ void applyLevelComponents(scene::World& w, const fmt::OcWorldData& level, const 
     // A class placement has no placement entity (LevelInstance.cpp), so its records can be kept in the file but never applied.
     for (usize i = 0; i < level.placements.size(); ++i) {
         const fmt::OcWorldPlacement& p = level.placements[i];
-        if (!p.className.empty() && !p.components.empty())
-            AVER_WARN("[Level] placement {} is a graph class: its {} COMPONENT record(s) are not applied", i, p.components.size());
+        if (p.className.empty()) continue;
+        // Props and Groups are applied by the host as it spawns the actor; anything else is not.
+        usize unused = 0;
+#if AVER_MODULE_FRAMEWORK
+        for (const fmt::OcPlacedComponent& c : p.components) unused += !isPropsComponent(c.type) && !isGroupsComponent(c.type);
+#else
+        unused = p.components.size();
+#endif
+        if (unused > 0)
+            AVER_WARN("[Level] placement {} is a class placement: {} of its COMPONENT records are not applied", i, unused);
     }
     if (t.suppressed) AVER_WARN("[Level] {} more COMPONENT record(s) refused (not listed)", t.suppressed);
     if (t.applied > 0) AVER_INFO("[Level] {} placed component(s) on {} placement(s)", t.applied, touched);

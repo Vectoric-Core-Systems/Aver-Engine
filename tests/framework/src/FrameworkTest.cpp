@@ -800,6 +800,26 @@ static void testAdopt() {
     check(aver_fw_clear_managed_dispatch() == 1, "the stand-in clears");
 }
 
+// Checks named groups: join order, case-sensitive names, leaving, and a destroyed member leaving every group.
+static void testGroups() {
+    AVER_INFO("=== groups: named groups of any entity ===");
+    const int32_t a = aver_scene_create();
+    const int32_t b = aver_scene_create();
+    check(aver_fw_group_add(a, "enemies") == 1 && aver_fw_group_add(b, "enemies") == 1, "two entities join 'enemies'");
+    check(aver_fw_group_add(a, "enemies") == 0, "joining twice is refused");
+    check(aver_fw_group_add(a, "Enemies") == 1, "names are case-sensitive: 'Enemies' is another group");
+    check(aver_fw_group_count("enemies") == 2 && aver_fw_group_member("enemies", 0) == a &&
+          aver_fw_group_member("enemies", 1) == b, "members in join order");
+    check(aver_fw_group_has(b, "enemies") == 1 && aver_fw_group_has(b, "Enemies") == 0, "has answers per name");
+    check(aver_fw_groups_of_count(a) == 2 && std::string(aver_fw_groups_of(a, 1)) == "Enemies", "a's groups, in join order");
+    check(aver_fw_group_remove(b, "enemies") == 1 && aver_fw_group_count("enemies") == 1, "b leaves");
+    check(aver_fw_destroy(a) == 1, "a is destroyed");
+    check(aver_fw_group_count("enemies") == 0 && aver_fw_group_count("Enemies") == 0, "and leaves every group");
+    check(aver_fw_group_count("nobody") == 0 && aver_fw_group_member("nobody", 0) == 0, "an unknown group is empty");
+    aver_fw_destroy(b);
+    World::instance().flush();
+}
+
 // Checks that a possession hook re-entering possess is refused rather than recursed to a crash.
 static void testPossessReentrancy() {
     AVER_INFO("=== a possession hook re-entering possession is refused, not recursed to a crash ===");
@@ -1949,6 +1969,7 @@ int main() {
     testTreeOrder();
     testSpawnBatchReadyOrder();
     testAdopt();
+    testGroups();
     testPossessReentrancy();
     testPlayLifecycle();
     testInput();

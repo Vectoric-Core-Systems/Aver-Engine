@@ -66,8 +66,9 @@ extern "C" {
  * 12: AVER_FW_PUMP_FRAME, the tick_all value for the per-frame pumps that also run while paused. */
 /* 2.1: aver_fw_spawn_batch_begin / aver_fw_spawn_batch_end (Godot's _ready order for a batch of spawns).
  * 2.2: aver_fw_adopt (an existing entity -- a prefab node -- becomes an actor).
- * 2.3: aver_fw_props_* (per-instance [Editable] values, a level's COMPONENT Props record). */
-#define AVER_FW_ABI_VERSION_MINOR 3
+ * 2.3: aver_fw_props_* (per-instance [Editable] values, a level's COMPONENT Props record).
+ * 2.4: aver_fw_group_* (named groups, Godot's add_to_group; a level's COMPONENT Groups record). */
+#define AVER_FW_ABI_VERSION_MINOR 4
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -147,6 +148,18 @@ AVER_FW_ABI int32_t     aver_fw_props_count(int32_t entity);
 AVER_FW_ABI const char* aver_fw_props_name(int32_t entity, int32_t index);    /* "" when out of range */
 AVER_FW_ABI const char* aver_fw_props_value(int32_t entity, int32_t index);   /* "" when out of range */
 AVER_FW_ABI int32_t     aver_fw_props_clear(int32_t entity);
+
+/* Named groups (Godot's add_to_group): any entity, actor or not, in any number of groups, by case-sensitive
+ * name. Members are kept in the order they joined; a destroyed entity leaves every group. Strings returned stay
+ * valid until that group or entity's membership changes. (2.4) */
+AVER_FW_ABI int32_t     aver_fw_group_add(int32_t entity, const char* group);      /* 1 if added, 0 if already in or bad */
+AVER_FW_ABI int32_t     aver_fw_group_remove(int32_t entity, const char* group);   /* 1 if it was in */
+AVER_FW_ABI int32_t     aver_fw_group_has(int32_t entity, const char* group);
+AVER_FW_ABI int32_t     aver_fw_group_count(const char* group);                    /* live members */
+AVER_FW_ABI int32_t     aver_fw_group_member(const char* group, int32_t index);    /* 0 when out of range */
+AVER_FW_ABI int32_t     aver_fw_groups_of_count(int32_t entity);
+AVER_FW_ABI const char* aver_fw_groups_of(int32_t entity, int32_t index);          /* "" when out of range */
+AVER_FW_ABI int32_t     aver_fw_groups_leave_all(int32_t entity);
 
 /* Declares a class. Idempotent by name: the same name returns the same handle for the life of the
  * process, and a redeclare rewrites the row's components and defaults in place. */

@@ -57,7 +57,10 @@ Owner decisions so far:
 | Signal flags (ONE_SHOT/DEFERRED, auto-disconnect on free) | open (with the signal layer) |
 | Prefab actor bind (moved from G0) | DONE: `aver_fw_adopt` / `aver_fw_adopt_by_name` (framework ABI 2.2), both hosts' prefab hooks; a pending class adopts on seal; `aver_fw_destroy` (and `Entity.Destroy`) ends every actor below a plain entity. FrameworkTest `testAdopt`. |
 | `[Editable]` per-instance values (moved from G0) | DONE: framework per-entity props store (`aver_fw_props_*`, ABI 2.3) filled from a placement's `COMPONENT Props` record (both hosts), written into fields before OnBeginPlay (`Editables.cs`), edited in the details panel (bridge `EditableList/EditableSet`), saved back by the editor. PlacementPropsTest, EditablesTests. |
-| Variant, PCG32 RNG, groups, level travel, files/resources, input chain, platform services | open |
+| PCG32 RNG | DONE: `RandomNumberGenerator` (own implementation from the published algorithm; matches pcg32's reference output), `AverRandom` on it. Exact match with Godot's own seeding is unverified (needs Godot's source, owner decision). RandomTests. |
+| Named groups | DONE: `aver_fw_group_*` (ABI 2.4), `Groups` / `AverActor.AddToGroup`, level `COMPONENT Groups names=...` on any placement. FrameworkTest `testGroups`, PlacementPropsTest. |
+| Variant | moves to the Aver.Fabric runtime (F2): it is a converted-script type, not an engine one |
+| Level travel, files/resources, input chain, platform services | open |
 
 ## Gap list, sized S/M/L, and where each fix goes
 **E** = Aver engine change (benefits every Aver game). **F** = `Aver.Fabric` runtime only. **C** = converter only.

@@ -59,6 +59,21 @@ int main() {
     game::capturePlacementProps(bare, none);
     check(none.components.empty(), "an entity with no values writes no Props record");
 
+    AVER_INFO("--- Groups: a record into the store and back ---");
+    fmt::OcWorldPlacement grouped;
+    fmt::OcPlacedComponent rec;
+    rec.type = "Groups";
+    rec.kv.emplace_back("names", "Enemies,flying");
+    grouped.components.push_back(rec);
+    const int32_t g = aver_scene_create();
+    check(game::applyPlacementGroups(g, grouped) == 2, "the entity joins both groups");
+    check(aver_fw_group_has(g, "Enemies") == 1 && aver_fw_group_has(g, "flying") == 1, "with the case kept");
+    fmt::OcWorldPlacement out;
+    game::capturePlacementGroups(g, out);
+    check(out.components.size() == 1 && out.components[0].kv.size() == 1 && out.components[0].kv[0].second == "Enemies,flying",
+          "capture writes the same record back");
+    aver_fw_destroy(g);
+
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

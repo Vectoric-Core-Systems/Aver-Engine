@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-209 public types and 1794 public members, read from `scripting/csharp/Aver.Framework/` (131 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+211 public types and 1817 public members, read from `scripting/csharp/Aver.Framework/` (133 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -333,6 +333,9 @@ Values: `None = 0`, `Started = 1`, `Ongoing = 2`, `Triggered = 4`, `Completed = 
 - `public virtual void OnEndPlay(EndReason reason)` - Runs once when this actor stops playing.
 - `public virtual void OnRebound()` - Runs after a hot reload has rebound this instance and restored its native state.
 - `public virtual bool OnEvent(string name)` - Runs when a named event is raised at this actor's entity.
+- `public bool AddToGroup(string group)` - Puts this actor in a named group (Godot's add_to_group).
+- `public bool RemoveFromGroup(string group)` - Takes this actor out of a named group.
+- `public bool IsInGroup(string group)` - Whether this actor is in a named group.
 
 ### AverCharacter
 
@@ -467,9 +470,11 @@ Values: `None = 0`, `Started = 1`, `Ongoing = 2`, `Triggered = 4`, `Completed = 
 
 ### AverRandom
 
-`public static class AverRandom` - One process-wide pseudo-random generator for gameplay, reseedable so a sequence can repeat.
+`public static class AverRandom` - One process-wide pseudo-random generator for gameplay, reseedable so a sequence can repeat (Godot's global randi/randf/seed).
 
+- `public static RandomNumberGenerator Generator { get; }` - The shared generator itself, for its state or the methods not mirrored here.
 - `public static void Seed(int seed)` - Restarts the generator from seed; the same seed repeats the same sequence.
+- `public static void Randomize()` - Reseeds from the clock (Godot's randomize()).
 - `public static float NextFloat()` - A float in [0, 1).
 - `public static float NextFloat(float min, float max)` - A float in [min, max).
 - `public static int NextInt(int min, int max)` - An integer in [min, max] with BOTH ends reachable.
@@ -1624,6 +1629,17 @@ Values: `DPadUp = 0`, `DPadDown`, `DPadLeft`, `DPadRight`, `Start`, `Back`, `Lef
 
 `public readonly record struct GroundSample(bool Found, float Z, Vec3 Normal, int DominantLayer, string Surface, int SurfaceId, float Friction, float Restitution)` - What the landscape is at one point: height, slope, the dominant paint layer and its physical surface.
 
+### Groups
+
+`public static class Groups` - Named groups of entities, actor or not, by case-sensitive name.
+
+- `public static bool Add(Entity e, string group)` - Puts the entity in the group.
+- `public static bool Remove(Entity e, string group)` - Takes the entity out of the group.
+- `public static bool Has(Entity e, string group)` - Whether the entity is in the group.
+- `public static Entity[] Members(string group)` - The group's members in scene-tree order (a parent before its children, siblings in the order added).
+- `public static string[] Of(Entity e)` - The groups the entity is in, in the order it joined them.
+- `public static int Call<T>(string group, Action<T> action) where T : AverActor` - Calls action on every actor of type T in the group, in tree order (Godot's call_group).
+
 ### Hair
 
 `public static class Hair` - Hair at world level.
@@ -2078,6 +2094,23 @@ Values: `Editor = 0`, `Playing = 1`, `Paused = 2`
 `public enum RagdollMode` - How a ragdoll relates to the animation.
 
 Values: `Kinematic = 0`, `Limp = 1`, `Powered = 2`
+
+### RandomNumberGenerator
+
+`public sealed class RandomNumberGenerator` - A seedable PCG32 generator with Godot's RandomNumberGenerator methods.
+
+- `public const ulong DefaultStream = 1442695040888963407UL` - The stream every generator uses unless told otherwise (PCG's default increment).
+- `public RandomNumberGenerator()` - A generator seeded from the clock and a counter, so two made at once differ.
+- `public RandomNumberGenerator(ulong seed, ulong stream = DefaultStream)` - A generator seeded with seed.
+- `public ulong Seed { get; set; }` - The seed last set; setting it restarts the sequence.
+- `public ulong State { get; set; }` - The generator's position: save it and set it back to replay from there.
+- `public void Randomize()` - Reseeds from the clock and a process counter.
+- `public uint Randi()` - A uniform 32-bit value (pcg32: XSH-RR of the old state).
+- `public uint Randi(uint bound)` - A uniform value in [0, bound), unbiased (pcg32_boundedrand).
+- `public float Randf()` - A float in [0, 1), from the top 24 bits so every value is exact.
+- `public float RandfRange(float from, float to)` - A float in [from, to).
+- `public int RandiRange(int from, int to)` - An integer in [from, to], both ends reachable; reversed bounds are swapped.
+- `public float Randfn(float mean = 0f, float deviation = 1f)` - A normally distributed float (Box-Muller) with this mean and deviation.
 
 ### RaycastHit
 
