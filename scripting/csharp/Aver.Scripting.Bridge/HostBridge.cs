@@ -77,6 +77,7 @@ public static class HostBridge
         public required bool Ticks;   // false for a graph class's C# ancestor: its graph ticks instead
         public required string Name;
         public int TickErrors, PhysicsTickErrors;
+        public PauseMode ResolvedPause = PauseMode.Pausable;
         public bool Disabled;
     }
 
@@ -1641,6 +1642,7 @@ public static class HostBridge
 
         RefreshTickOrder();
         bool physics = group == TickPhysics;
+        bool paused = Game.IsPaused;
         // The order array is replaced, never mutated, so a bind or unbind inside a callback leaves this
         // walk alone: a destroyed actor is skipped below, a spawned one ticks from the next pass.
         ActorLive[] order = physics ? s_physicsOrder : s_processOrder;
@@ -1651,6 +1653,7 @@ public static class HostBridge
                 continue;
             AverActor a = live.Instance;
             if (physics ? !a.PhysicsTickEnabled : !a.TickEnabled) continue;
+            if (!PauseRules.Ticks(live.ResolvedPause, paused)) continue;
             try
             {
                 if (physics) a.OnPhysicsTick(dt);
@@ -1691,6 +1694,15 @@ public static class HostBridge
         }
         s_processOrder = SortedByTree(entities, process);
         s_physicsOrder = SortedByTree(entities, phys);
+        foreach (ActorLive a in s_tickActors) a.ResolvedPause = PauseRules.Resolve(PauseChain(a));
+    }
+
+    // The PauseMode of the actor and of every actor above it, nearest first; plain entities are skipped.
+    private static IEnumerable<PauseMode> PauseChain(ActorLive a)
+    {
+        yield return a.Instance.PauseMode;
+        for (Entity e = a.Instance.Self.Parent; e.Handle != 0; e = e.Parent)
+            if (s_actorsByEntity.TryGetValue(e.Handle, out ActorLive? up)) yield return up.Instance.PauseMode;
     }
 
     private static ActorLive[] SortedByTree(int[] entities, int[] priorities)

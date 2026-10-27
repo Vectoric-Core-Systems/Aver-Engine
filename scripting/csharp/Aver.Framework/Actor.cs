@@ -45,7 +45,16 @@ public abstract class AverActor
         set { if (_physicsTickPriority != value) { _physicsTickPriority = value; TickOrderChanged?.Invoke(); } }
     }
 
+    /// <summary>Whether this actor ticks while the game is paused; <see cref="Aver.Framework.PauseMode.Inherit"/> by default,
+    /// which takes the nearest actor above it in the scene tree. A paused game does not step physics.</summary>
+    public PauseMode PauseMode
+    {
+        get => _pauseMode;
+        set { if (_pauseMode != value) { _pauseMode = value; TickOrderChanged?.Invoke(); } }
+    }
+
     private int _tickPriority, _physicsTickPriority;
+    private PauseMode _pauseMode;
 
     // Set by the scripting bridge: a priority changed, so its walk order is stale.
     internal static Action? TickOrderChanged;

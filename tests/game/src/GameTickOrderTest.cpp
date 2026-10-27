@@ -104,6 +104,22 @@ int main() {
     check(after[2] == held[2] && held[2] < before[2], "but the world holds still");
     aver_fw_timers_set_dilation(1.0f);
 
+    AVER_INFO("=== a paused frame: the pumps and both passes on the fixed clock, no step ===");
+    float pausedAt[3] = {0, 0, 0};
+    aver_phys_body_position(g_body, pausedAt);
+    g_calls.clear();
+    game::tickPausedFrame(step * 2.5f);
+    check(count(AVER_FW_PUMP_FRAME) == 1 && count(AVER_FW_PUMP_PLAY) == 0,
+          "the frame pump runs while paused, the gameplay pump does not");
+    check(count(AVER_FW_TICK_PHYSICS) == 2 && count(AVER_FW_TICK_PROCESS) == 1,
+          "two PHYSICS passes for 2.5 steps of time and one PROCESS pass, for actors that tick while paused");
+    float pausedAfter[3] = {0, 0, 0};
+    aver_phys_body_position(g_body, pausedAfter);
+    check(pausedAfter[2] == pausedAt[2], "physics does not step while paused");
+    check(game::physicsTickCarry() > 0.0f, "the paused frame carries its leftover half step");
+    game::tickGameplayGroups(step * 0.25f);
+    check(game::physicsTickCarry() == 0.0f, "back in play the world's own accumulator takes over and the paused carry is dropped");
+
     AVER_INFO("=== without a physics world: the same cadence from the frame's own clock ===");
     aver_phys_shutdown();
     g_body = 0;

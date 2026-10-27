@@ -100,22 +100,38 @@ inline void applyProjectAudioMix(const fmt::ProjectDesc& project) {
 #endif
 
 #if AVER_MODULE_FRAMEWORK
-// A paused play frame: IGNORE_PAUSE timers, posted events and the per-frame pumps, so a pause
-// menu's handlers still run. No tick pass, no physics step, no action update.
-inline void tickPausedFrame(f32 dt) {
-    aver_fw_timers_update(dt);
-    aver_fw_events_flush();
-    aver_fw_tick(AVER_FW_PUMP_FRAME, dt);
-}
-
 // Game time per real time (Godot's Engine.time_scale): the timer service's dilation, the one setting.
 inline f32 gameTimeScale() { return aver_fw_timers_dilation(); }
 
 // The physics tick pass, run by aver_phys_step at the start of each fixed step.
 inline void physicsTickHook(float fixedStep, void*) { aver_fw_tick(AVER_FW_TICK_PHYSICS, fixedStep); }
 
-// Physics-pass time carried between frames when no physics world steps (a build or a level without one).
+// Physics-pass time carried between frames when no physics world steps (no world, or a paused game).
 inline f32& physicsTickCarry() { static f32 carry = 0.0f; return carry; }
+
+// Runs the PHYSICS pass on the fixed cadence from the frame's own clock, stepping nothing: the same
+// step and catch-up clamp as the physics world.
+inline void physicsTicksOnClock(f32 dt, f32 scale) {
+    f32 step = 1.0f / 60.0f;
+#if AVER_MODULE_PHYSICS
+    step = aver_phys_fixed_step();
+#endif
+    f32& carry = physicsTickCarry();
+    carry += dt > 0.0f ? (dt < step * 8.0f ? dt : step * 8.0f) : 0.0f;
+    while (carry >= step) { carry -= step; aver_fw_tick(AVER_FW_TICK_PHYSICS, step * scale); }
+}
+
+// A paused play frame: IGNORE_PAUSE timers, posted events, the per-frame pumps, and both tick passes
+// for the actors whose PauseMode lets them run while paused (the bridge filters). Physics does not
+// step and input actions do not update.
+inline void tickPausedFrame(f32 dt) {
+    const f32 scale = gameTimeScale();
+    aver_fw_timers_update(dt);
+    aver_fw_events_flush();
+    aver_fw_tick(AVER_FW_PUMP_FRAME, dt);
+    physicsTicksOnClock(dt, scale);
+    aver_fw_tick(AVER_FW_TICK_PROCESS, dt * scale);
+}
 
 // One gameplay frame in Godot's order: input, timers and events, the frame pumps, then for each fixed
 // physics step the PHYSICS pass (OnPhysicsTick) followed by the step, then the PROCESS pass (OnTick).
@@ -141,11 +157,7 @@ inline i32 tickGameplayGroups(f32 dt) {
     } else
 #endif
     {
-        // The same fixed cadence and catch-up clamp as the physics world, with nothing to step.
-        constexpr f32 kStep = 1.0f / 60.0f;
-        f32& carry = physicsTickCarry();
-        carry += dt > 0.0f ? (dt < kStep * 8.0f ? dt : kStep * 8.0f) : 0.0f;
-        while (carry >= kStep) { carry -= kStep; aver_fw_tick(AVER_FW_TICK_PHYSICS, kStep * scale); }
+        physicsTicksOnClock(dt, scale);
     }
     aver_fw_tick(AVER_FW_TICK_PROCESS, dt * scale);
 #if AVER_MODULE_SCENE

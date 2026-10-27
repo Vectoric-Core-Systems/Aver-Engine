@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-206 public types and 1783 public members, read from `scripting/csharp/Aver.Framework/` (128 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+207 public types and 1789 public members, read from `scripting/csharp/Aver.Framework/` (129 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -328,6 +328,7 @@ Values: `None = 0`, `Started = 1`, `Ongoing = 2`, `Triggered = 4`, `Completed = 
 - `public bool PhysicsTickEnabled { get; set; }` - Whether OnPhysicsTick runs.
 - `public int TickPriority { get; set; }` - Order among actors in the OnTick pass: lower runs first, equal priorities in scene-tree order (a parent before its children, siblings in the order they were added).
 - `public int PhysicsTickPriority { get; set; }` - Order among actors in the OnPhysicsTick pass, as TickPriority.
+- `public PauseMode PauseMode { get; set; }` - Whether this actor ticks while the game is paused; Inherit by default, which takes the nearest actor above it in the scene tree.
 - `public virtual void OnEndPlay(EndReason reason)` - Runs once when this actor stops playing.
 - `public virtual void OnRebound()` - Runs after a hot reload has rebound this instance and restored its native state.
 - `public virtual bool OnEvent(string name)` - Runs when a named event is raised at this actor's entity.
@@ -1996,6 +1997,12 @@ Values: `Float = 0`, `Vector = 1`, `Color = 2`
 ### ParticleStats
 
 `public readonly record struct ParticleStats(int GpuEmitters, int CpuEmitters, int GpuParticles, int CpuParticles, int SpawnAtDropped, int GpuAllocatedKB)` - The particle system's counters, as TryGetStats returns them.
+
+### PauseMode
+
+`public enum PauseMode` - Whether an actor ticks while the game is paused (Godot's process_mode).
+
+Values: `Inherit = 0`, `Pausable = 1`, `WhenPaused = 2`, `Always = 3`, `Disabled = 4`
 
 ### PhysicalSurfaces
 

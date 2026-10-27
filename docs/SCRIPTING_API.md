@@ -167,6 +167,12 @@ Override these on your `AverActor` subclass. All are optional; the defaults do n
 `TickEnabled` and `PhysicsTickEnabled` turn either tick off or back on at runtime; `TickPriority` and
 `PhysicsTickPriority` order actors within a pass (lower first). A tick that throws aborts only that call:
 the error is logged and the actor keeps ticking.
+
+`PauseMode` decides whether an actor ticks while the game is paused (Godot's `process_mode`): `Inherit`
+(the default: the nearest actor above it in the scene tree, `Pausable` at the top), `Pausable` (only
+while running), `WhenPaused` (only while paused, for a pause menu's logic), `Always`, or `Disabled`. A
+paused game runs both passes for the actors allowed to tick, on the same fixed cadence, but does not
+step physics.
 | `void OnEndPlay(EndReason reason)` | Once when the actor stops playing. `Stop` = the world stopped; `Destroy` = it was destroyed; `Reload` = the entity stays, only the managed half is rebuilt. |
 | `void OnRebound()` | **DECLARED BUT NEVER CALLED.** The hook exists in `framework_hooks.h` and nothing in the engine invokes it; the bridge's own comment records the rebind path as out of scope. Do not put logic here expecting it to run. |
 | `bool OnEvent(string name)` | A named event was raised **at this entity**. Two things raise one: an **animation notify** (a marker crossed on a playing clip) and a graph's `FireEvent` node aimed here. Return `true` if you handled it -- the value is what the caller reads as its own success. |

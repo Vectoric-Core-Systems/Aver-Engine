@@ -39,6 +39,21 @@ internal enum TickPass
     Process = 1,
 }
 
+/// <summary>Whether an actor ticks while the game is paused (Godot's <c>process_mode</c>).</summary>
+public enum PauseMode
+{
+    /// <summary>Whatever the nearest actor above it in the scene tree uses; Pausable at the top.</summary>
+    Inherit = 0,
+    /// <summary>Ticks only while the game runs.</summary>
+    Pausable = 1,
+    /// <summary>Ticks only while the game is paused: a pause menu's logic.</summary>
+    WhenPaused = 2,
+    /// <summary>Ticks whether or not the game is paused.</summary>
+    Always = 3,
+    /// <summary>Never ticks.</summary>
+    Disabled = 4,
+}
+
 /// <summary>The world's play state, as read from <c>aver_fw_play_state</c>.</summary>
 public enum PlayState
 {
