@@ -604,17 +604,18 @@ void GameApp::tickGameplay(f32 dt) {
 
 #if AVER_MODULE_PHYSICS
 #if AVER_MODULE_SCENE
-    // Vehicle logic: input -> step -> output. LOD based on camera distance.
-    vehicles_.prePhysics(dt, camPos_);
+    // Vehicle logic: input -> step -> output. LOD based on camera distance. In game time.
+    const f32 gameDt = dt * game::gameTimeScale();
+    vehicles_.prePhysics(gameDt, camPos_);
 
-    game::tickVehiclesPre(dt, camPos_);
+    game::tickVehiclesPre(gameDt, camPos_);
 #endif
-    // Sum step count; a frame can run 0-8 fixed steps
+    // Sum step count; a frame can run 0-8 fixed steps. Real time: the time scale is applied inside.
     physSteps_ += static_cast<u64>(game::tickGameplayGroups(dt));
 #if AVER_MODULE_SCENE
     vehicles_.postPhysics(scene::World::instance());
 
-    game::tickVehiclesPost(dt, playMobility_);
+    game::tickVehiclesPost(gameDt, playMobility_);
 #endif
 #else
     game::tickGameplayGroups(dt);
@@ -2248,13 +2249,20 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     objectsHeld = aver_fw_play_state() == AVER_FW_PLAY_PAUSED;
 #endif
 #endif
+    // Game time: the frame scaled by the time scale. tickGameplay takes real time (physics keeps a real-time
+    // cadence and scales each step); the gameplay systems after it advance in game time.
+#if AVER_MODULE_FRAMEWORK
+    const f32 gameDt = t.dt * game::gameTimeScale();
+#else
+    const f32 gameDt = t.dt;
+#endif
     tickGameplay(t.dt);
 #if AVER_MODULE_FLUIDS
     // After physics step: spawns, reads solver particles, pushes player into pool. Not gated on Play.
-    if (rhi::IDevice* dev = e.device()) water_.update(*dev, t.dt);
+    if (rhi::IDevice* dev = e.device()) water_.update(*dev, gameDt);
 #endif
     // Beside tickGameplay, not gated on PLAYING.
-    tickProjectGraphs(t.dt);
+    tickProjectGraphs(gameDt);
 #if AVER_MODULE_SCRIPTING
     // Graph-as-class instances: gated on PLAY. Graph class declares like C# one and finds GAME_MODE bit.
     // Project with no GameMode never calls aver_fw_begin_play; gating on PLAYING alone would freeze class-placed graphs.
@@ -2262,7 +2270,7 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 #if AVER_MODULE_FRAMEWORK
     if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING || !gameModeDeclared_) {
 #endif
-    scripts_.tickGraphClassInstances(t.dt);
+    scripts_.tickGraphClassInstances(gameDt);
 #if AVER_MODULE_FRAMEWORK
     }
 #endif
@@ -2274,26 +2282,26 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // [wave5/sequencer] Level sequences, Pre phase: the clock (not while paused), then property, visibility, animation,
     // event, audio and sub-sequence tracks, so driven poses land in the animation tick below.
     if (!sequenceDirector_.empty()) {
-        if (!objectsHeld) sequenceDirector_.advance(t.dt);
+        if (!objectsHeld) sequenceDirector_.advance(gameDt);
         sequenceDirector_.evaluate(scene::World::instance(), game::SeqPhase::Pre);
     }
-    game::tickAnimGraphs(t.dt);   // state machines write the pose the clip sampler would
+    game::tickAnimGraphs(gameDt);   // state machines write the pose the clip sampler would
 #if AVER_MODULE_RAGDOLL
-    ragdoll::ragdollSystem().tick(t.dt);   // after the physics step, before the pose it writes into
+    ragdoll::ragdollSystem().tick(gameDt);   // after the physics step, before the pose it writes into
 #endif
-    anim::animSystem().tick(scene::World::instance(), t.dt);
+    anim::animSystem().tick(scene::World::instance(), gameDt);
 #if AVER_MODULE_SOFTBODY_SCENE
-    game::tickSoftBodies(t.dt, camPos_);   // after the pose it reads, before softBodyScene_->update copies the result
+    game::tickSoftBodies(gameDt, camPos_);   // after the pose it reads, before softBodyScene_->update copies the result
 #endif
     // Level sequences: Post phase (transform, material, camera); advanced and Pre-evaluated before the animation tick.
     // [wave5/sequencer]
     if (!sequenceDirector_.empty()) sequenceDirector_.evaluate(scene::World::instance(), game::SeqPhase::Post);
     // Animated placements' kinematic bodies follow poses the tick just wrote.
     if (!objectsHeld)
-        world::driveKinematicBodies(scene::World::instance(), level_.animatedBodies(), t.dt);
+        world::driveKinematicBodies(scene::World::instance(), level_.animatedBodies(), gameDt);
 #if AVER_MODULE_PARTICLES
     // Particle system: same unconditional reasoning.
-    particles::particleSystem().tick(scene::World::instance(), t.dt);
+    particles::particleSystem().tick(scene::World::instance(), gameDt);
 #if AVER_MODULE_FRAMEWORK
     for (scene::Entity fe : particles::particleSystem().finished())
         aver_fw_event_post("Particles.EffectFinished", static_cast<int32_t>(fe), static_cast<int32_t>(fe));   // needs framework_timers_abi.h
@@ -2332,7 +2340,7 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 #if AVER_MODULE_FRAMEWORK
     if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
 #endif
-    game::tickAi(t.dt, &gameNav_);
+    game::tickAi(gameDt, &gameNav_);
 #if AVER_MODULE_FRAMEWORK
     }
 #endif

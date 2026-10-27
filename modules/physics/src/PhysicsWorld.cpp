@@ -386,6 +386,13 @@ void aver_phys_set_gravity(float x, float y, float z) {
     if (g_world) g_world->system.SetGravity(toJoltDir(Vec3(x, y, z)));
 }
 
+void aver_phys_set_time_scale(float scale) {
+    if (!g_world || !(scale >= 0.0f)) return;
+    g_world->timeScale = scale < 100.0f ? scale : 100.0f;
+}
+
+float aver_phys_time_scale(void) { return g_world ? g_world->timeScale : 1.0f; }
+
 // The fixed step in seconds.
 float aver_phys_fixed_step(void) { return g_world ? g_world->fixedStep : 1.0f / 60.0f; }
 
@@ -428,8 +435,10 @@ int32_t aver_phys_step(float dt) {
     int32_t steps = 0;
     while (g_world->accumulator >= g_world->fixedStep) {
         g_world->accumulator -= g_world->fixedStep;
-        if (g_stepHook) g_stepHook(g_world->fixedStep, g_stepHookUser);
+        const float stepDt = g_world->simStep();   // the game time this step simulates
+        if (g_stepHook) g_stepHook(stepDt, g_stepHookUser);
         if (!g_world) break;   // the hook shut physics down
+        if (stepDt <= 0.0f) { ++steps; continue; }   // time scale 0: the tick ran, nothing moves
         AVER_PHYS_SCOPE("FixedStep");   // the root of the profiler tree for this fixed step
         // Characters are integrated before the solver so their swept motion sees this step's world.
         // CharacterVirtual does not integrate gravity itself, so only the vertical component of its
@@ -473,7 +482,7 @@ int32_t aver_phys_step(float dt) {
                 v += up * carryUp;
                 carry -= up * carryUp;
                 // Fall normally.
-                v += gravity * g_world->fixedStep;
+                v += gravity * stepDt;
             }
             ch->SetLinearVelocity(v + carry);
 
@@ -483,7 +492,7 @@ int32_t aver_phys_step(float dt) {
             // detail::applyCharacterStairSettings.
             JPH::CharacterVirtual::ExtendedUpdateSettings us;
             applyCharacterStairSettings(h, us);
-            ch->ExtendedUpdate(g_world->fixedStep,
+            ch->ExtendedUpdate(stepDt,
                                gravity,
                                us,
                                g_world->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
@@ -513,17 +522,17 @@ int32_t aver_phys_step(float dt) {
                 for (const auto& [handle, id] : g_world->bodies) fn(handle, id);
             };
             phys::water::waterVolumes().evaluate(g_world->system, find, each,
-                                                 g_world->system.GetGravity(), g_world->fixedStep);
+                                                 g_world->system.GetGravity(), stepDt);
         }
         // Wind and drag on builder soft bodies, and the velocity cache impacts read: before the solver, like buoyancy.
-        { AVER_PHYS_SCOPE("SoftBodyBegin"); softbody::onStepBegin(g_world->fixedStep); }
+        { AVER_PHYS_SCOPE("SoftBodyBegin"); softbody::onStepBegin(stepDt); }
         // Vehicle driver aids, aero and the manual clutch, from last step's slip: before the solver, like buoyancy.
-        { AVER_PHYS_SCOPE("VehicleStepBegin"); vehicleStepBegin(g_world->fixedStep); }
+        { AVER_PHYS_SCOPE("VehicleStepBegin"); vehicleStepBegin(stepDt); }
         stepWorldOnce();   // system.Update with the collisionSteps setting; keeps the update error and times the step (PhysicsStats.cpp)
         // Vehicle telemetry and events, read back while Jolt's state is this step's.
-        { AVER_PHYS_SCOPE("VehicleStepEnd"); vehicleStepEnd(g_world->fixedStep); }
+        { AVER_PHYS_SCOPE("VehicleStepEnd"); vehicleStepEnd(stepDt); }
         // Soft-body sensor enter and exit events, from the sets the contact listener filled during Update.
-        softbody::onStepEnd(g_world->fixedStep);
+        softbody::onStepEnd(stepDt);
         { AVER_PHYS_SCOPE("JointBreakChecks"); afterStepJoints(); }
         stateAfterFixedStep();   // the hash log: one "step hash" line per fixed step while it is open (physics_state_abi.h)
         ++steps;

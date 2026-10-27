@@ -42,6 +42,12 @@ AVER_PHYS_API int32_t aver_phys_step(float dt);
 typedef void (*aver_phys_step_hook_fn)(float fixedStep, void* user);
 AVER_PHYS_API void    aver_phys_set_step_hook(aver_phys_step_hook_fn fn, void* user);
 
+// Game time per real time, clamped to [0, 100] (1 unless set). Steps keep their real-time cadence and
+// each simulates fixedStep * scale, so 0.25 is smooth slow motion and 0 holds everything still while
+// the step hook still runs (Godot's Engine.time_scale).
+AVER_PHYS_API void    aver_phys_set_time_scale(float scale);
+AVER_PHYS_API float   aver_phys_time_scale(void);
+
 // The fixed step, in seconds (1/60 unless set).
 AVER_PHYS_API float   aver_phys_fixed_step(void);
 // Change the fixed step. Set it before any bodies exist.

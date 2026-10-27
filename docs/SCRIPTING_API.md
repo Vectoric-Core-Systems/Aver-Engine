@@ -336,6 +336,7 @@ editor's job, not a script's; a script can **pause and resume** the one that is 
 | `PlayState State` | `Editor` / `Playing` / `Paused`. |
 | `bool IsPlaying` / `bool IsPaused` / `bool HasSession` | Playing / paused / a session exists (playing OR paused). |
 | `bool SetPaused(bool)` / `bool Pause()` / `bool Resume()` | Freeze or resume the session's tick without tearing it down; false when there is no session. |
+| `float TimeScale` | Game time per real time, [0, 100] (Godot's `Engine.time_scale`). Scales both ticks' `dt`, each physics step, timers, animation, particles, AI and vehicles; physics still steps 60 times a real second, so slow motion stays smooth and 0 holds the world still while ticks run. Same value as `Timers.TimeDilation`; resets to 1 when the session ends. |
 
 **Session singletons** (each `Entity`, with a typed `…As<T>()` counterpart)
 

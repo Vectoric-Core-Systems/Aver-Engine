@@ -7,6 +7,7 @@
 #include "aver/framework/framework_abi.h"
 #include "aver/framework/framework_hooks.h"
 #include "aver/framework/framework_terrain_abi.h"
+#include "aver/framework/framework_timers_abi.h"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
 #include "aver/scene/scene_abi.h"
@@ -783,8 +784,10 @@ static void testPlayLifecycle() {
     check(aver_fw_play_state() == AVER_FW_PLAY_PLAYING, "play state is PLAYING again after resume");
 
     // end_play tears the whole session down, back to EDITOR with every singleton cleared.
+    aver_fw_timers_set_dilation(0.25f);
     check(aver_fw_end_play() == 1, "end_play ends the session");
     check(aver_fw_play_state() == AVER_FW_PLAY_EDITOR, "play state is EDITOR after end_play");
+    check(aver_fw_timers_dilation() == 1.0f, "the session's time scale does not outlive it");
     check(aver_fw_game_instance() == 0, "the GameInstance singleton is cleared");
     check(aver_fw_game_mode() == 0, "the GameMode singleton is cleared");
     check(aver_fw_player_controller(0) == 0, "the controller singleton is cleared");

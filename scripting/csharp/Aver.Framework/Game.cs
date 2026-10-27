@@ -33,6 +33,15 @@ public static class Game
     /// False when no session is playing. The change shows in <see cref="State"/> and <see cref="IsPaused"/>.</summary>
     public static bool SetPaused(bool paused) => PauseNative.aver_fw_set_paused(paused ? 1 : 0) != 0;
 
+    /// <summary>Game time per real time, clamped to [0, 100] (Godot's <c>Engine.time_scale</c>): scales OnTick and OnPhysicsTick's
+    /// dt, each physics step, timers, animation, particles, AI and vehicles. Physics keeps stepping 60 times a real second, so
+    /// 0.25 is smooth slow motion and 0 holds the world still while ticks still run. Resets to 1 when the session ends.</summary>
+    public static float TimeScale
+    {
+        get => Timers.TimeDilation;
+        set => Timers.TimeDilation = value;
+    }
+
     /// <summary>Freezes the play session. Shorthand for <c>SetPaused(true)</c>.</summary>
     public static bool Pause() => SetPaused(true);
 

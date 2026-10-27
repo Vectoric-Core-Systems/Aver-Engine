@@ -106,6 +106,10 @@ bool readPose(int n, const float* pos, const float* rot, std::vector<JPH::Vec3>&
     return true;
 }
 
+// The game time the next step will simulate; the fixed step while the time scale holds the world still,
+// since MoveKinematic divides by it.
+static float kinematicStep() { return g_world->simStep() > 0.0f ? g_world->simStep() : g_world->fixedStep; }
+
 // Moves every part toward its bone's target so it arrives in `dt`.
 void driveKinematic(Entry& e, float dt, bool locking) {
     JPH::BodyInterface& b = bodiesOf(locking);
@@ -177,7 +181,7 @@ void applyMode(Entry& e, int mode) {
             c->SetTwistMotorState(JPH::EMotorState::Off);
             c->SetEnabled(false);
         });
-        driveKinematic(e, g_world->fixedStep, true);
+        driveKinematic(e, kinematicStep(), true);
         return;
     }
 
@@ -525,7 +529,7 @@ int32_t aver_phys_ragdoll_set_target(int32_t ragdoll, const float* worldPos, con
     e->tRot = std::move(r);
 
     if (e->mode == AVER_PHYS_RAGDOLL_KINEMATIC) {
-        driveKinematic(*e, g_world->fixedStep, true);
+        driveKinematic(*e, kinematicStep(), true);
     } else if (e->mode == AVER_PHYS_RAGDOLL_POWERED) {
         driveMotors(*e);
         if (changed) activateParts(*e);

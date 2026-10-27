@@ -8,6 +8,7 @@
 #include "aver/game/GameTick.hpp"
 #include "aver/framework/framework_abi.h"
 #include "aver/framework/framework_hooks.h"
+#include "aver/framework/framework_timers_abi.h"
 #include "aver/physics/physics_abi.h"
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -80,6 +81,28 @@ int main() {
     g_calls.clear();
     game::tickGameplayGroups(step * 100.0f);
     check(count(AVER_FW_TICK_PHYSICS) == 8, "a long stall is clamped to eight PHYSICS passes");
+
+    AVER_INFO("=== time scale: the same real-time cadence, every pass and step shrunk ===");
+    aver_fw_timers_set_dilation(0.5f);
+    float before[3] = {0, 0, 0};
+    aver_phys_body_position(g_body, before);
+    g_calls.clear();
+    check(game::tickGameplayGroups(step * 3.0f) == 3, "half speed still runs three steps for three steps of real time");
+    check(count(AVER_FW_TICK_PHYSICS) == 3, "and three PHYSICS passes");
+    if (g_calls.size() == 6) {
+        check(std::fabs(g_calls[2].dt - step * 0.5f) < 1e-7f, "each PHYSICS pass gets half the fixed step");
+        check(std::fabs(g_calls[5].dt - step * 1.5f) < 1e-6f, "the PROCESS pass gets half the frame");
+    }
+    aver_fw_timers_set_dilation(0.0f);
+    float held[3] = {0, 0, 0};
+    aver_phys_body_position(g_body, held);
+    g_calls.clear();
+    check(game::tickGameplayGroups(step * 2.0f) == 2 && count(AVER_FW_TICK_PHYSICS) == 2,
+          "time scale 0 still runs the PHYSICS passes");
+    float after[3] = {0, 0, 0};
+    aver_phys_body_position(g_body, after);
+    check(after[2] == held[2] && held[2] < before[2], "but the world holds still");
+    aver_fw_timers_set_dilation(1.0f);
 
     AVER_INFO("=== without a physics world: the same cadence from the frame's own clock ===");
     aver_phys_shutdown();

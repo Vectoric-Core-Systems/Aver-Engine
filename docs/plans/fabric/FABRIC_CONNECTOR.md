@@ -47,7 +47,8 @@ Owner decisions so far:
 | Item | Status |
 |---|---|
 | Tick model → Godot's order (owner decision 2026-10-28: Aver's only order, no compat switch) | DONE: `OnPhysicsTick` once per fixed step before the step (physics step hook), `OnTick` once a frame after, by priority then tree order (`aver_fw_tree_order`, World order stamps). Runtime `TickEnabled`/`PhysicsTickEnabled` and priorities; a throwing tick no longer disables its actor. Framework ABI 2.0. Tests: GameTickOrderTest, FrameworkTest `testTreeOrder`. Graph-class instances still tick in their own pass, once a frame. |
-| Time scale on every delta; physics interpolation | open |
+| Time scale on every delta | DONE: `Game.TimeScale` (= timer dilation) scales both passes, each physics step (real-time cadence, `aver_phys_set_time_scale`), timers, anim, particles, AI, vehicles, sequences, decals; 0 holds the world while ticks run; reset at session end. GameTickOrderTest, FrameworkTest. |
+| Physics interpolation | open |
 | Per-actor pause modes | open |
 | Lifecycle order (enter/ready/exit), notifications | open |
 | Deferred queue, signal flags, await context | open |

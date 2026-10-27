@@ -326,7 +326,9 @@ struct World {
     std::vector<VehicleImpactRaw> vehicleImpacts;
 
     float fixedStep = 1.0f / 60.0f;
-    float accumulator = 0.0f;
+    float accumulator = 0.0f;   // real time; steps run at the fixed cadence whatever timeScale is
+    float timeScale = 1.0f;     // game time per real time: each step simulates fixedStep * timeScale
+    float simStep() const { return fixedStep * timeScale; }
 
     // Config this world was built with, in the ABI's float form (AVER_PHYS_CF_*); config_active reads it.
     float activeConfig[AVER_PHYS_CF_COUNT] = {};

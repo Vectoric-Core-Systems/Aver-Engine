@@ -6,7 +6,7 @@ Generated from source by `scripts/csharp-api-index.py`. Hand-written guides: `do
 
 | Assembly | Public types | Public members |
 |---|---|---|
-| [Aver.Framework](Aver.Framework.md) | 206 | 1782 |
+| [Aver.Framework](Aver.Framework.md) | 206 | 1783 |
 | [Aver.Scene](Aver.Scene.md) | 10 | 116 |
 | [Aver.Physics](Aver.Physics.md) | 89 | 887 |
 | [Aver.UI](Aver.UI.md) | 23 | 193 |

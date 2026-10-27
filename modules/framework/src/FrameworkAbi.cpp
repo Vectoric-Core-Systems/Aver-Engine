@@ -3,6 +3,7 @@
 
 #include "aver/framework/framework_abi.h"
 #include "aver/framework/framework_hooks.h"
+#include "aver/framework/framework_timers_abi.h"
 
 #include "ActionEngine.hpp"
 
@@ -1061,6 +1062,7 @@ int32_t aver_fw_end_play(void) {
             destroyActor(static_cast<int32_t>(e), AVER_FW_END_STOP);
     }
 
+    aver_fw_timers_set_dilation(1.0f);   // the time scale: a session's slow motion does not outlive it
     playStateRef() = AVER_FW_PLAY_EDITOR;
     return 1;
 }

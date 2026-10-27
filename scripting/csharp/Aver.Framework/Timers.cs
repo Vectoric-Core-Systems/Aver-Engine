@@ -172,7 +172,8 @@ public static class Timers
         set => FwTE.aver_fw_timers_set_paused(value ? 1 : 0);
     }
 
-    /// <summary>Game-time scale, clamped to [0, 100]. Affects every timer without <see cref="TimerFlags.IgnoreDilation"/>.</summary>
+    /// <summary>Game-time scale, clamped to [0, 100]; the same value as <see cref="Game.TimeScale"/>. Affects every timer
+    /// without <see cref="TimerFlags.IgnoreDilation"/>.</summary>
     public static float TimeDilation
     {
         get => FwTE.aver_fw_timers_dilation();

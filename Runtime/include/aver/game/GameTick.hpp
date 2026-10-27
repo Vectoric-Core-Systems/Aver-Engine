@@ -108,6 +108,9 @@ inline void tickPausedFrame(f32 dt) {
     aver_fw_tick(AVER_FW_PUMP_FRAME, dt);
 }
 
+// Game time per real time (Godot's Engine.time_scale): the timer service's dilation, the one setting.
+inline f32 gameTimeScale() { return aver_fw_timers_dilation(); }
+
 // The physics tick pass, run by aver_phys_step at the start of each fixed step.
 inline void physicsTickHook(float fixedStep, void*) { aver_fw_tick(AVER_FW_TICK_PHYSICS, fixedStep); }
 
@@ -115,10 +118,12 @@ inline void physicsTickHook(float fixedStep, void*) { aver_fw_tick(AVER_FW_TICK_
 inline f32& physicsTickCarry() { static f32 carry = 0.0f; return carry; }
 
 // One gameplay frame in Godot's order: input, timers and events, the frame pumps, then for each fixed
-// physics step the PHYSICS pass (OnPhysicsTick, fixed dt) followed by the step, then the PROCESS pass
-// (OnTick, frame dt). Returns how many fixed steps ran: 0-8, the catch-up clamp. The caller decides
-// whether the world advances this frame at all.
+// physics step the PHYSICS pass (OnPhysicsTick) followed by the step, then the PROCESS pass (OnTick).
+// `dt` is REAL time: steps keep a real-time cadence, and the time scale shrinks what each pass and step
+// is handed (fixed step * scale, frame dt * scale). Returns how many fixed steps ran: 0-8, the catch-up
+// clamp. The caller decides whether the world advances this frame at all.
 inline i32 tickGameplayGroups(f32 dt) {
+    const f32 scale = gameTimeScale();
     // Input triggers and smoothing advance once a frame, after the host published this frame's input.
     aver_fw_action_update(dt);
     aver_fw_timers_update(dt);
@@ -128,6 +133,7 @@ inline i32 tickGameplayGroups(f32 dt) {
     i32 steps = 0;
 #if AVER_MODULE_PHYSICS
     if (aver_phys_ready()) {
+        aver_phys_set_time_scale(scale);
         aver_phys_set_step_hook(&physicsTickHook, nullptr);
         steps = aver_phys_step(dt);
         aver_phys_set_step_hook(nullptr, nullptr);
@@ -139,11 +145,11 @@ inline i32 tickGameplayGroups(f32 dt) {
         constexpr f32 kStep = 1.0f / 60.0f;
         f32& carry = physicsTickCarry();
         carry += dt > 0.0f ? (dt < kStep * 8.0f ? dt : kStep * 8.0f) : 0.0f;
-        while (carry >= kStep) { carry -= kStep; aver_fw_tick(AVER_FW_TICK_PHYSICS, kStep); }
+        while (carry >= kStep) { carry -= kStep; aver_fw_tick(AVER_FW_TICK_PHYSICS, kStep * scale); }
     }
-    aver_fw_tick(AVER_FW_TICK_PROCESS, dt);
+    aver_fw_tick(AVER_FW_TICK_PROCESS, dt * scale);
 #if AVER_MODULE_SCENE
-    aver_decal_tick(dt);   // lifetimes of pooled decals
+    aver_decal_tick(dt * scale);   // lifetimes of pooled decals, in game time
 #endif
 #if AVER_MODULE_AUDIO_SCENE
     // Reverb zones and audio occlusion probes, after this frame's movement.

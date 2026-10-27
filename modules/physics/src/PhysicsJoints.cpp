@@ -1062,7 +1062,8 @@ void destroyAllJoints() {
 // event; re-enabling re-arms it.
 void afterStepJoints() {
     if (g_breakableCount == 0 || !g_world) return;
-    const float dt = g_world->fixedStep;
+    const float dt = g_world->simStep();
+    if (dt <= 0.0f) return;
     std::vector<BreakEvent> fresh;
     for (auto& [handle, j] : g_joints) {
         if (!j.breakable() || !j.constraint->GetEnabled()) continue;

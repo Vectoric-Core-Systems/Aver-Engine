@@ -61,7 +61,7 @@ void stepWorldOnce() {
     debugStepBegin();
     const auto t0 = Clock::now();
     const JPH::EPhysicsUpdateError err =
-        w.system.Update(w.fixedStep, collisionStepsSetting(), w.temp.get(), w.jobs.get());
+        w.system.Update(w.simStep(), collisionStepsSetting(), w.temp.get(), w.jobs.get());
     const double ms = msSince(t0);
     debugStepEnd();
     diagOnStepEnd();

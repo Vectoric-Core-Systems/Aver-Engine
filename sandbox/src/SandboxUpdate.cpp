@@ -603,6 +603,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     scripts_.update(t.dt);
     hm.mark("scripts");
 #endif
+    // Game time: the frame scaled by the time scale (1 outside a session). tickGameplayGroups takes real time
+    // (physics keeps a real-time cadence and scales each step); the gameplay systems below advance in game time.
+#if AVER_MODULE_FRAMEWORK
+    const f32 gameDt = t.dt * game::gameTimeScale();
+#else
+    const f32 gameDt = t.dt;
+#endif
 #if AVER_MODULE_FRAMEWORK
     // --recapture-test opts in (gesture lives entirely inside this block).
     const bool interactive = (maxFrames_ == 0 && !playTest_) || recapFrames_ > 0;
@@ -761,16 +768,16 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         aver_fw_set_paused(0);
         frameStepGuard.active = true;
     }
-    // Tick groups bracket physics step: PrePhysics -> Physics -> PostPhysics.
+    // Godot's order: OnPhysicsTick before each fixed step, then OnTick (GameTick.hpp).
     if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
         // Level's cars: each driver sets input before physics step, each entity written after.
         // Inside this gate so Pause and Frame Skip hold traffic with everything else.
         // Focus is the view (pawn's eye while possessed, free camera while ejected): cars far from it think less often.
         playProf_.begin(editor::PlayPhase::Vehicles);
-        vehicles_.prePhysics(t.dt, camPos_);
+        vehicles_.prePhysics(gameDt, camPos_);
 
-        game::tickVehiclesPre(t.dt, camPos_);
+        game::tickVehiclesPre(gameDt, camPos_);
         playProf_.end(editor::PlayPhase::Vehicles);
 #endif
         playProf_.begin(editor::PlayPhase::Gameplay);
@@ -780,7 +787,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         playProf_.begin(editor::PlayPhase::Vehicles);
         vehicles_.postPhysics(scene::World::instance());
 
-        game::tickVehiclesPost(t.dt, playMobility_);
+        game::tickVehiclesPost(gameDt, playMobility_);
         playProf_.end(editor::PlayPhase::Vehicles);
 #endif
     } else if (aver_fw_play_state() == AVER_FW_PLAY_PAUSED) {
@@ -793,7 +800,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     water_.setFrozen(ptSceneView_ != nullptr);
     if (ptSceneView_)
         ptSceneView_->setIncludeDynamicMeshes(water_.displacedSurfaceActive(), water_.displacedSurfaceRevision());
-    water_.update(*e.device(), t.dt);
+    water_.update(*e.device(), gameDt);
     hm.mark("water");
 #endif
 #if AVER_MODULE_SCENE
@@ -806,19 +813,19 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     // [wave5/sequencer] The sequence's Pre phase first: a pose chosen by the render queue, the clock, and the
     // property / visibility / animation / audio / event tracks, so a driven montage lands in the tick below.
-    tickSequencePre(e, t.dt);
+    tickSequencePre(e, gameDt);
     playProf_.begin(editor::PlayPhase::ObjectAnim);
-    game::tickAnimGraphs(t.dt);   // state machines write the pose the clip sampler would
+    game::tickAnimGraphs(gameDt);   // state machines write the pose the clip sampler would
 #if AVER_MODULE_RAGDOLL
-    ragdoll::ragdollSystem().tick(t.dt);   // after the physics step, before the pose it writes into
+    ragdoll::ragdollSystem().tick(gameDt);   // after the physics step, before the pose it writes into
 #endif
-    anim::animSystem().tick(scene::World::instance(), t.dt);
+    anim::animSystem().tick(scene::World::instance(), gameDt);
     playProf_.end(editor::PlayPhase::ObjectAnim);
     hm.mark("objectAnim");
 #if AVER_MODULE_SOFTBODY_SCENE
     // After the pose it reads (skin palette), before the draw scene copies the result (plan 2.5.2).
     playProf_.begin(editor::PlayPhase::SoftBody);
-    game::tickSoftBodies(t.dt, viewPos());
+    game::tickSoftBodies(gameDt, viewPos());
     playProf_.end(editor::PlayPhase::SoftBody);
     hm.mark("softBodies");
 #endif
@@ -828,7 +835,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #if AVER_MODULE_PHYSICS
     // After the tick that moved them: animated placement's kinematic body follows it (carries standing characters).
     playProf_.begin(editor::PlayPhase::DriveBodies);
-    driveAnimatedBodies(t.dt);
+    driveAnimatedBodies(gameDt);
     playProf_.end(editor::PlayPhase::DriveBodies);
     hm.mark("driveBodies");
 #endif
@@ -837,7 +844,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     {
         const auto tickStart = std::chrono::steady_clock::now();
         playProf_.begin(editor::PlayPhase::Particles);
-        particles::particleSystem().tick(scene::World::instance(), t.dt);
+        particles::particleSystem().tick(scene::World::instance(), gameDt);
         playProf_.end(editor::PlayPhase::Particles);
 #if AVER_MODULE_FRAMEWORK
         for (scene::Entity fe : particles::particleSystem().finished())
@@ -914,7 +921,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #if AVER_MODULE_FRAMEWORK
     playProf_.begin(editor::PlayPhase::GraphTicks);
     if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING)
-        scripts_.tickGraphClassInstances(t.dt);
+        scripts_.tickGraphClassInstances(gameDt);
     playProf_.end(editor::PlayPhase::GraphTicks);
     hm.mark("graphTicks");
 #endif
@@ -955,7 +962,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // Gated on Play (like physics/fw_tick above): pathing is gameplay, not authoring preview.
     // nav_ may be empty or frame stale; AgentSystem::tick treats that as "wait for a grid".
     if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
-        game::tickAi(t.dt, &nav_);
+        game::tickAi(gameDt, &nav_);
     }
 #endif
 #endif

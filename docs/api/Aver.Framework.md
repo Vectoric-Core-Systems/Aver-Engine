@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-206 public types and 1782 public members, read from `scripting/csharp/Aver.Framework/` (128 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+206 public types and 1783 public members, read from `scripting/csharp/Aver.Framework/` (128 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -1466,6 +1466,7 @@ Values: `Linear = 0`, `EqualPower = 1`
 - `public static bool IsPaused { get; }` - True while a session exists but is frozen.
 - `public static bool HasSession { get; }` - True while a session exists at all — Playing or Paused.
 - `public static bool SetPaused(bool paused)` - Freezes (true) or resumes (false) the play session's tick without tearing it down.
+- `public static float TimeScale { get; set; }` - Game time per real time, clamped to [0, 100] (Godot's Engine.time_scale): scales OnTick and OnPhysicsTick's dt, each physics step, timers, animation, particles, AI and vehicles.
 - `public static bool Pause()` - Freezes the play session.
 - `public static bool Resume()` - Resumes a paused play session.
 - `public static void Quit()` - Requests that the host exit.
@@ -2338,7 +2339,7 @@ Values: `None = 0`, `IgnorePause = 2`, `IgnoreDilation = 4`
 - `public static bool IsPaused(TimerHandle h)` - True when this timer is individually paused.
 - `public static bool Reset(TimerHandle h, float delay = -1f)` - Restarts the countdown; a non-negative delay also becomes the new interval.
 - `public static bool Paused { get; set; }` - Pauses every timer that does not carry IgnorePause.
-- `public static float TimeDilation { get; set; }` - Game-time scale, clamped to [0, 100].
+- `public static float TimeDilation { get; set; }` - Game-time scale, clamped to [0, 100]; the same value as TimeScale.
 - `public static double Time { get; }` - Dilated, pause-respecting game time in seconds.
 - `public static double RealTime { get; }` - Unscaled time in seconds.
 - `public static int Count { get; }` - Scheduled timer count.
