@@ -245,7 +245,11 @@ bool Window::create(const WindowDesc& desc) {
     width_ = static_cast<u32>(std::max(pw, 0));
     height_ = static_cast<u32>(std::max(ph, 0));
 
-    if (!desc.startHidden) show(desc.activate);
+    // Wayland sends frame callbacks only to a mapped surface, so a FIFO present into a hidden window waits
+    // forever (the warm-up frames behind the splash): there the window is shown from the start.
+    const char* driver = SDL_GetCurrentVideoDriver();
+    const bool hiddenPresentsBlock = driver && std::strcmp(driver, "wayland") == 0;
+    if (!desc.startHidden || hiddenPresentsBlock) show(desc.activate);
     AVER_INFO("[Platform] window '{}' {}x{} created ({}x{} pixels, scale {:.2f})", desc.title, desc.width,
               desc.height, width_, height_, dpiScale_);
     return true;
