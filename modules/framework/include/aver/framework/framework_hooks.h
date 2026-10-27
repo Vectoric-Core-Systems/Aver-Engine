@@ -46,7 +46,8 @@ typedef struct AvActorVTable {
     aver_fw_vt_end_play_fn   endPlay;          /* per actor of this class, before teardown              */
 } AvActorVTable;
 
-#define AVER_FW_DISPATCH_VERSION 2
+/* 3: enter_tree (Godot's _enter_tree, parent first, before any OnBeginPlay of a spawn batch). */
+#define AVER_FW_DISPATCH_VERSION 3
 
 /* 1 == an instance of the named class now exists on the managed side and is bound to entity `e`. */
 typedef int32_t (AVER_FW_CALL* aver_fw_bind_fn)       (int64_t classNameHash, aver_entity e);
@@ -59,6 +60,7 @@ typedef void    (AVER_FW_CALL* aver_fw_build_models_fn)(aver_entity e);
 typedef void    (AVER_FW_CALL* aver_fw_possessed_fn)  (aver_entity pawn, aver_entity controller);
 typedef void    (AVER_FW_CALL* aver_fw_unpossessed_fn)(aver_entity pawn);
 typedef void    (AVER_FW_CALL* aver_fw_post_login_fn) (aver_entity gameMode, aver_entity controller);
+typedef void    (AVER_FW_CALL* aver_fw_enter_tree_fn) (aver_entity e);
 
 /* The ONE table serving every managed class. Routes by entity handle, class-name hash or tick
  * group, never by a per-class cookie. Stored by value so no ALC-owned pointer is ever retained. */
@@ -75,6 +77,7 @@ typedef struct AvManagedDispatch {
     aver_fw_possessed_fn     possessed;        /* OnPossessed(controller) on a pawn, when possessed  (v2)  */
     aver_fw_unpossessed_fn   unpossessed;      /* OnUnpossessed() on a pawn, when released            (v2)  */
     aver_fw_post_login_fn    post_login;       /* OnPostLogin(controller) on the GameMode, post-possess(v2) */
+    aver_fw_enter_tree_fn    enter_tree;       /* OnEnterTree() for one actor, before its beginPlay    (v3) */
 } AvManagedDispatch;
 
 /* Stores the table by value after validating structBytes + contractVersion. Refuses a second

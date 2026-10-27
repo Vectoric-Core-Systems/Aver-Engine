@@ -546,8 +546,9 @@ static void beginActor(Entity e, const ClassRecord& r, bool dispatchBeginPlay) {
     const bool bound = d.bind && d.bind(static_cast<int64_t>(r.nameHash), ae) == 1;
     if (!bound) return;
     if (d.build_models) d.build_models(ae);
-    if (dispatchBeginPlay && g_spawnBatchDepth > 0) batchedBegins().push_back(e);
-    else if (dispatchBeginPlay && d.beginPlay) d.beginPlay(ae, AVER_FW_BEGIN_SPAWN);
+    if (dispatchBeginPlay && g_spawnBatchDepth > 0) { batchedBegins().push_back(e); return; }
+    if (dispatchBeginPlay && d.enter_tree) d.enter_tree(ae);
+    if (dispatchBeginPlay && d.beginPlay) d.beginPlay(ae, AVER_FW_BEGIN_SPAWN);
 }
 
 // The spawn body: attaches the sealed archetype, lays down defaults, applies transform overrides and
@@ -1249,6 +1250,11 @@ int32_t aver_fw_spawn_batch_end(void) {
         std::reverse(path.begin(), path.end());
         ready.emplace_back(std::move(path), e);
     }
+    // Enter first, parent before child (pre-order: plain path order), as Godot's _enter_tree.
+    std::stable_sort(ready.begin(), ready.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& [path, e] : ready)
+        if (w.valid(e) && !w.destroyPending(e) && classOfEntity(e) != 0 && managedInstalled() && managedDispatch().enter_tree)
+            managedDispatch().enter_tree(static_cast<aver_entity>(e));
     std::stable_sort(ready.begin(), ready.end(), [](const auto& a, const auto& b) {
         const usize n = std::min(a.first.size(), b.first.size());
         for (usize i = 0; i < n; ++i)

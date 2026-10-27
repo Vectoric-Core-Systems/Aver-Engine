@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-218 public types and 1846 public members, read from `scripting/csharp/Aver.Framework/` (135 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+218 public types and 1851 public members, read from `scripting/csharp/Aver.Framework/` (135 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -329,6 +329,11 @@ Values: `None = 0`, `Started = 1`, `Ongoing = 2`, `Triggered = 4`, `Completed = 
 - `public int TickPriority { get; set; }` - Order among actors in the OnTick pass: lower runs first, equal priorities in scene-tree order (a parent before its children, siblings in the order they were added).
 - `public int PhysicsTickPriority { get; set; }` - Order among actors in the OnPhysicsTick pass, as TickPriority.
 - `public PauseMode PauseMode { get; set; }` - Whether this actor ticks while the game is paused; Inherit by default, which takes the nearest actor above it in the scene tree.
+- `public virtual void OnEnterTree()` - Runs when the actor enters the world, before OnBeginPlay (Godot's _enter_tree).
+- `public virtual void OnExitTree()` - Runs when the actor leaves the world, before OnEndPlay (Godot's _exit_tree); children leave before their parent.
+- `public virtual void OnParentChanged()` - Runs when the actor's parent in the scene tree changed (Godot's NOTIFICATION_PARENTED / UNPARENTED).
+- `public virtual void OnTransformChanged()` - Runs once a frame, after OnTick, when the actor's world transform moved, if NotifyTransform is on (Godot's NOTIFICATION_TRANSFORM_CHANGED with set_notify_transform).
+- `public bool NotifyTransform { get; set; }` - Whether OnTransformChanged is called.
 - `public void QueueDestroy()` - Destroys this actor at the end of the frame, after every tick and deferred call (Godot's queue_free).
 - `public virtual void OnEndPlay(EndReason reason)` - Runs once when this actor stops playing.
 - `public virtual void OnRebound()` - Runs after a hot reload has rebound this instance and restored its native state.

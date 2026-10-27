@@ -11,7 +11,7 @@ namespace Aver.Framework;
 internal static class ManagedDispatch
 {
     // Must match AVER_FW_DISPATCH_VERSION in modules/framework/include/aver/framework/framework_hooks.h.
-    internal const int ContractVersion = 2;
+    internal const int ContractVersion = 3;
 
     // Mirrors AvManagedDispatch field for field, in header order.
     [StructLayout(LayoutKind.Sequential)]
@@ -29,6 +29,7 @@ internal static class ManagedDispatch
         public IntPtr Possessed;
         public IntPtr Unpossessed;
         public IntPtr PostLogin;
+        public IntPtr EnterTree;
     }
 
     [DllImport("Aver.Framework")]
@@ -41,7 +42,7 @@ internal static class ManagedDispatch
     /// <summary>Installs the bridge's dispatch table. Returns false if the framework refused it.</summary>
     internal static bool Install(IntPtr bind, IntPtr unbind, IntPtr beginPlay, IntPtr tickAll,
                                  IntPtr endPlay, IntPtr rebound, IntPtr buildModels,
-                                 IntPtr possessed, IntPtr unpossessed, IntPtr postLogin)
+                                 IntPtr possessed, IntPtr unpossessed, IntPtr postLogin, IntPtr enterTree)
     {
         Table t = new()
         {
@@ -57,6 +58,7 @@ internal static class ManagedDispatch
             Possessed = possessed,
             Unpossessed = unpossessed,
             PostLogin = postLogin,
+            EnterTree = enterTree,
         };
         return aver_fw_install_managed_dispatch(in t) != 0;
     }

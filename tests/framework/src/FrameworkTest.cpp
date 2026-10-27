@@ -686,8 +686,9 @@ static void testTreeOrder() {
     World::instance().flush();
 }
 
-static std::vector<int32_t> g_begun;
+static std::vector<int32_t> g_begun, g_entered;
 static void AVER_FW_CALL standInRecordBegin(aver_entity e, int32_t) { g_begun.push_back(static_cast<int32_t>(e)); }
+static void AVER_FW_CALL standInRecordEnter(aver_entity e) { g_entered.push_back(static_cast<int32_t>(e)); }
 static int32_t AVER_FW_CALL standInBindAll(int64_t, aver_entity) { return 1; }
 
 // Checks a spawn batch: nothing begins until the outermost end, then children before their parent and
@@ -704,9 +705,11 @@ static void testSpawnBatchReadyOrder() {
     table.contractVersion = AVER_FW_DISPATCH_VERSION;
     table.bind            = &standInBindAll;
     table.beginPlay       = &standInRecordBegin;
+    table.enter_tree      = &standInRecordEnter;
     check(aver_fw_install_managed_dispatch(&table) == 1, "the recording stand-in installs");
 
     g_begun.clear();
+    g_entered.clear();
     aver_fw_spawn_batch_begin();
     const int32_t p  = aver_fw_spawn(managedC, "p", nullptr, nullptr, nullptr);
     const int32_t c  = aver_fw_spawn(managedC, "c", nullptr, nullptr, nullptr);
@@ -720,13 +723,17 @@ static void testSpawnBatchReadyOrder() {
     check(aver_fw_destroy(gone) == 1, "one actor is destroyed inside the batch");
     check(g_begun.empty(), "nothing has begun before the outermost end");
     check(aver_fw_spawn_batch_end() == 4, "the outermost end begins four actors");
+    check(g_entered == std::vector<int32_t>{p, c, g, c2},
+          "every actor enters first, parent before child: p, c, g, c2 (Godot's _enter_tree)");
     check(g_begun == std::vector<int32_t>{g, c, c2, p},
-          "children first, siblings in order, the parent last: g, c, c2, p");
+          "then begins children first, siblings in order, the parent last: g, c, c2, p");
     check(aver_fw_spawn_batch_end() == 0, "an unmatched end is a no-op");
 
     g_begun.clear();
+    g_entered.clear();
     const int32_t solo = aver_fw_spawn(managedC, "solo", nullptr, nullptr, nullptr);
-    check(g_begun == std::vector<int32_t>{solo}, "outside a batch, a spawn begins at once");
+    check(g_entered == std::vector<int32_t>{solo} && g_begun == std::vector<int32_t>{solo},
+          "outside a batch, a spawn enters and begins at once");
 
     for (const int32_t e : {p, solo}) aver_fw_destroy(e);
     World::instance().flush();

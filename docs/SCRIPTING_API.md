@@ -197,6 +197,10 @@ there resumes there: `await Frame.Next()` resumes at the start of the next `OnTi
 `await Frame.NextPhysics()` at the start of the next `OnPhysicsTick` pass, and `await
 Frame.Delay(seconds)` after that much game time (scaled, held while paused). Work awaited on a thread
 pool (`HttpClient`, `Task.Run`) resumes on the game thread too.
+| `void OnEnterTree()` | Before `OnBeginPlay` (Godot's `_enter_tree`); actors placed together enter parent first, then begin children first. |
+| `void OnExitTree()` | Before `OnEndPlay` (Godot's `_exit_tree`); children leave before their parent. |
+| `void OnParentChanged()` | The actor's parent in the scene tree changed (NOTIFICATION_PARENTED / UNPARENTED). |
+| `void OnTransformChanged()` | Once a frame after `OnTick`, when its world transform moved; only while `NotifyTransform` is on. |
 | `void OnEndPlay(EndReason reason)` | Once when the actor stops playing. `Stop` = the world stopped; `Destroy` = it was destroyed; `Reload` = the entity stays, only the managed half is rebuilt. |
 | `void OnRebound()` | **DECLARED BUT NEVER CALLED.** The hook exists in `framework_hooks.h` and nothing in the engine invokes it; the bridge's own comment records the rebind path as out of scope. Do not put logic here expecting it to run. |
 | `bool OnEvent(string name)` | A named event was raised **at this entity**. Two things raise one: an **animation notify** (a marker crossed on a playing clip) and a graph's `FireEvent` node aimed here. Return `true` if you handled it -- the value is what the caller reads as its own success. |

@@ -78,6 +78,9 @@ public static class HostBridge
         public required string Name;
         public int TickErrors, PhysicsTickErrors;
         public PauseMode ResolvedPause = PauseMode.Pausable;
+        public bool Entered;                // OnEnterTree has run and OnExitTree has not
+        public int LastParent;              // the parent it had when last seen, for OnParentChanged
+        public float[]? LastWorld;          // its world matrix when last seen, for OnTransformChanged
         public bool Disabled;
     }
 
@@ -1242,7 +1245,8 @@ public static class HostBridge
             (IntPtr)(delegate* unmanaged[Cdecl]<int, void>)&DispBuildModels,
             (IntPtr)(delegate* unmanaged[Cdecl]<int, int, void>)&DispPossessed,
             (IntPtr)(delegate* unmanaged[Cdecl]<int, void>)&DispUnpossessed,
-            (IntPtr)(delegate* unmanaged[Cdecl]<int, int, void>)&DispPostLogin);
+            (IntPtr)(delegate* unmanaged[Cdecl]<int, int, void>)&DispPostLogin,
+            (IntPtr)(delegate* unmanaged[Cdecl]<int, void>)&DispEnterTree);
 
         if (ok)
             Emit((int)Log.Level.Info, "[Scripting] managed actor dispatch installed");
@@ -1723,7 +1727,11 @@ public static class HostBridge
             catch (Exception ex) { ReportTickError(live, physics, ex); }
         }
         if (physics) GameThread.Flush();
-        else GameThread.EndFrame();   // deferred calls, then QueueDestroy's destroys
+        else
+        {
+            NotifyTransforms();
+            GameThread.EndFrame();   // deferred calls, then QueueDestroy's destroys
+        }
     }
 
     // A tick that throws aborts only that call, as in Godot; the actor keeps ticking. Errors are logged
@@ -1758,6 +1766,36 @@ public static class HostBridge
         s_processOrder = SortedByTree(entities, process);
         s_physicsOrder = SortedByTree(entities, phys);
         foreach (ActorLive a in s_tickActors) a.ResolvedPause = PauseRules.Resolve(PauseChain(a));
+        // The tree moved: tell each entered actor whose parent changed (Godot's NOTIFICATION_PARENTED).
+        foreach (ActorLive a in s_tickActors)
+        {
+            if (!a.Entered || a.Disabled) continue;
+            int parent = a.Instance.Self.Parent.Handle;
+            if (parent == a.LastParent) continue;
+            a.LastParent = parent;
+            try { a.Instance.OnParentChanged(); }
+            catch (Exception ex) { Emit((int)Log.Level.Error, $"[Scripting] {a.Name}.OnParentChanged threw: {Describe(ex)}"); }
+        }
+    }
+
+    // Once a frame: an actor that asked for NotifyTransform hears when its world transform moved.
+    private static readonly float[] s_worldScratch = new float[16];
+
+    private static void NotifyTransforms()
+    {
+        float[] m = s_worldScratch;
+        foreach (ActorLive a in s_tickActors)
+        {
+            if (!a.Entered || a.Disabled || !a.Instance.NotifyTransform) continue;
+            if (SceneNative.aver_scene_world_matrix(a.Entity, m) == 0) continue;
+            bool moved = a.LastWorld is null;
+            a.LastWorld ??= new float[16];
+            for (int i = 0; i < 16; ++i)
+                if (a.LastWorld[i] != m[i]) { moved = true; a.LastWorld[i] = m[i]; }
+            if (!moved) continue;
+            try { a.Instance.OnTransformChanged(); }
+            catch (Exception ex) { Emit((int)Log.Level.Error, $"[Scripting] {a.Name}.OnTransformChanged threw: {Describe(ex)}"); }
+        }
     }
 
     // The PauseMode of the actor and of every actor above it, nearest first; plain entities are skipped.
@@ -1779,11 +1817,28 @@ public static class HostBridge
         return result;
     }
 
-    // Calls the actor's OnEndPlay.
+    // Calls the actor's OnEnterTree and remembers where in the tree it entered (for OnParentChanged).
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void DispEnterTree(int entity)
+    {
+        if (!s_actorsByEntity.TryGetValue(entity, out ActorLive? live) || live.Disabled) return;
+        live.Entered = true;
+        live.LastParent = live.Instance.Self.Parent.Handle;
+        try { live.Instance.OnEnterTree(); }
+        catch (Exception ex) { DisableActor(live, "OnEnterTree", ex); }
+    }
+
+    // Calls the actor's OnExitTree, then OnEndPlay.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispEndPlay(int entity, int reason)
     {
         if (!s_actorsByEntity.TryGetValue(entity, out ActorLive? live) || live.Disabled) return;
+        if (live.Entered)
+        {
+            live.Entered = false;
+            try { live.Instance.OnExitTree(); }
+            catch (Exception ex) { Emit((int)Log.Level.Error, $"[Scripting] {live.Name}.OnExitTree threw: {Describe(ex)}"); }
+        }
         try { live.Instance.OnEndPlay((EndReason)reason); }
         catch (Exception ex) { DisableActor(live, "OnEndPlay", ex); }
     }

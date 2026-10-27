@@ -77,6 +77,24 @@ public abstract partial class AverActor
     private static bool Overrides(Type t, string method) =>
         t.GetMethod(method, new[] { typeof(float) })?.DeclaringType != typeof(AverActor);
 
+    /// <summary>Runs when the actor enters the world, before <see cref="OnBeginPlay"/> (Godot's <c>_enter_tree</c>). Among
+    /// actors placed together a parent enters before its children, then they begin play children first.</summary>
+    public virtual void OnEnterTree() { }
+
+    /// <summary>Runs when the actor leaves the world, before <see cref="OnEndPlay"/> (Godot's <c>_exit_tree</c>); children
+    /// leave before their parent.</summary>
+    public virtual void OnExitTree() { }
+
+    /// <summary>Runs when the actor's parent in the scene tree changed (Godot's NOTIFICATION_PARENTED / UNPARENTED).</summary>
+    public virtual void OnParentChanged() { }
+
+    /// <summary>Runs once a frame, after OnTick, when the actor's world transform moved, if <see cref="NotifyTransform"/>
+    /// is on (Godot's NOTIFICATION_TRANSFORM_CHANGED with set_notify_transform).</summary>
+    public virtual void OnTransformChanged() { }
+
+    /// <summary>Whether <see cref="OnTransformChanged"/> is called. Off by default.</summary>
+    public bool NotifyTransform { get; set; }
+
     /// <summary>Destroys this actor at the end of the frame, after every tick and deferred call (Godot's <c>queue_free</c>).
     /// It keeps ticking for the rest of this frame.</summary>
     public void QueueDestroy() => GameThread.QueueDestroy(this);
