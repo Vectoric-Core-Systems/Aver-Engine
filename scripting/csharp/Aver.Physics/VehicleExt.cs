@@ -2,10 +2,8 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
-// Vehicles v2 (physics_vehicle_ext_abi.h): torque curve, gearbox, differentials, tyre curves, tracked
-// vehicles, driver aids, aero, live tuning, telemetry and events. A vehicle that never calls anything here
-// drives exactly as it does under v1. Units are the engine's: cm, kg, N*m, degrees for steering and slip
-// angle, rad/s for wheel speed.
+// Vehicles v2 (physics_vehicle_ext_abi.h). Units: cm, kg, N*m, degrees for steering and slip angle, rad/s for wheel speed.
+// A vehicle that never calls anything here drives exactly as under v1.
 
 using System;
 
@@ -18,8 +16,7 @@ public enum VehicleKind
     Tracked = 1,
 }
 
-/// <summary>How an axle (or the centre differential) shares torque between its sides. Jolt has no hard-locked
-/// differential: <see cref="Locked"/> is a limited-slip ratio of 1.01.</summary>
+/// <summary>How an axle (or the centre differential) shares torque between its sides. Jolt has no hard-locked differential: <see cref="Locked"/> is a limited-slip ratio of 1.01.</summary>
 public enum DifferentialMode
 {
     Open = 0,
@@ -27,9 +24,7 @@ public enum DifferentialMode
     Locked = 2,
 }
 
-/// <summary>The live tuning keys of <see cref="Vehicle.Tune"/>. The steering-speed curve is up to four
-/// (speed cm/s, scale) points written in order through <c>SteerCurve0</c> to <c>SteerCurve7</c>; a point with
-/// speed 0 and scale 0 ends the list.</summary>
+/// <summary>The live tuning keys of <see cref="Vehicle.Tune"/>. The steering-speed curve is up to four (speed cm/s, scale) points written in order through <c>SteerCurve0</c> to <c>SteerCurve7</c>; a point with speed 0 and scale 0 ends the list.</summary>
 public enum VehicleTune
 {
     EngineTorqueScale = 0,
@@ -63,7 +58,7 @@ public enum VehiclePhysicsEventKind
     Assist = 7,
 }
 
-// The index blocks of the header, as enums, so the parity test pins every number and the code below names them.
+// Index blocks of the header arrays, as enums: the parity test pins every number, the code names them.
 internal enum VeIndex { MaxTorque = 0, MinRpm = 1, MaxRpm = 2, Inertia = 3, AngularDamping = 4, Count = 5 }
 internal enum VgIndex { SwitchTime = 0, ClutchReleaseTime = 1, SwitchLatency = 2, ShiftUpFraction = 3, ShiftDownFraction = 4, ClutchStrength = 5, Count = 6 }
 internal enum VaIndex { FinalDrive = 0, DiffMode = 1, LsdRatio = 2, LeftRightSplit = 3, TorqueShare = 4, AntiRollStiffness = 5, Count = 6 }
@@ -94,9 +89,7 @@ internal enum VwsIndex
 }
 internal enum VwsiIndex { Contact = 0, ContactBody = 1, ContactEntity = 2, Skidding = 3, Count = 4 }
 
-/// <summary>The gearbox timings of <see cref="Vehicle.SetGearbox"/>. An all-zero value (<c>default</c>) leaves
-/// them at Jolt's own: 0.5 s to switch, 0.3 s to release the clutch, 0.5 s before another switch, up at 60 percent
-/// and down at 20 percent of the rev range, clutch strength scaled to the engine.</summary>
+/// <summary>The gearbox timings of <see cref="Vehicle.SetGearbox"/>. An all-zero value (<c>default</c>) leaves them at Jolt's own.</summary>
 public readonly record struct GearboxTiming(float SwitchTime, float ClutchReleaseTime, float SwitchLatency,
                                             float ShiftUpFraction, float ShiftDownFraction, float ClutchStrength)
 {
@@ -105,8 +98,7 @@ public readonly record struct GearboxTiming(float SwitchTime, float ClutchReleas
     internal bool IsUnset => this == default;
 }
 
-/// <summary>The driver aids of <see cref="Vehicle.SetAssists"/> (VD in the header). They run in the fixed step;
-/// <see cref="Enabled"/> off is the v1 pass-through (raw pedals straight to the controller).</summary>
+/// <summary>The driver aids of <see cref="Vehicle.SetAssists"/> (VD in the header). They run in the fixed step; <see cref="Enabled"/> off is the v1 pass-through (raw pedals straight to the controller).</summary>
 public readonly record struct DriverAids(
     bool Enabled, bool Abs, float AbsSlip, float AbsRelease, bool Tcs, float TcsSlip, float SteerIn, float SteerOut,
     float ThrottleIn, float ThrottleOut, float BrakeIn, bool ReverseOnBrake, float ReverseSpeed, float HoldBrake,
@@ -130,8 +122,7 @@ public readonly record struct VehicleState(
     int Gear, int GearCount, bool Manual, bool Shifting, int WheelsOnGround, bool AbsActive, bool TcsActive,
     VehicleKind Kind, int AxleCount, int WheelCount, bool RevLimited);
 
-/// <summary>One wheel's telemetry as of the last fixed step (VWS and VWSI in the header). Longitudinal slip is a signed
-/// ratio: positive when the tyre turns faster than the road moves, negative when it drags.</summary>
+/// <summary>One wheel's telemetry as of the last fixed step (VWS and VWSI in the header). Longitudinal slip is a signed ratio: positive when the tyre turns faster than the road moves, negative when it drags.</summary>
 public readonly record struct WheelState(
     bool Contact, float SlipLongitudinal, float SlipLateralDeg, float LoadN, float CompressionCm, float SuspensionLengthCm,
     float AngularVelocityRadS, float SteerDeg, float SpinRad, Float3 ContactPoint, Float3 ContactNormal,
@@ -154,22 +145,17 @@ public readonly partial struct Vehicle
         }
     }
 
-    // ---- Building (before Finish) -----------------------------------------------------------------------
-
     /// <summary>Wheeled (the default) or tracked. Before the first <see cref="AddWheel"/>.</summary>
     public bool SetKind(VehicleKind kind) => Native.aver_phys_vehicle_set_kind(Handle, (int)kind) != 0;
 
-    /// <summary>Replaces the single chassis box with one to eight: <c>cx cy cz hx hy hz</c> per box, origin-relative cm.
-    /// Mass and centre of mass are unchanged.</summary>
+    /// <summary>Replaces the single chassis box with one to eight: <c>cx cy cz hx hy hz</c> per box, origin-relative cm. Mass and centre of mass are unchanged.</summary>
     public bool SetChassisBoxes(ReadOnlySpan<float> boxes) =>
         boxes.Length >= 6 && boxes.Length % 6 == 0 && Native.aver_phys_vehicle_set_chassis_boxes(Handle, boxes.ToArray(), boxes.Length / 6) != 0;
 
-    /// <summary>Replaces the chassis with any <see cref="CollisionShape"/> that has a mass, in the vehicle's origin frame
-    /// (bottom centre of the car). Mass and centre of mass are unchanged. Before <c>Finish</c>.</summary>
+    /// <summary>Replaces the chassis with any <see cref="CollisionShape"/> that has a mass, in the vehicle's origin frame (bottom centre of the car). Before <c>Finish</c>.</summary>
     public bool SetChassisShape(CollisionShape shape) => Native.aver_phys_vehicle_set_chassis_shape(Handle, shape.Handle) != 0;
 
-    /// <summary>The engine: peak torque (N*m), idle and limit revs, rotational inertia (0 = scaled to the torque as the
-    /// plain engine is) and damping (engine braking).</summary>
+    /// <summary>The engine: peak torque (N*m), idle and limit revs, rotational inertia (0 = scaled to the torque as the plain engine is) and damping (engine braking).</summary>
     public bool SetEngine(float maxTorque, float minRpm, float maxRpm, float inertia = 0f, float damping = 0.2f) =>
         Native.aver_phys_vehicle_set_engine_ex(Handle, new[] { maxTorque, minRpm, maxRpm, inertia, damping }, (int)VeIndex.Count) != 0;
 
@@ -178,8 +164,7 @@ public readonly partial struct Vehicle
         rpmFraction.Length == torqueFraction.Length &&
         Native.aver_phys_vehicle_set_torque_curve(Handle, rpmFraction.ToArray(), torqueFraction.ToArray(), rpmFraction.Length) != 0;
 
-    /// <summary>Forward ratios (positive), reverse ratios (positive magnitudes), automatic or manual, and the timings.
-    /// An empty list keeps Jolt's ratios.</summary>
+    /// <summary>Forward ratios (positive), reverse ratios (positive magnitudes), automatic or manual, and the timings. An empty list keeps Jolt's ratios.</summary>
     public bool SetGearbox(bool manual, ReadOnlySpan<float> forward, ReadOnlySpan<float> reverse, GearboxTiming timing = default)
     {
         float[]? block = timing.IsUnset ? null : new[]
@@ -222,8 +207,6 @@ public readonly partial struct Vehicle
         Native.aver_phys_vehicle_set_track(Handle, side, wheels.ToArray(), wheels.Length, drivenWheel,
                                            new[] { inertia, damping, brakeNm, finalDrive, steerGain, pivotPower }, (int)VtIndex.Count) != 0;
 
-    // ---- Live (before or after Finish) ----------------------------------------------------------------------
-
     /// <summary>The driver aids. Run in the fixed step, so they do not depend on the frame rate.</summary>
     public bool SetAssists(in DriverAids aids) => Native.aver_phys_vehicle_set_assists(Handle, aids.ToBlock(), (int)VdIndex.Count) != 0;
 
@@ -235,8 +218,6 @@ public readonly partial struct Vehicle
 
     /// <summary>Live tuning: engine torque, brake, grip, suspension stiffness, steering, drag and downforce scales.</summary>
     public bool Tune(VehicleTune key, float value) => Native.aver_phys_vehicle_tune(Handle, (int)key, value) != 0;
-
-    // ---- After Finish ------------------------------------------------------------------------------------
 
     /// <summary>Switches between an automatic and a manual gearbox.</summary>
     public bool SetManualGearbox(bool manual) => Native.aver_phys_vehicle_set_gearbox_mode(Handle, manual ? 1 : 0) != 0;
@@ -293,8 +274,7 @@ public readonly partial struct Vehicle
         return true;
     }
 
-    /// <summary>Copies this step's vehicle events (for every vehicle in the world) into <paramref name="buffer"/> and returns
-    /// how many were written. The queue is cleared at the top of the next physics step, so call it once per step.</summary>
+    /// <summary>Copies this step's vehicle events (for every vehicle in the world) into <paramref name="buffer"/> and returns how many were written.</summary>
     public static int DrainEvents(Span<VehiclePhysicsEvent> buffer)
     {
         int count = Native.aver_phys_vehicle_event_count();

@@ -784,3 +784,55 @@ Status mirrors PathTracer::init() gates (DXR-1.1/SM-6.5/DXC/compute). Tier drive
 - Output Log filtering optimization: ImGuiListClipper optimization. Used to style and draw all kMaxLogLines (4000) every frame under logMutex_, which every logging thread queues on. Now filter is applied first to a list of indices (level compare per line), and clipper draws just the visible slice, holding the lock for a few dozen rows instead of four thousand. Multiline lines (e.g. shader errors) fall back to the old path: exact for any height, costs what it did while such lines are in buffer.
 
 - Cluster button width computation: not hardcoded. Measured via ImGui's own layout to ensure all buttons fit and stay in stable relative positions. "Constants broke twice before."
+
+
+## sandbox/src/HairGroomTab.hpp
+
+- file header, the Groom tab: an .ochair opened as an asset (HairGroomEditor, an AssetEditor like FoliageTypeEditor) shows the scalp, the generator, the simulation materials, the looks, the level of detail and the collision proxies as widgets over the groom's records; a live preview of roots and guide strands on the scalp (a 2D projection drawn with the ImGui draw list, no device); "Import curves" for a glTF with LINES; and the budget and advice lines.
+- file header, undo: the stored strands and embedded scalp can be megabytes and sit beside the undo stack, so importing or clearing strands is not an undo step (the tooltips say so). Kept as "strands and the scalp are not undoable".
+- file header, the rules: HairDetailsModel.hpp's (ImGui-free, tested).
+- file header, the hook: #include "HairGroomTab.hpp", and assetEditors_.registerFactory(&editor::makeHairGroomEditor) appended after the other factories in SandboxInit.cpp (kept); plus the Content Browser's icon row for ".ochair" and a "New Hair Groom" entry that calls writeStarterHairGroom().
+- file header, the Details section: drawHairSection for a placed CHair, reached from SandboxComponentDetails.cpp through one call after filling a HairSectionEnv.
+- file header, the TU split: kept as "Own TU: SandboxComponentDetails.cpp is at the Debug COFF section cap."
+- file header, headless: tests/hair's HairGroomEditorTest leaves AVER_WITH_IMGUI undefined and still gets load, save, dirty, undo and every edit; only the widgets are absent (kept).
+- `HairSectionEnv::instantEdit` / `gestureEdit`: SandboxApp's instantEdit / gestureEdit for the section's kind (kept as "runs mutate as ONE undo step when changed is true" in summary).
+- `HairSectionEnv::assetRow`: the "Groom (.ochair)" asset row: draws the picker for the component's asset id (key "asset") and applies a change through the applier.
+- `HairSectionEnv::computeHost`: HairScene::ready() decides it.
+- `drawHairSection`: nothing when the entity has no CHair (kept).
+- `HairGroomEditor` (reachable-for-headless-test section): records() is "the records (no strands, no embedded scalp: those sit beside them)" (kept shortened).
+- `edit`: then sanitize (the clamps that keep valid() true), dirty, preview stale (kept shortened).
+- `addMaterial` group: "Material and look index lists: add a record with the next unused index (refused at 255), remove one by index (the last of a kind stays)." (kept shortened, but "the last of a kind stays" is now "removing the last of a kind is refused")
+- `useStarterProxies`: the humanoid starter set, per the library's rules (kept shortened).
+- `clearStoredStrands`: makes the groom generated again (kept as "turns GENERATE on").
+- `importCurves`: as AverAssetC hair does (kept).
+- `preview`: the preview as last built (kept as "Stale until preview() is called again after an edit").
+- `advice`: the advice lines for the groom as it stands, recomputed when the records change.
+- `previewNextMs_` block: at most every ~120 ms while a drag runs; previewStale_ plus previewNextMs_ (kept shortened).
+- `previewScalpKey_`: the scalp the cached mesh was read for.
+- scratch block: "plain so they need no #if" (kept as "plain so no #if is needed").
+- `ItemState` block: each widget takes the current value from the records and writes through `set` inside edit() / editInGesture(), so a drag is one undo step (kept shortened).
+- `makeHairGroomEditor`: creates the Groom tab for an .ochair, else nullptr.
+
+
+## sandbox/src/SoftShapeDetailsModel.hpp
+
+- file header: the section is the Jelly and Rope Details sections of docs/SOFTBODY.md "Jelly, ropes and cables"; header-only and ImGui-free so tests can drive every rule; SoftShapeGizmos.cpp is the widget, overlay and gizmo half, in its own translation unit because SandboxComponentDetails.cpp and SandboxRender.cpp are at the Debug COFF section cap.
+- file header: the component state is read and written through game::applyPlacedComponent / capturePlacedComponent (LevelComponents.cpp), so what the section edits is exactly what the level saves and reloads; this header only knows the record spelling.
+- ShapeKind::type: the COMPONENT record type. ShapeKind::label: the Add Component menu row.
+- canonicalize: drops every key that is at its default. Idempotent.
+- parseVec3: "x,y,z" -> three numbers; false for anything else.
+- newRopeRecord: a Rope record from its two world points (what Add Component writes); the ends are pinned.
+- ropeNodeCount: nodes a rope of this length needs (what the system will build), at least 3; the cap tells whether it is over.
+- ropeRestLength: the component's length when it names one, else the distance times the asset's slack.
+- ropeEndWorld: a null matrix means the offset is a world point (the removed text said "null matrix"; the code tests a null anchor pointer).
+- ropeEndOffsetFor: the inverse of ropeEndWorld.
+- pickHandle: handle index (0 .. count - 1) nearest the pick ray among those within radiusCm, in front of the origin; -1 for none.
+- ropeGizmoHandles: fills the two end positions in the world, false when the entity is not a rope.
+- ropeGizmoDrag: moves an end to a world point by rewriting the component's offset, in its anchor entity's space when it has one. The undo step belongs to the caller, which captures the record before and after.
+- ropeHandleBegin: grabs the nearer end when the click ray passes within a 12 pixel radius; pixelWorldCm is the world size of one pixel at the rope's distance; returns true so the click is not also a selection change.
+- ropeHandleUpdate: moves the grabbed end on the camera-facing plane through it, keeping the offset of the grab; returns true when it moved.
+- ropeHandleEnd: lets go. The drag is not an undo step (the decal box handles are not either); the Details rows are.
+- SoftShapeEnv: callbacks, each a thin wrapper over what the Cloth section already uses in SandboxComponentDetails.cpp: content id -> content-relative path, the "Asset (.ocsoft)" row, adopting a newly written asset into the Content Browser, and writing the component's asset field (an undo step).
+- drawSoftShapeSection: the Jelly or Rope section for entity e; nothing when it has no such component. `world` is the live scene.
+- drawClothShapeSections: the asset is edited in place and saved on a change. closedKnown / closed: whether the system has looked at the mesh and found it closed. Returns true when the asset was saved.
+- drawClothPressureLive: the live pressure slider that calls SoftBodySystem::setPressure during Play.

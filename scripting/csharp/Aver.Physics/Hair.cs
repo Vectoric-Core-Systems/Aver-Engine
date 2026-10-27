@@ -1,10 +1,8 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-//
-// Strand hair on Jolt's Hair (physics_hair_abi.h): the settings builder, the settings and instance handles and the index blocks of
-// the parameter arrays. A thin wrapper for tools and tests; game scripts use Entity.AddHair and the Hair node family in Aver.Framework.
-// Units are engine centimetres and engine axes throughout, hair space being the space of the scalp mesh.
+
+// Strand hair on Jolt's Hair (physics_hair_abi.h). Tools and tests; game scripts use Entity.AddHair. Units: cm, engine axes.
 
 using System.Runtime.CompilerServices;
 
@@ -27,8 +25,7 @@ public enum HairParam
     Count = 10,
 }
 
-/// <summary>Indices of a material's parameter block (AVER_PHYS_HAIRM_*). A gradient takes four floats from its index: min, max, min
-/// fraction, max fraction.</summary>
+/// <summary>Indices of a material's parameter block (AVER_PHYS_HAIRM_*). A gradient takes four floats: min, max, min fraction, max fraction.</summary>
 public enum HairMaterialParam
 {
     EnableCollision = 0,
@@ -147,16 +144,14 @@ public sealed class HairSettingsBuilder
 
     public bool IsOpen => _id != 0;
 
-    /// <summary>Render strands: points in cm (3 per vertex, scalp-mesh space), the first vertex of each strand in strandStart (and one past
-    /// the last), a material per strand and an optional inverse mass per vertex. Every strand has 3 to 255 vertices.</summary>
+    /// <summary>Render strands: points in cm (3 per vertex, scalp-mesh space), the first vertex of each strand in strandStart (and one past the last), a material per strand and an optional inverse mass per vertex. 3 to 255 vertices per strand.</summary>
     public bool SetStrands(float[] pointsXyz, int[] strandStart, int[]? strandMaterial = null, float[]? invMass = null)
     {
         if (_id == 0 || strandStart.Length < 2) return false;
         return Native.aver_phys_hair_settings_strands(_id, pointsXyz, invMass, pointsXyz.Length / 3, strandStart, strandMaterial, strandStart.Length - 1) != 0;
     }
 
-    /// <summary>The scalp mesh the roots attach to. Joints and weights (4 per vertex) are indices into the scalp joint list; both null
-    /// skins everything to one joint. A joint count of 0 counts as 1.</summary>
+    /// <summary>The scalp mesh the roots attach to. Both joints and weights null skins all to one joint; a jointCount of 0 counts as 1.</summary>
     public bool SetScalp(float[] vertsXyz, int[] tri3, int[]? joints4 = null, float[]? weights4 = null, int jointCount = 1)
     {
         return _id != 0 && Native.aver_phys_hair_settings_scalp(_id, vertsXyz, vertsXyz.Length / 3, tri3, tri3.Length / 3, joints4, weights4, jointCount) != 0;
@@ -168,8 +163,7 @@ public sealed class HairSettingsBuilder
     /// <summary>The settings' parameters, indexed by <see cref="HairParam"/>. NaN entries keep the default.</summary>
     public bool SetParams(float[] p) => _id != 0 && Native.aver_phys_hair_settings_params(_id, p, p.Length) != 0;
 
-    /// <summary>Splits render and simulated strands and creates the compute buffers. Returns the settings handle, 0 on refusal; the builder is
-    /// closed either way. Resample 0 keeps every strand as it is. Slow for a large groom: call it from a worker.</summary>
+    /// <summary>Splits render and simulated strands and creates the compute buffers. 0 handle on refusal; the builder closes either way. Slow: call from a worker.</summary>
     public HairSettingsHandle Finish(int resampleVertices, out float rootToScalpCm)
     {
         rootToScalpCm = 0;

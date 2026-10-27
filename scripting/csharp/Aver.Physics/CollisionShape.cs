@@ -1,24 +1,15 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-//
-// Generic shape handles (physics_shape_builder_abi.h): every collision shape Jolt has, built, combined with
-// decorators and compounds, introspected, and put on a body. Engine units and axes: centimetres, +X forward,
-// +Y right, +Z up, a capsule's height TOTAL, a cylinder's full, all upright along +Z.
+
+// Generic shape handles (physics_shape_builder_abi.h). Units: cm; +X forward, +Y right, +Z up.
 
 using System;
 
 namespace Aver.Physics;
 
-/// <summary>Optional build parameters of a shape. A negative <see cref="ConvexRadiusCm"/> is the shape's own default
-/// (5 cm; a triangle's is 0). Entries a shape does not use are ignored: the hull tolerance, edge angle, build quality
-/// and triangles per leaf are for hulls and meshes.</summary>
-/// <param name="ConvexRadiusCm">Convex radius in cm; Jolt clamps it to the smallest extent.</param>
-/// <param name="DensityKgM3">Density of a convex leaf, which gives the mass of a body made with no mass.</param>
-/// <param name="HullToleranceCm">How far a hull point may sit outside the hull before it is kept.</param>
-/// <param name="EdgeAngleDeg">Mesh active-edge angle; negative makes every edge active (then bodies touching it want enhanced edges).</param>
-/// <param name="FavorBuildSpeed">Mesh: build faster, query slower (procedural and destruction meshes).</param>
-/// <param name="MaxTrianglesPerLeaf">Mesh: 1 to 8.</param>
+/// <summary>Optional build parameters of a shape. A negative <see cref="ConvexRadiusCm"/> is the shape's own default.</summary>
+/// <param name="EdgeAngleDeg">Negative makes every edge active, so bodies touching it want enhanced edges.</param>
 public readonly record struct ShapeParams(float ConvexRadiusCm = -1f, float DensityKgM3 = 1000f, float HullToleranceCm = 0.1f,
                                           float EdgeAngleDeg = 5f, bool FavorBuildSpeed = false, int MaxTrianglesPerLeaf = 8)
 {
@@ -37,8 +28,8 @@ public readonly record struct ShapeInfo(ShapeType Type, float VolumeCm3, float M
                                         float InnerRadius, Float3 InertiaPrincipal, Quaternion InertiaFrame,
                                         int Children, int Leaves, int Triangles, long Bytes, bool MustBeStatic, bool HasMass);
 
-/// <summary>A handle to a collision shape. 0 is invalid. A shape is not a body: build it here, put it on bodies with
-/// <see cref="CreateBody"/>, and <see cref="Release"/> it when done (a body keeps its shape alive).</summary>
+/// <summary>A handle to a collision shape. 0 is invalid. A shape is not a body: put it on one with <see cref="CreateBody"/>.
+/// <see cref="Release"/> it when done (a body keeps it alive).</summary>
 public readonly struct CollisionShape : IEquatable<CollisionShape>
 {
     public int Handle { get; }
@@ -46,8 +37,6 @@ public readonly struct CollisionShape : IEquatable<CollisionShape>
 
     public bool IsValid => Handle != 0;
     public static CollisionShape None => new(0);
-
-    // ---- Leaves ---------------------------------------------------------------------------------------------
 
     /// <summary>A box with these half extents.</summary>
     public static CollisionShape Box(Float3 half, int surface = 0, ShapeParams? p = null) =>
@@ -75,8 +64,7 @@ public readonly struct CollisionShape : IEquatable<CollisionShape>
     public static CollisionShape Triangle(Float3 a, Float3 b, Float3 c, int surface = 0, ShapeParams? p = null) =>
         new(Native.aver_phys_shape_triangle(new[] { a.X, a.Y, a.Z, b.X, b.Y, b.Z, c.X, c.Y, c.Z }, surface, Block(p), BlockLen(p)));
 
-    /// <summary>The points with <c>normal . x = offsetCm</c>; the side opposite the normal is solid. Static or kinematic
-    /// bodies only. <paramref name="halfExtentCm"/> (1 to 1e6) bounds its broadphase box.</summary>
+    /// <summary>The points with <c>normal . x = offsetCm</c>; the side opposite the normal is solid. Static or kinematic bodies only.</summary>
     public static CollisionShape Plane(Float3 normal, float offsetCm, float halfExtentCm, int surface = 0) =>
         new(Native.aver_phys_shape_plane(normal.ToArray(), offsetCm, halfExtentCm, surface));
 
@@ -88,9 +76,7 @@ public readonly struct CollisionShape : IEquatable<CollisionShape>
         points is null || points.Length < 4 ? None
             : new(Native.aver_phys_shape_convex_hull(Flatten(points), points.Length, surface, Block(p), BlockLen(p)));
 
-    /// <summary>A triangle mesh. <paramref name="indices"/> is 3 per triangle. <paramref name="palette"/> is up to 32
-    /// surface ids and <paramref name="triPalette"/> one byte per triangle indexing it; <paramref name="triUserData"/>
-    /// is one value per triangle. Mismatched array lengths return <see cref="None"/>.</summary>
+    /// <summary>A triangle mesh. <paramref name="indices"/> is 3 per triangle. Mismatched array lengths return <see cref="None"/>.</summary>
     public static CollisionShape Mesh(Float3[] vertices, int[] indices, byte[]? triPalette = null, int[]? palette = null,
                                       int[]? triUserData = null, ShapeParams? p = null)
     {
@@ -103,8 +89,6 @@ public readonly struct CollisionShape : IEquatable<CollisionShape>
                                                triPalette, palette, palette?.Length ?? 0, triUserData, Block(p), BlockLen(p)));
     }
 
-    // ---- Decorators and compounds ---------------------------------------------------------------------------
-
     public CollisionShape RotatedTranslated(Float3 position, Quaternion rotation) =>
         new(Native.aver_phys_shape_rotated_translated(Handle, position.ToArray(), Quat(rotation)));
 
@@ -114,8 +98,7 @@ public readonly struct CollisionShape : IEquatable<CollisionShape>
     /// <summary>Scales the shape (Jolt's ScaleShape: a scale it cannot wrap is baked where it can, refused where it cannot).</summary>
     public CollisionShape Scaled(Float3 scale) => new(Native.aver_phys_shape_scaled(Handle, scale.ToArray()));
 
-    /// <summary>One shape from several. A mutable compound can gain and lose children while its body runs
-    /// (<see cref="Body.AddChild"/>) and belongs to the first body made from it.</summary>
+    /// <summary>One shape from several. A mutable compound can gain and lose children at run time (<see cref="Body.AddChild"/>).</summary>
     public static CollisionShape Compound(ShapeChild[] children, bool mutable = false)
     {
         if (children is null || children.Length < 1) return None;
@@ -134,8 +117,6 @@ public readonly struct CollisionShape : IEquatable<CollisionShape>
         }
         return new(Native.aver_phys_shape_compound(mutable ? (int)CompoundKind.Mutable : (int)CompoundKind.Static, handles, pos, rot, user, n));
     }
-
-    // ---- Handles and introspection --------------------------------------------------------------------------
 
     /// <summary>Live shape handles (a diagnostic).</summary>
     public static int Count() => Native.aver_phys_shape_count();
@@ -164,12 +145,8 @@ public readonly struct CollisionShape : IEquatable<CollisionShape>
         return true;
     }
 
-    // ---- Bodies ---------------------------------------------------------------------------------------------
-
-    /// <summary>A body made from this shape at <paramref name="origin"/> (the shape's origin, which is not its centre of
-    /// mass for a compound or an offset shape). <paramref name="massKg"/> &lt;= 0 takes volume times density. A plane,
-    /// heightfield or a mesh without a mass cannot be dynamic; a mesh with a mass can, and then collides with convex
-    /// shapes only (not other meshes or heightfields).</summary>
+    /// <summary>A body made from this shape at <paramref name="origin"/> (the shape's origin, which is not its centre of mass for a compound or an offset shape).
+    /// A massKg of 0 or less takes volume times density. A plane, heightfield or massless mesh cannot be dynamic.</summary>
     public Body CreateBody(Float3 origin, Quaternion rotation, MotionType motion, float massKg = 0f, int layer = 0,
                            bool sensor = false, bool enhancedEdges = false)
     {
@@ -181,16 +158,12 @@ public readonly struct CollisionShape : IEquatable<CollisionShape>
         return new Body(Native.aver_phys_body_from_shape(Handle, origin.ToArray(), Quat(rotation), (int)motion, massKg, p, p.Length));
     }
 
-    // ---- Equality -------------------------------------------------------------------------------------------
-
     public bool Equals(CollisionShape other) => Handle == other.Handle;
     public override bool Equals(object? obj) => obj is CollisionShape s && Equals(s);
     public override int GetHashCode() => Handle;
     public static bool operator ==(CollisionShape a, CollisionShape b) => a.Handle == b.Handle;
     public static bool operator !=(CollisionShape a, CollisionShape b) => a.Handle != b.Handle;
     public override string ToString() => IsValid ? $"CollisionShape#{Handle}" : "CollisionShape(none)";
-
-    // ---- Packing --------------------------------------------------------------------------------------------
 
     internal static float[]? Block(ShapeParams? p) => p?.ToBlock();
     internal static int BlockLen(ShapeParams? p) => p is null ? 0 : (int)SpIndex.Count;

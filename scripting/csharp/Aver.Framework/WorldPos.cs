@@ -1,15 +1,13 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// A position that stays exact at any distance: a global chunk index plus a float offset inside the chunk (docs/plans/wave11/LARGE_WORLD.md
-// 2.1, 2.5). The arithmetic is aver/world/WorldPos.hpp restated; a test pins the two against each other.
+// A position that stays exact at any distance: a global chunk index plus a float offset inside the chunk (docs/plans/wave11/LARGE_WORLD.md 2.1, 2.5).
 
 using Aver.Scene;
 
 namespace Aver.Framework;
 
-/// <summary>A double-precision vector in centimetres: an absolute position (or a distance between two) where a <see cref="Vec3"/> would
-/// lose precision. Exact to 2^53 cm.</summary>
+/// <summary>A double-precision vector in centimetres: an absolute position (or a distance between two) where a <see cref="Vec3"/> would lose precision.</summary>
 public readonly struct Double3 : IEquatable<Double3>
 {
     /// <summary>X, centimetres.</summary>
@@ -61,11 +59,7 @@ public readonly struct Double3 : IEquatable<Double3>
     public override string ToString() => $"({X:R}, {Y:R}, {Z:R})";
 }
 
-/// <summary>A position in the whole world: a global chunk index (16 m chunks, three integers) and a float offset inside that chunk, in
-/// [0, 1600) centimetres. 1.2 micrometres at any distance, where a bare float is 1 cm at 100 km.</summary>
-/// <remarks>The scene, physics and every other API speak origin-relative floats (<see cref="Entity.WorldPosition"/>); this is what a
-/// script stores when a position must outlive a floating-origin shift. Region 0 is centred on the world's zero; a region is
-/// 1024 chunks (16.384 km) on a side. Convert with <see cref="WorldOrigin"/> or the members here.</remarks>
+/// <summary>A position in the whole world: a global chunk index (16 m chunks, three integers) and a float offset inside that chunk, in [0, 1600) centimetres.</summary>
 public readonly struct WorldPos : IEquatable<WorldPos>
 {
     /// <summary>Chunk edge in centimetres.</summary>
@@ -87,8 +81,7 @@ public readonly struct WorldPos : IEquatable<WorldPos>
     /// <summary>Makes a position from a chunk and an offset. The offset is not normalised; use <see cref="FromAbsolute"/> for that.</summary>
     public WorldPos(int chunkX, int chunkY, int chunkZ, Vec3 local) { ChunkX = chunkX; ChunkY = chunkY; ChunkZ = chunkZ; Local = local; }
 
-    // One axis of the split with the invariant local in [0, 1600) enforced: the f64 division can land a value one chunk off, and
-    // narrowing a remainder just under the chunk size can round up to it. Both are repaired, exactly like world::detail::splitAxis.
+    // Keeps local in [0, 1600): the f64 division and the float narrowing can each land one chunk off. Repaired as world::detail::splitAxis does.
     private static void SplitAxis(double v, out int chunk, out float local)
     {
         const double s = ChunkSizeCm;
@@ -116,7 +109,7 @@ public readonly struct WorldPos : IEquatable<WorldPos>
                                        (double)((long)ChunkY * ChunkSizeCm) + Local.Y,
                                        (double)((long)ChunkZ * ChunkSizeCm) + Local.Z);
 
-    /// <summary>The origin-relative position the scene uses for this point, through the current floating origin. One rounding.</summary>
+    /// <summary>The origin-relative position the scene uses for this point, through the current floating origin.</summary>
     public Vec3 ToLocal()
     {
         (long ox, long oy) = WorldOrigin.Origin;

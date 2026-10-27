@@ -2,18 +2,13 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
-// The rest of Jolt's soft bodies (physics_softbody_ext_abi.h): tetrahedral volumes, long range attachments, Cosserat
-// rods, Jolt's own constraint generator, pressure, grab and release, contact policy, sensors, a collision group and
-// buoyancy. A thin wrapper for tools and tests; game scripts use Entity and SoftShapes in Aver.Framework. Units are
-// engine centimetres, kg, kPa and engine axes throughout. A body that never uses anything here behaves as before.
+// Thin wrapper over physics_softbody_ext_abi.h, in engine units (cm, kg, kPa, engine axes). Game scripts use Entity and SoftShapes in Aver.Framework.
 
 using System;
 
 namespace Aver.Physics;
 
-/// <summary>Indices of the extra parameter array (AVER_PHYS_SBX_P_*, physics_softbody_ext_abi.h). NaN = leave as is.
-/// Defaults: pressure 0, skin enabled, skin distance scale 1, group 0, mass scales 1, fluid density 0, fluid drag 1,
-/// buoyancy flags WorldWater.</summary>
+/// <summary>Indices of the extra parameter array (AVER_PHYS_SBX_P_*, physics_softbody_ext_abi.h). NaN = leave as is.</summary>
 public enum SoftBodyExtParam
 {
     PressureKPa = 0,
@@ -102,8 +97,7 @@ public sealed partial class SoftBodyBuilder
     public bool LraAuto(LraMode mode, float distanceMultiplier = 1.0f) =>
         _id != 0 && Native.aver_phys_sbx_builder_lra_auto(_id, (int)mode, distanceMultiplier) != 0;
 
-    /// <summary>Cosserat rods (2 vertices each) and the pairs of rods (indices within this call) joined by a bend-twist
-    /// constraint. A rod no pair names is refused.</summary>
+    /// <summary>Cosserat rods (2 vertices each) and the pairs of rods (indices within this call) joined by a bend-twist constraint. A rod no pair names is refused.</summary>
     public bool Rods(int[] ab, float[]? stretch, int[] rodPairs2, float[]? bendTwist) =>
         _id != 0 && Native.aver_phys_sbx_builder_rods(_id, ab, stretch, ab.Length / 2, rodPairs2, bendTwist, rodPairs2.Length / 2) != 0;
 
@@ -111,8 +105,7 @@ public sealed partial class SoftBodyBuilder
     public bool RodChain(int firstVertex, int vertexCount, float stretch = 0, float bendTwist = 0) =>
         _id != 0 && Native.aver_phys_sbx_builder_rod_chain(_id, firstVertex, vertexCount, stretch, bendTwist) != 0;
 
-    /// <summary>Jolt's CreateConstraints over the staged faces. Five numbers per vertex attribute: compliance, shear compliance,
-    /// bend compliance (negative = no bends), LRA mode, LRA multiplier. Refused with staged edges or bends.</summary>
+    /// <summary>Jolt's CreateConstraints over the staged faces. Five numbers per vertex attribute: compliance, shear compliance, bend compliance (negative = no bends), LRA mode, LRA multiplier. Refused with staged edges or bends.</summary>
     public bool Auto(float[] attrs5, BendType bend, float angleToleranceDeg = 8) =>
         _id != 0 && Native.aver_phys_sbx_builder_auto(_id, attrs5, attrs5.Length / 5, (int)bend, angleToleranceDeg) != 0;
 
@@ -213,8 +206,7 @@ public readonly partial struct SoftBodyHandle
 
     public int RodCount => Native.aver_phys_sbx_rod_count(Handle);
 
-    /// <summary>World orientation of rods firstRod .. (engine +X rotated by it is the rod's direction) and their angular
-    /// velocity (rad/s). Fills as many as both spans hold (an empty angular span is skipped). Returns the number written.</summary>
+    /// <summary>World orientation of rods firstRod .. (engine +X rotated by it is the rod's direction) and their angular velocity (rad/s). Fills as many as both spans hold (an empty angular span is skipped). Returns the number written.</summary>
     public int RodState(int firstRod, Span<Quaternion> rotation, Span<Float3> angularVelocity)
     {
         int n = rotation.Length;

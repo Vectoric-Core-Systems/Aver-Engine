@@ -1,18 +1,15 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-//
-// The physics world's configuration (physics_world_abi.h): the live solver settings, the limits a world is built
-// with, rebuilding the world, and the build facts. Units are the engine's: centimetres, cm/s, seconds, degrees
-// where the name says so. Defaults are Jolt's own converted to centimetres, so a game that never calls anything
-// here simulates exactly as before.
+
+// The physics world's configuration (physics_world_abi.h): live solver settings, world limits, rebuild and build facts.
+// Units: cm, cm/s, seconds, degrees where the name says so.
 
 using System;
 
 namespace Aver.Physics;
 
-/// <summary>The live solver settings, in the native table's order (AVER_PHYS_WS_*). Setting one applies to the
-/// running world at once and is remembered across a world rebuild.</summary>
+/// <summary>The live solver settings, in the native table's order (AVER_PHYS_WS_*).</summary>
 public enum PhysicsSetting
 {
     /// <summary>Solver velocity iterations (2..64). Below 2 friction stops working.</summary>
@@ -61,8 +58,7 @@ public enum PhysicsSetting
     Count = 27,
 }
 
-/// <summary>The limits a world is built with (AVER_PHYS_CF_*). Fixed for the world's lifetime: a set is remembered
-/// as pending and applies when the world is next created, or at once through <see cref="Physics.RebuildWorld"/>.</summary>
+/// <summary>The limits a world is built with (AVER_PHYS_CF_*). Fixed for the world's lifetime; a set applies at the next world creation or via RebuildWorld.</summary>
 public enum PhysicsConfigKey
 {
     MaxBodies = 0,
@@ -97,14 +93,12 @@ public enum PhysicsBuildFlags : uint
 
 public static partial class Physics
 {
-    // ---- Live solver settings -----------------------------------------------------------------------
-
     /// <summary>The setting's current value.</summary>
     public static float GetSetting(PhysicsSetting key) =>
         Native.aver_phys_setting_get((int)key, out float v) != 0 ? v : 0f;
 
-    /// <summary>Sets a setting (clamped into its range, whole numbers for counts and flags). False for an unknown key
-    /// or a NaN. Applies to the running world at once, and survives a rebuild.</summary>
+    /// <summary>Sets a setting (clamped into its range, whole numbers for counts and flags). False for an unknown key or a NaN.
+    /// Applies to the running world at once, and survives a rebuild.</summary>
     public static bool SetSetting(PhysicsSetting key, float value) => Native.aver_phys_setting_set((int)key, value) != 0;
 
     /// <summary>Puts a setting back to Jolt's default.</summary>
@@ -133,10 +127,7 @@ public static partial class Physics
         return k >= 0;
     }
 
-    // ---- World limits ----------------------------------------------------------------------------------
-
-    /// <summary>Sets a limit the NEXT world is built with (works with or without a world). Clamped; false for an
-    /// unknown key or a NaN.</summary>
+    /// <summary>Sets a limit the NEXT world is built with (works with or without a world). Clamped; false for an unknown key or a NaN.</summary>
     public static bool SetConfig(PhysicsConfigKey key, float value) => Native.aver_phys_config_set((int)key, value) != 0;
 
     /// <summary>The pending value of a limit: what the next world will use.</summary>
@@ -154,15 +145,11 @@ public static partial class Physics
     /// <summary>True when a world exists and was built with other limits than the pending ones.</summary>
     public static bool ConfigNeedsRebuild => Native.aver_phys_config_differs() != 0;
 
-    /// <summary>True when <see cref="RebuildWorld"/> would be accepted: no world, or a world with no bodies,
-    /// characters, joints, ragdolls or vehicles.</summary>
+    /// <summary>True when <see cref="RebuildWorld"/> would be accepted: no world, or a world with no bodies, characters, joints, ragdolls or vehicles.</summary>
     public static bool WorldIsEmpty => Native.aver_phys_world_empty() != 0;
 
-    /// <summary>Creates the world again with the pending limits. Refused (false) unless the world is empty. Settings
-    /// and shape handles survive.</summary>
+    /// <summary>Creates the world again with the pending limits. Refused (false) unless the world is empty; settings and shape handles survive.</summary>
     public static bool RebuildWorld() => Native.aver_phys_rebuild() != 0;
-
-    // ---- Build facts (callable with no world) ---------------------------------------------------------
 
     /// <summary>Single or double precision positions in the native library.</summary>
     public static PhysicsPrecision Precision => (PhysicsPrecision)Native.aver_phys_precision();
@@ -170,8 +157,7 @@ public static partial class Physics
     /// <summary>The optional features the native library has.</summary>
     public static PhysicsBuildFlags BuildFlags => (PhysicsBuildFlags)Native.aver_phys_build_flags();
 
-    /// <summary>Jolt's configuration string plus the state layout version. Two peers compare this before they
-    /// exchange physics state.</summary>
+    /// <summary>Jolt's configuration string plus the state layout version. Two peers compare this before they exchange physics state.</summary>
     public static string BuildString
     {
         get

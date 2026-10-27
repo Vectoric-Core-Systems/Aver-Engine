@@ -2,9 +2,7 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 //
-// The physics world's statistics (aver_phys_stats): body counts, the fixed step's wall time, and the update
-// errors Jolt reports when a limit is too small. A snapshot, cheap enough to read every frame; all zero with no
-// world.
+// Physics world statistics and profiler table (aver_phys_stats). A snapshot, cheap enough to read every frame.
 
 using System;
 using System.Collections.Generic;
@@ -45,8 +43,7 @@ public enum PhysicsStat
     Count = 26,
 }
 
-/// <summary>What Jolt could not hold during a step: contacts were dropped. Raise the matching limit
-/// (<see cref="PhysicsConfigKey.MaxContacts"/> or <see cref="PhysicsConfigKey.MaxBodyPairs"/>) and rebuild.</summary>
+/// <summary>What Jolt could not hold during a step: contacts were dropped. Raise the matching limit (<see cref="PhysicsConfigKey.MaxContacts"/> or <see cref="PhysicsConfigKey.MaxBodyPairs"/>) and rebuild.</summary>
 [Flags]
 public enum PhysicsUpdateErrors
 {
@@ -104,19 +101,15 @@ public readonly struct PhysicsStats
 }
 
 /// <summary>One scope of the profiler table: a Jolt stage or one of the engine's fixed-step stages. Rows come depth first.</summary>
-/// <param name="Name">The scope's name ("PhysicsStep", "Update", "FindCollisions", ...).</param>
 /// <param name="InclusiveMs">Milliseconds per fixed step, averaged over the last published window, children included.</param>
 /// <param name="ExclusiveMs">Milliseconds per fixed step spent in the scope itself.</param>
 /// <param name="MaxMs">The largest per-step inclusive time of any call in the window.</param>
-/// <param name="CallsPerStep">How often the scope ran per fixed step.</param>
 /// <param name="Parent">Index of the parent row, -1 for a root.</param>
-/// <param name="Depth">Nesting depth, 0 for a root.</param>
 public readonly record struct ProfileRow(string Name, double InclusiveMs, double ExclusiveMs, double MaxMs, double CallsPerStep, int Parent, int Depth);
 
 public static partial class Physics
 {
-    /// <summary>Turns the profiler on or off. False when the native library was built without the hook
-    /// (<see cref="PhysicsBuildFlags.Profiler"/>). While off a profile scope costs one branch; the table freezes when disabled.</summary>
+    /// <summary>Turns the profiler on or off. False when the native library was built without the hook (<see cref="PhysicsBuildFlags.Profiler"/>).</summary>
     public static bool ProfileEnable(bool on) => Native.aver_phys_profile_enable(on ? 1 : 0) != 0;
 
     /// <summary>True while the profiler is collecting.</summary>
@@ -125,8 +118,7 @@ public static partial class Physics
     /// <summary>Drops the profile table and restarts its window.</summary>
     public static void ProfileReset() => Native.aver_phys_profile_reset();
 
-    /// <summary>The last published profile table, depth first. Empty until the profiler has run for about five fixed steps.
-    /// Jolt's job scopes appear under one "Worker jobs" row whose times are CPU time summed over the worker threads.</summary>
+    /// <summary>The last published profile table, depth first.</summary>
     public static IReadOnlyList<ProfileRow> ProfileRows()
     {
         int n = Native.aver_phys_profile_count();
@@ -164,11 +156,9 @@ public static partial class Physics
     /// <summary>Clears the maximum step time, the temp-memory peak and the update-error fields.</summary>
     public static bool ResetStatsWindow() => Native.aver_phys_stats_reset_window() != 0;
 
-    /// <summary>The diagnostics preset's reports (AVER_PHYSICS_DIAGNOSTICS builds only): 1 broad-phase, 2 per-body simulation,
-    /// 3 narrow-phase (to the engine log), 4 Jolt's internal profiler as HTML in the working directory. False in any other build.</summary>
+    /// <summary>The diagnostics preset's reports (AVER_PHYSICS_DIAGNOSTICS builds only): 1 broad-phase, 2 per-body simulation, 3 narrow-phase (to the engine log), 4 Jolt's internal profiler as HTML in the working directory. False in any other build.</summary>
     public static bool DiagReport(int kind) => Native.aver_phys_diag_report(kind) != 0;
 
-    /// <summary>Where Jolt writes its determinism log, detlog.txt (diagnostics preset only; null for the working directory). Applies to
-    /// the next world created. False in any other build.</summary>
+    /// <summary>Where Jolt writes its determinism log, detlog.txt (diagnostics preset only; null for the working directory). Applies to the next world created. False in any other build.</summary>
     public static bool DiagLogDir(string? directory) => Native.aver_phys_diag_log_dir(directory) != 0;
 }

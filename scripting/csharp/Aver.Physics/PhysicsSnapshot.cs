@@ -1,15 +1,9 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-//
-// Snapshots of the whole physics simulation, exact stepping and the state hash (physics_state_abi.h). A snapshot holds what
-// the simulation derives between inputs -- bodies, contacts, constraints, characters, vehicle driver-aid state, the fixed-step
-// accumulator -- and restores all-or-nothing: a body, character, vehicle or joint that was removed since, or ANY constraint that
-// was added or removed, refuses the restore and changes nothing. Inputs (pedals set this frame, forces, kinematic targets,
-// tune values) are not state; a rollback layer re-issues them for each resimulated tick.
-//
-// A snapshot only restores into a world built the same way (handles change when a level reloads), and a single-precision
-// snapshot is refused by a double-precision build. It is not a save file.
+
+// Snapshots of the physics simulation, exact stepping and the state hash (physics_state_abi.h). Restores are all-or-nothing,
+// into a world built the same way. Not a save file. Inputs (pedals, forces, kinematic targets, tune values) are not state.
 
 using System;
 
@@ -35,8 +29,7 @@ public enum SnapshotParts : uint
     All = 0x1F,
 }
 
-/// <summary>How strictly a restore checks the world (AVER_PHYS_RESTORE_STRICT). The default, 0, allows bodies, characters,
-/// vehicles and joints that were ADDED since the capture: they keep their current state.</summary>
+/// <summary>How strictly a restore checks the world (AVER_PHYS_RESTORE_STRICT). The default, 0, allows bodies, characters, vehicles and joints that were ADDED since the capture: they keep their current state.</summary>
 [Flags]
 public enum RestoreOptions : uint
 {
@@ -79,24 +72,19 @@ internal enum SnapshotInfoSlot
 }
 
 /// <summary>What a snapshot holds, as counted when it was taken.</summary>
-/// <param name="Parts">The parts held.</param>
 /// <param name="Bodies">Bodies Jolt saved (a character's inner body included).</param>
 /// <param name="Steps">Fixed steps since the world was created, at the capture.</param>
-/// <param name="Bytes">The blob size.</param>
 public readonly record struct SnapshotInfo(SnapshotParts Parts, int Bodies, int Characters, int Vehicles, int Joints, int Ragdolls,
                                            uint TopologyEpoch, uint ConstraintEpoch, PhysicsPrecision Precision, long Steps, int Bytes);
 
-/// <summary>A captured physics state. Main thread, between steps. <see cref="Dispose"/> releases it; snapshots that are never
-/// released die with the world (shutdown or rebuild). There is no finalizer: the native table is main-thread only.</summary>
+/// <summary>A captured physics state. Main thread, between steps. Unreleased snapshots die with the world (shutdown or rebuild); there is no finalizer.</summary>
 public sealed class PhysicsSnapshot : IDisposable
 {
     private int _handle;
 
     private PhysicsSnapshot(int handle) { _handle = handle; }
 
-    /// <summary>Takes a snapshot of the running world. With <paramref name="reuse"/> that snapshot's buffer is overwritten in
-    /// place (no allocation once warm) and it is returned; if its handle died with an earlier world it simply becomes a new
-    /// one. Null (see <see cref="LastResult"/> and the physics error) when there is no world or a part is unknown.</summary>
+    /// <summary>Takes a snapshot of the running world. With reuse, its buffer is overwritten in place; null when there is no world or a part is unknown.</summary>
     public static PhysicsSnapshot? Capture(SnapshotParts parts = SnapshotParts.All, PhysicsSnapshot? reuse = null)
     {
         int h = Native.aver_phys_snapshot_capture(reuse?._handle ?? 0, (uint)parts);
@@ -110,8 +98,7 @@ public sealed class PhysicsSnapshot : IDisposable
         return reuse;
     }
 
-    /// <summary>Validates and adopts a blob from <see cref="ToBytes"/> (a peer, a test). Null when it is not a snapshot of this
-    /// build or fails its checksum; <see cref="LastResult"/> says which. Needs a running world.</summary>
+    /// <summary>Validates and adopts a blob from <see cref="ToBytes"/> (a peer, a test). Null when it is not a snapshot of this build or fails its checksum; needs a running world.</summary>
     public static PhysicsSnapshot? FromBytes(ReadOnlySpan<byte> data)
     {
         if (data.IsEmpty) return null;
@@ -176,9 +163,8 @@ public sealed class PhysicsSnapshot : IDisposable
     }
 }
 
-/// <summary>A fixed-capacity ring of snapshots keyed by tick: the rollback helper. Buffers are allocated once and reused. After
-/// <see cref="Rewind"/> the entries newer than the tick are dropped (that history never happened), and pushing a tick that is not
-/// newer than the newest drops the stale entries the same way. Main thread.</summary>
+/// <summary>A fixed-capacity ring of snapshots keyed by tick: the rollback helper. Buffers are allocated once and reused.
+/// Rewind drops the newer entries; a push at or before the newest tick drops the stale entries the same way. Main thread.</summary>
 public sealed class PhysicsStateRing
 {
     private readonly PhysicsSnapshot?[] _snaps;
@@ -281,8 +267,7 @@ public static partial class Physics
         set => Native.aver_phys_accumulator_set(value);
     }
 
-    // ---- The shape binary cache (physics_state_abi.h). A mesh or heightfield shape to bytes and back, so a host can keep the
-    // BVH on disk. A restore is a miss (0), never a failure. ------------------------------------------------------------
+    // Shape binary cache (physics_state_abi.h): a mesh or heightfield to bytes and back. A failed restore is a miss (0), never an error.
 
     /// <summary>Bumped by any change to unit conversion, winding or the blob layout; part of every blob.</summary>
     public static uint ShapeCacheVersion => Native.aver_phys_shape_cache_version();

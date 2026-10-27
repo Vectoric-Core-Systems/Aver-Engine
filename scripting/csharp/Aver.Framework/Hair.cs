@@ -2,11 +2,7 @@
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
 // Strand hair from a script: the CHair surface on Entity and the world wind. Design: docs/plans/wave11/SOFTBODY_HAIR.md 2.20, docs/HAIR.md.
-//
-// CHair is registered at RUNTIME (like CCloth), so adding and configuring it is a field write over the generic scene ABI and a host that never
-// registered it gets false, not a throw. The component goes on the entity that owns the skeleton the scalp is skinned to (the character root). A
-// groom is built by the hair system at its next tick; what HAPPENS (a teleport, a collider) goes through the framework relay
-// (framework_hair_abi.h) and applies at once, in arrival order. Scales read 0 as 1 on the native side, so a zero-filled component is the default.
+// CHair is registered at runtime, so a host without it gets false, not a throw. The component goes on the skeleton's owner (the character root).
 
 using Aver.Scene;
 
@@ -32,14 +28,14 @@ public readonly partial struct Entity
     private const string HairType = "CHair";
     private const int HairFlagNoCollision = 0x1, HairFlagNoShadow = 0x2, HairFlagNoWind = 0x8, HairFlagHidden = 0x10;
 
-    // False, not a throw, in a process with no native scene (the bare-process graph tests, a tool).
+    // False, not a throw, when there is no native scene (bare-process graph tests, tools).
     private bool HairHas()
     {
         try { return HasComponent(HairType); }
         catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return false; }
     }
 
-    // A scale field reads 0 as "the default 1" on the native side; a negative or non-finite value is refused here.
+    // 0 reads as the default 1 natively; negative or non-finite values are refused here.
     private bool HairSetScale(string field, float value)
     {
         if (!float.IsFinite(value) || value < 0f || !HairHas()) return false;
@@ -58,9 +54,7 @@ public readonly partial struct Entity
         catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return false; }
     }
 
-    /// <summary>Gives this character strand hair from an .ochair groom. The component goes on the entity that owns the skeleton (the character
-    /// root); the hair system builds the groom at its next tick, makes a child entity "Hair" that carries the draw, and shares the build with every
-    /// other entity using the same groom. False for a dead entity, an empty asset or a build without the hair module.</summary>
+    /// <summary>Gives this character strand hair from an .ochair groom. False for a dead entity, an empty asset or a build without the hair module.</summary>
     public bool AddHair(string asset)
     {
         if (string.IsNullOrEmpty(asset)) return false;
@@ -72,8 +66,7 @@ public readonly partial struct Entity
         catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return false; }
     }
 
-    /// <summary>Draws the hair with this .ocmat (a material whose shading model is hair) instead of the groom's own look. An empty string goes
-    /// back to the groom's look.</summary>
+    /// <summary>Draws the hair with this .ocmat (a material whose shading model is hair) instead of the groom's own look.</summary>
     public bool SetHairLook(string materialAsset)
     {
         if (!HairHas()) return false;
@@ -87,8 +80,7 @@ public readonly partial struct Entity
     /// <summary>The fraction of the render strands drawn on top of the distance levels, 0 to 1 (1 = all; the renderer clamps higher values).</summary>
     public bool SetHairDensityScale(float scale) => HairSetScale("densityScale", scale);
 
-    /// <summary>Divides the bend and stretch compliance of every material of the groom, so 2 is twice as stiff. Shared by every instance of the
-    /// groom: the last entity to ask wins.</summary>
+    /// <summary>Divides the bend and stretch compliance of every material of the groom, so 2 is twice as stiff.</summary>
     public bool SetHairStiffness(float scale) => HairSetScale("stiffnessScale", scale);
 
     /// <summary>Multiplies the world wind this hair feels. 0 is the default 1; use <see cref="SetHairWindEnabled"/> for none.</summary>
@@ -97,8 +89,7 @@ public readonly partial struct Entity
     /// <summary>Whether the world wind moves this hair.</summary>
     public bool SetHairWindEnabled(bool on) => HairSetFlag(HairFlagNoWind, !on);
 
-    /// <summary>Whether the hair collides with the character's head, neck and shoulder proxies and with colliders added by
-    /// <see cref="AddHairCollider"/>. The layer is chosen when the hair is built, so this takes effect for a rebuilt groom.</summary>
+    /// <summary>Whether the hair collides with the character's head, neck and shoulder proxies and with colliders added by <see cref="AddHairCollider"/>.</summary>
     public bool SetHairCollides(bool on) => HairSetFlag(HairFlagNoCollision, !on);
 
     /// <summary>Whether the strands cast shadow-map shadows.</summary>
@@ -107,17 +98,14 @@ public readonly partial struct Entity
     /// <summary>Shows or hides the hair. Hidden hair is neither drawn nor expanded; the simulation still follows the distance rules.</summary>
     public bool SetHairEnabled(bool on) => HairSetFlag(HairFlagHidden, !on);
 
-    /// <summary>Puts the hair back in its default pose with no velocity at the next update, wherever the head now is (after a cut or a respawn).
-    /// False while the groom is not built.</summary>
+    /// <summary>Puts the hair back in its default pose with no velocity at the next update, wherever the head now is (after a cut or a respawn).</summary>
     public bool TeleportHair()
     {
         try { return FwHair.aver_fw_hair_teleport(Handle) != 0; }
         catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return false; }
     }
 
-    /// <summary>Adds a hull that follows <paramref name="bone"/> of this character's skeleton and that hair collides with: a held prop, a hat, a
-    /// shoulder pad. <paramref name="size"/> is in centimetres (see <see cref="HairColliderShape"/>), <paramref name="offset"/> in the bone's frame.
-    /// At most 16 per character. The hull is made once the groom is built; a bone the skeleton does not have is logged and skipped then.</summary>
+    /// <summary>Adds a hull that follows <paramref name="bone"/> of this character's skeleton and that hair collides with: a held prop, a hat, a shoulder pad.</summary>
     public bool AddHairCollider(HairColliderShape shape, Vec3 size, string bone, Vec3 offset = default)
     {
         if (string.IsNullOrEmpty(bone) || (int)shape < 0 || (int)shape > 2) return false;
@@ -151,8 +139,7 @@ public readonly partial struct Entity
 /// <summary>Hair at world level.</summary>
 public static class Hair
 {
-    /// <summary>The world wind the hair feels: the soft bodies' wind (<see cref="SoftBodies.SetWind"/>), which the hair system takes from the same
-    /// place, so cloth, ropes and hair move together. Centimetres per second; the gust is an amplitude in cm/s.</summary>
+    /// <summary>The world wind the hair feels: the soft bodies' wind (<see cref="SoftBodies.SetWind"/>), so cloth, ropes and hair move together.</summary>
     public static bool SetWind(Vec3 velocityCmPerS, float gustCmPerS = 0f, float gustHz = 0.3f, float turbulence = 0f)
     {
         try { return SoftBodies.SetWind(velocityCmPerS, gustCmPerS, gustHz, turbulence); }
@@ -160,8 +147,7 @@ public static class Hair
     }
 }
 
-/// <summary>The graph-node surface for the Hair family (GraphHairNodeTable.cs): the same calls with the int-entity / primitive-only signatures
-/// GraphCompiler's emitted IL needs. A hair crosses the graph as its entity id.</summary>
+/// <summary>The graph-node surface for the Hair family (GraphHairNodeTable.cs): the same calls with the int-entity / primitive-only signatures GraphCompiler's emitted IL needs.</summary>
 internal static class HairGraphInterop
 {
     internal static bool AddHairForGraph(int entity, string asset) => new Entity(entity).AddHair(asset ?? string.Empty);

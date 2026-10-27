@@ -440,3 +440,118 @@ Kept:
 - `materialForSurface`: Search order: built .ocmat in Binaries (from avermatc) wins over hand-authored in Content. Built version is what the level ids reference. Parse failures break (corrupt built material not silently replaced by stale hand-authored).
 
 - `loadProjectParticleEffects`: Effect id is `fnv1a64(relative path)`, matches `CParticleEmitter::effect`. The table is process-global; reload clears it to prevent stale entries across project reloads.
+
+
+## Runtime/include/aver/game/AuthoredStreaming.hpp
+
+- header: the level's placements live in region files under <project>/Binaries/Chunks/<level>/; the chunk streamer keeps chunks around the viewer resident; the authored host turns each decoded chunk into entities through game::ItemLoader (collision, animators, slot materials, COMPONENT records exactly as the flat path makes them).
+- header: owns a world::ChunkWorld over the cooked set (no generator), an ItemLoader, and the host between them. Does not own the level-global records (lights, water, classes, sequence targets, ...), which are the slim level.ocworld the cook wrote; GameLevel loads that whole through the flat path before this starts.
+- header, THE CHOICE: a level whose STREAM header names `chunks=<dir>` streams from it when the set opens, is a cooked set, and its source hash matches the level as it is now. Otherwise (no set, damaged, stale) the level streams the old way and one line says why.
+- resolve: `chunksPath` is the level's STREAM chunks= value (project-relative or absolute). `source` is the level as authored (the loaded .ocworld); `levelAsset` is its content-relative path. Reads the cook's index and slim level; parses nothing else.
+- begin: `opt` is what a full load would pass to world::instantiate (materials, ground, bounds, triangles). `stream`'s load and evict distances become radii in chunks. Returns false with `why` when the set does not open. Opens the cooked set in `cookDir` and starts streaming it.
+- Hooks::afterLoad: the placement id is CookPlan's PLID, stable across a re-cook; body is -1 for none.
+- tick: mesh reads are made on worker threads; what stays in the class (GPU buffers, entities, bodies) runs nearest first within the streamer's millisecond budgets. Call once a frame, before World::flush.
+- resetVelocityTracking: after a teleport the next tick reports zero velocity instead of one huge one.
+- pin: keeps a chunk resident for sequences and tooling.
+- onOriginShift: the camera and every viewer are origin-relative while chunk keys are absolute, so a shift loads and evicts nothing; a shift only tells this class the new origin and moves the one remembered position. Called by the origin service's streaming participant (order 50), after the scene and host members have shifted.
+- setOrigin: level load or teleport without a shift (WorldOrigin::reset); the origin changes and the velocity history is dropped.
+- owns: true when a resident chunk made the entity; save skips it and the editor treats it as unselectable. Same distinction GameStreaming::owns draws for PCG scatter.
+- animatedBodies: for world::driveKinematicBodies.
+- Prepared::recs: f64 absolute for roots, parent-relative for children. Prepared::plids: parallel, the cook's placement ids. Prepared::meshes: distinct mesh object ids. Prepared::waits: prepare() calls that answered Pending. Prepared::stamp: the tick that last asked.
+- waitingChunks: a chunk decoded, still waiting for its meshes.
+- itemOf_: resident chunk -> the ItemLoader unit holding its entities.
+- counters and section banners ("the choice", "lifetime", "the floating origin", "counters") restated the names; dropped.
+
+
+## Runtime/include/aver/game/ColliderShapes.hpp
+
+- header: an .ocshape tree builds children first; a leaf that names no surface takes the file's default; a mesh leaf's slot surfaces win over the default, and the default fills the slots that name none.
+- header: `hull mesh` and `mesh` leaves read geometry through the ColliderMeshSource seam: GameContent::collisionMeshFor in a host (makeColliderShapeHost), a hand-built cube in a test.
+- buildColliderShape: every handle made on the way is released except the root's, which the caller owns. A shape stays alive while a body uses it, so releasing it right after aver_phys_body_from_shape is correct.
+- CCollisionShape: runtime-registered companion of CRigidBody (the CMotionMatcher / CCloth pattern: no Components.hpp growth, no scene-ABI change). 32 bytes; zero-filled storage is valid. Motion type, mass, friction, restitution, gravity, damping and layer come from the CRigidBody; the shape comes from the .ocshape.
+- CCollisionShape field offsets: asset @0, surface @8, flags @12, outShape @16, outMassKg @20, outVolumeCm3 @24, reserved @28.
+- CCollisionShape, editor: the editor's Play builds the shape (sandbox PhysicsSceneSync) and only the editor, as CRigidBody is; the packaged game gets shapes through C# (Aver.Physics.CollisionShape).
+- ColliderMesh::indices: three per triangle.
+- makeColliderShapeHost: `pathOfId` maps an asset id to its content-relative path ("" when unknown); `contentDir` roots it. Mesh leaves resolve the content path to the id fnv1a64 gives it and ask content.collisionMeshFor.
+- collisionShapeType: 0 when the component has not been registered.
+- COMPONENT record, motion: "Read, it sets the body's motion type (also on a body the entity already had)." On capture it is written only when the entity's body is not static; the ABSENT key means static, like every canonical default.
+- COMPONENT record, asset: the content path is hashed with fnv1a64.
+- COMPONENT record, surface: `#<hex id>` is used for an id the surface table does not know.
+- COMPONENT record, mass: Mass (the .ocshape MASS), friction and the rest stay on the CRigidBody.
+- applyCollisionShape and removeCollisionShape: the Rigid Body removal is for a body that is still the unusable zero-size box with no live body; Add Component > Collision Shape and its undo leave nothing behind.
+- buildColliderShape failure: `why` says which node and what the physics module said (kept as "the node and nothing stays allocated").
+- setColliderShapeHost is process-wide; the host sets it before Play builds bodies (kept).
+- Kept verbatim in substance: the scene-module and physics-module guards, the negative sense of kCollisionShapeIgnoreScale, OUT fields untouched by applyCollisionShape and never read by captureCollisionShape.
+- section banners ("the mesh seam", "the walker", "the host", "the component") restated the names; dropped.
+
+
+## Runtime/include/aver/game/ItemLoader.hpp
+
+- header: the MECHANISM half of authored-level streaming (docs/plans/wave11/LARGE_WORLD.md 2.4.1). Callers decide which units are wanted, their order, the time budget, pinning and write-back: game::LevelStreaming (the editable path) and, from the cook, game::AuthoredStreaming.
+- header: moved out of LevelStreaming unchanged: mesh acquire and release with the content cache's refcounts, the shared Jolt mesh-shape cache, slot-material binding, the instantiate call, the kinematic bodies of animated placements, the COMPONENT apply, and the teardown (bodies, entities children first, meshes).
+- header: a UNIT is a root and its descendants for LevelStreaming, or a chunk for the cooked path.
+- Entry::parent: the caller has already remapped it, because only the caller knows which of a placement's ancestors are part of this batch. Parents come before children, as OcWorldData has them.
+- Entry::tag: the caller's id for this placement, echoed back in Loaded. Entry::item: the unit that owns the placement.
+- Loaded::body: the body the placement created (static, or kinematic for an animated one).
+- begin: `opt` is what a full load would pass to world::instantiate (materials, ground, bounds, triangles).
+- load, origin: InstantiateOptions::origin; zero is today's absolute placement.
+- evict: children are destroyed first, so no destroy sees a parent already gone. The caller's own hooks and maps are done before this; entitiesOf() is empty afterwards. hm gets "evict:destroy" and "evict:releaseMesh".
+- load: hm gets the "meshes", "materials" and "instantiate" marks.
+- animatedBodies: for world::driveKinematicBodies.
+- ItemState::meshes: acquired while the unit is resident.
+- meshShapes_ comment: physics shapes by mesh id.
+- releaseUnusedShapes: the ones whose mesh is no longer loaded are released.
+- section banners ("units the host made itself", "the content cache's prefetch") restated names; kept only as short comments.
+
+
+## Runtime/include/aver/game/OriginParticipants.hpp
+
+- header: the hosts' side of the floating origin (docs/plans/wave11/LARGE_WORLD.md 2.2.4, 2.2.5).
+- header: this file is the only caller of the other areas' shift entry points; each area is tested alone, and this file is where they meet.
+- header: the shift happens at slot S0 at the top of onUpdate (update()), before input, gameplay, the physics step, streaming and the scene flush.
+- header: a refused shift calls nothing, because the renderer's and physics' entry points have no undo.
+- header, Bindings layout: types are forward-declared and every pointer is optional, so the header has no #if on a module and its layout is the same in every translation unit. The .cpp (in Aver.Runtime.Game.Core, which sees the module macros) calls what its build has. Whatever Core cannot link (audio, the Synapse AI instance, the occlusion culler, the editor) arrives as a hook the host fills.
+- OriginBindings::mobility: re-baselined, so statics stay Static (the reclassification trap).
+- OriginBindings::sequences: its base store follows the shift.
+- OriginBindings::nav: the host's baked grid.
+- OriginBindings::synapseAi: hearing, tactics, crowd, smart objects, EQS.
+- OriginBindings::streaming: PCG scatter chunk worlds.
+- OriginBindings::level: the cooked-chunk streamer, and what the gate reads about LevelStreaming / instances.
+- OriginBindings::voxi: null until attached (kept).
+- OriginBindings::positions: host members are every origin-relative position the host holds across frames (camera, eye, GI centre, drone, ...).
+- OriginBindings::onRenderCommit: renderer-side host state, after the renderer calls: the sandbox's occlusion basis.
+- OriginBindings::busy: why the host cannot take a shift now (a play transition, a gesture). Urgent is ShiftEvent::urgent.
+- OriginBindings::editorPrepare/editorCommit: the editor's part: undo and redo stacks, clipboard, play snapshots, overlay signatures; its prepare is the gesture gate. Empty in the game.
+- OriginBindings::postEvent: sender 0, target 0, and the payload ints (dxCm, dyCm, generation, originX, originY) are defined in framework_origin_abi.h.
+- configure: the service clamps the margin. allowShiftRequest is whether a script's aver_fw_origin_request_shift is honoured.
+- install: registers every participant and, with the framework linked, makes this the origin ABI's provider. Later calls do nothing.
+- requestShift: "False when the project did not allow it (WORLD.ALLOWSHIFTREQUEST), the origin is off, or both numbers are zero" (kept). Under the follow-camera policy the camera pulls the origin straight back at the same update; this is for the Manual policy and for callers that move the camera too.
+- resetForLevel: the service moves to `o` without running a participant (nothing exists in the new scene yet). A host calls it with the default (zero) until levels choose a region.
+- Quiesce: a shift is refused while it lives: level load, unload, a play start or stop.
+- participantCount/participantName: the participants in commit order.
+- ownsStreamed: a streamed entity has its own persistence, so a save must not capture it and a restore must not tear it down. `self` is an OriginParticipants*.
+- skipStreamed: save::SkipFn-shaped.
+- originX/originY: the origin a save is written under and restored into (CaptureOptions / RestoreOptions originX, originY).
+- order_: (order, name), kept in the service's order.
+- section banners ("scene and gameplay systems", "streaming", "renderer", "host members", "hooks", "saves") restated the names; dropped.
+- the scene order list in the header (gate 0 ... script event 90) is kept.
+
+
+## Runtime/include/aver/game/PhysicsProjectApply.hpp
+
+- header: header-only like GameTick.hpp, for the same reason (each host re-evaluates AVER_MODULE_PHYSICS in its own translation unit).
+- header: physics starts before any project is known (SandboxInit calls startPhysics before a project can open; GameApp::initPhysics precedes openProject). That is why there are two moments.
+- header: applyProjectPhysicsKeys is what GameTick.hpp's applyProjectPhysics forwards to.
+- header: a project only ever overrides what it STATES. Keys the previous project stated and this one does not go back to their defaults, so opening a second project in the editor does not inherit the first one's solver.
+- PhysicsAppliedKeys::settings: bit per AVER_PHYS_WS_* key. PhysicsAppliedKeys::config: bit per AVER_PHYS_CF_* key. PhysicsAppliedKeys::shapeCache: the previous project stated PHYSICS.SHAPECACHE.
+- physicsProjectKey: "velocitySteps" -> "PHYSICS.VELOCITYSTEPS".
+- applyProjectPhysicsSettings: returns how many were applied.
+- applyProjectPhysicsLimits: writes the manifest's init-time limits (MAXBODIES, MAXBODYPAIRS, MAXCONTACTS, TEMPALLOCMB, THREADS) into the pending config, read by the next world. A limit a previous project stated and this one does not is put back to its default. Returns how many are stated.
+- applyProjectPhysicsShapeCache: read by the level loaders as they build mesh shapes, so it must be in place before the first level. Default is off; the AVER_PHYS_SHAPE_CACHE=1 environment variable still turns it on for tools. A project that stated it and the next one that does not puts it back to the default.
+- configureProjectPhysics: writes the live solver settings and the init-time limits into the physics module's pending tables; when the world is still empty and the limits differ from what it was built with, it rebuilds it (aver_phys_rebuild). A world that already holds bodies keeps its limits and the log says they apply when it is next created. True when the world was rebuilt.
+- configureProjectPhysics: "No world yet: the pending config is what the first aver_phys_init reads" (kept).
+- applyProjectPhysicsKeys: gravity and fixed step need a live world; the settings are applied again (idempotent) so a host that never called configureProjectPhysics still gets them.
+- applyProjectPhysicsKeys: both setters are no-ops before aver_phys_init() succeeds, so this asks aver_phys_ready() itself rather than trusting the caller to have gated on it. A project that states physics before the world exists is told the settings apply once it does.
+- applyProjectPhysicsKeys: the fixed-step setter refuses a step outside (0, 0.5] by returning 0; a manifest with a nonsense step must not read as applied.
+- applyProjectPhysicsKeys: a host that configured before its first level has already rebuilt; one that did not, or whose world was not empty, is told what is pending.
+- applyProjectPhysicsKeys: the limits are fixed for a world's lifetime (kept).

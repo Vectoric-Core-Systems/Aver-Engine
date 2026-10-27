@@ -1,20 +1,8 @@
-// PhysicsProjectApply: the manifest's PHYSICS.* keys, applied. Header-only like GameTick.hpp, for the same
-// reason (each host re-evaluates AVER_MODULE_PHYSICS in its own translation unit).
-//
-// TWO MOMENTS, because physics starts before any project is known (SandboxInit calls startPhysics before a
-// project can open; GameApp::initPhysics precedes openProject):
-//
-//   configureProjectPhysics  -- right after the manifest is parsed and BEFORE the first level loads. Writes the
-//     live solver settings and the init-time limits (MAXBODIES, MAXBODYPAIRS, MAXCONTACTS, TEMPALLOCMB, THREADS)
-//     into the physics module's pending tables, and, when the world is still empty and the limits differ from
-//     what it was built with, rebuilds it (aver_phys_rebuild). A world that already holds bodies keeps its
-//     limits and the log says they apply when it is next created.
-//   applyProjectPhysicsKeys  -- after the level load (GameTick.hpp's applyProjectPhysics forwards here): gravity
-//     and fixed step, which need a live world, plus the settings again (idempotent) so a host that never called
-//     configureProjectPhysics still gets them.
-//
-// A project only ever overrides what it STATES. The keys the previous project stated and this one does not go
-// back to their defaults, so opening a second project in the editor does not inherit the first one's solver.
+// PhysicsProjectApply: applies the manifest's PHYSICS.* keys. Header-only like GameTick.hpp, since each host re-evaluates
+// AVER_MODULE_PHYSICS in its own translation unit.
+// Two moments, because physics starts before any project is known: configureProjectPhysics runs after the manifest parse and
+// before the first level; applyProjectPhysicsKeys runs after the level load (gravity and fixed step need a live world).
+// A project overrides only what it STATES: keys the previous project stated but this one does not revert to their defaults.
 #pragma once
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcProject.hpp"
@@ -48,8 +36,7 @@ inline std::string physicsProjectKey(const char* camel) {
     return s;
 }
 
-// Writes the manifest's live solver settings into the physics module's table (applied to a live world at once).
-// Returns how many were applied.
+// Live solver settings, applied to a live world at once.
 inline int applyProjectPhysicsSettings(const fmt::ProjectDesc& project) {
     PhysicsAppliedKeys& applied = physicsAppliedKeys();
     std::uint64_t stated = 0;
@@ -78,8 +65,7 @@ inline int applyProjectPhysicsSettings(const fmt::ProjectDesc& project) {
     return n;
 }
 
-// Writes the manifest's init-time limits into the pending config (read by the next world), and puts the ones a
-// previous project stated and this one does not back to their defaults. Returns how many are stated.
+// Init-time limits, read by the next world. A limit this project does not state goes back to its default if a previous one did.
 inline int applyProjectPhysicsLimits(const fmt::ProjectDesc& project) {
     struct Row { int key; int value; bool stated; const char* name; };
     const Row rows[] = {
@@ -112,9 +98,8 @@ inline int applyProjectPhysicsLimits(const fmt::ProjectDesc& project) {
     return n;
 }
 
-// PHYSICS.SHAPECACHE: the shape binary cache switch (physics_state_abi.h), read by the level loaders as they build mesh shapes,
-// so it must be in place before the first level. A project that stated it and the next one that does not puts it back to the
-// default (off; the AVER_PHYS_SHAPE_CACHE=1 environment variable still turns it on for tools).
+// PHYSICS.SHAPECACHE is read by the level loaders as they build mesh shapes, so it must be in place before the first level.
+// Without it the cache is off; AVER_PHYS_SHAPE_CACHE=1 still turns it on for tools.
 inline void applyProjectPhysicsShapeCache(const fmt::ProjectDesc& project) {
     PhysicsAppliedKeys& applied = physicsAppliedKeys();
     if (project.physShapeCache >= 0) {
@@ -126,8 +111,8 @@ inline void applyProjectPhysicsShapeCache(const fmt::ProjectDesc& project) {
     }
 }
 
-// Before the first level: settings and limits into the physics module, then a rebuild if the world is empty and
-// built with other limits. True when the world was rebuilt.
+// Before the first level. A world built with other limits is rebuilt only when empty; a non-empty one keeps its limits
+// until it is next created. True when the world was rebuilt.
 inline bool configureProjectPhysics(const fmt::ProjectDesc& project, const char* hostTag) {
     applyProjectPhysicsSettings(project);
     applyProjectPhysicsLimits(project);
@@ -147,24 +132,19 @@ inline bool configureProjectPhysics(const fmt::ProjectDesc& project, const char*
     return false;
 }
 
-// After the level load: gravity and fixed step (they need a live world), and the settings again.
-//
-// READINESS, CHECKED: both setters are no-ops before aver_phys_init() has succeeded, so this asks
-// aver_phys_ready() itself rather than trusting the caller to have gated on it already -- a project that
-// states physics settings before the world exists is told they will apply once it does.
+// After the level load. Both setters are no-ops before aver_phys_init() succeeds, so readiness is checked here, not trusted
+// from the caller: a project that states physics before the world exists is told the keys apply once it does.
 inline void applyProjectPhysicsKeys(const fmt::ProjectDesc& project) {
     applyProjectPhysicsSettings(project);
     applyProjectPhysicsLimits(project);
     if (aver_phys_ready()) {
         if (project.hasGravity)
             aver_phys_set_gravity(project.gravity[0], project.gravity[1], project.gravity[2]);
-        // CHECKED, because the setter refuses a step outside (0, 0.5] and says so by returning 0. A
-        // manifest with a nonsense step must not read as applied.
+        // The setter refuses a step outside (0, 0.5] by returning 0; checked so a bad step never reads as applied.
         if (project.fixedStep > 0.0f && !aver_phys_set_fixed_step(project.fixedStep))
             AVER_WARN("[Project] PHYSICS.FIXEDSTEP {} refused -- must be within (0, 0.5] seconds",
                       project.fixedStep);
-        // The limits are fixed for a world's lifetime. A host that configured before its first level has
-        // already rebuilt; one that did not, or whose world was not empty, is told what is pending.
+        // Limits are fixed for a world's lifetime.
         if (aver_phys_config_differs())
             AVER_INFO("[Project] PHYSICS.MAXBODIES / MAXBODYPAIRS / MAXCONTACTS / TEMPALLOCMB / THREADS "
                       "change when the world is next created");

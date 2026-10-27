@@ -1,14 +1,5 @@
-// HairInternal.hpp -- the hair registry shared by PhysicsHairSettings.cpp (settings builders and settings objects) and PhysicsHair.cpp
-// (host install, compute system, instances, update).
-//
-// SRC-LOCAL, like PhysicsInternal.hpp: it names JPH:: types. JPH::Hair, HairSettings and HairShaders live inside Aver.Physics, so the module
-// still links Jolt PRIVATE and depends on Core only; the GPU side reaches the compute work only through the function table in
-// physics_hair_abi.h (HairComputeHost.hpp), and with no table installed Jolt's CPU compute backend runs it.
-//
-// LOCKING. One mutex guards every table below. Every ABI entry point takes it; settings_finish holds it only for the registry work and runs the
-// quadratic strand split unlocked, so it can sit on a worker thread while the main thread keeps updating other hair. The host table is NOT
-// re-entered from two threads at once: everything that calls into it (buffer creation at finish and create, the queue at update and flush)
-// is under the lock.
+// HairInternal.hpp: the hair registry shared by PhysicsHairSettings.cpp and PhysicsHair.cpp. Src-local; names JPH:: types.
+// Locking: one mutex guards every table; the host table is never entered from two threads at once.
 #pragma once
 #include "aver/physics/physics_hair_abi.h"
 
@@ -36,7 +27,7 @@
 #include <mutex>
 #include <vector>
 
-// Defined in HairWindWrapper.cpp: registers the AverHairWind kernel with Jolt's CPU backend, beside Jolt's own HairRegisterShaders.
+// Defined in HairWindWrapper.cpp.
 JPH_NAMESPACE_BEGIN
 class ComputeSystemCPU;
 void AverHairRegisterShaders(ComputeSystemCPU* inComputeSystem);
@@ -44,7 +35,7 @@ JPH_NAMESPACE_END
 
 namespace aver::physics::detail {
 
-// What a settings builder staged, until finish or cancel. Everything is in the ABI's units (cm, engine axes).
+// A settings builder's staged data, until finish or cancel. Engine units (cm, engine axes).
 struct HairBuilderRec {
     std::vector<float> points;                  // 3 per vertex
     std::vector<float> invMass;                 // per vertex, or empty = 1 each
@@ -66,33 +57,31 @@ struct HairBuilderRec {
         bool described = false;
         float p[AVER_PHYS_HAIRM_COUNT];         // NaN = untouched
     };
-    std::vector<MaterialBlock> materials;       // by material index, grown on demand
+    std::vector<MaterialBlock> materials;
     float params[AVER_PHYS_HAIRP_COUNT];        // NaN = default
 
     HairBuilderRec();
 };
 
-// A finished settings object and what the ABI reports about it.
 struct HairSettingsRec {
     JPH::Ref<JPH::HairSettings> settings;
-    int32_t instances = 0;                      // hairs that use it
+    int32_t instances = 0;
     int32_t scalpJoints = 0;
     float rootToScalpCm = 0.0f;
-    float boundsCm[6] = {};                     // min xyz, max xyz in hair space, engine axes
+    float boundsCm[6] = {};                     // min xyz, max xyz in hair space
     std::vector<int32_t> renderTable;           // {start, count} per render strand
 };
 
-// One hair instance.
 struct HairRec {
     std::unique_ptr<JPH::Hair> hair;
     int32_t settings = 0;
     int32_t layer = 0;
-    std::vector<JPH::Mat44> palette;            // jointToHair is identity, so these go to Hair::Update as given
-    JPH::Quat rotation = JPH::Quat::sIdentity(); // hair rotation in Jolt space: rotates the world wind into hair space
+    std::vector<JPH::Mat44> palette;            // jointToHair is identity, passed to Hair::Update as given
+    JPH::Quat rotation = JPH::Quat::sIdentity(); // rotates the world wind into hair space
     float windCmS[3] = {0, 0, 0};
     float windDrag = 0.0f;
     float windTurbulenceCmS = 0.0f;
-    JPH::Ref<JPH::ComputeBuffer> windCB;        // the wind kernel's constants
+    JPH::Ref<JPH::ComputeBuffer> windCB;
     uint32_t updates = 0;
     uint32_t lastIterations = 0;
     uint32_t lastDispatches = 0;
@@ -106,13 +95,13 @@ struct HairGlobals {
     AverPhysComputeHostV1 host = {};
     bool hostInstalled = false;
 
-    // Created lazily by hairEnsureCompute (needs a world: Jolt's allocator is registered by aver_phys_init) and dropped with the world.
+    // Created lazily by hairEnsureCompute (needs a world: Jolt's allocator is registered by aver_phys_init); dropped with the world.
     JPH::Ref<JPH::ComputeSystem> compute;
     JPH::Ref<JPH::HairShaders> shaders;
-    JPH::Ref<JPH::ComputeShader> windCS;        // null when the host does not know AverHairWind (wind is then off)
+    JPH::Ref<JPH::ComputeShader> windCS;       // null when the host does not know AverHairWind (wind is then off)
     JPH::Ref<CountingQueue> queue;
-    int32_t readbackOk = -1;                    // -1 unknown, 0 the host cannot map a readback buffer, 1 it can
-    int32_t pendingUpdates = 0;                 // updates recorded since the last flush
+    int32_t readbackOk = -1;                    // -1 unknown, 0 cannot map a readback buffer, 1 can
+    int32_t pendingUpdates = 0;
 
     std::map<int32_t, HairBuilderRec> builders;
     std::map<int32_t, HairSettingsRec> settings;
@@ -124,15 +113,15 @@ struct HairGlobals {
 
 HairGlobals& hairGlobals();
 
-// Creates the compute system, the fifteen shaders plus the wind kernel and the queue if they do not exist yet. The caller holds the mutex and
-// a world exists. False (logged) when the host refused a shader or Jolt's CPU backend lacked one.
+// Creates the compute system, the fifteen shaders, the wind kernel and the queue if missing. Caller holds the mutex; a world exists.
+// False (logged) when the host refused a shader or Jolt's CPU backend lacked one.
 bool hairEnsureCompute(HairGlobals& g);
 
 // Applies one AVER_PHYS_HAIRM_* block (engine units) to a Jolt material; NaN entries are skipped. False when a value is not legal.
 bool hairApplyMaterialBlock(JPH::HairSettings::Material& m, const float* p, int32_t n);
 
-// Destroys every builder, settings object and hair, then the queue, shaders and compute system, then forgets the installed host. Called by
-// aver_phys_shutdown (PhysicsWorld.cpp) before the world goes. Safe with no world.
+// Destroys every builder, settings object and hair, then the queue, shaders and compute system, then forgets the host.
+// Called by aver_phys_shutdown (PhysicsWorld.cpp) before the world goes. Safe with no world.
 void hairDestroyAll();
 
 } // namespace aver::physics::detail

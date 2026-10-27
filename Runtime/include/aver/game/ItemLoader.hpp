@@ -1,14 +1,6 @@
-// The MECHANISM half of authored-level streaming (docs/plans/wave11/LARGE_WORLD.md 2.4.1): given a batch of placement
-// records, make their entities, bodies and meshes; given a resident unit, take them all away again. It owns no residency
-// policy -- which units are wanted, in what order, within what time budget, with what pinning and write-back, is the
-// caller's: game::LevelStreaming (the editable path) and, from the cook, game::AuthoredStreaming.
-//
-// What it carries, moved out of LevelStreaming unchanged: mesh acquire and release with the content cache's refcounts, the
-// shared Jolt mesh-shape cache, slot-material binding, the instantiate call, the kinematic bodies of animated placements,
-// the COMPONENT apply, and the teardown (bodies, entities children first, meshes).
-//
-// A UNIT is whatever the caller says it is -- a root and its descendants for LevelStreaming, a chunk for the cooked path --
-// named by a u32 the caller picks. The loader keeps each unit's entities, bodies, acquired meshes and animated bodies.
+// Mechanism half of authored-level streaming: given placement records, makes their entities, bodies and meshes; given a
+// resident unit, takes them all away. No residency policy here: callers (game::LevelStreaming, game::AuthoredStreaming) choose
+// the units, their order, budgets and pinning. A unit is named by a u32 the caller picks.
 #pragma once
 #include "aver/core/Types.hpp"
 #include "aver/core/Math.hpp"
@@ -30,63 +22,53 @@ class GameContent;
 
 class ItemLoader {
 public:
-    // One placement of a batch. `rec` must stay valid for the call. `parent` is an index into the same batch (parents before
-    // children, as OcWorldData has them), -1 for a root: the caller has already remapped, because only it knows which of a
-    // placement's ancestors are part of this batch.
+    // `rec` must stay valid for the call. `parent` indexes this batch (parents before children), -1 for a root; the caller remaps it.
     struct Entry {
         const fmt::OcWorldPlacement* rec = nullptr;
-        u32 tag = 0;      // the caller's id for this placement, echoed back in Loaded
-        u32 item = 0;     // the unit that owns it
+        u32 tag = 0;
+        u32 item = 0;
         i32 parent = -1;
     };
-    // One entity the batch made.
     struct Loaded {
         scene::Entity entity = scene::kInvalidEntity;
         u32 tag = 0;
         u32 item = 0;
-        i32 body = -1;    // the body the placement created (static, or kinematic for an animated one), -1 none
+        i32 body = -1;    // -1 = none
         const fmt::OcWorldPlacement* rec = nullptr;
     };
 
-    // `opt` is what a full load would pass to world::instantiate (materials, ground, bounds, triangles); its progress
-    // callback is ignored. The loader keeps a copy, with meshShapes pointed at its own cache.
+    // Keeps a copy of `opt` with meshShapes pointed at its own cache; the progress callback is ignored.
     void begin(GameContent& content, rhi::IDevice& device, const world::InstantiateOptions& opt);
-    // Releases every physics mesh shape and forgets every unit. Units still resident are the caller's to evict first.
+    // Releases every physics mesh shape and forgets every unit. The caller evicts resident units first.
     void end();
     bool active() const { return content_ != nullptr; }
 
-    // Acquires the batch's meshes (once per unit), binds their materials, instantiates the records into the process-global
-    // World and files the results under their units. `origin` is the floating origin the placements are narrowed against
-    // (InstantiateOptions::origin); zero is today's absolute placement. `hm`, when given, gets the "meshes", "materials" and
-    // "instantiate" marks. COMPONENT records are NOT applied here: the caller does its own bookkeeping first, then
-    // applyComponents (the order the editor's hooks were written against).
+    // `origin` narrows placements (InstantiateOptions::origin; zero = absolute). `hm` gets the "meshes", "materials" and "instantiate"
+    // marks. COMPONENT records are not applied here: the caller does its own bookkeeping, then calls applyComponents (the order
+    // the editor's hooks expect).
     std::vector<Loaded> load(const std::vector<Entry>& entries, world::OriginCm origin = {}, HitchMarks* hm = nullptr);
-    // Applies the COMPONENT records of a batch, in batch order. Warnings only.
+    // In batch order. Failures only warn.
     void applyComponents(const std::vector<Loaded>& loaded);
 
-    // Tears one unit down: removes its bodies, destroys its entities (children first, so no destroy sees a parent already
-    // gone), releases its meshes and forgets its kinematic bodies. `hm` gets "evict:destroy" and "evict:releaseMesh".
-    // The caller's own hooks and maps are done before this; entitiesOf() is empty afterwards.
+    // Removes the unit's bodies, destroys its entities children first, releases its meshes and forgets its kinematic bodies.
+    // `hm` gets "evict:destroy" and "evict:releaseMesh".
     void evict(scene::World& world, u32 item, HitchMarks* hm = nullptr);
 
-    // ---- units the host made itself (the editor's new placements) ----
-    // The unit now holds an entity the host created, and one reference on its mesh when the cache will give one.
+    // Units the host made itself (editor placements). adopt: the unit holds an entity the host created, plus one mesh
+    // reference when the cache gives one. forget: the host destroyed `e` and its body, so nothing here removes that body again.
     void adopt(u32 item, scene::Entity e, u64 meshObjectId);
-    // The host destroyed `e` and its body: drop them from the unit (nothing here will remove that body again).
     void forget(u32 item, scene::Entity e);
-    // Releases the unit's mesh references and nothing else.
     void releaseMeshes(u32 item);
 
     const std::vector<scene::Entity>& entitiesOf(u32 item) const;
     bool resident(u32 item) const { return items_.count(item) != 0; }
 
-    // Kinematic bodies of resident animated placements, for world::driveKinematicBodies.
     const std::vector<world::AnimatedBody>& animatedBodies() const { return animated_; }
 
-    // Physics mesh shapes by mesh id, shared by every batch; the ones whose mesh is no longer loaded are released.
+    // Shapes whose mesh is no longer loaded are released.
     void releaseUnusedShapes();
 
-    // ---- the content cache's prefetch, so a policy never reaches past the loader ----
+    // Content cache prefetch, so a policy never reaches past the loader.
     void prefetchTick();
     void prefetch(u64 meshObjectId, f32 priority);
     bool ready(u64 meshObjectId) const;
@@ -95,7 +77,7 @@ private:
     struct ItemState {
         std::vector<scene::Entity> entities;
         std::vector<std::pair<scene::Entity, i32>> bodies;
-        std::vector<u64> meshes;                       // acquired while resident
+        std::vector<u64> meshes;
         std::vector<world::AnimatedBody> animated;
     };
     void bindMeshMaterials(u64 meshId);
@@ -106,7 +88,7 @@ private:
     world::InstantiateOptions opt_;
     std::unordered_map<u32, ItemState> items_;
     std::vector<world::AnimatedBody> animated_;
-    // Physics shapes by mesh id, shared by every batch; released once the mesh is unloaded.
+    // Shared by every batch; released once the mesh is unloaded.
     std::unordered_map<u64, i32> meshShapes_;
 };
 

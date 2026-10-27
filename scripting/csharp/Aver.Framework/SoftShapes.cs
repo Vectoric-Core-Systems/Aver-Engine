@@ -1,13 +1,8 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems.
 // SPDX-License-Identifier: LGPL-2.1-only. See LICENSE at the repository root.
-// Jelly, ropes and cables, grab and release, inflatables, soft-body buoyancy and contact policy from a script: the CSoftVolume /
-// CSoftRope surface on Entity and the world-level calls on Ropes and SoftShapes. Design: docs/plans/wave11/SOFTBODY_HAIR.md 2.4 and 2.6,
-// docs/SOFTBODY.md.
-//
-// CSoftVolume and CSoftRope are registered at RUNTIME (like CCloth), so adding and configuring them is a field write over the generic
-// scene ABI and a host that never registered them gets false, not a throw. What HAPPENS (a grab, a cut, buoyancy, pressure) goes through
-// the framework relay (framework_softshape_abi.h) and applies at once, in arrival order. Units are engine centimetres and kilopascal.
+// Jelly, rope and cable soft bodies from a script: CSoftVolume / CSoftRope on Entity, and the world-level Ropes and SoftShapes calls (docs/SOFTBODY.md).
+// Registered at runtime like CCloth, so a host without them gets false, not a throw. Units: engine centimetres and kilopascal.
 
 using Aver.Scene;
 
@@ -33,8 +28,7 @@ public readonly record struct RopeState(float LengthCm, float Strain, int Segmen
 /// <summary>A jelly as of the last tick: current / rest volume, the largest lattice edge strain, the lattice node count.</summary>
 public readonly record struct JellyState(float VolumeRatio, float MaxStretch, int Nodes, bool Awake, bool Frozen, bool Failed);
 
-/// <summary>A soft body entering or leaving a sensor. <paramref name="Sensor"/> is the invalid entity when the sensor body belongs
-/// to no rigid body component.</summary>
+/// <summary>A soft body entering or leaving a sensor. <paramref name="Sensor"/> is the invalid entity when the sensor body belongs to no rigid body component.</summary>
 public readonly record struct SoftSensorEvent(Entity Soft, Entity Sensor, bool Entered);
 
 public readonly partial struct Entity
@@ -43,7 +37,7 @@ public readonly partial struct Entity
     private const string RopeType = "CSoftRope";
     private const int RopeNoStartPin = 0x2, RopeNoEndPin = 0x4;
 
-    // False, not a throw, in a process with no native scene (the bare-process graph tests, a tool).
+    // False, not a throw, when there is no native scene (bare-process graph tests, tools).
     private static bool SafeHas(Entity e, string type)
     {
         try { return e.HasComponent(type); }
@@ -63,9 +57,7 @@ public readonly partial struct Entity
         catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return false; }
     }
 
-    /// <summary>Simulates this entity's closed mesh as a jelly: a tetrahedral lattice inside it that wobbles and keeps its volume, the
-    /// mesh following. Needs a mesh renderer; refused on an entity that is already a rope. <paramref name="asset"/> is an .ocsoft path of
-    /// kind "jelly" (empty = the jelly preset). The mesh must be closed, or the jelly reports failed and the entity keeps its mesh.</summary>
+    /// <summary>Simulates this entity's closed mesh as a jelly: a tetrahedral lattice inside it that wobbles and keeps its volume, the mesh following. Refused on a rope.</summary>
     public bool AddJelly(string asset = "", SoftPreset preset = SoftPreset.Jelly)
     {
         try
@@ -78,9 +70,7 @@ public readonly partial struct Entity
         catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return false; }
     }
 
-    /// <summary>Makes this entity a rope or cable between two world points, both ends pinned. <paramref name="lengthCm"/> 0 = the distance
-    /// between the points times the asset's slack; <paramref name="radiusCm"/> 0 = the asset's. It draws through a generated tube (the entity
-    /// is given a renderer if it has none). Refused on an entity that is already a jelly.</summary>
+    /// <summary>Makes this entity a rope or cable between two world points, both ends pinned. Refused on a jelly.</summary>
     public bool AddRope(Vec3 start, Vec3 end, string asset = "", float lengthCm = 0f, float radiusCm = 0f)
     {
         try
@@ -99,8 +89,7 @@ public readonly partial struct Entity
         catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return false; }
     }
 
-    /// <summary>Pins a rope end to a point of an entity (<paramref name="offset"/> is in that entity's space), so the rope follows a moving
-    /// door, a vehicle or an animated hand. Clears the end's free flag.</summary>
+    /// <summary>Pins a rope end to a point of an entity (<paramref name="offset"/> is in that entity's space), so the rope follows a moving door, a vehicle or an animated hand.</summary>
     public bool SetRopeEnd(RopeEnd end, Entity anchor, Vec3 offset)
     {
         if (!SafeHas(this, RopeType)) return false;
@@ -123,8 +112,7 @@ public readonly partial struct Entity
         return SetInt("CSoftRope.flags", pinned ? flags & ~bit : flags | bit);
     }
 
-    /// <summary>Cuts this rope at its node nearest <paramref name="point"/> (an interior node within about a segment of it). This entity keeps
-    /// the start; <paramref name="other"/> is a NEW entity holding the rest; both cut ends are free. False when the point is not on the rope.</summary>
+    /// <summary>Cuts this rope at its node nearest <paramref name="point"/> (an interior node within about a segment of it). False when the point is not on the rope.</summary>
     public bool CutRope(Vec3 point, out Entity other)
     {
         other = default;
@@ -165,8 +153,7 @@ public readonly partial struct Entity
         catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException) { return false; }
     }
 
-    /// <summary>The inflation pressure of a closed cloth or a jelly, in kilopascal at its rest volume (0 deflates). False for an open mesh,
-    /// a negative value or an entity with no such body.</summary>
+    /// <summary>The inflation pressure of a closed cloth or a jelly, in kilopascal at its rest volume (0 deflates). False for an open mesh, a negative value or an entity with no such body.</summary>
     public bool SetSoftPressure(float kPa) => Relay(Handle, h => FwSoftShape.aver_fw_softshape_set_pressure(h, kPa));
 
     /// <summary>Rest and current volume of the soft body in cm^3 (the current one is negative when it is turned inside out).</summary>
@@ -179,9 +166,8 @@ public readonly partial struct Entity
         return ok;
     }
 
-    /// <summary>Grabs the vertex of this soft body (cloth, jelly or rope) nearest <paramref name="point"/> within <paramref name="maxDistanceCm"/>
-    /// and carries it toward <paramref name="target"/> every physics step. Returns a grab id (the vertex index + 1) for
-    /// <see cref="MoveSoftGrab"/> and <see cref="ReleaseSoftGrab"/>, 0 when nothing is in reach. Grabbing two vertices is two calls.</summary>
+    /// <summary>Grabs the vertex of this soft body (cloth, jelly or rope) nearest <paramref name="point"/> within <paramref name="maxDistanceCm"/> and carries it toward <paramref name="target"/> every physics step.
+    /// Returns a grab id (the vertex index + 1), or 0 when nothing is in reach.</summary>
     public int GrabSoftVertex(Vec3 point, float maxDistanceCm, Vec3 target)
     {
         try { return Math.Max(0, FwSoftShape.aver_fw_softshape_grab(Handle, point.X, point.Y, point.Z, maxDistanceCm, target.X, target.Y, target.Z)); }
@@ -207,8 +193,7 @@ public readonly partial struct Entity
         return ok;
     }
 
-    /// <summary>How the soft body trades momentum with rigid bodies: 0 = infinite mass, 1 = unchanged. A soft scale of 0 pins it against
-    /// anything it touches; an other scale of 0 lets a body land on it without being slowed.</summary>
+    /// <summary>How the soft body trades momentum with rigid bodies: 0 = infinite mass, 1 = unchanged.</summary>
     public bool SetSoftContact(float softScale, float otherScale) => Relay(Handle, h => FwSoftShape.aver_fw_softshape_set_contact(h, softScale, otherScale));
 
     /// <summary>What happens between this soft body and one other (a rigid body, or another soft body): normal, sensor events only, or ignored.</summary>
@@ -218,8 +203,7 @@ public readonly partial struct Entity
 /// <summary>Ropes and cables at world level.</summary>
 public static class Ropes
 {
-    /// <summary>Creates a rope entity between two world points, both ends pinned. <paramref name="lengthCm"/> 0 = the distance times the asset's slack.
-    /// Returns <see cref="Entity.None"/> when the host has no soft shape system.</summary>
+    /// <summary>Creates a rope entity between two world points, both ends pinned. Returns <see cref="Entity.None"/> when the host has no soft shape system.</summary>
     public static Entity Create(Vec3 start, Vec3 end, float lengthCm = 0f, float radiusCm = 0f, string asset = "")
     {
         int made;
@@ -235,9 +219,7 @@ public static class Ropes
 /// <summary>World-level soft shape events.</summary>
 public static class SoftShapes
 {
-    /// <summary>Moves the soft bodies' sensor enter / exit events of the last tick into <paramref name="buffer"/> and returns how many. Pairs set
-    /// to <see cref="SoftContactMode.Sensor"/> and Jolt sensor bodies raise them; they also reach graphs as the named events
-    /// SoftBodySensorEntered and SoftBodySensorExited at the soft body's entity.</summary>
+    /// <summary>Moves the soft bodies' sensor enter / exit events of the last tick into <paramref name="buffer"/> and returns how many.</summary>
     public static int DrainSensorEvents(Span<SoftSensorEvent> buffer)
     {
         if (buffer.Length == 0) return 0;
@@ -252,8 +234,7 @@ public static class SoftShapes
     }
 }
 
-/// <summary>The graph-node surface for the soft-body rows (SoftBody family version 3): the same calls with the int-entity /
-/// primitive-only signatures GraphCompiler's emitted IL needs. Forwarded from the node table (GraphSoftBodyNodeTable.cs).</summary>
+/// <summary>The graph-node surface for the soft-body rows (SoftBody family version 3): the same calls with the int-entity / primitive-only signatures GraphCompiler's emitted IL needs.</summary>
 internal static partial class SoftBodyGraphInterop
 {
     internal static bool SetSoftPressureForGraph(int entity, float kPa) => new Entity(entity).SetSoftPressure(kPa);

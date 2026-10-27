@@ -1606,7 +1606,7 @@ Values: `DPadUp = 0`, `DPadDown`, `DPadLeft`, `DPadRight`, `Start`, `Back`, `Lef
 
 `public static class Hair` - Hair at world level.
 
-- `public static bool SetWind(Vec3 velocityCmPerS, float gustCmPerS = 0f, float gustHz = 0.3f, float turbulence = 0f)` - The world wind the hair feels: the soft bodies' wind (SetWind), which the hair system takes from the same place, so cloth, ropes and hair move together.
+- `public static bool SetWind(Vec3 velocityCmPerS, float gustCmPerS = 0f, float gustHz = 0.3f, float turbulence = 0f)` - The world wind the hair feels: the soft bodies' wind (SetWind), so cloth, ropes and hair move together.
 
 ### HairColliderShape
 

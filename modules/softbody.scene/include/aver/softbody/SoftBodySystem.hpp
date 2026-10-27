@@ -1,27 +1,7 @@
-// SoftBodySystem: cloth and destruction on scene entities, over Jolt soft bodies.
-//
-// The one runtime owner of every Jolt soft body that belongs to an entity (docs/SOFTBODY.md). It builds a
-// cage from the entity's mesh (Aver.SoftBody: weld, beams, bends, masses, pins), makes the Jolt body through
-// aver_phys_sb_*, mirrors the simulated positions back, runs the damage step (dents are in-place writes to
-// the body's edge rest lengths; tears rebuild the body under the same handle and split islands into debris
-// pieces), and publishes PieceViews that Aver.Render.SoftBody draws.
-//
-// COMPONENTS ARE REGISTERED DYNAMICALLY, the CMotionMatcher pattern: Components.hpp ids and the scene ABI do
-// not change. CSoftBody (id 13) stays the marker the draw seam keys on and the legacy jiggle path. Attach
-// through attachCloth / attachDestructible / attachSoftField, never world.addComponent directly: storage arrives
-// zero-filled and runs no constructor, and zero-filled storage means the useful state (scales of 0 read as 1).
-//
-// Thick breaks (back skin and walls as derived draw geometry), fields (volumes that push, hurt, release, kill or hold soft
-// bodies), break effects (particles and sounds bound in .ocsoft), saved damage (the `softbody` $State channel), proxy cages
-// for meshes over the particle cap, and cheaper debris (reveal handshake, baking of settled pieces, distance cadence) are
-// specified in docs/plans/wave10/SOFTBODY_DEPTH.md. The pure parts live in Aver.SoftBody.
-//
-// DETERMINISM. Inputs are the asset bytes + preset, the ordered inbox (damage, explode, tear, repair, release,
-// wind, budget, pulses), the entity transforms and palettes per tick and the fixed step count. Every loop runs in
-// ascending entity id, then piece id; piece and event ids come from counters advanced in that order. Fields run
-// pulses (arrival order), then component fields (ascending entity id), then transient fields (ascending handle),
-// with time from the step count. State is a pure function of those on one binary; cross-platform determinism is
-// not claimed.
+// SoftBodySystem: cloth and destruction on scene entities, over Jolt soft bodies (docs/SOFTBODY.md; depth features in docs/plans/wave10/SOFTBODY_DEPTH.md).
+// Owns every entity's Jolt soft body: cage, bodies, damage, tears, and the PieceViews Aver.Render.SoftBody draws.
+// Attach through attachCloth / attachDestructible / attachSoftField, never world.addComponent (storage is zero-filled, no constructor runs).
+// Deterministic per binary (ascending entity, then piece id); cross-platform determinism is not claimed.
 #pragma once
 
 #include "aver/core/Math.hpp"
@@ -46,10 +26,8 @@
 
 namespace aver::softbody {
 
-// A draw vertex that is not an authored vertex (a back-skin or wall vertex of a cap): `sourceVertex` carries this.
+// sourceVertex of a draw vertex that is not authored (a cap's back-skin or wall vertex).
 inline constexpr u32 kGeneratedVertex = 0xFFFFFFFFu;
-
-// ---- components -----------------------------------------------------------------------------------
 
 inline constexpr u32 kClothNoWorld = 0x1;            // negative sense: zero-filled = collides with the world
 inline constexpr u32 kClothNoCharacterProxy = 0x2;
@@ -58,35 +36,34 @@ inline constexpr u32 kClothTearable = 0x8;
 inline constexpr u32 kClothRelease = 0x10;           // script sets, the system clears
 
 inline constexpr u32 kDestructNoDebris = 0x1;
-inline constexpr u32 kDestructIndestructible = 0x2;  // damage is ignored
+inline constexpr u32 kDestructIndestructible = 0x2;
 
-// CCloth::outState / CDestructible::outState bits.
 inline constexpr u32 kStateAwake = 0x1, kStateFrozen = 0x2, kStateReleased = 0x4, kStateAssetStale = 0x8;
-inline constexpr u32 kStateOverCap = 0x10;           // the mesh welds to more particles than allowed and has no proxy: authored mesh, not simulated
-inline constexpr u32 kStateProxy = 0x20;             // simulated on a cooked proxy cage
-inline constexpr u32 kStatePieceShift = 8;           // bits 8+ hold the live piece count
+inline constexpr u32 kStateOverCap = 0x10;           // welds past the particle cap with no proxy: authored mesh, not simulated
+inline constexpr u32 kStateProxy = 0x20;
+inline constexpr u32 kStatePieceShift = 8;
 
 struct CCloth {
     u64 asset = 0;                // .ocsoft ObjectId; 0 = preset only
-    u32 preset = 0;               // SoftPreset
+    u32 preset = 0;
     u32 flags = 0;
     f32 windScale = 0;            // 0 reads 1
-    f32 stiffnessScale = 0;       // 0 reads 1 (scales compliance by 1/s)
-    f32 reachScale = 0;           // 0 reads 1 (scales skinned reach)
+    f32 stiffnessScale = 0;       // 0 reads 1; scales compliance by 1/s
+    f32 reachScale = 0;
     f32 freezeDistanceCm = 0;     // 0 = system default
-    f32 outMaxStrain = 0;         // OUT
-    u32 outState = 0;             // OUT
+    f32 outMaxStrain = 0;
+    u32 outState = 0;
 };
 
 struct CDestructible {
     u64 asset = 0;
     u32 preset = 0;
     u32 flags = 0;
-    f32 toughnessScale = 0;       // 0 reads 1 (multiplies toughnessJ and the strain limits)
-    f32 impactScale = 0;          // 0 reads 1 (multiplies deposited energy)
-    f32 debrisLifetimeS = 0;      // 0 = asset default
-    u32 maxPieces = 0;            // 0 = asset default
-    f32 outDamage = 0;            // OUT: broken beams / total, 0..1
+    f32 toughnessScale = 0;       // 0 reads 1; multiplies toughnessJ and the strain limits
+    f32 impactScale = 0;          // 0 reads 1; multiplies deposited energy
+    f32 debrisLifetimeS = 0;      // 0 = asset default (also maxPieces)
+    u32 maxPieces = 0;
+    f32 outDamage = 0;            // broken beams / total, 0..1
     u32 outBroken = 0, outPieces = 0, outState = 0;
 };
 static_assert(sizeof(CCloth) == 40 && sizeof(CDestructible) == 48, "the soft-body components must be padding-free");
@@ -94,29 +71,25 @@ static_assert(sizeof(CCloth) == 40 && sizeof(CDestructible) == 48, "the soft-bod
 inline constexpr u32 kFieldDisabled = 0x1;   // negative sense: zero-filled = enabled
 inline constexpr u32 kFieldOnce = 0x2;       // apply once as a pulse, then set kFieldDisabled
 
-// CSoftField::outState bits.
 inline constexpr u32 kFieldStateActive = 0x1, kFieldStateFired = 0x2;
 
-// A placed soft-body field: the entity's world matrix is the shape frame. Continuous (strength in cm/s per second,
-// energy in joules per second) unless kFieldOnce, which applies strength and energy once as a pulse.
-struct CSoftField {                  // "CSoftField"
+// A placed field: the entity's world matrix is the shape frame. Continuous (strength in cm/s per second, energy in J/s) unless kFieldOnce.
+struct CSoftField {
     u32 kind = 0, shape = 0, flags = 0, targets = 0;      // targets 0 reads kFieldTargetAll, except Kill which reads Debris only
     f32 extentX = 0, extentY = 0, extentZ = 0;            // 0 reads 100
     f32 strength = 0, energyJPerS = 0, falloff = 0;       // falloff 0 reads 1
     f32 dirX = 0, dirY = 0, dirZ = 0;                     // all zero reads +Z for DirectionalForce
     f32 turbulence = 0;
-    u32 outTouched = 0;               // OUT: pieces in reach on the last tick
-    u32 outState = 0;                 // OUT: bit0 active, bit1 fired (a kFieldOnce field after it ran)
+    u32 outTouched = 0;
+    u32 outState = 0;                 // bit0 active, bit1 fired (a kFieldOnce field after it ran)
 };
 static_assert(sizeof(CSoftField) == 64, "CSoftField must be padding-free");
 
-// ---- options, events, views -----------------------------------------------------------------------
-
 struct Options {
-    u32 maxLivePieces = 48;             // debris pieces beyond the roots
+    u32 maxLivePieces = 48;
     u32 maxActiveParticles = 20000;
-    u32 maxRebuildsPerFrame = 2;        // tear pipelines and entry builds
-    u32 maxDrawBuildsPerFrame = 8;      // resident builds and draw-mesh epochs in the draw side (Aver.Render.SoftBody)
+    u32 maxRebuildsPerFrame = 2;
+    u32 maxDrawBuildsPerFrame = 8;
     u32 maxDepositsPerFrame = 64;
     u32 minPieceTriangles = 4;
     f32 debrisLifetimeS = 12.0f;
@@ -130,13 +103,13 @@ struct Options {
     f32 lodNearCm = 1500.0f;            // full iterations inside; x0.5 to lodMidCm; x0.25 beyond (min 2)
     f32 lodMidCm = 3500.0f;
     f32 teleportCm = 150.0f;            // a root moved farther than this in one frame hard-skins
-    f32 hotSeconds = 2.0f;              // a piece is "hot" this long after an impact or a deposit
-    f32 watchStrain = 0.005f;           // ... or while its largest strain exceeds this
+    f32 hotSeconds = 2.0f;              // a piece is hot this long after an impact or deposit, or while its max strain exceeds watchStrain
+    f32 watchStrain = 0.005f;
     bool capsEnabled = true;            // master switch for thick breaks (an asset's caps.mode still applies)
-    bool bakeEnabled = true;            // settled debris becomes a plain static mesh
-    f32 bakeAfterS = 3.0f;              // asleep this long before it is baked
-    f32 cullPixelRatio = 0.004f;        // debris and cap entities whose bounding radius over distance is below this are not drawn
-    u32 fxMaxPerTick = 16;              // break effects dispatched per tick
+    bool bakeEnabled = true;
+    f32 bakeAfterS = 3.0f;
+    f32 cullPixelRatio = 0.004f;        // debris and cap entities below this radius-over-distance are not drawn
+    u32 fxMaxPerTick = 16;
     u32 fxSoundsPerTick = 6;
     f32 fxMaxDistanceCm = 6000.0f;      // effects farther than this from the view are dropped
     u32 restoreMaxReplayGroups = 64;    // saved tear-log groups beyond this are merged on load
@@ -163,25 +136,25 @@ struct SoftEvent {
 
 // What the draw side needs for one live piece. Pointers stay valid until the next tick().
 struct PieceView {
-    scene::Entity entity = scene::kInvalidEntity;   // the entity that draws it (the root, or a debris entity, or a cap entity)
+    scene::Entity entity = scene::kInvalidEntity;   // draws it: the root, a debris entity or a cap entity
     u32 piece = 0;
-    u32 epoch = 0;                    // changes when the draw mesh must be rebuilt (a tear, a release, a cap change, a bake)
+    u32 epoch = 0;                    // changes when the draw mesh must be rebuilt (tear, release, cap change, bake)
     u32 vertexCount = 0;
-    const Vec3* world = nullptr;      // world cm per draw vertex
-    const u32* indices = nullptr;     // visible triangles, into the draw vertices
+    const Vec3* world = nullptr;
+    const u32* indices = nullptr;
     u32 indexCount = 0;
-    const u32* sourceVertex = nullptr;   // draw vertex -> vertex of the entity's authored mesh (UV and rest data), or kGeneratedVertex
-    u64 meshId = 0;                   // the entity's authored mesh
-    Vec3 origin{0, 0, 0};             // debris: pack relative to this (the entity has an identity-rotation CLocal at it)
-    Vec3 centroid{0, 0, 0};           // shrink target, world cm
+    const u32* sourceVertex = nullptr;   // draw vertex -> authored vertex (UV and rest data), or kGeneratedVertex
+    u64 meshId = 0;
+    Vec3 origin{0, 0, 0};             // debris: pack relative to this
+    Vec3 centroid{0, 0, 0};
     bool useEntityWorld = true;       // root piece: pack through the entity's CWorld inverse
-    f32 scale01 = 1.0f;               // despawn shrink toward the centroid
-    bool frozen = false;              // last packed vertices are still current
-    bool empty = false;               // nothing to draw (every triangle gone)
-    const f32* uv = nullptr;          // 2 per draw vertex; null means every vertex is authored. Read for kGeneratedVertex entries
+    f32 scale01 = 1.0f;
+    bool frozen = false;
+    bool empty = false;
+    const f32* uv = nullptr;          // null means all authored; read for kGeneratedVertex entries
     u32 layer = 0;                    // 0 surface (with merged caps), 1 the interior-material cap entity
-    bool revealOnReady = false;       // debris and cap entities start invisible: set the visible bit once this view has a resident
-    bool bake = false;                // a settled piece: build one plain static mesh from these vertices and never pack again
+    bool revealOnReady = false;       // debris and cap entities start invisible: show once this view has a resident
+    bool bake = false;                // settled: one plain static mesh from these vertices, never packed again
 };
 
 struct Stats {
@@ -192,7 +165,6 @@ struct Stats {
     u32 fxSent = 0, fxDropped = 0;
 };
 
-// Per-entity query for graphs and scripts.
 struct SoftBodyState {
     bool found = false;
     f32 damage01 = 0.0f, maxStrain = 0.0f;
@@ -203,17 +175,16 @@ struct SoftBodyState {
 // The last damage deposit on an entity, for the Tuning HUD (docs/SOFTBODY.md "Tuning").
 struct HitInfo {
     bool valid = false;
-    u8 kind = 0;                      // DepositKind
+    u8 kind = 0;
     f32 closingCmS = 0.0f;            // an impact's closing speed, else 0
     f32 energyJ = 0.0f, radiusCm = 0.0f;
     u32 beamsDamaged = 0, broken = 0;
-    f32 maxStrain = 0.0f;             // now, not at the hit
+    f32 maxStrain = 0.0f;
     f32 maxSetCm = 0.0f;              // the largest permanent set now, cm
     u32 tick = 0;
     u32 pieces = 0, baked = 0;
 };
 
-// Permanent set and live debris of one entity.
 struct DentInfo {
     bool found = false;
     u32 dentedEdges = 0;
@@ -231,24 +202,19 @@ struct FxRequest {
     u64 sound = 0;
     f32 volume = 1.0f, pitch = 1.0f, innerCm = 300.0f, outerCm = 4000.0f;
 };
-// Plays one sound request. Called at the end of the tick for requests that survive the budgets.
+// Called at the end of the tick for requests that survive the budgets.
 using SoundFn = void (*)(const FxRequest& r, void* user);
 
-// ---- host seams -----------------------------------------------------------------------------------
-
+// Host seams, installed through the setters below.
 // u64 meshId -> decoded mesh (host content cache); null when it does not resolve yet.
 using MeshSourceFn = const fmt::OcMeshData* (*)(u64 meshId, void* user);
 // u64 asset id -> parsed .ocsoft; null when absent.
 using AssetSourceFn = const SoftAsset* (*)(u64 assetId, void* user);
-// The skinning palette of an entity (model x inverse-bind per joint), or null.
 using PaletteFn = const Mat4* (*)(scene::Entity e, u32& count, void* user);
-// Starts (on = true) or stops a Kinematic ragdoll as the entity's collision proxy.
 using ProxyFn = void (*)(scene::Entity e, bool on, void* user);
 // The graph notify seam: (entity, "SoftBodyTorn", user).
 using NotifyFn = void (*)(scene::Entity e, const char* name, void* user);
-// A bone name's index in the skeleton an entity is skinned to, or -1 (for bone-weight paint rules).
 using BoneIndexFn = i32 (*)(scene::Entity e, const std::string& bone, void* user);
-// Turns an asset id into a path (the same function the hosts hand AnimSystem).
 using PathFn = std::string (*)(u64 objectId, void* user);
 // The physics handle of the ragdoll that belongs to a skeleton entity (the group id a soft body can ignore), or 0.
 using RagdollGroupFn = i32 (*)(scene::Entity skeleton, void* user);
@@ -262,13 +228,12 @@ public:
     SoftBodySystem(const SoftBodySystem&) = delete;
     SoftBodySystem& operator=(const SoftBodySystem&) = delete;
 
-    // Registers CCloth, CDestructible and CSoftField (idempotent) and returns CCloth's type id.
+    // Registers CCloth, CDestructible and CSoftField (idempotent). CSoftBody (id 13) stays the draw marker.
     static u32 registerComponents(scene::World& world);
-    // Attach with defaults over the zero-filled bytes, and add CSoftBody if absent. Null when the entity has a
-    // mesh-less renderer, is invalid, or already carries the other kind (one body per entity root).
+    // Defaults over the zero-filled bytes; adds CSoftBody if absent. Null: mesh-less renderer, invalid entity, or the other kind already present.
     static CCloth* attachCloth(scene::World& world, scene::Entity e, SoftPreset preset, u64 asset = 0);
     static CDestructible* attachDestructible(scene::World& world, scene::Entity e, SoftPreset preset, u64 asset = 0);
-    // A field needs nothing else on the entity: its transform is the frame. Defaults: radial sphere of 100 cm, all targets.
+    // Radial sphere of 100 cm, all targets; the entity's transform is the frame.
     static CSoftField* attachSoftField(scene::World& world, scene::Entity e);
     static u32 clothType();
     static u32 destructibleType();
@@ -279,34 +244,31 @@ public:
 
     void setMeshSource(MeshSourceFn fn, void* user) { meshFn_ = fn; meshUser_ = user; }
     void setAssetSource(AssetSourceFn fn, void* user) { assetFn_ = fn; assetUser_ = user; }
-    // Installs the default mesh and asset sources: decode caches over this path resolver.
+    // Installs the default mesh and asset sources: decode caches over this resolver.
     void setPathResolver(PathFn fn, void* user);
     void setPaletteSource(PaletteFn fn, void* user) { paletteFn_ = fn; paletteUser_ = user; paletteSet_ = true; }
     void setCharacterProxyFn(ProxyFn fn, void* user) { proxyFn_ = fn; proxyUser_ = user; }
     void setNotifySink(NotifyFn fn, void* user) { notifyFn_ = fn; notifyUser_ = user; }
     void setBoneIndexFn(BoneIndexFn fn, void* user) { boneFn_ = fn; boneUser_ = user; }
-    // Which ragdoll a cloth with "group": { "ragdollOf": "owner" } ignores. Null: the group is never applied.
+    // A cloth with "group": { "ragdollOf": "owner" } ignores that ragdoll. Null: the group is never applied.
     void setRagdollGroupFn(RagdollGroupFn fn, void* user) { ragdollGroupFn_ = fn; ragdollGroupUser_ = user; }
     void setViewPos(const Vec3& p) { viewPos_ = p; }
     Vec3 viewPos() const { return viewPos_; }
-    // Where sound requests go (the host adapter in Runtime/include/aver/game/SoftBodyEffects.hpp). Null: silent.
+    // Sound requests go to the host adapter (Runtime/include/aver/game/SoftBodyEffects.hpp). Null: silent.
     void setSoundSink(SoundFn fn, void* user) { soundFn_ = fn; soundUser_ = user; }
-    // The master switch for break effects (particles and sounds). Immediate.
     void setEffectsEnabled(bool on) { effectsOn_ = on; }
     bool effectsEnabled() const { return effectsOn_; }
 
     // Once per frame after the physics step and animSystem().tick, before the draw scene updates.
     void tick(scene::World& world, f32 dt);
-    // Destroys bodies, debris entities and every entry; keeps options and wind. Also drops transient fields, queued
-    // pulses, the effect queue and any pending restore blobs.
+    // Destroys bodies, debris and entries; keeps options and wind. Also drops transient fields, queued pulses, the effect queue and pending restore blobs.
     void clear();
 
-    // ---- inbox: applied in arrival order at the next tick ----
+    // Inbox ops are applied in arrival order at the next tick.
     bool damage(scene::Entity e, Vec3 point, f32 radiusCm, f32 energyJ, Vec3 dir, u8 kind);
-    u32 explode(Vec3 centre, f32 radiusCm, f32 impulseCmS, f32 energyJ);   // returns entities in reach right now
-    // Damage to every entity with a piece in reach (the framework relay with entity 0). Returns how many.
+    u32 explode(Vec3 centre, f32 radiusCm, f32 impulseCmS, f32 energyJ);
+    // Damage to every entity with a piece in reach (the framework relay, entity 0). Returns how many.
     u32 damageNear(Vec3 point, f32 radiusCm, f32 energyJ, Vec3 dir, u8 kind);
-    // How many unbroken beams a cut of this radius would break right now.
     u32 cutPreview(scene::Entity e, Vec3 point, f32 radiusCm) const;
     u32 tearAt(scene::Entity e, Vec3 point, f32 radiusCm);
     bool repair(scene::Entity e);
@@ -314,78 +276,64 @@ public:
     bool setPreset(scene::Entity e, u32 preset);
     void setWind(Vec3 v, f32 gust, f32 gustHz, f32 turbulence);
     void setBudget(const Budget& b);
-    // Holds (true) or releases (false) every piece of the entity asleep, the way a Sleep field does.
     bool setAsleep(scene::Entity e, bool asleep);
-    // Destroys the entity's debris pieces now (the shrink is skipped).
+    // Destroys the entity's debris now (the shrink is skipped).
     bool clearDebris(scene::Entity e);
-    // Repairs every entry; returns how many.
     u32 repairAll();
     Options& options() { return opt_; }
     const Options& options() const { return opt_; }
 
-    // ---- fields (docs/SOFTBODY.md 2.4; VEHICLES calls pulseField/impact) ----
-    // One application at the next tick, in arrival order. Returns the pieces in reach now (an upper bound of what is touched).
+    // One application at the next tick, in arrival order. Returns the pieces in reach now (an upper bound of those touched).
     u32 pulseField(const FieldSpec& f);
-    // A transient continuous field (perSecond forced on) for lifetimeS seconds. Returns a handle, 0 = refused.
+    // Transient continuous field (perSecond forced on) for lifetimeS seconds. Returns a handle; 0 = refused.
     u32 startField(const FieldSpec& f, f32 lifetimeS);
     bool stopField(u32 handle);
-    // Damage pulse in a sphere plus a directional kick along dir (zero = radial); the crash helper. Returns the pieces in reach now.
+    // Damage pulse in a sphere plus a directional kick along dir (zero = radial): the crash helper. Returns the pieces in reach now.
     u32 impact(Vec3 point, Vec3 dir, f32 radiusCm, f32 energyJ, f32 kickCmS);
-    // An entity carrying a CSoftField that destroys itself after lifetimeS (move it to move the field).
+    // An entity with a CSoftField that destroys itself after lifetimeS (move it to move the field).
     scene::Entity spawnFieldEntity(scene::World& world, const FieldSpec& f, f32 lifetimeS);
-    // True for an entity spawnFieldEntity made that has not expired: a save skips it, since its lifetime is not saved.
+    // A save skips these: their lifetime is not saved.
     bool isTransientFieldEntity(scene::Entity e) const { return spawnedLife_.count(e) != 0; }
 
-    // ---- saved damage (docs/SOFTBODY.md 2.6) ----
     // Serialises the entity's damage as the `softbody` channel payload. False (and `out` untouched) when it has none.
     bool saveState(scene::Entity e, std::string& out) const;
-    // Stores a payload under the (new) entity; the entry applies it when it is built. False for a malformed payload.
+    // Stores a payload for the (new) entity; applied when its entry is built. False for a malformed payload.
     bool restoreState(scene::Entity e, std::string_view payload);
 
-    // ---- inflatables and the seams SoftShapeSystem uses (docs/plans/wave11/SOFTBODY_HAIR.md) ----
-    // Sets the pressure (kPa at rest volume) of a closed cloth; applied at the next tick with the other ops. False for an
-    // entity with no cloth body, a destructible, or a negative value. 0 deflates.
+    // kPa at rest volume, applied at the next tick. False for no cloth body, a destructible or a negative value; 0 deflates.
     bool setPressure(scene::Entity e, f32 kPa);
     f32 pressureOf(scene::Entity e) const;
-    // The physics handle of the entity's root piece, 0 when it has no live soft body.
+    // Physics handle of the root piece; 0 when the entity has no live soft body.
     i32 bodyOf(scene::Entity e) const;
-    // The cloth or destructible entity a physics body belongs to, kInvalidEntity when none.
     scene::Entity entityOfBody(i32 body) const;
-    // Another system's PieceViews: `fn` is called at the end of every publish() and appends to the list pieces() returns, so
-    // the draw side reads one list. refreshViewSources() rebuilds that tail (call it after the other system ticked).
+    // fn runs at the end of every publish() and appends to pieces(), so the draw side reads one list. refreshViewSources() rebuilds that tail after the other system ticks.
     void addViewSource(ViewSourceFn fn, void* user);
     void removeViewSource(ViewSourceFn fn, void* user);
     void refreshViewSources();
-    // A mesh that has no file (the rope tube's placeholder cube): meshData(id) returns it, before any host source.
+    // A mesh with no file (the rope tube's placeholder cube); meshData(id) returns it before any host source.
     void registerSyntheticMesh(u64 id, const fmt::OcMeshData& mesh);
-    // The parsed .ocsoft behind an id through the same sources the cloth path uses, or null.
     const SoftAsset* softAsset(u64 id) { return assetFor(id); }
-    // A graph event at an entity (the notify sink the host installed); no-op without one.
     void notifyEntity(scene::Entity e, const char* name) {
         if (notifyFn_) notifyFn_(e, name, notifyUser_);
     }
 
-    // ---- outputs ----
     const PieceView* pieces(u32& count) const;
     u32 drainEvents(SoftEvent* out, u32 max);
     Stats stats() const { return stats_; }
     SoftBodyState state(scene::Entity e) const;
     HitInfo lastHit(scene::Entity e) const;
     DentInfo dents(scene::Entity e) const;
-    // The decoded mesh behind an id (the draw side reads UVs from it), or null.
+    // The draw side reads UVs from it.
     const fmt::OcMeshData* meshData(u64 meshId);
     u32 pieceCount(scene::Entity e) const;
-    // For the strain debug overlay: the cage of an entity, or null. Valid until the next tick.
+    // Strain debug overlay: the entity's cage, or null. Valid until the next tick.
     const Cage* cageOf(scene::Entity e) const;
-    // The world wind as last applied (cm/s), for the debug overlay.
     Vec3 windVelocity() const { return wind_; }
-    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts `deltaCm` from every world position the system caches
-    // across ticks: each entry's lastWorld (else one hard re-skin through teleportCm), the cage particles, piece
-    // origin / centroid / bounds / draw arrays, queued hit points and field frames. The skin palette needs nothing:
-    // invBuildWorld is entity-local. Call after World::shiftRoots and the physics shift.
+    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts deltaCm from every cached world position (entry lastWorld, cage, piece draw data, hit points, field frames).
+    // Call after World::shiftRoots and the physics shift.
     void rebase(const Vec3& deltaCm);
-    // For the field gizmos: the live transient fields, and a component field's spec as the step would apply it.
     struct FieldView { u32 handle = 0; FieldSpec spec; f32 remainingS = 0.0f; };
+    // Field gizmos: the live transient fields, and a component field's spec as the step applies it.
     std::vector<FieldView> transientFields() const;
     static bool specOfComponent(scene::World& world, scene::Entity e, FieldSpec& out);
 
@@ -393,25 +341,25 @@ private:
     // One body of an entry: the root, or a detached island. Owns a subset of the entry's cage.
     struct Piece {
         u32 id = 0;
-        scene::Entity entity = scene::kInvalidEntity;   // draws this piece
+        scene::Entity entity = scene::kInvalidEntity;
         scene::Entity capEntity = scene::kInvalidEntity;   // the interior-material cap entity, a child of `entity`
         i32 body = 0;
         bool alive = true;
         bool debris = false;
-        bool empty = false;                // no triangles left to draw
+        bool empty = false;
         bool skinned = false;
         bool anchored = false;
         bool released = false;
         bool frozen = false;
-        bool needsRebuild = false;         // a beam broke since the body was built
-        bool needsRead = true;             // positions must be read at least once (a fresh body)
-        bool plastic = false;              // some beam has a set: a rebuild must re-take the bend rest angles
+        bool needsRebuild = false;
+        bool needsRead = true;
+        bool plastic = false;              // some beam has a set: a rebuild re-takes the bend rest angles
         bool needsBody = false;            // planTear made or changed it: commitTear builds the body and the draw arrays
-        bool pendingKill = false;          // planTear found nothing left of it: commitTear removes it
+        bool pendingKill = false;          // planTear found nothing left: commitTear removes it
         bool baked = false;                // settled: no body, drawn as a plain static mesh
-        bool fieldHeld = false;            // a Sleep field (or setAsleep) holds it inactive
-        bool capsHidden = false;           // beyond caps.lodCm: drawn without caps
-        bool needsPack = true;             // positions changed since the last published view
+        bool fieldHeld = false;
+        bool capsHidden = false;
+        bool needsPack = true;
         bool capsOn = false;
         u32 heldTick = 0;
         u32 srcPiece = kNone;              // planTear: the piece whose body this one's starting state comes from
@@ -424,24 +372,23 @@ private:
         Vec3 origin{0, 0, 0};              // debris draw origin (fixed at creation, moved to the centroid when baked)
         Vec3 centroid{0, 0, 0};
         Vec3 boundsMin{0, 0, 0}, boundsMax{0, 0, 0};
-        std::vector<u32> particles;        // cage particle ids, in Jolt vertex order
-        std::vector<u32> beams, triangles; // cage ids
-        std::vector<u32> renderVerts;      // entry binding render vertex per front draw vertex
-        // The draw arrays are laid out [front | back skin | walls]. With an interior material the walls leave for the cap
-        // entity's own arrays (capWorld ...) and the main arrays are [front | back skin].
+        std::vector<u32> particles;
+        std::vector<u32> beams, triangles;
+        std::vector<u32> renderVerts;
+        // Draw arrays are [front | back skin | walls]. With an interior material the walls go to the cap entity and the main arrays are [front | back skin].
         u32 frontCount = 0, frontIndexCount = 0;
-        std::vector<u32> drawIndices;      // visible triangles into draw vertices (caps appended)
-        std::vector<u32> sourceVertex;     // draw vertex -> authored mesh vertex or kGeneratedVertex
-        std::vector<f32> drawUv;           // 2 per draw vertex
+        std::vector<u32> drawIndices;
+        std::vector<u32> sourceVertex;
+        std::vector<f32> drawUv;
         std::vector<u32> drawWeld;         // front draw vertex -> surface point identity (for caps)
         std::vector<u32> drawEvalTri;      // proxy: front draw vertex -> proxy triangle it is evaluated against
         std::vector<Vec3> drawWorld;       // per draw vertex, refreshed when awake
         CapGeometry caps;
-        std::vector<Vec3> normals;         // smooth normals of the front draw vertices
-        std::vector<Vec3> capWorld;        // the interior-material cap entity's arrays
+        std::vector<Vec3> normals;
+        std::vector<Vec3> capWorld;
         std::vector<u32> capIndices, capSource;
         std::vector<f32> capUv;
-        std::vector<f32> posBuf, velBuf;   // readback scratch (3 per vertex)
+        std::vector<f32> posBuf, velBuf;
         std::vector<i32> edgeSlot, bendSlot;
     };
 
@@ -458,13 +405,13 @@ private:
     struct Entry {
         scene::Entity entity = scene::kInvalidEntity;
         bool destructible = false;
-        bool legacy = false;               // a plain CSoftBody
+        bool legacy = false;
         bool failed = false;
         Spec spec;
         SoftAsset asset;
         const fmt::OcMeshData* mesh = nullptr;
         SimMesh sim;
-        Mat4 invBuildWorld;                // W0^-1: the palette is brought into the build frame
+        Mat4 invBuildWorld;                // W0^-1: brings the palette into the build frame
         Mat4 lastWorld;
         bool hasLastWorld = false;
         bool hardSkinNext = true;
@@ -472,8 +419,8 @@ private:
         bool propPalette = true;           // no skeleton: one identity joint
         scene::Entity skeletonEntity = scene::kInvalidEntity;
         std::vector<Piece> pieces;
-        std::vector<u32> owner;            // cage particle -> piece index
-        std::vector<u32> renderSrc;        // binding render vertex -> authored mesh vertex
+        std::vector<u32> owner;
+        std::vector<u32> renderSrc;
         u32 nextPieceId = 1;
         u32 brokenBeams = 0;
         f32 windScale = 1.0f, freezeDistance = 0.0f;
@@ -481,36 +428,34 @@ private:
         u32 stepAccum = 0;
         bool released = false;
         bool assetStale = false;
-        bool hidden = false;               // the root entity is hidden because every triangle is gone
+        bool hidden = false;               // the root is hidden because every triangle is gone
         bool conflict = false;             // both CCloth and CDestructible
         u32 totalBeams = 0;
-        bool proxyOn = false;              // this entry holds a share of its skeleton entity's collision proxy
+        bool proxyOn = false;
         f32 uniformScale = 1.0f;           // the scale inside the build matrix; cap thickness and proxy offsets scale by it
         bool openSheet = false;            // the intact visible mesh has boundary edges (BackSkin::Auto)
-        bool overCap = false;              // failed because the mesh welds to more particles than allowed
-        bool capsLogged = false;           // the over-limit warning was logged
-        i32 interiorToken = 0;             // aver_scene_material of caps.interiorMaterial, 0 = merge the walls
-        bool forceAsleep = false;          // setAsleep(true)
+        bool overCap = false;              // failed: the mesh welds to more particles than allowed
+        bool capsLogged = false;
+        i32 interiorToken = 0;             // aver_scene_material of caps.interiorMaterial; 0 = merge the walls
+        bool forceAsleep = false;
         std::vector<std::vector<u32>> tearLog;   // beams that broke between two tear-pipeline runs, in order
-        std::vector<u8> logged;            // beam -> already in the log
+        std::vector<u8> logged;
         std::vector<std::pair<Vec3, u32>> pendingDust;   // dust clusters planTear found, flushed by commitTear
         std::vector<u8> bakedBeams;        // beam -> belongs to a baked piece (empty until one bakes)
         HitInfo hit;
         f32 fxCooldown[kFxSlotCount] = {0, 0, 0, 0, 0};
-        // proxy cage
         bool proxyMode = false;
         ProxyBind proxyBind;
         std::vector<u32> renderWeld;       // authored vertex -> welded position id (proxy mode)
         std::vector<Vec3> proxyNormals;
         u32 proxyNormalsTick = 0xFFFFFFFFu;
-        // saved damage
         u64 saveMeshKey = 0;
         std::unique_ptr<SoftState> restore;   // the blob being replayed by initialPiece
         std::vector<f32> restorePos, restoreVel;
-        f32 pressureKPa = 0.0f;            // the live inflation pressure (a closed cloth); a rebuild passes it on
+        f32 pressureKPa = 0.0f;            // live inflation pressure (a closed cloth); a rebuild passes it on
         f32 leakKPaPerS = 0.0f;
-        bool groupApplied = false;         // the ragdoll collision group was set
-        i32 groupHandle = 0;               // ... to this (a rebuild passes it on)
+        bool groupApplied = false;
+        i32 groupHandle = 0;               // the ragdoll collision group a rebuild passes on
     };
 
     struct InboxItem {
@@ -532,7 +477,6 @@ private:
         f32 remainingS = 0.0f;
     };
 
-    // ---- SoftBodySystem.cpp ----
     // The build inputs an entry is keyed on, read from its components (meshId left to the caller). Equal specs mean no rebuild.
     static Spec specFromComponents(const scene::CSoftBody& sb, const CCloth* cl, const CDestructible* de);
     void syncEntries(scene::World& world);
@@ -551,15 +495,12 @@ private:
     void installLayers();
     u32 fieldTargetOf(const Entry& en, const Piece& p) const;
 
-    // ---- SoftBodyBuild.cpp ----
-    // Makes (or replaces, when replaceBody != 0) the Jolt body for the particles/beams/triangles of `p`. statePos/stateVel
-    // (3 floats per piece vertex, world cm and cm/s) give the starting state of a restored body.
+    // Makes (or replaces, when replaceBody != 0) the Jolt body for piece p. statePos/stateVel (3 floats per vertex: cm, cm/s) seed a restored body.
     bool buildPieceBody(Entry& en, Piece& p, i32 replaceBody, i32 stateSrcBody, const std::vector<i32>* stateMap, bool carryPose,
                         const f32* statePos = nullptr, const f32* stateVel = nullptr);
     bool initialPiece(scene::World& world, Entry& en);
     void fillPieceDraw(Entry& en, Piece& p);
 
-    // ---- SoftBodyDamage.cpp ----
     void applyInbox(scene::World& world);
     void pollImpacts(scene::World& world);
     void depositOn(scene::World& world, Entry& en, Piece* hint, const DamageDeposit& d, f32 impactScale, bool kick, SoftEventKind evKind);
@@ -572,27 +513,22 @@ private:
     void releaseEntry(scene::World& world, Entry& en);
     void repairEntry(scene::World& world, Entry& en);
 
-    // ---- SoftBodyTear.cpp ----
-    // The tear pipeline split in two: planTear is topology and the piece table (no physics, no entities, no events);
-    // commitTear makes the bodies, the debris entities and the events. Live ticks call them back to back.
+    // planTear: topology and piece table (no physics, entities or events). commitTear: bodies, debris entities and events.
+    // Live ticks call both back to back.
     bool tearPipeline(scene::World& world, Entry& en);
     bool planTear(scene::World& world, Entry& en);
     void commitTear(scene::World& world, Entry& en);
     void appendTearLog(Entry& en);
     void killPiece(scene::World& world, Entry& en, Piece& p);
 
-    // ---- SoftBodyFields.cpp ----
     void fieldStep(scene::World& world, f32 stepSeconds);
-    // Applies one field to every entry; returns the pieces in reach. `once` makes it a pulse (strength and energy applied once).
     u32 applyField(scene::World& world, const FieldSpec& f, f32 seconds, bool once);
     void releaseAnchorsIn(scene::World& world, Entry& en, const std::vector<u32>& particles);
     u32 piecesInReach(const FieldSpec& f) const;
-    // A piece a field can touch: alive, not baked or pending a kill, targeted by the field, and inside its bounds.
+    // Alive, not baked or pending kill, targeted by the field, and inside its bounds.
     bool inReach(const Entry& en, const Piece& p, const FieldSpec& f) const;
-    // Holds a piece asleep for a Sleep field (or setAsleep) this tick.
     void holdAsleep(Piece& p);
 
-    // ---- SoftBodyCaps.cpp (thick breaks, cap entities, baking, draw cadence) ----
     void buildPieceCaps(scene::World* world, Entry& en, Piece& p);
     void refreshCaps(Entry& en, Piece& p);
     void ensureCapEntity(scene::World& world, Entry& en, Piece& p);
@@ -600,24 +536,19 @@ private:
     void bakePiece(scene::World& world, Entry& en, Piece& p);
     void publishVisibility(scene::World& world, Entry& en, Piece& p, bool& culled);
 
-    // ---- SoftBodyFx.cpp ----
     void emitFx(Entry& en, FxSlot slot, const Vec3& pos, const Vec3& dir, f32 value, u32 particles = 0);
     void flushFx();
 
-    // ---- SoftBodySave.cpp ----
     // Builds a root piece from the entry's pending restore blob: replays the saved tear log, then makes the bodies.
     void restoreBuild(scene::World& world, Entry& en);
 
-    // ---- SoftBodyProxy.cpp ----
     bool buildProxy(scene::World& world, Entry& en, const SimMeshInput& authored, SimBuildSpec& spec, bool& notReady);
     void proxyPositions(Entry& en, Piece& p);
 
-    // ---- SoftBodyBuild.cpp (inflatables, ragdoll group) ----
     void setEntryPressure(Entry& en, f32 kPa);              // en.pressureKPa and every piece's body
     void applyPressureOps();                                // the queue setPressure fills, in arrival order
     void applyGroup(Entry& en);                             // "ragdollOf": "owner", once the ragdoll exists
 
-    // ---- SoftBodyCloth.cpp ----
     void clothStep(scene::World& world, Entry& en, f32 dt);
     void applyLodAndFreeze(scene::World& world, f32 dt);
     void setCharacterProxy(scene::World& world, Entry& en, bool on);
@@ -631,12 +562,12 @@ private:
     std::vector<InboxItem> inbox_;
     std::vector<SoftEvent> events_;
     std::vector<PieceView> views_;
-    std::unordered_map<i32, std::pair<scene::Entity, u32>> byBody_;    // body handle -> (entry entity, piece id)
-    std::map<scene::Entity, u32> proxyUsers_;                          // skeleton entity -> cloth users
+    std::unordered_map<i32, std::pair<scene::Entity, u32>> byBody_;
+    std::map<scene::Entity, u32> proxyUsers_;
     u32 nextSeq_ = 1;
-    u32 stepClock_ = 0;                // fixed steps seen (damageEvalEveryNSteps)
-    u32 tickCount_ = 0;                // ticks seen (draw cadence, the Tuning HUD's tick)
-    u32 fieldTick_ = 0;                // advances once per field step (Sleep holds)
+    u32 stepClock_ = 0;
+    u32 tickCount_ = 0;
+    u32 fieldTick_ = 0;
     f32 stepSeconds_ = 1.0f / 60.0f;   // this tick's fixed-step time, what a perSecond field integrates over
     u32 rebuildsThisTick_ = 0, buildsThisTick_ = 0, depositsThisTick_ = 0;
     u32 liveDebris_ = 0;
@@ -645,12 +576,10 @@ private:
     bool needFlush_ = false;           // debris entities were created: composed world matrices must be current
     bool restoring_ = false;           // replaying a saved tear log: no events, no effects
 
-    // fields
-    std::map<u32, Transient> fields_;                  // ascending handle
+    std::map<u32, Transient> fields_;
     std::set<u32> liveHandles_;                        // issued and not stopped (also those still in the inbox)
     u32 nextFieldHandle_ = 1;
-    std::map<scene::Entity, f32> spawnedLife_;         // spawnFieldEntity: seconds left
-    // effects
+    std::map<scene::Entity, f32> spawnedLife_;
     bool effectsOn_ = true;
     SoundFn soundFn_ = nullptr;
     void* soundUser_ = nullptr;
@@ -660,7 +589,6 @@ private:
     // saved damage waiting for its entity's entry
     std::unordered_map<scene::Entity, std::unique_ptr<SoftState>> pendingRestore_;
     std::unordered_map<scene::Entity, u32> proxyWait_;
-    // view sources
     struct ViewSource { ViewSourceFn fn = nullptr; void* user = nullptr; };
     std::vector<ViewSource> viewSources_;
     usize baseViewCount_ = 0;                          // views_ before the view sources appended theirs
@@ -688,15 +616,14 @@ private:
     std::unordered_map<u64, std::unique_ptr<SoftAsset>> assetCache_;
 };
 
-SoftBodySystem& softBodySystem();   // process singleton, like anim::animSystem()
+// Process singleton, like anim::animSystem().
+SoftBodySystem& softBodySystem();
 
-// The framework relay's provider (framework_softbody_abi.h, aver_fw_set_softbody_provider), with the
-// SoftBodySystem as `user`. Declared here so the system need not link the framework: the composition root
-// hands it across: aver_fw_set_softbody_provider(&softbody::softBodyProvider, &softbody::softBodySystem()).
+// Framework relay provider (framework_softbody_abi.h); declared here so the system need not link the framework.
+// The composition root installs it: aver_fw_set_softbody_provider(&softbody::softBodyProvider, &softbody::softBodySystem()).
 i32 softBodyProvider(i32 op, i32 entity, const float* in, i32 inCount, float* outF, i32* outI, i32 cap, void* user);
 
-// The soft-field relay's provider (framework_softfield_abi.h, aver_fw_set_softfield_provider), installed the same way:
-// aver_fw_set_softfield_provider(&softbody::softFieldProvider, &softbody::softBodySystem()).
+// Soft-field relay provider (framework_softfield_abi.h), installed the same way: aver_fw_set_softfield_provider(&softbody::softFieldProvider, &softbody::softBodySystem()).
 i32 softFieldProvider(i32 op, i32 entity, const float* in, i32 inCount, float* outF, i32* outI, i32 cap, void* user);
 
 } // namespace aver::softbody

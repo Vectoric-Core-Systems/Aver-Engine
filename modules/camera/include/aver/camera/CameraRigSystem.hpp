@@ -1,19 +1,7 @@
-// CameraRigSystem: the CCameraRig component (spring arm, camera mode, blend source in one) and the per-frame driver that
-// picks the live rig, evaluates it against the physics world, blends view targets and applies the modifier stack.
-// Design, modes and tuning: docs/CAMERAS.md.
-//
-// REGISTERED DYNAMICALLY, exactly as CMotionMatcher is, so Components.hpp and scene_abi.h stay put. Attach through
-// CameraRigSystem::attach, never world.addComponent directly: the storage arrives zero-filled and runs no
-// constructor. Zero-filled storage is a valid Chase rig (a 0 tuning field reads as its default).
-//
-// NO C ABI of its own: a script drives a rig by writing fields through the generic scene ABI; the framework relay
-// (framework_camera_abi.h, provider cameraRigProvider below) carries what is not a field write.
-//
-// A PROJECT WITH NO RIG IS UNTOUCHED: with no CCameraRig, no modifier, no blend and no external hand-back pending,
-// drive() returns {active = false} and the host uses the legacy boom pose it computed first, bit for bit.
-//
-// DETERMINISM. Inputs are component fields, world matrices after World::flush, Jolt query results, the host's frame dt and
-// the ordered inbox. No wall clock and no rand; ids come from counters advanced in call order.
+// CameraRigSystem: the CCameraRig component and the per-frame driver (picks the live rig, evaluates it, blends view targets, applies modifiers). Docs: docs/CAMERAS.md.
+// Registered dynamically, like CMotionMatcher; attach with CameraRigSystem::attach, never world.addComponent (zero-filled storage, no constructor, a valid Chase rig).
+// No C ABI of its own; framework_camera_abi.h carries what is not a scene field write.
+// With no rig, modifier, blend or hand-back pending, drive() returns {active = false} and the legacy boom pose stands bit for bit.
 #pragma once
 
 #include "aver/camera/CameraModifiers.hpp"
@@ -30,7 +18,7 @@ namespace aver::camera {
 
 struct Options {
     f32 teleportCm = 1000;                    // a pivot moving farther than this in one frame snaps the lag state
-    f32 externalBlendS = 0.5f;                // hand-back blend after a sequencer camera lets go
+    f32 externalBlendS = 0.5f;
     u32 defaultProbeMask = 0xFFFFFFFFu;       // used when a rig's collisionMask is 0 (the host drops the cloth and proxy layers)
     f32 reduceMotionLagFloor = 40;            // position lag speed while Reduce motion is on: stiff, not swaying
     f32 holdDestroyedS = 0.5f;                // a rig whose target died holds its pose this long, then yields to the fallback
@@ -38,11 +26,11 @@ struct Options {
 
 struct RigFrame {
     f32 dt = 0;                               // the host's frame dt (what applyCameraFx gets), not the fixed physics step
-    scene::Entity possessed = scene::kInvalidEntity;   // player 0's pawn
-    scene::Entity viewNode = scene::kInvalidEntity;    // aver_fw_view_entity() if valid
+    scene::Entity possessed = scene::kInvalidEntity;
+    scene::Entity viewNode = scene::kInvalidEntity;
     bool motionAllowed = true;                // false while access.motion.reduce is on
     CameraPov fallback;                       // the legacy boom pose, computed by the host first
-    bool externalActive = false;              // the sequencer camera holds the view this frame
+    bool externalActive = false;
     CameraPov external;
 };
 
@@ -51,7 +39,7 @@ struct RigResult {
     CameraPov pov;
     scene::Entity ownerHideRoot = scene::kInvalidEntity;
     bool hideAll = false;                     // hide every mesh under ownerHideRoot (the collision fade), not only the flagged ones
-    bool cut = false;                         // the camera teleported this frame
+    bool cut = false;
 };
 
 // The graph notify seam: (entity, "CameraViewTargetChanged" | "CameraBlendFinished" | "CameraCut", user).
@@ -75,23 +63,20 @@ public:
     Options& options() { return options_; }
     const Options& options() const { return options_; }
 
-    // Once per frame. See docs/CAMERAS.md for the order.
+    // Once per frame; order in docs/CAMERAS.md.
     RigResult drive(scene::World&, const RigFrame&);
-    // Stateless: the pose one rig would give right now (editor "look through"). No lag, no blend, no modifiers, and no
-    // write to the component.
+    // Stateless: no lag, blend, modifiers, or write to the component.
     RigResult preview(scene::World&, scene::Entity rig, const RigFrame&);
 
-    // Inbox: applied in arrival order at the top of the next drive. Modifier calls take effect on the stack at once (the
-    // stack only advances inside drive, so the order is the same) and return their id.
+    // Applied in arrival order at the next drive; modifier calls act on the stack at once and return their id.
     bool setViewTarget(scene::Entity, ViewBlend);     // kInvalidEntity = the legacy / pawn camera
-    bool clearViewTarget(ViewBlend);                  // back to automatic selection
+    bool clearViewTarget(ViewBlend);
     bool cut(scene::Entity);                          // kInvalidEntity = the active rig
     u32  pushModifier(const CameraModifier&);         // 0 when the stack is full
     bool removeModifier(u32 id, f32 outS);
     u32  clearModifiers(u32 tag);
     void shakeAt(Vec3 pos, f32 radiusCm, f32 intensity, f32 falloffPower);
 
-    // Reads (last drive)
     const CameraPov& pose() const { return lastFinite_; }
     bool hasPose() const { return haveFinite_; }
     scene::Entity activeRig() const { return current_; }
@@ -99,18 +84,15 @@ public:
     f32 blendAlpha() const { return blendAlphaNow_; }
     bool rigState(scene::Entity, f32& armCm, u32& state) const;
     u32 modifierCount() const { return mods_.count(); }
-    // True when the view target was set explicitly (SetViewTarget) and not cleared.
     bool explicitViewTarget() const { return explicit_ != Selection::Auto; }
 
     // Play stop / level unload: state, modifiers, inbox.
     void clear();
 
-    // Floating-origin shift (LARGE_WORLD 2.2.5): subtracts `deltaCm` from every world position the system holds
-    // across frames (follow lag, look-ahead, last poses, the blend source, queued shakes, the debug view). Left
-    // alone the boom lags 16 km behind its target for a frame and snaps. Call after World::shiftRoots.
+    // Floating-origin shift: subtracts deltaCm from every held world position. Call after World::shiftRoots.
     void rebase(const Vec3& deltaCm);
 
-    // Debug view for the editor overlay: what the live rig computed last frame. False when none is live.
+    // Editor overlay data for the last drive. False when no rig is live.
     struct DebugView {
         scene::Entity rig = scene::kInvalidEntity;
         Vec3 pivot, laggedPivot, desiredEnd, camera, hit, lead;
@@ -135,7 +117,7 @@ private:
     struct RigState {
         u64 lastFrame = 0;                // drive counter of the last evaluation; a gap resets the follow state
         bool lagValid = false;
-        Vec3 lagPivot, prevTarget;        // the lagged pivot and last frame's unlagged one
+        Vec3 lagPivot, prevTarget;
         LeadState lead;
         bool rotValid = false;
         f32 yaw = 0, pitch = 0, roll = 0; // smoothed rotation (radians)
@@ -150,7 +132,7 @@ private:
         Vec3 lastTargetPos;
         bool targetPosValid = false;
         f32 speed = 0;
-        f32 deadFor = 0;                  // seconds the rig's target has been dead
+        f32 deadFor = 0;
         CameraPov lastPov;
         bool havePov = false;
         bool warnedNonFinite = false;
@@ -160,7 +142,7 @@ private:
         CameraPov pov;
         bool cut = false;
         bool held = false;                // target dead, holding the last pose
-        bool first = false;               // this rig's follow state was fresh (first evaluation)
+        bool first = false;
         scene::Entity hideRoot = scene::kInvalidEntity;
         bool hideAll = false;
         u32 state = 0;
@@ -191,17 +173,16 @@ private:
     std::unordered_map<scene::Entity, RigState> states_;
     std::vector<scene::Entity> scratch_;
 
-    // The view target
     Selection explicit_ = Selection::Auto;
     scene::Entity explicitRig_ = scene::kInvalidEntity;
     ViewBlend pendingBlend_;
     bool hasPendingBlend_ = false;
     scene::Entity current_ = scene::kInvalidEntity;   // the live rig, none = the fallback
-    bool haveSource_ = false;                         // current_ was decided at least once
+    bool haveSource_ = false;
 
     CameraPov lastOut_;                               // previous frame's pose before modifiers (the blend 'from')
     bool haveLast_ = false;
-    CameraPov lastFinite_;                            // previous frame's final finite pose
+    CameraPov lastFinite_;
     bool haveFinite_ = false;
     bool blending_ = false;
     CameraPov from_;
@@ -221,7 +202,7 @@ private:
     bool haveDebug_ = false;
 };
 
-CameraRigSystem& cameraRigSystem();   // process singleton, like anim::animSystem()
+CameraRigSystem& cameraRigSystem();
 
 // The framework relay's provider (framework_camera_abi.h, aver_fw_set_camera_provider), with user = &cameraRigSystem().
 i32 cameraRigProvider(i32 op, i32 entity, const float* in, i32 inCount, float* outF, i32* outI, i32 cap, void* user);
