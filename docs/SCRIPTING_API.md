@@ -179,6 +179,14 @@ Named groups (Godot's groups): `AddToGroup`, `RemoveFromGroup` and `IsInGroup` o
 entity. Names are case-sensitive; a destroyed entity leaves every group. A level keeps a placement's groups as
 `COMPONENT Groups names=a,b`.
 
+Input events (Godot's `_input` / `_unhandled_input`): each unpaused frame, before the ticks, the frame's input
+becomes events -- `InputEventKey`, `InputEventMouseButton`, `InputEventMouseWheel`, `InputEventMouseMotion`,
+`InputEventJoypadButton`, `InputEventJoypadMotion` -- and each goes to every actor's `OnInput` (deepest, last-added
+first), then to the game UI if it wants that device (the pointer, or the keyboard), then to `OnUnhandledInput`.
+`Input.SetInputAsHandled()` stops it; `Input.ParseInputEvent(e)` routes a made-up one next frame; `e.IsActionPressed(name)`
+is true for a press in a frame the action was pressed. Polling (`Input.GetKey`, actions) is unchanged. Not yet: touch,
+absolute mouse position, more than one gamepad, and input to `WhenPaused` actors while paused.
+
 Level travel (Godot's `change_scene_to_file`): `Game.ChangeLevel("Maps/Next.ocworld")` replaces the level at the end
 of the frame. Every actor ends with `EndReason.Travel` except the GameInstance and actors with `Persistent = true`
 (Godot's autoloads, lifted to the top of the tree and kept until Play stops); the new level's actors begin, then a

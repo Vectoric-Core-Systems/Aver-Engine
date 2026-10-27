@@ -63,7 +63,7 @@ Owner decisions so far:
 | Files and platform services | DONE: `aver_fw_set_project` (ABI 2.5) published by both hosts; `Paths` (res://, user://), `ConfigFile`, `ProjectSettings`, `OS`, `Engine` frame counters, `DebugDraw` (ABI 2.6, drawn by both hosts), `Display.SetVSync` (game). Runtime fullscreen is not offered: the window has no runtime mode switch. PlatformTests, FrameworkTest `testDebugLines`. |
 | Resource objects / async load handles | open |
 | Level travel + autoloads | DONE: `Game.ChangeLevel`, `AverActor.Persistent`, `aver_fw_travel_begin/end` (ABI 2.7), the shipped game's `travelTo`. The editor's Play refuses it (it would replace the level being edited). FrameworkTest `testTravel`; the game-side sequence is unrun (engine-run ban). |
-| Input chain | open |
+| Input chain | DONE (v1): event objects from the polled state, `OnInput` -> game UI (pointer/keyboard wants) -> `OnUnhandledInput`, `SetInputAsHandled`, `ParseInputEvent`. InputRouterTests. Not yet: touch, absolute mouse position, several gamepads, SDL mapping database, input while paused. |
 
 ## Gap list, sized S/M/L, and where each fix goes
 **E** = Aver engine change (benefits every Aver game). **F** = `Aver.Fabric` runtime only. **C** = converter only.

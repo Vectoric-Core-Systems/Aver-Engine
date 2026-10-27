@@ -121,6 +121,20 @@ public sealed class InputAction
         return handle != 0 ? FromHandle(handle) : null;
     }
 
+    /// <summary>Whether the named action was pressed this frame; false for an unknown action.</summary>
+    public static bool ActionPressedThisFrame(string name)
+    {
+        int handle = Fw.aver_fw_action_find(name);
+        return handle != 0 && Fw.aver_fw_action_pressed(handle) != 0;
+    }
+
+    /// <summary>Whether the named action was released this frame; false for an unknown action.</summary>
+    public static bool ActionReleasedThisFrame(string name)
+    {
+        int handle = Fw.aver_fw_action_find(name);
+        return handle != 0 && Fw.aver_fw_action_released(handle) != 0;
+    }
+
     /// <summary>The wrapper for a native handle, built from the registry readback when no C# code made
     /// one. Null for a handle that is not registered.</summary>
     internal static InputAction? FromHandle(int handle)

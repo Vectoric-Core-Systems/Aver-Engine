@@ -2,7 +2,7 @@
 
 # Aver.Framework public API
 
-218 public types and 1853 public members, read from `scripting/csharp/Aver.Framework/` (135 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
+225 public types and 1892 public members, read from `scripting/csharp/Aver.Framework/` (136 source files). Signatures are single lines as declared; the sentence after each is the first line of its XML summary.
 
 ## namespace Aver.Framework
 
@@ -324,6 +324,9 @@ Values: `None = 0`, `Started = 1`, `Ongoing = 2`, `Triggered = 4`, `Completed = 
 - `public virtual void OnBeginPlay(BeginReason reason)` - Runs once when this actor begins playing, for a spawn, a world start or a hot reload.
 - `public virtual void OnTick(float dt)` - Runs once a frame, after the frame's physics steps (Godot's _process).
 - `public virtual void OnPhysicsTick(float dt)` - Runs once per fixed physics step, before that step (Godot's _physics_process): 0 to 8 times a frame.
+- `public virtual void OnInput(InputEvent e)` - Receives each input event first, deepest actor first (Godot's _input).
+- `public virtual void OnUnhandledInput(InputEvent e)` - Receives the input events nothing else handled (Godot's _unhandled_input): the place for gameplay controls, so a click on a menu does not also fire a weapon.
+- `public bool InputEnabled { get; set; }` - Whether this actor receives input events.
 - `public bool TickEnabled { get; set; }` - Whether OnTick runs.
 - `public bool PhysicsTickEnabled { get; set; }` - Whether OnPhysicsTick runs.
 - `public int TickPriority { get; set; }` - Order among actors in the OnTick pass: lower runs first, equal priorities in scene-tree order (a parent before its children, siblings in the order they were added).
@@ -1745,6 +1748,8 @@ Values: `World = 0`, `Model = 1`
 `public static class Input` - Polled keyboard and mouse.
 
 - `public static bool GetKey(Key k)` - True while k is held.
+- `public static void SetInputAsHandled()` - Stops the input event being routed from going any further (Godot's set_input_as_handled).
+- `public static void ParseInputEvent(InputEvent ev)` - Routes a made-up event through the actors next frame, as if it were real input (Godot's parse_input_event).
 - `public static bool GetKeyDown(Key k)` - True on the frame k went down.
 - `public static bool GetKeyUp(Key k)` - True on the frame k went up.
 - `public static float MouseDeltaX { get; }` - This frame's horizontal mouse movement, in pixels.
@@ -1768,6 +1773,8 @@ Values: `World = 0`, `Model = 1`
 - `public static InputAction Axis1D(string name)` - Declares a single-axis action.
 - `public static InputAction Axis2D(string name)` - Declares a two-axis action, read through Value2D.
 - `public static InputAction? Find(string name)` - Looks up an action by name, or null if none is registered.
+- `public static bool ActionPressedThisFrame(string name)` - Whether the named action was pressed this frame; false for an unknown action.
+- `public static bool ActionReleasedThisFrame(string name)` - Whether the named action was released this frame; false for an unknown action.
 - `public Vec3 Value3D { get; }` - The current value after modifiers, all three channels: X for a 1D axis, X and Y for 2D, X = 0 or 1 for a button.
 - `public Vec3 Value2D { get; }` - The current value, same as Value3D (kept for existing callers).
 - `public float Value1D { get; }` - The single-axis value.
@@ -1791,6 +1798,73 @@ Values: `World = 0`, `Model = 1`
 - `public event Action<InputAction>? Triggered` - Raised every update the action is Triggered.
 - `public event Action<InputAction>? Completed` - Raised when the action goes from Triggered to None.
 - `public event Action<InputAction>? Canceled` - Raised when the action goes from Ongoing to None without triggering.
+- `public override string ToString()`
+
+### InputEvent
+
+`public abstract class InputEvent` - One piece of input, routed to OnInput, then the game UI, then OnUnhandledInput, until something handles it.
+
+- `public bool Handled { get; }` - Set by SetInputAsHandled (or the UI): the event goes no further.
+- `public virtual bool Pressed { get; }` - Whether this is a press.
+- `public bool IsActionPressed(string action)` - Whether the action was pressed this frame and this event is a press (Godot's is_action_pressed on an event).
+- `public bool IsActionReleased(string action)` - Whether the action was released this frame and this event is a release.
+
+### InputEventJoypadButton
+
+`public sealed class InputEventJoypadButton : InputEvent` - A gamepad button going down or up.
+
+- `public InputEventJoypadButton(GamepadButton button, bool pressed, int pad = 0)`
+- `public GamepadButton Button { get; }`
+- `public bool IsPressed { get; }`
+- `public int Pad { get; }`
+- `public override bool Pressed { get; }`
+- `public override string ToString()`
+
+### InputEventJoypadMotion
+
+`public sealed class InputEventJoypadMotion : InputEvent` - A gamepad axis moving to a new value.
+
+- `public InputEventJoypadMotion(GamepadAxis axis, float value, int pad = 0)`
+- `public GamepadAxis Axis { get; }`
+- `public float Value { get; }`
+- `public int Pad { get; }`
+- `public override string ToString()`
+
+### InputEventKey
+
+`public sealed class InputEventKey : InputEvent` - A key going down or up.
+
+- `public InputEventKey(Key key, bool pressed)`
+- `public Key Key { get; }`
+- `public bool IsPressed { get; }`
+- `public override bool Pressed { get; }`
+- `public override string ToString()`
+
+### InputEventMouseButton
+
+`public sealed class InputEventMouseButton : InputEvent` - A mouse button going down or up (MouseLeft, MouseRight, MouseMiddle).
+
+- `public InputEventMouseButton(Key button, bool pressed)`
+- `public Key Button { get; }`
+- `public bool IsPressed { get; }`
+- `public override bool Pressed { get; }`
+- `public override string ToString()`
+
+### InputEventMouseMotion
+
+`public sealed class InputEventMouseMotion : InputEvent` - The mouse moving, by this much since the last frame.
+
+- `public InputEventMouseMotion(float dx, float dy)`
+- `public float RelativeX { get; }`
+- `public float RelativeY { get; }`
+- `public override string ToString()`
+
+### InputEventMouseWheel
+
+`public sealed class InputEventMouseWheel : InputEvent` - The mouse wheel turning; positive is away from the user.
+
+- `public InputEventMouseWheel(float delta)`
+- `public float Delta { get; }`
 - `public override string ToString()`
 
 ### InputMappingContext

@@ -24,6 +24,19 @@ public abstract partial class AverActor
     /// frame. <paramref name="dt"/> is the fixed step. On when the class overrides it; see <see cref="PhysicsTickEnabled"/>.</summary>
     public virtual void OnPhysicsTick(float dt) { }
 
+    /// <summary>Receives each input event first, deepest actor first (Godot's <c>_input</c>). Call
+    /// <see cref="Input.SetInputAsHandled"/> to stop it there; otherwise it goes to the game UI, then
+    /// <see cref="OnUnhandledInput"/>. Runs before the frame's ticks, while the game is not paused.</summary>
+    public virtual void OnInput(InputEvent e) { }
+
+    /// <summary>Receives the input events nothing else handled (Godot's <c>_unhandled_input</c>): the place for gameplay
+    /// controls, so a click on a menu does not also fire a weapon.</summary>
+    public virtual void OnUnhandledInput(InputEvent e) { }
+
+    /// <summary>Whether this actor receives input events. Defaults to true when the class overrides OnInput or
+    /// OnUnhandledInput.</summary>
+    public bool InputEnabled { get; set; }
+
     /// <summary>Whether <see cref="OnTick"/> runs. Defaults to true when the class overrides it.</summary>
     public bool TickEnabled { get; set; }
 
@@ -59,7 +72,7 @@ public abstract partial class AverActor
     // Set by the scripting bridge: a priority changed, so its walk order is stale.
     internal static Action? TickOrderChanged;
 
-    private static readonly Dictionary<Type, (bool Tick, bool Physics)> s_overrides = new();
+    private static readonly Dictionary<Type, (bool Tick, bool Physics, bool Input)> s_overrides = new();
 
     /// <summary>Turns each tick on when the concrete class overrides it.</summary>
     protected AverActor()
@@ -67,15 +80,17 @@ public abstract partial class AverActor
         Type t = GetType();
         if (!s_overrides.TryGetValue(t, out var o))
         {
-            o = (Overrides(t, nameof(OnTick)), Overrides(t, nameof(OnPhysicsTick)));
+            o = (Overrides(t, nameof(OnTick), typeof(float)), Overrides(t, nameof(OnPhysicsTick), typeof(float)),
+                 Overrides(t, nameof(OnInput), typeof(InputEvent)) || Overrides(t, nameof(OnUnhandledInput), typeof(InputEvent)));
             s_overrides[t] = o;
         }
         TickEnabled = o.Tick;
         PhysicsTickEnabled = o.Physics;
+        InputEnabled = o.Input;
     }
 
-    private static bool Overrides(Type t, string method) =>
-        t.GetMethod(method, new[] { typeof(float) })?.DeclaringType != typeof(AverActor);
+    private static bool Overrides(Type t, string method, Type arg) =>
+        t.GetMethod(method, new[] { arg })?.DeclaringType != typeof(AverActor);
 
     /// <summary>Runs when the actor enters the world, before <see cref="OnBeginPlay"/> (Godot's <c>_enter_tree</c>). Among
     /// actors placed together a parent enters before its children, then they begin play children first.</summary>

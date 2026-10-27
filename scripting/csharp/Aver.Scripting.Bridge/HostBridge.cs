@@ -181,6 +181,7 @@ public static class HostBridge
     private static readonly List<ActorLive> s_tickActors = new();
     private static ActorLive[] s_processOrder = Array.Empty<ActorLive>();
     private static ActorLive[] s_physicsOrder = Array.Empty<ActorLive>();
+    private static ActorLive[] s_inputOrder = Array.Empty<ActorLive>();
     private static bool s_tickOrderDirty = true;
     private static long s_tickTreeRevision = -1;
 
@@ -1699,6 +1700,8 @@ public static class HostBridge
             try { GameplayAbilities.Update(); } catch (DllNotFoundException) { }
             // Input triggers raised by this frame's aver_fw_action_update reach C# events and graph OnInputAction entries.
             try { EnhancedInput.PumpEvents(); } catch (DllNotFoundException) { }
+            // Then this frame's input as events: OnInput, the game UI, OnUnhandledInput.
+            try { RouteInputEvents(); } catch (DllNotFoundException) { }
             return;
         }
         if (group != TickPhysics && group != TickProcess) return;
@@ -1744,6 +1747,25 @@ public static class HostBridge
                  $"[Scripting] {live.Name}.{(physics ? "OnPhysicsTick" : "OnTick")} threw ({n} so far): {Describe(ex)}");
     }
 
+    // Routes the frame's input events through the actors that take input, deepest (reverse tree order) first.
+    private static void RouteInputEvents()
+    {
+        RefreshTickOrder();
+        if (s_inputOrder.Length == 0) return;
+        var receivers = new List<AverActor>(s_inputOrder.Length);
+        foreach (ActorLive live in s_inputOrder)
+            if (!live.Disabled && live.Instance.InputEnabled && PauseRules.Ticks(live.ResolvedPause, paused: false)
+                && s_actorsByEntity.TryGetValue(live.Entity, out ActorLive? cur) && ReferenceEquals(cur, live))
+                receivers.Add(live.Instance);
+        if (receivers.Count == 0) return;
+        bool wantsPointer = false, wantsKeyboard = false;
+        try { wantsPointer = Aver.UI.UiSystem.WantsPointer; wantsKeyboard = Aver.UI.UiSystem.WantsKeyboard; }
+        catch (DllNotFoundException) { }
+        foreach (InputEvent ev in InputEventSource.Collect())
+            InputRouter.Route(ev, receivers, wantsPointer, wantsKeyboard,
+                              (a, hook, ex) => Emit((int)Log.Level.Error, $"[Scripting] {a.GetType().Name}.{hook} threw: {Describe(ex)}"));
+    }
+
     // Rebuilds both walk orders when the actor set, a priority or the scene tree has changed.
     private static void RefreshTickOrder()
     {
@@ -1765,6 +1787,8 @@ public static class HostBridge
         }
         s_processOrder = SortedByTree(entities, process);
         s_physicsOrder = SortedByTree(entities, phys);
+        s_inputOrder = SortedByTree(entities, new int[n]);
+        Array.Reverse(s_inputOrder);   // input reaches the deepest, last-added actor first
         foreach (ActorLive a in s_tickActors) a.ResolvedPause = PauseRules.Resolve(PauseChain(a));
         // The tree moved: tell each entered actor whose parent changed (Godot's NOTIFICATION_PARENTED).
         foreach (ActorLive a in s_tickActors)
