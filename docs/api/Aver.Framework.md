@@ -1105,7 +1105,7 @@ Values: `Destroy = 0`, `Stop = 1`, `Reload = 2`, `Travel = 3`
 - `public ActorClass Class { get; }` - The gameplay class this entity is an instance of; invalid for a plain entity.
 - `public AverActor? Actor { get; }` - The live managed actor bound to this entity, or null.
 - `public T? As<T>() where T : AverActor` - The managed actor bound to this entity as T, or null.
-- `public void Destroy()` - Destroys this entity and its subtree; an actor runs the full framework teardown.
+- `public void Destroy()` - Destroys this entity and its subtree; every actor in it runs the full framework teardown, children first.
 - `public bool Equals(Entity o)`
 - `public override bool Equals(object? o)`
 - `public override int GetHashCode()`

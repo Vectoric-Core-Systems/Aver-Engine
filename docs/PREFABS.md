@@ -122,8 +122,10 @@ Graph nodes (`GraphPrefabs` in `Aver.Prefab` is the seam; the asset path and nod
 * Reparenting or deleting a **linked** entity inside an instance, and adding entities to one, are not
   overrides: the next sync restores the prefab's structure (extra *unlinked* children are kept).
 * Apply folds into the instance's own (outermost) asset only; applying into a nested asset directly is not offered.
-* A node's `className` is stored but a class is bound only if the host installs `Hooks::classBound`; the
-  editor wiring below does not.
+* A node's `className` makes it an actor of that class (`aver_fw_adopt_by_name`, both hosts' `Hooks::classBound`):
+  it keeps the components the prefab gave it and gains the class defaults it lacks. A class not declared yet
+  (a level's prefabs load before its scripts) adopts the node when it seals. Destroying an instance runs the
+  actor teardown for every actor in it, children first.
 * Capturing a subtree under a nested instance keeps only the overrides, not extra children a user added under
   the instance's own entities.
 * Undoing a conversion or an unpack recreates ordinary entities from a flat capture, so an instance nested

@@ -171,12 +171,8 @@ public readonly partial struct Entity : IEquatable<Entity>
     /// <summary>The managed actor bound to this entity as <typeparamref name="T"/>, or null.</summary>
     public T? As<T>() where T : AverActor => Actors.Get<T>(this);
 
-    /// <summary>Destroys this entity and its subtree; an actor runs the full framework teardown.</summary>
-    public void Destroy()
-    {
-        if (IsActor) Fw.aver_fw_destroy(Handle);
-        else SceneNative.aver_scene_destroy(Handle);
-    }
+    /// <summary>Destroys this entity and its subtree; every actor in it runs the full framework teardown, children first.</summary>
+    public void Destroy() => Fw.aver_fw_destroy(Handle);
 
     /// <summary>Rotates <paramref name="v"/> by unit quaternion <paramref name="q"/> (v' = q v q*).</summary>
     private static Vec3 Rotate(Quat q, Vec3 v)

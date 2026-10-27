@@ -733,6 +733,73 @@ static void testSpawnBatchReadyOrder() {
     check(aver_fw_clear_managed_dispatch() == 1, "the recording stand-in clears");
 }
 
+static int g_adoptBinds = 0, g_adoptEnds = 0;
+static int32_t AVER_FW_CALL standInAdoptBind(int64_t, aver_entity) { ++g_adoptBinds; return 1; }
+static void AVER_FW_CALL standInAdoptEnd(aver_entity, int32_t) { ++g_adoptEnds; }
+
+// Checks aver_fw_adopt: an existing entity (a prefab node) becomes an actor, keeping the components it has
+// and gaining the class defaults it lacks; a class not declared yet adopts when it seals; destroy ends it.
+static void testAdopt() {
+    AVER_INFO("=== adopt: a prefab node becomes an actor, its own values kept ===");
+
+    AvManagedDispatch table{};
+    table.structBytes     = static_cast<int32_t>(sizeof(AvManagedDispatch));
+    table.contractVersion = AVER_FW_DISPATCH_VERSION;
+    table.bind            = &standInAdoptBind;
+    table.beginPlay       = &standInRecordBegin;
+    table.endPlay         = &standInAdoptEnd;
+    check(aver_fw_install_managed_dispatch(&table) == 1, "the stand-in installs");
+
+    const int32_t c = aver_fw_class_declare("AdoptLamp", "");
+    aver_fw_class_set_flags(c, AVER_FW_CLASS_MANAGED);
+    aver_fw_class_add_component(c, static_cast<int32_t>(kComponentLight));
+    aver_fw_class_add_component(c, static_cast<int32_t>(kComponentMeshRenderer));
+    const int32_t fLux = aver_scene_field("CLight.intensityLux");
+    const int32_t fMat = aver_scene_field("CMeshRenderer.material");
+    aver_fw_class_set_default_f32(c, fLux, 500.0f);
+    aver_fw_class_set_default_i32(c, fMat, 7);
+    check(aver_fw_class_seal(c) == 1, "the class seals");
+
+    // The prefab node already has a light of its own, and no mesh.
+    const int32_t node = aver_scene_create();
+    World& w = World::instance();
+    auto* light = static_cast<CLight*>(w.addComponent(static_cast<Entity>(node), kComponentLight));
+    check(light != nullptr, "the node has its own light");
+    if (light) light->intensityLux = 42.0f;
+
+    g_begun.clear();
+    g_adoptBinds = 0;
+    check(aver_fw_adopt(node, c) == node, "the node is adopted");
+    check(aver_fw_class_of(node) == c && g_adoptBinds == 1 && g_begun == std::vector<int32_t>{node},
+          "it is an actor of the class: bound, and begun");
+    const auto* lit = w.component<CLight>(static_cast<Entity>(node), kComponentLight);
+    check(lit && lit->intensityLux == 42.0f, "its own light keeps its value, not the class's 500");
+    const auto* mr = w.component<CMeshRenderer>(static_cast<Entity>(node), kComponentMeshRenderer);
+    check(mr && mr->material == 7, "the mesh it lacked is added with the class default");
+    check(aver_fw_adopt(node, c) == 0, "an actor cannot be adopted twice");
+
+    AVER_INFO("--- a class not declared yet adopts when it seals ---");
+    const int32_t later = aver_scene_create();
+    g_begun.clear();
+    check(aver_fw_adopt_by_name(later, "AdoptLater") == 0 && aver_fw_class_of(later) == 0,
+          "an undeclared class leaves the node waiting");
+    const int32_t lc = aver_fw_class_declare("AdoptLater", "");
+    aver_fw_class_set_flags(lc, AVER_FW_CLASS_MANAGED);
+    check(aver_fw_class_seal(lc) == 1, "the late class seals");
+    check(aver_fw_class_of(later) == lc && g_begun == std::vector<int32_t>{later}, "and the waiting node is adopted then");
+
+    AVER_INFO("--- destroying a plain parent ends the actor below it ---");
+    const int32_t holder = aver_scene_create();
+    aver_scene_set_parent(node, holder);
+    g_adoptEnds = 0;
+    check(aver_fw_destroy(holder) == 1, "aver_fw_destroy accepts a plain entity");
+    check(g_adoptEnds == 1, "the adopted actor under it ran its END edge");
+
+    aver_fw_destroy(later);
+    w.flush();
+    check(aver_fw_clear_managed_dispatch() == 1, "the stand-in clears");
+}
+
 // Checks that a possession hook re-entering possess is refused rather than recursed to a crash.
 static void testPossessReentrancy() {
     AVER_INFO("=== a possession hook re-entering possession is refused, not recursed to a crash ===");
@@ -1881,6 +1948,7 @@ int main() {
     testSubtreeDestroyEndsChildren();
     testTreeOrder();
     testSpawnBatchReadyOrder();
+    testAdopt();
     testPossessReentrancy();
     testPlayLifecycle();
     testInput();

@@ -2030,6 +2030,20 @@ void GameApp::onInit(Engine& e) {
         return fmt::loadOcPrefab(full, out, why);
     });
     prefabSys_ = std::make_unique<prefab::PrefabSystem>(scene::World::instance(), prefabLib_);
+#  if AVER_MODULE_FRAMEWORK
+    // A prefab node naming a class becomes that actor (now, or when its class is declared), and destroying
+    // one runs the actor teardown for it and every actor below it.
+    {
+        prefab::Hooks h;
+        h.classBound = [](scene::Entity e, const std::string& cls) {
+            aver_fw_adopt_by_name(static_cast<int32_t>(e), cls.c_str());
+        };
+        h.destroying = [](scene::Entity e) {
+            if (aver_fw_class_of(static_cast<int32_t>(e)) != 0) aver_fw_destroy(static_cast<int32_t>(e));
+        };
+        prefabSys_->setHooks(std::move(h));
+    }
+#  endif
     prefabHost_ = prefab::makeAbiHost(*prefabSys_);
     aver_prefab_set_host(&prefabHost_);
 #  ifdef AVER_WITH_LEVELINST_ABI

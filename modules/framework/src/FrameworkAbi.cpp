@@ -451,8 +451,12 @@ int32_t aver_fw_class_count(void) {
 }
 
 // Flattens the parent chain into the resolved archetype. 0 on a cycle or an undeclared parent.
+static void adoptPendingFor(int32_t c);
+
 int32_t aver_fw_class_seal(int32_t c) {
-    return sealClass(c) ? 1 : 0;
+    if (!sealClass(c)) return 0;
+    adoptPendingFor(c);
+    return 1;
 }
 
 // Sets an F32 field's class default.
@@ -532,6 +536,19 @@ int32_t aver_fw_class_set_player_controller(int32_t gameMode, const char* contro
 static int32_t g_spawnBatchDepth = 0;
 static std::vector<Entity>& batchedBegins() { static std::vector<Entity> v; return v; }
 
+// The BEGIN edge: bind(nameHash, e) -> build_models(e) -> beginPlay(e, SPAWN), the last held while a
+// spawn batch is open. bind is the gate.
+static void beginActor(Entity e, const ClassRecord& r, bool dispatchBeginPlay) {
+    if (!(r.flags & AVER_FW_CLASS_MANAGED) || !managedInstalled()) return;
+    AvManagedDispatch& d = managedDispatch();
+    const aver_entity  ae = static_cast<aver_entity>(e);
+    const bool bound = d.bind && d.bind(static_cast<int64_t>(r.nameHash), ae) == 1;
+    if (!bound) return;
+    if (d.build_models) d.build_models(ae);
+    if (dispatchBeginPlay && g_spawnBatchDepth > 0) batchedBegins().push_back(e);
+    else if (dispatchBeginPlay && d.beginPlay) d.beginPlay(ae, AVER_FW_BEGIN_SPAWN);
+}
+
 // The spawn body: attaches the sealed archetype, lays down defaults, applies transform overrides and
 // runs the managed BEGIN edge. `dispatchBeginPlay` false gives a preview bind + build_models only.
 // Inside a spawn batch the beginPlay waits for the batch's end.
@@ -567,20 +584,65 @@ static int32_t spawnActor(int32_t c, const char* name,
     }
 
     recordClass(e, c);
-
-    // The BEGIN edge: bind(nameHash, e) -> build_models(e) -> beginPlay(e, SPAWN). bind is the gate.
-    if ((r->flags & AVER_FW_CLASS_MANAGED) && managedInstalled()) {
-        AvManagedDispatch& d = managedDispatch();
-        const aver_entity  ae = static_cast<aver_entity>(e);
-        const bool bound = d.bind && d.bind(static_cast<int64_t>(r->nameHash), ae) == 1;
-        if (bound) {
-            if (d.build_models) d.build_models(ae);
-            if (dispatchBeginPlay && g_spawnBatchDepth > 0) batchedBegins().push_back(e);
-            else if (dispatchBeginPlay && d.beginPlay) d.beginPlay(ae, AVER_FW_BEGIN_SPAWN);
-        }
-    }
-
+    beginActor(e, *r, dispatchBeginPlay);
     return static_cast<int32_t>(e);
+}
+
+// Makes an existing entity an actor of class `c`: the archetype's components it lacks are added with the
+// class defaults, the ones it has keep their values (a prefab's own), then the BEGIN edge runs.
+int32_t aver_fw_adopt(int32_t entity, int32_t c) {
+    ClassRecord* r = rec(c);
+    const Entity e = toEntity(entity);
+    if (!r || (r->flags & AVER_FW_CLASS_ABSTRACT) || !world().valid(e) || classOfEntity(e) != 0) return 0;
+    if (!r->sealed && !sealClass(c)) return 0;
+
+    const Archetype& a = r->resolved;
+    std::unordered_set<u32> added;
+    for (usize i = 0; i < a.components.size(); ++i) {
+        const u32 comp = a.components[i];
+        if (world().hasComponent(e, comp)) continue;
+        void* base = world().addComponent(e, comp);
+        if (!base) continue;
+        std::memcpy(base, a.blob.data() + a.offset[i], world().componentSize(comp));
+        added.insert(comp);
+    }
+    for (const auto& kv : a.strDefaults) {
+        const scene::FieldDesc* f = world().field(static_cast<u32>(kv.first));
+        if (f && added.count(f->component)) aver_scene_set_str(entity, kv.first, kv.second.c_str());
+    }
+    world().touchLocal(e);
+
+    recordClass(e, c);
+    beginActor(e, *r, /*dispatchBeginPlay=*/true);
+    return entity;
+}
+
+// Prefab nodes whose class was not declared yet when they were made: adopted when it seals.
+static std::vector<std::pair<Entity, std::string>>& pendingAdopts() {
+    static std::vector<std::pair<Entity, std::string>> v;
+    return v;
+}
+
+int32_t aver_fw_adopt_by_name(int32_t entity, const char* className) {
+    if (!className || !*className || !world().valid(toEntity(entity))) return 0;
+    if (const int32_t c = aver_fw_class_find(className)) return aver_fw_adopt(entity, c);
+    pendingAdopts().emplace_back(toEntity(entity), className);
+    return 0;
+}
+
+static void adoptPendingFor(int32_t c) {
+    auto& pending = pendingAdopts();
+    if (pending.empty()) return;
+    const ClassRecord* r = rec(c);
+    if (!r) return;
+    std::vector<Entity> due;
+    pending.erase(std::remove_if(pending.begin(), pending.end(), [&](const auto& p) {
+        if (!world().valid(p.first) || world().destroyPending(p.first)) return true;   // gone meanwhile
+        if (p.second != r->name) return false;
+        due.push_back(p.first);
+        return true;
+    }), pending.end());
+    for (const Entity e : due) aver_fw_adopt(static_cast<int32_t>(e), c);
 }
 
 static int32_t destroyActor(int32_t e, int32_t endReason, bool dispatchEndPlay = true);

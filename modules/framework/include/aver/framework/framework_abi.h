@@ -64,8 +64,9 @@ extern "C" {
  *    event_count/event_at; aver_fw_input_scheme_trigger_count/trigger_spec/modifier_count/
  *    modifier_spec) -- see NAMED ACTIONS and INPUT SCHEME below.
  * 12: AVER_FW_PUMP_FRAME, the tick_all value for the per-frame pumps that also run while paused. */
-/* 2.1: aver_fw_spawn_batch_begin / aver_fw_spawn_batch_end (Godot's _ready order for a batch of spawns). */
-#define AVER_FW_ABI_VERSION_MINOR 1
+/* 2.1: aver_fw_spawn_batch_begin / aver_fw_spawn_batch_end (Godot's _ready order for a batch of spawns).
+ * 2.2: aver_fw_adopt (an existing entity -- a prefab node -- becomes an actor). */
+#define AVER_FW_ABI_VERSION_MINOR 2
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -126,6 +127,15 @@ AVER_FW_ABI int64_t aver_fw_tree_revision(void);
  * Batches nest; end returns how many actors began (0 for an inner end). (2.1) */
 AVER_FW_ABI void    aver_fw_spawn_batch_begin(void);
 AVER_FW_ABI int32_t aver_fw_spawn_batch_end(void);
+
+/* Makes an existing entity -- a prefab node that names a class -- an actor of class `c`: the archetype
+ * components it lacks are added with the class defaults, the ones it has keep their values, then it binds
+ * and begins play like a spawn (held by an open spawn batch). Returns the entity, or 0 for an abstract or
+ * unknown class, a dead entity or one that is already an actor. aver_fw_destroy ends it. (2.2) */
+AVER_FW_ABI int32_t aver_fw_adopt(int32_t entity, int32_t c);
+/* aver_fw_adopt by class name. A class not declared yet is remembered, and the entity is adopted when
+ * that class seals (a level's prefabs load before its scripts). 0 until then. (2.2) */
+AVER_FW_ABI int32_t aver_fw_adopt_by_name(int32_t entity, const char* className);
 
 /* Declares a class. Idempotent by name: the same name returns the same handle for the life of the
  * process, and a redeclare rewrites the row's components and defaults in place. */

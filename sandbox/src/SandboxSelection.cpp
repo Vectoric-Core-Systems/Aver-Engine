@@ -539,7 +539,16 @@ void SandboxApp::installPrefabHooks() {
         (void)e;
 #endif
     };
+#if AVER_MODULE_FRAMEWORK
+    // A prefab node naming a class becomes that actor (now, or when its class is declared).
+    h.classBound = [](scene::Entity e, const std::string& cls) {
+        aver_fw_adopt_by_name(static_cast<int32_t>(e), cls.c_str());
+    };
+#endif
     h.destroying = [this](scene::Entity e) {
+#if AVER_MODULE_FRAMEWORK
+        if (aver_fw_class_of(static_cast<int32_t>(e)) != 0) aver_fw_destroy(static_cast<int32_t>(e));   // the actor teardown
+#endif
         levelEntities_.erase(std::remove(levelEntities_.begin(), levelEntities_.end(), e), levelEntities_.end());
         entityLabels_.erase(static_cast<u32>(e));
         entityCollide_.erase(static_cast<u32>(e));
