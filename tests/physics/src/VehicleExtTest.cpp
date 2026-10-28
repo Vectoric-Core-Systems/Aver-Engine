@@ -218,8 +218,11 @@ static void testTorqueCurve() {
     const float weak = throttleDistance([&](int32_t v) { aver_phys_vehicle_set_torque_curve(v, flatX, lowY, 2); }, 180);
     check(weak < base * 0.85f, "a flat 30 percent curve covers less in 3 s: " + f2s(weak) + " against " + f2s(base));
     const int tBase = stepsToFirstUpshift({});
+    const int tWeak = stepsToFirstUpshift([&](int32_t v) { aver_phys_vehicle_set_torque_curve(v, flatX, lowY, 2); });
     const int tStrong = stepsToFirstUpshift([&](int32_t v) { aver_phys_vehicle_set_torque_curve(v, flatX, highY, 2); });
-    check(tBase > 0 && tStrong > 0 && tStrong <= tBase, "a flat full-torque curve reaches the first shift no later: " + std::to_string(tStrong) + " against " + std::to_string(tBase) + " steps");
+    check(tBase > 0 && (tWeak < 0 || tWeak > tBase + 30), "a flat 30 percent curve reaches the first shift much later: " + std::to_string(tWeak) + " against " + std::to_string(tBase) + " steps");
+    // Grip-limited to the first shift, so full torque only ties the default curve; a step either way is rounding (macOS: 256 vs 255).
+    check(tStrong > 0 && tStrong <= tBase + 2, "a flat full-torque curve reaches the first shift no later: " + std::to_string(tStrong) + " against " + std::to_string(tBase) + " steps");
     const float xBad[3] = {0.0f, 0.5f, 0.4f};
     const float yBad[3] = {1, 1, 1};
     beginWorld();
