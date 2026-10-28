@@ -3,6 +3,7 @@
 // The properties are checked against an independent i64 / f64 reference, never against the code's own
 // formulas, and the flight is walked one centimetre at a time so the trigger distances are measured,
 // not assumed.
+#include "aver/core/CharConv.hpp"
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/world/PlacementWriteBack.hpp"
@@ -269,7 +270,7 @@ int main() {
         char buf[64];
         const auto r = std::to_chars(buf, buf + sizeof buf, w2.x);
         f64 back = 0;
-        std::from_chars(buf, r.ptr, back);
+        aver::fromChars(buf, r.ptr, back);
         check(back == w2.x, "the quantised value round-trips through shortest text");
         check(static_cast<usize>(r.ptr - buf) <= 18, "and is short");
     }

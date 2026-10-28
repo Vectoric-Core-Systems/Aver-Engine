@@ -73,6 +73,8 @@ static void testScalars() {
     check(parseGodotVariant("1.5e-3", v, &d) && near(v.f, 0.0015), "exponent float");
     check(parseGodotVariant("-2E+2", v, &d) && near(v.f, -200.0), "signed capital exponent");
     check(parseGodotVariant(".5", v, &d) && near(v.f, 0.5), "leading-dot float");
+    check(parseGodotVariant("\"a\r\nb\"", v, &d) && v.s == "a\nb", "a CRLF checkout's multi-line string reads as LF");
+    check(parseGodotVariant("\"a\\r\\nb\"", v, &d) && v.s == "a\r\nb", "an escaped \\r stays");
     check(parseGodotVariant("-.25", v, &d) && near(v.f, -0.25), "negative leading-dot float");
     check(parseGodotVariant("inf", v, &d) && std::isinf(v.f) && v.f > 0, "inf");
     check(parseGodotVariant("inf_neg", v, &d) && std::isinf(v.f) && v.f < 0, "inf_neg");

@@ -532,6 +532,8 @@ bool GodotVariantReader::parseString(std::string& out) {
         }
         const char c = advance();
         if (c == '"') return true;
+        // Godot writes a CR as "\r"; a raw CR before LF is a CRLF checkout, and the string means LF.
+        if (c == '\r' && peek() == '\n') continue;
         if (c != '\\') {
             out += c;
             continue;

@@ -183,7 +183,8 @@ jobs:
             mon=$!
           fi
           rc=0
-          cmake --build build-ci --parallel || rc=$?
+          # -k 0: one run reports every compile error, not just the first.
+          cmake --build build-ci --parallel -- -k 0 || rc=$?
           if [ -n "${mon}" ]; then kill "${mon}" || true; fi
           exit "${rc}"
 
