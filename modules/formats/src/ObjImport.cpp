@@ -1,4 +1,5 @@
 #include "aver/formats/ObjImport.hpp"
+#include "aver/formats/AxisMap.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include <algorithm>
@@ -341,7 +342,8 @@ bool importObjFromMemory(const char* text, usize size, const std::string& baseDi
             // The basis change, matching GltfImport.cpp:173 exactly: engine.x = -src.z,
             // engine.y = src.x, engine.z = src.y. Scale applies after, so it is a pure unit change.
             if (opt.convertAxes) {
-                gp.push_back(-z * opt.scale); gp.push_back(x * opt.scale); gp.push_back(y * opt.scale);
+                const Vec3 e = axis::direction(x, y, z);   // AxisMap.hpp, shared with glTF and the Godot converter
+                gp.push_back(e.x * opt.scale); gp.push_back(e.y * opt.scale); gp.push_back(e.z * opt.scale);
             } else {
                 gp.push_back(x * opt.scale); gp.push_back(y * opt.scale); gp.push_back(z * opt.scale);
             }
@@ -363,7 +365,7 @@ bool importObjFromMemory(const char* text, usize size, const std::string& baseDi
             const f32 x = parseFloat(token(q, lineEnd));
             const f32 y = parseFloat(token(q, lineEnd));
             const f32 z = parseFloat(token(q, lineEnd));
-            if (opt.convertAxes) { gn.push_back(-z); gn.push_back(x); gn.push_back(y); }
+            if (opt.convertAxes) { const Vec3 e = axis::direction(x, y, z); gn.push_back(e.x); gn.push_back(e.y); gn.push_back(e.z); }
             else                 { gn.push_back(x);  gn.push_back(y); gn.push_back(z); }
             continue;
         }

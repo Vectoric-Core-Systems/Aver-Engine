@@ -60,6 +60,9 @@ internal static class Fw
     // Spawn: rotation crosses as a quaternion; a null pos/quat/scale means "use the class default".
     [DllImport(Lib)] internal static extern int aver_fw_spawn(int c, [MarshalAs(UnmanagedType.LPUTF8Str)] string? name, float[]? pos3, float[]? quat4, float[]? scale3);
     [DllImport(Lib)] internal static extern int aver_fw_destroy(int e);
+    // A spawn batch (Godot's enter/ready order for a subtree): begin, spawn and parent the nodes, end.
+    [DllImport(Lib)] internal static extern void aver_fw_spawn_batch_begin();
+    [DllImport(Lib)] internal static extern int aver_fw_spawn_batch_end();
     // ANIMATION CURVES, relayed. The framework does not know what an animation is; a provider
     // installed by the composition root answers this. See framework_abi.h for why it is a relay.
     [DllImport(Lib)] internal static extern int aver_fw_anim_curve(int entity, long nameHash, out float outValue);

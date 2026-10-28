@@ -52,6 +52,10 @@
     <InternalsVisibleTo Include="Aver.Graph" />
     <!-- The gameplay-ability test project builds Entity handles and reads the save payload directly, in a bare process. -->
     <InternalsVisibleTo Include="Aver.Framework.Tests" />
+    <!-- The Godot-compatible node layer sets Self on nodes it wraps, spawns through Fw and hands the bridge a ready-made instance. -->
+    <InternalsVisibleTo Include="Aver.Fabric" />
+    <!-- The Fabric suite flushes the deferred queue and builds events directly, in a bare process. -->
+    <InternalsVisibleTo Include="Aver.Fabric.Tests" />
     <!-- The node suites call the internal ...ForGraph owners directly (ParticlesNodeTests and friends). -->
     <InternalsVisibleTo Include="Aver.Graph.Tests" />
   </ItemGroup>

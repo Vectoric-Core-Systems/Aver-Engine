@@ -44,6 +44,7 @@
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Hash.hpp"
+#include "fabric/FabricConvert.hpp"   // `fabric`: the Godot project converter (tools/fabric)
 
 #if AVER_HAVE_AUDIO_IMPORT
 #include "aver/formats/OcAudio.hpp"
@@ -1538,6 +1539,9 @@ struct ModelConvertArgs {
     bool merge = false;
     f32 lodRatio = 0.0f;
     u32 maxTexture = 0;
+    // `fabric` (tools/fabric): the caller wants each mesh's stem and placement back instead of a level, and no summary line.
+    std::vector<std::string>* stemsOut = nullptr;
+    std::vector<ScenePlacement>* placementsOut = nullptr;
 };
 
 int convertImportedModel(const ModelConvertArgs& args, fmt::GltfImportResult& res, RunStats& stats) {
@@ -1548,11 +1552,12 @@ int convertImportedModel(const ModelConvertArgs& args, fmt::GltfImportResult& re
     const bool merge = args.merge;
     const f32 lodRatio = args.lodRatio;
     const u32 maxTexture = args.maxTexture;
+    const bool embedded = args.placementsOut != nullptr;
     std::string why;
     for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
     if (res.meshes.empty() && res.skeletons.empty() && res.animations.empty() && res.objectAnimations.empty()) {
         emitArtifact(input, {}, "mesh", false, false, "no meshes", stats);
-        emitSummary(input, stats, 1);
+        if (!embedded) emitSummary(input, stats, 1);
         return exitCode(ExitCode::Failed);
     }
 
@@ -1633,7 +1638,12 @@ int convertImportedModel(const ModelConvertArgs& args, fmt::GltfImportResult& re
         AVER_INFO("level camera: the file's {} at ({:.0f}, {:.0f}, {:.0f}) yaw {:.1f} pitch {:.1f}", c.name,
                   c.position.x, c.position.y, c.position.z, c.yawDeg, c.pitchDeg);
     }
-    if (!writeSceneLevel(outDir, contentDir, base, scene, stems, res.cameras.empty() ? nullptr : &startCamera)) anyFailed = true;
+    if (embedded) {
+        *args.placementsOut = scene;
+        if (args.stemsOut) *args.stemsOut = stems;
+    } else if (!writeSceneLevel(outDir, contentDir, base, scene, stems, res.cameras.empty() ? nullptr : &startCamera)) {
+        anyFailed = true;
+    }
 
     bool anySkinned = false;
     for (const fmt::OcMeshData& mesh : res.meshes) if (mesh.hasSkin()) { anySkinned = true; break; }
@@ -1674,8 +1684,99 @@ int convertImportedModel(const ModelConvertArgs& args, fmt::GltfImportResult& re
         }
     }
 
-    emitSummary(input, stats, anyFailed ? 1 : 0);
+    if (!embedded) emitSummary(input, stats, anyFailed ? 1 : 0);
     return exitCode(anyFailed ? ExitCode::Failed : ExitCode::Ok);
+}
+
+// ---- `fabric`: the model importer the Godot converter calls (tools/fabric) ----
+//
+// One model file (glTF, GLB, FBX, OBJ) written as meshes, materials, textures, skeletons and clips under
+// <contentDir>/<outSubdir>, returning each mesh's content path and where it sits in the model. The JSON artifact
+// lines the importer emits go to stdout like any other run; the summary line is the fabric run's own.
+fabric::ModelResult fabricImportModel(const std::string& input, const std::string& contentDir, const std::string& outSubdir,
+                                      const std::string& base) {
+    fabric::ModelResult out;
+    const std::string outDir = contentDir + "/" + outSubdir;
+    createDirectories(outDir);
+    const std::string ext = extOf(input);
+    RunStats stats;
+    std::vector<std::string> stems;
+    std::vector<ScenePlacement> placements;
+    ModelConvertArgs margs;
+    margs.input = input; margs.outDir = outDir; margs.base = base; margs.contentDir = contentDir;
+    margs.stemsOut = &stems; margs.placementsOut = &placements;
+
+    int code = exitCode(ExitCode::Failed);
+    std::vector<std::string> positionNames;
+    if (ext == ".gltf" || ext == ".glb") {
+        fmt::GltfImportResult res;
+        std::string why;
+        if (!fmt::importGltf(input, res, {}, &why)) { out.error = why; return out; }
+        code = convertImportedModel(margs, res, stats);
+        for (const fmt::GltfPlacement& p : res.placements) positionNames.push_back(p.name);
+        if (placements.empty())
+            for (usize i = 0; i < res.meshes.size(); ++i) {
+                placements.push_back(ScenePlacement{i32(i), Vec3{0, 0, 0}});
+                positionNames.push_back(i < res.meshNames.size() ? res.meshNames[i] : std::string{});
+            }
+        for (const std::string& u : res.unsupported) out.notes.push_back("unsupported in the model: " + u);
+    }
+#if AVER_HAVE_FBX
+    else if (ext == ".fbx") {
+        fmt::FbxImportResult res;
+        std::string why;
+        if (!fmt::importFbx(input, res, fmt::FbxImportOptions{}, &why)) { out.error = why; return out; }
+        code = convertImportedModel(margs, res, stats);
+        for (const fmt::GltfPlacement& p : res.placements) positionNames.push_back(p.name);
+        if (placements.empty())
+            for (usize i = 0; i < res.meshes.size(); ++i) {
+                placements.push_back(ScenePlacement{i32(i), Vec3{0, 0, 0}});
+                positionNames.push_back(i < res.meshNames.size() ? res.meshNames[i] : std::string{});
+            }
+        for (const std::string& u : res.unsupported) out.notes.push_back("unsupported in the model: " + u);
+    }
+#endif
+    else if (ext == ".obj") {
+        fmt::ObjImportResult res;
+        std::string why;
+        if (!fmt::importObj(input, res, {}, &why)) { out.error = why; return out; }
+        if (res.meshes.empty()) { out.error = "no meshes"; return out; }
+        {
+            std::vector<fmt::ImportedMaterial> mats;
+            std::vector<fmt::ImportedImage> imgs;
+            std::vector<std::string> mwarn;
+            const usize slash = input.find_last_of("/\\");
+            const std::string baseDir = slash == std::string::npos ? std::string() : input.substr(0, slash);
+            fmt::objMaterialsToImported(res.materials, baseDir, mats, imgs, &mwarn);
+            for (const std::string& w : mwarn) out.notes.push_back(w);
+            cookAndRewriteSlots(mats, imgs, contentDir, base, res.meshes, 0);
+        }
+        std::vector<MeshItem> items;
+        for (usize i = 0; i < res.meshes.size(); ++i)
+            items.push_back(MeshItem{i < res.meshNames.size() ? res.meshNames[i] : std::string{}, res.meshes[i], -1});
+        code = writeMeshItems(input, outDir, base, items, false, 0.0f, stats, &stems) ? exitCode(ExitCode::Failed) : exitCode(ExitCode::Ok);
+        for (usize i = 0; i < res.meshes.size(); ++i) {
+            placements.push_back(ScenePlacement{i32(i), Vec3{0, 0, 0}});
+            positionNames.push_back(i < res.meshNames.size() ? res.meshNames[i] : std::string{});
+        }
+    } else {
+        out.error = "not a model file the importers read (" + ext + ")";
+        return out;
+    }
+
+    if (code != exitCode(ExitCode::Ok)) { out.error = "the importer reported a failure for " + input; return out; }
+    for (usize i = 0; i < placements.size(); ++i) {
+        const ScenePlacement& p = placements[i];
+        if (p.meshIndex < 0 || usize(p.meshIndex) >= stems.size() || stems[usize(p.meshIndex)].empty()) continue;
+        fabric::ModelPart part;
+        part.meshAsset = outSubdir + "/" + stems[usize(p.meshIndex)] + ".ocmesh";
+        part.name = i < positionNames.size() ? positionNames[i] : std::string{};
+        part.x = p.position.x; part.y = p.position.y; part.z = p.position.z;
+        out.parts.push_back(std::move(part));
+    }
+    out.ok = !out.parts.empty();
+    if (!out.ok) out.error = "the model produced no meshes";
+    return out;
 }
 
 } // namespace
@@ -1921,6 +2022,8 @@ int main(int argc, char** argv) {
         "\n       AverAssetC hair <file.gltf|.glb> --out <groom.ochair> [--scalp <mesh.ocmesh>] [--scalp-asset <ref>] [--submesh N]"
         "\n                          [--joints a,b,c] [--default-width-cm F] [--max-root-cm F]   glTF line strands -> strand groom"
         "\n       AverAssetC hair-text <groom.txt> --out <groom.ochair>   the HEAD records of a groom (SCALP, SIM, MATERIAL, LOOK, GENERATE ...) as text -> .ochair"
+        "\n       AverAssetC fabric <godot-project-dir> <out-dir> [--dry-run] [--scenes-only] [--scripts-only] [--overwrite]"
+        "\n                          a Godot 4.1+ project as a standalone Aver project: <out-dir>/<Name>/ plus FabricReport.md/.jsonl (docs/FABRIC.md)"
         ;
 
     if (argc < 2) {
@@ -1941,6 +2044,11 @@ int main(int argc, char** argv) {
     if (subcommand == "visbake") return runVisBake(argc, argv);
     if (subcommand == "hair") return runHair(argc, argv);
     if (subcommand == "hair-text") return runHairText(argc, argv);
+    if (subcommand == "fabric") {
+        fabric::Host host;
+        host.importModel = fabricImportModel;
+        return fabric::run(argc, argv, host);
+    }
 
     if (subcommand != "convert") {
         AVER_ERROR("{}", kUsage);

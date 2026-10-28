@@ -89,6 +89,7 @@ internal static class Editables
     // Writes the entity's stored per-instance values into the actor's fields. Returns how many applied.
     internal static int ApplyProps(AverActor actor)
     {
+        if (actor.EditablesApplied) return 0;
         int entity = actor.Self.Handle;
         int n = Fw.aver_fw_props_count(entity), applied = 0;
         for (int i = 0; i < n; ++i)

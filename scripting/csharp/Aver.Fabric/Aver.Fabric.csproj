@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The Godot-compatible runtime a converted project's scripts compile against (Fabric Connector, docs/plans/fabric).
+       GodotSharp's names and semantics on top of Aver.Framework: Node and its subclasses over entities, Godot-space
+       math, Variant, Callable and signals. Godot numbers (metres, +Y up, right-handed) exist only in scripts; they are
+       converted to Aver space in FabricSpace, at the engine boundary. It sits beside Aver.Framework like Aver.UI does and
+       is referenced by the scripting bridge (to declare its node classes) and by a converted project's Scripts.csproj. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Aver.Fabric</AssemblyName>
+    <RootNamespace>Aver.Fabric</RootNamespace>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- The Godot names are the API; a comment restating "the X component" is noise. -->
+    <NoWarn>$(NoWarn);CS1591;CS0436</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Loads Aver.Fabric.GDExt.Abi (the GDExtension host) from the executable folder; one shared file, a resolver per assembly. -->
+    <Compile Include="../Shared/NativeResolver.cs" Link="NativeResolver.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Aver.Fabric.Tests" />
+  </ItemGroup>
+
+</Project>

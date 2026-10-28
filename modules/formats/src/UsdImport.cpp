@@ -1,4 +1,5 @@
 #include "aver/formats/UsdImport.hpp"
+#include "aver/formats/AxisMap.hpp"
 #include "UsdImportInternal.hpp"
 
 #include "aver/platform/Image.hpp"
@@ -287,7 +288,7 @@ void allInts(std::string_view region, std::vector<i32>& out) {
 // were Y-up is the single most common USD import bug and it lays the model on its side.
 inline void toEngine(bool convert, bool yUp, const f32 in[3], f32 out[3]) {
     if (!convert)   { out[0] = in[0]; out[1] = in[1]; out[2] = in[2]; return; }
-    if (yUp)        { out[0] = -in[2]; out[1] = in[0]; out[2] = in[1]; }
+    if (yUp)        { const Vec3 e = axis::direction(in[0], in[1], in[2]); out[0] = e.x; out[1] = e.y; out[2] = e.z; }
     else            { out[0] = in[0];  out[1] = -in[1]; out[2] = in[2]; }
 }
 

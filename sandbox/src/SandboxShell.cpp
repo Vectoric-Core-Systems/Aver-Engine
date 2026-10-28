@@ -7,6 +7,7 @@
 #include "aver/core/HitchMarks.hpp"
 #include "aver/rhi/PrimitiveMeshes.hpp"
 #include "CollisionShapeOverlay.hpp"   // Show > Collision Shapes
+#include "FabricImport.hpp"            // File > Import Godot Project...
 
 namespace aver {
 // Restarts profiler stats when Play starts/stops (called from startPlay/stopPlay in SandboxPlay.cpp).
@@ -1981,6 +1982,18 @@ void SandboxApp::buildUI(Engine& e) {
             }
 #endif
             ImGui::Separator();
+            // Converts a Godot 4 project with AverAssetC fabric (child process on a worker thread; the modal shows its log).
+            {
+                const bool haveConverter = !editor::fabricConverterPath().empty();
+                ImGui::BeginDisabled(!haveConverter);
+                if (ImGui::MenuItem("Import Godot Project...")) editor::fabricImporter().open();
+                ImGui::EndDisabled();
+                uiReg_.track("file.importGodotProject");
+                if (!haveConverter && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("AverAssetC is not beside the editor - build the AverAssetC target.");
+                else if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Convert a Godot 4.1+ project (scenes, assets, scripts, GDExtensions) into an Aver project.\nSee docs/FABRIC.md.");
+            }
             if (ImGui::MenuItem("Take Screenshot", editor::chordToString(keybinds_.chordFor(editor::CommandId::Screenshot)).c_str()))
                 requestViewportScreenshot();
             uiReg_.track("file.takeScreenshot");
@@ -2625,6 +2638,22 @@ ImGui::MenuItem("Tuning", nullptr, &softBodyDebug_.tuning);
     cbApplyWatchEvents();
     assetEditors_.draw(e, centralDock_, dpi_);
     tools_.drawModals(project_, dpi_);
+    editor::fabricImporter().drawModal(dpi_);
+    // The converted project the Import Godot Project dialog was told to open: the same switch the project browser makes.
+    if (const std::string converted = editor::fabricImporter().takeOpenRequest(); !converted.empty()) {
+        std::string openErr;
+        if (levelHasUnsavedEdits() || assetEditors_.anyDirty()) {
+            editor::Notification n;
+            n.severity = editor::NotifySeverity::Warning;
+            n.title = "Save before opening the converted project";
+            n.body = "The open level or an asset has unsaved edits. Save, then open " + converted + " from the project browser.";
+            editor::notifications().push(std::move(n));
+        } else if (browser_.open(converted, &openErr)) {
+            applyProject(e);
+        } else {
+            AVER_ERROR("[Fabric] cannot open the converted project {}: {}", converted, openErr);
+        }
+    }
     nrd2Session_.drawWindow(dpi_);
     drawUpgradePrompt();
     drawAboutPrompt(e);

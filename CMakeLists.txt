@@ -192,6 +192,10 @@ endif()
 # rather than behind a module switch: a game with no scene still has settings.
 add_subdirectory(modules/settings)
 add_subdirectory(modules/formats)  # Phase 2 (.ocbeam / .ocmap loaders)
+# Godot 4 text-format reader for the Fabric converter (Core + Platform only, always built).
+add_subdirectory(modules/formats.godot)
+# GDExtension host of the Fabric Connector (hosts a converted project's native Godot plugins; the aver_gdext C ABI).
+add_subdirectory(modules/fabric.gdext)
 # The Roslyn backend for actor scripts. Above Aver.Formats rather than inside it, so the base
 # module keeps its no-dependency, no-process guarantee. See its CMakeLists for the full argument --
 # including why it is guarded on Aver.Formats.Material rather than on a switch of its own.
@@ -502,6 +506,8 @@ if(AVER_BUILD_TESTS)
   endif()
   add_subdirectory(tests/pcg)
   add_subdirectory(tests/formats)
+  add_subdirectory(tests/formats.godot)
+  add_subdirectory(tests/fabric)   # FabricConvertTest: AverAssetC fabric end to end
   # The render queue's video encoder; skips (exit 77) on a machine without an H.264 encoder.
   if(TARGET Aver.Media)
     add_subdirectory(tests/media)

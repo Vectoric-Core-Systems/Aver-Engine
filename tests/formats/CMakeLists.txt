@@ -368,6 +368,20 @@ set_target_properties(AverAssetC PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BIN
 # PointInstancer produces. Header-only and Core-only, so an include directory and no link -- the
 # arrangement tests/editor already uses for it.
 target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/modules/world/include)
+# `AverAssetC fabric <godot-dir> <out-dir>` (Fabric Connector, docs/plans/fabric/G3_SCENES.md). The converter is tools/fabric/*.cpp; it reads Godot's text
+# formats through Aver.Formats.Godot and calls back into this file for the model importers. Its material cook rides on AVER_HAVE_MATERIAL_COMPILE below.
+target_sources(AverAssetC PRIVATE
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricConvert.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricExtensions.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricProcess.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricScripts.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricMeshGen.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricProject.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricReport.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricResources.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricScene.cpp)
+target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/tools)
+target_link_libraries(AverAssetC PRIVATE Aver.Formats.Godot)
 # `AverAssetC cook-chunks` (LARGE_WORLD 2.4.5). The cook is the pure half of Aver.World (Core + Formats + Platform). It is compiled straight into the tool, like
 # HairCurves.cpp below, rather than by linking Aver.World: that library's PUBLIC link interface carries Aver.Scene, Aver.Physics (Jolt) and Aver.Vehicle, and a shipping
 # asset compiler must not depend on them. None of these files may see AVER_MODULE_SCENE (the tool must not link anything that defines it); none does.

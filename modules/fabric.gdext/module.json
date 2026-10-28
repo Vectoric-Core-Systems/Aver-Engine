@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Fabric.GDExt",
+  "dir": "fabric.gdext",
+  "displayName": "GDExtension Host",
+  "description": "Hosts Godot GDExtension plugins (.gdextension) of a converted project: the interface, a minimal engine class registry and the aver_gdext C ABI.",
+  "category": "Content",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Platform", "Aver.Formats", "Aver.Formats.Godot"],
+  "consequence": ""
+}

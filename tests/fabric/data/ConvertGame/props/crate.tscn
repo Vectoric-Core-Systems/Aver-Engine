@@ -1,0 +1,21 @@
+[gd_scene load_steps=5 format=3 uid="uid://cconvertcrate1"]
+
+[ext_resource type="Material" path="res://materials/red.tres" id="1_red"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_crate"]
+material = ExtResource("1_red")
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_crate"]
+
+[node name="Crate" type="RigidBody3D"]
+mass = 5.0
+linear_damp_mode = 1
+linear_damp = 0.0
+
+[node name="Body" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_crate")
+
+[node name="Lid" type="MeshInstance3D" parent="."]
+
+[node name="Shape" type="CollisionShape3D" parent="."]
+shape = SubResource("BoxShape3D_crate")

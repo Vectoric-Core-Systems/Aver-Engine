@@ -1,0 +1,26 @@
+[remap]
+
+importer="texture"
+type="CompressedTexture2D"
+uid="uid://c4albedo0000"
+path.s3tc="res://.godot/imported/albedo.png-0123abcd.s3tc.ctex"
+path.etc2="res://.godot/imported/albedo.png-0123abcd.etc2.ctex"
+metadata={
+"imported_formats": ["s3tc_bptc", "etc2_astc"],
+"vram_texture": true
+}
+
+[deps]
+
+source_file="res://textures/albedo.png"
+dest_files=["res://.godot/imported/albedo.png-0123abcd.s3tc.ctex", "res://.godot/imported/albedo.png-0123abcd.etc2.ctex"]
+
+[params]
+
+compress/mode=2
+compress/high_quality=false
+compress/hdr_compression=1
+mipmaps/generate=true
+process/fix_alpha_border=true
+process/normal_map_invert_y=false
+detect_3d/compress_to=1

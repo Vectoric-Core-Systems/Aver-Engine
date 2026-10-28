@@ -36,7 +36,9 @@ than the basis itself. **`V` flips (`v -> 1 - v`) for OBJ and USD only**, whose 
 bottom-left; glTF's UVs are already top-left origin, so they cross unchanged.
 
 Sharing one convention means a model exported to two formats lands in the same place, and means
-there is one piece of arithmetic in this codebase to get wrong instead of three.
+there is one piece of arithmetic in this codebase to get wrong instead of three. The map itself
+(`(x,y,z) -> (-z,x,y)`, rotation `(z,-x,-y,w)`, scale `(z,x,y)`, metres to centimetres) is
+`aver/formats/AxisMap.hpp`; the glTF, OBJ and Y-up USD importers and the Godot converter (`AverAssetC fabric`) all call it.
 `ObjImport.cpp` and `UsdImport.cpp` both reference `GltfImport.cpp`'s basis change and winding-reversal code
 for the shared transformation logic rather than restating it. **`UsdImport.cpp` implements its own `toEngine`**
 handling both the Y-up and Z-up cases that OBJ and glTF never need.

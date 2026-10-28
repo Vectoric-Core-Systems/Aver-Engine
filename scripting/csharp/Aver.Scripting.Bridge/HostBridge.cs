@@ -1380,6 +1380,9 @@ public static class HostBridge
         DeclareBase("GameMode", "Actor", ClassFlags.GameMode | ClassFlags.Abstract);
         DeclareBase("GameInstance", "Actor", ClassFlags.GameInstance | ClassFlags.Abstract);
         DeclareActorClass(typeof(AverCharacter));
+        // Aver.Fabric's node classes (Node3D, Timer, Area3D ...): the classes a converted Godot scene places.
+        try { DeclareActors(typeof(Aver.Fabric.Node).Assembly, "Aver.Fabric", static t => typeof(Aver.Fabric.Node).IsAssignableFrom(t)); }
+        catch (Exception ex) { Emit((int)Log.Level.Warn, $"[Scripting] Aver.Fabric node classes could not be declared: {Describe(ex)}"); }
     }
 
     // Declares and seals one base class row.
@@ -1439,12 +1442,14 @@ public static class HostBridge
     }
 
     /// <summary>Declares every non-abstract AverActor-derived type in an assembly. Returns the count.</summary>
-    private static int DeclareActors(Assembly asm, string file)
+    private static int DeclareActors(Assembly asm, string file, Func<Type, bool>? only = null)
     {
         int declared = 0;
         foreach (Type type in asm.GetTypes())
         {
             if (!typeof(AverActor).IsAssignableFrom(type) || type.IsAbstract)
+                continue;
+            if (only is not null && !only(type))
                 continue;
             if (type.GetConstructor(Type.EmptyTypes) is null)
             {
@@ -1564,7 +1569,7 @@ public static class HostBridge
         {
             if (s_classes.TryGetValue(classNameHash, out ClassInfo? info))
             {
-                var instance = (AverActor)Activator.CreateInstance(info.Type)!;
+                var instance = AverActor.TakePending(info.Type) ?? (AverActor)Activator.CreateInstance(info.Type)!;
                 instance.Self = new Entity(entity);
                 if (info.DefaultTickPriority != 0)
                     instance.TickPriority = instance.PhysicsTickPriority = info.DefaultTickPriority;

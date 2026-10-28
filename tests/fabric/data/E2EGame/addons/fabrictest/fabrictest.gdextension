@@ -1,0 +1,21 @@
+[configuration]
+
+entry_symbol = "fabric_test_init"
+compatibility_minimum = "4.1"
+reloadable = false
+
+[libraries]
+
+windows.debug.x86_64 = "res://addons/fabrictest/FabricTestExt.dll"
+windows.release.x86_64 = "res://addons/fabrictest/FabricTestExt.dll"
+linux.debug.x86_64 = "res://addons/fabrictest/libFabricTestExt.so"
+linux.release.x86_64 = "res://addons/fabrictest/libFabricTestExt.so"
+linux.debug.arm64 = "res://addons/fabrictest/libFabricTestExt.so"
+linux.release.arm64 = "res://addons/fabrictest/libFabricTestExt.so"
+macos.debug = "res://addons/fabrictest/libFabricTestExt.dylib"
+macos.release = "res://addons/fabrictest/libFabricTestExt.dylib"
+android.debug.arm64 = "res://addons/fabrictest/libFabricTestExt.android.so"
+
+[icons]
+
+FabricTestNode = "res://addons/fabrictest/icon.svg"

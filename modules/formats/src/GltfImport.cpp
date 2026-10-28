@@ -1,6 +1,7 @@
 // Imports glTF 2.0 and GLB into engine meshes: accessors, node transforms and axis conversion.
 
 #include "aver/formats/GltfImport.hpp"
+#include "aver/formats/AxisMap.hpp"
 #include "aver/core/Types.hpp"   // AVER_PATH_SEP
 
 #include "aver/core/Hash.hpp"
@@ -324,7 +325,7 @@ private:
 
     // Converts glTF space (right-handed, +Y up, metres) to engine space (left-handed, +Z up, cm).
     Vec3 toEngine(f32 x, f32 y, f32 z, bool isDirection) const {
-        Vec3 v = o_.convertAxes ? Vec3{-z, x, y} : Vec3{x, y, z};
+        Vec3 v = o_.convertAxes ? axis::direction(x, y, z) : Vec3{x, y, z};   // AxisMap.hpp: the one map, shared with the Godot converter
         if (!isDirection) { v.x *= o_.scale; v.y *= o_.scale; v.z *= o_.scale; }
         return v;
     }
@@ -334,11 +335,11 @@ private:
     // pseudovector, so it picks up a sign the position vectors do not, and the angle is unchanged --
     // which is why the vector part negates and w does not.
     Quat toEngineQuat(f32 x, f32 y, f32 z, f32 w) const {
-        return o_.convertAxes ? Quat{z, -x, -y, w} : Quat{x, y, z, w};
+        return o_.convertAxes ? axis::rotation(x, y, z, w) : Quat{x, y, z, w};
     }
     // Scale is dimensionless, so it permutes with the axes and takes neither sign nor unit change.
     Vec3 toEngineScale(f32 x, f32 y, f32 z) const {
-        return o_.convertAxes ? Vec3{z, x, y} : Vec3{x, y, z};
+        return o_.convertAxes ? axis::scale(x, y, z) : Vec3{x, y, z};
     }
 
     // One mesh's blend-shape deltas as the primitives are read, in engine space; the MorphTargetBuilder

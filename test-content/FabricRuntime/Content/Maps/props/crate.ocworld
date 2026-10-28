@@ -1,0 +1,13 @@
+OCWORLD 1
+# Hand-written test fixture: res://props/crate.tscn, a small scene with a nested child and a local-to-scene-style plain value.
+ID 0x00000000000000A2
+NAME crate
+BUILD 0
+ALGO 3
+
+PLACE none 0 0 0 0 0 0 1 class RigidBody3D name Crate
+  COMPONENT Props _name=%22Crate%22 mass=5.0 collision_layer=4
+BEGIN
+  CHILD none 0 0 0 0 0 0 1 class CollisionShape3D name Shape
+    COMPONENT Props _name=%22Shape%22 _owner=%22..%22 shape=Object(BoxShape3D,%20%22size%22:%20Vector3(1,%202,%203))
+END

@@ -69,6 +69,25 @@ public abstract partial class AverActor
     private int _tickPriority, _physicsTickPriority;
     private PauseMode _pauseMode;
 
+    // An instance the next bind should use instead of constructing one (a node that scripts made with `new`
+    // and then added to the tree). The bridge calls TakePending from its bind; any other caller clears it.
+    [ThreadStatic] private static AverActor? s_pending;
+
+    internal static void OfferPending(AverActor? actor) => s_pending = actor;
+
+    /// <summary>The instance offered for the bind that is running, when it is a <paramref name="type"/>; otherwise null.
+    /// The bridge calls this before it would construct a new instance.</summary>
+    public static AverActor? TakePending(Type type)
+    {
+        AverActor? a = s_pending;
+        s_pending = null;
+        return a != null && type.IsInstanceOfType(a) ? a : null;
+    }
+
+    // Set when the [Editable] values were written early (a Godot node reads its exported values in _EnterTree);
+    // the bridge's write before OnBeginPlay then skips this instance.
+    internal bool EditablesApplied;
+
     // Set by the scripting bridge: a priority changed, so its walk order is stale.
     internal static Action? TickOrderChanged;
 

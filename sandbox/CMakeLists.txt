@@ -91,6 +91,10 @@ add_executable(Sandbox WIN32
   src/RevisionControl.cpp
   src/NavBakeCommand.cpp
   src/ToolsMenu.cpp
+  # File > Import Godot Project...: runs `AverAssetC fabric` on a worker thread. Its headless half is compiled by tests/fabric's
+  # FabricImportTest too; FabricProcess.cpp is the converter's own child-process helper (tools/fabric), shared rather than copied.
+  src/FabricImport.cpp
+  ${CMAKE_SOURCE_DIR}/tools/fabric/FabricProcess.cpp
   src/Nrd2Session.cpp
   src/GraphEditorGeometry.cpp
   src/GraphNodeDefs.cpp
@@ -439,6 +443,7 @@ if(TARGET Aver.Scripting.Host)
   target_link_libraries(Sandbox PRIVATE Aver.Scripting.Host)
 endif()
 target_include_directories(Sandbox PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
+target_include_directories(Sandbox PRIVATE ${CMAKE_SOURCE_DIR}/tools)   # fabric/FabricProcess.hpp (File > Import Godot Project...)
 set_target_properties(Sandbox PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 

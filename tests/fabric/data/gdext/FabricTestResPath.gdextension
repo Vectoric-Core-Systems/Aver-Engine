@@ -1,0 +1,15 @@
+[configuration]
+
+entry_symbol = "fabric_test_init"
+compatibility_minimum = "4.2"
+
+[libraries]
+
+windows.debug.x86_64 = "res://FabricTestExt.dll"
+windows.release.x86_64 = "res://FabricTestExt.dll"
+linux.debug.x86_64 = "res://libFabricTestExt.so"
+linux.release.x86_64 = "res://libFabricTestExt.so"
+linux.debug.arm64 = "res://libFabricTestExt.so"
+linux.release.arm64 = "res://libFabricTestExt.so"
+macos.debug = "res://libFabricTestExt.dylib"
+macos.release = "res://libFabricTestExt.dylib"

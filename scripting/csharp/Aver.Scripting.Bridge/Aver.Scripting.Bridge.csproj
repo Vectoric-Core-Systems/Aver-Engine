@@ -45,6 +45,8 @@
          below). References Aver.Scene itself, which is already transitive through Aver.Framework
          above, so this adds no new native surface, just the managed graph runtime. -->
     <ProjectReference Include="..\Aver.Graph\Aver.Graph.csproj" />
+    <!-- Aver.Fabric: the Godot-compatible node classes converted scenes place; declared with the other base classes. -->
+    <ProjectReference Include="..\Aver.Fabric\Aver.Fabric.csproj" />
     <ProjectReference Include="..\Aver.Prefab\Aver.Prefab.csproj" />
     <ProjectReference Include="..\Aver.LevelInstance\Aver.LevelInstance.csproj" />   <!-- [wave3/level-instances] -->
   </ItemGroup>

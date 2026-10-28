@@ -1,0 +1,13 @@
+; Engine configuration file.
+; A fixture for the GodotSharp script converter (Aver.Fabric.Convert): hand-written C# in the shapes Godot 4 projects use.
+
+config_version=5
+
+[application]
+
+config/name="CSharp Game"
+config/features=PackedStringArray("4.3", "C#", "Forward Plus")
+
+[dotnet]
+
+project/assembly_name="CSharpGame"

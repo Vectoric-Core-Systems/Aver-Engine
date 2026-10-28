@@ -1,0 +1,24 @@
+OCWORLD 1
+# Hand-written test fixture for the Aver.Fabric runtime, in the shape tools/fabric writes a converted scene (docs/plans/fabric/G3_RUNTIME.md).
+# res://arena.tscn: an autoload that belongs to the project, and a scene root with four children.
+ID 0x00000000000000A1
+NAME arena
+BUILD 0
+ALGO 3
+
+PLACE none 0 0 0 0 0 0 1 class Global name Global
+  COMPONENT Props _name=%22Global%22 _persistent=1
+PLACE none 100 200 300 0 0 0 1 class ArenaNode name Arena
+  COMPONENT Props _name=%22Arena%22 speed=7.5 title=%22Arena%20One%22 lives=4
+  COMPONENT Groups names=arenas,level
+BEGIN
+  CHILD none 300 400 50 -90 0 0 1 class Marker3D name Crate
+    COMPONENT Props _name=%22Crate%22 _owner=%22..%22 _unique=1
+  CHILD none 0 0 0 0 0 0 1 class OmniLight3D name Lamp
+    COMPONENT Props _name=%22Lamp%22 _owner=%22..%22 light_energy=2.0 omni_range=8.0
+  CHILD none 0 0 0 0 0 0 1 class Emitter name Gate
+    COMPONENT Props _name=%22Gate%22 _owner=%22..%22 _connections=[{%22signal%22:%20%22Hit%22,%20%22to%22:%20%22..%22,%20%22method%22:%20%22_on_gate_hit%22,%20%22flags%22:%200,%20%22binds%22:%20[],%20%22unbinds%22:%200}]
+  CHILD none 0 0 0 0 0 0 1 class StaticBody3D name Floor
+    COMPONENT Props _name=%22Floor%22 _owner=%22..%22 physics_material_override={%22__class%22:%20%22PhysicsMaterial%22,%20%22friction%22:%200.25,%20%22bounce%22:%200.5,%20%22rough%22:%20true,%20%22absorbent%22:%20false}
+    COMPONENT Groups names=ground
+END

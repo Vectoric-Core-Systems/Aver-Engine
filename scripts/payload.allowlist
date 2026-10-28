@@ -48,6 +48,9 @@ Aver.UI.Abi.dll
 Aver.Synapse.Abi.dll   ?AVER_MODULE_SCENE
 Aver.Prefab.Abi.dll     ?AVER_MODULE_SCENE
 Aver.LevelInstance.Abi.dll   ?AVER_MODULE_SCENE
+# The GDExtension host of the Fabric Connector and the API dump its method-hash checks read from beside the executable.
+Aver.Fabric.GDExt.Abi.dll
+extension_api.json
 
 # SETTINGS IS NOT ONE THE EDITOR LOAD-TIME LINKS -- it is the exception this block used to claim did
 # not exist, and the reason it was absent from this file entirely.
